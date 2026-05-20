@@ -11,7 +11,7 @@ use super::types::{RawGammaEvent, RawGammaMarket};
 
 /// Extract per-token fee metadata from a Gamma sync page.
 ///
-/// Returns `(token_id, fees_enabled, category)` tuples for [`FeeCalculator::ingest_gamma_markets`].
+/// Returns `(token_id, fees_enabled, category)` tuples for `FeeCalculator::ingest_gamma_markets`.
 pub fn collect_fee_sync(raw_events: &[RawGammaEvent]) -> Vec<(TokenId, bool, MarketCategory)> {
     let mut out = Vec::new();
     for ev in raw_events {
@@ -61,7 +61,7 @@ pub fn map_market(raw: RawGammaMarket, event_id: &EventId) -> MarketEntry {
     let tick_size = raw
         .minimum_tick_size
         .as_deref()
-        .and_then(TickSize::from_str_value)
+        .and_then(|s| s.parse::<TickSize>().ok())
         .unwrap_or(TickSize::Hundredth);
 
     let category = MarketCategory::from(raw.category.as_deref());

@@ -8,7 +8,9 @@ pub use signer::OrderSigner;
 
 use alloy::primitives::Address;
 use oxide_arb_error::signing::SigningError;
-use oxide_arb_models::config::KeysConfig;
+use oxide_arb_models::config::{KeysConfig, PolymarketConfig};
+use polymarket_client_sdk_v2::clob::{Client as SdkClient, Config as SdkConfig};
+use secrecy::ExposeSecret;
 use zeroize::Zeroizing;
 
 /// Unified keystore for signing and authentication.
@@ -82,5 +84,27 @@ impl Keystore {
     /// Get the wallet address as a checksummed hex string.
     pub fn address_string(&self) -> String {
         self.signer.address_string()
+    }
+
+    /// Derive L2 API credentials from the signing key via Polymarket CLOB.
+    ///
+    /// Calls `create_or_derive_api_key` — idempotent for a given wallet.
+    pub async fn derive_l2_credentials(
+        &self,
+        polymarket: &PolymarketConfig,
+    ) -> Result<L2Credentials, SigningError> {
+        let sdk = SdkClient::new(&polymarket.clob_base_url, SdkConfig::default())
+            .map_err(|e| SigningError::HmacDerivation(e.to_string()))?;
+
+        let creds = sdk
+            .create_or_derive_api_key(self.signer.inner(), None)
+            .await
+            .map_err(|e| SigningError::HmacDerivation(e.to_string()))?;
+
+        Ok(L2Credentials {
+            api_key: creds.key().to_string(),
+            api_secret: creds.secret().expose_secret().to_string(),
+            passphrase: creds.passphrase().expose_secret().to_string(),
+        })
     }
 }

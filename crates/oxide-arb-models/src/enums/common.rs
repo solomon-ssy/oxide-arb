@@ -5,11 +5,11 @@
 //! JSON serialization.
 
 use oxide_arb_macros::IntoActiveValue;
-use polymarket_client_sdk_v2::clob::types::Side as SdkSide;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use sea_orm::{DeriveActiveEnum, EnumIter};
 use serde::{Deserialize, Serialize};
+use std::str::FromStr;
 
 /// Trade direction.
 #[derive(
@@ -53,47 +53,12 @@ impl std::fmt::Display for Side {
     }
 }
 
-/// Failed to map CLOB SDK [`SdkSide`] into [`Side`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SdkSideConversionError;
-
-impl std::fmt::Display for SdkSideConversionError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("unsupported Polymarket CLOB side")
-    }
-}
-
-impl std::error::Error for SdkSideConversionError {}
-
-impl From<Side> for SdkSide {
-    fn from(side: Side) -> Self {
-        match side {
-            Side::Buy => Self::Buy,
-            Side::Sell => Self::Sell,
-        }
-    }
-}
-
-impl TryFrom<SdkSide> for Side {
-    type Error = SdkSideConversionError;
-
-    fn try_from(side: SdkSide) -> Result<Self, Self::Error> {
-        match side {
-            SdkSide::Buy => Ok(Self::Buy),
-            SdkSide::Sell => Ok(Self::Sell),
-            _ => Err(SdkSideConversionError),
-        }
-    }
-}
-
 /// Polymarket CLOB order time-in-force types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OrderType {
-    /// Fill-or-Kill: must fill entirely and immediately, or cancel.
+    /// Fill-or-Kill: must fill entirely and immediately, or cancel. Never retried.
     Fok,
-    /// Fill-and-Kill: fill as much as possible immediately, cancel the rest.
-    Fak,
     /// Good-Till-Cancelled: rests on the book until filled or manually cancelled.
     Gtc,
     /// Good-Till-Date: rests on the book until `expiration` (unix timestamp).
@@ -351,6 +316,18 @@ pub enum TickSize {
     TenThousandth,
 }
 
+/// Invalid tick size string from Gamma / CLOB wire format.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TickSizeParseError(pub String);
+
+impl std::fmt::Display for TickSizeParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "invalid tick size: {}", self.0)
+    }
+}
+
+impl std::error::Error for TickSizeParseError {}
+
 impl TickSize {
     #[must_use]
     #[inline]
@@ -362,16 +339,27 @@ impl TickSize {
             Self::TenThousandth => dec!(0.0001),
         }
     }
+}
 
-    #[must_use]
-    pub fn from_str_value(s: &str) -> Option<Self> {
-        match s {
-            "0.1" => Some(Self::Tenth),
-            "0.01" => Some(Self::Hundredth),
-            "0.001" => Some(Self::Thousandth),
-            "0.0001" => Some(Self::TenThousandth),
-            _ => None,
+impl std::str::FromStr for TickSize {
+    type Err = TickSizeParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim() {
+            "0.1" => Ok(Self::Tenth),
+            "0.01" => Ok(Self::Hundredth),
+            "0.001" => Ok(Self::Thousandth),
+            "0.0001" => Ok(Self::TenThousandth),
+            other => Err(TickSizeParseError(other.to_owned())),
         }
+    }
+}
+
+impl TryFrom<Decimal> for TickSize {
+    type Error = TickSizeParseError;
+
+    fn try_from(d: Decimal) -> Result<Self, TickSizeParseError> {
+        Self::from_str(&d.normalize().to_string())
     }
 }
 

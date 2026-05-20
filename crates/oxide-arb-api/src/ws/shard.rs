@@ -1,17 +1,18 @@
-//! Single WebSocket shard: owns one SDK WS client connection.
-//!
-//! Each shard subscribes to a set of token IDs and forwards parsed
-//! events to the shared output channel.
+//! Single WebSocket shard: one SDK connection, multiplexed market streams.
 
 use futures_util::StreamExt;
-use oxide_arb_models::types::{Price, Shares, TokenId};
+use oxide_arb_models::types::TokenId;
 use polymarket_client_sdk_v2::clob::ws::Client as SdkWsClient;
+use polymarket_client_sdk_v2::clob::ws::types::response::WsMessage;
 use polymarket_client_sdk_v2::types::U256;
+use polymarket_client_sdk_v2::ws::config::Config as SdkWsConfig;
 use std::collections::HashSet;
 use std::str::FromStr;
 use tokio_util::sync::CancellationToken;
 
-use super::event::{PriceLevel, ShardConnectionStatus, WsEvent};
+use super::WsEvent;
+use super::event::ShardConnectionStatus;
+use super::normalize::normalize_ws_message;
 use super::reconnect::{ReconnectPolicy, ReconnectState};
 
 /// A single shard managing one SDK WebSocket connection.
@@ -41,7 +42,6 @@ impl WsShard {
         }
     }
 
-    /// Run the shard's main loop: connect, subscribe, forward events, reconnect.
     pub async fn run_loop(mut self) {
         loop {
             if self.shutdown.is_cancelled() {
@@ -54,9 +54,7 @@ impl WsShard {
             });
 
             match self.connect_and_stream().await {
-                Ok(()) => {
-                    tracing::info!(shard_id = self.shard_id, "Stream ended cleanly");
-                }
+                Ok(()) => tracing::info!(shard_id = self.shard_id, "Stream ended cleanly"),
                 Err(e) => {
                     tracing::warn!(shard_id = self.shard_id, error = %e, "Shard connection error");
                 }
@@ -69,11 +67,6 @@ impl WsShard {
             }
 
             if let Some(delay) = self.reconnect_state.next_delay() {
-                tracing::debug!(
-                    shard_id = self.shard_id,
-                    delay_ms = delay.as_millis(),
-                    "Waiting before reconnect"
-                );
                 tokio::select! {
                     () = tokio::time::sleep(delay) => {}
                     () = self.shutdown.cancelled() => break,
@@ -100,57 +93,69 @@ impl WsShard {
             return Ok(());
         }
 
-        let ws_config = polymarket_client_sdk_v2::ws::config::Config::default();
+        let ws_config = SdkWsConfig::default();
         let client = SdkWsClient::new(&self.ws_url, ws_config)
             .map_err(|e| format!("WS client creation failed: {e}"))?;
 
-        let stream = client
-            .subscribe_orderbook(asset_ids)
-            .map_err(|e| format!("subscribe_orderbook failed: {e}"))?;
+        // `subscribe_market_resolutions` first — enables SDK `custom_features` on the channel.
+        let mut resolution_stream = Box::pin(
+            client
+                .subscribe_market_resolutions(asset_ids.clone())
+                .map_err(|e| format!("subscribe_market_resolutions: {e}"))?,
+        );
+        let mut book_stream = Box::pin(
+            client
+                .subscribe_orderbook(asset_ids.clone())
+                .map_err(|e| format!("subscribe_orderbook: {e}"))?,
+        );
+        let mut price_stream = Box::pin(
+            client
+                .subscribe_prices(asset_ids)
+                .map_err(|e| format!("subscribe_prices: {e}"))?,
+        );
 
         self.reconnect_state.reset();
         self.emit_status(ShardConnectionStatus::Connected);
 
-        let mut stream = Box::pin(stream);
-
         loop {
             tokio::select! {
-                () = self.shutdown.cancelled() => {
-                    return Ok(());
-                }
-                msg = stream.next() => {
-                    match msg {
-                        Some(Ok(book)) => {
-                            let bids: Vec<PriceLevel> = book.bids.iter().map(|l| PriceLevel {
-                                price: Price::new(l.price),
-                                size: Shares::new(l.size),
-                            }).collect();
-                            let asks: Vec<PriceLevel> = book.asks.iter().map(|l| PriceLevel {
-                                price: Price::new(l.price),
-                                size: Shares::new(l.size),
-                            }).collect();
-
-                            let event = WsEvent::BookSnapshot {
-                                asset_id: TokenId::new(book.asset_id.to_string()),
-                                bids,
-                                asks,
-                                timestamp_ms: u64::try_from(book.timestamp).unwrap_or(0),
-                                hash: book.hash.unwrap_or_default(),
-                            };
-
-                            if self.output_tx.send(event).is_err() {
-                                tracing::error!(shard_id = self.shard_id, "Output channel closed");
-                                return Ok(());
-                            }
+                () = self.shutdown.cancelled() => return Ok(()),
+                book = book_stream.next() => {
+                    match book {
+                        Some(Ok(update)) => {
+                            self.dispatch_events(normalize_ws_message(WsMessage::Book(update)));
                         }
-                        Some(Err(e)) => {
-                            tracing::warn!(shard_id = self.shard_id, error = %e, "WS message error");
-                        }
-                        None => {
-                            return Err("Stream ended (connection closed)".into());
-                        }
+                        Some(Err(e)) => tracing::warn!(shard_id = self.shard_id, error = %e, "book stream error"),
+                        None => return Err("book stream closed".into()),
                     }
                 }
+                price = price_stream.next() => {
+                    match price {
+                        Some(Ok(pc)) => {
+                            self.dispatch_events(normalize_ws_message(WsMessage::PriceChange(pc)));
+                        }
+                        Some(Err(e)) => tracing::warn!(shard_id = self.shard_id, error = %e, "price stream error"),
+                        None => return Err("price stream closed".into()),
+                    }
+                }
+                res = resolution_stream.next() => {
+                    match res {
+                        Some(Ok(mr)) => {
+                            self.dispatch_events(normalize_ws_message(WsMessage::MarketResolved(mr)));
+                        }
+                        Some(Err(e)) => tracing::warn!(shard_id = self.shard_id, error = %e, "resolution stream error"),
+                        None => return Err("resolution stream closed".into()),
+                    }
+                }
+            }
+        }
+    }
+
+    fn dispatch_events(&self, events: Vec<WsEvent>) {
+        for event in events {
+            if self.output_tx.send(event).is_err() {
+                tracing::error!(shard_id = self.shard_id, "Output channel closed");
+                return;
             }
         }
     }

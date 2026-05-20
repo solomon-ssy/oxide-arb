@@ -1,11 +1,11 @@
-//! Order domain models for venue interaction.
+//! Order domain models for Polymarket CLOB interaction.
 
 use crate::enums::common::{OrderType, Side};
 use crate::types::{MarketId, OrderId, Price, Shares, TokenId, Usd};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-/// Request to place an order on a venue.
+/// Request to place an order on the Polymarket CLOB.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrderRequest {
     pub market_id: MarketId,
@@ -18,7 +18,7 @@ pub struct OrderRequest {
     pub neg_risk: bool,
 }
 
-/// Response from venue after order submission.
+/// Response from the CLOB after order submission.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrderResponse {
     pub order_id: OrderId,
@@ -32,7 +32,7 @@ pub struct OrderResponse {
     pub responded_at: DateTime<Utc>,
 }
 
-/// Status of an order on the venue.
+/// Status of an order on the CLOB.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OrderStatus {
@@ -40,7 +40,7 @@ pub enum OrderStatus {
     Filled,
     /// Order partially filled (FOK would have been killed).
     PartiallyFilled,
-    /// Order rejected by the venue.
+    /// Order rejected by the exchange.
     Rejected,
     /// Order cancelled (e.g. FAK remainder).
     Cancelled,

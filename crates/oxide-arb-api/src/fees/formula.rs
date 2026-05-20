@@ -1,6 +1,9 @@
 //! Polymarket fee formula implementation.
 //!
-//! fee = shares × price × feeRate × (price × (1 - price))^exponent
+//! fee = shares × feeRate × (price × (1 - price))^exponent
+//!
+//! Equivalent to SDK `calc_platform_fee(amount_usd, price, …)` where
+//! `shares = amount_usd / price`.
 //!
 //! - Precision: 4 decimal places
 //! - Values < 0.0001 round to 0
@@ -22,7 +25,7 @@ pub fn calculate_fee(shares: Shares, price: Price, fee_rate: Decimal, exponent: 
 
     let p_complement = Decimal::ONE - p;
     let volatility_factor = (p * p_complement).powd(exponent);
-    let raw_fee = shares.inner() * p * fee_rate * volatility_factor;
+    let raw_fee = shares.inner() * fee_rate * volatility_factor;
 
     let rounded = raw_fee.round_dp(4);
     if rounded < dec!(0.0001) {

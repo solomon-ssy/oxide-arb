@@ -1,8 +1,15 @@
 //! Polymarket CLOB REST client with rate limiting and retry.
 
 mod book;
+mod convert;
 mod orders;
 mod rate_limiter;
+mod sdk_error;
+mod token;
+
+pub use convert::{ClobSide, SdkSideConversionError};
+pub use sdk_error::SdkClobError;
+pub use token::WireTokenId;
 
 pub use book::{BookLevel, OrderbookSnapshot};
 pub use orders::{CancelAllResult, CancelResult, OpenOrder};
@@ -13,15 +20,15 @@ use crate::keystore::OrderSigner;
 use oxide_arb_error::api::ApiError;
 use oxide_arb_models::config::PolymarketConfig;
 use oxide_arb_models::domain::order::{OrderRequest, OrderResponse, OrderStatus};
-use oxide_arb_models::enums::common::{OrderType, Side};
+use oxide_arb_models::enums::common::OrderType;
 use oxide_arb_models::types::{OrderId, Price, Shares, TokenId, Usd};
 use polymarket_client_sdk_v2::auth::Normal;
 use polymarket_client_sdk_v2::auth::state::Authenticated;
+use polymarket_client_sdk_v2::clob::types::OrderType as SdkOrderType;
+use polymarket_client_sdk_v2::clob::types::Side as SdkSide;
 use polymarket_client_sdk_v2::clob::types::request::OrderBookSummaryRequest;
-use polymarket_client_sdk_v2::clob::types::{OrderType as SdkOrderType, Side as SdkSide};
 use polymarket_client_sdk_v2::clob::{Client as SdkClient, Config as SdkConfig};
-use polymarket_client_sdk_v2::types::U256;
-use std::str::FromStr;
+use std::convert::TryFrom;
 use std::sync::Arc;
 
 /// Polymarket CLOB REST client backed by the official SDK.
@@ -43,11 +50,11 @@ impl ClobClient {
     ) -> Result<Self, ApiError> {
         let sdk_config = SdkConfig::builder().use_server_time(true).build();
         let sdk = SdkClient::new(&config.clob_base_url, sdk_config)
-            .map_err(|e| ApiError::Sdk(e.to_string()))?
+            .map_err(|e| ApiError::from(sdk_error::SdkClobError(&e)))?
             .authentication_builder(signer.inner())
             .authenticate()
             .await
-            .map_err(|e| ApiError::Sdk(e.to_string()))?;
+            .map_err(|e| ApiError::from(sdk_error::SdkClobError(&e)))?;
 
         Ok(Self {
             sdk: Arc::new(sdk),
@@ -63,20 +70,20 @@ impl ClobClient {
 
         let sdk = Arc::clone(&self.sdk);
         let signer = Arc::clone(&self.signer);
-        let token_id = parse_token_id(&req.token_id)?;
-        let order_side = SdkSide::from(req.side);
+        let token_id = WireTokenId::try_from(&req.token_id)?.0;
+        let order_side = SdkSide::from(ClobSide::from(req.side));
         let price = req.price.inner();
         let share_qty = req.shares.inner();
-        let order_type = &req.order_type;
+        let order_type = req.order_type;
 
-        let order_type_clone = *order_type;
         let submitted_at = chrono::Utc::now();
+        let retry_policy = RetryPolicy::for_order_type(order_type);
 
-        retry::retry_with_policy(&RetryPolicy::clob_default(), || {
+        retry::retry_with_policy(&retry_policy, || {
             let sdk = Arc::clone(&sdk);
             let signer = Arc::clone(&signer);
             async move {
-                let unsigned = match order_type_clone {
+                let unsigned = match order_type {
                     OrderType::Fok => sdk
                         .limit_order()
                         .token_id(token_id)
@@ -86,7 +93,7 @@ impl ClobClient {
                         .side(order_side)
                         .build()
                         .await
-                        .map_err(|e| ApiError::Sdk(e.to_string()))?,
+                        .map_err(|e| ApiError::from(sdk_error::SdkClobError(&e)))?,
                     OrderType::Gtd { expiration } => {
                         let exp = i64::try_from(expiration)
                             .ok()
@@ -101,7 +108,7 @@ impl ClobClient {
                             .side(order_side)
                             .build()
                             .await
-                            .map_err(|e| ApiError::Sdk(e.to_string()))?
+                            .map_err(|e| ApiError::from(sdk_error::SdkClobError(&e)))?
                     }
                     OrderType::Gtc => sdk
                         .limit_order()
@@ -112,28 +119,18 @@ impl ClobClient {
                         .side(order_side)
                         .build()
                         .await
-                        .map_err(|e| ApiError::Sdk(e.to_string()))?,
-                    OrderType::Fak => sdk
-                        .limit_order()
-                        .token_id(token_id)
-                        .order_type(SdkOrderType::FOK)
-                        .price(price)
-                        .size(share_qty)
-                        .side(order_side)
-                        .build()
-                        .await
-                        .map_err(|e| ApiError::Sdk(e.to_string()))?,
+                        .map_err(|e| ApiError::from(sdk_error::SdkClobError(&e)))?,
                 };
 
                 let signed_order = sdk
                     .sign(signer.inner(), unsigned)
                     .await
-                    .map_err(|e| ApiError::Sdk(e.to_string()))?;
+                    .map_err(|e| ApiError::from(sdk_error::SdkClobError(&e)))?;
 
                 let resp = sdk
                     .post_order(signed_order)
                     .await
-                    .map_err(|e| ApiError::Sdk(e.to_string()))?;
+                    .map_err(|e| ApiError::from(sdk_error::SdkClobError(&e)))?;
 
                 Ok(OrderResponse {
                     order_id: OrderId::new(&resp.order_id),
@@ -169,7 +166,7 @@ impl ClobClient {
                 let resp = sdk
                     .cancel_order(&oid)
                     .await
-                    .map_err(|e| ApiError::Sdk(e.to_string()))?;
+                    .map_err(|e| ApiError::from(sdk_error::SdkClobError(&e)))?;
 
                 let success = resp.canceled.contains(&oid);
                 let reason = resp.not_canceled.get(&oid).cloned();
@@ -197,7 +194,7 @@ impl ClobClient {
                 let resp = sdk
                     .cancel_all_orders()
                     .await
-                    .map_err(|e| ApiError::Sdk(e.to_string()))?;
+                    .map_err(|e| ApiError::from(sdk_error::SdkClobError(&e)))?;
 
                 Ok(CancelAllResult {
                     canceled: resp
@@ -222,7 +219,7 @@ impl ClobClient {
         self.rate_limiter.acquire("GET /book").await;
 
         let sdk = Arc::clone(&self.sdk);
-        let tid = parse_token_id(token_id)?;
+        let tid = WireTokenId::try_from(token_id)?.0;
 
         retry::retry_with_policy(&RetryPolicy::clob_default(), || {
             let sdk = Arc::clone(&sdk);
@@ -231,7 +228,7 @@ impl ClobClient {
                 let resp = sdk
                     .order_book(&request)
                     .await
-                    .map_err(|e| ApiError::Sdk(e.to_string()))?;
+                    .map_err(|e| ApiError::from(sdk_error::SdkClobError(&e)))?;
 
                 let bids = resp
                     .bids
@@ -278,7 +275,7 @@ impl ClobClient {
                 let resp = sdk
                     .orders(&request, None)
                     .await
-                    .map_err(|e| ApiError::Sdk(e.to_string()))?;
+                    .map_err(|e| ApiError::from(sdk_error::SdkClobError(&e)))?;
 
                 let orders: Vec<OpenOrder> = resp
                     .data
@@ -287,9 +284,11 @@ impl ClobClient {
                         Ok(OpenOrder {
                             order_id: OrderId::new(&o.id),
                             token_id: TokenId::new(o.asset_id.to_string()),
-                            side: Side::try_from(o.side).map_err(|e| ApiError::Deserialize {
-                                context: "CLOB open order side".into(),
-                                detail: e.to_string(),
+                            side: ClobSide::try_from(o.side).map(|s| s.0).map_err(|e| {
+                                ApiError::Deserialize {
+                                    context: "CLOB open order side".into(),
+                                    detail: e.to_string(),
+                                }
                             })?,
                             price: Price::new(o.price),
                             size: Shares::new(o.original_size),
@@ -303,12 +302,4 @@ impl ClobClient {
         })
         .await
     }
-}
-
-#[inline]
-fn parse_token_id(token_id: &TokenId) -> Result<U256, ApiError> {
-    U256::from_str(token_id.as_str()).map_err(|e| ApiError::Deserialize {
-        context: "token_id to U256".into(),
-        detail: e.to_string(),
-    })
 }

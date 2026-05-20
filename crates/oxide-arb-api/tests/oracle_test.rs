@@ -3,9 +3,11 @@
 use async_trait::async_trait;
 use oxide_arb_api::oracle::{OracleSource, ResolutionVerdict, SourceVote, VotingOracle};
 use oxide_arb_error::rpc::RpcError;
+use oxide_arb_models::config::AllSourcesDownStrategy;
 use oxide_arb_models::types::MarketId;
 use rust_decimal::Decimal;
 use std::sync::Arc;
+use std::time::Duration;
 
 struct MockSource {
     id: &'static str,
@@ -39,9 +41,18 @@ impl OracleSource for MockSource {
     }
 }
 
+fn test_oracle(sources: Vec<Arc<dyn OracleSource>>, quorum: usize) -> VotingOracle {
+    VotingOracle::new(
+        sources,
+        quorum,
+        Duration::ZERO,
+        AllSourcesDownStrategy::ConservativeReject,
+    )
+}
+
 #[tokio::test]
 async fn both_agree_yes_resolves() {
-    let oracle = VotingOracle::new(
+    let oracle = test_oracle(
         vec![
             Arc::new(MockSource {
                 id: "a",
@@ -73,7 +84,7 @@ async fn both_agree_yes_resolves() {
 
 #[tokio::test]
 async fn both_agree_no_resolves() {
-    let oracle = VotingOracle::new(
+    let oracle = test_oracle(
         vec![
             Arc::new(MockSource {
                 id: "a",
@@ -102,7 +113,7 @@ async fn both_agree_no_resolves() {
 
 #[tokio::test]
 async fn disagreement_returns_disputed() {
-    let oracle = VotingOracle::new(
+    let oracle = test_oracle(
         vec![
             Arc::new(MockSource {
                 id: "a",
@@ -128,7 +139,7 @@ async fn disagreement_returns_disputed() {
 
 #[tokio::test]
 async fn insufficient_votes_returns_unresolved() {
-    let oracle = VotingOracle::new(
+    let oracle = test_oracle(
         vec![
             Arc::new(MockSource {
                 id: "a",
@@ -153,8 +164,45 @@ async fn insufficient_votes_returns_unresolved() {
 }
 
 #[tokio::test]
+async fn two_of_three_majority_resolves_despite_dissent() {
+    let oracle = test_oracle(
+        vec![
+            Arc::new(MockSource {
+                id: "gamma",
+                vote: Some(true),
+                should_fail: false,
+            }),
+            Arc::new(MockSource {
+                id: "ctf",
+                vote: Some(true),
+                should_fail: false,
+            }),
+            Arc::new(MockSource {
+                id: "uma",
+                vote: Some(false),
+                should_fail: false,
+            }),
+        ],
+        2,
+    );
+
+    let result = oracle
+        .resolve(&MarketId::new("0xtest"), "condition123")
+        .await
+        .unwrap();
+
+    match result {
+        ResolutionVerdict::Resolved { actual_yes, votes } => {
+            assert!(actual_yes);
+            assert_eq!(votes.len(), 3);
+        }
+        other => panic!("Expected Resolved (2-of-3), got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn source_failure_degrades_gracefully() {
-    let oracle = VotingOracle::new(
+    let oracle = test_oracle(
         vec![
             Arc::new(MockSource {
                 id: "a",
@@ -176,4 +224,35 @@ async fn source_failure_degrades_gracefully() {
         .unwrap();
 
     assert!(matches!(result, ResolutionVerdict::Unresolved { .. }));
+}
+
+#[tokio::test]
+async fn all_sources_down_uses_conservative_reject_reason() {
+    let oracle = test_oracle(
+        vec![
+            Arc::new(MockSource {
+                id: "a",
+                vote: None,
+                should_fail: true,
+            }),
+            Arc::new(MockSource {
+                id: "b",
+                vote: None,
+                should_fail: true,
+            }),
+        ],
+        2,
+    );
+
+    let result = oracle
+        .resolve(&MarketId::new("0xtest"), "condition123")
+        .await
+        .unwrap();
+
+    match result {
+        ResolutionVerdict::Unresolved { reason } => {
+            assert!(reason.contains("conservative_reject"));
+        }
+        other => panic!("Expected Unresolved, got {other:?}"),
+    }
 }

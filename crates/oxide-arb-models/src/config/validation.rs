@@ -182,6 +182,32 @@ pub fn validate_settings_common(inner: &Inner) -> ConfigValidationReport {
         });
     }
 
+    if inner.risk.min_depth_usd <= Decimal::ZERO {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "risk.min_depth_usd",
+            detail: "must be > 0".into(),
+        });
+    }
+
+    if inner.risk.max_depth_usage_pct <= Decimal::ZERO || inner.risk.max_depth_usage_pct > dec!(100)
+    {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "risk.max_depth_usage_pct",
+            detail: "must be in (0, 100]".into(),
+        });
+    }
+
+    if inner.risk.min_depth_usd > inner.sizing.max_single_trade_usd
+        && inner.sizing.max_single_trade_usd > Decimal::ZERO
+    {
+        report.errors.push(ConfigValidationError::InfeasibleRange {
+            field_low: "risk.min_depth_usd",
+            value_low: inner.risk.min_depth_usd,
+            field_high: "sizing.max_single_trade_usd",
+            value_high: inner.sizing.max_single_trade_usd,
+        });
+    }
+
     if inner.polymarket.fees.exponent <= Decimal::ZERO {
         report.errors.push(ConfigValidationError::InvalidValue {
             field: "polymarket.fees.exponent",

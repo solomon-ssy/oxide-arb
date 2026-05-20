@@ -1,7 +1,7 @@
 //! Normalized WebSocket event types.
 
 use oxide_arb_models::enums::common::TickSize;
-use oxide_arb_models::types::{Price, Shares, TokenId};
+use oxide_arb_models::types::{MarketId, Price, Shares, TokenId};
 use serde::{Deserialize, Serialize};
 
 /// A single price level in the orderbook.
@@ -55,6 +55,14 @@ pub enum WsEvent {
     LastTradePrice {
         asset_id: TokenId,
         price: Price,
+        timestamp_ms: u64,
+    },
+    /// Market settled (CLOB WS `MarketResolved`; always subscribed via SDK `custom_features`).
+    MarketResolved {
+        market_id: MarketId,
+        winning_token_id: TokenId,
+        winning_outcome: String,
+        asset_ids: Vec<TokenId>,
         timestamp_ms: u64,
     },
     ShardStatus {

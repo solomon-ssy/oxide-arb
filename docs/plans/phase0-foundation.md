@@ -305,17 +305,16 @@ crates/oxide-arb-models/
     ├── types/
     │   ├── mod.rs
     │   ├── ids.rs              # MarketId, EventId, TokenId, OpportunityId, TradeId, ExecutionId, OrderId
-    │   ├── money.rs            # Usd, Price, Shares, Bps — rust_decimal newtypes
-    │   └── venue.rs            # VenueId enum (仅 Polymarket)
+    │   └── money.rs            # Usd, Price, Shares, Bps — rust_decimal newtypes
     ├── enums/
     │   ├── mod.rs
-    │   ├── common.rs           # OpportunityType, TradeOutcome, Side, ExecutionMode, StalenessLevel
+    │   ├── common.rs           # TradeOutcome, Side, ExecutionMode, StalenessLevel, TickSize, MarketCategory
     │   ├── market.rs           # MarketCategory, TickSize, MarketStatus
     │   ├── risk.rs             # CircuitBreakerLevel, BlacklistScope, BlacklistReason
     │   └── lifecycle.rs        # LifecyclePhase, ShutdownStage
     ├── domain/
     │   ├── mod.rs
-    │   ├── opportunity.rs      # Opportunity<M>, Leg, PayoutModel, EndgameMeta
+    │   ├── opportunity.rs      # Opportunity (concrete), PayoutModel, EndgameMeta
     │   ├── market.rs           # MarketEntry, EventEntry, TokenDescriptor
     │   ├── trade.rs            # NewTrade, TradeInfo, TradeRecord
     │   ├── position.rs         # PositionInfo, ExposureReservation
@@ -331,7 +330,7 @@ crates/oxide-arb-models/
     │   ├── risk.rs             # RiskConfig, CircuitBreakerConfig, BlacklistConfig
     │   ├── sizing.rs           # PositionSizingConfig, KellyConfig, DrawdownConfig
     │   ├── market_data.rs      # MarketDataConfig, WebSocketConfig, GammaConfig
-    │   ├── venues.rs           # VenuesConfig, PolymarketVenueConfig, OnchainConfig
+    │   ├── polymarket.rs       # PolymarketConfig, OnchainConfig, FeesConfig
     │   ├── observability.rs    # ObservabilityConfig, AlertsConfig, MetricsConfig
     │   ├── db.rs               # DatabaseConfig, PostgresConfig
     │   ├── analytics.rs        # AnalyticsConfig (ClickHouse)
@@ -540,7 +539,7 @@ pub struct Settings {
     #[validate(nested)]
     pub market_data: MarketDataConfig,
     #[validate(nested)]
-    pub venues: VenuesConfig,
+    pub polymarket: PolymarketConfig,
     #[validate(nested)]
     pub observability: ObservabilityConfig,
     #[validate(nested)]
@@ -597,14 +596,9 @@ pub enum StalenessLevel {
 pub enum TradeOutcome {
     Success,
     Miss,
-    HedgeLoss,
-    Unhedged,
+    Stale,
+    TradeFailed,
     SystemError,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Display, EnumString)]
-pub enum OpportunityType {
-    DirectionalBet,
 }
 ```
 
@@ -629,21 +623,13 @@ pub const CTF_ADDRESS: &str = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045";
 /// Polygon chain ID
 pub const POLYGON_CHAIN_ID: u64 = 137;
 
-/// Minimum profit threshold (USD)
-pub const MIN_PROFIT_THRESHOLD: Decimal = dec!(0.50);
-
-/// Minimum edge in basis points
-pub const MIN_EDGE_BPS: Decimal = dec!(200);
-
-/// Maximum depth usage percentage
-pub const MAX_DEPTH_USAGE_PCT: Decimal = dec!(30);
-
-/// Minimum market depth (USD)
-pub const MIN_DEPTH_USD: Decimal = dec!(200);
-
-/// Quarter Kelly fraction
-pub const KELLY_FRACTION: Decimal = dec!(0.25);
+/// USDC decimals and scale only — all trading thresholds live in config.
+pub const USDC_DECIMALS: u8 = 6;
+pub const USDC_SCALE: u64 = 1_000_000;
 ```
+
+Runtime depth limits: `[risk] min_depth_usd`, `max_depth_usage_pct` (defaults 200 / 30).
+Sizing uses `[sizing] bankroll_usd` + `kelly_fraction`. Detection has no `budget_targets_usd` (ADR-001).
 
 ---
 
@@ -675,10 +661,10 @@ crates/oxide-arb-macros/src/typed_id.rs
 crates/oxide-arb-models/Cargo.toml
 crates/oxide-arb-models/src/lib.rs
 crates/oxide-arb-models/src/constants.rs
-crates/oxide-arb-models/src/types/{mod,ids,money,venue}.rs
+crates/oxide-arb-models/src/types/{mod,ids,money}.rs
 crates/oxide-arb-models/src/enums/{mod,common,market,risk,lifecycle}.rs
 crates/oxide-arb-models/src/domain/{mod,opportunity,market,trade,position,risk,pnl,calibration,order,system}.rs
-crates/oxide-arb-models/src/config/{mod,detection,execution,risk,sizing,market_data,venues,observability,db,analytics,cache,treasury,keys,notification}.rs
+crates/oxide-arb-models/src/config/{mod,detection,execution,risk,sizing,market_data,polymarket,observability,db,analytics,cache,treasury,keys,notification,validation}.rs
 crates/oxide-arb-models/src/entities/{mod,market,event,trade,position,risk_state,calibration,lifecycle_event,runtime_config}.rs
 crates/oxide-arb-models/src/idens/{mod,market,event,trade,position,risk_state,calibration,lifecycle_event,runtime_config}.rs
 config/oxide-arb.toml                   # 默认配置文件

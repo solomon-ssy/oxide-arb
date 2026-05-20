@@ -13,6 +13,12 @@ pub struct RiskConfig {
     // ── Per-opportunity static filters ───────────────────────────────
     #[serde(default = "default_min_profit")]
     pub min_profit_usd: Decimal,
+    /// Minimum order-book depth (USD) required before execution.
+    #[serde(default = "default_min_depth_usd")]
+    pub min_depth_usd: Decimal,
+    /// Maximum fraction of visible book depth a single order may consume (%).
+    #[serde(default = "default_max_depth_usage_pct")]
+    pub max_depth_usage_pct: Decimal,
 
     // ── Rolling counters + adaptive cooldown ─────────────────────────
     #[serde(default = "default_max_misses")]
@@ -78,6 +84,8 @@ impl Default for RiskConfig {
     fn default() -> Self {
         Self {
             min_profit_usd: default_min_profit(),
+            min_depth_usd: default_min_depth_usd(),
+            max_depth_usage_pct: default_max_depth_usage_pct(),
             max_consecutive_misses: default_max_misses(),
             max_hourly_loss_usd: default_max_hourly_loss(),
             base_cooldown_secs: default_base_cooldown(),
@@ -106,6 +114,12 @@ impl Default for RiskConfig {
 
 const fn default_min_profit() -> Decimal {
     dec!(0.50)
+}
+const fn default_min_depth_usd() -> Decimal {
+    dec!(200)
+}
+const fn default_max_depth_usage_pct() -> Decimal {
+    dec!(30)
 }
 const fn default_max_misses() -> u32 {
     3

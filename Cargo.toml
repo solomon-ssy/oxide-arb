@@ -114,9 +114,13 @@ governor = "0.10"
 # Security
 zeroize = { version = "1", features = ["derive"] }
 hex = "0.4"
+secrecy = "0.10"
 
 # URL parsing
 url = "2"
+
+# HTTP mocking (integration tests)
+wiremock = "0.6"
 
 # ── Internal Crates ──────────────────────────────────────────────────────────
 

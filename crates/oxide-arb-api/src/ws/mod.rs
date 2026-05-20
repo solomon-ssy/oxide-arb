@@ -6,6 +6,7 @@
 //! unified bounded channel.
 
 mod event;
+mod normalize;
 mod reconnect;
 mod router;
 mod shard;

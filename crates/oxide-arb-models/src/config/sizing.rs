@@ -51,7 +51,7 @@ const fn default_min_trade() -> Decimal {
     dec!(1)
 }
 const fn default_max_trade() -> Decimal {
-    dec!(100)
+    dec!(250)
 }
 
 #[derive(Debug, Clone, Deserialize, Validate)]

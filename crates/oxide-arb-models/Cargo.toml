@@ -19,7 +19,6 @@ validator = { workspace = true }
 bitcode = { workspace = true }
 tracing = { workspace = true }
 config = { workspace = true }
-polymarket_client_sdk_v2 = { workspace = true, features = ["clob"] }
 
 [lints]
 workspace = true

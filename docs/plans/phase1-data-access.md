@@ -28,31 +28,16 @@ crates/oxide-arb-api/
 ├── Cargo.toml
 └── src/
     ├── lib.rs
-    ├── client/
-    │   ├── mod.rs
-    │   ├── clob.rs             # CLOB REST client (orders, books, trades)
-    │   ├── gamma.rs            # Gamma API client (events, markets catalog)
-    │   └── ws.rs               # CLOB WebSocket manager (sharded connections)
-    ├── fees/
-    │   ├── mod.rs
-    │   ├── calculator.rs       # Polymarket fee formula implementation
-    │   ├── rate_source.rs      # Dynamic fee rate fetching + ArcSwap snapshot
-    │   └── service.rs          # FeeService trait + PolymarketFeeService impl
-    ├── oracle/
-    │   ├── mod.rs
-    │   ├── source.rs           # OracleSource trait definition
-    │   ├── gamma_source.rs     # Gamma-based resolution detection
-    │   ├── ctf_source.rs       # On-chain CTF getPayouts via alloy
-    │   ├── voting.rs           # Multi-source quorum (2-of-3)
-    │   └── types.rs            # ResolutionVerdict, OutcomeReport, SourceVote
-    ├── keystore/
-    │   ├── mod.rs
-    │   ├── loader.rs           # KeyLoader trait + HexKeyLoader, KeystoreFileLoader
-    │   ├── signer.rs           # EIP-712 order signing (polymarket-client-sdk bridge)
-    │   └── credentials.rs      # L2 HMAC credential derivation + management
-    ├── types.rs                # API-specific DTOs (GammaEvent, GammaMarket, ClobOrder, etc.)
-    └── error.rs                # ApiError enum (converts to OxideError)
+    ├── clob/                   # CLOB REST (orders, books) + convert (Side ↔ SDK)
+    ├── ws/                     # Sharded WebSocket manager (wraps SDK WS)
+    ├── gamma/                  # Gamma API client + sync + mapper
+    ├── fees/                   # FeeCalculator struct + formula + rate_cache
+    ├── oracle/                 # OracleSource trait, Gamma + CTF, VotingOracle (2-of-2)
+    ├── keystore/               # Keystore struct, OrderSigner, L2Credentials
+    └── infra/                  # Shared retry policy
 ```
+
+Errors live in `oxide-arb-error` (`api::ApiError`, `ws::WsError`, `rpc::RpcError`, …), not a local `error.rs`.
 
 ---
 
@@ -69,8 +54,8 @@ rust-version.workspace = true
 oxide-arb-error = { workspace = true }
 oxide-arb-models = { workspace = true }
 
-# Polymarket SDK
-polymarket-client-sdk = { workspace = true }
+# Polymarket SDK (v2)
+polymarket_client_sdk_v2 = { workspace = true }
 
 # Networking
 reqwest = { workspace = true }
@@ -312,13 +297,17 @@ pub struct SourceVote {
 
 ### 6.2 VotingOracle (2-of-3 quorum)
 
+Production stack: **Gamma + CTF on-chain + UMA** with `[settlement_oracle].voting_quorum` (default 2).
+Built via `oracle::build_voting_oracle(&polymarket, &gamma, &settlement_oracle)`.
+
 ```rust
 pub struct VotingOracle {
     sources: Vec<Arc<dyn OracleSource>>,
+    quorum: usize,
 }
 
 impl VotingOracle {
-    /// Resolve a market by querying all sources and requiring 2-of-3 agreement.
+    /// Resolve a market by querying all sources and requiring quorum agreement.
     pub async fn resolve(&self, market_id: &MarketId, condition_id: &str)
         -> ApiResult<Option<ResolutionVerdict>>
     {
@@ -354,22 +343,20 @@ impl OracleSource for CtfOracleSource {
 
 ## 7. Keystore
 
-### 7.1 Key Loading
+### 7.1 Key loading (concrete struct, ADR-001)
 
 ```rust
-#[async_trait]
-pub trait KeyLoader: Send + Sync {
-    async fn load_signing_key(&self) -> ApiResult<SigningKey>;
+pub struct Keystore {
+    signer: OrderSigner,
+    credentials: Option<L2Credentials>,
 }
 
-pub struct HexKeyLoader {
-    hex_key: String,
-}
-
-pub struct EnvKeyLoader {
-    env_var: String,
+impl Keystore {
+    pub fn from_config(config: &KeysConfig) -> Result<Self, SigningError>;
 }
 ```
+
+Loads hex private key from config/env; L2 HMAC triple optional via env vars.
 
 ### 7.2 Order Signing
 
@@ -392,58 +379,9 @@ impl OrderSigner {
 
 ## 8. Error Types
 
-```rust
-use oxide_arb_error::OxideError;
-use thiserror::Error;
-
-pub type ApiResult<T> = Result<T, ApiError>;
-
-#[derive(Debug, Error)]
-pub enum ApiError {
-    #[error("HTTP request failed: {0}")]
-    Http(#[from] reqwest::Error),
-
-    #[error("WebSocket error: {0}")]
-    WebSocket(String),
-
-    #[error("Gamma API error: status={status}, body={body}")]
-    GammaApi { status: u16, body: String },
-
-    #[error("CLOB API error: code={code}, message={message}")]
-    ClobApi { code: String, message: String },
-
-    #[error("Rate limited: retry after {retry_after_ms}ms")]
-    RateLimited { retry_after_ms: u64 },
-
-    #[error("Signing error: {0}")]
-    Signing(String),
-
-    #[error("RPC error: {0}")]
-    Rpc(String),
-
-    #[error("Deserialization error: {0}")]
-    Deserialize(String),
-
-    #[error("Timeout: {0}")]
-    Timeout(String),
-
-    #[error("Connection closed")]
-    ConnectionClosed,
-}
-
-impl From<ApiError> for OxideError {
-    fn from(e: ApiError) -> Self {
-        match e {
-            ApiError::Http(e) => OxideError::Http(e.to_string()),
-            ApiError::WebSocket(s) => OxideError::WebSocket(s),
-            ApiError::Timeout(s) => OxideError::Timeout(s),
-            ApiError::Signing(s) => OxideError::Signing(s),
-            ApiError::RateLimited { .. } => OxideError::Http(e.to_string()),
-            _ => OxideError::Internal(e.to_string()),
-        }
-    }
-}
-```
+Implemented in `crates/oxide-arb-error/src/{api,ws,rpc,signing,...}.rs` and composed
+into `OxideError` via `#[from]`. `oxide-arb-api` re-exports `OxideResult` and `ApiError`.
+`ApiError` includes `is_retryable()` / `retry_after_ms()` for smart retries.
 
 ---
 

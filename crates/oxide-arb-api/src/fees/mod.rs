@@ -6,7 +6,11 @@
 //! poll that re-fetches the same hardcoded table.
 
 mod formula;
+#[cfg(test)]
+mod golden;
 mod rate_cache;
+#[cfg(test)]
+mod reference;
 
 pub use formula::calculate_fee;
 pub use rate_cache::{CategoryFeeParams, FeeRateSource, FeeSnapshot};

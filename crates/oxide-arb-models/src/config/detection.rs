@@ -11,8 +11,6 @@ pub struct DetectionConfig {
     pub fallback_scan_interval_secs: u64,
     #[serde(default = "default_min_profit_threshold_usd")]
     pub min_profit_threshold_usd: Decimal,
-    #[serde(default = "default_budget_targets_usd")]
-    pub budget_targets_usd: Vec<Decimal>,
     #[serde(default = "default_warmup_secs")]
     pub detection_warmup_secs: u64,
     #[serde(default = "default_coalesce_ms")]
@@ -30,7 +28,6 @@ impl Default for DetectionConfig {
         Self {
             fallback_scan_interval_secs: default_scan_interval_secs(),
             min_profit_threshold_usd: default_min_profit_threshold_usd(),
-            budget_targets_usd: default_budget_targets_usd(),
             detection_warmup_secs: default_warmup_secs(),
             dedup_coalesce_window_ms: default_coalesce_ms(),
             fallback_scan_concurrency: default_scan_concurrency(),
@@ -45,9 +42,6 @@ const fn default_scan_interval_secs() -> u64 {
 }
 const fn default_min_profit_threshold_usd() -> Decimal {
     dec!(0.50)
-}
-fn default_budget_targets_usd() -> Vec<Decimal> {
-    vec![dec!(5), dec!(10), dec!(25), dec!(50), dec!(100)]
 }
 const fn default_warmup_secs() -> u64 {
     90

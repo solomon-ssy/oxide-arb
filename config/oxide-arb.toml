@@ -60,7 +60,6 @@ page_size = 100
 [detection]
 fallback_scan_interval_secs = 5
 min_profit_threshold_usd = "0.50"
-budget_targets_usd = ["5", "10", "25", "50", "100"]
 detection_warmup_secs = 90
 dedup_coalesce_window_ms = 300
 fallback_scan_concurrency = 32
@@ -98,7 +97,7 @@ trade_confirm_poll_interval_secs = 2
 kelly_fraction = "0.25"
 bankroll_usd = "1000"
 min_trade_usd = "1"
-max_single_trade_usd = "100"
+max_single_trade_usd = "250"
 
 [sizing.kelly]
 max_kelly = "0.25"
@@ -112,6 +111,8 @@ drawdown_reduction_factor = "0.5"
 
 [risk]
 min_profit_usd = "0.50"
+min_depth_usd = "200"
+max_depth_usage_pct = "30"
 max_consecutive_misses = 3
 max_hourly_loss_usd = "30"
 base_cooldown_secs = 900
@@ -208,6 +209,15 @@ sweep_threshold_usd = "1400"
 [treasury.hot_wallet]
 address = ""
 balance_poll_interval_secs = 60
+
+# ── Settlement Oracle (Gamma + CTF + UMA, 2-of-3 quorum) ─────────────────────
+
+[settlement_oracle]
+enabled = true
+voting_quorum = 2
+cross_check_delay_secs = 120
+uma_endpoint = "https://api.uma.xyz"
+uma_timeout_secs = 10
 
 # ── Notification ─────────────────────────────────────────────────────────────
 

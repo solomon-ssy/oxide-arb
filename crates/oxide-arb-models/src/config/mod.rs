@@ -22,6 +22,7 @@ mod notification;
 mod observability;
 mod polymarket;
 mod risk;
+mod settlement_oracle;
 mod sizing;
 mod treasury;
 pub mod validation;
@@ -38,6 +39,7 @@ pub use notification::*;
 pub use observability::*;
 pub use polymarket::*;
 pub use risk::*;
+pub use settlement_oracle::*;
 pub use sizing::*;
 pub use treasury::*;
 
@@ -203,6 +205,8 @@ pub struct Inner {
     pub keys: KeysConfig,
     #[serde(default)]
     pub notification: NotificationConfig,
+    #[serde(default)]
+    pub settlement_oracle: SettlementOracleConfig,
 }
 
 #[cfg(test)]
