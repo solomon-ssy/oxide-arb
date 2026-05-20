@@ -326,7 +326,7 @@ crates/oxide-arb-models/
     ├── config/
     │   ├── mod.rs              # Settings (顶层配置聚合)
     │   ├── detection.rs        # DetectionConfig, EndgameConfig, CalibrationConfig
-    │   ├── execution.rs        # ExecutionConfig, HedgingConfig
+    │   ├── execution.rs        # ExecutionConfig (mode + timeout only; tiered FOK/GTD fields in Phase 4)
     │   ├── risk.rs             # RiskConfig, CircuitBreakerConfig, BlacklistConfig
     │   ├── sizing.rs           # PositionSizingConfig, KellyConfig, DrawdownConfig
     │   ├── market_data.rs      # MarketDataConfig, WebSocketConfig, GammaConfig
@@ -635,14 +635,16 @@ Sizing uses `[sizing] bankroll_usd` + `kelly_fraction`. Detection has no `budget
 
 ## 5. 验收检查清单
 
-- [ ] `cargo build --workspace` 编译通过（零 warning）
-- [ ] `cargo clippy --workspace -- -D warnings` 通过
-- [ ] `cargo test --workspace` 全绿
-- [ ] `cargo doc --workspace --no-deps` 生成文档无 broken link
-- [ ] 所有 money 类型禁止 `From<f64>` 实现
-- [ ] 所有 ID 类型通过 `TypedId` 宏生成，具备 SeaORM 绑定
-- [ ] `Settings` 可从 `config/oxide-arb.toml` + env vars 加载
-- [ ] 错误类型覆盖所有已知失败场景（基础设施 + 网络 + 交易 + 风控 + 数据）
+- [x] `cargo build --workspace` 编译通过（零 warning）
+- [x] `cargo clippy --workspace -- -D warnings` 通过
+- [x] `cargo test --workspace` 全绿
+- [x] `cargo doc --workspace --no-deps` 生成文档无 broken link
+- [x] 所有 money 类型禁止 `From<f64>` 实现
+- [x] 所有 ID 类型通过 `TypedId` 宏生成，具备 SeaORM 绑定
+- [x] `Settings` 可从 `config/oxide-arb.toml` + env vars 加载（`Settings::new` / `load`）
+- [x] 错误类型覆盖所有已知失败场景（子模块：`api`, `ws`, `rpc`, `storage`, `signing`, `config`, `trading`）
+- [x] `detection.min_profit_threshold_usd` 为唯一 min_profit 配置源（ADR-001）
+- [x] `[execution]` 不含 `fok_timeout_ms` 等字段 — **延后 Phase 4**（见 ADR-001 §8、`phase4-core-and-risk.md` §0.1）
 
 ---
 

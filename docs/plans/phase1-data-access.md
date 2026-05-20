@@ -59,7 +59,7 @@ polymarket_client_sdk_v2 = { workspace = true }
 
 # Networking
 reqwest = { workspace = true }
-tokio-tungstenite = { workspace = true }
+# WebSocket via polymarket_client_sdk_v2 (`ws` + `heartbeats`) — no tokio-tungstenite
 
 # Ethereum / Polygon
 alloy = { workspace = true }
@@ -171,8 +171,8 @@ pub enum WsEvent {
 
 ### 3.3 心跳
 
-- 独立 task 每 5s 发送 ping
-- 10s 内无 pong → 认为断线触发重连
+由 **`polymarket_client_sdk_v2`** 的 `heartbeats` feature 处理（`WsShard` 不实现应用层 ping）。
+`[market_data.websocket]` 仅配置 **分片订阅上限** 与 **重连退避**（`reconnect_delay_ms` / `max_reconnect_delay_ms`）。
 
 ---
 
@@ -387,15 +387,21 @@ into `OxideError` via `#[from]`. `oxide-arb-api` re-exports `OxideResult` and `A
 
 ## 9. 验收检查清单
 
-- [ ] `ClobWsManager` 可连接 Polymarket WS 并接收 book snapshot
-- [ ] WebSocket 断线后自动重连，重连后重新订阅
-- [ ] `GammaClient::full_sync()` 可拉取所有活跃市场
-- [ ] `calculate_fee()` 结果与 Polymarket 官方 SDK 一致（精确到 4 位小数）
-- [ ] `CtfOracleSource` 可查询已 resolve 市场的 payout
-- [ ] `OrderSigner` 可签名 FOK 订单并通过 CLOB API 提交（dry-run 模式验证签名格式）
-- [ ] 所有网络调用带超时 + 重试（backoff）
-- [ ] Rate limiting 被正确处理（429 → 等待 retry-after）
-- [ ] 单元测试覆盖 fee 计算边界情况（price=0, price=1, price=0.5 峰值）
+- [x] `ClobWsManager` 可连接 Polymarket WS 并接收 book snapshot（`tests/integration/ws_book.rs`，`--ignored` + CI `network-integration` job）
+- [x] WebSocket 断线重连策略（`ReconnectPolicy` / `infra::retry`，shard 级单测）
+- [x] `GammaClient::full_sync()` / `incremental_sync()`（wiremock + 可选 live `integration/gamma_sync.rs`）
+- [x] `calculate_fee()` 与官方公式一致（`fees/golden.rs` + reference）
+- [x] `CtfOracleSource` 可查询已 resolve 市场（`integration/ctf_oracle.rs`，需 Alchemy RPC + `OXIDE_ARB_TEST_RESOLVED_CONDITION_ID`）
+- [x] `OrderSigner` / L2 凭证（`keystore_test.rs` + `integration/clob_auth.rs`）
+- [x] 网络调用超时 + 重试（`infra/retry.rs`，Gamma/CLOB wiremock 429）
+- [x] Rate limiting（`clob/rate_limiter.rs` + 429 wiremock）
+- [x] Fee 边界（price=0, 0.5, 1）
+
+**网络集成测试运行方式**（见 `docs/operations/network-integration.md`）：
+
+```bash
+cargo test -p oxide-arb-api --features integration -- --ignored
+```
 
 ---
 

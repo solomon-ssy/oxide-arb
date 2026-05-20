@@ -182,6 +182,13 @@ pub fn validate_settings_common(inner: &Inner) -> ConfigValidationReport {
         });
     }
 
+    if inner.detection.min_profit_threshold_usd <= Decimal::ZERO {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "detection.min_profit_threshold_usd",
+            detail: "must be > 0".into(),
+        });
+    }
+
     if inner.risk.min_depth_usd <= Decimal::ZERO {
         report.errors.push(ConfigValidationError::InvalidValue {
             field: "risk.min_depth_usd",

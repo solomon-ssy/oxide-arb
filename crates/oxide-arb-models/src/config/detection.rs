@@ -9,6 +9,8 @@ use validator::Validate;
 pub struct DetectionConfig {
     #[serde(default = "default_scan_interval_secs")]
     pub fallback_scan_interval_secs: u64,
+    /// Authoritative minimum net profit (USD) for detection, validation, and risk.
+    /// Single source per ADR-001 — do not duplicate under `[execution]` or `[risk]`.
     #[serde(default = "default_min_profit_threshold_usd")]
     pub min_profit_threshold_usd: Decimal,
     #[serde(default = "default_warmup_secs")]

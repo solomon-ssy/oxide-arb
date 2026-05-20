@@ -49,7 +49,7 @@ impl VotingOracle {
 
     /// Query all sources in parallel; require `quorum` agreeing votes.
     ///
-    /// When Gamma reports a resolution hint, waits [`cross_check_delay`] before
+    /// When Gamma reports a resolution hint, waits [`VotingOracle::cross_check_delay`] before
     /// querying all sources so slower on-chain / UMA sources can catch up.
     pub async fn resolve(
         &self,

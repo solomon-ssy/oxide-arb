@@ -11,8 +11,6 @@ use validator::Validate;
 #[derive(Debug, Clone, Deserialize, Validate)]
 pub struct RiskConfig {
     // ── Per-opportunity static filters ───────────────────────────────
-    #[serde(default = "default_min_profit")]
-    pub min_profit_usd: Decimal,
     /// Minimum order-book depth (USD) required before execution.
     #[serde(default = "default_min_depth_usd")]
     pub min_depth_usd: Decimal,
@@ -83,7 +81,6 @@ pub struct RiskConfig {
 impl Default for RiskConfig {
     fn default() -> Self {
         Self {
-            min_profit_usd: default_min_profit(),
             min_depth_usd: default_min_depth_usd(),
             max_depth_usage_pct: default_max_depth_usage_pct(),
             max_consecutive_misses: default_max_misses(),
@@ -112,9 +109,6 @@ impl Default for RiskConfig {
     }
 }
 
-const fn default_min_profit() -> Decimal {
-    dec!(0.50)
-}
 const fn default_min_depth_usd() -> Decimal {
     dec!(200)
 }

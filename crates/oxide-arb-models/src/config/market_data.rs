@@ -45,14 +45,17 @@ const fn default_staleness_expired() -> u64 {
     30_000
 }
 
+/// Polymarket CLOB WebSocket sharding and reconnect policy.
+///
+/// Transport heartbeats are owned by `polymarket_client_sdk_v2` (workspace feature
+/// `heartbeats`). This struct does not expose ping intervals — they are not
+/// configurable at the application layer.
 #[derive(Debug, Clone, Deserialize, Validate)]
 pub struct WebSocketConfig {
     #[serde(default = "default_ws_reconnect")]
     pub reconnect_delay_ms: u64,
     #[serde(default = "default_ws_max_reconnect")]
     pub max_reconnect_delay_ms: u64,
-    #[serde(default = "default_ws_ping_interval")]
-    pub ping_interval_secs: u64,
     #[serde(default = "default_ws_max_subscriptions")]
     pub max_subscriptions_per_connection: usize,
 }
@@ -62,7 +65,6 @@ impl Default for WebSocketConfig {
         Self {
             reconnect_delay_ms: default_ws_reconnect(),
             max_reconnect_delay_ms: default_ws_max_reconnect(),
-            ping_interval_secs: default_ws_ping_interval(),
             max_subscriptions_per_connection: default_ws_max_subscriptions(),
         }
     }
@@ -74,11 +76,8 @@ const fn default_ws_reconnect() -> u64 {
 const fn default_ws_max_reconnect() -> u64 {
     30_000
 }
-const fn default_ws_ping_interval() -> u64 {
-    30
-}
 const fn default_ws_max_subscriptions() -> usize {
-    100
+    200
 }
 
 /// Polymarket Gamma API configuration.

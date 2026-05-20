@@ -12,7 +12,7 @@ use chrono::{DateTime, Utc};
 use oxide_arb_error::api::ApiError;
 use oxide_arb_models::config::GammaConfig;
 use oxide_arb_models::domain::market::{EventEntry, MarketEntry};
-use oxide_arb_models::types::{EventId, MarketId};
+use oxide_arb_models::types::{EventId, MarketId, TokenId};
 
 use types::RawGammaMarket;
 
@@ -35,6 +35,11 @@ impl GammaClient {
     /// Full sync: paginate all active events + their markets.
     pub async fn full_sync(&self) -> Result<Vec<EventEntry>, ApiError> {
         sync::full_sync(&self.http, &self.config).await
+    }
+
+    /// Discover one liquid/active token for smoke tests (first page of active events).
+    pub async fn discover_active_token(&self) -> Result<TokenId, ApiError> {
+        sync::discover_active_token(&self.http, &self.config).await
     }
 
     /// Incremental sync: events changed since timestamp.

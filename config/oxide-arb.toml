@@ -14,6 +14,7 @@ clob_base_url = "https://clob.polymarket.com"
 clob_ws_url = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 chain_id = 137
 
+# CTF oracle / on-chain reads. Alchemy: https://polygon-mainnet.g.alchemy.com/v2/<KEY>
 [polymarket.onchain]
 rpc_url = "https://polygon-rpc.com"
 rpc_timeout_ms = 10000
@@ -44,11 +45,11 @@ staleness_acceptable_ms = 5000
 staleness_stale_ms = 15000
 staleness_expired_ms = 30000
 
+# Heartbeats: polymarket_client_sdk_v2 (`heartbeats` feature), not app-level ping.
 [market_data.websocket]
 reconnect_delay_ms = 1000
 max_reconnect_delay_ms = 30000
-ping_interval_secs = 30
-max_subscriptions_per_connection = 100
+max_subscriptions_per_connection = 200
 
 [market_data.gamma]
 base_url = "https://gamma-api.polymarket.com"
@@ -82,7 +83,6 @@ refresh_interval_secs = 3600
 
 [execution]
 execution_mode = "dry_run"
-min_profit_margin_usd = "0.50"
 
 [execution.timeout]
 max_validation_time_ms = 500
@@ -110,7 +110,6 @@ drawdown_reduction_factor = "0.5"
 # ── Risk Management ──────────────────────────────────────────────────────────
 
 [risk]
-min_profit_usd = "0.50"
 min_depth_usd = "200"
 max_depth_usage_pct = "30"
 max_consecutive_misses = 3

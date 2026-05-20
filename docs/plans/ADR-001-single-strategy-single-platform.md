@@ -169,12 +169,10 @@ Settings
 │   ├── scan_concurrency
 │   ├── endgame (settlement_window_hours, thresholds, convergence params...)
 │   └── calibration (min_sample_size, refresh_interval, fusion params...)
-├── execution        ← 保留
+├── execution        ← Phase 0 仅 timeout + mode；FOK/GTD 分层字段 **Phase 4** 交付
 │   ├── mode (DryRun/Paper/Live)
-│   ├── fok_timeout_ms
-│   ├── gtd_expiry_secs
-│   ├── max_retries_per_tier
-│   └── price_tolerance_ticks
+│   ├── timeout (validation / dispatcher / confirm)
+│   └── (Phase 4) fok_timeout_ms, gtd_expiry_secs, max_retries_per_tier, price_tolerance_ticks
 ├── risk             ← 保留
 │   ├── circuit_breaker (L1-L4 thresholds, cooldown)
 │   ├── daily_loss_limit_usd
@@ -270,12 +268,21 @@ workspace
 
 ## 8. 后续执行计划
 
-### 立即执行（当前 PR）
+### 立即执行（Phase 0 — 已完成）
 
-1. 删除 `constants.rs` 中的 trading thresholds（lines 26-41）
-2. `venue.rs` → 重命名为 `polymarket.rs`，更新 `mod.rs`
-3. 确保 `detection.rs` 已吸收所有从 constants.rs 删除的参数
-4. 在 `sizing.rs` 添加 `bankroll_usd` 字段
+1. ✅ 删除 `constants.rs` 中的 trading thresholds
+2. ✅ `venue` → `polymarket` 配置段
+3. ✅ `detection.min_profit_threshold_usd` 为唯一 min_profit 来源（已删除 `[execution]` / `[risk]` 重复字段）
+4. ✅ `sizing.bankroll_usd`
+
+### 延后到 Phase 4（执行层）
+
+以下字段在 ADR §5.2 中描述，但 **不在 Phase 0/1 实现**；由 `oxide-arb-core` 的 `ExecutionConfig` 扩展与 `TieredExecutionStrategy` 一并交付（见 `phase4-core-and-risk.md` §0.1）：
+
+- `fok_timeout_ms`
+- `gtd_expiry_secs`
+- `max_retries_per_tier`
+- `price_tolerance_ticks`
 
 ### Phase 0 补全阶段
 

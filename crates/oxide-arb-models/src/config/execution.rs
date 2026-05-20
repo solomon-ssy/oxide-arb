@@ -9,29 +9,12 @@ use rust_decimal_macros::dec;
 use serde::Deserialize;
 use validator::Validate;
 
-#[derive(Debug, Clone, Deserialize, Validate)]
+#[derive(Debug, Clone, Default, Deserialize, Validate)]
 pub struct ExecutionConfig {
     #[serde(default)]
     pub execution_mode: ExecutionMode,
-    /// Minimum profit margin (USD) beyond fees before execution proceeds.
-    #[serde(default = "default_min_profit_margin")]
-    pub min_profit_margin_usd: Decimal,
     #[serde(default)]
     pub timeout: TradeTimeoutConfig,
-}
-
-impl Default for ExecutionConfig {
-    fn default() -> Self {
-        Self {
-            execution_mode: ExecutionMode::default(),
-            min_profit_margin_usd: default_min_profit_margin(),
-            timeout: TradeTimeoutConfig::default(),
-        }
-    }
-}
-
-const fn default_min_profit_margin() -> Decimal {
-    dec!(0.50)
 }
 
 #[derive(Debug, Clone, Deserialize, Validate)]

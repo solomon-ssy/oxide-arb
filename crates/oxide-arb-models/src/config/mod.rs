@@ -209,6 +209,16 @@ pub struct Inner {
     pub settlement_oracle: SettlementOracleConfig,
 }
 
+impl Inner {
+    /// Minimum net profit (USD) required to act on an opportunity.
+    ///
+    /// Authoritative field: `[detection].min_profit_threshold_usd` (ADR-001).
+    #[inline]
+    pub const fn min_profit_threshold_usd(&self) -> rust_decimal::Decimal {
+        self.detection.min_profit_threshold_usd
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -241,6 +251,15 @@ mod tests {
         let settings = Settings::new("nonexistent_dir_for_test").expect("defaults");
         let report = settings.validate_for_mode(ExecutionMode::DryRun);
         assert!(!report.has_errors());
+    }
+
+    #[test]
+    fn min_profit_threshold_single_source_on_defaults() {
+        let inner = Inner::default();
+        assert_eq!(
+            inner.min_profit_threshold_usd(),
+            inner.detection.min_profit_threshold_usd
+        );
     }
 
     #[test]

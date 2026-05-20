@@ -10,3 +10,5 @@ mod clob_auth;
 mod ctf_oracle;
 #[path = "integration/gamma_sync.rs"]
 mod gamma_sync;
+#[path = "integration/ws_book.rs"]
+mod ws_book;

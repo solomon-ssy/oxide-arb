@@ -10,6 +10,19 @@
 
 ## 0. 工作范围
 
+### 0.1 自 Phase 0/1 延后的交付项（ADR-001 §5.2 / §8）
+
+以下在架构文档中已定义，但 **故意不在 Phase 0/1 的 `oxide-arb-models` / `oxide-arb-api` 中实现**；在本 Phase 与执行管线一并落地：
+
+| 项 | 落点 | 说明 |
+|---|---|---|
+| `ExecutionConfig` 扩展字段 | `oxide-arb-models/src/config/execution.rs` | `fok_timeout_ms`, `gtd_expiry_secs`, `max_retries_per_tier`, `price_tolerance_ticks` |
+| `TieredExecutionStrategy` | `oxide-arb-core/src/execution/` | FOK → 短 GTD → 长 GTD 分层，读取上述配置 |
+| `ExecutionFSM` 简化 | `oxide-arb-core/src/execution/state_machine.rs` | **删除 `Hedging`**；`Emergency` 仅系统级故障，非对冲失败 |
+| Oracle `HealthTracker` | `oxide-arb-core/src/oracle/health.rs`（或 `oxide-arb-api` 若仅数据层需要） | 自旧版 `settlement_oracle/health.rs` 移植：300s 滑动窗口、`SourceHealth` / `Degraded` / `Down`，供 `HealthChecker` 与熔断联动 |
+
+**Phase 0 已完成的配置原则**：`detection.min_profit_threshold_usd` 为唯一 min_profit 来源；执行/风控通过 `Settings::min_profit_threshold_usd()` 读取，不得在 `[execution]` / `[risk]` 重复 TOML 字段。
+
 ### oxide-arb-risk
 
 独立风控 crate，**不依赖** `oxide-arb-core`。通过 trait 注入实现与核心的解耦。
@@ -904,28 +917,25 @@ impl ExecutionPipeline {
 
 ## 9. 执行状态机
 
+> **ADR-001**: Endgame 不对冲。实现时 **删除 `Hedging`**；`Emergency` 仅用于系统级故障（API 全不可用、DB 损坏等），非对冲失败。EXEC 失败直接回 IDLE 并上报 risk engine。
+
 ```rust
-/// Execution finite state machine.
+/// Execution finite state machine (endgame, no hedge path).
 ///
 /// ```text
 /// IDLE ──▶ VALIDATE ──▶ EXEC ──▶ IDLE (success)
 ///   │         │           │
-///   │         │ fail      │ partial fill
+///   │         │ fail      │ fail / miss
 ///   │         ▼           ▼
-///   │       IDLE       HEDGING ──▶ IDLE
-///   │                     │
-///   │                     │ hedge fail
-///   │                     ▼
-///   │                 EMERGENCY ──▶ IDLE (operator resume)
+///   │       IDLE       IDLE (+ risk / audit)
 ///   │
-///   └──────────────────────────────────────────────────
+///   └── (global fault) ──▶ EMERGENCY ──▶ IDLE (operator resume)
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExecState {
     Idle,
     Validate,
     Exec,
-    Hedging,
     Emergency,
 }
 
@@ -941,10 +951,7 @@ impl ExecutionFSM {
             (ExecState::Idle, ExecState::Validate) => true,
             (ExecState::Validate, ExecState::Exec) => true,
             (ExecState::Validate, ExecState::Idle) => true,   // validation failure
-            (ExecState::Exec, ExecState::Idle) => true,       // success
-            (ExecState::Exec, ExecState::Hedging) => true,    // partial fill
-            (ExecState::Hedging, ExecState::Idle) => true,    // hedge success
-            (ExecState::Hedging, ExecState::Emergency) => true, // hedge failure
+            (ExecState::Exec, ExecState::Idle) => true,       // terminal (success or miss)
             (ExecState::Emergency, ExecState::Idle) => true,  // operator resume
             _ => false,
         };

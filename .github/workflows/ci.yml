@@ -76,3 +76,24 @@ jobs:
 
       - name: Check MSRV
         run: cargo check --workspace
+
+  # network-integration:
+  #   name: Live API / WS / RPC (optional)
+  #   runs-on: ubuntu-latest
+  #   # Runs only on main when secrets are set; does not block PRs without secrets.
+  #   if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: dtolnay/rust-toolchain@stable
+  #     - uses: Swatinem/rust-cache@v2
+
+  #     - name: Live integration tests
+  #       env:
+  #         OXIDE_ARB__POLYMARKET__ONCHAIN__RPC_URL: ${{ secrets.POLYGON_RPC_URL }}
+  #         OXIDE_ARB_TEST_RESOLVED_CONDITION_ID: ${{ secrets.RESOLVED_CONDITION_ID }}
+  #       run: |
+  #         if [ -z "$OXIDE_ARB__POLYMARKET__ONCHAIN__RPC_URL" ] || [ -z "$OXIDE_ARB_TEST_RESOLVED_CONDITION_ID" ]; then
+  #           echo "Skipping: set POLYGON_RPC_URL and RESOLVED_CONDITION_ID repo secrets to enable."
+  #           exit 0
+  #         fi
+  #         cargo test -p oxide-arb-api --features integration -- --ignored --test-threads=1

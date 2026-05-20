@@ -38,8 +38,11 @@ culture = "0.05"
 weather = "0.05"
 other = "0.05"
 
+# Polygon mainnet RPC (CTF oracle, on-chain reads). Alchemy works:
+#   https://polygon-mainnet.g.alchemy.com/v2/<YOUR_API_KEY>
+# Override at runtime: OXIDE_ARB__POLYMARKET__ONCHAIN__RPC_URL
 [polymarket.onchain]
-rpc_url = "REPLACE_WITH_YOUR_POLYGON_RPC_URL"
+rpc_url = "https://polygon-mainnet.g.alchemy.com/v2/REPLACE_WITH_ALCHEMY_KEY"
 rpc_timeout_ms = 10000
 
 # ── Market Data Pipeline ──────────────────────────────────────────────────────
@@ -53,8 +56,7 @@ staleness_expired_ms = 30000
 [market_data.websocket]
 reconnect_delay_ms = 1000
 max_reconnect_delay_ms = 30000
-ping_interval_secs = 5
-max_subscriptions_per_connection = 100
+max_subscriptions_per_connection = 200
 
 [market_data.gamma]
 base_url = "https://gamma-api.polymarket.com"
@@ -65,7 +67,6 @@ page_size = 100
 
 [execution]
 execution_mode = "live"
-min_profit_margin_usd = "0.50"
 
 [execution.timeout]
 max_validation_time_ms = 500
@@ -93,7 +94,6 @@ drawdown_reduction_factor = "0.5"
 # ── Risk Management ──────────────────────────────────────────────────────────
 
 [risk]
-min_profit_usd = "0.50"
 max_consecutive_misses = 3
 max_hourly_loss_usd = "100"
 base_cooldown_secs = 900
