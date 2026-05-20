@@ -1,0 +1,72 @@
+[package]
+name = "oxide-arb-api"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+oxide-arb-error = { workspace = true }
+oxide-arb-models = { workspace = true }
+
+# Polymarket SDK
+polymarket_client_sdk_v2 = { workspace = true }
+
+# Ethereum / Polygon
+alloy = { workspace = true }
+
+# Networking
+reqwest = { workspace = true }
+tokio-tungstenite = { workspace = true }
+
+# Async runtime
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+futures-util = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Decimal
+rust_decimal = { workspace = true }
+rust_decimal_macros = { workspace = true }
+
+# Time
+chrono = { workspace = true }
+
+# Concurrency
+arc-swap = { workspace = true }
+dashmap = { workspace = true }
+parking_lot = { workspace = true }
+flume = { workspace = true }
+
+# Retry
+backoff = { workspace = true }
+
+# Rate limiting
+governor = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# Error
+thiserror = { workspace = true }
+
+# Security
+zeroize = { workspace = true }
+hex = { workspace = true }
+
+# Async trait
+async-trait = { workspace = true }
+
+# URL
+url = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+
+[features]
+integration = []
+
+[lints]
+workspace = true

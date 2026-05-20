@@ -1,0 +1,199 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# oxide-arb — Production Configuration Example
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# Copy this file to `oxide-arb.toml` and fill in REAL values.
+# All sensitive fields should be set via environment variables instead:
+#
+#   OXIDE_ARB__KEYS__PRIVATE_KEY=0x...
+#   OXIDE_ARB__KEYS__POLYMARKET_API_KEY=...
+#   OXIDE_ARB__KEYS__POLYMARKET_API_SECRET=...
+#   OXIDE_ARB__KEYS__POLYMARKET_PASSPHRASE=...
+#   OXIDE_ARB__DB__POSTGRES__PASSWORD=...
+#   OXIDE_ARB__ANALYTICS__CLICKHOUSE_PASSWORD=...
+#   OXIDE_ARB__NOTIFICATION__TELEGRAM__BOT_TOKEN=...
+#
+# DO NOT commit real secrets to version control.
+
+# ── Polymarket Platform ───────────────────────────────────────────────────────
+
+[polymarket]
+clob_base_url = "https://clob.polymarket.com"
+clob_ws_url = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+chain_id = 137
+
+[polymarket.fees]
+exponent = "1"
+unknown_category_rate = "0.05"
+
+[polymarket.fees.category_rates]
+geopolitics = "0"
+sports = "0.03"
+crypto = "0.072"
+finance = "0.04"
+politics = "0.04"
+tech = "0.04"
+economics = "0.05"
+culture = "0.05"
+weather = "0.05"
+other = "0.05"
+
+[polymarket.onchain]
+rpc_url = "REPLACE_WITH_YOUR_POLYGON_RPC_URL"
+rpc_timeout_ms = 10000
+
+# ── Market Data Pipeline ──────────────────────────────────────────────────────
+
+[market_data]
+staleness_fresh_ms = 2000
+staleness_acceptable_ms = 5000
+staleness_stale_ms = 15000
+staleness_expired_ms = 30000
+
+[market_data.websocket]
+reconnect_delay_ms = 1000
+max_reconnect_delay_ms = 30000
+ping_interval_secs = 5
+max_subscriptions_per_connection = 100
+
+[market_data.gamma]
+base_url = "https://gamma-api.polymarket.com"
+poll_interval_secs = 300
+page_size = 100
+
+# ── Execution ─────────────────────────────────────────────────────────────────
+
+[execution]
+execution_mode = "live"
+min_profit_margin_usd = "0.50"
+
+[execution.timeout]
+max_validation_time_ms = 500
+max_validation_slippage_bps = "50"
+dispatcher_timeout_ms = 30000
+trade_confirm_timeout_secs = 60
+trade_confirm_poll_interval_secs = 2
+
+# ── Position Sizing ──────────────────────────────────────────────────────────
+
+[sizing]
+kelly_fraction = "0.25"
+bankroll_usd = "5000"
+min_trade_usd = "5"
+max_single_trade_usd = "250"
+
+[sizing.kelly]
+max_kelly = "0.25"
+min_edge_bps = "200"
+
+[sizing.drawdown]
+max_drawdown_pct = "10"
+drawdown_reduction_factor = "0.5"
+
+# ── Risk Management ──────────────────────────────────────────────────────────
+
+[risk]
+min_profit_usd = "0.50"
+max_consecutive_misses = 3
+max_hourly_loss_usd = "100"
+base_cooldown_secs = 900
+cooldown_multiplier = "2.0"
+max_cooldown_secs = 7200
+max_daily_loss_usd = "250"
+max_single_loss_usd = "75"
+max_weekly_loss_usd = "500"
+daily_budget_usd = "500"
+ws_disconnect_threshold_secs = 30
+min_balance_usd = "200"
+market_miss_blacklist_count = 3
+market_miss_blacklist_duration_secs = 3600
+max_total_exposure_usd = "10000"
+reserve_balance_usd = "2000"
+max_open_positions = 5
+max_single_market_exposure_usd = "1000"
+max_single_bet_usd = "250"
+stop_loss_pct = "30"
+
+[risk.circuit_breaker]
+enabled = true
+consecutive_failure_threshold = 5
+open_wait_secs = 60
+max_open_wait_secs = 300
+
+# ── Keys / Credentials ───────────────────────────────────────────────────────
+
+[keys]
+source = "env"
+# All secrets via environment variables — DO NOT put values here.
+
+# ── Observability ────────────────────────────────────────────────────────────
+
+[observability]
+log_level = "info"
+log_json = true
+
+[observability.metrics]
+enabled = true
+port = 9090
+
+[observability.alerts]
+enabled = true
+cooldown_secs = 300
+
+# ── Database ─────────────────────────────────────────────────────────────────
+
+[db.postgres]
+host = "REPLACE_WITH_PG_HOST"
+port = 5432
+user = "oxide"
+password = ""
+database = "oxide_arb"
+schema = "public"
+max_connections = 20
+min_connections = 5
+connect_timeout_secs = 10
+idle_timeout_secs = 300
+
+# ── Analytics (ClickHouse) ───────────────────────────────────────────────────
+
+[analytics]
+clickhouse_url = "http://REPLACE_WITH_CH_HOST:8123"
+clickhouse_database = "oxide_arb"
+clickhouse_user = "default"
+clickhouse_password = ""
+flush_interval_secs = 5
+batch_size = 5000
+
+# ── Cache ────────────────────────────────────────────────────────────────────
+
+[cache.redis]
+url = "redis://REPLACE_WITH_REDIS_HOST:6379"
+pool_size = 16
+timeout_ms = 500
+
+[cache.moka]
+max_capacity = 50000
+time_to_live_secs = 300
+time_to_idle_secs = 120
+
+# ── Treasury ─────────────────────────────────────────────────────────────────
+
+[treasury]
+target_balance_usd = "5000"
+refill_threshold_usd = "2000"
+sweep_threshold_usd = "8000"
+
+[treasury.hot_wallet]
+address = "REPLACE_WITH_YOUR_WALLET_ADDRESS"
+balance_poll_interval_secs = 30
+
+# ── Notification ─────────────────────────────────────────────────────────────
+
+[notification.telegram]
+enabled = true
+bot_token = ""
+chat_id = "REPLACE_WITH_CHAT_ID"
+
+[notification.webhook]
+enabled = false
+url = ""

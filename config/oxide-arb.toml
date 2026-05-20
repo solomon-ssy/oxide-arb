@@ -1,0 +1,221 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# oxide-arb — Development Configuration
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# All values shown are the compiled-in defaults. This file is optional:
+# if absent, all defaults apply. Override any field with OXIDE_ARB__* env vars.
+#
+# Naming: single-strategy (endgame) + single-platform (polymarket). See ADR-001.
+
+# ── Polymarket Platform ───────────────────────────────────────────────────────
+
+[polymarket]
+clob_base_url = "https://clob.polymarket.com"
+clob_ws_url = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+chain_id = 137
+
+[polymarket.onchain]
+rpc_url = "https://polygon-rpc.com"
+rpc_timeout_ms = 10000
+
+# Per-category feeRate (official 2026-04-04). Override when PM updates docs.
+# Exponent is always 1 per https://docs.polymarket.com/trading/fees
+[polymarket.fees]
+exponent = "1"
+unknown_category_rate = "0.05"
+
+[polymarket.fees.category_rates]
+geopolitics = "0"
+sports = "0.03"
+crypto = "0.072"
+finance = "0.04"
+politics = "0.04"
+tech = "0.04"
+economics = "0.05"
+culture = "0.05"
+weather = "0.05"
+other = "0.05"
+
+# ── Market Data Pipeline ──────────────────────────────────────────────────────
+
+[market_data]
+staleness_fresh_ms = 2000
+staleness_acceptable_ms = 5000
+staleness_stale_ms = 15000
+staleness_expired_ms = 30000
+
+[market_data.websocket]
+reconnect_delay_ms = 1000
+max_reconnect_delay_ms = 30000
+ping_interval_secs = 30
+max_subscriptions_per_connection = 100
+
+[market_data.gamma]
+base_url = "https://gamma-api.polymarket.com"
+poll_interval_secs = 300
+page_size = 100
+
+# ── Opportunity Detection ─────────────────────────────────────────────────────
+
+[detection]
+fallback_scan_interval_secs = 5
+min_profit_threshold_usd = "0.50"
+budget_targets_usd = ["5", "10", "25", "50", "100"]
+detection_warmup_secs = 90
+dedup_coalesce_window_ms = 300
+fallback_scan_concurrency = 32
+
+[detection.endgame]
+enabled = true
+settlement_window_hours = 24
+high_threshold = "0.95"
+low_threshold = "0.05"
+min_convergence_duration_secs = 300
+min_profit_per_share = "0.005"
+max_investment_usd = "500"
+max_convergence_age_secs = 7200
+
+[detection.calibration]
+min_sample_size = 30
+refresh_interval_secs = 3600
+
+# ── Execution ─────────────────────────────────────────────────────────────────
+
+[execution]
+execution_mode = "dry_run"
+min_profit_margin_usd = "0.50"
+
+[execution.timeout]
+max_validation_time_ms = 500
+max_validation_slippage_bps = "50"
+dispatcher_timeout_ms = 30000
+trade_confirm_timeout_secs = 60
+trade_confirm_poll_interval_secs = 2
+
+# ── Position Sizing (Quarter-Kelly) ──────────────────────────────────────────
+
+[sizing]
+kelly_fraction = "0.25"
+bankroll_usd = "1000"
+min_trade_usd = "1"
+max_single_trade_usd = "100"
+
+[sizing.kelly]
+max_kelly = "0.25"
+min_edge_bps = "200"
+
+[sizing.drawdown]
+max_drawdown_pct = "10"
+drawdown_reduction_factor = "0.5"
+
+# ── Risk Management ──────────────────────────────────────────────────────────
+
+[risk]
+min_profit_usd = "0.50"
+max_consecutive_misses = 3
+max_hourly_loss_usd = "30"
+base_cooldown_secs = 900
+cooldown_multiplier = "2.0"
+max_cooldown_secs = 7200
+max_daily_loss_usd = "75"
+max_single_loss_usd = "30"
+max_weekly_loss_usd = "120"
+daily_budget_usd = "50"
+ws_disconnect_threshold_secs = 30
+min_balance_usd = "50"
+market_miss_blacklist_count = 3
+market_miss_blacklist_duration_secs = 3600
+max_total_exposure_usd = "5000"
+reserve_balance_usd = "1000"
+max_open_positions = 3
+max_single_market_exposure_usd = "500"
+max_single_bet_usd = "25"
+stop_loss_pct = "30"
+
+[risk.circuit_breaker]
+enabled = true
+consecutive_failure_threshold = 5
+open_wait_secs = 60
+max_open_wait_secs = 300
+
+# ── Keys / Credentials ───────────────────────────────────────────────────────
+
+[keys]
+source = "env"
+# Credentials loaded from environment variables:
+#   OXIDE_ARB__KEYS__PRIVATE_KEY
+#   OXIDE_ARB__KEYS__POLYMARKET_API_KEY
+#   OXIDE_ARB__KEYS__POLYMARKET_API_SECRET
+#   OXIDE_ARB__KEYS__POLYMARKET_PASSPHRASE
+
+# ── Observability ────────────────────────────────────────────────────────────
+
+[observability]
+log_level = "info"
+log_json = false
+
+[observability.metrics]
+enabled = true
+port = 9090
+
+[observability.alerts]
+enabled = false
+cooldown_secs = 300
+
+# ── Database ─────────────────────────────────────────────────────────────────
+
+[db.postgres]
+host = "localhost"
+port = 5432
+user = "oxide"
+password = ""
+database = "oxide_arb"
+schema = "public"
+max_connections = 10
+min_connections = 2
+connect_timeout_secs = 10
+idle_timeout_secs = 300
+
+# ── Analytics (ClickHouse) ───────────────────────────────────────────────────
+
+[analytics]
+clickhouse_url = "http://localhost:8123"
+clickhouse_database = "oxide_arb"
+clickhouse_user = "default"
+clickhouse_password = ""
+flush_interval_secs = 10
+batch_size = 1000
+
+# ── Cache ────────────────────────────────────────────────────────────────────
+
+[cache.redis]
+url = "redis://localhost:6379"
+pool_size = 8
+timeout_ms = 1000
+
+[cache.moka]
+max_capacity = 10000
+time_to_live_secs = 300
+time_to_idle_secs = 120
+
+# ── Treasury ─────────────────────────────────────────────────────────────────
+
+[treasury]
+target_balance_usd = "1000"
+refill_threshold_usd = "600"
+sweep_threshold_usd = "1400"
+
+[treasury.hot_wallet]
+address = ""
+balance_poll_interval_secs = 60
+
+# ── Notification ─────────────────────────────────────────────────────────────
+
+[notification.telegram]
+enabled = false
+bot_token = ""
+chat_id = ""
+
+[notification.webhook]
+enabled = false
+url = ""

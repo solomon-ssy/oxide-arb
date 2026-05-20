@@ -3,6 +3,7 @@
 //! This is the sole venue. There is no abstraction layer for "multiple venues" —
 //! oxide-arb operates exclusively on Polymarket (Polygon chain).
 
+use super::fees::FeesConfig;
 use serde::Deserialize;
 use validator::Validate;
 
@@ -17,6 +18,8 @@ pub struct PolymarketConfig {
     pub chain_id: u64,
     #[serde(default)]
     pub onchain: OnchainConfig,
+    #[serde(default)]
+    pub fees: FeesConfig,
 }
 
 impl Default for PolymarketConfig {
@@ -26,6 +29,7 @@ impl Default for PolymarketConfig {
             clob_ws_url: default_clob_ws_url(),
             chain_id: default_chain_id(),
             onchain: OnchainConfig::default(),
+            fees: FeesConfig::default(),
         }
     }
 }

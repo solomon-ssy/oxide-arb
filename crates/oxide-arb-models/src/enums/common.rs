@@ -5,6 +5,7 @@
 //! JSON serialization.
 
 use oxide_arb_macros::IntoActiveValue;
+use polymarket_client_sdk_v2::clob::types::Side as SdkSide;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use sea_orm::{DeriveActiveEnum, EnumIter};
@@ -48,6 +49,39 @@ impl std::fmt::Display for Side {
         match self {
             Self::Buy => write!(f, "BUY"),
             Self::Sell => write!(f, "SELL"),
+        }
+    }
+}
+
+/// Failed to map CLOB SDK [`SdkSide`] into [`Side`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SdkSideConversionError;
+
+impl std::fmt::Display for SdkSideConversionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("unsupported Polymarket CLOB side")
+    }
+}
+
+impl std::error::Error for SdkSideConversionError {}
+
+impl From<Side> for SdkSide {
+    fn from(side: Side) -> Self {
+        match side {
+            Side::Buy => Self::Buy,
+            Side::Sell => Self::Sell,
+        }
+    }
+}
+
+impl TryFrom<SdkSide> for Side {
+    type Error = SdkSideConversionError;
+
+    fn try_from(side: SdkSide) -> Result<Self, Self::Error> {
+        match side {
+            SdkSide::Buy => Ok(Self::Buy),
+            SdkSide::Sell => Ok(Self::Sell),
+            _ => Err(SdkSideConversionError),
         }
     }
 }
@@ -237,6 +271,74 @@ pub enum MarketCategory {
     Crypto,
     #[sea_orm(string_value = "other")]
     Other,
+}
+
+impl std::fmt::Display for MarketCategory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl MarketCategory {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Geopolitics => "geopolitics",
+            Self::Sports => "sports",
+            Self::Politics => "politics",
+            Self::Finance => "finance",
+            Self::Tech => "tech",
+            Self::Culture => "culture",
+            Self::Weather => "weather",
+            Self::Economics => "economics",
+            Self::Crypto => "crypto",
+            Self::Other => "other",
+        }
+    }
+
+    /// Parse Gamma API category labels; unknown labels map to [`Self::Other`].
+    #[must_use]
+    pub fn from_gamma_label(label: Option<&str>) -> Self {
+        label.and_then(|s| s.parse().ok()).unwrap_or(Self::Other)
+    }
+}
+
+impl From<Option<&str>> for MarketCategory {
+    fn from(label: Option<&str>) -> Self {
+        Self::from_gamma_label(label)
+    }
+}
+
+/// Error returned when a category string cannot be parsed (config / DB keys).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MarketCategoryParseError(pub String);
+
+impl std::fmt::Display for MarketCategoryParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "unknown market category: {}", self.0)
+    }
+}
+
+impl std::error::Error for MarketCategoryParseError {}
+
+impl std::str::FromStr for MarketCategory {
+    type Err = MarketCategoryParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim() {
+            "geopolitics" | "Geopolitics" => Ok(Self::Geopolitics),
+            "sports" | "Sports" => Ok(Self::Sports),
+            "politics" | "Politics" => Ok(Self::Politics),
+            "finance" | "Finance" => Ok(Self::Finance),
+            "tech" | "Tech" => Ok(Self::Tech),
+            "culture" | "Culture" | "Pop Culture" => Ok(Self::Culture),
+            "weather" | "Weather" | "Climate" => Ok(Self::Weather),
+            "economics" | "Economics" => Ok(Self::Economics),
+            "crypto" | "Crypto" => Ok(Self::Crypto),
+            "other" | "Other" => Ok(Self::Other),
+            other => Err(MarketCategoryParseError(other.to_owned())),
+        }
+    }
 }
 
 /// Minimum price increment supported by a Polymarket CLOB market.

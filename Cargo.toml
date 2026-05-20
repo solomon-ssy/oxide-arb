@@ -4,6 +4,7 @@ members = [
   "crates/oxide-arb-error",
   "crates/oxide-arb-macros",
   "crates/oxide-arb-models",
+  "crates/oxide-arb-api",
 ]
 
 [workspace.package]
@@ -27,6 +28,8 @@ missing_panics_doc = "allow"
 [workspace.dependencies]
 # Async runtime
 tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+futures-util = "0.3"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -48,11 +51,14 @@ uuid = { version = "1", features = ["v4", "v7", "serde"] }
 # Structured logging
 tracing = "0.1"
 
+# Configuration loading (TOML + env vars)
+config = { version = "0.15", features = ["toml"] }
+
 # Async trait (still needed for dyn trait objects)
 async-trait = "0.1"
 
 # Enum derive macros
-strum = { version = "0.27", features = ["derive"] }
+strum = { version = "0.28", features = ["derive"] }
 
 # Validation
 validator = { version = "0.18", features = ["derive"] }
@@ -75,14 +81,53 @@ quote = "1"
 proc-macro2 = "1"
 darling = "0.23"
 
-# Internal crates
+# ── Phase 1: Data Access Layer Dependencies ──────────────────────────────────
+
+# Polymarket SDK (official v2 — CLOB, WS, Gamma, CTF, signing)
+polymarket_client_sdk_v2 = { version = "0.5", features = [
+  "clob", "ws", "gamma", "ctf", "tracing", "heartbeats",
+] }
+
+# Ethereum / Polygon (aligned with SDK's alloy ^1.6)
+alloy = { version = "1.6", features = [
+  "provider-http", "signer-local", "sol-types", "contract",
+] }
+
+# HTTP client (aligned with SDK's reqwest ^0.13)
+reqwest = { version = "0.13", features = ["json", "rustls"] }
+
+# WebSocket (aligned with SDK)
+tokio-tungstenite = { version = "0.29", features = ["rustls-tls-native-roots"] }
+
+# Concurrency primitives
+arc-swap = "1"
+dashmap = "6"
+parking_lot = "0.12"
+flume = "0.12"
+
+# Retry / backoff
+backoff = { version = "0.4", features = ["tokio"] }
+
+# Rate limiting (GCRA algorithm, lock-free)
+governor = "0.10"
+
+# Security
+zeroize = { version = "1", features = ["derive"] }
+hex = "0.4"
+
+# URL parsing
+url = "2"
+
+# ── Internal Crates ──────────────────────────────────────────────────────────
+
 oxide-arb-error = { path = "crates/oxide-arb-error" }
 oxide-arb-macros = { path = "crates/oxide-arb-macros" }
 oxide-arb-models = { path = "crates/oxide-arb-models" }
+oxide-arb-api = { path = "crates/oxide-arb-api" }
 
-# ═══════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════════
 # Cargo Profile Configuration
-# ═══════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════════
 
 [profile.dev]
 opt-level = 0

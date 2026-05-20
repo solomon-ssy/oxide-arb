@@ -41,11 +41,23 @@ pub enum Relation {
         to = "super::market::Column::ConditionId"
     )]
     Market,
+    #[sea_orm(
+        belongs_to = "super::event::Entity",
+        from = "Column::EventId",
+        to = "super::event::Column::EventId"
+    )]
+    Event,
 }
 
 impl Related<super::market::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::Market.def()
+    }
+}
+
+impl Related<super::event::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::Event.def()
     }
 }
 

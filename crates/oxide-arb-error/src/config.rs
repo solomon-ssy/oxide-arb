@@ -1,0 +1,19 @@
+//! Configuration loading and validation errors.
+
+use thiserror::Error;
+
+/// Errors from configuration loading (TOML/env) and semantic validation.
+#[derive(Debug, Error)]
+pub enum ConfigError {
+    #[error("Configuration load failed: {0}")]
+    Load(String),
+
+    #[error("Configuration validation failed: {0}")]
+    Validation(String),
+
+    #[error("Missing required field: {field} in section [{section}]")]
+    MissingField { section: String, field: String },
+
+    #[error("Invalid value for {field}: {reason}")]
+    InvalidValue { field: String, reason: String },
+}

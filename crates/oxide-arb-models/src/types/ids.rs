@@ -122,8 +122,8 @@ mod tests {
         }
         let mut sorted = ids.clone();
         sorted.sort_by(|a, b| a.as_str().cmp(b.as_str()));
-        let expected: Vec<&str> = ids.iter().map(|i| i.as_str()).collect();
-        let got: Vec<&str> = sorted.iter().map(|i| i.as_str()).collect();
+        let expected: Vec<&str> = ids.iter().map(OpportunityId::as_str).collect();
+        let got: Vec<&str> = sorted.iter().map(OpportunityId::as_str).collect();
         assert_eq!(
             got, expected,
             "UUID v7 must be lexicographically time-ordered"
@@ -165,6 +165,9 @@ mod tests {
         let id = TokenId::new("token-123");
         let cloned = id.clone();
         assert_eq!(id, cloned);
-        assert_eq!(id.as_str() as *const str, cloned.as_str() as *const str);
+        assert_eq!(
+            std::ptr::from_ref::<str>(id.as_str()),
+            std::ptr::from_ref::<str>(cloned.as_str())
+        );
     }
 }
