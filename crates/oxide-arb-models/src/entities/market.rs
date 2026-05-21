@@ -4,10 +4,12 @@ use crate::enums::common::MarketCategory;
 use crate::enums::market::MarketStatus;
 use crate::types::{EventId, MarketId, TokenId};
 use chrono::{DateTime, Utc};
+use oxide_arb_macros::ActiveModelDefaults;
 use sea_orm::entity::prelude::*;
 
-#[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+#[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, ActiveModelDefaults)]
 #[sea_orm(table_name = "market")]
+#[active_defaults(timestamp(created_at), timestamp(updated_at, always))]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub market_id: MarketId,
@@ -62,5 +64,3 @@ impl Related<super::position::Entity> for Entity {
         Relation::Position.def()
     }
 }
-
-impl ActiveModelBehavior for ActiveModel {}

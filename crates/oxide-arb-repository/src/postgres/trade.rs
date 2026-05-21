@@ -65,7 +65,6 @@ async fn do_update_outcome(
     active.latency_ms = Set(update.latency_ms);
     active.error_message = Set(update.error_message);
     active.confirmed_at = Set(update.confirmed_at);
-    active.updated_at = Set(Utc::now());
 
     active.update(db).await.map_err(StorageError::from)
 }

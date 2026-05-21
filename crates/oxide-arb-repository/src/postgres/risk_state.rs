@@ -36,6 +36,7 @@ async fn do_load(db: &impl ConnectionTrait) -> Result<risk_state::Model, Storage
 }
 
 async fn do_save(db: &impl ConnectionTrait, state: ActiveModel) -> Result<(), StorageError> {
+    let state = state.prepare_for_insert();
     Entity::insert(state)
         .on_conflict(
             OnConflict::column(Column::Id)
@@ -74,7 +75,6 @@ async fn do_reset_hourly_window(db: &impl ConnectionTrait) -> Result<(), Storage
         .col_expr(Column::HourlyLossUsd, Expr::value("0"))
         .col_expr(Column::HourlyFeeUsd, Expr::value("0"))
         .col_expr(Column::HourlyWindowStart, Expr::value(Utc::now()))
-        .col_expr(Column::UpdatedAt, Expr::value(Utc::now()))
         .filter(Column::Id.eq(1))
         .exec(db)
         .await
@@ -91,7 +91,6 @@ async fn do_reset_daily_window(db: &impl ConnectionTrait) -> Result<(), StorageE
             Column::DailyWindowStart,
             Expr::value(Utc::now().date_naive()),
         )
-        .col_expr(Column::UpdatedAt, Expr::value(Utc::now()))
         .filter(Column::Id.eq(1))
         .exec(db)
         .await
@@ -106,7 +105,6 @@ async fn do_reset_weekly_window(db: &impl ConnectionTrait) -> Result<(), Storage
             Column::WeeklyWindowStart,
             Expr::value(Utc::now().date_naive()),
         )
-        .col_expr(Column::UpdatedAt, Expr::value(Utc::now()))
         .filter(Column::Id.eq(1))
         .exec(db)
         .await

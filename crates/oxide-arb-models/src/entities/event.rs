@@ -3,10 +3,12 @@
 use crate::enums::common::MarketCategory;
 use crate::types::EventId;
 use chrono::{DateTime, Utc};
+use oxide_arb_macros::ActiveModelDefaults;
 use sea_orm::entity::prelude::*;
 
-#[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+#[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, ActiveModelDefaults)]
 #[sea_orm(table_name = "event")]
+#[active_defaults(timestamp(created_at), timestamp(updated_at, always))]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub event_id: EventId,
@@ -44,5 +46,3 @@ impl Related<super::trade::Entity> for Entity {
         Relation::Trade.def()
     }
 }
-
-impl ActiveModelBehavior for ActiveModel {}

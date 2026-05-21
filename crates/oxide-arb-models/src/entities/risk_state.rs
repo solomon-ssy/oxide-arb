@@ -25,7 +25,6 @@ use sea_orm::entity::prelude::*;
     default(weekly_loss_usd, Usd::ZERO),
     default(weekly_window_start, Utc::now().date_naive()),
     timestamp(updated_at, always),
-    on_update(timestamp(updated_at)),
 )]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]

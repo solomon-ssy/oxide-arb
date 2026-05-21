@@ -62,13 +62,15 @@ pub fn derive_into_active_value(input: TokenStream) -> TokenStream {
 /// `ActiveModel::prepare_for_insert()` (for bulk insert paths that bypass hooks)
 /// and `ActiveModelBehavior::before_save` that delegates to it on insert.
 ///
+/// Update-time `updated_at` is NOT handled here — it is owned by a `PostgreSQL`
+/// `BEFORE UPDATE` trigger, which covers all write paths reliably.
+///
 /// # Rules
 ///
 /// - `generate(field, expr)` — set `field` to `expr` when `NotSet` (typically ID generation)
 /// - `default(field, expr)` — set `field` to `expr` when `NotSet`
 /// - `timestamp(field)` — set `field` to `Utc::now()` when `NotSet`
 /// - `timestamp(field, always)` — always set `field` to `Utc::now()` on insert
-/// - `on_update(timestamp(field))` — set `field` to `Utc::now()` on update
 ///
 /// # Example
 ///
@@ -80,7 +82,6 @@ pub fn derive_into_active_value(input: TokenStream) -> TokenStream {
 ///     default(outcome, TradeOutcome::Pending),
 ///     timestamp(created_at),
 ///     timestamp(updated_at, always),
-///     on_update(timestamp(updated_at)),
 /// )]
 /// pub struct Model { /* ... */ }
 /// ```

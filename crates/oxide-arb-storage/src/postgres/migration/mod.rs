@@ -21,7 +21,8 @@ mod m20250601_000009_create_accounting_periods;
 mod m20250601_000010_create_potential_loss_ledger;
 mod m20250601_000012_create_opportunity_lifecycle_outbox;
 mod m20250601_000013_create_resolution_event;
-mod m20250601_000014_bootstrap_trading_state;
+mod m20250601_000014_add_updated_at_triggers;
+mod m20250601_000015_bootstrap_trading_state;
 
 pub struct Migrator;
 
@@ -41,7 +42,8 @@ impl MigratorTrait for Migrator {
             Box::new(m20250601_000010_create_potential_loss_ledger::Migration),
             Box::new(m20250601_000012_create_opportunity_lifecycle_outbox::Migration),
             Box::new(m20250601_000013_create_resolution_event::Migration),
-            Box::new(m20250601_000014_bootstrap_trading_state::Migration),
+            Box::new(m20250601_000014_add_updated_at_triggers::Migration),
+            Box::new(m20250601_000015_bootstrap_trading_state::Migration),
         ]
     }
 }

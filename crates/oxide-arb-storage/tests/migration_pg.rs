@@ -1,5 +1,6 @@
 //! `PostgreSQL` migration integration tests (requires Docker).
 
+use chrono::Utc;
 use oxide_arb_models::config::PostgresConfig;
 use oxide_arb_models::entities::runtime_config::RuntimeConfigKey;
 use oxide_arb_models::entities::{risk_state, runtime_config};
@@ -175,5 +176,83 @@ async fn runtime_config_no_clobber() {
     assert_eq!(
         row.value, custom_value,
         "operator-modified value must survive re-migration"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn updated_at_trigger_fires_on_update() {
+    let (pool, _container) = setup_pool().await;
+    let db = pool.connection();
+
+    Migrator::up(db, None).await.expect("Migration up failed");
+
+    // Record the bootstrap row's updated_at
+    let before = risk_state::Entity::find_by_id(1)
+        .one(db)
+        .await
+        .expect("query")
+        .expect("row");
+    let old_updated_at = before.updated_at;
+
+    // Sleep briefly to ensure timestamp differs
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // Update a column WITHOUT manually setting updated_at
+    db.execute(sea_orm::Statement::from_sql_and_values(
+        db.get_database_backend(),
+        "UPDATE risk_engine_state SET is_halted = $1 WHERE id = $2",
+        [true.into(), 1_i32.into()],
+    ))
+    .await
+    .expect("raw UPDATE");
+
+    let after = risk_state::Entity::find_by_id(1)
+        .one(db)
+        .await
+        .expect("query")
+        .expect("row");
+
+    assert!(
+        after.updated_at > old_updated_at,
+        "trigger must auto-refresh updated_at on UPDATE \
+         (before={old_updated_at}, after={})",
+        after.updated_at
+    );
+    assert!(after.is_halted, "the actual column should have changed too");
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn db_defaults_fill_notset_timestamps_on_insert() {
+    let (pool, _container) = setup_pool().await;
+    let db = pool.connection();
+
+    Migrator::up(db, None).await.expect("Migration up failed");
+
+    let before_insert = Utc::now();
+
+    // Insert a runtime_config row with updated_at deliberately omitted (DB default).
+    db.execute(sea_orm::Statement::from_sql_and_values(
+        db.get_database_backend(),
+        "INSERT INTO runtime_config (key, value, updated_by) VALUES ($1, $2, $3)",
+        [
+            "test_key_defaults".into(),
+            serde_json::json!(42).into(),
+            "test".into(),
+        ],
+    ))
+    .await
+    .expect("raw INSERT");
+
+    let row = runtime_config::Entity::find_by_id("test_key_defaults".to_owned())
+        .one(db)
+        .await
+        .expect("query")
+        .expect("row");
+
+    assert!(
+        row.updated_at >= before_insert,
+        "DB column default must fill updated_at on INSERT"
     );
 }

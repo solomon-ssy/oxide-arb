@@ -14,8 +14,7 @@ use sea_orm::entity::prelude::*;
     generate(trade_id, TradeId::generate()),
     default(outcome, TradeOutcome::Pending),
     timestamp(created_at),
-    timestamp(updated_at, always),
-    on_update(timestamp(updated_at))
+    timestamp(updated_at, always)
 )]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]

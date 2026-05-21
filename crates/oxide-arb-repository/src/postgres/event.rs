@@ -64,7 +64,7 @@ async fn do_insert(
     db: &impl ConnectionTrait,
     model: ActiveModel,
 ) -> Result<event::Model, StorageError> {
-    Entity::insert(model)
+    Entity::insert(model.prepare_for_insert())
         .exec_with_returning(db)
         .await
         .map_err(StorageError::from)
@@ -78,6 +78,10 @@ async fn do_insert_batch(
         return Ok(0);
     }
     let count = models.len() as u64;
+    let models: Vec<ActiveModel> = models
+        .into_iter()
+        .map(ActiveModel::prepare_for_insert)
+        .collect();
     Entity::insert_many(models)
         .exec(db)
         .await
