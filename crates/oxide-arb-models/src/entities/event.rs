@@ -1,5 +1,6 @@
 //! `events` table entity.
 
+use crate::enums::common::MarketCategory;
 use crate::types::EventId;
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
@@ -13,7 +14,13 @@ pub struct Model {
     pub title: String,
     #[sea_orm(column_type = "Text")]
     pub slug: String,
+    pub category: MarketCategory,
+    #[sea_orm(column_type = "Text")]
+    pub status: String,
     pub neg_risk: bool,
+    pub end_date: Option<DateTime<Utc>>,
+    #[sea_orm(column_type = "Text", nullable)]
+    pub raw_gamma: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

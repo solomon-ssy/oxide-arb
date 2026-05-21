@@ -3,11 +3,18 @@ use sea_orm::DeriveIden;
 #[derive(DeriveIden)]
 pub enum Position {
     Table,
+    PositionId,
     MarketId,
     TokenId,
     Side,
-    Size,
+    Shares,
     AvgEntryPrice,
-    CostBasis,
-    UpdatedAt,
+    TotalCostUsd,
+    TotalFeesUsd,
+    UnrealizedPnl,
+    RealizedPnl,
+    Status,
+    OpenedAt,
+    ClosedAt,
+    SettledAt,
 }

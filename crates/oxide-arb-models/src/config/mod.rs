@@ -88,9 +88,9 @@ impl Settings {
 
         let inner: Inner = builder
             .build()
-            .map_err(|e| ConfigError::Load(e.to_string()))?
+            .map_err(ConfigError::Load)?
             .try_deserialize()
-            .map_err(|e| ConfigError::Load(e.to_string()))?;
+            .map_err(ConfigError::Load)?;
 
         run_common_validation(&inner)?;
 

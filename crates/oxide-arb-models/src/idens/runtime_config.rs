@@ -5,5 +5,7 @@ pub enum RuntimeConfig {
     Table,
     Key,
     Value,
+    Description,
+    UpdatedBy,
     UpdatedAt,
 }

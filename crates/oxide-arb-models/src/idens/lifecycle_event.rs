@@ -4,9 +4,9 @@ use sea_orm::DeriveIden;
 pub enum LifecycleEvent {
     Table,
     Id,
-    OpportunityId,
     Phase,
-    Recorder,
-    Detail,
+    Stage,
+    Message,
+    Metadata,
     CreatedAt,
 }

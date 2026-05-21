@@ -1,23 +1,32 @@
 //! `markets` table entity.
 
 use crate::enums::common::MarketCategory;
-use crate::types::{EventId, MarketId};
+use crate::enums::market::MarketStatus;
+use crate::types::{EventId, MarketId, TokenId};
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "market")]
 pub struct Model {
-    #[sea_orm(primary_key, auto_increment = false, column_name = "condition_id")]
-    pub condition_id: MarketId,
+    #[sea_orm(primary_key, auto_increment = false)]
+    pub market_id: MarketId,
     pub event_id: EventId,
     #[sea_orm(column_type = "Text")]
     pub question: String,
     #[sea_orm(column_type = "Text")]
     pub slug: String,
     pub category: MarketCategory,
+    pub status: MarketStatus,
+    #[sea_orm(column_type = "Text", nullable)]
+    pub outcome: Option<String>,
+    pub yes_token_id: TokenId,
+    pub no_token_id: TokenId,
+    #[sea_orm(column_type = "Text")]
+    pub tick_size: String,
     pub neg_risk: bool,
-    pub active: bool,
+    pub end_date: Option<DateTime<Utc>>,
+    pub resolved_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

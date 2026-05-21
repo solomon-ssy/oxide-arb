@@ -1,11 +1,8 @@
 //! `endgame_calibration_outcomes` table entity.
-//!
-//! Records individual market resolution outcomes used to update
-//! calibration bucket resolution rates.
 
-use crate::types::MarketId;
+use crate::enums::common::MarketCategory;
+use crate::types::{MarketId, Price};
 use chrono::{DateTime, Utc};
-use rust_decimal::Decimal;
 use sea_orm::entity::prelude::*;
 
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
@@ -14,14 +11,18 @@ pub struct Model {
     #[sea_orm(primary_key)]
     pub id: i64,
     pub market_id: MarketId,
+    pub category: MarketCategory,
     #[sea_orm(column_type = "Text")]
     pub price_zone: String,
     #[sea_orm(column_type = "Text")]
     pub duration_bucket: String,
-    pub prediction_correct: bool,
-    pub settlement_price: Decimal,
-    pub entry_price: Decimal,
-    pub resolved_at: DateTime<Utc>,
+    pub predicted_yes: bool,
+    pub actual_yes: Option<bool>,
+    pub entry_price: Price,
+    #[sea_orm(column_type = "Text")]
+    pub confidence_at_entry: String,
+    pub convergence_secs: i32,
+    pub resolved_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -30,7 +31,7 @@ pub enum Relation {
     #[sea_orm(
         belongs_to = "super::market::Entity",
         from = "Column::MarketId",
-        to = "super::market::Column::ConditionId"
+        to = "super::market::Column::MarketId"
     )]
     Market,
 }

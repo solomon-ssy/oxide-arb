@@ -1582,3 +1582,271 @@ fn bench_risk_pre_trade_check(b: &mut Bencher) {
 | `observability/` (metrics, alerts, reports) | ~500 | ~200 |
 | **小计** | **~4,600** | **~2,500** |
 | **Phase 4 合计** | **~7,200** | **~4,600** |
+
+---
+
+## 补充设计 A：Outbox EventStore + Flusher
+
+> 基于 Migration #012 (`opportunity_lifecycle_event` + `outbox_event` 表) 的上层实现设计。
+
+### A.1 EventStore trait
+
+```rust
+/// 事件持久化接口。在同一个 DB 事务中写入 lifecycle event + outbox row。
+#[async_trait]
+pub trait EventStore: Send + Sync {
+    /// 追加一条生命周期事件，同时写入 outbox。
+    /// 返回持久化后的 event_id。
+    async fn append(
+        &self,
+        txn: &DatabaseTransaction,
+        event: NewLifecycleEvent,
+    ) -> Result<String, StorageError>;
+
+    /// 批量追加（用于回放修正场景）
+    async fn append_batch(
+        &self,
+        txn: &DatabaseTransaction,
+        events: Vec<NewLifecycleEvent>,
+    ) -> Result<Vec<String>, StorageError>;
+
+    /// 获取某个 opportunity 的完整事件流
+    async fn get_lifecycle(
+        &self,
+        opportunity_id: &OpportunityId,
+    ) -> Result<Vec<LifecycleEventModel>, StorageError>;
+}
+
+pub struct NewLifecycleEvent {
+    pub opportunity_id: OpportunityId,
+    pub execution_id: Option<ExecutionId>,
+    pub phase: LifecyclePhase,
+    pub phase_data: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum LifecyclePhase {
+    Detected,
+    Scored,
+    SizingApproved,
+    ExposureReserved,
+    OrderSubmitted,
+    OrderConfirmed,
+    OrderFailed,
+    Settled,
+    Expired,
+    Cancelled,
+}
+```
+
+### A.2 OutboxFlusher
+
+```rust
+/// 后台任务：定期扫描 outbox_event 表中未发布的行，
+/// 转发给内部消费者（metrics, CH writer, alert dispatcher）。
+pub struct OutboxFlusher {
+    db: DatabaseConnection,
+    consumers: Vec<Box<dyn OutboxConsumer>>,
+    poll_interval: Duration,
+    batch_size: usize,
+    max_retries: u32,
+}
+
+#[async_trait]
+pub trait OutboxConsumer: Send + Sync {
+    async fn consume(&self, events: &[OutboxPayload]) -> Result<(), anyhow::Error>;
+}
+
+impl OutboxFlusher {
+    pub async fn run(&self, shutdown: CancellationToken) {
+        // 1. SELECT * FROM outbox_event WHERE published_at IS NULL
+        //    ORDER BY created_at LIMIT batch_size FOR UPDATE SKIP LOCKED
+        // 2. 对每条 event 调用所有 consumers
+        // 3. 成功: UPDATE published_at = NOW()
+        // 4. 失败: UPDATE publish_attempts += 1, last_error = ...
+        // 5. 超过 max_retries: 告警 + 标记 dead-letter (published_at = epoch)
+    }
+}
+```
+
+**关键设计决策**:
+- 使用 `FOR UPDATE SKIP LOCKED` 确保单进程下幂等性，未来多实例也能安全工作
+- Consumers 失败不阻塞其他 consumers（独立错误处理）
+- Dead-letter 策略：超过 max_retries 后设置 `published_at` 为 epoch（1970-01-01）标记已放弃
+
+---
+
+## 补充设计 B：Exposure Reservation（内存方案）
+
+> 单进程部署，不需要分布式锁或 DB 级 reservation。使用 `DashMap` 实现内存级别的快速预留。
+
+### B.1 ExposureReservationManager
+
+```rust
+use dashmap::DashMap;
+use std::sync::Arc;
+
+pub struct ExposureReservationManager {
+    /// reservation_id -> ReservationEntry
+    reservations: DashMap<ReservationId, ReservationEntry>,
+    /// 当前总预留暴露额 (atomic for fast reads)
+    total_reserved: AtomicU64, // 以 cents 存储避免浮点
+    /// 配置上限
+    max_total_exposure_cents: u64,
+}
+
+struct ReservationEntry {
+    market_id: MarketId,
+    token_id: TokenId,
+    amount_cents: u64,
+    created_at: Instant,
+    ttl: Duration,
+}
+
+impl ExposureReservationManager {
+    /// 尝试预留资金。如果超过上限则返回 Err。
+    /// 预留有 TTL，超时后自动释放（通过后台 gc task）。
+    pub fn try_reserve(
+        &self,
+        market_id: &MarketId,
+        token_id: &TokenId,
+        amount_usd: Usd,
+        ttl: Duration,
+    ) -> Result<ReservationId, ReservationError>;
+
+    /// 确认预留（交易成功后释放 reservation，暴露转为 position）
+    pub fn confirm(&self, reservation_id: &ReservationId) -> Result<(), ReservationError>;
+
+    /// 显式释放（交易取消/失败）
+    pub fn release(&self, reservation_id: &ReservationId) -> Result<(), ReservationError>;
+
+    /// 当前总预留额
+    pub fn total_reserved_usd(&self) -> Usd;
+
+    /// 后台 GC：清理过期 reservation
+    pub async fn gc_loop(&self, interval: Duration, shutdown: CancellationToken);
+}
+```
+
+**设计要点**:
+- `DashMap` 提供无锁并发 (sharded lock)
+- TTL 防止 orphan reservations（进程崩溃重启后所有 reservation 自然过期）
+- `total_reserved` 使用 `AtomicU64` 以 cents 单位，读取无锁
+- 集成点：`RiskEngine.pre_trade_check()` 调用 `try_reserve()`
+
+---
+
+## 补充设计 C：LedgerReconciler
+
+> 定期对账：比较 `position` 表 + `potential_loss_ledger` + Polymarket on-chain 余额，
+> 确保系统状态一致。
+
+### C.1 ReconciliationReport
+
+```rust
+pub struct ReconciliationReport {
+    pub checked_at: DateTime<Utc>,
+    pub positions_checked: usize,
+    pub mismatches: Vec<ReconciliationMismatch>,
+    pub total_drift_usd: Usd,
+    pub status: ReconciliationStatus,
+}
+
+pub enum ReconciliationMismatch {
+    SharesMismatch {
+        market_id: MarketId,
+        token_id: TokenId,
+        db_shares: Shares,
+        chain_shares: Shares,
+    },
+    OrphanPosition {
+        position_id: PositionId,
+        market_id: MarketId,
+    },
+    UnrecordedHolding {
+        token_id: TokenId,
+        chain_shares: Shares,
+    },
+    PnlDrift {
+        market_id: MarketId,
+        db_pnl: Usd,
+        computed_pnl: Usd,
+    },
+}
+
+pub enum ReconciliationStatus {
+    Clean,
+    DriftWithinTolerance,
+    DriftExceedsTolerance,
+    Critical,
+}
+```
+
+### C.2 LedgerReconciler
+
+```rust
+pub struct LedgerReconciler {
+    position_repo: Arc<dyn PositionRepository>,
+    polymarket_api: Arc<dyn BalanceQuerier>,
+    alert_dispatcher: Arc<AlertDispatcher>,
+    tolerance_usd: Usd,
+    check_interval: Duration,
+}
+
+impl LedgerReconciler {
+    pub async fn reconcile(&self) -> Result<ReconciliationReport, StorageError> {
+        // 1. 获取所有 open positions from DB
+        // 2. 获取 on-chain token balances via API
+        // 3. 交叉匹配，找出差异
+        // 4. 计算 total drift
+        // 5. 如果超过 tolerance，触发告警
+        // 6. 生成报告
+    }
+
+    pub async fn run_periodic(&self, shutdown: CancellationToken) {
+        // 定期执行 reconcile()
+        // 将报告写入 lifecycle_event 表
+        // Critical 级别触发 circuit breaker
+    }
+}
+```
+
+**集成点**:
+- `CircuitBreaker`: 对账 Critical -> 升级到 Level 3 (HaltNew) 或 Level 4 (Emergency)
+- `AlertDispatcher`: 所有 mismatch 发送通知
+- 调度频率：默认每 5 分钟一次，可通过 `RuntimeConfig` 调整
+
+---
+
+## 补充设计 D：DrawdownManager
+
+```rust
+pub struct DrawdownManager {
+    /// 会计期起始余额
+    period_start_equity: Usd,
+    /// 当前最高水位线
+    high_water_mark: Usd,
+    /// 日内最大回撤阈值（超过则触发熔断）
+    max_intraday_drawdown_pct: f64,
+    /// 滚动周（7日）最大回撤
+    max_weekly_drawdown_pct: f64,
+}
+
+impl DrawdownManager {
+    /// 更新当前权益，检查是否触发回撤保护
+    pub fn update_equity(&mut self, current_equity: Usd) -> DrawdownAction;
+
+    /// 当前回撤百分比
+    pub fn current_drawdown_pct(&self) -> f64;
+
+    /// 重置水位线（新会计期开始）
+    pub fn reset_period(&mut self, new_equity: Usd);
+}
+
+pub enum DrawdownAction {
+    Normal,
+    Warning { pct: f64 },
+    HaltNew { pct: f64 },
+    Emergency { pct: f64 },
+}
+```

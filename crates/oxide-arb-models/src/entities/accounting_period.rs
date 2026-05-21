@@ -1,0 +1,32 @@
+//! `accounting_periods` table entity.
+
+use crate::enums::common::ReportType;
+use crate::types::Usd;
+use chrono::{DateTime, NaiveDate, Utc};
+use sea_orm::entity::prelude::*;
+
+#[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+#[sea_orm(table_name = "accounting_period")]
+pub struct Model {
+    #[sea_orm(primary_key, auto_increment = false, column_type = "Text")]
+    pub period_id: String,
+    pub period_type: ReportType,
+    pub start_date: NaiveDate,
+    pub end_date: NaiveDate,
+    pub realized_pnl: Usd,
+    pub total_fees: Usd,
+    pub trade_count: i32,
+    pub win_count: i32,
+    pub loss_count: i32,
+    pub miss_count: i32,
+    pub max_drawdown: Usd,
+    #[sea_orm(column_type = "Text", nullable)]
+    pub sharpe_ratio: Option<String>,
+    pub finalized: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+pub enum Relation {}
+
+impl ActiveModelBehavior for ActiveModel {}

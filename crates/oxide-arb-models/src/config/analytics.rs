@@ -17,6 +17,21 @@ pub struct AnalyticsConfig {
     pub flush_interval_secs: u64,
     #[serde(default = "default_batch_size")]
     pub batch_size: usize,
+
+    /// Maximum concurrent `ClickHouse` insert operations. Prevents overwhelming
+    /// the server under high tick ingestion rates.
+    #[serde(default = "default_max_concurrent_inserts")]
+    pub max_concurrent_inserts: usize,
+
+    /// Maximum acceptable replication/insert lag in seconds. When the CH server
+    /// reports lag exceeding this value, writes are throttled via exponential
+    /// back-off until lag subsides.
+    #[serde(default = "default_max_lag_secs")]
+    pub max_lag_secs: f64,
+
+    /// Interval (seconds) between lag probes to the `ClickHouse` server.
+    #[serde(default = "default_lag_probe_interval_secs")]
+    pub lag_probe_interval_secs: u64,
 }
 
 impl Default for AnalyticsConfig {
@@ -28,6 +43,9 @@ impl Default for AnalyticsConfig {
             clickhouse_password: String::new(),
             flush_interval_secs: default_flush_interval(),
             batch_size: default_batch_size(),
+            max_concurrent_inserts: default_max_concurrent_inserts(),
+            max_lag_secs: default_max_lag_secs(),
+            lag_probe_interval_secs: default_lag_probe_interval_secs(),
         }
     }
 }
@@ -46,4 +64,13 @@ const fn default_flush_interval() -> u64 {
 }
 const fn default_batch_size() -> usize {
     1000
+}
+const fn default_max_concurrent_inserts() -> usize {
+    4
+}
+const fn default_max_lag_secs() -> f64 {
+    10.0
+}
+const fn default_lag_probe_interval_secs() -> u64 {
+    5
 }

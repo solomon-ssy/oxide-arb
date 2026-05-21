@@ -1,22 +1,37 @@
 //! Market lifecycle enums for the data pipeline.
 
+use oxide_arb_macros::IntoActiveValue;
+use sea_orm::{DeriveActiveEnum, EnumIter};
 use serde::{Deserialize, Serialize};
 
 /// Lifecycle state of a market in the registry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    EnumIter,
+    DeriveActiveEnum,
+    IntoActiveValue,
+)]
+#[sea_orm(rs_type = "String", db_type = "Text")]
 #[serde(rename_all = "snake_case")]
 pub enum MarketStatus {
-    /// Discovered via Gamma but not yet evaluated.
+    #[sea_orm(string_value = "discovered")]
     Discovered,
-    /// Active and eligible for WS subscription.
+    #[sea_orm(string_value = "active")]
     Active,
-    /// Filtered out (insufficient liquidity, too new, etc.).
+    #[sea_orm(string_value = "filtered")]
     Filtered,
-    /// Trading has been paused (manual or auto blacklist).
+    #[sea_orm(string_value = "paused")]
     Paused,
-    /// Market has settled / resolved.
+    #[sea_orm(string_value = "settled")]
     Settled,
-    /// Market is no longer listed on the exchange.
+    #[sea_orm(string_value = "delisted")]
     Delisted,
 }
 

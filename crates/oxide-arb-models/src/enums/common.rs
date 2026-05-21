@@ -163,6 +163,9 @@ impl std::fmt::Display for StalenessLevel {
 #[sea_orm(rs_type = "String", db_type = "Text")]
 #[serde(rename_all = "snake_case")]
 pub enum TradeOutcome {
+    /// Order submitted, awaiting exchange confirmation.
+    #[sea_orm(string_value = "pending")]
+    Pending,
     /// Order filled, position opened, awaiting settlement.
     #[sea_orm(string_value = "success")]
     Success,
@@ -360,6 +363,76 @@ impl TryFrom<Decimal> for TickSize {
 
     fn try_from(d: Decimal) -> Result<Self, TickSizeParseError> {
         Self::from_str(&d.normalize().to_string())
+    }
+}
+
+/// Lifecycle status of a position.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    EnumIter,
+    DeriveActiveEnum,
+    IntoActiveValue,
+)]
+#[sea_orm(rs_type = "String", db_type = "Text")]
+#[serde(rename_all = "snake_case")]
+pub enum PositionStatus {
+    #[sea_orm(string_value = "open")]
+    Open,
+    #[sea_orm(string_value = "closed")]
+    Closed,
+    #[sea_orm(string_value = "settled")]
+    Settled,
+}
+
+impl std::fmt::Display for PositionStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Open => write!(f, "open"),
+            Self::Closed => write!(f, "closed"),
+            Self::Settled => write!(f, "settled"),
+        }
+    }
+}
+
+/// Lifecycle status of a potential-loss ledger entry.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    EnumIter,
+    DeriveActiveEnum,
+    IntoActiveValue,
+)]
+#[sea_orm(rs_type = "String", db_type = "Text")]
+#[serde(rename_all = "snake_case")]
+pub enum LedgerStatus {
+    #[sea_orm(string_value = "active")]
+    Active,
+    #[sea_orm(string_value = "resolved")]
+    Resolved,
+    #[sea_orm(string_value = "expired")]
+    Expired,
+}
+
+impl std::fmt::Display for LedgerStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Active => write!(f, "active"),
+            Self::Resolved => write!(f, "resolved"),
+            Self::Expired => write!(f, "expired"),
+        }
     }
 }
 

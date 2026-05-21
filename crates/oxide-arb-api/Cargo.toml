@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-oxide-arb-error = { workspace = true }
+oxide-arb-error = { workspace = true, features = ["serde"] }
 oxide-arb-models = { workspace = true }
 
 # Polymarket SDK

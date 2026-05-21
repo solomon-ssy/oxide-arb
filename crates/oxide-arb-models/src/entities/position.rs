@@ -1,22 +1,39 @@
 //! `positions` table entity.
 
-use crate::enums::common::Side;
-use crate::types::{MarketId, Price, Shares, TokenId, Usd};
+use crate::enums::common::{PositionStatus, Side};
+use crate::types::{MarketId, PositionId, Price, Shares, TokenId, Usd};
 use chrono::{DateTime, Utc};
+use oxide_arb_macros::ActiveModelDefaults;
 use sea_orm::entity::prelude::*;
 
-#[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+const DEFAULT_UNREALIZED_PNL: Usd = Usd::ZERO;
+const DEFAULT_REALIZED_PNL: Usd = Usd::ZERO;
+
+#[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, ActiveModelDefaults)]
 #[sea_orm(table_name = "position")]
+#[active_defaults(
+    generate(position_id, PositionId::generate()),
+    default(status, PositionStatus::Open),
+    default(unrealized_pnl, DEFAULT_UNREALIZED_PNL),
+    default(realized_pnl, DEFAULT_REALIZED_PNL),
+    timestamp(opened_at)
+)]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
+    pub position_id: PositionId,
     pub market_id: MarketId,
-    #[sea_orm(primary_key, auto_increment = false)]
     pub token_id: TokenId,
     pub side: Side,
-    pub size: Shares,
+    pub shares: Shares,
     pub avg_entry_price: Price,
-    pub cost_basis: Usd,
-    pub updated_at: DateTime<Utc>,
+    pub total_cost_usd: Usd,
+    pub total_fees_usd: Usd,
+    pub unrealized_pnl: Usd,
+    pub realized_pnl: Usd,
+    pub status: PositionStatus,
+    pub opened_at: DateTime<Utc>,
+    pub closed_at: Option<DateTime<Utc>>,
+    pub settled_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -24,7 +41,7 @@ pub enum Relation {
     #[sea_orm(
         belongs_to = "super::market::Entity",
         from = "Column::MarketId",
-        to = "super::market::Column::ConditionId"
+        to = "super::market::Column::MarketId"
     )]
     Market,
 }
@@ -34,5 +51,3 @@ impl Related<super::market::Entity> for Entity {
         Relation::Market.def()
     }
 }
-
-impl ActiveModelBehavior for ActiveModel {}

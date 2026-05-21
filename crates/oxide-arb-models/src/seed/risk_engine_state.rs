@@ -1,0 +1,87 @@
+//! Risk engine singleton seed — inserts the canonical id=1 row.
+
+use crate::entities::risk_state;
+use crate::enums::risk::BreakerStateName;
+use crate::seed::SeedContext;
+use crate::types::Usd;
+use chrono::{DateTime, NaiveDate, Utc};
+use oxide_arb_macros::SeedUnit;
+use sea_orm::{
+    DeriveIntoActiveModel, EntityTrait, IntoActiveModel, QueryTrait, sea_query::OnConflict,
+};
+
+#[derive(SeedUnit)]
+#[seed_unit(
+    id = "trading.risk_engine_state",
+    order = 10,
+    policy = InsertIfAbsent,
+    loader = crate::seed::risk_engine_state::load,
+)]
+pub struct RiskEngineStateSeed;
+
+/// All fields required to bootstrap the risk engine singleton.
+#[derive(Debug, Clone, DeriveIntoActiveModel)]
+#[sea_orm(active_model = "crate::entities::risk_state::ActiveModel")]
+pub struct NewRiskEngineState {
+    pub id: i32,
+    pub breaker_state: BreakerStateName,
+    pub is_halted: bool,
+    pub consecutive_misses: i32,
+    pub cooldown_multiplier: i32,
+    pub total_exposure: Usd,
+    pub hourly_loss_usd: Usd,
+    pub hourly_fee_usd: Usd,
+    pub hourly_window_start: DateTime<Utc>,
+    pub daily_loss_usd: Usd,
+    pub daily_fee_usd: Usd,
+    pub daily_pnl: Usd,
+    pub daily_window_start: NaiveDate,
+    pub weekly_loss_usd: Usd,
+    pub weekly_window_start: NaiveDate,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl Default for NewRiskEngineState {
+    fn default() -> Self {
+        let now = Utc::now();
+        Self {
+            id: 1,
+            breaker_state: BreakerStateName::Active,
+            is_halted: false,
+            consecutive_misses: 0,
+            cooldown_multiplier: 1,
+            total_exposure: Usd::ZERO,
+            hourly_loss_usd: Usd::ZERO,
+            hourly_fee_usd: Usd::ZERO,
+            hourly_window_start: now,
+            daily_loss_usd: Usd::ZERO,
+            daily_fee_usd: Usd::ZERO,
+            daily_pnl: Usd::ZERO,
+            daily_window_start: now.date_naive(),
+            weekly_loss_usd: Usd::ZERO,
+            weekly_window_start: now.date_naive(),
+            updated_at: now,
+        }
+    }
+}
+
+/// Insert the singleton risk engine row.
+///
+/// Uses `ON CONFLICT DO NOTHING` to protect production state from being
+/// overwritten during re-migration.
+pub async fn load(
+    db: &dyn sea_orm::ConnectionTrait,
+    _ctx: &mut SeedContext,
+) -> Result<u64, sea_orm::DbErr> {
+    let am = NewRiskEngineState::default().into_active_model();
+    let backend = db.get_database_backend();
+    let stmt = risk_state::Entity::insert(am)
+        .on_conflict(
+            OnConflict::column(risk_state::Column::Id)
+                .do_nothing()
+                .to_owned(),
+        )
+        .build(backend);
+    let result = db.execute(stmt).await?;
+    Ok(result.rows_affected())
+}

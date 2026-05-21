@@ -1,0 +1,33 @@
+[package]
+name = "oxide-arb-repository"
+description = "Data access layer: repository pattern for SeaORM entities and ClickHouse timeseries"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+oxide-arb-error = { workspace = true, features = ["storage"] }
+oxide-arb-models = { workspace = true }
+oxide-arb-storage = { workspace = true }
+sea-orm = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+clickhouse = { workspace = true }
+uuid = { workspace = true }
+rust_decimal = { workspace = true }
+bitcode = { workspace = true }
+tokio-util = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+rust_decimal = { workspace = true }
+rust_decimal_macros = { workspace = true }
+oxide-arb-storage = { workspace = true, features = ["test-util"] }
+testcontainers = { workspace = true }
+testcontainers-modules = { workspace = true }
+sea-orm = { workspace = true }
+chrono = { workspace = true }
+
+[lints]
+workspace = true

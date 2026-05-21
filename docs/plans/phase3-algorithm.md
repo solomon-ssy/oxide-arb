@@ -1330,3 +1330,205 @@ proptest! {
 | `scorer/` | ~120 | ~150 |
 | `opportunity/pipeline.rs` | ~150 | ~200 |
 | **合计** | **~1,800** | **~2,030** |
+
+---
+
+## 15. 补充设计：老版 oxide-arb-math 关键算法迁移
+
+> 以下组件在老版 `oxide-arb-math` 中存在或隐含需要，在 Endgame 单策略场景下仍然必需。
+> 它们不需要约束求解器，但需要独立设计和实现。
+
+### 15.1 EmissionCooldown（机会发射冷却）
+
+**问题**: 同一市场在短时间内价格持续满足检测阈值，会产生重复机会。
+
+**设计**:
+
+```rust
+pub struct EmissionCooldown {
+    /// market_id -> last_emission_at
+    last_emitted: HashMap<MarketId, Instant>,
+    /// 基础冷却时间
+    base_cooldown: Duration,
+    /// 连续命中时的指数退避乘数上限
+    max_multiplier: f64,
+    /// market_id -> consecutive_hits (未命中时重置)
+    consecutive_hits: HashMap<MarketId, u32>,
+}
+
+impl EmissionCooldown {
+    /// 返回 true 表示该市场当前可以发射新机会
+    pub fn may_emit(&self, market_id: &MarketId) -> bool;
+
+    /// 记录一次发射
+    pub fn record_emission(&mut self, market_id: &MarketId);
+
+    /// 记录一次检测但被冷却抑制
+    pub fn record_suppressed(&mut self, market_id: &MarketId);
+
+    /// 重置该市场冷却（如：价格显著偏离后回归）
+    pub fn reset(&mut self, market_id: &MarketId);
+}
+```
+
+**冷却策略**:
+- `base_cooldown` = 30s (configurable via `RuntimeConfig`)
+- 每次连续命中，实际冷却 = `base_cooldown * min(2^consecutive_hits, max_multiplier)`
+- 市场结算或价格离开 endgame 区间时 reset
+
+### 15.2 StalenessPolicy（数据新鲜度策略）
+
+**问题**: 订单簿数据有延迟或 WS 断连恢复后数据可能过时，需要分级衰减置信度。
+
+**设计**:
+
+```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StalenessLevel {
+    /// < 2s since last update
+    Fresh,
+    /// 2-10s
+    Aging,
+    /// 10-30s
+    Stale,
+    /// > 30s or disconnected
+    Expired,
+}
+
+pub struct StalenessPolicy {
+    pub fresh_threshold_ms: u64,    // default 2000
+    pub aging_threshold_ms: u64,    // default 10000
+    pub stale_threshold_ms: u64,    // default 30000
+}
+
+impl StalenessPolicy {
+    pub fn classify(&self, age_ms: u64) -> StalenessLevel;
+
+    /// 返回 [0.0, 1.0] 的置信度折扣因子
+    pub fn confidence_discount(&self, level: StalenessLevel) -> f64 {
+        match level {
+            StalenessLevel::Fresh => 1.0,
+            StalenessLevel::Aging => 0.7,
+            StalenessLevel::Stale => 0.3,
+            StalenessLevel::Expired => 0.0, // 不可交易
+        }
+    }
+}
+```
+
+### 15.3 UrgencyFactor（紧迫度因子）
+
+**问题**: 距离市场结束时间越近，错过机会的机会成本越高，应提升优先级。
+
+**设计**:
+
+```rust
+pub struct UrgencyFactor;
+
+impl UrgencyFactor {
+    /// 计算紧迫度乘数 [1.0, max_multiplier]
+    /// hours_remaining: 距市场关闭的小时数
+    /// endgame_window_hours: endgame 检测窗口（如 72h）
+    pub fn compute(hours_remaining: f64, endgame_window_hours: f64) -> f64 {
+        // 非线性衰减：越接近截止时间，紧迫度指数上升
+        let progress = 1.0 - (hours_remaining / endgame_window_hours).clamp(0.0, 1.0);
+        // 使用 smoothstep 曲线避免突变
+        let t = progress * progress * (3.0 - 2.0 * progress);
+        1.0 + t * 2.0  // [1.0, 3.0]
+    }
+}
+```
+
+融入 `EndgameScorer`: `final_score = e_pnl * fill_prob * urgency * confidence_discount`
+
+### 15.4 FeeEstimator trait（手续费估计）
+
+**问题**: 不同价格区间、不同订单大小的手续费率不同（maker/taker/promo），需要精确计算净利润。
+
+**设计**:
+
+```rust
+/// 手续费估计 trait，允许不同平台/模式实现
+pub trait FeeEstimator: Send + Sync {
+    /// 估计特定交易的手续费（USD）
+    fn estimate_fee(
+        &self,
+        side: Side,
+        shares: Shares,
+        price: Price,
+        is_maker: bool,
+    ) -> Usd;
+
+    /// 获取当前费率 (bps)
+    fn current_rate_bps(&self, is_maker: bool) -> Bps;
+}
+
+/// Polymarket 手续费实现
+pub struct PolymarketFeeEstimator {
+    maker_rate_bps: Bps,
+    taker_rate_bps: Bps,
+    /// 促销期间费率可能为 0
+    promo_active: bool,
+}
+```
+
+### 15.5 OrderbookWalker + estimate_slippage
+
+**问题**: 大额订单会吃掉多层深度，实际成交均价偏离 BBO。需要模拟 walk book 估算滑点。
+
+**设计**:
+
+```rust
+/// 订单簿层级（从 L2 快照）
+pub struct BookLevel {
+    pub price: Price,
+    pub size: Shares,
+}
+
+pub struct OrderbookWalker;
+
+impl OrderbookWalker {
+    /// 模拟买入 `target_shares` 的成交过程
+    /// 返回: (avg_fill_price, total_cost, levels_consumed)
+    pub fn walk_buy(
+        asks: &[BookLevel],
+        target_shares: Shares,
+    ) -> Option<WalkResult>;
+
+    /// 模拟卖出
+    pub fn walk_sell(
+        bids: &[BookLevel],
+        target_shares: Shares,
+    ) -> Option<WalkResult>;
+}
+
+pub struct WalkResult {
+    pub avg_price: Price,
+    pub total_cost: Usd,
+    pub levels_consumed: usize,
+    pub fully_filled: bool,
+}
+
+/// 高层 API: 估计滑点 (bps)
+pub fn estimate_slippage(
+    book_side: &[BookLevel],
+    target_shares: Shares,
+    reference_price: Price,
+) -> Option<Bps>;
+```
+
+**集成点**:
+- `EndgameScorer` 在计算 E[PnL] 时用 slippage-adjusted price
+- `FillProbabilityEstimator` 用 `levels_consumed / total_levels` 衡量市场冲击
+
+### 15.6 更新后工作量预估
+
+| 新增组件 | 源码 LoC | 测试 LoC |
+|---|---|---|
+| `emission_cooldown.rs` | ~100 | ~120 |
+| `staleness.rs` | ~60 | ~80 |
+| `urgency.rs` | ~40 | ~50 |
+| `fee_estimator/` | ~120 | ~150 |
+| `orderbook_walker.rs` | ~150 | ~200 |
+| **新增合计** | **~470** | **~600** |
+| **Phase 3 总计（含 §14）** | **~2,270** | **~2,630** |

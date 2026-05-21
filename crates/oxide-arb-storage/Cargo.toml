@@ -1,0 +1,45 @@
+[package]
+name = "oxide-arb-storage"
+description = "Database initialization, connection management, schema migrations, and unified cache layer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[features]
+default = []
+test-util = ["dep:testcontainers", "dep:testcontainers-modules"]
+
+[dependencies]
+oxide-arb-error = { workspace = true, features = ["storage"] }
+oxide-arb-models = { workspace = true }
+sea-orm = { workspace = true }
+sea-orm-migration = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+bitcode = { workspace = true }
+prometheus = { workspace = true }
+moka = { workspace = true }
+deadpool-redis = { workspace = true }
+redis = { workspace = true }
+clickhouse = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+rust_decimal = { workspace = true }
+backoff = { workspace = true }
+testcontainers = { workspace = true, optional = true }
+testcontainers-modules = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+rust_decimal = { workspace = true }
+rust_decimal_macros = { workspace = true }
+testcontainers = { workspace = true }
+testcontainers-modules = { workspace = true }
+
+[lints]
+workspace = true

@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-oxide-arb-error = { workspace = true }
+oxide-arb-error = { workspace = true, features = ["config"] }
 oxide-arb-macros = { workspace = true }
 rust_decimal = { workspace = true }
 rust_decimal_macros = { workspace = true }
@@ -15,10 +15,12 @@ chrono = { workspace = true }
 uuid = { workspace = true }
 sea-orm = { workspace = true }
 strum = { workspace = true }
+async-trait = { workspace = true }
 validator = { workspace = true }
 bitcode = { workspace = true }
 tracing = { workspace = true }
 config = { workspace = true }
+clickhouse = { workspace = true }
 
 [lints]
 workspace = true

@@ -74,7 +74,7 @@ pub enum OxideError {
 impl OxideError {
     /// Shorthand config error from a string message (used by Settings loader).
     pub fn config(msg: impl Into<String>) -> Self {
-        Self::Config(config::ConfigError::Load(msg.into()))
+        Self::Config(config::ConfigError::Validation(msg.into()))
     }
 }
 

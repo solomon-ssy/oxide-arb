@@ -5,6 +5,8 @@ members = [
   "crates/oxide-arb-macros",
   "crates/oxide-arb-models",
   "crates/oxide-arb-api",
+  "crates/oxide-arb-storage",
+  "crates/oxide-arb-repository",
 ]
 
 [workspace.package]
@@ -15,6 +17,7 @@ license = "MIT"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
+async_fn_in_trait = "allow"
 
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }
@@ -72,7 +75,12 @@ sea-orm = { version = "1", features = [
   "runtime-tokio-rustls",
   "macros",
   "with-chrono",
+  "with-json",
   "with-rust_decimal",
+] }
+sea-orm-migration = { version = "1", features = [
+  "sqlx-postgres",
+  "runtime-tokio-rustls",
 ] }
 
 # Proc-macro infrastructure
@@ -119,12 +127,33 @@ url = "2"
 # HTTP mocking (integration tests)
 wiremock = "0.6"
 
+# ── Phase 2: Persistence Layer Dependencies ──────────────────────────────────
+
+# Redis connection pool + client
+deadpool-redis = { version = "0.23", features = ["rt_tokio_1"] }
+redis = { version = "1.2", features = ["aio", "tokio-comp"] }
+
+# In-process cache (TinyLFU eviction, async, per-entry TTL)
+moka = { version = "0.12", features = ["future"] }
+
+# ClickHouse typed client (official)
+clickhouse = { version = "0.15", features = ["lz4"] }
+
+# Prometheus metrics
+prometheus = "0.14"
+
+# Test containers (integration tests with real DB)
+testcontainers = "0.27"
+testcontainers-modules = { version = "0.15", features = ["postgres", "redis"] }
+
 # ── Internal Crates ──────────────────────────────────────────────────────────
 
 oxide-arb-error = { path = "crates/oxide-arb-error" }
 oxide-arb-macros = { path = "crates/oxide-arb-macros" }
 oxide-arb-models = { path = "crates/oxide-arb-models" }
 oxide-arb-api = { path = "crates/oxide-arb-api" }
+oxide-arb-storage = { path = "crates/oxide-arb-storage" }
+oxide-arb-repository = { path = "crates/oxide-arb-repository" }
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Cargo Profile Configuration

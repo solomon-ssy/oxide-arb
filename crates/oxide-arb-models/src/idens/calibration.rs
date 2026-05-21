@@ -4,10 +4,13 @@ use sea_orm::DeriveIden;
 pub enum EndgameCalibrationBucket {
     Table,
     Id,
+    Category,
     PriceZone,
     DurationBucket,
-    ResolutionRate,
-    SampleSize,
-    ConfidenceAdjust,
+    TotalCount,
+    CorrectCount,
+    AlphaPrior,
+    BetaPrior,
+    PosteriorMean,
     UpdatedAt,
 }

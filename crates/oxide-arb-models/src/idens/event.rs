@@ -6,7 +6,11 @@ pub enum Event {
     EventId,
     Title,
     Slug,
+    Category,
+    Status,
     NegRisk,
+    EndDate,
+    RawGamma,
     CreatedAt,
     UpdatedAt,
 }

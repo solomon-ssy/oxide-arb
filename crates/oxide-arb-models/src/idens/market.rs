@@ -3,13 +3,19 @@ use sea_orm::DeriveIden;
 #[derive(DeriveIden)]
 pub enum Market {
     Table,
-    ConditionId,
+    MarketId,
     EventId,
     Question,
     Slug,
     Category,
+    Status,
+    Outcome,
+    YesTokenId,
+    NoTokenId,
+    TickSize,
     NegRisk,
-    Active,
+    EndDate,
+    ResolvedAt,
     CreatedAt,
     UpdatedAt,
 }

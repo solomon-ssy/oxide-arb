@@ -24,6 +24,11 @@ pub enum WsError {
     #[error("Ping timeout on shard {shard_id} (no pong in {deadline_ms}ms)")]
     PingTimeout { shard_id: usize, deadline_ms: u64 },
 
+    #[cfg(feature = "serde")]
+    #[error("Message parse error: {0}")]
+    MessageParse(#[from] serde_json::Error),
+
+    #[cfg(not(feature = "serde"))]
     #[error("Message parse error: {0}")]
     MessageParse(String),
 

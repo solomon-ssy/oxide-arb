@@ -5,6 +5,11 @@ use thiserror::Error;
 /// Errors from configuration loading (TOML/env) and semantic validation.
 #[derive(Debug, Error)]
 pub enum ConfigError {
+    #[cfg(feature = "config")]
+    #[error("Configuration load failed: {0}")]
+    Load(#[from] config::ConfigError),
+
+    #[cfg(not(feature = "config"))]
     #[error("Configuration load failed: {0}")]
     Load(String),
 

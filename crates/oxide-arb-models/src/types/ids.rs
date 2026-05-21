@@ -96,6 +96,21 @@ impl OrderId {
     }
 }
 
+/// Unique position lifecycle identifier (UUID v4).
+///
+/// Each open/close/settle cycle for a (market, token, side) triple
+/// generates a new `PositionId`, allowing full history tracking.
+#[derive(TypedId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PositionId(Arc<str>);
+
+impl PositionId {
+    /// Generate a new random position ID.
+    #[must_use]
+    pub fn generate() -> Self {
+        Self(Arc::from(Uuid::new_v4().to_string().as_str()))
+    }
+}
+
 /// Exposure reservation identifier.
 #[derive(TypedId, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ReservationId(Arc<str>);
