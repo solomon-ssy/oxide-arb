@@ -9,6 +9,7 @@
 //!    This decouples domain logic from ORM details and enforces which fields are
 //!    settable at creation vs. update time.
 
+pub mod book;
 pub mod calibration;
 pub mod market;
 pub mod opportunity;
@@ -19,6 +20,7 @@ pub mod risk;
 pub mod system;
 pub mod trade;
 
+pub use book::*;
 pub use calibration::*;
 pub use market::*;
 pub use opportunity::*;

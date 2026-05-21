@@ -1,0 +1,27 @@
+[package]
+name = "oxide-arb-algorithm"
+description = "Endgame strategy detection, resolution calibration, and opportunity scoring"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+oxide-arb-error = { workspace = true }
+oxide-arb-models = { workspace = true }
+
+rust_decimal = { workspace = true }
+rust_decimal_macros = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+uuid = { workspace = true }
+dashmap = { workspace = true }
+moka = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+proptest = "1"
+
+[lints]
+workspace = true

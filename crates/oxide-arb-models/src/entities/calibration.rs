@@ -1,5 +1,6 @@
 //! `endgame_calibration_buckets` table entity.
 
+use crate::domain::calibration::{DurationBucket, PriceZone};
 use crate::enums::common::MarketCategory;
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
@@ -10,10 +11,8 @@ pub struct Model {
     #[sea_orm(primary_key)]
     pub id: i32,
     pub category: MarketCategory,
-    #[sea_orm(column_type = "Text")]
-    pub price_zone: String,
-    #[sea_orm(column_type = "Text")]
-    pub duration_bucket: String,
+    pub price_zone: PriceZone,
+    pub duration_bucket: DurationBucket,
     pub total_count: i32,
     pub correct_count: i32,
     #[sea_orm(column_type = "Text")]

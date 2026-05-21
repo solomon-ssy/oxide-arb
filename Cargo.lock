@@ -3802,6 +3802,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "oxide-arb-algorithm"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "dashmap",
+ "moka",
+ "oxide-arb-error",
+ "oxide-arb-models",
+ "proptest",
+ "rust_decimal",
+ "rust_decimal_macros",
+ "serde",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "oxide-arb-api"
 version = "0.1.0"
 dependencies = [

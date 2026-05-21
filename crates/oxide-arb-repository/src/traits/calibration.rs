@@ -1,17 +1,21 @@
 use oxide_arb_error::storage::StorageError;
-use oxide_arb_models::entities::{calibration, calibration_outcome};
+use oxide_arb_models::{
+    domain::calibration::{DurationBucket, PriceZone},
+    entities::{calibration, calibration_outcome},
+    enums::common::MarketCategory,
+};
 
 pub trait CalibrationRepository: Send + Sync {
     async fn get_bucket(
         &self,
-        category: &str,
-        price_zone: &str,
-        duration_bucket: &str,
+        category: MarketCategory,
+        price_zone: PriceZone,
+        duration_bucket: DurationBucket,
     ) -> Result<Option<calibration::Model>, StorageError>;
 
     async fn get_buckets_by_category(
         &self,
-        category: &str,
+        category: MarketCategory,
     ) -> Result<Vec<calibration::Model>, StorageError>;
 
     async fn get_all_buckets(&self) -> Result<Vec<calibration::Model>, StorageError>;

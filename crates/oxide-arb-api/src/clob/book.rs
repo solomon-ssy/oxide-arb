@@ -1,6 +1,13 @@
 //! Orderbook snapshot types.
+//!
+//! [`BookLevel`] is re-exported from `oxide_arb_models::domain::book` — the
+//! canonical definition shared across the workspace. [`OrderbookSnapshot`]
+//! remains API-specific because it carries wire-format fields (`hash`) that
+//! only the CLOB REST layer cares about.
 
-use oxide_arb_models::types::{Price, Shares, TokenId};
+pub use oxide_arb_models::domain::BookLevel;
+
+use oxide_arb_models::types::TokenId;
 use serde::{Deserialize, Serialize};
 
 /// A full orderbook snapshot from the REST API.
@@ -11,11 +18,4 @@ pub struct OrderbookSnapshot {
     pub asks: Vec<BookLevel>,
     pub hash: String,
     pub timestamp_ms: u64,
-}
-
-/// A single level in the orderbook.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BookLevel {
-    pub price: Price,
-    pub size: Shares,
 }

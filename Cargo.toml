@@ -7,6 +7,7 @@ members = [
   "crates/oxide-arb-api",
   "crates/oxide-arb-storage",
   "crates/oxide-arb-repository",
+  "crates/oxide-arb-algorithm",
 ]
 
 [workspace.package]
@@ -134,7 +135,7 @@ deadpool-redis = { version = "0.23", features = ["rt_tokio_1"] }
 redis = { version = "1.2", features = ["aio", "tokio-comp"] }
 
 # In-process cache (TinyLFU eviction, async, per-entry TTL)
-moka = { version = "0.12", features = ["future"] }
+moka = { version = "0.12", features = ["future", "sync"] }
 
 # ClickHouse typed client (official)
 clickhouse = { version = "0.15", features = ["lz4"] }
@@ -154,6 +155,7 @@ oxide-arb-models = { path = "crates/oxide-arb-models" }
 oxide-arb-api = { path = "crates/oxide-arb-api" }
 oxide-arb-storage = { path = "crates/oxide-arb-storage" }
 oxide-arb-repository = { path = "crates/oxide-arb-repository" }
+oxide-arb-algorithm = { path = "crates/oxide-arb-algorithm" }
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Cargo Profile Configuration

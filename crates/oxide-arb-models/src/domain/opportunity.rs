@@ -27,12 +27,14 @@ pub struct Opportunity {
     pub entry_price: Price,
     pub total_cost: Usd,
     pub total_fees: Usd,
+    /// Raw profit assuming the predicted outcome is correct (payout - cost - fees).
     pub net_profit: Usd,
+    /// Calibration-adjusted expected net profit: `fused_p * payout - cost - fees`.
     pub expected_net_profit: Usd,
     pub edge_bps: Bps,
-    /// Calibration-based resolution probability adjustment.
+    /// Fused calibration probability (output of `ConfidenceFusion`).
     pub resolution_adjust: Decimal,
-    /// Fraction of available book depth consumed by this order.
+    /// Fraction of available book depth consumed by this order (0–100).
     pub depth_used_pct: Decimal,
     pub staleness: StalenessLevel,
     pub category: MarketCategory,
@@ -46,9 +48,9 @@ pub struct Opportunity {
 pub struct EndgameMeta {
     /// Whether we predict YES outcome.
     pub predicted_yes: bool,
-    /// Model confidence (0.0–1.0).
+    /// Fused model confidence (0.0–1.0).
     pub confidence: Decimal,
-    /// Expected seconds until convergence.
+    /// How long the market has been in the convergence zone (seconds).
     pub convergence_duration_secs: u64,
     pub price_zone: PriceZone,
     pub duration_bucket: DurationBucket,
@@ -60,7 +62,9 @@ pub struct EndgameMeta {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum PayoutModel {
     DirectionalSettlement {
+        /// Payout if our prediction is correct: `shares * $1.00`.
         projected_payout_if_correct: Usd,
+        /// Expected payout: `fused_p * projected_payout_if_correct`.
         expected_payout: Usd,
         predicted_side: Side,
     },

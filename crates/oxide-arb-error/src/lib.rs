@@ -7,8 +7,9 @@
 //! # Architecture (ng-gateway pattern)
 //!
 //! ```text
-//! ApiError ──┐
-//! WsError ───┤
+//! AlgoError ───┐
+//! ApiError ────┤
+//! WsError ─────┤
 //! StorageError─┤
 //! SigningError──┼──► OxideError
 //! RpcError ────┤
@@ -16,6 +17,7 @@
 //! TradingError─┘
 //! ```
 
+pub mod algorithm;
 pub mod api;
 pub mod config;
 pub mod rpc;
@@ -35,6 +37,10 @@ pub type OxideResult<T> = Result<T, OxideError>;
 /// enabling ergonomic `?` propagation from any subsystem.
 #[derive(Debug, Error)]
 pub enum OxideError {
+    // ── Algorithm ─────────────────────────────────────────────────────────
+    #[error(transparent)]
+    Algorithm(#[from] algorithm::AlgoError),
+
     // ── API / Network ───────────────────────────────────────────────────
     #[error(transparent)]
     Api(#[from] api::ApiError),

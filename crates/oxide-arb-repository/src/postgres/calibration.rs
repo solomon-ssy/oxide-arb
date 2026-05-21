@@ -1,11 +1,15 @@
 use crate::traits::CalibrationRepository;
 use chrono::Utc;
 use oxide_arb_error::storage::StorageError;
-use oxide_arb_models::entities::calibration::{
-    self, ActiveModel as CalibActiveModel, Column as CalibColumn, Entity as CalibEntity,
-};
-use oxide_arb_models::entities::calibration_outcome::{
-    self, ActiveModel as OutcomeActiveModel, Column as OutcomeColumn, Entity as OutcomeEntity,
+use oxide_arb_models::{
+    domain::calibration::{DurationBucket, PriceZone},
+    entities::calibration::{
+        self, ActiveModel as CalibActiveModel, Column as CalibColumn, Entity as CalibEntity,
+    },
+    entities::calibration_outcome::{
+        self, ActiveModel as OutcomeActiveModel, Column as OutcomeColumn, Entity as OutcomeEntity,
+    },
+    enums::common::MarketCategory,
 };
 use sea_orm::sea_query::Expr;
 #[allow(clippy::wildcard_imports)]
@@ -15,9 +19,9 @@ use sea_orm::*;
 
 async fn get_bucket_q(
     db: &impl ConnectionTrait,
-    category: &str,
-    price_zone: &str,
-    duration_bucket: &str,
+    category: MarketCategory,
+    price_zone: PriceZone,
+    duration_bucket: DurationBucket,
 ) -> Result<Option<calibration::Model>, StorageError> {
     CalibEntity::find()
         .filter(CalibColumn::Category.eq(category))
@@ -30,7 +34,7 @@ async fn get_bucket_q(
 
 async fn get_buckets_by_category_q(
     db: &impl ConnectionTrait,
-    category: &str,
+    category: MarketCategory,
 ) -> Result<Vec<calibration::Model>, StorageError> {
     CalibEntity::find()
         .filter(CalibColumn::Category.eq(category))
@@ -120,16 +124,16 @@ impl PgCalibrationRepository {
 impl CalibrationRepository for PgCalibrationRepository {
     async fn get_bucket(
         &self,
-        category: &str,
-        price_zone: &str,
-        duration_bucket: &str,
+        category: MarketCategory,
+        price_zone: PriceZone,
+        duration_bucket: DurationBucket,
     ) -> Result<Option<calibration::Model>, StorageError> {
         get_bucket_q(&self.db, category, price_zone, duration_bucket).await
     }
 
     async fn get_buckets_by_category(
         &self,
-        category: &str,
+        category: MarketCategory,
     ) -> Result<Vec<calibration::Model>, StorageError> {
         get_buckets_by_category_q(&self.db, category).await
     }
@@ -176,16 +180,16 @@ pub struct PgCalibrationRepositoryTxn<'a> {
 impl CalibrationRepository for PgCalibrationRepositoryTxn<'_> {
     async fn get_bucket(
         &self,
-        category: &str,
-        price_zone: &str,
-        duration_bucket: &str,
+        category: MarketCategory,
+        price_zone: PriceZone,
+        duration_bucket: DurationBucket,
     ) -> Result<Option<calibration::Model>, StorageError> {
         get_bucket_q(self.txn, category, price_zone, duration_bucket).await
     }
 
     async fn get_buckets_by_category(
         &self,
-        category: &str,
+        category: MarketCategory,
     ) -> Result<Vec<calibration::Model>, StorageError> {
         get_buckets_by_category_q(self.txn, category).await
     }

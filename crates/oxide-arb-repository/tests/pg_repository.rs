@@ -4,6 +4,7 @@ mod common;
 
 use chrono::Utc;
 use common::{make_event, make_market, setup_pg};
+use oxide_arb_models::domain::calibration::{DurationBucket, PriceZone};
 use oxide_arb_models::domain::{NewPosition, NewTrade, UpdateTradeOutcome};
 use oxide_arb_models::entities::{
     accounting_period, calibration, calibration_outcome, potential_loss_ledger, risk_state,
@@ -341,8 +342,8 @@ async fn calibration_repository_crud() {
     let cal_repo = PgCalibrationRepository::new(pool.connection().clone());
     let bucket = calibration::ActiveModel {
         category: Set(MarketCategory::Sports),
-        price_zone: Set("Z99".into()),
-        duration_bucket: Set("short".into()),
+        price_zone: Set(PriceZone::Z99),
+        duration_bucket: Set(DurationBucket::Short),
         total_count: Set(10),
         correct_count: Set(9),
         alpha_prior: Set("1.0".into()),
@@ -355,14 +356,21 @@ async fn calibration_repository_crud() {
     let inserted = cal_repo.insert_bucket(bucket).await.unwrap();
     assert_eq!(inserted.total_count, 10);
 
-    let found = cal_repo.get_bucket("sports", "Z99", "short").await.unwrap();
+    let found = cal_repo
+        .get_bucket(
+            MarketCategory::Sports,
+            PriceZone::Z99,
+            DurationBucket::Short,
+        )
+        .await
+        .unwrap();
     assert!(found.is_some());
 
     let outcome = calibration_outcome::ActiveModel {
         market_id: Set(MarketId::new("0xcal-mkt")),
         category: Set(MarketCategory::Sports),
-        price_zone: Set("Z99".into()),
-        duration_bucket: Set("short".into()),
+        price_zone: Set(PriceZone::Z99),
+        duration_bucket: Set(DurationBucket::Short),
         predicted_yes: Set(true),
         actual_yes: Set(None),
         entry_price: Set(Price::from(Decimal::new(99, 2))),
