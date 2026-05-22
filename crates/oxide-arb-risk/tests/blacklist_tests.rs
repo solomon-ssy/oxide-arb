@@ -7,6 +7,7 @@ use oxide_arb_models::domain::blacklist::BlacklistCheckResult;
 use oxide_arb_models::enums::risk::{BlacklistReason, BlacklistScope};
 use oxide_arb_models::types::MarketId;
 use oxide_arb_risk::blacklist::BlacklistManager;
+use oxide_arb_risk::clock::utc_clock;
 use std::time::Duration;
 
 fn test_config() -> RiskConfig {
@@ -24,7 +25,7 @@ fn test_config() -> RiskConfig {
 #[test]
 fn clear_market_passes_check() {
     let config = test_config();
-    let mgr = BlacklistManager::new(&config);
+    let mgr = BlacklistManager::new(&config, utc_clock());
     let market_id = MarketId::new("0xclear_market");
 
     let result = mgr.check(&market_id, BlacklistScope::TradingPath);
@@ -36,7 +37,7 @@ fn clear_market_passes_check() {
 #[test]
 fn blacklisted_market_is_blocked() {
     let config = test_config();
-    let mgr = BlacklistManager::new(&config);
+    let mgr = BlacklistManager::new(&config, utc_clock());
     let market_id = MarketId::new("0xblocked_market");
 
     mgr.add_temporary(
@@ -60,7 +61,7 @@ fn blacklisted_market_is_blocked() {
 #[test]
 fn expired_entry_returns_clear() {
     let config = test_config();
-    let mgr = BlacklistManager::new(&config);
+    let mgr = BlacklistManager::new(&config, utc_clock());
     let market_id = MarketId::new("0xexpired_market");
 
     // Add with very short TTL
@@ -88,7 +89,7 @@ fn expired_entry_returns_clear() {
 #[test]
 fn permanent_entry_never_expires() {
     let config = test_config();
-    let mgr = BlacklistManager::new(&config);
+    let mgr = BlacklistManager::new(&config, utc_clock());
     let market_id = MarketId::new("0xperm_market");
 
     mgr.add_permanent(market_id.clone(), BlacklistReason::Manual);
@@ -103,7 +104,7 @@ fn permanent_entry_never_expires() {
 #[test]
 fn gc_removes_expired_keeps_permanent() {
     let config = test_config();
-    let mgr = BlacklistManager::new(&config);
+    let mgr = BlacklistManager::new(&config, utc_clock());
 
     let perm_market = MarketId::new("0xperm");
     let temp_market = MarketId::new("0xtemp");
@@ -141,7 +142,7 @@ fn gc_removes_expired_keeps_permanent() {
 #[test]
 fn scope_ordering_lower_scope_does_not_block_higher_required() {
     let config = test_config();
-    let mgr = BlacklistManager::new(&config);
+    let mgr = BlacklistManager::new(&config, utc_clock());
     let market_id = MarketId::new("0xscope_test");
 
     // Blacklist at DataPath scope only
@@ -175,7 +176,7 @@ fn auto_blacklist_at_threshold() {
         market_miss_blacklist_duration_secs: 3600,
         ..test_config()
     };
-    let mgr = BlacklistManager::new(&config);
+    let mgr = BlacklistManager::new(&config, utc_clock());
     let market_id = MarketId::new("0xauto_bl");
 
     // Below threshold — no blacklist
@@ -196,7 +197,7 @@ fn auto_blacklist_at_threshold() {
 #[test]
 fn scope_upgrade_on_re_blacklist() {
     let config = test_config();
-    let mgr = BlacklistManager::new(&config);
+    let mgr = BlacklistManager::new(&config, utc_clock());
     let market_id = MarketId::new("0xupgrade");
 
     // First blacklist at TradingPath
@@ -244,7 +245,7 @@ fn permanent_blacklist_from_config_is_loaded() {
         ],
         ..test_config()
     };
-    let mgr = BlacklistManager::new(&config);
+    let mgr = BlacklistManager::new(&config, utc_clock());
 
     let m1 = MarketId::new("0xperm_from_config_1");
     let m2 = MarketId::new("0xperm_from_config_2");

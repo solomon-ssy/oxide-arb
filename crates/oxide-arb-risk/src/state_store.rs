@@ -5,16 +5,18 @@
 
 use crate::accounting::{DailyAccounting, HourlyAccounting, WeeklyAccounting};
 use crate::circuit_breaker::CircuitBreaker;
+use crate::clock::Clock;
 use crate::position::{PositionTracker, PotentialLossLedger};
 use crate::traits::RiskMetrics;
 use crate::types::{PeriodStats, StateVersion};
-use chrono::{Timelike, Utc};
+use chrono::Timelike;
 use oxide_arb_error::{OxideError, OxideResult};
 use oxide_arb_models::config::RiskConfig;
 use oxide_arb_models::domain::blacklist::BlacklistEntry;
 use oxide_arb_models::domain::potential_loss::PotentialLossEntry;
 use oxide_arb_models::domain::risk::RiskEngineSnapshot;
 use oxide_arb_models::types::Usd;
+use std::sync::Arc;
 
 /// Fully recovered state ready to initialize a `RiskEngine`.
 pub struct RecoveredState {
@@ -39,10 +41,12 @@ pub fn recover_state(
     blacklist_entries: Vec<BlacklistEntry>,
     potential_loss_entries: Vec<PotentialLossEntry>,
     metrics: &dyn RiskMetrics,
+    clock: &Arc<dyn Clock>,
 ) -> OxideResult<RecoveredState> {
-    let today = Utc::now().date_naive();
+    let today = clock.today();
 
-    let breaker = CircuitBreaker::from_snapshot(config.circuit_breaker.clone(), snapshot)?;
+    let breaker =
+        CircuitBreaker::from_snapshot(config.circuit_breaker.clone(), Arc::clone(clock), snapshot)?;
 
     let snapshot_date = snapshot.snapshot_at.date_naive();
     let daily = if snapshot_date <= today {
@@ -58,6 +62,7 @@ pub fn recover_state(
             },
             Usd::new(config.daily_budget_usd),
             snapshot.daily_budget_spent,
+            Arc::clone(clock),
         )
     } else {
         return Err(OxideError::Internal(format!(
@@ -72,6 +77,7 @@ pub fn recover_state(
             trade_count: snapshot.weekly_trade_count,
             ..PeriodStats::default()
         },
+        Arc::clone(clock),
     );
 
     let hourly = HourlyAccounting::from_snapshot(
@@ -84,6 +90,7 @@ pub fn recover_state(
             miss_count: snapshot.hourly_miss_count,
             ..PeriodStats::default()
         },
+        Arc::clone(clock),
     );
 
     if snapshot.daily_loss.is_negative() {

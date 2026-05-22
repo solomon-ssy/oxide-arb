@@ -9,6 +9,7 @@ use oxide_arb_models::domain::risk::RiskEngineSnapshot;
 use oxide_arb_models::enums::risk::{BreakerStateName, CircuitBreakerLevel};
 use oxide_arb_models::types::Usd;
 use oxide_arb_risk::circuit_breaker::CircuitBreaker;
+use oxide_arb_risk::clock::utc_clock;
 use oxide_arb_risk::types::BreakerState;
 use rust_decimal_macros::dec;
 
@@ -54,7 +55,7 @@ fn base_snapshot() -> RiskEngineSnapshot {
 
 #[test]
 fn trip_from_closed_transitions_to_open() {
-    let mut cb = CircuitBreaker::new(test_config());
+    let mut cb = CircuitBreaker::new(test_config(), utc_clock());
     assert!(matches!(cb.state(), BreakerState::Closed));
     assert!(cb.allows_trading());
 
@@ -76,7 +77,7 @@ fn tick_past_cooldown_transitions_open_to_half_open() {
         l1_cooldown_secs: 0, // immediate expiry for test
         ..test_config()
     };
-    let mut cb = CircuitBreaker::new(config);
+    let mut cb = CircuitBreaker::new(config, utc_clock());
     cb.trip(CircuitBreakerLevel::Trade, "test".into());
     assert!(!cb.allows_trading());
 
@@ -98,7 +99,7 @@ fn successful_probes_transition_half_open_to_recovered() {
         half_open_probes: 2,
         ..test_config()
     };
-    let mut cb = CircuitBreaker::new(config);
+    let mut cb = CircuitBreaker::new(config, utc_clock());
     cb.trip(CircuitBreakerLevel::Trade, "test".into());
     std::thread::sleep(std::time::Duration::from_millis(10));
     let _ = cb.tick();
@@ -121,7 +122,7 @@ fn failed_probe_transitions_half_open_back_to_open() {
         half_open_probes: 2,
         ..test_config()
     };
-    let mut cb = CircuitBreaker::new(config);
+    let mut cb = CircuitBreaker::new(config, utc_clock());
     cb.trip(CircuitBreakerLevel::Trade, "test".into());
     std::thread::sleep(std::time::Duration::from_millis(10));
     let _ = cb.tick();
@@ -144,7 +145,7 @@ fn tick_past_observation_period_transitions_recovered_to_closed() {
         recovery_observation_secs: 0, // immediate for test
         ..test_config()
     };
-    let mut cb = CircuitBreaker::new(config);
+    let mut cb = CircuitBreaker::new(config, utc_clock());
     cb.trip(CircuitBreakerLevel::Trade, "test".into());
 
     std::thread::sleep(std::time::Duration::from_millis(10));
@@ -162,7 +163,7 @@ fn tick_past_observation_period_transitions_recovered_to_closed() {
 
 #[test]
 fn reset_from_any_state_returns_to_closed() {
-    let mut cb = CircuitBreaker::new(test_config());
+    let mut cb = CircuitBreaker::new(test_config(), utc_clock());
     cb.trip(CircuitBreakerLevel::System, "emergency".into());
     assert!(matches!(cb.state(), BreakerState::Open { .. }));
 
@@ -178,7 +179,7 @@ fn reset_from_any_state_returns_to_closed() {
 #[test]
 fn l2_exponential_cooldown_increases() {
     let config = test_config(); // l2_cooldown_secs = 900
-    let mut cb = CircuitBreaker::new(config);
+    let mut cb = CircuitBreaker::new(config, utc_clock());
 
     // cooldown_for_level is evaluated BEFORE l2_trip_count is incremented.
     // Formula: base * 2^(count.saturating_sub(1)), computed BEFORE ++count.
@@ -236,7 +237,7 @@ fn l2_cooldown_capped_at_max() {
         max_cooldown_secs: 14400,
         ..test_config()
     };
-    let mut cb = CircuitBreaker::new(config);
+    let mut cb = CircuitBreaker::new(config, utc_clock());
 
     // Trip multiple times in succession to accumulate l2_trip_count.
     // Eventually the exponential would exceed max, but cap should apply.
@@ -269,7 +270,7 @@ fn l2_cooldown_capped_at_max() {
 
 #[test]
 fn higher_level_overwrites_lower() {
-    let mut cb = CircuitBreaker::new(test_config());
+    let mut cb = CircuitBreaker::new(test_config(), utc_clock());
     cb.trip(CircuitBreakerLevel::Trade, "L1 trip".into());
 
     if let BreakerState::Open { level, .. } = cb.state() {
@@ -288,7 +289,7 @@ fn higher_level_overwrites_lower() {
 
 #[test]
 fn lower_level_does_not_overwrite_higher() {
-    let mut cb = CircuitBreaker::new(test_config());
+    let mut cb = CircuitBreaker::new(test_config(), utc_clock());
     cb.trip(CircuitBreakerLevel::Daily, "L3 trip".into());
 
     cb.trip(CircuitBreakerLevel::Trade, "L1 attempt".into());
@@ -314,7 +315,7 @@ fn from_snapshot_open_missing_level_returns_error() {
         ..base_snapshot()
     };
 
-    let result = CircuitBreaker::from_snapshot(config, &snapshot);
+    let result = CircuitBreaker::from_snapshot(config, utc_clock(), &snapshot);
     assert!(
         result.is_err(),
         "should fail-closed when Open missing level"
@@ -332,7 +333,7 @@ fn from_snapshot_open_missing_reason_returns_error() {
         ..base_snapshot()
     };
 
-    let result = CircuitBreaker::from_snapshot(config, &snapshot);
+    let result = CircuitBreaker::from_snapshot(config, utc_clock(), &snapshot);
     assert!(
         result.is_err(),
         "should fail-closed when Open missing reason"
@@ -350,7 +351,7 @@ fn from_snapshot_open_missing_cooling_until_returns_error() {
         ..base_snapshot()
     };
 
-    let result = CircuitBreaker::from_snapshot(config, &snapshot);
+    let result = CircuitBreaker::from_snapshot(config, utc_clock(), &snapshot);
     assert!(
         result.is_err(),
         "should fail-closed when Open missing cooling_until"
@@ -362,7 +363,7 @@ fn from_snapshot_closed_restores_successfully() {
     let config = test_config();
     let snapshot = base_snapshot();
 
-    let cb = CircuitBreaker::from_snapshot(config, &snapshot).unwrap();
+    let cb = CircuitBreaker::from_snapshot(config, utc_clock(), &snapshot).unwrap();
     assert!(matches!(cb.state(), BreakerState::Closed));
     assert!(cb.allows_trading());
 }

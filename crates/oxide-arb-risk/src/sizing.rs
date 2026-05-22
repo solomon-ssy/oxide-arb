@@ -122,19 +122,34 @@ impl QuarterKellyCalculator {
     }
 }
 
+/// Multi-constraint position sizer. Stores only the fields it needs
+/// from `RiskConfig` to avoid cloning the entire config.
 pub struct MultiConstraintSizer {
-    config: RiskConfig,
     kelly: QuarterKellyCalculator,
+    max_single_bet_usd: Decimal,
+    max_single_loss_usd: Decimal,
+    max_single_market_exposure_usd: Decimal,
+    max_total_exposure_usd: Decimal,
+    max_weekly_loss_usd: Decimal,
+    reserve_balance_usd: Decimal,
+    min_trade_usd: Decimal,
 }
 
 impl MultiConstraintSizer {
     #[must_use]
-    pub fn new(config: &RiskConfig) -> Self {
+    pub const fn new(config: &RiskConfig) -> Self {
         Self {
-            config: config.clone(),
             kelly: QuarterKellyCalculator::new(config),
+            max_single_bet_usd: config.max_single_bet_usd,
+            max_single_loss_usd: config.max_single_loss_usd,
+            max_single_market_exposure_usd: config.max_single_market_exposure_usd,
+            max_total_exposure_usd: config.max_total_exposure_usd,
+            max_weekly_loss_usd: config.max_weekly_loss_usd,
+            reserve_balance_usd: config.reserve_balance_usd,
+            min_trade_usd: config.min_trade_usd,
         }
     }
+
     #[must_use]
     pub fn size(&self, ctx: &RiskContext, bankroll: Usd, drawdown_factor: Decimal) -> SizeResult {
         let kelly = self.kelly.calculate(
@@ -150,21 +165,21 @@ impl MultiConstraintSizer {
             },
             SizeConstraint {
                 name: "max_single_bet",
-                max_usd: Usd::new(self.config.max_single_bet_usd),
+                max_usd: Usd::new(self.max_single_bet_usd),
             },
             SizeConstraint {
                 name: "max_single_loss",
-                max_usd: Usd::new(self.config.max_single_loss_usd),
+                max_usd: Usd::new(self.max_single_loss_usd),
             },
             SizeConstraint {
                 name: "market_exposure_headroom",
-                max_usd: (Usd::new(self.config.max_single_market_exposure_usd)
+                max_usd: (Usd::new(self.max_single_market_exposure_usd)
                     - ctx.market_exposure_before)
                     .max(Usd::ZERO),
             },
             SizeConstraint {
                 name: "portfolio_exposure_headroom",
-                max_usd: (Usd::new(self.config.max_total_exposure_usd) - ctx.total_exposure_before)
+                max_usd: (Usd::new(self.max_total_exposure_usd) - ctx.total_exposure_before)
                     .max(Usd::ZERO),
             },
             SizeConstraint {
@@ -173,13 +188,12 @@ impl MultiConstraintSizer {
             },
             SizeConstraint {
                 name: "weekly_loss_headroom",
-                max_usd: (Usd::new(self.config.max_weekly_loss_usd) - ctx.weekly_loss)
-                    .max(Usd::ZERO),
+                max_usd: (Usd::new(self.max_weekly_loss_usd) - ctx.weekly_loss).max(Usd::ZERO),
             },
             SizeConstraint {
                 name: "available_balance",
                 max_usd: (ctx.cached_balance
-                    - Usd::new(self.config.reserve_balance_usd)
+                    - Usd::new(self.reserve_balance_usd)
                     - ctx.total_exposure_before)
                     .max(Usd::ZERO),
             },
@@ -196,7 +210,7 @@ impl MultiConstraintSizer {
         let binding = constraints.iter().min_by_key(|c| c.max_usd).unwrap();
         let mut final_usd = binding.max_usd.max(Usd::ZERO);
 
-        if final_usd < Usd::new(self.config.min_trade_usd) {
+        if final_usd < Usd::new(self.min_trade_usd) {
             final_usd = Usd::ZERO;
         }
         let final_usd = Usd::new(final_usd.inner().round_dp(2));

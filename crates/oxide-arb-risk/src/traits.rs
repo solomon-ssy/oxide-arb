@@ -96,6 +96,11 @@ pub trait RiskPersistence: Send + Sync + 'static {
     async fn append_audit_event(&self, event: &RiskAuditEvent) -> OxideResult<()>;
 }
 
+// TODO Phase 4.2 (oxide-arb-core): ReservationManager trait must be defined here
+// to prevent double-allocation of exposure between concurrent opportunities.
+// The trait will cover: reserve() -> ReservationId, confirm(), release(), timeout_gc().
+// See docs/plans/phase4.2-core.md for requirements.
+
 /// Query the authoritative on-chain or exchange-side balance.
 ///
 /// Separated from `RiskMetrics` because it involves actual I/O (API calls

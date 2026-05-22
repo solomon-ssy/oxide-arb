@@ -98,9 +98,11 @@ impl Default for PositionTracker {
 /// Tracks maximum potential loss for positions that have not yet settled.
 ///
 /// The risk engine subtracts `total_potential_loss()` from available capital
-/// to ensure worst-case exposure is always accounted for.
+/// to ensure worst-case exposure is always accounted for. Maintains a running
+/// total for O(1) queries on the hot path.
 pub struct PotentialLossLedger {
     entries: HashMap<String, PotentialLossEntry>,
+    running_total: Usd,
 }
 
 impl PotentialLossLedger {
@@ -108,25 +110,38 @@ impl PotentialLossLedger {
     pub fn new() -> Self {
         Self {
             entries: HashMap::new(),
+            running_total: Usd::ZERO,
         }
     }
 
     /// Bootstrap from a list of entries (e.g. loaded from persistence).
     #[must_use]
     pub fn from_entries(entries: Vec<PotentialLossEntry>) -> Self {
+        let running_total = entries
+            .iter()
+            .filter(|e| e.is_active())
+            .map(|e| e.max_loss)
+            .sum();
         let map = entries
             .into_iter()
             .map(|e| (e.entry_id.clone(), e))
             .collect();
-        Self { entries: map }
+        Self {
+            entries: map,
+            running_total,
+        }
     }
 
     /// Record a new potential-loss entry.
     pub fn record_entry(&mut self, entry: PotentialLossEntry) {
+        if entry.is_active() {
+            self.running_total += entry.max_loss;
+        }
         tracing::info!(
             entry_id = %entry.entry_id,
             market_id = %entry.market_id,
             max_loss = %entry.max_loss,
+            running_total = %self.running_total,
             "potential loss entry recorded"
         );
         self.entries.insert(entry.entry_id.clone(), entry);
@@ -135,20 +150,23 @@ impl PotentialLossLedger {
     /// Mark an entry as resolved (position settled or closed).
     pub fn resolve(&mut self, entry_id: &str) {
         if let Some(entry) = self.entries.get_mut(entry_id) {
+            if entry.is_active() {
+                self.running_total = (self.running_total - entry.max_loss).max(Usd::ZERO);
+            }
             entry.status = LedgerStatus::Resolved;
             entry.resolved_at = Some(Utc::now());
-            tracing::info!(entry_id, "potential loss entry resolved");
+            tracing::info!(
+                entry_id,
+                running_total = %self.running_total,
+                "potential loss entry resolved"
+            );
         }
     }
 
     /// Sum of `max_loss` across all active (unresolved) entries.
     #[must_use]
-    pub fn total_potential_loss(&self) -> Usd {
-        self.entries
-            .values()
-            .filter(|e| e.is_active())
-            .map(|e| e.max_loss)
-            .sum()
+    pub const fn total_potential_loss(&self) -> Usd {
+        self.running_total
     }
 
     #[must_use]

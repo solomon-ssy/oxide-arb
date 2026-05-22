@@ -18,6 +18,7 @@ use oxide_arb_models::types::{
     Bps, EventId, MarketId, OpportunityId, Price, Shares, TokenId, TradeId, Usd,
 };
 use oxide_arb_risk::builder::RiskEngineBuilder;
+use oxide_arb_risk::clock::utc_clock;
 use oxide_arb_risk::engine::RiskEngine;
 use oxide_arb_risk::traits::RiskMetrics;
 use oxide_arb_risk::types::ReportMode;
@@ -203,6 +204,7 @@ async fn build_engine(metrics: &dyn RiskMetrics) -> RiskEngine {
 
     RiskEngineBuilder::new()
         .config(config)
+        .clock(utc_clock())
         .initial_equity(Usd::new(dec!(5000)))
         .build(metrics)
         .await
@@ -218,7 +220,10 @@ async fn healthy_engine_allows_trade() {
 
     let opp = test_opportunity();
     let prob = test_probability();
-    let decision = engine.pre_trade_check(&opp, &prob, &metrics, ReportMode::ShortCircuit);
+    let decision = engine
+        .pre_trade_check(&opp, &prob, &metrics, ReportMode::ShortCircuit)
+        .await
+        .unwrap();
 
     assert!(
         decision.allowed,
@@ -238,7 +243,10 @@ async fn halted_engine_denies_trade() {
 
     let opp = test_opportunity();
     let prob = test_probability();
-    let decision = engine.pre_trade_check(&opp, &prob, &metrics, ReportMode::ShortCircuit);
+    let decision = engine
+        .pre_trade_check(&opp, &prob, &metrics, ReportMode::ShortCircuit)
+        .await
+        .unwrap();
 
     assert!(!decision.allowed);
     assert!(
@@ -268,7 +276,10 @@ async fn tripped_breaker_denies_trade() {
 
     let opp = test_opportunity();
     let prob = test_probability();
-    let decision = engine.pre_trade_check(&opp, &prob, &metrics, ReportMode::ShortCircuit);
+    let decision = engine
+        .pre_trade_check(&opp, &prob, &metrics, ReportMode::ShortCircuit)
+        .await
+        .unwrap();
 
     assert!(!decision.allowed);
     assert!(
@@ -292,7 +303,10 @@ async fn low_balance_denies_trade() {
 
     let opp = test_opportunity();
     let prob = test_probability();
-    let decision = engine.pre_trade_check(&opp, &prob, &metrics, ReportMode::ShortCircuit);
+    let decision = engine
+        .pre_trade_check(&opp, &prob, &metrics, ReportMode::ShortCircuit)
+        .await
+        .unwrap();
 
     assert!(!decision.allowed);
 }
@@ -307,11 +321,14 @@ async fn full_report_runs_all_checks() {
 
     let opp = test_opportunity();
     let prob = test_probability();
-    let decision = engine.pre_trade_check(&opp, &prob, &metrics, ReportMode::FullReport);
+    let decision = engine
+        .pre_trade_check(&opp, &prob, &metrics, ReportMode::FullReport)
+        .await
+        .unwrap();
 
     assert!(!decision.allowed);
     assert!(
-        decision.checks.len() >= 23,
+        decision.checks.len() >= 24,
         "full report should have all checks, got {}",
         decision.checks.len()
     );
@@ -363,6 +380,7 @@ async fn tick_drives_breaker_transitions() {
 
     let engine = RiskEngineBuilder::new()
         .config(config)
+        .clock(utc_clock())
         .initial_equity(Usd::new(dec!(5000)))
         .build(&metrics)
         .await
@@ -380,7 +398,10 @@ async fn tick_drives_breaker_transitions() {
     let mut opp = test_opportunity();
     opp.market_id = MarketId::new("0xother_market");
     let prob = test_probability();
-    let decision = engine.pre_trade_check(&opp, &prob, &metrics, ReportMode::ShortCircuit);
+    let decision = engine
+        .pre_trade_check(&opp, &prob, &metrics, ReportMode::ShortCircuit)
+        .await
+        .unwrap();
     assert!(!decision.allowed, "should deny while breaker is open");
 
     std::thread::sleep(std::time::Duration::from_millis(10));
@@ -390,7 +411,10 @@ async fn tick_drives_breaker_transitions() {
 
     // After tick, breaker is in HalfOpen — allows trading (probe mode)
     let metrics_normal = MockMetrics::default();
-    let decision = engine.pre_trade_check(&opp, &prob, &metrics_normal, ReportMode::ShortCircuit);
+    let decision = engine
+        .pre_trade_check(&opp, &prob, &metrics_normal, ReportMode::ShortCircuit)
+        .await
+        .unwrap();
     assert!(
         decision.allowed,
         "HalfOpen allows probe trades: {:?}",
@@ -413,7 +437,10 @@ async fn resume_clears_halt() {
 
     let opp = test_opportunity();
     let prob = test_probability();
-    let decision = engine.pre_trade_check(&opp, &prob, &metrics, ReportMode::ShortCircuit);
+    let decision = engine
+        .pre_trade_check(&opp, &prob, &metrics, ReportMode::ShortCircuit)
+        .await
+        .unwrap();
     assert!(
         decision.allowed,
         "should allow after resume: {:?}",

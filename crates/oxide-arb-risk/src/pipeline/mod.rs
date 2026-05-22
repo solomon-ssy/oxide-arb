@@ -106,12 +106,12 @@ impl Default for RiskPipeline {
 #[must_use]
 pub fn build_default_pipeline(config: &RiskConfig) -> RiskPipeline {
     use checks::{
-        BlacklistCheck, CircuitBreakerCheck, DailyBudgetCheck, DailyDirectionalBudgetCheck,
-        DailyLossCapCheck, DirectionalConcentrationCheck, DrawdownGuardCheck, DuplicateMarketCheck,
-        ExposurePctCheck, HourlyLossCapCheck, ManualHaltCheck, MarketExposureCheck,
-        MaxDepthUsageCheck, MaxPositionsCheck, MaxSingleBetCheck, MinBalanceCheck, MinDepthCheck,
-        PotentialLossCapCheck, StalenessCheck, TokenBlacklistCheck, TotalExposureCheck,
-        WeeklyLossCapCheck, WsConnectivityCheck,
+        ApiErrorRateCheck, BlacklistCheck, CircuitBreakerCheck, DailyBudgetCheck,
+        DailyDirectionalBudgetCheck, DailyLossCapCheck, DirectionalConcentrationCheck,
+        DrawdownGuardCheck, DuplicateMarketCheck, ExposurePctCheck, HourlyLossCapCheck,
+        ManualHaltCheck, MarketExposureCheck, MaxDepthUsageCheck, MaxPositionsCheck,
+        MaxSingleBetCheck, MinBalanceCheck, MinDepthCheck, PotentialLossCapCheck, StalenessCheck,
+        TokenBlacklistCheck, TotalExposureCheck, WeeklyLossCapCheck, WsConnectivityCheck,
     };
 
     let mut pipeline = RiskPipeline::new();
@@ -141,16 +141,17 @@ pub fn build_default_pipeline(config: &RiskConfig) -> RiskPipeline {
     pipeline.register(Box::new(PotentialLossCapCheck));
     pipeline.register(Box::new(MaxPositionsCheck::new(config)));
 
-    // 18-19: System health
+    // 18-20: System health
     pipeline.register(Box::new(WsConnectivityCheck::new(config)));
+    pipeline.register(Box::new(ApiErrorRateCheck::new(config)));
     pipeline.register(Box::new(MinBalanceCheck::new(config)));
 
-    // 20-22: Endgame-specific
+    // 21-23: Endgame-specific
     pipeline.register(Box::new(DirectionalConcentrationCheck::new(config)));
     pipeline.register(Box::new(DailyDirectionalBudgetCheck::new(config)));
     pipeline.register(Box::new(DuplicateMarketCheck));
 
-    // 23: Drawdown guard
+    // 24: Drawdown guard
     pipeline.register(Box::new(DrawdownGuardCheck));
 
     pipeline

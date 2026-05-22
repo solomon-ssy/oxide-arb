@@ -1,25 +1,29 @@
 //! Daily accounting with automatic period rollover.
 
+use crate::clock::Clock;
 use crate::types::PeriodStats;
-use chrono::{NaiveDate, Utc};
+use chrono::NaiveDate;
 use oxide_arb_models::enums::common::TradeOutcome;
 use oxide_arb_models::types::Usd;
+use std::sync::Arc;
 
 pub struct DailyAccounting {
     window_start: NaiveDate,
     stats: PeriodStats,
     budget_remaining: Usd,
     initial_budget: Usd,
+    clock: Arc<dyn Clock>,
 }
 
 impl DailyAccounting {
     #[must_use]
-    pub fn new(budget: Usd) -> Self {
+    pub fn new(budget: Usd, clock: Arc<dyn Clock>) -> Self {
         Self {
-            window_start: Utc::now().date_naive(),
+            window_start: clock.today(),
             stats: PeriodStats::default(),
             budget_remaining: budget,
             initial_budget: budget,
+            clock,
         }
     }
 
@@ -29,12 +33,14 @@ impl DailyAccounting {
         stats: PeriodStats,
         budget: Usd,
         spent: Usd,
+        clock: Arc<dyn Clock>,
     ) -> Self {
         Self {
             window_start,
             stats,
             budget_remaining: budget - spent,
             initial_budget: budget,
+            clock,
         }
     }
 
@@ -101,7 +107,7 @@ impl DailyAccounting {
     }
 
     pub fn maybe_rollover(&mut self) -> bool {
-        let today = Utc::now().date_naive();
+        let today = self.clock.today();
         if today > self.window_start {
             tracing::info!(
                 previous = %self.window_start,

@@ -157,6 +157,7 @@ pub enum RiskCheckId {
     DailyDirectionalBudget,
     DuplicateMarket,
     DrawdownGuard,
+    ApiErrorRate,
 }
 
 impl fmt::Display for RiskCheckId {

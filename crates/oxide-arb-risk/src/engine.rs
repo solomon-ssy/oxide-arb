@@ -11,6 +11,7 @@ use crate::accounting::{DailyAccounting, HourlyAccounting, WeeklyAccounting};
 use crate::audit::{RiskAuditEvent, RiskDecisionTrace};
 use crate::blacklist::BlacklistManager;
 use crate::circuit_breaker::CircuitBreaker;
+use crate::clock::Clock;
 use crate::context::{BlacklistGate, CircuitBreakerGate, ManualHaltGate, RiskContext};
 use crate::pipeline::RiskPipeline;
 use crate::position::{PositionTracker, PotentialLossLedger};
@@ -18,11 +19,12 @@ use crate::reconciliation::LedgerReconciler;
 use crate::sizing::{DrawdownGuard, MultiConstraintSizer};
 use crate::traits::{RiskMetrics, RiskPersistence};
 use crate::types::{
-    AtomicStateVersion, BreakerState, PostTradeReport, ReportMode, RiskDecision, StateVersion,
+    AtomicStateVersion, BreakerState, PostTradeReport, ReconciliationReport, ReconciliationStatus,
+    ReportMode, RiskDecision, StateVersion,
 };
-use chrono::Utc;
 use oxide_arb_error::OxideResult;
 use oxide_arb_models::config::RiskConfig;
+use oxide_arb_models::domain::BlacklistEntry;
 use oxide_arb_models::domain::blacklist::BlacklistCheckResult;
 use oxide_arb_models::domain::opportunity::Opportunity;
 use oxide_arb_models::domain::potential_loss::PotentialLossEntry;
@@ -55,21 +57,26 @@ pub struct RiskEngine {
     pub(crate) is_halted: AtomicBool,
     pub(crate) halt_reason: RwLock<Option<String>>,
     pub(crate) state_version: AtomicStateVersion,
+    pub(crate) clock: Arc<dyn Clock>,
 }
 
 impl RiskEngine {
-    // ── Pre-trade (hot path, sync) ─────────────────────────────────────
+    // ── Pre-trade (async — sync computation + async audit) ───────────
 
-    #[must_use]
-    pub fn pre_trade_check(
+    /// Evaluate all pre-trade risk checks and compute sizing.
+    ///
+    /// Produces an immutable `RiskDecision` and persists an audit event
+    /// (`TradeAllowed` or `TradeDenied`). If audit persistence fails,
+    /// the engine halts (fail-closed).
+    pub async fn pre_trade_check(
         &self,
         opp: &Opportunity,
         probability: &ProbabilityInput,
         metrics: &dyn RiskMetrics,
         mode: ReportMode,
-    ) -> RiskDecision {
+    ) -> OxideResult<RiskDecision> {
         let eval_start = Instant::now();
-        let now = Utc::now();
+        let now = self.clock.now();
         let version = self.state_version.load();
 
         let ctx = self.build_context(opp, probability, metrics, version);
@@ -84,7 +91,7 @@ impl RiskEngine {
                 )
             });
 
-            return RiskDecision {
+            let decision = RiskDecision {
                 allowed: false,
                 checks: gate_report.results.clone(),
                 denial_reason,
@@ -101,6 +108,14 @@ impl RiskEngine {
                     evaluated_at: now,
                 },
             };
+
+            let audit = RiskAuditEvent::TradeDenied {
+                trace: decision.trace.clone(),
+                opportunity_id: opp.opportunity_id.clone(),
+            };
+            self.persist_audit_event(audit).await?;
+
+            return Ok(decision);
         }
 
         let bankroll = available_bankroll(
@@ -125,7 +140,7 @@ impl RiskEngine {
             ))
         };
 
-        RiskDecision {
+        let decision = RiskDecision {
             allowed,
             checks: gate_report.results.clone(),
             denial_reason,
@@ -141,29 +156,55 @@ impl RiskEngine {
                     .unwrap_or(u64::MAX),
                 evaluated_at: now,
             },
-        }
+        };
+
+        let audit = if allowed {
+            RiskAuditEvent::TradeAllowed {
+                trace: decision.trace.clone(),
+                opportunity_id: opp.opportunity_id.clone(),
+            }
+        } else {
+            RiskAuditEvent::TradeDenied {
+                trace: decision.trace.clone(),
+                opportunity_id: opp.opportunity_id.clone(),
+            }
+        };
+        self.persist_audit_event(audit).await?;
+
+        Ok(decision)
     }
 
     // ── Post-trade (async mutation path) ────────────────────────────────
 
     /// Process a trade result with Fill/Settlement phase separation.
     ///
-    /// - **Fill**: records cost, counts, and potential loss; no realized
-    ///   profit flows into daily/weekly/hourly loss caps.
+    /// - **Fill**: records cost, fees, counts, and potential loss across all
+    ///   accounting windows. No realized profit flows into loss caps.
     /// - **Settlement**: records realized profit, resolves potential loss,
     ///   checks caps and may trip the circuit breaker.
     ///
-    /// After in-memory mutation, persists the snapshot and appends an audit
-    /// event. If persistence fails, the engine halts (fail-closed).
+    /// After in-memory mutation, persists the snapshot, appends an audit
+    /// event, and persists any auto-blacklist entry. If persistence fails,
+    /// the engine halts (fail-closed).
+    #[must_use = "post-trade report contains breaker/blacklist state changes"]
     pub async fn on_trade_result(
         &self,
         phase: TradeAccountingPhase,
         trade: &TradeRecord,
         metrics: &dyn RiskMetrics,
     ) -> OxideResult<PostTradeReport> {
-        let (report, audit_event) = self.apply_trade_result(phase, trade, metrics);
+        let (report, audit_event, auto_bl_entry) = self.apply_trade_result(phase, trade, metrics);
+
         self.persist_and_audit(&report.snapshot, audit_event)
             .await?;
+
+        if let Some(ref entry) = auto_bl_entry {
+            if let Err(e) = self.persistence.save_blacklist_entry(entry).await {
+                self.halt_internal(format!("auto-blacklist persist failed: {e}"));
+                return Err(e);
+            }
+        }
+
         Ok(report)
     }
 
@@ -172,9 +213,10 @@ impl RiskEngine {
         phase: TradeAccountingPhase,
         trade: &TradeRecord,
         metrics: &dyn RiskMetrics,
-    ) -> (PostTradeReport, RiskAuditEvent) {
+    ) -> (PostTradeReport, RiskAuditEvent, Option<BlacklistEntry>) {
         let mut breaker_tripped: Option<CircuitBreakerLevel> = None;
         let mut auto_blacklisted = None;
+        let mut auto_bl_entry = None;
 
         let (daily_rolled, weekly_rolled, hourly_rolled) = match phase {
             TradeAccountingPhase::Fill => self.apply_fill(trade),
@@ -186,8 +228,17 @@ impl RiskEngine {
         };
 
         if let Some(bt) = self.apply_common_checks(trade, metrics) {
-            if breaker_tripped.is_none() {
-                breaker_tripped = Some(bt);
+            breaker_tripped = Some(breaker_tripped.map_or(bt, |existing| existing.max(bt)));
+        }
+
+        if trade.is_miss() {
+            let miss_count = metrics.consecutive_market_misses(&trade.market_id);
+            if let Some(entry) = self
+                .blacklist
+                .maybe_auto_blacklist(&trade.market_id, miss_count)
+            {
+                auto_blacklisted = Some(trade.market_id.clone());
+                auto_bl_entry = Some(entry);
             }
         }
 
@@ -197,20 +248,16 @@ impl RiskEngine {
         let audit_event = RiskAuditEvent::PostTradeUpdate {
             trade_id: trade.trade_id.clone(),
             outcome: trade.status,
+            phase,
             daily_loss_after: snapshot.daily_loss,
             weekly_loss_after: snapshot.weekly_loss,
+            hourly_loss_after: snapshot.hourly_loss,
+            breaker_tripped,
+            auto_blacklisted: auto_blacklisted.clone(),
+            daily_rolled,
+            weekly_rolled,
+            hourly_rolled,
         };
-
-        if trade.is_miss() {
-            let miss_count = metrics.consecutive_market_misses(&trade.market_id);
-            if self
-                .blacklist
-                .maybe_auto_blacklist(&trade.market_id, miss_count)
-                .is_some()
-            {
-                auto_blacklisted = Some(trade.market_id.clone());
-            }
-        }
 
         (
             PostTradeReport {
@@ -222,10 +269,11 @@ impl RiskEngine {
                 auto_blacklisted,
             },
             audit_event,
+            auto_bl_entry,
         )
     }
 
-    /// Fill phase: record cost/counts/potential loss, no realized profit.
+    /// Fill phase: record cost/fees/counts across all windows + potential loss.
     fn apply_fill(&self, trade: &TradeRecord) -> (bool, bool, bool) {
         let daily_rolled = {
             let mut daily = self.daily.write();
@@ -237,6 +285,16 @@ impl RiskEngine {
             )
         };
 
+        let weekly_rolled =
+            self.weekly
+                .write()
+                .record_trade(Usd::ZERO, trade.total_fees_usd, trade.status);
+
+        let hourly_rolled =
+            self.hourly
+                .write()
+                .record_trade(Usd::ZERO, trade.total_fees_usd, trade.status);
+
         if trade.is_success() {
             self.potential_loss
                 .write()
@@ -247,12 +305,12 @@ impl RiskEngine {
                     cost_basis: trade.total_cost_usd,
                     max_loss: trade.total_cost_usd + trade.total_fees_usd,
                     status: LedgerStatus::Active,
-                    created_at: Utc::now(),
+                    created_at: self.clock.now(),
                     resolved_at: None,
                 });
         }
 
-        (daily_rolled, false, false)
+        (daily_rolled, weekly_rolled, hourly_rolled)
     }
 
     /// Settlement phase: realized profit flows into all accounting windows.
@@ -277,9 +335,9 @@ impl RiskEngine {
         (daily_rolled, weekly_rolled, hourly_rolled)
     }
 
-    /// Check all loss caps and trip the breaker if any are breached.
+    /// Check all loss caps and trip the breaker at the highest applicable level.
     fn check_loss_caps(&self) -> Option<CircuitBreakerLevel> {
-        let mut tripped = None;
+        let mut highest: Option<CircuitBreakerLevel> = None;
 
         let daily_loss = self.daily.read().daily_loss();
         if daily_loss.inner() >= self.config.max_daily_loss_usd {
@@ -287,7 +345,7 @@ impl RiskEngine {
             self.circuit_breaker
                 .write()
                 .trip(CircuitBreakerLevel::Daily, reason);
-            tripped = Some(CircuitBreakerLevel::Daily);
+            highest = Some(CircuitBreakerLevel::Daily);
         }
 
         let weekly_loss = self.weekly.read().weekly_loss();
@@ -296,9 +354,9 @@ impl RiskEngine {
             self.circuit_breaker
                 .write()
                 .trip(CircuitBreakerLevel::Daily, reason);
-            if tripped.is_none() {
-                tripped = Some(CircuitBreakerLevel::Daily);
-            }
+            highest = Some(highest.map_or(CircuitBreakerLevel::Daily, |h| {
+                h.max(CircuitBreakerLevel::Daily)
+            }));
         }
 
         let hourly_loss = self.hourly.read().hourly_loss();
@@ -307,12 +365,12 @@ impl RiskEngine {
             self.circuit_breaker
                 .write()
                 .trip(CircuitBreakerLevel::Session, reason);
-            if tripped.is_none() {
-                tripped = Some(CircuitBreakerLevel::Session);
-            }
+            highest = Some(highest.map_or(CircuitBreakerLevel::Session, |h| {
+                h.max(CircuitBreakerLevel::Session)
+            }));
         }
 
-        tripped
+        highest
     }
 
     /// Common checks run on both Fill and Settlement phases.
@@ -358,9 +416,11 @@ impl RiskEngine {
                 self.circuit_breaker
                     .write()
                     .trip(CircuitBreakerLevel::Session, reason);
-                if tripped.is_none() {
-                    tripped = Some(CircuitBreakerLevel::Session);
-                }
+                tripped = Some(
+                    tripped.map_or(CircuitBreakerLevel::Session, |h: CircuitBreakerLevel| {
+                        h.max(CircuitBreakerLevel::Session)
+                    }),
+                );
             }
         }
 
@@ -395,6 +455,46 @@ impl RiskEngine {
         self.position_tracker.write().refresh(metrics);
     }
 
+    // ── Reconciliation ──────────────────────────────────────────────────
+
+    /// Process a reconciliation report: persist, audit, and trip L4
+    /// breaker if drift is critical.
+    pub async fn on_reconciliation_result(
+        &self,
+        report: &ReconciliationReport,
+        metrics: &dyn RiskMetrics,
+    ) -> OxideResult<()> {
+        if let Err(e) = self.persistence.save_reconciliation_report(report).await {
+            self.halt_internal(format!("reconciliation report persist failed: {e}"));
+            return Err(e);
+        }
+
+        let audit = RiskAuditEvent::ReconciliationCompleted {
+            status: report.status,
+            mismatch_count: report.mismatches.len(),
+        };
+        self.persist_audit_event(audit).await?;
+
+        if report.status == ReconciliationStatus::Critical {
+            let reason = format!(
+                "reconciliation critical drift: {} mismatches",
+                report.mismatches.len()
+            );
+            self.circuit_breaker
+                .write()
+                .trip(CircuitBreakerLevel::System, reason);
+            self.state_version.increment();
+
+            let snapshot = self.snapshot(metrics);
+            if let Err(e) = self.persistence.save_snapshot(&snapshot).await {
+                self.halt_internal(format!("reconciliation breaker persist failed: {e}"));
+                return Err(e);
+            }
+        }
+
+        Ok(())
+    }
+
     // ── Operations (async with persistence) ────────────────────────────
 
     #[must_use]
@@ -407,7 +507,6 @@ impl RiskEngine {
         self.halt_internal(reason.clone());
 
         let audit = RiskAuditEvent::EngineHalted { reason };
-        // Best-effort persist — if it fails, engine is already halted
         let _ = self.persistence.append_audit_event(&audit).await;
     }
 
@@ -458,18 +557,19 @@ impl RiskEngine {
         metrics: &dyn RiskMetrics,
     ) -> OxideResult<()> {
         let entry = self.blacklist.add_permanent(market_id, reason);
-        self.state_version.increment();
 
+        if let Err(e) = self.persistence.save_blacklist_entry(&entry).await {
+            self.halt_internal(format!("blacklist persist failed: {e}"));
+            return Err(e);
+        }
+
+        self.state_version.increment();
         let snapshot = self.snapshot(metrics);
         let audit = RiskAuditEvent::BlacklistAdded {
             entry: entry.clone(),
         };
         self.persist_and_audit(&snapshot, audit).await?;
 
-        if let Err(e) = self.persistence.save_blacklist_entry(&entry).await {
-            self.halt_internal(format!("blacklist persist failed: {e}"));
-            return Err(e);
-        }
         Ok(())
     }
 
@@ -481,8 +581,13 @@ impl RiskEngine {
         metrics: &dyn RiskMetrics,
     ) -> OxideResult<()> {
         let _ = self.blacklist.remove(market_id);
-        self.state_version.increment();
 
+        if let Err(e) = self.persistence.remove_blacklist_entry(market_id).await {
+            self.halt_internal(format!("blacklist remove persist failed: {e}"));
+            return Err(e);
+        }
+
+        self.state_version.increment();
         let snapshot = self.snapshot(metrics);
         let audit = RiskAuditEvent::BlacklistRemoved {
             market_id: market_id.clone(),
@@ -490,10 +595,6 @@ impl RiskEngine {
         };
         self.persist_and_audit(&snapshot, audit).await?;
 
-        if let Err(e) = self.persistence.remove_blacklist_entry(market_id).await {
-            self.halt_internal(format!("blacklist remove persist failed: {e}"));
-            return Err(e);
-        }
         Ok(())
     }
 
@@ -564,21 +665,18 @@ impl RiskEngine {
             daily_miss_count: daily.stats().miss_count,
             weekly_trade_count: weekly.stats().trade_count,
             hwm_equity: dg.hwm(),
-            snapshot_at: Utc::now(),
+            snapshot_at: self.clock.now(),
         }
     }
 
     // ── Private ─────────────────────────────────────────────────────────
 
-    /// Sync halt — sets the halted flag without persistence.
-    /// Used when persistence itself has failed (avoid recursion).
     fn halt_internal(&self, reason: String) {
         tracing::error!(%reason, "risk engine halted (fail-closed)");
         self.is_halted.store(true, Ordering::Release);
         *self.halt_reason.write() = Some(reason);
     }
 
-    /// Persist snapshot + append audit event. Halts on failure.
     async fn persist_and_audit(
         &self,
         snapshot: &RiskEngineSnapshot,
@@ -590,6 +688,14 @@ impl RiskEngine {
         }
         if let Err(e) = self.persistence.append_audit_event(&event).await {
             self.halt_internal(format!("audit failed: {e}"));
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    async fn persist_audit_event(&self, event: RiskAuditEvent) -> OxideResult<()> {
+        if let Err(e) = self.persistence.append_audit_event(&event).await {
+            self.halt_internal(format!("audit persist failed: {e}"));
             return Err(e);
         }
         Ok(())
@@ -669,7 +775,7 @@ impl RiskEngine {
             api_request_count: metrics.api_request_count(),
             drawdown_factor,
             drawdown_action,
-            snapshot_at: Utc::now(),
+            snapshot_at: self.clock.now(),
         }
     }
 }

@@ -14,6 +14,7 @@ pub mod audit;
 pub mod blacklist;
 pub mod builder;
 pub mod circuit_breaker;
+pub mod clock;
 pub mod context;
 pub mod engine;
 pub mod pipeline;

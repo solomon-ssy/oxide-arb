@@ -12,31 +12,26 @@ use oxide_arb_models::enums::common::StalenessLevel;
 use oxide_arb_models::types::Usd;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
-use std::time::Instant;
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
+// elapsed_us is set by the pipeline after evaluate() returns; checks set 0.
 
-fn elapsed_us(start: Instant) -> u64 {
-    u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX)
-}
-
-fn pass(check_id: RiskCheckId, start: Instant) -> RiskCheckResult {
+const fn pass(check_id: RiskCheckId) -> RiskCheckResult {
     RiskCheckResult {
         check_id,
         passed: true,
         detail: None,
         threshold: None,
         actual: None,
-        elapsed_us: elapsed_us(start),
+        elapsed_us: 0,
     }
 }
 
-fn fail(
+const fn fail(
     check_id: RiskCheckId,
     detail: String,
     threshold: String,
     actual: String,
-    start: Instant,
 ) -> RiskCheckResult {
     RiskCheckResult {
         check_id,
@@ -44,7 +39,7 @@ fn fail(
         detail: Some(detail),
         threshold: Some(threshold),
         actual: Some(actual),
-        elapsed_us: elapsed_us(start),
+        elapsed_us: 0,
     }
 }
 
@@ -62,9 +57,8 @@ impl RiskCheck for ManualHaltCheck {
         RiskCheckKind::Gate
     }
     fn evaluate(&self, ctx: &RiskContext) -> RiskCheckResult {
-        let start = Instant::now();
         if ctx.manual_halt.allows_trading() {
-            return pass(RiskCheckId::ManualHalt, start);
+            return pass(RiskCheckId::ManualHalt);
         }
         fail(
             RiskCheckId::ManualHalt,
@@ -73,7 +67,6 @@ impl RiskCheck for ManualHaltCheck {
                 .unwrap_or_else(|| "engine manually halted".into()),
             "not halted".into(),
             "halted".into(),
-            start,
         )
     }
 }
@@ -92,16 +85,14 @@ impl RiskCheck for CircuitBreakerCheck {
         RiskCheckKind::Gate
     }
     fn evaluate(&self, ctx: &RiskContext) -> RiskCheckResult {
-        let start = Instant::now();
         if ctx.circuit_breaker.allows_trading {
-            return pass(RiskCheckId::CircuitBreaker, start);
+            return pass(RiskCheckId::CircuitBreaker);
         }
         fail(
             RiskCheckId::CircuitBreaker,
             "circuit breaker is open".into(),
             "closed or half-open".into(),
             "open".into(),
-            start,
         )
     }
 }
@@ -120,9 +111,8 @@ impl RiskCheck for BlacklistCheck {
         RiskCheckKind::Gate
     }
     fn evaluate(&self, ctx: &RiskContext) -> RiskCheckResult {
-        let start = Instant::now();
         if ctx.blacklist.allows_trading() {
-            return pass(RiskCheckId::BlacklistTradingPath, start);
+            return pass(RiskCheckId::BlacklistTradingPath);
         }
         fail(
             RiskCheckId::BlacklistTradingPath,
@@ -131,7 +121,6 @@ impl RiskCheck for BlacklistCheck {
                 .unwrap_or_else(|| "market is blacklisted".into()),
             "not blacklisted".into(),
             "blacklisted".into(),
-            start,
         )
     }
 }
@@ -150,16 +139,14 @@ impl RiskCheck for TokenBlacklistCheck {
         RiskCheckKind::Gate
     }
     fn evaluate(&self, ctx: &RiskContext) -> RiskCheckResult {
-        let start = Instant::now();
         if !ctx.token_blacklisted {
-            return pass(RiskCheckId::TokenBlacklist, start);
+            return pass(RiskCheckId::TokenBlacklist);
         }
         fail(
             RiskCheckId::TokenBlacklist,
             "token is blacklisted".into(),
             "not blacklisted".into(),
             "blacklisted".into(),
-            start,
         )
     }
 }
@@ -189,7 +176,6 @@ impl RiskCheck for MinDepthCheck {
         RiskCheckKind::Gate
     }
     fn evaluate(&self, ctx: &RiskContext) -> RiskCheckResult {
-        let start = Instant::now();
         let depth_pct = ctx.opportunity.depth_used_pct;
 
         if depth_pct.is_zero() {
@@ -198,14 +184,13 @@ impl RiskCheck for MinDepthCheck {
                 "depth_used_pct is zero — cannot infer available depth".into(),
                 format!("≥ ${}", self.min_depth_usd),
                 "unknown".into(),
-                start,
             );
         }
 
         let available_depth = ctx.opportunity.total_cost.inner() * dec!(100) / depth_pct;
 
         if available_depth >= self.min_depth_usd {
-            pass(RiskCheckId::MinDepth, start)
+            pass(RiskCheckId::MinDepth)
         } else {
             fail(
                 RiskCheckId::MinDepth,
@@ -215,7 +200,6 @@ impl RiskCheck for MinDepthCheck {
                 ),
                 format!("≥ ${}", self.min_depth_usd),
                 format!("${available_depth:.2}"),
-                start,
             )
         }
     }
@@ -246,11 +230,10 @@ impl RiskCheck for MaxDepthUsageCheck {
         RiskCheckKind::Gate
     }
     fn evaluate(&self, ctx: &RiskContext) -> RiskCheckResult {
-        let start = Instant::now();
         let actual = ctx.opportunity.depth_used_pct;
 
         if actual <= self.max_depth_usage_pct {
-            pass(RiskCheckId::MaxDepthUsage, start)
+            pass(RiskCheckId::MaxDepthUsage)
         } else {
             fail(
                 RiskCheckId::MaxDepthUsage,
@@ -260,7 +243,6 @@ impl RiskCheck for MaxDepthUsageCheck {
                 ),
                 format!("≤ {}%", self.max_depth_usage_pct),
                 format!("{actual}%"),
-                start,
             )
         }
     }
@@ -280,10 +262,8 @@ impl RiskCheck for StalenessCheck {
         RiskCheckKind::Gate
     }
     fn evaluate(&self, ctx: &RiskContext) -> RiskCheckResult {
-        let start = Instant::now();
-
         if ctx.opportunity.staleness < StalenessLevel::Stale {
-            pass(RiskCheckId::Staleness, start)
+            pass(RiskCheckId::Staleness)
         } else {
             fail(
                 RiskCheckId::Staleness,
@@ -293,7 +273,6 @@ impl RiskCheck for StalenessCheck {
                 ),
                 "< stale".into(),
                 ctx.opportunity.staleness.as_str().into(),
-                start,
             )
         }
     }
@@ -313,10 +292,8 @@ impl RiskCheck for DailyBudgetCheck {
         RiskCheckKind::Gate
     }
     fn evaluate(&self, ctx: &RiskContext) -> RiskCheckResult {
-        let start = Instant::now();
-
         if ctx.daily_budget_remaining > Usd::ZERO {
-            pass(RiskCheckId::DailyBudget, start)
+            pass(RiskCheckId::DailyBudget)
         } else {
             fail(
                 RiskCheckId::DailyBudget,
@@ -326,7 +303,6 @@ impl RiskCheck for DailyBudgetCheck {
                 ),
                 "> $0".into(),
                 format!("${}", ctx.daily_budget_remaining),
-                start,
             )
         }
     }
@@ -357,10 +333,8 @@ impl RiskCheck for DailyLossCapCheck {
         RiskCheckKind::Gate
     }
     fn evaluate(&self, ctx: &RiskContext) -> RiskCheckResult {
-        let start = Instant::now();
-
         if ctx.daily_loss.inner() < self.max_daily_loss_usd {
-            pass(RiskCheckId::DailyLossCap, start)
+            pass(RiskCheckId::DailyLossCap)
         } else {
             fail(
                 RiskCheckId::DailyLossCap,
@@ -370,7 +344,6 @@ impl RiskCheck for DailyLossCapCheck {
                 ),
                 format!("< ${}", self.max_daily_loss_usd),
                 format!("${}", ctx.daily_loss),
-                start,
             )
         }
     }
@@ -401,10 +374,8 @@ impl RiskCheck for WeeklyLossCapCheck {
         RiskCheckKind::Gate
     }
     fn evaluate(&self, ctx: &RiskContext) -> RiskCheckResult {
-        let start = Instant::now();
-
         if ctx.weekly_loss.inner() < self.max_weekly_loss_usd {
-            pass(RiskCheckId::WeeklyLossCap, start)
+            pass(RiskCheckId::WeeklyLossCap)
         } else {
             fail(
                 RiskCheckId::WeeklyLossCap,
@@ -414,7 +385,6 @@ impl RiskCheck for WeeklyLossCapCheck {
                 ),
                 format!("< ${}", self.max_weekly_loss_usd),
                 format!("${}", ctx.weekly_loss),
-                start,
             )
         }
     }
@@ -445,10 +415,8 @@ impl RiskCheck for HourlyLossCapCheck {
         RiskCheckKind::Gate
     }
     fn evaluate(&self, ctx: &RiskContext) -> RiskCheckResult {
-        let start = Instant::now();
-
         if ctx.hourly_loss.inner() < self.max_hourly_loss_usd {
-            pass(RiskCheckId::HourlyLossCap, start)
+            pass(RiskCheckId::HourlyLossCap)
         } else {
             fail(
                 RiskCheckId::HourlyLossCap,
@@ -458,7 +426,6 @@ impl RiskCheck for HourlyLossCapCheck {
                 ),
                 format!("< ${}", self.max_hourly_loss_usd),
                 format!("${}", ctx.hourly_loss),
-                start,
             )
         }
     }
@@ -489,18 +456,16 @@ impl RiskCheck for MaxSingleBetCheck {
         RiskCheckKind::Gate
     }
     fn evaluate(&self, ctx: &RiskContext) -> RiskCheckResult {
-        let start = Instant::now();
         let actual = ctx.opportunity.total_cost;
 
         if actual <= self.max_single_bet_usd {
-            pass(RiskCheckId::MaxSingleBet, start)
+            pass(RiskCheckId::MaxSingleBet)
         } else {
             fail(
                 RiskCheckId::MaxSingleBet,
                 format!("bet ${actual} exceeds max ${}", self.max_single_bet_usd),
                 format!("≤ ${}", self.max_single_bet_usd),
                 format!("${actual}"),
-                start,
             )
         }
     }
@@ -531,11 +496,10 @@ impl RiskCheck for MarketExposureCheck {
         RiskCheckKind::Gate
     }
     fn evaluate(&self, ctx: &RiskContext) -> RiskCheckResult {
-        let start = Instant::now();
         let post_trade = ctx.market_exposure_before + ctx.opportunity.total_cost;
 
         if post_trade <= self.max_single_market_exposure_usd {
-            pass(RiskCheckId::MarketExposure, start)
+            pass(RiskCheckId::MarketExposure)
         } else {
             fail(
                 RiskCheckId::MarketExposure,
@@ -545,7 +509,6 @@ impl RiskCheck for MarketExposureCheck {
                 ),
                 format!("≤ ${}", self.max_single_market_exposure_usd),
                 format!("${post_trade}"),
-                start,
             )
         }
     }
@@ -576,11 +539,10 @@ impl RiskCheck for TotalExposureCheck {
         RiskCheckKind::Gate
     }
     fn evaluate(&self, ctx: &RiskContext) -> RiskCheckResult {
-        let start = Instant::now();
         let post_trade = ctx.total_exposure_before + ctx.opportunity.total_cost;
 
         if post_trade <= self.max_total_exposure_usd {
-            pass(RiskCheckId::TotalExposure, start)
+            pass(RiskCheckId::TotalExposure)
         } else {
             fail(
                 RiskCheckId::TotalExposure,
@@ -590,7 +552,6 @@ impl RiskCheck for TotalExposureCheck {
                 ),
                 format!("≤ ${}", self.max_total_exposure_usd),
                 format!("${post_trade}"),
-                start,
             )
         }
     }
@@ -621,15 +582,12 @@ impl RiskCheck for ExposurePctCheck {
         RiskCheckKind::Gate
     }
     fn evaluate(&self, ctx: &RiskContext) -> RiskCheckResult {
-        let start = Instant::now();
-
         if ctx.cached_balance <= Usd::ZERO {
             return fail(
                 RiskCheckId::ExposurePct,
                 "cached balance is zero or negative — cannot compute exposure %".into(),
                 format!("≤ {}%", self.max_total_exposure_pct),
                 "N/A".into(),
-                start,
             );
         }
 
@@ -637,7 +595,7 @@ impl RiskCheck for ExposurePctCheck {
         let pct = post_trade / ctx.cached_balance.inner() * dec!(100);
 
         if pct <= self.max_total_exposure_pct {
-            pass(RiskCheckId::ExposurePct, start)
+            pass(RiskCheckId::ExposurePct)
         } else {
             fail(
                 RiskCheckId::ExposurePct,
@@ -647,7 +605,6 @@ impl RiskCheck for ExposurePctCheck {
                 ),
                 format!("≤ {}%", self.max_total_exposure_pct),
                 format!("{pct:.1}%"),
-                start,
             )
         }
     }
@@ -667,11 +624,10 @@ impl RiskCheck for PotentialLossCapCheck {
         RiskCheckKind::Gate
     }
     fn evaluate(&self, ctx: &RiskContext) -> RiskCheckResult {
-        let start = Instant::now();
         let post_trade_potential = ctx.total_potential_loss + ctx.opportunity.total_cost;
 
         if post_trade_potential <= ctx.cached_balance {
-            pass(RiskCheckId::PotentialLossCap, start)
+            pass(RiskCheckId::PotentialLossCap)
         } else {
             fail(
                 RiskCheckId::PotentialLossCap,
@@ -681,7 +637,6 @@ impl RiskCheck for PotentialLossCapCheck {
                 ),
                 format!("≤ ${}", ctx.cached_balance),
                 format!("${post_trade_potential}"),
-                start,
             )
         }
     }
@@ -712,18 +667,16 @@ impl RiskCheck for MaxPositionsCheck {
         RiskCheckKind::Gate
     }
     fn evaluate(&self, ctx: &RiskContext) -> RiskCheckResult {
-        let start = Instant::now();
         let actual = ctx.open_position_count;
 
         if actual < self.max_open_positions {
-            pass(RiskCheckId::MaxPositions, start)
+            pass(RiskCheckId::MaxPositions)
         } else {
             fail(
                 RiskCheckId::MaxPositions,
                 format!("open positions {actual} ≥ max {}", self.max_open_positions),
                 format!("< {}", self.max_open_positions),
                 format!("{actual}"),
-                start,
             )
         }
     }
@@ -754,18 +707,16 @@ impl RiskCheck for WsConnectivityCheck {
         RiskCheckKind::Gate
     }
     fn evaluate(&self, ctx: &RiskContext) -> RiskCheckResult {
-        let start = Instant::now();
         let actual = ctx.ws_disconnect_secs;
 
         if actual < self.ws_disconnect_threshold_secs {
-            pass(RiskCheckId::WsConnectivity, start)
+            pass(RiskCheckId::WsConnectivity)
         } else {
             fail(
                 RiskCheckId::WsConnectivity,
                 format!("WS disconnected for {actual}s"),
                 format!("< {}s", self.ws_disconnect_threshold_secs),
                 format!("{actual}s"),
-                start,
             )
         }
     }
@@ -796,18 +747,16 @@ impl RiskCheck for MinBalanceCheck {
         RiskCheckKind::Gate
     }
     fn evaluate(&self, ctx: &RiskContext) -> RiskCheckResult {
-        let start = Instant::now();
         let balance = ctx.cached_balance;
 
         if balance >= self.min_balance_usd {
-            pass(RiskCheckId::MinBalance, start)
+            pass(RiskCheckId::MinBalance)
         } else {
             fail(
                 RiskCheckId::MinBalance,
                 format!("balance ${balance} below min ${}", self.min_balance_usd),
                 format!("≥ ${}", self.min_balance_usd),
                 format!("${balance}"),
-                start,
             )
         }
     }
@@ -838,11 +787,10 @@ impl RiskCheck for DirectionalConcentrationCheck {
         RiskCheckKind::Gate
     }
     fn evaluate(&self, ctx: &RiskContext) -> RiskCheckResult {
-        let start = Instant::now();
         let actual = ctx.open_directional_count_same_side;
 
         if actual < self.max_concurrent_directional {
-            pass(RiskCheckId::DirectionalConcentration, start)
+            pass(RiskCheckId::DirectionalConcentration)
         } else {
             fail(
                 RiskCheckId::DirectionalConcentration,
@@ -852,7 +800,6 @@ impl RiskCheck for DirectionalConcentrationCheck {
                 ),
                 format!("< {}", self.max_concurrent_directional),
                 format!("{actual}"),
-                start,
             )
         }
     }
@@ -883,11 +830,10 @@ impl RiskCheck for DailyDirectionalBudgetCheck {
         RiskCheckKind::Gate
     }
     fn evaluate(&self, ctx: &RiskContext) -> RiskCheckResult {
-        let start = Instant::now();
         let actual = ctx.daily_directional_trades_same_side;
 
         if actual < self.daily_directional_budget {
-            pass(RiskCheckId::DailyDirectionalBudget, start)
+            pass(RiskCheckId::DailyDirectionalBudget)
         } else {
             fail(
                 RiskCheckId::DailyDirectionalBudget,
@@ -897,7 +843,6 @@ impl RiskCheck for DailyDirectionalBudgetCheck {
                 ),
                 format!("< {}", self.daily_directional_budget),
                 format!("{actual}"),
-                start,
             )
         }
     }
@@ -917,10 +862,8 @@ impl RiskCheck for DuplicateMarketCheck {
         RiskCheckKind::Gate
     }
     fn evaluate(&self, ctx: &RiskContext) -> RiskCheckResult {
-        let start = Instant::now();
-
         if ctx.market_exposure_before <= Usd::ZERO {
-            pass(RiskCheckId::DuplicateMarket, start)
+            pass(RiskCheckId::DuplicateMarket)
         } else {
             fail(
                 RiskCheckId::DuplicateMarket,
@@ -930,7 +873,6 @@ impl RiskCheck for DuplicateMarketCheck {
                 ),
                 "$0".into(),
                 format!("${}", ctx.market_exposure_before),
-                start,
             )
         }
     }
@@ -950,18 +892,60 @@ impl RiskCheck for DrawdownGuardCheck {
         RiskCheckKind::Gate
     }
     fn evaluate(&self, ctx: &RiskContext) -> RiskCheckResult {
-        let start = Instant::now();
-
         if ctx.drawdown_action == DrawdownAction::Halt {
             fail(
                 RiskCheckId::DrawdownGuard,
                 format!("drawdown halt (factor: {})", ctx.drawdown_factor),
                 "!= Halt".into(),
                 format!("{:?}", ctx.drawdown_action),
-                start,
             )
         } else {
-            pass(RiskCheckId::DrawdownGuard, start)
+            pass(RiskCheckId::DrawdownGuard)
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// #24 ApiErrorRate
+// ═══════════════════════════════════════════════════════════════════════════════
+
+pub struct ApiErrorRateCheck {
+    threshold: Decimal,
+}
+
+impl ApiErrorRateCheck {
+    #[must_use]
+    pub const fn new(config: &RiskConfig) -> Self {
+        Self {
+            threshold: config.api_error_rate_threshold,
+        }
+    }
+}
+
+impl RiskCheck for ApiErrorRateCheck {
+    fn id(&self) -> RiskCheckId {
+        RiskCheckId::ApiErrorRate
+    }
+    fn kind(&self) -> RiskCheckKind {
+        RiskCheckKind::Gate
+    }
+    fn evaluate(&self, ctx: &RiskContext) -> RiskCheckResult {
+        if ctx.api_request_count == 0 {
+            return pass(RiskCheckId::ApiErrorRate);
+        }
+        let error_rate = Decimal::from(ctx.api_error_count) / Decimal::from(ctx.api_request_count);
+        if error_rate < self.threshold {
+            pass(RiskCheckId::ApiErrorRate)
+        } else {
+            fail(
+                RiskCheckId::ApiErrorRate,
+                format!(
+                    "API error rate {error_rate:.2} >= threshold {}",
+                    self.threshold
+                ),
+                format!("< {}", self.threshold),
+                format!("{error_rate:.2}"),
+            )
         }
     }
 }

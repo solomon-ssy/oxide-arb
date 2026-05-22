@@ -1,33 +1,43 @@
 //! Hourly rolling-window loss accounting.
 
+use crate::clock::Clock;
 use crate::types::PeriodStats;
-use chrono::{NaiveDate, Timelike, Utc};
+use chrono::{NaiveDate, Timelike};
 use oxide_arb_models::enums::common::TradeOutcome;
 use oxide_arb_models::types::Usd;
+use std::sync::Arc;
 
 pub struct HourlyAccounting {
     window_start_hour: u32,
     window_start_date: NaiveDate,
     stats: PeriodStats,
+    clock: Arc<dyn Clock>,
 }
 
 impl HourlyAccounting {
     #[must_use]
-    pub fn new() -> Self {
-        let now = Utc::now();
+    pub fn new(clock: Arc<dyn Clock>) -> Self {
+        let now = clock.now();
         Self {
             window_start_hour: now.hour(),
             window_start_date: now.date_naive(),
             stats: PeriodStats::default(),
+            clock,
         }
     }
 
     #[must_use]
-    pub const fn from_snapshot(hour: u32, date: NaiveDate, stats: PeriodStats) -> Self {
+    pub fn from_snapshot(
+        hour: u32,
+        date: NaiveDate,
+        stats: PeriodStats,
+        clock: Arc<dyn Clock>,
+    ) -> Self {
         Self {
             window_start_hour: hour,
             window_start_date: date,
             stats,
+            clock,
         }
     }
 
@@ -63,7 +73,7 @@ impl HourlyAccounting {
 
     pub fn maybe_rollover(&mut self) -> bool {
         if self.should_rollover() {
-            let now = Utc::now();
+            let now = self.clock.now();
             let new_hour = now.hour();
             let new_date = now.date_naive();
             tracing::info!(
@@ -84,13 +94,7 @@ impl HourlyAccounting {
     }
 
     fn should_rollover(&self) -> bool {
-        let now = Utc::now();
+        let now = self.clock.now();
         now.date_naive() != self.window_start_date || now.hour() != self.window_start_hour
-    }
-}
-
-impl Default for HourlyAccounting {
-    fn default() -> Self {
-        Self::new()
     }
 }

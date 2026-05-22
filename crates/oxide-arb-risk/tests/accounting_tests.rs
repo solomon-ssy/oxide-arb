@@ -6,6 +6,7 @@ use chrono::{Timelike, Utc};
 use oxide_arb_models::enums::common::TradeOutcome;
 use oxide_arb_models::types::Usd;
 use oxide_arb_risk::accounting::{DailyAccounting, HourlyAccounting, WeeklyAccounting};
+use oxide_arb_risk::clock::utc_clock;
 use oxide_arb_risk::types::PeriodStats;
 use rust_decimal_macros::dec;
 
@@ -27,7 +28,7 @@ fn daily_rollover_resets_stats() {
     let budget = Usd::new(dec!(100));
     let spent = Usd::new(dec!(50));
 
-    let mut daily = DailyAccounting::from_snapshot(yesterday, stats, budget, spent);
+    let mut daily = DailyAccounting::from_snapshot(yesterday, stats, budget, spent, utc_clock());
     assert_eq!(daily.budget_remaining(), Usd::new(dec!(50)));
 
     // Recording a trade today should trigger rollover
@@ -52,8 +53,13 @@ fn daily_budget_resets_on_rollover() {
     let budget = Usd::new(dec!(100));
     let spent = Usd::new(dec!(90));
 
-    let mut daily =
-        DailyAccounting::from_snapshot(yesterday, PeriodStats::default(), budget, spent);
+    let mut daily = DailyAccounting::from_snapshot(
+        yesterday,
+        PeriodStats::default(),
+        budget,
+        spent,
+        utc_clock(),
+    );
     assert_eq!(daily.budget_remaining(), Usd::new(dec!(10)));
 
     // Trigger rollover
@@ -79,7 +85,7 @@ fn weekly_rollover_at_monday_boundary() {
         trade_count: 10,
         ..PeriodStats::default()
     };
-    let mut weekly = WeeklyAccounting::from_snapshot(two_weeks_ago, stats);
+    let mut weekly = WeeklyAccounting::from_snapshot(two_weeks_ago, stats, utc_clock());
 
     let rolled = weekly.record_trade(
         Usd::new(dec!(3)),
@@ -96,7 +102,7 @@ fn weekly_rollover_at_monday_boundary() {
 
 #[test]
 fn no_rollover_within_same_day() {
-    let mut daily = DailyAccounting::new(Usd::new(dec!(100)));
+    let mut daily = DailyAccounting::new(Usd::new(dec!(100)), utc_clock());
 
     // Record first trade
     daily.record_trade(
@@ -140,7 +146,7 @@ fn from_snapshot_restores_correctly() {
     let budget = Usd::new(dec!(200));
     let spent = Usd::new(dec!(60));
 
-    let daily = DailyAccounting::from_snapshot(today, stats, budget, spent);
+    let daily = DailyAccounting::from_snapshot(today, stats, budget, spent, utc_clock());
 
     assert_eq!(daily.window_start(), today);
     assert_eq!(daily.daily_loss(), Usd::new(dec!(15)));
@@ -157,7 +163,8 @@ fn budget_exhausted_when_spent_exceeds_budget() {
     let budget = Usd::new(dec!(50));
     let spent = Usd::new(dec!(50));
 
-    let daily = DailyAccounting::from_snapshot(today, PeriodStats::default(), budget, spent);
+    let daily =
+        DailyAccounting::from_snapshot(today, PeriodStats::default(), budget, spent, utc_clock());
 
     assert!(daily.is_budget_exhausted());
     assert_eq!(daily.budget_remaining(), Usd::ZERO);
@@ -174,7 +181,7 @@ fn weekly_from_snapshot_restores_correctly() {
         ..PeriodStats::default()
     };
 
-    let weekly = WeeklyAccounting::from_snapshot(today, stats);
+    let weekly = WeeklyAccounting::from_snapshot(today, stats, utc_clock());
 
     assert_eq!(weekly.week_start(), today);
     assert_eq!(weekly.weekly_loss(), Usd::new(dec!(30)));
@@ -194,7 +201,7 @@ fn hourly_from_snapshot_restores_loss_and_counts() {
         ..PeriodStats::default()
     };
 
-    let hourly = HourlyAccounting::from_snapshot(now.hour(), now.date_naive(), stats);
+    let hourly = HourlyAccounting::from_snapshot(now.hour(), now.date_naive(), stats, utc_clock());
 
     assert_eq!(hourly.hourly_loss(), Usd::new(dec!(12)));
     assert_eq!(hourly.stats().trade_count, 6);
@@ -204,7 +211,7 @@ fn hourly_from_snapshot_restores_loss_and_counts() {
 
 #[test]
 fn hourly_no_rollover_within_same_hour() {
-    let mut hourly = HourlyAccounting::new();
+    let mut hourly = HourlyAccounting::new(utc_clock());
 
     hourly.record_trade(Usd::new(dec!(-3)), Usd::new(dec!(0.1)), TradeOutcome::Miss);
     let rolled = hourly.record_trade(Usd::new(dec!(-2)), Usd::new(dec!(0.1)), TradeOutcome::Miss);
@@ -225,7 +232,7 @@ fn hourly_rollover_resets_on_stale_snapshot() {
         ..PeriodStats::default()
     };
 
-    let mut hourly = HourlyAccounting::from_snapshot(23, yesterday, stats);
+    let mut hourly = HourlyAccounting::from_snapshot(23, yesterday, stats, utc_clock());
 
     let rolled = hourly.record_trade(Usd::new(dec!(-1)), Usd::new(dec!(0.1)), TradeOutcome::Miss);
 
@@ -246,7 +253,7 @@ fn hourly_maybe_rollover_standalone() {
         ..PeriodStats::default()
     };
 
-    let mut hourly = HourlyAccounting::from_snapshot(0, yesterday, stats);
+    let mut hourly = HourlyAccounting::from_snapshot(0, yesterday, stats, utc_clock());
 
     let rolled = hourly.maybe_rollover();
     assert!(

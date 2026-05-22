@@ -146,6 +146,98 @@ impl fmt::Display for ConfigWarning {
     }
 }
 
+fn validate_risk_cross_constraints(inner: &Inner, report: &mut ConfigValidationReport) {
+    let r = &inner.risk;
+
+    if r.max_hourly_loss_usd > r.max_daily_loss_usd {
+        report.errors.push(ConfigValidationError::InfeasibleRange {
+            field_low: "risk.max_hourly_loss_usd",
+            value_low: r.max_hourly_loss_usd,
+            field_high: "risk.max_daily_loss_usd",
+            value_high: r.max_daily_loss_usd,
+        });
+    }
+
+    if r.max_daily_loss_usd > r.max_weekly_loss_usd {
+        report.errors.push(ConfigValidationError::InfeasibleRange {
+            field_low: "risk.max_daily_loss_usd",
+            value_low: r.max_daily_loss_usd,
+            field_high: "risk.max_weekly_loss_usd",
+            value_high: r.max_weekly_loss_usd,
+        });
+    }
+
+    if r.max_single_bet_usd > Decimal::ZERO
+        && r.max_single_market_exposure_usd > Decimal::ZERO
+        && r.max_single_bet_usd > r.max_single_market_exposure_usd
+    {
+        report.errors.push(ConfigValidationError::InfeasibleRange {
+            field_low: "risk.max_single_bet_usd",
+            value_low: r.max_single_bet_usd,
+            field_high: "risk.max_single_market_exposure_usd",
+            value_high: r.max_single_market_exposure_usd,
+        });
+    }
+
+    if r.max_single_market_exposure_usd > Decimal::ZERO
+        && r.max_total_exposure_usd > Decimal::ZERO
+        && r.max_single_market_exposure_usd > r.max_total_exposure_usd
+    {
+        report.errors.push(ConfigValidationError::InfeasibleRange {
+            field_low: "risk.max_single_market_exposure_usd",
+            value_low: r.max_single_market_exposure_usd,
+            field_high: "risk.max_total_exposure_usd",
+            value_high: r.max_total_exposure_usd,
+        });
+    }
+
+    if r.reserve_balance_usd >= r.bankroll_usd && r.bankroll_usd > Decimal::ZERO {
+        report.errors.push(ConfigValidationError::InfeasibleRange {
+            field_low: "risk.reserve_balance_usd",
+            value_low: r.reserve_balance_usd,
+            field_high: "risk.bankroll_usd",
+            value_high: r.bankroll_usd,
+        });
+    }
+
+    if r.daily_budget_usd <= Decimal::ZERO {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "risk.daily_budget_usd",
+            detail: "must be > 0".into(),
+        });
+    }
+
+    let cb = &r.circuit_breaker;
+    for (field, val) in [
+        ("risk.circuit_breaker.l1_cooldown_secs", cb.l1_cooldown_secs),
+        ("risk.circuit_breaker.l2_cooldown_secs", cb.l2_cooldown_secs),
+        ("risk.circuit_breaker.l3_cooldown_secs", cb.l3_cooldown_secs),
+        ("risk.circuit_breaker.l4_cooldown_secs", cb.l4_cooldown_secs),
+    ] {
+        if val == 0 {
+            report.errors.push(ConfigValidationError::InvalidValue {
+                field,
+                detail: "must be > 0".into(),
+            });
+        }
+    }
+
+    let dd = &r.drawdown;
+    if dd.max_drawdown_pct <= Decimal::ZERO || dd.max_drawdown_pct > dec!(100) {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "risk.drawdown.max_drawdown_pct",
+            detail: "must be in (0, 100]".into(),
+        });
+    }
+    if dd.drawdown_reduction_factor <= Decimal::ZERO || dd.drawdown_reduction_factor > Decimal::ONE
+    {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "risk.drawdown.drawdown_reduction_factor",
+            detail: "must be in (0, 1]".into(),
+        });
+    }
+}
+
 /// Mode-agnostic validation: checks mathematical invariants that must hold
 /// regardless of execution mode.
 pub fn validate_settings_common(inner: &Inner) -> ConfigValidationReport {
@@ -206,6 +298,8 @@ pub fn validate_settings_common(inner: &Inner) -> ConfigValidationReport {
     // Depth check intentionally removed: min_depth_usd (order book depth
     // requirement) is not directly comparable to max_single_bet_usd (bet size cap).
     // The old validation compared against the deleted max_single_trade_usd.
+
+    validate_risk_cross_constraints(inner, &mut report);
 
     if inner.polymarket.fees.exponent <= Decimal::ZERO {
         report.errors.push(ConfigValidationError::InvalidValue {

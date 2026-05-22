@@ -11,6 +11,7 @@ use oxide_arb_models::domain::risk::ProbabilityInput;
 use oxide_arb_models::enums::common::TradeOutcome;
 use oxide_arb_models::types::Usd;
 use oxide_arb_risk::accounting::DailyAccounting;
+use oxide_arb_risk::clock::utc_clock;
 use oxide_arb_risk::sizing::QuarterKellyCalculator;
 use proptest::prelude::*;
 use rust_decimal::Decimal;
@@ -152,7 +153,7 @@ proptest! {
     fn daily_loss_non_negative(
         profits in proptest::collection::vec(-50.0f64..50.0, 1..20),
     ) {
-        let mut daily = DailyAccounting::new(Usd::new(dec!(10000)));
+        let mut daily = DailyAccounting::new(Usd::new(dec!(10000)), utc_clock());
 
         for p in &profits {
             let profit = Decimal::from_f64_retain(*p).unwrap();

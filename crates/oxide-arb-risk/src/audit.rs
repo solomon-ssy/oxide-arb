@@ -10,7 +10,9 @@ use crate::types::{
 use chrono::{DateTime, NaiveDate, Utc};
 use oxide_arb_models::domain::blacklist::BlacklistEntry;
 use oxide_arb_models::enums::common::TradeOutcome;
-use oxide_arb_models::enums::risk::{BreakerStateName, CircuitBreakerLevel, WindowType};
+use oxide_arb_models::enums::risk::{
+    BreakerStateName, CircuitBreakerLevel, TradeAccountingPhase, WindowType,
+};
 use oxide_arb_models::types::{MarketId, OpportunityId, TradeId, Usd};
 use serde::Serialize;
 
@@ -64,8 +66,15 @@ pub enum RiskAuditEvent {
     PostTradeUpdate {
         trade_id: TradeId,
         outcome: TradeOutcome,
+        phase: TradeAccountingPhase,
         daily_loss_after: Usd,
         weekly_loss_after: Usd,
+        hourly_loss_after: Usd,
+        breaker_tripped: Option<CircuitBreakerLevel>,
+        auto_blacklisted: Option<MarketId>,
+        daily_rolled: bool,
+        weekly_rolled: bool,
+        hourly_rolled: bool,
     },
 }
 

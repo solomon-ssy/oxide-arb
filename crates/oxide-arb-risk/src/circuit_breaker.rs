@@ -9,15 +9,18 @@
 //!
 //! Additional edge: `reset()` → any state → Closed (operator intervention).
 
+use crate::clock::Clock;
 use crate::types::BreakerState;
 use chrono::{DateTime, Utc};
 use oxide_arb_error::{OxideError, OxideResult};
 use oxide_arb_models::config::CircuitBreakerConfig;
 use oxide_arb_models::domain::risk::RiskEngineSnapshot;
 use oxide_arb_models::enums::risk::{BreakerStateName, CircuitBreakerLevel};
+use std::sync::Arc;
 
 pub struct CircuitBreaker {
     config: CircuitBreakerConfig,
+    clock: Arc<dyn Clock>,
     state: BreakerState,
     l2_trip_count: u32,
     last_transition_at: DateTime<Utc>,
@@ -26,12 +29,14 @@ pub struct CircuitBreaker {
 impl CircuitBreaker {
     /// Create a new circuit breaker in Closed state.
     #[must_use]
-    pub fn new(config: CircuitBreakerConfig) -> Self {
+    pub fn new(config: CircuitBreakerConfig, clock: Arc<dyn Clock>) -> Self {
+        let now = clock.now();
         Self {
             config,
+            clock,
             state: BreakerState::Closed,
             l2_trip_count: 0,
-            last_transition_at: Utc::now(),
+            last_transition_at: now,
         }
     }
 
@@ -42,6 +47,7 @@ impl CircuitBreaker {
     /// an error rather than silently defaulting.
     pub fn from_snapshot(
         config: CircuitBreakerConfig,
+        clock: Arc<dyn Clock>,
         snapshot: &RiskEngineSnapshot,
     ) -> OxideResult<Self> {
         let state = match snapshot.breaker_state {
@@ -93,6 +99,7 @@ impl CircuitBreaker {
 
         Ok(Self {
             config,
+            clock,
             state,
             l2_trip_count: snapshot.l2_trip_count,
             last_transition_at: snapshot.snapshot_at,
@@ -118,7 +125,7 @@ impl CircuitBreaker {
     ///
     /// Higher level overrides lower. Same or higher level refreshes cooldown.
     pub fn trip(&mut self, level: CircuitBreakerLevel, reason: String) {
-        let now = Utc::now();
+        let now = self.clock.now();
         let cooldown_secs = self.cooldown_for_level(level);
         let cooldown_until =
             now + chrono::Duration::seconds(i64::try_from(cooldown_secs).unwrap_or(i64::MAX));
@@ -160,7 +167,7 @@ impl CircuitBreaker {
     /// Returns `true` if a state transition occurred.
     #[must_use]
     pub fn tick(&mut self) -> bool {
-        let now = Utc::now();
+        let now = self.clock.now();
         match &self.state {
             BreakerState::Open {
                 level,
@@ -196,7 +203,7 @@ impl CircuitBreaker {
 
     /// Report a trade result while in `HalfOpen` state.
     pub fn on_trade_result(&mut self, success: bool) {
-        let now = Utc::now();
+        let now = self.clock.now();
         if let BreakerState::HalfOpen {
             level,
             successful_probes,
@@ -255,7 +262,7 @@ impl CircuitBreaker {
         );
         self.state = BreakerState::Closed;
         self.l2_trip_count = 0;
-        self.last_transition_at = Utc::now();
+        self.last_transition_at = self.clock.now();
     }
 
     #[must_use]

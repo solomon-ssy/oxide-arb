@@ -1,27 +1,36 @@
 //! Weekly accounting with automatic period rollover at Monday UTC boundary.
 
+use crate::clock::Clock;
 use crate::types::PeriodStats;
-use chrono::{Datelike, NaiveDate, Utc};
+use chrono::{Datelike, NaiveDate};
 use oxide_arb_models::enums::common::TradeOutcome;
 use oxide_arb_models::types::Usd;
+use std::sync::Arc;
 
 pub struct WeeklyAccounting {
     week_start: NaiveDate,
     stats: PeriodStats,
+    clock: Arc<dyn Clock>,
 }
 
 impl WeeklyAccounting {
     #[must_use]
-    pub fn new() -> Self {
+    pub fn new(clock: Arc<dyn Clock>) -> Self {
+        let week_start = Self::current_monday_from(&*clock);
         Self {
-            week_start: Self::current_monday(),
+            week_start,
             stats: PeriodStats::default(),
+            clock,
         }
     }
 
     #[must_use]
-    pub const fn from_snapshot(week_start: NaiveDate, stats: PeriodStats) -> Self {
-        Self { week_start, stats }
+    pub fn from_snapshot(week_start: NaiveDate, stats: PeriodStats, clock: Arc<dyn Clock>) -> Self {
+        Self {
+            week_start,
+            stats,
+            clock,
+        }
     }
 
     pub fn record_trade(&mut self, net_profit: Usd, fees: Usd, outcome: TradeOutcome) -> bool {
@@ -56,7 +65,7 @@ impl WeeklyAccounting {
     }
 
     pub fn maybe_rollover(&mut self) -> bool {
-        let monday = Self::current_monday();
+        let monday = self.current_monday();
         if monday > self.week_start {
             tracing::info!(
                 previous = %self.week_start,
@@ -72,15 +81,13 @@ impl WeeklyAccounting {
         }
     }
 
-    fn current_monday() -> NaiveDate {
-        let today = Utc::now().date_naive();
+    fn current_monday(&self) -> NaiveDate {
+        Self::current_monday_from(&*self.clock)
+    }
+
+    fn current_monday_from(clock: &dyn Clock) -> NaiveDate {
+        let today = clock.today();
         let weekday = today.weekday().num_days_from_monday();
         today - chrono::Duration::days(i64::from(weekday))
-    }
-}
-
-impl Default for WeeklyAccounting {
-    fn default() -> Self {
-        Self::new()
     }
 }

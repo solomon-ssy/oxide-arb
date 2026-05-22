@@ -5,29 +5,32 @@
 //! on the hot path. Permanent entries loaded from config; temporary entries
 //! are added at runtime and garbage-collected on TTL expiry.
 
+use crate::clock::Clock;
 use crate::types::BlacklistKey;
-use chrono::Utc;
 use dashmap::DashMap;
 use oxide_arb_models::config::RiskConfig;
 use oxide_arb_models::domain::blacklist::{BlacklistCheckResult, BlacklistEntry};
 use oxide_arb_models::enums::risk::{BlacklistReason, BlacklistScope};
 use oxide_arb_models::types::{MarketId, TokenId};
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Concurrent blacklist projection with lazy TTL eviction.
 pub struct BlacklistManager {
     entries: DashMap<BlacklistKey, BlacklistEntry>,
-    config: RiskConfig,
+    market_miss_blacklist_count: u32,
+    market_miss_blacklist_duration_secs: u64,
+    clock: Arc<dyn Clock>,
 }
 
 impl BlacklistManager {
     /// Construct a new manager and pre-populate permanent blacklist entries
     /// from the config.
     #[must_use]
-    pub fn new(config: &RiskConfig) -> Self {
+    pub fn new(config: &RiskConfig, clock: Arc<dyn Clock>) -> Self {
         let entries = DashMap::new();
 
-        let now = Utc::now();
+        let now = clock.now();
         for market_str in &config.permanent_blacklist_markets {
             let market_id = MarketId::new(market_str);
             let key = BlacklistKey::Market(market_id.clone());
@@ -67,13 +70,15 @@ impl BlacklistManager {
 
         Self {
             entries,
-            config: config.clone(),
+            market_miss_blacklist_count: config.market_miss_blacklist_count,
+            market_miss_blacklist_duration_secs: config.market_miss_blacklist_duration_secs,
+            clock,
         }
     }
 
     /// Startup recovery: load persisted entries, filtering expired ones.
     pub fn load_entries(&self, entries: Vec<BlacklistEntry>) {
-        let now = Utc::now();
+        let now = self.clock.now();
         let mut loaded = 0usize;
 
         for entry in entries {
@@ -102,7 +107,7 @@ impl BlacklistManager {
 
         if let Some(entry_ref) = self.entries.get(&key) {
             let entry = entry_ref.value();
-            let now = Utc::now();
+            let now = self.clock.now();
 
             if entry.is_expired(now) {
                 drop(entry_ref);
@@ -135,7 +140,7 @@ impl BlacklistManager {
         duration: Duration,
         miss_count: u32,
     ) -> BlacklistEntry {
-        let now = Utc::now();
+        let now = self.clock.now();
         let expires_at = now
             + chrono::Duration::from_std(duration).unwrap_or_else(|_| chrono::Duration::hours(1));
 
@@ -180,7 +185,7 @@ impl BlacklistManager {
 
     /// Add a permanent (never-expiring) blacklist entry.
     pub fn add_permanent(&self, market_id: MarketId, reason: BlacklistReason) -> BlacklistEntry {
-        let now = Utc::now();
+        let now = self.clock.now();
         let key = BlacklistKey::Market(market_id.clone());
 
         let entry = BlacklistEntry {
@@ -219,7 +224,7 @@ impl BlacklistManager {
     /// Garbage-collect expired entries. Permanent entries are never removed.
     /// Returns the number of entries evicted.
     pub fn gc(&self) -> usize {
-        let now = Utc::now();
+        let now = self.clock.now();
         let before = self.entries.len();
 
         self.entries
@@ -246,7 +251,7 @@ impl BlacklistManager {
         market_id: &MarketId,
         consecutive_misses: u32,
     ) -> Option<BlacklistEntry> {
-        if consecutive_misses < self.config.market_miss_blacklist_count {
+        if consecutive_misses < self.market_miss_blacklist_count {
             return None;
         }
 
@@ -255,7 +260,7 @@ impl BlacklistManager {
             return None;
         }
 
-        let duration = Duration::from_secs(self.config.market_miss_blacklist_duration_secs);
+        let duration = Duration::from_secs(self.market_miss_blacklist_duration_secs);
 
         let entry = self.add_temporary(
             market_id.clone(),
@@ -280,7 +285,7 @@ impl BlacklistManager {
     pub fn is_token_blacklisted(&self, token_id: &TokenId) -> bool {
         let key = BlacklistKey::Token(token_id.clone());
         if let Some(entry_ref) = self.entries.get(&key) {
-            let now = Utc::now();
+            let now = self.clock.now();
             if entry_ref.value().is_expired(now) {
                 drop(entry_ref);
                 self.entries.remove(&key);
@@ -294,7 +299,7 @@ impl BlacklistManager {
     /// Snapshot of all active (non-expired) entries.
     #[must_use]
     pub fn active_entries(&self) -> Vec<BlacklistEntry> {
-        let now = Utc::now();
+        let now = self.clock.now();
         self.entries
             .iter()
             .filter(|r| !r.value().is_expired(now))
@@ -304,7 +309,7 @@ impl BlacklistManager {
 
     #[must_use]
     pub fn active_count(&self) -> usize {
-        let now = Utc::now();
+        let now = self.clock.now();
         self.entries
             .iter()
             .filter(|r| !r.value().is_expired(now))

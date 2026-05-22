@@ -4,6 +4,7 @@ use crate::accounting::{DailyAccounting, HourlyAccounting, WeeklyAccounting};
 use crate::audit::RiskAuditEvent;
 use crate::blacklist::BlacklistManager;
 use crate::circuit_breaker::CircuitBreaker;
+use crate::clock::{self, Clock};
 use crate::engine::RiskEngine;
 use crate::pipeline;
 use crate::position::{PositionTracker, PotentialLossLedger};
@@ -31,11 +32,12 @@ pub struct RiskEngineBuilder {
     blacklist_entries: Vec<BlacklistEntry>,
     potential_loss_entries: Vec<PotentialLossEntry>,
     initial_equity: Option<Usd>,
+    clock: Option<Arc<dyn Clock>>,
 }
 
 impl RiskEngineBuilder {
     #[must_use]
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             config: None,
             snapshot: None,
@@ -43,6 +45,7 @@ impl RiskEngineBuilder {
             blacklist_entries: Vec::new(),
             potential_loss_entries: Vec::new(),
             initial_equity: None,
+            clock: None,
         }
     }
 
@@ -82,6 +85,12 @@ impl RiskEngineBuilder {
         self
     }
 
+    #[must_use]
+    pub fn clock(mut self, clock: Arc<dyn Clock>) -> Self {
+        self.clock = Some(clock);
+        self
+    }
+
     /// Build the `RiskEngine`, optionally restoring from a snapshot.
     ///
     /// If a snapshot is provided, uses `state_store::recover_state` to
@@ -92,12 +101,11 @@ impl RiskEngineBuilder {
     /// - `recover_state()` returned an error (already fail-closed)
     /// - Persisted breaker is `Open` with unexpired cooldown
     /// - Active escalated potential-loss entries exist
-    /// # Async
-    /// Marked async for forward compatibility with `RiskPersistence::load_snapshot`.
     #[allow(clippy::unused_async)]
     pub async fn build(self, metrics: &dyn RiskMetrics) -> OxideResult<RiskEngine> {
         let config = self.config.unwrap_or_default();
         let equity = self.initial_equity.unwrap_or_else(|| Usd::new(dec!(1000)));
+        let clock = self.clock.unwrap_or_else(clock::utc_clock);
 
         let persistence = self
             .persistence
@@ -111,6 +119,7 @@ impl RiskEngineBuilder {
                     self.blacklist_entries.clone(),
                     self.potential_loss_entries,
                     metrics,
+                    &clock,
                 )?;
                 (
                     recovered.breaker,
@@ -122,17 +131,19 @@ impl RiskEngineBuilder {
                     recovered.drawdown_hwm,
                 )
             } else {
-                let breaker = CircuitBreaker::new(config.circuit_breaker.clone());
-                let daily = DailyAccounting::new(Usd::new(config.daily_budget_usd));
-                let weekly = WeeklyAccounting::new();
-                let hourly = HourlyAccounting::new();
+                let breaker =
+                    CircuitBreaker::new(config.circuit_breaker.clone(), Arc::clone(&clock));
+                let daily =
+                    DailyAccounting::new(Usd::new(config.daily_budget_usd), Arc::clone(&clock));
+                let weekly = WeeklyAccounting::new(Arc::clone(&clock));
+                let hourly = HourlyAccounting::new(Arc::clone(&clock));
                 let mut pt = PositionTracker::new();
                 pt.refresh(metrics);
                 let pl = PotentialLossLedger::from_entries(self.potential_loss_entries);
                 (breaker, daily, weekly, hourly, pt, pl, equity)
             };
 
-        let blacklist = BlacklistManager::new(&config);
+        let blacklist = BlacklistManager::new(&config, Arc::clone(&clock));
         if self.snapshot.is_some() {
             blacklist.load_entries(self.blacklist_entries);
         }
@@ -146,8 +157,7 @@ impl RiskEngineBuilder {
         let reconciler = LedgerReconciler::new(config.reconciliation_tolerance_usd);
         let risk_pipeline = pipeline::build_default_pipeline(&config);
 
-        // Conditional safe-start: halt if breaker is Open with unexpired cooldown
-        let safe_start_halt = should_safe_start_halt(&breaker, &potential_loss);
+        let safe_start_halt = should_safe_start_halt(&breaker, &potential_loss, &*clock);
 
         let engine = RiskEngine {
             circuit_breaker: RwLock::new(breaker),
@@ -166,6 +176,7 @@ impl RiskEngineBuilder {
             is_halted: AtomicBool::new(safe_start_halt.is_some()),
             halt_reason: RwLock::new(safe_start_halt.clone()),
             state_version: AtomicStateVersion::new(0),
+            clock,
         };
 
         if let Some(ref reason) = safe_start_halt {
@@ -186,8 +197,8 @@ impl Default for RiskEngineBuilder {
 fn should_safe_start_halt(
     breaker: &CircuitBreaker,
     potential_loss: &PotentialLossLedger,
+    clock: &dyn Clock,
 ) -> Option<String> {
-    // Breaker is Open with unexpired cooldown
     if let BreakerState::Open {
         level,
         cooldown_until,
@@ -195,7 +206,7 @@ fn should_safe_start_halt(
         ..
     } = breaker.state()
     {
-        let now = chrono::Utc::now();
+        let now = clock.now();
         if *cooldown_until > now {
             return Some(format!(
                 "safe-start: breaker is Open (level={level}, reason={reason})"
@@ -203,7 +214,6 @@ fn should_safe_start_halt(
         }
     }
 
-    // Escalated potential loss entries (active entries at boot)
     let active = potential_loss.active_count();
     if active > 0 {
         return Some(format!(

@@ -11,6 +11,7 @@ use oxide_arb_models::enums::common::Side;
 use oxide_arb_models::types::MarketId;
 use oxide_arb_models::types::Usd;
 use oxide_arb_risk::builder::RiskEngineBuilder;
+use oxide_arb_risk::clock::utc_clock;
 use oxide_arb_risk::context::{BlacklistGate, CircuitBreakerGate, ManualHaltGate, RiskContext};
 use oxide_arb_risk::pipeline::{RiskCheck, RiskPipeline};
 use oxide_arb_risk::traits::RiskMetrics;
@@ -162,7 +163,7 @@ impl RiskMetrics for GoldenMetrics {
     }
 }
 
-// ── Golden test: verify 23-check pipeline order via full report ────────────
+// ── Golden test: verify 24-check pipeline order via full report ────────────
 
 #[tokio::test]
 async fn pipeline_check_order_golden_test() {
@@ -170,6 +171,7 @@ async fn pipeline_check_order_golden_test() {
     let metrics = GoldenMetrics;
     let engine = RiskEngineBuilder::new()
         .config(config)
+        .clock(utc_clock())
         .initial_equity(Usd::new(dec!(5000)))
         .build(&metrics)
         .await
@@ -187,8 +189,10 @@ async fn pipeline_check_order_golden_test() {
     };
 
     // Use FullReport to get all check results in order
-    let decision =
-        engine.pre_trade_check(&ctx.opportunity, &prob, &metrics, ReportMode::FullReport);
+    let decision = engine
+        .pre_trade_check(&ctx.opportunity, &prob, &metrics, ReportMode::FullReport)
+        .await
+        .unwrap();
 
     let check_ids: Vec<RiskCheckId> = decision.checks.iter().map(|r| r.check_id).collect();
 
@@ -211,6 +215,7 @@ async fn pipeline_check_order_golden_test() {
         RiskCheckId::PotentialLossCap,
         RiskCheckId::MaxPositions,
         RiskCheckId::WsConnectivity,
+        RiskCheckId::ApiErrorRate,
         RiskCheckId::MinBalance,
         RiskCheckId::DirectionalConcentration,
         RiskCheckId::DailyDirectionalBudget,
@@ -220,8 +225,8 @@ async fn pipeline_check_order_golden_test() {
 
     assert_eq!(
         check_ids.len(),
-        23,
-        "expected exactly 23 checks, got {}",
+        24,
+        "expected exactly 24 checks, got {}",
         check_ids.len()
     );
     assert_eq!(check_ids, expected, "pipeline check order mismatch");
