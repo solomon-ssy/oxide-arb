@@ -151,7 +151,7 @@ impl fmt::Display for ConfigWarning {
 pub fn validate_settings_common(inner: &Inner) -> ConfigValidationReport {
     let mut report = ConfigValidationReport::default();
 
-    let kelly = inner.sizing.kelly_fraction;
+    let kelly = inner.risk.kelly_fraction;
     if kelly <= Decimal::ZERO || kelly > Decimal::ONE {
         report
             .errors
@@ -171,14 +171,13 @@ pub fn validate_settings_common(inner: &Inner) -> ConfigValidationReport {
     }
 
     if inner.risk.max_single_bet_usd > Decimal::ZERO
-        && inner.sizing.max_single_trade_usd > Decimal::ZERO
-        && inner.sizing.min_trade_usd > inner.sizing.max_single_trade_usd
+        && inner.risk.min_trade_usd > inner.risk.max_single_bet_usd
     {
         report.errors.push(ConfigValidationError::InfeasibleRange {
-            field_low: "sizing.min_trade_usd",
-            value_low: inner.sizing.min_trade_usd,
-            field_high: "sizing.max_single_trade_usd",
-            value_high: inner.sizing.max_single_trade_usd,
+            field_low: "risk.min_trade_usd",
+            value_low: inner.risk.min_trade_usd,
+            field_high: "risk.max_single_bet_usd",
+            value_high: inner.risk.max_single_bet_usd,
         });
     }
 
@@ -204,16 +203,9 @@ pub fn validate_settings_common(inner: &Inner) -> ConfigValidationReport {
         });
     }
 
-    if inner.risk.min_depth_usd > inner.sizing.max_single_trade_usd
-        && inner.sizing.max_single_trade_usd > Decimal::ZERO
-    {
-        report.errors.push(ConfigValidationError::InfeasibleRange {
-            field_low: "risk.min_depth_usd",
-            value_low: inner.risk.min_depth_usd,
-            field_high: "sizing.max_single_trade_usd",
-            value_high: inner.sizing.max_single_trade_usd,
-        });
-    }
+    // Depth check intentionally removed: min_depth_usd (order book depth
+    // requirement) is not directly comparable to max_single_bet_usd (bet size cap).
+    // The old validation compared against the deleted max_single_trade_usd.
 
     if inner.polymarket.fees.exponent <= Decimal::ZERO {
         report.errors.push(ConfigValidationError::InvalidValue {
@@ -337,7 +329,7 @@ mod tests {
     #[test]
     fn inverted_kelly_fraction_is_fatal() {
         let mut inner = Inner::default();
-        inner.sizing.kelly_fraction = dec!(1.5);
+        inner.risk.kelly_fraction = dec!(1.5);
         let report = validate_settings_common(&inner);
         assert!(report.has_errors());
     }

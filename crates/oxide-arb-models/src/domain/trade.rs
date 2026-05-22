@@ -17,12 +17,26 @@ use chrono::{DateTime, NaiveDate, Utc};
 use sea_orm::DeriveIntoActiveModel;
 use serde::{Deserialize, Serialize};
 
-/// Full trade record used across the business layer.
+/// Risk/accounting read model for a completed trade.
+///
+/// This is the **business-layer** view consumed by `RiskEngine` and accounting
+/// subsystems. It is intentionally distinct from `entities::trade::Model`
+/// (the `SeaORM` persistence entity) — the two have different field sets:
+///
+/// - **Entity** has execution-level fields (`side`, `shares`, `price`,
+///   `execution_id`, `order_id`) that risk doesn't need.
+/// - **`TradeRecord`** has accounting aggregates (`total_cost_usd`, `total_gas_usd`,
+///   `opportunity_snapshot`) that the entity stores differently.
+///
+/// The mapping `impl From<trade::Model> for TradeRecord` (or a dedicated
+/// assembler) belongs to the core crate and is planned for Phase 4.2.
+/// Until then, `TradeRecord` is constructed only in test harnesses.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TradeRecord {
     pub trade_id: TradeId,
     pub market_id: MarketId,
     pub event_id: EventId,
+    pub token_id: TokenId,
     pub status: TradeOutcome,
     pub detected_edge_bps: Bps,
     pub detected_profit_usd: Usd,

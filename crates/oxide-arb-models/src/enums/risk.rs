@@ -175,6 +175,32 @@ impl std::fmt::Display for BlacklistReason {
     }
 }
 
+/// Distinguishes fill-time vs. settlement-time trade accounting.
+///
+/// Endgame convergence trades have two accounting phases:
+/// - `Fill`: cost/volume recorded, potential loss entry created, but no
+///   realized profit flows into daily/weekly loss caps (settlement hasn't
+///   happened yet).
+/// - `Settlement`: realized profit recorded, potential loss resolved,
+///   breaker checks triggered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TradeAccountingPhase {
+    /// Trade was filled — record cost, counts, potential loss. No realized profit.
+    Fill,
+    /// Market settled — record realized profit, resolve potential loss, check caps.
+    Settlement,
+}
+
+impl std::fmt::Display for TradeAccountingPhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Fill => f.write_str("fill"),
+            Self::Settlement => f.write_str("settlement"),
+        }
+    }
+}
+
 /// Lifecycle state of an exposure reservation.
 #[derive(
     Debug,

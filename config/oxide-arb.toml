@@ -99,23 +99,7 @@ gtd_long_expiry_secs = 300
 max_retries_per_tier = 1
 price_tolerance_ticks = 2
 
-# ── Position Sizing (Quarter-Kelly) ──────────────────────────────────────────
-
-[sizing]
-kelly_fraction = "0.25"
-bankroll_usd = "1000"
-min_trade_usd = "1"
-max_single_trade_usd = "250"
-
-[sizing.kelly]
-max_kelly = "0.25"
-min_edge_bps = "200"
-
-[sizing.drawdown]
-max_drawdown_pct = "10"
-drawdown_reduction_factor = "0.5"
-
-# ── Risk Management ──────────────────────────────────────────────────────────
+# ── Risk Management + Position Sizing ────────────────────────────────────────
 
 [risk]
 min_depth_usd = "200"
@@ -138,11 +122,19 @@ reserve_balance_usd = "1000"
 max_open_positions = 3
 max_single_market_exposure_usd = "500"
 max_single_bet_usd = "25"
-stop_loss_pct = "30"
 
 max_total_exposure_pct = "80"
 reconciliation_interval_secs = 300
 reconciliation_tolerance_usd = "1.0"
+
+# Position sizing (absorbed from [sizing])
+kelly_fraction = "0.25"
+bankroll_usd = "1000"
+min_trade_usd = "1"
+
+# Endgame-specific rules
+max_concurrent_directional = 3
+daily_directional_budget = 10
 
 # 4-level circuit breaker (Closed → Open → HalfOpen → Recovered → Closed)
 [risk.circuit_breaker]
@@ -153,6 +145,17 @@ l4_cooldown_secs = 7200
 half_open_probes = 2
 recovery_observation_secs = 300
 max_cooldown_secs = 14400
+
+[risk.kelly]
+max_kelly = "0.25"
+min_edge_bps = "200"
+min_probability_confidence = "0.3"
+min_calibration_samples = 10
+max_probability_staleness_secs = 7200
+
+[risk.drawdown]
+max_drawdown_pct = "10"
+drawdown_reduction_factor = "0.5"
 
 # ── Keys / Credentials ───────────────────────────────────────────────────────
 

@@ -1,7 +1,8 @@
 //! Risk guard-rail configuration.
 //!
-//! Single-strategy (endgame) risk model. No separate arb/directional
-//! budgets — all limits apply to the one strategy we run.
+//! Single-strategy (endgame) risk model. All limits, position sizing,
+//! and endgame-specific parameters live in [`RiskConfig`].
+//! `PositionSizingConfig` has been absorbed here per ADR-001 §4.
 
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -42,9 +43,6 @@ pub struct RiskConfig {
     pub daily_budget_usd: Decimal,
 
     // ── Connectivity + balance health ────────────────────────────────
-    // TODO(cache): cache the external Polymarket balance snapshot with
-    // `CacheKey::Balance` in the balance/risk service once order submission
-    // and confirmation paths own invalidation.
     #[serde(default = "default_ws_disconnect_threshold")]
     pub ws_disconnect_threshold_secs: u64,
     #[serde(default = "default_min_balance")]
@@ -72,9 +70,6 @@ pub struct RiskConfig {
     /// Maximum USD for a single bet.
     #[serde(default = "default_max_single_bet")]
     pub max_single_bet_usd: Decimal,
-    /// Stop-loss as percentage of entry cost. Auto-close if exceeded.
-    #[serde(default = "default_stop_loss_pct")]
-    pub stop_loss_pct: Decimal,
 
     // ── Exposure as percentage of balance ─────────────────────────────
     /// Maximum portfolio exposure as a percentage of available balance.
@@ -92,6 +87,34 @@ pub struct RiskConfig {
     // ── Circuit breaker ──────────────────────────────────────────────
     #[serde(default)]
     pub circuit_breaker: CircuitBreakerConfig,
+
+    // ── Position Sizing (absorbed from PositionSizingConfig) ─────────
+    /// Quarter-Kelly fraction multiplier (f*/4).
+    #[serde(default = "default_kelly_fraction")]
+    pub kelly_fraction: Decimal,
+    /// Total bankroll available for Kelly computation (USD).
+    #[serde(default = "default_bankroll")]
+    pub bankroll_usd: Decimal,
+    /// Minimum trade size (below this, skip the opportunity).
+    #[serde(default = "default_min_trade")]
+    pub min_trade_usd: Decimal,
+    #[serde(default)]
+    pub kelly: KellyConfig,
+    #[serde(default)]
+    pub drawdown: DrawdownConfig,
+
+    // ── API health ────────────────────────────────────────────────────
+    /// API error rate threshold (0..1). Exceeding triggers L2 Session breaker.
+    #[serde(default = "default_api_error_rate_threshold")]
+    pub api_error_rate_threshold: Decimal,
+
+    // ── Endgame-specific rules ───────────────────────────────────────
+    /// Max concurrent positions in the same directional side.
+    #[serde(default = "default_max_concurrent_directional")]
+    pub max_concurrent_directional: usize,
+    /// Daily budget of directional trades per side.
+    #[serde(default = "default_daily_directional_budget")]
+    pub daily_directional_budget: u32,
 }
 
 impl Default for RiskConfig {
@@ -119,11 +142,18 @@ impl Default for RiskConfig {
             max_open_positions: default_max_open_positions(),
             max_single_market_exposure_usd: default_max_market_exposure(),
             max_single_bet_usd: default_max_single_bet(),
-            stop_loss_pct: default_stop_loss_pct(),
             max_total_exposure_pct: default_max_total_exposure_pct(),
             reconciliation_interval_secs: default_reconciliation_interval(),
             reconciliation_tolerance_usd: default_reconciliation_tolerance(),
             circuit_breaker: CircuitBreakerConfig::default(),
+            kelly_fraction: default_kelly_fraction(),
+            bankroll_usd: default_bankroll(),
+            min_trade_usd: default_min_trade(),
+            kelly: KellyConfig::default(),
+            drawdown: DrawdownConfig::default(),
+            api_error_rate_threshold: default_api_error_rate_threshold(),
+            max_concurrent_directional: default_max_concurrent_directional(),
+            daily_directional_budget: default_daily_directional_budget(),
         }
     }
 }
@@ -188,9 +218,6 @@ const fn default_max_market_exposure() -> Decimal {
 const fn default_max_single_bet() -> Decimal {
     dec!(25)
 }
-const fn default_stop_loss_pct() -> Decimal {
-    dec!(30)
-}
 const fn default_max_total_exposure_pct() -> Decimal {
     dec!(80)
 }
@@ -199,6 +226,99 @@ const fn default_reconciliation_interval() -> u64 {
 }
 const fn default_reconciliation_tolerance() -> Decimal {
     dec!(1.0)
+}
+const fn default_kelly_fraction() -> Decimal {
+    dec!(0.25)
+}
+const fn default_bankroll() -> Decimal {
+    dec!(1000)
+}
+const fn default_min_trade() -> Decimal {
+    dec!(1)
+}
+const fn default_api_error_rate_threshold() -> Decimal {
+    dec!(0.5)
+}
+const fn default_max_concurrent_directional() -> usize {
+    3
+}
+const fn default_daily_directional_budget() -> u32 {
+    10
+}
+
+/// Kelly criterion sub-configuration.
+#[derive(Debug, Clone, Deserialize, Validate)]
+pub struct KellyConfig {
+    /// Maximum Kelly fraction before capping.
+    #[serde(default = "default_kelly_max")]
+    pub max_kelly: Decimal,
+    /// Minimum edge (bps) below which Kelly returns zero.
+    #[serde(default = "default_kelly_min_edge")]
+    pub min_edge_bps: Decimal,
+    /// Minimum calibration confidence (0..1) below which Kelly returns zero.
+    #[serde(default = "default_kelly_min_confidence")]
+    pub min_probability_confidence: Decimal,
+    /// Minimum historical sample count required for calibration to be trusted.
+    #[serde(default = "default_kelly_min_samples")]
+    pub min_calibration_samples: u32,
+    /// Maximum staleness (secs) of calibration model before Kelly returns zero.
+    #[serde(default = "default_kelly_max_staleness")]
+    pub max_probability_staleness_secs: u64,
+}
+
+impl Default for KellyConfig {
+    fn default() -> Self {
+        Self {
+            max_kelly: default_kelly_max(),
+            min_edge_bps: default_kelly_min_edge(),
+            min_probability_confidence: default_kelly_min_confidence(),
+            min_calibration_samples: default_kelly_min_samples(),
+            max_probability_staleness_secs: default_kelly_max_staleness(),
+        }
+    }
+}
+
+const fn default_kelly_max() -> Decimal {
+    dec!(0.25)
+}
+const fn default_kelly_min_edge() -> Decimal {
+    dec!(200)
+}
+const fn default_kelly_min_confidence() -> Decimal {
+    dec!(0.3)
+}
+const fn default_kelly_min_samples() -> u32 {
+    10
+}
+const fn default_kelly_max_staleness() -> u64 {
+    7200
+}
+
+/// Drawdown protection sub-configuration.
+#[derive(Debug, Clone, Deserialize, Validate)]
+pub struct DrawdownConfig {
+    /// Maximum drawdown (%) before reducing position sizes.
+    #[serde(default = "default_max_dd")]
+    pub max_drawdown_pct: Decimal,
+    /// Size reduction factor when drawdown limit is hit.
+    #[serde(default = "default_dd_reduction")]
+    pub drawdown_reduction_factor: Decimal,
+}
+
+impl Default for DrawdownConfig {
+    fn default() -> Self {
+        Self {
+            max_drawdown_pct: default_max_dd(),
+            drawdown_reduction_factor: default_dd_reduction(),
+        }
+    }
+}
+
+const fn default_max_dd() -> Decimal {
+    dec!(10)
+}
+const fn default_dd_reduction() -> Decimal {
+    dec!(0.5)
 }
 
 /// 4-level circuit breaker configuration.

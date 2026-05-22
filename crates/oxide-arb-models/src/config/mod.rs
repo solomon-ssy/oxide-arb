@@ -23,7 +23,6 @@ mod observability;
 mod polymarket;
 mod risk;
 mod settlement_oracle;
-mod sizing;
 mod treasury;
 pub mod validation;
 
@@ -40,7 +39,6 @@ pub use observability::*;
 pub use polymarket::*;
 pub use risk::*;
 pub use settlement_oracle::*;
-pub use sizing::*;
 pub use treasury::*;
 
 use crate::config::validation::{validate_settings_common, validate_settings_mode};
@@ -187,8 +185,6 @@ pub struct Inner {
     pub execution: ExecutionConfig,
     #[serde(default)]
     pub risk: RiskConfig,
-    #[serde(default)]
-    pub sizing: PositionSizingConfig,
     #[serde(default)]
     pub market_data: MarketDataConfig,
     #[serde(default)]

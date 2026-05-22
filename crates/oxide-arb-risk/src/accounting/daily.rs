@@ -1,0 +1,120 @@
+//! Daily accounting with automatic period rollover.
+
+use crate::types::PeriodStats;
+use chrono::{NaiveDate, Utc};
+use oxide_arb_models::enums::common::TradeOutcome;
+use oxide_arb_models::types::Usd;
+
+pub struct DailyAccounting {
+    window_start: NaiveDate,
+    stats: PeriodStats,
+    budget_remaining: Usd,
+    initial_budget: Usd,
+}
+
+impl DailyAccounting {
+    #[must_use]
+    pub fn new(budget: Usd) -> Self {
+        Self {
+            window_start: Utc::now().date_naive(),
+            stats: PeriodStats::default(),
+            budget_remaining: budget,
+            initial_budget: budget,
+        }
+    }
+
+    #[must_use]
+    pub fn from_snapshot(
+        window_start: NaiveDate,
+        stats: PeriodStats,
+        budget: Usd,
+        spent: Usd,
+    ) -> Self {
+        Self {
+            window_start,
+            stats,
+            budget_remaining: budget - spent,
+            initial_budget: budget,
+        }
+    }
+
+    pub fn record_trade(
+        &mut self,
+        net_profit: Usd,
+        fees: Usd,
+        cost: Usd,
+        outcome: TradeOutcome,
+    ) -> bool {
+        let rolled = self.maybe_rollover();
+        self.stats.trade_count += 1;
+        self.stats.pnl += net_profit;
+        self.stats.fees += fees;
+        match outcome {
+            TradeOutcome::Success => self.stats.success_count += 1,
+            TradeOutcome::Miss => self.stats.miss_count += 1,
+            _ => {}
+        }
+        if net_profit.is_negative() {
+            let abs_loss = net_profit.abs();
+            self.stats.loss += abs_loss;
+            self.stats.max_single_loss = self.stats.max_single_loss.max(abs_loss);
+        } else {
+            self.stats.max_single_profit = self.stats.max_single_profit.max(net_profit);
+        }
+        self.budget_remaining -= cost;
+        rolled
+    }
+
+    #[must_use]
+    pub const fn daily_loss(&self) -> Usd {
+        self.stats.loss
+    }
+
+    #[must_use]
+    pub const fn daily_pnl(&self) -> Usd {
+        self.stats.pnl
+    }
+
+    #[must_use]
+    pub const fn budget_remaining(&self) -> Usd {
+        self.budget_remaining
+    }
+
+    #[must_use]
+    pub fn is_budget_exhausted(&self) -> bool {
+        self.budget_remaining <= Usd::ZERO
+    }
+
+    #[must_use]
+    pub const fn stats(&self) -> &PeriodStats {
+        &self.stats
+    }
+
+    #[must_use]
+    pub const fn window_start(&self) -> NaiveDate {
+        self.window_start
+    }
+
+    #[must_use]
+    pub fn budget_spent(&self) -> Usd {
+        self.initial_budget - self.budget_remaining
+    }
+
+    pub fn maybe_rollover(&mut self) -> bool {
+        let today = Utc::now().date_naive();
+        if today > self.window_start {
+            tracing::info!(
+                previous = %self.window_start,
+                new = %today,
+                final_pnl = %self.stats.pnl,
+                "daily accounting rollover"
+            );
+            self.window_start = today;
+            self.stats = PeriodStats::default();
+            self.budget_remaining = self.initial_budget;
+            true
+        } else {
+            false
+        }
+    }
+}

@@ -72,6 +72,10 @@ macro_rules! decimal_newtype {
             pub fn ceil(self) -> Self { Self(self.0.ceil()) }
         }
 
+        impl Default for $name {
+            fn default() -> Self { Self::ZERO }
+        }
+
         impl fmt::Display for $name {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 write!(f, "{}", self.0)

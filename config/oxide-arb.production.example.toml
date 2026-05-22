@@ -81,7 +81,6 @@ trade_confirm_poll_interval_secs = 2
 kelly_fraction = "0.25"
 bankroll_usd = "5000"
 min_trade_usd = "5"
-max_single_trade_usd = "250"
 
 [sizing.kelly]
 max_kelly = "0.25"
@@ -112,7 +111,6 @@ reserve_balance_usd = "2000"
 max_open_positions = 5
 max_single_market_exposure_usd = "1000"
 max_single_bet_usd = "250"
-stop_loss_pct = "30"
 
 [risk.circuit_breaker]
 enabled = true

@@ -1,0 +1,169 @@
+//! Position tracking and potential-loss ledger.
+//!
+//! [`PositionTracker`] maintains a per-market exposure view derived from
+//! [`RiskMetrics`]. [`PotentialLossLedger`] tracks worst-case loss for
+//! unsettled positions so the risk engine can account for committed capital.
+
+use crate::traits::RiskMetrics;
+use chrono::{DateTime, Utc};
+use oxide_arb_models::domain::potential_loss::PotentialLossEntry;
+use oxide_arb_models::domain::risk::MarketExposure;
+use oxide_arb_models::enums::common::LedgerStatus;
+use oxide_arb_models::types::{MarketId, Usd};
+use std::collections::HashMap;
+
+// ── Position Tracker ────────────────────────────────────────────────────────
+
+/// Aggregated per-market exposure view, refreshed from [`RiskMetrics`].
+///
+/// Not a ledger of individual positions — it is a cached summary for
+/// fast lookup during pre-trade checks.
+pub struct PositionTracker {
+    market_exposures: HashMap<MarketId, MarketExposure>,
+    total_position_value: Usd,
+    last_refresh: DateTime<Utc>,
+}
+
+impl PositionTracker {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            market_exposures: HashMap::new(),
+            total_position_value: Usd::ZERO,
+            last_refresh: Utc::now(),
+        }
+    }
+
+    /// Re-derive exposure data from the authoritative [`RiskMetrics`] source.
+    pub fn refresh(&mut self, metrics: &dyn RiskMetrics) {
+        self.market_exposures.clear();
+
+        let positions = metrics.open_positions();
+        let mut total = Usd::ZERO;
+
+        let mut by_market: HashMap<MarketId, Usd> = HashMap::new();
+        for pos in &positions {
+            *by_market.entry(pos.market_id.clone()).or_insert(Usd::ZERO) += pos.cost_basis;
+        }
+
+        for (market_id, position_value) in &by_market {
+            let full_exposure = metrics.market_exposure(market_id);
+            let reserved = (full_exposure - *position_value).max(Usd::ZERO);
+            let exposure = MarketExposure {
+                market_id: market_id.clone(),
+                position_value: *position_value,
+                reserved_value: reserved,
+                total_exposure: *position_value + reserved,
+            };
+            total += exposure.total_exposure;
+            self.market_exposures.insert(market_id.clone(), exposure);
+        }
+
+        self.total_position_value = total;
+        self.last_refresh = Utc::now();
+        tracing::info!(
+            markets = self.market_exposures.len(),
+            total_value = %self.total_position_value,
+            "position tracker refreshed"
+        );
+    }
+
+    /// Exposure in a single market. Returns `Usd::ZERO` if unknown.
+    #[must_use]
+    pub fn market_exposure(&self, market_id: &MarketId) -> Usd {
+        self.market_exposures
+            .get(market_id)
+            .map_or(Usd::ZERO, |e| e.total_exposure)
+    }
+
+    #[must_use]
+    pub const fn total_position_value(&self) -> Usd {
+        self.total_position_value
+    }
+
+    #[must_use]
+    pub fn all_exposures(&self) -> Vec<&MarketExposure> {
+        self.market_exposures.values().collect()
+    }
+}
+
+impl Default for PositionTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ── Potential Loss Ledger ───────────────────────────────────────────────────
+
+/// Tracks maximum potential loss for positions that have not yet settled.
+///
+/// The risk engine subtracts `total_potential_loss()` from available capital
+/// to ensure worst-case exposure is always accounted for.
+pub struct PotentialLossLedger {
+    entries: HashMap<String, PotentialLossEntry>,
+}
+
+impl PotentialLossLedger {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+        }
+    }
+
+    /// Bootstrap from a list of entries (e.g. loaded from persistence).
+    #[must_use]
+    pub fn from_entries(entries: Vec<PotentialLossEntry>) -> Self {
+        let map = entries
+            .into_iter()
+            .map(|e| (e.entry_id.clone(), e))
+            .collect();
+        Self { entries: map }
+    }
+
+    /// Record a new potential-loss entry.
+    pub fn record_entry(&mut self, entry: PotentialLossEntry) {
+        tracing::info!(
+            entry_id = %entry.entry_id,
+            market_id = %entry.market_id,
+            max_loss = %entry.max_loss,
+            "potential loss entry recorded"
+        );
+        self.entries.insert(entry.entry_id.clone(), entry);
+    }
+
+    /// Mark an entry as resolved (position settled or closed).
+    pub fn resolve(&mut self, entry_id: &str) {
+        if let Some(entry) = self.entries.get_mut(entry_id) {
+            entry.status = LedgerStatus::Resolved;
+            entry.resolved_at = Some(Utc::now());
+            tracing::info!(entry_id, "potential loss entry resolved");
+        }
+    }
+
+    /// Sum of `max_loss` across all active (unresolved) entries.
+    #[must_use]
+    pub fn total_potential_loss(&self) -> Usd {
+        self.entries
+            .values()
+            .filter(|e| e.is_active())
+            .map(|e| e.max_loss)
+            .sum()
+    }
+
+    #[must_use]
+    pub fn active_count(&self) -> usize {
+        self.entries.values().filter(|e| e.is_active()).count()
+    }
+
+    #[must_use]
+    pub fn active_entries(&self) -> Vec<&PotentialLossEntry> {
+        self.entries.values().filter(|e| e.is_active()).collect()
+    }
+}
+
+impl Default for PotentialLossLedger {
+    fn default() -> Self {
+        Self::new()
+    }
+}
