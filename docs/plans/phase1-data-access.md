@@ -268,6 +268,14 @@ pub struct CategoryFeeParams {
 }
 ```
 
+**Deferred cache hook**:
+
+`CacheKey::FeeParams { category }` 已在 Phase 2 cache key 中定义，但不能在 repository 层实现。Fee 参数来自静态配置、运行时配置或后续 fee refresh service，必须由 `FeeRateSource` / fee service 拥有失效逻辑。Phase 1/4 实现 fee runtime refresh 时需接入：
+
+- read: category fee params -> `CacheKey::FeeParams { category }`
+- TTL: 600s
+- invalidate: fee config changed / runtime config override changed / fee snapshot refreshed
+
 ---
 
 ## 6. Settlement Oracle

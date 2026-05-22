@@ -201,6 +201,11 @@ decimal_newtype!(
     Bps
 );
 
+decimal_newtype!(
+    /// Statistical probability, confidence, or model weight stored losslessly.
+    Probability
+);
+
 // ── Cross-type arithmetic ───────────────────────────────────────────────
 
 impl std::ops::Mul<Price> for Shares {

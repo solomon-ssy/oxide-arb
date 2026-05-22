@@ -568,6 +568,10 @@ impl MultiConstraintSizer {
 
         // 3. Per-market exposure
         let current_market_exp = metrics.market_exposure(&opp.market_id).await;
+        // Phase 4 implementation note:
+        // cache `market_exposure` / position summary with
+        // `CacheKey::PositionSummary { market_id }` once this service owns
+        // invalidation after position, trade, and settlement updates.
         let market_cap = Usd::new(
             (self.risk_config.max_single_market_exposure_usd - current_market_exp)
                 .max(Decimal::ZERO),
@@ -576,6 +580,9 @@ impl MultiConstraintSizer {
         // 4. Portfolio exposure
         let total_exp = metrics.total_exposure().await;
         let balance = metrics.available_balance().await;
+        // Phase 4 implementation note:
+        // cache external Polymarket balance snapshots with `CacheKey::Balance`
+        // once order submission and confirmation paths own invalidation.
         let max_portfolio = balance * self.risk_config.max_total_exposure_pct / Decimal::from(100);
         let portfolio_cap = Usd::new((max_portfolio - total_exp).max(Decimal::ZERO));
 
@@ -1816,6 +1823,11 @@ impl LedgerReconciler {
 - `AlertDispatcher`: 所有 mismatch 发送通知
 - 调度频率：默认每 5 分钟一次，可通过 `RuntimeConfig` 调整
 
+**缓存延期项**:
+- `CacheKey::Balance` 不能在 repository 层提前实现；它依赖 `BalanceQuerier` / wallet service 的外部快照读取，以及订单提交、成交确认、reconcile 后的失效路径。
+- Phase 4 实现 `BalanceQuerier` 时必须把 `CacheKey::Balance` 接入 service 层，并在所有改变可用余额的路径后 invalidate。
+- `CacheKey::PositionSummary { market_id }` 必须由风险/持仓服务持有，因为失效依赖 position lifecycle、trade outcome、settlement/reconcile 多条写路径。
+
 ---
 
 ## 补充设计 D：DrawdownManager
@@ -1850,3 +1862,41 @@ pub enum DrawdownAction {
     Emergency { pct: f64 },
 }
 ```
+
+---
+
+## Phase 4 补充 — 关键缺口修补（Phase 4+ 计划）
+
+### P1. ExposureReservation 并发安全更新
+
+补充设计 B 中的 `try_reserve` 必须使用 AtomicU64 CAS loop 保证原子性（避免 check-then-act 竞态）。
+trait `ExposureReservationBackend` 已定义在 `oxide-arb-models/src/domain/exposure.rs`，包含：
+- `try_reserve(market_id, amount, ttl)` — CAS 原子预留
+- `confirm(id)` / `release(id)` — 确认/释放
+- `total_reserved_usd()` / `active_count()`
+
+InMemory 实现使用 DashMap + AtomicU64 CAS loop；Redis 实现预留为未来扩展。
+
+### P2. Calibration 全链路 Wiring
+
+`AppContext::build()` 步骤追加：
+1. `PgCalibrationRepository` → `CachedCalibrationRepository` 包装
+2. `CoreCalibrationDataSource` 注入 cached_repo + GammaClient + CtfOracle
+3. `CalibrationUpdater::new(calibrator, data_source, config)`
+4. `TaskRegistry` spawn periodic: `updater.tick()` every 60s
+5. tick 完成后 invalidate `CacheKey::AllCalibrationBuckets`
+
+### P3. ReportGenerator 注入 ReportRepository
+
+`ReportGenerator` 通过 `Arc<dyn ReportRepository>` 注入（trait 已定义），生成日/周报后：
+- `save_daily(date, json)` 或 `save_weekly(start, end, json)`
+- 发送 AlertDispatcher 通知
+
+### P4. CalibrationDataSource 桥接实现
+
+`CoreCalibrationDataSource` 结构体包含：
+- `calibration_repo: CachedCalibrationRepository<PgCalibrationRepository>`
+- `gamma_client: Arc<GammaClient>`
+- `ctf_oracle: Arc<dyn CtfOracle>`
+
+将 `calibration_outcome::Model` 转换为 `UnresolvedOutcome`，桥接 repository 与 algorithm。

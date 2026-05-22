@@ -30,6 +30,9 @@ impl FeeSnapshot {
     /// Build a snapshot from application configuration.
     #[must_use]
     pub fn from_config(config: &FeesConfig) -> Self {
+        // TODO(cache): cache category fee parameters with
+        // `CacheKey::FeeParams { category }` once runtime fee config updates
+        // own invalidation across API and scoring services.
         let category_params = config
             .all_category_rates()
             .map(|(category, fee_rate, exponent)| {

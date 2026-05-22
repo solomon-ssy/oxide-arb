@@ -38,7 +38,11 @@ fn create_tables() -> Vec<TableCreateStatement> {
             .col(ColumnDef::new(LifecycleEvent::Phase).text().not_null())
             .col(ColumnDef::new(LifecycleEvent::Stage).text().null())
             .col(ColumnDef::new(LifecycleEvent::Message).text().not_null())
-            .col(ColumnDef::new(LifecycleEvent::Metadata).text().null())
+            .col(
+                ColumnDef::new(LifecycleEvent::Metadata)
+                    .json_binary()
+                    .null(),
+            )
             .col(
                 ColumnDef::new(LifecycleEvent::CreatedAt)
                     .timestamp_with_time_zone()

@@ -1,13 +1,16 @@
 //! `markets` table entity.
 
-use crate::enums::common::MarketCategory;
+use crate::enums::common::{MarketCategory, TickSize};
 use crate::enums::market::MarketStatus;
 use crate::types::{EventId, MarketId, TokenId};
 use chrono::{DateTime, Utc};
 use oxide_arb_macros::ActiveModelDefaults;
 use sea_orm::entity::prelude::*;
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, ActiveModelDefaults)]
+#[derive(
+    Clone, Debug, PartialEq, Eq, DeriveEntityModel, ActiveModelDefaults, Serialize, Deserialize,
+)]
 #[sea_orm(table_name = "market")]
 #[active_defaults(timestamp(created_at), timestamp(updated_at, always))]
 pub struct Model {
@@ -24,8 +27,7 @@ pub struct Model {
     pub outcome: Option<String>,
     pub yes_token_id: TokenId,
     pub no_token_id: TokenId,
-    #[sea_orm(column_type = "Text")]
-    pub tick_size: String,
+    pub tick_size: TickSize,
     pub neg_risk: bool,
     pub end_date: Option<DateTime<Utc>>,
     pub resolved_at: Option<DateTime<Utc>>,

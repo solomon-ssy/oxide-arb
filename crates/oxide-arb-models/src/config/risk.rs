@@ -42,6 +42,9 @@ pub struct RiskConfig {
     pub daily_budget_usd: Decimal,
 
     // ── Connectivity + balance health ────────────────────────────────
+    // TODO(cache): cache the external Polymarket balance snapshot with
+    // `CacheKey::Balance` in the balance/risk service once order submission
+    // and confirmation paths own invalidation.
     #[serde(default = "default_ws_disconnect_threshold")]
     pub ws_disconnect_threshold_secs: u64,
     #[serde(default = "default_min_balance")]

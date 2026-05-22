@@ -1,12 +1,16 @@
 //! `events` table entity.
 
 use crate::enums::common::MarketCategory;
+use crate::enums::market::EventStatus;
 use crate::types::EventId;
 use chrono::{DateTime, Utc};
 use oxide_arb_macros::ActiveModelDefaults;
 use sea_orm::entity::prelude::*;
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, ActiveModelDefaults)]
+#[derive(
+    Clone, Debug, PartialEq, Eq, DeriveEntityModel, ActiveModelDefaults, Serialize, Deserialize,
+)]
 #[sea_orm(table_name = "event")]
 #[active_defaults(timestamp(created_at), timestamp(updated_at, always))]
 pub struct Model {
@@ -17,12 +21,11 @@ pub struct Model {
     #[sea_orm(column_type = "Text")]
     pub slug: String,
     pub category: MarketCategory,
-    #[sea_orm(column_type = "Text")]
-    pub status: String,
+    pub status: EventStatus,
     pub neg_risk: bool,
     pub end_date: Option<DateTime<Utc>>,
-    #[sea_orm(column_type = "Text", nullable)]
-    pub raw_gamma: Option<String>,
+    #[sea_orm(column_type = "JsonBinary", nullable)]
+    pub raw_gamma: Option<serde_json::Value>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

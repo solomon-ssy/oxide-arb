@@ -1,5 +1,10 @@
 //! Unit tests for cache layer components (no external deps required).
 
+use oxide_arb_models::{
+    domain::calibration::{DurationBucket, PriceZone},
+    enums::common::MarketCategory,
+    types::MarketId,
+};
 use oxide_arb_storage::cache::{CacheBackend, CacheKey, MokaBackend};
 use std::time::Duration;
 
@@ -76,18 +81,18 @@ async fn moka_mset_bulk_write() {
 #[tokio::test]
 async fn cache_key_format_and_ttl() {
     let key = CacheKey::MarketEntry {
-        market_id: "0xabc".to_string(),
+        market_id: MarketId::new("0xabc"),
     };
     assert_eq!(key.as_str(), "mkt:0xabc");
     assert_eq!(key.domain(), "market");
     assert_eq!(key.ttl(), Duration::from_secs(300));
 
     let key = CacheKey::CalibrationBucket {
-        category: "sports".to_string(),
-        price_zone: "deep_yes".to_string(),
-        duration_bucket: "short".to_string(),
+        category: MarketCategory::Sports,
+        price_zone: PriceZone::Z99,
+        duration_bucket: DurationBucket::Short,
     };
-    assert_eq!(key.as_str(), "cal:sports:deep_yes:short");
+    assert_eq!(key.as_str(), "cal:sports:z99:short");
     assert_eq!(key.ttl(), Duration::from_secs(3600));
 }
 

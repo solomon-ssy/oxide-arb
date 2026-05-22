@@ -1532,3 +1532,36 @@ pub fn estimate_slippage(
 | `orderbook_walker.rs` | ~150 | ~200 |
 | **新增合计** | **~470** | **~600** |
 | **Phase 3 总计（含 §14）** | **~2,270** | **~2,630** |
+
+---
+
+## Phase 3 补充 — 关键缺口修补（Phase 4+ 计划）
+
+> 以下内容在 Phase 3 代码基础上追加实现，由 Phase 4+ 缺口修补计划驱动。
+
+### S1. StalenessPolicy::confidence_discount 接入 Scorer
+
+**已完成**。`EndgameScorer::score()` 公式变更为：
+
+```
+score = expected_net_profit × fill_probability × urgency × category_weight × staleness_discount
+```
+
+`ScoredOpportunity` 新增 `staleness_discount: Decimal` 字段用于审计追踪。
+
+### S2. CalibrationUpdater::tick() 集成测试
+
+**已完成**。新建 `tests/calibration_updater_integration.rs`，9 个测试场景：
+- Happy path (Gamma 确认 → 更新 → 持久化)
+- Gamma miss / CTF 不一致 / CTF 不可用 fallback
+- 错误预测记录 / 零 unresolved / 批量处理
+- MoM prior 更新验证（稀疏 bucket 被更新，密集 bucket 保持原始）
+
+### S3. CooldownBackend / ConvergenceBackend 抽象 trait
+
+**已完成**。新建 `src/backend.rs` 定义：
+- `CooldownBackend` — `may_emit`, `record_emission`, `reset`, `take_suppressed_count`, `tracked_count`
+- `ConvergenceBackend` — `update_and_get`, `remove`, `tracked_count`
+
+`EmissionCooldown` 和 `ConvergenceTracker` 均实现对应 trait（当前 InMemory Moka 实现）。
+未来多实例部署可注入 Redis-backed 实现。

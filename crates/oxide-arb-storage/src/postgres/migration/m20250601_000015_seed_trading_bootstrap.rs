@@ -1,3 +1,9 @@
+//! Seed migration: trading bootstrap v1.
+//!
+//! Depends on the risk engine state and runtime config tables created by
+//! earlier schema migrations. The seed plan is idempotent and preserves
+//! operator-modified values through `ON CONFLICT DO NOTHING`.
+
 use oxide_arb_models::seed::plans;
 use sea_orm_migration::prelude::*;
 
@@ -7,10 +13,10 @@ pub struct Migration;
 #[async_trait::async_trait]
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        crate::postgres::seed::runner::run_plan(
+        super::migrate_seed(crate::postgres::seed::runner::run_plan(
             manager.get_connection(),
             &plans::trading_bootstrap_v1(),
-        )
+        ))
         .await
     }
 

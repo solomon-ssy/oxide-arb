@@ -731,3 +731,28 @@ GET  /api/v1/replay/history  → 历史 replay 记录列表
 | `ch_queries.rs` | ~80 | ~30 |
 | `lib.rs` (CLI entry) | ~60 | — |
 | **合计** | **~1,220** | **~620** |
+
+---
+
+## Phase 5 补充 — CH Schema 粒度增强（Phase 4+ 计划）
+
+### tick_events_l2 表
+
+**已完成**。新增 `tick_events_l2` 表存储完整 L2 orderbook level 数据：
+
+- 使用 `Array(Decimal64(8))` 列（bid_prices/sizes, ask_prices/sizes）避免 JSON 解析
+- 支持 `snapshot`（全量替换）和 `delta`（增量更新）两种事件类型
+- 90 天 TTL，按月分区
+- DDL: `crates/oxide-arb-storage/src/clickhouse/sql/tick_events_l2.sql`
+- Row: `crates/oxide-arb-models/src/clickhouse/tick_event_l2.rs` (`TickEventL2Row`)
+
+### 写入路径
+
+`DataPipeline` 收到 WS event 后双写：
+1. `tick_events` — 轻量 BBO 级（现有）
+2. `tick_events_l2` — 完整 L2 级（新增）
+
+### BookReplayer 数据源变更
+
+`BookReplayer` 优先从 `tick_events_l2` 消费 Array 型数据做 L2 重建，
+fallback 到 `book_snapshots` JSON 解析（兼容历史数据）。

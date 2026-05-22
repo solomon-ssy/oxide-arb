@@ -37,6 +37,9 @@ pub enum StorageError {
     #[error("Serialization error: {0}")]
     Serialization(#[from] bitcode::Error),
 
+    #[error("Codec error: {0}")]
+    Codec(String),
+
     #[cfg(not(feature = "storage"))]
     #[error("Serialization error: {0}")]
     SerializationStr(String),

@@ -1,9 +1,12 @@
-//! Convergence duration tracker using `moka::sync::Cache`.
+//! In-memory convergence duration tracker using `moka::sync::Cache`.
 //!
 //! Tracks how long each market has been in the convergence zone (price above
 //! the high threshold). Entries are keyed by `MarketId` and automatically
 //! evicted after `max_idle_secs` of inactivity.
+//!
+//! Implements [`ConvergenceBackend`] for use as the default in-process backend.
 
+use crate::backend::ConvergenceBackend;
 use chrono::{DateTime, Utc};
 use moka::sync::Cache;
 use oxide_arb_models::{config::ConvergenceTrackerConfig, types::MarketId};
@@ -26,11 +29,11 @@ struct ConvergenceEntry {
 }
 
 /// Tracks per-market convergence duration with automatic idle eviction.
-pub struct ConvergenceTracker {
+pub struct InMemoryConvergenceTracker {
     entries: Cache<MarketId, ConvergenceEntry>,
 }
 
-impl ConvergenceTracker {
+impl InMemoryConvergenceTracker {
     /// Create a new tracker from configuration.
     #[must_use]
     pub fn new(config: &ConvergenceTrackerConfig) -> Self {
@@ -91,6 +94,25 @@ impl ConvergenceTracker {
     }
 }
 
+impl ConvergenceBackend for InMemoryConvergenceTracker {
+    fn update_and_get(
+        &self,
+        market_id: &MarketId,
+        direction: ConvergenceDirection,
+        now: DateTime<Utc>,
+    ) -> u64 {
+        self.update_and_get(market_id, direction, now)
+    }
+
+    fn remove(&self, market_id: &MarketId) {
+        self.remove(market_id);
+    }
+
+    fn tracked_count(&self) -> u64 {
+        self.tracked_count()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -104,7 +126,7 @@ mod tests {
 
     #[test]
     fn first_update_returns_zero() {
-        let tracker = ConvergenceTracker::new(&test_config());
+        let tracker = InMemoryConvergenceTracker::new(&test_config());
         let mid = MarketId::new("m1");
         let now = Utc::now();
         let dur = tracker.update_and_get(&mid, ConvergenceDirection::YesLikely, now);
@@ -113,7 +135,7 @@ mod tests {
 
     #[test]
     fn same_direction_accumulates_duration() {
-        let tracker = ConvergenceTracker::new(&test_config());
+        let tracker = InMemoryConvergenceTracker::new(&test_config());
         let mid = MarketId::new("m1");
         let t0 = Utc::now();
         tracker.update_and_get(&mid, ConvergenceDirection::YesLikely, t0);
@@ -125,7 +147,7 @@ mod tests {
 
     #[test]
     fn direction_change_resets_timer() {
-        let tracker = ConvergenceTracker::new(&test_config());
+        let tracker = InMemoryConvergenceTracker::new(&test_config());
         let mid = MarketId::new("m1");
         let t0 = Utc::now();
         tracker.update_and_get(&mid, ConvergenceDirection::YesLikely, t0);
@@ -137,7 +159,7 @@ mod tests {
 
     #[test]
     fn remove_clears_entry() {
-        let tracker = ConvergenceTracker::new(&test_config());
+        let tracker = InMemoryConvergenceTracker::new(&test_config());
         let mid = MarketId::new("m1");
         tracker.update_and_get(&mid, ConvergenceDirection::YesLikely, Utc::now());
         tracker.entries.run_pending_tasks();
@@ -154,7 +176,7 @@ mod tests {
             max_idle_secs: 0,
             max_capacity: 100,
         };
-        let tracker = ConvergenceTracker::new(&config);
+        let tracker = InMemoryConvergenceTracker::new(&config);
         let mid = MarketId::new("m1");
         tracker.update_and_get(&mid, ConvergenceDirection::YesLikely, Utc::now());
 

@@ -9,14 +9,15 @@
 //! - [`fee`] — `FeeEstimator` trait for dependency-injected fee calculation.
 //! - [`staleness`] — `StalenessPolicy` confidence discount lookup.
 //! - [`urgency`] — `UrgencyFactor` non-linear urgency multiplier.
-//! - [`cooldown`] — `EmissionCooldown` per-market duplicate suppression.
+//! - [`cooldown`] — `InMemoryEmissionCooldown` per-market duplicate suppression.
 //! - [`walker`] — `OrderbookWalker` simulates order execution through book levels.
-//! - [`endgame`] — `EndgameDetector`, `ConvergenceTracker`, `ConfidenceFusion`.
+//! - [`endgame`] — `EndgameDetector`, `InMemoryConvergenceTracker`, `ConfidenceFusion`.
 //! - [`calibration`] — `ResolutionCalibrator`, `MoM` priors, 4-tier fallback, updater.
 //! - [`fill_probability`] — Endgame-specific fill probability estimation.
 //! - [`scorer`] — `EndgameScorer` composite opportunity ranking.
 //! - [`pipeline`] — `OpportunityPipeline` end-to-end detect→score→emit orchestration.
 
+pub mod backend;
 pub mod calibration;
 pub mod cooldown;
 pub mod endgame;

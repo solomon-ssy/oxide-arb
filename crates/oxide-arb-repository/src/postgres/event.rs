@@ -1,6 +1,7 @@
 use crate::traits::EventRepository;
 use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::entities::event::{self, ActiveModel, Column, Entity};
+use oxide_arb_models::enums::market::EventStatus;
 use oxide_arb_models::types::EventId;
 #[allow(clippy::wildcard_imports)]
 use sea_orm::*;
@@ -36,7 +37,7 @@ async fn do_find_by_id(
 
 async fn do_find_active(db: &impl ConnectionTrait) -> Result<Vec<event::Model>, StorageError> {
     Entity::find()
-        .filter(Column::Status.eq("active"))
+        .filter(Column::Status.eq(EventStatus::Active))
         .all(db)
         .await
         .map_err(StorageError::from)

@@ -1,7 +1,7 @@
 //! `accounting_periods` table entity.
 
 use crate::enums::common::ReportType;
-use crate::types::Usd;
+use crate::types::{Probability, Usd};
 use chrono::{DateTime, NaiveDate, Utc};
 use sea_orm::entity::prelude::*;
 
@@ -20,8 +20,7 @@ pub struct Model {
     pub loss_count: i32,
     pub miss_count: i32,
     pub max_drawdown: Usd,
-    #[sea_orm(column_type = "Text", nullable)]
-    pub sharpe_ratio: Option<String>,
+    pub sharpe_ratio: Option<Probability>,
     pub finalized: bool,
     pub created_at: DateTime<Utc>,
 }

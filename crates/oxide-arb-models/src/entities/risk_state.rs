@@ -5,8 +5,11 @@ use crate::types::Usd;
 use chrono::{DateTime, NaiveDate, Utc};
 use oxide_arb_macros::ActiveModelDefaults;
 use sea_orm::entity::prelude::*;
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, ActiveModelDefaults)]
+#[derive(
+    Clone, Debug, PartialEq, Eq, DeriveEntityModel, ActiveModelDefaults, Serialize, Deserialize,
+)]
 #[sea_orm(table_name = "risk_engine_state")]
 #[active_defaults(
     default(id, 1_i32),

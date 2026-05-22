@@ -574,14 +574,22 @@ use std::time::Duration;
 
 /// Type-safe cache key builder.
 pub enum CacheKey {
-    MarketEntry { market_id: String },
-    EventEntry { event_id: String },
-    CalibrationBucket { category: String, price_zone: String, duration_bucket: String },
+    MarketEntry { market_id: MarketId },
+    EventEntry { event_id: EventId },
+    MarketMetadata { market_id: MarketId },
+    ActiveMarkets,
+    CalibrationBucket {
+        category: MarketCategory,
+        price_zone: PriceZone,
+        duration_bucket: DurationBucket,
+    },
+    AllCalibrationBuckets,
+    PositionSummary { market_id: MarketId },
     RiskState,
-    RuntimeConfig { key: String },
-    FeeParams { category: String },
-    BookSnapshot { token_id: String },
-    PositionsByMarket { market_id: String },
+    Balance,
+    RuntimeConfig { key: RuntimeConfigKey },
+    AllRuntimeConfig,
+    FeeParams { category: MarketCategory },
 }
 
 impl CacheKey {
@@ -589,40 +597,44 @@ impl CacheKey {
         match self {
             Self::MarketEntry { market_id } => format!("mkt:{market_id}"),
             Self::EventEntry { event_id } => format!("evt:{event_id}"),
+            Self::MarketMetadata { market_id } => format!("mkt_meta:{market_id}"),
+            Self::ActiveMarkets => "mkt:__active__".to_owned(),
             Self::CalibrationBucket { category, price_zone, duration_bucket } => {
-                format!("cal:{category}:{price_zone}:{duration_bucket}")
+                format!("cal:{}:{price_zone}:{duration_bucket}", category.as_str())
             }
+            Self::AllCalibrationBuckets => "cal:__all__".to_owned(),
+            Self::PositionSummary { market_id } => format!("pos:{market_id}"),
             Self::RiskState => "risk:state".to_string(),
-            Self::RuntimeConfig { key } => format!("cfg:{key}"),
-            Self::FeeParams { category } => format!("fee:{category}"),
-            Self::BookSnapshot { token_id } => format!("book:{token_id}"),
-            Self::PositionsByMarket { market_id } => format!("pos:{market_id}"),
+            Self::Balance => "bal:polymarket".to_owned(),
+            Self::RuntimeConfig { key } => format!("cfg:{}", key.as_str()),
+            Self::AllRuntimeConfig => "cfg:__all__".to_owned(),
+            Self::FeeParams { category } => format!("fee:{}", category.as_str()),
         }
     }
 
     pub fn ttl(&self) -> Duration {
         match self {
-            Self::MarketEntry { .. } => Duration::from_secs(300),       // 5 min
-            Self::EventEntry { .. } => Duration::from_secs(300),
-            Self::CalibrationBucket { .. } => Duration::from_secs(3600), // 1 hour
-            Self::RiskState => Duration::from_secs(10),                  // 10s — 频繁更新
-            Self::RuntimeConfig { .. } => Duration::from_secs(60),
-            Self::FeeParams { .. } => Duration::from_secs(600),         // 10 min
-            Self::BookSnapshot { .. } => Duration::from_secs(5),        // 5s — 高频变化
-            Self::PositionsByMarket { .. } => Duration::from_secs(30),
+            Self::MarketEntry { .. } | Self::EventEntry { .. } | Self::ActiveMarkets => Duration::from_secs(300),
+            Self::MarketMetadata { .. } => Duration::from_secs(1800),
+            Self::CalibrationBucket { .. } | Self::AllCalibrationBuckets => Duration::from_secs(3600),
+            Self::PositionSummary { .. } => Duration::from_secs(30),
+            Self::RiskState | Self::RuntimeConfig { .. } | Self::AllRuntimeConfig => Duration::from_secs(60),
+            Self::Balance => Duration::from_secs(15),
+            Self::FeeParams { .. } => Duration::from_secs(600),
         }
     }
 
     pub fn domain(&self) -> &'static str {
         match self {
-            Self::MarketEntry { .. } => "market",
+            Self::MarketEntry { .. } | Self::ActiveMarkets => "market",
             Self::EventEntry { .. } => "event",
-            Self::CalibrationBucket { .. } => "calibration",
+            Self::MarketMetadata { .. } => "market_metadata",
+            Self::CalibrationBucket { .. } | Self::AllCalibrationBuckets => "calibration",
+            Self::PositionSummary { .. } => "position",
             Self::RiskState => "risk",
-            Self::RuntimeConfig { .. } => "config",
+            Self::Balance => "balance",
+            Self::RuntimeConfig { .. } | Self::AllRuntimeConfig => "config",
             Self::FeeParams { .. } => "fee",
-            Self::BookSnapshot { .. } => "book",
-            Self::PositionsByMarket { .. } => "position",
         }
     }
 }
@@ -1362,3 +1374,53 @@ async fn test_redis_cache_backend() {
 | `repository/clickhouse/` | ~500 | ~300 |
 | `repository/cached/` | ~300 | ~200 |
 | **合计** | **~5,380** | **~2,530** |
+
+---
+
+## Phase 2 补充 — 关键缺口修补（Phase 4+ 计划）
+
+### S1. Reports 表 Migration
+
+**已完成**。`m20250601_000016_create_reports.rs`:
+- `report` 表：`id(PK)`, `report_type`, `period_start`, `period_end`, `payload(TEXT)`, `created_at`
+- 索引：`idx_report_type_period` on `(report_type, period_start DESC)`
+- Entity: `entities/report.rs` (Serialize/Deserialize)
+- Domain DTO: `domain/report.rs` (`NewReport::daily/weekly`)
+- Repository: trait `ReportRepository` + `PgReportRepository` impl
+
+### S2. CacheKey 扩展
+
+**已完成**。新增 5 个 CacheKey 变体：
+| 变体 | L2 TTL | 用途 |
+|------|--------|------|
+| `MarketMetadata { market_id }` | 30min | 检测/评分用市场元数据 |
+| `AllCalibrationBuckets` | 1h | 批量 calibration 加载 |
+| `PositionSummary { market_id }` | 30s | pre-trade 风控查询 |
+| `RiskState` | 60s | 风控状态快照 |
+| `Balance` | 15s | Polymarket 余额快照 |
+| `RuntimeConfig { key }` / `AllRuntimeConfig` | 60s | 热配置查询 |
+| `FeeParams { category }` | 10min | 分类 fee 参数 |
+
+### S2.1 Deferred Service-Owned Cache Hooks
+
+以下 `CacheKey` 已完成类型定义，但不在 repository wrapper 中立即落地，因为它们是 service 聚合结果或外部服务快照，必须由后续 service owner 掌握写路径失效：
+
+| CacheKey | 延期原因 | 后续落地位置 |
+|---|---|---|
+| `PositionSummary { market_id }` | 需要风控/持仓服务聚合 open positions，并在 position/trade/settlement 更新后统一失效 | Phase 4 `RiskMetrics` / position risk service |
+| `Balance` | 依赖 Polymarket wallet/balance 查询和订单提交/确认后的失效入口 | Phase 4 balance/risk service |
+| `FeeParams { category }` | 依赖 fee runtime config 或 fee refresh service 拥有更新和失效入口 | Phase 1/Phase 4 fee rate source/service |
+
+### S3. CachedCalibrationRepository
+
+**已完成**。`cached/calibration.rs`:
+- 泛型 `CachedCalibrationRepository<R: CalibrationRepository>`
+- `get_bucket` / `get_all_buckets`: L1+L2 → PG fallback → backfill (serde_json codec)
+- `insert_bucket` / `update_bucket`: delegate + invalidate granular + bulk keys
+- Outcome 操作直接透传（写频率高但不适合缓存）
+
+### S4. TieredCache serde_json 方法
+
+**已完成**。`cache/tiered.rs` 新增 `get_json<T>` / `set_json<T>` 方法：
+- 用于无法 derive `bitcode::Encode/Decode` 的 SeaORM entity 类型
+- 通过 `StorageError::Codec(String)` 报告序列化错误

@@ -54,7 +54,7 @@ fn create_tables() -> Vec<TableCreateStatement> {
                     .timestamp_with_time_zone()
                     .null(),
             )
-            .col(ColumnDef::new(Event::RawGamma).text().null())
+            .col(ColumnDef::new(Event::RawGamma).json_binary().null())
             .col(
                 ColumnDef::new(Event::CreatedAt)
                     .timestamp_with_time_zone()

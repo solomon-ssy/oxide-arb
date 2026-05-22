@@ -11,7 +11,7 @@ use oxide_arb_models::{
 };
 use rust_decimal::Decimal;
 
-use crate::cooldown::EmissionCooldown;
+use crate::cooldown::InMemoryEmissionCooldown;
 use crate::endgame::EndgameDetector;
 use crate::scorer::{EndgameScorer, ScoredOpportunity};
 use crate::staleness::StalenessPolicy;
@@ -36,7 +36,9 @@ pub struct MarketScanInput {
 pub struct OpportunityPipeline {
     detector: EndgameDetector,
     scorer: EndgameScorer,
-    cooldown: EmissionCooldown,
+    // TODO(redis-backend): switch this field to a distributed
+    // `RedisEmissionCooldown` before running multiple scanner instances.
+    cooldown: InMemoryEmissionCooldown,
     min_profit_threshold_usd: Decimal,
     max_depth_usage_pct: Decimal,
     min_score: Decimal,
@@ -48,7 +50,7 @@ impl OpportunityPipeline {
     pub const fn new(
         detector: EndgameDetector,
         scorer: EndgameScorer,
-        cooldown: EmissionCooldown,
+        cooldown: InMemoryEmissionCooldown,
         min_profit_threshold_usd: Decimal,
         scorer_config: &ScorerConfig,
     ) -> Self {
@@ -84,6 +86,13 @@ impl OpportunityPipeline {
         // 2. Staleness guard
         if !StalenessPolicy::is_tradeable(staleness) {
             return None;
+        }
+
+        if self
+            .detector
+            .should_reset_market_state(book, settlement_deadline, now)
+        {
+            self.cooldown.reset(market_id);
         }
 
         // 3. Detect
@@ -171,7 +180,7 @@ impl OpportunityPipeline {
 
     /// Access the emission cooldown (for metrics).
     #[must_use]
-    pub const fn cooldown(&self) -> &EmissionCooldown {
+    pub const fn cooldown(&self) -> &InMemoryEmissionCooldown {
         &self.cooldown
     }
 

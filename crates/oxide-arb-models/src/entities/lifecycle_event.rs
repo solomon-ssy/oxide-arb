@@ -1,5 +1,6 @@
 //! `lifecycle_events` table entity.
 
+use crate::enums::lifecycle::LifecyclePhase;
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
@@ -8,14 +9,13 @@ use sea_orm::entity::prelude::*;
 pub struct Model {
     #[sea_orm(primary_key)]
     pub id: i64,
-    #[sea_orm(column_type = "Text")]
-    pub phase: String,
+    pub phase: LifecyclePhase,
     #[sea_orm(column_type = "Text", nullable)]
     pub stage: Option<String>,
     #[sea_orm(column_type = "Text")]
     pub message: String,
-    #[sea_orm(column_type = "Text", nullable)]
-    pub metadata: Option<String>,
+    #[sea_orm(column_type = "JsonBinary", nullable)]
+    pub metadata: Option<serde_json::Value>,
     pub created_at: DateTime<Utc>,
 }
 

@@ -8,6 +8,7 @@ pub mod lifecycle_event;
 pub mod market;
 pub mod position;
 pub mod potential_loss_ledger;
+pub mod report;
 pub mod risk_state;
 pub mod runtime_config;
 pub mod trade;

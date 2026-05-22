@@ -1,15 +1,15 @@
 //! Endgame opportunity scorer — ranks opportunities by risk-adjusted expected `PnL`.
 //!
-//! `score = expected_net_profit × fill_probability × urgency × category_weight`
+//! `score = expected_net_profit × fill_probability × urgency × category_weight × staleness_discount`
 
+use crate::fill_probability::FillProbabilityEstimator;
+use crate::staleness::StalenessPolicy;
+use crate::urgency::UrgencyFactor;
 use oxide_arb_models::{
     config::{FillProbabilityConfig, ScorerConfig},
     domain::opportunity::Opportunity,
 };
 use rust_decimal::Decimal;
-
-use crate::fill_probability::FillProbabilityEstimator;
-use crate::urgency::UrgencyFactor;
 
 /// A scored opportunity ready for ranking and emission.
 #[derive(Debug, Clone)]
@@ -23,6 +23,8 @@ pub struct ScoredOpportunity {
     pub urgency_factor: Decimal,
     /// Category-based weight multiplier applied.
     pub category_weight: Decimal,
+    /// Staleness-based confidence discount applied (1.0 = fresh, 0.0 = expired).
+    pub staleness_discount: Decimal,
 }
 
 /// Endgame opportunity scorer.
@@ -49,7 +51,7 @@ impl EndgameScorer {
 
     /// Score an opportunity.
     ///
-    /// `score = expected_net_profit × fill_probability × urgency × category_weight`
+    /// `score = expected_net_profit × fill_probability × urgency × category_weight × staleness_discount`
     #[must_use]
     pub fn score(&self, opp: &Opportunity) -> ScoredOpportunity {
         let category_weight = self
@@ -73,7 +75,13 @@ impl EndgameScorer {
             Decimal::from(self.settlement_window_hours),
         );
 
-        let score = opp.expected_net_profit.inner() * fill_prob * urgency * category_weight;
+        let staleness_discount = StalenessPolicy::confidence_discount(opp.staleness);
+
+        let score = opp.expected_net_profit.inner()
+            * fill_prob
+            * urgency
+            * category_weight
+            * staleness_discount;
 
         ScoredOpportunity {
             opportunity: opp.clone(),
@@ -81,6 +89,7 @@ impl EndgameScorer {
             fill_probability: fill_prob,
             urgency_factor: urgency,
             category_weight,
+            staleness_discount,
         }
     }
 

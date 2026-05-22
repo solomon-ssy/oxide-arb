@@ -11,22 +11,26 @@
 
 pub mod book;
 pub mod calibration;
+pub mod exposure;
 pub mod market;
 pub mod opportunity;
 pub mod order;
 pub mod pnl;
 pub mod position;
+pub mod report;
 pub mod risk;
 pub mod system;
 pub mod trade;
 
 pub use book::*;
 pub use calibration::*;
+pub use exposure::*;
 pub use market::*;
 pub use opportunity::*;
 pub use order::*;
 pub use pnl::*;
 pub use position::*;
+pub use report::*;
 pub use risk::*;
 pub use system::*;
 pub use trade::*;

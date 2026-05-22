@@ -10,8 +10,9 @@ use oxide_arb_models::entities::{
     accounting_period, calibration, calibration_outcome, potential_loss_ledger, risk_state,
 };
 use oxide_arb_models::enums::common::{
-    LedgerStatus, MarketCategory, PositionStatus, ReportType, Side, TradeOutcome,
+    ExecutionMode, LedgerStatus, MarketCategory, PositionStatus, ReportType, Side, TradeOutcome,
 };
+use oxide_arb_models::enums::lifecycle::LifecyclePhase;
 use oxide_arb_models::enums::risk::BreakerStateName;
 use oxide_arb_models::types::*;
 use oxide_arb_repository::postgres::*;
@@ -183,7 +184,7 @@ async fn trade_repository_crud() {
             fee_usd: Usd::ONE,
             detected_edge_bps: Some(Bps::from(Decimal::from(200))),
             detected_profit_usd: Some(Usd::from(Decimal::new(5, 0))),
-            execution_mode: "dry_run".into(),
+            execution_mode: ExecutionMode::DryRun,
         })
         .await
         .expect("create trade");
@@ -194,7 +195,7 @@ async fn trade_repository_crud() {
             &created.trade_id,
             UpdateTradeOutcome {
                 outcome: TradeOutcome::Success,
-                order_id: Some("order-123".into()),
+                order_id: Some(OrderId::new("order-123")),
                 tx_hash: Some("0xdead".into()),
                 net_profit_usd: Some(Usd::from(Decimal::new(4, 0))),
                 latency_ms: Some(42),
@@ -252,7 +253,7 @@ async fn trade_repository_batch_create() {
             fee_usd: Usd::ZERO,
             detected_edge_bps: None,
             detected_profit_usd: None,
-            execution_mode: "paper".into(),
+            execution_mode: ExecutionMode::Paper,
         })
         .collect();
 
@@ -346,9 +347,9 @@ async fn calibration_repository_crud() {
         duration_bucket: Set(DurationBucket::Short),
         total_count: Set(10),
         correct_count: Set(9),
-        alpha_prior: Set("1.0".into()),
-        beta_prior: Set("1.0".into()),
-        posterior_mean: Set(Some("0.9".into())),
+        alpha_prior: Set(Probability::from(Decimal::new(10, 1))),
+        beta_prior: Set(Probability::from(Decimal::new(10, 1))),
+        posterior_mean: Set(Some(Probability::from(Decimal::new(9, 1)))),
         updated_at: Set(Utc::now()),
         ..Default::default()
     };
@@ -374,7 +375,7 @@ async fn calibration_repository_crud() {
         predicted_yes: Set(true),
         actual_yes: Set(None),
         entry_price: Set(Price::from(Decimal::new(99, 2))),
-        confidence_at_entry: Set("0.95".into()),
+        confidence_at_entry: Set(Probability::from(Decimal::new(95, 2))),
         convergence_secs: Set(3600),
         ..Default::default()
     };
@@ -466,14 +467,14 @@ async fn lifecycle_repository_crud() {
 
     let recorded = repo
         .record(
-            "running",
+            LifecyclePhase::Detected,
             Some("startup"),
             "Application started",
-            Some(r#"{"version":"test"}"#),
+            Some(serde_json::json!({ "version": "test" })),
         )
         .await
         .unwrap();
-    assert_eq!(recorded.phase, "running");
+    assert_eq!(recorded.phase, LifecyclePhase::Detected);
 
     let recent = repo.get_recent(5).await.unwrap();
     assert!(!recent.is_empty());

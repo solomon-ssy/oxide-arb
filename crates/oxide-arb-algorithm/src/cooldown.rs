@@ -1,9 +1,12 @@
-//! Per-market emission cooldown with exponential backoff.
+//! In-memory per-market emission cooldown with exponential backoff.
 //!
 //! Prevents the same market from flooding the opportunity pipeline with
 //! duplicate signals on every scan tick. Uses `moka::sync::Cache` for
 //! automatic TTL-based eviction of stale entries.
+//!
+//! Implements [`CooldownBackend`] for use as the default in-process backend.
 
+use crate::backend::CooldownBackend;
 use moka::sync::Cache;
 use oxide_arb_models::{config::EmissionCooldownConfig, types::MarketId};
 use rust_decimal::{Decimal, prelude::ToPrimitive};
@@ -19,20 +22,20 @@ struct CooldownEntry {
     consecutive_hits: u32,
 }
 
-/// Per-market emission cooldown with exponential backoff.
+/// In-memory per-market emission cooldown with exponential backoff.
 ///
 /// After emitting an opportunity for a market, further emissions are
 /// suppressed for `base_cooldown × min(2^consecutive_hits, max_multiplier)`
 /// seconds. The cooldown resets when explicitly cleared (e.g. the market
 /// leaves the convergence zone).
-pub struct EmissionCooldown {
+pub struct InMemoryEmissionCooldown {
     entries: Cache<MarketId, CooldownEntry>,
     base_cooldown: Duration,
     max_multiplier: Decimal,
     suppressed_count: AtomicU64,
 }
 
-impl EmissionCooldown {
+impl InMemoryEmissionCooldown {
     /// Create a new cooldown tracker from configuration.
     #[must_use]
     pub fn new(config: &EmissionCooldownConfig) -> Self {
@@ -109,6 +112,28 @@ impl EmissionCooldown {
     }
 }
 
+impl CooldownBackend for InMemoryEmissionCooldown {
+    fn may_emit(&self, market_id: &MarketId) -> bool {
+        self.may_emit(market_id)
+    }
+
+    fn record_emission(&self, market_id: &MarketId) {
+        self.record_emission(market_id);
+    }
+
+    fn reset(&self, market_id: &MarketId) {
+        self.reset(market_id);
+    }
+
+    fn take_suppressed_count(&self) -> u64 {
+        self.take_suppressed_count()
+    }
+
+    fn tracked_count(&self) -> u64 {
+        self.tracked_count()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -124,14 +149,14 @@ mod tests {
 
     #[test]
     fn first_emission_allowed() {
-        let cd = EmissionCooldown::new(&test_config());
+        let cd = InMemoryEmissionCooldown::new(&test_config());
         let mid = MarketId::new("m1");
         assert!(cd.may_emit(&mid));
     }
 
     #[test]
     fn immediate_re_emission_suppressed() {
-        let cd = EmissionCooldown::new(&test_config());
+        let cd = InMemoryEmissionCooldown::new(&test_config());
         let mid = MarketId::new("m1");
         cd.record_emission(&mid);
         assert!(!cd.may_emit(&mid));
@@ -139,7 +164,7 @@ mod tests {
 
     #[test]
     fn reset_clears_cooldown() {
-        let cd = EmissionCooldown::new(&test_config());
+        let cd = InMemoryEmissionCooldown::new(&test_config());
         let mid = MarketId::new("m1");
         cd.record_emission(&mid);
         cd.reset(&mid);
@@ -148,7 +173,7 @@ mod tests {
 
     #[test]
     fn consecutive_hits_tracked() {
-        let cd = EmissionCooldown::new(&test_config());
+        let cd = InMemoryEmissionCooldown::new(&test_config());
         let mid = MarketId::new("m1");
 
         cd.record_emission(&mid);
@@ -162,7 +187,7 @@ mod tests {
 
     #[test]
     fn suppressed_count_accumulates() {
-        let cd = EmissionCooldown::new(&test_config());
+        let cd = InMemoryEmissionCooldown::new(&test_config());
         let mid = MarketId::new("m1");
         cd.record_emission(&mid);
 

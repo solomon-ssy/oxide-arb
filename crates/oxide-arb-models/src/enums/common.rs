@@ -66,12 +66,29 @@ pub enum OrderType {
 }
 
 /// Trade execution mode.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    EnumIter,
+    DeriveActiveEnum,
+    IntoActiveValue,
+)]
+#[sea_orm(rs_type = "String", db_type = "Text")]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionMode {
+    #[sea_orm(string_value = "dry_run")]
     #[default]
     DryRun,
+    #[sea_orm(string_value = "paper")]
     Paper,
+    #[sea_orm(string_value = "live")]
     Live,
 }
 
@@ -310,12 +327,29 @@ impl std::str::FromStr for MarketCategory {
 }
 
 /// Minimum price increment supported by a Polymarket CLOB market.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    EnumIter,
+    DeriveActiveEnum,
+    IntoActiveValue,
+)]
+#[sea_orm(rs_type = "String", db_type = "Text")]
 #[serde(rename_all = "snake_case")]
 pub enum TickSize {
+    #[sea_orm(string_value = "0.1")]
     Tenth,
+    #[sea_orm(string_value = "0.01")]
     Hundredth,
+    #[sea_orm(string_value = "0.001")]
     Thousandth,
+    #[sea_orm(string_value = "0.0001")]
     TenThousandth,
 }
 

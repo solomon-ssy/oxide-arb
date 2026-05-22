@@ -1,7 +1,10 @@
 use crate::traits::LifecycleRepository;
 use chrono::Utc;
 use oxide_arb_error::storage::StorageError;
-use oxide_arb_models::entities::lifecycle_event::{self, ActiveModel, Column, Entity};
+use oxide_arb_models::{
+    entities::lifecycle_event::{self, ActiveModel, Column, Entity},
+    enums::lifecycle::LifecyclePhase,
+};
 #[allow(clippy::wildcard_imports)]
 use sea_orm::*;
 
@@ -25,17 +28,17 @@ pub struct PgLifecycleRepositoryTxn<'a> {
 
 async fn do_record(
     db: &impl ConnectionTrait,
-    phase: &str,
+    phase: LifecyclePhase,
     stage: Option<&str>,
     message: &str,
-    metadata: Option<&str>,
+    metadata: Option<serde_json::Value>,
 ) -> Result<lifecycle_event::Model, StorageError> {
     let model = ActiveModel {
         id: NotSet,
-        phase: Set(phase.to_string()),
+        phase: Set(phase),
         stage: Set(stage.map(String::from)),
         message: Set(message.to_string()),
-        metadata: Set(metadata.map(String::from)),
+        metadata: Set(metadata),
         created_at: Set(Utc::now()),
     };
 
@@ -60,10 +63,10 @@ async fn do_get_recent(
 impl LifecycleRepository for PgLifecycleRepository {
     async fn record(
         &self,
-        phase: &str,
+        phase: LifecyclePhase,
         stage: Option<&str>,
         message: &str,
-        metadata: Option<&str>,
+        metadata: Option<serde_json::Value>,
     ) -> Result<lifecycle_event::Model, StorageError> {
         do_record(&self.db, phase, stage, message, metadata).await
     }
@@ -76,10 +79,10 @@ impl LifecycleRepository for PgLifecycleRepository {
 impl LifecycleRepository for PgLifecycleRepositoryTxn<'_> {
     async fn record(
         &self,
-        phase: &str,
+        phase: LifecyclePhase,
         stage: Option<&str>,
         message: &str,
-        metadata: Option<&str>,
+        metadata: Option<serde_json::Value>,
     ) -> Result<lifecycle_event::Model, StorageError> {
         do_record(self.txn, phase, stage, message, metadata).await
     }

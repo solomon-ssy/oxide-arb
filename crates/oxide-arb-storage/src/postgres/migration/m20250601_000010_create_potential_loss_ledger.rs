@@ -102,7 +102,7 @@ async fn specials(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
     execute_sql(
         manager,
         [
-            "CREATE INDEX idx_pll_active \
+            "CREATE INDEX IF NOT EXISTS idx_pll_active \
              ON potential_loss_ledger (status) \
              WHERE status = 'active'",
             "CREATE INDEX IF NOT EXISTS idx_pll_active_created \

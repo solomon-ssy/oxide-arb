@@ -3,8 +3,8 @@
 use chrono::Utc;
 use oxide_arb_models::config::PostgresConfig;
 use oxide_arb_models::entities::{event, market};
-use oxide_arb_models::enums::common::MarketCategory;
-use oxide_arb_models::enums::market::MarketStatus;
+use oxide_arb_models::enums::common::{MarketCategory, TickSize};
+use oxide_arb_models::enums::market::{EventStatus, MarketStatus};
 use oxide_arb_models::types::*;
 use oxide_arb_storage::postgres::PostgresPool;
 use oxide_arb_storage::postgres::migration::{Migrator, MigratorTrait};
@@ -68,7 +68,7 @@ pub fn make_event(
         title: Set(title.into()),
         slug: Set(slug.into()),
         category: Set(category),
-        status: Set("active".into()),
+        status: Set(EventStatus::Active),
         neg_risk: Set(false),
         end_date: Set(None),
         raw_gamma: Set(None),
@@ -95,7 +95,7 @@ pub fn make_market(
         outcome: Set(None),
         yes_token_id: Set(TokenId::new("12345")),
         no_token_id: Set(TokenId::new("67890")),
-        tick_size: Set("0.01".into()),
+        tick_size: Set(TickSize::Hundredth),
         neg_risk: Set(false),
         end_date: Set(end_date),
         resolved_at: Set(None),

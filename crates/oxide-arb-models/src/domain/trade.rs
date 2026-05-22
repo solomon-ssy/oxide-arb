@@ -8,9 +8,10 @@
 //! conversion to `SeaORM` `ActiveModel`. System-generated fields (`trade_id`,
 //! timestamps, default outcome) are populated by `ActiveModelBehavior::before_save`.
 
-use crate::enums::common::{Side, TradeOutcome};
+use crate::enums::common::{ExecutionMode, Side, TradeOutcome};
 use crate::types::{
-    Bps, EventId, ExecutionId, MarketId, OpportunityId, Price, Shares, TokenId, TradeId, Usd,
+    Bps, EventId, ExecutionId, MarketId, OpportunityId, OrderId, Price, Shares, TokenId, TradeId,
+    Usd,
 };
 use chrono::{DateTime, NaiveDate, Utc};
 use sea_orm::DeriveIntoActiveModel;
@@ -64,14 +65,14 @@ pub struct NewTrade {
     pub fee_usd: Usd,
     pub detected_edge_bps: Option<Bps>,
     pub detected_profit_usd: Option<Usd>,
-    pub execution_mode: String,
+    pub execution_mode: ExecutionMode,
 }
 
 /// Fields that can be updated after trade creation (execution result).
 #[derive(Debug, Clone)]
 pub struct UpdateTradeOutcome {
     pub outcome: TradeOutcome,
-    pub order_id: Option<String>,
+    pub order_id: Option<OrderId>,
     pub tx_hash: Option<String>,
     pub net_profit_usd: Option<Usd>,
     pub latency_ms: Option<i32>,

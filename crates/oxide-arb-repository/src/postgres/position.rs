@@ -141,6 +141,9 @@ async fn settle_position_q(
 }
 
 async fn total_exposure_q(db: &impl ConnectionTrait) -> Result<Usd, StorageError> {
+    // TODO(cache): cache per-market position summaries with
+    // `CacheKey::PositionSummary { market_id }` once the risk service owns
+    // invalidation after position, trade, and settlement updates.
     let positions = Entity::find()
         .filter(Column::Status.eq(PositionStatus::Open))
         .all(db)

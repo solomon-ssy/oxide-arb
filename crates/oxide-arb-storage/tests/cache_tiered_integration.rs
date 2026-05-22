@@ -1,6 +1,10 @@
 //! `TieredCache` integration tests (requires Docker for Redis).
 
-use oxide_arb_models::config::RedisConfig;
+use oxide_arb_models::{
+    config::RedisConfig,
+    enums::common::MarketCategory,
+    types::{EventId, MarketId},
+};
 use oxide_arb_storage::cache::{CacheBackend, CacheKey, MokaBackend, RedisBackend, TieredCache};
 
 fn test_redis_config(port: u16) -> RedisConfig {
@@ -37,7 +41,7 @@ async fn tiered_l2_hit_backfills_l1() {
     let (port, _container) = setup_redis().await;
     let redis_cfg = test_redis_config(port);
     let key = CacheKey::MarketEntry {
-        market_id: "0xbackfill".into(),
+        market_id: MarketId::new("0xbackfill"),
     };
     let value = CachedMarketStub {
         market_id: "0xbackfill".into(),
@@ -80,7 +84,7 @@ async fn tiered_both_miss_returns_none() {
     let (port, _container) = setup_redis().await;
     let redis_cfg = test_redis_config(port);
     let key = CacheKey::EventEntry {
-        event_id: "evt-missing".into(),
+        event_id: EventId::new("evt-missing"),
     };
 
     let cache = TieredCache::new(
@@ -98,7 +102,7 @@ async fn tiered_set_populates_both_levels() {
     let (port, _container) = setup_redis().await;
     let redis_cfg = test_redis_config(port);
     let key = CacheKey::FeeParams {
-        category: "sports".into(),
+        category: MarketCategory::Sports,
     };
     let value = CachedMarketStub {
         market_id: "fee".into(),

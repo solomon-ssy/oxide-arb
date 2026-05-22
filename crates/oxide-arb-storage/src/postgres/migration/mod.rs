@@ -1,13 +1,24 @@
 //! `SeaORM` migration registry.
 //!
-//! Each migration module follows the canonical lifecycle documented in
-//! [`helpers`] — `create_tables`, `create_indexes`, `specials`, `seeding_data`,
-//! and `drop_tables`.
+//! Migration files use explicit action prefixes to keep long-term evolution
+//! predictable:
+//!
+//! - `create_*` creates new schema objects and their initial indexes.
+//! - `alter_*` changes existing schema.
+//! - `backfill_*` performs data-only historical repair or conversion.
+//! - `seed_*` inserts idempotent bootstrap/reference data.
+//! - `trigger_*` manages database functions, triggers, or extensions.
+//!
+//! Seed migrations are not required to remain the final migration forever; each
+//! seed only depends on schema that appears before it in this registry.
 
 pub use sea_orm_migration::prelude::*;
 
 mod helpers;
-pub use helpers::{create_indexes, create_tables, drop_tables, execute_sql, migrate_up, noop};
+pub use helpers::{
+    create_indexes, create_tables, drop_tables, execute_sql, migrate_data, migrate_schema,
+    migrate_seed, migrate_up, noop,
+};
 
 mod m20250601_000001_create_events;
 mod m20250601_000002_create_markets;
@@ -22,7 +33,8 @@ mod m20250601_000010_create_potential_loss_ledger;
 mod m20250601_000012_create_opportunity_lifecycle_outbox;
 mod m20250601_000013_create_resolution_event;
 mod m20250601_000014_add_updated_at_triggers;
-mod m20250601_000015_bootstrap_trading_state;
+mod m20250601_000015_seed_trading_bootstrap;
+mod m20250601_000016_create_reports;
 
 pub struct Migrator;
 
@@ -43,7 +55,8 @@ impl MigratorTrait for Migrator {
             Box::new(m20250601_000012_create_opportunity_lifecycle_outbox::Migration),
             Box::new(m20250601_000013_create_resolution_event::Migration),
             Box::new(m20250601_000014_add_updated_at_triggers::Migration),
-            Box::new(m20250601_000015_bootstrap_trading_state::Migration),
+            Box::new(m20250601_000015_seed_trading_bootstrap::Migration),
+            Box::new(m20250601_000016_create_reports::Migration),
         ]
     }
 }

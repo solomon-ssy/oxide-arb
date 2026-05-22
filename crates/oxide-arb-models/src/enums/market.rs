@@ -47,3 +47,57 @@ impl std::fmt::Display for MarketStatus {
         }
     }
 }
+
+/// Lifecycle state of an external Polymarket event.
+///
+/// Event status is intentionally separate from [`MarketStatus`]: events model
+/// the upstream Gamma lifecycle, while markets additionally carry local
+/// registry states such as discovered, filtered, and delisted.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    EnumIter,
+    DeriveActiveEnum,
+    IntoActiveValue,
+)]
+#[sea_orm(rs_type = "String", db_type = "Text")]
+#[serde(rename_all = "snake_case")]
+pub enum EventStatus {
+    /// Event is open for active market discovery and scanning.
+    #[sea_orm(string_value = "active")]
+    Active,
+    /// Event has closed to new trading.
+    #[sea_orm(string_value = "closed")]
+    Closed,
+    /// Event has been archived by the upstream source.
+    #[sea_orm(string_value = "archived")]
+    Archived,
+    /// Event status was not recognized by the ingestion layer.
+    #[sea_orm(string_value = "unknown")]
+    Unknown,
+}
+
+impl EventStatus {
+    /// Canonical database and cache representation.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Closed => "closed",
+            Self::Archived => "archived",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+impl std::fmt::Display for EventStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}

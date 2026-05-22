@@ -73,12 +73,68 @@ impl TieredCache {
         r2?;
         Ok(())
     }
+
+    /// Get a value using `serde_json` for deserialization.
+    ///
+    /// Use this for types that cannot derive `bitcode::Decode` (e.g. `SeaORM`
+    /// entity models with `DateTime` fields).
+    pub async fn get_json<T: serde::de::DeserializeOwned + Send>(
+        &self,
+        key: &CacheKey,
+    ) -> Result<Option<T>, StorageError> {
+        let key_str = key.as_str();
+
+        if let Some(bytes) = self.l1.get(&key_str).await? {
+            self.metrics.record_hit("l1", key.domain());
+            return serde_json::from_slice(&bytes)
+                .map(Some)
+                .map_err(|e| StorageError::Codec(e.to_string()));
+        }
+
+        if let Some(bytes) = self.l2.get(&key_str).await? {
+            self.metrics.record_hit("l2", key.domain());
+            let l1_ttl = key.ttl() / 4;
+            self.l1.set(&key_str, &bytes, l1_ttl).await?;
+            return serde_json::from_slice(&bytes)
+                .map(Some)
+                .map_err(|e| StorageError::Codec(e.to_string()));
+        }
+
+        self.metrics.record_miss(key.domain());
+        trace!(key = %key_str, "Cache miss (L1 + L2)");
+        Ok(None)
+    }
+
+    /// Set a value using `serde_json` for serialization.
+    ///
+    /// Use this for types that cannot derive `bitcode::Encode` (e.g. `SeaORM`
+    /// entity models with `DateTime` fields).
+    pub async fn set_json<T: serde::Serialize + Send + Sync>(
+        &self,
+        key: &CacheKey,
+        value: &T,
+    ) -> Result<(), StorageError> {
+        let bytes = serde_json::to_vec(value).map_err(|e| StorageError::Codec(e.to_string()))?;
+        let ttl = key.ttl();
+        let l1_ttl = ttl / 4;
+        let key_str = key.as_str();
+
+        let (r1, r2) = tokio::join!(
+            self.l1.set(&key_str, &bytes, l1_ttl),
+            self.l2.set(&key_str, &bytes, ttl),
+        );
+        r1?;
+        r2?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use async_trait::async_trait;
+    use oxide_arb_models::types::EventId;
+    use oxide_arb_models::types::MarketId;
     use std::collections::HashMap;
     use std::sync::Arc;
     use std::time::Duration;
@@ -187,7 +243,7 @@ mod tests {
         let l2 = MockL2::default();
         let writer = MockTiered::new(MokaBackend::new(100), l2);
         let key = CacheKey::MarketEntry {
-            market_id: "0xmock".into(),
+            market_id: MarketId::new("0xmock"),
         };
         let value = CachedStub {
             id: "0xmock".into(),
@@ -215,7 +271,7 @@ mod tests {
     async fn tiered_both_miss_without_redis() {
         let cache = MockTiered::new(MokaBackend::new(100), MockL2::default());
         let key = CacheKey::EventEntry {
-            event_id: "missing".into(),
+            event_id: EventId::new("missing"),
         };
         let missing: Option<CachedStub> = cache.get(&key).await.unwrap();
         assert!(missing.is_none());

@@ -2,10 +2,12 @@
 
 use crate::domain::calibration::{DurationBucket, PriceZone};
 use crate::enums::common::MarketCategory;
+use crate::types::Probability;
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+#[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize, Deserialize)]
 #[sea_orm(table_name = "endgame_calibration_bucket")]
 pub struct Model {
     #[sea_orm(primary_key)]
@@ -15,12 +17,9 @@ pub struct Model {
     pub duration_bucket: DurationBucket,
     pub total_count: i32,
     pub correct_count: i32,
-    #[sea_orm(column_type = "Text")]
-    pub alpha_prior: String,
-    #[sea_orm(column_type = "Text")]
-    pub beta_prior: String,
-    #[sea_orm(column_type = "Text", nullable)]
-    pub posterior_mean: Option<String>,
+    pub alpha_prior: Probability,
+    pub beta_prior: Probability,
+    pub posterior_mean: Option<Probability>,
     pub updated_at: DateTime<Utc>,
 }
 

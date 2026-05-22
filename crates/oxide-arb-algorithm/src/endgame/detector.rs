@@ -22,7 +22,7 @@ use oxide_arb_models::{
 
 use crate::calibration::ResolutionCalibrator;
 use crate::endgame::confidence::{ConfidenceFusion, compute_realtime_confidence};
-use crate::endgame::convergence::{ConvergenceDirection, ConvergenceTracker};
+use crate::endgame::convergence::{ConvergenceDirection, InMemoryConvergenceTracker};
 use crate::fee::FeeEstimator;
 use crate::walker::OrderbookWalker;
 
@@ -32,7 +32,9 @@ use crate::walker::OrderbookWalker;
 /// configuration. Designed to be constructed once and reused across scans.
 pub struct EndgameDetector {
     config: EndgameDetectionConfig,
-    convergence: ConvergenceTracker,
+    // TODO(redis-backend): switch this field to `RedisConvergenceTracker`
+    // before running multiple scanner instances against the same markets.
+    convergence: InMemoryConvergenceTracker,
     calibrator: Arc<ResolutionCalibrator>,
     fusion: ConfidenceFusion,
     fee_estimator: Arc<dyn FeeEstimator>,
@@ -48,7 +50,7 @@ impl EndgameDetector {
         fee_estimator: Arc<dyn FeeEstimator>,
     ) -> Self {
         Self {
-            convergence: ConvergenceTracker::new(&config.convergence_tracker),
+            convergence: InMemoryConvergenceTracker::new(&config.convergence_tracker),
             fusion: ConfidenceFusion::new(calibration_config),
             config,
             calibrator,
@@ -221,9 +223,36 @@ impl EndgameDetector {
         None
     }
 
+    /// Return `true` when per-market state should be cleared.
+    ///
+    /// The pipeline uses this signal to reset emission cooldown when a market
+    /// leaves the active settlement window or no longer has converged prices.
+    #[must_use]
+    pub fn should_reset_market_state(
+        &self,
+        book: &MarketBookSnapshot,
+        settlement_deadline: Option<DateTime<Utc>>,
+        now: DateTime<Utc>,
+    ) -> bool {
+        if !self.config.enabled {
+            return true;
+        }
+        let Some(deadline) = settlement_deadline else {
+            return true;
+        };
+        let hours_remaining = (deadline - now).num_hours();
+        if hours_remaining < 0
+            || hours_remaining
+                > i64::try_from(self.config.settlement_window_hours).unwrap_or(i64::MAX)
+        {
+            return true;
+        }
+        self.detect_direction(book).is_none()
+    }
+
     /// Access the underlying convergence tracker (for metrics/diagnostics).
     #[must_use]
-    pub const fn convergence_tracker(&self) -> &ConvergenceTracker {
+    pub const fn convergence_tracker(&self) -> &InMemoryConvergenceTracker {
         &self.convergence
     }
 

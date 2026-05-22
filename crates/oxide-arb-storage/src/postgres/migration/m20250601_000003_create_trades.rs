@@ -1,4 +1,5 @@
 use super::migrate_up;
+use oxide_arb_models::idens::event::Event;
 use oxide_arb_models::idens::market::Market;
 use oxide_arb_models::idens::trade::Trade;
 use sea_orm_migration::prelude::*;
@@ -78,6 +79,13 @@ fn create_tables() -> Vec<TableCreateStatement> {
                     .to(Market::Table, Market::MarketId)
                     .on_delete(ForeignKeyAction::Restrict),
             )
+            .foreign_key(
+                ForeignKey::create()
+                    .name("fk_trade_event")
+                    .from(Trade::Table, Trade::EventId)
+                    .to(Event::Table, Event::EventId)
+                    .on_delete(ForeignKeyAction::Restrict),
+            )
             .to_owned(),
     ]
 }
@@ -98,6 +106,11 @@ fn create_indexes() -> Vec<IndexCreateStatement> {
             .name("idx_trades_market_id")
             .table(Trade::Table)
             .col(Trade::MarketId)
+            .to_owned(),
+        Index::create()
+            .name("idx_trades_event_id")
+            .table(Trade::Table)
+            .col(Trade::EventId)
             .to_owned(),
         Index::create()
             .name("idx_trades_outcome")

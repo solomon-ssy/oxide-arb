@@ -74,6 +74,42 @@ pub async fn migrate_up(
     Ok(())
 }
 
+/// Run a schema-only migration in fixed DDL order.
+///
+/// Use this helper for `create_*`, `alter_*`, and trigger/function migrations
+/// that do not seed application data.
+pub async fn migrate_schema(
+    manager: &SchemaManager<'_>,
+    tables: impl IntoIterator<Item = TableCreateStatement>,
+    indexes: impl IntoIterator<Item = IndexCreateStatement>,
+    specials: impl std::future::Future<Output = Result<(), DbErr>>,
+) -> Result<(), DbErr> {
+    create_tables(manager, tables).await?;
+    create_indexes(manager, indexes).await?;
+    specials.await?;
+    Ok(())
+}
+
+/// Run an idempotent seed migration.
+///
+/// Seed migrations must not create or alter schema. They may only populate
+/// data into tables created by prior schema migrations.
+pub async fn migrate_seed(
+    seeding_data: impl std::future::Future<Output = Result<(), DbErr>>,
+) -> Result<(), DbErr> {
+    seeding_data.await
+}
+
+/// Run a data-only migration such as a backfill or data repair.
+///
+/// Data migrations must document their required input schema in the migration
+/// module docs and must be idempotent when possible.
+pub async fn migrate_data(
+    data_migration: impl std::future::Future<Output = Result<(), DbErr>>,
+) -> Result<(), DbErr> {
+    data_migration.await
+}
+
 /// No-op phase for migrations with nothing to run in `specials` or `seeding_data`.
 pub async fn noop(_manager: &SchemaManager<'_>) -> Result<(), DbErr> {
     Ok(())

@@ -2,7 +2,7 @@
 
 use crate::domain::calibration::{DurationBucket, PriceZone};
 use crate::enums::common::MarketCategory;
-use crate::types::{MarketId, Price};
+use crate::types::{MarketId, Price, Probability};
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
@@ -18,8 +18,7 @@ pub struct Model {
     pub predicted_yes: bool,
     pub actual_yes: Option<bool>,
     pub entry_price: Price,
-    #[sea_orm(column_type = "Text")]
-    pub confidence_at_entry: String,
+    pub confidence_at_entry: Probability,
     pub convergence_secs: i32,
     pub resolved_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,

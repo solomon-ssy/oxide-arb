@@ -1,8 +1,9 @@
 //! `trades` table entity.
 
-use crate::enums::common::{Side, TradeOutcome};
+use crate::enums::common::{ExecutionMode, Side, TradeOutcome};
 use crate::types::{
-    Bps, EventId, ExecutionId, MarketId, OpportunityId, Price, Shares, TokenId, TradeId, Usd,
+    Bps, EventId, ExecutionId, MarketId, OpportunityId, OrderId, Price, Shares, TokenId, TradeId,
+    Usd,
 };
 use chrono::{DateTime, Utc};
 use oxide_arb_macros::ActiveModelDefaults;
@@ -32,13 +33,11 @@ pub struct Model {
     pub detected_edge_bps: Option<Bps>,
     pub detected_profit_usd: Option<Usd>,
     pub net_profit_usd: Option<Usd>,
-    #[sea_orm(column_type = "Text", nullable)]
-    pub order_id: Option<String>,
+    pub order_id: Option<OrderId>,
     #[sea_orm(column_type = "Text", nullable)]
     pub tx_hash: Option<String>,
     pub outcome: TradeOutcome,
-    #[sea_orm(column_type = "Text")]
-    pub execution_mode: String,
+    pub execution_mode: ExecutionMode,
     pub latency_ms: Option<i32>,
     #[sea_orm(column_type = "Text", nullable)]
     pub error_message: Option<String>,
