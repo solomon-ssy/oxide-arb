@@ -17,7 +17,7 @@ use std::time::Duration;
 pub enum ConvergenceDirection {
     /// YES token ask >= threshold → outcome likely YES.
     YesLikely,
-    /// NO token ask >= threshold (or YES ask <= `low_threshold`) → outcome likely NO.
+    /// NO token ask >= threshold → outcome likely NO.
     NoLikely,
 }
 

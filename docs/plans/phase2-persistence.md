@@ -432,25 +432,7 @@ TTL audit_date + INTERVAL 365 DAY DELETE
 SETTINGS index_granularity = 8192;
 ```
 
-### 4.4 signal_data — 特征存储
-
-```sql
-CREATE TABLE signal_data (
-    market_id       String,
-    signal_name     String,
-    signal_value    Float64,
-    metadata        String CODEC(ZSTD(1)),
-    recorded_at     DateTime64(3, 'UTC'),
-    signal_date     Date MATERIALIZED toDate(recorded_at)
-)
-ENGINE = MergeTree()
-PARTITION BY toYYYYMM(signal_date)
-ORDER BY (market_id, signal_name, recorded_at)
-TTL signal_date + INTERVAL 180 DAY DELETE
-SETTINGS index_granularity = 8192;
-```
-
-### 4.5 calibration_snapshots — 校准状态快照
+### 4.4 calibration_snapshots — 校准状态快照
 
 ```sql
 CREATE TABLE calibration_snapshots (
@@ -995,7 +977,6 @@ pub trait TimeseriesRepository: Send + Sync + 'static {
     async fn insert_tick_events(&self, events: &[TickEventRow]) -> Result<(), StorageError>;
     async fn insert_book_snapshot(&self, snapshot: &BookSnapshotRow) -> Result<(), StorageError>;
     async fn insert_opportunity_audit(&self, audit: &OpportunityAuditRow) -> Result<(), StorageError>;
-    async fn insert_signal_data(&self, signals: &[SignalDataRow]) -> Result<(), StorageError>;
     async fn insert_calibration_snapshot(
         &self,
         snapshot: &CalibrationSnapshotRow,
@@ -1348,7 +1329,7 @@ async fn test_redis_cache_backend() {
 - [ ] 所有 SeaORM entity 的 CRUD 操作通过集成测试
 - [ ] `MarketRepository::find_endgame_candidates()` 正确按 `end_date` 筛选
 - [ ] `PositionRepository::total_exposure()` 精确聚合（NUMERIC 精度无损）
-- [ ] ClickHouse 5 张表 DDL 幂等创建
+- [ ] ClickHouse 表与物化视图 DDL 幂等创建（不包含已废弃的 `signal_data`）
 - [ ] `BatchInserter` 在 shutdown 时 drain 剩余 buffer
 - [ ] `TieredCache` L1 miss → L2 hit 路径自动 backfill L1
 - [ ] `TieredCache` L1+L2 both miss 路径正确返回 `None`

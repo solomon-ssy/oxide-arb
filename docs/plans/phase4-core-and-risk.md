@@ -20,6 +20,9 @@
 | `TieredExecutionStrategy` | `oxide-arb-core/src/execution/` | FOK → 短 GTD → 长 GTD 分层，读取上述配置 |
 | `ExecutionFSM` 简化 | `oxide-arb-core/src/execution/state_machine.rs` | **删除 `Hedging`**；`Emergency` 仅系统级故障，非对冲失败 |
 | Oracle `HealthTracker` | `oxide-arb-core/src/oracle/health.rs`（或 `oxide-arb-api` 若仅数据层需要） | 自旧版 `settlement_oracle/health.rs` 移植：300s 滑动窗口、`SourceHealth` / `Degraded` / `Down`，供 `HealthChecker` 与熔断联动 |
+| Dual NO Book 运行时 | `oxide-arb-core/src/data/{dual_book,book_gate}.rs` | 基于 Phase 0-3 的 `EndgameBookSnapshot`，WS 必须订阅 YES+NO 双 token，检测前完成双书组装与质量门控 |
+| Cache Owner Services | `oxide-arb-core/src/services/` | `FeeParamsService`、`PositionSummaryService`、`WalletBalanceService` 统一拥有 read-through cache 与失效路径 |
+| ClobClient 余额查询 | `oxide-arb-api/src/clob/` | `collateral_balance()` 查询 Polymarket USDC.e 可用余额，供 `WalletBalanceService` 和风控使用 |
 
 **Phase 0 已完成的配置原则**：`detection.min_profit_threshold_usd` 为唯一 min_profit 来源；执行/风控通过 `Settings::min_profit_threshold_usd()` 读取，不得在 `[execution]` / `[risk]` 重复 TOML 字段。
 
@@ -567,22 +570,17 @@ impl MultiConstraintSizer {
         let single_cap = Usd::new(self.risk_config.directional.max_single_bet_usd);
 
         // 3. Per-market exposure
+        // Implemented through PositionSummaryService (see P6).
         let current_market_exp = metrics.market_exposure(&opp.market_id).await;
-        // Phase 4 implementation note:
-        // cache `market_exposure` / position summary with
-        // `CacheKey::PositionSummary { market_id }` once this service owns
-        // invalidation after position, trade, and settlement updates.
         let market_cap = Usd::new(
             (self.risk_config.max_single_market_exposure_usd - current_market_exp)
                 .max(Decimal::ZERO),
         );
 
         // 4. Portfolio exposure
+        // Implemented through WalletBalanceService (see P6).
         let total_exp = metrics.total_exposure().await;
         let balance = metrics.available_balance().await;
-        // Phase 4 implementation note:
-        // cache external Polymarket balance snapshots with `CacheKey::Balance`
-        // once order submission and confirmation paths own invalidation.
         let max_portfolio = balance * self.risk_config.max_total_exposure_pct / Decimal::from(100);
         let portfolio_cap = Usd::new((max_portfolio - total_exp).max(Decimal::ZERO));
 
@@ -1823,10 +1821,9 @@ impl LedgerReconciler {
 - `AlertDispatcher`: 所有 mismatch 发送通知
 - 调度频率：默认每 5 分钟一次，可通过 `RuntimeConfig` 调整
 
-**缓存延期项**:
-- `CacheKey::Balance` 不能在 repository 层提前实现；它依赖 `BalanceQuerier` / wallet service 的外部快照读取，以及订单提交、成交确认、reconcile 后的失效路径。
-- Phase 4 实现 `BalanceQuerier` 时必须把 `CacheKey::Balance` 接入 service 层，并在所有改变可用余额的路径后 invalidate。
-- `CacheKey::PositionSummary { market_id }` 必须由风险/持仓服务持有，因为失效依赖 position lifecycle、trade outcome、settlement/reconcile 多条写路径。
+**缓存 Owner**: `CacheKey::Balance` 与 `CacheKey::PositionSummary { market_id }`
+由 P6 的 `WalletBalanceService` / `PositionSummaryService` 统一拥有 read-through
+cache 与显式失效路径，repository 层不得提前实现聚合缓存。
 
 ---
 
@@ -1900,3 +1897,162 @@ InMemory 实现使用 DashMap + AtomicU64 CAS loop；Redis 实现预留为未来
 - `ctf_oracle: Arc<dyn CtfOracle>`
 
 将 `calibration_outcome::Model` 转换为 `UnresolvedOutcome`，桥接 repository 与 algorithm。
+
+### P5. Dual NO Book 运行时
+
+Phase 0-3 已将算法入口收敛到严格的 `EndgameBookSnapshot`：Endgame 检测不能再用 YES low-threshold 合成 NO 方向，也不能从 YES book 反推 NO book。Phase 4 的数据管线必须在调用 `OpportunityPipeline` 前完成 YES+NO 双 token book 组装。
+
+新增 `oxide-arb-core/src/data/dual_book.rs`:
+
+```rust
+/// Builds strict YES+NO endgame books from per-token book state.
+pub struct DualBookAssembler {
+    book_store: Arc<BookStore>,
+    market_registry: Arc<MarketRegistry>,
+    book_gate: Arc<BookGate>,
+}
+
+impl DualBookAssembler {
+    pub fn build(&self, market_id: &MarketId) -> Result<EndgameBookSnapshot, BookGateError> {
+        // 1. Resolve yes_token_id / no_token_id from MarketRegistry.
+        // 2. Fetch both token books from BookStore.
+        // 3. Reject missing, empty, stale, or crossed sides through BookGate.
+        // 4. Return EndgameBookSnapshot with all four sides populated.
+    }
+}
+```
+
+`BookStore` remains token-keyed (`TokenId -> OrderBook`) as described in §7.1. `DualBookAssembler` is the market-level adapter that joins `yes_token_id` and `no_token_id` into a single `EndgameBookSnapshot`.
+
+新增 `oxide-arb-core/src/data/book_gate.rs`:
+
+```rust
+pub enum BookGateError {
+    MissingYesBook,
+    MissingNoBook,
+    EmptyYesBook,
+    EmptyNoBook,
+    StaleYesBook { age_ms: u64 },
+    StaleNoBook { age_ms: u64 },
+    CrossedYesBook,
+    CrossedNoBook,
+}
+```
+
+BookGate rules:
+
+- Every endgame candidate market MUST subscribe to both `yes_token_id` and `no_token_id`.
+- `MissingNoBook` and `EmptyNoBook` are hard rejections; no complement fallback is allowed.
+- Staleness is computed independently for YES and NO sides; the opportunity staleness is the maximum side age.
+- Crossed YES or NO book is quarantined and recorded as a funnel rejection reason.
+- `ClobClient::get_dual_book(yes_token, no_token)` is used only for startup bootstrap and reconciliation baselines; live detection uses WS-fed `BookStore`.
+
+Data pipeline change:
+
+```text
+WsEvent(token book) → BookStore.apply_* → MarketRegistry.token_to_market
+    → DualBookAssembler::build(market_id) → OpportunityPipeline::process(EndgameBookSnapshot)
+```
+
+Validation checklist:
+
+- [ ] WS subscription set includes both YES and NO tokens for every active endgame candidate.
+- [ ] Only YES updates with missing NO book produce zero emitted opportunities.
+- [ ] NO convergence uses NO ask VWAP and NO depth, never YES inferred depth.
+- [ ] WS-assembled dual book matches REST `get_dual_book` within one tick on live integration tests.
+- [ ] Funnel metrics include `missing_no_book`, `stale_no_book`, and `crossed_no_book` rejection reasons.
+
+### P6. Cache Owner Services
+
+`CacheKey::PositionSummary`, `CacheKey::Balance`, and `CacheKey::FeeParams` are intentionally defined in Phase 2 without repository wrappers. Their write paths are service-owned, so Phase 4 must introduce explicit owners under `oxide-arb-core/src/services/`.
+
+Directory:
+
+```text
+oxide-arb-core/src/services/
+├── mod.rs
+├── fee_params.rs
+├── position_summary.rs
+├── wallet_balance.rs
+└── invalidation.rs
+```
+
+Service ownership:
+
+| Service | CacheKey | Read path | Invalidation triggers |
+|---|---|---|---|
+| `FeeParamsService` | `FeeParams { category }` | TieredCache miss → `FeeCalculator::category_params(category)` → `set_json` | Gamma market ingest changed token-category mapping; runtime fee config changed; full fee snapshot refresh |
+| `PositionSummaryService` | `PositionSummary { market_id }` | TieredCache miss → `PositionRepository::find_by_market` → aggregate open exposure | position open/close/settle; trade insert/outcome update; reconciliation adjustment |
+| `WalletBalanceService` | `Balance` | TieredCache miss → `ClobClient::collateral_balance()` minus active reservations | order submit/cancel/fill confirm; reservation try/confirm/release; ledger reconciliation drift |
+
+DTOs to add in `oxide-arb-models/src/domain/`:
+
+```rust
+/// Per-market aggregated open position view for pre-trade risk.
+pub struct PositionSummary {
+    pub market_id: MarketId,
+    pub open_position_count: u32,
+    pub total_shares: Shares,
+    pub total_cost_usd: Usd,
+    pub total_fees_usd: Usd,
+    pub unrealized_pnl: Usd,
+    pub computed_at: DateTime<Utc>,
+}
+
+/// Polymarket collateral balance snapshot after local reservations.
+pub struct WalletBalanceSnapshot {
+    pub available_usd: Usd,
+    pub allowance_usd: Usd,
+    pub reserved_usd: Usd,
+    pub effective_available_usd: Usd,
+    pub fetched_at: DateTime<Utc>,
+}
+```
+
+Move `CategoryFeeParams` to `oxide-arb-models/src/domain/fee.rs` so API, algorithm, and core share the same type without API re-exports.
+
+Invalidation contract:
+
+- All cache invalidation is awaited synchronously on the owning write path.
+- Failed invalidation increments a metric and returns an error to money-moving paths; no stale fail-open behavior is allowed for risk, balance, or fee reads.
+- Repository wrappers must not cache `PositionSummary`; repositories persist facts, services own aggregate read models.
+- `CacheInvalidationCoordinator` centralizes the API used by execution, reconciliation, and runtime config updates.
+
+`AppContext` additions:
+
+```rust
+pub struct AppContext {
+    pub fee_params: Arc<FeeParamsService>,
+    pub position_summary: Arc<PositionSummaryService>,
+    pub wallet_balance: Arc<WalletBalanceService>,
+    pub cache_invalidation: Arc<CacheInvalidationCoordinator>,
+}
+```
+
+Integration tests:
+
+- [ ] Fee params read-through fills L1 and L2, then returns updated values after invalidation.
+- [ ] Position summary invalidates after close/settle and recomputes from repository state.
+- [ ] Wallet balance invalidates after reservation try/release and updates `effective_available_usd`.
+- [ ] Redis/backend errors fail closed for balance and position summary reads.
+
+### P7. DetectionScanner 接线
+
+The Phase 4 scanner must treat `EndgameBookSnapshot` as the only valid algorithm input.
+
+```text
+MarketRegistry → DualBookAssembler → OpportunityPipeline::process(EndgameBookSnapshot)
+```
+
+Scanner requirements:
+
+- `Scanner` constructs `EndgameBookSnapshot` only after YES and NO token books both pass `DualBookAssembler` and `BookGate`.
+- `DataPipeline::trigger_detection(token_id)` resolves the owning market, coalesces market-level updates, and schedules a scan only after `DualBookAssembler::build` succeeds.
+- Rejected book assembly produces funnel metrics and lifecycle debug events, not silent `None` paths.
+- Dry-run E2E must cover YES convergence and NO convergence with real YES+NO token books.
+
+Validation checklist:
+
+- [ ] `OpportunityPipeline::process` is only called with `EndgameBookSnapshot`.
+- [ ] Missing NO book is visible in funnel metrics and produces no opportunity.
+- [ ] NO convergence dry-run audit rows use NO token id, NO VWAP, and NO depth.

@@ -71,11 +71,10 @@ struct TableDdl {
 async fn clickhouse_table_ttl_policies() {
     let (_pool, client, _port, _container) = setup_clickhouse().await;
 
-    let expected: [(&str, &str); 5] = [
+    let expected: [(&str, &str); 4] = [
         ("tick_events", "event_date + INTERVAL 90 DAY"),
         ("book_snapshots", "snapshot_date + INTERVAL 180 DAY"),
         ("opportunity_audit", "audit_date + INTERVAL 365 DAY"),
-        ("signal_data", "signal_date + INTERVAL 180 DAY"),
         ("calibration_snapshots", "snapshot_date + INTERVAL 365 DAY"),
     ];
 

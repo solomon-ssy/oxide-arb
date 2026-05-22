@@ -43,15 +43,61 @@ impl OrderbookSide {
     }
 }
 
-/// Complete orderbook state for a binary market (YES + NO tokens).
-///
-/// The algorithm crate receives this as input to the detection pipeline.
-/// The `no_*` sides are `Option` because not all markets expose a separate
-/// NO-token book (single-token markets derive NO from YES complement).
+/// Complete YES+NO orderbook snapshot required by the endgame detector.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MarketBookSnapshot {
+pub struct EndgameBookSnapshot {
+    /// YES-token bid side, sorted descending by price.
     pub yes_bids: OrderbookSide,
+    /// YES-token ask side, sorted ascending by price.
     pub yes_asks: OrderbookSide,
-    pub no_bids: Option<OrderbookSide>,
-    pub no_asks: Option<OrderbookSide>,
+    /// NO-token bid side, sorted descending by price.
+    pub no_bids: OrderbookSide,
+    /// NO-token ask side, sorted ascending by price.
+    pub no_asks: OrderbookSide,
+}
+
+impl EndgameBookSnapshot {
+    /// Return the maximum age, in milliseconds, across all four book sides.
+    #[must_use]
+    pub fn max_staleness_ms(&self, now_ms: u64) -> u64 {
+        [
+            self.yes_bids.timestamp_ms,
+            self.yes_asks.timestamp_ms,
+            self.no_bids.timestamp_ms,
+            self.no_asks.timestamp_ms,
+        ]
+        .into_iter()
+        .map(|timestamp_ms| now_ms.saturating_sub(timestamp_ms))
+        .max()
+        .unwrap_or(0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{Price, Shares};
+    use rust_decimal_macros::dec;
+
+    fn side(price: rust_decimal::Decimal, timestamp_ms: u64) -> OrderbookSide {
+        OrderbookSide {
+            levels: vec![BookLevel {
+                price: Price::new(price),
+                size: Shares::new(dec!(10)),
+            }],
+            timestamp_ms,
+        }
+    }
+
+    #[test]
+    fn max_staleness_uses_oldest_side() {
+        let book = EndgameBookSnapshot {
+            yes_bids: side(dec!(0.96), 900),
+            yes_asks: side(dec!(0.97), 950),
+            no_bids: side(dec!(0.03), 700),
+            no_asks: side(dec!(0.04), 990),
+        };
+
+        assert_eq!(book.max_staleness_ms(1000), 300);
+    }
 }

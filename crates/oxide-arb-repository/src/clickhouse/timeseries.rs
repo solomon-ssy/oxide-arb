@@ -2,7 +2,7 @@ use crate::traits::TimeseriesRepository;
 use chrono::{DateTime, Utc};
 use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::clickhouse::{
-    BookSnapshotRow, CalibrationSnapshotRow, OpportunityAuditRow, SignalDataRow, TickEventRow,
+    BookSnapshotRow, CalibrationSnapshotRow, OpportunityAuditRow, TickEventRow,
 };
 use oxide_arb_models::config::AnalyticsConfig;
 use oxide_arb_storage::clickhouse::{BatchInserter, ChWriteManager, ChWriteMetrics};
@@ -21,7 +21,6 @@ pub struct ChTimeseriesRepository {
     tick_inserter: BatchInserter<TickEventRow>,
     book_inserter: BatchInserter<BookSnapshotRow>,
     audit_inserter: BatchInserter<OpportunityAuditRow>,
-    signal_inserter: BatchInserter<SignalDataRow>,
     calibration_inserter: BatchInserter<CalibrationSnapshotRow>,
 }
 
@@ -56,14 +55,6 @@ impl ChTimeseriesRepository {
             audit_inserter: BatchInserter::new(
                 client.clone(),
                 "opportunity_audit",
-                batch_size,
-                flush_interval,
-                metrics.clone(),
-                shutdown.clone(),
-            ),
-            signal_inserter: BatchInserter::new(
-                client.clone(),
-                "signal_data",
                 batch_size,
                 flush_interval,
                 metrics.clone(),
@@ -108,13 +99,6 @@ impl TimeseriesRepository for ChTimeseriesRepository {
         audit: &OpportunityAuditRow,
     ) -> Result<(), StorageError> {
         self.audit_inserter.insert(audit.clone()).await
-    }
-
-    async fn insert_signal_data(&self, signals: &[SignalDataRow]) -> Result<(), StorageError> {
-        for signal in signals {
-            self.signal_inserter.insert(signal.clone()).await?;
-        }
-        Ok(())
     }
 
     async fn insert_calibration_snapshot(

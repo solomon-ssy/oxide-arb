@@ -19,6 +19,7 @@ use crate::infra::retry::{self, RetryPolicy};
 use crate::keystore::OrderSigner;
 use oxide_arb_error::api::ApiError;
 use oxide_arb_models::config::PolymarketConfig;
+use oxide_arb_models::domain::book::{EndgameBookSnapshot, OrderbookSide};
 use oxide_arb_models::domain::order::{OrderRequest, OrderResponse, OrderStatus};
 use oxide_arb_models::enums::common::OrderType;
 use oxide_arb_models::types::{OrderId, Price, Shares, TokenId, Usd};
@@ -258,6 +259,39 @@ impl ClobClient {
             }
         })
         .await
+    }
+
+    /// Fetch both YES and NO token books and build a strict endgame snapshot.
+    ///
+    /// This method intentionally fails if either token book cannot be fetched.
+    /// The endgame strategy must never synthesize a NO book from YES prices.
+    #[tracing::instrument(skip(self), fields(yes_token = %yes_token, no_token = %no_token))]
+    pub async fn get_dual_book(
+        &self,
+        yes_token: &TokenId,
+        no_token: &TokenId,
+    ) -> Result<EndgameBookSnapshot, ApiError> {
+        let (yes_book, no_book) =
+            tokio::try_join!(self.get_book(yes_token), self.get_book(no_token))?;
+
+        Ok(EndgameBookSnapshot {
+            yes_bids: OrderbookSide {
+                levels: yes_book.bids,
+                timestamp_ms: yes_book.timestamp_ms,
+            },
+            yes_asks: OrderbookSide {
+                levels: yes_book.asks,
+                timestamp_ms: yes_book.timestamp_ms,
+            },
+            no_bids: OrderbookSide {
+                levels: no_book.bids,
+                timestamp_ms: no_book.timestamp_ms,
+            },
+            no_asks: OrderbookSide {
+                levels: no_book.asks,
+                timestamp_ms: no_book.timestamp_ms,
+            },
+        })
     }
 
     /// List all open orders for the authenticated account.

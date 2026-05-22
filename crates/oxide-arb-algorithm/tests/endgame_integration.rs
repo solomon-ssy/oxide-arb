@@ -14,7 +14,7 @@ use oxide_arb_algorithm::{
 use oxide_arb_models::{
     config::{CalibrationConfig, EndgameDetectionConfig},
     domain::{
-        BookLevel, MarketBookSnapshot, OrderbookSide,
+        BookLevel, EndgameBookSnapshot, OrderbookSide,
         calibration::{BucketKey, DurationBucket, PriceZone},
     },
     enums::common::{MarketCategory, StalenessLevel},
@@ -36,21 +36,32 @@ impl FeeEstimator for ZeroFeeEstimator {
     }
 }
 
-fn make_book(yes_ask_price: Decimal, yes_ask_size: Decimal) -> MarketBookSnapshot {
-    MarketBookSnapshot {
+fn side(price: Decimal, size: Decimal) -> OrderbookSide {
+    OrderbookSide {
+        levels: vec![BookLevel {
+            price: Price::new(price),
+            size: Shares::new(size),
+        }],
+        timestamp_ms: 0,
+    }
+}
+
+const fn empty_side() -> OrderbookSide {
+    OrderbookSide {
+        levels: vec![],
+        timestamp_ms: 0,
+    }
+}
+
+fn make_book(yes_ask_price: Decimal, yes_ask_size: Decimal) -> EndgameBookSnapshot {
+    EndgameBookSnapshot {
         yes_bids: OrderbookSide {
             levels: vec![],
             timestamp_ms: 0,
         },
-        yes_asks: OrderbookSide {
-            levels: vec![BookLevel {
-                price: Price::new(yes_ask_price),
-                size: Shares::new(yes_ask_size),
-            }],
-            timestamp_ms: 0,
-        },
-        no_bids: None,
-        no_asks: None,
+        yes_asks: side(yes_ask_price, yes_ask_size),
+        no_bids: side(dec!(0.02), yes_ask_size),
+        no_asks: side(dec!(0.03), yes_ask_size),
     }
 }
 
@@ -160,17 +171,11 @@ fn short_convergence_rejected() {
 #[test]
 fn empty_book_returns_none() {
     let detector = make_detector();
-    let book = MarketBookSnapshot {
-        yes_bids: OrderbookSide {
-            levels: vec![],
-            timestamp_ms: 0,
-        },
-        yes_asks: OrderbookSide {
-            levels: vec![],
-            timestamp_ms: 0,
-        },
-        no_bids: None,
-        no_asks: None,
+    let book = EndgameBookSnapshot {
+        yes_bids: empty_side(),
+        yes_asks: empty_side(),
+        no_bids: empty_side(),
+        no_asks: empty_side(),
     };
     let now = Utc::now();
     let deadline = now + Duration::hours(12);

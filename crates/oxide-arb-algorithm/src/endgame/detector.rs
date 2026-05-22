@@ -12,7 +12,7 @@ use rust_decimal_macros::dec;
 use oxide_arb_models::{
     config::{CalibrationConfig, EndgameDetectionConfig},
     domain::{
-        book::MarketBookSnapshot,
+        book::EndgameBookSnapshot,
         calibration::{BucketKey, DurationBucket, PriceZone},
         opportunity::{EndgameMeta, Opportunity, PayoutModel},
     },
@@ -68,7 +68,7 @@ impl EndgameDetector {
         event_id: &EventId,
         token_yes: &TokenId,
         token_no: &TokenId,
-        book: &MarketBookSnapshot,
+        book: &EndgameBookSnapshot,
         category: MarketCategory,
         staleness: StalenessLevel,
         settlement_deadline: Option<DateTime<Utc>>,
@@ -100,10 +100,7 @@ impl EndgameDetector {
         // Step 4: walk the target orderbook
         let (target_asks, target_token) = match direction {
             ConvergenceDirection::YesLikely => (&book.yes_asks, token_yes),
-            ConvergenceDirection::NoLikely => {
-                let no_asks = book.no_asks.as_ref()?;
-                (no_asks, token_no)
-            }
+            ConvergenceDirection::NoLikely => (&book.no_asks, token_no),
         };
 
         let walk = OrderbookWalker::walk_asks_by_cost(
@@ -198,25 +195,18 @@ impl EndgameDetector {
 
     /// Detect convergence direction from the market book.
     ///
-    /// Checks YES asks first (`YesLikely` if best ask >= threshold), then
-    /// NO asks (`NoLikely` if NO best ask >= threshold), then the complement
-    /// check (YES best ask <= `low_threshold` implies `NoLikely`).
-    fn detect_direction(&self, book: &MarketBookSnapshot) -> Option<ConvergenceDirection> {
+    /// Checks YES asks first (`YesLikely` if best ask >= threshold), then NO
+    /// asks (`NoLikely` if NO best ask >= threshold).
+    fn detect_direction(&self, book: &EndgameBookSnapshot) -> Option<ConvergenceDirection> {
         if let Some(yes_best_ask) = book.yes_asks.best_price() {
             if yes_best_ask.inner() >= self.config.high_threshold {
                 return Some(ConvergenceDirection::YesLikely);
             }
-
-            if yes_best_ask.inner() <= self.config.low_threshold {
-                return Some(ConvergenceDirection::NoLikely);
-            }
         }
 
-        if let Some(no_asks) = &book.no_asks {
-            if let Some(no_best_ask) = no_asks.best_price() {
-                if no_best_ask.inner() >= self.config.high_threshold {
-                    return Some(ConvergenceDirection::NoLikely);
-                }
+        if let Some(no_best_ask) = book.no_asks.best_price() {
+            if no_best_ask.inner() >= self.config.high_threshold {
+                return Some(ConvergenceDirection::NoLikely);
             }
         }
 
@@ -230,7 +220,7 @@ impl EndgameDetector {
     #[must_use]
     pub fn should_reset_market_state(
         &self,
-        book: &MarketBookSnapshot,
+        book: &EndgameBookSnapshot,
         settlement_deadline: Option<DateTime<Utc>>,
         now: DateTime<Utc>,
     ) -> bool {

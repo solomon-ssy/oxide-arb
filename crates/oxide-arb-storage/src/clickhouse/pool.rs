@@ -53,7 +53,7 @@ impl ClickHousePool {
         for ddl in schema::all_ddl() {
             self.client.query(ddl).execute().await?;
         }
-        info!("ClickHouse schema ensured (5 tables + 1 materialized view)");
+        info!("ClickHouse schema ensured");
         Ok(())
     }
 }

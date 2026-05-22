@@ -5,7 +5,7 @@
 use chrono::{DateTime, Utc};
 use oxide_arb_models::{
     config::ScorerConfig,
-    domain::book::MarketBookSnapshot,
+    domain::book::EndgameBookSnapshot,
     enums::common::{MarketCategory, StalenessLevel},
     types::{EventId, MarketId, TokenId},
 };
@@ -22,7 +22,7 @@ pub struct MarketScanInput {
     pub event_id: EventId,
     pub token_yes: TokenId,
     pub token_no: TokenId,
-    pub book: MarketBookSnapshot,
+    pub book: EndgameBookSnapshot,
     pub category: MarketCategory,
     pub staleness: StalenessLevel,
     pub settlement_deadline: Option<DateTime<Utc>>,
@@ -72,7 +72,7 @@ impl OpportunityPipeline {
         event_id: &EventId,
         token_yes: &TokenId,
         token_no: &TokenId,
-        book: &MarketBookSnapshot,
+        book: &EndgameBookSnapshot,
         category: MarketCategory,
         staleness: StalenessLevel,
         settlement_deadline: Option<DateTime<Utc>>,

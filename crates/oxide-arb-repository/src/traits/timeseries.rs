@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::clickhouse::{
-    BookSnapshotRow, CalibrationSnapshotRow, OpportunityAuditRow, SignalDataRow, TickEventRow,
+    BookSnapshotRow, CalibrationSnapshotRow, OpportunityAuditRow, TickEventRow,
 };
 
 pub trait TimeseriesRepository: Send + Sync {
@@ -11,7 +11,6 @@ pub trait TimeseriesRepository: Send + Sync {
         &self,
         audit: &OpportunityAuditRow,
     ) -> Result<(), StorageError>;
-    async fn insert_signal_data(&self, signals: &[SignalDataRow]) -> Result<(), StorageError>;
     async fn insert_calibration_snapshot(
         &self,
         snapshot: &CalibrationSnapshotRow,
