@@ -1,10 +1,12 @@
-# Phase 4.1 — `oxide-arb-risk` 详细设计文档
+# Phase 4.1 — `oxide-arb-risk` 生产级详细设计文档
 
-> **状态**: Draft  
+> **状态**: Production Design Target  
 > **作者**: oxide-arb team  
 > **创建日期**: 2026-05-22  
 > **前置依赖**: Phase 0 (error/macros), Phase 1 (models/api), Phase 2 (storage/repository), Phase 3 (algorithm)  
 > **ADR 参考**: ADR-001 (单策略 endgame，单平台 Polymarket，无对冲)
+> **运行拓扑**: 单活交易引擎（single-active execution engine），允许只读观测实例
+> **一致性取向**: 资金安全优先；关键状态同步持久化；失败即 fail-closed
 
 ---
 
@@ -42,13 +44,14 @@ Phase 4.1 创建一个**完全独立**的 `oxide-arb-risk` crate，不依赖 `ox
 | `PotentialLossLedger` | 未结算头寸最大潜在损失账本 |
 | `StaticLimitChecker` | L1 级前置静态过滤 (depth, staleness, edge) |
 | `ExposureLimitChecker` | 多维敞口限制 (per-market, portfolio, balance-based) |
-| `BlacklistManager` | `DashMap` 驱动的黑名单，支持 TTL 懒清理、scope 分级、自动拉黑 |
-| `QuarterKellyCalculator` | Quarter-Kelly 公式 + fill probability 折扣 |
-| `MultiConstraintSizer` | 7 约束取 min 的下注大小计算器 |
+| `BlacklistManager` | DB 权威 + `DashMap` 热路径投影，支持 TTL、scope 分级、自动拉黑、审计 |
+| `QuarterKellyCalculator` | Fractional Kelly 上限计算，纳入概率置信度、fill probability、费用/失败成本折扣 |
+| `MultiConstraintSizer` | 多约束风险预算器，Kelly 只是候选上限之一，最终受流动性/敞口/资金/回撤/交易所约束共同裁剪 |
 | `DrawdownGuard` | HWM 追踪 + drawdown 保护 |
 | `EndgameRiskRules` | Endgame 策略专用规则 (方向集中度、日方向预算) |
 | `LedgerReconciler` | 内部账本 vs 链上/交易所余额对账 |
-| `RiskEngine` | 门面类，编排所有子系统，提供 `pre_trade_check()` / `on_trade_result()` |
+| `RiskPipeline` | 统一 check 管线，静态注册、确定顺序、可审计 trace、支持 short-circuit/full-report |
+| `RiskEngine` | 门面类，编排状态恢复、check 管线、sizing、post-trade 状态机 |
 
 ### 0.2 依赖关系
 
@@ -79,11 +82,16 @@ oxide-arb-risk
 7. 会计翻转在 UTC 午夜 ±1ms 窗口内正确触发
 8. 黑名单 TTL 过期后自动清除，不阻塞交易
 9. Drawdown guard 在 HWM 回撤 > 阈值时正确降速/暂停
-10. `pre_trade_check()` 12 项检查按序执行，short-circuit 模式第一个 fail 即返回
+10. `RiskPipeline` 静态注册的 pre-trade checks 按序执行，short-circuit 模式第一个 hard fail 即返回，full-report 模式输出完整 trace
 11. `on_trade_result()` 更新所有子系统且不 panic
 12. 所有公共 API 签名有 `#[must_use]` 标注
 13. 零 `f64` 用于金额路径
 14. proptest 回归覆盖 Kelly 和 accounting 边界
+15. 启动恢复必须从持久化权威源重建 breaker/accounting/position/potential-loss/blacklist/drawdown；任一关键状态恢复失败则拒绝交易
+16. breaker、blacklist、accounting、position、potential-loss 的关键变更必须同步持久化并写审计记录；持久化失败时 fail-closed
+17. `pre_trade_check()` 输出完整 `RiskDecisionTrace`，包含 check id、输入摘要、阈值、实际值、耗时、状态版本和失败原因
+18. check 顺序由 `RiskPipeline` 静态注册，测试必须锁定顺序；禁止散落的 ad hoc `check_*` 被绕过
+19. 生产 API 不做向前兼容 re-export；公开面必须显式、收敛、可审计
 
 ---
 
@@ -95,10 +103,14 @@ oxide-arb-risk
 crates/oxide-arb-risk/
 ├── Cargo.toml
 ├── src/
-│   ├── lib.rs                    # crate 根，re-export 公开 API
+│   ├── lib.rs                    # crate 根，声明公开模块；禁止兼容 re-export
 │   ├── traits.rs                 # RiskMetrics, RiskPersistence, BalanceQuerier
 │   ├── engine.rs                 # RiskEngine 门面
 │   ├── builder.rs                # RiskEngineBuilder
+│   ├── pipeline.rs               # RiskPipeline, RiskCheck trait, registry/order
+│   ├── context.rs                # RiskContext, StateVersion, CheckInput snapshots
+│   ├── state_store.rs            # in-memory projections + recovery invariants
+│   ├── audit.rs                  # RiskAuditEvent, DecisionTrace, mutation log
 │   ├── circuit_breaker.rs        # CircuitBreaker FSM + BreakerState
 │   ├── accounting.rs             # DailyAccounting, WeeklyAccounting, PeriodStats
 │   ├── position.rs               # PositionTracker, PotentialLossLedger
@@ -107,7 +119,7 @@ crates/oxide-arb-risk/
 │   ├── sizing.rs                 # QuarterKellyCalculator, MultiConstraintSizer, DrawdownGuard
 │   ├── endgame_rules.rs          # EndgameRiskRules
 │   ├── reconciliation.rs         # LedgerReconciler, ReconciliationReport
-│   └── types.rs                  # crate-local types (PreTradeDecision, RiskCheckResult, SizeResult, etc.)
+│   └── types.rs                  # crate-local types (RiskDecision, RiskCheckResult, SizeResult, etc.)
 └── tests/
     ├── circuit_breaker_tests.rs
     ├── accounting_tests.rs
@@ -116,6 +128,9 @@ crates/oxide-arb-risk/
     ├── limits_tests.rs
     ├── endgame_rules_tests.rs
     ├── reconciliation_tests.rs
+    ├── pipeline_tests.rs
+    ├── recovery_tests.rs
+    ├── audit_tests.rs
     ├── engine_tests.rs
     └── proptest_sizing.rs
 ```
@@ -158,7 +173,11 @@ workspace = true
 ```text
 oxide_arb_risk
 ├── traits          (RiskMetrics, RiskPersistence, BalanceQuerier)
-├── types           (PreTradeDecision, RiskCheckResult, SizeResult, ...)
+├── types           (RiskDecision, RiskCheckResult, SizeResult, ...)
+├── context         (RiskContext, StateVersion, immutable check inputs)
+├── pipeline        (RiskPipeline, RiskCheck, static registry)
+├── state_store     (RecoveredState, in-memory projections)
+├── audit           (RiskAuditEvent, DecisionTrace)
 ├── circuit_breaker (CircuitBreaker, BreakerState, BreakerLevel)
 ├── accounting      (DailyAccounting, WeeklyAccounting, PeriodStats)
 ├── position        (PositionTracker, PotentialLossLedger)
@@ -171,11 +190,15 @@ oxide_arb_risk
 └── engine          (RiskEngine)
 ```
 
-`lib.rs` re-export 策略：
+`lib.rs` 公开面策略：
 
 ```rust
 pub mod traits;
 pub mod types;
+pub mod context;
+pub mod pipeline;
+pub mod state_store;
+pub mod audit;
 pub mod circuit_breaker;
 pub mod accounting;
 pub mod position;
@@ -184,12 +207,13 @@ pub mod blacklist;
 pub mod sizing;
 pub mod endgame_rules;
 pub mod reconciliation;
-mod builder;
-mod engine;
-
-pub use builder::RiskEngineBuilder;
-pub use engine::RiskEngine;
+pub mod builder;
+pub mod engine;
 ```
+
+**禁止 re-export 兼容层。** 调用方必须使用显式模块路径，例如
+`oxide_arb_risk::engine::RiskEngine`、`oxide_arb_risk::builder::RiskEngineBuilder`。
+Phase 4.1 是未发布新 crate，不为草稿 API 保留 alias、shim 或 re-export。
 
 ---
 
@@ -199,7 +223,8 @@ pub use engine::RiskEngine;
 
 ### 2.1 `RiskMetrics`
 
-运行时查询只读指标的 trait。RiskEngine 通过它获取来自 repository/cache 层的实时数据，不直接持有数据库连接。
+运行时查询只读指标的 trait。RiskEngine 通过它获取来自 repository/内存投影层的实时数据，不直接持有数据库连接。
+这些方法位于 pre-trade 热路径，必须是无阻塞、无 I/O、带版本的新鲜快照读取；实现方不得在方法内部等待网络、数据库或远端缓存。
 
 ```rust
 /// Read-only accessor for live system metrics required by risk checks.
@@ -248,14 +273,15 @@ pub trait RiskMetrics: Send + Sync + 'static {
 
 ### 2.2 `RiskPersistence`
 
-异步持久化 trait，用于 crash recovery 和 audit trail。
+异步持久化 trait，用于 crash recovery、状态突变和 audit trail。资金相关状态不接受 write-behind 作为成功语义：
+调用方只有在持久化成功后，才能把 breaker/blacklist/accounting/position/potential-loss 变更视为 committed。
 
 ```rust
 /// Async persistence interface for risk engine state.
 ///
-/// Called by `RiskEngine` after state mutations to ensure durability.
-/// Implementations may batch writes or use write-behind caching for
-/// performance, but must guarantee eventual persistence.
+/// Called by `RiskEngine` inside state transitions to ensure durability.
+/// Critical mutations must be committed before this method returns `Ok`.
+/// Returning `Err` means the engine must enter fail-closed mode.
 #[async_trait::async_trait]
 pub trait RiskPersistence: Send + Sync + 'static {
     /// Persist the full risk engine snapshot (crash recovery).
@@ -281,6 +307,11 @@ pub trait RiskPersistence: Send + Sync + 'static {
         &self,
         report: &ReconciliationReport,
     ) -> OxideResult<()>;
+
+    /// Append an immutable audit event. This is not a best-effort log:
+    /// critical state transitions and denied/allowed trade decisions require
+    /// a durable audit record before they are acknowledged to the caller.
+    async fn append_audit_event(&self, event: &RiskAuditEvent) -> OxideResult<()>;
 }
 ```
 
@@ -304,6 +335,28 @@ pub trait BalanceQuerier: Send + Sync + 'static {
     /// Returns a map of market_id → position_value_usd.
     async fn query_positions(&self) -> OxideResult<Vec<(MarketId, Usd)>>;
 }
+```
+
+### 2.4 状态权威源与 fail-closed 规则
+
+Phase 4.1 的生产原则：
+
+1. **PostgreSQL/repository + audit event 是权威源**。`CircuitBreaker`、`DailyAccounting`、`WeeklyAccounting`、`PositionTracker`、`PotentialLossLedger`、`BlacklistManager` 的内存结构只是可重建投影。
+2. **现有 `oxide-arb-storage/src/cache` 不能作为风控权威状态**。该缓存层设计为 fail-open、TTL 读加速、可丢数据；风控门禁必须 fail-closed、可恢复、可审计。
+3. **pre-trade 热路径读取快照**。`RiskContextBuilder` 从已恢复且校验通过的内存投影构造不可变 `RiskContext`，所有 check 在同一版本快照上运行。
+4. **post-trade 路径同步提交**。trade result 会触发 accounting、breaker、blacklist、position、potential-loss、drawdown 更新；任一关键写失败，engine 进入 manual/system halt 并拒绝后续交易。
+5. **启动恢复必须完整**。恢复过程加载 snapshot、active blacklist、current accounting windows、open positions、active potential-loss entries、drawdown HWM；任何缺失、过期窗口未正确 rollover、版本不一致、数据自相矛盾都必须阻止交易。
+
+```text
+startup
+  ├── load risk_engine_state
+  ├── load current accounting windows
+  ├── load open positions + active reservations
+  ├── load active potential-loss ledger
+  ├── load active blacklist entries
+  ├── rebuild in-memory projections
+  ├── validate invariants
+  └── only then accept pre_trade_check()
 ```
 
 ---
@@ -352,7 +405,12 @@ pub trait BalanceQuerier: Send + Sync + 'static {
 
 ### 3.2 `BreakerState` 运行时枚举
 
-持久化层使用 `BreakerStateName`（4 值扁平枚举），运行时使用更富的 `BreakerState`：
+持久化层现有 `BreakerStateName` 是 4 值扁平枚举，运行时使用更富的 `BreakerState`。生产设计中二者**不合并**，但必须收敛命名和边界：
+
+- `BreakerState` 是状态机事实源，包含完成转换所需的全部元数据。
+- `BreakerStateName` 只是 DB enum / reporting projection，不允许进入业务判断分支。
+- 从 `RiskEngineSnapshot` 恢复时必须构造完整 `BreakerState`，缺失必需字段时恢复失败并 fail-closed。
+- 对外 API 返回 `BreakerSnapshot`，包含 `state_name` 与元数据；避免调用方拿 `BreakerStateName` 做半吊子判断。
 
 ```rust
 /// Runtime circuit breaker state with embedded transition metadata.
@@ -409,6 +467,23 @@ impl BreakerState {
     }
 }
 ```
+
+#### 3.2.1 为什么不与 `BreakerStateName` 合并
+
+不合并的原因不是向前兼容，而是状态建模的职责不同：
+
+| 类型 | 职责 | 是否可用于业务判断 | 是否可持久化 |
+|------|------|--------------------|--------------|
+| `BreakerState` | 运行时 FSM 状态，携带 `cooldown_until`、probe 计数、观测窗口、trip reason | 是 | 可序列化，但不直接映射 DB enum |
+| `BreakerStateName` | DB/reporting 的扁平标签，便于索引、dashboard、告警展示 | 否 | 是 |
+
+如果强行合并，会出现两个生产级风险：
+
+1. `Open` 没有 `cooldown_until`、`level`、`reason` 时无法决定是否进入 `HalfOpen`，实现会被迫反查 DB 或引入旁路字段。
+2. `HalfOpen` 没有 `successful_probes`/`required_probes` 时无法保证 probe 收敛，重启后可能错误放行或永久卡死。
+
+因此最佳实践是：**运行时使用富状态，持久化使用 projection，但 projection 不能反向替代状态机。**
+为了避免类型散乱，所有转换集中在 `BreakerSnapshot::from_state()` 和 `CircuitBreaker::restore(snapshot)` 两个入口，禁止业务代码手写 `to_name()`/`from_name()` 分支。
 
 ### 3.3 `BreakerLevel` (L1–L4) 触发条件
 
@@ -668,6 +743,8 @@ impl CircuitBreaker {
     }
 }
 ```
+
+生产实现不得使用 `unwrap_or` 填补关键状态。`Open` 缺少 `breaker_level`、`breaker_reason` 或 `cooldown_until` 时应返回 `RecoveryError::CorruptBreakerSnapshot`；`HalfOpen` 缺少 probe 元数据时应回退到更安全的 `Open` 或拒绝启动，具体策略必须在测试中固定。
 
 ### 3.5 L2 指数退避公式
 
@@ -937,6 +1014,28 @@ struct RiskEngineInner {
 - 写路径 (`on_trade_result`): `daily.write()` — 独占写锁
 - `parking_lot::RwLock` 选型原因：无 poisoning、writer-preferring fairness、比 `std::sync::RwLock` 更低 latency
 
+### 4.5 生产级持久化与重启恢复语义
+
+`DailyAccounting` / `WeeklyAccounting` **不能只存在于内存**。如果服务重启后丢失当日损失、周损失、预算消耗或 miss 统计，系统会错误放大仓位并绕过风控上限，这是不可接受的资金安全缺陷。
+
+生产实现要求：
+
+1. `DailyAccounting`、`WeeklyAccounting` 启动时从 `risk_engine_state` 和 `accounting_period` 当前窗口恢复；窗口不存在时创建，窗口冲突时恢复失败。
+2. 每次 `on_trade_result()` 同步更新内存状态、当前 accounting period、risk snapshot 和 audit event；任一关键写失败时 engine 进入 fail-closed halt。
+3. rollover 不是简单清零：旧窗口必须 finalize，新窗口必须创建，两个动作应在同一事务或可恢复的幂等流程中完成。
+4. budget 消耗以实际资金占用和已确认费用为准，不能仅使用计划交易 cost；miss、partial fill、cancel、failed-after-matched 必须分别记账。
+5. 所有窗口使用 UTC，并以 `Clock` trait 注入时间，测试覆盖午夜/周一边界、重复 `on_trade_result()` 幂等、恢复后继续 rollover。
+
+```text
+on_trade_result(result)
+  ├── derive AccountingDelta
+  ├── acquire accounting write lock
+  ├── maybe finalize old period + create new period
+  ├── apply delta to daily/weekly projections
+  ├── persist accounting_period + risk_engine_state + audit event
+  └── release lock only after durable commit
+```
+
 ---
 
 ## 5. 持仓追踪 (Position)
@@ -1065,13 +1164,45 @@ impl PotentialLossLedger {
 }
 ```
 
-### 5.3 与 `RiskMetrics` 的集成
+### 5.3 与 `RiskMetrics` / repository 的集成
 
-`PositionTracker` 和 `PotentialLossLedger` 在 `RiskEngine.pre_trade_check()` 流程中被查询：
+`PositionTracker` 和 `PotentialLossLedger` 同样不能只存在于内存。重启后丢失 open position、pending reservation 或 potential loss，会直接导致 exposure undercount 和 oversizing。
 
-1. `PositionTracker.refresh(metrics)` — 刷新持仓快照
-2. `PositionTracker.market_exposure(market_id)` — 查询 per-market 敞口
-3. `PotentialLossLedger.total_potential_loss()` — 查询最大潜在损失
+生产实现采用两层：
+
+1. **权威层**：repository 中的 open positions、active reservations、active potential-loss entries。
+2. **热路径投影**：`PositionTracker` / `PotentialLossLedger` 在启动恢复时重建，并在 post-trade / reservation 生命周期事件后同步更新。
+
+`pre_trade_check()` 不应临时 `refresh(metrics)` 后再用半新半旧数据；它应读取同一个 `RiskContext` 里的 immutable position snapshot：
+
+```text
+RiskContext {
+  state_version,
+  market_exposure_before,
+  total_exposure_before,
+  active_reservation_count,
+  total_potential_loss,
+  open_position_count,
+  exposure_snapshot_at,
+}
+```
+
+`RiskMetrics` 的职责是为 `RiskContextBuilder` 提供已缓存、已校验、同版本的数据，而不是在每个 check 内部分散查询。这样可以避免单次决策中 market exposure、total exposure、balance 来自不同时间点。
+
+### 5.4 Reservation 与 exposure 的强一致要求
+
+单活交易引擎下仍必须实现 reservation，防止一个机会通过 pre-trade 后、下单前被后续机会重复占用同一资金头寸。
+
+```text
+pre_trade_check allowed
+  ├── create pending exposure reservation
+  ├── persist reservation before order submission
+  ├── submit order
+  ├── confirm reservation on fill
+  └── release reservation on reject/cancel/timeout
+```
+
+`ExposureLimitChecker` 和 `MultiConstraintSizer` 必须同时计算 position value 与 pending reservation；任何 reservation 状态未知或过期未清理时，按已占用处理。
 
 ---
 
@@ -1377,19 +1508,40 @@ impl ExposureLimitChecker {
 
 ### 7.1 `BlacklistManager` 设计
 
+`BlacklistManager` 的热路径使用 `DashMap` 是合理的，但它不是权威存储。生产级设计中：
+
+- `DashMap<BlacklistKey, BlacklistEntry>` 是内存投影，用于 O(1) 同步 check。
+- PostgreSQL/repository + audit event 是权威源，用于启动恢复、人工操作审计、故障排查。
+- 现有 `oxide-arb-storage/src/cache` / Moka / Redis tiered cache 不用于 blacklist 权威状态。
+
+原因：
+
+1. storage cache 当前是 fail-open 读加速，cache miss / timeout 会返回 `None`；黑名单门禁必须 fail-closed。
+2. Moka/Redis TTL 只表达缓存失效，不表达业务语义中的永久拉黑、scope 升级、token+market 双索引和审计。
+3. TieredCache 的 L1/L2 可能短时间不一致，不能作为资金门禁依据。
+4. blacklist 需要 operator action、auto-blacklist、expiry、remove 都有持久化事件；缓存无法替代审计日志。
+
 ```rust
-/// Concurrent blacklist manager backed by `DashMap`.
+/// Concurrent blacklist manager backed by an in-memory `DashMap` projection.
 ///
 /// Key design decisions:
-/// - `DashMap<MarketId, BlacklistEntry>` for lock-free concurrent reads
+/// - DB/audit log is source of truth; DashMap is reconstructed on startup.
+/// - `DashMap<BlacklistKey, BlacklistEntry>` for lock-free concurrent reads.
 /// - Lazy TTL eviction: expired entries are not proactively removed,
 ///   but filtered out on read. Periodic `gc()` sweeps stale entries.
 /// - Permanent entries have `expires_at = None` and survive GC.
 /// - Scope-based blocking: `DataPath` blocks data ingestion,
 ///   `TradingPath` blocks trading, `Full` blocks both.
 pub struct BlacklistManager {
-    entries: DashMap<MarketId, BlacklistEntry>,
+    entries: DashMap<BlacklistKey, BlacklistEntry>,
     config: RiskConfig,
+    recovered_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum BlacklistKey {
+    Market(MarketId),
+    Token(TokenId),
 }
 
 impl BlacklistManager {
@@ -1397,13 +1549,14 @@ impl BlacklistManager {
         let manager = Self {
             entries: DashMap::new(),
             config: config.clone(),
+            recovered_at: Utc::now(),
         };
 
         // Load permanent blacklist from config
         for market_id_str in &config.permanent_blacklist_markets {
             let market_id = MarketId::new(market_id_str);
             manager.entries.insert(
-                market_id.clone(),
+                BlacklistKey::Market(market_id.clone()),
                 BlacklistEntry {
                     market_id,
                     token_id: None,
@@ -1424,7 +1577,7 @@ impl BlacklistManager {
         let now = Utc::now();
         for entry in entries {
             if !entry.is_expired(now) {
-                self.entries.insert(entry.market_id.clone(), entry);
+                self.entries.insert(BlacklistKey::Market(entry.market_id.clone()), entry);
             }
         }
     }
@@ -1439,10 +1592,11 @@ impl BlacklistManager {
         required_scope: BlacklistScope,
     ) -> BlacklistCheckResult {
         let now = Utc::now();
-        if let Some(entry) = self.entries.get(market_id) {
+        let key = BlacklistKey::Market(market_id.clone());
+        if let Some(entry) = self.entries.get(&key) {
             if entry.is_expired(now) {
                 drop(entry); // release the DashMap ref
-                self.entries.remove(market_id);
+                self.entries.remove(&key);
                 return BlacklistCheckResult::Clear;
             }
             if entry.scope >= required_scope {
@@ -1483,7 +1637,7 @@ impl BlacklistManager {
         };
 
         self.entries
-            .entry(market_id)
+            .entry(BlacklistKey::Market(market_id))
             .and_modify(|existing| {
                 if entry.scope > existing.scope
                     || entry.expires_at > existing.expires_at
@@ -1519,13 +1673,15 @@ impl BlacklistManager {
             created_at: Utc::now(),
             miss_count: 0,
         };
-        self.entries.insert(market_id, entry.clone());
+        self.entries.insert(BlacklistKey::Market(market_id), entry.clone());
         entry
     }
 
     /// Remove a blacklist entry (operator action).
     pub fn remove(&self, market_id: &MarketId) -> bool {
-        self.entries.remove(market_id).is_some()
+        self.entries
+            .remove(&BlacklistKey::Market(market_id.clone()))
+            .is_some()
     }
 
     /// Garbage-collect expired entries. Returns count of removed entries.
@@ -1590,6 +1746,9 @@ impl BlacklistManager {
 | `TradingPath` | ✗ 继续接收数据 | ✓ | 连续 FOK miss、TickChange |
 | `Full` | ✓ | ✓ | 永久拉黑、严重故障 |
 
+Scope 比较只允许在 `BlacklistManager` 内部完成。其他模块不得直接用
+`entry.scope >= required_scope` 做业务判断，避免 token-level 与 market-level 规则被绕过。
+
 ### 7.3 自动拉黑触发流程
 
 ```text
@@ -1607,11 +1766,28 @@ on_trade_result(miss)
         persistence.save_blacklist_entry(&entry)
 ```
 
+### 7.4 持久化、恢复与审计
+
+每个 blacklist 变更必须产生不可变审计事件：
+
+| 操作 | 持久化要求 | 失败策略 |
+|------|------------|----------|
+| config permanent preload | 启动时 upsert 到权威源并写 audit | 失败则启动失败 |
+| `add_temporary` | 同步 upsert entry + audit event | 失败则 fail-closed |
+| `add_permanent` | 同步 upsert entry + operator reason + audit event | 失败则 fail-closed |
+| `remove` | 同步 tombstone/remove + operator reason + audit event | 失败则保持 blocked |
+| `gc` | 只清内存过期投影；权威源保留历史或标记 expired | 不影响交易安全 |
+
+`check()` 发现 entry 已过期时，可以从内存投影移除，但不能删除审计历史。
+若持久化层不可用，不得把未知状态解释为 clear。
+
 ---
 
 ## 8. 定量器 (Sizing)
 
 ### 8.1 Quarter-Kelly 计算器
+
+当前 Kelly 草稿只是 sizing 的数学骨架，不能单独视为生产级闭环。生产实现必须明确：Kelly 输出是**理论上限候选**，不是最终下注金额；任何输入概率、成交概率、费用、滑点、相关性或状态新鲜度不满足质量要求时，Kelly 必须返回 zero 或显著折扣。
 
 #### 8.1.1 公式推导
 
@@ -1622,9 +1798,9 @@ f^* = \frac{p \cdot b - q}{b}
 $$
 
 其中：
-- $p$ = 胜率（fused calibration probability × fill probability）
+- $p$ = 经校准、经置信度折扣、经 fill probability 折扣后的有效胜率
 - $q = 1 - p$
-- $b$ = 赔率（odds，对于 endgame：$b = \frac{1 - \text{entry\_price}}{\text{entry\_price}} - \frac{\text{fees}}{\text{cost}}$）
+- $b$ = 净赔率（odds，对于 endgame：$b = \frac{1 - \text{entry\_price}}{\text{entry\_price}} - \frac{\text{fees} + \text{slippage} + \text{expected_failure_cost}}{\text{cost}}$）
 
 **实际使用 Quarter-Kelly**（$f = 0.25 \times f^*$）以降低 variance：
 
@@ -1648,6 +1824,8 @@ $$
 pub struct QuarterKellyCalculator {
     kelly_fraction: Decimal,
     min_edge_bps: Decimal,
+    max_kelly_fraction: Decimal,
+    min_probability_confidence: Decimal,
 }
 
 impl QuarterKellyCalculator {
@@ -1661,7 +1839,7 @@ impl QuarterKellyCalculator {
     /// Calculate the optimal bet size.
     ///
     /// # Arguments
-    /// - `win_prob`: Fused probability × fill probability (0..1).
+    /// - `win_prob`: Calibrated probability after confidence/fill discounts (0..1).
     /// - `entry_price`: Price per share (0..1 for Polymarket).
     /// - `fees_pct`: Total fees as a fraction of cost (0..1).
     /// - `bankroll`: Available capital for Kelly computation.
@@ -1736,9 +1914,47 @@ pub struct KellyResult {
 }
 ```
 
+#### 8.1.3 概率质量与 Kelly 折扣
+
+生产级 Kelly 必须消费概率质量元数据，而不是只消费一个裸 `Decimal`：
+
+```rust
+pub struct ProbabilityInput {
+    pub calibrated_win_prob: Decimal,
+    pub fill_prob: Decimal,
+    pub calibration_confidence: Decimal,
+    pub sample_size: u32,
+    pub model_staleness_secs: u64,
+    pub expected_slippage_pct: Decimal,
+    pub expected_failure_cost_pct: Decimal,
+}
+```
+
+有效胜率计算规则：
+
+```text
+effective_p =
+  calibrated_win_prob
+  × fill_prob
+  × confidence_haircut(calibration_confidence, sample_size)
+  × staleness_haircut(model_staleness_secs)
+```
+
+强制 zero 条件：
+
+- `calibration_confidence < min_probability_confidence`
+- `sample_size < min_calibration_samples`
+- `model_staleness_secs > max_probability_staleness_secs`
+- `effective_edge_bps < min_edge_bps`
+- `net_odds <= 0`
+- 任何概率字段不在 `[0, 1]`
+
+Kelly 输出必须包含输入摘要与折扣明细，便于审计“为什么这笔建议下注是 X 美元”。
+
 ### 8.2 `MultiConstraintSizer`
 
-7 个约束独立计算 max bet，取最小值。每个约束有名字，输出标识 binding constraint。
+多个约束独立计算 max bet，取最小值。每个约束有稳定 ID，输出标识 binding constraint。
+生产实现不把“7 个约束”写死为不可扩展事实；约束集合由 `RiskPipeline` 静态注册，测试锁定顺序与结果。
 
 ```rust
 /// Position sizer that computes 7 independent upper bounds on bet size
@@ -1776,7 +1992,7 @@ impl MultiConstraintSizer {
 
         let win_prob = opp.resolution_adjust * fill_prob;
 
-        // 1. Kelly optimal
+        // 1. Kelly upper bound
         let kelly = self.kelly.calculate(
             win_prob,
             opp.entry_price.inner(),
@@ -1878,6 +2094,27 @@ pub struct SizeBreakdown {
 }
 ```
 
+#### 8.2.1 生产级 sizing 约束清单
+
+至少包含以下约束，全部进入 `SizeBreakdown`：
+
+| 约束 | 目的 | 失败/绑定含义 |
+|------|------|---------------|
+| `kelly_upper_bound` | 理论收益风险上限 | 概率优势不足或 variance 过高 |
+| `min_trade_size` | 避免 dust/手续费吞噬 | 小于最小交易额则 zero |
+| `max_single_bet` | 单笔名义本金上限 | 防止 fat-finger |
+| `max_single_loss` | 单笔最大损失上限 | 以 worst-case loss 计，不只看 cost |
+| `market_exposure_headroom` | 单市场总敞口 | 包含 position + pending reservation |
+| `portfolio_exposure_headroom` | 组合总敞口 | 包含 active potential loss |
+| `daily_budget_remaining` | 当日风险预算 | 使用已持久化 accounting 状态 |
+| `weekly_loss_headroom` | 周损失预算 | 防止周内连续亏损放大 |
+| `available_balance` | 可用余额扣 reserve | balance 快照过期则 zero |
+| `drawdown_factor` | HWM 回撤降速 | Halt 时 zero |
+| `liquidity_depth` | 可成交深度 | 限制 depth usage 和滑点 |
+| `exchange_order_bounds` | 交易所 min/max/precision | 避免生成不可提交订单 |
+
+最终下注金额必须先向下取整到交易所允许精度，再重新验证所有约束；取整后低于 `min_trade_size` 时拒绝交易。
+
 ### 8.3 `DrawdownGuard`
 
 ```rust
@@ -1972,6 +2209,34 @@ impl DrawdownGuard {
     pub fn hwm(&self) -> Usd { self.hwm }
 }
 ```
+
+### 8.4 Sizing 闭环与事后校准
+
+生产级 sizing 不是单次函数调用，而是闭环：
+
+```text
+pre_trade_check
+  ├── build RiskContext
+  ├── run gate checks
+  ├── compute size constraints
+  ├── create exposure reservation
+  └── emit decision trace
+
+on_trade_result
+  ├── compare recommended vs submitted vs filled size
+  ├── record realized fill probability / slippage / fees / miss reason
+  ├── update accounting, positions, potential loss, drawdown
+  ├── feed calibration metrics
+  └── persist audit event
+```
+
+必须测试的 invariants：
+
+- 任意输入下 `bet_usd >= 0`
+- 任一风险预算下降，最终 size 不上升
+- balance、exposure、reservation、drawdown 任一状态未知时 size 为 zero
+- Kelly raw 可为正，但任一 hard gate 失败时最终 decision 不允许交易
+- full-report 模式下 sizing 也必须输出完整 breakdown，便于诊断
 
 ---
 
@@ -2272,6 +2537,80 @@ pub enum ReconciliationStatus {
 
 ## 11. RiskEngine 门面
 
+### 11.0 统一 Check 管线
+
+当前草稿里大量 `check_*` 函数分散在 engine、limits、blacklist、endgame、drawdown 中。生产实现需要保留确定顺序，但不能让编排散落在 `pre_trade_check()` 的长函数里。
+
+设计原则：
+
+1. **静态注册，不做动态插件**。资金风控不需要运行时任意注册 check；注册表由代码构造，顺序在测试中锁定。
+2. **统一接口，统一 trace**。每个 check 接收同一个 immutable `RiskContext`，返回 `RiskCheckResult`；不得在 check 内部查询不同时点的 metrics。
+3. **分层分类**。区分 hard gate、soft warning、sizing constraint、breaker trigger、post-trade trigger、background reconciliation。
+4. **short-circuit 与 full-report 同源**。两种模式使用同一条 pipeline，只是失败后的控制流不同。
+5. **所有 check 都必须可审计**。输出包含 id、severity、actual、threshold、detail、elapsed、state_version。
+
+```rust
+pub enum RiskCheckId {
+    ManualHalt,
+    CircuitBreaker,
+    BlacklistTradingPath,
+    MinDepth,
+    MaxDepthUsage,
+    Staleness,
+    MinEdge,
+    DailyBudget,
+    DailyLossCap,
+    WeeklyLossCap,
+    MaxSingleBet,
+    MarketExposure,
+    TotalExposure,
+    ExposurePct,
+    MaxPositions,
+    WsConnectivity,
+    MinBalance,
+    DirectionalConcentration,
+    DailyDirectionalBudget,
+    DrawdownGuard,
+}
+
+pub enum RiskCheckKind {
+    Gate,
+    SizingConstraint,
+    BreakerTrigger,
+    PostTradeTrigger,
+    BackgroundReconciliation,
+}
+
+pub trait RiskCheck: Send + Sync {
+    fn id(&self) -> RiskCheckId;
+    fn kind(&self) -> RiskCheckKind;
+    fn evaluate(&self, ctx: &RiskContext) -> RiskCheckResult;
+}
+
+pub struct RiskPipeline {
+    checks: Vec<Box<dyn RiskCheck>>,
+}
+```
+
+生产默认 pre-trade 顺序：
+
+```text
+RiskContextBuilder
+  ├── state recovery/version freshness gate
+  ├── manual halt
+  ├── circuit breaker
+  ├── blacklist trading path
+  ├── static market quality gates
+  ├── accounting budget/loss gates
+  ├── exposure gates
+  ├── connectivity/balance gates
+  ├── endgame portfolio-construction gates
+  ├── drawdown gate
+  └── sizing constraints + reservation
+```
+
+`RiskPipeline` 是第 5 个问题的最终答案：需要抽象和注册表，但注册表应是**静态、显式、测试锁定**，由统一 manager/pipeline 调度；不要做运行时插件系统。
+
 ### 11.1 核心结构
 
 ```rust
@@ -2288,6 +2627,7 @@ pub struct RiskEngine {
     potential_loss: RwLock<PotentialLossLedger>,
     static_limits: StaticLimitChecker,
     exposure_limits: ExposureLimitChecker,
+    pipeline: RiskPipeline,
     blacklist: BlacklistManager,
     sizer: MultiConstraintSizer,
     drawdown: RwLock<DrawdownGuard>,
@@ -2303,12 +2643,12 @@ pub struct RiskEngine {
 }
 ```
 
-### 11.2 `PreTradeDecision`
+### 11.2 `RiskDecision`
 
 ```rust
 /// Result of a pre-trade risk evaluation.
 #[derive(Debug, Clone, Serialize)]
-pub struct PreTradeDecision {
+pub struct RiskDecision {
     /// Whether the trade is allowed to proceed.
     pub allowed: bool,
     /// All check results (populated in full_report mode).
@@ -2321,8 +2661,14 @@ pub struct PreTradeDecision {
     pub drawdown_factor: Decimal,
     /// Evaluated timestamp.
     pub evaluated_at: DateTime<Utc>,
+    /// Immutable state version used by all checks in this decision.
+    pub state_version: StateVersion,
+    /// Full audit trace for diagnosis and post-mortem.
+    pub trace: RiskDecisionTrace,
 }
 ```
+
+使用 `RiskDecision` 作为唯一决策类型，不再新增 `PreTradeDecision`。这是破坏式收敛：Phase 4.1 应直接复用/升级 models 中已有概念，而不是并存两个近义类型。
 
 ### 11.3 `RiskCheckResult`
 
@@ -2336,7 +2682,43 @@ pub struct RiskCheckResult {
 }
 ```
 
-### 11.4 `pre_trade_check()` — 12 项检查流程
+### 11.4 `pre_trade_check()` — Pipeline 调度流程
+
+`pre_trade_check()` 不再手写 12 段 inline check。生产实现只负责构造 `RiskContext`、调用 `RiskPipeline`、执行 sizing、创建 reservation、写 decision audit。
+具体 check 由 §11.0 的静态注册表统一调度。下面的流程是规范实现，后续代码落地应删除旧的散落 `check_*` 编排。
+
+```rust
+impl RiskEngine {
+    pub fn pre_trade_check(
+        &self,
+        opp: &Opportunity,
+        metrics: &dyn RiskMetrics,
+        probability: ProbabilityInput,
+        mode: ReportMode,
+    ) -> RiskDecision {
+        let ctx = self.context_builder.build(opp, metrics, probability)?;
+        let gate_report = self.pipeline.evaluate_gates(&ctx, mode);
+
+        if gate_report.has_failed_hard_gate() {
+            return self.decision_builder.denied(ctx, gate_report);
+        }
+
+        let sizing = self.sizer.size(&ctx);
+        if sizing.bet_usd <= Usd::ZERO {
+            return self.decision_builder.denied_by_sizing(ctx, gate_report, sizing);
+        }
+
+        let reservation = self
+            .reservation_manager
+            .reserve(&ctx, sizing.bet_usd)
+            .expect_or_halt("exposure reservation failed");
+
+        self.decision_builder.allowed(ctx, gate_report, sizing, reservation)
+    }
+}
+```
+
+Legacy draft below is retained only as a check inventory while implementing the pipeline; it is not the target architecture.
 
 ```rust
 impl RiskEngine {
@@ -2368,7 +2750,7 @@ impl RiskEngine {
         metrics: &dyn RiskMetrics,
         fill_prob: Decimal,
         short_circuit: bool,
-    ) -> PreTradeDecision {
+    ) -> RiskDecision {
         let mut all_checks: Vec<RiskCheckResult> = Vec::with_capacity(20);
         let now = Utc::now();
 
@@ -2628,7 +3010,7 @@ impl RiskEngine {
             drawdown_factor,
         );
 
-        PreTradeDecision {
+        RiskDecision {
             allowed: size_result.bet_usd > Usd::ZERO,
             checks: all_checks,
             denial_reason: if size_result.bet_usd <= Usd::ZERO {
@@ -2649,7 +3031,7 @@ impl RiskEngine {
         &self,
         checks: Vec<RiskCheckResult>,
         at: DateTime<Utc>,
-    ) -> PreTradeDecision {
+    ) -> RiskDecision {
         let denial_reason = checks
             .iter()
             .find(|c| !c.passed)
@@ -2660,7 +3042,7 @@ impl RiskEngine {
                     c.detail.as_deref().unwrap_or("failed")
                 )
             });
-        PreTradeDecision {
+        RiskDecision {
             allowed: false,
             checks,
             denial_reason,
@@ -2678,9 +3060,10 @@ impl RiskEngine {
 impl RiskEngine {
     /// Process a completed trade result — update all subsystems.
     ///
-    /// This is the post-trade hot path. Must not block on I/O — all
-    /// persistence is fire-and-forget via the `RiskPersistence` trait
-    /// (awaited by the caller, not here).
+    /// This is the post-trade mutation path. Critical persistence is not
+    /// fire-and-forget: accounting, breaker, blacklist, position, potential
+    /// loss, drawdown, and audit mutations must be durably committed before
+    /// this method returns success. Persistence failure halts the engine.
     ///
     /// # Update sequence
     ///
@@ -2801,6 +3184,8 @@ impl RiskEngine {
     }
 }
 ```
+
+生产实现必须将上面的同步草稿升级为 `async`/事务化 mutation flow：`on_trade_result()` 的返回值应是 `OxideResult<RiskEngineSnapshot>` 或 `OxideResult<PostTradeUpdateReport>`，并在内部完成持久化与 audit。只返回 snapshot 让外部“稍后保存”会打开 crash window，不符合本阶段资金安全要求。
 
 ### 11.6 其他公共 API
 
@@ -3057,8 +3442,28 @@ impl RiskEngineBuilder {
 | `limits` | `limits_tests.rs` | static + exposure 限制 |
 | `endgame_rules` | `endgame_rules_tests.rs` | 方向集中度 + 日预算 |
 | `reconciliation` | `reconciliation_tests.rs` | 对账逻辑 |
+| `pipeline` | `pipeline_tests.rs` | 静态注册顺序、short-circuit、full-report trace |
+| `recovery` | `recovery_tests.rs` | breaker/accounting/position/blacklist/drawdown 启动恢复 |
+| `audit` | `audit_tests.rs` | 关键状态突变和 decision audit 不丢失 |
 | `engine` | `engine_tests.rs` | 集成门面 |
 | `proptest` | `proptest_sizing.rs` | Kelly + sizing 属性测试 |
+
+### 12.1.1 生产级安全测试矩阵
+
+必须新增以下高风险场景测试：
+
+| 场景 | 断言 |
+|------|------|
+| 启动时 breaker snapshot 缺少 `cooldown_until` | 恢复失败并 fail-closed |
+| accounting 当前窗口缺失或重复 | 恢复失败，不允许交易 |
+| open position 存在但 position projection 未恢复 | exposure gate fail-closed |
+| active potential-loss ledger 丢失 | sizing 返回 zero |
+| blacklist 权威源不可用 | 启动失败或交易 gate blocked |
+| `append_audit_event` 失败 | 状态 mutation 返回 error 并 halt |
+| `RiskPipeline` 注册顺序变化 | golden test 失败 |
+| full-report 模式 | 所有 check 都有 trace、threshold、actual、elapsed |
+| reservation 创建失败 | 不提交订单，engine 进入安全拒绝状态 |
+| post-trade 持久化中途失败 | 后续 pre-trade 全部拒绝，等待人工恢复 |
 
 ### 12.2 CircuitBreaker FSM 完整路径测试 (6 条边)
 
@@ -4071,7 +4476,7 @@ mod engine_integration_tests {
 | 7 | 日翻转在 UTC 午夜 ±1ms 内正确触发 | `accounting_rollover_tests` | AC-7 |
 | 8 | 黑名单 TTL 过期后不阻塞 | `blacklist_tests::expired_entry_returns_clear` | AC-8 |
 | 9 | DrawdownGuard 在 HWM dd > max 时 Halt | `drawdown_tests::drawdown_at_max_halts` | AC-9 |
-| 10 | `pre_trade_check` 12 项 short-circuit | `engine_integration_tests` | AC-10 |
+| 10 | `RiskPipeline` 顺序、short-circuit、full-report trace 均正确 | `pipeline_tests`, `engine_integration_tests` | AC-10 |
 | 11 | `on_trade_result` 无 panic (fuzzy inputs) | proptest | AC-11 |
 | 12 | 公共 API `#[must_use]` 标注 | code review | AC-12 |
 | 13 | 零 `f64` 在金额路径 | `rg 'f64' crates/oxide-arb-risk/src/` | AC-13 |
@@ -4082,6 +4487,11 @@ mod engine_integration_tests {
 | 18 | Level escalation：高级覆盖低级 | `higher_level_overwrites_lower` | correctness |
 | 19 | `reconcile()` 报告 Critical 且漂移 > 10× tolerance | `reconciliation_tests` | correctness |
 | 20 | `DrawdownGuard.sizing_factor()` 在 Halt 时返回 0 | `sizing_factor_zero_on_halt` | safety |
+| 21 | 启动恢复缺关键状态时 fail-closed | `recovery_tests` | AC-15 |
+| 22 | 关键 mutation 持久化失败会 halt | `audit_tests`, `engine_integration_tests` | AC-16 |
+| 23 | decision trace 包含状态版本、阈值、实际值和耗时 | `pipeline_tests` | AC-17 |
+| 24 | 散落 check 无法绕过 `RiskPipeline` | code review + `pipeline_order_golden` | AC-18 |
+| 25 | public API 无兼容 re-export/alias | code review + public API snapshot | AC-19 |
 
 ---
 
@@ -4090,21 +4500,25 @@ mod engine_integration_tests {
 | 模块 | 源码 (LoC est.) | 测试 (LoC est.) | 备注 |
 |------|----------------|----------------|------|
 | `traits.rs` | ~80 | 0 (trait 定义) | RiskMetrics, RiskPersistence, BalanceQuerier |
-| `types.rs` | ~60 | ~20 | PreTradeDecision, RiskCheckResult, SizeResult |
+| `types.rs` | ~120 | ~80 | RiskDecision, RiskCheckResult, RiskDecisionTrace, SizeResult |
+| `context.rs` | ~180 | ~160 | RiskContextBuilder, StateVersion, immutable snapshots |
+| `pipeline.rs` | ~220 | ~260 | RiskCheck trait, static registry, trace, ordering tests |
+| `state_store.rs` | ~220 | ~260 | startup recovery, in-memory projections, invariant validation |
+| `audit.rs` | ~140 | ~140 | RiskAuditEvent, decision/mutation audit helpers |
 | `circuit_breaker.rs` | ~250 | ~350 | FSM 核心，最复杂的模块 |
-| `accounting.rs` | ~200 | ~200 | Daily + Weekly + PeriodStats |
-| `position.rs` | ~120 | ~60 | PositionTracker + PotentialLossLedger |
+| `accounting.rs` | ~280 | ~320 | Daily + Weekly + PeriodStats + durable rollover |
+| `position.rs` | ~240 | ~260 | PositionTracker + PotentialLossLedger + reservation projection |
 | `limits.rs` | ~200 | ~150 | Static + Exposure checkers |
-| `blacklist.rs` | ~180 | ~200 | DashMap + TTL + scope |
-| `sizing.rs` | ~300 | ~350 | Kelly + MultiConstraint + DrawdownGuard |
+| `blacklist.rs` | ~280 | ~320 | DB-backed projection + TTL + scope + token/market index + audit |
+| `sizing.rs` | ~420 | ~520 | ProbabilityInput + Kelly + MultiConstraint + DrawdownGuard |
 | `endgame_rules.rs` | ~80 | ~80 | 方向集中度 + 日预算 |
 | `reconciliation.rs` | ~150 | ~120 | Reconciler + Report |
-| `engine.rs` | ~350 | ~300 | 门面类，编排所有子系统 |
-| `builder.rs` | ~120 | ~50 | Builder pattern |
-| `lib.rs` | ~30 | 0 | re-exports |
-| **合计** | **~2,120** | **~1,880** | **总计 ~4,000 LoC** |
+| `engine.rs` | ~420 | ~420 | 门面类，编排恢复、pipeline、sizing、post-trade mutation |
+| `builder.rs` | ~160 | ~100 | Builder pattern + recovery dependencies |
+| `lib.rs` | ~30 | 0 | explicit modules only; no compatibility re-exports |
+| **合计** | **~3,430** | **~3,340** | **总计 ~6,770 LoC** |
 
-交付周期估算：2–3 周（含代码审查和集成测试）。
+交付周期估算：4–6 周（含代码审查、故障注入测试、repository 集成测试和生产演练）。这是资金安全版本，不按最小工作量估算。
 
 ---
 
