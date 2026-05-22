@@ -15,6 +15,59 @@ pub struct ExecutionConfig {
     pub execution_mode: ExecutionMode,
     #[serde(default)]
     pub timeout: TradeTimeoutConfig,
+    #[serde(default)]
+    pub tiered: TieredExecutionConfig,
+}
+
+/// FOK + GTD tiered execution strategy configuration.
+///
+/// Endgame execution tries tiers in order: FOK → short GTD → long GTD.
+/// Each tier may adjust price by `price_tolerance_ticks` tick increments.
+#[derive(Debug, Clone, Deserialize, Validate)]
+pub struct TieredExecutionConfig {
+    /// FOK order timeout (ms) — how long to wait for immediate fill.
+    #[serde(default = "default_fok_timeout")]
+    pub fok_timeout_ms: u64,
+    /// Short GTD expiry (secs) — used when FOK fails due to minor slippage.
+    #[serde(default = "default_gtd_short_expiry")]
+    pub gtd_short_expiry_secs: u64,
+    /// Long GTD expiry (secs) — used for larger orders needing fill time.
+    #[serde(default = "default_gtd_long_expiry")]
+    pub gtd_long_expiry_secs: u64,
+    /// Max retries within a single tier before falling through.
+    #[serde(default = "default_max_retries_per_tier")]
+    pub max_retries_per_tier: u32,
+    /// Price tolerance in ticks added per tier (cumulative).
+    #[serde(default = "default_price_tolerance_ticks")]
+    pub price_tolerance_ticks: i32,
+}
+
+impl Default for TieredExecutionConfig {
+    fn default() -> Self {
+        Self {
+            fok_timeout_ms: default_fok_timeout(),
+            gtd_short_expiry_secs: default_gtd_short_expiry(),
+            gtd_long_expiry_secs: default_gtd_long_expiry(),
+            max_retries_per_tier: default_max_retries_per_tier(),
+            price_tolerance_ticks: default_price_tolerance_ticks(),
+        }
+    }
+}
+
+const fn default_fok_timeout() -> u64 {
+    5_000
+}
+const fn default_gtd_short_expiry() -> u64 {
+    30
+}
+const fn default_gtd_long_expiry() -> u64 {
+    300
+}
+const fn default_max_retries_per_tier() -> u32 {
+    1
+}
+const fn default_price_tolerance_ticks() -> i32 {
+    2
 }
 
 #[derive(Debug, Clone, Deserialize, Validate)]

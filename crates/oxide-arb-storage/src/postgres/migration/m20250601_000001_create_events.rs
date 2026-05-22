@@ -1,4 +1,5 @@
 use super::migrate_up;
+use oxide_arb_models::enums::market::EventStatus;
 use oxide_arb_models::idens::event::Event;
 use sea_orm_migration::prelude::*;
 
@@ -41,7 +42,7 @@ fn create_tables() -> Vec<TableCreateStatement> {
                 ColumnDef::new(Event::Status)
                     .text()
                     .not_null()
-                    .default("active"),
+                    .default(EventStatus::Active),
             )
             .col(
                 ColumnDef::new(Event::NegRisk)

@@ -1,5 +1,6 @@
 use super::migrate_up;
 use oxide_arb_models::idens::accounting_period::AccountingPeriod;
+use oxide_arb_models::types::Usd;
 use sea_orm_migration::prelude::*;
 
 #[derive(DeriveMigrationName)]
@@ -49,13 +50,13 @@ fn create_tables() -> Vec<TableCreateStatement> {
                 ColumnDef::new(AccountingPeriod::RealizedPnl)
                     .text()
                     .not_null()
-                    .default("0"),
+                    .default(Usd::ZERO),
             )
             .col(
                 ColumnDef::new(AccountingPeriod::TotalFees)
                     .text()
                     .not_null()
-                    .default("0"),
+                    .default(Usd::ZERO),
             )
             .col(
                 ColumnDef::new(AccountingPeriod::TradeCount)
@@ -85,7 +86,7 @@ fn create_tables() -> Vec<TableCreateStatement> {
                 ColumnDef::new(AccountingPeriod::MaxDrawdown)
                     .text()
                     .not_null()
-                    .default("0"),
+                    .default(Usd::ZERO),
             )
             .col(ColumnDef::new(AccountingPeriod::SharpeRatio).text().null())
             .col(

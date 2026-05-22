@@ -1,6 +1,8 @@
 use super::{execute_sql, migrate_up};
+use oxide_arb_models::enums::common::PositionStatus;
 use oxide_arb_models::idens::market::Market;
 use oxide_arb_models::idens::position::Position;
+use oxide_arb_models::types::Usd;
 use sea_orm_migration::prelude::*;
 
 #[derive(DeriveMigrationName)]
@@ -46,19 +48,19 @@ fn create_tables() -> Vec<TableCreateStatement> {
                 ColumnDef::new(Position::UnrealizedPnl)
                     .text()
                     .not_null()
-                    .default("0"),
+                    .default(Usd::ZERO),
             )
             .col(
                 ColumnDef::new(Position::RealizedPnl)
                     .text()
                     .not_null()
-                    .default("0"),
+                    .default(Usd::ZERO),
             )
             .col(
                 ColumnDef::new(Position::Status)
                     .text()
                     .not_null()
-                    .default("open"),
+                    .default(PositionStatus::Open),
             )
             .col(
                 ColumnDef::new(Position::OpenedAt)

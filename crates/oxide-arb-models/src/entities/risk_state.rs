@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 #[sea_orm(table_name = "risk_engine_state")]
 #[active_defaults(
     default(id, 1_i32),
-    default(breaker_state, BreakerStateName::Active),
+    default(breaker_state, BreakerStateName::Closed),
     default(is_halted, false),
     default(consecutive_misses, 0_i32),
     default(cooldown_multiplier, 1_i32),

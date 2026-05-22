@@ -91,6 +91,14 @@ dispatcher_timeout_ms = 30000
 trade_confirm_timeout_secs = 60
 trade_confirm_poll_interval_secs = 2
 
+# FOK → short GTD → long GTD tiered execution
+[execution.tiered]
+fok_timeout_ms = 5000
+gtd_short_expiry_secs = 30
+gtd_long_expiry_secs = 300
+max_retries_per_tier = 1
+price_tolerance_ticks = 2
+
 # ── Position Sizing (Quarter-Kelly) ──────────────────────────────────────────
 
 [sizing]
@@ -132,11 +140,19 @@ max_single_market_exposure_usd = "500"
 max_single_bet_usd = "25"
 stop_loss_pct = "30"
 
+max_total_exposure_pct = "80"
+reconciliation_interval_secs = 300
+reconciliation_tolerance_usd = "1.0"
+
+# 4-level circuit breaker (Closed → Open → HalfOpen → Recovered → Closed)
 [risk.circuit_breaker]
-enabled = true
-consecutive_failure_threshold = 5
-open_wait_secs = 60
-max_open_wait_secs = 300
+l1_cooldown_secs = 60
+l2_cooldown_secs = 900
+l3_cooldown_secs = 3600
+l4_cooldown_secs = 7200
+half_open_probes = 2
+recovery_observation_secs = 300
+max_cooldown_secs = 14400
 
 # ── Keys / Credentials ───────────────────────────────────────────────────────
 

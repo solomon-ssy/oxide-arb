@@ -8,6 +8,7 @@ members = [
   "crates/oxide-arb-storage",
   "crates/oxide-arb-repository",
   "crates/oxide-arb-algorithm",
+  "crates/oxide-arb-risk",
 ]
 
 [workspace.package]
@@ -143,6 +144,9 @@ clickhouse = { version = "0.15", features = ["lz4"] }
 # Prometheus metrics
 prometheus = "0.14"
 
+# Telegram bot (push-only alerts)
+teloxide = { version = "0.17", features = ["macros"] }
+
 # Test containers (integration tests with real DB)
 testcontainers = "0.27"
 testcontainers-modules = { version = "0.15", features = ["postgres", "redis"] }
@@ -156,6 +160,7 @@ oxide-arb-api = { path = "crates/oxide-arb-api" }
 oxide-arb-storage = { path = "crates/oxide-arb-storage" }
 oxide-arb-repository = { path = "crates/oxide-arb-repository" }
 oxide-arb-algorithm = { path = "crates/oxide-arb-algorithm" }
+oxide-arb-risk = { path = "crates/oxide-arb-risk" }
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Cargo Profile Configuration

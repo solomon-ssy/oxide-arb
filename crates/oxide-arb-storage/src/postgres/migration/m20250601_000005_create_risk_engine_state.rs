@@ -1,5 +1,7 @@
 use super::migrate_up;
+use oxide_arb_models::enums::risk::BreakerStateName;
 use oxide_arb_models::idens::risk_state::RiskEngineState;
+use oxide_arb_models::types::Usd;
 use sea_orm_migration::prelude::*;
 
 #[derive(DeriveMigrationName)]
@@ -50,7 +52,7 @@ fn risk_engine_breaker_columns(table: &mut TableCreateStatement) {
             ColumnDef::new(RiskEngineState::BreakerState)
                 .text()
                 .not_null()
-                .default("active"),
+                .default(BreakerStateName::Closed),
         )
         .col(ColumnDef::new(RiskEngineState::BreakerLevel).text().null())
         .col(
@@ -81,7 +83,7 @@ fn risk_engine_breaker_columns(table: &mut TableCreateStatement) {
             ColumnDef::new(RiskEngineState::TotalExposure)
                 .text()
                 .not_null()
-                .default("0"),
+                .default(Usd::ZERO),
         );
 }
 
@@ -91,13 +93,13 @@ fn risk_engine_window_columns(table: &mut TableCreateStatement) {
             ColumnDef::new(RiskEngineState::HourlyLossUsd)
                 .text()
                 .not_null()
-                .default("0"),
+                .default(Usd::ZERO),
         )
         .col(
             ColumnDef::new(RiskEngineState::HourlyFeeUsd)
                 .text()
                 .not_null()
-                .default("0"),
+                .default(Usd::ZERO),
         )
         .col(
             ColumnDef::new(RiskEngineState::HourlyWindowStart)
@@ -109,19 +111,19 @@ fn risk_engine_window_columns(table: &mut TableCreateStatement) {
             ColumnDef::new(RiskEngineState::DailyLossUsd)
                 .text()
                 .not_null()
-                .default("0"),
+                .default(Usd::ZERO),
         )
         .col(
             ColumnDef::new(RiskEngineState::DailyFeeUsd)
                 .text()
                 .not_null()
-                .default("0"),
+                .default(Usd::ZERO),
         )
         .col(
             ColumnDef::new(RiskEngineState::DailyPnl)
                 .text()
                 .not_null()
-                .default("0"),
+                .default(Usd::ZERO),
         )
         .col(
             ColumnDef::new(RiskEngineState::DailyWindowStart)
@@ -133,7 +135,7 @@ fn risk_engine_window_columns(table: &mut TableCreateStatement) {
             ColumnDef::new(RiskEngineState::WeeklyLossUsd)
                 .text()
                 .not_null()
-                .default("0"),
+                .default(Usd::ZERO),
         )
         .col(
             ColumnDef::new(RiskEngineState::WeeklyWindowStart)

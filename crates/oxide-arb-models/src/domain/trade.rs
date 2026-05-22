@@ -42,6 +42,50 @@ pub struct TradeRecord {
     pub updated_at: DateTime<Utc>,
 }
 
+impl TradeRecord {
+    /// Whether the trade was successfully filled.
+    #[must_use]
+    pub fn is_success(&self) -> bool {
+        self.status == TradeOutcome::Success
+    }
+
+    /// Whether the FOK order was not filled (book moved or insufficient depth).
+    #[must_use]
+    pub fn is_miss(&self) -> bool {
+        self.status == TradeOutcome::Miss
+    }
+
+    /// Whether the trade failed due to an internal pipeline error.
+    #[must_use]
+    pub fn is_system_error(&self) -> bool {
+        self.status == TradeOutcome::SystemError
+    }
+
+    /// Whether the trade failed at the venue level.
+    #[must_use]
+    pub fn is_trade_failed(&self) -> bool {
+        self.status == TradeOutcome::TradeFailed
+    }
+
+    /// Whether the trade was rejected at validation due to stale data.
+    #[must_use]
+    pub fn is_stale(&self) -> bool {
+        self.status == TradeOutcome::Stale
+    }
+
+    /// Whether the trade reached a terminal failure state (miss, stale, failed, error).
+    #[must_use]
+    pub const fn is_failure(&self) -> bool {
+        matches!(
+            self.status,
+            TradeOutcome::Miss
+                | TradeOutcome::Stale
+                | TradeOutcome::TradeFailed
+                | TradeOutcome::SystemError
+        )
+    }
+}
+
 // ── Repository Write DTOs ────────────────────────────────────────────
 
 /// All fields required to record a new trade at creation time.

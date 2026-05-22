@@ -2,6 +2,7 @@ use super::{execute_sql, migrate_up};
 use oxide_arb_models::idens::calibration::EndgameCalibrationBucket;
 use oxide_arb_models::idens::calibration_outcome::EndgameCalibrationOutcome;
 use oxide_arb_models::idens::market::Market;
+use oxide_arb_models::types::Probability;
 use sea_orm_migration::prelude::*;
 
 #[derive(DeriveMigrationName)]
@@ -71,13 +72,13 @@ fn calibration_bucket_table() -> TableCreateStatement {
             ColumnDef::new(EndgameCalibrationBucket::AlphaPrior)
                 .text()
                 .not_null()
-                .default("1.0"),
+                .default(Probability::ONE),
         )
         .col(
             ColumnDef::new(EndgameCalibrationBucket::BetaPrior)
                 .text()
                 .not_null()
-                .default("1.0"),
+                .default(Probability::ONE),
         )
         .col(
             ColumnDef::new(EndgameCalibrationBucket::PosteriorMean)

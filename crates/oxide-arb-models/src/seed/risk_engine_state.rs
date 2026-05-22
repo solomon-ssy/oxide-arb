@@ -46,7 +46,7 @@ impl Default for NewRiskEngineState {
         let now = Utc::now();
         Self {
             id: 1,
-            breaker_state: BreakerStateName::Active,
+            breaker_state: BreakerStateName::Closed,
             is_halted: false,
             consecutive_misses: 0,
             cooldown_multiplier: 1,

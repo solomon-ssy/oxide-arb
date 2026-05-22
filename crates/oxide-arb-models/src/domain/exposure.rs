@@ -4,47 +4,12 @@
 //! concurrent orders from exceeding exposure limits. The trait is
 //! intentionally async to support both in-memory and distributed
 //! (Redis-backed) implementations.
+//!
+//! `ReservationId` is the canonical typed ID from `crate::types::ids`.
 
-use crate::types::{MarketId, Usd};
+use crate::types::{MarketId, ReservationId, Usd};
 use std::fmt;
 use std::time::Duration;
-use uuid::Uuid;
-
-/// Unique identifier for a capital reservation.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ReservationId(String);
-
-impl ReservationId {
-    /// Generate a new unique reservation ID.
-    #[must_use]
-    pub fn new() -> Self {
-        Self(Uuid::now_v7().to_string())
-    }
-
-    /// Create from an existing string (e.g. loaded from DB).
-    #[must_use]
-    pub const fn from_string(s: String) -> Self {
-        Self(s)
-    }
-
-    /// Access the inner string.
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl Default for ReservationId {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl fmt::Display for ReservationId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
 
 /// Error returned when a reservation cannot be fulfilled.
 #[derive(Debug, Clone)]

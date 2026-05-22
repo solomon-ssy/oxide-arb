@@ -1,4 +1,6 @@
 use super::{execute_sql, migrate_up};
+use oxide_arb_models::enums::common::TickSize;
+use oxide_arb_models::enums::market::MarketStatus;
 use oxide_arb_models::idens::event::Event;
 use oxide_arb_models::idens::market::Market;
 use sea_orm_migration::prelude::*;
@@ -43,7 +45,7 @@ fn create_tables() -> Vec<TableCreateStatement> {
                 ColumnDef::new(Market::Status)
                     .text()
                     .not_null()
-                    .default("active"),
+                    .default(MarketStatus::Active),
             )
             .col(ColumnDef::new(Market::Outcome).text().null())
             .col(ColumnDef::new(Market::YesTokenId).text().not_null())
@@ -52,7 +54,7 @@ fn create_tables() -> Vec<TableCreateStatement> {
                 ColumnDef::new(Market::TickSize)
                     .text()
                     .not_null()
-                    .default("0.01"),
+                    .default(TickSize::Hundredth),
             )
             .col(
                 ColumnDef::new(Market::NegRisk)

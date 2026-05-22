@@ -401,12 +401,12 @@ async fn risk_state_repository_crud() {
 
     let mut active: risk_state::ActiveModel = state.into();
     active.consecutive_misses = Set(2);
-    active.breaker_state = Set(BreakerStateName::Cooling);
+    active.breaker_state = Set(BreakerStateName::Open);
     repo.save(active).await.unwrap();
 
     let reloaded = repo.load().await.unwrap();
     assert_eq!(reloaded.consecutive_misses, 2);
-    assert_eq!(reloaded.breaker_state, BreakerStateName::Cooling);
+    assert_eq!(reloaded.breaker_state, BreakerStateName::Open);
 
     repo.reset_hourly_window().await.unwrap();
     repo.reset_daily_window().await.unwrap();

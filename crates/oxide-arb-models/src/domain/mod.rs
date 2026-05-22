@@ -9,6 +9,7 @@
 //!    This decouples domain logic from ORM details and enforces which fields are
 //!    settable at creation vs. update time.
 
+pub mod blacklist;
 pub mod book;
 pub mod calibration;
 pub mod exposure;
@@ -17,11 +18,13 @@ pub mod opportunity;
 pub mod order;
 pub mod pnl;
 pub mod position;
+pub mod potential_loss;
 pub mod report;
 pub mod risk;
 pub mod system;
 pub mod trade;
 
+pub use blacklist::*;
 pub use book::*;
 pub use calibration::*;
 pub use exposure::*;
@@ -30,6 +33,7 @@ pub use opportunity::*;
 pub use order::*;
 pub use pnl::*;
 pub use position::*;
+pub use potential_loss::*;
 pub use report::*;
 pub use risk::*;
 pub use system::*;

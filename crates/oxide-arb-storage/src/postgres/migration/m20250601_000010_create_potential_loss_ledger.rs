@@ -1,4 +1,5 @@
 use super::{execute_sql, migrate_up};
+use oxide_arb_models::enums::common::LedgerStatus;
 use oxide_arb_models::idens::market::Market;
 use oxide_arb_models::idens::potential_loss_ledger::PotentialLossLedger;
 use sea_orm_migration::prelude::*;
@@ -64,7 +65,7 @@ fn create_tables() -> Vec<TableCreateStatement> {
                 ColumnDef::new(PotentialLossLedger::Status)
                     .text()
                     .not_null()
-                    .default("active"),
+                    .default(LedgerStatus::Active),
             )
             .col(
                 ColumnDef::new(PotentialLossLedger::CreatedAt)

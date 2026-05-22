@@ -209,12 +209,16 @@ pub enum DataSource {
 }
 
 /// Severity level for operational alerts.
+///
+/// Ordered from lowest to highest: `Info < Warning < Critical < Emergency`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AlertLevel {
     Info,
     Warning,
     Critical,
+    /// System-level fault: API fully down, DB corrupted, circuit breaker L4.
+    Emergency,
 }
 
 /// Polymarket event category for fee-rate lookup and opportunity scoring.

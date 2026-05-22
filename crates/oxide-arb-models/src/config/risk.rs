@@ -76,6 +76,19 @@ pub struct RiskConfig {
     #[serde(default = "default_stop_loss_pct")]
     pub stop_loss_pct: Decimal,
 
+    // ── Exposure as percentage of balance ─────────────────────────────
+    /// Maximum portfolio exposure as a percentage of available balance.
+    #[serde(default = "default_max_total_exposure_pct")]
+    pub max_total_exposure_pct: Decimal,
+
+    // ── Reconciliation ───────────────────────────────────────────────
+    /// Interval (secs) between ledger reconciliation runs.
+    #[serde(default = "default_reconciliation_interval")]
+    pub reconciliation_interval_secs: u64,
+    /// Maximum acceptable drift (USD) before triggering an alert.
+    #[serde(default = "default_reconciliation_tolerance")]
+    pub reconciliation_tolerance_usd: Decimal,
+
     // ── Circuit breaker ──────────────────────────────────────────────
     #[serde(default)]
     pub circuit_breaker: CircuitBreakerConfig,
@@ -107,6 +120,9 @@ impl Default for RiskConfig {
             max_single_market_exposure_usd: default_max_market_exposure(),
             max_single_bet_usd: default_max_single_bet(),
             stop_loss_pct: default_stop_loss_pct(),
+            max_total_exposure_pct: default_max_total_exposure_pct(),
+            reconciliation_interval_secs: default_reconciliation_interval(),
+            reconciliation_tolerance_usd: default_reconciliation_tolerance(),
             circuit_breaker: CircuitBreakerConfig::default(),
         }
     }
@@ -175,39 +191,84 @@ const fn default_max_single_bet() -> Decimal {
 const fn default_stop_loss_pct() -> Decimal {
     dec!(30)
 }
+const fn default_max_total_exposure_pct() -> Decimal {
+    dec!(80)
+}
+const fn default_reconciliation_interval() -> u64 {
+    300
+}
+const fn default_reconciliation_tolerance() -> Decimal {
+    dec!(1.0)
+}
 
+/// 4-level circuit breaker configuration.
+///
+/// Each level has an independent cooldown duration. The FSM transitions:
+/// Closed → Open (tripped) → `HalfOpen` (cooldown expired) → Recovered (probes pass) → Closed.
+///
+/// | Level | Trigger | Default Cooldown |
+/// |-------|---------|------------------|
+/// | L1 (Trade) | Per-opportunity static filter failure | 60s |
+/// | L2 (Session) | Rolling window breach (misses, hourly loss) | 15min |
+/// | L3 (Daily) | Daily/weekly cap breach | 1h |
+/// | L4 (System) | Connectivity/balance emergency | 2h |
 #[derive(Debug, Clone, Deserialize, Validate)]
 pub struct CircuitBreakerConfig {
-    #[serde(default = "default_cb_enabled")]
-    pub enabled: bool,
-    #[serde(default = "default_cb_consecutive")]
-    pub consecutive_failure_threshold: u32,
-    #[serde(default = "default_cb_open_wait")]
-    pub open_wait_secs: u64,
-    #[serde(default = "default_cb_max_wait")]
-    pub max_open_wait_secs: u64,
+    /// Level 1 (Trade): per-opportunity static filter failure cooldown.
+    #[serde(default = "default_cb_l1_cooldown")]
+    pub l1_cooldown_secs: u64,
+    /// Level 2 (Session): rolling window breach cooldown.
+    #[serde(default = "default_cb_l2_cooldown")]
+    pub l2_cooldown_secs: u64,
+    /// Level 3 (Daily): daily/weekly cap breach cooldown.
+    #[serde(default = "default_cb_l3_cooldown")]
+    pub l3_cooldown_secs: u64,
+    /// Level 4 (System): connectivity/balance emergency cooldown.
+    #[serde(default = "default_cb_l4_cooldown")]
+    pub l4_cooldown_secs: u64,
+    /// Number of successful probe trades required in `HalfOpen` before Recovered.
+    #[serde(default = "default_cb_half_open_probes")]
+    pub half_open_probes: u32,
+    /// Observation period (secs) in Recovered state before returning to Closed.
+    #[serde(default = "default_cb_recovery_observation")]
+    pub recovery_observation_secs: u64,
+    /// Maximum cooldown duration (secs) for L2 exponential back-off.
+    #[serde(default = "default_cb_max_cooldown")]
+    pub max_cooldown_secs: u64,
 }
 
 impl Default for CircuitBreakerConfig {
     fn default() -> Self {
         Self {
-            enabled: default_cb_enabled(),
-            consecutive_failure_threshold: default_cb_consecutive(),
-            open_wait_secs: default_cb_open_wait(),
-            max_open_wait_secs: default_cb_max_wait(),
+            l1_cooldown_secs: default_cb_l1_cooldown(),
+            l2_cooldown_secs: default_cb_l2_cooldown(),
+            l3_cooldown_secs: default_cb_l3_cooldown(),
+            l4_cooldown_secs: default_cb_l4_cooldown(),
+            half_open_probes: default_cb_half_open_probes(),
+            recovery_observation_secs: default_cb_recovery_observation(),
+            max_cooldown_secs: default_cb_max_cooldown(),
         }
     }
 }
 
-const fn default_cb_enabled() -> bool {
-    true
-}
-const fn default_cb_consecutive() -> u32 {
-    5
-}
-const fn default_cb_open_wait() -> u64 {
+const fn default_cb_l1_cooldown() -> u64 {
     60
 }
-const fn default_cb_max_wait() -> u64 {
+const fn default_cb_l2_cooldown() -> u64 {
+    900
+}
+const fn default_cb_l3_cooldown() -> u64 {
+    3600
+}
+const fn default_cb_l4_cooldown() -> u64 {
+    7200
+}
+const fn default_cb_half_open_probes() -> u32 {
+    2
+}
+const fn default_cb_recovery_observation() -> u64 {
     300
+}
+const fn default_cb_max_cooldown() -> u64 {
+    14400
 }

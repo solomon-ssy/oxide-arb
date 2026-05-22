@@ -3922,6 +3922,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "oxide-arb-risk"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "dashmap",
+ "oxide-arb-error",
+ "oxide-arb-models",
+ "parking_lot",
+ "rust_decimal",
+ "rust_decimal_macros",
+ "serde",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "oxide-arb-storage"
 version = "0.1.0"
 dependencies = [

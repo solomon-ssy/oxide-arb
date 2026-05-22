@@ -26,6 +26,9 @@ pub struct RiskCheck {
 }
 
 /// Persisted snapshot of the risk engine state.
+///
+/// Used for crash recovery: the risk engine loads this on startup and
+/// restores its internal FSM, accumulators, and blacklist from it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RiskEngineSnapshot {
     pub breaker_state: BreakerStateName,
@@ -34,7 +37,11 @@ pub struct RiskEngineSnapshot {
     pub cooling_until: Option<DateTime<Utc>>,
     pub total_exposure: Usd,
     pub daily_pnl: Usd,
-    pub consecutive_losses: u32,
+    pub daily_loss: Usd,
+    pub weekly_loss: Usd,
+    pub consecutive_misses: u32,
+    /// Number of L2 trips in this session (for exponential cooldown).
+    pub l2_trip_count: u32,
     pub snapshot_at: DateTime<Utc>,
 }
 
