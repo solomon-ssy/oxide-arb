@@ -1,7 +1,8 @@
 use crate::traits::RiskStateRepository;
 use chrono::Utc;
 use oxide_arb_error::storage::StorageError;
-use oxide_arb_models::entities::risk_state::{self, ActiveModel, Column, Entity};
+use oxide_arb_models::domain::{RiskStateInfo, UpsertRiskEngineState};
+use oxide_arb_models::entities::risk_state::{ActiveModel, Column, Entity};
 use sea_orm::sea_query::{Expr, OnConflict};
 #[allow(clippy::wildcard_imports)]
 use sea_orm::*;
@@ -24,20 +25,25 @@ pub struct PgRiskStateRepositoryTxn<'a> {
     txn: &'a DatabaseTransaction,
 }
 
-async fn do_load(db: &impl ConnectionTrait) -> Result<risk_state::Model, StorageError> {
-    Entity::find_by_id(1)
+async fn do_load(db: &impl ConnectionTrait) -> Result<RiskStateInfo, StorageError> {
+    let model = Entity::find_by_id(1)
         .one(db)
         .await
         .map_err(StorageError::from)?
         .ok_or_else(|| StorageError::NotFound {
             entity: "risk_engine_state",
             id: "1".to_string(),
-        })
+        })?;
+    Ok(model.into())
 }
 
-async fn do_save(db: &impl ConnectionTrait, state: ActiveModel) -> Result<(), StorageError> {
-    let state = state.prepare_for_insert();
-    Entity::insert(state)
+async fn do_upsert(
+    db: &impl ConnectionTrait,
+    state: UpsertRiskEngineState,
+) -> Result<(), StorageError> {
+    let am: ActiveModel = state.into_active_model();
+    let am = am.prepare_for_insert();
+    Entity::insert(am)
         .on_conflict(
             OnConflict::column(Column::Id)
                 .update_columns([
@@ -51,13 +57,22 @@ async fn do_save(db: &impl ConnectionTrait, state: ActiveModel) -> Result<(), St
                     Column::TotalExposure,
                     Column::HourlyLossUsd,
                     Column::HourlyFeeUsd,
+                    Column::HourlyTradeCount,
+                    Column::HourlySuccessCount,
+                    Column::HourlyMissCount,
                     Column::HourlyWindowStart,
                     Column::DailyLossUsd,
                     Column::DailyFeeUsd,
                     Column::DailyPnl,
+                    Column::DailyBudgetSpent,
+                    Column::DailyTradeCount,
+                    Column::DailySuccessCount,
+                    Column::DailyMissCount,
                     Column::DailyWindowStart,
                     Column::WeeklyLossUsd,
+                    Column::WeeklyTradeCount,
                     Column::WeeklyWindowStart,
+                    Column::HwmEquity,
                     Column::LastEmergencyAt,
                     Column::LastEmergencyReason,
                     Column::UpdatedAt,
@@ -113,12 +128,12 @@ async fn do_reset_weekly_window(db: &impl ConnectionTrait) -> Result<(), Storage
 }
 
 impl RiskStateRepository for PgRiskStateRepository {
-    async fn load(&self) -> Result<risk_state::Model, StorageError> {
+    async fn load(&self) -> Result<RiskStateInfo, StorageError> {
         do_load(&self.db).await
     }
 
-    async fn save(&self, state: ActiveModel) -> Result<(), StorageError> {
-        do_save(&self.db, state).await
+    async fn upsert(&self, state: UpsertRiskEngineState) -> Result<(), StorageError> {
+        do_upsert(&self.db, state).await
     }
 
     async fn reset_hourly_window(&self) -> Result<(), StorageError> {
@@ -135,12 +150,12 @@ impl RiskStateRepository for PgRiskStateRepository {
 }
 
 impl RiskStateRepository for PgRiskStateRepositoryTxn<'_> {
-    async fn load(&self) -> Result<risk_state::Model, StorageError> {
+    async fn load(&self) -> Result<RiskStateInfo, StorageError> {
         do_load(self.txn).await
     }
 
-    async fn save(&self, state: ActiveModel) -> Result<(), StorageError> {
-        do_save(self.txn, state).await
+    async fn upsert(&self, state: UpsertRiskEngineState) -> Result<(), StorageError> {
+        do_upsert(self.txn, state).await
     }
 
     async fn reset_hourly_window(&self) -> Result<(), StorageError> {

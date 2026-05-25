@@ -8,10 +8,8 @@ use oxide_arb_algorithm::{
 };
 use oxide_arb_models::{
     config::{CalibrationConfig, FillProbabilityConfig},
-    domain::{
-        BookLevel,
-        calibration::{DurationBucket, PriceZone},
-    },
+    domain::BookLevel,
+    enums::calibration::{DurationBucket, PriceZone},
     enums::common::StalenessLevel,
     types::{Price, Shares},
 };

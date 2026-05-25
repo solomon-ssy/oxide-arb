@@ -6,22 +6,38 @@
 
 use crate::enums::common::{PositionStatus, Side};
 use crate::enums::risk::ReservationStatus;
-use crate::types::{MarketId, Price, ReservationId, Shares, TokenId, TradeId, Usd};
+use crate::types::{MarketId, PositionId, Price, ReservationId, Shares, TokenId, TradeId, Usd};
 use chrono::{DateTime, Utc};
-use sea_orm::DeriveIntoActiveModel;
+use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
 use serde::{Deserialize, Serialize};
 
-/// Full serializable view of a token-level position.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+// ── Read model ──────────────────────────────────────────────────────
+
+/// DB row projection for the `position` table.
+#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]
+#[sea_orm(entity = "crate::entities::position::Entity")]
 pub struct PositionInfo {
+    pub position_id: PositionId,
     pub market_id: MarketId,
     pub token_id: TokenId,
     pub side: Side,
-    pub size: Shares,
+    pub shares: Shares,
     pub avg_entry_price: Price,
-    pub cost_basis: Usd,
-    pub updated_at: DateTime<Utc>,
+    pub total_cost_usd: Usd,
+    pub total_fees_usd: Usd,
+    pub unrealized_pnl: Usd,
+    pub realized_pnl: Usd,
+    pub status: PositionStatus,
+    pub opened_at: DateTime<Utc>,
+    pub closed_at: Option<DateTime<Utc>>,
+    pub settled_at: Option<DateTime<Utc>>,
 }
+
+info_from_model!(PositionInfo, crate::entities::position::Model, {
+    position_id, market_id, token_id, side, shares, avg_entry_price,
+    total_cost_usd, total_fees_usd, unrealized_pnl, realized_pnl,
+    status, opened_at, closed_at, settled_at,
+});
 
 /// Capital reservation for a pending trade execution.
 #[derive(Debug, Clone, Serialize, Deserialize)]

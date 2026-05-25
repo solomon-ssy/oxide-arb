@@ -22,11 +22,11 @@ use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 
 fn default_context() -> RiskContext {
-    use oxide_arb_models::domain::calibration::{
-        BucketKey, CalibrationSnapshot, DurationBucket, PriceZone,
-    };
-    use oxide_arb_models::domain::opportunity::{EndgameMeta, Opportunity, PayoutModel};
+    use oxide_arb_models::domain::calibration::{BucketKey, CalibrationSnapshot};
+    use oxide_arb_models::domain::opportunity::{EndgameMeta, Opportunity};
+    use oxide_arb_models::enums::calibration::{DurationBucket, PriceZone};
     use oxide_arb_models::enums::common::{MarketCategory, Side, StalenessLevel};
+    use oxide_arb_models::enums::opportunity::PayoutModel;
     use oxide_arb_models::types::{Bps, EventId, MarketId, OpportunityId, Price, Shares, TokenId};
 
     let opp = Opportunity {

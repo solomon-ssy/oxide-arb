@@ -1,7 +1,6 @@
 //! Builder pattern for constructing a `RiskEngine` with all sub-systems.
 
 use crate::accounting::{DailyAccounting, HourlyAccounting, WeeklyAccounting};
-use crate::audit::RiskAuditEvent;
 use crate::blacklist::BlacklistManager;
 use crate::circuit_breaker::CircuitBreaker;
 use crate::clock::{self, Clock};
@@ -12,13 +11,16 @@ use crate::reconciliation::LedgerReconciler;
 use crate::sizing::{DrawdownGuard, MultiConstraintSizer};
 use crate::state_store;
 use crate::traits::{RiskMetrics, RiskPersistence};
-use crate::types::{AtomicStateVersion, BreakerState, ReconciliationReport};
+use crate::types::{AtomicStateVersion, BreakerState};
 use oxide_arb_error::OxideResult;
 use oxide_arb_models::config::RiskConfig;
-use oxide_arb_models::domain::EmergencySnapshot;
-use oxide_arb_models::domain::blacklist::BlacklistEntry;
-use oxide_arb_models::domain::potential_loss::PotentialLossEntry;
-use oxide_arb_models::domain::risk::RiskEngineSnapshot;
+use oxide_arb_models::domain::blacklist::{BlacklistInfo, UpsertBlacklistEntry};
+use oxide_arb_models::domain::potential_loss::PotentialLossInfo;
+use oxide_arb_models::domain::risk::{
+    NewEmergencySnapshot, NewReconciliationReport, NewRiskAuditEvent, RiskEngineState,
+    RiskStateInfo, UpsertRiskEngineState,
+};
+use oxide_arb_models::enums::risk::BreakerStateName;
 use oxide_arb_models::types::{MarketId, Usd};
 use parking_lot::RwLock;
 use rust_decimal_macros::dec;
@@ -27,10 +29,10 @@ use std::sync::atomic::AtomicBool;
 
 pub struct RiskEngineBuilder {
     config: Option<RiskConfig>,
-    snapshot: Option<RiskEngineSnapshot>,
+    snapshot: Option<RiskEngineState>,
     persistence: Option<Arc<dyn RiskPersistence>>,
-    blacklist_entries: Vec<BlacklistEntry>,
-    potential_loss_entries: Vec<PotentialLossEntry>,
+    blacklist_entries: Vec<BlacklistInfo>,
+    potential_loss_entries: Vec<PotentialLossInfo>,
     initial_equity: Option<Usd>,
     clock: Option<Arc<dyn Clock>>,
 }
@@ -56,7 +58,7 @@ impl RiskEngineBuilder {
     }
 
     #[must_use]
-    pub fn snapshot(mut self, snapshot: RiskEngineSnapshot) -> Self {
+    pub fn snapshot(mut self, snapshot: RiskEngineState) -> Self {
         self.snapshot = Some(snapshot);
         self
     }
@@ -68,13 +70,13 @@ impl RiskEngineBuilder {
     }
 
     #[must_use]
-    pub fn blacklist_entries(mut self, entries: Vec<BlacklistEntry>) -> Self {
+    pub fn blacklist_entries(mut self, entries: Vec<BlacklistInfo>) -> Self {
         self.blacklist_entries = entries;
         self
     }
 
     #[must_use]
-    pub fn potential_loss_entries(mut self, entries: Vec<PotentialLossEntry>) -> Self {
+    pub fn potential_loss_entries(mut self, entries: Vec<PotentialLossInfo>) -> Self {
         self.potential_loss_entries = entries;
         self
     }
@@ -229,35 +231,67 @@ struct NoopPersistence;
 
 #[async_trait::async_trait]
 impl RiskPersistence for NoopPersistence {
-    async fn save_snapshot(&self, _snapshot: &RiskEngineSnapshot) -> OxideResult<()> {
+    async fn upsert_state(&self, _state: UpsertRiskEngineState) -> OxideResult<()> {
         Ok(())
     }
 
-    async fn load_snapshot(&self) -> OxideResult<Option<RiskEngineSnapshot>> {
-        Ok(None)
+    async fn load_state(&self) -> OxideResult<RiskStateInfo> {
+        let now = chrono::Utc::now();
+        Ok(RiskStateInfo {
+            id: 1,
+            breaker_state: BreakerStateName::Closed,
+            breaker_level: None,
+            is_halted: false,
+            halt_reason: None,
+            consecutive_misses: 0,
+            cooldown_until: None,
+            cooldown_multiplier: 0,
+            total_exposure: Usd::ZERO,
+            hourly_loss_usd: Usd::ZERO,
+            hourly_fee_usd: Usd::ZERO,
+            hourly_trade_count: 0,
+            hourly_success_count: 0,
+            hourly_miss_count: 0,
+            hourly_window_start: now,
+            daily_loss_usd: Usd::ZERO,
+            daily_fee_usd: Usd::ZERO,
+            daily_pnl: Usd::ZERO,
+            daily_budget_spent: Usd::ZERO,
+            daily_trade_count: 0,
+            daily_success_count: 0,
+            daily_miss_count: 0,
+            daily_window_start: now.date_naive(),
+            weekly_loss_usd: Usd::ZERO,
+            weekly_trade_count: 0,
+            weekly_window_start: now.date_naive(),
+            hwm_equity: Usd::ZERO,
+            last_emergency_at: None,
+            last_emergency_reason: None,
+            updated_at: now,
+        })
     }
 
-    async fn save_blacklist_entry(&self, _entry: &BlacklistEntry) -> OxideResult<()> {
+    async fn upsert_blacklist(&self, _entry: UpsertBlacklistEntry) -> OxideResult<()> {
         Ok(())
     }
 
-    async fn remove_blacklist_entry(&self, _market_id: &MarketId) -> OxideResult<()> {
+    async fn remove_blacklist(&self, _market_id: &MarketId) -> OxideResult<()> {
         Ok(())
     }
 
-    async fn load_blacklist_entries(&self) -> OxideResult<Vec<BlacklistEntry>> {
+    async fn load_blacklist(&self) -> OxideResult<Vec<BlacklistInfo>> {
         Ok(Vec::new())
     }
 
-    async fn save_emergency_snapshot(&self, _snapshot: &EmergencySnapshot) -> OxideResult<()> {
+    async fn create_emergency(&self, _emergency: NewEmergencySnapshot) -> OxideResult<()> {
         Ok(())
     }
 
-    async fn save_reconciliation_report(&self, _report: &ReconciliationReport) -> OxideResult<()> {
+    async fn create_reconciliation(&self, _report: NewReconciliationReport) -> OxideResult<()> {
         Ok(())
     }
 
-    async fn append_audit_event(&self, _event: &RiskAuditEvent) -> OxideResult<()> {
+    async fn create_audit(&self, _audit: NewRiskAuditEvent) -> OxideResult<()> {
         Ok(())
     }
 }

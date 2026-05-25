@@ -10,6 +10,7 @@ use rust_decimal_macros::dec;
 use sea_orm::{DeriveActiveEnum, EnumIter};
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
+use thiserror::Error;
 
 /// Trade direction.
 #[derive(
@@ -269,6 +270,20 @@ impl std::fmt::Display for MarketCategory {
 }
 
 impl MarketCategory {
+    /// Every persisted category variant — used for bulk cache invalidation.
+    pub const ALL_VARIANTS: [Self; 10] = [
+        Self::Geopolitics,
+        Self::Sports,
+        Self::Politics,
+        Self::Finance,
+        Self::Tech,
+        Self::Culture,
+        Self::Weather,
+        Self::Economics,
+        Self::Crypto,
+        Self::Other,
+    ];
+
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -299,16 +314,9 @@ impl From<Option<&str>> for MarketCategory {
 }
 
 /// Error returned when a category string cannot be parsed (config / DB keys).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("unknown market category: {0}")]
 pub struct MarketCategoryParseError(pub String);
-
-impl std::fmt::Display for MarketCategoryParseError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "unknown market category: {}", self.0)
-    }
-}
-
-impl std::error::Error for MarketCategoryParseError {}
 
 impl std::str::FromStr for MarketCategory {
     type Err = MarketCategoryParseError;
@@ -358,16 +366,9 @@ pub enum TickSize {
 }
 
 /// Invalid tick size string from Gamma / CLOB wire format.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("invalid tick size: {0}")]
 pub struct TickSizeParseError(pub String);
-
-impl std::fmt::Display for TickSizeParseError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "invalid tick size: {}", self.0)
-    }
-}
-
-impl std::error::Error for TickSizeParseError {}
 
 impl TickSize {
     #[must_use]

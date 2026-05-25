@@ -4,25 +4,26 @@ mod common;
 
 use chrono::Utc;
 use common::{make_event, make_market, setup_pg};
-use oxide_arb_models::domain::calibration::{DurationBucket, PriceZone};
-use oxide_arb_models::domain::{NewPosition, NewTrade, UpdateTradeOutcome};
-use oxide_arb_models::entities::{
-    accounting_period, calibration, calibration_outcome, potential_loss_ledger, risk_state,
+use oxide_arb_models::domain::{
+    NewAccountingPeriod, NewCalibrationOutcome, NewLifecycleEvent, NewPosition, NewPotentialLoss,
+    NewTrade, UpdatePotentialLoss, UpdateTradeOutcome, UpsertCalibration, UpsertRiskEngineState,
+    UpsertRuntimeConfig,
 };
+use oxide_arb_models::enums::calibration::{DurationBucket, PriceZone};
 use oxide_arb_models::enums::common::{
     ExecutionMode, LedgerStatus, MarketCategory, PositionStatus, ReportType, Side, TradeOutcome,
 };
-use oxide_arb_models::enums::lifecycle::LifecyclePhase;
+use oxide_arb_models::enums::lifecycle::{LifecyclePhase, LifecycleRecorder};
 use oxide_arb_models::enums::risk::BreakerStateName;
+use oxide_arb_models::enums::runtime_config::RuntimeConfigKey;
 use oxide_arb_models::types::*;
 use oxide_arb_repository::postgres::*;
 use oxide_arb_repository::traits::*;
+use oxide_arb_storage::postgres::PostgresPool;
 use rust_decimal::Decimal;
-use sea_orm::ActiveValue::Set;
-use uuid::Uuid;
 
 async fn seed_market(
-    pool: &oxide_arb_storage::postgres::PostgresPool,
+    pool: &PostgresPool,
     event_id: &str,
     market_id: &str,
     category: MarketCategory,
@@ -30,7 +31,7 @@ async fn seed_market(
     let event_repo = PgEventRepository::new(pool.connection().clone());
     let market_repo = PgMarketRepository::new(pool.connection().clone());
     event_repo
-        .insert(make_event(
+        .upsert(make_event(
             event_id,
             "Seed Event",
             &format!("{event_id}-slug"),
@@ -39,7 +40,7 @@ async fn seed_market(
         .await
         .unwrap();
     market_repo
-        .insert(make_market(
+        .upsert(make_market(
             market_id,
             event_id,
             "Seed question?",
@@ -63,7 +64,7 @@ async fn event_repository_crud() {
         "test-event",
         MarketCategory::Sports,
     );
-    let inserted = repo.insert(model).await.expect("insert event");
+    let inserted = repo.upsert(model).await.expect("insert event");
     assert_eq!(inserted.title, "Test Event");
 
     let found = repo
@@ -85,7 +86,7 @@ async fn market_repository_crud() {
     let market_repo = PgMarketRepository::new(pool.connection().clone());
 
     event_repo
-        .insert(make_event(
+        .upsert(make_event(
             "evt-mkt-test",
             "Market Test Event",
             "market-test-event",
@@ -103,7 +104,7 @@ async fn market_repository_crud() {
         Some(Utc::now() + chrono::Duration::hours(24)),
     );
 
-    let inserted = market_repo.insert(mkt).await.expect("insert market");
+    let inserted = market_repo.upsert(mkt).await.expect("insert market");
     assert_eq!(inserted.question, "Will X happen?");
 
     let found = market_repo
@@ -130,7 +131,7 @@ async fn market_insert_then_update() {
     let market_repo = PgMarketRepository::new(pool.connection().clone());
 
     event_repo
-        .insert(make_event(
+        .upsert(make_event(
             "evt-update",
             "Update Test",
             "update-test",
@@ -147,15 +148,53 @@ async fn market_insert_then_update() {
         MarketCategory::Tech,
         None,
     );
-    let inserted = market_repo.insert(mkt).await.unwrap();
+    let inserted = market_repo.upsert(mkt).await.unwrap();
     assert_eq!(inserted.question, "Original question?");
 
-    let mut active: oxide_arb_models::entities::market::ActiveModel = inserted.into();
-    active.question = Set("Updated question?".into());
-    active.slug = Set("updated".into());
-    let updated = market_repo.update(active).await.unwrap();
+    let updated_mkt = make_market(
+        "0xupdate-market",
+        "evt-update",
+        "Updated question?",
+        "updated",
+        MarketCategory::Tech,
+        None,
+    );
+    let updated = market_repo.upsert(updated_mkt).await.unwrap();
     assert_eq!(updated.question, "Updated question?");
     assert_eq!(updated.slug, "updated");
+
+    let upsert_model = make_market(
+        "0xupsert-market",
+        "evt-update",
+        "Upsert question?",
+        "upsert-slug",
+        MarketCategory::Tech,
+        None,
+    );
+    market_repo.upsert_batch(vec![upsert_model]).await.unwrap();
+
+    let upserted = market_repo
+        .find_by_id(&MarketId::new("0xupsert-market"))
+        .await
+        .unwrap()
+        .expect("upserted market should exist");
+    assert_eq!(upserted.question, "Upsert question?");
+
+    let upsert_update = make_market(
+        "0xupsert-market",
+        "evt-update",
+        "Upsert updated?",
+        "upsert-slug",
+        MarketCategory::Tech,
+        None,
+    );
+    market_repo.upsert_batch(vec![upsert_update]).await.unwrap();
+    let reloaded = market_repo
+        .find_by_id(&MarketId::new("0xupsert-market"))
+        .await
+        .unwrap()
+        .expect("upserted market should still exist");
+    assert_eq!(reloaded.question, "Upsert updated?");
 
     let all_active = market_repo.find_active().await.unwrap();
     assert_eq!(all_active.len(), 1, "Update should not create duplicates");
@@ -191,7 +230,7 @@ async fn trade_repository_crud() {
     assert_eq!(created.outcome, TradeOutcome::Pending);
 
     let updated = trade_repo
-        .update_outcome(
+        .update(
             &created.trade_id,
             UpdateTradeOutcome {
                 outcome: TradeOutcome::Success,
@@ -341,20 +380,19 @@ async fn calibration_repository_crud() {
     seed_market(&pool, "evt-cal", "0xcal-mkt", MarketCategory::Sports).await;
 
     let cal_repo = PgCalibrationRepository::new(pool.connection().clone());
-    let bucket = calibration::ActiveModel {
-        category: Set(MarketCategory::Sports),
-        price_zone: Set(PriceZone::Z99),
-        duration_bucket: Set(DurationBucket::Short),
-        total_count: Set(10),
-        correct_count: Set(9),
-        alpha_prior: Set(Probability::from(Decimal::new(10, 1))),
-        beta_prior: Set(Probability::from(Decimal::new(10, 1))),
-        posterior_mean: Set(Some(Probability::from(Decimal::new(9, 1)))),
-        updated_at: Set(Utc::now()),
-        ..Default::default()
+    let bucket = UpsertCalibration {
+        category: MarketCategory::Sports,
+        price_zone: PriceZone::Z99,
+        duration_bucket: DurationBucket::Short,
+        total_count: 10,
+        correct_count: 9,
+        alpha_prior: Probability::from(Decimal::new(10, 1)),
+        beta_prior: Probability::from(Decimal::new(10, 1)),
+        posterior_mean: Some(Probability::from(Decimal::new(9, 1))),
+        updated_at: Utc::now(),
     };
 
-    let inserted = cal_repo.insert_bucket(bucket).await.unwrap();
+    let inserted = cal_repo.upsert(bucket).await.unwrap();
     assert_eq!(inserted.total_count, 10);
 
     let found = cal_repo
@@ -367,19 +405,19 @@ async fn calibration_repository_crud() {
         .unwrap();
     assert!(found.is_some());
 
-    let outcome = calibration_outcome::ActiveModel {
-        market_id: Set(MarketId::new("0xcal-mkt")),
-        category: Set(MarketCategory::Sports),
-        price_zone: Set(PriceZone::Z99),
-        duration_bucket: Set(DurationBucket::Short),
-        predicted_yes: Set(true),
-        actual_yes: Set(None),
-        entry_price: Set(Price::from(Decimal::new(99, 2))),
-        confidence_at_entry: Set(Probability::from(Decimal::new(95, 2))),
-        convergence_secs: Set(3600),
-        ..Default::default()
+    let outcome = NewCalibrationOutcome {
+        market_id: MarketId::new("0xcal-mkt"),
+        category: MarketCategory::Sports,
+        price_zone: PriceZone::Z99,
+        duration_bucket: DurationBucket::Short,
+        predicted_yes: true,
+        actual_yes: None,
+        entry_price: Price::from(Decimal::new(99, 2)),
+        confidence_at_entry: Probability::from(Decimal::new(95, 2)),
+        convergence_secs: 3600,
+        resolved_at: None,
     };
-    cal_repo.record_outcome(outcome).await.unwrap();
+    cal_repo.create_outcome(outcome).await.unwrap();
 
     let unresolved = cal_repo.get_unresolved_outcomes().await.unwrap();
     assert_eq!(unresolved.len(), 1);
@@ -399,10 +437,38 @@ async fn risk_state_repository_crud() {
     let state = repo.load().await.expect("seeded singleton row");
     assert_eq!(state.id, 1);
 
-    let mut active: risk_state::ActiveModel = state.into();
-    active.consecutive_misses = Set(2);
-    active.breaker_state = Set(BreakerStateName::Open);
-    repo.save(active).await.unwrap();
+    let upsert = UpsertRiskEngineState {
+        id: state.id,
+        breaker_state: BreakerStateName::Open,
+        breaker_level: state.breaker_level,
+        is_halted: state.is_halted,
+        halt_reason: state.halt_reason,
+        consecutive_misses: 2,
+        cooldown_until: state.cooldown_until,
+        cooldown_multiplier: state.cooldown_multiplier,
+        total_exposure: state.total_exposure,
+        hourly_loss_usd: state.hourly_loss_usd,
+        hourly_fee_usd: state.hourly_fee_usd,
+        hourly_trade_count: state.hourly_trade_count,
+        hourly_success_count: state.hourly_success_count,
+        hourly_miss_count: state.hourly_miss_count,
+        hourly_window_start: state.hourly_window_start,
+        daily_loss_usd: state.daily_loss_usd,
+        daily_fee_usd: state.daily_fee_usd,
+        daily_pnl: state.daily_pnl,
+        daily_budget_spent: state.daily_budget_spent,
+        daily_trade_count: state.daily_trade_count,
+        daily_success_count: state.daily_success_count,
+        daily_miss_count: state.daily_miss_count,
+        daily_window_start: state.daily_window_start,
+        weekly_loss_usd: state.weekly_loss_usd,
+        weekly_trade_count: state.weekly_trade_count,
+        weekly_window_start: state.weekly_window_start,
+        hwm_equity: state.hwm_equity,
+        last_emergency_at: state.last_emergency_at,
+        last_emergency_reason: state.last_emergency_reason,
+    };
+    repo.upsert(upsert).await.unwrap();
 
     let reloaded = repo.load().await.unwrap();
     assert_eq!(reloaded.consecutive_misses, 2);
@@ -424,26 +490,16 @@ async fn accounting_repository_crud() {
     let (pool, _container) = setup_pg().await;
     let repo = PgAccountingRepository::new(pool.connection().clone());
     let today = Utc::now().date_naive();
-    let period_id = Uuid::new_v4().to_string();
+    let period_id = PeriodId::generate();
 
-    let period = accounting_period::ActiveModel {
-        period_id: Set(period_id.clone()),
-        period_type: Set(ReportType::Daily),
-        start_date: Set(today),
-        end_date: Set(today),
-        realized_pnl: Set(Usd::from(Decimal::new(100, 0))),
-        total_fees: Set(Usd::from(Decimal::new(5, 0))),
-        trade_count: Set(3),
-        win_count: Set(2),
-        loss_count: Set(1),
-        miss_count: Set(0),
-        max_drawdown: Set(Usd::ZERO),
-        sharpe_ratio: Set(None),
-        finalized: Set(false),
-        created_at: Set(Utc::now()),
+    let period = NewAccountingPeriod {
+        period_id: period_id.clone(),
+        period_type: ReportType::Daily,
+        start_date: today,
+        end_date: today,
     };
 
-    let created = repo.create_period(period).await.unwrap();
+    let created = repo.create(period).await.unwrap();
     assert_eq!(created.period_id, period_id);
     assert!(!created.finalized);
 
@@ -465,15 +521,13 @@ async fn lifecycle_repository_crud() {
     let (pool, _container) = setup_pg().await;
     let repo = PgLifecycleRepository::new(pool.connection().clone());
 
-    let recorded = repo
-        .record(
-            LifecyclePhase::Detected,
-            Some("startup"),
-            "Application started",
-            Some(serde_json::json!({ "version": "test" })),
-        )
-        .await
-        .unwrap();
+    let event = NewLifecycleEvent {
+        phase: LifecyclePhase::Detected,
+        stage: Some(LifecycleRecorder::System),
+        message: "Application started".into(),
+        metadata: Some(serde_json::json!({ "version": "test" })),
+    };
+    let recorded = repo.create(event).await.unwrap();
     assert_eq!(recorded.phase, LifecyclePhase::Detected);
 
     let recent = repo.get_recent(5).await.unwrap();
@@ -487,34 +541,23 @@ async fn runtime_config_repository_crud() {
     let (pool, _container) = setup_pg().await;
     let repo = PgRuntimeConfigRepository::new(pool.connection().clone());
 
-    let value = serde_json::json!({ "threshold_usd": 100.0 });
-    let set = repo
-        .set("min_profit_threshold_usd", &value, "test")
-        .await
-        .unwrap();
-    assert_eq!(set.key, "min_profit_threshold_usd");
+    let key = RuntimeConfigKey::MinProfitThresholdUsd;
+    let config = UpsertRuntimeConfig {
+        key,
+        value: serde_json::json!({ "threshold_usd": 100.0 }),
+        updated_by: "test".into(),
+    };
+    let set = repo.upsert(config).await.unwrap();
+    assert_eq!(set.key, key);
 
-    let got = repo.get("min_profit_threshold_usd").await.unwrap();
+    let got = repo.get(key).await.unwrap();
     assert!(got.is_some());
-
-    let typed = repo
-        .get_typed(
-            oxide_arb_models::entities::runtime_config::RuntimeConfigKey::MinProfitThresholdUsd,
-        )
-        .await
-        .unwrap();
-    assert!(typed.is_some());
 
     let all = repo.get_all().await.unwrap();
     assert!(!all.is_empty());
 
-    assert!(repo.delete("min_profit_threshold_usd").await.unwrap());
-    assert!(
-        repo.get("min_profit_threshold_usd")
-            .await
-            .unwrap()
-            .is_none()
-    );
+    assert!(repo.delete(key).await.unwrap());
+    assert!(repo.get(key).await.unwrap().is_none());
 }
 
 #[tokio::test]
@@ -524,27 +567,32 @@ async fn potential_loss_repository_crud() {
     seed_market(&pool, "evt-pll", "0xpll-mkt", MarketCategory::Tech).await;
 
     let repo = PgPotentialLossRepository::new(pool.connection().clone());
-    let ledger_id = Uuid::new_v4().to_string();
+    let ledger_id = LedgerId::generate();
 
-    let entry = potential_loss_ledger::ActiveModel {
-        ledger_id: Set(ledger_id.clone()),
-        market_id: Set(MarketId::new("0xpll-mkt")),
-        token_id: Set(TokenId::new("555")),
-        shares: Set(Shares::from(Decimal::new(20, 0))),
-        entry_price: Set(Price::from(Decimal::new(90, 2))),
-        max_loss_usd: Set(Usd::from(Decimal::new(18, 0))),
-        status: Set(LedgerStatus::Active),
-        created_at: Set(Utc::now()),
-        resolved_at: Set(None),
+    let entry = NewPotentialLoss {
+        ledger_id: ledger_id.clone(),
+        market_id: MarketId::new("0xpll-mkt"),
+        token_id: TokenId::new("555"),
+        shares: Shares::from(Decimal::new(20, 0)),
+        entry_price: Price::from(Decimal::new(90, 2)),
+        max_loss_usd: Usd::from(Decimal::new(18, 0)),
     };
 
-    repo.record(entry).await.unwrap();
+    repo.create(entry).await.unwrap();
     assert_eq!(repo.find_active().await.unwrap().len(), 1);
     assert_eq!(
         repo.total_active_loss().await.unwrap(),
         Usd::from(Decimal::new(18, 0))
     );
 
-    repo.resolve(&ledger_id).await.unwrap();
+    repo.update(
+        &ledger_id,
+        UpdatePotentialLoss {
+            status: Some(LedgerStatus::Resolved),
+            resolved_at: Some(Utc::now()),
+        },
+    )
+    .await
+    .unwrap();
     assert!(repo.find_active().await.unwrap().is_empty());
 }

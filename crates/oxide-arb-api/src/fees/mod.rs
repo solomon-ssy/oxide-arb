@@ -83,6 +83,11 @@ impl FeeCalculator {
         formula::calculate_fee(shares, price, params.fee_rate, params.exponent)
     }
 
+    /// Return a clone of the current fee snapshot.
+    pub fn snapshot(&self) -> FeeSnapshot {
+        self.rate_cache.load().as_ref().clone()
+    }
+
     /// Atomically replace the entire fee snapshot (manual override / verification).
     pub fn replace_snapshot(&self, snapshot: FeeSnapshot) {
         self.rate_cache.store(Arc::new(snapshot));

@@ -40,7 +40,7 @@ struct CachedMarketStub {
 async fn tiered_l2_hit_backfills_l1() {
     let (port, _container) = setup_redis().await;
     let redis_cfg = test_redis_config(port);
-    let key = CacheKey::MarketEntry {
+    let key = CacheKey::MarketInfo {
         market_id: MarketId::new("0xbackfill"),
     };
     let value = CachedMarketStub {
@@ -83,7 +83,7 @@ async fn tiered_l2_hit_backfills_l1() {
 async fn tiered_both_miss_returns_none() {
     let (port, _container) = setup_redis().await;
     let redis_cfg = test_redis_config(port);
-    let key = CacheKey::EventEntry {
+    let key = CacheKey::EventInfo {
         event_id: EventId::new("evt-missing"),
     };
 

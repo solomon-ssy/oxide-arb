@@ -4,14 +4,14 @@ mod mapper;
 mod sync;
 pub mod types;
 
-pub use mapper::collect_fee_sync;
+pub use mapper::{GammaCatalogBatch, collect_fee_sync};
 pub use types::GammaResolution;
 
 use crate::infra::retry::{self, RetryPolicy};
 use chrono::{DateTime, Utc};
 use oxide_arb_error::api::ApiError;
 use oxide_arb_models::config::GammaConfig;
-use oxide_arb_models::domain::market::{EventEntry, MarketEntry};
+use oxide_arb_models::domain::market::{EventRegistryInfo, MarketRegistryInfo};
 use oxide_arb_models::types::{EventId, MarketId, TokenId};
 
 use types::RawGammaMarket;
@@ -33,8 +33,66 @@ impl GammaClient {
     }
 
     /// Full sync: paginate all active events + their markets.
-    pub async fn full_sync(&self) -> Result<Vec<EventEntry>, ApiError> {
+    pub async fn full_sync(&self) -> Result<Vec<EventRegistryInfo>, ApiError> {
         sync::full_sync(&self.http, &self.config).await
+    }
+
+    /// Full sync returning both events and their embedded market entries.
+    ///
+    /// Unlike `full_sync()`, this preserves the per-market metadata needed
+    /// by `MarketRegistry`, `MarketCache`, and `FeeCalculator`.
+    pub async fn full_sync_detailed(
+        &self,
+    ) -> Result<(Vec<EventRegistryInfo>, Vec<MarketRegistryInfo>), ApiError> {
+        let raw_events = sync::full_sync_raw(&self.http, &self.config).await?;
+        let fee_data = mapper::collect_fee_sync(&raw_events);
+        let mut events = Vec::new();
+        let mut markets = Vec::new();
+        for raw in raw_events {
+            let event_id = EventId::new(&raw.id);
+            let raw_markets = raw.markets.clone().unwrap_or_default();
+            for rm in raw_markets {
+                markets.push(mapper::map_market(rm, &event_id));
+            }
+            events.push(mapper::map_event(raw));
+        }
+        let _ = fee_data; // fee data extracted from same raw payload by caller
+        Ok((events, markets))
+    }
+
+    /// Full sync returning a `GammaCatalogBatch` with persistence DTOs and registry views.
+    pub async fn full_sync_with_fees(&self) -> Result<GammaCatalogBatch, ApiError> {
+        let raw_events = sync::full_sync_raw(&self.http, &self.config).await?;
+        Ok(mapper::parse_sync_payload(raw_events))
+    }
+
+    /// Incremental sync returning a `GammaCatalogBatch` with persistence DTOs and registry views.
+    pub async fn incremental_sync_with_fees(
+        &self,
+        since: DateTime<Utc>,
+    ) -> Result<GammaCatalogBatch, ApiError> {
+        let raw_events = sync::incremental_sync_raw(&self.http, &self.config, since).await?;
+        Ok(mapper::parse_sync_payload(raw_events))
+    }
+
+    /// Fetch markets not embedded in an incremental event payload, with bounded concurrency.
+    pub async fn fetch_markets_bounded(
+        &self,
+        market_ids: &[MarketId],
+        max_concurrency: usize,
+    ) -> Vec<Result<MarketRegistryInfo, ApiError>> {
+        use futures_util::stream::{self, StreamExt};
+
+        if market_ids.is_empty() {
+            return Vec::new();
+        }
+
+        let concurrency = max_concurrency.max(1);
+        stream::iter(market_ids.iter().cloned())
+            .map(|market_id| async move { self.get_market(&market_id).await })
+            .buffer_unordered(concurrency)
+            .collect()
+            .await
     }
 
     /// Discover one liquid/active token for smoke tests (first page of active events).
@@ -46,12 +104,15 @@ impl GammaClient {
     pub async fn incremental_sync(
         &self,
         since: DateTime<Utc>,
-    ) -> Result<Vec<EventEntry>, ApiError> {
+    ) -> Result<Vec<EventRegistryInfo>, ApiError> {
         sync::incremental_sync(&self.http, &self.config, since).await
     }
 
     /// Fetch a single market by `condition_id`.
-    pub async fn get_market(&self, condition_id: &MarketId) -> Result<MarketEntry, ApiError> {
+    pub async fn get_market(
+        &self,
+        condition_id: &MarketId,
+    ) -> Result<MarketRegistryInfo, ApiError> {
         let http = self.http.clone();
         let base_url = self.config.base_url.clone();
         let cid = condition_id.as_str().to_owned();

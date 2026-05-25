@@ -59,6 +59,14 @@ impl RateLimiter {
             ))),
         );
 
+        // GET /balance-allowance: 5 requests/second (reconciliation only, not hot path)
+        limiters.insert(
+            "GET /balance-allowance",
+            Arc::new(GovLimiter::direct(Quota::per_second(
+                NonZeroU32::new(5).expect("nonzero"),
+            ))),
+        );
+
         Self { limiters }
     }
 

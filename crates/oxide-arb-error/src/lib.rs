@@ -7,24 +7,31 @@
 //! # Architecture (ng-gateway pattern)
 //!
 //! ```text
-//! AlgoError ───┐
-//! ApiError ────┤
-//! WsError ─────┤
-//! StorageError─┤
-//! SigningError──┼──► OxideError
-//! RpcError ────┤
-//! ConfigError──┤
-//! TradingError─┘
+//! AlgoError ────────┐
+//! ApiError ─────────┤
+//! WsError ──────────┤
+//! StorageError──────┤
+//! SigningError───────┼──► OxideError
+//! RpcError ─────────┤
+//! ConfigError───────┤
+//! MarketError────────┤
+//! TradingError──────┤
+//! ReservationError──┘
 //! ```
 
 pub mod algorithm;
 pub mod api;
 pub mod config;
+pub mod config_validation;
+pub mod market;
+pub mod reservation;
 pub mod rpc;
 pub mod signing;
 pub mod storage;
 pub mod trading;
 pub mod ws;
+
+pub use config_validation::{ConfigValidationError, ConfigValidationReport, ConfigWarning};
 
 use thiserror::Error;
 
@@ -63,9 +70,17 @@ pub enum OxideError {
     #[error(transparent)]
     Config(#[from] config::ConfigError),
 
+    // ── Market catalog ──────────────────────────────────────────────────
+    #[error(transparent)]
+    Market(#[from] market::MarketError),
+
     // ── Trading ─────────────────────────────────────────────────────────
     #[error(transparent)]
     Trading(#[from] trading::TradingError),
+
+    // ── Reservation ──────────────────────────────────────────────────────
+    #[error(transparent)]
+    Reservation(#[from] reservation::ReservationError),
 
     // ── General ─────────────────────────────────────────────────────────
     #[error("Internal error: {0}")]
@@ -80,7 +95,13 @@ pub enum OxideError {
 impl OxideError {
     /// Shorthand config error from a string message (used by Settings loader).
     pub fn config(msg: impl Into<String>) -> Self {
-        Self::Config(config::ConfigError::Validation(msg.into()))
+        Self::Config(
+            ConfigValidationReport::single_error(ConfigValidationError::InvalidValue {
+                field: "config",
+                detail: msg.into(),
+            })
+            .into(),
+        )
     }
 }
 
@@ -136,7 +157,12 @@ mod tests {
 
     #[test]
     fn config_error_propagates() {
-        let cfg_err = config::ConfigError::Validation("bad kelly".into());
+        use config_validation::{ConfigValidationError, ConfigValidationReport};
+        use rust_decimal_macros::dec;
+
+        let cfg_err = config::ConfigError::from(ConfigValidationReport::single_error(
+            ConfigValidationError::InvalidKellyFraction(dec!(1.5)),
+        ));
         let oxide_err: OxideError = cfg_err.into();
         assert!(matches!(oxide_err, OxideError::Config(_)));
     }
@@ -173,6 +199,15 @@ mod tests {
         ));
         let oxide_err: OxideError = tx_err.into();
         assert!(matches!(oxide_err, OxideError::Storage(_)));
+    }
+
+    #[test]
+    fn market_error_propagates() {
+        let market_err = market::MarketError::InvalidTokenPair {
+            market_id: "0xabc".into(),
+        };
+        let oxide_err: OxideError = market_err.into();
+        assert!(matches!(oxide_err, OxideError::Market(_)));
     }
 
     #[test]

@@ -9,6 +9,8 @@ members = [
   "crates/oxide-arb-repository",
   "crates/oxide-arb-algorithm",
   "crates/oxide-arb-risk",
+  "crates/oxide-arb-core",
+  "crates/oxide-arb-bin",
 ]
 
 [workspace.package]
@@ -39,6 +41,9 @@ futures-util = "0.3"
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# Numeric trait conversions (ToPrimitive, FromPrimitive)
+num-traits = "0.2"
 
 # Decimal arithmetic — never use f64 for money
 rust_decimal = { version = "1", features = ["serde-with-str", "maths"] }
@@ -161,6 +166,7 @@ oxide-arb-storage = { path = "crates/oxide-arb-storage" }
 oxide-arb-repository = { path = "crates/oxide-arb-repository" }
 oxide-arb-algorithm = { path = "crates/oxide-arb-algorithm" }
 oxide-arb-risk = { path = "crates/oxide-arb-risk" }
+oxide-arb-core = { path = "crates/oxide-arb-core" }
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Cargo Profile Configuration

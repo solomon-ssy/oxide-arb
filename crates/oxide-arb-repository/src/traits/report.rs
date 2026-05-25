@@ -2,12 +2,13 @@
 
 use chrono::NaiveDate;
 use oxide_arb_error::storage::StorageError;
-use oxide_arb_models::{domain::report::NewReport, entities::report, enums::common::ReportType};
+use oxide_arb_models::domain::{ReportInfo, UpsertReport};
+use oxide_arb_models::enums::common::ReportType;
 
 /// Data access for the `report` table.
 pub trait ReportRepository: Send + Sync {
     /// Insert or upsert a report (replaces payload on conflict).
-    async fn create(&self, report: NewReport) -> Result<(), StorageError>;
+    async fn upsert(&self, report: UpsertReport) -> Result<(), StorageError>;
 
     /// Persist a daily report as a JSONB payload.
     async fn save_daily(
@@ -29,11 +30,11 @@ pub trait ReportRepository: Send + Sync {
         &self,
         report_type: ReportType,
         limit: u64,
-    ) -> Result<Vec<report::Model>, StorageError>;
+    ) -> Result<Vec<ReportInfo>, StorageError>;
 
     /// Find the most recent report of a given type.
     async fn find_latest(
         &self,
         report_type: ReportType,
-    ) -> Result<Option<report::Model>, StorageError>;
+    ) -> Result<Option<ReportInfo>, StorageError>;
 }

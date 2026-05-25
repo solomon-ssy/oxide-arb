@@ -2,8 +2,8 @@
 
 use chrono::Utc;
 use oxide_arb_models::config::PostgresConfig;
-use oxide_arb_models::entities::runtime_config::RuntimeConfigKey;
 use oxide_arb_models::entities::{risk_state, runtime_config};
+use oxide_arb_models::enums::runtime_config::RuntimeConfigKey;
 use oxide_arb_storage::postgres::PostgresPool;
 use oxide_arb_storage::postgres::migration::{Migrator, MigratorTrait};
 use sea_orm::{ConnectionTrait, EntityTrait};
@@ -153,7 +153,8 @@ async fn runtime_config_no_clobber() {
 
     // Manually update a config value
     let custom_value = serde_json::json!(99999.0);
-    let key = RuntimeConfigKey::MaxPortfolioExposureUsd.as_str();
+    let typed_key = RuntimeConfigKey::MaxPortfolioExposureUsd;
+    let key = typed_key.as_str();
     db.execute(sea_orm::Statement::from_sql_and_values(
         db.get_database_backend(),
         "UPDATE runtime_config SET value = $1 WHERE key = $2",
@@ -167,7 +168,7 @@ async fn runtime_config_no_clobber() {
         .await
         .expect("Second up (no-clobber) failed");
 
-    let row = runtime_config::Entity::find_by_id(key.to_owned())
+    let row = runtime_config::Entity::find_by_id(typed_key)
         .one(db)
         .await
         .expect("Failed to query runtime_config")
@@ -232,20 +233,27 @@ async fn db_defaults_fill_notset_timestamps_on_insert() {
 
     let before_insert = Utc::now();
 
+    let typed_key = RuntimeConfigKey::DryRunMode;
+    let key = typed_key.as_str();
+
+    db.execute(sea_orm::Statement::from_sql_and_values(
+        db.get_database_backend(),
+        "DELETE FROM runtime_config WHERE key = $1",
+        [key.into()],
+    ))
+    .await
+    .expect("delete seeded row");
+
     // Insert a runtime_config row with updated_at deliberately omitted (DB default).
     db.execute(sea_orm::Statement::from_sql_and_values(
         db.get_database_backend(),
         "INSERT INTO runtime_config (key, value, updated_by) VALUES ($1, $2, $3)",
-        [
-            "test_key_defaults".into(),
-            serde_json::json!(42).into(),
-            "test".into(),
-        ],
+        [key.into(), serde_json::json!(42).into(), "test".into()],
     ))
     .await
     .expect("raw INSERT");
 
-    let row = runtime_config::Entity::find_by_id("test_key_defaults".to_owned())
+    let row = runtime_config::Entity::find_by_id(typed_key)
         .one(db)
         .await
         .expect("query")

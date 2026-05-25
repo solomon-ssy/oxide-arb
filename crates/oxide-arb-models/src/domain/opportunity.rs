@@ -7,8 +7,10 @@
 //! Endgame is a single-order strategy: buy tokens expected to settle at
 //! $1, or sell tokens expected to settle at $0. No multi-leg orchestration.
 
-use crate::domain::calibration::{CalibrationSnapshot, DurationBucket, PriceZone};
+use crate::domain::calibration::CalibrationSnapshot;
+use crate::enums::calibration::{DurationBucket, PriceZone};
 use crate::enums::common::{MarketCategory, Side, StalenessLevel};
+use crate::enums::opportunity::PayoutModel;
 use crate::types::{Bps, EventId, MarketId, OpportunityId, Price, Shares, TokenId, Usd};
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
@@ -56,27 +58,4 @@ pub struct EndgameMeta {
     pub duration_bucket: DurationBucket,
     /// Expected settlement deadline (if known from the market).
     pub settlement_deadline: Option<DateTime<Utc>>,
-}
-
-/// Settlement payout model for endgame strategy.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum PayoutModel {
-    DirectionalSettlement {
-        /// Payout if our prediction is correct: `shares * $1.00`.
-        projected_payout_if_correct: Usd,
-        /// Expected payout: `fused_p * projected_payout_if_correct`.
-        expected_payout: Usd,
-        predicted_side: Side,
-    },
-}
-
-impl PayoutModel {
-    /// Single source of truth for expected `PnL` computation.
-    pub fn compute_pnl(&self, total_cost: Usd, total_fees: Usd) -> Usd {
-        match self {
-            Self::DirectionalSettlement {
-                expected_payout, ..
-            } => *expected_payout - total_cost - total_fees,
-        }
-    }
 }

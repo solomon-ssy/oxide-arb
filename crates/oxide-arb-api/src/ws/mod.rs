@@ -15,9 +15,12 @@ pub use event::{PriceLevel, PriceLevelDelta, ShardConnectionStatus, WsEvent};
 pub use reconnect::ReconnectPolicy;
 
 use flume::Receiver;
+use num_traits::ToPrimitive;
 use oxide_arb_models::config::{PolymarketConfig, WebSocketConfig};
 use oxide_arb_models::types::TokenId;
 use router::ShardRouter;
+use std::sync::Arc;
+use std::time::Instant;
 
 /// Manages sharded WebSocket connections to Polymarket CLOB.
 ///
@@ -27,6 +30,7 @@ pub struct ClobWsManager {
     router: ShardRouter,
     output_rx: Receiver<WsEvent>,
     ws_url: String,
+    last_message_at: Arc<parking_lot::Mutex<Option<Instant>>>,
 }
 
 impl ClobWsManager {
@@ -37,17 +41,20 @@ impl ClobWsManager {
         shutdown: tokio_util::sync::CancellationToken,
     ) -> Self {
         let (output_tx, output_rx) = flume::bounded(8192);
+        let last_message_at = Arc::new(parking_lot::Mutex::new(None));
         let router = ShardRouter::new(
             ws_config.max_subscriptions_per_connection,
             output_tx,
             polymarket_config.clob_ws_url.clone(),
             shutdown,
+            Arc::clone(&last_message_at),
         );
 
         Self {
             router,
             output_rx,
             ws_url: polymarket_config.clob_ws_url.clone(),
+            last_message_at,
         }
     }
 
@@ -76,5 +83,15 @@ impl ClobWsManager {
     /// Get the WebSocket URL.
     pub fn ws_url(&self) -> &str {
         &self.ws_url
+    }
+
+    /// Milliseconds since last WS message received from any shard.
+    ///
+    /// Returns `None` if no message has ever been received (e.g. never connected).
+    /// Used by `HealthChecker` and `CoreRiskMetrics` to detect WS connectivity issues.
+    pub fn last_message_age_ms(&self) -> Option<u64> {
+        self.last_message_at
+            .lock()
+            .and_then(|ts| ToPrimitive::to_u64(&ts.elapsed().as_millis()))
     }
 }

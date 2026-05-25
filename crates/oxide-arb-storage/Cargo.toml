@@ -11,7 +11,8 @@ test-util = ["dep:testcontainers", "dep:testcontainers-modules"]
 
 [dependencies]
 oxide-arb-error = { workspace = true, features = ["storage"] }
-oxide-arb-models = { workspace = true }
+oxide-arb-models = { workspace = true, features = ["repository"] }
+num-traits = { workspace = true }
 sea-orm = { workspace = true }
 sea-orm-migration = { workspace = true }
 tokio = { workspace = true }

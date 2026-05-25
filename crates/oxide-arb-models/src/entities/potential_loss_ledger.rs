@@ -1,15 +1,15 @@
 //! `potential_loss_ledger` table entity.
 
 use crate::enums::common::LedgerStatus;
-use crate::types::{MarketId, Price, Shares, TokenId, Usd};
+use crate::types::{LedgerId, MarketId, Price, Shares, TokenId, Usd};
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "potential_loss_ledger")]
 pub struct Model {
-    #[sea_orm(primary_key, auto_increment = false, column_type = "Text")]
-    pub ledger_id: String,
+    #[sea_orm(primary_key, auto_increment = false)]
+    pub ledger_id: LedgerId,
     pub market_id: MarketId,
     pub token_id: TokenId,
     pub shares: Shares,

@@ -5,7 +5,7 @@
 
 use chrono::{Duration, Utc};
 use oxide_arb_models::config::CircuitBreakerConfig;
-use oxide_arb_models::domain::risk::RiskEngineSnapshot;
+use oxide_arb_models::domain::risk::RiskEngineState;
 use oxide_arb_models::enums::risk::{BreakerStateName, CircuitBreakerLevel};
 use oxide_arb_models::types::Usd;
 use oxide_arb_risk::circuit_breaker::CircuitBreaker;
@@ -25,29 +25,37 @@ const fn test_config() -> CircuitBreakerConfig {
     }
 }
 
-fn base_snapshot() -> RiskEngineSnapshot {
-    RiskEngineSnapshot {
+fn base_snapshot() -> RiskEngineState {
+    let now = Utc::now();
+    RiskEngineState {
         breaker_state: BreakerStateName::Closed,
         breaker_level: None,
-        breaker_reason: None,
-        cooling_until: None,
+        halt_reason: None,
+        cooldown_until: None,
         total_exposure: Usd::ZERO,
-        daily_pnl: Usd::ZERO,
-        daily_loss: Usd::ZERO,
-        weekly_loss: Usd::ZERO,
-        hourly_loss: Usd::ZERO,
+        hourly_loss_usd: Usd::ZERO,
+        hourly_fee_usd: Usd::ZERO,
         hourly_trade_count: 0,
         hourly_success_count: 0,
         hourly_miss_count: 0,
-        consecutive_misses: 0,
-        l2_trip_count: 0,
+        hourly_window_start: now,
+        daily_pnl: Usd::ZERO,
+        daily_loss_usd: Usd::ZERO,
+        daily_fee_usd: Usd::ZERO,
         daily_budget_spent: Usd::ZERO,
         daily_trade_count: 0,
         daily_success_count: 0,
         daily_miss_count: 0,
+        daily_window_start: now.date_naive(),
+        weekly_loss_usd: Usd::ZERO,
         weekly_trade_count: 0,
+        weekly_window_start: now.date_naive(),
+        consecutive_misses: 0,
+        cooldown_multiplier: 0,
         hwm_equity: Usd::new(dec!(5000)),
-        snapshot_at: Utc::now(),
+        last_emergency_at: None,
+        last_emergency_reason: None,
+        snapshot_at: now,
     }
 }
 
@@ -181,9 +189,6 @@ fn l2_exponential_cooldown_increases() {
     let config = test_config(); // l2_cooldown_secs = 900
     let mut cb = CircuitBreaker::new(config, utc_clock());
 
-    // cooldown_for_level is evaluated BEFORE l2_trip_count is incremented.
-    // Formula: base * 2^(count.saturating_sub(1)), computed BEFORE ++count.
-
     // 1st trip: count=0 → cooldown = 900 * 2^0 = 900, then count→1
     cb.trip(CircuitBreakerLevel::Session, "miss 1".into());
     assert_eq!(cb.l2_trip_count(), 1);
@@ -239,15 +244,11 @@ fn l2_cooldown_capped_at_max() {
     };
     let mut cb = CircuitBreaker::new(config, utc_clock());
 
-    // Trip multiple times in succession to accumulate l2_trip_count.
-    // Eventually the exponential would exceed max, but cap should apply.
     cb.trip(CircuitBreakerLevel::Session, "t1".into()); // count 0→1
     cb.trip(CircuitBreakerLevel::Session, "t2".into()); // count 1→2
     cb.trip(CircuitBreakerLevel::Session, "t3".into()); // count 2→3
     cb.trip(CircuitBreakerLevel::Session, "t4".into()); // count 3→4
 
-    // At this point count=4 before computation:
-    // cooldown = 10000 * 2^(4-1) = 10000 * 8 = 80000 → capped at 14400
     cb.trip(CircuitBreakerLevel::Session, "t5".into()); // count 4→5
 
     if let BreakerState::Open {
@@ -307,11 +308,11 @@ fn lower_level_does_not_overwrite_higher() {
 #[test]
 fn from_snapshot_open_missing_level_returns_error() {
     let config = test_config();
-    let snapshot = RiskEngineSnapshot {
+    let snapshot = RiskEngineState {
         breaker_state: BreakerStateName::Open,
         breaker_level: None, // missing!
-        breaker_reason: Some("test".into()),
-        cooling_until: Some(Utc::now() + Duration::seconds(300)),
+        halt_reason: Some("test".into()),
+        cooldown_until: Some(Utc::now() + Duration::seconds(300)),
         ..base_snapshot()
     };
 
@@ -325,11 +326,11 @@ fn from_snapshot_open_missing_level_returns_error() {
 #[test]
 fn from_snapshot_open_missing_reason_returns_error() {
     let config = test_config();
-    let snapshot = RiskEngineSnapshot {
+    let snapshot = RiskEngineState {
         breaker_state: BreakerStateName::Open,
         breaker_level: Some(CircuitBreakerLevel::Session),
-        breaker_reason: None, // missing!
-        cooling_until: Some(Utc::now() + Duration::seconds(300)),
+        halt_reason: None, // missing!
+        cooldown_until: Some(Utc::now() + Duration::seconds(300)),
         ..base_snapshot()
     };
 
@@ -341,20 +342,20 @@ fn from_snapshot_open_missing_reason_returns_error() {
 }
 
 #[test]
-fn from_snapshot_open_missing_cooling_until_returns_error() {
+fn from_snapshot_open_missing_cooldown_until_returns_error() {
     let config = test_config();
-    let snapshot = RiskEngineSnapshot {
+    let snapshot = RiskEngineState {
         breaker_state: BreakerStateName::Open,
         breaker_level: Some(CircuitBreakerLevel::Session),
-        breaker_reason: Some("test".into()),
-        cooling_until: None, // missing!
+        halt_reason: Some("test".into()),
+        cooldown_until: None, // missing!
         ..base_snapshot()
     };
 
     let result = CircuitBreaker::from_snapshot(config, utc_clock(), &snapshot);
     assert!(
         result.is_err(),
-        "should fail-closed when Open missing cooling_until"
+        "should fail-closed when Open missing cooldown_until"
     );
 }
 

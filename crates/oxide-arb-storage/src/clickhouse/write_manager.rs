@@ -6,6 +6,7 @@
 //!   writes when lag exceeds the configured threshold.
 //! - Prometheus metrics for observability (permits acquired, lag values, throttle events).
 
+use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::config::AnalyticsConfig;
 use prometheus::{Gauge, GaugeVec, IntCounter, IntCounterVec, IntGauge, Opts, Registry};
 use std::sync::Arc;
@@ -142,7 +143,7 @@ impl ChWriteManager {
 
     /// Acquire a write permit. Blocks if semaphore is exhausted or lag is detected.
     /// Returns the permit guard; dropping it releases the permit.
-    pub async fn acquire_write_permit(&self) -> Result<WritePermit, WriteManagerError> {
+    pub async fn acquire_write_permit(&self) -> Result<WritePermit, StorageError> {
         // Check lag backpressure
         if self.lagging.load(Ordering::Relaxed) {
             self.metrics.throttle_events.inc();
@@ -159,7 +160,7 @@ impl ChWriteManager {
             .clone()
             .acquire_owned()
             .await
-            .map_err(|_| WriteManagerError::SemaphoreClosed)?;
+            .map_err(|_| StorageError::ClickHouseWriteSemaphoreClosed)?;
 
         self.metrics.semaphore_permits_used.inc();
 
@@ -177,14 +178,14 @@ impl ChWriteManager {
         self.lagging.load(Ordering::Relaxed)
     }
 
-    async fn wait_for_lag_recovery(&self) -> Result<(), WriteManagerError> {
+    async fn wait_for_lag_recovery(&self) -> Result<(), StorageError> {
         let mut backoff = Duration::from_millis(100);
         let max_wait = Duration::from_secs(30);
         let mut total_waited = Duration::ZERO;
 
         while self.lagging.load(Ordering::Relaxed) {
             if total_waited >= max_wait {
-                return Err(WriteManagerError::LagTimeout);
+                return Err(StorageError::ClickHouseLagTimeout);
             }
             tokio::time::sleep(backoff).await;
             total_waited += backoff;
@@ -271,12 +272,4 @@ impl Drop for WritePermit {
     fn drop(&mut self) {
         self.metrics.semaphore_permits_used.dec();
     }
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum WriteManagerError {
-    #[error("Write semaphore closed (system shutting down)")]
-    SemaphoreClosed,
-    #[error("Timed out waiting for ClickHouse lag to recover")]
-    LagTimeout,
 }

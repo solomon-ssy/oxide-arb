@@ -2,9 +2,9 @@
 
 use crate::traits::RuntimeConfigRepository;
 use oxide_arb_error::storage::StorageError;
-use oxide_arb_models::entities::runtime_config::{self, RuntimeConfigKey};
+use oxide_arb_models::domain::{RuntimeConfigInfo, UpsertRuntimeConfig};
+use oxide_arb_models::enums::runtime_config::RuntimeConfigKey;
 use oxide_arb_storage::cache::{CacheKey, TieredCache};
-use std::str::FromStr;
 use std::sync::Arc;
 
 /// Caching decorator for hot-reloadable runtime configuration.
@@ -14,12 +14,11 @@ pub struct CachedRuntimeConfigRepository<R: RuntimeConfigRepository> {
 }
 
 impl<R: RuntimeConfigRepository> CachedRuntimeConfigRepository<R> {
-    /// Wrap an existing repository with tiered cache support.
     pub const fn new(inner: R, cache: Arc<TieredCache>) -> Self {
         Self { inner, cache }
     }
 
-    async fn invalidate_typed(&self, key: RuntimeConfigKey) {
+    async fn invalidate(&self, key: RuntimeConfigKey) {
         let _ = self
             .cache
             .invalidate(&CacheKey::RuntimeConfig { key })
@@ -29,65 +28,28 @@ impl<R: RuntimeConfigRepository> CachedRuntimeConfigRepository<R> {
 }
 
 impl<R: RuntimeConfigRepository> RuntimeConfigRepository for CachedRuntimeConfigRepository<R> {
-    async fn get(&self, key: &str) -> Result<Option<runtime_config::Model>, StorageError> {
-        let Ok(typed_key) = RuntimeConfigKey::from_str(key) else {
-            return self.inner.get(key).await;
-        };
-        self.get_typed(typed_key).await
-    }
-
-    async fn get_typed(
-        &self,
-        key: RuntimeConfigKey,
-    ) -> Result<Option<runtime_config::Model>, StorageError> {
+    async fn get(&self, key: RuntimeConfigKey) -> Result<Option<RuntimeConfigInfo>, StorageError> {
         let cache_key = CacheKey::RuntimeConfig { key };
-        if let Some(cached) = self
-            .cache
-            .get_json::<runtime_config::Model>(&cache_key)
-            .await?
-        {
+        if let Some(cached) = self.cache.get_json::<RuntimeConfigInfo>(&cache_key).await? {
             return Ok(Some(cached));
         }
-        let result = self.inner.get_typed(key).await?;
-        if let Some(ref model) = result {
-            let _ = self.cache.set_json(&cache_key, model).await;
+        let result = self.inner.get(key).await?;
+        if let Some(ref info) = result {
+            let _ = self.cache.set_json(&cache_key, info).await;
         }
         Ok(result)
     }
 
-    async fn set(
-        &self,
-        key: &str,
-        value: &serde_json::Value,
-        updated_by: &str,
-    ) -> Result<runtime_config::Model, StorageError> {
-        let result = self.inner.set(key, value, updated_by).await?;
-        if let Ok(typed_key) = RuntimeConfigKey::from_str(key) {
-            self.invalidate_typed(typed_key).await;
-        } else {
-            let _ = self.cache.invalidate(&CacheKey::AllRuntimeConfig).await;
-        }
+    async fn upsert(&self, dto: UpsertRuntimeConfig) -> Result<RuntimeConfigInfo, StorageError> {
+        let key = dto.key;
+        let result = self.inner.upsert(dto).await?;
+        self.invalidate(key).await;
         Ok(result)
     }
 
-    async fn set_typed(
-        &self,
-        key: RuntimeConfigKey,
-        value: &serde_json::Value,
-        updated_by: &str,
-    ) -> Result<runtime_config::Model, StorageError> {
-        let result = self.inner.set_typed(key, value, updated_by).await?;
-        self.invalidate_typed(key).await;
-        Ok(result)
-    }
-
-    async fn get_all(&self) -> Result<Vec<runtime_config::Model>, StorageError> {
+    async fn get_all(&self) -> Result<Vec<RuntimeConfigInfo>, StorageError> {
         let key = CacheKey::AllRuntimeConfig;
-        if let Some(cached) = self
-            .cache
-            .get_json::<Vec<runtime_config::Model>>(&key)
-            .await?
-        {
+        if let Some(cached) = self.cache.get_json::<Vec<RuntimeConfigInfo>>(&key).await? {
             return Ok(cached);
         }
         let values = self.inner.get_all().await?;
@@ -95,13 +57,9 @@ impl<R: RuntimeConfigRepository> RuntimeConfigRepository for CachedRuntimeConfig
         Ok(values)
     }
 
-    async fn delete(&self, key: &str) -> Result<bool, StorageError> {
+    async fn delete(&self, key: RuntimeConfigKey) -> Result<bool, StorageError> {
         let deleted = self.inner.delete(key).await?;
-        if let Ok(typed_key) = RuntimeConfigKey::from_str(key) {
-            self.invalidate_typed(typed_key).await;
-        } else {
-            let _ = self.cache.invalidate(&CacheKey::AllRuntimeConfig).await;
-        }
+        self.invalidate(key).await;
         Ok(deleted)
     }
 }

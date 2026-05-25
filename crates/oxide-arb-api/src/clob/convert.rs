@@ -2,18 +2,12 @@
 
 use oxide_arb_models::enums::common::Side;
 use polymarket_client_sdk_v2::clob::types::Side as SdkSide;
+use thiserror::Error;
 
 /// Failed to map CLOB SDK [`SdkSide`] into domain [`Side`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[error("unsupported Polymarket CLOB side")]
 pub struct SdkSideConversionError;
-
-impl std::fmt::Display for SdkSideConversionError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("unsupported Polymarket CLOB side")
-    }
-}
-
-impl std::error::Error for SdkSideConversionError {}
 
 /// Local newtype so [`From`] / [`TryFrom`] impls satisfy orphan rules.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

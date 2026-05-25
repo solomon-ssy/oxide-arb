@@ -35,6 +35,10 @@ mod m20250601_000013_create_resolution_event;
 mod m20250601_000014_add_updated_at_triggers;
 mod m20250601_000015_seed_trading_bootstrap;
 mod m20250601_000016_create_reports;
+mod m20250601_000018_create_blacklist_entries;
+mod m20250601_000019_create_risk_audit_events;
+mod m20250601_000020_create_emergency_snapshots;
+mod m20250601_000021_create_reconciliation_reports;
 
 pub struct Migrator;
 
@@ -57,6 +61,10 @@ impl MigratorTrait for Migrator {
             Box::new(m20250601_000014_add_updated_at_triggers::Migration),
             Box::new(m20250601_000015_seed_trading_bootstrap::Migration),
             Box::new(m20250601_000016_create_reports::Migration),
+            Box::new(m20250601_000018_create_blacklist_entries::Migration),
+            Box::new(m20250601_000019_create_risk_audit_events::Migration),
+            Box::new(m20250601_000020_create_emergency_snapshots::Migration),
+            Box::new(m20250601_000021_create_reconciliation_reports::Migration),
         ]
     }
 }

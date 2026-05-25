@@ -74,6 +74,8 @@ pub enum LifecycleRecorder {
     Scanner,
     #[sea_orm(string_value = "execution")]
     Execution,
+    #[sea_orm(string_value = "risk_engine")]
+    RiskEngine,
     #[sea_orm(string_value = "oracle_poller")]
     OraclePoller,
     #[sea_orm(string_value = "backfill")]
@@ -89,10 +91,28 @@ impl std::fmt::Display for LifecycleRecorder {
         match self {
             Self::Scanner => f.write_str("scanner"),
             Self::Execution => f.write_str("execution"),
+            Self::RiskEngine => f.write_str("risk_engine"),
             Self::OraclePoller => f.write_str("oracle_poller"),
             Self::Backfill => f.write_str("backfill"),
             Self::DryRun => f.write_str("dry_run"),
             Self::System => f.write_str("system"),
+        }
+    }
+}
+
+impl std::str::FromStr for LifecycleRecorder {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "scanner" => Ok(Self::Scanner),
+            "execution" => Ok(Self::Execution),
+            "risk_engine" => Ok(Self::RiskEngine),
+            "oracle_poller" => Ok(Self::OraclePoller),
+            "backfill" => Ok(Self::Backfill),
+            "dry_run" => Ok(Self::DryRun),
+            "system" => Ok(Self::System),
+            other => Err(format!("unknown lifecycle recorder: {other}")),
         }
     }
 }

@@ -1,7 +1,7 @@
 //! Unit tests for cache layer components (no external deps required).
 
 use oxide_arb_models::{
-    domain::calibration::{DurationBucket, PriceZone},
+    enums::calibration::{DurationBucket, PriceZone},
     enums::common::MarketCategory,
     types::MarketId,
 };
@@ -80,7 +80,7 @@ async fn moka_mset_bulk_write() {
 
 #[tokio::test]
 async fn cache_key_format_and_ttl() {
-    let key = CacheKey::MarketEntry {
+    let key = CacheKey::MarketInfo {
         market_id: MarketId::new("0xabc"),
     };
     assert_eq!(key.as_str(), "mkt:0xabc");

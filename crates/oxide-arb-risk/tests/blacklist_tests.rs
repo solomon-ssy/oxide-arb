@@ -3,7 +3,7 @@
 //! Validates TTL eviction, scope ordering, auto-blacklist, and GC.
 
 use oxide_arb_models::config::RiskConfig;
-use oxide_arb_models::domain::blacklist::BlacklistCheckResult;
+use oxide_arb_models::enums::blacklist::BlacklistCheckResult;
 use oxide_arb_models::enums::risk::{BlacklistReason, BlacklistScope};
 use oxide_arb_models::types::MarketId;
 use oxide_arb_risk::blacklist::BlacklistManager;

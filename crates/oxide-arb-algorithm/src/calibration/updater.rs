@@ -6,9 +6,12 @@
 use super::calibrator::ResolutionCalibrator;
 use super::prior::estimate_mom_prior;
 use super::types::CalibrationEntry;
+use num_traits::ToPrimitive;
 use oxide_arb_error::algorithm::AlgoError;
 use oxide_arb_models::{
-    config::CalibrationConfig, domain::calibration::BucketKey, types::MarketId,
+    config::CalibrationConfig,
+    domain::calibration::{BucketKey, UpsertCalibration},
+    types::MarketId,
 };
 use std::sync::Arc;
 
@@ -28,7 +31,7 @@ pub trait CalibrationDataSource: Send + Sync + 'static {
     async fn check_ctf_resolution(&self, market_id: &MarketId) -> Result<Option<bool>, AlgoError>;
 
     /// Persist updated calibration bucket entries to the database.
-    async fn save_buckets(&self, entries: &[CalibrationEntry]) -> Result<(), AlgoError>;
+    async fn upsert_buckets(&self, entries: &[UpsertCalibration]) -> Result<(), AlgoError>;
 
     /// Mark an outcome as resolved in the database.
     async fn resolve_outcome(&self, outcome_id: i64, actual_yes: bool) -> Result<(), AlgoError>;
@@ -85,7 +88,7 @@ impl CalibrationUpdater {
     pub async fn tick(&self) -> Result<UpdateStats, AlgoError> {
         let unresolved = self.data_source.get_unresolved_outcomes().await?;
         let mut stats = UpdateStats {
-            total_unresolved: u32::try_from(unresolved.len()).unwrap_or(u32::MAX),
+            total_unresolved: ToPrimitive::to_u32(&unresolved.len()).unwrap_or(u32::MAX),
             ..Default::default()
         };
 
@@ -155,7 +158,11 @@ impl CalibrationUpdater {
             }
         }
 
-        self.data_source.save_buckets(&all_entries).await?;
+        let upserts: Vec<UpsertCalibration> = all_entries
+            .iter()
+            .map(CalibrationEntry::to_upsert)
+            .collect();
+        self.data_source.upsert_buckets(&upserts).await?;
         Ok(())
     }
 }

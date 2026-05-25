@@ -1,6 +1,7 @@
 //! Order domain models for Polymarket CLOB interaction.
 
 use crate::enums::common::{OrderType, Side};
+use crate::enums::order::OrderStatus;
 use crate::types::{MarketId, OrderId, Price, Shares, TokenId, Usd};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -30,35 +31,4 @@ pub struct OrderResponse {
     pub fee_paid: Usd,
     pub submitted_at: DateTime<Utc>,
     pub responded_at: DateTime<Utc>,
-}
-
-/// Status of an order on the CLOB.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum OrderStatus {
-    /// Order accepted and fully filled.
-    Filled,
-    /// Order partially filled (FOK would have been killed).
-    PartiallyFilled,
-    /// Order rejected by the exchange.
-    Rejected,
-    /// Order cancelled (e.g. FAK remainder).
-    Cancelled,
-    /// Order is resting on the book (GTC/GTD).
-    Open,
-    /// Order expired (GTD past deadline).
-    Expired,
-}
-
-impl std::fmt::Display for OrderStatus {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Filled => write!(f, "filled"),
-            Self::PartiallyFilled => write!(f, "partially_filled"),
-            Self::Rejected => write!(f, "rejected"),
-            Self::Cancelled => write!(f, "cancelled"),
-            Self::Open => write!(f, "open"),
-            Self::Expired => write!(f, "expired"),
-        }
-    }
 }

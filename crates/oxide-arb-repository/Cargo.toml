@@ -7,8 +7,9 @@ rust-version.workspace = true
 
 [dependencies]
 oxide-arb-error = { workspace = true, features = ["storage"] }
-oxide-arb-models = { workspace = true }
+oxide-arb-models = { workspace = true, features = ["repository"] }
 oxide-arb-storage = { workspace = true }
+num-traits = { workspace = true }
 sea-orm = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }

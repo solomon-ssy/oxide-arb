@@ -4,8 +4,34 @@
 //! in an L2 orderbook. It is defined here (rather than in the API crate) so
 //! that the algorithm crate can consume it without depending on `oxide-arb-api`.
 
-use crate::types::{Price, Shares};
+use crate::types::{Price, Shares, TokenId};
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+/// Orderbook quality issue detected before feeding the opportunity pipeline.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum BookGateError {
+    /// At least one side has no levels (WS snapshot received but empty).
+    #[error("empty {side} for token {token_id}")]
+    EmptySide {
+        token_id: TokenId,
+        side: &'static str,
+    },
+    /// Data age exceeds the expired staleness threshold.
+    #[error("stale data for {token_id}: {age_ms}ms > {threshold_ms}ms")]
+    Stale {
+        token_id: TokenId,
+        age_ms: u64,
+        threshold_ms: u64,
+    },
+    /// Crossed book: best bid >= best ask (abnormal market state).
+    #[error("crossed book for {token_id}: bid={best_bid} >= ask={best_ask}")]
+    CrossedBook {
+        token_id: TokenId,
+        best_bid: Price,
+        best_ask: Price,
+    },
+}
 
 /// A single price level in an orderbook.
 #[derive(Debug, Clone, Serialize, Deserialize)]

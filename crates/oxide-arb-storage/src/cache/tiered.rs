@@ -1,8 +1,8 @@
 //! Tiered cache: L1 (Moka) → L2 (Redis) fallthrough.
 
 use crate::cache::{CacheBackend, CacheKey, CacheMetrics, MokaBackend, RedisBackend};
-use crate::error::StorageError;
 use bitcode::{Decode, Encode};
+use oxide_arb_error::storage::StorageError;
 use tracing::trace;
 
 pub struct TieredCache {
@@ -242,7 +242,7 @@ mod tests {
     async fn tiered_l2_hit_backfills_l1_without_redis() {
         let l2 = MockL2::default();
         let writer = MockTiered::new(MokaBackend::new(100), l2);
-        let key = CacheKey::MarketEntry {
+        let key = CacheKey::MarketInfo {
             market_id: MarketId::new("0xmock"),
         };
         let value = CachedStub {
@@ -270,7 +270,7 @@ mod tests {
     #[tokio::test]
     async fn tiered_both_miss_without_redis() {
         let cache = MockTiered::new(MokaBackend::new(100), MockL2::default());
-        let key = CacheKey::EventEntry {
+        let key = CacheKey::EventInfo {
             event_id: EventId::new("missing"),
         };
         let missing: Option<CachedStub> = cache.get(&key).await.unwrap();

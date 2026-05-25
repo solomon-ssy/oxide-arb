@@ -123,6 +123,50 @@ impl ReservationId {
     }
 }
 
+/// Outbox event row primary key (UUID v4).
+#[derive(TypedId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct OutboxEventId(Arc<str>);
+
+impl OutboxEventId {
+    /// Generate a new random outbox event ID.
+    #[must_use]
+    pub fn generate() -> Self {
+        Self(Arc::from(Uuid::new_v4().to_string().as_str()))
+    }
+}
+
+/// Polymorphic aggregate reference in transactional outbox rows.
+#[derive(TypedId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct AggregateId(Arc<str>);
+
+/// Accounting period identifier (UUID v4).
+#[derive(TypedId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PeriodId(Arc<str>);
+
+impl PeriodId {
+    /// Generate a new random period ID.
+    #[must_use]
+    pub fn generate() -> Self {
+        Self(Arc::from(Uuid::new_v4().to_string().as_str()))
+    }
+}
+
+/// Potential loss ledger entry identifier (UUID v4).
+#[derive(TypedId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct LedgerId(Arc<str>);
+
+impl LedgerId {
+    /// Generate a new random ledger entry ID.
+    #[must_use]
+    pub fn generate() -> Self {
+        Self(Arc::from(Uuid::new_v4().to_string().as_str()))
+    }
+}
+
+/// Report snapshot identifier (e.g. `"daily_2025-06-01"`).
+#[derive(TypedId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ReportId(Arc<str>);
+
 #[cfg(test)]
 mod tests {
     use super::*;

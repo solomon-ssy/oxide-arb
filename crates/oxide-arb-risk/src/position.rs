@@ -6,10 +6,10 @@
 
 use crate::traits::RiskMetrics;
 use chrono::{DateTime, Utc};
-use oxide_arb_models::domain::potential_loss::PotentialLossEntry;
+use oxide_arb_models::domain::potential_loss::PotentialLossInfo;
 use oxide_arb_models::domain::risk::MarketExposure;
 use oxide_arb_models::enums::common::LedgerStatus;
-use oxide_arb_models::types::{MarketId, Usd};
+use oxide_arb_models::types::{LedgerId, MarketId, Usd};
 use std::collections::HashMap;
 
 // ── Position Tracker ────────────────────────────────────────────────────────
@@ -43,7 +43,7 @@ impl PositionTracker {
 
         let mut by_market: HashMap<MarketId, Usd> = HashMap::new();
         for pos in &positions {
-            *by_market.entry(pos.market_id.clone()).or_insert(Usd::ZERO) += pos.cost_basis;
+            *by_market.entry(pos.market_id.clone()).or_insert(Usd::ZERO) += pos.total_cost_usd;
         }
 
         for (market_id, position_value) in &by_market {
@@ -101,7 +101,7 @@ impl Default for PositionTracker {
 /// to ensure worst-case exposure is always accounted for. Maintains a running
 /// total for O(1) queries on the hot path.
 pub struct PotentialLossLedger {
-    entries: HashMap<String, PotentialLossEntry>,
+    entries: HashMap<LedgerId, PotentialLossInfo>,
     running_total: Usd,
 }
 
@@ -116,15 +116,15 @@ impl PotentialLossLedger {
 
     /// Bootstrap from a list of entries (e.g. loaded from persistence).
     #[must_use]
-    pub fn from_entries(entries: Vec<PotentialLossEntry>) -> Self {
+    pub fn from_entries(entries: Vec<PotentialLossInfo>) -> Self {
         let running_total = entries
             .iter()
             .filter(|e| e.is_active())
-            .map(|e| e.max_loss)
+            .map(|e| e.max_loss_usd)
             .sum();
         let map = entries
             .into_iter()
-            .map(|e| (e.entry_id.clone(), e))
+            .map(|e| (e.ledger_id.clone(), e))
             .collect();
         Self {
             entries: map,
@@ -133,30 +133,30 @@ impl PotentialLossLedger {
     }
 
     /// Record a new potential-loss entry.
-    pub fn record_entry(&mut self, entry: PotentialLossEntry) {
+    pub fn record_entry(&mut self, entry: PotentialLossInfo) {
         if entry.is_active() {
-            self.running_total += entry.max_loss;
+            self.running_total += entry.max_loss_usd;
         }
         tracing::info!(
-            entry_id = %entry.entry_id,
+            entry_id = %entry.ledger_id,
             market_id = %entry.market_id,
-            max_loss = %entry.max_loss,
+            max_loss = %entry.max_loss_usd,
             running_total = %self.running_total,
             "potential loss entry recorded"
         );
-        self.entries.insert(entry.entry_id.clone(), entry);
+        self.entries.insert(entry.ledger_id.clone(), entry);
     }
 
     /// Mark an entry as resolved (position settled or closed).
-    pub fn resolve(&mut self, entry_id: &str) {
-        if let Some(entry) = self.entries.get_mut(entry_id) {
+    pub fn resolve(&mut self, ledger_id: &LedgerId) {
+        if let Some(entry) = self.entries.get_mut(ledger_id) {
             if entry.is_active() {
-                self.running_total = (self.running_total - entry.max_loss).max(Usd::ZERO);
+                self.running_total = (self.running_total - entry.max_loss_usd).max(Usd::ZERO);
             }
             entry.status = LedgerStatus::Resolved;
             entry.resolved_at = Some(Utc::now());
             tracing::info!(
-                entry_id,
+                ledger_id = %ledger_id,
                 running_total = %self.running_total,
                 "potential loss entry resolved"
             );
@@ -175,7 +175,7 @@ impl PotentialLossLedger {
     }
 
     #[must_use]
-    pub fn active_entries(&self) -> Vec<&PotentialLossEntry> {
+    pub fn active_entries(&self) -> Vec<&PotentialLossInfo> {
         self.entries.values().filter(|e| e.is_active()).collect()
     }
 }

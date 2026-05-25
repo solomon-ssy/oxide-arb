@@ -5,14 +5,13 @@
 
 use chrono::Utc;
 use oxide_arb_models::config::RiskConfig;
-use oxide_arb_models::domain::calibration::{
-    BucketKey, CalibrationSnapshot, DurationBucket, PriceZone,
-};
-use oxide_arb_models::domain::opportunity::{EndgameMeta, Opportunity, PayoutModel};
-use oxide_arb_models::domain::position::PositionInfo;
+use oxide_arb_models::domain::calibration::{BucketKey, CalibrationSnapshot};
+use oxide_arb_models::domain::opportunity::{EndgameMeta, Opportunity};
 use oxide_arb_models::domain::risk::ProbabilityInput;
-use oxide_arb_models::domain::trade::TradeRecord;
+use oxide_arb_models::domain::trade::PostTradeInput;
+use oxide_arb_models::enums::calibration::{DurationBucket, PriceZone};
 use oxide_arb_models::enums::common::{MarketCategory, Side, StalenessLevel, TradeOutcome};
+use oxide_arb_models::enums::opportunity::PayoutModel;
 use oxide_arb_models::enums::risk::TradeAccountingPhase;
 use oxide_arb_models::types::{
     Bps, EventId, MarketId, OpportunityId, Price, Shares, TokenId, TradeId, Usd,
@@ -25,79 +24,8 @@ use oxide_arb_risk::types::ReportMode;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 
-// ── Mock Metrics ───────────────────────────────────────────────────────────
-
-struct MockMetrics {
-    balance: Usd,
-    total_exposure: Usd,
-    market_exposure: Usd,
-    open_position_count: usize,
-    open_directional_count: usize,
-    daily_directional_trades: u32,
-    consecutive_misses: u32,
-    ws_disconnect_secs: u64,
-    reserved_usd: Usd,
-    active_reservation_count: usize,
-}
-
-impl Default for MockMetrics {
-    fn default() -> Self {
-        Self {
-            balance: Usd::new(dec!(5000)),
-            total_exposure: Usd::new(dec!(100)),
-            market_exposure: Usd::ZERO,
-            open_position_count: 0,
-            open_directional_count: 0,
-            daily_directional_trades: 0,
-            consecutive_misses: 0,
-            ws_disconnect_secs: 0,
-            reserved_usd: Usd::ZERO,
-            active_reservation_count: 0,
-        }
-    }
-}
-
-impl RiskMetrics for MockMetrics {
-    fn total_exposure(&self) -> Usd {
-        self.total_exposure
-    }
-    fn market_exposure(&self, _market_id: &MarketId) -> Usd {
-        self.market_exposure
-    }
-    fn open_position_count(&self) -> usize {
-        self.open_position_count
-    }
-    fn open_positions(&self) -> Vec<PositionInfo> {
-        vec![]
-    }
-    fn cached_balance(&self) -> Usd {
-        self.balance
-    }
-    fn active_reservation_count(&self) -> usize {
-        self.active_reservation_count
-    }
-    fn reserved_usd(&self) -> Usd {
-        self.reserved_usd
-    }
-    fn open_directional_count(&self, _side: Side) -> usize {
-        self.open_directional_count
-    }
-    fn daily_directional_trades(&self, _side: Side) -> u32 {
-        self.daily_directional_trades
-    }
-    fn consecutive_market_misses(&self, _market_id: &MarketId) -> u32 {
-        self.consecutive_misses
-    }
-    fn ws_disconnect_secs(&self) -> u64 {
-        self.ws_disconnect_secs
-    }
-    fn api_error_count(&self) -> u64 {
-        0
-    }
-    fn api_request_count(&self) -> u64 {
-        0
-    }
-}
+mod support;
+use support::MockMetrics;
 
 // ── Test Helpers ───────────────────────────────────────────────────────────
 
@@ -161,28 +89,15 @@ const fn test_probability() -> ProbabilityInput {
     }
 }
 
-fn test_trade_record(outcome: TradeOutcome, profit: Decimal) -> TradeRecord {
-    TradeRecord {
+fn test_trade_record(outcome: TradeOutcome, profit: Decimal) -> PostTradeInput {
+    PostTradeInput {
         trade_id: TradeId::generate(),
         market_id: MarketId::new("0xtest_market"),
-        event_id: EventId::new("test_event"),
         token_id: TokenId::new("test_token"),
-        status: outcome,
-        detected_edge_bps: Bps::new(dec!(300)),
-        detected_profit_usd: Usd::new(dec!(5)),
-        total_cost_usd: Usd::new(dec!(20)),
-        total_fees_usd: Usd::new(dec!(0.40)),
-        total_gas_usd: Usd::ZERO,
-        net_profit_usd: Usd::new(profit),
-        net_profit_projected_usd: Usd::new(profit),
-        detection_to_exec_ms: Some(100),
-        tx_hash: None,
-        confirmed_at: Some(Utc::now()),
-        opportunity_snapshot: "{}".into(),
-        validation_snapshot: None,
-        execution_record: None,
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        outcome,
+        cost_usd: Usd::new(dec!(20)),
+        fee_usd: Usd::new(dec!(0.40)),
+        net_profit_usd: Some(Usd::new(profit)),
     }
 }
 

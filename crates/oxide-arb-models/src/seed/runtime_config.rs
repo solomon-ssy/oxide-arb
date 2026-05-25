@@ -1,12 +1,13 @@
 //! Runtime configuration defaults seed — inserts one row per `RuntimeConfigKey`.
 
-use crate::entities::runtime_config::{self, RuntimeConfigKey};
+use crate::entities::runtime_config;
+use crate::enums::runtime_config::RuntimeConfigKey;
 use crate::seed::SeedContext;
 use oxide_arb_macros::SeedUnit;
 use sea_orm::{
-    DeriveIntoActiveModel, EntityTrait, IntoActiveModel, QueryTrait, sea_query::OnConflict,
+    DeriveIntoActiveModel, EntityTrait, IntoActiveModel, Iterable, QueryTrait,
+    sea_query::OnConflict,
 };
-use strum::IntoEnumIterator;
 
 #[derive(SeedUnit)]
 #[seed_unit(
@@ -23,7 +24,7 @@ pub struct RuntimeConfigSeed;
 #[derive(Debug, Clone, DeriveIntoActiveModel)]
 #[sea_orm(active_model = "crate::entities::runtime_config::ActiveModel")]
 pub struct NewRuntimeConfig {
-    pub key: String,
+    pub key: RuntimeConfigKey,
     pub value: serde_json::Value,
     pub description: Option<String>,
     pub updated_by: String,
@@ -41,7 +42,7 @@ pub async fn load(
         .map(|key| {
             let (value, description) = default_for(key);
             NewRuntimeConfig {
-                key: key.as_str().to_owned(),
+                key,
                 value,
                 description: Some(description.to_owned()),
                 updated_by: "system:bootstrap".to_owned(),

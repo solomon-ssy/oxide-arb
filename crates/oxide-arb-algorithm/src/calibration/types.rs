@@ -1,6 +1,10 @@
 //! Calibration entry type used by the in-memory calibrator.
 
-use oxide_arb_models::domain::calibration::{BucketKey, CalibrationSnapshot};
+use num_traits::ToPrimitive;
+use oxide_arb_models::{
+    domain::calibration::{BucketKey, CalibrationSnapshot, UpsertCalibration},
+    types::Probability,
+};
 use rust_decimal::Decimal;
 
 /// A single calibration entry corresponding to one bucket in the `DashMap`.
@@ -62,13 +66,30 @@ impl CalibrationEntry {
             fused_probability,
         }
     }
+
+    /// Convert this entry into an [`UpsertCalibration`] for database persistence.
+    #[must_use]
+    pub fn to_upsert(&self) -> UpsertCalibration {
+        UpsertCalibration {
+            category: self.bucket_key.category,
+            price_zone: self.bucket_key.price_zone,
+            duration_bucket: self.bucket_key.duration_bucket,
+            total_count: ToPrimitive::to_i32(&self.total_count).unwrap_or(i32::MAX),
+            correct_count: ToPrimitive::to_i32(&self.correct_count).unwrap_or(i32::MAX),
+            alpha_prior: Probability::from(self.alpha_prior),
+            beta_prior: Probability::from(self.beta_prior),
+            posterior_mean: Some(Probability::from(self.posterior_mean())),
+            updated_at: chrono::Utc::now(),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use oxide_arb_models::{
-        domain::calibration::{DurationBucket, PriceZone},
+        domain::calibration::BucketKey,
+        enums::calibration::{DurationBucket, PriceZone},
         enums::common::MarketCategory,
     };
     use rust_decimal_macros::dec;

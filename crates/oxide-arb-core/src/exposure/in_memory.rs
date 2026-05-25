@@ -1,0 +1,176 @@
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
+
+use dashmap::DashMap;
+use oxide_arb_error::reservation::ReservationError;
+use oxide_arb_models::config::ExposureReservationConfig;
+use oxide_arb_models::types::{MarketId, ReservationId, Usd};
+use oxide_arb_risk::traits::ExposureReservationBackend;
+use rust_decimal::Decimal;
+use rust_decimal_macros::dec;
+
+struct ReservationEntry {
+    market_id: MarketId,
+    amount_cents: u64,
+    expires_at: Instant,
+}
+
+pub struct InMemoryExposureReservation {
+    reservations: DashMap<ReservationId, ReservationEntry>,
+    total_reserved_cents: AtomicU64,
+    per_market_cents: DashMap<MarketId, AtomicU64>,
+    config: ExposureReservationConfig,
+}
+
+impl InMemoryExposureReservation {
+    pub fn new(config: ExposureReservationConfig) -> Self {
+        Self {
+            reservations: DashMap::new(),
+            total_reserved_cents: AtomicU64::new(0),
+            per_market_cents: DashMap::new(),
+            config,
+        }
+    }
+
+    pub fn total_reserved_usd_sync(&self) -> Usd {
+        let cents = self.total_reserved_cents.load(Ordering::Acquire);
+        Usd::new(Decimal::from(cents) / dec!(100))
+    }
+
+    pub fn active_count_sync(&self) -> usize {
+        self.reservations.len()
+    }
+
+    pub fn per_market_reserved_sync(&self, market_id: &MarketId) -> Usd {
+        self.per_market_cents.get(market_id).map_or(Usd::ZERO, |v| {
+            Usd::new(Decimal::from(v.load(Ordering::Acquire)) / dec!(100))
+        })
+    }
+
+    /// GC expired reservations. Returns count of expired entries removed.
+    pub fn gc_expired(&self) -> u32 {
+        let now = Instant::now();
+        let mut expired_count = 0u32;
+
+        self.reservations.retain(|_, entry| {
+            if now >= entry.expires_at {
+                self.total_reserved_cents
+                    .fetch_sub(entry.amount_cents, Ordering::AcqRel);
+                if let Some(market_total) = self.per_market_cents.get(&entry.market_id) {
+                    market_total.fetch_sub(entry.amount_cents, Ordering::AcqRel);
+                }
+                expired_count += 1;
+                false
+            } else {
+                true
+            }
+        });
+
+        expired_count
+    }
+
+    fn usd_to_cents(amount: Usd) -> Result<u64, ReservationError> {
+        let cents_decimal = amount.inner() * dec!(100);
+        cents_decimal
+            .to_string()
+            .parse::<u64>()
+            .map_err(|_| ReservationError::Backend("amount overflow or negative".into()))
+    }
+}
+
+#[async_trait::async_trait]
+impl ExposureReservationBackend for InMemoryExposureReservation {
+    async fn try_reserve(
+        &self,
+        market_id: &MarketId,
+        amount: Usd,
+        ttl: Duration,
+    ) -> Result<ReservationId, ReservationError> {
+        let amount_cents = Self::usd_to_cents(amount)?;
+
+        // CAS loop for global limit
+        loop {
+            let current = self.total_reserved_cents.load(Ordering::Acquire);
+            let new_total = current + amount_cents;
+
+            if new_total > self.config.max_total_exposure_cents {
+                return Err(ReservationError::ExceedsLimit {
+                    current_cents: current,
+                    requested_cents: amount_cents,
+                    max_cents: self.config.max_total_exposure_cents,
+                });
+            }
+
+            if self
+                .total_reserved_cents
+                .compare_exchange_weak(current, new_total, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                break;
+            }
+        }
+
+        // Per-market limit check
+        let market_counter = self
+            .per_market_cents
+            .entry(market_id.clone())
+            .or_insert_with(|| AtomicU64::new(0));
+        let market_current = market_counter.fetch_add(amount_cents, Ordering::AcqRel);
+
+        if market_current + amount_cents > self.config.max_per_market_cents {
+            market_counter.fetch_sub(amount_cents, Ordering::AcqRel);
+            drop(market_counter);
+            self.total_reserved_cents
+                .fetch_sub(amount_cents, Ordering::AcqRel);
+            return Err(ReservationError::ExceedsLimit {
+                current_cents: market_current,
+                requested_cents: amount_cents,
+                max_cents: self.config.max_per_market_cents,
+            });
+        }
+
+        let id = ReservationId::new_id();
+        self.reservations.insert(
+            id.clone(),
+            ReservationEntry {
+                market_id: market_id.clone(),
+                amount_cents,
+                expires_at: Instant::now() + ttl,
+            },
+        );
+
+        Ok(id)
+    }
+
+    async fn confirm(&self, id: &ReservationId) -> Result<(), ReservationError> {
+        let (_, entry) =
+            self.reservations
+                .remove(id)
+                .ok_or_else(|| ReservationError::NotFound {
+                    id: id.as_str().to_owned(),
+                })?;
+
+        self.total_reserved_cents
+            .fetch_sub(entry.amount_cents, Ordering::AcqRel);
+        if let Some(market_total) = self.per_market_cents.get(&entry.market_id) {
+            market_total.fetch_sub(entry.amount_cents, Ordering::AcqRel);
+        }
+        Ok(())
+    }
+
+    async fn release(&self, id: &ReservationId) -> Result<(), ReservationError> {
+        self.confirm(id).await
+    }
+
+    async fn total_reserved_usd(&self) -> Usd {
+        self.total_reserved_usd_sync()
+    }
+
+    async fn active_count(&self) -> usize {
+        self.active_count_sync()
+    }
+
+    async fn per_market_reserved(&self, market_id: &MarketId) -> Usd {
+        self.per_market_reserved_sync(market_id)
+    }
+}

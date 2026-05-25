@@ -1,6 +1,7 @@
 //! `ClickHouse` client wrapper.
 
-use crate::{clickhouse::schema, error::StorageError};
+use crate::clickhouse::schema;
+use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::config::AnalyticsConfig;
 use tracing::info;
 

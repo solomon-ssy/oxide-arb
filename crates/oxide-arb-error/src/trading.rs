@@ -22,4 +22,10 @@ pub enum TradingError {
 
     #[error("Position limit reached: {0}")]
     PositionLimit(String),
+
+    #[error("Invalid execution state transition: {from} -> {to}")]
+    InvalidStateTransition {
+        from: &'static str,
+        to: &'static str,
+    },
 }

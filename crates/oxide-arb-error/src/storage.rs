@@ -64,4 +64,10 @@ pub enum StorageError {
         operation: String,
         duration: Duration,
     },
+
+    #[error("ClickHouse write semaphore closed (system shutting down)")]
+    ClickHouseWriteSemaphoreClosed,
+
+    #[error("Timed out waiting for ClickHouse lag to recover")]
+    ClickHouseLagTimeout,
 }

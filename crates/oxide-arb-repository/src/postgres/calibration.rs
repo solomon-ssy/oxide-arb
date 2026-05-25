@@ -1,17 +1,18 @@
 use crate::traits::CalibrationRepository;
 use chrono::Utc;
 use oxide_arb_error::storage::StorageError;
-use oxide_arb_models::{
-    domain::calibration::{DurationBucket, PriceZone},
-    entities::calibration::{
-        self, ActiveModel as CalibActiveModel, Column as CalibColumn, Entity as CalibEntity,
-    },
-    entities::calibration_outcome::{
-        self, ActiveModel as OutcomeActiveModel, Column as OutcomeColumn, Entity as OutcomeEntity,
-    },
-    enums::common::MarketCategory,
+use oxide_arb_models::domain::{
+    CalibrationBucketInfo, CalibrationOutcomeInfo, NewCalibrationOutcome, UpsertCalibration,
 };
-use sea_orm::sea_query::Expr;
+use oxide_arb_models::entities::calibration::{
+    ActiveModel as CalibActiveModel, Column as CalibColumn, Entity as CalibEntity,
+};
+use oxide_arb_models::entities::calibration_outcome::{
+    Column as OutcomeColumn, Entity as OutcomeEntity,
+};
+use oxide_arb_models::enums::calibration::{DurationBucket, PriceZone};
+use oxide_arb_models::enums::common::MarketCategory;
+use sea_orm::sea_query::{Expr, OnConflict};
 #[allow(clippy::wildcard_imports)]
 use sea_orm::*;
 
@@ -22,7 +23,7 @@ async fn get_bucket_q(
     category: MarketCategory,
     price_zone: PriceZone,
     duration_bucket: DurationBucket,
-) -> Result<Option<calibration::Model>, StorageError> {
+) -> Result<Option<CalibrationBucketInfo>, StorageError> {
     CalibEntity::find()
         .filter(CalibColumn::Category.eq(category))
         .filter(CalibColumn::PriceZone.eq(price_zone))
@@ -30,64 +31,80 @@ async fn get_bucket_q(
         .one(db)
         .await
         .map_err(StorageError::from)
+        .map(|opt| opt.map(Into::into))
 }
 
 async fn get_buckets_by_category_q(
     db: &impl ConnectionTrait,
     category: MarketCategory,
-) -> Result<Vec<calibration::Model>, StorageError> {
+) -> Result<Vec<CalibrationBucketInfo>, StorageError> {
     CalibEntity::find()
         .filter(CalibColumn::Category.eq(category))
         .all(db)
         .await
         .map_err(StorageError::from)
+        .map(|v| v.into_iter().map(Into::into).collect())
 }
 
 async fn get_all_buckets_q(
     db: &impl ConnectionTrait,
-) -> Result<Vec<calibration::Model>, StorageError> {
+) -> Result<Vec<CalibrationBucketInfo>, StorageError> {
     CalibEntity::find()
         .all(db)
         .await
         .map_err(StorageError::from)
+        .map(|v| v.into_iter().map(Into::into).collect())
 }
 
-async fn insert_bucket_q(
+async fn upsert_q(
     db: &impl ConnectionTrait,
-    bucket: CalibActiveModel,
-) -> Result<calibration::Model, StorageError> {
-    CalibEntity::insert(bucket)
+    dto: UpsertCalibration,
+) -> Result<CalibrationBucketInfo, StorageError> {
+    let am: CalibActiveModel = dto.into_active_model();
+    let model = CalibEntity::insert(am)
+        .on_conflict(
+            OnConflict::columns([
+                CalibColumn::Category,
+                CalibColumn::PriceZone,
+                CalibColumn::DurationBucket,
+            ])
+            .update_columns([
+                CalibColumn::TotalCount,
+                CalibColumn::CorrectCount,
+                CalibColumn::AlphaPrior,
+                CalibColumn::BetaPrior,
+                CalibColumn::PosteriorMean,
+                CalibColumn::UpdatedAt,
+            ])
+            .to_owned(),
+        )
         .exec_with_returning(db)
         .await
-        .map_err(StorageError::from)
+        .map_err(StorageError::from)?;
+    Ok(model.into())
 }
 
-async fn update_bucket_q(
+async fn create_outcome_q(
     db: &impl ConnectionTrait,
-    bucket: CalibActiveModel,
-) -> Result<calibration::Model, StorageError> {
-    bucket.update(db).await.map_err(StorageError::from)
-}
-
-async fn record_outcome_q(
-    db: &impl ConnectionTrait,
-    outcome: OutcomeActiveModel,
-) -> Result<(), StorageError> {
-    OutcomeEntity::insert(outcome)
-        .exec(db)
+    outcome: NewCalibrationOutcome,
+) -> Result<CalibrationOutcomeInfo, StorageError> {
+    let am = outcome.into_active_model();
+    let model = OutcomeEntity::insert(am)
+        .exec_with_returning(db)
         .await
         .map_err(StorageError::from)?;
-    Ok(())
+    Ok(model.into())
 }
 
 async fn get_unresolved_outcomes_q(
     db: &impl ConnectionTrait,
-) -> Result<Vec<calibration_outcome::Model>, StorageError> {
+) -> Result<Vec<CalibrationOutcomeInfo>, StorageError> {
     OutcomeEntity::find()
         .filter(OutcomeColumn::ActualYes.is_null())
         .all(db)
         .await
         .map_err(StorageError::from)
+        .map(|v| v.into_iter().map(Into::into).collect())
 }
 
 async fn resolve_outcome_q(
@@ -127,42 +144,33 @@ impl CalibrationRepository for PgCalibrationRepository {
         category: MarketCategory,
         price_zone: PriceZone,
         duration_bucket: DurationBucket,
-    ) -> Result<Option<calibration::Model>, StorageError> {
+    ) -> Result<Option<CalibrationBucketInfo>, StorageError> {
         get_bucket_q(&self.db, category, price_zone, duration_bucket).await
     }
 
     async fn get_buckets_by_category(
         &self,
         category: MarketCategory,
-    ) -> Result<Vec<calibration::Model>, StorageError> {
+    ) -> Result<Vec<CalibrationBucketInfo>, StorageError> {
         get_buckets_by_category_q(&self.db, category).await
     }
 
-    async fn get_all_buckets(&self) -> Result<Vec<calibration::Model>, StorageError> {
+    async fn get_all_buckets(&self) -> Result<Vec<CalibrationBucketInfo>, StorageError> {
         get_all_buckets_q(&self.db).await
     }
 
-    async fn insert_bucket(
-        &self,
-        bucket: CalibActiveModel,
-    ) -> Result<calibration::Model, StorageError> {
-        insert_bucket_q(&self.db, bucket).await
+    async fn upsert(&self, dto: UpsertCalibration) -> Result<CalibrationBucketInfo, StorageError> {
+        upsert_q(&self.db, dto).await
     }
 
-    async fn update_bucket(
+    async fn create_outcome(
         &self,
-        bucket: CalibActiveModel,
-    ) -> Result<calibration::Model, StorageError> {
-        update_bucket_q(&self.db, bucket).await
+        outcome: NewCalibrationOutcome,
+    ) -> Result<CalibrationOutcomeInfo, StorageError> {
+        create_outcome_q(&self.db, outcome).await
     }
 
-    async fn record_outcome(&self, outcome: OutcomeActiveModel) -> Result<(), StorageError> {
-        record_outcome_q(&self.db, outcome).await
-    }
-
-    async fn get_unresolved_outcomes(
-        &self,
-    ) -> Result<Vec<calibration_outcome::Model>, StorageError> {
+    async fn get_unresolved_outcomes(&self) -> Result<Vec<CalibrationOutcomeInfo>, StorageError> {
         get_unresolved_outcomes_q(&self.db).await
     }
 
@@ -183,42 +191,33 @@ impl CalibrationRepository for PgCalibrationRepositoryTxn<'_> {
         category: MarketCategory,
         price_zone: PriceZone,
         duration_bucket: DurationBucket,
-    ) -> Result<Option<calibration::Model>, StorageError> {
+    ) -> Result<Option<CalibrationBucketInfo>, StorageError> {
         get_bucket_q(self.txn, category, price_zone, duration_bucket).await
     }
 
     async fn get_buckets_by_category(
         &self,
         category: MarketCategory,
-    ) -> Result<Vec<calibration::Model>, StorageError> {
+    ) -> Result<Vec<CalibrationBucketInfo>, StorageError> {
         get_buckets_by_category_q(self.txn, category).await
     }
 
-    async fn get_all_buckets(&self) -> Result<Vec<calibration::Model>, StorageError> {
+    async fn get_all_buckets(&self) -> Result<Vec<CalibrationBucketInfo>, StorageError> {
         get_all_buckets_q(self.txn).await
     }
 
-    async fn insert_bucket(
-        &self,
-        bucket: CalibActiveModel,
-    ) -> Result<calibration::Model, StorageError> {
-        insert_bucket_q(self.txn, bucket).await
+    async fn upsert(&self, dto: UpsertCalibration) -> Result<CalibrationBucketInfo, StorageError> {
+        upsert_q(self.txn, dto).await
     }
 
-    async fn update_bucket(
+    async fn create_outcome(
         &self,
-        bucket: CalibActiveModel,
-    ) -> Result<calibration::Model, StorageError> {
-        update_bucket_q(self.txn, bucket).await
+        outcome: NewCalibrationOutcome,
+    ) -> Result<CalibrationOutcomeInfo, StorageError> {
+        create_outcome_q(self.txn, outcome).await
     }
 
-    async fn record_outcome(&self, outcome: OutcomeActiveModel) -> Result<(), StorageError> {
-        record_outcome_q(self.txn, outcome).await
-    }
-
-    async fn get_unresolved_outcomes(
-        &self,
-    ) -> Result<Vec<calibration_outcome::Model>, StorageError> {
+    async fn get_unresolved_outcomes(&self) -> Result<Vec<CalibrationOutcomeInfo>, StorageError> {
         get_unresolved_outcomes_q(self.txn).await
     }
 

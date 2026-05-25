@@ -2,7 +2,7 @@
 
 use crate::clock::Clock;
 use crate::types::PeriodStats;
-use chrono::{NaiveDate, Timelike};
+use chrono::{DateTime, NaiveDate, Timelike, Utc};
 use oxide_arb_models::enums::common::TradeOutcome;
 use oxide_arb_models::types::Usd;
 use std::sync::Arc;
@@ -91,6 +91,13 @@ impl HourlyAccounting {
         } else {
             false
         }
+    }
+
+    pub const fn window_start(&self) -> DateTime<Utc> {
+        self.window_start_date
+            .and_hms_opt(self.window_start_hour, 0, 0)
+            .unwrap()
+            .and_utc()
     }
 
     fn should_rollover(&self) -> bool {

@@ -5,10 +5,14 @@
 //! beyond the configured tolerance is classified as a mismatch and
 //! reported as Warning or Critical.
 
+use std::collections::HashSet;
+
 use crate::traits::{BalanceQuerier, RiskMetrics};
-use crate::types::{ReconciliationMismatch, ReconciliationReport, ReconciliationStatus};
+use crate::types::{ReconciliationMismatch, ReconciliationReport};
 use chrono::Utc;
+use num_traits::ToPrimitive;
 use oxide_arb_error::OxideResult;
+use oxide_arb_models::enums::ReconciliationStatus;
 use oxide_arb_models::types::Usd;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -82,8 +86,7 @@ impl LedgerReconciler {
         }
 
         // Internal markets not present externally
-        let ext_market_set: std::collections::HashSet<_> =
-            ext_positions.iter().map(|(m, _)| m.clone()).collect();
+        let ext_market_set: HashSet<_> = ext_positions.iter().map(|(m, _)| m.clone()).collect();
 
         for pos in &positions {
             if !ext_market_set.contains(&pos.market_id) {
@@ -102,7 +105,7 @@ impl LedgerReconciler {
         let critical_threshold = self.tolerance.inner() * dec!(10);
         let status = Self::classify(&mismatches, critical_threshold);
 
-        let duration_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let duration_ms = ToPrimitive::to_u64(&start.elapsed().as_millis()).unwrap_or(u64::MAX);
 
         match status {
             ReconciliationStatus::Ok => {

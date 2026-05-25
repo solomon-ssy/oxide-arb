@@ -1,5 +1,6 @@
 //! Configuration loading and validation errors.
 
+use crate::config_validation::ConfigValidationReport;
 use thiserror::Error;
 
 /// Errors from configuration loading (TOML/env) and semantic validation.
@@ -14,7 +15,7 @@ pub enum ConfigError {
     Load(String),
 
     #[error("Configuration validation failed: {0}")]
-    Validation(String),
+    Validation(#[from] ConfigValidationReport),
 
     #[error("Missing required field: {field} in section [{section}]")]
     MissingField { section: String, field: String },

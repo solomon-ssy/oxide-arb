@@ -5,6 +5,8 @@
 
 use crate::audit::RiskDecisionTrace;
 use chrono::{DateTime, Utc};
+use oxide_arb_models::domain::risk::RiskEngineState;
+use oxide_arb_models::enums::ReconciliationStatus;
 use oxide_arb_models::enums::risk::{BreakerStateName, CircuitBreakerLevel};
 use oxide_arb_models::types::{MarketId, ReservationId, TokenId, Usd};
 use rust_decimal::Decimal;
@@ -291,14 +293,6 @@ pub struct PeriodStats {
 
 // ── Reconciliation ──────────────────────────────────────────────────────────
 
-/// Overall reconciliation outcome.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ReconciliationStatus {
-    Ok,
-    Warning,
-    Critical,
-}
-
 /// A single mismatch detected during reconciliation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ReconciliationMismatch {
@@ -358,7 +352,7 @@ pub enum BlacklistKey {
 /// Summary of all state changes produced by `on_trade_result`.
 #[derive(Debug, Clone, Serialize)]
 pub struct PostTradeReport {
-    pub snapshot: oxide_arb_models::domain::risk::RiskEngineSnapshot,
+    pub snapshot: RiskEngineState,
     pub daily_rolled: bool,
     pub weekly_rolled: bool,
     pub hourly_rolled: bool,

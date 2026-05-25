@@ -12,4 +12,5 @@ pub enum OutboxEvent {
     PublishedAt,
     LastError,
     CreatedAt,
+    DeadLetterReason,
 }

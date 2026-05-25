@@ -1,9 +1,9 @@
 //! Distributed L2 cache using Redis via deadpool.
 
 use crate::cache::backend::CacheBackend;
-use crate::error::StorageError;
 use async_trait::async_trait;
 use deadpool_redis::{Config, Pool, Runtime};
+use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::config::RedisConfig;
 use redis::AsyncCommands;
 use std::time::Duration;

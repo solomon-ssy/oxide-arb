@@ -207,7 +207,7 @@ const fn default_max_total_exposure() -> Decimal {
     dec!(5000)
 }
 const fn default_reserve_balance() -> Decimal {
-    dec!(1000)
+    dec!(100)
 }
 const fn default_max_open_positions() -> usize {
     3
@@ -370,6 +370,51 @@ impl Default for CircuitBreakerConfig {
         }
     }
 }
+
+// ── Exposure Reservation Config ──────────────────────────────────────────────
+
+/// Configuration for the exposure reservation system.
+#[derive(Debug, Clone, Deserialize, Validate)]
+pub struct ExposureReservationConfig {
+    /// Maximum total exposure across all active reservations (USD cents).
+    #[serde(default = "default_max_total_exposure_cents")]
+    pub max_total_exposure_cents: u64,
+    /// Maximum exposure per market (USD cents).
+    #[serde(default = "default_max_per_market_cents")]
+    pub max_per_market_cents: u64,
+    /// Default TTL for reservations in seconds (auto-expire if not confirmed/released).
+    #[serde(default = "default_reservation_ttl_secs")]
+    pub default_ttl_secs: u64,
+    /// GC interval in seconds for cleaning expired reservations.
+    #[serde(default = "default_reservation_gc_interval_secs")]
+    pub gc_interval_secs: u64,
+}
+
+impl Default for ExposureReservationConfig {
+    fn default() -> Self {
+        Self {
+            max_total_exposure_cents: default_max_total_exposure_cents(),
+            max_per_market_cents: default_max_per_market_cents(),
+            default_ttl_secs: default_reservation_ttl_secs(),
+            gc_interval_secs: default_reservation_gc_interval_secs(),
+        }
+    }
+}
+
+const fn default_max_total_exposure_cents() -> u64 {
+    5_000_000 // $50,000
+}
+const fn default_max_per_market_cents() -> u64 {
+    1_000_000 // $10,000
+}
+const fn default_reservation_ttl_secs() -> u64 {
+    300
+}
+const fn default_reservation_gc_interval_secs() -> u64 {
+    30
+}
+
+// ── Circuit Breaker Config defaults ─────────────────────────────────────────
 
 const fn default_cb_l1_cooldown() -> u64 {
     60

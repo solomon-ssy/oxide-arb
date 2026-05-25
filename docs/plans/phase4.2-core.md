@@ -46,7 +46,8 @@
 | WS 增强 | last-message-age 跟踪 |
 | InMemory ExposureReservationBackend | `DashMap + AtomicU64` CAS 实现 |
 | CoreRiskMetrics / CoreRiskPersistence | 桥接 oxide-arb-risk DI trait |
-| CoreCalibrationDataSource | 桥接 oxide-arb-algorithm CalibrationDataSource trait |
+| CoreCalibrationDataSource / CoreFeeEstimator / CoreBalanceQuerier | 桥接 oxide-arb-algorithm / oxide-arb-risk DI trait |
+| GammaService | Gamma 目录同步（full + incremental）→ MarketRegistry / MarketCache / PG |
 | Outbox EventStore + Flusher | 可靠生命周期事件投递 |
 | Cache Owner Services | FeeParams / PositionSummary / WalletBalance 读穿缓存 |
 | MetricsHub + AlertDispatcher | Prometheus 指标 + Telegram/Webhook 告警 |
@@ -120,18 +121,21 @@ crates/oxide-arb-core/
     │   ├── fsm.rs                      # ExecutionFSM: Idle→Validate→Exec→Idle + Emergency
     │   └── types.rs                    # ExecutionPlan, ExecutionResult, ExecutionOutcome
     │
-    ├── bridge/
+    ├── bridge/                         # trait 适配层：仅 impl 上游 crate 定义的 DI trait
     │   ├── mod.rs
-    │   ├── risk_metrics.rs             # CoreRiskMetrics: impl RiskMetrics for oxide-arb-risk
-    │   ├── risk_persistence.rs         # CoreRiskPersistence: impl RiskPersistence
-    │   └── calibration_source.rs       # CoreCalibrationDataSource: impl CalibrationDataSource
+    │   ├── balance_querier.rs          # CoreBalanceQuerier: impl BalanceQuerier
+    │   ├── calibration_source.rs       # CoreCalibrationDataSource: impl CalibrationDataSource
+    │   ├── fee_estimator.rs            # CoreFeeEstimator: impl FeeEstimator
+    │   ├── risk_metrics.rs             # CoreRiskMetrics: impl RiskMetrics
+    │   └── risk_persistence.rs         # CoreRiskPersistence: impl RiskPersistence
     │
-    ├── service/
+    ├── service/                        # 编排层：周期性任务 + 读穿缓存，不 impl 上游 trait
     │   ├── mod.rs
+    │   ├── cache_invalidation.rs       # CacheInvalidationCoordinator
     │   ├── fee_params_service.rs       # FeeParamsService: CacheKey::FeeParams 读穿
+    │   ├── gamma_service.rs            # GammaService: Gamma full/incremental sync
     │   ├── position_summary_service.rs # PositionSummaryService: CacheKey::PositionSummary 读穿
-    │   ├── wallet_balance_service.rs   # WalletBalanceService: CacheKey::Balance 读穿
-    │   └── cache_invalidation.rs       # CacheInvalidationCoordinator
+    │   └── wallet_balance_service.rs   # WalletBalanceService: CacheKey::Balance 读穿
     │
     ├── exposure/
     │   ├── mod.rs
@@ -246,15 +250,25 @@ oxide_arb_core
 ├── execution        (ExecutionPipeline, Validator, PlanBuilder, Dispatcher,
 │                     Runner, CapitalManager, TieredExecutionStrategy, ExecutionFSM,
 │                     ExecutionPlan, ExecutionResult, ExecutionOutcome)
-├── bridge           (CoreRiskMetrics, CoreRiskPersistence, CoreCalibrationDataSource)
-├── service          (FeeParamsService, PositionSummaryService,
-│                     WalletBalanceService, CacheInvalidationCoordinator)
+├── bridge           (CoreBalanceQuerier, CoreCalibrationDataSource, CoreFeeEstimator,
+│                     CoreRiskMetrics, CoreRiskPersistence)
+├── service          (CacheInvalidationCoordinator, FeeParamsService, GammaService,
+│                     PositionSummaryService, WalletBalanceService)
 ├── exposure         (InMemoryExposureReservation)
 ├── outbox           (EventStore, PgEventStore, OutboxFlusher, OutboxConsumer)
 ├── infra            (AsyncWriter, DebouncedWriter, PeriodicTask, HealthChecker,
 │                     RetryPolicy, OracleHealthTracker)
 └── observability    (MetricsHub, AlertDispatcher, ReportGenerator)
 ```
+
+### 1.4 `bridge/` vs `service/` 分层
+
+| 层 | 职责 | 判断标准 | 示例 |
+|----|------|----------|------|
+| `bridge/` | 实现 `oxide-arb-risk` / `oxide-arb-algorithm` 定义的 trait，供引擎 DI 注入 | 必须 `impl XxxTrait for CoreXxx` | `CoreRiskPersistence`, `CoreFeeEstimator` |
+| `service/` | 编排多个依赖、驱动周期性副作用（sync / refresh / invalidate） | 有 `sync()` / `refresh()` 等业务方法，不 impl 上游 trait | `GammaService`, `FeeParamsService` |
+
+**迁移说明**: `GammaSyncer` 原位于 `bridge/`，因不符合「trait 适配」职责，已迁至 `service/gamma_service.rs` 并重命名为 `GammaService`。
 
 ---
 
@@ -324,7 +338,8 @@ pub struct AppContext {
     pub execution_fsm: Arc<ExecutionFSM>,
     pub tiered_strategy: Arc<TieredExecutionStrategy>,
 
-    // ── Cache services ────────────────────────────────────────────
+    // ── Cache + catalog services ──────────────────────────────────
+    pub gamma_service: Arc<GammaService>,
     pub fee_params_service: Arc<FeeParamsService>,
     pub position_summary_service: Arc<PositionSummaryService>,
     pub wallet_balance_service: Arc<WalletBalanceService>,
@@ -365,7 +380,9 @@ Phase  阶段              输出                                        依赖
   8    Exposure          InMemoryExposureReservation                  (1)
   9    Cache services    FeeParamsService, PositionSummaryService,    (6,7,3,8)
                          WalletBalanceService, CacheInvalidation
- 10    Risk bridge       CoreRiskMetrics, CoreRiskPersistence         (6,9)
+  9b   Catalog sync      GammaService (MarketRegistry + MarketCache)   (6,7,2)
+ 10    Risk bridge       CoreRiskMetrics, CoreRiskPersistence,         (6,9)
+                         CoreBalanceQuerier, CoreFeeEstimator
  11    Risk engine       RiskEngine (from oxide-arb-risk)             (10, risk_state from DB)
  12    Algorithm         ResolutionCalibrator, EndgameDetector,       (7,6)
                          EndgameScorer, OpportunityPipeline
@@ -462,7 +479,7 @@ impl AppContext {
 │     ├── spawn Scanner + Coalescer + Funnel                           │
 │     ├── spawn ExecutionPipeline Runner                                │
 │     ├── spawn OutboxFlusher                                          │
-│     ├── spawn PeriodicTask: GammaSyncer (300s)                       │
+│     ├── spawn PeriodicTask: GammaService::sync (300s)                │
 │     ├── spawn PeriodicTask: CalibrationUpdater (3600s)               │
 │     ├── spawn PeriodicTask: HealthChecker (30s)                      │
 │     ├── spawn PeriodicTask: WalletBalanceRefresh (15s)               │
@@ -4191,6 +4208,7 @@ criterion_main!(benches);
 | CoreRiskMetrics + CoreRiskPersistence | 4h | P0 | risk crate |
 | CoreCalibrationDataSource | 3h | P1 | algorithm crate |
 | Cache services (Fee/Position/Balance) | 5h | P0 | repos, cache |
+| GammaService (catalog sync) | 4h | P0 | GammaClient, MarketRegistry |
 | CacheInvalidationCoordinator | 2h | P1 | cache services |
 | ClobClient::collateral_balance() | 2h | P0 | — |
 | WS last-message-age | 1h | P0 | — |

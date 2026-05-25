@@ -1,10 +1,8 @@
 use crate::traits::LifecycleRepository;
 use chrono::Utc;
 use oxide_arb_error::storage::StorageError;
-use oxide_arb_models::{
-    entities::lifecycle_event::{self, ActiveModel, Column, Entity},
-    enums::lifecycle::LifecyclePhase,
-};
+use oxide_arb_models::domain::{LifecycleEventInfo, NewLifecycleEvent};
+use oxide_arb_models::entities::lifecycle_event::{ActiveModel, Column, Entity};
 #[allow(clippy::wildcard_imports)]
 use sea_orm::*;
 
@@ -26,68 +24,55 @@ pub struct PgLifecycleRepositoryTxn<'a> {
     txn: &'a DatabaseTransaction,
 }
 
-async fn do_record(
+async fn do_create(
     db: &impl ConnectionTrait,
-    phase: LifecyclePhase,
-    stage: Option<&str>,
-    message: &str,
-    metadata: Option<serde_json::Value>,
-) -> Result<lifecycle_event::Model, StorageError> {
+    event: NewLifecycleEvent,
+) -> Result<LifecycleEventInfo, StorageError> {
     let model = ActiveModel {
         id: NotSet,
-        phase: Set(phase),
-        stage: Set(stage.map(String::from)),
-        message: Set(message.to_string()),
-        metadata: Set(metadata),
+        phase: Set(event.phase),
+        stage: Set(event.stage),
+        message: Set(event.message),
+        metadata: Set(event.metadata),
         created_at: Set(Utc::now()),
     };
 
-    Entity::insert(model)
+    let result = Entity::insert(model)
         .exec_with_returning(db)
         .await
-        .map_err(StorageError::from)
+        .map_err(StorageError::from)?;
+    Ok(result.into())
 }
 
 async fn do_get_recent(
     db: &impl ConnectionTrait,
     limit: u64,
-) -> Result<Vec<lifecycle_event::Model>, StorageError> {
+) -> Result<Vec<LifecycleEventInfo>, StorageError> {
     Entity::find()
         .order_by_desc(Column::CreatedAt)
         .limit(limit)
         .all(db)
         .await
         .map_err(StorageError::from)
+        .map(|v| v.into_iter().map(Into::into).collect())
 }
 
 impl LifecycleRepository for PgLifecycleRepository {
-    async fn record(
-        &self,
-        phase: LifecyclePhase,
-        stage: Option<&str>,
-        message: &str,
-        metadata: Option<serde_json::Value>,
-    ) -> Result<lifecycle_event::Model, StorageError> {
-        do_record(&self.db, phase, stage, message, metadata).await
+    async fn create(&self, event: NewLifecycleEvent) -> Result<LifecycleEventInfo, StorageError> {
+        do_create(&self.db, event).await
     }
 
-    async fn get_recent(&self, limit: u64) -> Result<Vec<lifecycle_event::Model>, StorageError> {
+    async fn get_recent(&self, limit: u64) -> Result<Vec<LifecycleEventInfo>, StorageError> {
         do_get_recent(&self.db, limit).await
     }
 }
 
 impl LifecycleRepository for PgLifecycleRepositoryTxn<'_> {
-    async fn record(
-        &self,
-        phase: LifecyclePhase,
-        stage: Option<&str>,
-        message: &str,
-        metadata: Option<serde_json::Value>,
-    ) -> Result<lifecycle_event::Model, StorageError> {
-        do_record(self.txn, phase, stage, message, metadata).await
+    async fn create(&self, event: NewLifecycleEvent) -> Result<LifecycleEventInfo, StorageError> {
+        do_create(self.txn, event).await
     }
 
-    async fn get_recent(&self, limit: u64) -> Result<Vec<lifecycle_event::Model>, StorageError> {
+    async fn get_recent(&self, limit: u64) -> Result<Vec<LifecycleEventInfo>, StorageError> {
         do_get_recent(self.txn, limit).await
     }
 }

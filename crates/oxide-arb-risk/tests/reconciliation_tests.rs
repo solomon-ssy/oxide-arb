@@ -4,11 +4,11 @@
 //! to verify Ok / Warning / Critical classification and mismatch detection.
 
 use oxide_arb_models::domain::position::PositionInfo;
-use oxide_arb_models::enums::common::Side;
-use oxide_arb_models::types::{MarketId, Usd};
+use oxide_arb_models::enums::common::{PositionStatus, Side};
+use oxide_arb_models::enums::risk::ReconciliationStatus;
+use oxide_arb_models::types::{MarketId, PositionId, Price, Shares, TokenId, Usd};
 use oxide_arb_risk::reconciliation::LedgerReconciler;
 use oxide_arb_risk::traits::{BalanceQuerier, RiskMetrics};
-use oxide_arb_risk::types::ReconciliationStatus;
 use rust_decimal_macros::dec;
 
 // ── Mock Metrics ────────────────────────────────────────────────────────────
@@ -186,13 +186,20 @@ async fn reconciliation_detects_internal_markets_not_present_externally() {
     let metrics = MockReconMetrics {
         market_exposures: vec![(market.clone(), Usd::new(dec!(50)))],
         positions: vec![PositionInfo {
+            position_id: PositionId::generate(),
             market_id: market,
-            token_id: oxide_arb_models::types::TokenId::new("tok"),
+            token_id: TokenId::new("tok"),
             side: Side::Buy,
-            size: oxide_arb_models::types::Shares::new(dec!(10)),
-            avg_entry_price: oxide_arb_models::types::Price::new(dec!(5)),
-            cost_basis: Usd::new(dec!(50)),
-            updated_at: chrono::Utc::now(),
+            shares: Shares::new(dec!(10)),
+            avg_entry_price: Price::new(dec!(5)),
+            total_cost_usd: Usd::new(dec!(50)),
+            total_fees_usd: Usd::ZERO,
+            unrealized_pnl: Usd::ZERO,
+            realized_pnl: Usd::ZERO,
+            status: PositionStatus::Open,
+            opened_at: chrono::Utc::now(),
+            closed_at: None,
+            settled_at: None,
         }],
         ..Default::default()
     };

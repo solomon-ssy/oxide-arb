@@ -1,8 +1,11 @@
 use crate::traits::EventRepository;
+use num_traits::ToPrimitive;
 use oxide_arb_error::storage::StorageError;
-use oxide_arb_models::entities::event::{self, ActiveModel, Column, Entity};
+use oxide_arb_models::domain::{EventInfo, UpsertEvent};
+use oxide_arb_models::entities::event::{ActiveModel, Column, Entity};
 use oxide_arb_models::enums::market::EventStatus;
 use oxide_arb_models::types::EventId;
+use sea_orm::sea_query::OnConflict;
 #[allow(clippy::wildcard_imports)]
 use sea_orm::*;
 use std::collections::HashSet;
@@ -28,19 +31,21 @@ pub struct PgEventRepositoryTxn<'a> {
 async fn do_find_by_id(
     db: &impl ConnectionTrait,
     id: &EventId,
-) -> Result<Option<event::Model>, StorageError> {
+) -> Result<Option<EventInfo>, StorageError> {
     Entity::find_by_id(id.clone())
         .one(db)
         .await
         .map_err(StorageError::from)
+        .map(|opt| opt.map(Into::into))
 }
 
-async fn do_find_active(db: &impl ConnectionTrait) -> Result<Vec<event::Model>, StorageError> {
+async fn do_find_active(db: &impl ConnectionTrait) -> Result<Vec<EventInfo>, StorageError> {
     Entity::find()
         .filter(Column::Status.eq(EventStatus::Active))
         .all(db)
         .await
         .map_err(StorageError::from)
+        .map(|v| v.into_iter().map(Into::into).collect())
 }
 
 async fn do_find_existing_ids(
@@ -61,48 +66,68 @@ async fn do_find_existing_ids(
     Ok(rows.into_iter().collect())
 }
 
-async fn do_insert(
-    db: &impl ConnectionTrait,
-    model: ActiveModel,
-) -> Result<event::Model, StorageError> {
-    Entity::insert(model.prepare_for_insert())
+async fn do_upsert(db: &impl ConnectionTrait, dto: UpsertEvent) -> Result<EventInfo, StorageError> {
+    let am: ActiveModel = dto.into_active_model();
+    let model = Entity::insert(am.prepare_for_insert())
+        .on_conflict(
+            OnConflict::column(Column::EventId)
+                .update_columns([
+                    Column::Title,
+                    Column::Slug,
+                    Column::Category,
+                    Column::Status,
+                    Column::NegRisk,
+                    Column::EndDate,
+                    Column::RawGamma,
+                    Column::UpdatedAt,
+                ])
+                .to_owned(),
+        )
         .exec_with_returning(db)
         .await
-        .map_err(StorageError::from)
+        .map_err(StorageError::from)?;
+    Ok(model.into())
 }
 
-async fn do_insert_batch(
+async fn do_upsert_batch(
     db: &impl ConnectionTrait,
-    models: Vec<ActiveModel>,
+    dtos: Vec<UpsertEvent>,
 ) -> Result<u64, StorageError> {
-    if models.is_empty() {
+    if dtos.is_empty() {
         return Ok(0);
     }
-    let count = models.len() as u64;
-    let models: Vec<ActiveModel> = models
+    let count = ToPrimitive::to_u64(&dtos.len()).unwrap_or(u64::MAX);
+    let models: Vec<ActiveModel> = dtos
         .into_iter()
-        .map(ActiveModel::prepare_for_insert)
+        .map(|dto| ActiveModel::prepare_for_insert(dto.into_active_model()))
         .collect();
     Entity::insert_many(models)
+        .on_conflict(
+            OnConflict::column(Column::EventId)
+                .update_columns([
+                    Column::Title,
+                    Column::Slug,
+                    Column::Category,
+                    Column::Status,
+                    Column::NegRisk,
+                    Column::EndDate,
+                    Column::RawGamma,
+                    Column::UpdatedAt,
+                ])
+                .to_owned(),
+        )
         .exec(db)
         .await
         .map_err(StorageError::from)?;
     Ok(count)
 }
 
-async fn do_update(
-    db: &impl ConnectionTrait,
-    model: ActiveModel,
-) -> Result<event::Model, StorageError> {
-    model.update(db).await.map_err(StorageError::from)
-}
-
 impl EventRepository for PgEventRepository {
-    async fn find_by_id(&self, id: &EventId) -> Result<Option<event::Model>, StorageError> {
+    async fn find_by_id(&self, id: &EventId) -> Result<Option<EventInfo>, StorageError> {
         do_find_by_id(&self.db, id).await
     }
 
-    async fn find_active(&self) -> Result<Vec<event::Model>, StorageError> {
+    async fn find_active(&self) -> Result<Vec<EventInfo>, StorageError> {
         do_find_active(&self.db).await
     }
 
@@ -110,25 +135,21 @@ impl EventRepository for PgEventRepository {
         do_find_existing_ids(&self.db, ids).await
     }
 
-    async fn insert(&self, model: ActiveModel) -> Result<event::Model, StorageError> {
-        do_insert(&self.db, model).await
+    async fn upsert(&self, dto: UpsertEvent) -> Result<EventInfo, StorageError> {
+        do_upsert(&self.db, dto).await
     }
 
-    async fn insert_batch(&self, models: Vec<ActiveModel>) -> Result<u64, StorageError> {
-        do_insert_batch(&self.db, models).await
-    }
-
-    async fn update(&self, model: ActiveModel) -> Result<event::Model, StorageError> {
-        do_update(&self.db, model).await
+    async fn upsert_batch(&self, dtos: Vec<UpsertEvent>) -> Result<u64, StorageError> {
+        do_upsert_batch(&self.db, dtos).await
     }
 }
 
 impl EventRepository for PgEventRepositoryTxn<'_> {
-    async fn find_by_id(&self, id: &EventId) -> Result<Option<event::Model>, StorageError> {
+    async fn find_by_id(&self, id: &EventId) -> Result<Option<EventInfo>, StorageError> {
         do_find_by_id(self.txn, id).await
     }
 
-    async fn find_active(&self) -> Result<Vec<event::Model>, StorageError> {
+    async fn find_active(&self) -> Result<Vec<EventInfo>, StorageError> {
         do_find_active(self.txn).await
     }
 
@@ -136,15 +157,11 @@ impl EventRepository for PgEventRepositoryTxn<'_> {
         do_find_existing_ids(self.txn, ids).await
     }
 
-    async fn insert(&self, model: ActiveModel) -> Result<event::Model, StorageError> {
-        do_insert(self.txn, model).await
+    async fn upsert(&self, dto: UpsertEvent) -> Result<EventInfo, StorageError> {
+        do_upsert(self.txn, dto).await
     }
 
-    async fn insert_batch(&self, models: Vec<ActiveModel>) -> Result<u64, StorageError> {
-        do_insert_batch(self.txn, models).await
-    }
-
-    async fn update(&self, model: ActiveModel) -> Result<event::Model, StorageError> {
-        do_update(self.txn, model).await
+    async fn upsert_batch(&self, dtos: Vec<UpsertEvent>) -> Result<u64, StorageError> {
+        do_upsert_batch(self.txn, dtos).await
     }
 }

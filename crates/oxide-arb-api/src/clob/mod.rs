@@ -8,10 +8,11 @@ mod sdk_error;
 mod token;
 
 pub use convert::{ClobSide, SdkSideConversionError};
+use num_traits::ToPrimitive;
 pub use sdk_error::SdkClobError;
 pub use token::WireTokenId;
 
-pub use book::{BookLevel, OrderbookSnapshot};
+pub use book::OrderbookSnapshot;
 pub use orders::{CancelAllResult, CancelResult, OpenOrder};
 pub use rate_limiter::RateLimiter;
 
@@ -19,15 +20,19 @@ use crate::infra::retry::{self, RetryPolicy};
 use crate::keystore::OrderSigner;
 use oxide_arb_error::api::ApiError;
 use oxide_arb_models::config::PolymarketConfig;
+use oxide_arb_models::domain::BookLevel;
 use oxide_arb_models::domain::book::{EndgameBookSnapshot, OrderbookSide};
-use oxide_arb_models::domain::order::{OrderRequest, OrderResponse, OrderStatus};
+use oxide_arb_models::domain::order::{OrderRequest, OrderResponse};
 use oxide_arb_models::enums::common::OrderType;
+use oxide_arb_models::enums::order::OrderStatus;
 use oxide_arb_models::types::{OrderId, Price, Shares, TokenId, Usd};
 use polymarket_client_sdk_v2::auth::Normal;
 use polymarket_client_sdk_v2::auth::state::Authenticated;
-use polymarket_client_sdk_v2::clob::types::OrderType as SdkOrderType;
 use polymarket_client_sdk_v2::clob::types::Side as SdkSide;
-use polymarket_client_sdk_v2::clob::types::request::OrderBookSummaryRequest;
+use polymarket_client_sdk_v2::clob::types::request::{
+    BalanceAllowanceRequest, OrderBookSummaryRequest,
+};
+use polymarket_client_sdk_v2::clob::types::{AssetType, OrderType as SdkOrderType};
 use polymarket_client_sdk_v2::clob::{Client as SdkClient, Config as SdkConfig};
 use std::convert::TryFrom;
 use std::sync::Arc;
@@ -96,8 +101,7 @@ impl ClobClient {
                         .await
                         .map_err(|e| ApiError::from(sdk_error::SdkClobError(&e)))?,
                     OrderType::Gtd { expiration } => {
-                        let exp = i64::try_from(expiration)
-                            .ok()
+                        let exp = ToPrimitive::to_i64(&expiration)
                             .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0))
                             .unwrap_or_else(chrono::Utc::now);
                         sdk.limit_order()
@@ -254,7 +258,8 @@ impl ClobClient {
                     bids,
                     asks,
                     hash: resp.hash.unwrap_or_default(),
-                    timestamp_ms: u64::try_from(resp.timestamp.timestamp_millis()).unwrap_or(0),
+                    timestamp_ms: ToPrimitive::to_u64(&resp.timestamp.timestamp_millis().max(0))
+                        .unwrap_or(0),
                 })
             }
         })
@@ -292,6 +297,34 @@ impl ClobClient {
                 timestamp_ms: no_book.timestamp_ms,
             },
         })
+    }
+
+    /// Query current USDC.e collateral balance.
+    ///
+    /// Uses the CLOB `balance-allowance` endpoint with `AssetType::Collateral`.
+    /// Returns the raw on-exchange balance (before subtracting reservations).
+    #[tracing::instrument(skip(self))]
+    pub async fn collateral_balance(&self) -> Result<Usd, ApiError> {
+        self.rate_limiter.acquire("GET /balance-allowance").await;
+
+        let sdk = Arc::clone(&self.sdk);
+
+        retry::retry_with_policy(&RetryPolicy::clob_default(), || {
+            let sdk = Arc::clone(&sdk);
+            async move {
+                let request = BalanceAllowanceRequest::builder()
+                    .asset_type(AssetType::Collateral)
+                    .build();
+
+                let resp = sdk
+                    .balance_allowance(request)
+                    .await
+                    .map_err(|e| ApiError::from(SdkClobError(&e)))?;
+
+                Ok(Usd::new(resp.balance))
+            }
+        })
+        .await
     }
 
     /// List all open orders for the authenticated account.

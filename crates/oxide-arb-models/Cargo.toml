@@ -21,6 +21,10 @@ bitcode = { workspace = true }
 tracing = { workspace = true }
 config = { workspace = true }
 clickhouse = { workspace = true }
+thiserror = { workspace = true }
+
+[features]
+repository = []
 
 [lints]
 workspace = true

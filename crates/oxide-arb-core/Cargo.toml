@@ -1,0 +1,74 @@
+[package]
+name = "oxide-arb-core"
+description = "System hub: AppContext, data pipeline, execution engine, bridge layers"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+# ── Workspace internal ─────────────────────────────────────────────
+oxide-arb-error      = { workspace = true, features = ["storage", "config", "serde"] }
+oxide-arb-models     = { workspace = true }
+oxide-arb-api        = { workspace = true }
+oxide-arb-storage    = { workspace = true }
+oxide-arb-repository = { workspace = true }
+oxide-arb-algorithm  = { workspace = true }
+oxide-arb-risk       = { workspace = true }
+
+# ── Async runtime ──────────────────────────────────────────────────
+tokio      = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "time", "sync"] }
+tokio-util = { workspace = true, features = ["rt"] }
+futures-util = { workspace = true }
+async-trait  = { workspace = true }
+num-traits   = { workspace = true }
+
+# ── Serialization ──────────────────────────────────────────────────
+serde      = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+
+# ── Money / time ───────────────────────────────────────────────────
+rust_decimal       = { workspace = true }
+rust_decimal_macros = { workspace = true }
+chrono = { workspace = true, features = ["serde"] }
+uuid   = { workspace = true, features = ["v4", "v7"] }
+
+# ── Errors / logging ──────────────────────────────────────────────
+thiserror = { workspace = true }
+tracing   = { workspace = true }
+
+# ── Concurrency ────────────────────────────────────────────────────
+dashmap     = { workspace = true }
+parking_lot = { workspace = true }
+arc-swap    = { workspace = true }
+flume       = { workspace = true }
+
+# ── Resilience ─────────────────────────────────────────────────────
+backoff  = { workspace = true, features = ["tokio"] }
+governor = { workspace = true }
+
+# ── Observability ──────────────────────────────────────────────────
+prometheus = { workspace = true }
+teloxide   = { workspace = true, features = ["macros"] }
+reqwest    = { workspace = true, features = ["json"] }
+
+# ── Cache ──────────────────────────────────────────────────────────
+moka = { workspace = true, features = ["future"] }
+
+# ── Misc ───────────────────────────────────────────────────────────
+rand = "0.10"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+wiremock = { workspace = true }
+testcontainers = { workspace = true }
+testcontainers-modules = { workspace = true, features = ["postgres", "redis"] }
+proptest = "1"
+criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
+
+[[bench]]
+name = "pipeline_bench"
+harness = false
+
+[lints]
+workspace = true

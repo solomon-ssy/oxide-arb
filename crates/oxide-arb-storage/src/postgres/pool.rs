@@ -9,7 +9,8 @@
 //! - Post-connect verification optionally confirms that GUCs actually took effect,
 //!   catching silent stripping by connection poolers like `PgBouncer` in transaction mode.
 
-use crate::error::StorageError;
+use num_traits::ToPrimitive;
+use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::config::PostgresConfig;
 use sea_orm::{
     ConnectOptions, ConnectionTrait, Database, DatabaseConnection, DbBackend, Statement,
@@ -43,9 +44,9 @@ impl PostgresPool {
         let stmt_cache_cap = config.statement_cache_capacity;
 
         opts.map_sqlx_postgres_opts(move |po| {
-            let po = po
-                .application_name(&app_name)
-                .statement_cache_capacity(stmt_cache_cap as usize);
+            let po = po.application_name(&app_name).statement_cache_capacity(
+                ToPrimitive::to_usize(&stmt_cache_cap).unwrap_or(usize::MAX),
+            );
 
             // GUC injection via `-c key=value` in libpq startup options.
             // This ensures each connection in the pool inherits these settings

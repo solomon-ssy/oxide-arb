@@ -4,14 +4,18 @@
 //! `oxide-arb-risk` does **not** implement these — implementations
 //! live in `oxide-arb-core` (Phase 4.2) or test mocks.
 
-use crate::audit::RiskAuditEvent;
-use crate::types::ReconciliationReport;
+use std::time::Duration;
+
 use oxide_arb_error::OxideResult;
-use oxide_arb_models::domain::blacklist::BlacklistEntry;
+use oxide_arb_error::reservation::ReservationError;
+use oxide_arb_models::domain::blacklist::{BlacklistInfo, UpsertBlacklistEntry};
 use oxide_arb_models::domain::position::PositionInfo;
-use oxide_arb_models::domain::risk::{EmergencySnapshot, RiskEngineSnapshot};
+use oxide_arb_models::domain::risk::{
+    NewEmergencySnapshot, NewReconciliationReport, NewRiskAuditEvent, RiskStateInfo,
+    UpsertRiskEngineState,
+};
 use oxide_arb_models::enums::common::Side;
-use oxide_arb_models::types::{MarketId, Usd};
+use oxide_arb_models::types::{MarketId, ReservationId, Usd};
 
 /// Read-only accessor for live system metrics required by risk checks.
 ///
@@ -69,37 +73,70 @@ pub trait RiskMetrics: Send + Sync + 'static {
 /// Returning `Err` means the engine must enter fail-closed mode.
 #[async_trait::async_trait]
 pub trait RiskPersistence: Send + Sync + 'static {
-    /// Persist the full risk engine snapshot (crash recovery).
-    async fn save_snapshot(&self, snapshot: &RiskEngineSnapshot) -> OxideResult<()>;
+    /// Upsert the full risk engine state (crash recovery).
+    async fn upsert_state(&self, state: UpsertRiskEngineState) -> OxideResult<()>;
 
-    /// Load the most recent snapshot (startup recovery).
-    async fn load_snapshot(&self) -> OxideResult<Option<RiskEngineSnapshot>>;
+    /// Load the most recent state snapshot (startup recovery).
+    async fn load_state(&self) -> OxideResult<RiskStateInfo>;
 
-    /// Persist a blacklist entry (add or update).
-    async fn save_blacklist_entry(&self, entry: &BlacklistEntry) -> OxideResult<()>;
+    /// Upsert a blacklist entry (add or update).
+    async fn upsert_blacklist(&self, entry: UpsertBlacklistEntry) -> OxideResult<()>;
 
     /// Remove a blacklist entry by `market_id`.
-    async fn remove_blacklist_entry(&self, market_id: &MarketId) -> OxideResult<()>;
+    async fn remove_blacklist(&self, market_id: &MarketId) -> OxideResult<()>;
 
     /// Load all active (non-expired) blacklist entries.
-    async fn load_blacklist_entries(&self) -> OxideResult<Vec<BlacklistEntry>>;
+    async fn load_blacklist(&self) -> OxideResult<Vec<BlacklistInfo>>;
 
     /// Persist an emergency snapshot for post-mortem analysis.
-    async fn save_emergency_snapshot(&self, snapshot: &EmergencySnapshot) -> OxideResult<()>;
+    async fn create_emergency(&self, emergency: NewEmergencySnapshot) -> OxideResult<()>;
 
     /// Persist a reconciliation report.
-    async fn save_reconciliation_report(&self, report: &ReconciliationReport) -> OxideResult<()>;
+    async fn create_reconciliation(&self, report: NewReconciliationReport) -> OxideResult<()>;
 
-    /// Append an immutable audit event. This is not a best-effort log:
-    /// critical state transitions and denied/allowed trade decisions require
-    /// a durable audit record before they are acknowledged to the caller.
-    async fn append_audit_event(&self, event: &RiskAuditEvent) -> OxideResult<()>;
+    /// Append an immutable audit event.
+    async fn create_audit(&self, audit: NewRiskAuditEvent) -> OxideResult<()>;
 }
 
-// TODO Phase 4.2 (oxide-arb-core): ReservationManager trait must be defined here
-// to prevent double-allocation of exposure between concurrent opportunities.
-// The trait will cover: reserve() -> ReservationId, confirm(), release(), timeout_gc().
-// See docs/plans/phase4.2-core.md for requirements.
+// ── Exposure Reservation ────────────────────────────────────────────────────
+
+/// Backend trait for exposure reservation management.
+///
+/// Implementations must be concurrency-safe — multiple execution workers
+/// may call `try_reserve` simultaneously. The in-memory implementation
+/// uses `AtomicU64` CAS loops; distributed implementations use Redis
+/// atomic scripts.
+#[async_trait::async_trait]
+pub trait ExposureReservationBackend: Send + Sync + 'static {
+    /// Attempt to reserve capital. Returns a reservation ID on success.
+    ///
+    /// This operation MUST be atomic: the `total_reserved` counter and the
+    /// reservation entry must be updated together without race conditions.
+    async fn try_reserve(
+        &self,
+        market_id: &MarketId,
+        amount: Usd,
+        ttl: Duration,
+    ) -> Result<ReservationId, ReservationError>;
+
+    /// Confirm a reservation (trade executed successfully).
+    ///
+    /// Releases the reservation from tracking — the exposure is now a
+    /// real position tracked elsewhere.
+    async fn confirm(&self, id: &ReservationId) -> Result<(), ReservationError>;
+
+    /// Explicitly release a reservation (trade cancelled/failed).
+    async fn release(&self, id: &ReservationId) -> Result<(), ReservationError>;
+
+    /// Current total reserved amount in USD.
+    async fn total_reserved_usd(&self) -> Usd;
+
+    /// Number of active reservations.
+    async fn active_count(&self) -> usize;
+
+    /// Reserved amount for a specific market (USD).
+    async fn per_market_reserved(&self, market_id: &MarketId) -> Usd;
+}
 
 /// Query the authoritative on-chain or exchange-side balance.
 ///

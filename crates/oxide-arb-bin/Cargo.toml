@@ -1,0 +1,21 @@
+[package]
+name = "oxide-arb-bin"
+description = "Binary entry point for the oxide-arb trading system"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "oxide-arb"
+path = "src/main.rs"
+
+[dependencies]
+oxide-arb-core = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+clap = { version = "4", features = ["derive"] }
+
+[lints]
+workspace = true

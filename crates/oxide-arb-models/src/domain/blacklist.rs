@@ -7,23 +7,26 @@
 use crate::enums::risk::{BlacklistReason, BlacklistScope};
 use crate::types::{MarketId, TokenId};
 use chrono::{DateTime, Utc};
+use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
 use serde::{Deserialize, Serialize};
 
-/// A single blacklist entry for a market or token.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BlacklistEntry {
+// ── Read model ──────────────────────────────────────────────────────
+
+/// DB row projection for the `blacklist_entry` table.
+#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]
+#[sea_orm(entity = "crate::entities::blacklist_entry::Entity")]
+pub struct BlacklistInfo {
     pub market_id: MarketId,
     pub token_id: Option<TokenId>,
     pub scope: BlacklistScope,
     pub reason: BlacklistReason,
-    /// `None` for permanent blacklist entries.
     pub expires_at: Option<DateTime<Utc>>,
+    pub miss_count: i32,
     pub created_at: DateTime<Utc>,
-    /// Consecutive miss count that triggered this entry (for auto-blacklist).
-    pub miss_count: u32,
+    pub updated_at: DateTime<Utc>,
 }
 
-impl BlacklistEntry {
+impl BlacklistInfo {
     /// Whether this entry has expired at the given time.
     #[must_use]
     pub fn is_expired(&self, now: DateTime<Utc>) -> bool {
@@ -43,22 +46,21 @@ impl BlacklistEntry {
     }
 }
 
-/// Result of checking a market/token against the blacklist.
-#[derive(Debug, Clone)]
-pub enum BlacklistCheckResult {
-    /// Not blacklisted — proceed.
-    Clear,
-    /// Blacklisted — do not trade.
-    Blocked {
-        reason: BlacklistReason,
-        scope: BlacklistScope,
-        expires_at: Option<DateTime<Utc>>,
-    },
-}
+info_from_model!(BlacklistInfo, crate::entities::blacklist_entry::Model, {
+    market_id, token_id, scope, reason, expires_at, miss_count,
+    created_at, updated_at,
+});
 
-impl BlacklistCheckResult {
-    #[must_use]
-    pub const fn is_clear(&self) -> bool {
-        matches!(self, Self::Clear)
-    }
+// ── Write DTOs ──────────────────────────────────────────────────────
+
+/// Upsert payload for the `blacklist_entry` table (ON CONFLICT DO UPDATE).
+#[derive(Debug, Clone, DeriveIntoActiveModel)]
+#[sea_orm(active_model = "super::super::entities::blacklist_entry::ActiveModel")]
+pub struct UpsertBlacklistEntry {
+    pub market_id: MarketId,
+    pub token_id: Option<TokenId>,
+    pub scope: BlacklistScope,
+    pub reason: BlacklistReason,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub miss_count: i32,
 }

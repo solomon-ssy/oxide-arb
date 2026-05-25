@@ -1,10 +1,10 @@
 //! In-process L1 cache using Moka (`TinyLFU` eviction).
 
 use crate::cache::backend::CacheBackend;
-use crate::error::StorageError;
 use async_trait::async_trait;
 use moka::Expiry;
 use moka::future::Cache;
+use oxide_arb_error::storage::StorageError;
 use std::time::{Duration, Instant};
 
 #[derive(Clone)]

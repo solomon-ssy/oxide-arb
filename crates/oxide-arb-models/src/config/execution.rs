@@ -6,7 +6,7 @@
 use crate::enums::common::ExecutionMode;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use validator::Validate;
 
 #[derive(Debug, Clone, Default, Deserialize, Validate)]
@@ -17,6 +17,10 @@ pub struct ExecutionConfig {
     pub timeout: TradeTimeoutConfig,
     #[serde(default)]
     pub tiered: TieredExecutionConfig,
+    #[serde(default)]
+    pub funnel: FunnelConfig,
+    #[serde(default)]
+    pub coalescer: CoalescerConfig,
 }
 
 /// FOK + GTD tiered execution strategy configuration.
@@ -115,4 +119,48 @@ const fn default_confirm_timeout() -> u64 {
 }
 const fn default_confirm_poll() -> u64 {
     2
+}
+
+/// Funnel (rate-limited opportunity dispatch) configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FunnelConfig {
+    #[serde(default = "default_max_queue_size")]
+    pub max_queue_size: usize,
+    #[serde(default = "default_min_dispatch_interval_ms")]
+    pub min_dispatch_interval_ms: u64,
+}
+
+impl Default for FunnelConfig {
+    fn default() -> Self {
+        Self {
+            max_queue_size: default_max_queue_size(),
+            min_dispatch_interval_ms: default_min_dispatch_interval_ms(),
+        }
+    }
+}
+
+const fn default_max_queue_size() -> usize {
+    50
+}
+const fn default_min_dispatch_interval_ms() -> u64 {
+    200
+}
+
+/// Coalescer (multi-token → single-market scan dedup) configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CoalescerConfig {
+    #[serde(default = "default_coalesce_window_ms")]
+    pub coalesce_window_ms: u64,
+}
+
+impl Default for CoalescerConfig {
+    fn default() -> Self {
+        Self {
+            coalesce_window_ms: default_coalesce_window_ms(),
+        }
+    }
+}
+
+const fn default_coalesce_window_ms() -> u64 {
+    300
 }

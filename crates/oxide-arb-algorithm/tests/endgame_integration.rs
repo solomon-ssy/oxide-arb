@@ -13,10 +13,8 @@ use oxide_arb_algorithm::{
 };
 use oxide_arb_models::{
     config::{CalibrationConfig, EndgameDetectionConfig},
-    domain::{
-        BookLevel, EndgameBookSnapshot, OrderbookSide,
-        calibration::{BucketKey, DurationBucket, PriceZone},
-    },
+    domain::{BookLevel, EndgameBookSnapshot, OrderbookSide, calibration::BucketKey},
+    enums::calibration::{DurationBucket, PriceZone},
     enums::common::{MarketCategory, StalenessLevel},
     types::{EventId, MarketId, Price, Shares, TokenId, Usd},
 };

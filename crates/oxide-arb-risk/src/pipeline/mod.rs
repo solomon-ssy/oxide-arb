@@ -8,6 +8,7 @@ pub mod checks;
 
 use crate::context::RiskContext;
 use crate::types::{PipelineReport, ReportMode, RiskCheckId, RiskCheckKind, RiskCheckResult};
+use num_traits::ToPrimitive;
 use oxide_arb_models::config::RiskConfig;
 use std::time::Instant;
 
@@ -67,7 +68,7 @@ impl RiskPipeline {
             let check_start = Instant::now();
             let mut result = check.evaluate(ctx);
             result.elapsed_us =
-                u64::try_from(check_start.elapsed().as_micros()).unwrap_or(u64::MAX);
+                ToPrimitive::to_u64(&check_start.elapsed().as_micros()).unwrap_or(u64::MAX);
 
             if !result.passed && check.kind() == RiskCheckKind::Gate {
                 has_failed_hard_gate = true;
@@ -87,7 +88,7 @@ impl RiskPipeline {
             results,
             has_failed_hard_gate,
             first_failure,
-            total_elapsed_us: u64::try_from(pipeline_start.elapsed().as_micros())
+            total_elapsed_us: ToPrimitive::to_u64(&pipeline_start.elapsed().as_micros())
                 .unwrap_or(u64::MAX),
         }
     }

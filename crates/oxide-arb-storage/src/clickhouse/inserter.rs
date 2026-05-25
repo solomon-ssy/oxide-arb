@@ -1,7 +1,8 @@
 //! Async batch inserter for `ClickHouse` with backpressure, retry, and metrics.
 
 use crate::clickhouse::ChWriteMetrics;
-use crate::error::StorageError;
+use num_traits::ToPrimitive;
+use oxide_arb_error::storage::StorageError;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
@@ -128,7 +129,7 @@ impl<T: clickhouse::RowOwned + clickhouse::RowWrite + Send> BatchInserter<T> {
                     metrics
                         .rows_written
                         .with_label_values(&[table])
-                        .inc_by(count as u64);
+                        .inc_by(ToPrimitive::to_u64(&count).unwrap_or(u64::MAX));
                     metrics
                         .insert_duration_seconds
                         .with_label_values(&[table])

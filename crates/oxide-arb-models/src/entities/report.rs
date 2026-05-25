@@ -5,6 +5,7 @@
 //! is an application-generated string (e.g. `"daily_2025-06-01"`).
 
 use crate::enums::common::ReportType;
+use crate::types::ReportId;
 use chrono::{DateTime, NaiveDate, Utc};
 use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -13,7 +14,7 @@ use serde::{Deserialize, Serialize};
 #[sea_orm(table_name = "report")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
-    pub id: String,
+    pub id: ReportId,
 
     /// Report classification (daily / weekly).
     pub report_type: ReportType,

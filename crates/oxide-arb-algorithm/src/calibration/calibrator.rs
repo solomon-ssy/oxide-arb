@@ -113,7 +113,8 @@ impl ResolutionCalibrator {
 mod tests {
     use super::*;
     use oxide_arb_models::{
-        domain::calibration::{DurationBucket, PriceZone},
+        domain::calibration::BucketKey,
+        enums::calibration::{DurationBucket, PriceZone},
         enums::common::MarketCategory,
     };
     use rust_decimal_macros::dec;

@@ -105,7 +105,7 @@ impl InMemoryEmissionCooldown {
 
     /// Compute the effective multiplier: `min(2^hits, max_multiplier)`.
     fn effective_multiplier(&self, consecutive_hits: u32) -> f64 {
-        let exp = i32::try_from(consecutive_hits.min(30)).unwrap_or(30);
+        let exp = ToPrimitive::to_i32(&consecutive_hits.min(30)).unwrap_or(30);
         let power = 2.0_f64.powi(exp);
         let max: f64 = self.max_multiplier.try_into().unwrap_or(16.0);
         power.min(max)

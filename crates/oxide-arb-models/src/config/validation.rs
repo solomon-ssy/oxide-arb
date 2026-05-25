@@ -20,131 +20,10 @@ use super::Inner;
 use crate::enums::common::ExecutionMode;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
-use std::fmt;
 
-/// Validation report produced by [`validate_settings_common`] or
-/// [`validate_settings_mode`].
-#[derive(Debug, Default)]
-pub struct ConfigValidationReport {
-    pub errors: Vec<ConfigValidationError>,
-    pub warnings: Vec<ConfigWarning>,
-}
-
-impl ConfigValidationReport {
-    #[must_use]
-    pub fn has_errors(&self) -> bool {
-        !self.errors.is_empty()
-    }
-
-    #[must_use]
-    pub fn is_clean(&self) -> bool {
-        self.errors.is_empty() && self.warnings.is_empty()
-    }
-}
-
-/// Fatal configuration error — system cannot operate correctly.
-#[derive(Debug)]
-pub enum ConfigValidationError {
-    InfeasibleRange {
-        field_low: &'static str,
-        value_low: Decimal,
-        field_high: &'static str,
-        value_high: Decimal,
-    },
-    InvalidKellyFraction(Decimal),
-    InvertedEndgameThresholds {
-        high: Decimal,
-        low: Decimal,
-    },
-    MissingCredentials {
-        mode: ExecutionMode,
-        missing: Vec<&'static str>,
-    },
-    PartialCredentials {
-        mode: ExecutionMode,
-        present: Vec<&'static str>,
-        missing: Vec<&'static str>,
-    },
-    InvalidValue {
-        field: &'static str,
-        detail: String,
-    },
-}
-
-impl fmt::Display for ConfigValidationError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InfeasibleRange {
-                field_low,
-                value_low,
-                field_high,
-                value_high,
-            } => write!(
-                f,
-                "{field_low} ({value_low}) must be < {field_high} ({value_high})"
-            ),
-            Self::InvalidKellyFraction(v) => {
-                write!(f, "kelly_fraction must be in (0, 1], got {v}")
-            }
-            Self::InvertedEndgameThresholds { high, low } => write!(
-                f,
-                "endgame high_threshold ({high}) must be > low_threshold ({low})"
-            ),
-            Self::MissingCredentials { mode, missing } => write!(
-                f,
-                "[{mode}] missing required credentials: {}",
-                missing.join(", ")
-            ),
-            Self::PartialCredentials {
-                mode,
-                present,
-                missing,
-            } => write!(
-                f,
-                "[{mode}] partial credentials (have: {}, missing: {})",
-                present.join(", "),
-                missing.join(", ")
-            ),
-            Self::InvalidValue { field, detail } => write!(f, "{field}: {detail}"),
-        }
-    }
-}
-
-/// Non-fatal configuration concern.
-#[derive(Debug)]
-pub enum ConfigWarning {
-    LargeKellyFraction(Decimal),
-    PartialCredentialsDryRun {
-        present: Vec<&'static str>,
-        missing: Vec<&'static str>,
-    },
-    NoCredentialsPaper,
-}
-
-impl fmt::Display for ConfigWarning {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::LargeKellyFraction(v) => {
-                write!(
-                    f,
-                    "kelly_fraction={v} is aggressive (>0.5); consider reducing"
-                )
-            }
-            Self::PartialCredentialsDryRun { present, missing } => write!(
-                f,
-                "DryRun with partial credentials (have: {}, missing: {})",
-                present.join(", "),
-                missing.join(", ")
-            ),
-            Self::NoCredentialsPaper => {
-                write!(
-                    f,
-                    "Paper mode without credentials; user-trade stream disabled"
-                )
-            }
-        }
-    }
-}
+use oxide_arb_error::config_validation::{
+    ConfigValidationError, ConfigValidationReport, ConfigWarning,
+};
 
 fn validate_risk_cross_constraints(inner: &Inner, report: &mut ConfigValidationReport) {
     let r = &inner.risk;
@@ -361,6 +240,7 @@ pub fn validate_settings_mode(inner: &Inner, mode: ExecutionMode) -> ConfigValid
 
     let all_present = missing.is_empty();
     let all_missing = present.is_empty();
+    let mode_label = mode.to_string();
 
     match mode {
         ExecutionMode::DryRun => {
@@ -380,7 +260,7 @@ pub fn validate_settings_mode(inner: &Inner, mode: ExecutionMode) -> ConfigValid
                 report
                     .errors
                     .push(ConfigValidationError::PartialCredentials {
-                        mode,
+                        mode: mode_label,
                         present: present.clone(),
                         missing: missing.clone(),
                     });
@@ -391,14 +271,14 @@ pub fn validate_settings_mode(inner: &Inner, mode: ExecutionMode) -> ConfigValid
                 report
                     .errors
                     .push(ConfigValidationError::MissingCredentials {
-                        mode,
+                        mode: mode_label,
                         missing: missing.clone(),
                     });
             } else if !all_present {
                 report
                     .errors
                     .push(ConfigValidationError::PartialCredentials {
-                        mode,
+                        mode: mode_label,
                         present: present.clone(),
                         missing: missing.clone(),
                     });

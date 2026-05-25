@@ -4,6 +4,7 @@ use oxide_arb_models::types::TokenId;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use super::event::WsEvent;
@@ -17,6 +18,7 @@ pub struct ShardRouter {
     output_tx: flume::Sender<WsEvent>,
     ws_url: String,
     shutdown: CancellationToken,
+    last_message_at: Arc<parking_lot::Mutex<Option<Instant>>>,
 }
 
 impl ShardRouter {
@@ -25,6 +27,7 @@ impl ShardRouter {
         output_tx: flume::Sender<WsEvent>,
         ws_url: String,
         shutdown: CancellationToken,
+        last_message_at: Arc<parking_lot::Mutex<Option<Instant>>>,
     ) -> Self {
         Self {
             max_per_shard,
@@ -33,6 +36,7 @@ impl ShardRouter {
             output_tx,
             ws_url,
             shutdown,
+            last_message_at,
         }
     }
 
@@ -102,6 +106,7 @@ impl ShardRouter {
             self.ws_url.clone(),
             self.output_tx.clone(),
             self.shutdown.clone(),
+            Arc::clone(&self.last_message_at),
         );
         for token in tokens {
             shard.subscribed_tokens.insert(token);

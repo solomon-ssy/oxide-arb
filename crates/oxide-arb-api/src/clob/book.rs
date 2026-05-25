@@ -1,12 +1,11 @@
 //! Orderbook snapshot types.
 //!
-//! [`BookLevel`] is re-exported from `oxide_arb_models::domain::book` — the
-//! canonical definition shared across the workspace. [`OrderbookSnapshot`]
-//! remains API-specific because it carries wire-format fields (`hash`) that
-//! only the CLOB REST layer cares about.
+//! [`OrderbookSnapshot`] is API-specific because it carries wire-format fields
+//! (`hash`) that only the CLOB REST layer cares about. For the canonical
+//! [`BookLevel`](oxide_arb_models::domain::BookLevel) type, import directly
+//! from `oxide_arb_models::domain`.
 
-pub use oxide_arb_models::domain::BookLevel;
-
+use oxide_arb_models::domain::BookLevel;
 use oxide_arb_models::types::TokenId;
 use serde::{Deserialize, Serialize};
 

@@ -1,8 +1,9 @@
 use crate::traits::PositionRepository;
 use chrono::Utc;
+use num_traits::ToPrimitive;
 use oxide_arb_error::storage::StorageError;
-use oxide_arb_models::domain::{NewPosition, UpdatePosition};
-use oxide_arb_models::entities::position::{self, ActiveModel, Column, Entity};
+use oxide_arb_models::domain::{NewPosition, PositionInfo, UpdatePosition};
+use oxide_arb_models::entities::position::{ActiveModel, Column, Entity};
 use oxide_arb_models::enums::common::PositionStatus;
 use oxide_arb_models::types::{MarketId, PositionId, Usd};
 use rust_decimal::Decimal;
@@ -11,50 +12,55 @@ use sea_orm::*;
 
 // ── helpers ──────────────────────────────────────────────────────────
 
-async fn find_open_q(db: &impl ConnectionTrait) -> Result<Vec<position::Model>, StorageError> {
+async fn find_open_q(db: &impl ConnectionTrait) -> Result<Vec<PositionInfo>, StorageError> {
     Entity::find()
         .filter(Column::Status.eq(PositionStatus::Open))
         .all(db)
         .await
         .map_err(StorageError::from)
+        .map(|v| v.into_iter().map(Into::into).collect())
 }
 
 async fn find_by_id_q(
     db: &impl ConnectionTrait,
     position_id: &PositionId,
-) -> Result<Option<position::Model>, StorageError> {
+) -> Result<Option<PositionInfo>, StorageError> {
     Entity::find_by_id(position_id.clone())
         .one(db)
         .await
         .map_err(StorageError::from)
+        .map(|opt| opt.map(Into::into))
 }
 
 async fn find_by_market_q(
     db: &impl ConnectionTrait,
     market_id: &MarketId,
-) -> Result<Vec<position::Model>, StorageError> {
+) -> Result<Vec<PositionInfo>, StorageError> {
     Entity::find()
         .filter(Column::MarketId.eq(market_id.as_str()))
         .all(db)
         .await
         .map_err(StorageError::from)
+        .map(|v| v.into_iter().map(Into::into).collect())
 }
 
 async fn create_q(
     db: &impl ConnectionTrait,
     new: NewPosition,
-) -> Result<position::Model, StorageError> {
-    new.into_active_model()
+) -> Result<PositionInfo, StorageError> {
+    let model = new
+        .into_active_model()
         .insert(db)
         .await
-        .map_err(StorageError::from)
+        .map_err(StorageError::from)?;
+    Ok(model.into())
 }
 
 async fn update_q(
     db: &impl ConnectionTrait,
     position_id: &PositionId,
     update: UpdatePosition,
-) -> Result<position::Model, StorageError> {
+) -> Result<PositionInfo, StorageError> {
     let existing = Entity::find_by_id(position_id.clone())
         .one(db)
         .await
@@ -93,7 +99,8 @@ async fn update_q(
         active.settled_at = Set(Some(settled));
     }
 
-    active.update(db).await.map_err(StorageError::from)
+    let model = active.update(db).await.map_err(StorageError::from)?;
+    Ok(model.into())
 }
 
 async fn close_position_q(
@@ -141,9 +148,6 @@ async fn settle_position_q(
 }
 
 async fn total_exposure_q(db: &impl ConnectionTrait) -> Result<Usd, StorageError> {
-    // TODO(cache): cache per-market position summaries with
-    // `CacheKey::PositionSummary { market_id }` once the risk service owns
-    // invalidation after position, trade, and settlement updates.
     let positions = Entity::find()
         .filter(Column::Status.eq(PositionStatus::Open))
         .all(db)
@@ -159,8 +163,7 @@ async fn count_open_q(db: &impl ConnectionTrait) -> Result<usize, StorageError> 
         .count(db)
         .await
         .map_err(StorageError::from)?;
-    #[allow(clippy::cast_possible_truncation)]
-    Ok(count as usize)
+    Ok(ToPrimitive::to_usize(&count).unwrap_or(usize::MAX))
 }
 
 // ── connection-based impl ────────────────────────────────────────────
@@ -180,25 +183,25 @@ impl PgPositionRepository {
 }
 
 impl PositionRepository for PgPositionRepository {
-    async fn find_open(&self) -> Result<Vec<position::Model>, StorageError> {
+    async fn find_open(&self) -> Result<Vec<PositionInfo>, StorageError> {
         find_open_q(&self.db).await
     }
 
     async fn find_by_id(
         &self,
         position_id: &PositionId,
-    ) -> Result<Option<position::Model>, StorageError> {
+    ) -> Result<Option<PositionInfo>, StorageError> {
         find_by_id_q(&self.db, position_id).await
     }
 
     async fn find_by_market(
         &self,
         market_id: &MarketId,
-    ) -> Result<Vec<position::Model>, StorageError> {
+    ) -> Result<Vec<PositionInfo>, StorageError> {
         find_by_market_q(&self.db, market_id).await
     }
 
-    async fn create(&self, position: NewPosition) -> Result<position::Model, StorageError> {
+    async fn create(&self, position: NewPosition) -> Result<PositionInfo, StorageError> {
         create_q(&self.db, position).await
     }
 
@@ -206,7 +209,7 @@ impl PositionRepository for PgPositionRepository {
         &self,
         position_id: &PositionId,
         update: UpdatePosition,
-    ) -> Result<position::Model, StorageError> {
+    ) -> Result<PositionInfo, StorageError> {
         update_q(&self.db, position_id, update).await
     }
 
@@ -242,25 +245,25 @@ pub struct PgPositionRepositoryTxn<'a> {
 }
 
 impl PositionRepository for PgPositionRepositoryTxn<'_> {
-    async fn find_open(&self) -> Result<Vec<position::Model>, StorageError> {
+    async fn find_open(&self) -> Result<Vec<PositionInfo>, StorageError> {
         find_open_q(self.txn).await
     }
 
     async fn find_by_id(
         &self,
         position_id: &PositionId,
-    ) -> Result<Option<position::Model>, StorageError> {
+    ) -> Result<Option<PositionInfo>, StorageError> {
         find_by_id_q(self.txn, position_id).await
     }
 
     async fn find_by_market(
         &self,
         market_id: &MarketId,
-    ) -> Result<Vec<position::Model>, StorageError> {
+    ) -> Result<Vec<PositionInfo>, StorageError> {
         find_by_market_q(self.txn, market_id).await
     }
 
-    async fn create(&self, position: NewPosition) -> Result<position::Model, StorageError> {
+    async fn create(&self, position: NewPosition) -> Result<PositionInfo, StorageError> {
         create_q(self.txn, position).await
     }
 
@@ -268,7 +271,7 @@ impl PositionRepository for PgPositionRepositoryTxn<'_> {
         &self,
         position_id: &PositionId,
         update: UpdatePosition,
-    ) -> Result<position::Model, StorageError> {
+    ) -> Result<PositionInfo, StorageError> {
         update_q(self.txn, position_id, update).await
     }
 

@@ -2,9 +2,10 @@
 
 use crate::infra::retry::{self, RetryPolicy};
 use chrono::{DateTime, Utc};
+use num_traits::ToPrimitive;
 use oxide_arb_error::api::ApiError;
 use oxide_arb_models::config::GammaConfig;
-use oxide_arb_models::domain::market::EventEntry;
+use oxide_arb_models::domain::market::EventRegistryInfo;
 use oxide_arb_models::types::TokenId;
 use url::Url;
 
@@ -41,11 +42,12 @@ fn events_incremental_url(base_url: &str, since: DateTime<Utc>) -> Result<Url, A
     Ok(url)
 }
 
-pub async fn full_sync(
+/// Paginate all active events, returning raw Gamma API DTOs.
+pub async fn full_sync_raw(
     http: &reqwest::Client,
     config: &GammaConfig,
-) -> Result<Vec<EventEntry>, ApiError> {
-    let mut all_events = Vec::new();
+) -> Result<Vec<RawGammaEvent>, ApiError> {
+    let mut all_raw = Vec::new();
     let mut offset = 0u32;
     let page_size = config.page_size;
 
@@ -85,60 +87,72 @@ pub async fn full_sync(
             .await?;
 
         let page_len = raw_events.len();
-        for raw in raw_events {
-            all_events.push(mapper::map_event(raw));
-        }
+        all_raw.extend(raw_events);
 
-        if page_len < page_size as usize {
+        if page_len < ToPrimitive::to_usize(&page_size).unwrap_or(usize::MAX) {
             break;
         }
-        offset += u32::try_from(page_len).unwrap_or(u32::MAX);
+        offset = offset.saturating_add(ToPrimitive::to_u32(&page_len).unwrap_or(u32::MAX));
     }
 
-    Ok(all_events)
+    Ok(all_raw)
+}
+
+pub async fn full_sync(
+    http: &reqwest::Client,
+    config: &GammaConfig,
+) -> Result<Vec<EventRegistryInfo>, ApiError> {
+    let raw = full_sync_raw(http, config).await?;
+    Ok(raw.into_iter().map(mapper::map_event).collect())
+}
+
+pub async fn incremental_sync_raw(
+    http: &reqwest::Client,
+    config: &GammaConfig,
+    since: DateTime<Utc>,
+) -> Result<Vec<RawGammaEvent>, ApiError> {
+    let http = http.clone();
+    let base_url = config.base_url.clone();
+
+    retry::retry_with_policy(&RetryPolicy::gamma_default(), || {
+        let http = http.clone();
+        let base_url = base_url.clone();
+        async move {
+            let url = events_incremental_url(&base_url, since)?;
+
+            let response = http.get(url).send().await.map_err(|e| ApiError::Gamma {
+                endpoint: "/events?updated_since".into(),
+                status: e.status().map_or(0, |s| s.as_u16()),
+                body: e.to_string(),
+            })?;
+
+            if !response.status().is_success() {
+                return Err(ApiError::Gamma {
+                    endpoint: "/events?updated_since".into(),
+                    status: response.status().as_u16(),
+                    body: response.text().await.unwrap_or_default(),
+                });
+            }
+
+            response
+                .json::<Vec<RawGammaEvent>>()
+                .await
+                .map_err(|e| ApiError::Deserialize {
+                    context: "gamma incremental_sync".into(),
+                    detail: e.to_string(),
+                })
+        }
+    })
+    .await
 }
 
 pub async fn incremental_sync(
     http: &reqwest::Client,
     config: &GammaConfig,
     since: DateTime<Utc>,
-) -> Result<Vec<EventEntry>, ApiError> {
-    let http = http.clone();
-    let base_url = config.base_url.clone();
-
-    let raw_events: Vec<RawGammaEvent> =
-        retry::retry_with_policy(&RetryPolicy::gamma_default(), || {
-            let http = http.clone();
-            let base_url = base_url.clone();
-            async move {
-                let url = events_incremental_url(&base_url, since)?;
-
-                let response = http.get(url).send().await.map_err(|e| ApiError::Gamma {
-                    endpoint: "/events?updated_since".into(),
-                    status: e.status().map_or(0, |s| s.as_u16()),
-                    body: e.to_string(),
-                })?;
-
-                if !response.status().is_success() {
-                    return Err(ApiError::Gamma {
-                        endpoint: "/events?updated_since".into(),
-                        status: response.status().as_u16(),
-                        body: response.text().await.unwrap_or_default(),
-                    });
-                }
-
-                response
-                    .json::<Vec<RawGammaEvent>>()
-                    .await
-                    .map_err(|e| ApiError::Deserialize {
-                        context: "gamma incremental_sync".into(),
-                        detail: e.to_string(),
-                    })
-            }
-        })
-        .await?;
-
-    Ok(raw_events.into_iter().map(mapper::map_event).collect())
+) -> Result<Vec<EventRegistryInfo>, ApiError> {
+    let raw = incremental_sync_raw(http, config, since).await?;
+    Ok(raw.into_iter().map(mapper::map_event).collect())
 }
 
 /// Return the first active token from a single Gamma events page.

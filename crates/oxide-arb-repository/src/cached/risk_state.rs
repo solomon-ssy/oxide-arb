@@ -2,7 +2,7 @@
 
 use crate::traits::RiskStateRepository;
 use oxide_arb_error::storage::StorageError;
-use oxide_arb_models::entities::risk_state;
+use oxide_arb_models::domain::{RiskStateInfo, UpsertRiskEngineState};
 use oxide_arb_storage::cache::{CacheKey, TieredCache};
 use std::sync::Arc;
 
@@ -13,7 +13,6 @@ pub struct CachedRiskStateRepository<R: RiskStateRepository> {
 }
 
 impl<R: RiskStateRepository> CachedRiskStateRepository<R> {
-    /// Wrap an existing repository with tiered cache support.
     pub const fn new(inner: R, cache: Arc<TieredCache>) -> Self {
         Self { inner, cache }
     }
@@ -24,9 +23,9 @@ impl<R: RiskStateRepository> CachedRiskStateRepository<R> {
 }
 
 impl<R: RiskStateRepository> RiskStateRepository for CachedRiskStateRepository<R> {
-    async fn load(&self) -> Result<risk_state::Model, StorageError> {
+    async fn load(&self) -> Result<RiskStateInfo, StorageError> {
         let key = CacheKey::RiskState;
-        if let Some(cached) = self.cache.get_json::<risk_state::Model>(&key).await? {
+        if let Some(cached) = self.cache.get_json::<RiskStateInfo>(&key).await? {
             return Ok(cached);
         }
         let state = self.inner.load().await?;
@@ -34,8 +33,8 @@ impl<R: RiskStateRepository> RiskStateRepository for CachedRiskStateRepository<R
         Ok(state)
     }
 
-    async fn save(&self, state: risk_state::ActiveModel) -> Result<(), StorageError> {
-        self.inner.save(state).await?;
+    async fn upsert(&self, state: UpsertRiskEngineState) -> Result<(), StorageError> {
+        self.inner.upsert(state).await?;
         self.invalidate_state().await;
         Ok(())
     }

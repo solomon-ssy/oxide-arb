@@ -1,5 +1,6 @@
 //! Map Polymarket SDK WebSocket payloads into domain [`WsEvent`].
 
+use num_traits::ToPrimitive;
 use oxide_arb_models::enums::common::TickSize;
 use oxide_arb_models::types::{MarketId, Price, Shares, TokenId};
 use polymarket_client_sdk_v2::clob::ws::types::response::{
@@ -56,14 +57,14 @@ impl From<&BookUpdate> for WsEvent {
             asset_id: TokenId::new(book.asset_id.to_string()),
             bids,
             asks,
-            timestamp_ms: u64::try_from(book.timestamp).unwrap_or(0),
+            timestamp_ms: ToPrimitive::to_u64(&book.timestamp.max(0)).unwrap_or(0),
             hash: book.hash.clone().unwrap_or_default(),
         }
     }
 }
 
 fn price_change_events(pc: &PriceChange) -> Vec<WsEvent> {
-    let timestamp_ms = u64::try_from(pc.timestamp).unwrap_or(0);
+    let timestamp_ms = ToPrimitive::to_u64(&pc.timestamp.max(0)).unwrap_or(0);
     pc.price_changes
         .iter()
         .map(|entry| WsEvent::PriceChange {
@@ -83,7 +84,7 @@ impl From<&BestBidAsk> for WsEvent {
             asset_id: TokenId::new(bba.asset_id.to_string()),
             best_bid: Price::new(bba.best_bid),
             best_ask: Price::new(bba.best_ask),
-            timestamp_ms: u64::try_from(bba.timestamp).unwrap_or(0),
+            timestamp_ms: ToPrimitive::to_u64(&bba.timestamp.max(0)).unwrap_or(0),
         }
     }
 }
@@ -103,7 +104,7 @@ impl From<&LastTradePrice> for WsEvent {
         Self::LastTradePrice {
             asset_id: TokenId::new(ltp.asset_id.to_string()),
             price: Price::new(ltp.price),
-            timestamp_ms: u64::try_from(ltp.timestamp).unwrap_or(0),
+            timestamp_ms: ToPrimitive::to_u64(&ltp.timestamp.max(0)).unwrap_or(0),
         }
     }
 }
@@ -119,7 +120,7 @@ impl From<&MarketResolved> for WsEvent {
                 .iter()
                 .map(|id| TokenId::new(id.to_string()))
                 .collect(),
-            timestamp_ms: u64::try_from(mr.timestamp).unwrap_or(0),
+            timestamp_ms: ToPrimitive::to_u64(&mr.timestamp.max(0)).unwrap_or(0),
         }
     }
 }

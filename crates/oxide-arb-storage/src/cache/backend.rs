@@ -1,7 +1,7 @@
 //! Cache backend trait.
 
-use crate::error::StorageError;
 use async_trait::async_trait;
+use oxide_arb_error::storage::StorageError;
 use std::time::Duration;
 
 #[async_trait]

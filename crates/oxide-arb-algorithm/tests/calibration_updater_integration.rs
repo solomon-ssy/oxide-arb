@@ -11,7 +11,8 @@ use oxide_arb_algorithm::calibration::{
 use oxide_arb_error::algorithm::AlgoError;
 use oxide_arb_models::{
     config::CalibrationConfig,
-    domain::calibration::{BucketKey, DurationBucket, PriceZone},
+    domain::calibration::{BucketKey, UpsertCalibration},
+    enums::calibration::{DurationBucket, PriceZone},
     enums::common::MarketCategory,
     types::MarketId,
 };
@@ -25,7 +26,7 @@ use std::sync::{Arc, Mutex};
 #[derive(Debug, Default, Clone)]
 struct CallLog {
     resolved_outcomes: Vec<(i64, bool)>,
-    saved_buckets: Vec<Vec<CalibrationEntry>>,
+    saved_buckets: Vec<Vec<UpsertCalibration>>,
 }
 
 /// Configurable mock implementing [`CalibrationDataSource`].
@@ -91,7 +92,7 @@ impl CalibrationDataSource for MockDataSource {
         map.get(market_id.as_str()).map_or(Ok(None), |v| Ok(*v))
     }
 
-    async fn save_buckets(&self, entries: &[CalibrationEntry]) -> Result<(), AlgoError> {
+    async fn upsert_buckets(&self, entries: &[UpsertCalibration]) -> Result<(), AlgoError> {
         self.log
             .lock()
             .unwrap()
@@ -431,7 +432,7 @@ async fn prior_update_modifies_sparse_buckets() {
         sparse_entry.beta_prior,
     );
 
-    // Verify save_buckets was called
+    // Verify upsert_buckets was called
     let log = ds.call_log();
     assert_eq!(log.saved_buckets.len(), 1);
 }

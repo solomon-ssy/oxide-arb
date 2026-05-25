@@ -495,7 +495,7 @@ PR / push to main
 | Book Update Latency | Heatmap | `oxide_arb_book_update_latency_seconds_bucket` |
 | Stale Books | Time series | `oxide_arb_stale_books_count` |
 | Gamma Sync Status | State timeline | `oxide_arb_gamma_last_sync_success` |
-| Gamma Sync Duration | Time series | `oxide_arb_gamma_sync_duration_seconds` |
+| Gamma Sync Duration | Time series | `oxide_arb_gamma_sync_duration_ms` |
 | WS Reconnects | Counter | `increase(oxide_arb_ws_reconnects_total[1h])` |
 | CH Write Latency | Time series | `oxide_arb_ch_write_latency_seconds` |
 

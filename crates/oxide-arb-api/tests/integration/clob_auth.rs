@@ -3,8 +3,9 @@
 use oxide_arb_api::clob::ClobClient;
 use oxide_arb_api::keystore::Keystore;
 use oxide_arb_models::config::{KeySource, KeysConfig, PolymarketConfig};
-use oxide_arb_models::domain::order::{OrderRequest, OrderStatus};
+use oxide_arb_models::domain::order::OrderRequest;
 use oxide_arb_models::enums::common::{OrderType, Side};
+use oxide_arb_models::enums::order::OrderStatus;
 use oxide_arb_models::types::{MarketId, Price, Shares, TokenId, Usd};
 use rust_decimal_macros::dec;
 use std::sync::Arc;

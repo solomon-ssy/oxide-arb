@@ -12,9 +12,10 @@
 use crate::clock::Clock;
 use crate::types::BreakerState;
 use chrono::{DateTime, Utc};
+use num_traits::ToPrimitive;
 use oxide_arb_error::{OxideError, OxideResult};
 use oxide_arb_models::config::CircuitBreakerConfig;
-use oxide_arb_models::domain::risk::RiskEngineSnapshot;
+use oxide_arb_models::domain::risk::RiskEngineState;
 use oxide_arb_models::enums::risk::{BreakerStateName, CircuitBreakerLevel};
 use std::sync::Arc;
 
@@ -43,12 +44,12 @@ impl CircuitBreaker {
     /// Restore from a persisted snapshot (crash recovery).
     ///
     /// **Fail-closed**: if the snapshot is in `Open` state but missing
-    /// `breaker_level`, `breaker_reason`, or `cooling_until`, this returns
+    /// `breaker_level`, `halt_reason`, or `cooldown_until`, this returns
     /// an error rather than silently defaulting.
     pub fn from_snapshot(
         config: CircuitBreakerConfig,
         clock: Arc<dyn Clock>,
-        snapshot: &RiskEngineSnapshot,
+        snapshot: &RiskEngineState,
     ) -> OxideResult<Self> {
         let state = match snapshot.breaker_state {
             BreakerStateName::Closed => BreakerState::Closed,
@@ -58,14 +59,14 @@ impl CircuitBreaker {
                         "corrupt breaker snapshot: Open state missing breaker_level".into(),
                     )
                 })?;
-                let reason = snapshot.breaker_reason.clone().ok_or_else(|| {
+                let reason = snapshot.halt_reason.clone().ok_or_else(|| {
                     OxideError::Internal(
-                        "corrupt breaker snapshot: Open state missing breaker_reason".into(),
+                        "corrupt breaker snapshot: Open state missing halt_reason".into(),
                     )
                 })?;
-                let cooldown_until = snapshot.cooling_until.ok_or_else(|| {
+                let cooldown_until = snapshot.cooldown_until.ok_or_else(|| {
                     OxideError::Internal(
-                        "corrupt breaker snapshot: Open state missing cooling_until".into(),
+                        "corrupt breaker snapshot: Open state missing cooldown_until".into(),
                     )
                 })?;
                 BreakerState::Open {
@@ -92,7 +93,7 @@ impl CircuitBreaker {
                 entered_at: snapshot.snapshot_at,
                 observation_until: snapshot.snapshot_at
                     + chrono::Duration::seconds(
-                        i64::try_from(config.recovery_observation_secs).unwrap_or(i64::MAX),
+                        ToPrimitive::to_i64(&config.recovery_observation_secs).unwrap_or(i64::MAX),
                     ),
             },
         };
@@ -101,7 +102,7 @@ impl CircuitBreaker {
             config,
             clock,
             state,
-            l2_trip_count: snapshot.l2_trip_count,
+            l2_trip_count: ToPrimitive::to_u32(&snapshot.cooldown_multiplier).unwrap_or(0),
             last_transition_at: snapshot.snapshot_at,
         })
     }
@@ -127,8 +128,8 @@ impl CircuitBreaker {
     pub fn trip(&mut self, level: CircuitBreakerLevel, reason: String) {
         let now = self.clock.now();
         let cooldown_secs = self.cooldown_for_level(level);
-        let cooldown_until =
-            now + chrono::Duration::seconds(i64::try_from(cooldown_secs).unwrap_or(i64::MAX));
+        let cooldown_until = now
+            + chrono::Duration::seconds(ToPrimitive::to_i64(&cooldown_secs).unwrap_or(i64::MAX));
 
         if level == CircuitBreakerLevel::Session {
             self.l2_trip_count += 1;
@@ -221,7 +222,7 @@ impl CircuitBreaker {
                 if *successful_probes >= *required_probes {
                     let observation_until = now
                         + chrono::Duration::seconds(
-                            i64::try_from(self.config.recovery_observation_secs)
+                            ToPrimitive::to_i64(&self.config.recovery_observation_secs)
                                 .unwrap_or(i64::MAX),
                         );
                     self.state = BreakerState::Recovered {
@@ -245,7 +246,7 @@ impl CircuitBreaker {
                     tripped_at: now,
                     cooldown_until: now
                         + chrono::Duration::seconds(
-                            i64::try_from(cooldown_secs).unwrap_or(i64::MAX),
+                            ToPrimitive::to_i64(&cooldown_secs).unwrap_or(i64::MAX),
                         ),
                 };
                 self.last_transition_at = now;

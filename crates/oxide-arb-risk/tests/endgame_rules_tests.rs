@@ -20,11 +20,11 @@ fn make_context(
     open_directional_same_side: usize,
     daily_directional_trades_same_side: u32,
 ) -> RiskContext {
-    use oxide_arb_models::domain::calibration::{
-        BucketKey, CalibrationSnapshot, DurationBucket, PriceZone,
-    };
-    use oxide_arb_models::domain::opportunity::{EndgameMeta, Opportunity, PayoutModel};
+    use oxide_arb_models::domain::calibration::{BucketKey, CalibrationSnapshot};
+    use oxide_arb_models::domain::opportunity::{EndgameMeta, Opportunity};
+    use oxide_arb_models::enums::calibration::{DurationBucket, PriceZone};
     use oxide_arb_models::enums::common::{MarketCategory, Side, StalenessLevel};
+    use oxide_arb_models::enums::opportunity::PayoutModel;
     use oxide_arb_models::types::{Bps, EventId, MarketId, OpportunityId, Price, Shares, TokenId};
 
     let opp = Opportunity {

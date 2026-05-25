@@ -20,6 +20,3 @@ pub mod oracle;
 pub mod ws;
 
 pub use oracle::{VotingOracle, build_voting_oracle};
-
-/// Re-export common result type from the error crate.
-pub use oxide_arb_error::{OxideResult, api::ApiError};

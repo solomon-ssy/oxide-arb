@@ -8,8 +8,10 @@
 use crate::clock::Clock;
 use crate::types::BlacklistKey;
 use dashmap::DashMap;
+use num_traits::ToPrimitive;
 use oxide_arb_models::config::RiskConfig;
-use oxide_arb_models::domain::blacklist::{BlacklistCheckResult, BlacklistEntry};
+use oxide_arb_models::domain::blacklist::BlacklistInfo;
+use oxide_arb_models::enums::blacklist::BlacklistCheckResult;
 use oxide_arb_models::enums::risk::{BlacklistReason, BlacklistScope};
 use oxide_arb_models::types::{MarketId, TokenId};
 use std::sync::Arc;
@@ -17,7 +19,7 @@ use std::time::Duration;
 
 /// Concurrent blacklist projection with lazy TTL eviction.
 pub struct BlacklistManager {
-    entries: DashMap<BlacklistKey, BlacklistEntry>,
+    entries: DashMap<BlacklistKey, BlacklistInfo>,
     market_miss_blacklist_count: u32,
     market_miss_blacklist_duration_secs: u64,
     clock: Arc<dyn Clock>,
@@ -34,7 +36,7 @@ impl BlacklistManager {
         for market_str in &config.permanent_blacklist_markets {
             let market_id = MarketId::new(market_str);
             let key = BlacklistKey::Market(market_id.clone());
-            let entry = BlacklistEntry {
+            let entry = BlacklistInfo {
                 market_id,
                 token_id: None,
                 scope: BlacklistScope::Full,
@@ -42,6 +44,7 @@ impl BlacklistManager {
                 expires_at: None,
                 created_at: now,
                 miss_count: 0,
+                updated_at: now,
             };
             entries.insert(key, entry);
         }
@@ -49,7 +52,7 @@ impl BlacklistManager {
         for token_str in &config.permanent_blacklist_tokens {
             let token_id = TokenId::new(token_str);
             let key = BlacklistKey::Token(token_id.clone());
-            let entry = BlacklistEntry {
+            let entry = BlacklistInfo {
                 market_id: MarketId::new("_token_blacklist_"),
                 token_id: Some(token_id),
                 scope: BlacklistScope::Full,
@@ -57,6 +60,7 @@ impl BlacklistManager {
                 expires_at: None,
                 created_at: now,
                 miss_count: 0,
+                updated_at: now,
             };
             entries.insert(key, entry);
         }
@@ -77,7 +81,7 @@ impl BlacklistManager {
     }
 
     /// Startup recovery: load persisted entries, filtering expired ones.
-    pub fn load_entries(&self, entries: Vec<BlacklistEntry>) {
+    pub fn load_entries(&self, entries: Vec<BlacklistInfo>) {
         let now = self.clock.now();
         let mut loaded = 0usize;
 
@@ -139,7 +143,7 @@ impl BlacklistManager {
         reason: BlacklistReason,
         duration: Duration,
         miss_count: u32,
-    ) -> BlacklistEntry {
+    ) -> BlacklistInfo {
         let now = self.clock.now();
         let expires_at = now
             + chrono::Duration::from_std(duration).unwrap_or_else(|_| chrono::Duration::hours(1));
@@ -156,17 +160,18 @@ impl BlacklistManager {
             if Some(expires_at) > existing.expires_at {
                 existing.expires_at = Some(expires_at);
             }
-            existing.miss_count = miss_count;
+            existing.miss_count = ToPrimitive::to_i32(&miss_count).unwrap_or(i32::MAX);
             existing.clone()
         } else {
-            let new_entry = BlacklistEntry {
+            let new_entry = BlacklistInfo {
                 market_id,
                 token_id,
                 scope,
                 reason,
                 expires_at: Some(expires_at),
                 created_at: now,
-                miss_count,
+                miss_count: ToPrimitive::to_i32(&miss_count).unwrap_or(i32::MAX),
+                updated_at: now,
             };
             self.entries.insert(key, new_entry.clone());
             new_entry
@@ -184,11 +189,11 @@ impl BlacklistManager {
     }
 
     /// Add a permanent (never-expiring) blacklist entry.
-    pub fn add_permanent(&self, market_id: MarketId, reason: BlacklistReason) -> BlacklistEntry {
+    pub fn add_permanent(&self, market_id: MarketId, reason: BlacklistReason) -> BlacklistInfo {
         let now = self.clock.now();
         let key = BlacklistKey::Market(market_id.clone());
 
-        let entry = BlacklistEntry {
+        let entry = BlacklistInfo {
             market_id,
             token_id: None,
             scope: BlacklistScope::Full,
@@ -196,6 +201,7 @@ impl BlacklistManager {
             expires_at: None,
             created_at: now,
             miss_count: 0,
+            updated_at: now,
         };
 
         self.entries.insert(key, entry.clone());
@@ -250,7 +256,7 @@ impl BlacklistManager {
         &self,
         market_id: &MarketId,
         consecutive_misses: u32,
-    ) -> Option<BlacklistEntry> {
+    ) -> Option<BlacklistInfo> {
         if consecutive_misses < self.market_miss_blacklist_count {
             return None;
         }
@@ -298,7 +304,7 @@ impl BlacklistManager {
 
     /// Snapshot of all active (non-expired) entries.
     #[must_use]
-    pub fn active_entries(&self) -> Vec<BlacklistEntry> {
+    pub fn active_entries(&self) -> Vec<BlacklistInfo> {
         let now = self.clock.now();
         self.entries
             .iter()

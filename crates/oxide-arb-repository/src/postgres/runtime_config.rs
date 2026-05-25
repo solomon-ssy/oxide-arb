@@ -1,9 +1,9 @@
 use crate::traits::RuntimeConfigRepository;
 use chrono::Utc;
 use oxide_arb_error::storage::StorageError;
-use oxide_arb_models::entities::runtime_config::{
-    self, ActiveModel, Column, Entity, RuntimeConfigKey,
-};
+use oxide_arb_models::domain::{RuntimeConfigInfo, UpsertRuntimeConfig};
+use oxide_arb_models::entities::runtime_config::{ActiveModel, Column, Entity};
+use oxide_arb_models::enums::runtime_config::RuntimeConfigKey;
 use sea_orm::sea_query::OnConflict;
 #[allow(clippy::wildcard_imports)]
 use sea_orm::*;
@@ -28,30 +28,29 @@ pub struct PgRuntimeConfigRepositoryTxn<'a> {
 
 async fn do_get(
     db: &impl ConnectionTrait,
-    key: &str,
-) -> Result<Option<runtime_config::Model>, StorageError> {
-    Entity::find_by_id(key.to_string())
+    key: RuntimeConfigKey,
+) -> Result<Option<RuntimeConfigInfo>, StorageError> {
+    Entity::find_by_id(key)
         .one(db)
         .await
         .map_err(StorageError::from)
+        .map(|opt| opt.map(Into::into))
 }
 
-async fn do_set(
+async fn do_upsert(
     db: &impl ConnectionTrait,
-    key: &str,
-    value: &serde_json::Value,
-    updated_by: &str,
-) -> Result<runtime_config::Model, StorageError> {
+    dto: UpsertRuntimeConfig,
+) -> Result<RuntimeConfigInfo, StorageError> {
     let now = Utc::now();
     let model = ActiveModel {
-        key: Set(key.to_string()),
-        value: Set(value.clone()),
+        key: Set(dto.key),
+        value: Set(dto.value),
         description: NotSet,
-        updated_by: Set(updated_by.to_string()),
+        updated_by: Set(dto.updated_by),
         updated_at: Set(now),
     };
 
-    Entity::insert(model)
+    let result = Entity::insert(model)
         .on_conflict(
             OnConflict::column(Column::Key)
                 .update_columns([Column::Value, Column::UpdatedBy, Column::UpdatedAt])
@@ -59,19 +58,21 @@ async fn do_set(
         )
         .exec_with_returning(db)
         .await
-        .map_err(StorageError::from)
+        .map_err(StorageError::from)?;
+    Ok(result.into())
 }
 
-async fn do_get_all(db: &impl ConnectionTrait) -> Result<Vec<runtime_config::Model>, StorageError> {
+async fn do_get_all(db: &impl ConnectionTrait) -> Result<Vec<RuntimeConfigInfo>, StorageError> {
     Entity::find()
         .order_by_asc(Column::Key)
         .all(db)
         .await
         .map_err(StorageError::from)
+        .map(|v| v.into_iter().map(Into::into).collect())
 }
 
-async fn do_delete(db: &impl ConnectionTrait, key: &str) -> Result<bool, StorageError> {
-    let result = Entity::delete_by_id(key.to_string())
+async fn do_delete(db: &impl ConnectionTrait, key: RuntimeConfigKey) -> Result<bool, StorageError> {
+    let result = Entity::delete_by_id(key)
         .exec(db)
         .await
         .map_err(StorageError::from)?;
@@ -79,79 +80,37 @@ async fn do_delete(db: &impl ConnectionTrait, key: &str) -> Result<bool, Storage
 }
 
 impl RuntimeConfigRepository for PgRuntimeConfigRepository {
-    async fn get(&self, key: &str) -> Result<Option<runtime_config::Model>, StorageError> {
+    async fn get(&self, key: RuntimeConfigKey) -> Result<Option<RuntimeConfigInfo>, StorageError> {
         do_get(&self.db, key).await
     }
 
-    async fn get_typed(
-        &self,
-        key: RuntimeConfigKey,
-    ) -> Result<Option<runtime_config::Model>, StorageError> {
-        do_get(&self.db, key.as_str()).await
+    async fn upsert(&self, dto: UpsertRuntimeConfig) -> Result<RuntimeConfigInfo, StorageError> {
+        do_upsert(&self.db, dto).await
     }
 
-    async fn set(
-        &self,
-        key: &str,
-        value: &serde_json::Value,
-        updated_by: &str,
-    ) -> Result<runtime_config::Model, StorageError> {
-        do_set(&self.db, key, value, updated_by).await
-    }
-
-    async fn set_typed(
-        &self,
-        key: RuntimeConfigKey,
-        value: &serde_json::Value,
-        updated_by: &str,
-    ) -> Result<runtime_config::Model, StorageError> {
-        do_set(&self.db, key.as_str(), value, updated_by).await
-    }
-
-    async fn get_all(&self) -> Result<Vec<runtime_config::Model>, StorageError> {
+    async fn get_all(&self) -> Result<Vec<RuntimeConfigInfo>, StorageError> {
         do_get_all(&self.db).await
     }
 
-    async fn delete(&self, key: &str) -> Result<bool, StorageError> {
+    async fn delete(&self, key: RuntimeConfigKey) -> Result<bool, StorageError> {
         do_delete(&self.db, key).await
     }
 }
 
 impl RuntimeConfigRepository for PgRuntimeConfigRepositoryTxn<'_> {
-    async fn get(&self, key: &str) -> Result<Option<runtime_config::Model>, StorageError> {
+    async fn get(&self, key: RuntimeConfigKey) -> Result<Option<RuntimeConfigInfo>, StorageError> {
         do_get(self.txn, key).await
     }
 
-    async fn get_typed(
-        &self,
-        key: RuntimeConfigKey,
-    ) -> Result<Option<runtime_config::Model>, StorageError> {
-        do_get(self.txn, key.as_str()).await
+    async fn upsert(&self, dto: UpsertRuntimeConfig) -> Result<RuntimeConfigInfo, StorageError> {
+        do_upsert(self.txn, dto).await
     }
 
-    async fn set(
-        &self,
-        key: &str,
-        value: &serde_json::Value,
-        updated_by: &str,
-    ) -> Result<runtime_config::Model, StorageError> {
-        do_set(self.txn, key, value, updated_by).await
-    }
-
-    async fn set_typed(
-        &self,
-        key: RuntimeConfigKey,
-        value: &serde_json::Value,
-        updated_by: &str,
-    ) -> Result<runtime_config::Model, StorageError> {
-        do_set(self.txn, key.as_str(), value, updated_by).await
-    }
-
-    async fn get_all(&self) -> Result<Vec<runtime_config::Model>, StorageError> {
+    async fn get_all(&self) -> Result<Vec<RuntimeConfigInfo>, StorageError> {
         do_get_all(self.txn).await
     }
 
-    async fn delete(&self, key: &str) -> Result<bool, StorageError> {
+    async fn delete(&self, key: RuntimeConfigKey) -> Result<bool, StorageError> {
         do_delete(self.txn, key).await
     }
 }

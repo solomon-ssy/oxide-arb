@@ -2,8 +2,8 @@
 
 use crate::cache::RedisBackend;
 use crate::clickhouse::ClickHousePool;
-use crate::error::StorageError;
 use crate::postgres::PostgresPool;
+use oxide_arb_error::storage::StorageError;
 use tracing::warn;
 
 pub struct StorageHealth<'a> {

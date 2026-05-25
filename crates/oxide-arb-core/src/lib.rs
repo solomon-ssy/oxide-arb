@@ -1,0 +1,19 @@
+//! `oxide-arb-core` — System hub for the Endgame trading engine.
+//!
+//! Owns the application lifecycle (`AppContext`), data pipeline, detection
+//! layer, execution engine, DI bridge adapters, and orchestration services.
+//!
+//! - [`bridge`] — trait adapters (`impl RiskMetrics`, `impl FeeEstimator`, …)
+//! - [`service`] — periodic orchestration (`GammaService`, cache refresh, …)
+
+pub mod app;
+pub mod bridge;
+pub mod detection;
+pub mod execution;
+pub mod exposure;
+pub mod infra;
+pub mod observability;
+pub mod outbox;
+pub mod pipeline;
+pub mod service;
+pub mod task_registry;

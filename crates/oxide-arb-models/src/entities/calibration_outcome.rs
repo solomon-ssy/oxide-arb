@@ -1,6 +1,6 @@
 //! `endgame_calibration_outcomes` table entity.
 
-use crate::domain::calibration::{DurationBucket, PriceZone};
+use crate::enums::calibration::{DurationBucket, PriceZone};
 use crate::enums::common::MarketCategory;
 use crate::types::{MarketId, Price, Probability};
 use chrono::{DateTime, Utc};

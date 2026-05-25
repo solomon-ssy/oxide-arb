@@ -14,8 +14,8 @@
 //! - **Operation timeouts**: Every cache operation has a bounded deadline.
 
 use crate::cache::{CacheKey, CacheMetrics, TieredCache};
-use crate::error::StorageError;
 use bitcode::{Decode, Encode};
+use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::config::CacheConfig;
 use std::collections::HashMap;
 use std::future::Future;

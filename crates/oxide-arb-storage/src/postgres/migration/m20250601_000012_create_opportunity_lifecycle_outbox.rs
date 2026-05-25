@@ -98,21 +98,12 @@ fn outbox_event_table() -> TableCreateStatement {
                 .null(),
         )
         .col(ColumnDef::new(OutboxEvent::LastError).text().null())
+        .col(ColumnDef::new(OutboxEvent::DeadLetterReason).text().null())
         .col(
             ColumnDef::new(OutboxEvent::CreatedAt)
                 .timestamp_with_time_zone()
                 .not_null()
                 .default(Expr::current_timestamp()),
-        )
-        .foreign_key(
-            ForeignKey::create()
-                .name("fk_outbox_lifecycle_event")
-                .from(OutboxEvent::Table, OutboxEvent::EventId)
-                .to(
-                    OpportunityLifecycleEvent::Table,
-                    OpportunityLifecycleEvent::EventId,
-                )
-                .on_delete(ForeignKeyAction::Restrict),
         )
         .to_owned()
 }
@@ -131,9 +122,14 @@ fn create_indexes() -> Vec<IndexCreateStatement> {
 async fn specials(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
     execute_sql(
         manager,
-        ["CREATE INDEX IF NOT EXISTS idx_outbox_pending \
-         ON outbox_event (created_at) \
-         WHERE published_at IS NULL"],
+        [
+            "CREATE INDEX IF NOT EXISTS idx_outbox_pending \
+             ON outbox_event (created_at) \
+             WHERE published_at IS NULL",
+            "CREATE INDEX IF NOT EXISTS idx_outbox_unpublished_attempts \
+             ON outbox_event (publish_attempts, created_at) \
+             WHERE published_at IS NULL AND dead_letter_reason IS NULL",
+        ],
     )
     .await
 }

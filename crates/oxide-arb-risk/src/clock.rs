@@ -5,7 +5,7 @@
 
 use chrono::{DateTime, NaiveDate, Utc};
 use std::sync::Arc;
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 use std::sync::atomic::{AtomicI64, Ordering};
 
 /// Abstraction over the system clock.
@@ -36,12 +36,12 @@ impl Clock for UtcClock {
 ///
 /// Internally stores a Unix timestamp (milliseconds) in an `AtomicI64`.
 /// Callers advance time via [`FakeClock::advance`] or [`FakeClock::set`].
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 pub struct FakeClock {
     millis: AtomicI64,
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 impl FakeClock {
     /// Create a fake clock anchored at the given instant.
     pub const fn new(initial: DateTime<Utc>) -> Self {
@@ -63,7 +63,7 @@ impl FakeClock {
     }
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 impl Clock for FakeClock {
     fn now(&self) -> DateTime<Utc> {
         let ms = self.millis.load(Ordering::SeqCst);
@@ -71,7 +71,7 @@ impl Clock for FakeClock {
     }
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 impl std::fmt::Debug for FakeClock {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "FakeClock({})", self.now())

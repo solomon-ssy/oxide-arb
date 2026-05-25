@@ -1,10 +1,12 @@
-//! System status and health reporting domain models.
+//! System status, lifecycle, config, accounting, and reporting domain models.
 
-use crate::enums::common::ExecutionMode;
-use crate::enums::lifecycle::ShutdownStage;
+use crate::enums::common::{ExecutionMode, ReportType};
+use crate::enums::lifecycle::{LifecyclePhase, LifecycleRecorder, ShutdownStage};
 use crate::enums::risk::BreakerStateName;
-use crate::types::Usd;
-use chrono::{DateTime, Utc};
+use crate::enums::runtime_config::RuntimeConfigKey;
+use crate::types::{PeriodId, Probability, Usd};
+use chrono::{DateTime, NaiveDate, Utc};
+use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
 use serde::{Deserialize, Serialize};
 
 /// Overall system status reported by the health endpoint.
@@ -45,4 +47,108 @@ pub struct ShutdownProgress {
     pub inflight_trades: u32,
     pub pending_flushes: u32,
     pub started_at: DateTime<Utc>,
+}
+
+// ── Lifecycle ────────────────────────────────────────────────────────
+
+/// DB row projection for the `lifecycle_event` table.
+#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]
+#[sea_orm(entity = "crate::entities::lifecycle_event::Entity")]
+pub struct LifecycleEventInfo {
+    pub id: i64,
+    pub phase: LifecyclePhase,
+    pub stage: Option<LifecycleRecorder>,
+    pub message: String,
+    pub metadata: Option<serde_json::Value>,
+    pub created_at: DateTime<Utc>,
+}
+
+info_from_model!(LifecycleEventInfo, crate::entities::lifecycle_event::Model, {
+    id, phase, stage, message, metadata, created_at,
+});
+
+/// Write DTO for creating a new lifecycle event.
+#[derive(Debug, Clone)]
+pub struct NewLifecycleEvent {
+    pub phase: LifecyclePhase,
+    pub stage: Option<LifecycleRecorder>,
+    pub message: String,
+    pub metadata: Option<serde_json::Value>,
+}
+
+// ── Runtime config ───────────────────────────────────────────────────
+
+/// DB row projection for the `runtime_config` table.
+#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]
+#[sea_orm(entity = "crate::entities::runtime_config::Entity")]
+pub struct RuntimeConfigInfo {
+    pub key: RuntimeConfigKey,
+    pub value: serde_json::Value,
+    pub description: Option<String>,
+    pub updated_by: String,
+    pub updated_at: DateTime<Utc>,
+}
+
+info_from_model!(RuntimeConfigInfo, crate::entities::runtime_config::Model, {
+    key, value, description, updated_by, updated_at,
+});
+
+/// Upsert payload for the `runtime_config` table.
+#[derive(Debug, Clone)]
+pub struct UpsertRuntimeConfig {
+    pub key: RuntimeConfigKey,
+    pub value: serde_json::Value,
+    pub updated_by: String,
+}
+
+// ── Accounting ───────────────────────────────────────────────────────
+
+/// DB row projection for the `accounting_period` table.
+#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]
+#[sea_orm(entity = "crate::entities::accounting_period::Entity")]
+pub struct AccountingPeriodInfo {
+    pub period_id: PeriodId,
+    pub period_type: ReportType,
+    pub start_date: NaiveDate,
+    pub end_date: NaiveDate,
+    pub realized_pnl: Usd,
+    pub total_fees: Usd,
+    pub trade_count: i32,
+    pub win_count: i32,
+    pub loss_count: i32,
+    pub miss_count: i32,
+    pub max_drawdown: Usd,
+    pub sharpe_ratio: Option<Probability>,
+    pub finalized: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+info_from_model!(AccountingPeriodInfo, crate::entities::accounting_period::Model, {
+    period_id, period_type, start_date, end_date, realized_pnl, total_fees,
+    trade_count, win_count, loss_count, miss_count, max_drawdown,
+    sharpe_ratio, finalized, created_at,
+});
+
+/// Write DTO for creating a new accounting period.
+#[derive(Debug, Clone, DeriveIntoActiveModel)]
+#[sea_orm(active_model = "super::super::entities::accounting_period::ActiveModel")]
+pub struct NewAccountingPeriod {
+    pub period_id: PeriodId,
+    pub period_type: ReportType,
+    pub start_date: NaiveDate,
+    pub end_date: NaiveDate,
+}
+
+/// Partial update for an accounting period.
+#[derive(Debug, Clone, Default)]
+pub struct UpdateAccountingPeriod {
+    pub realized_pnl: Option<Usd>,
+    pub total_fees: Option<Usd>,
+    pub trade_count: Option<i32>,
+    pub win_count: Option<i32>,
+    pub loss_count: Option<i32>,
+    pub miss_count: Option<i32>,
+    pub max_drawdown: Option<Usd>,
+    pub sharpe_ratio: Option<Probability>,
+    pub finalized: Option<bool>,
 }

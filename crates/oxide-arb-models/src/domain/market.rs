@@ -4,24 +4,92 @@
 //! Gamma API and enriched by the data pipeline.
 
 use crate::enums::common::{MarketCategory, TickSize};
-use crate::enums::market::MarketStatus;
+use crate::enums::market::{EventStatus, MarketStatus};
 use crate::types::{EventId, MarketId, Price, TokenId, Usd};
 use chrono::{DateTime, Utc};
+use oxide_arb_error::market::MarketError;
 use rust_decimal::Decimal;
+use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
 use serde::{Deserialize, Serialize};
+
+// ── Market read models ──────────────────────────────────────────────
+
+/// DB row projection matching `entities::market::Model` columns exactly.
+#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]
+#[sea_orm(entity = "crate::entities::market::Entity")]
+pub struct MarketInfo {
+    pub market_id: MarketId,
+    pub event_id: EventId,
+    pub question: String,
+    pub slug: String,
+    pub category: MarketCategory,
+    pub status: MarketStatus,
+    pub outcome: Option<String>,
+    pub yes_token_id: TokenId,
+    pub no_token_id: TokenId,
+    pub tick_size: TickSize,
+    pub neg_risk: bool,
+    pub end_date: Option<DateTime<Utc>>,
+    pub resolved_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+info_from_model!(MarketInfo, crate::entities::market::Model, {
+    market_id, event_id, question, slug, category, status, outcome,
+    yes_token_id, no_token_id, tick_size, neg_risk, end_date, resolved_at,
+    created_at, updated_at,
+});
+
+impl From<MarketInfo> for MarketRegistryInfo {
+    fn from(info: MarketInfo) -> Self {
+        let tokens = vec![
+            TokenInfo {
+                token_id: info.yes_token_id.clone(),
+                outcome: "Yes".to_owned(),
+                neg_risk: info.neg_risk,
+            },
+            TokenInfo {
+                token_id: info.no_token_id.clone(),
+                outcome: "No".to_owned(),
+                neg_risk: info.neg_risk,
+            },
+        ];
+        Self {
+            market_id: info.market_id,
+            event_id: info.event_id,
+            question: info.question,
+            slug: info.slug,
+            category: info.category,
+            status: info.status,
+            neg_risk: info.neg_risk,
+            tick_size: info.tick_size,
+            tokens,
+            best_bid: None,
+            best_ask: None,
+            depth_usd: None,
+            min_order_size: Decimal::ZERO,
+            volume_24h: Usd::ZERO,
+            created_at: info.created_at,
+            updated_at: info.updated_at,
+        }
+    }
+}
 
 /// A single conditional token within a market.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TokenDescriptor {
+pub struct TokenInfo {
     pub token_id: TokenId,
     pub outcome: String,
-    /// Whether this is a neg-risk market token.
     pub neg_risk: bool,
 }
 
-/// A market (condition) in the registry.
+/// In-memory enriched market view with runtime orderbook fields.
+///
+/// Replaces the old `MarketEntry`. Not persisted directly; convert to
+/// `UpsertMarket` for persistence.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MarketEntry {
+pub struct MarketRegistryInfo {
     pub market_id: MarketId,
     pub event_id: EventId,
     pub question: String,
@@ -30,24 +98,130 @@ pub struct MarketEntry {
     pub status: MarketStatus,
     pub neg_risk: bool,
     pub tick_size: TickSize,
-    pub tokens: Vec<TokenDescriptor>,
-    /// Current best bid price.
+    pub tokens: Vec<TokenInfo>,
     pub best_bid: Option<Price>,
-    /// Current best ask price.
     pub best_ask: Option<Price>,
-    /// Total order book depth in USD.
     pub depth_usd: Option<Usd>,
-    /// Minimum order size in USDC.
     pub min_order_size: Decimal,
-    /// Volume in the last 24h.
     pub volume_24h: Usd,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
 
-/// A Polymarket event grouping multiple markets.
+impl MarketRegistryInfo {
+    /// Resolve YES/NO token IDs using outcome labels (case-insensitive).
+    ///
+    /// Fails closed when either leg is missing — never guesses by token order.
+    pub fn yes_no_tokens(&self) -> Result<(TokenId, TokenId), MarketError> {
+        let yes = self
+            .tokens
+            .iter()
+            .find(|t| t.outcome.eq_ignore_ascii_case("yes"))
+            .map(|t| t.token_id.clone());
+        let no = self
+            .tokens
+            .iter()
+            .find(|t| t.outcome.eq_ignore_ascii_case("no"))
+            .map(|t| t.token_id.clone());
+
+        match (yes, no) {
+            (Some(y), Some(n)) => Ok((y, n)),
+            _ => Err(MarketError::InvalidTokenPair {
+                market_id: self.market_id.to_string(),
+            }),
+        }
+    }
+}
+
+// ── Market write DTOs ───────────────────────────────────────────────
+
+/// Upsert payload for the `market` table. Derives `DeriveIntoActiveModel`.
+///
+/// Timestamps (`created_at`, `updated_at`) are populated by the entity's
+/// `ActiveModelBehavior::before_save`.
+#[derive(Debug, Clone, DeriveIntoActiveModel)]
+#[sea_orm(active_model = "super::super::entities::market::ActiveModel")]
+pub struct UpsertMarket {
+    pub market_id: MarketId,
+    pub event_id: EventId,
+    pub question: String,
+    pub slug: String,
+    pub category: MarketCategory,
+    pub status: MarketStatus,
+    pub outcome: Option<String>,
+    pub yes_token_id: TokenId,
+    pub no_token_id: TokenId,
+    pub tick_size: TickSize,
+    pub neg_risk: bool,
+    pub end_date: Option<DateTime<Utc>>,
+    pub resolved_at: Option<DateTime<Utc>>,
+}
+
+impl TryFrom<&MarketRegistryInfo> for UpsertMarket {
+    type Error = MarketError;
+
+    fn try_from(info: &MarketRegistryInfo) -> Result<Self, Self::Error> {
+        let (yes_token_id, no_token_id) = info.yes_no_tokens()?;
+        Ok(Self {
+            market_id: info.market_id.clone(),
+            event_id: info.event_id.clone(),
+            question: info.question.clone(),
+            slug: info.slug.clone(),
+            category: info.category,
+            status: info.status,
+            outcome: None,
+            yes_token_id,
+            no_token_id,
+            tick_size: info.tick_size,
+            neg_risk: info.neg_risk,
+            end_date: None,
+            resolved_at: None,
+        })
+    }
+}
+
+/// Fee metadata tuples for `FeeCalculator::ingest_gamma_markets`.
+pub fn collect_fee_data(entries: &[MarketRegistryInfo]) -> Vec<(TokenId, bool, MarketCategory)> {
+    entries
+        .iter()
+        .flat_map(|entry| {
+            entry
+                .tokens
+                .iter()
+                .map(|token| (token.token_id.clone(), true, entry.category))
+        })
+        .collect()
+}
+
+// ── Event read models ───────────────────────────────────────────────
+
+/// DB row projection matching `entities::event::Model` columns exactly.
+#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]
+#[sea_orm(entity = "crate::entities::event::Entity")]
+pub struct EventInfo {
+    pub event_id: EventId,
+    pub title: String,
+    pub slug: String,
+    pub category: MarketCategory,
+    pub status: EventStatus,
+    pub neg_risk: bool,
+    pub end_date: Option<DateTime<Utc>>,
+    pub raw_gamma: Option<serde_json::Value>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+info_from_model!(EventInfo, crate::entities::event::Model, {
+    event_id, title, slug, category, status, neg_risk, end_date,
+    raw_gamma, created_at, updated_at,
+});
+
+/// In-memory enriched event view with associated market IDs.
+///
+/// Replaces the old `EventEntry`. Not persisted directly; convert to
+/// `UpsertEvent` for persistence.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EventEntry {
+pub struct EventRegistryInfo {
     pub event_id: EventId,
     pub title: String,
     pub slug: String,
@@ -55,4 +229,23 @@ pub struct EventEntry {
     pub neg_risk: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+// ── Event write DTOs ────────────────────────────────────────────────
+
+/// Upsert payload for the `event` table. Derives `DeriveIntoActiveModel`.
+///
+/// Timestamps (`created_at`, `updated_at`) are populated by the entity's
+/// `ActiveModelBehavior::before_save`.
+#[derive(Debug, Clone, DeriveIntoActiveModel)]
+#[sea_orm(active_model = "super::super::entities::event::ActiveModel")]
+pub struct UpsertEvent {
+    pub event_id: EventId,
+    pub title: String,
+    pub slug: String,
+    pub category: MarketCategory,
+    pub status: EventStatus,
+    pub neg_risk: bool,
+    pub end_date: Option<DateTime<Utc>>,
+    pub raw_gamma: Option<serde_json::Value>,
 }

@@ -4,12 +4,13 @@
 //! audit event that must be durably persisted before the mutation is
 //! acknowledged.
 
-use crate::types::{
-    PeriodStats, ReconciliationStatus, RiskCheckResult, SizeBreakdown, StateVersion,
-};
+use crate::types::{PeriodStats, RiskCheckResult, SizeBreakdown, StateVersion};
 use chrono::{DateTime, NaiveDate, Utc};
-use oxide_arb_models::domain::blacklist::BlacklistEntry;
+use oxide_arb_models::domain::blacklist::BlacklistInfo;
+use oxide_arb_models::domain::risk::NewRiskAuditEvent;
+use oxide_arb_models::enums::ReconciliationStatus;
 use oxide_arb_models::enums::common::TradeOutcome;
+use oxide_arb_models::enums::risk::RiskAuditEventType;
 use oxide_arb_models::enums::risk::{
     BreakerStateName, CircuitBreakerLevel, TradeAccountingPhase, WindowType,
 };
@@ -43,7 +44,7 @@ pub enum RiskAuditEvent {
         operator_reason: String,
     },
     BlacklistAdded {
-        entry: BlacklistEntry,
+        entry: BlacklistInfo,
     },
     BlacklistRemoved {
         market_id: MarketId,
@@ -91,4 +92,58 @@ pub struct RiskDecisionTrace {
     pub state_version: StateVersion,
     pub total_elapsed_us: u64,
     pub evaluated_at: DateTime<Utc>,
+}
+
+impl From<&RiskAuditEvent> for NewRiskAuditEvent {
+    fn from(event: &RiskAuditEvent) -> Self {
+        let (event_type, opportunity_id, trade_id) = audit_event_metadata(event);
+        let payload = serde_json::to_value(event).unwrap_or(serde_json::Value::Null);
+
+        Self {
+            event_type,
+            opportunity_id,
+            trade_id,
+            payload,
+            created_at: Utc::now(),
+        }
+    }
+}
+
+fn audit_event_metadata(
+    event: &RiskAuditEvent,
+) -> (RiskAuditEventType, Option<OpportunityId>, Option<TradeId>) {
+    match event {
+        RiskAuditEvent::TradeAllowed { opportunity_id, .. } => (
+            RiskAuditEventType::TradeAllowed,
+            Some(opportunity_id.clone()),
+            None,
+        ),
+        RiskAuditEvent::TradeDenied { opportunity_id, .. } => (
+            RiskAuditEventType::TradeDenied,
+            Some(opportunity_id.clone()),
+            None,
+        ),
+        RiskAuditEvent::BreakerTripped { .. } => (RiskAuditEventType::BreakerTripped, None, None),
+        RiskAuditEvent::BreakerRecovered { .. } => {
+            (RiskAuditEventType::BreakerRecovered, None, None)
+        }
+        RiskAuditEvent::BreakerReset { .. } => (RiskAuditEventType::BreakerReset, None, None),
+        RiskAuditEvent::BlacklistAdded { .. } => (RiskAuditEventType::BlacklistAdded, None, None),
+        RiskAuditEvent::BlacklistRemoved { .. } => {
+            (RiskAuditEventType::BlacklistRemoved, None, None)
+        }
+        RiskAuditEvent::AccountingRollover { .. } => {
+            (RiskAuditEventType::AccountingRollover, None, None)
+        }
+        RiskAuditEvent::ReconciliationCompleted { .. } => {
+            (RiskAuditEventType::ReconciliationCompleted, None, None)
+        }
+        RiskAuditEvent::EngineHalted { .. } => (RiskAuditEventType::EngineHalted, None, None),
+        RiskAuditEvent::EngineResumed => (RiskAuditEventType::EngineResumed, None, None),
+        RiskAuditEvent::PostTradeUpdate { trade_id, .. } => (
+            RiskAuditEventType::PostTradeUpdate,
+            None,
+            Some(trade_id.clone()),
+        ),
+    }
 }

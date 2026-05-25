@@ -10,11 +10,12 @@ use crate::position::{PositionTracker, PotentialLossLedger};
 use crate::traits::RiskMetrics;
 use crate::types::{PeriodStats, StateVersion};
 use chrono::Timelike;
+use num_traits::ToPrimitive;
 use oxide_arb_error::{OxideError, OxideResult};
 use oxide_arb_models::config::RiskConfig;
-use oxide_arb_models::domain::blacklist::BlacklistEntry;
-use oxide_arb_models::domain::potential_loss::PotentialLossEntry;
-use oxide_arb_models::domain::risk::RiskEngineSnapshot;
+use oxide_arb_models::domain::blacklist::BlacklistInfo;
+use oxide_arb_models::domain::potential_loss::PotentialLossInfo;
+use oxide_arb_models::domain::risk::RiskEngineState;
 use oxide_arb_models::types::Usd;
 use std::sync::Arc;
 
@@ -26,7 +27,7 @@ pub struct RecoveredState {
     pub hourly: HourlyAccounting,
     pub position_tracker: PositionTracker,
     pub potential_loss: PotentialLossLedger,
-    pub blacklist_entries: Vec<BlacklistEntry>,
+    pub blacklist_entries: Vec<BlacklistInfo>,
     pub drawdown_hwm: Usd,
     pub state_version: StateVersion,
 }
@@ -37,9 +38,9 @@ pub struct RecoveredState {
 /// corrupt or inconsistent (fail-closed).
 pub fn recover_state(
     config: &RiskConfig,
-    snapshot: &RiskEngineSnapshot,
-    blacklist_entries: Vec<BlacklistEntry>,
-    potential_loss_entries: Vec<PotentialLossEntry>,
+    snapshot: &RiskEngineState,
+    blacklist_entries: Vec<BlacklistInfo>,
+    potential_loss_entries: Vec<PotentialLossInfo>,
     metrics: &dyn RiskMetrics,
     clock: &Arc<dyn Clock>,
 ) -> OxideResult<RecoveredState> {
@@ -53,11 +54,11 @@ pub fn recover_state(
         DailyAccounting::from_snapshot(
             snapshot_date,
             PeriodStats {
-                loss: snapshot.daily_loss,
+                loss: snapshot.daily_loss_usd,
                 pnl: snapshot.daily_pnl,
-                trade_count: snapshot.daily_trade_count,
-                success_count: snapshot.daily_success_count,
-                miss_count: snapshot.daily_miss_count,
+                trade_count: ToPrimitive::to_u32(&snapshot.daily_trade_count).unwrap_or(0),
+                success_count: ToPrimitive::to_u32(&snapshot.daily_success_count).unwrap_or(0),
+                miss_count: ToPrimitive::to_u32(&snapshot.daily_miss_count).unwrap_or(0),
                 ..PeriodStats::default()
             },
             Usd::new(config.daily_budget_usd),
@@ -73,8 +74,8 @@ pub fn recover_state(
     let weekly = WeeklyAccounting::from_snapshot(
         snapshot.snapshot_at.date_naive(),
         PeriodStats {
-            loss: snapshot.weekly_loss,
-            trade_count: snapshot.weekly_trade_count,
+            loss: snapshot.weekly_loss_usd,
+            trade_count: ToPrimitive::to_u32(&snapshot.weekly_trade_count).unwrap_or(0),
             ..PeriodStats::default()
         },
         Arc::clone(clock),
@@ -84,26 +85,26 @@ pub fn recover_state(
         snapshot.snapshot_at.hour(),
         snapshot.snapshot_at.date_naive(),
         PeriodStats {
-            loss: snapshot.hourly_loss,
-            trade_count: snapshot.hourly_trade_count,
-            success_count: snapshot.hourly_success_count,
-            miss_count: snapshot.hourly_miss_count,
+            loss: snapshot.hourly_loss_usd,
+            trade_count: ToPrimitive::to_u32(&snapshot.hourly_trade_count).unwrap_or(0),
+            success_count: ToPrimitive::to_u32(&snapshot.hourly_success_count).unwrap_or(0),
+            miss_count: ToPrimitive::to_u32(&snapshot.hourly_miss_count).unwrap_or(0),
             ..PeriodStats::default()
         },
         Arc::clone(clock),
     );
 
-    if snapshot.daily_loss.is_negative() {
+    if snapshot.daily_loss_usd.is_negative() {
         return Err(OxideError::Internal(
             "snapshot daily_loss is negative".into(),
         ));
     }
-    if snapshot.weekly_loss.is_negative() {
+    if snapshot.weekly_loss_usd.is_negative() {
         return Err(OxideError::Internal(
             "snapshot weekly_loss is negative".into(),
         ));
     }
-    if snapshot.hourly_loss.is_negative() {
+    if snapshot.hourly_loss_usd.is_negative() {
         return Err(OxideError::Internal(
             "snapshot hourly_loss is negative".into(),
         ));

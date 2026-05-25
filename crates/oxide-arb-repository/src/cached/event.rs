@@ -2,7 +2,8 @@
 
 use crate::traits::EventRepository;
 use oxide_arb_error::storage::StorageError;
-use oxide_arb_models::{entities::event, types::EventId};
+use oxide_arb_models::domain::{EventInfo, UpsertEvent};
+use oxide_arb_models::types::EventId;
 use oxide_arb_storage::cache::{CacheKey, TieredCache};
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -14,7 +15,6 @@ pub struct CachedEventRepository<R: EventRepository> {
 }
 
 impl<R: EventRepository> CachedEventRepository<R> {
-    /// Wrap an existing repository with tiered cache support.
     pub const fn new(inner: R, cache: Arc<TieredCache>) -> Self {
         Self { inner, cache }
     }
@@ -22,7 +22,7 @@ impl<R: EventRepository> CachedEventRepository<R> {
     async fn invalidate_event(&self, event_id: &EventId) {
         let _ = self
             .cache
-            .invalidate(&CacheKey::EventEntry {
+            .invalidate(&CacheKey::EventInfo {
                 event_id: event_id.clone(),
             })
             .await;
@@ -30,21 +30,21 @@ impl<R: EventRepository> CachedEventRepository<R> {
 }
 
 impl<R: EventRepository> EventRepository for CachedEventRepository<R> {
-    async fn find_by_id(&self, id: &EventId) -> Result<Option<event::Model>, StorageError> {
-        let key = CacheKey::EventEntry {
+    async fn find_by_id(&self, id: &EventId) -> Result<Option<EventInfo>, StorageError> {
+        let key = CacheKey::EventInfo {
             event_id: id.clone(),
         };
-        if let Some(cached) = self.cache.get_json::<event::Model>(&key).await? {
+        if let Some(cached) = self.cache.get_json::<EventInfo>(&key).await? {
             return Ok(Some(cached));
         }
         let result = self.inner.find_by_id(id).await?;
-        if let Some(ref model) = result {
-            let _ = self.cache.set_json(&key, model).await;
+        if let Some(ref info) = result {
+            let _ = self.cache.set_json(&key, info).await;
         }
         Ok(result)
     }
 
-    async fn find_active(&self) -> Result<Vec<event::Model>, StorageError> {
+    async fn find_active(&self) -> Result<Vec<EventInfo>, StorageError> {
         self.inner.find_active().await
     }
 
@@ -52,19 +52,14 @@ impl<R: EventRepository> EventRepository for CachedEventRepository<R> {
         self.inner.find_existing_ids(ids).await
     }
 
-    async fn insert(&self, model: event::ActiveModel) -> Result<event::Model, StorageError> {
-        let result = self.inner.insert(model).await?;
-        self.invalidate_event(&result.event_id).await;
+    async fn upsert(&self, dto: UpsertEvent) -> Result<EventInfo, StorageError> {
+        let event_id = dto.event_id.clone();
+        let result = self.inner.upsert(dto).await?;
+        self.invalidate_event(&event_id).await;
         Ok(result)
     }
 
-    async fn insert_batch(&self, models: Vec<event::ActiveModel>) -> Result<u64, StorageError> {
-        self.inner.insert_batch(models).await
-    }
-
-    async fn update(&self, model: event::ActiveModel) -> Result<event::Model, StorageError> {
-        let result = self.inner.update(model).await?;
-        self.invalidate_event(&result.event_id).await;
-        Ok(result)
+    async fn upsert_batch(&self, dtos: Vec<UpsertEvent>) -> Result<u64, StorageError> {
+        self.inner.upsert_batch(dtos).await
     }
 }

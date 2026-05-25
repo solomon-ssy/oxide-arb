@@ -3,11 +3,9 @@
 use crate::traits::ReportRepository;
 use chrono::NaiveDate;
 use oxide_arb_error::storage::StorageError;
-use oxide_arb_models::{
-    domain::report::NewReport,
-    entities::report::{self, Column as ReportColumn, Entity as ReportEntity},
-    enums::common::ReportType,
-};
+use oxide_arb_models::domain::{ReportInfo, UpsertReport};
+use oxide_arb_models::entities::report::{Column as ReportColumn, Entity as ReportEntity};
+use oxide_arb_models::enums::common::ReportType;
 use sea_orm::sea_query::OnConflict;
 use sea_orm::{
     ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder,
@@ -25,7 +23,7 @@ impl PgReportRepository {
 }
 
 impl ReportRepository for PgReportRepository {
-    async fn create(&self, report: NewReport) -> Result<(), StorageError> {
+    async fn upsert(&self, report: UpsertReport) -> Result<(), StorageError> {
         ReportEntity::insert(report.into_active_model())
             .on_conflict(
                 OnConflict::column(ReportColumn::Id)
@@ -43,7 +41,7 @@ impl ReportRepository for PgReportRepository {
         date: NaiveDate,
         payload: serde_json::Value,
     ) -> Result<(), StorageError> {
-        self.create(NewReport::daily(date, payload)).await
+        self.upsert(UpsertReport::daily(date, payload)).await
     }
 
     async fn save_weekly(
@@ -52,7 +50,7 @@ impl ReportRepository for PgReportRepository {
         week_end: NaiveDate,
         payload: serde_json::Value,
     ) -> Result<(), StorageError> {
-        self.create(NewReport::weekly(week_start, week_end, payload))
+        self.upsert(UpsertReport::weekly(week_start, week_end, payload))
             .await
     }
 
@@ -60,7 +58,7 @@ impl ReportRepository for PgReportRepository {
         &self,
         report_type: ReportType,
         limit: u64,
-    ) -> Result<Vec<report::Model>, StorageError> {
+    ) -> Result<Vec<ReportInfo>, StorageError> {
         ReportEntity::find()
             .filter(ReportColumn::ReportType.eq(report_type))
             .order_by_desc(ReportColumn::PeriodStart)
@@ -68,17 +66,19 @@ impl ReportRepository for PgReportRepository {
             .all(&self.db)
             .await
             .map_err(StorageError::from)
+            .map(|v| v.into_iter().map(Into::into).collect())
     }
 
     async fn find_latest(
         &self,
         report_type: ReportType,
-    ) -> Result<Option<report::Model>, StorageError> {
+    ) -> Result<Option<ReportInfo>, StorageError> {
         ReportEntity::find()
             .filter(ReportColumn::ReportType.eq(report_type))
             .order_by_desc(ReportColumn::PeriodStart)
             .one(&self.db)
             .await
             .map_err(StorageError::from)
+            .map(|opt| opt.map(Into::into))
     }
 }

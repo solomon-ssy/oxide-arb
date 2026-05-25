@@ -5,6 +5,7 @@
 //! are used to initialise new buckets and regularise sparse ones.
 
 use super::types::CalibrationEntry;
+use num_traits::ToPrimitive;
 use rust_decimal::Decimal;
 
 /// Estimate Beta distribution priors `(α₀, β₀)` from observed bucket statistics
@@ -41,7 +42,7 @@ pub fn estimate_mom_prior(
         return (fallback_alpha, fallback_beta);
     }
 
-    let Ok(len) = u32::try_from(rates.len()) else {
+    let Some(len) = ToPrimitive::to_u32(&rates.len()) else {
         return (fallback_alpha, fallback_beta);
     };
     let n = Decimal::from(len);
@@ -81,7 +82,8 @@ pub fn estimate_mom_prior(
 mod tests {
     use super::*;
     use oxide_arb_models::{
-        domain::calibration::{BucketKey, DurationBucket, PriceZone},
+        domain::calibration::BucketKey,
+        enums::calibration::{DurationBucket, PriceZone},
         enums::common::MarketCategory,
     };
     use rust_decimal_macros::dec;

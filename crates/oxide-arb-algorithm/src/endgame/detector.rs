@@ -6,6 +6,7 @@
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
+use num_traits::ToPrimitive;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 
@@ -13,10 +14,12 @@ use oxide_arb_models::{
     config::{CalibrationConfig, EndgameDetectionConfig},
     domain::{
         book::EndgameBookSnapshot,
-        calibration::{BucketKey, DurationBucket, PriceZone},
-        opportunity::{EndgameMeta, Opportunity, PayoutModel},
+        calibration::BucketKey,
+        opportunity::{EndgameMeta, Opportunity},
     },
+    enums::calibration::{DurationBucket, PriceZone},
     enums::common::{MarketCategory, Side, StalenessLevel},
+    enums::opportunity::PayoutModel,
     types::{Bps, EventId, MarketId, OpportunityId, TokenId, Usd},
 };
 
@@ -82,7 +85,7 @@ impl EndgameDetector {
         let hours_remaining = (deadline - now).num_hours();
         if hours_remaining < 0
             || hours_remaining
-                > i64::try_from(self.config.settlement_window_hours).unwrap_or(i64::MAX)
+                > ToPrimitive::to_i64(&self.config.settlement_window_hours).unwrap_or(i64::MAX)
         {
             self.convergence.remove(market_id);
             return None;
@@ -233,7 +236,7 @@ impl EndgameDetector {
         let hours_remaining = (deadline - now).num_hours();
         if hours_remaining < 0
             || hours_remaining
-                > i64::try_from(self.config.settlement_window_hours).unwrap_or(i64::MAX)
+                > ToPrimitive::to_i64(&self.config.settlement_window_hours).unwrap_or(i64::MAX)
         {
             return true;
         }

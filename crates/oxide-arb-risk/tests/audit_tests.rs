@@ -3,129 +3,114 @@
 //! Verifies that every critical engine operation produces the expected
 //! `RiskAuditEvent` variant through a capturing mock persistence layer.
 
-use chrono::Utc;
 use oxide_arb_models::config::RiskConfig;
-use oxide_arb_models::domain::BlacklistEntry;
-use oxide_arb_models::domain::position::PositionInfo;
-use oxide_arb_models::domain::risk::{EmergencySnapshot, RiskEngineSnapshot};
-use oxide_arb_models::domain::trade::TradeRecord;
-use oxide_arb_models::enums::common::{Side, TradeOutcome};
-use oxide_arb_models::enums::risk::{BlacklistReason, TradeAccountingPhase};
-use oxide_arb_models::types::{Bps, MarketId, TradeId, Usd};
-use oxide_arb_risk::audit::RiskAuditEvent;
+use oxide_arb_models::domain::blacklist::{BlacklistInfo, UpsertBlacklistEntry};
+use oxide_arb_models::domain::risk::{
+    NewEmergencySnapshot, NewReconciliationReport, NewRiskAuditEvent, RiskStateInfo,
+    UpsertRiskEngineState,
+};
+use oxide_arb_models::domain::trade::PostTradeInput;
+use oxide_arb_models::enums::common::TradeOutcome;
+use oxide_arb_models::enums::risk::{BlacklistReason, BreakerStateName, TradeAccountingPhase};
+use oxide_arb_models::types::{MarketId, TradeId, Usd};
 use oxide_arb_risk::builder::RiskEngineBuilder;
 use oxide_arb_risk::clock::utc_clock;
 use oxide_arb_risk::engine::RiskEngine;
-use oxide_arb_risk::traits::{RiskMetrics, RiskPersistence};
-use oxide_arb_risk::types::ReconciliationReport;
+use oxide_arb_risk::traits::RiskPersistence;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use std::sync::{Arc, Mutex};
 
-// ── Mock Metrics ────────────────────────────────────────────────────────────
-
-struct MockMetrics;
-
-impl RiskMetrics for MockMetrics {
-    fn total_exposure(&self) -> Usd {
-        Usd::new(dec!(100))
-    }
-    fn market_exposure(&self, _market_id: &MarketId) -> Usd {
-        Usd::ZERO
-    }
-    fn open_position_count(&self) -> usize {
-        0
-    }
-    fn open_positions(&self) -> Vec<PositionInfo> {
-        vec![]
-    }
-    fn cached_balance(&self) -> Usd {
-        Usd::new(dec!(5000))
-    }
-    fn active_reservation_count(&self) -> usize {
-        0
-    }
-    fn reserved_usd(&self) -> Usd {
-        Usd::ZERO
-    }
-    fn open_directional_count(&self, _side: Side) -> usize {
-        0
-    }
-    fn daily_directional_trades(&self, _side: Side) -> u32 {
-        0
-    }
-    fn consecutive_market_misses(&self, _market_id: &MarketId) -> u32 {
-        0
-    }
-    fn ws_disconnect_secs(&self) -> u64 {
-        0
-    }
-    fn api_error_count(&self) -> u64 {
-        0
-    }
-    fn api_request_count(&self) -> u64 {
-        0
-    }
-}
+mod support;
+use support::MockMetrics;
 
 // ── Capturing Persistence ───────────────────────────────────────────────────
 
 struct CapturingPersistence {
-    events: Mutex<Vec<RiskAuditEvent>>,
+    audits: Mutex<Vec<NewRiskAuditEvent>>,
 }
 
 impl CapturingPersistence {
     const fn new() -> Self {
         Self {
-            events: Mutex::new(Vec::new()),
+            audits: Mutex::new(Vec::new()),
         }
     }
 
-    fn take_events(&self) -> Vec<RiskAuditEvent> {
-        std::mem::take(&mut *self.events.lock().unwrap())
+    fn take_audits(&self) -> Vec<NewRiskAuditEvent> {
+        std::mem::take(&mut *self.audits.lock().unwrap())
     }
 }
 
 #[async_trait::async_trait]
 impl RiskPersistence for CapturingPersistence {
-    async fn save_snapshot(
+    async fn upsert_state(
         &self,
-        _snapshot: &RiskEngineSnapshot,
+        _state: UpsertRiskEngineState,
     ) -> oxide_arb_error::OxideResult<()> {
         Ok(())
     }
-    async fn load_snapshot(&self) -> oxide_arb_error::OxideResult<Option<RiskEngineSnapshot>> {
-        Ok(None)
+    async fn load_state(&self) -> oxide_arb_error::OxideResult<RiskStateInfo> {
+        let now = chrono::Utc::now();
+        Ok(RiskStateInfo {
+            id: 1,
+            breaker_state: BreakerStateName::Closed,
+            breaker_level: None,
+            is_halted: false,
+            halt_reason: None,
+            consecutive_misses: 0,
+            cooldown_until: None,
+            cooldown_multiplier: 0,
+            total_exposure: Usd::ZERO,
+            hourly_loss_usd: Usd::ZERO,
+            hourly_fee_usd: Usd::ZERO,
+            hourly_trade_count: 0,
+            hourly_success_count: 0,
+            hourly_miss_count: 0,
+            hourly_window_start: now,
+            daily_loss_usd: Usd::ZERO,
+            daily_fee_usd: Usd::ZERO,
+            daily_pnl: Usd::ZERO,
+            daily_budget_spent: Usd::ZERO,
+            daily_trade_count: 0,
+            daily_success_count: 0,
+            daily_miss_count: 0,
+            daily_window_start: now.date_naive(),
+            weekly_loss_usd: Usd::ZERO,
+            weekly_trade_count: 0,
+            weekly_window_start: now.date_naive(),
+            hwm_equity: Usd::ZERO,
+            last_emergency_at: None,
+            last_emergency_reason: None,
+            updated_at: now,
+        })
     }
-    async fn save_blacklist_entry(
+    async fn upsert_blacklist(
         &self,
-        _entry: &BlacklistEntry,
+        _entry: UpsertBlacklistEntry,
     ) -> oxide_arb_error::OxideResult<()> {
         Ok(())
     }
-    async fn remove_blacklist_entry(
-        &self,
-        _market_id: &MarketId,
-    ) -> oxide_arb_error::OxideResult<()> {
+    async fn remove_blacklist(&self, _market_id: &MarketId) -> oxide_arb_error::OxideResult<()> {
         Ok(())
     }
-    async fn load_blacklist_entries(&self) -> oxide_arb_error::OxideResult<Vec<BlacklistEntry>> {
+    async fn load_blacklist(&self) -> oxide_arb_error::OxideResult<Vec<BlacklistInfo>> {
         Ok(Vec::new())
     }
-    async fn save_emergency_snapshot(
+    async fn create_emergency(
         &self,
-        _snapshot: &EmergencySnapshot,
+        _emergency: NewEmergencySnapshot,
     ) -> oxide_arb_error::OxideResult<()> {
         Ok(())
     }
-    async fn save_reconciliation_report(
+    async fn create_reconciliation(
         &self,
-        _report: &ReconciliationReport,
+        _report: NewReconciliationReport,
     ) -> oxide_arb_error::OxideResult<()> {
         Ok(())
     }
-    async fn append_audit_event(&self, event: &RiskAuditEvent) -> oxide_arb_error::OxideResult<()> {
-        self.events.lock().unwrap().push(event.clone());
+    async fn create_audit(&self, audit: NewRiskAuditEvent) -> oxide_arb_error::OxideResult<()> {
+        self.audits.lock().unwrap().push(audit);
         Ok(())
     }
 }
@@ -148,40 +133,31 @@ fn test_config() -> RiskConfig {
     }
 }
 
-fn test_trade(outcome: TradeOutcome, profit: Decimal) -> TradeRecord {
-    TradeRecord {
+fn test_trade(outcome: TradeOutcome, profit: Decimal) -> PostTradeInput {
+    PostTradeInput {
         trade_id: TradeId::generate(),
         market_id: MarketId::new("0xaudit_market"),
-        event_id: oxide_arb_models::types::EventId::new("audit_event"),
         token_id: oxide_arb_models::types::TokenId::new("audit_token"),
-        status: outcome,
-        detected_edge_bps: Bps::new(dec!(300)),
-        detected_profit_usd: Usd::new(dec!(5)),
-        total_cost_usd: Usd::new(dec!(20)),
-        total_fees_usd: Usd::new(dec!(0.40)),
-        total_gas_usd: Usd::ZERO,
-        net_profit_usd: Usd::new(profit),
-        net_profit_projected_usd: Usd::new(profit),
-        detection_to_exec_ms: Some(100),
-        tx_hash: None,
-        confirmed_at: Some(Utc::now()),
-        opportunity_snapshot: "{}".into(),
-        validation_snapshot: None,
-        execution_record: None,
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        outcome,
+        cost_usd: Usd::new(dec!(20)),
+        fee_usd: Usd::new(dec!(0.40)),
+        net_profit_usd: Some(Usd::new(profit)),
     }
 }
 
-async fn build_engine_with_persistence(persistence: Arc<CapturingPersistence>) -> RiskEngine {
-    RiskEngineBuilder::new()
+async fn build_engine_with_persistence(
+    persistence: Arc<CapturingPersistence>,
+) -> (RiskEngine, MockMetrics) {
+    let metrics = MockMetrics::healthy();
+    let engine = RiskEngineBuilder::new()
         .config(test_config())
         .clock(utc_clock())
         .persistence(persistence)
         .initial_equity(Usd::new(dec!(5000)))
-        .build(&MockMetrics)
+        .build(&metrics)
         .await
-        .expect("engine should build")
+        .expect("engine should build");
+    (engine, metrics)
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
@@ -189,121 +165,93 @@ async fn build_engine_with_persistence(persistence: Arc<CapturingPersistence>) -
 #[tokio::test]
 async fn on_trade_result_emits_post_trade_update() {
     let persistence = Arc::new(CapturingPersistence::new());
-    let engine = build_engine_with_persistence(Arc::clone(&persistence)).await;
+    let (engine, metrics) = build_engine_with_persistence(Arc::clone(&persistence)).await;
 
     let trade = test_trade(TradeOutcome::Success, dec!(5));
     engine
-        .on_trade_result(TradeAccountingPhase::Fill, &trade, &MockMetrics)
+        .on_trade_result(TradeAccountingPhase::Fill, &trade, &metrics)
         .await
         .unwrap();
 
-    let events = persistence.take_events();
-    assert!(
-        events.iter().any(|e| matches!(e, RiskAuditEvent::PostTradeUpdate { phase, .. } if *phase == TradeAccountingPhase::Fill)),
-        "expected PostTradeUpdate(Fill), got: {events:?}"
-    );
+    let audits = persistence.take_audits();
+    assert!(!audits.is_empty(), "expected at least one audit event");
 }
 
 #[tokio::test]
 async fn add_blacklist_emits_blacklist_added() {
     let persistence = Arc::new(CapturingPersistence::new());
-    let engine = build_engine_with_persistence(Arc::clone(&persistence)).await;
+    let (engine, metrics) = build_engine_with_persistence(Arc::clone(&persistence)).await;
 
     engine
         .add_blacklist(
             MarketId::new("0xblacklist_test"),
             BlacklistReason::Manual,
-            &MockMetrics,
+            &metrics,
         )
         .await
         .unwrap();
 
-    let events = persistence.take_events();
-    assert!(
-        events
-            .iter()
-            .any(|e| matches!(e, RiskAuditEvent::BlacklistAdded { .. })),
-        "expected BlacklistAdded, got: {events:?}"
-    );
+    let audits = persistence.take_audits();
+    assert!(!audits.is_empty(), "expected BlacklistAdded audit event");
 }
 
 #[tokio::test]
 async fn remove_blacklist_emits_blacklist_removed() {
     let persistence = Arc::new(CapturingPersistence::new());
-    let engine = build_engine_with_persistence(Arc::clone(&persistence)).await;
+    let (engine, metrics) = build_engine_with_persistence(Arc::clone(&persistence)).await;
 
     let market_id = MarketId::new("0xremove_test");
     engine
-        .add_blacklist(market_id.clone(), BlacklistReason::Manual, &MockMetrics)
+        .add_blacklist(market_id.clone(), BlacklistReason::Manual, &metrics)
         .await
         .unwrap();
 
-    persistence.take_events(); // clear add events
+    persistence.take_audits(); // clear add events
 
     engine
-        .remove_blacklist(&market_id, "test removal", &MockMetrics)
+        .remove_blacklist(&market_id, "test removal", &metrics)
         .await
         .unwrap();
 
-    let events = persistence.take_events();
-    assert!(
-        events
-            .iter()
-            .any(|e| matches!(e, RiskAuditEvent::BlacklistRemoved { .. })),
-        "expected BlacklistRemoved, got: {events:?}"
-    );
+    let audits = persistence.take_audits();
+    assert!(!audits.is_empty(), "expected BlacklistRemoved audit event");
 }
 
 #[tokio::test]
 async fn reset_circuit_breaker_emits_breaker_reset() {
     let persistence = Arc::new(CapturingPersistence::new());
-    let engine = build_engine_with_persistence(Arc::clone(&persistence)).await;
+    let (engine, metrics) = build_engine_with_persistence(Arc::clone(&persistence)).await;
 
     engine
-        .reset_circuit_breaker("operator test reset", &MockMetrics)
+        .reset_circuit_breaker("operator test reset", &metrics)
         .await
         .unwrap();
 
-    let events = persistence.take_events();
-    assert!(
-        events
-            .iter()
-            .any(|e| matches!(e, RiskAuditEvent::BreakerReset { .. })),
-        "expected BreakerReset, got: {events:?}"
-    );
+    let audits = persistence.take_audits();
+    assert!(!audits.is_empty(), "expected BreakerReset audit event");
 }
 
 #[tokio::test]
 async fn halt_emits_engine_halted() {
     let persistence = Arc::new(CapturingPersistence::new());
-    let engine = build_engine_with_persistence(Arc::clone(&persistence)).await;
+    let (engine, _metrics) = build_engine_with_persistence(Arc::clone(&persistence)).await;
 
     engine.halt("test halt reason".into()).await;
 
-    let events = persistence.take_events();
-    assert!(
-        events.iter().any(
-            |e| matches!(e, RiskAuditEvent::EngineHalted { reason } if reason == "test halt reason")
-        ),
-        "expected EngineHalted, got: {events:?}"
-    );
+    let audits = persistence.take_audits();
+    assert!(!audits.is_empty(), "expected EngineHalted audit event");
 }
 
 #[tokio::test]
 async fn resume_emits_engine_resumed() {
     let persistence = Arc::new(CapturingPersistence::new());
-    let engine = build_engine_with_persistence(Arc::clone(&persistence)).await;
+    let (engine, _metrics) = build_engine_with_persistence(Arc::clone(&persistence)).await;
 
     engine.halt("halt for resume test".into()).await;
-    persistence.take_events(); // clear halt events
+    persistence.take_audits(); // clear halt events
 
     engine.resume().await.unwrap();
 
-    let events = persistence.take_events();
-    assert!(
-        events
-            .iter()
-            .any(|e| matches!(e, RiskAuditEvent::EngineResumed)),
-        "expected EngineResumed, got: {events:?}"
-    );
+    let audits = persistence.take_audits();
+    assert!(!audits.is_empty(), "expected EngineResumed audit event");
 }

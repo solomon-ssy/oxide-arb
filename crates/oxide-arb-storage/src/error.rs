@@ -1,2 +1,3 @@
-//! Storage error re-export.
-pub use oxide_arb_error::storage::StorageError;
+//! Storage error types.
+//!
+//! Use `oxide_arb_error::storage::StorageError` directly.

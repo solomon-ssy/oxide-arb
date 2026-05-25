@@ -14,7 +14,7 @@ pub struct GammaResolution {
 }
 
 /// Raw event response from Gamma API.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RawGammaEvent {
     pub id: String,
     pub title: String,
@@ -26,7 +26,7 @@ pub struct RawGammaEvent {
 }
 
 /// Raw market response from Gamma API.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RawGammaMarket {
     pub condition_id: String,
     pub question: String,
@@ -47,7 +47,7 @@ pub struct RawGammaMarket {
 }
 
 /// Raw token response from Gamma API.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RawGammaToken {
     pub token_id: String,
     pub outcome: String,

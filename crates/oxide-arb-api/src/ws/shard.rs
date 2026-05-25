@@ -8,6 +8,8 @@ use polymarket_client_sdk_v2::types::U256;
 use polymarket_client_sdk_v2::ws::config::Config as SdkWsConfig;
 use std::collections::HashSet;
 use std::str::FromStr;
+use std::sync::Arc;
+use std::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use super::WsEvent;
@@ -23,6 +25,7 @@ pub struct WsShard {
     pub output_tx: flume::Sender<WsEvent>,
     pub shutdown: CancellationToken,
     pub ws_url: String,
+    last_message_at: Arc<parking_lot::Mutex<Option<Instant>>>,
 }
 
 impl WsShard {
@@ -31,6 +34,7 @@ impl WsShard {
         ws_url: String,
         output_tx: flume::Sender<WsEvent>,
         shutdown: CancellationToken,
+        last_message_at: Arc<parking_lot::Mutex<Option<Instant>>>,
     ) -> Self {
         Self {
             shard_id,
@@ -39,6 +43,7 @@ impl WsShard {
             output_tx,
             shutdown,
             ws_url,
+            last_message_at,
         }
     }
 
@@ -152,6 +157,9 @@ impl WsShard {
     }
 
     fn dispatch_events(&self, events: Vec<WsEvent>) {
+        if !events.is_empty() {
+            *self.last_message_at.lock() = Some(Instant::now());
+        }
         for event in events {
             if self.output_tx.send(event).is_err() {
                 tracing::error!(shard_id = self.shard_id, "Output channel closed");

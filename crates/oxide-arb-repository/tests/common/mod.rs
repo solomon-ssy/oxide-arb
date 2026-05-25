@@ -2,13 +2,12 @@
 
 use chrono::Utc;
 use oxide_arb_models::config::PostgresConfig;
-use oxide_arb_models::entities::{event, market};
+use oxide_arb_models::domain::{UpsertEvent, UpsertMarket};
 use oxide_arb_models::enums::common::{MarketCategory, TickSize};
 use oxide_arb_models::enums::market::{EventStatus, MarketStatus};
 use oxide_arb_models::types::*;
 use oxide_arb_storage::postgres::PostgresPool;
 use oxide_arb_storage::postgres::migration::{Migrator, MigratorTrait};
-use sea_orm::ActiveValue::Set;
 
 pub fn test_pg_config(port: u16) -> PostgresConfig {
     PostgresConfig {
@@ -57,23 +56,16 @@ pub async fn setup_pg() -> (
     (pool, container)
 }
 
-pub fn make_event(
-    id: &str,
-    title: &str,
-    slug: &str,
-    category: MarketCategory,
-) -> event::ActiveModel {
-    event::ActiveModel {
-        event_id: Set(EventId::new(id)),
-        title: Set(title.into()),
-        slug: Set(slug.into()),
-        category: Set(category),
-        status: Set(EventStatus::Active),
-        neg_risk: Set(false),
-        end_date: Set(None),
-        raw_gamma: Set(None),
-        created_at: Set(Utc::now()),
-        updated_at: Set(Utc::now()),
+pub fn make_event(id: &str, title: &str, slug: &str, category: MarketCategory) -> UpsertEvent {
+    UpsertEvent {
+        event_id: EventId::new(id),
+        title: title.into(),
+        slug: slug.into(),
+        category,
+        status: EventStatus::Active,
+        neg_risk: false,
+        end_date: None,
+        raw_gamma: None,
     }
 }
 
@@ -84,22 +76,20 @@ pub fn make_market(
     slug: &str,
     category: MarketCategory,
     end_date: Option<chrono::DateTime<Utc>>,
-) -> market::ActiveModel {
-    market::ActiveModel {
-        market_id: Set(MarketId::new(market_id)),
-        event_id: Set(EventId::new(event_id)),
-        question: Set(question.into()),
-        slug: Set(slug.into()),
-        category: Set(category),
-        status: Set(MarketStatus::Active),
-        outcome: Set(None),
-        yes_token_id: Set(TokenId::new("12345")),
-        no_token_id: Set(TokenId::new("67890")),
-        tick_size: Set(TickSize::Hundredth),
-        neg_risk: Set(false),
-        end_date: Set(end_date),
-        resolved_at: Set(None),
-        created_at: Set(Utc::now()),
-        updated_at: Set(Utc::now()),
+) -> UpsertMarket {
+    UpsertMarket {
+        market_id: MarketId::new(market_id),
+        event_id: EventId::new(event_id),
+        question: question.into(),
+        slug: slug.into(),
+        category,
+        status: MarketStatus::Active,
+        outcome: None,
+        yes_token_id: TokenId::new("12345"),
+        no_token_id: TokenId::new("67890"),
+        tick_size: TickSize::Hundredth,
+        neg_risk: false,
+        end_date,
+        resolved_at: None,
     }
 }

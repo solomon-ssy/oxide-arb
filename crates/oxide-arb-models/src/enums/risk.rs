@@ -119,13 +119,20 @@ impl std::fmt::Display for CircuitBreakerLevel {
     Hash,
     Serialize,
     Deserialize,
+    EnumIter,
+    DeriveActiveEnum,
+    IntoActiveValue,
     bitcode::Encode,
     bitcode::Decode,
 )]
+#[sea_orm(rs_type = "String", db_type = "Text")]
 #[serde(rename_all = "snake_case")]
 pub enum BlacklistScope {
+    #[sea_orm(string_value = "data_path")]
     DataPath = 0,
+    #[sea_orm(string_value = "trading_path")]
     TradingPath = 1,
+    #[sea_orm(string_value = "full")]
     Full = 2,
 }
 
@@ -149,16 +156,26 @@ impl std::fmt::Display for BlacklistScope {
     Hash,
     Serialize,
     Deserialize,
+    EnumIter,
+    DeriveActiveEnum,
+    IntoActiveValue,
     bitcode::Encode,
     bitcode::Decode,
 )]
+#[sea_orm(rs_type = "String", db_type = "Text")]
 #[serde(rename_all = "snake_case")]
 pub enum BlacklistReason {
+    #[sea_orm(string_value = "consecutive_fok_failures")]
     ConsecutiveFokFailures,
+    #[sea_orm(string_value = "trade_failed_after_matched")]
     TradeFailedAfterMatched,
+    #[sea_orm(string_value = "depth_drop")]
     DepthDrop,
+    #[sea_orm(string_value = "tick_change")]
     TickChange,
+    #[sea_orm(string_value = "manual")]
     Manual,
+    #[sea_orm(string_value = "data_not_found")]
     DataNotFound,
 }
 
@@ -197,6 +214,103 @@ impl std::fmt::Display for TradeAccountingPhase {
         match self {
             Self::Fill => f.write_str("fill"),
             Self::Settlement => f.write_str("settlement"),
+        }
+    }
+}
+
+/// Overall outcome of a balance/exposure reconciliation run.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    EnumIter,
+    DeriveActiveEnum,
+    IntoActiveValue,
+)]
+#[sea_orm(rs_type = "String", db_type = "Text")]
+#[serde(rename_all = "snake_case")]
+pub enum ReconciliationStatus {
+    #[sea_orm(string_value = "ok")]
+    Ok,
+    #[sea_orm(string_value = "warning")]
+    Warning,
+    #[sea_orm(string_value = "critical")]
+    Critical,
+}
+
+impl std::fmt::Display for ReconciliationStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Ok => f.write_str("ok"),
+            Self::Warning => f.write_str("warning"),
+            Self::Critical => f.write_str("critical"),
+        }
+    }
+}
+
+/// Type of risk audit event persisted for post-mortem analysis.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    EnumIter,
+    DeriveActiveEnum,
+    IntoActiveValue,
+)]
+#[sea_orm(rs_type = "String", db_type = "Text")]
+#[serde(rename_all = "snake_case")]
+pub enum RiskAuditEventType {
+    #[sea_orm(string_value = "trade_allowed")]
+    TradeAllowed,
+    #[sea_orm(string_value = "trade_denied")]
+    TradeDenied,
+    #[sea_orm(string_value = "breaker_tripped")]
+    BreakerTripped,
+    #[sea_orm(string_value = "breaker_recovered")]
+    BreakerRecovered,
+    #[sea_orm(string_value = "breaker_reset")]
+    BreakerReset,
+    #[sea_orm(string_value = "blacklist_added")]
+    BlacklistAdded,
+    #[sea_orm(string_value = "blacklist_removed")]
+    BlacklistRemoved,
+    #[sea_orm(string_value = "accounting_rollover")]
+    AccountingRollover,
+    #[sea_orm(string_value = "reconciliation_completed")]
+    ReconciliationCompleted,
+    #[sea_orm(string_value = "engine_halted")]
+    EngineHalted,
+    #[sea_orm(string_value = "engine_resumed")]
+    EngineResumed,
+    #[sea_orm(string_value = "post_trade_update")]
+    PostTradeUpdate,
+}
+
+impl std::fmt::Display for RiskAuditEventType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TradeAllowed => f.write_str("trade_allowed"),
+            Self::TradeDenied => f.write_str("trade_denied"),
+            Self::BreakerTripped => f.write_str("breaker_tripped"),
+            Self::BreakerRecovered => f.write_str("breaker_recovered"),
+            Self::BreakerReset => f.write_str("breaker_reset"),
+            Self::BlacklistAdded => f.write_str("blacklist_added"),
+            Self::BlacklistRemoved => f.write_str("blacklist_removed"),
+            Self::AccountingRollover => f.write_str("accounting_rollover"),
+            Self::ReconciliationCompleted => f.write_str("reconciliation_completed"),
+            Self::EngineHalted => f.write_str("engine_halted"),
+            Self::EngineResumed => f.write_str("engine_resumed"),
+            Self::PostTradeUpdate => f.write_str("post_trade_update"),
         }
     }
 }

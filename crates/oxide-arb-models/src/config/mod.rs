@@ -43,10 +43,10 @@ pub use treasury::*;
 
 use crate::config::validation::{validate_settings_common, validate_settings_mode};
 use crate::enums::common::ExecutionMode;
+use oxide_arb_error::config_validation::ConfigValidationReport;
 use oxide_arb_error::{OxideResult, config::ConfigError};
 use serde::Deserialize;
 use std::{ops::Deref, path::PathBuf, sync::Arc};
-pub use validation::ConfigValidationReport;
 
 /// Top-level application settings.
 ///
@@ -157,13 +157,7 @@ fn run_common_validation(inner: &Inner) -> OxideResult<()> {
         tracing::warn!("Config warning: {w}");
     }
     if report.has_errors() {
-        let msg = report
-            .errors
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join("; ");
-        return Err(ConfigError::Validation(msg).into());
+        return Err(ConfigError::from(report).into());
     }
     Ok(())
 }

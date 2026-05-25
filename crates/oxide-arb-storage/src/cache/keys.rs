@@ -5,9 +5,9 @@
 //! derived as `ttl / 4` by the [`TieredCache`] layer.
 
 use oxide_arb_models::{
-    domain::calibration::{DurationBucket, PriceZone},
-    entities::runtime_config::RuntimeConfigKey,
+    enums::calibration::{DurationBucket, PriceZone},
     enums::common::MarketCategory,
+    enums::runtime_config::RuntimeConfigKey,
     types::{EventId, MarketId},
 };
 use std::time::Duration;
@@ -19,10 +19,10 @@ use std::time::Duration;
 pub enum CacheKey {
     // ── Market data ─────────────────────────────────────────────────────
     /// Cached market metadata (category, tokens, settlement info).
-    MarketEntry { market_id: MarketId },
+    MarketInfo { market_id: MarketId },
 
     /// Cached event entry (event-level metadata aggregate).
-    EventEntry { event_id: EventId },
+    EventInfo { event_id: EventId },
 
     /// Market metadata used by detection and scoring (category, deadline).
     MarketMetadata { market_id: MarketId },
@@ -66,8 +66,8 @@ impl CacheKey {
     /// Render the cache key as a string suitable for both L1 and L2 backends.
     pub fn as_str(&self) -> String {
         match self {
-            Self::MarketEntry { market_id } => format!("mkt:{market_id}"),
-            Self::EventEntry { event_id } => format!("evt:{event_id}"),
+            Self::MarketInfo { market_id } => format!("mkt:{market_id}"),
+            Self::EventInfo { event_id } => format!("evt:{event_id}"),
             Self::MarketMetadata { market_id } => format!("mkt_meta:{market_id}"),
             Self::ActiveMarkets => "mkt:__active__".to_owned(),
             Self::CalibrationBucket {
@@ -90,7 +90,7 @@ impl CacheKey {
     /// L1 (Moka) TTL is derived as `ttl / 4` by the tiered cache layer.
     pub const fn ttl(&self) -> Duration {
         match self {
-            Self::MarketEntry { .. } | Self::EventEntry { .. } | Self::ActiveMarkets => {
+            Self::MarketInfo { .. } | Self::EventInfo { .. } | Self::ActiveMarkets => {
                 Duration::from_secs(300)
             }
             Self::MarketMetadata { .. } => Duration::from_secs(1800),
@@ -109,8 +109,8 @@ impl CacheKey {
     /// Domain label used for metrics partitioning (cache hit/miss counters).
     pub const fn domain(&self) -> &'static str {
         match self {
-            Self::MarketEntry { .. } | Self::ActiveMarkets => "market",
-            Self::EventEntry { .. } => "event",
+            Self::MarketInfo { .. } | Self::ActiveMarkets => "market",
+            Self::EventInfo { .. } => "event",
             Self::MarketMetadata { .. } => "market_metadata",
             Self::CalibrationBucket { .. } | Self::AllCalibrationBuckets => "calibration",
             Self::PositionSummary { .. } => "position",

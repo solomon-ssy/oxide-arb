@@ -9,6 +9,7 @@
 use crate::backend::ConvergenceBackend;
 use chrono::{DateTime, Utc};
 use moka::sync::Cache;
+use num_traits::ToPrimitive;
 use oxide_arb_models::{config::ConvergenceTrackerConfig, types::MarketId};
 use std::time::Duration;
 
@@ -59,7 +60,7 @@ impl InMemoryConvergenceTracker {
         match self.entries.get(market_id) {
             Some(existing) if existing.direction == direction => {
                 let delta: chrono::TimeDelta = now - existing.first_seen;
-                let duration = u64::try_from(delta.num_seconds().max(0)).unwrap_or(0);
+                let duration = ToPrimitive::to_u64(&delta.num_seconds().max(0)).unwrap_or(0);
                 self.entries.insert(
                     market_id.clone(),
                     ConvergenceEntry {

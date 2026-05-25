@@ -10,7 +10,8 @@
 
 use super::types::CalibrationEntry;
 use dashmap::DashMap;
-use oxide_arb_models::domain::calibration::{BucketKey, DurationBucket, PriceZone};
+use oxide_arb_models::domain::calibration::BucketKey;
+use oxide_arb_models::enums::calibration::{DurationBucket, PriceZone};
 use oxide_arb_models::enums::common::MarketCategory;
 use rust_decimal::Decimal;
 
