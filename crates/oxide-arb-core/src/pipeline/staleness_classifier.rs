@@ -16,6 +16,7 @@ pub struct StalenessClassifier {
 }
 
 impl StalenessClassifier {
+    #[inline]
     pub const fn new(config: &MarketDataConfig) -> Self {
         Self {
             thresholds: StalenessThresholds {
@@ -27,6 +28,7 @@ impl StalenessClassifier {
         }
     }
 
+    #[inline]
     pub const fn classify(&self, age_ms: u64) -> StalenessLevel {
         if age_ms <= self.thresholds.fresh {
             StalenessLevel::Fresh
@@ -40,6 +42,7 @@ impl StalenessClassifier {
     }
 
     /// Return the expired threshold (used by `BookGate`).
+    #[inline]
     pub const fn expired_ms(&self) -> u64 {
         self.thresholds.expired
     }

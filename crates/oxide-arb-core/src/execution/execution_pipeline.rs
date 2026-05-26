@@ -1,1 +1,285 @@
+//! Execution pipeline orchestration — validate → risk → size → reserve → dispatch → audit.
 
+use std::sync::Arc;
+
+use chrono::Utc;
+use oxide_arb_algorithm::scorer::ScoredOpportunity;
+use oxide_arb_error::OxideError;
+use oxide_arb_models::domain::execution::ExecutionResult;
+use oxide_arb_models::domain::trade::PostTradeInput;
+use oxide_arb_models::enums::common::{ExecutionMode, TradeOutcome};
+use oxide_arb_models::enums::execution::ExecutionOutcome;
+use oxide_arb_models::enums::risk::TradeAccountingPhase;
+use oxide_arb_models::types::{MarketId, Price, TokenId, TradeId, Usd};
+use oxide_arb_risk::engine::RiskEngine;
+use oxide_arb_risk::types::ReportMode;
+use tokio_util::sync::CancellationToken;
+
+use crate::bridge::risk_metrics::CoreRiskMetrics;
+use crate::execution::capital_manager::CapitalManager;
+use crate::execution::dispatcher::Dispatcher;
+use crate::execution::fsm::ExecutionFSM;
+use crate::execution::market_inflight::MarketInFlightRegistry;
+use crate::execution::plan_builder::PlanBuilder;
+use crate::execution::probability_input::build_probability_input;
+use crate::execution::tiered_strategy::OrderStrategy;
+use crate::execution::validator::Validator;
+use crate::observability::metrics_hub::MetricsHub;
+
+/// Slim async post-trade work item — ids and outcome only, no full opportunity clone.
+#[derive(Debug, Clone)]
+pub struct PostTradeJob {
+    pub trade_id: TradeId,
+    pub market_id: MarketId,
+    pub token_id: TokenId,
+    pub entry_price: Price,
+    pub net_profit: Usd,
+    pub outcome: ExecutionOutcome,
+}
+
+/// Dependencies injected into [`ExecutionPipeline`].
+pub struct ExecutionPipelineDeps {
+    pub validator: Validator,
+    pub plan_builder: PlanBuilder,
+    pub dispatcher: Dispatcher,
+    pub order_strategy: OrderStrategy,
+    pub capital_manager: Arc<CapitalManager>,
+    pub risk_engine: Arc<RiskEngine>,
+    pub risk_metrics: Arc<CoreRiskMetrics>,
+    pub fsm: Arc<ExecutionFSM>,
+    pub market_inflight: Arc<MarketInFlightRegistry>,
+    pub metrics: Arc<MetricsHub>,
+    pub execution_mode: ExecutionMode,
+    pub outcome_tx: flume::Sender<PostTradeJob>,
+}
+
+pub struct ExecutionPipeline {
+    validator: Validator,
+    plan_builder: PlanBuilder,
+    dispatcher: Dispatcher,
+    order_strategy: OrderStrategy,
+    capital_manager: Arc<CapitalManager>,
+    risk_engine: Arc<RiskEngine>,
+    risk_metrics: Arc<CoreRiskMetrics>,
+    fsm: Arc<ExecutionFSM>,
+    market_inflight: Arc<MarketInFlightRegistry>,
+    metrics: Arc<MetricsHub>,
+    execution_mode: ExecutionMode,
+    outcome_tx: flume::Sender<PostTradeJob>,
+}
+
+impl ExecutionPipeline {
+    pub fn new(deps: ExecutionPipelineDeps) -> Self {
+        Self {
+            validator: deps.validator,
+            plan_builder: deps.plan_builder,
+            dispatcher: deps.dispatcher,
+            order_strategy: deps.order_strategy,
+            capital_manager: deps.capital_manager,
+            risk_engine: deps.risk_engine,
+            risk_metrics: deps.risk_metrics,
+            fsm: deps.fsm,
+            market_inflight: deps.market_inflight,
+            metrics: deps.metrics,
+            execution_mode: deps.execution_mode,
+            outcome_tx: deps.outcome_tx,
+        }
+    }
+
+    pub fn outcome_channel() -> (flume::Sender<PostTradeJob>, flume::Receiver<PostTradeJob>) {
+        flume::bounded(256)
+    }
+
+    pub async fn spawn_outcome_drain(
+        rx: flume::Receiver<PostTradeJob>,
+        risk_engine: Arc<RiskEngine>,
+        risk_metrics: Arc<CoreRiskMetrics>,
+        fsm: Arc<ExecutionFSM>,
+        shutdown: CancellationToken,
+    ) -> Result<(), OxideError> {
+        loop {
+            tokio::select! {
+                () = shutdown.cancelled() => {
+                    while let Ok(job) = rx.try_recv() {
+                        process_post_trade_job(&risk_engine, risk_metrics.as_ref(), &fsm, job).await;
+                    }
+                    return Ok(());
+                }
+                job = rx.recv_async() => {
+                    match job {
+                        Ok(job) => process_post_trade_job(&risk_engine, risk_metrics.as_ref(), &fsm, job).await,
+                        Err(_) => return Ok(()),
+                    }
+                }
+            }
+        }
+    }
+
+    /// Process a single scored opportunity through the full pipeline.
+    pub async fn execute(&self, scored: ScoredOpportunity) -> ExecutionResult {
+        let started_at = Utc::now();
+        let timer = self.metrics.execution_latency.start_timer();
+        let opp = &scored.opportunity;
+
+        if self.fsm.is_emergency() || !self.risk_engine.allows_trading() {
+            return ExecutionResult::rejected("halted", "execution halted — trading blocked");
+        }
+
+        let Some(_inflight) = self.market_inflight.try_acquire(&opp.market_id) else {
+            self.metrics.execution_market_busy.inc();
+            return ExecutionResult::rejected("inflight", "market already executing");
+        };
+
+        // 1. Validate fresh book + slippage
+        if let Err(e) = self.validator.validate(opp) {
+            return ExecutionResult::rejected("validation", e);
+        }
+
+        // 3. Risk pre-trade check (sync hot path)
+        let probability = build_probability_input(&scored);
+        let risk_decision = self.risk_engine.pre_trade_check_core(
+            opp,
+            &probability,
+            self.risk_metrics.as_ref(),
+            ReportMode::ShortCircuit,
+        );
+
+        if !risk_decision.allowed {
+            self.metrics.risk_denials.inc();
+            return ExecutionResult::rejected(
+                "risk",
+                risk_decision
+                    .denial_reason
+                    .unwrap_or_else(|| "risk denied".into()),
+            );
+        }
+
+        // 3. Position sizing from risk engine output
+        let approved_size = risk_decision
+            .recommended_size
+            .map_or(Usd::ZERO, |s| s.bet_usd);
+        if approved_size <= Usd::ZERO {
+            self.metrics.sizing_zero.inc();
+            return ExecutionResult::rejected("sizing", "Kelly sizing returned zero");
+        }
+
+        // 4. Exposure reservation (sync — no await on hot path)
+        let reservation = match self
+            .capital_manager
+            .reserve_sync(&opp.market_id, approved_size)
+        {
+            Ok(handle) => handle,
+            Err(e) => {
+                self.metrics.reservation_failures.inc();
+                return ExecutionResult::rejected("reservation", e);
+            }
+        };
+
+        // 5. Build execution plan
+        let plan = self.plan_builder.build(opp, approved_size, &reservation);
+
+        // 6. Dispatch (mode-aware via order strategy + dispatcher)
+        let outcome = self.order_strategy.execute(&self.dispatcher, &plan).await;
+
+        // 7. Confirm or release reservation synchronously
+        match &outcome {
+            ExecutionOutcome::Filled { .. } => {
+                let _ = self.capital_manager.confirm_sync(&reservation);
+            }
+            ExecutionOutcome::Miss { .. } | ExecutionOutcome::Failed { .. } => {
+                let _ = self.capital_manager.release_sync(&reservation);
+            }
+        }
+
+        let result = ExecutionResult {
+            outcome: Some(outcome.clone()),
+            rejection_reason: None,
+            rejection_stage: None,
+            started_at,
+            completed_at: Utc::now(),
+        };
+
+        // 8. Enqueue async post-trade processing (non-blocking)
+        let job = PostTradeJob {
+            trade_id: TradeId::new(opp.opportunity_id.as_str()),
+            market_id: opp.market_id.clone(),
+            token_id: opp.token_id.clone(),
+            entry_price: opp.entry_price,
+            net_profit: opp.net_profit,
+            outcome,
+        };
+        if self.outcome_tx.try_send(job).is_err() {
+            self.metrics.post_trade_dropped.inc();
+            tracing::error!("post-trade queue full — job dropped");
+        }
+
+        timer.observe_duration();
+        result
+    }
+
+    pub const fn execution_mode(&self) -> ExecutionMode {
+        self.execution_mode
+    }
+}
+
+async fn process_post_trade_job(
+    risk_engine: &RiskEngine,
+    metrics: &CoreRiskMetrics,
+    fsm: &ExecutionFSM,
+    job: PostTradeJob,
+) {
+    let (trade_outcome, cost, fee, net_profit) = match &job.outcome {
+        ExecutionOutcome::Filled {
+            filled_shares,
+            avg_fill_price,
+            fee_paid,
+            ..
+        } => {
+            let price = avg_fill_price.unwrap_or(job.entry_price);
+            let cost = Usd::new(filled_shares.inner() * price.inner());
+            (TradeOutcome::Success, cost, *fee_paid, Some(job.net_profit))
+        }
+        ExecutionOutcome::Miss { .. } => (TradeOutcome::Miss, Usd::ZERO, Usd::ZERO, None),
+        ExecutionOutcome::Failed { .. } => (TradeOutcome::TradeFailed, Usd::ZERO, Usd::ZERO, None),
+    };
+
+    let fill_input = PostTradeInput {
+        trade_id: job.trade_id.clone(),
+        market_id: job.market_id.clone(),
+        token_id: job.token_id.clone(),
+        outcome: trade_outcome,
+        cost_usd: cost,
+        fee_usd: fee,
+        net_profit_usd: net_profit,
+    };
+
+    if let Err(e) = risk_engine
+        .on_trade_result(TradeAccountingPhase::Fill, &fill_input, metrics)
+        .await
+    {
+        tracing::error!(error = %e, "post-trade fill accounting failed");
+        fsm.enter_emergency("post-trade fill persist failed");
+        return;
+    }
+
+    if trade_outcome == TradeOutcome::Success {
+        let settlement = PostTradeInput {
+            net_profit_usd: net_profit,
+            ..fill_input
+        };
+        match risk_engine
+            .on_trade_result(TradeAccountingPhase::Settlement, &settlement, metrics)
+            .await
+        {
+            Ok(report) => {
+                if report.breaker_tripped.is_some() {
+                    fsm.enter_emergency("circuit breaker tripped after settlement");
+                }
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "post-trade settlement accounting failed");
+                fsm.enter_emergency("post-trade settlement persist failed");
+            }
+        }
+    }
+}

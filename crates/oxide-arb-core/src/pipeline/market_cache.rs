@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
@@ -29,7 +30,8 @@ pub struct CachedMarketScanEntry {
 /// Backed by `ArcSwap` for wait-free reads. Rebuilt on Gamma sync
 /// (~every 5 minutes), so reads never block writes and vice versa.
 pub struct MarketCache {
-    scan_entries: ArcSwap<Vec<CachedMarketScanEntry>>,
+    scan_entries: ArcSwap<Vec<Arc<CachedMarketScanEntry>>>,
+    index: ArcSwap<HashMap<MarketId, Arc<CachedMarketScanEntry>>>,
     registry: Arc<MarketRegistry>,
 }
 
@@ -37,6 +39,7 @@ impl MarketCache {
     pub fn new(registry: Arc<MarketRegistry>) -> Self {
         let cache = Self {
             scan_entries: ArcSwap::from_pointee(Vec::new()),
+            index: ArcSwap::from_pointee(HashMap::new()),
             registry,
         };
         cache.rebuild();
@@ -47,6 +50,7 @@ impl MarketCache {
     pub fn rebuild(&self) {
         let active_ids = self.registry.active_market_ids();
         let mut entries = Vec::with_capacity(active_ids.len());
+        let mut index = HashMap::with_capacity(active_ids.len());
 
         for market_id in &active_ids {
             let Some(market) = self.registry.get_market(market_id) else {
@@ -56,7 +60,7 @@ impl MarketCache {
                 continue;
             };
 
-            entries.push(CachedMarketScanEntry {
+            let entry = Arc::new(CachedMarketScanEntry {
                 market_id: market.market_id,
                 event_id: market.event_id,
                 token_yes,
@@ -66,14 +70,22 @@ impl MarketCache {
                 neg_risk: market.neg_risk,
                 settlement_deadline: None,
             });
+            index.insert(entry.market_id.clone(), Arc::clone(&entry));
+            entries.push(entry);
         }
 
         self.scan_entries.store(Arc::new(entries));
+        self.index.store(Arc::new(index));
     }
 
     /// Wait-free snapshot of cached entries.
-    pub fn entries(&self) -> Arc<Vec<CachedMarketScanEntry>> {
+    pub fn entries(&self) -> Arc<Vec<Arc<CachedMarketScanEntry>>> {
         self.scan_entries.load_full()
+    }
+
+    /// O(1) lookup for a single market scan entry (Arc clone, no struct copy).
+    pub fn get(&self, market_id: &MarketId) -> Option<Arc<CachedMarketScanEntry>> {
+        self.index.load().get(market_id).cloned()
     }
 }
 
@@ -130,9 +142,20 @@ mod tests {
     }
 
     #[test]
+    fn get_returns_entry_by_market_id() {
+        let reg = Arc::new(MarketRegistry::new());
+        reg.register_market(sample_entry("m1"));
+
+        let cache = MarketCache::new(reg);
+        let entry = cache.get(&MarketId::new("m1")).unwrap();
+        assert_eq!(entry.market_id.as_str(), "m1");
+    }
+
+    #[test]
     fn empty_registry_yields_empty_cache() {
         let reg = Arc::new(MarketRegistry::new());
         let cache = MarketCache::new(reg);
         assert!(cache.entries().is_empty());
+        assert!(cache.get(&MarketId::new("missing")).is_none());
     }
 }

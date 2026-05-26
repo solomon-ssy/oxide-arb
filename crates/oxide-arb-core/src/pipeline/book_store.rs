@@ -1,23 +1,31 @@
 use std::sync::Arc;
 
+use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use num_traits::ToPrimitive;
-use parking_lot::RwLock;
+use oxide_arb_models::domain::BookLevel;
+use parking_lot::Mutex;
 
-use oxide_arb_models::domain::book::BookLevel;
-use oxide_arb_models::types::{Price, Shares, TokenId};
+use oxide_arb_models::domain::book::{BookSnapshot, EndgameBookPair, TopOfBook};
+use oxide_arb_models::types::{MarketId, Price, Shares, TokenId};
 
 use super::order_book::OrderBook;
 use crate::observability::metrics_hub::MetricsHub;
+use crate::pipeline::market_registry::MarketRegistry;
+
+struct TokenBookState {
+    live: Mutex<OrderBook>,
+    published: ArcSwap<BookSnapshot>,
+}
 
 /// Central orderbook store keyed by token.
 ///
-/// Uses `DashMap` for shard-level locking: the WS event loop writes while
-/// the Scanner reads concurrently. Inner `parking_lot::RwLock` protects
-/// each individual `OrderBook` — hold time is sub-microsecond (Vec clone).
+/// Writers mutate `live` under a short mutex; readers load `published` via
+/// `ArcSwap` with zero locking and zero cloning.
 pub struct BookStore {
-    books: DashMap<TokenId, Arc<RwLock<OrderBook>>>,
+    books: DashMap<TokenId, Arc<TokenBookState>>,
     metrics: Arc<MetricsHub>,
+    metric_update_counter: std::sync::atomic::AtomicU64,
 }
 
 impl BookStore {
@@ -25,30 +33,48 @@ impl BookStore {
         Self {
             books: DashMap::new(),
             metrics,
+            metric_update_counter: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
-    /// Return (or lazily create) the orderbook for `token_id`.
-    pub fn get_or_create(&self, token_id: &TokenId) -> Arc<RwLock<OrderBook>> {
-        let book = self
-            .books
-            .entry(token_id.clone())
-            .or_insert_with(|| Arc::new(RwLock::new(OrderBook::new(token_id.clone()))))
-            .value()
-            .clone();
+    fn get_or_create_state(&self, token_id: &TokenId) -> Arc<TokenBookState> {
+        if let Some(entry) = self.books.get(token_id) {
+            return Arc::clone(entry.value());
+        }
 
-        self.metrics
-            .book_store_token_count
-            .set(ToPrimitive::to_i64(&self.books.len()).unwrap_or(i64::MAX));
-        book
+        let state = Arc::new(TokenBookState {
+            live: Mutex::new(OrderBook::new(token_id.clone())),
+            published: ArcSwap::from_pointee(BookSnapshot::new(Arc::from([]), Arc::from([]), 0)),
+        });
+        self.books.insert(token_id.clone(), Arc::clone(&state));
+        self.update_token_count_metric(true);
+        state
     }
 
-    /// Retrieve an existing orderbook without creating one.
-    pub fn get(&self, token_id: &TokenId) -> Option<Arc<RwLock<OrderBook>>> {
-        self.books.get(token_id).map(|r| r.value().clone())
+    fn update_token_count_metric(&self, force: bool) {
+        if force {
+            self.metrics
+                .book_store_token_count
+                .set(ToPrimitive::to_i64(&self.books.len()).unwrap_or(i64::MAX));
+            return;
+        }
+        let n = self
+            .metric_update_counter
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if n % 1024 == 0 {
+            self.metrics
+                .book_store_token_count
+                .set(ToPrimitive::to_i64(&self.books.len()).unwrap_or(i64::MAX));
+        }
     }
 
-    /// Apply a full snapshot to the book for `token_id`.
+    #[inline]
+    pub fn load(&self, token_id: &TokenId) -> Option<Arc<BookSnapshot>> {
+        self.books
+            .get(token_id)
+            .map(|entry| entry.value().published.load_full())
+    }
+
     pub fn apply_snapshot(
         &self,
         token_id: &TokenId,
@@ -56,40 +82,67 @@ impl BookStore {
         asks: Vec<BookLevel>,
         timestamp_ms: u64,
     ) {
-        let book = self.get_or_create(token_id);
-        book.write().apply_snapshot(bids, asks, timestamp_ms);
+        let state = self.get_or_create_state(token_id);
+        let mut book = state.live.lock();
+        book.apply_snapshot(bids, asks, timestamp_ms);
+        state.published.store(Arc::new(book.publish()));
     }
 
-    /// Apply an incremental delta to the book for `token_id`.
-    pub fn apply_delta(&self, token_id: &TokenId, changes: &[(Price, Shares)], timestamp_ms: u64) {
-        let book = self.get_or_create(token_id);
-        book.write().apply_delta(changes, timestamp_ms);
+    pub fn apply_delta<I>(&self, token_id: &TokenId, changes: I, timestamp_ms: u64)
+    where
+        I: IntoIterator<Item = (Price, Shares)>,
+    {
+        let state = self.get_or_create_state(token_id);
+        let mut book = state.live.lock();
+        book.apply_delta(changes, timestamp_ms);
+        state.published.store(Arc::new(book.publish()));
     }
 
-    /// Remove a token's orderbook (e.g. market delisted).
     pub fn remove(&self, token_id: &TokenId) {
         self.books.remove(token_id);
-        self.metrics
-            .book_store_token_count
-            .set(ToPrimitive::to_i64(&self.books.len()).unwrap_or(i64::MAX));
+        self.update_token_count_metric(true);
     }
 
-    /// Number of tokens currently tracked.
     pub fn token_count(&self) -> usize {
         self.books.len()
+    }
+
+    /// Load YES+NO published snapshots without copying level data.
+    #[inline]
+    pub fn load_pair(&self, token_yes: &TokenId, token_no: &TokenId) -> Option<EndgameBookPair> {
+        let yes = self.load(token_yes)?;
+        let no = self.load(token_no)?;
+        Some(EndgameBookPair { yes, no })
+    }
+
+    /// Top-of-book for execution validation (4 prices + staleness, zero depth clone).
+    pub fn top_of_book(
+        &self,
+        registry: &MarketRegistry,
+        market_id: &MarketId,
+        now_ms: u64,
+    ) -> Option<TopOfBook> {
+        let (token_yes, token_no) = registry.token_pair(market_id)?;
+        let yes = self.load(&token_yes)?;
+        let no = self.load(&token_no)?;
+        Some(TopOfBook {
+            yes_best_bid: yes.best_bid(),
+            yes_best_ask: yes.best_ask(),
+            no_best_bid: no.best_bid(),
+            no_best_ask: no.best_ask(),
+            max_staleness_ms: EndgameBookPair { yes, no }.max_staleness_ms(now_ms),
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use oxide_arb_models::domain::book::BookLevel;
     use rust_decimal_macros::dec;
 
     fn make_level(price: rust_decimal::Decimal, size: rust_decimal::Decimal) -> BookLevel {
-        BookLevel {
-            price: Price::new(price),
-            size: Shares::new(size),
-        }
+        BookLevel::from_decimal_unchecked(Price::new(price), Shares::new(size))
     }
 
     #[test]
@@ -106,22 +159,20 @@ mod tests {
         );
         assert_eq!(store.token_count(), 1);
 
-        let book = store.get(&tid).unwrap();
-        let guard = book.read();
-        assert_eq!(guard.best_bid().unwrap().inner(), dec!(0.5));
-        assert_eq!(guard.best_ask().unwrap().inner(), dec!(0.6));
-        drop(guard);
+        let snap = store.load(&tid).unwrap();
+        assert_eq!(snap.best_bid().unwrap().inner(), dec!(0.5));
+        assert_eq!(snap.best_ask().unwrap().inner(), dec!(0.6));
     }
 
     #[test]
-    fn remove_token() {
+    fn load_pair_zero_copy() {
         let metrics = Arc::new(MetricsHub::new());
         let store = BookStore::new(metrics);
-        let tid = TokenId::new("tok-1");
-        store.apply_snapshot(&tid, vec![], vec![], 1);
-        assert_eq!(store.token_count(), 1);
-        store.remove(&tid);
-        assert_eq!(store.token_count(), 0);
-        assert!(store.get(&tid).is_none());
+        let yes = TokenId::new("yes");
+        let no = TokenId::new("no");
+        store.apply_snapshot(&yes, vec![make_level(dec!(0.95), dec!(10))], vec![], 1);
+        store.apply_snapshot(&no, vec![], vec![make_level(dec!(0.05), dec!(10))], 1);
+        let pair = store.load_pair(&yes, &no).unwrap();
+        assert_eq!(pair.view().yes_bids.levels.len(), 1);
     }
 }

@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use crate::observability::metrics_hub::MetricsHub;
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
+use num_traits::ToPrimitive;
 use oxide_arb_api::clob::ClobClient;
 use oxide_arb_models::domain::position::PositionInfo;
 use oxide_arb_models::enums::common::Side;
@@ -74,12 +75,14 @@ impl ApiHealthTracker {
         }
     }
 
+    #[inline]
     pub fn requests_in_window(&self) -> u64 {
         self.maybe_rotate();
         self.current_requests.load(Ordering::Relaxed)
             + self.previous_requests.load(Ordering::Relaxed)
     }
 
+    #[inline]
     pub fn errors_in_window(&self) -> u64 {
         self.maybe_rotate();
         self.current_errors.load(Ordering::Relaxed) + self.previous_errors.load(Ordering::Relaxed)
@@ -109,10 +112,13 @@ pub struct RiskMetricsState {
     daily_buy_trades: AtomicU32,
     daily_sell_trades: AtomicU32,
     daily_rollover_date: parking_lot::Mutex<chrono::NaiveDate>,
+    stale: std::sync::atomic::AtomicBool,
+    last_successful_refresh: AtomicU64,
 }
 
 impl RiskMetricsState {
     pub fn new(api_tracker: Arc<ApiHealthTracker>) -> Self {
+        let now_ms = ToPrimitive::to_u64(&Instant::now().elapsed().as_millis()).unwrap_or(0);
         Self {
             snapshot: ArcSwap::from_pointee(MetricsSnapshot::initial()),
             api_tracker,
@@ -120,13 +126,26 @@ impl RiskMetricsState {
             daily_buy_trades: AtomicU32::new(0),
             daily_sell_trades: AtomicU32::new(0),
             daily_rollover_date: parking_lot::Mutex::new(chrono::Utc::now().date_naive()),
+            stale: std::sync::atomic::AtomicBool::new(true),
+            last_successful_refresh: AtomicU64::new(now_ms),
         }
     }
 
+    pub fn mark_stale(&self) {
+        self.stale.store(true, Ordering::Release);
+    }
+
+    #[inline]
+    pub fn is_stale(&self) -> bool {
+        self.stale.load(Ordering::Acquire)
+    }
+
+    #[inline]
     pub fn cached_balance(&self) -> Usd {
         self.snapshot.load().cached_balance
     }
 
+    #[inline]
     pub fn open_position_count(&self) -> usize {
         self.snapshot.load().open_position_count
     }
@@ -135,10 +154,12 @@ impl RiskMetricsState {
         self.snapshot.load().positions.clone()
     }
 
+    #[inline]
     pub fn total_position_exposure(&self) -> Usd {
         self.snapshot.load().total_position_exposure
     }
 
+    #[inline]
     pub fn market_position_exposure(&self, market_id: &MarketId) -> Usd {
         self.snapshot
             .load()
@@ -148,6 +169,7 @@ impl RiskMetricsState {
             .unwrap_or(Usd::ZERO)
     }
 
+    #[inline]
     pub fn open_directional_count(&self, side: Side) -> usize {
         let snap = self.snapshot.load();
         match side {
@@ -156,6 +178,7 @@ impl RiskMetricsState {
         }
     }
 
+    #[inline]
     pub fn daily_directional_trades(&self, side: Side) -> u32 {
         self.check_daily_rollover();
         match side {
@@ -164,6 +187,28 @@ impl RiskMetricsState {
         }
     }
 
+    #[inline]
+    pub fn load_metrics_snapshot(&self, market_id: &MarketId) -> LoadedMetricsSnapshot {
+        self.check_daily_rollover();
+        let snap = self.snapshot.load();
+        LoadedMetricsSnapshot {
+            cached_balance: snap.cached_balance,
+            total_position_exposure: snap.total_position_exposure,
+            market_position_exposure: snap
+                .market_position_exposures
+                .get(market_id)
+                .copied()
+                .unwrap_or(Usd::ZERO),
+            open_position_count: snap.open_position_count,
+            open_buy_count: snap.open_buy_count,
+            open_sell_count: snap.open_sell_count,
+            daily_buy_trades: self.daily_buy_trades.load(Ordering::Relaxed),
+            daily_sell_trades: self.daily_sell_trades.load(Ordering::Relaxed),
+            consecutive_market_misses: self.consecutive_market_misses(market_id),
+        }
+    }
+
+    #[inline]
     pub fn consecutive_market_misses(&self, market_id: &MarketId) -> u32 {
         self.market_misses
             .get(market_id)
@@ -204,7 +249,30 @@ impl RiskMetricsState {
 
     fn store_snapshot(&self, snapshot: MetricsSnapshot) {
         self.snapshot.store(Arc::new(snapshot));
+        self.stale.store(false, Ordering::Release);
+        self.last_successful_refresh.store(
+            ToPrimitive::to_u64(&chrono::Utc::now().timestamp_millis().max(0)).unwrap_or(0),
+            Ordering::Release,
+        );
     }
+
+    pub fn last_successful_refresh_ms(&self) -> u64 {
+        self.last_successful_refresh.load(Ordering::Acquire)
+    }
+}
+
+/// Point-in-time copy of position metrics (single `ArcSwap` load).
+#[derive(Debug, Clone, Copy)]
+pub struct LoadedMetricsSnapshot {
+    pub cached_balance: Usd,
+    pub total_position_exposure: Usd,
+    pub market_position_exposure: Usd,
+    pub open_position_count: usize,
+    pub open_buy_count: usize,
+    pub open_sell_count: usize,
+    pub daily_buy_trades: u32,
+    pub daily_sell_trades: u32,
+    pub consecutive_market_misses: u32,
 }
 
 pub struct RiskMetricsRefreshService {

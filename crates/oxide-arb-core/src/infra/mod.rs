@@ -3,3 +3,5 @@ pub mod debounced_writer;
 pub mod health_checker;
 pub mod oracle_health_tracker;
 pub mod periodic_task;
+pub mod risk_decision_audit_buffer;
+pub mod risk_decision_audit_drain;

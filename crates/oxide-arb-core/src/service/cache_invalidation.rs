@@ -6,7 +6,7 @@ use oxide_arb_repository::traits::PositionRepository;
 use oxide_arb_storage::cache::{CacheKey, TieredCache};
 
 use crate::service::{
-    position_summary_service::PositionSummaryService, wallet_balance_service::WalletBalanceService,
+    position_summary::PositionSummaryService, wallet_balance::WalletBalanceService,
 };
 
 /// Invalidate all caches derived from a Gamma catalog sync.

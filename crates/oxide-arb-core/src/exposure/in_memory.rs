@@ -2,6 +2,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
+use num_traits::ToPrimitive;
 use oxide_arb_error::reservation::ReservationError;
 use oxide_arb_models::config::ExposureReservationConfig;
 use oxide_arb_models::types::{MarketId, ReservationId, Usd};
@@ -32,15 +33,18 @@ impl InMemoryExposureReservation {
         }
     }
 
+    #[inline]
     pub fn total_reserved_usd_sync(&self) -> Usd {
         let cents = self.total_reserved_cents.load(Ordering::Acquire);
         Usd::new(Decimal::from(cents) / dec!(100))
     }
 
+    #[inline]
     pub fn active_count_sync(&self) -> usize {
         self.reservations.len()
     }
 
+    #[inline]
     pub fn per_market_reserved_sync(&self, market_id: &MarketId) -> Usd {
         self.per_market_cents.get(market_id).map_or(Usd::ZERO, |v| {
             Usd::new(Decimal::from(v.load(Ordering::Acquire)) / dec!(100))
@@ -70,17 +74,19 @@ impl InMemoryExposureReservation {
     }
 
     fn usd_to_cents(amount: Usd) -> Result<u64, ReservationError> {
-        let cents_decimal = amount.inner() * dec!(100);
+        let cents_decimal = (amount.inner() * dec!(100)).floor();
+        if cents_decimal.is_sign_negative() {
+            return Err(ReservationError::Backend(
+                "amount overflow or negative".into(),
+            ));
+        }
         cents_decimal
-            .to_string()
-            .parse::<u64>()
-            .map_err(|_| ReservationError::Backend("amount overflow or negative".into()))
+            .to_u64()
+            .ok_or_else(|| ReservationError::Backend("amount overflow or negative".into()))
     }
-}
 
-#[async_trait::async_trait]
-impl ExposureReservationBackend for InMemoryExposureReservation {
-    async fn try_reserve(
+    /// Synchronous reserve — hot-path entry point for execution pipeline.
+    pub fn try_reserve_sync(
         &self,
         market_id: &MarketId,
         amount: Usd,
@@ -142,7 +148,8 @@ impl ExposureReservationBackend for InMemoryExposureReservation {
         Ok(id)
     }
 
-    async fn confirm(&self, id: &ReservationId) -> Result<(), ReservationError> {
+    /// Synchronous confirm — releases reservation tracking after a fill.
+    pub fn confirm_sync(&self, id: &ReservationId) -> Result<(), ReservationError> {
         let (_, entry) =
             self.reservations
                 .remove(id)
@@ -158,8 +165,29 @@ impl ExposureReservationBackend for InMemoryExposureReservation {
         Ok(())
     }
 
+    /// Synchronous release — same as confirm for in-memory backend.
+    pub fn release_sync(&self, id: &ReservationId) -> Result<(), ReservationError> {
+        self.confirm_sync(id)
+    }
+}
+
+#[async_trait::async_trait]
+impl ExposureReservationBackend for InMemoryExposureReservation {
+    async fn try_reserve(
+        &self,
+        market_id: &MarketId,
+        amount: Usd,
+        ttl: Duration,
+    ) -> Result<ReservationId, ReservationError> {
+        self.try_reserve_sync(market_id, amount, ttl)
+    }
+
+    async fn confirm(&self, id: &ReservationId) -> Result<(), ReservationError> {
+        self.confirm_sync(id)
+    }
+
     async fn release(&self, id: &ReservationId) -> Result<(), ReservationError> {
-        self.confirm(id).await
+        self.release_sync(id)
     }
 
     async fn total_reserved_usd(&self) -> Usd {

@@ -1,5 +1,6 @@
 use prometheus::{
-    Gauge, Histogram, HistogramOpts, IntCounter, IntCounterVec, IntGauge, Opts, Registry,
+    Gauge, Histogram, HistogramOpts, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts,
+    Registry,
 };
 
 macro_rules! register_counter {
@@ -48,6 +49,14 @@ macro_rules! register_counter_vec {
     }};
 }
 
+macro_rules! register_gauge_vec {
+    ($registry:expr, $name:expr, $help:expr, $labels:expr) => {{
+        let gauge_vec = IntGaugeVec::new(Opts::new($name, $help), $labels).unwrap();
+        $registry.register(Box::new(gauge_vec.clone())).unwrap();
+        gauge_vec
+    }};
+}
+
 pub struct MetricsHub {
     pub registry: Registry,
 
@@ -59,10 +68,12 @@ pub struct MetricsHub {
     pub markets_resolved_ws: IntCounter,
     pub shard_status_changes: IntCounter,
     pub book_store_token_count: IntGauge,
+    pub book_apply_dropped: IntCounter,
 
     // Detection
     pub scans_gate_rejected: IntCounter,
     pub coalesced_scans: IntCounter,
+    pub coalescer_dropped: IntCounter,
     pub scan_results_total: Histogram,
     pub scan_duration_seconds: Histogram,
     pub opportunities_detected: IntCounter,
@@ -83,14 +94,14 @@ pub struct MetricsHub {
     pub validation_failures: IntCounter,
     pub sizing_zero: IntCounter,
     pub reservation_failures: IntCounter,
+    pub execution_market_busy: IntCounter,
+    pub post_trade_dropped: IntCounter,
 
     // Tiered execution
     pub tier_fills: IntCounterVec,
     pub tier_misses: IntCounterVec,
 
-    // FSM
-    pub fsm_transitions: IntCounterVec,
-    pub fsm_invalid_transitions: IntCounter,
+    // Kill switch
     pub fsm_emergency_entries: IntCounter,
 
     // Risk
@@ -126,6 +137,10 @@ pub struct MetricsHub {
 
     // Metrics refresh
     pub metrics_refresh_failures: IntCounter,
+
+    // Shutdown
+    pub shutdown_stage_progress_remaining: IntGaugeVec,
+    pub shutdown_stage_timeouts: IntCounterVec,
 }
 
 struct PipelineMetrics {
@@ -136,11 +151,13 @@ struct PipelineMetrics {
     markets_resolved_ws: IntCounter,
     shard_status_changes: IntCounter,
     book_store_token_count: IntGauge,
+    book_apply_dropped: IntCounter,
 }
 
 struct DetectionMetrics {
     scans_gate_rejected: IntCounter,
     coalesced_scans: IntCounter,
+    coalescer_dropped: IntCounter,
     scan_results_total: Histogram,
     scan_duration_seconds: Histogram,
     opportunities_detected: IntCounter,
@@ -163,10 +180,10 @@ struct ExecutionMetrics {
     validation_failures: IntCounter,
     sizing_zero: IntCounter,
     reservation_failures: IntCounter,
+    execution_market_busy: IntCounter,
+    post_trade_dropped: IntCounter,
     tier_fills: IntCounterVec,
     tier_misses: IntCounterVec,
-    fsm_transitions: IntCounterVec,
-    fsm_invalid_transitions: IntCounter,
     fsm_emergency_entries: IntCounter,
 }
 
@@ -202,6 +219,8 @@ struct SystemMetrics {
     gamma_markets_total: IntGauge,
     gamma_last_sync_success: IntGauge,
     metrics_refresh_failures: IntCounter,
+    shutdown_stage_progress_remaining: IntGaugeVec,
+    shutdown_stage_timeouts: IntCounterVec,
 }
 
 fn register_pipeline_metrics(registry: &Registry) -> PipelineMetrics {
@@ -241,6 +260,11 @@ fn register_pipeline_metrics(registry: &Registry) -> PipelineMetrics {
             "oxide_arb_pipeline_book_store_token_count",
             "Tokens tracked in book store"
         ),
+        book_apply_dropped: register_counter!(
+            registry,
+            "oxide_arb_pipeline_book_apply_dropped_total",
+            "WS events dropped when book apply queue full"
+        ),
     }
 }
 
@@ -255,6 +279,11 @@ fn register_detection_metrics(registry: &Registry) -> DetectionMetrics {
             registry,
             "oxide_arb_detection_coalesced_scans_total",
             "Scans coalesced"
+        ),
+        coalescer_dropped: register_counter!(
+            registry,
+            "oxide_arb_detection_coalescer_dropped_total",
+            "Token updates dropped when coalescer channel full"
         ),
         scan_results_total: register_histogram!(
             registry,
@@ -350,6 +379,16 @@ fn register_execution_metrics(registry: &Registry) -> ExecutionMetrics {
             "oxide_arb_execution_reservation_failures_total",
             "Capital reservation failures"
         ),
+        execution_market_busy: register_counter!(
+            registry,
+            "oxide_arb_execution_market_busy_total",
+            "Rejected because market already in-flight"
+        ),
+        post_trade_dropped: register_counter!(
+            registry,
+            "oxide_arb_execution_post_trade_dropped_total",
+            "Post-trade jobs dropped when queue full"
+        ),
         tier_fills: register_counter_vec!(
             registry,
             "oxide_arb_execution_tier_fills_total",
@@ -361,17 +400,6 @@ fn register_execution_metrics(registry: &Registry) -> ExecutionMetrics {
             "oxide_arb_execution_tier_misses_total",
             "Misses by execution tier",
             &["tier"]
-        ),
-        fsm_transitions: register_counter_vec!(
-            registry,
-            "oxide_arb_fsm_transitions_total",
-            "FSM state transitions",
-            &["from", "to"]
-        ),
-        fsm_invalid_transitions: register_counter!(
-            registry,
-            "oxide_arb_fsm_invalid_transitions_total",
-            "Invalid FSM transitions attempted"
         ),
         fsm_emergency_entries: register_counter!(
             registry,
@@ -510,6 +538,18 @@ fn register_system_metrics(registry: &Registry) -> SystemMetrics {
             "oxide_arb_system_metrics_refresh_failures_total",
             "Metrics refresh failures"
         ),
+        shutdown_stage_progress_remaining: register_gauge_vec!(
+            registry,
+            "oxide_arb_shutdown_stage_progress_remaining",
+            "Tasks remaining during staged shutdown",
+            &["stage"]
+        ),
+        shutdown_stage_timeouts: register_counter_vec!(
+            registry,
+            "oxide_arb_shutdown_stage_timeouts_total",
+            "Staged shutdown stage timeouts",
+            &["stage"]
+        ),
     }
 }
 
@@ -534,8 +574,10 @@ impl MetricsHub {
             markets_resolved_ws: pipeline.markets_resolved_ws,
             shard_status_changes: pipeline.shard_status_changes,
             book_store_token_count: pipeline.book_store_token_count,
+            book_apply_dropped: pipeline.book_apply_dropped,
             scans_gate_rejected: detection.scans_gate_rejected,
             coalesced_scans: detection.coalesced_scans,
+            coalescer_dropped: detection.coalescer_dropped,
             scan_results_total: detection.scan_results_total,
             scan_duration_seconds: detection.scan_duration_seconds,
             opportunities_detected: detection.opportunities_detected,
@@ -552,10 +594,10 @@ impl MetricsHub {
             validation_failures: execution.validation_failures,
             sizing_zero: execution.sizing_zero,
             reservation_failures: execution.reservation_failures,
+            execution_market_busy: execution.execution_market_busy,
+            post_trade_dropped: execution.post_trade_dropped,
             tier_fills: execution.tier_fills,
             tier_misses: execution.tier_misses,
-            fsm_transitions: execution.fsm_transitions,
-            fsm_invalid_transitions: execution.fsm_invalid_transitions,
             fsm_emergency_entries: execution.fsm_emergency_entries,
             risk_checks_total: risk.checks_total,
             risk_exposure_usd: risk.exposure_usd,
@@ -579,7 +621,22 @@ impl MetricsHub {
             gamma_markets_total: system.gamma_markets_total,
             gamma_last_sync_success: system.gamma_last_sync_success,
             metrics_refresh_failures: system.metrics_refresh_failures,
+            shutdown_stage_progress_remaining: system.shutdown_stage_progress_remaining,
+            shutdown_stage_timeouts: system.shutdown_stage_timeouts,
         }
+    }
+
+    pub fn record_shutdown_timeout(&self, stage: &str, abandoned: usize) {
+        self.shutdown_stage_timeouts
+            .with_label_values(&[stage])
+            .inc();
+        self.set_shutdown_stage_remaining(stage, abandoned);
+    }
+
+    pub fn set_shutdown_stage_remaining(&self, stage: &str, remaining: usize) {
+        self.shutdown_stage_progress_remaining
+            .with_label_values(&[stage])
+            .set(i64::try_from(remaining).unwrap_or(i64::MAX));
     }
 }
 

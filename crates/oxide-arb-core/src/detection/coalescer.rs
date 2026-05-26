@@ -68,7 +68,7 @@ impl Coalescer {
 
     fn flush_ready(&self) {
         let now = Instant::now();
-        let mut ready = Vec::new();
+        let mut ready = Vec::with_capacity(self.pending.len());
 
         self.pending.retain(|market_id, first_seen| {
             if now.duration_since(*first_seen) >= self.coalesce_window {

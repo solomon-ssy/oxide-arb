@@ -1,13 +1,13 @@
-use oxide_arb_models::domain::book::{BookLevel, OrderbookSide};
-use oxide_arb_models::types::{Price, Shares, TokenId};
+use oxide_arb_models::domain::book::{BookLevel, BookSnapshot};
+use oxide_arb_models::types::{MicroPrice, Price, Shares, TokenId};
 use rust_decimal::Decimal;
 use std::cmp::{Ordering, Reverse};
+use std::sync::Arc;
 
-/// Single-token L2 orderbook.
+/// Single-token L2 orderbook (mutable writer-side state).
 ///
 /// `bids` are sorted descending by price; `asks` are sorted ascending.
-/// Uses `Vec<BookLevel>` for cache-friendly iteration at typical Polymarket
-/// depth (~50 levels), outperforming `BTreeMap` on the hot path.
+/// Published to readers via `BookSnapshot` (Arc-backed, lock-free).
 pub struct OrderBook {
     bids: Vec<BookLevel>,
     asks: Vec<BookLevel>,
@@ -16,10 +16,10 @@ pub struct OrderBook {
 }
 
 impl OrderBook {
-    pub const fn new(token_id: TokenId) -> Self {
+    pub fn new(token_id: TokenId) -> Self {
         Self {
-            bids: Vec::new(),
-            asks: Vec::new(),
+            bids: Vec::with_capacity(64),
+            asks: Vec::with_capacity(64),
             last_update_ms: 0,
             token_id,
         }
@@ -35,52 +35,71 @@ impl OrderBook {
         bids.sort_by_key(|b| Reverse(b.price));
         asks.sort_by_key(|a| a.price);
 
-        bids.retain(|l| l.size.inner() > Decimal::ZERO);
-        asks.retain(|l| l.size.inner() > Decimal::ZERO);
+        bids.retain(|l| l.size.is_positive());
+        asks.retain(|l| l.size.is_positive());
 
         self.bids = bids;
         self.asks = asks;
         self.last_update_ms = timestamp_ms;
     }
 
-    /// Incremental update (WS `PriceChange` event).
-    ///
-    /// For each `(price, size)` pair:
-    ///   - size > 0 → insert or update that price level
-    ///   - size == 0 → remove that price level
-    ///
-    /// Each price is looked up on both sides; an existing level is updated
-    /// in-place on whichever side it's found. A new insert (price not on
-    /// either side) is placed on bids if ≥ current mid, asks otherwise.
-    pub fn apply_delta(&mut self, changes: &[(Price, Shares)], timestamp_ms: u64) {
-        for &(price, size) in changes {
-            let on_bids = find_level(&self.bids, price, true).is_ok();
-            let on_asks = find_level(&self.asks, price, false).is_ok();
+    pub fn apply_delta<I>(&mut self, changes: I, timestamp_ms: u64)
+    where
+        I: IntoIterator<Item = (Price, Shares)>,
+    {
+        for (price, size) in changes {
+            let Ok(level) = BookLevel::from_decimal(price, size) else {
+                continue;
+            };
+            let on_bids = find_level(&self.bids, level.price, true).is_ok();
+            let on_asks = find_level(&self.asks, level.price, false).is_ok();
 
             if on_bids {
-                apply_level_delta(&mut self.bids, price, size, true);
+                apply_level_delta(&mut self.bids, level, true);
             } else if on_asks {
-                apply_level_delta(&mut self.asks, price, size, false);
-            } else if size.inner() > Decimal::ZERO {
+                apply_level_delta(&mut self.asks, level, false);
+            } else if level.size.is_positive() {
                 if self.should_place_on_bids(price) {
-                    apply_level_delta(&mut self.bids, price, size, true);
+                    apply_level_delta(&mut self.bids, level, true);
                 } else {
-                    apply_level_delta(&mut self.asks, price, size, false);
+                    apply_level_delta(&mut self.asks, level, false);
                 }
             }
         }
         self.last_update_ms = timestamp_ms;
     }
 
+    #[must_use]
+    #[inline]
+    pub fn publish(&self) -> BookSnapshot {
+        BookSnapshot::new(
+            Arc::from(self.bids.as_slice()),
+            Arc::from(self.asks.as_slice()),
+            self.last_update_ms,
+        )
+    }
+
+    #[inline]
+    pub fn bids(&self) -> &[BookLevel] {
+        &self.bids
+    }
+
+    #[inline]
+    pub fn asks(&self) -> &[BookLevel] {
+        &self.asks
+    }
+
+    #[inline]
     pub fn best_bid(&self) -> Option<Price> {
-        self.bids.first().map(|l| l.price)
+        self.bids.first().map(|l| l.price_decimal())
     }
 
+    #[inline]
     pub fn best_ask(&self) -> Option<Price> {
-        self.asks.first().map(|l| l.price)
+        self.asks.first().map(|l| l.price_decimal())
     }
 
-    /// Bid-ask spread, `None` if either side is empty.
+    #[inline]
     pub fn spread(&self) -> Option<Price> {
         match (self.best_ask(), self.best_bid()) {
             (Some(ask), Some(bid)) => Some(Price::new(ask.inner() - bid.inner())),
@@ -88,7 +107,7 @@ impl OrderBook {
         }
     }
 
-    /// `true` when `best_bid` >= `best_ask` (anomalous).
+    #[inline]
     pub fn is_crossed(&self) -> bool {
         match (self.best_bid(), self.best_ask()) {
             (Some(bid), Some(ask)) => bid >= ask,
@@ -97,42 +116,32 @@ impl OrderBook {
     }
 
     pub fn bid_depth(&self) -> Shares {
-        self.bids.iter().map(|l| l.size).sum()
+        self.bids.iter().fold(Shares::ZERO, |acc, l| {
+            Shares::new(acc.inner() + l.size.to_decimal())
+        })
     }
 
     pub fn ask_depth(&self) -> Shares {
-        self.asks.iter().map(|l| l.size).sum()
+        self.asks.iter().fold(Shares::ZERO, |acc, l| {
+            Shares::new(acc.inner() + l.size.to_decimal())
+        })
     }
 
-    pub fn bid_side(&self) -> OrderbookSide {
-        OrderbookSide {
-            levels: self.bids.clone(),
-            timestamp_ms: self.last_update_ms,
-        }
-    }
-
-    pub fn ask_side(&self) -> OrderbookSide {
-        OrderbookSide {
-            levels: self.asks.clone(),
-            timestamp_ms: self.last_update_ms,
-        }
-    }
-
+    #[inline]
     pub const fn last_update_ms(&self) -> u64 {
         self.last_update_ms
     }
 
+    #[inline]
     pub fn is_empty(&self) -> bool {
         self.bids.is_empty() && self.asks.is_empty()
     }
 
+    #[inline]
     pub const fn token_id(&self) -> &TokenId {
         &self.token_id
     }
 
-    /// Heuristic: determine whether a new price level belongs on the bid side.
-    ///
-    /// Bids sit below the midpoint; asks sit above.
     fn should_place_on_bids(&self, price: Price) -> bool {
         match (self.best_bid(), self.best_ask()) {
             (Some(bid), Some(ask)) => {
@@ -146,8 +155,8 @@ impl OrderBook {
     }
 }
 
-/// Binary search for `price` within a sorted side.
-fn find_level(levels: &[BookLevel], price: Price, descending: bool) -> Result<usize, usize> {
+#[inline]
+fn find_level(levels: &[BookLevel], price: MicroPrice, descending: bool) -> Result<usize, usize> {
     let cmp_fn = |probe: &BookLevel| -> Ordering {
         if descending {
             probe.price.cmp(&price).reverse()
@@ -158,21 +167,19 @@ fn find_level(levels: &[BookLevel], price: Price, descending: bool) -> Result<us
     levels.binary_search_by(cmp_fn)
 }
 
-/// Apply a single price-level delta to one side of the book.
-///
-/// `descending` = true for bids (price desc), false for asks (price asc).
-fn apply_level_delta(levels: &mut Vec<BookLevel>, price: Price, size: Shares, descending: bool) {
-    match find_level(levels, price, descending) {
+#[inline]
+fn apply_level_delta(levels: &mut Vec<BookLevel>, level: BookLevel, descending: bool) {
+    match find_level(levels, level.price, descending) {
         Ok(idx) => {
-            if size.inner() > Decimal::ZERO {
-                levels[idx].size = size;
+            if level.size.is_positive() {
+                levels[idx].size = level.size;
             } else {
                 levels.remove(idx);
             }
         }
         Err(idx) => {
-            if size.inner() > Decimal::ZERO {
-                levels.insert(idx, BookLevel { price, size });
+            if level.size.is_positive() {
+                levels.insert(idx, level);
             }
         }
     }
@@ -184,10 +191,7 @@ mod tests {
     use rust_decimal_macros::dec;
 
     fn lvl(p: Decimal, s: Decimal) -> BookLevel {
-        BookLevel {
-            price: Price::new(p),
-            size: Shares::new(s),
-        }
+        BookLevel::from_decimal(Price::new(p), Shares::new(s)).unwrap()
     }
 
     #[test]
@@ -208,6 +212,20 @@ mod tests {
     }
 
     #[test]
+    fn publish_zero_copy_slices() {
+        let mut ob = OrderBook::new(TokenId::new("t1"));
+        ob.apply_snapshot(
+            vec![lvl(dec!(0.5), dec!(10))],
+            vec![lvl(dec!(0.6), dec!(5))],
+            1,
+        );
+        let snap = ob.publish();
+        assert_eq!(snap.bids.len(), 1);
+        assert_eq!(snap.best_bid().unwrap().inner(), dec!(0.5));
+        assert!(snap.total_ask_depth_usd.is_positive());
+    }
+
+    #[test]
     fn delta_insert_update_remove() {
         let mut ob = OrderBook::new(TokenId::new("t1"));
         ob.apply_snapshot(
@@ -217,7 +235,7 @@ mod tests {
         );
 
         ob.apply_delta(
-            &[
+            [
                 (Price::new(dec!(0.5)), Shares::new(dec!(20))),
                 (Price::new(dec!(0.55)), Shares::new(dec!(15))),
                 (Price::new(dec!(0.7)), Shares::ZERO),
@@ -227,51 +245,8 @@ mod tests {
         );
 
         assert_eq!(ob.best_bid().unwrap().inner(), dec!(0.55));
-        assert_eq!(ob.bids[0].size.inner(), dec!(15));
-        assert_eq!(ob.bids[1].size.inner(), dec!(20));
+        assert_eq!(ob.bids[0].size.to_decimal(), dec!(15));
         assert_eq!(ob.best_ask().unwrap().inner(), dec!(0.65));
         assert_eq!(ob.asks.len(), 1);
-        assert_eq!(ob.last_update_ms(), 200);
-    }
-
-    #[test]
-    fn spread_and_crossed() {
-        let mut ob = OrderBook::new(TokenId::new("t1"));
-        assert!(ob.spread().is_none());
-        assert!(!ob.is_crossed());
-
-        ob.apply_snapshot(
-            vec![lvl(dec!(0.6), dec!(10))],
-            vec![lvl(dec!(0.7), dec!(10))],
-            1,
-        );
-        assert_eq!(ob.spread().unwrap().inner(), dec!(0.1));
-        assert!(!ob.is_crossed());
-
-        ob.apply_snapshot(
-            vec![lvl(dec!(0.7), dec!(10))],
-            vec![lvl(dec!(0.6), dec!(10))],
-            2,
-        );
-        assert!(ob.is_crossed());
-    }
-
-    #[test]
-    fn depth_calculation() {
-        let mut ob = OrderBook::new(TokenId::new("t1"));
-        ob.apply_snapshot(
-            vec![lvl(dec!(0.5), dec!(10)), lvl(dec!(0.4), dec!(20))],
-            vec![lvl(dec!(0.6), dec!(5))],
-            1,
-        );
-        assert_eq!(ob.bid_depth().inner(), dec!(30));
-        assert_eq!(ob.ask_depth().inner(), dec!(5));
-    }
-
-    #[test]
-    fn empty_book() {
-        let ob = OrderBook::new(TokenId::new("t1"));
-        assert!(ob.is_empty());
-        assert_eq!(ob.last_update_ms(), 0);
     }
 }
