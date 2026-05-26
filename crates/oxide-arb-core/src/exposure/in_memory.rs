@@ -51,6 +51,16 @@ impl InMemoryExposureReservation {
         })
     }
 
+    /// Single-pass reservation read for pre-trade metrics snapshots.
+    #[inline]
+    pub fn reservation_snapshot_sync(&self, market_id: &MarketId) -> (Usd, Usd, usize) {
+        (
+            self.total_reserved_usd_sync(),
+            self.per_market_reserved_sync(market_id),
+            self.active_count_sync(),
+        )
+    }
+
     /// GC expired reservations. Returns count of expired entries removed.
     pub fn gc_expired(&self) -> u32 {
         let now = Instant::now();

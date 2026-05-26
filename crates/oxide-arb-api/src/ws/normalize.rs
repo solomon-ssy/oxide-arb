@@ -1,13 +1,15 @@
 //! Map Polymarket SDK WebSocket payloads into domain [`WsEvent`].
 
 use num_traits::ToPrimitive;
+use oxide_arb_models::domain::book::BookLevel;
 use oxide_arb_models::enums::common::TickSize;
-use oxide_arb_models::types::{MarketId, Price, Shares};
+use oxide_arb_models::types::{MarketId, Price, Shares, TokenId};
 use polymarket_client_sdk_v2::clob::ws::types::response::{
     BestBidAsk, BookUpdate, LastTradePrice, MarketResolved, PriceChange, TickSizeChange, WsMessage,
 };
+use std::collections::HashMap;
 
-use super::event::{PriceLevel, PriceLevelDelta, WsEvent};
+use super::event::{PriceLevelDelta, WsEvent};
 use super::token_intern::intern_u256;
 
 /// Normalized output of a single SDK WebSocket message (local newtype for [`From`]).
@@ -37,21 +39,15 @@ pub fn normalize_ws_message(msg: WsMessage) -> Vec<WsEvent> {
 
 impl From<&BookUpdate> for WsEvent {
     fn from(book: &BookUpdate) -> Self {
-        let bids: Vec<PriceLevel> = book
+        let bids: Vec<BookLevel> = book
             .bids
             .iter()
-            .map(|l| PriceLevel {
-                price: Price::new(l.price),
-                size: Shares::new(l.size),
-            })
+            .map(|l| BookLevel::from_decimal_unchecked(Price::new(l.price), Shares::new(l.size)))
             .collect();
-        let asks: Vec<PriceLevel> = book
+        let asks: Vec<BookLevel> = book
             .asks
             .iter()
-            .map(|l| PriceLevel {
-                price: Price::new(l.price),
-                size: Shares::new(l.size),
-            })
+            .map(|l| BookLevel::from_decimal_unchecked(Price::new(l.price), Shares::new(l.size)))
             .collect();
 
         Self::BookSnapshot {
@@ -66,14 +62,21 @@ impl From<&BookUpdate> for WsEvent {
 
 fn price_change_events(pc: &PriceChange) -> Vec<WsEvent> {
     let timestamp_ms = ToPrimitive::to_u64(&pc.timestamp.max(0)).unwrap_or(0);
-    pc.price_changes
-        .iter()
-        .map(|entry| WsEvent::PriceChange {
-            asset_id: intern_u256(entry.asset_id),
-            changes: vec![PriceLevelDelta {
-                price: Price::new(entry.price),
-                size: Shares::new(entry.size.unwrap_or_default()),
-            }],
+    let mut grouped: HashMap<TokenId, Vec<PriceLevelDelta>> = HashMap::new();
+
+    for entry in &pc.price_changes {
+        let asset_id = intern_u256(entry.asset_id);
+        grouped.entry(asset_id).or_default().push(PriceLevelDelta {
+            price: Price::new(entry.price),
+            size: Shares::new(entry.size.unwrap_or_default()),
+        });
+    }
+
+    grouped
+        .into_iter()
+        .map(|(asset_id, changes)| WsEvent::PriceChange {
+            asset_id,
+            changes,
             timestamp_ms,
         })
         .collect()

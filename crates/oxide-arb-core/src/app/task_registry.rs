@@ -585,6 +585,16 @@ impl AppRunner {
         }
     }
 
+    pub fn absorb_pending_queue(&mut self, queue: &PendingTaskQueue) {
+        for PendingTask { id, future_factory } in queue.drain() {
+            self.spawn(id, move |tok| async move { future_factory(tok).await });
+        }
+    }
+
+    pub fn registry_len(&self) -> usize {
+        self.registry.len()
+    }
+
     pub async fn run(mut self) -> Result<(), oxide_arb_error::OxideError> {
         self.absorb_pending_tasks();
 

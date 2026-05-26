@@ -28,6 +28,14 @@ pub enum RiskAuditEvent {
         trace: RiskDecisionTrace,
         opportunity_id: OpportunityId,
     },
+    /// Compact audit for allowed trades on the short-circuit hot path.
+    TradeAllowedSummary {
+        opportunity_id: OpportunityId,
+        state_version: StateVersion,
+        check_count: usize,
+        total_elapsed_us: u64,
+        evaluated_at: DateTime<Utc>,
+    },
     TradeDenied {
         trace: RiskDecisionTrace,
         opportunity_id: OpportunityId,
@@ -113,7 +121,8 @@ fn audit_event_metadata(
     event: &RiskAuditEvent,
 ) -> (RiskAuditEventType, Option<OpportunityId>, Option<TradeId>) {
     match event {
-        RiskAuditEvent::TradeAllowed { opportunity_id, .. } => (
+        RiskAuditEvent::TradeAllowed { opportunity_id, .. }
+        | RiskAuditEvent::TradeAllowedSummary { opportunity_id, .. } => (
             RiskAuditEventType::TradeAllowed,
             Some(opportunity_id.clone()),
             None,

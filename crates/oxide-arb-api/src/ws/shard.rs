@@ -161,8 +161,11 @@ impl WsShard {
             *self.last_message_at.lock() = Some(Instant::now());
         }
         for event in events {
-            if self.output_tx.send(event).is_err() {
-                tracing::error!(shard_id = self.shard_id, "Output channel closed");
+            if self.output_tx.try_send(event).is_err() {
+                tracing::error!(
+                    shard_id = self.shard_id,
+                    "WS output channel full — event dropped"
+                );
                 return;
             }
         }

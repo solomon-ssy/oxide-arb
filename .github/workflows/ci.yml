@@ -56,6 +56,9 @@ jobs:
         if: github.event_name == 'pull_request'
         run: bash scripts/check-bench-regression.sh
 
+      - name: Enforce absolute micro SLO ceilings
+        run: bash scripts/check-bench-slo.sh
+
       - name: Run benchmarks
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: bash scripts/check-bench-regression.sh
@@ -80,6 +83,20 @@ jobs:
 
       - name: Check MSRV
         run: cargo check --workspace
+
+  integration-docker:
+    name: Integration (Docker)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Run ignored Postgres integration tests
+        run: cargo test -p oxide-arb-repository --test pg_repository -- --ignored --test-threads=1
+
+      - name: Run storage migration integration tests
+        run: cargo test -p oxide-arb-storage --test migration_pg -- --ignored --test-threads=1
 
   # network-integration:
   #   name: Live API / WS / RPC (optional)

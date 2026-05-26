@@ -96,7 +96,7 @@ impl ExecutionRunnerPool {
         let mut runners = Vec::with_capacity(shard_count);
 
         for _ in 0..shard_count {
-            let (tx, rx) = flume::bounded(64);
+            let (tx, rx) = flume::bounded(256);
             shard_txs.push(tx);
             runners.push(ExecutionRunner::new(
                 rx,

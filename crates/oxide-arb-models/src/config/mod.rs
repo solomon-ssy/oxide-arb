@@ -138,6 +138,9 @@ impl Settings {
     /// (CLI subcommand overrides the TOML default), so that credential
     /// policy and any future mode-sensitive invariants are evaluated
     /// against the mode that will actually run.
+    ///
+    /// Warnings are logged via `tracing::warn`. Call [`Self::ensure_valid_for_mode`]
+    /// at startup to fail closed on errors.
     #[must_use]
     pub fn validate_for_mode(&self, mode: ExecutionMode) -> ConfigValidationReport {
         let report = validate_settings_mode(self.inner.as_ref(), mode);
@@ -145,6 +148,18 @@ impl Settings {
             tracing::warn!(mode = ?mode, "Config warning: {w}");
         }
         report
+    }
+
+    /// Fail-closed gate for mode-aware validation (mirrors [`run_common_validation`]).
+    ///
+    /// Live/Paper credential policy and other mode-sensitive invariants must pass
+    /// before subsystems connect to PG/CLOB. Warnings are logged; only errors abort.
+    pub fn ensure_valid_for_mode(&self, mode: ExecutionMode) -> OxideResult<()> {
+        let report = self.validate_for_mode(mode);
+        if report.has_errors() {
+            return Err(ConfigError::from(report).into());
+        }
+        Ok(())
     }
 }
 
@@ -241,6 +256,23 @@ mod tests {
         let settings = Settings::new("nonexistent_dir_for_test").expect("defaults");
         let report = settings.validate_for_mode(ExecutionMode::DryRun);
         assert!(!report.has_errors());
+    }
+
+    #[test]
+    fn ensure_valid_for_mode_fails_on_live_missing_credentials() {
+        let settings = Settings::new("nonexistent_dir_for_test").expect("defaults");
+        let err = settings
+            .ensure_valid_for_mode(ExecutionMode::Live)
+            .expect_err("Live without credentials must fail closed");
+        assert!(err.to_string().contains("missing required credentials"));
+    }
+
+    #[test]
+    fn ensure_valid_for_mode_passes_dry_run() {
+        let settings = Settings::new("nonexistent_dir_for_test").expect("defaults");
+        settings
+            .ensure_valid_for_mode(ExecutionMode::DryRun)
+            .expect("DryRun defaults should pass mode validation");
     }
 
     #[test]

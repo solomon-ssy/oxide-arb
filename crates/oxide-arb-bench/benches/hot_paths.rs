@@ -1,4 +1,5 @@
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
+use std::sync::OnceLock;
 
 use chrono::{Duration, Utc};
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
@@ -7,11 +8,14 @@ use oxide_arb_algorithm::{
     cooldown::InMemoryEmissionCooldown,
     endgame::{EndgameDetectInput, EndgameDetector, convergence::ConvergenceDirection},
     fee::FeeEstimator,
-    pipeline::{MarketScanInput, OpportunityPipeline},
+    pipeline::{MarketScanInputRef, OpportunityPipeline},
     scorer::EndgameScorer,
     walker::OrderbookWalker,
 };
+use oxide_arb_core::detection::coalescer::Coalescer;
+use oxide_arb_core::detection::funnel::Funnel;
 use oxide_arb_core::observability::metrics_hub::MetricsHub;
+use oxide_arb_core::pipeline::market_registry::MarketRegistry;
 use oxide_arb_core::pipeline::order_book::OrderBook;
 use oxide_arb_models::{
     config::{
@@ -34,6 +38,7 @@ use oxide_arb_risk::{
     builder::RiskEngineBuilder, clock::utc_clock, traits::RiskMetrics, types::ReportMode,
 };
 use rust_decimal_macros::dec;
+use tokio_util::sync::CancellationToken;
 
 struct ZeroFeeEstimator;
 
@@ -285,19 +290,19 @@ fn bench_pipeline_process(c: &mut Criterion) {
     let now = Utc::now();
     let deadline = now + Duration::hours(12);
 
-    let scan_input = MarketScanInput {
-        market_id,
-        event_id,
-        token_yes,
-        token_no,
-        book,
+    let scan_input = MarketScanInputRef {
+        market_id: &market_id,
+        event_id: &event_id,
+        token_yes: &token_yes,
+        token_no: &token_no,
+        book: &book,
         category: MarketCategory::Geopolitics,
         staleness: StalenessLevel::Fresh,
         settlement_deadline: Some(deadline),
     };
 
     c.bench_function("pipeline_process", |b| {
-        b.iter(|| pipeline.process(black_box(&scan_input), black_box(now)));
+        b.iter(|| pipeline.process_ref(black_box(&scan_input), black_box(now)));
     });
 }
 
@@ -386,13 +391,19 @@ fn bench_pre_trade_fail_short(c: &mut Criterion) {
 }
 
 fn bench_book_apply_snapshot(c: &mut Criterion) {
-    let levels = sample_levels(50);
+    let bids = sample_levels(50);
+    let asks = sample_levels(50);
     c.bench_function("book_apply_snapshot_50", |b| {
-        b.iter(|| {
-            let mut ob = OrderBook::new(TokenId::new("t"));
-            ob.apply_snapshot(levels.clone(), levels.clone(), 1);
-            black_box(ob.publish(1));
-        });
+        b.iter_with_setup(
+            || {
+                let ob = OrderBook::new(TokenId::new("t"));
+                (ob, bids.clone(), asks.clone())
+            },
+            |(mut ob, bids, asks)| {
+                ob.apply_snapshot(bids, asks, 1);
+                black_box(ob.publish(1));
+            },
+        );
     });
 }
 
@@ -428,6 +439,122 @@ fn bench_dual_book_assemble(c: &mut Criterion) {
     });
 }
 
+fn bench_coalescer_pair_flush(c: &mut Criterion) {
+    let metrics = Arc::new(MetricsHub::new());
+    let registry = Arc::new(MarketRegistry::new());
+    registry.register_market(oxide_arb_models::domain::market::MarketRegistryInfo {
+        market_id: MarketId::new("bench-m1"),
+        event_id: EventId::new("evt"),
+        token_yes: TokenId::new("bench-m1-yes"),
+        token_no: TokenId::new("bench-m1-no"),
+        question: "Q".into(),
+        slug: "q".into(),
+        category: MarketCategory::Other,
+        status: oxide_arb_models::enums::market::MarketStatus::Active,
+        neg_risk: false,
+        tick_size: oxide_arb_models::enums::common::TickSize::Hundredth,
+        tokens: vec![],
+        best_bid: None,
+        best_ask: None,
+        depth_usd: None,
+        min_order_size: dec!(1),
+        volume_24h: Usd::ZERO,
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    });
+    let (tx, _rx) = flume::bounded(8);
+    let coalescer = Coalescer::new(
+        registry,
+        std::time::Duration::from_millis(500),
+        tx,
+        metrics,
+        CancellationToken::new(),
+    );
+    let yes = TokenId::new("bench-m1-yes");
+    let no = TokenId::new("bench-m1-no");
+
+    c.bench_function("coalescer_pair_flush", |b| {
+        b.iter(|| {
+            coalescer.notify_token_update(black_box(&yes));
+            coalescer.notify_token_update(black_box(&no));
+        });
+    });
+}
+
+fn bench_funnel_immediate_dispatch(c: &mut Criterion) {
+    let metrics = Arc::new(MetricsHub::new());
+    let (tx, _rx) = flume::bounded(256);
+    let funnel = Funnel::new(vec![tx], 50, std::time::Duration::from_millis(75), metrics);
+    let scored = {
+        use oxide_arb_models::domain::opportunity::{EndgameMeta, Opportunity};
+        use oxide_arb_models::enums::opportunity::PayoutModel;
+        use oxide_arb_models::types::OpportunityId;
+        oxide_arb_algorithm::scorer::ScoredOpportunity {
+            opportunity: Arc::new(Opportunity {
+                opportunity_id: OpportunityId::new_v7(),
+                market_id: MarketId::new("bench"),
+                event_id: EventId::new("e"),
+                token_id: TokenId::new("t"),
+                side: Side::Buy,
+                payout_model: PayoutModel::DirectionalSettlement {
+                    projected_payout_if_correct: Usd::ZERO,
+                    expected_payout: Usd::ZERO,
+                    predicted_side: Side::Buy,
+                },
+                shares: Shares::ZERO,
+                entry_price: Price::new(dec!(0.95)),
+                total_cost: Usd::ZERO,
+                total_fees: Usd::ZERO,
+                net_profit: Usd::new(dec!(1)),
+                expected_net_profit: Usd::new(dec!(1)),
+                edge_bps: Bps::ZERO,
+                resolution_adjust: dec!(1),
+                depth_used_pct: dec!(1),
+                staleness: StalenessLevel::Fresh,
+                category: MarketCategory::Other,
+                meta: EndgameMeta {
+                    predicted_yes: true,
+                    confidence: dec!(0.9),
+                    convergence_duration_secs: 0,
+                    price_zone: PriceZone::Z95,
+                    duration_bucket: DurationBucket::Short,
+                    settlement_deadline: None,
+                },
+                calibration: oxide_arb_models::domain::calibration::CalibrationSnapshot {
+                    bucket_key: oxide_arb_models::domain::calibration::BucketKey {
+                        category: MarketCategory::Other,
+                        price_zone: PriceZone::Z95,
+                        duration_bucket: DurationBucket::Short,
+                    },
+                    posterior_mean: dec!(0.9),
+                    sample_size: 10,
+                    alpha_prior: dec!(1),
+                    beta_prior: dec!(1),
+                    fallback_tier: 1,
+                    fused_probability: dec!(0.9),
+                },
+                detected_at: Utc::now(),
+            }),
+            token_yes: TokenId::new("y"),
+            token_no: TokenId::new("n"),
+            score: dec!(0.9),
+            fill_probability: dec!(1),
+            urgency_factor: dec!(1),
+            category_weight: dec!(1),
+            staleness_discount: dec!(1),
+            book_yes_version: 1,
+            book_no_version: 1,
+        }
+    };
+
+    c.bench_function("funnel_immediate_dispatch", |b| {
+        b.iter(|| {
+            let _ = black_box(funnel.try_dispatch_immediate(scored.clone()));
+            black_box(());
+        });
+    });
+}
+
 criterion_group!(
     benches,
     bench_walk_micro_5,
@@ -439,6 +566,8 @@ criterion_group!(
     bench_pre_trade_fail_short,
     bench_book_apply_snapshot,
     bench_book_apply_delta_50,
-    bench_dual_book_assemble
+    bench_dual_book_assemble,
+    bench_coalescer_pair_flush,
+    bench_funnel_immediate_dispatch
 );
 criterion_main!(benches);

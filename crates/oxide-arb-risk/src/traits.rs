@@ -4,6 +4,7 @@
 //! `oxide-arb-risk` does **not** implement them — implementations
 //! live in `oxide-arb-core` (Phase 4.2) or test mocks.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use oxide_arb_error::OxideResult;
@@ -235,4 +236,39 @@ pub trait BalanceQuerier: Send + Sync + 'static {
 
     /// Fetch per-market position values from the exchange.
     async fn query_positions(&self) -> OxideResult<Vec<(MarketId, Usd)>>;
+}
+
+#[async_trait::async_trait]
+impl RiskPersistence for Arc<dyn RiskPersistence> {
+    async fn upsert_state(&self, state: UpsertRiskEngineState) -> OxideResult<()> {
+        (**self).upsert_state(state).await
+    }
+
+    async fn load_state(&self) -> OxideResult<RiskStateInfo> {
+        (**self).load_state().await
+    }
+
+    async fn upsert_blacklist(&self, entry: UpsertBlacklistEntry) -> OxideResult<()> {
+        (**self).upsert_blacklist(entry).await
+    }
+
+    async fn remove_blacklist(&self, market_id: &MarketId) -> OxideResult<()> {
+        (**self).remove_blacklist(market_id).await
+    }
+
+    async fn load_blacklist(&self) -> OxideResult<Vec<BlacklistInfo>> {
+        (**self).load_blacklist().await
+    }
+
+    async fn create_emergency(&self, emergency: NewEmergencySnapshot) -> OxideResult<()> {
+        (**self).create_emergency(emergency).await
+    }
+
+    async fn create_reconciliation(&self, report: NewReconciliationReport) -> OxideResult<()> {
+        (**self).create_reconciliation(report).await
+    }
+
+    async fn create_audit(&self, audit: NewRiskAuditEvent) -> OxideResult<()> {
+        (**self).create_audit(audit).await
+    }
 }

@@ -4,7 +4,6 @@ use std::thread;
 use flume::{Receiver, Sender};
 use oxide_arb_api::ws::{ClobWsManager, WsEvent};
 use oxide_arb_error::OxideError;
-use oxide_arb_models::domain::book::BookLevel;
 use oxide_arb_models::types::TokenId;
 use tokio_util::sync::CancellationToken;
 
@@ -163,19 +162,8 @@ impl BookApplyWorker {
                 timestamp_ms,
                 ..
             } => {
-                let mut bid_levels = Vec::with_capacity(bids.len());
-                bid_levels.extend(
-                    bids.into_iter()
-                        .map(|pl| BookLevel::from_decimal_unchecked(pl.price, pl.size)),
-                );
-                let mut ask_levels = Vec::with_capacity(asks.len());
-                ask_levels.extend(
-                    asks.into_iter()
-                        .map(|pl| BookLevel::from_decimal_unchecked(pl.price, pl.size)),
-                );
-
                 self.book_store
-                    .apply_snapshot(&asset_id, bid_levels, ask_levels, timestamp_ms);
+                    .apply_snapshot(&asset_id, bids, asks, timestamp_ms);
                 self.notify_coalescer(asset_id);
                 self.metrics.book_snapshots_applied.inc();
             }

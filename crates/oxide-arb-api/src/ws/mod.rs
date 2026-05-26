@@ -12,7 +12,7 @@ mod router;
 mod shard;
 mod token_intern;
 
-pub use event::{PriceLevel, PriceLevelDelta, ShardConnectionStatus, WsEvent};
+pub use event::{PriceLevelDelta, ShardConnectionStatus, WsEvent};
 pub use reconnect::ReconnectPolicy;
 pub use token_intern::{TokenInternPool, intern_str, intern_u256};
 
@@ -95,5 +95,11 @@ impl ClobWsManager {
         self.last_message_at
             .lock()
             .and_then(|ts| ToPrimitive::to_u64(&ts.elapsed().as_millis()))
+    }
+
+    /// Mark WS as connected for integration tests (no live socket required).
+    #[doc(hidden)]
+    pub fn seed_test_connectivity(&self) {
+        *self.last_message_at.lock() = Some(Instant::now());
     }
 }

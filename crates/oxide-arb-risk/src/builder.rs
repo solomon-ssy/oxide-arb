@@ -5,7 +5,7 @@ use crate::audit_sink::AuditSink;
 use crate::blacklist::BlacklistManager;
 use crate::circuit_breaker::CircuitBreaker;
 use crate::clock::{self, Clock};
-use crate::engine::RiskEngine;
+use crate::engine::{DynRiskEngine, RiskEngine};
 use crate::pipeline;
 use crate::position::{PositionTracker, PotentialLossLedger};
 use crate::reconciliation::LedgerReconciler;
@@ -113,7 +113,7 @@ impl RiskEngineBuilder {
     /// - `recover_state()` returned an error (already fail-closed)
     /// - Persisted breaker is `Open` with unexpired cooldown
     /// - Active escalated potential-loss entries exist
-    pub fn build(self, metrics: &dyn RiskMetrics) -> OxideResult<RiskEngine> {
+    pub fn build(self, metrics: &dyn RiskMetrics) -> OxideResult<DynRiskEngine> {
         let config = self.config.unwrap_or_default();
         let equity = self.initial_equity.unwrap_or_else(|| Usd::new(dec!(1000)));
         let clock = self.clock.unwrap_or_else(clock::utc_clock);

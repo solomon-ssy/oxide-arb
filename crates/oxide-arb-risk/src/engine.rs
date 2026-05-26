@@ -55,7 +55,10 @@ use std::time::Instant;
 /// Gates evaluated before live metrics are loaded (halt / CB / blacklist).
 const PHASE1_GATE_COUNT: usize = 4;
 
-pub struct RiskEngine {
+pub struct RiskEngine<P = Arc<dyn RiskPersistence>>
+where
+    P: RiskPersistence + Send + Sync + 'static,
+{
     pub(crate) circuit_breaker: RwLock<CircuitBreaker>,
     pub(crate) daily: RwLock<DailyAccounting>,
     pub(crate) weekly: RwLock<WeeklyAccounting>,
@@ -69,13 +72,19 @@ pub struct RiskEngine {
     pub(crate) drawdown: RwLock<DrawdownGuard>,
     pub(crate) reconciler: LedgerReconciler,
     pub(crate) config: RiskConfig,
-    pub(crate) persistence: Arc<dyn RiskPersistence>,
+    pub(crate) persistence: P,
     pub(crate) audit_sink: Option<Arc<dyn AuditSink>>,
     pub(crate) state_version: AtomicStateVersion,
     pub(crate) clock: Arc<dyn Clock>,
 }
 
-impl RiskEngine {
+/// Default engine type — dynamic persistence via [`Arc<dyn RiskPersistence>`].
+pub type DynRiskEngine = RiskEngine<Arc<dyn RiskPersistence>>;
+
+impl<P> RiskEngine<P>
+where
+    P: RiskPersistence + Send + Sync + 'static,
+{
     // ── Pre-trade (sync hot path + non-blocking audit) ───────────────
 
     /// Evaluate all pre-trade risk checks and compute sizing.
@@ -175,7 +184,7 @@ impl RiskEngine {
             trace,
         };
 
-        self.enqueue_pre_trade_audit(allowed, &decision.trace, opp.opportunity_id.clone());
+        self.enqueue_pre_trade_audit(allowed, &decision.trace, opp.opportunity_id.clone(), mode);
         decision
     }
 
@@ -610,7 +619,9 @@ impl RiskEngine {
     /// Whether new trades may pass circuit-breaker gates (Closed / `HalfOpen` / Recovered).
     #[inline]
     pub fn allows_trading(&self) -> bool {
-        self.circuit_breaker.read().allows_trading()
+        let snap = self.risk_snapshot.load();
+        snap.circuit_breaker.circuit_breaker.allows_trading
+            && snap.circuit_breaker.manual_halt.allows_trading()
     }
 
     /// Halt the engine and persist the state change.
@@ -986,12 +997,21 @@ impl RiskEngine {
         allowed: bool,
         trace: &RiskDecisionTrace,
         opportunity_id: OpportunityId,
+        mode: ReportMode,
     ) {
         let Some(sink) = &self.audit_sink else {
             return;
         };
 
-        let audit = if allowed {
+        let audit = if allowed && mode == ReportMode::ShortCircuit {
+            RiskAuditEvent::TradeAllowedSummary {
+                opportunity_id,
+                state_version: trace.state_version,
+                check_count: trace.check_results.len(),
+                total_elapsed_us: trace.total_elapsed_us,
+                evaluated_at: trace.evaluated_at,
+            }
+        } else if allowed {
             RiskAuditEvent::TradeAllowed {
                 trace: trace.clone(),
                 opportunity_id,

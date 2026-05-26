@@ -1,4 +1,5 @@
 pub mod capital_manager;
+pub mod clob_outcome;
 pub mod dispatcher;
 pub mod execution_pipeline;
 pub mod fsm;

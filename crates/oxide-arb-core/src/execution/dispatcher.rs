@@ -24,13 +24,10 @@ impl Dispatcher {
         let outcome = match self.execution_mode {
             ExecutionMode::DryRun => Self::dry_run(plan),
             ExecutionMode::Paper => Self::paper_trade(plan),
-            ExecutionMode::Live => {
-                tracing::warn!(
-                    execution_id = %plan.execution_id,
-                    "Live dispatch uses tiered FOK strategy — paper simulation until venue wiring completes"
-                );
-                Self::paper_trade(plan)
-            }
+            ExecutionMode::Live => ExecutionOutcome::Failed {
+                error: "Live dispatch must go through OrderStrategy + ClobClient".into(),
+                execution_mode: ExecutionMode::Live,
+            },
         };
         self.record_outcome_metrics(&outcome);
         outcome

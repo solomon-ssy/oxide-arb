@@ -596,3 +596,146 @@ async fn potential_loss_repository_crud() {
     .unwrap();
     assert!(repo.find_active().await.unwrap().is_empty());
 }
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn blacklist_persistence_repository_crud() {
+    use oxide_arb_models::domain::UpsertBlacklistEntry;
+    use oxide_arb_models::enums::risk::{BlacklistReason, BlacklistScope};
+
+    let (pool, _container) = setup_pg().await;
+    seed_market(&pool, "evt-bl", "0xbl-mkt", MarketCategory::Politics).await;
+
+    let repo = PgBlacklistPersistenceRepository::new(pool.connection().clone());
+    repo.upsert(UpsertBlacklistEntry {
+        market_id: MarketId::new("0xbl-mkt"),
+        token_id: None,
+        scope: BlacklistScope::TradingPath,
+        reason: BlacklistReason::Manual,
+        expires_at: None,
+        miss_count: 0,
+    })
+    .await
+    .unwrap();
+
+    let active = repo.load_active().await.unwrap();
+    assert_eq!(active.len(), 1);
+
+    repo.remove(&MarketId::new("0xbl-mkt")).await.unwrap();
+    assert!(repo.load_active().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn emergency_repository_create() {
+    use oxide_arb_models::domain::NewEmergencySnapshot;
+    use oxide_arb_models::enums::risk::CircuitBreakerLevel;
+
+    let (pool, _container) = setup_pg().await;
+    let repo = PgEmergencyRepository::new(pool.connection().clone());
+
+    repo.create(NewEmergencySnapshot {
+        trigger_level: CircuitBreakerLevel::System,
+        reason: "integration test".into(),
+        risk_state: serde_json::json!({}),
+        open_positions_count: 0,
+        open_reservations_count: 0,
+        triggered_at: Utc::now(),
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn outbox_repository_create_and_fetch() {
+    use oxide_arb_models::domain::NewOutboxEventWithId;
+    use oxide_arb_models::enums::outbox::{OutboxAggregateType, OutboxEventType};
+    use oxide_arb_models::types::{AggregateId, OutboxEventId};
+
+    let (pool, _container) = setup_pg().await;
+    let repo = PgOutboxRepository::new(pool.connection().clone());
+
+    let event_id = OutboxEventId::generate();
+    let created = repo
+        .create(NewOutboxEventWithId {
+            event_id: event_id.clone(),
+            aggregate_type: OutboxAggregateType::Trade,
+            aggregate_id: AggregateId::new("trade-1"),
+            event_type: OutboxEventType::Audit,
+            payload: serde_json::json!({"ok": true}),
+        })
+        .await
+        .unwrap();
+    assert_eq!(created.event_id, event_id);
+
+    let pending = repo.fetch_pending(10).await.unwrap();
+    assert_eq!(pending.len(), 1);
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn reconciliation_repository_create() {
+    use oxide_arb_models::domain::NewReconciliationReport;
+    use oxide_arb_models::enums::risk::ReconciliationStatus;
+    use rust_decimal_macros::dec;
+
+    let (pool, _container) = setup_pg().await;
+    let repo = PgReconciliationRepository::new(pool.connection().clone());
+
+    repo.create(NewReconciliationReport {
+        status: ReconciliationStatus::Ok,
+        mismatches: serde_json::json!([]),
+        internal_balance: Usd::ZERO,
+        external_balance: Usd::ZERO,
+        internal_exposure: Usd::ZERO,
+        external_exposure: Usd::ZERO,
+        reserved: Usd::ZERO,
+        tolerance: Usd::new(dec!(1)),
+        checked_at: Utc::now(),
+        duration_ms: 5,
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn report_repository_daily_upsert() {
+    use chrono::NaiveDate;
+
+    let (pool, _container) = setup_pg().await;
+    let repo = PgReportRepository::new(pool.connection().clone());
+    let date = NaiveDate::from_ymd_opt(2026, 1, 15).unwrap();
+
+    repo.save_daily(date, serde_json::json!({"trades": 1}))
+        .await
+        .unwrap();
+
+    let found = repo
+        .find_latest(ReportType::Daily)
+        .await
+        .unwrap()
+        .expect("daily report");
+    assert_eq!(found.report_type, ReportType::Daily);
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn risk_audit_repository_create_batch() {
+    use oxide_arb_models::domain::NewRiskAuditEvent;
+    use oxide_arb_models::enums::risk::RiskAuditEventType;
+
+    let (pool, _container) = setup_pg().await;
+    let repo = PgRiskAuditRepository::new(pool.connection().clone());
+
+    repo.create_batch(vec![NewRiskAuditEvent {
+        event_type: RiskAuditEventType::EngineHalted,
+        opportunity_id: None,
+        trade_id: None,
+        payload: serde_json::json!({"reason": "test"}),
+        created_at: Utc::now(),
+    }])
+    .await
+    .unwrap();
+}

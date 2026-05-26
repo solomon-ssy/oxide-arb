@@ -94,6 +94,31 @@ async fn coalescer_flushes_after_window() {
     assert_eq!(market.as_str(), "m1");
 }
 
+#[tokio::test]
+async fn coalescer_pair_complete_flushes_immediately() {
+    let metrics = Arc::new(MetricsHub::new());
+    let registry = Arc::new(MarketRegistry::new());
+    registry.register_market(sample_market("m2"));
+
+    let (tx, rx) = flume::bounded(16);
+    let shutdown = CancellationToken::new();
+    let coalescer = Coalescer::new(
+        registry,
+        std::time::Duration::from_millis(500),
+        tx,
+        Arc::clone(&metrics),
+        shutdown,
+    );
+
+    coalescer.notify_token_update(&TokenId::new("m2-yes"));
+    coalescer.notify_token_update(&TokenId::new("m2-no"));
+
+    let market = rx
+        .try_recv()
+        .expect("pair-complete should flush immediately");
+    assert_eq!(market.as_str(), "m2");
+}
+
 #[test]
 fn fsm_drop_halt_engages_once() {
     let metrics = Arc::new(MetricsHub::new());

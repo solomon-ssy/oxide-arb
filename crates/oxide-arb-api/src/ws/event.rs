@@ -1,15 +1,9 @@
 //! Normalized WebSocket event types.
 
+use oxide_arb_models::domain::book::BookLevel;
 use oxide_arb_models::enums::common::TickSize;
 use oxide_arb_models::types::{MarketId, Price, Shares, TokenId};
 use serde::{Deserialize, Serialize};
-
-/// A single price level in the orderbook.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PriceLevel {
-    pub price: Price,
-    pub size: Shares,
-}
 
 /// A change to a price level (size=0 means removal).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -31,8 +25,8 @@ pub enum ShardConnectionStatus {
 pub enum WsEvent {
     BookSnapshot {
         asset_id: TokenId,
-        bids: Vec<PriceLevel>,
-        asks: Vec<PriceLevel>,
+        bids: Vec<BookLevel>,
+        asks: Vec<BookLevel>,
         timestamp_ms: u64,
         hash: String,
     },

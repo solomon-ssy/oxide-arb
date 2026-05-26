@@ -26,6 +26,34 @@ pub struct MarketScanInput {
     pub settlement_deadline: Option<DateTime<Utc>>,
 }
 
+/// Borrowed scan input — avoids cloning `Arc<str>` IDs on the hot path.
+pub struct MarketScanInputRef<'a> {
+    pub market_id: &'a MarketId,
+    pub event_id: &'a EventId,
+    pub token_yes: &'a TokenId,
+    pub token_no: &'a TokenId,
+    pub book: &'a EndgameBookPair,
+    pub category: MarketCategory,
+    pub staleness: StalenessLevel,
+    pub settlement_deadline: Option<DateTime<Utc>>,
+}
+
+impl MarketScanInput {
+    #[inline]
+    pub const fn as_ref(&self) -> MarketScanInputRef<'_> {
+        MarketScanInputRef {
+            market_id: &self.market_id,
+            event_id: &self.event_id,
+            token_yes: &self.token_yes,
+            token_no: &self.token_no,
+            book: &self.book,
+            category: self.category,
+            staleness: self.staleness,
+            settlement_deadline: self.settlement_deadline,
+        }
+    }
+}
+
 pub struct OpportunityPipeline<F: FeeEstimator> {
     detector: EndgameDetector<F>,
     scorer: EndgameScorer,
@@ -60,7 +88,16 @@ impl<F: FeeEstimator> OpportunityPipeline<F> {
         input: &MarketScanInput,
         now: DateTime<Utc>,
     ) -> Option<ScoredOpportunity> {
-        if !self.cooldown.may_emit(&input.market_id) {
+        self.process_ref(&input.as_ref(), now)
+    }
+
+    #[inline]
+    pub fn process_ref(
+        &self,
+        input: &MarketScanInputRef<'_>,
+        now: DateTime<Utc>,
+    ) -> Option<ScoredOpportunity> {
+        if !self.cooldown.may_emit(input.market_id) {
             return None;
         }
 
@@ -73,17 +110,17 @@ impl<F: FeeEstimator> OpportunityPipeline<F> {
             .detector
             .should_reset_market_state(direction, input.settlement_deadline, now)
         {
-            self.cooldown.reset(&input.market_id);
+            self.cooldown.reset(input.market_id);
         }
 
         let direction = direction?;
 
         let detect_input = EndgameDetectInput {
-            market_id: &input.market_id,
-            event_id: &input.event_id,
-            token_yes: &input.token_yes,
-            token_no: &input.token_no,
-            book: &input.book,
+            market_id: input.market_id,
+            event_id: input.event_id,
+            token_yes: input.token_yes,
+            token_no: input.token_no,
+            book: input.book,
             direction,
             category: input.category,
             staleness: input.staleness,
@@ -104,7 +141,7 @@ impl<F: FeeEstimator> OpportunityPipeline<F> {
             return None;
         }
 
-        self.cooldown.record_emission(&input.market_id);
+        self.cooldown.record_emission(input.market_id);
         Some(EndgameScorer::finalize(
             opp,
             draft,

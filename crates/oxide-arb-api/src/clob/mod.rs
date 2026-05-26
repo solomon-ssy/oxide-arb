@@ -34,6 +34,7 @@ use polymarket_client_sdk_v2::clob::types::request::{
 };
 use polymarket_client_sdk_v2::clob::types::{AssetType, OrderType as SdkOrderType};
 use polymarket_client_sdk_v2::clob::{Client as SdkClient, Config as SdkConfig};
+use rust_decimal::Decimal;
 use std::convert::TryFrom;
 use std::sync::Arc;
 
@@ -137,16 +138,28 @@ impl ClobClient {
                     .await
                     .map_err(|e| ApiError::from(sdk_error::SdkClobError(&e)))?;
 
+                let filled_shares = Shares::new(resp.making_amount);
+                let requested_shares = share_qty;
+                let status = if !resp.success || filled_shares.inner() <= Decimal::ZERO {
+                    OrderStatus::Rejected
+                } else if filled_shares.inner() >= requested_shares {
+                    OrderStatus::Filled
+                } else {
+                    OrderStatus::PartiallyFilled
+                };
+
+                let avg_fill_price = if filled_shares.inner() > Decimal::ZERO {
+                    Some(Price::new(resp.taking_amount / filled_shares.inner()))
+                } else {
+                    None
+                };
+
                 Ok(OrderResponse {
                     order_id: OrderId::new(&resp.order_id),
-                    status: if resp.success {
-                        OrderStatus::Filled
-                    } else {
-                        OrderStatus::Rejected
-                    },
+                    status,
                     tx_hash: resp.transaction_hashes.first().map(|h| format!("{h:#x}")),
-                    filled_shares: Shares::new(resp.making_amount),
-                    avg_fill_price: None,
+                    filled_shares,
+                    avg_fill_price,
                     fee_paid: Usd::ZERO,
                     submitted_at,
                     responded_at: chrono::Utc::now(),

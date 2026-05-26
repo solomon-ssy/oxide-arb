@@ -104,24 +104,25 @@ impl RiskMetrics for CoreRiskMetrics {
 
     fn snapshot_for(&self, market_id: &MarketId) -> RiskMetricsSnapshot {
         let snap = self.state.load_metrics_snapshot(market_id);
-        let reserved = self.exposure.total_reserved_usd_sync();
-        let market_reserved = self.exposure.per_market_reserved_sync(market_id);
+        let (reserved, market_reserved, active_count) =
+            self.exposure.reservation_snapshot_sync(market_id);
+        let ws_disconnect_secs = self
+            .ws_manager
+            .last_message_age_ms()
+            .map_or(u64::MAX, |ms| ms / 1000);
         RiskMetricsSnapshot {
             cached_balance: snap.cached_balance,
             total_exposure: snap.total_position_exposure + reserved,
             market_exposure: snap.market_position_exposure + market_reserved,
             open_position_count: snap.open_position_count,
-            active_reservation_count: self.exposure.active_count_sync(),
+            active_reservation_count: active_count,
             reserved_usd: reserved,
             open_directional_count_buy: snap.open_buy_count,
             open_directional_count_sell: snap.open_sell_count,
             daily_directional_trades_buy: snap.daily_buy_trades,
             daily_directional_trades_sell: snap.daily_sell_trades,
             consecutive_market_misses: snap.consecutive_market_misses,
-            ws_disconnect_secs: self
-                .ws_manager
-                .last_message_age_ms()
-                .map_or(u64::MAX, |ms| ms / 1000),
+            ws_disconnect_secs,
             api_error_count: self.state.api_tracker.errors_in_window(),
             api_request_count: self.state.api_tracker.requests_in_window(),
         }

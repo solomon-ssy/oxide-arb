@@ -6,6 +6,8 @@ mod signer;
 pub use credentials::L2Credentials;
 pub use signer::OrderSigner;
 
+use std::sync::Arc;
+
 use alloy::primitives::Address;
 use oxide_arb_error::signing::SigningError;
 use oxide_arb_models::config::{KeysConfig, PolymarketConfig};
@@ -18,7 +20,7 @@ use zeroize::Zeroizing;
 /// Holds the `OrderSigner` (alloy `LocalSigner`) and optional L2 HMAC
 /// credentials for authenticated CLOB access.
 pub struct Keystore {
-    signer: OrderSigner,
+    signer: Arc<OrderSigner>,
     credentials: Option<L2Credentials>,
 }
 
@@ -61,14 +63,19 @@ impl Keystore {
         };
 
         Ok(Self {
-            signer,
+            signer: Arc::new(signer),
             credentials,
         })
     }
 
     /// Get the order signer (for SDK auth and signing).
-    pub const fn signer(&self) -> &OrderSigner {
+    pub fn signer(&self) -> &OrderSigner {
         &self.signer
+    }
+
+    /// Shared signer handle for [`ClobClient::connect`].
+    pub fn signer_arc(&self) -> Arc<OrderSigner> {
+        Arc::clone(&self.signer)
     }
 
     /// Get L2 credentials if available.
@@ -77,7 +84,7 @@ impl Keystore {
     }
 
     /// Get the wallet address.
-    pub const fn address(&self) -> Address {
+    pub fn address(&self) -> Address {
         self.signer.address()
     }
 

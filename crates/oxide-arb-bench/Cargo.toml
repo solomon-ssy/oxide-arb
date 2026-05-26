@@ -16,6 +16,8 @@ rust_decimal_macros = { workspace = true }
 chrono = { workspace = true }
 criterion = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
+flume = { workspace = true }
 
 [[bench]]
 name = "hot_paths"

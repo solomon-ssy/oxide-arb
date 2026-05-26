@@ -6,7 +6,8 @@ use std::time::Instant;
 use chrono::Utc;
 use oxide_arb_algorithm::scorer::ScoredOpportunity;
 use oxide_arb_error::OxideError;
-use oxide_arb_models::domain::execution::ExecutionResult;
+use oxide_arb_models::domain::execution::{ExecutionPlan, ExecutionResult, ReservationHandle};
+use oxide_arb_models::domain::opportunity::Opportunity;
 use oxide_arb_models::domain::trade::PostTradeInput;
 use oxide_arb_models::enums::common::{ExecutionMode, TradeOutcome};
 use oxide_arb_models::enums::execution::ExecutionOutcome;
@@ -18,6 +19,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::bridge::risk_metrics::CoreRiskMetrics;
 use crate::execution::capital_manager::CapitalManager;
+use crate::execution::clob_outcome::{filled_cost, filled_net_profit};
 use crate::execution::dispatcher::Dispatcher;
 use crate::execution::fsm::ExecutionFSM;
 use crate::execution::market_inflight::MarketInFlightRegistry;
@@ -92,7 +94,7 @@ impl ExecutionPipeline {
     }
 
     pub fn outcome_channel() -> (flume::Sender<PostTradeJob>, flume::Receiver<PostTradeJob>) {
-        flume::bounded(256)
+        flume::bounded(1024)
     }
 
     pub async fn spawn_outcome_drain(
@@ -136,7 +138,6 @@ impl ExecutionPipeline {
             return ExecutionResult::rejected("inflight", "market already executing");
         };
 
-        // 1. Validate fresh book + slippage (SLO-2)
         if let Err(e) = self.validator.validate(
             opp,
             &scored.token_yes,
@@ -147,7 +148,6 @@ impl ExecutionPipeline {
             return ExecutionResult::rejected("validation", e);
         }
 
-        // 3. Risk pre-trade check (sync hot path)
         let probability = build_probability_input(&scored);
         let risk_decision = self.risk_engine.pre_trade_check_core(
             opp,
@@ -166,7 +166,6 @@ impl ExecutionPipeline {
             );
         }
 
-        // 3. Position sizing from risk engine output
         let approved_size = risk_decision
             .recommended_size
             .map_or(Usd::ZERO, |s| s.bet_usd);
@@ -175,7 +174,6 @@ impl ExecutionPipeline {
             return ExecutionResult::rejected("sizing", "Kelly sizing returned zero");
         }
 
-        // 4. Exposure reservation (sync — no await on hot path)
         let reservation = match self
             .capital_manager
             .reserve_sync(&opp.market_id, approved_size)
@@ -187,41 +185,74 @@ impl ExecutionPipeline {
             }
         };
 
-        // 5. Build execution plan
         let plan = self.plan_builder.build(opp, approved_size, &reservation);
-
-        // 6. Dispatch (mode-aware via order strategy + dispatcher)
         let outcome = self.order_strategy.execute(&self.dispatcher, &plan).await;
         self.metrics
             .execute_intent_to_http_us
             .observe(intent_started.elapsed().as_secs_f64() * 1_000_000.0);
 
-        // 7. Confirm or release reservation synchronously
-        match &outcome {
-            ExecutionOutcome::Filled { .. } => {
-                let _ = self.capital_manager.confirm_sync(&reservation);
-            }
-            ExecutionOutcome::Miss { .. } | ExecutionOutcome::Failed { .. } => {
-                let _ = self.capital_manager.release_sync(&reservation);
-            }
-        }
-
-        let completed_at = Utc::now();
+        self.settle_reservation(&outcome, &reservation);
+        let (job_net_profit, job_entry_price) = Self::filled_job_fields(opp, &plan, &outcome);
         let result = ExecutionResult {
             outcome: Some(outcome.clone()),
             rejection_reason: None,
             rejection_stage: None,
             started_at,
-            completed_at,
+            completed_at: Utc::now(),
         };
+        self.enqueue_post_trade(opp, job_entry_price, job_net_profit, outcome);
+        timer.observe_duration();
+        result
+    }
 
-        // 8. Enqueue async post-trade processing (non-blocking)
+    fn settle_reservation(&self, outcome: &ExecutionOutcome, reservation: &ReservationHandle) {
+        match outcome {
+            ExecutionOutcome::Filled { .. } => {
+                if let Err(e) = self.capital_manager.confirm_sync(reservation) {
+                    tracing::error!(error = %e, "reservation confirm failed");
+                    self.fsm.enter_emergency("reservation confirm failed");
+                }
+            }
+            ExecutionOutcome::Miss { .. } | ExecutionOutcome::Failed { .. } => {
+                if let Err(e) = self.capital_manager.release_sync(reservation) {
+                    tracing::error!(error = %e, "reservation release failed");
+                    self.fsm.enter_emergency("reservation release failed");
+                }
+            }
+        }
+    }
+
+    fn filled_job_fields(
+        opp: &Opportunity,
+        plan: &ExecutionPlan,
+        outcome: &ExecutionOutcome,
+    ) -> (Usd, Price) {
+        match outcome {
+            ExecutionOutcome::Filled {
+                filled_shares,
+                avg_fill_price,
+                ..
+            } => {
+                let price = avg_fill_price.unwrap_or(opp.entry_price);
+                (filled_net_profit(opp, *filled_shares, plan.shares), price)
+            }
+            _ => (opp.net_profit, opp.entry_price),
+        }
+    }
+
+    fn enqueue_post_trade(
+        &self,
+        opp: &Opportunity,
+        entry_price: Price,
+        net_profit: Usd,
+        outcome: ExecutionOutcome,
+    ) {
         let job = PostTradeJob {
             trade_id: TradeId::new(opp.opportunity_id.as_str()),
             market_id: opp.market_id.clone(),
             token_id: opp.token_id.clone(),
-            entry_price: opp.entry_price,
-            net_profit: opp.net_profit,
+            entry_price,
+            net_profit,
             outcome,
         };
         if self.outcome_tx.try_send(job).is_err() {
@@ -229,12 +260,10 @@ impl ExecutionPipeline {
                 guard.on_post_trade_drop();
             } else {
                 self.metrics.post_trade_dropped.inc();
+                self.fsm.enter_emergency("post_trade_dropped");
             }
-            tracing::error!("post-trade queue full — job dropped");
+            tracing::error!("post-trade queue full — job dropped, trading halted");
         }
-
-        timer.observe_duration();
-        result
     }
 
     pub const fn execution_mode(&self) -> ExecutionMode {
@@ -256,8 +285,9 @@ async fn process_post_trade_job(
             ..
         } => {
             let price = avg_fill_price.unwrap_or(job.entry_price);
-            let cost = Usd::new(filled_shares.inner() * price.inner());
-            (TradeOutcome::Success, cost, *fee_paid, Some(job.net_profit))
+            let cost = filled_cost(*filled_shares, price);
+            let scaled_profit = job.net_profit;
+            (TradeOutcome::Success, cost, *fee_paid, Some(scaled_profit))
         }
         ExecutionOutcome::Miss { .. } => (TradeOutcome::Miss, Usd::ZERO, Usd::ZERO, None),
         ExecutionOutcome::Failed { .. } => (TradeOutcome::TradeFailed, Usd::ZERO, Usd::ZERO, None),

@@ -6,9 +6,8 @@ use oxide_arb_models::config::{KeySource, KeysConfig, PolymarketConfig};
 use oxide_arb_models::domain::order::OrderRequest;
 use oxide_arb_models::enums::common::{OrderType, Side};
 use oxide_arb_models::enums::order::OrderStatus;
-use oxide_arb_models::types::{MarketId, Price, Shares, TokenId, Usd};
+use oxide_arb_models::types::{MarketId, Price, Shares, TokenId};
 use rust_decimal_macros::dec;
-use std::sync::Arc;
 
 fn test_keystore() -> Option<Keystore> {
     let key = std::env::var("OXIDE_ARB_TEST_PRIVATE_KEY").ok()?;
@@ -43,7 +42,7 @@ async fn fok_order_sign_and_submit() {
         std::env::var("OXIDE_ARB_TEST_TOKEN_ID").expect("OXIDE_ARB_TEST_TOKEN_ID decimal token id");
     let market_id = std::env::var("OXIDE_ARB_TEST_MARKET_ID").unwrap_or_else(|_| "0x0".into());
 
-    let client = ClobClient::connect(Arc::new(ks.signer().clone()), &PolymarketConfig::default())
+    let client = ClobClient::connect(ks.signer_arc(), &PolymarketConfig::default())
         .await
         .expect("connect");
 

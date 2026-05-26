@@ -4,6 +4,8 @@
 //! run, and graceful shutdown. The struct is decomposed into four bundles
 //! to avoid a 40+ field god struct.
 
+pub mod bootstrap;
+pub mod build;
 pub mod lifecycle;
 pub mod task_id;
 pub mod task_registry;
@@ -16,6 +18,7 @@ use oxide_arb_api::clob::ClobClient;
 use oxide_arb_api::ws::ClobWsManager;
 use oxide_arb_models::config::Settings;
 use oxide_arb_models::enums::common::ExecutionMode;
+use oxide_arb_models::types::{MarketId, TokenId};
 use oxide_arb_repository::postgres::PgRiskAuditRepository;
 use oxide_arb_risk::audit::RiskAuditEvent;
 use oxide_arb_risk::engine::RiskEngine;
@@ -34,6 +37,7 @@ use crate::bridge::trading_gate::TradingGate;
 use crate::detection::coalescer::Coalescer;
 use crate::detection::funnel::Funnel;
 use crate::detection::scanner::Scanner;
+use crate::detection::scanner_task::{ScannerTask, ScannerTaskDeps};
 use crate::execution::execution_pipeline::{ExecutionPipeline, PostTradeJob};
 use crate::execution::fsm::ExecutionFSM;
 use crate::execution::heartbeat::HeartbeatTask;
@@ -113,8 +117,15 @@ pub struct TradingBundle {
     pub funnel: Arc<Funnel>,
     pub fsm: Arc<ExecutionFSM>,
     pub execution: Option<ExecutionBundle>,
-    pub clob_client: Arc<ClobClient>,
+    pub clob_client: Option<Arc<ClobClient>>,
     pub ws_manager: Arc<ClobWsManager>,
+}
+
+/// One-shot channel receivers consumed when registering runtime tasks.
+pub struct RuntimeChannels {
+    pub coalescer_token_rx: Mutex<Option<flume::Receiver<TokenId>>>,
+    pub scanner_market_rx: Mutex<Option<flume::Receiver<MarketId>>>,
+    pub execution_runners: Mutex<Option<Vec<ExecutionRunner>>>,
 }
 
 /// System composition root — owns all subsystems.
@@ -127,6 +138,7 @@ pub struct AppContext {
     pub data: DataBundle,
     pub risk: RiskBundle,
     pub trading: TradingBundle,
+    pub runtime: RuntimeChannels,
     pub shutdown: CancellationToken,
     pub pending_tasks: PendingTaskQueue,
 }
@@ -182,7 +194,11 @@ impl AppContext {
 
     /// Queue venue heartbeat probe (Live mode only).
     pub fn queue_execution_heartbeat(&self, interval_secs: u64, execution_mode: ExecutionMode) {
-        let clob_client = Arc::clone(&self.trading.clob_client);
+        let Some(clob_client) = self.trading.clob_client.as_ref() else {
+            tracing::info!("execution heartbeat skipped — ClobClient unavailable");
+            return;
+        };
+        let clob_client = Arc::clone(clob_client);
         let risk_engine = Arc::clone(&self.risk.engine);
         let fsm = Arc::clone(&self.trading.fsm);
 
@@ -219,6 +235,70 @@ impl AppContext {
                     }
                 },
             );
+        }
+    }
+
+    /// Register the core trading loop tasks (WS → books → detect → execute).
+    pub fn queue_runtime_tasks(&self) {
+        let mode = self.config.execution.execution_mode;
+
+        let data_pipeline = Arc::clone(&self.data.data_pipeline);
+        self.pending_tasks
+            .push(TaskId::DataPipeline, move |_token| async move {
+                if let Err(error) = data_pipeline.run().await {
+                    tracing::error!(%error, "data pipeline exited with error");
+                }
+            });
+
+        let coalescer = Arc::clone(&self.trading.coalescer);
+        let token_rx = self.runtime.coalescer_token_rx.lock().take();
+        self.pending_tasks
+            .push(TaskId::Coalescer, move |_token| async move {
+                if let Err(error) = coalescer.run_with_ingress(token_rx).await {
+                    tracing::error!(%error, "coalescer exited with error");
+                }
+            });
+
+        let Some(market_rx) = self.runtime.scanner_market_rx.lock().take() else {
+            tracing::warn!("scanner task skipped — market channel unavailable");
+            return;
+        };
+        let scanner_task = ScannerTask::new(ScannerTaskDeps {
+            rx: market_rx,
+            scanner: Arc::clone(&self.trading.scanner),
+            market_cache: Arc::clone(&self.data.market_cache),
+            funnel: Arc::clone(&self.trading.funnel),
+            dispatch_immediate_threshold: self
+                .config
+                .execution
+                .endgame_latency
+                .dispatch_immediate_threshold,
+            shutdown: self.shutdown.clone(),
+            metrics: Arc::clone(&self.infra.metrics),
+        });
+        self.pending_tasks
+            .push(TaskId::Scanner, move |_token| async move {
+                if let Err(error) = scanner_task.run().await {
+                    tracing::error!(%error, "scanner task exited with error");
+                }
+            });
+
+        let funnel = Arc::clone(&self.trading.funnel);
+        let shutdown = self.shutdown.clone();
+        self.pending_tasks
+            .push(TaskId::Funnel, move |_token| async move {
+                if let Err(error) = funnel.run(shutdown).await {
+                    tracing::error!(%error, "funnel exited with error");
+                }
+            });
+
+        if self.trading.execution.is_some() {
+            let runners = self.runtime.execution_runners.lock().take();
+            if let Some(runners) = runners {
+                self.queue_execution_runners(runners);
+            }
+            self.queue_execution_outcome_drain();
+            self.queue_execution_heartbeat(30, mode);
         }
     }
 }

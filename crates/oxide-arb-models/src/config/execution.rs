@@ -86,13 +86,13 @@ const fn default_book_channel_capacity() -> usize {
     2048
 }
 
-/// FOK + GTD tiered execution strategy configuration.
+/// FOK-only execution configuration (ADR-001: single-strategy Endgame).
 ///
-/// Endgame execution tries tiers in order: FOK → short GTD → long GTD.
-/// Each tier may adjust price by `price_tolerance_ticks` tick increments.
+/// GTD tier fields remain for config backward compatibility but are unused —
+/// Live execution uses FOK via [`OrderStrategy`].
 #[derive(Debug, Clone, Deserialize, Validate)]
 pub struct TieredExecutionConfig {
-    /// FOK order timeout (ms) — how long to wait for immediate fill.
+    /// FOK order timeout (ms) — reserved for future CLOB client tuning.
     #[serde(default = "default_fok_timeout")]
     pub fok_timeout_ms: u64,
     /// Short GTD expiry (secs) — used when FOK fails due to minor slippage.
@@ -225,5 +225,5 @@ impl Default for CoalescerConfig {
 }
 
 const fn default_coalesce_window_ms() -> u64 {
-    60
+    40
 }

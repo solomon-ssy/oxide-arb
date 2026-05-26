@@ -1,17 +1,18 @@
 //! FOK-first order strategy for Endgame single-platform execution.
 //!
-//! ADR-001 removed multi-leg GTD hedging. Live mode uses FOK with configurable
-//! retry; Paper/DryRun delegate to the dispatcher's simulated fills.
+//! Live mode submits real FOK orders via [`ClobClient`]; Paper/DryRun delegate to
+//! the dispatcher's simulated fills.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::Instant;
 
 use oxide_arb_api::clob::ClobClient;
-use oxide_arb_models::config::TieredExecutionConfig;
 use oxide_arb_models::domain::execution::ExecutionPlan;
-use oxide_arb_models::enums::common::ExecutionMode;
+use oxide_arb_models::domain::order::OrderRequest;
+use oxide_arb_models::enums::common::{ExecutionMode, OrderType};
 use oxide_arb_models::enums::execution::ExecutionOutcome;
 
+use crate::execution::clob_outcome::map_order_response;
 use crate::execution::dispatcher::Dispatcher;
 use crate::observability::metrics_hub::MetricsHub;
 
@@ -19,7 +20,6 @@ const TIER_FOK: &str = "fok";
 
 pub struct OrderStrategy {
     execution_mode: ExecutionMode,
-    tier_config: TieredExecutionConfig,
     clob_client: Option<Arc<ClobClient>>,
     metrics: Arc<MetricsHub>,
 }
@@ -27,13 +27,11 @@ pub struct OrderStrategy {
 impl OrderStrategy {
     pub const fn new(
         execution_mode: ExecutionMode,
-        tier_config: TieredExecutionConfig,
         clob_client: Option<Arc<ClobClient>>,
         metrics: Arc<MetricsHub>,
     ) -> Self {
         Self {
             execution_mode,
-            tier_config,
             clob_client,
             metrics,
         }
@@ -46,58 +44,46 @@ impl OrderStrategy {
                 self.record_tier_metrics(&outcome);
                 outcome
             }
-            ExecutionMode::Live => self.execute_live_fok(dispatcher, plan).await,
+            ExecutionMode::Live => self.execute_live_fok(plan).await,
         }
     }
 
-    async fn execute_live_fok(
-        &self,
-        dispatcher: &Dispatcher,
-        plan: &ExecutionPlan,
-    ) -> ExecutionOutcome {
-        if self.clob_client.is_none() {
-            tracing::error!(
-                "Live mode requested but ClobClient is unavailable — falling back to paper"
-            );
-            let outcome = dispatcher.dispatch(plan);
-            self.record_tier_metrics(&outcome);
-            return outcome;
-        }
+    async fn execute_live_fok(&self, plan: &ExecutionPlan) -> ExecutionOutcome {
+        let Some(clob) = &self.clob_client else {
+            tracing::error!("Live mode requested but ClobClient is unavailable");
+            return ExecutionOutcome::Failed {
+                error: "ClobClient unavailable in Live mode".into(),
+                execution_mode: ExecutionMode::Live,
+            };
+        };
 
-        let deadline =
-            tokio::time::Instant::now() + Duration::from_millis(self.tier_config.fok_timeout_ms);
-        let mut attempts = 0u32;
+        let started = Instant::now();
+        let req = OrderRequest {
+            market_id: plan.market_id.clone(),
+            token_id: plan.token_id.clone(),
+            side: plan.side,
+            shares: plan.shares,
+            price: plan.limit_price,
+            order_type: OrderType::Fok,
+            neg_risk: plan.neg_risk,
+        };
 
-        while tokio::time::Instant::now() < deadline
-            && attempts <= self.tier_config.max_retries_per_tier
-        {
-            attempts += 1;
-            let outcome = dispatcher.dispatch(plan);
-            if matches!(outcome, ExecutionOutcome::Filled { .. }) {
-                self.metrics.tier_fills.with_label_values(&[TIER_FOK]).inc();
-                return outcome;
+        match clob.place_order(&req).await {
+            Ok(resp) => {
+                let outcome = map_order_response(resp, plan, ExecutionMode::Live, started);
+                self.record_tier_metrics(&outcome);
+                outcome
             }
-            if matches!(outcome, ExecutionOutcome::Failed { .. }) {
+            Err(e) => {
                 self.metrics
                     .tier_misses
                     .with_label_values(&[TIER_FOK])
                     .inc();
-                return outcome;
+                ExecutionOutcome::Failed {
+                    error: e.to_string(),
+                    execution_mode: ExecutionMode::Live,
+                }
             }
-            // Non-blocking retry — sleep would break SLO-1 execute-intent budget.
-            tokio::task::yield_now().await;
-        }
-
-        self.metrics
-            .tier_misses
-            .with_label_values(&[TIER_FOK])
-            .inc();
-        ExecutionOutcome::Miss {
-            reason: format!(
-                "FOK not filled after {attempts} attempts within {}ms",
-                self.tier_config.fok_timeout_ms
-            ),
-            execution_mode: ExecutionMode::Live,
         }
     }
 

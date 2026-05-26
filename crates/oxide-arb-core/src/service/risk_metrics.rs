@@ -42,16 +42,13 @@ impl MetricsSnapshot {
     }
 }
 
-/// Sliding-window tracker for API request/error counts.
-///
-/// Uses a two-bucket rotation scheme: when the current window expires,
-/// `current` is swapped into `previous` and a fresh window starts.
+/// Sliding-window tracker for API request/error counts (lock-free reads).
 pub struct ApiHealthTracker {
     current_requests: AtomicU64,
     current_errors: AtomicU64,
     previous_requests: AtomicU64,
     previous_errors: AtomicU64,
-    window_start: parking_lot::Mutex<Instant>,
+    window_start_ms: AtomicU64,
     window_duration: Duration,
 }
 
@@ -62,7 +59,7 @@ impl ApiHealthTracker {
             current_errors: AtomicU64::new(0),
             previous_requests: AtomicU64::new(0),
             previous_errors: AtomicU64::new(0),
-            window_start: parking_lot::Mutex::new(Instant::now()),
+            window_start_ms: AtomicU64::new(now_ms()),
             window_duration,
         }
     }
@@ -78,19 +75,30 @@ impl ApiHealthTracker {
     #[inline]
     pub fn requests_in_window(&self) -> u64 {
         self.maybe_rotate();
-        self.current_requests.load(Ordering::Relaxed)
-            + self.previous_requests.load(Ordering::Relaxed)
+        self.previous_requests.load(Ordering::Relaxed)
+            + self.current_requests.load(Ordering::Relaxed)
     }
 
     #[inline]
     pub fn errors_in_window(&self) -> u64 {
         self.maybe_rotate();
-        self.current_errors.load(Ordering::Relaxed) + self.previous_errors.load(Ordering::Relaxed)
+        self.previous_errors.load(Ordering::Relaxed) + self.current_errors.load(Ordering::Relaxed)
     }
 
     fn maybe_rotate(&self) {
-        let mut start = self.window_start.lock();
-        if start.elapsed() >= self.window_duration {
+        let now = now_ms();
+        let start = self.window_start_ms.load(Ordering::Relaxed);
+        if now.saturating_sub(start)
+            < ToPrimitive::to_u64(&self.window_duration.as_millis()).unwrap_or(u64::MAX)
+        {
+            return;
+        }
+
+        if self
+            .window_start_ms
+            .compare_exchange(start, now, Ordering::AcqRel, Ordering::Relaxed)
+            .is_ok()
+        {
             self.previous_requests.store(
                 self.current_requests.swap(0, Ordering::Relaxed),
                 Ordering::Relaxed,
@@ -99,9 +107,16 @@ impl ApiHealthTracker {
                 self.current_errors.swap(0, Ordering::Relaxed),
                 Ordering::Relaxed,
             );
-            *start = Instant::now();
         }
     }
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|d| ToPrimitive::to_u64(&d.as_millis()))
+        .unwrap_or(0)
 }
 
 /// Shared mutable risk metrics state read by [`crate::bridge::risk_metrics::CoreRiskMetrics`].
@@ -258,6 +273,21 @@ impl RiskMetricsState {
 
     pub fn last_successful_refresh_ms(&self) -> u64 {
         self.last_successful_refresh.load(Ordering::Acquire)
+    }
+
+    /// Seed a minimal metrics snapshot for integration tests (no CLOB/DB refresh loop).
+    #[doc(hidden)]
+    pub fn seed_test_snapshot(&self, cached_balance: Usd) {
+        self.store_snapshot(MetricsSnapshot {
+            cached_balance,
+            positions: Vec::new(),
+            total_position_exposure: Usd::ZERO,
+            market_position_exposures: HashMap::new(),
+            open_position_count: 0,
+            open_buy_count: 0,
+            open_sell_count: 0,
+            refresh_sequence: 1,
+        });
     }
 }
 
