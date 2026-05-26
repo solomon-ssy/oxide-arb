@@ -3,7 +3,7 @@
 //! All lookups go through the 4-tier fallback chain. Writes (outcome recording,
 //! full reload) are lock-free at the per-bucket level via `DashMap`.
 
-use super::fallback::lookup_with_fallback;
+use super::fallback::{FallbackIndexes, lookup_with_fallback};
 use super::types::CalibrationEntry;
 use dashmap::DashMap;
 use oxide_arb_models::{config::CalibrationConfig, domain::calibration::BucketKey};
@@ -14,6 +14,7 @@ use oxide_arb_models::{config::CalibrationConfig, domain::calibration::BucketKey
 /// [`CalibrationUpdater`]. Detection reads are concurrent and lock-free.
 pub struct ResolutionCalibrator {
     buckets: DashMap<BucketKey, CalibrationEntry>,
+    indexes: FallbackIndexes,
     config: CalibrationConfig,
 }
 
@@ -23,9 +24,14 @@ impl ResolutionCalibrator {
     pub fn from_entries(entries: Vec<CalibrationEntry>, config: CalibrationConfig) -> Self {
         let buckets = DashMap::with_capacity(entries.len());
         for entry in entries {
-            buckets.insert(entry.bucket_key.clone(), entry);
+            buckets.insert(entry.bucket_key, entry);
         }
-        Self { buckets, config }
+        let indexes = FallbackIndexes::rebuild(&buckets);
+        Self {
+            buckets,
+            indexes,
+            config,
+        }
     }
 
     /// Construct an empty calibrator (cold start / no historical data).
@@ -33,6 +39,7 @@ impl ResolutionCalibrator {
     pub fn empty(config: CalibrationConfig) -> Self {
         Self {
             buckets: DashMap::new(),
+            indexes: FallbackIndexes::default(),
             config,
         }
     }
@@ -47,6 +54,7 @@ impl ResolutionCalibrator {
     pub fn lookup(&self, key: &BucketKey) -> CalibrationEntry {
         lookup_with_fallback(
             &self.buckets,
+            &self.indexes,
             key,
             self.config.min_sample_size,
             self.config.bootstrap_alpha,
@@ -58,29 +66,43 @@ impl ResolutionCalibrator {
     ///
     /// If the bucket does not exist, it is created with bootstrap priors.
     pub fn record_outcome(&self, key: &BucketKey, was_correct: bool) {
-        self.buckets
-            .entry(key.clone())
-            .and_modify(|e| {
-                e.total_count = e.total_count.saturating_add(1);
+        use dashmap::mapref::entry::Entry;
+
+        match self.buckets.entry(*key) {
+            Entry::Occupied(mut occupied) => {
+                let entry = occupied.get_mut();
+                entry.total_count = entry.total_count.saturating_add(1);
                 if was_correct {
-                    e.correct_count = e.correct_count.saturating_add(1);
+                    entry.correct_count = entry.correct_count.saturating_add(1);
                 }
-            })
-            .or_insert_with(|| CalibrationEntry {
-                bucket_key: key.clone(),
-                total_count: 1,
-                correct_count: u32::from(was_correct),
-                alpha_prior: self.config.bootstrap_alpha,
-                beta_prior: self.config.bootstrap_beta,
-                fallback_tier: 1,
-            });
+                self.indexes.bump_outcome(key, was_correct);
+            }
+            Entry::Vacant(vacant) => {
+                let entry = CalibrationEntry {
+                    bucket_key: *key,
+                    total_count: 1,
+                    correct_count: u32::from(was_correct),
+                    alpha_prior: self.config.bootstrap_alpha,
+                    beta_prior: self.config.bootstrap_beta,
+                    fallback_tier: 1,
+                };
+                vacant.insert(entry);
+                if let Some(stored) = self.buckets.get(key) {
+                    self.indexes.register_new_bucket(*key, &stored);
+                }
+            }
+        }
     }
 
     /// Atomically replace all in-memory buckets (called after full DB reload).
     pub fn reload(&self, entries: Vec<CalibrationEntry>) {
         self.buckets.clear();
+        self.indexes.clear();
         for entry in entries {
-            self.buckets.insert(entry.bucket_key.clone(), entry);
+            self.buckets.insert(entry.bucket_key, entry);
+        }
+        for entry in &self.buckets {
+            self.indexes.add_entry(*entry.key(), entry.value());
         }
     }
 

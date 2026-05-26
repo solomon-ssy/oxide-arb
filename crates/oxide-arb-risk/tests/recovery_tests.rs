@@ -23,6 +23,7 @@ fn default_snapshot() -> RiskEngineState {
     RiskEngineState {
         breaker_state: BreakerStateName::Closed,
         breaker_level: None,
+        is_halted: false,
         halt_reason: None,
         cooldown_until: None,
         total_exposure: Usd::ZERO,

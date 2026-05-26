@@ -1,11 +1,11 @@
 //! ArcSwap-backed fee rate snapshot.
 
+use ahash::{HashMap, HashMapExt};
 use chrono::{DateTime, Utc};
 use oxide_arb_models::config::FeesConfig;
 use oxide_arb_models::enums::common::MarketCategory;
 use oxide_arb_models::types::TokenId;
 use rust_decimal::Decimal;
-use std::collections::HashMap;
 
 /// Where the current category rates originated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

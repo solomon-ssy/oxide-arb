@@ -51,6 +51,7 @@ impl InMemoryConvergenceTracker {
     /// If the direction matches the existing entry, returns the elapsed time
     /// since convergence first began. If the direction changed or the entry
     /// expired, the timer resets to 0.
+    #[inline]
     pub fn update_and_get(
         &self,
         market_id: &MarketId,
@@ -60,15 +61,7 @@ impl InMemoryConvergenceTracker {
         match self.entries.get(market_id) {
             Some(existing) if existing.direction == direction => {
                 let delta: chrono::TimeDelta = now - existing.first_seen;
-                let duration = ToPrimitive::to_u64(&delta.num_seconds().max(0)).unwrap_or(0);
-                self.entries.insert(
-                    market_id.clone(),
-                    ConvergenceEntry {
-                        direction,
-                        first_seen: existing.first_seen,
-                    },
-                );
-                duration
+                ToPrimitive::to_u64(&delta.num_seconds().max(0)).unwrap_or(0)
             }
             _ => {
                 self.entries.insert(

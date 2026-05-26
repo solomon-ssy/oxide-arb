@@ -19,6 +19,7 @@ impl StalenessPolicy {
     /// - `Stale`      → 0.70
     /// - `Expired`    → 0.00  (do not trade)
     #[must_use]
+    #[inline]
     pub const fn confidence_discount(level: StalenessLevel) -> Decimal {
         match level {
             StalenessLevel::Fresh => Decimal::ONE,
@@ -30,6 +31,7 @@ impl StalenessPolicy {
 
     /// Whether this staleness level permits trading at all.
     #[must_use]
+    #[inline]
     pub const fn is_tradeable(level: StalenessLevel) -> bool {
         !matches!(level, StalenessLevel::Expired)
     }

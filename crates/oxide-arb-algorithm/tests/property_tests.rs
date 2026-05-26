@@ -11,7 +11,7 @@ use oxide_arb_models::{
     domain::BookLevel,
     enums::calibration::{DurationBucket, PriceZone},
     enums::common::StalenessLevel,
-    types::{Price, Shares},
+    types::{MicroPrice, MicroUsd, Price, Shares},
 };
 use proptest::prelude::*;
 use rust_decimal::Decimal;
@@ -126,13 +126,18 @@ proptest! {
         size in 10.0_f64..10000.0,
     ) {
         let budget_d = Decimal::try_from(budget).unwrap();
-        let asks = vec![BookLevel {
-            price: Price::new(Decimal::try_from(price).unwrap()),
-            size: Shares::new(Decimal::try_from(size).unwrap()),
-        }];
+        let asks = vec![BookLevel::from_decimal_unchecked(
+            Price::new(Decimal::try_from(price).unwrap()),
+            Shares::new(Decimal::try_from(size).unwrap()),
+        )];
+        let depth = oxide_arb_models::domain::book::total_depth_usd(&asks);
+        let budget = MicroUsd::try_from_decimal(budget_d).unwrap();
+        let floor = MicroPrice::try_from_decimal(dec!(0.95)).unwrap();
 
-        if let Some(walk) = OrderbookWalker::walk_asks_by_cost(&asks, budget_d, None) {
-            assert!(walk.total_cost.inner() <= budget_d + dec!(0.01));
+        if let Some(walk) =
+            OrderbookWalker::walk_asks_by_cost(&asks, budget, floor, depth)
+        {
+            assert!(walk.total_cost.to_decimal() <= budget_d + dec!(0.01));
         }
     }
 }

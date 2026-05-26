@@ -1,6 +1,7 @@
 //! Builder pattern for constructing a `RiskEngine` with all sub-systems.
 
 use crate::accounting::{DailyAccounting, HourlyAccounting, WeeklyAccounting};
+use crate::audit_sink::AuditSink;
 use crate::blacklist::BlacklistManager;
 use crate::circuit_breaker::CircuitBreaker;
 use crate::clock::{self, Clock};
@@ -9,9 +10,11 @@ use crate::pipeline;
 use crate::position::{PositionTracker, PotentialLossLedger};
 use crate::reconciliation::LedgerReconciler;
 use crate::sizing::{DrawdownGuard, MultiConstraintSizer};
+use crate::snapshot::RiskSnapshot;
 use crate::state_store;
 use crate::traits::{RiskMetrics, RiskPersistence};
 use crate::types::{AtomicStateVersion, BreakerState};
+use arc_swap::ArcSwap;
 use oxide_arb_error::OxideResult;
 use oxide_arb_models::config::RiskConfig;
 use oxide_arb_models::domain::blacklist::{BlacklistInfo, UpsertBlacklistEntry};
@@ -20,12 +23,11 @@ use oxide_arb_models::domain::risk::{
     NewEmergencySnapshot, NewReconciliationReport, NewRiskAuditEvent, RiskEngineState,
     RiskStateInfo, UpsertRiskEngineState,
 };
-use oxide_arb_models::enums::risk::BreakerStateName;
+use oxide_arb_models::enums::risk::{BreakerStateName, CircuitBreakerLevel};
 use oxide_arb_models::types::{MarketId, Usd};
 use parking_lot::RwLock;
 use rust_decimal_macros::dec;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 
 pub struct RiskEngineBuilder {
     config: Option<RiskConfig>,
@@ -35,6 +37,7 @@ pub struct RiskEngineBuilder {
     potential_loss_entries: Vec<PotentialLossInfo>,
     initial_equity: Option<Usd>,
     clock: Option<Arc<dyn Clock>>,
+    audit_sink: Option<Arc<dyn AuditSink>>,
 }
 
 impl RiskEngineBuilder {
@@ -48,6 +51,7 @@ impl RiskEngineBuilder {
             potential_loss_entries: Vec::new(),
             initial_equity: None,
             clock: None,
+            audit_sink: None,
         }
     }
 
@@ -84,6 +88,12 @@ impl RiskEngineBuilder {
     #[must_use]
     pub const fn initial_equity(mut self, equity: Usd) -> Self {
         self.initial_equity = Some(equity);
+        self
+    }
+
+    #[must_use]
+    pub fn audit_sink(mut self, audit_sink: Arc<dyn AuditSink>) -> Self {
+        self.audit_sink = Some(audit_sink);
         self
     }
 
@@ -145,6 +155,15 @@ impl RiskEngineBuilder {
                 (breaker, daily, weekly, hourly, pt, pl, equity)
             };
 
+        let mut breaker = breaker;
+        let safe_start_halt = should_safe_start_halt(&breaker, &potential_loss, &*clock);
+        if let Some(ref reason) = safe_start_halt {
+            if !breaker.state().is_halted() {
+                breaker.halt(CircuitBreakerLevel::System, reason.clone());
+            }
+            tracing::warn!(%reason, "safe-start: engine booted in halted state");
+        }
+
         let blacklist = BlacklistManager::new(&config, Arc::clone(&clock));
         if self.snapshot.is_some() {
             blacklist.load_entries(self.blacklist_entries);
@@ -159,8 +178,6 @@ impl RiskEngineBuilder {
         let reconciler = LedgerReconciler::new(config.reconciliation_tolerance_usd);
         let risk_pipeline = pipeline::build_default_pipeline(&config);
 
-        let safe_start_halt = should_safe_start_halt(&breaker, &potential_loss, &*clock);
-
         let engine = RiskEngine {
             circuit_breaker: RwLock::new(breaker),
             daily: RwLock::new(daily),
@@ -169,21 +186,19 @@ impl RiskEngineBuilder {
             position_tracker: RwLock::new(position_tracker),
             potential_loss: RwLock::new(potential_loss),
             pipeline: risk_pipeline,
+            risk_snapshot: ArcSwap::from_pointee(RiskSnapshot::zeroed()),
             blacklist,
             sizer,
             drawdown: RwLock::new(drawdown),
             reconciler,
             config,
             persistence,
-            is_halted: AtomicBool::new(safe_start_halt.is_some()),
-            halt_reason: RwLock::new(safe_start_halt.clone()),
+            audit_sink: self.audit_sink,
             state_version: AtomicStateVersion::new(0),
             clock,
         };
 
-        if let Some(ref reason) = safe_start_halt {
-            tracing::warn!(%reason, "safe-start: engine booted in halted state");
-        }
+        engine.publish_risk_snapshot();
 
         Ok(engine)
     }
@@ -196,24 +211,33 @@ impl Default for RiskEngineBuilder {
 }
 
 /// Check if the engine should boot halted (conditional safe-start).
+///
+/// Returns `Some(reason)` if the engine must start halted:
+/// - Breaker was persisted as `Halted` (L3/L4 requiring ack)
+/// - Breaker was `Open` with unexpired cooldown
+/// - Active potential-loss entries exist at boot
 fn should_safe_start_halt(
     breaker: &CircuitBreaker,
     potential_loss: &PotentialLossLedger,
     clock: &dyn Clock,
 ) -> Option<String> {
-    if let BreakerState::Open {
-        level,
-        cooldown_until,
-        reason,
-        ..
-    } = breaker.state()
-    {
-        let now = clock.now();
-        if *cooldown_until > now {
+    match breaker.state() {
+        BreakerState::Halted { level, reason, .. } => {
+            return Some(format!(
+                "safe-start: breaker is Halted (level={level}, reason={reason})"
+            ));
+        }
+        BreakerState::Open {
+            level,
+            cooldown_until,
+            reason,
+            ..
+        } if *cooldown_until > clock.now() => {
             return Some(format!(
                 "safe-start: breaker is Open (level={level}, reason={reason})"
             ));
         }
+        _ => {}
     }
 
     let active = potential_loss.active_count();

@@ -158,7 +158,7 @@ impl MultiConstraintSizer {
             bankroll,
         );
 
-        let constraints = vec![
+        let constraints = [
             SizeConstraint {
                 name: "kelly_upper_bound",
                 max_usd: kelly.bet_usd,
@@ -207,7 +207,10 @@ impl MultiConstraintSizer {
             },
         ];
 
-        let binding = constraints.iter().min_by_key(|c| c.max_usd).unwrap();
+        let binding = constraints
+            .iter()
+            .min_by(|a, b| a.max_usd.inner().cmp(&b.max_usd.inner()))
+            .expect("constraints is non-empty");
         let mut final_usd = binding.max_usd.max(Usd::ZERO);
 
         if final_usd < Usd::new(self.min_trade_usd) {
@@ -219,7 +222,9 @@ impl MultiConstraintSizer {
             bet_usd: final_usd,
             kelly_result: kelly,
             binding_constraint: binding.name,
-            breakdown: SizeBreakdown { constraints },
+            breakdown: SizeBreakdown {
+                constraints: constraints.into_iter().collect(),
+            },
         }
     }
 }
@@ -292,6 +297,7 @@ impl DrawdownGuard {
         }
     }
     #[must_use]
+    #[inline]
     pub const fn hwm(&self) -> Usd {
         self.hwm
     }

@@ -39,36 +39,47 @@ macro_rules! decimal_newtype {
             pub const ONE: Self = Self(Decimal::ONE);
 
             #[must_use]
+            #[inline]
             pub const fn new(value: Decimal) -> Self { Self(value) }
 
             #[must_use]
+            #[inline]
             pub const fn inner(self) -> Decimal { self.0 }
 
             #[must_use]
+            #[inline]
             pub const fn is_zero(&self) -> bool { self.0.is_zero() }
 
             #[must_use]
+            #[inline]
             pub fn is_positive(&self) -> bool { self.0 > Decimal::ZERO }
 
             #[must_use]
+            #[inline]
             pub fn is_negative(&self) -> bool { self.0 < Decimal::ZERO }
 
             #[must_use]
+            #[inline]
             pub fn abs(self) -> Self { Self(self.0.abs()) }
 
             #[must_use]
+            #[inline]
             pub fn min(self, other: Self) -> Self { Self(self.0.min(other.0)) }
 
             #[must_use]
+            #[inline]
             pub fn max(self, other: Self) -> Self { Self(self.0.max(other.0)) }
 
             #[must_use]
+            #[inline]
             pub fn round_dp(self, dp: u32) -> Self { Self(self.0.round_dp(dp)) }
 
             #[must_use]
+            #[inline]
             pub fn floor(self) -> Self { Self(self.0.floor()) }
 
             #[must_use]
+            #[inline]
             pub fn ceil(self) -> Self { Self(self.0.ceil()) }
         }
 
@@ -94,24 +105,29 @@ macro_rules! decimal_newtype {
 
         impl std::ops::Add for $name {
             type Output = Self;
+            #[inline]
             fn add(self, rhs: Self) -> Self { Self(self.0 + rhs.0) }
         }
 
         impl std::ops::AddAssign for $name {
+            #[inline]
             fn add_assign(&mut self, rhs: Self) { self.0 += rhs.0; }
         }
 
         impl std::ops::Sub for $name {
             type Output = Self;
+            #[inline]
             fn sub(self, rhs: Self) -> Self { Self(self.0 - rhs.0) }
         }
 
         impl std::ops::SubAssign for $name {
+            #[inline]
             fn sub_assign(&mut self, rhs: Self) { self.0 -= rhs.0; }
         }
 
         impl std::ops::Neg for $name {
             type Output = Self;
+            #[inline]
             fn neg(self) -> Self { Self(-self.0) }
         }
 
@@ -214,6 +230,7 @@ decimal_newtype!(
 
 impl std::ops::Mul<Price> for Shares {
     type Output = Usd;
+    #[inline]
     fn mul(self, rhs: Price) -> Usd {
         Usd::new(self.inner() * rhs.inner())
     }
@@ -221,6 +238,7 @@ impl std::ops::Mul<Price> for Shares {
 
 impl std::ops::Mul<Shares> for Price {
     type Output = Usd;
+    #[inline]
     fn mul(self, rhs: Shares) -> Usd {
         Usd::new(self.inner() * rhs.inner())
     }
@@ -228,6 +246,7 @@ impl std::ops::Mul<Shares> for Price {
 
 impl std::ops::Div<Price> for Usd {
     type Output = Shares;
+    #[inline]
     fn div(self, rhs: Price) -> Shares {
         Shares::new(self.inner() / rhs.inner())
     }
@@ -282,6 +301,7 @@ impl std::ops::Mul<Decimal> for Bps {
 impl Bps {
     /// Convert basis points to a decimal fraction (e.g. 200 bps → 0.02).
     #[must_use]
+    #[inline]
     pub fn to_fraction(self) -> Decimal {
         self.inner() / Decimal::from(10_000)
     }

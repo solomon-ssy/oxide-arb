@@ -2,4 +2,4 @@
 
 pub mod endgame_scorer;
 
-pub use endgame_scorer::{EndgameScorer, ScoredOpportunity};
+pub use endgame_scorer::{EndgameScorer, ScoreDraft, ScoredOpportunity};

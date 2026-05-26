@@ -11,6 +11,7 @@
 
 pub mod accounting;
 pub mod audit;
+pub mod audit_sink;
 pub mod blacklist;
 pub mod builder;
 pub mod circuit_breaker;
@@ -21,6 +22,7 @@ pub mod pipeline;
 pub mod position;
 pub mod reconciliation;
 pub mod sizing;
+pub mod snapshot;
 pub mod state_store;
 pub mod traits;
 pub mod types;

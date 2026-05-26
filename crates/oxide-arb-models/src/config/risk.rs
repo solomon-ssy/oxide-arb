@@ -103,10 +103,27 @@ pub struct RiskConfig {
     #[serde(default)]
     pub drawdown: DrawdownConfig,
 
+    // ── Fee spend caps ─────────────────────────────────────────────────
+    /// Maximum daily fee spend (USD). Exceeding triggers L3 Daily halt.
+    #[serde(default = "default_max_daily_fee_spend")]
+    pub max_daily_fee_spend_usd: Decimal,
+    /// Maximum hourly fee spend (USD). Exceeding triggers L2 Session trip.
+    #[serde(default = "default_max_hourly_fee_spend")]
+    pub max_hourly_fee_spend_usd: Decimal,
+
     // ── API health ────────────────────────────────────────────────────
     /// API error rate threshold (0..1). Exceeding triggers L2 Session breaker.
     #[serde(default = "default_api_error_rate_threshold")]
     pub api_error_rate_threshold: Decimal,
+    /// Number of consecutive heartbeat failures before triggering L4 System halt.
+    #[serde(default = "default_heartbeat_max_failures")]
+    pub heartbeat_max_failures: u32,
+
+    // ── Potential loss escalation ──────────────────────────────────────
+    /// Maximum age (secs) of an active potential-loss entry before
+    /// escalation triggers an L4 System halt.
+    #[serde(default = "default_potential_loss_escalation")]
+    pub potential_loss_escalation_secs: u64,
 
     // ── Endgame-specific rules ───────────────────────────────────────
     /// Max concurrent positions in the same directional side.
@@ -151,7 +168,11 @@ impl Default for RiskConfig {
             min_trade_usd: default_min_trade(),
             kelly: KellyConfig::default(),
             drawdown: DrawdownConfig::default(),
+            max_daily_fee_spend_usd: default_max_daily_fee_spend(),
+            max_hourly_fee_spend_usd: default_max_hourly_fee_spend(),
             api_error_rate_threshold: default_api_error_rate_threshold(),
+            heartbeat_max_failures: default_heartbeat_max_failures(),
+            potential_loss_escalation_secs: default_potential_loss_escalation(),
             max_concurrent_directional: default_max_concurrent_directional(),
             daily_directional_budget: default_daily_directional_budget(),
         }
@@ -236,8 +257,20 @@ const fn default_bankroll() -> Decimal {
 const fn default_min_trade() -> Decimal {
     dec!(1)
 }
+const fn default_max_daily_fee_spend() -> Decimal {
+    dec!(20)
+}
+const fn default_max_hourly_fee_spend() -> Decimal {
+    dec!(5)
+}
 const fn default_api_error_rate_threshold() -> Decimal {
-    dec!(0.5)
+    dec!(0.10)
+}
+const fn default_heartbeat_max_failures() -> u32 {
+    3
+}
+const fn default_potential_loss_escalation() -> u64 {
+    3600
 }
 const fn default_max_concurrent_directional() -> usize {
     3

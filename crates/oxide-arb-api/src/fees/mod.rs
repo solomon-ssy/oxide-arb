@@ -12,7 +12,6 @@ mod rate_cache;
 #[cfg(test)]
 mod reference;
 
-pub use formula::calculate_fee;
 pub use rate_cache::{CategoryFeeParams, FeeRateSource, FeeSnapshot};
 
 use arc_swap::ArcSwap;

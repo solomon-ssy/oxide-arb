@@ -10,15 +10,23 @@ use rust_decimal_macros::dec;
 
 /// Fill probability estimator configured by [`FillProbabilityConfig`].
 pub struct FillProbabilityEstimator {
-    config: FillProbabilityConfig,
+    base_fill_prob: Decimal,
+    depth_penalty_threshold_pct: Decimal,
+    depth_penalty_per_pct: Decimal,
+    staleness_penalty_per_level: Decimal,
+    resolution_proximity_bonus: Decimal,
 }
 
 impl FillProbabilityEstimator {
     /// Create from configuration.
     #[must_use]
-    pub fn new(config: &FillProbabilityConfig) -> Self {
+    pub const fn new(config: &FillProbabilityConfig) -> Self {
         Self {
-            config: config.clone(),
+            base_fill_prob: config.base_fill_prob,
+            depth_penalty_threshold_pct: config.depth_penalty_threshold_pct,
+            depth_penalty_per_pct: config.depth_penalty_per_pct,
+            staleness_penalty_per_level: config.staleness_penalty_per_level,
+            resolution_proximity_bonus: config.resolution_proximity_bonus,
         }
     }
 
@@ -31,17 +39,17 @@ impl FillProbabilityEstimator {
     ///
     /// Output is clamped to `[0.10, 0.99]`.
     #[must_use]
+    #[inline]
     pub fn estimate(
         &self,
         depth_used_pct: Decimal,
         staleness: StalenessLevel,
         hours_to_settlement: i64,
     ) -> Decimal {
-        let mut p = self.config.base_fill_prob;
+        let mut p = self.base_fill_prob;
 
-        let excess_depth =
-            (depth_used_pct - self.config.depth_penalty_threshold_pct).max(Decimal::ZERO);
-        p -= excess_depth * self.config.depth_penalty_per_pct;
+        let excess_depth = (depth_used_pct - self.depth_penalty_threshold_pct).max(Decimal::ZERO);
+        p -= excess_depth * self.depth_penalty_per_pct;
 
         let staleness_steps = match staleness {
             StalenessLevel::Fresh => Decimal::ZERO,
@@ -49,11 +57,11 @@ impl FillProbabilityEstimator {
             StalenessLevel::Stale => Decimal::from(2),
             StalenessLevel::Expired => Decimal::from(3),
         };
-        p -= staleness_steps * self.config.staleness_penalty_per_level;
+        p -= staleness_steps * self.staleness_penalty_per_level;
 
         if (0..=6).contains(&hours_to_settlement) {
             let fraction = Decimal::ONE - Decimal::from(hours_to_settlement) / Decimal::from(6);
-            p += self.config.resolution_proximity_bonus * fraction;
+            p += self.resolution_proximity_bonus * fraction;
         }
 
         p.max(dec!(0.10)).min(dec!(0.99))

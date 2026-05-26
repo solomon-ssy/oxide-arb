@@ -28,11 +28,13 @@ impl StateVersion {
     pub const ZERO: Self = Self(0);
 
     #[must_use]
+    #[inline]
     pub const fn new(v: u64) -> Self {
         Self(v)
     }
 
     #[must_use]
+    #[inline]
     pub const fn get(self) -> u64 {
         self.0
     }
@@ -53,6 +55,7 @@ impl AtomicStateVersion {
     }
 
     #[must_use]
+    #[inline]
     pub fn load(&self) -> StateVersion {
         StateVersion(self.0.load(Ordering::Acquire))
     }
@@ -85,6 +88,14 @@ pub enum ReportMode {
 ///
 /// Richer than the persisted `BreakerStateName` — carries timing info
 /// needed for FSM transitions without re-querying the database.
+///
+/// Five states:
+/// - `Closed`: normal trading
+/// - `Open`: L2 Session trip with cooldown (auto-recovery via `HalfOpen`)
+/// - `HalfOpen`: probe trades after cooldown expires
+/// - `Recovered`: observation period before returning to Closed
+/// - `Halted`: L3 Daily / L4 System — **no** automatic recovery, requires
+///   operator `acknowledge_and_resume()`
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum BreakerState {
     Closed,
@@ -104,27 +115,42 @@ pub enum BreakerState {
         entered_at: DateTime<Utc>,
         observation_until: DateTime<Utc>,
     },
+    Halted {
+        level: CircuitBreakerLevel,
+        reason: String,
+        halted_at: DateTime<Utc>,
+    },
 }
 
 impl BreakerState {
     #[must_use]
+    #[inline]
     pub const fn to_name(&self) -> BreakerStateName {
         match self {
             Self::Closed => BreakerStateName::Closed,
             Self::Open { .. } => BreakerStateName::Open,
             Self::HalfOpen { .. } => BreakerStateName::HalfOpen,
             Self::Recovered { .. } => BreakerStateName::Recovered,
+            Self::Halted { .. } => BreakerStateName::Halted,
         }
     }
 
     #[must_use]
+    #[inline]
     pub const fn allows_trading(&self) -> bool {
         matches!(self, Self::Closed | Self::HalfOpen { .. })
     }
 
     #[must_use]
+    #[inline]
     pub const fn is_probe_mode(&self) -> bool {
         matches!(self, Self::HalfOpen { .. })
+    }
+
+    #[must_use]
+    #[inline]
+    pub const fn is_halted(&self) -> bool {
+        matches!(self, Self::Halted { .. })
     }
 }
 
@@ -188,6 +214,40 @@ pub struct RiskCheckResult {
     pub elapsed_us: u64,
 }
 
+impl RiskCheckResult {
+    /// Zero-allocation pass result; pipeline sets `elapsed_us` after evaluation.
+    #[must_use]
+    #[inline]
+    pub const fn passed(check_id: RiskCheckId) -> Self {
+        Self {
+            check_id,
+            passed: true,
+            detail: None,
+            threshold: None,
+            actual: None,
+            elapsed_us: 0,
+        }
+    }
+
+    #[must_use]
+    #[inline]
+    pub const fn failed(
+        check_id: RiskCheckId,
+        detail: String,
+        threshold: String,
+        actual: String,
+    ) -> Self {
+        Self {
+            check_id,
+            passed: false,
+            detail: Some(detail),
+            threshold: Some(threshold),
+            actual: Some(actual),
+            elapsed_us: 0,
+        }
+    }
+}
+
 // ── Decision ────────────────────────────────────────────────────────────────
 
 /// Result of a pre-trade risk evaluation.
@@ -196,13 +256,20 @@ pub struct RiskCheckResult {
 #[derive(Debug, Clone, Serialize)]
 pub struct RiskDecision {
     pub allowed: bool,
-    pub checks: Vec<RiskCheckResult>,
     pub denial_reason: Option<String>,
     pub recommended_size: Option<SizeResult>,
     pub drawdown_factor: Decimal,
     pub evaluated_at: DateTime<Utc>,
     pub state_version: StateVersion,
     pub trace: RiskDecisionTrace,
+}
+
+impl RiskDecision {
+    #[must_use]
+    #[inline]
+    pub fn checks(&self) -> &[RiskCheckResult] {
+        &self.trace.check_results
+    }
 }
 
 // `RiskDecisionTrace` is defined in `crate::audit` — the single source of truth.
@@ -315,6 +382,7 @@ pub enum ReconciliationMismatch {
 
 impl ReconciliationMismatch {
     #[must_use]
+    #[inline]
     pub fn drift_abs(&self) -> Usd {
         match self {
             Self::BalanceDrift { drift, .. } | Self::PositionDrift { drift, .. } => drift.abs(),
@@ -336,6 +404,29 @@ pub struct ReconciliationReport {
     pub tolerance: Usd,
     pub checked_at: DateTime<Utc>,
     pub duration_ms: u64,
+}
+
+// ── Execution Risk Events ───────────────────────────────────────────────────
+
+/// Events from the execution layer that the risk engine consumes for
+/// blacklist management and system health tracking.
+#[derive(Debug, Clone)]
+pub enum ExecutionRiskEvent {
+    FokFailure {
+        market_id: MarketId,
+        token_id: TokenId,
+        consecutive: u32,
+    },
+    TradeFailed {
+        market_id: MarketId,
+        token_id: TokenId,
+    },
+    DepthDrop {
+        market_id: MarketId,
+        pct_drop: Decimal,
+    },
+    HeartbeatFailure,
+    HeartbeatSuccess,
 }
 
 // ── Blacklist Key ───────────────────────────────────────────────────────────
@@ -369,4 +460,16 @@ pub struct PipelineReport {
     pub has_failed_hard_gate: bool,
     pub first_failure: Option<RiskCheckId>,
     pub total_elapsed_us: u64,
+}
+
+impl PipelineReport {
+    /// Append results from a subsequent pipeline segment (e.g. phase-2 gates).
+    pub fn merge(&mut self, other: Self) {
+        self.results.extend(other.results);
+        self.has_failed_hard_gate |= other.has_failed_hard_gate;
+        if self.first_failure.is_none() {
+            self.first_failure = other.first_failure;
+        }
+        self.total_elapsed_us = self.total_elapsed_us.saturating_add(other.total_elapsed_us);
+    }
 }

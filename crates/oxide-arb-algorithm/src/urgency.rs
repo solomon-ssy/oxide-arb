@@ -18,6 +18,7 @@ impl UrgencyFactor {
     ///
     /// Smoothstep: `t² × (3 − 2t)` where `t = progress ∈ [0, 1]`.
     #[must_use]
+    #[inline]
     pub fn compute(hours_remaining: Decimal, window_hours: Decimal) -> Decimal {
         if window_hours.is_zero() {
             return Decimal::ONE;

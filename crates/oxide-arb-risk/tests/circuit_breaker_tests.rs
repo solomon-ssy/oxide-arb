@@ -1,7 +1,8 @@
 //! Circuit breaker FSM tests.
 //!
-//! Validates all 6 edges of the 4-state FSM plus L2 exponential cooldown,
-//! level overwrite semantics, and fail-closed snapshot recovery.
+//! Validates all edges of the 5-state FSM (`Closed`, `Open`, `HalfOpen`,
+//! `Recovered`, `Halted`) plus L2 exponential cooldown, level overwrite
+//! semantics, Halted manual-ack semantics, and fail-closed snapshot recovery.
 
 use chrono::{Duration, Utc};
 use oxide_arb_models::config::CircuitBreakerConfig;
@@ -30,6 +31,7 @@ fn base_snapshot() -> RiskEngineState {
     RiskEngineState {
         breaker_state: BreakerStateName::Closed,
         breaker_level: None,
+        is_halted: false,
         halt_reason: None,
         cooldown_until: None,
         total_exposure: Usd::ZERO,
@@ -367,4 +369,184 @@ fn from_snapshot_closed_restores_successfully() {
     let cb = CircuitBreaker::from_snapshot(config, utc_clock(), &snapshot).unwrap();
     assert!(matches!(cb.state(), BreakerState::Closed));
     assert!(cb.allows_trading());
+}
+
+// ── Halted state: L3/L4 manual ack only ─────────────────────────────────
+
+#[test]
+fn fsm_halt_system_blocks_allows_trading() {
+    let mut cb = CircuitBreaker::new(test_config(), utc_clock());
+    cb.halt(CircuitBreakerLevel::System, "balance critical".into());
+
+    assert!(matches!(cb.state(), BreakerState::Halted { .. }));
+    assert!(!cb.allows_trading());
+    assert!(!cb.is_probe_mode());
+    assert!(cb.state().is_halted());
+}
+
+#[test]
+fn fsm_halted_never_auto_transitions_on_tick() {
+    let config = CircuitBreakerConfig {
+        l3_cooldown_secs: 0,
+        l4_cooldown_secs: 0,
+        ..test_config()
+    };
+    let mut cb = CircuitBreaker::new(config, utc_clock());
+    cb.halt(CircuitBreakerLevel::Daily, "daily loss cap".into());
+
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    let transitioned = cb.tick();
+
+    assert!(!transitioned, "Halted must never auto-transition via tick");
+    assert!(matches!(cb.state(), BreakerState::Halted { .. }));
+}
+
+#[test]
+fn fsm_halted_daily_requires_acknowledge_and_resume() {
+    let mut cb = CircuitBreaker::new(test_config(), utc_clock());
+    cb.halt(CircuitBreakerLevel::Daily, "daily loss cap breached".into());
+    assert!(!cb.allows_trading());
+
+    let resumed = cb.acknowledge_and_resume("operator reviewed");
+    assert!(resumed);
+    assert!(matches!(cb.state(), BreakerState::Closed));
+    assert!(cb.allows_trading());
+    assert_eq!(cb.l2_trip_count(), 0);
+}
+
+#[test]
+fn fsm_acknowledge_and_resume_noop_when_not_halted() {
+    let mut cb = CircuitBreaker::new(test_config(), utc_clock());
+    cb.trip(CircuitBreakerLevel::Session, "session trip".into());
+
+    let resumed = cb.acknowledge_and_resume("attempted");
+    assert!(!resumed, "acknowledge should be no-op when not Halted");
+    assert!(matches!(cb.state(), BreakerState::Open { .. }));
+}
+
+#[test]
+fn fsm_session_trip_does_not_use_halt() {
+    let mut cb = CircuitBreaker::new(test_config(), utc_clock());
+    cb.trip(CircuitBreakerLevel::Session, "session miss".into());
+
+    assert!(
+        matches!(cb.state(), BreakerState::Open { .. }),
+        "Session trip should produce Open, not Halted"
+    );
+}
+
+#[test]
+fn fsm_halt_does_not_downgrade_existing_halted() {
+    let mut cb = CircuitBreaker::new(test_config(), utc_clock());
+    cb.halt(CircuitBreakerLevel::System, "system emergency".into());
+
+    cb.halt(CircuitBreakerLevel::Daily, "daily cap".into());
+
+    if let BreakerState::Halted { level, reason, .. } = cb.state() {
+        assert_eq!(
+            *level,
+            CircuitBreakerLevel::System,
+            "L4 must not be downgraded to L3"
+        );
+        assert_eq!(reason, "system emergency");
+    } else {
+        panic!("expected Halted state");
+    }
+}
+
+#[test]
+fn fsm_trip_is_noop_when_halted() {
+    let mut cb = CircuitBreaker::new(test_config(), utc_clock());
+    cb.halt(CircuitBreakerLevel::System, "system halt".into());
+
+    cb.trip(CircuitBreakerLevel::Session, "should be ignored".into());
+
+    assert!(
+        matches!(cb.state(), BreakerState::Halted { .. }),
+        "trip() must not override Halted state"
+    );
+}
+
+#[test]
+fn fsm_higher_session_trip_refreshes_cooldown() {
+    let mut cb = CircuitBreaker::new(test_config(), utc_clock());
+    cb.trip(CircuitBreakerLevel::Trade, "trade issue".into());
+
+    let first_cooldown = if let BreakerState::Open { cooldown_until, .. } = cb.state() {
+        *cooldown_until
+    } else {
+        panic!("expected Open");
+    };
+
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    cb.trip(CircuitBreakerLevel::Session, "session issue".into());
+
+    if let BreakerState::Open {
+        cooldown_until,
+        level,
+        ..
+    } = cb.state()
+    {
+        assert_eq!(*level, CircuitBreakerLevel::Session);
+        assert!(
+            *cooldown_until > first_cooldown,
+            "cooldown should be refreshed"
+        );
+    } else {
+        panic!("expected Open");
+    }
+}
+
+// ── Snapshot recovery: Halted ───────────────────────────────────────────
+
+#[test]
+fn from_snapshot_halted_restores_successfully() {
+    let config = test_config();
+    let snapshot = RiskEngineState {
+        breaker_state: BreakerStateName::Halted,
+        breaker_level: Some(CircuitBreakerLevel::Daily),
+        is_halted: true,
+        halt_reason: Some("daily loss cap".into()),
+        ..base_snapshot()
+    };
+
+    let cb = CircuitBreaker::from_snapshot(config, utc_clock(), &snapshot).unwrap();
+    assert!(matches!(cb.state(), BreakerState::Halted { .. }));
+    assert!(!cb.allows_trading());
+}
+
+#[test]
+fn from_snapshot_halted_missing_level_returns_error() {
+    let config = test_config();
+    let snapshot = RiskEngineState {
+        breaker_state: BreakerStateName::Halted,
+        breaker_level: None,
+        is_halted: true,
+        halt_reason: Some("test".into()),
+        ..base_snapshot()
+    };
+
+    let result = CircuitBreaker::from_snapshot(config, utc_clock(), &snapshot);
+    assert!(
+        result.is_err(),
+        "should fail-closed when Halted missing level"
+    );
+}
+
+#[test]
+fn from_snapshot_halted_missing_reason_returns_error() {
+    let config = test_config();
+    let snapshot = RiskEngineState {
+        breaker_state: BreakerStateName::Halted,
+        breaker_level: Some(CircuitBreakerLevel::System),
+        is_halted: true,
+        halt_reason: None,
+        ..base_snapshot()
+    };
+
+    let result = CircuitBreaker::from_snapshot(config, utc_clock(), &snapshot);
+    assert!(
+        result.is_err(),
+        "should fail-closed when Halted missing reason"
+    );
 }

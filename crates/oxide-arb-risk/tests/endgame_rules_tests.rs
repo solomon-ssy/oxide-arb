@@ -15,6 +15,7 @@ use oxide_arb_risk::pipeline::checks::{
 use oxide_arb_risk::types::{DrawdownAction, RiskCheckId, StateVersion};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
+use std::sync::Arc;
 
 fn make_context(
     open_directional_same_side: usize,
@@ -75,7 +76,7 @@ fn make_context(
 
     RiskContext {
         state_version: StateVersion::ZERO,
-        opportunity: opp,
+        opportunity: Arc::new(opp),
         probability: ProbabilityInput {
             calibrated_win_prob: dec!(0.95),
             fill_prob: dec!(0.90),

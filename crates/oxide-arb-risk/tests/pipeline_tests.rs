@@ -4,6 +4,7 @@
 //! and empty pipeline semantics.
 
 use chrono::Utc;
+use num_traits::ToPrimitive;
 use oxide_arb_models::config::RiskConfig;
 use oxide_arb_models::domain::position::PositionInfo;
 use oxide_arb_models::domain::risk::ProbabilityInput;
@@ -13,13 +14,14 @@ use oxide_arb_models::types::Usd;
 use oxide_arb_risk::builder::RiskEngineBuilder;
 use oxide_arb_risk::clock::utc_clock;
 use oxide_arb_risk::context::{BlacklistGate, CircuitBreakerGate, ManualHaltGate, RiskContext};
-use oxide_arb_risk::pipeline::{RiskCheck, RiskPipeline};
+use oxide_arb_risk::pipeline::{RiskCheck, build_default_pipeline};
 use oxide_arb_risk::traits::RiskMetrics;
 use oxide_arb_risk::types::{
     DrawdownAction, ReportMode, RiskCheckId, RiskCheckKind, RiskCheckResult, StateVersion,
 };
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
+use std::sync::Arc;
 
 fn default_context() -> RiskContext {
     use oxide_arb_models::domain::calibration::{BucketKey, CalibrationSnapshot};
@@ -77,7 +79,7 @@ fn default_context() -> RiskContext {
 
     RiskContext {
         state_version: StateVersion::ZERO,
-        opportunity: opp,
+        opportunity: Arc::new(opp),
         probability: ProbabilityInput {
             calibrated_win_prob: dec!(0.95),
             fill_prob: dec!(0.90),
@@ -189,12 +191,10 @@ async fn pipeline_check_order_golden_test() {
     };
 
     // Use FullReport to get all check results in order
-    let decision = engine
-        .pre_trade_check(&ctx.opportunity, &prob, &metrics, ReportMode::FullReport)
-        .await
-        .unwrap();
+    let decision =
+        engine.pre_trade_check_core(&ctx.opportunity, &prob, &metrics, ReportMode::FullReport);
 
-    let check_ids: Vec<RiskCheckId> = decision.checks.iter().map(|r| r.check_id).collect();
+    let check_ids: Vec<RiskCheckId> = decision.checks().iter().map(|r| r.check_id).collect();
 
     let expected = vec![
         RiskCheckId::ManualHalt,
@@ -230,6 +230,72 @@ async fn pipeline_check_order_golden_test() {
         check_ids.len()
     );
     assert_eq!(check_ids, expected, "pipeline check order mismatch");
+}
+
+// ── Short-circuit / full-report behaviour (test-only dynamic pipeline) ─────
+
+struct TestRiskPipeline {
+    checks: Vec<Box<dyn RiskCheck>>,
+}
+
+impl TestRiskPipeline {
+    fn new() -> Self {
+        Self { checks: Vec::new() }
+    }
+
+    fn register(&mut self, check: Box<dyn RiskCheck>) {
+        self.checks.push(check);
+    }
+
+    fn evaluate(
+        &self,
+        ctx: &RiskContext,
+        mode: ReportMode,
+    ) -> oxide_arb_risk::types::PipelineReport {
+        use oxide_arb_risk::types::{PipelineReport, RiskCheckKind};
+        use std::time::Instant;
+
+        let pipeline_start = Instant::now();
+        let mut results = Vec::with_capacity(self.checks.len());
+        let mut has_failed_hard_gate = false;
+        let mut first_failure: Option<RiskCheckId> = None;
+
+        for check in &self.checks {
+            let check_start = Instant::now();
+            let mut result = check.evaluate(ctx);
+            result.elapsed_us =
+                ToPrimitive::to_u64(&check_start.elapsed().as_micros()).unwrap_or(u64::MAX);
+
+            if !result.passed && check.kind() == RiskCheckKind::Gate {
+                has_failed_hard_gate = true;
+                if first_failure.is_none() {
+                    first_failure = Some(check.id());
+                }
+            }
+
+            results.push(result);
+
+            if has_failed_hard_gate && mode == ReportMode::ShortCircuit {
+                break;
+            }
+        }
+
+        PipelineReport {
+            results,
+            has_failed_hard_gate,
+            first_failure,
+            total_elapsed_us: ToPrimitive::to_u64(&pipeline_start.elapsed().as_micros())
+                .unwrap_or(u64::MAX),
+        }
+    }
+}
+
+// ── Static pipeline exposes canonical order ────────────────────────────────
+
+#[test]
+fn static_pipeline_check_order_matches_golden() {
+    let pipeline = build_default_pipeline(&RiskConfig::default());
+    assert_eq!(pipeline.check_order().len(), 24);
 }
 
 // ── Short-circuit stops on first gate failure ──────────────────────────────
@@ -276,7 +342,7 @@ impl RiskCheck for AlwaysPass {
 
 #[test]
 fn short_circuit_stops_on_first_failure() {
-    let mut pipeline = RiskPipeline::new();
+    let mut pipeline = TestRiskPipeline::new();
     pipeline.register(Box::new(AlwaysPass(RiskCheckId::ManualHalt)));
     pipeline.register(Box::new(AlwaysFail(RiskCheckId::CircuitBreaker)));
     pipeline.register(Box::new(AlwaysPass(RiskCheckId::MinBalance))); // should never reach
@@ -294,7 +360,7 @@ fn short_circuit_stops_on_first_failure() {
 
 #[test]
 fn full_report_evaluates_all_checks() {
-    let mut pipeline = RiskPipeline::new();
+    let mut pipeline = TestRiskPipeline::new();
     pipeline.register(Box::new(AlwaysPass(RiskCheckId::ManualHalt)));
     pipeline.register(Box::new(AlwaysFail(RiskCheckId::CircuitBreaker)));
     pipeline.register(Box::new(AlwaysPass(RiskCheckId::MinBalance)));
@@ -309,17 +375,11 @@ fn full_report_evaluates_all_checks() {
     assert_eq!(report.results.len(), 4);
 }
 
-// ── Empty pipeline allows ──────────────────────────────────────────────────
+// ── Static pipeline is never empty ─────────────────────────────────────────
 
 #[test]
-fn empty_pipeline_allows() {
-    let pipeline = RiskPipeline::new();
-    assert!(pipeline.is_empty());
-
-    let ctx = default_context();
-    let report = pipeline.evaluate(&ctx, ReportMode::ShortCircuit);
-
-    assert!(!report.has_failed_hard_gate);
-    assert!(report.first_failure.is_none());
-    assert!(report.results.is_empty());
+fn static_pipeline_has_fixed_checks() {
+    let pipeline = build_default_pipeline(&RiskConfig::default());
+    assert!(!pipeline.is_empty());
+    assert_eq!(pipeline.len(), 24);
 }

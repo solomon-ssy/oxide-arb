@@ -62,11 +62,13 @@ impl HourlyAccounting {
     }
 
     #[must_use]
+    #[inline]
     pub const fn hourly_loss(&self) -> Usd {
         self.stats.loss
     }
 
     #[must_use]
+    #[inline]
     pub const fn stats(&self) -> &PeriodStats {
         &self.stats
     }
@@ -93,6 +95,7 @@ impl HourlyAccounting {
         }
     }
 
+    #[inline]
     pub const fn window_start(&self) -> DateTime<Utc> {
         self.window_start_date
             .and_hms_opt(self.window_start_hour, 0, 0)

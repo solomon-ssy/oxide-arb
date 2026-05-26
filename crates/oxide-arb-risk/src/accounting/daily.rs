@@ -72,36 +72,43 @@ impl DailyAccounting {
     }
 
     #[must_use]
+    #[inline]
     pub const fn daily_loss(&self) -> Usd {
         self.stats.loss
     }
 
     #[must_use]
+    #[inline]
     pub const fn daily_pnl(&self) -> Usd {
         self.stats.pnl
     }
 
     #[must_use]
+    #[inline]
     pub const fn budget_remaining(&self) -> Usd {
         self.budget_remaining
     }
 
     #[must_use]
+    #[inline]
     pub fn is_budget_exhausted(&self) -> bool {
         self.budget_remaining <= Usd::ZERO
     }
 
     #[must_use]
+    #[inline]
     pub const fn stats(&self) -> &PeriodStats {
         &self.stats
     }
 
     #[must_use]
+    #[inline]
     pub const fn window_start(&self) -> NaiveDate {
         self.window_start
     }
 
     #[must_use]
+    #[inline]
     pub fn budget_spent(&self) -> Usd {
         self.initial_budget - self.budget_remaining
     }

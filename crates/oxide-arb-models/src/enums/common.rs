@@ -37,6 +37,7 @@ pub enum Side {
 
 impl Side {
     #[must_use]
+    #[inline]
     pub const fn opposite(self) -> Self {
         match self {
             Self::Buy => Self::Sell,
@@ -284,7 +285,26 @@ impl MarketCategory {
         Self::Other,
     ];
 
+    /// Index into fixed-size category weight tables (0..9).
     #[must_use]
+    #[inline]
+    pub const fn table_index(self) -> usize {
+        match self {
+            Self::Geopolitics => 0,
+            Self::Sports => 1,
+            Self::Politics => 2,
+            Self::Finance => 3,
+            Self::Tech => 4,
+            Self::Culture => 5,
+            Self::Weather => 6,
+            Self::Economics => 7,
+            Self::Crypto => 8,
+            Self::Other => 9,
+        }
+    }
+
+    #[must_use]
+    #[inline]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Geopolitics => "geopolitics",

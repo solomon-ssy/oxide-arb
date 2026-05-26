@@ -35,6 +35,7 @@ impl ConfidenceFusion {
     ///
     /// `fused = w × p_calibrator + (1−w) × p_realtime`, clamped to `[floor, ceiling]`.
     #[must_use]
+    #[inline]
     pub fn fuse(&self, p_calibrator: Decimal, p_realtime: Decimal, sample_count: u32) -> Decimal {
         let n = Decimal::from(sample_count);
         let w = n / (n + self.prior_strength);
@@ -51,6 +52,7 @@ impl ConfidenceFusion {
 /// Duration confidence uses a piecewise-linear approximation of log-saturating
 /// behaviour to avoid `f64` — all arithmetic stays in `Decimal`.
 #[must_use]
+#[inline]
 pub fn compute_realtime_confidence(
     entry_price: Decimal,
     convergence_secs: u64,
@@ -78,6 +80,7 @@ pub fn compute_realtime_confidence(
 /// - 3600–21600 → 0.6–0.85
 /// - 21600–86400 → 0.85–1.0
 /// - 86400+ → 1.0
+#[inline]
 fn duration_confidence_factor(secs: u64) -> Decimal {
     match secs {
         0..=300 => Decimal::from(secs) / dec!(300) * dec!(0.2),

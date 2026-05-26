@@ -47,10 +47,22 @@ impl TokenId {
 pub struct OpportunityId(Arc<str>);
 
 impl OpportunityId {
+    /// Placeholder until score gates pass and a v7 ID is assigned.
+    #[must_use]
+    pub fn pending() -> Self {
+        Self(Arc::from(""))
+    }
+
     /// Generate a fresh time-ordered ID (UUID v7).
     #[must_use]
     pub fn new_v7() -> Self {
         Self(Arc::from(Uuid::now_v7().to_string().as_str()))
+    }
+
+    #[must_use]
+    #[inline]
+    pub fn is_pending(&self) -> bool {
+        self.as_str().is_empty()
     }
 }
 

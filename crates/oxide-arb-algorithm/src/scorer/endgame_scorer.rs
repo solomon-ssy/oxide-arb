@@ -1,70 +1,76 @@
 //! Endgame opportunity scorer — ranks opportunities by risk-adjusted expected `PnL`.
-//!
-//! `score = expected_net_profit × fill_probability × urgency × category_weight × staleness_discount`
+
+use std::sync::Arc;
 
 use crate::fill_probability::FillProbabilityEstimator;
 use crate::staleness::StalenessPolicy;
 use crate::urgency::UrgencyFactor;
+use chrono::{DateTime, Utc};
 use oxide_arb_models::{
     config::{FillProbabilityConfig, ScorerConfig},
     domain::opportunity::Opportunity,
+    types::OpportunityId,
 };
 use rust_decimal::Decimal;
 
-/// A scored opportunity ready for ranking and emission.
 #[derive(Debug, Clone)]
 pub struct ScoredOpportunity {
-    pub opportunity: Opportunity,
-    /// Composite score used for ranking (higher = better).
+    pub opportunity: Arc<Opportunity>,
     pub score: Decimal,
-    /// Estimated probability that the FOK order fills at the target price.
     pub fill_probability: Decimal,
-    /// Time-to-settlement urgency multiplier applied.
     pub urgency_factor: Decimal,
-    /// Category-based weight multiplier applied.
     pub category_weight: Decimal,
-    /// Staleness-based confidence discount applied (1.0 = fresh, 0.0 = expired).
     pub staleness_discount: Decimal,
 }
 
-/// Endgame opportunity scorer.
+/// Score components computed before final emit gates.
+#[derive(Debug, Clone, Copy)]
+pub struct ScoreDraft {
+    pub score: Decimal,
+    pub fill_probability: Decimal,
+    pub urgency_factor: Decimal,
+    pub category_weight: Decimal,
+    pub staleness_discount: Decimal,
+}
+
 pub struct EndgameScorer {
-    config: ScorerConfig,
+    category_weights: [Decimal; 10],
+    min_score: Decimal,
+    max_depth_usage_pct: Decimal,
     fill_estimator: FillProbabilityEstimator,
     settlement_window_hours: u64,
 }
 
 impl EndgameScorer {
-    /// Create a new scorer.
     #[must_use]
     pub fn new(
         config: ScorerConfig,
         fill_config: &FillProbabilityConfig,
         settlement_window_hours: u64,
     ) -> Self {
+        let mut category_weights = [Decimal::ONE; 10];
+        for (cat, weight) in config.category_weights {
+            category_weights[cat.table_index()] = weight;
+        }
         Self {
-            config,
+            category_weights,
+            min_score: config.min_score,
+            max_depth_usage_pct: config.max_depth_usage_pct,
             fill_estimator: FillProbabilityEstimator::new(fill_config),
             settlement_window_hours,
         }
     }
 
-    /// Score an opportunity.
-    ///
-    /// `score = expected_net_profit × fill_probability × urgency × category_weight × staleness_discount`
+    /// Compute score from an opportunity reference — no heap allocation.
     #[must_use]
-    pub fn score(&self, opp: &Opportunity) -> ScoredOpportunity {
-        let category_weight = self
-            .config
-            .category_weights
-            .get(&opp.category)
-            .copied()
-            .unwrap_or(Decimal::ONE);
+    #[inline]
+    pub fn score(&self, opp: &Opportunity, now: DateTime<Utc>) -> ScoreDraft {
+        let category_weight = self.category_weights[opp.category.table_index()];
 
         let hours_to_settlement = opp
             .meta
             .settlement_deadline
-            .map_or(i64::MAX, |d| (d - chrono::Utc::now()).num_hours());
+            .map_or(i64::MAX, |d| (d - now).num_hours());
 
         let fill_prob =
             self.fill_estimator
@@ -83,8 +89,7 @@ impl EndgameScorer {
             * category_weight
             * staleness_discount;
 
-        ScoredOpportunity {
-            opportunity: opp.clone(),
+        ScoreDraft {
             score,
             fill_probability: fill_prob,
             urgency_factor: urgency,
@@ -93,9 +98,29 @@ impl EndgameScorer {
         }
     }
 
-    /// Access the scorer configuration.
+    /// Wrap a scored opportunity for emission (assigns ID, allocates Arc once).
     #[must_use]
-    pub const fn config(&self) -> &ScorerConfig {
-        &self.config
+    pub fn finalize(mut opp: Opportunity, draft: ScoreDraft) -> ScoredOpportunity {
+        if opp.opportunity_id.is_pending() {
+            opp.opportunity_id = OpportunityId::new_v7();
+        }
+        ScoredOpportunity {
+            opportunity: Arc::new(opp),
+            score: draft.score,
+            fill_probability: draft.fill_probability,
+            urgency_factor: draft.urgency_factor,
+            category_weight: draft.category_weight,
+            staleness_discount: draft.staleness_discount,
+        }
+    }
+
+    #[must_use]
+    pub const fn min_score(&self) -> Decimal {
+        self.min_score
+    }
+
+    #[must_use]
+    pub const fn max_depth_usage_pct(&self) -> Decimal {
+        self.max_depth_usage_pct
     }
 }

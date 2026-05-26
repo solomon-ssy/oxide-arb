@@ -140,11 +140,11 @@ fn make_outcome(id: i64, market: &str, zone: PriceZone, predicted_yes: bool) -> 
 }
 
 /// Find a specific bucket entry by key from the calibrator's entries.
-fn find_entry(calibrator: &ResolutionCalibrator, key: &BucketKey) -> Option<CalibrationEntry> {
+fn find_entry(calibrator: &ResolutionCalibrator, key: BucketKey) -> Option<CalibrationEntry> {
     calibrator
         .all_entries()
         .into_iter()
-        .find(|e| &e.bucket_key == key)
+        .find(|e| e.bucket_key == key)
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────
@@ -168,7 +168,7 @@ async fn happy_path_gamma_confirms_and_updates_calibrator() {
     assert_eq!(stats.gamma_miss, 0);
 
     // Calibrator should have recorded a correct outcome
-    let entry = find_entry(&calibrator, &outcome.bucket_key)
+    let entry = find_entry(&calibrator, outcome.bucket_key)
         .expect("Bucket should exist after recording outcome");
     assert_eq!(entry.total_count, 1);
     assert_eq!(entry.correct_count, 1);
@@ -249,7 +249,7 @@ async fn ctf_unavailable_falls_through_to_gamma() {
     assert_eq!(stats.resolved, 1);
 
     // predicted_yes=false, actual=false → was_correct=true
-    let entry = find_entry(&calibrator, &outcome.bucket_key).expect("Bucket should exist");
+    let entry = find_entry(&calibrator, outcome.bucket_key).expect("Bucket should exist");
     assert_eq!(entry.correct_count, 1);
 
     let log = ds.call_log();
@@ -273,7 +273,7 @@ async fn incorrect_prediction_records_miss() {
     assert_eq!(stats.resolved, 1);
 
     // predicted_yes=true, actual=false → was_correct=false
-    let entry = find_entry(&calibrator, &outcome.bucket_key).expect("Bucket should exist");
+    let entry = find_entry(&calibrator, outcome.bucket_key).expect("Bucket should exist");
     assert_eq!(entry.total_count, 1);
     assert_eq!(entry.correct_count, 0);
 }
@@ -319,13 +319,13 @@ async fn multiple_outcomes_mixed_results() {
 
     // mkt-a bucket: predicted YES, actual YES → correct
     let key_a = make_bucket_key(PriceZone::Z97);
-    let entry_a = find_entry(&calibrator, &key_a).expect("Z97 bucket should exist");
+    let entry_a = find_entry(&calibrator, key_a).expect("Z97 bucket should exist");
     assert_eq!(entry_a.total_count, 1);
     assert_eq!(entry_a.correct_count, 1);
 
     // mkt-b bucket: predicted NO, actual YES → incorrect
     let key_b = make_bucket_key(PriceZone::Z98);
-    let entry_b = find_entry(&calibrator, &key_b).expect("Z98 bucket should exist");
+    let entry_b = find_entry(&calibrator, key_b).expect("Z98 bucket should exist");
     assert_eq!(entry_b.total_count, 1);
     assert_eq!(entry_b.correct_count, 0);
 
@@ -362,7 +362,7 @@ async fn prior_update_modifies_sparse_buckets() {
 
     let initial_entries = vec![
         CalibrationEntry {
-            bucket_key: sparse_key.clone(),
+            bucket_key: sparse_key,
             total_count: 3,
             correct_count: 2,
             alpha_prior: dec!(2),
@@ -371,7 +371,7 @@ async fn prior_update_modifies_sparse_buckets() {
         },
         // 3 dense buckets with varying rates to ensure non-zero variance
         CalibrationEntry {
-            bucket_key: dense_key_1.clone(),
+            bucket_key: dense_key_1,
             total_count: 30,
             correct_count: 27, // rate = 0.90
             alpha_prior: dec!(2),
@@ -379,7 +379,7 @@ async fn prior_update_modifies_sparse_buckets() {
             fallback_tier: 1,
         },
         CalibrationEntry {
-            bucket_key: dense_key_2.clone(),
+            bucket_key: dense_key_2,
             total_count: 20,
             correct_count: 16, // rate = 0.80
             alpha_prior: dec!(2),
@@ -387,7 +387,7 @@ async fn prior_update_modifies_sparse_buckets() {
             fallback_tier: 1,
         },
         CalibrationEntry {
-            bucket_key: dense_key_3.clone(),
+            bucket_key: dense_key_3,
             total_count: 25,
             correct_count: 24, // rate = 0.96
             alpha_prior: dec!(2),
@@ -404,7 +404,7 @@ async fn prior_update_modifies_sparse_buckets() {
     let outcome = UnresolvedOutcome {
         outcome_id: 99,
         market_id: MarketId::new("mkt-trigger"),
-        bucket_key: dense_key_1.clone(),
+        bucket_key: dense_key_1,
         predicted_yes: true,
     };
     let ds = Arc::new(
@@ -417,14 +417,14 @@ async fn prior_update_modifies_sparse_buckets() {
     updater.tick().await.unwrap();
 
     // Dense buckets should keep original priors (total_count >= min_sample_size)
-    let dense_entry = find_entry(&calibrator, &dense_key_2).expect("Dense bucket 2 should exist");
+    let dense_entry = find_entry(&calibrator, dense_key_2).expect("Dense bucket 2 should exist");
     assert_eq!(dense_entry.alpha_prior, dec!(2));
     assert_eq!(dense_entry.beta_prior, dec!(0.2));
 
     // Sparse bucket should have updated priors from MoM estimation.
     // With 3 dense buckets having rates 0.90, 0.80, 0.96 (variance > 0),
     // MoM will produce α,β different from (2, 0.2).
-    let sparse_entry = find_entry(&calibrator, &sparse_key).expect("Sparse bucket should exist");
+    let sparse_entry = find_entry(&calibrator, sparse_key).expect("Sparse bucket should exist");
     assert!(
         sparse_entry.alpha_prior != dec!(2) || sparse_entry.beta_prior != dec!(0.2),
         "Sparse bucket priors should have been updated by MoM: α={}, β={}",

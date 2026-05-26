@@ -11,6 +11,7 @@ use oxide_arb_models::domain::opportunity::Opportunity;
 use oxide_arb_models::domain::risk::ProbabilityInput;
 use oxide_arb_models::types::Usd;
 use rust_decimal::Decimal;
+use std::sync::Arc;
 
 /// Circuit breaker gate snapshot for pre-trade evaluation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,6 +29,7 @@ pub enum ManualHaltGate {
 
 impl ManualHaltGate {
     #[must_use]
+    #[inline]
     pub const fn allows_trading(&self) -> bool {
         matches!(self, Self::Clear)
     }
@@ -50,6 +52,7 @@ pub enum BlacklistGate {
 
 impl BlacklistGate {
     #[must_use]
+    #[inline]
     pub const fn allows_trading(&self) -> bool {
         matches!(self, Self::Clear)
     }
@@ -70,7 +73,7 @@ impl BlacklistGate {
 #[derive(Debug, Clone)]
 pub struct RiskContext {
     pub state_version: StateVersion,
-    pub opportunity: Opportunity,
+    pub opportunity: Arc<Opportunity>,
     pub probability: ProbabilityInput,
     pub market_exposure_before: Usd,
     pub total_exposure_before: Usd,

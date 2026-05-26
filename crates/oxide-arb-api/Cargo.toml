@@ -36,6 +36,7 @@ chrono = { workspace = true }
 
 # Concurrency
 arc-swap = { workspace = true }
+ahash = { workspace = true }
 dashmap = { workspace = true }
 parking_lot = { workspace = true }
 flume = { workspace = true }

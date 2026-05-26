@@ -70,6 +70,7 @@ impl PositionTracker {
 
     /// Exposure in a single market. Returns `Usd::ZERO` if unknown.
     #[must_use]
+    #[inline]
     pub fn market_exposure(&self, market_id: &MarketId) -> Usd {
         self.market_exposures
             .get(market_id)
@@ -77,6 +78,7 @@ impl PositionTracker {
     }
 
     #[must_use]
+    #[inline]
     pub const fn total_position_value(&self) -> Usd {
         self.total_position_value
     }
@@ -165,6 +167,7 @@ impl PotentialLossLedger {
 
     /// Sum of `max_loss` across all active (unresolved) entries.
     #[must_use]
+    #[inline]
     pub const fn total_potential_loss(&self) -> Usd {
         self.running_total
     }

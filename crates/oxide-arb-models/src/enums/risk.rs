@@ -4,13 +4,18 @@ use oxide_arb_macros::IntoActiveValue;
 use sea_orm::{DeriveActiveEnum, EnumIter};
 use serde::{Deserialize, Serialize};
 
-/// Persisted top-level state of the 4-state circuit breaker FSM.
+/// Persisted top-level state of the 5-state circuit breaker FSM.
 ///
 /// ```text
-/// Closed ──trip──▶ Open ──cooldown expires──▶ HalfOpen ──probes pass──▶ Recovered
-///   ▲                ▲                           │                         │
-///   │                └───── probe fails ──────────┘                         │
-///   └──────────────── observation period expires ──────────────────────────┘
+///                     ┌── Halted (L3 Daily / L4 System) ──┐
+///                     │   NO tick transition               │
+///                     │   manual ack only                  │
+///                     └──────────▲─────────────────────────┘
+///                                │ halt()
+/// Closed ──trip_session──▶ Open ──cooldown──▶ HalfOpen ──probes──▶ Recovered ──obs──▶ Closed
+///   ▲                         ▲                    │                                    │
+///   │                         └── probe fail ──────┘                                    │
+///   └───────────────────────── acknowledge_and_resume (from Halted) ────────────────────┘
 /// ```
 #[derive(
     Debug,
@@ -31,7 +36,7 @@ pub enum BreakerStateName {
     /// Normal operation — execution permitted.
     #[sea_orm(string_value = "closed")]
     Closed,
-    /// Tripped — execution blocked, cooldown timer running.
+    /// Tripped (L2 Session) — execution blocked, cooldown timer running.
     #[sea_orm(string_value = "open")]
     Open,
     /// Cooldown expired — allowing probe trades to test recovery.
@@ -40,6 +45,9 @@ pub enum BreakerStateName {
     /// Probes succeeded — observation period before returning to Closed.
     #[sea_orm(string_value = "recovered")]
     Recovered,
+    /// Hard halt (L3 Daily / L4 System) — requires operator `acknowledge_and_resume`.
+    #[sea_orm(string_value = "halted")]
+    Halted,
 }
 
 impl std::fmt::Display for BreakerStateName {
@@ -49,6 +57,7 @@ impl std::fmt::Display for BreakerStateName {
             Self::Open => f.write_str("open"),
             Self::HalfOpen => f.write_str("half_open"),
             Self::Recovered => f.write_str("recovered"),
+            Self::Halted => f.write_str("halted"),
         }
     }
 }
@@ -84,6 +93,7 @@ pub enum CircuitBreakerLevel {
 
 impl CircuitBreakerLevel {
     #[must_use]
+    #[inline]
     pub const fn as_u8(self) -> u8 {
         match self {
             Self::Trade => 1,
@@ -377,6 +387,7 @@ pub enum WindowType {
 
 impl WindowType {
     #[must_use]
+    #[inline]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Hourly => "hourly",

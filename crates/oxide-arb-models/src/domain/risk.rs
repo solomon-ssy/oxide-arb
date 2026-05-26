@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 pub struct RiskEngineState {
     pub breaker_state: BreakerStateName,
     pub breaker_level: Option<CircuitBreakerLevel>,
+    pub is_halted: bool,
     pub halt_reason: Option<String>,
     pub cooldown_until: Option<DateTime<Utc>>,
     pub total_exposure: Usd,
@@ -104,6 +105,7 @@ impl From<&RiskStateInfo> for RiskEngineState {
         Self {
             breaker_state: info.breaker_state,
             breaker_level: info.breaker_level,
+            is_halted: info.is_halted,
             halt_reason: info.halt_reason.clone(),
             cooldown_until: info.cooldown_until,
             total_exposure: info.total_exposure,
@@ -191,7 +193,7 @@ impl From<&RiskEngineState> for UpsertRiskEngineState {
             id: 1,
             breaker_state: s.breaker_state,
             breaker_level: s.breaker_level,
-            is_halted: s.breaker_level.is_some(),
+            is_halted: s.is_halted,
             halt_reason: s.halt_reason.clone(),
             consecutive_misses: s.consecutive_misses,
             cooldown_until: s.cooldown_until,
@@ -332,7 +334,7 @@ pub struct MarketExposure {
 ///
 /// Bridges the algorithm crate (calibration output) and the risk crate
 /// (sizing input). All fields are `Decimal` — no `f64`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct ProbabilityInput {
     /// Calibrated win probability after empirical Bayes adjustment.
     pub calibrated_win_prob: Decimal,

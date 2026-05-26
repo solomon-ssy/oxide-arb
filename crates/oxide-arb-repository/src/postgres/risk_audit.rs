@@ -23,4 +23,21 @@ impl RiskAuditRepository for PgRiskAuditRepository {
             .map_err(StorageError::from)?;
         Ok(())
     }
+
+    async fn create_batch(&self, events: Vec<NewRiskAuditEvent>) -> Result<(), StorageError> {
+        if events.is_empty() {
+            return Ok(());
+        }
+        let txn = self.db.begin().await.map_err(StorageError::from)?;
+        let models: Vec<_> = events
+            .into_iter()
+            .map(IntoActiveModel::into_active_model)
+            .collect();
+        Entity::insert_many(models)
+            .exec(&txn)
+            .await
+            .map_err(StorageError::from)?;
+        txn.commit().await.map_err(StorageError::from)?;
+        Ok(())
+    }
 }

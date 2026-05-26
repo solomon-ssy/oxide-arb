@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// The triple `(category, price_zone, duration_bucket)` uniquely identifies
 /// a calibration bucket both in-memory and in the database.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct BucketKey {
     pub category: MarketCategory,
     pub price_zone: PriceZone,

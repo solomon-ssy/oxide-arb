@@ -238,18 +238,16 @@ impl ClobClient {
                 let bids = resp
                     .bids
                     .iter()
-                    .map(|l| BookLevel {
-                        price: Price::new(l.price),
-                        size: Shares::new(l.size),
+                    .map(|l| {
+                        BookLevel::from_decimal_unchecked(Price::new(l.price), Shares::new(l.size))
                     })
                     .collect();
 
                 let asks = resp
                     .asks
                     .iter()
-                    .map(|l| BookLevel {
-                        price: Price::new(l.price),
-                        size: Shares::new(l.size),
+                    .map(|l| {
+                        BookLevel::from_decimal_unchecked(Price::new(l.price), Shares::new(l.size))
                     })
                     .collect();
 

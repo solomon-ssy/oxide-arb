@@ -20,9 +20,10 @@ use oxide_arb_risk::builder::RiskEngineBuilder;
 use oxide_arb_risk::clock::utc_clock;
 use oxide_arb_risk::engine::RiskEngine;
 use oxide_arb_risk::traits::RiskMetrics;
-use oxide_arb_risk::types::ReportMode;
+use oxide_arb_risk::types::{ExecutionRiskEvent, ReportMode};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
+use std::sync::Arc;
 
 mod support;
 use support::MockMetrics;
@@ -133,12 +134,9 @@ async fn healthy_engine_allows_trade() {
     let metrics = MockMetrics::default();
     let engine = build_engine(&metrics).await;
 
-    let opp = test_opportunity();
+    let opp = Arc::new(test_opportunity());
     let prob = test_probability();
-    let decision = engine
-        .pre_trade_check(&opp, &prob, &metrics, ReportMode::ShortCircuit)
-        .await
-        .unwrap();
+    let decision = engine.pre_trade_check_core(&opp, &prob, &metrics, ReportMode::ShortCircuit);
 
     assert!(
         decision.allowed,
@@ -156,12 +154,9 @@ async fn halted_engine_denies_trade() {
     let engine = build_engine(&metrics).await;
     engine.halt("manual halt for test".into()).await;
 
-    let opp = test_opportunity();
+    let opp = Arc::new(test_opportunity());
     let prob = test_probability();
-    let decision = engine
-        .pre_trade_check(&opp, &prob, &metrics, ReportMode::ShortCircuit)
-        .await
-        .unwrap();
+    let decision = engine.pre_trade_check_core(&opp, &prob, &metrics, ReportMode::ShortCircuit);
 
     assert!(!decision.allowed);
     assert!(
@@ -189,12 +184,9 @@ async fn tripped_breaker_denies_trade() {
         .await
         .unwrap();
 
-    let opp = test_opportunity();
+    let opp = Arc::new(test_opportunity());
     let prob = test_probability();
-    let decision = engine
-        .pre_trade_check(&opp, &prob, &metrics, ReportMode::ShortCircuit)
-        .await
-        .unwrap();
+    let decision = engine.pre_trade_check_core(&opp, &prob, &metrics, ReportMode::ShortCircuit);
 
     assert!(!decision.allowed);
     assert!(
@@ -216,12 +208,9 @@ async fn low_balance_denies_trade() {
     };
     let engine = build_engine(&metrics).await;
 
-    let opp = test_opportunity();
+    let opp = Arc::new(test_opportunity());
     let prob = test_probability();
-    let decision = engine
-        .pre_trade_check(&opp, &prob, &metrics, ReportMode::ShortCircuit)
-        .await
-        .unwrap();
+    let decision = engine.pre_trade_check_core(&opp, &prob, &metrics, ReportMode::ShortCircuit);
 
     assert!(!decision.allowed);
 }
@@ -234,18 +223,15 @@ async fn full_report_runs_all_checks() {
     let engine = build_engine(&metrics).await;
     engine.halt("halt for full report test".into()).await;
 
-    let opp = test_opportunity();
+    let opp = Arc::new(test_opportunity());
     let prob = test_probability();
-    let decision = engine
-        .pre_trade_check(&opp, &prob, &metrics, ReportMode::FullReport)
-        .await
-        .unwrap();
+    let decision = engine.pre_trade_check_core(&opp, &prob, &metrics, ReportMode::FullReport);
 
     assert!(!decision.allowed);
     assert!(
-        decision.checks.len() >= 24,
+        decision.checks().len() >= 24,
         "full report should have all checks, got {}",
-        decision.checks.len()
+        decision.checks().len()
     );
 }
 
@@ -312,11 +298,9 @@ async fn tick_drives_breaker_transitions() {
     // Use a different market from the one we tripped (which got auto-blacklisted)
     let mut opp = test_opportunity();
     opp.market_id = MarketId::new("0xother_market");
+    let opp = Arc::new(opp);
     let prob = test_probability();
-    let decision = engine
-        .pre_trade_check(&opp, &prob, &metrics, ReportMode::ShortCircuit)
-        .await
-        .unwrap();
+    let decision = engine.pre_trade_check_core(&opp, &prob, &metrics, ReportMode::ShortCircuit);
     assert!(!decision.allowed, "should deny while breaker is open");
 
     std::thread::sleep(std::time::Duration::from_millis(10));
@@ -326,10 +310,8 @@ async fn tick_drives_breaker_transitions() {
 
     // After tick, breaker is in HalfOpen — allows trading (probe mode)
     let metrics_normal = MockMetrics::default();
-    let decision = engine
-        .pre_trade_check(&opp, &prob, &metrics_normal, ReportMode::ShortCircuit)
-        .await
-        .unwrap();
+    let decision =
+        engine.pre_trade_check_core(&opp, &prob, &metrics_normal, ReportMode::ShortCircuit);
     assert!(
         decision.allowed,
         "HalfOpen allows probe trades: {:?}",
@@ -337,28 +319,63 @@ async fn tick_drives_breaker_transitions() {
     );
 }
 
-// ── resume clears halt ─────────────────────────────────────────────────────
+// ── acknowledge_and_resume clears halt ─────────────────────────────────────
 
 #[tokio::test]
-async fn resume_clears_halt() {
+async fn acknowledge_and_resume_clears_halt() {
     let metrics = MockMetrics::default();
     let engine = build_engine(&metrics).await;
 
     engine.halt("test halt".into()).await;
     assert!(engine.is_halted());
 
-    engine.resume().await.unwrap();
-    assert!(!engine.is_halted());
-
-    let opp = test_opportunity();
-    let prob = test_probability();
-    let decision = engine
-        .pre_trade_check(&opp, &prob, &metrics, ReportMode::ShortCircuit)
+    engine
+        .acknowledge_and_resume("operator reviewed and approved")
         .await
         .unwrap();
+    assert!(!engine.is_halted());
+
+    let opp = Arc::new(test_opportunity());
+    let prob = test_probability();
+    let decision = engine.pre_trade_check_core(&opp, &prob, &metrics, ReportMode::ShortCircuit);
     assert!(
         decision.allowed,
-        "should allow after resume: {:?}",
+        "should allow after acknowledge_and_resume: {:?}",
         decision.denial_reason
+    );
+}
+
+// ── heartbeat failures trigger L4 halt ─────────────────────────────────────
+
+#[tokio::test]
+async fn heartbeat_failures_trigger_system_halt() {
+    let metrics = MockMetrics::default();
+    let config = RiskConfig {
+        heartbeat_max_failures: 2,
+        ..Default::default()
+    };
+    let engine = RiskEngineBuilder::new()
+        .config(config)
+        .clock(utc_clock())
+        .build(&metrics)
+        .await
+        .unwrap();
+
+    engine.on_execution_event(ExecutionRiskEvent::HeartbeatFailure);
+    assert!(
+        !engine.is_halted(),
+        "single heartbeat failure should not halt yet"
+    );
+
+    engine.on_execution_event(ExecutionRiskEvent::HeartbeatFailure);
+    assert!(
+        engine.is_halted(),
+        "max heartbeat failures should trigger L4 halt"
+    );
+
+    engine.on_execution_event(ExecutionRiskEvent::HeartbeatSuccess);
+    assert!(
+        engine.is_halted(),
+        "heartbeat success does not auto-resume from L4 halt"
     );
 }

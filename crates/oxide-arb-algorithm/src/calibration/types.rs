@@ -57,7 +57,7 @@ impl CalibrationEntry {
     #[must_use]
     pub fn to_snapshot(&self, fused_probability: Decimal) -> CalibrationSnapshot {
         CalibrationSnapshot {
-            bucket_key: self.bucket_key.clone(),
+            bucket_key: self.bucket_key,
             posterior_mean: self.posterior_mean(),
             sample_size: self.total_count,
             alpha_prior: self.alpha_prior,

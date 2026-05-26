@@ -8,7 +8,10 @@ use oxide_arb_algorithm::{
 };
 use oxide_arb_models::{
     config::{CalibrationConfig, EndgameDetectionConfig},
-    domain::{BookLevel, EndgameBookSnapshot, OrderbookSide},
+    domain::{
+        OrderbookSide,
+        book::{BookLevel, BookSnapshot, EndgameBookPair, EndgameBookSnapshot},
+    },
     enums::common::{MarketCategory, StalenessLevel},
     types::{EventId, MarketId, Price, Shares, TokenId, Usd},
 };
@@ -29,11 +32,8 @@ impl FeeEstimator for ZeroFeeEstimator {
     }
 }
 
-const fn level(price: Decimal, size: Decimal) -> BookLevel {
-    BookLevel {
-        price: Price::new(price),
-        size: Shares::new(size),
-    }
+fn level(price: Decimal, size: Decimal) -> BookLevel {
+    BookLevel::from_decimal_unchecked(Price::new(price), Shares::new(size))
 }
 
 const fn side(levels: Vec<BookLevel>) -> OrderbookSide {
@@ -43,25 +43,53 @@ const fn side(levels: Vec<BookLevel>) -> OrderbookSide {
     }
 }
 
-fn detector() -> EndgameDetector {
+fn token_snapshot(bids: &[BookLevel], asks: &[BookLevel]) -> Arc<BookSnapshot> {
+    Arc::new(BookSnapshot::new(Arc::from(bids), Arc::from(asks), 0))
+}
+
+fn pair_from_snapshot(snapshot: &EndgameBookSnapshot) -> EndgameBookPair {
+    EndgameBookPair {
+        yes: token_snapshot(&snapshot.yes_bids.levels, &snapshot.yes_asks.levels),
+        no: token_snapshot(&snapshot.no_bids.levels, &snapshot.no_asks.levels),
+    }
+}
+
+fn make_book(
+    yes_bids: Vec<BookLevel>,
+    yes_asks: Vec<BookLevel>,
+    no_bids: Vec<BookLevel>,
+    no_asks: Vec<BookLevel>,
+) -> EndgameBookPair {
+    pair_from_snapshot(&EndgameBookSnapshot {
+        yes_bids: side(yes_bids),
+        yes_asks: side(yes_asks),
+        no_bids: side(no_bids),
+        no_asks: side(no_asks),
+    })
+}
+
+fn detector() -> EndgameDetector<ZeroFeeEstimator> {
     let calibration = CalibrationConfig::default();
     let calibrator = Arc::new(ResolutionCalibrator::empty(calibration.clone()));
-    let fees: Arc<dyn FeeEstimator> = Arc::new(ZeroFeeEstimator);
+    let fees = ZeroFeeEstimator;
     let detection = EndgameDetectionConfig {
         min_convergence_duration_secs: 0,
         ..Default::default()
     };
 
-    EndgameDetector::new(detection, &calibration, calibrator, fees)
+    EndgameDetector::new(&detection, &calibration, calibrator, fees)
 }
 
-fn detect(book: &EndgameBookSnapshot) -> Option<oxide_arb_models::domain::Opportunity> {
-    detector().detect(
+fn detect(book: &EndgameBookPair) -> Option<oxide_arb_models::domain::Opportunity> {
+    let detector = detector();
+    let direction = detector.detect_direction(book.view())?;
+    detector.detect_with_direction(
         &MarketId::new("m-no"),
         &EventId::new("e-no"),
         &TokenId::new("yes-no"),
         &TokenId::new("no-no"),
         book,
+        direction,
         MarketCategory::Sports,
         StalenessLevel::Fresh,
         Some(Utc::now() + Duration::hours(6)),
@@ -71,12 +99,12 @@ fn detect(book: &EndgameBookSnapshot) -> Option<oxide_arb_models::domain::Opport
 
 #[test]
 fn no_convergence_buys_no_from_no_ask_book() {
-    let book = EndgameBookSnapshot {
-        yes_bids: side(vec![level(dec!(0.02), dec!(5000))]),
-        yes_asks: side(vec![level(dec!(0.03), dec!(5000))]),
-        no_bids: side(vec![level(dec!(0.96), dec!(200))]),
-        no_asks: side(vec![level(dec!(0.97), dec!(200))]),
-    };
+    let book = make_book(
+        vec![level(dec!(0.02), dec!(5000))],
+        vec![level(dec!(0.03), dec!(5000))],
+        vec![level(dec!(0.96), dec!(200))],
+        vec![level(dec!(0.97), dec!(200))],
+    );
 
     let opp = detect(&book).expect("NO convergence should produce an opportunity");
 
@@ -89,12 +117,12 @@ fn no_convergence_buys_no_from_no_ask_book() {
 
 #[test]
 fn no_depth_is_not_inferred_from_yes_depth() {
-    let book = EndgameBookSnapshot {
-        yes_bids: side(vec![level(dec!(0.02), dec!(5000))]),
-        yes_asks: side(vec![level(dec!(0.03), dec!(5000))]),
-        no_bids: side(vec![level(dec!(0.96), dec!(200))]),
-        no_asks: side(vec![level(dec!(0.97), dec!(200))]),
-    };
+    let book = make_book(
+        vec![level(dec!(0.02), dec!(5000))],
+        vec![level(dec!(0.03), dec!(5000))],
+        vec![level(dec!(0.96), dec!(200))],
+        vec![level(dec!(0.97), dec!(200))],
+    );
 
     let opp = detect(&book).expect("NO convergence should use real NO depth");
 
@@ -107,12 +135,12 @@ fn no_depth_is_not_inferred_from_yes_depth() {
 
 #[test]
 fn yes_low_without_no_high_does_not_trigger_no_convergence() {
-    let book = EndgameBookSnapshot {
-        yes_bids: side(vec![level(dec!(0.02), dec!(5000))]),
-        yes_asks: side(vec![level(dec!(0.03), dec!(5000))]),
-        no_bids: side(vec![level(dec!(0.88), dec!(1000))]),
-        no_asks: side(vec![level(dec!(0.90), dec!(1000))]),
-    };
+    let book = make_book(
+        vec![level(dec!(0.02), dec!(5000))],
+        vec![level(dec!(0.03), dec!(5000))],
+        vec![level(dec!(0.88), dec!(1000))],
+        vec![level(dec!(0.90), dec!(1000))],
+    );
 
     assert!(
         detect(&book).is_none(),
@@ -122,12 +150,12 @@ fn yes_low_without_no_high_does_not_trigger_no_convergence() {
 
 #[test]
 fn yes_convergence_still_uses_yes_ask_book() {
-    let book = EndgameBookSnapshot {
-        yes_bids: side(vec![level(dec!(0.96), dec!(1000))]),
-        yes_asks: side(vec![level(dec!(0.97), dec!(1000))]),
-        no_bids: side(vec![level(dec!(0.02), dec!(5000))]),
-        no_asks: side(vec![level(dec!(0.03), dec!(5000))]),
-    };
+    let book = make_book(
+        vec![level(dec!(0.96), dec!(1000))],
+        vec![level(dec!(0.97), dec!(1000))],
+        vec![level(dec!(0.02), dec!(5000))],
+        vec![level(dec!(0.03), dec!(5000))],
+    );
 
     let opp = detect(&book).expect("YES convergence should still work");
 

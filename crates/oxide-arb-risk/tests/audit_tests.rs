@@ -250,7 +250,10 @@ async fn resume_emits_engine_resumed() {
     engine.halt("halt for resume test".into()).await;
     persistence.take_audits(); // clear halt events
 
-    engine.resume().await.unwrap();
+    engine
+        .acknowledge_and_resume("operator approved")
+        .await
+        .unwrap();
 
     let audits = persistence.take_audits();
     assert!(!audits.is_empty(), "expected EngineResumed audit event");

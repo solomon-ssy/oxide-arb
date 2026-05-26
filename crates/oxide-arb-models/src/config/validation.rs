@@ -46,6 +46,15 @@ fn validate_risk_cross_constraints(inner: &Inner, report: &mut ConfigValidationR
         });
     }
 
+    if r.max_hourly_fee_spend_usd > r.max_daily_fee_spend_usd {
+        report.errors.push(ConfigValidationError::InfeasibleRange {
+            field_low: "risk.max_hourly_fee_spend_usd",
+            value_low: r.max_hourly_fee_spend_usd,
+            field_high: "risk.max_daily_fee_spend_usd",
+            value_high: r.max_daily_fee_spend_usd,
+        });
+    }
+
     if r.max_single_bet_usd > Decimal::ZERO
         && r.max_single_market_exposure_usd > Decimal::ZERO
         && r.max_single_bet_usd > r.max_single_market_exposure_usd

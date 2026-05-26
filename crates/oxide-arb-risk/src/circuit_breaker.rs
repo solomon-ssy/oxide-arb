@@ -1,13 +1,18 @@
-//! 4-state circuit breaker FSM with 4 severity levels (L1-L4).
+//! 5-state circuit breaker FSM with 4 severity levels (L1-L4).
 //!
 //! ```text
-//! Closed ──trip──▶ Open ──cooldown expires──▶ HalfOpen ──probes pass──▶ Recovered
-//!   ▲                ▲                           │                         │
-//!   │                └───── probe fails ──────────┘                         │
-//!   └──────────────── observation period expires ──────────────────────────┘
+//!                     ┌── Halted (L3/L4) ── acknowledge_and_resume ──┐
+//!                     │   NO tick transition                          │
+//!                     └──────────▲───────────────────────────────────┘
+//!                                │ halt()                             ▼
+//! Closed ──trip──▶ Open ──cooldown──▶ HalfOpen ──probes──▶ Recovered ──▶ Closed
+//!   ▲                ▲                    │
+//!   │                └── probe fail ──────┘
 //! ```
 //!
-//! Additional edge: `reset()` → any state → Closed (operator intervention).
+//! - L2 Session: `trip()` → Open (auto-recovery via `HalfOpen`)
+//! - L3 Daily / L4 System: `halt()` → Halted (requires `acknowledge_and_resume()`)
+//! - `reset()` → any state → Closed (testing / escape hatch)
 
 use crate::clock::Clock;
 use crate::types::BreakerState;
@@ -24,6 +29,7 @@ pub struct CircuitBreaker {
     clock: Arc<dyn Clock>,
     state: BreakerState,
     l2_trip_count: u32,
+    heartbeat_failures: u32,
     last_transition_at: DateTime<Utc>,
 }
 
@@ -37,6 +43,7 @@ impl CircuitBreaker {
             clock,
             state: BreakerState::Closed,
             l2_trip_count: 0,
+            heartbeat_failures: 0,
             last_transition_at: now,
         }
     }
@@ -96,6 +103,23 @@ impl CircuitBreaker {
                         ToPrimitive::to_i64(&config.recovery_observation_secs).unwrap_or(i64::MAX),
                     ),
             },
+            BreakerStateName::Halted => {
+                let level = snapshot.breaker_level.ok_or_else(|| {
+                    OxideError::Internal(
+                        "corrupt breaker snapshot: Halted state missing breaker_level".into(),
+                    )
+                })?;
+                let reason = snapshot.halt_reason.clone().ok_or_else(|| {
+                    OxideError::Internal(
+                        "corrupt breaker snapshot: Halted state missing halt_reason".into(),
+                    )
+                })?;
+                BreakerState::Halted {
+                    level,
+                    reason,
+                    halted_at: snapshot.snapshot_at,
+                }
+            }
         };
 
         Ok(Self {
@@ -103,26 +127,33 @@ impl CircuitBreaker {
             clock,
             state,
             l2_trip_count: ToPrimitive::to_u32(&snapshot.cooldown_multiplier).unwrap_or(0),
+            heartbeat_failures: 0,
             last_transition_at: snapshot.snapshot_at,
         })
     }
 
     #[must_use]
+    #[inline]
     pub const fn state(&self) -> &BreakerState {
         &self.state
     }
 
     #[must_use]
+    #[inline]
     pub const fn allows_trading(&self) -> bool {
         self.state.allows_trading()
     }
 
     #[must_use]
+    #[inline]
     pub const fn is_probe_mode(&self) -> bool {
         self.state.is_probe_mode()
     }
 
-    /// Trip the breaker to Open state at the given level.
+    /// Trip the breaker to Open state for **L2 Session** level only.
+    ///
+    /// For L3 Daily / L4 System, use `halt()` instead. This enforces the
+    /// design invariant that L3/L4 require manual operator acknowledgement.
     ///
     /// Higher level overrides lower. Same or higher level refreshes cooldown.
     pub fn trip(&mut self, level: CircuitBreakerLevel, reason: String) {
@@ -136,6 +167,7 @@ impl CircuitBreaker {
         }
 
         let should_trip = match &self.state {
+            BreakerState::Halted { .. } => false,
             BreakerState::Closed
             | BreakerState::HalfOpen { .. }
             | BreakerState::Recovered { .. } => true,
@@ -163,9 +195,58 @@ impl CircuitBreaker {
         }
     }
 
+    /// Halt the breaker for **L3 Daily / L4 System** — no automatic recovery.
+    ///
+    /// Requires `acknowledge_and_resume()` to return to Closed.
+    /// Can override Open/HalfOpen/Recovered but never downgrades an existing Halted.
+    pub fn halt(&mut self, level: CircuitBreakerLevel, reason: String) {
+        let should_halt = match &self.state {
+            BreakerState::Halted { level: current, .. } => level > *current,
+            _ => true,
+        };
+
+        if should_halt {
+            let now = self.clock.now();
+            tracing::error!(
+                %level,
+                %reason,
+                "circuit breaker HALTED — manual intervention required"
+            );
+            self.state = BreakerState::Halted {
+                level,
+                reason,
+                halted_at: now,
+            };
+            self.last_transition_at = now;
+        }
+    }
+
+    /// Operator intervention — resume from Halted state to Closed.
+    ///
+    /// Returns `true` if the breaker was in Halted state and has been resumed.
+    /// Returns `false` if the breaker was not halted (no-op).
+    pub fn acknowledge_and_resume(&mut self, operator_ack: &str) -> bool {
+        if let BreakerState::Halted { level, reason, .. } = &self.state {
+            tracing::warn!(
+                %level,
+                previous_reason = %reason,
+                ack = operator_ack,
+                "circuit breaker resumed from Halted by operator"
+            );
+            self.state = BreakerState::Closed;
+            self.l2_trip_count = 0;
+            self.last_transition_at = self.clock.now();
+            true
+        } else {
+            false
+        }
+    }
+
     /// Periodic tick — drives time-based state transitions.
     ///
     /// Returns `true` if a state transition occurred.
+    /// **Halted** state is never auto-transitioned — requires explicit
+    /// `acknowledge_and_resume()`.
     #[must_use]
     pub fn tick(&mut self) -> bool {
         let now = self.clock.now();
@@ -269,6 +350,28 @@ impl CircuitBreaker {
     #[must_use]
     pub const fn l2_trip_count(&self) -> u32 {
         self.l2_trip_count
+    }
+
+    #[must_use]
+    pub const fn heartbeat_failures(&self) -> u32 {
+        self.heartbeat_failures
+    }
+
+    /// Record a heartbeat probe failure. Returns `true` if L4 halt was triggered.
+    pub fn on_heartbeat_failure(&mut self, max_failures: u32) -> bool {
+        self.heartbeat_failures = self.heartbeat_failures.saturating_add(1);
+        if self.heartbeat_failures >= max_failures {
+            let reason = format!("{} consecutive heartbeat failures", self.heartbeat_failures);
+            self.halt(CircuitBreakerLevel::System, reason);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Reset the heartbeat failure counter after a successful probe.
+    pub const fn on_heartbeat_success(&mut self) {
+        self.heartbeat_failures = 0;
     }
 
     #[must_use]

@@ -94,10 +94,10 @@ pub struct RiskDecisionTrace {
     pub evaluated_at: DateTime<Utc>,
 }
 
-impl From<&RiskAuditEvent> for NewRiskAuditEvent {
-    fn from(event: &RiskAuditEvent) -> Self {
-        let (event_type, opportunity_id, trade_id) = audit_event_metadata(event);
-        let payload = serde_json::to_value(event).unwrap_or(serde_json::Value::Null);
+impl From<RiskAuditEvent> for NewRiskAuditEvent {
+    fn from(event: RiskAuditEvent) -> Self {
+        let (event_type, opportunity_id, trade_id) = audit_event_metadata(&event);
+        let payload = serde_json::to_value(&event).unwrap_or(serde_json::Value::Null);
 
         Self {
             event_type,

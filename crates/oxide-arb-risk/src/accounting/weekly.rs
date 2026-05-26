@@ -50,16 +50,19 @@ impl WeeklyAccounting {
     }
 
     #[must_use]
+    #[inline]
     pub const fn weekly_loss(&self) -> Usd {
         self.stats.loss
     }
 
     #[must_use]
+    #[inline]
     pub const fn stats(&self) -> &PeriodStats {
         &self.stats
     }
 
     #[must_use]
+    #[inline]
     pub const fn week_start(&self) -> NaiveDate {
         self.week_start
     }

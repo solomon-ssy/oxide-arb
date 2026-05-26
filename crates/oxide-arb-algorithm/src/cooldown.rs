@@ -55,6 +55,7 @@ impl InMemoryEmissionCooldown {
 
     /// Returns `true` if the market may emit (NOT in cooldown).
     #[must_use]
+    #[inline]
     pub fn may_emit(&self, market_id: &MarketId) -> bool {
         let Some(entry) = self.entries.get(market_id) else {
             return true;

@@ -16,6 +16,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 pub trait Clock: Send + Sync + 'static {
     fn now(&self) -> DateTime<Utc>;
 
+    #[inline]
     fn today(&self) -> NaiveDate {
         self.now().date_naive()
     }

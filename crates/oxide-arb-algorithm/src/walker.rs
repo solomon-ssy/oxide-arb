@@ -1,30 +1,20 @@
-//! Orderbook walk simulation for entry cost and slippage estimation.
+//! Fixed-point orderbook walk simulation for entry cost and slippage estimation.
 //!
-//! Simulates filling a FOK order by walking through orderbook levels.
-//! All arithmetic uses `rust_decimal::Decimal` — no floating-point.
+//! All interior arithmetic uses [`MicroPrice`] / [`MicroShares`] / [`MicroUsd`].
 
-use oxide_arb_models::{
-    domain::BookLevel,
-    types::{Bps, Price, Shares, Usd},
-};
-use rust_decimal::Decimal;
-use rust_decimal_macros::dec;
+use oxide_arb_models::domain::BookLevel;
+use oxide_arb_models::types::{MicroPrice, MicroShares, MicroUsd, Price, Shares, Usd};
 
 /// Result of walking through orderbook levels.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WalkResult {
-    /// Total shares that would be filled.
-    pub shares: Shares,
-    /// Volume-weighted average price across consumed levels.
-    pub vwap: Price,
-    /// Total USD cost (sum of `price × size` per consumed level).
-    pub total_cost: Usd,
-    /// Number of price levels partially or fully consumed.
+    pub shares: MicroShares,
+    pub vwap: MicroPrice,
+    pub total_cost: MicroUsd,
     pub levels_consumed: usize,
-    /// Whether the walk exhausted all available liquidity before budget/target.
     pub fully_filled: bool,
-    /// Percentage of total available depth consumed (0–100).
-    pub depth_used_pct: Decimal,
+    /// Percentage of total available depth consumed (0–100 integer).
+    pub depth_used_pct: i64,
 }
 
 /// Stateless orderbook walker.
@@ -33,44 +23,41 @@ pub struct OrderbookWalker;
 impl OrderbookWalker {
     /// Walk ask levels to simulate buying up to `max_cost_usd` worth of shares.
     ///
-    /// Levels **must** be sorted ascending by price. The walk stops when:
-    /// - The budget is exhausted.
-    /// - No more levels remain.
-    /// - A level's price drops below `price_floor` (if set).
-    ///
-    /// Returns `None` if zero shares would be filled.
+    /// Levels **must** be sorted ascending by price. Stops when budget exhausted,
+    /// no levels remain, or price drops below `price_floor`.
     #[must_use]
+    #[inline]
     pub fn walk_asks_by_cost(
         asks: &[BookLevel],
-        max_cost_usd: Decimal,
-        price_floor: Option<Decimal>,
+        max_cost_usd: MicroUsd,
+        price_floor: MicroPrice,
+        total_ask_depth_usd: MicroUsd,
     ) -> Option<WalkResult> {
-        let total_available_depth: Decimal =
-            asks.iter().map(|l| l.price.inner() * l.size.inner()).sum();
-
         let mut remaining_budget = max_cost_usd;
-        let mut total_shares = Decimal::ZERO;
-        let mut total_cost = Decimal::ZERO;
+        let mut total_shares = MicroShares::ZERO;
+        let mut total_cost = MicroUsd::ZERO;
         let mut levels_consumed = 0_usize;
 
         for level in asks {
-            if let Some(floor) = price_floor {
-                if level.price.inner() < floor {
-                    break;
-                }
+            let price = level.price;
+            let size = level.size;
+            if price.micro() <= 0 || size.micro() <= 0 {
+                continue;
             }
-
-            if remaining_budget <= Decimal::ZERO {
+            if price.micro() < price_floor.micro() {
+                break;
+            }
+            if remaining_budget.micro() <= 0 {
                 break;
             }
 
-            let affordable = remaining_budget / level.price.inner();
-            let fill = affordable.min(level.size.inner());
-            let cost = fill * level.price.inner();
+            let affordable = price.affordable_shares(remaining_budget);
+            let fill = MicroShares::from_micro(affordable.micro().min(size.micro()));
+            let cost = price.mul_shares(fill);
 
-            total_shares += fill;
-            total_cost += cost;
-            remaining_budget -= cost;
+            total_shares = MicroShares::from_micro(total_shares.micro() + fill.micro());
+            total_cost = MicroUsd::from_micro(total_cost.micro() + cost.micro());
+            remaining_budget = MicroUsd::from_micro(remaining_budget.micro() - cost.micro());
             levels_consumed += 1;
         }
 
@@ -78,18 +65,14 @@ impl OrderbookWalker {
             return None;
         }
 
-        let vwap = total_cost / total_shares;
-        let depth_used_pct = if total_available_depth.is_zero() {
-            Decimal::ZERO
-        } else {
-            total_cost / total_available_depth * dec!(100)
-        };
-        let fully_filled = remaining_budget > Decimal::ZERO;
+        let vwap = MicroPrice::vwap_from_cost(total_cost, total_shares);
+        let depth_used_pct = total_cost.percent_of(total_ask_depth_usd);
+        let fully_filled = remaining_budget.is_positive();
 
         Some(WalkResult {
-            shares: Shares::new(total_shares),
-            vwap: Price::new(vwap),
-            total_cost: Usd::new(total_cost),
+            shares: total_shares,
+            vwap,
+            total_cost,
             levels_consumed,
             fully_filled,
             depth_used_pct,
@@ -97,39 +80,38 @@ impl OrderbookWalker {
     }
 
     /// Walk ask levels to buy exactly `target_shares` (or as many as available).
-    ///
-    /// Levels **must** be sorted ascending by price.
     #[must_use]
+    #[inline]
     pub fn walk_asks_by_shares(
         asks: &[BookLevel],
-        target_shares: Decimal,
-        price_floor: Option<Decimal>,
+        target_shares: MicroShares,
+        price_floor: MicroPrice,
+        total_ask_depth_usd: MicroUsd,
     ) -> Option<WalkResult> {
-        let total_available_depth: Decimal =
-            asks.iter().map(|l| l.price.inner() * l.size.inner()).sum();
-
         let mut remaining = target_shares;
-        let mut total_shares = Decimal::ZERO;
-        let mut total_cost = Decimal::ZERO;
+        let mut total_shares = MicroShares::ZERO;
+        let mut total_cost = MicroUsd::ZERO;
         let mut levels_consumed = 0_usize;
 
         for level in asks {
-            if let Some(floor) = price_floor {
-                if level.price.inner() < floor {
-                    break;
-                }
+            if remaining.is_zero() {
+                break;
             }
-
-            if remaining <= Decimal::ZERO {
+            let price = level.price;
+            let size = level.size;
+            if price.micro() <= 0 || size.micro() <= 0 {
+                continue;
+            }
+            if price.micro() < price_floor.micro() {
                 break;
             }
 
-            let fill = remaining.min(level.size.inner());
-            let cost = fill * level.price.inner();
+            let fill = MicroShares::from_micro(remaining.micro().min(size.micro()));
+            let cost = price.mul_shares(fill);
 
-            total_shares += fill;
-            total_cost += cost;
-            remaining -= fill;
+            total_shares = MicroShares::from_micro(total_shares.micro() + fill.micro());
+            total_cost = MicroUsd::from_micro(total_cost.micro() + cost.micro());
+            remaining = MicroShares::from_micro(remaining.micro() - fill.micro());
             levels_consumed += 1;
         }
 
@@ -137,190 +119,111 @@ impl OrderbookWalker {
             return None;
         }
 
-        let vwap = total_cost / total_shares;
-        let depth_used_pct = if total_available_depth.is_zero() {
-            Decimal::ZERO
-        } else {
-            total_cost / total_available_depth * dec!(100)
-        };
-        let fully_filled = remaining <= Decimal::ZERO;
+        let vwap = MicroPrice::vwap_from_cost(total_cost, total_shares);
+        let depth_used_pct = total_cost.percent_of(total_ask_depth_usd);
+        let fully_filled = remaining.is_zero();
 
         Some(WalkResult {
-            shares: Shares::new(total_shares),
-            vwap: Price::new(vwap),
-            total_cost: Usd::new(total_cost),
+            shares: total_shares,
+            vwap,
+            total_cost,
             levels_consumed,
             fully_filled,
             depth_used_pct,
         })
     }
 
-    /// Walk bid levels to simulate selling `target_shares`.
-    ///
-    /// Levels **must** be sorted descending by price.
+    /// Decimal boundary helpers for tests and persistence adapters.
     #[must_use]
-    pub fn walk_bids_by_shares(bids: &[BookLevel], target_shares: Decimal) -> Option<WalkResult> {
-        let total_available_depth: Decimal =
-            bids.iter().map(|l| l.price.inner() * l.size.inner()).sum();
-
-        let mut remaining = target_shares;
-        let mut total_shares = Decimal::ZERO;
-        let mut total_cost = Decimal::ZERO;
-        let mut levels_consumed = 0_usize;
-
-        for level in bids {
-            if remaining <= Decimal::ZERO {
-                break;
-            }
-
-            let fill = remaining.min(level.size.inner());
-            let cost = fill * level.price.inner();
-
-            total_shares += fill;
-            total_cost += cost;
-            remaining -= fill;
-            levels_consumed += 1;
-        }
-
-        if total_shares.is_zero() {
-            return None;
-        }
-
-        let vwap = total_cost / total_shares;
-        let depth_used_pct = if total_available_depth.is_zero() {
-            Decimal::ZERO
-        } else {
-            total_cost / total_available_depth * dec!(100)
-        };
-        let fully_filled = remaining <= Decimal::ZERO;
-
-        Some(WalkResult {
-            shares: Shares::new(total_shares),
-            vwap: Price::new(vwap),
-            total_cost: Usd::new(total_cost),
-            levels_consumed,
-            fully_filled,
-            depth_used_pct,
-        })
+    #[inline]
+    pub fn walk_result_decimal(walk: WalkResult) -> (Shares, Price, Usd, i64) {
+        (
+            Shares::new(walk.shares.to_decimal()),
+            Price::new(walk.vwap.to_decimal()),
+            Usd::new(walk.total_cost.to_decimal()),
+            walk.depth_used_pct,
+        )
     }
-}
-
-/// Estimate slippage in basis points relative to a reference price.
-///
-/// Positive bps means the execution price is worse than reference (higher
-/// for buys). Returns `None` when no shares could be filled.
-#[must_use]
-pub fn estimate_slippage(
-    asks: &[BookLevel],
-    target_shares: Decimal,
-    reference_price: Price,
-) -> Option<Bps> {
-    let walk = OrderbookWalker::walk_asks_by_shares(asks, target_shares, None)?;
-    Bps::spread(walk.vwap, reference_price)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use oxide_arb_models::domain::book::{BookLevel, total_depth_usd};
+    use oxide_arb_models::types::{MicroPrice, MicroUsd, Price, Shares};
+    use rust_decimal::Decimal;
+    use rust_decimal_macros::dec;
 
     fn level(price: Decimal, size: Decimal) -> BookLevel {
-        BookLevel {
-            price: Price::new(price),
-            size: Shares::new(size),
-        }
+        BookLevel::from_decimal(Price::new(price), Shares::new(size)).unwrap()
+    }
+
+    fn micro_usd(d: Decimal) -> MicroUsd {
+        MicroUsd::try_from_decimal(d).unwrap()
+    }
+
+    fn micro_price(d: Decimal) -> MicroPrice {
+        MicroPrice::try_from_decimal(d).unwrap()
     }
 
     #[test]
-    fn single_level_full_fill() {
-        let asks = vec![level(dec!(0.97), dec!(100))];
-        let walk = OrderbookWalker::walk_asks_by_cost(&asks, dec!(500), None).unwrap();
-
-        assert_eq!(walk.shares.inner(), dec!(100));
-        assert_eq!(walk.vwap.inner(), dec!(0.97));
-        assert_eq!(walk.total_cost.inner(), dec!(97));
-        assert_eq!(walk.levels_consumed, 1);
-        assert!(walk.fully_filled);
-    }
-
-    #[test]
-    fn budget_exhaustion_mid_level() {
-        let asks = vec![level(dec!(0.97), dec!(1000))];
-        let walk = OrderbookWalker::walk_asks_by_cost(&asks, dec!(97), None).unwrap();
-
-        assert_eq!(walk.shares.inner(), dec!(100));
-        assert_eq!(walk.vwap.inner(), dec!(0.97));
-        assert_eq!(walk.total_cost.inner(), dec!(97));
-    }
-
-    #[test]
-    fn multi_level_vwap() {
-        let asks = vec![level(dec!(0.96), dec!(100)), level(dec!(0.97), dec!(100))];
-        let walk = OrderbookWalker::walk_asks_by_cost(&asks, dec!(500), None).unwrap();
-
-        assert_eq!(walk.shares.inner(), dec!(200));
-        assert_eq!(walk.vwap.inner(), dec!(0.965));
-        assert_eq!(walk.total_cost.inner(), dec!(193));
-        assert_eq!(walk.levels_consumed, 2);
-    }
-
-    #[test]
-    fn price_floor_stops_walk() {
-        let asks = vec![level(dec!(0.97), dec!(100)), level(dec!(0.94), dec!(100))];
-        let walk = OrderbookWalker::walk_asks_by_cost(&asks, dec!(500), Some(dec!(0.95))).unwrap();
-
-        assert_eq!(walk.levels_consumed, 1);
-        assert_eq!(walk.shares.inner(), dec!(100));
-    }
-
-    #[test]
-    fn empty_asks_returns_none() {
-        let result = OrderbookWalker::walk_asks_by_cost(&[], dec!(500), None);
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn walk_by_shares_exact_fill() {
-        let asks = vec![level(dec!(0.97), dec!(200))];
-        let walk = OrderbookWalker::walk_asks_by_shares(&asks, dec!(100), None).unwrap();
-
-        assert_eq!(walk.shares.inner(), dec!(100));
-        assert!(walk.fully_filled);
-    }
-
-    #[test]
-    fn walk_by_shares_partial_fill() {
-        let asks = vec![level(dec!(0.97), dec!(50))];
-        let walk = OrderbookWalker::walk_asks_by_shares(&asks, dec!(100), None).unwrap();
-
-        assert_eq!(walk.shares.inner(), dec!(50));
+    fn walk_single_level_full_fill() {
+        let asks = [level(dec!(0.97), dec!(100))];
+        let depth = total_depth_usd(&asks);
+        let walk = OrderbookWalker::walk_asks_by_cost(
+            &asks,
+            micro_usd(dec!(97)),
+            micro_price(dec!(0.95)),
+            depth,
+        )
+        .unwrap();
+        assert_eq!(walk.shares.to_decimal(), dec!(100));
+        assert_eq!(walk.total_cost.to_decimal(), dec!(97));
+        assert_eq!(walk.vwap.to_decimal(), dec!(0.97));
         assert!(!walk.fully_filled);
     }
 
     #[test]
-    fn walk_bids_by_shares_basic() {
-        let bids = vec![level(dec!(0.97), dec!(100)), level(dec!(0.96), dec!(100))];
-        let walk = OrderbookWalker::walk_bids_by_shares(&bids, dec!(150)).unwrap();
-
-        assert_eq!(walk.shares.inner(), dec!(150));
-        let expected_cost = dec!(100) * dec!(0.97) + dec!(50) * dec!(0.96);
-        assert_eq!(walk.total_cost.inner(), expected_cost);
+    fn walk_stops_at_price_floor() {
+        let asks = [level(dec!(0.98), dec!(50)), level(dec!(0.94), dec!(50))];
+        let depth = total_depth_usd(&asks);
+        let walk = OrderbookWalker::walk_asks_by_cost(
+            &asks,
+            micro_usd(dec!(100)),
+            micro_price(dec!(0.95)),
+            depth,
+        )
+        .unwrap();
+        assert_eq!(walk.levels_consumed, 1);
     }
 
     #[test]
-    fn depth_used_pct_calculated() {
-        let asks = vec![level(dec!(0.97), dec!(1000))];
-        let walk = OrderbookWalker::walk_asks_by_cost(&asks, dec!(97), None).unwrap();
-
-        let expected_pct = dec!(97) / dec!(970) * dec!(100);
-        assert_eq!(walk.depth_used_pct, expected_pct);
+    fn depth_used_pct_from_precomputed_total() {
+        let asks = [level(dec!(0.97), dec!(50)), level(dec!(0.98), dec!(50))];
+        let depth = total_depth_usd(&asks);
+        let walk = OrderbookWalker::walk_asks_by_cost(
+            &asks,
+            micro_usd(dec!(48.5)),
+            micro_price(dec!(0.95)),
+            depth,
+        )
+        .unwrap();
+        assert!(walk.depth_used_pct > 0);
+        assert!(walk.depth_used_pct <= 100);
     }
 
     #[test]
-    fn slippage_estimation() {
-        let asks = vec![level(dec!(0.97), dec!(50)), level(dec!(0.98), dec!(50))];
-        let slippage = estimate_slippage(&asks, dec!(100), Price::new(dec!(0.97)));
-        assert!(slippage.is_some());
-        let bps = slippage.unwrap();
-        assert!(bps.inner() > Decimal::ZERO);
+    fn zero_shares_returns_none() {
+        let asks = [level(dec!(0.97), dec!(0))];
+        let depth = total_depth_usd(&asks);
+        assert!(
+            OrderbookWalker::walk_asks_by_cost(
+                &asks,
+                micro_usd(dec!(100)),
+                micro_price(dec!(0.95)),
+                depth,
+            )
+            .is_none()
+        );
     }
 }

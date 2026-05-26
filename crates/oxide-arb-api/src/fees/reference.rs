@@ -1,7 +1,7 @@
 //! Reference fee implementation aligned with Polymarket SDK `utilities` tests.
 //!
 //! Used as the golden oracle in unit tests — not called on the hot path.
-//! Production uses [`super::formula::calculate_fee`] which must match this
+//! Golden tests assert [`super::formula::calculate_fee`] matches this oracle
 //! within 4-decimal-place rounding.
 
 use rust_decimal::Decimal;

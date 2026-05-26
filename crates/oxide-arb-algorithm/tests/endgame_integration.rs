@@ -13,7 +13,11 @@ use oxide_arb_algorithm::{
 };
 use oxide_arb_models::{
     config::{CalibrationConfig, EndgameDetectionConfig},
-    domain::{BookLevel, EndgameBookSnapshot, OrderbookSide, calibration::BucketKey},
+    domain::{
+        OrderbookSide,
+        book::{BookLevel, BookSnapshot, EndgameBookPair, EndgameBookSnapshot},
+        calibration::BucketKey,
+    },
     enums::calibration::{DurationBucket, PriceZone},
     enums::common::{MarketCategory, StalenessLevel},
     types::{EventId, MarketId, Price, Shares, TokenId, Usd},
@@ -36,10 +40,10 @@ impl FeeEstimator for ZeroFeeEstimator {
 
 fn side(price: Decimal, size: Decimal) -> OrderbookSide {
     OrderbookSide {
-        levels: vec![BookLevel {
-            price: Price::new(price),
-            size: Shares::new(size),
-        }],
+        levels: vec![BookLevel::from_decimal_unchecked(
+            Price::new(price),
+            Shares::new(size),
+        )],
         timestamp_ms: 0,
     }
 }
@@ -51,8 +55,19 @@ const fn empty_side() -> OrderbookSide {
     }
 }
 
-fn make_book(yes_ask_price: Decimal, yes_ask_size: Decimal) -> EndgameBookSnapshot {
-    EndgameBookSnapshot {
+fn token_snapshot(bids: &[BookLevel], asks: &[BookLevel]) -> Arc<BookSnapshot> {
+    Arc::new(BookSnapshot::new(Arc::from(bids), Arc::from(asks), 0))
+}
+
+fn pair_from_snapshot(snapshot: &EndgameBookSnapshot) -> EndgameBookPair {
+    EndgameBookPair {
+        yes: token_snapshot(&snapshot.yes_bids.levels, &snapshot.yes_asks.levels),
+        no: token_snapshot(&snapshot.no_bids.levels, &snapshot.no_asks.levels),
+    }
+}
+
+fn make_book(yes_ask_price: Decimal, yes_ask_size: Decimal) -> EndgameBookPair {
+    pair_from_snapshot(&EndgameBookSnapshot {
         yes_bids: OrderbookSide {
             levels: vec![],
             timestamp_ms: 0,
@@ -60,20 +75,51 @@ fn make_book(yes_ask_price: Decimal, yes_ask_size: Decimal) -> EndgameBookSnapsh
         yes_asks: side(yes_ask_price, yes_ask_size),
         no_bids: side(dec!(0.02), yes_ask_size),
         no_asks: side(dec!(0.03), yes_ask_size),
-    }
+    })
 }
 
-fn make_detector() -> EndgameDetector {
+fn make_detector() -> EndgameDetector<ZeroFeeEstimator> {
     let cal_config = CalibrationConfig::default();
     let calibrator = Arc::new(ResolutionCalibrator::empty(cal_config.clone()));
-    let fee_estimator: Arc<dyn FeeEstimator> = Arc::new(ZeroFeeEstimator);
+    let fee_estimator = ZeroFeeEstimator;
 
     let config = EndgameDetectionConfig {
         min_convergence_duration_secs: 0,
         ..Default::default()
     };
 
-    EndgameDetector::new(config, &cal_config, calibrator, fee_estimator)
+    EndgameDetector::new(&config, &cal_config, calibrator, fee_estimator)
+}
+
+struct DetectCase<'a> {
+    market_id: &'a MarketId,
+    event_id: &'a EventId,
+    token_yes: &'a TokenId,
+    token_no: &'a TokenId,
+    book: &'a EndgameBookPair,
+    category: MarketCategory,
+    staleness: StalenessLevel,
+    settlement_deadline: Option<chrono::DateTime<Utc>>,
+    now: chrono::DateTime<Utc>,
+}
+
+fn detect(
+    detector: &EndgameDetector<ZeroFeeEstimator>,
+    case: &DetectCase<'_>,
+) -> Option<oxide_arb_models::domain::Opportunity> {
+    let direction = detector.detect_direction(case.book.view())?;
+    detector.detect_with_direction(
+        case.market_id,
+        case.event_id,
+        case.token_yes,
+        case.token_no,
+        case.book,
+        direction,
+        case.category,
+        case.staleness,
+        case.settlement_deadline,
+        case.now,
+    )
 }
 
 // ── Happy Path ───────────────────────────────────────────────────────
@@ -85,16 +131,19 @@ fn happy_path_detects_yes_convergence() {
     let now = Utc::now();
     let deadline = now + Duration::hours(12);
 
-    let opp = detector.detect(
-        &MarketId::new("m1"),
-        &EventId::new("e1"),
-        &TokenId::new("yes-1"),
-        &TokenId::new("no-1"),
-        &book,
-        MarketCategory::Geopolitics,
-        StalenessLevel::Fresh,
-        Some(deadline),
-        now,
+    let opp = detect(
+        &detector,
+        &DetectCase {
+            market_id: &MarketId::new("m1"),
+            event_id: &EventId::new("e1"),
+            token_yes: &TokenId::new("yes-1"),
+            token_no: &TokenId::new("no-1"),
+            book: &book,
+            category: MarketCategory::Geopolitics,
+            staleness: StalenessLevel::Fresh,
+            settlement_deadline: Some(deadline),
+            now,
+        },
     );
 
     assert!(opp.is_some());
@@ -113,16 +162,19 @@ fn no_convergence_below_threshold() {
     let now = Utc::now();
     let deadline = now + Duration::hours(12);
 
-    let opp = detector.detect(
-        &MarketId::new("m1"),
-        &EventId::new("e1"),
-        &TokenId::new("yes-1"),
-        &TokenId::new("no-1"),
-        &book,
-        MarketCategory::Geopolitics,
-        StalenessLevel::Fresh,
-        Some(deadline),
-        now,
+    let opp = detect(
+        &detector,
+        &DetectCase {
+            market_id: &MarketId::new("m1"),
+            event_id: &EventId::new("e1"),
+            token_yes: &TokenId::new("yes-1"),
+            token_no: &TokenId::new("no-1"),
+            book: &book,
+            category: MarketCategory::Geopolitics,
+            staleness: StalenessLevel::Fresh,
+            settlement_deadline: Some(deadline),
+            now,
+        },
     );
 
     assert!(opp.is_none());
@@ -134,28 +186,31 @@ fn no_convergence_below_threshold() {
 fn short_convergence_rejected() {
     let cal_config = CalibrationConfig::default();
     let calibrator = Arc::new(ResolutionCalibrator::empty(cal_config.clone()));
-    let fee_estimator: Arc<dyn FeeEstimator> = Arc::new(ZeroFeeEstimator);
+    let fee_estimator = ZeroFeeEstimator;
 
     let config = EndgameDetectionConfig {
         min_convergence_duration_secs: 300,
         ..Default::default()
     };
 
-    let detector = EndgameDetector::new(config, &cal_config, calibrator, fee_estimator);
+    let detector = EndgameDetector::new(&config, &cal_config, calibrator, fee_estimator);
     let book = make_book(dec!(0.97), dec!(1000));
     let now = Utc::now();
     let deadline = now + Duration::hours(12);
 
-    let opp = detector.detect(
-        &MarketId::new("m2"),
-        &EventId::new("e2"),
-        &TokenId::new("yes-2"),
-        &TokenId::new("no-2"),
-        &book,
-        MarketCategory::Sports,
-        StalenessLevel::Fresh,
-        Some(deadline),
-        now,
+    let opp = detect(
+        &detector,
+        &DetectCase {
+            market_id: &MarketId::new("m2"),
+            event_id: &EventId::new("e2"),
+            token_yes: &TokenId::new("yes-2"),
+            token_no: &TokenId::new("no-2"),
+            book: &book,
+            category: MarketCategory::Sports,
+            staleness: StalenessLevel::Fresh,
+            settlement_deadline: Some(deadline),
+            now,
+        },
     );
 
     assert!(
@@ -169,25 +224,28 @@ fn short_convergence_rejected() {
 #[test]
 fn empty_book_returns_none() {
     let detector = make_detector();
-    let book = EndgameBookSnapshot {
+    let book = pair_from_snapshot(&EndgameBookSnapshot {
         yes_bids: empty_side(),
         yes_asks: empty_side(),
         no_bids: empty_side(),
         no_asks: empty_side(),
-    };
+    });
     let now = Utc::now();
     let deadline = now + Duration::hours(12);
 
-    let opp = detector.detect(
-        &MarketId::new("m3"),
-        &EventId::new("e3"),
-        &TokenId::new("yes-3"),
-        &TokenId::new("no-3"),
-        &book,
-        MarketCategory::Other,
-        StalenessLevel::Fresh,
-        Some(deadline),
-        now,
+    let opp = detect(
+        &detector,
+        &DetectCase {
+            market_id: &MarketId::new("m3"),
+            event_id: &EventId::new("e3"),
+            token_yes: &TokenId::new("yes-3"),
+            token_no: &TokenId::new("no-3"),
+            book: &book,
+            category: MarketCategory::Other,
+            staleness: StalenessLevel::Fresh,
+            settlement_deadline: Some(deadline),
+            now,
+        },
     );
 
     assert!(opp.is_none());
@@ -202,16 +260,19 @@ fn settlement_too_far_rejected() {
     let now = Utc::now();
     let deadline = now + Duration::hours(48);
 
-    let opp = detector.detect(
-        &MarketId::new("m4"),
-        &EventId::new("e4"),
-        &TokenId::new("yes-4"),
-        &TokenId::new("no-4"),
-        &book,
-        MarketCategory::Geopolitics,
-        StalenessLevel::Fresh,
-        Some(deadline),
-        now,
+    let opp = detect(
+        &detector,
+        &DetectCase {
+            market_id: &MarketId::new("m4"),
+            event_id: &EventId::new("e4"),
+            token_yes: &TokenId::new("yes-4"),
+            token_no: &TokenId::new("no-4"),
+            book: &book,
+            category: MarketCategory::Geopolitics,
+            staleness: StalenessLevel::Fresh,
+            settlement_deadline: Some(deadline),
+            now,
+        },
     );
 
     assert!(opp.is_none());
@@ -224,16 +285,19 @@ fn no_deadline_returns_none() {
     let detector = make_detector();
     let book = make_book(dec!(0.97), dec!(1000));
 
-    let opp = detector.detect(
-        &MarketId::new("m5"),
-        &EventId::new("e5"),
-        &TokenId::new("yes-5"),
-        &TokenId::new("no-5"),
-        &book,
-        MarketCategory::Geopolitics,
-        StalenessLevel::Fresh,
-        None,
-        Utc::now(),
+    let opp = detect(
+        &detector,
+        &DetectCase {
+            market_id: &MarketId::new("m5"),
+            event_id: &EventId::new("e5"),
+            token_yes: &TokenId::new("yes-5"),
+            token_no: &TokenId::new("no-5"),
+            book: &book,
+            category: MarketCategory::Geopolitics,
+            staleness: StalenessLevel::Fresh,
+            settlement_deadline: None,
+            now: Utc::now(),
+        },
     );
 
     assert!(opp.is_none());
@@ -248,16 +312,19 @@ fn calibration_fallback_produces_tier4_for_empty_calibrator() {
     let now = Utc::now();
     let deadline = now + Duration::hours(12);
 
-    let opp = detector.detect(
-        &MarketId::new("m6"),
-        &EventId::new("e6"),
-        &TokenId::new("yes-6"),
-        &TokenId::new("no-6"),
-        &book,
-        MarketCategory::Geopolitics,
-        StalenessLevel::Fresh,
-        Some(deadline),
-        now,
+    let opp = detect(
+        &detector,
+        &DetectCase {
+            market_id: &MarketId::new("m6"),
+            event_id: &EventId::new("e6"),
+            token_yes: &TokenId::new("yes-6"),
+            token_no: &TokenId::new("no-6"),
+            book: &book,
+            category: MarketCategory::Geopolitics,
+            staleness: StalenessLevel::Fresh,
+            settlement_deadline: Some(deadline),
+            now,
+        },
     );
 
     assert!(opp.is_some());
@@ -291,27 +358,30 @@ fn calibration_with_data_uses_tier1() {
         entries,
         cal_config.clone(),
     ));
-    let fee_estimator: Arc<dyn FeeEstimator> = Arc::new(ZeroFeeEstimator);
+    let fee_estimator = ZeroFeeEstimator;
     let config = EndgameDetectionConfig {
         min_convergence_duration_secs: 0,
         ..Default::default()
     };
 
-    let detector = EndgameDetector::new(config, &cal_config, calibrator, fee_estimator);
+    let detector = EndgameDetector::new(&config, &cal_config, calibrator, fee_estimator);
     let book = make_book(dec!(0.97), dec!(1000));
     let now = Utc::now();
     let deadline = now + Duration::hours(12);
 
-    let opp = detector.detect(
-        &MarketId::new("m7"),
-        &EventId::new("e7"),
-        &TokenId::new("yes-7"),
-        &TokenId::new("no-7"),
-        &book,
-        MarketCategory::Geopolitics,
-        StalenessLevel::Fresh,
-        Some(deadline),
-        now,
+    let opp = detect(
+        &detector,
+        &DetectCase {
+            market_id: &MarketId::new("m7"),
+            event_id: &EventId::new("e7"),
+            token_yes: &TokenId::new("yes-7"),
+            token_no: &TokenId::new("no-7"),
+            book: &book,
+            category: MarketCategory::Geopolitics,
+            staleness: StalenessLevel::Fresh,
+            settlement_deadline: Some(deadline),
+            now,
+        },
     );
 
     assert!(opp.is_some());

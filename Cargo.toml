@@ -10,6 +10,7 @@ members = [
   "crates/oxide-arb-algorithm",
   "crates/oxide-arb-risk",
   "crates/oxide-arb-core",
+  "crates/oxide-arb-bench",
   "crates/oxide-arb-bin",
 ]
 
@@ -44,6 +45,8 @@ serde_json = "1"
 
 # Numeric trait conversions (ToPrimitive, FromPrimitive)
 num-traits = "0.2"
+ahash = "0.8"
+criterion = { version = "0.5", features = ["html_reports"] }
 
 # Decimal arithmetic — never use f64 for money
 rust_decimal = { version = "1", features = ["serde-with-str", "maths"] }
@@ -100,12 +103,20 @@ darling = "0.23"
 
 # Polymarket SDK (official v2 — CLOB, WS, Gamma, CTF, signing)
 polymarket_client_sdk_v2 = { version = "0.5", features = [
-  "clob", "ws", "gamma", "ctf", "tracing", "heartbeats",
+  "clob",
+  "ws",
+  "gamma",
+  "ctf",
+  "tracing",
+  "heartbeats",
 ] }
 
 # Ethereum / Polygon (aligned with SDK's alloy ^1.6)
 alloy = { version = "1.6", features = [
-  "provider-http", "signer-local", "sol-types", "contract",
+  "provider-http",
+  "signer-local",
+  "sol-types",
+  "contract",
 ] }
 
 # HTTP client (aligned with SDK's reqwest ^0.13)
@@ -182,8 +193,17 @@ opt-level = 2
 debug = false
 
 [profile.release]
-opt-level = "s"
+opt-level = 3
 codegen-units = 1
-lto = true
+lto = "fat"
 panic = "abort"
 strip = "symbols"
+
+[profile.bench]
+inherits = "release"
+debug = 1
+
+[profile.release-with-debug]
+inherits = "release"
+debug = "limited"
+strip = "none"
