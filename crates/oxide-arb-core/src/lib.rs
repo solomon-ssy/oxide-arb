@@ -16,4 +16,3 @@ pub mod observability;
 pub mod outbox;
 pub mod pipeline;
 pub mod service;
-pub mod task_registry;
