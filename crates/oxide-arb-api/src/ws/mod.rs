@@ -10,9 +10,11 @@ mod normalize;
 mod reconnect;
 mod router;
 mod shard;
+mod token_intern;
 
 pub use event::{PriceLevel, PriceLevelDelta, ShardConnectionStatus, WsEvent};
 pub use reconnect::ReconnectPolicy;
+pub use token_intern::{TokenInternPool, intern_str, intern_u256};
 
 use flume::Receiver;
 use num_traits::ToPrimitive;

@@ -11,8 +11,7 @@ pub struct ClickHousePool {
 }
 
 impl ClickHousePool {
-    #[allow(clippy::unused_async)]
-    pub async fn connect(config: &AnalyticsConfig) -> Result<Self, StorageError> {
+    pub fn connect(config: &AnalyticsConfig) -> Result<Self, StorageError> {
         let client = clickhouse::Client::default()
             .with_url(&config.clickhouse_url)
             .with_database(&config.clickhouse_database)

@@ -145,7 +145,7 @@ fn test_trade(outcome: TradeOutcome, profit: Decimal) -> PostTradeInput {
     }
 }
 
-async fn build_engine_with_persistence(
+fn build_engine_with_persistence(
     persistence: Arc<CapturingPersistence>,
 ) -> (RiskEngine, MockMetrics) {
     let metrics = MockMetrics::healthy();
@@ -155,7 +155,6 @@ async fn build_engine_with_persistence(
         .persistence(persistence)
         .initial_equity(Usd::new(dec!(5000)))
         .build(&metrics)
-        .await
         .expect("engine should build");
     (engine, metrics)
 }
@@ -165,7 +164,7 @@ async fn build_engine_with_persistence(
 #[tokio::test]
 async fn on_trade_result_emits_post_trade_update() {
     let persistence = Arc::new(CapturingPersistence::new());
-    let (engine, metrics) = build_engine_with_persistence(Arc::clone(&persistence)).await;
+    let (engine, metrics) = build_engine_with_persistence(Arc::clone(&persistence));
 
     let trade = test_trade(TradeOutcome::Success, dec!(5));
     engine
@@ -180,7 +179,7 @@ async fn on_trade_result_emits_post_trade_update() {
 #[tokio::test]
 async fn add_blacklist_emits_blacklist_added() {
     let persistence = Arc::new(CapturingPersistence::new());
-    let (engine, metrics) = build_engine_with_persistence(Arc::clone(&persistence)).await;
+    let (engine, metrics) = build_engine_with_persistence(Arc::clone(&persistence));
 
     engine
         .add_blacklist(
@@ -198,7 +197,7 @@ async fn add_blacklist_emits_blacklist_added() {
 #[tokio::test]
 async fn remove_blacklist_emits_blacklist_removed() {
     let persistence = Arc::new(CapturingPersistence::new());
-    let (engine, metrics) = build_engine_with_persistence(Arc::clone(&persistence)).await;
+    let (engine, metrics) = build_engine_with_persistence(Arc::clone(&persistence));
 
     let market_id = MarketId::new("0xremove_test");
     engine
@@ -220,7 +219,7 @@ async fn remove_blacklist_emits_blacklist_removed() {
 #[tokio::test]
 async fn reset_circuit_breaker_emits_breaker_reset() {
     let persistence = Arc::new(CapturingPersistence::new());
-    let (engine, metrics) = build_engine_with_persistence(Arc::clone(&persistence)).await;
+    let (engine, metrics) = build_engine_with_persistence(Arc::clone(&persistence));
 
     engine
         .reset_circuit_breaker("operator test reset", &metrics)
@@ -234,7 +233,7 @@ async fn reset_circuit_breaker_emits_breaker_reset() {
 #[tokio::test]
 async fn halt_emits_engine_halted() {
     let persistence = Arc::new(CapturingPersistence::new());
-    let (engine, _metrics) = build_engine_with_persistence(Arc::clone(&persistence)).await;
+    let (engine, _metrics) = build_engine_with_persistence(Arc::clone(&persistence));
 
     engine.halt("test halt reason".into()).await;
 
@@ -245,7 +244,7 @@ async fn halt_emits_engine_halted() {
 #[tokio::test]
 async fn resume_emits_engine_resumed() {
     let persistence = Arc::new(CapturingPersistence::new());
-    let (engine, _metrics) = build_engine_with_persistence(Arc::clone(&persistence)).await;
+    let (engine, _metrics) = build_engine_with_persistence(Arc::clone(&persistence));
 
     engine.halt("halt for resume test".into()).await;
     persistence.take_audits(); // clear halt events

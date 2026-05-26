@@ -1,3 +1,7 @@
+use super::orm::{
+    ColumnTrait, ConnectionTrait, DatabaseConnection, DatabaseTransaction, EntityTrait,
+    IntoActiveModel, QueryFilter, QuerySelect,
+};
 use crate::traits::MarketRepository;
 use chrono::{DateTime, Utc};
 use num_traits::ToPrimitive;
@@ -8,8 +12,6 @@ use oxide_arb_models::enums::market::MarketStatus;
 use oxide_arb_models::types::MarketId;
 use sea_orm::sea_query::Expr;
 use sea_orm::sea_query::OnConflict;
-#[allow(clippy::wildcard_imports)]
-use sea_orm::*;
 use std::collections::HashSet;
 
 pub struct PgMarketRepository {

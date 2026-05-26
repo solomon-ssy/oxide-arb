@@ -176,7 +176,6 @@ async fn pipeline_check_order_golden_test() {
         .clock(utc_clock())
         .initial_equity(Usd::new(dec!(5000)))
         .build(&metrics)
-        .await
         .expect("engine build");
 
     let ctx = default_context();

@@ -56,15 +56,12 @@ impl MarketCache {
             let Some(market) = self.registry.get_market(market_id) else {
                 continue;
             };
-            let Some((token_yes, token_no)) = self.registry.token_pair(market_id) else {
-                continue;
-            };
 
             let entry = Arc::new(CachedMarketScanEntry {
                 market_id: market.market_id,
                 event_id: market.event_id,
-                token_yes,
-                token_no,
+                token_yes: market.token_yes.clone(),
+                token_no: market.token_no.clone(),
                 category: market.category,
                 tick_size: market.tick_size,
                 neg_risk: market.neg_risk,
@@ -102,6 +99,8 @@ mod tests {
         MarketRegistryInfo {
             market_id: MarketId::new(id),
             event_id: EventId::new("evt-1"),
+            token_yes: TokenId::new(format!("{id}-yes")),
+            token_no: TokenId::new(format!("{id}-no")),
             question: "Q?".into(),
             slug: "q".into(),
             category: MarketCategory::Other,

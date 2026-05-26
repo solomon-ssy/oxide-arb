@@ -1,6 +1,7 @@
 //! Execution pipeline orchestration — validate → risk → size → reserve → dispatch → audit.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use chrono::Utc;
 use oxide_arb_algorithm::scorer::ScoredOpportunity;
@@ -24,6 +25,7 @@ use crate::execution::plan_builder::PlanBuilder;
 use crate::execution::probability_input::build_probability_input;
 use crate::execution::tiered_strategy::OrderStrategy;
 use crate::execution::validator::Validator;
+use crate::observability::drop_halt::DropHaltGuard;
 use crate::observability::metrics_hub::MetricsHub;
 
 /// Slim async post-trade work item — ids and outcome only, no full opportunity clone.
@@ -51,6 +53,7 @@ pub struct ExecutionPipelineDeps {
     pub metrics: Arc<MetricsHub>,
     pub execution_mode: ExecutionMode,
     pub outcome_tx: flume::Sender<PostTradeJob>,
+    pub drop_halt: Option<DropHaltGuard>,
 }
 
 pub struct ExecutionPipeline {
@@ -66,6 +69,7 @@ pub struct ExecutionPipeline {
     metrics: Arc<MetricsHub>,
     execution_mode: ExecutionMode,
     outcome_tx: flume::Sender<PostTradeJob>,
+    drop_halt: Option<DropHaltGuard>,
 }
 
 impl ExecutionPipeline {
@@ -83,6 +87,7 @@ impl ExecutionPipeline {
             metrics: deps.metrics,
             execution_mode: deps.execution_mode,
             outcome_tx: deps.outcome_tx,
+            drop_halt: deps.drop_halt,
         }
     }
 
@@ -118,6 +123,7 @@ impl ExecutionPipeline {
     /// Process a single scored opportunity through the full pipeline.
     pub async fn execute(&self, scored: ScoredOpportunity) -> ExecutionResult {
         let started_at = Utc::now();
+        let intent_started = Instant::now();
         let timer = self.metrics.execution_latency.start_timer();
         let opp = &scored.opportunity;
 
@@ -130,8 +136,14 @@ impl ExecutionPipeline {
             return ExecutionResult::rejected("inflight", "market already executing");
         };
 
-        // 1. Validate fresh book + slippage
-        if let Err(e) = self.validator.validate(opp) {
+        // 1. Validate fresh book + slippage (SLO-2)
+        if let Err(e) = self.validator.validate(
+            opp,
+            &scored.token_yes,
+            &scored.token_no,
+            scored.book_yes_version,
+            scored.book_no_version,
+        ) {
             return ExecutionResult::rejected("validation", e);
         }
 
@@ -180,6 +192,9 @@ impl ExecutionPipeline {
 
         // 6. Dispatch (mode-aware via order strategy + dispatcher)
         let outcome = self.order_strategy.execute(&self.dispatcher, &plan).await;
+        self.metrics
+            .execute_intent_to_http_us
+            .observe(intent_started.elapsed().as_secs_f64() * 1_000_000.0);
 
         // 7. Confirm or release reservation synchronously
         match &outcome {
@@ -191,12 +206,13 @@ impl ExecutionPipeline {
             }
         }
 
+        let completed_at = Utc::now();
         let result = ExecutionResult {
             outcome: Some(outcome.clone()),
             rejection_reason: None,
             rejection_stage: None,
             started_at,
-            completed_at: Utc::now(),
+            completed_at,
         };
 
         // 8. Enqueue async post-trade processing (non-blocking)
@@ -209,7 +225,11 @@ impl ExecutionPipeline {
             outcome,
         };
         if self.outcome_tx.try_send(job).is_err() {
-            self.metrics.post_trade_dropped.inc();
+            if let Some(ref guard) = self.drop_halt {
+                guard.on_post_trade_drop();
+            } else {
+                self.metrics.post_trade_dropped.inc();
+            }
             tracing::error!("post-trade queue full — job dropped");
         }
 

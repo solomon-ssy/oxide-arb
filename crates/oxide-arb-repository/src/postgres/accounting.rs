@@ -1,3 +1,7 @@
+use super::orm::{
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, DatabaseTransaction,
+    EntityTrait, IntoActiveModel, QueryFilter, QueryOrder, QuerySelect, Set,
+};
 use crate::traits::AccountingRepository;
 use chrono::Utc;
 use oxide_arb_error::storage::StorageError;
@@ -6,8 +10,6 @@ use oxide_arb_models::entities::accounting_period::{ActiveModel, Column, Entity}
 use oxide_arb_models::enums::common::ReportType;
 use oxide_arb_models::types::PeriodId;
 use sea_orm::sea_query::Expr;
-#[allow(clippy::wildcard_imports)]
-use sea_orm::*;
 
 // ── helpers ──────────────────────────────────────────────────────────
 

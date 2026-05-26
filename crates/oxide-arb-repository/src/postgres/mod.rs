@@ -1,5 +1,7 @@
 //! `PostgreSQL` repository implementations.
 
+mod orm;
+
 pub mod accounting;
 pub mod blacklist_persistence;
 pub mod calibration;

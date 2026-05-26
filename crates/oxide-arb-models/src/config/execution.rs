@@ -21,6 +21,69 @@ pub struct ExecutionConfig {
     pub funnel: FunnelConfig,
     #[serde(default)]
     pub coalescer: CoalescerConfig,
+    #[serde(default)]
+    pub endgame_latency: EndgameLatencyConfig,
+    #[serde(default)]
+    pub book_apply: BookApplyConfig,
+}
+
+/// Endgame-specific latency tuning (SLO-1 fast lane + SLO-3 coalesce).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EndgameLatencyConfig {
+    /// Scores at or above this bypass funnel sweep delay (immediate shard dispatch).
+    #[serde(default = "default_dispatch_immediate_threshold")]
+    pub dispatch_immediate_threshold: Decimal,
+    /// Funnel tick interval for low-score sweep only (ms).
+    #[serde(default = "default_funnel_sweep_interval_ms")]
+    pub funnel_sweep_interval_ms: u64,
+    /// Max ms from last book apply to order emit (SLO-2).
+    #[serde(default = "default_max_book_to_order_ms")]
+    pub max_book_to_order_ms: u64,
+}
+
+impl Default for EndgameLatencyConfig {
+    fn default() -> Self {
+        Self {
+            dispatch_immediate_threshold: default_dispatch_immediate_threshold(),
+            funnel_sweep_interval_ms: default_funnel_sweep_interval_ms(),
+            max_book_to_order_ms: default_max_book_to_order_ms(),
+        }
+    }
+}
+
+const fn default_dispatch_immediate_threshold() -> Decimal {
+    dec!(0.5)
+}
+const fn default_funnel_sweep_interval_ms() -> u64 {
+    75
+}
+const fn default_max_book_to_order_ms() -> u64 {
+    5
+}
+
+/// Sharded book-apply workers (500-market single host).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BookApplyConfig {
+    #[serde(default = "default_book_shard_count")]
+    pub shard_count: usize,
+    #[serde(default = "default_book_channel_capacity")]
+    pub channel_capacity: usize,
+}
+
+impl Default for BookApplyConfig {
+    fn default() -> Self {
+        Self {
+            shard_count: default_book_shard_count(),
+            channel_capacity: default_book_channel_capacity(),
+        }
+    }
+}
+
+const fn default_book_shard_count() -> usize {
+    4
+}
+const fn default_book_channel_capacity() -> usize {
+    2048
 }
 
 /// FOK + GTD tiered execution strategy configuration.
@@ -143,7 +206,7 @@ const fn default_max_queue_size() -> usize {
     50
 }
 const fn default_min_dispatch_interval_ms() -> u64 {
-    200
+    75
 }
 
 /// Coalescer (multi-token → single-market scan dedup) configuration.
@@ -162,5 +225,5 @@ impl Default for CoalescerConfig {
 }
 
 const fn default_coalesce_window_ms() -> u64 {
-    300
+    60
 }

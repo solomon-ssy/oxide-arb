@@ -52,7 +52,7 @@ impl Coalescer {
 
     /// Main loop: periodically flush markets whose coalesce window has elapsed.
     pub async fn run(&self) -> Result<(), OxideError> {
-        let mut interval = tokio::time::interval(Duration::from_millis(50));
+        let mut interval = tokio::time::interval(Duration::from_millis(25));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {

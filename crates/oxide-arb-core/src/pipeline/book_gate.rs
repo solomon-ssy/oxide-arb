@@ -112,15 +112,15 @@ mod tests {
     use std::sync::Arc;
 
     fn snap(price: rust_decimal::Decimal, ts: u64) -> Arc<BookSnapshot> {
-        let bids = Arc::from([BookLevel::from_decimal_unchecked(
+        let bids = Arc::new(vec![BookLevel::from_decimal_unchecked(
             Price::new(price),
             Shares::new(dec!(10)),
         )]);
-        let asks = Arc::from([BookLevel::from_decimal_unchecked(
+        let asks = Arc::new(vec![BookLevel::from_decimal_unchecked(
             Price::new(price + dec!(0.01)),
             Shares::new(dec!(10)),
         )]);
-        Arc::new(BookSnapshot::new(bids, asks, ts))
+        Arc::new(BookSnapshot::new(bids, asks, ts, 0))
     }
 
     #[test]

@@ -1,3 +1,6 @@
+use super::orm::{
+    ConnectionTrait, DatabaseConnection, DatabaseTransaction, EntityTrait, NotSet, QueryOrder, Set,
+};
 use crate::traits::RuntimeConfigRepository;
 use chrono::Utc;
 use oxide_arb_error::storage::StorageError;
@@ -5,8 +8,6 @@ use oxide_arb_models::domain::{RuntimeConfigInfo, UpsertRuntimeConfig};
 use oxide_arb_models::entities::runtime_config::{ActiveModel, Column, Entity};
 use oxide_arb_models::enums::runtime_config::RuntimeConfigKey;
 use sea_orm::sea_query::OnConflict;
-#[allow(clippy::wildcard_imports)]
-use sea_orm::*;
 
 pub struct PgRuntimeConfigRepository {
     db: DatabaseConnection,

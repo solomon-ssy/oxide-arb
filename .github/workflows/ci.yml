@@ -50,11 +50,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Compile benchmarks
-        run: cargo bench --workspace --no-run
+        run: cargo bench -p oxide-arb-bench --no-run
+
+      - name: Run hot_paths benchmarks (PR regression gate)
+        if: github.event_name == 'pull_request'
+        run: bash scripts/check-bench-regression.sh
 
       - name: Run benchmarks
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        run: cargo bench --workspace -- --output-format bencher | tee bench_results.txt
+        run: bash scripts/check-bench-regression.sh
 
       - name: Archive benchmark results
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'

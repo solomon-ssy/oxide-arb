@@ -1,3 +1,7 @@
+use super::orm::{
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, DatabaseTransaction,
+    EntityTrait, FromQueryResult, IntoActiveModel, QueryFilter, QueryOrder, QuerySelect, Set,
+};
 use crate::batch;
 use crate::traits::TradeRepository;
 use chrono::{DateTime, Utc};
@@ -6,8 +10,6 @@ use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::domain::{NewTrade, TradeInfo, UpdateTradeOutcome};
 use oxide_arb_models::entities::trade::{ActiveModel, Column, Entity};
 use oxide_arb_models::types::{MarketId, TradeId};
-#[allow(clippy::wildcard_imports)]
-use sea_orm::*;
 use std::collections::HashMap;
 
 /// Number of columns in the `trade` table used for bind-variable calculations.

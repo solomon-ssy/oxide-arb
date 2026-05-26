@@ -6,7 +6,6 @@ use crate::observability::metrics_hub::MetricsHub;
 use num_traits::ToPrimitive;
 use oxide_arb_algorithm::scorer::ScoredOpportunity;
 use oxide_arb_error::OxideError;
-use oxide_arb_models::types::MarketId;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use tokio_util::sync::CancellationToken;
@@ -118,8 +117,8 @@ impl ExecutionRunnerPool {
 }
 
 #[inline]
-pub fn shard_index(market_id: &MarketId, shard_count: usize) -> usize {
+pub fn shard_index(id: &str, shard_count: usize) -> usize {
     let mut hasher = DefaultHasher::new();
-    market_id.hash(&mut hasher);
+    id.hash(&mut hasher);
     ToPrimitive::to_usize(&hasher.finish()).unwrap_or(0) % shard_count.max(1)
 }

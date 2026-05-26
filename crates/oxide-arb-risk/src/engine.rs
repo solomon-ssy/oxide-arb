@@ -147,13 +147,12 @@ impl RiskEngine {
                 ))
             };
 
-            let breakdown = size_result.breakdown.clone();
-            (
-                allowed,
-                denial_reason,
-                if allowed { Some(size_result) } else { None },
-                Some(breakdown),
-            )
+            if allowed {
+                (true, denial_reason, Some(size_result), None)
+            } else {
+                let breakdown = size_result.breakdown;
+                (false, denial_reason, None, Some(breakdown))
+            }
         };
 
         let check_results = gate_report.results;
@@ -178,17 +177,6 @@ impl RiskEngine {
 
         self.enqueue_pre_trade_audit(allowed, &decision.trace, opp.opportunity_id.clone());
         decision
-    }
-
-    /// Async wrapper for callers outside the sync hot path (tests, services).
-    pub fn pre_trade_check<M: RiskMetrics>(
-        &self,
-        opp: &Opportunity,
-        probability: &ProbabilityInput,
-        metrics: &M,
-        mode: ReportMode,
-    ) -> RiskDecision {
-        self.pre_trade_check_core(&Arc::new(opp.clone()), probability, metrics, mode)
     }
 
     // ── Post-trade (async mutation path) ────────────────────────────────

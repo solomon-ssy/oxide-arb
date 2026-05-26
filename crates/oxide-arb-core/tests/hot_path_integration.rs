@@ -1,0 +1,104 @@
+//! Deterministic integration tests for book/coalescer/execution hot paths.
+
+use std::sync::Arc;
+
+use chrono::Utc;
+use oxide_arb_core::detection::coalescer::Coalescer;
+use oxide_arb_core::execution::fsm::ExecutionFSM;
+use oxide_arb_core::observability::metrics_hub::MetricsHub;
+use oxide_arb_core::pipeline::book_store::BookStore;
+use oxide_arb_core::pipeline::market_registry::MarketRegistry;
+use oxide_arb_models::domain::book::BookLevel;
+use oxide_arb_models::domain::market::{MarketRegistryInfo, TokenInfo};
+use oxide_arb_models::enums::market::MarketStatus;
+use oxide_arb_models::types::{MarketId, Price, Shares, TokenId};
+use rust_decimal_macros::dec;
+use tokio_util::sync::CancellationToken;
+
+fn level(p: rust_decimal::Decimal, s: rust_decimal::Decimal) -> BookLevel {
+    BookLevel::from_decimal_unchecked(Price::new(p), Shares::new(s))
+}
+
+fn sample_market(id: &str) -> MarketRegistryInfo {
+    MarketRegistryInfo {
+        market_id: MarketId::new(id),
+        event_id: oxide_arb_models::types::EventId::new("evt"),
+        token_yes: TokenId::new(format!("{id}-yes")),
+        token_no: TokenId::new(format!("{id}-no")),
+        question: "Q".into(),
+        slug: "q".into(),
+        category: oxide_arb_models::enums::common::MarketCategory::Other,
+        status: MarketStatus::Active,
+        neg_risk: false,
+        tick_size: oxide_arb_models::enums::common::TickSize::Hundredth,
+        tokens: vec![
+            TokenInfo {
+                token_id: TokenId::new(format!("{id}-yes")),
+                outcome: "Yes".into(),
+                neg_risk: false,
+            },
+            TokenInfo {
+                token_id: TokenId::new(format!("{id}-no")),
+                outcome: "No".into(),
+                neg_risk: false,
+            },
+        ],
+        best_bid: None,
+        best_ask: None,
+        depth_usd: None,
+        min_order_size: dec!(1),
+        volume_24h: oxide_arb_models::types::Usd::ZERO,
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    }
+}
+
+#[test]
+fn book_store_publish_increments_version() {
+    let metrics = Arc::new(MetricsHub::new());
+    let store = BookStore::new(metrics);
+    let tid = TokenId::new("tok");
+    store.apply_snapshot(&tid, vec![level(dec!(0.5), dec!(1))], vec![], 100);
+    let v1 = store.book_version(&tid);
+    store.apply_delta(&tid, [(Price::new(dec!(0.55)), Shares::new(dec!(2)))], 200);
+    let v2 = store.book_version(&tid);
+    assert_eq!(v1, 1);
+    assert_eq!(v2, 2);
+}
+
+#[tokio::test]
+async fn coalescer_flushes_after_window() {
+    let metrics = Arc::new(MetricsHub::new());
+    let registry = Arc::new(MarketRegistry::new());
+    registry.register_market(sample_market("m1"));
+
+    let (tx, rx) = flume::bounded(16);
+    let shutdown = CancellationToken::new();
+    let coalescer = Coalescer::new(
+        registry,
+        std::time::Duration::from_millis(30),
+        tx,
+        Arc::clone(&metrics),
+        shutdown.clone(),
+    );
+
+    let yes = TokenId::new("m1-yes");
+    coalescer.notify_token_update(&yes);
+
+    let handle = tokio::spawn(async move { coalescer.run().await });
+    tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+    shutdown.cancel();
+    let _ = handle.await;
+
+    let market = rx.try_recv().expect("market should flush");
+    assert_eq!(market.as_str(), "m1");
+}
+
+#[test]
+fn fsm_drop_halt_engages_once() {
+    let metrics = Arc::new(MetricsHub::new());
+    let fsm = Arc::new(ExecutionFSM::new(Arc::clone(&metrics)));
+    assert!(!fsm.is_emergency());
+    oxide_arb_core::observability::drop_halt::on_book_apply_drop(&metrics, &fsm);
+    assert!(fsm.is_emergency());
+}

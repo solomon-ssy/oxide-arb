@@ -26,7 +26,30 @@ use crate::calibration::ResolutionCalibrator;
 use crate::endgame::confidence::{ConfidenceFusion, compute_realtime_confidence};
 use crate::endgame::convergence::{ConvergenceDirection, InMemoryConvergenceTracker};
 use crate::fee::FeeEstimator;
-use crate::walker::OrderbookWalker;
+use crate::walker::{OrderbookWalker, WalkResult};
+
+struct OpportunityBuildCtx<'a> {
+    input: &'a EndgameDetectInput<'a>,
+    walk: WalkResult,
+    target_token: &'a TokenId,
+    entry_price: Price,
+    convergence_secs: u64,
+    deadline: DateTime<Utc>,
+    now: DateTime<Utc>,
+}
+
+/// Inputs for a single directional endgame detection pass.
+pub struct EndgameDetectInput<'a> {
+    pub market_id: &'a MarketId,
+    pub event_id: &'a EventId,
+    pub token_yes: &'a TokenId,
+    pub token_no: &'a TokenId,
+    pub book: &'a EndgameBookPair,
+    pub direction: ConvergenceDirection,
+    pub category: MarketCategory,
+    pub staleness: StalenessLevel,
+    pub settlement_deadline: Option<DateTime<Utc>>,
+}
 
 pub struct EndgameDetector<F: FeeEstimator> {
     enabled: bool,
@@ -100,42 +123,35 @@ impl<F: FeeEstimator> EndgameDetector<F> {
         direction.is_none()
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn detect_with_direction(
         &self,
-        market_id: &MarketId,
-        event_id: &EventId,
-        token_yes: &TokenId,
-        token_no: &TokenId,
-        book: &EndgameBookPair,
-        direction: ConvergenceDirection,
-        category: MarketCategory,
-        staleness: StalenessLevel,
-        settlement_deadline: Option<DateTime<Utc>>,
+        input: &EndgameDetectInput<'_>,
         now: DateTime<Utc>,
     ) -> Option<Opportunity> {
         if !self.enabled {
             return None;
         }
-        let deadline = settlement_deadline?;
+        let deadline = input.settlement_deadline?;
         let hours_remaining = (deadline - now).num_hours();
         if hours_remaining < 0
             || hours_remaining
                 > ToPrimitive::to_i64(&self.settlement_window_hours).unwrap_or(i64::MAX)
         {
-            self.convergence.remove(market_id);
+            self.convergence.remove(input.market_id);
             return None;
         }
 
-        let view = book.view();
-        let convergence_secs = self.convergence.update_and_get(market_id, direction, now);
+        let view = input.book.view();
+        let convergence_secs =
+            self.convergence
+                .update_and_get(input.market_id, input.direction, now);
         if convergence_secs < self.min_convergence_duration_secs {
             return None;
         }
 
-        let (target_asks, target_token) = match direction {
-            ConvergenceDirection::YesLikely => (view.yes_asks, token_yes),
-            ConvergenceDirection::NoLikely => (view.no_asks, token_no),
+        let (target_asks, target_token) = match input.direction {
+            ConvergenceDirection::YesLikely => (view.yes_asks, input.token_yes),
+            ConvergenceDirection::NoLikely => (view.no_asks, input.token_no),
         };
 
         let walk = OrderbookWalker::walk_asks_by_cost(
@@ -146,16 +162,35 @@ impl<F: FeeEstimator> EndgameDetector<F> {
         )?;
 
         let entry_price = Price::new(walk.vwap.to_decimal());
-        let shares = Shares::new(walk.shares.to_decimal());
-        let total_cost = Usd::new(walk.total_cost.to_decimal());
-
-        let raw_profit_per_share = Decimal::ONE - entry_price.inner();
-        if raw_profit_per_share < self.min_profit_per_share {
+        if Decimal::ONE - entry_price.inner() < self.min_profit_per_share {
             return None;
         }
 
+        let ctx = OpportunityBuildCtx {
+            input,
+            walk,
+            target_token,
+            entry_price,
+            convergence_secs,
+            deadline,
+            now,
+        };
+        Some(self.build_opportunity(&ctx))
+    }
+
+    fn build_opportunity(&self, ctx: &OpportunityBuildCtx<'_>) -> Opportunity {
+        let input = ctx.input;
+        let walk = ctx.walk;
+        let target_token = ctx.target_token;
+        let entry_price = ctx.entry_price;
+        let convergence_secs = ctx.convergence_secs;
+        let deadline = ctx.deadline;
+        let now = ctx.now;
+        let shares = Shares::new(walk.shares.to_decimal());
+        let total_cost = Usd::new(walk.total_cost.to_decimal());
+
         let bucket_key = BucketKey {
-            category,
+            category: input.category,
             price_zone: PriceZone::from_price(entry_price),
             duration_bucket: DurationBucket::from_secs(convergence_secs),
         };
@@ -172,9 +207,9 @@ impl<F: FeeEstimator> EndgameDetector<F> {
             cal_entry.sample_count(),
         );
 
-        let fees = self
-            .fee_estimator
-            .estimate_fee(shares, entry_price, category, target_token);
+        let fees =
+            self.fee_estimator
+                .estimate_fee(shares, entry_price, input.category, target_token);
 
         let shares_usd = Usd::new(shares.inner());
         let net_profit = shares_usd - total_cost - fees;
@@ -188,13 +223,12 @@ impl<F: FeeEstimator> EndgameDetector<F> {
             Bps::new((expected_net_profit.inner() / cost_plus_fees.inner() * dec!(10000)).round())
         };
 
-        let predicted_yes = matches!(direction, ConvergenceDirection::YesLikely);
-        let depth_used_pct = Decimal::from(walk.depth_used_pct);
+        let predicted_yes = matches!(input.direction, ConvergenceDirection::YesLikely);
 
-        Some(Opportunity {
+        Opportunity {
             opportunity_id: OpportunityId::pending(),
-            market_id: market_id.clone(),
-            event_id: event_id.clone(),
+            market_id: input.market_id.clone(),
+            event_id: input.event_id.clone(),
             token_id: target_token.clone(),
             side: Side::Buy,
             payout_model: PayoutModel::DirectionalSettlement {
@@ -210,9 +244,9 @@ impl<F: FeeEstimator> EndgameDetector<F> {
             expected_net_profit,
             edge_bps,
             resolution_adjust: fused_p,
-            depth_used_pct,
-            staleness,
-            category,
+            depth_used_pct: Decimal::from(walk.depth_used_pct),
+            staleness: input.staleness,
+            category: input.category,
             meta: EndgameMeta {
                 predicted_yes,
                 confidence: fused_p,
@@ -223,7 +257,7 @@ impl<F: FeeEstimator> EndgameDetector<F> {
             },
             calibration: cal_entry.to_snapshot(fused_p),
             detected_at: now,
-        })
+        }
     }
 
     #[must_use]

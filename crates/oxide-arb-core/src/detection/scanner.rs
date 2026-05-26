@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use num_traits::ToPrimitive;
-use oxide_arb_algorithm::scorer::ScoredOpportunity;
+use oxide_arb_algorithm::{pipeline::MarketScanInput, scorer::ScoredOpportunity};
 
 use crate::bridge::CoreOpportunityPipeline;
 use crate::observability::metrics_hub::MetricsHub;
@@ -62,17 +62,17 @@ impl Scanner {
             .staleness_classifier
             .classify(pair.max_staleness_ms(now_ms));
 
-        self.pipeline.process(
-            &entry.market_id,
-            &entry.event_id,
-            &entry.token_yes,
-            &entry.token_no,
-            &pair,
-            entry.category,
+        let input = MarketScanInput {
+            market_id: entry.market_id.clone(),
+            event_id: entry.event_id.clone(),
+            token_yes: entry.token_yes.clone(),
+            token_no: entry.token_no.clone(),
+            book: pair,
+            category: entry.category,
             staleness,
-            entry.settlement_deadline,
-            now,
-        )
+            settlement_deadline: entry.settlement_deadline,
+        };
+        self.pipeline.process(&input, now)
     }
 
     pub fn scan_all(&self, now: DateTime<Utc>) -> Vec<ScoredOpportunity> {

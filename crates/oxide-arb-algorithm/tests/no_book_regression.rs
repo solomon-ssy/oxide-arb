@@ -4,7 +4,9 @@ use std::sync::Arc;
 
 use chrono::{Duration, Utc};
 use oxide_arb_algorithm::{
-    calibration::ResolutionCalibrator, endgame::EndgameDetector, fee::FeeEstimator,
+    calibration::ResolutionCalibrator,
+    endgame::{EndgameDetectInput, EndgameDetector},
+    fee::FeeEstimator,
 };
 use oxide_arb_models::{
     config::{CalibrationConfig, EndgameDetectionConfig},
@@ -44,7 +46,12 @@ const fn side(levels: Vec<BookLevel>) -> OrderbookSide {
 }
 
 fn token_snapshot(bids: &[BookLevel], asks: &[BookLevel]) -> Arc<BookSnapshot> {
-    Arc::new(BookSnapshot::new(Arc::from(bids), Arc::from(asks), 0))
+    Arc::new(BookSnapshot::new(
+        Arc::new(bids.to_vec()),
+        Arc::new(asks.to_vec()),
+        0,
+        0,
+    ))
 }
 
 fn pair_from_snapshot(snapshot: &EndgameBookSnapshot) -> EndgameBookPair {
@@ -83,17 +90,20 @@ fn detector() -> EndgameDetector<ZeroFeeEstimator> {
 fn detect(book: &EndgameBookPair) -> Option<oxide_arb_models::domain::Opportunity> {
     let detector = detector();
     let direction = detector.detect_direction(book.view())?;
+    let now = Utc::now();
     detector.detect_with_direction(
-        &MarketId::new("m-no"),
-        &EventId::new("e-no"),
-        &TokenId::new("yes-no"),
-        &TokenId::new("no-no"),
-        book,
-        direction,
-        MarketCategory::Sports,
-        StalenessLevel::Fresh,
-        Some(Utc::now() + Duration::hours(6)),
-        Utc::now(),
+        &EndgameDetectInput {
+            market_id: &MarketId::new("m-no"),
+            event_id: &EventId::new("e-no"),
+            token_yes: &TokenId::new("yes-no"),
+            token_no: &TokenId::new("no-no"),
+            book,
+            direction,
+            category: MarketCategory::Sports,
+            staleness: StalenessLevel::Fresh,
+            settlement_deadline: Some(now + Duration::hours(6)),
+        },
+        now,
     )
 }
 

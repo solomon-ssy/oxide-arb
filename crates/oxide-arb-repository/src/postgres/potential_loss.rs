@@ -1,3 +1,7 @@
+use super::orm::{
+    ColumnTrait, ConnectionTrait, DatabaseConnection, DatabaseTransaction, EntityTrait,
+    IntoActiveModel, QueryFilter,
+};
 use crate::traits::PotentialLossRepository;
 use chrono::Utc;
 use oxide_arb_error::storage::StorageError;
@@ -6,8 +10,6 @@ use oxide_arb_models::entities::potential_loss_ledger::{Column, Entity};
 use oxide_arb_models::enums::common::LedgerStatus;
 use oxide_arb_models::types::{LedgerId, MarketId, Usd};
 use sea_orm::sea_query::Expr;
-#[allow(clippy::wildcard_imports)]
-use sea_orm::*;
 
 pub struct PgPotentialLossRepository {
     db: DatabaseConnection,

@@ -84,7 +84,8 @@ impl OrderStrategy {
                     .inc();
                 return outcome;
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            // Non-blocking retry — sleep would break SLO-1 execute-intent budget.
+            tokio::task::yield_now().await;
         }
 
         self.metrics

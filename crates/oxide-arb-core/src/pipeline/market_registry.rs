@@ -28,7 +28,11 @@ impl MarketRegistry {
     }
 
     /// Register a single market. Rebuilds token→market index.
-    pub fn register_market(&self, entry: MarketRegistryInfo) {
+    pub fn register_market(&self, mut entry: MarketRegistryInfo) {
+        if entry.resolve_token_pair().is_err() {
+            tracing::warn!(market_id = %entry.market_id, "skipping market with invalid token pair");
+            return;
+        }
         for td in &entry.tokens {
             self.token_to_market
                 .insert(td.token_id.clone(), entry.market_id.clone());
@@ -55,7 +59,11 @@ impl MarketRegistry {
 
         let mut active = self.active_market_ids.read().clone();
 
-        for entry in entries {
+        for mut entry in entries {
+            if entry.resolve_token_pair().is_err() {
+                tracing::warn!(market_id = %entry.market_id, "skipping market with invalid token pair");
+                continue;
+            }
             for td in &entry.tokens {
                 self.token_to_market
                     .insert(td.token_id.clone(), entry.market_id.clone());
@@ -131,19 +139,9 @@ impl MarketRegistry {
     ///
     /// Tokens are identified by their `outcome` field: "Yes" and "No".
     pub fn token_pair(&self, market_id: &MarketId) -> Option<(TokenId, TokenId)> {
-        let entry = self.markets.get(market_id)?;
-        let yes = entry
-            .tokens
-            .iter()
-            .find(|t| t.outcome == "Yes")
-            .map(|t| t.token_id.clone())?;
-        let no = entry
-            .tokens
-            .iter()
-            .find(|t| t.outcome == "No")
-            .map(|t| t.token_id.clone())?;
-        drop(entry);
-        Some((yes, no))
+        self.markets
+            .get(market_id)
+            .map(|entry| (entry.token_yes.clone(), entry.token_no.clone()))
     }
 
     /// Snapshot of all active market IDs.
@@ -186,6 +184,8 @@ mod tests {
         MarketRegistryInfo {
             market_id: MarketId::new(id),
             event_id: EventId::new("evt-1"),
+            token_yes: TokenId::new(format!("{id}-yes")),
+            token_no: TokenId::new(format!("{id}-no")),
             question: "Test?".into(),
             slug: "test".into(),
             category: MarketCategory::Other,

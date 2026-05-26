@@ -84,9 +84,12 @@ pub struct MetricsHub {
     pub funnel_dropped: IntCounter,
     pub funnel_dispatch_age_ms: Histogram,
     pub funnel_queue_depth: IntGauge,
+    pub funnel_fast_lane_dispatched: IntCounter,
 
     // Execution
     pub execution_latency: Histogram,
+    pub execute_intent_to_http_us: Histogram,
+    pub book_freshness_rejected: IntCounter,
     pub trades_filled: IntCounter,
     pub trades_missed: IntCounter,
     pub trades_failed: IntCounter,
@@ -169,10 +172,13 @@ struct FunnelMetrics {
     dropped: IntCounter,
     dispatch_age_ms: Histogram,
     queue_depth: IntGauge,
+    fast_lane_dispatched: IntCounter,
 }
 
 struct ExecutionMetrics {
     execution_latency: Histogram,
+    execute_intent_to_http_us: Histogram,
+    book_freshness_rejected: IntCounter,
     trades_filled: IntCounter,
     trades_missed: IntCounter,
     trades_failed: IntCounter,
@@ -333,6 +339,11 @@ fn register_funnel_metrics(registry: &Registry) -> FunnelMetrics {
             "oxide_arb_funnel_queue_depth",
             "Current funnel queue depth"
         ),
+        fast_lane_dispatched: register_counter!(
+            registry,
+            "oxide_arb_funnel_fast_lane_dispatched_total",
+            "Opportunities dispatched via fast lane (bypass funnel sweep)"
+        ),
     }
 }
 
@@ -343,6 +354,17 @@ fn register_execution_metrics(registry: &Registry) -> ExecutionMetrics {
             "oxide_arb_execution_latency_seconds",
             "End-to-end execution latency",
             vec![0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0]
+        ),
+        execute_intent_to_http_us: register_histogram!(
+            registry,
+            "oxide_arb_execution_intent_to_http_microseconds",
+            "Execute intent to HTTP request emit (SLO-1)",
+            vec![50.0, 100.0, 250.0, 500.0, 1000.0, 2500.0, 5000.0, 10000.0]
+        ),
+        book_freshness_rejected: register_counter!(
+            registry,
+            "oxide_arb_execution_book_freshness_rejected_total",
+            "Validation rejected due to book version/age SLO-2"
         ),
         trades_filled: register_counter!(
             registry,
@@ -586,7 +608,10 @@ impl MetricsHub {
             funnel_dropped: funnel.dropped,
             funnel_dispatch_age_ms: funnel.dispatch_age_ms,
             funnel_queue_depth: funnel.queue_depth,
+            funnel_fast_lane_dispatched: funnel.fast_lane_dispatched,
             execution_latency: execution.execution_latency,
+            execute_intent_to_http_us: execution.execute_intent_to_http_us,
+            book_freshness_rejected: execution.book_freshness_rejected,
             trades_filled: execution.trades_filled,
             trades_missed: execution.trades_missed,
             trades_failed: execution.trades_failed,

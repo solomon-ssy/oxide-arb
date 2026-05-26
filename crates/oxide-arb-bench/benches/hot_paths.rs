@@ -5,9 +5,9 @@ use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use oxide_arb_algorithm::{
     calibration::ResolutionCalibrator,
     cooldown::InMemoryEmissionCooldown,
-    endgame::{EndgameDetector, convergence::ConvergenceDirection},
+    endgame::{EndgameDetectInput, EndgameDetector, convergence::ConvergenceDirection},
     fee::FeeEstimator,
-    pipeline::OpportunityPipeline,
+    pipeline::{MarketScanInput, OpportunityPipeline},
     scorer::EndgameScorer,
     walker::OrderbookWalker,
 };
@@ -75,11 +75,17 @@ fn make_endgame_book() -> EndgameBookPair {
     )];
     EndgameBookPair {
         yes: Arc::new(BookSnapshot::new(
-            Arc::from([] as [BookLevel; 0]),
-            Arc::from(yes_asks),
+            Arc::new(Vec::new()),
+            Arc::new(yes_asks),
+            0,
             0,
         )),
-        no: Arc::new(BookSnapshot::new(Arc::from(no_bids), Arc::from(no_asks), 0)),
+        no: Arc::new(BookSnapshot::new(
+            Arc::new(no_bids),
+            Arc::new(no_asks),
+            0,
+            0,
+        )),
     }
 }
 
@@ -196,33 +202,26 @@ fn bench_opportunity() -> Opportunity {
 fn risk_engine() -> &'static oxide_arb_risk::engine::RiskEngine {
     static ENGINE: OnceLock<oxide_arb_risk::engine::RiskEngine> = OnceLock::new();
     ENGINE.get_or_init(|| {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("tokio runtime");
-        rt.block_on(async {
-            let config = RiskConfig {
-                max_total_exposure_usd: dec!(5000),
-                max_single_market_exposure_usd: dec!(500),
-                max_single_bet_usd: dec!(25),
-                max_open_positions: 5,
-                max_daily_loss_usd: dec!(75),
-                max_weekly_loss_usd: dec!(120),
-                daily_budget_usd: dec!(200),
-                min_balance_usd: dec!(50),
-                reserve_balance_usd: dec!(100),
-                min_trade_usd: dec!(1),
-                max_consecutive_misses: 3,
-                ..RiskConfig::default()
-            };
-            RiskEngineBuilder::new()
-                .config(config)
-                .clock(utc_clock())
-                .initial_equity(Usd::new(dec!(5000)))
-                .build(&BenchMetrics)
-                .await
-                .expect("engine build")
-        })
+        let config = RiskConfig {
+            max_total_exposure_usd: dec!(5000),
+            max_single_market_exposure_usd: dec!(500),
+            max_single_bet_usd: dec!(25),
+            max_open_positions: 5,
+            max_daily_loss_usd: dec!(75),
+            max_weekly_loss_usd: dec!(120),
+            daily_budget_usd: dec!(200),
+            min_balance_usd: dec!(50),
+            reserve_balance_usd: dec!(100),
+            min_trade_usd: dec!(1),
+            max_consecutive_misses: 3,
+            ..RiskConfig::default()
+        };
+        RiskEngineBuilder::new()
+            .config(config)
+            .clock(utc_clock())
+            .initial_equity(Usd::new(dec!(5000)))
+            .build(&BenchMetrics)
+            .expect("engine build")
     })
 }
 
@@ -259,21 +258,20 @@ fn bench_detect_with_direction(c: &mut Criterion) {
     let deadline = now + Duration::hours(12);
     let direction = ConvergenceDirection::YesLikely;
 
+    let input = EndgameDetectInput {
+        market_id: &market_id,
+        event_id: &event_id,
+        token_yes: &token_yes,
+        token_no: &token_no,
+        book: &book,
+        direction,
+        category: MarketCategory::Geopolitics,
+        staleness: StalenessLevel::Fresh,
+        settlement_deadline: Some(deadline),
+    };
+
     c.bench_function("detect_with_direction", |b| {
-        b.iter(|| {
-            detector.detect_with_direction(
-                black_box(&market_id),
-                black_box(&event_id),
-                black_box(&token_yes),
-                black_box(&token_no),
-                black_box(&book),
-                direction,
-                MarketCategory::Geopolitics,
-                StalenessLevel::Fresh,
-                Some(deadline),
-                now,
-            )
-        });
+        b.iter(|| detector.detect_with_direction(black_box(&input), now));
     });
 }
 
@@ -287,20 +285,19 @@ fn bench_pipeline_process(c: &mut Criterion) {
     let now = Utc::now();
     let deadline = now + Duration::hours(12);
 
+    let scan_input = MarketScanInput {
+        market_id,
+        event_id,
+        token_yes,
+        token_no,
+        book,
+        category: MarketCategory::Geopolitics,
+        staleness: StalenessLevel::Fresh,
+        settlement_deadline: Some(deadline),
+    };
+
     c.bench_function("pipeline_process", |b| {
-        b.iter(|| {
-            pipeline.process(
-                black_box(&market_id),
-                black_box(&event_id),
-                black_box(&token_yes),
-                black_box(&token_no),
-                black_box(&book),
-                MarketCategory::Geopolitics,
-                StalenessLevel::Fresh,
-                Some(deadline),
-                now,
-            )
-        });
+        b.iter(|| pipeline.process(black_box(&scan_input), black_box(now)));
     });
 }
 
@@ -337,31 +334,28 @@ fn risk_engine_halted() -> &'static oxide_arb_risk::engine::RiskEngine {
             .enable_all()
             .build()
             .expect("tokio runtime");
-        rt.block_on(async {
-            let config = RiskConfig {
-                max_total_exposure_usd: dec!(5000),
-                max_single_market_exposure_usd: dec!(500),
-                max_single_bet_usd: dec!(25),
-                max_open_positions: 5,
-                max_daily_loss_usd: dec!(75),
-                max_weekly_loss_usd: dec!(120),
-                daily_budget_usd: dec!(200),
-                min_balance_usd: dec!(50),
-                reserve_balance_usd: dec!(100),
-                min_trade_usd: dec!(1),
-                max_consecutive_misses: 3,
-                ..RiskConfig::default()
-            };
-            let engine = RiskEngineBuilder::new()
-                .config(config)
-                .clock(utc_clock())
-                .initial_equity(Usd::new(dec!(5000)))
-                .build(&BenchMetrics)
-                .await
-                .expect("engine build");
-            engine.halt("bench halted engine".into()).await;
-            engine
-        })
+        let config = RiskConfig {
+            max_total_exposure_usd: dec!(5000),
+            max_single_market_exposure_usd: dec!(500),
+            max_single_bet_usd: dec!(25),
+            max_open_positions: 5,
+            max_daily_loss_usd: dec!(75),
+            max_weekly_loss_usd: dec!(120),
+            daily_budget_usd: dec!(200),
+            min_balance_usd: dec!(50),
+            reserve_balance_usd: dec!(100),
+            min_trade_usd: dec!(1),
+            max_consecutive_misses: 3,
+            ..RiskConfig::default()
+        };
+        let engine = RiskEngineBuilder::new()
+            .config(config)
+            .clock(utc_clock())
+            .initial_equity(Usd::new(dec!(5000)))
+            .build(&BenchMetrics)
+            .expect("engine build");
+        rt.block_on(engine.halt("bench halted engine".into()));
+        engine
     })
 }
 
@@ -397,7 +391,23 @@ fn bench_book_apply_snapshot(c: &mut Criterion) {
         b.iter(|| {
             let mut ob = OrderBook::new(TokenId::new("t"));
             ob.apply_snapshot(levels.clone(), levels.clone(), 1);
-            black_box(ob.publish());
+            black_box(ob.publish(1));
+        });
+    });
+}
+
+fn bench_book_apply_delta_50(c: &mut Criterion) {
+    use oxide_arb_core::pipeline::book_store::BookStore;
+    let metrics = Arc::new(MetricsHub::new());
+    let store = BookStore::new(metrics);
+    let tid = TokenId::new("t");
+    let levels = sample_levels(50);
+    store.apply_snapshot(&tid, levels.clone(), levels, 1);
+    let delta = [(Price::new(dec!(0.96)), Shares::new(dec!(10)))];
+
+    c.bench_function("book_apply_delta_50", |b| {
+        b.iter(|| {
+            black_box(store.apply_delta(&tid, delta, 2));
         });
     });
 }
@@ -428,6 +438,7 @@ criterion_group!(
     bench_pre_trade_pass,
     bench_pre_trade_fail_short,
     bench_book_apply_snapshot,
+    bench_book_apply_delta_50,
     bench_dual_book_assemble
 );
 criterion_main!(benches);

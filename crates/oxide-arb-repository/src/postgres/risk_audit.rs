@@ -1,9 +1,8 @@
+use super::orm::{DatabaseConnection, EntityTrait, IntoActiveModel, TransactionTrait};
 use crate::traits::RiskAuditRepository;
 use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::domain::NewRiskAuditEvent;
 use oxide_arb_models::entities::risk_audit_event::Entity;
-#[allow(clippy::wildcard_imports)]
-use sea_orm::*;
 
 pub struct PgRiskAuditRepository {
     db: DatabaseConnection,

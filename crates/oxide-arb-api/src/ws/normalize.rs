@@ -2,12 +2,13 @@
 
 use num_traits::ToPrimitive;
 use oxide_arb_models::enums::common::TickSize;
-use oxide_arb_models::types::{MarketId, Price, Shares, TokenId};
+use oxide_arb_models::types::{MarketId, Price, Shares};
 use polymarket_client_sdk_v2::clob::ws::types::response::{
     BestBidAsk, BookUpdate, LastTradePrice, MarketResolved, PriceChange, TickSizeChange, WsMessage,
 };
 
 use super::event::{PriceLevel, PriceLevelDelta, WsEvent};
+use super::token_intern::intern_u256;
 
 /// Normalized output of a single SDK WebSocket message (local newtype for [`From`]).
 #[derive(Debug, Default)]
@@ -54,7 +55,7 @@ impl From<&BookUpdate> for WsEvent {
             .collect();
 
         Self::BookSnapshot {
-            asset_id: TokenId::new(book.asset_id.to_string()),
+            asset_id: intern_u256(book.asset_id),
             bids,
             asks,
             timestamp_ms: ToPrimitive::to_u64(&book.timestamp.max(0)).unwrap_or(0),
@@ -68,7 +69,7 @@ fn price_change_events(pc: &PriceChange) -> Vec<WsEvent> {
     pc.price_changes
         .iter()
         .map(|entry| WsEvent::PriceChange {
-            asset_id: TokenId::new(entry.asset_id.to_string()),
+            asset_id: intern_u256(entry.asset_id),
             changes: vec![PriceLevelDelta {
                 price: Price::new(entry.price),
                 size: Shares::new(entry.size.unwrap_or_default()),
@@ -81,7 +82,7 @@ fn price_change_events(pc: &PriceChange) -> Vec<WsEvent> {
 impl From<&BestBidAsk> for WsEvent {
     fn from(bba: &BestBidAsk) -> Self {
         Self::BestBidAsk {
-            asset_id: TokenId::new(bba.asset_id.to_string()),
+            asset_id: intern_u256(bba.asset_id),
             best_bid: Price::new(bba.best_bid),
             best_ask: Price::new(bba.best_ask),
             timestamp_ms: ToPrimitive::to_u64(&bba.timestamp.max(0)).unwrap_or(0),
@@ -92,7 +93,7 @@ impl From<&BestBidAsk> for WsEvent {
 impl From<&TickSizeChange> for WsEvent {
     fn from(tsc: &TickSizeChange) -> Self {
         Self::TickSizeChange {
-            asset_id: TokenId::new(tsc.asset_id.to_string()),
+            asset_id: intern_u256(tsc.asset_id),
             old_tick: TickSize::try_from(tsc.old_tick_size).unwrap_or(TickSize::Hundredth),
             new_tick: TickSize::try_from(tsc.new_tick_size).unwrap_or(TickSize::Hundredth),
         }
@@ -102,7 +103,7 @@ impl From<&TickSizeChange> for WsEvent {
 impl From<&LastTradePrice> for WsEvent {
     fn from(ltp: &LastTradePrice) -> Self {
         Self::LastTradePrice {
-            asset_id: TokenId::new(ltp.asset_id.to_string()),
+            asset_id: intern_u256(ltp.asset_id),
             price: Price::new(ltp.price),
             timestamp_ms: ToPrimitive::to_u64(&ltp.timestamp.max(0)).unwrap_or(0),
         }
@@ -113,13 +114,9 @@ impl From<&MarketResolved> for WsEvent {
     fn from(mr: &MarketResolved) -> Self {
         Self::MarketResolved {
             market_id: MarketId::new(format!("{:#x}", mr.market)),
-            winning_token_id: TokenId::new(mr.winning_asset_id.to_string()),
+            winning_token_id: intern_u256(mr.winning_asset_id),
             winning_outcome: mr.winning_outcome.clone(),
-            asset_ids: mr
-                .asset_ids
-                .iter()
-                .map(|id| TokenId::new(id.to_string()))
-                .collect(),
+            asset_ids: mr.asset_ids.iter().copied().map(intern_u256).collect(),
             timestamp_ms: ToPrimitive::to_u64(&mr.timestamp.max(0)).unwrap_or(0),
         }
     }

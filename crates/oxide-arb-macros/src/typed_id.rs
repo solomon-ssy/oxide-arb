@@ -6,9 +6,10 @@
 
 use proc_macro2::TokenStream;
 use quote::quote;
-use syn::{Data, DeriveInput, Error, Fields, Result};
+use syn::{
+    Data, DeriveInput, Error, Fields, ImplGenerics, Result, TypeGenerics, Visibility, WhereClause,
+};
 
-#[allow(clippy::too_many_lines)]
 pub fn expand(input: TokenStream) -> Result<TokenStream> {
     let input: DeriveInput = syn::parse2(input)?;
     let name = &input.ident;
@@ -18,9 +19,28 @@ pub fn expand(input: TokenStream) -> Result<TokenStream> {
 
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
 
-    Ok(quote! {
-        // ── Core trait impls ────────────────────────────────────────
+    let core = expand_core(name, vis, &impl_generics, &ty_generics, where_clause);
+    let serde = expand_serde(name, &impl_generics, &ty_generics, where_clause);
+    let seaorm = expand_seaorm(name, &impl_generics, &ty_generics, where_clause);
+    let seaorm_try_getable =
+        expand_seaorm_try_getable(name, &impl_generics, &ty_generics, where_clause);
 
+    Ok(quote! {
+        #core
+        #serde
+        #seaorm
+        #seaorm_try_getable
+    })
+}
+
+fn expand_core(
+    name: &syn::Ident,
+    vis: &Visibility,
+    impl_generics: &ImplGenerics<'_>,
+    ty_generics: &TypeGenerics<'_>,
+    where_clause: Option<&WhereClause>,
+) -> TokenStream {
+    quote! {
         impl #impl_generics #name #ty_generics #where_clause {
             #[must_use]
             #[inline]
@@ -83,9 +103,16 @@ pub fn expand(input: TokenStream) -> Result<TokenStream> {
                 id.as_str().to_owned()
             }
         }
+    }
+}
 
-        // ── Serde ───────────────────────────────────────────────────
-
+fn expand_serde(
+    name: &syn::Ident,
+    impl_generics: &ImplGenerics<'_>,
+    ty_generics: &TypeGenerics<'_>,
+    where_clause: Option<&WhereClause>,
+) -> TokenStream {
+    quote! {
         impl #impl_generics ::serde::Serialize for #name #ty_generics #where_clause {
             fn serialize<S: ::serde::Serializer>(&self, serializer: S) -> ::std::result::Result<S::Ok, S::Error> {
                 self.0.serialize(serializer)
@@ -98,13 +125,16 @@ pub fn expand(input: TokenStream) -> Result<TokenStream> {
                 Ok(Self(::std::sync::Arc::from(s.as_str())))
             }
         }
+    }
+}
 
-        // ── SeaORM bindings ─────────────────────────────────────────
-        //
-        // String-backed newtypes stored as TEXT columns for lossless
-        // round-trips. The Arc<str> → String allocation happens only
-        // at the DB boundary; hot-path clones remain O(1).
-
+fn expand_seaorm(
+    name: &syn::Ident,
+    impl_generics: &ImplGenerics<'_>,
+    ty_generics: &TypeGenerics<'_>,
+    where_clause: Option<&WhereClause>,
+) -> TokenStream {
+    quote! {
         impl #impl_generics From<#name #ty_generics> for sea_orm::sea_query::Value #where_clause {
             #[inline]
             fn from(id: #name #ty_generics) -> Self {
@@ -116,24 +146,6 @@ pub fn expand(input: TokenStream) -> Result<TokenStream> {
             #[inline]
             fn from(id: &#name #ty_generics) -> Self {
                 sea_orm::sea_query::Value::String(Some(Box::new(id.as_str().to_owned())))
-            }
-        }
-
-        impl #impl_generics sea_orm::TryGetable for #name #ty_generics #where_clause {
-            fn try_get_by<I: sea_orm::ColIdx>(
-                res: &sea_orm::QueryResult,
-                index: I,
-            ) -> ::std::result::Result<Self, sea_orm::TryGetError> {
-                let raw: String =
-                    <String as sea_orm::TryGetable>::try_get_by(res, index).map_err(|e| match e {
-                        sea_orm::TryGetError::DbErr(sea_orm::DbErr::Type(ref msg))
-                            if msg.contains("null value") =>
-                        {
-                            sea_orm::TryGetError::Null(format!("{:?}", index))
-                        }
-                        other => other,
-                    })?;
-                Ok(Self::from(raw))
             }
         }
 
@@ -176,7 +188,34 @@ pub fn expand(input: TokenStream) -> Result<TokenStream> {
                 Err(sea_orm::DbErr::ConvertFromU64(stringify!(#name)))
             }
         }
-    })
+    }
+}
+
+fn expand_seaorm_try_getable(
+    name: &syn::Ident,
+    impl_generics: &ImplGenerics<'_>,
+    ty_generics: &TypeGenerics<'_>,
+    where_clause: Option<&WhereClause>,
+) -> TokenStream {
+    quote! {
+        impl #impl_generics sea_orm::TryGetable for #name #ty_generics #where_clause {
+            fn try_get_by<I: sea_orm::ColIdx>(
+                res: &sea_orm::QueryResult,
+                index: I,
+            ) -> ::std::result::Result<Self, sea_orm::TryGetError> {
+                let raw: String =
+                    <String as sea_orm::TryGetable>::try_get_by(res, index).map_err(|e| match e {
+                        sea_orm::TryGetError::DbErr(sea_orm::DbErr::Type(ref msg))
+                            if msg.contains("null value") =>
+                        {
+                            sea_orm::TryGetError::Null(format!("{:?}", index))
+                        }
+                        other => other,
+                    })?;
+                Ok(Self::from(raw))
+            }
+        }
+    }
 }
 
 fn validate_struct(input: &DeriveInput) -> Result<()> {

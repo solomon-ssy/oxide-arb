@@ -6,45 +6,66 @@ use oxide_arb_error::trading::TradingError;
 use oxide_arb_models::domain::execution::ValidationResult;
 use oxide_arb_models::domain::opportunity::Opportunity;
 use oxide_arb_models::enums::common::{Side, StalenessLevel};
-use oxide_arb_models::types::Bps;
+use oxide_arb_models::types::{Bps, TokenId};
 use rust_decimal_macros::dec;
 
 use crate::observability::metrics_hub::MetricsHub;
 use crate::pipeline::book_store::BookStore;
-use crate::pipeline::market_registry::MarketRegistry;
 use crate::pipeline::staleness_classifier::StalenessClassifier;
 
 pub struct Validator {
     book_store: Arc<BookStore>,
-    market_registry: Arc<MarketRegistry>,
     staleness_classifier: StalenessClassifier,
     max_slippage_bps: rust_decimal::Decimal,
+    max_book_to_order_ms: u64,
     metrics: Arc<MetricsHub>,
 }
 
 impl Validator {
     pub const fn new(
         book_store: Arc<BookStore>,
-        market_registry: Arc<MarketRegistry>,
         staleness_classifier: StalenessClassifier,
         max_slippage_bps: rust_decimal::Decimal,
+        max_book_to_order_ms: u64,
         metrics: Arc<MetricsHub>,
     ) -> Self {
         Self {
             book_store,
-            market_registry,
             staleness_classifier,
             max_slippage_bps,
+            max_book_to_order_ms,
             metrics,
         }
     }
 
-    pub fn validate(&self, opp: &Opportunity) -> Result<ValidationResult, TradingError> {
+    pub fn validate(
+        &self,
+        opp: &Opportunity,
+        token_yes: &TokenId,
+        token_no: &TokenId,
+        book_yes_version: u64,
+        book_no_version: u64,
+    ) -> Result<ValidationResult, TradingError> {
         let now_ms = ToPrimitive::to_u64(&Utc::now().timestamp_millis().max(0)).unwrap_or(0);
         let top = self
             .book_store
-            .top_of_book(&self.market_registry, &opp.market_id, now_ms)
+            .top_of_book_tokens(token_yes, token_no, now_ms)
             .ok_or_else(|| TradingError::Validation("book not available".into()))?;
+
+        if top.yes_version < book_yes_version || top.no_version < book_no_version {
+            self.metrics.book_freshness_rejected.inc();
+            return Err(TradingError::Validation(
+                "book version regressed since detection".into(),
+            ));
+        }
+
+        if top.max_staleness_ms > self.max_book_to_order_ms {
+            self.metrics.book_freshness_rejected.inc();
+            return Err(TradingError::Validation(format!(
+                "book age {0}ms exceeds SLO-2 budget {1}ms",
+                top.max_staleness_ms, self.max_book_to_order_ms
+            )));
+        }
 
         let staleness = self.staleness_classifier.classify(top.max_staleness_ms);
         if staleness > StalenessLevel::Acceptable {

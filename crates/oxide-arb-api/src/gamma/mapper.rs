@@ -148,8 +148,8 @@ fn map_market_dual(raw: RawGammaMarket, event_id: &EventId) -> (UpsertMarket, Ma
         category,
         status,
         outcome: None,
-        yes_token_id: yes_token,
-        no_token_id: no_token,
+        yes_token_id: yes_token.clone(),
+        no_token_id: no_token.clone(),
         tick_size,
         neg_risk: raw.neg_risk.unwrap_or(false),
         end_date: None,
@@ -159,6 +159,8 @@ fn map_market_dual(raw: RawGammaMarket, event_id: &EventId) -> (UpsertMarket, Ma
     let registry = MarketRegistryInfo {
         market_id,
         event_id: event_id.clone(),
+        token_yes: yes_token,
+        token_no: no_token,
         question: raw.question,
         slug: raw.slug.unwrap_or_default(),
         category,
@@ -224,9 +226,20 @@ pub fn map_market(raw: RawGammaMarket, event_id: &EventId) -> MarketRegistryInfo
         MarketStatus::Paused
     };
 
+    let yes_token = tokens
+        .iter()
+        .find(|t| t.outcome.eq_ignore_ascii_case("yes"))
+        .map_or_else(|| TokenId::new(""), |t| t.token_id.clone());
+    let no_token = tokens
+        .iter()
+        .find(|t| t.outcome.eq_ignore_ascii_case("no"))
+        .map_or_else(|| TokenId::new(""), |t| t.token_id.clone());
+
     MarketRegistryInfo {
         market_id: MarketId::new(&raw.condition_id),
         event_id: event_id.clone(),
+        token_yes: yes_token,
+        token_no: no_token,
         question: raw.question,
         slug: raw.slug.unwrap_or_default(),
         category,

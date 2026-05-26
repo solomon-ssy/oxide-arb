@@ -6,11 +6,11 @@ use std::sync::Arc;
 
 /// Single-token L2 orderbook (mutable writer-side state).
 ///
-/// `bids` are sorted descending by price; `asks` are sorted ascending.
-/// Published to readers via `BookSnapshot` (Arc-backed, lock-free).
+/// `bids` / `asks` are [`Arc<Vec<BookLevel>>`]; deltas use [`Arc::make_mut`].
+/// [`Self::publish`] refcount-clones into [`BookSnapshot`] without copying levels.
 pub struct OrderBook {
-    bids: Vec<BookLevel>,
-    asks: Vec<BookLevel>,
+    bids: Arc<Vec<BookLevel>>,
+    asks: Arc<Vec<BookLevel>>,
     last_update_ms: u64,
     token_id: TokenId,
 }
@@ -18,8 +18,8 @@ pub struct OrderBook {
 impl OrderBook {
     pub fn new(token_id: TokenId) -> Self {
         Self {
-            bids: Vec::with_capacity(64),
-            asks: Vec::with_capacity(64),
+            bids: Arc::new(Vec::with_capacity(64)),
+            asks: Arc::new(Vec::with_capacity(64)),
             last_update_ms: 0,
             token_id,
         }
@@ -38,8 +38,8 @@ impl OrderBook {
         bids.retain(|l| l.size.is_positive());
         asks.retain(|l| l.size.is_positive());
 
-        self.bids = bids;
-        self.asks = asks;
+        self.bids = Arc::new(bids);
+        self.asks = Arc::new(asks);
         self.last_update_ms = timestamp_ms;
     }
 
@@ -51,31 +51,33 @@ impl OrderBook {
             let Ok(level) = BookLevel::from_decimal(price, size) else {
                 continue;
             };
-            let on_bids = find_level(&self.bids, level.price, true).is_ok();
-            let on_asks = find_level(&self.asks, level.price, false).is_ok();
+            let on_bids = find_level(self.bids.as_ref(), level.price, true).is_ok();
+            let on_asks = find_level(self.asks.as_ref(), level.price, false).is_ok();
 
             if on_bids {
-                apply_level_delta(&mut self.bids, level, true);
+                apply_level_delta(Arc::make_mut(&mut self.bids), level, true);
             } else if on_asks {
-                apply_level_delta(&mut self.asks, level, false);
+                apply_level_delta(Arc::make_mut(&mut self.asks), level, false);
             } else if level.size.is_positive() {
                 if self.should_place_on_bids(price) {
-                    apply_level_delta(&mut self.bids, level, true);
+                    apply_level_delta(Arc::make_mut(&mut self.bids), level, true);
                 } else {
-                    apply_level_delta(&mut self.asks, level, false);
+                    apply_level_delta(Arc::make_mut(&mut self.asks), level, false);
                 }
             }
         }
         self.last_update_ms = timestamp_ms;
     }
 
+    /// Publish a refcount-only snapshot (no level copy when arcs are unshared).
     #[must_use]
     #[inline]
-    pub fn publish(&self) -> BookSnapshot {
+    pub fn publish(&self, version: u64) -> BookSnapshot {
         BookSnapshot::new(
-            Arc::from(self.bids.as_slice()),
-            Arc::from(self.asks.as_slice()),
+            Arc::clone(&self.bids),
+            Arc::clone(&self.asks),
             self.last_update_ms,
+            version,
         )
     }
 
@@ -212,17 +214,18 @@ mod tests {
     }
 
     #[test]
-    fn publish_zero_copy_slices() {
+    fn publish_refcount_clones_arc_without_level_copy() {
         let mut ob = OrderBook::new(TokenId::new("t1"));
         ob.apply_snapshot(
             vec![lvl(dec!(0.5), dec!(10))],
             vec![lvl(dec!(0.6), dec!(5))],
             1,
         );
-        let snap = ob.publish();
+        let snap = ob.publish(1);
         assert_eq!(snap.bids.len(), 1);
         assert_eq!(snap.best_bid().unwrap().inner(), dec!(0.5));
         assert!(snap.total_ask_depth_usd.is_positive());
+        assert_eq!(Arc::strong_count(&snap.bids), 2);
     }
 
     #[test]

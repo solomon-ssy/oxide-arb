@@ -39,7 +39,7 @@ async fn setup_clickhouse() -> (
         .expect("ClickHouse container");
     let port = container.get_host_port_ipv4(8123).await.expect("port");
     let config = test_ch_config(port);
-    let pool = ClickHousePool::connect(&config).await.expect("connect");
+    let pool = ClickHousePool::connect(&config).expect("connect");
     pool.ensure_schema().await.expect("schema");
     let client = pool.client().clone();
     (pool, client, port, container)

@@ -1,10 +1,12 @@
+use super::orm::{
+    ConnectionTrait, DatabaseConnection, DatabaseTransaction, EntityTrait, NotSet, QueryOrder,
+    QuerySelect, Set,
+};
 use crate::traits::LifecycleRepository;
 use chrono::Utc;
 use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::domain::{LifecycleEventInfo, NewLifecycleEvent};
 use oxide_arb_models::entities::lifecycle_event::{ActiveModel, Column, Entity};
-#[allow(clippy::wildcard_imports)]
-use sea_orm::*;
 
 pub struct PgLifecycleRepository {
     db: DatabaseConnection,

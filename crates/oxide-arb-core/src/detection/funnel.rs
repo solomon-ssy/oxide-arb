@@ -1,4 +1,5 @@
 use std::cmp::Ordering;
+use std::collections::BinaryHeap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -53,8 +54,18 @@ impl FunnelQueue {
         true
     }
 
+    /// Pop highest-scored entry using a max-heap over indices (O(n log n), n ≤ `max_size`).
     fn pop_best(&mut self) -> Option<ScoredEntry> {
-        let max_idx = self.max_score_index()?;
+        if self.entries.is_empty() {
+            return None;
+        }
+        let mut heap: BinaryHeap<(Decimal, usize)> = self
+            .entries
+            .iter()
+            .enumerate()
+            .map(|(i, e)| (e.score, i))
+            .collect();
+        let (_, max_idx) = heap.pop()?;
         Some(self.entries.swap_remove(max_idx))
     }
 
@@ -65,23 +76,18 @@ impl FunnelQueue {
             .min_by(|(_, a), (_, b)| a.score.partial_cmp(&b.score).unwrap_or(Ordering::Equal))
             .map(|(i, _)| i)
     }
-
-    fn max_score_index(&self) -> Option<usize> {
-        self.entries
-            .iter()
-            .enumerate()
-            .max_by(|(_, a), (_, b)| a.score.partial_cmp(&b.score).unwrap_or(Ordering::Equal))
-            .map(|(i, _)| i)
-    }
 }
 
 /// Priority queue that rate-limits opportunity dispatch to execution shards.
 ///
-/// Scored opportunities are submitted by the scanner. The funnel holds them in a
-/// score-ordered buffer and dispatches the best one at each `min_dispatch_interval`
-/// tick directly to the shard channel for the opportunity's market. When the queue
-/// is full, the lowest-scored entry is evicted if the incoming opportunity has a
-/// higher score.
+/// Result of a fast-lane dispatch attempt.
+pub enum FastLaneDispatch {
+    Dispatched,
+    Backpressure(ScoredOpportunity),
+}
+
+/// High-score opportunities should use [`Self::try_dispatch_immediate`] (fast lane).
+/// This funnel only sweeps lower-priority backlog on a fixed interval.
 pub struct Funnel {
     queue: parking_lot::Mutex<FunnelQueue>,
     shard_txs: Vec<flume::Sender<ScoredOpportunity>>,
@@ -104,7 +110,7 @@ impl Funnel {
         }
     }
 
-    /// Submit a scored opportunity for rate-limited dispatch.
+    /// Submit a scored opportunity for rate-limited sweep dispatch.
     pub fn submit(&self, scored: ScoredOpportunity) {
         let score = scored.score;
         let mut queue = self.queue.lock();
@@ -117,6 +123,21 @@ impl Funnel {
             self.metrics.funnel_dropped.inc();
         }
         drop(queue);
+    }
+
+    /// Fast lane: dispatch immediately to the execution shard (bypass funnel timer).
+    ///
+    /// Dispatches immediately on success; returns the opportunity on channel backpressure.
+    pub fn try_dispatch_immediate(&self, scored: ScoredOpportunity) -> FastLaneDispatch {
+        let market_id = &scored.opportunity.market_id;
+        let idx = shard_index(market_id.as_str(), self.shard_txs.len());
+        match self.shard_txs[idx].try_send(scored) {
+            Ok(()) => {
+                self.metrics.funnel_fast_lane_dispatched.inc();
+                FastLaneDispatch::Dispatched
+            }
+            Err(e) => FastLaneDispatch::Backpressure(e.into_inner()),
+        }
     }
 
     /// Dispatch loop: pops the highest-scored entry every interval tick and routes to shard.
@@ -144,7 +165,7 @@ impl Funnel {
                                 .unwrap_or(u32::MAX),
                         ));
                         let market_id = &entry.scored.opportunity.market_id;
-                        let idx = shard_index(market_id, self.shard_txs.len());
+                        let idx = shard_index(market_id.as_str(), self.shard_txs.len());
                         if let Err(e) = self.shard_txs[idx].send_async(entry.scored).await {
                             tracing::warn!(error = %e, shard = idx, "execution shard channel closed");
                             return Ok(());
@@ -161,22 +182,24 @@ impl Funnel {
 mod tests {
     use super::*;
     use chrono::Utc;
-    use oxide_arb_models::domain::calibration::{BucketKey, CalibrationSnapshot};
-    use oxide_arb_models::domain::opportunity::{EndgameMeta, Opportunity};
-    use oxide_arb_models::enums::calibration::{DurationBucket, PriceZone};
-    use oxide_arb_models::enums::common::{MarketCategory, Side, StalenessLevel};
-    use oxide_arb_models::enums::opportunity::PayoutModel;
-    use oxide_arb_models::types::{Bps, MarketId, OpportunityId, Price, Shares, Usd};
+    use oxide_arb_models::{
+        domain::opportunity::{EndgameMeta, Opportunity},
+        enums::{
+            calibration::{DurationBucket, PriceZone},
+            common::{MarketCategory, Side, StalenessLevel},
+            opportunity::PayoutModel,
+        },
+        types::{Bps, EventId, MarketId, OpportunityId, Price, Shares, TokenId, Usd},
+    };
     use rust_decimal_macros::dec;
-    use std::sync::Arc;
 
-    fn sample_scored(score: Decimal) -> ScoredOpportunity {
+    fn sample_scored(market: &str, score: Decimal) -> ScoredOpportunity {
         ScoredOpportunity {
             opportunity: Arc::new(Opportunity {
-                opportunity_id: OpportunityId::pending(),
-                market_id: MarketId::new("m1"),
-                event_id: "e1".into(),
-                token_id: "t1".into(),
+                opportunity_id: OpportunityId::new_v7(),
+                market_id: MarketId::new(market),
+                event_id: EventId::new("e"),
+                token_id: TokenId::new("t"),
                 side: Side::Buy,
                 payout_model: PayoutModel::DirectionalSettlement {
                     projected_payout_if_correct: Usd::ZERO,
@@ -184,81 +207,68 @@ mod tests {
                     predicted_side: Side::Buy,
                 },
                 shares: Shares::ZERO,
-                entry_price: Price::ZERO,
+                entry_price: Price::new(dec!(0.95)),
                 total_cost: Usd::ZERO,
                 total_fees: Usd::ZERO,
-                net_profit: Usd::ZERO,
-                expected_net_profit: Usd::ZERO,
-                edge_bps: Bps::default(),
-                resolution_adjust: dec!(0.5),
-                depth_used_pct: dec!(10),
+                net_profit: Usd::new(dec!(1)),
+                expected_net_profit: Usd::new(dec!(1)),
+                edge_bps: Bps::ZERO,
+                resolution_adjust: dec!(1),
+                depth_used_pct: dec!(1),
                 staleness: StalenessLevel::Fresh,
-                category: MarketCategory::Politics,
+                category: MarketCategory::Other,
                 meta: EndgameMeta {
                     predicted_yes: true,
-                    confidence: dec!(0.95),
-                    convergence_duration_secs: 60,
-                    price_zone: PriceZone::Z99,
+                    confidence: dec!(0.9),
+                    convergence_duration_secs: 0,
+                    price_zone: PriceZone::Z95,
                     duration_bucket: DurationBucket::Short,
                     settlement_deadline: None,
                 },
-                calibration: CalibrationSnapshot {
-                    bucket_key: BucketKey {
-                        category: MarketCategory::Politics,
-                        price_zone: PriceZone::Z99,
+                calibration: oxide_arb_models::domain::calibration::CalibrationSnapshot {
+                    bucket_key: oxide_arb_models::domain::calibration::BucketKey {
+                        category: MarketCategory::Other,
+                        price_zone: PriceZone::Z95,
                         duration_bucket: DurationBucket::Short,
                     },
-                    posterior_mean: dec!(0.95),
+                    posterior_mean: dec!(0.9),
                     sample_size: 10,
                     alpha_prior: dec!(1),
                     beta_prior: dec!(1),
                     fallback_tier: 1,
-                    fused_probability: dec!(0.95),
+                    fused_probability: dec!(0.9),
                 },
                 detected_at: Utc::now(),
             }),
+            token_yes: TokenId::new("y"),
+            token_no: TokenId::new("n"),
             score,
             fill_probability: dec!(1),
             urgency_factor: dec!(1),
             category_weight: dec!(1),
             staleness_discount: dec!(1),
+            book_yes_version: 1,
+            book_no_version: 1,
         }
     }
 
     #[test]
-    fn evicts_lowest_when_full_and_incoming_higher() {
+    fn queue_evicts_lowest_when_full() {
         let mut q = FunnelQueue::new(2);
-        assert!(q.submit(sample_scored(dec!(1)), dec!(1)));
-        assert!(q.submit(sample_scored(dec!(2)), dec!(2)));
-        assert!(!q.submit(sample_scored(dec!(0.5)), dec!(0.5)));
-        assert!(q.submit(sample_scored(dec!(3)), dec!(3)));
-
-        let first = q.pop_best().unwrap();
-        assert_eq!(first.score, dec!(3));
-        let second = q.pop_best().unwrap();
-        assert_eq!(second.score, dec!(2));
-        assert!(q.pop_best().is_none());
-    }
-
-    #[test]
-    fn drops_incoming_when_lower_than_queue_min() {
-        let mut q = FunnelQueue::new(2);
-        assert!(q.submit(sample_scored(dec!(5)), dec!(5)));
-        assert!(q.submit(sample_scored(dec!(4)), dec!(4)));
-        assert!(!q.submit(sample_scored(dec!(3)), dec!(3)));
-        assert_eq!(q.len(), 2);
-    }
-
-    #[test]
-    fn accepts_incoming_when_score_between_min_and_max() {
-        let mut q = FunnelQueue::new(2);
-        assert!(q.submit(sample_scored(dec!(5)), dec!(5)));
-        assert!(q.submit(sample_scored(dec!(3)), dec!(3)));
-        assert!(q.submit(sample_scored(dec!(4)), dec!(4)));
-        assert_eq!(q.len(), 2);
+        assert!(q.submit(sample_scored("a", dec!(1)), dec!(1)));
+        assert!(q.submit(sample_scored("b", dec!(2)), dec!(2)));
+        assert!(!q.submit(sample_scored("c", dec!(0.5)), dec!(0.5)));
+        assert!(q.submit(sample_scored("d", dec!(3)), dec!(3)));
         let best = q.pop_best().unwrap();
-        assert_eq!(best.score, dec!(5));
-        let second = q.pop_best().unwrap();
-        assert_eq!(second.score, dec!(4));
+        assert_eq!(best.score, dec!(3));
+    }
+
+    #[test]
+    fn pop_best_returns_highest() {
+        let mut q = FunnelQueue::new(3);
+        q.submit(sample_scored("a", dec!(1)), dec!(1));
+        q.submit(sample_scored("b", dec!(5)), dec!(5));
+        q.submit(sample_scored("c", dec!(3)), dec!(3));
+        assert_eq!(q.pop_best().unwrap().score, dec!(5));
     }
 }

@@ -1,44 +1,50 @@
 //! Scanner task — consumes market scan triggers from the coalescer,
-//! looks up market data, invokes the scanner, and submits results to
-//! the funnel for rate-limited dispatch.
+//! looks up market data, invokes the scanner, and dispatches results.
 
 use std::sync::Arc;
 
 use oxide_arb_error::OxideError;
 use oxide_arb_models::types::MarketId;
+use rust_decimal::Decimal;
 use tokio_util::sync::CancellationToken;
 
 use crate::detection::scanner::Scanner;
 use crate::observability::metrics_hub::MetricsHub;
 use crate::pipeline::market_cache::MarketCache;
 
-use super::funnel::Funnel;
+use super::funnel::{FastLaneDispatch, Funnel};
+
+/// Dependencies injected into [`ScannerTask`].
+pub struct ScannerTaskDeps {
+    pub rx: flume::Receiver<MarketId>,
+    pub scanner: Arc<Scanner>,
+    pub market_cache: Arc<MarketCache>,
+    pub funnel: Arc<Funnel>,
+    pub dispatch_immediate_threshold: Decimal,
+    pub shutdown: CancellationToken,
+    pub metrics: Arc<MetricsHub>,
+}
 
 pub struct ScannerTask {
     rx: flume::Receiver<MarketId>,
     scanner: Arc<Scanner>,
     market_cache: Arc<MarketCache>,
     funnel: Arc<Funnel>,
+    dispatch_immediate_threshold: Decimal,
     shutdown: CancellationToken,
     metrics: Arc<MetricsHub>,
 }
 
 impl ScannerTask {
-    pub const fn new(
-        rx: flume::Receiver<MarketId>,
-        scanner: Arc<Scanner>,
-        market_cache: Arc<MarketCache>,
-        funnel: Arc<Funnel>,
-        shutdown: CancellationToken,
-        metrics: Arc<MetricsHub>,
-    ) -> Self {
+    pub fn new(deps: ScannerTaskDeps) -> Self {
         Self {
-            rx,
-            scanner,
-            market_cache,
-            funnel,
-            shutdown,
-            metrics,
+            rx: deps.rx,
+            scanner: deps.scanner,
+            market_cache: deps.market_cache,
+            funnel: deps.funnel,
+            dispatch_immediate_threshold: deps.dispatch_immediate_threshold,
+            shutdown: deps.shutdown,
+            metrics: deps.metrics,
         }
     }
 
@@ -68,8 +74,15 @@ impl ScannerTask {
         };
         let now = chrono::Utc::now();
         if let Some(scored) = self.scanner.scan_market(&entry, now) {
-            self.funnel.submit(scored);
             self.metrics.opportunities_detected.inc();
+            let mut scored = scored;
+            if scored.score >= self.dispatch_immediate_threshold {
+                match self.funnel.try_dispatch_immediate(scored) {
+                    FastLaneDispatch::Dispatched => return,
+                    FastLaneDispatch::Backpressure(s) => scored = s,
+                }
+            }
+            self.funnel.submit(scored);
         }
     }
 }

@@ -58,6 +58,8 @@ impl From<MarketInfo> for MarketRegistryInfo {
         Self {
             market_id: info.market_id,
             event_id: info.event_id,
+            token_yes: info.yes_token_id.clone(),
+            token_no: info.no_token_id.clone(),
             question: info.question,
             slug: info.slug,
             category: info.category,
@@ -92,6 +94,9 @@ pub struct TokenInfo {
 pub struct MarketRegistryInfo {
     pub market_id: MarketId,
     pub event_id: EventId,
+    /// Cached at registration — hot-path lookups avoid scanning `tokens`.
+    pub token_yes: TokenId,
+    pub token_no: TokenId,
     pub question: String,
     pub slug: String,
     pub category: MarketCategory,
@@ -109,6 +114,14 @@ pub struct MarketRegistryInfo {
 }
 
 impl MarketRegistryInfo {
+    /// Populate cached [`Self::token_yes`] / [`Self::token_no`] from `tokens`.
+    pub fn resolve_token_pair(&mut self) -> Result<(), MarketError> {
+        let (yes, no) = self.yes_no_tokens()?;
+        self.token_yes = yes;
+        self.token_no = no;
+        Ok(())
+    }
+
     /// Resolve YES/NO token IDs using outcome labels (case-insensitive).
     ///
     /// Fails closed when either leg is missing — never guesses by token order.

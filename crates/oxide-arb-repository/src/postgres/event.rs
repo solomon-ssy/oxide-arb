@@ -1,3 +1,7 @@
+use super::orm::{
+    ColumnTrait, ConnectionTrait, DatabaseConnection, DatabaseTransaction, EntityTrait,
+    IntoActiveModel, QueryFilter, QuerySelect,
+};
 use crate::traits::EventRepository;
 use num_traits::ToPrimitive;
 use oxide_arb_error::storage::StorageError;
@@ -6,8 +10,6 @@ use oxide_arb_models::entities::event::{ActiveModel, Column, Entity};
 use oxide_arb_models::enums::market::EventStatus;
 use oxide_arb_models::types::EventId;
 use sea_orm::sea_query::OnConflict;
-#[allow(clippy::wildcard_imports)]
-use sea_orm::*;
 use std::collections::HashSet;
 
 pub struct PgEventRepository {

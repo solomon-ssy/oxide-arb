@@ -8,7 +8,7 @@ use rust_decimal_macros::dec;
 
 use oxide_arb_algorithm::{
     calibration::{CalibrationEntry, ResolutionCalibrator},
-    endgame::EndgameDetector,
+    endgame::{EndgameDetectInput, EndgameDetector},
     fee::FeeEstimator,
 };
 use oxide_arb_models::{
@@ -56,7 +56,12 @@ const fn empty_side() -> OrderbookSide {
 }
 
 fn token_snapshot(bids: &[BookLevel], asks: &[BookLevel]) -> Arc<BookSnapshot> {
-    Arc::new(BookSnapshot::new(Arc::from(bids), Arc::from(asks), 0))
+    Arc::new(BookSnapshot::new(
+        Arc::new(bids.to_vec()),
+        Arc::new(asks.to_vec()),
+        0,
+        0,
+    ))
 }
 
 fn pair_from_snapshot(snapshot: &EndgameBookSnapshot) -> EndgameBookPair {
@@ -109,15 +114,17 @@ fn detect(
 ) -> Option<oxide_arb_models::domain::Opportunity> {
     let direction = detector.detect_direction(case.book.view())?;
     detector.detect_with_direction(
-        case.market_id,
-        case.event_id,
-        case.token_yes,
-        case.token_no,
-        case.book,
-        direction,
-        case.category,
-        case.staleness,
-        case.settlement_deadline,
+        &EndgameDetectInput {
+            market_id: case.market_id,
+            event_id: case.event_id,
+            token_yes: case.token_yes,
+            token_no: case.token_no,
+            book: case.book,
+            direction,
+            category: case.category,
+            staleness: case.staleness,
+            settlement_deadline: case.settlement_deadline,
+        },
         case.now,
     )
 }

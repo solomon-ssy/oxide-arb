@@ -113,8 +113,7 @@ impl RiskEngineBuilder {
     /// - `recover_state()` returned an error (already fail-closed)
     /// - Persisted breaker is `Open` with unexpired cooldown
     /// - Active escalated potential-loss entries exist
-    #[allow(clippy::unused_async)]
-    pub async fn build(self, metrics: &dyn RiskMetrics) -> OxideResult<RiskEngine> {
+    pub fn build(self, metrics: &dyn RiskMetrics) -> OxideResult<RiskEngine> {
         let config = self.config.unwrap_or_default();
         let equity = self.initial_equity.unwrap_or_else(|| Usd::new(dec!(1000)));
         let clock = self.clock.unwrap_or_else(clock::utc_clock);

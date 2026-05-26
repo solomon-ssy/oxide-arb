@@ -9,13 +9,17 @@ use chrono::{DateTime, Utc};
 use oxide_arb_models::{
     config::{FillProbabilityConfig, ScorerConfig},
     domain::opportunity::Opportunity,
-    types::OpportunityId,
+    types::{OpportunityId, TokenId},
 };
 use rust_decimal::Decimal;
 
 #[derive(Debug, Clone)]
 pub struct ScoredOpportunity {
     pub opportunity: Arc<Opportunity>,
+    pub token_yes: TokenId,
+    pub token_no: TokenId,
+    pub book_yes_version: u64,
+    pub book_no_version: u64,
     pub score: Decimal,
     pub fill_probability: Decimal,
     pub urgency_factor: Decimal,
@@ -100,12 +104,23 @@ impl EndgameScorer {
 
     /// Wrap a scored opportunity for emission (assigns ID, allocates Arc once).
     #[must_use]
-    pub fn finalize(mut opp: Opportunity, draft: ScoreDraft) -> ScoredOpportunity {
+    pub fn finalize(
+        mut opp: Opportunity,
+        draft: ScoreDraft,
+        token_yes: TokenId,
+        token_no: TokenId,
+        book_yes_version: u64,
+        book_no_version: u64,
+    ) -> ScoredOpportunity {
         if opp.opportunity_id.is_pending() {
             opp.opportunity_id = OpportunityId::new_v7();
         }
         ScoredOpportunity {
             opportunity: Arc::new(opp),
+            token_yes,
+            token_no,
+            book_yes_version,
+            book_no_version,
             score: draft.score,
             fill_probability: draft.fill_probability,
             urgency_factor: draft.urgency_factor,

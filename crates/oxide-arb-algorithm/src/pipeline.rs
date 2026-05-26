@@ -10,7 +10,7 @@ use oxide_arb_models::{
 use rust_decimal::Decimal;
 
 use crate::cooldown::InMemoryEmissionCooldown;
-use crate::endgame::EndgameDetector;
+use crate::endgame::{EndgameDetectInput, EndgameDetector};
 use crate::fee::FeeEstimator;
 use crate::scorer::{EndgameScorer, ScoredOpportunity};
 use crate::staleness::StalenessPolicy;
@@ -54,50 +54,42 @@ impl<F: FeeEstimator> OpportunityPipeline<F> {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     #[inline]
     pub fn process(
         &self,
-        market_id: &MarketId,
-        event_id: &EventId,
-        token_yes: &TokenId,
-        token_no: &TokenId,
-        book: &EndgameBookPair,
-        category: MarketCategory,
-        staleness: StalenessLevel,
-        settlement_deadline: Option<DateTime<Utc>>,
+        input: &MarketScanInput,
         now: DateTime<Utc>,
     ) -> Option<ScoredOpportunity> {
-        if !self.cooldown.may_emit(market_id) {
+        if !self.cooldown.may_emit(&input.market_id) {
             return None;
         }
 
-        if !StalenessPolicy::is_tradeable(staleness) {
+        if !StalenessPolicy::is_tradeable(input.staleness) {
             return None;
         }
 
-        let direction = self.detector.detect_direction(book.view());
+        let direction = self.detector.detect_direction(input.book.view());
         if self
             .detector
-            .should_reset_market_state(direction, settlement_deadline, now)
+            .should_reset_market_state(direction, input.settlement_deadline, now)
         {
-            self.cooldown.reset(market_id);
+            self.cooldown.reset(&input.market_id);
         }
 
         let direction = direction?;
 
-        let opp = self.detector.detect_with_direction(
-            market_id,
-            event_id,
-            token_yes,
-            token_no,
-            book,
+        let detect_input = EndgameDetectInput {
+            market_id: &input.market_id,
+            event_id: &input.event_id,
+            token_yes: &input.token_yes,
+            token_no: &input.token_no,
+            book: &input.book,
             direction,
-            category,
-            staleness,
-            settlement_deadline,
-            now,
-        )?;
+            category: input.category,
+            staleness: input.staleness,
+            settlement_deadline: input.settlement_deadline,
+        };
+        let opp = self.detector.detect_with_direction(&detect_input, now)?;
 
         if opp.expected_net_profit.inner() < self.min_profit_threshold_usd {
             return None;
@@ -112,8 +104,15 @@ impl<F: FeeEstimator> OpportunityPipeline<F> {
             return None;
         }
 
-        self.cooldown.record_emission(market_id);
-        Some(EndgameScorer::finalize(opp, draft))
+        self.cooldown.record_emission(&input.market_id);
+        Some(EndgameScorer::finalize(
+            opp,
+            draft,
+            input.token_yes.clone(),
+            input.token_no.clone(),
+            input.book.yes.version,
+            input.book.no.version,
+        ))
     }
 
     pub fn scan_batch(
@@ -123,19 +122,7 @@ impl<F: FeeEstimator> OpportunityPipeline<F> {
     ) -> Vec<ScoredOpportunity> {
         let mut results: Vec<ScoredOpportunity> = inputs
             .iter()
-            .filter_map(|input| {
-                self.process(
-                    &input.market_id,
-                    &input.event_id,
-                    &input.token_yes,
-                    &input.token_no,
-                    &input.book,
-                    input.category,
-                    input.staleness,
-                    input.settlement_deadline,
-                    now,
-                )
-            })
+            .filter_map(|input| self.process(input, now))
             .collect();
 
         results.sort_by(|a, b| {

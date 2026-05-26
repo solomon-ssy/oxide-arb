@@ -1,3 +1,7 @@
+use super::orm::{
+    ColumnTrait, ConnectionTrait, DatabaseConnection, DatabaseTransaction, EntityTrait,
+    IntoActiveModel, QueryFilter,
+};
 use crate::traits::CalibrationRepository;
 use chrono::Utc;
 use oxide_arb_error::storage::StorageError;
@@ -13,8 +17,6 @@ use oxide_arb_models::entities::calibration_outcome::{
 use oxide_arb_models::enums::calibration::{DurationBucket, PriceZone};
 use oxide_arb_models::enums::common::MarketCategory;
 use sea_orm::sea_query::{Expr, OnConflict};
-#[allow(clippy::wildcard_imports)]
-use sea_orm::*;
 
 // ── helpers ──────────────────────────────────────────────────────────
 

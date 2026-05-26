@@ -1,10 +1,12 @@
+use super::orm::{
+    ColumnTrait, ConnectionTrait, DatabaseConnection, DatabaseTransaction, EntityTrait,
+    IntoActiveModel, QueryFilter,
+};
 use crate::traits::BlacklistPersistenceRepository;
 use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::domain::{BlacklistInfo, UpsertBlacklistEntry};
 use oxide_arb_models::entities::blacklist_entry::{Column, Entity};
 use oxide_arb_models::types::MarketId;
-#[allow(clippy::wildcard_imports)]
-use sea_orm::*;
 
 pub struct PgBlacklistPersistenceRepository {
     db: DatabaseConnection,

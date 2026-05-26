@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
@@ -11,17 +12,17 @@ use oxide_arb_models::types::{MarketId, Price, Shares, TokenId};
 
 use super::order_book::OrderBook;
 use crate::observability::metrics_hub::MetricsHub;
-use crate::pipeline::market_registry::MarketRegistry;
 
 struct TokenBookState {
     live: Mutex<OrderBook>,
     published: ArcSwap<BookSnapshot>,
+    version: AtomicU64,
 }
 
 /// Central orderbook store keyed by token.
 ///
 /// Writers mutate `live` under a short mutex; readers load `published` via
-/// `ArcSwap` with zero locking and zero cloning.
+/// `ArcSwap` with zero locking. Publish bumps `version` and refcount-clones arcs.
 pub struct BookStore {
     books: DashMap<TokenId, Arc<TokenBookState>>,
     metrics: Arc<MetricsHub>,
@@ -42,13 +43,26 @@ impl BookStore {
             return Arc::clone(entry.value());
         }
 
+        let empty = Arc::new(Vec::new());
         let state = Arc::new(TokenBookState {
             live: Mutex::new(OrderBook::new(token_id.clone())),
-            published: ArcSwap::from_pointee(BookSnapshot::new(Arc::from([]), Arc::from([]), 0)),
+            published: ArcSwap::from_pointee(BookSnapshot::new(
+                Arc::clone(&empty),
+                Arc::clone(&empty),
+                0,
+                0,
+            )),
+            version: AtomicU64::new(0),
         });
         self.books.insert(token_id.clone(), Arc::clone(&state));
         self.update_token_count_metric(true);
         state
+    }
+
+    fn bump_and_publish(state: &TokenBookState, book: &OrderBook) -> u64 {
+        let version = state.version.fetch_add(1, Ordering::AcqRel) + 1;
+        state.published.store(Arc::new(book.publish(version)));
+        version
     }
 
     fn update_token_count_metric(&self, force: bool) {
@@ -75,27 +89,39 @@ impl BookStore {
             .map(|entry| entry.value().published.load_full())
     }
 
+    /// Monotonic publish sequence for a token (0 if unknown).
+    #[inline]
+    pub fn book_version(&self, token_id: &TokenId) -> u64 {
+        self.books
+            .get(token_id)
+            .map_or(0, |e| e.value().version.load(Ordering::Acquire))
+    }
+
     pub fn apply_snapshot(
         &self,
         token_id: &TokenId,
         bids: Vec<BookLevel>,
         asks: Vec<BookLevel>,
         timestamp_ms: u64,
-    ) {
+    ) -> u64 {
         let state = self.get_or_create_state(token_id);
         let mut book = state.live.lock();
         book.apply_snapshot(bids, asks, timestamp_ms);
-        state.published.store(Arc::new(book.publish()));
+        let version = Self::bump_and_publish(&state, &book);
+        drop(book);
+        version
     }
 
-    pub fn apply_delta<I>(&self, token_id: &TokenId, changes: I, timestamp_ms: u64)
+    pub fn apply_delta<I>(&self, token_id: &TokenId, changes: I, timestamp_ms: u64) -> u64
     where
         I: IntoIterator<Item = (Price, Shares)>,
     {
         let state = self.get_or_create_state(token_id);
         let mut book = state.live.lock();
         book.apply_delta(changes, timestamp_ms);
-        state.published.store(Arc::new(book.publish()));
+        let version = Self::bump_and_publish(&state, &book);
+        drop(book);
+        version
     }
 
     pub fn remove(&self, token_id: &TokenId) {
@@ -115,23 +141,40 @@ impl BookStore {
         Some(EndgameBookPair { yes, no })
     }
 
-    /// Top-of-book for execution validation (4 prices + staleness, zero depth clone).
-    pub fn top_of_book(
+    /// Top-of-book for execution validation (four prices + staleness + versions).
+    #[inline]
+    pub fn top_of_book_tokens(
         &self,
-        registry: &MarketRegistry,
-        market_id: &MarketId,
+        token_yes: &TokenId,
+        token_no: &TokenId,
         now_ms: u64,
     ) -> Option<TopOfBook> {
-        let (token_yes, token_no) = registry.token_pair(market_id)?;
-        let yes = self.load(&token_yes)?;
-        let no = self.load(&token_no)?;
+        let yes = self.load(token_yes)?;
+        let no = self.load(token_no)?;
         Some(TopOfBook {
             yes_best_bid: yes.best_bid(),
             yes_best_ask: yes.best_ask(),
             no_best_bid: no.best_bid(),
             no_best_ask: no.best_ask(),
-            max_staleness_ms: EndgameBookPair { yes, no }.max_staleness_ms(now_ms),
+            max_staleness_ms: EndgameBookPair {
+                yes: Arc::clone(&yes),
+                no: Arc::clone(&no),
+            }
+            .max_staleness_ms(now_ms),
+            yes_version: yes.version,
+            no_version: no.version,
         })
+    }
+
+    /// Top-of-book via registry lookup (prefer [`Self::top_of_book_tokens`] on hot path).
+    pub fn top_of_book(
+        &self,
+        registry: &super::market_registry::MarketRegistry,
+        market_id: &MarketId,
+        now_ms: u64,
+    ) -> Option<TopOfBook> {
+        let (token_yes, token_no) = registry.token_pair(market_id)?;
+        self.top_of_book_tokens(&token_yes, &token_no, now_ms)
     }
 }
 
@@ -151,17 +194,19 @@ mod tests {
         let store = BookStore::new(metrics);
 
         let tid = TokenId::new("tok-1");
-        store.apply_snapshot(
+        let v = store.apply_snapshot(
             &tid,
             vec![make_level(dec!(0.5), dec!(10))],
             vec![make_level(dec!(0.6), dec!(5))],
             100,
         );
+        assert_eq!(v, 1);
         assert_eq!(store.token_count(), 1);
 
         let snap = store.load(&tid).unwrap();
         assert_eq!(snap.best_bid().unwrap().inner(), dec!(0.5));
         assert_eq!(snap.best_ask().unwrap().inner(), dec!(0.6));
+        assert_eq!(store.book_version(&tid), 1);
     }
 
     #[test]
@@ -174,5 +219,15 @@ mod tests {
         store.apply_snapshot(&no, vec![], vec![make_level(dec!(0.05), dec!(10))], 1);
         let pair = store.load_pair(&yes, &no).unwrap();
         assert_eq!(pair.view().yes_bids.levels.len(), 1);
+    }
+
+    #[test]
+    fn version_increments_on_delta() {
+        let metrics = Arc::new(MetricsHub::new());
+        let store = BookStore::new(metrics);
+        let tid = TokenId::new("t");
+        store.apply_snapshot(&tid, vec![make_level(dec!(0.5), dec!(1))], vec![], 1);
+        let v2 = store.apply_delta(&tid, [(Price::new(dec!(0.55)), Shares::new(dec!(2)))], 2);
+        assert_eq!(v2, 2);
     }
 }

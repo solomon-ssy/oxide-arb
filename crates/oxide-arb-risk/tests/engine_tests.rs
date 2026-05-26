@@ -102,7 +102,7 @@ fn test_trade_record(outcome: TradeOutcome, profit: Decimal) -> PostTradeInput {
     }
 }
 
-async fn build_engine(metrics: &dyn RiskMetrics) -> RiskEngine {
+fn build_engine(metrics: &dyn RiskMetrics) -> RiskEngine {
     let config = RiskConfig {
         max_total_exposure_usd: dec!(5000),
         max_single_market_exposure_usd: dec!(500),
@@ -123,7 +123,6 @@ async fn build_engine(metrics: &dyn RiskMetrics) -> RiskEngine {
         .clock(utc_clock())
         .initial_equity(Usd::new(dec!(5000)))
         .build(metrics)
-        .await
         .expect("engine should build")
 }
 
@@ -132,7 +131,7 @@ async fn build_engine(metrics: &dyn RiskMetrics) -> RiskEngine {
 #[tokio::test]
 async fn healthy_engine_allows_trade() {
     let metrics = MockMetrics::default();
-    let engine = build_engine(&metrics).await;
+    let engine = build_engine(&metrics);
 
     let opp = Arc::new(test_opportunity());
     let prob = test_probability();
@@ -151,7 +150,7 @@ async fn healthy_engine_allows_trade() {
 #[tokio::test]
 async fn halted_engine_denies_trade() {
     let metrics = MockMetrics::default();
-    let engine = build_engine(&metrics).await;
+    let engine = build_engine(&metrics);
     engine.halt("manual halt for test".into()).await;
 
     let opp = Arc::new(test_opportunity());
@@ -176,7 +175,7 @@ async fn tripped_breaker_denies_trade() {
         consecutive_misses: 5, // above max_consecutive_misses=3
         ..MockMetrics::default()
     };
-    let engine = build_engine(&metrics).await;
+    let engine = build_engine(&metrics);
 
     let trade = test_trade_record(TradeOutcome::Miss, dec!(-5));
     engine
@@ -206,7 +205,7 @@ async fn low_balance_denies_trade() {
         balance: Usd::new(dec!(10)), // below min_balance_usd=50
         ..MockMetrics::default()
     };
-    let engine = build_engine(&metrics).await;
+    let engine = build_engine(&metrics);
 
     let opp = Arc::new(test_opportunity());
     let prob = test_probability();
@@ -220,7 +219,7 @@ async fn low_balance_denies_trade() {
 #[tokio::test]
 async fn full_report_runs_all_checks() {
     let metrics = MockMetrics::default();
-    let engine = build_engine(&metrics).await;
+    let engine = build_engine(&metrics);
     engine.halt("halt for full report test".into()).await;
 
     let opp = Arc::new(test_opportunity());
@@ -240,7 +239,7 @@ async fn full_report_runs_all_checks() {
 #[tokio::test]
 async fn on_trade_result_updates_accounting() {
     let metrics = MockMetrics::default();
-    let engine = build_engine(&metrics).await;
+    let engine = build_engine(&metrics);
 
     let trade = test_trade_record(TradeOutcome::Success, dec!(5));
     let report = engine
@@ -284,7 +283,6 @@ async fn tick_drives_breaker_transitions() {
         .clock(utc_clock())
         .initial_equity(Usd::new(dec!(5000)))
         .build(&metrics)
-        .await
         .unwrap();
 
     // Trip the breaker via on_trade_result (consecutive misses >= threshold)
@@ -324,7 +322,7 @@ async fn tick_drives_breaker_transitions() {
 #[tokio::test]
 async fn acknowledge_and_resume_clears_halt() {
     let metrics = MockMetrics::default();
-    let engine = build_engine(&metrics).await;
+    let engine = build_engine(&metrics);
 
     engine.halt("test halt".into()).await;
     assert!(engine.is_halted());
@@ -358,7 +356,6 @@ async fn heartbeat_failures_trigger_system_halt() {
         .config(config)
         .clock(utc_clock())
         .build(&metrics)
-        .await
         .unwrap();
 
     engine.on_execution_event(ExecutionRiskEvent::HeartbeatFailure);
