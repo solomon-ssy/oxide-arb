@@ -8,10 +8,9 @@ use crate::urgency::UrgencyFactor;
 use chrono::{DateTime, Utc};
 use oxide_arb_models::{
     config::{FillProbabilityConfig, ScorerConfig},
-    domain::opportunity::Opportunity,
-    types::{OpportunityId, TokenId},
+    domain::{latency::LatencyTrace, opportunity::Opportunity},
+    types::{MicroPct, MicroProb, MicroScore, MicroUsd, OpportunityId, TokenId},
 };
-use rust_decimal::Decimal;
 
 #[derive(Debug, Clone)]
 pub struct ScoredOpportunity {
@@ -20,27 +19,28 @@ pub struct ScoredOpportunity {
     pub token_no: TokenId,
     pub book_yes_version: u64,
     pub book_no_version: u64,
-    pub score: Decimal,
-    pub fill_probability: Decimal,
-    pub urgency_factor: Decimal,
-    pub category_weight: Decimal,
-    pub staleness_discount: Decimal,
+    pub score: MicroScore,
+    pub fill_probability: MicroProb,
+    pub urgency_factor: MicroProb,
+    pub category_weight: MicroProb,
+    pub staleness_discount: MicroProb,
+    pub trace: LatencyTrace,
 }
 
 /// Score components computed before final emit gates.
 #[derive(Debug, Clone, Copy)]
 pub struct ScoreDraft {
-    pub score: Decimal,
-    pub fill_probability: Decimal,
-    pub urgency_factor: Decimal,
-    pub category_weight: Decimal,
-    pub staleness_discount: Decimal,
+    pub score: MicroScore,
+    pub fill_probability: MicroProb,
+    pub urgency_factor: MicroProb,
+    pub category_weight: MicroProb,
+    pub staleness_discount: MicroProb,
 }
 
 pub struct EndgameScorer {
-    category_weights: [Decimal; 10],
-    min_score: Decimal,
-    max_depth_usage_pct: Decimal,
+    category_weights: [MicroProb; 10],
+    min_score: MicroScore,
+    max_depth_usage_pct: MicroPct,
     fill_estimator: FillProbabilityEstimator,
     settlement_window_hours: u64,
 }
@@ -52,7 +52,7 @@ impl EndgameScorer {
         fill_config: &FillProbabilityConfig,
         settlement_window_hours: u64,
     ) -> Self {
-        let mut category_weights = [Decimal::ONE; 10];
+        let mut category_weights = [MicroProb::ONE; 10];
         for (cat, weight) in config.category_weights {
             category_weights[cat.table_index()] = weight;
         }
@@ -76,22 +76,23 @@ impl EndgameScorer {
             .settlement_deadline
             .map_or(i64::MAX, |d| (d - now).num_hours());
 
-        let fill_prob =
-            self.fill_estimator
-                .estimate(opp.depth_used_pct, opp.staleness, hours_to_settlement);
+        let depth_pct =
+            MicroPct::try_from_pct_decimal(opp.depth_used_pct).unwrap_or(MicroPct::ZERO);
+        let fill_prob = self
+            .fill_estimator
+            .estimate(depth_pct, opp.staleness, hours_to_settlement);
 
-        let urgency = UrgencyFactor::compute(
-            Decimal::from(hours_to_settlement.max(0)),
-            Decimal::from(self.settlement_window_hours),
-        );
+        let urgency =
+            UrgencyFactor::compute(hours_to_settlement.max(0), self.settlement_window_hours);
 
         let staleness_discount = StalenessPolicy::confidence_discount(opp.staleness);
 
-        let score = opp.expected_net_profit.inner()
-            * fill_prob
-            * urgency
-            * category_weight
-            * staleness_discount;
+        let profit =
+            MicroUsd::try_from_decimal(opp.expected_net_profit.inner()).unwrap_or(MicroUsd::ZERO);
+        let score = MicroScore::from_profit_prob(profit, fill_prob)
+            .scale_by_factor(urgency)
+            .scale_by_factor(category_weight)
+            .scale_by_factor(staleness_discount);
 
         ScoreDraft {
             score,
@@ -111,11 +112,13 @@ impl EndgameScorer {
         token_no: TokenId,
         book_yes_version: u64,
         book_no_version: u64,
-    ) -> ScoredOpportunity {
+        mut trace: LatencyTrace,
+    ) -> Arc<ScoredOpportunity> {
         if opp.opportunity_id.is_pending() {
             opp.opportunity_id = OpportunityId::new_v7();
         }
-        ScoredOpportunity {
+        trace.mark_scan_emitted();
+        Arc::new(ScoredOpportunity {
             opportunity: Arc::new(opp),
             token_yes,
             token_no,
@@ -126,16 +129,17 @@ impl EndgameScorer {
             urgency_factor: draft.urgency_factor,
             category_weight: draft.category_weight,
             staleness_discount: draft.staleness_discount,
-        }
+            trace,
+        })
     }
 
     #[must_use]
-    pub const fn min_score(&self) -> Decimal {
+    pub const fn min_score(&self) -> MicroScore {
         self.min_score
     }
 
     #[must_use]
-    pub const fn max_depth_usage_pct(&self) -> Decimal {
+    pub const fn max_depth_usage_pct(&self) -> MicroPct {
         self.max_depth_usage_pct
     }
 }

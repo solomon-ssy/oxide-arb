@@ -38,6 +38,7 @@ thiserror = { workspace = true }
 tracing   = { workspace = true }
 
 # ── Concurrency ────────────────────────────────────────────────────
+ahash       = { workspace = true }
 dashmap     = { workspace = true }
 parking_lot = { workspace = true }
 arc-swap    = { workspace = true }
@@ -61,6 +62,10 @@ rand = "0.10"
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 wiremock = { workspace = true }
+hex = { workspace = true }
+serde_json = { workspace = true }
+alloy = { workspace = true }
+polymarket_client_sdk_v2 = { workspace = true }
 testcontainers = { workspace = true }
 testcontainers-modules = { workspace = true, features = ["postgres", "redis"] }
 proptest = "1"

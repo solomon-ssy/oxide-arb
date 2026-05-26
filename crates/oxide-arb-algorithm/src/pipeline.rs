@@ -1,13 +1,15 @@
 //! End-to-end opportunity pipeline: detect → filter → score → cooldown → emit.
 
+use std::sync::Arc;
+
 use chrono::{DateTime, Utc};
 use oxide_arb_models::{
     config::ScorerConfig,
     domain::book::EndgameBookPair,
+    domain::latency::LatencyTrace,
     enums::common::{MarketCategory, StalenessLevel},
-    types::{EventId, MarketId, TokenId},
+    types::{EventId, MarketId, MicroPct, MicroScore, MicroUsd, TokenId},
 };
-use rust_decimal::Decimal;
 
 use crate::cooldown::InMemoryEmissionCooldown;
 use crate::endgame::{EndgameDetectInput, EndgameDetector};
@@ -24,6 +26,7 @@ pub struct MarketScanInput {
     pub category: MarketCategory,
     pub staleness: StalenessLevel,
     pub settlement_deadline: Option<DateTime<Utc>>,
+    pub latency: LatencyTrace,
 }
 
 /// Borrowed scan input — avoids cloning `Arc<str>` IDs on the hot path.
@@ -36,11 +39,12 @@ pub struct MarketScanInputRef<'a> {
     pub category: MarketCategory,
     pub staleness: StalenessLevel,
     pub settlement_deadline: Option<DateTime<Utc>>,
+    pub latency: LatencyTrace,
 }
 
 impl MarketScanInput {
     #[inline]
-    pub const fn as_ref(&self) -> MarketScanInputRef<'_> {
+    pub fn as_ref(&self) -> MarketScanInputRef<'_> {
         MarketScanInputRef {
             market_id: &self.market_id,
             event_id: &self.event_id,
@@ -50,6 +54,7 @@ impl MarketScanInput {
             category: self.category,
             staleness: self.staleness,
             settlement_deadline: self.settlement_deadline,
+            latency: self.latency.clone(),
         }
     }
 }
@@ -58,9 +63,9 @@ pub struct OpportunityPipeline<F: FeeEstimator> {
     detector: EndgameDetector<F>,
     scorer: EndgameScorer,
     cooldown: InMemoryEmissionCooldown,
-    min_profit_threshold_usd: Decimal,
-    max_depth_usage_pct: Decimal,
-    min_score: Decimal,
+    min_profit_threshold_usd: MicroUsd,
+    max_depth_usage_pct: MicroPct,
+    min_score: MicroScore,
 }
 
 impl<F: FeeEstimator> OpportunityPipeline<F> {
@@ -69,7 +74,7 @@ impl<F: FeeEstimator> OpportunityPipeline<F> {
         detector: EndgameDetector<F>,
         scorer: EndgameScorer,
         cooldown: InMemoryEmissionCooldown,
-        min_profit_threshold_usd: Decimal,
+        min_profit_threshold_usd: MicroUsd,
         scorer_config: &ScorerConfig,
     ) -> Self {
         Self {
@@ -87,7 +92,7 @@ impl<F: FeeEstimator> OpportunityPipeline<F> {
         &self,
         input: &MarketScanInput,
         now: DateTime<Utc>,
-    ) -> Option<ScoredOpportunity> {
+    ) -> Option<Arc<ScoredOpportunity>> {
         self.process_ref(&input.as_ref(), now)
     }
 
@@ -96,7 +101,7 @@ impl<F: FeeEstimator> OpportunityPipeline<F> {
         &self,
         input: &MarketScanInputRef<'_>,
         now: DateTime<Utc>,
-    ) -> Option<ScoredOpportunity> {
+    ) -> Option<Arc<ScoredOpportunity>> {
         if !self.cooldown.may_emit(input.market_id) {
             return None;
         }
@@ -128,11 +133,15 @@ impl<F: FeeEstimator> OpportunityPipeline<F> {
         };
         let opp = self.detector.detect_with_direction(&detect_input, now)?;
 
-        if opp.expected_net_profit.inner() < self.min_profit_threshold_usd {
+        let profit =
+            MicroUsd::try_from_decimal(opp.expected_net_profit.inner()).unwrap_or(MicroUsd::ZERO);
+        if profit < self.min_profit_threshold_usd {
             return None;
         }
 
-        if opp.depth_used_pct > self.max_depth_usage_pct {
+        let depth_pct =
+            MicroPct::try_from_pct_decimal(opp.depth_used_pct).unwrap_or(MicroPct::ZERO);
+        if depth_pct > self.max_depth_usage_pct {
             return None;
         }
 
@@ -149,6 +158,7 @@ impl<F: FeeEstimator> OpportunityPipeline<F> {
             input.token_no.clone(),
             input.book.yes.version,
             input.book.no.version,
+            input.latency.clone(),
         ))
     }
 
@@ -156,17 +166,13 @@ impl<F: FeeEstimator> OpportunityPipeline<F> {
         &self,
         inputs: &[MarketScanInput],
         now: DateTime<Utc>,
-    ) -> Vec<ScoredOpportunity> {
-        let mut results: Vec<ScoredOpportunity> = inputs
+    ) -> Vec<Arc<ScoredOpportunity>> {
+        let mut results: Vec<Arc<ScoredOpportunity>> = inputs
             .iter()
             .filter_map(|input| self.process(input, now))
             .collect();
 
-        results.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        results.sort_by(|a, b| a.score.cmp_desc(b.score));
         results
     }
 

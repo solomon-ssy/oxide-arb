@@ -56,12 +56,7 @@ const fn empty_side() -> OrderbookSide {
 }
 
 fn token_snapshot(bids: &[BookLevel], asks: &[BookLevel]) -> Arc<BookSnapshot> {
-    Arc::new(BookSnapshot::new(
-        Arc::new(bids.to_vec()),
-        Arc::new(asks.to_vec()),
-        0,
-        0,
-    ))
+    Arc::new(BookSnapshot::new(Arc::from(bids), Arc::from(asks), 0, 0))
 }
 
 fn pair_from_snapshot(snapshot: &EndgameBookSnapshot) -> EndgameBookPair {

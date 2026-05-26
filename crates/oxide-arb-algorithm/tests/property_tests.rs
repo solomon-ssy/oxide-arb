@@ -11,7 +11,7 @@ use oxide_arb_models::{
     domain::BookLevel,
     enums::calibration::{DurationBucket, PriceZone},
     enums::common::StalenessLevel,
-    types::{MicroPrice, MicroUsd, Price, Shares},
+    types::{MicroPct, MicroPrice, MicroProb, MicroUsd, Price, Shares},
 };
 use proptest::prelude::*;
 use rust_decimal::Decimal;
@@ -62,12 +62,12 @@ proptest! {
         let config = CalibrationConfig::default();
         let fusion = ConfidenceFusion::new(&config);
         let result = fusion.fuse(
-            Decimal::try_from(p_cal).unwrap(),
-            Decimal::try_from(p_rt).unwrap(),
+            MicroProb::try_from_decimal(Decimal::try_from(p_cal).unwrap()).unwrap(),
+            MicroProb::try_from_decimal(Decimal::try_from(p_rt).unwrap()).unwrap(),
             n,
         );
-        assert!(result >= config.fused_p_floor);
-        assert!(result <= config.fused_p_ceiling);
+        assert!(result.to_decimal() >= config.fused_p_floor);
+        assert!(result.to_decimal() <= config.fused_p_ceiling);
     }
 }
 
@@ -80,16 +80,16 @@ proptest! {
         hours in 0_i64..48,
     ) {
         let estimator = FillProbabilityEstimator::new(&FillProbabilityConfig::default());
-        let d = Decimal::try_from(depth_pct).unwrap();
+        let d = MicroPct::try_from_pct_decimal(Decimal::try_from(depth_pct).unwrap()).unwrap();
 
         let fresh = estimator.estimate(d, StalenessLevel::Fresh, hours);
         let acceptable = estimator.estimate(d, StalenessLevel::Acceptable, hours);
         let stale = estimator.estimate(d, StalenessLevel::Stale, hours);
         let expired = estimator.estimate(d, StalenessLevel::Expired, hours);
 
-        assert!(fresh >= acceptable);
-        assert!(acceptable >= stale);
-        assert!(stale >= expired);
+        assert!(fresh.micro() >= acceptable.micro());
+        assert!(acceptable.micro() >= stale.micro());
+        assert!(stale.micro() >= expired.micro());
     }
 }
 
@@ -98,20 +98,16 @@ proptest! {
 proptest! {
     #[test]
     fn urgency_monotonically_increasing(
-        hours_a in 0.0_f64..24.0,
-        hours_b in 0.0_f64..24.0,
+        hours_a in 0_i64..24,
+        hours_b in 0_i64..24,
     ) {
-        let a = Decimal::try_from(hours_a).unwrap();
-        let b = Decimal::try_from(hours_b).unwrap();
-        let window = dec!(24);
+        let ua = UrgencyFactor::compute(hours_a, 24);
+        let ub = UrgencyFactor::compute(hours_b, 24);
 
-        let ua = UrgencyFactor::compute(a, window);
-        let ub = UrgencyFactor::compute(b, window);
-
-        if a < b {
-            assert!(ua >= ub);
-        } else if a > b {
-            assert!(ub >= ua);
+        if hours_a < hours_b {
+            assert!(ua.micro() >= ub.micro());
+        } else if hours_a > hours_b {
+            assert!(ub.micro() >= ua.micro());
         }
     }
 }
@@ -151,11 +147,11 @@ proptest! {
         secs in 0_u64..200_000,
     ) {
         let result = compute_realtime_confidence(
-            Decimal::try_from(price).unwrap(),
+            MicroPrice::try_from_decimal(Decimal::try_from(price).unwrap()).unwrap(),
             secs,
-            dec!(0.95),
+            MicroPrice::try_from_decimal(dec!(0.95)).unwrap(),
         );
-        assert!(result >= dec!(0.50));
-        assert!(result <= dec!(0.995));
+        assert!(result.to_decimal() >= dec!(0.50));
+        assert!(result.to_decimal() <= dec!(0.995));
     }
 }

@@ -6,11 +6,11 @@ use std::sync::Arc;
 
 /// Single-token L2 orderbook (mutable writer-side state).
 ///
-/// `bids` / `asks` are [`Arc<Vec<BookLevel>>`]; deltas use [`Arc::make_mut`].
-/// [`Self::publish`] refcount-clones into [`BookSnapshot`] without copying levels.
+/// Sides are [`Arc<[BookLevel]>`]; [`Self::publish_cow`] shares storage with readers
+/// via refcount clone. Deltas copy a side only when a published snapshot still holds it.
 pub struct OrderBook {
-    bids: Arc<Vec<BookLevel>>,
-    asks: Arc<Vec<BookLevel>>,
+    bids: Arc<[BookLevel]>,
+    asks: Arc<[BookLevel]>,
     last_update_ms: u64,
     token_id: TokenId,
 }
@@ -18,14 +18,14 @@ pub struct OrderBook {
 impl OrderBook {
     pub fn new(token_id: TokenId) -> Self {
         Self {
-            bids: Arc::new(Vec::with_capacity(64)),
-            asks: Arc::new(Vec::with_capacity(64)),
+            bids: Arc::from([]),
+            asks: Arc::from([]),
             last_update_ms: 0,
             token_id,
         }
     }
 
-    /// Replace the entire book (WS `BookSnapshot` event).
+    /// Replace the entire book (WS snapshot).
     pub fn apply_snapshot(
         &mut self,
         mut bids: Vec<BookLevel>,
@@ -38,12 +38,30 @@ impl OrderBook {
         bids.retain(|l| l.size.is_positive());
         asks.retain(|l| l.size.is_positive());
 
-        self.bids = Arc::new(bids);
-        self.asks = Arc::new(asks);
+        self.bids = Arc::from(bids);
+        self.asks = Arc::from(asks);
         self.last_update_ms = timestamp_ms;
     }
 
+    /// Apply pre-built snapshot sides (sorts/filters into fresh live storage).
+    pub fn apply_snapshot_arc(
+        &mut self,
+        bids: &Arc<[BookLevel]>,
+        asks: &Arc<[BookLevel]>,
+        timestamp_ms: u64,
+    ) {
+        self.apply_snapshot(bids.to_vec(), asks.to_vec(), timestamp_ms);
+    }
+
     pub fn apply_delta<I>(&mut self, changes: I, timestamp_ms: u64)
+    where
+        I: IntoIterator<Item = (Price, Shares)>,
+    {
+        self.apply_delta_cow(changes, timestamp_ms);
+    }
+
+    /// Incremental update with explicit copy-on-write when a published snapshot still references a side.
+    pub fn apply_delta_cow<I>(&mut self, changes: I, timestamp_ms: u64)
     where
         I: IntoIterator<Item = (Price, Shares)>,
     {
@@ -51,34 +69,48 @@ impl OrderBook {
             let Ok(level) = BookLevel::from_decimal(price, size) else {
                 continue;
             };
-            let on_bids = find_level(self.bids.as_ref(), level.price, true).is_ok();
-            let on_asks = find_level(self.asks.as_ref(), level.price, false).is_ok();
+            let on_bids = find_level(&self.bids, level.price, true).is_ok();
+            let on_asks = find_level(&self.asks, level.price, false).is_ok();
 
             if on_bids {
-                apply_level_delta(Arc::make_mut(&mut self.bids), level, true);
+                mutate_side(&mut self.bids, |levels| {
+                    apply_level_delta(levels, level, true);
+                });
             } else if on_asks {
-                apply_level_delta(Arc::make_mut(&mut self.asks), level, false);
+                mutate_side(&mut self.asks, |levels| {
+                    apply_level_delta(levels, level, false);
+                });
             } else if level.size.is_positive() {
                 if self.should_place_on_bids(price) {
-                    apply_level_delta(Arc::make_mut(&mut self.bids), level, true);
+                    mutate_side(&mut self.bids, |levels| {
+                        apply_level_delta(levels, level, true);
+                    });
                 } else {
-                    apply_level_delta(Arc::make_mut(&mut self.asks), level, false);
+                    mutate_side(&mut self.asks, |levels| {
+                        apply_level_delta(levels, level, false);
+                    });
                 }
             }
         }
         self.last_update_ms = timestamp_ms;
     }
 
-    /// Publish a refcount-only snapshot (no level copy when arcs are unshared).
+    /// Publish a refcount-only snapshot (no level copy while uniquely owned).
     #[must_use]
     #[inline]
-    pub fn publish(&self, version: u64) -> BookSnapshot {
+    pub fn publish_cow(&self, version: u64) -> BookSnapshot {
         BookSnapshot::new(
             Arc::clone(&self.bids),
             Arc::clone(&self.asks),
             self.last_update_ms,
             version,
         )
+    }
+
+    #[must_use]
+    #[inline]
+    pub fn publish(&self, version: u64) -> BookSnapshot {
+        self.publish_cow(version)
     }
 
     #[inline]
@@ -158,6 +190,13 @@ impl OrderBook {
 }
 
 #[inline]
+fn mutate_side(side: &mut Arc<[BookLevel]>, mut f: impl FnMut(&mut Vec<BookLevel>)) {
+    let mut levels = side.to_vec();
+    f(&mut levels);
+    *side = Arc::from(levels);
+}
+
+#[inline]
 fn find_level(levels: &[BookLevel], price: MicroPrice, descending: bool) -> Result<usize, usize> {
     let cmp_fn = |probe: &BookLevel| -> Ordering {
         if descending {
@@ -214,18 +253,36 @@ mod tests {
     }
 
     #[test]
-    fn publish_refcount_clones_arc_without_level_copy() {
+    fn publish_cow_refcount_without_level_copy() {
         let mut ob = OrderBook::new(TokenId::new("t1"));
         ob.apply_snapshot(
             vec![lvl(dec!(0.5), dec!(10))],
             vec![lvl(dec!(0.6), dec!(5))],
             1,
         );
-        let snap = ob.publish(1);
+        let snap = ob.publish_cow(1);
         assert_eq!(snap.bids.len(), 1);
         assert_eq!(snap.best_bid().unwrap().inner(), dec!(0.5));
         assert!(snap.total_ask_depth_usd.is_positive());
         assert_eq!(Arc::strong_count(&snap.bids), 2);
+    }
+
+    #[test]
+    fn delta_cow_clones_side_when_snapshot_shared() {
+        let mut ob = OrderBook::new(TokenId::new("t1"));
+        ob.apply_snapshot(
+            vec![lvl(dec!(0.5), dec!(10))],
+            vec![lvl(dec!(0.7), dec!(5))],
+            100,
+        );
+        let snap = ob.publish_cow(1);
+        assert_eq!(Arc::strong_count(&snap.bids), 2);
+
+        ob.apply_delta_cow([(Price::new(dec!(0.5)), Shares::new(dec!(20)))], 200);
+        assert_eq!(Arc::strong_count(&snap.bids), 1);
+        assert_eq!(ob.bids[0].size.to_decimal(), dec!(20));
+        assert_eq!(snap.bids[0].size.to_decimal(), dec!(10));
+        assert!(!Arc::ptr_eq(&ob.bids, &snap.bids));
     }
 
     #[test]
@@ -237,7 +294,7 @@ mod tests {
             100,
         );
 
-        ob.apply_delta(
+        ob.apply_delta_cow(
             [
                 (Price::new(dec!(0.5)), Shares::new(dec!(20))),
                 (Price::new(dec!(0.55)), Shares::new(dec!(15))),

@@ -9,8 +9,9 @@
 //! - `OXIDE_ARB_TEST_TOKEN_ID` — decimal CLOB token id (skips Gamma discovery)
 
 use oxide_arb_api::gamma::GammaClient;
-use oxide_arb_api::ws::{ClobWsManager, WsEvent};
+use oxide_arb_api::ws::ClobWsManager;
 use oxide_arb_models::config::{GammaConfig, PolymarketConfig, WebSocketConfig};
+use oxide_arb_models::domain::pipeline::PipelineEvent;
 use oxide_arb_models::types::TokenId;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -43,15 +44,13 @@ async fn ws_receives_book_snapshot_for_subscribed_token() {
         loop {
             let event = events.recv_async().await.expect("event channel open");
             match event {
-                WsEvent::BookSnapshot {
-                    asset_id,
-                    bids,
-                    asks,
-                    ..
-                } if asset_id == token && (!bids.is_empty() || !asks.is_empty()) => {
+                PipelineEvent::BookSnapshot(cmd)
+                    if cmd.asset_id == token
+                        && (!cmd.bids.levels.is_empty() || !cmd.asks.levels.is_empty()) =>
+                {
                     return;
                 }
-                WsEvent::ShardStatus { status, .. } => {
+                PipelineEvent::ShardStatus { status, .. } => {
                     tracing::debug!(?status, "shard status");
                 }
                 _ => {}

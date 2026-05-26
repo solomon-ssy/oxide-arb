@@ -13,7 +13,7 @@ use crate::audit_sink::{AuditEnqueueResult, AuditSink};
 use crate::blacklist::BlacklistManager;
 use crate::circuit_breaker::CircuitBreaker;
 use crate::clock::Clock;
-use crate::context::{BlacklistGate, CircuitBreakerGate, ManualHaltGate, RiskContext};
+use crate::context::{CircuitBreakerGate, ManualHaltGate, PreTradeContext};
 use crate::pipeline::StaticRiskPipeline;
 use crate::position::{PositionTracker, PotentialLossLedger};
 use crate::reconciliation::LedgerReconciler;
@@ -25,7 +25,7 @@ use crate::snapshot::{
 use crate::traits::{RiskMetrics, RiskMetricsSnapshot, RiskPersistence};
 use crate::types::{
     AtomicStateVersion, BreakerState, ExecutionRiskEvent, PostTradeReport, ReconciliationReport,
-    ReportMode, RiskDecision, StateVersion,
+    ReportMode, RiskDecision,
 };
 use arc_swap::ArcSwap;
 use num_traits::ToPrimitive;
@@ -41,14 +41,12 @@ use oxide_arb_models::domain::risk::{
 };
 use oxide_arb_models::domain::trade::PostTradeInput;
 use oxide_arb_models::enums::ReconciliationStatus;
-use oxide_arb_models::enums::blacklist::BlacklistCheckResult;
 use oxide_arb_models::enums::common::LedgerStatus;
 use oxide_arb_models::enums::risk::{
-    BlacklistReason, BlacklistScope, CircuitBreakerLevel, TradeAccountingPhase, WindowType,
+    BlacklistReason, CircuitBreakerLevel, TradeAccountingPhase, WindowType,
 };
 use oxide_arb_models::types::{LedgerId, MarketId, OpportunityId, Price, Shares, Usd};
 use parking_lot::RwLock;
-use rust_decimal::Decimal;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -93,9 +91,10 @@ where
     /// (`TradeAllowed` or `TradeDenied`) when an [`AuditSink`] is configured.
     /// Audit enqueue failures are best-effort and never halt the engine.
     #[must_use]
+    #[inline]
     pub fn pre_trade_check_core<M: RiskMetrics>(
         &self,
-        opp: &Arc<Opportunity>,
+        opp: &Opportunity,
         probability: &ProbabilityInput,
         metrics: &M,
         mode: ReportMode,
@@ -105,7 +104,13 @@ where
         let version = self.state_version.load();
         let snap = self.risk_snapshot.load();
 
-        let phase1_ctx = self.build_context_phase1(opp, probability, &snap, version, now);
+        let phase1_ctx = PreTradeContext {
+            opportunity: opp,
+            probability: *probability,
+            snap: &snap,
+            metrics: RiskMetricsSnapshot::zeroed(),
+            now,
+        };
         let mut gate_report = self
             .pipeline
             .evaluate_range(&phase1_ctx, mode, 0, PHASE1_GATE_COUNT);
@@ -114,12 +119,18 @@ where
             phase1_ctx
         } else {
             let metrics_snap = metrics.snapshot_for(&opp.market_id);
-            let ctx = self.build_context_full(opp, probability, &snap, &metrics_snap, version, now);
-            let phase2 =
-                self.pipeline
-                    .evaluate_range(&ctx, mode, PHASE1_GATE_COUNT, self.pipeline.len());
+            let full_ctx = PreTradeContext {
+                metrics: metrics_snap,
+                ..phase1_ctx
+            };
+            let phase2 = self.pipeline.evaluate_range(
+                &full_ctx,
+                mode,
+                PHASE1_GATE_COUNT,
+                self.pipeline.len(),
+            );
             gate_report.merge(phase2);
-            ctx
+            full_ctx
         };
 
         let (allowed, denial_reason, recommended_size, sizing_breakdown) = if gate_report
@@ -135,14 +146,15 @@ where
             (false, denial_reason, None, None)
         } else {
             let bankroll = available_bankroll(
-                ctx.cached_balance,
+                ctx.cached_balance(),
                 Usd::new(self.config.reserve_balance_usd),
-                ctx.total_exposure_before,
-                ctx.total_potential_loss,
+                ctx.total_exposure_before(),
+                ctx.total_potential_loss(),
                 Usd::new(self.config.bankroll_usd),
             );
 
-            let size_result = self.sizer.size(&ctx, bankroll, ctx.drawdown_factor);
+            let drawdown_factor = ctx.drawdown_factor();
+            let size_result = self.sizer.size(&ctx, bankroll, drawdown_factor);
 
             let allowed = size_result.bet_usd > Usd::ZERO
                 && size_result.bet_usd >= Usd::new(self.config.min_trade_usd);
@@ -178,7 +190,7 @@ where
             allowed,
             denial_reason,
             recommended_size,
-            drawdown_factor: ctx.drawdown_factor,
+            drawdown_factor: ctx.drawdown_factor(),
             evaluated_at: now,
             state_version: version,
             trace,
@@ -984,6 +996,7 @@ where
                 reduction_factor: self.config.drawdown.drawdown_reduction_factor,
             },
             total_potential_loss: pl.total_potential_loss(),
+            blacklist: self.blacklist.build_bloom_snapshot(),
         }
     }
 
@@ -1025,108 +1038,6 @@ where
 
         if sink.try_enqueue(audit) == AuditEnqueueResult::Dropped {
             tracing::warn!("pre-trade audit channel full — event dropped");
-        }
-    }
-
-    fn build_context_phase1(
-        &self,
-        opp: &Arc<Opportunity>,
-        probability: &ProbabilityInput,
-        snap: &RiskSnapshot,
-        version: StateVersion,
-        now: chrono::DateTime<chrono::Utc>,
-    ) -> RiskContext {
-        let blacklist_gate = self.blacklist_gate(opp);
-        let token_blacklisted = self.blacklist.is_token_blacklisted(&opp.token_id);
-
-        RiskContext {
-            state_version: version,
-            opportunity: Arc::clone(opp),
-            probability: *probability,
-            market_exposure_before: Usd::ZERO,
-            total_exposure_before: Usd::ZERO,
-            total_potential_loss: snap.total_potential_loss,
-            active_reservation_count: 0,
-            reserved_usd: Usd::ZERO,
-            open_position_count: 0,
-            cached_balance: Usd::ZERO,
-            ws_disconnect_secs: 0,
-            open_directional_count_same_side: 0,
-            daily_directional_trades_same_side: 0,
-            consecutive_market_misses: 0,
-            hourly_loss: snap.hourly.hourly_loss,
-            daily_loss: snap.daily.daily_loss,
-            daily_budget_remaining: snap.daily.daily_budget_remaining,
-            weekly_loss: snap.weekly.weekly_loss,
-            daily_pnl: snap.daily.daily_pnl,
-            circuit_breaker: snap.circuit_breaker.circuit_breaker,
-            manual_halt: snap.circuit_breaker.manual_halt.clone(),
-            blacklist: blacklist_gate,
-            token_blacklisted,
-            api_error_count: 0,
-            api_request_count: 0,
-            drawdown_factor: Decimal::ONE,
-            drawdown_action: crate::types::DrawdownAction::Normal,
-            snapshot_at: now,
-        }
-    }
-
-    fn build_context_full(
-        &self,
-        opp: &Arc<Opportunity>,
-        probability: &ProbabilityInput,
-        snap: &RiskSnapshot,
-        metrics: &RiskMetricsSnapshot,
-        version: StateVersion,
-        now: chrono::DateTime<chrono::Utc>,
-    ) -> RiskContext {
-        let equity = metrics.cached_balance;
-        let drawdown_factor = snap.drawdown.sizing_factor(equity);
-        let (_, drawdown_action) = snap.drawdown.evaluate(equity);
-        let blacklist_gate = self.blacklist_gate(opp);
-        let token_blacklisted = self.blacklist.is_token_blacklisted(&opp.token_id);
-
-        RiskContext {
-            state_version: version,
-            opportunity: Arc::clone(opp),
-            probability: *probability,
-            market_exposure_before: metrics.market_exposure,
-            total_exposure_before: metrics.total_exposure,
-            total_potential_loss: snap.total_potential_loss,
-            active_reservation_count: metrics.active_reservation_count,
-            reserved_usd: metrics.reserved_usd,
-            open_position_count: metrics.open_position_count,
-            cached_balance: equity,
-            ws_disconnect_secs: metrics.ws_disconnect_secs,
-            open_directional_count_same_side: metrics.open_directional_count(opp.side),
-            daily_directional_trades_same_side: metrics.daily_directional_trades(opp.side),
-            consecutive_market_misses: metrics.consecutive_market_misses,
-            hourly_loss: snap.hourly.hourly_loss,
-            daily_loss: snap.daily.daily_loss,
-            daily_budget_remaining: snap.daily.daily_budget_remaining,
-            weekly_loss: snap.weekly.weekly_loss,
-            daily_pnl: snap.daily.daily_pnl,
-            circuit_breaker: snap.circuit_breaker.circuit_breaker,
-            manual_halt: snap.circuit_breaker.manual_halt.clone(),
-            blacklist: blacklist_gate,
-            token_blacklisted,
-            api_error_count: metrics.api_error_count,
-            api_request_count: metrics.api_request_count,
-            drawdown_factor,
-            drawdown_action,
-            snapshot_at: now,
-        }
-    }
-
-    fn blacklist_gate(&self, opp: &Opportunity) -> BlacklistGate {
-        let bl_result = self
-            .blacklist
-            .check(&opp.market_id, BlacklistScope::TradingPath);
-        match &bl_result {
-            BlacklistCheckResult::Clear => BlacklistGate::Clear,
-            BlacklistCheckResult::Blocked { reason, scope, .. } => BlacklistGate::Blocked {
-                detail: format!("{reason} (scope: {scope})"),
-            },
         }
     }
 }

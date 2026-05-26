@@ -1,11 +1,13 @@
 //! Confidence fusion: dynamic-weight blend of calibrator posterior and
 //! real-time convergence confidence.
 //!
-//! All arithmetic is pure `rust_decimal::Decimal` — no `f64` on the hot path.
+//! All hot-path arithmetic uses fixed-point [`MicroProb`] / [`MicroPrice`].
 
-use oxide_arb_models::config::CalibrationConfig;
-use rust_decimal::Decimal;
-use rust_decimal_macros::dec;
+use num_traits::ToPrimitive;
+use oxide_arb_models::{
+    config::CalibrationConfig,
+    types::{MICRO_SCALE, MicroPrice, MicroProb},
+};
 
 /// Fuses calibrator posterior probability with real-time confidence.
 ///
@@ -15,9 +17,9 @@ use rust_decimal_macros::dec;
 /// When `n` is small, real-time confidence dominates. As `n` grows, the
 /// calibrator's posterior takes over.
 pub struct ConfidenceFusion {
-    prior_strength: Decimal,
-    p_floor: Decimal,
-    p_ceiling: Decimal,
+    prior_strength: u32,
+    p_floor: MicroProb,
+    p_ceiling: MicroProb,
 }
 
 impl ConfidenceFusion {
@@ -25,9 +27,10 @@ impl ConfidenceFusion {
     #[must_use]
     pub fn new(config: &CalibrationConfig) -> Self {
         Self {
-            prior_strength: Decimal::from(config.fusion_prior_strength),
-            p_floor: config.fused_p_floor,
-            p_ceiling: config.fused_p_ceiling,
+            prior_strength: config.fusion_prior_strength,
+            p_floor: MicroProb::try_from_decimal(config.fused_p_floor).unwrap_or(MicroProb::ZERO),
+            p_ceiling: MicroProb::try_from_decimal(config.fused_p_ceiling)
+                .unwrap_or(MicroProb::ONE),
         }
     }
 
@@ -36,11 +39,19 @@ impl ConfidenceFusion {
     /// `fused = w × p_calibrator + (1−w) × p_realtime`, clamped to `[floor, ceiling]`.
     #[must_use]
     #[inline]
-    pub fn fuse(&self, p_calibrator: Decimal, p_realtime: Decimal, sample_count: u32) -> Decimal {
-        let n = Decimal::from(sample_count);
-        let w = n / (n + self.prior_strength);
-        let raw = w * p_calibrator + (Decimal::ONE - w) * p_realtime;
-        raw.max(self.p_floor).min(self.p_ceiling)
+    pub fn fuse(
+        &self,
+        p_calibrator: MicroProb,
+        p_realtime: MicroProb,
+        sample_count: u32,
+    ) -> MicroProb {
+        let denom = sample_count.saturating_add(self.prior_strength);
+        let blended = if denom == 0 {
+            p_realtime
+        } else {
+            p_realtime.blend(p_calibrator, sample_count, denom)
+        };
+        blended.clamp_prob(self.p_floor, self.p_ceiling)
     }
 }
 
@@ -48,125 +59,155 @@ impl ConfidenceFusion {
 ///
 /// Both factors are combined with 70% price weight and 30% duration weight.
 /// Output is clamped to `[0.50, 0.995]`.
-///
-/// Duration confidence uses a piecewise-linear approximation of log-saturating
-/// behaviour to avoid `f64` — all arithmetic stays in `Decimal`.
 #[must_use]
 #[inline]
 pub fn compute_realtime_confidence(
-    entry_price: Decimal,
+    entry_price: MicroPrice,
     convergence_secs: u64,
-    high_threshold: Decimal,
-) -> Decimal {
-    let range = Decimal::ONE - high_threshold;
-    let price_conf = if range.is_zero() {
-        dec!(0.99)
+    high_threshold: MicroPrice,
+) -> MicroProb {
+    const PRICE_WEIGHT: i64 = 700_000;
+    const DURATION_WEIGHT: i64 = 300_000;
+
+    let range = MicroPrice::ONE
+        .micro()
+        .saturating_sub(high_threshold.micro());
+    let price_conf = if range <= 0 {
+        MicroProb::from_micro(990_000)
     } else {
-        let excess = (entry_price - high_threshold).max(Decimal::ZERO);
-        dec!(0.80) + excess / range * dec!(0.19)
+        let excess = entry_price.micro().saturating_sub(high_threshold.micro());
+        let scaled = i128::from(excess) * 190_000 / i128::from(range);
+        MicroProb::from_micro(800_000 + ToPrimitive::to_i64(&scaled).unwrap_or(0))
     };
 
     let duration_conf = duration_confidence_factor(convergence_secs);
 
-    let raw = dec!(0.7) * price_conf + dec!(0.3) * duration_conf;
-    raw.max(dec!(0.50)).min(dec!(0.995))
+    let raw = (i128::from(price_conf.micro()) * i128::from(PRICE_WEIGHT)
+        + i128::from(duration_conf.micro()) * i128::from(DURATION_WEIGHT))
+        / i128::from(MICRO_SCALE);
+    MicroProb::from_micro(ToPrimitive::to_i64(&raw).unwrap_or(0)).clamp_prob(
+        MicroProb::from_micro(500_000),
+        MicroProb::from_micro(995_000),
+    )
 }
 
 /// Piecewise-linear approximation of log-saturating duration confidence.
-///
-/// Maps convergence seconds → `[0.0, 1.0]`:
-/// - 0–300s   → 0.0–0.2
-/// - 300–3600 → 0.2–0.6
-/// - 3600–21600 → 0.6–0.85
-/// - 21600–86400 → 0.85–1.0
-/// - 86400+ → 1.0
 #[inline]
-fn duration_confidence_factor(secs: u64) -> Decimal {
-    match secs {
-        0..=300 => Decimal::from(secs) / dec!(300) * dec!(0.2),
-        301..=3600 => dec!(0.2) + Decimal::from(secs - 300) / dec!(3300) * dec!(0.4),
-        3601..=21600 => dec!(0.6) + Decimal::from(secs - 3600) / dec!(18000) * dec!(0.25),
-        21601..=86400 => dec!(0.85) + Decimal::from(secs - 21600) / dec!(64800) * dec!(0.15),
-        _ => Decimal::ONE,
-    }
+fn duration_confidence_factor(secs: u64) -> MicroProb {
+    let micro = match secs {
+        0..=300 => i128::from(secs) * 200_000 / 300,
+        301..=3600 => 200_000 + i128::from(secs - 300) * 400_000 / 3300,
+        3601..=21600 => 600_000 + i128::from(secs - 3600) * 250_000 / 18000,
+        21601..=86400 => 850_000 + i128::from(secs - 21600) * 150_000 / 64800,
+        _ => i128::from(MICRO_SCALE),
+    };
+    MicroProb::from_micro(ToPrimitive::to_i64(&micro).unwrap_or(MICRO_SCALE))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use oxide_arb_models::types::MicroPrice;
+    use rust_decimal_macros::dec;
 
     fn default_fusion() -> ConfidenceFusion {
         ConfidenceFusion {
-            prior_strength: dec!(20),
-            p_floor: dec!(0.80),
-            p_ceiling: dec!(0.995),
+            prior_strength: 20,
+            p_floor: MicroProb::from_micro(800_000),
+            p_ceiling: MicroProb::from_micro(995_000),
         }
     }
 
     #[test]
     fn n_zero_uses_only_realtime() {
         let fusion = default_fusion();
-        let result = fusion.fuse(dec!(0.90), dec!(0.85), 0);
-        assert_eq!(result, dec!(0.85));
+        let result = fusion.fuse(
+            MicroProb::try_from_decimal(dec!(0.90)).unwrap(),
+            MicroProb::try_from_decimal(dec!(0.85)).unwrap(),
+            0,
+        );
+        assert_eq!(result.to_decimal(), dec!(0.85));
     }
 
     #[test]
     fn n_equals_n0_is_50_50() {
         let fusion = default_fusion();
-        let result = fusion.fuse(dec!(0.90), dec!(0.80), 20);
-        let expected = dec!(0.5) * dec!(0.90) + dec!(0.5) * dec!(0.80);
-        assert_eq!(result, expected);
+        let result = fusion.fuse(
+            MicroProb::try_from_decimal(dec!(0.90)).unwrap(),
+            MicroProb::try_from_decimal(dec!(0.80)).unwrap(),
+            20,
+        );
+        let expected_dec = dec!(0.5) * dec!(0.90) + dec!(0.5) * dec!(0.80);
+        assert_eq!(result.to_decimal(), expected_dec);
     }
 
     #[test]
     fn large_n_converges_to_calibrator() {
         let fusion = default_fusion();
-        let result = fusion.fuse(dec!(0.95), dec!(0.80), 10000);
-        assert!(result > dec!(0.94));
-        assert!(result < dec!(0.96));
+        let result = fusion.fuse(
+            MicroProb::try_from_decimal(dec!(0.95)).unwrap(),
+            MicroProb::try_from_decimal(dec!(0.80)).unwrap(),
+            10000,
+        );
+        assert!(result.to_decimal() > dec!(0.94));
+        assert!(result.to_decimal() < dec!(0.96));
     }
 
     #[test]
     fn output_clamped_to_floor() {
         let fusion = ConfidenceFusion {
-            prior_strength: dec!(20),
-            p_floor: dec!(0.80),
-            p_ceiling: dec!(0.995),
+            prior_strength: 20,
+            p_floor: MicroProb::from_micro(800_000),
+            p_ceiling: MicroProb::from_micro(995_000),
         };
-        let result = fusion.fuse(dec!(0.50), dec!(0.50), 0);
-        assert_eq!(result, dec!(0.80));
+        let result = fusion.fuse(
+            MicroProb::try_from_decimal(dec!(0.50)).unwrap(),
+            MicroProb::try_from_decimal(dec!(0.50)).unwrap(),
+            0,
+        );
+        assert_eq!(result.to_decimal(), dec!(0.80));
     }
 
     #[test]
     fn output_clamped_to_ceiling() {
         let fusion = default_fusion();
-        let result = fusion.fuse(dec!(1.0), dec!(1.0), 1000);
-        assert_eq!(result, dec!(0.995));
+        let result = fusion.fuse(
+            MicroProb::try_from_decimal(dec!(1.0)).unwrap(),
+            MicroProb::try_from_decimal(dec!(1.0)).unwrap(),
+            1000,
+        );
+        assert_eq!(result.to_decimal(), dec!(0.995));
     }
 
     #[test]
     fn realtime_confidence_at_threshold() {
-        let conf = compute_realtime_confidence(dec!(0.95), 600, dec!(0.95));
-        assert!(conf >= dec!(0.50));
-        assert!(conf <= dec!(0.995));
+        let conf = compute_realtime_confidence(
+            MicroPrice::try_from_decimal(dec!(0.95)).unwrap(),
+            600,
+            MicroPrice::try_from_decimal(dec!(0.95)).unwrap(),
+        );
+        assert!(conf.to_decimal() >= dec!(0.50));
+        assert!(conf.to_decimal() <= dec!(0.995));
     }
 
     #[test]
     fn realtime_confidence_at_0_99() {
-        let conf = compute_realtime_confidence(dec!(0.99), 600, dec!(0.95));
-        // price_conf = 0.80 + 0.8*0.19 = 0.952, dur ≈ 0.236
-        // raw = 0.7*0.952 + 0.3*0.236 ≈ 0.737
-        assert!(conf > dec!(0.70));
-        assert!(conf < dec!(0.80));
+        let conf = compute_realtime_confidence(
+            MicroPrice::try_from_decimal(dec!(0.99)).unwrap(),
+            600,
+            MicroPrice::try_from_decimal(dec!(0.95)).unwrap(),
+        );
+        assert!(conf.to_decimal() > dec!(0.70));
+        assert!(conf.to_decimal() < dec!(0.80));
     }
 
     #[test]
     fn duration_factor_boundary_values() {
-        assert_eq!(duration_confidence_factor(0), Decimal::ZERO);
-        assert_eq!(duration_confidence_factor(300), dec!(0.2));
-        assert!(duration_confidence_factor(3600) >= dec!(0.59));
-        assert!(duration_confidence_factor(3600) <= dec!(0.61));
-        assert!(duration_confidence_factor(86400) >= dec!(0.99));
-        assert_eq!(duration_confidence_factor(100_000), Decimal::ONE);
+        assert_eq!(duration_confidence_factor(0).to_decimal(), dec!(0));
+        assert_eq!(duration_confidence_factor(300).to_decimal(), dec!(0.2));
+        assert!(duration_confidence_factor(3600).to_decimal() >= dec!(0.59));
+        assert!(duration_confidence_factor(3600).to_decimal() <= dec!(0.61));
+        assert!(duration_confidence_factor(86400).to_decimal() >= dec!(0.99));
+        assert_eq!(duration_confidence_factor(100_000).to_decimal(), dec!(1));
     }
 }

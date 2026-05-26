@@ -1,6 +1,6 @@
 //! Position sizing — Quarter-Kelly with multi-constraint clipping.
 
-use crate::context::RiskContext;
+use crate::context::PreTradeContext;
 use crate::types::{DrawdownAction, KellyResult, SizeBreakdown, SizeConstraint, SizeResult};
 use oxide_arb_models::config::RiskConfig;
 use oxide_arb_models::domain::risk::ProbabilityInput;
@@ -151,7 +151,12 @@ impl MultiConstraintSizer {
     }
 
     #[must_use]
-    pub fn size(&self, ctx: &RiskContext, bankroll: Usd, drawdown_factor: Decimal) -> SizeResult {
+    pub fn size(
+        &self,
+        ctx: &PreTradeContext<'_>,
+        bankroll: Usd,
+        drawdown_factor: Decimal,
+    ) -> SizeResult {
         let kelly = self.kelly.calculate(
             &ctx.probability,
             ctx.opportunity.entry_price.inner(),
@@ -174,28 +179,28 @@ impl MultiConstraintSizer {
             SizeConstraint {
                 name: "market_exposure_headroom",
                 max_usd: (Usd::new(self.max_single_market_exposure_usd)
-                    - ctx.market_exposure_before)
-                    .max(Usd::ZERO),
+                    - ctx.market_exposure_before())
+                .max(Usd::ZERO),
             },
             SizeConstraint {
                 name: "portfolio_exposure_headroom",
-                max_usd: (Usd::new(self.max_total_exposure_usd) - ctx.total_exposure_before)
+                max_usd: (Usd::new(self.max_total_exposure_usd) - ctx.total_exposure_before())
                     .max(Usd::ZERO),
             },
             SizeConstraint {
                 name: "daily_budget_remaining",
-                max_usd: ctx.daily_budget_remaining.max(Usd::ZERO),
+                max_usd: ctx.daily_budget_remaining().max(Usd::ZERO),
             },
             SizeConstraint {
                 name: "weekly_loss_headroom",
-                max_usd: (Usd::new(self.max_weekly_loss_usd) - ctx.weekly_loss).max(Usd::ZERO),
+                max_usd: (Usd::new(self.max_weekly_loss_usd) - ctx.weekly_loss()).max(Usd::ZERO),
             },
             SizeConstraint {
                 name: "available_balance",
-                max_usd: (ctx.cached_balance
+                max_usd: (ctx.cached_balance()
                     - Usd::new(self.reserve_balance_usd)
-                    - ctx.total_exposure_before)
-                    .max(Usd::ZERO),
+                    - ctx.total_exposure_before())
+                .max(Usd::ZERO),
             },
             SizeConstraint {
                 name: "drawdown_scaled",

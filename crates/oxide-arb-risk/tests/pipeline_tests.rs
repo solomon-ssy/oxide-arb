@@ -13,17 +13,44 @@ use oxide_arb_models::types::MarketId;
 use oxide_arb_models::types::Usd;
 use oxide_arb_risk::builder::RiskEngineBuilder;
 use oxide_arb_risk::clock::utc_clock;
-use oxide_arb_risk::context::{BlacklistGate, CircuitBreakerGate, ManualHaltGate, RiskContext};
+use oxide_arb_risk::context::PreTradeContext;
 use oxide_arb_risk::pipeline::{RiskCheck, build_default_pipeline};
-use oxide_arb_risk::traits::RiskMetrics;
-use oxide_arb_risk::types::{
-    DrawdownAction, ReportMode, RiskCheckId, RiskCheckKind, RiskCheckResult, StateVersion,
-};
-use rust_decimal::Decimal;
+use oxide_arb_risk::snapshot::RiskSnapshot;
+use oxide_arb_risk::traits::{RiskMetrics, RiskMetricsSnapshot};
+use oxide_arb_risk::types::{ReportMode, RiskCheckId, RiskCheckKind, RiskCheckResult};
 use rust_decimal_macros::dec;
-use std::sync::Arc;
 
-fn default_context() -> RiskContext {
+struct TestFrame {
+    opp: oxide_arb_models::domain::opportunity::Opportunity,
+    snap: RiskSnapshot,
+}
+
+impl TestFrame {
+    fn ctx(&self) -> PreTradeContext<'_> {
+        PreTradeContext {
+            opportunity: &self.opp,
+            probability: ProbabilityInput {
+                calibrated_win_prob: dec!(0.95),
+                fill_prob: dec!(0.90),
+                calibration_confidence: dec!(0.85),
+                sample_size: 50,
+                model_staleness_secs: 300,
+                expected_slippage_pct: dec!(0.005),
+                expected_failure_cost_pct: dec!(0.005),
+            },
+            snap: &self.snap,
+            metrics: RiskMetricsSnapshot {
+                total_exposure: Usd::new(dec!(100)),
+                open_position_count: 1,
+                cached_balance: Usd::new(dec!(5000)),
+                ..RiskMetricsSnapshot::zeroed()
+            },
+            now: Utc::now(),
+        }
+    }
+}
+
+fn default_frame() -> TestFrame {
     use oxide_arb_models::domain::calibration::{BucketKey, CalibrationSnapshot};
     use oxide_arb_models::domain::opportunity::{EndgameMeta, Opportunity};
     use oxide_arb_models::enums::calibration::{DurationBucket, PriceZone};
@@ -77,46 +104,15 @@ fn default_context() -> RiskContext {
         detected_at: Utc::now(),
     };
 
-    RiskContext {
-        state_version: StateVersion::ZERO,
-        opportunity: Arc::new(opp),
-        probability: ProbabilityInput {
-            calibrated_win_prob: dec!(0.95),
-            fill_prob: dec!(0.90),
-            calibration_confidence: dec!(0.85),
-            sample_size: 50,
-            model_staleness_secs: 300,
-            expected_slippage_pct: dec!(0.005),
-            expected_failure_cost_pct: dec!(0.005),
+    TestFrame {
+        opp,
+        snap: RiskSnapshot {
+            daily: oxide_arb_risk::snapshot::DailyAccountingSnapshot {
+                daily_budget_remaining: Usd::new(dec!(50)),
+                ..RiskSnapshot::zeroed().daily
+            },
+            ..RiskSnapshot::zeroed()
         },
-        market_exposure_before: Usd::ZERO,
-        total_exposure_before: Usd::new(dec!(100)),
-        total_potential_loss: Usd::ZERO,
-        active_reservation_count: 0,
-        reserved_usd: Usd::ZERO,
-        open_position_count: 1,
-        cached_balance: Usd::new(dec!(5000)),
-        ws_disconnect_secs: 0,
-        open_directional_count_same_side: 0,
-        daily_directional_trades_same_side: 0,
-        consecutive_market_misses: 0,
-        hourly_loss: Usd::ZERO,
-        daily_loss: Usd::ZERO,
-        daily_budget_remaining: Usd::new(dec!(50)),
-        weekly_loss: Usd::ZERO,
-        daily_pnl: Usd::ZERO,
-        circuit_breaker: CircuitBreakerGate {
-            allows_trading: true,
-            is_probe: false,
-        },
-        manual_halt: ManualHaltGate::Clear,
-        blacklist: BlacklistGate::Clear,
-        token_blacklisted: false,
-        api_error_count: 0,
-        api_request_count: 0,
-        drawdown_factor: Decimal::ONE,
-        drawdown_action: DrawdownAction::Normal,
-        snapshot_at: Utc::now(),
     }
 }
 
@@ -178,20 +174,10 @@ async fn pipeline_check_order_golden_test() {
         .build(&metrics)
         .expect("engine build");
 
-    let ctx = default_context();
-    let prob = ProbabilityInput {
-        calibrated_win_prob: dec!(0.95),
-        fill_prob: dec!(0.90),
-        calibration_confidence: dec!(0.85),
-        sample_size: 50,
-        model_staleness_secs: 300,
-        expected_slippage_pct: dec!(0.005),
-        expected_failure_cost_pct: dec!(0.005),
-    };
+    let frame = default_frame();
+    let prob = frame.ctx().probability;
 
-    // Use FullReport to get all check results in order
-    let decision =
-        engine.pre_trade_check_core(&ctx.opportunity, &prob, &metrics, ReportMode::FullReport);
+    let decision = engine.pre_trade_check_core(&frame.opp, &prob, &metrics, ReportMode::FullReport);
 
     let check_ids: Vec<RiskCheckId> = decision.checks().iter().map(|r| r.check_id).collect();
 
@@ -248,7 +234,7 @@ impl TestRiskPipeline {
 
     fn evaluate(
         &self,
-        ctx: &RiskContext,
+        ctx: &PreTradeContext<'_>,
         mode: ReportMode,
     ) -> oxide_arb_risk::types::PipelineReport {
         use oxide_arb_risk::types::{PipelineReport, RiskCheckKind};
@@ -307,7 +293,7 @@ impl RiskCheck for AlwaysFail {
     fn kind(&self) -> RiskCheckKind {
         RiskCheckKind::Gate
     }
-    fn evaluate(&self, _ctx: &RiskContext) -> RiskCheckResult {
+    fn evaluate(&self, _ctx: &PreTradeContext<'_>) -> RiskCheckResult {
         RiskCheckResult {
             check_id: self.0,
             passed: false,
@@ -327,7 +313,7 @@ impl RiskCheck for AlwaysPass {
     fn kind(&self) -> RiskCheckKind {
         RiskCheckKind::Gate
     }
-    fn evaluate(&self, _ctx: &RiskContext) -> RiskCheckResult {
+    fn evaluate(&self, _ctx: &PreTradeContext<'_>) -> RiskCheckResult {
         RiskCheckResult {
             check_id: self.0,
             passed: true,
@@ -346,8 +332,8 @@ fn short_circuit_stops_on_first_failure() {
     pipeline.register(Box::new(AlwaysFail(RiskCheckId::CircuitBreaker)));
     pipeline.register(Box::new(AlwaysPass(RiskCheckId::MinBalance))); // should never reach
 
-    let ctx = default_context();
-    let report = pipeline.evaluate(&ctx, ReportMode::ShortCircuit);
+    let frame = default_frame();
+    let report = pipeline.evaluate(&frame.ctx(), ReportMode::ShortCircuit);
 
     assert!(report.has_failed_hard_gate);
     assert_eq!(report.first_failure, Some(RiskCheckId::CircuitBreaker));
@@ -365,8 +351,8 @@ fn full_report_evaluates_all_checks() {
     pipeline.register(Box::new(AlwaysPass(RiskCheckId::MinBalance)));
     pipeline.register(Box::new(AlwaysFail(RiskCheckId::DailyBudget)));
 
-    let ctx = default_context();
-    let report = pipeline.evaluate(&ctx, ReportMode::FullReport);
+    let frame = default_frame();
+    let report = pipeline.evaluate(&frame.ctx(), ReportMode::FullReport);
 
     assert!(report.has_failed_hard_gate);
     assert_eq!(report.first_failure, Some(RiskCheckId::CircuitBreaker));

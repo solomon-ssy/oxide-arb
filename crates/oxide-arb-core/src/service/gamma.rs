@@ -7,6 +7,7 @@ use chrono::{DateTime, Utc};
 use num_traits::ToPrimitive;
 use oxide_arb_api::fees::FeeCalculator;
 use oxide_arb_api::gamma::GammaClient;
+use oxide_arb_api::ws::TOKEN_INTERN;
 use oxide_arb_error::OxideError;
 use oxide_arb_models::domain::market::{
     EventRegistryInfo, MarketRegistryInfo, UpsertEvent, UpsertMarket,
@@ -114,6 +115,7 @@ impl GammaService {
         );
 
         self.market_registry.register_events(batch.registry_events);
+        prewarm_token_intern(&batch.registry_markets);
         self.market_registry
             .register_markets(batch.registry_markets);
         self.fee_calculator.ingest_gamma_markets(&batch.fee_data);
@@ -203,6 +205,7 @@ impl GammaService {
             return Ok(());
         }
 
+        prewarm_token_intern(&all_registry);
         self.market_registry.register_markets(all_registry);
         self.fee_calculator.ingest_gamma_markets(&fee_data);
 
@@ -235,6 +238,21 @@ impl GammaService {
             Err(e) => tracing::warn!(error = %e, "failed to persist events"),
         }
     }
+}
+
+fn prewarm_token_intern(markets: &[MarketRegistryInfo]) {
+    let token_ids: Vec<&str> = markets
+        .iter()
+        .flat_map(|market| market.tokens.iter().map(|t| t.token_id.as_str()))
+        .collect();
+    if token_ids.is_empty() {
+        return;
+    }
+    TOKEN_INTERN.prewarm_token_strs(&token_ids);
+    tracing::debug!(
+        count = token_ids.len(),
+        "token intern pool prewarmed after gamma sync"
+    );
 }
 
 /// Convert `MarketRegistryInfo` → `UpsertMarket` for individually-fetched and deactivated markets.

@@ -18,7 +18,8 @@ use oxide_arb_models::{
     enums::common::{MarketCategory, Side, StalenessLevel},
     enums::opportunity::PayoutModel,
     types::{
-        Bps, EventId, MarketId, MicroPrice, MicroUsd, OpportunityId, Price, Shares, TokenId, Usd,
+        Bps, EventId, MarketId, MicroPrice, MicroProb, MicroUsd, OpportunityId, Price, Shares,
+        TokenId, Usd,
     },
 };
 
@@ -57,7 +58,7 @@ pub struct EndgameDetector<F: FeeEstimator> {
     min_convergence_duration_secs: u64,
     high_threshold: MicroPrice,
     max_investment_usd: MicroUsd,
-    min_profit_per_share: Decimal,
+    min_profit_per_share: MicroPrice,
     convergence: InMemoryConvergenceTracker,
     calibrator: Arc<ResolutionCalibrator>,
     fusion: ConfidenceFusion,
@@ -80,7 +81,8 @@ impl<F: FeeEstimator> EndgameDetector<F> {
                 .unwrap_or(MicroPrice::ZERO),
             max_investment_usd: MicroUsd::try_from_decimal(config.max_investment_usd)
                 .unwrap_or(MicroUsd::ZERO),
-            min_profit_per_share: config.min_profit_per_share,
+            min_profit_per_share: MicroPrice::try_from_decimal(config.min_profit_per_share)
+                .unwrap_or(MicroPrice::ZERO),
             convergence: InMemoryConvergenceTracker::new(&config.convergence_tracker),
             fusion: ConfidenceFusion::new(calibration_config),
             calibrator,
@@ -91,10 +93,16 @@ impl<F: FeeEstimator> EndgameDetector<F> {
     #[must_use]
     #[inline]
     pub fn detect_direction(&self, book: EndgameBookView<'_>) -> Option<ConvergenceDirection> {
-        if book.yes_asks.best_price()?.inner() >= self.high_threshold.to_decimal() {
+        if book.yes_asks.best_price().is_some_and(|p| {
+            MicroPrice::try_from_decimal(p.inner())
+                .is_ok_and(|mp| mp.micro() >= self.high_threshold.micro())
+        }) {
             return Some(ConvergenceDirection::YesLikely);
         }
-        if book.no_asks.best_price()?.inner() >= self.high_threshold.to_decimal() {
+        if book.no_asks.best_price().is_some_and(|p| {
+            MicroPrice::try_from_decimal(p.inner())
+                .is_ok_and(|mp| mp.micro() >= self.high_threshold.micro())
+        }) {
             return Some(ConvergenceDirection::NoLikely);
         }
         None
@@ -161,8 +169,12 @@ impl<F: FeeEstimator> EndgameDetector<F> {
             target_asks.total_depth_usd,
         )?;
 
-        let entry_price = Price::new(walk.vwap.to_decimal());
-        if Decimal::ONE - entry_price.inner() < self.min_profit_per_share {
+        let entry_price_micro = walk.vwap;
+        let entry_price = Price::new(entry_price_micro.to_decimal());
+        let min_edge = MicroPrice::ONE
+            .micro()
+            .saturating_sub(entry_price_micro.micro());
+        if min_edge < self.min_profit_per_share.micro() {
             return None;
         }
 
@@ -196,16 +208,16 @@ impl<F: FeeEstimator> EndgameDetector<F> {
         };
         let cal_entry = self.calibrator.lookup(&bucket_key);
 
-        let realtime_conf = compute_realtime_confidence(
-            entry_price.inner(),
-            convergence_secs,
-            self.high_threshold.to_decimal(),
-        );
+        let entry_price_micro =
+            MicroPrice::try_from_decimal(entry_price.inner()).unwrap_or(MicroPrice::ZERO);
+        let realtime_conf =
+            compute_realtime_confidence(entry_price_micro, convergence_secs, self.high_threshold);
         let fused_p = self.fusion.fuse(
-            cal_entry.posterior_mean(),
+            MicroProb::try_from_decimal(cal_entry.posterior_mean()).unwrap_or(MicroProb::ZERO),
             realtime_conf,
             cal_entry.sample_count(),
         );
+        let fused_p_dec = fused_p.to_decimal();
 
         let fees =
             self.fee_estimator
@@ -213,7 +225,7 @@ impl<F: FeeEstimator> EndgameDetector<F> {
 
         let shares_usd = Usd::new(shares.inner());
         let net_profit = shares_usd - total_cost - fees;
-        let expected_payout = shares_usd * fused_p;
+        let expected_payout = shares_usd * fused_p_dec;
         let expected_net_profit = expected_payout - total_cost - fees;
 
         let cost_plus_fees = total_cost + fees;
@@ -243,19 +255,19 @@ impl<F: FeeEstimator> EndgameDetector<F> {
             net_profit,
             expected_net_profit,
             edge_bps,
-            resolution_adjust: fused_p,
+            resolution_adjust: fused_p_dec,
             depth_used_pct: Decimal::from(walk.depth_used_pct),
             staleness: input.staleness,
             category: input.category,
             meta: EndgameMeta {
                 predicted_yes,
-                confidence: fused_p,
+                confidence: fused_p_dec,
                 convergence_duration_secs: convergence_secs,
                 price_zone: bucket_key.price_zone,
                 duration_bucket: bucket_key.duration_bucket,
                 settlement_deadline: Some(deadline),
             },
-            calibration: cal_entry.to_snapshot(fused_p),
+            calibration: cal_entry.to_snapshot(fused_p_dec),
             detected_at: now,
         }
     }

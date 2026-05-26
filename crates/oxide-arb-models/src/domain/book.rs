@@ -91,12 +91,12 @@ pub fn total_depth_usd(levels: &[BookLevel]) -> MicroUsd {
 
 /// Immutable published snapshot for a single token (Arc-backed, lock-free read).
 ///
-/// Sides use [`Arc<Vec<BookLevel>>`] so writers can [`Arc::clone`] on publish without
-/// copying level data (`CoW` via [`Arc::make_mut`] on the writer-side book).
+/// Sides use [`Arc<[BookLevel]>`] so readers share level storage without copying;
+/// writers use copy-on-write on the mutable [`OrderBook`] before publish.
 #[derive(Debug, Clone)]
 pub struct BookSnapshot {
-    pub bids: Arc<Vec<BookLevel>>,
-    pub asks: Arc<Vec<BookLevel>>,
+    pub bids: Arc<[BookLevel]>,
+    pub asks: Arc<[BookLevel]>,
     pub timestamp_ms: u64,
     /// Monotonic per-token sequence bumped on each publish (SLO-2 freshness).
     pub version: u64,
@@ -109,8 +109,8 @@ pub struct BookSnapshot {
 impl BookSnapshot {
     #[must_use]
     pub fn new(
-        bids: Arc<Vec<BookLevel>>,
-        asks: Arc<Vec<BookLevel>>,
+        bids: Arc<[BookLevel]>,
+        asks: Arc<[BookLevel]>,
         timestamp_ms: u64,
         version: u64,
     ) -> Self {
@@ -362,14 +362,14 @@ mod tests {
     #[test]
     fn endgame_view_max_staleness() {
         let yes = Arc::new(BookSnapshot::new(
-            Arc::new(vec![level(dec!(0.96))]),
-            Arc::new(vec![level(dec!(0.97))]),
+            Arc::from([level(dec!(0.96))]),
+            Arc::from([level(dec!(0.97))]),
             900,
             0,
         ));
         let no = Arc::new(BookSnapshot::new(
-            Arc::new(vec![level(dec!(0.03))]),
-            Arc::new(vec![level(dec!(0.04))]),
+            Arc::from([level(dec!(0.03))]),
+            Arc::from([level(dec!(0.04))]),
             700,
             0,
         ));
@@ -379,8 +379,8 @@ mod tests {
 
     #[test]
     fn total_depth_precomputed() {
-        let asks = Arc::new(vec![level(dec!(0.97))]);
-        let snap = BookSnapshot::new(Arc::new(Vec::new()), asks, 0, 0);
+        let asks = Arc::from([level(dec!(0.97))]);
+        let snap = BookSnapshot::new(Arc::from([]), asks, 0, 0);
         assert_eq!(snap.total_ask_depth_usd.to_decimal(), dec!(9.7));
     }
 }

@@ -19,7 +19,7 @@ use oxide_arb_error::OxideResult;
 use oxide_arb_models::config::{ExposureReservationConfig, Settings};
 use oxide_arb_models::domain::risk::RiskEngineState;
 use oxide_arb_models::enums::common::ExecutionMode;
-use oxide_arb_models::types::{MarketId, TokenId};
+use oxide_arb_models::types::{MarketId, MicroUsd, TokenId};
 use oxide_arb_repository::postgres::{
     PgBlacklistPersistenceRepository, PgCalibrationRepository, PgEmergencyRepository,
     PgPotentialLossRepository, PgReconciliationRepository, PgRiskAuditRepository,
@@ -61,6 +61,7 @@ use crate::execution::execution_pipeline::{ExecutionPipeline, ExecutionPipelineD
 use crate::execution::fsm::ExecutionFSM;
 use crate::execution::market_inflight::MarketInFlightRegistry;
 use crate::execution::plan_builder::PlanBuilder;
+use crate::execution::port::ExecutionPort;
 use crate::execution::runner::{ExecutionRunner, ExecutionRunnerPool};
 use crate::execution::tiered_strategy::OrderStrategy;
 use crate::execution::validator::Validator;
@@ -68,8 +69,9 @@ use crate::exposure::in_memory::InMemoryExposureReservation;
 use crate::infra::oracle_health_tracker::OracleHealthTracker;
 use crate::infra::risk_decision_audit_buffer::RiskDecisionAuditBuffer;
 use crate::observability::alert_dispatcher::AlertDispatcher;
-use crate::observability::drop_halt::DropHaltGuard;
+use crate::observability::backpressure::BackpressurePolicy;
 use crate::observability::metrics_hub::MetricsHub;
+use crate::outbox::in_memory::InMemoryEventStore;
 use crate::pipeline::book_store::BookStore;
 use crate::pipeline::data_pipeline::{DataPipeline, DataPipelineDeps};
 use crate::pipeline::market_cache::MarketCache;
@@ -113,7 +115,7 @@ struct BuildRisk {
     engine: Arc<RiskEngine>,
     potential_loss_store: Arc<CorePotentialLossStore>,
     fsm: Arc<ExecutionFSM>,
-    drop_halt: Option<DropHaltGuard>,
+    backpressure: Arc<BackpressurePolicy>,
 }
 
 struct BuildTrading {
@@ -360,9 +362,11 @@ async fn wire_risk(
         infra.repos.potential_loss.clone(),
     ));
     let fsm = Arc::new(ExecutionFSM::new(Arc::clone(&infra.metrics)));
-    let drop_halt = Some(DropHaltGuard::new(
+    let post_trade_spill = Arc::new(InMemoryEventStore::new());
+    let backpressure = Arc::new(BackpressurePolicy::new(
         Arc::clone(&infra.metrics),
-        Arc::clone(&fsm),
+        Some(Arc::clone(&infra.alerts)),
+        Arc::clone(&post_trade_spill),
     ));
 
     Ok(BuildRisk {
@@ -372,7 +376,7 @@ async fn wire_risk(
         engine,
         potential_loss_store,
         fsm,
-        drop_halt,
+        backpressure,
     })
 }
 
@@ -442,11 +446,13 @@ fn wire_detection(
         settings.detection.endgame.settlement_window_hours,
     );
     let cooldown = InMemoryEmissionCooldown::new(&settings.detection.endgame.emission_cooldown);
+    let min_profit = MicroUsd::try_from_decimal(settings.detection.min_profit_threshold_usd)
+        .unwrap_or(MicroUsd::ZERO);
     let opportunity_pipeline: Arc<CoreOpportunityPipeline> = Arc::new(OpportunityPipeline::new(
         detector,
         scorer,
         cooldown,
-        settings.detection.min_profit_threshold_usd,
+        min_profit,
         &settings.detection.endgame.scorer,
     ));
 
@@ -523,31 +529,33 @@ fn wire_execution_loop(
         metrics: Arc::clone(&infra.metrics),
         execution_mode: mode,
         outcome_tx,
-        drop_halt: risk.drop_halt.clone(),
+        backpressure: Arc::clone(&risk.backpressure),
     }));
 
     let inflight = Arc::new(AtomicU32::new(0));
+    let pipeline_port: Arc<dyn ExecutionPort> = execution_pipeline.clone();
     let (runner_pool, execution_runners) = ExecutionRunnerPool::new(
         settings.execution.book_apply.shard_count,
-        &execution_pipeline,
+        &pipeline_port,
         &shutdown,
         &inflight,
         &infra.metrics,
     );
-    let funnel = Arc::new(Funnel::new(
+    let funnel = Arc::new(Funnel::with_backpressure(
         runner_pool.shard_senders().to_vec(),
         settings.execution.funnel.max_queue_size,
         Duration::from_millis(settings.execution.funnel.min_dispatch_interval_ms),
         Arc::clone(&infra.metrics),
+        Some(Arc::clone(&risk.backpressure)),
     ));
 
     let data_pipeline = Arc::new(DataPipeline::new(DataPipelineDeps {
-        ws_manager: clients.ws_manager.clone(),
+        event_source: clients.ws_manager.clone(),
         book_store: Arc::clone(&detection.book_store),
         market_registry: Arc::clone(&detection.market_registry),
         coalescer_tx: detection.token_tx.clone(),
         metrics: Arc::clone(&infra.metrics),
-        drop_halt: risk.drop_halt.clone(),
+        backpressure: Arc::clone(&risk.backpressure),
         book_shard_count: settings.execution.book_apply.shard_count,
         book_channel_capacity: settings.execution.book_apply.channel_capacity,
         shutdown,

@@ -1,5 +1,6 @@
 //! Zero-alloc [`TokenId`] interning for WS hot paths.
 
+use std::str::FromStr;
 use std::sync::{Arc, LazyLock};
 
 use dashmap::DashMap;
@@ -31,6 +32,22 @@ impl TokenInternPool {
         let token = TokenId::new(asset_id.to_string());
         self.by_u256.insert(asset_id, token.clone());
         token
+    }
+
+    /// Pre-populate the intern pool after Gamma sync (avoids alloc on first WS tick).
+    pub fn prewarm_u256(&self, ids: &[U256]) {
+        for id in ids {
+            let _ = self.intern_u256(*id);
+        }
+    }
+
+    /// Pre-populate from decimal token id strings (Gamma registry path).
+    pub fn prewarm_token_strs(&self, token_ids: &[&str]) {
+        for token_id in token_ids {
+            if let Ok(u256) = U256::from_str(token_id) {
+                let _ = self.intern_u256(u256);
+            }
+        }
     }
 
     /// Intern a string asset id (cache hit avoids heap alloc).
@@ -78,5 +95,15 @@ mod tests {
         let a = pool.intern_u256(id);
         let b = pool.intern_u256(id);
         assert_eq!(a.as_str(), b.as_str());
+    }
+
+    #[test]
+    fn prewarm_populates_cache() {
+        let pool = TokenInternPool::new();
+        let ids = [U256::from(1_u64), U256::from(2_u64), U256::from(3_u64)];
+        pool.prewarm_u256(&ids);
+        for id in ids {
+            assert!(pool.by_u256.contains_key(&id));
+        }
     }
 }

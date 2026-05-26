@@ -380,4 +380,17 @@ impl ClobClient {
         })
         .await
     }
+
+    /// Inject a pre-authenticated SDK client for wiremock/integration tests.
+    #[doc(hidden)]
+    pub fn from_sdk_for_test(
+        sdk: Arc<SdkClient<Authenticated<Normal>>>,
+        signer: Arc<OrderSigner>,
+    ) -> Self {
+        Self {
+            sdk,
+            signer,
+            rate_limiter: RateLimiter::new(),
+        }
+    }
 }

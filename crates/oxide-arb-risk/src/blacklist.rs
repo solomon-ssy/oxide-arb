@@ -6,6 +6,7 @@
 //! are added at runtime and garbage-collected on TTL expiry.
 
 use crate::clock::Clock;
+use crate::snapshot::{BlacklistSnapshot, BloomFilter512, TradingPathBlock};
 use crate::types::BlacklistKey;
 use dashmap::DashMap;
 use num_traits::ToPrimitive;
@@ -320,5 +321,69 @@ impl BlacklistManager {
             .iter()
             .filter(|r| !r.value().is_expired(now))
             .count()
+    }
+
+    /// Build bloom + exact confirm tables for [`RiskSnapshot`] publish.
+    #[must_use]
+    pub fn build_bloom_snapshot(&self) -> BlacklistSnapshot {
+        let now = self.clock.now();
+        let mut market_bloom = BloomFilter512::default();
+        let mut token_bloom = BloomFilter512::default();
+        let mut trading_path_blocks = Vec::new();
+        let mut blacklisted_tokens = Vec::new();
+
+        for entry in &self.entries {
+            let info = entry.value();
+            if info.is_expired(now) {
+                continue;
+            }
+            match entry.key() {
+                BlacklistKey::Market(market_id) => {
+                    market_bloom.insert(market_id.as_str().as_bytes());
+                    if info.scope >= BlacklistScope::TradingPath {
+                        trading_path_blocks.push(TradingPathBlock {
+                            market_id: market_id.clone(),
+                            reason: info.reason,
+                            scope: info.scope,
+                        });
+                    }
+                }
+                BlacklistKey::Token(token_id) => {
+                    token_bloom.insert(token_id.as_str().as_bytes());
+                    blacklisted_tokens.push(token_id.clone());
+                }
+            }
+        }
+
+        BlacklistSnapshot::from_parts(
+            market_bloom,
+            token_bloom,
+            trading_path_blocks,
+            blacklisted_tokens,
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use oxide_arb_models::config::RiskConfig;
+    use oxide_arb_models::enums::risk::BlacklistReason;
+
+    #[test]
+    fn bloom_snapshot_blocks_trading_path_market() {
+        let clock = crate::clock::utc_clock();
+        let manager = BlacklistManager::new(&RiskConfig::default(), clock);
+        manager.add_permanent(MarketId::new("blocked"), BlacklistReason::Manual);
+        let snap = manager.build_bloom_snapshot();
+        assert!(snap.may_contain_market(&MarketId::new("blocked")));
+        assert!(
+            snap.trading_path_block_detail(&MarketId::new("blocked"))
+                .is_some()
+        );
+        assert!(
+            snap.trading_path_block_detail(&MarketId::new("clear"))
+                .is_none()
+        );
     }
 }

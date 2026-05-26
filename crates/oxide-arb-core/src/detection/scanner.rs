@@ -1,16 +1,21 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::{DateTime, Utc};
 use num_traits::ToPrimitive;
 use oxide_arb_algorithm::{pipeline::MarketScanInputRef, scorer::ScoredOpportunity};
+use oxide_arb_models::domain::latency::LatencyTrace;
 
 use crate::bridge::CoreOpportunityPipeline;
+use crate::observability::latency::observe_ws_to_scan;
 use crate::observability::metrics_hub::MetricsHub;
 use crate::pipeline::book_gate::BookGate;
 use crate::pipeline::book_store::BookStore;
 use crate::pipeline::dual_book_assembler::DualBookAssembler;
 use crate::pipeline::market_cache::{CachedMarketScanEntry, MarketCache};
 use crate::pipeline::staleness_classifier::StalenessClassifier;
+
+static SCAN_SAMPLE: AtomicU64 = AtomicU64::new(0);
 
 pub struct Scanner {
     pipeline: Arc<CoreOpportunityPipeline>,
@@ -41,8 +46,10 @@ impl Scanner {
         &self,
         entry: &CachedMarketScanEntry,
         now: DateTime<Utc>,
-    ) -> Option<ScoredOpportunity> {
-        let _timer = self.metrics.scan_duration_seconds.start_timer();
+    ) -> Option<Arc<ScoredOpportunity>> {
+        let sample = SCAN_SAMPLE.fetch_add(1, Ordering::Relaxed).trailing_zeros() >= 6;
+        let timer = sample.then(|| self.metrics.scan_duration_seconds.start_timer());
+
         let pair =
             DualBookAssembler::assemble(&self.book_store, &entry.token_yes, &entry.token_no)?;
 
@@ -62,6 +69,16 @@ impl Scanner {
             .staleness_classifier
             .classify(pair.max_staleness_ms(now_ms));
 
+        let mut latency = LatencyTrace::merge_pair(
+            self.book_store
+                .token_latency_trace(&entry.token_yes)
+                .as_ref(),
+            self.book_store
+                .token_latency_trace(&entry.token_no)
+                .as_ref(),
+        );
+        latency.mark_scan_started();
+
         let input = MarketScanInputRef {
             market_id: &entry.market_id,
             event_id: &entry.event_id,
@@ -71,21 +88,23 @@ impl Scanner {
             category: entry.category,
             staleness,
             settlement_deadline: entry.settlement_deadline,
+            latency,
         };
-        self.pipeline.process_ref(&input, now)
+        let result = self.pipeline.process_ref(&input, now);
+        if let Some(ref scored) = result {
+            observe_ws_to_scan(&scored.trace, &self.metrics);
+        }
+        drop(timer);
+        result
     }
 
-    pub fn scan_all(&self, now: DateTime<Utc>) -> Vec<ScoredOpportunity> {
+    pub fn scan_all(&self, now: DateTime<Utc>) -> Vec<Arc<ScoredOpportunity>> {
         let entries = self.market_cache.entries();
-        let mut results: Vec<ScoredOpportunity> = entries
+        let mut results: Vec<Arc<ScoredOpportunity>> = entries
             .iter()
             .filter_map(|entry| self.scan_market(entry, now))
             .collect();
-        results.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        results.sort_by(|a, b| a.score.cmp_desc(b.score));
         self.metrics.scan_results_total.observe(f64::from(
             ToPrimitive::to_u32(&results.len()).unwrap_or(u32::MAX),
         ));

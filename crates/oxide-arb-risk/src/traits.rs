@@ -23,6 +23,7 @@ use oxide_arb_models::types::{LedgerId, MarketId, ReservationId, Usd};
 /// Pre-loaded metrics for a single pre-trade decision (one batch read).
 #[derive(Debug, Clone, Copy)]
 pub struct RiskMetricsSnapshot {
+    pub version: u64,
     pub cached_balance: Usd,
     pub total_exposure: Usd,
     pub market_exposure: Usd,
@@ -40,6 +41,27 @@ pub struct RiskMetricsSnapshot {
 }
 
 impl RiskMetricsSnapshot {
+    #[must_use]
+    pub const fn zeroed() -> Self {
+        Self {
+            version: 0,
+            cached_balance: Usd::ZERO,
+            total_exposure: Usd::ZERO,
+            market_exposure: Usd::ZERO,
+            open_position_count: 0,
+            active_reservation_count: 0,
+            reserved_usd: Usd::ZERO,
+            open_directional_count_buy: 0,
+            open_directional_count_sell: 0,
+            daily_directional_trades_buy: 0,
+            daily_directional_trades_sell: 0,
+            consecutive_market_misses: 0,
+            ws_disconnect_secs: 0,
+            api_error_count: 0,
+            api_request_count: 0,
+        }
+    }
+
     #[inline]
     pub const fn open_directional_count(&self, side: Side) -> usize {
         match side {
@@ -111,6 +133,7 @@ pub trait RiskMetrics: Send + Sync + 'static {
     /// implementations should override with a single snapshot read.
     fn snapshot_for(&self, market_id: &MarketId) -> RiskMetricsSnapshot {
         RiskMetricsSnapshot {
+            version: 0,
             cached_balance: self.cached_balance(),
             total_exposure: self.total_exposure(),
             market_exposure: self.market_exposure(market_id),

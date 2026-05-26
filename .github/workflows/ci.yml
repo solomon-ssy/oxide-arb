@@ -27,6 +27,9 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      - name: Architecture lint
+        run: bash scripts/lint-architecture.sh
+
       - name: Build
         run: cargo build --workspace
 
@@ -70,6 +73,22 @@ jobs:
           name: bench-results-${{ github.sha }}
           path: bench_results.txt
           retention-days: 90
+
+  pgo-build:
+    name: PGO Build (optional)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install llvm-tools
+        run: sudo apt-get update && sudo apt-get install -y llvm
+
+      - name: PGO build
+        run: bash scripts/pgo.sh
 
   msrv:
     name: MSRV Check

@@ -48,11 +48,11 @@ impl MarketCache {
 
     /// Reconstruct the cache from the current registry state.
     pub fn rebuild(&self) {
-        let active_ids = self.registry.active_market_ids();
+        let active_ids = self.registry.active_markets();
         let mut entries = Vec::with_capacity(active_ids.len());
         let mut index = HashMap::with_capacity(active_ids.len());
 
-        for market_id in &active_ids {
+        for market_id in active_ids.iter() {
             let Some(market) = self.registry.get_market(market_id) else {
                 continue;
             };

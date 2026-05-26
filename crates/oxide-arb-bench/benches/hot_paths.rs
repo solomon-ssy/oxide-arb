@@ -1,8 +1,11 @@
 use std::sync::Arc;
 use std::sync::OnceLock;
+use std::time::Instant;
 
 use chrono::{Duration, Utc};
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use num_traits::ToPrimitive;
+use oxide_arb_algorithm::scorer::ScoredOpportunity;
 use oxide_arb_algorithm::{
     calibration::ResolutionCalibrator,
     cooldown::InMemoryEmissionCooldown,
@@ -12,31 +15,60 @@ use oxide_arb_algorithm::{
     scorer::EndgameScorer,
     walker::OrderbookWalker,
 };
+use oxide_arb_api::fees::FeeCalculator;
+use oxide_arb_api::ws::ClobWsManager;
+use oxide_arb_api::ws::normalize::normalize_ws_message;
+use oxide_arb_core::bridge::risk_metrics::CoreRiskMetrics;
+use oxide_arb_core::bridge::{CoreFeeEstimator, CoreOpportunityPipeline};
 use oxide_arb_core::detection::coalescer::Coalescer;
 use oxide_arb_core::detection::funnel::Funnel;
+use oxide_arb_core::detection::scanner::Scanner;
+use oxide_arb_core::execution::capital_manager::CapitalManager;
+use oxide_arb_core::execution::dispatcher::Dispatcher;
+use oxide_arb_core::execution::execution_pipeline::{ExecutionPipeline, ExecutionPipelineDeps};
+use oxide_arb_core::execution::fsm::ExecutionFSM;
+use oxide_arb_core::execution::market_inflight::MarketInFlightRegistry;
+use oxide_arb_core::execution::plan_builder::PlanBuilder;
+use oxide_arb_core::execution::tiered_strategy::OrderStrategy;
+use oxide_arb_core::execution::validator::Validator;
+use oxide_arb_core::exposure::in_memory::InMemoryExposureReservation;
+use oxide_arb_core::observability::backpressure::BackpressurePolicy;
 use oxide_arb_core::observability::metrics_hub::MetricsHub;
+use oxide_arb_core::outbox::in_memory::InMemoryEventStore;
+use oxide_arb_core::pipeline::book_store::BookStore;
+use oxide_arb_core::pipeline::market_cache::{CachedMarketScanEntry, MarketCache};
 use oxide_arb_core::pipeline::market_registry::MarketRegistry;
 use oxide_arb_core::pipeline::order_book::OrderBook;
+use oxide_arb_core::pipeline::staleness_classifier::StalenessClassifier;
+use oxide_arb_core::service::risk_metrics::{ApiHealthTracker, RiskMetricsState};
 use oxide_arb_models::{
     config::{
-        CalibrationConfig, EmissionCooldownConfig, EndgameDetectionConfig, FillProbabilityConfig,
-        RiskConfig, ScorerConfig,
+        CalibrationConfig, EmissionCooldownConfig, EndgameDetectionConfig,
+        ExposureReservationConfig, FillProbabilityConfig, MarketDataConfig, PolymarketConfig,
+        RiskConfig, ScorerConfig, WebSocketConfig,
     },
     domain::{
         book::{BookLevel, BookSnapshot, EndgameBookPair},
         calibration::BucketKey,
+        calibration::CalibrationSnapshot,
+        latency::LatencyTrace,
+        market::MarketRegistryInfo,
         opportunity::{EndgameMeta, Opportunity},
     },
     enums::calibration::{DurationBucket, PriceZone},
-    enums::common::{MarketCategory, Side, StalenessLevel},
+    enums::common::{ExecutionMode, MarketCategory, Side, StalenessLevel, TickSize},
+    enums::market::MarketStatus,
     enums::opportunity::PayoutModel,
     types::{
-        Bps, EventId, MarketId, MicroPrice, MicroUsd, OpportunityId, Price, Shares, TokenId, Usd,
+        Bps, EventId, MarketId, MicroPrice, MicroProb, MicroScore, MicroUsd, OpportunityId, Price,
+        Shares, TokenId, Usd,
     },
 };
 use oxide_arb_risk::{
     builder::RiskEngineBuilder, clock::utc_clock, traits::RiskMetrics, types::ReportMode,
 };
+use polymarket_client_sdk_v2::clob::ws::types::response::{BookUpdate, OrderBookLevel, WsMessage};
+use polymarket_client_sdk_v2::types::{B256, U256};
 use rust_decimal_macros::dec;
 use tokio_util::sync::CancellationToken;
 
@@ -79,15 +111,10 @@ fn make_endgame_book() -> EndgameBookPair {
         Shares::new(dec!(1000)),
     )];
     EndgameBookPair {
-        yes: Arc::new(BookSnapshot::new(
-            Arc::new(Vec::new()),
-            Arc::new(yes_asks),
-            0,
-            0,
-        )),
+        yes: Arc::new(BookSnapshot::new(Arc::from([]), Arc::from(yes_asks), 0, 0)),
         no: Arc::new(BookSnapshot::new(
-            Arc::new(no_bids),
-            Arc::new(no_asks),
+            Arc::from(no_bids),
+            Arc::from(no_asks),
             0,
             0,
         )),
@@ -109,7 +136,13 @@ fn make_pipeline() -> OpportunityPipeline<ZeroFeeEstimator> {
     let scorer_config = ScorerConfig::default();
     let scorer = EndgameScorer::new(scorer_config.clone(), &FillProbabilityConfig::default(), 24);
     let cooldown = InMemoryEmissionCooldown::new(&EmissionCooldownConfig::default());
-    OpportunityPipeline::new(detector, scorer, cooldown, dec!(0.01), &scorer_config)
+    OpportunityPipeline::new(
+        detector,
+        scorer,
+        cooldown,
+        MicroUsd::try_from_decimal(dec!(0.01)).unwrap(),
+        &scorer_config,
+    )
 }
 
 struct BenchMetrics;
@@ -299,6 +332,7 @@ fn bench_pipeline_process(c: &mut Criterion) {
         category: MarketCategory::Geopolitics,
         staleness: StalenessLevel::Fresh,
         settlement_deadline: Some(deadline),
+        latency: LatencyTrace::default(),
     };
 
     c.bench_function("pipeline_process", |b| {
@@ -308,7 +342,7 @@ fn bench_pipeline_process(c: &mut Criterion) {
 
 fn bench_pre_trade_pass(c: &mut Criterion) {
     let engine = risk_engine();
-    let opp = Arc::new(bench_opportunity());
+    let opp = bench_opportunity();
     let probability = oxide_arb_models::domain::risk::ProbabilityInput {
         calibrated_win_prob: dec!(0.99),
         fill_prob: dec!(0.99),
@@ -366,7 +400,7 @@ fn risk_engine_halted() -> &'static oxide_arb_risk::engine::RiskEngine {
 
 fn bench_pre_trade_fail_short(c: &mut Criterion) {
     let engine = risk_engine_halted();
-    let opp = Arc::new(bench_opportunity());
+    let opp = bench_opportunity();
     let probability = oxide_arb_models::domain::risk::ProbabilityInput {
         calibrated_win_prob: dec!(0.99),
         fill_prob: dec!(0.99),
@@ -401,25 +435,30 @@ fn bench_book_apply_snapshot(c: &mut Criterion) {
             },
             |(mut ob, bids, asks)| {
                 ob.apply_snapshot(bids, asks, 1);
-                black_box(ob.publish(1));
+                black_box(ob.publish_cow(1));
             },
         );
     });
 }
 
 fn bench_book_apply_delta_50(c: &mut Criterion) {
-    use oxide_arb_core::pipeline::book_store::BookStore;
-    let metrics = Arc::new(MetricsHub::new());
-    let store = BookStore::new(metrics);
-    let tid = TokenId::new("t");
-    let levels = sample_levels(50);
-    store.apply_snapshot(&tid, levels.clone(), levels, 1);
-    let delta = [(Price::new(dec!(0.96)), Shares::new(dec!(10)))];
+    let bids = sample_levels(50);
+    let asks = sample_levels(50);
+    // Hot path: single-level update on an existing bid (no insert / dual-side probe).
+    let delta = [(Price::new(dec!(0.95)), Shares::new(dec!(10)))];
 
     c.bench_function("book_apply_delta_50", |b| {
-        b.iter(|| {
-            black_box(store.apply_delta(&tid, delta, 2));
-        });
+        b.iter_with_setup(
+            || {
+                let mut ob = OrderBook::new(TokenId::new("t"));
+                ob.apply_snapshot(bids.clone(), asks.clone(), 1);
+                ob
+            },
+            |mut ob| {
+                ob.apply_delta_cow(delta, 2);
+                black_box(&ob);
+            },
+        );
     });
 }
 
@@ -429,10 +468,10 @@ fn bench_dual_book_assemble(c: &mut Criterion) {
     let store = BookStore::new(Arc::clone(&metrics));
     let yes = TokenId::new("yes");
     let no = TokenId::new("no");
-    let levels = sample_levels(50);
-    store.apply_snapshot(&yes, levels.clone(), levels, 1);
-    let levels = sample_levels(50);
-    store.apply_snapshot(&no, levels.clone(), levels, 1);
+    let levels = Arc::from(sample_levels(50).into_boxed_slice());
+    store.apply_snapshot(&yes, Arc::clone(&levels), Arc::clone(&levels), 1, None);
+    let levels = Arc::from(sample_levels(50).into_boxed_slice());
+    store.apply_snapshot(&no, Arc::clone(&levels), levels, 1, None);
 
     c.bench_function("dual_book_assemble_50_levels", |b| {
         b.iter(|| DualBookAssembler::assemble(black_box(&store), &yes, &no));
@@ -485,7 +524,7 @@ fn bench_funnel_immediate_dispatch(c: &mut Criterion) {
     let metrics = Arc::new(MetricsHub::new());
     let (tx, _rx) = flume::bounded(256);
     let funnel = Funnel::new(vec![tx], 50, std::time::Duration::from_millis(75), metrics);
-    let scored = {
+    let scored = Arc::new({
         use oxide_arb_models::domain::opportunity::{EndgameMeta, Opportunity};
         use oxide_arb_models::enums::opportunity::PayoutModel;
         use oxide_arb_models::types::OpportunityId;
@@ -537,20 +576,327 @@ fn bench_funnel_immediate_dispatch(c: &mut Criterion) {
             }),
             token_yes: TokenId::new("y"),
             token_no: TokenId::new("n"),
-            score: dec!(0.9),
-            fill_probability: dec!(1),
-            urgency_factor: dec!(1),
-            category_weight: dec!(1),
-            staleness_discount: dec!(1),
+            score: MicroScore::try_from_decimal(dec!(0.9)).unwrap(),
+            fill_probability: MicroProb::ONE,
+            urgency_factor: MicroProb::ONE,
+            category_weight: MicroProb::ONE,
+            staleness_discount: MicroProb::ONE,
             book_yes_version: 1,
             book_no_version: 1,
+            trace: LatencyTrace::default(),
         }
-    };
+    });
 
     c.bench_function("funnel_immediate_dispatch", |b| {
         b.iter(|| {
-            let _ = black_box(funnel.try_dispatch_immediate(scored.clone()));
+            let _ = black_box(funnel.try_dispatch_immediate(Arc::clone(&scored)));
             black_box(());
+        });
+    });
+}
+
+fn bench_ws_normalize_book_50(c: &mut Criterion) {
+    let levels: Vec<OrderBookLevel> = (0..50)
+        .map(|i| {
+            OrderBookLevel::builder()
+                .price(dec!(0.95) + dec!(0.0001) * rust_decimal::Decimal::from(i))
+                .size(dec!(100))
+                .build()
+        })
+        .collect();
+
+    let book = BookUpdate::builder()
+        .asset_id(U256::from(42_u64))
+        .market(B256::ZERO)
+        .timestamp(1000)
+        .bids(levels.clone())
+        .asks(levels)
+        .build();
+
+    c.bench_function("ws_normalize_book_50", |b| {
+        b.iter(|| {
+            black_box(normalize_ws_message(
+                WsMessage::Book(book.clone()),
+                Instant::now(),
+            ))
+        });
+    });
+}
+
+fn make_core_pipeline() -> CoreOpportunityPipeline {
+    let cal_config = CalibrationConfig::default();
+    let calibrator = Arc::new(ResolutionCalibrator::empty(cal_config.clone()));
+    let config = EndgameDetectionConfig {
+        min_convergence_duration_secs: 0,
+        ..Default::default()
+    };
+    let detector = EndgameDetector::new(
+        &config,
+        &cal_config,
+        calibrator,
+        CoreFeeEstimator(Arc::new(FeeCalculator::default())),
+    );
+    let scorer_config = ScorerConfig::default();
+    let scorer = EndgameScorer::new(scorer_config.clone(), &FillProbabilityConfig::default(), 24);
+    let cooldown = InMemoryEmissionCooldown::new(&EmissionCooldownConfig::default());
+    OpportunityPipeline::new(
+        detector,
+        scorer,
+        cooldown,
+        MicroUsd::try_from_decimal(dec!(0.01)).unwrap(),
+        &scorer_config,
+    )
+}
+
+fn bench_scanner_scan_market(c: &mut Criterion) {
+    let metrics = Arc::new(MetricsHub::new());
+    let book_store = Arc::new(BookStore::new(Arc::clone(&metrics)));
+    let registry = Arc::new(MarketRegistry::new());
+    registry.register_market(MarketRegistryInfo {
+        market_id: MarketId::new("bench-m1"),
+        event_id: EventId::new("evt"),
+        token_yes: TokenId::new("bench-m1-yes"),
+        token_no: TokenId::new("bench-m1-no"),
+        question: "Q".into(),
+        slug: "q".into(),
+        category: MarketCategory::Geopolitics,
+        status: MarketStatus::Active,
+        neg_risk: false,
+        tick_size: TickSize::Hundredth,
+        tokens: vec![],
+        best_bid: None,
+        best_ask: None,
+        depth_usd: None,
+        min_order_size: dec!(1),
+        volume_24h: Usd::ZERO,
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    });
+    let market_cache = Arc::new(MarketCache::new(registry));
+    let yes = TokenId::new("bench-m1-yes");
+    let no = TokenId::new("bench-m1-no");
+    let yes_asks = vec![BookLevel::from_decimal_unchecked(
+        Price::new(dec!(0.97)),
+        Shares::new(dec!(1000)),
+    )];
+    let no_bids = vec![BookLevel::from_decimal_unchecked(
+        Price::new(dec!(0.02)),
+        Shares::new(dec!(1000)),
+    )];
+    let no_asks = vec![BookLevel::from_decimal_unchecked(
+        Price::new(dec!(0.03)),
+        Shares::new(dec!(1000)),
+    )];
+    let now_ms = ToPrimitive::to_u64(&Utc::now().timestamp_millis().max(0)).unwrap_or(0);
+    book_store.apply_snapshot(&yes, vec![], yes_asks, now_ms, None);
+    book_store.apply_snapshot(&no, no_bids, no_asks, now_ms, None);
+
+    let pipeline = Arc::new(make_core_pipeline());
+    let scanner = Scanner::new(
+        pipeline,
+        book_store,
+        market_cache,
+        StalenessClassifier::new(&MarketDataConfig::default()),
+        metrics,
+    );
+    let entry = CachedMarketScanEntry {
+        market_id: MarketId::new("bench-m1"),
+        event_id: EventId::new("evt"),
+        token_yes: yes,
+        token_no: no,
+        category: MarketCategory::Geopolitics,
+        tick_size: TickSize::Hundredth,
+        neg_risk: false,
+        settlement_deadline: Some(Utc::now() + Duration::hours(12)),
+    };
+    let now = Utc::now();
+
+    c.bench_function("scanner_scan_market", |b| {
+        b.iter(|| black_box(scanner.scan_market(black_box(&entry), now)));
+    });
+}
+
+fn execution_bench_scored() -> ScoredOpportunity {
+    ScoredOpportunity {
+        opportunity: Arc::new(Opportunity {
+            opportunity_id: OpportunityId::new_v7(),
+            market_id: MarketId::new("bench-exec"),
+            event_id: EventId::new("e"),
+            token_id: TokenId::new("bench-m1-yes"),
+            side: Side::Buy,
+            payout_model: PayoutModel::DirectionalSettlement {
+                projected_payout_if_correct: Usd::new(dec!(100)),
+                expected_payout: Usd::new(dec!(95)),
+                predicted_side: Side::Buy,
+            },
+            shares: Shares::new(dec!(100)),
+            entry_price: Price::new(dec!(0.92)),
+            total_cost: Usd::new(dec!(20)),
+            total_fees: Usd::new(dec!(0.40)),
+            net_profit: Usd::new(dec!(5)),
+            expected_net_profit: Usd::new(dec!(4.5)),
+            edge_bps: Bps::new(dec!(300)),
+            resolution_adjust: dec!(0.95),
+            depth_used_pct: dec!(10),
+            staleness: StalenessLevel::Fresh,
+            category: MarketCategory::Politics,
+            meta: EndgameMeta {
+                predicted_yes: true,
+                confidence: dec!(0.95),
+                convergence_duration_secs: 600,
+                price_zone: PriceZone::Z97,
+                duration_bucket: DurationBucket::Medium,
+                settlement_deadline: None,
+            },
+            calibration: CalibrationSnapshot {
+                bucket_key: BucketKey {
+                    category: MarketCategory::Politics,
+                    price_zone: PriceZone::Z97,
+                    duration_bucket: DurationBucket::Medium,
+                },
+                posterior_mean: dec!(0.93),
+                sample_size: 50,
+                alpha_prior: dec!(2.0),
+                beta_prior: dec!(1.0),
+                fallback_tier: 1,
+                fused_probability: dec!(0.99),
+            },
+            detected_at: Utc::now(),
+        }),
+        token_yes: TokenId::new("bench-m1-yes"),
+        token_no: TokenId::new("bench-m1-no"),
+        score: MicroScore::try_from_decimal(dec!(0.9)).unwrap(),
+        fill_probability: MicroProb::ONE,
+        urgency_factor: MicroProb::ONE,
+        category_weight: MicroProb::ONE,
+        staleness_discount: MicroProb::ONE,
+        book_yes_version: 1,
+        book_no_version: 1,
+        trace: LatencyTrace::default(),
+    }
+}
+
+fn seed_execution_books(store: &BookStore, scored: &ScoredOpportunity) {
+    let yes_asks = vec![BookLevel::from_decimal_unchecked(
+        Price::new(dec!(0.92)),
+        Shares::new(dec!(1000)),
+    )];
+    let no_bids = vec![BookLevel::from_decimal_unchecked(
+        Price::new(dec!(0.07)),
+        Shares::new(dec!(1000)),
+    )];
+    let no_asks = vec![BookLevel::from_decimal_unchecked(
+        Price::new(dec!(0.08)),
+        Shares::new(dec!(1000)),
+    )];
+    let now_ms = ToPrimitive::to_u64(&Utc::now().timestamp_millis().max(0)).unwrap_or(0);
+    store.apply_snapshot(&scored.token_yes, vec![], yes_asks, now_ms, None);
+    store.apply_snapshot(&scored.token_no, no_bids, no_asks, now_ms, None);
+}
+
+fn execution_bench_risk_engine() -> Arc<oxide_arb_risk::engine::RiskEngine> {
+    Arc::new(
+        RiskEngineBuilder::new()
+            .config(RiskConfig {
+                max_total_exposure_usd: dec!(5000),
+                max_single_market_exposure_usd: dec!(500),
+                max_single_bet_usd: dec!(25),
+                max_open_positions: 5,
+                max_daily_loss_usd: dec!(75),
+                max_weekly_loss_usd: dec!(120),
+                daily_budget_usd: dec!(200),
+                min_balance_usd: dec!(50),
+                reserve_balance_usd: dec!(100),
+                min_trade_usd: dec!(1),
+                max_consecutive_misses: 3,
+                ..RiskConfig::default()
+            })
+            .clock(utc_clock())
+            .initial_equity(Usd::new(dec!(5000)))
+            .build(&BenchMetrics)
+            .expect("engine build"),
+    )
+}
+
+fn execution_bench_risk_metrics(
+    exposure: Arc<InMemoryExposureReservation>,
+) -> Arc<CoreRiskMetrics> {
+    let ws_manager = Arc::new(ClobWsManager::new(
+        &PolymarketConfig::default(),
+        &WebSocketConfig::default(),
+        CancellationToken::new(),
+    ));
+    ws_manager.seed_test_connectivity();
+    let metrics_state = Arc::new(RiskMetricsState::new(Arc::new(ApiHealthTracker::new(
+        std::time::Duration::from_secs(60),
+    ))));
+    metrics_state.seed_test_snapshot(Usd::new(dec!(5000)));
+    Arc::new(CoreRiskMetrics::new(metrics_state, exposure, ws_manager))
+}
+
+fn execution_bench_setup() -> (&'static ExecutionPipeline, &'static Arc<ScoredOpportunity>) {
+    static SETUP: OnceLock<(ExecutionPipeline, Arc<ScoredOpportunity>)> = OnceLock::new();
+    SETUP.get_or_init(|| {
+        let metrics = Arc::new(MetricsHub::new());
+        let fsm = Arc::new(ExecutionFSM::new(Arc::clone(&metrics)));
+        let backpressure = Arc::new(BackpressurePolicy::new(
+            Arc::clone(&metrics),
+            None,
+            Arc::new(InMemoryEventStore::new()),
+        ));
+        let book_store = Arc::new(BookStore::new(Arc::clone(&metrics)));
+        let exposure = Arc::new(InMemoryExposureReservation::new(
+            ExposureReservationConfig::default(),
+        ));
+        let capital = Arc::new(CapitalManager::new(
+            Arc::clone(&exposure),
+            ExposureReservationConfig::default(),
+        ));
+        let scored = Arc::new(execution_bench_scored());
+        seed_execution_books(&book_store, &scored);
+        let (outcome_tx, _rx) = ExecutionPipeline::outcome_channel();
+
+        let pipeline = ExecutionPipeline::new(ExecutionPipelineDeps {
+            validator: Validator::new(
+                Arc::clone(&book_store),
+                StalenessClassifier::new(&MarketDataConfig::default()),
+                dec!(50),
+                5_000,
+                Arc::clone(&metrics),
+            ),
+            plan_builder: PlanBuilder::new(Arc::new(FeeCalculator::default())),
+            dispatcher: Dispatcher::new(ExecutionMode::Paper, Arc::clone(&metrics)),
+            order_strategy: OrderStrategy::new(ExecutionMode::Paper, None, Arc::clone(&metrics)),
+            capital_manager: capital,
+            risk_engine: execution_bench_risk_engine(),
+            risk_metrics: execution_bench_risk_metrics(exposure),
+            fsm,
+            market_inflight: Arc::new(MarketInFlightRegistry::new()),
+            metrics,
+            execution_mode: ExecutionMode::Paper,
+            outcome_tx,
+            backpressure,
+        });
+
+        (pipeline, scored)
+    });
+    let (pipeline, scored) = SETUP.get().expect("execution bench setup");
+    (pipeline, scored)
+}
+
+fn bench_execution_pipeline_paper_sync(c: &mut Criterion) {
+    let (pipeline, scored) = execution_bench_setup();
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+
+    c.bench_function("execution_pipeline_paper_sync", |b| {
+        b.iter(|| {
+            rt.block_on(async {
+                black_box(pipeline.execute(Arc::clone(scored)).await);
+            });
         });
     });
 }
@@ -568,6 +914,9 @@ criterion_group!(
     bench_book_apply_delta_50,
     bench_dual_book_assemble,
     bench_coalescer_pair_flush,
-    bench_funnel_immediate_dispatch
+    bench_funnel_immediate_dispatch,
+    bench_ws_normalize_book_50,
+    bench_scanner_scan_market,
+    bench_execution_pipeline_paper_sync
 );
 criterion_main!(benches);

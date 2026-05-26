@@ -135,7 +135,8 @@ async fn healthy_engine_allows_trade() {
 
     let opp = Arc::new(test_opportunity());
     let prob = test_probability();
-    let decision = engine.pre_trade_check_core(&opp, &prob, &metrics, ReportMode::ShortCircuit);
+    let decision =
+        engine.pre_trade_check_core(opp.as_ref(), &prob, &metrics, ReportMode::ShortCircuit);
 
     assert!(
         decision.allowed,
@@ -155,7 +156,8 @@ async fn halted_engine_denies_trade() {
 
     let opp = Arc::new(test_opportunity());
     let prob = test_probability();
-    let decision = engine.pre_trade_check_core(&opp, &prob, &metrics, ReportMode::ShortCircuit);
+    let decision =
+        engine.pre_trade_check_core(opp.as_ref(), &prob, &metrics, ReportMode::ShortCircuit);
 
     assert!(!decision.allowed);
     assert!(
@@ -185,7 +187,8 @@ async fn tripped_breaker_denies_trade() {
 
     let opp = Arc::new(test_opportunity());
     let prob = test_probability();
-    let decision = engine.pre_trade_check_core(&opp, &prob, &metrics, ReportMode::ShortCircuit);
+    let decision =
+        engine.pre_trade_check_core(opp.as_ref(), &prob, &metrics, ReportMode::ShortCircuit);
 
     assert!(!decision.allowed);
     assert!(
@@ -209,7 +212,8 @@ async fn low_balance_denies_trade() {
 
     let opp = Arc::new(test_opportunity());
     let prob = test_probability();
-    let decision = engine.pre_trade_check_core(&opp, &prob, &metrics, ReportMode::ShortCircuit);
+    let decision =
+        engine.pre_trade_check_core(opp.as_ref(), &prob, &metrics, ReportMode::ShortCircuit);
 
     assert!(!decision.allowed);
 }
@@ -224,7 +228,8 @@ async fn full_report_runs_all_checks() {
 
     let opp = Arc::new(test_opportunity());
     let prob = test_probability();
-    let decision = engine.pre_trade_check_core(&opp, &prob, &metrics, ReportMode::FullReport);
+    let decision =
+        engine.pre_trade_check_core(opp.as_ref(), &prob, &metrics, ReportMode::FullReport);
 
     assert!(!decision.allowed);
     assert!(
@@ -298,7 +303,8 @@ async fn tick_drives_breaker_transitions() {
     opp.market_id = MarketId::new("0xother_market");
     let opp = Arc::new(opp);
     let prob = test_probability();
-    let decision = engine.pre_trade_check_core(&opp, &prob, &metrics, ReportMode::ShortCircuit);
+    let decision =
+        engine.pre_trade_check_core(opp.as_ref(), &prob, &metrics, ReportMode::ShortCircuit);
     assert!(!decision.allowed, "should deny while breaker is open");
 
     std::thread::sleep(std::time::Duration::from_millis(10));
@@ -308,8 +314,12 @@ async fn tick_drives_breaker_transitions() {
 
     // After tick, breaker is in HalfOpen — allows trading (probe mode)
     let metrics_normal = MockMetrics::default();
-    let decision =
-        engine.pre_trade_check_core(&opp, &prob, &metrics_normal, ReportMode::ShortCircuit);
+    let decision = engine.pre_trade_check_core(
+        opp.as_ref(),
+        &prob,
+        &metrics_normal,
+        ReportMode::ShortCircuit,
+    );
     assert!(
         decision.allowed,
         "HalfOpen allows probe trades: {:?}",
@@ -335,7 +345,8 @@ async fn acknowledge_and_resume_clears_halt() {
 
     let opp = Arc::new(test_opportunity());
     let prob = test_probability();
-    let decision = engine.pre_trade_check_core(&opp, &prob, &metrics, ReportMode::ShortCircuit);
+    let decision =
+        engine.pre_trade_check_core(opp.as_ref(), &prob, &metrics, ReportMode::ShortCircuit);
     assert!(
         decision.allowed,
         "should allow after acknowledge_and_resume: {:?}",

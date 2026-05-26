@@ -6,7 +6,7 @@
 
 pub mod checks;
 
-use crate::context::RiskContext;
+use crate::context::PreTradeContext;
 use crate::pipeline::checks::{
     ApiErrorRateCheck, BlacklistCheck, CircuitBreakerCheck, DailyBudgetCheck,
     DailyDirectionalBudgetCheck, DailyLossCapCheck, DirectionalConcentrationCheck,
@@ -24,7 +24,7 @@ use std::time::Instant;
 pub trait RiskCheck: Send + Sync {
     fn id(&self) -> RiskCheckId;
     fn kind(&self) -> RiskCheckKind;
-    fn evaluate(&self, ctx: &RiskContext) -> RiskCheckResult;
+    fn evaluate(&self, ctx: &PreTradeContext<'_>) -> RiskCheckResult;
 }
 
 /// Statically registered pipeline — no dynamic dispatch on the hot path.
@@ -98,7 +98,7 @@ impl StaticRiskPipeline {
     }
 
     #[must_use]
-    pub fn evaluate(&self, ctx: &RiskContext, mode: ReportMode) -> PipelineReport {
+    pub fn evaluate(&self, ctx: &PreTradeContext<'_>, mode: ReportMode) -> PipelineReport {
         self.evaluate_range(ctx, mode, 0, self.len())
     }
 
@@ -106,7 +106,7 @@ impl StaticRiskPipeline {
     #[must_use]
     pub fn evaluate_range(
         &self,
-        ctx: &RiskContext,
+        ctx: &PreTradeContext<'_>,
         mode: ReportMode,
         start: usize,
         end: usize,
@@ -189,7 +189,7 @@ impl StaticRiskPipeline {
 fn run_check<C: RiskCheck>(
     check: &C,
     kind: RiskCheckKind,
-    ctx: &RiskContext,
+    ctx: &PreTradeContext<'_>,
     mode: ReportMode,
     results: &mut Vec<RiskCheckResult>,
     has_failed_hard_gate: &mut bool,

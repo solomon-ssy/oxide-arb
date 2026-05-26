@@ -1,21 +1,18 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use crate::execution::execution_pipeline::ExecutionPipeline;
+use crate::execution::port::ExecutionPort;
 use crate::observability::metrics_hub::MetricsHub;
-use num_traits::ToPrimitive;
 use oxide_arb_algorithm::scorer::ScoredOpportunity;
 use oxide_arb_error::OxideError;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use tokio_util::sync::CancellationToken;
 
 /// Default number of execution shards (one runner per shard).
 pub const DEFAULT_EXECUTION_SHARD_COUNT: usize = 4;
 
 pub struct ExecutionRunner {
-    rx: flume::Receiver<ScoredOpportunity>,
-    pipeline: Arc<ExecutionPipeline>,
+    rx: flume::Receiver<Arc<ScoredOpportunity>>,
+    pipeline: Arc<dyn ExecutionPort>,
     shutdown: CancellationToken,
     inflight: Arc<AtomicU32>,
     metrics: Arc<MetricsHub>,
@@ -23,8 +20,8 @@ pub struct ExecutionRunner {
 
 impl ExecutionRunner {
     pub const fn new(
-        rx: flume::Receiver<ScoredOpportunity>,
-        pipeline: Arc<ExecutionPipeline>,
+        rx: flume::Receiver<Arc<ScoredOpportunity>>,
+        pipeline: Arc<dyn ExecutionPort>,
         shutdown: CancellationToken,
         inflight: Arc<AtomicU32>,
         metrics: Arc<MetricsHub>,
@@ -80,13 +77,13 @@ impl ExecutionRunner {
 
 /// Pool of N shard runners; funnel dispatches directly to [`Self::shard_senders`].
 pub struct ExecutionRunnerPool {
-    shard_txs: Vec<flume::Sender<ScoredOpportunity>>,
+    shard_txs: Vec<flume::Sender<Arc<ScoredOpportunity>>>,
 }
 
 impl ExecutionRunnerPool {
     pub fn new(
         shard_count: usize,
-        pipeline: &Arc<ExecutionPipeline>,
+        pipeline: &Arc<dyn ExecutionPort>,
         shutdown: &CancellationToken,
         inflight: &Arc<AtomicU32>,
         metrics: &Arc<MetricsHub>,
@@ -111,14 +108,7 @@ impl ExecutionRunnerPool {
     }
 
     #[must_use]
-    pub fn shard_senders(&self) -> &[flume::Sender<ScoredOpportunity>] {
+    pub fn shard_senders(&self) -> &[flume::Sender<Arc<ScoredOpportunity>>] {
         &self.shard_txs
     }
-}
-
-#[inline]
-pub fn shard_index(id: &str, shard_count: usize) -> usize {
-    let mut hasher = DefaultHasher::new();
-    id.hash(&mut hasher);
-    ToPrimitive::to_usize(&hasher.finish()).unwrap_or(0) % shard_count.max(1)
 }

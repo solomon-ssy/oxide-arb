@@ -1,26 +1,24 @@
 //! Endgame-specific risk check tests.
-//!
-//! Validates directional concentration limits and daily directional budget
-//! via the pipeline check structs.
 
 use chrono::Utc;
 use oxide_arb_models::config::RiskConfig;
 use oxide_arb_models::domain::risk::ProbabilityInput;
 use oxide_arb_models::types::Usd;
-use oxide_arb_risk::context::{BlacklistGate, CircuitBreakerGate, ManualHaltGate, RiskContext};
+use oxide_arb_risk::context::PreTradeContext;
 use oxide_arb_risk::pipeline::RiskCheck;
 use oxide_arb_risk::pipeline::checks::{
     DailyDirectionalBudgetCheck, DirectionalConcentrationCheck,
 };
-use oxide_arb_risk::types::{DrawdownAction, RiskCheckId, StateVersion};
-use rust_decimal::Decimal;
+use oxide_arb_risk::snapshot::{DailyAccountingSnapshot, RiskSnapshot};
+use oxide_arb_risk::traits::RiskMetricsSnapshot;
+use oxide_arb_risk::types::RiskCheckId;
 use rust_decimal_macros::dec;
-use std::sync::Arc;
 
-fn make_context(
+fn with_context(
     open_directional_same_side: usize,
     daily_directional_trades_same_side: u32,
-) -> RiskContext {
+    f: impl FnOnce(&PreTradeContext<'_>),
+) {
     use oxide_arb_models::domain::calibration::{BucketKey, CalibrationSnapshot};
     use oxide_arb_models::domain::opportunity::{EndgameMeta, Opportunity};
     use oxide_arb_models::enums::calibration::{DurationBucket, PriceZone};
@@ -74,9 +72,25 @@ fn make_context(
         detected_at: Utc::now(),
     };
 
-    RiskContext {
-        state_version: StateVersion::ZERO,
-        opportunity: Arc::new(opp),
+    let snap = RiskSnapshot {
+        daily: DailyAccountingSnapshot {
+            daily_budget_remaining: Usd::new(dec!(50)),
+            ..RiskSnapshot::zeroed().daily
+        },
+        ..RiskSnapshot::zeroed()
+    };
+
+    let metrics = RiskMetricsSnapshot {
+        total_exposure: Usd::new(dec!(100)),
+        open_position_count: 1,
+        cached_balance: Usd::new(dec!(5000)),
+        open_directional_count_buy: open_directional_same_side,
+        daily_directional_trades_buy: daily_directional_trades_same_side,
+        ..RiskMetricsSnapshot::zeroed()
+    };
+
+    let ctx = PreTradeContext {
+        opportunity: &opp,
         probability: ProbabilityInput {
             calibrated_win_prob: dec!(0.95),
             fill_prob: dec!(0.90),
@@ -86,35 +100,12 @@ fn make_context(
             expected_slippage_pct: dec!(0.005),
             expected_failure_cost_pct: dec!(0.005),
         },
-        market_exposure_before: Usd::ZERO,
-        total_exposure_before: Usd::new(dec!(100)),
-        total_potential_loss: Usd::ZERO,
-        active_reservation_count: 0,
-        reserved_usd: Usd::ZERO,
-        open_position_count: 1,
-        cached_balance: Usd::new(dec!(5000)),
-        ws_disconnect_secs: 0,
-        open_directional_count_same_side: open_directional_same_side,
-        daily_directional_trades_same_side,
-        consecutive_market_misses: 0,
-        hourly_loss: Usd::ZERO,
-        daily_loss: Usd::ZERO,
-        daily_budget_remaining: Usd::new(dec!(50)),
-        weekly_loss: Usd::ZERO,
-        daily_pnl: Usd::ZERO,
-        circuit_breaker: CircuitBreakerGate {
-            allows_trading: true,
-            is_probe: false,
-        },
-        manual_halt: ManualHaltGate::Clear,
-        blacklist: BlacklistGate::Clear,
-        token_blacklisted: false,
-        api_error_count: 0,
-        api_request_count: 0,
-        drawdown_factor: Decimal::ONE,
-        drawdown_action: DrawdownAction::Normal,
-        snapshot_at: Utc::now(),
-    }
+        snap: &snap,
+        metrics,
+        now: Utc::now(),
+    };
+
+    f(&ctx);
 }
 
 #[test]
@@ -124,11 +115,11 @@ fn directional_concentration_blocks_when_at_max() {
         ..RiskConfig::default()
     };
     let check = DirectionalConcentrationCheck::new(&config);
-    let ctx = make_context(3, 0);
-
-    let result = check.evaluate(&ctx);
-    assert!(!result.passed);
-    assert_eq!(result.check_id, RiskCheckId::DirectionalConcentration);
+    with_context(3, 0, |ctx| {
+        let result = check.evaluate(ctx);
+        assert!(!result.passed);
+        assert_eq!(result.check_id, RiskCheckId::DirectionalConcentration);
+    });
 }
 
 #[test]
@@ -138,10 +129,9 @@ fn directional_concentration_allows_when_below_max() {
         ..RiskConfig::default()
     };
     let check = DirectionalConcentrationCheck::new(&config);
-    let ctx = make_context(2, 0);
-
-    let result = check.evaluate(&ctx);
-    assert!(result.passed);
+    with_context(2, 0, |ctx| {
+        assert!(check.evaluate(ctx).passed);
+    });
 }
 
 #[test]
@@ -151,11 +141,11 @@ fn daily_directional_budget_blocks_at_limit() {
         ..RiskConfig::default()
     };
     let check = DailyDirectionalBudgetCheck::new(&config);
-    let ctx = make_context(0, 10);
-
-    let result = check.evaluate(&ctx);
-    assert!(!result.passed);
-    assert_eq!(result.check_id, RiskCheckId::DailyDirectionalBudget);
+    with_context(0, 10, |ctx| {
+        let result = check.evaluate(ctx);
+        assert!(!result.passed);
+        assert_eq!(result.check_id, RiskCheckId::DailyDirectionalBudget);
+    });
 }
 
 #[test]
@@ -165,8 +155,7 @@ fn daily_directional_budget_allows_below_limit() {
         ..RiskConfig::default()
     };
     let check = DailyDirectionalBudgetCheck::new(&config);
-    let ctx = make_context(0, 9);
-
-    let result = check.evaluate(&ctx);
-    assert!(result.passed);
+    with_context(0, 9, |ctx| {
+        assert!(check.evaluate(ctx).passed);
+    });
 }

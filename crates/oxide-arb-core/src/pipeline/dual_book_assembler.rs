@@ -45,6 +45,7 @@ mod tests {
                 Shares::new(dec!(50)),
             )],
             1000,
+            None,
         );
         store.apply_snapshot(
             &no,
@@ -57,6 +58,7 @@ mod tests {
                 Shares::new(dec!(60)),
             )],
             1000,
+            None,
         );
 
         let pair = DualBookAssembler::assemble(&store, &yes, &no).unwrap();

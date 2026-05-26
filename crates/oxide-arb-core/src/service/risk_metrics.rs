@@ -156,6 +156,11 @@ impl RiskMetricsState {
     }
 
     #[inline]
+    pub fn metrics_version(&self) -> u64 {
+        self.snapshot.load().refresh_sequence
+    }
+
+    #[inline]
     pub fn cached_balance(&self) -> Usd {
         self.snapshot.load().cached_balance
     }

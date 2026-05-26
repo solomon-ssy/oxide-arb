@@ -18,7 +18,7 @@ use oxide_arb_api::clob::ClobClient;
 use oxide_arb_api::ws::ClobWsManager;
 use oxide_arb_models::config::Settings;
 use oxide_arb_models::enums::common::ExecutionMode;
-use oxide_arb_models::types::{MarketId, TokenId};
+use oxide_arb_models::types::{MarketId, MicroScore, TokenId};
 use oxide_arb_repository::postgres::PgRiskAuditRepository;
 use oxide_arb_risk::audit::RiskAuditEvent;
 use oxide_arb_risk::engine::RiskEngine;
@@ -175,6 +175,7 @@ impl AppContext {
         let risk_engine = Arc::clone(&self.risk.engine);
         let risk_metrics = Arc::clone(&self.risk.metrics);
         let fsm = Arc::clone(&self.trading.fsm);
+        let post_trade_spill = Arc::clone(exec.pipeline.post_trade_spill());
 
         self.pending_tasks
             .push(TaskId::ExecutionOutcomeDrain, move |shutdown| async move {
@@ -183,6 +184,7 @@ impl AppContext {
                     risk_engine,
                     risk_metrics,
                     fsm,
+                    post_trade_spill,
                     shutdown,
                 )
                 .await
@@ -268,11 +270,13 @@ impl AppContext {
             scanner: Arc::clone(&self.trading.scanner),
             market_cache: Arc::clone(&self.data.market_cache),
             funnel: Arc::clone(&self.trading.funnel),
-            dispatch_immediate_threshold: self
-                .config
-                .execution
-                .endgame_latency
-                .dispatch_immediate_threshold,
+            dispatch_immediate_threshold: MicroScore::try_from_decimal(
+                self.config
+                    .execution
+                    .endgame_latency
+                    .dispatch_immediate_threshold,
+            )
+            .unwrap_or(MicroScore::ZERO),
             shutdown: self.shutdown.clone(),
             metrics: Arc::clone(&self.infra.metrics),
         });

@@ -3,7 +3,8 @@
 use crate::enums::common::{Side, StalenessLevel};
 use crate::enums::execution::ExecutionOutcome;
 use crate::types::{
-    Bps, EventId, ExecutionId, MarketId, OpportunityId, Price, ReservationId, Shares, TokenId, Usd,
+    Bps, EventId, ExecutionId, MarketId, OpportunityId, OrderId, Price, ReservationId, Shares,
+    TokenId, Usd,
 };
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -27,10 +28,31 @@ pub struct ExecutionPlan {
     pub planned_at: DateTime<Utc>,
 }
 
+/// Lightweight execution outcome for pipeline results — no clone of full [`ExecutionOutcome`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub enum ExecutionOutcomeSummary {
+    Filled { order_id: OrderId },
+    Miss,
+    Failed,
+}
+
+impl ExecutionOutcomeSummary {
+    #[must_use]
+    pub fn from_outcome(outcome: &ExecutionOutcome) -> Self {
+        match outcome {
+            ExecutionOutcome::Filled { order_id, .. } => Self::Filled {
+                order_id: order_id.clone(),
+            },
+            ExecutionOutcome::Miss { .. } => Self::Miss,
+            ExecutionOutcome::Failed { .. } => Self::Failed,
+        }
+    }
+}
+
 /// Result of the full execution pipeline.
 #[derive(Debug, Clone, Serialize)]
 pub struct ExecutionResult {
-    pub outcome: Option<ExecutionOutcome>,
+    pub outcome_summary: Option<ExecutionOutcomeSummary>,
     pub rejection_reason: Option<String>,
     pub rejection_stage: Option<String>,
     pub started_at: DateTime<Utc>,
@@ -39,10 +61,10 @@ pub struct ExecutionResult {
 
 impl ExecutionResult {
     #[must_use]
-    pub fn completed(outcome: ExecutionOutcome) -> Self {
+    pub fn completed(summary: ExecutionOutcomeSummary) -> Self {
         let now = Utc::now();
         Self {
-            outcome: Some(outcome),
+            outcome_summary: Some(summary),
             rejection_reason: None,
             rejection_stage: None,
             started_at: now,
@@ -54,7 +76,7 @@ impl ExecutionResult {
     pub fn rejected(stage: &str, reason: impl std::fmt::Display) -> Self {
         let now = Utc::now();
         Self {
-            outcome: None,
+            outcome_summary: None,
             rejection_reason: Some(reason.to_string()),
             rejection_stage: Some(stage.into()),
             started_at: now,
@@ -64,12 +86,15 @@ impl ExecutionResult {
 
     #[must_use]
     pub const fn is_filled(&self) -> bool {
-        matches!(&self.outcome, Some(ExecutionOutcome::Filled { .. }))
+        matches!(
+            self.outcome_summary,
+            Some(ExecutionOutcomeSummary::Filled { .. })
+        )
     }
 
     #[must_use]
     pub const fn is_miss(&self) -> bool {
-        matches!(&self.outcome, Some(ExecutionOutcome::Miss { .. }))
+        matches!(self.outcome_summary, Some(ExecutionOutcomeSummary::Miss))
     }
 
     #[must_use]

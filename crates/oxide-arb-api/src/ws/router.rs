@@ -1,5 +1,6 @@
 //! Token-to-shard routing and dynamic shard spawning.
 
+use oxide_arb_models::domain::pipeline::PipelineEvent;
 use oxide_arb_models::types::TokenId;
 use parking_lot::RwLock;
 use std::collections::HashMap;
@@ -7,7 +8,6 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use super::event::WsEvent;
 use super::shard::WsShard;
 
 /// Routes token subscriptions across shards and spawns shard tasks.
@@ -15,7 +15,7 @@ pub struct ShardRouter {
     max_per_shard: usize,
     assignments: Arc<RwLock<HashMap<TokenId, usize>>>,
     shard_loads: Arc<RwLock<Vec<usize>>>,
-    output_tx: flume::Sender<WsEvent>,
+    output_tx: flume::Sender<PipelineEvent>,
     ws_url: String,
     shutdown: CancellationToken,
     last_message_at: Arc<parking_lot::Mutex<Option<Instant>>>,
@@ -24,7 +24,7 @@ pub struct ShardRouter {
 impl ShardRouter {
     pub fn new(
         max_per_shard: usize,
-        output_tx: flume::Sender<WsEvent>,
+        output_tx: flume::Sender<PipelineEvent>,
         ws_url: String,
         shutdown: CancellationToken,
         last_message_at: Arc<parking_lot::Mutex<Option<Instant>>>,

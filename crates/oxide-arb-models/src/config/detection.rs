@@ -1,6 +1,7 @@
 //! Opportunity detection configuration.
 
 use crate::enums::common::MarketCategory;
+use crate::types::{MicroPct, MicroProb, MicroScore};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::Deserialize;
@@ -251,25 +252,58 @@ const fn default_resolution_bonus() -> Decimal {
 
 // ── Scorer ───────────────────────────────────────────────────────────────────
 
+/// Serde wire format — decimals in config files; converted to Micro on load.
+#[derive(Debug, Deserialize)]
+struct ScorerConfigSerde {
+    #[serde(default = "default_min_score")]
+    min_score: Decimal,
+    #[serde(default = "default_max_depth_usage")]
+    max_depth_usage_pct: Decimal,
+    #[serde(default = "default_category_weights_decimal")]
+    category_weights: HashMap<MarketCategory, Decimal>,
+}
+
 /// Endgame opportunity scorer configuration.
-#[derive(Debug, Clone, Deserialize, Validate)]
+#[derive(Debug, Clone, Validate)]
 pub struct ScorerConfig {
     /// Minimum composite score to emit an opportunity.
-    #[serde(default = "default_min_score")]
-    pub min_score: Decimal,
+    pub min_score: MicroScore,
     /// Maximum depth usage (%) to accept.
-    #[serde(default = "default_max_depth_usage")]
-    pub max_depth_usage_pct: Decimal,
+    pub max_depth_usage_pct: MicroPct,
     /// Per-category weight multipliers for scoring.
-    #[serde(default = "default_category_weights")]
-    pub category_weights: HashMap<MarketCategory, Decimal>,
+    pub category_weights: HashMap<MarketCategory, MicroProb>,
+}
+
+impl<'de> Deserialize<'de> for ScorerConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = ScorerConfigSerde::deserialize(deserializer)?;
+        let category_weights = raw
+            .category_weights
+            .into_iter()
+            .map(|(cat, weight)| {
+                MicroProb::try_from_decimal(weight)
+                    .map(|w| (cat, MicroProb::from_factor_micro(w.micro())))
+                    .map_err(serde::de::Error::custom)
+            })
+            .collect::<Result<HashMap<_, _>, _>>()?;
+        Ok(Self {
+            min_score: MicroScore::try_from_decimal(raw.min_score)
+                .map_err(serde::de::Error::custom)?,
+            max_depth_usage_pct: MicroPct::try_from_pct_decimal(raw.max_depth_usage_pct)
+                .map_err(serde::de::Error::custom)?,
+            category_weights,
+        })
+    }
 }
 
 impl Default for ScorerConfig {
     fn default() -> Self {
         Self {
-            min_score: default_min_score(),
-            max_depth_usage_pct: default_max_depth_usage(),
+            min_score: MicroScore::from_micro(100_000),
+            max_depth_usage_pct: MicroPct::from_micro(500_000),
             category_weights: default_category_weights(),
         }
     }
@@ -282,9 +316,8 @@ const fn default_max_depth_usage() -> Decimal {
     dec!(50)
 }
 
-/// Default category weights derived from fee rates: lower fees → higher weight.
-#[must_use]
-pub fn default_category_weights() -> HashMap<MarketCategory, Decimal> {
+/// Default category weights (decimal wire format for serde defaults).
+fn default_category_weights_decimal() -> HashMap<MarketCategory, Decimal> {
     HashMap::from([
         (MarketCategory::Geopolitics, dec!(1.5)),
         (MarketCategory::Sports, dec!(1.2)),
@@ -296,6 +329,50 @@ pub fn default_category_weights() -> HashMap<MarketCategory, Decimal> {
         (MarketCategory::Economics, dec!(0.8)),
         (MarketCategory::Crypto, dec!(0.8)),
         (MarketCategory::Other, dec!(0.8)),
+    ])
+}
+
+/// Default category weights derived from fee rates: lower fees → higher weight.
+#[must_use]
+pub fn default_category_weights() -> HashMap<MarketCategory, MicroProb> {
+    HashMap::from([
+        (
+            MarketCategory::Geopolitics,
+            MicroProb::from_factor_micro(1_500_000),
+        ),
+        (
+            MarketCategory::Sports,
+            MicroProb::from_factor_micro(1_200_000),
+        ),
+        (
+            MarketCategory::Politics,
+            MicroProb::from_factor_micro(1_000_000),
+        ),
+        (
+            MarketCategory::Finance,
+            MicroProb::from_factor_micro(1_000_000),
+        ),
+        (
+            MarketCategory::Tech,
+            MicroProb::from_factor_micro(1_000_000),
+        ),
+        (
+            MarketCategory::Culture,
+            MicroProb::from_factor_micro(800_000),
+        ),
+        (
+            MarketCategory::Weather,
+            MicroProb::from_factor_micro(800_000),
+        ),
+        (
+            MarketCategory::Economics,
+            MicroProb::from_factor_micro(800_000),
+        ),
+        (
+            MarketCategory::Crypto,
+            MicroProb::from_factor_micro(800_000),
+        ),
+        (MarketCategory::Other, MicroProb::from_factor_micro(800_000)),
     ])
 }
 

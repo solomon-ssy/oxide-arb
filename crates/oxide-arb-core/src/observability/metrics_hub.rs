@@ -69,6 +69,8 @@ pub struct MetricsHub {
     pub shard_status_changes: IntCounter,
     pub book_store_token_count: IntGauge,
     pub book_apply_dropped: IntCounter,
+    pub book_apply_coalesced_total: IntCounter,
+    pub backpressure_events: IntCounterVec,
 
     // Detection
     pub scans_gate_rejected: IntCounter,
@@ -85,6 +87,7 @@ pub struct MetricsHub {
     pub funnel_dispatch_age_ms: Histogram,
     pub funnel_queue_depth: IntGauge,
     pub funnel_fast_lane_dispatched: IntCounter,
+    pub execution_shard_evicted_total: IntCounter,
 
     // Execution
     pub execution_latency: Histogram,
@@ -99,10 +102,16 @@ pub struct MetricsHub {
     pub reservation_failures: IntCounter,
     pub execution_market_busy: IntCounter,
     pub post_trade_dropped: IntCounter,
+    pub post_trade_spilled_total: IntCounter,
 
     // Tiered execution
     pub tier_fills: IntCounterVec,
     pub tier_misses: IntCounterVec,
+
+    // Latency segments (WS → scan → dispatch → HTTP)
+    pub latency_ws_to_scan_us: Histogram,
+    pub latency_scan_to_dispatch_us: Histogram,
+    pub latency_tick_to_http_us: Histogram,
 
     // Kill switch
     pub fsm_emergency_entries: IntCounter,
@@ -155,6 +164,8 @@ struct PipelineMetrics {
     shard_status_changes: IntCounter,
     book_store_token_count: IntGauge,
     book_apply_dropped: IntCounter,
+    book_apply_coalesced_total: IntCounter,
+    backpressure_events: IntCounterVec,
 }
 
 struct DetectionMetrics {
@@ -173,6 +184,7 @@ struct FunnelMetrics {
     dispatch_age_ms: Histogram,
     queue_depth: IntGauge,
     fast_lane_dispatched: IntCounter,
+    execution_shard_evicted_total: IntCounter,
 }
 
 struct ExecutionMetrics {
@@ -188,8 +200,12 @@ struct ExecutionMetrics {
     reservation_failures: IntCounter,
     execution_market_busy: IntCounter,
     post_trade_dropped: IntCounter,
+    post_trade_spilled_total: IntCounter,
     tier_fills: IntCounterVec,
     tier_misses: IntCounterVec,
+    latency_ws_to_scan_us: Histogram,
+    latency_scan_to_dispatch_us: Histogram,
+    latency_tick_to_http_us: Histogram,
     fsm_emergency_entries: IntCounter,
 }
 
@@ -269,7 +285,18 @@ fn register_pipeline_metrics(registry: &Registry) -> PipelineMetrics {
         book_apply_dropped: register_counter!(
             registry,
             "oxide_arb_pipeline_book_apply_dropped_total",
-            "WS events dropped when book apply queue full"
+            "WS events dropped when book apply queue full (non-coalescable)"
+        ),
+        book_apply_coalesced_total: register_counter!(
+            registry,
+            "oxide_arb_book_apply_coalesced_total",
+            "Book apply events coalesced under backpressure"
+        ),
+        backpressure_events: register_counter_vec!(
+            registry,
+            "oxide_arb_backpressure_events_total",
+            "Backpressure actions by site",
+            &["site", "action"]
         ),
     }
 }
@@ -344,10 +371,45 @@ fn register_funnel_metrics(registry: &Registry) -> FunnelMetrics {
             "oxide_arb_funnel_fast_lane_dispatched_total",
             "Opportunities dispatched via fast lane (bypass funnel sweep)"
         ),
+        execution_shard_evicted_total: register_counter!(
+            registry,
+            "oxide_arb_execution_shard_evicted_total",
+            "Lowest-score funnel entries evicted under execution shard backpressure"
+        ),
+    }
+}
+
+struct LatencyMetrics {
+    ws_to_scan: Histogram,
+    scan_to_dispatch: Histogram,
+    tick_to_http: Histogram,
+}
+
+fn register_latency_metrics(registry: &Registry) -> LatencyMetrics {
+    LatencyMetrics {
+        ws_to_scan: register_histogram!(
+            registry,
+            "oxide_arb_latency_ws_to_scan_microseconds",
+            "WS ingress to scan emit",
+            vec![50.0, 100.0, 250.0, 500.0, 1000.0, 2500.0, 5000.0, 10000.0]
+        ),
+        scan_to_dispatch: register_histogram!(
+            registry,
+            "oxide_arb_latency_scan_to_dispatch_microseconds",
+            "Scan emit to execution dispatch",
+            vec![50.0, 100.0, 250.0, 500.0, 1000.0, 2500.0, 5000.0, 10000.0]
+        ),
+        tick_to_http: register_histogram!(
+            registry,
+            "oxide_arb_latency_tick_to_http_microseconds",
+            "Dispatch start to HTTP send",
+            vec![50.0, 100.0, 250.0, 500.0, 1000.0, 2500.0, 5000.0, 10000.0]
+        ),
     }
 }
 
 fn register_execution_metrics(registry: &Registry) -> ExecutionMetrics {
+    let latency = register_latency_metrics(registry);
     ExecutionMetrics {
         execution_latency: register_histogram!(
             registry,
@@ -409,7 +471,12 @@ fn register_execution_metrics(registry: &Registry) -> ExecutionMetrics {
         post_trade_dropped: register_counter!(
             registry,
             "oxide_arb_execution_post_trade_dropped_total",
-            "Post-trade jobs dropped when queue full"
+            "Post-trade jobs dropped when spill buffer fails"
+        ),
+        post_trade_spilled_total: register_counter!(
+            registry,
+            "oxide_arb_post_trade_spilled_total",
+            "Post-trade jobs spilled to in-memory outbox when queue full"
         ),
         tier_fills: register_counter_vec!(
             registry,
@@ -423,6 +490,9 @@ fn register_execution_metrics(registry: &Registry) -> ExecutionMetrics {
             "Misses by execution tier",
             &["tier"]
         ),
+        latency_ws_to_scan_us: latency.ws_to_scan,
+        latency_scan_to_dispatch_us: latency.scan_to_dispatch,
+        latency_tick_to_http_us: latency.tick_to_http,
         fsm_emergency_entries: register_counter!(
             registry,
             "oxide_arb_fsm_emergency_entries_total",
@@ -597,6 +667,8 @@ impl MetricsHub {
             shard_status_changes: pipeline.shard_status_changes,
             book_store_token_count: pipeline.book_store_token_count,
             book_apply_dropped: pipeline.book_apply_dropped,
+            book_apply_coalesced_total: pipeline.book_apply_coalesced_total,
+            backpressure_events: pipeline.backpressure_events,
             scans_gate_rejected: detection.scans_gate_rejected,
             coalesced_scans: detection.coalesced_scans,
             coalescer_dropped: detection.coalescer_dropped,
@@ -609,6 +681,7 @@ impl MetricsHub {
             funnel_dispatch_age_ms: funnel.dispatch_age_ms,
             funnel_queue_depth: funnel.queue_depth,
             funnel_fast_lane_dispatched: funnel.fast_lane_dispatched,
+            execution_shard_evicted_total: funnel.execution_shard_evicted_total,
             execution_latency: execution.execution_latency,
             execute_intent_to_http_us: execution.execute_intent_to_http_us,
             book_freshness_rejected: execution.book_freshness_rejected,
@@ -621,8 +694,12 @@ impl MetricsHub {
             reservation_failures: execution.reservation_failures,
             execution_market_busy: execution.execution_market_busy,
             post_trade_dropped: execution.post_trade_dropped,
+            post_trade_spilled_total: execution.post_trade_spilled_total,
             tier_fills: execution.tier_fills,
             tier_misses: execution.tier_misses,
+            latency_ws_to_scan_us: execution.latency_ws_to_scan_us,
+            latency_scan_to_dispatch_us: execution.latency_scan_to_dispatch_us,
+            latency_tick_to_http_us: execution.latency_tick_to_http_us,
             fsm_emergency_entries: execution.fsm_emergency_entries,
             risk_checks_total: risk.checks_total,
             risk_exposure_usd: risk.exposure_usd,

@@ -8,12 +8,14 @@ use std::time::Instant;
 
 use oxide_arb_api::clob::ClobClient;
 use oxide_arb_models::domain::execution::ExecutionPlan;
+use oxide_arb_models::domain::latency::LatencyTrace;
 use oxide_arb_models::domain::order::OrderRequest;
 use oxide_arb_models::enums::common::{ExecutionMode, OrderType};
 use oxide_arb_models::enums::execution::ExecutionOutcome;
 
 use crate::execution::clob_outcome::map_order_response;
 use crate::execution::dispatcher::Dispatcher;
+use crate::observability::latency::observe_tick_to_http;
 use crate::observability::metrics_hub::MetricsHub;
 
 const TIER_FOK: &str = "fok";
@@ -37,18 +39,29 @@ impl OrderStrategy {
         }
     }
 
-    pub async fn execute(&self, dispatcher: &Dispatcher, plan: &ExecutionPlan) -> ExecutionOutcome {
+    pub async fn execute(
+        &self,
+        dispatcher: &Dispatcher,
+        plan: &ExecutionPlan,
+        trace: &mut LatencyTrace,
+    ) -> ExecutionOutcome {
         match self.execution_mode {
             ExecutionMode::DryRun | ExecutionMode::Paper => {
+                trace.mark_http_sent();
+                observe_tick_to_http(trace, &self.metrics);
                 let outcome = dispatcher.dispatch(plan);
                 self.record_tier_metrics(&outcome);
                 outcome
             }
-            ExecutionMode::Live => self.execute_live_fok(plan).await,
+            ExecutionMode::Live => self.execute_live_fok(plan, trace).await,
         }
     }
 
-    async fn execute_live_fok(&self, plan: &ExecutionPlan) -> ExecutionOutcome {
+    async fn execute_live_fok(
+        &self,
+        plan: &ExecutionPlan,
+        trace: &mut LatencyTrace,
+    ) -> ExecutionOutcome {
         let Some(clob) = &self.clob_client else {
             tracing::error!("Live mode requested but ClobClient is unavailable");
             return ExecutionOutcome::Failed {
@@ -67,6 +80,9 @@ impl OrderStrategy {
             order_type: OrderType::Fok,
             neg_risk: plan.neg_risk,
         };
+
+        trace.mark_http_sent();
+        observe_tick_to_http(trace, &self.metrics);
 
         match clob.place_order(&req).await {
             Ok(resp) => {

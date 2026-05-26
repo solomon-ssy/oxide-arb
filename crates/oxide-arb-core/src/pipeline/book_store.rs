@@ -1,10 +1,12 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use num_traits::ToPrimitive;
 use oxide_arb_models::domain::BookLevel;
+use oxide_arb_models::domain::latency::LatencyTrace;
 use parking_lot::Mutex;
 
 use oxide_arb_models::domain::book::{BookSnapshot, EndgameBookPair, TopOfBook};
@@ -25,6 +27,7 @@ struct TokenBookState {
 /// `ArcSwap` with zero locking. Publish bumps `version` and refcount-clones arcs.
 pub struct BookStore {
     books: DashMap<TokenId, Arc<TokenBookState>>,
+    token_latency_traces: DashMap<TokenId, LatencyTrace>,
     metrics: Arc<MetricsHub>,
     metric_update_counter: std::sync::atomic::AtomicU64,
 }
@@ -33,6 +36,7 @@ impl BookStore {
     pub fn new(metrics: Arc<MetricsHub>) -> Self {
         Self {
             books: DashMap::new(),
+            token_latency_traces: DashMap::new(),
             metrics,
             metric_update_counter: std::sync::atomic::AtomicU64::new(0),
         }
@@ -43,7 +47,7 @@ impl BookStore {
             return Arc::clone(entry.value());
         }
 
-        let empty = Arc::new(Vec::new());
+        let empty: Arc<[BookLevel]> = Arc::from([]);
         let state = Arc::new(TokenBookState {
             live: Mutex::new(OrderBook::new(token_id.clone())),
             published: ArcSwap::from_pointee(BookSnapshot::new(
@@ -61,7 +65,7 @@ impl BookStore {
 
     fn bump_and_publish(state: &TokenBookState, book: &OrderBook) -> u64 {
         let version = state.version.fetch_add(1, Ordering::AcqRel) + 1;
-        state.published.store(Arc::new(book.publish(version)));
+        state.published.store(Arc::new(book.publish_cow(version)));
         version
     }
 
@@ -100,19 +104,32 @@ impl BookStore {
     pub fn apply_snapshot(
         &self,
         token_id: &TokenId,
-        bids: Vec<BookLevel>,
-        asks: Vec<BookLevel>,
+        bids: impl Into<Arc<[BookLevel]>>,
+        asks: impl Into<Arc<[BookLevel]>>,
         timestamp_ms: u64,
+        latency: Option<LatencyTrace>,
     ) -> u64 {
+        let bids = bids.into();
+        let asks = asks.into();
         let state = self.get_or_create_state(token_id);
         let mut book = state.live.lock();
-        book.apply_snapshot(bids, asks, timestamp_ms);
+        book.apply_snapshot_arc(&bids, &asks, timestamp_ms);
         let version = Self::bump_and_publish(&state, &book);
         drop(book);
+        if let Some(mut lat) = latency {
+            lat.book_applied = Some(Instant::now());
+            self.token_latency_traces.insert(token_id.clone(), lat);
+        }
         version
     }
 
-    pub fn apply_delta<I>(&self, token_id: &TokenId, changes: I, timestamp_ms: u64) -> u64
+    pub fn apply_delta<I>(
+        &self,
+        token_id: &TokenId,
+        changes: I,
+        timestamp_ms: u64,
+        latency: Option<LatencyTrace>,
+    ) -> u64
     where
         I: IntoIterator<Item = (Price, Shares)>,
     {
@@ -121,7 +138,18 @@ impl BookStore {
         book.apply_delta(changes, timestamp_ms);
         let version = Self::bump_and_publish(&state, &book);
         drop(book);
+        if let Some(mut lat) = latency {
+            lat.book_applied = Some(Instant::now());
+            self.token_latency_traces.insert(token_id.clone(), lat);
+        }
         version
+    }
+
+    #[inline]
+    pub fn token_latency_trace(&self, token_id: &TokenId) -> Option<LatencyTrace> {
+        self.token_latency_traces
+            .get(token_id)
+            .map(|entry| entry.value().clone())
     }
 
     pub fn remove(&self, token_id: &TokenId) {
@@ -199,6 +227,7 @@ mod tests {
             vec![make_level(dec!(0.5), dec!(10))],
             vec![make_level(dec!(0.6), dec!(5))],
             100,
+            None,
         );
         assert_eq!(v, 1);
         assert_eq!(store.token_count(), 1);
@@ -215,8 +244,14 @@ mod tests {
         let store = BookStore::new(metrics);
         let yes = TokenId::new("yes");
         let no = TokenId::new("no");
-        store.apply_snapshot(&yes, vec![make_level(dec!(0.95), dec!(10))], vec![], 1);
-        store.apply_snapshot(&no, vec![], vec![make_level(dec!(0.05), dec!(10))], 1);
+        store.apply_snapshot(
+            &yes,
+            vec![make_level(dec!(0.95), dec!(10))],
+            vec![],
+            1,
+            None,
+        );
+        store.apply_snapshot(&no, vec![], vec![make_level(dec!(0.05), dec!(10))], 1, None);
         let pair = store.load_pair(&yes, &no).unwrap();
         assert_eq!(pair.view().yes_bids.levels.len(), 1);
     }
@@ -226,8 +261,13 @@ mod tests {
         let metrics = Arc::new(MetricsHub::new());
         let store = BookStore::new(metrics);
         let tid = TokenId::new("t");
-        store.apply_snapshot(&tid, vec![make_level(dec!(0.5), dec!(1))], vec![], 1);
-        let v2 = store.apply_delta(&tid, [(Price::new(dec!(0.55)), Shares::new(dec!(2)))], 2);
+        store.apply_snapshot(&tid, vec![make_level(dec!(0.5), dec!(1))], vec![], 1, None);
+        let v2 = store.apply_delta(
+            &tid,
+            [(Price::new(dec!(0.55)), Shares::new(dec!(2)))],
+            2,
+            None,
+        );
         assert_eq!(v2, 2);
     }
 }

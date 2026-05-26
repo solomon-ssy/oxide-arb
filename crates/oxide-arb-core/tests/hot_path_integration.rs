@@ -58,9 +58,14 @@ fn book_store_publish_increments_version() {
     let metrics = Arc::new(MetricsHub::new());
     let store = BookStore::new(metrics);
     let tid = TokenId::new("tok");
-    store.apply_snapshot(&tid, vec![level(dec!(0.5), dec!(1))], vec![], 100);
+    store.apply_snapshot(&tid, vec![level(dec!(0.5), dec!(1))], vec![], 100, None);
     let v1 = store.book_version(&tid);
-    store.apply_delta(&tid, [(Price::new(dec!(0.55)), Shares::new(dec!(2)))], 200);
+    store.apply_delta(
+        &tid,
+        [(Price::new(dec!(0.55)), Shares::new(dec!(2)))],
+        200,
+        None,
+    );
     let v2 = store.book_version(&tid);
     assert_eq!(v1, 1);
     assert_eq!(v2, 2);
@@ -120,10 +125,40 @@ async fn coalescer_pair_complete_flushes_immediately() {
 }
 
 #[test]
-fn fsm_drop_halt_engages_once() {
+fn backpressure_book_coalesce_does_not_halt() {
+    use std::sync::Arc;
+    use std::time::Instant;
+
+    use oxide_arb_core::observability::backpressure::{BackpressureAction, BackpressurePolicy};
+    use oxide_arb_core::outbox::in_memory::InMemoryEventStore;
+    use oxide_arb_models::domain::pipeline::{
+        IngressTrace, PipelineEvent, PriceDeltaCmd, PriceLevelDelta,
+    };
+    use oxide_arb_models::types::{Price, Shares, TokenId};
+    use rust_decimal_macros::dec;
+
     let metrics = Arc::new(MetricsHub::new());
     let fsm = Arc::new(ExecutionFSM::new(Arc::clone(&metrics)));
+    let bp = BackpressurePolicy::new(
+        Arc::clone(&metrics),
+        None,
+        Arc::new(InMemoryEventStore::new()),
+    );
+
+    let event = PipelineEvent::PriceDelta(PriceDeltaCmd {
+        asset_id: TokenId::new("t1"),
+        changes: Arc::from([PriceLevelDelta {
+            price: Price::new(dec!(0.5)),
+            size: Shares::new(dec!(100)),
+        }]),
+        timestamp_ms: 1,
+        trace: IngressTrace::new(Instant::now(), 1),
+    });
+
+    assert_eq!(
+        bp.on_book_channel_full(0, event),
+        BackpressureAction::Coalesced
+    );
     assert!(!fsm.is_emergency());
-    oxide_arb_core::observability::drop_halt::on_book_apply_drop(&metrics, &fsm);
-    assert!(fsm.is_emergency());
+    assert_eq!(metrics.book_apply_coalesced_total.get(), 1);
 }

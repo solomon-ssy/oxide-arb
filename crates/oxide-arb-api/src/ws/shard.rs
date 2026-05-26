@@ -1,6 +1,7 @@
 //! Single WebSocket shard: one SDK connection, multiplexed market streams.
 
 use futures_util::StreamExt;
+use oxide_arb_models::domain::pipeline::{PipelineEvent, ShardConnectionStatus};
 use oxide_arb_models::types::TokenId;
 use polymarket_client_sdk_v2::clob::ws::Client as SdkWsClient;
 use polymarket_client_sdk_v2::clob::ws::types::response::WsMessage;
@@ -12,8 +13,6 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use super::WsEvent;
-use super::event::ShardConnectionStatus;
 use super::normalize::normalize_ws_message;
 use super::reconnect::{ReconnectPolicy, ReconnectState};
 
@@ -22,7 +21,7 @@ pub struct WsShard {
     pub shard_id: usize,
     pub subscribed_tokens: HashSet<TokenId>,
     pub reconnect_state: ReconnectState,
-    pub output_tx: flume::Sender<WsEvent>,
+    pub output_tx: flume::Sender<PipelineEvent>,
     pub shutdown: CancellationToken,
     pub ws_url: String,
     last_message_at: Arc<parking_lot::Mutex<Option<Instant>>>,
@@ -32,7 +31,7 @@ impl WsShard {
     pub fn new(
         shard_id: usize,
         ws_url: String,
-        output_tx: flume::Sender<WsEvent>,
+        output_tx: flume::Sender<PipelineEvent>,
         shutdown: CancellationToken,
         last_message_at: Arc<parking_lot::Mutex<Option<Instant>>>,
     ) -> Self {
@@ -128,7 +127,11 @@ impl WsShard {
                 book = book_stream.next() => {
                     match book {
                         Some(Ok(update)) => {
-                            self.dispatch_events(normalize_ws_message(WsMessage::Book(update)));
+                            let ws_ingress = Instant::now();
+                            self.dispatch_events(normalize_ws_message(
+                                WsMessage::Book(update),
+                                ws_ingress,
+                            ));
                         }
                         Some(Err(e)) => tracing::warn!(shard_id = self.shard_id, error = %e, "book stream error"),
                         None => return Err("book stream closed".into()),
@@ -137,7 +140,11 @@ impl WsShard {
                 price = price_stream.next() => {
                     match price {
                         Some(Ok(pc)) => {
-                            self.dispatch_events(normalize_ws_message(WsMessage::PriceChange(pc)));
+                            let ws_ingress = Instant::now();
+                            self.dispatch_events(normalize_ws_message(
+                                WsMessage::PriceChange(pc),
+                                ws_ingress,
+                            ));
                         }
                         Some(Err(e)) => tracing::warn!(shard_id = self.shard_id, error = %e, "price stream error"),
                         None => return Err("price stream closed".into()),
@@ -146,7 +153,11 @@ impl WsShard {
                 res = resolution_stream.next() => {
                     match res {
                         Some(Ok(mr)) => {
-                            self.dispatch_events(normalize_ws_message(WsMessage::MarketResolved(mr)));
+                            let ws_ingress = Instant::now();
+                            self.dispatch_events(normalize_ws_message(
+                                WsMessage::MarketResolved(mr),
+                                ws_ingress,
+                            ));
                         }
                         Some(Err(e)) => tracing::warn!(shard_id = self.shard_id, error = %e, "resolution stream error"),
                         None => return Err("resolution stream closed".into()),
@@ -156,7 +167,7 @@ impl WsShard {
         }
     }
 
-    fn dispatch_events(&self, events: Vec<WsEvent>) {
+    fn dispatch_events(&self, events: Vec<PipelineEvent>) {
         if !events.is_empty() {
             *self.last_message_at.lock() = Some(Instant::now());
         }
@@ -172,7 +183,7 @@ impl WsShard {
     }
 
     fn emit_status(&self, status: ShardConnectionStatus) {
-        let _ = self.output_tx.try_send(WsEvent::ShardStatus {
+        let _ = self.output_tx.try_send(PipelineEvent::ShardStatus {
             shard_id: self.shard_id,
             status,
         });

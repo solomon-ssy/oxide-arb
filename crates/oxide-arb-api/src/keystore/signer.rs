@@ -1,6 +1,7 @@
 //! EIP-712 order signing via alloy `PrivateKeySigner`.
 
 use alloy::primitives::Address;
+use alloy::signers::Signer;
 use alloy::signers::local::PrivateKeySigner;
 use oxide_arb_error::signing::SigningError;
 
@@ -25,6 +26,13 @@ impl OrderSigner {
             .map_err(|e| SigningError::InvalidKey(e.to_string()))?;
 
         Ok(Self { signer })
+    }
+
+    /// Attach a chain ID to the inner signer (required for CLOB EIP-712 signing).
+    #[must_use]
+    pub fn with_chain_id(mut self, chain_id: Option<u64>) -> Self {
+        self.signer.set_chain_id(chain_id);
+        self
     }
 
     /// Get the Ethereum address derived from the signing key.

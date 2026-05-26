@@ -6,129 +6,207 @@ use std::time::{Duration, Instant};
 use num_traits::ToPrimitive;
 use oxide_arb_algorithm::scorer::ScoredOpportunity;
 use oxide_arb_error::OxideError;
-use rust_decimal::Decimal;
+use oxide_arb_models::types::MicroScore;
 use tokio_util::sync::CancellationToken;
 
-use crate::execution::runner::shard_index;
+use crate::infra::sharding::shard_index;
+use crate::observability::backpressure::BackpressurePolicy;
+use crate::observability::latency::{observe_scan_to_dispatch, stamp_dispatch_started};
 use crate::observability::metrics_hub::MetricsHub;
 
+#[derive(Clone)]
 struct ScoredEntry {
-    score: Decimal,
+    score: MicroScore,
     received_at: Instant,
-    scored: ScoredOpportunity,
+    scored: Arc<ScoredOpportunity>,
 }
 
-/// Bounded priority queue: dispatch highest score, evict lowest when full.
+impl PartialEq for ScoredEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.score == other.score && self.received_at == other.received_at
+    }
+}
+
+impl Eq for ScoredEntry {}
+
+impl PartialOrd for ScoredEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for ScoredEntry {
+    /// Max-heap order: higher score first; tie-break by earlier `received_at`.
+    fn cmp(&self, other: &Self) -> Ordering {
+        match self.score.cmp(&other.score) {
+            Ordering::Equal => other.received_at.cmp(&self.received_at),
+            non_eq => non_eq,
+        }
+    }
+}
+
+enum SubmitOutcome {
+    Enqueued,
+    EnqueuedEvicted,
+    Dropped,
+}
+
+/// Bounded max-heap priority queue: dispatch highest score, evict lowest when full.
 struct FunnelQueue {
-    entries: Vec<ScoredEntry>,
+    heap: BinaryHeap<ScoredEntry>,
     max_size: usize,
 }
 
 impl FunnelQueue {
     const fn new(max_size: usize) -> Self {
         Self {
-            entries: Vec::new(),
+            heap: BinaryHeap::new(),
             max_size,
         }
     }
 
     fn len(&self) -> usize {
-        self.entries.len()
+        self.heap.len()
     }
 
-    fn submit(&mut self, scored: ScoredOpportunity, score: Decimal) -> bool {
-        if self.entries.len() >= self.max_size {
-            let Some(min_idx) = self.min_score_index() else {
-                return false;
+    fn submit(&mut self, scored: Arc<ScoredOpportunity>, score: MicroScore) -> SubmitOutcome {
+        let evicted = if self.heap.len() >= self.max_size {
+            let Some(min_score) = self.peek_min_score() else {
+                return SubmitOutcome::Dropped;
             };
-            if score <= self.entries[min_idx].score {
-                return false;
+            if score <= min_score {
+                return SubmitOutcome::Dropped;
             }
-            self.entries.swap_remove(min_idx);
-        }
-        self.entries.push(ScoredEntry {
+            self.evict_min();
+            true
+        } else {
+            false
+        };
+        self.heap.push(ScoredEntry {
             score,
             received_at: Instant::now(),
             scored,
         });
+        if evicted {
+            SubmitOutcome::EnqueuedEvicted
+        } else {
+            SubmitOutcome::Enqueued
+        }
+    }
+
+    fn pop_best(&mut self) -> Option<ScoredEntry> {
+        self.heap.pop()
+    }
+
+    fn peek_min_score(&self) -> Option<MicroScore> {
+        self.heap.iter().map(|entry| entry.score).min()
+    }
+
+    fn evict_min(&mut self) -> bool {
+        if self.heap.is_empty() {
+            return false;
+        }
+        let entries: Vec<_> = self.heap.drain().collect();
+        let min_idx = entries
+            .iter()
+            .enumerate()
+            .min_by(|(_, a), (_, b)| match a.score.cmp(&b.score) {
+                Ordering::Equal => b.received_at.cmp(&a.received_at),
+                ord => ord,
+            })
+            .map_or(0, |(idx, _)| idx);
+
+        let mut kept = Vec::with_capacity(entries.len().saturating_sub(1));
+        for (idx, entry) in entries.into_iter().enumerate() {
+            if idx != min_idx {
+                kept.push(entry);
+            }
+        }
+        self.heap = kept.into_iter().collect();
         true
     }
 
-    /// Pop highest-scored entry using a max-heap over indices (O(n log n), n ≤ `max_size`).
-    fn pop_best(&mut self) -> Option<ScoredEntry> {
-        if self.entries.is_empty() {
-            return None;
-        }
-        let mut heap: BinaryHeap<(Decimal, usize)> = self
-            .entries
-            .iter()
-            .enumerate()
-            .map(|(i, e)| (e.score, i))
-            .collect();
-        let (_, max_idx) = heap.pop()?;
-        Some(self.entries.swap_remove(max_idx))
-    }
-
-    fn min_score_index(&self) -> Option<usize> {
-        self.entries
-            .iter()
-            .enumerate()
-            .min_by(|(_, a), (_, b)| a.score.partial_cmp(&b.score).unwrap_or(Ordering::Equal))
-            .map(|(i, _)| i)
+    fn evict_lowest(&mut self) -> bool {
+        self.evict_min()
     }
 }
 
-/// Priority queue that rate-limits opportunity dispatch to execution shards.
-///
 /// Result of a fast-lane dispatch attempt.
 pub enum FastLaneDispatch {
     Dispatched,
-    Backpressure(ScoredOpportunity),
+    Backpressure(Arc<ScoredOpportunity>),
 }
 
 /// High-score opportunities should use [`Self::try_dispatch_immediate`] (fast lane).
 /// This funnel only sweeps lower-priority backlog on a fixed interval.
 pub struct Funnel {
     queue: parking_lot::Mutex<FunnelQueue>,
-    shard_txs: Vec<flume::Sender<ScoredOpportunity>>,
+    shard_txs: Vec<flume::Sender<Arc<ScoredOpportunity>>>,
     min_dispatch_interval: Duration,
     metrics: Arc<MetricsHub>,
+    backpressure: Option<Arc<BackpressurePolicy>>,
 }
 
 impl Funnel {
     pub const fn new(
-        shard_txs: Vec<flume::Sender<ScoredOpportunity>>,
+        shard_txs: Vec<flume::Sender<Arc<ScoredOpportunity>>>,
         max_queue_size: usize,
         min_dispatch_interval: Duration,
         metrics: Arc<MetricsHub>,
+    ) -> Self {
+        Self::with_backpressure(
+            shard_txs,
+            max_queue_size,
+            min_dispatch_interval,
+            metrics,
+            None,
+        )
+    }
+
+    pub const fn with_backpressure(
+        shard_txs: Vec<flume::Sender<Arc<ScoredOpportunity>>>,
+        max_queue_size: usize,
+        min_dispatch_interval: Duration,
+        metrics: Arc<MetricsHub>,
+        backpressure: Option<Arc<BackpressurePolicy>>,
     ) -> Self {
         Self {
             queue: parking_lot::Mutex::new(FunnelQueue::new(max_queue_size)),
             shard_txs,
             min_dispatch_interval,
             metrics,
+            backpressure,
         }
     }
 
     /// Submit a scored opportunity for rate-limited sweep dispatch.
-    pub fn submit(&self, scored: ScoredOpportunity) {
+    pub fn submit(&self, scored: Arc<ScoredOpportunity>) {
         let score = scored.score;
         let mut queue = self.queue.lock();
-        if queue.submit(scored, score) {
-            self.metrics.funnel_enqueued.inc();
-            self.metrics
-                .funnel_queue_depth
-                .set(ToPrimitive::to_i64(&queue.len()).unwrap_or(i64::MAX));
-        } else {
-            self.metrics.funnel_dropped.inc();
+        match queue.submit(scored, score) {
+            SubmitOutcome::Enqueued => {
+                self.metrics.funnel_enqueued.inc();
+            }
+            SubmitOutcome::EnqueuedEvicted => {
+                self.metrics.funnel_enqueued.inc();
+                self.record_execution_shard_evict();
+            }
+            SubmitOutcome::Dropped => {
+                self.metrics.funnel_dropped.inc();
+            }
         }
+        self.metrics
+            .funnel_queue_depth
+            .set(ToPrimitive::to_i64(&queue.len()).unwrap_or(i64::MAX));
         drop(queue);
     }
 
     /// Fast lane: dispatch immediately to the execution shard (bypass funnel timer).
     ///
     /// Dispatches immediately on success; returns the opportunity on channel backpressure.
-    pub fn try_dispatch_immediate(&self, scored: ScoredOpportunity) -> FastLaneDispatch {
+    pub fn try_dispatch_immediate(&self, scored: Arc<ScoredOpportunity>) -> FastLaneDispatch {
+        let scored = stamp_dispatch_started(scored);
+        observe_scan_to_dispatch(&scored.trace, &self.metrics);
         let market_id = &scored.opportunity.market_id;
         let idx = shard_index(market_id.as_str(), self.shard_txs.len());
         match self.shard_txs[idx].try_send(scored) {
@@ -136,7 +214,7 @@ impl Funnel {
                 self.metrics.funnel_fast_lane_dispatched.inc();
                 FastLaneDispatch::Dispatched
             }
-            Err(e) => FastLaneDispatch::Backpressure(e.into_inner()),
+            Err(error) => FastLaneDispatch::Backpressure(error.into_inner()),
         }
     }
 
@@ -166,14 +244,50 @@ impl Funnel {
                         ));
                         let market_id = &entry.scored.opportunity.market_id;
                         let idx = shard_index(market_id.as_str(), self.shard_txs.len());
-                        if let Err(e) = self.shard_txs[idx].send_async(entry.scored).await {
-                            tracing::warn!(error = %e, shard = idx, "execution shard channel closed");
-                            return Ok(());
+                        match self.shard_txs[idx].send_async(Arc::clone(&entry.scored)).await {
+                            Ok(()) => {
+                                self.metrics.funnel_dispatched.inc();
+                            }
+                            Err(error) => {
+                                let mut scored = error.into_inner();
+                                self.evict_lowest_from_queue();
+                                match self.shard_txs[idx].try_send(Arc::clone(&scored)) {
+                                    Ok(()) => {
+                                        self.metrics.funnel_dispatched.inc();
+                                    }
+                                    Err(retry_err) => {
+                                        scored = retry_err.into_inner();
+                                        self.submit(scored);
+                                    }
+                                }
+                            }
                         }
-                        self.metrics.funnel_dispatched.inc();
                     }
                 }
             }
+        }
+    }
+
+    fn evict_lowest_from_queue(&self) {
+        let mut queue = self.queue.lock();
+        if queue.evict_lowest() {
+            drop(queue);
+            self.record_execution_shard_evict();
+            self.metrics
+                .funnel_queue_depth
+                .set(ToPrimitive::to_i64(&self.queue.lock().len()).unwrap_or(i64::MAX));
+        }
+    }
+
+    fn record_execution_shard_evict(&self) {
+        if let Some(bp) = &self.backpressure {
+            bp.on_execution_shard_evict();
+        } else {
+            self.metrics.execution_shard_evicted_total.inc();
+            self.metrics
+                .backpressure_events
+                .with_label_values(&["execution_shard", "evict"])
+                .inc();
         }
     }
 }
@@ -183,18 +297,24 @@ mod tests {
     use super::*;
     use chrono::Utc;
     use oxide_arb_models::{
-        domain::opportunity::{EndgameMeta, Opportunity},
+        domain::{
+            latency::LatencyTrace,
+            opportunity::{EndgameMeta, Opportunity},
+        },
         enums::{
             calibration::{DurationBucket, PriceZone},
             common::{MarketCategory, Side, StalenessLevel},
             opportunity::PayoutModel,
         },
-        types::{Bps, EventId, MarketId, OpportunityId, Price, Shares, TokenId, Usd},
+        types::{
+            Bps, EventId, MarketId, MicroProb, MicroScore, OpportunityId, Price, Shares, TokenId,
+            Usd,
+        },
     };
     use rust_decimal_macros::dec;
 
-    fn sample_scored(market: &str, score: Decimal) -> ScoredOpportunity {
-        ScoredOpportunity {
+    fn sample_scored(market: &str, score: MicroScore) -> Arc<ScoredOpportunity> {
+        Arc::new(ScoredOpportunity {
             opportunity: Arc::new(Opportunity {
                 opportunity_id: OpportunityId::new_v7(),
                 market_id: MarketId::new(market),
@@ -243,32 +363,96 @@ mod tests {
             token_yes: TokenId::new("y"),
             token_no: TokenId::new("n"),
             score,
-            fill_probability: dec!(1),
-            urgency_factor: dec!(1),
-            category_weight: dec!(1),
-            staleness_discount: dec!(1),
+            fill_probability: MicroProb::ONE,
+            urgency_factor: MicroProb::ONE,
+            category_weight: MicroProb::ONE,
+            staleness_discount: MicroProb::ONE,
             book_yes_version: 1,
             book_no_version: 1,
-        }
+            trace: LatencyTrace::default(),
+        })
     }
 
     #[test]
-    fn queue_evicts_lowest_when_full() {
+    fn heap_evicts_lowest_on_overflow() {
         let mut q = FunnelQueue::new(2);
-        assert!(q.submit(sample_scored("a", dec!(1)), dec!(1)));
-        assert!(q.submit(sample_scored("b", dec!(2)), dec!(2)));
-        assert!(!q.submit(sample_scored("c", dec!(0.5)), dec!(0.5)));
-        assert!(q.submit(sample_scored("d", dec!(3)), dec!(3)));
+        assert!(matches!(
+            q.submit(
+                sample_scored("a", MicroScore::from_micro(1_000_000)),
+                MicroScore::from_micro(1_000_000)
+            ),
+            SubmitOutcome::Enqueued
+        ));
+        assert!(matches!(
+            q.submit(
+                sample_scored("b", MicroScore::from_micro(2_000_000)),
+                MicroScore::from_micro(2_000_000)
+            ),
+            SubmitOutcome::Enqueued
+        ));
+        assert!(matches!(
+            q.submit(
+                sample_scored("c", MicroScore::from_micro(500_000)),
+                MicroScore::from_micro(500_000)
+            ),
+            SubmitOutcome::Dropped
+        ));
+        assert!(matches!(
+            q.submit(
+                sample_scored("d", MicroScore::from_micro(3_000_000)),
+                MicroScore::from_micro(3_000_000)
+            ),
+            SubmitOutcome::EnqueuedEvicted
+        ));
         let best = q.pop_best().unwrap();
-        assert_eq!(best.score, dec!(3));
+        assert_eq!(best.score, MicroScore::from_micro(3_000_000));
+        let second = q.pop_best().unwrap();
+        assert_eq!(second.score, MicroScore::from_micro(2_000_000));
+        assert!(q.pop_best().is_none());
     }
 
     #[test]
-    fn pop_best_returns_highest() {
+    fn pop_best_score_order() {
         let mut q = FunnelQueue::new(3);
-        q.submit(sample_scored("a", dec!(1)), dec!(1));
-        q.submit(sample_scored("b", dec!(5)), dec!(5));
-        q.submit(sample_scored("c", dec!(3)), dec!(3));
-        assert_eq!(q.pop_best().unwrap().score, dec!(5));
+        q.submit(
+            sample_scored("a", MicroScore::from_micro(1_000_000)),
+            MicroScore::from_micro(1_000_000),
+        );
+        q.submit(
+            sample_scored("b", MicroScore::from_micro(5_000_000)),
+            MicroScore::from_micro(5_000_000),
+        );
+        q.submit(
+            sample_scored("c", MicroScore::from_micro(3_000_000)),
+            MicroScore::from_micro(3_000_000),
+        );
+        assert_eq!(
+            q.pop_best().unwrap().score,
+            MicroScore::from_micro(5_000_000)
+        );
+        assert_eq!(
+            q.pop_best().unwrap().score,
+            MicroScore::from_micro(3_000_000)
+        );
+        assert_eq!(
+            q.pop_best().unwrap().score,
+            MicroScore::from_micro(1_000_000)
+        );
+    }
+
+    #[test]
+    fn tie_break_earlier_received_wins() {
+        let mut q = FunnelQueue::new(10);
+        q.submit(
+            sample_scored("early", MicroScore::from_micro(5_000_000)),
+            MicroScore::from_micro(5_000_000),
+        );
+        std::thread::sleep(Duration::from_millis(2));
+        q.submit(
+            sample_scored("late", MicroScore::from_micro(5_000_000)),
+            MicroScore::from_micro(5_000_000),
+        );
+        let first = q.pop_best().unwrap();
+        assert_eq!(first.scored.opportunity.market_id.as_str(), "early");
     }
 }

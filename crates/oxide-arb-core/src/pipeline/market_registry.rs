@@ -1,7 +1,8 @@
 use std::collections::HashSet;
+use std::sync::Arc;
 
+use arc_swap::ArcSwap;
 use dashmap::DashMap;
-use parking_lot::RwLock;
 
 use oxide_arb_models::domain::market::{EventRegistryInfo, MarketRegistryInfo};
 use oxide_arb_models::enums::market::MarketStatus;
@@ -14,7 +15,7 @@ pub struct MarketRegistry {
     markets: DashMap<MarketId, MarketRegistryInfo>,
     token_to_market: DashMap<TokenId, MarketId>,
     events: DashMap<EventId, EventRegistryInfo>,
-    active_market_ids: RwLock<Vec<MarketId>>,
+    active_markets: ArcSwap<Vec<MarketId>>,
 }
 
 impl MarketRegistry {
@@ -23,8 +24,38 @@ impl MarketRegistry {
             markets: DashMap::new(),
             token_to_market: DashMap::new(),
             events: DashMap::new(),
-            active_market_ids: RwLock::new(Vec::new()),
+            active_markets: ArcSwap::from_pointee(Vec::new()),
         }
+    }
+
+    fn store_active_ids(&self, ids: Vec<MarketId>) {
+        self.active_markets.store(Arc::new(ids));
+    }
+
+    fn push_active(&self, market_id: &MarketId) {
+        self.active_markets.rcu(|current| {
+            if current.iter().any(|id| id == market_id) {
+                return current.clone();
+            }
+            let mut next = current.to_vec();
+            next.push(market_id.clone());
+            Arc::new(next)
+        });
+    }
+
+    fn remove_active(&self, market_id: &MarketId) {
+        self.active_markets.rcu(|current| {
+            if !current.iter().any(|id| id == market_id) {
+                return current.clone();
+            }
+            Arc::new(
+                current
+                    .iter()
+                    .filter(|id| *id != market_id)
+                    .cloned()
+                    .collect(),
+            )
+        });
     }
 
     /// Register a single market. Rebuilds token→market index.
@@ -41,13 +72,10 @@ impl MarketRegistry {
         let market_id = entry.market_id.clone();
         self.markets.insert(market_id.clone(), entry);
 
-        let mut active = self.active_market_ids.write();
         if is_active {
-            if !active.contains(&market_id) {
-                active.push(market_id);
-            }
+            self.push_active(&market_id);
         } else {
-            active.retain(|id| id != &market_id);
+            self.remove_active(&market_id);
         }
     }
 
@@ -57,7 +85,7 @@ impl MarketRegistry {
             return;
         }
 
-        let mut active = self.active_market_ids.read().clone();
+        let mut active = self.active_markets().iter().cloned().collect::<Vec<_>>();
 
         for mut entry in entries {
             if entry.resolve_token_pair().is_err() {
@@ -74,7 +102,7 @@ impl MarketRegistry {
             self.markets.insert(market_id.clone(), entry);
 
             if is_active {
-                if !active.contains(&market_id) {
+                if !active.iter().any(|id| id == &market_id) {
                     active.push(market_id);
                 }
             } else {
@@ -82,7 +110,7 @@ impl MarketRegistry {
             }
         }
 
-        *self.active_market_ids.write() = active;
+        self.store_active_ids(active);
     }
 
     /// Batch register events from Gamma sync.
@@ -97,9 +125,10 @@ impl MarketRegistry {
     /// Returns the deactivated entries for downstream persistence.
     pub fn deactivate_stale(&self, seen_ids: &HashSet<MarketId>) -> Vec<MarketRegistryInfo> {
         let stale_ids: Vec<MarketId> = self
-            .active_market_ids()
-            .into_iter()
+            .active_markets()
+            .iter()
             .filter(|id| !seen_ids.contains(id))
+            .cloned()
             .collect();
 
         if stale_ids.is_empty() {
@@ -144,9 +173,10 @@ impl MarketRegistry {
             .map(|entry| (entry.token_yes.clone(), entry.token_no.clone()))
     }
 
-    /// Snapshot of all active market IDs.
-    pub fn active_market_ids(&self) -> Vec<MarketId> {
-        self.active_market_ids.read().clone()
+    /// Wait-free read of the active market ID list.
+    #[must_use]
+    pub fn active_markets(&self) -> Arc<Vec<MarketId>> {
+        self.active_markets.load_full()
     }
 
     /// Rebuild the active-market list from scratch by scanning all entries.
@@ -157,7 +187,7 @@ impl MarketRegistry {
                 ids.push(entry.key().clone());
             }
         }
-        *self.active_market_ids.write() = ids;
+        self.store_active_ids(ids);
     }
 
     /// Total number of registered markets.
@@ -219,7 +249,7 @@ mod tests {
         let reg = MarketRegistry::new();
         reg.register_market(sample_market("m1", MarketStatus::Active));
         assert_eq!(reg.market_count(), 1);
-        assert_eq!(reg.active_market_ids().len(), 1);
+        assert_eq!(reg.active_markets().len(), 1);
 
         let mid = reg
             .market_for_token(&TokenId::new("m1-yes"))
@@ -235,7 +265,7 @@ mod tests {
     fn inactive_market_not_in_active_list() {
         let reg = MarketRegistry::new();
         reg.register_market(sample_market("m1", MarketStatus::Settled));
-        assert!(reg.active_market_ids().is_empty());
+        assert!(reg.active_markets().is_empty());
     }
 
     #[test]
@@ -246,6 +276,15 @@ mod tests {
             sample_market("m2", MarketStatus::Active),
         ]);
         assert_eq!(reg.market_count(), 2);
-        assert_eq!(reg.active_market_ids().len(), 2);
+        assert_eq!(reg.active_markets().len(), 2);
+    }
+
+    #[test]
+    fn active_markets_snapshot_is_wait_free() {
+        let reg = MarketRegistry::new();
+        reg.register_market(sample_market("m1", MarketStatus::Active));
+        let snapshot = reg.active_markets();
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].as_str(), "m1");
     }
 }

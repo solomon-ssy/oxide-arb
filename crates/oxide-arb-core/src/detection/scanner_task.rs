@@ -4,8 +4,7 @@
 use std::sync::Arc;
 
 use oxide_arb_error::OxideError;
-use oxide_arb_models::types::MarketId;
-use rust_decimal::Decimal;
+use oxide_arb_models::types::{MarketId, MicroScore};
 use tokio_util::sync::CancellationToken;
 
 use crate::detection::scanner::Scanner;
@@ -20,7 +19,7 @@ pub struct ScannerTaskDeps {
     pub scanner: Arc<Scanner>,
     pub market_cache: Arc<MarketCache>,
     pub funnel: Arc<Funnel>,
-    pub dispatch_immediate_threshold: Decimal,
+    pub dispatch_immediate_threshold: MicroScore,
     pub shutdown: CancellationToken,
     pub metrics: Arc<MetricsHub>,
 }
@@ -30,7 +29,7 @@ pub struct ScannerTask {
     scanner: Arc<Scanner>,
     market_cache: Arc<MarketCache>,
     funnel: Arc<Funnel>,
-    dispatch_immediate_threshold: Decimal,
+    dispatch_immediate_threshold: MicroScore,
     shutdown: CancellationToken,
     metrics: Arc<MetricsHub>,
 }
@@ -77,9 +76,9 @@ impl ScannerTask {
             self.metrics.opportunities_detected.inc();
             let mut scored = scored;
             if scored.score >= self.dispatch_immediate_threshold {
-                match self.funnel.try_dispatch_immediate(scored) {
+                match self.funnel.try_dispatch_immediate(Arc::clone(&scored)) {
                     FastLaneDispatch::Dispatched => return,
-                    FastLaneDispatch::Backpressure(s) => scored = s,
+                    FastLaneDispatch::Backpressure(arc) => scored = arc,
                 }
             }
             self.funnel.submit(scored);

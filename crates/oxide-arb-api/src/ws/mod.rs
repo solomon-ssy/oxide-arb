@@ -2,23 +2,22 @@
 //!
 //! Each shard manages one SDK WebSocket connection to Polymarket,
 //! subscribing to up to `max_subscriptions_per_connection` tokens.
-//! All events are normalized into [`WsEvent`] and dispatched to a
+//! All events are normalized into [`PipelineEvent`] and dispatched to a
 //! unified bounded channel.
 
-mod event;
-mod normalize;
+pub mod normalize;
 mod reconnect;
 mod router;
 mod shard;
 mod token_intern;
 
-pub use event::{PriceLevelDelta, ShardConnectionStatus, WsEvent};
 pub use reconnect::ReconnectPolicy;
-pub use token_intern::{TokenInternPool, intern_str, intern_u256};
+pub use token_intern::{TOKEN_INTERN, TokenInternPool, intern_str, intern_u256};
 
 use flume::Receiver;
 use num_traits::ToPrimitive;
 use oxide_arb_models::config::{PolymarketConfig, WebSocketConfig};
+use oxide_arb_models::domain::pipeline::PipelineEvent;
 use oxide_arb_models::types::TokenId;
 use router::ShardRouter;
 use std::sync::Arc;
@@ -30,7 +29,7 @@ use std::time::Instant;
 /// Messages are normalized and dispatched to a unified output channel.
 pub struct ClobWsManager {
     router: ShardRouter,
-    output_rx: Receiver<WsEvent>,
+    output_rx: Receiver<PipelineEvent>,
     ws_url: String,
     last_message_at: Arc<parking_lot::Mutex<Option<Instant>>>,
 }
@@ -61,8 +60,6 @@ impl ClobWsManager {
     }
 
     /// Subscribe to orderbook updates for the given tokens.
-    ///
-    /// Assigns tokens to shards and spawns shard tasks if needed.
     pub fn subscribe(&self, tokens: &[TokenId]) {
         self.router.assign_tokens(tokens);
     }
@@ -73,7 +70,7 @@ impl ClobWsManager {
     }
 
     /// Returns the unified event receiver for all shards.
-    pub const fn events(&self) -> &Receiver<WsEvent> {
+    pub const fn events(&self) -> &Receiver<PipelineEvent> {
         &self.output_rx
     }
 
@@ -88,9 +85,6 @@ impl ClobWsManager {
     }
 
     /// Milliseconds since last WS message received from any shard.
-    ///
-    /// Returns `None` if no message has ever been received (e.g. never connected).
-    /// Used by `HealthChecker` and `CoreRiskMetrics` to detect WS connectivity issues.
     pub fn last_message_age_ms(&self) -> Option<u64> {
         self.last_message_at
             .lock()
