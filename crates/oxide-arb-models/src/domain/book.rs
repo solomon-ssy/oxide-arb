@@ -12,6 +12,13 @@ use crate::types::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+/// Which YES/NO leg triggered a pair-level book gate failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BookGateLeg {
+    Yes,
+    No,
+}
+
 /// Orderbook quality issue detected before feeding the opportunity pipeline.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum BookGateError {
@@ -21,9 +28,10 @@ pub enum BookGateError {
         token_id: TokenId,
         side: &'static str,
     },
-    /// Data age exceeds the expired staleness threshold.
-    #[error("stale data for {token_id}: {age_ms}ms > {threshold_ms}ms")]
+    /// Data age exceeds the staleness threshold for the stalest leg.
+    #[error("stale {leg:?} book for {token_id}: {age_ms}ms > {threshold_ms}ms")]
     Stale {
+        leg: BookGateLeg,
         token_id: TokenId,
         age_ms: u64,
         threshold_ms: u64,
@@ -46,13 +54,25 @@ pub struct BookLevel {
 
 impl BookLevel {
     pub fn from_decimal(price: Price, size: Shares) -> Result<Self, MicroConversionError> {
+        let price_d = price.inner();
+        if price_d <= rust_decimal::Decimal::ZERO || price_d > rust_decimal::Decimal::ONE {
+            return Err(MicroConversionError);
+        }
         Ok(Self {
-            price: MicroPrice::try_from_decimal(price.inner())?,
+            price: MicroPrice::try_from_decimal(price_d)?,
             size: MicroShares::try_from_decimal(size.inner())?,
         })
     }
 
-    /// Infallible conversion when caller guarantees valid decimal ranges (WS/API ingest).
+    /// Ingest-only helper: returns `None` when price/size are out of range.
+    #[must_use]
+    #[inline]
+    pub fn try_from_decimal(price: Price, size: Shares) -> Option<Self> {
+        Self::from_decimal(price, size).ok()
+    }
+
+    /// Infallible conversion when caller guarantees valid decimal ranges (test/bench seed only).
+    #[doc(hidden)]
     #[must_use]
     pub fn from_decimal_unchecked(price: Price, size: Shares) -> Self {
         Self {
@@ -203,6 +223,27 @@ impl EndgameBookView<'_> {
         let c = now_ms.saturating_sub(self.no_bids.timestamp_ms);
         let d = now_ms.saturating_sub(self.no_asks.timestamp_ms);
         a.max(b).max(c).max(d)
+    }
+
+    /// Identify the stalest YES/NO leg for error attribution.
+    #[must_use]
+    pub fn stalest_leg(
+        &self,
+        now_ms: u64,
+        token_yes: &TokenId,
+        token_no: &TokenId,
+    ) -> (BookGateLeg, TokenId, u64) {
+        let yes_age = now_ms
+            .saturating_sub(self.yes_bids.timestamp_ms)
+            .max(now_ms.saturating_sub(self.yes_asks.timestamp_ms));
+        let no_age = now_ms
+            .saturating_sub(self.no_bids.timestamp_ms)
+            .max(now_ms.saturating_sub(self.no_asks.timestamp_ms));
+        if yes_age >= no_age {
+            (BookGateLeg::Yes, token_yes.clone(), yes_age)
+        } else {
+            (BookGateLeg::No, token_no.clone(), no_age)
+        }
     }
 }
 

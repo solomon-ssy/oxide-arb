@@ -97,9 +97,9 @@ impl DataPipeline {
                 event = rx.recv_async() => {
                     if let Ok(pipeline_event) = event {
                         let shard = book_shard_for_event(&pipeline_event, shard_count);
-                        if book_senders[shard].try_send(pipeline_event.clone()).is_err() {
+                        if let Err(error) = book_senders[shard].try_send(pipeline_event) {
                             self.backpressure
-                                .on_book_channel_full(shard, pipeline_event);
+                                .on_book_channel_full(shard, error.into_inner());
                         }
                     } else {
                         tracing::error!("Pipeline event channel closed unexpectedly");
@@ -153,6 +153,7 @@ impl BookApplyWorker {
         }
     }
 
+    #[inline]
     fn handle_event(&self, event: PipelineEvent) {
         self.metrics.ws_events_received.inc();
 
@@ -172,7 +173,7 @@ impl BookApplyWorker {
             PipelineEvent::PriceDelta(cmd) => {
                 self.book_store.apply_delta(
                     &cmd.asset_id,
-                    cmd.changes.iter().map(|d| (d.price, d.size)),
+                    cmd.changes.iter().map(|d| (d.side, d.price, d.size)),
                     cmd.timestamp_ms,
                     Some(LatencyTrace::from_ingress(cmd.trace.mono)),
                 );

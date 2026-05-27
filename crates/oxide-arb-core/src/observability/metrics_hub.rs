@@ -65,6 +65,8 @@ pub struct MetricsHub {
     pub book_snapshots_applied: IntCounter,
     pub price_changes_applied: IntCounter,
     pub ws_events_ignored: IntCounter,
+    pub ws_events_dropped: IntCounter,
+    pub book_level_rejected: IntCounterVec,
     pub markets_resolved_ws: IntCounter,
     pub shard_status_changes: IntCounter,
     pub book_store_token_count: IntGauge,
@@ -160,6 +162,8 @@ struct PipelineMetrics {
     book_snapshots_applied: IntCounter,
     price_changes_applied: IntCounter,
     ws_events_ignored: IntCounter,
+    ws_events_dropped: IntCounter,
+    book_level_rejected: IntCounterVec,
     markets_resolved_ws: IntCounter,
     shard_status_changes: IntCounter,
     book_store_token_count: IntGauge,
@@ -266,6 +270,17 @@ fn register_pipeline_metrics(registry: &Registry) -> PipelineMetrics {
             registry,
             "oxide_arb_pipeline_ws_events_ignored_total",
             "WebSocket events ignored"
+        ),
+        ws_events_dropped: register_counter!(
+            registry,
+            "oxide_arb_pipeline_ws_events_dropped_total",
+            "WebSocket events dropped when output channel full"
+        ),
+        book_level_rejected: register_counter_vec!(
+            registry,
+            "oxide_arb_pipeline_book_level_rejected_total",
+            "Invalid book levels rejected at ingest",
+            &["source"]
         ),
         markets_resolved_ws: register_counter!(
             registry,
@@ -663,6 +678,8 @@ impl MetricsHub {
             book_snapshots_applied: pipeline.book_snapshots_applied,
             price_changes_applied: pipeline.price_changes_applied,
             ws_events_ignored: pipeline.ws_events_ignored,
+            ws_events_dropped: pipeline.ws_events_dropped,
+            book_level_rejected: pipeline.book_level_rejected,
             markets_resolved_ws: pipeline.markets_resolved_ws,
             shard_status_changes: pipeline.shard_status_changes,
             book_store_token_count: pipeline.book_store_token_count,

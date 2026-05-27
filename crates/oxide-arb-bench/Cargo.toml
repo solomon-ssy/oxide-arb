@@ -26,5 +26,9 @@ polymarket_client_sdk_v2 = { workspace = true }
 name = "hot_paths"
 harness = false
 
+[[bench]]
+name = "e2e_paths"
+harness = false
+
 [lints]
 workspace = true

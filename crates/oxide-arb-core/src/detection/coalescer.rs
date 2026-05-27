@@ -51,6 +51,7 @@ impl Coalescer {
     }
 
     /// Called by the data pipeline when a token book is updated.
+    #[inline]
     pub fn notify_token_update(&self, token_id: &TokenId) {
         let Some(market_id) = self.market_registry.market_for_token(token_id) else {
             return;

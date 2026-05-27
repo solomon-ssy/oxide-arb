@@ -69,6 +69,7 @@ fn build_pipeline(
         Arc::clone(&metrics),
         None,
         Arc::new(InMemoryEventStore::new()),
+        1,
     ));
     let book_store = Arc::new(BookStore::new(Arc::clone(&metrics)));
     let exposure = Arc::new(InMemoryExposureReservation::new(
@@ -90,6 +91,8 @@ fn build_pipeline(
         &PolymarketConfig::default(),
         &WebSocketConfig::default(),
         CancellationToken::new(),
+        None,
+        None,
     ));
     ws_manager.seed_test_connectivity();
     let metrics_state = Arc::new(RiskMetricsState::new(Arc::new(ApiHealthTracker::new(
@@ -214,7 +217,7 @@ fn post_trade_spill_does_not_halt() {
     let metrics = Arc::new(MetricsHub::new());
     let fsm = Arc::new(ExecutionFSM::new(Arc::clone(&metrics)));
     let spill = Arc::new(InMemoryEventStore::new());
-    let bp = BackpressurePolicy::new(Arc::clone(&metrics), None, Arc::clone(&spill));
+    let bp = BackpressurePolicy::new(Arc::clone(&metrics), None, Arc::clone(&spill), 1);
 
     let job = PostTradeJob {
         trade_id: TradeId::new("trade-1"),
@@ -235,6 +238,40 @@ fn post_trade_spill_does_not_halt() {
     assert!(!fsm.is_emergency());
     assert_eq!(metrics.post_trade_spilled_total.get(), 1);
     assert_eq!(spill.pending_post_trade_count(), 1);
+}
+
+#[test]
+fn outbox_spill_fifo_under_pressure() {
+    let metrics = Arc::new(MetricsHub::new());
+    let spill = Arc::new(InMemoryEventStore::new());
+    let bp = BackpressurePolicy::new(Arc::clone(&metrics), None, Arc::clone(&spill), 1);
+
+    for i in 0..10 {
+        let job = PostTradeJob {
+            trade_id: TradeId::new(format!("job-{i}")),
+            market_id: MarketId::new("m1"),
+            token_id: TokenId::new("t1"),
+            entry_price: Price::new(dec!(0.5)),
+            net_profit: Usd::new(dec!(1)),
+            outcome: ExecutionOutcome::Miss {
+                reason: "pressure".into(),
+                execution_mode: ExecutionMode::Paper,
+            },
+        };
+        assert_eq!(
+            bp.on_post_trade_channel_full(job),
+            BackpressureAction::Spilled
+        );
+    }
+
+    assert_eq!(metrics.post_trade_spilled_total.get(), 10);
+    assert_eq!(spill.pending_post_trade_count(), 10);
+
+    let drained = spill.drain_post_trade_jobs();
+    assert_eq!(drained.len(), 10);
+    for (i, job) in drained.iter().enumerate() {
+        assert_eq!(job.trade_id.as_str(), format!("job-{i}"));
+    }
 }
 
 #[tokio::test]
@@ -367,6 +404,7 @@ fn live_execution_pipeline(clob: Arc<oxide_arb_api::clob::ClobClient>) -> LivePi
         Arc::clone(&metrics),
         None,
         Arc::new(InMemoryEventStore::new()),
+        1,
     ));
     let book_store = Arc::new(BookStore::new(Arc::clone(&metrics)));
     let exposure = Arc::new(InMemoryExposureReservation::new(
@@ -388,6 +426,8 @@ fn live_execution_pipeline(clob: Arc<oxide_arb_api::clob::ClobClient>) -> LivePi
         &PolymarketConfig::default(),
         &WebSocketConfig::default(),
         CancellationToken::new(),
+        None,
+        None,
     ));
     ws_manager.seed_test_connectivity();
     let metrics_state = Arc::new(RiskMetricsState::new(Arc::new(ApiHealthTracker::new(

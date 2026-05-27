@@ -9,7 +9,7 @@ echo "Running hot_paths benchmarks (release)..."
 RESULT="$(mktemp)"
 cargo bench -p oxide-arb-bench --bench hot_paths -- --output-format bencher | tee "$RESULT"
 
-BASELINE="${BENCH_BASELINE:-$ROOT/target/critcmp/baseline.txt}"
+BASELINE="${BENCH_BASELINE:-$ROOT/benches/baseline/hot_paths.txt}"
 mkdir -p "$(dirname "$BASELINE")"
 
 if command -v critcmp >/dev/null 2>&1 && [[ -f "$BASELINE" ]]; then

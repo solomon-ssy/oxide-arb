@@ -206,13 +206,16 @@ impl ExecutionPipeline {
         };
 
         let plan = self.plan_builder.build(opp, approved_size, &reservation);
-        let mut trace = scored.trace.clone();
-        if trace.dispatch_started.is_none() {
-            trace.mark_dispatch_started();
+        let mut trace = Arc::clone(&scored.trace);
+        {
+            let trace_mut = Arc::make_mut(&mut trace);
+            if trace_mut.dispatch_started.is_none() {
+                trace_mut.mark_dispatch_started();
+            }
         }
         let outcome = self
             .order_strategy
-            .execute(&self.dispatcher, &plan, &mut trace)
+            .execute(&self.dispatcher, &plan, Arc::make_mut(&mut trace))
             .await;
         self.metrics
             .execute_intent_to_http_us

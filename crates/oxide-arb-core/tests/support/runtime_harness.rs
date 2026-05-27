@@ -37,7 +37,7 @@ use oxide_arb_models::config::Settings;
 use oxide_arb_models::domain::book::BookLevel;
 use oxide_arb_models::domain::market::{MarketRegistryInfo, TokenInfo};
 use oxide_arb_models::domain::pipeline::{
-    BookSideData, BookSnapshotCmd, IngressTrace, PipelineEvent,
+    BookSideData, BookSnapshotCmd, IngressTrace, PipelineEvent, PriceDeltaCmd, PriceLevelDelta,
 };
 use oxide_arb_models::enums::common::ExecutionMode;
 use oxide_arb_models::enums::market::MarketStatus;
@@ -227,6 +227,16 @@ impl RuntimeHarness {
             updated_at: Utc::now(),
         });
         inner.market_cache.rebuild();
+    }
+
+    pub fn inject_price_delta(&self, token: &TokenId, changes: &[PriceLevelDelta]) {
+        let cmd = PriceDeltaCmd {
+            asset_id: token.clone(),
+            changes: Arc::from(changes),
+            timestamp_ms: u64::try_from(Utc::now().timestamp_millis()).unwrap_or(0),
+            trace: IngressTrace::new(Instant::now(), 0),
+        };
+        self.inject.send(PipelineEvent::PriceDelta(cmd));
     }
 
     pub fn inject_book_snapshot(

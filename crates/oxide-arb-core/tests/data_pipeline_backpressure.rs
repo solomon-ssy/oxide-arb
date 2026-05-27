@@ -41,6 +41,7 @@ async fn flood_does_not_halt_fsm() {
         Arc::clone(&metrics),
         None,
         Arc::new(InMemoryEventStore::new()),
+        1,
     ));
     let book_store = Arc::new(BookStore::new(Arc::clone(&metrics)));
     let market_registry = Arc::new(MarketRegistry::new());
@@ -96,4 +97,60 @@ async fn flood_does_not_halt_fsm() {
         .and_then(|snap| snap.best_ask())
         .expect("book should have latest snapshot applied");
     assert_eq!(best.inner(), last_price, "latest-wins coalesce must win");
+}
+
+#[tokio::test]
+async fn success_path_does_not_coalesce() {
+    let metrics = Arc::new(MetricsHub::new());
+    let backpressure = Arc::new(BackpressurePolicy::new(
+        Arc::clone(&metrics),
+        None,
+        Arc::new(InMemoryEventStore::new()),
+        1,
+    ));
+    let book_store = Arc::new(BookStore::new(Arc::clone(&metrics)));
+    let market_registry = Arc::new(MarketRegistry::new());
+    let (coalescer_tx, _coalescer_rx) = flume::bounded(64);
+    let shutdown = CancellationToken::new();
+
+    let (source, inject) = MockEventSource::paired(8192);
+    let event_source: Arc<dyn oxide_arb_core::pipeline::event_source::PipelineEventSource> =
+        Arc::new(source);
+
+    let pipeline = Arc::new(DataPipeline::new(DataPipelineDeps {
+        event_source,
+        book_store: Arc::clone(&book_store),
+        market_registry,
+        coalescer_tx,
+        metrics: Arc::clone(&metrics),
+        backpressure,
+        book_shard_count: 1,
+        book_channel_capacity: 256,
+        shutdown: shutdown.clone(),
+    }));
+
+    let pipeline_handle = {
+        let pipeline = Arc::clone(&pipeline);
+        tokio::spawn(async move { pipeline.run().await })
+    };
+
+    let token = TokenId::new("no-coalesce-token");
+    for i in 0..50 {
+        inject.send(snapshot_cmd(
+            &token,
+            dec!(0.90) + dec!(0.0001) * rust_decimal::Decimal::from(i),
+            i,
+        ));
+    }
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    shutdown.cancel();
+    let _ = pipeline_handle.await;
+
+    assert_eq!(
+        metrics.book_apply_coalesced_total.get(),
+        0,
+        "successful dispatch must not trigger coalesce backpressure"
+    );
+    assert_eq!(book_store.book_version(&token), 50);
 }

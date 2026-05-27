@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::domain::book::BookLevel;
+use crate::enums::common::Side;
 use crate::enums::common::TickSize;
 use crate::types::{MarketId, Price, Shares, TokenId};
 
@@ -32,6 +33,7 @@ impl IngressTrace {
 pub struct PriceLevelDelta {
     pub price: Price,
     pub size: Shares,
+    pub side: Side,
 }
 
 /// One side of a book snapshot (zero-copy via `Arc`).

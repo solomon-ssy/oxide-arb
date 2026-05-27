@@ -24,7 +24,7 @@ pub struct ScoredOpportunity {
     pub urgency_factor: MicroProb,
     pub category_weight: MicroProb,
     pub staleness_discount: MicroProb,
-    pub trace: LatencyTrace,
+    pub trace: Arc<LatencyTrace>,
 }
 
 /// Score components computed before final emit gates.
@@ -112,11 +112,12 @@ impl EndgameScorer {
         token_no: TokenId,
         book_yes_version: u64,
         book_no_version: u64,
-        mut trace: LatencyTrace,
+        trace: Arc<LatencyTrace>,
     ) -> Arc<ScoredOpportunity> {
         if opp.opportunity_id.is_pending() {
             opp.opportunity_id = OpportunityId::new_v7();
         }
+        let mut trace = Arc::unwrap_or_clone(trace);
         trace.mark_scan_emitted();
         Arc::new(ScoredOpportunity {
             opportunity: Arc::new(opp),
@@ -129,7 +130,7 @@ impl EndgameScorer {
             urgency_factor: draft.urgency_factor,
             category_weight: draft.category_weight,
             staleness_discount: draft.staleness_discount,
-            trace,
+            trace: Arc::new(trace),
         })
     }
 

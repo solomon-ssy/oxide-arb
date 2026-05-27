@@ -3,10 +3,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use arc_swap::ArcSwap;
-use dashmap::DashMap;
+use dashmap::{DashMap, Entry};
 use num_traits::ToPrimitive;
 use oxide_arb_models::domain::BookLevel;
 use oxide_arb_models::domain::latency::LatencyTrace;
+use oxide_arb_models::enums::common::Side;
 use parking_lot::Mutex;
 
 use oxide_arb_models::domain::book::{BookSnapshot, EndgameBookPair, TopOfBook};
@@ -27,7 +28,7 @@ struct TokenBookState {
 /// `ArcSwap` with zero locking. Publish bumps `version` and refcount-clones arcs.
 pub struct BookStore {
     books: DashMap<TokenId, Arc<TokenBookState>>,
-    token_latency_traces: DashMap<TokenId, LatencyTrace>,
+    token_latency_traces: DashMap<TokenId, Arc<LatencyTrace>>,
     metrics: Arc<MetricsHub>,
     metric_update_counter: std::sync::atomic::AtomicU64,
 }
@@ -43,24 +44,25 @@ impl BookStore {
     }
 
     fn get_or_create_state(&self, token_id: &TokenId) -> Arc<TokenBookState> {
-        if let Some(entry) = self.books.get(token_id) {
-            return Arc::clone(entry.value());
+        match self.books.entry(token_id.clone()) {
+            Entry::Occupied(entry) => Arc::clone(entry.get()),
+            Entry::Vacant(entry) => {
+                let empty: Arc<[BookLevel]> = Arc::from([]);
+                let state = Arc::new(TokenBookState {
+                    live: Mutex::new(OrderBook::new(token_id.clone())),
+                    published: ArcSwap::from_pointee(BookSnapshot::new(
+                        Arc::clone(&empty),
+                        Arc::clone(&empty),
+                        0,
+                        0,
+                    )),
+                    version: AtomicU64::new(0),
+                });
+                entry.insert(Arc::clone(&state));
+                self.update_token_count_metric(true);
+                state
+            }
         }
-
-        let empty: Arc<[BookLevel]> = Arc::from([]);
-        let state = Arc::new(TokenBookState {
-            live: Mutex::new(OrderBook::new(token_id.clone())),
-            published: ArcSwap::from_pointee(BookSnapshot::new(
-                Arc::clone(&empty),
-                Arc::clone(&empty),
-                0,
-                0,
-            )),
-            version: AtomicU64::new(0),
-        });
-        self.books.insert(token_id.clone(), Arc::clone(&state));
-        self.update_token_count_metric(true);
-        state
     }
 
     fn bump_and_publish(state: &TokenBookState, book: &OrderBook) -> u64 {
@@ -118,7 +120,8 @@ impl BookStore {
         drop(book);
         if let Some(mut lat) = latency {
             lat.book_applied = Some(Instant::now());
-            self.token_latency_traces.insert(token_id.clone(), lat);
+            self.token_latency_traces
+                .insert(token_id.clone(), Arc::new(lat));
         }
         version
     }
@@ -131,7 +134,7 @@ impl BookStore {
         latency: Option<LatencyTrace>,
     ) -> u64
     where
-        I: IntoIterator<Item = (Price, Shares)>,
+        I: IntoIterator<Item = (Side, Price, Shares)>,
     {
         let state = self.get_or_create_state(token_id);
         let mut book = state.live.lock();
@@ -140,16 +143,17 @@ impl BookStore {
         drop(book);
         if let Some(mut lat) = latency {
             lat.book_applied = Some(Instant::now());
-            self.token_latency_traces.insert(token_id.clone(), lat);
+            self.token_latency_traces
+                .insert(token_id.clone(), Arc::new(lat));
         }
         version
     }
 
     #[inline]
-    pub fn token_latency_trace(&self, token_id: &TokenId) -> Option<LatencyTrace> {
+    pub fn token_latency_trace(&self, token_id: &TokenId) -> Option<Arc<LatencyTrace>> {
         self.token_latency_traces
             .get(token_id)
-            .map(|entry| entry.value().clone())
+            .map(|entry| Arc::clone(entry.value()))
     }
 
     pub fn remove(&self, token_id: &TokenId) {
@@ -209,7 +213,7 @@ impl BookStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use oxide_arb_models::domain::book::BookLevel;
+    use oxide_arb_models::enums::common::Side;
     use rust_decimal_macros::dec;
 
     fn make_level(price: rust_decimal::Decimal, size: rust_decimal::Decimal) -> BookLevel {
@@ -264,7 +268,7 @@ mod tests {
         store.apply_snapshot(&tid, vec![make_level(dec!(0.5), dec!(1))], vec![], 1, None);
         let v2 = store.apply_delta(
             &tid,
-            [(Price::new(dec!(0.55)), Shares::new(dec!(2)))],
+            [(Side::Buy, Price::new(dec!(0.55)), Shares::new(dec!(2)))],
             2,
             None,
         );

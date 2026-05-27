@@ -18,6 +18,7 @@ pub use rate_limiter::RateLimiter;
 
 use crate::infra::retry::{self, RetryPolicy};
 use crate::keystore::OrderSigner;
+use crate::ws::BookLevelRejectHook;
 use oxide_arb_error::api::ApiError;
 use oxide_arb_models::config::PolymarketConfig;
 use oxide_arb_models::domain::BookLevel;
@@ -47,6 +48,24 @@ pub struct ClobClient {
     sdk: Arc<SdkClient<Authenticated<Normal>>>,
     signer: Arc<OrderSigner>,
     rate_limiter: RateLimiter,
+    on_book_level_rejected: Option<BookLevelRejectHook>,
+}
+
+fn push_rest_level(
+    levels: &mut Vec<BookLevel>,
+    price: Decimal,
+    size: Decimal,
+    on_rejected: Option<&BookLevelRejectHook>,
+) {
+    match BookLevel::try_from_decimal(Price::new(price), Shares::new(size)) {
+        Some(level) if level.size.is_positive() => levels.push(level),
+        _ => {
+            tracing::warn!(?price, ?size, "rejecting invalid REST book level");
+            if let Some(hook) = on_rejected {
+                hook();
+            }
+        }
+    }
 }
 
 impl ClobClient {
@@ -67,7 +86,15 @@ impl ClobClient {
             sdk: Arc::new(sdk),
             signer,
             rate_limiter: RateLimiter::new(),
+            on_book_level_rejected: None,
         })
+    }
+
+    /// Attach a hook invoked when REST book ingest rejects an invalid level.
+    #[must_use]
+    pub fn with_book_level_reject_hook(mut self, hook: Option<BookLevelRejectHook>) -> Self {
+        self.on_book_level_rejected = hook;
+        self
     }
 
     /// Place an order on the CLOB.
@@ -236,11 +263,13 @@ impl ClobClient {
     pub async fn get_book(&self, token_id: &TokenId) -> Result<OrderbookSnapshot, ApiError> {
         self.rate_limiter.acquire("GET /book").await;
 
-        let sdk = Arc::clone(&self.sdk);
         let tid = WireTokenId::try_from(token_id)?.0;
+        let sdk = Arc::clone(&self.sdk);
+        let on_rejected = self.on_book_level_rejected.clone();
 
         retry::retry_with_policy(&RetryPolicy::clob_default(), || {
             let sdk = Arc::clone(&sdk);
+            let on_rejected = on_rejected.clone();
             async move {
                 let request = OrderBookSummaryRequest::builder().token_id(tid).build();
                 let resp = sdk
@@ -248,21 +277,15 @@ impl ClobClient {
                     .await
                     .map_err(|e| ApiError::from(sdk_error::SdkClobError(&e)))?;
 
-                let bids = resp
-                    .bids
-                    .iter()
-                    .map(|l| {
-                        BookLevel::from_decimal_unchecked(Price::new(l.price), Shares::new(l.size))
-                    })
-                    .collect();
+                let mut bids = Vec::with_capacity(resp.bids.len());
+                for level in &resp.bids {
+                    push_rest_level(&mut bids, level.price, level.size, on_rejected.as_ref());
+                }
 
-                let asks = resp
-                    .asks
-                    .iter()
-                    .map(|l| {
-                        BookLevel::from_decimal_unchecked(Price::new(l.price), Shares::new(l.size))
-                    })
-                    .collect();
+                let mut asks = Vec::with_capacity(resp.asks.len());
+                for level in &resp.asks {
+                    push_rest_level(&mut asks, level.price, level.size, on_rejected.as_ref());
+                }
 
                 Ok(OrderbookSnapshot {
                     token_id: token_id.clone(),
@@ -391,6 +414,7 @@ impl ClobClient {
             sdk,
             signer,
             rate_limiter: RateLimiter::new(),
+            on_book_level_rejected: None,
         }
     }
 }

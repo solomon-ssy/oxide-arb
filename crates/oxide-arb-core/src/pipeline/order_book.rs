@@ -1,4 +1,5 @@
 use oxide_arb_models::domain::book::{BookLevel, BookSnapshot};
+use oxide_arb_models::enums::common::Side;
 use oxide_arb_models::types::{MicroPrice, Price, Shares, TokenId};
 use rust_decimal::Decimal;
 use std::cmp::{Ordering, Reverse};
@@ -43,19 +44,31 @@ impl OrderBook {
         self.last_update_ms = timestamp_ms;
     }
 
-    /// Apply pre-built snapshot sides (sorts/filters into fresh live storage).
+    /// Apply pre-sorted, pre-filtered snapshot sides without copying level data.
+    pub fn apply_snapshot_validated(
+        &mut self,
+        bids: Arc<[BookLevel]>,
+        asks: Arc<[BookLevel]>,
+        timestamp_ms: u64,
+    ) {
+        self.bids = bids;
+        self.asks = asks;
+        self.last_update_ms = timestamp_ms;
+    }
+
+    /// Apply pre-built snapshot sides validated at WS ingress.
     pub fn apply_snapshot_arc(
         &mut self,
         bids: &Arc<[BookLevel]>,
         asks: &Arc<[BookLevel]>,
         timestamp_ms: u64,
     ) {
-        self.apply_snapshot(bids.to_vec(), asks.to_vec(), timestamp_ms);
+        self.apply_snapshot_validated(Arc::clone(bids), Arc::clone(asks), timestamp_ms);
     }
 
     pub fn apply_delta<I>(&mut self, changes: I, timestamp_ms: u64)
     where
-        I: IntoIterator<Item = (Price, Shares)>,
+        I: IntoIterator<Item = (Side, Price, Shares)>,
     {
         self.apply_delta_cow(changes, timestamp_ms);
     }
@@ -63,16 +76,26 @@ impl OrderBook {
     /// Incremental update with explicit copy-on-write when a published snapshot still references a side.
     pub fn apply_delta_cow<I>(&mut self, changes: I, timestamp_ms: u64)
     where
-        I: IntoIterator<Item = (Price, Shares)>,
+        I: IntoIterator<Item = (Side, Price, Shares)>,
     {
-        for (price, size) in changes {
+        for (side, price, size) in changes {
             let Ok(level) = BookLevel::from_decimal(price, size) else {
                 continue;
             };
-            let on_bids = find_level(&self.bids, level.price, true).is_ok();
-            let on_asks = find_level(&self.asks, level.price, false).is_ok();
+            let on_bids =
+                matches!(side, Side::Buy) || find_level(&self.bids, level.price, true).is_ok();
+            let on_asks =
+                matches!(side, Side::Sell) || find_level(&self.asks, level.price, false).is_ok();
 
-            if on_bids {
+            if on_bids && !on_asks {
+                mutate_side(&mut self.bids, |levels| {
+                    apply_level_delta(levels, level, true);
+                });
+            } else if on_asks && !on_bids {
+                mutate_side(&mut self.asks, |levels| {
+                    apply_level_delta(levels, level, false);
+                });
+            } else if on_bids {
                 mutate_side(&mut self.bids, |levels| {
                     apply_level_delta(levels, level, true);
                 });
@@ -81,7 +104,7 @@ impl OrderBook {
                     apply_level_delta(levels, level, false);
                 });
             } else if level.size.is_positive() {
-                if self.should_place_on_bids(price) {
+                if matches!(side, Side::Buy) || self.should_place_on_bids(price) {
                     mutate_side(&mut self.bids, |levels| {
                         apply_level_delta(levels, level, true);
                     });
@@ -278,7 +301,10 @@ mod tests {
         let snap = ob.publish_cow(1);
         assert_eq!(Arc::strong_count(&snap.bids), 2);
 
-        ob.apply_delta_cow([(Price::new(dec!(0.5)), Shares::new(dec!(20)))], 200);
+        ob.apply_delta_cow(
+            [(Side::Buy, Price::new(dec!(0.5)), Shares::new(dec!(20)))],
+            200,
+        );
         assert_eq!(Arc::strong_count(&snap.bids), 1);
         assert_eq!(ob.bids[0].size.to_decimal(), dec!(20));
         assert_eq!(snap.bids[0].size.to_decimal(), dec!(10));
@@ -296,10 +322,10 @@ mod tests {
 
         ob.apply_delta_cow(
             [
-                (Price::new(dec!(0.5)), Shares::new(dec!(20))),
-                (Price::new(dec!(0.55)), Shares::new(dec!(15))),
-                (Price::new(dec!(0.7)), Shares::ZERO),
-                (Price::new(dec!(0.65)), Shares::new(dec!(8))),
+                (Side::Buy, Price::new(dec!(0.5)), Shares::new(dec!(20))),
+                (Side::Buy, Price::new(dec!(0.55)), Shares::new(dec!(15))),
+                (Side::Sell, Price::new(dec!(0.7)), Shares::ZERO),
+                (Side::Sell, Price::new(dec!(0.65)), Shares::new(dec!(8))),
             ],
             200,
         );

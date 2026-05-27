@@ -8,6 +8,8 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio_util::sync::CancellationToken;
 
+use super::drop_hook::WsEventDropHook;
+use super::ingest_hooks::BookLevelRejectHook;
 use super::shard::WsShard;
 
 /// Routes token subscriptions across shards and spawns shard tasks.
@@ -19,6 +21,8 @@ pub struct ShardRouter {
     ws_url: String,
     shutdown: CancellationToken,
     last_message_at: Arc<parking_lot::Mutex<Option<Instant>>>,
+    on_events_dropped: Option<WsEventDropHook>,
+    on_book_level_rejected: Option<BookLevelRejectHook>,
 }
 
 impl ShardRouter {
@@ -28,6 +32,8 @@ impl ShardRouter {
         ws_url: String,
         shutdown: CancellationToken,
         last_message_at: Arc<parking_lot::Mutex<Option<Instant>>>,
+        on_events_dropped: Option<WsEventDropHook>,
+        on_book_level_rejected: Option<BookLevelRejectHook>,
     ) -> Self {
         Self {
             max_per_shard,
@@ -37,6 +43,8 @@ impl ShardRouter {
             ws_url,
             shutdown,
             last_message_at,
+            on_events_dropped,
+            on_book_level_rejected,
         }
     }
 
@@ -107,6 +115,8 @@ impl ShardRouter {
             self.output_tx.clone(),
             self.shutdown.clone(),
             Arc::clone(&self.last_message_at),
+            self.on_events_dropped.clone(),
+            self.on_book_level_rejected.clone(),
         );
         for token in tokens {
             shard.subscribed_tokens.insert(token);

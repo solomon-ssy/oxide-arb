@@ -16,7 +16,7 @@ use crate::outbox::in_memory::SharedInMemoryEventStore;
 const COALESCER_DEDUP_WINDOW: Duration = Duration::from_micros(500);
 const SPILL_ALERT_INTERVAL: Duration = Duration::from_secs(60);
 
-type BookCoalesceKey = (usize, TokenId);
+type BookCoalesceKey = TokenId;
 
 /// Result of applying a backpressure policy at one site.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,7 +36,7 @@ pub struct BackpressurePolicy {
     metrics: Arc<MetricsHub>,
     alerts: Option<Arc<AlertDispatcher>>,
     post_trade_spill: SharedInMemoryEventStore,
-    book_coalesce: DashMap<BookCoalesceKey, PipelineEvent>,
+    book_coalesce: Vec<DashMap<BookCoalesceKey, PipelineEvent>>,
     coalescer_dedup: DashMap<TokenId, Instant>,
     last_spill_alert: Mutex<Option<Instant>>,
 }
@@ -46,12 +46,14 @@ impl BackpressurePolicy {
         metrics: Arc<MetricsHub>,
         alerts: Option<Arc<AlertDispatcher>>,
         post_trade_spill: SharedInMemoryEventStore,
+        book_shard_count: usize,
     ) -> Self {
+        let shard_count = book_shard_count.max(1);
         Self {
             metrics,
             alerts,
             post_trade_spill,
-            book_coalesce: DashMap::new(),
+            book_coalesce: (0..shard_count).map(|_| DashMap::new()).collect(),
             coalescer_dedup: DashMap::new(),
             last_spill_alert: Mutex::new(None),
         }
@@ -73,7 +75,7 @@ impl BackpressurePolicy {
             return BackpressureAction::Dropped;
         }
 
-        self.book_coalesce.insert((shard, token), event);
+        self.book_coalesce[shard].insert(token, event);
         self.metrics.book_apply_coalesced_total.inc();
         self.record_event("book_apply", "coalesce");
         BackpressureAction::Coalesced
@@ -81,15 +83,13 @@ impl BackpressurePolicy {
 
     /// Drain coalesced book events for one shard after each worker event.
     pub fn drain_book_coalesce(&self, shard: usize, mut apply: impl FnMut(PipelineEvent)) {
-        let keys: Vec<BookCoalesceKey> = self
-            .book_coalesce
+        let keys: Vec<BookCoalesceKey> = self.book_coalesce[shard]
             .iter()
-            .filter(|entry| entry.key().0 == shard)
             .map(|entry| entry.key().clone())
             .collect();
 
         for key in keys {
-            if let Some((_, event)) = self.book_coalesce.remove(&key) {
+            if let Some((_, event)) = self.book_coalesce[shard].remove(&key) {
                 apply(event);
             }
         }
@@ -220,6 +220,7 @@ mod tests {
     use oxide_arb_models::domain::pipeline::{
         IngressTrace, PipelineEvent, PriceDeltaCmd, PriceLevelDelta,
     };
+    use oxide_arb_models::enums::common::Side;
     use oxide_arb_models::enums::execution::ExecutionOutcome;
     use oxide_arb_models::types::{MarketId, Price, Shares, TokenId, TradeId, Usd};
     use rust_decimal_macros::dec;
@@ -236,6 +237,7 @@ mod tests {
             Arc::clone(&metrics),
             None,
             Arc::new(InMemoryEventStore::new()),
+            1,
         );
 
         let event = PipelineEvent::PriceDelta(PriceDeltaCmd {
@@ -243,6 +245,7 @@ mod tests {
             changes: Arc::from([PriceLevelDelta {
                 price: Price::new(dec!(0.5)),
                 size: Shares::new(dec!(100)),
+                side: Side::Buy,
             }]),
             timestamp_ms: 1,
             trace: IngressTrace::new(Instant::now(), 1),
@@ -263,6 +266,7 @@ mod tests {
             Arc::clone(&metrics),
             None,
             Arc::new(InMemoryEventStore::new()),
+            1,
         );
         let token = TokenId::new("t1");
 
@@ -279,7 +283,7 @@ mod tests {
         let metrics = Arc::new(MetricsHub::new());
         let fsm = Arc::new(ExecutionFSM::new(Arc::clone(&metrics)));
         let spill = Arc::new(InMemoryEventStore::new());
-        let bp = BackpressurePolicy::new(Arc::clone(&metrics), None, Arc::clone(&spill));
+        let bp = BackpressurePolicy::new(Arc::clone(&metrics), None, Arc::clone(&spill), 1);
 
         let job = PostTradeJob {
             trade_id: TradeId::new("trade-1"),

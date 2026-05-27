@@ -43,15 +43,10 @@ pub fn observe_tick_to_http(trace: &LatencyTrace, metrics: &MetricsHub) {
 /// Stamp `dispatch_started` on a scored opportunity before fast-lane routing.
 #[must_use]
 pub fn stamp_dispatch_started(scored: Arc<ScoredOpportunity>) -> Arc<ScoredOpportunity> {
-    match Arc::try_unwrap(scored) {
-        Ok(mut inner) => {
-            inner.trace.mark_dispatch_started();
-            Arc::new(inner)
-        }
-        Err(arc) => {
-            let mut inner = (*arc).clone();
-            inner.trace.mark_dispatch_started();
-            Arc::new(inner)
-        }
-    }
+    let mut inner = match Arc::try_unwrap(scored) {
+        Ok(value) => value,
+        Err(arc) => (*arc).clone(),
+    };
+    Arc::make_mut(&mut inner.trace).mark_dispatch_started();
+    Arc::new(inner)
 }

@@ -13,6 +13,8 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio_util::sync::CancellationToken;
 
+use super::drop_hook::WsEventDropHook;
+use super::ingest_hooks::BookLevelRejectHook;
 use super::normalize::normalize_ws_message;
 use super::reconnect::{ReconnectPolicy, ReconnectState};
 
@@ -25,6 +27,8 @@ pub struct WsShard {
     pub shutdown: CancellationToken,
     pub ws_url: String,
     last_message_at: Arc<parking_lot::Mutex<Option<Instant>>>,
+    on_events_dropped: Option<WsEventDropHook>,
+    on_book_level_rejected: Option<BookLevelRejectHook>,
 }
 
 impl WsShard {
@@ -34,6 +38,8 @@ impl WsShard {
         output_tx: flume::Sender<PipelineEvent>,
         shutdown: CancellationToken,
         last_message_at: Arc<parking_lot::Mutex<Option<Instant>>>,
+        on_events_dropped: Option<WsEventDropHook>,
+        on_book_level_rejected: Option<BookLevelRejectHook>,
     ) -> Self {
         Self {
             shard_id,
@@ -43,6 +49,8 @@ impl WsShard {
             shutdown,
             ws_url,
             last_message_at,
+            on_events_dropped,
+            on_book_level_rejected,
         }
     }
 
@@ -131,6 +139,7 @@ impl WsShard {
                             self.dispatch_events(normalize_ws_message(
                                 WsMessage::Book(update),
                                 ws_ingress,
+                                self.on_book_level_rejected.as_ref(),
                             ));
                         }
                         Some(Err(e)) => tracing::warn!(shard_id = self.shard_id, error = %e, "book stream error"),
@@ -144,6 +153,7 @@ impl WsShard {
                             self.dispatch_events(normalize_ws_message(
                                 WsMessage::PriceChange(pc),
                                 ws_ingress,
+                                self.on_book_level_rejected.as_ref(),
                             ));
                         }
                         Some(Err(e)) => tracing::warn!(shard_id = self.shard_id, error = %e, "price stream error"),
@@ -157,6 +167,7 @@ impl WsShard {
                             self.dispatch_events(normalize_ws_message(
                                 WsMessage::MarketResolved(mr),
                                 ws_ingress,
+                                self.on_book_level_rejected.as_ref(),
                             ));
                         }
                         Some(Err(e)) => tracing::warn!(shard_id = self.shard_id, error = %e, "resolution stream error"),
@@ -171,13 +182,20 @@ impl WsShard {
         if !events.is_empty() {
             *self.last_message_at.lock() = Some(Instant::now());
         }
+        let mut dropped = 0u64;
         for event in events {
             if self.output_tx.try_send(event).is_err() {
-                tracing::error!(
-                    shard_id = self.shard_id,
-                    "WS output channel full — event dropped"
-                );
-                return;
+                dropped += 1;
+            }
+        }
+        if dropped > 0 {
+            tracing::error!(
+                shard_id = self.shard_id,
+                dropped,
+                "WS output channel full — events dropped"
+            );
+            if let Some(hook) = &self.on_events_dropped {
+                hook(dropped);
             }
         }
     }
@@ -187,5 +205,45 @@ impl WsShard {
             shard_id: self.shard_id,
             status,
         });
+    }
+}
+
+#[cfg(test)]
+mod dispatch_tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use super::*;
+    use oxide_arb_models::domain::pipeline::ShardConnectionStatus;
+
+    #[test]
+    fn continues_dispatch_on_full_channel_and_invokes_drop_hook() {
+        let (tx, rx) = flume::bounded(1);
+        let dropped = Arc::new(AtomicU64::new(0));
+        let hook: WsEventDropHook = {
+            let dropped = Arc::clone(&dropped);
+            Arc::new(move |n| {
+                dropped.fetch_add(n, Ordering::Relaxed);
+            })
+        };
+        let shard = WsShard::new(
+            0,
+            "ws://test".into(),
+            tx,
+            CancellationToken::new(),
+            Arc::new(parking_lot::Mutex::new(None)),
+            Some(hook),
+            None,
+        );
+
+        let status = |_n| PipelineEvent::ShardStatus {
+            shard_id: 0,
+            status: ShardConnectionStatus::Connected,
+        };
+
+        shard.dispatch_events(vec![status(1), status(2), status(3)]);
+
+        assert_eq!(rx.len(), 1);
+        assert_eq!(dropped.load(Ordering::Relaxed), 2);
     }
 }

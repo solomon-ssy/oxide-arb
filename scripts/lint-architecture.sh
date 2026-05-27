@@ -22,6 +22,18 @@ if rg 'pub use oxide_arb_(models|error)::' crates/oxide-arb-{api,core,storage}/s
     ERRORS=$((ERRORS + 1))
 fi
 
+echo "=== Checking for from_decimal_unchecked in production ingest paths ==="
+if rg 'from_decimal_unchecked' crates/oxide-arb-api/src/ws/ crates/oxide-arb-api/src/clob/ 2>/dev/null; then
+    echo "ERROR: from_decimal_unchecked must not appear in WS/REST ingest paths"
+    ERRORS=$((ERRORS + 1))
+fi
+
+echo "=== Checking DataPipeline try_send success path does not clone events ==="
+if rg 'pipeline_event\.clone\(\)' crates/oxide-arb-core/src/pipeline/data_pipeline.rs 2>/dev/null; then
+    echo "ERROR: data_pipeline try_send success path must not clone PipelineEvent"
+    ERRORS=$((ERRORS + 1))
+fi
+
 if [ $ERRORS -eq 0 ]; then
     echo "All architecture checks passed!"
 else

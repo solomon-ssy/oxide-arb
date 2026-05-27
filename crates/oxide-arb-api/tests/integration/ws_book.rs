@@ -36,6 +36,8 @@ async fn ws_receives_book_snapshot_for_subscribed_token() {
         &PolymarketConfig::default(),
         &WebSocketConfig::default(),
         shutdown.clone(),
+        None,
+        None,
     );
     manager.subscribe(std::slice::from_ref(&token));
     let events = manager.events();

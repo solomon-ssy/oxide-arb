@@ -163,7 +163,8 @@ impl AppContext {
         settings.ensure_valid_for_mode(mode)?;
 
         let infra = connect_infra(&settings).await?;
-        let clients = connect_clients(&settings, shutdown.clone()).await?;
+        let clients =
+            connect_clients(&settings, shutdown.clone(), Arc::clone(&infra.metrics)).await?;
         let risk = wire_risk(&settings, &infra, &clients).await?;
         let trading = wire_trading(&settings, mode, &infra, &clients, &risk, shutdown.clone());
 
@@ -276,11 +277,39 @@ async fn connect_infra(settings: &Settings) -> OxideResult<BuildInfra> {
 async fn connect_clients(
     settings: &Settings,
     shutdown: CancellationToken,
+    metrics: Arc<MetricsHub>,
 ) -> OxideResult<BuildClients> {
+    use oxide_arb_api::ws::WsEventDropHook;
+
+    let metrics_hook = Arc::clone(&metrics);
+    let on_events_dropped: WsEventDropHook = Arc::new(move |n| {
+        metrics_hook.ws_events_dropped.inc_by(n);
+    });
+    let reject_hook = {
+        let metrics_hook = Arc::clone(&metrics);
+        Arc::new(move || {
+            metrics_hook
+                .book_level_rejected
+                .with_label_values(&["ws"])
+                .inc();
+        })
+    };
+    let rest_reject_hook = {
+        let metrics_hook = Arc::clone(&metrics);
+        Arc::new(move || {
+            metrics_hook
+                .book_level_rejected
+                .with_label_values(&["rest"])
+                .inc();
+        })
+    };
+
     let ws_manager = Arc::new(ClobWsManager::new(
         &settings.polymarket,
         &settings.market_data.websocket,
         shutdown,
+        Some(on_events_dropped),
+        Some(reject_hook),
     ));
     let gamma_client = Arc::new(GammaClient::new(settings.market_data.gamma.clone()));
     let fee_calculator = Arc::new(FeeCalculator::from_config(&settings.polymarket.fees));
@@ -292,7 +321,9 @@ async fn connect_clients(
 
     let clob_client = match Keystore::from_config(&settings.keys) {
         Ok(ks) => match ClobClient::connect(ks.signer_arc(), &settings.polymarket).await {
-            Ok(client) => Some(Arc::new(client)),
+            Ok(client) => Some(Arc::new(
+                client.with_book_level_reject_hook(Some(rest_reject_hook)),
+            )),
             Err(error) => {
                 tracing::warn!(%error, "ClobClient connect failed — Live/paper CLOB disabled");
                 None
@@ -367,6 +398,7 @@ async fn wire_risk(
         Arc::clone(&infra.metrics),
         Some(Arc::clone(&infra.alerts)),
         Arc::clone(&post_trade_spill),
+        settings.execution.book_apply.shard_count.max(1),
     ));
 
     Ok(BuildRisk {

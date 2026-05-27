@@ -5,12 +5,16 @@
 //! All events are normalized into [`PipelineEvent`] and dispatched to a
 //! unified bounded channel.
 
+mod drop_hook;
+mod ingest_hooks;
 pub mod normalize;
 mod reconnect;
 mod router;
 mod shard;
 mod token_intern;
 
+pub use drop_hook::WsEventDropHook;
+pub use ingest_hooks::BookLevelRejectHook;
 pub use reconnect::ReconnectPolicy;
 pub use token_intern::{TOKEN_INTERN, TokenInternPool, intern_str, intern_u256};
 
@@ -40,6 +44,8 @@ impl ClobWsManager {
         polymarket_config: &PolymarketConfig,
         ws_config: &WebSocketConfig,
         shutdown: tokio_util::sync::CancellationToken,
+        on_events_dropped: Option<WsEventDropHook>,
+        on_book_level_rejected: Option<BookLevelRejectHook>,
     ) -> Self {
         let (output_tx, output_rx) = flume::bounded(8192);
         let last_message_at = Arc::new(parking_lot::Mutex::new(None));
@@ -49,6 +55,8 @@ impl ClobWsManager {
             polymarket_config.clob_ws_url.clone(),
             shutdown,
             Arc::clone(&last_message_at),
+            on_events_dropped,
+            on_book_level_rejected,
         );
 
         Self {

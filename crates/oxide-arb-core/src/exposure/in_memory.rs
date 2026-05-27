@@ -179,6 +179,15 @@ impl InMemoryExposureReservation {
     pub fn release_sync(&self, id: &ReservationId) -> Result<(), ReservationError> {
         self.confirm_sync(id)
     }
+
+    /// Integration-test helper: snapshot active reservation ids for race injection.
+    #[doc(hidden)]
+    pub fn test_snapshot_active_ids(&self) -> Vec<ReservationId> {
+        self.reservations
+            .iter()
+            .map(|entry| entry.key().clone())
+            .collect()
+    }
 }
 
 #[async_trait::async_trait]

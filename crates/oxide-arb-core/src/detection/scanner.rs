@@ -42,6 +42,7 @@ impl Scanner {
         }
     }
 
+    #[inline]
     pub fn scan_market(
         &self,
         entry: &CachedMarketScanEntry,
@@ -57,7 +58,7 @@ impl Scanner {
         if !BookGate::pass(
             &pair,
             now_ms,
-            self.staleness_classifier.expired_ms(),
+            self.staleness_classifier.acceptable_ms(),
             &entry.token_yes,
             &entry.token_no,
         ) {
@@ -72,12 +73,13 @@ impl Scanner {
         let mut latency = LatencyTrace::merge_pair(
             self.book_store
                 .token_latency_trace(&entry.token_yes)
-                .as_ref(),
+                .as_deref(),
             self.book_store
                 .token_latency_trace(&entry.token_no)
-                .as_ref(),
+                .as_deref(),
         );
         latency.mark_scan_started();
+        let latency = Arc::new(latency);
 
         let input = MarketScanInputRef {
             market_id: &entry.market_id,

@@ -10,6 +10,7 @@ use oxide_arb_core::pipeline::book_store::BookStore;
 use oxide_arb_core::pipeline::market_registry::MarketRegistry;
 use oxide_arb_models::domain::book::BookLevel;
 use oxide_arb_models::domain::market::{MarketRegistryInfo, TokenInfo};
+use oxide_arb_models::enums::common::Side;
 use oxide_arb_models::enums::market::MarketStatus;
 use oxide_arb_models::types::{MarketId, Price, Shares, TokenId};
 use rust_decimal_macros::dec;
@@ -62,7 +63,7 @@ fn book_store_publish_increments_version() {
     let v1 = store.book_version(&tid);
     store.apply_delta(
         &tid,
-        [(Price::new(dec!(0.55)), Shares::new(dec!(2)))],
+        [(Side::Buy, Price::new(dec!(0.55)), Shares::new(dec!(2)))],
         200,
         None,
     );
@@ -134,6 +135,7 @@ fn backpressure_book_coalesce_does_not_halt() {
     use oxide_arb_models::domain::pipeline::{
         IngressTrace, PipelineEvent, PriceDeltaCmd, PriceLevelDelta,
     };
+    use oxide_arb_models::enums::common::Side;
     use oxide_arb_models::types::{Price, Shares, TokenId};
     use rust_decimal_macros::dec;
 
@@ -143,6 +145,7 @@ fn backpressure_book_coalesce_does_not_halt() {
         Arc::clone(&metrics),
         None,
         Arc::new(InMemoryEventStore::new()),
+        1,
     );
 
     let event = PipelineEvent::PriceDelta(PriceDeltaCmd {
@@ -150,6 +153,7 @@ fn backpressure_book_coalesce_does_not_halt() {
         changes: Arc::from([PriceLevelDelta {
             price: Price::new(dec!(0.5)),
             size: Shares::new(dec!(100)),
+            side: Side::Buy,
         }]),
         timestamp_ms: 1,
         trace: IngressTrace::new(Instant::now(), 1),

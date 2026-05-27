@@ -93,16 +93,18 @@ impl<F: FeeEstimator> EndgameDetector<F> {
     #[must_use]
     #[inline]
     pub fn detect_direction(&self, book: EndgameBookView<'_>) -> Option<ConvergenceDirection> {
-        if book.yes_asks.best_price().is_some_and(|p| {
-            MicroPrice::try_from_decimal(p.inner())
-                .is_ok_and(|mp| mp.micro() >= self.high_threshold.micro())
-        }) {
+        if book
+            .yes_asks
+            .best_price_micro()
+            .is_some_and(|p| p.micro() >= self.high_threshold.micro())
+        {
             return Some(ConvergenceDirection::YesLikely);
         }
-        if book.no_asks.best_price().is_some_and(|p| {
-            MicroPrice::try_from_decimal(p.inner())
-                .is_ok_and(|mp| mp.micro() >= self.high_threshold.micro())
-        }) {
+        if book
+            .no_asks
+            .best_price_micro()
+            .is_some_and(|p| p.micro() >= self.high_threshold.micro())
+        {
             return Some(ConvergenceDirection::NoLikely);
         }
         None
@@ -131,6 +133,7 @@ impl<F: FeeEstimator> EndgameDetector<F> {
         direction.is_none()
     }
 
+    #[inline]
     pub fn detect_with_direction(
         &self,
         input: &EndgameDetectInput<'_>,

@@ -39,7 +39,7 @@ impl StalenessPolicy {
     #[must_use]
     #[inline]
     pub const fn is_tradeable(level: StalenessLevel) -> bool {
-        !matches!(level, StalenessLevel::Expired)
+        matches!(level, StalenessLevel::Fresh | StalenessLevel::Acceptable)
     }
 }
 
@@ -65,6 +65,7 @@ mod tests {
         assert!(!StalenessPolicy::is_tradeable(StalenessLevel::Expired));
         assert!(StalenessPolicy::is_tradeable(StalenessLevel::Fresh));
         assert!(StalenessPolicy::is_tradeable(StalenessLevel::Acceptable));
-        assert!(StalenessPolicy::is_tradeable(StalenessLevel::Stale));
+        assert!(!StalenessPolicy::is_tradeable(StalenessLevel::Stale));
+        assert!(!StalenessPolicy::is_tradeable(StalenessLevel::Expired));
     }
 }

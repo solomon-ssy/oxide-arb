@@ -135,6 +135,7 @@ fn build_test_infra(
         Arc::clone(&metrics),
         Some(alerts),
         post_trade_spill,
+        settings.execution.book_apply.shard_count,
     ));
 
     Ok(TestInfra {
@@ -284,6 +285,8 @@ pub fn assemble_test_runtime(
         &settings.polymarket,
         &settings.market_data.websocket,
         shutdown.clone(),
+        None,
+        None,
     ));
     ws_manager.seed_test_connectivity();
 

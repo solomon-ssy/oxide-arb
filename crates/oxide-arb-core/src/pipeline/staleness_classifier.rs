@@ -41,7 +41,13 @@ impl StalenessClassifier {
         }
     }
 
-    /// Return the expired threshold (used by `BookGate`).
+    /// Return the acceptable threshold (Fresh + Acceptable pass [`BookGate`]).
+    #[inline]
+    pub const fn acceptable_ms(&self) -> u64 {
+        self.thresholds.acceptable
+    }
+
+    /// Return the expired threshold (legacy alias).
     #[inline]
     pub const fn expired_ms(&self) -> u64 {
         self.thresholds.expired

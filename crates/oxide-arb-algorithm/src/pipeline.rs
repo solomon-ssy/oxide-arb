@@ -26,7 +26,7 @@ pub struct MarketScanInput {
     pub category: MarketCategory,
     pub staleness: StalenessLevel,
     pub settlement_deadline: Option<DateTime<Utc>>,
-    pub latency: LatencyTrace,
+    pub latency: Arc<LatencyTrace>,
 }
 
 /// Borrowed scan input — avoids cloning `Arc<str>` IDs on the hot path.
@@ -39,7 +39,7 @@ pub struct MarketScanInputRef<'a> {
     pub category: MarketCategory,
     pub staleness: StalenessLevel,
     pub settlement_deadline: Option<DateTime<Utc>>,
-    pub latency: LatencyTrace,
+    pub latency: Arc<LatencyTrace>,
 }
 
 impl MarketScanInput {

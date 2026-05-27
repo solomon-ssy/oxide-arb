@@ -25,9 +25,11 @@ impl BookGate {
 
         let max_age = book.max_staleness_ms(now_ms);
         if max_age > expired_threshold_ms {
+            let (leg, token_id, age_ms) = book.stalest_leg(now_ms, token_yes, token_no);
             errors.push(BookGateError::Stale {
-                token_id: token_yes.clone(),
-                age_ms: max_age,
+                leg,
+                token_id,
+                age_ms,
                 threshold_ms: expired_threshold_ms,
             });
         }
@@ -40,7 +42,7 @@ impl BookGate {
     pub fn pass(
         pair: &EndgameBookPair,
         now_ms: u64,
-        expired_threshold_ms: u64,
+        acceptable_threshold_ms: u64,
         _token_yes: &TokenId,
         _token_no: &TokenId,
     ) -> bool {
@@ -57,7 +59,7 @@ impl BookGate {
         {
             return false;
         }
-        book.max_staleness_ms(now_ms) <= expired_threshold_ms
+        book.max_staleness_ms(now_ms) <= acceptable_threshold_ms
     }
 
     #[inline]
@@ -106,7 +108,9 @@ impl BookGate {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use oxide_arb_models::domain::book::{BookLevel, BookSnapshot, EndgameBookPair};
+    use oxide_arb_models::domain::book::{
+        BookGateError, BookGateLeg, BookLevel, BookSnapshot, EndgameBookPair,
+    };
     use oxide_arb_models::types::{Price, Shares};
     use rust_decimal_macros::dec;
     use std::sync::Arc;
@@ -132,5 +136,56 @@ mod tests {
         let yes = TokenId::new("y");
         let no = TokenId::new("n");
         assert!(BookGate::pass(&pair, 1100, 5000, &yes, &no));
+    }
+
+    #[test]
+    fn rejects_book_in_stale_window() {
+        let pair = EndgameBookPair {
+            yes: snap(dec!(0.95), 1000),
+            no: snap(dec!(0.04), 1000),
+        };
+        let yes = TokenId::new("y");
+        let no = TokenId::new("n");
+        assert!(!BookGate::pass(&pair, 20_000, 5_000, &yes, &no));
+    }
+
+    #[test]
+    fn stale_error_attributes_no_leg_when_no_is_older() {
+        let pair = EndgameBookPair {
+            yes: snap(dec!(0.95), 9_000),
+            no: snap(dec!(0.04), 1_000),
+        };
+        let yes = TokenId::new("yes-token");
+        let no = TokenId::new("no-token");
+        let errors = BookGate::check(pair.view(), 10_000, 5_000, &yes, &no);
+        assert_eq!(errors.len(), 1);
+        assert!(matches!(
+            &errors[0],
+            BookGateError::Stale {
+                leg: BookGateLeg::No,
+                token_id,
+                age_ms: 9_000,
+                threshold_ms: 5_000,
+            } if token_id.as_str() == "no-token"
+        ));
+    }
+
+    #[test]
+    fn stale_error_attributes_yes_leg_when_yes_is_older() {
+        let pair = EndgameBookPair {
+            yes: snap(dec!(0.95), 500),
+            no: snap(dec!(0.04), 8_000),
+        };
+        let yes = TokenId::new("yes-token");
+        let no = TokenId::new("no-token");
+        let errors = BookGate::check(pair.view(), 10_000, 5_000, &yes, &no);
+        assert!(matches!(
+            &errors[0],
+            BookGateError::Stale {
+                leg: BookGateLeg::Yes,
+                token_id,
+                ..
+            } if token_id.as_str() == "yes-token"
+        ));
     }
 }

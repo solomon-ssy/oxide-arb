@@ -6,11 +6,14 @@ mod runtime_harness;
 use std::time::{Duration, Instant};
 
 use oxide_arb_models::domain::book::BookLevel;
+use oxide_arb_models::domain::pipeline::PriceLevelDelta;
 use oxide_arb_models::enums::ExecutionOutcome;
+use oxide_arb_models::enums::common::Side;
 use oxide_arb_models::types::{Price, Shares, TokenId};
 use runtime_harness::RuntimeHarness;
 use runtime_harness::book_store_seed::seed_book_store;
 use runtime_harness::scored_opportunity::sample_scored;
+use rust_decimal_macros::dec;
 
 #[tokio::test]
 async fn e2e_book_update_to_paper_fill() {
@@ -119,6 +122,72 @@ async fn e2e_tick_to_order_submitted_p99_under_5ms_localhost() {
     assert!(
         p99 < 5_000,
         "in-process paper tick_to_order P99 should be <5ms, got {p99}µs"
+    );
+}
+
+#[tokio::test]
+async fn e2e_multi_price_delta_events_applied() {
+    let mut harness = RuntimeHarness::build();
+    harness.register_fixture_market();
+    harness.start();
+    harness.inject_fixture_books();
+
+    let books_applied = harness
+        .run_until(
+            |metrics| metrics.book_snapshots_applied.get() >= 2,
+            Duration::from_millis(500),
+        )
+        .await;
+    assert!(books_applied, "fixture books should reach book store");
+
+    let yes = TokenId::new("yes-token");
+    let no = TokenId::new("no-token");
+    let v_yes_before = harness.book_store().book_version(&yes);
+    let v_no_before = harness.book_store().book_version(&no);
+
+    harness.inject_price_delta(
+        &yes,
+        &[PriceLevelDelta {
+            price: Price::new(dec!(0.91)),
+            size: Shares::new(dec!(500)),
+            side: Side::Sell,
+        }],
+    );
+    harness.inject_price_delta(
+        &no,
+        &[PriceLevelDelta {
+            price: Price::new(dec!(0.09)),
+            size: Shares::new(dec!(400)),
+            side: Side::Buy,
+        }],
+    );
+    harness.inject_price_delta(
+        &yes,
+        &[PriceLevelDelta {
+            price: Price::new(dec!(0.905)),
+            size: Shares::new(dec!(600)),
+            side: Side::Sell,
+        }],
+    );
+
+    let deltas_applied = harness
+        .run_until(
+            |metrics| metrics.price_changes_applied.get() >= 3,
+            Duration::from_millis(500),
+        )
+        .await;
+    assert!(
+        deltas_applied,
+        "price deltas should be applied by data pipeline"
+    );
+
+    assert!(
+        harness.book_store().book_version(&yes) > v_yes_before,
+        "YES book version should advance after price deltas"
+    );
+    assert!(
+        harness.book_store().book_version(&no) > v_no_before,
+        "NO book version should advance after price delta"
     );
 }
 

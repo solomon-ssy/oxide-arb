@@ -72,6 +72,8 @@ use polymarket_client_sdk_v2::types::{B256, U256};
 use rust_decimal_macros::dec;
 use tokio_util::sync::CancellationToken;
 
+static EXECUTION_RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+
 struct ZeroFeeEstimator;
 
 impl FeeEstimator for ZeroFeeEstimator {
@@ -332,7 +334,7 @@ fn bench_pipeline_process(c: &mut Criterion) {
         category: MarketCategory::Geopolitics,
         staleness: StalenessLevel::Fresh,
         settlement_deadline: Some(deadline),
-        latency: LatencyTrace::default(),
+        latency: Arc::new(LatencyTrace::default()),
     };
 
     c.bench_function("pipeline_process", |b| {
@@ -445,7 +447,7 @@ fn bench_book_apply_delta_50(c: &mut Criterion) {
     let bids = sample_levels(50);
     let asks = sample_levels(50);
     // Hot path: single-level update on an existing bid (no insert / dual-side probe).
-    let delta = [(Price::new(dec!(0.95)), Shares::new(dec!(10)))];
+    let delta = [(Side::Buy, Price::new(dec!(0.95)), Shares::new(dec!(10)))];
 
     c.bench_function("book_apply_delta_50", |b| {
         b.iter_with_setup(
@@ -583,7 +585,7 @@ fn bench_funnel_immediate_dispatch(c: &mut Criterion) {
             staleness_discount: MicroProb::ONE,
             book_yes_version: 1,
             book_no_version: 1,
-            trace: LatencyTrace::default(),
+            trace: Arc::new(LatencyTrace::default()),
         }
     });
 
@@ -618,6 +620,7 @@ fn bench_ws_normalize_book_50(c: &mut Criterion) {
             black_box(normalize_ws_message(
                 WsMessage::Book(book.clone()),
                 Instant::now(),
+                None,
             ))
         });
     });
@@ -772,7 +775,7 @@ fn execution_bench_scored() -> ScoredOpportunity {
         staleness_discount: MicroProb::ONE,
         book_yes_version: 1,
         book_no_version: 1,
-        trace: LatencyTrace::default(),
+        trace: Arc::new(LatencyTrace::default()),
     }
 }
 
@@ -825,6 +828,8 @@ fn execution_bench_risk_metrics(
         &PolymarketConfig::default(),
         &WebSocketConfig::default(),
         CancellationToken::new(),
+        None,
+        None,
     ));
     ws_manager.seed_test_connectivity();
     let metrics_state = Arc::new(RiskMetricsState::new(Arc::new(ApiHealthTracker::new(
@@ -843,6 +848,7 @@ fn execution_bench_setup() -> (&'static ExecutionPipeline, &'static Arc<ScoredOp
             Arc::clone(&metrics),
             None,
             Arc::new(InMemoryEventStore::new()),
+            1,
         ));
         let book_store = Arc::new(BookStore::new(Arc::clone(&metrics)));
         let exposure = Arc::new(InMemoryExposureReservation::new(
@@ -887,10 +893,16 @@ fn execution_bench_setup() -> (&'static ExecutionPipeline, &'static Arc<ScoredOp
 fn bench_execution_pipeline_paper_sync(c: &mut Criterion) {
     let (pipeline, scored) = execution_bench_setup();
 
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("tokio runtime");
+    let rt = EXECUTION_RT.get_or_init(|| {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime")
+    });
+
+    rt.block_on(async {
+        black_box(pipeline.execute(Arc::clone(scored)).await);
+    });
 
     c.bench_function("execution_pipeline_paper_sync", |b| {
         b.iter(|| {

@@ -1,6 +1,7 @@
 //! Map Polymarket SDK WebSocket payloads into domain [`PipelineEvent`].
 
 use std::cell::RefCell;
+use std::cmp::Reverse;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -16,6 +17,9 @@ use polymarket_client_sdk_v2::clob::ws::types::response::{
     BestBidAsk, BookUpdate, LastTradePrice, MarketResolved, PriceChange, TickSizeChange, WsMessage,
 };
 
+use crate::clob::ClobSide;
+
+use super::ingest_hooks::BookLevelRejectHook;
 use super::token_intern::intern_u256;
 
 thread_local! {
@@ -27,10 +31,14 @@ thread_local! {
 ///
 /// `ws_ingress` must be captured before parsing (typically `Instant::now()` in the shard).
 #[inline]
-pub fn normalize_ws_message(msg: WsMessage, ws_ingress: Instant) -> Vec<PipelineEvent> {
+pub fn normalize_ws_message(
+    msg: WsMessage,
+    ws_ingress: Instant,
+    on_level_rejected: Option<&BookLevelRejectHook>,
+) -> Vec<PipelineEvent> {
     match msg {
-        WsMessage::Book(book) => vec![book_update_to_event(&book, ws_ingress)],
-        WsMessage::PriceChange(pc) => price_change_events(&pc, ws_ingress),
+        WsMessage::Book(book) => vec![book_update_to_event(&book, ws_ingress, on_level_rejected)],
+        WsMessage::PriceChange(pc) => price_change_events(&pc, ws_ingress, on_level_rejected),
         WsMessage::BestBidAsk(bba) => vec![best_bid_ask_event(&bba, ws_ingress)],
         WsMessage::TickSizeChange(tsc) => vec![tick_size_event(&tsc, ws_ingress)],
         WsMessage::LastTradePrice(ltp) => vec![last_trade_event(&ltp, ws_ingress)],
@@ -44,24 +52,51 @@ const fn ingress_trace(ws_ingress: Instant, ws_timestamp_ms: u64) -> IngressTrac
     IngressTrace::new(ws_ingress, ws_timestamp_ms)
 }
 
-fn book_update_to_event(book: &BookUpdate, ws_ingress: Instant) -> PipelineEvent {
+fn push_level(
+    levels: &mut Vec<BookLevel>,
+    price: Price,
+    size: Shares,
+    on_level_rejected: Option<&BookLevelRejectHook>,
+) {
+    match BookLevel::from_decimal(price, size) {
+        Ok(level) if level.size.is_positive() => levels.push(level),
+        Ok(_) => {}
+        Err(error) => {
+            tracing::warn!(%error, ?price, ?size, "rejecting invalid WS book level");
+            if let Some(hook) = on_level_rejected {
+                hook();
+            }
+        }
+    }
+}
+
+fn book_update_to_event(
+    book: &BookUpdate,
+    ws_ingress: Instant,
+    on_level_rejected: Option<&BookLevelRejectHook>,
+) -> PipelineEvent {
     let timestamp_ms = ToPrimitive::to_u64(&book.timestamp.max(0)).unwrap_or(0);
-    let bid_cap = book.bids.len();
-    let ask_cap = book.asks.len();
-    let mut bids = Vec::with_capacity(bid_cap);
-    let mut asks = Vec::with_capacity(ask_cap);
+    let mut bids = Vec::with_capacity(book.bids.len());
+    let mut asks = Vec::with_capacity(book.asks.len());
     for level in &book.bids {
-        bids.push(BookLevel::from_decimal_unchecked(
+        push_level(
+            &mut bids,
             Price::new(level.price),
             Shares::new(level.size),
-        ));
+            on_level_rejected,
+        );
     }
     for level in &book.asks {
-        asks.push(BookLevel::from_decimal_unchecked(
+        push_level(
+            &mut asks,
             Price::new(level.price),
             Shares::new(level.size),
-        ));
+            on_level_rejected,
+        );
     }
+
+    bids.sort_by_key(|b| Reverse(b.price));
+    asks.sort_by_key(|a| a.price);
 
     PipelineEvent::BookSnapshot(BookSnapshotCmd {
         asset_id: intern_u256(book.asset_id),
@@ -72,7 +107,11 @@ fn book_update_to_event(book: &BookUpdate, ws_ingress: Instant) -> PipelineEvent
     })
 }
 
-fn price_change_events(pc: &PriceChange, ws_ingress: Instant) -> Vec<PipelineEvent> {
+fn price_change_events(
+    pc: &PriceChange,
+    ws_ingress: Instant,
+    on_level_rejected: Option<&BookLevelRejectHook>,
+) -> Vec<PipelineEvent> {
     let timestamp_ms = ToPrimitive::to_u64(&pc.timestamp.max(0)).unwrap_or(0);
     let trace = ingress_trace(ws_ingress, timestamp_ms);
 
@@ -82,10 +121,34 @@ fn price_change_events(pc: &PriceChange, ws_ingress: Instant) -> Vec<PipelineEve
 
         for entry in &pc.price_changes {
             let asset_id = intern_u256(entry.asset_id);
-            grouped.entry(asset_id).or_default().push(PriceLevelDelta {
-                price: Price::new(entry.price),
-                size: Shares::new(entry.size.unwrap_or_default()),
-            });
+            let price = Price::new(entry.price);
+            let share_qty = Shares::new(entry.size.unwrap_or_default());
+            let book_side = match ClobSide::try_from(entry.side) {
+                Ok(clob_side) => clob_side.0,
+                Err(error) => {
+                    tracing::warn!(%error, ?price, ?share_qty, side = ?entry.side, "rejecting WS price change with unknown side");
+                    if let Some(hook) = on_level_rejected {
+                        hook();
+                    }
+                    continue;
+                }
+            };
+            match BookLevel::from_decimal(price, share_qty) {
+                Ok(level) if level.size.is_positive() => {
+                    grouped.entry(asset_id).or_default().push(PriceLevelDelta {
+                        price: level.price_decimal(),
+                        size: level.size_decimal(),
+                        side: book_side,
+                    });
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(%error, ?price, ?share_qty, "rejecting invalid WS price change");
+                    if let Some(hook) = on_level_rejected {
+                        hook();
+                    }
+                }
+            }
         }
 
         grouped
@@ -156,7 +219,7 @@ mod tests {
     use oxide_arb_models::domain::pipeline::PipelineEvent;
     use polymarket_client_sdk_v2::types::{B256, U256};
     use rust_decimal_macros::dec;
-    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     #[test]
     fn maps_market_resolved_event() {
@@ -170,7 +233,7 @@ mod tests {
             .timestamp(1_700_000_000_000)
             .build();
 
-        let events = normalize_ws_message(WsMessage::MarketResolved(mr), Instant::now());
+        let events = normalize_ws_message(WsMessage::MarketResolved(mr), Instant::now(), None);
         assert_eq!(events.len(), 1);
         match &events[0] {
             PipelineEvent::MarketResolved {
@@ -207,11 +270,75 @@ mod tests {
             ])
             .build();
 
-        let events = normalize_ws_message(WsMessage::Book(book), Instant::now());
+        let events = normalize_ws_message(WsMessage::Book(book), Instant::now(), None);
         match &events[0] {
             PipelineEvent::BookSnapshot(cmd) => {
                 assert_eq!(cmd.bids.levels.len(), 1);
                 assert_eq!(Arc::strong_count(&cmd.bids.levels), 1);
+            }
+            _ => panic!("expected BookSnapshot"),
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_book_level() {
+        use polymarket_client_sdk_v2::clob::ws::types::response::OrderBookLevel;
+
+        let rejects = Arc::new(AtomicU32::new(0));
+        let hook: BookLevelRejectHook = {
+            let rejects = Arc::clone(&rejects);
+            Arc::new(move || {
+                rejects.fetch_add(1, Ordering::Relaxed);
+            })
+        };
+
+        let book = BookUpdate::builder()
+            .asset_id(U256::from(42_u64))
+            .market(B256::ZERO)
+            .timestamp(1000)
+            .bids(vec![
+                OrderBookLevel::builder()
+                    .price(dec!(1.5))
+                    .size(dec!(10))
+                    .build(),
+            ])
+            .asks(vec![])
+            .build();
+
+        let events = normalize_ws_message(WsMessage::Book(book), Instant::now(), Some(&hook));
+        match &events[0] {
+            PipelineEvent::BookSnapshot(cmd) => assert!(cmd.bids.levels.is_empty()),
+            _ => panic!("expected BookSnapshot"),
+        }
+        assert_eq!(rejects.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn keeps_valid_levels_when_invalid_present() {
+        use polymarket_client_sdk_v2::clob::ws::types::response::OrderBookLevel;
+
+        let book = BookUpdate::builder()
+            .asset_id(U256::from(42_u64))
+            .market(B256::ZERO)
+            .timestamp(1000)
+            .bids(vec![
+                OrderBookLevel::builder()
+                    .price(dec!(0.5))
+                    .size(dec!(10))
+                    .build(),
+                OrderBookLevel::builder()
+                    .price(dec!(1.5))
+                    .size(dec!(10))
+                    .build(),
+            ])
+            .asks(vec![])
+            .build();
+
+        let events = normalize_ws_message(WsMessage::Book(book), Instant::now(), None);
+        match &events[0] {
+            PipelineEvent::BookSnapshot(cmd) => {
+                assert_eq!(cmd.bids.levels.len(), 1);
+                assert_eq!(cmd.bids.levels[0].price_decimal().inner(), dec!(0.5));
             }
             _ => panic!("expected BookSnapshot"),
         }
@@ -241,7 +368,7 @@ mod tests {
             ])
             .build();
 
-        let events = normalize_ws_message(WsMessage::PriceChange(pc), Instant::now());
+        let events = normalize_ws_message(WsMessage::PriceChange(pc), Instant::now(), None);
         assert_eq!(events.len(), 2);
         assert!(matches!(events[0], PipelineEvent::PriceDelta(_)));
     }

@@ -9,20 +9,20 @@ cd "$ROOT"
 # name:limit pairs (nanoseconds).
 readonly SLO_SPECS="
 walk_micro_5:100
-walk_micro_50:1000
+walk_micro_50:500
 walk_micro_200:5000
 detect_with_direction:2000
-pipeline_process:100000
+pipeline_process:2000
 pre_trade_pass:5000
 pre_trade_fail_short:1000
 book_apply_snapshot_50:5000
 book_apply_delta_50:500
 dual_book_assemble_50_levels:10000
-coalescer_pair_flush:50000
-funnel_immediate_dispatch:50000
-ws_normalize_book_50:2000
+coalescer_pair_flush:100
+funnel_immediate_dispatch:200
+ws_normalize_book_50:1600
 scanner_scan_market:2000
-execution_pipeline_paper_sync:10000
+execution_pipeline_paper_sync:2000
 "
 
 DELTA_SNAPSHOT_RATIO_NUM=6

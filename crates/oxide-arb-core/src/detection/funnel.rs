@@ -1,5 +1,5 @@
-use std::cmp::Ordering;
-use std::collections::BinaryHeap;
+use std::cmp::{Ordering, Reverse};
+use std::collections::{BinaryHeap, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -16,27 +16,24 @@ use crate::observability::metrics_hub::MetricsHub;
 
 #[derive(Clone)]
 struct ScoredEntry {
-    score: MicroScore,
     received_at: Instant,
     scored: Arc<ScoredOpportunity>,
 }
 
-impl PartialEq for ScoredEntry {
-    fn eq(&self, other: &Self) -> bool {
-        self.score == other.score && self.received_at == other.received_at
-    }
+#[derive(Clone, Eq, PartialEq)]
+struct HeapKey {
+    score: MicroScore,
+    received_at: Instant,
+    id: u64,
 }
 
-impl Eq for ScoredEntry {}
-
-impl PartialOrd for ScoredEntry {
+impl PartialOrd for HeapKey {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl Ord for ScoredEntry {
-    /// Max-heap order: higher score first; tie-break by earlier `received_at`.
+impl Ord for HeapKey {
     fn cmp(&self, other: &Self) -> Ordering {
         match self.score.cmp(&other.score) {
             Ordering::Equal => other.received_at.cmp(&self.received_at),
@@ -51,26 +48,56 @@ enum SubmitOutcome {
     Dropped,
 }
 
-/// Bounded max-heap priority queue: dispatch highest score, evict lowest when full.
+/// Bounded priority queue with O(log n) submit/evict via lazy dual-heaps.
 struct FunnelQueue {
-    heap: BinaryHeap<ScoredEntry>,
+    entries: HashMap<u64, ScoredEntry>,
+    max_heap: BinaryHeap<HeapKey>,
+    min_heap: BinaryHeap<Reverse<HeapKey>>,
+    next_id: u64,
     max_size: usize,
 }
 
 impl FunnelQueue {
-    const fn new(max_size: usize) -> Self {
+    fn new(max_size: usize) -> Self {
         Self {
-            heap: BinaryHeap::new(),
+            entries: HashMap::new(),
+            max_heap: BinaryHeap::new(),
+            min_heap: BinaryHeap::new(),
+            next_id: 0,
             max_size,
         }
     }
 
     fn len(&self) -> usize {
-        self.heap.len()
+        self.entries.len()
+    }
+
+    fn push_heaps(&mut self, key: &HeapKey) {
+        self.max_heap.push(key.clone());
+        self.min_heap.push(Reverse(key.clone()));
+    }
+
+    fn peek_min_score(&mut self) -> Option<MicroScore> {
+        while let Some(Reverse(key)) = self.min_heap.peek() {
+            if self.entries.contains_key(&key.id) {
+                return Some(key.score);
+            }
+            self.min_heap.pop();
+        }
+        None
+    }
+
+    fn evict_min(&mut self) -> bool {
+        while let Some(Reverse(key)) = self.min_heap.pop() {
+            if self.entries.remove(&key.id).is_some() {
+                return true;
+            }
+        }
+        false
     }
 
     fn submit(&mut self, scored: Arc<ScoredOpportunity>, score: MicroScore) -> SubmitOutcome {
-        let evicted = if self.heap.len() >= self.max_size {
+        let evicted = if self.entries.len() >= self.max_size {
             let Some(min_score) = self.peek_min_score() else {
                 return SubmitOutcome::Dropped;
             };
@@ -82,11 +109,23 @@ impl FunnelQueue {
         } else {
             false
         };
-        self.heap.push(ScoredEntry {
+
+        let id = self.next_id;
+        self.next_id += 1;
+        let received_at = Instant::now();
+        self.entries.insert(
+            id,
+            ScoredEntry {
+                received_at,
+                scored,
+            },
+        );
+        self.push_heaps(&HeapKey {
             score,
-            received_at: Instant::now(),
-            scored,
+            received_at,
+            id,
         });
+
         if evicted {
             SubmitOutcome::EnqueuedEvicted
         } else {
@@ -95,35 +134,12 @@ impl FunnelQueue {
     }
 
     fn pop_best(&mut self) -> Option<ScoredEntry> {
-        self.heap.pop()
-    }
-
-    fn peek_min_score(&self) -> Option<MicroScore> {
-        self.heap.iter().map(|entry| entry.score).min()
-    }
-
-    fn evict_min(&mut self) -> bool {
-        if self.heap.is_empty() {
-            return false;
-        }
-        let entries: Vec<_> = self.heap.drain().collect();
-        let min_idx = entries
-            .iter()
-            .enumerate()
-            .min_by(|(_, a), (_, b)| match a.score.cmp(&b.score) {
-                Ordering::Equal => b.received_at.cmp(&a.received_at),
-                ord => ord,
-            })
-            .map_or(0, |(idx, _)| idx);
-
-        let mut kept = Vec::with_capacity(entries.len().saturating_sub(1));
-        for (idx, entry) in entries.into_iter().enumerate() {
-            if idx != min_idx {
-                kept.push(entry);
+        while let Some(key) = self.max_heap.pop() {
+            if let Some(entry) = self.entries.remove(&key.id) {
+                return Some(entry);
             }
         }
-        self.heap = kept.into_iter().collect();
-        true
+        None
     }
 
     fn evict_lowest(&mut self) -> bool {
@@ -148,7 +164,7 @@ pub struct Funnel {
 }
 
 impl Funnel {
-    pub const fn new(
+    pub fn new(
         shard_txs: Vec<flume::Sender<Arc<ScoredOpportunity>>>,
         max_queue_size: usize,
         min_dispatch_interval: Duration,
@@ -163,7 +179,7 @@ impl Funnel {
         )
     }
 
-    pub const fn with_backpressure(
+    pub fn with_backpressure(
         shard_txs: Vec<flume::Sender<Arc<ScoredOpportunity>>>,
         max_queue_size: usize,
         min_dispatch_interval: Duration,
@@ -369,7 +385,7 @@ mod tests {
             staleness_discount: MicroProb::ONE,
             book_yes_version: 1,
             book_no_version: 1,
-            trace: LatencyTrace::default(),
+            trace: Arc::new(LatencyTrace::default()),
         })
     }
 
@@ -405,9 +421,9 @@ mod tests {
             SubmitOutcome::EnqueuedEvicted
         ));
         let best = q.pop_best().unwrap();
-        assert_eq!(best.score, MicroScore::from_micro(3_000_000));
+        assert_eq!(best.scored.score, MicroScore::from_micro(3_000_000));
         let second = q.pop_best().unwrap();
-        assert_eq!(second.score, MicroScore::from_micro(2_000_000));
+        assert_eq!(second.scored.score, MicroScore::from_micro(2_000_000));
         assert!(q.pop_best().is_none());
     }
 
@@ -427,15 +443,15 @@ mod tests {
             MicroScore::from_micro(3_000_000),
         );
         assert_eq!(
-            q.pop_best().unwrap().score,
+            q.pop_best().unwrap().scored.score,
             MicroScore::from_micro(5_000_000)
         );
         assert_eq!(
-            q.pop_best().unwrap().score,
+            q.pop_best().unwrap().scored.score,
             MicroScore::from_micro(3_000_000)
         );
         assert_eq!(
-            q.pop_best().unwrap().score,
+            q.pop_best().unwrap().scored.score,
             MicroScore::from_micro(1_000_000)
         );
     }
