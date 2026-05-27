@@ -32,6 +32,7 @@ use oxide_arb_core::{
     outbox::in_memory::InMemoryEventStore,
     pipeline::{
         book_store::BookStore,
+        dual_book_assembler::DualBookAssembler,
         market_cache::{CachedMarketScanEntry, MarketCache},
         market_registry::MarketRegistry,
         order_book::OrderBook,
@@ -468,7 +469,6 @@ fn bench_book_apply_delta_50(c: &mut Criterion) {
 }
 
 fn bench_dual_book_assemble(c: &mut Criterion) {
-    use oxide_arb_core::pipeline::{book_store::BookStore, dual_book_assembler::DualBookAssembler};
     let metrics = Arc::new(MetricsHub::new());
     let store = BookStore::new(Arc::clone(&metrics));
     let yes = TokenId::new("yes");
@@ -529,67 +529,62 @@ fn bench_funnel_immediate_dispatch(c: &mut Criterion) {
     let metrics = Arc::new(MetricsHub::new());
     let (tx, _rx) = flume::bounded(256);
     let funnel = Funnel::new(vec![tx], 50, std::time::Duration::from_millis(75), metrics);
-    let scored = Arc::new({
-        use oxide_arb_models::domain::opportunity::{EndgameMeta, Opportunity};
-        use oxide_arb_models::enums::opportunity::PayoutModel;
-        use oxide_arb_models::types::OpportunityId;
-        oxide_arb_algorithm::scorer::ScoredOpportunity {
-            opportunity: Arc::new(Opportunity {
-                opportunity_id: OpportunityId::new_v7(),
-                market_id: MarketId::new("bench"),
-                event_id: EventId::new("e"),
-                token_id: TokenId::new("t"),
-                side: Side::Buy,
-                payout_model: PayoutModel::DirectionalSettlement {
-                    projected_payout_if_correct: Usd::ZERO,
-                    expected_payout: Usd::ZERO,
-                    predicted_side: Side::Buy,
-                },
-                shares: Shares::ZERO,
-                entry_price: Price::new(dec!(0.95)),
-                total_cost: Usd::ZERO,
-                total_fees: Usd::ZERO,
-                net_profit: Usd::new(dec!(1)),
-                expected_net_profit: Usd::new(dec!(1)),
-                edge_bps: Bps::ZERO,
-                resolution_adjust: dec!(1),
-                depth_used_pct: dec!(1),
-                staleness: StalenessLevel::Fresh,
-                category: MarketCategory::Other,
-                meta: EndgameMeta {
-                    predicted_yes: true,
-                    confidence: dec!(0.9),
-                    convergence_duration_secs: 0,
+    let scored = Arc::new(ScoredOpportunity {
+        opportunity: Arc::new(Opportunity {
+            opportunity_id: OpportunityId::new_v7(),
+            market_id: MarketId::new("bench"),
+            event_id: EventId::new("e"),
+            token_id: TokenId::new("t"),
+            side: Side::Buy,
+            payout_model: PayoutModel::DirectionalSettlement {
+                projected_payout_if_correct: Usd::ZERO,
+                expected_payout: Usd::ZERO,
+                predicted_side: Side::Buy,
+            },
+            shares: Shares::ZERO,
+            entry_price: Price::new(dec!(0.95)),
+            total_cost: Usd::ZERO,
+            total_fees: Usd::ZERO,
+            net_profit: Usd::new(dec!(1)),
+            expected_net_profit: Usd::new(dec!(1)),
+            edge_bps: Bps::ZERO,
+            resolution_adjust: dec!(1),
+            depth_used_pct: dec!(1),
+            staleness: StalenessLevel::Fresh,
+            category: MarketCategory::Other,
+            meta: EndgameMeta {
+                predicted_yes: true,
+                confidence: dec!(0.9),
+                convergence_duration_secs: 0,
+                price_zone: PriceZone::Z95,
+                duration_bucket: DurationBucket::Short,
+                settlement_deadline: None,
+            },
+            calibration: oxide_arb_models::domain::calibration::CalibrationSnapshot {
+                bucket_key: oxide_arb_models::domain::calibration::BucketKey {
+                    category: MarketCategory::Other,
                     price_zone: PriceZone::Z95,
                     duration_bucket: DurationBucket::Short,
-                    settlement_deadline: None,
                 },
-                calibration: oxide_arb_models::domain::calibration::CalibrationSnapshot {
-                    bucket_key: oxide_arb_models::domain::calibration::BucketKey {
-                        category: MarketCategory::Other,
-                        price_zone: PriceZone::Z95,
-                        duration_bucket: DurationBucket::Short,
-                    },
-                    posterior_mean: dec!(0.9),
-                    sample_size: 10,
-                    alpha_prior: dec!(1),
-                    beta_prior: dec!(1),
-                    fallback_tier: 1,
-                    fused_probability: dec!(0.9),
-                },
-                detected_at: Utc::now(),
-            }),
-            token_yes: TokenId::new("y"),
-            token_no: TokenId::new("n"),
-            score: MicroScore::try_from_decimal(dec!(0.9)).unwrap(),
-            fill_probability: MicroProb::ONE,
-            urgency_factor: MicroProb::ONE,
-            category_weight: MicroProb::ONE,
-            staleness_discount: MicroProb::ONE,
-            book_yes_version: 1,
-            book_no_version: 1,
-            trace: Arc::new(LatencyTrace::default()),
-        }
+                posterior_mean: dec!(0.9),
+                sample_size: 10,
+                alpha_prior: dec!(1),
+                beta_prior: dec!(1),
+                fallback_tier: 1,
+                fused_probability: dec!(0.9),
+            },
+            detected_at: Utc::now(),
+        }),
+        token_yes: TokenId::new("y"),
+        token_no: TokenId::new("n"),
+        score: MicroScore::try_from_decimal(dec!(0.9)).unwrap(),
+        fill_probability: MicroProb::ONE,
+        urgency_factor: MicroProb::ONE,
+        category_weight: MicroProb::ONE,
+        staleness_discount: MicroProb::ONE,
+        book_yes_version: 1,
+        book_no_version: 1,
+        trace: Arc::new(LatencyTrace::default()),
     });
 
     c.bench_function("funnel_immediate_dispatch", |b| {

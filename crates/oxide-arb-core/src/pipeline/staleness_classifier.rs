@@ -1,5 +1,4 @@
-use oxide_arb_models::config::MarketDataConfig;
-use oxide_arb_models::enums::common::StalenessLevel;
+use oxide_arb_models::{config::MarketDataConfig, enums::common::StalenessLevel};
 
 /// Maps an age (in milliseconds) to a `StalenessLevel` using config thresholds.
 ///

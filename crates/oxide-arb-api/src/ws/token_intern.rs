@@ -1,11 +1,12 @@
 //! Zero-alloc [`TokenId`] interning for WS hot paths.
 
-use std::str::FromStr;
-use std::sync::{Arc, LazyLock};
-
 use dashmap::DashMap;
 use oxide_arb_models::types::TokenId;
 use polymarket_client_sdk_v2::types::U256;
+use std::{
+    str::FromStr,
+    sync::{Arc, LazyLock},
+};
 
 /// Process-wide intern pool for CLOB decimal token ids.
 pub static TOKEN_INTERN: LazyLock<TokenInternPool> = LazyLock::new(TokenInternPool::new);

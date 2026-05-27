@@ -18,12 +18,11 @@
 
 use super::Inner;
 use crate::enums::common::ExecutionMode;
-use rust_decimal::Decimal;
-use rust_decimal_macros::dec;
-
 use oxide_arb_error::config_validation::{
     ConfigValidationError, ConfigValidationReport, ConfigWarning,
 };
+use rust_decimal::Decimal;
+use rust_decimal_macros::dec;
 
 fn validate_risk_cross_constraints(inner: &Inner, report: &mut ConfigValidationReport) {
     let r = &inner.risk;

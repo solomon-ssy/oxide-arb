@@ -31,9 +31,6 @@ use oxide_arb_core::{
         market_cache::MarketCache, market_registry::MarketRegistry,
     },
 };
-use oxide_arb_models::enums::common::MarketCategory as ModelsMarketCategory;
-use oxide_arb_models::enums::common::TickSize as ModelsTickSize;
-use oxide_arb_models::types::EventId as ModelsEventId;
 use oxide_arb_models::{
     config::Settings,
     domain::{
@@ -46,6 +43,10 @@ use oxide_arb_models::{
     },
     enums::{MarketCategory, TickSize, common::ExecutionMode, market::MarketStatus},
     types::{EventId, MarketId, Price, Shares, TokenId, Usd},
+};
+use oxide_arb_models::{
+    enums::common::{MarketCategory as ModelsMarketCategory, TickSize as ModelsTickSize},
+    types::EventId as ModelsEventId,
 };
 use oxide_arb_risk::traits::RiskPersistence;
 use risk_persistence::TestRiskPersistence;

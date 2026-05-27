@@ -4,8 +4,7 @@
 
 use num_traits::ToPrimitive;
 use oxide_arb_models::types::{MICRO_SCALE, MicroPrice, MicroShares, MicroUsd, Price, Shares, Usd};
-use rust_decimal::Decimal;
-use rust_decimal::MathematicalOps;
+use rust_decimal::{Decimal, MathematicalOps};
 use rust_decimal_macros::dec;
 use std::sync::LazyLock;
 

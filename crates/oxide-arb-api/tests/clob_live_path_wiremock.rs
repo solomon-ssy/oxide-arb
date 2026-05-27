@@ -9,7 +9,6 @@ use clob_wiremock::{
 };
 use oxide_arb_api::infra::retry::RetryPolicy;
 use oxide_arb_core::execution::clob_outcome::map_order_response;
-use oxide_arb_models::types::Usd as ModelsUsd;
 use oxide_arb_models::{
     domain::execution::ExecutionPlan,
     enums::{
@@ -17,7 +16,10 @@ use oxide_arb_models::{
         execution::ExecutionOutcome,
         order::OrderStatus,
     },
-    types::{EventId, ExecutionId, MarketId, OpportunityId, Price, ReservationId, Shares, Usd},
+    types::{
+        EventId, ExecutionId, MarketId, OpportunityId, Price, ReservationId, Shares, Usd,
+        Usd as ModelsUsd,
+    },
 };
 use rust_decimal_macros::dec;
 use std::{

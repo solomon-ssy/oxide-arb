@@ -1,8 +1,6 @@
 //! Runtime configuration defaults seed — inserts one row per `RuntimeConfigKey`.
 
-use crate::entities::runtime_config;
-use crate::enums::runtime_config::RuntimeConfigKey;
-use crate::seed::SeedContext;
+use crate::{entities::runtime_config, enums::runtime_config::RuntimeConfigKey, seed::SeedContext};
 use oxide_arb_macros::SeedUnit;
 use sea_orm::{
     DeriveIntoActiveModel, EntityTrait, IntoActiveModel, Iterable, QueryTrait,

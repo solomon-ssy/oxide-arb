@@ -8,9 +8,7 @@ use governor::{
     clock::DefaultClock,
     state::{InMemoryState, NotKeyed},
 };
-use std::collections::HashMap;
-use std::num::NonZeroU32;
-use std::sync::Arc;
+use std::{collections::HashMap, num::NonZeroU32, sync::Arc};
 
 type Limiter = GovLimiter<NotKeyed, InMemoryState, DefaultClock>;
 

@@ -3,13 +3,16 @@
 //! Published via `ArcSwap` so `pre_trade_check_core` reads all subsystems in a
 //! single atomic load instead of six separate `RwLock` acquisitions.
 
-use oxide_arb_models::enums::risk::{BlacklistReason, BlacklistScope};
-use oxide_arb_models::types::{MarketId, TokenId, Usd};
+use crate::{
+    context::{CircuitBreakerGate, ManualHaltGate},
+    sizing::DrawdownGuard,
+    types::DrawdownAction,
+};
+use oxide_arb_models::{
+    enums::risk::{BlacklistReason, BlacklistScope},
+    types::{MarketId, TokenId, Usd},
+};
 use rust_decimal::Decimal;
-
-use crate::context::{CircuitBreakerGate, ManualHaltGate};
-use crate::sizing::DrawdownGuard;
-use crate::types::DrawdownAction;
 
 /// Fixed 512-bit bloom filter (k=3). Used for blacklist fast-path negatives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

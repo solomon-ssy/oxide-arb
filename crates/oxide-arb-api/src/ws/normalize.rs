@@ -215,10 +215,12 @@ fn market_resolved_event(mr: &MarketResolved, ws_ingress: Instant) -> PipelineEv
 mod tests {
     use super::*;
     use oxide_arb_models::domain::pipeline::PipelineEvent;
-    use polymarket_client_sdk_v2::types::{B256, U256};
     use polymarket_client_sdk_v2::{
-        clob::types::Side,
-        clob::ws::types::response::{OrderBookLevel, PriceChangeBatchEntry},
+        clob::{
+            types::Side,
+            ws::types::response::{OrderBookLevel, PriceChangeBatchEntry},
+        },
+        types::{B256, U256},
     };
     use rust_decimal_macros::dec;
     use std::sync::atomic::{AtomicU32, Ordering};
