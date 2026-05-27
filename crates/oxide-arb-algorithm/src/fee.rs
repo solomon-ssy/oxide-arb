@@ -3,12 +3,11 @@
 //! The algorithm crate calls this during detection; the core layer wraps
 //! `oxide_arb_api::fees::FeeCalculator` into a concrete implementation.
 
-use std::sync::Arc;
-
 use oxide_arb_models::{
     enums::common::MarketCategory,
     types::{Price, Shares, TokenId, Usd},
 };
+use std::sync::Arc;
 
 /// Fee estimation dependency injected by `oxide-arb-core`.
 pub trait FeeEstimator: Send + Sync {

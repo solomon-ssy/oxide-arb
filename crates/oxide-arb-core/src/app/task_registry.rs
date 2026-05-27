@@ -4,12 +4,14 @@
 //! At shutdown the registry cancels and drains tasks in deterministic
 //! [`ShutdownStage`] order so producers stop before consumers flush.
 
-use super::lifecycle::{force_exit_on_second_signal, shutdown_signal};
-use super::task_id::TaskId;
+use super::{
+    lifecycle::{force_exit_on_second_signal, shutdown_signal},
+    task_id::TaskId,
+};
 use crate::observability::metrics_hub::MetricsHub;
 use oxide_arb_models::enums::common::ExecutionMode;
 use std::{
-    future::Future,
+    mem::take,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -272,7 +274,7 @@ impl PendingTaskQueue {
     pub fn drain(&self) -> Vec<PendingTask> {
         self.inner
             .lock()
-            .map(|mut g| std::mem::take(&mut *g))
+            .map(|mut g| take(&mut *g))
             .unwrap_or_default()
     }
 }
@@ -370,7 +372,7 @@ impl TaskRegistry {
         );
 
         for stage in ShutdownStage::ALL {
-            let tasks = std::mem::take(&mut self.stages[stage.index()]);
+            let tasks = take(&mut self.stages[stage.index()]);
             self.stage_tokens[stage.index()].cancel();
             drain_stage(
                 stage,
@@ -622,7 +624,7 @@ impl AppRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
-
+    use std::sync::atomic::{AtomicBool, Ordering};
     fn tick_budget() -> ShutdownBudget {
         let mut b = [Duration::from_secs(0); ShutdownStage::COUNT];
         for slot in &mut b {
@@ -686,11 +688,11 @@ mod tests {
         let root = CancellationToken::new();
         let mut registry = TaskRegistry::new(root.clone());
 
-        let stubborn_ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stubborn_ran = Arc::new(AtomicBool::new(false));
         let observed = Arc::clone(&stubborn_ran);
         registry.spawn(TaskId::DataPipeline, move |_token| async move {
             tokio::time::sleep(Duration::from_secs(10)).await;
-            observed.store(true, std::sync::atomic::Ordering::Relaxed);
+            observed.store(true, Ordering::Relaxed);
         });
 
         let mut budget = [Duration::from_secs(0); ShutdownStage::COUNT];

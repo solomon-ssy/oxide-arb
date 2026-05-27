@@ -5,10 +5,9 @@
 //! but can be replaced with Redis-backed implementations for multi-instance
 //! deployments.
 
+use crate::endgame::convergence::ConvergenceDirection;
 use chrono::{DateTime, Utc};
 use oxide_arb_models::types::MarketId;
-
-use crate::endgame::convergence::ConvergenceDirection;
 
 /// Backend for per-market emission cooldown state.
 ///

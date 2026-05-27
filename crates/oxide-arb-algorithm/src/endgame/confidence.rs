@@ -109,7 +109,6 @@ mod tests {
     use super::*;
     use oxide_arb_models::types::MicroPrice;
     use rust_decimal_macros::dec;
-
     fn default_fusion() -> ConfidenceFusion {
         ConfidenceFusion {
             prior_strength: 20,

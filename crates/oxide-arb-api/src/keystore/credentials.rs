@@ -1,5 +1,6 @@
 //! L2 HMAC credential derivation and management.
 
+use std::fmt::{self, Debug, Formatter};
 use zeroize::Zeroize;
 
 /// L2 HMAC API credentials for authenticated CLOB access.
@@ -18,8 +19,8 @@ impl Drop for L2Credentials {
     }
 }
 
-impl std::fmt::Debug for L2Credentials {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Debug for L2Credentials {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_struct("L2Credentials")
             .field("api_key", &"[REDACTED]")
             .field("api_secret", &"[REDACTED]")

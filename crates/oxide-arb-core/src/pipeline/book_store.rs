@@ -1,20 +1,27 @@
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
-
+use super::order_book::OrderBook;
+use crate::observability::metrics_hub::MetricsHub;
 use arc_swap::ArcSwap;
 use dashmap::{DashMap, Entry};
 use num_traits::ToPrimitive;
-use oxide_arb_models::domain::BookLevel;
-use oxide_arb_models::domain::latency::LatencyTrace;
-use oxide_arb_models::enums::common::Side;
+use oxide_arb_models::{
+    domain::{
+        BookLevel,
+        book::{BookSnapshot, EndgameBookPair, TopOfBook},
+        latency::LatencyTrace,
+    },
+    enums::common::Side,
+    types::{MarketId, Price, Shares, TokenId},
+};
 use parking_lot::Mutex;
-
-use oxide_arb_models::domain::book::{BookSnapshot, EndgameBookPair, TopOfBook};
-use oxide_arb_models::types::{MarketId, Price, Shares, TokenId};
-
-use super::order_book::OrderBook;
-use crate::observability::metrics_hub::MetricsHub;
+use std::sync::atomic::AtomicU64 as StdSyncAtomicU64;
+use std::sync::atomic::Ordering as StdSyncOrdering;
+use std::{
+    sync::{
+        Arc, atomic,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Instant,
+};
 
 struct TokenBookState {
     live: Mutex<OrderBook>,
@@ -30,7 +37,7 @@ pub struct BookStore {
     books: DashMap<TokenId, Arc<TokenBookState>>,
     token_latency_traces: DashMap<TokenId, Arc<LatencyTrace>>,
     metrics: Arc<MetricsHub>,
-    metric_update_counter: std::sync::atomic::AtomicU64,
+    metric_update_counter: atomic::AtomicU64,
 }
 
 impl BookStore {
@@ -39,7 +46,7 @@ impl BookStore {
             books: DashMap::new(),
             token_latency_traces: DashMap::new(),
             metrics,
-            metric_update_counter: std::sync::atomic::AtomicU64::new(0),
+            metric_update_counter: StdSyncAtomicU64::new(0),
         }
     }
 
@@ -80,7 +87,7 @@ impl BookStore {
         }
         let n = self
             .metric_update_counter
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            .fetch_add(1, StdSyncOrdering::Relaxed);
         if n % 1024 == 0 {
             self.metrics
                 .book_store_token_count
@@ -215,7 +222,6 @@ mod tests {
     use super::*;
     use oxide_arb_models::enums::common::Side;
     use rust_decimal_macros::dec;
-
     fn make_level(price: rust_decimal::Decimal, size: rust_decimal::Decimal) -> BookLevel {
         BookLevel::from_decimal_unchecked(Price::new(price), Shares::new(size))
     }

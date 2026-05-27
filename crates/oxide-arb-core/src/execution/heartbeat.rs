@@ -1,14 +1,11 @@
 //! Periodic venue connectivity probe — feeds execution health into the risk engine.
 
-use std::sync::Arc;
-use std::time::Duration;
-
 use crate::execution::fsm::ExecutionFSM;
 use oxide_arb_api::clob::ClobClient;
 use oxide_arb_error::OxideError;
 use oxide_arb_models::enums::common::ExecutionMode;
-use oxide_arb_risk::engine::RiskEngine;
-use oxide_arb_risk::types::ExecutionRiskEvent;
+use oxide_arb_risk::{engine::RiskEngine, types::ExecutionRiskEvent};
+use std::{sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
 
 pub struct HeartbeatTask {

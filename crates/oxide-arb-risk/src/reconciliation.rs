@@ -5,17 +5,17 @@
 //! beyond the configured tolerance is classified as a mismatch and
 //! reported as Warning or Critical.
 
-use std::collections::HashSet;
-
-use crate::traits::{BalanceQuerier, RiskMetrics};
-use crate::types::{ReconciliationMismatch, ReconciliationReport};
+use crate::{
+    traits::{BalanceQuerier, RiskMetrics},
+    types::{ReconciliationMismatch, ReconciliationReport},
+};
 use chrono::Utc;
 use num_traits::ToPrimitive;
 use oxide_arb_error::OxideResult;
-use oxide_arb_models::enums::ReconciliationStatus;
-use oxide_arb_models::types::Usd;
+use oxide_arb_models::{enums::ReconciliationStatus, types::Usd};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
+use std::{collections::HashSet, time::Instant};
 
 /// Compares internal vs. external balances and positions.
 pub struct LedgerReconciler {
@@ -44,7 +44,7 @@ impl LedgerReconciler {
         metrics: &dyn RiskMetrics,
         querier: &dyn BalanceQuerier,
     ) -> OxideResult<ReconciliationReport> {
-        let start = std::time::Instant::now();
+        let start = Instant::now();
 
         let (ext_available, ext_locked) = querier.query_balance().await?;
         let ext_positions = querier.query_positions().await?;

@@ -2,8 +2,10 @@
 //!
 //! All interior arithmetic uses [`MicroPrice`] / [`MicroShares`] / [`MicroUsd`].
 
-use oxide_arb_models::domain::BookLevel;
-use oxide_arb_models::types::{MicroPrice, MicroShares, MicroUsd, Price, Shares, Usd};
+use oxide_arb_models::{
+    domain::BookLevel,
+    types::{MicroPrice, MicroShares, MicroUsd, Price, Shares, Usd},
+};
 
 /// Result of walking through orderbook levels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,11 +151,12 @@ impl OrderbookWalker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use oxide_arb_models::domain::book::{BookLevel, total_depth_usd};
-    use oxide_arb_models::types::{MicroPrice, MicroUsd, Price, Shares};
+    use oxide_arb_models::{
+        domain::book::{BookLevel, total_depth_usd},
+        types::{MicroPrice, MicroUsd, Price, Shares},
+    };
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
-
     fn level(price: Decimal, size: Decimal) -> BookLevel {
         BookLevel::from_decimal(Price::new(price), Shares::new(size)).unwrap()
     }

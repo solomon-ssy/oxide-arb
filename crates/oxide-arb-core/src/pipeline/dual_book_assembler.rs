@@ -1,7 +1,5 @@
-use oxide_arb_models::domain::book::EndgameBookPair;
-use oxide_arb_models::types::TokenId;
-
 use super::book_store::BookStore;
+use oxide_arb_models::{domain::book::EndgameBookPair, types::TokenId};
 
 /// Assembles a paired YES+NO orderbook for the endgame detector (zero-copy).
 pub struct DualBookAssembler;
@@ -21,8 +19,10 @@ impl DualBookAssembler {
 mod tests {
     use super::*;
     use crate::observability::metrics_hub::MetricsHub;
-    use oxide_arb_models::domain::book::BookLevel;
-    use oxide_arb_models::types::{Price, Shares};
+    use oxide_arb_models::{
+        domain::book::BookLevel,
+        types::{Price, Shares},
+    };
     use rust_decimal_macros::dec;
     use std::sync::Arc;
 

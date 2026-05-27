@@ -3,9 +3,7 @@
 //! The `CalibrationDataSource` trait is implemented by the core layer to
 //! bridge between the algorithm crate (pure computation) and I/O (DB, APIs).
 
-use super::calibrator::ResolutionCalibrator;
-use super::prior::estimate_mom_prior;
-use super::types::CalibrationEntry;
+use super::{calibrator::ResolutionCalibrator, prior::estimate_mom_prior, types::CalibrationEntry};
 use num_traits::ToPrimitive;
 use oxide_arb_error::algorithm::AlgoError;
 use oxide_arb_models::{

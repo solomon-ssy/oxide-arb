@@ -3,11 +3,12 @@
 use crate::traits::MarketRepository;
 use chrono::{DateTime, Utc};
 use oxide_arb_error::storage::StorageError;
-use oxide_arb_models::domain::{MarketInfo, UpsertMarket};
-use oxide_arb_models::types::MarketId;
+use oxide_arb_models::{
+    domain::{MarketInfo, UpsertMarket},
+    types::MarketId,
+};
 use oxide_arb_storage::cache::{CacheKey, TieredCache};
-use std::collections::HashSet;
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 /// Caching decorator for market metadata reads.
 pub struct CachedMarketRepository<R: MarketRepository> {

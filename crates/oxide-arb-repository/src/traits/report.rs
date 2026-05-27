@@ -2,8 +2,10 @@
 
 use chrono::NaiveDate;
 use oxide_arb_error::storage::StorageError;
-use oxide_arb_models::domain::{ReportInfo, UpsertReport};
-use oxide_arb_models::enums::common::ReportType;
+use oxide_arb_models::{
+    domain::{ReportInfo, UpsertReport},
+    enums::common::ReportType,
+};
 
 /// Data access for the `report` table.
 pub trait ReportRepository: Send + Sync {

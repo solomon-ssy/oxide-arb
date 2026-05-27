@@ -1,21 +1,17 @@
 //! Property tests: Funnel submit invariants under random load.
 
-use std::sync::Arc;
-use std::time::Duration;
-
-use oxide_arb_core::detection::funnel::Funnel;
-use oxide_arb_core::observability::metrics_hub::MetricsHub;
-use proptest::prelude::*;
-use rust_decimal::Decimal;
-
 #[path = "support/test_util/scored_opportunity.rs"]
 mod scored_opportunity;
 
+use oxide_arb_algorithm::scorer::ScoredOpportunity;
+use oxide_arb_core::{detection::funnel::Funnel, observability::metrics_hub::MetricsHub};
+use oxide_arb_models::types::MicroScore;
+use proptest::prelude::*;
+use rust_decimal::Decimal;
 use scored_opportunity::sample_scored;
+use std::{sync::Arc, time::Duration};
 
-fn scored_with_score(score: f64) -> Arc<oxide_arb_algorithm::scorer::ScoredOpportunity> {
-    use oxide_arb_models::types::MicroScore;
-
+fn scored_with_score(score: f64) -> Arc<ScoredOpportunity> {
     let mut base = sample_scored();
     Arc::make_mut(&mut base).score =
         MicroScore::try_from_decimal(Decimal::try_from(score).unwrap()).unwrap();

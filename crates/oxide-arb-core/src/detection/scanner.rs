@@ -1,19 +1,22 @@
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-
+use crate::{
+    bridge::CoreOpportunityPipeline,
+    observability::{latency::observe_ws_to_scan, metrics_hub::MetricsHub},
+    pipeline::{
+        book_gate::BookGate,
+        book_store::BookStore,
+        dual_book_assembler::DualBookAssembler,
+        market_cache::{CachedMarketScanEntry, MarketCache},
+        staleness_classifier::StalenessClassifier,
+    },
+};
 use chrono::{DateTime, Utc};
 use num_traits::ToPrimitive;
 use oxide_arb_algorithm::{pipeline::MarketScanInputRef, scorer::ScoredOpportunity};
 use oxide_arb_models::domain::latency::LatencyTrace;
-
-use crate::bridge::CoreOpportunityPipeline;
-use crate::observability::latency::observe_ws_to_scan;
-use crate::observability::metrics_hub::MetricsHub;
-use crate::pipeline::book_gate::BookGate;
-use crate::pipeline::book_store::BookStore;
-use crate::pipeline::dual_book_assembler::DualBookAssembler;
-use crate::pipeline::market_cache::{CachedMarketScanEntry, MarketCache};
-use crate::pipeline::staleness_classifier::StalenessClassifier;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 
 static SCAN_SAMPLE: AtomicU64 = AtomicU64::new(0);
 

@@ -1,7 +1,8 @@
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-
 use crate::observability::metrics_hub::MetricsHub;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 /// Global execution kill switch — replaces the old Idle→Validate→Exec FSM.
 ///

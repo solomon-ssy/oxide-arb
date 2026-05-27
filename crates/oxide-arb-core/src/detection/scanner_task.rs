@@ -1,17 +1,15 @@
 //! Scanner task — consumes market scan triggers from the coalescer,
 //! looks up market data, invokes the scanner, and dispatches results.
 
-use std::sync::Arc;
-
+use super::funnel::{FastLaneDispatch, Funnel};
+use crate::{
+    detection::scanner::Scanner, observability::metrics_hub::MetricsHub,
+    pipeline::market_cache::MarketCache,
+};
 use oxide_arb_error::OxideError;
 use oxide_arb_models::types::{MarketId, MicroScore};
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
-
-use crate::detection::scanner::Scanner;
-use crate::observability::metrics_hub::MetricsHub;
-use crate::pipeline::market_cache::MarketCache;
-
-use super::funnel::{FastLaneDispatch, Funnel};
 
 /// Dependencies injected into [`ScannerTask`].
 pub struct ScannerTaskDeps {

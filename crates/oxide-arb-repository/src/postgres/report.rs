@@ -3,13 +3,14 @@
 use crate::traits::ReportRepository;
 use chrono::NaiveDate;
 use oxide_arb_error::storage::StorageError;
-use oxide_arb_models::domain::{ReportInfo, UpsertReport};
 use oxide_arb_models::entities::report::{Column as ReportColumn, Entity as ReportEntity};
-use oxide_arb_models::enums::common::ReportType;
-use sea_orm::sea_query::OnConflict;
+use oxide_arb_models::{
+    domain::{ReportInfo, UpsertReport},
+    enums::common::ReportType,
+};
 use sea_orm::{
     ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder,
-    QuerySelect,
+    QuerySelect, sea_query::OnConflict,
 };
 
 pub struct PgReportRepository {

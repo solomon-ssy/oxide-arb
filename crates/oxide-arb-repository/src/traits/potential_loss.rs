@@ -1,6 +1,8 @@
 use oxide_arb_error::storage::StorageError;
-use oxide_arb_models::domain::{NewPotentialLoss, PotentialLossInfo, UpdatePotentialLoss};
-use oxide_arb_models::types::{LedgerId, MarketId, Usd};
+use oxide_arb_models::{
+    domain::{NewPotentialLoss, PotentialLossInfo, UpdatePotentialLoss},
+    types::{LedgerId, MarketId, Usd},
+};
 
 pub trait PotentialLossRepository: Send + Sync {
     async fn create(&self, entry: NewPotentialLoss) -> Result<PotentialLossInfo, StorageError>;

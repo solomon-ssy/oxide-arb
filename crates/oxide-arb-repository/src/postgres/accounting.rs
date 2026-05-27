@@ -5,10 +5,12 @@ use super::orm::{
 use crate::traits::AccountingRepository;
 use chrono::Utc;
 use oxide_arb_error::storage::StorageError;
-use oxide_arb_models::domain::{AccountingPeriodInfo, NewAccountingPeriod, UpdateAccountingPeriod};
-use oxide_arb_models::entities::accounting_period::{ActiveModel, Column, Entity};
-use oxide_arb_models::enums::common::ReportType;
-use oxide_arb_models::types::PeriodId;
+use oxide_arb_models::{
+    domain::{AccountingPeriodInfo, NewAccountingPeriod, UpdateAccountingPeriod},
+    entities::accounting_period::{ActiveModel, Column, Entity},
+    enums::common::ReportType,
+    types::PeriodId,
+};
 use sea_orm::sea_query::Expr;
 
 // ── helpers ──────────────────────────────────────────────────────────

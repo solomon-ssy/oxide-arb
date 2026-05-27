@@ -1,12 +1,11 @@
-use std::sync::Arc;
-use std::time::Duration;
-
-use oxide_arb_error::reservation::ReservationError;
-use oxide_arb_models::config::ExposureReservationConfig;
-use oxide_arb_models::domain::execution::ReservationHandle;
-use oxide_arb_models::types::{MarketId, Usd};
-
 use crate::exposure::in_memory::InMemoryExposureReservation;
+use oxide_arb_error::reservation::ReservationError;
+use oxide_arb_models::{
+    config::ExposureReservationConfig,
+    domain::execution::ReservationHandle,
+    types::{MarketId, Usd},
+};
+use std::{sync::Arc, time::Duration};
 
 pub struct CapitalManager {
     backend: Arc<InMemoryExposureReservation>,

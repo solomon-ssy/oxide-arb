@@ -1,21 +1,20 @@
 //! End-to-end opportunity pipeline: detect → filter → score → cooldown → emit.
 
-use std::sync::Arc;
-
+use crate::{
+    cooldown::InMemoryEmissionCooldown,
+    endgame::{EndgameDetectInput, EndgameDetector},
+    fee::FeeEstimator,
+    scorer::{EndgameScorer, ScoredOpportunity},
+    staleness::StalenessPolicy,
+};
 use chrono::{DateTime, Utc};
 use oxide_arb_models::{
     config::ScorerConfig,
-    domain::book::EndgameBookPair,
-    domain::latency::LatencyTrace,
+    domain::{book::EndgameBookPair, latency::LatencyTrace},
     enums::common::{MarketCategory, StalenessLevel},
     types::{EventId, MarketId, MicroPct, MicroScore, MicroUsd, TokenId},
 };
-
-use crate::cooldown::InMemoryEmissionCooldown;
-use crate::endgame::{EndgameDetectInput, EndgameDetector};
-use crate::fee::FeeEstimator;
-use crate::scorer::{EndgameScorer, ScoredOpportunity};
-use crate::staleness::StalenessPolicy;
+use std::sync::Arc;
 
 pub struct MarketScanInput {
     pub market_id: MarketId,

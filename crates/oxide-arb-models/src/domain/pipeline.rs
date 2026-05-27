@@ -3,13 +3,12 @@
 //! Replaces heap-heavy legacy WS book payloads in PR-3+.
 //! Control-plane variants mirror WS manager output; book payloads use `Arc<[BookLevel]>`.
 
-use std::sync::Arc;
-use std::time::Instant;
-
-use crate::domain::book::BookLevel;
-use crate::enums::common::Side;
-use crate::enums::common::TickSize;
-use crate::types::{MarketId, Price, Shares, TokenId};
+use crate::{
+    domain::book::BookLevel,
+    enums::common::{Side, TickSize},
+    types::{MarketId, Price, Shares, TokenId},
+};
+use std::{sync::Arc, time::Instant};
 
 /// Monotonic + exchange timestamps captured at WS ingress (not serialized).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

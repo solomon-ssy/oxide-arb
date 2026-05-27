@@ -1,22 +1,24 @@
 //! Shared wiremock mounts for CLOB SDK + [`ClobClient`] integration tests.
 
-use std::str::FromStr as _;
-use std::sync::Arc;
-
 use alloy::signers::Signer as _;
 use alloy::signers::local::LocalSigner;
-use oxide_arb_api::clob::ClobClient;
-use oxide_arb_api::keystore::OrderSigner;
-use oxide_arb_models::domain::order::OrderRequest;
-use oxide_arb_models::enums::common::{OrderType, Side};
-use oxide_arb_models::types::{MarketId, Price, Shares, TokenId};
+use oxide_arb_api::{clob::ClobClient, keystore::OrderSigner};
+use oxide_arb_models::{
+    domain::order::OrderRequest,
+    enums::common::{OrderType, Side},
+    types::{MarketId, Price, Shares, TokenId},
+};
 use polymarket_client_sdk_v2::POLYGON;
 use polymarket_client_sdk_v2::auth::Normal;
 use polymarket_client_sdk_v2::auth::state::Authenticated;
 use polymarket_client_sdk_v2::clob::{Client as SdkClient, Config as SdkConfig};
 use rust_decimal_macros::dec;
-use wiremock::matchers::{method, path, query_param};
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use std::str::FromStr as _;
+use std::sync::Arc;
+use wiremock::{
+    Mock, MockServer, ResponseTemplate,
+    matchers::{method, path, query_param},
+};
 
 /// Publicly known Anvil/Hardhat test key #0.
 const PRIVATE_KEY: &str = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";

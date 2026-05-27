@@ -1,6 +1,6 @@
 //! Conflict resolution strategies for seed insertion.
-
 /// Determines how a seed handles pre-existing rows during bootstrap.
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SeedConflictPolicy {
     /// `ON CONFLICT DO NOTHING` — never update existing rows.

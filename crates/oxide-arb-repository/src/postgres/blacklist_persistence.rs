@@ -4,9 +4,11 @@ use super::orm::{
 };
 use crate::traits::BlacklistPersistenceRepository;
 use oxide_arb_error::storage::StorageError;
-use oxide_arb_models::domain::{BlacklistInfo, UpsertBlacklistEntry};
-use oxide_arb_models::entities::blacklist_entry::{Column, Entity};
-use oxide_arb_models::types::MarketId;
+use oxide_arb_models::{
+    domain::{BlacklistInfo, UpsertBlacklistEntry},
+    entities::blacklist_entry::{Column, Entity},
+    types::MarketId,
+};
 
 pub struct PgBlacklistPersistenceRepository {
     db: DatabaseConnection,

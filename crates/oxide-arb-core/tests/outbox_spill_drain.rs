@@ -7,28 +7,32 @@ mod risk_metrics;
 #[path = "support/test_util/risk_persistence.rs"]
 mod risk_persistence;
 
-use std::sync::Arc;
-use std::time::Duration;
-
 use oxide_arb_api::ws::ClobWsManager;
-use oxide_arb_core::bridge::risk_metrics::CoreRiskMetrics;
-use oxide_arb_core::execution::execution_pipeline::{ExecutionPipeline, PostTradeJob};
-use oxide_arb_core::execution::fsm::ExecutionFSM;
-use oxide_arb_core::exposure::in_memory::InMemoryExposureReservation;
-use oxide_arb_core::observability::metrics_hub::MetricsHub;
-use oxide_arb_core::outbox::in_memory::{InMemoryEventStore, SharedInMemoryEventStore};
-use oxide_arb_core::service::risk_metrics::{ApiHealthTracker, RiskMetricsState};
-use oxide_arb_models::config::{ExposureReservationConfig, PolymarketConfig, WebSocketConfig};
-use oxide_arb_models::enums::common::ExecutionMode;
-use oxide_arb_models::enums::execution::ExecutionOutcome;
-use oxide_arb_models::types::{MarketId, Price, TokenId, TradeId, Usd};
-use oxide_arb_risk::builder::RiskEngineBuilder;
-use oxide_arb_risk::clock::utc_clock;
-use oxide_arb_risk::engine::RiskEngine;
+use oxide_arb_core::{
+    bridge::risk_metrics::CoreRiskMetrics,
+    execution::{
+        execution_pipeline::{ExecutionPipeline, PostTradeJob},
+        fsm::ExecutionFSM,
+    },
+    exposure::in_memory::InMemoryExposureReservation,
+    observability::metrics_hub::MetricsHub,
+    outbox::in_memory::{InMemoryEventStore, SharedInMemoryEventStore},
+    service::risk_metrics::{ApiHealthTracker, RiskMetricsState},
+};
+use oxide_arb_models::{
+    config::{ExposureReservationConfig, PolymarketConfig, WebSocketConfig},
+    enums::{common::ExecutionMode, execution::ExecutionOutcome},
+    types::{MarketId, Price, TokenId, TradeId, Usd},
+};
+use oxide_arb_risk::{
+    builder::RiskEngineBuilder, clock::utc_clock, engine::RiskEngine, traits::RiskPersistence,
+};
 use risk_config::test_risk_config;
 use risk_metrics::TestRiskMetrics;
 use risk_persistence::TestRiskPersistence;
 use rust_decimal_macros::dec;
+use std::time::Duration as StdTimeDuration;
+use std::{sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
 
 struct DrainFixture {
@@ -73,7 +77,7 @@ fn build_drain_fixture() -> DrainFixture {
     ));
     ws_manager.seed_test_connectivity();
     let metrics_state = Arc::new(RiskMetricsState::new(Arc::new(ApiHealthTracker::new(
-        std::time::Duration::from_secs(60),
+        StdTimeDuration::from_secs(60),
     ))));
     metrics_state.seed_test_snapshot(Usd::new(dec!(5000)));
     let risk_metrics = Arc::new(CoreRiskMetrics::new(
@@ -86,9 +90,7 @@ fn build_drain_fixture() -> DrainFixture {
             .config(test_risk_config())
             .clock(utc_clock())
             .initial_equity(Usd::new(dec!(5000)))
-            .persistence(
-                Arc::clone(&persistence) as Arc<dyn oxide_arb_risk::traits::RiskPersistence>
-            )
+            .persistence(Arc::clone(&persistence) as Arc<dyn RiskPersistence>)
             .build(&TestRiskMetrics)
             .expect("risk engine"),
     );

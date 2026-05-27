@@ -5,10 +5,12 @@ use super::orm::{
 use crate::traits::EventRepository;
 use num_traits::ToPrimitive;
 use oxide_arb_error::storage::StorageError;
-use oxide_arb_models::domain::{EventInfo, UpsertEvent};
-use oxide_arb_models::entities::event::{ActiveModel, Column, Entity};
-use oxide_arb_models::enums::market::EventStatus;
-use oxide_arb_models::types::EventId;
+use oxide_arb_models::{
+    domain::{EventInfo, UpsertEvent},
+    entities::event::{ActiveModel, Column, Entity},
+    enums::market::EventStatus,
+    types::EventId,
+};
 use sea_orm::sea_query::OnConflict;
 use std::collections::HashSet;
 

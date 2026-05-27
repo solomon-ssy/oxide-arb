@@ -2,11 +2,12 @@
 
 use crate::traits::EventRepository;
 use oxide_arb_error::storage::StorageError;
-use oxide_arb_models::domain::{EventInfo, UpsertEvent};
-use oxide_arb_models::types::EventId;
+use oxide_arb_models::{
+    domain::{EventInfo, UpsertEvent},
+    types::EventId,
+};
 use oxide_arb_storage::cache::{CacheKey, TieredCache};
-use std::collections::HashSet;
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 /// Caching decorator for event metadata reads.
 pub struct CachedEventRepository<R: EventRepository> {

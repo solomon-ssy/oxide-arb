@@ -2,14 +2,15 @@ use super::orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, DatabaseTransaction,
     EntityTrait, FromQueryResult, IntoActiveModel, QueryFilter, QueryOrder, QuerySelect, Set,
 };
-use crate::batch;
-use crate::traits::TradeRepository;
+use crate::{batch, traits::TradeRepository};
 use chrono::{DateTime, Utc};
 use num_traits::ToPrimitive;
 use oxide_arb_error::storage::StorageError;
-use oxide_arb_models::domain::{NewTrade, TradeInfo, UpdateTradeOutcome};
-use oxide_arb_models::entities::trade::{ActiveModel, Column, Entity};
-use oxide_arb_models::types::{MarketId, TradeId};
+use oxide_arb_models::{
+    domain::{NewTrade, TradeInfo, UpdateTradeOutcome},
+    entities::trade::{ActiveModel, Column, Entity},
+    types::{MarketId, TradeId},
+};
 use std::collections::HashMap;
 
 /// Number of columns in the `trade` table used for bind-variable calculations.

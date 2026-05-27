@@ -1,7 +1,6 @@
 //! Typed context for passing data between dependent seed units.
 
-use std::any::Any;
-use std::collections::HashMap;
+use std::{any::Any, collections::HashMap};
 
 /// Shared state passed through a seed plan's execution.
 ///

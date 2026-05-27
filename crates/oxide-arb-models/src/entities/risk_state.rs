@@ -1,7 +1,9 @@
 //! `risk_engine_state` table entity (singleton row).
 
-use crate::enums::risk::{BreakerStateName, CircuitBreakerLevel};
-use crate::types::Usd;
+use crate::{
+    enums::risk::{BreakerStateName, CircuitBreakerLevel},
+    types::Usd,
+};
 use chrono::{DateTime, NaiveDate, Utc};
 use oxide_arb_macros::ActiveModelDefaults;
 use sea_orm::entity::prelude::*;

@@ -3,6 +3,7 @@
 use oxide_arb_macros::IntoActiveValue;
 use sea_orm::{DeriveActiveEnum, EnumIter};
 use serde::{Deserialize, Serialize};
+use std::fmt::{self, Display, Formatter};
 
 /// Lifecycle state of a market in the registry.
 #[derive(
@@ -35,8 +36,8 @@ pub enum MarketStatus {
     Delisted,
 }
 
-impl std::fmt::Display for MarketStatus {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Display for MarketStatus {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Discovered => write!(f, "discovered"),
             Self::Active => write!(f, "active"),
@@ -96,8 +97,8 @@ impl EventStatus {
     }
 }
 
-impl std::fmt::Display for EventStatus {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Display for EventStatus {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
     }
 }

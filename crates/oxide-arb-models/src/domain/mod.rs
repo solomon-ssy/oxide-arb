@@ -48,7 +48,6 @@
 //!   `Upsert*` DTOs — never `*Info`.
 //! - All DB read models end in `Info`; runtime aggregates end in `State`; frozen
 //!   audit captures end in `Snapshot`.
-
 /// Generate `impl From<$model> for $info` by copying all named fields.
 ///
 /// Use when `DerivePartialModel` is present (provides `FromQueryResult` +

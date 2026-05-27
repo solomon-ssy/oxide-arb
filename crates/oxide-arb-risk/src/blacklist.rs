@@ -5,18 +5,23 @@
 //! on the hot path. Permanent entries loaded from config; temporary entries
 //! are added at runtime and garbage-collected on TTL expiry.
 
-use crate::clock::Clock;
-use crate::snapshot::{BlacklistSnapshot, BloomFilter512, TradingPathBlock};
-use crate::types::BlacklistKey;
+use crate::{
+    clock::Clock,
+    snapshot::{BlacklistSnapshot, BloomFilter512, TradingPathBlock},
+    types::BlacklistKey,
+};
 use dashmap::DashMap;
 use num_traits::ToPrimitive;
-use oxide_arb_models::config::RiskConfig;
-use oxide_arb_models::domain::blacklist::BlacklistInfo;
-use oxide_arb_models::enums::blacklist::BlacklistCheckResult;
-use oxide_arb_models::enums::risk::{BlacklistReason, BlacklistScope};
-use oxide_arb_models::types::{MarketId, TokenId};
-use std::sync::Arc;
-use std::time::Duration;
+use oxide_arb_models::{
+    config::RiskConfig,
+    domain::blacklist::BlacklistInfo,
+    enums::{
+        blacklist::BlacklistCheckResult,
+        risk::{BlacklistReason, BlacklistScope},
+    },
+    types::{MarketId, TokenId},
+};
+use std::{sync::Arc, time::Duration};
 
 /// Concurrent blacklist projection with lazy TTL eviction.
 pub struct BlacklistManager {
@@ -367,8 +372,7 @@ impl BlacklistManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use oxide_arb_models::config::RiskConfig;
-    use oxide_arb_models::enums::risk::BlacklistReason;
+    use oxide_arb_models::{config::RiskConfig, enums::risk::BlacklistReason};
 
     #[test]
     fn bloom_snapshot_blocks_trading_path_market() {

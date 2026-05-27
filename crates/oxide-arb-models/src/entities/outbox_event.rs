@@ -1,7 +1,9 @@
 //! `outbox_event` table entity.
 
-use crate::enums::outbox::{OutboxAggregateType, OutboxEventType};
-use crate::types::{AggregateId, OutboxEventId};
+use crate::{
+    enums::outbox::{OutboxAggregateType, OutboxEventType},
+    types::{AggregateId, OutboxEventId},
+};
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 

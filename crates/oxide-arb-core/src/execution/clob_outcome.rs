@@ -1,16 +1,13 @@
 //! Map CLOB order responses to execution outcomes with actual fill economics.
 
-use std::time::Instant;
-
 use num_traits::ToPrimitive;
-use oxide_arb_models::domain::execution::ExecutionPlan;
-use oxide_arb_models::domain::opportunity::Opportunity;
-use oxide_arb_models::domain::order::OrderResponse;
-use oxide_arb_models::enums::common::ExecutionMode;
-use oxide_arb_models::enums::execution::ExecutionOutcome;
-use oxide_arb_models::enums::order::OrderStatus;
-use oxide_arb_models::types::{Price, Shares, Usd};
+use oxide_arb_models::{
+    domain::{execution::ExecutionPlan, opportunity::Opportunity, order::OrderResponse},
+    enums::{common::ExecutionMode, execution::ExecutionOutcome, order::OrderStatus},
+    types::{Price, Shares, Usd},
+};
 use rust_decimal::Decimal;
+use std::time::Instant;
 
 /// Convert a CLOB [`OrderResponse`] into an [`ExecutionOutcome`] using actual fill data.
 pub fn map_order_response(

@@ -1,11 +1,10 @@
-use std::sync::Arc;
-
-use oxide_arb_models::domain::execution::ExecutionPlan;
-use oxide_arb_models::enums::common::ExecutionMode;
-use oxide_arb_models::enums::execution::ExecutionOutcome;
-use oxide_arb_models::types::OrderId;
-
 use crate::observability::metrics_hub::MetricsHub;
+use oxide_arb_models::{
+    domain::execution::ExecutionPlan,
+    enums::{common::ExecutionMode, execution::ExecutionOutcome},
+    types::OrderId,
+};
+use std::sync::Arc;
 
 pub struct Dispatcher {
     execution_mode: ExecutionMode,

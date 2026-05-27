@@ -10,10 +10,12 @@
 
 use super::types::CalibrationEntry;
 use dashmap::DashMap;
-use oxide_arb_models::domain::calibration::BucketKey;
-use oxide_arb_models::enums::calibration::PriceZone;
-use oxide_arb_models::enums::common::MarketCategory;
+use oxide_arb_models::{
+    domain::calibration::BucketKey,
+    enums::{calibration::PriceZone, common::MarketCategory},
+};
 use rust_decimal::Decimal;
+use std::hash::Hash;
 
 /// Pre-aggregated counts and priors for tier-2/3 fallback lookups.
 #[derive(Debug, Default)]
@@ -56,7 +58,7 @@ impl FallbackIndexes {
         Self::merge_into(&self.by_zone, key.price_zone, entry);
     }
 
-    fn merge_into<K: Eq + std::hash::Hash>(
+    fn merge_into<K: Eq + Hash>(
         map: &DashMap<K, AggregatedCalibration>,
         key: K,
         entry: &CalibrationEntry,
@@ -184,7 +186,6 @@ mod tests {
     use super::*;
     use oxide_arb_models::enums::calibration::DurationBucket;
     use rust_decimal_macros::dec;
-
     fn key(cat: MarketCategory, zone: PriceZone, dur: DurationBucket) -> BucketKey {
         BucketKey {
             category: cat,

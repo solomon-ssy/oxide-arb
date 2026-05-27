@@ -4,9 +4,8 @@
 //! drains the channel in batches and persists them via `RiskAuditRepository`.
 //! Channel full → drop + increment counter. **Never halts the engine.**
 
-use std::sync::atomic::{AtomicU64, Ordering};
-
 use oxide_arb_risk::audit::RiskAuditEvent;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub enum EnqueueResult {
     Queued,

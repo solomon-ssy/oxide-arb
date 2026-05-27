@@ -5,8 +5,10 @@ use super::orm::{
 use crate::traits::RiskStateRepository;
 use chrono::Utc;
 use oxide_arb_error::storage::StorageError;
-use oxide_arb_models::domain::{RiskStateInfo, UpsertRiskEngineState};
-use oxide_arb_models::entities::risk_state::{ActiveModel, Column, Entity};
+use oxide_arb_models::{
+    domain::{RiskStateInfo, UpsertRiskEngineState},
+    entities::risk_state::{ActiveModel, Column, Entity},
+};
 use sea_orm::sea_query::{Expr, OnConflict};
 
 pub struct PgRiskStateRepository {

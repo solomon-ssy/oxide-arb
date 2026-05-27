@@ -1,9 +1,11 @@
 //! `trades` table entity.
 
-use crate::enums::common::{ExecutionMode, Side, TradeOutcome};
-use crate::types::{
-    Bps, EventId, ExecutionId, MarketId, OpportunityId, OrderId, Price, Shares, TokenId, TradeId,
-    Usd,
+use crate::{
+    enums::common::{ExecutionMode, Side, TradeOutcome},
+    types::{
+        Bps, EventId, ExecutionId, MarketId, OpportunityId, OrderId, Price, Shares, TokenId,
+        TradeId, Usd,
+    },
 };
 use chrono::{DateTime, Utc};
 use oxide_arb_macros::ActiveModelDefaults;

@@ -1,7 +1,9 @@
 //! `potential_loss_ledger` table entity.
 
-use crate::enums::common::LedgerStatus;
-use crate::types::{LedgerId, MarketId, Price, Shares, TokenId, Usd};
+use crate::{
+    enums::common::LedgerStatus,
+    types::{LedgerId, MarketId, Price, Shares, TokenId, Usd},
+};
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 

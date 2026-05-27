@@ -1,12 +1,16 @@
 //! 8-step endgame detection pipeline.
 
-use std::sync::Arc;
-
+use crate::{
+    calibration::ResolutionCalibrator,
+    endgame::{
+        confidence::{ConfidenceFusion, compute_realtime_confidence},
+        convergence::{ConvergenceDirection, InMemoryConvergenceTracker},
+    },
+    fee::FeeEstimator,
+    walker::{OrderbookWalker, WalkResult},
+};
 use chrono::{DateTime, Utc};
 use num_traits::ToPrimitive;
-use rust_decimal::Decimal;
-use rust_decimal_macros::dec;
-
 use oxide_arb_models::{
     config::{CalibrationConfig, EndgameDetectionConfig},
     domain::{
@@ -14,20 +18,19 @@ use oxide_arb_models::{
         calibration::BucketKey,
         opportunity::{EndgameMeta, Opportunity},
     },
-    enums::calibration::{DurationBucket, PriceZone},
-    enums::common::{MarketCategory, Side, StalenessLevel},
-    enums::opportunity::PayoutModel,
+    enums::{
+        calibration::{DurationBucket, PriceZone},
+        common::{MarketCategory, Side, StalenessLevel},
+        opportunity::PayoutModel,
+    },
     types::{
         Bps, EventId, MarketId, MicroPrice, MicroProb, MicroUsd, OpportunityId, Price, Shares,
         TokenId, Usd,
     },
 };
-
-use crate::calibration::ResolutionCalibrator;
-use crate::endgame::confidence::{ConfidenceFusion, compute_realtime_confidence};
-use crate::endgame::convergence::{ConvergenceDirection, InMemoryConvergenceTracker};
-use crate::fee::FeeEstimator;
-use crate::walker::{OrderbookWalker, WalkResult};
+use rust_decimal::Decimal;
+use rust_decimal_macros::dec;
+use std::sync::Arc;
 
 struct OpportunityBuildCtx<'a> {
     input: &'a EndgameDetectInput<'a>,

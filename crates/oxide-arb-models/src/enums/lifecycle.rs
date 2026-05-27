@@ -3,6 +3,10 @@
 use oxide_arb_macros::IntoActiveValue;
 use sea_orm::{DeriveActiveEnum, EnumIter};
 use serde::{Deserialize, Serialize};
+use std::{
+    fmt::{self, Display, Formatter},
+    str::FromStr,
+};
 
 /// Pipeline phase of an opportunity / trade lifecycle event.
 #[derive(
@@ -86,8 +90,8 @@ pub enum LifecycleRecorder {
     System,
 }
 
-impl std::fmt::Display for LifecycleRecorder {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Display for LifecycleRecorder {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Scanner => f.write_str("scanner"),
             Self::Execution => f.write_str("execution"),
@@ -100,7 +104,7 @@ impl std::fmt::Display for LifecycleRecorder {
     }
 }
 
-impl std::str::FromStr for LifecycleRecorder {
+impl FromStr for LifecycleRecorder {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -131,8 +135,8 @@ pub enum ShutdownStage {
     Stopped,
 }
 
-impl std::fmt::Display for ShutdownStage {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Display for ShutdownStage {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Draining => f.write_str("draining"),
             Self::AwaitingInflight => f.write_str("awaiting_inflight"),

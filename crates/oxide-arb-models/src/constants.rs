@@ -3,9 +3,8 @@
 //! Only chain-level facts belong here: contract addresses, chain IDs,
 //! token decimals. All tunable trading parameters live in the config system
 //! (`crate::config`) and are adjustable at runtime via TOML / env vars / API.
-
-// ── Polymarket Contract Addresses (Polygon) ─────────────────────────────
-
+//!
+//! ── Polymarket Contract Addresses (Polygon) ─────────────────────────────
 /// Polymarket CTF Exchange (standard binary markets).
 pub const CTF_EXCHANGE: &str = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E";
 

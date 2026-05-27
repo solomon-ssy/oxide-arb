@@ -1,6 +1,8 @@
 use oxide_arb_error::storage::StorageError;
-use oxide_arb_models::domain::{NewOutboxEventWithId, OutboxEventInfo, UpdateOutboxEvent};
-use oxide_arb_models::types::OutboxEventId;
+use oxide_arb_models::{
+    domain::{NewOutboxEventWithId, OutboxEventInfo, UpdateOutboxEvent},
+    types::OutboxEventId,
+};
 
 pub trait OutboxRepository: Send + Sync {
     async fn create(&self, event: NewOutboxEventWithId) -> Result<OutboxEventInfo, StorageError>;

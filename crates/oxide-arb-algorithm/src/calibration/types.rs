@@ -89,11 +89,12 @@ mod tests {
     use super::*;
     use oxide_arb_models::{
         domain::calibration::BucketKey,
-        enums::calibration::{DurationBucket, PriceZone},
-        enums::common::MarketCategory,
+        enums::{
+            calibration::{DurationBucket, PriceZone},
+            common::MarketCategory,
+        },
     };
     use rust_decimal_macros::dec;
-
     fn make_key() -> BucketKey {
         BucketKey {
             category: MarketCategory::Geopolitics,

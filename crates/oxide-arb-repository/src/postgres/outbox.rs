@@ -1,14 +1,16 @@
 use crate::traits::OutboxRepository;
 use num_traits::ToPrimitive;
 use oxide_arb_error::storage::StorageError;
-use oxide_arb_models::domain::{NewOutboxEventWithId, OutboxEventInfo, UpdateOutboxEvent};
-use oxide_arb_models::entities::outbox_event::{self, Column, Entity};
-use oxide_arb_models::types::OutboxEventId;
-use sea_orm::sea_query::{LockBehavior, LockType};
+use oxide_arb_models::{
+    domain::{NewOutboxEventWithId, OutboxEventInfo, UpdateOutboxEvent},
+    entities::outbox_event::{self, Column, Entity},
+    types::OutboxEventId,
+};
 use sea_orm::{
     ActiveModelTrait, ActiveValue, ColumnTrait, ConnectionTrait, DatabaseConnection,
     DatabaseTransaction, EntityTrait, IntoActiveModel, PaginatorTrait, QueryFilter, QueryOrder,
     QuerySelect,
+    sea_query::{LockBehavior, LockType},
 };
 
 pub struct PgOutboxRepository {

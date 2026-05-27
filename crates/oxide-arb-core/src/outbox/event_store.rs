@@ -1,12 +1,12 @@
-use std::sync::Arc;
-
 use chrono::Utc;
 use oxide_arb_error::OxideError;
-use oxide_arb_models::domain::outbox::{NewOutboxEventWithId, OutboxEventInfo, UpdateOutboxEvent};
-use oxide_arb_models::enums::outbox::{OutboxAggregateType, OutboxEventType};
-use oxide_arb_models::types::{AggregateId, OutboxEventId};
-use oxide_arb_repository::postgres::PgOutboxRepository;
-use oxide_arb_repository::traits::OutboxRepository;
+use oxide_arb_models::{
+    domain::outbox::{NewOutboxEventWithId, OutboxEventInfo, UpdateOutboxEvent},
+    enums::outbox::{OutboxAggregateType, OutboxEventType},
+    types::{AggregateId, OutboxEventId},
+};
+use oxide_arb_repository::{postgres::PgOutboxRepository, traits::OutboxRepository};
+use std::sync::Arc;
 
 #[async_trait::async_trait]
 pub trait EventStore: Send + Sync + 'static {

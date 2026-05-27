@@ -1,9 +1,13 @@
 use oxide_arb_error::storage::StorageError;
-use oxide_arb_models::domain::{
-    CalibrationBucketInfo, CalibrationOutcomeInfo, NewCalibrationOutcome, UpsertCalibration,
+use oxide_arb_models::{
+    domain::{
+        CalibrationBucketInfo, CalibrationOutcomeInfo, NewCalibrationOutcome, UpsertCalibration,
+    },
+    enums::{
+        calibration::{DurationBucket, PriceZone},
+        common::MarketCategory,
+    },
 };
-use oxide_arb_models::enums::calibration::{DurationBucket, PriceZone};
-use oxide_arb_models::enums::common::MarketCategory;
 
 pub trait CalibrationRepository: Send + Sync {
     async fn get_bucket(

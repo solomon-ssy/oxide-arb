@@ -1,15 +1,16 @@
 //! Maps raw Gamma API DTOs to domain types.
 
-use chrono::{DateTime, Utc};
-use oxide_arb_models::domain::market::{
-    EventRegistryInfo, MarketRegistryInfo, TokenInfo, UpsertEvent, UpsertMarket,
-};
-use oxide_arb_models::enums::common::{MarketCategory, TickSize};
-use oxide_arb_models::enums::market::{EventStatus, MarketStatus};
-use oxide_arb_models::types::{EventId, MarketId, TokenId, Usd};
-use rust_decimal::Decimal;
-
 use super::types::{RawGammaEvent, RawGammaMarket};
+use chrono::{DateTime, Utc};
+use oxide_arb_models::{
+    domain::market::{EventRegistryInfo, MarketRegistryInfo, TokenInfo, UpsertEvent, UpsertMarket},
+    enums::{
+        common::{MarketCategory, TickSize},
+        market::{EventStatus, MarketStatus},
+    },
+    types::{EventId, MarketId, TokenId, Usd},
+};
+use rust_decimal::Decimal;
 
 /// Complete output of a Gamma catalog sync — persistence DTOs and in-memory views.
 pub struct GammaCatalogBatch {

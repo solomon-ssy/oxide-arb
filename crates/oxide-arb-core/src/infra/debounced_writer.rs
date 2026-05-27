@@ -1,10 +1,6 @@
-use std::future::Future;
-use std::pin::Pin;
-use std::sync::Arc;
-use std::time::Duration;
-
 use oxide_arb_error::OxideError;
 use parking_lot::Mutex;
+use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
 
 pub struct DebouncedWriter<T: Clone + Send + 'static> {

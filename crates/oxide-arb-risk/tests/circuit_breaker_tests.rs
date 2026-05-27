@@ -5,14 +5,16 @@
 //! semantics, Halted manual-ack semantics, and fail-closed snapshot recovery.
 
 use chrono::{Duration, Utc};
-use oxide_arb_models::config::CircuitBreakerConfig;
-use oxide_arb_models::domain::risk::RiskEngineState;
-use oxide_arb_models::enums::risk::{BreakerStateName, CircuitBreakerLevel};
-use oxide_arb_models::types::Usd;
-use oxide_arb_risk::circuit_breaker::CircuitBreaker;
-use oxide_arb_risk::clock::utc_clock;
-use oxide_arb_risk::types::BreakerState;
+use oxide_arb_models::{
+    config::CircuitBreakerConfig,
+    domain::risk::RiskEngineState,
+    enums::risk::{BreakerStateName, CircuitBreakerLevel},
+    types::Usd,
+};
+use oxide_arb_risk::{circuit_breaker::CircuitBreaker, clock::utc_clock, types::BreakerState};
 use rust_decimal_macros::dec;
+use std::thread::sleep;
+use std::time::Duration as StdTimeDuration;
 
 const fn test_config() -> CircuitBreakerConfig {
     CircuitBreakerConfig {
@@ -91,7 +93,7 @@ fn tick_past_cooldown_transitions_open_to_half_open() {
     cb.trip(CircuitBreakerLevel::Trade, "test".into());
     assert!(!cb.allows_trading());
 
-    std::thread::sleep(std::time::Duration::from_millis(10));
+    sleep(StdTimeDuration::from_millis(10));
     let transitioned = cb.tick();
 
     assert!(transitioned);
@@ -111,7 +113,7 @@ fn successful_probes_transition_half_open_to_recovered() {
     };
     let mut cb = CircuitBreaker::new(config, utc_clock());
     cb.trip(CircuitBreakerLevel::Trade, "test".into());
-    std::thread::sleep(std::time::Duration::from_millis(10));
+    sleep(StdTimeDuration::from_millis(10));
     let _ = cb.tick();
     assert!(cb.is_probe_mode());
 
@@ -134,7 +136,7 @@ fn failed_probe_transitions_half_open_back_to_open() {
     };
     let mut cb = CircuitBreaker::new(config, utc_clock());
     cb.trip(CircuitBreakerLevel::Trade, "test".into());
-    std::thread::sleep(std::time::Duration::from_millis(10));
+    sleep(StdTimeDuration::from_millis(10));
     let _ = cb.tick();
     assert!(cb.is_probe_mode());
 
@@ -158,11 +160,11 @@ fn tick_past_observation_period_transitions_recovered_to_closed() {
     let mut cb = CircuitBreaker::new(config, utc_clock());
     cb.trip(CircuitBreakerLevel::Trade, "test".into());
 
-    std::thread::sleep(std::time::Duration::from_millis(10));
+    sleep(StdTimeDuration::from_millis(10));
     let _ = cb.tick(); // Open → HalfOpen
     cb.on_trade_result(true); // HalfOpen → Recovered
 
-    std::thread::sleep(std::time::Duration::from_millis(10));
+    sleep(StdTimeDuration::from_millis(10));
     let transitioned = cb.tick(); // Recovered → Closed
 
     assert!(transitioned);
@@ -394,7 +396,7 @@ fn fsm_halted_never_auto_transitions_on_tick() {
     let mut cb = CircuitBreaker::new(config, utc_clock());
     cb.halt(CircuitBreakerLevel::Daily, "daily loss cap".into());
 
-    std::thread::sleep(std::time::Duration::from_millis(10));
+    sleep(StdTimeDuration::from_millis(10));
     let transitioned = cb.tick();
 
     assert!(!transitioned, "Halted must never auto-transition via tick");
@@ -478,7 +480,7 @@ fn fsm_higher_session_trip_refreshes_cooldown() {
         panic!("expected Open");
     };
 
-    std::thread::sleep(std::time::Duration::from_millis(5));
+    sleep(StdTimeDuration::from_millis(5));
     cb.trip(CircuitBreakerLevel::Session, "session issue".into());
 
     if let BreakerState::Open {

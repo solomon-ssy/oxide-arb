@@ -1,13 +1,10 @@
-use std::sync::Arc;
-
-use oxide_arb_models::enums::common::MarketCategory;
-use oxide_arb_models::types::MarketId;
-use oxide_arb_repository::traits::PositionRepository;
-use oxide_arb_storage::cache::{CacheKey, TieredCache};
-
 use crate::service::{
     position_summary::PositionSummaryService, wallet_balance::WalletBalanceService,
 };
+use oxide_arb_models::{enums::common::MarketCategory, types::MarketId};
+use oxide_arb_repository::traits::PositionRepository;
+use oxide_arb_storage::cache::{CacheKey, TieredCache};
+use std::sync::Arc;
 
 /// Invalidate all caches derived from a Gamma catalog sync.
 pub async fn invalidate_post_gamma_sync(cache: &TieredCache) {

@@ -1,8 +1,5 @@
-use std::future::Future;
-use std::pin::Pin;
-use std::time::Duration;
-
 use oxide_arb_error::OxideError;
+use std::{future::Future, pin::Pin, time::Duration};
 use tokio_util::sync::CancellationToken;
 
 pub struct AsyncWriter<T: Send + 'static> {

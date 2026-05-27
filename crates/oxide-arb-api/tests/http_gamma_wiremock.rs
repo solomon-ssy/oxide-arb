@@ -2,9 +2,11 @@
 
 use chrono::{Duration, Utc};
 use oxide_arb_api::gamma::GammaClient;
-use oxide_arb_models::config::GammaConfig;
-use wiremock::matchers::{method, path, query_param};
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use oxide_arb_models::{config::GammaConfig, types::MarketId};
+use wiremock::{
+    Mock, MockServer, ResponseTemplate,
+    matchers::{method, path, query_param},
+};
 
 #[tokio::test]
 async fn gamma_get_market_deserializes_from_mock() {
@@ -32,7 +34,7 @@ async fn gamma_get_market_deserializes_from_mock() {
     });
 
     let market = client
-        .get_market(&oxide_arb_models::types::MarketId::new("0xabc"))
+        .get_market(&MarketId::new("0xabc"))
         .await
         .expect("get_market");
 
@@ -72,9 +74,7 @@ async fn gamma_retries_on_429() {
         ..GammaConfig::default()
     });
 
-    let result = client
-        .get_market(&oxide_arb_models::types::MarketId::new("0xabc"))
-        .await;
+    let result = client.get_market(&MarketId::new("0xabc")).await;
 
     assert!(result.is_ok(), "expected retry success: {result:?}");
 }

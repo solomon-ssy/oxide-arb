@@ -1,7 +1,6 @@
 //! Endgame opportunity enums.
 
-use crate::enums::common::Side;
-use crate::types::Usd;
+use crate::{enums::common::Side, types::Usd};
 use serde::{Deserialize, Serialize};
 
 /// Settlement payout model for endgame strategy.

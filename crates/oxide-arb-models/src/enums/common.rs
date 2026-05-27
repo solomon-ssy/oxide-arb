@@ -9,7 +9,10 @@ use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use sea_orm::{DeriveActiveEnum, EnumIter};
 use serde::{Deserialize, Serialize};
-use std::str::FromStr;
+use std::{
+    fmt::{self, Display, Formatter},
+    str::FromStr,
+};
 use thiserror::Error;
 
 /// Trade direction.
@@ -46,8 +49,8 @@ impl Side {
     }
 }
 
-impl std::fmt::Display for Side {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Display for Side {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Buy => write!(f, "BUY"),
             Self::Sell => write!(f, "SELL"),
@@ -94,8 +97,8 @@ pub enum ExecutionMode {
     Live,
 }
 
-impl std::fmt::Display for ExecutionMode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Display for ExecutionMode {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::DryRun => write!(f, "dry_run"),
             Self::Paper => write!(f, "paper"),
@@ -159,8 +162,8 @@ impl StalenessLevel {
     }
 }
 
-impl std::fmt::Display for StalenessLevel {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Display for StalenessLevel {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
     }
 }
@@ -264,8 +267,8 @@ pub enum MarketCategory {
     Other,
 }
 
-impl std::fmt::Display for MarketCategory {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Display for MarketCategory {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
     }
 }
@@ -338,7 +341,7 @@ impl From<Option<&str>> for MarketCategory {
 #[error("unknown market category: {0}")]
 pub struct MarketCategoryParseError(pub String);
 
-impl std::str::FromStr for MarketCategory {
+impl FromStr for MarketCategory {
     type Err = MarketCategoryParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -403,7 +406,7 @@ impl TickSize {
     }
 }
 
-impl std::str::FromStr for TickSize {
+impl FromStr for TickSize {
     type Err = TickSizeParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -450,8 +453,8 @@ pub enum PositionStatus {
     Settled,
 }
 
-impl std::fmt::Display for PositionStatus {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Display for PositionStatus {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Open => write!(f, "open"),
             Self::Closed => write!(f, "closed"),
@@ -485,8 +488,8 @@ pub enum LedgerStatus {
     Expired,
 }
 
-impl std::fmt::Display for LedgerStatus {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Display for LedgerStatus {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Active => write!(f, "active"),
             Self::Resolved => write!(f, "resolved"),
@@ -518,8 +521,8 @@ pub enum ReportType {
     Weekly,
 }
 
-impl std::fmt::Display for ReportType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Display for ReportType {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Daily => write!(f, "daily"),
             Self::Weekly => write!(f, "weekly"),

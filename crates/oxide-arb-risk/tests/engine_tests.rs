@@ -3,29 +3,35 @@
 //! Uses a `MockMetrics` implementation to exercise the engine's pre-trade,
 //! post-trade, tick, halt/resume lifecycle.
 
+mod support;
+
 use chrono::Utc;
-use oxide_arb_models::config::RiskConfig;
-use oxide_arb_models::domain::calibration::{BucketKey, CalibrationSnapshot};
-use oxide_arb_models::domain::opportunity::{EndgameMeta, Opportunity};
-use oxide_arb_models::domain::risk::ProbabilityInput;
-use oxide_arb_models::domain::trade::PostTradeInput;
-use oxide_arb_models::enums::calibration::{DurationBucket, PriceZone};
-use oxide_arb_models::enums::common::{MarketCategory, Side, StalenessLevel, TradeOutcome};
-use oxide_arb_models::enums::opportunity::PayoutModel;
-use oxide_arb_models::enums::risk::TradeAccountingPhase;
-use oxide_arb_models::types::{
-    Bps, EventId, MarketId, OpportunityId, Price, Shares, TokenId, TradeId, Usd,
+use oxide_arb_models::{
+    config::{CircuitBreakerConfig, RiskConfig},
+    domain::{
+        calibration::{BucketKey, CalibrationSnapshot},
+        opportunity::{EndgameMeta, Opportunity},
+        risk::ProbabilityInput,
+        trade::PostTradeInput,
+    },
+    enums::{
+        calibration::{DurationBucket, PriceZone},
+        common::{MarketCategory, Side, StalenessLevel, TradeOutcome},
+        opportunity::PayoutModel,
+        risk::TradeAccountingPhase,
+    },
+    types::{Bps, EventId, MarketId, OpportunityId, Price, Shares, TokenId, TradeId, Usd},
 };
-use oxide_arb_risk::builder::RiskEngineBuilder;
-use oxide_arb_risk::clock::utc_clock;
-use oxide_arb_risk::engine::RiskEngine;
-use oxide_arb_risk::traits::RiskMetrics;
-use oxide_arb_risk::types::{ExecutionRiskEvent, ReportMode};
+use oxide_arb_risk::{
+    builder::RiskEngineBuilder,
+    clock::utc_clock,
+    engine::RiskEngine,
+    traits::RiskMetrics,
+    types::{ExecutionRiskEvent, ReportMode},
+};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
-use std::sync::Arc;
-
-mod support;
+use std::{sync::Arc, thread::sleep, time::Duration};
 use support::MockMetrics;
 
 // ── Test Helpers ───────────────────────────────────────────────────────────
@@ -276,7 +282,7 @@ async fn tick_drives_breaker_transitions() {
         min_balance_usd: dec!(50),
         reserve_balance_usd: dec!(100),
         min_trade_usd: dec!(1),
-        circuit_breaker: oxide_arb_models::config::CircuitBreakerConfig {
+        circuit_breaker: CircuitBreakerConfig {
             l2_cooldown_secs: 0, // immediate for test
             ..Default::default()
         },
@@ -307,7 +313,7 @@ async fn tick_drives_breaker_transitions() {
         engine.pre_trade_check_core(opp.as_ref(), &prob, &metrics, ReportMode::ShortCircuit);
     assert!(!decision.allowed, "should deny while breaker is open");
 
-    std::thread::sleep(std::time::Duration::from_millis(10));
+    sleep(Duration::from_millis(10));
     let transitioned = engine.tick(&metrics).await.unwrap();
 
     assert!(transitioned, "tick should drive Open → HalfOpen transition");

@@ -1,10 +1,8 @@
 //! Daily accounting with automatic period rollover.
 
-use crate::clock::Clock;
-use crate::types::PeriodStats;
+use crate::{clock::Clock, types::PeriodStats};
 use chrono::NaiveDate;
-use oxide_arb_models::enums::common::TradeOutcome;
-use oxide_arb_models::types::Usd;
+use oxide_arb_models::{enums::common::TradeOutcome, types::Usd};
 use std::sync::Arc;
 
 pub struct DailyAccounting {

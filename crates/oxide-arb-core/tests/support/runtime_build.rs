@@ -1,63 +1,65 @@
 //! Test-only runtime wiring — no Postgres/ClickHouse/Redis required.
 
-use std::sync::Arc;
-use std::sync::atomic::AtomicU32;
-use std::time::Duration;
-
-use oxide_arb_algorithm::calibration::ResolutionCalibrator;
-use oxide_arb_algorithm::cooldown::InMemoryEmissionCooldown;
-use oxide_arb_algorithm::endgame::EndgameDetector;
-use oxide_arb_algorithm::pipeline::OpportunityPipeline;
-use oxide_arb_algorithm::scorer::EndgameScorer;
-use oxide_arb_api::clob::ClobClient;
-use oxide_arb_api::fees::FeeCalculator;
-use oxide_arb_api::ws::ClobWsManager;
-use oxide_arb_error::OxideResult;
-use oxide_arb_models::config::{ExposureReservationConfig, Settings};
-use oxide_arb_models::enums::common::ExecutionMode;
-use oxide_arb_models::types::{MarketId, MicroScore, MicroUsd, TokenId, Usd};
-use oxide_arb_risk::audit_sink::AuditSink;
-use oxide_arb_risk::builder::RiskEngineBuilder;
-use oxide_arb_risk::clock::utc_clock;
-use oxide_arb_risk::engine::RiskEngine;
-use oxide_arb_risk::traits::RiskPersistence;
-use tokio_util::sync::CancellationToken;
-
-use oxide_arb_core::bridge::CoreOpportunityPipeline;
-use oxide_arb_core::bridge::fee_estimator::CoreFeeEstimator;
-use oxide_arb_core::bridge::risk_audit_sink::new_audit_sink;
-use oxide_arb_core::bridge::risk_metrics::CoreRiskMetrics;
-use oxide_arb_core::detection::coalescer::Coalescer;
-use oxide_arb_core::detection::funnel::Funnel;
-use oxide_arb_core::detection::scanner::Scanner;
-use oxide_arb_core::detection::scanner_task::{ScannerTask, ScannerTaskDeps};
-use oxide_arb_core::execution::capital_manager::CapitalManager;
-use oxide_arb_core::execution::dispatcher::Dispatcher;
-use oxide_arb_core::execution::execution_pipeline::{
-    ExecutionPipeline, ExecutionPipelineDeps, PostTradeJob,
+use super::{risk_config::test_risk_config, risk_metrics::TestRiskMetrics};
+use oxide_arb_algorithm::{
+    calibration::ResolutionCalibrator, cooldown::InMemoryEmissionCooldown,
+    endgame::EndgameDetector, pipeline::OpportunityPipeline, scorer::EndgameScorer,
 };
-use oxide_arb_core::execution::fsm::ExecutionFSM;
-use oxide_arb_core::execution::market_inflight::MarketInFlightRegistry;
-use oxide_arb_core::execution::plan_builder::PlanBuilder;
-use oxide_arb_core::execution::port::ExecutionPort;
-use oxide_arb_core::execution::runner::{ExecutionRunner, ExecutionRunnerPool};
-use oxide_arb_core::execution::tiered_strategy::OrderStrategy;
-use oxide_arb_core::execution::validator::Validator;
-use oxide_arb_core::exposure::in_memory::InMemoryExposureReservation;
-use oxide_arb_core::observability::alert_dispatcher::AlertDispatcher;
-use oxide_arb_core::observability::backpressure::BackpressurePolicy;
-use oxide_arb_core::observability::metrics_hub::MetricsHub;
-use oxide_arb_core::outbox::in_memory::InMemoryEventStore;
-use oxide_arb_core::pipeline::book_store::BookStore;
-use oxide_arb_core::pipeline::data_pipeline::{DataPipeline, DataPipelineDeps};
-use oxide_arb_core::pipeline::event_source::PipelineEventSource;
-use oxide_arb_core::pipeline::market_cache::MarketCache;
-use oxide_arb_core::pipeline::market_registry::MarketRegistry;
-use oxide_arb_core::pipeline::staleness_classifier::StalenessClassifier;
-use oxide_arb_core::service::risk_metrics::{ApiHealthTracker, RiskMetricsState};
-
-use super::risk_config::test_risk_config;
-use super::risk_metrics::TestRiskMetrics;
+use oxide_arb_api::{clob::ClobClient, fees::FeeCalculator, ws::ClobWsManager};
+use oxide_arb_core::{
+    bridge::{
+        CoreOpportunityPipeline, fee_estimator::CoreFeeEstimator, risk_audit_sink::new_audit_sink,
+        risk_metrics::CoreRiskMetrics,
+    },
+    detection::{
+        coalescer::Coalescer,
+        funnel::Funnel,
+        scanner::Scanner,
+        scanner_task::{ScannerTask, ScannerTaskDeps},
+    },
+    execution::{
+        capital_manager::CapitalManager,
+        dispatcher::Dispatcher,
+        execution_pipeline::{ExecutionPipeline, ExecutionPipelineDeps, PostTradeJob},
+        fsm::ExecutionFSM,
+        market_inflight::MarketInFlightRegistry,
+        plan_builder::PlanBuilder,
+        port::ExecutionPort,
+        runner::{ExecutionRunner, ExecutionRunnerPool},
+        tiered_strategy::OrderStrategy,
+        validator::Validator,
+    },
+    exposure::in_memory::InMemoryExposureReservation,
+    observability::{
+        alert_dispatcher::AlertDispatcher, backpressure::BackpressurePolicy,
+        metrics_hub::MetricsHub,
+    },
+    outbox::in_memory::InMemoryEventStore,
+    pipeline::{
+        book_store::BookStore,
+        data_pipeline::{DataPipeline, DataPipelineDeps},
+        event_source::PipelineEventSource,
+        market_cache::MarketCache,
+        market_registry::MarketRegistry,
+        staleness_classifier::StalenessClassifier,
+    },
+    service::risk_metrics::{ApiHealthTracker, RiskMetricsState},
+};
+use oxide_arb_error::OxideResult;
+use oxide_arb_models::{
+    config::{ExposureReservationConfig, Settings},
+    enums::common::ExecutionMode,
+    types::{MarketId, MicroScore, MicroUsd, TokenId, Usd},
+};
+use oxide_arb_risk::{
+    audit_sink::AuditSink, builder::RiskEngineBuilder, clock::utc_clock, engine::RiskEngine,
+    traits::RiskPersistence,
+};
+use std::{
+    sync::{Arc, atomic::AtomicU32},
+    time::Duration,
+};
+use tokio_util::sync::CancellationToken;
 
 /// Injectable dependencies for [`assemble_test_runtime`].
 pub struct TestBuildDeps {

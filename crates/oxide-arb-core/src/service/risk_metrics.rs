@@ -1,20 +1,24 @@
 //! Periodic refresh of risk metrics snapshot from CLOB balance and open positions.
 
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::time::{Duration, Instant};
-
 use crate::observability::metrics_hub::MetricsHub;
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use num_traits::ToPrimitive;
 use oxide_arb_api::clob::ClobClient;
-use oxide_arb_models::domain::position::PositionInfo;
-use oxide_arb_models::enums::common::Side;
-use oxide_arb_models::types::{MarketId, Usd};
-use oxide_arb_repository::postgres::PgPositionRepository;
-use oxide_arb_repository::traits::PositionRepository;
+use oxide_arb_models::{
+    domain::position::PositionInfo,
+    enums::common::Side,
+    types::{MarketId, Usd},
+};
+use oxide_arb_repository::{postgres::PgPositionRepository, traits::PositionRepository};
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc, atomic,
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
+    },
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
 
 struct MetricsSnapshot {
     cached_balance: Usd,
@@ -112,8 +116,8 @@ impl ApiHealthTracker {
 }
 
 fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
         .ok()
         .and_then(|d| ToPrimitive::to_u64(&d.as_millis()))
         .unwrap_or(0)
@@ -127,7 +131,7 @@ pub struct RiskMetricsState {
     daily_buy_trades: AtomicU32,
     daily_sell_trades: AtomicU32,
     daily_rollover_date: parking_lot::Mutex<chrono::NaiveDate>,
-    stale: std::sync::atomic::AtomicBool,
+    stale: atomic::AtomicBool,
     last_successful_refresh: AtomicU64,
 }
 
@@ -141,7 +145,7 @@ impl RiskMetricsState {
             daily_buy_trades: AtomicU32::new(0),
             daily_sell_trades: AtomicU32::new(0),
             daily_rollover_date: parking_lot::Mutex::new(chrono::Utc::now().date_naive()),
-            stale: std::sync::atomic::AtomicBool::new(true),
+            stale: AtomicBool::new(true),
             last_successful_refresh: AtomicU64::new(now_ms),
         }
     }

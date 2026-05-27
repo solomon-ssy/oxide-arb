@@ -1,17 +1,30 @@
 //! Endgame-specific risk check tests.
 
 use chrono::Utc;
-use oxide_arb_models::config::RiskConfig;
-use oxide_arb_models::domain::risk::ProbabilityInput;
-use oxide_arb_models::types::Usd;
-use oxide_arb_risk::context::PreTradeContext;
-use oxide_arb_risk::pipeline::RiskCheck;
-use oxide_arb_risk::pipeline::checks::{
-    DailyDirectionalBudgetCheck, DirectionalConcentrationCheck,
+use oxide_arb_models::{
+    config::RiskConfig,
+    domain::{
+        calibration::{BucketKey, CalibrationSnapshot},
+        opportunity::{EndgameMeta, Opportunity},
+        risk::ProbabilityInput,
+    },
+    enums::{
+        calibration::{DurationBucket, PriceZone},
+        common::{MarketCategory, Side, StalenessLevel},
+        opportunity::PayoutModel,
+    },
+    types::{Bps, EventId, MarketId, OpportunityId, Price, Shares, TokenId, Usd},
 };
-use oxide_arb_risk::snapshot::{DailyAccountingSnapshot, RiskSnapshot};
-use oxide_arb_risk::traits::RiskMetricsSnapshot;
-use oxide_arb_risk::types::RiskCheckId;
+use oxide_arb_risk::{
+    context::PreTradeContext,
+    pipeline::{
+        RiskCheck,
+        checks::{DailyDirectionalBudgetCheck, DirectionalConcentrationCheck},
+    },
+    snapshot::{DailyAccountingSnapshot, RiskSnapshot},
+    traits::RiskMetricsSnapshot,
+    types::RiskCheckId,
+};
 use rust_decimal_macros::dec;
 
 fn with_context(
@@ -19,13 +32,6 @@ fn with_context(
     daily_directional_trades_same_side: u32,
     f: impl FnOnce(&PreTradeContext<'_>),
 ) {
-    use oxide_arb_models::domain::calibration::{BucketKey, CalibrationSnapshot};
-    use oxide_arb_models::domain::opportunity::{EndgameMeta, Opportunity};
-    use oxide_arb_models::enums::calibration::{DurationBucket, PriceZone};
-    use oxide_arb_models::enums::common::{MarketCategory, Side, StalenessLevel};
-    use oxide_arb_models::enums::opportunity::PayoutModel;
-    use oxide_arb_models::types::{Bps, EventId, MarketId, OpportunityId, Price, Shares, TokenId};
-
     let opp = Opportunity {
         opportunity_id: OpportunityId::new_v7(),
         market_id: MarketId::new("0xtest"),

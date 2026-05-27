@@ -3,10 +3,11 @@
 use crate::clickhouse::ChWriteMetrics;
 use num_traits::ToPrimitive;
 use oxide_arb_error::storage::StorageError;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
+use tokio::{sync::mpsc, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 

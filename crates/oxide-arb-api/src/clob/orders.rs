@@ -1,7 +1,9 @@
 //! Order submission, cancellation, and query types.
 
-use oxide_arb_models::enums::common::Side;
-use oxide_arb_models::types::{OrderId, Price, Shares, TokenId};
+use oxide_arb_models::{
+    enums::common::Side,
+    types::{OrderId, Price, Shares, TokenId},
+};
 use serde::{Deserialize, Serialize};
 
 /// Result of cancelling a single order.

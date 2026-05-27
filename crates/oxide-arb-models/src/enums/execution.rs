@@ -1,7 +1,9 @@
 //! Execution pipeline enums.
 
-use crate::enums::common::ExecutionMode;
-use crate::types::{OrderId, Price, Shares, Usd};
+use crate::{
+    enums::common::ExecutionMode,
+    types::{OrderId, Price, Shares, Usd},
+};
 use serde::Serialize;
 
 /// Outcome of a single execution attempt.

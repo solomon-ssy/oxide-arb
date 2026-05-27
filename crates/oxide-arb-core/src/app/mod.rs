@@ -10,49 +10,51 @@ pub mod lifecycle;
 pub mod task_id;
 pub mod task_registry;
 
-use std::sync::Arc;
-
+use crate::{
+    app::{task_id::TaskId, task_registry::PendingTaskQueue},
+    bridge::{
+        CoreOpportunityPipeline, potential_loss_store::CorePotentialLossStore,
+        risk_metrics::CoreRiskMetrics, trading_gate::TradingGate,
+    },
+    detection::{
+        coalescer::Coalescer,
+        funnel::Funnel,
+        scanner::Scanner,
+        scanner_task::{ScannerTask, ScannerTaskDeps},
+    },
+    execution::{
+        execution_pipeline::{ExecutionPipeline, PostTradeJob},
+        fsm::ExecutionFSM,
+        heartbeat::HeartbeatTask,
+        market_inflight::MarketInFlightRegistry,
+        runner::ExecutionRunner,
+    },
+    exposure::in_memory::InMemoryExposureReservation,
+    infra::{
+        risk_decision_audit_buffer::RiskDecisionAuditBuffer,
+        risk_decision_audit_drain::spawn_risk_decision_audit_drain,
+    },
+    observability::{alert_dispatcher::AlertDispatcher, metrics_hub::MetricsHub},
+    pipeline::{
+        book_store::BookStore, data_pipeline::DataPipeline, market_cache::MarketCache,
+        market_registry::MarketRegistry,
+    },
+    service::risk_metrics::RiskMetricsState,
+};
 use flume::Receiver;
 use oxide_arb_algorithm::calibration::{CalibrationUpdater, ResolutionCalibrator};
-use oxide_arb_api::clob::ClobClient;
-use oxide_arb_api::ws::ClobWsManager;
-use oxide_arb_models::config::Settings;
-use oxide_arb_models::enums::common::ExecutionMode;
-use oxide_arb_models::types::{MarketId, MicroScore, TokenId};
+use oxide_arb_api::{clob::ClobClient, ws::ClobWsManager};
+use oxide_arb_models::{
+    config::Settings,
+    enums::common::ExecutionMode,
+    types::{MarketId, MicroScore, TokenId},
+};
 use oxide_arb_repository::postgres::PgRiskAuditRepository;
-use oxide_arb_risk::audit::RiskAuditEvent;
-use oxide_arb_risk::engine::RiskEngine;
-use oxide_arb_storage::cache::TieredCache;
-use oxide_arb_storage::clickhouse::ClickHousePool;
-use oxide_arb_storage::postgres::PostgresPool;
+use oxide_arb_risk::{audit::RiskAuditEvent, engine::RiskEngine};
+use oxide_arb_storage::{cache::TieredCache, clickhouse::ClickHousePool, postgres::PostgresPool};
 use parking_lot::Mutex;
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
-
-use crate::app::task_id::TaskId;
-use crate::app::task_registry::PendingTaskQueue;
-use crate::bridge::CoreOpportunityPipeline;
-use crate::bridge::potential_loss_store::CorePotentialLossStore;
-use crate::bridge::risk_metrics::CoreRiskMetrics;
-use crate::bridge::trading_gate::TradingGate;
-use crate::detection::coalescer::Coalescer;
-use crate::detection::funnel::Funnel;
-use crate::detection::scanner::Scanner;
-use crate::detection::scanner_task::{ScannerTask, ScannerTaskDeps};
-use crate::execution::execution_pipeline::{ExecutionPipeline, PostTradeJob};
-use crate::execution::fsm::ExecutionFSM;
-use crate::execution::heartbeat::HeartbeatTask;
-use crate::execution::market_inflight::MarketInFlightRegistry;
-use crate::execution::runner::ExecutionRunner;
-use crate::exposure::in_memory::InMemoryExposureReservation;
-use crate::infra::risk_decision_audit_buffer::RiskDecisionAuditBuffer;
-use crate::infra::risk_decision_audit_drain::spawn_risk_decision_audit_drain;
-use crate::observability::alert_dispatcher::AlertDispatcher;
-use crate::observability::metrics_hub::MetricsHub;
-use crate::pipeline::book_store::BookStore;
-use crate::pipeline::data_pipeline::DataPipeline;
-use crate::pipeline::market_cache::MarketCache;
-use crate::pipeline::market_registry::MarketRegistry;
-use crate::service::risk_metrics::RiskMetricsState;
 
 /// Infrastructure subsystem: storage, metrics, alerts.
 pub struct InfraBundle {

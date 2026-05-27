@@ -1,8 +1,5 @@
 //! End-to-end latency benchmarks: normalize → book → coalescer → scanner.
 
-use std::sync::Arc;
-use std::time::Instant;
-
 use chrono::{Duration, Utc};
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use num_traits::ToPrimitive;
@@ -10,27 +7,35 @@ use oxide_arb_algorithm::{
     calibration::ResolutionCalibrator, cooldown::InMemoryEmissionCooldown,
     endgame::EndgameDetector, pipeline::OpportunityPipeline, scorer::EndgameScorer,
 };
-use oxide_arb_api::ws::normalize::normalize_ws_message;
-use oxide_arb_core::bridge::{CoreFeeEstimator, CoreOpportunityPipeline};
-use oxide_arb_core::detection::coalescer::Coalescer;
-use oxide_arb_core::detection::scanner::Scanner;
-use oxide_arb_core::observability::metrics_hub::MetricsHub;
-use oxide_arb_core::pipeline::book_store::BookStore;
-use oxide_arb_core::pipeline::market_cache::{CachedMarketScanEntry, MarketCache};
-use oxide_arb_core::pipeline::market_registry::MarketRegistry;
-use oxide_arb_core::pipeline::staleness_classifier::StalenessClassifier;
-use oxide_arb_models::config::{
-    CalibrationConfig, EmissionCooldownConfig, EndgameDetectionConfig, FillProbabilityConfig,
-    MarketDataConfig, ScorerConfig,
+use oxide_arb_api::{fees::FeeCalculator, ws::normalize::normalize_ws_message};
+use oxide_arb_core::{
+    bridge::{CoreFeeEstimator, CoreOpportunityPipeline},
+    detection::{coalescer::Coalescer, scanner::Scanner},
+    observability::metrics_hub::MetricsHub,
+    pipeline::{
+        book_store::BookStore,
+        market_cache::{CachedMarketScanEntry, MarketCache},
+        market_registry::MarketRegistry,
+        staleness_classifier::StalenessClassifier,
+    },
 };
-use oxide_arb_models::domain::book::BookLevel;
-use oxide_arb_models::domain::market::MarketRegistryInfo;
-use oxide_arb_models::enums::common::{MarketCategory, TickSize};
-use oxide_arb_models::enums::market::MarketStatus;
-use oxide_arb_models::types::{EventId, MarketId, MicroUsd, Price, Shares, TokenId, Usd};
+use oxide_arb_models::{
+    config::{
+        CalibrationConfig, EmissionCooldownConfig, EndgameDetectionConfig, FillProbabilityConfig,
+        MarketDataConfig, ScorerConfig,
+    },
+    domain::{book::BookLevel, market::MarketRegistryInfo, pipeline::PipelineEvent},
+    enums::{
+        common::{MarketCategory, TickSize},
+        market::MarketStatus,
+    },
+    types::{EventId, MarketId, MicroUsd, Price, Shares, TokenId, Usd},
+};
 use polymarket_client_sdk_v2::clob::ws::types::response::{BookUpdate, OrderBookLevel, WsMessage};
 use polymarket_client_sdk_v2::types::{B256, U256};
 use rust_decimal_macros::dec;
+use std::time::Duration as StdTimeDuration;
+use std::{sync::Arc, time::Instant};
 use tokio_util::sync::CancellationToken;
 
 fn make_core_pipeline() -> CoreOpportunityPipeline {
@@ -39,7 +44,7 @@ fn make_core_pipeline() -> CoreOpportunityPipeline {
         &EndgameDetectionConfig::default(),
         &CalibrationConfig::default(),
         calibrator,
-        CoreFeeEstimator(Arc::new(oxide_arb_api::fees::FeeCalculator::default())),
+        CoreFeeEstimator(Arc::new(FeeCalculator::default())),
     );
     let scorer_config = ScorerConfig::default();
     let scorer = EndgameScorer::new(scorer_config.clone(), &FillProbabilityConfig::default(), 24);
@@ -156,7 +161,7 @@ fn bench_e2e_ws_normalize_to_coalescer(c: &mut Criterion) {
     let (market_tx, _market_rx) = flume::bounded(8);
     let coalescer = Coalescer::new(
         registry,
-        std::time::Duration::from_millis(500),
+        StdTimeDuration::from_millis(500),
         market_tx,
         Arc::clone(&metrics),
         CancellationToken::new(),
@@ -185,8 +190,7 @@ fn bench_e2e_ws_normalize_to_coalescer(c: &mut Criterion) {
             let ws_ingress = Instant::now();
             let events = normalize_ws_message(WsMessage::Book(book.clone()), ws_ingress, None);
             for event in events {
-                if let oxide_arb_models::domain::pipeline::PipelineEvent::BookSnapshot(cmd) = event
-                {
+                if let PipelineEvent::BookSnapshot(cmd) = event {
                     book_store.apply_snapshot(
                         &cmd.asset_id,
                         Arc::clone(&cmd.bids.levels),

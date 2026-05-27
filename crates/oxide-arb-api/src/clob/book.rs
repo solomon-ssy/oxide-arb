@@ -5,8 +5,7 @@
 //! [`BookLevel`](oxide_arb_models::domain::BookLevel) type, import directly
 //! from `oxide_arb_models::domain`.
 
-use oxide_arb_models::domain::BookLevel;
-use oxide_arb_models::types::TokenId;
+use oxide_arb_models::{domain::BookLevel, types::TokenId};
 use serde::{Deserialize, Serialize};
 
 /// A full orderbook snapshot from the REST API.

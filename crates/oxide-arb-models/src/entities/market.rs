@@ -1,8 +1,12 @@
 //! `markets` table entity.
 
-use crate::enums::common::{MarketCategory, TickSize};
-use crate::enums::market::MarketStatus;
-use crate::types::{EventId, MarketId, TokenId};
+use crate::{
+    enums::{
+        common::{MarketCategory, TickSize},
+        market::MarketStatus,
+    },
+    types::{EventId, MarketId, TokenId},
+};
 use chrono::{DateTime, Utc};
 use oxide_arb_macros::ActiveModelDefaults;
 use sea_orm::entity::prelude::*;

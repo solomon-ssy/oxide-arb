@@ -1,7 +1,9 @@
 use chrono::{DateTime, Utc};
 use oxide_arb_error::storage::StorageError;
-use oxide_arb_models::domain::{NewTrade, TradeInfo, UpdateTradeOutcome};
-use oxide_arb_models::types::{MarketId, TradeId};
+use oxide_arb_models::{
+    domain::{NewTrade, TradeInfo, UpdateTradeOutcome},
+    types::{MarketId, TradeId},
+};
 use std::collections::HashMap;
 
 pub trait TradeRepository: Send + Sync {

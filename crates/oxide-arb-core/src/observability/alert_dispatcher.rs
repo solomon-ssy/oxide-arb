@@ -1,8 +1,10 @@
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
-use std::time::{Duration, Instant};
-use teloxide::prelude::*;
-use teloxide::types::ChatId;
+use std::{
+    fmt::{self, Display, Formatter},
+    time::{Duration, Instant},
+};
+use teloxide::{prelude::*, types::ChatId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum AlertSeverity {
@@ -12,8 +14,8 @@ pub enum AlertSeverity {
     Emergency,
 }
 
-impl std::fmt::Display for AlertSeverity {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Display for AlertSeverity {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Info => write!(f, "INFO"),
             Self::Warning => write!(f, "WARNING"),

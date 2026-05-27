@@ -1,5 +1,7 @@
-use oxide_arb_models::domain::book::{BookGateError, EndgameBookPair, EndgameBookView};
-use oxide_arb_models::types::TokenId;
+use oxide_arb_models::{
+    domain::book::{BookGateError, EndgameBookPair, EndgameBookView},
+    types::TokenId,
+};
 
 /// Quality gate for orderbooks before entering the detection pipeline.
 pub struct BookGate;
@@ -108,13 +110,12 @@ impl BookGate {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use oxide_arb_models::domain::book::{
-        BookGateError, BookGateLeg, BookLevel, BookSnapshot, EndgameBookPair,
+    use oxide_arb_models::{
+        domain::book::{BookGateError, BookGateLeg, BookLevel, BookSnapshot, EndgameBookPair},
+        types::{Price, Shares},
     };
-    use oxide_arb_models::types::{Price, Shares};
     use rust_decimal_macros::dec;
     use std::sync::Arc;
-
     fn snap(price: rust_decimal::Decimal, ts: u64) -> Arc<BookSnapshot> {
         let bids = Arc::from([BookLevel::from_decimal_unchecked(
             Price::new(price),

@@ -1,6 +1,7 @@
 //! Order enums for Polymarket CLOB interaction.
 
 use serde::{Deserialize, Serialize};
+use std::fmt::{self, Display, Formatter};
 
 /// Status of an order on the CLOB.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -20,8 +21,8 @@ pub enum OrderStatus {
     Expired,
 }
 
-impl std::fmt::Display for OrderStatus {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Display for OrderStatus {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Filled => write!(f, "filled"),
             Self::PartiallyFilled => write!(f, "partially_filled"),

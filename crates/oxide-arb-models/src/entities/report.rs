@@ -4,8 +4,7 @@
 //! dates and carry the full JSONB payload. The primary key `id`
 //! is an application-generated string (e.g. `"daily_2025-06-01"`).
 
-use crate::enums::common::ReportType;
-use crate::types::ReportId;
+use crate::{enums::common::ReportType, types::ReportId};
 use chrono::{DateTime, NaiveDate, Utc};
 use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};

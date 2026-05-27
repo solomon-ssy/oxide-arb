@@ -1,14 +1,12 @@
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-
+use crate::{observability::metrics_hub::MetricsHub, pipeline::market_registry::MarketRegistry};
 use dashmap::DashMap;
-use tokio_util::sync::CancellationToken;
-
 use oxide_arb_error::OxideError;
 use oxide_arb_models::types::{MarketId, TokenId};
-
-use crate::observability::metrics_hub::MetricsHub;
-use crate::pipeline::market_registry::MarketRegistry;
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
+use tokio_util::sync::CancellationToken;
 
 const COALESCE_TICK_MS: u64 = 10;
 

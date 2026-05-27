@@ -1,5 +1,6 @@
 //! Graceful shutdown signal handling.
 
+use std::process::exit;
 use tokio::signal::unix;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
@@ -55,5 +56,5 @@ pub async fn force_exit_on_second_signal() {
         }
     }
 
-    std::process::exit(1);
+    exit(1);
 }

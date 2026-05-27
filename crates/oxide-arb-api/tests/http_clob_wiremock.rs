@@ -4,10 +4,14 @@ use oxide_arb_api::infra::retry::{RetryPolicy, retry_with_policy};
 use oxide_arb_error::api::ApiError;
 use oxide_arb_models::enums::common::OrderType;
 use reqwest::StatusCode;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
-use wiremock::matchers::{method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use std::sync::{
+    Arc,
+    atomic::{AtomicU32, Ordering},
+};
+use wiremock::{
+    Mock, MockServer, ResponseTemplate,
+    matchers::{method, path},
+};
 
 #[tokio::test]
 async fn clob_post_order_429_retries_over_http() {

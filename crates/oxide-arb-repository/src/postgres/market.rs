@@ -6,12 +6,13 @@ use crate::traits::MarketRepository;
 use chrono::{DateTime, Utc};
 use num_traits::ToPrimitive;
 use oxide_arb_error::storage::StorageError;
-use oxide_arb_models::domain::{MarketInfo, UpsertMarket};
-use oxide_arb_models::entities::market::{ActiveModel, Column, Entity};
-use oxide_arb_models::enums::market::MarketStatus;
-use oxide_arb_models::types::MarketId;
-use sea_orm::sea_query::Expr;
-use sea_orm::sea_query::OnConflict;
+use oxide_arb_models::{
+    domain::{MarketInfo, UpsertMarket},
+    entities::market::{ActiveModel, Column, Entity},
+    enums::market::MarketStatus,
+    types::MarketId,
+};
+use sea_orm::sea_query::{Expr, OnConflict};
 use std::collections::HashSet;
 
 pub struct PgMarketRepository {

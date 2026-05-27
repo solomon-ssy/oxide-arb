@@ -1,8 +1,10 @@
 //! Configurable mock metrics for risk engine integration tests.
 
-use oxide_arb_models::domain::position::PositionInfo;
-use oxide_arb_models::enums::common::Side;
-use oxide_arb_models::types::{MarketId, Usd};
+use oxide_arb_models::{
+    domain::position::PositionInfo,
+    enums::common::Side,
+    types::{MarketId, Usd},
+};
 use oxide_arb_risk::traits::RiskMetrics;
 use rust_decimal_macros::dec;
 

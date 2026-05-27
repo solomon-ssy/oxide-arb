@@ -1,16 +1,12 @@
 //! Full and incremental sync orchestration with retry.
 
+use super::{mapper, types::RawGammaEvent};
 use crate::infra::retry::{self, RetryPolicy};
 use chrono::{DateTime, Utc};
 use num_traits::ToPrimitive;
 use oxide_arb_error::api::ApiError;
-use oxide_arb_models::config::GammaConfig;
-use oxide_arb_models::domain::market::EventRegistryInfo;
-use oxide_arb_models::types::TokenId;
+use oxide_arb_models::{config::GammaConfig, domain::market::EventRegistryInfo, types::TokenId};
 use url::Url;
-
-use super::mapper;
-use super::types::RawGammaEvent;
 
 fn parse_events_base(base_url: &str) -> Result<Url, ApiError> {
     Url::parse(&format!("{base_url}/events")).map_err(|e| ApiError::Gamma {

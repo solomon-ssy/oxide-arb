@@ -1,11 +1,9 @@
 //! Coordinates risk-engine halt/resume with the execution kill switch.
 
-use std::sync::Arc;
-
+use crate::execution::fsm::ExecutionFSM;
 use oxide_arb_error::OxideResult;
 use oxide_arb_risk::engine::RiskEngine;
-
-use crate::execution::fsm::ExecutionFSM;
+use std::sync::Arc;
 
 /// Halt risk + engage execution kill switch atomically from the core layer.
 pub async fn halt_trading(risk: &RiskEngine, fsm: &ExecutionFSM, reason: String) {

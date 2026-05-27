@@ -19,6 +19,7 @@ pub mod constants;
 pub mod domain;
 #[cfg(feature = "repository")]
 pub mod entities;
+
 #[cfg(not(feature = "repository"))]
 pub(crate) mod entities;
 

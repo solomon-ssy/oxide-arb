@@ -1,8 +1,12 @@
 //! Order domain models for Polymarket CLOB interaction.
 
-use crate::enums::common::{OrderType, Side};
-use crate::enums::order::OrderStatus;
-use crate::types::{MarketId, OrderId, Price, Shares, TokenId, Usd};
+use crate::{
+    enums::{
+        common::{OrderType, Side},
+        order::OrderStatus,
+    },
+    types::{MarketId, OrderId, Price, Shares, TokenId, Usd},
+};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 

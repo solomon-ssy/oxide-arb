@@ -4,21 +4,22 @@
 //! `oxide-arb-risk` does **not** implement them — implementations
 //! live in `oxide-arb-core` (Phase 4.2) or test mocks.
 
-use std::sync::Arc;
-use std::time::Duration;
-
-use oxide_arb_error::OxideResult;
-use oxide_arb_error::reservation::ReservationError;
-use oxide_arb_models::domain::NewPotentialLoss;
-use oxide_arb_models::domain::blacklist::{BlacklistInfo, UpsertBlacklistEntry};
-use oxide_arb_models::domain::position::PositionInfo;
-use oxide_arb_models::domain::potential_loss::PotentialLossInfo;
-use oxide_arb_models::domain::risk::{
-    NewEmergencySnapshot, NewReconciliationReport, NewRiskAuditEvent, RiskStateInfo,
-    UpsertRiskEngineState,
+use oxide_arb_error::{OxideResult, reservation::ReservationError};
+use oxide_arb_models::{
+    domain::{
+        NewPotentialLoss,
+        blacklist::{BlacklistInfo, UpsertBlacklistEntry},
+        position::PositionInfo,
+        potential_loss::PotentialLossInfo,
+        risk::{
+            NewEmergencySnapshot, NewReconciliationReport, NewRiskAuditEvent, RiskStateInfo,
+            UpsertRiskEngineState,
+        },
+    },
+    enums::common::Side,
+    types::{LedgerId, MarketId, ReservationId, Usd},
 };
-use oxide_arb_models::enums::common::Side;
-use oxide_arb_models::types::{LedgerId, MarketId, ReservationId, Usd};
+use std::{sync::Arc, time::Duration};
 
 /// Pre-loaded metrics for a single pre-trade decision (one batch read).
 #[derive(Debug, Clone, Copy)]

@@ -1,12 +1,9 @@
-use std::sync::Arc;
-
+use super::{consumer::OutboxConsumer, event_store::EventStore};
+use crate::observability::metrics_hub::MetricsHub;
 use num_traits::ToPrimitive;
 use oxide_arb_error::OxideError;
+use std::{sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
-
-use super::consumer::OutboxConsumer;
-use super::event_store::EventStore;
-use crate::observability::metrics_hub::MetricsHub;
 
 pub struct OutboxFlusher {
     event_store: Arc<dyn EventStore>,
@@ -37,7 +34,7 @@ impl OutboxFlusher {
     }
 
     pub async fn run(&self) -> Result<(), OxideError> {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+        let mut interval = tokio::time::interval(Duration::from_secs(5));
         loop {
             tokio::select! {
                 biased;

@@ -4,11 +4,13 @@
 //! - `PostTradeInput` is the risk engine's view of a completed trade.
 //! - `NewTrade` / `UpdateTradeOutcome` are write DTOs.
 
-use crate::domain::PositionInfo;
-use crate::enums::common::{ExecutionMode, MarketCategory, Side, TradeOutcome};
-use crate::types::{
-    Bps, EventId, ExecutionId, MarketId, OpportunityId, OrderId, Price, Shares, TokenId, TradeId,
-    Usd,
+use crate::{
+    domain::PositionInfo,
+    enums::common::{ExecutionMode, MarketCategory, Side, TradeOutcome},
+    types::{
+        Bps, EventId, ExecutionId, MarketId, OpportunityId, OrderId, Price, Shares, TokenId,
+        TradeId, Usd,
+    },
 };
 use chrono::{DateTime, NaiveDate, Utc};
 use rust_decimal::Decimal;

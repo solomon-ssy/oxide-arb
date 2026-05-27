@@ -12,14 +12,7 @@
 //! Seed migrations are not required to remain the final migration forever; each
 //! seed only depends on schema that appears before it in this registry.
 
-pub use sea_orm_migration::prelude::*;
-
 mod helpers;
-pub use helpers::{
-    create_indexes, create_tables, drop_tables, execute_sql, migrate_data, migrate_schema,
-    migrate_seed, migrate_up, noop,
-};
-
 mod m20250601_000001_create_events;
 mod m20250601_000002_create_markets;
 mod m20250601_000003_create_trades;
@@ -39,6 +32,12 @@ mod m20250601_000018_create_blacklist_entries;
 mod m20250601_000019_create_risk_audit_events;
 mod m20250601_000020_create_emergency_snapshots;
 mod m20250601_000021_create_reconciliation_reports;
+
+pub use helpers::{
+    create_indexes, create_tables, drop_tables, execute_sql, migrate_data, migrate_schema,
+    migrate_seed, migrate_up, noop,
+};
+pub use sea_orm_migration::prelude::*;
 
 pub struct Migrator;
 

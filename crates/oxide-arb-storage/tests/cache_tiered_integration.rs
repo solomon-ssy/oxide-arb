@@ -6,6 +6,7 @@ use oxide_arb_models::{
     types::{EventId, MarketId},
 };
 use oxide_arb_storage::cache::{CacheBackend, CacheKey, MokaBackend, RedisBackend, TieredCache};
+use testcontainers::runners::AsyncRunner;
 
 fn test_redis_config(port: u16) -> RedisConfig {
     RedisConfig {
@@ -20,7 +21,6 @@ async fn setup_redis() -> (
     u16,
     testcontainers::ContainerAsync<testcontainers_modules::redis::Redis>,
 ) {
-    use testcontainers::runners::AsyncRunner;
     let container = testcontainers_modules::redis::Redis::default()
         .start()
         .await

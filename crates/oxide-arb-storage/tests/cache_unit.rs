@@ -1,8 +1,10 @@
 //! Unit tests for cache layer components (no external deps required).
 
 use oxide_arb_models::{
-    enums::calibration::{DurationBucket, PriceZone},
-    enums::common::MarketCategory,
+    enums::{
+        calibration::{DurationBucket, PriceZone},
+        common::MarketCategory,
+    },
     types::MarketId,
 };
 use oxide_arb_storage::cache::{CacheBackend, CacheKey, MokaBackend};

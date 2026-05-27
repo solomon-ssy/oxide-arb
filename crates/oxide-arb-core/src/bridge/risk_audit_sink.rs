@@ -1,12 +1,12 @@
 //! Bridge [`RiskDecisionAuditBuffer`] to the risk crate [`AuditSink`] trait.
 
-use std::sync::Arc;
-
-use parking_lot::Mutex;
-
 use crate::infra::risk_decision_audit_buffer::{EnqueueResult, RiskDecisionAuditBuffer};
-use oxide_arb_risk::audit::RiskAuditEvent;
-use oxide_arb_risk::audit_sink::{AuditEnqueueResult, AuditSink};
+use oxide_arb_risk::{
+    audit::RiskAuditEvent,
+    audit_sink::{AuditEnqueueResult, AuditSink},
+};
+use parking_lot::Mutex;
+use std::sync::Arc;
 
 impl AuditSink for RiskDecisionAuditBuffer {
     fn try_enqueue(&self, event: RiskAuditEvent) -> AuditEnqueueResult {

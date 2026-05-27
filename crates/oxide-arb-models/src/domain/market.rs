@@ -3,9 +3,13 @@
 //! These models represent the market data as ingested from Polymarket's
 //! Gamma API and enriched by the data pipeline.
 
-use crate::enums::common::{MarketCategory, TickSize};
-use crate::enums::market::{EventStatus, MarketStatus};
-use crate::types::{EventId, MarketId, Price, TokenId, Usd};
+use crate::{
+    enums::{
+        common::{MarketCategory, TickSize},
+        market::{EventStatus, MarketStatus},
+    },
+    types::{EventId, MarketId, Price, TokenId, Usd},
+};
 use chrono::{DateTime, Utc};
 use oxide_arb_error::market::MarketError;
 use rust_decimal::Decimal;

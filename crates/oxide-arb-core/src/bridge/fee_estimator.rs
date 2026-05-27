@@ -1,9 +1,10 @@
-use std::sync::Arc;
-
 use oxide_arb_algorithm::fee::FeeEstimator;
 use oxide_arb_api::fees::FeeCalculator;
-use oxide_arb_models::enums::common::MarketCategory;
-use oxide_arb_models::types::{Price, Shares, TokenId, Usd};
+use oxide_arb_models::{
+    enums::common::MarketCategory,
+    types::{Price, Shares, TokenId, Usd},
+};
+use std::sync::Arc;
 
 pub struct CoreFeeEstimator(pub Arc<FeeCalculator>);
 

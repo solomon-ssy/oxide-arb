@@ -1,8 +1,11 @@
 use super::{execute_sql, migrate_up};
-use oxide_arb_models::idens::calibration::EndgameCalibrationBucket;
-use oxide_arb_models::idens::calibration_outcome::EndgameCalibrationOutcome;
-use oxide_arb_models::idens::market::Market;
-use oxide_arb_models::types::Probability;
+use oxide_arb_models::{
+    idens::{
+        calibration::EndgameCalibrationBucket, calibration_outcome::EndgameCalibrationOutcome,
+        market::Market,
+    },
+    types::Probability,
+};
 use sea_orm_migration::prelude::*;
 
 #[derive(DeriveMigrationName)]

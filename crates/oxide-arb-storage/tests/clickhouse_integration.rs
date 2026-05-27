@@ -1,11 +1,10 @@
 //! `ClickHouse` integration tests (requires Docker).
 
 use chrono::Utc;
-use oxide_arb_models::clickhouse::TickEventRow;
-use oxide_arb_models::config::AnalyticsConfig;
+use oxide_arb_models::{clickhouse::TickEventRow, config::AnalyticsConfig};
 use oxide_arb_storage::clickhouse::{BatchInserter, ChWriteMetrics, ClickHousePool};
-use std::sync::Arc;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
+use testcontainers::runners::AsyncRunner;
 use tokio_util::sync::CancellationToken;
 
 fn test_ch_config(port: u16) -> AnalyticsConfig {
@@ -28,7 +27,6 @@ async fn setup_clickhouse() -> (
     u16,
     testcontainers::ContainerAsync<testcontainers::GenericImage>,
 ) {
-    use testcontainers::runners::AsyncRunner;
     let container = testcontainers::GenericImage::new("clickhouse/clickhouse-server", "24")
         .with_exposed_port(8123.into())
         .with_wait_for(testcontainers::core::WaitFor::message_on_stderr(

@@ -2,9 +2,7 @@
 
 use ahash::{HashMap, HashMapExt};
 use chrono::{DateTime, Utc};
-use oxide_arb_models::config::FeesConfig;
-use oxide_arb_models::enums::common::MarketCategory;
-use oxide_arb_models::types::TokenId;
+use oxide_arb_models::{config::FeesConfig, enums::common::MarketCategory, types::TokenId};
 use rust_decimal::Decimal;
 
 /// Where the current category rates originated.

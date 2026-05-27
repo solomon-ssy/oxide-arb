@@ -1,8 +1,9 @@
 use super::{execute_sql, migrate_up};
-use oxide_arb_models::enums::common::PositionStatus;
-use oxide_arb_models::idens::market::Market;
-use oxide_arb_models::idens::position::Position;
-use oxide_arb_models::types::Usd;
+use oxide_arb_models::{
+    enums::common::PositionStatus,
+    idens::{market::Market, position::Position},
+    types::Usd,
+};
 use sea_orm_migration::prelude::*;
 
 #[derive(DeriveMigrationName)]

@@ -1,6 +1,8 @@
 use oxide_arb_error::storage::StorageError;
-use oxide_arb_models::domain::{NewPosition, PositionInfo, UpdatePosition};
-use oxide_arb_models::types::{MarketId, PositionId, Usd};
+use oxide_arb_models::{
+    domain::{NewPosition, PositionInfo, UpdatePosition},
+    types::{MarketId, PositionId, Usd},
+};
 use rust_decimal::Decimal;
 
 pub trait PositionRepository: Send + Sync {

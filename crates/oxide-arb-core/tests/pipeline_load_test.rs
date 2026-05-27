@@ -3,22 +3,29 @@
 #[path = "support/test_util/mock_event_source.rs"]
 mod mock_event_source;
 
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-
 use mock_event_source::MockEventSource;
-use oxide_arb_core::observability::backpressure::BackpressurePolicy;
-use oxide_arb_core::observability::metrics_hub::MetricsHub;
-use oxide_arb_core::outbox::in_memory::InMemoryEventStore;
-use oxide_arb_core::pipeline::book_store::BookStore;
-use oxide_arb_core::pipeline::data_pipeline::{DataPipeline, DataPipelineDeps};
-use oxide_arb_core::pipeline::market_registry::MarketRegistry;
-use oxide_arb_models::domain::book::BookLevel;
-use oxide_arb_models::domain::pipeline::{
-    BookSideData, BookSnapshotCmd, IngressTrace, PipelineEvent,
+use oxide_arb_core::{
+    observability::{backpressure::BackpressurePolicy, metrics_hub::MetricsHub},
+    outbox::in_memory::InMemoryEventStore,
+    pipeline::{
+        book_store::BookStore,
+        data_pipeline::{DataPipeline, DataPipelineDeps},
+        event_source,
+        market_registry::MarketRegistry,
+    },
 };
-use oxide_arb_models::types::{Price, Shares, TokenId};
+use oxide_arb_models::{
+    domain::{
+        book::BookLevel,
+        pipeline::{BookSideData, BookSnapshotCmd, IngressTrace, PipelineEvent},
+    },
+    types::{Price, Shares, TokenId},
+};
 use rust_decimal_macros::dec;
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use tokio_util::sync::CancellationToken;
 
 fn snapshot_cmd(token: &TokenId, ts: u64) -> PipelineEvent {
@@ -47,8 +54,7 @@ async fn hundred_tokens_thousand_snapshots_monotonic_versions() {
     let shutdown = CancellationToken::new();
 
     let (source, inject) = MockEventSource::paired(8192);
-    let event_source: Arc<dyn oxide_arb_core::pipeline::event_source::PipelineEventSource> =
-        Arc::new(source);
+    let event_source: Arc<dyn event_source::PipelineEventSource> = Arc::new(source);
 
     let pipeline = Arc::new(DataPipeline::new(DataPipelineDeps {
         event_source,

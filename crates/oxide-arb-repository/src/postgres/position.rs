@@ -6,10 +6,12 @@ use crate::traits::PositionRepository;
 use chrono::Utc;
 use num_traits::ToPrimitive;
 use oxide_arb_error::storage::StorageError;
-use oxide_arb_models::domain::{NewPosition, PositionInfo, UpdatePosition};
-use oxide_arb_models::entities::position::{ActiveModel, Column, Entity};
-use oxide_arb_models::enums::common::PositionStatus;
-use oxide_arb_models::types::{MarketId, PositionId, Usd};
+use oxide_arb_models::{
+    domain::{NewPosition, PositionInfo, UpdatePosition},
+    entities::position::{ActiveModel, Column, Entity},
+    enums::common::PositionStatus,
+    types::{MarketId, PositionId, Usd},
+};
 use rust_decimal::Decimal;
 
 // ── helpers ──────────────────────────────────────────────────────────

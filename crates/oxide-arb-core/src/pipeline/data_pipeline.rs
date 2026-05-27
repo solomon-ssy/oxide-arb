@@ -1,19 +1,18 @@
-use std::sync::Arc;
-use std::thread;
-
+use super::{
+    book_store::BookStore, event_source::PipelineEventSource, market_registry::MarketRegistry,
+};
+use crate::{
+    infra::sharding::shard_index,
+    observability::{backpressure::BackpressurePolicy, metrics_hub::MetricsHub},
+};
 use flume::{Receiver, Sender};
 use oxide_arb_error::OxideError;
-use oxide_arb_models::domain::latency::LatencyTrace;
-use oxide_arb_models::domain::pipeline::PipelineEvent;
-use oxide_arb_models::types::TokenId;
+use oxide_arb_models::{
+    domain::{latency::LatencyTrace, pipeline::PipelineEvent},
+    types::TokenId,
+};
+use std::{sync::Arc, thread};
 use tokio_util::sync::CancellationToken;
-
-use super::book_store::BookStore;
-use super::event_source::PipelineEventSource;
-use super::market_registry::MarketRegistry;
-use crate::infra::sharding::shard_index;
-use crate::observability::backpressure::BackpressurePolicy;
-use crate::observability::metrics_hub::MetricsHub;
 
 /// Sharded book-apply workers for ~500 markets / ~1000 tokens on one host.
 pub const DEFAULT_BOOK_SHARD_COUNT: usize = 4;

@@ -1,10 +1,8 @@
-use std::sync::Arc;
-
 use oxide_arb_error::OxideError;
-use oxide_arb_models::domain::trade::PositionSummary;
-use oxide_arb_models::types::MarketId;
+use oxide_arb_models::{domain::trade::PositionSummary, types::MarketId};
 use oxide_arb_repository::traits::PositionRepository;
 use oxide_arb_storage::cache::{CacheKey, TieredCache};
+use std::sync::Arc;
 
 pub struct PositionSummaryService<R: PositionRepository> {
     cache: Arc<TieredCache>,

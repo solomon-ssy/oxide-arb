@@ -1,16 +1,17 @@
 //! Opportunity + scored-opportunity fixtures.
 
-use std::sync::Arc;
-
-use oxide_arb_algorithm::scorer::ScoredOpportunity;
-use oxide_arb_models::domain::latency::LatencyTrace;
-use oxide_arb_models::types::{MicroProb, MicroScore, TokenId};
-use rust_decimal_macros::dec;
-
 #[path = "opportunity_fixture.rs"]
 mod opportunity_fixture;
 
 pub use opportunity_fixture::sample_opportunity;
+
+use oxide_arb_algorithm::scorer::ScoredOpportunity;
+use oxide_arb_models::{
+    domain::latency::LatencyTrace,
+    types::{MicroProb, MicroScore, TokenId},
+};
+use rust_decimal_macros::dec;
+use std::sync::Arc;
 
 #[must_use]
 pub fn sample_scored() -> Arc<ScoredOpportunity> {

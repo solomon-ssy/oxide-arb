@@ -1,8 +1,12 @@
 //! `endgame_calibration_outcomes` table entity.
 
-use crate::enums::calibration::{DurationBucket, PriceZone};
-use crate::enums::common::MarketCategory;
-use crate::types::{MarketId, Price, Probability};
+use crate::{
+    enums::{
+        calibration::{DurationBucket, PriceZone},
+        common::MarketCategory,
+    },
+    types::{MarketId, Price, Probability},
+};
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 

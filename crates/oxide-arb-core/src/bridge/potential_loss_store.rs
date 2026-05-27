@@ -1,19 +1,16 @@
 //! `PotentialLossStore` bridge — wraps `PgPotentialLossRepository` into
 //! the risk crate's DI trait.
 
-use std::sync::Arc;
-use std::time::Duration;
-
 use chrono::Utc;
 use oxide_arb_error::{OxideError, OxideResult};
-use oxide_arb_models::domain::NewPotentialLoss;
-use oxide_arb_models::domain::UpdatePotentialLoss;
-use oxide_arb_models::domain::potential_loss::PotentialLossInfo;
-use oxide_arb_models::enums::common::LedgerStatus;
-use oxide_arb_models::types::LedgerId;
-use oxide_arb_repository::postgres::PgPotentialLossRepository;
-use oxide_arb_repository::traits::PotentialLossRepository;
+use oxide_arb_models::{
+    domain::{NewPotentialLoss, UpdatePotentialLoss, potential_loss::PotentialLossInfo},
+    enums::common::LedgerStatus,
+    types::LedgerId,
+};
+use oxide_arb_repository::{postgres::PgPotentialLossRepository, traits::PotentialLossRepository};
 use oxide_arb_risk::traits::PotentialLossStore;
+use std::{sync::Arc, time::Duration};
 
 pub struct CorePotentialLossStore {
     repo: Arc<PgPotentialLossRepository>,

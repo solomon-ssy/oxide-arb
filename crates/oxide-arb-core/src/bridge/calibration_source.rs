@@ -1,16 +1,16 @@
-use std::sync::Arc;
-
-use oxide_arb_algorithm::calibration::updater::{CalibrationDataSource, UnresolvedOutcome};
-use oxide_arb_api::gamma::GammaClient;
-use oxide_arb_api::oracle::VotingOracle;
-use oxide_arb_api::oracle::types::ResolutionVerdict;
-use oxide_arb_error::algorithm::AlgoError;
-use oxide_arb_models::domain::calibration::{BucketKey, UpsertCalibration};
-use oxide_arb_models::types::MarketId;
-use oxide_arb_repository::postgres::PgCalibrationRepository;
-use oxide_arb_repository::traits::CalibrationRepository;
-
 use crate::infra::oracle_health_tracker::OracleHealthTracker;
+use oxide_arb_algorithm::calibration::updater::{CalibrationDataSource, UnresolvedOutcome};
+use oxide_arb_api::{
+    gamma::GammaClient,
+    oracle::{VotingOracle, types::ResolutionVerdict},
+};
+use oxide_arb_error::algorithm::AlgoError;
+use oxide_arb_models::{
+    domain::calibration::{BucketKey, UpsertCalibration},
+    types::MarketId,
+};
+use oxide_arb_repository::{postgres::PgCalibrationRepository, traits::CalibrationRepository};
+use std::sync::Arc;
 
 pub struct CoreCalibrationDataSource {
     calibration_repo: Arc<PgCalibrationRepository>,

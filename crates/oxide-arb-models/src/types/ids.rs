@@ -182,6 +182,7 @@ pub struct ReportId(Arc<str>);
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{thread::sleep, time::Duration};
 
     #[test]
     fn opportunity_id_v7_sortable_by_time() {
@@ -189,7 +190,7 @@ mod tests {
         let mut ids: Vec<OpportunityId> = Vec::with_capacity(N);
         for _ in 0..N {
             ids.push(OpportunityId::new_v7());
-            std::thread::sleep(std::time::Duration::from_millis(2));
+            sleep(Duration::from_millis(2));
         }
         let mut sorted = ids.clone();
         sorted.sort_by(|a, b| a.as_str().cmp(b.as_str()));

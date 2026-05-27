@@ -1,26 +1,27 @@
 //! Gamma market catalog sync — full and incremental refresh into registry, cache, and DB.
 
-use std::collections::HashSet;
-use std::sync::Arc;
-
+use crate::{
+    observability::metrics_hub::MetricsHub,
+    pipeline::{market_cache::MarketCache, market_registry::MarketRegistry},
+    service::cache_invalidation::invalidate_post_gamma_sync,
+};
 use chrono::{DateTime, Utc};
 use num_traits::ToPrimitive;
-use oxide_arb_api::fees::FeeCalculator;
-use oxide_arb_api::gamma::GammaClient;
-use oxide_arb_api::ws::TOKEN_INTERN;
+use oxide_arb_api::{fees::FeeCalculator, gamma::GammaClient, ws::TOKEN_INTERN};
 use oxide_arb_error::OxideError;
-use oxide_arb_models::domain::market::{
-    EventRegistryInfo, MarketRegistryInfo, UpsertEvent, UpsertMarket,
+use oxide_arb_models::{
+    domain::{
+        market,
+        market::{EventRegistryInfo, MarketRegistryInfo, UpsertEvent, UpsertMarket},
+    },
+    types::MarketId,
 };
-use oxide_arb_models::types::MarketId;
-use oxide_arb_repository::postgres::{PgEventRepository, PgMarketRepository};
-use oxide_arb_repository::traits::{EventRepository, MarketRepository};
+use oxide_arb_repository::{
+    postgres::{PgEventRepository, PgMarketRepository},
+    traits::{EventRepository, MarketRepository},
+};
 use oxide_arb_storage::cache::TieredCache;
-
-use crate::observability::metrics_hub::MetricsHub;
-use crate::pipeline::market_cache::MarketCache;
-use crate::pipeline::market_registry::MarketRegistry;
-use crate::service::cache_invalidation::invalidate_post_gamma_sync;
+use std::{collections::HashSet, sync::Arc, time::Instant};
 
 const FULL_SYNC_INTERVAL_SECS: i64 = 300;
 const INCREMENTAL_FETCH_CONCURRENCY: usize = 10;
@@ -65,7 +66,7 @@ impl GammaService {
     }
 
     pub async fn sync(&self) -> Result<(), OxideError> {
-        let timer = std::time::Instant::now();
+        let timer = Instant::now();
         let result = self.sync_inner().await;
         let elapsed_ms = ToPrimitive::to_i64(&timer.elapsed().as_millis()).unwrap_or(i64::MAX);
 
@@ -192,9 +193,7 @@ impl GammaService {
                 }
             }
 
-            fee_data.extend(oxide_arb_models::domain::market::collect_fee_data(
-                &extra_registry,
-            ));
+            fee_data.extend(market::collect_fee_data(&extra_registry));
             extra_upserts = convert_registry_to_upsert(&extra_registry);
         }
 

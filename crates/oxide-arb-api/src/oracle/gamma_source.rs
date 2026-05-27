@@ -1,11 +1,9 @@
 //! Gamma API-based oracle source.
 
+use super::{source::OracleSource, types::SourceVote};
 use async_trait::async_trait;
 use oxide_arb_error::rpc::RpcError;
 use oxide_arb_models::types::MarketId;
-
-use super::source::OracleSource;
-use super::types::SourceVote;
 
 /// Oracle source that checks Gamma API for market resolution.
 pub struct GammaOracleSource {

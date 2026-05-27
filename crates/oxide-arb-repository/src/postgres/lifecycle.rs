@@ -5,8 +5,10 @@ use super::orm::{
 use crate::traits::LifecycleRepository;
 use chrono::Utc;
 use oxide_arb_error::storage::StorageError;
-use oxide_arb_models::domain::{LifecycleEventInfo, NewLifecycleEvent};
-use oxide_arb_models::entities::lifecycle_event::{ActiveModel, Column, Entity};
+use oxide_arb_models::{
+    domain::{LifecycleEventInfo, NewLifecycleEvent},
+    entities::lifecycle_event::{ActiveModel, Column, Entity},
+};
 
 pub struct PgLifecycleRepository {
     db: DatabaseConnection,

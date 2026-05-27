@@ -1,7 +1,6 @@
 //! Report domain DTOs for the `report` table.
 
-use crate::enums::common::ReportType;
-use crate::types::ReportId;
+use crate::{enums::common::ReportType, types::ReportId};
 use chrono::{DateTime, NaiveDate, Utc};
 use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
 use serde::{Deserialize, Serialize};

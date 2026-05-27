@@ -1,8 +1,9 @@
 //! `events` table entity.
 
-use crate::enums::common::MarketCategory;
-use crate::enums::market::EventStatus;
-use crate::types::EventId;
+use crate::{
+    enums::{common::MarketCategory, market::EventStatus},
+    types::EventId,
+};
 use chrono::{DateTime, Utc};
 use oxide_arb_macros::ActiveModelDefaults;
 use sea_orm::entity::prelude::*;

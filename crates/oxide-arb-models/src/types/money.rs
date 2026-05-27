@@ -25,7 +25,11 @@ use sea_orm::{
     sea_query::{ArrayType, ColumnType, Nullable, Value, ValueType, ValueTypeErr},
 };
 use serde::{Deserialize, Serialize};
-use std::fmt;
+use std::{
+    fmt,
+    iter::Sum,
+    ops::{Add, AddAssign, Div, Mul, Neg, Sub, SubAssign},
+};
 
 macro_rules! decimal_newtype {
     ($(#[$meta:meta])* $name:ident) => {
@@ -103,37 +107,37 @@ macro_rules! decimal_newtype {
 
         // ── Same-type arithmetic ────────────────────────────────────
 
-        impl std::ops::Add for $name {
+        impl Add for $name {
             type Output = Self;
             #[inline]
             fn add(self, rhs: Self) -> Self { Self(self.0 + rhs.0) }
         }
 
-        impl std::ops::AddAssign for $name {
+        impl AddAssign for $name {
             #[inline]
             fn add_assign(&mut self, rhs: Self) { self.0 += rhs.0; }
         }
 
-        impl std::ops::Sub for $name {
+        impl Sub for $name {
             type Output = Self;
             #[inline]
             fn sub(self, rhs: Self) -> Self { Self(self.0 - rhs.0) }
         }
 
-        impl std::ops::SubAssign for $name {
+        impl SubAssign for $name {
             #[inline]
             fn sub_assign(&mut self, rhs: Self) { self.0 -= rhs.0; }
         }
 
-        impl std::ops::Neg for $name {
+        impl Neg for $name {
             type Output = Self;
             #[inline]
             fn neg(self) -> Self { Self(-self.0) }
         }
 
-        impl std::iter::Sum for $name {
+        impl Sum for $name {
             fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
-                iter.fold(Self::ZERO, std::ops::Add::add)
+                iter.fold(Self::ZERO, Add::add)
             }
         }
 
@@ -228,7 +232,7 @@ decimal_newtype!(
 
 // ── Cross-type arithmetic ───────────────────────────────────────────────
 
-impl std::ops::Mul<Price> for Shares {
+impl Mul<Price> for Shares {
     type Output = Usd;
     #[inline]
     fn mul(self, rhs: Price) -> Usd {
@@ -236,7 +240,7 @@ impl std::ops::Mul<Price> for Shares {
     }
 }
 
-impl std::ops::Mul<Shares> for Price {
+impl Mul<Shares> for Price {
     type Output = Usd;
     #[inline]
     fn mul(self, rhs: Shares) -> Usd {
@@ -244,7 +248,7 @@ impl std::ops::Mul<Shares> for Price {
     }
 }
 
-impl std::ops::Div<Price> for Usd {
+impl Div<Price> for Usd {
     type Output = Shares;
     #[inline]
     fn div(self, rhs: Price) -> Shares {
@@ -254,42 +258,42 @@ impl std::ops::Div<Price> for Usd {
 
 // ── Scalar arithmetic ───────────────────────────────────────────────────
 
-impl std::ops::Mul<Decimal> for Usd {
+impl Mul<Decimal> for Usd {
     type Output = Self;
     fn mul(self, rhs: Decimal) -> Self {
         Self::new(self.inner() * rhs)
     }
 }
 
-impl std::ops::Div<Decimal> for Usd {
+impl Div<Decimal> for Usd {
     type Output = Self;
     fn div(self, rhs: Decimal) -> Self {
         Self::new(self.inner() / rhs)
     }
 }
 
-impl std::ops::Mul<Decimal> for Shares {
+impl Mul<Decimal> for Shares {
     type Output = Self;
     fn mul(self, rhs: Decimal) -> Self {
         Self::new(self.inner() * rhs)
     }
 }
 
-impl std::ops::Div<Decimal> for Shares {
+impl Div<Decimal> for Shares {
     type Output = Self;
     fn div(self, rhs: Decimal) -> Self {
         Self::new(self.inner() / rhs)
     }
 }
 
-impl std::ops::Mul<Decimal> for Price {
+impl Mul<Decimal> for Price {
     type Output = Self;
     fn mul(self, rhs: Decimal) -> Self {
         Self::new(self.inner() * rhs)
     }
 }
 
-impl std::ops::Mul<Decimal> for Bps {
+impl Mul<Decimal> for Bps {
     type Output = Self;
     fn mul(self, rhs: Decimal) -> Self {
         Self::new(self.inner() * rhs)

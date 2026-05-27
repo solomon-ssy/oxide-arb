@@ -1,10 +1,13 @@
-use std::sync::Arc;
-
 use chrono::Utc;
 use oxide_arb_api::fees::FeeCalculator;
-use oxide_arb_models::domain::execution::{ExecutionPlan, ReservationHandle};
-use oxide_arb_models::domain::opportunity::Opportunity;
-use oxide_arb_models::types::{ExecutionId, Shares, Usd};
+use oxide_arb_models::{
+    domain::{
+        execution::{ExecutionPlan, ReservationHandle},
+        opportunity::Opportunity,
+    },
+    types::{ExecutionId, Shares, Usd},
+};
+use std::sync::Arc;
 
 pub struct PlanBuilder {
     fee_calculator: Arc<FeeCalculator>,

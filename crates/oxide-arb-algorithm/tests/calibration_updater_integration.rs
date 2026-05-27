@@ -12,13 +12,17 @@ use oxide_arb_error::algorithm::AlgoError;
 use oxide_arb_models::{
     config::CalibrationConfig,
     domain::calibration::{BucketKey, UpsertCalibration},
-    enums::calibration::{DurationBucket, PriceZone},
-    enums::common::MarketCategory,
+    enums::{
+        calibration::{DurationBucket, PriceZone},
+        common::MarketCategory,
+    },
     types::MarketId,
 };
 use rust_decimal_macros::dec;
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
 
 // ── Mock Data Source ────────────────────────────────────────────────────
 

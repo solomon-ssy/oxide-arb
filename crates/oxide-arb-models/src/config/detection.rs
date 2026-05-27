@@ -1,7 +1,9 @@
 //! Opportunity detection configuration.
 
-use crate::enums::common::MarketCategory;
-use crate::types::{MicroPct, MicroProb, MicroScore};
+use crate::{
+    enums::common::MarketCategory,
+    types::{MicroPct, MicroProb, MicroScore},
+};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::Deserialize;

@@ -3,6 +3,7 @@
 use oxide_arb_models::config::RedisConfig;
 use oxide_arb_storage::cache::{CacheBackend, RedisBackend};
 use std::time::Duration;
+use testcontainers::runners::AsyncRunner;
 
 fn test_redis_config(port: u16) -> RedisConfig {
     RedisConfig {
@@ -17,7 +18,6 @@ async fn setup_redis() -> (
     RedisBackend,
     testcontainers::ContainerAsync<testcontainers_modules::redis::Redis>,
 ) {
-    use testcontainers::runners::AsyncRunner;
     let container = testcontainers_modules::redis::Redis::default()
         .start()
         .await

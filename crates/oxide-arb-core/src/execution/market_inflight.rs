@@ -1,11 +1,9 @@
 //! Per-market execution in-flight guard — prevents double-fire on the same market
 //! while allowing parallel execution across different markets.
 
-use std::sync::Arc;
-
-use dashmap::DashMap;
-use dashmap::mapref::entry::Entry;
+use dashmap::{DashMap, mapref::entry::Entry};
 use oxide_arb_models::types::MarketId;
+use std::sync::Arc;
 
 /// Global registry of markets currently in an execution pipeline.
 pub struct MarketInFlightRegistry {

@@ -1,10 +1,8 @@
 //! Hourly rolling-window loss accounting.
 
-use crate::clock::Clock;
-use crate::types::PeriodStats;
+use crate::{clock::Clock, types::PeriodStats};
 use chrono::{DateTime, NaiveDate, Timelike, Utc};
-use oxide_arb_models::enums::common::TradeOutcome;
-use oxide_arb_models::types::Usd;
+use oxide_arb_models::{enums::common::TradeOutcome, types::Usd};
 use std::sync::Arc;
 
 pub struct HourlyAccounting {

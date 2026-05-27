@@ -2,8 +2,10 @@
 
 use crate::traits::RuntimeConfigRepository;
 use oxide_arb_error::storage::StorageError;
-use oxide_arb_models::domain::{RuntimeConfigInfo, UpsertRuntimeConfig};
-use oxide_arb_models::enums::runtime_config::RuntimeConfigKey;
+use oxide_arb_models::{
+    domain::{RuntimeConfigInfo, UpsertRuntimeConfig},
+    enums::runtime_config::RuntimeConfigKey,
+};
 use oxide_arb_storage::cache::{CacheKey, TieredCache};
 use std::sync::Arc;
 

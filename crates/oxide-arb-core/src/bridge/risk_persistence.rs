@@ -1,21 +1,26 @@
-use std::sync::Arc;
-
 use oxide_arb_error::{OxideError, OxideResult};
-use oxide_arb_models::domain::blacklist::{BlacklistInfo, UpsertBlacklistEntry};
-use oxide_arb_models::domain::risk::{
-    NewEmergencySnapshot, NewReconciliationReport, NewRiskAuditEvent, RiskStateInfo,
-    UpsertRiskEngineState,
+use oxide_arb_models::{
+    domain::{
+        blacklist::{BlacklistInfo, UpsertBlacklistEntry},
+        risk::{
+            NewEmergencySnapshot, NewReconciliationReport, NewRiskAuditEvent, RiskStateInfo,
+            UpsertRiskEngineState,
+        },
+    },
+    types::MarketId,
 };
-use oxide_arb_models::types::MarketId;
-use oxide_arb_repository::postgres::{
-    PgBlacklistPersistenceRepository, PgEmergencyRepository, PgReconciliationRepository,
-    PgRiskAuditRepository, PgRiskStateRepository,
-};
-use oxide_arb_repository::traits::{
-    BlacklistPersistenceRepository, EmergencyRepository, ReconciliationRepository,
-    RiskAuditRepository, RiskStateRepository,
+use oxide_arb_repository::{
+    postgres::{
+        PgBlacklistPersistenceRepository, PgEmergencyRepository, PgReconciliationRepository,
+        PgRiskAuditRepository, PgRiskStateRepository,
+    },
+    traits::{
+        BlacklistPersistenceRepository, EmergencyRepository, ReconciliationRepository,
+        RiskAuditRepository, RiskStateRepository,
+    },
 };
 use oxide_arb_risk::traits::RiskPersistence;
+use std::sync::Arc;
 
 pub struct CoreRiskPersistence {
     risk_state: Arc<PgRiskStateRepository>,

@@ -3,8 +3,10 @@
 use num_traits::ToPrimitive;
 use oxide_arb_algorithm::scorer::ScoredOpportunity;
 use oxide_arb_core::pipeline::book_store::BookStore;
-use oxide_arb_models::domain::book::BookLevel;
-use oxide_arb_models::types::{Price, Shares};
+use oxide_arb_models::{
+    domain::book::BookLevel,
+    types::{Price, Shares},
+};
 use rust_decimal_macros::dec;
 
 pub fn seed_book_store(store: &BookStore, scored: &ScoredOpportunity) {

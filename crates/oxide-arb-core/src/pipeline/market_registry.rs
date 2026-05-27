@@ -1,12 +1,11 @@
-use std::collections::HashSet;
-use std::sync::Arc;
-
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
-
-use oxide_arb_models::domain::market::{EventRegistryInfo, MarketRegistryInfo};
-use oxide_arb_models::enums::market::MarketStatus;
-use oxide_arb_models::types::{EventId, MarketId, TokenId};
+use oxide_arb_models::{
+    domain::market::{EventRegistryInfo, MarketRegistryInfo},
+    enums::market::MarketStatus,
+    types::{EventId, MarketId, TokenId},
+};
+use std::{collections::HashSet, sync::Arc};
 
 /// Market metadata registry with bidirectional token ↔ market lookup.
 ///
@@ -206,10 +205,12 @@ impl Default for MarketRegistry {
 mod tests {
     use super::*;
     use chrono::Utc;
-    use oxide_arb_models::domain::market::TokenInfo;
-    use oxide_arb_models::enums::common::{MarketCategory, TickSize};
+    use oxide_arb_models::{
+        domain::market::TokenInfo,
+        enums::common::{MarketCategory, TickSize},
+        types::Usd,
+    };
     use rust_decimal_macros::dec;
-
     fn sample_market(id: &str, status: MarketStatus) -> MarketRegistryInfo {
         MarketRegistryInfo {
             market_id: MarketId::new(id),
@@ -238,7 +239,7 @@ mod tests {
             best_ask: None,
             depth_usd: None,
             min_order_size: dec!(5),
-            volume_24h: oxide_arb_models::types::Usd::ZERO,
+            volume_24h: Usd::ZERO,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

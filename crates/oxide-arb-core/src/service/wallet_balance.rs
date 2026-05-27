@@ -1,11 +1,9 @@
-use std::sync::Arc;
-
 use oxide_arb_api::clob::ClobClient;
 use oxide_arb_error::OxideError;
-use oxide_arb_models::domain::trade::WalletBalanceSnapshot;
-use oxide_arb_models::types::Usd;
+use oxide_arb_models::{domain::trade::WalletBalanceSnapshot, types::Usd};
 use oxide_arb_risk::traits::ExposureReservationBackend;
 use oxide_arb_storage::cache::{CacheKey, TieredCache};
+use std::sync::Arc;
 
 pub struct WalletBalanceService {
     cache: Arc<TieredCache>,

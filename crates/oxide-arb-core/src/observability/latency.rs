@@ -1,12 +1,9 @@
 //! Latency segment observers wired to Prometheus histograms.
 
-use std::sync::Arc;
-use std::time::Instant;
-
+use crate::observability::metrics_hub::MetricsHub;
 use oxide_arb_algorithm::scorer::ScoredOpportunity;
 use oxide_arb_models::domain::latency::LatencyTrace;
-
-use crate::observability::metrics_hub::MetricsHub;
+use std::{sync::Arc, time::Instant};
 
 fn duration_us(start: Instant, end: Instant) -> f64 {
     end.duration_since(start).as_secs_f64() * 1_000_000.0

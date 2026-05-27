@@ -6,15 +6,18 @@
 
 use crate::types::{PeriodStats, RiskCheckResult, SizeBreakdown, StateVersion};
 use chrono::{DateTime, NaiveDate, Utc};
-use oxide_arb_models::domain::blacklist::BlacklistInfo;
-use oxide_arb_models::domain::risk::NewRiskAuditEvent;
-use oxide_arb_models::enums::ReconciliationStatus;
-use oxide_arb_models::enums::common::TradeOutcome;
-use oxide_arb_models::enums::risk::RiskAuditEventType;
-use oxide_arb_models::enums::risk::{
-    BreakerStateName, CircuitBreakerLevel, TradeAccountingPhase, WindowType,
+use oxide_arb_models::{
+    domain::{blacklist::BlacklistInfo, risk::NewRiskAuditEvent},
+    enums::{
+        ReconciliationStatus,
+        common::TradeOutcome,
+        risk::{
+            BreakerStateName, CircuitBreakerLevel, RiskAuditEventType, TradeAccountingPhase,
+            WindowType,
+        },
+    },
+    types::{MarketId, OpportunityId, TradeId, Usd},
 };
-use oxide_arb_models::types::{MarketId, OpportunityId, TradeId, Usd};
 use serde::Serialize;
 
 /// Immutable audit event produced by the risk engine.

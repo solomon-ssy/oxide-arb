@@ -1,15 +1,16 @@
 //! Concurrent stress tests for [`BookStore`] token creation and writes.
 
-use std::sync::Arc;
-use std::sync::Barrier;
-use std::thread;
-
-use oxide_arb_core::observability::metrics_hub::MetricsHub;
-use oxide_arb_core::pipeline::book_store::BookStore;
-use oxide_arb_models::domain::book::BookLevel;
-use oxide_arb_models::enums::common::Side;
-use oxide_arb_models::types::{Price, Shares, TokenId};
+use oxide_arb_core::{observability::metrics_hub::MetricsHub, pipeline::book_store::BookStore};
+use oxide_arb_models::{
+    domain::book::BookLevel,
+    enums::common::Side,
+    types::{Price, Shares, TokenId},
+};
 use rust_decimal_macros::dec;
+use std::{
+    sync::{Arc, Barrier},
+    thread,
+};
 
 fn make_level(price: rust_decimal::Decimal) -> BookLevel {
     BookLevel::from_decimal_unchecked(Price::new(price), Shares::new(dec!(10)))

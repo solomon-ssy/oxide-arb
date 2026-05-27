@@ -4,8 +4,10 @@
 //! Used by the risk engine to account for worst-case exposure before
 //! market resolution is confirmed.
 
-use crate::enums::common::LedgerStatus;
-use crate::types::{LedgerId, MarketId, Price, Shares, TokenId, Usd};
+use crate::{
+    enums::common::LedgerStatus,
+    types::{LedgerId, MarketId, Price, Shares, TokenId, Usd},
+};
 use chrono::{DateTime, Utc};
 use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
 use serde::{Deserialize, Serialize};

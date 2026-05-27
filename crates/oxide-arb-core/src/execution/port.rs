@@ -1,12 +1,10 @@
 //! Execution port — trait boundary for [`ExecutionRunner`] dependency injection.
 
-use std::sync::Arc;
-
+use super::execution_pipeline::ExecutionPipeline;
 use async_trait::async_trait;
 use oxide_arb_algorithm::scorer::ScoredOpportunity;
 use oxide_arb_models::domain::execution::ExecutionResult;
-
-use super::execution_pipeline::ExecutionPipeline;
+use std::sync::Arc;
 
 /// Async execution boundary consumed by shard runners.
 #[async_trait]

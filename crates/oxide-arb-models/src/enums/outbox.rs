@@ -3,6 +3,7 @@
 use oxide_arb_macros::IntoActiveValue;
 use sea_orm::{DeriveActiveEnum, EnumIter};
 use serde::{Deserialize, Serialize};
+use std::fmt::{self, Display, Formatter};
 
 /// Aggregate root referenced by an outbox event.
 #[derive(
@@ -33,8 +34,8 @@ pub enum OutboxAggregateType {
     System,
 }
 
-impl std::fmt::Display for OutboxAggregateType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Display for OutboxAggregateType {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Opportunity => f.write_str("opportunity"),
             Self::Trade => f.write_str("trade"),
@@ -74,8 +75,8 @@ pub enum OutboxEventType {
     Notification,
 }
 
-impl std::fmt::Display for OutboxEventType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Display for OutboxEventType {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Lifecycle => f.write_str("lifecycle"),
             Self::Audit => f.write_str("audit"),

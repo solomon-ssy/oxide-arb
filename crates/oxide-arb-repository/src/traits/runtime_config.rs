@@ -1,6 +1,8 @@
 use oxide_arb_error::storage::StorageError;
-use oxide_arb_models::domain::{RuntimeConfigInfo, UpsertRuntimeConfig};
-use oxide_arb_models::enums::runtime_config::RuntimeConfigKey;
+use oxide_arb_models::{
+    domain::{RuntimeConfigInfo, UpsertRuntimeConfig},
+    enums::runtime_config::RuntimeConfigKey,
+};
 
 pub trait RuntimeConfigRepository: Send + Sync {
     async fn get(&self, key: RuntimeConfigKey) -> Result<Option<RuntimeConfigInfo>, StorageError>;

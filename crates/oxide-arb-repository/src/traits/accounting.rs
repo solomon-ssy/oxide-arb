@@ -1,6 +1,8 @@
 use oxide_arb_error::storage::StorageError;
-use oxide_arb_models::domain::{AccountingPeriodInfo, NewAccountingPeriod, UpdateAccountingPeriod};
-use oxide_arb_models::types::PeriodId;
+use oxide_arb_models::{
+    domain::{AccountingPeriodInfo, NewAccountingPeriod, UpdateAccountingPeriod},
+    types::PeriodId,
+};
 
 pub trait AccountingRepository: Send + Sync {
     async fn get_current_daily(&self) -> Result<Option<AccountingPeriodInfo>, StorageError>;

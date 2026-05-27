@@ -9,43 +9,44 @@ mod risk_metrics;
 #[path = "support/test_util/scored_opportunity.rs"]
 mod scored_opportunity;
 
-use std::sync::Arc;
-
 use book_store_seed::seed_book_store;
 use oxide_arb_algorithm::scorer::ScoredOpportunity;
-use oxide_arb_api::fees::FeeCalculator;
-use oxide_arb_api::ws::ClobWsManager;
-use oxide_arb_core::bridge::risk_metrics::CoreRiskMetrics;
-use oxide_arb_core::bridge::trading_gate::{halt_trading, resume_trading};
-use oxide_arb_core::execution::capital_manager::CapitalManager;
-use oxide_arb_core::execution::dispatcher::Dispatcher;
-use oxide_arb_core::execution::execution_pipeline::{
-    ExecutionPipeline, ExecutionPipelineDeps, PostTradeJob,
+use oxide_arb_api::{fees::FeeCalculator, ws::ClobWsManager};
+use oxide_arb_core::{
+    bridge::{
+        risk_metrics::CoreRiskMetrics,
+        trading_gate::{halt_trading, resume_trading},
+    },
+    execution::{
+        capital_manager::CapitalManager,
+        dispatcher::Dispatcher,
+        execution_pipeline::{ExecutionPipeline, ExecutionPipelineDeps, PostTradeJob},
+        fsm::ExecutionFSM,
+        market_inflight::MarketInFlightRegistry,
+        plan_builder::PlanBuilder,
+        tiered_strategy::OrderStrategy,
+        validator::Validator,
+    },
+    exposure::in_memory::InMemoryExposureReservation,
+    observability::{
+        backpressure::{BackpressureAction, BackpressurePolicy},
+        metrics_hub::MetricsHub,
+    },
+    outbox::in_memory::InMemoryEventStore,
+    pipeline::{book_store::BookStore, staleness_classifier::StalenessClassifier},
+    service::risk_metrics::{ApiHealthTracker, RiskMetricsState},
 };
-use oxide_arb_core::execution::fsm::ExecutionFSM;
-use oxide_arb_core::execution::market_inflight::MarketInFlightRegistry;
-use oxide_arb_core::execution::plan_builder::PlanBuilder;
-use oxide_arb_core::execution::tiered_strategy::OrderStrategy;
-use oxide_arb_core::execution::validator::Validator;
-use oxide_arb_core::exposure::in_memory::InMemoryExposureReservation;
-use oxide_arb_core::observability::backpressure::{BackpressureAction, BackpressurePolicy};
-use oxide_arb_core::observability::metrics_hub::MetricsHub;
-use oxide_arb_core::outbox::in_memory::InMemoryEventStore;
-use oxide_arb_core::pipeline::book_store::BookStore;
-use oxide_arb_core::pipeline::staleness_classifier::StalenessClassifier;
-use oxide_arb_core::service::risk_metrics::{ApiHealthTracker, RiskMetricsState};
-use oxide_arb_models::config::{
-    ExposureReservationConfig, MarketDataConfig, PolymarketConfig, WebSocketConfig,
+use oxide_arb_models::{
+    config::{ExposureReservationConfig, MarketDataConfig, PolymarketConfig, WebSocketConfig},
+    enums::{common::ExecutionMode, execution::ExecutionOutcome},
+    types::{MarketId, Price, TokenId, TradeId, Usd},
 };
-use oxide_arb_models::enums::common::ExecutionMode;
-use oxide_arb_models::enums::execution::ExecutionOutcome;
-use oxide_arb_models::types::{MarketId, Price, TokenId, TradeId, Usd};
-use oxide_arb_risk::builder::RiskEngineBuilder;
-use oxide_arb_risk::clock::utc_clock;
+use oxide_arb_risk::{builder::RiskEngineBuilder, clock::utc_clock, engine::RiskEngine};
 use risk_config::test_risk_config;
 use risk_metrics::TestRiskMetrics;
 use rust_decimal_macros::dec;
 use scored_opportunity::sample_scored;
+use std::{hint::spin_loop, sync::Arc, thread::spawn, time::Duration};
 use tokio_util::sync::CancellationToken;
 
 fn build_pipeline(
@@ -53,7 +54,7 @@ fn build_pipeline(
 ) -> (
     ExecutionPipeline,
     Arc<ExecutionFSM>,
-    Arc<oxide_arb_risk::engine::RiskEngine>,
+    Arc<RiskEngine>,
     Arc<ScoredOpportunity>,
     Arc<InMemoryExposureReservation>,
 ) {
@@ -91,7 +92,7 @@ fn build_pipeline(
     ));
     ws_manager.seed_test_connectivity();
     let metrics_state = Arc::new(RiskMetricsState::new(Arc::new(ApiHealthTracker::new(
-        std::time::Duration::from_secs(60),
+        Duration::from_secs(60),
     ))));
     metrics_state.seed_test_snapshot(Usd::new(dec!(5000)));
     let risk_metrics = Arc::new(CoreRiskMetrics::new(
@@ -198,13 +199,13 @@ async fn reservation_confirm_failure_enters_emergency() {
     let (pipeline, fsm, _risk_engine, scored, exposure) = build_pipeline(outcome_tx);
 
     let exposure_steal = Arc::clone(&exposure);
-    let steal_thread = std::thread::spawn(move || {
+    let steal_thread = spawn(move || {
         for _ in 0..1_000_000 {
             if let Some(id) = exposure_steal.test_snapshot_active_ids().into_iter().next() {
                 let _ = exposure_steal.confirm_sync(&id);
                 return;
             }
-            std::hint::spin_loop();
+            spin_loop();
         }
     });
 

@@ -1,13 +1,10 @@
 //! UMA Optimistic Oracle REST source (third vote in 2-of-3 quorum).
 
+use super::{source::OracleSource, types::SourceVote};
 use async_trait::async_trait;
 use oxide_arb_error::rpc::RpcError;
-use oxide_arb_models::config::SettlementOracleConfig;
-use oxide_arb_models::types::MarketId;
+use oxide_arb_models::{config::SettlementOracleConfig, types::MarketId};
 use std::time::Duration;
-
-use super::source::OracleSource;
-use super::types::SourceVote;
 
 /// Queries UMA DVM for assertion settlement status by `condition_id`.
 pub struct UmaOracleSource {

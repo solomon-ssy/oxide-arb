@@ -5,14 +5,20 @@
 
 use crate::audit::RiskDecisionTrace;
 use chrono::{DateTime, Utc};
-use oxide_arb_models::domain::risk::RiskEngineState;
-use oxide_arb_models::enums::ReconciliationStatus;
-use oxide_arb_models::enums::risk::{BreakerStateName, CircuitBreakerLevel};
-use oxide_arb_models::types::{MarketId, ReservationId, TokenId, Usd};
+use oxide_arb_models::{
+    domain::risk::RiskEngineState,
+    enums::{
+        ReconciliationStatus,
+        risk::{BreakerStateName, CircuitBreakerLevel},
+    },
+    types::{MarketId, ReservationId, TokenId, Usd},
+};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use std::fmt;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::{
+    fmt,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 // ── State Version ───────────────────────────────────────────────────────────
 

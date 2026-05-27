@@ -3,6 +3,7 @@
 use oxide_arb_macros::IntoActiveValue;
 use sea_orm::{DeriveActiveEnum, EnumIter};
 use serde::{Deserialize, Serialize};
+use std::fmt::{self, Display, Formatter};
 
 /// Persisted top-level state of the 5-state circuit breaker FSM.
 ///
@@ -50,8 +51,8 @@ pub enum BreakerStateName {
     Halted,
 }
 
-impl std::fmt::Display for BreakerStateName {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Display for BreakerStateName {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Closed => f.write_str("closed"),
             Self::Open => f.write_str("open"),
@@ -104,8 +105,8 @@ impl CircuitBreakerLevel {
     }
 }
 
-impl std::fmt::Display for CircuitBreakerLevel {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Display for CircuitBreakerLevel {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Trade => f.write_str("trade"),
             Self::Session => f.write_str("session"),
@@ -146,8 +147,8 @@ pub enum BlacklistScope {
     Full = 2,
 }
 
-impl std::fmt::Display for BlacklistScope {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Display for BlacklistScope {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::DataPath => f.write_str("data_path"),
             Self::TradingPath => f.write_str("trading_path"),
@@ -189,8 +190,8 @@ pub enum BlacklistReason {
     DataNotFound,
 }
 
-impl std::fmt::Display for BlacklistReason {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Display for BlacklistReason {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::ConsecutiveFokFailures => f.write_str("consecutive_fok_failures"),
             Self::TradeFailedAfterMatched => f.write_str("trade_failed_after_matched"),
@@ -219,8 +220,8 @@ pub enum TradeAccountingPhase {
     Settlement,
 }
 
-impl std::fmt::Display for TradeAccountingPhase {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Display for TradeAccountingPhase {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Fill => f.write_str("fill"),
             Self::Settlement => f.write_str("settlement"),
@@ -253,8 +254,8 @@ pub enum ReconciliationStatus {
     Critical,
 }
 
-impl std::fmt::Display for ReconciliationStatus {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Display for ReconciliationStatus {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Ok => f.write_str("ok"),
             Self::Warning => f.write_str("warning"),
@@ -306,8 +307,8 @@ pub enum RiskAuditEventType {
     PostTradeUpdate,
 }
 
-impl std::fmt::Display for RiskAuditEventType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Display for RiskAuditEventType {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::TradeAllowed => f.write_str("trade_allowed"),
             Self::TradeDenied => f.write_str("trade_denied"),
@@ -350,8 +351,8 @@ pub enum ReservationStatus {
     Released,
 }
 
-impl std::fmt::Display for ReservationStatus {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Display for ReservationStatus {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Pending => f.write_str("pending"),
             Self::Confirmed => f.write_str("confirmed"),
@@ -397,8 +398,8 @@ impl WindowType {
     }
 }
 
-impl std::fmt::Display for WindowType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Display for WindowType {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
     }
 }

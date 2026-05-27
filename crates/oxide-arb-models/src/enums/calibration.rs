@@ -6,6 +6,7 @@ use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use sea_orm::{DeriveActiveEnum, EnumIter};
 use serde::{Deserialize, Serialize};
+use std::fmt::{self, Display, Formatter};
 
 /// Price zone classification for endgame calibration bucketing.
 ///
@@ -96,8 +97,8 @@ impl PriceZone {
     }
 }
 
-impl std::fmt::Display for PriceZone {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Display for PriceZone {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Z95 => f.write_str("z95"),
             Self::Z96 => f.write_str("z96"),
@@ -169,8 +170,8 @@ impl DurationBucket {
     }
 }
 
-impl std::fmt::Display for DurationBucket {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Display for DurationBucket {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Short => f.write_str("short"),
             Self::Medium => f.write_str("medium"),

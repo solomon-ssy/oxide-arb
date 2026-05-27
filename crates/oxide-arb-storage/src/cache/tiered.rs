@@ -133,11 +133,8 @@ impl TieredCache {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use oxide_arb_models::types::EventId;
-    use oxide_arb_models::types::MarketId;
-    use std::collections::HashMap;
-    use std::sync::Arc;
-    use std::time::Duration;
+    use oxide_arb_models::types::{EventId, MarketId};
+    use std::{collections::HashMap, sync::Arc, time::Duration};
     use tokio::sync::Mutex;
 
     #[derive(Default)]

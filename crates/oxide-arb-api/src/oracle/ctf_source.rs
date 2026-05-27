@@ -3,16 +3,16 @@
 //! Queries the Conditional Tokens Framework contract to determine
 //! whether a market has been resolved and what the payout is.
 
-use alloy::primitives::{Address, FixedBytes, U256};
-use alloy::providers::ProviderBuilder;
-use alloy::sol;
+use super::{source::OracleSource, types::SourceVote};
+use alloy::{
+    primitives::{Address, FixedBytes, U256},
+    providers::ProviderBuilder,
+    sol,
+};
 use async_trait::async_trait;
 use oxide_arb_error::rpc::RpcError;
 use oxide_arb_models::types::MarketId;
 use std::str::FromStr;
-
-use super::source::OracleSource;
-use super::types::SourceVote;
 
 sol! {
     #[sol(rpc)]

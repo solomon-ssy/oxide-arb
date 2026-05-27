@@ -17,9 +17,7 @@ use crate::cache::{CacheKey, CacheMetrics, TieredCache};
 use bitcode::{Decode, Encode};
 use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::config::CacheConfig;
-use std::collections::HashMap;
-use std::future::Future;
-use std::time::Duration;
+use std::{collections::HashMap, future::Future, time::Duration};
 use tracing::{debug, warn};
 
 /// Resolved per-domain cache behavior (computed from config at construction time).

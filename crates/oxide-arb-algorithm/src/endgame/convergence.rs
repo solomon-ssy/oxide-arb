@@ -110,7 +110,7 @@ impl ConvergenceBackend for InMemoryConvergenceTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
-
+    use std::{thread::sleep, time::Duration as StdTimeDuration};
     fn test_config() -> ConvergenceTrackerConfig {
         ConvergenceTrackerConfig {
             max_idle_secs: 7200,
@@ -174,7 +174,7 @@ mod tests {
         let mid = MarketId::new("m1");
         tracker.update_and_get(&mid, ConvergenceDirection::YesLikely, Utc::now());
 
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        sleep(StdTimeDuration::from_millis(50));
         tracker.entries.run_pending_tasks();
         assert_eq!(tracker.tracked_count(), 0);
     }

@@ -1,11 +1,6 @@
 //! Integration tests for the endgame detection pipeline.
 
-use std::sync::Arc;
-
 use chrono::{Duration, Utc};
-use rust_decimal::Decimal;
-use rust_decimal_macros::dec;
-
 use oxide_arb_algorithm::{
     calibration::{CalibrationEntry, ResolutionCalibrator},
     endgame::{EndgameDetectInput, EndgameDetector},
@@ -14,14 +9,19 @@ use oxide_arb_algorithm::{
 use oxide_arb_models::{
     config::{CalibrationConfig, EndgameDetectionConfig},
     domain::{
-        OrderbookSide,
+        Opportunity, OrderbookSide,
         book::{BookLevel, BookSnapshot, EndgameBookPair, EndgameBookSnapshot},
         calibration::BucketKey,
     },
-    enums::calibration::{DurationBucket, PriceZone},
-    enums::common::{MarketCategory, StalenessLevel},
+    enums::{
+        calibration::{DurationBucket, PriceZone},
+        common::{MarketCategory, StalenessLevel},
+    },
     types::{EventId, MarketId, Price, Shares, TokenId, Usd},
 };
+use rust_decimal::Decimal;
+use rust_decimal_macros::dec;
+use std::sync::Arc;
 
 /// Zero-fee estimator for deterministic test results.
 struct ZeroFeeEstimator;
@@ -106,7 +106,7 @@ struct DetectCase<'a> {
 fn detect(
     detector: &EndgameDetector<ZeroFeeEstimator>,
     case: &DetectCase<'_>,
-) -> Option<oxide_arb_models::domain::Opportunity> {
+) -> Option<Opportunity> {
     let direction = detector.detect_direction(case.book.view())?;
     detector.detect_with_direction(
         &EndgameDetectInput {

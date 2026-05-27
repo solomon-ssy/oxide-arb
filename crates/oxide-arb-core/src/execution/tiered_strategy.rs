@@ -3,20 +3,19 @@
 //! Live mode submits real FOK orders via [`ClobClient`]; Paper/DryRun delegate to
 //! the dispatcher's simulated fills.
 
-use std::sync::Arc;
-use std::time::Instant;
-
+use crate::{
+    execution::{clob_outcome::map_order_response, dispatcher::Dispatcher},
+    observability::{latency::observe_tick_to_http, metrics_hub::MetricsHub},
+};
 use oxide_arb_api::clob::ClobClient;
-use oxide_arb_models::domain::execution::ExecutionPlan;
-use oxide_arb_models::domain::latency::LatencyTrace;
-use oxide_arb_models::domain::order::OrderRequest;
-use oxide_arb_models::enums::common::{ExecutionMode, OrderType};
-use oxide_arb_models::enums::execution::ExecutionOutcome;
-
-use crate::execution::clob_outcome::map_order_response;
-use crate::execution::dispatcher::Dispatcher;
-use crate::observability::latency::observe_tick_to_http;
-use crate::observability::metrics_hub::MetricsHub;
+use oxide_arb_models::{
+    domain::{execution::ExecutionPlan, latency::LatencyTrace, order::OrderRequest},
+    enums::{
+        common::{ExecutionMode, OrderType},
+        execution::ExecutionOutcome,
+    },
+};
+use std::{sync::Arc, time::Instant};
 
 const TIER_FOK: &str = "fok";
 

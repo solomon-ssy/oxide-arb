@@ -1,8 +1,8 @@
 use super::{execute_sql, migrate_up};
-use oxide_arb_models::enums::common::TickSize;
-use oxide_arb_models::enums::market::MarketStatus;
-use oxide_arb_models::idens::event::Event;
-use oxide_arb_models::idens::market::Market;
+use oxide_arb_models::{
+    enums::{common::TickSize, market::MarketStatus},
+    idens::{event::Event, market::Market},
+};
 use sea_orm_migration::prelude::*;
 
 #[derive(DeriveMigrationName)]

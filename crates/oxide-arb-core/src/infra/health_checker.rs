@@ -1,11 +1,9 @@
-use std::sync::Arc;
-use std::time::Instant;
-
 use chrono::Utc;
 use num_traits::ToPrimitive;
 use oxide_arb_api::ws::ClobWsManager;
 use oxide_arb_models::domain::system::{HealthReport, SubsystemHealth};
 use oxide_arb_storage::{clickhouse::ClickHousePool, postgres::PostgresPool};
+use std::{sync::Arc, time::Instant};
 
 pub struct HealthChecker {
     pg_pool: Arc<PostgresPool>,

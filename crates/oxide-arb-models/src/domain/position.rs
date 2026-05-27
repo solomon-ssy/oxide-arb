@@ -4,9 +4,13 @@
 //! conversion. System fields (`position_id`, status, timestamps, `PnL` defaults)
 //! are populated by `ActiveModelBehavior::before_save`.
 
-use crate::enums::common::{PositionStatus, Side};
-use crate::enums::risk::ReservationStatus;
-use crate::types::{MarketId, PositionId, Price, ReservationId, Shares, TokenId, TradeId, Usd};
+use crate::{
+    enums::{
+        common::{PositionStatus, Side},
+        risk::ReservationStatus,
+    },
+    types::{MarketId, PositionId, Price, ReservationId, Shares, TokenId, TradeId, Usd},
+};
 use chrono::{DateTime, Utc};
 use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
 use serde::{Deserialize, Serialize};

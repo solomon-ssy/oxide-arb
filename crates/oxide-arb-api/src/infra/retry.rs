@@ -264,8 +264,13 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::{
+        fmt::{self, Formatter},
+        sync::{
+            Arc,
+            atomic::{AtomicU32, Ordering},
+        },
+    };
 
     #[test]
     fn controller_exhausts_after_max_attempts() {
@@ -313,8 +318,8 @@ mod tests {
     #[derive(Debug)]
     struct TestErr(ErrorKind, String);
 
-    impl std::fmt::Display for TestErr {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    impl Display for TestErr {
+        fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
             self.1.fmt(f)
         }
     }
@@ -360,8 +365,6 @@ mod tests {
 
     #[test]
     fn api_error_maps_to_error_kind_via_from() {
-        use oxide_arb_error::api::ApiError;
-
         let transient = ApiError::Timeout {
             operation: "gamma".into(),
             elapsed_ms: 5_000,

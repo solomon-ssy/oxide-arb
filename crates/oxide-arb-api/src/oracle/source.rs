@@ -1,10 +1,9 @@
 //! `OracleSource` trait definition.
 
+use super::types::SourceVote;
 use async_trait::async_trait;
 use oxide_arb_error::rpc::RpcError;
 use oxide_arb_models::types::MarketId;
-
-use super::types::SourceVote;
 
 /// Trait for a single oracle data source.
 ///

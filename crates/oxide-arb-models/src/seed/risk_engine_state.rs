@@ -1,9 +1,6 @@
 //! Risk engine singleton seed — inserts the canonical id=1 row.
 
-use crate::entities::risk_state;
-use crate::enums::risk::BreakerStateName;
-use crate::seed::SeedContext;
-use crate::types::Usd;
+use crate::{entities::risk_state, enums::risk::BreakerStateName, seed::SeedContext, types::Usd};
 use chrono::{DateTime, NaiveDate, Utc};
 use oxide_arb_macros::SeedUnit;
 use sea_orm::{

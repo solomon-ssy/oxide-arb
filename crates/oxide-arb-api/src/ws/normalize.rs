@@ -1,26 +1,24 @@
 //! Map Polymarket SDK WebSocket payloads into domain [`PipelineEvent`].
 
-use std::cell::RefCell;
-use std::cmp::Reverse;
-use std::sync::Arc;
-use std::time::Instant;
-
+use super::{ingest_hooks::BookLevelRejectHook, token_intern::intern_u256};
+use crate::clob::ClobSide;
 use ahash::AHashMap;
 use num_traits::ToPrimitive;
-use oxide_arb_models::domain::book::BookLevel;
-use oxide_arb_models::domain::pipeline::{
-    BookSideData, BookSnapshotCmd, IngressTrace, PipelineEvent, PriceDeltaCmd, PriceLevelDelta,
+use oxide_arb_models::{
+    domain::{
+        book::BookLevel,
+        pipeline::{
+            BookSideData, BookSnapshotCmd, IngressTrace, PipelineEvent, PriceDeltaCmd,
+            PriceLevelDelta,
+        },
+    },
+    enums::common::TickSize,
+    types::{MarketId, Price, Shares, TokenId},
 };
-use oxide_arb_models::enums::common::TickSize;
-use oxide_arb_models::types::{MarketId, Price, Shares, TokenId};
 use polymarket_client_sdk_v2::clob::ws::types::response::{
     BestBidAsk, BookUpdate, LastTradePrice, MarketResolved, PriceChange, TickSizeChange, WsMessage,
 };
-
-use crate::clob::ClobSide;
-
-use super::ingest_hooks::BookLevelRejectHook;
-use super::token_intern::intern_u256;
+use std::{cell::RefCell, cmp::Reverse, sync::Arc, time::Instant};
 
 thread_local! {
     static DELTA_GROUP: RefCell<AHashMap<TokenId, Vec<PriceLevelDelta>>> =
@@ -218,6 +216,10 @@ mod tests {
     use super::*;
     use oxide_arb_models::domain::pipeline::PipelineEvent;
     use polymarket_client_sdk_v2::types::{B256, U256};
+    use polymarket_client_sdk_v2::{
+        clob::types::Side,
+        clob::ws::types::response::{OrderBookLevel, PriceChangeBatchEntry},
+    };
     use rust_decimal_macros::dec;
     use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -250,8 +252,6 @@ mod tests {
 
     #[test]
     fn maps_book_snapshot_with_arc_levels() {
-        use polymarket_client_sdk_v2::clob::ws::types::response::OrderBookLevel;
-
         let book = BookUpdate::builder()
             .asset_id(U256::from(42_u64))
             .market(B256::ZERO)
@@ -282,8 +282,6 @@ mod tests {
 
     #[test]
     fn rejects_invalid_book_level() {
-        use polymarket_client_sdk_v2::clob::ws::types::response::OrderBookLevel;
-
         let rejects = Arc::new(AtomicU32::new(0));
         let hook: BookLevelRejectHook = {
             let rejects = Arc::clone(&rejects);
@@ -315,8 +313,6 @@ mod tests {
 
     #[test]
     fn keeps_valid_levels_when_invalid_present() {
-        use polymarket_client_sdk_v2::clob::ws::types::response::OrderBookLevel;
-
         let book = BookUpdate::builder()
             .asset_id(U256::from(42_u64))
             .market(B256::ZERO)
@@ -346,9 +342,6 @@ mod tests {
 
     #[test]
     fn price_change_reuses_thread_local_buffer() {
-        use polymarket_client_sdk_v2::clob::types::Side;
-        use polymarket_client_sdk_v2::clob::ws::types::response::PriceChangeBatchEntry;
-
         let pc = PriceChange::builder()
             .market(B256::ZERO)
             .timestamp(1000)

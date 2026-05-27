@@ -1,6 +1,5 @@
 use super::migrate_up;
-use oxide_arb_models::idens::accounting_period::AccountingPeriod;
-use oxide_arb_models::types::Usd;
+use oxide_arb_models::{idens::accounting_period::AccountingPeriod, types::Usd};
 use sea_orm_migration::prelude::*;
 
 #[derive(DeriveMigrationName)]

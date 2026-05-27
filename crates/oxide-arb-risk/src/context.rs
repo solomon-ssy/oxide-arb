@@ -4,15 +4,13 @@
 //! [`RiskMetricsSnapshot`]. Checks read only from this context — no I/O or
 //! subsystem locks on the hot path.
 
+use crate::{snapshot::RiskSnapshot, traits::RiskMetricsSnapshot, types::DrawdownAction};
 use chrono::{DateTime, Utc};
-use oxide_arb_models::domain::opportunity::Opportunity;
-use oxide_arb_models::domain::risk::ProbabilityInput;
-use oxide_arb_models::types::Usd;
+use oxide_arb_models::{
+    domain::{opportunity::Opportunity, risk::ProbabilityInput},
+    types::Usd,
+};
 use rust_decimal::Decimal;
-
-use crate::snapshot::RiskSnapshot;
-use crate::traits::RiskMetricsSnapshot;
-use crate::types::DrawdownAction;
 
 /// Circuit breaker gate snapshot for pre-trade evaluation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -210,7 +208,19 @@ impl PreTradeContext<'_> {
 mod tests {
     use super::*;
     use crate::snapshot::{BlacklistSnapshot, RiskSnapshot};
-    use oxide_arb_models::types::MarketId;
+    use oxide_arb_models::{
+        domain::{
+            calibration::{BucketKey, CalibrationSnapshot},
+            opportunity::{EndgameMeta, Opportunity},
+        },
+        enums::{
+            calibration::{DurationBucket, PriceZone},
+            common::{MarketCategory, Side, StalenessLevel},
+            opportunity::PayoutModel,
+        },
+        types::{Bps, EventId, MarketId, OpportunityId, Price, Shares, TokenId, Usd},
+    };
+    use rust_decimal_macros::dec;
 
     #[test]
     fn bloom_negative_skips_confirm() {
@@ -231,7 +241,6 @@ mod tests {
     }
 
     fn make_test_probability() -> ProbabilityInput {
-        use rust_decimal_macros::dec;
         ProbabilityInput {
             calibrated_win_prob: dec!(0.9),
             fill_prob: dec!(0.9),
@@ -244,15 +253,6 @@ mod tests {
     }
 
     fn make_test_opportunity() -> Opportunity {
-        use chrono::Utc;
-        use oxide_arb_models::domain::calibration::{BucketKey, CalibrationSnapshot};
-        use oxide_arb_models::domain::opportunity::{EndgameMeta, Opportunity};
-        use oxide_arb_models::enums::calibration::{DurationBucket, PriceZone};
-        use oxide_arb_models::enums::common::{MarketCategory, Side, StalenessLevel};
-        use oxide_arb_models::enums::opportunity::PayoutModel;
-        use oxide_arb_models::types::{Bps, EventId, OpportunityId, Price, Shares, TokenId, Usd};
-        use rust_decimal_macros::dec;
-
         Opportunity {
             opportunity_id: OpportunityId::new_v7(),
             market_id: MarketId::new("m"),

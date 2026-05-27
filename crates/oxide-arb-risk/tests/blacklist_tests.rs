@@ -2,13 +2,17 @@
 //!
 //! Validates TTL eviction, scope ordering, auto-blacklist, and GC.
 
-use oxide_arb_models::config::RiskConfig;
-use oxide_arb_models::enums::blacklist::BlacklistCheckResult;
-use oxide_arb_models::enums::risk::{BlacklistReason, BlacklistScope};
-use oxide_arb_models::types::MarketId;
-use oxide_arb_risk::blacklist::BlacklistManager;
-use oxide_arb_risk::clock::utc_clock;
-use std::time::Duration;
+use oxide_arb_models::{
+    config::RiskConfig,
+    enums::{
+        blacklist::BlacklistCheckResult,
+        risk::{BlacklistReason, BlacklistScope},
+    },
+    types::MarketId,
+};
+use oxide_arb_risk::{blacklist::BlacklistManager, clock::utc_clock};
+use std::time::Duration as StdTimeDuration;
+use std::{thread::sleep, time::Duration};
 
 fn test_config() -> RiskConfig {
     RiskConfig {
@@ -75,7 +79,7 @@ fn expired_entry_returns_clear() {
     );
 
     // Wait for expiry
-    std::thread::sleep(std::time::Duration::from_millis(10));
+    sleep(StdTimeDuration::from_millis(10));
 
     let result = mgr.check(&market_id, BlacklistScope::TradingPath);
     assert!(
@@ -119,7 +123,7 @@ fn gc_removes_expired_keeps_permanent() {
         2,
     );
 
-    std::thread::sleep(std::time::Duration::from_millis(10));
+    sleep(StdTimeDuration::from_millis(10));
 
     let evicted = mgr.gc();
     assert_eq!(evicted, 1, "should evict 1 expired entry");

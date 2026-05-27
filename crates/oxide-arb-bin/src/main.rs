@@ -1,5 +1,6 @@
 use clap::Parser;
 use oxide_arb_core::app::bootstrap;
+use std::error::Error;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
@@ -11,7 +12,7 @@ struct Cli {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<(), Box<dyn Error>> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .with_target(true)

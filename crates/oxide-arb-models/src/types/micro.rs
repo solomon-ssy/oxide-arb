@@ -6,9 +6,12 @@
 use num_traits::ToPrimitive;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use std::cmp::Ordering;
-use std::fmt;
-use std::ops::{Add, AddAssign, Div, Mul, Sub, SubAssign};
+use std::{
+    cmp::Ordering,
+    error::Error,
+    fmt,
+    ops::{Add, AddAssign, Div, Mul, Sub, SubAssign},
+};
 
 /// Scale factor: 1 unit = 1 / `MICRO_SCALE`.
 pub const MICRO_SCALE: i64 = 1_000_000;
@@ -23,7 +26,7 @@ impl fmt::Display for MicroConversionError {
     }
 }
 
-impl std::error::Error for MicroConversionError {}
+impl Error for MicroConversionError {}
 
 macro_rules! micro_newtype {
     ($(#[$meta:meta])* $name:ident) => {

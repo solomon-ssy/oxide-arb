@@ -3,25 +3,33 @@
 //! Verifies that every critical engine operation produces the expected
 //! `RiskAuditEvent` variant through a capturing mock persistence layer.
 
-use oxide_arb_models::config::RiskConfig;
-use oxide_arb_models::domain::blacklist::{BlacklistInfo, UpsertBlacklistEntry};
-use oxide_arb_models::domain::risk::{
-    NewEmergencySnapshot, NewReconciliationReport, NewRiskAuditEvent, RiskStateInfo,
-    UpsertRiskEngineState,
+mod support;
+
+use oxide_arb_models::{
+    config::RiskConfig,
+    domain::{
+        blacklist::{BlacklistInfo, UpsertBlacklistEntry},
+        risk::{
+            NewEmergencySnapshot, NewReconciliationReport, NewRiskAuditEvent, RiskStateInfo,
+            UpsertRiskEngineState,
+        },
+        trade::PostTradeInput,
+    },
+    enums::{
+        common::TradeOutcome,
+        risk::{BlacklistReason, BreakerStateName, TradeAccountingPhase},
+    },
+    types::{MarketId, TokenId, TradeId, Usd},
 };
-use oxide_arb_models::domain::trade::PostTradeInput;
-use oxide_arb_models::enums::common::TradeOutcome;
-use oxide_arb_models::enums::risk::{BlacklistReason, BreakerStateName, TradeAccountingPhase};
-use oxide_arb_models::types::{MarketId, TradeId, Usd};
-use oxide_arb_risk::builder::RiskEngineBuilder;
-use oxide_arb_risk::clock::utc_clock;
-use oxide_arb_risk::engine::RiskEngine;
-use oxide_arb_risk::traits::RiskPersistence;
+use oxide_arb_risk::{
+    builder::RiskEngineBuilder, clock::utc_clock, engine::RiskEngine, traits::RiskPersistence,
+};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
-use std::sync::{Arc, Mutex};
-
-mod support;
+use std::{
+    mem::take,
+    sync::{Arc, Mutex},
+};
 use support::MockMetrics;
 
 // ── Capturing Persistence ───────────────────────────────────────────────────
@@ -38,7 +46,7 @@ impl CapturingPersistence {
     }
 
     fn take_audits(&self) -> Vec<NewRiskAuditEvent> {
-        std::mem::take(&mut *self.audits.lock().unwrap())
+        take(&mut *self.audits.lock().unwrap())
     }
 }
 
@@ -137,7 +145,7 @@ fn test_trade(outcome: TradeOutcome, profit: Decimal) -> PostTradeInput {
     PostTradeInput {
         trade_id: TradeId::generate(),
         market_id: MarketId::new("0xaudit_market"),
-        token_id: oxide_arb_models::types::TokenId::new("audit_token"),
+        token_id: TokenId::new("audit_token"),
         outcome,
         cost_usd: Usd::new(dec!(20)),
         fee_usd: Usd::new(dec!(0.40)),

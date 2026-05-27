@@ -139,7 +139,6 @@ impl CooldownBackend for InMemoryEmissionCooldown {
 mod tests {
     use super::*;
     use rust_decimal_macros::dec;
-
     fn test_config() -> EmissionCooldownConfig {
         EmissionCooldownConfig {
             base_cooldown_secs: 1,

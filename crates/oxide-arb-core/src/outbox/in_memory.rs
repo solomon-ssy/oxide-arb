@@ -3,14 +3,10 @@
 //! Production flusher integration lands in PR-8; until then spilled jobs are
 //! replayed directly by the execution outcome drain.
 
-use std::collections::VecDeque;
-use std::sync::Arc;
-
+use crate::{execution::execution_pipeline::PostTradeJob, observability::metrics_hub::MetricsHub};
 use oxide_arb_error::OxideError;
 use parking_lot::Mutex;
-
-use crate::execution::execution_pipeline::PostTradeJob;
-use crate::observability::metrics_hub::MetricsHub;
+use std::{collections::VecDeque, sync::Arc};
 
 /// Synchronous spill buffer backing post-trade backpressure.
 pub struct InMemoryEventStore {
@@ -68,11 +64,11 @@ pub type SharedInMemoryEventStore = Arc<InMemoryEventStore>;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use oxide_arb_models::enums::common::ExecutionMode;
-    use oxide_arb_models::enums::execution::ExecutionOutcome;
-    use oxide_arb_models::types::{MarketId, Price, TokenId, TradeId, Usd};
+    use oxide_arb_models::{
+        enums::{common::ExecutionMode, execution::ExecutionOutcome},
+        types::{MarketId, Price, TokenId, TradeId, Usd},
+    };
     use rust_decimal_macros::dec;
-
     fn sample_job(id: &str) -> PostTradeJob {
         PostTradeJob {
             trade_id: TradeId::new(id),

@@ -1,16 +1,10 @@
 //! Token-to-shard routing and dynamic shard spawning.
 
-use oxide_arb_models::domain::pipeline::PipelineEvent;
-use oxide_arb_models::types::TokenId;
+use super::{drop_hook::WsEventDropHook, ingest_hooks::BookLevelRejectHook, shard::WsShard};
+use oxide_arb_models::{domain::pipeline::PipelineEvent, types::TokenId};
 use parking_lot::RwLock;
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::Instant;
+use std::{collections::HashMap, sync::Arc, time::Instant};
 use tokio_util::sync::CancellationToken;
-
-use super::drop_hook::WsEventDropHook;
-use super::ingest_hooks::BookLevelRejectHook;
-use super::shard::WsShard;
 
 /// Routes token subscriptions across shards and spawns shard tasks.
 pub struct ShardRouter {

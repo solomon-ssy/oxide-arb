@@ -1,6 +1,8 @@
 use oxide_arb_error::storage::StorageError;
-use oxide_arb_models::domain::{EventInfo, UpsertEvent};
-use oxide_arb_models::types::EventId;
+use oxide_arb_models::{
+    domain::{EventInfo, UpsertEvent},
+    types::EventId,
+};
 use std::collections::HashSet;
 
 pub trait EventRepository: Send + Sync {

@@ -14,14 +14,15 @@
 //! - L3 Daily / L4 System: `halt()` → Halted (requires `acknowledge_and_resume()`)
 //! - `reset()` → any state → Closed (testing / escape hatch)
 
-use crate::clock::Clock;
-use crate::types::BreakerState;
+use crate::{clock::Clock, types::BreakerState};
 use chrono::{DateTime, Utc};
 use num_traits::ToPrimitive;
 use oxide_arb_error::{OxideError, OxideResult};
-use oxide_arb_models::config::CircuitBreakerConfig;
-use oxide_arb_models::domain::risk::RiskEngineState;
-use oxide_arb_models::enums::risk::{BreakerStateName, CircuitBreakerLevel};
+use oxide_arb_models::{
+    config::CircuitBreakerConfig,
+    domain::risk::RiskEngineState,
+    enums::risk::{BreakerStateName, CircuitBreakerLevel},
+};
 use std::sync::Arc;
 
 pub struct CircuitBreaker {

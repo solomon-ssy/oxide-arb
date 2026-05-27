@@ -9,51 +9,66 @@ mod risk_metrics;
 #[path = "support/test_util/scored_opportunity.rs"]
 mod scored_opportunity;
 
-use std::sync::Arc;
-use std::time::Instant;
-
+use alloy::signers::Signer as _;
+use alloy::signers::local::LocalSigner;
 use book_store_seed::seed_book_store;
 use chrono::Utc;
 use oxide_arb_algorithm::scorer::ScoredOpportunity;
-use oxide_arb_api::fees::FeeCalculator;
-use oxide_arb_api::ws::ClobWsManager;
-use oxide_arb_core::bridge::risk_metrics::CoreRiskMetrics;
-use oxide_arb_core::execution::capital_manager::CapitalManager;
-use oxide_arb_core::execution::clob_outcome::{filled_net_profit, map_order_response};
-use oxide_arb_core::execution::dispatcher::Dispatcher;
-use oxide_arb_core::execution::execution_pipeline::{
-    ExecutionPipeline, ExecutionPipelineDeps, PostTradeJob,
+use oxide_arb_api::{
+    clob::ClobClient, fees::FeeCalculator, keystore::OrderSigner, ws::ClobWsManager,
 };
-use oxide_arb_core::execution::fsm::ExecutionFSM;
-use oxide_arb_core::execution::market_inflight::MarketInFlightRegistry;
-use oxide_arb_core::execution::plan_builder::PlanBuilder;
-use oxide_arb_core::execution::tiered_strategy::OrderStrategy;
-use oxide_arb_core::execution::validator::Validator;
-use oxide_arb_core::exposure::in_memory::InMemoryExposureReservation;
-use oxide_arb_core::observability::backpressure::{BackpressureAction, BackpressurePolicy};
-use oxide_arb_core::observability::metrics_hub::MetricsHub;
-use oxide_arb_core::outbox::in_memory::InMemoryEventStore;
-use oxide_arb_core::pipeline::book_store::BookStore;
-use oxide_arb_core::pipeline::staleness_classifier::StalenessClassifier;
-use oxide_arb_core::service::risk_metrics::{ApiHealthTracker, RiskMetricsState};
-use oxide_arb_models::config::{
-    ExposureReservationConfig, MarketDataConfig, PolymarketConfig, WebSocketConfig,
+use oxide_arb_core::{
+    bridge::risk_metrics::CoreRiskMetrics,
+    execution::{
+        capital_manager::CapitalManager,
+        clob_outcome::{filled_net_profit, map_order_response},
+        dispatcher::Dispatcher,
+        execution_pipeline::{ExecutionPipeline, ExecutionPipelineDeps, PostTradeJob},
+        fsm::ExecutionFSM,
+        market_inflight::MarketInFlightRegistry,
+        plan_builder::PlanBuilder,
+        tiered_strategy::OrderStrategy,
+        validator::Validator,
+    },
+    exposure::in_memory::InMemoryExposureReservation,
+    observability::{
+        backpressure::{BackpressureAction, BackpressurePolicy},
+        metrics_hub::MetricsHub,
+    },
+    outbox::in_memory::InMemoryEventStore,
+    pipeline::{book_store::BookStore, staleness_classifier::StalenessClassifier},
+    service::risk_metrics::{ApiHealthTracker, RiskMetricsState},
 };
-use oxide_arb_models::domain::execution::ExecutionPlan;
-use oxide_arb_models::domain::order::OrderResponse;
-use oxide_arb_models::enums::common::ExecutionMode;
-use oxide_arb_models::enums::execution::ExecutionOutcome;
-use oxide_arb_models::enums::order::OrderStatus;
-use oxide_arb_models::types::{
-    EventId, ExecutionId, MarketId, OrderId, Price, ReservationId, Shares, TokenId, TradeId, Usd,
+use oxide_arb_models::{
+    config::{ExposureReservationConfig, MarketDataConfig, PolymarketConfig, WebSocketConfig},
+    domain::{execution, execution::ExecutionPlan, order::OrderResponse},
+    enums::{
+        common::{ExecutionMode, Side},
+        execution::ExecutionOutcome,
+        order::OrderStatus,
+    },
+    types::{
+        EventId, ExecutionId, MarketId, OpportunityId, OrderId, Price, ReservationId, Shares,
+        TokenId, TradeId, Usd,
+    },
 };
-use oxide_arb_risk::builder::RiskEngineBuilder;
-use oxide_arb_risk::clock::utc_clock;
+use oxide_arb_risk::{builder::RiskEngineBuilder, clock::utc_clock};
+use polymarket_client_sdk_v2::POLYGON;
+use polymarket_client_sdk_v2::clob::{Client as SdkClient, Config as SdkConfig};
 use risk_config::test_risk_config;
 use risk_metrics::TestRiskMetrics;
 use rust_decimal_macros::dec;
 use scored_opportunity::{sample_opportunity, sample_scored};
+use std::str::FromStr as _;
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use tokio_util::sync::CancellationToken;
+use wiremock::{
+    Mock, MockServer, ResponseTemplate,
+    matchers::{method, path},
+};
 
 fn build_pipeline(
     outcome_tx: flume::Sender<PostTradeJob>,
@@ -96,7 +111,7 @@ fn build_pipeline(
     ));
     ws_manager.seed_test_connectivity();
     let metrics_state = Arc::new(RiskMetricsState::new(Arc::new(ApiHealthTracker::new(
-        std::time::Duration::from_secs(60),
+        Duration::from_secs(60),
     ))));
     metrics_state.seed_test_snapshot(Usd::new(dec!(5000)));
     let risk_metrics = Arc::new(CoreRiskMetrics::new(metrics_state, exposure, ws_manager));
@@ -133,11 +148,11 @@ fn build_pipeline(
 fn clob_outcome_maps_partial_fill() {
     let plan = ExecutionPlan {
         execution_id: ExecutionId::generate(),
-        opportunity_id: oxide_arb_models::types::OpportunityId::new_v7(),
+        opportunity_id: OpportunityId::new_v7(),
         market_id: MarketId::new("m1"),
         event_id: EventId::new("e1"),
         token_id: TokenId::new("t1"),
-        side: oxide_arb_models::enums::common::Side::Buy,
+        side: Side::Buy,
         shares: Shares::new(dec!(100)),
         limit_price: Price::new(dec!(0.5)),
         estimated_cost: Usd::new(dec!(50)),
@@ -276,8 +291,6 @@ fn outbox_spill_fifo_under_pressure() {
 
 #[tokio::test]
 async fn live_mode_wiremock_fill() {
-    use wiremock::MockServer;
-
     const TOKEN: &str =
         "15871154585880608648532107628464183779895785213830018178010423617714102767076";
 
@@ -302,9 +315,6 @@ async fn live_mode_wiremock_fill() {
 }
 
 async fn mount_live_clob_wiremock(server: &wiremock::MockServer) {
-    use wiremock::matchers::{method, path};
-    use wiremock::{Mock, ResponseTemplate};
-
     Mock::given(method("GET"))
         .and(path("/auth/derive-api-key"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
@@ -361,16 +371,7 @@ async fn mount_live_clob_wiremock(server: &wiremock::MockServer) {
         .await;
 }
 
-async fn live_clob_client(server: &wiremock::MockServer) -> Arc<oxide_arb_api::clob::ClobClient> {
-    use std::str::FromStr as _;
-
-    use alloy::signers::Signer as _;
-    use alloy::signers::local::LocalSigner;
-    use oxide_arb_api::clob::ClobClient;
-    use oxide_arb_api::keystore::OrderSigner;
-    use polymarket_client_sdk_v2::POLYGON;
-    use polymarket_client_sdk_v2::clob::{Client as SdkClient, Config as SdkConfig};
-
+async fn live_clob_client(server: &wiremock::MockServer) -> Arc<ClobClient> {
     const PRIVATE_KEY: &str = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 
     let local = LocalSigner::from_str(PRIVATE_KEY)
@@ -394,9 +395,7 @@ async fn live_clob_client(server: &wiremock::MockServer) -> Arc<oxide_arb_api::c
     Arc::new(ClobClient::from_sdk_for_test(Arc::new(sdk), order_signer))
 }
 
-fn live_execution_pipeline(clob: Arc<oxide_arb_api::clob::ClobClient>) -> LivePipelineHarness {
-    use oxide_arb_core::execution::tiered_strategy::OrderStrategy;
-    use oxide_arb_models::enums::common::ExecutionMode;
+fn live_execution_pipeline(clob: Arc<ClobClient>) -> LivePipelineHarness {
     let (outcome_tx, _rx) = ExecutionPipeline::outcome_channel();
     let metrics = Arc::new(MetricsHub::new());
     let fsm = Arc::new(ExecutionFSM::new(Arc::clone(&metrics)));
@@ -431,7 +430,7 @@ fn live_execution_pipeline(clob: Arc<oxide_arb_api::clob::ClobClient>) -> LivePi
     ));
     ws_manager.seed_test_connectivity();
     let metrics_state = Arc::new(RiskMetricsState::new(Arc::new(ApiHealthTracker::new(
-        std::time::Duration::from_secs(60),
+        Duration::from_secs(60),
     ))));
     metrics_state.seed_test_snapshot(Usd::new(dec!(5000)));
     let risk_metrics = Arc::new(CoreRiskMetrics::new(metrics_state, exposure, ws_manager));
@@ -474,10 +473,7 @@ impl LivePipelineHarness {
         &self.book_store
     }
 
-    async fn execute(
-        &self,
-        scored: Arc<ScoredOpportunity>,
-    ) -> oxide_arb_models::domain::execution::ExecutionResult {
+    async fn execute(&self, scored: Arc<ScoredOpportunity>) -> execution::ExecutionResult {
         self.pipeline.execute(scored).await
     }
 }

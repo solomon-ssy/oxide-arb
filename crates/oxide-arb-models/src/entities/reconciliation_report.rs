@@ -1,7 +1,6 @@
 //! `reconciliation_reports` table entity.
 
-use crate::enums::risk::ReconciliationStatus;
-use crate::types::Usd;
+use crate::{enums::risk::ReconciliationStatus, types::Usd};
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 

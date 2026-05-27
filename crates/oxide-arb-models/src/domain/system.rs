@@ -1,10 +1,14 @@
 //! System status, lifecycle, config, accounting, and reporting domain models.
 
-use crate::enums::common::{ExecutionMode, ReportType};
-use crate::enums::lifecycle::{LifecyclePhase, LifecycleRecorder, ShutdownStage};
-use crate::enums::risk::BreakerStateName;
-use crate::enums::runtime_config::RuntimeConfigKey;
-use crate::types::{PeriodId, Probability, Usd};
+use crate::{
+    enums::{
+        common::{ExecutionMode, ReportType},
+        lifecycle::{LifecyclePhase, LifecycleRecorder, ShutdownStage},
+        risk::BreakerStateName,
+        runtime_config::RuntimeConfigKey,
+    },
+    types::{PeriodId, Probability, Usd},
+};
 use chrono::{DateTime, NaiveDate, Utc};
 use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
 use serde::{Deserialize, Serialize};

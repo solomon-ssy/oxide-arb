@@ -1,13 +1,11 @@
-use std::collections::HashMap;
-use std::sync::Arc;
-
+use super::market_registry::MarketRegistry;
 use arc_swap::ArcSwap;
 use chrono::{DateTime, Utc};
-
-use oxide_arb_models::enums::common::{MarketCategory, TickSize};
-use oxide_arb_models::types::{EventId, MarketId, TokenId};
-
-use super::market_registry::MarketRegistry;
+use oxide_arb_models::{
+    enums::common::{MarketCategory, TickSize},
+    types::{EventId, MarketId, TokenId},
+};
+use std::{collections::HashMap, sync::Arc};
 
 /// Pre-computed scan entry for hot-path iteration.
 ///
@@ -91,10 +89,12 @@ mod tests {
     use super::*;
     use crate::pipeline::market_registry::MarketRegistry;
     use chrono::Utc;
-    use oxide_arb_models::domain::market::{MarketRegistryInfo, TokenInfo};
-    use oxide_arb_models::enums::market::MarketStatus;
+    use oxide_arb_models::{
+        domain::market::{MarketRegistryInfo, TokenInfo},
+        enums::market::MarketStatus,
+        types::Usd,
+    };
     use rust_decimal_macros::dec;
-
     fn sample_entry(id: &str) -> MarketRegistryInfo {
         MarketRegistryInfo {
             market_id: MarketId::new(id),
@@ -123,7 +123,7 @@ mod tests {
             best_ask: None,
             depth_usd: None,
             min_order_size: dec!(5),
-            volume_24h: oxide_arb_models::types::Usd::ZERO,
+            volume_24h: Usd::ZERO,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

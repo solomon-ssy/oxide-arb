@@ -7,26 +7,30 @@ mod rate_limiter;
 mod sdk_error;
 mod token;
 
+pub use book::OrderbookSnapshot;
 pub use convert::{ClobSide, SdkSideConversionError};
-use num_traits::ToPrimitive;
+pub use orders::{CancelAllResult, CancelResult, OpenOrder};
+pub use rate_limiter::RateLimiter;
 pub use sdk_error::SdkClobError;
 pub use token::WireTokenId;
 
-pub use book::OrderbookSnapshot;
-pub use orders::{CancelAllResult, CancelResult, OpenOrder};
-pub use rate_limiter::RateLimiter;
-
-use crate::infra::retry::{self, RetryPolicy};
-use crate::keystore::OrderSigner;
-use crate::ws::BookLevelRejectHook;
+use crate::{
+    infra::retry::{self, RetryPolicy},
+    keystore::OrderSigner,
+    ws::BookLevelRejectHook,
+};
+use num_traits::ToPrimitive;
 use oxide_arb_error::api::ApiError;
-use oxide_arb_models::config::PolymarketConfig;
-use oxide_arb_models::domain::BookLevel;
-use oxide_arb_models::domain::book::{EndgameBookSnapshot, OrderbookSide};
-use oxide_arb_models::domain::order::{OrderRequest, OrderResponse};
-use oxide_arb_models::enums::common::OrderType;
-use oxide_arb_models::enums::order::OrderStatus;
-use oxide_arb_models::types::{OrderId, Price, Shares, TokenId, Usd};
+use oxide_arb_models::{
+    config::PolymarketConfig,
+    domain::{
+        BookLevel,
+        book::{EndgameBookSnapshot, OrderbookSide},
+        order::{OrderRequest, OrderResponse},
+    },
+    enums::{common::OrderType, order::OrderStatus},
+    types::{OrderId, Price, Shares, TokenId, Usd},
+};
 use polymarket_client_sdk_v2::auth::Normal;
 use polymarket_client_sdk_v2::auth::state::Authenticated;
 use polymarket_client_sdk_v2::clob::types::Side as SdkSide;
@@ -36,8 +40,7 @@ use polymarket_client_sdk_v2::clob::types::request::{
 use polymarket_client_sdk_v2::clob::types::{AssetType, OrderType as SdkOrderType};
 use polymarket_client_sdk_v2::clob::{Client as SdkClient, Config as SdkConfig};
 use rust_decimal::Decimal;
-use std::convert::TryFrom;
-use std::sync::Arc;
+use std::{convert::TryFrom, sync::Arc};
 
 /// Polymarket CLOB REST client backed by the official SDK.
 ///

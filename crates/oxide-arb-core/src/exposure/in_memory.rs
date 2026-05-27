@@ -1,14 +1,17 @@
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
-
 use dashmap::DashMap;
 use num_traits::ToPrimitive;
 use oxide_arb_error::reservation::ReservationError;
-use oxide_arb_models::config::ExposureReservationConfig;
-use oxide_arb_models::types::{MarketId, ReservationId, Usd};
+use oxide_arb_models::{
+    config::ExposureReservationConfig,
+    types::{MarketId, ReservationId, Usd},
+};
 use oxide_arb_risk::traits::ExposureReservationBackend;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
+use std::{
+    sync::atomic::{AtomicU64, Ordering},
+    time::{Duration, Instant},
+};
 
 struct ReservationEntry {
     market_id: MarketId,

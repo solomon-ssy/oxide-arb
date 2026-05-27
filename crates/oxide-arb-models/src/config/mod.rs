@@ -41,10 +41,13 @@ pub use risk::*;
 pub use settlement_oracle::*;
 pub use treasury::*;
 
-use crate::config::validation::{validate_settings_common, validate_settings_mode};
-use crate::enums::common::ExecutionMode;
-use oxide_arb_error::config_validation::ConfigValidationReport;
-use oxide_arb_error::{OxideResult, config::ConfigError};
+use crate::{
+    config::validation::{validate_settings_common, validate_settings_mode},
+    enums::common::ExecutionMode,
+};
+use oxide_arb_error::{
+    OxideResult, config::ConfigError, config_validation::ConfigValidationReport,
+};
 use serde::Deserialize;
 use std::{ops::Deref, path::PathBuf, sync::Arc};
 
@@ -227,6 +230,7 @@ impl Inner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{env::var, path::Path};
 
     #[test]
     fn default_config_deserializes() {
@@ -286,8 +290,8 @@ mod tests {
 
     #[test]
     fn shipped_toml_template_deserializes() {
-        let crate_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_owned());
-        let workspace_root = std::path::Path::new(&crate_dir)
+        let crate_dir = var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_owned());
+        let workspace_root = Path::new(&crate_dir)
             .ancestors()
             .nth(2)
             .expect("workspace root");

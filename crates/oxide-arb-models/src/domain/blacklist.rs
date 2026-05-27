@@ -4,8 +4,10 @@
 //! from trading due to repeated failures, data issues, or manual operator
 //! action.
 
-use crate::enums::risk::{BlacklistReason, BlacklistScope};
-use crate::types::{MarketId, TokenId};
+use crate::{
+    enums::risk::{BlacklistReason, BlacklistScope},
+    types::{MarketId, TokenId},
+};
 use chrono::{DateTime, Utc};
 use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
 use serde::{Deserialize, Serialize};

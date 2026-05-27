@@ -1,8 +1,9 @@
-use std::collections::VecDeque;
-use std::time::{Duration, Instant};
-
 use dashmap::DashMap;
 use oxide_arb_models::enums::system::SourceHealth;
+use std::{
+    collections::VecDeque,
+    time::{Duration, Instant},
+};
 
 pub struct OracleHealthTracker {
     sources: DashMap<String, SourceHealthWindow>,

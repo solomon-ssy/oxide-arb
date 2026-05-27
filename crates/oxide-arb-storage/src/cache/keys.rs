@@ -5,9 +5,11 @@
 //! derived as `ttl / 4` by the [`TieredCache`] layer.
 
 use oxide_arb_models::{
-    enums::calibration::{DurationBucket, PriceZone},
-    enums::common::MarketCategory,
-    enums::runtime_config::RuntimeConfigKey,
+    enums::{
+        calibration::{DurationBucket, PriceZone},
+        common::MarketCategory,
+        runtime_config::RuntimeConfigKey,
+    },
     types::{EventId, MarketId},
 };
 use std::time::Duration;

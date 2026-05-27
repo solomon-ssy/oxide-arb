@@ -1,19 +1,33 @@
 //! Deterministic integration tests for book/coalescer/execution hot paths.
 
-use std::sync::Arc;
-
 use chrono::Utc;
-use oxide_arb_core::detection::coalescer::Coalescer;
-use oxide_arb_core::execution::fsm::ExecutionFSM;
-use oxide_arb_core::observability::metrics_hub::MetricsHub;
-use oxide_arb_core::pipeline::book_store::BookStore;
-use oxide_arb_core::pipeline::market_registry::MarketRegistry;
-use oxide_arb_models::domain::book::BookLevel;
-use oxide_arb_models::domain::market::{MarketRegistryInfo, TokenInfo};
-use oxide_arb_models::enums::common::Side;
-use oxide_arb_models::enums::market::MarketStatus;
-use oxide_arb_models::types::{MarketId, Price, Shares, TokenId};
+use oxide_arb_core::{
+    detection::coalescer::Coalescer,
+    execution::fsm::ExecutionFSM,
+    observability::{
+        backpressure::{BackpressureAction, BackpressurePolicy},
+        metrics_hub::MetricsHub,
+    },
+    outbox::in_memory::InMemoryEventStore,
+    pipeline::{book_store::BookStore, market_registry::MarketRegistry},
+};
+use oxide_arb_models::{
+    domain::{
+        book::BookLevel,
+        market::{MarketRegistryInfo, TokenInfo},
+        pipeline::{IngressTrace, PipelineEvent, PriceDeltaCmd, PriceLevelDelta},
+    },
+    enums::{
+        common::{MarketCategory, Side, TickSize},
+        market::MarketStatus,
+    },
+    types::{EventId, MarketId, Price, Shares, TokenId, Usd},
+};
 use rust_decimal_macros::dec;
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use tokio_util::sync::CancellationToken;
 
 fn level(p: rust_decimal::Decimal, s: rust_decimal::Decimal) -> BookLevel {
@@ -23,15 +37,15 @@ fn level(p: rust_decimal::Decimal, s: rust_decimal::Decimal) -> BookLevel {
 fn sample_market(id: &str) -> MarketRegistryInfo {
     MarketRegistryInfo {
         market_id: MarketId::new(id),
-        event_id: oxide_arb_models::types::EventId::new("evt"),
+        event_id: EventId::new("evt"),
         token_yes: TokenId::new(format!("{id}-yes")),
         token_no: TokenId::new(format!("{id}-no")),
         question: "Q".into(),
         slug: "q".into(),
-        category: oxide_arb_models::enums::common::MarketCategory::Other,
+        category: MarketCategory::Other,
         status: MarketStatus::Active,
         neg_risk: false,
-        tick_size: oxide_arb_models::enums::common::TickSize::Hundredth,
+        tick_size: TickSize::Hundredth,
         tokens: vec![
             TokenInfo {
                 token_id: TokenId::new(format!("{id}-yes")),
@@ -48,7 +62,7 @@ fn sample_market(id: &str) -> MarketRegistryInfo {
         best_ask: None,
         depth_usd: None,
         min_order_size: dec!(1),
-        volume_24h: oxide_arb_models::types::Usd::ZERO,
+        volume_24h: Usd::ZERO,
         created_at: Utc::now(),
         updated_at: Utc::now(),
     }
@@ -82,7 +96,7 @@ async fn coalescer_flushes_after_window() {
     let shutdown = CancellationToken::new();
     let coalescer = Coalescer::new(
         registry,
-        std::time::Duration::from_millis(30),
+        Duration::from_millis(30),
         tx,
         Arc::clone(&metrics),
         shutdown.clone(),
@@ -92,7 +106,7 @@ async fn coalescer_flushes_after_window() {
     coalescer.notify_token_update(&yes);
 
     let handle = tokio::spawn(async move { coalescer.run().await });
-    tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+    tokio::time::sleep(Duration::from_millis(80)).await;
     shutdown.cancel();
     let _ = handle.await;
 
@@ -110,7 +124,7 @@ async fn coalescer_pair_complete_flushes_immediately() {
     let shutdown = CancellationToken::new();
     let coalescer = Coalescer::new(
         registry,
-        std::time::Duration::from_millis(500),
+        Duration::from_millis(500),
         tx,
         Arc::clone(&metrics),
         shutdown,
@@ -127,18 +141,6 @@ async fn coalescer_pair_complete_flushes_immediately() {
 
 #[test]
 fn backpressure_book_coalesce_does_not_halt() {
-    use std::sync::Arc;
-    use std::time::Instant;
-
-    use oxide_arb_core::observability::backpressure::{BackpressureAction, BackpressurePolicy};
-    use oxide_arb_core::outbox::in_memory::InMemoryEventStore;
-    use oxide_arb_models::domain::pipeline::{
-        IngressTrace, PipelineEvent, PriceDeltaCmd, PriceLevelDelta,
-    };
-    use oxide_arb_models::enums::common::Side;
-    use oxide_arb_models::types::{Price, Shares, TokenId};
-    use rust_decimal_macros::dec;
-
     let metrics = Arc::new(MetricsHub::new());
     let fsm = Arc::new(ExecutionFSM::new(Arc::clone(&metrics)));
     let bp = BackpressurePolicy::new(

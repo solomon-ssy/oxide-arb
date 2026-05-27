@@ -1,7 +1,5 @@
 //! Regression tests for strict NO-token orderbook handling.
 
-use std::sync::Arc;
-
 use chrono::{Duration, Utc};
 use oxide_arb_algorithm::{
     calibration::ResolutionCalibrator,
@@ -11,7 +9,7 @@ use oxide_arb_algorithm::{
 use oxide_arb_models::{
     config::{CalibrationConfig, EndgameDetectionConfig},
     domain::{
-        OrderbookSide,
+        Opportunity, OrderbookSide,
         book::{BookLevel, BookSnapshot, EndgameBookPair, EndgameBookSnapshot},
     },
     enums::common::{MarketCategory, StalenessLevel},
@@ -19,6 +17,7 @@ use oxide_arb_models::{
 };
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
+use std::sync::Arc;
 
 struct ZeroFeeEstimator;
 
@@ -82,7 +81,7 @@ fn detector() -> EndgameDetector<ZeroFeeEstimator> {
     EndgameDetector::new(&detection, &calibration, calibrator, fees)
 }
 
-fn detect(book: &EndgameBookPair) -> Option<oxide_arb_models::domain::Opportunity> {
+fn detect(book: &EndgameBookPair) -> Option<Opportunity> {
     let detector = detector();
     let direction = detector.detect_direction(book.view())?;
     let now = Utc::now();

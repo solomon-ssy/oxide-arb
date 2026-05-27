@@ -1,8 +1,6 @@
 //! Pre-defined seed plans for bootstrap migrations.
 
-use super::SeedPlan;
-use super::risk_engine_state::RiskEngineStateSeed;
-use super::runtime_config::RuntimeConfigSeed;
+use super::{SeedPlan, risk_engine_state::RiskEngineStateSeed, runtime_config::RuntimeConfigSeed};
 
 /// Trading bootstrap v1: risk engine singleton + runtime configuration defaults.
 ///

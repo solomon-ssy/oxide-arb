@@ -3,12 +3,18 @@
 //! Exercises the reconciliation engine with mock metrics and balance queries
 //! to verify Ok / Warning / Critical classification and mismatch detection.
 
-use oxide_arb_models::domain::position::PositionInfo;
-use oxide_arb_models::enums::common::{PositionStatus, Side};
-use oxide_arb_models::enums::risk::ReconciliationStatus;
-use oxide_arb_models::types::{MarketId, PositionId, Price, Shares, TokenId, Usd};
-use oxide_arb_risk::reconciliation::LedgerReconciler;
-use oxide_arb_risk::traits::{BalanceQuerier, RiskMetrics};
+use oxide_arb_models::{
+    domain::position::PositionInfo,
+    enums::{
+        common::{PositionStatus, Side},
+        risk::ReconciliationStatus,
+    },
+    types::{MarketId, PositionId, Price, Shares, TokenId, Usd},
+};
+use oxide_arb_risk::{
+    reconciliation::LedgerReconciler,
+    traits::{BalanceQuerier, RiskMetrics},
+};
 use rust_decimal_macros::dec;
 
 // ── Mock Metrics ────────────────────────────────────────────────────────────

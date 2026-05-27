@@ -1,6 +1,5 @@
 use super::migrate_up;
-use oxide_arb_models::enums::market::EventStatus;
-use oxide_arb_models::idens::event::Event;
+use oxide_arb_models::{enums::market::EventStatus, idens::event::Event};
 use sea_orm_migration::prelude::*;
 
 #[derive(DeriveMigrationName)]

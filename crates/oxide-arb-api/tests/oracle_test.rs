@@ -3,11 +3,9 @@
 use async_trait::async_trait;
 use oxide_arb_api::oracle::{OracleSource, ResolutionVerdict, SourceVote, VotingOracle};
 use oxide_arb_error::rpc::RpcError;
-use oxide_arb_models::config::AllSourcesDownStrategy;
-use oxide_arb_models::types::MarketId;
+use oxide_arb_models::{config::AllSourcesDownStrategy, types::MarketId};
 use rust_decimal::Decimal;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 struct MockSource {
     id: &'static str,

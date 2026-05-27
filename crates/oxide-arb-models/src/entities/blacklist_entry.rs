@@ -1,7 +1,9 @@
 //! `blacklist_entries` table entity.
 
-use crate::enums::risk::{BlacklistReason, BlacklistScope};
-use crate::types::{MarketId, TokenId};
+use crate::{
+    enums::risk::{BlacklistReason, BlacklistScope},
+    types::{MarketId, TokenId},
+};
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 

@@ -2,26 +2,34 @@
 
 mod clob_wiremock;
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
-
 use chrono::Utc;
-use oxide_arb_api::infra::retry::RetryPolicy;
-use oxide_arb_core::execution::clob_outcome::map_order_response;
-use oxide_arb_models::domain::execution::ExecutionPlan;
-use oxide_arb_models::enums::common::{ExecutionMode, OrderType, Side};
-use oxide_arb_models::enums::execution::ExecutionOutcome;
-use oxide_arb_models::enums::order::OrderStatus;
-use oxide_arb_models::types::{
-    EventId, ExecutionId, MarketId, OpportunityId, Price, ReservationId, Shares, Usd,
-};
-use rust_decimal_macros::dec;
-use wiremock::matchers::{method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
-
 use clob_wiremock::{
     mount_clob_requirements, mount_derive_api_key, mount_post_order, test_clob_client,
     test_order_request, test_token_id,
+};
+use oxide_arb_api::infra::retry::RetryPolicy;
+use oxide_arb_core::execution::clob_outcome::map_order_response;
+use oxide_arb_models::types::Usd as ModelsUsd;
+use oxide_arb_models::{
+    domain::execution::ExecutionPlan,
+    enums::{
+        common::{ExecutionMode, OrderType, Side},
+        execution::ExecutionOutcome,
+        order::OrderStatus,
+    },
+    types::{EventId, ExecutionId, MarketId, OpportunityId, Price, ReservationId, Shares, Usd},
+};
+use rust_decimal_macros::dec;
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicU32, Ordering},
+    },
+    time::Instant,
+};
+use wiremock::{
+    Mock, MockServer, ResponseTemplate,
+    matchers::{method, path},
 };
 
 #[tokio::test]
@@ -80,7 +88,7 @@ async fn live_fok_miss() {
     assert_eq!(resp.status, OrderStatus::Rejected);
 
     let plan = sample_plan();
-    let outcome = map_order_response(resp, &plan, ExecutionMode::Live, std::time::Instant::now());
+    let outcome = map_order_response(resp, &plan, ExecutionMode::Live, Instant::now());
     assert!(matches!(outcome, ExecutionOutcome::Miss { .. }));
 }
 
@@ -191,7 +199,7 @@ fn sample_plan() -> ExecutionPlan {
         shares: Shares::new(dec!(100)),
         limit_price: Price::new(dec!(0.5)),
         estimated_cost: Usd::new(dec!(50)),
-        estimated_fee: oxide_arb_models::types::Usd::ZERO,
+        estimated_fee: ModelsUsd::ZERO,
         neg_risk: false,
         reservation_id: ReservationId::new_id(),
         detected_at: Utc::now(),

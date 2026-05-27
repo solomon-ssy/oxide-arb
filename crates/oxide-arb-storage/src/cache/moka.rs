@@ -2,8 +2,7 @@
 
 use crate::cache::backend::CacheBackend;
 use async_trait::async_trait;
-use moka::Expiry;
-use moka::future::Cache;
+use moka::{Expiry, future::Cache};
 use oxide_arb_error::storage::StorageError;
 use std::time::{Duration, Instant};
 

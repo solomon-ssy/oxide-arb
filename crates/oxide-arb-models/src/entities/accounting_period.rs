@@ -1,7 +1,9 @@
 //! `accounting_periods` table entity.
 
-use crate::enums::common::ReportType;
-use crate::types::{PeriodId, Probability, Usd};
+use crate::{
+    enums::common::ReportType,
+    types::{PeriodId, Probability, Usd},
+};
 use chrono::{DateTime, NaiveDate, Utc};
 use sea_orm::entity::prelude::*;
 

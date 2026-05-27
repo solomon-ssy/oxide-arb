@@ -1,10 +1,10 @@
 //! Position sizing — Quarter-Kelly with multi-constraint clipping.
 
-use crate::context::PreTradeContext;
-use crate::types::{DrawdownAction, KellyResult, SizeBreakdown, SizeConstraint, SizeResult};
-use oxide_arb_models::config::RiskConfig;
-use oxide_arb_models::domain::risk::ProbabilityInput;
-use oxide_arb_models::types::Usd;
+use crate::{
+    context::PreTradeContext,
+    types::{DrawdownAction, KellyResult, SizeBreakdown, SizeConstraint, SizeResult},
+};
+use oxide_arb_models::{config::RiskConfig, domain::risk::ProbabilityInput, types::Usd};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 

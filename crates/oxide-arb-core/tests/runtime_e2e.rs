@@ -3,17 +3,16 @@
 #[path = "support/runtime_harness.rs"]
 mod runtime_harness;
 
-use std::time::{Duration, Instant};
-
-use oxide_arb_models::domain::book::BookLevel;
-use oxide_arb_models::domain::pipeline::PriceLevelDelta;
-use oxide_arb_models::enums::ExecutionOutcome;
-use oxide_arb_models::enums::common::Side;
-use oxide_arb_models::types::{Price, Shares, TokenId};
+use oxide_arb_models::{
+    domain::{book::BookLevel, pipeline::PriceLevelDelta},
+    enums::{ExecutionOutcome, common::Side},
+    types::{Price, Shares, TokenId},
+};
 use runtime_harness::RuntimeHarness;
 use runtime_harness::book_store_seed::seed_book_store;
 use runtime_harness::scored_opportunity::sample_scored;
 use rust_decimal_macros::dec;
+use std::time::{Duration, Instant};
 
 #[tokio::test]
 async fn e2e_book_update_to_paper_fill() {

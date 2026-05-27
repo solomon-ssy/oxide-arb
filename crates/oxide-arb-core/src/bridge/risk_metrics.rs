@@ -1,14 +1,16 @@
 //! Thin `RiskMetrics` trait adapter over shared state and live reservation/WS probes.
 
-use std::sync::Arc;
-
-use crate::exposure::in_memory::InMemoryExposureReservation;
-use crate::service::risk_metrics::RiskMetricsState;
+use crate::{
+    exposure::in_memory::InMemoryExposureReservation, service::risk_metrics::RiskMetricsState,
+};
 use oxide_arb_api::ws::ClobWsManager;
-use oxide_arb_models::domain::position::PositionInfo;
-use oxide_arb_models::enums::common::Side;
-use oxide_arb_models::types::{MarketId, Usd};
+use oxide_arb_models::{
+    domain::position::PositionInfo,
+    enums::common::Side,
+    types::{MarketId, Usd},
+};
 use oxide_arb_risk::traits::{RiskMetrics, RiskMetricsSnapshot};
+use std::sync::Arc;
 
 pub struct CoreRiskMetrics {
     state: Arc<RiskMetricsState>,

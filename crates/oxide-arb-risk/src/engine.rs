@@ -7,48 +7,55 @@
 //! locks, then release locks and persist + audit via `RiskPersistence`.
 //! If persistence fails, the engine halts (fail-closed).
 
-use crate::accounting::{DailyAccounting, HourlyAccounting, WeeklyAccounting};
-use crate::audit::{RiskAuditEvent, RiskDecisionTrace};
-use crate::audit_sink::{AuditEnqueueResult, AuditSink};
-use crate::blacklist::BlacklistManager;
-use crate::circuit_breaker::CircuitBreaker;
-use crate::clock::Clock;
-use crate::context::{CircuitBreakerGate, ManualHaltGate, PreTradeContext};
-use crate::pipeline::StaticRiskPipeline;
-use crate::position::{PositionTracker, PotentialLossLedger};
-use crate::reconciliation::LedgerReconciler;
-use crate::sizing::{DrawdownGuard, MultiConstraintSizer};
-use crate::snapshot::{
-    CircuitBreakerSnapshot, DailyAccountingSnapshot, DrawdownSnapshot, HourlyAccountingSnapshot,
-    RiskSnapshot, WeeklyAccountingSnapshot,
-};
-use crate::traits::{RiskMetrics, RiskMetricsSnapshot, RiskPersistence};
-use crate::types::{
-    AtomicStateVersion, BreakerState, ExecutionRiskEvent, PostTradeReport, ReconciliationReport,
-    ReportMode, RiskDecision,
+use crate::{
+    accounting::{DailyAccounting, HourlyAccounting, WeeklyAccounting},
+    audit::{RiskAuditEvent, RiskDecisionTrace},
+    audit_sink::{AuditEnqueueResult, AuditSink},
+    blacklist::BlacklistManager,
+    circuit_breaker::CircuitBreaker,
+    clock::Clock,
+    context::{CircuitBreakerGate, ManualHaltGate, PreTradeContext},
+    pipeline::StaticRiskPipeline,
+    position::{PositionTracker, PotentialLossLedger},
+    reconciliation::LedgerReconciler,
+    sizing::{DrawdownGuard, MultiConstraintSizer},
+    snapshot::{
+        CircuitBreakerSnapshot, DailyAccountingSnapshot, DrawdownSnapshot,
+        HourlyAccountingSnapshot, RiskSnapshot, WeeklyAccountingSnapshot,
+    },
+    traits::{RiskMetrics, RiskMetricsSnapshot, RiskPersistence},
+    types::{
+        AtomicStateVersion, BreakerState, ExecutionRiskEvent, PostTradeReport,
+        ReconciliationReport, ReportMode, RiskDecision,
+    },
 };
 use arc_swap::ArcSwap;
 use num_traits::ToPrimitive;
 use oxide_arb_error::OxideResult;
-use oxide_arb_models::config::RiskConfig;
-use oxide_arb_models::domain::BlacklistInfo;
-use oxide_arb_models::domain::blacklist::UpsertBlacklistEntry;
-use oxide_arb_models::domain::opportunity::Opportunity;
-use oxide_arb_models::domain::potential_loss::PotentialLossInfo;
-use oxide_arb_models::domain::risk::{
-    NewEmergencySnapshot, NewRiskAuditEvent, ProbabilityInput, RiskEngineState,
-    UpsertRiskEngineState,
+use oxide_arb_models::types::MarketId as ModelsMarketId;
+use oxide_arb_models::{
+    config::RiskConfig,
+    domain::{
+        BlacklistInfo,
+        blacklist::UpsertBlacklistEntry,
+        opportunity::Opportunity,
+        potential_loss::PotentialLossInfo,
+        risk,
+        risk::{
+            NewEmergencySnapshot, NewRiskAuditEvent, ProbabilityInput, RiskEngineState,
+            UpsertRiskEngineState,
+        },
+        trade::PostTradeInput,
+    },
+    enums::{
+        ReconciliationStatus,
+        common::LedgerStatus,
+        risk::{BlacklistReason, CircuitBreakerLevel, TradeAccountingPhase, WindowType},
+    },
+    types::{LedgerId, MarketId, OpportunityId, Price, Shares, Usd},
 };
-use oxide_arb_models::domain::trade::PostTradeInput;
-use oxide_arb_models::enums::ReconciliationStatus;
-use oxide_arb_models::enums::common::LedgerStatus;
-use oxide_arb_models::enums::risk::{
-    BlacklistReason, CircuitBreakerLevel, TradeAccountingPhase, WindowType,
-};
-use oxide_arb_models::types::{LedgerId, MarketId, OpportunityId, Price, Shares, Usd};
 use parking_lot::RwLock;
-use std::sync::Arc;
-use std::time::Instant;
+use std::{sync::Arc, time::Instant};
 
 /// Gates evaluated before live metrics are loaded (halt / CB / blacklist).
 const PHASE1_GATE_COUNT: usize = 4;
@@ -571,7 +578,7 @@ where
     ) -> OxideResult<()> {
         let mismatches_json =
             serde_json::to_value(&report.mismatches).unwrap_or(serde_json::Value::Null);
-        let new_report = oxide_arb_models::domain::risk::NewReconciliationReport {
+        let new_report = risk::NewReconciliationReport {
             status: report.status,
             mismatches: mismatches_json,
             internal_balance: report.internal_balance,
@@ -837,8 +844,7 @@ where
                 .unwrap_or(i32::MAX),
             weekly_window_start: weekly.week_start(),
             consecutive_misses: ToPrimitive::to_i32(
-                &metrics
-                    .consecutive_market_misses(&oxide_arb_models::types::MarketId::new("_global_")),
+                &metrics.consecutive_market_misses(&ModelsMarketId::new("_global_")),
             )
             .unwrap_or(0),
             cooldown_multiplier: ToPrimitive::to_i32(&cb.l2_trip_count()).unwrap_or(i32::MAX),

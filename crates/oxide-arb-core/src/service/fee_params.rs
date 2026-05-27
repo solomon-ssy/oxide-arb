@@ -1,11 +1,9 @@
-use std::sync::Arc;
-
 use oxide_arb_api::fees::FeeCalculator;
 use oxide_arb_error::OxideError;
-use oxide_arb_models::domain::trade::CachedFeeParams;
-use oxide_arb_models::enums::common::MarketCategory;
+use oxide_arb_models::{domain::trade::CachedFeeParams, enums::common::MarketCategory};
 use oxide_arb_storage::cache::{CacheKey, TieredCache};
 use rust_decimal_macros::dec;
+use std::sync::Arc;
 
 pub struct FeeParamsService {
     cache: Arc<TieredCache>,

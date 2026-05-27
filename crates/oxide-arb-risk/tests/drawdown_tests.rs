@@ -4,8 +4,7 @@
 //! and halt vs. reduce actions at various drawdown levels.
 
 use oxide_arb_models::types::Usd;
-use oxide_arb_risk::sizing::DrawdownGuard;
-use oxide_arb_risk::types::DrawdownAction;
+use oxide_arb_risk::{sizing::DrawdownGuard, types::DrawdownAction};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 

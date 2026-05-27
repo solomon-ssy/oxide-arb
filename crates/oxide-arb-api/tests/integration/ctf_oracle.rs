@@ -30,18 +30,17 @@
 //! baked-in default — placeholders rot when markets delist.
 
 use oxide_arb_api::oracle::{CtfOracleSource, OracleSource};
-use oxide_arb_models::config::OnchainConfig;
-use oxide_arb_models::constants::CTF_ADDRESS;
-use oxide_arb_models::types::MarketId;
+use oxide_arb_models::{config::OnchainConfig, constants::CTF_ADDRESS, types::MarketId};
+use std::env::var;
 
 fn onchain_from_env_or_config() -> OnchainConfig {
-    if let Ok(url) = std::env::var("OXIDE_ARB__POLYMARKET__ONCHAIN__RPC_URL") {
+    if let Ok(url) = var("OXIDE_ARB__POLYMARKET__ONCHAIN__RPC_URL") {
         return OnchainConfig {
             rpc_url: url,
             ..OnchainConfig::default()
         };
     }
-    if let Ok(url) = std::env::var("OXIDE_ARB_TEST_POLYGON_RPC_URL") {
+    if let Ok(url) = var("OXIDE_ARB_TEST_POLYGON_RPC_URL") {
         return OnchainConfig {
             rpc_url: url,
             ..OnchainConfig::default()
@@ -51,7 +50,7 @@ fn onchain_from_env_or_config() -> OnchainConfig {
 }
 
 fn require_resolved_condition_id() -> String {
-    std::env::var("OXIDE_ARB_TEST_RESOLVED_CONDITION_ID").unwrap_or_else(|_| {
+    var("OXIDE_ARB_TEST_RESOLVED_CONDITION_ID").unwrap_or_else(|_| {
         panic!(
             "set OXIDE_ARB_TEST_RESOLVED_CONDITION_ID to a settled market condition_id \
              (0x + 64 hex). Also set OXIDE_ARB__POLYMARKET__ONCHAIN__RPC_URL or \

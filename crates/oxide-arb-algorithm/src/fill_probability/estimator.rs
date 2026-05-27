@@ -99,7 +99,6 @@ impl FillProbabilityEstimator {
 mod tests {
     use super::*;
     use rust_decimal_macros::dec;
-
     fn default_config() -> FillProbabilityConfig {
         FillProbabilityConfig::default()
     }

@@ -1,11 +1,9 @@
-use std::sync::Arc;
-
 use oxide_arb_api::clob::ClobClient;
 use oxide_arb_error::{OxideError, OxideResult};
 use oxide_arb_models::types::{MarketId, Usd};
-use oxide_arb_repository::postgres::PgPositionRepository;
-use oxide_arb_repository::traits::PositionRepository;
+use oxide_arb_repository::{postgres::PgPositionRepository, traits::PositionRepository};
 use oxide_arb_risk::traits::BalanceQuerier;
+use std::sync::Arc;
 
 pub struct CoreBalanceQuerier {
     clob_client: Arc<ClobClient>,

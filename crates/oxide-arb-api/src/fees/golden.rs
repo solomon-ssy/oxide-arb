@@ -1,7 +1,9 @@
 //! Golden fee vectors — must match Polymarket SDK `utilities` test suite.
 
-use super::formula::calculate_fee;
-use super::reference::{platform_fee_usd, production_fee_usd, round_fee};
+use super::{
+    formula::calculate_fee,
+    reference::{platform_fee_usd, production_fee_usd, round_fee},
+};
 use oxide_arb_models::types::{Price, Shares};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;

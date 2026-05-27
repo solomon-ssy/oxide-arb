@@ -6,13 +6,15 @@
 //! - Kelly bet is monotone in win probability
 //! - Daily loss accumulator is always non-negative
 
-use oxide_arb_models::config::{KellyConfig, RiskConfig};
-use oxide_arb_models::domain::risk::ProbabilityInput;
-use oxide_arb_models::enums::common::TradeOutcome;
-use oxide_arb_models::types::Usd;
-use oxide_arb_risk::accounting::DailyAccounting;
-use oxide_arb_risk::clock::utc_clock;
-use oxide_arb_risk::sizing::QuarterKellyCalculator;
+use oxide_arb_models::{
+    config::{KellyConfig, RiskConfig},
+    domain::risk::ProbabilityInput,
+    enums::common::TradeOutcome,
+    types::Usd,
+};
+use oxide_arb_risk::{
+    accounting::DailyAccounting, clock::utc_clock, sizing::QuarterKellyCalculator,
+};
 use proptest::prelude::*;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;

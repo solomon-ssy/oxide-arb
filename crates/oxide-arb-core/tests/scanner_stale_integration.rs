@@ -1,34 +1,39 @@
 //! Scanner integration: stale books are rejected at `BookGate` before scoring.
 
-use std::sync::Arc;
-
 use chrono::{TimeZone, Utc};
-use oxide_arb_algorithm::calibration::ResolutionCalibrator;
-use oxide_arb_algorithm::cooldown::InMemoryEmissionCooldown;
-use oxide_arb_algorithm::endgame::EndgameDetector;
-use oxide_arb_algorithm::pipeline::OpportunityPipeline;
-use oxide_arb_algorithm::scorer::EndgameScorer;
+use oxide_arb_algorithm::{
+    calibration::ResolutionCalibrator, cooldown::InMemoryEmissionCooldown,
+    endgame::EndgameDetector, pipeline::OpportunityPipeline, scorer::EndgameScorer,
+};
 use oxide_arb_api::fees::FeeCalculator;
-use oxide_arb_core::bridge::CoreOpportunityPipeline;
-use oxide_arb_core::bridge::fee_estimator::CoreFeeEstimator;
-use oxide_arb_core::detection::scanner::Scanner;
-use oxide_arb_core::observability::metrics_hub::MetricsHub;
-use oxide_arb_core::pipeline::book_store::BookStore;
-use oxide_arb_core::pipeline::market_cache::MarketCache;
-use oxide_arb_core::pipeline::market_registry::MarketRegistry;
-use oxide_arb_core::pipeline::staleness_classifier::StalenessClassifier;
-use oxide_arb_models::config::Settings;
-use oxide_arb_models::domain::book::BookLevel;
-use oxide_arb_models::domain::market::{MarketRegistryInfo, TokenInfo};
-use oxide_arb_models::enums::common::MarketCategory;
-use oxide_arb_models::enums::market::MarketStatus;
-use oxide_arb_models::types::{MicroUsd, Price, Shares, TokenId, Usd};
+use oxide_arb_core::{
+    bridge::{CoreOpportunityPipeline, fee_estimator::CoreFeeEstimator},
+    detection::scanner::Scanner,
+    observability::metrics_hub::MetricsHub,
+    pipeline::{
+        book_store::BookStore, market_cache::MarketCache, market_registry::MarketRegistry,
+        staleness_classifier::StalenessClassifier,
+    },
+};
+use oxide_arb_models::{
+    config::Settings,
+    domain::{
+        book::BookLevel,
+        market::{MarketRegistryInfo, TokenInfo},
+    },
+    enums::{
+        common::{MarketCategory, TickSize},
+        market::MarketStatus,
+    },
+    types::{EventId, MarketId, MicroUsd, Price, Shares, TokenId, Usd},
+};
 use rust_decimal_macros::dec;
+use std::sync::Arc;
 
 fn sample_market(id: &str) -> MarketRegistryInfo {
     MarketRegistryInfo {
-        market_id: oxide_arb_models::types::MarketId::new(id),
-        event_id: oxide_arb_models::types::EventId::new("evt"),
+        market_id: MarketId::new(id),
+        event_id: EventId::new("evt"),
         token_yes: TokenId::new(format!("{id}-yes")),
         token_no: TokenId::new(format!("{id}-no")),
         question: "Q".into(),
@@ -36,7 +41,7 @@ fn sample_market(id: &str) -> MarketRegistryInfo {
         category: MarketCategory::Politics,
         status: MarketStatus::Active,
         neg_risk: false,
-        tick_size: oxide_arb_models::enums::common::TickSize::Hundredth,
+        tick_size: TickSize::Hundredth,
         tokens: vec![
             TokenInfo {
                 token_id: TokenId::new(format!("{id}-yes")),

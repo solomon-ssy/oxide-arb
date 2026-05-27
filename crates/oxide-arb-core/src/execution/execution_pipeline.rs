@@ -1,37 +1,40 @@
 //! Execution pipeline orchestration — validate → risk → size → reserve → dispatch → audit.
 
-use std::sync::Arc;
-use std::time::Instant;
-
+use crate::{
+    bridge::risk_metrics::CoreRiskMetrics,
+    execution::{
+        capital_manager::CapitalManager,
+        clob_outcome::{filled_cost, filled_net_profit},
+        dispatcher::Dispatcher,
+        fsm::ExecutionFSM,
+        market_inflight::MarketInFlightRegistry,
+        plan_builder::PlanBuilder,
+        probability_input::build_probability_input,
+        tiered_strategy::OrderStrategy,
+        validator::Validator,
+    },
+    observability::{backpressure::BackpressurePolicy, metrics_hub::MetricsHub},
+    outbox::in_memory::SharedInMemoryEventStore,
+};
 use chrono::Utc;
 use oxide_arb_algorithm::scorer::ScoredOpportunity;
 use oxide_arb_error::OxideError;
-use oxide_arb_models::domain::execution::{
-    ExecutionOutcomeSummary, ExecutionPlan, ExecutionResult, ReservationHandle,
+use oxide_arb_models::{
+    domain::{
+        execution::{ExecutionOutcomeSummary, ExecutionPlan, ExecutionResult, ReservationHandle},
+        opportunity::Opportunity,
+        trade::PostTradeInput,
+    },
+    enums::{
+        common::{ExecutionMode, TradeOutcome},
+        execution::ExecutionOutcome,
+        risk::TradeAccountingPhase,
+    },
+    types::{MarketId, Price, TokenId, TradeId, Usd},
 };
-use oxide_arb_models::domain::opportunity::Opportunity;
-use oxide_arb_models::domain::trade::PostTradeInput;
-use oxide_arb_models::enums::common::{ExecutionMode, TradeOutcome};
-use oxide_arb_models::enums::execution::ExecutionOutcome;
-use oxide_arb_models::enums::risk::TradeAccountingPhase;
-use oxide_arb_models::types::{MarketId, Price, TokenId, TradeId, Usd};
-use oxide_arb_risk::engine::RiskEngine;
-use oxide_arb_risk::types::ReportMode;
+use oxide_arb_risk::{engine::RiskEngine, types::ReportMode};
+use std::{fmt::Display, sync::Arc, time::Instant};
 use tokio_util::sync::CancellationToken;
-
-use crate::bridge::risk_metrics::CoreRiskMetrics;
-use crate::execution::capital_manager::CapitalManager;
-use crate::execution::clob_outcome::{filled_cost, filled_net_profit};
-use crate::execution::dispatcher::Dispatcher;
-use crate::execution::fsm::ExecutionFSM;
-use crate::execution::market_inflight::MarketInFlightRegistry;
-use crate::execution::plan_builder::PlanBuilder;
-use crate::execution::probability_input::build_probability_input;
-use crate::execution::tiered_strategy::OrderStrategy;
-use crate::execution::validator::Validator;
-use crate::observability::backpressure::BackpressurePolicy;
-use crate::observability::metrics_hub::MetricsHub;
-use crate::outbox::in_memory::SharedInMemoryEventStore;
 
 /// Slim async post-trade work item — ids and outcome only, no full opportunity clone.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -296,7 +299,7 @@ impl ExecutionPipeline {
     }
 
     #[cold]
-    fn reject(stage: &'static str, reason: impl std::fmt::Display) -> ExecutionResult {
+    fn reject(stage: &'static str, reason: impl Display) -> ExecutionResult {
         ExecutionResult::rejected(stage, reason)
     }
 }

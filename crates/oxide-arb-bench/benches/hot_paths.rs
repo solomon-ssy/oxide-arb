@@ -1,46 +1,44 @@
-use std::sync::Arc;
-use std::sync::OnceLock;
-use std::time::Instant;
-
 use chrono::{Duration, Utc};
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use num_traits::ToPrimitive;
-use oxide_arb_algorithm::scorer::ScoredOpportunity;
 use oxide_arb_algorithm::{
     calibration::ResolutionCalibrator,
     cooldown::InMemoryEmissionCooldown,
     endgame::{EndgameDetectInput, EndgameDetector, convergence::ConvergenceDirection},
     fee::FeeEstimator,
     pipeline::{MarketScanInputRef, OpportunityPipeline},
-    scorer::EndgameScorer,
+    scorer::{EndgameScorer, ScoredOpportunity},
     walker::OrderbookWalker,
 };
-use oxide_arb_api::fees::FeeCalculator;
-use oxide_arb_api::ws::ClobWsManager;
-use oxide_arb_api::ws::normalize::normalize_ws_message;
-use oxide_arb_core::bridge::risk_metrics::CoreRiskMetrics;
-use oxide_arb_core::bridge::{CoreFeeEstimator, CoreOpportunityPipeline};
-use oxide_arb_core::detection::coalescer::Coalescer;
-use oxide_arb_core::detection::funnel::Funnel;
-use oxide_arb_core::detection::scanner::Scanner;
-use oxide_arb_core::execution::capital_manager::CapitalManager;
-use oxide_arb_core::execution::dispatcher::Dispatcher;
-use oxide_arb_core::execution::execution_pipeline::{ExecutionPipeline, ExecutionPipelineDeps};
-use oxide_arb_core::execution::fsm::ExecutionFSM;
-use oxide_arb_core::execution::market_inflight::MarketInFlightRegistry;
-use oxide_arb_core::execution::plan_builder::PlanBuilder;
-use oxide_arb_core::execution::tiered_strategy::OrderStrategy;
-use oxide_arb_core::execution::validator::Validator;
-use oxide_arb_core::exposure::in_memory::InMemoryExposureReservation;
-use oxide_arb_core::observability::backpressure::BackpressurePolicy;
-use oxide_arb_core::observability::metrics_hub::MetricsHub;
-use oxide_arb_core::outbox::in_memory::InMemoryEventStore;
-use oxide_arb_core::pipeline::book_store::BookStore;
-use oxide_arb_core::pipeline::market_cache::{CachedMarketScanEntry, MarketCache};
-use oxide_arb_core::pipeline::market_registry::MarketRegistry;
-use oxide_arb_core::pipeline::order_book::OrderBook;
-use oxide_arb_core::pipeline::staleness_classifier::StalenessClassifier;
-use oxide_arb_core::service::risk_metrics::{ApiHealthTracker, RiskMetricsState};
+use oxide_arb_api::{
+    fees::FeeCalculator,
+    ws::{ClobWsManager, normalize::normalize_ws_message},
+};
+use oxide_arb_core::{
+    bridge::{CoreFeeEstimator, CoreOpportunityPipeline, risk_metrics::CoreRiskMetrics},
+    detection::{coalescer::Coalescer, funnel::Funnel, scanner::Scanner},
+    execution::{
+        capital_manager::CapitalManager,
+        dispatcher::Dispatcher,
+        execution_pipeline::{ExecutionPipeline, ExecutionPipelineDeps},
+        fsm::ExecutionFSM,
+        market_inflight::MarketInFlightRegistry,
+        plan_builder::PlanBuilder,
+        tiered_strategy::OrderStrategy,
+        validator::Validator,
+    },
+    exposure::in_memory::InMemoryExposureReservation,
+    observability::{backpressure::BackpressurePolicy, metrics_hub::MetricsHub},
+    outbox::in_memory::InMemoryEventStore,
+    pipeline::{
+        book_store::BookStore,
+        market_cache::{CachedMarketScanEntry, MarketCache},
+        market_registry::MarketRegistry,
+        order_book::OrderBook,
+        staleness_classifier::StalenessClassifier,
+    },
+    service::risk_metrics::{ApiHealthTracker, RiskMetricsState},
+};
 use oxide_arb_models::{
     config::{
         CalibrationConfig, EmissionCooldownConfig, EndgameDetectionConfig,
@@ -49,16 +47,17 @@ use oxide_arb_models::{
     },
     domain::{
         book::{BookLevel, BookSnapshot, EndgameBookPair},
-        calibration::BucketKey,
-        calibration::CalibrationSnapshot,
+        calibration::{BucketKey, CalibrationSnapshot},
         latency::LatencyTrace,
         market::MarketRegistryInfo,
         opportunity::{EndgameMeta, Opportunity},
     },
-    enums::calibration::{DurationBucket, PriceZone},
-    enums::common::{ExecutionMode, MarketCategory, Side, StalenessLevel, TickSize},
-    enums::market::MarketStatus,
-    enums::opportunity::PayoutModel,
+    enums::{
+        calibration::{DurationBucket, PriceZone},
+        common::{ExecutionMode, MarketCategory, Side, StalenessLevel, TickSize},
+        market::MarketStatus,
+        opportunity::PayoutModel,
+    },
     types::{
         Bps, EventId, MarketId, MicroPrice, MicroProb, MicroScore, MicroUsd, OpportunityId, Price,
         Shares, TokenId, Usd,
@@ -70,6 +69,10 @@ use oxide_arb_risk::{
 use polymarket_client_sdk_v2::clob::ws::types::response::{BookUpdate, OrderBookLevel, WsMessage};
 use polymarket_client_sdk_v2::types::{B256, U256};
 use rust_decimal_macros::dec;
+use std::{
+    sync::{Arc, OnceLock},
+    time::Instant,
+};
 use tokio_util::sync::CancellationToken;
 
 static EXECUTION_RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();

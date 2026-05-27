@@ -3,17 +3,18 @@
 //! Exercises `state_store::recover_state()` with valid and invalid snapshots
 //! to verify fail-closed behaviour on corrupt or inconsistent data.
 
+mod support;
+
 use chrono::{Duration, Utc};
 use oxide_arb_error::OxideError;
-use oxide_arb_models::config::RiskConfig;
-use oxide_arb_models::domain::risk::RiskEngineState;
-use oxide_arb_models::enums::risk::{BreakerStateName, CircuitBreakerLevel};
-use oxide_arb_models::types::Usd;
-use oxide_arb_risk::clock::utc_clock;
-use oxide_arb_risk::state_store;
+use oxide_arb_models::{
+    config::RiskConfig,
+    domain::risk::RiskEngineState,
+    enums::risk::{BreakerStateName, CircuitBreakerLevel},
+    types::Usd,
+};
+use oxide_arb_risk::{clock::utc_clock, state_store};
 use rust_decimal_macros::dec;
-
-mod support;
 use support::MockMetrics;
 
 // ── Helpers ─────────────────────────────────────────────────────────────────

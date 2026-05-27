@@ -7,11 +7,15 @@
 //! Endgame is a single-order strategy: buy tokens expected to settle at
 //! $1, or sell tokens expected to settle at $0. No multi-leg orchestration.
 
-use crate::domain::calibration::CalibrationSnapshot;
-use crate::enums::calibration::{DurationBucket, PriceZone};
-use crate::enums::common::{MarketCategory, Side, StalenessLevel};
-use crate::enums::opportunity::PayoutModel;
-use crate::types::{Bps, EventId, MarketId, OpportunityId, Price, Shares, TokenId, Usd};
+use crate::{
+    domain::calibration::CalibrationSnapshot,
+    enums::{
+        calibration::{DurationBucket, PriceZone},
+        common::{MarketCategory, Side, StalenessLevel},
+        opportunity::PayoutModel,
+    },
+    types::{Bps, EventId, MarketId, OpportunityId, Price, Shares, TokenId, Usd},
+};
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};

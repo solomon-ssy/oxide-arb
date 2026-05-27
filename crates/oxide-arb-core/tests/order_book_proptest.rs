@@ -1,9 +1,11 @@
 //! Property tests: `OrderBook` COW delta invariants.
 
 use oxide_arb_core::pipeline::order_book::OrderBook;
-use oxide_arb_models::domain::book::BookLevel;
-use oxide_arb_models::enums::common::Side;
-use oxide_arb_models::types::{Price, Shares, TokenId};
+use oxide_arb_models::{
+    domain::book::BookLevel,
+    enums::common::Side,
+    types::{Price, Shares, TokenId},
+};
 use proptest::prelude::*;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;

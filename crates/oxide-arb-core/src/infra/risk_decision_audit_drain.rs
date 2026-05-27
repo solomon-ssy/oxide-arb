@@ -1,14 +1,11 @@
 //! Background drain for pre-trade risk decision audit events.
 
-use std::sync::Arc;
-use std::time::Duration;
-
 use flume::Receiver;
 use oxide_arb_error::OxideError;
 use oxide_arb_models::domain::risk::NewRiskAuditEvent;
-use oxide_arb_repository::postgres::PgRiskAuditRepository;
-use oxide_arb_repository::traits::RiskAuditRepository;
+use oxide_arb_repository::{postgres::PgRiskAuditRepository, traits::RiskAuditRepository};
 use oxide_arb_risk::audit::RiskAuditEvent;
+use std::{mem::take, sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
 
 const DEFAULT_BATCH_SIZE: usize = 64;
@@ -80,7 +77,7 @@ async fn flush_batch(
     if batch.is_empty() {
         return Ok(());
     }
-    let events: Vec<NewRiskAuditEvent> = std::mem::take(batch)
+    let events: Vec<NewRiskAuditEvent> = take(batch)
         .into_iter()
         .map(NewRiskAuditEvent::from)
         .collect();

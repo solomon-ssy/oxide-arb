@@ -1,10 +1,10 @@
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
-
-use crate::execution::port::ExecutionPort;
-use crate::observability::metrics_hub::MetricsHub;
+use crate::{execution::port::ExecutionPort, observability::metrics_hub::MetricsHub};
 use oxide_arb_algorithm::scorer::ScoredOpportunity;
 use oxide_arb_error::OxideError;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU32, Ordering},
+};
 use tokio_util::sync::CancellationToken;
 
 /// Default number of execution shards (one runner per shard).

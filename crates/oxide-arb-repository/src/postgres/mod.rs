@@ -1,7 +1,5 @@
 //! `PostgreSQL` repository implementations.
 
-mod orm;
-
 pub mod accounting;
 pub mod blacklist_persistence;
 pub mod calibration;
@@ -9,6 +7,7 @@ pub mod emergency;
 pub mod event;
 pub mod lifecycle;
 pub mod market;
+mod orm;
 pub mod outbox;
 pub mod position;
 pub mod potential_loss;

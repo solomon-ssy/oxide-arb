@@ -9,11 +9,13 @@ pub use types::GammaResolution;
 
 use crate::infra::retry::{self, RetryPolicy};
 use chrono::{DateTime, Utc};
+use futures_util::stream::{self, StreamExt};
 use oxide_arb_error::api::ApiError;
-use oxide_arb_models::config::GammaConfig;
-use oxide_arb_models::domain::market::{EventRegistryInfo, MarketRegistryInfo};
-use oxide_arb_models::types::{EventId, MarketId, TokenId};
-
+use oxide_arb_models::{
+    config::GammaConfig,
+    domain::market::{EventRegistryInfo, MarketRegistryInfo},
+    types::{EventId, MarketId, TokenId},
+};
 use types::RawGammaMarket;
 
 /// Gamma API client for market discovery and metadata sync.
@@ -81,8 +83,6 @@ impl GammaClient {
         market_ids: &[MarketId],
         max_concurrency: usize,
     ) -> Vec<Result<MarketRegistryInfo, ApiError>> {
-        use futures_util::stream::{self, StreamExt};
-
         if market_ids.is_empty() {
             return Vec::new();
         }

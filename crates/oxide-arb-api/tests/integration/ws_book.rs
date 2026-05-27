@@ -8,16 +8,17 @@
 //! Optional env:
 //! - `OXIDE_ARB_TEST_TOKEN_ID` — decimal CLOB token id (skips Gamma discovery)
 
-use oxide_arb_api::gamma::GammaClient;
-use oxide_arb_api::ws::ClobWsManager;
-use oxide_arb_models::config::{GammaConfig, PolymarketConfig, WebSocketConfig};
-use oxide_arb_models::domain::pipeline::PipelineEvent;
-use oxide_arb_models::types::TokenId;
-use std::time::Duration;
+use oxide_arb_api::{gamma::GammaClient, ws::ClobWsManager};
+use oxide_arb_models::{
+    config::{GammaConfig, PolymarketConfig, WebSocketConfig},
+    domain::pipeline::PipelineEvent,
+    types::TokenId,
+};
+use std::{env::var, slice::from_ref, time::Duration};
 use tokio_util::sync::CancellationToken;
 
 async fn resolve_token_id() -> TokenId {
-    if let Ok(id) = std::env::var("OXIDE_ARB_TEST_TOKEN_ID") {
+    if let Ok(id) = var("OXIDE_ARB_TEST_TOKEN_ID") {
         return TokenId::new(id);
     }
     let client = GammaClient::new(GammaConfig::default());
@@ -39,7 +40,7 @@ async fn ws_receives_book_snapshot_for_subscribed_token() {
         None,
         None,
     );
-    manager.subscribe(std::slice::from_ref(&token));
+    manager.subscribe(from_ref(&token));
     let events = manager.events();
 
     let result = tokio::time::timeout(Duration::from_secs(90), async {

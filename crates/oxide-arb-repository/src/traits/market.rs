@@ -1,7 +1,9 @@
 use chrono::{DateTime, Utc};
 use oxide_arb_error::storage::StorageError;
-use oxide_arb_models::domain::{MarketInfo, UpsertMarket};
-use oxide_arb_models::types::MarketId;
+use oxide_arb_models::{
+    domain::{MarketInfo, UpsertMarket},
+    types::MarketId,
+};
 use std::collections::HashSet;
 
 pub trait MarketRepository: Send + Sync {

@@ -1,13 +1,12 @@
 use crate::traits::TimeseriesRepository;
 use chrono::{DateTime, Utc};
 use oxide_arb_error::storage::StorageError;
-use oxide_arb_models::clickhouse::{
-    BookSnapshotRow, CalibrationSnapshotRow, OpportunityAuditRow, TickEventRow,
+use oxide_arb_models::{
+    clickhouse::{BookSnapshotRow, CalibrationSnapshotRow, OpportunityAuditRow, TickEventRow},
+    config::AnalyticsConfig,
 };
-use oxide_arb_models::config::AnalyticsConfig;
 use oxide_arb_storage::clickhouse::{BatchInserter, ChWriteManager, ChWriteMetrics};
-use std::sync::Arc;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
 
 /// `ClickHouse` timeseries repository backed by per-table `BatchInserter` instances.

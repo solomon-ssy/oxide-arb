@@ -1,7 +1,6 @@
 //! Live-network integration tests (ignored by default).
 //!
 //! Run: `cargo test -p oxide-arb-api --features integration -- --ignored`
-
 #![cfg(feature = "integration")]
 
 #[path = "integration/clob_auth.rs"]

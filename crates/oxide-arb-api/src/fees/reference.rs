@@ -4,8 +4,7 @@
 //! Golden tests assert [`super::formula::calculate_fee`] matches this oracle
 //! within 4-decimal-place rounding.
 
-use rust_decimal::Decimal;
-use rust_decimal::MathematicalOps;
+use rust_decimal::{Decimal, MathematicalOps};
 use rust_decimal_macros::dec;
 
 /// Platform fee per official formula (exponent may be > 1 in legacy markets).

@@ -1,12 +1,17 @@
 //! `PostgreSQL` migration integration tests (requires Docker).
 
 use chrono::Utc;
-use oxide_arb_models::config::PostgresConfig;
-use oxide_arb_models::entities::{risk_state, runtime_config};
-use oxide_arb_models::enums::runtime_config::RuntimeConfigKey;
-use oxide_arb_storage::postgres::PostgresPool;
-use oxide_arb_storage::postgres::migration::{Migrator, MigratorTrait};
+use oxide_arb_models::{
+    config::PostgresConfig,
+    entities::{risk_state, runtime_config},
+    enums::runtime_config::RuntimeConfigKey,
+};
+use oxide_arb_storage::postgres::{
+    PostgresPool,
+    migration::{Migrator, MigratorTrait},
+};
 use sea_orm::{ConnectionTrait, EntityTrait};
+use std::time::Duration;
 use testcontainers::runners::AsyncRunner;
 
 fn test_pg_config(port: u16) -> PostgresConfig {
@@ -197,7 +202,7 @@ async fn updated_at_trigger_fires_on_update() {
     let old_updated_at = before.updated_at;
 
     // Sleep briefly to ensure timestamp differs
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
 
     // Update a column WITHOUT manually setting updated_at
     db.execute(sea_orm::Statement::from_sql_and_values(

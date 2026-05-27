@@ -1,7 +1,6 @@
-use std::time::Duration;
-
 use oxide_arb_error::OxideError;
 use rand::RngExt;
+use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 pub struct PeriodicTask;

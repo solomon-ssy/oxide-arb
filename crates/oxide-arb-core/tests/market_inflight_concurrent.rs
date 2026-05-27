@@ -1,11 +1,11 @@
 //! Concurrent stress tests for [`MarketInFlightRegistry`].
 
-use std::sync::Arc;
-use std::sync::Barrier;
-use std::thread;
-
 use oxide_arb_core::execution::market_inflight::{InFlightGuard, MarketInFlightRegistry};
 use oxide_arb_models::types::MarketId;
+use std::{
+    sync::{Arc, Barrier},
+    thread,
+};
 
 #[test]
 fn concurrent_same_market_only_one_wins() {

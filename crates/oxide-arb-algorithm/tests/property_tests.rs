@@ -9,8 +9,10 @@ use oxide_arb_algorithm::{
 use oxide_arb_models::{
     config::{CalibrationConfig, FillProbabilityConfig},
     domain::BookLevel,
-    enums::calibration::{DurationBucket, PriceZone},
-    enums::common::StalenessLevel,
+    enums::{
+        calibration::{DurationBucket, PriceZone},
+        common::StalenessLevel,
+    },
     types::{MicroPct, MicroPrice, MicroProb, MicroUsd, Price, Shares},
 };
 use proptest::prelude::*;

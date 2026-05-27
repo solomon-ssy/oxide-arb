@@ -3,11 +3,12 @@
 //! Validates rollover semantics, budget tracking, and snapshot recovery.
 
 use chrono::{Timelike, Utc};
-use oxide_arb_models::enums::common::TradeOutcome;
-use oxide_arb_models::types::Usd;
-use oxide_arb_risk::accounting::{DailyAccounting, HourlyAccounting, WeeklyAccounting};
-use oxide_arb_risk::clock::utc_clock;
-use oxide_arb_risk::types::PeriodStats;
+use oxide_arb_models::{enums::common::TradeOutcome, types::Usd};
+use oxide_arb_risk::{
+    accounting::{DailyAccounting, HourlyAccounting, WeeklyAccounting},
+    clock::utc_clock,
+    types::PeriodStats,
+};
 use rust_decimal_macros::dec;
 
 // ── Daily rollover ─────────────────────────────────────────────────────────

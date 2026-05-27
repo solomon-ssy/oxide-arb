@@ -3,6 +3,10 @@
 use oxide_arb_macros::IntoActiveValue;
 use sea_orm::{DeriveActiveEnum, EnumIter};
 use serde::{Deserialize, Serialize};
+use std::{
+    fmt::{self, Display, Formatter},
+    str::FromStr,
+};
 
 /// Strongly-typed keys for the `runtime_config` table.
 ///
@@ -82,7 +86,7 @@ impl RuntimeConfigKey {
     }
 }
 
-impl std::str::FromStr for RuntimeConfigKey {
+impl FromStr for RuntimeConfigKey {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -106,8 +110,8 @@ impl std::str::FromStr for RuntimeConfigKey {
     }
 }
 
-impl std::fmt::Display for RuntimeConfigKey {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Display for RuntimeConfigKey {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
     }
 }

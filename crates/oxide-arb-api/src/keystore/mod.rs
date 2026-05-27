@@ -6,13 +6,12 @@ mod signer;
 pub use credentials::L2Credentials;
 pub use signer::OrderSigner;
 
-use std::sync::Arc;
-
 use alloy::primitives::Address;
 use oxide_arb_error::signing::SigningError;
 use oxide_arb_models::config::{KeysConfig, PolymarketConfig};
 use polymarket_client_sdk_v2::clob::{Client as SdkClient, Config as SdkConfig};
 use secrecy::ExposeSecret;
+use std::sync::Arc;
 use zeroize::Zeroizing;
 
 /// Unified keystore for signing and authentication.

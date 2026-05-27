@@ -9,11 +9,17 @@
 use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::config::AnalyticsConfig;
 use prometheus::{Gauge, GaugeVec, IntCounter, IntCounterVec, IntGauge, Opts, Registry};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
-use tokio::task::JoinHandle;
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::{Duration, Instant},
+};
+use tokio::{
+    sync::{OwnedSemaphorePermit, Semaphore},
+    task::JoinHandle,
+};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, warn};
 
@@ -254,7 +260,7 @@ impl ChWriteManager {
         } else {
             // Fallback: use a simple round-trip latency as a proxy.
             // If the server is overwhelmed, even SELECT 1 will be slow.
-            let start = std::time::Instant::now();
+            let start = Instant::now();
             client.query("SELECT 1").fetch_one::<u8>().await?;
             let rtt = start.elapsed().as_secs_f64();
             Ok(rtt)

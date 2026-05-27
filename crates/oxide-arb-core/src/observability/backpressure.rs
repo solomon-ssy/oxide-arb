@@ -1,17 +1,20 @@
 //! Graceful backpressure — coalesce, dedup, evict, spill. Never halts trading.
 
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-
+use crate::{
+    execution::execution_pipeline::PostTradeJob,
+    observability::{
+        alert_dispatcher::{Alert, AlertDispatcher, AlertSeverity},
+        metrics_hub::MetricsHub,
+    },
+    outbox::in_memory::SharedInMemoryEventStore,
+};
 use dashmap::DashMap;
-use oxide_arb_models::domain::pipeline::PipelineEvent;
-use oxide_arb_models::types::TokenId;
+use oxide_arb_models::{domain::pipeline::PipelineEvent, types::TokenId};
 use parking_lot::Mutex;
-
-use crate::execution::execution_pipeline::PostTradeJob;
-use crate::observability::alert_dispatcher::{Alert, AlertDispatcher, AlertSeverity};
-use crate::observability::metrics_hub::MetricsHub;
-use crate::outbox::in_memory::SharedInMemoryEventStore;
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 const COALESCER_DEDUP_WINDOW: Duration = Duration::from_micros(500);
 const SPILL_ALERT_INTERVAL: Duration = Duration::from_secs(60);
@@ -214,20 +217,18 @@ const fn is_book_coalescable(event: &PipelineEvent) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-    use std::time::Instant;
-
-    use oxide_arb_models::domain::pipeline::{
-        IngressTrace, PipelineEvent, PriceDeltaCmd, PriceLevelDelta,
-    };
-    use oxide_arb_models::enums::common::Side;
-    use oxide_arb_models::enums::execution::ExecutionOutcome;
-    use oxide_arb_models::types::{MarketId, Price, Shares, TokenId, TradeId, Usd};
-    use rust_decimal_macros::dec;
-
     use super::*;
-    use crate::execution::fsm::ExecutionFSM;
-    use crate::outbox::in_memory::InMemoryEventStore;
+    use crate::{execution::fsm::ExecutionFSM, outbox::in_memory::InMemoryEventStore};
+    use oxide_arb_models::{
+        domain::pipeline::{IngressTrace, PipelineEvent, PriceDeltaCmd, PriceLevelDelta},
+        enums::{
+            common::{ExecutionMode, Side},
+            execution::ExecutionOutcome,
+        },
+        types::{MarketId, Price, Shares, TokenId, TradeId, Usd},
+    };
+    use rust_decimal_macros::dec;
+    use std::{sync::Arc, time::Instant};
 
     #[test]
     fn book_coalesce_does_not_halt() {
@@ -293,7 +294,7 @@ mod tests {
             net_profit: Usd::new(dec!(1)),
             outcome: ExecutionOutcome::Miss {
                 reason: "test".into(),
-                execution_mode: oxide_arb_models::enums::common::ExecutionMode::Paper,
+                execution_mode: ExecutionMode::Paper,
             },
         };
 

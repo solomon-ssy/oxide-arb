@@ -20,12 +20,13 @@ pub use token_intern::{TOKEN_INTERN, TokenInternPool, intern_str, intern_u256};
 
 use flume::Receiver;
 use num_traits::ToPrimitive;
-use oxide_arb_models::config::{PolymarketConfig, WebSocketConfig};
-use oxide_arb_models::domain::pipeline::PipelineEvent;
-use oxide_arb_models::types::TokenId;
+use oxide_arb_models::{
+    config::{PolymarketConfig, WebSocketConfig},
+    domain::pipeline::PipelineEvent,
+    types::TokenId,
+};
 use router::ShardRouter;
-use std::sync::Arc;
-use std::time::Instant;
+use std::{sync::Arc, time::Instant};
 
 /// Manages sharded WebSocket connections to Polymarket CLOB.
 ///

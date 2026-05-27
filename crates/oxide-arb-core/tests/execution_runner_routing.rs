@@ -3,19 +3,28 @@
 #[path = "support/test_util/scored_opportunity.rs"]
 mod scored_opportunity;
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::Duration;
-
 use async_trait::async_trait;
 use oxide_arb_algorithm::scorer::ScoredOpportunity;
-use oxide_arb_core::execution::port::ExecutionPort;
-use oxide_arb_core::execution::runner::{DEFAULT_EXECUTION_SHARD_COUNT, ExecutionRunnerPool};
-use oxide_arb_core::observability::metrics_hub::MetricsHub;
-use oxide_arb_models::domain::execution::{ExecutionOutcomeSummary, ExecutionResult};
-use oxide_arb_models::types::MarketId;
+use oxide_arb_core::{
+    execution::{
+        port::ExecutionPort,
+        runner::{DEFAULT_EXECUTION_SHARD_COUNT, ExecutionRunnerPool},
+    },
+    observability::metrics_hub::MetricsHub,
+};
+use oxide_arb_models::{
+    domain::execution::{ExecutionOutcomeSummary, ExecutionResult},
+    types::MarketId,
+};
 use parking_lot::Mutex;
 use scored_opportunity::sample_scored;
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicU32, Ordering},
+    },
+    time::Duration,
+};
 use tokio_util::sync::CancellationToken;
 
 struct CountingPipeline {

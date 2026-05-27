@@ -15,9 +15,11 @@ mod reference;
 pub use rate_cache::{CategoryFeeParams, FeeRateSource, FeeSnapshot};
 
 use arc_swap::ArcSwap;
-use oxide_arb_models::config::FeesConfig;
-use oxide_arb_models::enums::common::MarketCategory;
-use oxide_arb_models::types::{Price, Shares, TokenId, Usd};
+use oxide_arb_models::{
+    config::FeesConfig,
+    enums::common::MarketCategory,
+    types::{Price, Shares, TokenId, Usd},
+};
 use std::sync::Arc;
 
 /// Polymarket fee calculator with lock-free snapshot reads.

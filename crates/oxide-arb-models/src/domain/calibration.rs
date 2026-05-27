@@ -5,9 +5,13 @@
 //! convergence duration. Zones are finer near 1.0 because small price
 //! differences at the extreme have outsized impact on expected return.
 
-use crate::enums::calibration::{DurationBucket, PriceZone};
-use crate::enums::common::MarketCategory;
-use crate::types::{MarketId, Price, Probability};
+use crate::{
+    enums::{
+        calibration::{DurationBucket, PriceZone},
+        common::MarketCategory,
+    },
+    types::{MarketId, Price, Probability},
+};
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};

@@ -2,6 +2,7 @@
 
 use oxide_arb_core::infra::sharding::shard_index;
 use serde::{Deserialize, Serialize};
+use std::fs::write;
 
 const MARKET_IDS: [&str; 100] = [
     "0x0000000000000000000000000000000000000001",
@@ -174,7 +175,7 @@ fn shard_distribution_within_thirty_percent_of_uniform() {
 fn write_shard_map_fixture() {
     let fixture = compute_fixture(4);
     let json = serde_json::to_string_pretty(&fixture).expect("serialize fixture");
-    std::fs::write(
+    write(
         concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/tests/fixtures/shard_map_4.json"

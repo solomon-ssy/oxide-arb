@@ -1,16 +1,15 @@
 //! Endgame opportunity scorer — ranks opportunities by risk-adjusted expected `PnL`.
 
-use std::sync::Arc;
-
-use crate::fill_probability::FillProbabilityEstimator;
-use crate::staleness::StalenessPolicy;
-use crate::urgency::UrgencyFactor;
+use crate::{
+    fill_probability::FillProbabilityEstimator, staleness::StalenessPolicy, urgency::UrgencyFactor,
+};
 use chrono::{DateTime, Utc};
 use oxide_arb_models::{
     config::{FillProbabilityConfig, ScorerConfig},
     domain::{latency::LatencyTrace, opportunity::Opportunity},
     types::{MicroPct, MicroProb, MicroScore, MicroUsd, OpportunityId, TokenId},
 };
+use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub struct ScoredOpportunity {

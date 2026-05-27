@@ -1,14 +1,11 @@
 //! Application bootstrap — load config and run lifecycle.
 
-use std::sync::Arc;
-
+use super::{AppContext, task_registry::AppRunner};
 use oxide_arb_error::OxideResult;
 use oxide_arb_models::config::Settings;
 use oxide_arb_repository::postgres::PgRiskAuditRepository;
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
-
-use super::AppContext;
-use super::task_registry::AppRunner;
 
 /// Load settings, build subsystems, register tasks, and run until shutdown.
 pub async fn run(config_dir: &str) -> OxideResult<()> {

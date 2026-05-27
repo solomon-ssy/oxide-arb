@@ -16,10 +16,8 @@ pub use uma_source::UmaOracleSource;
 
 use futures_util::future::join_all;
 use oxide_arb_error::rpc::RpcError;
-use oxide_arb_models::config::AllSourcesDownStrategy;
-use oxide_arb_models::types::MarketId;
-use std::sync::Arc;
-use std::time::Duration;
+use oxide_arb_models::{config::AllSourcesDownStrategy, types::MarketId};
+use std::{sync::Arc, time::Duration};
 
 /// Multi-source voting oracle for settlement verification.
 ///

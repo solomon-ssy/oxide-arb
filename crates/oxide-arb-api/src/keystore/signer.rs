@@ -1,8 +1,9 @@
 //! EIP-712 order signing via alloy `PrivateKeySigner`.
 
-use alloy::primitives::Address;
-use alloy::signers::Signer;
-use alloy::signers::local::PrivateKeySigner;
+use alloy::{
+    primitives::Address,
+    signers::{Signer, local::PrivateKeySigner},
+};
 use oxide_arb_error::signing::SigningError;
 
 /// Order signer backed by an alloy `PrivateKeySigner` (secp256k1).

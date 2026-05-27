@@ -1,83 +1,96 @@
 //! Application composition root — wires subsystems in dependency order.
 
-use std::sync::Arc;
-use std::sync::atomic::AtomicU32;
-use std::time::Duration;
-
-use oxide_arb_algorithm::calibration::{CalibrationUpdater, ResolutionCalibrator};
-use oxide_arb_algorithm::cooldown::InMemoryEmissionCooldown;
-use oxide_arb_algorithm::endgame::EndgameDetector;
-use oxide_arb_algorithm::pipeline::OpportunityPipeline;
-use oxide_arb_algorithm::scorer::EndgameScorer;
-use oxide_arb_api::clob::ClobClient;
-use oxide_arb_api::fees::FeeCalculator;
-use oxide_arb_api::gamma::GammaClient;
-use oxide_arb_api::keystore::Keystore;
-use oxide_arb_api::ws::ClobWsManager;
-use oxide_arb_api::{VotingOracle, build_voting_oracle};
-use oxide_arb_error::OxideResult;
-use oxide_arb_models::config::{ExposureReservationConfig, Settings};
-use oxide_arb_models::domain::risk::RiskEngineState;
-use oxide_arb_models::enums::common::ExecutionMode;
-use oxide_arb_models::types::{MarketId, MicroUsd, TokenId};
-use oxide_arb_repository::postgres::{
-    PgBlacklistPersistenceRepository, PgCalibrationRepository, PgEmergencyRepository,
-    PgPotentialLossRepository, PgReconciliationRepository, PgRiskAuditRepository,
-    PgRiskStateRepository,
-};
-use oxide_arb_repository::traits::{
-    BlacklistPersistenceRepository, PotentialLossRepository, RiskStateRepository,
-};
-use oxide_arb_risk::audit::RiskAuditEvent;
-use oxide_arb_risk::audit_sink::AuditSink;
-use oxide_arb_risk::builder::RiskEngineBuilder;
-use oxide_arb_risk::clock::utc_clock;
-use oxide_arb_risk::engine::RiskEngine;
-use oxide_arb_storage::cache::{MokaBackend, RedisBackend, TieredCache};
-use oxide_arb_storage::clickhouse::ClickHousePool;
-use oxide_arb_storage::postgres::PostgresPool;
-use oxide_arb_storage::postgres::migration::{Migrator, MigratorTrait};
-use parking_lot::Mutex;
-use tokio_util::sync::CancellationToken;
-
-use super::task_registry::PendingTaskQueue;
 use super::{
     AppContext, DataBundle, ExecutionBundle, InfraBundle, RiskBundle, RuntimeChannels,
-    TradingBundle,
+    TradingBundle, task_registry::PendingTaskQueue,
 };
-use crate::bridge::CoreOpportunityPipeline;
-use crate::bridge::calibration_source::CoreCalibrationDataSource;
-use crate::bridge::fee_estimator::CoreFeeEstimator;
-use crate::bridge::potential_loss_store::CorePotentialLossStore;
-use crate::bridge::risk_audit_sink::new_audit_sink;
-use crate::bridge::risk_metrics::CoreRiskMetrics;
-use crate::bridge::risk_persistence::CoreRiskPersistence;
-use crate::detection::coalescer::Coalescer;
-use crate::detection::funnel::Funnel;
-use crate::detection::scanner::Scanner;
-use crate::execution::capital_manager::CapitalManager;
-use crate::execution::dispatcher::Dispatcher;
-use crate::execution::execution_pipeline::{ExecutionPipeline, ExecutionPipelineDeps};
-use crate::execution::fsm::ExecutionFSM;
-use crate::execution::market_inflight::MarketInFlightRegistry;
-use crate::execution::plan_builder::PlanBuilder;
-use crate::execution::port::ExecutionPort;
-use crate::execution::runner::{ExecutionRunner, ExecutionRunnerPool};
-use crate::execution::tiered_strategy::OrderStrategy;
-use crate::execution::validator::Validator;
-use crate::exposure::in_memory::InMemoryExposureReservation;
-use crate::infra::oracle_health_tracker::OracleHealthTracker;
-use crate::infra::risk_decision_audit_buffer::RiskDecisionAuditBuffer;
-use crate::observability::alert_dispatcher::AlertDispatcher;
-use crate::observability::backpressure::BackpressurePolicy;
-use crate::observability::metrics_hub::MetricsHub;
-use crate::outbox::in_memory::InMemoryEventStore;
-use crate::pipeline::book_store::BookStore;
-use crate::pipeline::data_pipeline::{DataPipeline, DataPipelineDeps};
-use crate::pipeline::market_cache::MarketCache;
-use crate::pipeline::market_registry::MarketRegistry;
-use crate::pipeline::staleness_classifier::StalenessClassifier;
-use crate::service::risk_metrics::{ApiHealthTracker, RiskMetricsState};
+use crate::{
+    bridge::{
+        CoreOpportunityPipeline, calibration_source::CoreCalibrationDataSource,
+        fee_estimator::CoreFeeEstimator, potential_loss_store::CorePotentialLossStore,
+        risk_audit_sink::new_audit_sink, risk_metrics::CoreRiskMetrics,
+        risk_persistence::CoreRiskPersistence,
+    },
+    detection::{coalescer::Coalescer, funnel::Funnel, scanner::Scanner},
+    execution::{
+        capital_manager::CapitalManager,
+        dispatcher::Dispatcher,
+        execution_pipeline::{ExecutionPipeline, ExecutionPipelineDeps},
+        fsm::ExecutionFSM,
+        market_inflight::MarketInFlightRegistry,
+        plan_builder::PlanBuilder,
+        port::ExecutionPort,
+        runner::{ExecutionRunner, ExecutionRunnerPool},
+        tiered_strategy::OrderStrategy,
+        validator::Validator,
+    },
+    exposure::in_memory::InMemoryExposureReservation,
+    infra::{
+        oracle_health_tracker::OracleHealthTracker,
+        risk_decision_audit_buffer::RiskDecisionAuditBuffer,
+    },
+    observability::{
+        alert_dispatcher::AlertDispatcher, backpressure::BackpressurePolicy,
+        metrics_hub::MetricsHub,
+    },
+    outbox::in_memory::InMemoryEventStore,
+    pipeline::{
+        book_store::BookStore,
+        data_pipeline::{DataPipeline, DataPipelineDeps},
+        market_cache::MarketCache,
+        market_registry::MarketRegistry,
+        staleness_classifier::StalenessClassifier,
+    },
+    service::risk_metrics::{ApiHealthTracker, RiskMetricsState},
+};
+use oxide_arb_algorithm::{
+    calibration::{CalibrationUpdater, ResolutionCalibrator},
+    cooldown::InMemoryEmissionCooldown,
+    endgame::EndgameDetector,
+    pipeline::OpportunityPipeline,
+    scorer::EndgameScorer,
+};
+use oxide_arb_api::{
+    VotingOracle, build_voting_oracle,
+    clob::ClobClient,
+    fees::FeeCalculator,
+    gamma::GammaClient,
+    keystore::Keystore,
+    ws::{ClobWsManager, WsEventDropHook},
+};
+use oxide_arb_error::OxideResult;
+use oxide_arb_models::{
+    config::{ExposureReservationConfig, Settings},
+    domain::risk::RiskEngineState,
+    enums::common::ExecutionMode,
+    types::{MarketId, MicroUsd, TokenId},
+};
+use oxide_arb_repository::{
+    postgres::{
+        PgBlacklistPersistenceRepository, PgCalibrationRepository, PgEmergencyRepository,
+        PgPotentialLossRepository, PgReconciliationRepository, PgRiskAuditRepository,
+        PgRiskStateRepository,
+    },
+    traits::{BlacklistPersistenceRepository, PotentialLossRepository, RiskStateRepository},
+};
+use oxide_arb_risk::{
+    audit::RiskAuditEvent, audit_sink::AuditSink, builder::RiskEngineBuilder, clock::utc_clock,
+    engine::RiskEngine,
+};
+use oxide_arb_storage::{
+    cache::{MokaBackend, RedisBackend, TieredCache},
+    clickhouse::ClickHousePool,
+    postgres::{
+        PostgresPool,
+        migration::{Migrator, MigratorTrait},
+    },
+};
+use parking_lot::Mutex;
+use std::{
+    sync::{Arc, atomic::AtomicU32},
+    time::Duration,
+};
+use tokio_util::sync::CancellationToken;
 
 struct BuildRepos {
     risk_state: Arc<PgRiskStateRepository>,
@@ -279,8 +292,6 @@ async fn connect_clients(
     shutdown: CancellationToken,
     metrics: Arc<MetricsHub>,
 ) -> OxideResult<BuildClients> {
-    use oxide_arb_api::ws::WsEventDropHook;
-
     let metrics_hook = Arc::clone(&metrics);
     let on_events_dropped: WsEventDropHook = Arc::new(move |n| {
         metrics_hook.ws_events_dropped.inc_by(n);

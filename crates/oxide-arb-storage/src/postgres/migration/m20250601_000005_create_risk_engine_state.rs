@@ -1,7 +1,7 @@
 use super::migrate_up;
-use oxide_arb_models::enums::risk::BreakerStateName;
-use oxide_arb_models::idens::risk_state::RiskEngineState;
-use oxide_arb_models::types::Usd;
+use oxide_arb_models::{
+    enums::risk::BreakerStateName, idens::risk_state::RiskEngineState, types::Usd,
+};
 use sea_orm_migration::prelude::*;
 
 #[derive(DeriveMigrationName)]

@@ -1,7 +1,5 @@
 use super::migrate_up;
-use oxide_arb_models::idens::event::Event;
-use oxide_arb_models::idens::market::Market;
-use oxide_arb_models::idens::trade::Trade;
+use oxide_arb_models::idens::{event::Event, market::Market, trade::Trade};
 use sea_orm_migration::prelude::*;
 
 #[derive(DeriveMigrationName)]

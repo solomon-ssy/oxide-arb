@@ -4,12 +4,11 @@
 //! [`EndgameBookView`] provides zero-copy detection views; serde/API boundaries
 //! convert via [`BookLevel::from_decimal`] / [`BookLevel::price_decimal`].
 
-use std::sync::Arc;
-
 use crate::types::{
     MicroConversionError, MicroPrice, MicroShares, MicroUsd, Price, Shares, TokenId,
 };
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use thiserror::Error;
 
 /// Which YES/NO leg triggered a pair-level book gate failure.
@@ -376,7 +375,6 @@ impl EndgameBookSnapshot {
 mod tests {
     use super::*;
     use rust_decimal_macros::dec;
-
     fn level(price: rust_decimal::Decimal) -> BookLevel {
         BookLevel::from_decimal(Price::new(price), Shares::new(dec!(10))).unwrap()
     }

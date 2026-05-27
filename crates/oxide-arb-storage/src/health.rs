@@ -1,8 +1,6 @@
 //! Combined storage health checking.
 
-use crate::cache::RedisBackend;
-use crate::clickhouse::ClickHousePool;
-use crate::postgres::PostgresPool;
+use crate::{cache::RedisBackend, clickhouse::ClickHousePool, postgres::PostgresPool};
 use oxide_arb_error::storage::StorageError;
 use tracing::warn;
 

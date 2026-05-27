@@ -3,20 +3,22 @@
 #[path = "support/test_util/opportunity_fixture.rs"]
 mod opportunity_fixture;
 
-use std::sync::Arc;
-
 use chrono::Utc;
 use num_traits::ToPrimitive;
 use opportunity_fixture::sample_opportunity;
-use oxide_arb_core::execution::validator::Validator;
-use oxide_arb_core::observability::metrics_hub::MetricsHub;
-use oxide_arb_core::pipeline::book_store::BookStore;
-use oxide_arb_core::pipeline::staleness_classifier::StalenessClassifier;
+use oxide_arb_core::{
+    execution::validator::Validator,
+    observability::metrics_hub::MetricsHub,
+    pipeline::{book_store::BookStore, staleness_classifier::StalenessClassifier},
+};
 use oxide_arb_error::trading::TradingError;
-use oxide_arb_models::config::MarketDataConfig;
-use oxide_arb_models::domain::book::BookLevel;
-use oxide_arb_models::types::{Price, Shares, TokenId};
+use oxide_arb_models::{
+    config::MarketDataConfig,
+    domain::book::BookLevel,
+    types::{Price, Shares, TokenId},
+};
 use rust_decimal_macros::dec;
+use std::sync::Arc;
 
 fn level(price: rust_decimal::Decimal) -> BookLevel {
     BookLevel::from_decimal(Price::new(price), Shares::new(dec!(1000))).unwrap()

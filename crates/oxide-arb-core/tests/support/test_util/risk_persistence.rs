@@ -1,16 +1,19 @@
 //! In-memory [`RiskPersistence`] for integration tests and runtime harnesses.
 
-use std::sync::Mutex;
-
 use oxide_arb_error::OxideResult;
-use oxide_arb_models::domain::blacklist::{BlacklistInfo, UpsertBlacklistEntry};
-use oxide_arb_models::domain::risk::{
-    NewEmergencySnapshot, NewReconciliationReport, NewRiskAuditEvent, RiskStateInfo,
-    UpsertRiskEngineState,
+use oxide_arb_models::{
+    domain::{
+        blacklist::{BlacklistInfo, UpsertBlacklistEntry},
+        risk::{
+            NewEmergencySnapshot, NewReconciliationReport, NewRiskAuditEvent, RiskStateInfo,
+            UpsertRiskEngineState,
+        },
+    },
+    enums::risk::BreakerStateName,
+    types::{MarketId, Usd},
 };
-use oxide_arb_models::enums::risk::BreakerStateName;
-use oxide_arb_models::types::{MarketId, Usd};
 use oxide_arb_risk::traits::RiskPersistence;
+use std::{mem::take, sync::Mutex};
 
 /// Captures all persistence writes in memory for assertions (no I/O, no PG).
 pub struct TestRiskPersistence {
@@ -35,7 +38,7 @@ impl TestRiskPersistence {
 
     /// Drain captured audit events (most recent batch since last take).
     pub fn take_audits(&self) -> Vec<NewRiskAuditEvent> {
-        std::mem::take(&mut *self.audits.lock().expect("audit lock"))
+        take(&mut *self.audits.lock().expect("audit lock"))
     }
 
     fn default_state_info() -> RiskStateInfo {
@@ -191,11 +194,9 @@ impl RiskPersistence for TestRiskPersistence {
 
 #[cfg(test)]
 mod tests {
-    use oxide_arb_models::domain::risk::NewRiskAuditEvent;
-    use oxide_arb_models::enums::risk::RiskAuditEventType;
-    use oxide_arb_risk::traits::RiskPersistence;
-
     use super::TestRiskPersistence;
+    use oxide_arb_models::{domain::risk::NewRiskAuditEvent, enums::risk::RiskAuditEventType};
+    use oxide_arb_risk::traits::RiskPersistence;
 
     #[tokio::test]
     async fn captures_audit_events() {

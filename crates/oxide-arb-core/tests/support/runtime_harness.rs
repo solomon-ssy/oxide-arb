@@ -15,38 +15,46 @@ mod runtime_build;
 #[path = "test_util/scored_opportunity.rs"]
 pub mod scored_opportunity;
 
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-
 use chrono::Utc;
 use mock_event_source::{MockEventInject, MockEventSource};
-use oxide_arb_core::detection::coalescer::Coalescer;
-use oxide_arb_core::detection::funnel::Funnel;
-use oxide_arb_core::detection::scanner_task::ScannerTask;
-use oxide_arb_core::execution::execution_pipeline::{ExecutionPipeline, PostTradeJob};
-use oxide_arb_core::execution::fsm::ExecutionFSM;
-use oxide_arb_core::execution::market_inflight::MarketInFlightRegistry;
-use oxide_arb_core::execution::runner::ExecutionRunner;
-use oxide_arb_core::observability::metrics_hub::MetricsHub;
-use oxide_arb_core::pipeline::book_store::BookStore;
-use oxide_arb_core::pipeline::data_pipeline::DataPipeline;
-use oxide_arb_core::pipeline::event_source::PipelineEventSource;
-use oxide_arb_core::pipeline::market_cache::MarketCache;
-use oxide_arb_core::pipeline::market_registry::MarketRegistry;
-use oxide_arb_models::config::Settings;
-use oxide_arb_models::domain::book::BookLevel;
-use oxide_arb_models::domain::market::{MarketRegistryInfo, TokenInfo};
-use oxide_arb_models::domain::pipeline::{
-    BookSideData, BookSnapshotCmd, IngressTrace, PipelineEvent, PriceDeltaCmd, PriceLevelDelta,
+use oxide_arb_core::{
+    detection::{coalescer::Coalescer, funnel::Funnel, scanner_task::ScannerTask},
+    execution::{
+        execution_pipeline::{ExecutionPipeline, PostTradeJob},
+        fsm::ExecutionFSM,
+        market_inflight::MarketInFlightRegistry,
+        runner::ExecutionRunner,
+    },
+    observability::metrics_hub::MetricsHub,
+    pipeline::{
+        book_store::BookStore, data_pipeline::DataPipeline, event_source::PipelineEventSource,
+        market_cache::MarketCache, market_registry::MarketRegistry,
+    },
 };
-use oxide_arb_models::enums::common::ExecutionMode;
-use oxide_arb_models::enums::market::MarketStatus;
-use oxide_arb_models::enums::{MarketCategory, TickSize};
-use oxide_arb_models::types::{EventId, MarketId, Price, Shares, TokenId};
+use oxide_arb_models::enums::common::MarketCategory as ModelsMarketCategory;
+use oxide_arb_models::enums::common::TickSize as ModelsTickSize;
+use oxide_arb_models::types::EventId as ModelsEventId;
+use oxide_arb_models::{
+    config::Settings,
+    domain::{
+        book::BookLevel,
+        market::{MarketRegistryInfo, TokenInfo},
+        pipeline::{
+            BookSideData, BookSnapshotCmd, IngressTrace, PipelineEvent, PriceDeltaCmd,
+            PriceLevelDelta,
+        },
+    },
+    enums::{MarketCategory, TickSize, common::ExecutionMode, market::MarketStatus},
+    types::{EventId, MarketId, Price, Shares, TokenId, Usd},
+};
 use oxide_arb_risk::traits::RiskPersistence;
 use risk_persistence::TestRiskPersistence;
 use runtime_build::{TestBuildDeps, assemble_test_runtime};
 use rust_decimal_macros::dec;
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use tokio_util::sync::CancellationToken;
 
 pub struct RuntimeHarness {
@@ -133,15 +141,15 @@ impl RuntimeHarness {
         };
         inner.market_registry.register_market(MarketRegistryInfo {
             market_id: MarketId::new("0xtest_market"),
-            event_id: oxide_arb_models::types::EventId::new("test_event"),
+            event_id: ModelsEventId::new("test_event"),
             token_yes: yes.clone(),
             token_no: no.clone(),
             question: "Q".into(),
             slug: "q".into(),
-            category: oxide_arb_models::enums::common::MarketCategory::Politics,
+            category: ModelsMarketCategory::Politics,
             status: MarketStatus::Active,
             neg_risk: false,
-            tick_size: oxide_arb_models::enums::common::TickSize::Hundredth,
+            tick_size: ModelsTickSize::Hundredth,
             tokens: vec![
                 TokenInfo {
                     token_id: yes,
@@ -158,7 +166,7 @@ impl RuntimeHarness {
             best_ask: None,
             depth_usd: None,
             min_order_size: dec!(1),
-            volume_24h: oxide_arb_models::types::Usd::ZERO,
+            volume_24h: Usd::ZERO,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         });
@@ -222,7 +230,7 @@ impl RuntimeHarness {
             best_ask: None,
             depth_usd: None,
             min_order_size: dec!(1),
-            volume_24h: oxide_arb_models::types::Usd::ZERO,
+            volume_24h: Usd::ZERO,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         });

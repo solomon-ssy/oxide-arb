@@ -127,6 +127,7 @@ impl From<sea_orm::TransactionError<Self>> for OxideError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rust_decimal_macros::dec;
 
     #[test]
     fn api_error_propagates_via_from() {
@@ -157,9 +158,6 @@ mod tests {
 
     #[test]
     fn config_error_propagates() {
-        use config_validation::{ConfigValidationError, ConfigValidationReport};
-        use rust_decimal_macros::dec;
-
         let cfg_err = config::ConfigError::from(ConfigValidationReport::single_error(
             ConfigValidationError::InvalidKellyFraction(dec!(1.5)),
         ));

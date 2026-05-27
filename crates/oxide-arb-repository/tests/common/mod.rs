@@ -1,13 +1,20 @@
 //! Shared helpers for `PostgreSQL` repository integration tests.
 
 use chrono::Utc;
-use oxide_arb_models::config::PostgresConfig;
-use oxide_arb_models::domain::{UpsertEvent, UpsertMarket};
-use oxide_arb_models::enums::common::{MarketCategory, TickSize};
-use oxide_arb_models::enums::market::{EventStatus, MarketStatus};
-use oxide_arb_models::types::*;
-use oxide_arb_storage::postgres::PostgresPool;
-use oxide_arb_storage::postgres::migration::{Migrator, MigratorTrait};
+use oxide_arb_models::{
+    config::PostgresConfig,
+    domain::{UpsertEvent, UpsertMarket},
+    enums::{
+        common::{MarketCategory, TickSize},
+        market::{EventStatus, MarketStatus},
+    },
+    types::*,
+};
+use oxide_arb_storage::postgres::{
+    PostgresPool,
+    migration::{Migrator, MigratorTrait},
+};
+use testcontainers::runners::AsyncRunner;
 
 pub fn test_pg_config(port: u16) -> PostgresConfig {
     PostgresConfig {
@@ -37,7 +44,6 @@ pub async fn setup_pg() -> (
     PostgresPool,
     testcontainers::ContainerAsync<testcontainers_modules::postgres::Postgres>,
 ) {
-    use testcontainers::runners::AsyncRunner;
     let container = testcontainers_modules::postgres::Postgres::default()
         .with_db_name("test_oxide_arb")
         .with_user("postgres")

@@ -1,9 +1,13 @@
-use oxide_arb_models::domain::book::{BookLevel, BookSnapshot};
-use oxide_arb_models::enums::common::Side;
-use oxide_arb_models::types::{MicroPrice, Price, Shares, TokenId};
+use oxide_arb_models::{
+    domain::book::{BookLevel, BookSnapshot},
+    enums::common::Side,
+    types::{MicroPrice, Price, Shares, TokenId},
+};
 use rust_decimal::Decimal;
-use std::cmp::{Ordering, Reverse};
-use std::sync::Arc;
+use std::{
+    cmp::{Ordering, Reverse},
+    sync::Arc,
+};
 
 /// Single-token L2 orderbook (mutable writer-side state).
 ///
@@ -253,7 +257,6 @@ fn apply_level_delta(levels: &mut Vec<BookLevel>, level: BookLevel, descending: 
 mod tests {
     use super::*;
     use rust_decimal_macros::dec;
-
     fn lvl(p: Decimal, s: Decimal) -> BookLevel {
         BookLevel::from_decimal(Price::new(p), Shares::new(s)).unwrap()
     }

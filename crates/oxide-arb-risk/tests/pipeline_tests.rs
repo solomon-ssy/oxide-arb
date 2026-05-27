@@ -5,23 +5,35 @@
 
 use chrono::Utc;
 use num_traits::ToPrimitive;
-use oxide_arb_models::config::RiskConfig;
-use oxide_arb_models::domain::position::PositionInfo;
-use oxide_arb_models::domain::risk::ProbabilityInput;
-use oxide_arb_models::enums::common::Side;
-use oxide_arb_models::types::MarketId;
-use oxide_arb_models::types::Usd;
-use oxide_arb_risk::builder::RiskEngineBuilder;
-use oxide_arb_risk::clock::utc_clock;
-use oxide_arb_risk::context::PreTradeContext;
-use oxide_arb_risk::pipeline::{RiskCheck, build_default_pipeline};
-use oxide_arb_risk::snapshot::RiskSnapshot;
-use oxide_arb_risk::traits::{RiskMetrics, RiskMetricsSnapshot};
-use oxide_arb_risk::types::{ReportMode, RiskCheckId, RiskCheckKind, RiskCheckResult};
+use oxide_arb_models::{
+    config::RiskConfig,
+    domain::{
+        calibration::{BucketKey, CalibrationSnapshot},
+        opportunity::{EndgameMeta, Opportunity},
+        position::PositionInfo,
+        risk::ProbabilityInput,
+    },
+    enums::{
+        calibration::{DurationBucket, PriceZone},
+        common::{MarketCategory, Side, StalenessLevel},
+        opportunity::PayoutModel,
+    },
+    types::{Bps, EventId, MarketId, OpportunityId, Price, Shares, TokenId, Usd},
+};
+use oxide_arb_risk::{
+    builder::RiskEngineBuilder,
+    clock::utc_clock,
+    context::PreTradeContext,
+    pipeline::{RiskCheck, build_default_pipeline},
+    snapshot::{DailyAccountingSnapshot, RiskSnapshot},
+    traits::{RiskMetrics, RiskMetricsSnapshot},
+    types::{PipelineReport, ReportMode, RiskCheckId, RiskCheckKind, RiskCheckResult},
+};
 use rust_decimal_macros::dec;
+use std::time::Instant;
 
 struct TestFrame {
-    opp: oxide_arb_models::domain::opportunity::Opportunity,
+    opp: Opportunity,
     snap: RiskSnapshot,
 }
 
@@ -51,13 +63,6 @@ impl TestFrame {
 }
 
 fn default_frame() -> TestFrame {
-    use oxide_arb_models::domain::calibration::{BucketKey, CalibrationSnapshot};
-    use oxide_arb_models::domain::opportunity::{EndgameMeta, Opportunity};
-    use oxide_arb_models::enums::calibration::{DurationBucket, PriceZone};
-    use oxide_arb_models::enums::common::{MarketCategory, Side, StalenessLevel};
-    use oxide_arb_models::enums::opportunity::PayoutModel;
-    use oxide_arb_models::types::{Bps, EventId, MarketId, OpportunityId, Price, Shares, TokenId};
-
     let opp = Opportunity {
         opportunity_id: OpportunityId::new_v7(),
         market_id: MarketId::new("0xtest"),
@@ -107,7 +112,7 @@ fn default_frame() -> TestFrame {
     TestFrame {
         opp,
         snap: RiskSnapshot {
-            daily: oxide_arb_risk::snapshot::DailyAccountingSnapshot {
+            daily: DailyAccountingSnapshot {
                 daily_budget_remaining: Usd::new(dec!(50)),
                 ..RiskSnapshot::zeroed().daily
             },
@@ -232,14 +237,7 @@ impl TestRiskPipeline {
         self.checks.push(check);
     }
 
-    fn evaluate(
-        &self,
-        ctx: &PreTradeContext<'_>,
-        mode: ReportMode,
-    ) -> oxide_arb_risk::types::PipelineReport {
-        use oxide_arb_risk::types::{PipelineReport, RiskCheckKind};
-        use std::time::Instant;
-
+    fn evaluate(&self, ctx: &PreTradeContext<'_>, mode: ReportMode) -> PipelineReport {
         let pipeline_start = Instant::now();
         let mut results = Vec::with_capacity(self.checks.len());
         let mut has_failed_hard_gate = false;

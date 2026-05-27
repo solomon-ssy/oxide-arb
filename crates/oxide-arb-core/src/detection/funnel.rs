@@ -1,18 +1,22 @@
-use std::cmp::{Ordering, Reverse};
-use std::collections::{BinaryHeap, HashMap};
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-
+use crate::{
+    infra::sharding::shard_index,
+    observability::{
+        backpressure::BackpressurePolicy,
+        latency::{observe_scan_to_dispatch, stamp_dispatch_started},
+        metrics_hub::MetricsHub,
+    },
+};
 use num_traits::ToPrimitive;
 use oxide_arb_algorithm::scorer::ScoredOpportunity;
 use oxide_arb_error::OxideError;
 use oxide_arb_models::types::MicroScore;
+use std::{
+    cmp::{Ordering, Reverse},
+    collections::{BinaryHeap, HashMap},
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use tokio_util::sync::CancellationToken;
-
-use crate::infra::sharding::shard_index;
-use crate::observability::backpressure::BackpressurePolicy;
-use crate::observability::latency::{observe_scan_to_dispatch, stamp_dispatch_started};
-use crate::observability::metrics_hub::MetricsHub;
 
 #[derive(Clone)]
 struct ScoredEntry {
@@ -314,6 +318,7 @@ mod tests {
     use chrono::Utc;
     use oxide_arb_models::{
         domain::{
+            calibration,
             latency::LatencyTrace,
             opportunity::{EndgameMeta, Opportunity},
         },
@@ -328,7 +333,7 @@ mod tests {
         },
     };
     use rust_decimal_macros::dec;
-
+    use std::{thread::sleep, time::Duration};
     fn sample_scored(market: &str, score: MicroScore) -> Arc<ScoredOpportunity> {
         Arc::new(ScoredOpportunity {
             opportunity: Arc::new(Opportunity {
@@ -361,8 +366,8 @@ mod tests {
                     duration_bucket: DurationBucket::Short,
                     settlement_deadline: None,
                 },
-                calibration: oxide_arb_models::domain::calibration::CalibrationSnapshot {
-                    bucket_key: oxide_arb_models::domain::calibration::BucketKey {
+                calibration: calibration::CalibrationSnapshot {
+                    bucket_key: calibration::BucketKey {
                         category: MarketCategory::Other,
                         price_zone: PriceZone::Z95,
                         duration_bucket: DurationBucket::Short,
@@ -463,7 +468,7 @@ mod tests {
             sample_scored("early", MicroScore::from_micro(5_000_000)),
             MicroScore::from_micro(5_000_000),
         );
-        std::thread::sleep(Duration::from_millis(2));
+        sleep(Duration::from_millis(2));
         q.submit(
             sample_scored("late", MicroScore::from_micro(5_000_000)),
             MicroScore::from_micro(5_000_000),

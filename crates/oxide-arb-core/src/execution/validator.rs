@@ -1,17 +1,17 @@
-use std::sync::Arc;
-
+use crate::{
+    observability::metrics_hub::MetricsHub,
+    pipeline::{book_store::BookStore, staleness_classifier::StalenessClassifier},
+};
 use chrono::Utc;
 use num_traits::ToPrimitive;
 use oxide_arb_error::trading::TradingError;
-use oxide_arb_models::domain::execution::ValidationResult;
-use oxide_arb_models::domain::opportunity::Opportunity;
-use oxide_arb_models::enums::common::{Side, StalenessLevel};
-use oxide_arb_models::types::{Bps, TokenId};
+use oxide_arb_models::{
+    domain::{execution::ValidationResult, opportunity::Opportunity},
+    enums::common::{Side, StalenessLevel},
+    types::{Bps, TokenId},
+};
 use rust_decimal_macros::dec;
-
-use crate::observability::metrics_hub::MetricsHub;
-use crate::pipeline::book_store::BookStore;
-use crate::pipeline::staleness_classifier::StalenessClassifier;
+use std::sync::Arc;
 
 pub struct Validator {
     book_store: Arc<BookStore>,

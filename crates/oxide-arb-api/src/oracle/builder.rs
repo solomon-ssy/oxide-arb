@@ -1,23 +1,22 @@
 //! Construct a [`VotingOracle`] from application settings.
 
-use super::VotingOracle;
-use super::ctf_source::CtfOracleSource;
-use super::gamma_source::GammaOracleSource;
-use super::source::OracleSource;
-use super::uma_source::UmaOracleSource;
-use oxide_arb_models::config::{
-    GammaConfig, OnchainConfig, PolymarketConfig, SettlementOracleConfig,
+use super::{
+    VotingOracle, ctf_source::CtfOracleSource, gamma_source::GammaOracleSource,
+    source::OracleSource, uma_source::UmaOracleSource,
 };
-use oxide_arb_models::constants::CTF_ADDRESS;
-use std::sync::Arc;
-use std::time::Duration;
+use oxide_arb_error::rpc::RpcError;
+use oxide_arb_models::{
+    config::{GammaConfig, OnchainConfig, PolymarketConfig, SettlementOracleConfig},
+    constants::CTF_ADDRESS,
+};
+use std::{sync::Arc, time::Duration};
 
 /// Build the production 3-source settlement oracle (Gamma + CTF + UMA).
 pub fn build_voting_oracle(
     polymarket: &PolymarketConfig,
     gamma: &GammaConfig,
     oracle_cfg: &SettlementOracleConfig,
-) -> Result<VotingOracle, oxide_arb_error::rpc::RpcError> {
+) -> Result<VotingOracle, RpcError> {
     let sources: Vec<Arc<dyn OracleSource>> = vec![
         Arc::new(GammaOracleSource::new(gamma.base_url.clone())),
         Arc::new(CtfOracleSource::new(
@@ -44,7 +43,7 @@ pub fn build_voting_oracle_from_urls(
     gamma_base_url: String,
     onchain: &OnchainConfig,
     oracle_cfg: &SettlementOracleConfig,
-) -> Result<VotingOracle, oxide_arb_error::rpc::RpcError> {
+) -> Result<VotingOracle, RpcError> {
     let polymarket = PolymarketConfig {
         onchain: onchain.clone(),
         ..PolymarketConfig::default()

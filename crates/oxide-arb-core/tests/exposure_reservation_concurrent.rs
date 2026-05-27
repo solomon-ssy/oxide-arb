@@ -1,14 +1,13 @@
 //! Concurrent exposure reservation stress tests.
 
-use std::sync::Arc;
-use std::thread;
-use std::time::Duration;
-
 use oxide_arb_core::exposure::in_memory::InMemoryExposureReservation;
 use oxide_arb_error::reservation::ReservationError;
-use oxide_arb_models::config::ExposureReservationConfig;
-use oxide_arb_models::types::{MarketId, Usd};
+use oxide_arb_models::{
+    config::ExposureReservationConfig,
+    types::{MarketId, Usd},
+};
 use rust_decimal_macros::dec;
+use std::{sync::Arc, thread, time::Duration};
 
 const fn tight_config() -> ExposureReservationConfig {
     ExposureReservationConfig {

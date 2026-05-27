@@ -1,9 +1,8 @@
 //! Injectable [`PipelineEvent`] source for `DataPipeline` tests (PR-3 wiring).
 
 use flume::{Receiver, Sender};
-use oxide_arb_models::domain::pipeline::PipelineEvent;
-
 use oxide_arb_core::pipeline::event_source::PipelineEventSource;
+use oxide_arb_models::domain::pipeline::PipelineEvent;
 
 /// Bounded in-memory pipeline event bus for tests.
 ///
@@ -52,16 +51,15 @@ impl PipelineEventSource for MockEventSource {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-    use std::time::Instant;
-
-    use oxide_arb_models::domain::book::BookLevel;
-    use oxide_arb_models::domain::pipeline::{
-        BookSideData, BookSnapshotCmd, IngressTrace, PipelineEvent,
-    };
-    use oxide_arb_models::types::{Price, Shares, TokenId};
-
     use super::{MockEventInject, MockEventSource};
+    use oxide_arb_models::{
+        domain::{
+            book::BookLevel,
+            pipeline::{BookSideData, BookSnapshotCmd, IngressTrace, PipelineEvent},
+        },
+        types::{Price, Shares, TokenId},
+    };
+    use std::{sync::Arc, time::Instant};
 
     #[test]
     fn roundtrip_book_snapshot_event() {

@@ -3,9 +3,11 @@
 //! Hand-calculated results validated against the mathematical model:
 //! Kelly f* = (p * b - q) / b, where b = `net_odds`, q = 1 - `p_effective`.
 
-use oxide_arb_models::config::{KellyConfig, RiskConfig};
-use oxide_arb_models::domain::risk::ProbabilityInput;
-use oxide_arb_models::types::Usd;
+use oxide_arb_models::{
+    config::{KellyConfig, RiskConfig},
+    domain::risk::ProbabilityInput,
+    types::Usd,
+};
 use oxide_arb_risk::sizing::QuarterKellyCalculator;
 use rust_decimal_macros::dec;
 

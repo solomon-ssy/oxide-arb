@@ -3,20 +3,22 @@
 //! `recover_state` reconstructs all risk engine subsystems from persisted
 //! snapshots and validates invariants before allowing trading.
 
-use crate::accounting::{DailyAccounting, HourlyAccounting, WeeklyAccounting};
-use crate::circuit_breaker::CircuitBreaker;
-use crate::clock::Clock;
-use crate::position::{PositionTracker, PotentialLossLedger};
-use crate::traits::RiskMetrics;
-use crate::types::{PeriodStats, StateVersion};
+use crate::{
+    accounting::{DailyAccounting, HourlyAccounting, WeeklyAccounting},
+    circuit_breaker::CircuitBreaker,
+    clock::Clock,
+    position::{PositionTracker, PotentialLossLedger},
+    traits::RiskMetrics,
+    types::{PeriodStats, StateVersion},
+};
 use chrono::Timelike;
 use num_traits::ToPrimitive;
 use oxide_arb_error::{OxideError, OxideResult};
-use oxide_arb_models::config::RiskConfig;
-use oxide_arb_models::domain::blacklist::BlacklistInfo;
-use oxide_arb_models::domain::potential_loss::PotentialLossInfo;
-use oxide_arb_models::domain::risk::RiskEngineState;
-use oxide_arb_models::types::Usd;
+use oxide_arb_models::{
+    config::RiskConfig,
+    domain::{blacklist::BlacklistInfo, potential_loss::PotentialLossInfo, risk::RiskEngineState},
+    types::Usd,
+};
 use std::sync::Arc;
 
 /// Fully recovered state ready to initialize a `RiskEngine`.

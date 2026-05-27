@@ -3,9 +3,11 @@
 //! All lookups go through the 4-tier fallback chain. Writes (outcome recording,
 //! full reload) are lock-free at the per-bucket level via `DashMap`.
 
-use super::fallback::{FallbackIndexes, lookup_with_fallback};
-use super::types::CalibrationEntry;
-use dashmap::DashMap;
+use super::{
+    fallback::{FallbackIndexes, lookup_with_fallback},
+    types::CalibrationEntry,
+};
+use dashmap::{DashMap, mapref::entry::Entry};
 use oxide_arb_models::{config::CalibrationConfig, domain::calibration::BucketKey};
 
 /// Thread-safe in-memory calibration store.
@@ -66,8 +68,6 @@ impl ResolutionCalibrator {
     ///
     /// If the bucket does not exist, it is created with bootstrap priors.
     pub fn record_outcome(&self, key: &BucketKey, was_correct: bool) {
-        use dashmap::mapref::entry::Entry;
-
         match self.buckets.entry(*key) {
             Entry::Occupied(mut occupied) => {
                 let entry = occupied.get_mut();
@@ -136,11 +136,12 @@ mod tests {
     use super::*;
     use oxide_arb_models::{
         domain::calibration::BucketKey,
-        enums::calibration::{DurationBucket, PriceZone},
-        enums::common::MarketCategory,
+        enums::{
+            calibration::{DurationBucket, PriceZone},
+            common::MarketCategory,
+        },
     };
     use rust_decimal_macros::dec;
-
     fn default_config() -> CalibrationConfig {
         CalibrationConfig {
             min_sample_size: 10,

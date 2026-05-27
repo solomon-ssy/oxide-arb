@@ -1,9 +1,11 @@
 //! Risk engine domain models.
 
-use crate::enums::risk::{
-    BreakerStateName, CircuitBreakerLevel, ReconciliationStatus, RiskAuditEventType,
+use crate::{
+    enums::risk::{
+        BreakerStateName, CircuitBreakerLevel, ReconciliationStatus, RiskAuditEventType,
+    },
+    types::{MarketId, OpportunityId, TradeId, Usd},
 };
-use crate::types::{MarketId, OpportunityId, TradeId, Usd};
 use chrono::{DateTime, NaiveDate, Utc};
 use rust_decimal::Decimal;
 use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};

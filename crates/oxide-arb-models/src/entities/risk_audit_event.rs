@@ -1,7 +1,9 @@
 //! `risk_audit_events` table entity.
 
-use crate::enums::risk::RiskAuditEventType;
-use crate::types::{OpportunityId, TradeId};
+use crate::{
+    enums::risk::RiskAuditEventType,
+    types::{OpportunityId, TradeId},
+};
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 

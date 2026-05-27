@@ -2,25 +2,35 @@
 
 mod common;
 
-use chrono::Utc;
+use chrono::{NaiveDate, Utc};
 use common::{make_event, make_market, setup_pg};
-use oxide_arb_models::domain::{
-    NewAccountingPeriod, NewCalibrationOutcome, NewLifecycleEvent, NewPosition, NewPotentialLoss,
-    NewTrade, UpdatePotentialLoss, UpdateTradeOutcome, UpsertCalibration, UpsertRiskEngineState,
-    UpsertRuntimeConfig,
+use oxide_arb_models::{
+    domain::{
+        NewAccountingPeriod, NewCalibrationOutcome, NewEmergencySnapshot, NewLifecycleEvent,
+        NewOutboxEventWithId, NewPosition, NewPotentialLoss, NewReconciliationReport,
+        NewRiskAuditEvent, NewTrade, UpdatePotentialLoss, UpdateTradeOutcome, UpsertBlacklistEntry,
+        UpsertCalibration, UpsertRiskEngineState, UpsertRuntimeConfig,
+    },
+    enums::{
+        calibration::{DurationBucket, PriceZone},
+        common::{
+            ExecutionMode, LedgerStatus, MarketCategory, PositionStatus, ReportType, Side,
+            TradeOutcome,
+        },
+        lifecycle::{LifecyclePhase, LifecycleRecorder},
+        outbox::{OutboxAggregateType, OutboxEventType},
+        risk::{
+            BlacklistReason, BlacklistScope, BreakerStateName, CircuitBreakerLevel,
+            ReconciliationStatus, RiskAuditEventType,
+        },
+        runtime_config::RuntimeConfigKey,
+    },
+    types::{AggregateId, OutboxEventId, *},
 };
-use oxide_arb_models::enums::calibration::{DurationBucket, PriceZone};
-use oxide_arb_models::enums::common::{
-    ExecutionMode, LedgerStatus, MarketCategory, PositionStatus, ReportType, Side, TradeOutcome,
-};
-use oxide_arb_models::enums::lifecycle::{LifecyclePhase, LifecycleRecorder};
-use oxide_arb_models::enums::risk::BreakerStateName;
-use oxide_arb_models::enums::runtime_config::RuntimeConfigKey;
-use oxide_arb_models::types::*;
-use oxide_arb_repository::postgres::*;
-use oxide_arb_repository::traits::*;
+use oxide_arb_repository::{postgres::*, traits::*};
 use oxide_arb_storage::postgres::PostgresPool;
 use rust_decimal::Decimal;
+use rust_decimal_macros::dec;
 
 async fn seed_market(
     pool: &PostgresPool,
@@ -600,9 +610,6 @@ async fn potential_loss_repository_crud() {
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn blacklist_persistence_repository_crud() {
-    use oxide_arb_models::domain::UpsertBlacklistEntry;
-    use oxide_arb_models::enums::risk::{BlacklistReason, BlacklistScope};
-
     let (pool, _container) = setup_pg().await;
     seed_market(&pool, "evt-bl", "0xbl-mkt", MarketCategory::Politics).await;
 
@@ -628,9 +635,6 @@ async fn blacklist_persistence_repository_crud() {
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn emergency_repository_create() {
-    use oxide_arb_models::domain::NewEmergencySnapshot;
-    use oxide_arb_models::enums::risk::CircuitBreakerLevel;
-
     let (pool, _container) = setup_pg().await;
     let repo = PgEmergencyRepository::new(pool.connection().clone());
 
@@ -649,10 +653,6 @@ async fn emergency_repository_create() {
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn outbox_repository_create_and_fetch() {
-    use oxide_arb_models::domain::NewOutboxEventWithId;
-    use oxide_arb_models::enums::outbox::{OutboxAggregateType, OutboxEventType};
-    use oxide_arb_models::types::{AggregateId, OutboxEventId};
-
     let (pool, _container) = setup_pg().await;
     let repo = PgOutboxRepository::new(pool.connection().clone());
 
@@ -676,10 +676,6 @@ async fn outbox_repository_create_and_fetch() {
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn reconciliation_repository_create() {
-    use oxide_arb_models::domain::NewReconciliationReport;
-    use oxide_arb_models::enums::risk::ReconciliationStatus;
-    use rust_decimal_macros::dec;
-
     let (pool, _container) = setup_pg().await;
     let repo = PgReconciliationRepository::new(pool.connection().clone());
 
@@ -702,8 +698,6 @@ async fn reconciliation_repository_create() {
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn report_repository_daily_upsert() {
-    use chrono::NaiveDate;
-
     let (pool, _container) = setup_pg().await;
     let repo = PgReportRepository::new(pool.connection().clone());
     let date = NaiveDate::from_ymd_opt(2026, 1, 15).unwrap();
@@ -723,9 +717,6 @@ async fn report_repository_daily_upsert() {
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn risk_audit_repository_create_batch() {
-    use oxide_arb_models::domain::NewRiskAuditEvent;
-    use oxide_arb_models::enums::risk::RiskAuditEventType;
-
     let (pool, _container) = setup_pg().await;
     let repo = PgRiskAuditRepository::new(pool.connection().clone());
 

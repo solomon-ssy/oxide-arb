@@ -4,12 +4,12 @@
 //! registered in the pipeline in a fixed canonical order. They read exclusively
 //! from [`PreTradeContext`] and never perform I/O or lock subsystems.
 
-use crate::context::PreTradeContext;
-use crate::pipeline::RiskCheck;
-use crate::types::{DrawdownAction, RiskCheckId, RiskCheckKind, RiskCheckResult};
-use oxide_arb_models::config::RiskConfig;
-use oxide_arb_models::enums::common::StalenessLevel;
-use oxide_arb_models::types::Usd;
+use crate::{
+    context::PreTradeContext,
+    pipeline::RiskCheck,
+    types::{DrawdownAction, RiskCheckId, RiskCheckKind, RiskCheckResult},
+};
+use oxide_arb_models::{config::RiskConfig, enums::common::StalenessLevel, types::Usd};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 

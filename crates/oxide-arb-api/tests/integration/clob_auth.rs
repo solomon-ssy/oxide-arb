@@ -1,22 +1,26 @@
 //! CLOB authentication: sign + optional live order probe.
 
-use oxide_arb_api::clob::ClobClient;
-use oxide_arb_api::keystore::Keystore;
-use oxide_arb_models::config::{KeySource, KeysConfig, PolymarketConfig};
-use oxide_arb_models::domain::order::OrderRequest;
-use oxide_arb_models::enums::common::{OrderType, Side};
-use oxide_arb_models::enums::order::OrderStatus;
-use oxide_arb_models::types::{MarketId, Price, Shares, TokenId};
+use oxide_arb_api::{clob::ClobClient, keystore::Keystore};
+use oxide_arb_models::{
+    config::{KeySource, KeysConfig, PolymarketConfig},
+    domain::order::OrderRequest,
+    enums::{
+        common::{OrderType, Side},
+        order::OrderStatus,
+    },
+    types::{MarketId, Price, Shares, TokenId},
+};
 use rust_decimal_macros::dec;
+use std::env::var;
 
 fn test_keystore() -> Option<Keystore> {
-    let key = std::env::var("OXIDE_ARB_TEST_PRIVATE_KEY").ok()?;
+    let key = var("OXIDE_ARB_TEST_PRIVATE_KEY").ok()?;
     Keystore::from_config(&KeysConfig {
         source: KeySource::Env,
         private_key: Some(key),
-        polymarket_api_key: std::env::var("OXIDE_ARB_TEST_API_KEY").ok(),
-        polymarket_api_secret: std::env::var("OXIDE_ARB_TEST_API_SECRET").ok(),
-        polymarket_passphrase: std::env::var("OXIDE_ARB_TEST_PASSPHRASE").ok(),
+        polymarket_api_key: var("OXIDE_ARB_TEST_API_KEY").ok(),
+        polymarket_api_secret: var("OXIDE_ARB_TEST_API_SECRET").ok(),
+        polymarket_passphrase: var("OXIDE_ARB_TEST_PASSPHRASE").ok(),
         keystore_path: None,
     })
     .ok()
@@ -39,8 +43,8 @@ async fn derive_l2_credentials_from_signer() {
 async fn fok_order_sign_and_submit() {
     let ks = test_keystore().expect("credentials");
     let token_id =
-        std::env::var("OXIDE_ARB_TEST_TOKEN_ID").expect("OXIDE_ARB_TEST_TOKEN_ID decimal token id");
-    let market_id = std::env::var("OXIDE_ARB_TEST_MARKET_ID").unwrap_or_else(|_| "0x0".into());
+        var("OXIDE_ARB_TEST_TOKEN_ID").expect("OXIDE_ARB_TEST_TOKEN_ID decimal token id");
+    let market_id = var("OXIDE_ARB_TEST_MARKET_ID").unwrap_or_else(|_| "0x0".into());
 
     let client = ClobClient::connect(ks.signer_arc(), &PolymarketConfig::default())
         .await

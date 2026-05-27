@@ -1,13 +1,18 @@
 //! Execution pipeline domain types.
 
-use crate::enums::common::{Side, StalenessLevel};
-use crate::enums::execution::ExecutionOutcome;
-use crate::types::{
-    Bps, EventId, ExecutionId, MarketId, OpportunityId, OrderId, Price, ReservationId, Shares,
-    TokenId, Usd,
+use crate::{
+    enums::{
+        common::{Side, StalenessLevel},
+        execution::ExecutionOutcome,
+    },
+    types::{
+        Bps, EventId, ExecutionId, MarketId, OpportunityId, OrderId, Price, ReservationId, Shares,
+        TokenId, Usd,
+    },
 };
 use chrono::{DateTime, Utc};
 use serde::Serialize;
+use std::fmt::Display;
 
 /// All information needed to place a single order.
 #[derive(Debug, Clone, Serialize)]
@@ -73,7 +78,7 @@ impl ExecutionResult {
     }
 
     #[must_use]
-    pub fn rejected(stage: &str, reason: impl std::fmt::Display) -> Self {
+    pub fn rejected(stage: &str, reason: impl Display) -> Self {
         let now = Utc::now();
         Self {
             outcome_summary: None,

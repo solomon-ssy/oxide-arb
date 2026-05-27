@@ -1,7 +1,9 @@
 //! `positions` table entity.
 
-use crate::enums::common::{PositionStatus, Side};
-use crate::types::{MarketId, PositionId, Price, Shares, TokenId, Usd};
+use crate::{
+    enums::common::{PositionStatus, Side},
+    types::{MarketId, PositionId, Price, Shares, TokenId, Usd},
+};
 use chrono::{DateTime, Utc};
 use oxide_arb_macros::ActiveModelDefaults;
 use sea_orm::entity::prelude::*;

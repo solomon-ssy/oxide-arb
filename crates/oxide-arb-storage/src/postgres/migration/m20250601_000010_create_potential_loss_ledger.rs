@@ -1,7 +1,8 @@
 use super::{execute_sql, migrate_up};
-use oxide_arb_models::enums::common::LedgerStatus;
-use oxide_arb_models::idens::market::Market;
-use oxide_arb_models::idens::potential_loss_ledger::PotentialLossLedger;
+use oxide_arb_models::{
+    enums::common::LedgerStatus,
+    idens::{market::Market, potential_loss_ledger::PotentialLossLedger},
+};
 use sea_orm_migration::prelude::*;
 
 #[derive(DeriveMigrationName)]

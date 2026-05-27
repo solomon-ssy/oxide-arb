@@ -1,22 +1,22 @@
 //! Single WebSocket shard: one SDK connection, multiplexed market streams.
 
+use super::{
+    drop_hook::WsEventDropHook,
+    ingest_hooks::BookLevelRejectHook,
+    normalize::normalize_ws_message,
+    reconnect::{ReconnectPolicy, ReconnectState},
+};
 use futures_util::StreamExt;
-use oxide_arb_models::domain::pipeline::{PipelineEvent, ShardConnectionStatus};
-use oxide_arb_models::types::TokenId;
+use oxide_arb_models::{
+    domain::pipeline::{PipelineEvent, ShardConnectionStatus},
+    types::TokenId,
+};
 use polymarket_client_sdk_v2::clob::ws::Client as SdkWsClient;
 use polymarket_client_sdk_v2::clob::ws::types::response::WsMessage;
 use polymarket_client_sdk_v2::types::U256;
 use polymarket_client_sdk_v2::ws::config::Config as SdkWsConfig;
-use std::collections::HashSet;
-use std::str::FromStr;
-use std::sync::Arc;
-use std::time::Instant;
+use std::{collections::HashSet, str::FromStr, sync::Arc, time::Instant};
 use tokio_util::sync::CancellationToken;
-
-use super::drop_hook::WsEventDropHook;
-use super::ingest_hooks::BookLevelRejectHook;
-use super::normalize::normalize_ws_message;
-use super::reconnect::{ReconnectPolicy, ReconnectState};
 
 /// A single shard managing one SDK WebSocket connection.
 pub struct WsShard {
@@ -210,11 +210,12 @@ impl WsShard {
 
 #[cfg(test)]
 mod dispatch_tests {
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicU64, Ordering};
-
     use super::*;
     use oxide_arb_models::domain::pipeline::ShardConnectionStatus;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    };
 
     #[test]
     fn continues_dispatch_on_full_channel_and_invokes_drop_hook() {
