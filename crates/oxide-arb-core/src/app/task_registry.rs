@@ -12,21 +12,23 @@ use crate::observability::metrics_hub::MetricsHub;
 use oxide_arb_models::enums::common::ExecutionMode;
 use std::{
     mem::take,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::{Duration, Instant},
 };
-use tokio::{
-    task::{JoinHandle, JoinSet},
-    time::MissedTickBehavior,
-};
-use tokio_util::sync::CancellationToken;
+use strum::IntoStaticStr;
+use tokio::{task::AbortHandle, time::MissedTickBehavior};
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::{error, info, warn};
 
 // ── Shutdown stages ─────────────────────────────────────────────────────────
 
 /// Ordered drain stages executed sequentially at shutdown.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, IntoStaticStr)]
 #[repr(u8)]
+#[strum(serialize_all = "snake_case")]
 pub enum ShutdownStage {
     WsIngress = 0,
     CacheWorkers = 1,
@@ -57,19 +59,8 @@ impl ShutdownStage {
     ];
 
     #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::WsIngress => "ws_ingress",
-            Self::CacheWorkers => "cache_workers",
-            Self::Reconciliation => "reconciliation",
-            Self::HealthMonitor => "health_monitor",
-            Self::Detection => "detection",
-            Self::Execution => "execution",
-            Self::Audit => "audit",
-            Self::Analytics => "analytics",
-            Self::Persistence => "persistence",
-            Self::DbClose => "db_close",
-        }
+    pub fn as_str(self) -> &'static str {
+        self.into()
     }
 
     #[must_use]
@@ -84,7 +75,8 @@ impl ShutdownStage {
 ///
 /// The mapping from [`TaskKind`] to [`ShutdownStage`] is fixed at compile
 /// time so shutdown ordering is self-documenting and unambiguous.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 pub enum TaskKind {
     WsIngress,
     CatalogSync,
@@ -121,22 +113,8 @@ impl TaskKind {
 
     /// Prometheus `kind` label (`snake_case`).
     #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::WsIngress => "ws_ingress",
-            Self::CatalogSync => "catalog_sync",
-            Self::CacheWorker => "cache_worker",
-            Self::BookReconciliation => "book_reconciliation",
-            Self::LedgerReconciliation => "ledger_reconciliation",
-            Self::HealthMonitor => "health_monitor",
-            Self::Detection => "detection",
-            Self::Execution => "execution",
-            Self::ExecutionHeartbeat => "execution_heartbeat",
-            Self::Audit => "audit",
-            Self::OutboxFlusher => "outbox_flusher",
-            Self::PositionPersistence => "position_persistence",
-            Self::ReportScheduler => "report_scheduler",
-        }
+    pub fn as_str(self) -> &'static str {
+        self.into()
     }
 }
 
@@ -214,9 +192,22 @@ impl Default for ShutdownBudget {
 
 // ── Internal tracking ───────────────────────────────────────────────────────
 
-struct TrackedTask {
-    id: TaskId,
-    handle: JoinHandle<()>,
+struct StageBucket {
+    tracker: TaskTracker,
+    aborts: Vec<AbortHandle>,
+    exited: Arc<AtomicUsize>,
+    panicked: Arc<AtomicUsize>,
+}
+
+impl Default for StageBucket {
+    fn default() -> Self {
+        Self {
+            tracker: TaskTracker::new(),
+            aborts: Vec::new(),
+            exited: Arc::new(AtomicUsize::new(0)),
+            panicked: Arc::new(AtomicUsize::new(0)),
+        }
+    }
 }
 
 #[derive(Clone, Default)]
@@ -276,7 +267,7 @@ impl PendingTaskQueue {
 pub struct TaskRegistry {
     root: CancellationToken,
     stage_tokens: [CancellationToken; ShutdownStage::COUNT],
-    stages: Vec<Vec<TrackedTask>>,
+    stages: [StageBucket; ShutdownStage::COUNT],
     telemetry: DrainTelemetry,
 }
 
@@ -284,11 +275,10 @@ impl TaskRegistry {
     #[must_use]
     pub fn new(root_shutdown: CancellationToken) -> Self {
         let stage_tokens = core::array::from_fn(|_| root_shutdown.child_token());
-        let stages = (0..ShutdownStage::COUNT).map(|_| Vec::new()).collect();
         Self {
             root: root_shutdown,
             stage_tokens,
-            stages,
+            stages: core::array::from_fn(|_| StageBucket::default()),
             telemetry: DrainTelemetry::default(),
         }
     }
@@ -314,45 +304,53 @@ impl TaskRegistry {
         F: FnOnce(CancellationToken) -> Fut + Send + 'static,
         Fut: Future<Output = ()> + Send + 'static,
     {
-        let kind = id.kind();
-        let token = self.stage_token(id);
-        let handle = tokio::spawn(f(token));
-        self.stages[kind.shutdown_stage().index()].push(TrackedTask { id, handle });
-        self
-    }
+        let stage = id.kind().shutdown_stage();
+        let stage_idx = stage.index();
+        let token = self.stage_tokens[stage_idx].clone();
+        let bucket = &mut self.stages[stage_idx];
 
-    pub fn attach<T>(&mut self, id: TaskId, handle: JoinHandle<T>)
-    where
-        T: Send + 'static,
-    {
-        let kind = id.kind();
         let name = id.display_name();
-        let kind_label = kind.as_str();
-        let wrapped = tokio::spawn(async move {
-            match handle.await {
-                Ok(_) => {}
+        let kind = id.kind().as_str();
+        let exited = Arc::clone(&bucket.exited);
+        let panicked = Arc::clone(&bucket.panicked);
+
+        let inner = tokio::spawn(f(token));
+        bucket.aborts.push(inner.abort_handle());
+
+        bucket.tracker.spawn(async move {
+            match inner.await {
+                Ok(()) => {
+                    exited.fetch_add(1, Ordering::Relaxed);
+                    info!(stage = stage.as_str(), task = %name, kind, "Task exited cleanly");
+                }
                 Err(e) if e.is_cancelled() => {
-                    info!(task = %name, kind = kind_label, "Task cancelled");
+                    exited.fetch_add(1, Ordering::Relaxed);
+                    info!(stage = stage.as_str(), task = %name, kind, "Task cancelled");
                 }
                 Err(e) => {
-                    error!(task = %name, kind = kind_label, error = %e, "Task panicked");
+                    panicked.fetch_add(1, Ordering::Relaxed);
+                    error!(
+                        stage = stage.as_str(),
+                        task = %name,
+                        kind,
+                        error = %e,
+                        "Task panicked during drain"
+                    );
                 }
             }
         });
-        self.stages[kind.shutdown_stage().index()].push(TrackedTask {
-            id,
-            handle: wrapped,
-        });
+
+        self
     }
 
     #[must_use]
     pub fn len(&self) -> usize {
-        self.stages.iter().map(Vec::len).sum()
+        self.stages.iter().map(|bucket| bucket.tracker.len()).sum()
     }
 
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.stages.iter().all(Vec::is_empty)
+        self.stages.iter().all(|bucket| bucket.tracker.is_empty())
     }
 
     pub async fn drain(mut self, budget: ShutdownBudget) {
@@ -364,32 +362,49 @@ impl TaskRegistry {
         );
 
         for stage in ShutdownStage::ALL {
-            let tasks = take(&mut self.stages[stage.index()]);
-            self.stage_tokens[stage.index()].cancel();
+            let idx = stage.index();
+            self.stage_tokens[idx].cancel();
+            let bucket = take(&mut self.stages[idx]);
             drain_stage(
                 stage,
-                tasks,
+                bucket,
                 budget.stage(stage),
                 self.telemetry.metrics.as_deref(),
             )
             .await;
+            self.stages[idx] = StageBucket::default();
         }
 
         info!("Staged drain complete");
     }
 }
 
-type DrainJoinRow = (String, &'static str, Result<(), tokio::task::JoinError>);
-
-async fn drain_stage_join_select(
+async fn drain_stage(
     stage: ShutdownStage,
+    bucket: StageBucket,
     budget: Duration,
     metrics: Option<&MetricsHub>,
-    mut join_set: JoinSet<DrainJoinRow>,
-    start: Instant,
-) -> (usize, usize) {
-    let mut exited = 0usize;
-    let mut panicked = 0usize;
+) {
+    if bucket.tracker.is_empty() {
+        if let Some(m) = metrics {
+            m.set_shutdown_stage_remaining(stage.as_str(), 0);
+        }
+        return;
+    }
+
+    let count = bucket.tracker.len();
+    info!(
+        stage = stage.as_str(),
+        tasks = count,
+        budget_secs = budget.as_secs(),
+        "Stage drain started"
+    );
+
+    bucket.tracker.close();
+    let start = Instant::now();
+    let wait = bucket.tracker.wait();
+    tokio::pin!(wait);
+
     let deadline = tokio::time::sleep(budget);
     tokio::pin!(deadline);
 
@@ -401,7 +416,9 @@ async fn drain_stage_join_select(
         tokio::select! {
             biased;
             () = &mut deadline => {
-                let abandoned = join_set.len();
+                let abandoned = bucket.tracker.len();
+                let exited = bucket.exited.load(Ordering::Relaxed);
+                let panicked = bucket.panicked.load(Ordering::Relaxed);
                 warn!(
                     stage = stage.as_str(),
                     budget_secs = budget.as_secs(),
@@ -413,32 +430,17 @@ async fn drain_stage_join_select(
                 if let Some(m) = metrics {
                     m.record_shutdown_timeout(stage.as_str(), abandoned);
                 }
-                join_set.shutdown().await;
+                for abort in &bucket.aborts {
+                    abort.abort();
+                }
+                let _ = tokio::time::timeout(Duration::from_millis(100), &mut wait).await;
                 break;
             }
-            maybe = join_set.join_next() => {
-                match maybe {
-                    Some(Ok((name, kind, Ok(())))) => {
-                        exited += 1;
-                        info!(stage = stage.as_str(), task = %name, kind, "Task exited cleanly");
-                    }
-                    Some(Ok((name, kind, Err(e)))) if e.is_cancelled() => {
-                        exited += 1;
-                        info!(stage = stage.as_str(), task = %name, kind, "Task cancelled");
-                    }
-                    Some(Ok((name, kind, Err(e)))) => {
-                        panicked += 1;
-                        error!(stage = stage.as_str(), task = %name, kind, error = %e, "Task panicked during drain");
-                    }
-                    Some(Err(e)) => {
-                        panicked += 1;
-                        error!(stage = stage.as_str(), error = %e, "Drain wrapper join error");
-                    }
-                    None => break,
-                }
-            }
+            () = &mut wait => break,
             _ = heartbeat.tick() => {
-                let remaining = join_set.len();
+                let remaining = bucket.tracker.len();
+                let exited = bucket.exited.load(Ordering::Relaxed);
+                let panicked = bucket.panicked.load(Ordering::Relaxed);
                 info!(
                     stage = stage.as_str(),
                     remaining,
@@ -455,44 +457,8 @@ async fn drain_stage_join_select(
         }
     }
 
-    (exited, panicked)
-}
-
-async fn drain_stage(
-    stage: ShutdownStage,
-    tasks: Vec<TrackedTask>,
-    budget: Duration,
-    metrics: Option<&MetricsHub>,
-) {
-    if tasks.is_empty() {
-        if let Some(m) = metrics {
-            m.set_shutdown_stage_remaining(stage.as_str(), 0);
-        }
-        return;
-    }
-
-    let count = tasks.len();
-    info!(
-        stage = stage.as_str(),
-        tasks = count,
-        budget_secs = budget.as_secs(),
-        "Stage drain started"
-    );
-
-    let start = Instant::now();
-    let mut join_set: JoinSet<DrainJoinRow> = JoinSet::new();
-    for task in tasks {
-        let name = task.id.display_name();
-        let kind = task.id.kind().as_str();
-        let handle = task.handle;
-        join_set.spawn(async move {
-            let outcome = handle.await;
-            (name, kind, outcome)
-        });
-    }
-
-    let (exited, panicked) = drain_stage_join_select(stage, budget, metrics, join_set, start).await;
-
+    let exited = bucket.exited.load(Ordering::Relaxed);
+    let panicked = bucket.panicked.load(Ordering::Relaxed);
     info!(
         stage = stage.as_str(),
         elapsed_ms = start.elapsed().as_millis(),
@@ -617,12 +583,19 @@ impl AppRunner {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
+
     fn tick_budget() -> ShutdownBudget {
         let mut b = [Duration::from_secs(0); ShutdownStage::COUNT];
         for slot in &mut b {
             *slot = Duration::from_millis(500);
         }
         ShutdownBudget::new(b)
+    }
+
+    #[test]
+    fn strum_labels_match_prometheus_names() {
+        assert_eq!(ShutdownStage::Execution.as_str(), "execution");
+        assert_eq!(TaskKind::OutboxFlusher.as_str(), "outbox_flusher");
     }
 
     #[tokio::test]
@@ -694,6 +667,6 @@ mod tests {
         root.cancel();
         registry.drain(budget).await;
 
-        assert!(!stubborn_ran.load(std::sync::atomic::Ordering::Relaxed));
+        assert!(!stubborn_ran.load(Ordering::Relaxed));
     }
 }

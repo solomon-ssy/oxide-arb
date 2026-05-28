@@ -58,6 +58,7 @@ moka = { workspace = true, features = ["future"] }
 
 # ── Misc ───────────────────────────────────────────────────────────
 rand = "0.10"
+strum = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]
 oxide-arb-test-support = { workspace = true }

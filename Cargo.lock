@@ -4303,6 +4303,7 @@ dependencies = [
  "rust_decimal_macros",
  "serde",
  "serde_json",
+ "strum 0.28.0",
  "teloxide",
  "testcontainers",
  "testcontainers-modules",

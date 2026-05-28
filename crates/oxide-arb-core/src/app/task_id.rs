@@ -5,9 +5,11 @@
 //! dimensions without a parallel string-constant module.
 
 use super::task_registry::TaskKind;
+use strum::IntoStaticStr;
 
 /// Canonical identifier for a registered background task.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, IntoStaticStr)]
+#[strum(serialize_all = "kebab-case")]
 pub enum TaskId {
     // ── Ingress ───────────────────────────────────────────────────────
     DataPipeline,
@@ -31,7 +33,10 @@ pub enum TaskId {
     Funnel,
 
     // ── Execution ─────────────────────────────────────────────────────
-    ExecutionRunner { shard: u8 },
+    #[strum(disabled)]
+    ExecutionRunner {
+        shard: u8,
+    },
     ExecutionOutcomeDrain,
     ExecutionHeartbeat,
 
@@ -84,29 +89,10 @@ impl TaskId {
 
     /// Static name for singleton tasks (no shard suffix).
     #[must_use]
-    pub const fn static_name(self) -> &'static str {
+    pub fn static_name(self) -> &'static str {
         match self {
-            Self::DataPipeline => "data-pipeline",
-            Self::GammaSync => "gamma-sync",
-            Self::CalibrationUpdater => "calibration-updater",
-            Self::Coalescer => "coalescer",
-            Self::PotentialLossEscalation => "potential-loss-escalation",
-            Self::HealthChecker => "health-checker",
-            Self::RiskMetricsRefresh => "risk-metrics-refresh",
-            Self::Scanner => "scanner",
-            Self::Funnel => "funnel",
             Self::ExecutionRunner { .. } => "execution-runner",
-            Self::ExecutionOutcomeDrain => "execution-outcome-drain",
-            Self::ExecutionHeartbeat => "execution-heartbeat",
-            Self::RiskTick => "risk-tick",
-            Self::ExposureGc => "exposure-gc",
-            Self::RiskAuditBatch => "risk-audit-batch",
-            Self::OutboxFlusher => "outbox-flusher",
-            Self::ExecutionAuditWriter => "execution-audit-writer",
-            Self::DetectionWriter => "detection-writer",
-            Self::RiskStatePersist => "risk-state-persist",
-            Self::RiskStateDebouncer => "risk-state-debouncer",
-            Self::ReportGenerator => "report-generator",
+            other => other.into(),
         }
     }
 }
