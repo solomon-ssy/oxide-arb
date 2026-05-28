@@ -14,8 +14,9 @@
 //!
 //! ## Write DTOs (`New*`, `Update*`, `Upsert*`)
 //!
-//! - **`New{Entity}`** — Insert payload. Derives `DeriveIntoActiveModel`. System
-//!   fields (PK, timestamps) are populated by `ActiveModelBehavior::before_save`.
+//! - **`New{Entity}`** — Insert payload. Derives `DeriveIntoActiveModel`. Entity
+//!   defaults may fill generated IDs and insert-only values; DB defaults/triggers
+//!   own database-managed write timestamps.
 //! - **`New{Entity}WithId`** — Insert payload where the caller assigns the PK.
 //! - **`Update{Entity}`** — Partial update. Fields are `Option<T>` for selective
 //!   patching; the repository fetches, patches, and persists internally.

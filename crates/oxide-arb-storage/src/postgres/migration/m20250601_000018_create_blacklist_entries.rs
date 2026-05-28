@@ -48,18 +48,12 @@ fn create_tables() -> Vec<TableCreateStatement> {
                     .not_null()
                     .default(0),
             )
-            .col(
-                ColumnDef::new(BlacklistEntry::CreatedAt)
-                    .timestamp_with_time_zone()
-                    .not_null()
-                    .default(Expr::current_timestamp()),
-            )
-            .col(
-                ColumnDef::new(BlacklistEntry::UpdatedAt)
-                    .timestamp_with_time_zone()
-                    .not_null()
-                    .default(Expr::current_timestamp()),
-            )
+            .col(super::timestamp_with_write_default(
+                BlacklistEntry::CreatedAt,
+            ))
+            .col(super::timestamp_with_write_default(
+                BlacklistEntry::UpdatedAt,
+            ))
             .to_owned(),
     ]
 }

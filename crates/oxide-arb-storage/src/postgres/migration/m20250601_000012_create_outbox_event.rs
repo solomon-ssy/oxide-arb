@@ -58,12 +58,7 @@ fn outbox_event_table() -> TableCreateStatement {
         )
         .col(ColumnDef::new(OutboxEvent::LastError).text().null())
         .col(ColumnDef::new(OutboxEvent::DeadLetterReason).text().null())
-        .col(
-            ColumnDef::new(OutboxEvent::CreatedAt)
-                .timestamp_with_time_zone()
-                .not_null()
-                .default(Expr::current_timestamp()),
-        )
+        .col(super::timestamp_with_write_default(OutboxEvent::CreatedAt))
         .to_owned()
 }
 

@@ -154,7 +154,7 @@ pub struct EmergencyContext {
 
 /// Upsert payload for the `risk_engine_state` singleton row.
 ///
-/// `updated_at` is auto-set by the entity's `ActiveModelBehavior::before_save`.
+/// `updated_at` is database-managed by the Postgres default and update trigger.
 #[derive(Debug, Clone, DeriveIntoActiveModel)]
 #[sea_orm(active_model = "super::super::entities::risk_state::ActiveModel")]
 pub struct UpsertRiskEngineState {

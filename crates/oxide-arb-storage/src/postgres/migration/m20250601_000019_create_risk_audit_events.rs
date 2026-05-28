@@ -43,12 +43,9 @@ fn create_tables() -> Vec<TableCreateStatement> {
                     .json_binary()
                     .not_null(),
             )
-            .col(
-                ColumnDef::new(RiskAuditEvent::CreatedAt)
-                    .timestamp_with_time_zone()
-                    .not_null()
-                    .default(Expr::current_timestamp()),
-            )
+            .col(super::timestamp_with_write_default(
+                RiskAuditEvent::CreatedAt,
+            ))
             .to_owned(),
     ]
 }

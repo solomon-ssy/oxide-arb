@@ -58,18 +58,8 @@ fn create_tables() -> Vec<TableCreateStatement> {
                     .timestamp_with_time_zone()
                     .null(),
             )
-            .col(
-                ColumnDef::new(Trade::CreatedAt)
-                    .timestamp_with_time_zone()
-                    .not_null()
-                    .default(Expr::current_timestamp()),
-            )
-            .col(
-                ColumnDef::new(Trade::UpdatedAt)
-                    .timestamp_with_time_zone()
-                    .not_null()
-                    .default(Expr::current_timestamp()),
-            )
+            .col(super::timestamp_with_write_default(Trade::CreatedAt))
+            .col(super::timestamp_with_write_default(Trade::UpdatedAt))
             .foreign_key(
                 ForeignKey::create()
                     .name("fk_trade_market")

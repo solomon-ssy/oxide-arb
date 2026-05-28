@@ -14,6 +14,42 @@
 
 use sea_orm_migration::prelude::*;
 
+/// Database-side timestamp for managed write-time columns.
+///
+/// `PostgreSQL` `CURRENT_TIMESTAMP` is fixed at transaction start, while
+/// `clock_timestamp()` can vary row-by-row within one statement. Statement time
+/// keeps one stable value per SQL command without going stale across long
+/// transactions.
+pub fn write_timestamp() -> SimpleExpr {
+    Expr::cust("statement_timestamp()")
+}
+
+/// Build a required `timestamptz` column with the canonical write-time default.
+pub fn timestamp_with_write_default(column: impl IntoIden) -> ColumnDef {
+    let mut column_def = ColumnDef::new(column);
+    column_def
+        .timestamp_with_time_zone()
+        .not_null()
+        .default(write_timestamp());
+    column_def
+}
+
+/// Create the canonical `updated_at` trigger for a table.
+pub fn create_updated_at_trigger(table: &str) -> String {
+    format!(
+        "CREATE TRIGGER trg_{table}_updated_at \
+         BEFORE UPDATE ON {table} \
+         FOR EACH ROW \
+         WHEN (OLD.* IS DISTINCT FROM NEW.*) \
+         EXECUTE FUNCTION trigger_set_updated_at()"
+    )
+}
+
+/// Drop the canonical `updated_at` trigger for a table.
+pub fn drop_updated_at_trigger(table: &str) -> String {
+    format!("DROP TRIGGER IF EXISTS trg_{table}_updated_at ON {table}")
+}
+
 /// Apply all table DDL in declaration order (respects foreign-key dependencies).
 pub async fn create_tables(
     manager: &SchemaManager<'_>,

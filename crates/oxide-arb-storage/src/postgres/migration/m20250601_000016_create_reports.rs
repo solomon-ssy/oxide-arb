@@ -33,12 +33,7 @@ fn create_tables() -> Vec<TableCreateStatement> {
             .col(ColumnDef::new(Report::PeriodStart).date().not_null())
             .col(ColumnDef::new(Report::PeriodEnd).date().not_null())
             .col(ColumnDef::new(Report::Payload).json_binary().not_null())
-            .col(
-                ColumnDef::new(Report::CreatedAt)
-                    .timestamp_with_time_zone()
-                    .not_null()
-                    .default(Expr::current_timestamp()),
-            )
+            .col(super::timestamp_with_write_default(Report::CreatedAt))
             .to_owned(),
     ]
 }

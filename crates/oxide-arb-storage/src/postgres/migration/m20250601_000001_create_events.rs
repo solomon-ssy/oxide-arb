@@ -55,18 +55,8 @@ fn create_tables() -> Vec<TableCreateStatement> {
                     .null(),
             )
             .col(ColumnDef::new(Event::RawGamma).json_binary().null())
-            .col(
-                ColumnDef::new(Event::CreatedAt)
-                    .timestamp_with_time_zone()
-                    .not_null()
-                    .default(Expr::current_timestamp()),
-            )
-            .col(
-                ColumnDef::new(Event::UpdatedAt)
-                    .timestamp_with_time_zone()
-                    .not_null()
-                    .default(Expr::current_timestamp()),
-            )
+            .col(super::timestamp_with_write_default(Event::CreatedAt))
+            .col(super::timestamp_with_write_default(Event::UpdatedAt))
             .to_owned(),
     ]
 }

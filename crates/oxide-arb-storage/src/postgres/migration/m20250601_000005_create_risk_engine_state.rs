@@ -121,12 +121,9 @@ fn risk_engine_hourly_window_columns(table: &mut TableCreateStatement) {
                 .not_null()
                 .default(0),
         )
-        .col(
-            ColumnDef::new(RiskEngineState::HourlyWindowStart)
-                .timestamp_with_time_zone()
-                .not_null()
-                .default(Expr::current_timestamp()),
-        );
+        .col(super::timestamp_with_write_default(
+            RiskEngineState::HourlyWindowStart,
+        ));
 }
 
 fn risk_engine_daily_window_columns(table: &mut TableCreateStatement) {
@@ -221,12 +218,9 @@ fn risk_engine_emergency_columns(table: &mut TableCreateStatement) {
                 .text()
                 .null(),
         )
-        .col(
-            ColumnDef::new(RiskEngineState::UpdatedAt)
-                .timestamp_with_time_zone()
-                .not_null()
-                .default(Expr::current_timestamp()),
-        );
+        .col(super::timestamp_with_write_default(
+            RiskEngineState::UpdatedAt,
+        ));
 }
 
 const fn create_indexes() -> Vec<IndexCreateStatement> {

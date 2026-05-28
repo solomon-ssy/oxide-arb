@@ -13,11 +13,7 @@ use sea_orm::entity::prelude::*;
 
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, ActiveModelDefaults)]
 #[sea_orm(table_name = "trade")]
-#[active_defaults(
-    default(outcome, TradeOutcome::Pending),
-    timestamp(created_at),
-    timestamp(updated_at, always)
-)]
+#[active_defaults(default(outcome, TradeOutcome::Pending), timestamp(created_at))]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub trade_id: TradeId,

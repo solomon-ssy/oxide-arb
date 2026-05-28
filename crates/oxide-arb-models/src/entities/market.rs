@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
     Clone, Debug, PartialEq, Eq, DeriveEntityModel, ActiveModelDefaults, Serialize, Deserialize,
 )]
 #[sea_orm(table_name = "market")]
-#[active_defaults(timestamp(created_at), timestamp(updated_at, always))]
+#[active_defaults(timestamp(created_at))]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub market_id: MarketId,

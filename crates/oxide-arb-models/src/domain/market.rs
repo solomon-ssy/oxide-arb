@@ -180,8 +180,8 @@ impl MarketRegistryInfo {
 
 /// Upsert payload for the `market` table. Derives `DeriveIntoActiveModel`.
 ///
-/// Timestamps (`created_at`, `updated_at`) are populated by the entity's
-/// `ActiveModelBehavior::before_save`.
+/// Insert defaults may prepare `created_at`; DB defaults and triggers own
+/// database-managed write timestamps.
 #[derive(Debug, Clone, DeriveIntoActiveModel)]
 #[sea_orm(active_model = "super::super::entities::market::ActiveModel")]
 pub struct UpsertMarket {
@@ -302,8 +302,8 @@ pub struct EventRegistryInfo {
 
 /// Upsert payload for the `event` table. Derives `DeriveIntoActiveModel`.
 ///
-/// Timestamps (`created_at`, `updated_at`) are populated by the entity's
-/// `ActiveModelBehavior::before_save`.
+/// Insert defaults may prepare `created_at`; DB defaults and triggers own
+/// database-managed write timestamps.
 #[derive(Debug, Clone, DeriveIntoActiveModel)]
 #[sea_orm(active_model = "super::super::entities::event::ActiveModel")]
 pub struct UpsertEvent {

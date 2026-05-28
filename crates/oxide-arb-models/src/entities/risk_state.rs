@@ -38,7 +38,6 @@ use serde::{Deserialize, Serialize};
     default(weekly_trade_count, 0_i32),
     default(weekly_window_start, Utc::now().date_naive()),
     default(hwm_equity, Usd::ZERO),
-    timestamp(updated_at, always),
 )]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]

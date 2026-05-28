@@ -18,7 +18,7 @@ pub struct RuntimeConfigSeed;
 
 /// DTO for inserting a single runtime configuration row.
 ///
-/// `updated_at` is omitted — the DB column default (`CURRENT_TIMESTAMP`) applies.
+/// `updated_at` is omitted so the DB column default (`statement_timestamp()`) applies.
 #[derive(Debug, Clone, DeriveIntoActiveModel)]
 #[sea_orm(active_model = "crate::entities::runtime_config::ActiveModel")]
 pub struct NewRuntimeConfig {

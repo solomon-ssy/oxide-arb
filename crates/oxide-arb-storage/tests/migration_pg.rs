@@ -3,8 +3,9 @@
 use chrono::Utc;
 use oxide_arb_models::{
     config::PostgresConfig,
-    entities::{risk_state, runtime_config},
+    entities::{blacklist_entry, risk_state, runtime_config},
     enums::runtime_config::RuntimeConfigKey,
+    types::MarketId,
 };
 use oxide_arb_storage::postgres::{
     PostgresPool,
@@ -13,6 +14,7 @@ use oxide_arb_storage::postgres::{
 use sea_orm::{ConnectionTrait, EntityTrait};
 use std::time::Duration;
 use testcontainers::runners::AsyncRunner;
+use tokio::time::sleep;
 
 fn test_pg_config(port: u16) -> PostgresConfig {
     PostgresConfig {
@@ -268,4 +270,59 @@ async fn db_defaults_fill_notset_timestamps_on_insert() {
         row.updated_at >= before_insert,
         "DB column default must fill updated_at on INSERT"
     );
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn blacklist_updated_at_trigger_fires_on_update() {
+    let (pool, _container) = setup_pool().await;
+    let db = pool.connection();
+
+    Migrator::up(db, None).await.expect("Migration up failed");
+
+    let market_id = MarketId::new("blacklist-trigger-market");
+
+    db.execute(sea_orm::Statement::from_sql_and_values(
+        db.get_database_backend(),
+        "INSERT INTO blacklist_entry (market_id, token_id, scope, reason) VALUES ($1, $2, $3, $4)",
+        [
+            market_id.as_str().into(),
+            sea_orm::Value::String(None),
+            "full".into(),
+            "manual".into(),
+        ],
+    ))
+    .await
+    .expect("raw INSERT");
+
+    let before = blacklist_entry::Entity::find_by_id(market_id.clone())
+        .one(db)
+        .await
+        .expect("query")
+        .expect("row");
+
+    sleep(Duration::from_millis(5)).await;
+
+    db.execute(sea_orm::Statement::from_sql_and_values(
+        db.get_database_backend(),
+        "UPDATE blacklist_entry SET miss_count = $1 WHERE market_id = $2",
+        [1.into(), market_id.as_str().into()],
+    ))
+    .await
+    .expect("raw UPDATE");
+
+    let after = blacklist_entry::Entity::find_by_id(market_id)
+        .one(db)
+        .await
+        .expect("query")
+        .expect("row");
+
+    assert!(
+        after.updated_at > before.updated_at,
+        "blacklist_entry updated_at trigger must auto-refresh on UPDATE \
+         (before={}, after={})",
+        before.updated_at,
+        after.updated_at
+    );
+    assert_eq!(after.miss_count, 1);
 }

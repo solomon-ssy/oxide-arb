@@ -54,12 +54,7 @@ fn create_tables() -> Vec<TableCreateStatement> {
                     .not_null()
                     .default(PositionStatus::Open),
             )
-            .col(
-                ColumnDef::new(Position::OpenedAt)
-                    .timestamp_with_time_zone()
-                    .not_null()
-                    .default(Expr::current_timestamp()),
-            )
+            .col(super::timestamp_with_write_default(Position::OpenedAt))
             .col(nullable_timestamp(Position::ClosedAt))
             .col(nullable_timestamp(Position::SettledAt))
             .col(ColumnDef::new(Position::WinningTokenId).text().null())

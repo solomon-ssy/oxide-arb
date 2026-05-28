@@ -81,7 +81,6 @@ pub fn derive_into_active_value(input: TokenStream) -> TokenStream {
 ///     generate(trade_id, TradeId::generate()),
 ///     default(outcome, TradeOutcome::Pending),
 ///     timestamp(created_at),
-///     timestamp(updated_at, always),
 /// )]
 /// pub struct Model { /* ... */ }
 /// ```

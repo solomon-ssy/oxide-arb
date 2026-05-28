@@ -46,12 +46,9 @@ fn create_tables() -> Vec<TableCreateStatement> {
                     .not_null()
                     .default("system"),
             )
-            .col(
-                ColumnDef::new(RuntimeConfig::UpdatedAt)
-                    .timestamp_with_time_zone()
-                    .not_null()
-                    .default(Expr::current_timestamp()),
-            )
+            .col(super::timestamp_with_write_default(
+                RuntimeConfig::UpdatedAt,
+            ))
             .to_owned(),
     ]
 }

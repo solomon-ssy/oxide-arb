@@ -33,8 +33,9 @@ mod m20250601_000020_create_emergency_snapshots;
 mod m20250601_000021_create_reconciliation_reports;
 
 pub use helpers::{
-    create_indexes, create_tables, drop_tables, execute_sql, migrate_data, migrate_schema,
-    migrate_seed, migrate_up, noop,
+    create_indexes, create_tables, create_updated_at_trigger, drop_tables, drop_updated_at_trigger,
+    execute_sql, migrate_data, migrate_schema, migrate_seed, migrate_up, noop,
+    timestamp_with_write_default, write_timestamp,
 };
 pub use sea_orm_migration::prelude::*;
 
@@ -55,10 +56,10 @@ impl MigratorTrait for Migrator {
             Box::new(m20250601_000010_create_potential_loss_ledger::Migration),
             Box::new(m20250601_000012_create_outbox_event::Migration),
             Box::new(m20250601_000013_create_resolution_event::Migration),
-            Box::new(m20250601_000014_add_updated_at_triggers::Migration),
             Box::new(m20250601_000015_seed_trading_bootstrap::Migration),
             Box::new(m20250601_000016_create_reports::Migration),
             Box::new(m20250601_000018_create_blacklist_entries::Migration),
+            Box::new(m20250601_000014_add_updated_at_triggers::Migration),
             Box::new(m20250601_000019_create_risk_audit_events::Migration),
             Box::new(m20250601_000020_create_emergency_snapshots::Migration),
             Box::new(m20250601_000021_create_reconciliation_reports::Migration),

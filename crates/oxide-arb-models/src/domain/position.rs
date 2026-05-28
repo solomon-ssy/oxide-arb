@@ -1,8 +1,8 @@
 //! Position tracking domain models.
 //!
 //! `NewPosition` derives `DeriveIntoActiveModel` for clean DTO→ActiveModel
-//! conversion. System fields (`position_id`, status, timestamps, `PnL` defaults)
-//! are populated by `ActiveModelBehavior::before_save`.
+//! conversion. Entity defaults fill `position_id`, status, `opened_at`, and
+//! `PnL` defaults before insert.
 
 use crate::{
     enums::{
@@ -79,9 +79,8 @@ pub struct ExposureReservation {
 
 /// All fields required to open a new position.
 ///
-/// Derives `DeriveIntoActiveModel` — system fields (`position_id`, status,
-/// `opened_at`, unrealized/realized `PnL` defaults) are filled by the entity's
-/// `ActiveModelBehavior::before_save`.
+/// Derives `DeriveIntoActiveModel` — entity defaults fill `position_id`, status,
+/// `opened_at`, and unrealized/realized `PnL` defaults before insert.
 #[derive(Debug, Clone, DeriveIntoActiveModel)]
 #[sea_orm(active_model = "super::super::entities::position::ActiveModel")]
 pub struct NewPosition {

@@ -6,10 +6,10 @@
 //! hooks (e.g. `Entity::update_many`, `Entity::insert(...).on_conflict`), the
 //! trigger guarantees the column is always fresh.
 
-use super::execute_sql;
+use super::{create_updated_at_trigger, drop_updated_at_trigger, execute_sql};
 use oxide_arb_models::idens::{
-    calibration::EndgameCalibrationBucket, event::Event, market::Market,
-    risk_state::RiskEngineState, runtime_config::RuntimeConfig, trade::Trade,
+    blacklist_entry::BlacklistEntry, calibration::EndgameCalibrationBucket, event::Event,
+    market::Market, risk_state::RiskEngineState, runtime_config::RuntimeConfig, trade::Trade,
 };
 use sea_orm::Iden;
 use sea_orm_migration::prelude::*;
@@ -25,6 +25,7 @@ fn tables_with_updated_at() -> Vec<String> {
         RiskEngineState::Table.to_string(),
         RuntimeConfig::Table.to_string(),
         EndgameCalibrationBucket::Table.to_string(),
+        BlacklistEntry::Table.to_string(),
     ]
 }
 
@@ -35,7 +36,7 @@ impl MigrationTrait for Migration {
             "CREATE OR REPLACE FUNCTION trigger_set_updated_at() \
              RETURNS TRIGGER AS $$ \
              BEGIN \
-                 NEW.updated_at = CURRENT_TIMESTAMP; \
+                 NEW.updated_at = statement_timestamp(); \
                  RETURN NEW; \
              END; \
              $$ LANGUAGE plpgsql"
@@ -43,12 +44,7 @@ impl MigrationTrait for Migration {
         ];
 
         for table in tables_with_updated_at() {
-            stmts.push(format!(
-                "CREATE TRIGGER trg_{table}_updated_at \
-                 BEFORE UPDATE ON {table} \
-                 FOR EACH ROW \
-                 EXECUTE FUNCTION trigger_set_updated_at()"
-            ));
+            stmts.push(create_updated_at_trigger(&table));
         }
 
         execute_sql(manager, stmts).await
@@ -57,7 +53,7 @@ impl MigrationTrait for Migration {
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         let mut stmts: Vec<String> = tables_with_updated_at()
             .iter()
-            .map(|table| format!("DROP TRIGGER IF EXISTS trg_{table}_updated_at ON {table}"))
+            .map(|table| drop_updated_at_trigger(table))
             .collect();
 
         stmts.push("DROP FUNCTION IF EXISTS trigger_set_updated_at()".to_owned());

@@ -53,12 +53,9 @@ fn create_tables() -> Vec<TableCreateStatement> {
                     .timestamp_with_time_zone()
                     .not_null(),
             )
-            .col(
-                ColumnDef::new(ResolutionEvent::CreatedAt)
-                    .timestamp_with_time_zone()
-                    .not_null()
-                    .default(Expr::current_timestamp()),
-            )
+            .col(super::timestamp_with_write_default(
+                ResolutionEvent::CreatedAt,
+            ))
             .foreign_key(
                 ForeignKey::create()
                     .name("fk_resolution_market")

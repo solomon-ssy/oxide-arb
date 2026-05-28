@@ -94,12 +94,9 @@ fn create_tables() -> Vec<TableCreateStatement> {
                     .not_null()
                     .default(false),
             )
-            .col(
-                ColumnDef::new(AccountingPeriod::CreatedAt)
-                    .timestamp_with_time_zone()
-                    .not_null()
-                    .default(Expr::current_timestamp()),
-            )
+            .col(super::timestamp_with_write_default(
+                AccountingPeriod::CreatedAt,
+            ))
             .to_owned(),
     ]
 }

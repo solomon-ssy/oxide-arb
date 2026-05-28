@@ -68,12 +68,9 @@ fn create_tables() -> Vec<TableCreateStatement> {
                     .not_null()
                     .default(LedgerStatus::Active),
             )
-            .col(
-                ColumnDef::new(PotentialLossLedger::CreatedAt)
-                    .timestamp_with_time_zone()
-                    .not_null()
-                    .default(Expr::current_timestamp()),
-            )
+            .col(super::timestamp_with_write_default(
+                PotentialLossLedger::CreatedAt,
+            ))
             .col(
                 ColumnDef::new(PotentialLossLedger::ResolvedAt)
                     .timestamp_with_time_zone()

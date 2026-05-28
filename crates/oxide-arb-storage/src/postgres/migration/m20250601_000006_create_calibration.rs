@@ -88,12 +88,9 @@ fn calibration_bucket_table() -> TableCreateStatement {
                 .text()
                 .null(),
         )
-        .col(
-            ColumnDef::new(EndgameCalibrationBucket::UpdatedAt)
-                .timestamp_with_time_zone()
-                .not_null()
-                .default(Expr::current_timestamp()),
-        )
+        .col(super::timestamp_with_write_default(
+            EndgameCalibrationBucket::UpdatedAt,
+        ))
         .to_owned()
 }
 
@@ -158,12 +155,9 @@ fn calibration_outcome_table() -> TableCreateStatement {
                 .timestamp_with_time_zone()
                 .null(),
         )
-        .col(
-            ColumnDef::new(EndgameCalibrationOutcome::CreatedAt)
-                .timestamp_with_time_zone()
-                .not_null()
-                .default(Expr::current_timestamp()),
-        )
+        .col(super::timestamp_with_write_default(
+            EndgameCalibrationOutcome::CreatedAt,
+        ))
         .foreign_key(
             ForeignKey::create()
                 .name("fk_cal_outcome_market")
