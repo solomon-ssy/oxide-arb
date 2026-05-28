@@ -4,7 +4,11 @@ use chrono::Utc;
 use oxide_arb_models::{clickhouse::TickEventRow, config::AnalyticsConfig};
 use oxide_arb_storage::clickhouse::{BatchInserter, ChWriteMetrics, ClickHousePool};
 use std::{sync::Arc, time::Duration};
-use testcontainers::runners::AsyncRunner;
+use testcontainers::{
+    ImageExt,
+    core::{WaitFor, wait::HttpWaitStrategy},
+    runners::AsyncRunner,
+};
 use tokio_util::sync::CancellationToken;
 
 fn test_ch_config(port: u16) -> AnalyticsConfig {
@@ -29,9 +33,12 @@ async fn setup_clickhouse() -> (
 ) {
     let container = testcontainers::GenericImage::new("clickhouse/clickhouse-server", "24")
         .with_exposed_port(8123.into())
-        .with_wait_for(testcontainers::core::WaitFor::message_on_stderr(
-            "Ready for connections",
+        .with_wait_for(WaitFor::http(
+            HttpWaitStrategy::new("/ping")
+                .with_port(8123.into())
+                .with_expected_status_code(200u16),
         ))
+        .with_startup_timeout(Duration::from_secs(120))
         .start()
         .await
         .expect("ClickHouse container");
@@ -69,22 +76,49 @@ struct TableDdl {
 async fn clickhouse_table_ttl_policies() {
     let (_pool, client, _port, _container) = setup_clickhouse().await;
 
-    let expected: [(&str, &str); 4] = [
-        ("tick_events", "event_date + INTERVAL 90 DAY"),
-        ("book_snapshots", "snapshot_date + INTERVAL 180 DAY"),
-        ("opportunity_audit", "audit_date + INTERVAL 365 DAY"),
-        ("calibration_snapshots", "snapshot_date + INTERVAL 365 DAY"),
+    let expected: [(&str, [&str; 2]); 4] = [
+        (
+            "tick_events",
+            [
+                "event_date + INTERVAL 90 DAY",
+                "event_date + toIntervalDay(90)",
+            ],
+        ),
+        (
+            "book_snapshots",
+            [
+                "snapshot_date + INTERVAL 180 DAY",
+                "snapshot_date + toIntervalDay(180)",
+            ],
+        ),
+        (
+            "opportunity_audit",
+            [
+                "audit_date + INTERVAL 365 DAY",
+                "audit_date + toIntervalDay(365)",
+            ],
+        ),
+        (
+            "calibration_snapshots",
+            [
+                "snapshot_date + INTERVAL 365 DAY",
+                "snapshot_date + toIntervalDay(365)",
+            ],
+        ),
     ];
 
-    for (table, ttl_fragment) in expected {
+    for (table, ttl_fragments) in expected {
         let ddl: TableDdl = client
             .query(&format!("SHOW CREATE TABLE {table}"))
             .fetch_one()
             .await
             .unwrap_or_else(|e| panic!("SHOW CREATE TABLE {table} failed: {e}"));
         assert!(
-            ddl.statement.contains("TTL") && ddl.statement.contains(ttl_fragment),
-            "table {table} should define TTL containing `{ttl_fragment}`; got:\n{}",
+            ddl.statement.contains("TTL")
+                && ttl_fragments
+                    .iter()
+                    .any(|fragment| ddl.statement.contains(fragment)),
+            "table {table} should define the expected TTL; got:\n{}",
             ddl.statement
         );
     }
@@ -106,6 +140,26 @@ fn sample_tick(token_id: &str, received_at: i64) -> TickEventRow {
 
 #[tokio::test]
 #[ignore = "requires Docker"]
+async fn tick_events_direct_insert_roundtrip() {
+    let (_pool, client, _port, _container) = setup_clickhouse().await;
+    let row = sample_tick("tok-direct", Utc::now().timestamp_millis());
+    let mut insert = client
+        .insert::<TickEventRow>("tick_events")
+        .await
+        .expect("insert start");
+    insert.write(&row).await.expect("write row");
+    insert.end().await.expect("end insert");
+
+    let count: u64 = client
+        .query("SELECT count() FROM tick_events WHERE token_id = 'tok-direct'")
+        .fetch_one()
+        .await
+        .expect("count");
+    assert_eq!(count, 1);
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
 async fn batch_inserter_shutdown_drains_buffer() {
     let (_pool, client, _port, _container) = setup_clickhouse().await;
     let shutdown = CancellationToken::new();
@@ -120,10 +174,10 @@ async fn batch_inserter_shutdown_drains_buffer() {
         shutdown.clone(),
     );
 
-    let now = Utc::now().timestamp();
+    let now = Utc::now().timestamp_millis();
     for i in 0..3 {
         inserter
-            .insert(sample_tick(&format!("tok-drain-{i}"), now + i))
+            .insert(sample_tick(&format!("tok-drain-{i}"), now + i * 1000))
             .await
             .expect("enqueue");
     }
@@ -155,13 +209,13 @@ async fn batch_inserter_channel_close_drains_buffer() {
         shutdown,
     );
 
-    let now = Utc::now().timestamp();
+    let now = Utc::now().timestamp_millis();
     inserter
         .insert(sample_tick("tok-close-1", now))
         .await
         .unwrap();
     inserter
-        .insert(sample_tick("tok-close-2", now + 1))
+        .insert(sample_tick("tok-close-2", now + 1_000))
         .await
         .unwrap();
 

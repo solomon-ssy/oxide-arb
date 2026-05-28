@@ -141,12 +141,14 @@ impl TimeseriesRepository for ChTimeseriesRepository {
         self.client
             .query(
                 "SELECT * FROM tick_events \
-                 WHERE token_id = ? AND received_at >= ? AND received_at < ? \
+                 WHERE token_id = ? \
+                   AND received_at >= fromUnixTimestamp64Milli(?) \
+                   AND received_at < fromUnixTimestamp64Milli(?) \
                  ORDER BY received_at DESC LIMIT ?",
             )
             .bind(token_id)
-            .bind(from.timestamp())
-            .bind(to.timestamp())
+            .bind(from.timestamp_millis())
+            .bind(to.timestamp_millis())
             .bind(limit)
             .fetch_all::<TickEventRow>()
             .await
@@ -161,11 +163,12 @@ impl TimeseriesRepository for ChTimeseriesRepository {
         self.client
             .query(
                 "SELECT * FROM opportunity_audit \
-                 WHERE detected_at >= ? AND detected_at < ? \
+                 WHERE detected_at >= fromUnixTimestamp64Milli(?) \
+                   AND detected_at < fromUnixTimestamp64Milli(?) \
                  ORDER BY detected_at DESC",
             )
-            .bind(from.timestamp())
-            .bind(to.timestamp())
+            .bind(from.timestamp_millis())
+            .bind(to.timestamp_millis())
             .fetch_all::<OpportunityAuditRow>()
             .await
             .map_err(Into::into)

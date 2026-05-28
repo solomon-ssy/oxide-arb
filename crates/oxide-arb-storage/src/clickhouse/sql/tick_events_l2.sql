@@ -1,10 +1,10 @@
 CREATE TABLE IF NOT EXISTS tick_events_l2 (
     token_id        String,
-    event_type      Enum8('snapshot' = 1, 'delta' = 2),
-    bid_prices      Array(Decimal64(8)),
-    bid_sizes       Array(Decimal64(8)),
-    ask_prices      Array(Decimal64(8)),
-    ask_sizes       Array(Decimal64(8)),
+    event_type      UInt8,
+    bid_prices      Array(Float64),
+    bid_sizes       Array(Float64),
+    ask_prices      Array(Float64),
+    ask_sizes       Array(Float64),
     changed_levels  Nullable(String) CODEC(ZSTD(3)),
     received_at     DateTime64(3, 'UTC'),
     event_date      Date MATERIALIZED toDate(received_at)

@@ -3,9 +3,9 @@ CREATE TABLE IF NOT EXISTS book_snapshots (
     snapshot_time   DateTime64(3, 'UTC'),
     bids            String CODEC(ZSTD(3)),
     asks            String CODEC(ZSTD(3)),
-    bid_depth_usd   Decimal64(8),
-    ask_depth_usd   Decimal64(8),
-    mid_price       Decimal64(8),
+    bid_depth_usd   Float64,
+    ask_depth_usd   Float64,
+    mid_price       Float64,
     spread_bps      UInt32,
     levels_count    UInt16,
     snapshot_date   Date MATERIALIZED toDate(snapshot_time)

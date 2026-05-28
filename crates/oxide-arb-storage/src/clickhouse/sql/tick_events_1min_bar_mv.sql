@@ -11,7 +11,7 @@ AS SELECT
     argMaxState(best_ask, received_at) AS close_ask,
     max(best_ask) AS high_ask,
     min(best_ask) AS low_ask,
-    avg(spread_bps) AS avg_spread_bps,
+    avgState(toFloat64(spread_bps)) AS avg_spread_bps,
     max(bid_depth_usd) AS max_bid_depth,
     max(ask_depth_usd) AS max_ask_depth,
     toUInt64(count()) AS tick_count

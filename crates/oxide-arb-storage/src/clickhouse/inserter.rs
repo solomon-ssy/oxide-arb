@@ -1,6 +1,7 @@
 //! Async batch inserter for `ClickHouse` with backpressure, retry, and metrics.
 
 use crate::clickhouse::ChWriteMetrics;
+use clickhouse::{Client, RowOwned, RowWrite};
 use num_traits::ToPrimitive;
 use oxide_arb_error::storage::StorageError;
 use std::{
@@ -11,18 +12,18 @@ use tokio::{sync::mpsc, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
-pub struct BatchInserter<T: clickhouse::RowOwned + clickhouse::RowWrite + Send> {
+pub struct BatchInserter<T: RowOwned + RowWrite + Clone + Send + Sync> {
     tx: mpsc::Sender<T>,
     _handle: JoinHandle<()>,
 }
 
-impl<T: clickhouse::RowOwned + clickhouse::RowWrite + Send> BatchInserter<T> {
+impl<T: RowOwned + RowWrite + Clone + Send + Sync> BatchInserter<T> {
     /// Create a new `BatchInserter` with integrated metrics reporting.
     ///
     /// Every successful flush records `rows_written` and `insert_duration`.
     /// Every failed flush (after retries exhausted) increments `insert_errors`.
     pub fn new(
-        client: clickhouse::Client,
+        client: Client,
         table: &'static str,
         batch_size: usize,
         flush_interval: Duration,
@@ -65,7 +66,7 @@ impl<T: clickhouse::RowOwned + clickhouse::RowWrite + Send> BatchInserter<T> {
     }
 
     async fn flush_loop(
-        client: clickhouse::Client,
+        client: Client,
         table: &'static str,
         mut rx: mpsc::Receiver<T>,
         batch_size: usize,
@@ -114,7 +115,7 @@ impl<T: clickhouse::RowOwned + clickhouse::RowWrite + Send> BatchInserter<T> {
     }
 
     async fn flush_with_retry(
-        client: &clickhouse::Client,
+        client: &Client,
         table: &'static str,
         buffer: &mut Vec<T>,
         metrics: &ChWriteMetrics,
@@ -163,18 +164,15 @@ impl<T: clickhouse::RowOwned + clickhouse::RowWrite + Send> BatchInserter<T> {
         }
     }
 
-    async fn flush(
-        client: &clickhouse::Client,
-        table: &str,
-        buffer: &mut Vec<T>,
-    ) -> Result<(), StorageError> {
+    async fn flush(client: &Client, table: &str, buffer: &mut Vec<T>) -> Result<(), StorageError> {
         let mut insert = client.insert::<T>(table).await?;
 
-        for row in buffer.drain(..) {
-            insert.write(&row).await?;
+        for row in buffer.iter() {
+            insert.write(row).await?;
         }
 
         insert.end().await?;
+        buffer.clear();
         Ok(())
     }
 }

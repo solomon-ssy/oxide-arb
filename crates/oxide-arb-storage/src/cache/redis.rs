@@ -6,7 +6,8 @@ use deadpool_redis::{Config, Pool, Runtime};
 use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::config::RedisConfig;
 use redis::AsyncCommands;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+use tokio::time::sleep;
 use tracing::info;
 
 pub struct RedisBackend {
@@ -21,11 +22,7 @@ impl RedisBackend {
             .create_pool(Some(Runtime::Tokio1))
             .map_err(|e| StorageError::Connection(format!("Redis pool creation failed: {e}")))?;
 
-        let mut conn = pool.get().await?;
-        redis::cmd("PING")
-            .query_async::<String>(&mut conn)
-            .await
-            .map_err(StorageError::Redis)?;
+        Self::wait_until_ready(&pool, Duration::from_millis(config.timeout_ms)).await?;
 
         info!(url = %config.url, prefix = %config.key_prefix, "Redis cache connected");
 
@@ -36,16 +33,40 @@ impl RedisBackend {
     }
 
     pub async fn health_check(&self) -> Result<(), StorageError> {
-        let mut conn = self.pool.get().await?;
-        redis::cmd("PING")
-            .query_async::<String>(&mut conn)
-            .await
-            .map_err(StorageError::Redis)?;
+        Self::ping(&self.pool).await?;
         Ok(())
     }
 
     fn prefixed(&self, key: &str) -> String {
         format!("{}{}", self.key_prefix, key)
+    }
+
+    async fn wait_until_ready(pool: &Pool, timeout: Duration) -> Result<(), StorageError> {
+        let deadline = Instant::now() + timeout;
+        let retry_delay = Duration::from_millis(50);
+
+        loop {
+            match Self::ping(pool).await {
+                Ok(()) => return Ok(()),
+                Err(error) if Instant::now() < deadline => {
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    sleep(retry_delay.min(remaining)).await;
+                    if remaining.is_zero() {
+                        return Err(error);
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    async fn ping(pool: &Pool) -> Result<(), StorageError> {
+        let mut conn = pool.get().await?;
+        redis::cmd("PING")
+            .query_async::<String>(&mut conn)
+            .await
+            .map_err(StorageError::Redis)?;
+        Ok(())
     }
 }
 

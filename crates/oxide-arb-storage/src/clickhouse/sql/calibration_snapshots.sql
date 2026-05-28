@@ -4,9 +4,9 @@ CREATE TABLE IF NOT EXISTS calibration_snapshots (
     duration_bucket String,
     total_count     UInt32,
     correct_count   UInt32,
-    alpha_prior     Decimal64(8),
-    beta_prior      Decimal64(8),
-    posterior_mean  Decimal64(8),
+    alpha_prior     Float64,
+    beta_prior      Float64,
+    posterior_mean  Float64,
     snapshot_time   DateTime64(3, 'UTC'),
     snapshot_date   Date MATERIALIZED toDate(snapshot_time)
 )

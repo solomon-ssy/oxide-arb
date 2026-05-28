@@ -1,9 +1,11 @@
 //! `PostgreSQL` repository integration tests (requires Docker).
 
-mod common;
+#[path = "common/pg.rs"]
+mod pg;
+
+use std::collections::HashSet;
 
 use chrono::{NaiveDate, Utc};
-use common::{make_event, make_market, setup_pg};
 use oxide_arb_models::{
     domain::{
         NewAccountingPeriod, NewCalibrationOutcome, NewEmergencySnapshot, NewOutboxEventWithId,
@@ -28,6 +30,7 @@ use oxide_arb_models::{
 };
 use oxide_arb_repository::{postgres::*, traits::*};
 use oxide_arb_storage::postgres::PostgresPool;
+use pg::{make_event, make_market, setup_pg};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 
@@ -211,7 +214,7 @@ async fn market_insert_then_update() {
         2,
         "upserts should update in place, not duplicate rows per market_id"
     );
-    let ids: std::collections::HashSet<_> = all_active.iter().map(|m| m.market_id.clone()).collect();
+    let ids: HashSet<_> = all_active.iter().map(|m| m.market_id.clone()).collect();
     assert_eq!(ids.len(), 2, "each market_id should appear once");
 }
 

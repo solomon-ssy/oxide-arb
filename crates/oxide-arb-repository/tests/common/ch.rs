@@ -1,0 +1,62 @@
+//! Shared helpers for `ClickHouse` repository integration tests.
+
+use std::{sync::Arc, time::Duration};
+
+use oxide_arb_models::config::AnalyticsConfig;
+use oxide_arb_repository::clickhouse::ChTimeseriesRepository;
+use oxide_arb_storage::clickhouse::{ChWriteManager, ClickHousePool};
+use testcontainers::{
+    ContainerAsync, GenericImage, ImageExt,
+    core::{WaitFor, wait::HttpWaitStrategy},
+    runners::AsyncRunner,
+};
+use tokio_util::sync::CancellationToken;
+
+pub fn test_ch_config(port: u16) -> AnalyticsConfig {
+    AnalyticsConfig {
+        clickhouse_url: format!("http://localhost:{port}"),
+        clickhouse_database: "default".into(),
+        clickhouse_user: "default".into(),
+        clickhouse_password: String::new(),
+        batch_size: 10,
+        flush_interval_secs: 1,
+        max_concurrent_inserts: 4,
+        max_lag_secs: 10.0,
+        lag_probe_interval_secs: 5,
+    }
+}
+
+pub async fn setup_timeseries_repo() -> (
+    ChTimeseriesRepository,
+    CancellationToken,
+    ContainerAsync<GenericImage>,
+) {
+    let container = GenericImage::new("clickhouse/clickhouse-server", "24")
+        .with_exposed_port(8123.into())
+        .with_wait_for(WaitFor::http(
+            HttpWaitStrategy::new("/ping")
+                .with_port(8123.into())
+                .with_expected_status_code(200u16),
+        ))
+        .with_startup_timeout(Duration::from_secs(120))
+        .start()
+        .await
+        .expect("ClickHouse container");
+    let port = container.get_host_port_ipv4(8123).await.expect("port");
+    let config = test_ch_config(port);
+    let pool = ClickHousePool::connect(&config).expect("connect");
+    pool.ensure_schema().await.expect("schema");
+
+    let shutdown = CancellationToken::new();
+    let write_manager = Arc::new(ChWriteManager::new_without_probe(
+        config.max_concurrent_inserts,
+    ));
+    let repo = ChTimeseriesRepository::new(
+        pool.client().clone(),
+        &config,
+        write_manager,
+        shutdown.clone(),
+    );
+
+    (repo, shutdown, container)
+}

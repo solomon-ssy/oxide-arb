@@ -49,7 +49,7 @@ fn test_pg_config(port: u16) -> PostgresConfig {
 
 fn test_redis_config(port: u16) -> RedisConfig {
     RedisConfig {
-        url: format!("redis://localhost:{port}"),
+        url: format!("redis://127.0.0.1:{port}"),
         pool_size: 5,
         timeout_ms: 5000,
         key_prefix: "gamma-test:".into(),

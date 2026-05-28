@@ -2,7 +2,6 @@
 
 pub fn all_ddl() -> Vec<&'static str> {
     vec![
-        include_str!("sql/drop_signal_data.sql"),
         include_str!("sql/tick_events.sql"),
         include_str!("sql/tick_events_l2.sql"),
         include_str!("sql/book_snapshots.sql"),
