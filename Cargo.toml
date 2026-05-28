@@ -23,7 +23,7 @@ rust-version = "1.85"
 license = "MIT"
 
 [workspace.lints.rust]
-unsafe_code = "forbid"
+unsafe_code = "deny"
 async_fn_in_trait = "allow"
 
 [workspace.lints.clippy]
@@ -100,6 +100,7 @@ syn = { version = "2", features = ["full", "extra-traits"] }
 quote = "1"
 proc-macro2 = "1"
 darling = "0.23"
+linkme = "0.3"
 
 # ── Phase 1: Data Access Layer Dependencies ──────────────────────────────────
 

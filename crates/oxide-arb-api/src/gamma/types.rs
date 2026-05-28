@@ -57,8 +57,6 @@ pub struct RawGammaMarket {
     pub minimum_order_size: Option<Decimal>,
     #[serde(alias = "minimum_tick_size")]
     pub minimum_tick_size: Option<String>,
-    #[allow(dead_code)]
-    pub volume: Option<String>,
     #[serde(alias = "created_at")]
     pub created_at: Option<String>,
     #[serde(alias = "updated_at")]

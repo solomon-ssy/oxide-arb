@@ -1,20 +1,31 @@
 //! Risk engine singleton seed — inserts the canonical id=1 row.
 
-use crate::{entities::risk_state, enums::risk::BreakerStateName, seed::SeedContext, types::Usd};
+use crate::{
+    entities::risk_state,
+    enums::risk::BreakerStateName,
+    idens::risk_state::RiskEngineState,
+    schema::seed::{SeedArtifact, SeedDependency, SeedSpec},
+    seed::{SeedConflictPolicy, SeedContext},
+    types::Usd,
+};
 use chrono::{DateTime, NaiveDate, Utc};
-use oxide_arb_macros::SeedUnit;
 use sea_orm::{
     DeriveIntoActiveModel, EntityTrait, IntoActiveModel, QueryTrait, sea_query::OnConflict,
 };
 
-#[derive(SeedUnit)]
-#[seed_unit(
-    id = "trading.risk_engine_state",
-    order = 10,
-    policy = InsertIfAbsent,
-    loader = crate::seed::risk_engine_state::load,
-)]
-pub struct RiskEngineStateSeed;
+const DEPENDS_ON: &[SeedDependency] = &[];
+const PRODUCES: &[SeedArtifact] = &[];
+
+pub const RISK_ENGINE_STATE_SEED: SeedSpec = SeedSpec {
+    id: "trading.risk_engine_state.bootstrap",
+    version: 1,
+    target_table: risk_engine_state_table_name,
+    depends_on: DEPENDS_ON,
+    produces: PRODUCES,
+    conflict_policy: SeedConflictPolicy::InsertIfAbsent,
+    checksum: "risk_engine_state.bootstrap.v1",
+    loader: load_boxed,
+};
 
 /// All fields required to bootstrap the risk engine singleton.
 #[derive(Debug, Clone, DeriveIntoActiveModel)]
@@ -99,4 +110,16 @@ pub async fn load(
         .build(backend);
     let result = db.execute(stmt).await?;
     Ok(result.rows_affected())
+}
+
+fn load_boxed<'a>(
+    db: &'a dyn sea_orm::ConnectionTrait,
+    ctx: &'a mut SeedContext,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<u64, sea_orm::DbErr>> + Send + 'a>> {
+    Box::pin(load(db, ctx))
+}
+
+fn risk_engine_state_table_name() -> String {
+    use sea_orm::Iden;
+    RiskEngineState::Table.to_string()
 }

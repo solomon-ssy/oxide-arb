@@ -16,4 +16,5 @@ pub mod resolution_event;
 pub mod risk_audit_event;
 pub mod risk_state;
 pub mod runtime_config;
+pub mod seed_application;
 pub mod trade;

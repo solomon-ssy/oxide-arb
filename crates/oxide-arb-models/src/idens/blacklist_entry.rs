@@ -1,6 +1,9 @@
-use sea_orm::DeriveIden;
+use oxide_arb_macros::oxide_schema;
+use sea_orm::sea_query::{ColumnDef, Table, TableCreateStatement};
 
-#[derive(DeriveIden)]
+use crate::schema::{dependency::TableDependency, index::IndexSpec, seed::SeedSpec};
+
+#[oxide_schema]
 pub enum BlacklistEntry {
     Table,
     MarketId,
@@ -11,4 +14,49 @@ pub enum BlacklistEntry {
     MissCount,
     CreatedAt,
     UpdatedAt,
+}
+
+pub fn table() -> TableCreateStatement {
+    Table::create()
+        .table(BlacklistEntry::Table)
+        .if_not_exists()
+        .col(
+            ColumnDef::new(BlacklistEntry::MarketId)
+                .text()
+                .not_null()
+                .primary_key(),
+        )
+        .col(ColumnDef::new(BlacklistEntry::TokenId).text().null())
+        .col(ColumnDef::new(BlacklistEntry::Scope).text().not_null())
+        .col(ColumnDef::new(BlacklistEntry::Reason).text().not_null())
+        .col(
+            ColumnDef::new(BlacklistEntry::ExpiresAt)
+                .timestamp_with_time_zone()
+                .null(),
+        )
+        .col(
+            ColumnDef::new(BlacklistEntry::MissCount)
+                .integer()
+                .not_null()
+                .default(0),
+        )
+        .col(crate::schema::timestamp_with_write_default(
+            BlacklistEntry::CreatedAt,
+        ))
+        .col(crate::schema::timestamp_with_write_default(
+            BlacklistEntry::UpdatedAt,
+        ))
+        .to_owned()
+}
+
+pub const fn indexes() -> Vec<IndexSpec> {
+    Vec::new()
+}
+
+pub const fn dependencies() -> Vec<TableDependency> {
+    Vec::new()
+}
+
+pub const fn seed_units() -> Vec<SeedSpec> {
+    Vec::new()
 }

@@ -1,20 +1,30 @@
 //! Runtime configuration defaults seed — inserts one row per `RuntimeConfigKey`.
 
-use crate::{entities::runtime_config, enums::runtime_config::RuntimeConfigKey, seed::SeedContext};
-use oxide_arb_macros::SeedUnit;
+use crate::{
+    entities::runtime_config,
+    enums::runtime_config::RuntimeConfigKey,
+    idens::runtime_config::RuntimeConfig,
+    schema::seed::{SeedArtifact, SeedDependency, SeedSpec},
+    seed::{SeedConflictPolicy, SeedContext},
+};
 use sea_orm::{
     DeriveIntoActiveModel, EntityTrait, IntoActiveModel, Iterable, QueryTrait,
     sea_query::OnConflict,
 };
 
-#[derive(SeedUnit)]
-#[seed_unit(
-    id = "trading.runtime_config",
-    order = 20,
-    policy = InsertKeyIfAbsent,
-    loader = crate::seed::runtime_config::load,
-)]
-pub struct RuntimeConfigSeed;
+const DEPENDS_ON: &[SeedDependency] = &[];
+const PRODUCES: &[SeedArtifact] = &[];
+
+pub const RUNTIME_CONFIG_SEED: SeedSpec = SeedSpec {
+    id: "trading.runtime_config.defaults",
+    version: 1,
+    target_table: runtime_config_table_name,
+    depends_on: DEPENDS_ON,
+    produces: PRODUCES,
+    conflict_policy: SeedConflictPolicy::InsertKeyIfAbsent,
+    checksum: "runtime_config.defaults.v1",
+    loader: load_boxed,
+};
 
 /// DTO for inserting a single runtime configuration row.
 ///
@@ -122,6 +132,18 @@ fn default_for(key: RuntimeConfigKey) -> (serde_json::Value, &'static str) {
             "Enable dry-run mode (simulate without execution)",
         ),
     }
+}
+
+fn load_boxed<'a>(
+    db: &'a dyn sea_orm::ConnectionTrait,
+    ctx: &'a mut SeedContext,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<u64, sea_orm::DbErr>> + Send + 'a>> {
+    Box::pin(load(db, ctx))
+}
+
+fn runtime_config_table_name() -> String {
+    use sea_orm::Iden;
+    RuntimeConfig::Table.to_string()
 }
 
 #[cfg(test)]

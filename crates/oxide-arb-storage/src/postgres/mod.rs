@@ -1,7 +1,6 @@
-//! `PostgreSQL` connection management, migrations, and seed execution.
+//! `PostgreSQL` connection management and migrations.
 
 pub mod migration;
 mod pool;
-pub mod seed;
 
 pub use pool::PostgresPool;

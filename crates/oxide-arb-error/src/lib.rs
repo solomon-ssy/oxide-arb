@@ -27,6 +27,7 @@ pub mod market;
 pub mod redeem;
 pub mod reservation;
 pub mod rpc;
+pub mod seed;
 pub mod signing;
 pub mod storage;
 pub mod trading;
@@ -85,6 +86,9 @@ pub enum OxideError {
 
     #[error(transparent)]
     Redeem(#[from] redeem::RedeemError),
+
+    #[error(transparent)]
+    Seed(#[from] seed::SeedError),
 
     // ── General ─────────────────────────────────────────────────────────
     #[error("Internal error: {0}")]

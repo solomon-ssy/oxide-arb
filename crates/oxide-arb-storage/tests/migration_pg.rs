@@ -1,6 +1,6 @@
 //! `PostgreSQL` migration integration tests (requires Docker).
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use oxide_arb_models::{
     config::PostgresConfig,
     entities::{blacklist_entry, risk_state, runtime_config},
@@ -189,6 +189,30 @@ async fn runtime_config_no_clobber() {
 
 #[tokio::test]
 #[ignore = "requires Docker"]
+async fn seed_application_records_catalog_seeds() {
+    let (pool, _container) = setup_pool().await;
+    let db = pool.connection();
+
+    Migrator::up(db, None).await.expect("Migration up failed");
+
+    let row = db
+        .query_one(sea_orm::Statement::from_string(
+            db.get_database_backend(),
+            "SELECT COUNT(*) FROM seed_application",
+        ))
+        .await
+        .expect("query seed ledger")
+        .expect("seed ledger row");
+    let count: i64 = row.try_get_by_index(0).expect("read seed ledger count");
+
+    assert_eq!(
+        count, 2,
+        "risk state and runtime config seeds should be recorded"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
 async fn updated_at_trigger_fires_on_update() {
     let (pool, _container) = setup_pool().await;
     let db = pool.connection();
@@ -238,7 +262,16 @@ async fn db_defaults_fill_notset_timestamps_on_insert() {
 
     Migrator::up(db, None).await.expect("Migration up failed");
 
-    let before_insert = Utc::now();
+    let before_insert: DateTime<Utc> = db
+        .query_one(sea_orm::Statement::from_string(
+            db.get_database_backend(),
+            "SELECT statement_timestamp()",
+        ))
+        .await
+        .expect("query db timestamp")
+        .expect("timestamp row")
+        .try_get_by_index(0)
+        .expect("read db timestamp");
 
     let typed_key = RuntimeConfigKey::DryRunMode;
     let key = typed_key.as_str();
