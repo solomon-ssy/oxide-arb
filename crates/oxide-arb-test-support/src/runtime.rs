@@ -349,6 +349,7 @@ pub fn assemble_test_runtime(
     let (coalescer_market_tx, coalescer_market_rx) = flume::bounded::<MarketId>(512);
     let (scanner_market_tx, scanner_market_rx) = flume::bounded::<MarketId>(512);
     let (market_tap_tx, market_rx_tap) = flume::bounded::<MarketId>(512);
+    let (settlement_tx, _settlement_rx) = flume::bounded(512);
     spawn_market_forwarder(coalescer_market_rx, scanner_market_tx, market_tap_tx);
 
     let coalescer = Arc::new(Coalescer::new(
@@ -374,6 +375,7 @@ pub fn assemble_test_runtime(
         book_store: Arc::clone(&book_store),
         market_registry: Arc::clone(&market_registry),
         coalescer_tx: token_tx,
+        settlement_tx,
         metrics: Arc::clone(&infra.metrics),
         backpressure: Arc::clone(&infra.backpressure),
         book_shard_count: settings.execution.book_apply.shard_count,

@@ -4,6 +4,7 @@ use oxide_arb_models::{
     types::MarketId,
 };
 
+#[async_trait::async_trait]
 pub trait BlacklistPersistenceRepository: Send + Sync {
     async fn upsert(&self, entry: UpsertBlacklistEntry) -> Result<(), StorageError>;
     async fn remove(&self, market_id: &MarketId) -> Result<(), StorageError>;

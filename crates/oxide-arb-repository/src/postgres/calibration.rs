@@ -144,6 +144,7 @@ impl PgCalibrationRepository {
     }
 }
 
+#[async_trait::async_trait]
 impl CalibrationRepository for PgCalibrationRepository {
     async fn get_bucket(
         &self,
@@ -191,6 +192,7 @@ pub struct PgCalibrationRepositoryTxn<'a> {
     txn: &'a DatabaseTransaction,
 }
 
+#[async_trait::async_trait]
 impl CalibrationRepository for PgCalibrationRepositoryTxn<'_> {
     async fn get_bucket(
         &self,

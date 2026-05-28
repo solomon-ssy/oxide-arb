@@ -1,4 +1,3 @@
-use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::clickhouse::{
@@ -6,7 +5,7 @@ use oxide_arb_models::clickhouse::{
     TickEventRow,
 };
 
-#[async_trait]
+#[async_trait::async_trait]
 pub trait TimeseriesRepository: Send + Sync {
     async fn insert_tick_events(&self, events: &[TickEventRow]) -> Result<(), StorageError>;
     async fn insert_book_snapshot(&self, snapshot: &BookSnapshotRow) -> Result<(), StorageError>;

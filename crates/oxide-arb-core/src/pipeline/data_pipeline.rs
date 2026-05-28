@@ -5,10 +5,12 @@ use crate::{
     infra::sharding::shard_index,
     observability::{backpressure::BackpressurePolicy, metrics_hub::MetricsHub},
 };
+use chrono::Utc;
 use flume::{Receiver, Sender};
 use oxide_arb_error::OxideError;
 use oxide_arb_models::{
-    domain::{latency::LatencyTrace, pipeline::PipelineEvent},
+    domain::{latency::LatencyTrace, pipeline::PipelineEvent, settlement::MarketSettlementRequest},
+    enums::common::SettlementTrigger,
     types::TokenId,
 };
 use std::{sync::Arc, thread};
@@ -24,6 +26,7 @@ pub struct DataPipelineDeps {
     pub book_store: Arc<BookStore>,
     pub market_registry: Arc<MarketRegistry>,
     pub coalescer_tx: flume::Sender<TokenId>,
+    pub settlement_tx: flume::Sender<MarketSettlementRequest>,
     pub metrics: Arc<MetricsHub>,
     pub backpressure: Arc<BackpressurePolicy>,
     pub book_shard_count: usize,
@@ -37,6 +40,7 @@ pub struct DataPipeline {
     book_store: Arc<BookStore>,
     market_registry: Arc<MarketRegistry>,
     coalescer_tx: flume::Sender<TokenId>,
+    settlement_tx: flume::Sender<MarketSettlementRequest>,
     metrics: Arc<MetricsHub>,
     backpressure: Arc<BackpressurePolicy>,
     book_shard_count: usize,
@@ -51,6 +55,7 @@ impl DataPipeline {
             book_store: deps.book_store,
             market_registry: deps.market_registry,
             coalescer_tx: deps.coalescer_tx,
+            settlement_tx: deps.settlement_tx,
             metrics: deps.metrics,
             backpressure: deps.backpressure,
             book_shard_count: deps.book_shard_count,
@@ -77,6 +82,7 @@ impl DataPipeline {
                 book_store: Arc::clone(&self.book_store),
                 market_registry: Arc::clone(&self.market_registry),
                 coalescer_tx: self.coalescer_tx.clone(),
+                settlement_tx: self.settlement_tx.clone(),
                 metrics: Arc::clone(&self.metrics),
                 backpressure: Arc::clone(&self.backpressure),
             };
@@ -139,6 +145,7 @@ struct BookApplyWorker {
     book_store: Arc<BookStore>,
     market_registry: Arc<MarketRegistry>,
     coalescer_tx: Sender<TokenId>,
+    settlement_tx: Sender<MarketSettlementRequest>,
     metrics: Arc<MetricsHub>,
     backpressure: Arc<BackpressurePolicy>,
 }
@@ -180,10 +187,26 @@ impl BookApplyWorker {
                 self.metrics.price_changes_applied.inc();
             }
 
-            PipelineEvent::MarketResolved { market_id, .. } => {
+            PipelineEvent::MarketResolved {
+                market_id,
+                winning_token_id,
+                winning_outcome,
+                ..
+            } => {
                 let known = self.market_registry.get_market(&market_id).is_some();
                 tracing::info!(%market_id, known, "Market resolved via WS");
                 self.metrics.markets_resolved_ws.inc();
+                let request = MarketSettlementRequest {
+                    market_id: market_id.clone(),
+                    winning_token_id,
+                    winning_outcome,
+                    source: SettlementTrigger::Ws,
+                    observed_at: Utc::now(),
+                };
+                if let Err(error) = self.settlement_tx.try_send(request) {
+                    self.metrics.settlement_channel_dropped_total.inc();
+                    tracing::error!(%error, %market_id, "settlement channel send failed");
+                }
             }
 
             PipelineEvent::TickSizeChange {

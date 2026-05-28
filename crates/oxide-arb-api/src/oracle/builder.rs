@@ -5,9 +5,9 @@ use super::{
     source::OracleSource, uma_source::UmaOracleSource,
 };
 use oxide_arb_error::rpc::RpcError;
-use oxide_arb_models::{
-    config::{GammaConfig, OnchainConfig, PolymarketConfig, SettlementOracleConfig},
-    constants::CTF_ADDRESS,
+use oxide_arb_models::config::{
+    GammaConfig, OnchainConfig, PolymarketConfig,
+    settlement::{SettlementContractsSection, SettlementOracleSection},
 };
 use std::{sync::Arc, time::Duration};
 
@@ -15,13 +15,14 @@ use std::{sync::Arc, time::Duration};
 pub fn build_voting_oracle(
     polymarket: &PolymarketConfig,
     gamma: &GammaConfig,
-    oracle_cfg: &SettlementOracleConfig,
+    oracle_cfg: &SettlementOracleSection,
+    contracts: &SettlementContractsSection,
 ) -> Result<VotingOracle, RpcError> {
     let sources: Vec<Arc<dyn OracleSource>> = vec![
         Arc::new(GammaOracleSource::new(gamma.base_url.clone())),
         Arc::new(CtfOracleSource::new(
             polymarket.onchain.rpc_url.clone(),
-            CTF_ADDRESS,
+            &contracts.ctf_address,
         )?),
         Arc::new(UmaOracleSource::new(oracle_cfg)?),
     ];
@@ -42,7 +43,8 @@ pub fn build_voting_oracle(
 pub fn build_voting_oracle_from_urls(
     gamma_base_url: String,
     onchain: &OnchainConfig,
-    oracle_cfg: &SettlementOracleConfig,
+    oracle_cfg: &SettlementOracleSection,
+    contracts: &SettlementContractsSection,
 ) -> Result<VotingOracle, RpcError> {
     let polymarket = PolymarketConfig {
         onchain: onchain.clone(),
@@ -52,5 +54,5 @@ pub fn build_voting_oracle_from_urls(
         base_url: gamma_base_url,
         ..GammaConfig::default()
     };
-    build_voting_oracle(&polymarket, &gamma, oracle_cfg)
+    build_voting_oracle(&polymarket, &gamma, oracle_cfg, contracts)
 }

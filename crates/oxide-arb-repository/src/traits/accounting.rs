@@ -4,6 +4,7 @@ use oxide_arb_models::{
     types::PeriodId,
 };
 
+#[async_trait::async_trait]
 pub trait AccountingRepository: Send + Sync {
     async fn get_current_daily(&self) -> Result<Option<AccountingPeriodInfo>, StorageError>;
     async fn get_current_weekly(&self) -> Result<Option<AccountingPeriodInfo>, StorageError>;

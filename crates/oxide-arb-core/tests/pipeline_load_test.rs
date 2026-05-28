@@ -48,6 +48,7 @@ async fn hundred_tokens_thousand_snapshots_monotonic_versions() {
     let book_store = Arc::new(BookStore::new(Arc::clone(&metrics)));
     let market_registry = Arc::new(MarketRegistry::new());
     let (coalescer_tx, _coalescer_rx) = flume::bounded(256);
+    let (settlement_tx, _settlement_rx) = flume::bounded(256);
     let shutdown = CancellationToken::new();
 
     let (source, inject) = MockEventSource::paired(8192);
@@ -58,6 +59,7 @@ async fn hundred_tokens_thousand_snapshots_monotonic_versions() {
         book_store: Arc::clone(&book_store),
         market_registry,
         coalescer_tx,
+        settlement_tx,
         metrics: Arc::clone(&metrics),
         backpressure,
         book_shard_count: 4,

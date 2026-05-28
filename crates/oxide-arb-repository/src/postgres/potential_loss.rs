@@ -104,6 +104,7 @@ async fn do_total_active_loss(db: &impl ConnectionTrait) -> Result<Usd, StorageE
     Ok(entries.iter().map(|e| e.max_loss_usd).sum())
 }
 
+#[async_trait::async_trait]
 impl PotentialLossRepository for PgPotentialLossRepository {
     async fn create(&self, entry: NewPotentialLoss) -> Result<PotentialLossInfo, StorageError> {
         do_create(&self.db, entry).await
@@ -133,6 +134,7 @@ impl PotentialLossRepository for PgPotentialLossRepository {
     }
 }
 
+#[async_trait::async_trait]
 impl PotentialLossRepository for PgPotentialLossRepositoryTxn<'_> {
     async fn create(&self, entry: NewPotentialLoss) -> Result<PotentialLossInfo, StorageError> {
         do_create(self.txn, entry).await

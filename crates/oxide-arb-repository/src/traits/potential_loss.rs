@@ -4,6 +4,7 @@ use oxide_arb_models::{
     types::{LedgerId, MarketId, Usd},
 };
 
+#[async_trait::async_trait]
 pub trait PotentialLossRepository: Send + Sync {
     async fn create(&self, entry: NewPotentialLoss) -> Result<PotentialLossInfo, StorageError>;
 

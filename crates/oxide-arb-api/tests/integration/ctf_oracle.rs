@@ -30,7 +30,10 @@
 //! baked-in default — placeholders rot when markets delist.
 
 use oxide_arb_api::oracle::{CtfOracleSource, OracleSource};
-use oxide_arb_models::{config::OnchainConfig, constants::CTF_ADDRESS, types::MarketId};
+use oxide_arb_models::{
+    config::{OnchainConfig, settlement::SettlementContractsSection},
+    types::MarketId,
+};
 use std::env::var;
 
 fn onchain_from_env_or_config() -> OnchainConfig {
@@ -69,7 +72,8 @@ async fn ctf_oracle_reads_resolved_payout() {
     );
 
     let onchain = onchain_from_env_or_config();
-    let source = CtfOracleSource::new(onchain.rpc_url, CTF_ADDRESS).expect("ctf source");
+    let contracts = SettlementContractsSection::default();
+    let source = CtfOracleSource::new(onchain.rpc_url, &contracts.ctf_address).expect("ctf source");
 
     let market_id = MarketId::new(&condition_id);
     let vote = source

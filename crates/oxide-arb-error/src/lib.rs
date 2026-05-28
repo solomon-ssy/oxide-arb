@@ -24,6 +24,7 @@ pub mod api;
 pub mod config;
 pub mod config_validation;
 pub mod market;
+pub mod redeem;
 pub mod reservation;
 pub mod rpc;
 pub mod signing;
@@ -81,6 +82,9 @@ pub enum OxideError {
     // ── Reservation ──────────────────────────────────────────────────────
     #[error(transparent)]
     Reservation(#[from] reservation::ReservationError),
+
+    #[error(transparent)]
+    Redeem(#[from] redeem::RedeemError),
 
     // ── General ─────────────────────────────────────────────────────────
     #[error("Internal error: {0}")]

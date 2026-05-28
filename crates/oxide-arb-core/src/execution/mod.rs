@@ -8,5 +8,6 @@ pub mod market_inflight;
 pub mod plan_builder;
 pub mod port;
 pub mod runner;
+pub mod settlement;
 pub mod tiered_strategy;
 pub mod validator;

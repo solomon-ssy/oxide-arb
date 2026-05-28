@@ -3,7 +3,6 @@ use super::orm::{
     EntityTrait, FromQueryResult, IntoActiveModel, QueryFilter, QueryOrder, QuerySelect, Set,
 };
 use crate::{batch, traits::TradeRepository};
-use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use num_traits::ToPrimitive;
 use oxide_arb_error::storage::StorageError;
@@ -187,7 +186,7 @@ async fn do_count_by_outcome(
     Ok(results.into_iter().map(|r| (r.outcome, r.count)).collect())
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 impl TradeRepository for PgTradeRepository {
     async fn create(&self, trade: NewTrade) -> Result<TradeInfo, StorageError> {
         do_create(&self.db, trade).await
@@ -237,7 +236,7 @@ impl TradeRepository for PgTradeRepository {
     }
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 impl TradeRepository for PgTradeRepositoryTxn<'_> {
     async fn create(&self, trade: NewTrade) -> Result<TradeInfo, StorageError> {
         do_create(self.txn, trade).await

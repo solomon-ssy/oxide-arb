@@ -8,10 +8,8 @@ use crate::{
         tiered_strategy::OrderStrategy, validator::Validator,
     },
     observability::{
-        alert_dispatcher::{Alert, AlertDispatcher, AlertSeverity},
-        backpressure::BackpressurePolicy,
-        execution_audit::ExecutionAuditWriter,
-        metrics_hub::MetricsHub,
+        alert_dispatcher::AlertDispatcher, backpressure::BackpressurePolicy,
+        execution_audit::ExecutionAuditWriter, metrics_hub::MetricsHub,
     },
     outbox::in_memory::SharedInMemoryEventStore,
     service::risk_metrics::{RiskMetricsRefreshService, RiskMetricsState},
@@ -26,18 +24,22 @@ use oxide_arb_models::{
             ReservationHandle, ResolvedOutcome,
         },
         opportunity::Opportunity,
+        position::NewPosition,
         risk::ProbabilityInput,
         scored_snapshot::ScoredOpportunitySnapshot,
         trade::NewTrade,
     },
     enums::{
-        common::{ExecutionMode, TradeOutcome},
+        common::{ExecutionMode, RedeemStatus, TradeOutcome},
         execution::ExecutionOutcome,
-        risk::{CircuitBreakerLevel, TradeAccountingPhase},
+        risk::TradeAccountingPhase,
     },
     types::{ExecutionId, TradeId, Usd},
 };
-use oxide_arb_repository::{postgres::PgTradeRepository, traits::TradeRepository};
+use oxide_arb_repository::{
+    postgres::PgTradeRepository,
+    traits::{PositionRepository, TradeRepository},
+};
 use oxide_arb_risk::{engine::RiskEngine, types::ReportMode};
 use rust_decimal_macros::dec;
 use std::{fmt::Display, sync::Arc, time::Instant};
@@ -68,11 +70,13 @@ pub struct PostTradeDrainDeps<R: TradeRepository + Send + Sync + 'static> {
     pub risk_metrics: Arc<CoreRiskMetrics>,
     pub fsm: Arc<ExecutionFSM>,
     pub trade_repo: Arc<R>,
+    pub position_repo: Arc<dyn PositionRepository>,
     pub audit_writer: Arc<ExecutionAuditWriter>,
     pub alerts: Arc<AlertDispatcher>,
     pub post_trade_spill: SharedInMemoryEventStore,
     pub metrics_state: Arc<RiskMetricsState>,
     pub metrics_refresh: Option<Arc<RiskMetricsRefreshService>>,
+    pub execution_mode: ExecutionMode,
 }
 
 pub struct ExecutionPipeline<R: TradeRepository + Send + Sync + 'static = PgTradeRepository> {
@@ -105,10 +109,11 @@ struct PostTradeJobCtx<'a, R> {
     metrics: &'a CoreRiskMetrics,
     fsm: &'a ExecutionFSM,
     trade_repo: &'a R,
+    position_repo: &'a dyn PositionRepository,
     audit_writer: &'a ExecutionAuditWriter,
-    alerts: &'a AlertDispatcher,
     metrics_state: &'a RiskMetricsState,
     metrics_refresh: Option<&'a RiskMetricsRefreshService>,
+    execution_mode: ExecutionMode,
 }
 
 struct PostTradeEnqueueInput<'a> {
@@ -158,10 +163,11 @@ impl<R: TradeRepository + Send + Sync + 'static> ExecutionPipeline<R> {
             metrics: deps.risk_metrics.as_ref(),
             fsm: deps.fsm.as_ref(),
             trade_repo: deps.trade_repo.as_ref(),
+            position_repo: deps.position_repo.as_ref(),
             audit_writer: deps.audit_writer.as_ref(),
-            alerts: deps.alerts.as_ref(),
             metrics_state: deps.metrics_state.as_ref(),
             metrics_refresh: deps.metrics_refresh.as_deref(),
+            execution_mode: deps.execution_mode,
         };
         loop {
             while let Some(job) = deps.post_trade_spill.try_pop_post_trade() {
@@ -512,7 +518,36 @@ async fn process_post_trade_job<R: TradeRepository>(
 
     ctx.audit_writer.write_terminal(&job, &resolved);
 
-    apply_post_trade_risk(ctx, &job, &resolved).await;
+    if !apply_post_trade_risk(ctx, &job, &resolved).await {
+        return;
+    }
+
+    if resolved.trade_outcome == TradeOutcome::Success {
+        let position = NewPosition {
+            trade_id: job.trade_id.clone(),
+            market_id: job.market_id.clone(),
+            token_id: job.token_id.clone(),
+            side: job.side,
+            shares: resolved.filled_shares,
+            avg_entry_price: resolved.avg_fill_price,
+            total_cost_usd: resolved.cost_usd,
+            total_fees_usd: resolved.fee_usd,
+            redeem_status: RedeemStatus::initial_for_mode(ctx.execution_mode),
+        };
+
+        if let Err(error) = ctx.position_repo.create(position).await {
+            tracing::error!(
+                %error,
+                trade_id = %job.trade_id,
+                market_id = %job.market_id,
+                "position creation failed after fill"
+            );
+            ctx.fsm.enter_emergency("position create failed");
+            return;
+        }
+
+        ctx.risk_engine.refresh_positions(ctx.metrics);
+    }
 
     ctx.metrics_state.mark_stale();
     if let Some(refresher) = ctx.metrics_refresh {
@@ -526,7 +561,7 @@ async fn apply_post_trade_risk<R: TradeRepository>(
     ctx: &PostTradeJobCtx<'_, R>,
     job: &PostTradeJob,
     resolved: &ResolvedOutcome,
-) {
+) -> bool {
     let fill_input = resolved.to_risk_input(job);
 
     if let Err(e) = ctx
@@ -536,39 +571,8 @@ async fn apply_post_trade_risk<R: TradeRepository>(
     {
         tracing::error!(error = %e, "post-trade fill accounting failed");
         ctx.fsm.enter_emergency("post-trade fill persist failed");
-        return;
+        return false;
     }
 
-    if resolved.trade_outcome == TradeOutcome::Success {
-        match ctx
-            .risk_engine
-            .on_trade_result(TradeAccountingPhase::Settlement, &fill_input, ctx.metrics)
-            .await
-        {
-            Ok(report) => {
-                if let Some(level) = report.breaker_tripped {
-                    ctx.fsm
-                        .enter_emergency("circuit breaker tripped after settlement");
-                    if level >= CircuitBreakerLevel::Daily {
-                        ctx.alerts
-                            .dispatch(Alert {
-                                severity: AlertSeverity::Emergency,
-                                title: format!("Circuit Breaker Tripped — {level:?}"),
-                                body: format!(
-                                    "Market: {}\nTrade: {}\nOpportunity: {}",
-                                    job.market_id, job.trade_id, job.opportunity_id
-                                ),
-                                timestamp: Utc::now(),
-                            })
-                            .await;
-                    }
-                }
-            }
-            Err(e) => {
-                tracing::error!(error = %e, "post-trade settlement accounting failed");
-                ctx.fsm
-                    .enter_emergency("post-trade settlement persist failed");
-            }
-        }
-    }
+    true
 }

@@ -38,7 +38,9 @@ impl<R: MarketRepository> CachedMarketRepository<R> {
     }
 }
 
+#[async_trait::async_trait]
 impl<R: MarketRepository> MarketRepository for CachedMarketRepository<R> {
+    #[inline]
     async fn find_by_id(&self, id: &MarketId) -> Result<Option<MarketInfo>, StorageError> {
         let key = CacheKey::MarketInfo {
             market_id: id.clone(),
@@ -53,6 +55,7 @@ impl<R: MarketRepository> MarketRepository for CachedMarketRepository<R> {
         Ok(result)
     }
 
+    #[inline]
     async fn find_active(&self) -> Result<Vec<MarketInfo>, StorageError> {
         let key = CacheKey::ActiveMarkets;
         if let Some(cached) = self.cache.get_json::<Vec<MarketInfo>>(&key).await? {
@@ -63,10 +66,12 @@ impl<R: MarketRepository> MarketRepository for CachedMarketRepository<R> {
         Ok(markets)
     }
 
+    #[inline]
     async fn find_by_event(&self, event_id: &str) -> Result<Vec<MarketInfo>, StorageError> {
         self.inner.find_by_event(event_id).await
     }
 
+    #[inline]
     async fn find_endgame_candidates(
         &self,
         before_deadline: DateTime<Utc>,
@@ -74,10 +79,12 @@ impl<R: MarketRepository> MarketRepository for CachedMarketRepository<R> {
         self.inner.find_endgame_candidates(before_deadline).await
     }
 
+    #[inline]
     async fn find_existing_ids(&self, ids: &[MarketId]) -> Result<HashSet<String>, StorageError> {
         self.inner.find_existing_ids(ids).await
     }
 
+    #[inline]
     async fn upsert(&self, dto: UpsertMarket) -> Result<MarketInfo, StorageError> {
         let market_id = dto.market_id.clone();
         let result = self.inner.upsert(dto).await?;
@@ -85,12 +92,14 @@ impl<R: MarketRepository> MarketRepository for CachedMarketRepository<R> {
         Ok(result)
     }
 
+    #[inline]
     async fn upsert_batch(&self, dtos: Vec<UpsertMarket>) -> Result<u64, StorageError> {
         let count = self.inner.upsert_batch(dtos).await?;
         let _ = self.cache.invalidate(&CacheKey::ActiveMarkets).await;
         Ok(count)
     }
 
+    #[inline]
     async fn update_status(
         &self,
         id: &MarketId,

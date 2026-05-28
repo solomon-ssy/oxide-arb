@@ -82,6 +82,7 @@ async fn do_delete(db: &impl ConnectionTrait, key: RuntimeConfigKey) -> Result<b
     Ok(result.rows_affected > 0)
 }
 
+#[async_trait::async_trait]
 impl RuntimeConfigRepository for PgRuntimeConfigRepository {
     async fn get(&self, key: RuntimeConfigKey) -> Result<Option<RuntimeConfigInfo>, StorageError> {
         do_get(&self.db, key).await
@@ -100,6 +101,7 @@ impl RuntimeConfigRepository for PgRuntimeConfigRepository {
     }
 }
 
+#[async_trait::async_trait]
 impl RuntimeConfigRepository for PgRuntimeConfigRepositoryTxn<'_> {
     async fn get(&self, key: RuntimeConfigKey) -> Result<Option<RuntimeConfigInfo>, StorageError> {
         do_get(self.txn, key).await

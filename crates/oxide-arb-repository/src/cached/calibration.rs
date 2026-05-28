@@ -45,7 +45,9 @@ impl<R: CalibrationRepository> CachedCalibrationRepository<R> {
     }
 }
 
+#[async_trait::async_trait]
 impl<R: CalibrationRepository> CalibrationRepository for CachedCalibrationRepository<R> {
+    #[inline]
     async fn get_bucket(
         &self,
         category: MarketCategory,
@@ -66,6 +68,7 @@ impl<R: CalibrationRepository> CalibrationRepository for CachedCalibrationReposi
         Ok(result)
     }
 
+    #[inline]
     async fn get_buckets_by_category(
         &self,
         category: MarketCategory,
@@ -73,6 +76,7 @@ impl<R: CalibrationRepository> CalibrationRepository for CachedCalibrationReposi
         self.inner.get_buckets_by_category(category).await
     }
 
+    #[inline]
     async fn get_all_buckets(&self) -> Result<Vec<CalibrationBucketInfo>, StorageError> {
         let key = CacheKey::AllCalibrationBuckets;
         if let Some(cached) = self
@@ -87,6 +91,7 @@ impl<R: CalibrationRepository> CalibrationRepository for CachedCalibrationReposi
         Ok(buckets)
     }
 
+    #[inline]
     async fn upsert(&self, dto: UpsertCalibration) -> Result<CalibrationBucketInfo, StorageError> {
         let result = self.inner.upsert(dto).await?;
         let key = Self::bucket_key(result.category, result.price_zone, result.duration_bucket);
@@ -95,6 +100,7 @@ impl<R: CalibrationRepository> CalibrationRepository for CachedCalibrationReposi
         Ok(result)
     }
 
+    #[inline]
     async fn create_outcome(
         &self,
         outcome: NewCalibrationOutcome,
@@ -102,10 +108,12 @@ impl<R: CalibrationRepository> CalibrationRepository for CachedCalibrationReposi
         self.inner.create_outcome(outcome).await
     }
 
+    #[inline]
     async fn get_unresolved_outcomes(&self) -> Result<Vec<CalibrationOutcomeInfo>, StorageError> {
         self.inner.get_unresolved_outcomes().await
     }
 
+    #[inline]
     async fn resolve_outcome(&self, outcome_id: i64, actual_yes: bool) -> Result<(), StorageError> {
         self.inner.resolve_outcome(outcome_id, actual_yes).await?;
         self.invalidate_all().await;

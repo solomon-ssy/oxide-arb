@@ -5,6 +5,7 @@ use oxide_arb_models::{
 };
 use std::collections::HashSet;
 
+#[async_trait::async_trait]
 pub trait EventRepository: Send + Sync {
     async fn find_by_id(&self, id: &EventId) -> Result<Option<EventInfo>, StorageError>;
     async fn find_active(&self) -> Result<Vec<EventInfo>, StorageError>;

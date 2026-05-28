@@ -50,6 +50,7 @@ async fn flood_does_not_halt_fsm() {
     let book_store = Arc::new(BookStore::new(Arc::clone(&metrics)));
     let market_registry = Arc::new(MarketRegistry::new());
     let (coalescer_tx, _coalescer_rx) = flume::bounded(4);
+    let (settlement_tx, _settlement_rx) = flume::bounded(4);
     let shutdown = CancellationToken::new();
 
     let (source, inject) = MockEventSource::paired(8192);
@@ -60,6 +61,7 @@ async fn flood_does_not_halt_fsm() {
         book_store: Arc::clone(&book_store),
         market_registry,
         coalescer_tx,
+        settlement_tx,
         metrics: Arc::clone(&metrics),
         backpressure: Arc::clone(&backpressure),
         book_shard_count: 1,
@@ -114,6 +116,7 @@ async fn success_path_does_not_coalesce() {
     let book_store = Arc::new(BookStore::new(Arc::clone(&metrics)));
     let market_registry = Arc::new(MarketRegistry::new());
     let (coalescer_tx, _coalescer_rx) = flume::bounded(64);
+    let (settlement_tx, _settlement_rx) = flume::bounded(64);
     let shutdown = CancellationToken::new();
 
     let (source, inject) = MockEventSource::paired(8192);
@@ -124,6 +127,7 @@ async fn success_path_does_not_coalesce() {
         book_store: Arc::clone(&book_store),
         market_registry,
         coalescer_tx,
+        settlement_tx,
         metrics: Arc::clone(&metrics),
         backpressure,
         book_shard_count: 1,

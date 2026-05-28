@@ -73,10 +73,17 @@ fn create_tables() -> Vec<TableCreateStatement> {
 fn create_indexes() -> Vec<IndexCreateStatement> {
     vec![
         Index::create()
-            .name("idx_resolution_market_unique")
+            .name("idx_resolution_market_created_at")
             .table(ResolutionEvent::Table)
             .col(ResolutionEvent::MarketId)
-            .unique()
+            .col(ResolutionEvent::CreatedAt)
+            .to_owned(),
+        Index::create()
+            .name("idx_resolution_market_source_created_at")
+            .table(ResolutionEvent::Table)
+            .col(ResolutionEvent::MarketId)
+            .col(ResolutionEvent::Source)
+            .col(ResolutionEvent::CreatedAt)
             .to_owned(),
     ]
 }

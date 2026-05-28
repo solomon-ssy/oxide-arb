@@ -6,12 +6,15 @@
 
 use crate::{
     enums::{
-        common::{PositionStatus, Side},
+        common::{
+            PositionStatus, RedeemStatus, SettlementAccountingStatus, SettlementTrigger, Side,
+        },
         risk::ReservationStatus,
     },
     types::{MarketId, PositionId, Price, ReservationId, Shares, TokenId, TradeId, Usd},
 };
 use chrono::{DateTime, Utc};
+use rust_decimal::Decimal;
 use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
 use serde::{Deserialize, Serialize};
 
@@ -22,6 +25,7 @@ use serde::{Deserialize, Serialize};
 #[sea_orm(entity = "crate::entities::position::Entity")]
 pub struct PositionInfo {
     pub position_id: PositionId,
+    pub trade_id: TradeId,
     pub market_id: MarketId,
     pub token_id: TokenId,
     pub side: Side,
@@ -35,12 +39,27 @@ pub struct PositionInfo {
     pub opened_at: DateTime<Utc>,
     pub closed_at: Option<DateTime<Utc>>,
     pub settled_at: Option<DateTime<Utc>>,
+    pub winning_token_id: Option<TokenId>,
+    pub settlement_payout_usd: Option<Usd>,
+    pub redeem_tx_hash: Option<String>,
+    pub redeem_status: RedeemStatus,
+    pub redeem_attempts: i32,
+    pub oracle_verdict: Option<serde_json::Value>,
+    pub settlement_trigger: Option<SettlementTrigger>,
+    pub settlement_accounting_status: SettlementAccountingStatus,
+    pub settlement_accounting_error: Option<String>,
+    pub settlement_accounted_at: Option<DateTime<Utc>>,
+    pub redeem_terminal_reason: Option<String>,
 }
 
 info_from_model!(PositionInfo, crate::entities::position::Model, {
-    position_id, market_id, token_id, side, shares, avg_entry_price,
+    position_id, trade_id, market_id, token_id, side, shares, avg_entry_price,
     total_cost_usd, total_fees_usd, unrealized_pnl, realized_pnl,
-    status, opened_at, closed_at, settled_at,
+    status, opened_at, closed_at, settled_at, winning_token_id,
+    settlement_payout_usd, redeem_tx_hash, redeem_status, redeem_attempts,
+    oracle_verdict, settlement_trigger,
+    settlement_accounting_status, settlement_accounting_error,
+    settlement_accounted_at, redeem_terminal_reason,
 });
 
 /// Capital reservation for a pending trade execution.
@@ -66,6 +85,7 @@ pub struct ExposureReservation {
 #[derive(Debug, Clone, DeriveIntoActiveModel)]
 #[sea_orm(active_model = "super::super::entities::position::ActiveModel")]
 pub struct NewPosition {
+    pub trade_id: TradeId,
     pub market_id: MarketId,
     pub token_id: TokenId,
     pub side: Side,
@@ -73,6 +93,7 @@ pub struct NewPosition {
     pub avg_entry_price: Price,
     pub total_cost_usd: Usd,
     pub total_fees_usd: Usd,
+    pub redeem_status: RedeemStatus,
 }
 
 /// Fields that can change when a position is updated (add/reduce/close/settle).
@@ -87,4 +108,37 @@ pub struct UpdatePosition {
     pub status: Option<PositionStatus>,
     pub closed_at: Option<DateTime<Utc>>,
     pub settled_at: Option<DateTime<Utc>>,
+    pub winning_token_id: Option<TokenId>,
+    pub settlement_payout_usd: Option<Usd>,
+    pub redeem_tx_hash: Option<String>,
+    pub redeem_status: Option<RedeemStatus>,
+    pub redeem_attempts: Option<i32>,
+    pub oracle_verdict: Option<serde_json::Value>,
+    pub settlement_trigger: Option<SettlementTrigger>,
+    pub settlement_accounting_status: Option<SettlementAccountingStatus>,
+    pub settlement_accounting_error: Option<String>,
+    pub settlement_accounted_at: Option<DateTime<Utc>>,
+    pub redeem_terminal_reason: Option<String>,
+}
+
+/// Atomic payload for closing the open-position lifecycle at market settlement.
+#[derive(Debug, Clone)]
+pub struct SettlePositionParams {
+    pub winning_token_id: TokenId,
+    pub settlement_payout_usd: Usd,
+    pub realized_pnl: Decimal,
+    pub redeem_tx_hash: Option<String>,
+    pub redeem_status: RedeemStatus,
+    pub settlement_trigger: SettlementTrigger,
+    pub oracle_verdict: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MarkRedeemedParams {
+    pub winning_token_id: TokenId,
+    pub settlement_payout_usd: Usd,
+    pub redeem_tx_hash: Option<String>,
+    pub redeem_status: RedeemStatus,
+    pub settlement_trigger: SettlementTrigger,
+    pub redeem_terminal_reason: Option<String>,
 }

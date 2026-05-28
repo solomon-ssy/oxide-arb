@@ -1,6 +1,6 @@
 //! Test persistence wiring built on repository mocks.
 
-use crate::mocks::MockTradeRepository;
+use crate::mocks::{MockPositionRepository, MockTradeRepository};
 use oxide_arb_core::{
     bridge::risk_metrics::CoreRiskMetrics,
     execution::{
@@ -16,7 +16,10 @@ use oxide_arb_core::{
     service::risk_metrics::{ApiHealthTracker, RiskMetricsState},
 };
 use oxide_arb_error::OxideError;
-use oxide_arb_models::{clickhouse::OpportunityAuditRow, domain::execution::PostTradeJob};
+use oxide_arb_models::{
+    clickhouse::OpportunityAuditRow, domain::execution::PostTradeJob, enums::common::ExecutionMode,
+};
+use oxide_arb_repository::traits::PositionRepository;
 use oxide_arb_risk::engine::RiskEngine;
 use std::{
     sync::{Arc, Mutex},
@@ -27,6 +30,7 @@ use tokio_util::sync::CancellationToken;
 
 pub struct TestPersistence {
     pub trade_repo: Arc<MockTradeRepository>,
+    pub position_repo: Arc<MockPositionRepository>,
     pub audit_writer: Arc<ExecutionAuditWriter>,
     pub alerts: Arc<AlertDispatcher>,
     pub audit_rows: Arc<Mutex<Vec<OpportunityAuditRow>>>,
@@ -59,6 +63,7 @@ pub fn test_persistence(shutdown: CancellationToken) -> TestPersistence {
 
     TestPersistence {
         trade_repo: Arc::new(MockTradeRepository::default()),
+        position_repo: Arc::new(MockPositionRepository::default()),
         audit_writer,
         alerts,
         audit_rows,
@@ -77,16 +82,19 @@ pub fn post_trade_drain_deps(
     let metrics_state = Arc::new(RiskMetricsState::new(Arc::new(ApiHealthTracker::new(
         Duration::from_secs(60),
     ))));
+    let position_repo: Arc<dyn PositionRepository> = persistence.position_repo.clone();
     PostTradeDrainDeps {
         risk_engine,
         risk_metrics,
         fsm,
         trade_repo: Arc::clone(&persistence.trade_repo),
+        position_repo,
         audit_writer: Arc::clone(&persistence.audit_writer),
         alerts: Arc::clone(&persistence.alerts),
         post_trade_spill,
         metrics_state,
         metrics_refresh: None,
+        execution_mode: ExecutionMode::Paper,
     }
 }
 

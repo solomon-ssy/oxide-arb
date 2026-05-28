@@ -12,6 +12,7 @@
 //! All types propagate errors through [`oxide_arb_error`]'s sub-error system.
 
 pub mod clob;
+pub mod ctf;
 pub mod fees;
 pub mod gamma;
 pub mod infra;

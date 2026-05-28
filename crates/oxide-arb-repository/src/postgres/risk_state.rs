@@ -131,6 +131,7 @@ async fn do_reset_weekly_window(db: &impl ConnectionTrait) -> Result<(), Storage
     Ok(())
 }
 
+#[async_trait::async_trait]
 impl RiskStateRepository for PgRiskStateRepository {
     async fn load(&self) -> Result<RiskStateInfo, StorageError> {
         do_load(&self.db).await
@@ -153,6 +154,7 @@ impl RiskStateRepository for PgRiskStateRepository {
     }
 }
 
+#[async_trait::async_trait]
 impl RiskStateRepository for PgRiskStateRepositoryTxn<'_> {
     async fn load(&self) -> Result<RiskStateInfo, StorageError> {
         do_load(self.txn).await

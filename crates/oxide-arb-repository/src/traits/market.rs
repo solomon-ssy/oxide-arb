@@ -6,6 +6,7 @@ use oxide_arb_models::{
 };
 use std::collections::HashSet;
 
+#[async_trait::async_trait]
 pub trait MarketRepository: Send + Sync {
     async fn find_by_id(&self, id: &MarketId) -> Result<Option<MarketInfo>, StorageError>;
     async fn find_active(&self) -> Result<Vec<MarketInfo>, StorageError>;

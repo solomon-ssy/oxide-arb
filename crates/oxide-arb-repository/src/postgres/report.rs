@@ -23,6 +23,7 @@ impl PgReportRepository {
     }
 }
 
+#[async_trait::async_trait]
 impl ReportRepository for PgReportRepository {
     async fn upsert(&self, report: UpsertReport) -> Result<(), StorageError> {
         ReportEntity::insert(report.into_active_model())

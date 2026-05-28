@@ -9,6 +9,7 @@ use oxide_arb_models::{
     },
 };
 
+#[async_trait::async_trait]
 pub trait CalibrationRepository: Send + Sync {
     async fn get_bucket(
         &self,

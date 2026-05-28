@@ -13,7 +13,7 @@ use crate::{
     sizing::{DrawdownGuard, MultiConstraintSizer},
     snapshot::RiskSnapshot,
     state_store,
-    traits::{RiskMetrics, RiskPersistence},
+    traits::{PotentialLossStore, RiskMetrics, RiskPersistence},
     types::{AtomicStateVersion, BreakerState},
 };
 use arc_swap::ArcSwap;
@@ -22,18 +22,21 @@ use oxide_arb_models::{
     config::RiskConfig,
     domain::{
         blacklist::{BlacklistInfo, UpsertBlacklistEntry},
-        potential_loss::PotentialLossInfo,
+        potential_loss::{NewPotentialLoss, PotentialLossInfo},
         risk::{
             NewEmergencySnapshot, NewReconciliationReport, NewRiskAuditEvent, RiskEngineState,
             RiskStateInfo, UpsertRiskEngineState,
         },
     },
-    enums::risk::{BreakerStateName, CircuitBreakerLevel},
-    types::{MarketId, Usd},
+    enums::{
+        common::LedgerStatus,
+        risk::{BreakerStateName, CircuitBreakerLevel},
+    },
+    types::{LedgerId, MarketId, Usd},
 };
 use parking_lot::RwLock;
 use rust_decimal_macros::dec;
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 pub struct RiskEngineBuilder {
     config: Option<RiskConfig>,
@@ -41,6 +44,7 @@ pub struct RiskEngineBuilder {
     persistence: Option<Arc<dyn RiskPersistence>>,
     blacklist_entries: Vec<BlacklistInfo>,
     potential_loss_entries: Vec<PotentialLossInfo>,
+    potential_loss_store: Option<Arc<dyn PotentialLossStore>>,
     initial_equity: Option<Usd>,
     clock: Option<Arc<dyn Clock>>,
     audit_sink: Option<Arc<dyn AuditSink>>,
@@ -55,6 +59,7 @@ impl RiskEngineBuilder {
             persistence: None,
             blacklist_entries: Vec::new(),
             potential_loss_entries: Vec::new(),
+            potential_loss_store: None,
             initial_equity: None,
             clock: None,
             audit_sink: None,
@@ -88,6 +93,12 @@ impl RiskEngineBuilder {
     #[must_use]
     pub fn potential_loss_entries(mut self, entries: Vec<PotentialLossInfo>) -> Self {
         self.potential_loss_entries = entries;
+        self
+    }
+
+    #[must_use]
+    pub fn potential_loss_store(mut self, store: Arc<dyn PotentialLossStore>) -> Self {
+        self.potential_loss_store = Some(store);
         self
     }
 
@@ -127,6 +138,9 @@ impl RiskEngineBuilder {
         let persistence = self
             .persistence
             .unwrap_or_else(|| Arc::new(NoopPersistence));
+        let potential_loss_store = self
+            .potential_loss_store
+            .unwrap_or_else(|| Arc::new(NoopPotentialLossStore));
 
         let (breaker, daily, weekly, hourly, position_tracker, potential_loss, drawdown_hwm) =
             if let Some(ref snap) = self.snapshot {
@@ -205,6 +219,7 @@ impl RiskEngineBuilder {
             reconciler,
             config,
             persistence,
+            potential_loss_store,
             audit_sink: self.audit_sink,
             state_version: AtomicStateVersion::new(0),
             clock,
@@ -330,5 +345,37 @@ impl RiskPersistence for NoopPersistence {
 
     async fn create_audit(&self, _audit: NewRiskAuditEvent) -> OxideResult<()> {
         Ok(())
+    }
+}
+
+struct NoopPotentialLossStore;
+
+#[async_trait::async_trait]
+impl PotentialLossStore for NoopPotentialLossStore {
+    async fn create(&self, entry: NewPotentialLoss) -> OxideResult<PotentialLossInfo> {
+        let now = chrono::Utc::now();
+        Ok(PotentialLossInfo {
+            ledger_id: entry.ledger_id,
+            market_id: entry.market_id,
+            token_id: entry.token_id,
+            shares: entry.shares,
+            entry_price: entry.entry_price,
+            max_loss_usd: entry.max_loss_usd,
+            status: LedgerStatus::Active,
+            created_at: now,
+            resolved_at: None,
+        })
+    }
+
+    async fn resolve(&self, _ledger_id: &LedgerId) -> OxideResult<()> {
+        Ok(())
+    }
+
+    async fn find_active(&self) -> OxideResult<Vec<PotentialLossInfo>> {
+        Ok(Vec::new())
+    }
+
+    async fn find_stale(&self, _max_age: Duration) -> OxideResult<Vec<PotentialLossInfo>> {
+        Ok(Vec::new())
     }
 }

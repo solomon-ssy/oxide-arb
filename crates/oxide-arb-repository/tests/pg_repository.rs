@@ -8,14 +8,14 @@ use oxide_arb_models::{
     domain::{
         NewAccountingPeriod, NewCalibrationOutcome, NewEmergencySnapshot, NewOutboxEventWithId,
         NewPosition, NewPotentialLoss, NewReconciliationReport, NewRiskAuditEvent, NewTrade,
-        UpdatePotentialLoss, UpdateTradeOutcome, UpsertBlacklistEntry, UpsertCalibration,
-        UpsertRiskEngineState, UpsertRuntimeConfig,
+        SettlePositionParams, UpdatePotentialLoss, UpdateTradeOutcome, UpsertBlacklistEntry,
+        UpsertCalibration, UpsertRiskEngineState, UpsertRuntimeConfig,
     },
     enums::{
         calibration::{DurationBucket, PriceZone},
         common::{
-            ExecutionMode, LedgerStatus, MarketCategory, PositionStatus, ReportType, Side,
-            TradeOutcome,
+            ExecutionMode, LedgerStatus, MarketCategory, PositionStatus, RedeemStatus, ReportType,
+            SettlementTrigger, Side, TradeOutcome,
         },
         outbox::{OutboxAggregateType, OutboxEventType},
         risk::{
@@ -333,9 +333,32 @@ async fn position_lifecycle() {
     )
     .await;
 
+    let trade_repo = PgTradeRepository::new(pool.connection().clone());
+    let trade_id = TradeId::generate();
+    trade_repo
+        .create(NewTrade {
+            trade_id: trade_id.clone(),
+            execution_id: ExecutionId::new("exec-pos-test"),
+            opportunity_id: OpportunityId::new_v7(),
+            market_id: MarketId::new("0xpos-market"),
+            event_id: EventId::new("evt-pos-test"),
+            token_id: TokenId::new("111"),
+            side: Side::Buy,
+            shares: Shares::from(Decimal::new(100, 0)),
+            price: Price::from(Decimal::new(95, 2)),
+            cost_usd: Usd::from(Decimal::new(95, 0)),
+            fee_usd: Usd::from(Decimal::ONE),
+            detected_edge_bps: None,
+            detected_profit_usd: None,
+            execution_mode: ExecutionMode::Paper,
+        })
+        .await
+        .expect("create trade");
+
     let position_repo = PgPositionRepository::new(pool.connection().clone());
     let opened = position_repo
         .create(NewPosition {
+            trade_id,
             market_id: MarketId::new("0xpos-market"),
             token_id: TokenId::new("111"),
             side: Side::Buy,
@@ -343,6 +366,7 @@ async fn position_lifecycle() {
             avg_entry_price: Price::from(Decimal::new(95, 2)),
             total_cost_usd: Usd::from(Decimal::new(95, 0)),
             total_fees_usd: Usd::from(Decimal::ONE),
+            redeem_status: RedeemStatus::NotRequired,
         })
         .await
         .expect("create position");
@@ -368,9 +392,32 @@ async fn position_settle() {
     let (pool, _container) = setup_pg().await;
     seed_market(&pool, "evt-settle", "0xsettle-mkt", MarketCategory::Crypto).await;
 
+    let trade_repo = PgTradeRepository::new(pool.connection().clone());
+    let trade_id = TradeId::generate();
+    trade_repo
+        .create(NewTrade {
+            trade_id: trade_id.clone(),
+            execution_id: ExecutionId::new("exec-settle"),
+            opportunity_id: OpportunityId::new_v7(),
+            market_id: MarketId::new("0xsettle-mkt"),
+            event_id: EventId::new("evt-settle"),
+            token_id: TokenId::new("333"),
+            side: Side::Sell,
+            shares: Shares::from(Decimal::new(50, 0)),
+            price: Price::from(Decimal::new(80, 2)),
+            cost_usd: Usd::from(Decimal::new(40, 0)),
+            fee_usd: Usd::ZERO,
+            detected_edge_bps: None,
+            detected_profit_usd: None,
+            execution_mode: ExecutionMode::Paper,
+        })
+        .await
+        .expect("create trade");
+
     let position_repo = PgPositionRepository::new(pool.connection().clone());
     let created = position_repo
         .create(NewPosition {
+            trade_id,
             market_id: MarketId::new("0xsettle-mkt"),
             token_id: TokenId::new("333"),
             side: Side::Sell,
@@ -378,11 +425,23 @@ async fn position_settle() {
             avg_entry_price: Price::from(Decimal::new(80, 2)),
             total_cost_usd: Usd::from(Decimal::new(40, 0)),
             total_fees_usd: Usd::ZERO,
+            redeem_status: RedeemStatus::NotRequired,
         })
         .await
         .expect("create position");
     position_repo
-        .settle_position(&created.position_id, Decimal::new(10, 0))
+        .settle_position(
+            &created.position_id,
+            SettlePositionParams {
+                winning_token_id: TokenId::new("333"),
+                settlement_payout_usd: Usd::from(Decimal::new(50, 0)),
+                realized_pnl: Decimal::new(10, 0),
+                redeem_tx_hash: None,
+                redeem_status: RedeemStatus::NotRequired,
+                settlement_trigger: SettlementTrigger::Manual,
+                oracle_verdict: None,
+            },
+        )
         .await
         .expect("settle position");
     assert!(position_repo.find_open().await.unwrap().is_empty());

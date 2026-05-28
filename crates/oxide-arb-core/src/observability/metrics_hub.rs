@@ -154,6 +154,16 @@ pub struct MetricsHub {
     // Metrics refresh
     pub metrics_refresh_failures: IntCounter,
 
+    // Settlement
+    pub settlement_requests_total: IntCounterVec,
+    pub settlement_positions_settled_total: IntCounter,
+    pub settlement_redeem_success_total: IntCounter,
+    pub settlement_redeem_failure_total: IntCounter,
+    pub settlement_oracle_mismatch_total: IntCounter,
+    pub settlement_channel_dropped_total: IntCounter,
+    pub settlement_no_open_positions_total: IntCounter,
+    pub settlement_duration_ms: Histogram,
+
     // Shutdown
     pub shutdown_stage_progress_remaining: IntGaugeVec,
     pub shutdown_stage_timeouts: IntCounterVec,
@@ -251,6 +261,17 @@ struct SystemMetrics {
     metrics_refresh_failures: IntCounter,
     shutdown_stage_progress_remaining: IntGaugeVec,
     shutdown_stage_timeouts: IntCounterVec,
+}
+
+struct SettlementMetrics {
+    requests_total: IntCounterVec,
+    positions_settled_total: IntCounter,
+    redeem_success_total: IntCounter,
+    redeem_failure_total: IntCounter,
+    oracle_mismatch_total: IntCounter,
+    channel_dropped_total: IntCounter,
+    no_open_positions_total: IntCounter,
+    duration_ms: Histogram,
 }
 
 fn register_pipeline_metrics(registry: &Registry) -> PipelineMetrics {
@@ -675,6 +696,53 @@ fn register_system_metrics(registry: &Registry) -> SystemMetrics {
     }
 }
 
+fn register_settlement_metrics(registry: &Registry) -> SettlementMetrics {
+    SettlementMetrics {
+        requests_total: register_counter_vec!(
+            registry,
+            "oxide_arb_settlement_requests_total",
+            "Settlement requests by source",
+            &["source"]
+        ),
+        positions_settled_total: register_counter!(
+            registry,
+            "oxide_arb_settlement_positions_settled_total",
+            "Positions settled"
+        ),
+        redeem_success_total: register_counter!(
+            registry,
+            "oxide_arb_settlement_redeem_success_total",
+            "CTF redeem successes"
+        ),
+        redeem_failure_total: register_counter!(
+            registry,
+            "oxide_arb_settlement_redeem_failure_total",
+            "CTF redeem failures"
+        ),
+        oracle_mismatch_total: register_counter!(
+            registry,
+            "oxide_arb_settlement_oracle_mismatch_total",
+            "Oracle audit mismatches after settlement"
+        ),
+        channel_dropped_total: register_counter!(
+            registry,
+            "oxide_arb_settlement_channel_dropped_total",
+            "Settlement requests dropped because channel send failed"
+        ),
+        no_open_positions_total: register_counter!(
+            registry,
+            "oxide_arb_settlement_no_open_positions_total",
+            "Settlement requests with no open positions"
+        ),
+        duration_ms: register_histogram!(
+            registry,
+            "oxide_arb_settlement_duration_milliseconds",
+            "Settlement processing duration in milliseconds",
+            vec![1.0, 5.0, 10.0, 50.0, 100.0, 500.0, 1000.0, 5000.0, 30000.0]
+        ),
+    }
+}
+
 impl MetricsHub {
     pub fn new() -> Self {
         let registry = Registry::new();
@@ -686,6 +754,7 @@ impl MetricsHub {
         let calibration = register_calibration_metrics(&registry);
         let cache = register_cache_metrics(&registry);
         let system = register_system_metrics(&registry);
+        let settlement = register_settlement_metrics(&registry);
 
         Self {
             registry,
@@ -757,6 +826,14 @@ impl MetricsHub {
             gamma_markets_total: system.gamma_markets_total,
             gamma_last_sync_success: system.gamma_last_sync_success,
             metrics_refresh_failures: system.metrics_refresh_failures,
+            settlement_requests_total: settlement.requests_total,
+            settlement_positions_settled_total: settlement.positions_settled_total,
+            settlement_redeem_success_total: settlement.redeem_success_total,
+            settlement_redeem_failure_total: settlement.redeem_failure_total,
+            settlement_oracle_mismatch_total: settlement.oracle_mismatch_total,
+            settlement_channel_dropped_total: settlement.channel_dropped_total,
+            settlement_no_open_positions_total: settlement.no_open_positions_total,
+            settlement_duration_ms: settlement.duration_ms,
             shutdown_stage_progress_remaining: system.shutdown_stage_progress_remaining,
             shutdown_stage_timeouts: system.shutdown_stage_timeouts,
         }

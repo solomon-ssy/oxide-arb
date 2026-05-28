@@ -154,6 +154,7 @@ impl PgAccountingRepository {
     }
 }
 
+#[async_trait::async_trait]
 impl AccountingRepository for PgAccountingRepository {
     async fn get_current_daily(&self) -> Result<Option<AccountingPeriodInfo>, StorageError> {
         get_current_daily_q(&self.db).await
@@ -197,6 +198,7 @@ pub struct PgAccountingRepositoryTxn<'a> {
     txn: &'a DatabaseTransaction,
 }
 
+#[async_trait::async_trait]
 impl AccountingRepository for PgAccountingRepositoryTxn<'_> {
     async fn get_current_daily(&self) -> Result<Option<AccountingPeriodInfo>, StorageError> {
         get_current_daily_q(self.txn).await

@@ -13,6 +13,7 @@ impl PgRiskAuditRepository {
     }
 }
 
+#[async_trait::async_trait]
 impl RiskAuditRepository for PgRiskAuditRepository {
     async fn create(&self, event: NewRiskAuditEvent) -> Result<(), StorageError> {
         Entity::insert(event.into_active_model())

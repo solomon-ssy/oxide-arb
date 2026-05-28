@@ -476,6 +476,184 @@ impl Display for PositionStatus {
     }
 }
 
+/// Lifecycle status of on-chain CTF redemption for a position.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    EnumIter,
+    DeriveActiveEnum,
+    IntoActiveValue,
+)]
+#[sea_orm(rs_type = "String", db_type = "Text")]
+#[serde(rename_all = "snake_case")]
+pub enum RedeemStatus {
+    #[sea_orm(string_value = "not_required")]
+    NotRequired,
+    #[sea_orm(string_value = "pending")]
+    Pending,
+    #[sea_orm(string_value = "completed")]
+    Completed,
+    #[sea_orm(string_value = "failed")]
+    Failed,
+}
+
+impl RedeemStatus {
+    #[must_use]
+    pub const fn initial_for_mode(mode: ExecutionMode) -> Self {
+        match mode {
+            ExecutionMode::DryRun | ExecutionMode::Paper => Self::NotRequired,
+            ExecutionMode::Live => Self::Pending,
+        }
+    }
+
+    #[must_use]
+    pub const fn settled_for_mode(mode: ExecutionMode) -> Self {
+        match mode {
+            ExecutionMode::DryRun | ExecutionMode::Paper => Self::NotRequired,
+            ExecutionMode::Live => Self::Completed,
+        }
+    }
+}
+
+impl Display for RedeemStatus {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotRequired => write!(f, "not_required"),
+            Self::Pending => write!(f, "pending"),
+            Self::Completed => write!(f, "completed"),
+            Self::Failed => write!(f, "failed"),
+        }
+    }
+}
+
+/// Configured on-chain redemption route.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RedeemRoute {
+    #[default]
+    Disabled,
+    StandardCtf,
+    NegRiskLegacyAdapter,
+    CtfCollateralAdapter,
+    NegRiskCollateralAdapter,
+    ProxySafe,
+}
+
+impl RedeemRoute {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::StandardCtf => "standard_ctf",
+            Self::NegRiskLegacyAdapter => "neg_risk_legacy_adapter",
+            Self::CtfCollateralAdapter => "ctf_collateral_adapter",
+            Self::NegRiskCollateralAdapter => "neg_risk_collateral_adapter",
+            Self::ProxySafe => "proxy_safe",
+        }
+    }
+}
+
+impl Display for RedeemRoute {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Settlement redeem output asset for adapter routes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RedeemOutputAsset {
+    #[default]
+    UsdcE,
+    Pusd,
+}
+
+/// Lifecycle status for post-redeem accounting persistence.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    EnumIter,
+    DeriveActiveEnum,
+    IntoActiveValue,
+)]
+#[sea_orm(rs_type = "String", db_type = "Text")]
+#[serde(rename_all = "snake_case")]
+pub enum SettlementAccountingStatus {
+    #[sea_orm(string_value = "pending")]
+    Pending,
+    #[sea_orm(string_value = "redeemed")]
+    Redeemed,
+    #[sea_orm(string_value = "accounted")]
+    Accounted,
+    #[sea_orm(string_value = "failed")]
+    Failed,
+}
+
+/// Source that triggered market settlement processing.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    EnumIter,
+    DeriveActiveEnum,
+    IntoActiveValue,
+)]
+#[sea_orm(rs_type = "String", db_type = "Text")]
+#[serde(rename_all = "snake_case")]
+pub enum SettlementTrigger {
+    #[sea_orm(string_value = "ws")]
+    Ws,
+    #[sea_orm(string_value = "periodic_retry")]
+    PeriodicRetry,
+    #[sea_orm(string_value = "manual")]
+    Manual,
+}
+
+impl SettlementTrigger {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ws => "ws",
+            Self::PeriodicRetry => "periodic_retry",
+            Self::Manual => "manual",
+        }
+    }
+}
+
+impl Display for SettlementTrigger {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl Display for SettlementAccountingStatus {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Pending => f.write_str("pending"),
+            Self::Redeemed => f.write_str("redeemed"),
+            Self::Accounted => f.write_str("accounted"),
+            Self::Failed => f.write_str("failed"),
+        }
+    }
+}
+
 /// Lifecycle status of a potential-loss ledger entry.
 #[derive(
     Debug,

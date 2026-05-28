@@ -8,11 +8,16 @@ use oxide_arb_models::{
         BookSnapshotRow, CalibrationSnapshotRow, OpportunityAuditRow, OpportunityDetectionRow,
         TickEventRow,
     },
-    domain::{NewTrade, TradeInfo, UpdateTradeOutcome},
-    enums::common::TradeOutcome,
-    types::{MarketId, TradeId},
+    domain::{
+        MarkRedeemedParams, NewPosition, NewTrade, PositionInfo, SettlePositionParams, TradeInfo,
+        UpdatePosition, UpdateTradeOutcome,
+    },
+    enums::common::{
+        PositionStatus, RedeemStatus, SettlementAccountingStatus, SettlementTrigger, TradeOutcome,
+    },
+    types::{MarketId, PositionId, TradeId, Usd},
 };
-use oxide_arb_repository::traits::{TimeseriesRepository, TradeRepository};
+use oxide_arb_repository::traits::{PositionRepository, TimeseriesRepository, TradeRepository};
 use std::{
     collections::HashMap,
     sync::{
@@ -38,6 +43,347 @@ impl MockTradeRepository {
 
     pub fn find(&self, trade_id: &TradeId) -> Option<TradeInfo> {
         self.trades.lock().unwrap().get(trade_id.as_str()).cloned()
+    }
+}
+
+#[derive(Default)]
+pub struct MockPositionRepository {
+    positions: Mutex<HashMap<String, PositionInfo>>,
+}
+
+#[async_trait]
+impl PositionRepository for MockPositionRepository {
+    async fn find_open(&self) -> Result<Vec<PositionInfo>, StorageError> {
+        Ok(self
+            .positions
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|position| position.status == PositionStatus::Open)
+            .cloned()
+            .collect())
+    }
+
+    async fn find_by_id(
+        &self,
+        position_id: &PositionId,
+    ) -> Result<Option<PositionInfo>, StorageError> {
+        Ok(self
+            .positions
+            .lock()
+            .unwrap()
+            .get(position_id.as_str())
+            .cloned())
+    }
+
+    async fn find_by_market(
+        &self,
+        market_id: &MarketId,
+    ) -> Result<Vec<PositionInfo>, StorageError> {
+        Ok(self
+            .positions
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|position| &position.market_id == market_id)
+            .cloned()
+            .collect())
+    }
+
+    async fn find_open_by_market(
+        &self,
+        market_id: &MarketId,
+    ) -> Result<Vec<PositionInfo>, StorageError> {
+        Ok(self
+            .find_by_market(market_id)
+            .await?
+            .into_iter()
+            .filter(|position| position.status == PositionStatus::Open)
+            .collect())
+    }
+
+    async fn find_by_trade_id(
+        &self,
+        trade_id: &TradeId,
+    ) -> Result<Option<PositionInfo>, StorageError> {
+        Ok(self
+            .positions
+            .lock()
+            .unwrap()
+            .values()
+            .find(|position| &position.trade_id == trade_id)
+            .cloned())
+    }
+
+    async fn find_redeem_retry_candidates(
+        &self,
+        max_attempts: u32,
+    ) -> Result<Vec<PositionInfo>, StorageError> {
+        let max_attempts = i32::try_from(max_attempts).unwrap_or(i32::MAX);
+        Ok(self
+            .positions
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|position| {
+                position.status == PositionStatus::Open
+                    && matches!(
+                        position.redeem_status,
+                        RedeemStatus::Pending | RedeemStatus::Failed
+                    )
+                    && position.redeem_attempts < max_attempts
+            })
+            .cloned()
+            .collect())
+    }
+
+    async fn find_open_for_resolved_markets(
+        &self,
+        limit: u64,
+    ) -> Result<Vec<PositionInfo>, StorageError> {
+        let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+        Ok(self.find_open().await?.into_iter().take(limit).collect())
+    }
+
+    async fn find_accounting_retry_candidates(
+        &self,
+        max_attempts: u32,
+    ) -> Result<Vec<PositionInfo>, StorageError> {
+        let max_attempts = i32::try_from(max_attempts).unwrap_or(i32::MAX);
+        Ok(self
+            .positions
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|position| {
+                position.status == PositionStatus::Open
+                    && position.settlement_accounting_status == SettlementAccountingStatus::Failed
+                    && position.redeem_attempts < max_attempts
+            })
+            .cloned()
+            .collect())
+    }
+
+    async fn create(&self, position: NewPosition) -> Result<PositionInfo, StorageError> {
+        let now = Utc::now();
+        let info = PositionInfo {
+            position_id: PositionId::generate(),
+            trade_id: position.trade_id,
+            market_id: position.market_id,
+            token_id: position.token_id,
+            side: position.side,
+            shares: position.shares,
+            avg_entry_price: position.avg_entry_price,
+            total_cost_usd: position.total_cost_usd,
+            total_fees_usd: position.total_fees_usd,
+            unrealized_pnl: Usd::ZERO,
+            realized_pnl: Usd::ZERO,
+            status: PositionStatus::Open,
+            opened_at: now,
+            closed_at: None,
+            settled_at: None,
+            winning_token_id: None,
+            settlement_payout_usd: None,
+            redeem_tx_hash: None,
+            redeem_status: position.redeem_status,
+            redeem_attempts: 0,
+            oracle_verdict: None,
+            settlement_trigger: None,
+            settlement_accounting_status: SettlementAccountingStatus::Pending,
+            settlement_accounting_error: None,
+            settlement_accounted_at: None,
+            redeem_terminal_reason: None,
+        };
+        self.positions
+            .lock()
+            .unwrap()
+            .insert(info.position_id.to_string(), info.clone());
+        Ok(info)
+    }
+
+    async fn update(
+        &self,
+        position_id: &PositionId,
+        _update: UpdatePosition,
+    ) -> Result<PositionInfo, StorageError> {
+        self.find_by_id(position_id)
+            .await?
+            .ok_or_else(|| StorageError::NotFound {
+                entity: "position",
+                id: position_id.to_string(),
+            })
+    }
+
+    async fn close_position(
+        &self,
+        position_id: &PositionId,
+        realized_pnl: rust_decimal::Decimal,
+    ) -> Result<(), StorageError> {
+        let mut positions = self.positions.lock().unwrap();
+        let position =
+            positions
+                .get_mut(position_id.as_str())
+                .ok_or_else(|| StorageError::NotFound {
+                    entity: "position",
+                    id: position_id.to_string(),
+                })?;
+        position.status = PositionStatus::Closed;
+        position.realized_pnl = Usd::new(realized_pnl);
+        position.closed_at = Some(Utc::now());
+        drop(positions);
+        Ok(())
+    }
+
+    async fn settle_position(
+        &self,
+        position_id: &PositionId,
+        params: SettlePositionParams,
+    ) -> Result<PositionInfo, StorageError> {
+        let mut positions = self.positions.lock().unwrap();
+        let position =
+            positions
+                .get_mut(position_id.as_str())
+                .ok_or_else(|| StorageError::NotFound {
+                    entity: "position",
+                    id: position_id.to_string(),
+                })?;
+        position.status = PositionStatus::Settled;
+        position.realized_pnl = Usd::new(params.realized_pnl);
+        position.winning_token_id = Some(params.winning_token_id);
+        position.settlement_payout_usd = Some(params.settlement_payout_usd);
+        position.redeem_tx_hash = params.redeem_tx_hash;
+        position.redeem_status = params.redeem_status;
+        position.settlement_trigger = Some(params.settlement_trigger);
+        position.oracle_verdict = params.oracle_verdict;
+        position.settlement_accounting_status = SettlementAccountingStatus::Accounted;
+        position.settlement_accounted_at = Some(Utc::now());
+        position.settled_at = Some(Utc::now());
+        let updated = position.clone();
+        drop(positions);
+        Ok(updated)
+    }
+
+    async fn mark_redeemed(
+        &self,
+        position_id: &PositionId,
+        params: MarkRedeemedParams,
+    ) -> Result<PositionInfo, StorageError> {
+        let mut positions = self.positions.lock().unwrap();
+        let position =
+            positions
+                .get_mut(position_id.as_str())
+                .ok_or_else(|| StorageError::NotFound {
+                    entity: "position",
+                    id: position_id.to_string(),
+                })?;
+        position.winning_token_id = Some(params.winning_token_id);
+        position.settlement_payout_usd = Some(params.settlement_payout_usd);
+        position.redeem_tx_hash = params.redeem_tx_hash;
+        position.redeem_status = params.redeem_status;
+        position.settlement_trigger = Some(params.settlement_trigger);
+        position.redeem_terminal_reason = params.redeem_terminal_reason;
+        position.settlement_accounting_status = SettlementAccountingStatus::Redeemed;
+        let updated = position.clone();
+        drop(positions);
+        Ok(updated)
+    }
+
+    async fn mark_accounted(
+        &self,
+        position_id: &PositionId,
+        accounted_at: chrono::DateTime<Utc>,
+    ) -> Result<PositionInfo, StorageError> {
+        let mut positions = self.positions.lock().unwrap();
+        let position =
+            positions
+                .get_mut(position_id.as_str())
+                .ok_or_else(|| StorageError::NotFound {
+                    entity: "position",
+                    id: position_id.to_string(),
+                })?;
+        position.status = PositionStatus::Settled;
+        position.settlement_accounting_status = SettlementAccountingStatus::Accounted;
+        position.settlement_accounting_error = None;
+        position.settlement_accounted_at = Some(accounted_at);
+        position.settled_at = Some(accounted_at);
+        let updated = position.clone();
+        drop(positions);
+        Ok(updated)
+    }
+
+    async fn mark_accounting_failed(
+        &self,
+        position_id: &PositionId,
+        error: String,
+    ) -> Result<PositionInfo, StorageError> {
+        let mut positions = self.positions.lock().unwrap();
+        let position =
+            positions
+                .get_mut(position_id.as_str())
+                .ok_or_else(|| StorageError::NotFound {
+                    entity: "position",
+                    id: position_id.to_string(),
+                })?;
+        position.settlement_accounting_status = SettlementAccountingStatus::Failed;
+        position.settlement_accounting_error = Some(error);
+        let updated = position.clone();
+        drop(positions);
+        Ok(updated)
+    }
+
+    async fn record_redeem_failure(
+        &self,
+        position_id: &PositionId,
+        attempts: u32,
+        winning_token_id: &oxide_arb_models::types::TokenId,
+        settlement_trigger: SettlementTrigger,
+    ) -> Result<PositionInfo, StorageError> {
+        let mut positions = self.positions.lock().unwrap();
+        let position =
+            positions
+                .get_mut(position_id.as_str())
+                .ok_or_else(|| StorageError::NotFound {
+                    entity: "position",
+                    id: position_id.to_string(),
+                })?;
+        position.redeem_status = RedeemStatus::Failed;
+        position.redeem_attempts = i32::try_from(attempts).unwrap_or(i32::MAX);
+        position.winning_token_id = Some(winning_token_id.clone());
+        position.settlement_trigger = Some(settlement_trigger);
+        let updated = position.clone();
+        drop(positions);
+        Ok(updated)
+    }
+
+    async fn patch_oracle_verdict(
+        &self,
+        position_id: &PositionId,
+        verdict: serde_json::Value,
+    ) -> Result<(), StorageError> {
+        let mut positions = self.positions.lock().unwrap();
+        let position =
+            positions
+                .get_mut(position_id.as_str())
+                .ok_or_else(|| StorageError::NotFound {
+                    entity: "position",
+                    id: position_id.to_string(),
+                })?;
+        position.oracle_verdict = Some(verdict);
+        drop(positions);
+        Ok(())
+    }
+
+    async fn total_exposure(&self) -> Result<Usd, StorageError> {
+        Ok(self
+            .find_open()
+            .await?
+            .iter()
+            .map(|position| position.total_cost_usd)
+            .sum())
+    }
+
+    async fn count_open(&self) -> Result<usize, StorageError> {
+        Ok(self.find_open().await?.len())
     }
 }
 

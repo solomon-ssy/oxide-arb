@@ -4,6 +4,7 @@ use sea_orm::DeriveIden;
 pub enum Position {
     Table,
     PositionId,
+    TradeId,
     MarketId,
     TokenId,
     Side,
@@ -17,4 +18,15 @@ pub enum Position {
     OpenedAt,
     ClosedAt,
     SettledAt,
+    WinningTokenId,
+    SettlementPayoutUsd,
+    RedeemTxHash,
+    RedeemStatus,
+    RedeemAttempts,
+    OracleVerdict,
+    SettlementTrigger,
+    SettlementAccountingStatus,
+    SettlementAccountingError,
+    SettlementAccountedAt,
+    RedeemTerminalReason,
 }

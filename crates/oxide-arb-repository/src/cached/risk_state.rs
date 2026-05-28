@@ -22,7 +22,9 @@ impl<R: RiskStateRepository> CachedRiskStateRepository<R> {
     }
 }
 
+#[async_trait::async_trait]
 impl<R: RiskStateRepository> RiskStateRepository for CachedRiskStateRepository<R> {
+    #[inline]
     async fn load(&self) -> Result<RiskStateInfo, StorageError> {
         let key = CacheKey::RiskState;
         if let Some(cached) = self.cache.get_json::<RiskStateInfo>(&key).await? {
@@ -33,24 +35,28 @@ impl<R: RiskStateRepository> RiskStateRepository for CachedRiskStateRepository<R
         Ok(state)
     }
 
+    #[inline]
     async fn upsert(&self, state: UpsertRiskEngineState) -> Result<(), StorageError> {
         self.inner.upsert(state).await?;
         self.invalidate_state().await;
         Ok(())
     }
 
+    #[inline]
     async fn reset_hourly_window(&self) -> Result<(), StorageError> {
         self.inner.reset_hourly_window().await?;
         self.invalidate_state().await;
         Ok(())
     }
 
+    #[inline]
     async fn reset_daily_window(&self) -> Result<(), StorageError> {
         self.inner.reset_daily_window().await?;
         self.invalidate_state().await;
         Ok(())
     }
 
+    #[inline]
     async fn reset_weekly_window(&self) -> Result<(), StorageError> {
         self.inner.reset_weekly_window().await?;
         self.invalidate_state().await;

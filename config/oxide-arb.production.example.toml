@@ -185,6 +185,39 @@ sweep_threshold_usd = "8000"
 address = "REPLACE_WITH_YOUR_WALLET_ADDRESS"
 balance_poll_interval_secs = 30
 
+# ── Settlement (Oracle + Lifecycle + Contracts + Redemption) ─────────────────
+
+[settlement.oracle]
+enabled = true
+voting_quorum = 2
+cross_check_delay_secs = 120
+uma_endpoint = "https://api.uma.xyz"
+uma_timeout_secs = 10
+
+[settlement.lifecycle]
+channel_capacity = 256
+retry_interval_secs = 60
+max_redeem_attempts = 5
+dedup_window_secs = 30
+settle_fail_closed = true
+
+[settlement.contracts]
+ctf_address = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
+usdc_e_address = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+standard_ctf_exchange = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E"
+neg_risk_ctf_exchange = "0xC5d563A36AE78145C45a50134d48A1215220f80a"
+# Verify before enabling neg-risk Live redeem:
+# neg_risk_adapter = "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296"
+# ctf_collateral_adapter = "0xAdA100Db00Ca00073811820692005400218FcE1f"
+# neg_risk_collateral_adapter = "0xadA2005600Dec949baf300f4C6120000bDB6eAab"
+
+[settlement.redeem]
+route = "disabled"
+output_asset = "usdc_e"
+gas_limit = 500000
+# holder_address = "0xREPLACE_WITH_HOLDER_ADDRESS"
+# proxy_safe_address = "0xREPLACE_WITH_SAFE_ADDRESS"
+
 # ── Notification ─────────────────────────────────────────────────────────────
 
 [notification.telegram]

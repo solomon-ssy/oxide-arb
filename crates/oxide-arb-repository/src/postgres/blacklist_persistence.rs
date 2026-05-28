@@ -76,6 +76,7 @@ async fn do_load_active(db: &impl ConnectionTrait) -> Result<Vec<BlacklistInfo>,
         .map(|v| v.into_iter().map(Into::into).collect())
 }
 
+#[async_trait::async_trait]
 impl BlacklistPersistenceRepository for PgBlacklistPersistenceRepository {
     async fn upsert(&self, entry: UpsertBlacklistEntry) -> Result<(), StorageError> {
         do_upsert(&self.db, entry).await
@@ -90,6 +91,7 @@ impl BlacklistPersistenceRepository for PgBlacklistPersistenceRepository {
     }
 }
 
+#[async_trait::async_trait]
 impl BlacklistPersistenceRepository for PgBlacklistPersistenceRepositoryTxn<'_> {
     async fn upsert(&self, entry: UpsertBlacklistEntry) -> Result<(), StorageError> {
         do_upsert(self.txn, entry).await

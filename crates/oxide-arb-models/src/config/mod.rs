@@ -22,7 +22,7 @@ mod notification;
 mod observability;
 mod polymarket;
 mod risk;
-mod settlement_oracle;
+pub mod settlement;
 mod treasury;
 pub mod validation;
 
@@ -38,7 +38,7 @@ pub use notification::*;
 pub use observability::*;
 pub use polymarket::*;
 pub use risk::*;
-pub use settlement_oracle::*;
+pub use settlement::*;
 pub use treasury::*;
 
 use crate::{
@@ -214,7 +214,7 @@ pub struct Inner {
     #[serde(default)]
     pub notification: NotificationConfig,
     #[serde(default)]
-    pub settlement_oracle: SettlementOracleConfig,
+    pub settlement: SettlementConfig,
 }
 
 impl Inner {

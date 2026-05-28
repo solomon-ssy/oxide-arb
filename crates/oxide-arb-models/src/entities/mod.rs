@@ -12,6 +12,7 @@ pub mod position;
 pub mod potential_loss_ledger;
 pub mod reconciliation_report;
 pub mod report;
+pub mod resolution_event;
 pub mod risk_audit_event;
 pub mod risk_state;
 pub mod runtime_config;

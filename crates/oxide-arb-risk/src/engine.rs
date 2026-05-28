@@ -23,7 +23,7 @@ use crate::{
         CircuitBreakerSnapshot, DailyAccountingSnapshot, DrawdownSnapshot,
         HourlyAccountingSnapshot, RiskSnapshot, WeeklyAccountingSnapshot,
     },
-    traits::{RiskMetrics, RiskMetricsSnapshot, RiskPersistence},
+    traits::{PotentialLossStore, RiskMetrics, RiskMetricsSnapshot, RiskPersistence},
     types::{
         AtomicStateVersion, BreakerState, ExecutionRiskEvent, PostTradeReport,
         ReconciliationReport, ReportMode, RiskDecision,
@@ -40,17 +40,18 @@ use oxide_arb_models::{
         BlacklistInfo,
         blacklist::UpsertBlacklistEntry,
         opportunity::Opportunity,
-        potential_loss::PotentialLossInfo,
+        potential_loss::{NewPotentialLoss, PotentialLossInfo},
         risk,
         risk::{
             NewEmergencySnapshot, NewRiskAuditEvent, ProbabilityInput, RiskEngineState,
             UpsertRiskEngineState,
         },
+        settlement::MarketSettlementInput,
         trade::PostTradeInput,
     },
     enums::{
         ReconciliationStatus,
-        common::LedgerStatus,
+        common::{LedgerStatus, TradeOutcome},
         risk::{
             BlacklistReason, BreakerStateName, CircuitBreakerLevel, TradeAccountingPhase,
             WindowType,
@@ -79,6 +80,7 @@ where
     pub(crate) reconciler: LedgerReconciler,
     pub(crate) config: RiskConfig,
     pub(crate) persistence: P,
+    pub(crate) potential_loss_store: Arc<dyn PotentialLossStore>,
     pub(crate) audit_sink: Option<Arc<dyn AuditSink>>,
     pub(crate) state_version: AtomicStateVersion,
     pub(crate) clock: Arc<dyn Clock>,
@@ -226,6 +228,13 @@ where
         trade: &PostTradeInput,
         metrics: &dyn RiskMetrics,
     ) -> OxideResult<PostTradeReport> {
+        match phase {
+            TradeAccountingPhase::Fill => self.persist_fill_potential_loss(trade).await?,
+            TradeAccountingPhase::Settlement => {
+                self.persist_settlement_potential_loss(trade).await?;
+            }
+        }
+
         let previous_breaker_state = self.circuit_breaker.read().state().to_name();
         let (report, audit_event, auto_bl_entry) = self.apply_trade_result(phase, trade, metrics);
 
@@ -264,6 +273,63 @@ where
         }
 
         Ok(report)
+    }
+
+    pub async fn on_market_settled(
+        &self,
+        input: &MarketSettlementInput,
+        metrics: &dyn RiskMetrics,
+    ) -> OxideResult<PostTradeReport> {
+        let trade = PostTradeInput {
+            trade_id: input.trade_id.clone(),
+            market_id: input.market_id.clone(),
+            token_id: input.token_id.clone(),
+            outcome: TradeOutcome::Success,
+            cost_usd: input.cost_usd,
+            fee_usd: input.fee_usd,
+            net_profit_usd: Some(input.realized_pnl_usd),
+            shares: input.shares,
+            entry_price: input.entry_price,
+        };
+
+        self.on_trade_result(TradeAccountingPhase::Settlement, &trade, metrics)
+            .await
+    }
+
+    async fn persist_fill_potential_loss(&self, trade: &PostTradeInput) -> OxideResult<()> {
+        if !trade.is_success() {
+            return Ok(());
+        }
+
+        let entry = NewPotentialLoss {
+            ledger_id: LedgerId::new(trade.trade_id.as_str()),
+            market_id: trade.market_id.clone(),
+            token_id: trade.token_id.clone(),
+            shares: trade.shares,
+            entry_price: trade.entry_price,
+            max_loss_usd: trade.cost_usd + trade.fee_usd,
+        };
+
+        if let Err(e) = self.potential_loss_store.create(entry).await {
+            self.halt_internal(format!("potential loss create failed: {e}"));
+            return Err(e);
+        }
+
+        Ok(())
+    }
+
+    async fn persist_settlement_potential_loss(&self, trade: &PostTradeInput) -> OxideResult<()> {
+        if !trade.is_success() {
+            return Ok(());
+        }
+
+        let ledger_id = LedgerId::new(trade.trade_id.as_str());
+        if let Err(e) = self.potential_loss_store.resolve(&ledger_id).await {
+            self.halt_internal(format!("potential loss resolve failed: {e}"));
+            return Err(e);
+        }
+
+        Ok(())
     }
 
     fn apply_trade_result(

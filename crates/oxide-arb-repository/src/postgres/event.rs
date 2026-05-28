@@ -126,6 +126,7 @@ async fn do_upsert_batch(
     Ok(count)
 }
 
+#[async_trait::async_trait]
 impl EventRepository for PgEventRepository {
     async fn find_by_id(&self, id: &EventId) -> Result<Option<EventInfo>, StorageError> {
         do_find_by_id(&self.db, id).await
@@ -148,6 +149,7 @@ impl EventRepository for PgEventRepository {
     }
 }
 
+#[async_trait::async_trait]
 impl EventRepository for PgEventRepositoryTxn<'_> {
     async fn find_by_id(&self, id: &EventId) -> Result<Option<EventInfo>, StorageError> {
         do_find_by_id(self.txn, id).await

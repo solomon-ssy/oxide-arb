@@ -29,7 +29,9 @@ impl<R: RuntimeConfigRepository> CachedRuntimeConfigRepository<R> {
     }
 }
 
+#[async_trait::async_trait]
 impl<R: RuntimeConfigRepository> RuntimeConfigRepository for CachedRuntimeConfigRepository<R> {
+    #[inline]
     async fn get(&self, key: RuntimeConfigKey) -> Result<Option<RuntimeConfigInfo>, StorageError> {
         let cache_key = CacheKey::RuntimeConfig { key };
         if let Some(cached) = self.cache.get_json::<RuntimeConfigInfo>(&cache_key).await? {
@@ -42,6 +44,7 @@ impl<R: RuntimeConfigRepository> RuntimeConfigRepository for CachedRuntimeConfig
         Ok(result)
     }
 
+    #[inline]
     async fn upsert(&self, dto: UpsertRuntimeConfig) -> Result<RuntimeConfigInfo, StorageError> {
         let key = dto.key;
         let result = self.inner.upsert(dto).await?;
@@ -49,6 +52,7 @@ impl<R: RuntimeConfigRepository> RuntimeConfigRepository for CachedRuntimeConfig
         Ok(result)
     }
 
+    #[inline]
     async fn get_all(&self) -> Result<Vec<RuntimeConfigInfo>, StorageError> {
         let key = CacheKey::AllRuntimeConfig;
         if let Some(cached) = self.cache.get_json::<Vec<RuntimeConfigInfo>>(&key).await? {
@@ -59,6 +63,7 @@ impl<R: RuntimeConfigRepository> RuntimeConfigRepository for CachedRuntimeConfig
         Ok(values)
     }
 
+    #[inline]
     async fn delete(&self, key: RuntimeConfigKey) -> Result<bool, StorageError> {
         let deleted = self.inner.delete(key).await?;
         self.invalidate(key).await;

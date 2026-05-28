@@ -23,6 +23,8 @@ pub enum TaskId {
 
     // ── Reconciliation ────────────────────────────────────────────────
     PotentialLossEscalation,
+    MarketSettlement,
+    MarketSettlementRetry,
 
     // ── Health ────────────────────────────────────────────────────────
     HealthChecker,
@@ -64,7 +66,9 @@ impl TaskId {
             Self::DataPipeline => TaskKind::WsIngress,
             Self::GammaSync | Self::CalibrationUpdater => TaskKind::CatalogSync,
             Self::Coalescer => TaskKind::CacheWorker,
-            Self::PotentialLossEscalation => TaskKind::LedgerReconciliation,
+            Self::PotentialLossEscalation
+            | Self::MarketSettlement
+            | Self::MarketSettlementRetry => TaskKind::LedgerReconciliation,
             Self::HealthChecker | Self::RiskMetricsRefresh => TaskKind::HealthMonitor,
             Self::Scanner | Self::Funnel => TaskKind::Detection,
             Self::ExecutionRunner { .. } | Self::ExecutionOutcomeDrain => TaskKind::Execution,

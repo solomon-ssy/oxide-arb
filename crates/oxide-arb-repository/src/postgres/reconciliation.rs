@@ -13,6 +13,7 @@ impl PgReconciliationRepository {
     }
 }
 
+#[async_trait::async_trait]
 impl ReconciliationRepository for PgReconciliationRepository {
     async fn create(&self, report: NewReconciliationReport) -> Result<(), StorageError> {
         Entity::insert(report.into_active_model())

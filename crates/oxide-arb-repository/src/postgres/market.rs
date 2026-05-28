@@ -187,6 +187,7 @@ async fn do_update_status(
     Ok(())
 }
 
+#[async_trait::async_trait]
 impl MarketRepository for PgMarketRepository {
     async fn find_by_id(&self, id: &MarketId) -> Result<Option<MarketInfo>, StorageError> {
         do_find_by_id(&self.db, id).await
@@ -229,6 +230,7 @@ impl MarketRepository for PgMarketRepository {
     }
 }
 
+#[async_trait::async_trait]
 impl MarketRepository for PgMarketRepositoryTxn<'_> {
     async fn find_by_id(&self, id: &MarketId) -> Result<Option<MarketInfo>, StorageError> {
         do_find_by_id(self.txn, id).await

@@ -49,11 +49,12 @@ use oxide_arb_models::{
         TokenId, Usd,
     },
 };
+use oxide_arb_repository::traits::PositionRepository;
 use oxide_arb_risk::{builder::RiskEngineBuilder, clock::utc_clock};
-use oxide_arb_test_support::mocks::MockTradeRepository;
 use oxide_arb_test_support::{
     book::seed_book_store,
     fixtures::{minimal_post_trade_job, sample_scored},
+    mocks::MockTradeRepository,
     persistence::{TestPersistence, spawn_test_outcome_drain, test_persistence},
     pipeline::build_pipeline,
     risk::{TestRiskMetrics, test_risk_config},
@@ -339,6 +340,7 @@ async fn post_trade_drain_updates_trade_and_writes_ch_audit() {
         let risk_metrics = Arc::clone(&harness.risk_metrics);
         let fsm = Arc::clone(&harness.fsm);
         let trade_repo = Arc::clone(&harness.persistence.trade_repo);
+        let position_repo: Arc<dyn PositionRepository> = harness.persistence.position_repo.clone();
         let audit_writer = Arc::clone(&harness.persistence.audit_writer);
         let alerts = Arc::clone(&harness.persistence.alerts);
         let spill = harness.pipeline.post_trade_spill().clone();
@@ -355,11 +357,13 @@ async fn post_trade_drain_updates_trade_and_writes_ch_audit() {
                     risk_metrics,
                     fsm,
                     trade_repo,
+                    position_repo,
                     audit_writer,
                     alerts,
                     post_trade_spill: spill,
                     metrics_state,
                     metrics_refresh: None,
+                    execution_mode: ExecutionMode::Paper,
                 },
                 shutdown,
             )

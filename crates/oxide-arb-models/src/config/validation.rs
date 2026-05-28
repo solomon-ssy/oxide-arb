@@ -17,7 +17,10 @@
 //! | partial (1-3 set)  | warn     | fatal   | fatal  |
 
 use super::Inner;
-use crate::enums::common::ExecutionMode;
+use crate::{
+    constants::POLYGON_CHAIN_ID,
+    enums::common::{ExecutionMode, RedeemRoute},
+};
 use oxide_arb_error::config_validation::{
     ConfigValidationError, ConfigValidationReport, ConfigWarning,
 };
@@ -125,6 +128,167 @@ fn validate_risk_cross_constraints(inner: &Inner, report: &mut ConfigValidationR
     }
 }
 
+fn is_hex_address(value: &str) -> bool {
+    value
+        .strip_prefix("0x")
+        .is_some_and(|hex| hex.len() == 40 && hex.chars().all(|c| c.is_ascii_hexdigit()))
+}
+
+fn validate_address(field: &'static str, value: &str, report: &mut ConfigValidationReport) {
+    if !is_hex_address(value.trim()) {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field,
+            detail: "must be a 20-byte hex address with 0x prefix".into(),
+        });
+    }
+}
+
+fn validate_settlement_common(inner: &Inner, report: &mut ConfigValidationReport) {
+    let lifecycle = &inner.settlement.lifecycle;
+    let contracts = &inner.settlement.contracts;
+    let redeem = &inner.settlement.redeem;
+
+    if lifecycle.channel_capacity < 16 {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "settlement.lifecycle.channel_capacity",
+            detail: "must be >= 16".into(),
+        });
+    }
+
+    if lifecycle.retry_interval_secs < 10 {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "settlement.lifecycle.retry_interval_secs",
+            detail: "must be >= 10".into(),
+        });
+    }
+
+    if lifecycle.max_redeem_attempts == 0 {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "settlement.lifecycle.max_redeem_attempts",
+            detail: "must be >= 1".into(),
+        });
+    }
+
+    if redeem.gas_limit == 0 {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "settlement.redeem.gas_limit",
+            detail: "must be > 0".into(),
+        });
+    }
+
+    if lifecycle.dedup_window_secs == 0 {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "settlement.lifecycle.dedup_window_secs",
+            detail: "must be > 0".into(),
+        });
+    }
+
+    validate_address(
+        "settlement.contracts.ctf_address",
+        &contracts.ctf_address,
+        report,
+    );
+    validate_address(
+        "settlement.contracts.usdc_e_address",
+        &contracts.usdc_e_address,
+        report,
+    );
+    validate_address(
+        "settlement.contracts.standard_ctf_exchange",
+        &contracts.standard_ctf_exchange,
+        report,
+    );
+    validate_address(
+        "settlement.contracts.neg_risk_ctf_exchange",
+        &contracts.neg_risk_ctf_exchange,
+        report,
+    );
+
+    for (field, value) in [
+        (
+            "settlement.contracts.neg_risk_adapter",
+            contracts.neg_risk_adapter.as_deref(),
+        ),
+        (
+            "settlement.contracts.ctf_collateral_adapter",
+            contracts.ctf_collateral_adapter.as_deref(),
+        ),
+        (
+            "settlement.contracts.neg_risk_collateral_adapter",
+            contracts.neg_risk_collateral_adapter.as_deref(),
+        ),
+        (
+            "settlement.redeem.holder_address",
+            redeem.holder_address.as_deref(),
+        ),
+        (
+            "settlement.redeem.proxy_safe_address",
+            redeem.proxy_safe_address.as_deref(),
+        ),
+    ] {
+        if let Some(address) = value {
+            validate_address(field, address, report);
+        }
+    }
+}
+
+fn validate_settlement_mode(
+    inner: &Inner,
+    mode: ExecutionMode,
+    report: &mut ConfigValidationReport,
+) {
+    if inner.polymarket.chain_id != POLYGON_CHAIN_ID {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "polymarket.chain_id",
+            detail: format!("must be Polygon chain id {POLYGON_CHAIN_ID}"),
+        });
+    }
+
+    if mode != ExecutionMode::Live {
+        return;
+    }
+
+    let contracts = &inner.settlement.contracts;
+    let redeem = &inner.settlement.redeem;
+
+    if redeem.route == RedeemRoute::Disabled {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "settlement.redeem.route",
+            detail: "Live mode requires an explicit redeem route".into(),
+        });
+    }
+
+    match redeem.route {
+        RedeemRoute::NegRiskLegacyAdapter if contracts.neg_risk_adapter.is_none() => {
+            report.errors.push(ConfigValidationError::InvalidValue {
+                field: "settlement.contracts.neg_risk_adapter",
+                detail: "required when settlement.redeem.route=neg_risk_legacy_adapter".into(),
+            });
+        }
+        RedeemRoute::CtfCollateralAdapter if contracts.ctf_collateral_adapter.is_none() => {
+            report.errors.push(ConfigValidationError::InvalidValue {
+                field: "settlement.contracts.ctf_collateral_adapter",
+                detail: "required when settlement.redeem.route=ctf_collateral_adapter".into(),
+            });
+        }
+        RedeemRoute::NegRiskCollateralAdapter
+            if contracts.neg_risk_collateral_adapter.is_none() =>
+        {
+            report.errors.push(ConfigValidationError::InvalidValue {
+                field: "settlement.contracts.neg_risk_collateral_adapter",
+                detail: "required when settlement.redeem.route=neg_risk_collateral_adapter".into(),
+            });
+        }
+        RedeemRoute::ProxySafe if redeem.proxy_safe_address.is_none() => {
+            report.errors.push(ConfigValidationError::InvalidValue {
+                field: "settlement.redeem.proxy_safe_address",
+                detail: "required when settlement.redeem.route=proxy_safe".into(),
+            });
+        }
+        _ => {}
+    }
+}
+
 /// Mode-agnostic validation: checks mathematical invariants that must hold
 /// regardless of execution mode.
 pub fn validate_settings_common(inner: &Inner) -> ConfigValidationReport {
@@ -187,6 +351,7 @@ pub fn validate_settings_common(inner: &Inner) -> ConfigValidationReport {
     // The old validation compared against the deleted max_single_trade_usd.
 
     validate_risk_cross_constraints(inner, &mut report);
+    validate_settlement_common(inner, &mut report);
 
     if inner.polymarket.fees.exponent <= Decimal::ZERO {
         report.errors.push(ConfigValidationError::InvalidValue {
@@ -293,6 +458,8 @@ pub fn validate_settings_mode(inner: &Inner, mode: ExecutionMode) -> ConfigValid
             }
         }
     }
+
+    validate_settlement_mode(inner, mode, &mut report);
 
     report
 }

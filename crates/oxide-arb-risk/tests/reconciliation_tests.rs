@@ -6,10 +6,10 @@
 use oxide_arb_models::{
     domain::position::PositionInfo,
     enums::{
-        common::{PositionStatus, Side},
+        common::{PositionStatus, RedeemStatus, SettlementAccountingStatus, Side},
         risk::ReconciliationStatus,
     },
-    types::{MarketId, PositionId, Price, Shares, TokenId, Usd},
+    types::{MarketId, PositionId, Price, Shares, TokenId, TradeId, Usd},
 };
 use oxide_arb_risk::{
     reconciliation::LedgerReconciler,
@@ -193,6 +193,7 @@ async fn reconciliation_detects_internal_markets_not_present_externally() {
         market_exposures: vec![(market.clone(), Usd::new(dec!(50)))],
         positions: vec![PositionInfo {
             position_id: PositionId::generate(),
+            trade_id: TradeId::generate(),
             market_id: market,
             token_id: TokenId::new("tok"),
             side: Side::Buy,
@@ -206,6 +207,17 @@ async fn reconciliation_detects_internal_markets_not_present_externally() {
             opened_at: chrono::Utc::now(),
             closed_at: None,
             settled_at: None,
+            winning_token_id: None,
+            settlement_payout_usd: None,
+            redeem_tx_hash: None,
+            redeem_status: RedeemStatus::NotRequired,
+            redeem_attempts: 0,
+            oracle_verdict: None,
+            settlement_trigger: None,
+            settlement_accounting_status: SettlementAccountingStatus::Pending,
+            settlement_accounting_error: None,
+            settlement_accounted_at: None,
+            redeem_terminal_reason: None,
         }],
         ..Default::default()
     };

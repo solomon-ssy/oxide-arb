@@ -29,6 +29,9 @@ use crate::{
         heartbeat::HeartbeatTask,
         market_inflight::MarketInFlightRegistry,
         runner::ExecutionRunner,
+        settlement::{
+            dedup::SettlementDedup, service::MarketSettlementService, task::MarketSettlementTask,
+        },
     },
     exposure::in_memory::InMemoryExposureReservation,
     infra::{
@@ -53,13 +56,13 @@ use oxide_arb_algorithm::calibration::{CalibrationUpdater, ResolutionCalibrator}
 use oxide_arb_api::{clob::ClobClient, ws::ClobWsManager};
 use oxide_arb_models::{
     config::Settings,
-    domain::execution::PostTradeJob,
+    domain::{execution::PostTradeJob, settlement::MarketSettlementRequest},
     enums::common::ExecutionMode,
     types::{MarketId, MicroScore, TokenId},
 };
 use oxide_arb_repository::{
     clickhouse::ChTimeseriesRepository,
-    postgres::{PgRiskAuditRepository, PgTradeRepository},
+    postgres::{PgPositionRepository, PgRiskAuditRepository, PgTradeRepository},
 };
 use oxide_arb_risk::{audit::RiskAuditEvent, engine::RiskEngine};
 use oxide_arb_storage::{cache::TieredCache, clickhouse::ClickHousePool, postgres::PostgresPool};
@@ -77,6 +80,7 @@ pub struct InfraBundle {
     pub risk_decision_audit: Arc<RiskDecisionAuditBuffer>,
     pub risk_decision_audit_rx: Mutex<Option<Receiver<RiskAuditEvent>>>,
     pub trade_repo: Arc<PgTradeRepository>,
+    pub position_repo: Arc<PgPositionRepository>,
     pub timeseries: Arc<ChTimeseriesRepository>,
     pub audit_writer: Arc<ExecutionAuditWriter>,
 }
@@ -139,6 +143,13 @@ pub struct TradingBundle {
     pub ws_manager: Arc<ClobWsManager>,
 }
 
+/// Market settlement subsystem.
+pub struct SettlementBundle {
+    pub service: Arc<MarketSettlementService>,
+    pub dedup: Arc<SettlementDedup>,
+    settlement_rx: Mutex<Option<Receiver<MarketSettlementRequest>>>,
+}
+
 /// One-shot channel receivers consumed when registering runtime tasks.
 pub struct RuntimeChannels {
     pub coalescer_token_rx: Mutex<Option<flume::Receiver<TokenId>>>,
@@ -156,6 +167,7 @@ pub struct AppContext {
     pub data: DataBundle,
     pub risk: RiskBundle,
     pub trading: TradingBundle,
+    pub settlement: SettlementBundle,
     pub runtime: RuntimeChannels,
     pub shutdown: CancellationToken,
     pub pending_tasks: PendingTaskQueue,
@@ -179,6 +191,25 @@ impl AppContext {
             });
     }
 
+    /// Queue market settlement worker consuming resolved-market events.
+    pub fn queue_market_settlement_task(&self) {
+        let Some(rx) = self.settlement.settlement_rx.lock().take() else {
+            tracing::warn!("market settlement task already registered or rx unavailable");
+            return;
+        };
+        let service = Arc::clone(&self.settlement.service);
+        let dedup = Arc::clone(&self.settlement.dedup);
+        let metrics = Arc::clone(&self.infra.metrics);
+
+        self.pending_tasks
+            .push(TaskId::MarketSettlement, move |shutdown| async move {
+                let task = MarketSettlementTask::new(rx, service, dedup, metrics, shutdown);
+                if let Err(error) = task.run().await {
+                    tracing::error!(%error, "market settlement task exited with error");
+                }
+            });
+    }
+
     /// Queue post-trade accounting drain (consumes `trading.execution.post_trade_rx` once).
     pub fn queue_execution_outcome_drain(&self) {
         let Some(exec) = &self.trading.execution else {
@@ -194,11 +225,13 @@ impl AppContext {
         let risk_metrics = Arc::clone(&self.risk.metrics);
         let fsm = Arc::clone(&self.trading.fsm);
         let trade_repo = Arc::clone(&self.infra.trade_repo);
+        let position_repo = Arc::clone(&self.infra.position_repo);
         let audit_writer = Arc::clone(&self.infra.audit_writer);
         let alerts = Arc::clone(&self.infra.alerts);
         let post_trade_spill = Arc::clone(exec.pipeline.post_trade_spill());
         let metrics_state = Arc::clone(&self.risk.metrics_state);
         let metrics_refresh = self.risk.metrics_refresh.clone();
+        let execution_mode = self.config.execution.execution_mode;
 
         self.pending_tasks
             .push(TaskId::ExecutionOutcomeDrain, move |shutdown| async move {
@@ -209,11 +242,13 @@ impl AppContext {
                         risk_metrics,
                         fsm,
                         trade_repo,
+                        position_repo,
                         audit_writer,
                         alerts,
                         post_trade_spill,
                         metrics_state,
                         metrics_refresh,
+                        execution_mode,
                     },
                     shutdown,
                 )

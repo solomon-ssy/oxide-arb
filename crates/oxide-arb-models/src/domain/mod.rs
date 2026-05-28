@@ -78,6 +78,7 @@ pub mod potential_loss;
 pub mod report;
 pub mod risk;
 pub mod scored_snapshot;
+pub mod settlement;
 pub mod system;
 pub mod trade;
 

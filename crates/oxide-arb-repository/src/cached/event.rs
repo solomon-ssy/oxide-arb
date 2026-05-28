@@ -30,7 +30,9 @@ impl<R: EventRepository> CachedEventRepository<R> {
     }
 }
 
+#[async_trait::async_trait]
 impl<R: EventRepository> EventRepository for CachedEventRepository<R> {
+    #[inline]
     async fn find_by_id(&self, id: &EventId) -> Result<Option<EventInfo>, StorageError> {
         let key = CacheKey::EventInfo {
             event_id: id.clone(),
@@ -45,14 +47,17 @@ impl<R: EventRepository> EventRepository for CachedEventRepository<R> {
         Ok(result)
     }
 
+    #[inline]
     async fn find_active(&self) -> Result<Vec<EventInfo>, StorageError> {
         self.inner.find_active().await
     }
 
+    #[inline]
     async fn find_existing_ids(&self, ids: &[EventId]) -> Result<HashSet<String>, StorageError> {
         self.inner.find_existing_ids(ids).await
     }
 
+    #[inline]
     async fn upsert(&self, dto: UpsertEvent) -> Result<EventInfo, StorageError> {
         let event_id = dto.event_id.clone();
         let result = self.inner.upsert(dto).await?;
@@ -60,6 +65,7 @@ impl<R: EventRepository> EventRepository for CachedEventRepository<R> {
         Ok(result)
     }
 
+    #[inline]
     async fn upsert_batch(&self, dtos: Vec<UpsertEvent>) -> Result<u64, StorageError> {
         self.inner.upsert_batch(dtos).await
     }

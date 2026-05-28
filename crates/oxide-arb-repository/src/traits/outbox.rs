@@ -4,6 +4,7 @@ use oxide_arb_models::{
     types::OutboxEventId,
 };
 
+#[async_trait::async_trait]
 pub trait OutboxRepository: Send + Sync {
     async fn create(&self, event: NewOutboxEventWithId) -> Result<OutboxEventInfo, StorageError>;
 

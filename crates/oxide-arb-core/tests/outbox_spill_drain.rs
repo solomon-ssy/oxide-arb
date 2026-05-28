@@ -18,13 +18,13 @@ use oxide_arb_models::{
     enums::common::ExecutionMode,
     types::Usd,
 };
-use oxide_arb_repository::traits::TradeRepository;
+use oxide_arb_repository::traits::{PositionRepository, TradeRepository};
 use oxide_arb_risk::{
     builder::RiskEngineBuilder, clock::utc_clock, engine::RiskEngine, traits::RiskPersistence,
 };
 use oxide_arb_test_support::{
     fixtures::minimal_post_trade_job,
-    mocks::MockTradeRepository,
+    mocks::{MockPositionRepository, MockTradeRepository},
     persistence::{spawn_test_outcome_drain, test_persistence},
     risk::{TestRiskMetrics, TestRiskPersistence, test_risk_config},
 };
@@ -39,6 +39,7 @@ struct DrainFixture {
     spill: SharedInMemoryEventStore,
     persistence: Arc<TestRiskPersistence>,
     trade_repo: Arc<MockTradeRepository>,
+    position_repo: Arc<MockPositionRepository>,
     audit_writer: Arc<ExecutionAuditWriter>,
     alerts: Arc<AlertDispatcher>,
     risk_engine: Arc<RiskEngine>,
@@ -115,6 +116,7 @@ fn build_drain_fixture() -> DrainFixture {
         spill,
         persistence,
         trade_repo: Arc::clone(&test_persist.trade_repo),
+        position_repo: Arc::clone(&test_persist.position_repo),
         audit_writer: Arc::clone(&test_persist.audit_writer),
         alerts: Arc::clone(&test_persist.alerts),
         risk_engine,
@@ -156,6 +158,7 @@ async fn spawn_outcome_drain_replays_spill_fifo_before_channel_jobs() {
         let risk_metrics = Arc::clone(&fixture.risk_metrics);
         let fsm = Arc::clone(&fixture.fsm);
         let trade_repo = Arc::clone(&fixture.trade_repo);
+        let position_repo: Arc<dyn PositionRepository> = fixture.position_repo.clone();
         let audit_writer = Arc::clone(&fixture.audit_writer);
         let alerts = Arc::clone(&fixture.alerts);
         let spill = Arc::clone(&fixture.spill);
@@ -169,11 +172,13 @@ async fn spawn_outcome_drain_replays_spill_fifo_before_channel_jobs() {
                     risk_metrics,
                     fsm,
                     trade_repo,
+                    position_repo,
                     audit_writer,
                     alerts,
                     post_trade_spill: spill,
                     metrics_state,
                     metrics_refresh: None,
+                    execution_mode: ExecutionMode::Paper,
                 },
                 shutdown,
             )

@@ -16,6 +16,7 @@ pub async fn run(config_dir: &str) -> OxideResult<()> {
     let ctx = AppContext::build(settings, shutdown.clone()).await?;
     periodic_services::ensure_live_metrics_ready(mode, ctx.risk.metrics_refresh.as_deref()).await?;
     ctx.queue_runtime_tasks();
+    ctx.queue_market_settlement_task();
     ctx.queue_risk_decision_audit_drain(Arc::new(PgRiskAuditRepository::new(
         ctx.infra.pg.connection().clone(),
     )));

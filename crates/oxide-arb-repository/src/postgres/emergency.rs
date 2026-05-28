@@ -13,6 +13,7 @@ impl PgEmergencyRepository {
     }
 }
 
+#[async_trait::async_trait]
 impl EmergencyRepository for PgEmergencyRepository {
     async fn create(&self, snapshot: NewEmergencySnapshot) -> Result<(), StorageError> {
         Entity::insert(snapshot.into_active_model())

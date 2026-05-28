@@ -2,7 +2,7 @@
 
 use super::{
     AppContext, DataBundle, ExecutionBundle, InfraBundle, RiskBundle, RuntimeChannels,
-    TradingBundle, task_registry::PendingTaskQueue,
+    SettlementBundle, TradingBundle, task_registry::PendingTaskQueue,
 };
 use crate::{
     app::periodic_services::run_calibration_startup_tick,
@@ -22,6 +22,10 @@ use crate::{
         plan_builder::PlanBuilder,
         port::ExecutionPort,
         runner::{ExecutionRunner, ExecutionRunnerPool},
+        settlement::{
+            dedup::SettlementDedup,
+            service::{MarketSettlementService, MarketSettlementServiceDeps},
+        },
         tiered_strategy::OrderStrategy,
         validator::Validator,
     },
@@ -60,6 +64,7 @@ use oxide_arb_algorithm::{
 use oxide_arb_api::{
     VotingOracle, build_voting_oracle,
     clob::ClobClient,
+    ctf::client::CtfRedeemClient,
     fees::FeeCalculator,
     gamma::GammaClient,
     keystore::Keystore,
@@ -68,7 +73,7 @@ use oxide_arb_api::{
 use oxide_arb_error::OxideResult;
 use oxide_arb_models::{
     config::{ExposureReservationConfig, Settings},
-    domain::risk::RiskEngineState,
+    domain::{risk::RiskEngineState, settlement::MarketSettlementRequest},
     enums::common::ExecutionMode,
     types::{MarketId, MicroUsd, TokenId},
 };
@@ -77,8 +82,8 @@ use oxide_arb_repository::{
     postgres::{
         PgBlacklistPersistenceRepository, PgCalibrationRepository, PgEmergencyRepository,
         PgEventRepository, PgMarketRepository, PgOutboxRepository, PgPositionRepository,
-        PgPotentialLossRepository, PgReconciliationRepository, PgRiskAuditRepository,
-        PgRiskStateRepository, PgTradeRepository,
+        PgPotentialLossRepository, PgReconciliationRepository, PgResolutionEventRepository,
+        PgRiskAuditRepository, PgRiskStateRepository, PgTradeRepository,
     },
     traits::{
         BlacklistPersistenceRepository, CalibrationRepository, PotentialLossRepository,
@@ -110,6 +115,7 @@ struct BuildRepos {
     audit: Arc<PgRiskAuditRepository>,
     emergency: Arc<PgEmergencyRepository>,
     reconciliation: Arc<PgReconciliationRepository>,
+    resolution_event: Arc<PgResolutionEventRepository>,
     potential_loss: Arc<PgPotentialLossRepository>,
     calibration: Arc<PgCalibrationRepository>,
     market: Arc<PgMarketRepository>,
@@ -137,6 +143,7 @@ struct BuildClients {
     fee_calculator: Arc<FeeCalculator>,
     voting_oracle: Arc<VotingOracle>,
     clob_client: Option<Arc<ClobClient>>,
+    ctf_redeem: Option<Arc<CtfRedeemClient>>,
 }
 
 struct BuildRisk {
@@ -163,6 +170,7 @@ struct BuildTrading {
     funnel: Arc<Funnel>,
     data_pipeline: Arc<DataPipeline>,
     execution: ExecutionBundle,
+    settlement_rx: flume::Receiver<MarketSettlementRequest>,
     token_rx: flume::Receiver<TokenId>,
     market_rx: flume::Receiver<MarketId>,
     execution_runners: Vec<ExecutionRunner>,
@@ -187,6 +195,7 @@ struct ExecutionLoop {
     funnel: Arc<Funnel>,
     data_pipeline: Arc<DataPipeline>,
     execution: ExecutionBundle,
+    settlement_rx: flume::Receiver<MarketSettlementRequest>,
     execution_runners: Vec<ExecutionRunner>,
 }
 
@@ -204,8 +213,27 @@ impl AppContext {
             wire_trading(&settings, mode, &infra, &clients, &risk, shutdown.clone()).await?;
 
         let trade_repo = Arc::clone(&infra.persistence.trade_repo);
+        let position_repo = Arc::clone(&infra.repos.position);
         let timeseries = Arc::clone(&infra.persistence.timeseries);
         let audit_writer = Arc::clone(&infra.persistence.audit_writer);
+        let settlement_service =
+            Arc::new(MarketSettlementService::new(MarketSettlementServiceDeps {
+                position_repo: Arc::clone(&infra.repos.position),
+                resolution_event_repo: Arc::clone(&infra.repos.resolution_event),
+                risk_engine: Arc::clone(&risk.engine),
+                risk_metrics: Arc::clone(&risk.metrics),
+                fsm: Arc::clone(&risk.fsm),
+                ctf_redeem: clients.ctf_redeem.clone(),
+                market_registry: Arc::clone(&trading.market_registry),
+                voting_oracle: Arc::clone(&clients.voting_oracle),
+                metrics: Arc::clone(&infra.metrics),
+                metrics_refresh: risk.metrics_refresh.clone(),
+                config: Arc::new(settings.settlement.clone()),
+                execution_mode: mode,
+            }));
+        let settlement_dedup = Arc::new(SettlementDedup::new(Duration::from_secs(
+            settings.settlement.lifecycle.dedup_window_secs,
+        )));
         let mut pending_tasks = PendingTaskQueue::default();
         infra
             .persistence
@@ -222,6 +250,7 @@ impl AppContext {
                 risk_decision_audit: infra.risk_decision_audit,
                 risk_decision_audit_rx: infra.risk_decision_audit_rx,
                 trade_repo,
+                position_repo,
                 timeseries,
                 audit_writer,
             },
@@ -251,6 +280,11 @@ impl AppContext {
                 execution: Some(trading.execution),
                 clob_client: clients.clob_client,
                 ws_manager: clients.ws_manager,
+            },
+            settlement: SettlementBundle {
+                service: settlement_service,
+                dedup: settlement_dedup,
+                settlement_rx: Mutex::new(Some(trading.settlement_rx)),
             },
             runtime: RuntimeChannels {
                 coalescer_token_rx: Mutex::new(Some(trading.token_rx)),
@@ -318,6 +352,7 @@ async fn connect_infra(
         audit: Arc::new(PgRiskAuditRepository::new(db.clone())),
         emergency: Arc::new(PgEmergencyRepository::new(db.clone())),
         reconciliation: Arc::new(PgReconciliationRepository::new(db.clone())),
+        resolution_event: Arc::new(PgResolutionEventRepository::new(db.clone())),
         potential_loss: Arc::new(PgPotentialLossRepository::new(db.clone())),
         calibration: Arc::new(PgCalibrationRepository::new(db.clone())),
         market: Arc::new(PgMarketRepository::new(db.clone())),
@@ -391,22 +426,40 @@ async fn connect_clients(
     let voting_oracle = Arc::new(build_voting_oracle(
         &settings.polymarket,
         &settings.market_data.gamma,
-        &settings.settlement_oracle,
+        &settings.settlement.oracle,
+        &settings.settlement.contracts,
     )?);
 
-    let clob_client = match Keystore::from_config(&settings.keys) {
-        Ok(ks) => match ClobClient::connect(ks.signer_arc(), &settings.polymarket).await {
-            Ok(client) => Some(Arc::new(
-                client.with_book_level_reject_hook(Some(rest_reject_hook)),
-            )),
-            Err(error) => {
-                tracing::warn!(%error, "ClobClient connect failed — Live/paper CLOB disabled");
-                None
-            }
-        },
+    let (clob_client, ctf_redeem) = match Keystore::from_config(&settings.keys) {
+        Ok(ks) => {
+            let signer = ks.signer_arc();
+            let ctf_redeem = match CtfRedeemClient::new(
+                Arc::clone(&signer),
+                settings.polymarket.onchain.rpc_url.clone(),
+                settings.settlement.contracts.clone(),
+                settings.settlement.redeem.clone(),
+                settings.polymarket.chain_id,
+            ) {
+                Ok(client) => Some(Arc::new(client)),
+                Err(error) => {
+                    tracing::warn!(%error, "CTF redeem client unavailable");
+                    None
+                }
+            };
+            let clob_client = match ClobClient::connect(signer, &settings.polymarket).await {
+                Ok(client) => Some(Arc::new(
+                    client.with_book_level_reject_hook(Some(rest_reject_hook)),
+                )),
+                Err(error) => {
+                    tracing::warn!(%error, "ClobClient connect failed — Live/paper CLOB disabled");
+                    None
+                }
+            };
+            (clob_client, ctf_redeem)
+        }
         Err(error) => {
             tracing::info!(%error, "Keystore unavailable — running without ClobClient");
-            None
+            (None, None)
         }
     };
 
@@ -416,6 +469,7 @@ async fn connect_clients(
         fee_calculator,
         voting_oracle,
         clob_client,
+        ctf_redeem,
     })
 }
 
@@ -451,6 +505,9 @@ async fn wire_risk(
         .await
         .unwrap_or_default();
     let audit_sink: Arc<dyn AuditSink> = infra.risk_decision_audit.clone();
+    let potential_loss_store = Arc::new(CorePotentialLossStore::new(
+        infra.repos.potential_loss.clone(),
+    ));
 
     let engine = Arc::new(
         RiskEngineBuilder::new()
@@ -459,14 +516,12 @@ async fn wire_risk(
             .snapshot(RiskEngineState::from(&risk_state_info))
             .blacklist_entries(blacklist)
             .potential_loss_entries(potential_loss)
+            .potential_loss_store(potential_loss_store.clone())
             .audit_sink(audit_sink)
             .clock(utc_clock())
             .build(risk_metrics.as_ref())?,
     );
 
-    let potential_loss_store = Arc::new(CorePotentialLossStore::new(
-        infra.repos.potential_loss.clone(),
-    ));
     let fsm = Arc::new(ExecutionFSM::new(Arc::clone(&infra.metrics)));
     let post_trade_spill = Arc::new(InMemoryEventStore::new());
     let backpressure = Arc::new(BackpressurePolicy::new(
@@ -529,6 +584,7 @@ async fn wire_trading(
         funnel: execution.funnel,
         data_pipeline: execution.data_pipeline,
         execution: execution.execution,
+        settlement_rx: execution.settlement_rx,
         token_rx: detection.token_rx,
         market_rx: detection.market_rx,
         execution_runners: execution.execution_runners,
@@ -676,6 +732,8 @@ fn wire_execution_loop(
     shutdown: CancellationToken,
 ) -> ExecutionLoop {
     let (outcome_tx, outcome_rx) = flume::bounded(1024);
+    let (settlement_tx, settlement_rx) =
+        flume::bounded(settings.settlement.lifecycle.channel_capacity);
     let capital = Arc::new(CapitalManager::new(
         Arc::clone(&risk.exposure),
         ExposureReservationConfig::default(),
@@ -744,6 +802,7 @@ fn wire_execution_loop(
         book_store: Arc::clone(&detection.book_store),
         market_registry: Arc::clone(&detection.market_registry),
         coalescer_tx: detection.token_tx.clone(),
+        settlement_tx,
         metrics: Arc::clone(&infra.metrics),
         backpressure: Arc::clone(&risk.backpressure),
         book_shard_count: settings.execution.book_apply.shard_count,
@@ -763,6 +822,7 @@ fn wire_execution_loop(
         funnel,
         data_pipeline,
         execution,
+        settlement_rx,
         execution_runners,
     }
 }

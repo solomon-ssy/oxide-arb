@@ -89,6 +89,7 @@ async fn do_dead_letter_count(db: &impl ConnectionTrait) -> Result<u64, StorageE
         .map_err(StorageError::from)
 }
 
+#[async_trait::async_trait]
 impl OutboxRepository for PgOutboxRepository {
     async fn create(&self, event: NewOutboxEventWithId) -> Result<OutboxEventInfo, StorageError> {
         do_create(&self.db, event).await
@@ -111,6 +112,7 @@ impl OutboxRepository for PgOutboxRepository {
     }
 }
 
+#[async_trait::async_trait]
 impl OutboxRepository for PgOutboxRepositoryTxn<'_> {
     async fn create(&self, event: NewOutboxEventWithId) -> Result<OutboxEventInfo, StorageError> {
         do_create(self.txn, event).await

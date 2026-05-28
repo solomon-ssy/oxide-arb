@@ -29,6 +29,7 @@ impl AppContext {
         self.queue_exposure_gc();
         self.queue_calibration_updater();
         self.queue_risk_metrics_refresh();
+        self.queue_market_settlement_retry();
         self.queue_health_checker();
     }
 }
@@ -185,6 +186,30 @@ impl AppContext {
                 .await
                 {
                     tracing::error!(%error, "risk metrics refresh periodic task exited");
+                }
+            });
+    }
+
+    fn queue_market_settlement_retry(&self) {
+        let settlement = Arc::clone(&self.settlement.service);
+        let interval_secs = self.config.settlement.lifecycle.retry_interval_secs.max(10);
+
+        self.pending_tasks
+            .push(TaskId::MarketSettlementRetry, move |shutdown| async move {
+                if let Err(error) = PeriodicTask::run(
+                    TaskId::MarketSettlementRetry.static_name(),
+                    Duration::from_secs(interval_secs),
+                    PERIODIC_JITTER_PCT,
+                    true,
+                    shutdown,
+                    || {
+                        let settlement = Arc::clone(&settlement);
+                        async move { settlement.retry_pending().await }
+                    },
+                )
+                .await
+                {
+                    tracing::error!(%error, "market settlement retry task exited");
                 }
             });
     }

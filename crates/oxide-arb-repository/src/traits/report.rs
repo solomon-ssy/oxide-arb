@@ -8,6 +8,7 @@ use oxide_arb_models::{
 };
 
 /// Data access for the `report` table.
+#[async_trait::async_trait]
 pub trait ReportRepository: Send + Sync {
     /// Insert or upsert a report (replaces payload on conflict).
     async fn upsert(&self, report: UpsertReport) -> Result<(), StorageError>;
