@@ -66,15 +66,17 @@ impl OpportunityId {
     }
 }
 
-/// Unique trade identifier (`t_<uuid v4>`).
+/// Unique trade identifier (`t_<uuid v7>`).
+///
+/// Independent from [`OpportunityId`] — correlate via opportunity fields on trade records.
 #[derive(TypedId, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TradeId(Arc<str>);
 
 impl TradeId {
-    /// Generate a new prefixed trade ID.
+    /// Generate a new time-ordered trade ID (UUID v7).
     #[must_use]
     pub fn generate() -> Self {
-        Self(Arc::from(format!("t_{}", Uuid::new_v4()).as_str()))
+        Self(Arc::from(format!("t_{}", Uuid::now_v7()).as_str()))
     }
 }
 
@@ -203,12 +205,12 @@ mod tests {
     }
 
     #[test]
-    fn trade_id_generate_is_prefixed_uuid_v4() {
+    fn trade_id_generate_is_prefixed_uuid_v7() {
         let id = TradeId::generate();
         let s = id.as_str();
         let suffix = s.strip_prefix("t_").expect("trade id must use t_ prefix");
         let parsed = Uuid::parse_str(suffix).expect("suffix must be a UUID");
-        assert_eq!(parsed.get_version(), Some(uuid::Version::Random));
+        assert_eq!(parsed.get_version(), Some(uuid::Version::SortRand));
     }
 
     #[test]

@@ -126,6 +126,7 @@ pub struct MetricsHub {
     pub risk_weekly_loss_usd: Gauge,
     pub risk_reservations_active: IntGauge,
     pub risk_reservations_total_usd: Gauge,
+    pub exposure_gc_cleaned: IntCounter,
 
     // Calibration
     pub calibration_update_total: IntCounter,
@@ -143,6 +144,7 @@ pub struct MetricsHub {
     pub outbox_pending: IntGauge,
     pub outbox_flushed: IntCounter,
     pub outbox_dead_letters: IntCounter,
+    pub async_writer_dropped: IntCounterVec,
 
     // Gamma sync
     pub gamma_sync_duration_ms: IntGauge,
@@ -221,6 +223,7 @@ struct RiskMetrics {
     weekly_loss_usd: Gauge,
     reservations_active: IntGauge,
     reservations_total_usd: Gauge,
+    exposure_gc_cleaned: IntCounter,
 }
 
 struct CalibrationMetrics {
@@ -241,6 +244,7 @@ struct SystemMetrics {
     outbox_pending: IntGauge,
     outbox_flushed: IntCounter,
     outbox_dead_letters: IntCounter,
+    async_writer_dropped: IntCounterVec,
     gamma_sync_duration_ms: IntGauge,
     gamma_markets_total: IntGauge,
     gamma_last_sync_success: IntGauge,
@@ -553,6 +557,11 @@ fn register_risk_metrics(registry: &Registry) -> RiskMetrics {
             "oxide_arb_risk_reservations_total_usd",
             "Total reserved capital in USD"
         ),
+        exposure_gc_cleaned: register_counter!(
+            registry,
+            "oxide_arb_risk_exposure_gc_cleaned_total",
+            "Expired exposure reservations cleaned by GC"
+        ),
     }
 }
 
@@ -624,6 +633,12 @@ fn register_system_metrics(registry: &Registry) -> SystemMetrics {
             registry,
             "oxide_arb_system_outbox_dead_letters_total",
             "Outbox dead-lettered events"
+        ),
+        async_writer_dropped: register_counter_vec!(
+            registry,
+            "oxide_arb_system_async_writer_dropped_total",
+            "AsyncWriter items dropped due to channel pressure",
+            &["writer"]
         ),
         gamma_sync_duration_ms: register_gauge_int!(
             registry,
@@ -725,6 +740,7 @@ impl MetricsHub {
             risk_weekly_loss_usd: risk.weekly_loss_usd,
             risk_reservations_active: risk.reservations_active,
             risk_reservations_total_usd: risk.reservations_total_usd,
+            exposure_gc_cleaned: risk.exposure_gc_cleaned,
             calibration_update_total: calibration.update_total,
             calibration_resolved: calibration.resolved,
             calibration_bucket_count: calibration.bucket_count,
@@ -736,6 +752,7 @@ impl MetricsHub {
             outbox_pending: system.outbox_pending,
             outbox_flushed: system.outbox_flushed,
             outbox_dead_letters: system.outbox_dead_letters,
+            async_writer_dropped: system.async_writer_dropped,
             gamma_sync_duration_ms: system.gamma_sync_duration_ms,
             gamma_markets_total: system.gamma_markets_total,
             gamma_last_sync_success: system.gamma_last_sync_success,

@@ -1,7 +1,6 @@
 //! Graceful backpressure — coalesce, dedup, evict, spill. Never halts trading.
 
 use crate::{
-    execution::execution_pipeline::PostTradeJob,
     observability::{
         alert_dispatcher::{Alert, AlertDispatcher, AlertSeverity},
         metrics_hub::MetricsHub,
@@ -9,7 +8,10 @@ use crate::{
     outbox::in_memory::SharedInMemoryEventStore,
 };
 use dashmap::DashMap;
-use oxide_arb_models::{domain::pipeline::PipelineEvent, types::TokenId};
+use oxide_arb_models::{
+    domain::{execution::PostTradeJob, pipeline::PipelineEvent},
+    types::TokenId,
+};
 use parking_lot::Mutex;
 use std::{
     sync::Arc,
@@ -220,15 +222,51 @@ mod tests {
     use super::*;
     use crate::{execution::fsm::ExecutionFSM, outbox::in_memory::InMemoryEventStore};
     use oxide_arb_models::{
-        domain::pipeline::{IngressTrace, PipelineEvent, PriceDeltaCmd, PriceLevelDelta},
+        domain::{
+            pipeline::{IngressTrace, PipelineEvent, PriceDeltaCmd, PriceLevelDelta},
+            scored_snapshot::ScoredOpportunitySnapshot,
+        },
         enums::{
-            common::{ExecutionMode, Side},
+            calibration::{DurationBucket, PriceZone},
+            common::{ExecutionMode, MarketCategory, Side, StalenessLevel},
             execution::ExecutionOutcome,
         },
-        types::{MarketId, Price, Shares, TokenId, TradeId, Usd},
+        types::{EventId, ExecutionId, MarketId, OpportunityId, Price, Shares, TokenId, TradeId},
     };
     use rust_decimal_macros::dec;
     use std::{sync::Arc, time::Instant};
+
+    fn sample_post_trade_job(trade_id: &str) -> PostTradeJob {
+        PostTradeJob {
+            trade_id: TradeId::new(trade_id),
+            execution_id: ExecutionId::generate(),
+            opportunity_id: OpportunityId::new_v7(),
+            market_id: MarketId::new("m1"),
+            event_id: EventId::new("e1"),
+            token_id: TokenId::new("t1"),
+            side: Side::Buy,
+            plan_shares: Shares::new(dec!(10)),
+            entry_price: Price::new(dec!(0.5)),
+            execution_mode: ExecutionMode::Paper,
+            edge_bps: None,
+            detected_profit: None,
+            detected_at: chrono::Utc::now(),
+            category: MarketCategory::Politics,
+            scored_snapshot: ScoredOpportunitySnapshot {
+                resolution_prob: 0.0,
+                confidence: 0.0,
+                convergence_secs: 0,
+                price_zone: PriceZone::Z97,
+                duration_bucket: DurationBucket::Medium,
+                depth_used_pct: 0.0,
+                staleness: StalenessLevel::Fresh,
+            },
+            outcome: ExecutionOutcome::Miss {
+                reason: "test".into(),
+                execution_mode: ExecutionMode::Paper,
+            },
+        }
+    }
 
     #[test]
     fn book_coalesce_does_not_halt() {
@@ -286,17 +324,7 @@ mod tests {
         let spill = Arc::new(InMemoryEventStore::new());
         let bp = BackpressurePolicy::new(Arc::clone(&metrics), None, Arc::clone(&spill), 1);
 
-        let job = PostTradeJob {
-            trade_id: TradeId::new("trade-1"),
-            market_id: MarketId::new("m1"),
-            token_id: TokenId::new("t1"),
-            entry_price: Price::new(dec!(0.5)),
-            net_profit: Usd::new(dec!(1)),
-            outcome: ExecutionOutcome::Miss {
-                reason: "test".into(),
-                execution_mode: ExecutionMode::Paper,
-            },
-        };
+        let job = sample_post_trade_job("trade-1");
 
         assert_eq!(
             bp.on_post_trade_channel_full(job),

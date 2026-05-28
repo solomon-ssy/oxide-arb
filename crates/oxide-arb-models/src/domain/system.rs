@@ -3,7 +3,7 @@
 use crate::{
     enums::{
         common::{ExecutionMode, ReportType},
-        lifecycle::{LifecyclePhase, LifecycleRecorder, ShutdownStage},
+        lifecycle::ShutdownStage,
         risk::BreakerStateName,
         runtime_config::RuntimeConfigKey,
     },
@@ -51,33 +51,6 @@ pub struct ShutdownProgress {
     pub inflight_trades: u32,
     pub pending_flushes: u32,
     pub started_at: DateTime<Utc>,
-}
-
-// ── Lifecycle ────────────────────────────────────────────────────────
-
-/// DB row projection for the `lifecycle_event` table.
-#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]
-#[sea_orm(entity = "crate::entities::lifecycle_event::Entity")]
-pub struct LifecycleEventInfo {
-    pub id: i64,
-    pub phase: LifecyclePhase,
-    pub stage: Option<LifecycleRecorder>,
-    pub message: String,
-    pub metadata: Option<serde_json::Value>,
-    pub created_at: DateTime<Utc>,
-}
-
-info_from_model!(LifecycleEventInfo, crate::entities::lifecycle_event::Model, {
-    id, phase, stage, message, metadata, created_at,
-});
-
-/// Write DTO for creating a new lifecycle event.
-#[derive(Debug, Clone)]
-pub struct NewLifecycleEvent {
-    pub phase: LifecyclePhase,
-    pub stage: Option<LifecycleRecorder>,
-    pub message: String,
-    pub metadata: Option<serde_json::Value>,
 }
 
 // ── Runtime config ───────────────────────────────────────────────────

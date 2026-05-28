@@ -60,6 +60,7 @@ moka = { workspace = true, features = ["future"] }
 rand = "0.10"
 
 [dev-dependencies]
+oxide-arb-test-support = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 wiremock = { workspace = true }
 hex = { workspace = true }

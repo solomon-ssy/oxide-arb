@@ -4,6 +4,7 @@ use super::execution_pipeline::ExecutionPipeline;
 use async_trait::async_trait;
 use oxide_arb_algorithm::scorer::ScoredOpportunity;
 use oxide_arb_models::domain::execution::ExecutionResult;
+use oxide_arb_repository::traits::TradeRepository;
 use std::sync::Arc;
 
 /// Async execution boundary consumed by shard runners.
@@ -13,7 +14,10 @@ pub trait ExecutionPort: Send + Sync {
 }
 
 #[async_trait]
-impl ExecutionPort for ExecutionPipeline {
+impl<R> ExecutionPort for ExecutionPipeline<R>
+where
+    R: TradeRepository + Send + Sync + 'static,
+{
     async fn execute(&self, scored: Arc<ScoredOpportunity>) -> ExecutionResult {
         Self::execute(self, scored).await
     }

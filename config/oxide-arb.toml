@@ -53,7 +53,7 @@ max_subscriptions_per_connection = 200
 
 [market_data.gamma]
 base_url = "https://gamma-api.polymarket.com"
-poll_interval_secs = 300
+full_sync_interval_secs = 300
 page_size = 100
 
 # ── Opportunity Detection ─────────────────────────────────────────────────────
@@ -124,6 +124,7 @@ max_single_market_exposure_usd = "500"
 max_single_bet_usd = "25"
 
 max_total_exposure_pct = "80"
+metrics_refresh_interval_secs = 5
 reconciliation_interval_secs = 300
 reconciliation_tolerance_usd = "1.0"
 

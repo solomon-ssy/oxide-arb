@@ -2,7 +2,9 @@
 
 use num_traits::ToPrimitive;
 use oxide_arb_models::{
-    domain::calibration::{BucketKey, CalibrationSnapshot, UpsertCalibration},
+    domain::calibration::{
+        BucketKey, CalibrationBucketInfo, CalibrationSnapshot, UpsertCalibration,
+    },
     types::Probability,
 };
 use rust_decimal::Decimal;
@@ -80,6 +82,23 @@ impl CalibrationEntry {
             beta_prior: Probability::from(self.beta_prior),
             posterior_mean: Some(Probability::from(self.posterior_mean())),
             updated_at: chrono::Utc::now(),
+        }
+    }
+}
+
+impl From<CalibrationBucketInfo> for CalibrationEntry {
+    fn from(info: CalibrationBucketInfo) -> Self {
+        Self {
+            bucket_key: BucketKey {
+                category: info.category,
+                price_zone: info.price_zone,
+                duration_bucket: info.duration_bucket,
+            },
+            total_count: u32::try_from(info.total_count.max(0)).unwrap_or(u32::MAX),
+            correct_count: u32::try_from(info.correct_count.max(0)).unwrap_or(u32::MAX),
+            alpha_prior: info.alpha_prior.into(),
+            beta_prior: info.beta_prior.into(),
+            fallback_tier: 1,
         }
     }
 }

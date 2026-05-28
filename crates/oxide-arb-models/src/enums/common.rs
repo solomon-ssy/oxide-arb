@@ -205,6 +205,19 @@ pub enum TradeOutcome {
     SystemError,
 }
 
+impl Display for TradeOutcome {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Pending => write!(f, "pending"),
+            Self::Success => write!(f, "success"),
+            Self::Miss => write!(f, "miss"),
+            Self::Stale => write!(f, "stale"),
+            Self::TradeFailed => write!(f, "trade_failed"),
+            Self::SystemError => write!(f, "system_error"),
+        }
+    }
+}
+
 /// Origin of a market-data update.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

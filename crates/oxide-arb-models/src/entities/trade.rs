@@ -14,7 +14,6 @@ use sea_orm::entity::prelude::*;
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, ActiveModelDefaults)]
 #[sea_orm(table_name = "trade")]
 #[active_defaults(
-    generate(trade_id, TradeId::generate()),
     default(outcome, TradeOutcome::Pending),
     timestamp(created_at),
     timestamp(updated_at, always)

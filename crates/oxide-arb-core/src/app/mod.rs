@@ -7,6 +7,7 @@
 pub mod bootstrap;
 pub mod build;
 pub mod lifecycle;
+pub mod periodic_services;
 pub mod task_id;
 pub mod task_registry;
 
@@ -23,7 +24,7 @@ use crate::{
         scanner_task::{ScannerTask, ScannerTaskDeps},
     },
     execution::{
-        execution_pipeline::{ExecutionPipeline, PostTradeJob},
+        execution_pipeline::{ExecutionPipeline, PostTradeDrainDeps},
         fsm::ExecutionFSM,
         heartbeat::HeartbeatTask,
         market_inflight::MarketInFlightRegistry,
@@ -34,22 +35,32 @@ use crate::{
         risk_decision_audit_buffer::RiskDecisionAuditBuffer,
         risk_decision_audit_drain::spawn_risk_decision_audit_drain,
     },
-    observability::{alert_dispatcher::AlertDispatcher, metrics_hub::MetricsHub},
+    observability::{
+        alert_dispatcher::AlertDispatcher, execution_audit::ExecutionAuditWriter,
+        metrics_hub::MetricsHub,
+    },
     pipeline::{
         book_store::BookStore, data_pipeline::DataPipeline, market_cache::MarketCache,
         market_registry::MarketRegistry,
     },
-    service::risk_metrics::RiskMetricsState,
+    service::{
+        gamma::GammaService,
+        risk_metrics::{RiskMetricsRefreshService, RiskMetricsState},
+    },
 };
 use flume::Receiver;
 use oxide_arb_algorithm::calibration::{CalibrationUpdater, ResolutionCalibrator};
 use oxide_arb_api::{clob::ClobClient, ws::ClobWsManager};
 use oxide_arb_models::{
     config::Settings,
+    domain::execution::PostTradeJob,
     enums::common::ExecutionMode,
     types::{MarketId, MicroScore, TokenId},
 };
-use oxide_arb_repository::postgres::PgRiskAuditRepository;
+use oxide_arb_repository::{
+    clickhouse::ChTimeseriesRepository,
+    postgres::{PgRiskAuditRepository, PgTradeRepository},
+};
 use oxide_arb_risk::{audit::RiskAuditEvent, engine::RiskEngine};
 use oxide_arb_storage::{cache::TieredCache, clickhouse::ClickHousePool, postgres::PostgresPool};
 use parking_lot::Mutex;
@@ -65,6 +76,9 @@ pub struct InfraBundle {
     pub alerts: Arc<AlertDispatcher>,
     pub risk_decision_audit: Arc<RiskDecisionAuditBuffer>,
     pub risk_decision_audit_rx: Mutex<Option<Receiver<RiskAuditEvent>>>,
+    pub trade_repo: Arc<PgTradeRepository>,
+    pub timeseries: Arc<ChTimeseriesRepository>,
+    pub audit_writer: Arc<ExecutionAuditWriter>,
 }
 
 /// Data pipeline subsystem: WS event loop, order books, market metadata.
@@ -73,6 +87,7 @@ pub struct DataBundle {
     pub market_registry: Arc<MarketRegistry>,
     pub market_cache: Arc<MarketCache>,
     pub data_pipeline: Arc<DataPipeline>,
+    pub gamma_service: Arc<GammaService>,
 }
 
 /// Risk management subsystem.
@@ -82,6 +97,7 @@ pub struct RiskBundle {
     pub metrics_state: Arc<RiskMetricsState>,
     pub exposure: Arc<InMemoryExposureReservation>,
     pub potential_loss_store: Arc<CorePotentialLossStore>,
+    pub metrics_refresh: Option<Arc<RiskMetricsRefreshService>>,
 }
 
 /// Execution subsystem wired after opportunity detection.
@@ -177,16 +193,28 @@ impl AppContext {
         let risk_engine = Arc::clone(&self.risk.engine);
         let risk_metrics = Arc::clone(&self.risk.metrics);
         let fsm = Arc::clone(&self.trading.fsm);
+        let trade_repo = Arc::clone(&self.infra.trade_repo);
+        let audit_writer = Arc::clone(&self.infra.audit_writer);
+        let alerts = Arc::clone(&self.infra.alerts);
         let post_trade_spill = Arc::clone(exec.pipeline.post_trade_spill());
+        let metrics_state = Arc::clone(&self.risk.metrics_state);
+        let metrics_refresh = self.risk.metrics_refresh.clone();
 
         self.pending_tasks
             .push(TaskId::ExecutionOutcomeDrain, move |shutdown| async move {
                 if let Err(error) = ExecutionPipeline::spawn_outcome_drain(
                     rx,
-                    risk_engine,
-                    risk_metrics,
-                    fsm,
-                    post_trade_spill,
+                    PostTradeDrainDeps {
+                        risk_engine,
+                        risk_metrics,
+                        fsm,
+                        trade_repo,
+                        audit_writer,
+                        alerts,
+                        post_trade_spill,
+                        metrics_state,
+                        metrics_refresh,
+                    },
                     shutdown,
                 )
                 .await
@@ -308,5 +336,3 @@ impl AppContext {
         }
     }
 }
-
-pub use task_registry::AppRunner;

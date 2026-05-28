@@ -22,6 +22,10 @@ use rust_decimal_macros::dec;
 pub struct ManualHaltCheck;
 
 impl RiskCheck for ManualHaltCheck {
+    fn requires_metrics(&self) -> bool {
+        false
+    }
+
     fn id(&self) -> RiskCheckId {
         RiskCheckId::ManualHalt
     }
@@ -50,6 +54,10 @@ impl RiskCheck for ManualHaltCheck {
 pub struct CircuitBreakerCheck;
 
 impl RiskCheck for CircuitBreakerCheck {
+    fn requires_metrics(&self) -> bool {
+        false
+    }
+
     fn id(&self) -> RiskCheckId {
         RiskCheckId::CircuitBreaker
     }
@@ -76,6 +84,10 @@ impl RiskCheck for CircuitBreakerCheck {
 pub struct BlacklistCheck;
 
 impl RiskCheck for BlacklistCheck {
+    fn requires_metrics(&self) -> bool {
+        false
+    }
+
     fn id(&self) -> RiskCheckId {
         RiskCheckId::BlacklistTradingPath
     }
@@ -102,6 +114,10 @@ impl RiskCheck for BlacklistCheck {
 pub struct TokenBlacklistCheck;
 
 impl RiskCheck for TokenBlacklistCheck {
+    fn requires_metrics(&self) -> bool {
+        false
+    }
+
     fn id(&self) -> RiskCheckId {
         RiskCheckId::TokenBlacklist
     }

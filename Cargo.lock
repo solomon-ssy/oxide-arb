@@ -4246,7 +4246,9 @@ dependencies = [
  "oxide-arb-api",
  "oxide-arb-core",
  "oxide-arb-models",
+ "oxide-arb-repository",
  "oxide-arb-risk",
+ "oxide-arb-test-support",
  "polymarket_client_sdk_v2",
  "rust_decimal",
  "rust_decimal_macros",
@@ -4290,6 +4292,7 @@ dependencies = [
  "oxide-arb-repository",
  "oxide-arb-risk",
  "oxide-arb-storage",
+ "oxide-arb-test-support",
  "parking_lot",
  "polymarket_client_sdk_v2",
  "prometheus",
@@ -4365,6 +4368,7 @@ dependencies = [
 name = "oxide-arb-repository"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "bitcode",
  "chrono",
  "clickhouse",
@@ -4435,6 +4439,29 @@ dependencies = [
  "tokio-util",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "oxide-arb-test-support"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "flume 0.12.0",
+ "num-traits",
+ "oxide-arb-algorithm",
+ "oxide-arb-api",
+ "oxide-arb-core",
+ "oxide-arb-error",
+ "oxide-arb-models",
+ "oxide-arb-repository",
+ "oxide-arb-risk",
+ "rust_decimal",
+ "rust_decimal_macros",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]

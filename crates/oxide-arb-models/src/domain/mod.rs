@@ -77,6 +77,7 @@ pub mod position;
 pub mod potential_loss;
 pub mod report;
 pub mod risk;
+pub mod scored_snapshot;
 pub mod system;
 pub mod trade;
 
@@ -95,5 +96,6 @@ pub use position::*;
 pub use potential_loss::*;
 pub use report::*;
 pub use risk::*;
+pub use scored_snapshot::*;
 pub use system::*;
 pub use trade::*;

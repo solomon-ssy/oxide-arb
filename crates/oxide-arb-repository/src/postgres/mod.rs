@@ -5,7 +5,6 @@ pub mod blacklist_persistence;
 pub mod calibration;
 pub mod emergency;
 pub mod event;
-pub mod lifecycle;
 pub mod market;
 mod orm;
 pub mod outbox;
@@ -25,7 +24,6 @@ pub use blacklist_persistence::{
 pub use calibration::{PgCalibrationRepository, PgCalibrationRepositoryTxn};
 pub use emergency::PgEmergencyRepository;
 pub use event::{PgEventRepository, PgEventRepositoryTxn};
-pub use lifecycle::{PgLifecycleRepository, PgLifecycleRepositoryTxn};
 pub use market::{PgMarketRepository, PgMarketRepositoryTxn};
 pub use outbox::{PgOutboxRepository, PgOutboxRepositoryTxn};
 pub use position::{PgPositionRepository, PgPositionRepositoryTxn};

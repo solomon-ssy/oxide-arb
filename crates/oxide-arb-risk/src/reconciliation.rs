@@ -12,7 +12,10 @@ use crate::{
 use chrono::Utc;
 use num_traits::ToPrimitive;
 use oxide_arb_error::OxideResult;
-use oxide_arb_models::{enums::ReconciliationStatus, types::Usd};
+use oxide_arb_models::{
+    enums::ReconciliationStatus,
+    types::{MarketId, Usd},
+};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use std::{collections::HashSet, time::Instant};
@@ -30,24 +33,32 @@ impl LedgerReconciler {
         }
     }
 
-    /// Run a full reconciliation cycle.
+    /// Run a full reconciliation cycle via [`BalanceQuerier`] I/O.
     ///
-    /// 1. Query external balance and positions via [`BalanceQuerier`].
-    /// 2. Read internal state from [`RiskMetrics`].
-    /// 3. Compare and classify each mismatch.
-    /// 4. Determine overall status:
-    ///    - `Ok` — no mismatches.
-    ///    - `Warning` — drift < 10x tolerance.
-    ///    - `Critical` — any drift >= 10x tolerance.
+    /// Prefer [`reconcile_fetched`](Self::reconcile_fetched) in production when
+    /// the caller already has fresh balance/position data.
     pub async fn reconcile(
         &self,
         metrics: &dyn RiskMetrics,
         querier: &dyn BalanceQuerier,
     ) -> OxideResult<ReconciliationReport> {
-        let start = Instant::now();
-
         let (ext_available, ext_locked) = querier.query_balance().await?;
         let ext_positions = querier.query_positions().await?;
+        Ok(self.reconcile_fetched(metrics, ext_available, ext_locked, &ext_positions))
+    }
+
+    /// Reconcile using pre-fetched external data — **zero additional I/O**.
+    ///
+    /// Used by [`RiskMetricsRefreshService`] to piggyback reconciliation on the
+    /// same CLOB balance + PG position fetch that updates the snapshot.
+    pub fn reconcile_fetched(
+        &self,
+        metrics: &dyn RiskMetrics,
+        ext_available: Usd,
+        ext_locked: Usd,
+        ext_positions: &[(MarketId, Usd)],
+    ) -> ReconciliationReport {
+        let start = Instant::now();
 
         let internal_balance = metrics.cached_balance();
         let external_balance = ext_available + ext_locked;
@@ -56,7 +67,6 @@ impl LedgerReconciler {
 
         let mut mismatches = Vec::new();
 
-        // Balance drift
         let balance_drift = internal_balance - external_balance;
         if balance_drift.abs() > self.tolerance {
             mismatches.push(ReconciliationMismatch::BalanceDrift {
@@ -66,11 +76,10 @@ impl LedgerReconciler {
             });
         }
 
-        // Per-market position drift
         let positions = metrics.open_positions();
         let mut external_exposure = Usd::ZERO;
 
-        for (ext_market_id, ext_value) in &ext_positions {
+        for (ext_market_id, ext_value) in ext_positions {
             external_exposure += *ext_value;
             let internal_value = metrics.market_exposure(ext_market_id);
             let drift = internal_value - *ext_value;
@@ -85,7 +94,6 @@ impl LedgerReconciler {
             }
         }
 
-        // Internal markets not present externally
         let ext_market_set: HashSet<_> = ext_positions.iter().map(|(m, _)| m.clone()).collect();
 
         for pos in &positions {
@@ -127,7 +135,7 @@ impl LedgerReconciler {
             }
         }
 
-        Ok(ReconciliationReport {
+        ReconciliationReport {
             status,
             mismatches,
             internal_balance,
@@ -138,7 +146,7 @@ impl LedgerReconciler {
             tolerance: self.tolerance,
             checked_at: Utc::now(),
             duration_ms,
-        })
+        }
     }
 
     fn classify(

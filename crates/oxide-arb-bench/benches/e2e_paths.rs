@@ -9,7 +9,7 @@ use oxide_arb_algorithm::{
 };
 use oxide_arb_api::{fees::FeeCalculator, ws::normalize::normalize_ws_message};
 use oxide_arb_core::{
-    bridge::{CoreFeeEstimator, CoreOpportunityPipeline},
+    bridge::{CoreOpportunityPipeline, fee_estimator::CoreFeeEstimator},
     detection::{coalescer::Coalescer, scanner::Scanner},
     observability::metrics_hub::MetricsHub,
     pipeline::{
@@ -116,6 +116,7 @@ fn bench_e2e_ws_to_scan(c: &mut Criterion) {
         market_cache,
         StalenessClassifier::new(&MarketDataConfig::default()),
         metrics,
+        None,
     );
     let entry = CachedMarketScanEntry {
         market_id: MarketId::new("bench-m1"),

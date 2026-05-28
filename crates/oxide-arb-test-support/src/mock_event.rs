@@ -1,4 +1,4 @@
-//! Injectable [`PipelineEvent`] source for `DataPipeline` tests (PR-3 wiring).
+//! Injectable [`PipelineEvent`] source for `DataPipeline` tests.
 
 use flume::{Receiver, Sender};
 use oxide_arb_core::pipeline::event_source::PipelineEventSource;
@@ -19,14 +19,12 @@ pub struct MockEventInject {
 }
 
 impl MockEventSource {
-    /// Create a paired source/inject with the given channel capacity.
     #[must_use]
     pub fn paired(capacity: usize) -> (Self, MockEventInject) {
         let (tx, rx) = flume::bounded(capacity);
         (Self { rx }, MockEventInject { tx })
     }
 
-    /// Consumer side — attach to `DataPipeline` in PR-3 via `PipelineEventSource`.
     #[must_use]
     pub const fn receiver(&self) -> &Receiver<PipelineEvent> {
         &self.rx
@@ -34,8 +32,6 @@ impl MockEventSource {
 }
 
 impl MockEventInject {
-    /// Blocking send for deterministic test setup.
-    ///
     /// # Panics
     /// Panics if the receiver is dropped.
     pub fn send(&self, event: PipelineEvent) {

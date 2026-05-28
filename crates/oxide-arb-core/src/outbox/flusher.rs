@@ -52,6 +52,10 @@ impl OutboxFlusher {
     }
 
     async fn flush_once(&self) -> Result<(), OxideError> {
+        if self.consumers.is_empty() {
+            return Ok(());
+        }
+
         let events = self.event_store.fetch_pending(self.batch_size).await?;
         if events.is_empty() {
             return Ok(());

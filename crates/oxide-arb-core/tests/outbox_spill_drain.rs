@@ -1,35 +1,33 @@
 //! Outcome drain integration: spill FIFO replay via `spawn_outcome_drain`.
 
-#[path = "support/test_util/risk_config.rs"]
-mod risk_config;
-#[path = "support/test_util/risk_metrics.rs"]
-mod risk_metrics;
-#[path = "support/test_util/risk_persistence.rs"]
-mod risk_persistence;
-
 use oxide_arb_api::ws::ClobWsManager;
 use oxide_arb_core::{
     bridge::risk_metrics::CoreRiskMetrics,
-    execution::{
-        execution_pipeline::{ExecutionPipeline, PostTradeJob},
-        fsm::ExecutionFSM,
-    },
+    execution::{execution_pipeline::PostTradeDrainDeps, fsm::ExecutionFSM},
     exposure::in_memory::InMemoryExposureReservation,
-    observability::metrics_hub::MetricsHub,
+    observability::{
+        alert_dispatcher::AlertDispatcher, execution_audit::ExecutionAuditWriter,
+        metrics_hub::MetricsHub,
+    },
     outbox::in_memory::{InMemoryEventStore, SharedInMemoryEventStore},
     service::risk_metrics::{ApiHealthTracker, RiskMetricsState},
 };
 use oxide_arb_models::{
     config::{ExposureReservationConfig, PolymarketConfig, WebSocketConfig},
-    enums::{common::ExecutionMode, execution::ExecutionOutcome},
-    types::{MarketId, Price, TokenId, TradeId, Usd},
+    domain::{NewTrade, execution::PostTradeJob},
+    enums::common::ExecutionMode,
+    types::Usd,
 };
+use oxide_arb_repository::traits::TradeRepository;
 use oxide_arb_risk::{
     builder::RiskEngineBuilder, clock::utc_clock, engine::RiskEngine, traits::RiskPersistence,
 };
-use risk_config::test_risk_config;
-use risk_metrics::TestRiskMetrics;
-use risk_persistence::TestRiskPersistence;
+use oxide_arb_test_support::{
+    fixtures::minimal_post_trade_job,
+    mocks::MockTradeRepository,
+    persistence::{spawn_test_outcome_drain, test_persistence},
+    risk::{TestRiskMetrics, TestRiskPersistence, test_risk_config},
+};
 use rust_decimal_macros::dec;
 use std::time::Duration as StdTimeDuration;
 use std::{sync::Arc, time::Duration};
@@ -40,27 +38,42 @@ struct DrainFixture {
     outcome_rx: flume::Receiver<PostTradeJob>,
     spill: SharedInMemoryEventStore,
     persistence: Arc<TestRiskPersistence>,
+    trade_repo: Arc<MockTradeRepository>,
+    audit_writer: Arc<ExecutionAuditWriter>,
+    alerts: Arc<AlertDispatcher>,
     risk_engine: Arc<RiskEngine>,
     risk_metrics: Arc<CoreRiskMetrics>,
+    metrics_state: Arc<RiskMetricsState>,
     fsm: Arc<ExecutionFSM>,
     metrics: Arc<MetricsHub>,
+    _shutdown: CancellationToken,
 }
 
-fn spill_job(id: &str) -> PostTradeJob {
-    PostTradeJob {
-        trade_id: TradeId::new(id),
-        market_id: MarketId::new("m1"),
-        token_id: TokenId::new("t1"),
-        entry_price: Price::new(dec!(0.5)),
-        net_profit: Usd::new(dec!(1)),
-        outcome: ExecutionOutcome::Miss {
-            reason: "test".into(),
+async fn seed_pending_trade(trade_repo: &MockTradeRepository, job: &PostTradeJob) {
+    trade_repo
+        .create(NewTrade {
+            trade_id: job.trade_id.clone(),
+            execution_id: job.execution_id.clone(),
+            opportunity_id: job.opportunity_id.clone(),
+            market_id: job.market_id.clone(),
+            event_id: job.event_id.clone(),
+            token_id: job.token_id.clone(),
+            side: job.side,
+            shares: job.plan_shares,
+            price: job.entry_price,
+            cost_usd: Usd::new(job.plan_shares.inner() * job.entry_price.inner()),
+            fee_usd: Usd::ZERO,
+            detected_edge_bps: job.edge_bps,
+            detected_profit_usd: job.detected_profit,
             execution_mode: ExecutionMode::Paper,
-        },
-    }
+        })
+        .await
+        .expect("seed pending trade");
 }
 
 fn build_drain_fixture() -> DrainFixture {
+    let shutdown = CancellationToken::new();
+    let test_persist = test_persistence(shutdown.clone());
     let metrics = Arc::new(MetricsHub::new());
     let fsm = Arc::new(ExecutionFSM::new(Arc::clone(&metrics)));
     let spill = Arc::new(InMemoryEventStore::new());
@@ -71,7 +84,7 @@ fn build_drain_fixture() -> DrainFixture {
     let ws_manager = Arc::new(ClobWsManager::new(
         &PolymarketConfig::default(),
         &WebSocketConfig::default(),
-        CancellationToken::new(),
+        shutdown.clone(),
         None,
         None,
     ));
@@ -94,17 +107,22 @@ fn build_drain_fixture() -> DrainFixture {
             .build(&TestRiskMetrics)
             .expect("risk engine"),
     );
-    let (outcome_tx, outcome_rx) = ExecutionPipeline::outcome_channel();
+    let (outcome_tx, outcome_rx) = flume::bounded(1024);
 
     DrainFixture {
         outcome_tx,
         outcome_rx,
         spill,
         persistence,
+        trade_repo: Arc::clone(&test_persist.trade_repo),
+        audit_writer: Arc::clone(&test_persist.audit_writer),
+        alerts: Arc::clone(&test_persist.alerts),
         risk_engine,
         risk_metrics,
+        metrics_state,
         fsm,
         metrics,
+        _shutdown: shutdown,
     }
 }
 
@@ -120,27 +138,43 @@ fn audit_trade_ids(persistence: &TestRiskPersistence) -> Vec<String> {
 async fn spawn_outcome_drain_replays_spill_fifo_before_channel_jobs() {
     let fixture = build_drain_fixture();
     for id in ["job-a", "job-b", "job-c"] {
+        let job = minimal_post_trade_job(id);
+        seed_pending_trade(fixture.trade_repo.as_ref(), &job).await;
         fixture
             .spill
-            .enqueue_sync_post_trade(spill_job(id), &fixture.metrics)
+            .enqueue_sync_post_trade(job, &fixture.metrics)
             .expect("prefill spill");
     }
 
     let shutdown = CancellationToken::new();
+    let channel_job = minimal_post_trade_job("job-d");
+    seed_pending_trade(fixture.trade_repo.as_ref(), &channel_job).await;
+
     let drain = tokio::spawn({
         let rx = fixture.outcome_rx.clone();
         let risk_engine = Arc::clone(&fixture.risk_engine);
         let risk_metrics = Arc::clone(&fixture.risk_metrics);
         let fsm = Arc::clone(&fixture.fsm);
+        let trade_repo = Arc::clone(&fixture.trade_repo);
+        let audit_writer = Arc::clone(&fixture.audit_writer);
+        let alerts = Arc::clone(&fixture.alerts);
         let spill = Arc::clone(&fixture.spill);
+        let metrics_state = Arc::clone(&fixture.metrics_state);
         let shutdown = shutdown.clone();
         async move {
-            ExecutionPipeline::spawn_outcome_drain(
+            spawn_test_outcome_drain(
                 rx,
-                risk_engine,
-                risk_metrics,
-                fsm,
-                spill,
+                PostTradeDrainDeps {
+                    risk_engine,
+                    risk_metrics,
+                    fsm,
+                    trade_repo,
+                    audit_writer,
+                    alerts,
+                    post_trade_spill: spill,
+                    metrics_state,
+                    metrics_refresh: None,
+                },
                 shutdown,
             )
             .await
@@ -150,7 +184,7 @@ async fn spawn_outcome_drain_replays_spill_fifo_before_channel_jobs() {
 
     fixture
         .outcome_tx
-        .send_async(spill_job("job-d"))
+        .send_async(channel_job)
         .await
         .expect("channel job");
 

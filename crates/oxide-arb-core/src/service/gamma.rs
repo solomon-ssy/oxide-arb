@@ -8,7 +8,7 @@ use crate::{
 use chrono::{DateTime, Utc};
 use num_traits::ToPrimitive;
 use oxide_arb_api::{fees::FeeCalculator, gamma::GammaClient, ws::TOKEN_INTERN};
-use oxide_arb_error::OxideError;
+use oxide_arb_error::{OxideError, market::MarketError};
 use oxide_arb_models::{
     domain::{
         market,
@@ -23,7 +23,6 @@ use oxide_arb_repository::{
 use oxide_arb_storage::cache::TieredCache;
 use std::{collections::HashSet, sync::Arc, time::Instant};
 
-const FULL_SYNC_INTERVAL_SECS: i64 = 300;
 const INCREMENTAL_FETCH_CONCURRENCY: usize = 10;
 
 /// Dependencies injected into [`GammaService`].
@@ -36,6 +35,8 @@ pub struct GammaServiceDeps {
     pub event_repo: Arc<PgEventRepository>,
     pub cache: Arc<TieredCache>,
     pub metrics: Arc<MetricsHub>,
+    /// Minimum seconds between full catalog refreshes (from `[market_data.gamma]`).
+    pub full_sync_interval_secs: u64,
 }
 
 pub struct GammaService {
@@ -47,6 +48,7 @@ pub struct GammaService {
     event_repo: Arc<PgEventRepository>,
     cache: Arc<TieredCache>,
     metrics: Arc<MetricsHub>,
+    full_sync_interval_secs: u64,
     last_sync_at: parking_lot::Mutex<Option<DateTime<Utc>>>,
 }
 
@@ -61,6 +63,7 @@ impl GammaService {
             event_repo: deps.event_repo,
             cache: deps.cache,
             metrics: deps.metrics,
+            full_sync_interval_secs: deps.full_sync_interval_secs.max(60),
             last_sync_at: parking_lot::Mutex::new(None),
         }
     }
@@ -81,7 +84,10 @@ impl GammaService {
     async fn sync_inner(&self) -> Result<(), OxideError> {
         let now = Utc::now();
         let last = *self.last_sync_at.lock();
-        let needs_full = last.is_none_or(|t| (now - t).num_seconds() > FULL_SYNC_INTERVAL_SECS);
+        let needs_full = last.is_none_or(|t| {
+            (now - t).num_seconds()
+                > i64::try_from(self.full_sync_interval_secs).unwrap_or(i64::MAX)
+        });
 
         if needs_full {
             self.full_sync().await?;
@@ -103,6 +109,11 @@ impl GammaService {
 
         let event_count = batch.registry_events.len();
         let market_count = batch.registry_markets.len();
+
+        if market_count == 0 {
+            return Err(MarketError::EmptyCatalog.into());
+        }
+
         let seen_ids: HashSet<MarketId> = batch
             .registry_markets
             .iter()

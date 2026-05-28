@@ -1,19 +1,108 @@
-//! In-memory [`RiskPersistence`] for integration tests and runtime harnesses.
+//! Risk engine config, metrics, and persistence mocks for integration tests.
 
 use oxide_arb_error::OxideResult;
 use oxide_arb_models::{
+    config::{KellyConfig, RiskConfig},
     domain::{
         blacklist::{BlacklistInfo, UpsertBlacklistEntry},
+        position::PositionInfo,
         risk::{
             NewEmergencySnapshot, NewReconciliationReport, NewRiskAuditEvent, RiskStateInfo,
             UpsertRiskEngineState,
         },
     },
-    enums::risk::BreakerStateName,
+    enums::{common::Side, risk::BreakerStateName},
     types::{MarketId, Usd},
 };
-use oxide_arb_risk::traits::RiskPersistence;
+use oxide_arb_risk::traits::{RiskMetrics, RiskPersistence};
+use rust_decimal_macros::dec;
 use std::{mem::take, sync::Mutex};
+
+// ── Config ──────────────────────────────────────────────────────────────
+
+#[must_use]
+pub fn test_risk_config() -> RiskConfig {
+    RiskConfig {
+        max_total_exposure_usd: dec!(5000),
+        max_single_market_exposure_usd: dec!(500),
+        max_single_bet_usd: dec!(25),
+        max_open_positions: 5,
+        max_daily_loss_usd: dec!(75),
+        max_weekly_loss_usd: dec!(120),
+        daily_budget_usd: dec!(200),
+        min_balance_usd: dec!(50),
+        reserve_balance_usd: dec!(100),
+        min_trade_usd: dec!(1),
+        max_consecutive_misses: 3,
+        bankroll_usd: dec!(5000),
+        kelly: KellyConfig {
+            min_edge_bps: dec!(50),
+            ..KellyConfig::default()
+        },
+        ..RiskConfig::default()
+    }
+}
+
+// ── Metrics ─────────────────────────────────────────────────────────────
+
+/// Zero-friction metrics snapshot with healthy defaults for execution tests.
+pub struct TestRiskMetrics;
+
+impl RiskMetrics for TestRiskMetrics {
+    fn total_exposure(&self) -> Usd {
+        Usd::new(dec!(100))
+    }
+
+    fn market_exposure(&self, _: &MarketId) -> Usd {
+        Usd::ZERO
+    }
+
+    fn open_position_count(&self) -> usize {
+        0
+    }
+
+    fn open_positions(&self) -> Vec<PositionInfo> {
+        Vec::new()
+    }
+
+    fn cached_balance(&self) -> Usd {
+        Usd::new(dec!(5000))
+    }
+
+    fn active_reservation_count(&self) -> usize {
+        0
+    }
+
+    fn reserved_usd(&self) -> Usd {
+        Usd::ZERO
+    }
+
+    fn open_directional_count(&self, _: Side) -> usize {
+        0
+    }
+
+    fn daily_directional_trades(&self, _: Side) -> u32 {
+        0
+    }
+
+    fn consecutive_market_misses(&self, _: &MarketId) -> u32 {
+        0
+    }
+
+    fn ws_disconnect_secs(&self) -> u64 {
+        0
+    }
+
+    fn api_error_count(&self) -> u64 {
+        0
+    }
+
+    fn api_request_count(&self) -> u64 {
+        0
+    }
+}
+
+// ── Persistence ─────────────────────────────────────────────────────────
 
 /// Captures all persistence writes in memory for assertions (no I/O, no PG).
 pub struct TestRiskPersistence {
@@ -36,7 +125,6 @@ impl TestRiskPersistence {
         }
     }
 
-    /// Drain captured audit events (most recent batch since last take).
     pub fn take_audits(&self) -> Vec<NewRiskAuditEvent> {
         take(&mut *self.audits.lock().expect("audit lock"))
     }

@@ -85,8 +85,8 @@ const fn default_ws_max_subscriptions() -> usize {
 pub struct GammaConfig {
     #[serde(default = "default_gamma_url")]
     pub base_url: String,
-    #[serde(default = "default_gamma_poll")]
-    pub poll_interval_secs: u64,
+    #[serde(default = "default_gamma_full_sync_interval")]
+    pub full_sync_interval_secs: u64,
     #[serde(default = "default_gamma_page_size")]
     pub page_size: u32,
 }
@@ -95,7 +95,7 @@ impl Default for GammaConfig {
     fn default() -> Self {
         Self {
             base_url: default_gamma_url(),
-            poll_interval_secs: default_gamma_poll(),
+            full_sync_interval_secs: default_gamma_full_sync_interval(),
             page_size: default_gamma_page_size(),
         }
     }
@@ -104,7 +104,7 @@ impl Default for GammaConfig {
 fn default_gamma_url() -> String {
     "https://gamma-api.polymarket.com".into()
 }
-const fn default_gamma_poll() -> u64 {
+const fn default_gamma_full_sync_interval() -> u64 {
     300
 }
 const fn default_gamma_page_size() -> u32 {

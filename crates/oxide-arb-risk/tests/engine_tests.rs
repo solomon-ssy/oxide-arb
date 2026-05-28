@@ -18,7 +18,7 @@ use oxide_arb_models::{
         calibration::{DurationBucket, PriceZone},
         common::{MarketCategory, Side, StalenessLevel, TradeOutcome},
         opportunity::PayoutModel,
-        risk::TradeAccountingPhase,
+        risk::{CircuitBreakerLevel, TradeAccountingPhase},
     },
     types::{Bps, EventId, MarketId, OpportunityId, Price, Shares, TokenId, TradeId, Usd},
 };
@@ -105,6 +105,8 @@ fn test_trade_record(outcome: TradeOutcome, profit: Decimal) -> PostTradeInput {
         cost_usd: Usd::new(dec!(20)),
         fee_usd: Usd::new(dec!(0.40)),
         net_profit_usd: Some(Usd::new(profit)),
+        shares: Shares::new(dec!(100)),
+        entry_price: Price::new(dec!(0.92)),
     }
 }
 
@@ -391,5 +393,124 @@ async fn heartbeat_failures_trigger_system_halt() {
     assert!(
         engine.is_halted(),
         "heartbeat success does not auto-resume from L4 halt"
+    );
+}
+
+// ── Loss cap breaker levels ────────────────────────────────────────────────
+
+fn loss_cap_engine(config: RiskConfig, metrics: &MockMetrics) -> RiskEngine {
+    RiskEngineBuilder::new()
+        .config(config)
+        .clock(utc_clock())
+        .initial_equity(Usd::new(dec!(5000)))
+        .build(metrics)
+        .expect("engine should build")
+}
+
+async fn fill_then_settle(engine: &RiskEngine, metrics: &MockMetrics, profit: Decimal) {
+    let trade = test_trade_record(TradeOutcome::Success, profit);
+    engine
+        .on_trade_result(TradeAccountingPhase::Fill, &trade, metrics)
+        .await
+        .unwrap();
+    engine
+        .on_trade_result(TradeAccountingPhase::Settlement, &trade, metrics)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn weekly_loss_cap_triggers_system_halt() {
+    let metrics = MockMetrics::default();
+    let config = RiskConfig {
+        max_weekly_loss_usd: dec!(50),
+        max_daily_loss_usd: dec!(500),
+        max_single_loss_usd: dec!(500),
+        max_total_exposure_usd: dec!(5000),
+        max_single_market_exposure_usd: dec!(500),
+        max_single_bet_usd: dec!(25),
+        max_open_positions: 5,
+        daily_budget_usd: dec!(200),
+        min_balance_usd: dec!(50),
+        reserve_balance_usd: dec!(100),
+        min_trade_usd: dec!(1),
+        max_consecutive_misses: 100,
+        ..RiskConfig::default()
+    };
+    let engine = loss_cap_engine(config, &metrics);
+
+    fill_then_settle(&engine, &metrics, dec!(-60)).await;
+
+    let snapshot = engine.snapshot(&metrics);
+    assert_eq!(
+        snapshot.breaker_level,
+        Some(CircuitBreakerLevel::System),
+        "weekly breach must trip System-level halt"
+    );
+    assert!(snapshot.is_halted);
+}
+
+#[tokio::test]
+async fn single_loss_cap_triggers_daily_halt() {
+    let metrics = MockMetrics::default();
+    let config = RiskConfig {
+        max_single_loss_usd: dec!(30),
+        max_weekly_loss_usd: dec!(500),
+        max_daily_loss_usd: dec!(500),
+        max_total_exposure_usd: dec!(5000),
+        max_single_market_exposure_usd: dec!(500),
+        max_single_bet_usd: dec!(25),
+        max_open_positions: 5,
+        daily_budget_usd: dec!(200),
+        min_balance_usd: dec!(50),
+        reserve_balance_usd: dec!(100),
+        min_trade_usd: dec!(1),
+        max_consecutive_misses: 100,
+        ..RiskConfig::default()
+    };
+    let engine = loss_cap_engine(config, &metrics);
+
+    fill_then_settle(&engine, &metrics, dec!(-40)).await;
+
+    let snapshot = engine.snapshot(&metrics);
+    assert_eq!(
+        snapshot.breaker_level,
+        Some(CircuitBreakerLevel::Daily),
+        "single-loss breach must trip Daily-level halt"
+    );
+    assert!(snapshot.is_halted);
+}
+
+#[tokio::test]
+async fn loss_cap_records_emergency_in_snapshot() {
+    let metrics = MockMetrics::default();
+    let config = RiskConfig {
+        max_weekly_loss_usd: dec!(50),
+        max_daily_loss_usd: dec!(500),
+        max_single_loss_usd: dec!(500),
+        max_total_exposure_usd: dec!(5000),
+        max_single_market_exposure_usd: dec!(500),
+        max_single_bet_usd: dec!(25),
+        max_open_positions: 5,
+        daily_budget_usd: dec!(200),
+        min_balance_usd: dec!(50),
+        reserve_balance_usd: dec!(100),
+        min_trade_usd: dec!(1),
+        max_consecutive_misses: 100,
+        ..RiskConfig::default()
+    };
+    let engine = loss_cap_engine(config, &metrics);
+
+    fill_then_settle(&engine, &metrics, dec!(-60)).await;
+
+    let snapshot = engine.snapshot(&metrics);
+    assert!(snapshot.last_emergency_at.is_some());
+    assert!(
+        snapshot
+            .last_emergency_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("weekly loss cap")),
+        "expected weekly loss reason, got {:?}",
+        snapshot.last_emergency_reason
     );
 }

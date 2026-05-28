@@ -1,8 +1,5 @@
 //! Execution runner shard routing and parallel dispatch tests.
 
-#[path = "support/test_util/scored_opportunity.rs"]
-mod scored_opportunity;
-
 use async_trait::async_trait;
 use oxide_arb_algorithm::scorer::ScoredOpportunity;
 use oxide_arb_core::{
@@ -16,8 +13,8 @@ use oxide_arb_models::{
     domain::execution::{ExecutionOutcomeSummary, ExecutionResult},
     types::MarketId,
 };
+use oxide_arb_test_support::fixtures::sample_scored;
 use parking_lot::Mutex;
-use scored_opportunity::sample_scored;
 use std::{
     sync::{
         Arc,

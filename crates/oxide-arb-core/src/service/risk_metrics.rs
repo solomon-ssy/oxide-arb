@@ -1,16 +1,19 @@
 //! Periodic refresh of risk metrics snapshot from CLOB balance and open positions.
 
-use crate::observability::metrics_hub::MetricsHub;
+use crate::{bridge::risk_metrics::CoreRiskMetrics, observability::metrics_hub::MetricsHub};
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use num_traits::ToPrimitive;
 use oxide_arb_api::clob::ClobClient;
+use oxide_arb_error::OxideError;
 use oxide_arb_models::{
     domain::position::PositionInfo,
     enums::common::Side,
     types::{MarketId, Usd},
 };
 use oxide_arb_repository::{postgres::PgPositionRepository, traits::PositionRepository};
+use oxide_arb_risk::engine::RiskEngine;
+use parking_lot::Mutex;
 use std::{
     collections::HashMap,
     sync::{
@@ -314,11 +317,19 @@ pub struct LoadedMetricsSnapshot {
     pub consecutive_market_misses: u32,
 }
 
+struct ReconciliationContext {
+    risk_engine: Arc<RiskEngine>,
+    risk_metrics: Arc<CoreRiskMetrics>,
+    interval: Duration,
+    last_run: Mutex<Instant>,
+}
+
 pub struct RiskMetricsRefreshService {
     state: Arc<RiskMetricsState>,
     clob_client: Arc<ClobClient>,
     position_repo: Arc<PgPositionRepository>,
     metrics: Arc<MetricsHub>,
+    reconciliation: Option<ReconciliationContext>,
 }
 
 impl RiskMetricsRefreshService {
@@ -333,33 +344,89 @@ impl RiskMetricsRefreshService {
             clob_client,
             position_repo,
             metrics,
+            reconciliation: None,
         }
     }
 
-    /// Refresh the `ArcSwap` snapshot from DB/API. Intended for a ~1s periodic task.
-    pub async fn refresh(&self) {
+    /// Attach reconciliation so it piggybacks on the same CLOB+PG fetch.
+    #[must_use]
+    pub fn with_reconciliation(
+        mut self,
+        risk_engine: Arc<RiskEngine>,
+        risk_metrics: Arc<CoreRiskMetrics>,
+        reconciliation_interval_secs: u64,
+    ) -> Self {
+        self.reconciliation = Some(ReconciliationContext {
+            risk_engine,
+            risk_metrics,
+            interval: Duration::from_secs(reconciliation_interval_secs.max(60)),
+            last_run: Mutex::new(Instant::now()),
+        });
+        self
+    }
+
+    /// Refresh the snapshot from CLOB/PG. Called by the startup gate.
+    pub async fn refresh(&self) -> Result<(), OxideError> {
+        self.fetch_and_store_snapshot().await?;
+        Ok(())
+    }
+
+    /// Refresh snapshot and, if the reconciliation interval has elapsed,
+    /// run ledger reconciliation on the same fetched data — zero extra I/O.
+    pub async fn refresh_and_maybe_reconcile(&self) -> Result<(), OxideError> {
+        let (balance, ext_positions) = self.fetch_and_store_snapshot().await?;
+
+        if let Some(ctx) = &self.reconciliation {
+            let should_reconcile = ctx.last_run.lock().elapsed() >= ctx.interval;
+            if should_reconcile {
+                let reconciler = ctx.risk_engine.reconciler();
+                let report = reconciler.reconcile_fetched(
+                    ctx.risk_metrics.as_ref(),
+                    balance,
+                    Usd::ZERO,
+                    &ext_positions,
+                );
+                if let Err(error) = ctx
+                    .risk_engine
+                    .on_reconciliation_result(&report, ctx.risk_metrics.as_ref())
+                    .await
+                {
+                    tracing::error!(%error, "reconciliation result processing failed");
+                }
+                *ctx.last_run.lock() = Instant::now();
+            }
+        }
+        Ok(())
+    }
+
+    async fn fetch_and_store_snapshot(&self) -> Result<(Usd, Vec<(MarketId, Usd)>), OxideError> {
         let balance = match self.clob_client.collateral_balance().await {
-            Ok(b) => b,
-            Err(e) => {
-                tracing::warn!(error = %e, "risk metrics refresh: balance fetch failed");
+            Ok(b) => {
+                self.state.api_tracker.record_request(true);
+                b
+            }
+            Err(error) => {
+                self.state.api_tracker.record_request(false);
+                tracing::warn!(%error, "risk metrics refresh: balance fetch failed");
                 self.metrics.metrics_refresh_failures.inc();
-                Usd::ZERO
+                return Err(OxideError::from(error));
             }
         };
 
-        let positions = match self.position_repo.find_open().await {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::warn!(error = %e, "risk metrics refresh: position fetch failed");
-                self.metrics.metrics_refresh_failures.inc();
-                Vec::new()
-            }
-        };
+        let positions = self.position_repo.find_open().await.map_err(|error| {
+            tracing::warn!(%error, "risk metrics refresh: position fetch failed");
+            self.metrics.metrics_refresh_failures.inc();
+            OxideError::from(error)
+        })?;
 
         let mut total_exp = Usd::ZERO;
         let mut market_exps: HashMap<MarketId, Usd> = HashMap::new();
         let mut buy_count = 0usize;
         let mut sell_count = 0usize;
+        let ext_positions: Vec<(MarketId, Usd)> = positions
+            .iter()
+            .map(|p| (p.market_id.clone(), p.total_cost_usd))
+            .collect();
 
         for p in &positions {
             total_exp += p.total_cost_usd;
@@ -383,5 +450,6 @@ impl RiskMetricsRefreshService {
             positions,
             refresh_sequence: seq,
         });
+        Ok((balance, ext_positions))
     }
 }

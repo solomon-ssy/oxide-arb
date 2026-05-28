@@ -60,7 +60,7 @@ max_subscriptions_per_connection = 200
 
 [market_data.gamma]
 base_url = "https://gamma-api.polymarket.com"
-poll_interval_secs = 300
+full_sync_interval_secs = 300
 page_size = 100
 
 # ── Execution ─────────────────────────────────────────────────────────────────

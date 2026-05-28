@@ -1,10 +1,15 @@
+use crate::observability::metrics_hub::MetricsHub;
 use oxide_arb_error::OxideError;
-use std::{future::Future, pin::Pin, time::Duration};
+use prometheus::IntCounter;
+use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
+
+type AsyncWriterWorker = Pin<Box<dyn Future<Output = Result<(), OxideError>> + Send>>;
 
 pub struct AsyncWriter<T: Send + 'static> {
     tx: flume::Sender<T>,
     name: String,
+    drops: IntCounter,
 }
 
 impl<T: Send + 'static> AsyncWriter<T> {
@@ -13,8 +18,9 @@ impl<T: Send + 'static> AsyncWriter<T> {
         batch_size: usize,
         flush_interval: Duration,
         flush_fn: F,
+        metrics: Arc<MetricsHub>,
         shutdown: CancellationToken,
-    ) -> (Self, impl Future<Output = Result<(), OxideError>>)
+    ) -> (Self, AsyncWriterWorker)
     where
         F: Fn(Vec<T>) -> Pin<Box<dyn Future<Output = Result<(), OxideError>> + Send>>
             + Send
@@ -22,9 +28,14 @@ impl<T: Send + 'static> AsyncWriter<T> {
     {
         let (tx, rx) = flume::bounded(4096);
         let name = name.into();
+        let drops = metrics
+            .async_writer_dropped
+            .with_label_values(&[name.as_str()]);
+        drop(metrics);
         let writer = Self {
             tx,
             name: name.clone(),
+            drops,
         };
 
         let worker = async move {
@@ -76,11 +87,12 @@ impl<T: Send + 'static> AsyncWriter<T> {
             }
         };
 
-        (writer, worker)
+        (writer, Box::pin(worker))
     }
 
     pub fn write(&self, item: T) {
         if let Err(e) = self.tx.try_send(item) {
+            self.drops.inc();
             tracing::warn!(writer = %self.name, "channel full or closed, dropping item: {e}");
         }
     }

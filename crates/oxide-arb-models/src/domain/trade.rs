@@ -5,15 +5,13 @@
 //! - `NewTrade` / `UpdateTradeOutcome` are write DTOs.
 
 use crate::{
-    domain::PositionInfo,
-    enums::common::{ExecutionMode, MarketCategory, Side, TradeOutcome},
+    enums::common::{ExecutionMode, Side, TradeOutcome},
     types::{
         Bps, EventId, ExecutionId, MarketId, OpportunityId, OrderId, Price, Shares, TokenId,
         TradeId, Usd,
     },
 };
 use chrono::{DateTime, NaiveDate, Utc};
-use rust_decimal::Decimal;
 use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
 use serde::{Deserialize, Serialize};
 
@@ -70,6 +68,8 @@ pub struct PostTradeInput {
     pub cost_usd: Usd,
     pub fee_usd: Usd,
     pub net_profit_usd: Option<Usd>,
+    pub shares: Shares,
+    pub entry_price: Price,
 }
 
 impl PostTradeInput {
@@ -120,6 +120,8 @@ impl From<&TradeInfo> for PostTradeInput {
             cost_usd: t.cost_usd,
             fee_usd: t.fee_usd,
             net_profit_usd: t.net_profit_usd,
+            shares: t.shares,
+            entry_price: t.price,
         }
     }
 }
@@ -130,11 +132,12 @@ impl From<&TradeInfo> for PostTradeInput {
 ///
 /// Derives `DeriveIntoActiveModel` — calling `.into_active_model()` produces
 /// an `ActiveModel` with these fields `Set(...)` and all others `NotSet`.
-/// The entity's `ActiveModelBehavior::before_save` fills in `trade_id`,
-/// `outcome`, timestamps, and nullable defaults automatically.
+/// The entity's `ActiveModelBehavior::before_save` fills in `outcome`,
+/// timestamps, and nullable defaults automatically.
 #[derive(Debug, Clone, DeriveIntoActiveModel)]
 #[sea_orm(active_model = "super::super::entities::trade::ActiveModel")]
 pub struct NewTrade {
+    pub trade_id: TradeId,
     pub execution_id: ExecutionId,
     pub opportunity_id: OpportunityId,
     pub market_id: MarketId,
@@ -154,6 +157,10 @@ pub struct NewTrade {
 #[derive(Debug, Clone)]
 pub struct UpdateTradeOutcome {
     pub outcome: TradeOutcome,
+    pub shares: Option<Shares>,
+    pub price: Option<Price>,
+    pub cost_usd: Option<Usd>,
+    pub fee_usd: Option<Usd>,
     pub order_id: Option<OrderId>,
     pub tx_hash: Option<String>,
     pub net_profit_usd: Option<Usd>,
@@ -176,32 +183,4 @@ pub struct DailyReport {
     pub miss_count: u32,
     pub largest_single_loss: Usd,
     pub largest_single_profit: Usd,
-}
-
-/// Wallet balance cache snapshot (not persisted, runtime-only).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WalletBalanceSnapshot {
-    pub raw_balance: Usd,
-    pub reserved: Usd,
-    pub available: Usd,
-    pub queried_at: DateTime<Utc>,
-}
-
-/// Per-market position summary cache DTO.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PositionSummary {
-    pub market_id: MarketId,
-    pub open_positions: Vec<PositionInfo>,
-    pub total_exposure_usd: Usd,
-    pub position_count: usize,
-    pub summarized_at: DateTime<Utc>,
-}
-
-/// Fee params cache DTO.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CachedFeeParams {
-    pub category: MarketCategory,
-    pub fee_rate: Decimal,
-    pub exponent: Decimal,
-    pub cached_at: DateTime<Utc>,
 }

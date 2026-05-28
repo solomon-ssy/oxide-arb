@@ -27,6 +27,16 @@ pub trait RiskCheck: Send + Sync {
     fn id(&self) -> RiskCheckId;
     fn kind(&self) -> RiskCheckKind;
     fn evaluate(&self, ctx: &PreTradeContext<'_>) -> RiskCheckResult;
+
+    /// Whether [`evaluate`] needs a live [`PreTradeContext::metrics`] snapshot.
+    ///
+    /// `false` only when the check reads exclusively from [`PreTradeContext::snap`]
+    /// (ArcSwap-published risk state). Phase-1 evaluation uses zeroed metrics so
+    /// incorrect `true` here can silently reject trades; incorrect `false` can
+    /// skip required live exposure/balance data.
+    fn requires_metrics(&self) -> bool {
+        true
+    }
 }
 
 /// Statically registered pipeline — no dynamic dispatch on the hot path.
@@ -55,6 +65,8 @@ pub struct StaticRiskPipeline {
     daily_directional_budget: DailyDirectionalBudgetCheck,
     duplicate_market: DuplicateMarketCheck,
     drawdown_guard: DrawdownGuardCheck,
+    /// Index of the first check in evaluation order with [`RiskCheck::requires_metrics`].
+    metrics_split: usize,
 }
 
 impl StaticRiskPipeline {
@@ -66,6 +78,21 @@ impl StaticRiskPipeline {
     #[must_use]
     pub const fn is_empty(&self) -> bool {
         false
+    }
+
+    /// Number of gates evaluated before live metrics are loaded.
+    #[must_use]
+    pub const fn metrics_split_index(&self) -> usize {
+        self.metrics_split
+    }
+
+    /// Per-check `requires_metrics` in canonical evaluation order (golden tests).
+    #[must_use]
+    pub fn requires_metrics_profile(&self) -> Vec<(RiskCheckId, bool)> {
+        self.check_refs_in_order()
+            .into_iter()
+            .map(|check| (check.id(), check.requires_metrics()))
+            .collect()
     }
 
     /// Ordered list of check IDs (for golden tests).
@@ -97,6 +124,42 @@ impl StaticRiskPipeline {
             RiskCheckId::DuplicateMarket,
             RiskCheckId::DrawdownGuard,
         ]
+    }
+
+    fn check_refs_in_order(&self) -> Vec<&dyn RiskCheck> {
+        vec![
+            &self.manual_halt,
+            &self.circuit_breaker,
+            &self.blacklist,
+            &self.token_blacklist,
+            &self.min_depth,
+            &self.max_depth_usage,
+            &self.staleness,
+            &self.daily_budget,
+            &self.daily_loss_cap,
+            &self.weekly_loss_cap,
+            &self.hourly_loss_cap,
+            &self.max_single_bet,
+            &self.market_exposure,
+            &self.total_exposure,
+            &self.exposure_pct,
+            &self.potential_loss_cap,
+            &self.max_positions,
+            &self.ws_connectivity,
+            &self.api_error_rate,
+            &self.min_balance,
+            &self.directional_concentration,
+            &self.daily_directional_budget,
+            &self.duplicate_market,
+            &self.drawdown_guard,
+        ]
+    }
+
+    fn compute_metrics_split(&self) -> usize {
+        self.check_refs_in_order()
+            .iter()
+            .position(|check| check.requires_metrics())
+            .unwrap_or(self.len())
     }
 
     #[must_use]
@@ -215,8 +278,8 @@ fn run_check<C: RiskCheck>(
 
 /// Build the canonical pipeline in the fixed evaluation order.
 #[must_use]
-pub const fn build_default_pipeline(config: &RiskConfig) -> StaticRiskPipeline {
-    StaticRiskPipeline {
+pub fn build_default_pipeline(config: &RiskConfig) -> StaticRiskPipeline {
+    let pipeline = StaticRiskPipeline {
         manual_halt: ManualHaltCheck,
         circuit_breaker: CircuitBreakerCheck,
         blacklist: BlacklistCheck,
@@ -241,5 +304,11 @@ pub const fn build_default_pipeline(config: &RiskConfig) -> StaticRiskPipeline {
         daily_directional_budget: DailyDirectionalBudgetCheck::new(config),
         duplicate_market: DuplicateMarketCheck,
         drawdown_guard: DrawdownGuardCheck,
+        metrics_split: 0,
+    };
+    let metrics_split = pipeline.compute_metrics_split();
+    StaticRiskPipeline {
+        metrics_split,
+        ..pipeline
     }
 }

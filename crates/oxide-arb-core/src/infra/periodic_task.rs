@@ -10,6 +10,7 @@ impl PeriodicTask {
         name: &str,
         interval: Duration,
         jitter_pct: f64,
+        skip_first_tick: bool,
         shutdown: CancellationToken,
         task_fn: F,
     ) -> Result<(), OxideError>
@@ -19,6 +20,9 @@ impl PeriodicTask {
     {
         let mut timer = tokio::time::interval(interval);
         timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        if skip_first_tick {
+            timer.tick().await;
+        }
 
         loop {
             tokio::select! {

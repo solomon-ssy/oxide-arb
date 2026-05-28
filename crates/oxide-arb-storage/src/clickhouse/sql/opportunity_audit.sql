@@ -1,5 +1,7 @@
 CREATE TABLE IF NOT EXISTS opportunity_audit (
     opportunity_id  String,
+    execution_id    String,
+    trade_id        String,
     market_id       String,
     event_id        String,
     side            String,
@@ -19,11 +21,14 @@ CREATE TABLE IF NOT EXISTS opportunity_audit (
     staleness       String,
     category        String,
     outcome         Nullable(String),
+    rejection_stage Nullable(String),
+    rejection_reason Nullable(String),
     detected_at     DateTime64(3, 'UTC'),
+    updated_at      DateTime64(3, 'UTC'),
     audit_date      Date MATERIALIZED toDate(detected_at)
 )
-ENGINE = MergeTree()
+ENGINE = ReplacingMergeTree(updated_at)
 PARTITION BY toYYYYMM(audit_date)
-ORDER BY (detected_at, opportunity_id)
+ORDER BY (execution_id, detected_at)
 TTL audit_date + INTERVAL 365 DAY DELETE
 SETTINGS index_granularity = 8192

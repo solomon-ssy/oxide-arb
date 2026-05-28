@@ -7,12 +7,12 @@ use clob_wiremock::{
     mount_clob_requirements, mount_derive_api_key, mount_post_order, test_clob_client,
     test_order_request, test_token_id,
 };
-use oxide_arb_api::infra::retry::RetryPolicy;
+use oxide_arb_api::{fees::FeeCalculator, infra::retry::RetryPolicy};
 use oxide_arb_core::execution::clob_outcome::map_order_response;
 use oxide_arb_models::{
     domain::execution::ExecutionPlan,
     enums::{
-        common::{ExecutionMode, OrderType, Side},
+        common::{ExecutionMode, MarketCategory, OrderType, Side},
         execution::ExecutionOutcome,
         order::OrderStatus,
     },
@@ -90,7 +90,16 @@ async fn live_fok_miss() {
     assert_eq!(resp.status, OrderStatus::Rejected);
 
     let plan = sample_plan();
-    let outcome = map_order_response(resp, &plan, ExecutionMode::Live, Instant::now());
+    let fee_calculator = FeeCalculator::default();
+    let outcome = map_order_response(
+        resp,
+        &plan,
+        ExecutionMode::Live,
+        Instant::now(),
+        &fee_calculator,
+        plan.category,
+        &plan.token_id,
+    );
     assert!(matches!(outcome, ExecutionOutcome::Miss { .. }));
 }
 
@@ -202,6 +211,7 @@ fn sample_plan() -> ExecutionPlan {
         limit_price: Price::new(dec!(0.5)),
         estimated_cost: Usd::new(dec!(50)),
         estimated_fee: ModelsUsd::ZERO,
+        category: MarketCategory::Other,
         neg_risk: false,
         reservation_id: ReservationId::new_id(),
         detected_at: Utc::now(),

@@ -97,7 +97,7 @@ fn build_scanner(
     ));
     let staleness = StalenessClassifier::new(&settings.market_data);
 
-    Scanner::new(pipeline, book_store, market_cache, staleness, metrics)
+    Scanner::new(pipeline, book_store, market_cache, staleness, metrics, None)
 }
 
 fn seed_full_books(store: &BookStore, yes: &TokenId, no: &TokenId, timestamp_ms: u64) {

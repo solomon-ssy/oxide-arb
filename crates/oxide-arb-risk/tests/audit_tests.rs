@@ -6,7 +6,7 @@
 mod support;
 
 use oxide_arb_models::{
-    config::RiskConfig,
+    config::{CircuitBreakerConfig, RiskConfig},
     domain::{
         blacklist::{BlacklistInfo, UpsertBlacklistEntry},
         risk::{
@@ -17,9 +17,9 @@ use oxide_arb_models::{
     },
     enums::{
         common::TradeOutcome,
-        risk::{BlacklistReason, BreakerStateName, TradeAccountingPhase},
+        risk::{BlacklistReason, BreakerStateName, RiskAuditEventType, TradeAccountingPhase},
     },
-    types::{MarketId, TokenId, TradeId, Usd},
+    types::{MarketId, Price, Shares, TokenId, TradeId, Usd},
 };
 use oxide_arb_risk::{
     builder::RiskEngineBuilder, clock::utc_clock, engine::RiskEngine, traits::RiskPersistence,
@@ -29,6 +29,8 @@ use rust_decimal_macros::dec;
 use std::{
     mem::take,
     sync::{Arc, Mutex},
+    thread::sleep,
+    time::Duration,
 };
 use support::MockMetrics;
 
@@ -150,6 +152,8 @@ fn test_trade(outcome: TradeOutcome, profit: Decimal) -> PostTradeInput {
         cost_usd: Usd::new(dec!(20)),
         fee_usd: Usd::new(dec!(0.40)),
         net_profit_usd: Some(Usd::new(profit)),
+        shares: Shares::new(dec!(100)),
+        entry_price: Price::new(dec!(0.92)),
     }
 }
 
@@ -264,4 +268,64 @@ async fn resume_emits_engine_resumed() {
 
     let audits = persistence.take_audits();
     assert!(!audits.is_empty(), "expected EngineResumed audit event");
+}
+
+#[tokio::test]
+async fn tick_emits_breaker_recovered_audit() {
+    let persistence = Arc::new(CapturingPersistence::new());
+    let metrics = MockMetrics {
+        consecutive_misses: 5,
+        ..MockMetrics::healthy()
+    };
+    let config = RiskConfig {
+        max_consecutive_misses: 3,
+        circuit_breaker: CircuitBreakerConfig {
+            l2_cooldown_secs: 0,
+            recovery_observation_secs: 0,
+            half_open_probes: 1,
+            ..Default::default()
+        },
+        ..test_config()
+    };
+    let engine = RiskEngineBuilder::new()
+        .config(config)
+        .clock(utc_clock())
+        .persistence(persistence.clone())
+        .initial_equity(Usd::new(dec!(5000)))
+        .build(&metrics)
+        .expect("engine should build");
+
+    engine
+        .on_trade_result(
+            TradeAccountingPhase::Settlement,
+            &test_trade(TradeOutcome::Miss, dec!(-5)),
+            &metrics,
+        )
+        .await
+        .unwrap();
+    persistence.take_audits();
+
+    sleep(Duration::from_millis(10));
+    engine.tick(&metrics).await.unwrap();
+
+    let probe_metrics = MockMetrics::default();
+    engine
+        .on_trade_result(
+            TradeAccountingPhase::Fill,
+            &test_trade(TradeOutcome::Success, dec!(5)),
+            &probe_metrics,
+        )
+        .await
+        .unwrap();
+
+    sleep(Duration::from_millis(10));
+    engine.tick(&probe_metrics).await.unwrap();
+
+    let audits = persistence.take_audits();
+    assert!(
+        audits
+            .iter()
+            .any(|audit| audit.event_type == RiskAuditEventType::BreakerRecovered),
+        "expected BreakerRecovered audit after Recovered → Closed transition, got: {audits:?}"
+    );
 }

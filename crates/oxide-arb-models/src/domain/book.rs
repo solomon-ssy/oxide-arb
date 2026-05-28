@@ -108,6 +108,28 @@ pub fn total_depth_usd(levels: &[BookLevel]) -> MicroUsd {
         .fold(MicroUsd::ZERO, |acc, l| acc + l.depth_usd())
 }
 
+/// Sum ask-side share depth at prices at or below `limit_price` (buy walk).
+#[must_use]
+pub fn ask_depth_up_to(levels: &[BookLevel], limit_price: Price) -> Shares {
+    levels
+        .iter()
+        .take_while(|level| level.price_decimal() <= limit_price)
+        .fold(Shares::ZERO, |acc, level| {
+            Shares::new(acc.inner() + level.size.to_decimal())
+        })
+}
+
+/// Sum bid-side share depth at prices at or above `limit_price` (sell walk).
+#[must_use]
+pub fn bid_depth_down_to(levels: &[BookLevel], limit_price: Price) -> Shares {
+    levels
+        .iter()
+        .take_while(|level| level.price_decimal() >= limit_price)
+        .fold(Shares::ZERO, |acc, level| {
+            Shares::new(acc.inner() + level.size.to_decimal())
+        })
+}
+
 /// Immutable published snapshot for a single token (Arc-backed, lock-free read).
 ///
 /// Sides use [`Arc<[BookLevel]>`] so readers share level storage without copying;
@@ -173,6 +195,20 @@ impl BookSnapshot {
     #[inline]
     pub fn best_ask(&self) -> Option<Price> {
         self.asks.first().map(|l| l.price_decimal())
+    }
+
+    /// Available ask depth fillable at or below `limit_price`.
+    #[must_use]
+    #[inline]
+    pub fn ask_depth_up_to(&self, limit_price: Price) -> Shares {
+        ask_depth_up_to(&self.asks, limit_price)
+    }
+
+    /// Available bid depth fillable at or above `limit_price`.
+    #[must_use]
+    #[inline]
+    pub fn bid_depth_down_to(&self, limit_price: Price) -> Shares {
+        bid_depth_down_to(&self.bids, limit_price)
     }
 }
 
@@ -421,5 +457,39 @@ mod tests {
         let asks = Arc::from([level(dec!(0.97))]);
         let snap = BookSnapshot::new(Arc::from([]), asks, 0, 0);
         assert_eq!(snap.total_ask_depth_usd.to_decimal(), dec!(9.7));
+    }
+
+    #[test]
+    fn ask_depth_up_to_walks_sorted_levels() {
+        let asks = Arc::from([
+            level_with_size(dec!(0.90), dec!(5)),
+            level_with_size(dec!(0.92), dec!(10)),
+            level_with_size(dec!(0.95), dec!(20)),
+        ]);
+        let snap = BookSnapshot::new(Arc::from([]), asks, 0, 0);
+        assert_eq!(
+            snap.ask_depth_up_to(Price::new(dec!(0.92))),
+            Shares::new(dec!(15))
+        );
+        assert_eq!(snap.ask_depth_up_to(Price::new(dec!(0.89))), Shares::ZERO);
+    }
+
+    #[test]
+    fn bid_depth_down_to_walks_sorted_levels() {
+        let bids = Arc::from([
+            level_with_size(dec!(0.95), dec!(8)),
+            level_with_size(dec!(0.93), dec!(12)),
+            level_with_size(dec!(0.90), dec!(4)),
+        ]);
+        let snap = BookSnapshot::new(bids, Arc::from([]), 0, 0);
+        assert_eq!(
+            snap.bid_depth_down_to(Price::new(dec!(0.93))),
+            Shares::new(dec!(20))
+        );
+        assert_eq!(snap.bid_depth_down_to(Price::new(dec!(0.96))), Shares::ZERO);
+    }
+
+    fn level_with_size(price: rust_decimal::Decimal, size: rust_decimal::Decimal) -> BookLevel {
+        BookLevel::from_decimal_unchecked(Price::new(price), Shares::new(size))
     }
 }

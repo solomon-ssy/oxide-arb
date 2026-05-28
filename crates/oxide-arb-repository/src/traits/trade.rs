@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::{
@@ -6,6 +7,7 @@ use oxide_arb_models::{
 };
 use std::collections::HashMap;
 
+#[async_trait]
 pub trait TradeRepository: Send + Sync {
     /// Record a new trade. The repository assigns `trade_id` and timestamps.
     async fn create(&self, trade: NewTrade) -> Result<TradeInfo, StorageError>;

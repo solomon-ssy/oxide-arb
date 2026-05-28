@@ -5,6 +5,7 @@ use super::{
     TradingBundle, task_registry::PendingTaskQueue,
 };
 use crate::{
+    app::periodic_services::run_calibration_startup_tick,
     bridge::{
         CoreOpportunityPipeline, calibration_source::CoreCalibrationDataSource,
         fee_estimator::CoreFeeEstimator, potential_loss_store::CorePotentialLossStore,
@@ -25,6 +26,9 @@ use crate::{
         validator::Validator,
     },
     exposure::in_memory::InMemoryExposureReservation,
+    infra::persistence_writers::{
+        PersistenceBackgroundWorkers, PersistenceBundle, PersistenceWireInput,
+    },
     infra::{
         oracle_health_tracker::OracleHealthTracker,
         risk_decision_audit_buffer::RiskDecisionAuditBuffer,
@@ -41,10 +45,13 @@ use crate::{
         market_registry::MarketRegistry,
         staleness_classifier::StalenessClassifier,
     },
-    service::risk_metrics::{ApiHealthTracker, RiskMetricsState},
+    service::{
+        gamma::{GammaService, GammaServiceDeps},
+        risk_metrics::{ApiHealthTracker, RiskMetricsRefreshService, RiskMetricsState},
+    },
 };
 use oxide_arb_algorithm::{
-    calibration::{CalibrationUpdater, ResolutionCalibrator},
+    calibration::{CalibrationEntry, CalibrationUpdater, ResolutionCalibrator},
     cooldown::InMemoryEmissionCooldown,
     endgame::EndgameDetector,
     pipeline::OpportunityPipeline,
@@ -66,12 +73,17 @@ use oxide_arb_models::{
     types::{MarketId, MicroUsd, TokenId},
 };
 use oxide_arb_repository::{
+    clickhouse::ChTimeseriesRepository,
     postgres::{
         PgBlacklistPersistenceRepository, PgCalibrationRepository, PgEmergencyRepository,
+        PgEventRepository, PgMarketRepository, PgOutboxRepository, PgPositionRepository,
         PgPotentialLossRepository, PgReconciliationRepository, PgRiskAuditRepository,
-        PgRiskStateRepository,
+        PgRiskStateRepository, PgTradeRepository,
     },
-    traits::{BlacklistPersistenceRepository, PotentialLossRepository, RiskStateRepository},
+    traits::{
+        BlacklistPersistenceRepository, CalibrationRepository, PotentialLossRepository,
+        RiskStateRepository,
+    },
 };
 use oxide_arb_risk::{
     audit::RiskAuditEvent, audit_sink::AuditSink, builder::RiskEngineBuilder, clock::utc_clock,
@@ -79,7 +91,7 @@ use oxide_arb_risk::{
 };
 use oxide_arb_storage::{
     cache::{MokaBackend, RedisBackend, TieredCache},
-    clickhouse::ClickHousePool,
+    clickhouse::{ChWriteManager, ClickHousePool},
     postgres::{
         PostgresPool,
         migration::{Migrator, MigratorTrait},
@@ -100,6 +112,11 @@ struct BuildRepos {
     reconciliation: Arc<PgReconciliationRepository>,
     potential_loss: Arc<PgPotentialLossRepository>,
     calibration: Arc<PgCalibrationRepository>,
+    market: Arc<PgMarketRepository>,
+    event: Arc<PgEventRepository>,
+    trade: Arc<PgTradeRepository>,
+    outbox: Arc<PgOutboxRepository>,
+    position: Arc<PgPositionRepository>,
 }
 
 struct BuildInfra {
@@ -111,6 +128,7 @@ struct BuildInfra {
     risk_decision_audit: Arc<RiskDecisionAuditBuffer>,
     risk_decision_audit_rx: Mutex<Option<flume::Receiver<RiskAuditEvent>>>,
     repos: BuildRepos,
+    persistence: PersistenceBundle,
 }
 
 struct BuildClients {
@@ -127,6 +145,7 @@ struct BuildRisk {
     metrics_state: Arc<RiskMetricsState>,
     engine: Arc<RiskEngine>,
     potential_loss_store: Arc<CorePotentialLossStore>,
+    metrics_refresh: Option<Arc<RiskMetricsRefreshService>>,
     fsm: Arc<ExecutionFSM>,
     backpressure: Arc<BackpressurePolicy>,
 }
@@ -135,6 +154,7 @@ struct BuildTrading {
     book_store: Arc<BookStore>,
     market_registry: Arc<MarketRegistry>,
     market_cache: Arc<MarketCache>,
+    gamma_service: Arc<GammaService>,
     opportunity_pipeline: Arc<CoreOpportunityPipeline>,
     calibrator: Arc<ResolutionCalibrator>,
     calibration_updater: Arc<CalibrationUpdater>,
@@ -152,6 +172,7 @@ struct DetectionStack {
     book_store: Arc<BookStore>,
     market_registry: Arc<MarketRegistry>,
     market_cache: Arc<MarketCache>,
+    gamma_service: Arc<GammaService>,
     opportunity_pipeline: Arc<CoreOpportunityPipeline>,
     calibrator: Arc<ResolutionCalibrator>,
     calibration_updater: Arc<CalibrationUpdater>,
@@ -175,11 +196,20 @@ impl AppContext {
         let mode = settings.execution.execution_mode;
         settings.ensure_valid_for_mode(mode)?;
 
-        let infra = connect_infra(&settings).await?;
+        let (infra, persistence_workers) = connect_infra(&settings, shutdown.clone()).await?;
         let clients =
             connect_clients(&settings, shutdown.clone(), Arc::clone(&infra.metrics)).await?;
         let risk = wire_risk(&settings, &infra, &clients).await?;
-        let trading = wire_trading(&settings, mode, &infra, &clients, &risk, shutdown.clone());
+        let trading =
+            wire_trading(&settings, mode, &infra, &clients, &risk, shutdown.clone()).await?;
+
+        let trade_repo = Arc::clone(&infra.persistence.trade_repo);
+        let timeseries = Arc::clone(&infra.persistence.timeseries);
+        let audit_writer = Arc::clone(&infra.persistence.audit_writer);
+        let mut pending_tasks = PendingTaskQueue::default();
+        infra
+            .persistence
+            .queue_background_tasks(persistence_workers, &mut pending_tasks);
 
         Ok(Self {
             config: settings,
@@ -191,12 +221,16 @@ impl AppContext {
                 alerts: infra.alerts,
                 risk_decision_audit: infra.risk_decision_audit,
                 risk_decision_audit_rx: infra.risk_decision_audit_rx,
+                trade_repo,
+                timeseries,
+                audit_writer,
             },
             data: DataBundle {
                 book_store: trading.book_store,
                 market_registry: trading.market_registry,
                 market_cache: trading.market_cache,
                 data_pipeline: trading.data_pipeline,
+                gamma_service: trading.gamma_service,
             },
             risk: RiskBundle {
                 engine: risk.engine,
@@ -204,6 +238,7 @@ impl AppContext {
                 metrics_state: risk.metrics_state,
                 exposure: risk.exposure,
                 potential_loss_store: risk.potential_loss_store,
+                metrics_refresh: risk.metrics_refresh,
             },
             trading: TradingBundle {
                 opportunity_pipeline: trading.opportunity_pipeline,
@@ -223,12 +258,15 @@ impl AppContext {
                 execution_runners: Mutex::new(Some(trading.execution_runners)),
             },
             shutdown,
-            pending_tasks: PendingTaskQueue::default(),
+            pending_tasks,
         })
     }
 }
 
-async fn connect_infra(settings: &Settings) -> OxideResult<BuildInfra> {
+async fn connect_infra(
+    settings: &Settings,
+    shutdown: CancellationToken,
+) -> OxideResult<(BuildInfra, PersistenceBackgroundWorkers)> {
     let metrics = Arc::new(MetricsHub::new());
     let telegram_token = settings.notification.telegram.bot_token.trim();
     let telegram_chat = settings.notification.telegram.chat_id.trim();
@@ -265,6 +303,15 @@ async fn connect_infra(settings: &Settings) -> OxideResult<BuildInfra> {
     ));
 
     let db = pg_pool.connection().clone();
+    let write_manager = Arc::new(ChWriteManager::new_without_probe(
+        settings.analytics.max_concurrent_inserts,
+    ));
+    let timeseries = Arc::new(ChTimeseriesRepository::new(
+        ch_pool.client().clone(),
+        &settings.analytics,
+        write_manager,
+        shutdown.clone(),
+    ));
     let repos = BuildRepos {
         risk_state: Arc::new(PgRiskStateRepository::new(db.clone())),
         blacklist: Arc::new(PgBlacklistPersistenceRepository::new(db.clone())),
@@ -272,19 +319,36 @@ async fn connect_infra(settings: &Settings) -> OxideResult<BuildInfra> {
         emergency: Arc::new(PgEmergencyRepository::new(db.clone())),
         reconciliation: Arc::new(PgReconciliationRepository::new(db.clone())),
         potential_loss: Arc::new(PgPotentialLossRepository::new(db.clone())),
-        calibration: Arc::new(PgCalibrationRepository::new(db)),
+        calibration: Arc::new(PgCalibrationRepository::new(db.clone())),
+        market: Arc::new(PgMarketRepository::new(db.clone())),
+        event: Arc::new(PgEventRepository::new(db.clone())),
+        trade: Arc::new(PgTradeRepository::new(db.clone())),
+        outbox: Arc::new(PgOutboxRepository::new(db.clone())),
+        position: Arc::new(PgPositionRepository::new(db)),
     };
 
-    Ok(BuildInfra {
-        pg_pool,
-        ch_pool,
-        cache,
-        metrics,
-        alerts,
-        risk_decision_audit,
-        risk_decision_audit_rx,
-        repos,
-    })
+    let (persistence, persistence_workers) = PersistenceBundle::wire(PersistenceWireInput {
+        metrics: Arc::clone(&metrics),
+        shutdown,
+        trade_repo: Arc::clone(&repos.trade),
+        outbox_repo: Arc::clone(&repos.outbox),
+        timeseries,
+    });
+
+    Ok((
+        BuildInfra {
+            pg_pool,
+            ch_pool,
+            cache,
+            metrics,
+            alerts,
+            risk_decision_audit,
+            risk_decision_audit_rx,
+            repos,
+            persistence,
+        },
+        persistence_workers,
+    ))
 }
 
 async fn connect_clients(
@@ -412,32 +476,51 @@ async fn wire_risk(
         settings.execution.book_apply.shard_count.max(1),
     ));
 
+    let metrics_refresh = clients.clob_client.as_ref().map(|clob_client| {
+        let position_repo = Arc::clone(&infra.repos.position);
+        Arc::new(
+            RiskMetricsRefreshService::new(
+                Arc::clone(&metrics_state),
+                Arc::clone(clob_client),
+                position_repo,
+                Arc::clone(&infra.metrics),
+            )
+            .with_reconciliation(
+                Arc::clone(&engine),
+                Arc::clone(&risk_metrics),
+                settings.risk.reconciliation_interval_secs,
+            ),
+        )
+    });
+
     Ok(BuildRisk {
         exposure,
         metrics: risk_metrics,
         metrics_state,
         engine,
         potential_loss_store,
+        metrics_refresh,
         fsm,
         backpressure,
     })
 }
 
-fn wire_trading(
+async fn wire_trading(
     settings: &Settings,
     mode: ExecutionMode,
     infra: &BuildInfra,
     clients: &BuildClients,
     risk: &BuildRisk,
     shutdown: CancellationToken,
-) -> BuildTrading {
-    let detection = wire_detection(settings, infra, clients, shutdown.clone());
+) -> OxideResult<BuildTrading> {
+    let detection = wire_detection(settings, infra, clients, shutdown.clone()).await?;
     let execution = wire_execution_loop(settings, mode, infra, clients, risk, &detection, shutdown);
 
-    BuildTrading {
+    Ok(BuildTrading {
         book_store: detection.book_store,
         market_registry: detection.market_registry,
         market_cache: detection.market_cache,
+        gamma_service: detection.gamma_service,
         opportunity_pipeline: detection.opportunity_pipeline,
         calibrator: detection.calibrator,
         calibration_updater: detection.calibration_updater,
@@ -449,22 +532,23 @@ fn wire_trading(
         token_rx: detection.token_rx,
         market_rx: detection.market_rx,
         execution_runners: execution.execution_runners,
-    }
+    })
 }
 
-fn wire_detection(
+async fn wire_calibration_stack(
     settings: &Settings,
     infra: &BuildInfra,
     clients: &BuildClients,
-    shutdown: CancellationToken,
-) -> DetectionStack {
-    let book_store = Arc::new(BookStore::new(Arc::clone(&infra.metrics)));
-    let market_registry = Arc::new(MarketRegistry::new());
-    let market_cache = Arc::new(MarketCache::new(Arc::clone(&market_registry)));
-
-    let calibrator = Arc::new(ResolutionCalibrator::empty(
+) -> OxideResult<(Arc<ResolutionCalibrator>, Arc<CalibrationUpdater>)> {
+    let calibrator = load_resolution_calibrator(
+        Arc::clone(&infra.repos.calibration),
         settings.detection.calibration.clone(),
-    ));
+    )
+    .await?;
+    infra
+        .metrics
+        .calibration_bucket_count
+        .set(i64::try_from(calibrator.bucket_count()).unwrap_or(i64::MAX));
     let calibration_source = Arc::new(CoreCalibrationDataSource::new(
         infra.repos.calibration.clone(),
         clients.gamma_client.clone(),
@@ -476,6 +560,27 @@ fn wire_detection(
         calibration_source,
         settings.detection.calibration.clone(),
     ));
+    run_calibration_startup_tick(
+        calibration_updater.as_ref(),
+        &infra.metrics,
+        calibrator.as_ref(),
+    )
+    .await;
+    Ok((calibrator, calibration_updater))
+}
+
+async fn wire_detection(
+    settings: &Settings,
+    infra: &BuildInfra,
+    clients: &BuildClients,
+    shutdown: CancellationToken,
+) -> OxideResult<DetectionStack> {
+    let book_store = Arc::new(BookStore::new(Arc::clone(&infra.metrics)));
+    let market_registry = Arc::new(MarketRegistry::new());
+    let market_cache = Arc::new(MarketCache::new(Arc::clone(&market_registry)));
+
+    let (calibrator, calibration_updater) =
+        wire_calibration_stack(settings, infra, clients).await?;
 
     let detector = EndgameDetector::new(
         &settings.detection.endgame,
@@ -506,6 +611,7 @@ fn wire_detection(
         Arc::clone(&market_cache),
         staleness,
         Arc::clone(&infra.metrics),
+        Some(Arc::clone(&infra.persistence.detection_writer)),
     ));
 
     let (token_tx, token_rx) = flume::bounded(8192);
@@ -519,10 +625,36 @@ fn wire_detection(
         shutdown,
     ));
 
-    DetectionStack {
+    let gamma_service = Arc::new(GammaService::new(GammaServiceDeps {
+        gamma_client: clients.gamma_client.clone(),
+        market_registry: Arc::clone(&market_registry),
+        market_cache: Arc::clone(&market_cache),
+        fee_calculator: clients.fee_calculator.clone(),
+        market_repo: infra.repos.market.clone(),
+        event_repo: infra.repos.event.clone(),
+        cache: infra.cache.clone(),
+        metrics: infra.metrics.clone(),
+        full_sync_interval_secs: settings.market_data.gamma.full_sync_interval_secs,
+    }));
+
+    gamma_service.sync().await.map_err(|error| {
+        tracing::error!(
+            %error,
+            "Gamma startup sync failed — cannot start without market catalog"
+        );
+        error
+    })?;
+
+    tracing::info!(
+        markets = market_registry.market_count(),
+        "Gamma startup sync complete"
+    );
+
+    Ok(DetectionStack {
         book_store,
         market_registry,
         market_cache,
+        gamma_service,
         opportunity_pipeline,
         calibrator,
         calibration_updater,
@@ -531,7 +663,7 @@ fn wire_detection(
         token_tx,
         token_rx,
         market_rx,
-    }
+    })
 }
 
 fn wire_execution_loop(
@@ -543,7 +675,7 @@ fn wire_execution_loop(
     detection: &DetectionStack,
     shutdown: CancellationToken,
 ) -> ExecutionLoop {
-    let (outcome_tx, outcome_rx) = ExecutionPipeline::outcome_channel();
+    let (outcome_tx, outcome_rx) = flume::bounded(1024);
     let capital = Arc::new(CapitalManager::new(
         Arc::clone(&risk.exposure),
         ExposureReservationConfig::default(),
@@ -557,11 +689,24 @@ fn wire_execution_loop(
             settings.execution.endgame_latency.max_book_to_order_ms,
             Arc::clone(&infra.metrics),
         ),
-        plan_builder: PlanBuilder::new(clients.fee_calculator.clone()),
-        dispatcher: Dispatcher::new(mode, Arc::clone(&infra.metrics)),
+        plan_builder: PlanBuilder::new(
+            clients.fee_calculator.clone(),
+            Arc::clone(&detection.market_registry),
+        ),
+        dispatcher: Dispatcher::new(
+            mode,
+            match mode {
+                ExecutionMode::Paper => Some(Arc::clone(&detection.book_store)),
+                ExecutionMode::DryRun | ExecutionMode::Live => None,
+            },
+            clients.fee_calculator.clone(),
+            Arc::clone(&infra.metrics),
+        ),
         order_strategy: OrderStrategy::new(
             mode,
             clients.clob_client.clone(),
+            clients.fee_calculator.clone(),
+            settings.execution.timeout.dispatcher_timeout_ms,
             Arc::clone(&infra.metrics),
         ),
         capital_manager: capital,
@@ -571,6 +716,8 @@ fn wire_execution_loop(
         market_inflight: Arc::clone(&market_inflight),
         metrics: Arc::clone(&infra.metrics),
         execution_mode: mode,
+        trade_repo: infra.persistence.trade_repo.clone(),
+        audit_writer: Arc::clone(&infra.persistence.audit_writer),
         outcome_tx,
         backpressure: Arc::clone(&risk.backpressure),
     }));
@@ -618,4 +765,23 @@ fn wire_execution_loop(
         execution,
         execution_runners,
     }
+}
+
+async fn load_resolution_calibrator(
+    calibration_repo: Arc<PgCalibrationRepository>,
+    config: oxide_arb_models::config::CalibrationConfig,
+) -> OxideResult<Arc<ResolutionCalibrator>> {
+    let buckets = calibration_repo
+        .get_all_buckets()
+        .await
+        .map_err(oxide_arb_error::OxideError::from)?;
+    let bucket_count = buckets.len();
+    let entries: Vec<CalibrationEntry> = buckets.into_iter().map(CalibrationEntry::from).collect();
+    let calibrator = Arc::new(if entries.is_empty() {
+        ResolutionCalibrator::empty(config)
+    } else {
+        ResolutionCalibrator::from_entries(entries, config)
+    });
+    tracing::info!(bucket_count, "loaded calibration buckets from database");
+    Ok(calibrator)
 }

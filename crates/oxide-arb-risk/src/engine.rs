@@ -30,6 +30,7 @@ use crate::{
     },
 };
 use arc_swap::ArcSwap;
+use chrono::{DateTime, Utc};
 use num_traits::ToPrimitive;
 use oxide_arb_error::OxideResult;
 use oxide_arb_models::types::MarketId as ModelsMarketId;
@@ -50,15 +51,15 @@ use oxide_arb_models::{
     enums::{
         ReconciliationStatus,
         common::LedgerStatus,
-        risk::{BlacklistReason, CircuitBreakerLevel, TradeAccountingPhase, WindowType},
+        risk::{
+            BlacklistReason, BreakerStateName, CircuitBreakerLevel, TradeAccountingPhase,
+            WindowType,
+        },
     },
-    types::{LedgerId, MarketId, OpportunityId, Price, Shares, Usd},
+    types::{LedgerId, MarketId, OpportunityId, Usd},
 };
 use parking_lot::RwLock;
 use std::{sync::Arc, time::Instant};
-
-/// Gates evaluated before live metrics are loaded (halt / CB / blacklist).
-const PHASE1_GATE_COUNT: usize = 4;
 
 pub struct RiskEngine<P = Arc<dyn RiskPersistence>>
 where
@@ -81,6 +82,7 @@ where
     pub(crate) audit_sink: Option<Arc<dyn AuditSink>>,
     pub(crate) state_version: AtomicStateVersion,
     pub(crate) clock: Arc<dyn Clock>,
+    pub(crate) last_emergency: RwLock<Option<(DateTime<Utc>, String)>>,
 }
 
 /// Default engine type — dynamic persistence via [`Arc<dyn RiskPersistence>`].
@@ -118,9 +120,10 @@ where
             metrics: RiskMetricsSnapshot::zeroed(),
             now,
         };
+        let metrics_split = self.pipeline.metrics_split_index();
         let mut gate_report = self
             .pipeline
-            .evaluate_range(&phase1_ctx, mode, 0, PHASE1_GATE_COUNT);
+            .evaluate_range(&phase1_ctx, mode, 0, metrics_split);
 
         let ctx = if gate_report.has_failed_hard_gate && mode == ReportMode::ShortCircuit {
             phase1_ctx
@@ -130,12 +133,9 @@ where
                 metrics: metrics_snap,
                 ..phase1_ctx
             };
-            let phase2 = self.pipeline.evaluate_range(
-                &full_ctx,
-                mode,
-                PHASE1_GATE_COUNT,
-                self.pipeline.len(),
-            );
+            let phase2 =
+                self.pipeline
+                    .evaluate_range(&full_ctx, mode, metrics_split, self.pipeline.len());
             gate_report.merge(phase2);
             full_ctx
         };
@@ -355,8 +355,8 @@ where
                 ledger_id: LedgerId::new(trade.trade_id.as_str()),
                 market_id: trade.market_id.clone(),
                 token_id: trade.token_id.clone(),
-                shares: Shares::new(rust_decimal::Decimal::ZERO),
-                entry_price: Price::new(rust_decimal::Decimal::ZERO),
+                shares: trade.shares,
+                entry_price: trade.entry_price,
                 max_loss_usd: trade.cost_usd + trade.fee_usd,
                 status: LedgerStatus::Active,
                 created_at: self.clock.now(),
@@ -402,7 +402,7 @@ where
             self.circuit_breaker
                 .write()
                 .halt(CircuitBreakerLevel::Daily, reason);
-            highest = Some(CircuitBreakerLevel::Daily);
+            escalate(&mut highest, CircuitBreakerLevel::Daily);
         }
 
         let weekly_loss = self.weekly.read().weekly_loss();
@@ -410,10 +410,8 @@ where
             let reason = format!("weekly loss cap breached: {weekly_loss}");
             self.circuit_breaker
                 .write()
-                .halt(CircuitBreakerLevel::Daily, reason);
-            highest = Some(highest.map_or(CircuitBreakerLevel::Daily, |h| {
-                h.max(CircuitBreakerLevel::Daily)
-            }));
+                .halt(CircuitBreakerLevel::System, reason);
+            escalate(&mut highest, CircuitBreakerLevel::System);
         }
 
         let max_single = self.daily.read().stats().max_single_loss;
@@ -422,9 +420,7 @@ where
             self.circuit_breaker
                 .write()
                 .halt(CircuitBreakerLevel::Daily, reason);
-            highest = Some(highest.map_or(CircuitBreakerLevel::Daily, |h| {
-                h.max(CircuitBreakerLevel::Daily)
-            }));
+            escalate(&mut highest, CircuitBreakerLevel::Daily);
         }
 
         let hourly_loss = self.hourly.read().hourly_loss();
@@ -433,9 +429,7 @@ where
             self.circuit_breaker
                 .write()
                 .trip(CircuitBreakerLevel::Session, reason);
-            highest = Some(highest.map_or(CircuitBreakerLevel::Session, |h| {
-                h.max(CircuitBreakerLevel::Session)
-            }));
+            escalate(&mut highest, CircuitBreakerLevel::Session);
         }
 
         highest
@@ -500,6 +494,7 @@ where
     /// Periodic tick — drives CB FSM transitions, accounting rollover,
     /// and blacklist GC.
     pub async fn tick(&self, metrics: &dyn RiskMetrics) -> OxideResult<bool> {
+        let pre_state = self.circuit_breaker.read().state().to_name();
         let cb_transitioned = self.circuit_breaker.write().tick();
 
         let (pre_daily_start, pre_daily_stats) = {
@@ -557,6 +552,16 @@ where
                 final_stats: pre_hourly_stats,
             };
             let _ = self.persistence.create_audit(audit.into()).await;
+        }
+
+        if cb_transitioned {
+            let post_state = self.circuit_breaker.read().state().to_name();
+            if pre_state == BreakerStateName::Recovered && post_state == BreakerStateName::Closed {
+                let audit = RiskAuditEvent::BreakerRecovered {
+                    from: BreakerStateName::Recovered,
+                };
+                let _ = self.persistence.create_audit(audit.into()).await;
+            }
         }
 
         Ok(any_change)
@@ -849,8 +854,14 @@ where
             .unwrap_or(0),
             cooldown_multiplier: ToPrimitive::to_i32(&cb.l2_trip_count()).unwrap_or(i32::MAX),
             hwm_equity: dg.hwm(),
-            last_emergency_at: None,
-            last_emergency_reason: None,
+            last_emergency_at: {
+                let emergency = self.last_emergency.read();
+                emergency.as_ref().map(|(at, _)| *at)
+            },
+            last_emergency_reason: {
+                let emergency = self.last_emergency.read();
+                emergency.as_ref().map(|(_, reason)| reason.clone())
+            },
             snapshot_at: self.clock.now(),
         }
     }
@@ -863,6 +874,7 @@ where
         reason: &str,
         metrics: &dyn RiskMetrics,
     ) -> OxideResult<()> {
+        *self.last_emergency.write() = Some((self.clock.now(), reason.to_owned()));
         let snapshot = self.snapshot(metrics);
         let emergency = NewEmergencySnapshot {
             trigger_level: level,
@@ -1046,6 +1058,11 @@ where
             tracing::warn!("pre-trade audit channel full — event dropped");
         }
     }
+}
+
+#[inline]
+fn escalate(current: &mut Option<CircuitBreakerLevel>, new: CircuitBreakerLevel) {
+    *current = Some(current.map_or(new, |existing| existing.max(new)));
 }
 
 /// Effective bankroll for Kelly sizing: `min(dynamic, config_bankroll)`.

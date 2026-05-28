@@ -1,11 +1,7 @@
 //! Validator rejection paths and happy-path coverage.
 
-#[path = "support/test_util/opportunity_fixture.rs"]
-mod opportunity_fixture;
-
 use chrono::Utc;
 use num_traits::ToPrimitive;
-use opportunity_fixture::sample_opportunity;
 use oxide_arb_core::{
     execution::validator::Validator,
     observability::metrics_hub::MetricsHub,
@@ -17,6 +13,7 @@ use oxide_arb_models::{
     domain::book::BookLevel,
     types::{Price, Shares, TokenId},
 };
+use oxide_arb_test_support::fixtures::sample_opportunity;
 use rust_decimal_macros::dec;
 use std::sync::Arc;
 

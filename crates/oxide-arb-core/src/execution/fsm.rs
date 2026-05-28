@@ -1,4 +1,5 @@
 use crate::observability::metrics_hub::MetricsHub;
+use oxide_arb_risk::engine::RiskEngine;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -30,6 +31,18 @@ impl ExecutionFSM {
     pub fn clear_emergency(&self) {
         self.emergency.store(false, Ordering::Release);
         tracing::info!("execution emergency halt cleared");
+    }
+
+    /// Clear emergency halt when the risk engine permits trading (e.g. after venue recovery).
+    #[must_use]
+    pub fn try_auto_recover(&self, risk_engine: &RiskEngine) -> bool {
+        if self.is_emergency() && risk_engine.allows_trading() {
+            self.clear_emergency();
+            tracing::info!("execution emergency auto-cleared: venue healthy + risk allows trading");
+            true
+        } else {
+            false
+        }
     }
 
     #[inline]

@@ -1,15 +1,5 @@
 //! Emergency halt, recovery, and spill drain ordering under stress.
 
-#[path = "support/test_util/book_store_seed.rs"]
-mod book_store_seed;
-#[path = "support/test_util/risk_config.rs"]
-mod risk_config;
-#[path = "support/test_util/risk_metrics.rs"]
-mod risk_metrics;
-#[path = "support/test_util/scored_opportunity.rs"]
-mod scored_opportunity;
-
-use book_store_seed::seed_book_store;
 use oxide_arb_algorithm::scorer::ScoredOpportunity;
 use oxide_arb_api::{fees::FeeCalculator, ws::ClobWsManager};
 use oxide_arb_core::{
@@ -20,7 +10,7 @@ use oxide_arb_core::{
     execution::{
         capital_manager::CapitalManager,
         dispatcher::Dispatcher,
-        execution_pipeline::{ExecutionPipeline, ExecutionPipelineDeps, PostTradeJob},
+        execution_pipeline::{ExecutionPipeline, ExecutionPipelineDeps},
         fsm::ExecutionFSM,
         market_inflight::MarketInFlightRegistry,
         plan_builder::PlanBuilder,
@@ -33,31 +23,42 @@ use oxide_arb_core::{
         metrics_hub::MetricsHub,
     },
     outbox::in_memory::InMemoryEventStore,
-    pipeline::{book_store::BookStore, staleness_classifier::StalenessClassifier},
+    pipeline::{
+        book_store::BookStore, market_registry::MarketRegistry,
+        staleness_classifier::StalenessClassifier,
+    },
     service::risk_metrics::{ApiHealthTracker, RiskMetricsState},
 };
 use oxide_arb_models::{
     config::{ExposureReservationConfig, MarketDataConfig, PolymarketConfig, WebSocketConfig},
-    enums::{common::ExecutionMode, execution::ExecutionOutcome},
-    types::{MarketId, Price, TokenId, TradeId, Usd},
+    domain::execution::PostTradeJob,
+    enums::common::ExecutionMode,
+    types::Usd,
 };
 use oxide_arb_risk::{builder::RiskEngineBuilder, clock::utc_clock, engine::RiskEngine};
-use risk_config::test_risk_config;
-use risk_metrics::TestRiskMetrics;
+use oxide_arb_test_support::mocks::MockTradeRepository;
+use oxide_arb_test_support::{
+    book::seed_book_store,
+    fixtures::{minimal_post_trade_job, sample_scored},
+    persistence::test_persistence,
+    risk::{TestRiskMetrics, test_risk_config},
+};
 use rust_decimal_macros::dec;
-use scored_opportunity::sample_scored;
 use std::{hint::spin_loop, sync::Arc, thread::spawn, time::Duration};
 use tokio_util::sync::CancellationToken;
 
-fn build_pipeline(
-    outcome_tx: flume::Sender<PostTradeJob>,
-) -> (
-    ExecutionPipeline,
+type EmergencyPipelineTuple = (
+    ExecutionPipeline<MockTradeRepository>,
     Arc<ExecutionFSM>,
     Arc<RiskEngine>,
     Arc<ScoredOpportunity>,
     Arc<InMemoryExposureReservation>,
-) {
+);
+
+fn build_pipeline() -> EmergencyPipelineTuple {
+    let shutdown = CancellationToken::new();
+    let persistence = test_persistence(shutdown);
+    let (outcome_tx, _rx) = flume::bounded(1024);
     let metrics = Arc::new(MetricsHub::new());
     let fsm = Arc::new(ExecutionFSM::new(Arc::clone(&metrics)));
     let spill = Arc::new(InMemoryEventStore::new());
@@ -101,6 +102,7 @@ fn build_pipeline(
         ws_manager,
     ));
 
+    let fee_calculator = Arc::new(FeeCalculator::default());
     let pipeline = ExecutionPipeline::new(ExecutionPipelineDeps {
         validator: Validator::new(
             Arc::clone(&book_store),
@@ -109,16 +111,32 @@ fn build_pipeline(
             5_000,
             Arc::clone(&metrics),
         ),
-        plan_builder: PlanBuilder::new(Arc::new(FeeCalculator::default())),
-        dispatcher: Dispatcher::new(ExecutionMode::Paper, Arc::clone(&metrics)),
-        order_strategy: OrderStrategy::new(ExecutionMode::Paper, None, Arc::clone(&metrics)),
+        plan_builder: PlanBuilder::new(
+            Arc::clone(&fee_calculator),
+            Arc::new(MarketRegistry::new()),
+        ),
+        dispatcher: Dispatcher::new(
+            ExecutionMode::Paper,
+            Some(Arc::clone(&book_store)),
+            Arc::clone(&fee_calculator),
+            Arc::clone(&metrics),
+        ),
+        order_strategy: OrderStrategy::new(
+            ExecutionMode::Paper,
+            None,
+            fee_calculator,
+            30_000,
+            Arc::clone(&metrics),
+        ),
         capital_manager: capital,
         risk_engine: Arc::clone(&risk_engine),
         risk_metrics,
         fsm: Arc::clone(&fsm),
         market_inflight: Arc::new(MarketInFlightRegistry::new()),
-        metrics,
+        metrics: Arc::clone(&metrics),
         execution_mode: ExecutionMode::Paper,
+        trade_repo: Arc::clone(&persistence.trade_repo),
+        audit_writer: Arc::clone(&persistence.audit_writer),
         outcome_tx,
         backpressure,
     });
@@ -130,23 +148,12 @@ fn build_pipeline(
 }
 
 fn spill_job(id: &str) -> PostTradeJob {
-    PostTradeJob {
-        trade_id: TradeId::new(id),
-        market_id: MarketId::new("m1"),
-        token_id: TokenId::new("t1"),
-        entry_price: Price::new(dec!(0.5)),
-        net_profit: Usd::new(dec!(1)),
-        outcome: ExecutionOutcome::Miss {
-            reason: "test".into(),
-            execution_mode: ExecutionMode::Paper,
-        },
-    }
+    minimal_post_trade_job(id)
 }
 
 #[tokio::test]
 async fn emergency_rejects_execute_until_resume() {
-    let (outcome_tx, _rx) = ExecutionPipeline::outcome_channel();
-    let (pipeline, fsm, risk_engine, scored, _exposure) = build_pipeline(outcome_tx);
+    let (pipeline, fsm, risk_engine, scored, _exposure) = build_pipeline();
 
     halt_trading(&risk_engine, &fsm, "reservation confirm failed".into()).await;
     assert!(pipeline.execute(Arc::clone(&scored)).await.is_rejected());
@@ -195,8 +202,7 @@ async fn spill_fifo_survives_emergency_drain() {
 
 #[tokio::test]
 async fn reservation_confirm_failure_enters_emergency() {
-    let (outcome_tx, _rx) = ExecutionPipeline::outcome_channel();
-    let (pipeline, fsm, _risk_engine, scored, exposure) = build_pipeline(outcome_tx);
+    let (pipeline, fsm, _risk_engine, scored, exposure) = build_pipeline();
 
     let exposure_steal = Arc::clone(&exposure);
     let steal_thread = spawn(move || {
@@ -220,4 +226,46 @@ async fn reservation_confirm_failure_enters_emergency() {
         fsm.is_emergency(),
         "confirm failure during settle_reservation should enter emergency"
     );
+}
+
+#[tokio::test]
+async fn emergency_auto_recovery_when_risk_allows() {
+    let metrics = Arc::new(MetricsHub::new());
+    let fsm = Arc::new(ExecutionFSM::new(Arc::clone(&metrics)));
+    let risk_engine = Arc::new(
+        RiskEngineBuilder::new()
+            .config(test_risk_config())
+            .clock(utc_clock())
+            .initial_equity(Usd::new(dec!(5000)))
+            .build(&TestRiskMetrics)
+            .expect("risk engine"),
+    );
+
+    fsm.enter_emergency("reservation confirm failed");
+    assert!(fsm.is_emergency());
+    assert!(risk_engine.allows_trading());
+
+    assert!(fsm.try_auto_recover(&risk_engine));
+    assert!(!fsm.is_emergency());
+}
+
+#[tokio::test]
+async fn emergency_auto_recovery_skips_when_risk_blocked() {
+    let metrics = Arc::new(MetricsHub::new());
+    let fsm = Arc::new(ExecutionFSM::new(Arc::clone(&metrics)));
+    let risk_engine = Arc::new(
+        RiskEngineBuilder::new()
+            .config(test_risk_config())
+            .clock(utc_clock())
+            .initial_equity(Usd::new(dec!(5000)))
+            .build(&TestRiskMetrics)
+            .expect("risk engine"),
+    );
+
+    fsm.enter_emergency("post-trade persist failed");
+    risk_engine.halt("operator manual halt".into()).await;
+    assert!(!risk_engine.allows_trading());
+
+    assert!(!fsm.try_auto_recover(&risk_engine));
+    assert!(fsm.is_emergency());
 }

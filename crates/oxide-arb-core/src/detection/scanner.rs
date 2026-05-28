@@ -1,6 +1,8 @@
 use crate::{
     bridge::CoreOpportunityPipeline,
-    observability::{latency::observe_ws_to_scan, metrics_hub::MetricsHub},
+    observability::{
+        detection_writer::DetectionWriter, latency::observe_ws_to_scan, metrics_hub::MetricsHub,
+    },
     pipeline::{
         book_gate::BookGate,
         book_store::BookStore,
@@ -26,6 +28,7 @@ pub struct Scanner {
     market_cache: Arc<MarketCache>,
     staleness_classifier: StalenessClassifier,
     metrics: Arc<MetricsHub>,
+    detection_writer: Option<Arc<DetectionWriter>>,
 }
 
 impl Scanner {
@@ -35,6 +38,7 @@ impl Scanner {
         market_cache: Arc<MarketCache>,
         staleness_classifier: StalenessClassifier,
         metrics: Arc<MetricsHub>,
+        detection_writer: Option<Arc<DetectionWriter>>,
     ) -> Self {
         Self {
             pipeline,
@@ -42,6 +46,7 @@ impl Scanner {
             market_cache,
             staleness_classifier,
             metrics,
+            detection_writer,
         }
     }
 
@@ -98,6 +103,10 @@ impl Scanner {
         let result = self.pipeline.process_ref(&input, now);
         if let Some(ref scored) = result {
             observe_ws_to_scan(&scored.trace, &self.metrics);
+            self.metrics.opportunities_detected.inc();
+            if let Some(writer) = &self.detection_writer {
+                writer.write(scored.opportunity.as_ref());
+            }
         }
         drop(timer);
         result

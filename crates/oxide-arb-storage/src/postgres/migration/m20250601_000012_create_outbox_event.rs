@@ -1,7 +1,5 @@
 use super::{execute_sql, migrate_up};
-use oxide_arb_models::idens::{
-    opportunity_lifecycle::OpportunityLifecycleEvent, outbox_event::OutboxEvent,
-};
+use oxide_arb_models::idens::outbox_event::OutboxEvent;
 use sea_orm_migration::prelude::*;
 
 #[derive(DeriveMigrationName)]
@@ -13,7 +11,7 @@ impl MigrationTrait for Migration {
         migrate_up(
             manager,
             create_tables(),
-            create_indexes(),
+            Vec::new(),
             specials(manager),
             seeding_data(manager),
         )
@@ -26,46 +24,7 @@ impl MigrationTrait for Migration {
 }
 
 fn create_tables() -> Vec<TableCreateStatement> {
-    vec![opportunity_lifecycle_event_table(), outbox_event_table()]
-}
-
-fn opportunity_lifecycle_event_table() -> TableCreateStatement {
-    Table::create()
-        .table(OpportunityLifecycleEvent::Table)
-        .if_not_exists()
-        .col(
-            ColumnDef::new(OpportunityLifecycleEvent::EventId)
-                .text()
-                .not_null()
-                .primary_key(),
-        )
-        .col(
-            ColumnDef::new(OpportunityLifecycleEvent::OpportunityId)
-                .text()
-                .not_null(),
-        )
-        .col(
-            ColumnDef::new(OpportunityLifecycleEvent::ExecutionId)
-                .text()
-                .null(),
-        )
-        .col(
-            ColumnDef::new(OpportunityLifecycleEvent::Phase)
-                .text()
-                .not_null(),
-        )
-        .col(
-            ColumnDef::new(OpportunityLifecycleEvent::PhaseData)
-                .json_binary()
-                .null(),
-        )
-        .col(
-            ColumnDef::new(OpportunityLifecycleEvent::CreatedAt)
-                .timestamp_with_time_zone()
-                .not_null()
-                .default(Expr::current_timestamp()),
-        )
-        .to_owned()
+    vec![outbox_event_table()]
 }
 
 fn outbox_event_table() -> TableCreateStatement {
@@ -108,17 +67,6 @@ fn outbox_event_table() -> TableCreateStatement {
         .to_owned()
 }
 
-fn create_indexes() -> Vec<IndexCreateStatement> {
-    vec![
-        Index::create()
-            .name("idx_opp_lifecycle_opp_id")
-            .table(OpportunityLifecycleEvent::Table)
-            .col(OpportunityLifecycleEvent::OpportunityId)
-            .col((OpportunityLifecycleEvent::CreatedAt, IndexOrder::Asc))
-            .to_owned(),
-    ]
-}
-
 async fn specials(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
     execute_sql(
         manager,
@@ -139,10 +87,5 @@ async fn seeding_data(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
 }
 
 fn drop_tables() -> Vec<TableDropStatement> {
-    vec![
-        Table::drop().table(OutboxEvent::Table).to_owned(),
-        Table::drop()
-            .table(OpportunityLifecycleEvent::Table)
-            .to_owned(),
-    ]
+    vec![Table::drop().table(OutboxEvent::Table).to_owned()]
 }

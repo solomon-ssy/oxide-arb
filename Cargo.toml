@@ -12,6 +12,7 @@ members = [
   "crates/oxide-arb-core",
   "crates/oxide-arb-bench",
   "crates/oxide-arb-bin",
+  "crates/oxide-arb-test-support",
 ]
 
 [workspace.package]
@@ -178,6 +179,7 @@ oxide-arb-repository = { path = "crates/oxide-arb-repository" }
 oxide-arb-algorithm = { path = "crates/oxide-arb-algorithm" }
 oxide-arb-risk = { path = "crates/oxide-arb-risk" }
 oxide-arb-core = { path = "crates/oxide-arb-core" }
+oxide-arb-test-support = { path = "crates/oxide-arb-test-support" }
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Cargo Profile Configuration

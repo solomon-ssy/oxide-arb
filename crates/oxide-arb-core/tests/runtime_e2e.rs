@@ -1,16 +1,13 @@
 //! Full runtime e2e tests (PR-8 F5/F6).
 
-#[path = "support/runtime_harness.rs"]
-mod runtime_harness;
-
 use oxide_arb_models::{
     domain::{book::BookLevel, pipeline::PriceLevelDelta},
     enums::{ExecutionOutcome, common::Side},
     types::{Price, Shares, TokenId},
 };
-use runtime_harness::RuntimeHarness;
-use runtime_harness::book_store_seed::seed_book_store;
-use runtime_harness::scored_opportunity::sample_scored;
+use oxide_arb_test_support::{
+    book::seed_book_store, fixtures::sample_scored, runtime::RuntimeHarness,
+};
 use rust_decimal_macros::dec;
 use std::time::{Duration, Instant};
 

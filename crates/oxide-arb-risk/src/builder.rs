@@ -183,6 +183,13 @@ impl RiskEngineBuilder {
         let reconciler = LedgerReconciler::new(config.reconciliation_tolerance_usd);
         let risk_pipeline = pipeline::build_default_pipeline(&config);
 
+        let last_emergency = self.snapshot.as_ref().and_then(|snap| {
+            match (snap.last_emergency_at, snap.last_emergency_reason.clone()) {
+                (Some(at), Some(reason)) => Some((at, reason)),
+                _ => None,
+            }
+        });
+
         let engine = RiskEngine {
             circuit_breaker: RwLock::new(breaker),
             daily: RwLock::new(daily),
@@ -201,6 +208,7 @@ impl RiskEngineBuilder {
             audit_sink: self.audit_sink,
             state_version: AtomicStateVersion::new(0),
             clock,
+            last_emergency: RwLock::new(last_emergency),
         };
 
         engine.publish_risk_snapshot();

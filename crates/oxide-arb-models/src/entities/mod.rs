@@ -6,7 +6,6 @@ pub mod calibration;
 pub mod calibration_outcome;
 pub mod emergency_snapshot;
 pub mod event;
-pub mod lifecycle_event;
 pub mod market;
 pub mod outbox_event;
 pub mod position;

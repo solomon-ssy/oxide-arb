@@ -1,8 +1,12 @@
 use crate::traits::TimeseriesRepository;
+use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::{
-    clickhouse::{BookSnapshotRow, CalibrationSnapshotRow, OpportunityAuditRow, TickEventRow},
+    clickhouse::{
+        BookSnapshotRow, CalibrationSnapshotRow, OpportunityAuditRow, OpportunityDetectionRow,
+        TickEventRow,
+    },
     config::AnalyticsConfig,
 };
 use oxide_arb_storage::clickhouse::{BatchInserter, ChWriteManager, ChWriteMetrics};
@@ -20,6 +24,7 @@ pub struct ChTimeseriesRepository {
     tick_inserter: BatchInserter<TickEventRow>,
     book_inserter: BatchInserter<BookSnapshotRow>,
     audit_inserter: BatchInserter<OpportunityAuditRow>,
+    detection_inserter: BatchInserter<OpportunityDetectionRow>,
     calibration_inserter: BatchInserter<CalibrationSnapshotRow>,
 }
 
@@ -59,6 +64,14 @@ impl ChTimeseriesRepository {
                 metrics.clone(),
                 shutdown.clone(),
             ),
+            detection_inserter: BatchInserter::new(
+                client.clone(),
+                "opportunity_detection",
+                batch_size,
+                flush_interval,
+                metrics.clone(),
+                shutdown.clone(),
+            ),
             calibration_inserter: BatchInserter::new(
                 client.clone(),
                 "calibration_snapshots",
@@ -81,6 +94,7 @@ impl ChTimeseriesRepository {
     }
 }
 
+#[async_trait]
 impl TimeseriesRepository for ChTimeseriesRepository {
     async fn insert_tick_events(&self, events: &[TickEventRow]) -> Result<(), StorageError> {
         for event in events {
@@ -105,6 +119,16 @@ impl TimeseriesRepository for ChTimeseriesRepository {
         snapshot: &CalibrationSnapshotRow,
     ) -> Result<(), StorageError> {
         self.calibration_inserter.insert(snapshot.clone()).await
+    }
+
+    async fn insert_detection_batch(
+        &self,
+        rows: &[OpportunityDetectionRow],
+    ) -> Result<(), StorageError> {
+        for row in rows {
+            self.detection_inserter.insert(row.clone()).await?;
+        }
+        Ok(())
     }
 
     async fn query_tick_events(

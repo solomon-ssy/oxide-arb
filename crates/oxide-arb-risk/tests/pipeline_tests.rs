@@ -24,7 +24,10 @@ use oxide_arb_risk::{
     builder::RiskEngineBuilder,
     clock::utc_clock,
     context::PreTradeContext,
-    pipeline::{RiskCheck, build_default_pipeline},
+    pipeline::{
+        RiskCheck, build_default_pipeline,
+        checks::{BlacklistCheck, CircuitBreakerCheck, ManualHaltCheck, TokenBlacklistCheck},
+    },
     snapshot::{DailyAccountingSnapshot, RiskSnapshot},
     traits::{RiskMetrics, RiskMetricsSnapshot},
     types::{PipelineReport, ReportMode, RiskCheckId, RiskCheckKind, RiskCheckResult},
@@ -279,6 +282,42 @@ impl TestRiskPipeline {
 fn static_pipeline_check_order_matches_golden() {
     let pipeline = build_default_pipeline(&RiskConfig::default());
     assert_eq!(pipeline.check_order().len(), 24);
+}
+
+#[test]
+fn metrics_split_index_matches_check_order() {
+    let pipeline = build_default_pipeline(&RiskConfig::default());
+
+    assert_eq!(pipeline.metrics_split_index(), 4);
+
+    assert!(!ManualHaltCheck.requires_metrics());
+    assert!(!CircuitBreakerCheck.requires_metrics());
+    assert!(!BlacklistCheck.requires_metrics());
+    assert!(!TokenBlacklistCheck.requires_metrics());
+
+    let order = pipeline.check_order();
+    let profile = pipeline.requires_metrics_profile();
+    assert_eq!(profile.len(), order.len());
+    for ((id, _), expected_id) in profile.iter().zip(order.iter()) {
+        assert_eq!(*id, *expected_id);
+    }
+
+    for (id, needs_metrics) in profile.iter().take(4) {
+        assert!(
+            !needs_metrics,
+            "{id} must not require live metrics (phase-1 halt/CB/blacklist)"
+        );
+    }
+    for (id, needs_metrics) in profile.iter().skip(4) {
+        assert!(*needs_metrics, "{id} must require live metrics (phase-2)");
+    }
+
+    let first_metrics_gate = profile
+        .iter()
+        .position(|(_, needs)| *needs)
+        .expect("at least one check requires metrics");
+    assert_eq!(first_metrics_gate, pipeline.metrics_split_index());
+    assert_eq!(order[first_metrics_gate], RiskCheckId::MinDepth);
 }
 
 // ── Short-circuit stops on first gate failure ──────────────────────────────

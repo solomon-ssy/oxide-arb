@@ -6,10 +6,10 @@ use chrono::{NaiveDate, Utc};
 use common::{make_event, make_market, setup_pg};
 use oxide_arb_models::{
     domain::{
-        NewAccountingPeriod, NewCalibrationOutcome, NewEmergencySnapshot, NewLifecycleEvent,
-        NewOutboxEventWithId, NewPosition, NewPotentialLoss, NewReconciliationReport,
-        NewRiskAuditEvent, NewTrade, UpdatePotentialLoss, UpdateTradeOutcome, UpsertBlacklistEntry,
-        UpsertCalibration, UpsertRiskEngineState, UpsertRuntimeConfig,
+        NewAccountingPeriod, NewCalibrationOutcome, NewEmergencySnapshot, NewOutboxEventWithId,
+        NewPosition, NewPotentialLoss, NewReconciliationReport, NewRiskAuditEvent, NewTrade,
+        UpdatePotentialLoss, UpdateTradeOutcome, UpsertBlacklistEntry, UpsertCalibration,
+        UpsertRiskEngineState, UpsertRuntimeConfig,
     },
     enums::{
         calibration::{DurationBucket, PriceZone},
@@ -17,7 +17,6 @@ use oxide_arb_models::{
             ExecutionMode, LedgerStatus, MarketCategory, PositionStatus, ReportType, Side,
             TradeOutcome,
         },
-        lifecycle::{LifecyclePhase, LifecycleRecorder},
         outbox::{OutboxAggregateType, OutboxEventType},
         risk::{
             BlacklistReason, BlacklistScope, BreakerStateName, CircuitBreakerLevel,
@@ -221,6 +220,7 @@ async fn trade_repository_crud() {
 
     let created = trade_repo
         .create(NewTrade {
+            trade_id: TradeId::generate(),
             execution_id: execution_id.clone(),
             opportunity_id: OpportunityId::new_v7(),
             market_id: MarketId::new("0xtrade-mkt"),
@@ -244,6 +244,10 @@ async fn trade_repository_crud() {
             &created.trade_id,
             UpdateTradeOutcome {
                 outcome: TradeOutcome::Success,
+                shares: None,
+                price: None,
+                cost_usd: None,
+                fee_usd: None,
                 order_id: Some(OrderId::new("order-123")),
                 tx_hash: Some("0xdead".into()),
                 net_profit_usd: Some(Usd::from(Decimal::new(4, 0))),
@@ -290,6 +294,7 @@ async fn trade_repository_batch_create() {
     let trade_repo = PgTradeRepository::new(pool.connection().clone());
     let trades: Vec<NewTrade> = (0..3)
         .map(|i| NewTrade {
+            trade_id: TradeId::generate(),
             execution_id: ExecutionId::generate(),
             opportunity_id: OpportunityId::new_v7(),
             market_id: MarketId::new("0xbatch-mkt"),
@@ -523,26 +528,6 @@ async fn accounting_repository_crud() {
             .iter()
             .any(|p| p.period_id == period_id && p.finalized)
     );
-}
-
-#[tokio::test]
-#[ignore = "requires Docker"]
-async fn lifecycle_repository_crud() {
-    let (pool, _container) = setup_pg().await;
-    let repo = PgLifecycleRepository::new(pool.connection().clone());
-
-    let event = NewLifecycleEvent {
-        phase: LifecyclePhase::Detected,
-        stage: Some(LifecycleRecorder::System),
-        message: "Application started".into(),
-        metadata: Some(serde_json::json!({ "version": "test" })),
-    };
-    let recorded = repo.create(event).await.unwrap();
-    assert_eq!(recorded.phase, LifecyclePhase::Detected);
-
-    let recent = repo.get_recent(5).await.unwrap();
-    assert!(!recent.is_empty());
-    assert_eq!(recent[0].message, "Application started");
 }
 
 #[tokio::test]

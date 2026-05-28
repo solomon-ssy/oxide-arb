@@ -7,7 +7,7 @@ use crate::{
     execution::{clob_outcome::map_order_response, dispatcher::Dispatcher},
     observability::{latency::observe_tick_to_http, metrics_hub::MetricsHub},
 };
-use oxide_arb_api::clob::ClobClient;
+use oxide_arb_api::{clob::ClobClient, fees::FeeCalculator};
 use oxide_arb_models::{
     domain::{execution::ExecutionPlan, latency::LatencyTrace, order::OrderRequest},
     enums::{
@@ -15,13 +15,18 @@ use oxide_arb_models::{
         execution::ExecutionOutcome,
     },
 };
-use std::{sync::Arc, time::Instant};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 const TIER_FOK: &str = "fok";
 
 pub struct OrderStrategy {
     execution_mode: ExecutionMode,
     clob_client: Option<Arc<ClobClient>>,
+    fee_calculator: Arc<FeeCalculator>,
+    dispatcher_timeout_ms: u64,
     metrics: Arc<MetricsHub>,
 }
 
@@ -29,11 +34,15 @@ impl OrderStrategy {
     pub const fn new(
         execution_mode: ExecutionMode,
         clob_client: Option<Arc<ClobClient>>,
+        fee_calculator: Arc<FeeCalculator>,
+        dispatcher_timeout_ms: u64,
         metrics: Arc<MetricsHub>,
     ) -> Self {
         Self {
             execution_mode,
             clob_client,
+            fee_calculator,
+            dispatcher_timeout_ms,
             metrics,
         }
     }
@@ -83,19 +92,43 @@ impl OrderStrategy {
         trace.mark_http_sent();
         observe_tick_to_http(trace, &self.metrics);
 
-        match clob.place_order(&req).await {
-            Ok(resp) => {
-                let outcome = map_order_response(resp, plan, ExecutionMode::Live, started);
+        let timeout = Duration::from_millis(self.dispatcher_timeout_ms);
+        match tokio::time::timeout(timeout, clob.place_order(&req)).await {
+            Ok(Ok(resp)) => {
+                let outcome = map_order_response(
+                    resp,
+                    plan,
+                    ExecutionMode::Live,
+                    started,
+                    &self.fee_calculator,
+                    plan.category,
+                    &plan.token_id,
+                );
                 self.record_tier_metrics(&outcome);
                 outcome
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 self.metrics
                     .tier_misses
                     .with_label_values(&[TIER_FOK])
                     .inc();
                 ExecutionOutcome::Failed {
                     error: e.to_string(),
+                    execution_mode: ExecutionMode::Live,
+                }
+            }
+            Err(_) => {
+                self.metrics
+                    .tier_misses
+                    .with_label_values(&[TIER_FOK])
+                    .inc();
+                tracing::error!(
+                    execution_id = %plan.execution_id,
+                    timeout_ms = self.dispatcher_timeout_ms,
+                    "CLOB order timed out"
+                );
+                ExecutionOutcome::Failed {
+                    error: format!("CLOB order timeout after {}ms", self.dispatcher_timeout_ms),
                     execution_mode: ExecutionMode::Live,
                 }
             }

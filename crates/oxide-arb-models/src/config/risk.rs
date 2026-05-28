@@ -77,6 +77,9 @@ pub struct RiskConfig {
     pub max_total_exposure_pct: Decimal,
 
     // ── Reconciliation ───────────────────────────────────────────────
+    /// Interval (secs) between CLOB balance + open-position metrics refreshes.
+    #[serde(default = "default_metrics_refresh_interval")]
+    pub metrics_refresh_interval_secs: u64,
     /// Interval (secs) between ledger reconciliation runs.
     #[serde(default = "default_reconciliation_interval")]
     pub reconciliation_interval_secs: u64,
@@ -160,6 +163,7 @@ impl Default for RiskConfig {
             max_single_market_exposure_usd: default_max_market_exposure(),
             max_single_bet_usd: default_max_single_bet(),
             max_total_exposure_pct: default_max_total_exposure_pct(),
+            metrics_refresh_interval_secs: default_metrics_refresh_interval(),
             reconciliation_interval_secs: default_reconciliation_interval(),
             reconciliation_tolerance_usd: default_reconciliation_tolerance(),
             circuit_breaker: CircuitBreakerConfig::default(),
@@ -241,6 +245,9 @@ const fn default_max_single_bet() -> Decimal {
 }
 const fn default_max_total_exposure_pct() -> Decimal {
     dec!(80)
+}
+const fn default_metrics_refresh_interval() -> u64 {
+    5
 }
 const fn default_reconciliation_interval() -> u64 {
     300

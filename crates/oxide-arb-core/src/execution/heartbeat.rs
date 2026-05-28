@@ -59,6 +59,7 @@ impl HeartbeatTask {
                             tracing::debug!("heartbeat OK");
                             self.risk_engine
                                 .on_execution_event(ExecutionRiskEvent::HeartbeatSuccess);
+                            let _ = self.fsm.try_auto_recover(&self.risk_engine);
                         }
                         Err(e) => {
                             tracing::warn!(error = %e, "heartbeat failed");

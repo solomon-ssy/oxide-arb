@@ -1,9 +1,5 @@
 //! Load test: flood snapshots and verify backpressure without emergency halt.
 
-#[path = "support/test_util/mock_event_source.rs"]
-mod mock_event_source;
-
-use mock_event_source::MockEventSource;
 use oxide_arb_core::{
     observability::{backpressure::BackpressurePolicy, metrics_hub::MetricsHub},
     outbox::in_memory::InMemoryEventStore,
@@ -21,6 +17,7 @@ use oxide_arb_models::{
     },
     types::{Price, Shares, TokenId},
 };
+use oxide_arb_test_support::mock_event::MockEventSource;
 use rust_decimal_macros::dec;
 use std::{
     sync::Arc,

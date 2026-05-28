@@ -95,13 +95,10 @@ pub enum TaskKind {
     Detection,
     Execution,
     ExecutionHeartbeat,
-    BalanceMonitor,
     Audit,
     OutboxFlusher,
-    TickRecorder,
     PositionPersistence,
     ReportScheduler,
-    Web,
 }
 
 impl TaskKind {
@@ -113,13 +110,11 @@ impl TaskKind {
             Self::BookReconciliation | Self::LedgerReconciliation => ShutdownStage::Reconciliation,
             Self::HealthMonitor => ShutdownStage::HealthMonitor,
             Self::Detection => ShutdownStage::Detection,
-            Self::Execution
-            | Self::ExecutionHeartbeat
-            | Self::BalanceMonitor
-            | Self::ReportScheduler
-            | Self::Web => ShutdownStage::Execution,
+            Self::Execution | Self::ExecutionHeartbeat | Self::ReportScheduler => {
+                ShutdownStage::Execution
+            }
             Self::Audit => ShutdownStage::Audit,
-            Self::OutboxFlusher | Self::TickRecorder => ShutdownStage::Analytics,
+            Self::OutboxFlusher => ShutdownStage::Analytics,
             Self::PositionPersistence => ShutdownStage::Persistence,
         }
     }
@@ -137,13 +132,10 @@ impl TaskKind {
             Self::Detection => "detection",
             Self::Execution => "execution",
             Self::ExecutionHeartbeat => "execution_heartbeat",
-            Self::BalanceMonitor => "balance_monitor",
             Self::Audit => "audit",
             Self::OutboxFlusher => "outbox_flusher",
-            Self::TickRecorder => "tick_recorder",
             Self::PositionPersistence => "position_persistence",
             Self::ReportScheduler => "report_scheduler",
-            Self::Web => "web",
         }
     }
 }

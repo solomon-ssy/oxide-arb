@@ -7,8 +7,8 @@ pub mod risk_metrics;
 pub mod risk_persistence;
 pub mod trading_gate;
 
-pub use fee_estimator::CoreFeeEstimator;
-pub use oxide_arb_algorithm::pipeline::OpportunityPipeline;
+use crate::bridge::fee_estimator::CoreFeeEstimator;
+use oxide_arb_algorithm::pipeline::OpportunityPipeline;
 
 /// Production opportunity pipeline wired with the core fee estimator.
 pub type CoreOpportunityPipeline = OpportunityPipeline<CoreFeeEstimator>;

@@ -20,7 +20,6 @@ pub enum TaskId {
     Coalescer,
 
     // ── Reconciliation ────────────────────────────────────────────────
-    LedgerReconcile,
     PotentialLossEscalation,
 
     // ── Health ────────────────────────────────────────────────────────
@@ -39,20 +38,17 @@ pub enum TaskId {
     // ── Risk / periodic ───────────────────────────────────────────────
     RiskTick,
     ExposureGc,
-    WalletBalanceRefresh,
 
     // ── Audit / analytics / persistence writers ───────────────────────
     RiskAuditBatch,
     OutboxFlusher,
-    LifecycleWriter,
-    TradeWriter,
+    ExecutionAuditWriter,
+    DetectionWriter,
     RiskStatePersist,
     RiskStateDebouncer,
 
     // ── Ops ───────────────────────────────────────────────────────────
-    MetricsServer,
     ReportGenerator,
-    Web,
 }
 
 impl TaskId {
@@ -63,17 +59,16 @@ impl TaskId {
             Self::DataPipeline => TaskKind::WsIngress,
             Self::GammaSync | Self::CalibrationUpdater => TaskKind::CatalogSync,
             Self::Coalescer => TaskKind::CacheWorker,
-            Self::LedgerReconcile | Self::PotentialLossEscalation => TaskKind::LedgerReconciliation,
+            Self::PotentialLossEscalation => TaskKind::LedgerReconciliation,
             Self::HealthChecker | Self::RiskMetricsRefresh => TaskKind::HealthMonitor,
             Self::Scanner | Self::Funnel => TaskKind::Detection,
             Self::ExecutionRunner { .. } | Self::ExecutionOutcomeDrain => TaskKind::Execution,
             Self::ExecutionHeartbeat => TaskKind::ExecutionHeartbeat,
-            Self::WalletBalanceRefresh => TaskKind::BalanceMonitor,
             Self::RiskTick | Self::ExposureGc | Self::ReportGenerator => TaskKind::ReportScheduler,
-            Self::MetricsServer | Self::Web => TaskKind::Web,
             Self::RiskAuditBatch => TaskKind::Audit,
-            Self::OutboxFlusher | Self::LifecycleWriter => TaskKind::OutboxFlusher,
-            Self::TradeWriter => TaskKind::TickRecorder,
+            Self::OutboxFlusher | Self::ExecutionAuditWriter | Self::DetectionWriter => {
+                TaskKind::OutboxFlusher
+            }
             Self::RiskStatePersist | Self::RiskStateDebouncer => TaskKind::PositionPersistence,
         }
     }
@@ -95,7 +90,6 @@ impl TaskId {
             Self::GammaSync => "gamma-sync",
             Self::CalibrationUpdater => "calibration-updater",
             Self::Coalescer => "coalescer",
-            Self::LedgerReconcile => "ledger-reconcile",
             Self::PotentialLossEscalation => "potential-loss-escalation",
             Self::HealthChecker => "health-checker",
             Self::RiskMetricsRefresh => "risk-metrics-refresh",
@@ -106,16 +100,13 @@ impl TaskId {
             Self::ExecutionHeartbeat => "execution-heartbeat",
             Self::RiskTick => "risk-tick",
             Self::ExposureGc => "exposure-gc",
-            Self::WalletBalanceRefresh => "wallet-balance-refresh",
             Self::RiskAuditBatch => "risk-audit-batch",
             Self::OutboxFlusher => "outbox-flusher",
-            Self::LifecycleWriter => "lifecycle-writer",
-            Self::TradeWriter => "trade-writer",
+            Self::ExecutionAuditWriter => "execution-audit-writer",
+            Self::DetectionWriter => "detection-writer",
             Self::RiskStatePersist => "risk-state-persist",
             Self::RiskStateDebouncer => "risk-state-debouncer",
-            Self::MetricsServer => "metrics-server",
             Self::ReportGenerator => "report-generator",
-            Self::Web => "web",
         }
     }
 }

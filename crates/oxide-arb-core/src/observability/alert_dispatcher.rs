@@ -2,6 +2,7 @@ use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use std::{
     fmt::{self, Display, Formatter},
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 use teloxide::{prelude::*, types::ChatId};
@@ -25,6 +26,7 @@ impl Display for AlertSeverity {
     }
 }
 
+#[derive(Clone)]
 pub struct Alert {
     pub severity: AlertSeverity,
     pub title: String,
@@ -47,6 +49,7 @@ pub struct AlertDispatcher {
     webhook: Option<WebhookChannel>,
     cooldown: DashMap<String, Instant>,
     cooldown_duration: Duration,
+    recordings: Option<Arc<Mutex<Vec<Alert>>>>,
 }
 
 impl AlertDispatcher {
@@ -74,10 +77,27 @@ impl AlertDispatcher {
             webhook,
             cooldown: DashMap::new(),
             cooldown_duration: Duration::from_secs(cooldown_secs),
+            recordings: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_recordings(recordings: Arc<Mutex<Vec<Alert>>>) -> Self {
+        Self {
+            telegram: None,
+            webhook: None,
+            cooldown: DashMap::new(),
+            cooldown_duration: Duration::ZERO,
+            recordings: Some(recordings),
         }
     }
 
     pub async fn dispatch(&self, alert: Alert) {
+        if let Some(recordings) = &self.recordings {
+            if let Ok(mut guard) = recordings.lock() {
+                guard.push(alert.clone());
+            }
+        }
         let cooldown_key = format!("{}:{}", alert.severity, alert.title);
         if let Some(last) = self.cooldown.get(&cooldown_key) {
             if last.elapsed() < self.cooldown_duration {

@@ -20,10 +20,9 @@ mod m20250601_000004_create_positions;
 mod m20250601_000005_create_risk_engine_state;
 mod m20250601_000006_create_calibration;
 mod m20250601_000007_create_runtime_config;
-mod m20250601_000008_create_lifecycle_events;
 mod m20250601_000009_create_accounting_periods;
 mod m20250601_000010_create_potential_loss_ledger;
-mod m20250601_000012_create_opportunity_lifecycle_outbox;
+mod m20250601_000012_create_outbox_event;
 mod m20250601_000013_create_resolution_event;
 mod m20250601_000014_add_updated_at_triggers;
 mod m20250601_000015_seed_trading_bootstrap;
@@ -52,10 +51,9 @@ impl MigratorTrait for Migrator {
             Box::new(m20250601_000005_create_risk_engine_state::Migration),
             Box::new(m20250601_000006_create_calibration::Migration),
             Box::new(m20250601_000007_create_runtime_config::Migration),
-            Box::new(m20250601_000008_create_lifecycle_events::Migration),
             Box::new(m20250601_000009_create_accounting_periods::Migration),
             Box::new(m20250601_000010_create_potential_loss_ledger::Migration),
-            Box::new(m20250601_000012_create_opportunity_lifecycle_outbox::Migration),
+            Box::new(m20250601_000012_create_outbox_event::Migration),
             Box::new(m20250601_000013_create_resolution_event::Migration),
             Box::new(m20250601_000014_add_updated_at_triggers::Migration),
             Box::new(m20250601_000015_seed_trading_bootstrap::Migration),

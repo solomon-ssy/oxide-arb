@@ -15,7 +15,9 @@ use oxide_arb_api::{
     ws::{ClobWsManager, normalize::normalize_ws_message},
 };
 use oxide_arb_core::{
-    bridge::{CoreFeeEstimator, CoreOpportunityPipeline, risk_metrics::CoreRiskMetrics},
+    bridge::{
+        CoreOpportunityPipeline, fee_estimator::CoreFeeEstimator, risk_metrics::CoreRiskMetrics,
+    },
     detection::{coalescer::Coalescer, funnel::Funnel, scanner::Scanner},
     execution::{
         capital_manager::CapitalManager,
@@ -28,7 +30,11 @@ use oxide_arb_core::{
         validator::Validator,
     },
     exposure::in_memory::InMemoryExposureReservation,
-    observability::{backpressure::BackpressurePolicy, metrics_hub::MetricsHub},
+    infra::async_writer::AsyncWriter,
+    observability::{
+        backpressure::BackpressurePolicy, execution_audit::ExecutionAuditWriter,
+        metrics_hub::MetricsHub,
+    },
     outbox::in_memory::InMemoryEventStore,
     pipeline::{
         book_store::BookStore,
@@ -41,6 +47,7 @@ use oxide_arb_core::{
     service::risk_metrics::{ApiHealthTracker, RiskMetricsState},
 };
 use oxide_arb_models::{
+    clickhouse::OpportunityAuditRow,
     config::{
         CalibrationConfig, EmissionCooldownConfig, EndgameDetectionConfig,
         ExposureReservationConfig, FillProbabilityConfig, MarketDataConfig, PolymarketConfig,
@@ -67,8 +74,11 @@ use oxide_arb_models::{
 use oxide_arb_risk::{
     builder::RiskEngineBuilder, clock::utc_clock, traits::RiskMetrics, types::ReportMode,
 };
-use polymarket_client_sdk_v2::clob::ws::types::response::{BookUpdate, OrderBookLevel, WsMessage};
-use polymarket_client_sdk_v2::types::{B256, U256};
+use oxide_arb_test_support::mocks::MockTradeRepository;
+use polymarket_client_sdk_v2::{
+    clob::ws::types::response::{BookUpdate, OrderBookLevel, WsMessage},
+    types::{B256, U256},
+};
 use rust_decimal_macros::dec;
 use std::{
     sync::{Arc, OnceLock},
@@ -699,6 +709,7 @@ fn bench_scanner_scan_market(c: &mut Criterion) {
         market_cache,
         StalenessClassifier::new(&MarketDataConfig::default()),
         metrics,
+        None,
     );
     let entry = CachedMarketScanEntry {
         market_id: MarketId::new("bench-m1"),
@@ -837,8 +848,14 @@ fn execution_bench_risk_metrics(
     Arc::new(CoreRiskMetrics::new(metrics_state, exposure, ws_manager))
 }
 
-fn execution_bench_setup() -> (&'static ExecutionPipeline, &'static Arc<ScoredOpportunity>) {
-    static SETUP: OnceLock<(ExecutionPipeline, Arc<ScoredOpportunity>)> = OnceLock::new();
+fn execution_bench_setup() -> (
+    &'static ExecutionPipeline<MockTradeRepository>,
+    &'static Arc<ScoredOpportunity>,
+) {
+    static SETUP: OnceLock<(
+        ExecutionPipeline<MockTradeRepository>,
+        Arc<ScoredOpportunity>,
+    )> = OnceLock::new();
     SETUP.get_or_init(|| {
         let metrics = Arc::new(MetricsHub::new());
         let fsm = Arc::new(ExecutionFSM::new(Arc::clone(&metrics)));
@@ -858,8 +875,20 @@ fn execution_bench_setup() -> (&'static ExecutionPipeline, &'static Arc<ScoredOp
         ));
         let scored = Arc::new(execution_bench_scored());
         seed_execution_books(&book_store, &scored);
-        let (outcome_tx, _rx) = ExecutionPipeline::outcome_channel();
+        let (outcome_tx, _rx) = flume::bounded(1024);
+        let trade_repo = Arc::new(MockTradeRepository::default());
+        let audit_shutdown = CancellationToken::new();
+        let (audit_writer_inner, _audit_worker) = AsyncWriter::new(
+            "bench-audit",
+            1024,
+            std::time::Duration::from_secs(3600),
+            move |_batch: Vec<OpportunityAuditRow>| Box::pin(async move { Ok(()) }),
+            Arc::clone(&metrics),
+            audit_shutdown,
+        );
+        let audit_writer = Arc::new(ExecutionAuditWriter::new(Arc::new(audit_writer_inner)));
 
+        let fee_calculator = Arc::new(FeeCalculator::default());
         let pipeline = ExecutionPipeline::new(ExecutionPipelineDeps {
             validator: Validator::new(
                 Arc::clone(&book_store),
@@ -868,9 +897,23 @@ fn execution_bench_setup() -> (&'static ExecutionPipeline, &'static Arc<ScoredOp
                 5_000,
                 Arc::clone(&metrics),
             ),
-            plan_builder: PlanBuilder::new(Arc::new(FeeCalculator::default())),
-            dispatcher: Dispatcher::new(ExecutionMode::Paper, Arc::clone(&metrics)),
-            order_strategy: OrderStrategy::new(ExecutionMode::Paper, None, Arc::clone(&metrics)),
+            plan_builder: PlanBuilder::new(
+                Arc::clone(&fee_calculator),
+                Arc::new(MarketRegistry::new()),
+            ),
+            dispatcher: Dispatcher::new(
+                ExecutionMode::Paper,
+                Some(Arc::clone(&book_store)),
+                Arc::clone(&fee_calculator),
+                Arc::clone(&metrics),
+            ),
+            order_strategy: OrderStrategy::new(
+                ExecutionMode::Paper,
+                None,
+                fee_calculator,
+                30_000,
+                Arc::clone(&metrics),
+            ),
             capital_manager: capital,
             risk_engine: execution_bench_risk_engine(),
             risk_metrics: execution_bench_risk_metrics(exposure),
@@ -878,6 +921,8 @@ fn execution_bench_setup() -> (&'static ExecutionPipeline, &'static Arc<ScoredOp
             market_inflight: Arc::new(MarketInFlightRegistry::new()),
             metrics,
             execution_mode: ExecutionMode::Paper,
+            trade_repo,
+            audit_writer,
             outcome_tx,
             backpressure,
         });
