@@ -3,11 +3,14 @@ use super::orm::{
     EntityTrait, IntoActiveModel, PaginatorTrait, QueryFilter, QuerySelect, Set,
 };
 use crate::traits::PositionRepository;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use num_traits::ToPrimitive;
 use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::{
-    domain::{MarkRedeemedParams, NewPosition, PositionInfo, SettlePositionParams, UpdatePosition},
+    domain::{
+        MarkRedeemedParams, NewPosition, PositionInfo, SettlePositionParams, SettledPositionStats,
+        UpdatePosition,
+    },
     entities::{
         market::Column as MarketColumn,
         position::{ActiveModel, Column, Entity, Relation},
@@ -295,6 +298,7 @@ async fn mark_redeemed_q(
     let mut active: ActiveModel = existing.into();
     active.winning_token_id = Set(Some(params.winning_token_id));
     active.settlement_payout_usd = Set(Some(params.settlement_payout_usd));
+    active.realized_pnl = Set(params.realized_pnl);
     active.redeem_tx_hash = Set(params.redeem_tx_hash);
     active.redeem_status = Set(params.redeem_status);
     active.settlement_trigger = Set(Some(params.settlement_trigger));
@@ -411,6 +415,71 @@ async fn count_open_q(db: &impl ConnectionTrait) -> Result<usize, StorageError> 
         .await
         .map_err(StorageError::from)?;
     Ok(ToPrimitive::to_usize(&count).unwrap_or(usize::MAX))
+}
+
+async fn aggregate_settled_between_q(
+    db: &impl ConnectionTrait,
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+) -> Result<SettledPositionStats, StorageError> {
+    let settled: Vec<PositionInfo> = Entity::find()
+        .filter(Column::Status.eq(PositionStatus::Settled))
+        .filter(Column::SettlementAccountingStatus.eq(SettlementAccountingStatus::Accounted))
+        .filter(Column::SettledAt.gte(start))
+        .filter(Column::SettledAt.lt(end))
+        .all(db)
+        .await
+        .map_err(StorageError::from)?
+        .into_iter()
+        .map(Into::into)
+        .collect();
+    let unsettled_count = Entity::find()
+        .filter(Column::Status.eq(PositionStatus::Open))
+        .count(db)
+        .await
+        .map_err(StorageError::from)?;
+    let failed_count = Entity::find()
+        .filter(Column::SettlementAccountingStatus.eq(SettlementAccountingStatus::Failed))
+        .count(db)
+        .await
+        .map_err(StorageError::from)?;
+
+    let mut stats = SettledPositionStats {
+        realized_pnl: Usd::ZERO,
+        total_payout: Usd::ZERO,
+        total_cost: Usd::ZERO,
+        total_fees: Usd::ZERO,
+        settled_position_count: 0,
+        winning_position_count: 0,
+        losing_position_count: 0,
+        unsettled_position_count: ToPrimitive::to_u32(&unsettled_count).unwrap_or(u32::MAX),
+        failed_accounting_count: ToPrimitive::to_u32(&failed_count).unwrap_or(u32::MAX),
+        largest_single_profit: Usd::ZERO,
+        largest_single_loss: Usd::ZERO,
+    };
+
+    for position in settled {
+        stats.settled_position_count = stats.settled_position_count.saturating_add(1);
+        stats.realized_pnl += position.realized_pnl;
+        stats.total_cost += position.total_cost_usd;
+        stats.total_fees += position.total_fees_usd;
+        if let Some(payout) = position.settlement_payout_usd {
+            stats.total_payout += payout;
+            if payout > Usd::ZERO {
+                stats.winning_position_count = stats.winning_position_count.saturating_add(1);
+            } else {
+                stats.losing_position_count = stats.losing_position_count.saturating_add(1);
+            }
+        }
+        if position.realized_pnl > stats.largest_single_profit {
+            stats.largest_single_profit = position.realized_pnl;
+        }
+        if position.realized_pnl < stats.largest_single_loss {
+            stats.largest_single_loss = position.realized_pnl;
+        }
+    }
+
+    Ok(stats)
 }
 
 // ── connection-based impl ────────────────────────────────────────────
@@ -568,6 +637,14 @@ impl PositionRepository for PgPositionRepository {
     async fn count_open(&self) -> Result<usize, StorageError> {
         count_open_q(&self.db).await
     }
+
+    async fn aggregate_settled_between(
+        &self,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> Result<SettledPositionStats, StorageError> {
+        aggregate_settled_between_q(&self.db, start, end).await
+    }
 }
 
 // ── transaction-based impl ───────────────────────────────────────────
@@ -714,5 +791,13 @@ impl PositionRepository for PgPositionRepositoryTxn<'_> {
 
     async fn count_open(&self) -> Result<usize, StorageError> {
         count_open_q(self.txn).await
+    }
+
+    async fn aggregate_settled_between(
+        &self,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> Result<SettledPositionStats, StorageError> {
+        aggregate_settled_between_q(self.txn, start, end).await
     }
 }

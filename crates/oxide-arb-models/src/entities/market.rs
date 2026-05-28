@@ -9,6 +9,7 @@ use crate::{
 };
 use chrono::{DateTime, Utc};
 use oxide_arb_macros::ActiveModelDefaults;
+use rust_decimal::Decimal;
 use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -35,6 +36,14 @@ pub struct Model {
     pub neg_risk: bool,
     pub end_date: Option<DateTime<Utc>>,
     pub resolved_at: Option<DateTime<Utc>>,
+    pub fees_enabled: bool,
+    pub fee_rate: Option<Decimal>,
+    pub fee_exponent: Option<Decimal>,
+    pub fee_taker_only: Option<bool>,
+    pub fee_rebate_rate: Option<Decimal>,
+    #[sea_orm(column_type = "Text", nullable)]
+    pub fee_source: Option<String>,
+    pub fee_observed_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

@@ -1,7 +1,7 @@
 use crate::{
     bridge::risk_metrics::CoreRiskMetrics,
     execution::{fsm::ExecutionFSM, settlement::payout::compute_settlement_economics},
-    observability::metrics_hub::MetricsHub,
+    observability::{execution_audit::ExecutionAuditWriter, metrics_hub::MetricsHub},
     pipeline::market_registry::MarketRegistry,
     service::risk_metrics::RiskMetricsRefreshService,
 };
@@ -27,8 +27,8 @@ use oxide_arb_models::{
     types::TokenId,
 };
 use oxide_arb_repository::{
-    postgres::{PgPositionRepository, PgResolutionEventRepository},
-    traits::{PositionRepository, ResolutionEventRepository},
+    postgres::{PgPositionRepository, PgResolutionEventRepository, PgTradeRepository},
+    traits::{PositionRepository, ResolutionEventRepository, TradeRepository},
 };
 use oxide_arb_risk::engine::RiskEngine;
 use std::{sync::Arc, time::Instant};
@@ -36,6 +36,7 @@ use std::{sync::Arc, time::Instant};
 pub struct MarketSettlementService {
     position_repo: Arc<PgPositionRepository>,
     resolution_event_repo: Arc<PgResolutionEventRepository>,
+    trade_repo: Arc<PgTradeRepository>,
     risk_engine: Arc<RiskEngine>,
     risk_metrics: Arc<CoreRiskMetrics>,
     fsm: Arc<ExecutionFSM>,
@@ -43,6 +44,7 @@ pub struct MarketSettlementService {
     market_registry: Arc<MarketRegistry>,
     voting_oracle: Arc<VotingOracle>,
     metrics: Arc<MetricsHub>,
+    audit_writer: Arc<ExecutionAuditWriter>,
     metrics_refresh: Option<Arc<RiskMetricsRefreshService>>,
     config: Arc<SettlementConfig>,
     execution_mode: ExecutionMode,
@@ -51,6 +53,7 @@ pub struct MarketSettlementService {
 pub struct MarketSettlementServiceDeps {
     pub position_repo: Arc<PgPositionRepository>,
     pub resolution_event_repo: Arc<PgResolutionEventRepository>,
+    pub trade_repo: Arc<PgTradeRepository>,
     pub risk_engine: Arc<RiskEngine>,
     pub risk_metrics: Arc<CoreRiskMetrics>,
     pub fsm: Arc<ExecutionFSM>,
@@ -58,6 +61,7 @@ pub struct MarketSettlementServiceDeps {
     pub market_registry: Arc<MarketRegistry>,
     pub voting_oracle: Arc<VotingOracle>,
     pub metrics: Arc<MetricsHub>,
+    pub audit_writer: Arc<ExecutionAuditWriter>,
     pub metrics_refresh: Option<Arc<RiskMetricsRefreshService>>,
     pub config: Arc<SettlementConfig>,
     pub execution_mode: ExecutionMode,
@@ -68,6 +72,7 @@ impl MarketSettlementService {
         Self {
             position_repo: deps.position_repo,
             resolution_event_repo: deps.resolution_event_repo,
+            trade_repo: deps.trade_repo,
             risk_engine: deps.risk_engine,
             risk_metrics: deps.risk_metrics,
             fsm: deps.fsm,
@@ -75,6 +80,7 @@ impl MarketSettlementService {
             market_registry: deps.market_registry,
             voting_oracle: deps.voting_oracle,
             metrics: deps.metrics,
+            audit_writer: deps.audit_writer,
             metrics_refresh: deps.metrics_refresh,
             config: deps.config,
             execution_mode: deps.execution_mode,
@@ -194,6 +200,7 @@ impl MarketSettlementService {
                 MarkRedeemedParams {
                     winning_token_id: req.winning_token_id.clone(),
                     settlement_payout_usd: economics.payout_usd,
+                    realized_pnl: economics.realized_pnl_usd,
                     redeem_tx_hash: redeem_outcome.tx_hash,
                     redeem_status: RedeemStatus::settled_for_mode(self.execution_mode),
                     settlement_trigger: req.source,
@@ -238,11 +245,41 @@ impl MarketSettlementService {
         self.position_repo
             .mark_accounted(&settled.position_id, Utc::now())
             .await?;
+        self.write_settlement_audit(req, settled, &economics).await;
         if report.breaker_tripped.is_some() {
             self.fsm
                 .enter_emergency("circuit breaker tripped after market settlement");
         }
         Ok(())
+    }
+
+    async fn write_settlement_audit(
+        &self,
+        req: &MarketSettlementRequest,
+        settled: &PositionInfo,
+        economics: &SettlementEconomics,
+    ) {
+        match self.trade_repo.find_by_id(&settled.trade_id).await {
+            Ok(Some(trade)) => {
+                self.audit_writer
+                    .write_settlement(&trade, settled, req, economics);
+            }
+            Ok(None) => {
+                tracing::error!(
+                    trade_id = %settled.trade_id,
+                    position_id = %settled.position_id,
+                    "settlement audit skipped: trade not found"
+                );
+            }
+            Err(error) => {
+                tracing::error!(
+                    %error,
+                    trade_id = %settled.trade_id,
+                    position_id = %settled.position_id,
+                    "settlement audit lookup failed"
+                );
+            }
+        }
     }
 
     pub async fn retry_pending(&self) -> Result<(), OxideError> {

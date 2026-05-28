@@ -2,7 +2,7 @@
 //!
 //! Used as the golden oracle in unit tests — not called on the hot path.
 //! Golden tests assert [`super::formula::calculate_fee`] matches this oracle
-//! within 4-decimal-place rounding.
+//! within official 5-decimal-place rounding.
 
 use rust_decimal::{Decimal, MathematicalOps};
 use rust_decimal_macros::dec;
@@ -35,8 +35,8 @@ pub fn production_fee_usd(shares: Decimal, price: Decimal, fee_rate: Decimal) ->
 
 #[must_use]
 pub fn round_fee(raw: Decimal) -> Decimal {
-    let rounded = raw.round_dp(4);
-    if rounded < dec!(0.0001) {
+    let rounded = raw.round_dp(5);
+    if rounded < dec!(0.00001) {
         Decimal::ZERO
     } else {
         rounded

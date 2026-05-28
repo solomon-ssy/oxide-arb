@@ -2,13 +2,21 @@
 
 use super::{AppContext, task_id::TaskId};
 use crate::{
-    infra::{health_checker::HealthChecker, periodic_task::PeriodicTask},
-    observability::metrics_hub::MetricsHub,
+    infra::{
+        debounced_writer::DebouncedWriter, health_checker::HealthChecker,
+        periodic_task::PeriodicTask,
+    },
+    observability::{
+        metrics_hub::MetricsHub,
+        report_generator::{ReportGenerator, previous_utc_day, previous_utc_week_start},
+    },
     service::risk_metrics::RiskMetricsRefreshService,
 };
+use chrono::Datelike;
 use oxide_arb_algorithm::calibration::{CalibrationUpdater, ResolutionCalibrator};
 use oxide_arb_error::{OxideError, OxideResult};
-use oxide_arb_models::enums::common::ExecutionMode;
+use oxide_arb_models::{domain::risk::UpsertRiskEngineState, enums::common::ExecutionMode};
+use oxide_arb_repository::traits::RiskStateRepository;
 use oxide_arb_risk::{engine::RiskEngine, traits::RiskMetrics};
 use std::{sync::Arc, time::Duration};
 
@@ -26,10 +34,12 @@ impl AppContext {
     pub fn queue_periodic_services(&self) {
         self.queue_gamma_sync();
         self.queue_risk_tick();
+        self.queue_risk_state_debouncer();
         self.queue_exposure_gc();
         self.queue_calibration_updater();
         self.queue_risk_metrics_refresh();
         self.queue_market_settlement_retry();
+        self.queue_report_generator();
         self.queue_health_checker();
     }
 }
@@ -121,6 +131,52 @@ impl AppContext {
             });
     }
 
+    fn queue_risk_state_debouncer(&self) {
+        let risk_engine = Arc::clone(&self.risk.engine);
+        let risk_metrics = Arc::clone(&self.risk.metrics);
+        let risk_state_repo = Arc::clone(&self.infra.risk_state_repo);
+        let shutdown = self.shutdown.clone();
+        let (writer, worker) = DebouncedWriter::new(
+            TaskId::RiskStateDebouncer.static_name(),
+            Duration::from_secs(60),
+            move |state: UpsertRiskEngineState| {
+                let repo = Arc::clone(&risk_state_repo);
+                Box::pin(async move { repo.upsert(state).await.map_err(Into::into) })
+            },
+            shutdown,
+        );
+
+        writer.update(UpsertRiskEngineState::from(
+            &risk_engine.snapshot(risk_metrics.as_ref()),
+        ));
+
+        self.pending_tasks
+            .push(TaskId::RiskStateDebouncer, move |shutdown| async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(60));
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                tokio::pin!(worker);
+
+                loop {
+                    tokio::select! {
+                        () = shutdown.cancelled() => {
+                            return;
+                        }
+                        result = &mut worker => {
+                            if let Err(error) = result {
+                                tracing::error!(%error, "risk state debouncer exited with error");
+                            }
+                            return;
+                        }
+                        _ = interval.tick() => {
+                            writer.update(UpsertRiskEngineState::from(
+                                &risk_engine.snapshot(risk_metrics.as_ref()),
+                            ));
+                        }
+                    }
+                }
+            });
+    }
+
     fn queue_calibration_updater(&self) {
         let updater = Arc::clone(&self.trading.calibration_updater);
         let metrics = Arc::clone(&self.infra.metrics);
@@ -173,13 +229,10 @@ impl AppContext {
                     || {
                         let refresher = Arc::clone(&refresher);
                         async move {
-                            refresher
-                                .refresh_and_maybe_reconcile()
-                                .await
-                                .map_err(|error| {
-                                    tracing::warn!(%error, "risk metrics refresh failed");
-                                    error
-                                })
+                            refresher.refresh().await.map_err(|error| {
+                                tracing::warn!(%error, "risk metrics refresh failed");
+                                error
+                            })
                         }
                     },
                 )
@@ -251,6 +304,45 @@ impl AppContext {
                 .await
                 {
                     tracing::error!(%error, "health checker periodic task exited");
+                }
+            });
+    }
+
+    fn queue_report_generator(&self) {
+        let generator = Arc::new(ReportGenerator::new(
+            Arc::clone(&self.infra.trade_repo),
+            Arc::clone(&self.infra.position_repo),
+            Arc::clone(&self.infra.report_repo),
+            Arc::clone(&self.risk.engine),
+            self.risk.metrics.clone(),
+            Arc::clone(&self.infra.alerts),
+        ));
+
+        self.pending_tasks
+            .push(TaskId::ReportGenerator, move |shutdown| async move {
+                if let Err(error) = PeriodicTask::run(
+                    TaskId::ReportGenerator.static_name(),
+                    Duration::from_secs(3600),
+                    PERIODIC_JITTER_PCT,
+                    false,
+                    shutdown,
+                    || {
+                        let generator = Arc::clone(&generator);
+                        async move {
+                            let now = chrono::Utc::now();
+                            generator.generate_daily(previous_utc_day(now)).await?;
+                            if now.weekday() == chrono::Weekday::Mon {
+                                generator
+                                    .generate_weekly(previous_utc_week_start(now))
+                                    .await?;
+                            }
+                            Ok(())
+                        }
+                    },
+                )
+                .await
+                {
+                    tracing::error!(%error, "report generator periodic task exited");
                 }
             });
     }

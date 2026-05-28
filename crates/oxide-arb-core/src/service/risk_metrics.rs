@@ -1,6 +1,6 @@
 //! Periodic refresh of risk metrics snapshot from CLOB balance and open positions.
 
-use crate::{bridge::risk_metrics::CoreRiskMetrics, observability::metrics_hub::MetricsHub};
+use crate::observability::metrics_hub::MetricsHub;
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use num_traits::ToPrimitive;
@@ -12,15 +12,13 @@ use oxide_arb_models::{
     types::{MarketId, Usd},
 };
 use oxide_arb_repository::{postgres::PgPositionRepository, traits::PositionRepository};
-use oxide_arb_risk::engine::RiskEngine;
-use parking_lot::Mutex;
 use std::{
     collections::HashMap,
     sync::{
         Arc, atomic,
         atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
     },
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 struct MetricsSnapshot {
@@ -140,7 +138,8 @@ pub struct RiskMetricsState {
 
 impl RiskMetricsState {
     pub fn new(api_tracker: Arc<ApiHealthTracker>) -> Self {
-        let now_ms = ToPrimitive::to_u64(&Instant::now().elapsed().as_millis()).unwrap_or(0);
+        let now_ms =
+            ToPrimitive::to_u64(&chrono::Utc::now().timestamp_millis().max(0)).unwrap_or(0);
         Self {
             snapshot: ArcSwap::from_pointee(MetricsSnapshot::initial()),
             api_tracker,
@@ -317,19 +316,11 @@ pub struct LoadedMetricsSnapshot {
     pub consecutive_market_misses: u32,
 }
 
-struct ReconciliationContext {
-    risk_engine: Arc<RiskEngine>,
-    risk_metrics: Arc<CoreRiskMetrics>,
-    interval: Duration,
-    last_run: Mutex<Instant>,
-}
-
 pub struct RiskMetricsRefreshService {
     state: Arc<RiskMetricsState>,
     clob_client: Arc<ClobClient>,
     position_repo: Arc<PgPositionRepository>,
     metrics: Arc<MetricsHub>,
-    reconciliation: Option<ReconciliationContext>,
 }
 
 impl RiskMetricsRefreshService {
@@ -344,58 +335,12 @@ impl RiskMetricsRefreshService {
             clob_client,
             position_repo,
             metrics,
-            reconciliation: None,
         }
-    }
-
-    /// Attach reconciliation so it piggybacks on the same CLOB+PG fetch.
-    #[must_use]
-    pub fn with_reconciliation(
-        mut self,
-        risk_engine: Arc<RiskEngine>,
-        risk_metrics: Arc<CoreRiskMetrics>,
-        reconciliation_interval_secs: u64,
-    ) -> Self {
-        self.reconciliation = Some(ReconciliationContext {
-            risk_engine,
-            risk_metrics,
-            interval: Duration::from_secs(reconciliation_interval_secs.max(60)),
-            last_run: Mutex::new(Instant::now()),
-        });
-        self
     }
 
     /// Refresh the snapshot from CLOB/PG. Called by the startup gate.
     pub async fn refresh(&self) -> Result<(), OxideError> {
         self.fetch_and_store_snapshot().await?;
-        Ok(())
-    }
-
-    /// Refresh snapshot and, if the reconciliation interval has elapsed,
-    /// run ledger reconciliation on the same fetched data — zero extra I/O.
-    pub async fn refresh_and_maybe_reconcile(&self) -> Result<(), OxideError> {
-        let (balance, ext_positions) = self.fetch_and_store_snapshot().await?;
-
-        if let Some(ctx) = &self.reconciliation {
-            let should_reconcile = ctx.last_run.lock().elapsed() >= ctx.interval;
-            if should_reconcile {
-                let reconciler = ctx.risk_engine.reconciler();
-                let report = reconciler.reconcile_fetched(
-                    ctx.risk_metrics.as_ref(),
-                    balance,
-                    Usd::ZERO,
-                    &ext_positions,
-                );
-                if let Err(error) = ctx
-                    .risk_engine
-                    .on_reconciliation_result(&report, ctx.risk_metrics.as_ref())
-                    .await
-                {
-                    tracing::error!(%error, "reconciliation result processing failed");
-                }
-                *ctx.last_run.lock() = Instant::now();
-            }
-        }
         Ok(())
     }
 

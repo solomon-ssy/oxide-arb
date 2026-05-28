@@ -1,12 +1,15 @@
+pub mod audit;
 pub mod blacklist;
 pub mod calibration;
 pub mod common;
 pub mod execution;
+pub mod fee;
 pub mod lifecycle;
 pub mod market;
 pub mod opportunity;
 pub mod order;
 pub mod outbox;
+pub mod report;
 pub mod risk;
 pub mod runtime_config;
 pub mod system;

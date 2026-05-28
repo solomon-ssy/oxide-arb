@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::{
-    domain::{NewTrade, TradeInfo, UpdateTradeOutcome},
+    domain::{NewTrade, ReportTradeStats, TradeInfo, UpdateTradeOutcome},
     types::{MarketId, TradeId},
 };
 use std::collections::HashMap;
@@ -42,4 +42,10 @@ pub trait TradeRepository: Send + Sync {
         &self,
         since: DateTime<Utc>,
     ) -> Result<HashMap<String, i64>, StorageError>;
+
+    async fn aggregate_between(
+        &self,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> Result<ReportTradeStats, StorageError>;
 }

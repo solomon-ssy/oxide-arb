@@ -1,6 +1,10 @@
+use chrono::{DateTime, Utc};
 use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::{
-    domain::{MarkRedeemedParams, NewPosition, PositionInfo, SettlePositionParams, UpdatePosition},
+    domain::{
+        MarkRedeemedParams, NewPosition, PositionInfo, SettlePositionParams, SettledPositionStats,
+        UpdatePosition,
+    },
     enums::common::SettlementTrigger,
     types::{MarketId, PositionId, TokenId, TradeId, Usd},
 };
@@ -100,4 +104,10 @@ pub trait PositionRepository: Send + Sync {
     async fn total_exposure(&self) -> Result<Usd, StorageError>;
 
     async fn count_open(&self) -> Result<usize, StorageError>;
+
+    async fn aggregate_settled_between(
+        &self,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> Result<SettledPositionStats, StorageError>;
 }

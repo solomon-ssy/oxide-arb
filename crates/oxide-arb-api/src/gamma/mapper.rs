@@ -3,9 +3,13 @@
 use super::types::{RawGammaEvent, RawGammaMarket};
 use chrono::{DateTime, Utc};
 use oxide_arb_models::{
-    domain::market::{EventRegistryInfo, MarketRegistryInfo, TokenInfo, UpsertEvent, UpsertMarket},
+    domain::{
+        fee::MarketFeeSchedule,
+        market::{EventRegistryInfo, MarketRegistryInfo, TokenInfo, UpsertEvent, UpsertMarket},
+    },
     enums::{
         common::{MarketCategory, TickSize},
+        fee::FeeSource,
         market::{EventStatus, MarketStatus},
     },
     types::{EventId, MarketId, TokenId, Usd},
@@ -18,21 +22,22 @@ pub struct GammaCatalogBatch {
     pub markets: Vec<UpsertMarket>,
     pub registry_events: Vec<EventRegistryInfo>,
     pub registry_markets: Vec<MarketRegistryInfo>,
-    pub fee_data: Vec<(TokenId, bool, MarketCategory)>,
+    pub fee_data: Vec<MarketFeeSchedule>,
 }
 
-/// Extract per-token fee metadata from a Gamma sync page.
-///
-/// Returns `(token_id, fees_enabled, category)` tuples for `FeeCalculator::ingest_gamma_markets`.
-pub fn collect_fee_sync(raw_events: &[RawGammaEvent]) -> Vec<(TokenId, bool, MarketCategory)> {
+/// Extract market-scoped fee schedules from a Gamma sync page.
+pub fn collect_fee_sync(raw_events: &[RawGammaEvent]) -> Vec<MarketFeeSchedule> {
     let mut out = Vec::new();
     for ev in raw_events {
         let markets = ev.markets.as_deref().unwrap_or(&[]);
         for m in markets {
-            let category = MarketCategory::from(m.category.as_deref());
-            let fees_enabled = m.fees_enabled.unwrap_or(true);
-            for t in m.tokens.as_deref().unwrap_or(&[]) {
-                out.push((TokenId::new(&t.token_id), fees_enabled, category));
+            if let Some(schedule) = (MarketFeeScheduleParts {
+                raw: m,
+                observed_at: Utc::now(),
+            })
+            .into()
+            {
+                out.push(schedule);
             }
         }
     }
@@ -86,8 +91,81 @@ fn map_upsert_event(raw: &RawGammaEvent, event_id: &EventId) -> UpsertEvent {
 }
 
 fn map_market_dual(raw: RawGammaMarket, event_id: &EventId) -> (UpsertMarket, MarketRegistryInfo) {
-    let tokens: Vec<TokenInfo> = raw
-        .tokens
+    let tokens = token_infos(&raw);
+    let tick_size = raw
+        .minimum_tick_size
+        .as_deref()
+        .and_then(|s| s.parse::<TickSize>().ok())
+        .unwrap_or(TickSize::Hundredth);
+    let category = MarketCategory::from(raw.category.as_deref());
+    let status = market_status(&raw);
+    let market_id = MarketId::new(&raw.condition_id);
+    let (yes_token, no_token) = token_pair_or_fallback(&tokens);
+    let created = raw
+        .created_at
+        .as_deref()
+        .and_then(|value| value.parse::<DateTime<Utc>>().ok())
+        .unwrap_or_else(Utc::now);
+    let updated = raw
+        .updated_at
+        .as_deref()
+        .and_then(|value| value.parse::<DateTime<Utc>>().ok())
+        .unwrap_or_else(Utc::now);
+    let fee_schedule: Option<MarketFeeSchedule> = MarketFeeScheduleParts {
+        raw: &raw,
+        observed_at: updated,
+    }
+    .into();
+    let outcome = raw
+        .winning_outcome
+        .clone()
+        .or_else(|| raw.outcome.clone())
+        .filter(|value| !value.trim().is_empty());
+    let resolved_at = if raw.closed.unwrap_or(false) {
+        raw.resolved_at
+            .as_deref()
+            .and_then(|value| value.parse::<DateTime<Utc>>().ok())
+            .or(Some(updated))
+    } else {
+        None
+    };
+
+    let upsert = MarketUpsertParts {
+        raw: &raw,
+        market_id: &market_id,
+        event_id,
+        category,
+        status,
+        outcome,
+        yes_token: &yes_token,
+        no_token: &no_token,
+        tick_size,
+        resolved_at,
+        fee_schedule: fee_schedule.as_ref(),
+    }
+    .into();
+
+    let registry = MarketRegistryParts {
+        raw,
+        market_id,
+        event_id,
+        yes_token,
+        no_token,
+        category,
+        status,
+        tick_size,
+        tokens,
+        fee_schedule,
+        created,
+        updated,
+    }
+    .into();
+
+    (upsert, registry)
+}
+
+fn token_infos(raw: &RawGammaMarket) -> Vec<TokenInfo> {
+    raw.tokens
         .clone()
         .unwrap_or_default()
         .into_iter()
@@ -96,26 +174,21 @@ fn map_market_dual(raw: RawGammaMarket, event_id: &EventId) -> (UpsertMarket, Ma
             outcome: t.outcome,
             neg_risk: raw.neg_risk.unwrap_or(false),
         })
-        .collect();
+        .collect()
+}
 
-    let tick_size = raw
-        .minimum_tick_size
-        .as_deref()
-        .and_then(|s| s.parse::<TickSize>().ok())
-        .unwrap_or(TickSize::Hundredth);
-
-    let category = MarketCategory::from(raw.category.as_deref());
-    let status = if raw.closed.unwrap_or(false) {
+fn market_status(raw: &RawGammaMarket) -> MarketStatus {
+    if raw.closed.unwrap_or(false) {
         MarketStatus::Settled
     } else if raw.active.unwrap_or(true) {
         MarketStatus::Active
     } else {
         MarketStatus::Paused
-    };
+    }
+}
 
-    let market_id = MarketId::new(&raw.condition_id);
-
-    let yes_token = tokens
+fn token_pair_or_fallback(tokens: &[TokenInfo]) -> (TokenId, TokenId) {
+    let yes = tokens
         .iter()
         .find(|t| t.outcome.eq_ignore_ascii_case("yes"))
         .map_or_else(
@@ -126,7 +199,7 @@ fn map_market_dual(raw: RawGammaMarket, event_id: &EventId) -> (UpsertMarket, Ma
             },
             |t| t.token_id.clone(),
         );
-    let no_token = tokens
+    let no = tokens
         .iter()
         .find(|t| t.outcome.eq_ignore_ascii_case("no"))
         .map_or_else(
@@ -137,48 +210,93 @@ fn map_market_dual(raw: RawGammaMarket, event_id: &EventId) -> (UpsertMarket, Ma
             },
             |t| t.token_id.clone(),
         );
+    (yes, no)
+}
 
-    let created = parse_datetime(raw.created_at.as_ref()).unwrap_or_else(Utc::now);
-    let updated = parse_datetime(raw.updated_at.as_ref()).unwrap_or_else(Utc::now);
+struct MarketUpsertParts<'a> {
+    raw: &'a RawGammaMarket,
+    market_id: &'a MarketId,
+    event_id: &'a EventId,
+    category: MarketCategory,
+    status: MarketStatus,
+    outcome: Option<String>,
+    yes_token: &'a TokenId,
+    no_token: &'a TokenId,
+    tick_size: TickSize,
+    resolved_at: Option<DateTime<Utc>>,
+    fee_schedule: Option<&'a MarketFeeSchedule>,
+}
 
-    let upsert = UpsertMarket {
-        market_id: market_id.clone(),
-        event_id: event_id.clone(),
-        question: raw.question.clone(),
-        slug: raw.slug.clone().unwrap_or_default(),
-        category,
-        status,
-        outcome: None,
-        yes_token_id: yes_token.clone(),
-        no_token_id: no_token.clone(),
-        tick_size,
-        neg_risk: raw.neg_risk.unwrap_or(false),
-        end_date: None,
-        resolved_at: None,
-    };
+impl From<MarketUpsertParts<'_>> for UpsertMarket {
+    fn from(parts: MarketUpsertParts<'_>) -> Self {
+        Self {
+            market_id: parts.market_id.clone(),
+            event_id: parts.event_id.clone(),
+            question: parts.raw.question.clone(),
+            slug: parts.raw.slug.clone().unwrap_or_default(),
+            category: parts.category,
+            status: parts.status,
+            outcome: parts.outcome,
+            yes_token_id: parts.yes_token.clone(),
+            no_token_id: parts.no_token.clone(),
+            tick_size: parts.tick_size,
+            neg_risk: parts.raw.neg_risk.unwrap_or(false),
+            end_date: None,
+            resolved_at: parts.resolved_at,
+            fees_enabled: parts
+                .fee_schedule
+                .is_none_or(|schedule| schedule.fees_enabled),
+            fee_rate: parts.fee_schedule.map(|schedule| schedule.fee_rate),
+            fee_exponent: parts.fee_schedule.map(|schedule| schedule.exponent),
+            fee_taker_only: parts.fee_schedule.map(|schedule| schedule.taker_only),
+            fee_rebate_rate: parts.fee_schedule.and_then(|schedule| schedule.rebate_rate),
+            fee_source: parts
+                .fee_schedule
+                .map(|schedule| schedule.source.as_str().to_owned()),
+            fee_observed_at: parts.fee_schedule.map(|schedule| schedule.observed_at),
+        }
+    }
+}
 
-    let registry = MarketRegistryInfo {
-        market_id,
-        event_id: event_id.clone(),
-        token_yes: yes_token,
-        token_no: no_token,
-        question: raw.question,
-        slug: raw.slug.unwrap_or_default(),
-        category,
-        status,
-        neg_risk: raw.neg_risk.unwrap_or(false),
-        tick_size,
-        tokens,
-        best_bid: None,
-        best_ask: None,
-        depth_usd: None,
-        min_order_size: raw.minimum_order_size.unwrap_or(Decimal::ONE),
-        volume_24h: Usd::ZERO,
-        created_at: created,
-        updated_at: updated,
-    };
+struct MarketRegistryParts<'a> {
+    raw: RawGammaMarket,
+    market_id: MarketId,
+    event_id: &'a EventId,
+    yes_token: TokenId,
+    no_token: TokenId,
+    category: MarketCategory,
+    status: MarketStatus,
+    tick_size: TickSize,
+    tokens: Vec<TokenInfo>,
+    fee_schedule: Option<MarketFeeSchedule>,
+    created: DateTime<Utc>,
+    updated: DateTime<Utc>,
+}
 
-    (upsert, registry)
+impl From<MarketRegistryParts<'_>> for MarketRegistryInfo {
+    fn from(parts: MarketRegistryParts<'_>) -> Self {
+        Self {
+            market_id: parts.market_id,
+            event_id: parts.event_id.clone(),
+            token_yes: parts.yes_token,
+            token_no: parts.no_token,
+            question: parts.raw.question,
+            slug: parts.raw.slug.unwrap_or_default(),
+            category: parts.category,
+            status: parts.status,
+            neg_risk: parts.raw.neg_risk.unwrap_or(false),
+            tick_size: parts.tick_size,
+            tokens: parts.tokens,
+            best_bid: None,
+            best_ask: None,
+            depth_usd: None,
+            min_order_size: parts.raw.minimum_order_size.unwrap_or(Decimal::ONE),
+            volume_24h: Usd::ZERO,
+            fee_schedule: parts.fee_schedule,
+            created_at: parts.created,
+            updated_at: parts.updated,
+        }
+    }
 }
 
 pub fn map_event(raw: RawGammaEvent) -> EventRegistryInfo {
@@ -195,12 +313,30 @@ pub fn map_event(raw: RawGammaEvent) -> EventRegistryInfo {
         slug: raw.slug,
         market_ids,
         neg_risk: raw.neg_risk.unwrap_or(false),
-        created_at: parse_datetime(raw.created_at.as_ref()).unwrap_or_else(Utc::now),
-        updated_at: parse_datetime(raw.updated_at.as_ref()).unwrap_or_else(Utc::now),
+        created_at: raw
+            .created_at
+            .as_deref()
+            .and_then(|value| value.parse::<DateTime<Utc>>().ok())
+            .unwrap_or_else(Utc::now),
+        updated_at: raw
+            .updated_at
+            .as_deref()
+            .and_then(|value| value.parse::<DateTime<Utc>>().ok())
+            .unwrap_or_else(Utc::now),
     }
 }
 
 pub fn map_market(raw: RawGammaMarket, event_id: &EventId) -> MarketRegistryInfo {
+    let updated_at = raw
+        .updated_at
+        .as_deref()
+        .and_then(|value| value.parse::<DateTime<Utc>>().ok())
+        .unwrap_or_else(Utc::now);
+    let fee_schedule: Option<MarketFeeSchedule> = MarketFeeScheduleParts {
+        raw: &raw,
+        observed_at: updated_at,
+    }
+    .into();
     let tokens: Vec<TokenInfo> = raw
         .tokens
         .unwrap_or_default()
@@ -235,6 +371,11 @@ pub fn map_market(raw: RawGammaMarket, event_id: &EventId) -> MarketRegistryInfo
         .iter()
         .find(|t| t.outcome.eq_ignore_ascii_case("no"))
         .map_or_else(|| TokenId::new(""), |t| t.token_id.clone());
+    let created_at = raw
+        .created_at
+        .as_deref()
+        .and_then(|value| value.parse::<DateTime<Utc>>().ok())
+        .unwrap_or_else(Utc::now);
 
     MarketRegistryInfo {
         market_id: MarketId::new(&raw.condition_id),
@@ -253,11 +394,29 @@ pub fn map_market(raw: RawGammaMarket, event_id: &EventId) -> MarketRegistryInfo
         depth_usd: None,
         min_order_size: raw.minimum_order_size.unwrap_or(Decimal::ONE),
         volume_24h: Usd::ZERO,
-        created_at: parse_datetime(raw.created_at.as_ref()).unwrap_or_else(Utc::now),
-        updated_at: parse_datetime(raw.updated_at.as_ref()).unwrap_or_else(Utc::now),
+        fee_schedule,
+        created_at,
+        updated_at,
     }
 }
 
-fn parse_datetime(s: Option<&String>) -> Option<DateTime<Utc>> {
-    s?.parse::<DateTime<Utc>>().ok()
+struct MarketFeeScheduleParts<'a> {
+    raw: &'a RawGammaMarket,
+    observed_at: DateTime<Utc>,
+}
+
+impl From<MarketFeeScheduleParts<'_>> for Option<MarketFeeSchedule> {
+    fn from(parts: MarketFeeScheduleParts<'_>) -> Self {
+        let fee = parts.raw.fee_schedule.as_ref()?;
+        Some(MarketFeeSchedule {
+            market_id: MarketId::new(&parts.raw.condition_id),
+            fees_enabled: parts.raw.fees_enabled.unwrap_or(true),
+            fee_rate: fee.rate?,
+            exponent: fee.exponent?,
+            taker_only: fee.taker_only.unwrap_or(true),
+            rebate_rate: fee.rebate_rate,
+            source: FeeSource::GammaFeeSchedule,
+            observed_at: parts.observed_at,
+        })
+    }
 }

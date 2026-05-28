@@ -59,11 +59,11 @@ fn sub_minimum_fee_rounds_to_zero() {
     let fee = calculate_fee(
         Shares::new(dec!(1)),
         Price::new(dec!(0.5)),
-        dec!(0.0001),
+        dec!(0.000001),
         dec!(1),
     );
     assert_eq!(fee, oxide_arb_models::types::Usd::ZERO);
-    assert_eq!(round_fee(dec!(0.00005)), Decimal::ZERO);
+    assert_eq!(round_fee(dec!(0.000005)), Decimal::ZERO);
 }
 
 #[test]

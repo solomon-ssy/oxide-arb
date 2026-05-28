@@ -6,7 +6,10 @@ use oxide_arb_models::{
     domain::{
         execution::{PostTradeJob, ResolvedOutcome},
         opportunity::Opportunity,
+        position::PositionInfo,
         scored_snapshot::ScoredOpportunitySnapshot,
+        settlement::{MarketSettlementRequest, SettlementEconomics},
+        trade::TradeInfo,
     },
     types::ExecutionId,
 };
@@ -39,6 +42,17 @@ impl ExecutionAuditWriter {
 
     pub fn write_terminal(&self, job: &PostTradeJob, resolved: &ResolvedOutcome) {
         let row = (job, resolved).into();
+        self.writer.write(row);
+    }
+
+    pub fn write_settlement(
+        &self,
+        trade: &TradeInfo,
+        position: &PositionInfo,
+        request: &MarketSettlementRequest,
+        economics: &SettlementEconomics,
+    ) {
+        let row = (trade, position, request, economics).into();
         self.writer.write(row);
     }
 }

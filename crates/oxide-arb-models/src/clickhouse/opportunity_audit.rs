@@ -2,8 +2,12 @@ use crate::{
     domain::{
         execution::{PostTradeJob, ResolvedOutcome},
         opportunity::Opportunity,
+        position::PositionInfo,
         scored_snapshot::ScoredOpportunitySnapshot,
+        settlement::{MarketSettlementRequest, SettlementEconomics},
+        trade::TradeInfo,
     },
+    enums::audit::OpportunityAuditStage,
     types::{ExecutionId, Shares},
 };
 use chrono::Utc;
@@ -34,6 +38,16 @@ pub struct OpportunityAuditRow {
     pub depth_used_pct: f64,
     pub staleness: String,
     pub category: String,
+    pub stage: String,
+    pub stage_order: u8,
+    pub stage_at: i64,
+    pub payout_usd: f64,
+    pub realized_pnl_usd: f64,
+    pub settlement_status: Option<String>,
+    pub settlement_trigger: Option<String>,
+    pub winning_token_id: Option<String>,
+    pub accounting_status: Option<String>,
+    pub fee_source: Option<String>,
     pub outcome: Option<String>,
     pub rejection_stage: Option<String>,
     pub rejection_reason: Option<String>,
@@ -49,6 +63,7 @@ impl From<(&PostTradeJob, &ResolvedOutcome)> for OpportunityAuditRow {
             job.plan_shares.inner().to_f64().unwrap_or(0.0)
         };
 
+        let stage = OpportunityAuditStage::from_trade_outcome(resolved.trade_outcome);
         Self {
             opportunity_id: job.opportunity_id.to_string(),
             execution_id: job.execution_id.to_string(),
@@ -75,6 +90,16 @@ impl From<(&PostTradeJob, &ResolvedOutcome)> for OpportunityAuditRow {
             depth_used_pct: job.scored_snapshot.depth_used_pct,
             staleness: job.scored_snapshot.staleness.to_string(),
             category: job.category.to_string(),
+            stage: stage.to_string(),
+            stage_order: stage.order(),
+            stage_at: Utc::now().timestamp_millis(),
+            payout_usd: 0.0,
+            realized_pnl_usd: 0.0,
+            settlement_status: None,
+            settlement_trigger: None,
+            winning_token_id: None,
+            accounting_status: None,
+            fee_source: None,
             outcome: Some(resolved.trade_outcome.to_string()),
             rejection_stage: None,
             rejection_reason: None,
@@ -102,6 +127,7 @@ impl
             &ScoredOpportunitySnapshot,
         ),
     ) -> Self {
+        let audit_stage = OpportunityAuditStage::from_rejection_stage(stage);
         Self {
             opportunity_id: opp.opportunity_id.to_string(),
             execution_id: execution_id.to_string(),
@@ -124,10 +150,84 @@ impl
             depth_used_pct: snapshot.depth_used_pct,
             staleness: snapshot.staleness.to_string(),
             category: opp.category.to_string(),
+            stage: audit_stage.to_string(),
+            stage_order: audit_stage.order(),
+            stage_at: Utc::now().timestamp_millis(),
+            payout_usd: 0.0,
+            realized_pnl_usd: 0.0,
+            settlement_status: None,
+            settlement_trigger: None,
+            winning_token_id: None,
+            accounting_status: None,
+            fee_source: None,
             outcome: Some("rejected".to_owned()),
             rejection_stage: Some(stage.to_owned()),
             rejection_reason: Some(reason.to_owned()),
             detected_at: opp.detected_at.timestamp_millis(),
+            updated_at: Utc::now().timestamp_millis(),
+        }
+    }
+}
+
+impl
+    From<(
+        &TradeInfo,
+        &PositionInfo,
+        &MarketSettlementRequest,
+        &SettlementEconomics,
+    )> for OpportunityAuditRow
+{
+    fn from(
+        (trade, position, request, economics): (
+            &TradeInfo,
+            &PositionInfo,
+            &MarketSettlementRequest,
+            &SettlementEconomics,
+        ),
+    ) -> Self {
+        let stage = OpportunityAuditStage::Settled;
+        Self {
+            opportunity_id: trade.opportunity_id.to_string(),
+            execution_id: trade.execution_id.to_string(),
+            trade_id: trade.trade_id.to_string(),
+            market_id: trade.market_id.to_string(),
+            event_id: trade.event_id.to_string(),
+            side: trade.side.to_string(),
+            entry_price: position.avg_entry_price.inner().to_f64().unwrap_or(0.0),
+            shares: position.shares.inner().to_f64().unwrap_or(0.0),
+            total_cost_usd: position.total_cost_usd.inner().to_f64().unwrap_or(0.0),
+            total_fees_usd: position.total_fees_usd.inner().to_f64().unwrap_or(0.0),
+            net_profit_usd: trade
+                .net_profit_usd
+                .map_or(0.0, |value| value.inner().to_f64().unwrap_or(0.0)),
+            expected_profit: trade
+                .detected_profit_usd
+                .map_or(0.0, |value| value.inner().to_f64().unwrap_or(0.0)),
+            edge_bps: trade
+                .detected_edge_bps
+                .map_or(0, |value| value.inner().to_u32().unwrap_or(0)),
+            resolution_prob: 0.0,
+            confidence: 0.0,
+            convergence_secs: 0,
+            price_zone: String::new(),
+            duration_bucket: String::new(),
+            depth_used_pct: 0.0,
+            staleness: String::new(),
+            category: String::new(),
+            stage: stage.to_string(),
+            stage_order: stage.order(),
+            stage_at: request.observed_at.timestamp_millis(),
+            payout_usd: economics.payout_usd.inner().to_f64().unwrap_or(0.0),
+            realized_pnl_usd: economics.realized_pnl_usd.inner().to_f64().unwrap_or(0.0),
+            settlement_status: Some(if economics.won { "won" } else { "lost" }.to_owned()),
+            settlement_trigger: Some(request.source.to_string()),
+            winning_token_id: Some(request.winning_token_id.to_string()),
+            accounting_status: Some(position.settlement_accounting_status.to_string()),
+            fee_source: None,
+            outcome: Some("settled".to_owned()),
+            rejection_stage: None,
+            rejection_reason: None,
+            detected_at: trade.created_at.timestamp_millis(),
             updated_at: Utc::now().timestamp_millis(),
         }
     }

@@ -62,7 +62,10 @@ use oxide_arb_models::{
 };
 use oxide_arb_repository::{
     clickhouse::ChTimeseriesRepository,
-    postgres::{PgPositionRepository, PgRiskAuditRepository, PgTradeRepository},
+    postgres::{
+        PgPositionRepository, PgReportRepository, PgRiskAuditRepository, PgRiskStateRepository,
+        PgTradeRepository,
+    },
 };
 use oxide_arb_risk::{audit::RiskAuditEvent, engine::RiskEngine};
 use oxide_arb_storage::{cache::TieredCache, clickhouse::ClickHousePool, postgres::PostgresPool};
@@ -81,6 +84,8 @@ pub struct InfraBundle {
     pub risk_decision_audit_rx: Mutex<Option<Receiver<RiskAuditEvent>>>,
     pub trade_repo: Arc<PgTradeRepository>,
     pub position_repo: Arc<PgPositionRepository>,
+    pub report_repo: Arc<PgReportRepository>,
+    pub risk_state_repo: Arc<PgRiskStateRepository>,
     pub timeseries: Arc<ChTimeseriesRepository>,
     pub audit_writer: Arc<ExecutionAuditWriter>,
 }

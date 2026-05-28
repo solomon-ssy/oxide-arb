@@ -116,11 +116,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
-      - name: Run ignored Postgres integration tests
-        run: cargo test -p oxide-arb-repository --test pg_repository -- --ignored --test-threads=1
-
-      - name: Run storage migration integration tests
-        run: cargo test -p oxide-arb-storage --test migration_pg -- --ignored --test-threads=1
+      - name: Run Docker integration tests
+        run: cargo test-docker
 
   # network-integration:
   #   name: Live API / WS / RPC (optional)

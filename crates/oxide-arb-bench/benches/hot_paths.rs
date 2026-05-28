@@ -513,6 +513,7 @@ fn bench_coalescer_pair_flush(c: &mut Criterion) {
         depth_usd: None,
         min_order_size: dec!(1),
         volume_24h: Usd::ZERO,
+        fee_schedule: None,
         created_at: Utc::now(),
         updated_at: Utc::now(),
     });
@@ -680,6 +681,7 @@ fn bench_scanner_scan_market(c: &mut Criterion) {
         depth_usd: None,
         min_order_size: dec!(1),
         volume_24h: Usd::ZERO,
+        fee_schedule: None,
         created_at: Utc::now(),
         updated_at: Utc::now(),
     });

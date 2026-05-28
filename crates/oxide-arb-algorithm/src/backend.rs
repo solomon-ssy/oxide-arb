@@ -14,9 +14,8 @@ use oxide_arb_models::types::MarketId;
 /// Controls how often the same market can emit opportunities, preventing
 /// duplicate signals on consecutive scan ticks.
 ///
-/// TODO(redis-backend): implement `RedisEmissionCooldown` with atomic Redis
-/// scripts before running multiple scanner instances. The distributed backend
-/// must preserve consecutive-hit increments and cooldown expiry atomically.
+/// Current production deployment is single-instance; no distributed cooldown
+/// backend is part of the Phase 4.4 plan.
 pub trait CooldownBackend: Send + Sync + 'static {
     /// Returns `true` if the market may emit (NOT in cooldown).
     fn may_emit(&self, market_id: &MarketId) -> bool;
@@ -39,9 +38,8 @@ pub trait CooldownBackend: Send + Sync + 'static {
 /// Tracks how long each market has been in the convergence zone,
 /// used by the endgame detector to enforce minimum convergence duration.
 ///
-/// TODO(redis-backend): implement `RedisConvergenceTracker` with timestamped
-/// Redis state before running multiple scanner instances. Direction changes
-/// and first-seen timestamp updates must be atomic per market.
+/// Current production deployment is single-instance; no distributed convergence
+/// backend is part of the Phase 4.4 plan.
 pub trait ConvergenceBackend: Send + Sync + 'static {
     /// Update convergence state and return duration in seconds since first entry.
     ///

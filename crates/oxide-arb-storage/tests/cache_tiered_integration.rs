@@ -2,7 +2,6 @@
 
 use oxide_arb_models::{
     config::RedisConfig,
-    enums::common::MarketCategory,
     types::{EventId, MarketId},
 };
 use oxide_arb_storage::cache::{CacheBackend, CacheKey, MokaBackend, RedisBackend, TieredCache};
@@ -101,8 +100,8 @@ async fn tiered_both_miss_returns_none() {
 async fn tiered_set_populates_both_levels() {
     let (port, _container) = setup_redis().await;
     let redis_cfg = test_redis_config(port);
-    let key = CacheKey::FeeParams {
-        category: MarketCategory::Sports,
+    let key = CacheKey::MarketMetadata {
+        market_id: MarketId::new("fee-metadata-market"),
     };
     let value = CachedMarketStub {
         market_id: "fee".into(),

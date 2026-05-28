@@ -7,9 +7,10 @@ use chrono::{DateTime, Utc};
 use num_traits::ToPrimitive;
 use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::{
-    domain::{NewTrade, TradeInfo, UpdateTradeOutcome},
+    domain::{NewTrade, ReportTradeStats, TradeInfo, UpdateTradeOutcome},
     entities::trade::{ActiveModel, Column, Entity},
-    types::{MarketId, TradeId},
+    enums::common::TradeOutcome,
+    types::{MarketId, TradeId, Usd},
 };
 use std::collections::HashMap;
 
@@ -186,6 +187,51 @@ async fn do_count_by_outcome(
     Ok(results.into_iter().map(|r| (r.outcome, r.count)).collect())
 }
 
+async fn do_aggregate_between(
+    db: &impl ConnectionTrait,
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+) -> Result<ReportTradeStats, StorageError> {
+    let trades: Vec<TradeInfo> = Entity::find()
+        .filter(Column::CreatedAt.gte(start))
+        .filter(Column::CreatedAt.lt(end))
+        .all(db)
+        .await
+        .map_err(StorageError::from)?
+        .into_iter()
+        .map(Into::into)
+        .collect();
+
+    let mut stats = ReportTradeStats {
+        trade_count: 0,
+        success_count: 0,
+        miss_count: 0,
+        failed_count: 0,
+        total_fill_cost: Usd::ZERO,
+        total_fill_fees: Usd::ZERO,
+        fill_expected_pnl: Usd::ZERO,
+    };
+
+    for trade in trades {
+        stats.trade_count = stats.trade_count.saturating_add(1);
+        stats.total_fill_cost += trade.cost_usd;
+        stats.total_fill_fees += trade.fee_usd;
+        if let Some(pnl) = trade.net_profit_usd {
+            stats.fill_expected_pnl += pnl;
+        }
+        match trade.outcome {
+            TradeOutcome::Pending => {}
+            TradeOutcome::Success => stats.success_count = stats.success_count.saturating_add(1),
+            TradeOutcome::Miss => stats.miss_count = stats.miss_count.saturating_add(1),
+            TradeOutcome::Stale | TradeOutcome::TradeFailed | TradeOutcome::SystemError => {
+                stats.failed_count = stats.failed_count.saturating_add(1);
+            }
+        }
+    }
+
+    Ok(stats)
+}
+
 #[async_trait::async_trait]
 impl TradeRepository for PgTradeRepository {
     async fn create(&self, trade: NewTrade) -> Result<TradeInfo, StorageError> {
@@ -233,6 +279,14 @@ impl TradeRepository for PgTradeRepository {
         since: DateTime<Utc>,
     ) -> Result<HashMap<String, i64>, StorageError> {
         do_count_by_outcome(&self.db, since).await
+    }
+
+    async fn aggregate_between(
+        &self,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> Result<ReportTradeStats, StorageError> {
+        do_aggregate_between(&self.db, start, end).await
     }
 }
 
@@ -283,5 +337,13 @@ impl TradeRepository for PgTradeRepositoryTxn<'_> {
         since: DateTime<Utc>,
     ) -> Result<HashMap<String, i64>, StorageError> {
         do_count_by_outcome(self.txn, since).await
+    }
+
+    async fn aggregate_between(
+        &self,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> Result<ReportTradeStats, StorageError> {
+        do_aggregate_between(self.txn, start, end).await
     }
 }

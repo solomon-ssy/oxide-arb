@@ -10,3 +10,6 @@
 .env.*
 !.env.example
 .DS_Store
+
+# VS Code extension stats
+.VSCodeCounter/

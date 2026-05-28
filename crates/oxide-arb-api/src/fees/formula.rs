@@ -88,8 +88,8 @@ pub fn calculate_fee(shares: Shares, price: Price, fee_rate: Decimal, exponent: 
         .to_i64()
         .unwrap_or(0);
     let fee = calculate_fee_micro(shares_m, price_m, fee_rate_micro, exponent);
-    let rounded = fee.to_decimal().round_dp(4);
-    if rounded < dec!(0.0001) {
+    let rounded = fee.to_decimal().round_dp(5);
+    if rounded < dec!(0.00001) {
         Usd::ZERO
     } else {
         Usd::new(rounded)

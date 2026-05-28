@@ -12,13 +12,14 @@ mod rate_cache;
 #[cfg(test)]
 mod reference;
 
-pub use rate_cache::{CategoryFeeParams, FeeRateSource, FeeSnapshot};
+pub use rate_cache::{CategoryFeeParams, FeeSnapshot};
 
 use arc_swap::ArcSwap;
 use oxide_arb_models::{
     config::FeesConfig,
-    enums::common::MarketCategory,
-    types::{Price, Shares, TokenId, Usd},
+    domain::fee::{FeeQuote, FeeQuoteInput, MarketFeeSchedule},
+    enums::{common::MarketCategory, fee::FeeLiquidityRole},
+    types::{MarketId, Price, Shares, TokenId, Usd},
 };
 use std::sync::Arc;
 
@@ -41,6 +42,11 @@ impl FeeCalculator {
     }
 
     /// Calculate the fee for a trade.
+    ///
+    /// Prefer [`Self::quote`] in new code. This method remains as a thin
+    /// adapter for call sites that have not yet been moved to market-scoped
+    /// quotes; it uses explicit category fallback and must not be used in Live
+    /// fail-closed paths.
     pub fn calculate(
         &self,
         shares: Shares,
@@ -48,70 +54,69 @@ impl FeeCalculator {
         category: MarketCategory,
         token_id: &TokenId,
     ) -> Usd {
+        let input = FeeQuoteInput {
+            market_id: MarketId::new(token_id.as_str()),
+            token_id: token_id.clone(),
+            category,
+            side: oxide_arb_models::enums::common::Side::Buy,
+            liquidity_role: FeeLiquidityRole::Taker,
+            shares,
+            price,
+            allow_category_fallback: true,
+        };
+        self.quote(&input).map_or(Usd::ZERO, |quote| quote.fee_usd)
+    }
+
+    pub fn quote(&self, input: &FeeQuoteInput) -> Result<FeeQuote, String> {
         let snapshot = self.rate_cache.load();
+        let schedule = match snapshot.market_schedules.get(&input.market_id) {
+            Some(schedule) => schedule.clone(),
+            None if input.allow_category_fallback => snapshot
+                .category_default_schedule(&input.market_id, input.category)
+                .ok_or_else(|| format!("missing fee schedule for {}", input.market_id))?,
+            None => return Err(format!("missing fee schedule for {}", input.market_id)),
+        };
 
-        let enabled = snapshot
-            .per_token_enabled
-            .get(token_id)
-            .copied()
-            .unwrap_or(true);
+        let fee_usd = if !schedule.fees_enabled || input.liquidity_role == FeeLiquidityRole::Maker {
+            Usd::ZERO
+        } else {
+            formula::calculate_fee(
+                input.shares,
+                input.price,
+                schedule.fee_rate,
+                schedule.exponent,
+            )
+        };
 
-        if !enabled {
-            return Usd::ZERO;
+        Ok(FeeQuote {
+            fee_usd,
+            schedule,
+            formula_version: "polymarket-v1",
+            rounded_scale: 5,
+        })
+    }
+
+    pub fn ingest_market_fee_schedules(
+        &self,
+        schedules: impl IntoIterator<Item = MarketFeeSchedule>,
+    ) {
+        let mut snapshot = self.rate_cache.load().as_ref().clone();
+        let mut changed = false;
+        for schedule in schedules {
+            snapshot
+                .market_schedules
+                .insert(schedule.market_id.clone(), schedule);
+            changed = true;
         }
-
-        let resolved_category = snapshot
-            .token_category
-            .get(token_id)
-            .copied()
-            .unwrap_or(category);
-
-        let params = snapshot
-            .category_params
-            .get(&resolved_category)
-            .copied()
-            .unwrap_or_else(|| {
-                snapshot
-                    .category_params
-                    .get(&MarketCategory::Other)
-                    .copied()
-                    .unwrap_or(CategoryFeeParams {
-                        fee_rate: rust_decimal_macros::dec!(0.05),
-                        exponent: rust_decimal_macros::dec!(1),
-                    })
-            });
-
-        formula::calculate_fee(shares, price, params.fee_rate, params.exponent)
+        if changed {
+            snapshot.updated_at = chrono::Utc::now();
+            self.rate_cache.store(Arc::new(snapshot));
+        }
     }
 
     /// Return a clone of the current fee snapshot.
     pub fn snapshot(&self) -> FeeSnapshot {
         self.rate_cache.load().as_ref().clone()
-    }
-
-    /// Atomically replace the entire fee snapshot (manual override / verification).
-    pub fn replace_snapshot(&self, snapshot: FeeSnapshot) {
-        self.rate_cache.store(Arc::new(snapshot));
-    }
-
-    /// Ingest per-token metadata from a Gamma sync pass.
-    ///
-    /// Each entry is `(token_id, fees_enabled, category)` extracted from Gamma
-    /// market payloads — the only dynamic fee input Polymarket exposes.
-    pub fn ingest_gamma_markets(&self, markets: &[(TokenId, bool, MarketCategory)]) {
-        if markets.is_empty() {
-            return;
-        }
-
-        let mut snapshot = self.rate_cache.load().as_ref().clone();
-        for (token_id, enabled, category) in markets {
-            snapshot
-                .per_token_enabled
-                .insert(token_id.clone(), *enabled);
-            snapshot.token_category.insert(token_id.clone(), *category);
-        }
-        snapshot.updated_at = chrono::Utc::now();
-        self.rate_cache.store(Arc::new(snapshot));
     }
 }
 

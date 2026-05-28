@@ -1,0 +1,17 @@
+[package]
+name = "oxide-arb-xtask"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "oxide-arb-xtask"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0"
+clap = { version = "4.5", features = ["derive"] }
+
+[lints]
+workspace = true

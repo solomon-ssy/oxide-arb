@@ -13,6 +13,7 @@ members = [
   "crates/oxide-arb-bench",
   "crates/oxide-arb-bin",
   "crates/oxide-arb-test-support",
+  "crates/oxide-arb-xtask",
 ]
 
 [workspace.package]

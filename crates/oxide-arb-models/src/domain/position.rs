@@ -137,8 +137,24 @@ pub struct SettlePositionParams {
 pub struct MarkRedeemedParams {
     pub winning_token_id: TokenId,
     pub settlement_payout_usd: Usd,
+    pub realized_pnl: Usd,
     pub redeem_tx_hash: Option<String>,
     pub redeem_status: RedeemStatus,
     pub settlement_trigger: SettlementTrigger,
     pub redeem_terminal_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SettledPositionStats {
+    pub realized_pnl: Usd,
+    pub total_payout: Usd,
+    pub total_cost: Usd,
+    pub total_fees: Usd,
+    pub settled_position_count: u32,
+    pub winning_position_count: u32,
+    pub losing_position_count: u32,
+    pub unsettled_position_count: u32,
+    pub failed_accounting_count: u32,
+    pub largest_single_profit: Usd,
+    pub largest_single_loss: Usd,
 }

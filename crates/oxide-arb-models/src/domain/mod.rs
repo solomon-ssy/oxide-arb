@@ -66,6 +66,7 @@ pub mod blacklist;
 pub mod book;
 pub mod calibration;
 pub mod execution;
+pub mod fee;
 pub mod latency;
 pub mod market;
 pub mod opportunity;

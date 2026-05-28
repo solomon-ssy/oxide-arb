@@ -4,8 +4,10 @@
 //! Gamma API and enriched by the data pipeline.
 
 use crate::{
+    domain::fee::MarketFeeSchedule,
     enums::{
         common::{MarketCategory, TickSize},
+        fee::FeeSource,
         market::{EventStatus, MarketStatus},
     },
     types::{EventId, MarketId, Price, TokenId, Usd},
@@ -35,6 +37,13 @@ pub struct MarketInfo {
     pub neg_risk: bool,
     pub end_date: Option<DateTime<Utc>>,
     pub resolved_at: Option<DateTime<Utc>>,
+    pub fees_enabled: bool,
+    pub fee_rate: Option<Decimal>,
+    pub fee_exponent: Option<Decimal>,
+    pub fee_taker_only: Option<bool>,
+    pub fee_rebate_rate: Option<Decimal>,
+    pub fee_source: Option<String>,
+    pub fee_observed_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -42,7 +51,8 @@ pub struct MarketInfo {
 info_from_model!(MarketInfo, crate::entities::market::Model, {
     market_id, event_id, question, slug, category, status, outcome,
     yes_token_id, no_token_id, tick_size, neg_risk, end_date, resolved_at,
-    created_at, updated_at,
+    fees_enabled, fee_rate, fee_exponent, fee_taker_only, fee_rebate_rate,
+    fee_source, fee_observed_at, created_at, updated_at,
 });
 
 impl From<MarketInfo> for MarketRegistryInfo {
@@ -59,6 +69,20 @@ impl From<MarketInfo> for MarketRegistryInfo {
                 neg_risk: info.neg_risk,
             },
         ];
+        let fee_schedule = match (info.fee_rate, info.fee_exponent) {
+            (Some(fee_rate), Some(exponent)) => Some(MarketFeeSchedule {
+                market_id: info.market_id.clone(),
+                fees_enabled: info.fees_enabled,
+                fee_rate,
+                exponent,
+                taker_only: info.fee_taker_only.unwrap_or(true),
+                rebate_rate: info.fee_rebate_rate,
+                source: FeeSource::GammaFeeSchedule,
+                observed_at: info.fee_observed_at.unwrap_or(info.updated_at),
+            }),
+            _ => None,
+        };
+
         Self {
             market_id: info.market_id,
             event_id: info.event_id,
@@ -76,6 +100,7 @@ impl From<MarketInfo> for MarketRegistryInfo {
             depth_usd: None,
             min_order_size: Decimal::ZERO,
             volume_24h: Usd::ZERO,
+            fee_schedule,
             created_at: info.created_at,
             updated_at: info.updated_at,
         }
@@ -113,6 +138,7 @@ pub struct MarketRegistryInfo {
     pub depth_usd: Option<Usd>,
     pub min_order_size: Decimal,
     pub volume_24h: Usd,
+    pub fee_schedule: Option<MarketFeeSchedule>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -172,6 +198,13 @@ pub struct UpsertMarket {
     pub neg_risk: bool,
     pub end_date: Option<DateTime<Utc>>,
     pub resolved_at: Option<DateTime<Utc>>,
+    pub fees_enabled: bool,
+    pub fee_rate: Option<Decimal>,
+    pub fee_exponent: Option<Decimal>,
+    pub fee_taker_only: Option<bool>,
+    pub fee_rebate_rate: Option<Decimal>,
+    pub fee_source: Option<String>,
+    pub fee_observed_at: Option<DateTime<Utc>>,
 }
 
 impl TryFrom<&MarketRegistryInfo> for UpsertMarket {
@@ -193,20 +226,37 @@ impl TryFrom<&MarketRegistryInfo> for UpsertMarket {
             neg_risk: info.neg_risk,
             end_date: None,
             resolved_at: None,
+            fees_enabled: info
+                .fee_schedule
+                .as_ref()
+                .is_none_or(|schedule| schedule.fees_enabled),
+            fee_rate: info.fee_schedule.as_ref().map(|schedule| schedule.fee_rate),
+            fee_exponent: info.fee_schedule.as_ref().map(|schedule| schedule.exponent),
+            fee_taker_only: info
+                .fee_schedule
+                .as_ref()
+                .map(|schedule| schedule.taker_only),
+            fee_rebate_rate: info
+                .fee_schedule
+                .as_ref()
+                .and_then(|schedule| schedule.rebate_rate),
+            fee_source: info
+                .fee_schedule
+                .as_ref()
+                .map(|schedule| schedule.source.as_str().to_owned()),
+            fee_observed_at: info
+                .fee_schedule
+                .as_ref()
+                .map(|schedule| schedule.observed_at),
         })
     }
 }
 
-/// Fee metadata tuples for `FeeCalculator::ingest_gamma_markets`.
-pub fn collect_fee_data(entries: &[MarketRegistryInfo]) -> Vec<(TokenId, bool, MarketCategory)> {
+/// Market fee schedules cached in registry entries.
+pub fn collect_fee_data(entries: &[MarketRegistryInfo]) -> Vec<MarketFeeSchedule> {
     entries
         .iter()
-        .flat_map(|entry| {
-            entry
-                .tokens
-                .iter()
-                .map(|token| (token.token_id.clone(), true, entry.category))
-        })
+        .filter_map(|entry| entry.fee_schedule.clone())
         .collect()
 }
 

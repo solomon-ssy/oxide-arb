@@ -240,6 +240,7 @@ mod tests {
             depth_usd: None,
             min_order_size: dec!(5),
             volume_24h: Usd::ZERO,
+            fee_schedule: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

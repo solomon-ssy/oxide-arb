@@ -16,6 +16,13 @@ pub enum Market {
     NegRisk,
     EndDate,
     ResolvedAt,
+    FeesEnabled,
+    FeeRate,
+    FeeExponent,
+    FeeTakerOnly,
+    FeeRebateRate,
+    FeeSource,
+    FeeObservedAt,
     CreatedAt,
     UpdatedAt,
 }

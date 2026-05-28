@@ -1,37 +1,28 @@
-//! ArcSwap-backed fee rate snapshot.
+//! ArcSwap-backed market fee schedule book.
 
 use ahash::{HashMap, HashMapExt};
 use chrono::{DateTime, Utc};
-use oxide_arb_models::{config::FeesConfig, enums::common::MarketCategory, types::TokenId};
+use oxide_arb_models::{
+    config::FeesConfig,
+    domain::fee::MarketFeeSchedule,
+    enums::{common::MarketCategory, fee::FeeSource},
+    types::MarketId,
+};
 use rust_decimal::Decimal;
-
-/// Where the current category rates originated.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FeeRateSource {
-    /// Loaded from config defaults (official Polymarket documentation).
-    ConfigDefault,
-    /// Operator override via config or admin API.
-    ManualOverride,
-}
 
 /// Snapshot of fee parameters, atomically swapped on refresh.
 #[derive(Debug, Clone)]
 pub struct FeeSnapshot {
-    pub category_params: HashMap<MarketCategory, CategoryFeeParams>,
-    pub per_token_enabled: HashMap<TokenId, bool>,
-    pub token_category: HashMap<TokenId, MarketCategory>,
+    pub market_schedules: HashMap<MarketId, MarketFeeSchedule>,
+    pub category_defaults: HashMap<MarketCategory, CategoryFeeParams>,
     pub updated_at: DateTime<Utc>,
-    pub source: FeeRateSource,
 }
 
 impl FeeSnapshot {
     /// Build a snapshot from application configuration.
     #[must_use]
     pub fn from_config(config: &FeesConfig) -> Self {
-        // TODO(cache): cache category fee parameters with
-        // `CacheKey::FeeParams { category }` once runtime fee config updates
-        // own invalidation across API and scoring services.
-        let category_params = config
+        let category_defaults = config
             .all_category_rates()
             .map(|(category, fee_rate, exponent)| {
                 (category, CategoryFeeParams { fee_rate, exponent })
@@ -39,12 +30,32 @@ impl FeeSnapshot {
             .collect();
 
         Self {
-            category_params,
-            per_token_enabled: HashMap::new(),
-            token_category: HashMap::new(),
+            market_schedules: HashMap::new(),
+            category_defaults,
             updated_at: Utc::now(),
-            source: FeeRateSource::ConfigDefault,
         }
+    }
+
+    #[must_use]
+    pub fn category_default_schedule(
+        &self,
+        market_id: &MarketId,
+        category: MarketCategory,
+    ) -> Option<MarketFeeSchedule> {
+        let params = self
+            .category_defaults
+            .get(&category)
+            .or_else(|| self.category_defaults.get(&MarketCategory::Other))?;
+        Some(MarketFeeSchedule {
+            market_id: market_id.clone(),
+            fees_enabled: params.fee_rate > Decimal::ZERO,
+            fee_rate: params.fee_rate,
+            exponent: params.exponent,
+            taker_only: true,
+            rebate_rate: None,
+            source: FeeSource::CategoryDefault,
+            observed_at: self.updated_at,
+        })
     }
 }
 

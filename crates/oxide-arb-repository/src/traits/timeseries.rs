@@ -32,6 +32,11 @@ pub trait TimeseriesRepository: Send + Sync {
         to: DateTime<Utc>,
     ) -> Result<Vec<OpportunityAuditRow>, StorageError>;
 
+    async fn query_opportunity_lifecycle(
+        &self,
+        opportunity_id: &str,
+    ) -> Result<Vec<OpportunityAuditRow>, StorageError>;
+
     async fn insert_detection_batch(
         &self,
         rows: &[OpportunityDetectionRow],

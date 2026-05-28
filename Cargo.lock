@@ -4466,6 +4466,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "oxide-arb-xtask"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+]
+
+[[package]]
 name = "page_size"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

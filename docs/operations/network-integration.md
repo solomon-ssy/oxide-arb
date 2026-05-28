@@ -55,3 +55,7 @@ Verify on-chain: `payoutDenominator(conditionId) > 0`.
 ## CI
 
 The `network-integration` job in `.github/workflows/ci.yml` runs ignored tests on `main` when repository secrets are configured (`POLYGON_RPC_URL`, `RESOLVED_CONDITION_ID`).
+
+## Related
+
+Postgres / Redis / ClickHouse tests that use testcontainers are a separate tier — see [docker-integration.md](./docker-integration.md).

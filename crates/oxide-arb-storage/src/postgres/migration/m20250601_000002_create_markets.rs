@@ -73,6 +73,22 @@ fn create_tables() -> Vec<TableCreateStatement> {
                     .null(),
             )
             .col(
+                ColumnDef::new(Market::FeesEnabled)
+                    .boolean()
+                    .not_null()
+                    .default(true),
+            )
+            .col(ColumnDef::new(Market::FeeRate).decimal().null())
+            .col(ColumnDef::new(Market::FeeExponent).decimal().null())
+            .col(ColumnDef::new(Market::FeeTakerOnly).boolean().null())
+            .col(ColumnDef::new(Market::FeeRebateRate).decimal().null())
+            .col(ColumnDef::new(Market::FeeSource).text().null())
+            .col(
+                ColumnDef::new(Market::FeeObservedAt)
+                    .timestamp_with_time_zone()
+                    .null(),
+            )
+            .col(
                 ColumnDef::new(Market::CreatedAt)
                     .timestamp_with_time_zone()
                     .not_null()

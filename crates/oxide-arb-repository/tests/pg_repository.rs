@@ -206,7 +206,13 @@ async fn market_insert_then_update() {
     assert_eq!(reloaded.question, "Upsert updated?");
 
     let all_active = market_repo.find_active().await.unwrap();
-    assert_eq!(all_active.len(), 1, "Update should not create duplicates");
+    assert_eq!(
+        all_active.len(),
+        2,
+        "upserts should update in place, not duplicate rows per market_id"
+    );
+    let ids: std::collections::HashSet<_> = all_active.iter().map(|m| m.market_id.clone()).collect();
+    assert_eq!(ids.len(), 2, "each market_id should appear once");
 }
 
 #[tokio::test]

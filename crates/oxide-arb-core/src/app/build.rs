@@ -82,8 +82,9 @@ use oxide_arb_repository::{
     postgres::{
         PgBlacklistPersistenceRepository, PgCalibrationRepository, PgEmergencyRepository,
         PgEventRepository, PgMarketRepository, PgOutboxRepository, PgPositionRepository,
-        PgPotentialLossRepository, PgReconciliationRepository, PgResolutionEventRepository,
-        PgRiskAuditRepository, PgRiskStateRepository, PgTradeRepository,
+        PgPotentialLossRepository, PgReconciliationRepository, PgReportRepository,
+        PgResolutionEventRepository, PgRiskAuditRepository, PgRiskStateRepository,
+        PgTradeRepository,
     },
     traits::{
         BlacklistPersistenceRepository, CalibrationRepository, PotentialLossRepository,
@@ -121,6 +122,7 @@ struct BuildRepos {
     market: Arc<PgMarketRepository>,
     event: Arc<PgEventRepository>,
     trade: Arc<PgTradeRepository>,
+    report: Arc<PgReportRepository>,
     outbox: Arc<PgOutboxRepository>,
     position: Arc<PgPositionRepository>,
 }
@@ -220,6 +222,7 @@ impl AppContext {
             Arc::new(MarketSettlementService::new(MarketSettlementServiceDeps {
                 position_repo: Arc::clone(&infra.repos.position),
                 resolution_event_repo: Arc::clone(&infra.repos.resolution_event),
+                trade_repo: Arc::clone(&trade_repo),
                 risk_engine: Arc::clone(&risk.engine),
                 risk_metrics: Arc::clone(&risk.metrics),
                 fsm: Arc::clone(&risk.fsm),
@@ -227,6 +230,7 @@ impl AppContext {
                 market_registry: Arc::clone(&trading.market_registry),
                 voting_oracle: Arc::clone(&clients.voting_oracle),
                 metrics: Arc::clone(&infra.metrics),
+                audit_writer: Arc::clone(&audit_writer),
                 metrics_refresh: risk.metrics_refresh.clone(),
                 config: Arc::new(settings.settlement.clone()),
                 execution_mode: mode,
@@ -251,6 +255,8 @@ impl AppContext {
                 risk_decision_audit_rx: infra.risk_decision_audit_rx,
                 trade_repo,
                 position_repo,
+                report_repo: infra.repos.report,
+                risk_state_repo: infra.repos.risk_state,
                 timeseries,
                 audit_writer,
             },
@@ -358,6 +364,7 @@ async fn connect_infra(
         market: Arc::new(PgMarketRepository::new(db.clone())),
         event: Arc::new(PgEventRepository::new(db.clone())),
         trade: Arc::new(PgTradeRepository::new(db.clone())),
+        report: Arc::new(PgReportRepository::new(db.clone())),
         outbox: Arc::new(PgOutboxRepository::new(db.clone())),
         position: Arc::new(PgPositionRepository::new(db)),
     };
@@ -533,19 +540,12 @@ async fn wire_risk(
 
     let metrics_refresh = clients.clob_client.as_ref().map(|clob_client| {
         let position_repo = Arc::clone(&infra.repos.position);
-        Arc::new(
-            RiskMetricsRefreshService::new(
-                Arc::clone(&metrics_state),
-                Arc::clone(clob_client),
-                position_repo,
-                Arc::clone(&infra.metrics),
-            )
-            .with_reconciliation(
-                Arc::clone(&engine),
-                Arc::clone(&risk_metrics),
-                settings.risk.reconciliation_interval_secs,
-            ),
-        )
+        Arc::new(RiskMetricsRefreshService::new(
+            Arc::clone(&metrics_state),
+            Arc::clone(clob_client),
+            position_repo,
+            Arc::clone(&infra.metrics),
+        ))
     });
 
     Ok(BuildRisk {

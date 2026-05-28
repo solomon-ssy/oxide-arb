@@ -5,7 +5,11 @@
 //! - `NewTrade` / `UpdateTradeOutcome` are write DTOs.
 
 use crate::{
-    enums::common::{ExecutionMode, Side, TradeOutcome},
+    domain::SettledPositionStats,
+    enums::{
+        common::{ExecutionMode, Side, TradeOutcome},
+        report::ReportSchemaVersion,
+    },
     types::{
         Bps, EventId, ExecutionId, MarketId, OpportunityId, OrderId, Price, Shares, TokenId,
         TradeId, Usd,
@@ -175,12 +179,86 @@ pub struct UpdateTradeOutcome {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DailyReport {
     pub date: NaiveDate,
+    pub schema_version: ReportSchemaVersion,
+    pub generated_at: DateTime<Utc>,
+    pub period_start: NaiveDate,
+    pub period_end: NaiveDate,
+    pub settled_pnl: SettledPnlStats,
+    pub execution: ReportTradeStats,
+    pub risk: ReportRiskSummary,
     pub total_pnl: Usd,
     pub total_fees_paid: Usd,
+    /// Actual gas paid by redemption transactions. Currently zero until redeem
+    /// gas persistence is implemented.
     pub total_gas_paid: Usd,
     pub trade_count: u32,
     pub success_count: u32,
     pub miss_count: u32,
     pub largest_single_loss: Usd,
     pub largest_single_profit: Usd,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SettledPnlStats {
+    pub realized_pnl: Usd,
+    pub total_payout: Usd,
+    pub total_cost: Usd,
+    pub total_fees: Usd,
+    pub settled_position_count: u32,
+    pub winning_position_count: u32,
+    pub losing_position_count: u32,
+    pub unsettled_position_count: u32,
+    pub failed_accounting_count: u32,
+    pub largest_single_profit: Usd,
+    pub largest_single_loss: Usd,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportTradeStats {
+    pub trade_count: u32,
+    pub success_count: u32,
+    pub miss_count: u32,
+    pub failed_count: u32,
+    pub total_fill_cost: Usd,
+    pub total_fill_fees: Usd,
+    pub fill_expected_pnl: Usd,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReportRiskSummary {
+    pub daily_pnl: Usd,
+    pub daily_loss: Usd,
+    pub weekly_loss: Usd,
+    pub total_exposure: Usd,
+    pub open_position_count: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WeeklyReport {
+    pub week_start: NaiveDate,
+    pub week_end: NaiveDate,
+    pub schema_version: ReportSchemaVersion,
+    pub generated_at: DateTime<Utc>,
+    pub settled_pnl: SettledPnlStats,
+    pub execution: ReportTradeStats,
+    pub risk: ReportRiskSummary,
+    pub daily_reports: Vec<DailyReport>,
+}
+
+impl From<&SettledPositionStats> for SettledPnlStats {
+    fn from(stats: &SettledPositionStats) -> Self {
+        Self {
+            realized_pnl: stats.realized_pnl,
+            total_payout: stats.total_payout,
+            total_cost: stats.total_cost,
+            total_fees: stats.total_fees,
+            settled_position_count: stats.settled_position_count,
+            winning_position_count: stats.winning_position_count,
+            losing_position_count: stats.losing_position_count,
+            unsettled_position_count: stats.unsettled_position_count,
+            failed_accounting_count: stats.failed_accounting_count,
+            largest_single_profit: stats.largest_single_profit,
+            largest_single_loss: stats.largest_single_loss,
+        }
+    }
 }

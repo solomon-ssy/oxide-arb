@@ -130,7 +130,8 @@ impl GammaService {
         prewarm_token_intern(&batch.registry_markets);
         self.market_registry
             .register_markets(batch.registry_markets);
-        self.fee_calculator.ingest_gamma_markets(&batch.fee_data);
+        self.fee_calculator
+            .ingest_market_fee_schedules(batch.fee_data.clone());
 
         let deactivated = self.market_registry.deactivate_stale(&seen_ids);
         let deactivated_upserts = convert_registry_to_upsert(&deactivated);
@@ -217,7 +218,7 @@ impl GammaService {
 
         prewarm_token_intern(&all_registry);
         self.market_registry.register_markets(all_registry);
-        self.fee_calculator.ingest_gamma_markets(&fee_data);
+        self.fee_calculator.ingest_market_fee_schedules(fee_data);
 
         let mut persist_batch = batch.markets;
         persist_batch.extend(extra_upserts);

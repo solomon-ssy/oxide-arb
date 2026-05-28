@@ -59,9 +59,6 @@ pub enum CacheKey {
 
     /// Bulk cache of all runtime configuration entries.
     AllRuntimeConfig,
-
-    /// Fee parameters per category (maker/taker rates).
-    FeeParams { category: MarketCategory },
 }
 
 impl CacheKey {
@@ -83,7 +80,6 @@ impl CacheKey {
             Self::Balance => "bal:polymarket".to_owned(),
             Self::RuntimeConfig { key } => format!("cfg:{}", key.as_str()),
             Self::AllRuntimeConfig => "cfg:__all__".to_owned(),
-            Self::FeeParams { category } => format!("fee:{}", category.as_str()),
         }
     }
 
@@ -104,7 +100,6 @@ impl CacheKey {
                 Duration::from_secs(60)
             }
             Self::Balance => Duration::from_secs(15),
-            Self::FeeParams { .. } => Duration::from_secs(600),
         }
     }
 
@@ -119,7 +114,6 @@ impl CacheKey {
             Self::RiskState => "risk",
             Self::Balance => "balance",
             Self::RuntimeConfig { .. } | Self::AllRuntimeConfig => "config",
-            Self::FeeParams { .. } => "fee",
         }
     }
 }

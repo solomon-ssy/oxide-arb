@@ -1,2 +1,6 @@
 [build]
 rustflags = ["-C", "target-cpu=native"]
+
+[alias]
+xtask = "run --package oxide-arb-xtask --"
+test-docker = "xtask test-docker"

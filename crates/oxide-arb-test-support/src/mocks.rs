@@ -9,8 +9,8 @@ use oxide_arb_models::{
         TickEventRow,
     },
     domain::{
-        MarkRedeemedParams, NewPosition, NewTrade, PositionInfo, SettlePositionParams, TradeInfo,
-        UpdatePosition, UpdateTradeOutcome,
+        MarkRedeemedParams, NewPosition, NewTrade, PositionInfo, ReportTradeStats,
+        SettlePositionParams, SettledPositionStats, TradeInfo, UpdatePosition, UpdateTradeOutcome,
     },
     enums::common::{
         PositionStatus, RedeemStatus, SettlementAccountingStatus, SettlementTrigger, TradeOutcome,
@@ -385,6 +385,26 @@ impl PositionRepository for MockPositionRepository {
     async fn count_open(&self) -> Result<usize, StorageError> {
         Ok(self.find_open().await?.len())
     }
+
+    async fn aggregate_settled_between(
+        &self,
+        _start: chrono::DateTime<Utc>,
+        _end: chrono::DateTime<Utc>,
+    ) -> Result<SettledPositionStats, StorageError> {
+        Ok(SettledPositionStats {
+            realized_pnl: Usd::ZERO,
+            total_payout: Usd::ZERO,
+            total_cost: Usd::ZERO,
+            total_fees: Usd::ZERO,
+            settled_position_count: 0,
+            winning_position_count: 0,
+            losing_position_count: 0,
+            unsettled_position_count: u32::try_from(self.count_open().await?).unwrap_or(u32::MAX),
+            failed_accounting_count: 0,
+            largest_single_profit: Usd::ZERO,
+            largest_single_loss: Usd::ZERO,
+        })
+    }
 }
 
 #[async_trait]
@@ -502,6 +522,22 @@ impl TradeRepository for MockTradeRepository {
     ) -> Result<HashMap<String, i64>, StorageError> {
         Ok(HashMap::new())
     }
+
+    async fn aggregate_between(
+        &self,
+        _start: chrono::DateTime<Utc>,
+        _end: chrono::DateTime<Utc>,
+    ) -> Result<ReportTradeStats, StorageError> {
+        Ok(ReportTradeStats {
+            trade_count: 0,
+            success_count: 0,
+            miss_count: 0,
+            failed_count: 0,
+            total_fill_cost: Usd::ZERO,
+            total_fill_fees: Usd::ZERO,
+            fill_expected_pnl: Usd::ZERO,
+        })
+    }
 }
 
 #[derive(Default)]
@@ -563,6 +599,20 @@ impl TimeseriesRepository for MockTimeseriesRepository {
         _to: chrono::DateTime<Utc>,
     ) -> Result<Vec<OpportunityAuditRow>, StorageError> {
         Ok(vec![])
+    }
+
+    async fn query_opportunity_lifecycle(
+        &self,
+        opportunity_id: &str,
+    ) -> Result<Vec<OpportunityAuditRow>, StorageError> {
+        Ok(self
+            .audits
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|row| row.opportunity_id == opportunity_id)
+            .cloned()
+            .collect())
     }
 
     async fn query_calibration_history(

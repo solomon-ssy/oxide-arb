@@ -171,6 +171,22 @@ impl TimeseriesRepository for ChTimeseriesRepository {
             .map_err(Into::into)
     }
 
+    async fn query_opportunity_lifecycle(
+        &self,
+        opportunity_id: &str,
+    ) -> Result<Vec<OpportunityAuditRow>, StorageError> {
+        self.client
+            .query(
+                "SELECT * FROM opportunity_audit \
+                 WHERE opportunity_id = ? \
+                 ORDER BY stage_order ASC, stage_at ASC, updated_at ASC",
+            )
+            .bind(opportunity_id)
+            .fetch_all::<OpportunityAuditRow>()
+            .await
+            .map_err(Into::into)
+    }
+
     async fn query_calibration_history(
         &self,
         category: &str,
