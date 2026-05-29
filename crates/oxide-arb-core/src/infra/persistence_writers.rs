@@ -5,17 +5,11 @@ use crate::{
         detection_writer::DetectionWriter, execution_audit::ExecutionAuditWriter,
         metrics_hub::MetricsHub,
     },
-    outbox::{
-        event_store::{EventStore, PgEventStore},
-        flusher::OutboxFlusher,
-    },
 };
 use oxide_arb_error::OxideError;
 use oxide_arb_models::clickhouse::{OpportunityAuditRow, OpportunityDetectionRow};
 use oxide_arb_repository::{
-    clickhouse::ChTimeseriesRepository,
-    postgres::{PgOutboxRepository, PgTradeRepository},
-    traits::TimeseriesRepository,
+    clickhouse::ChTimeseriesRepository, postgres::PgTradeRepository, traits::TimeseriesRepository,
 };
 use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
@@ -25,8 +19,6 @@ pub struct PersistenceBundle {
     pub timeseries: Arc<ChTimeseriesRepository>,
     pub audit_writer: Arc<ExecutionAuditWriter>,
     pub detection_writer: Arc<DetectionWriter>,
-    pub event_store: Arc<dyn EventStore>,
-    outbox_flusher: Arc<OutboxFlusher>,
 }
 
 pub struct PersistenceBackgroundWorkers {
@@ -38,15 +30,11 @@ pub struct PersistenceWireInput {
     pub metrics: Arc<MetricsHub>,
     pub shutdown: CancellationToken,
     pub trade_repo: Arc<PgTradeRepository>,
-    pub outbox_repo: Arc<PgOutboxRepository>,
     pub timeseries: Arc<ChTimeseriesRepository>,
 }
 
 impl PersistenceBundle {
     pub fn wire(input: PersistenceWireInput) -> (Self, PersistenceBackgroundWorkers) {
-        let event_store: Arc<dyn EventStore> =
-            Arc::new(PgEventStore::new(Arc::clone(&input.outbox_repo)));
-
         let ts_audit = Arc::clone(&input.timeseries);
         let (audit_raw, audit_writer_worker) = AsyncWriter::new(
             "execution-audit",
@@ -84,23 +72,11 @@ impl PersistenceBundle {
         let audit_writer = Arc::new(ExecutionAuditWriter::new(Arc::new(audit_raw)));
         let detection_writer = Arc::new(DetectionWriter::new(Arc::new(detection_raw)));
 
-        let metrics = Arc::clone(&input.metrics);
-        let outbox_flusher = Arc::new(OutboxFlusher::new(
-            Arc::clone(&event_store),
-            Vec::new(),
-            100,
-            3,
-            metrics,
-            input.shutdown,
-        ));
-
         let bundle = Self {
             trade_repo: input.trade_repo,
             timeseries: input.timeseries,
             audit_writer,
             detection_writer,
-            event_store,
-            outbox_flusher,
         };
         let workers = PersistenceBackgroundWorkers {
             audit_writer_worker: Box::pin(audit_writer_worker),
@@ -136,14 +112,6 @@ impl PersistenceBundle {
                     }
                 }
             }
-        });
-
-        let flusher = self.outbox_flusher;
-        pending.push(TaskId::OutboxFlusher, move |shutdown| async move {
-            if let Err(error) = flusher.run().await {
-                tracing::error!(%error, "outbox flusher exited with error");
-            }
-            let _ = shutdown;
         });
     }
 }

@@ -137,6 +137,13 @@ impl PotentialLossLedger {
 
     /// Record a new potential-loss entry.
     pub fn record_entry(&mut self, entry: PotentialLossInfo) {
+        if self.entries.contains_key(&entry.ledger_id) {
+            tracing::debug!(
+                entry_id = %entry.ledger_id,
+                "potential loss entry already recorded"
+            );
+            return;
+        }
         if entry.is_active() {
             self.running_total += entry.max_loss_usd;
         }

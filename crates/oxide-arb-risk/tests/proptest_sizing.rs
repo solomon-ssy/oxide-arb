@@ -9,7 +9,7 @@
 use oxide_arb_models::{
     config::{KellyConfig, RiskConfig},
     domain::risk::ProbabilityInput,
-    enums::common::TradeOutcome,
+    enums::common::TradeBusinessOutcome,
     types::Usd,
 };
 use oxide_arb_risk::{
@@ -159,7 +159,11 @@ proptest! {
 
         for p in &profits {
             let profit = Decimal::from_f64_retain(*p).unwrap();
-            let outcome = if *p >= 0.0 { TradeOutcome::Success } else { TradeOutcome::Miss };
+            let outcome = if *p >= 0.0 {
+                TradeBusinessOutcome::Success
+            } else {
+                TradeBusinessOutcome::Miss
+            };
             daily.record_trade(
                 Usd::new(profit),
                 Usd::new(dec!(0.1)),

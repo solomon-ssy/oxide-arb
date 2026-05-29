@@ -3,7 +3,7 @@
 //! Validates rollover semantics, budget tracking, and snapshot recovery.
 
 use chrono::{Timelike, Utc};
-use oxide_arb_models::{enums::common::TradeOutcome, types::Usd};
+use oxide_arb_models::{enums::common::TradeBusinessOutcome, types::Usd};
 use oxide_arb_risk::{
     accounting::{DailyAccounting, HourlyAccounting, WeeklyAccounting},
     clock::utc_clock,
@@ -37,7 +37,7 @@ fn daily_rollover_resets_stats() {
         Usd::new(dec!(5)),
         Usd::new(dec!(0.5)),
         Usd::new(dec!(10)),
-        TradeOutcome::Success,
+        TradeBusinessOutcome::Success,
     );
 
     assert!(rolled, "should rollover when window_start is in the past");
@@ -68,7 +68,7 @@ fn daily_budget_resets_on_rollover() {
         Usd::new(dec!(1)),
         Usd::ZERO,
         Usd::new(dec!(5)),
-        TradeOutcome::Success,
+        TradeBusinessOutcome::Success,
     );
 
     // Budget should be reset to initial minus the new trade's cost
@@ -91,7 +91,7 @@ fn weekly_rollover_at_monday_boundary() {
     let rolled = weekly.record_trade(
         Usd::new(dec!(3)),
         Usd::new(dec!(0.2)),
-        TradeOutcome::Success,
+        TradeBusinessOutcome::Success,
     );
 
     assert!(rolled, "should rollover when week_start is old");
@@ -110,7 +110,7 @@ fn no_rollover_within_same_day() {
         Usd::new(dec!(5)),
         Usd::new(dec!(0.5)),
         Usd::new(dec!(10)),
-        TradeOutcome::Success,
+        TradeBusinessOutcome::Success,
     );
 
     // Record second trade — should NOT roll over
@@ -118,7 +118,7 @@ fn no_rollover_within_same_day() {
         Usd::new(dec!(-3)),
         Usd::new(dec!(0.3)),
         Usd::new(dec!(8)),
-        TradeOutcome::Miss,
+        TradeBusinessOutcome::Miss,
     );
 
     assert!(!rolled);
@@ -214,8 +214,16 @@ fn hourly_from_snapshot_restores_loss_and_counts() {
 fn hourly_no_rollover_within_same_hour() {
     let mut hourly = HourlyAccounting::new(utc_clock());
 
-    hourly.record_trade(Usd::new(dec!(-3)), Usd::new(dec!(0.1)), TradeOutcome::Miss);
-    let rolled = hourly.record_trade(Usd::new(dec!(-2)), Usd::new(dec!(0.1)), TradeOutcome::Miss);
+    hourly.record_trade(
+        Usd::new(dec!(-3)),
+        Usd::new(dec!(0.1)),
+        TradeBusinessOutcome::Miss,
+    );
+    let rolled = hourly.record_trade(
+        Usd::new(dec!(-2)),
+        Usd::new(dec!(0.1)),
+        TradeBusinessOutcome::Miss,
+    );
 
     assert!(!rolled);
     assert_eq!(hourly.stats().trade_count, 2);
@@ -235,7 +243,11 @@ fn hourly_rollover_resets_on_stale_snapshot() {
 
     let mut hourly = HourlyAccounting::from_snapshot(23, yesterday, stats, utc_clock());
 
-    let rolled = hourly.record_trade(Usd::new(dec!(-1)), Usd::new(dec!(0.1)), TradeOutcome::Miss);
+    let rolled = hourly.record_trade(
+        Usd::new(dec!(-1)),
+        Usd::new(dec!(0.1)),
+        TradeBusinessOutcome::Miss,
+    );
 
     assert!(
         rolled,

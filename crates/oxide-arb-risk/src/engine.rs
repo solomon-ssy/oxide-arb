@@ -23,7 +23,7 @@ use crate::{
         CircuitBreakerSnapshot, DailyAccountingSnapshot, DrawdownSnapshot,
         HourlyAccountingSnapshot, RiskSnapshot, WeeklyAccountingSnapshot,
     },
-    traits::{PotentialLossStore, RiskMetrics, RiskMetricsSnapshot, RiskPersistence},
+    traits::{FillClaim, PotentialLossStore, RiskMetrics, RiskMetricsSnapshot, RiskPersistence},
     types::{
         AtomicStateVersion, BreakerState, ExecutionRiskEvent, PostTradeReport,
         ReconciliationReport, ReportMode, RiskDecision,
@@ -43,7 +43,7 @@ use oxide_arb_models::{
         potential_loss::{NewPotentialLoss, PotentialLossInfo},
         risk,
         risk::{
-            NewEmergencySnapshot, NewRiskAuditEvent, ProbabilityInput, RiskEngineState,
+            FillCommit, NewEmergencySnapshot, NewRiskAuditEvent, ProbabilityInput, RiskEngineState,
             UpsertRiskEngineState,
         },
         settlement::MarketSettlementInput,
@@ -51,7 +51,7 @@ use oxide_arb_models::{
     },
     enums::{
         ReconciliationStatus,
-        common::{LedgerStatus, TradeOutcome},
+        common::{LedgerStatus, TradeBusinessOutcome},
         risk::{
             BlacklistReason, BreakerStateName, CircuitBreakerLevel, TradeAccountingPhase,
             WindowType,
@@ -230,20 +230,70 @@ where
         phase: TradeAccountingPhase,
         trade: &PostTradeInput,
         metrics: &dyn RiskMetrics,
-    ) -> OxideResult<PostTradeReport> {
+    ) -> OxideResult<Option<PostTradeReport>> {
         match phase {
-            TradeAccountingPhase::Fill => self.persist_fill_potential_loss(trade).await?,
+            TradeAccountingPhase::Fill => {
+                let fill_claim = match self
+                    .persistence
+                    .begin_fill(&trade.trade_id, self.clock.now())
+                    .await
+                {
+                    Ok(FillClaim::AlreadyApplied) => return Ok(None),
+                    Ok(FillClaim::Claimed(claim)) => claim,
+                    Err(e) => {
+                        self.halt_internal(format!("risk fill marker claim failed: {e}"));
+                        return Err(e);
+                    }
+                };
+                let previous_breaker_state = self.circuit_breaker.read().state().to_name();
+                let fill_potential_loss = Self::fill_potential_loss_entry(trade);
+                let (report, audit_event, auto_bl_entry) =
+                    self.apply_trade_result(phase, trade, metrics);
+                let commit = FillCommit {
+                    trade_id: trade.trade_id.clone(),
+                    potential_loss: fill_potential_loss,
+                    state: UpsertRiskEngineState::from(&report.snapshot),
+                    audit: audit_event,
+                };
+                if let Err(e) = fill_claim.commit(commit).await {
+                    self.halt_internal(format!("risk fill commit failed: {e}"));
+                    return Err(e);
+                }
+                self.persist_post_trade_followups(
+                    &report,
+                    auto_bl_entry,
+                    previous_breaker_state,
+                    metrics,
+                )
+                .await?;
+                Ok(Some(report))
+            }
             TradeAccountingPhase::Settlement => {
                 self.persist_settlement_potential_loss(trade).await?;
+                let previous_breaker_state = self.circuit_breaker.read().state().to_name();
+                let (report, audit_event, auto_bl_entry) =
+                    self.apply_trade_result(phase, trade, metrics);
+                self.persist_and_audit(&report.snapshot, audit_event)
+                    .await?;
+                self.persist_post_trade_followups(
+                    &report,
+                    auto_bl_entry,
+                    previous_breaker_state,
+                    metrics,
+                )
+                .await?;
+                Ok(Some(report))
             }
         }
+    }
 
-        let previous_breaker_state = self.circuit_breaker.read().state().to_name();
-        let (report, audit_event, auto_bl_entry) = self.apply_trade_result(phase, trade, metrics);
-
-        self.persist_and_audit(&report.snapshot, audit_event)
-            .await?;
-
+    async fn persist_post_trade_followups(
+        &self,
+        report: &PostTradeReport,
+        auto_bl_entry: Option<BlacklistInfo>,
+        previous_breaker_state: BreakerStateName,
+        metrics: &dyn RiskMetrics,
+    ) -> OxideResult<()> {
         if let Some(tripped_level) = report.breaker_tripped {
             let reason = match self.circuit_breaker.read().state() {
                 BreakerState::Open { reason, .. } | BreakerState::Halted { reason, .. } => {
@@ -275,19 +325,19 @@ where
             }
         }
 
-        Ok(report)
+        Ok(())
     }
 
     pub async fn on_market_settled(
         &self,
         input: &MarketSettlementInput,
         metrics: &dyn RiskMetrics,
-    ) -> OxideResult<PostTradeReport> {
+    ) -> OxideResult<Option<PostTradeReport>> {
         let trade = PostTradeInput {
             trade_id: input.trade_id.clone(),
             market_id: input.market_id.clone(),
             token_id: input.token_id.clone(),
-            outcome: TradeOutcome::Success,
+            outcome: TradeBusinessOutcome::Success,
             cost_usd: input.cost_usd,
             fee_usd: input.fee_usd,
             net_profit_usd: Some(input.realized_pnl_usd),
@@ -299,26 +349,19 @@ where
             .await
     }
 
-    async fn persist_fill_potential_loss(&self, trade: &PostTradeInput) -> OxideResult<()> {
+    fn fill_potential_loss_entry(trade: &PostTradeInput) -> Option<NewPotentialLoss> {
         if !trade.is_success() {
-            return Ok(());
+            return None;
         }
 
-        let entry = NewPotentialLoss {
+        Some(NewPotentialLoss {
             ledger_id: LedgerId::new(trade.trade_id.as_str()),
             market_id: trade.market_id.clone(),
             token_id: trade.token_id.clone(),
             shares: trade.shares,
             entry_price: trade.entry_price,
             max_loss_usd: trade.cost_usd + trade.fee_usd,
-        };
-
-        if let Err(e) = self.potential_loss_store.create(entry).await {
-            self.halt_internal(format!("potential loss create failed: {e}"));
-            return Err(e);
-        }
-
-        Ok(())
+        })
     }
 
     async fn persist_settlement_potential_loss(&self, trade: &PostTradeInput) -> OxideResult<()> {

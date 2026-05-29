@@ -3,7 +3,6 @@
 use oxide_arb_core::{
     execution::fsm::ExecutionFSM,
     observability::{backpressure::BackpressurePolicy, metrics_hub::MetricsHub},
-    outbox::in_memory::InMemoryEventStore,
     pipeline::{
         book_store::BookStore,
         data_pipeline::{DataPipeline, DataPipelineDeps},
@@ -41,12 +40,7 @@ fn snapshot_cmd(token: &TokenId, ask_price: rust_decimal::Decimal, ts: u64) -> P
 async fn flood_does_not_halt_fsm() {
     let metrics = Arc::new(MetricsHub::new());
     let fsm = Arc::new(ExecutionFSM::new(Arc::clone(&metrics)));
-    let backpressure = Arc::new(BackpressurePolicy::new(
-        Arc::clone(&metrics),
-        None,
-        Arc::new(InMemoryEventStore::new()),
-        1,
-    ));
+    let backpressure = Arc::new(BackpressurePolicy::new(Arc::clone(&metrics), 1));
     let book_store = Arc::new(BookStore::new(Arc::clone(&metrics)));
     let market_registry = Arc::new(MarketRegistry::new());
     let (coalescer_tx, _coalescer_rx) = flume::bounded(4);
@@ -107,12 +101,7 @@ async fn flood_does_not_halt_fsm() {
 #[tokio::test]
 async fn success_path_does_not_coalesce() {
     let metrics = Arc::new(MetricsHub::new());
-    let backpressure = Arc::new(BackpressurePolicy::new(
-        Arc::clone(&metrics),
-        None,
-        Arc::new(InMemoryEventStore::new()),
-        1,
-    ));
+    let backpressure = Arc::new(BackpressurePolicy::new(Arc::clone(&metrics), 1));
     let book_store = Arc::new(BookStore::new(Arc::clone(&metrics)));
     let market_registry = Arc::new(MarketRegistry::new());
     let (coalescer_tx, _coalescer_rx) = flume::bounded(64);

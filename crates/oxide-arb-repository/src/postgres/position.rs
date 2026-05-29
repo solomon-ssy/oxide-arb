@@ -496,6 +496,19 @@ impl PgPositionRepository {
     pub const fn with_txn(txn: &DatabaseTransaction) -> PgPositionRepositoryTxn<'_> {
         PgPositionRepositoryTxn { txn }
     }
+
+    pub async fn settlement_payout_total(&self) -> Result<Usd, StorageError> {
+        let positions = Entity::find()
+            .filter(Column::Status.eq(PositionStatus::Settled))
+            .filter(Column::SettlementAccountingStatus.eq(SettlementAccountingStatus::Accounted))
+            .all(&self.db)
+            .await
+            .map_err(StorageError::from)?;
+        Ok(positions
+            .iter()
+            .filter_map(|position| position.settlement_payout_usd)
+            .sum())
+    }
 }
 
 #[async_trait::async_trait]

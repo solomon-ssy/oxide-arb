@@ -10,7 +10,7 @@ use oxide_arb_models::{
     domain::{blacklist::BlacklistInfo, risk::NewRiskAuditEvent},
     enums::{
         ReconciliationStatus,
-        common::TradeOutcome,
+        common::TradeBusinessOutcome,
         risk::{
             BreakerStateName, CircuitBreakerLevel, RiskAuditEventType, TradeAccountingPhase,
             WindowType,
@@ -77,7 +77,7 @@ pub enum RiskAuditEvent {
     EngineResumed,
     PostTradeUpdate {
         trade_id: TradeId,
-        outcome: TradeOutcome,
+        outcome: TradeBusinessOutcome,
         phase: TradeAccountingPhase,
         daily_loss_after: Usd,
         weekly_loss_after: Usd,

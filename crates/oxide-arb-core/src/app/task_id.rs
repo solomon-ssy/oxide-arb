@@ -23,6 +23,7 @@ pub enum TaskId {
 
     // ── Reconciliation ────────────────────────────────────────────────
     PotentialLossEscalation,
+    LedgerReconciliation,
     MarketSettlement,
     MarketSettlementRetry,
 
@@ -39,7 +40,7 @@ pub enum TaskId {
     ExecutionRunner {
         shard: u8,
     },
-    ExecutionOutcomeDrain,
+    PostTradeRelay,
     ExecutionHeartbeat,
 
     // ── Risk / periodic ───────────────────────────────────────────────
@@ -48,7 +49,6 @@ pub enum TaskId {
 
     // ── Audit / analytics / persistence writers ───────────────────────
     RiskAuditBatch,
-    OutboxFlusher,
     ExecutionAuditWriter,
     DetectionWriter,
     RiskStatePersist,
@@ -67,17 +67,16 @@ impl TaskId {
             Self::GammaSync | Self::CalibrationUpdater => TaskKind::CatalogSync,
             Self::Coalescer => TaskKind::CacheWorker,
             Self::PotentialLossEscalation
+            | Self::LedgerReconciliation
             | Self::MarketSettlement
             | Self::MarketSettlementRetry => TaskKind::LedgerReconciliation,
             Self::HealthChecker | Self::RiskMetricsRefresh => TaskKind::HealthMonitor,
             Self::Scanner | Self::Funnel => TaskKind::Detection,
-            Self::ExecutionRunner { .. } | Self::ExecutionOutcomeDrain => TaskKind::Execution,
+            Self::ExecutionRunner { .. } | Self::PostTradeRelay => TaskKind::Execution,
             Self::ExecutionHeartbeat => TaskKind::ExecutionHeartbeat,
             Self::RiskTick | Self::ExposureGc | Self::ReportGenerator => TaskKind::ReportScheduler,
             Self::RiskAuditBatch => TaskKind::Audit,
-            Self::OutboxFlusher | Self::ExecutionAuditWriter | Self::DetectionWriter => {
-                TaskKind::OutboxFlusher
-            }
+            Self::ExecutionAuditWriter | Self::DetectionWriter => TaskKind::AnalyticsWriter,
             Self::RiskStatePersist | Self::RiskStateDebouncer => TaskKind::PositionPersistence,
         }
     }

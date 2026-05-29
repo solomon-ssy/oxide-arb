@@ -15,11 +15,19 @@ use crate::{
 };
 use chrono::Datelike;
 use oxide_arb_algorithm::calibration::{CalibrationUpdater, ResolutionCalibrator};
+use oxide_arb_api::clob::ClobClient;
 use oxide_arb_error::{OxideError, OxideResult};
-use oxide_arb_models::{domain::risk::UpsertRiskEngineState, enums::common::ExecutionMode};
-use oxide_arb_repository::traits::RiskStateRepository;
+use oxide_arb_models::{
+    domain::risk::UpsertRiskEngineState,
+    enums::common::ExecutionMode,
+    types::{MarketId, Usd},
+};
+use oxide_arb_repository::{
+    postgres::{PgPositionRepository, PgTradeRepository},
+    traits::RiskStateRepository,
+};
 use oxide_arb_risk::{engine::RiskEngine, traits::RiskMetrics};
-use std::{sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 const RISK_TICK_INTERVAL_SECS: u64 = 5;
 const EXPOSURE_GC_INTERVAL_SECS: u64 = 30;
@@ -39,6 +47,7 @@ impl AppContext {
         self.queue_exposure_gc();
         self.queue_calibration_updater();
         self.queue_risk_metrics_refresh();
+        self.queue_ledger_reconciliation();
         self.queue_market_settlement_retry();
         self.queue_report_generator();
         self.queue_health_checker();
@@ -244,6 +253,53 @@ impl AppContext {
             });
     }
 
+    fn queue_ledger_reconciliation(&self) {
+        let Some(clob_client) = self.trading.clob_client.as_ref() else {
+            tracing::info!("ledger reconciliation skipped — ClobClient unavailable");
+            return;
+        };
+        let clob_client = Arc::clone(clob_client);
+        let risk_engine = Arc::clone(&self.risk.engine);
+        let risk_metrics = Arc::clone(&self.risk.metrics);
+        let trade_repo = Arc::clone(&self.infra.trade_repo);
+        let position_repo = Arc::clone(&self.infra.position_repo);
+        let configured_bankroll = Usd::new(self.config.risk.bankroll_usd);
+        let interval_secs = self.config.risk.reconciliation_interval_secs.max(30);
+
+        self.pending_tasks
+            .push(TaskId::LedgerReconciliation, move |shutdown| async move {
+                if let Err(error) = PeriodicTask::run(
+                    TaskId::LedgerReconciliation.static_name(),
+                    Duration::from_secs(interval_secs),
+                    PERIODIC_JITTER_PCT,
+                    true,
+                    shutdown,
+                    || {
+                        let clob_client = Arc::clone(&clob_client);
+                        let risk_engine = Arc::clone(&risk_engine);
+                        let risk_metrics = Arc::clone(&risk_metrics);
+                        let trade_repo = Arc::clone(&trade_repo);
+                        let position_repo = Arc::clone(&position_repo);
+                        async move {
+                            run_ledger_reconciliation(
+                                &risk_engine,
+                                risk_metrics.as_ref(),
+                                &clob_client,
+                                &trade_repo,
+                                &position_repo,
+                                configured_bankroll,
+                            )
+                            .await
+                        }
+                    },
+                )
+                .await
+                {
+                    tracing::error!(%error, "ledger reconciliation periodic task exited");
+                }
+            });
+    }
+
     fn queue_market_settlement_retry(&self) {
         let settlement = Arc::clone(&self.settlement.service);
         let interval_secs = self.config.settlement.lifecycle.retry_interval_secs.max(10);
@@ -377,6 +433,45 @@ async fn run_risk_tick(
             tracing::error!(%error, "risk tick failed — engine may halt");
             error
         })
+}
+
+async fn run_ledger_reconciliation(
+    risk_engine: &RiskEngine,
+    risk_metrics: &dyn RiskMetrics,
+    clob_client: &ClobClient,
+    trade_repo: &PgTradeRepository,
+    position_repo: &PgPositionRepository,
+    configured_bankroll: Usd,
+) -> OxideResult<()> {
+    let external_available = clob_client
+        .collateral_balance()
+        .await
+        .map_err(OxideError::from)?;
+    let success_spend = trade_repo.successful_spend_total().await?;
+    let settled_payout = position_repo.settlement_payout_total().await?;
+    let internal_cash = configured_bankroll - success_spend + settled_payout;
+    let external_positions = external_positions_from_metrics(risk_metrics);
+
+    let report = risk_engine.reconciler().reconcile_fetched(
+        risk_metrics,
+        internal_cash,
+        external_available,
+        Usd::ZERO,
+        &external_positions,
+    );
+    risk_engine
+        .on_reconciliation_result(&report, risk_metrics)
+        .await
+}
+
+fn external_positions_from_metrics(risk_metrics: &dyn RiskMetrics) -> Vec<(MarketId, Usd)> {
+    let mut by_market: HashMap<MarketId, Usd> = HashMap::new();
+    for position in risk_metrics.open_positions() {
+        *by_market
+            .entry(position.market_id.clone())
+            .or_insert(Usd::ZERO) += position.total_cost_usd;
+    }
+    by_market.into_iter().collect()
 }
 
 async fn run_calibration_tick(

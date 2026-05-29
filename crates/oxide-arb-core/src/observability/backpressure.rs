@@ -1,25 +1,18 @@
-//! Graceful backpressure — coalesce, dedup, evict, spill. Never halts trading.
+//! Graceful backpressure — coalesce, dedup, evict. Never halts trading.
+//!
+//! Post-trade durability is NOT a backpressure concern: the venue outcome is
+//! persisted on the `trade` row and replayed by the relay, so there is no
+//! bounded in-memory post-trade queue to overflow.
 
-use crate::{
-    observability::{
-        alert_dispatcher::{Alert, AlertDispatcher, AlertSeverity},
-        metrics_hub::MetricsHub,
-    },
-    outbox::in_memory::SharedInMemoryEventStore,
-};
+use crate::observability::metrics_hub::MetricsHub;
 use dashmap::DashMap;
-use oxide_arb_models::{
-    domain::{execution::PostTradeJob, pipeline::PipelineEvent},
-    types::TokenId,
-};
-use parking_lot::Mutex;
+use oxide_arb_models::{domain::pipeline::PipelineEvent, types::TokenId};
 use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
 
 const COALESCER_DEDUP_WINDOW: Duration = Duration::from_micros(500);
-const SPILL_ALERT_INTERVAL: Duration = Duration::from_secs(60);
 
 type BookCoalesceKey = TokenId;
 
@@ -32,40 +25,23 @@ pub enum BackpressureAction {
     Deduped,
     /// Event/job truly dropped (non-coalescable or below eviction threshold).
     Dropped,
-    /// Post-trade job spilled to in-memory outbox.
-    Spilled,
 }
 
-/// Central backpressure policy for all four hot-path sites.
+/// Central backpressure policy for the three hot-path coalesce/evict sites.
 pub struct BackpressurePolicy {
     metrics: Arc<MetricsHub>,
-    alerts: Option<Arc<AlertDispatcher>>,
-    post_trade_spill: SharedInMemoryEventStore,
     book_coalesce: Vec<DashMap<BookCoalesceKey, PipelineEvent>>,
     coalescer_dedup: DashMap<TokenId, Instant>,
-    last_spill_alert: Mutex<Option<Instant>>,
 }
 
 impl BackpressurePolicy {
-    pub fn new(
-        metrics: Arc<MetricsHub>,
-        alerts: Option<Arc<AlertDispatcher>>,
-        post_trade_spill: SharedInMemoryEventStore,
-        book_shard_count: usize,
-    ) -> Self {
+    pub fn new(metrics: Arc<MetricsHub>, book_shard_count: usize) -> Self {
         let shard_count = book_shard_count.max(1);
         Self {
             metrics,
-            alerts,
-            post_trade_spill,
             book_coalesce: (0..shard_count).map(|_| DashMap::new()).collect(),
             coalescer_dedup: DashMap::new(),
-            last_spill_alert: Mutex::new(None),
         }
-    }
-
-    pub const fn post_trade_spill(&self) -> &SharedInMemoryEventStore {
-        &self.post_trade_spill
     }
 
     /// Site 1 — `book_apply` channel full: latest-wins coalesce per (shard, token).
@@ -124,26 +100,6 @@ impl BackpressurePolicy {
         self.record_event("execution_shard", "evict");
     }
 
-    /// Site 4 — `post_trade` channel full: spill to in-memory outbox, never halt.
-    pub fn on_post_trade_channel_full(&self, job: PostTradeJob) -> BackpressureAction {
-        match self
-            .post_trade_spill
-            .enqueue_sync_post_trade(job, &self.metrics)
-        {
-            Ok(()) => {
-                self.metrics.post_trade_spilled_total.inc();
-                self.record_event("post_trade", "spill");
-                self.maybe_warn_post_trade_spill();
-                BackpressureAction::Spilled
-            }
-            Err(error) => {
-                tracing::error!(%error, "post-trade spill failed — job dropped");
-                self.record_post_trade_drop();
-                BackpressureAction::Dropped
-            }
-        }
-    }
-
     #[cold]
     fn record_book_drop(&self) {
         self.metrics.book_apply_dropped.inc();
@@ -156,46 +112,11 @@ impl BackpressurePolicy {
         self.record_event("coalescer", "drop");
     }
 
-    #[cold]
-    fn record_post_trade_drop(&self) {
-        self.metrics.post_trade_dropped.inc();
-        self.record_event("post_trade", "drop");
-    }
-
     fn record_event(&self, site: &'static str, action: &'static str) {
         self.metrics
             .backpressure_events
             .with_label_values(&[site, action])
             .inc();
-    }
-
-    fn maybe_warn_post_trade_spill(&self) {
-        let mut last = self.last_spill_alert.lock();
-        let now = Instant::now();
-        if last
-            .map(|t| now.duration_since(t) >= SPILL_ALERT_INTERVAL)
-            .unwrap_or(true)
-        {
-            *last = Some(now);
-            drop(last);
-            tracing::warn!("post_trade queue full — job spilled to in-memory outbox");
-            if let Some(alerts) = &self.alerts {
-                let alerts = Arc::clone(alerts);
-                if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                    handle.spawn(async move {
-                        alerts
-                            .dispatch(Alert {
-                                severity: AlertSeverity::Warning,
-                                title: "post_trade_spilled".into(),
-                                body: "Post-trade queue full; jobs spilled to in-memory outbox"
-                                    .into(),
-                                timestamp: chrono::Utc::now(),
-                            })
-                            .await;
-                    });
-                }
-            }
-        }
     }
 }
 
@@ -220,64 +141,18 @@ const fn is_book_coalescable(event: &PipelineEvent) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{execution::fsm::ExecutionFSM, outbox::in_memory::InMemoryEventStore};
     use oxide_arb_models::{
-        domain::{
-            pipeline::{IngressTrace, PipelineEvent, PriceDeltaCmd, PriceLevelDelta},
-            scored_snapshot::ScoredOpportunitySnapshot,
-        },
-        enums::{
-            calibration::{DurationBucket, PriceZone},
-            common::{ExecutionMode, MarketCategory, Side, StalenessLevel},
-            execution::ExecutionOutcome,
-        },
-        types::{EventId, ExecutionId, MarketId, OpportunityId, Price, Shares, TokenId, TradeId},
+        domain::pipeline::{IngressTrace, PipelineEvent, PriceDeltaCmd, PriceLevelDelta},
+        enums::common::Side,
+        types::{Price, Shares, TokenId},
     };
     use rust_decimal_macros::dec;
     use std::{sync::Arc, time::Instant};
 
-    fn sample_post_trade_job(trade_id: &str) -> PostTradeJob {
-        PostTradeJob {
-            trade_id: TradeId::new(trade_id),
-            execution_id: ExecutionId::generate(),
-            opportunity_id: OpportunityId::new_v7(),
-            market_id: MarketId::new("m1"),
-            event_id: EventId::new("e1"),
-            token_id: TokenId::new("t1"),
-            side: Side::Buy,
-            plan_shares: Shares::new(dec!(10)),
-            entry_price: Price::new(dec!(0.5)),
-            execution_mode: ExecutionMode::Paper,
-            edge_bps: None,
-            detected_profit: None,
-            detected_at: chrono::Utc::now(),
-            category: MarketCategory::Politics,
-            scored_snapshot: ScoredOpportunitySnapshot {
-                resolution_prob: 0.0,
-                confidence: 0.0,
-                convergence_secs: 0,
-                price_zone: PriceZone::Z97,
-                duration_bucket: DurationBucket::Medium,
-                depth_used_pct: 0.0,
-                staleness: StalenessLevel::Fresh,
-            },
-            outcome: ExecutionOutcome::Miss {
-                reason: "test".into(),
-                execution_mode: ExecutionMode::Paper,
-            },
-        }
-    }
-
     #[test]
     fn book_coalesce_does_not_halt() {
         let metrics = Arc::new(MetricsHub::new());
-        let fsm = Arc::new(ExecutionFSM::new(Arc::clone(&metrics)));
-        let bp = BackpressurePolicy::new(
-            Arc::clone(&metrics),
-            None,
-            Arc::new(InMemoryEventStore::new()),
-            1,
-        );
+        let bp = BackpressurePolicy::new(Arc::clone(&metrics), 1);
 
         let event = PipelineEvent::PriceDelta(PriceDeltaCmd {
             asset_id: TokenId::new("t1"),
@@ -294,19 +169,13 @@ mod tests {
             bp.on_book_channel_full(0, event),
             BackpressureAction::Coalesced
         );
-        assert!(!fsm.is_emergency());
         assert_eq!(metrics.book_apply_coalesced_total.get(), 1);
     }
 
     #[test]
     fn coalescer_dedup_within_window() {
         let metrics = Arc::new(MetricsHub::new());
-        let bp = BackpressurePolicy::new(
-            Arc::clone(&metrics),
-            None,
-            Arc::new(InMemoryEventStore::new()),
-            1,
-        );
+        let bp = BackpressurePolicy::new(Arc::clone(&metrics), 1);
         let token = TokenId::new("t1");
 
         bp.on_coalescer_notify_success(&token);
@@ -315,23 +184,5 @@ mod tests {
             BackpressureAction::Deduped
         );
         assert_eq!(metrics.coalescer_dropped.get(), 0);
-    }
-
-    #[test]
-    fn post_trade_spill_does_not_halt() {
-        let metrics = Arc::new(MetricsHub::new());
-        let fsm = Arc::new(ExecutionFSM::new(Arc::clone(&metrics)));
-        let spill = Arc::new(InMemoryEventStore::new());
-        let bp = BackpressurePolicy::new(Arc::clone(&metrics), None, Arc::clone(&spill), 1);
-
-        let job = sample_post_trade_job("trade-1");
-
-        assert_eq!(
-            bp.on_post_trade_channel_full(job),
-            BackpressureAction::Spilled
-        );
-        assert!(!fsm.is_emergency());
-        assert_eq!(metrics.post_trade_spilled_total.get(), 1);
-        assert_eq!(spill.pending_post_trade_count(), 1);
     }
 }

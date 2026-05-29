@@ -103,8 +103,8 @@ pub struct MetricsHub {
     pub sizing_zero: IntCounter,
     pub reservation_failures: IntCounter,
     pub execution_market_busy: IntCounter,
-    pub post_trade_dropped: IntCounter,
-    pub post_trade_spilled_total: IntCounter,
+    pub post_trade_relay_processed: IntCounter,
+    pub post_trade_relay_failed: IntCounter,
 
     // Tiered execution
     pub tier_fills: IntCounterVec,
@@ -141,9 +141,7 @@ pub struct MetricsHub {
     pub uptime_seconds: IntGauge,
     pub active_tasks: IntGauge,
     pub health_check_failures: IntCounter,
-    pub outbox_pending: IntGauge,
-    pub outbox_flushed: IntCounter,
-    pub outbox_dead_letters: IntCounter,
+    pub post_trade_relay_pending: IntGauge,
     pub async_writer_dropped: IntCounterVec,
 
     // Gamma sync
@@ -215,8 +213,8 @@ struct ExecutionMetrics {
     sizing_zero: IntCounter,
     reservation_failures: IntCounter,
     execution_market_busy: IntCounter,
-    post_trade_dropped: IntCounter,
-    post_trade_spilled_total: IntCounter,
+    post_trade_relay_processed: IntCounter,
+    post_trade_relay_failed: IntCounter,
     tier_fills: IntCounterVec,
     tier_misses: IntCounterVec,
     latency_ws_to_scan_us: Histogram,
@@ -251,9 +249,7 @@ struct SystemMetrics {
     uptime_seconds: IntGauge,
     active_tasks: IntGauge,
     health_check_failures: IntCounter,
-    outbox_pending: IntGauge,
-    outbox_flushed: IntCounter,
-    outbox_dead_letters: IntCounter,
+    post_trade_relay_pending: IntGauge,
     async_writer_dropped: IntCounterVec,
     gamma_sync_duration_ms: IntGauge,
     gamma_markets_total: IntGauge,
@@ -508,15 +504,15 @@ fn register_execution_metrics(registry: &Registry) -> ExecutionMetrics {
             "oxide_arb_execution_market_busy_total",
             "Rejected because market already in-flight"
         ),
-        post_trade_dropped: register_counter!(
+        post_trade_relay_processed: register_counter!(
             registry,
-            "oxide_arb_execution_post_trade_dropped_total",
-            "Post-trade jobs dropped when spill buffer fails"
+            "oxide_arb_post_trade_relay_processed_total",
+            "Trades advanced to terminal state by the post-trade relay"
         ),
-        post_trade_spilled_total: register_counter!(
+        post_trade_relay_failed: register_counter!(
             registry,
-            "oxide_arb_post_trade_spilled_total",
-            "Post-trade jobs spilled to in-memory outbox when queue full"
+            "oxide_arb_post_trade_relay_failed_total",
+            "Post-trade relay processing failures"
         ),
         tier_fills: register_counter_vec!(
             registry,
@@ -640,20 +636,10 @@ fn register_system_metrics(registry: &Registry) -> SystemMetrics {
             "oxide_arb_system_health_check_failures_total",
             "Health check failures"
         ),
-        outbox_pending: register_gauge_int!(
+        post_trade_relay_pending: register_gauge_int!(
             registry,
-            "oxide_arb_system_outbox_pending",
-            "Pending outbox events"
-        ),
-        outbox_flushed: register_counter!(
-            registry,
-            "oxide_arb_system_outbox_flushed_total",
-            "Outbox events flushed"
-        ),
-        outbox_dead_letters: register_counter!(
-            registry,
-            "oxide_arb_system_outbox_dead_letters_total",
-            "Outbox dead-lettered events"
+            "oxide_arb_post_trade_relay_pending",
+            "Unprocessed post-trade rows claimed in the last relay drain"
         ),
         async_writer_dropped: register_counter_vec!(
             registry,
@@ -794,8 +780,8 @@ impl MetricsHub {
             sizing_zero: execution.sizing_zero,
             reservation_failures: execution.reservation_failures,
             execution_market_busy: execution.execution_market_busy,
-            post_trade_dropped: execution.post_trade_dropped,
-            post_trade_spilled_total: execution.post_trade_spilled_total,
+            post_trade_relay_processed: execution.post_trade_relay_processed,
+            post_trade_relay_failed: execution.post_trade_relay_failed,
             tier_fills: execution.tier_fills,
             tier_misses: execution.tier_misses,
             latency_ws_to_scan_us: execution.latency_ws_to_scan_us,
@@ -818,9 +804,7 @@ impl MetricsHub {
             uptime_seconds: system.uptime_seconds,
             active_tasks: system.active_tasks,
             health_check_failures: system.health_check_failures,
-            outbox_pending: system.outbox_pending,
-            outbox_flushed: system.outbox_flushed,
-            outbox_dead_letters: system.outbox_dead_letters,
+            post_trade_relay_pending: system.post_trade_relay_pending,
             async_writer_dropped: system.async_writer_dropped,
             gamma_sync_duration_ms: system.gamma_sync_duration_ms,
             gamma_markets_total: system.gamma_markets_total,

@@ -5,39 +5,48 @@
 
 mod support;
 
-use oxide_arb_models::{
-    config::{CircuitBreakerConfig, RiskConfig},
-    domain::{
-        blacklist::{BlacklistInfo, UpsertBlacklistEntry},
-        risk::{
-            NewEmergencySnapshot, NewReconciliationReport, NewRiskAuditEvent, RiskStateInfo,
-            UpsertRiskEngineState,
-        },
-        trade::PostTradeInput,
-    },
-    enums::{
-        common::TradeOutcome,
-        risk::{BlacklistReason, BreakerStateName, RiskAuditEventType, TradeAccountingPhase},
-    },
-    types::{MarketId, Price, Shares, TokenId, TradeId, Usd},
-};
-use oxide_arb_risk::{
-    builder::RiskEngineBuilder, clock::utc_clock, engine::RiskEngine, traits::RiskPersistence,
-};
-use rust_decimal::Decimal;
-use rust_decimal_macros::dec;
 use std::{
     mem::take,
     sync::{Arc, Mutex},
     thread::sleep,
     time::Duration,
 };
+
+use chrono::{DateTime, Utc};
+use oxide_arb_models::{
+    config::{CircuitBreakerConfig, RiskConfig},
+    domain::{
+        blacklist::{BlacklistInfo, UpsertBlacklistEntry},
+        risk::{
+            FillCommit, NewEmergencySnapshot, NewReconciliationReport, NewRiskAuditEvent,
+            RiskStateInfo, UpsertRiskEngineState,
+        },
+        trade::PostTradeInput,
+    },
+    enums::{
+        common::TradeBusinessOutcome,
+        risk::{BlacklistReason, BreakerStateName, RiskAuditEventType, TradeAccountingPhase},
+    },
+    types::{MarketId, Price, Shares, TokenId, TradeId, Usd},
+};
+use oxide_arb_risk::{
+    builder::RiskEngineBuilder,
+    clock::utc_clock,
+    engine::RiskEngine,
+    traits::{FillClaim, RiskFillCommitGuard, RiskPersistence},
+};
+use rust_decimal::Decimal;
+use rust_decimal_macros::dec;
 use support::MockMetrics;
 
 // ── Capturing Persistence ───────────────────────────────────────────────────
 
 struct CapturingPersistence {
     audits: Mutex<Vec<NewRiskAuditEvent>>,
+}
+
+struct CapturingFillCommitGuard<'a> {
+    persistence: &'a CapturingPersistence,
 }
 
 impl CapturingPersistence {
@@ -49,6 +58,13 @@ impl CapturingPersistence {
 
     fn take_audits(&self) -> Vec<NewRiskAuditEvent> {
         take(&mut *self.audits.lock().unwrap())
+    }
+}
+
+#[async_trait::async_trait]
+impl RiskFillCommitGuard for CapturingFillCommitGuard<'_> {
+    async fn commit(self: Box<Self>, commit: FillCommit) -> oxide_arb_error::OxideResult<()> {
+        self.persistence.create_audit(commit.audit).await
     }
 }
 
@@ -95,6 +111,17 @@ impl RiskPersistence for CapturingPersistence {
             updated_at: now,
         })
     }
+
+    async fn begin_fill<'a>(
+        &'a self,
+        _trade_id: &TradeId,
+        _applied_at: DateTime<Utc>,
+    ) -> oxide_arb_error::OxideResult<FillClaim<'a>> {
+        Ok(FillClaim::Claimed(Box::new(CapturingFillCommitGuard {
+            persistence: self,
+        })))
+    }
+
     async fn upsert_blacklist(
         &self,
         _entry: UpsertBlacklistEntry,
@@ -143,7 +170,7 @@ fn test_config() -> RiskConfig {
     }
 }
 
-fn test_trade(outcome: TradeOutcome, profit: Decimal) -> PostTradeInput {
+fn test_trade(outcome: TradeBusinessOutcome, profit: Decimal) -> PostTradeInput {
     PostTradeInput {
         trade_id: TradeId::generate(),
         market_id: MarketId::new("0xaudit_market"),
@@ -178,7 +205,7 @@ async fn on_trade_result_emits_post_trade_update() {
     let persistence = Arc::new(CapturingPersistence::new());
     let (engine, metrics) = build_engine_with_persistence(Arc::clone(&persistence));
 
-    let trade = test_trade(TradeOutcome::Success, dec!(5));
+    let trade = test_trade(TradeBusinessOutcome::Success, dec!(5));
     engine
         .on_trade_result(TradeAccountingPhase::Fill, &trade, &metrics)
         .await
@@ -298,7 +325,7 @@ async fn tick_emits_breaker_recovered_audit() {
     engine
         .on_trade_result(
             TradeAccountingPhase::Settlement,
-            &test_trade(TradeOutcome::Miss, dec!(-5)),
+            &test_trade(TradeBusinessOutcome::Miss, dec!(-5)),
             &metrics,
         )
         .await
@@ -312,7 +339,7 @@ async fn tick_emits_breaker_recovered_audit() {
     engine
         .on_trade_result(
             TradeAccountingPhase::Fill,
-            &test_trade(TradeOutcome::Success, dec!(5)),
+            &test_trade(TradeBusinessOutcome::Success, dec!(5)),
             &probe_metrics,
         )
         .await

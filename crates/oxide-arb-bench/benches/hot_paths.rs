@@ -31,11 +31,7 @@ use oxide_arb_core::{
     },
     exposure::in_memory::InMemoryExposureReservation,
     infra::async_writer::AsyncWriter,
-    observability::{
-        backpressure::BackpressurePolicy, execution_audit::ExecutionAuditWriter,
-        metrics_hub::MetricsHub,
-    },
-    outbox::in_memory::InMemoryEventStore,
+    observability::{execution_audit::ExecutionAuditWriter, metrics_hub::MetricsHub},
     pipeline::{
         book_store::BookStore,
         dual_book_assembler::DualBookAssembler,
@@ -83,6 +79,7 @@ use std::{
     sync::{Arc, OnceLock},
     time::Instant,
 };
+use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 static EXECUTION_RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
@@ -867,12 +864,6 @@ fn execution_bench_setup() -> (
     SETUP.get_or_init(|| {
         let metrics = Arc::new(MetricsHub::new());
         let fsm = Arc::new(ExecutionFSM::new(Arc::clone(&metrics)));
-        let backpressure = Arc::new(BackpressurePolicy::new(
-            Arc::clone(&metrics),
-            None,
-            Arc::new(InMemoryEventStore::new()),
-            1,
-        ));
         let book_store = Arc::new(BookStore::new(Arc::clone(&metrics)));
         let reservation_config = RiskConfig::default().exposure_reservation_config();
         let exposure = Arc::new(InMemoryExposureReservation::new(reservation_config.clone()));
@@ -882,7 +873,6 @@ fn execution_bench_setup() -> (
         ));
         let scored = Arc::new(execution_bench_scored());
         seed_execution_books(&book_store, &scored);
-        let (outcome_tx, _rx) = flume::bounded(1024);
         let trade_repo = Arc::new(MockTradeRepository::default());
         let audit_shutdown = CancellationToken::new();
         let (audit_writer_inner, _audit_worker) = AsyncWriter::new(
@@ -930,9 +920,10 @@ fn execution_bench_setup() -> (
             execution_mode: ExecutionMode::Paper,
             trade_repo,
             audit_writer,
-            event_store: Arc::new(InMemoryEventStore::new()),
-            outcome_tx,
-            backpressure,
+            relay_notify: Arc::new(Notify::new()),
+            metrics_state: Arc::new(RiskMetricsState::new(Arc::new(ApiHealthTracker::new(
+                std::time::Duration::from_secs(60),
+            )))),
         });
 
         (pipeline, scored)

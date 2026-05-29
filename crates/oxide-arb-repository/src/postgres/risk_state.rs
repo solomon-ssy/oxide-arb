@@ -41,7 +41,7 @@ async fn do_load(db: &impl ConnectionTrait) -> Result<RiskStateInfo, StorageErro
     Ok(model.into())
 }
 
-async fn do_upsert(
+pub(crate) async fn do_upsert(
     db: &impl ConnectionTrait,
     state: UpsertRiskEngineState,
 ) -> Result<(), StorageError> {

@@ -20,6 +20,7 @@ pub enum Trade {
     Table,
     TradeId,
     ExecutionId,
+    ReservationId,
     OpportunityId,
     MarketId,
     EventId,
@@ -34,10 +35,18 @@ pub enum Trade {
     NetProfitUsd,
     OrderId,
     TxHash,
-    Outcome,
+    State,
+    BusinessOutcome,
+    ScoredSnapshot,
+    Category,
+    NeedsReconcile,
+    PostTradeClaimOwner,
+    PostTradeClaimedAt,
+    PostTradeAttempts,
     ExecutionMode,
     LatencyMs,
     ErrorMessage,
+    SubmittedAt,
     ConfirmedAt,
     CreatedAt,
     UpdatedAt,
@@ -54,6 +63,7 @@ pub fn table() -> TableCreateStatement {
                 .primary_key(),
         )
         .col(ColumnDef::new(Trade::ExecutionId).text().not_null())
+        .col(ColumnDef::new(Trade::ReservationId).text().not_null())
         .col(ColumnDef::new(Trade::OpportunityId).text().not_null())
         .col(ColumnDef::new(Trade::MarketId).text().not_null())
         .col(ColumnDef::new(Trade::EventId).text().not_null())
@@ -68,10 +78,53 @@ pub fn table() -> TableCreateStatement {
         .col(ColumnDef::new(Trade::NetProfitUsd).text().null())
         .col(ColumnDef::new(Trade::OrderId).text().null())
         .col(ColumnDef::new(Trade::TxHash).text().null())
-        .col(ColumnDef::new(Trade::Outcome).text().not_null())
+        .col(ColumnDef::new(Trade::State).text().not_null())
+        .col(ColumnDef::new(Trade::BusinessOutcome).text().extra(
+            "GENERATED ALWAYS AS (CASE state \
+                 WHEN 'fill_observed' THEN 'success' \
+                 WHEN 'fill_processing' THEN 'success' \
+                 WHEN 'settled' THEN 'success' \
+                 WHEN 'miss_observed' THEN 'miss' \
+                 WHEN 'miss_processing' THEN 'miss' \
+                 WHEN 'missed' THEN 'miss' \
+                 WHEN 'fail_observed' THEN 'failed' \
+                 WHEN 'fail_processing' THEN 'failed' \
+                 WHEN 'failed' THEN 'failed' \
+                 WHEN 'orphaned' THEN 'failed' \
+                 ELSE NULL END) STORED",
+        ))
+        .col(
+            ColumnDef::new(Trade::ScoredSnapshot)
+                .json_binary()
+                .not_null(),
+        )
+        .col(ColumnDef::new(Trade::Category).text().not_null())
+        .col(
+            ColumnDef::new(Trade::NeedsReconcile)
+                .boolean()
+                .not_null()
+                .default(false),
+        )
+        .col(ColumnDef::new(Trade::PostTradeClaimOwner).text().null())
+        .col(
+            ColumnDef::new(Trade::PostTradeClaimedAt)
+                .timestamp_with_time_zone()
+                .null(),
+        )
+        .col(
+            ColumnDef::new(Trade::PostTradeAttempts)
+                .integer()
+                .not_null()
+                .default(0),
+        )
         .col(ColumnDef::new(Trade::ExecutionMode).text().not_null())
         .col(ColumnDef::new(Trade::LatencyMs).integer().null())
         .col(ColumnDef::new(Trade::ErrorMessage).text().null())
+        .col(
+            ColumnDef::new(Trade::SubmittedAt)
+                .timestamp_with_time_zone()
+                .null(),
+        )
         .col(
             ColumnDef::new(Trade::ConfirmedAt)
                 .timestamp_with_time_zone()
@@ -114,7 +167,32 @@ pub fn indexes() -> Vec<IndexSpec> {
         ),
         simple_index("idx_trades_market_id", Trade::MarketId, "market lookup"),
         simple_index("idx_trades_event_id", Trade::EventId, "event lookup"),
-        simple_index("idx_trades_outcome", Trade::Outcome, "outcome filters"),
+        simple_index(
+            "idx_trades_business_outcome",
+            Trade::BusinessOutcome,
+            "business-outcome report group-by",
+        ),
+        IndexSpec::raw(
+            "idx_trade_post_trade_claim",
+            trade_table_name,
+            IndexBuildMode::Transactional,
+            "CREATE INDEX IF NOT EXISTS idx_trade_post_trade_claim \
+             ON trade (created_at, post_trade_claimed_at) \
+             WHERE state IN (\
+                'fill_observed', 'miss_observed', 'fail_observed', \
+                'fill_processing', 'miss_processing', 'fail_processing'\
+             )",
+            "post-trade relay claim and expired lease scans",
+        ),
+        IndexSpec::raw(
+            "idx_trade_submitted_stale",
+            trade_table_name,
+            IndexBuildMode::Transactional,
+            "CREATE INDEX IF NOT EXISTS idx_trade_submitted_stale \
+             ON trade (submitted_at) \
+             WHERE state = 'submitted'",
+            "orphan scan of stale submitted trades",
+        ),
         IndexSpec::sea_query(
             "idx_trades_created_at",
             trade_table_name,

@@ -2,7 +2,7 @@
 
 use crate::{clock::Clock, types::PeriodStats};
 use chrono::{Datelike, NaiveDate};
-use oxide_arb_models::{enums::common::TradeOutcome, types::Usd};
+use oxide_arb_models::{enums::common::TradeBusinessOutcome, types::Usd};
 use std::sync::Arc;
 
 pub struct WeeklyAccounting {
@@ -31,15 +31,20 @@ impl WeeklyAccounting {
         }
     }
 
-    pub fn record_trade(&mut self, net_profit: Usd, fees: Usd, outcome: TradeOutcome) -> bool {
+    pub fn record_trade(
+        &mut self,
+        net_profit: Usd,
+        fees: Usd,
+        outcome: TradeBusinessOutcome,
+    ) -> bool {
         let rolled = self.maybe_rollover();
         self.stats.trade_count += 1;
         self.stats.pnl += net_profit;
         self.stats.fees += fees;
         match outcome {
-            TradeOutcome::Success => self.stats.success_count += 1,
-            TradeOutcome::Miss => self.stats.miss_count += 1,
-            _ => {}
+            TradeBusinessOutcome::Success => self.stats.success_count += 1,
+            TradeBusinessOutcome::Miss => self.stats.miss_count += 1,
+            TradeBusinessOutcome::Failed => {}
         }
         if net_profit.is_negative() {
             self.stats.loss += net_profit.abs();

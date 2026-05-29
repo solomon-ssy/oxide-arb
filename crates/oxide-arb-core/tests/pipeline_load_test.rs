@@ -2,7 +2,6 @@
 
 use oxide_arb_core::{
     observability::{backpressure::BackpressurePolicy, metrics_hub::MetricsHub},
-    outbox::in_memory::InMemoryEventStore,
     pipeline::{
         book_store::BookStore,
         data_pipeline::{DataPipeline, DataPipelineDeps},
@@ -39,12 +38,7 @@ fn snapshot_cmd(token: &TokenId, ts: u64) -> PipelineEvent {
 #[tokio::test]
 async fn hundred_tokens_thousand_snapshots_monotonic_versions() {
     let metrics = Arc::new(MetricsHub::new());
-    let backpressure = Arc::new(BackpressurePolicy::new(
-        Arc::clone(&metrics),
-        None,
-        Arc::new(InMemoryEventStore::new()),
-        4,
-    ));
+    let backpressure = Arc::new(BackpressurePolicy::new(Arc::clone(&metrics), 4));
     let book_store = Arc::new(BookStore::new(Arc::clone(&metrics)));
     let market_registry = Arc::new(MarketRegistry::new());
     let (coalescer_tx, _coalescer_rx) = flume::bounded(256);

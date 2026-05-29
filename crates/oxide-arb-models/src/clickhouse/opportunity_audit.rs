@@ -1,6 +1,5 @@
 use crate::{
     domain::{
-        execution::{PostTradeJob, ResolvedOutcome},
         opportunity::Opportunity,
         position::PositionInfo,
         scored_snapshot::ScoredOpportunitySnapshot,
@@ -8,7 +7,7 @@ use crate::{
         trade::TradeInfo,
     },
     enums::audit::OpportunityAuditStage,
-    types::{ExecutionId, Shares},
+    types::ExecutionId,
 };
 use chrono::Utc;
 use num_traits::ToPrimitive;
@@ -55,41 +54,44 @@ pub struct OpportunityAuditRow {
     pub updated_at: i64,
 }
 
-impl From<(&PostTradeJob, &ResolvedOutcome)> for OpportunityAuditRow {
-    fn from((job, resolved): (&PostTradeJob, &ResolvedOutcome)) -> Self {
-        let shares = if resolved.filled_shares > Shares::ZERO {
-            resolved.filled_shares.inner().to_f64().unwrap_or(0.0)
-        } else {
-            job.plan_shares.inner().to_f64().unwrap_or(0.0)
-        };
-
-        let stage = OpportunityAuditStage::from_trade_outcome(resolved.trade_outcome);
+impl OpportunityAuditRow {
+    /// Build a terminal (`filled`/`miss`/`failed`) audit row from a persisted
+    /// trade row and its frozen scored snapshot. The relay calls this for
+    /// `*_observed` rows, where `business_outcome` is always `Some`.
+    #[must_use]
+    pub fn from_terminal_trade(trade: &TradeInfo, snapshot: &ScoredOpportunitySnapshot) -> Self {
+        let outcome = trade.business_outcome;
+        let stage = outcome.map_or(OpportunityAuditStage::Failed, |o| {
+            OpportunityAuditStage::from_business_outcome(o)
+        });
         Self {
-            opportunity_id: job.opportunity_id.to_string(),
-            execution_id: job.execution_id.to_string(),
-            trade_id: job.trade_id.to_string(),
-            market_id: job.market_id.to_string(),
-            event_id: job.event_id.to_string(),
-            side: job.side.to_string(),
-            entry_price: job.entry_price.inner().to_f64().unwrap_or(0.0),
-            shares,
-            total_cost_usd: resolved.cost_usd.inner().to_f64().unwrap_or(0.0),
-            total_fees_usd: resolved.fee_usd.inner().to_f64().unwrap_or(0.0),
-            net_profit_usd: resolved
+            opportunity_id: trade.opportunity_id.to_string(),
+            execution_id: trade.execution_id.to_string(),
+            trade_id: trade.trade_id.to_string(),
+            market_id: trade.market_id.to_string(),
+            event_id: trade.event_id.to_string(),
+            side: trade.side.to_string(),
+            entry_price: trade.price.inner().to_f64().unwrap_or(0.0),
+            shares: trade.shares.inner().to_f64().unwrap_or(0.0),
+            total_cost_usd: trade.cost_usd.inner().to_f64().unwrap_or(0.0),
+            total_fees_usd: trade.fee_usd.inner().to_f64().unwrap_or(0.0),
+            net_profit_usd: trade
                 .net_profit_usd
                 .map_or(0.0, |v| v.inner().to_f64().unwrap_or(0.0)),
-            expected_profit: job
-                .detected_profit
+            expected_profit: trade
+                .detected_profit_usd
                 .map_or(0.0, |v| v.inner().to_f64().unwrap_or(0.0)),
-            edge_bps: job.edge_bps.map_or(0, |v| v.inner().to_u32().unwrap_or(0)),
-            resolution_prob: job.scored_snapshot.resolution_prob,
-            confidence: job.scored_snapshot.confidence,
-            convergence_secs: job.scored_snapshot.convergence_secs,
-            price_zone: job.scored_snapshot.price_zone.to_string(),
-            duration_bucket: job.scored_snapshot.duration_bucket.to_string(),
-            depth_used_pct: job.scored_snapshot.depth_used_pct,
-            staleness: job.scored_snapshot.staleness.to_string(),
-            category: job.category.to_string(),
+            edge_bps: trade
+                .detected_edge_bps
+                .map_or(0, |v| v.inner().to_u32().unwrap_or(0)),
+            resolution_prob: snapshot.resolution_prob,
+            confidence: snapshot.confidence,
+            convergence_secs: snapshot.convergence_secs,
+            price_zone: snapshot.price_zone.to_string(),
+            duration_bucket: snapshot.duration_bucket.to_string(),
+            depth_used_pct: snapshot.depth_used_pct,
+            staleness: snapshot.staleness.to_string(),
+            category: trade.category.to_string(),
             stage: stage.to_string(),
             stage_order: stage.order(),
             stage_at: Utc::now().timestamp_millis(),
@@ -100,10 +102,10 @@ impl From<(&PostTradeJob, &ResolvedOutcome)> for OpportunityAuditRow {
             winning_token_id: None,
             accounting_status: None,
             fee_source: None,
-            outcome: Some(resolved.trade_outcome.to_string()),
+            outcome: outcome.map(|o| o.to_string()),
             rejection_stage: None,
             rejection_reason: None,
-            detected_at: job.detected_at.timestamp_millis(),
+            detected_at: trade.created_at.timestamp_millis(),
             updated_at: Utc::now().timestamp_millis(),
         }
     }
@@ -238,8 +240,8 @@ mod tests {
     use super::*;
     use crate::{
         domain::{
-            execution::{PostTradeJob, ResolvedOutcome},
-            scored_snapshot::ScoredOpportunitySnapshot,
+            execution::ResolvedOutcome, scored_snapshot::ScoredOpportunitySnapshot,
+            trade::TradeInfo,
         },
         enums::{
             calibration::{DurationBucket, PriceZone},
@@ -247,44 +249,67 @@ mod tests {
             execution::ExecutionOutcome,
         },
         types::{
-            Bps, EventId, ExecutionId, MarketId, OpportunityId, OrderId, Price, Shares, TokenId,
-            TradeId, Usd,
+            Bps, EventId, ExecutionId, MarketId, OpportunityId, OrderId, Price, ReservationId,
+            Shares, TokenId, TradeId, Usd,
         },
     };
     use rust_decimal_macros::dec;
 
-    fn test_job(outcome: ExecutionOutcome) -> PostTradeJob {
-        PostTradeJob {
+    fn test_snapshot() -> ScoredOpportunitySnapshot {
+        ScoredOpportunitySnapshot {
+            resolution_prob: 0.95,
+            confidence: 0.95,
+            convergence_secs: 600,
+            price_zone: PriceZone::Z97,
+            duration_bucket: DurationBucket::Medium,
+            depth_used_pct: 10.0,
+            staleness: StalenessLevel::Fresh,
+        }
+    }
+
+    fn test_trade(resolved: &ResolvedOutcome) -> TradeInfo {
+        let now = chrono::Utc::now();
+        TradeInfo {
             trade_id: TradeId::new("t1"),
             execution_id: ExecutionId::generate(),
+            reservation_id: ReservationId::new("r1"),
             opportunity_id: OpportunityId::new_v7(),
             market_id: MarketId::new("m1"),
             event_id: EventId::new("e1"),
             token_id: TokenId::new("tok1"),
             side: Side::Buy,
-            plan_shares: Shares::new(dec!(100)),
-            entry_price: Price::new(dec!(0.92)),
-            execution_mode: ExecutionMode::Paper,
-            edge_bps: Some(Bps::new(dec!(300))),
-            detected_profit: Some(Usd::new(dec!(4.5))),
-            detected_at: chrono::Utc::now(),
+            shares: resolved.filled_shares,
+            price: resolved.avg_fill_price,
+            cost_usd: resolved.cost_usd,
+            fee_usd: resolved.fee_usd,
+            detected_edge_bps: Some(Bps::new(dec!(300))),
+            detected_profit_usd: Some(Usd::new(dec!(4.5))),
+            net_profit_usd: resolved.net_profit_usd,
+            order_id: resolved.order_id.clone(),
+            tx_hash: resolved.tx_hash.clone(),
+            state: resolved.observed_state(),
+            business_outcome: Some(resolved.business_outcome),
+            scored_snapshot: serde_json::to_value(test_snapshot()).expect("snapshot json"),
             category: MarketCategory::Politics,
-            scored_snapshot: ScoredOpportunitySnapshot {
-                resolution_prob: 0.95,
-                confidence: 0.95,
-                convergence_secs: 600,
-                price_zone: PriceZone::Z97,
-                duration_bucket: DurationBucket::Medium,
-                depth_used_pct: 10.0,
-                staleness: StalenessLevel::Fresh,
-            },
-            outcome,
+            needs_reconcile: false,
+            post_trade_claim_owner: None,
+            post_trade_claimed_at: None,
+            post_trade_attempts: 0,
+            execution_mode: ExecutionMode::Paper,
+            latency_ms: resolved
+                .latency_ms
+                .map(|ms| i32::try_from(ms).unwrap_or(i32::MAX)),
+            error_message: resolved.error_message.clone(),
+            submitted_at: Some(now),
+            confirmed_at: Some(now),
+            created_at: now,
+            updated_at: now,
         }
     }
 
     #[test]
     fn from_execution_filled_maps_all_fields() {
-        let job = test_job(ExecutionOutcome::Filled {
+        let outcome = ExecutionOutcome::Filled {
             order_id: OrderId::new("ord1"),
             filled_shares: Shares::new(dec!(80)),
             avg_fill_price: Some(Price::new(dec!(0.93))),
@@ -292,9 +317,11 @@ mod tests {
             tx_hash: Some("0xabc".into()),
             execution_mode: ExecutionMode::Paper,
             latency_ms: 42,
-        });
-        let resolved = ResolvedOutcome::resolve(&job);
-        let row = OpportunityAuditRow::from((&job, &resolved));
+        };
+        let resolved = ResolvedOutcome::resolve(&outcome, Price::new(dec!(0.92)), 0.95);
+        let trade = test_trade(&resolved);
+        let snapshot = test_snapshot();
+        let row = OpportunityAuditRow::from_terminal_trade(&trade, &snapshot);
 
         assert!((row.shares - 80.0).abs() < f64::EPSILON);
         assert!((row.total_cost_usd - 74.4).abs() < 0.01);
@@ -310,18 +337,19 @@ mod tests {
 
     #[test]
     fn from_execution_miss_zeros_financial() {
-        let job = test_job(ExecutionOutcome::Miss {
+        let outcome = ExecutionOutcome::Miss {
             reason: "no fill".into(),
             execution_mode: ExecutionMode::Paper,
-        });
-        let resolved = ResolvedOutcome::resolve(&job);
-        let row = OpportunityAuditRow::from((&job, &resolved));
+        };
+        let resolved = ResolvedOutcome::resolve(&outcome, Price::new(dec!(0.92)), 0.95);
+        let trade = test_trade(&resolved);
+        let snapshot = test_snapshot();
+        let row = OpportunityAuditRow::from_terminal_trade(&trade, &snapshot);
 
         assert!((row.total_cost_usd).abs() < f64::EPSILON);
         assert!((row.total_fees_usd).abs() < f64::EPSILON);
         assert!((row.net_profit_usd).abs() < f64::EPSILON);
-        // shares falls back to plan_shares
-        assert!((row.shares - 100.0).abs() < f64::EPSILON);
+        assert!((row.shares).abs() < f64::EPSILON);
         assert_eq!(row.outcome.as_deref(), Some("miss"));
     }
 

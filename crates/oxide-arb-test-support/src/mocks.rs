@@ -10,10 +10,11 @@ use oxide_arb_models::{
     },
     domain::{
         MarkRedeemedParams, NewPosition, NewTrade, PositionInfo, ReportTradeStats,
-        SettlePositionParams, SettledPositionStats, TradeInfo, UpdatePosition, UpdateTradeOutcome,
+        SettlePositionParams, SettledPositionStats, TradeInfo, TradeObservation, UpdatePosition,
     },
     enums::common::{
-        PositionStatus, RedeemStatus, SettlementAccountingStatus, SettlementTrigger, TradeOutcome,
+        PositionStatus, RedeemStatus, SettlementAccountingStatus, SettlementTrigger,
+        TradeBusinessOutcome, TradeState,
     },
     types::{MarketId, PositionId, TradeId, Usd},
 };
@@ -417,6 +418,7 @@ impl TradeRepository for MockTradeRepository {
         let info = TradeInfo {
             trade_id: trade.trade_id.clone(),
             execution_id: trade.execution_id.clone(),
+            reservation_id: trade.reservation_id.clone(),
             opportunity_id: trade.opportunity_id.clone(),
             market_id: trade.market_id.clone(),
             event_id: trade.event_id.clone(),
@@ -431,10 +433,18 @@ impl TradeRepository for MockTradeRepository {
             net_profit_usd: None,
             order_id: None,
             tx_hash: None,
-            outcome: TradeOutcome::Pending,
+            state: TradeState::Intent,
+            business_outcome: None,
+            scored_snapshot: trade.scored_snapshot.clone(),
+            category: trade.category,
+            needs_reconcile: false,
+            post_trade_claim_owner: None,
+            post_trade_claimed_at: None,
+            post_trade_attempts: 0,
             execution_mode: trade.execution_mode,
             latency_ms: None,
             error_message: None,
+            submitted_at: None,
             confirmed_at: None,
             created_at: now,
             updated_at: now,
@@ -455,11 +465,11 @@ impl TradeRepository for MockTradeRepository {
         Ok(count)
     }
 
-    async fn update(
+    async fn mark_submitted(
         &self,
         trade_id: &TradeId,
-        update: UpdateTradeOutcome,
-    ) -> Result<TradeInfo, StorageError> {
+        submitted_at: chrono::DateTime<Utc>,
+    ) -> Result<bool, StorageError> {
         let mut guard = self.trades.lock().unwrap();
         let existing = guard
             .get_mut(trade_id.as_str())
@@ -467,29 +477,157 @@ impl TradeRepository for MockTradeRepository {
                 entity: "trade",
                 id: trade_id.to_string(),
             })?;
-        existing.outcome = update.outcome;
-        if let Some(shares) = update.shares {
-            existing.shares = shares;
+        if existing.state != TradeState::Intent {
+            drop(guard);
+            return Ok(false);
         }
-        if let Some(price) = update.price {
-            existing.price = price;
-        }
-        if let Some(cost_usd) = update.cost_usd {
-            existing.cost_usd = cost_usd;
-        }
-        if let Some(fee_usd) = update.fee_usd {
-            existing.fee_usd = fee_usd;
-        }
-        existing.order_id = update.order_id;
-        existing.tx_hash = update.tx_hash;
-        existing.net_profit_usd = update.net_profit_usd;
-        existing.latency_ms = update.latency_ms;
-        existing.error_message = update.error_message;
-        existing.confirmed_at = update.confirmed_at;
+        existing.state = TradeState::Submitted;
+        existing.submitted_at = Some(submitted_at);
         existing.updated_at = Utc::now();
-        let updated = existing.clone();
         drop(guard);
-        Ok(updated)
+        Ok(true)
+    }
+
+    async fn mark_observed(
+        &self,
+        trade_id: &TradeId,
+        observation: TradeObservation,
+    ) -> Result<(), StorageError> {
+        let mut guard = self.trades.lock().unwrap();
+        let existing = guard
+            .get_mut(trade_id.as_str())
+            .ok_or_else(|| StorageError::NotFound {
+                entity: "trade",
+                id: trade_id.to_string(),
+            })?;
+        if existing.state != TradeState::Submitted {
+            return Err(StorageError::StaleData(format!(
+                "trade {trade_id} was not in submitted state"
+            )));
+        }
+        existing.state = observation.state;
+        existing.business_outcome = observation.state.business_outcome();
+        existing.shares = observation.shares;
+        existing.price = observation.price;
+        existing.cost_usd = observation.cost_usd;
+        existing.fee_usd = observation.fee_usd;
+        existing.order_id = observation.order_id;
+        existing.tx_hash = observation.tx_hash;
+        existing.net_profit_usd = observation.net_profit_usd;
+        existing.latency_ms = observation.latency_ms;
+        existing.error_message = observation.error_message;
+        existing.confirmed_at = Some(observation.confirmed_at);
+        existing.updated_at = Utc::now();
+        drop(guard);
+        Ok(())
+    }
+
+    async fn claim_unprocessed(
+        &self,
+        limit: u64,
+        owner: &str,
+        claimed_at: chrono::DateTime<Utc>,
+        lease_expired_before: chrono::DateTime<Utc>,
+    ) -> Result<Vec<TradeInfo>, StorageError> {
+        let mut guard = self.trades.lock().unwrap();
+        let mut claimable: Vec<_> = guard
+            .values()
+            .filter(|trade| {
+                trade.state.is_unprocessed()
+                    || (trade.state.is_processing()
+                        && trade.post_trade_claimed_at < Some(lease_expired_before))
+            })
+            .cloned()
+            .collect();
+        claimable.sort_by_key(|trade| trade.created_at);
+        claimable.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
+
+        let mut claimed = Vec::with_capacity(claimable.len());
+        for trade in claimable {
+            let Some(existing) = guard.get_mut(trade.trade_id.as_str()) else {
+                continue;
+            };
+            existing.state = match existing.state {
+                TradeState::FillObserved | TradeState::FillProcessing => TradeState::FillProcessing,
+                TradeState::MissObserved | TradeState::MissProcessing => TradeState::MissProcessing,
+                TradeState::FailObserved | TradeState::FailProcessing => TradeState::FailProcessing,
+                state => state,
+            };
+            existing.business_outcome = existing.state.business_outcome();
+            existing.post_trade_claim_owner = Some(owner.to_owned());
+            existing.post_trade_claimed_at = Some(claimed_at);
+            existing.post_trade_attempts = existing.post_trade_attempts.saturating_add(1);
+            existing.updated_at = claimed_at;
+            claimed.push(existing.clone());
+        }
+        drop(guard);
+        Ok(claimed)
+    }
+
+    async fn advance_state(
+        &self,
+        trade_id: &TradeId,
+        from: TradeState,
+        to: TradeState,
+    ) -> Result<bool, StorageError> {
+        let mut guard = self.trades.lock().unwrap();
+        let existing = guard
+            .get_mut(trade_id.as_str())
+            .ok_or_else(|| StorageError::NotFound {
+                entity: "trade",
+                id: trade_id.to_string(),
+            })?;
+        if existing.state != from {
+            drop(guard);
+            return Ok(false);
+        }
+        existing.state = to;
+        existing.business_outcome = to.business_outcome();
+        existing.post_trade_claim_owner = None;
+        existing.post_trade_claimed_at = None;
+        existing.updated_at = Utc::now();
+        drop(guard);
+        Ok(true)
+    }
+
+    async fn mark_orphaned(&self, trade_id: &TradeId) -> Result<bool, StorageError> {
+        let mut guard = self.trades.lock().unwrap();
+        let existing = guard
+            .get_mut(trade_id.as_str())
+            .ok_or_else(|| StorageError::NotFound {
+                entity: "trade",
+                id: trade_id.to_string(),
+            })?;
+        if existing.state != TradeState::Submitted {
+            drop(guard);
+            return Ok(false);
+        }
+        existing.state = TradeState::Orphaned;
+        existing.business_outcome = Some(TradeBusinessOutcome::Failed);
+        existing.needs_reconcile = true;
+        existing.updated_at = Utc::now();
+        drop(guard);
+        Ok(true)
+    }
+
+    async fn find_stale_submitted(
+        &self,
+        older_than: chrono::DateTime<Utc>,
+        limit: u64,
+    ) -> Result<Vec<TradeInfo>, StorageError> {
+        let mut stale: Vec<_> = self
+            .trades
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|trade| {
+                trade.state == TradeState::Submitted && trade.submitted_at < Some(older_than)
+            })
+            .cloned()
+            .collect();
+        stale.sort_by_key(|trade| trade.submitted_at);
+        stale.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
+        Ok(stale)
     }
 
     async fn find_by_id(&self, trade_id: &TradeId) -> Result<Option<TradeInfo>, StorageError> {

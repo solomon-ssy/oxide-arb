@@ -5,20 +5,16 @@ use oxide_arb_algorithm::scorer::ScoredOpportunity;
 use oxide_arb_models::{
     domain::{
         calibration::{BucketKey, CalibrationSnapshot},
-        execution::PostTradeJob,
         latency::LatencyTrace,
         opportunity::{EndgameMeta, Opportunity},
-        scored_snapshot::ScoredOpportunitySnapshot,
     },
     enums::{
         calibration::{DurationBucket, PriceZone},
-        common::{ExecutionMode, MarketCategory, Side, StalenessLevel},
-        execution::ExecutionOutcome,
+        common::{MarketCategory, Side, StalenessLevel},
         opportunity::PayoutModel,
     },
     types::{
-        Bps, EventId, ExecutionId, MarketId, MicroProb, MicroScore, OpportunityId, Price, Shares,
-        TokenId, TradeId, Usd,
+        Bps, EventId, MarketId, MicroProb, MicroScore, OpportunityId, Price, Shares, TokenId, Usd,
     },
 };
 use rust_decimal_macros::dec;
@@ -91,30 +87,4 @@ pub fn sample_scored() -> Arc<ScoredOpportunity> {
         staleness_discount: MicroProb::ONE,
         trace: Arc::new(LatencyTrace::default()),
     })
-}
-
-#[must_use]
-pub fn minimal_post_trade_job(trade_id: &str) -> PostTradeJob {
-    let opp = sample_opportunity();
-    PostTradeJob {
-        trade_id: TradeId::new(trade_id),
-        execution_id: ExecutionId::generate(),
-        opportunity_id: opp.opportunity_id.clone(),
-        market_id: opp.market_id.clone(),
-        event_id: opp.event_id.clone(),
-        token_id: opp.token_id.clone(),
-        side: opp.side,
-        plan_shares: opp.shares,
-        entry_price: opp.entry_price,
-        execution_mode: ExecutionMode::Paper,
-        edge_bps: Some(opp.edge_bps),
-        detected_profit: Some(opp.expected_net_profit),
-        detected_at: opp.detected_at,
-        category: opp.category,
-        scored_snapshot: ScoredOpportunitySnapshot::from_opportunity(&opp),
-        outcome: ExecutionOutcome::Miss {
-            reason: "test".into(),
-            execution_mode: ExecutionMode::Paper,
-        },
-    }
 }

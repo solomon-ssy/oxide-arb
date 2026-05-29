@@ -1,6 +1,6 @@
 //! Audit lifecycle stage enums.
 
-use crate::enums::common::TradeOutcome;
+use crate::enums::common::TradeBusinessOutcome;
 use serde::{Deserialize, Serialize};
 use std::fmt::{self, Display, Formatter};
 
@@ -57,14 +57,11 @@ impl OpportunityAuditStage {
     }
 
     #[must_use]
-    pub const fn from_trade_outcome(outcome: TradeOutcome) -> Self {
+    pub const fn from_business_outcome(outcome: TradeBusinessOutcome) -> Self {
         match outcome {
-            TradeOutcome::Success => Self::Filled,
-            TradeOutcome::Miss => Self::Missed,
-            TradeOutcome::Pending
-            | TradeOutcome::Stale
-            | TradeOutcome::TradeFailed
-            | TradeOutcome::SystemError => Self::Failed,
+            TradeBusinessOutcome::Success => Self::Filled,
+            TradeBusinessOutcome::Miss => Self::Missed,
+            TradeBusinessOutcome::Failed => Self::Failed,
         }
     }
 }

@@ -41,7 +41,6 @@ use crate::{
         alert_dispatcher::AlertDispatcher, backpressure::BackpressurePolicy,
         metrics_hub::MetricsHub,
     },
-    outbox::in_memory::InMemoryEventStore,
     pipeline::{
         book_store::BookStore,
         data_pipeline::{DataPipeline, DataPipelineDeps},
@@ -82,10 +81,10 @@ use oxide_arb_repository::{
     clickhouse::ChTimeseriesRepository,
     postgres::{
         PgBlacklistPersistenceRepository, PgCalibrationRepository, PgEmergencyRepository,
-        PgEventRepository, PgMarketRepository, PgOutboxRepository, PgPositionRepository,
-        PgPotentialLossRepository, PgReconciliationRepository, PgReportRepository,
-        PgResolutionEventRepository, PgRiskAuditRepository, PgRiskStateRepository,
-        PgTradeRepository,
+        PgEventRepository, PgMarketRepository, PgPositionRepository, PgPotentialLossRepository,
+        PgReconciliationRepository, PgReportRepository, PgResolutionEventRepository,
+        PgRiskAuditRepository, PgRiskStateRepository, PgTradeRepository,
+        risk_fill::PgRiskFillRepository,
     },
     traits::{
         BlacklistPersistenceRepository, CalibrationRepository, PotentialLossRepository,
@@ -109,12 +108,14 @@ use std::{
     sync::{Arc, atomic::AtomicU32},
     time::Duration,
 };
+use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 struct BuildRepos {
     risk_state: Arc<PgRiskStateRepository>,
     blacklist: Arc<PgBlacklistPersistenceRepository>,
     audit: Arc<PgRiskAuditRepository>,
+    risk_fill: Arc<PgRiskFillRepository>,
     emergency: Arc<PgEmergencyRepository>,
     reconciliation: Arc<PgReconciliationRepository>,
     resolution_event: Arc<PgResolutionEventRepository>,
@@ -124,7 +125,6 @@ struct BuildRepos {
     event: Arc<PgEventRepository>,
     trade: Arc<PgTradeRepository>,
     report: Arc<PgReportRepository>,
-    outbox: Arc<PgOutboxRepository>,
     position: Arc<PgPositionRepository>,
 }
 
@@ -357,6 +357,7 @@ async fn connect_infra(
         risk_state: Arc::new(PgRiskStateRepository::new(db.clone())),
         blacklist: Arc::new(PgBlacklistPersistenceRepository::new(db.clone())),
         audit: Arc::new(PgRiskAuditRepository::new(db.clone())),
+        risk_fill: Arc::new(PgRiskFillRepository::new(db.clone())),
         emergency: Arc::new(PgEmergencyRepository::new(db.clone())),
         reconciliation: Arc::new(PgReconciliationRepository::new(db.clone())),
         resolution_event: Arc::new(PgResolutionEventRepository::new(db.clone())),
@@ -366,7 +367,6 @@ async fn connect_infra(
         event: Arc::new(PgEventRepository::new(db.clone())),
         trade: Arc::new(PgTradeRepository::new(db.clone())),
         report: Arc::new(PgReportRepository::new(db.clone())),
-        outbox: Arc::new(PgOutboxRepository::new(db.clone())),
         position: Arc::new(PgPositionRepository::new(db)),
     };
 
@@ -374,7 +374,6 @@ async fn connect_infra(
         metrics: Arc::clone(&metrics),
         shutdown,
         trade_repo: Arc::clone(&repos.trade),
-        outbox_repo: Arc::clone(&repos.outbox),
         timeseries,
     });
 
@@ -506,6 +505,7 @@ async fn wire_risk(
         infra.repos.risk_state.clone(),
         infra.repos.blacklist.clone(),
         infra.repos.audit.clone(),
+        infra.repos.risk_fill.clone(),
         infra.repos.emergency.clone(),
         infra.repos.reconciliation.clone(),
     ));
@@ -536,11 +536,8 @@ async fn wire_risk(
     );
 
     let fsm = Arc::new(ExecutionFSM::new(Arc::clone(&infra.metrics)));
-    let post_trade_spill = Arc::new(InMemoryEventStore::new());
     let backpressure = Arc::new(BackpressurePolicy::new(
         Arc::clone(&infra.metrics),
-        Some(Arc::clone(&infra.alerts)),
-        Arc::clone(&post_trade_spill),
         settings.execution.book_apply.shard_count.max(1),
     ));
 
@@ -740,7 +737,7 @@ fn wire_execution_loop(
     detection: &DetectionStack,
     shutdown: CancellationToken,
 ) -> ExecutionLoop {
-    let (outcome_tx, outcome_rx) = flume::bounded(1024);
+    let relay_notify = Arc::new(Notify::new());
     let (settlement_tx, settlement_rx) =
         flume::bounded(settings.settlement.lifecycle.channel_capacity);
     let capital = Arc::new(CapitalManager::new(
@@ -776,7 +773,7 @@ fn wire_execution_loop(
             settings.execution.timeout.dispatcher_timeout_ms,
             Arc::clone(&infra.metrics),
         ),
-        capital_manager: capital,
+        capital_manager: Arc::clone(&capital),
         risk_engine: Arc::clone(&risk.engine),
         risk_metrics: Arc::clone(&risk.metrics),
         fsm: Arc::clone(&risk.fsm),
@@ -785,9 +782,8 @@ fn wire_execution_loop(
         execution_mode: mode,
         trade_repo: infra.persistence.trade_repo.clone(),
         audit_writer: Arc::clone(&infra.persistence.audit_writer),
-        event_store: Arc::clone(&infra.persistence.event_store),
-        outcome_tx,
-        backpressure: Arc::clone(&risk.backpressure),
+        relay_notify: Arc::clone(&relay_notify),
+        metrics_state: Arc::clone(&risk.metrics_state),
     }));
 
     let inflight = Arc::new(AtomicU32::new(0));
@@ -825,7 +821,8 @@ fn wire_execution_loop(
         market_inflight,
         risk.engine.clone(),
         risk.fsm.clone(),
-        outcome_rx,
+        Arc::clone(&capital),
+        relay_notify,
     );
 
     ExecutionLoop {

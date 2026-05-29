@@ -88,7 +88,7 @@ pub enum TaskKind {
     Execution,
     ExecutionHeartbeat,
     Audit,
-    OutboxFlusher,
+    AnalyticsWriter,
     PositionPersistence,
     ReportScheduler,
 }
@@ -106,7 +106,7 @@ impl TaskKind {
                 ShutdownStage::Execution
             }
             Self::Audit => ShutdownStage::Audit,
-            Self::OutboxFlusher => ShutdownStage::Analytics,
+            Self::AnalyticsWriter => ShutdownStage::Analytics,
             Self::PositionPersistence => ShutdownStage::Persistence,
         }
     }
@@ -595,7 +595,7 @@ mod tests {
     #[test]
     fn strum_labels_match_prometheus_names() {
         assert_eq!(ShutdownStage::Execution.as_str(), "execution");
-        assert_eq!(TaskKind::OutboxFlusher.as_str(), "outbox_flusher");
+        assert_eq!(TaskKind::AnalyticsWriter.as_str(), "analytics_writer");
     }
 
     #[tokio::test]

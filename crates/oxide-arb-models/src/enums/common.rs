@@ -168,7 +168,11 @@ impl Display for StalenessLevel {
     }
 }
 
-/// Final outcome of a trade attempt.
+/// Success/miss/failed bucket derived from [`TradeState`].
+///
+/// This is not the trade's stored state: the `trade` row has exactly one state
+/// field, while this bucket is surfaced as a read-only PG generated column for
+/// risk accounting, reporting, and audit.
 #[derive(
     Debug,
     Clone,
@@ -184,36 +188,167 @@ impl Display for StalenessLevel {
 )]
 #[sea_orm(rs_type = "String", db_type = "Text")]
 #[serde(rename_all = "snake_case")]
-pub enum TradeOutcome {
-    /// Order submitted, awaiting exchange confirmation.
-    #[sea_orm(string_value = "pending")]
-    Pending,
-    /// Order filled, position opened, awaiting settlement.
+pub enum TradeBusinessOutcome {
+    /// Order filled, position opened.
     #[sea_orm(string_value = "success")]
     Success,
     /// FOK not filled (book moved or insufficient depth).
     #[sea_orm(string_value = "miss")]
     Miss,
-    /// Data was too old, trade rejected at validation.
-    #[sea_orm(string_value = "stale")]
-    Stale,
-    /// Order submitted but venue returned error.
-    #[sea_orm(string_value = "trade_failed")]
-    TradeFailed,
-    /// Internal error in our pipeline.
-    #[sea_orm(string_value = "system_error")]
-    SystemError,
+    /// Order failed/errored, or submitted-but-unconfirmed (orphaned).
+    #[sea_orm(string_value = "failed")]
+    Failed,
 }
 
-impl Display for TradeOutcome {
+impl Display for TradeBusinessOutcome {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Pending => write!(f, "pending"),
             Self::Success => write!(f, "success"),
             Self::Miss => write!(f, "miss"),
-            Self::Stale => write!(f, "stale"),
-            Self::TradeFailed => write!(f, "trade_failed"),
-            Self::SystemError => write!(f, "system_error"),
+            Self::Failed => write!(f, "failed"),
+        }
+    }
+}
+
+/// Durable trade lifecycle state machine — single source of truth on the `trade` row.
+///
+/// Replaces the former `phase × outcome` two-column model: one field makes illegal
+/// states unrepresentable (e.g. "processed but no outcome" cannot occur). The
+/// business-outcome classification (success/miss/failed) is derived via
+/// [`TradeState::business_outcome`] in Rust and a PG generated column for reporting.
+///
+/// Transitions:
+/// `Intent` → `Submitted` → (`FillObserved` | `MissObserved` | `FailObserved`)
+///   → (`FillProcessing` | `MissProcessing` | `FailProcessing`)
+///   → (`Settled` | `Missed` | `Failed`); stale `Submitted` → `Orphaned`.
+/// The `*Observed` states are unclaimed durable work. The `*Processing` states
+/// are lease-backed claims and may be reclaimed after lease expiry.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    EnumIter,
+    DeriveActiveEnum,
+    IntoActiveValue,
+)]
+#[sea_orm(rs_type = "String", db_type = "Text")]
+#[serde(rename_all = "snake_case")]
+pub enum TradeState {
+    /// Row inserted, order not yet submitted to the venue.
+    #[sea_orm(string_value = "intent")]
+    Intent,
+    /// Order signed and sent, venue outcome not yet observed (crash-orphan window).
+    #[sea_orm(string_value = "submitted")]
+    Submitted,
+    /// Fill observed; position + risk Fill accounting not yet applied (relay queue).
+    #[sea_orm(string_value = "fill_observed")]
+    FillObserved,
+    /// FOK miss observed; finalization not yet applied (relay queue).
+    #[sea_orm(string_value = "miss_observed")]
+    MissObserved,
+    /// Venue error/timeout observed; finalization not yet applied (relay queue).
+    #[sea_orm(string_value = "fail_observed")]
+    FailObserved,
+    /// Fill relay side-effects are currently claimed by a worker.
+    #[sea_orm(string_value = "fill_processing")]
+    FillProcessing,
+    /// Miss relay finalization is currently claimed by a worker.
+    #[sea_orm(string_value = "miss_processing")]
+    MissProcessing,
+    /// Failure relay finalization is currently claimed by a worker.
+    #[sea_orm(string_value = "fail_processing")]
+    FailProcessing,
+    /// Fill fully processed (position created, risk Fill accounted). Terminal.
+    #[sea_orm(string_value = "settled")]
+    Settled,
+    /// Miss fully processed. Terminal.
+    #[sea_orm(string_value = "missed")]
+    Missed,
+    /// Failure fully processed. Terminal.
+    #[sea_orm(string_value = "failed")]
+    Failed,
+    /// Submitted but never confirmed past the timeout — needs reconciliation. Terminal.
+    #[sea_orm(string_value = "orphaned")]
+    Orphaned,
+}
+
+impl TradeState {
+    /// States awaiting relay processing (outcome observed, side-effects not applied).
+    #[must_use]
+    pub const fn is_unprocessed(self) -> bool {
+        matches!(
+            self,
+            Self::FillObserved | Self::MissObserved | Self::FailObserved
+        )
+    }
+
+    /// States held by a relay worker lease.
+    #[must_use]
+    pub const fn is_processing(self) -> bool {
+        matches!(
+            self,
+            Self::FillProcessing | Self::MissProcessing | Self::FailProcessing
+        )
+    }
+
+    /// Terminal state reached once the relay processes the matching observed state.
+    #[must_use]
+    pub const fn processed_terminal(self) -> Option<Self> {
+        match self {
+            Self::FillObserved | Self::FillProcessing => Some(Self::Settled),
+            Self::MissObserved | Self::MissProcessing => Some(Self::Missed),
+            Self::FailObserved | Self::FailProcessing => Some(Self::Failed),
+            _ => None,
+        }
+    }
+
+    /// Business-outcome classification, or `None` while still in-flight.
+    #[must_use]
+    pub const fn business_outcome(self) -> Option<TradeBusinessOutcome> {
+        match self {
+            Self::FillObserved | Self::FillProcessing | Self::Settled => {
+                Some(TradeBusinessOutcome::Success)
+            }
+            Self::MissObserved | Self::MissProcessing | Self::Missed => {
+                Some(TradeBusinessOutcome::Miss)
+            }
+            Self::FailObserved | Self::FailProcessing | Self::Failed | Self::Orphaned => {
+                Some(TradeBusinessOutcome::Failed)
+            }
+            Self::Intent | Self::Submitted => None,
+        }
+    }
+
+    /// True once a fill has been observed (whether or not post-trade is applied).
+    #[must_use]
+    pub const fn is_success(self) -> bool {
+        matches!(
+            self,
+            Self::FillObserved | Self::FillProcessing | Self::Settled
+        )
+    }
+}
+
+impl Display for TradeState {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Intent => write!(f, "intent"),
+            Self::Submitted => write!(f, "submitted"),
+            Self::FillObserved => write!(f, "fill_observed"),
+            Self::MissObserved => write!(f, "miss_observed"),
+            Self::FailObserved => write!(f, "fail_observed"),
+            Self::FillProcessing => write!(f, "fill_processing"),
+            Self::MissProcessing => write!(f, "miss_processing"),
+            Self::FailProcessing => write!(f, "fail_processing"),
+            Self::Settled => write!(f, "settled"),
+            Self::Missed => write!(f, "missed"),
+            Self::Failed => write!(f, "failed"),
+            Self::Orphaned => write!(f, "orphaned"),
         }
     }
 }

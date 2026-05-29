@@ -2,17 +2,17 @@
 //!
 //! - `TradeInfo` is the 1:1 DB projection returned by `TradeRepository`.
 //! - `PostTradeInput` is the risk engine's view of a completed trade.
-//! - `NewTrade` / `UpdateTradeOutcome` are write DTOs.
+//! - `NewTrade` / `TradeObservation` are write DTOs.
 
 use crate::{
     domain::SettledPositionStats,
     enums::{
-        common::{ExecutionMode, Side, TradeOutcome},
+        common::{ExecutionMode, MarketCategory, Side, TradeBusinessOutcome, TradeState},
         report::ReportSchemaVersion,
     },
     types::{
-        Bps, EventId, ExecutionId, MarketId, OpportunityId, OrderId, Price, Shares, TokenId,
-        TradeId, Usd,
+        Bps, EventId, ExecutionId, MarketId, OpportunityId, OrderId, Price, ReservationId, Shares,
+        TokenId, TradeId, Usd,
     },
 };
 use chrono::{DateTime, NaiveDate, Utc};
@@ -27,6 +27,7 @@ use serde::{Deserialize, Serialize};
 pub struct TradeInfo {
     pub trade_id: TradeId,
     pub execution_id: ExecutionId,
+    pub reservation_id: ReservationId,
     pub opportunity_id: OpportunityId,
     pub market_id: MarketId,
     pub event_id: EventId,
@@ -41,20 +42,33 @@ pub struct TradeInfo {
     pub net_profit_usd: Option<Usd>,
     pub order_id: Option<OrderId>,
     pub tx_hash: Option<String>,
-    pub outcome: TradeOutcome,
+    /// Lifecycle state machine — single source of truth for the trade row.
+    pub state: TradeState,
+    /// Read-only business-outcome bucket derived from `state` (PG generated column).
+    pub business_outcome: Option<TradeBusinessOutcome>,
+    /// Frozen scored-opportunity snapshot captured at dispatch (post-trade audit).
+    pub scored_snapshot: serde_json::Value,
+    pub category: MarketCategory,
+    pub needs_reconcile: bool,
+    pub post_trade_claim_owner: Option<String>,
+    pub post_trade_claimed_at: Option<DateTime<Utc>>,
+    pub post_trade_attempts: i32,
     pub execution_mode: ExecutionMode,
     pub latency_ms: Option<i32>,
     pub error_message: Option<String>,
+    pub submitted_at: Option<DateTime<Utc>>,
     pub confirmed_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
 
 info_from_model!(TradeInfo, crate::entities::trade::Model, {
-    trade_id, execution_id, opportunity_id, market_id, event_id, token_id,
+    trade_id, execution_id, reservation_id, opportunity_id, market_id, event_id, token_id,
     side, shares, price, cost_usd, fee_usd, detected_edge_bps,
-    detected_profit_usd, net_profit_usd, order_id, tx_hash, outcome,
-    execution_mode, latency_ms, error_message, confirmed_at,
+    detected_profit_usd, net_profit_usd, order_id, tx_hash, state,
+    business_outcome, scored_snapshot, category, needs_reconcile,
+    post_trade_claim_owner, post_trade_claimed_at, post_trade_attempts,
+    execution_mode, latency_ms, error_message, submitted_at, confirmed_at,
     created_at, updated_at,
 });
 
@@ -68,7 +82,7 @@ pub struct PostTradeInput {
     pub trade_id: TradeId,
     pub market_id: MarketId,
     pub token_id: TokenId,
-    pub outcome: TradeOutcome,
+    pub outcome: TradeBusinessOutcome,
     pub cost_usd: Usd,
     pub fee_usd: Usd,
     pub net_profit_usd: Option<Usd>,
@@ -79,70 +93,49 @@ pub struct PostTradeInput {
 impl PostTradeInput {
     #[must_use]
     pub fn is_success(&self) -> bool {
-        self.outcome == TradeOutcome::Success
+        self.outcome == TradeBusinessOutcome::Success
     }
 
     #[must_use]
     pub fn is_miss(&self) -> bool {
-        self.outcome == TradeOutcome::Miss
+        self.outcome == TradeBusinessOutcome::Miss
     }
 
+    /// Build the risk-engine input from a persisted trade row.
+    ///
+    /// Returns `None` for in-flight rows (`Intent`/`Submitted`) that have no
+    /// business outcome yet — the relay only calls this for `*_observed` rows.
     #[must_use]
-    pub fn is_system_error(&self) -> bool {
-        self.outcome == TradeOutcome::SystemError
-    }
-
-    #[must_use]
-    pub fn is_trade_failed(&self) -> bool {
-        self.outcome == TradeOutcome::TradeFailed
-    }
-
-    #[must_use]
-    pub fn is_stale(&self) -> bool {
-        self.outcome == TradeOutcome::Stale
-    }
-
-    #[must_use]
-    pub const fn is_failure(&self) -> bool {
-        matches!(
-            self.outcome,
-            TradeOutcome::Miss
-                | TradeOutcome::Stale
-                | TradeOutcome::TradeFailed
-                | TradeOutcome::SystemError
-        )
-    }
-}
-
-impl From<&TradeInfo> for PostTradeInput {
-    fn from(t: &TradeInfo) -> Self {
-        Self {
+    pub fn from_trade_info(t: &TradeInfo) -> Option<Self> {
+        Some(Self {
             trade_id: t.trade_id.clone(),
             market_id: t.market_id.clone(),
             token_id: t.token_id.clone(),
-            outcome: t.outcome,
+            outcome: t.business_outcome?,
             cost_usd: t.cost_usd,
             fee_usd: t.fee_usd,
             net_profit_usd: t.net_profit_usd,
             shares: t.shares,
             entry_price: t.price,
-        }
+        })
     }
 }
 
 // ── Repository Write DTOs ────────────────────────────────────────────
 
-/// All fields required to record a new trade at creation time.
+/// All fields required to record a new trade at creation time (state = `Intent`).
 ///
 /// Derives `DeriveIntoActiveModel` — calling `.into_active_model()` produces
 /// an `ActiveModel` with these fields `Set(...)` and all others `NotSet`.
-/// The entity's `ActiveModelBehavior::before_save` fills in `outcome`,
-/// timestamps, and nullable defaults automatically.
+/// The entity's `ActiveModelBehavior::before_save` fills in `state` (`Intent`),
+/// `needs_reconcile`, timestamps, and nullable defaults automatically;
+/// `business_outcome` is computed by a PG generated column.
 #[derive(Debug, Clone, DeriveIntoActiveModel)]
 #[sea_orm(active_model = "super::super::entities::trade::ActiveModel")]
 pub struct NewTrade {
     pub trade_id: TradeId,
     pub execution_id: ExecutionId,
+    pub reservation_id: ReservationId,
     pub opportunity_id: OpportunityId,
     pub market_id: MarketId,
     pub event_id: EventId,
@@ -154,23 +147,30 @@ pub struct NewTrade {
     pub fee_usd: Usd,
     pub detected_edge_bps: Option<Bps>,
     pub detected_profit_usd: Option<Usd>,
+    /// Frozen scored-opportunity snapshot, captured at dispatch.
+    pub scored_snapshot: serde_json::Value,
+    pub category: MarketCategory,
     pub execution_mode: ExecutionMode,
 }
 
-/// Fields that can be updated after trade creation (execution result).
+/// Venue-result observation written when an order outcome becomes known.
+///
+/// Transitions the row to one of the `*_observed` states and records the raw
+/// execution economics. The relay later applies side-effects and advances to a
+/// terminal state. `state` must be one of `FillObserved`/`MissObserved`/`FailObserved`.
 #[derive(Debug, Clone)]
-pub struct UpdateTradeOutcome {
-    pub outcome: TradeOutcome,
-    pub shares: Option<Shares>,
-    pub price: Option<Price>,
-    pub cost_usd: Option<Usd>,
-    pub fee_usd: Option<Usd>,
+pub struct TradeObservation {
+    pub state: TradeState,
+    pub shares: Shares,
+    pub price: Price,
+    pub cost_usd: Usd,
+    pub fee_usd: Usd,
     pub order_id: Option<OrderId>,
     pub tx_hash: Option<String>,
     pub net_profit_usd: Option<Usd>,
     pub latency_ms: Option<i32>,
     pub error_message: Option<String>,
-    pub confirmed_at: Option<DateTime<Utc>>,
+    pub confirmed_at: DateTime<Utc>,
 }
 
 // ── Reporting ────────────────────────────────────────────────────────

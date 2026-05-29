@@ -1,4 +1,9 @@
-//! Execution pipeline orchestration — validate → risk → size → reserve → dispatch → audit.
+//! Execution pipeline orchestration — validate → risk → size → reserve → submit → observe.
+//!
+//! The hot path persists the venue outcome onto the durable `trade` row
+//! (`submitted` → `*_observed`) and rings the post-trade relay. All derived
+//! bookkeeping (position, risk accounting, audit) is applied asynchronously and
+//! idempotently by [`crate::post_trade`], replayed from the row on crash.
 
 use crate::{
     bridge::risk_metrics::CoreRiskMetrics,
@@ -7,44 +12,30 @@ use crate::{
         fsm::ExecutionFSM, market_inflight::MarketInFlightRegistry, plan_builder::PlanBuilder,
         validator::Validator,
     },
-    observability::{
-        alert_dispatcher::AlertDispatcher, backpressure::BackpressurePolicy,
-        execution_audit::ExecutionAuditWriter, metrics_hub::MetricsHub,
-    },
-    outbox::{event_store::EventStore, in_memory::SharedInMemoryEventStore},
-    service::risk_metrics::{RiskMetricsRefreshService, RiskMetricsState},
+    observability::{execution_audit::ExecutionAuditWriter, metrics_hub::MetricsHub},
+    service::risk_metrics::RiskMetricsState,
 };
 use chrono::Utc;
 use oxide_arb_algorithm::scorer::ScoredOpportunity;
-use oxide_arb_error::OxideError;
 use oxide_arb_models::{
     domain::{
         execution::{
-            ExecutionOutcomeSummary, ExecutionPlan, ExecutionResult, PostTradeJob,
-            ReservationHandle, ResolvedOutcome,
+            ExecutionOutcomeSummary, ExecutionPlan, ExecutionResult, ReservationHandle,
+            ResolvedOutcome,
         },
         opportunity::Opportunity,
-        position::NewPosition,
         risk::ProbabilityInput,
         scored_snapshot::ScoredOpportunitySnapshot,
         trade::NewTrade,
     },
-    enums::{
-        common::{ExecutionMode, RedeemStatus, TradeOutcome},
-        execution::ExecutionOutcome,
-        outbox::{OutboxAggregateType, OutboxEventType},
-        risk::TradeAccountingPhase,
-    },
-    types::{AggregateId, ExecutionId, TradeId, Usd},
+    enums::{common::ExecutionMode, execution::ExecutionOutcome},
+    types::{ExecutionId, TradeId, Usd},
 };
-use oxide_arb_repository::{
-    postgres::PgTradeRepository,
-    traits::{PositionRepository, TradeRepository},
-};
+use oxide_arb_repository::{postgres::PgTradeRepository, traits::TradeRepository};
 use oxide_arb_risk::{engine::RiskEngine, types::ReportMode};
 use rust_decimal_macros::dec;
 use std::{fmt::Display, sync::Arc, time::Instant};
-use tokio_util::sync::CancellationToken;
+use tokio::sync::Notify;
 
 /// Dependencies injected into [`ExecutionPipeline`].
 pub struct ExecutionPipelineDeps<R: TradeRepository + Send + Sync + 'static = PgTradeRepository> {
@@ -61,24 +52,9 @@ pub struct ExecutionPipelineDeps<R: TradeRepository + Send + Sync + 'static = Pg
     pub execution_mode: ExecutionMode,
     pub trade_repo: Arc<R>,
     pub audit_writer: Arc<ExecutionAuditWriter>,
-    pub event_store: Arc<dyn EventStore>,
-    pub outcome_tx: flume::Sender<PostTradeJob>,
-    pub backpressure: Arc<BackpressurePolicy>,
-}
-
-/// Dependencies for the post-trade outcome drain task.
-pub struct PostTradeDrainDeps<R: TradeRepository + Send + Sync + 'static> {
-    pub risk_engine: Arc<RiskEngine>,
-    pub risk_metrics: Arc<CoreRiskMetrics>,
-    pub fsm: Arc<ExecutionFSM>,
-    pub trade_repo: Arc<R>,
-    pub position_repo: Arc<dyn PositionRepository>,
-    pub audit_writer: Arc<ExecutionAuditWriter>,
-    pub alerts: Arc<AlertDispatcher>,
-    pub post_trade_spill: SharedInMemoryEventStore,
+    /// Rung after each durable `*_observed` write to wake the post-trade relay.
+    pub relay_notify: Arc<Notify>,
     pub metrics_state: Arc<RiskMetricsState>,
-    pub metrics_refresh: Option<Arc<RiskMetricsRefreshService>>,
-    pub execution_mode: ExecutionMode,
 }
 
 pub struct ExecutionPipeline<R: TradeRepository + Send + Sync + 'static = PgTradeRepository> {
@@ -95,9 +71,8 @@ pub struct ExecutionPipeline<R: TradeRepository + Send + Sync + 'static = PgTrad
     execution_mode: ExecutionMode,
     trade_repo: Arc<R>,
     audit_writer: Arc<ExecutionAuditWriter>,
-    event_store: Arc<dyn EventStore>,
-    outcome_tx: flume::Sender<PostTradeJob>,
-    backpressure: Arc<BackpressurePolicy>,
+    relay_notify: Arc<Notify>,
+    metrics_state: Arc<RiskMetricsState>,
 }
 
 struct PreparedDispatch {
@@ -105,26 +80,6 @@ struct PreparedDispatch {
     plan: ExecutionPlan,
     reservation: ReservationHandle,
     snapshot: ScoredOpportunitySnapshot,
-}
-
-struct PostTradeJobCtx<'a, R> {
-    risk_engine: &'a RiskEngine,
-    metrics: &'a CoreRiskMetrics,
-    fsm: &'a ExecutionFSM,
-    trade_repo: &'a R,
-    position_repo: &'a dyn PositionRepository,
-    audit_writer: &'a ExecutionAuditWriter,
-    metrics_state: &'a RiskMetricsState,
-    metrics_refresh: Option<&'a RiskMetricsRefreshService>,
-    execution_mode: ExecutionMode,
-}
-
-struct PostTradeEnqueueInput<'a> {
-    opp: &'a Opportunity,
-    plan: &'a ExecutionPlan,
-    trade_id: TradeId,
-    scored_snapshot: ScoredOpportunitySnapshot,
-    outcome: ExecutionOutcome,
 }
 
 impl<R: TradeRepository + Send + Sync + 'static> ExecutionPipeline<R> {
@@ -143,58 +98,8 @@ impl<R: TradeRepository + Send + Sync + 'static> ExecutionPipeline<R> {
             execution_mode: deps.execution_mode,
             trade_repo: deps.trade_repo,
             audit_writer: deps.audit_writer,
-            event_store: deps.event_store,
-            outcome_tx: deps.outcome_tx,
-            backpressure: deps.backpressure,
-        }
-    }
-
-    pub const fn backpressure(&self) -> &Arc<BackpressurePolicy> {
-        &self.backpressure
-    }
-
-    pub fn post_trade_spill(&self) -> &SharedInMemoryEventStore {
-        self.backpressure.post_trade_spill()
-    }
-
-    pub async fn spawn_outcome_drain(
-        rx: flume::Receiver<PostTradeJob>,
-        deps: PostTradeDrainDeps<R>,
-        shutdown: CancellationToken,
-    ) -> Result<(), OxideError> {
-        let ctx = PostTradeJobCtx {
-            risk_engine: deps.risk_engine.as_ref(),
-            metrics: deps.risk_metrics.as_ref(),
-            fsm: deps.fsm.as_ref(),
-            trade_repo: deps.trade_repo.as_ref(),
-            position_repo: deps.position_repo.as_ref(),
-            audit_writer: deps.audit_writer.as_ref(),
-            metrics_state: deps.metrics_state.as_ref(),
-            metrics_refresh: deps.metrics_refresh.as_deref(),
-            execution_mode: deps.execution_mode,
-        };
-        loop {
-            while let Some(job) = deps.post_trade_spill.try_pop_post_trade() {
-                process_post_trade_job(&ctx, job).await;
-            }
-
-            tokio::select! {
-                () = shutdown.cancelled() => {
-                    while let Ok(job) = rx.try_recv() {
-                        process_post_trade_job(&ctx, job).await;
-                    }
-                    for job in deps.post_trade_spill.drain_post_trade_jobs() {
-                        process_post_trade_job(&ctx, job).await;
-                    }
-                    return Ok(());
-                }
-                job = rx.recv_async() => {
-                    match job {
-                        Ok(job) => process_post_trade_job(&ctx, job).await,
-                        Err(_) => return Ok(()),
-                    }
-                }
-            }
+            relay_notify: deps.relay_notify,
+            metrics_state: deps.metrics_state,
         }
     }
 
@@ -220,6 +125,28 @@ impl<R: TradeRepository + Send + Sync + 'static> ExecutionPipeline<R> {
             Err(result) => return result,
         };
 
+        // Persist "order submitted, outcome unknown" before the venue round-trip so a
+        // crash leaves a `submitted` row the orphan scan can reconcile (fail-closed).
+        match self
+            .trade_repo
+            .mark_submitted(&prepared.trade_id, Utc::now())
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::error!(trade_id = %prepared.trade_id, "trade was not in intent state");
+                let _ = self.capital_manager.release_sync(&prepared.reservation);
+                self.fsm.enter_emergency("mark submitted skipped");
+                return Self::reject("submit_persist", "trade was not in intent state");
+            }
+            Err(error) => {
+                tracing::error!(%error, trade_id = %prepared.trade_id, "mark submitted failed");
+                let _ = self.capital_manager.release_sync(&prepared.reservation);
+                self.fsm.enter_emergency("mark submitted failed");
+                return Self::reject("submit_persist", error);
+            }
+        }
+
         let mut trace = Arc::clone(&scored.trace);
         {
             let trace_mut = Arc::make_mut(&mut trace);
@@ -237,14 +164,7 @@ impl<R: TradeRepository + Send + Sync + 'static> ExecutionPipeline<R> {
 
         self.settle_reservation(&outcome, &prepared.reservation);
         let outcome_summary = ExecutionOutcomeSummary::from_outcome(&outcome);
-        self.enqueue_post_trade(PostTradeEnqueueInput {
-            opp,
-            plan: &prepared.plan,
-            trade_id: prepared.trade_id,
-            scored_snapshot: prepared.snapshot,
-            outcome,
-        })
-        .await;
+        self.observe_outcome(&prepared, &outcome).await;
         timer.observe_duration();
         ExecutionResult {
             outcome_summary: Some(outcome_summary),
@@ -377,9 +297,18 @@ impl<R: TradeRepository + Send + Sync + 'static> ExecutionPipeline<R> {
         let plan = self
             .plan_builder
             .build(opp, approved_size, &reservation, execution_id);
-        let pending_trade = build_pending_trade(&trade_id, &plan, opp, self.execution_mode);
+        let pending_trade =
+            match build_pending_trade(&trade_id, &plan, opp, &snapshot, self.execution_mode) {
+                Ok(trade) => trade,
+                Err(e) => {
+                    let _ = self.capital_manager.release_sync(&reservation);
+                    self.fsm
+                        .enter_emergency("scored snapshot serialization failed");
+                    return Err(Self::reject("trade_persist", e));
+                }
+            };
         if let Err(e) = self.trade_repo.create(pending_trade).await {
-            tracing::error!(error = %e, trade_id = %trade_id, "trade pending insert failed");
+            tracing::error!(error = %e, trade_id = %trade_id, "trade intent insert failed");
             let _ = self.capital_manager.release_sync(&reservation);
             self.audit_writer.write_rejection(
                 &plan.execution_id,
@@ -423,58 +352,26 @@ impl<R: TradeRepository + Send + Sync + 'static> ExecutionPipeline<R> {
         }
     }
 
-    async fn enqueue_post_trade(&self, input: PostTradeEnqueueInput<'_>) {
-        let PostTradeEnqueueInput {
-            opp,
-            plan,
-            trade_id,
-            scored_snapshot,
+    /// Durably record the venue outcome on the trade row, then wake the relay.
+    async fn observe_outcome(&self, prepared: &PreparedDispatch, outcome: &ExecutionOutcome) {
+        let resolved = ResolvedOutcome::resolve(
             outcome,
-        } = input;
-        let job = PostTradeJob {
-            trade_id,
-            execution_id: plan.execution_id.clone(),
-            opportunity_id: opp.opportunity_id.clone(),
-            market_id: opp.market_id.clone(),
-            event_id: opp.event_id.clone(),
-            token_id: opp.token_id.clone(),
-            side: opp.side,
-            plan_shares: plan.shares,
-            entry_price: opp.entry_price,
-            execution_mode: self.execution_mode,
-            edge_bps: Some(opp.edge_bps),
-            detected_profit: Some(opp.expected_net_profit),
-            detected_at: opp.detected_at,
-            category: plan.category,
-            scored_snapshot,
-            outcome,
-        };
-        let payload = match serde_json::to_value(&job) {
-            Ok(payload) => payload,
-            Err(error) => {
-                tracing::error!(%error, trade_id = %job.trade_id, "post-trade payload serialization failed");
-                self.fsm
-                    .enter_emergency("post-trade payload serialization failed");
-                return;
-            }
-        };
+            prepared.plan.limit_price,
+            prepared.snapshot.resolution_prob,
+        );
         if let Err(error) = self
-            .event_store
-            .append(
-                OutboxAggregateType::Trade,
-                AggregateId::new(job.trade_id.as_str()),
-                OutboxEventType::TradeOutcomeObserved,
-                &payload,
-            )
+            .trade_repo
+            .mark_observed(&prepared.trade_id, resolved.to_observation())
             .await
         {
-            tracing::error!(%error, trade_id = %job.trade_id, "post-trade outbox append failed");
-            self.fsm.enter_emergency("post-trade outbox append failed");
+            tracing::error!(%error, trade_id = %prepared.trade_id, "mark observed failed");
+            self.fsm.enter_emergency("mark observed failed");
+            return;
         }
-        if let Err(send_err) = self.outcome_tx.try_send(job) {
-            self.backpressure
-                .on_post_trade_channel_full(send_err.into_inner());
-        }
+        self.metrics_state.mark_stale();
+        // Near-instant happy-path processing; the relay's periodic poll is the
+        // crash-recovery safety net if this wake is missed.
+        self.relay_notify.notify_one();
     }
 
     pub const fn execution_mode(&self) -> ExecutionMode {
@@ -507,11 +404,13 @@ fn build_pending_trade(
     trade_id: &TradeId,
     plan: &ExecutionPlan,
     opp: &Opportunity,
+    snapshot: &ScoredOpportunitySnapshot,
     execution_mode: ExecutionMode,
-) -> NewTrade {
-    NewTrade {
+) -> Result<NewTrade, serde_json::Error> {
+    Ok(NewTrade {
         trade_id: trade_id.clone(),
         execution_id: plan.execution_id.clone(),
+        reservation_id: plan.reservation_id.clone(),
         opportunity_id: opp.opportunity_id.clone(),
         market_id: opp.market_id.clone(),
         event_id: opp.event_id.clone(),
@@ -523,83 +422,8 @@ fn build_pending_trade(
         fee_usd: plan.estimated_fee,
         detected_edge_bps: Some(opp.edge_bps),
         detected_profit_usd: Some(opp.expected_net_profit),
+        scored_snapshot: serde_json::to_value(snapshot)?,
+        category: plan.category,
         execution_mode,
-    }
-}
-
-async fn process_post_trade_job<R: TradeRepository>(
-    ctx: &PostTradeJobCtx<'_, R>,
-    job: PostTradeJob,
-) {
-    let resolved = ResolvedOutcome::resolve(&job);
-
-    if let Err(e) = ctx
-        .trade_repo
-        .update(&job.trade_id, resolved.to_trade_update())
-        .await
-    {
-        tracing::error!(error = %e, trade_id = %job.trade_id, "trade outcome update failed");
-        ctx.fsm.enter_emergency("trade outcome update failed");
-        return;
-    }
-
-    ctx.audit_writer.write_terminal(&job, &resolved);
-
-    if !apply_post_trade_risk(ctx, &job, &resolved).await {
-        return;
-    }
-
-    if resolved.trade_outcome == TradeOutcome::Success {
-        let position = NewPosition {
-            trade_id: job.trade_id.clone(),
-            market_id: job.market_id.clone(),
-            token_id: job.token_id.clone(),
-            side: job.side,
-            shares: resolved.filled_shares,
-            avg_entry_price: resolved.avg_fill_price,
-            total_cost_usd: resolved.cost_usd,
-            total_fees_usd: resolved.fee_usd,
-            redeem_status: RedeemStatus::initial_for_mode(ctx.execution_mode),
-        };
-
-        if let Err(error) = ctx.position_repo.create(position).await {
-            tracing::error!(
-                %error,
-                trade_id = %job.trade_id,
-                market_id = %job.market_id,
-                "position creation failed after fill"
-            );
-            ctx.fsm.enter_emergency("position create failed");
-            return;
-        }
-
-        ctx.risk_engine.refresh_positions(ctx.metrics);
-    }
-
-    ctx.metrics_state.mark_stale();
-    if let Some(refresher) = ctx.metrics_refresh {
-        if let Err(error) = refresher.refresh().await {
-            tracing::warn!(%error, "post-trade metrics refresh failed");
-        }
-    }
-}
-
-async fn apply_post_trade_risk<R: TradeRepository>(
-    ctx: &PostTradeJobCtx<'_, R>,
-    job: &PostTradeJob,
-    resolved: &ResolvedOutcome,
-) -> bool {
-    let fill_input = resolved.to_risk_input(job);
-
-    if let Err(e) = ctx
-        .risk_engine
-        .on_trade_result(TradeAccountingPhase::Fill, &fill_input, ctx.metrics)
-        .await
-    {
-        tracing::error!(error = %e, "post-trade fill accounting failed");
-        ctx.fsm.enter_emergency("post-trade fill persist failed");
-        return false;
-    }
-
-    true
+    })
 }

@@ -8,7 +8,6 @@ use oxide_arb_core::{
         backpressure::{BackpressureAction, BackpressurePolicy},
         metrics_hub::MetricsHub,
     },
-    outbox::in_memory::InMemoryEventStore,
     pipeline::{book_store::BookStore, market_registry::MarketRegistry},
 };
 use oxide_arb_models::{
@@ -145,12 +144,7 @@ async fn coalescer_pair_complete_flushes_immediately() {
 fn backpressure_book_coalesce_does_not_halt() {
     let metrics = Arc::new(MetricsHub::new());
     let fsm = Arc::new(ExecutionFSM::new(Arc::clone(&metrics)));
-    let bp = BackpressurePolicy::new(
-        Arc::clone(&metrics),
-        None,
-        Arc::new(InMemoryEventStore::new()),
-        1,
-    );
+    let bp = BackpressurePolicy::new(Arc::clone(&metrics), 1);
 
     let event = PipelineEvent::PriceDelta(PriceDeltaCmd {
         asset_id: TokenId::new("t1"),

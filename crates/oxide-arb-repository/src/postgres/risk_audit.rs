@@ -1,4 +1,6 @@
-use super::orm::{DatabaseConnection, EntityTrait, IntoActiveModel, TransactionTrait};
+use super::orm::{
+    ConnectionTrait, DatabaseConnection, EntityTrait, IntoActiveModel, TransactionTrait,
+};
 use crate::traits::RiskAuditRepository;
 use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::{domain::NewRiskAuditEvent, entities::risk_audit_event::Entity};
@@ -13,14 +15,22 @@ impl PgRiskAuditRepository {
     }
 }
 
+/// Append one audit event on any connection or transaction handle.
+pub(crate) async fn do_create(
+    db: &impl ConnectionTrait,
+    event: NewRiskAuditEvent,
+) -> Result<(), StorageError> {
+    Entity::insert(event.into_active_model())
+        .exec(db)
+        .await
+        .map_err(StorageError::from)?;
+    Ok(())
+}
+
 #[async_trait::async_trait]
 impl RiskAuditRepository for PgRiskAuditRepository {
     async fn create(&self, event: NewRiskAuditEvent) -> Result<(), StorageError> {
-        Entity::insert(event.into_active_model())
-            .exec(&self.db)
-            .await
-            .map_err(StorageError::from)?;
-        Ok(())
+        do_create(&self.db, event).await
     }
 
     async fn create_batch(&self, events: Vec<NewRiskAuditEvent>) -> Result<(), StorageError> {

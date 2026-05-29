@@ -4,6 +4,7 @@
 //! `oxide-arb-risk` does **not** implement them — implementations
 //! live in `oxide-arb-core` (Phase 4.2) or test mocks.
 
+use chrono::{DateTime, Utc};
 use oxide_arb_error::{OxideResult, reservation::ReservationError};
 use oxide_arb_models::{
     domain::{
@@ -12,14 +13,24 @@ use oxide_arb_models::{
         position::PositionInfo,
         potential_loss::PotentialLossInfo,
         risk::{
-            NewEmergencySnapshot, NewReconciliationReport, NewRiskAuditEvent, RiskStateInfo,
-            UpsertRiskEngineState,
+            FillCommit, NewEmergencySnapshot, NewReconciliationReport, NewRiskAuditEvent,
+            RiskStateInfo, UpsertRiskEngineState,
         },
     },
     enums::common::Side,
-    types::{LedgerId, MarketId, ReservationId, Usd},
+    types::{LedgerId, MarketId, ReservationId, TradeId, Usd},
 };
 use std::{sync::Arc, time::Duration};
+
+pub enum FillClaim<'a> {
+    Claimed(Box<dyn RiskFillCommitGuard + Send + 'a>),
+    AlreadyApplied,
+}
+
+#[async_trait::async_trait]
+pub trait RiskFillCommitGuard: Send {
+    async fn commit(self: Box<Self>, commit: FillCommit) -> OxideResult<()>;
+}
 
 /// Pre-loaded metrics for a single pre-trade decision (one batch read).
 #[derive(Debug, Clone, Copy)]
@@ -166,6 +177,16 @@ pub trait RiskPersistence: Send + Sync + 'static {
     /// Load the most recent state snapshot (startup recovery).
     async fn load_state(&self) -> OxideResult<RiskStateInfo>;
 
+    /// Claim a trade's risk Fill marker in a transaction.
+    ///
+    /// The returned guard owns the open transaction. Dropping it rolls the
+    /// marker back; committing it makes marker + write-set durable atomically.
+    async fn begin_fill<'a>(
+        &'a self,
+        trade_id: &TradeId,
+        applied_at: DateTime<Utc>,
+    ) -> OxideResult<FillClaim<'a>>;
+
     /// Upsert a blacklist entry (add or update).
     async fn upsert_blacklist(&self, entry: UpsertBlacklistEntry) -> OxideResult<()>;
 
@@ -270,6 +291,14 @@ impl RiskPersistence for Arc<dyn RiskPersistence> {
 
     async fn load_state(&self) -> OxideResult<RiskStateInfo> {
         (**self).load_state().await
+    }
+
+    async fn begin_fill<'a>(
+        &'a self,
+        trade_id: &TradeId,
+        applied_at: DateTime<Utc>,
+    ) -> OxideResult<FillClaim<'a>> {
+        (**self).begin_fill(trade_id, applied_at).await
     }
 
     async fn upsert_blacklist(&self, entry: UpsertBlacklistEntry) -> OxideResult<()> {

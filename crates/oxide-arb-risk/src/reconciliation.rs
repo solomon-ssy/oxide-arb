@@ -44,7 +44,13 @@ impl LedgerReconciler {
     ) -> OxideResult<ReconciliationReport> {
         let (ext_available, ext_locked) = querier.query_balance().await?;
         let ext_positions = querier.query_positions().await?;
-        Ok(self.reconcile_fetched(metrics, ext_available, ext_locked, &ext_positions))
+        Ok(self.reconcile_fetched(
+            metrics,
+            metrics.cached_balance(),
+            ext_available,
+            ext_locked,
+            &ext_positions,
+        ))
     }
 
     /// Reconcile using pre-fetched external data — **zero additional I/O**.
@@ -54,13 +60,13 @@ impl LedgerReconciler {
     pub fn reconcile_fetched(
         &self,
         metrics: &dyn RiskMetrics,
+        internal_balance: Usd,
         ext_available: Usd,
         ext_locked: Usd,
         ext_positions: &[(MarketId, Usd)],
     ) -> ReconciliationReport {
         let start = Instant::now();
 
-        let internal_balance = metrics.cached_balance();
         let external_balance = ext_available + ext_locked;
         let internal_exposure = metrics.total_exposure();
         let reserved = metrics.reserved_usd();

@@ -13,6 +13,6 @@ pub mod execution;
 pub mod exposure;
 pub mod infra;
 pub mod observability;
-pub mod outbox;
 pub mod pipeline;
+pub mod post_trade;
 pub mod service;

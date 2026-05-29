@@ -1,5 +1,8 @@
 //! Risk engine config, metrics, and persistence mocks for integration tests.
 
+use std::{collections::HashSet, mem::take, sync::Mutex};
+
+use chrono::{DateTime, Utc};
 use oxide_arb_error::OxideResult;
 use oxide_arb_models::{
     config::{KellyConfig, RiskConfig},
@@ -7,16 +10,15 @@ use oxide_arb_models::{
         blacklist::{BlacklistInfo, UpsertBlacklistEntry},
         position::PositionInfo,
         risk::{
-            NewEmergencySnapshot, NewReconciliationReport, NewRiskAuditEvent, RiskStateInfo,
-            UpsertRiskEngineState,
+            FillCommit, NewEmergencySnapshot, NewReconciliationReport, NewRiskAuditEvent,
+            RiskStateInfo, UpsertRiskEngineState,
         },
     },
     enums::{common::Side, risk::BreakerStateName},
-    types::{MarketId, Usd},
+    types::{MarketId, TradeId, Usd},
 };
-use oxide_arb_risk::traits::{RiskMetrics, RiskPersistence};
+use oxide_arb_risk::traits::{FillClaim, RiskFillCommitGuard, RiskMetrics, RiskPersistence};
 use rust_decimal_macros::dec;
-use std::{mem::take, sync::Mutex};
 
 // ── Config ──────────────────────────────────────────────────────────────
 
@@ -111,17 +113,23 @@ pub struct TestRiskPersistence {
     audits: Mutex<Vec<NewRiskAuditEvent>>,
     emergencies: Mutex<Vec<NewEmergencySnapshot>>,
     reconciliations: Mutex<Vec<NewReconciliationReport>>,
+    fill_applied: Mutex<HashSet<TradeId>>,
+}
+
+struct TestRiskFillCommitGuard<'a> {
+    persistence: &'a TestRiskPersistence,
 }
 
 impl TestRiskPersistence {
     #[must_use]
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             state: Mutex::new(None),
             blacklist: Mutex::new(Vec::new()),
             audits: Mutex::new(Vec::new()),
             emergencies: Mutex::new(Vec::new()),
             reconciliations: Mutex::new(Vec::new()),
+            fill_applied: Mutex::new(HashSet::new()),
         }
     }
 
@@ -173,6 +181,14 @@ impl Default for TestRiskPersistence {
 }
 
 #[async_trait::async_trait]
+impl RiskFillCommitGuard for TestRiskFillCommitGuard<'_> {
+    async fn commit(self: Box<Self>, commit: FillCommit) -> OxideResult<()> {
+        self.persistence.upsert_state(commit.state).await?;
+        self.persistence.create_audit(commit.audit).await
+    }
+}
+
+#[async_trait::async_trait]
 impl RiskPersistence for TestRiskPersistence {
     async fn upsert_state(&self, state: UpsertRiskEngineState) -> OxideResult<()> {
         let mut slot = self.state.lock().expect("state lock");
@@ -218,6 +234,21 @@ impl RiskPersistence for TestRiskPersistence {
             .expect("state lock")
             .clone()
             .unwrap_or_else(Self::default_state_info))
+    }
+
+    async fn begin_fill<'a>(
+        &'a self,
+        trade_id: &TradeId,
+        _applied_at: DateTime<Utc>,
+    ) -> OxideResult<FillClaim<'a>> {
+        let mut applied = self.fill_applied.lock().expect("fill applied lock");
+        if !applied.insert(trade_id.clone()) {
+            return Ok(FillClaim::AlreadyApplied);
+        }
+        drop(applied);
+        Ok(FillClaim::Claimed(Box::new(TestRiskFillCommitGuard {
+            persistence: self,
+        })))
     }
 
     async fn upsert_blacklist(&self, entry: UpsertBlacklistEntry) -> OxideResult<()> {

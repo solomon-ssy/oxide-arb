@@ -13,10 +13,11 @@ use crate::{
     sizing::{DrawdownGuard, MultiConstraintSizer},
     snapshot::RiskSnapshot,
     state_store,
-    traits::{PotentialLossStore, RiskMetrics, RiskPersistence},
+    traits::{FillClaim, PotentialLossStore, RiskFillCommitGuard, RiskMetrics, RiskPersistence},
     types::{AtomicStateVersion, BreakerState},
 };
 use arc_swap::ArcSwap;
+use chrono::{DateTime, Utc};
 use oxide_arb_error::OxideResult;
 use oxide_arb_models::{
     config::RiskConfig,
@@ -24,15 +25,15 @@ use oxide_arb_models::{
         blacklist::{BlacklistInfo, UpsertBlacklistEntry},
         potential_loss::{NewPotentialLoss, PotentialLossInfo},
         risk::{
-            NewEmergencySnapshot, NewReconciliationReport, NewRiskAuditEvent, RiskEngineState,
-            RiskStateInfo, UpsertRiskEngineState,
+            FillCommit, NewEmergencySnapshot, NewReconciliationReport, NewRiskAuditEvent,
+            RiskEngineState, RiskStateInfo, UpsertRiskEngineState,
         },
     },
     enums::{
         common::LedgerStatus,
         risk::{BreakerStateName, CircuitBreakerLevel},
     },
-    types::{LedgerId, MarketId, Usd},
+    types::{LedgerId, MarketId, TradeId, Usd},
 };
 use parking_lot::RwLock;
 use rust_decimal_macros::dec;
@@ -291,6 +292,14 @@ fn should_safe_start_halt(
 
 /// No-op persistence for testing or when persistence is not configured.
 struct NoopPersistence;
+struct NoopFillCommitGuard;
+
+#[async_trait::async_trait]
+impl RiskFillCommitGuard for NoopFillCommitGuard {
+    async fn commit(self: Box<Self>, _commit: FillCommit) -> OxideResult<()> {
+        Ok(())
+    }
+}
 
 #[async_trait::async_trait]
 impl RiskPersistence for NoopPersistence {
@@ -299,7 +308,7 @@ impl RiskPersistence for NoopPersistence {
     }
 
     async fn load_state(&self) -> OxideResult<RiskStateInfo> {
-        let now = chrono::Utc::now();
+        let now = Utc::now();
         Ok(RiskStateInfo {
             id: 1,
             breaker_state: BreakerStateName::Closed,
@@ -334,6 +343,14 @@ impl RiskPersistence for NoopPersistence {
         })
     }
 
+    async fn begin_fill<'a>(
+        &'a self,
+        _trade_id: &TradeId,
+        _applied_at: DateTime<Utc>,
+    ) -> OxideResult<FillClaim<'a>> {
+        Ok(FillClaim::Claimed(Box::new(NoopFillCommitGuard)))
+    }
+
     async fn upsert_blacklist(&self, _entry: UpsertBlacklistEntry) -> OxideResult<()> {
         Ok(())
     }
@@ -364,7 +381,7 @@ struct NoopPotentialLossStore;
 #[async_trait::async_trait]
 impl PotentialLossStore for NoopPotentialLossStore {
     async fn create(&self, entry: NewPotentialLoss) -> OxideResult<PotentialLossInfo> {
-        let now = chrono::Utc::now();
+        let now = Utc::now();
         Ok(PotentialLossInfo {
             ledger_id: entry.ledger_id,
             market_id: entry.market_id,

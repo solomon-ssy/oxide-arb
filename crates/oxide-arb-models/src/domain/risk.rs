@@ -1,6 +1,7 @@
 //! Risk engine domain models.
 
 use crate::{
+    domain::NewPotentialLoss,
     enums::risk::{
         BreakerStateName, CircuitBreakerLevel, ReconciliationStatus, RiskAuditEventType,
     },
@@ -319,6 +320,20 @@ pub struct NewReconciliationReport {
     pub tolerance: Usd,
     pub checked_at: DateTime<Utc>,
     pub duration_ms: i64,
+}
+
+/// Atomic write-set for one idempotent risk Fill commit.
+///
+/// Bundles the write-set committed after the persistence layer has claimed the
+/// fill marker inside an open transaction. The transaction is committed only
+/// after the risk engine has produced the new snapshot and audit event, so a
+/// crash leaves either all writes durable or no marker at all.
+#[derive(Debug, Clone)]
+pub struct FillCommit {
+    pub trade_id: TradeId,
+    pub potential_loss: Option<NewPotentialLoss>,
+    pub state: UpsertRiskEngineState,
+    pub audit: NewRiskAuditEvent,
 }
 
 // ── Value objects ───────────────────────────────────────────────────

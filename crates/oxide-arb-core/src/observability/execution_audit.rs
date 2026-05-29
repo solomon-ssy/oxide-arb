@@ -4,7 +4,6 @@ use crate::infra::async_writer::AsyncWriter;
 use oxide_arb_models::{
     clickhouse::OpportunityAuditRow,
     domain::{
-        execution::{PostTradeJob, ResolvedOutcome},
         opportunity::Opportunity,
         position::PositionInfo,
         scored_snapshot::ScoredOpportunitySnapshot,
@@ -40,8 +39,8 @@ impl ExecutionAuditWriter {
         self.writer.write(row);
     }
 
-    pub fn write_terminal(&self, job: &PostTradeJob, resolved: &ResolvedOutcome) {
-        let row = (job, resolved).into();
+    pub fn write_terminal(&self, trade: &TradeInfo, snapshot: &ScoredOpportunitySnapshot) {
+        let row = OpportunityAuditRow::from_terminal_trade(trade, snapshot);
         self.writer.write(row);
     }
 

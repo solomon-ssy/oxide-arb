@@ -137,22 +137,6 @@ impl ReservationId {
     }
 }
 
-/// Outbox event row primary key (UUID v4).
-#[derive(TypedId, Debug, Clone, PartialEq, Eq, Hash)]
-pub struct OutboxEventId(Arc<str>);
-
-impl OutboxEventId {
-    /// Generate a new random outbox event ID.
-    #[must_use]
-    pub fn generate() -> Self {
-        Self(Arc::from(Uuid::new_v4().to_string().as_str()))
-    }
-}
-
-/// Polymorphic aggregate reference in transactional outbox rows.
-#[derive(TypedId, Debug, Clone, PartialEq, Eq, Hash)]
-pub struct AggregateId(Arc<str>);
-
 /// Accounting period identifier (UUID v4).
 #[derive(TypedId, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PeriodId(Arc<str>);

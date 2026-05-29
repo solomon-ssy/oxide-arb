@@ -24,7 +24,8 @@ use crate::{
         scanner_task::{ScannerTask, ScannerTaskDeps},
     },
     execution::{
-        execution_pipeline::{ExecutionPipeline, PostTradeDrainDeps},
+        capital_manager::CapitalManager,
+        execution_pipeline::ExecutionPipeline,
         fsm::ExecutionFSM,
         heartbeat::HeartbeatTask,
         market_inflight::MarketInFlightRegistry,
@@ -46,6 +47,10 @@ use crate::{
         book_store::BookStore, data_pipeline::DataPipeline, market_cache::MarketCache,
         market_registry::MarketRegistry,
     },
+    post_trade::{
+        consumer::PostTradeConsumer,
+        relay::{PostTradeRelay, PostTradeRelayDeps},
+    },
     service::{
         gamma::GammaService,
         risk_metrics::{RiskMetricsRefreshService, RiskMetricsState},
@@ -56,7 +61,7 @@ use oxide_arb_algorithm::calibration::{CalibrationUpdater, ResolutionCalibrator}
 use oxide_arb_api::{clob::ClobClient, ws::ClobWsManager};
 use oxide_arb_models::{
     config::Settings,
-    domain::{execution::PostTradeJob, settlement::MarketSettlementRequest},
+    domain::settlement::MarketSettlementRequest,
     enums::common::ExecutionMode,
     types::{MarketId, MicroScore, TokenId},
 };
@@ -66,12 +71,19 @@ use oxide_arb_repository::{
         PgPositionRepository, PgReportRepository, PgRiskAuditRepository, PgRiskStateRepository,
         PgTradeRepository,
     },
+    traits::{PositionRepository, TradeRepository},
 };
 use oxide_arb_risk::{audit::RiskAuditEvent, engine::RiskEngine};
 use oxide_arb_storage::{cache::TieredCache, clickhouse::ClickHousePool, postgres::PostgresPool};
 use parking_lot::Mutex;
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
+use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
+
+/// Max trades claimed per post-trade relay drain iteration.
+const POST_TRADE_RELAY_BATCH_SIZE: u64 = 128;
+/// Crash-recovery floor for the post-trade relay (notify drives the happy path).
+const POST_TRADE_RELAY_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Infrastructure subsystem: storage, metrics, alerts.
 pub struct InfraBundle {
@@ -114,22 +126,26 @@ pub struct ExecutionBundle {
     pub pipeline: Arc<ExecutionPipeline>,
     pub market_inflight: Arc<MarketInFlightRegistry>,
     pub trading_gate: TradingGate,
-    post_trade_rx: Mutex<Option<Receiver<PostTradeJob>>>,
+    pub capital_manager: Arc<CapitalManager>,
+    /// Shared with the pipeline; rung after each `*_observed` write to wake the relay.
+    pub relay_notify: Arc<Notify>,
 }
 
 impl ExecutionBundle {
-    pub const fn new(
+    pub fn new(
         pipeline: Arc<ExecutionPipeline>,
         market_inflight: Arc<MarketInFlightRegistry>,
         risk_engine: Arc<RiskEngine>,
         fsm: Arc<ExecutionFSM>,
-        post_trade_rx: Receiver<PostTradeJob>,
+        capital_manager: Arc<CapitalManager>,
+        relay_notify: Arc<Notify>,
     ) -> Self {
         Self {
             pipeline,
             market_inflight,
             trading_gate: TradingGate::new(risk_engine, fsm),
-            post_trade_rx: Mutex::new(Some(post_trade_rx)),
+            capital_manager,
+            relay_notify,
         }
     }
 }
@@ -215,51 +231,44 @@ impl AppContext {
             });
     }
 
-    /// Queue post-trade accounting drain (consumes `trading.execution.post_trade_rx` once).
-    pub fn queue_execution_outcome_drain(&self) {
+    /// Queue the durable post-trade relay (notify-woken + periodic crash-recovery poll).
+    pub fn queue_post_trade_relay(&self) {
         let Some(exec) = &self.trading.execution else {
-            tracing::warn!("execution outcome drain skipped — execution bundle not configured");
-            return;
-        };
-        let Some(rx) = exec.post_trade_rx.lock().take() else {
-            tracing::warn!("execution outcome drain already registered or rx unavailable");
+            tracing::warn!("post-trade relay skipped — execution bundle not configured");
             return;
         };
 
-        let risk_engine = Arc::clone(&self.risk.engine);
-        let risk_metrics = Arc::clone(&self.risk.metrics);
-        let fsm = Arc::clone(&self.trading.fsm);
-        let trade_repo = Arc::clone(&self.infra.trade_repo);
-        let position_repo = Arc::clone(&self.infra.position_repo);
-        let audit_writer = Arc::clone(&self.infra.audit_writer);
-        let alerts = Arc::clone(&self.infra.alerts);
-        let post_trade_spill = Arc::clone(exec.pipeline.post_trade_spill());
-        let metrics_state = Arc::clone(&self.risk.metrics_state);
-        let metrics_refresh = self.risk.metrics_refresh.clone();
-        let execution_mode = self.config.execution.execution_mode;
+        let trade_repo: Arc<dyn TradeRepository> = self.infra.trade_repo.clone();
+        let position_repo: Arc<dyn PositionRepository> = self.infra.position_repo.clone();
+        let consumer = PostTradeConsumer {
+            risk_engine: Arc::clone(&self.risk.engine),
+            risk_metrics: Arc::clone(&self.risk.metrics),
+            fsm: Arc::clone(&self.trading.fsm),
+            trade_repo: Arc::clone(&trade_repo),
+            position_repo,
+            audit_writer: Arc::clone(&self.infra.audit_writer),
+            metrics_state: Arc::clone(&self.risk.metrics_state),
+            metrics_refresh: self.risk.metrics_refresh.clone(),
+            metrics: Arc::clone(&self.infra.metrics),
+            execution_mode: self.config.execution.execution_mode,
+        };
+        let relay = PostTradeRelay::new(PostTradeRelayDeps {
+            consumer,
+            trade_repo,
+            notify: Arc::clone(&exec.relay_notify),
+            capital_manager: Arc::clone(&exec.capital_manager),
+            batch_size: POST_TRADE_RELAY_BATCH_SIZE,
+            poll_interval: POST_TRADE_RELAY_POLL_INTERVAL,
+            stale_submitted_after: Duration::from_secs(
+                self.config.execution.timeout.trade_confirm_timeout_secs,
+            ),
+            metrics: Arc::clone(&self.infra.metrics),
+        });
 
         self.pending_tasks
-            .push(TaskId::ExecutionOutcomeDrain, move |shutdown| async move {
-                if let Err(error) = ExecutionPipeline::spawn_outcome_drain(
-                    rx,
-                    PostTradeDrainDeps {
-                        risk_engine,
-                        risk_metrics,
-                        fsm,
-                        trade_repo,
-                        position_repo,
-                        audit_writer,
-                        alerts,
-                        post_trade_spill,
-                        metrics_state,
-                        metrics_refresh,
-                        execution_mode,
-                    },
-                    shutdown,
-                )
-                .await
-                {
-                    tracing::error!(%error, "execution outcome drain exited with error");
+            .push(TaskId::PostTradeRelay, move |shutdown| async move {
+                if let Err(error) = relay.run(shutdown).await {
+                    tracing::error!(%error, "post-trade relay exited with error");
                 }
             });
     }
@@ -370,7 +379,7 @@ impl AppContext {
             if let Some(runners) = runners {
                 self.queue_execution_runners(runners);
             }
-            self.queue_execution_outcome_drain();
+            self.queue_post_trade_relay();
             self.queue_execution_heartbeat(30, mode);
         }
     }

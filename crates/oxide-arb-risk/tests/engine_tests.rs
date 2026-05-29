@@ -16,7 +16,7 @@ use oxide_arb_models::{
     },
     enums::{
         calibration::{DurationBucket, PriceZone},
-        common::{MarketCategory, Side, StalenessLevel, TradeOutcome},
+        common::{MarketCategory, Side, StalenessLevel, TradeBusinessOutcome},
         opportunity::PayoutModel,
         risk::{CircuitBreakerLevel, TradeAccountingPhase},
     },
@@ -96,7 +96,7 @@ const fn test_probability() -> ProbabilityInput {
     }
 }
 
-fn test_trade_record(outcome: TradeOutcome, profit: Decimal) -> PostTradeInput {
+fn test_trade_record(outcome: TradeBusinessOutcome, profit: Decimal) -> PostTradeInput {
     PostTradeInput {
         trade_id: TradeId::generate(),
         market_id: MarketId::new("0xtest_market"),
@@ -187,7 +187,7 @@ async fn tripped_breaker_denies_trade() {
     };
     let engine = build_engine(&metrics);
 
-    let trade = test_trade_record(TradeOutcome::Miss, dec!(-5));
+    let trade = test_trade_record(TradeBusinessOutcome::Miss, dec!(-5));
     engine
         .on_trade_result(TradeAccountingPhase::Settlement, &trade, &metrics)
         .await
@@ -254,11 +254,12 @@ async fn on_trade_result_updates_accounting() {
     let metrics = MockMetrics::default();
     let engine = build_engine(&metrics);
 
-    let trade = test_trade_record(TradeOutcome::Success, dec!(5));
+    let trade = test_trade_record(TradeBusinessOutcome::Success, dec!(5));
     let report = engine
         .on_trade_result(TradeAccountingPhase::Fill, &trade, &metrics)
         .await
-        .unwrap();
+        .unwrap()
+        .expect("fill should apply");
 
     assert_eq!(report.snapshot.daily_trade_count, 1);
     assert_eq!(report.snapshot.daily_success_count, 1);
@@ -299,7 +300,7 @@ async fn tick_drives_breaker_transitions() {
         .unwrap();
 
     // Trip the breaker via on_trade_result (consecutive misses >= threshold)
-    let trade = test_trade_record(TradeOutcome::Miss, dec!(-5));
+    let trade = test_trade_record(TradeBusinessOutcome::Miss, dec!(-5));
     engine
         .on_trade_result(TradeAccountingPhase::Settlement, &trade, &metrics)
         .await
@@ -408,7 +409,7 @@ fn loss_cap_engine(config: RiskConfig, metrics: &MockMetrics) -> RiskEngine {
 }
 
 async fn fill_then_settle(engine: &RiskEngine, metrics: &MockMetrics, profit: Decimal) {
-    let trade = test_trade_record(TradeOutcome::Success, profit);
+    let trade = test_trade_record(TradeBusinessOutcome::Success, profit);
     engine
         .on_trade_result(TradeAccountingPhase::Fill, &trade, metrics)
         .await

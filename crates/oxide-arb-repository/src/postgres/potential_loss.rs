@@ -31,7 +31,7 @@ pub struct PgPotentialLossRepositoryTxn<'a> {
     txn: &'a DatabaseTransaction,
 }
 
-async fn do_create(
+pub(crate) async fn do_create(
     db: &impl ConnectionTrait,
     entry: NewPotentialLoss,
 ) -> Result<PotentialLossInfo, StorageError> {

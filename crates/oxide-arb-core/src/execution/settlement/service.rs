@@ -246,7 +246,10 @@ impl MarketSettlementService {
             .mark_accounted(&settled.position_id, Utc::now())
             .await?;
         self.write_settlement_audit(req, settled, &economics).await;
-        if report.breaker_tripped.is_some() {
+        if report
+            .as_ref()
+            .is_some_and(|report| report.breaker_tripped.is_some())
+        {
             self.fsm
                 .enter_emergency("circuit breaker tripped after market settlement");
         }

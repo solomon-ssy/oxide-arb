@@ -8,25 +8,24 @@ use std::collections::HashSet;
 use chrono::{NaiveDate, Utc};
 use oxide_arb_models::{
     domain::{
-        NewAccountingPeriod, NewCalibrationOutcome, NewEmergencySnapshot, NewOutboxEventWithId,
-        NewPosition, NewPotentialLoss, NewReconciliationReport, NewRiskAuditEvent, NewTrade,
-        SettlePositionParams, UpdatePotentialLoss, UpdateTradeOutcome, UpsertBlacklistEntry,
+        NewAccountingPeriod, NewCalibrationOutcome, NewEmergencySnapshot, NewPosition,
+        NewPotentialLoss, NewReconciliationReport, NewRiskAuditEvent, NewTrade,
+        SettlePositionParams, TradeObservation, UpdatePotentialLoss, UpsertBlacklistEntry,
         UpsertCalibration, UpsertRiskEngineState, UpsertRuntimeConfig,
     },
     enums::{
         calibration::{DurationBucket, PriceZone},
         common::{
             ExecutionMode, LedgerStatus, MarketCategory, PositionStatus, RedeemStatus, ReportType,
-            SettlementTrigger, Side, TradeOutcome,
+            SettlementTrigger, Side, TradeState,
         },
-        outbox::{OutboxAggregateType, OutboxEventType},
         risk::{
             BlacklistReason, BlacklistScope, BreakerStateName, CircuitBreakerLevel,
             ReconciliationStatus, RiskAuditEventType,
         },
         runtime_config::RuntimeConfigKey,
     },
-    types::{AggregateId, OutboxEventId, *},
+    types::*,
 };
 use oxide_arb_repository::{postgres::*, traits::*};
 use oxide_arb_storage::postgres::PostgresPool;
@@ -231,6 +230,7 @@ async fn trade_repository_crud() {
         .create(NewTrade {
             trade_id: TradeId::generate(),
             execution_id: execution_id.clone(),
+            reservation_id: ReservationId::new("res-trade"),
             opportunity_id: OpportunityId::new_v7(),
             market_id: MarketId::new("0xtrade-mkt"),
             event_id: EventId::new("evt-trade"),
@@ -242,32 +242,61 @@ async fn trade_repository_crud() {
             fee_usd: Usd::ONE,
             detected_edge_bps: Some(Bps::from(Decimal::from(200))),
             detected_profit_usd: Some(Usd::from(Decimal::new(5, 0))),
+            scored_snapshot: serde_json::json!({}),
+            category: MarketCategory::Sports,
             execution_mode: ExecutionMode::DryRun,
         })
         .await
         .expect("create trade");
-    assert_eq!(created.outcome, TradeOutcome::Pending);
+    assert_eq!(created.state, TradeState::Intent);
 
-    let updated = trade_repo
-        .update(
+    assert!(
+        trade_repo
+            .mark_submitted(&created.trade_id, Utc::now())
+            .await
+            .expect("mark submitted")
+    );
+    trade_repo
+        .mark_observed(
             &created.trade_id,
-            UpdateTradeOutcome {
-                outcome: TradeOutcome::Success,
-                shares: None,
-                price: None,
-                cost_usd: None,
-                fee_usd: None,
+            TradeObservation {
+                state: TradeState::FillObserved,
+                shares: created.shares,
+                price: created.price,
+                cost_usd: created.cost_usd,
+                fee_usd: created.fee_usd,
                 order_id: Some(OrderId::new("order-123")),
                 tx_hash: Some("0xdead".into()),
                 net_profit_usd: Some(Usd::from(Decimal::new(4, 0))),
                 latency_ms: Some(42),
                 error_message: None,
-                confirmed_at: Some(Utc::now()),
+                confirmed_at: Utc::now(),
             },
         )
         .await
-        .expect("update outcome");
-    assert_eq!(updated.outcome, TradeOutcome::Success);
+        .expect("mark observed");
+    let updated = trade_repo
+        .find_by_id(&created.trade_id)
+        .await
+        .unwrap()
+        .expect("trade still exists");
+    assert_eq!(updated.state, TradeState::FillObserved);
+    let claimed = trade_repo
+        .claim_unprocessed(
+            10,
+            "pg-repository-test",
+            Utc::now(),
+            Utc::now() - chrono::Duration::minutes(5),
+        )
+        .await
+        .expect("claim observed trade");
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(claimed[0].state, TradeState::FillProcessing);
+    assert_eq!(claimed[0].post_trade_attempts, 1);
+    assert_eq!(
+        claimed[0].post_trade_claim_owner.as_deref(),
+        Some("pg-repository-test")
+    );
 
     let by_exec = trade_repo
         .find_by_execution(execution_id.as_str())
@@ -305,6 +334,7 @@ async fn trade_repository_batch_create() {
         .map(|i| NewTrade {
             trade_id: TradeId::generate(),
             execution_id: ExecutionId::generate(),
+            reservation_id: ReservationId::new(format!("res-batch-{i}")),
             opportunity_id: OpportunityId::new_v7(),
             market_id: MarketId::new("0xbatch-mkt"),
             event_id: EventId::new("evt-batch"),
@@ -316,6 +346,8 @@ async fn trade_repository_batch_create() {
             fee_usd: Usd::ZERO,
             detected_edge_bps: None,
             detected_profit_usd: None,
+            scored_snapshot: serde_json::json!({}),
+            category: MarketCategory::Finance,
             execution_mode: ExecutionMode::Paper,
         })
         .collect();
@@ -348,6 +380,7 @@ async fn position_lifecycle() {
         .create(NewTrade {
             trade_id: trade_id.clone(),
             execution_id: ExecutionId::new("exec-pos-test"),
+            reservation_id: ReservationId::new("res-pos-test"),
             opportunity_id: OpportunityId::new_v7(),
             market_id: MarketId::new("0xpos-market"),
             event_id: EventId::new("evt-pos-test"),
@@ -359,6 +392,8 @@ async fn position_lifecycle() {
             fee_usd: Usd::from(Decimal::ONE),
             detected_edge_bps: None,
             detected_profit_usd: None,
+            scored_snapshot: serde_json::json!({}),
+            category: MarketCategory::Politics,
             execution_mode: ExecutionMode::Paper,
         })
         .await
@@ -407,6 +442,7 @@ async fn position_settle() {
         .create(NewTrade {
             trade_id: trade_id.clone(),
             execution_id: ExecutionId::new("exec-settle"),
+            reservation_id: ReservationId::new("res-settle"),
             opportunity_id: OpportunityId::new_v7(),
             market_id: MarketId::new("0xsettle-mkt"),
             event_id: EventId::new("evt-settle"),
@@ -418,6 +454,8 @@ async fn position_settle() {
             fee_usd: Usd::ZERO,
             detected_edge_bps: None,
             detected_profit_usd: None,
+            scored_snapshot: serde_json::json!({}),
+            category: MarketCategory::Crypto,
             execution_mode: ExecutionMode::Paper,
         })
         .await
@@ -701,29 +739,6 @@ async fn emergency_repository_create() {
     })
     .await
     .unwrap();
-}
-
-#[tokio::test]
-#[ignore = "requires Docker"]
-async fn outbox_repository_create_and_fetch() {
-    let (pool, _container) = setup_pg().await;
-    let repo = PgOutboxRepository::new(pool.connection().clone());
-
-    let event_id = OutboxEventId::generate();
-    let created = repo
-        .create(NewOutboxEventWithId {
-            event_id: event_id.clone(),
-            aggregate_type: OutboxAggregateType::Trade,
-            aggregate_id: AggregateId::new("trade-1"),
-            event_type: OutboxEventType::Audit,
-            payload: serde_json::json!({"ok": true}),
-        })
-        .await
-        .unwrap();
-    assert_eq!(created.event_id, event_id);
-
-    let pending = repo.fetch_pending(10).await.unwrap();
-    assert_eq!(pending.len(), 1);
 }
 
 #[tokio::test]
