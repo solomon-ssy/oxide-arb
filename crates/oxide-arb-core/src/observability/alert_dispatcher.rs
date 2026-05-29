@@ -207,9 +207,14 @@ mod tests {
         dispatcher.dispatch(alert("same")).await;
         dispatcher.dispatch(alert("different")).await;
 
-        let guard = recordings.lock().expect("recordings lock");
-        assert_eq!(guard.len(), 2);
-        assert_eq!(guard[0].title, "same");
-        assert_eq!(guard[1].title, "different");
+        let recorded_titles = {
+            let guard = recordings.lock().expect("recordings lock");
+            assert_eq!(guard.len(), 2);
+            guard
+                .iter()
+                .map(|alert| alert.title.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(recorded_titles, ["same", "different"]);
     }
 }
