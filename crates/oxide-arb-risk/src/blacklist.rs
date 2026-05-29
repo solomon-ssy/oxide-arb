@@ -95,7 +95,10 @@ impl BlacklistManager {
             if entry.is_expired(now) {
                 continue;
             }
-            let key = BlacklistKey::Market(entry.market_id.clone());
+            let key = entry.token_id.as_ref().map_or_else(
+                || BlacklistKey::Market(entry.market_id.clone()),
+                |token_id| BlacklistKey::Token(token_id.clone()),
+            );
             self.entries.insert(key, entry);
             loaded += 1;
         }

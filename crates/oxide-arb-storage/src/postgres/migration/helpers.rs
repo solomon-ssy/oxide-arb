@@ -203,8 +203,8 @@ fn ordered_seeds() -> Result<Vec<SeedSpec>, DbErr> {
 
     for seed in &seeds {
         for artifact in seed.produces {
-            let previous = artifact_producers
-                .insert(artifact.key.0, format!("{}#{}", seed.id, seed.version));
+            let previous =
+                artifact_producers.insert(artifact.key.0, format!("{}#{}", seed.id, seed.version));
             if previous.is_some() {
                 return Err(DbErr::Custom(
                     SeedError::DuplicateArtifactProducer {

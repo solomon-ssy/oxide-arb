@@ -13,7 +13,7 @@ use oxide_arb_core::{
     service::risk_metrics::{ApiHealthTracker, RiskMetricsState},
 };
 use oxide_arb_models::{
-    config::{ExposureReservationConfig, PolymarketConfig, WebSocketConfig},
+    config::{PolymarketConfig, WebSocketConfig},
     domain::{NewTrade, execution::PostTradeJob},
     enums::common::ExecutionMode,
     types::Usd,
@@ -80,7 +80,7 @@ fn build_drain_fixture() -> DrainFixture {
     let spill = Arc::new(InMemoryEventStore::new());
     let persistence: Arc<TestRiskPersistence> = Arc::new(TestRiskPersistence::new());
     let exposure = Arc::new(InMemoryExposureReservation::new(
-        ExposureReservationConfig::default(),
+        test_risk_config().exposure_reservation_config(),
     ));
     let ws_manager = Arc::new(ClobWsManager::new(
         &PolymarketConfig::default(),
@@ -93,11 +93,12 @@ fn build_drain_fixture() -> DrainFixture {
     let metrics_state = Arc::new(RiskMetricsState::new(Arc::new(ApiHealthTracker::new(
         StdTimeDuration::from_secs(60),
     ))));
-    metrics_state.seed_test_snapshot(Usd::new(dec!(5000)));
+    metrics_state.seed_simulated_snapshot(ExecutionMode::Paper, Usd::new(dec!(5000)));
     let risk_metrics = Arc::new(CoreRiskMetrics::new(
         Arc::clone(&metrics_state),
         Arc::clone(&exposure),
         ws_manager,
+        ExecutionMode::Paper,
     ));
     let risk_engine = Arc::new(
         RiskEngineBuilder::new()

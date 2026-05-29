@@ -5,7 +5,10 @@ use crate::{
         detection_writer::DetectionWriter, execution_audit::ExecutionAuditWriter,
         metrics_hub::MetricsHub,
     },
-    outbox::{event_store::PgEventStore, flusher::OutboxFlusher},
+    outbox::{
+        event_store::{EventStore, PgEventStore},
+        flusher::OutboxFlusher,
+    },
 };
 use oxide_arb_error::OxideError;
 use oxide_arb_models::clickhouse::{OpportunityAuditRow, OpportunityDetectionRow};
@@ -22,6 +25,7 @@ pub struct PersistenceBundle {
     pub timeseries: Arc<ChTimeseriesRepository>,
     pub audit_writer: Arc<ExecutionAuditWriter>,
     pub detection_writer: Arc<DetectionWriter>,
+    pub event_store: Arc<dyn EventStore>,
     outbox_flusher: Arc<OutboxFlusher>,
 }
 
@@ -40,7 +44,8 @@ pub struct PersistenceWireInput {
 
 impl PersistenceBundle {
     pub fn wire(input: PersistenceWireInput) -> (Self, PersistenceBackgroundWorkers) {
-        let event_store = Arc::new(PgEventStore::new(Arc::clone(&input.outbox_repo)));
+        let event_store: Arc<dyn EventStore> =
+            Arc::new(PgEventStore::new(Arc::clone(&input.outbox_repo)));
 
         let ts_audit = Arc::clone(&input.timeseries);
         let (audit_raw, audit_writer_worker) = AsyncWriter::new(
@@ -81,8 +86,8 @@ impl PersistenceBundle {
 
         let metrics = Arc::clone(&input.metrics);
         let outbox_flusher = Arc::new(OutboxFlusher::new(
-            event_store,
-            vec![],
+            Arc::clone(&event_store),
+            Vec::new(),
             100,
             3,
             metrics,
@@ -94,6 +99,7 @@ impl PersistenceBundle {
             timeseries: input.timeseries,
             audit_writer,
             detection_writer,
+            event_store,
             outbox_flusher,
         };
         let workers = PersistenceBackgroundWorkers {

@@ -8,15 +8,15 @@ use oxide_arb_api::clob::ClobClient;
 use oxide_arb_error::OxideError;
 use oxide_arb_models::{
     domain::position::PositionInfo,
-    enums::common::Side,
+    enums::common::{ExecutionMode, Side},
     types::{MarketId, Usd},
 };
 use oxide_arb_repository::{postgres::PgPositionRepository, traits::PositionRepository};
 use std::{
     collections::HashMap,
     sync::{
-        Arc, atomic,
-        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
+        Arc,
+        atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering},
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -30,6 +30,31 @@ struct MetricsSnapshot {
     open_buy_count: usize,
     open_sell_count: usize,
     refresh_sequence: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RiskMetricsSource {
+    NeverRefreshed = 0,
+    AuthoritativeClob = 1,
+    SimulatedPaper = 2,
+    SimulatedDryRun = 3,
+}
+
+impl From<u8> for RiskMetricsSource {
+    fn from(value: u8) -> Self {
+        match value {
+            1 => Self::AuthoritativeClob,
+            2 => Self::SimulatedPaper,
+            3 => Self::SimulatedDryRun,
+            _ => Self::NeverRefreshed,
+        }
+    }
+}
+
+impl From<RiskMetricsSource> for u8 {
+    fn from(source: RiskMetricsSource) -> Self {
+        source as Self
+    }
 }
 
 impl MetricsSnapshot {
@@ -132,8 +157,9 @@ pub struct RiskMetricsState {
     daily_buy_trades: AtomicU32,
     daily_sell_trades: AtomicU32,
     daily_rollover_date: parking_lot::Mutex<chrono::NaiveDate>,
-    stale: atomic::AtomicBool,
+    stale: AtomicBool,
     last_successful_refresh: AtomicU64,
+    source: AtomicU8,
 }
 
 impl RiskMetricsState {
@@ -149,6 +175,7 @@ impl RiskMetricsState {
             daily_rollover_date: parking_lot::Mutex::new(chrono::Utc::now().date_naive()),
             stale: AtomicBool::new(true),
             last_successful_refresh: AtomicU64::new(now_ms),
+            source: AtomicU8::new(RiskMetricsSource::NeverRefreshed as u8),
         }
     }
 
@@ -159,6 +186,11 @@ impl RiskMetricsState {
     #[inline]
     pub fn is_stale(&self) -> bool {
         self.stale.load(Ordering::Acquire)
+    }
+
+    #[inline]
+    pub fn source(&self) -> RiskMetricsSource {
+        self.source.load(Ordering::Acquire).into()
     }
 
     #[inline]
@@ -273,9 +305,10 @@ impl RiskMetricsState {
         drop(date);
     }
 
-    fn store_snapshot(&self, snapshot: MetricsSnapshot) {
+    fn store_snapshot(&self, snapshot: MetricsSnapshot, source: RiskMetricsSource) {
         self.snapshot.store(Arc::new(snapshot));
         self.stale.store(false, Ordering::Release);
+        self.source.store(source.into(), Ordering::Release);
         self.last_successful_refresh.store(
             ToPrimitive::to_u64(&chrono::Utc::now().timestamp_millis().max(0)).unwrap_or(0),
             Ordering::Release,
@@ -286,19 +319,29 @@ impl RiskMetricsState {
         self.last_successful_refresh.load(Ordering::Acquire)
     }
 
-    /// Seed a minimal metrics snapshot for integration tests (no CLOB/DB refresh loop).
-    #[doc(hidden)]
-    pub fn seed_test_snapshot(&self, cached_balance: Usd) {
-        self.store_snapshot(MetricsSnapshot {
-            cached_balance,
-            positions: Vec::new(),
-            total_position_exposure: Usd::ZERO,
-            market_position_exposures: HashMap::new(),
-            open_position_count: 0,
-            open_buy_count: 0,
-            open_sell_count: 0,
-            refresh_sequence: 1,
-        });
+    pub fn seed_simulated_snapshot(&self, mode: ExecutionMode, cached_balance: Usd) {
+        let source = match mode {
+            ExecutionMode::DryRun => RiskMetricsSource::SimulatedDryRun,
+            ExecutionMode::Paper => RiskMetricsSource::SimulatedPaper,
+            ExecutionMode::Live => RiskMetricsSource::AuthoritativeClob,
+        };
+        self.store_empty_position_snapshot(cached_balance, source);
+    }
+
+    fn store_empty_position_snapshot(&self, cached_balance: Usd, source: RiskMetricsSource) {
+        self.store_snapshot(
+            MetricsSnapshot {
+                cached_balance,
+                positions: Vec::new(),
+                total_position_exposure: Usd::ZERO,
+                market_position_exposures: HashMap::new(),
+                open_position_count: 0,
+                open_buy_count: 0,
+                open_sell_count: 0,
+                refresh_sequence: 1,
+            },
+            source,
+        );
     }
 }
 
@@ -385,16 +428,19 @@ impl RiskMetricsRefreshService {
         let prev = self.state.snapshot.load();
         let seq = prev.refresh_sequence + 1;
 
-        self.state.store_snapshot(MetricsSnapshot {
-            cached_balance: balance,
-            open_position_count: positions.len(),
-            open_buy_count: buy_count,
-            open_sell_count: sell_count,
-            total_position_exposure: total_exp,
-            market_position_exposures: market_exps,
-            positions,
-            refresh_sequence: seq,
-        });
+        self.state.store_snapshot(
+            MetricsSnapshot {
+                cached_balance: balance,
+                open_position_count: positions.len(),
+                open_buy_count: buy_count,
+                open_sell_count: sell_count,
+                total_position_exposure: total_exp,
+                market_position_exposures: market_exps,
+                positions,
+                refresh_sequence: seq,
+            },
+            RiskMetricsSource::AuthoritativeClob,
+        );
         Ok((balance, ext_positions))
     }
 }

@@ -65,6 +65,8 @@ impl Display for OutboxAggregateType {
 pub enum OutboxEventType {
     #[sea_orm(string_value = "lifecycle")]
     Lifecycle,
+    #[sea_orm(string_value = "trade_outcome_observed")]
+    TradeOutcomeObserved,
     #[sea_orm(string_value = "audit")]
     Audit,
     #[sea_orm(string_value = "alert")]
@@ -79,6 +81,7 @@ impl Display for OutboxEventType {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Lifecycle => f.write_str("lifecycle"),
+            Self::TradeOutcomeObserved => f.write_str("trade_outcome_observed"),
             Self::Audit => f.write_str("audit"),
             Self::Alert => f.write_str("alert"),
             Self::Reconciliation => f.write_str("reconciliation"),

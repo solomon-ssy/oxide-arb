@@ -66,19 +66,21 @@ impl OutboxFlusher {
             let mut all_ok = true;
             for consumer in &self.consumers {
                 if let Err(e) = consumer.consume(event).await {
+                    let reason = e.to_string();
                     tracing::warn!(
                         event_id = %event.event_id,
                         consumer = consumer.name(),
-                        error = %e,
+                        error = %reason,
                         "consumer failed"
                     );
+                    self.event_store.record_failure(event, &reason).await?;
                     all_ok = false;
                 }
             }
 
             if all_ok {
                 published.push(event.event_id.clone());
-            } else if event.publish_attempts >= self.max_retries {
+            } else if event.publish_attempts.saturating_add(1) >= self.max_retries {
                 self.event_store
                     .mark_dead_letter(&event.event_id, "max retries exceeded")
                     .await?;

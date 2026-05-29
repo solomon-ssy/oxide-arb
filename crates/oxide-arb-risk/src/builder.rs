@@ -175,7 +175,7 @@ impl RiskEngineBuilder {
             };
 
         let mut breaker = breaker;
-        let safe_start_halt = should_safe_start_halt(&breaker, &potential_loss, &*clock);
+        let safe_start_halt = should_safe_start_halt(&config, &breaker, &potential_loss, &*clock);
         if let Some(ref reason) = safe_start_halt {
             if !breaker.state().is_halted() {
                 breaker.halt(CircuitBreakerLevel::System, reason.clone());
@@ -245,6 +245,7 @@ impl Default for RiskEngineBuilder {
 /// - Breaker was `Open` with unexpired cooldown
 /// - Active potential-loss entries exist at boot
 fn should_safe_start_halt(
+    config: &RiskConfig,
     breaker: &CircuitBreaker,
     potential_loss: &PotentialLossLedger,
     clock: &dyn Clock,
@@ -268,10 +269,20 @@ fn should_safe_start_halt(
         _ => {}
     }
 
-    let active = potential_loss.active_count();
-    if active > 0 {
+    let stale_entries = potential_loss
+        .active_entries()
+        .into_iter()
+        .filter(|entry| {
+            clock
+                .now()
+                .signed_duration_since(entry.created_at)
+                .num_seconds()
+                >= i64::try_from(config.potential_loss_escalation_secs).unwrap_or(i64::MAX)
+        })
+        .count();
+    if stale_entries > 0 {
         return Some(format!(
-            "safe-start: {active} active potential-loss entries at boot"
+            "safe-start: {stale_entries} stale active potential-loss entries at boot"
         ));
     }
 

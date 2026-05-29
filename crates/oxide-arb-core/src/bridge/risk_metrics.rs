@@ -6,7 +6,7 @@ use crate::{
 use oxide_arb_api::ws::ClobWsManager;
 use oxide_arb_models::{
     domain::position::PositionInfo,
-    enums::common::Side,
+    enums::common::{ExecutionMode, Side},
     types::{MarketId, Usd},
 };
 use oxide_arb_risk::traits::{RiskMetrics, RiskMetricsSnapshot};
@@ -16,6 +16,7 @@ pub struct CoreRiskMetrics {
     state: Arc<RiskMetricsState>,
     exposure: Arc<InMemoryExposureReservation>,
     ws_manager: Arc<ClobWsManager>,
+    execution_mode: ExecutionMode,
 }
 
 impl CoreRiskMetrics {
@@ -23,11 +24,13 @@ impl CoreRiskMetrics {
         state: Arc<RiskMetricsState>,
         exposure: Arc<InMemoryExposureReservation>,
         ws_manager: Arc<ClobWsManager>,
+        execution_mode: ExecutionMode,
     ) -> Self {
         Self {
             state,
             exposure,
             ws_manager,
+            execution_mode,
         }
     }
 
@@ -39,10 +42,7 @@ impl CoreRiskMetrics {
         let snap = self.state.load_metrics_snapshot(market_id);
         let (reserved, market_reserved, active_count) =
             self.exposure.reservation_snapshot_sync(market_id);
-        let ws_disconnect_secs = self
-            .ws_manager
-            .last_message_age_ms()
-            .map_or(u64::MAX, |ms| ms / 1000);
+        let ws_disconnect_secs = self.ws_disconnect_secs_for_mode();
         RiskMetricsSnapshot {
             version: self.state.metrics_version(),
             cached_balance: snap.cached_balance,
@@ -60,6 +60,16 @@ impl CoreRiskMetrics {
             api_error_count: self.state.api_tracker.errors_in_window(),
             api_request_count: self.state.api_tracker.requests_in_window(),
         }
+    }
+
+    fn ws_disconnect_secs_for_mode(&self) -> u64 {
+        self.ws_manager.last_message_age_ms().map_or_else(
+            || match self.execution_mode {
+                ExecutionMode::Live => u64::MAX,
+                ExecutionMode::DryRun | ExecutionMode::Paper => 0,
+            },
+            |ms| ms / 1000,
+        )
     }
 }
 
@@ -116,9 +126,7 @@ impl RiskMetrics for CoreRiskMetrics {
 
     #[inline]
     fn ws_disconnect_secs(&self) -> u64 {
-        self.ws_manager
-            .last_message_age_ms()
-            .map_or(u64::MAX, |ms| ms / 1000)
+        self.ws_disconnect_secs_for_mode()
     }
 
     #[inline]

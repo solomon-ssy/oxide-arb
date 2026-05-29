@@ -111,6 +111,8 @@ reserve_balance_usd = "2000"
 max_open_positions = 5
 max_single_market_exposure_usd = "1000"
 max_single_bet_usd = "250"
+reservation_ttl_secs = 300
+reservation_gc_interval_secs = 30
 
 [risk.circuit_breaker]
 enabled = true

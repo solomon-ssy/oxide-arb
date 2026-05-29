@@ -20,6 +20,8 @@ pub struct RawGammaEvent {
     pub id: String,
     pub title: String,
     pub slug: String,
+    #[serde(alias = "end_date", alias = "endDateIso")]
+    pub end_date: Option<String>,
     #[serde(alias = "neg_risk")]
     pub neg_risk: Option<bool>,
     pub markets: Option<Vec<RawGammaMarket>>,
@@ -48,6 +50,8 @@ pub struct RawGammaMarket {
     #[serde(alias = "resolved_at")]
     pub resolved_at: Option<String>,
     pub category: Option<String>,
+    #[serde(alias = "end_date", alias = "endDateIso", alias = "end_date_iso")]
+    pub end_date: Option<String>,
     /// Whether taker fees apply for this market's tokens.
     #[serde(alias = "fees_enabled")]
     pub fees_enabled: Option<bool>,

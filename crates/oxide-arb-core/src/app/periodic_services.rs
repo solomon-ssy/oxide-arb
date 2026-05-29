@@ -7,6 +7,7 @@ use crate::{
         periodic_task::PeriodicTask,
     },
     observability::{
+        alert_dispatcher::{Alert, AlertSeverity},
         metrics_hub::MetricsHub,
         report_generator::{ReportGenerator, previous_utc_day, previous_utc_week_start},
     },
@@ -272,6 +273,7 @@ impl AppContext {
         let ch = Arc::clone(&self.infra.ch);
         let ws = Arc::clone(&self.trading.ws_manager);
         let metrics = Arc::clone(&self.infra.metrics);
+        let alerts = Arc::clone(&self.infra.alerts);
 
         self.pending_tasks
             .push(TaskId::HealthChecker, move |shutdown| async move {
@@ -285,17 +287,32 @@ impl AppContext {
                     || {
                         let checker_ref = &checker;
                         let metrics_ref = &metrics;
+                        let alerts = Arc::clone(&alerts);
                         async move {
                             let report = checker_ref.check_all().await;
                             if !report.overall_healthy {
+                                let unhealthy = report
+                                    .checks
+                                    .iter()
+                                    .filter(|c| !c.healthy)
+                                    .map(|c| c.name.as_str())
+                                    .collect::<Vec<_>>();
                                 tracing::warn!(
-                                    checks = ?report.checks.iter()
-                                        .filter(|c| !c.healthy)
-                                        .map(|c| c.name.as_str())
-                                        .collect::<Vec<_>>(),
+                                    checks = ?unhealthy,
                                     "health check detected unhealthy subsystems"
                                 );
                                 metrics_ref.health_check_failures.inc();
+                                alerts
+                                    .dispatch(Alert {
+                                        severity: AlertSeverity::Critical,
+                                        title: "Health check unhealthy".into(),
+                                        body: format!(
+                                            "unhealthy subsystems: {}",
+                                            unhealthy.join(", ")
+                                        ),
+                                        timestamp: chrono::Utc::now(),
+                                    })
+                                    .await;
                             }
                             Ok(())
                         }

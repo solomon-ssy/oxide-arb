@@ -37,7 +37,7 @@ impl Dispatcher {
             ExecutionMode::DryRun => self.dry_run(plan),
             ExecutionMode::Paper => self.paper_trade(plan),
             ExecutionMode::Live => ExecutionOutcome::Failed {
-                error: "Live dispatch must go through OrderStrategy + ClobClient".into(),
+                error: "Live dispatch must go through FokOrderStrategy + ClobClient".into(),
                 execution_mode: ExecutionMode::Live,
             },
         };

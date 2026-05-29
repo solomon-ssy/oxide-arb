@@ -3,15 +3,15 @@
 use crate::{
     bridge::risk_metrics::CoreRiskMetrics,
     execution::{
-        capital_manager::CapitalManager, dispatcher::Dispatcher, fsm::ExecutionFSM,
-        market_inflight::MarketInFlightRegistry, plan_builder::PlanBuilder,
-        tiered_strategy::OrderStrategy, validator::Validator,
+        capital_manager::CapitalManager, dispatcher::Dispatcher, fok_strategy::FokOrderStrategy,
+        fsm::ExecutionFSM, market_inflight::MarketInFlightRegistry, plan_builder::PlanBuilder,
+        validator::Validator,
     },
     observability::{
         alert_dispatcher::AlertDispatcher, backpressure::BackpressurePolicy,
         execution_audit::ExecutionAuditWriter, metrics_hub::MetricsHub,
     },
-    outbox::in_memory::SharedInMemoryEventStore,
+    outbox::{event_store::EventStore, in_memory::SharedInMemoryEventStore},
     service::risk_metrics::{RiskMetricsRefreshService, RiskMetricsState},
 };
 use chrono::Utc;
@@ -32,9 +32,10 @@ use oxide_arb_models::{
     enums::{
         common::{ExecutionMode, RedeemStatus, TradeOutcome},
         execution::ExecutionOutcome,
+        outbox::{OutboxAggregateType, OutboxEventType},
         risk::TradeAccountingPhase,
     },
-    types::{ExecutionId, TradeId, Usd},
+    types::{AggregateId, ExecutionId, TradeId, Usd},
 };
 use oxide_arb_repository::{
     postgres::PgTradeRepository,
@@ -50,7 +51,7 @@ pub struct ExecutionPipelineDeps<R: TradeRepository + Send + Sync + 'static = Pg
     pub validator: Validator,
     pub plan_builder: PlanBuilder,
     pub dispatcher: Dispatcher,
-    pub order_strategy: OrderStrategy,
+    pub order_strategy: FokOrderStrategy,
     pub capital_manager: Arc<CapitalManager>,
     pub risk_engine: Arc<RiskEngine>,
     pub risk_metrics: Arc<CoreRiskMetrics>,
@@ -60,6 +61,7 @@ pub struct ExecutionPipelineDeps<R: TradeRepository + Send + Sync + 'static = Pg
     pub execution_mode: ExecutionMode,
     pub trade_repo: Arc<R>,
     pub audit_writer: Arc<ExecutionAuditWriter>,
+    pub event_store: Arc<dyn EventStore>,
     pub outcome_tx: flume::Sender<PostTradeJob>,
     pub backpressure: Arc<BackpressurePolicy>,
 }
@@ -83,7 +85,7 @@ pub struct ExecutionPipeline<R: TradeRepository + Send + Sync + 'static = PgTrad
     validator: Validator,
     plan_builder: PlanBuilder,
     dispatcher: Dispatcher,
-    order_strategy: OrderStrategy,
+    order_strategy: FokOrderStrategy,
     capital_manager: Arc<CapitalManager>,
     risk_engine: Arc<RiskEngine>,
     risk_metrics: Arc<CoreRiskMetrics>,
@@ -93,6 +95,7 @@ pub struct ExecutionPipeline<R: TradeRepository + Send + Sync + 'static = PgTrad
     execution_mode: ExecutionMode,
     trade_repo: Arc<R>,
     audit_writer: Arc<ExecutionAuditWriter>,
+    event_store: Arc<dyn EventStore>,
     outcome_tx: flume::Sender<PostTradeJob>,
     backpressure: Arc<BackpressurePolicy>,
 }
@@ -140,6 +143,7 @@ impl<R: TradeRepository + Send + Sync + 'static> ExecutionPipeline<R> {
             execution_mode: deps.execution_mode,
             trade_repo: deps.trade_repo,
             audit_writer: deps.audit_writer,
+            event_store: deps.event_store,
             outcome_tx: deps.outcome_tx,
             backpressure: deps.backpressure,
         }
@@ -239,7 +243,8 @@ impl<R: TradeRepository + Send + Sync + 'static> ExecutionPipeline<R> {
             trade_id: prepared.trade_id,
             scored_snapshot: prepared.snapshot,
             outcome,
-        });
+        })
+        .await;
         timer.observe_duration();
         ExecutionResult {
             outcome_summary: Some(outcome_summary),
@@ -418,7 +423,7 @@ impl<R: TradeRepository + Send + Sync + 'static> ExecutionPipeline<R> {
         }
     }
 
-    fn enqueue_post_trade(&self, input: PostTradeEnqueueInput<'_>) {
+    async fn enqueue_post_trade(&self, input: PostTradeEnqueueInput<'_>) {
         let PostTradeEnqueueInput {
             opp,
             plan,
@@ -444,6 +449,28 @@ impl<R: TradeRepository + Send + Sync + 'static> ExecutionPipeline<R> {
             scored_snapshot,
             outcome,
         };
+        let payload = match serde_json::to_value(&job) {
+            Ok(payload) => payload,
+            Err(error) => {
+                tracing::error!(%error, trade_id = %job.trade_id, "post-trade payload serialization failed");
+                self.fsm
+                    .enter_emergency("post-trade payload serialization failed");
+                return;
+            }
+        };
+        if let Err(error) = self
+            .event_store
+            .append(
+                OutboxAggregateType::Trade,
+                AggregateId::new(job.trade_id.as_str()),
+                OutboxEventType::TradeOutcomeObserved,
+                &payload,
+            )
+            .await
+        {
+            tracing::error!(%error, trade_id = %job.trade_id, "post-trade outbox append failed");
+            self.fsm.enter_emergency("post-trade outbox append failed");
+        }
         if let Err(send_err) = self.outcome_tx.try_send(job) {
             self.backpressure
                 .on_post_trade_channel_full(send_err.into_inner());

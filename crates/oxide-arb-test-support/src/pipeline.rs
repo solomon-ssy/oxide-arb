@@ -15,10 +15,10 @@ use oxide_arb_core::{
         capital_manager::CapitalManager,
         dispatcher::Dispatcher,
         execution_pipeline::{ExecutionPipeline, ExecutionPipelineDeps},
+        fok_strategy::FokOrderStrategy,
         fsm::ExecutionFSM,
         market_inflight::MarketInFlightRegistry,
         plan_builder::PlanBuilder,
-        tiered_strategy::OrderStrategy,
         validator::Validator,
     },
     exposure::in_memory::InMemoryExposureReservation,
@@ -31,7 +31,7 @@ use oxide_arb_core::{
     service::risk_metrics::{ApiHealthTracker, RiskMetricsState},
 };
 use oxide_arb_models::{
-    config::{ExposureReservationConfig, MarketDataConfig, PolymarketConfig, WebSocketConfig},
+    config::{MarketDataConfig, PolymarketConfig, WebSocketConfig},
     domain::execution::PostTradeJob,
     enums::common::ExecutionMode,
     types::Usd,
@@ -59,19 +59,19 @@ pub fn build_pipeline() -> PipelineHarness {
     let (outcome_tx, outcome_rx) = flume::bounded(1024);
     let metrics = Arc::new(MetricsHub::new());
     let fsm = Arc::new(ExecutionFSM::new(Arc::clone(&metrics)));
+    let event_store = Arc::new(InMemoryEventStore::new());
     let backpressure = Arc::new(BackpressurePolicy::new(
         Arc::clone(&metrics),
         None,
-        Arc::new(InMemoryEventStore::new()),
+        Arc::clone(&event_store),
         1,
     ));
     let book_store = Arc::new(BookStore::new(Arc::clone(&metrics)));
-    let exposure = Arc::new(InMemoryExposureReservation::new(
-        ExposureReservationConfig::default(),
-    ));
+    let reservation_config = test_risk_config().exposure_reservation_config();
+    let exposure = Arc::new(InMemoryExposureReservation::new(reservation_config.clone()));
     let capital = Arc::new(CapitalManager::new(
         Arc::clone(&exposure),
-        ExposureReservationConfig::default(),
+        reservation_config,
     ));
     let risk_engine = Arc::new(
         RiskEngineBuilder::new()
@@ -92,8 +92,13 @@ pub fn build_pipeline() -> PipelineHarness {
     let metrics_state = Arc::new(RiskMetricsState::new(Arc::new(ApiHealthTracker::new(
         Duration::from_secs(60),
     ))));
-    metrics_state.seed_test_snapshot(Usd::new(dec!(5000)));
-    let risk_metrics = Arc::new(CoreRiskMetrics::new(metrics_state, exposure, ws_manager));
+    metrics_state.seed_simulated_snapshot(ExecutionMode::Paper, Usd::new(dec!(5000)));
+    let risk_metrics = Arc::new(CoreRiskMetrics::new(
+        metrics_state,
+        exposure,
+        ws_manager,
+        ExecutionMode::Paper,
+    ));
 
     let fee_calculator = Arc::new(FeeCalculator::default());
     let pipeline = ExecutionPipeline::new(ExecutionPipelineDeps {
@@ -114,7 +119,7 @@ pub fn build_pipeline() -> PipelineHarness {
             Arc::clone(&fee_calculator),
             Arc::clone(&metrics),
         ),
-        order_strategy: OrderStrategy::new(
+        order_strategy: FokOrderStrategy::new(
             ExecutionMode::Paper,
             None,
             fee_calculator,
@@ -130,6 +135,7 @@ pub fn build_pipeline() -> PipelineHarness {
         execution_mode: ExecutionMode::Paper,
         trade_repo: Arc::clone(&persistence.trade_repo),
         audit_writer: Arc::clone(&persistence.audit_writer),
+        event_store,
         outcome_tx,
         backpressure,
     });

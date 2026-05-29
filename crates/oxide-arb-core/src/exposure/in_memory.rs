@@ -110,7 +110,11 @@ impl InMemoryExposureReservation {
         // CAS loop for global limit
         loop {
             let current = self.total_reserved_cents.load(Ordering::Acquire);
-            let new_total = current + amount_cents;
+            let Some(new_total) = current.checked_add(amount_cents) else {
+                return Err(ReservationError::Backend(
+                    "reservation total overflow".into(),
+                ));
+            };
 
             if new_total > self.config.max_total_exposure_cents {
                 return Err(ReservationError::ExceedsLimit {
@@ -135,8 +139,17 @@ impl InMemoryExposureReservation {
             .entry(market_id.clone())
             .or_insert_with(|| AtomicU64::new(0));
         let market_current = market_counter.fetch_add(amount_cents, Ordering::AcqRel);
+        let Some(market_new_total) = market_current.checked_add(amount_cents) else {
+            market_counter.fetch_sub(amount_cents, Ordering::AcqRel);
+            drop(market_counter);
+            self.total_reserved_cents
+                .fetch_sub(amount_cents, Ordering::AcqRel);
+            return Err(ReservationError::Backend(
+                "reservation market total overflow".into(),
+            ));
+        };
 
-        if market_current + amount_cents > self.config.max_per_market_cents {
+        if market_new_total > self.config.max_per_market_cents {
             market_counter.fetch_sub(amount_cents, Ordering::AcqRel);
             drop(market_counter);
             self.total_reserved_cents

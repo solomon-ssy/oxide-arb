@@ -22,6 +22,9 @@ pub trait EventStore: Send + Sync + 'static {
 
     async fn mark_published(&self, event_id: &OutboxEventId) -> Result<(), OxideError>;
 
+    async fn record_failure(&self, event: &OutboxEventInfo, reason: &str)
+    -> Result<(), OxideError>;
+
     async fn mark_dead_letter(
         &self,
         event_id: &OutboxEventId,
@@ -71,6 +74,24 @@ impl EventStore for PgEventStore {
                 event_id,
                 UpdateOutboxEvent {
                     published_at: Some(Utc::now()),
+                    ..Default::default()
+                },
+            )
+            .await?)
+    }
+
+    async fn record_failure(
+        &self,
+        event: &OutboxEventInfo,
+        reason: &str,
+    ) -> Result<(), OxideError> {
+        Ok(self
+            .repo
+            .update(
+                &event.event_id,
+                UpdateOutboxEvent {
+                    publish_attempts: Some(event.publish_attempts.saturating_add(1)),
+                    last_error: Some(Some(reason.to_owned())),
                     ..Default::default()
                 },
             )

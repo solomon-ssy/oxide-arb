@@ -11,10 +11,10 @@ use oxide_arb_core::{
         capital_manager::CapitalManager,
         dispatcher::Dispatcher,
         execution_pipeline::{ExecutionPipeline, ExecutionPipelineDeps},
+        fok_strategy::FokOrderStrategy,
         fsm::ExecutionFSM,
         market_inflight::MarketInFlightRegistry,
         plan_builder::PlanBuilder,
-        tiered_strategy::OrderStrategy,
         validator::Validator,
     },
     exposure::in_memory::InMemoryExposureReservation,
@@ -30,7 +30,7 @@ use oxide_arb_core::{
     service::risk_metrics::{ApiHealthTracker, RiskMetricsState},
 };
 use oxide_arb_models::{
-    config::{ExposureReservationConfig, MarketDataConfig, PolymarketConfig, WebSocketConfig},
+    config::{MarketDataConfig, PolymarketConfig, WebSocketConfig},
     domain::execution::PostTradeJob,
     enums::common::ExecutionMode,
     types::Usd,
@@ -69,12 +69,11 @@ fn build_pipeline() -> EmergencyPipelineTuple {
         1,
     ));
     let book_store = Arc::new(BookStore::new(Arc::clone(&metrics)));
-    let exposure = Arc::new(InMemoryExposureReservation::new(
-        ExposureReservationConfig::default(),
-    ));
+    let reservation_config = test_risk_config().exposure_reservation_config();
+    let exposure = Arc::new(InMemoryExposureReservation::new(reservation_config.clone()));
     let capital = Arc::new(CapitalManager::new(
         Arc::clone(&exposure),
-        ExposureReservationConfig::default(),
+        reservation_config,
     ));
     let risk_engine = Arc::new(
         RiskEngineBuilder::new()
@@ -95,11 +94,12 @@ fn build_pipeline() -> EmergencyPipelineTuple {
     let metrics_state = Arc::new(RiskMetricsState::new(Arc::new(ApiHealthTracker::new(
         Duration::from_secs(60),
     ))));
-    metrics_state.seed_test_snapshot(Usd::new(dec!(5000)));
+    metrics_state.seed_simulated_snapshot(ExecutionMode::Paper, Usd::new(dec!(5000)));
     let risk_metrics = Arc::new(CoreRiskMetrics::new(
         metrics_state,
         Arc::clone(&exposure),
         ws_manager,
+        ExecutionMode::Paper,
     ));
 
     let fee_calculator = Arc::new(FeeCalculator::default());
@@ -121,7 +121,7 @@ fn build_pipeline() -> EmergencyPipelineTuple {
             Arc::clone(&fee_calculator),
             Arc::clone(&metrics),
         ),
-        order_strategy: OrderStrategy::new(
+        order_strategy: FokOrderStrategy::new(
             ExecutionMode::Paper,
             None,
             fee_calculator,
@@ -137,6 +137,7 @@ fn build_pipeline() -> EmergencyPipelineTuple {
         execution_mode: ExecutionMode::Paper,
         trade_repo: Arc::clone(&persistence.trade_repo),
         audit_writer: Arc::clone(&persistence.audit_writer),
+        event_store: Arc::new(InMemoryEventStore::new()),
         outcome_tx,
         backpressure,
     });

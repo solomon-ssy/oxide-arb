@@ -64,6 +64,7 @@ fn sample_market(id: &str) -> MarketRegistryInfo {
         min_order_size: dec!(1),
         volume_24h: Usd::ZERO,
         fee_schedule: None,
+        end_date: None,
         created_at: Utc::now(),
         updated_at: Utc::now(),
     }

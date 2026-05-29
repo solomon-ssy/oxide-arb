@@ -1,7 +1,7 @@
-//! FOK-first order strategy for Endgame single-platform execution.
+//! FOK-only order strategy for Endgame single-platform execution.
 //!
-//! Live mode submits real FOK orders via [`ClobClient`]; Paper/DryRun delegate to
-//! the dispatcher's simulated fills.
+//! Live mode submits real FOK orders via [`ClobClient`]. Paper and `DryRun`
+//! delegate to the dispatcher for deterministic simulated outcomes.
 
 use crate::{
     execution::{clob_outcome::map_order_response, dispatcher::Dispatcher},
@@ -20,9 +20,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-const TIER_FOK: &str = "fok";
+const FOK_LABEL: &str = "fok";
 
-pub struct OrderStrategy {
+pub struct FokOrderStrategy {
     execution_mode: ExecutionMode,
     clob_client: Option<Arc<ClobClient>>,
     fee_calculator: Arc<FeeCalculator>,
@@ -30,7 +30,7 @@ pub struct OrderStrategy {
     metrics: Arc<MetricsHub>,
 }
 
-impl OrderStrategy {
+impl FokOrderStrategy {
     pub const fn new(
         execution_mode: ExecutionMode,
         clob_client: Option<Arc<ClobClient>>,
@@ -58,7 +58,7 @@ impl OrderStrategy {
                 trace.mark_http_sent();
                 observe_tick_to_http(trace, &self.metrics);
                 let outcome = dispatcher.dispatch(plan);
-                self.record_tier_metrics(&outcome);
+                self.record_fok_metrics(&outcome);
                 outcome
             }
             ExecutionMode::Live => self.execute_live_fok(plan, trace).await,
@@ -104,13 +104,13 @@ impl OrderStrategy {
                     plan.category,
                     &plan.token_id,
                 );
-                self.record_tier_metrics(&outcome);
+                self.record_fok_metrics(&outcome);
                 outcome
             }
             Ok(Err(e)) => {
                 self.metrics
                     .tier_misses
-                    .with_label_values(&[TIER_FOK])
+                    .with_label_values(&[FOK_LABEL])
                     .inc();
                 ExecutionOutcome::Failed {
                     error: e.to_string(),
@@ -120,30 +120,36 @@ impl OrderStrategy {
             Err(_) => {
                 self.metrics
                     .tier_misses
-                    .with_label_values(&[TIER_FOK])
+                    .with_label_values(&[FOK_LABEL])
                     .inc();
                 tracing::error!(
                     execution_id = %plan.execution_id,
                     timeout_ms = self.dispatcher_timeout_ms,
-                    "CLOB order timed out"
+                    "CLOB FOK order timed out"
                 );
                 ExecutionOutcome::Failed {
-                    error: format!("CLOB order timeout after {}ms", self.dispatcher_timeout_ms),
+                    error: format!(
+                        "CLOB FOK order timeout after {}ms",
+                        self.dispatcher_timeout_ms
+                    ),
                     execution_mode: ExecutionMode::Live,
                 }
             }
         }
     }
 
-    fn record_tier_metrics(&self, outcome: &ExecutionOutcome) {
+    fn record_fok_metrics(&self, outcome: &ExecutionOutcome) {
         match outcome {
             ExecutionOutcome::Filled { .. } => {
-                self.metrics.tier_fills.with_label_values(&[TIER_FOK]).inc();
+                self.metrics
+                    .tier_fills
+                    .with_label_values(&[FOK_LABEL])
+                    .inc();
             }
             ExecutionOutcome::Miss { .. } | ExecutionOutcome::Failed { .. } => {
                 self.metrics
                     .tier_misses
-                    .with_label_values(&[TIER_FOK])
+                    .with_label_values(&[FOK_LABEL])
                     .inc();
             }
         }

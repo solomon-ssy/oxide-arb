@@ -117,6 +117,7 @@ async fn build_gamma_service(server_uri: &str) -> (GammaService, Arc<MarketRegis
         event_repo: Arc::new(PgEventRepository::new(db)),
         cache,
         metrics,
+        ws_subscription: None,
         full_sync_interval_secs: 300,
     });
 

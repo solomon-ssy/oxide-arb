@@ -101,6 +101,7 @@ impl From<MarketInfo> for MarketRegistryInfo {
             min_order_size: Decimal::ZERO,
             volume_24h: Usd::ZERO,
             fee_schedule,
+            end_date: info.end_date,
             created_at: info.created_at,
             updated_at: info.updated_at,
         }
@@ -139,6 +140,7 @@ pub struct MarketRegistryInfo {
     pub min_order_size: Decimal,
     pub volume_24h: Usd,
     pub fee_schedule: Option<MarketFeeSchedule>,
+    pub end_date: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -224,7 +226,7 @@ impl TryFrom<&MarketRegistryInfo> for UpsertMarket {
             no_token_id,
             tick_size: info.tick_size,
             neg_risk: info.neg_risk,
-            end_date: None,
+            end_date: info.end_date,
             resolved_at: None,
             fees_enabled: info
                 .fee_schedule

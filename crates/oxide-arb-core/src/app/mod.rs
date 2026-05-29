@@ -348,7 +348,6 @@ impl AppContext {
             )
             .unwrap_or(MicroScore::ZERO),
             shutdown: self.shutdown.clone(),
-            metrics: Arc::clone(&self.infra.metrics),
         });
         self.pending_tasks
             .push(TaskId::Scanner, move |_token| async move {

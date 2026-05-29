@@ -4,6 +4,7 @@
 //! and endgame-specific parameters live in [`RiskConfig`].
 //! `PositionSizingConfig` has been absorbed here per ADR-001 §4.
 
+use num_traits::ToPrimitive;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::Deserialize;
@@ -70,6 +71,12 @@ pub struct RiskConfig {
     /// Maximum USD for a single bet.
     #[serde(default = "default_max_single_bet")]
     pub max_single_bet_usd: Decimal,
+    /// Default TTL for in-flight capital reservations.
+    #[serde(default = "default_reservation_ttl_secs")]
+    pub reservation_ttl_secs: u64,
+    /// Interval for cleaning expired in-flight reservations.
+    #[serde(default = "default_reservation_gc_interval_secs")]
+    pub reservation_gc_interval_secs: u64,
 
     // ── Exposure as percentage of balance ─────────────────────────────
     /// Maximum portfolio exposure as a percentage of available balance.
@@ -105,14 +112,6 @@ pub struct RiskConfig {
     pub kelly: KellyConfig,
     #[serde(default)]
     pub drawdown: DrawdownConfig,
-
-    // ── Fee spend caps ─────────────────────────────────────────────────
-    /// Maximum daily fee spend (USD). Exceeding triggers L3 Daily halt.
-    #[serde(default = "default_max_daily_fee_spend")]
-    pub max_daily_fee_spend_usd: Decimal,
-    /// Maximum hourly fee spend (USD). Exceeding triggers L2 Session trip.
-    #[serde(default = "default_max_hourly_fee_spend")]
-    pub max_hourly_fee_spend_usd: Decimal,
 
     // ── API health ────────────────────────────────────────────────────
     /// API error rate threshold (0..1). Exceeding triggers L2 Session breaker.
@@ -162,6 +161,8 @@ impl Default for RiskConfig {
             max_open_positions: default_max_open_positions(),
             max_single_market_exposure_usd: default_max_market_exposure(),
             max_single_bet_usd: default_max_single_bet(),
+            reservation_ttl_secs: default_reservation_ttl_secs(),
+            reservation_gc_interval_secs: default_reservation_gc_interval_secs(),
             max_total_exposure_pct: default_max_total_exposure_pct(),
             metrics_refresh_interval_secs: default_metrics_refresh_interval(),
             reconciliation_interval_secs: default_reconciliation_interval(),
@@ -172,13 +173,23 @@ impl Default for RiskConfig {
             min_trade_usd: default_min_trade(),
             kelly: KellyConfig::default(),
             drawdown: DrawdownConfig::default(),
-            max_daily_fee_spend_usd: default_max_daily_fee_spend(),
-            max_hourly_fee_spend_usd: default_max_hourly_fee_spend(),
             api_error_rate_threshold: default_api_error_rate_threshold(),
             heartbeat_max_failures: default_heartbeat_max_failures(),
             potential_loss_escalation_secs: default_potential_loss_escalation(),
             max_concurrent_directional: default_max_concurrent_directional(),
             daily_directional_budget: default_daily_directional_budget(),
+        }
+    }
+}
+
+impl RiskConfig {
+    #[must_use]
+    pub fn exposure_reservation_config(&self) -> ExposureReservationConfig {
+        ExposureReservationConfig {
+            max_total_exposure_cents: usd_decimal_to_cents(self.max_total_exposure_usd),
+            max_per_market_cents: usd_decimal_to_cents(self.max_single_market_exposure_usd),
+            default_ttl_secs: self.reservation_ttl_secs,
+            gc_interval_secs: self.reservation_gc_interval_secs,
         }
     }
 }
@@ -263,12 +274,6 @@ const fn default_bankroll() -> Decimal {
 }
 const fn default_min_trade() -> Decimal {
     dec!(1)
-}
-const fn default_max_daily_fee_spend() -> Decimal {
-    dec!(20)
-}
-const fn default_max_hourly_fee_spend() -> Decimal {
-    dec!(5)
 }
 const fn default_api_error_rate_threshold() -> Decimal {
     dec!(0.10)
@@ -413,14 +418,18 @@ impl Default for CircuitBreakerConfig {
 
 // ── Exposure Reservation Config ──────────────────────────────────────────────
 
-/// Configuration for the exposure reservation system.
+/// Derived configuration for the exposure reservation system.
+///
+/// Production code must construct this from [`RiskConfig`] via
+/// [`RiskConfig::exposure_reservation_config`] so risk gates and reservation
+/// limits share one authority. Direct construction is kept for focused tests.
 #[derive(Debug, Clone, Deserialize, Validate)]
 pub struct ExposureReservationConfig {
     /// Maximum total exposure across all active reservations (USD cents).
-    #[serde(default = "default_max_total_exposure_cents")]
+    #[serde(default = "default_reservation_max_total_exposure_cents")]
     pub max_total_exposure_cents: u64,
     /// Maximum exposure per market (USD cents).
-    #[serde(default = "default_max_per_market_cents")]
+    #[serde(default = "default_reservation_max_per_market_cents")]
     pub max_per_market_cents: u64,
     /// Default TTL for reservations in seconds (auto-expire if not confirmed/released).
     #[serde(default = "default_reservation_ttl_secs")]
@@ -432,26 +441,27 @@ pub struct ExposureReservationConfig {
 
 impl Default for ExposureReservationConfig {
     fn default() -> Self {
-        Self {
-            max_total_exposure_cents: default_max_total_exposure_cents(),
-            max_per_market_cents: default_max_per_market_cents(),
-            default_ttl_secs: default_reservation_ttl_secs(),
-            gc_interval_secs: default_reservation_gc_interval_secs(),
-        }
+        RiskConfig::default().exposure_reservation_config()
     }
 }
 
-const fn default_max_total_exposure_cents() -> u64 {
-    5_000_000 // $50,000
-}
-const fn default_max_per_market_cents() -> u64 {
-    1_000_000 // $10,000
-}
 const fn default_reservation_ttl_secs() -> u64 {
     300
 }
 const fn default_reservation_gc_interval_secs() -> u64 {
     30
+}
+
+fn usd_decimal_to_cents(value: Decimal) -> u64 {
+    (value * dec!(100)).ceil().to_u64().unwrap_or(u64::MAX)
+}
+
+fn default_reservation_max_total_exposure_cents() -> u64 {
+    usd_decimal_to_cents(default_max_total_exposure())
+}
+
+fn default_reservation_max_per_market_cents() -> u64 {
+    usd_decimal_to_cents(default_max_market_exposure())
 }
 
 // ── Circuit Breaker Config defaults ─────────────────────────────────────────

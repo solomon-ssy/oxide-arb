@@ -74,6 +74,12 @@ async fn do_update(
     if let Some(published_at) = update.published_at {
         am.published_at = ActiveValue::Set(Some(published_at));
     }
+    if let Some(publish_attempts) = update.publish_attempts {
+        am.publish_attempts = ActiveValue::Set(publish_attempts);
+    }
+    if let Some(ref last_error) = update.last_error {
+        am.last_error = ActiveValue::Set(last_error.clone());
+    }
     if let Some(ref reason) = update.dead_letter_reason {
         am.dead_letter_reason = ActiveValue::Set(reason.clone());
     }

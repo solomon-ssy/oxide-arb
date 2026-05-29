@@ -2,10 +2,7 @@
 //! looks up market data, invokes the scanner, and dispatches results.
 
 use super::funnel::{FastLaneDispatch, Funnel};
-use crate::{
-    detection::scanner::Scanner, observability::metrics_hub::MetricsHub,
-    pipeline::market_cache::MarketCache,
-};
+use crate::{detection::scanner::Scanner, pipeline::market_cache::MarketCache};
 use oxide_arb_error::OxideError;
 use oxide_arb_models::types::{MarketId, MicroScore};
 use std::sync::Arc;
@@ -19,7 +16,6 @@ pub struct ScannerTaskDeps {
     pub funnel: Arc<Funnel>,
     pub dispatch_immediate_threshold: MicroScore,
     pub shutdown: CancellationToken,
-    pub metrics: Arc<MetricsHub>,
 }
 
 pub struct ScannerTask {
@@ -29,7 +25,6 @@ pub struct ScannerTask {
     funnel: Arc<Funnel>,
     dispatch_immediate_threshold: MicroScore,
     shutdown: CancellationToken,
-    metrics: Arc<MetricsHub>,
 }
 
 impl ScannerTask {
@@ -41,7 +36,6 @@ impl ScannerTask {
             funnel: deps.funnel,
             dispatch_immediate_threshold: deps.dispatch_immediate_threshold,
             shutdown: deps.shutdown,
-            metrics: deps.metrics,
         }
     }
 
@@ -71,7 +65,6 @@ impl ScannerTask {
         };
         let now = chrono::Utc::now();
         if let Some(scored) = self.scanner.scan_market(&entry, now) {
-            self.metrics.opportunities_detected.inc();
             let mut scored = scored;
             if scored.score >= self.dispatch_immediate_threshold {
                 match self.funnel.try_dispatch_immediate(Arc::clone(&scored)) {

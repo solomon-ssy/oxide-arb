@@ -85,7 +85,7 @@ fn map_upsert_event(raw: &RawGammaEvent, event_id: &EventId) -> UpsertEvent {
         category: MarketCategory::Other,
         status: EventStatus::Active,
         neg_risk: raw.neg_risk.unwrap_or(false),
-        end_date: None,
+        end_date: parse_gamma_datetime(raw.end_date.as_deref()),
         raw_gamma: serde_json::to_value(raw).ok(),
     }
 }
@@ -111,6 +111,7 @@ fn map_market_dual(raw: RawGammaMarket, event_id: &EventId) -> (UpsertMarket, Ma
         .as_deref()
         .and_then(|value| value.parse::<DateTime<Utc>>().ok())
         .unwrap_or_else(Utc::now);
+    let end_date = parse_gamma_datetime(raw.end_date.as_deref());
     let fee_schedule: Option<MarketFeeSchedule> = MarketFeeScheduleParts {
         raw: &raw,
         observed_at: updated,
@@ -140,6 +141,7 @@ fn map_market_dual(raw: RawGammaMarket, event_id: &EventId) -> (UpsertMarket, Ma
         yes_token: &yes_token,
         no_token: &no_token,
         tick_size,
+        end_date,
         resolved_at,
         fee_schedule: fee_schedule.as_ref(),
     }
@@ -156,6 +158,7 @@ fn map_market_dual(raw: RawGammaMarket, event_id: &EventId) -> (UpsertMarket, Ma
         tick_size,
         tokens,
         fee_schedule,
+        end_date,
         created,
         updated,
     }
@@ -213,6 +216,12 @@ fn token_pair_or_fallback(tokens: &[TokenInfo]) -> (TokenId, TokenId) {
     (yes, no)
 }
 
+fn parse_gamma_datetime(value: Option<&str>) -> Option<DateTime<Utc>> {
+    value
+        .filter(|raw| !raw.trim().is_empty())
+        .and_then(|raw| raw.parse::<DateTime<Utc>>().ok())
+}
+
 struct MarketUpsertParts<'a> {
     raw: &'a RawGammaMarket,
     market_id: &'a MarketId,
@@ -223,6 +232,7 @@ struct MarketUpsertParts<'a> {
     yes_token: &'a TokenId,
     no_token: &'a TokenId,
     tick_size: TickSize,
+    end_date: Option<DateTime<Utc>>,
     resolved_at: Option<DateTime<Utc>>,
     fee_schedule: Option<&'a MarketFeeSchedule>,
 }
@@ -241,7 +251,7 @@ impl From<MarketUpsertParts<'_>> for UpsertMarket {
             no_token_id: parts.no_token.clone(),
             tick_size: parts.tick_size,
             neg_risk: parts.raw.neg_risk.unwrap_or(false),
-            end_date: None,
+            end_date: parts.end_date,
             resolved_at: parts.resolved_at,
             fees_enabled: parts
                 .fee_schedule
@@ -269,6 +279,7 @@ struct MarketRegistryParts<'a> {
     tick_size: TickSize,
     tokens: Vec<TokenInfo>,
     fee_schedule: Option<MarketFeeSchedule>,
+    end_date: Option<DateTime<Utc>>,
     created: DateTime<Utc>,
     updated: DateTime<Utc>,
 }
@@ -293,6 +304,7 @@ impl From<MarketRegistryParts<'_>> for MarketRegistryInfo {
             min_order_size: parts.raw.minimum_order_size.unwrap_or(Decimal::ONE),
             volume_24h: Usd::ZERO,
             fee_schedule: parts.fee_schedule,
+            end_date: parts.end_date,
             created_at: parts.created,
             updated_at: parts.updated,
         }
@@ -395,6 +407,7 @@ pub fn map_market(raw: RawGammaMarket, event_id: &EventId) -> MarketRegistryInfo
         min_order_size: raw.minimum_order_size.unwrap_or(Decimal::ONE),
         volume_24h: Usd::ZERO,
         fee_schedule,
+        end_date: parse_gamma_datetime(raw.end_date.as_deref()),
         created_at,
         updated_at,
     }

@@ -3,21 +3,28 @@
 //! Production flusher integration lands in PR-8; until then spilled jobs are
 //! replayed directly by the execution outcome drain.
 
-use crate::observability::metrics_hub::MetricsHub;
+use crate::{observability::metrics_hub::MetricsHub, outbox::event_store::EventStore};
+use chrono::Utc;
 use oxide_arb_error::OxideError;
-use oxide_arb_models::domain::execution::PostTradeJob;
+use oxide_arb_models::{
+    domain::{execution::PostTradeJob, outbox::OutboxEventInfo},
+    enums::outbox::{OutboxAggregateType, OutboxEventType},
+    types::{AggregateId, OutboxEventId},
+};
 use parking_lot::Mutex;
 use std::{collections::VecDeque, sync::Arc};
 
 /// Synchronous spill buffer backing post-trade backpressure.
 pub struct InMemoryEventStore {
     post_trade_jobs: Mutex<VecDeque<PostTradeJob>>,
+    outbox_events: Mutex<VecDeque<OutboxEventInfo>>,
 }
 
 impl InMemoryEventStore {
     pub const fn new() -> Self {
         Self {
             post_trade_jobs: Mutex::new(VecDeque::new()),
+            outbox_events: Mutex::new(VecDeque::new()),
         }
     }
 
@@ -50,6 +57,87 @@ impl InMemoryEventStore {
 
     pub fn pending_post_trade_count(&self) -> usize {
         self.post_trade_jobs.lock().len()
+    }
+}
+
+#[async_trait::async_trait]
+impl EventStore for InMemoryEventStore {
+    async fn append(
+        &self,
+        aggregate_type: OutboxAggregateType,
+        aggregate_id: AggregateId,
+        event_type: OutboxEventType,
+        payload: &serde_json::Value,
+    ) -> Result<OutboxEventInfo, OxideError> {
+        let event = OutboxEventInfo {
+            event_id: OutboxEventId::generate(),
+            aggregate_type,
+            aggregate_id,
+            event_type,
+            payload: payload.clone(),
+            publish_attempts: 0,
+            published_at: None,
+            last_error: None,
+            dead_letter_reason: None,
+            created_at: Utc::now(),
+        };
+        self.outbox_events.lock().push_back(event.clone());
+        Ok(event)
+    }
+
+    async fn fetch_pending(&self, limit: usize) -> Result<Vec<OutboxEventInfo>, OxideError> {
+        Ok(self
+            .outbox_events
+            .lock()
+            .iter()
+            .take(limit)
+            .cloned()
+            .collect())
+    }
+
+    async fn mark_published(&self, event_id: &OutboxEventId) -> Result<(), OxideError> {
+        self.outbox_events
+            .lock()
+            .retain(|event| &event.event_id != event_id);
+        Ok(())
+    }
+
+    async fn record_failure(
+        &self,
+        event: &OutboxEventInfo,
+        reason: &str,
+    ) -> Result<(), OxideError> {
+        for stored in self.outbox_events.lock().iter_mut() {
+            if stored.event_id == event.event_id {
+                stored.publish_attempts = stored.publish_attempts.saturating_add(1);
+                stored.last_error = Some(reason.to_owned());
+            }
+        }
+        Ok(())
+    }
+
+    async fn mark_dead_letter(
+        &self,
+        event_id: &OutboxEventId,
+        reason: &str,
+    ) -> Result<(), OxideError> {
+        for stored in self.outbox_events.lock().iter_mut() {
+            if &stored.event_id == event_id {
+                stored.dead_letter_reason = Some(reason.to_owned());
+            }
+        }
+        Ok(())
+    }
+
+    async fn dead_letter_count(&self) -> Result<u64, OxideError> {
+        Ok(self
+            .outbox_events
+            .lock()
+            .iter()
+            .filter(|event| event.dead_letter_reason.is_some())
+            .count()
+            .try_into()
+            .unwrap_or(u64::MAX))
     }
 }
 

@@ -3,7 +3,9 @@
 use crate::{
     observability::metrics_hub::MetricsHub,
     pipeline::{market_cache::MarketCache, market_registry::MarketRegistry},
-    service::cache_invalidation::invalidate_post_gamma_sync,
+    service::{
+        cache_invalidation::invalidate_post_gamma_sync, ws_subscription::WsSubscriptionCoordinator,
+    },
 };
 use chrono::{DateTime, Utc};
 use num_traits::ToPrimitive;
@@ -35,6 +37,7 @@ pub struct GammaServiceDeps {
     pub event_repo: Arc<PgEventRepository>,
     pub cache: Arc<TieredCache>,
     pub metrics: Arc<MetricsHub>,
+    pub ws_subscription: Option<Arc<WsSubscriptionCoordinator>>,
     /// Minimum seconds between full catalog refreshes (from `[market_data.gamma]`).
     pub full_sync_interval_secs: u64,
 }
@@ -48,6 +51,7 @@ pub struct GammaService {
     event_repo: Arc<PgEventRepository>,
     cache: Arc<TieredCache>,
     metrics: Arc<MetricsHub>,
+    ws_subscription: Option<Arc<WsSubscriptionCoordinator>>,
     full_sync_interval_secs: u64,
     last_sync_at: parking_lot::Mutex<Option<DateTime<Utc>>>,
 }
@@ -63,6 +67,7 @@ impl GammaService {
             event_repo: deps.event_repo,
             cache: deps.cache,
             metrics: deps.metrics,
+            ws_subscription: deps.ws_subscription,
             full_sync_interval_secs: deps.full_sync_interval_secs.max(60),
             last_sync_at: parking_lot::Mutex::new(None),
         }
@@ -142,6 +147,7 @@ impl GammaService {
         self.persist_events(&batch.events).await;
         self.persist_markets(&persist_batch).await;
         self.market_cache.rebuild();
+        self.sync_ws_subscriptions();
 
         self.metrics
             .gamma_markets_total
@@ -226,8 +232,23 @@ impl GammaService {
         self.persist_events(&batch.events).await;
         self.persist_markets(&persist_batch).await;
         self.market_cache.rebuild();
+        self.sync_ws_subscriptions();
 
         Ok(())
+    }
+
+    fn sync_ws_subscriptions(&self) {
+        let Some(coordinator) = &self.ws_subscription else {
+            return;
+        };
+        let tokens = self.market_registry.active_subscribable_tokens();
+        let count = tokens.len();
+        coordinator.sync_to_tokens(tokens);
+        tracing::info!(
+            tokens = count,
+            subscribed = coordinator.subscribed_count(),
+            "CLOB websocket subscriptions synced after Gamma catalog update"
+        );
     }
 
     async fn persist_markets(&self, markets: &[UpsertMarket]) {

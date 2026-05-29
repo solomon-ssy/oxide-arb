@@ -60,7 +60,10 @@ use oxide_arb_models::{
     types::{LedgerId, MarketId, OpportunityId, Usd},
 };
 use parking_lot::RwLock;
-use std::{sync::Arc, time::Instant};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 pub struct RiskEngine<P = Arc<dyn RiskPersistence>>
 where
@@ -580,6 +583,26 @@ where
         let weekly_rolled = self.weekly.write().maybe_rollover();
         let hourly_rolled = self.hourly.write().maybe_rollover();
         self.blacklist.gc();
+        let stale_potential_loss = self
+            .potential_loss_store
+            .find_stale(Duration::from_secs(
+                self.config.potential_loss_escalation_secs,
+            ))
+            .await?;
+        if !stale_potential_loss.is_empty() {
+            let reason = format!(
+                "{} stale potential-loss entries exceeded {}s",
+                stale_potential_loss.len(),
+                self.config.potential_loss_escalation_secs
+            );
+            self.circuit_breaker
+                .write()
+                .halt(CircuitBreakerLevel::System, reason.clone());
+            self.publish_risk_snapshot();
+            self.record_emergency(CircuitBreakerLevel::System, &reason, metrics)
+                .await?;
+            return Ok(true);
+        }
 
         let any_change = cb_transitioned || daily_rolled || weekly_rolled || hourly_rolled;
         if any_change {

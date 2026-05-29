@@ -17,6 +17,7 @@ use crate::{
         capital_manager::CapitalManager,
         dispatcher::Dispatcher,
         execution_pipeline::{ExecutionPipeline, ExecutionPipelineDeps},
+        fok_strategy::FokOrderStrategy,
         fsm::ExecutionFSM,
         market_inflight::MarketInFlightRegistry,
         plan_builder::PlanBuilder,
@@ -26,7 +27,6 @@ use crate::{
             dedup::SettlementDedup,
             service::{MarketSettlementService, MarketSettlementServiceDeps},
         },
-        tiered_strategy::OrderStrategy,
         validator::Validator,
     },
     exposure::in_memory::InMemoryExposureReservation,
@@ -52,6 +52,7 @@ use crate::{
     service::{
         gamma::{GammaService, GammaServiceDeps},
         risk_metrics::{ApiHealthTracker, RiskMetricsRefreshService, RiskMetricsState},
+        ws_subscription::WsSubscriptionCoordinator,
     },
 };
 use oxide_arb_algorithm::{
@@ -72,10 +73,10 @@ use oxide_arb_api::{
 };
 use oxide_arb_error::OxideResult;
 use oxide_arb_models::{
-    config::{ExposureReservationConfig, Settings},
+    config::Settings,
     domain::{risk::RiskEngineState, settlement::MarketSettlementRequest},
     enums::common::ExecutionMode,
-    types::{MarketId, MicroUsd, TokenId},
+    types::{MarketId, MicroUsd, TokenId, Usd},
 };
 use oxide_arb_repository::{
     clickhouse::ChTimeseriesRepository,
@@ -486,14 +487,19 @@ async fn wire_risk(
     clients: &BuildClients,
 ) -> OxideResult<BuildRisk> {
     let exposure = Arc::new(InMemoryExposureReservation::new(
-        ExposureReservationConfig::default(),
+        settings.risk.exposure_reservation_config(),
     ));
     let api_tracker = Arc::new(ApiHealthTracker::new(Duration::from_secs(60)));
     let metrics_state = Arc::new(RiskMetricsState::new(api_tracker));
+    let mode = settings.execution.execution_mode;
+    if mode != ExecutionMode::Live {
+        metrics_state.seed_simulated_snapshot(mode, Usd::new(settings.risk.bankroll_usd));
+    }
     let risk_metrics = Arc::new(CoreRiskMetrics::new(
         Arc::clone(&metrics_state),
         Arc::clone(&exposure),
         Arc::clone(&clients.ws_manager),
+        mode,
     ));
 
     let risk_persistence = Arc::new(CoreRiskPersistence::new(
@@ -690,6 +696,9 @@ async fn wire_detection(
         event_repo: infra.repos.event.clone(),
         cache: infra.cache.clone(),
         metrics: infra.metrics.clone(),
+        ws_subscription: Some(Arc::new(WsSubscriptionCoordinator::new(Arc::clone(
+            &clients.ws_manager,
+        )))),
         full_sync_interval_secs: settings.market_data.gamma.full_sync_interval_secs,
     }));
 
@@ -736,7 +745,7 @@ fn wire_execution_loop(
         flume::bounded(settings.settlement.lifecycle.channel_capacity);
     let capital = Arc::new(CapitalManager::new(
         Arc::clone(&risk.exposure),
-        ExposureReservationConfig::default(),
+        settings.risk.exposure_reservation_config(),
     ));
     let market_inflight = Arc::new(MarketInFlightRegistry::new());
     let execution_pipeline = Arc::new(ExecutionPipeline::new(ExecutionPipelineDeps {
@@ -760,7 +769,7 @@ fn wire_execution_loop(
             clients.fee_calculator.clone(),
             Arc::clone(&infra.metrics),
         ),
-        order_strategy: OrderStrategy::new(
+        order_strategy: FokOrderStrategy::new(
             mode,
             clients.clob_client.clone(),
             clients.fee_calculator.clone(),
@@ -776,6 +785,7 @@ fn wire_execution_loop(
         execution_mode: mode,
         trade_repo: infra.persistence.trade_repo.clone(),
         audit_writer: Arc::clone(&infra.persistence.audit_writer),
+        event_store: Arc::clone(&infra.persistence.event_store),
         outcome_tx,
         backpressure: Arc::clone(&risk.backpressure),
     }));

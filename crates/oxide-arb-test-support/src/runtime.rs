@@ -27,12 +27,12 @@ use oxide_arb_core::{
         capital_manager::CapitalManager,
         dispatcher::Dispatcher,
         execution_pipeline::{ExecutionPipeline, ExecutionPipelineDeps},
+        fok_strategy::FokOrderStrategy,
         fsm::ExecutionFSM,
         market_inflight::MarketInFlightRegistry,
         plan_builder::PlanBuilder,
         port::ExecutionPort,
         runner::{ExecutionRunner, ExecutionRunnerPool},
-        tiered_strategy::OrderStrategy,
         validator::Validator,
     },
     exposure::in_memory::InMemoryExposureReservation,
@@ -53,7 +53,7 @@ use oxide_arb_core::{
 };
 use oxide_arb_error::OxideResult;
 use oxide_arb_models::{
-    config::{ExposureReservationConfig, Settings},
+    config::Settings,
     domain::{
         book::BookLevel,
         execution::PostTradeJob,
@@ -132,15 +132,16 @@ fn build_test_infra(
 
     let fee_calculator = Arc::new(FeeCalculator::from_config(&settings.polymarket.fees));
     let exposure = Arc::new(InMemoryExposureReservation::new(
-        ExposureReservationConfig::default(),
+        settings.risk.exposure_reservation_config(),
     ));
     let api_tracker = Arc::new(ApiHealthTracker::new(Duration::from_secs(60)));
     let metrics_state = Arc::new(RiskMetricsState::new(api_tracker));
-    metrics_state.seed_test_snapshot(Usd::new(dec!(5000)));
+    metrics_state.seed_simulated_snapshot(settings.execution.execution_mode, Usd::new(dec!(5000)));
     let risk_metrics = Arc::new(CoreRiskMetrics::new(
         Arc::clone(&metrics_state),
         Arc::clone(&exposure),
         Arc::clone(ws_manager),
+        settings.execution.execution_mode,
     ));
 
     let audit_sink: Arc<dyn AuditSink> = risk_decision_audit;
@@ -250,7 +251,7 @@ fn build_test_execution_graph(
     let (outcome_tx, post_trade_rx) = flume::bounded(1024);
     let capital = Arc::new(CapitalManager::new(
         Arc::clone(&infra.exposure),
-        ExposureReservationConfig::default(),
+        settings.risk.exposure_reservation_config(),
     ));
     let market_inflight = Arc::new(MarketInFlightRegistry::new());
     let pipeline = Arc::new(ExecutionPipeline::new(ExecutionPipelineDeps {
@@ -274,7 +275,7 @@ fn build_test_execution_graph(
             Arc::clone(&infra.fee_calculator),
             Arc::clone(&infra.metrics),
         ),
-        order_strategy: OrderStrategy::new(
+        order_strategy: FokOrderStrategy::new(
             mode,
             clob,
             Arc::clone(&infra.fee_calculator),
@@ -290,6 +291,7 @@ fn build_test_execution_graph(
         execution_mode: mode,
         trade_repo: Arc::clone(&persistence.trade_repo),
         audit_writer: Arc::clone(&persistence.audit_writer),
+        event_store: Arc::new(InMemoryEventStore::new()),
         outcome_tx,
         backpressure: Arc::clone(&infra.backpressure),
     }));
@@ -396,7 +398,6 @@ pub fn assemble_test_runtime(
         )
         .unwrap_or(MicroScore::ZERO),
         shutdown,
-        metrics: Arc::clone(&infra.metrics),
     });
 
     Ok(TestRuntime {
@@ -531,6 +532,7 @@ impl RuntimeHarness {
             min_order_size: dec!(1),
             volume_24h: Usd::ZERO,
             fee_schedule: None,
+            end_date: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         });
@@ -596,6 +598,7 @@ impl RuntimeHarness {
             min_order_size: dec!(1),
             volume_24h: Usd::ZERO,
             fee_schedule: None,
+            end_date: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         });

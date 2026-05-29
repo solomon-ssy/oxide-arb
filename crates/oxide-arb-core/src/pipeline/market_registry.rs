@@ -178,6 +178,26 @@ impl MarketRegistry {
         self.active_markets.load_full()
     }
 
+    /// Active YES/NO tokens that should be subscribed on the CLOB websocket.
+    #[must_use]
+    pub fn active_subscribable_tokens(&self) -> Vec<TokenId> {
+        let active = self.active_markets();
+        let mut tokens = Vec::with_capacity(active.len() * 2);
+        for market_id in active.iter() {
+            let Some(market) = self.get_market(market_id) else {
+                continue;
+            };
+            if market.status != MarketStatus::Active {
+                continue;
+            }
+            tokens.push(market.token_yes.clone());
+            tokens.push(market.token_no.clone());
+        }
+        tokens.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        tokens.dedup_by(|a, b| a.as_str() == b.as_str());
+        tokens
+    }
+
     /// Rebuild the active-market list from scratch by scanning all entries.
     pub fn refresh_active(&self) {
         let mut ids = Vec::new();
@@ -241,6 +261,7 @@ mod tests {
             min_order_size: dec!(5),
             volume_24h: Usd::ZERO,
             fee_schedule: None,
+            end_date: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

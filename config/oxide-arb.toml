@@ -91,14 +91,6 @@ dispatcher_timeout_ms = 30000
 trade_confirm_timeout_secs = 60
 trade_confirm_poll_interval_secs = 2
 
-# FOK → short GTD → long GTD tiered execution
-[execution.tiered]
-fok_timeout_ms = 5000
-gtd_short_expiry_secs = 30
-gtd_long_expiry_secs = 300
-max_retries_per_tier = 1
-price_tolerance_ticks = 2
-
 # ── Risk Management + Position Sizing ────────────────────────────────────────
 
 [risk]
@@ -122,6 +114,8 @@ reserve_balance_usd = "100"
 max_open_positions = 3
 max_single_market_exposure_usd = "500"
 max_single_bet_usd = "25"
+reservation_ttl_secs = 300
+reservation_gc_interval_secs = 30
 
 max_total_exposure_pct = "80"
 metrics_refresh_interval_secs = 5

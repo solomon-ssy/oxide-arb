@@ -23,10 +23,10 @@ use oxide_arb_core::{
         capital_manager::CapitalManager,
         dispatcher::Dispatcher,
         execution_pipeline::{ExecutionPipeline, ExecutionPipelineDeps},
+        fok_strategy::FokOrderStrategy,
         fsm::ExecutionFSM,
         market_inflight::MarketInFlightRegistry,
         plan_builder::PlanBuilder,
-        tiered_strategy::OrderStrategy,
         validator::Validator,
     },
     exposure::in_memory::InMemoryExposureReservation,
@@ -49,9 +49,8 @@ use oxide_arb_core::{
 use oxide_arb_models::{
     clickhouse::OpportunityAuditRow,
     config::{
-        CalibrationConfig, EmissionCooldownConfig, EndgameDetectionConfig,
-        ExposureReservationConfig, FillProbabilityConfig, MarketDataConfig, PolymarketConfig,
-        RiskConfig, ScorerConfig, WebSocketConfig,
+        CalibrationConfig, EmissionCooldownConfig, EndgameDetectionConfig, FillProbabilityConfig,
+        MarketDataConfig, PolymarketConfig, RiskConfig, ScorerConfig, WebSocketConfig,
     },
     domain::{
         book::{BookLevel, BookSnapshot, EndgameBookPair},
@@ -514,6 +513,7 @@ fn bench_coalescer_pair_flush(c: &mut Criterion) {
         min_order_size: dec!(1),
         volume_24h: Usd::ZERO,
         fee_schedule: None,
+        end_date: None,
         created_at: Utc::now(),
         updated_at: Utc::now(),
     });
@@ -682,6 +682,7 @@ fn bench_scanner_scan_market(c: &mut Criterion) {
         min_order_size: dec!(1),
         volume_24h: Usd::ZERO,
         fee_schedule: None,
+        end_date: None,
         created_at: Utc::now(),
         updated_at: Utc::now(),
     });
@@ -846,8 +847,13 @@ fn execution_bench_risk_metrics(
     let metrics_state = Arc::new(RiskMetricsState::new(Arc::new(ApiHealthTracker::new(
         std::time::Duration::from_secs(60),
     ))));
-    metrics_state.seed_test_snapshot(Usd::new(dec!(5000)));
-    Arc::new(CoreRiskMetrics::new(metrics_state, exposure, ws_manager))
+    metrics_state.seed_simulated_snapshot(ExecutionMode::Paper, Usd::new(dec!(5000)));
+    Arc::new(CoreRiskMetrics::new(
+        metrics_state,
+        exposure,
+        ws_manager,
+        ExecutionMode::Paper,
+    ))
 }
 
 fn execution_bench_setup() -> (
@@ -868,12 +874,11 @@ fn execution_bench_setup() -> (
             1,
         ));
         let book_store = Arc::new(BookStore::new(Arc::clone(&metrics)));
-        let exposure = Arc::new(InMemoryExposureReservation::new(
-            ExposureReservationConfig::default(),
-        ));
+        let reservation_config = RiskConfig::default().exposure_reservation_config();
+        let exposure = Arc::new(InMemoryExposureReservation::new(reservation_config.clone()));
         let capital = Arc::new(CapitalManager::new(
             Arc::clone(&exposure),
-            ExposureReservationConfig::default(),
+            reservation_config,
         ));
         let scored = Arc::new(execution_bench_scored());
         seed_execution_books(&book_store, &scored);
@@ -909,7 +914,7 @@ fn execution_bench_setup() -> (
                 Arc::clone(&fee_calculator),
                 Arc::clone(&metrics),
             ),
-            order_strategy: OrderStrategy::new(
+            order_strategy: FokOrderStrategy::new(
                 ExecutionMode::Paper,
                 None,
                 fee_calculator,
@@ -925,6 +930,7 @@ fn execution_bench_setup() -> (
             execution_mode: ExecutionMode::Paper,
             trade_repo,
             audit_writer,
+            event_store: Arc::new(InMemoryEventStore::new()),
             outcome_tx,
             backpressure,
         });

@@ -63,7 +63,7 @@ impl MarketCache {
                 category: market.category,
                 tick_size: market.tick_size,
                 neg_risk: market.neg_risk,
-                settlement_deadline: None,
+                settlement_deadline: market.end_date,
             });
             index.insert(entry.market_id.clone(), Arc::clone(&entry));
             entries.push(entry);
@@ -125,6 +125,7 @@ mod tests {
             min_order_size: dec!(5),
             volume_24h: Usd::ZERO,
             fee_schedule: None,
+            end_date: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

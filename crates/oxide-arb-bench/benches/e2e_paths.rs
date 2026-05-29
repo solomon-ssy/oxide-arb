@@ -80,6 +80,7 @@ fn bench_e2e_ws_to_scan(c: &mut Criterion) {
         min_order_size: dec!(1),
         volume_24h: Usd::ZERO,
         fee_schedule: None,
+        end_date: None,
         created_at: Utc::now(),
         updated_at: Utc::now(),
     });
@@ -158,6 +159,7 @@ fn bench_e2e_ws_normalize_to_coalescer(c: &mut Criterion) {
         min_order_size: dec!(1),
         volume_24h: Usd::ZERO,
         fee_schedule: None,
+        end_date: None,
         created_at: Utc::now(),
         updated_at: Utc::now(),
     });
