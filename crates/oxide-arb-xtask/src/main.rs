@@ -32,11 +32,14 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Run the default workspace tests, Docker suites, and network suites.
-    TestFull,
+    #[command(name = "test-full")]
+    Full,
     /// Run testcontainers-based integration tests (requires Docker daemon).
-    TestDocker,
+    #[command(name = "test-docker")]
+    Docker,
     /// Run network-shaped API tests that are ignored by default.
-    TestNetwork,
+    #[command(name = "test-network")]
+    Network,
 }
 
 fn main() -> ExitCode {
@@ -51,9 +54,9 @@ fn main() -> ExitCode {
 
 fn run() -> Result<()> {
     match Cli::parse().command {
-        Commands::TestFull => test_full(),
-        Commands::TestDocker => test_docker(),
-        Commands::TestNetwork => test_network(),
+        Commands::Full => test_full(),
+        Commands::Docker => test_docker(),
+        Commands::Network => test_network(),
     }
 }
 
