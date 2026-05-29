@@ -1,6 +1,6 @@
 //! Periodic refresh of risk metrics snapshot from CLOB balance and open positions.
 
-use crate::observability::metrics_hub::MetricsHub;
+use crate::{observability::metrics_hub::MetricsHub, service::equity_valuator::EquityValuator};
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use num_traits::ToPrimitive;
@@ -22,9 +22,11 @@ use std::{
 };
 
 struct MetricsSnapshot {
-    cached_balance: Usd,
+    cash_balance: Usd,
     positions: Vec<PositionInfo>,
     total_position_exposure: Usd,
+    position_mark_value: Usd,
+    equity: Usd,
     market_position_exposures: HashMap<MarketId, Usd>,
     open_position_count: usize,
     open_buy_count: usize,
@@ -60,9 +62,11 @@ impl From<RiskMetricsSource> for u8 {
 impl MetricsSnapshot {
     fn initial() -> Self {
         Self {
-            cached_balance: Usd::ZERO,
+            cash_balance: Usd::ZERO,
             positions: Vec::new(),
             total_position_exposure: Usd::ZERO,
+            position_mark_value: Usd::ZERO,
+            equity: Usd::ZERO,
             market_position_exposures: HashMap::new(),
             open_position_count: 0,
             open_buy_count: 0,
@@ -199,8 +203,18 @@ impl RiskMetricsState {
     }
 
     #[inline]
-    pub fn cached_balance(&self) -> Usd {
-        self.snapshot.load().cached_balance
+    pub fn cash_balance(&self) -> Usd {
+        self.snapshot.load().cash_balance
+    }
+
+    #[inline]
+    pub fn position_mark_value(&self) -> Usd {
+        self.snapshot.load().position_mark_value
+    }
+
+    #[inline]
+    pub fn equity(&self) -> Usd {
+        self.snapshot.load().equity
     }
 
     #[inline]
@@ -250,7 +264,9 @@ impl RiskMetricsState {
         self.check_daily_rollover();
         let snap = self.snapshot.load();
         LoadedMetricsSnapshot {
-            cached_balance: snap.cached_balance,
+            cash_balance: snap.cash_balance,
+            position_mark_value: snap.position_mark_value,
+            equity: snap.equity,
             total_position_exposure: snap.total_position_exposure,
             market_position_exposure: snap
                 .market_position_exposures
@@ -319,21 +335,23 @@ impl RiskMetricsState {
         self.last_successful_refresh.load(Ordering::Acquire)
     }
 
-    pub fn seed_simulated_snapshot(&self, mode: ExecutionMode, cached_balance: Usd) {
+    pub fn seed_simulated_snapshot(&self, mode: ExecutionMode, cash_balance: Usd) {
         let source = match mode {
             ExecutionMode::DryRun => RiskMetricsSource::SimulatedDryRun,
             ExecutionMode::Paper => RiskMetricsSource::SimulatedPaper,
             ExecutionMode::Live => RiskMetricsSource::AuthoritativeClob,
         };
-        self.store_empty_position_snapshot(cached_balance, source);
+        self.store_empty_position_snapshot(cash_balance, source);
     }
 
-    fn store_empty_position_snapshot(&self, cached_balance: Usd, source: RiskMetricsSource) {
+    fn store_empty_position_snapshot(&self, cash_balance: Usd, source: RiskMetricsSource) {
         self.store_snapshot(
             MetricsSnapshot {
-                cached_balance,
+                cash_balance,
                 positions: Vec::new(),
                 total_position_exposure: Usd::ZERO,
+                position_mark_value: Usd::ZERO,
+                equity: cash_balance,
                 market_position_exposures: HashMap::new(),
                 open_position_count: 0,
                 open_buy_count: 0,
@@ -348,7 +366,9 @@ impl RiskMetricsState {
 /// Point-in-time copy of position metrics (single `ArcSwap` load).
 #[derive(Debug, Clone, Copy)]
 pub struct LoadedMetricsSnapshot {
-    pub cached_balance: Usd,
+    pub cash_balance: Usd,
+    pub position_mark_value: Usd,
+    pub equity: Usd,
     pub total_position_exposure: Usd,
     pub market_position_exposure: Usd,
     pub open_position_count: usize,
@@ -363,6 +383,7 @@ pub struct RiskMetricsRefreshService {
     state: Arc<RiskMetricsState>,
     clob_client: Arc<ClobClient>,
     position_repo: Arc<PgPositionRepository>,
+    equity_valuator: Arc<EquityValuator>,
     metrics: Arc<MetricsHub>,
 }
 
@@ -371,12 +392,14 @@ impl RiskMetricsRefreshService {
         state: Arc<RiskMetricsState>,
         clob_client: Arc<ClobClient>,
         position_repo: Arc<PgPositionRepository>,
+        equity_valuator: Arc<EquityValuator>,
         metrics: Arc<MetricsHub>,
     ) -> Self {
         Self {
             state,
             clob_client,
             position_repo,
+            equity_valuator,
             metrics,
         }
     }
@@ -388,7 +411,7 @@ impl RiskMetricsRefreshService {
     }
 
     async fn fetch_and_store_snapshot(&self) -> Result<(Usd, Vec<(MarketId, Usd)>), OxideError> {
-        let balance = match self.clob_client.collateral_balance().await {
+        let cash_balance = match self.clob_client.collateral_balance().await {
             Ok(b) => {
                 self.state.api_tracker.record_request(true);
                 b
@@ -425,22 +448,26 @@ impl RiskMetricsRefreshService {
             }
         }
 
+        let (position_mark_value, _) = self.equity_valuator.value(&positions, chrono::Utc::now());
+        let equity = cash_balance + position_mark_value;
         let prev = self.state.snapshot.load();
         let seq = prev.refresh_sequence + 1;
 
         self.state.store_snapshot(
             MetricsSnapshot {
-                cached_balance: balance,
+                cash_balance,
                 open_position_count: positions.len(),
                 open_buy_count: buy_count,
                 open_sell_count: sell_count,
                 total_position_exposure: total_exp,
+                position_mark_value,
+                equity,
                 market_position_exposures: market_exps,
                 positions,
                 refresh_sequence: seq,
             },
             RiskMetricsSource::AuthoritativeClob,
         );
-        Ok((balance, ext_positions))
+        Ok((cash_balance, ext_positions))
     }
 }

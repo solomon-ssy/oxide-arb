@@ -1,13 +1,13 @@
-use super::orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, DatabaseTransaction, EntityTrait,
-    QueryFilter, QueryOrder, Set,
-};
 use crate::traits::ResolutionEventRepository;
 use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::{
     domain::settlement::{NewResolutionEvent, ResolutionEventInfo},
-    entities::resolution_event::{ActiveModel, Column, Entity},
+    entities::resolution_event::{Column, Entity},
     types::MarketId,
+};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, DatabaseTransaction, EntityTrait,
+    IntoActiveModel, QueryFilter, QueryOrder,
 };
 
 pub struct PgResolutionEventRepository {
@@ -76,7 +76,8 @@ async fn append_q(
     db: &impl sea_orm::ConnectionTrait,
     event: NewResolutionEvent,
 ) -> Result<(), StorageError> {
-    active_model(event)
+    event
+        .into_active_model()
         .insert(db)
         .await
         .map_err(StorageError::from)?;
@@ -109,18 +110,4 @@ async fn latest_by_source_q(
         .await
         .map_err(StorageError::from)
         .map(|row| row.map(Into::into))
-}
-
-fn active_model(event: NewResolutionEvent) -> ActiveModel {
-    ActiveModel {
-        resolution_id: Set(event.resolution_id),
-        market_id: Set(event.market_id),
-        outcome: Set(event.outcome),
-        source: Set(event.source),
-        gamma_agrees: Set(event.gamma_agrees),
-        ctf_agrees: Set(event.ctf_agrees),
-        evidence: Set(event.evidence),
-        resolved_at: Set(event.resolved_at),
-        created_at: Set(event.created_at),
-    }
 }

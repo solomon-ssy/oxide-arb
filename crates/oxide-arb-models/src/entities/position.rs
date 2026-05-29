@@ -7,28 +7,10 @@ use crate::{
     types::{MarketId, PositionId, Price, Shares, TokenId, TradeId, Usd},
 };
 use chrono::{DateTime, Utc};
-use oxide_arb_macros::ActiveModelDefaults;
 use sea_orm::entity::prelude::*;
 
-const DEFAULT_UNREALIZED_PNL: Usd = Usd::ZERO;
-const DEFAULT_REALIZED_PNL: Usd = Usd::ZERO;
-const DEFAULT_REDEEM_STATUS: RedeemStatus = RedeemStatus::NotRequired;
-const DEFAULT_REDEEM_ATTEMPTS: i32 = 0;
-const DEFAULT_SETTLEMENT_ACCOUNTING_STATUS: SettlementAccountingStatus =
-    SettlementAccountingStatus::Pending;
-
-#[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, ActiveModelDefaults)]
+#[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "position")]
-#[active_defaults(
-    generate(position_id, PositionId::generate()),
-    default(status, PositionStatus::Open),
-    default(unrealized_pnl, DEFAULT_UNREALIZED_PNL),
-    default(realized_pnl, DEFAULT_REALIZED_PNL),
-    default(redeem_status, DEFAULT_REDEEM_STATUS),
-    default(redeem_attempts, DEFAULT_REDEEM_ATTEMPTS),
-    default(settlement_accounting_status, DEFAULT_SETTLEMENT_ACCOUNTING_STATUS),
-    timestamp(opened_at)
-)]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub position_id: PositionId,
@@ -87,3 +69,5 @@ impl Related<super::trade::Entity> for Entity {
         Relation::Trade.def()
     }
 }
+
+impl ActiveModelBehavior for ActiveModel {}

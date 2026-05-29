@@ -89,7 +89,7 @@ info_from_model!(CalibrationOutcomeInfo, crate::entities::calibration_outcome::M
 /// ON CONFLICT upserts keyed on `(category, price_zone, duration_bucket)`,
 /// only the updateable columns are included.
 #[derive(Debug, Clone, DeriveIntoActiveModel)]
-#[sea_orm(active_model = "super::super::entities::calibration::ActiveModel")]
+#[sea_orm(active_model = "crate::entities::calibration::ActiveModel")]
 pub struct UpsertCalibration {
     pub category: MarketCategory,
     pub price_zone: PriceZone,
@@ -99,7 +99,6 @@ pub struct UpsertCalibration {
     pub alpha_prior: Probability,
     pub beta_prior: Probability,
     pub posterior_mean: Option<Probability>,
-    pub updated_at: DateTime<Utc>,
 }
 
 /// DB row projection for calibration outcomes.
@@ -122,7 +121,7 @@ pub struct CalibrationOutcomeInfo {
 
 /// Insert payload for a calibration outcome record.
 #[derive(Debug, Clone, DeriveIntoActiveModel)]
-#[sea_orm(active_model = "super::super::entities::calibration_outcome::ActiveModel")]
+#[sea_orm(active_model = "crate::entities::calibration_outcome::ActiveModel")]
 pub struct NewCalibrationOutcome {
     pub market_id: MarketId,
     pub category: MarketCategory,

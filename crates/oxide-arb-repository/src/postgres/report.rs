@@ -29,7 +29,7 @@ impl ReportRepository for PgReportRepository {
         ReportEntity::insert(report.into_active_model())
             .on_conflict(
                 OnConflict::column(ReportColumn::Id)
-                    .update_columns([ReportColumn::Payload, ReportColumn::CreatedAt])
+                    .update_columns([ReportColumn::Payload])
                     .to_owned(),
             )
             .exec(&self.db)

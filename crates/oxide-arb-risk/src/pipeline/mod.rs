@@ -13,8 +13,9 @@ use crate::{
         DailyDirectionalBudgetCheck, DailyLossCapCheck, DirectionalConcentrationCheck,
         DrawdownGuardCheck, DuplicateMarketCheck, ExposurePctCheck, HourlyLossCapCheck,
         ManualHaltCheck, MarketExposureCheck, MaxDepthUsageCheck, MaxPositionsCheck,
-        MaxSingleBetCheck, MinBalanceCheck, MinDepthCheck, PotentialLossCapCheck, StalenessCheck,
-        TokenBlacklistCheck, TotalExposureCheck, WeeklyLossCapCheck, WsConnectivityCheck,
+        MaxSingleBetCheck, MetricsFreshnessCheck, MinBalanceCheck, MinDepthCheck,
+        PotentialLossCapCheck, StalenessCheck, TokenBlacklistCheck, TotalExposureCheck,
+        WeeklyLossCapCheck, WsConnectivityCheck,
     },
     types::{PipelineReport, ReportMode, RiskCheckId, RiskCheckKind, RiskCheckResult},
 };
@@ -45,6 +46,7 @@ pub struct StaticRiskPipeline {
     circuit_breaker: CircuitBreakerCheck,
     blacklist: BlacklistCheck,
     token_blacklist: TokenBlacklistCheck,
+    metrics_freshness: MetricsFreshnessCheck,
     min_depth: MinDepthCheck,
     max_depth_usage: MaxDepthUsageCheck,
     staleness: StalenessCheck,
@@ -72,7 +74,7 @@ pub struct StaticRiskPipeline {
 impl StaticRiskPipeline {
     #[must_use]
     pub const fn len(&self) -> usize {
-        24
+        25
     }
 
     #[must_use]
@@ -103,6 +105,7 @@ impl StaticRiskPipeline {
             RiskCheckId::CircuitBreaker,
             RiskCheckId::BlacklistTradingPath,
             RiskCheckId::TokenBlacklist,
+            RiskCheckId::MetricsFreshness,
             RiskCheckId::MinDepth,
             RiskCheckId::MaxDepthUsage,
             RiskCheckId::Staleness,
@@ -132,6 +135,7 @@ impl StaticRiskPipeline {
             &self.circuit_breaker,
             &self.blacklist,
             &self.token_blacklist,
+            &self.metrics_freshness,
             &self.min_depth,
             &self.max_depth_usage,
             &self.staleness,
@@ -213,6 +217,7 @@ impl StaticRiskPipeline {
             gate!(self.circuit_breaker);
             gate!(self.blacklist);
             gate!(self.token_blacklist);
+            gate!(self.metrics_freshness);
             gate!(self.min_depth);
             gate!(self.max_depth_usage);
             gate!(self.staleness);
@@ -284,6 +289,7 @@ pub fn build_default_pipeline(config: &RiskConfig) -> StaticRiskPipeline {
         circuit_breaker: CircuitBreakerCheck,
         blacklist: BlacklistCheck,
         token_blacklist: TokenBlacklistCheck,
+        metrics_freshness: MetricsFreshnessCheck::new(config),
         min_depth: MinDepthCheck::new(config),
         max_depth_usage: MaxDepthUsageCheck::new(config),
         staleness: StalenessCheck,

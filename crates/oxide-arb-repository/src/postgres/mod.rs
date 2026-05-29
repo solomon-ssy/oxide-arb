@@ -6,7 +6,6 @@ pub mod calibration;
 pub mod emergency;
 pub mod event;
 pub mod market;
-mod orm;
 pub mod position;
 pub mod potential_loss;
 pub mod reconciliation;

@@ -5,6 +5,7 @@ use crate::{
     types::{MarketId, Price, Shares, TokenId, TradeId, Usd},
 };
 use chrono::{DateTime, Utc};
+use sea_orm::DeriveIntoActiveModel;
 use serde::{Deserialize, Serialize};
 
 /// Event-driven or retry-driven request to settle all open positions for a market.
@@ -59,7 +60,8 @@ info_from_model!(ResolutionEventInfo, crate::entities::resolution_event::Model, 
     evidence, resolved_at, created_at,
 });
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, DeriveIntoActiveModel)]
+#[sea_orm(active_model = "crate::entities::resolution_event::ActiveModel")]
 pub struct NewResolutionEvent {
     pub resolution_id: String,
     pub market_id: MarketId,
@@ -69,5 +71,4 @@ pub struct NewResolutionEvent {
     pub ctf_agrees: Option<bool>,
     pub evidence: Option<serde_json::Value>,
     pub resolved_at: DateTime<Utc>,
-    pub created_at: DateTime<Utc>,
 }

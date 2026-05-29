@@ -4,8 +4,7 @@
 use chrono::Utc;
 use oxide_arb_error::{OxideError, OxideResult};
 use oxide_arb_models::{
-    domain::{NewPotentialLoss, UpdatePotentialLoss, potential_loss::PotentialLossInfo},
-    enums::common::LedgerStatus,
+    domain::{NewPotentialLoss, ResolvePotentialLoss, potential_loss::PotentialLossInfo},
     types::LedgerId,
 };
 use oxide_arb_repository::{postgres::PgPotentialLossRepository, traits::PotentialLossRepository};
@@ -29,12 +28,11 @@ impl PotentialLossStore for CorePotentialLossStore {
     }
 
     async fn resolve(&self, ledger_id: &LedgerId) -> OxideResult<()> {
-        let update = UpdatePotentialLoss {
-            status: Some(LedgerStatus::Resolved),
-            resolved_at: Some(Utc::now()),
+        let command = ResolvePotentialLoss {
+            resolved_at: Utc::now(),
         };
         self.repo
-            .update(ledger_id, update)
+            .resolve(ledger_id, command)
             .await
             .map_err(OxideError::from)?;
         Ok(())

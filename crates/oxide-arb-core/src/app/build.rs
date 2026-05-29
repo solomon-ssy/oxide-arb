@@ -49,6 +49,7 @@ use crate::{
         staleness_classifier::StalenessClassifier,
     },
     service::{
+        equity_valuator::EquityValuator,
         gamma::{GammaService, GammaServiceDeps},
         risk_metrics::{ApiHealthTracker, RiskMetricsRefreshService, RiskMetricsState},
         ws_subscription::WsSubscriptionCoordinator,
@@ -211,9 +212,8 @@ impl AppContext {
         let (infra, persistence_workers) = connect_infra(&settings, shutdown.clone()).await?;
         let clients =
             connect_clients(&settings, shutdown.clone(), Arc::clone(&infra.metrics)).await?;
-        let risk = wire_risk(&settings, &infra, &clients).await?;
-        let trading =
-            wire_trading(&settings, mode, &infra, &clients, &risk, shutdown.clone()).await?;
+        let (risk, trading) =
+            wire_risk_and_trading(&settings, mode, &infra, &clients, shutdown.clone()).await?;
 
         let trade_repo = Arc::clone(&infra.persistence.trade_repo);
         let position_repo = Arc::clone(&infra.repos.position);
@@ -480,10 +480,24 @@ async fn connect_clients(
     })
 }
 
+async fn wire_risk_and_trading(
+    settings: &Settings,
+    mode: ExecutionMode,
+    infra: &BuildInfra,
+    clients: &BuildClients,
+    shutdown: CancellationToken,
+) -> OxideResult<(BuildRisk, BuildTrading)> {
+    let detection = wire_detection(settings, infra, clients, shutdown.clone()).await?;
+    let risk = wire_risk(settings, infra, clients, &detection).await?;
+    let trading = wire_trading(settings, mode, infra, clients, &risk, detection, shutdown);
+    Ok((risk, trading))
+}
+
 async fn wire_risk(
     settings: &Settings,
     infra: &BuildInfra,
     clients: &BuildClients,
+    detection: &DetectionStack,
 ) -> OxideResult<BuildRisk> {
     let exposure = Arc::new(InMemoryExposureReservation::new(
         settings.risk.exposure_reservation_config(),
@@ -543,10 +557,16 @@ async fn wire_risk(
 
     let metrics_refresh = clients.clob_client.as_ref().map(|clob_client| {
         let position_repo = Arc::clone(&infra.repos.position);
+        let equity_valuator = Arc::new(EquityValuator::new(
+            Arc::clone(&detection.market_registry),
+            Arc::clone(&detection.book_store),
+            Arc::clone(&detection.calibrator),
+        ));
         Arc::new(RiskMetricsRefreshService::new(
             Arc::clone(&metrics_state),
             Arc::clone(clob_client),
             position_repo,
+            equity_valuator,
             Arc::clone(&infra.metrics),
         ))
     });
@@ -563,18 +583,18 @@ async fn wire_risk(
     })
 }
 
-async fn wire_trading(
+fn wire_trading(
     settings: &Settings,
     mode: ExecutionMode,
     infra: &BuildInfra,
     clients: &BuildClients,
     risk: &BuildRisk,
+    detection: DetectionStack,
     shutdown: CancellationToken,
-) -> OxideResult<BuildTrading> {
-    let detection = wire_detection(settings, infra, clients, shutdown.clone()).await?;
+) -> BuildTrading {
     let execution = wire_execution_loop(settings, mode, infra, clients, risk, &detection, shutdown);
 
-    Ok(BuildTrading {
+    BuildTrading {
         book_store: detection.book_store,
         market_registry: detection.market_registry,
         market_cache: detection.market_cache,
@@ -591,7 +611,7 @@ async fn wire_trading(
         token_rx: detection.token_rx,
         market_rx: detection.market_rx,
         execution_runners: execution.execution_runners,
-    })
+    }
 }
 
 async fn wire_calibration_stack(

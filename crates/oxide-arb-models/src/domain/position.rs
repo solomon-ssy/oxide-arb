@@ -1,10 +1,11 @@
 //! Position tracking domain models.
 //!
 //! `NewPosition` derives `DeriveIntoActiveModel` for clean DTO→ActiveModel
-//! conversion. Entity defaults fill `position_id`, status, `opened_at`, and
-//! `PnL` defaults before insert.
+//! conversion. Database defaults own insert-time timestamps; patch DTOs keep
+//! nullable clear semantics explicit.
 
 use crate::{
+    domain::{NullablePatch, Patch},
     enums::{
         common::{
             PositionStatus, RedeemStatus, SettlementAccountingStatus, SettlementTrigger, Side,
@@ -79,11 +80,12 @@ pub struct ExposureReservation {
 
 /// All fields required to open a new position.
 ///
-/// Derives `DeriveIntoActiveModel` — entity defaults fill `position_id`, status,
-/// `opened_at`, and unrealized/realized `PnL` defaults before insert.
+/// Derives `DeriveIntoActiveModel`; database defaults fill insert-only state
+/// such as `opened_at` and `PnL` defaults.
 #[derive(Debug, Clone, DeriveIntoActiveModel)]
-#[sea_orm(active_model = "super::super::entities::position::ActiveModel")]
+#[sea_orm(active_model = "crate::entities::position::ActiveModel")]
 pub struct NewPosition {
+    pub position_id: PositionId,
     pub trade_id: TradeId,
     pub market_id: MarketId,
     pub token_id: TokenId,
@@ -96,28 +98,29 @@ pub struct NewPosition {
 }
 
 /// Fields that can change when a position is updated (add/reduce/close/settle).
-#[derive(Debug, Clone, Default)]
-pub struct UpdatePosition {
-    pub shares: Option<Shares>,
-    pub avg_entry_price: Option<Price>,
-    pub total_cost_usd: Option<Usd>,
-    pub total_fees_usd: Option<Usd>,
-    pub unrealized_pnl: Option<Usd>,
-    pub realized_pnl: Option<Usd>,
-    pub status: Option<PositionStatus>,
-    pub closed_at: Option<DateTime<Utc>>,
-    pub settled_at: Option<DateTime<Utc>>,
-    pub winning_token_id: Option<TokenId>,
-    pub settlement_payout_usd: Option<Usd>,
-    pub redeem_tx_hash: Option<String>,
-    pub redeem_status: Option<RedeemStatus>,
-    pub redeem_attempts: Option<i32>,
-    pub oracle_verdict: Option<serde_json::Value>,
-    pub settlement_trigger: Option<SettlementTrigger>,
-    pub settlement_accounting_status: Option<SettlementAccountingStatus>,
-    pub settlement_accounting_error: Option<String>,
-    pub settlement_accounted_at: Option<DateTime<Utc>>,
-    pub redeem_terminal_reason: Option<String>,
+#[derive(Debug, Clone, Default, DeriveIntoActiveModel)]
+#[sea_orm(active_model = "crate::entities::position::ActiveModel")]
+pub struct PositionPatch {
+    pub shares: Patch<Shares>,
+    pub avg_entry_price: Patch<Price>,
+    pub total_cost_usd: Patch<Usd>,
+    pub total_fees_usd: Patch<Usd>,
+    pub unrealized_pnl: Patch<Usd>,
+    pub realized_pnl: Patch<Usd>,
+    pub status: Patch<PositionStatus>,
+    pub closed_at: NullablePatch<DateTime<Utc>>,
+    pub settled_at: NullablePatch<DateTime<Utc>>,
+    pub winning_token_id: NullablePatch<TokenId>,
+    pub settlement_payout_usd: NullablePatch<Usd>,
+    pub redeem_tx_hash: NullablePatch<String>,
+    pub redeem_status: Patch<RedeemStatus>,
+    pub redeem_attempts: Patch<i32>,
+    pub oracle_verdict: NullablePatch<serde_json::Value>,
+    pub settlement_trigger: NullablePatch<SettlementTrigger>,
+    pub settlement_accounting_status: Patch<SettlementAccountingStatus>,
+    pub settlement_accounting_error: NullablePatch<String>,
+    pub settlement_accounted_at: NullablePatch<DateTime<Utc>>,
+    pub redeem_terminal_reason: NullablePatch<String>,
 }
 
 /// Atomic payload for closing the open-position lifecycle at market settlement.
@@ -156,4 +159,25 @@ pub struct SettledPositionStats {
     pub failed_accounting_count: u32,
     pub largest_single_profit: Usd,
     pub largest_single_loss: Usd,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PositionPatch;
+    use crate::domain::{NullablePatch, Patch};
+    use sea_orm::{ActiveValue, IntoActiveModel};
+
+    #[test]
+    fn position_patch_maps_keep_set_and_clear_to_active_values() {
+        let active = PositionPatch {
+            redeem_attempts: Patch::set(3),
+            redeem_tx_hash: NullablePatch::clear(),
+            ..Default::default()
+        }
+        .into_active_model();
+
+        assert!(matches!(active.shares, ActiveValue::NotSet));
+        assert!(matches!(active.redeem_attempts, ActiveValue::Set(3)));
+        assert!(matches!(active.redeem_tx_hash, ActiveValue::Set(None)));
+    }
 }

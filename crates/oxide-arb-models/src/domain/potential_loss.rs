@@ -46,7 +46,7 @@ info_from_model!(PotentialLossInfo, crate::entities::potential_loss_ledger::Mode
 
 /// All fields required to create a new potential loss entry.
 #[derive(Debug, Clone, DeriveIntoActiveModel)]
-#[sea_orm(active_model = "super::super::entities::potential_loss_ledger::ActiveModel")]
+#[sea_orm(active_model = "crate::entities::potential_loss_ledger::ActiveModel")]
 pub struct NewPotentialLoss {
     pub ledger_id: LedgerId,
     pub market_id: MarketId,
@@ -56,9 +56,8 @@ pub struct NewPotentialLoss {
     pub max_loss_usd: Usd,
 }
 
-/// Partial update for potential loss entries (resolution).
-#[derive(Debug, Clone, Default)]
-pub struct UpdatePotentialLoss {
-    pub status: Option<LedgerStatus>,
-    pub resolved_at: Option<DateTime<Utc>>,
+/// Command payload for resolving an active potential-loss ledger entry.
+#[derive(Debug, Clone)]
+pub struct ResolvePotentialLoss {
+    pub resolved_at: DateTime<Utc>,
 }

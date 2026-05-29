@@ -1,7 +1,3 @@
-use super::orm::{
-    ColumnTrait, ConnectionTrait, DatabaseConnection, DatabaseTransaction, EntityTrait,
-    IntoActiveModel, QueryFilter,
-};
 use crate::traits::CalibrationRepository;
 use chrono::Utc;
 use oxide_arb_error::storage::StorageError;
@@ -20,7 +16,11 @@ use oxide_arb_models::{
         common::MarketCategory,
     },
 };
-use sea_orm::sea_query::{Expr, OnConflict};
+use sea_orm::{
+    ColumnTrait, ConnectionTrait, DatabaseConnection, DatabaseTransaction, EntityTrait,
+    IntoActiveModel, QueryFilter,
+    sea_query::{Expr, OnConflict},
+};
 
 // ── helpers ──────────────────────────────────────────────────────────
 
@@ -80,7 +80,6 @@ async fn upsert_q(
                 CalibColumn::AlphaPrior,
                 CalibColumn::BetaPrior,
                 CalibColumn::PosteriorMean,
-                CalibColumn::UpdatedAt,
             ])
             .to_owned(),
         )

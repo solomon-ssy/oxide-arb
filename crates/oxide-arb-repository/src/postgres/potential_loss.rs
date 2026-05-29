@@ -1,17 +1,16 @@
-use super::orm::{
-    ColumnTrait, ConnectionTrait, DatabaseConnection, DatabaseTransaction, EntityTrait,
-    IntoActiveModel, QueryFilter,
-};
 use crate::traits::PotentialLossRepository;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::{
-    domain::{NewPotentialLoss, PotentialLossInfo, UpdatePotentialLoss},
+    domain::{NewPotentialLoss, PotentialLossInfo, ResolvePotentialLoss},
     entities::potential_loss_ledger::{Column, Entity},
     enums::common::LedgerStatus,
     types::{LedgerId, MarketId, Usd},
 };
-use sea_orm::sea_query::Expr;
+use sea_orm::{
+    ColumnTrait, ConnectionTrait, DatabaseConnection, DatabaseTransaction, DeriveIntoActiveModel,
+    EntityTrait, IntoActiveModel, QueryFilter,
+};
 
 pub struct PgPotentialLossRepository {
     db: DatabaseConnection,
@@ -29,6 +28,13 @@ impl PgPotentialLossRepository {
 
 pub struct PgPotentialLossRepositoryTxn<'a> {
     txn: &'a DatabaseTransaction,
+}
+
+#[derive(Debug, Clone, DeriveIntoActiveModel)]
+#[sea_orm(active_model = "oxide_arb_models::entities::potential_loss_ledger::ActiveModel")]
+struct ResolvePotentialLossPatch {
+    status: LedgerStatus,
+    resolved_at: Option<DateTime<Utc>>,
 }
 
 pub(crate) async fn do_create(
@@ -67,31 +73,28 @@ async fn do_find_by_market(
 async fn do_update(
     db: &impl ConnectionTrait,
     ledger_id: &LedgerId,
+    command: ResolvePotentialLoss,
 ) -> Result<PotentialLossInfo, StorageError> {
-    let result = Entity::update_many()
-        .col_expr(Column::Status, Expr::value(LedgerStatus::Resolved))
-        .col_expr(Column::ResolvedAt, Expr::value(Some(Utc::now())))
+    let patch = ResolvePotentialLossPatch {
+        status: LedgerStatus::Resolved,
+        resolved_at: Some(command.resolved_at),
+    };
+    let models = Entity::update_many()
+        .set(patch.into_active_model())
         .filter(Column::LedgerId.eq(ledger_id))
         .filter(Column::Status.eq(LedgerStatus::Active))
-        .exec(db)
+        .exec_with_returning(db)
         .await
         .map_err(StorageError::from)?;
 
-    if result.rows_affected == 0 {
-        return Err(StorageError::NotFound {
-            entity: "potential_loss_ledger",
-            id: ledger_id.to_string(),
-        });
-    }
-    let model = Entity::find_by_id(ledger_id.clone())
-        .one(db)
-        .await
-        .map_err(StorageError::from)?
+    models
+        .into_iter()
+        .next()
+        .map(Into::into)
         .ok_or_else(|| StorageError::NotFound {
             entity: "potential_loss_ledger",
             id: ledger_id.to_string(),
-        })?;
-    Ok(model.into())
+        })
 }
 
 async fn do_total_active_loss(db: &impl ConnectionTrait) -> Result<Usd, StorageError> {
@@ -121,12 +124,12 @@ impl PotentialLossRepository for PgPotentialLossRepository {
         do_find_by_market(&self.db, market_id).await
     }
 
-    async fn update(
+    async fn resolve(
         &self,
         ledger_id: &LedgerId,
-        _update: UpdatePotentialLoss,
+        command: ResolvePotentialLoss,
     ) -> Result<PotentialLossInfo, StorageError> {
-        do_update(&self.db, ledger_id).await
+        do_update(&self.db, ledger_id, command).await
     }
 
     async fn total_active_loss(&self) -> Result<Usd, StorageError> {
@@ -151,12 +154,12 @@ impl PotentialLossRepository for PgPotentialLossRepositoryTxn<'_> {
         do_find_by_market(self.txn, market_id).await
     }
 
-    async fn update(
+    async fn resolve(
         &self,
         ledger_id: &LedgerId,
-        _update: UpdatePotentialLoss,
+        command: ResolvePotentialLoss,
     ) -> Result<PotentialLossInfo, StorageError> {
-        do_update(self.txn, ledger_id).await
+        do_update(self.txn, ledger_id, command).await
     }
 
     async fn total_active_loss(&self) -> Result<Usd, StorageError> {

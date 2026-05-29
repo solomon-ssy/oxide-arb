@@ -117,8 +117,33 @@ impl PreTradeContext<'_> {
     }
 
     #[inline]
-    pub const fn cached_balance(&self) -> Usd {
-        self.metrics.cached_balance
+    pub const fn cash_balance(&self) -> Usd {
+        self.metrics.cash_balance
+    }
+
+    #[inline]
+    pub const fn position_mark_value(&self) -> Usd {
+        self.metrics.position_mark_value
+    }
+
+    #[inline]
+    pub const fn equity(&self) -> Usd {
+        self.metrics.equity
+    }
+
+    #[inline]
+    pub const fn metrics_age_secs(&self) -> u64 {
+        self.metrics.metrics_age_secs
+    }
+
+    #[inline]
+    pub const fn is_metrics_stale(&self) -> bool {
+        self.metrics.is_stale
+    }
+
+    #[inline]
+    pub const fn is_authoritative(&self) -> bool {
+        self.metrics.is_authoritative
     }
 
     #[inline]
@@ -178,14 +203,12 @@ impl PreTradeContext<'_> {
 
     #[must_use]
     pub fn drawdown_factor(&self) -> Decimal {
-        self.snap
-            .drawdown
-            .sizing_factor(self.metrics.cached_balance)
+        self.snap.drawdown.sizing_factor(self.metrics.equity)
     }
 
     #[must_use]
     pub fn drawdown_action(&self) -> DrawdownAction {
-        self.snap.drawdown.evaluate(self.metrics.cached_balance).1
+        self.snap.drawdown.evaluate(self.metrics.equity).1
     }
 
     /// Bloom fast-path negative, then exact confirm from snapshot (no live blacklist read).

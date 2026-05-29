@@ -4,6 +4,7 @@ use crate::types::TradeId;
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
+#[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "risk_fill_applied")]
 pub struct Model {
@@ -13,19 +14,6 @@ pub struct Model {
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-pub enum Relation {
-    #[sea_orm(
-        belongs_to = "super::trade::Entity",
-        from = "Column::TradeId",
-        to = "super::trade::Column::TradeId"
-    )]
-    Trade,
-}
-
-impl Related<super::trade::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::Trade.def()
-    }
-}
+pub enum Relation {}
 
 impl ActiveModelBehavior for ActiveModel {}

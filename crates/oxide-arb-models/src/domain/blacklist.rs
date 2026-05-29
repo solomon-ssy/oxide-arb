@@ -57,7 +57,7 @@ info_from_model!(BlacklistInfo, crate::entities::blacklist_entry::Model, {
 
 /// Upsert payload for the `blacklist_entry` table (ON CONFLICT DO UPDATE).
 #[derive(Debug, Clone, DeriveIntoActiveModel)]
-#[sea_orm(active_model = "super::super::entities::blacklist_entry::ActiveModel")]
+#[sea_orm(active_model = "crate::entities::blacklist_entry::ActiveModel")]
 pub struct UpsertBlacklistEntry {
     pub market_id: MarketId,
     pub token_id: Option<TokenId>,

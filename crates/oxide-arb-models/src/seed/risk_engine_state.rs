@@ -55,7 +55,6 @@ pub struct NewRiskEngineState {
     pub weekly_trade_count: i32,
     pub weekly_window_start: NaiveDate,
     pub hwm_equity: Usd,
-    pub updated_at: DateTime<Utc>,
 }
 
 impl Default for NewRiskEngineState {
@@ -86,7 +85,6 @@ impl Default for NewRiskEngineState {
             weekly_trade_count: 0,
             weekly_window_start: now.date_naive(),
             hwm_equity: Usd::ZERO,
-            updated_at: now,
         }
     }
 }

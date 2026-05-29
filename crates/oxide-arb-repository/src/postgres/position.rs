@@ -1,19 +1,15 @@
-use super::orm::{
-    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, DatabaseTransaction,
-    EntityTrait, IntoActiveModel, PaginatorTrait, QueryFilter, QuerySelect, Set,
-};
 use crate::traits::PositionRepository;
 use chrono::{DateTime, Utc};
 use num_traits::ToPrimitive;
 use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::{
     domain::{
-        MarkRedeemedParams, NewPosition, PositionInfo, SettlePositionParams, SettledPositionStats,
-        UpdatePosition,
+        MarkRedeemedParams, NewPosition, NullablePatch, Patch, PositionInfo, PositionPatch,
+        SettlePositionParams, SettledPositionStats,
     },
     entities::{
         market::Column as MarketColumn,
-        position::{ActiveModel, Column, Entity, Relation},
+        position::{Column, Entity, Relation},
     },
     enums::{
         common::{PositionStatus, RedeemStatus, SettlementAccountingStatus, SettlementTrigger},
@@ -22,7 +18,11 @@ use oxide_arb_models::{
     types::{MarketId, PositionId, TokenId, TradeId, Usd},
 };
 use rust_decimal::Decimal;
-use sea_orm::{JoinType, RelationTrait};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, DatabaseTransaction,
+    EntityTrait, IntoActiveModel, JoinType, PaginatorTrait, QueryFilter, QuerySelect,
+    RelationTrait,
+};
 
 // ── helpers ──────────────────────────────────────────────────────────
 
@@ -141,84 +141,35 @@ async fn create_q(
     Ok(model.into())
 }
 
+async fn patch_position_q(
+    db: &impl ConnectionTrait,
+    position_id: &PositionId,
+    patch: PositionPatch,
+    entity: &'static str,
+) -> Result<PositionInfo, StorageError> {
+    let models = Entity::update_many()
+        .set(patch.into_active_model())
+        .filter(Column::PositionId.eq(position_id.clone()))
+        .exec_with_returning(db)
+        .await
+        .map_err(StorageError::from)?;
+
+    models
+        .into_iter()
+        .next()
+        .map(Into::into)
+        .ok_or_else(|| StorageError::NotFound {
+            entity,
+            id: position_id.to_string(),
+        })
+}
+
 async fn update_q(
     db: &impl ConnectionTrait,
     position_id: &PositionId,
-    update: UpdatePosition,
+    patch: PositionPatch,
 ) -> Result<PositionInfo, StorageError> {
-    let existing = Entity::find_by_id(position_id.clone())
-        .one(db)
-        .await
-        .map_err(StorageError::from)?
-        .ok_or_else(|| StorageError::NotFound {
-            entity: "position",
-            id: position_id.to_string(),
-        })?;
-
-    let mut active: ActiveModel = existing.into();
-    if let Some(shares) = update.shares {
-        active.shares = Set(shares);
-    }
-    if let Some(price) = update.avg_entry_price {
-        active.avg_entry_price = Set(price);
-    }
-    if let Some(cost) = update.total_cost_usd {
-        active.total_cost_usd = Set(cost);
-    }
-    if let Some(fees) = update.total_fees_usd {
-        active.total_fees_usd = Set(fees);
-    }
-    if let Some(pnl) = update.unrealized_pnl {
-        active.unrealized_pnl = Set(pnl);
-    }
-    if let Some(pnl) = update.realized_pnl {
-        active.realized_pnl = Set(pnl);
-    }
-    if let Some(status) = update.status {
-        active.status = Set(status);
-    }
-    if let Some(closed) = update.closed_at {
-        active.closed_at = Set(Some(closed));
-    }
-    if let Some(settled) = update.settled_at {
-        active.settled_at = Set(Some(settled));
-    }
-    if let Some(winning_token_id) = update.winning_token_id {
-        active.winning_token_id = Set(Some(winning_token_id));
-    }
-    if let Some(payout) = update.settlement_payout_usd {
-        active.settlement_payout_usd = Set(Some(payout));
-    }
-    if let Some(tx_hash) = update.redeem_tx_hash {
-        active.redeem_tx_hash = Set(Some(tx_hash));
-    }
-    if let Some(status) = update.redeem_status {
-        active.redeem_status = Set(status);
-    }
-    if let Some(attempts) = update.redeem_attempts {
-        active.redeem_attempts = Set(attempts);
-    }
-    if let Some(verdict) = update.oracle_verdict {
-        active.oracle_verdict = Set(Some(verdict));
-    }
-    if let Some(trigger) = update.settlement_trigger {
-        active.settlement_trigger = Set(Some(trigger));
-    }
-    if let Some(status) = update.settlement_accounting_status {
-        active.settlement_accounting_status = Set(status);
-    }
-    if let Some(error) = update.settlement_accounting_error {
-        active.settlement_accounting_error = Set(Some(error));
-    }
-    if let Some(accounted_at) = update.settlement_accounted_at {
-        active.settlement_accounted_at = Set(Some(accounted_at));
-    }
-    if let Some(reason) = update.redeem_terminal_reason {
-        active.redeem_terminal_reason = Set(Some(reason));
-    }
-
-    let model = active.update(db).await.map_err(StorageError::from)?;
-    Ok(model.into())
+    patch_position_q(db, position_id, patch, "position").await
 }
 
 async fn close_position_q(
@@ -226,20 +177,13 @@ async fn close_position_q(
     position_id: &PositionId,
     realized_pnl: Decimal,
 ) -> Result<(), StorageError> {
-    let existing = Entity::find_by_id(position_id.clone())
-        .one(db)
-        .await
-        .map_err(StorageError::from)?
-        .ok_or_else(|| StorageError::NotFound {
-            entity: "position",
-            id: position_id.to_string(),
-        })?;
-
-    let mut active: ActiveModel = existing.into();
-    active.status = Set(PositionStatus::Closed);
-    active.realized_pnl = Set(Usd::new(realized_pnl));
-    active.closed_at = Set(Some(Utc::now()));
-    active.update(db).await.map_err(StorageError::from)?;
+    let patch = PositionPatch {
+        status: Patch::set(PositionStatus::Closed),
+        realized_pnl: Patch::set(Usd::new(realized_pnl)),
+        closed_at: NullablePatch::set(Utc::now()),
+        ..Default::default()
+    };
+    patch_position_q(db, position_id, patch, "open position").await?;
     Ok(())
 }
 
@@ -248,37 +192,38 @@ async fn settle_position_q(
     position_id: &PositionId,
     params: SettlePositionParams,
 ) -> Result<PositionInfo, StorageError> {
-    let existing = Entity::find_by_id(position_id.clone())
-        .one(db)
+    let now = Utc::now();
+    let patch = PositionPatch {
+        status: Patch::set(PositionStatus::Settled),
+        realized_pnl: Patch::set(Usd::new(params.realized_pnl)),
+        winning_token_id: NullablePatch::set(params.winning_token_id),
+        settlement_payout_usd: NullablePatch::set(params.settlement_payout_usd),
+        redeem_tx_hash: NullablePatch::set_nullable(params.redeem_tx_hash),
+        redeem_status: Patch::set(params.redeem_status),
+        settlement_accounting_status: Patch::set(SettlementAccountingStatus::Accounted),
+        settlement_accounting_error: NullablePatch::clear(),
+        settlement_accounted_at: NullablePatch::set(now),
+        oracle_verdict: NullablePatch::set_nullable(params.oracle_verdict),
+        settlement_trigger: NullablePatch::set(params.settlement_trigger),
+        settled_at: NullablePatch::set(now),
+        ..Default::default()
+    };
+    let models = Entity::update_many()
+        .set(patch.into_active_model())
+        .filter(Column::PositionId.eq(position_id.clone()))
+        .filter(Column::Status.eq(PositionStatus::Open))
+        .exec_with_returning(db)
         .await
-        .map_err(StorageError::from)?
-        .ok_or_else(|| StorageError::NotFound {
-            entity: "position",
-            id: position_id.to_string(),
-        })?;
+        .map_err(StorageError::from)?;
 
-    if existing.status != PositionStatus::Open {
-        return Err(StorageError::NotFound {
+    models
+        .into_iter()
+        .next()
+        .map(Into::into)
+        .ok_or_else(|| StorageError::NotFound {
             entity: "open position",
             id: position_id.to_string(),
-        });
-    }
-
-    let mut active: ActiveModel = existing.into();
-    active.status = Set(PositionStatus::Settled);
-    active.realized_pnl = Set(Usd::new(params.realized_pnl));
-    active.winning_token_id = Set(Some(params.winning_token_id));
-    active.settlement_payout_usd = Set(Some(params.settlement_payout_usd));
-    active.redeem_tx_hash = Set(params.redeem_tx_hash);
-    active.redeem_status = Set(params.redeem_status);
-    active.settlement_accounting_status = Set(SettlementAccountingStatus::Accounted);
-    active.settlement_accounting_error = Set(None);
-    active.settlement_accounted_at = Set(Some(Utc::now()));
-    active.oracle_verdict = Set(params.oracle_verdict);
-    active.settlement_trigger = Set(Some(params.settlement_trigger));
-    active.settled_at = Set(Some(Utc::now()));
-    let model = active.update(db).await.map_err(StorageError::from)?;
-    Ok(model.into())
+        })
 }
 
 async fn mark_redeemed_q(
@@ -286,26 +231,18 @@ async fn mark_redeemed_q(
     position_id: &PositionId,
     params: MarkRedeemedParams,
 ) -> Result<PositionInfo, StorageError> {
-    let existing = Entity::find_by_id(position_id.clone())
-        .one(db)
-        .await
-        .map_err(StorageError::from)?
-        .ok_or_else(|| StorageError::NotFound {
-            entity: "position",
-            id: position_id.to_string(),
-        })?;
-
-    let mut active: ActiveModel = existing.into();
-    active.winning_token_id = Set(Some(params.winning_token_id));
-    active.settlement_payout_usd = Set(Some(params.settlement_payout_usd));
-    active.realized_pnl = Set(params.realized_pnl);
-    active.redeem_tx_hash = Set(params.redeem_tx_hash);
-    active.redeem_status = Set(params.redeem_status);
-    active.settlement_trigger = Set(Some(params.settlement_trigger));
-    active.redeem_terminal_reason = Set(params.redeem_terminal_reason);
-    active.settlement_accounting_status = Set(SettlementAccountingStatus::Redeemed);
-    let model = active.update(db).await.map_err(StorageError::from)?;
-    Ok(model.into())
+    let patch = PositionPatch {
+        winning_token_id: NullablePatch::set(params.winning_token_id),
+        settlement_payout_usd: NullablePatch::set(params.settlement_payout_usd),
+        realized_pnl: Patch::set(params.realized_pnl),
+        redeem_tx_hash: NullablePatch::set_nullable(params.redeem_tx_hash),
+        redeem_status: Patch::set(params.redeem_status),
+        settlement_trigger: NullablePatch::set(params.settlement_trigger),
+        redeem_terminal_reason: NullablePatch::set_nullable(params.redeem_terminal_reason),
+        settlement_accounting_status: Patch::set(SettlementAccountingStatus::Redeemed),
+        ..Default::default()
+    };
+    patch_position_q(db, position_id, patch, "position").await
 }
 
 async fn mark_accounted_q(
@@ -313,23 +250,15 @@ async fn mark_accounted_q(
     position_id: &PositionId,
     accounted_at: chrono::DateTime<Utc>,
 ) -> Result<PositionInfo, StorageError> {
-    let existing = Entity::find_by_id(position_id.clone())
-        .one(db)
-        .await
-        .map_err(StorageError::from)?
-        .ok_or_else(|| StorageError::NotFound {
-            entity: "position",
-            id: position_id.to_string(),
-        })?;
-
-    let mut active: ActiveModel = existing.into();
-    active.status = Set(PositionStatus::Settled);
-    active.settlement_accounting_status = Set(SettlementAccountingStatus::Accounted);
-    active.settlement_accounting_error = Set(None);
-    active.settlement_accounted_at = Set(Some(accounted_at));
-    active.settled_at = Set(Some(accounted_at));
-    let model = active.update(db).await.map_err(StorageError::from)?;
-    Ok(model.into())
+    let patch = PositionPatch {
+        status: Patch::set(PositionStatus::Settled),
+        settlement_accounting_status: Patch::set(SettlementAccountingStatus::Accounted),
+        settlement_accounting_error: NullablePatch::clear(),
+        settlement_accounted_at: NullablePatch::set(accounted_at),
+        settled_at: NullablePatch::set(accounted_at),
+        ..Default::default()
+    };
+    patch_position_q(db, position_id, patch, "position").await
 }
 
 async fn mark_accounting_failed_q(
@@ -337,20 +266,12 @@ async fn mark_accounting_failed_q(
     position_id: &PositionId,
     error: String,
 ) -> Result<PositionInfo, StorageError> {
-    let existing = Entity::find_by_id(position_id.clone())
-        .one(db)
-        .await
-        .map_err(StorageError::from)?
-        .ok_or_else(|| StorageError::NotFound {
-            entity: "position",
-            id: position_id.to_string(),
-        })?;
-
-    let mut active: ActiveModel = existing.into();
-    active.settlement_accounting_status = Set(SettlementAccountingStatus::Failed);
-    active.settlement_accounting_error = Set(Some(error));
-    let model = active.update(db).await.map_err(StorageError::from)?;
-    Ok(model.into())
+    let patch = PositionPatch {
+        settlement_accounting_status: Patch::set(SettlementAccountingStatus::Failed),
+        settlement_accounting_error: NullablePatch::set(error),
+        ..Default::default()
+    };
+    patch_position_q(db, position_id, patch, "position").await
 }
 
 async fn record_redeem_failure_q(
@@ -360,22 +281,14 @@ async fn record_redeem_failure_q(
     winning_token_id: &TokenId,
     settlement_trigger: SettlementTrigger,
 ) -> Result<PositionInfo, StorageError> {
-    let existing = Entity::find_by_id(position_id.clone())
-        .one(db)
-        .await
-        .map_err(StorageError::from)?
-        .ok_or_else(|| StorageError::NotFound {
-            entity: "position",
-            id: position_id.to_string(),
-        })?;
-
-    let mut active: ActiveModel = existing.into();
-    active.redeem_status = Set(RedeemStatus::Failed);
-    active.redeem_attempts = Set(i32::try_from(attempts).unwrap_or(i32::MAX));
-    active.winning_token_id = Set(Some(winning_token_id.clone()));
-    active.settlement_trigger = Set(Some(settlement_trigger));
-    let model = active.update(db).await.map_err(StorageError::from)?;
-    Ok(model.into())
+    let patch = PositionPatch {
+        redeem_status: Patch::set(RedeemStatus::Failed),
+        redeem_attempts: Patch::set(i32::try_from(attempts).unwrap_or(i32::MAX)),
+        winning_token_id: NullablePatch::set(winning_token_id.clone()),
+        settlement_trigger: NullablePatch::set(settlement_trigger),
+        ..Default::default()
+    };
+    patch_position_q(db, position_id, patch, "position").await
 }
 
 async fn patch_oracle_verdict_q(
@@ -383,18 +296,11 @@ async fn patch_oracle_verdict_q(
     position_id: &PositionId,
     verdict: serde_json::Value,
 ) -> Result<(), StorageError> {
-    let existing = Entity::find_by_id(position_id.clone())
-        .one(db)
-        .await
-        .map_err(StorageError::from)?
-        .ok_or_else(|| StorageError::NotFound {
-            entity: "position",
-            id: position_id.to_string(),
-        })?;
-
-    let mut active: ActiveModel = existing.into();
-    active.oracle_verdict = Set(Some(verdict));
-    active.update(db).await.map_err(StorageError::from)?;
+    let patch = PositionPatch {
+        oracle_verdict: NullablePatch::set(verdict),
+        ..Default::default()
+    };
+    patch_position_q(db, position_id, patch, "position").await?;
     Ok(())
 }
 
@@ -573,9 +479,9 @@ impl PositionRepository for PgPositionRepository {
     async fn update(
         &self,
         position_id: &PositionId,
-        update: UpdatePosition,
+        patch: PositionPatch,
     ) -> Result<PositionInfo, StorageError> {
-        update_q(&self.db, position_id, update).await
+        update_q(&self.db, position_id, patch).await
     }
 
     async fn close_position(
@@ -728,9 +634,9 @@ impl PositionRepository for PgPositionRepositoryTxn<'_> {
     async fn update(
         &self,
         position_id: &PositionId,
-        update: UpdatePosition,
+        patch: PositionPatch,
     ) -> Result<PositionInfo, StorageError> {
-        update_q(self.txn, position_id, update).await
+        update_q(self.txn, position_id, patch).await
     }
 
     async fn close_position(

@@ -1,7 +1,3 @@
-use super::orm::{
-    ColumnTrait, ConnectionTrait, DatabaseConnection, DatabaseTransaction, EntityTrait,
-    IntoActiveModel, QueryFilter, QuerySelect,
-};
 use crate::traits::MarketRepository;
 use chrono::{DateTime, Utc};
 use num_traits::ToPrimitive;
@@ -12,7 +8,11 @@ use oxide_arb_models::{
     enums::market::MarketStatus,
     types::MarketId,
 };
-use sea_orm::sea_query::{Expr, OnConflict};
+use sea_orm::{
+    ColumnTrait, ConnectionTrait, DatabaseConnection, DatabaseTransaction, EntityTrait,
+    IntoActiveModel, QueryFilter, QuerySelect,
+    sea_query::{Expr, OnConflict},
+};
 use std::collections::HashSet;
 
 pub struct PgMarketRepository {
@@ -102,7 +102,7 @@ async fn do_upsert(
     dto: UpsertMarket,
 ) -> Result<MarketInfo, StorageError> {
     let am: ActiveModel = dto.into_active_model();
-    let model = Entity::insert(am.prepare_for_insert())
+    let model = Entity::insert(am)
         .on_conflict(
             OnConflict::column(Column::MarketId)
                 .update_columns([
@@ -125,7 +125,6 @@ async fn do_upsert(
                     Column::FeeRebateRate,
                     Column::FeeSource,
                     Column::FeeObservedAt,
-                    Column::UpdatedAt,
                 ])
                 .to_owned(),
         )
@@ -145,7 +144,7 @@ async fn do_upsert_batch(
     let count = ToPrimitive::to_u64(&dtos.len()).unwrap_or(u64::MAX);
     let models: Vec<ActiveModel> = dtos
         .into_iter()
-        .map(|dto| ActiveModel::prepare_for_insert(dto.into_active_model()))
+        .map(IntoActiveModel::into_active_model)
         .collect();
     Entity::insert_many(models)
         .on_conflict(
@@ -170,7 +169,6 @@ async fn do_upsert_batch(
                     Column::FeeRebateRate,
                     Column::FeeSource,
                     Column::FeeObservedAt,
-                    Column::UpdatedAt,
                 ])
                 .to_owned(),
         )

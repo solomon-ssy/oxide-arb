@@ -464,7 +464,6 @@ impl MarketSettlementService {
             ctf_agrees,
             evidence: Some(evidence),
             resolved_at: req.observed_at,
-            created_at: Utc::now(),
         };
         if let Err(error) = self.resolution_event_repo.append(event).await {
             tracing::warn!(%error, market_id = %req.market_id, "resolution event persist failed");

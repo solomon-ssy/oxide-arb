@@ -36,7 +36,9 @@ pub trait RiskFillCommitGuard: Send {
 #[derive(Debug, Clone, Copy)]
 pub struct RiskMetricsSnapshot {
     pub version: u64,
-    pub cached_balance: Usd,
+    pub cash_balance: Usd,
+    pub position_mark_value: Usd,
+    pub equity: Usd,
     pub total_exposure: Usd,
     pub market_exposure: Usd,
     pub open_position_count: usize,
@@ -50,6 +52,9 @@ pub struct RiskMetricsSnapshot {
     pub ws_disconnect_secs: u64,
     pub api_error_count: u64,
     pub api_request_count: u64,
+    pub is_stale: bool,
+    pub metrics_age_secs: u64,
+    pub is_authoritative: bool,
 }
 
 impl RiskMetricsSnapshot {
@@ -57,7 +62,9 @@ impl RiskMetricsSnapshot {
     pub const fn zeroed() -> Self {
         Self {
             version: 0,
-            cached_balance: Usd::ZERO,
+            cash_balance: Usd::ZERO,
+            position_mark_value: Usd::ZERO,
+            equity: Usd::ZERO,
             total_exposure: Usd::ZERO,
             market_exposure: Usd::ZERO,
             open_position_count: 0,
@@ -71,6 +78,9 @@ impl RiskMetricsSnapshot {
             ws_disconnect_secs: 0,
             api_error_count: 0,
             api_request_count: 0,
+            is_stale: true,
+            metrics_age_secs: u64::MAX,
+            is_authoritative: false,
         }
     }
 
@@ -111,8 +121,14 @@ pub trait RiskMetrics: Send + Sync + 'static {
     /// All open positions as a snapshot.
     fn open_positions(&self) -> Vec<PositionInfo>;
 
-    /// Last known platform balance (USDC.e on Polygon), cached.
-    fn cached_balance(&self) -> Usd;
+    /// Last known platform cash balance (USDC.e on Polygon), cached.
+    fn cash_balance(&self) -> Usd;
+
+    /// Current marked value of open positions.
+    fn position_mark_value(&self) -> Usd;
+
+    /// Current account equity: cash balance plus marked open positions.
+    fn equity(&self) -> Usd;
 
     /// Count of active exposure reservations.
     fn active_reservation_count(&self) -> usize;
@@ -139,6 +155,15 @@ pub trait RiskMetrics: Send + Sync + 'static {
     /// Rolling-window API request count (same window as error count).
     fn api_request_count(&self) -> u64;
 
+    /// Seconds since the metrics snapshot was last successfully refreshed.
+    fn metrics_age_secs(&self) -> u64;
+
+    /// Whether the latest metrics snapshot was marked stale by a state-changing event.
+    fn is_stale(&self) -> bool;
+
+    /// Whether the snapshot source is authoritative for the current execution mode.
+    fn is_authoritative(&self) -> bool;
+
     /// Batch-load all live metrics for one pre-trade check.
     ///
     /// Default implementation delegates to individual accessors; production
@@ -146,7 +171,9 @@ pub trait RiskMetrics: Send + Sync + 'static {
     fn snapshot_for(&self, market_id: &MarketId) -> RiskMetricsSnapshot {
         RiskMetricsSnapshot {
             version: 0,
-            cached_balance: self.cached_balance(),
+            cash_balance: self.cash_balance(),
+            position_mark_value: self.position_mark_value(),
+            equity: self.equity(),
             total_exposure: self.total_exposure(),
             market_exposure: self.market_exposure(market_id),
             open_position_count: self.open_position_count(),
@@ -160,6 +187,9 @@ pub trait RiskMetrics: Send + Sync + 'static {
             ws_disconnect_secs: self.ws_disconnect_secs(),
             api_error_count: self.api_error_count(),
             api_request_count: self.api_request_count(),
+            is_stale: self.is_stale(),
+            metrics_age_secs: self.metrics_age_secs(),
+            is_authoritative: self.is_authoritative(),
         }
     }
 }

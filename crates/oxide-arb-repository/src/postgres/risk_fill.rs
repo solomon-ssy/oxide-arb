@@ -5,10 +5,7 @@
 //! event. The marker's presence is the durable authority for whether a fill's
 //! in-memory accounting was already applied, making relay replay safe.
 
-use super::{
-    orm::{DatabaseConnection, DatabaseTransaction, EntityTrait, Set, TransactionTrait},
-    potential_loss, risk_audit, risk_state,
-};
+use super::{potential_loss, risk_audit, risk_state};
 use chrono::{DateTime, Utc};
 use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::{
@@ -16,7 +13,10 @@ use oxide_arb_models::{
     entities::risk_fill_applied::{ActiveModel, Column, Entity},
     types::TradeId,
 };
-use sea_orm::{DbErr, sea_query::OnConflict};
+use sea_orm::{
+    DatabaseConnection, DatabaseTransaction, DbErr, EntityTrait, Set, TransactionTrait,
+    sea_query::OnConflict,
+};
 
 pub struct PgRiskFillRepository {
     db: DatabaseConnection,

@@ -1,100 +1,15 @@
-//! Position tracking and potential-loss ledger.
+//! Potential-loss ledger.
 //!
-//! [`PositionTracker`] maintains a per-market exposure view derived from
-//! [`RiskMetrics`]. [`PotentialLossLedger`] tracks worst-case loss for
-//! unsettled positions so the risk engine can account for committed capital.
+//! [`PotentialLossLedger`] tracks worst-case loss for unsettled positions so
+//! the risk engine can account for committed capital.
 
-use crate::traits::RiskMetrics;
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use oxide_arb_models::{
-    domain::{potential_loss::PotentialLossInfo, risk::MarketExposure},
+    domain::potential_loss::PotentialLossInfo,
     enums::common::LedgerStatus,
-    types::{LedgerId, MarketId, Usd},
+    types::{LedgerId, Usd},
 };
 use std::collections::HashMap;
-
-// ── Position Tracker ────────────────────────────────────────────────────────
-
-/// Aggregated per-market exposure view, refreshed from [`RiskMetrics`].
-///
-/// Not a ledger of individual positions — it is a cached summary for
-/// fast lookup during pre-trade checks.
-pub struct PositionTracker {
-    market_exposures: HashMap<MarketId, MarketExposure>,
-    total_position_value: Usd,
-    last_refresh: DateTime<Utc>,
-}
-
-impl PositionTracker {
-    #[must_use]
-    pub fn new() -> Self {
-        Self {
-            market_exposures: HashMap::new(),
-            total_position_value: Usd::ZERO,
-            last_refresh: Utc::now(),
-        }
-    }
-
-    /// Re-derive exposure data from the authoritative [`RiskMetrics`] source.
-    pub fn refresh(&mut self, metrics: &dyn RiskMetrics) {
-        self.market_exposures.clear();
-
-        let positions = metrics.open_positions();
-        let mut total = Usd::ZERO;
-
-        let mut by_market: HashMap<MarketId, Usd> = HashMap::new();
-        for pos in &positions {
-            *by_market.entry(pos.market_id.clone()).or_insert(Usd::ZERO) += pos.total_cost_usd;
-        }
-
-        for (market_id, position_value) in &by_market {
-            let full_exposure = metrics.market_exposure(market_id);
-            let reserved = (full_exposure - *position_value).max(Usd::ZERO);
-            let exposure = MarketExposure {
-                market_id: market_id.clone(),
-                position_value: *position_value,
-                reserved_value: reserved,
-                total_exposure: *position_value + reserved,
-            };
-            total += exposure.total_exposure;
-            self.market_exposures.insert(market_id.clone(), exposure);
-        }
-
-        self.total_position_value = total;
-        self.last_refresh = Utc::now();
-        tracing::info!(
-            markets = self.market_exposures.len(),
-            total_value = %self.total_position_value,
-            "position tracker refreshed"
-        );
-    }
-
-    /// Exposure in a single market. Returns `Usd::ZERO` if unknown.
-    #[must_use]
-    #[inline]
-    pub fn market_exposure(&self, market_id: &MarketId) -> Usd {
-        self.market_exposures
-            .get(market_id)
-            .map_or(Usd::ZERO, |e| e.total_exposure)
-    }
-
-    #[must_use]
-    #[inline]
-    pub const fn total_position_value(&self) -> Usd {
-        self.total_position_value
-    }
-
-    #[must_use]
-    pub fn all_exposures(&self) -> Vec<&MarketExposure> {
-        self.market_exposures.values().collect()
-    }
-}
-
-impl Default for PositionTracker {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 // ── Potential Loss Ledger ───────────────────────────────────────────────────
 

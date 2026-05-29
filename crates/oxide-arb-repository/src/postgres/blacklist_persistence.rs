@@ -1,13 +1,13 @@
-use super::orm::{
-    ColumnTrait, ConnectionTrait, DatabaseConnection, DatabaseTransaction, EntityTrait,
-    IntoActiveModel, QueryFilter,
-};
 use crate::traits::BlacklistPersistenceRepository;
 use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::{
     domain::{BlacklistInfo, UpsertBlacklistEntry},
     entities::blacklist_entry::{Column, Entity},
     types::MarketId,
+};
+use sea_orm::{
+    ColumnTrait, ConnectionTrait, DatabaseConnection, DatabaseTransaction, EntityTrait,
+    IntoActiveModel, QueryFilter,
 };
 
 pub struct PgBlacklistPersistenceRepository {
@@ -42,7 +42,6 @@ async fn do_upsert(
                     Column::Reason,
                     Column::ExpiresAt,
                     Column::MissCount,
-                    Column::UpdatedAt,
                 ])
                 .to_owned(),
         )

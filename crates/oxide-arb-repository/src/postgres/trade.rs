@@ -1,8 +1,3 @@
-use super::orm::{
-    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, DatabaseTransaction,
-    EntityTrait, FromQueryResult, IntoActiveModel, QueryFilter, QueryOrder, QuerySelect,
-    TransactionTrait,
-};
 use crate::{batch, traits::TradeRepository};
 use chrono::{DateTime, Utc};
 use num_traits::ToPrimitive;
@@ -13,7 +8,12 @@ use oxide_arb_models::{
     enums::common::{TradeBusinessOutcome, TradeState},
     types::{MarketId, TradeId, Usd},
 };
-use sea_orm::sea_query::{Condition, Expr, LockBehavior, LockType};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, DatabaseTransaction,
+    EntityTrait, FromQueryResult, IntoActiveModel, QueryFilter, QueryOrder, QuerySelect,
+    TransactionTrait,
+    sea_query::{Condition, Expr, LockBehavior, LockType},
+};
 use std::collections::HashMap;
 
 /// Number of columns in the `trade` table used for bind-variable calculations.
@@ -78,7 +78,7 @@ async fn do_create_batch(
         let models: Vec<ActiveModel> = chunk
             .iter()
             .cloned()
-            .map(|new| ActiveModel::prepare_for_insert(new.into_active_model()))
+            .map(IntoActiveModel::into_active_model)
             .collect();
         Entity::insert_many(models)
             .exec(db)
@@ -256,7 +256,6 @@ async fn update_claimed_group(
             Column::PostTradeAttempts,
             Expr::col(Column::PostTradeAttempts).add(1),
         )
-        .col_expr(Column::UpdatedAt, Expr::value(claimed_at))
         .filter(Column::TradeId.is_in(trade_ids))
         .exec_with_returning(txn)
         .await

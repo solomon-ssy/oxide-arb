@@ -89,7 +89,11 @@ fn with_context(
     let metrics = RiskMetricsSnapshot {
         total_exposure: Usd::new(dec!(100)),
         open_position_count: 1,
-        cached_balance: Usd::new(dec!(5000)),
+        cash_balance: Usd::new(dec!(5000)),
+        equity: Usd::new(dec!(5000)),
+        is_authoritative: true,
+        is_stale: false,
+        metrics_age_secs: 0,
         open_directional_count_buy: open_directional_same_side,
         daily_directional_trades_buy: daily_directional_trades_same_side,
         ..RiskMetricsSnapshot::zeroed()

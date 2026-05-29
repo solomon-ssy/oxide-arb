@@ -1,6 +1,7 @@
 //! System status, lifecycle, config, accounting, and reporting domain models.
 
 use crate::{
+    domain::{NullablePatch, Patch},
     enums::{
         common::{ExecutionMode, ReportType},
         lifecycle::ShutdownStage,
@@ -71,7 +72,8 @@ info_from_model!(RuntimeConfigInfo, crate::entities::runtime_config::Model, {
 });
 
 /// Upsert payload for the `runtime_config` table.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, DeriveIntoActiveModel)]
+#[sea_orm(active_model = "crate::entities::runtime_config::ActiveModel")]
 pub struct UpsertRuntimeConfig {
     pub key: RuntimeConfigKey,
     pub value: serde_json::Value,
@@ -108,7 +110,7 @@ info_from_model!(AccountingPeriodInfo, crate::entities::accounting_period::Model
 
 /// Write DTO for creating a new accounting period.
 #[derive(Debug, Clone, DeriveIntoActiveModel)]
-#[sea_orm(active_model = "super::super::entities::accounting_period::ActiveModel")]
+#[sea_orm(active_model = "crate::entities::accounting_period::ActiveModel")]
 pub struct NewAccountingPeriod {
     pub period_id: PeriodId,
     pub period_type: ReportType,
@@ -117,15 +119,37 @@ pub struct NewAccountingPeriod {
 }
 
 /// Partial update for an accounting period.
-#[derive(Debug, Clone, Default)]
-pub struct UpdateAccountingPeriod {
-    pub realized_pnl: Option<Usd>,
-    pub total_fees: Option<Usd>,
-    pub trade_count: Option<i32>,
-    pub win_count: Option<i32>,
-    pub loss_count: Option<i32>,
-    pub miss_count: Option<i32>,
-    pub max_drawdown: Option<Usd>,
-    pub sharpe_ratio: Option<Probability>,
-    pub finalized: Option<bool>,
+#[derive(Debug, Clone, Default, DeriveIntoActiveModel)]
+#[sea_orm(active_model = "crate::entities::accounting_period::ActiveModel")]
+pub struct AccountingPeriodPatch {
+    pub realized_pnl: Patch<Usd>,
+    pub total_fees: Patch<Usd>,
+    pub trade_count: Patch<i32>,
+    pub win_count: Patch<i32>,
+    pub loss_count: Patch<i32>,
+    pub miss_count: Patch<i32>,
+    pub max_drawdown: Patch<Usd>,
+    pub sharpe_ratio: NullablePatch<Probability>,
+    pub finalized: Patch<bool>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AccountingPeriodPatch;
+    use crate::domain::{NullablePatch, Patch};
+    use sea_orm::{ActiveValue, IntoActiveModel};
+
+    #[test]
+    fn accounting_patch_maps_keep_set_and_clear_to_active_values() {
+        let active = AccountingPeriodPatch {
+            finalized: Patch::set(true),
+            sharpe_ratio: NullablePatch::clear(),
+            ..Default::default()
+        }
+        .into_active_model();
+
+        assert!(matches!(active.realized_pnl, ActiveValue::NotSet));
+        assert!(matches!(active.finalized, ActiveValue::Set(true)));
+        assert!(matches!(active.sharpe_ratio, ActiveValue::Set(None)));
+    }
 }

@@ -8,16 +8,12 @@ use crate::{
     types::{EventId, MarketId, TokenId},
 };
 use chrono::{DateTime, Utc};
-use oxide_arb_macros::ActiveModelDefaults;
 use rust_decimal::Decimal;
 use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};
 
-#[derive(
-    Clone, Debug, PartialEq, Eq, DeriveEntityModel, ActiveModelDefaults, Serialize, Deserialize,
-)]
+#[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, Serialize, Deserialize)]
 #[sea_orm(table_name = "market")]
-#[active_defaults(timestamp(created_at))]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub market_id: MarketId,
@@ -79,3 +75,5 @@ impl Related<super::position::Entity> for Entity {
         Relation::Position.def()
     }
 }
+
+impl ActiveModelBehavior for ActiveModel {}

@@ -12,14 +12,15 @@
 //! - **`{Entity}RegistryInfo`** — In-memory enriched view (e.g. runtime book data).
 //!   Not persisted directly; converted to write DTOs for persistence.
 //!
-//! ## Write DTOs (`New*`, `Update*`, `Upsert*`)
+//! ## Write DTOs (`New*`, `Patch*`, `Upsert*`)
 //!
-//! - **`New{Entity}`** — Insert payload. Derives `DeriveIntoActiveModel`. Entity
-//!   defaults may fill generated IDs and insert-only values; DB defaults/triggers
-//!   own database-managed write timestamps.
+//! - **`New{Entity}`** — Insert payload. Derives `DeriveIntoActiveModel`.
+//!   Database-managed write timestamps are omitted so Postgres defaults/triggers
+//!   remain the single source of truth.
 //! - **`New{Entity}WithId`** — Insert payload where the caller assigns the PK.
-//! - **`Update{Entity}`** — Partial update. Fields are `Option<T>` for selective
-//!   patching; the repository fetches, patches, and persists internally.
+//! - **`{Entity}Patch`** — Partial update. Uses `Patch<T>` for non-nullable
+//!   columns and `NullablePatch<T>` for nullable columns, so write intent is
+//!   explicit: keep, set, or clear.
 //! - **`Upsert{Entity}`** — `ON CONFLICT DO UPDATE` payload. Derives
 //!   `DeriveIntoActiveModel`. Contains the conflict key and all updateable columns.
 //!
@@ -72,6 +73,7 @@ pub mod latency;
 pub mod market;
 pub mod opportunity;
 pub mod order;
+pub mod patch;
 pub mod pipeline;
 pub mod pnl;
 pub mod position;
@@ -91,6 +93,7 @@ pub use latency::*;
 pub use market::*;
 pub use opportunity::*;
 pub use order::*;
+pub use patch::*;
 pub use pipeline::*;
 pub use pnl::*;
 pub use position::*;

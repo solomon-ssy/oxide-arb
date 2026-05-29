@@ -115,7 +115,6 @@ impl From<RiskAuditEvent> for NewRiskAuditEvent {
             opportunity_id,
             trade_id,
             payload,
-            created_at: Utc::now(),
         }
     }
 }

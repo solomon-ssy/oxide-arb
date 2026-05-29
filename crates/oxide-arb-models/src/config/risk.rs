@@ -87,6 +87,9 @@ pub struct RiskConfig {
     /// Interval (secs) between CLOB balance + open-position metrics refreshes.
     #[serde(default = "default_metrics_refresh_interval")]
     pub metrics_refresh_interval_secs: u64,
+    /// Maximum age (secs) of the risk metrics snapshot allowed on Live hot path.
+    #[serde(default = "default_max_metrics_staleness")]
+    pub max_metrics_staleness_secs: u64,
     /// Interval (secs) between ledger reconciliation runs.
     #[serde(default = "default_reconciliation_interval")]
     pub reconciliation_interval_secs: u64,
@@ -165,6 +168,7 @@ impl Default for RiskConfig {
             reservation_gc_interval_secs: default_reservation_gc_interval_secs(),
             max_total_exposure_pct: default_max_total_exposure_pct(),
             metrics_refresh_interval_secs: default_metrics_refresh_interval(),
+            max_metrics_staleness_secs: default_max_metrics_staleness(),
             reconciliation_interval_secs: default_reconciliation_interval(),
             reconciliation_tolerance_usd: default_reconciliation_tolerance(),
             circuit_breaker: CircuitBreakerConfig::default(),
@@ -259,6 +263,9 @@ const fn default_max_total_exposure_pct() -> Decimal {
 }
 const fn default_metrics_refresh_interval() -> u64 {
     5
+}
+const fn default_max_metrics_staleness() -> u64 {
+    default_metrics_refresh_interval() * 3
 }
 const fn default_reconciliation_interval() -> u64 {
     300

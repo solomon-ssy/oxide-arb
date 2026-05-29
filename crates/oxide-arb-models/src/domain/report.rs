@@ -27,7 +27,7 @@ info_from_model!(ReportInfo, crate::entities::report::Model, {
 
 /// Upsert payload for the `report` table (ON CONFLICT updates payload).
 #[derive(Debug, Clone, DeriveIntoActiveModel)]
-#[sea_orm(active_model = "super::super::entities::report::ActiveModel")]
+#[sea_orm(active_model = "crate::entities::report::ActiveModel")]
 pub struct UpsertReport {
     pub id: ReportId,
     pub report_type: ReportType,

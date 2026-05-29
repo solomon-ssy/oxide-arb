@@ -8,7 +8,7 @@ use crate::{
     clock::{self, Clock},
     engine::{DynRiskEngine, RiskEngine},
     pipeline,
-    position::{PositionTracker, PotentialLossLedger},
+    position::PotentialLossLedger,
     reconciliation::LedgerReconciler,
     sizing::{DrawdownGuard, MultiConstraintSizer},
     snapshot::RiskSnapshot,
@@ -143,37 +143,33 @@ impl RiskEngineBuilder {
             .potential_loss_store
             .unwrap_or_else(|| Arc::new(NoopPotentialLossStore));
 
-        let (breaker, daily, weekly, hourly, position_tracker, potential_loss, drawdown_hwm) =
-            if let Some(ref snap) = self.snapshot {
-                let recovered = state_store::recover_state(
-                    &config,
-                    snap,
-                    self.blacklist_entries.clone(),
-                    self.potential_loss_entries,
-                    metrics,
-                    &clock,
-                )?;
-                (
-                    recovered.breaker,
-                    recovered.daily,
-                    recovered.weekly,
-                    recovered.hourly,
-                    recovered.position_tracker,
-                    recovered.potential_loss,
-                    recovered.drawdown_hwm,
-                )
-            } else {
-                let breaker =
-                    CircuitBreaker::new(config.circuit_breaker.clone(), Arc::clone(&clock));
-                let daily =
-                    DailyAccounting::new(Usd::new(config.daily_budget_usd), Arc::clone(&clock));
-                let weekly = WeeklyAccounting::new(Arc::clone(&clock));
-                let hourly = HourlyAccounting::new(Arc::clone(&clock));
-                let mut pt = PositionTracker::new();
-                pt.refresh(metrics);
-                let pl = PotentialLossLedger::from_entries(self.potential_loss_entries);
-                (breaker, daily, weekly, hourly, pt, pl, equity)
-            };
+        let (breaker, daily, weekly, hourly, potential_loss, drawdown_hwm) = if let Some(ref snap) =
+            self.snapshot
+        {
+            let recovered = state_store::recover_state(
+                &config,
+                snap,
+                self.blacklist_entries.clone(),
+                self.potential_loss_entries,
+                metrics,
+                &clock,
+            )?;
+            (
+                recovered.breaker,
+                recovered.daily,
+                recovered.weekly,
+                recovered.hourly,
+                recovered.potential_loss,
+                recovered.drawdown_hwm,
+            )
+        } else {
+            let breaker = CircuitBreaker::new(config.circuit_breaker.clone(), Arc::clone(&clock));
+            let daily = DailyAccounting::new(Usd::new(config.daily_budget_usd), Arc::clone(&clock));
+            let weekly = WeeklyAccounting::new(Arc::clone(&clock));
+            let hourly = HourlyAccounting::new(Arc::clone(&clock));
+            let pl = PotentialLossLedger::from_entries(self.potential_loss_entries);
+            (breaker, daily, weekly, hourly, pl, equity)
+        };
 
         let mut breaker = breaker;
         let safe_start_halt = should_safe_start_halt(&config, &breaker, &potential_loss, &*clock);
@@ -210,7 +206,6 @@ impl RiskEngineBuilder {
             daily: RwLock::new(daily),
             weekly: RwLock::new(weekly),
             hourly: RwLock::new(hourly),
-            position_tracker: RwLock::new(position_tracker),
             potential_loss: RwLock::new(potential_loss),
             pipeline: risk_pipeline,
             risk_snapshot: ArcSwap::from_pointee(RiskSnapshot::zeroed()),

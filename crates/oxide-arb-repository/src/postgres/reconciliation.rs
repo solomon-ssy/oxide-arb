@@ -1,7 +1,7 @@
-use super::orm::{DatabaseConnection, EntityTrait, IntoActiveModel};
 use crate::traits::ReconciliationRepository;
 use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::{domain::NewReconciliationReport, entities::reconciliation_report::Entity};
+use sea_orm::{DatabaseConnection, EntityTrait, IntoActiveModel};
 
 pub struct PgReconciliationRepository {
     db: DatabaseConnection,

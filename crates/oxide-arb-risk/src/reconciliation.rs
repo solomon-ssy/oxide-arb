@@ -46,7 +46,7 @@ impl LedgerReconciler {
         let ext_positions = querier.query_positions().await?;
         Ok(self.reconcile_fetched(
             metrics,
-            metrics.cached_balance(),
+            metrics.cash_balance(),
             ext_available,
             ext_locked,
             &ext_positions,

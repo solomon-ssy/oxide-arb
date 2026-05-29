@@ -5,7 +5,7 @@ use crate::{
     enums::risk::{
         BreakerStateName, CircuitBreakerLevel, ReconciliationStatus, RiskAuditEventType,
     },
-    types::{MarketId, OpportunityId, TradeId, Usd},
+    types::{OpportunityId, TradeId, Usd},
 };
 use chrono::{DateTime, NaiveDate, Utc};
 use rust_decimal::Decimal;
@@ -157,7 +157,7 @@ pub struct EmergencyContext {
 ///
 /// `updated_at` is database-managed by the Postgres default and update trigger.
 #[derive(Debug, Clone, DeriveIntoActiveModel)]
-#[sea_orm(active_model = "super::super::entities::risk_state::ActiveModel")]
+#[sea_orm(active_model = "crate::entities::risk_state::ActiveModel")]
 pub struct UpsertRiskEngineState {
     pub id: i32,
     pub breaker_state: BreakerStateName,
@@ -285,18 +285,17 @@ info_from_model!(EmergencySnapshotInfo, crate::entities::emergency_snapshot::Mod
 
 /// All fields required to persist a new risk audit event.
 #[derive(Debug, Clone, DeriveIntoActiveModel)]
-#[sea_orm(active_model = "super::super::entities::risk_audit_event::ActiveModel")]
+#[sea_orm(active_model = "crate::entities::risk_audit_event::ActiveModel")]
 pub struct NewRiskAuditEvent {
     pub event_type: RiskAuditEventType,
     pub opportunity_id: Option<OpportunityId>,
     pub trade_id: Option<TradeId>,
     pub payload: serde_json::Value,
-    pub created_at: DateTime<Utc>,
 }
 
 /// All fields required to persist a new emergency snapshot.
 #[derive(Debug, Clone, DeriveIntoActiveModel)]
-#[sea_orm(active_model = "super::super::entities::emergency_snapshot::ActiveModel")]
+#[sea_orm(active_model = "crate::entities::emergency_snapshot::ActiveModel")]
 pub struct NewEmergencySnapshot {
     pub trigger_level: CircuitBreakerLevel,
     pub reason: String,
@@ -308,7 +307,7 @@ pub struct NewEmergencySnapshot {
 
 /// All fields required to persist a new reconciliation report.
 #[derive(Debug, Clone, DeriveIntoActiveModel)]
-#[sea_orm(active_model = "super::super::entities::reconciliation_report::ActiveModel")]
+#[sea_orm(active_model = "crate::entities::reconciliation_report::ActiveModel")]
 pub struct NewReconciliationReport {
     pub status: ReconciliationStatus,
     pub mismatches: serde_json::Value,
@@ -337,15 +336,6 @@ pub struct FillCommit {
 }
 
 // ── Value objects ───────────────────────────────────────────────────
-
-/// Per-market exposure summary for risk dashboard.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MarketExposure {
-    pub market_id: MarketId,
-    pub position_value: Usd,
-    pub reserved_value: Usd,
-    pub total_exposure: Usd,
-}
 
 /// Probability quality metadata consumed by the Kelly calculator.
 ///

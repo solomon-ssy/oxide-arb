@@ -67,7 +67,15 @@ impl RiskMetrics for TestRiskMetrics {
         Vec::new()
     }
 
-    fn cached_balance(&self) -> Usd {
+    fn cash_balance(&self) -> Usd {
+        Usd::new(dec!(5000))
+    }
+
+    fn position_mark_value(&self) -> Usd {
+        Usd::ZERO
+    }
+
+    fn equity(&self) -> Usd {
         Usd::new(dec!(5000))
     }
 
@@ -101,6 +109,18 @@ impl RiskMetrics for TestRiskMetrics {
 
     fn api_request_count(&self) -> u64 {
         0
+    }
+
+    fn metrics_age_secs(&self) -> u64 {
+        0
+    }
+
+    fn is_stale(&self) -> bool {
+        false
+    }
+
+    fn is_authoritative(&self) -> bool {
+        true
     }
 }
 
@@ -326,7 +346,6 @@ mod tests {
                 opportunity_id: None,
                 trade_id: None,
                 payload: serde_json::json!({}),
-                created_at: chrono::Utc::now(),
             })
             .await
             .expect("audit write");

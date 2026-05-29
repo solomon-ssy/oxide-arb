@@ -10,13 +10,13 @@ use oxide_arb_models::{
     domain::{
         NewAccountingPeriod, NewCalibrationOutcome, NewEmergencySnapshot, NewPosition,
         NewPotentialLoss, NewReconciliationReport, NewRiskAuditEvent, NewTrade,
-        SettlePositionParams, TradeObservation, UpdatePotentialLoss, UpsertBlacklistEntry,
+        ResolvePotentialLoss, SettlePositionParams, TradeObservation, UpsertBlacklistEntry,
         UpsertCalibration, UpsertRiskEngineState, UpsertRuntimeConfig,
     },
     enums::{
         calibration::{DurationBucket, PriceZone},
         common::{
-            ExecutionMode, LedgerStatus, MarketCategory, PositionStatus, RedeemStatus, ReportType,
+            ExecutionMode, MarketCategory, PositionStatus, RedeemStatus, ReportType,
             SettlementTrigger, Side, TradeState,
         },
         risk::{
@@ -402,6 +402,7 @@ async fn position_lifecycle() {
     let position_repo = PgPositionRepository::new(pool.connection().clone());
     let opened = position_repo
         .create(NewPosition {
+            position_id: PositionId::generate(),
             trade_id,
             market_id: MarketId::new("0xpos-market"),
             token_id: TokenId::new("111"),
@@ -464,6 +465,7 @@ async fn position_settle() {
     let position_repo = PgPositionRepository::new(pool.connection().clone());
     let created = position_repo
         .create(NewPosition {
+            position_id: PositionId::generate(),
             trade_id,
             market_id: MarketId::new("0xsettle-mkt"),
             token_id: TokenId::new("333"),
@@ -510,7 +512,6 @@ async fn calibration_repository_crud() {
         alpha_prior: Probability::from(Decimal::new(10, 1)),
         beta_prior: Probability::from(Decimal::new(10, 1)),
         posterior_mean: Some(Probability::from(Decimal::new(9, 1))),
-        updated_at: Utc::now(),
     };
 
     let inserted = cal_repo.upsert(bucket).await.unwrap();
@@ -686,11 +687,10 @@ async fn potential_loss_repository_crud() {
         Usd::from(Decimal::new(18, 0))
     );
 
-    repo.update(
+    repo.resolve(
         &ledger_id,
-        UpdatePotentialLoss {
-            status: Some(LedgerStatus::Resolved),
-            resolved_at: Some(Utc::now()),
+        ResolvePotentialLoss {
+            resolved_at: Utc::now(),
         },
     )
     .await
@@ -793,7 +793,6 @@ async fn risk_audit_repository_create_batch() {
         opportunity_id: None,
         trade_id: None,
         payload: serde_json::json!({"reason": "test"}),
-        created_at: Utc::now(),
     }])
     .await
     .unwrap();

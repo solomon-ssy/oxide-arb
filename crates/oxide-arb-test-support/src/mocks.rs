@@ -9,8 +9,8 @@ use oxide_arb_models::{
         TickEventRow,
     },
     domain::{
-        MarkRedeemedParams, NewPosition, NewTrade, PositionInfo, ReportTradeStats,
-        SettlePositionParams, SettledPositionStats, TradeInfo, TradeObservation, UpdatePosition,
+        MarkRedeemedParams, NewPosition, NewTrade, PositionInfo, PositionPatch, ReportTradeStats,
+        SettlePositionParams, SettledPositionStats, TradeInfo, TradeObservation,
     },
     enums::common::{
         PositionStatus, RedeemStatus, SettlementAccountingStatus, SettlementTrigger,
@@ -168,7 +168,7 @@ impl PositionRepository for MockPositionRepository {
     async fn create(&self, position: NewPosition) -> Result<PositionInfo, StorageError> {
         let now = Utc::now();
         let info = PositionInfo {
-            position_id: PositionId::generate(),
+            position_id: position.position_id,
             trade_id: position.trade_id,
             market_id: position.market_id,
             token_id: position.token_id,
@@ -205,7 +205,7 @@ impl PositionRepository for MockPositionRepository {
     async fn update(
         &self,
         position_id: &PositionId,
-        _update: UpdatePosition,
+        _patch: PositionPatch,
     ) -> Result<PositionInfo, StorageError> {
         self.find_by_id(position_id)
             .await?

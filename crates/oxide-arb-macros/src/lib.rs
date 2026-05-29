@@ -3,10 +3,7 @@
 //! - [`TypedId`]: Generates a type-safe ID newtype backed by `Arc<str>`.
 //! - [`IntoActiveValue`]: Generates `IntoActiveValue` impl for enums stored as
 //!   strings in `SeaORM`.
-//! - [`ActiveModelDefaults`]: Generates `prepare_for_insert` and
-//!   `ActiveModelBehavior` for `SeaORM` entities with system-generated fields.
 
-mod active_model_defaults;
 mod into_active_value;
 mod oxide_schema;
 mod typed_id;
@@ -60,41 +57,6 @@ pub fn derive_typed_id(input: TokenStream) -> TokenStream {
 #[proc_macro_derive(IntoActiveValue)]
 pub fn derive_into_active_value(input: TokenStream) -> TokenStream {
     into_active_value::expand(input.into())
-        .unwrap_or_else(|e| e.to_compile_error())
-        .into()
-}
-
-/// Derive insert defaults and `ActiveModelBehavior` for a `SeaORM` entity model.
-///
-/// Requires `#[active_defaults(...)]` on the same struct. Generates
-/// `ActiveModel::prepare_for_insert()` (for bulk insert paths that bypass hooks)
-/// and `ActiveModelBehavior::before_save` that delegates to it on insert.
-///
-/// Update-time `updated_at` is NOT handled here — it is owned by a `PostgreSQL`
-/// `BEFORE UPDATE` trigger, which covers all write paths reliably.
-///
-/// # Rules
-///
-/// - `generate(field, expr)` — set `field` to `expr` when `NotSet` (typically ID generation)
-/// - `default(field, expr)` — set `field` to `expr` when `NotSet`
-/// - `timestamp(field)` — set `field` to `Utc::now()` when `NotSet`
-/// - `timestamp(field, always)` — always set `field` to `Utc::now()` on insert
-///
-/// # Example
-///
-/// ```ignore
-/// #[derive(DeriveEntityModel, ActiveModelDefaults)]
-/// #[sea_orm(table_name = "trade")]
-/// #[active_defaults(
-///     generate(trade_id, TradeId::generate()),
-///     default(outcome, TradeOutcome::Pending),
-///     timestamp(created_at),
-/// )]
-/// pub struct Model { /* ... */ }
-/// ```
-#[proc_macro_derive(ActiveModelDefaults, attributes(active_defaults))]
-pub fn derive_active_model_defaults(input: TokenStream) -> TokenStream {
-    active_model_defaults::expand(input.into())
         .unwrap_or_else(|e| e.to_compile_error())
         .into()
 }

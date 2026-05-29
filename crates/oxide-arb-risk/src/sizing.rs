@@ -197,9 +197,9 @@ impl MultiConstraintSizer {
             },
             SizeConstraint {
                 name: "available_balance",
-                max_usd: (ctx.cached_balance()
+                max_usd: (ctx.cash_balance()
                     - Usd::new(self.reserve_balance_usd)
-                    - ctx.total_exposure_before())
+                    - ctx.reserved_usd())
                 .max(Usd::ZERO),
             },
             SizeConstraint {

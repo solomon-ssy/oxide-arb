@@ -1,7 +1,3 @@
-use super::orm::{
-    ColumnTrait, ConnectionTrait, DatabaseConnection, DatabaseTransaction, EntityTrait,
-    IntoActiveModel, QueryFilter, QuerySelect,
-};
 use crate::traits::EventRepository;
 use num_traits::ToPrimitive;
 use oxide_arb_error::storage::StorageError;
@@ -11,7 +7,10 @@ use oxide_arb_models::{
     enums::market::EventStatus,
     types::EventId,
 };
-use sea_orm::sea_query::OnConflict;
+use sea_orm::{
+    ColumnTrait, ConnectionTrait, DatabaseConnection, DatabaseTransaction, EntityTrait,
+    IntoActiveModel, QueryFilter, QuerySelect, sea_query::OnConflict,
+};
 use std::collections::HashSet;
 
 pub struct PgEventRepository {
@@ -72,7 +71,7 @@ async fn do_find_existing_ids(
 
 async fn do_upsert(db: &impl ConnectionTrait, dto: UpsertEvent) -> Result<EventInfo, StorageError> {
     let am: ActiveModel = dto.into_active_model();
-    let model = Entity::insert(am.prepare_for_insert())
+    let model = Entity::insert(am)
         .on_conflict(
             OnConflict::column(Column::EventId)
                 .update_columns([
@@ -83,7 +82,6 @@ async fn do_upsert(db: &impl ConnectionTrait, dto: UpsertEvent) -> Result<EventI
                     Column::NegRisk,
                     Column::EndDate,
                     Column::RawGamma,
-                    Column::UpdatedAt,
                 ])
                 .to_owned(),
         )
@@ -103,7 +101,7 @@ async fn do_upsert_batch(
     let count = ToPrimitive::to_u64(&dtos.len()).unwrap_or(u64::MAX);
     let models: Vec<ActiveModel> = dtos
         .into_iter()
-        .map(|dto| ActiveModel::prepare_for_insert(dto.into_active_model()))
+        .map(IntoActiveModel::into_active_model)
         .collect();
     Entity::insert_many(models)
         .on_conflict(
@@ -116,7 +114,6 @@ async fn do_upsert_batch(
                     Column::NegRisk,
                     Column::EndDate,
                     Column::RawGamma,
-                    Column::UpdatedAt,
                 ])
                 .to_owned(),
         )

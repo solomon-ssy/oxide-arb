@@ -172,7 +172,15 @@ impl RiskMetrics for BenchMetrics {
     fn open_positions(&self) -> Vec<oxide_arb_models::domain::position::PositionInfo> {
         Vec::new()
     }
-    fn cached_balance(&self) -> Usd {
+    fn cash_balance(&self) -> Usd {
+        Usd::new(dec!(5000))
+    }
+
+    fn position_mark_value(&self) -> Usd {
+        Usd::ZERO
+    }
+
+    fn equity(&self) -> Usd {
         Usd::new(dec!(5000))
     }
     fn active_reservation_count(&self) -> usize {
@@ -198,6 +206,18 @@ impl RiskMetrics for BenchMetrics {
     }
     fn api_request_count(&self) -> u64 {
         0
+    }
+
+    fn metrics_age_secs(&self) -> u64 {
+        0
+    }
+
+    fn is_stale(&self) -> bool {
+        false
+    }
+
+    fn is_authoritative(&self) -> bool {
+        true
     }
 }
 

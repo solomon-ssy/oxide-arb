@@ -185,7 +185,7 @@ impl MarketRegistryInfo {
 /// Insert defaults may prepare `created_at`; DB defaults and triggers own
 /// database-managed write timestamps.
 #[derive(Debug, Clone, DeriveIntoActiveModel)]
-#[sea_orm(active_model = "super::super::entities::market::ActiveModel")]
+#[sea_orm(active_model = "crate::entities::market::ActiveModel")]
 pub struct UpsertMarket {
     pub market_id: MarketId,
     pub event_id: EventId,
@@ -307,7 +307,7 @@ pub struct EventRegistryInfo {
 /// Insert defaults may prepare `created_at`; DB defaults and triggers own
 /// database-managed write timestamps.
 #[derive(Debug, Clone, DeriveIntoActiveModel)]
-#[sea_orm(active_model = "super::super::entities::event::ActiveModel")]
+#[sea_orm(active_model = "crate::entities::event::ActiveModel")]
 pub struct UpsertEvent {
     pub event_id: EventId,
     pub title: String,

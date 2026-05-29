@@ -172,6 +172,7 @@ pub enum RiskCheckId {
     CircuitBreaker,
     BlacklistTradingPath,
     TokenBlacklist,
+    MetricsFreshness,
     MinDepth,
     MaxDepthUsage,
     Staleness,

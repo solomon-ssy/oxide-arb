@@ -1,6 +1,6 @@
 use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::{
-    domain::{NewPotentialLoss, PotentialLossInfo, UpdatePotentialLoss},
+    domain::{NewPotentialLoss, PotentialLossInfo, ResolvePotentialLoss},
     types::{LedgerId, MarketId, Usd},
 };
 
@@ -15,10 +15,10 @@ pub trait PotentialLossRepository: Send + Sync {
         market_id: &MarketId,
     ) -> Result<Vec<PotentialLossInfo>, StorageError>;
 
-    async fn update(
+    async fn resolve(
         &self,
         ledger_id: &LedgerId,
-        update: UpdatePotentialLoss,
+        command: ResolvePotentialLoss,
     ) -> Result<PotentialLossInfo, StorageError>;
 
     async fn total_active_loss(&self) -> Result<Usd, StorageError>;

@@ -131,7 +131,7 @@ impl PostTradeInput {
 /// `needs_reconcile`, timestamps, and nullable defaults automatically;
 /// `business_outcome` is computed by a PG generated column.
 #[derive(Debug, Clone, DeriveIntoActiveModel)]
-#[sea_orm(active_model = "super::super::entities::trade::ActiveModel")]
+#[sea_orm(active_model = "crate::entities::trade::ActiveModel")]
 pub struct NewTrade {
     pub trade_id: TradeId,
     pub execution_id: ExecutionId,

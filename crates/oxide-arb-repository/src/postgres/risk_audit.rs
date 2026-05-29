@@ -1,9 +1,9 @@
-use super::orm::{
-    ConnectionTrait, DatabaseConnection, EntityTrait, IntoActiveModel, TransactionTrait,
-};
 use crate::traits::RiskAuditRepository;
 use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::{domain::NewRiskAuditEvent, entities::risk_audit_event::Entity};
+use sea_orm::{
+    ConnectionTrait, DatabaseConnection, EntityTrait, IntoActiveModel, TransactionTrait,
+};
 
 pub struct PgRiskAuditRepository {
     db: DatabaseConnection,

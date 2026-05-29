@@ -81,7 +81,6 @@ impl CalibrationEntry {
             alpha_prior: Probability::from(self.alpha_prior),
             beta_prior: Probability::from(self.beta_prior),
             posterior_mean: Some(Probability::from(self.posterior_mean())),
-            updated_at: chrono::Utc::now(),
         }
     }
 }

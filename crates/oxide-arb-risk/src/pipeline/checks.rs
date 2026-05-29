@@ -138,6 +138,65 @@ impl RiskCheck for TokenBlacklistCheck {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// #5 MetricsFreshness
+// ═══════════════════════════════════════════════════════════════════════════════
+
+pub struct MetricsFreshnessCheck {
+    max_age_secs: u64,
+}
+
+impl MetricsFreshnessCheck {
+    #[must_use]
+    pub const fn new(config: &RiskConfig) -> Self {
+        Self {
+            max_age_secs: config.max_metrics_staleness_secs,
+        }
+    }
+}
+
+impl RiskCheck for MetricsFreshnessCheck {
+    fn id(&self) -> RiskCheckId {
+        RiskCheckId::MetricsFreshness
+    }
+
+    fn kind(&self) -> RiskCheckKind {
+        RiskCheckKind::Gate
+    }
+
+    fn evaluate(&self, ctx: &PreTradeContext<'_>) -> RiskCheckResult {
+        if !ctx.is_authoritative() {
+            return RiskCheckResult::failed(
+                RiskCheckId::MetricsFreshness,
+                "risk metrics source is not authoritative".into(),
+                "authoritative".into(),
+                "non-authoritative".into(),
+            );
+        }
+
+        if ctx.is_metrics_stale() {
+            return RiskCheckResult::failed(
+                RiskCheckId::MetricsFreshness,
+                "risk metrics snapshot has been marked stale".into(),
+                "not stale".into(),
+                "stale".into(),
+            );
+        }
+
+        let actual = ctx.metrics_age_secs();
+        if actual <= self.max_age_secs {
+            RiskCheckResult::passed(RiskCheckId::MetricsFreshness)
+        } else {
+            RiskCheckResult::failed(
+                RiskCheckId::MetricsFreshness,
+                format!("risk metrics snapshot is stale: {actual}s"),
+                format!("≤ {}s", self.max_age_secs),
+                format!("{actual}s"),
+            )
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // #5 MinDepth
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -571,17 +630,17 @@ impl RiskCheck for ExposurePctCheck {
         RiskCheckKind::Gate
     }
     fn evaluate(&self, ctx: &PreTradeContext<'_>) -> RiskCheckResult {
-        if ctx.cached_balance() <= Usd::ZERO {
+        if ctx.cash_balance() <= Usd::ZERO {
             return RiskCheckResult::failed(
                 RiskCheckId::ExposurePct,
-                "cached balance is zero or negative — cannot compute exposure %".into(),
+                "cash balance is zero or negative — cannot compute exposure %".into(),
                 format!("≤ {}%", self.max_total_exposure_pct),
                 "N/A".into(),
             );
         }
 
         let post_trade = ctx.total_exposure_before().inner() + ctx.opportunity.total_cost.inner();
-        let pct = post_trade / ctx.cached_balance().inner() * dec!(100);
+        let pct = post_trade / ctx.cash_balance().inner() * dec!(100);
 
         if pct <= self.max_total_exposure_pct {
             RiskCheckResult::passed(RiskCheckId::ExposurePct)
@@ -615,16 +674,16 @@ impl RiskCheck for PotentialLossCapCheck {
     fn evaluate(&self, ctx: &PreTradeContext<'_>) -> RiskCheckResult {
         let post_trade_potential = ctx.total_potential_loss() + ctx.opportunity.total_cost;
 
-        if post_trade_potential <= ctx.cached_balance() {
+        if post_trade_potential <= ctx.cash_balance() {
             RiskCheckResult::passed(RiskCheckId::PotentialLossCap)
         } else {
             RiskCheckResult::failed(
                 RiskCheckId::PotentialLossCap,
                 format!(
                     "potential loss ${post_trade_potential} exceeds balance ${}",
-                    ctx.cached_balance()
+                    ctx.cash_balance()
                 ),
-                format!("≤ ${}", ctx.cached_balance()),
+                format!("≤ ${}", ctx.cash_balance()),
                 format!("${post_trade_potential}"),
             )
         }
@@ -736,7 +795,7 @@ impl RiskCheck for MinBalanceCheck {
         RiskCheckKind::Gate
     }
     fn evaluate(&self, ctx: &PreTradeContext<'_>) -> RiskCheckResult {
-        let balance = ctx.cached_balance();
+        let balance = ctx.cash_balance();
 
         if balance >= self.min_balance_usd {
             RiskCheckResult::passed(RiskCheckId::MinBalance)

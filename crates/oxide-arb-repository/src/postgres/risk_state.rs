@@ -1,7 +1,3 @@
-use super::orm::{
-    ColumnTrait, ConnectionTrait, DatabaseConnection, DatabaseTransaction, EntityTrait,
-    IntoActiveModel, QueryFilter,
-};
 use crate::traits::RiskStateRepository;
 use chrono::Utc;
 use oxide_arb_error::storage::StorageError;
@@ -9,7 +5,11 @@ use oxide_arb_models::{
     domain::{RiskStateInfo, UpsertRiskEngineState},
     entities::risk_state::{ActiveModel, Column, Entity},
 };
-use sea_orm::sea_query::{Expr, OnConflict};
+use sea_orm::{
+    ColumnTrait, ConnectionTrait, DatabaseConnection, DatabaseTransaction, EntityTrait,
+    IntoActiveModel, QueryFilter,
+    sea_query::{Expr, OnConflict},
+};
 
 pub struct PgRiskStateRepository {
     db: DatabaseConnection,
@@ -46,7 +46,6 @@ pub(crate) async fn do_upsert(
     state: UpsertRiskEngineState,
 ) -> Result<(), StorageError> {
     let am: ActiveModel = state.into_active_model();
-    let am = am.prepare_for_insert();
     Entity::insert(am)
         .on_conflict(
             OnConflict::column(Column::Id)
@@ -79,7 +78,6 @@ pub(crate) async fn do_upsert(
                     Column::HwmEquity,
                     Column::LastEmergencyAt,
                     Column::LastEmergencyReason,
-                    Column::UpdatedAt,
                 ])
                 .to_owned(),
         )

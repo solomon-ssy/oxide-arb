@@ -328,12 +328,14 @@ impl AppContext {
         let pg = Arc::clone(&self.infra.pg);
         let ch = Arc::clone(&self.infra.ch);
         let ws = Arc::clone(&self.trading.ws_manager);
+        let clob_client = self.trading.clob_client.clone();
+        let execution_mode = self.config.execution.execution_mode;
         let metrics = Arc::clone(&self.infra.metrics);
         let alerts = Arc::clone(&self.infra.alerts);
 
         self.pending_tasks
             .push(TaskId::HealthChecker, move |shutdown| async move {
-                let checker = HealthChecker::new(pg, ch, ws);
+                let checker = HealthChecker::new(pg, ch, ws, clob_client, execution_mode);
                 if let Err(error) = PeriodicTask::run(
                     TaskId::HealthChecker.static_name(),
                     Duration::from_secs(HEALTH_CHECK_INTERVAL_SECS),

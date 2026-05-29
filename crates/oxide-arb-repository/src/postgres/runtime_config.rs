@@ -1,15 +1,14 @@
-use super::orm::{
-    ConnectionTrait, DatabaseConnection, DatabaseTransaction, EntityTrait, NotSet, QueryOrder, Set,
-};
 use crate::traits::RuntimeConfigRepository;
-use chrono::Utc;
 use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::{
     domain::{RuntimeConfigInfo, UpsertRuntimeConfig},
-    entities::runtime_config::{ActiveModel, Column, Entity},
+    entities::runtime_config::{Column, Entity},
     enums::runtime_config::RuntimeConfigKey,
 };
-use sea_orm::sea_query::OnConflict;
+use sea_orm::{
+    ConnectionTrait, DatabaseConnection, DatabaseTransaction, EntityTrait, IntoActiveModel,
+    QueryOrder, sea_query::OnConflict,
+};
 
 pub struct PgRuntimeConfigRepository {
     db: DatabaseConnection,
@@ -44,19 +43,10 @@ async fn do_upsert(
     db: &impl ConnectionTrait,
     dto: UpsertRuntimeConfig,
 ) -> Result<RuntimeConfigInfo, StorageError> {
-    let now = Utc::now();
-    let model = ActiveModel {
-        key: Set(dto.key),
-        value: Set(dto.value),
-        description: NotSet,
-        updated_by: Set(dto.updated_by),
-        updated_at: Set(now),
-    };
-
-    let result = Entity::insert(model)
+    let result = Entity::insert(dto.into_active_model())
         .on_conflict(
             OnConflict::column(Column::Key)
-                .update_columns([Column::Value, Column::UpdatedBy, Column::UpdatedAt])
+                .update_columns([Column::Value, Column::UpdatedBy])
                 .to_owned(),
         )
         .exec_with_returning(db)

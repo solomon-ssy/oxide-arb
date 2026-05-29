@@ -17,6 +17,7 @@ use oxide_arb_models::{
         common::{ExecutionMode, RedeemStatus},
         risk::TradeAccountingPhase,
     },
+    types::PositionId,
 };
 use oxide_arb_repository::traits::{PositionRepository, TradeRepository};
 use oxide_arb_risk::engine::RiskEngine;
@@ -78,8 +79,6 @@ impl PostTradeConsumer {
                 self.metrics.post_trade_relay_failed.inc();
                 return;
             }
-            self.risk_engine
-                .refresh_positions(self.risk_metrics.as_ref());
         }
 
         self.write_audit(trade);
@@ -120,6 +119,7 @@ impl PostTradeConsumer {
             return Ok(());
         }
         let position = NewPosition {
+            position_id: PositionId::generate(),
             trade_id: trade.trade_id.clone(),
             market_id: trade.market_id.clone(),
             token_id: trade.token_id.clone(),

@@ -5,6 +5,7 @@ use oxide_arb_models::{
     config::PostgresConfig,
     entities::{blacklist_entry, risk_state, runtime_config},
     enums::runtime_config::RuntimeConfigKey,
+    schema::{catalog, trigger::TriggerKind},
     types::MarketId,
 };
 use oxide_arb_storage::postgres::{
@@ -15,6 +16,30 @@ use sea_orm::{ConnectionTrait, EntityTrait};
 use std::time::Duration;
 use testcontainers::runners::AsyncRunner;
 use tokio::time::sleep;
+
+#[test]
+fn updated_at_trigger_catalog_is_complete() {
+    let mut tables = catalog::tables()
+        .into_iter()
+        .flat_map(|spec| (spec.triggers)())
+        .filter(|trigger| trigger.kind == TriggerKind::UpdatedAt)
+        .map(|trigger| (trigger.table_name)())
+        .collect::<Vec<_>>();
+    tables.sort();
+
+    assert_eq!(
+        tables,
+        vec![
+            "blacklist_entry",
+            "endgame_calibration_bucket",
+            "event",
+            "market",
+            "risk_engine_state",
+            "runtime_config",
+            "trade",
+        ]
+    );
+}
 
 fn test_pg_config(port: u16) -> PostgresConfig {
     PostgresConfig {

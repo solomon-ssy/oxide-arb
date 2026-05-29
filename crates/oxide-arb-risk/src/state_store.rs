@@ -7,7 +7,7 @@ use crate::{
     accounting::{DailyAccounting, HourlyAccounting, WeeklyAccounting},
     circuit_breaker::CircuitBreaker,
     clock::Clock,
-    position::{PositionTracker, PotentialLossLedger},
+    position::PotentialLossLedger,
     traits::RiskMetrics,
     types::{PeriodStats, StateVersion},
 };
@@ -27,7 +27,6 @@ pub struct RecoveredState {
     pub daily: DailyAccounting,
     pub weekly: WeeklyAccounting,
     pub hourly: HourlyAccounting,
-    pub position_tracker: PositionTracker,
     pub potential_loss: PotentialLossLedger,
     pub blacklist_entries: Vec<BlacklistInfo>,
     pub drawdown_hwm: Usd,
@@ -112,15 +111,12 @@ pub fn recover_state(
         ));
     }
 
-    let mut position_tracker = PositionTracker::new();
-    position_tracker.refresh(metrics);
-
     let potential_loss = PotentialLossLedger::from_entries(potential_loss_entries);
 
     let drawdown_hwm = if snapshot.hwm_equity.is_positive() {
         snapshot.hwm_equity
     } else {
-        metrics.cached_balance()
+        metrics.equity()
     };
 
     Ok(RecoveredState {
@@ -128,7 +124,6 @@ pub fn recover_state(
         daily,
         weekly,
         hourly,
-        position_tracker,
         potential_loss,
         blacklist_entries,
         drawdown_hwm,

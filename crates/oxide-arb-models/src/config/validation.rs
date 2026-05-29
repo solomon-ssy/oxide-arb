@@ -88,6 +88,20 @@ fn validate_risk_cross_constraints(inner: &Inner, report: &mut ConfigValidationR
         });
     }
 
+    if r.metrics_refresh_interval_secs == 0 {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "risk.metrics_refresh_interval_secs",
+            detail: "must be > 0".into(),
+        });
+    }
+
+    if r.max_metrics_staleness_secs < r.metrics_refresh_interval_secs {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "risk.max_metrics_staleness_secs",
+            detail: "must be >= risk.metrics_refresh_interval_secs".into(),
+        });
+    }
+
     let cb = &r.circuit_breaker;
     for (field, val) in [
         ("risk.circuit_breaker.l1_cooldown_secs", cb.l1_cooldown_secs),

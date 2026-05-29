@@ -16,7 +16,7 @@ use crate::{
     clock::Clock,
     context::{CircuitBreakerGate, ManualHaltGate, PreTradeContext},
     pipeline::StaticRiskPipeline,
-    position::{PositionTracker, PotentialLossLedger},
+    position::PotentialLossLedger,
     reconciliation::LedgerReconciler,
     sizing::{DrawdownGuard, MultiConstraintSizer},
     snapshot::{
@@ -73,7 +73,6 @@ where
     pub(crate) daily: RwLock<DailyAccounting>,
     pub(crate) weekly: RwLock<WeeklyAccounting>,
     pub(crate) hourly: RwLock<HourlyAccounting>,
-    pub(crate) position_tracker: RwLock<PositionTracker>,
     pub(crate) potential_loss: RwLock<PotentialLossLedger>,
     pub(crate) pipeline: StaticRiskPipeline,
     pub(crate) risk_snapshot: ArcSwap<RiskSnapshot>,
@@ -158,10 +157,9 @@ where
             (false, denial_reason, None, None)
         } else {
             let bankroll = available_bankroll(
-                ctx.cached_balance(),
+                ctx.equity(),
                 Usd::new(self.config.reserve_balance_usd),
-                ctx.total_exposure_before(),
-                ctx.total_potential_loss(),
+                ctx.reserved_usd(),
                 Usd::new(self.config.bankroll_usd),
             );
 
@@ -562,9 +560,7 @@ where
             }
         }
 
-        self.drawdown
-            .write()
-            .update_equity(metrics.cached_balance());
+        self.drawdown.write().update_equity(metrics.equity());
 
         let miss_count = metrics.consecutive_market_misses(&trade.market_id);
         if miss_count >= self.config.max_consecutive_misses {
@@ -697,11 +693,6 @@ where
         }
 
         Ok(any_change)
-    }
-
-    /// Refresh the cached position tracker from the live metrics source.
-    pub fn refresh_positions(&self, metrics: &dyn RiskMetrics) {
-        self.position_tracker.write().refresh(metrics);
     }
 
     // ── Reconciliation ──────────────────────────────────────────────────
@@ -1201,14 +1192,8 @@ fn escalate(current: &mut Option<CircuitBreakerLevel>, new: CircuitBreakerLevel)
 ///
 /// `dynamic = balance - reserve - exposure - potential_loss`, floored at zero.
 #[inline]
-fn available_bankroll(
-    cached_balance: Usd,
-    reserve: Usd,
-    total_exposure: Usd,
-    total_potential_loss: Usd,
-    config_bankroll: Usd,
-) -> Usd {
-    let dynamic = (cached_balance - reserve - total_exposure - total_potential_loss).max(Usd::ZERO);
+fn available_bankroll(equity: Usd, reserve: Usd, reserved_usd: Usd, config_bankroll: Usd) -> Usd {
+    let dynamic = (equity - reserve - reserved_usd).max(Usd::ZERO);
     let capped = Usd::new(config_bankroll.inner().min(dynamic.inner()));
     capped.max(Usd::ZERO)
 }

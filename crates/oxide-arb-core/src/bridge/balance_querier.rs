@@ -30,6 +30,8 @@ impl BalanceQuerier for CoreBalanceQuerier {
             .collateral_balance()
             .await
             .map_err(OxideError::from)?;
+        // Endgame execution is FOK-only, so orders never rest on the book and
+        // collateral locked in open orders is structurally zero.
         Ok((balance, Usd::ZERO))
     }
 

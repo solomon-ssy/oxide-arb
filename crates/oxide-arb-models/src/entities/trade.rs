@@ -8,17 +8,10 @@ use crate::{
     },
 };
 use chrono::{DateTime, Utc};
-use oxide_arb_macros::ActiveModelDefaults;
 use sea_orm::entity::prelude::*;
 
-#[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel, ActiveModelDefaults)]
+#[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "trade")]
-#[active_defaults(
-    default(state, TradeState::Intent),
-    default(needs_reconcile, false),
-    default(post_trade_attempts, 0),
-    timestamp(created_at)
-)]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub trade_id: TradeId,
@@ -96,3 +89,5 @@ impl Related<super::event::Entity> for Entity {
         Relation::Event.def()
     }
 }
+
+impl ActiveModelBehavior for ActiveModel {}

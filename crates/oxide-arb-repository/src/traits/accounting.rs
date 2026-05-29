@@ -1,6 +1,6 @@
 use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::{
-    domain::{AccountingPeriodInfo, NewAccountingPeriod, UpdateAccountingPeriod},
+    domain::{AccountingPeriodInfo, AccountingPeriodPatch, NewAccountingPeriod},
     types::PeriodId,
 };
 
@@ -17,7 +17,7 @@ pub trait AccountingRepository: Send + Sync {
     async fn update(
         &self,
         period_id: &PeriodId,
-        update: UpdateAccountingPeriod,
+        patch: AccountingPeriodPatch,
     ) -> Result<AccountingPeriodInfo, StorageError>;
 
     async fn finalize_period(&self, period_id: &PeriodId) -> Result<(), StorageError>;

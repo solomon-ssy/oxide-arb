@@ -57,7 +57,11 @@ impl TestFrame {
             metrics: RiskMetricsSnapshot {
                 total_exposure: Usd::new(dec!(100)),
                 open_position_count: 1,
-                cached_balance: Usd::new(dec!(5000)),
+                cash_balance: Usd::new(dec!(5000)),
+                equity: Usd::new(dec!(5000)),
+                is_authoritative: true,
+                is_stale: false,
+                metrics_age_secs: 0,
                 ..RiskMetricsSnapshot::zeroed()
             },
             now: Utc::now(),
@@ -140,7 +144,13 @@ impl RiskMetrics for GoldenMetrics {
     fn open_positions(&self) -> Vec<PositionInfo> {
         vec![]
     }
-    fn cached_balance(&self) -> Usd {
+    fn cash_balance(&self) -> Usd {
+        Usd::new(dec!(5000))
+    }
+    fn position_mark_value(&self) -> Usd {
+        Usd::ZERO
+    }
+    fn equity(&self) -> Usd {
         Usd::new(dec!(5000))
     }
     fn active_reservation_count(&self) -> usize {
@@ -166,6 +176,15 @@ impl RiskMetrics for GoldenMetrics {
     }
     fn api_request_count(&self) -> u64 {
         0
+    }
+    fn metrics_age_secs(&self) -> u64 {
+        0
+    }
+    fn is_stale(&self) -> bool {
+        false
+    }
+    fn is_authoritative(&self) -> bool {
+        true
     }
 }
 
@@ -194,6 +213,7 @@ async fn pipeline_check_order_golden_test() {
         RiskCheckId::CircuitBreaker,
         RiskCheckId::BlacklistTradingPath,
         RiskCheckId::TokenBlacklist,
+        RiskCheckId::MetricsFreshness,
         RiskCheckId::MinDepth,
         RiskCheckId::MaxDepthUsage,
         RiskCheckId::Staleness,
@@ -218,8 +238,8 @@ async fn pipeline_check_order_golden_test() {
 
     assert_eq!(
         check_ids.len(),
-        24,
-        "expected exactly 24 checks, got {}",
+        25,
+        "expected exactly 25 checks, got {}",
         check_ids.len()
     );
     assert_eq!(check_ids, expected, "pipeline check order mismatch");
@@ -281,7 +301,7 @@ impl TestRiskPipeline {
 #[test]
 fn static_pipeline_check_order_matches_golden() {
     let pipeline = build_default_pipeline(&RiskConfig::default());
-    assert_eq!(pipeline.check_order().len(), 24);
+    assert_eq!(pipeline.check_order().len(), 25);
 }
 
 #[test]
@@ -317,7 +337,7 @@ fn metrics_split_index_matches_check_order() {
         .position(|(_, needs)| *needs)
         .expect("at least one check requires metrics");
     assert_eq!(first_metrics_gate, pipeline.metrics_split_index());
-    assert_eq!(order[first_metrics_gate], RiskCheckId::MinDepth);
+    assert_eq!(order[first_metrics_gate], RiskCheckId::MetricsFreshness);
 }
 
 // ── Short-circuit stops on first gate failure ──────────────────────────────
@@ -403,5 +423,5 @@ fn full_report_evaluates_all_checks() {
 fn static_pipeline_has_fixed_checks() {
     let pipeline = build_default_pipeline(&RiskConfig::default());
     assert!(!pipeline.is_empty());
-    assert_eq!(pipeline.len(), 24);
+    assert_eq!(pipeline.len(), 25);
 }
