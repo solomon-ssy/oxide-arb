@@ -5,6 +5,7 @@ use chrono::{DateTime, NaiveDate, Timelike, Utc};
 use oxide_arb_models::{enums::common::TradeBusinessOutcome, types::Usd};
 use std::sync::Arc;
 
+#[derive(Clone)]
 pub struct HourlyAccounting {
     window_start_hour: u32,
     window_start_date: NaiveDate,
@@ -68,6 +69,12 @@ impl HourlyAccounting {
     #[inline]
     pub const fn hourly_loss(&self) -> Usd {
         self.stats.loss
+    }
+
+    #[must_use]
+    #[inline]
+    pub const fn fees(&self) -> Usd {
+        self.stats.fees
     }
 
     #[must_use]

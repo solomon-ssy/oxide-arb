@@ -83,21 +83,24 @@ impl AlertDispatcher {
 
     #[must_use]
     pub fn with_recordings(recordings: Arc<Mutex<Vec<Alert>>>) -> Self {
+        Self::with_recordings_and_cooldown(recordings, Duration::ZERO)
+    }
+
+    #[must_use]
+    pub fn with_recordings_and_cooldown(
+        recordings: Arc<Mutex<Vec<Alert>>>,
+        cooldown_duration: Duration,
+    ) -> Self {
         Self {
             telegram: None,
             webhook: None,
             cooldown: DashMap::new(),
-            cooldown_duration: Duration::ZERO,
+            cooldown_duration,
             recordings: Some(recordings),
         }
     }
 
     pub async fn dispatch(&self, alert: Alert) {
-        if let Some(recordings) = &self.recordings {
-            if let Ok(mut guard) = recordings.lock() {
-                guard.push(alert.clone());
-            }
-        }
         let cooldown_key = format!("{}:{}", alert.severity, alert.title);
         if let Some(last) = self.cooldown.get(&cooldown_key) {
             if last.elapsed() < self.cooldown_duration {
@@ -106,6 +109,12 @@ impl AlertDispatcher {
             }
         }
         self.cooldown.insert(cooldown_key, Instant::now());
+
+        if let Some(recordings) = &self.recordings {
+            if let Ok(mut guard) = recordings.lock() {
+                guard.push(alert.clone());
+            }
+        }
 
         let text = format!(
             "[{}] {}\n{}\n{}",
@@ -122,6 +131,20 @@ impl AlertDispatcher {
             }
             AlertSeverity::Info => {
                 tracing::info!(severity = %alert.severity, title = %alert.title, "{}", alert.body);
+            }
+        }
+    }
+
+    pub fn dispatch_background(self: &Arc<Self>, alert: Alert) {
+        let dispatcher = Arc::clone(self);
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                handle.spawn(async move {
+                    dispatcher.dispatch(alert).await;
+                });
+            }
+            Err(error) => {
+                tracing::error!(%error, title = %alert.title, "cannot dispatch alert outside Tokio runtime");
             }
         }
     }
@@ -151,5 +174,42 @@ impl AlertDispatcher {
         if let Err(e) = result {
             tracing::error!(error = %e, "failed to send webhook alert");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Alert, AlertDispatcher, AlertSeverity};
+    use chrono::Utc;
+    use std::{
+        sync::{Arc, Mutex},
+        time::Duration,
+    };
+
+    fn alert(title: &str) -> Alert {
+        Alert {
+            severity: AlertSeverity::Critical,
+            title: title.to_owned(),
+            body: "body".to_owned(),
+            timestamp: Utc::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn cooldown_suppresses_duplicate_alert_recordings() {
+        let recordings = Arc::new(Mutex::new(Vec::new()));
+        let dispatcher = AlertDispatcher::with_recordings_and_cooldown(
+            Arc::clone(&recordings),
+            Duration::from_secs(60),
+        );
+
+        dispatcher.dispatch(alert("same")).await;
+        dispatcher.dispatch(alert("same")).await;
+        dispatcher.dispatch(alert("different")).await;
+
+        let guard = recordings.lock().expect("recordings lock");
+        assert_eq!(guard.len(), 2);
+        assert_eq!(guard[0].title, "same");
+        assert_eq!(guard[1].title, "different");
     }
 }

@@ -356,6 +356,34 @@ impl PositionRepository for MockPositionRepository {
         Ok(updated)
     }
 
+    async fn mark_redeem_terminal(
+        &self,
+        position_id: &PositionId,
+        attempts: u32,
+        winning_token_id: &oxide_arb_models::types::TokenId,
+        settlement_trigger: SettlementTrigger,
+        reason: String,
+    ) -> Result<PositionInfo, StorageError> {
+        let mut positions = self.positions.lock().unwrap();
+        let position =
+            positions
+                .get_mut(position_id.as_str())
+                .ok_or_else(|| StorageError::NotFound {
+                    entity: "position",
+                    id: position_id.to_string(),
+                })?;
+        position.redeem_status = RedeemStatus::Failed;
+        position.redeem_attempts = i32::try_from(attempts).unwrap_or(i32::MAX);
+        position.winning_token_id = Some(winning_token_id.clone());
+        position.settlement_trigger = Some(settlement_trigger);
+        position.settlement_accounting_status = SettlementAccountingStatus::Failed;
+        position.settlement_accounting_error = Some(reason.clone());
+        position.redeem_terminal_reason = Some(reason);
+        let updated = position.clone();
+        drop(positions);
+        Ok(updated)
+    }
+
     async fn patch_oracle_verdict(
         &self,
         position_id: &PositionId,

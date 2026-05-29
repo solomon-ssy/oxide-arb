@@ -146,6 +146,12 @@ pub trait RiskMetrics: Send + Sync + 'static {
     /// Count of consecutive misses for a specific market (for auto-blacklist).
     fn consecutive_market_misses(&self, market_id: &MarketId) -> u32;
 
+    /// Record one deduped Fill outcome for directional counters and miss tracking.
+    ///
+    /// This is called only after a Fill marker has been claimed, so replayed
+    /// post-trade rows do not double-count misses or directional budgets.
+    fn record_trade_outcome(&self, side: Side, market_id: &MarketId, was_miss: bool);
+
     /// Seconds since last successful WebSocket heartbeat.
     fn ws_disconnect_secs(&self) -> u64;
 
@@ -240,9 +246,10 @@ pub trait RiskPersistence: Send + Sync + 'static {
 
 /// Async write-through persistence for the potential loss ledger.
 ///
-/// Ensures that potential-loss entries survive process crashes. The risk
-/// engine writes to PG **before** updating the in-memory ledger (PG-first
-/// ordering). If PG write fails, the engine enters fail-closed halt.
+/// Ensures that potential-loss entries survive process crashes. Fill commits
+/// make the marker, potential-loss write-set, engine state, and audit durable
+/// atomically; if that commit fails, the engine restores its pre-commit
+/// in-memory state and enters fail-closed halt.
 #[async_trait::async_trait]
 pub trait PotentialLossStore: Send + Sync + 'static {
     /// Persist a new potential-loss entry (Fill phase).

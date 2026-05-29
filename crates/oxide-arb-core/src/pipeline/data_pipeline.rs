@@ -3,7 +3,11 @@ use super::{
 };
 use crate::{
     infra::sharding::shard_index,
-    observability::{backpressure::BackpressurePolicy, metrics_hub::MetricsHub},
+    observability::{
+        alert_dispatcher::{Alert, AlertDispatcher, AlertSeverity},
+        backpressure::BackpressurePolicy,
+        metrics_hub::MetricsHub,
+    },
 };
 use chrono::Utc;
 use flume::{Receiver, Sender};
@@ -28,6 +32,7 @@ pub struct DataPipelineDeps {
     pub coalescer_tx: flume::Sender<TokenId>,
     pub settlement_tx: flume::Sender<MarketSettlementRequest>,
     pub metrics: Arc<MetricsHub>,
+    pub alerts: Arc<AlertDispatcher>,
     pub backpressure: Arc<BackpressurePolicy>,
     pub book_shard_count: usize,
     pub book_channel_capacity: usize,
@@ -42,6 +47,7 @@ pub struct DataPipeline {
     coalescer_tx: flume::Sender<TokenId>,
     settlement_tx: flume::Sender<MarketSettlementRequest>,
     metrics: Arc<MetricsHub>,
+    alerts: Arc<AlertDispatcher>,
     backpressure: Arc<BackpressurePolicy>,
     book_shard_count: usize,
     book_channel_capacity: usize,
@@ -57,6 +63,7 @@ impl DataPipeline {
             coalescer_tx: deps.coalescer_tx,
             settlement_tx: deps.settlement_tx,
             metrics: deps.metrics,
+            alerts: deps.alerts,
             backpressure: deps.backpressure,
             book_shard_count: deps.book_shard_count,
             book_channel_capacity: deps.book_channel_capacity,
@@ -84,6 +91,7 @@ impl DataPipeline {
                 coalescer_tx: self.coalescer_tx.clone(),
                 settlement_tx: self.settlement_tx.clone(),
                 metrics: Arc::clone(&self.metrics),
+                alerts: Arc::clone(&self.alerts),
                 backpressure: Arc::clone(&self.backpressure),
             };
             book_threads.push(thread::spawn(move || worker.run(&rx)));
@@ -147,6 +155,7 @@ struct BookApplyWorker {
     coalescer_tx: Sender<TokenId>,
     settlement_tx: Sender<MarketSettlementRequest>,
     metrics: Arc<MetricsHub>,
+    alerts: Arc<AlertDispatcher>,
     backpressure: Arc<BackpressurePolicy>,
 }
 
@@ -206,6 +215,14 @@ impl BookApplyWorker {
                 if let Err(error) = self.settlement_tx.try_send(request) {
                     self.metrics.settlement_channel_dropped_total.inc();
                     tracing::error!(%error, %market_id, "settlement channel send failed");
+                    self.alerts.dispatch_background(Alert {
+                        severity: AlertSeverity::Warning,
+                        title: "Settlement channel dropped".to_owned(),
+                        body: format!(
+                            "Market {market_id} resolution event was dropped; Gamma resolved-market retry is the safety net"
+                        ),
+                        timestamp: Utc::now(),
+                    });
                 }
             }
 

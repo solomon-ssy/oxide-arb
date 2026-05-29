@@ -95,6 +95,15 @@ pub trait PositionRepository: Send + Sync {
         settlement_trigger: SettlementTrigger,
     ) -> Result<PositionInfo, StorageError>;
 
+    async fn mark_redeem_terminal(
+        &self,
+        position_id: &PositionId,
+        attempts: u32,
+        winning_token_id: &TokenId,
+        settlement_trigger: SettlementTrigger,
+        reason: String,
+    ) -> Result<PositionInfo, StorageError>;
+
     async fn patch_oracle_verdict(
         &self,
         position_id: &PositionId,

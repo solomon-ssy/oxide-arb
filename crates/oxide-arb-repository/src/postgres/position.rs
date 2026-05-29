@@ -291,6 +291,27 @@ async fn record_redeem_failure_q(
     patch_position_q(db, position_id, patch, "position").await
 }
 
+async fn mark_redeem_terminal_q(
+    db: &impl ConnectionTrait,
+    position_id: &PositionId,
+    attempts: u32,
+    winning_token_id: &TokenId,
+    settlement_trigger: SettlementTrigger,
+    reason: String,
+) -> Result<PositionInfo, StorageError> {
+    let patch = PositionPatch {
+        redeem_status: Patch::set(RedeemStatus::Failed),
+        redeem_attempts: Patch::set(i32::try_from(attempts).unwrap_or(i32::MAX)),
+        winning_token_id: NullablePatch::set(winning_token_id.clone()),
+        settlement_trigger: NullablePatch::set(settlement_trigger),
+        settlement_accounting_status: Patch::set(SettlementAccountingStatus::Failed),
+        settlement_accounting_error: NullablePatch::set(reason.clone()),
+        redeem_terminal_reason: NullablePatch::set(reason),
+        ..Default::default()
+    };
+    patch_position_q(db, position_id, patch, "position").await
+}
+
 async fn patch_oracle_verdict_q(
     db: &impl ConnectionTrait,
     position_id: &PositionId,
@@ -541,6 +562,25 @@ impl PositionRepository for PgPositionRepository {
         .await
     }
 
+    async fn mark_redeem_terminal(
+        &self,
+        position_id: &PositionId,
+        attempts: u32,
+        winning_token_id: &TokenId,
+        settlement_trigger: SettlementTrigger,
+        reason: String,
+    ) -> Result<PositionInfo, StorageError> {
+        mark_redeem_terminal_q(
+            &self.db,
+            position_id,
+            attempts,
+            winning_token_id,
+            settlement_trigger,
+            reason,
+        )
+        .await
+    }
+
     async fn patch_oracle_verdict(
         &self,
         position_id: &PositionId,
@@ -692,6 +732,25 @@ impl PositionRepository for PgPositionRepositoryTxn<'_> {
             attempts,
             winning_token_id,
             settlement_trigger,
+        )
+        .await
+    }
+
+    async fn mark_redeem_terminal(
+        &self,
+        position_id: &PositionId,
+        attempts: u32,
+        winning_token_id: &TokenId,
+        settlement_trigger: SettlementTrigger,
+        reason: String,
+    ) -> Result<PositionInfo, StorageError> {
+        mark_redeem_terminal_q(
+            self.txn,
+            position_id,
+            attempts,
+            winning_token_id,
+            settlement_trigger,
+            reason,
         )
         .await
     }

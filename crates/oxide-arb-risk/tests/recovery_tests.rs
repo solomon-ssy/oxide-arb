@@ -91,6 +91,18 @@ fn recover_closed_breaker_succeeds() {
 }
 
 #[test]
+fn recover_restores_fee_windows() {
+    let mut snap = default_snapshot();
+    snap.daily_fee_usd = Usd::new(dec!(3.25));
+    snap.hourly_fee_usd = Usd::new(dec!(1.50));
+
+    let recovered = try_recover(&snap).expect("state should recover");
+
+    assert_eq!(recovered.daily.fees(), Usd::new(dec!(3.25)));
+    assert_eq!(recovered.hourly.fees(), Usd::new(dec!(1.50)));
+}
+
+#[test]
 fn recover_open_breaker_without_level_fails() {
     let mut snap = default_snapshot();
     snap.breaker_state = BreakerStateName::Open;

@@ -1,7 +1,7 @@
 //! Gamma HTTP client tests with wiremock (no live network).
 
 use chrono::{Duration, Utc};
-use oxide_arb_api::gamma::GammaClient;
+use oxide_arb_api::{gamma::GammaClient, infra::retry::RetryPolicy};
 use oxide_arb_models::{config::GammaConfig, types::MarketId};
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
@@ -9,6 +9,7 @@ use wiremock::{
 };
 
 #[tokio::test]
+#[ignore = "run with cargo test-network"]
 async fn gamma_get_market_deserializes_from_mock() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -31,7 +32,9 @@ async fn gamma_get_market_deserializes_from_mock() {
     let client = GammaClient::new(GammaConfig {
         base_url: server.uri(),
         ..GammaConfig::default()
-    });
+    })
+    .with_http_client(fast_http_client())
+    .with_retry_policy(fast_retry_policy());
 
     let market = client
         .get_market(&MarketId::new("0xabc"))
@@ -43,6 +46,7 @@ async fn gamma_get_market_deserializes_from_mock() {
 }
 
 #[tokio::test]
+#[ignore = "run with cargo test-network"]
 async fn gamma_retries_on_429() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -72,7 +76,9 @@ async fn gamma_retries_on_429() {
     let client = GammaClient::new(GammaConfig {
         base_url: server.uri(),
         ..GammaConfig::default()
-    });
+    })
+    .with_http_client(fast_http_client())
+    .with_retry_policy(fast_retry_policy());
 
     let result = client.get_market(&MarketId::new("0xabc")).await;
 
@@ -80,6 +86,7 @@ async fn gamma_retries_on_429() {
 }
 
 #[tokio::test]
+#[ignore = "run with cargo test-network"]
 async fn gamma_incremental_sync_uses_updated_since_query() {
     let server = MockServer::start().await;
     let since = Utc::now() - Duration::hours(2);
@@ -113,7 +120,8 @@ async fn gamma_incremental_sync_uses_updated_since_query() {
     let client = GammaClient::new(GammaConfig {
         base_url: server.uri(),
         ..GammaConfig::default()
-    });
+    })
+    .with_http_client(fast_http_client());
 
     let events = client
         .incremental_sync(since)
@@ -123,4 +131,23 @@ async fn gamma_incremental_sync_uses_updated_since_query() {
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].slug, "updated-event");
     assert_eq!(events[0].market_ids.len(), 1);
+}
+
+const fn fast_retry_policy() -> RetryPolicy {
+    RetryPolicy {
+        max_attempts: Some(2),
+        initial_interval_ms: 1,
+        max_interval_ms: 1,
+        randomization_factor: 0.0,
+        multiplier: 1.0,
+        max_elapsed_time_ms: None,
+    }
+}
+
+fn fast_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .no_proxy()
+        .pool_max_idle_per_host(0)
+        .build()
+        .expect("test reqwest client")
 }

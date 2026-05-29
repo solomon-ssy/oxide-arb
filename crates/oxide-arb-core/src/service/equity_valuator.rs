@@ -230,6 +230,7 @@ mod tests {
             slug: "slug".into(),
             category: MarketCategory::Politics,
             status: MarketStatus::Active,
+            outcome: None,
             neg_risk: false,
             tick_size: TickSize::Hundredth,
             tokens: vec![
@@ -251,6 +252,7 @@ mod tests {
             volume_24h: Usd::ZERO,
             fee_schedule: None,
             end_date: with_end_date.then_some(now + chrono::Duration::hours(2)),
+            resolved_at: None,
             created_at: now,
             updated_at: now,
         }

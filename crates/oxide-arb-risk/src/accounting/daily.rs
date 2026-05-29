@@ -5,6 +5,7 @@ use chrono::NaiveDate;
 use oxide_arb_models::{enums::common::TradeBusinessOutcome, types::Usd};
 use std::sync::Arc;
 
+#[derive(Clone)]
 pub struct DailyAccounting {
     window_start: NaiveDate,
     stats: PeriodStats,
@@ -79,6 +80,12 @@ impl DailyAccounting {
     #[inline]
     pub const fn daily_pnl(&self) -> Usd {
         self.stats.pnl
+    }
+
+    #[must_use]
+    #[inline]
+    pub const fn fees(&self) -> Usd {
+        self.stats.fees
     }
 
     #[must_use]

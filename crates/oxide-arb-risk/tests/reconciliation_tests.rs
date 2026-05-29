@@ -3,6 +3,7 @@
 //! Exercises the reconciliation engine with mock metrics and balance queries
 //! to verify Ok / Warning / Critical classification and mismatch detection.
 
+use oxide_arb_error::OxideResult;
 use oxide_arb_models::{
     domain::position::PositionInfo,
     enums::{
@@ -14,6 +15,7 @@ use oxide_arb_models::{
 use oxide_arb_risk::{
     reconciliation::LedgerReconciler,
     traits::{BalanceQuerier, RiskMetrics},
+    types::ReconciliationMismatch,
 };
 use rust_decimal_macros::dec;
 
@@ -81,6 +83,7 @@ impl RiskMetrics for MockReconMetrics {
     fn consecutive_market_misses(&self, _market_id: &MarketId) -> u32 {
         0
     }
+    fn record_trade_outcome(&self, _side: Side, _market_id: &MarketId, _was_miss: bool) {}
     fn ws_disconnect_secs(&self) -> u64 {
         0
     }
@@ -124,10 +127,10 @@ impl Default for MockQuerier {
 
 #[async_trait::async_trait]
 impl BalanceQuerier for MockQuerier {
-    async fn query_balance(&self) -> oxide_arb_error::OxideResult<(Usd, Usd)> {
+    async fn query_balance(&self) -> OxideResult<(Usd, Usd)> {
         Ok((self.available, self.locked))
     }
-    async fn query_positions(&self) -> oxide_arb_error::OxideResult<Vec<(MarketId, Usd)>> {
+    async fn query_positions(&self) -> OxideResult<Vec<(MarketId, Usd)>> {
         Ok(self.positions.clone())
     }
 }
@@ -197,10 +200,10 @@ async fn reconciliation_detects_position_drift() {
 
     let report = reconciler.reconcile(&metrics, &querier).await.unwrap();
     assert!(
-        report.mismatches.iter().any(|m| matches!(
-            m,
-            oxide_arb_risk::types::ReconciliationMismatch::PositionDrift { .. }
-        )),
+        report
+            .mismatches
+            .iter()
+            .any(|m| matches!(m, ReconciliationMismatch::PositionDrift { .. })),
         "expected PositionDrift mismatch, got: {:?}",
         report.mismatches
     );
@@ -249,7 +252,7 @@ async fn reconciliation_detects_internal_markets_not_present_externally() {
     assert!(
         report.mismatches.iter().any(|m| matches!(
             m,
-            oxide_arb_risk::types::ReconciliationMismatch::PositionDrift {
+            ReconciliationMismatch::PositionDrift {
                 external,
                 ..
             } if *external == Usd::ZERO

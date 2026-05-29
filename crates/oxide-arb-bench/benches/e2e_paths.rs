@@ -71,6 +71,7 @@ fn bench_e2e_ws_to_scan(c: &mut Criterion) {
         slug: "q".into(),
         category: MarketCategory::Geopolitics,
         status: MarketStatus::Active,
+        outcome: None,
         neg_risk: false,
         tick_size: TickSize::Hundredth,
         tokens: vec![],
@@ -81,6 +82,7 @@ fn bench_e2e_ws_to_scan(c: &mut Criterion) {
         volume_24h: Usd::ZERO,
         fee_schedule: None,
         end_date: None,
+        resolved_at: None,
         created_at: Utc::now(),
         updated_at: Utc::now(),
     });
@@ -150,6 +152,7 @@ fn bench_e2e_ws_normalize_to_coalescer(c: &mut Criterion) {
         slug: "q".into(),
         category: MarketCategory::Other,
         status: MarketStatus::Active,
+        outcome: None,
         neg_risk: false,
         tick_size: TickSize::Hundredth,
         tokens: vec![],
@@ -160,6 +163,7 @@ fn bench_e2e_ws_normalize_to_coalescer(c: &mut Criterion) {
         volume_24h: Usd::ZERO,
         fee_schedule: None,
         end_date: None,
+        resolved_at: None,
         created_at: Utc::now(),
         updated_at: Utc::now(),
     });

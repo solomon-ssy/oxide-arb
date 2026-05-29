@@ -8,7 +8,7 @@ use oxide_arb_algorithm::{
 };
 use oxide_arb_models::{
     config::{CalibrationConfig, FillProbabilityConfig},
-    domain::BookLevel,
+    domain::{BookLevel, book},
     enums::{
         calibration::{DurationBucket, PriceZone},
         common::StalenessLevel,
@@ -128,7 +128,7 @@ proptest! {
             Price::new(Decimal::try_from(price).unwrap()),
             Shares::new(Decimal::try_from(size).unwrap()),
         )];
-        let depth = oxide_arb_models::domain::book::total_depth_usd(&asks);
+        let depth = book::total_depth_usd(&asks);
         let budget = MicroUsd::try_from_decimal(budget_d).unwrap();
         let floor = MicroPrice::try_from_decimal(dec!(0.95)).unwrap();
 

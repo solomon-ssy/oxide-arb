@@ -197,9 +197,10 @@ impl MultiConstraintSizer {
             },
             SizeConstraint {
                 name: "available_balance",
-                max_usd: (ctx.cash_balance()
+                max_usd: (ctx.equity()
                     - Usd::new(self.reserve_balance_usd)
-                    - ctx.reserved_usd())
+                    - ctx.reserved_usd()
+                    - ctx.total_potential_loss())
                 .max(Usd::ZERO),
             },
             SizeConstraint {
@@ -234,6 +235,7 @@ impl MultiConstraintSizer {
     }
 }
 
+#[derive(Clone)]
 pub struct DrawdownGuard {
     hwm: Usd,
     max_drawdown_pct: Decimal,

@@ -69,6 +69,10 @@ impl AtomicStateVersion {
     pub fn increment(&self) -> StateVersion {
         StateVersion(self.0.fetch_add(1, Ordering::AcqRel) + 1)
     }
+
+    pub fn store(&self, version: StateVersion) {
+        self.0.store(version.get(), Ordering::Release);
+    }
 }
 
 impl fmt::Debug for AtomicStateVersion {
@@ -180,6 +184,7 @@ pub enum RiskCheckId {
     DailyLossCap,
     WeeklyLossCap,
     HourlyLossCap,
+    FeeSpend,
     MaxSingleBet,
     MarketExposure,
     TotalExposure,

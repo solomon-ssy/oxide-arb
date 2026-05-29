@@ -1,5 +1,8 @@
 use oxide_arb_models::{
-    domain::book::{BookGateError, EndgameBookPair, EndgameBookView},
+    domain::{
+        BookSideView,
+        book::{BookGateError, EndgameBookPair, EndgameBookView},
+    },
     types::TokenId,
 };
 
@@ -65,10 +68,7 @@ impl BookGate {
     }
 
     #[inline]
-    fn is_crossed(
-        bids: oxide_arb_models::domain::book::BookSideView<'_>,
-        asks: oxide_arb_models::domain::book::BookSideView<'_>,
-    ) -> bool {
+    fn is_crossed(bids: BookSideView<'_>, asks: BookSideView<'_>) -> bool {
         match (bids.best_price(), asks.best_price()) {
             (Some(bid), Some(ask)) => bid >= ask,
             _ => false,
@@ -76,7 +76,7 @@ impl BookGate {
     }
 
     fn check_side_empty(
-        side: oxide_arb_models::domain::book::BookSideView<'_>,
+        side: BookSideView<'_>,
         token_id: &TokenId,
         side_name: &'static str,
         errors: &mut Vec<BookGateError>,
@@ -90,8 +90,8 @@ impl BookGate {
     }
 
     fn check_crossed(
-        bids: oxide_arb_models::domain::book::BookSideView<'_>,
-        asks: oxide_arb_models::domain::book::BookSideView<'_>,
+        bids: BookSideView<'_>,
+        asks: BookSideView<'_>,
         token_id: &TokenId,
         errors: &mut Vec<BookGateError>,
     ) {

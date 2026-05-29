@@ -169,6 +169,11 @@ impl RiskMetrics for CoreRiskMetrics {
     }
 
     #[inline]
+    fn record_trade_outcome(&self, side: Side, market_id: &MarketId, was_miss: bool) {
+        self.state.record_trade_outcome(side, market_id, was_miss);
+    }
+
+    #[inline]
     fn ws_disconnect_secs(&self) -> u64 {
         self.ws_disconnect_secs_for_mode()
     }

@@ -11,11 +11,11 @@ use crate::{
     pipeline::checks::{
         ApiErrorRateCheck, BlacklistCheck, CircuitBreakerCheck, DailyBudgetCheck,
         DailyDirectionalBudgetCheck, DailyLossCapCheck, DirectionalConcentrationCheck,
-        DrawdownGuardCheck, DuplicateMarketCheck, ExposurePctCheck, HourlyLossCapCheck,
-        ManualHaltCheck, MarketExposureCheck, MaxDepthUsageCheck, MaxPositionsCheck,
-        MaxSingleBetCheck, MetricsFreshnessCheck, MinBalanceCheck, MinDepthCheck,
-        PotentialLossCapCheck, StalenessCheck, TokenBlacklistCheck, TotalExposureCheck,
-        WeeklyLossCapCheck, WsConnectivityCheck,
+        DrawdownGuardCheck, DuplicateMarketCheck, ExposurePctCheck, FeeSpendCheck,
+        HourlyLossCapCheck, ManualHaltCheck, MarketExposureCheck, MaxDepthUsageCheck,
+        MaxPositionsCheck, MaxSingleBetCheck, MetricsFreshnessCheck, MinBalanceCheck,
+        MinDepthCheck, PotentialLossCapCheck, StalenessCheck, TokenBlacklistCheck,
+        TotalExposureCheck, WeeklyLossCapCheck, WsConnectivityCheck,
     },
     types::{PipelineReport, ReportMode, RiskCheckId, RiskCheckKind, RiskCheckResult},
 };
@@ -54,6 +54,7 @@ pub struct StaticRiskPipeline {
     daily_loss_cap: DailyLossCapCheck,
     weekly_loss_cap: WeeklyLossCapCheck,
     hourly_loss_cap: HourlyLossCapCheck,
+    fee_spend: FeeSpendCheck,
     max_single_bet: MaxSingleBetCheck,
     market_exposure: MarketExposureCheck,
     total_exposure: TotalExposureCheck,
@@ -74,7 +75,7 @@ pub struct StaticRiskPipeline {
 impl StaticRiskPipeline {
     #[must_use]
     pub const fn len(&self) -> usize {
-        25
+        26
     }
 
     #[must_use]
@@ -113,6 +114,7 @@ impl StaticRiskPipeline {
             RiskCheckId::DailyLossCap,
             RiskCheckId::WeeklyLossCap,
             RiskCheckId::HourlyLossCap,
+            RiskCheckId::FeeSpend,
             RiskCheckId::MaxSingleBet,
             RiskCheckId::MarketExposure,
             RiskCheckId::TotalExposure,
@@ -143,6 +145,7 @@ impl StaticRiskPipeline {
             &self.daily_loss_cap,
             &self.weekly_loss_cap,
             &self.hourly_loss_cap,
+            &self.fee_spend,
             &self.max_single_bet,
             &self.market_exposure,
             &self.total_exposure,
@@ -225,6 +228,7 @@ impl StaticRiskPipeline {
             gate!(self.daily_loss_cap);
             gate!(self.weekly_loss_cap);
             gate!(self.hourly_loss_cap);
+            gate!(self.fee_spend);
             gate!(self.max_single_bet);
             gate!(self.market_exposure);
             gate!(self.total_exposure);
@@ -297,6 +301,7 @@ pub fn build_default_pipeline(config: &RiskConfig) -> StaticRiskPipeline {
         daily_loss_cap: DailyLossCapCheck::new(config),
         weekly_loss_cap: WeeklyLossCapCheck::new(config),
         hourly_loss_cap: HourlyLossCapCheck::new(config),
+        fee_spend: FeeSpendCheck::new(config),
         max_single_bet: MaxSingleBetCheck::new(config),
         market_exposure: MarketExposureCheck::new(config),
         total_exposure: TotalExposureCheck::new(config),

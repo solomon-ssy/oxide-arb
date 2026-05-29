@@ -20,8 +20,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-const FOK_LABEL: &str = "fok";
-
 pub struct FokOrderStrategy {
     execution_mode: ExecutionMode,
     clob_client: Option<Arc<ClobClient>>,
@@ -108,20 +106,14 @@ impl FokOrderStrategy {
                 outcome
             }
             Ok(Err(e)) => {
-                self.metrics
-                    .tier_misses
-                    .with_label_values(&[FOK_LABEL])
-                    .inc();
+                self.metrics.fok_misses.inc();
                 ExecutionOutcome::Failed {
                     error: e.to_string(),
                     execution_mode: ExecutionMode::Live,
                 }
             }
             Err(_) => {
-                self.metrics
-                    .tier_misses
-                    .with_label_values(&[FOK_LABEL])
-                    .inc();
+                self.metrics.fok_misses.inc();
                 tracing::error!(
                     execution_id = %plan.execution_id,
                     timeout_ms = self.dispatcher_timeout_ms,
@@ -141,16 +133,10 @@ impl FokOrderStrategy {
     fn record_fok_metrics(&self, outcome: &ExecutionOutcome) {
         match outcome {
             ExecutionOutcome::Filled { .. } => {
-                self.metrics
-                    .tier_fills
-                    .with_label_values(&[FOK_LABEL])
-                    .inc();
+                self.metrics.fok_fills.inc();
             }
             ExecutionOutcome::Miss { .. } | ExecutionOutcome::Failed { .. } => {
-                self.metrics
-                    .tier_misses
-                    .with_label_values(&[FOK_LABEL])
-                    .inc();
+                self.metrics.fok_misses.inc();
             }
         }
     }

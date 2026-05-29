@@ -157,7 +157,10 @@ impl BlacklistManager {
         let expires_at = now
             + chrono::Duration::from_std(duration).unwrap_or_else(|_| chrono::Duration::hours(1));
 
-        let key = BlacklistKey::Market(market_id.clone());
+        let key = token_id.as_ref().map_or_else(
+            || BlacklistKey::Market(market_id.clone()),
+            |token_id| BlacklistKey::Token(token_id.clone()),
+        );
 
         let entry = if let Some(mut existing) = self.entries.get_mut(&key) {
             if existing.is_permanent() {

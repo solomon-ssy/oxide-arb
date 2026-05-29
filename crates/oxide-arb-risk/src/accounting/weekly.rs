@@ -5,6 +5,7 @@ use chrono::{Datelike, NaiveDate};
 use oxide_arb_models::{enums::common::TradeBusinessOutcome, types::Usd};
 use std::sync::Arc;
 
+#[derive(Clone)]
 pub struct WeeklyAccounting {
     week_start: NaiveDate,
     stats: PeriodStats,

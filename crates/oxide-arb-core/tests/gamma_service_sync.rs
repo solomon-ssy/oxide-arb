@@ -7,7 +7,10 @@ use oxide_arb_core::{
     service::gamma::{GammaService, GammaServiceDeps},
 };
 use oxide_arb_error::{OxideError, market::MarketError};
-use oxide_arb_models::config::{GammaConfig, PostgresConfig, RedisConfig};
+use oxide_arb_models::{
+    config::{GammaConfig, PostgresConfig, RedisConfig},
+    types::TokenId,
+};
 use oxide_arb_repository::postgres::{PgEventRepository, PgMarketRepository};
 use oxide_arb_storage::{
     cache::{MokaBackend, RedisBackend, TieredCache},
@@ -158,9 +161,7 @@ async fn gamma_sync_populates_registry() {
         "registry must contain markets after startup sync"
     );
     assert!(
-        registry
-            .market_for_token(&oxide_arb_models::types::TokenId::new("1001"))
-            .is_some(),
+        registry.market_for_token(&TokenId::new("1001")).is_some(),
         "token → market routing must work after sync"
     );
 }

@@ -39,6 +39,8 @@ fn validate_risk_cross_constraints(inner: &Inner, report: &mut ConfigValidationR
         });
     }
 
+    validate_fee_spend_limits(inner, report);
+
     if r.max_daily_loss_usd > r.max_weekly_loss_usd {
         report.errors.push(ConfigValidationError::InfeasibleRange {
             field_low: "risk.max_daily_loss_usd",
@@ -129,6 +131,31 @@ fn validate_risk_cross_constraints(inner: &Inner, report: &mut ConfigValidationR
         report.errors.push(ConfigValidationError::InvalidValue {
             field: "risk.drawdown.drawdown_reduction_factor",
             detail: "must be in (0, 1]".into(),
+        });
+    }
+}
+
+fn validate_fee_spend_limits(inner: &Inner, report: &mut ConfigValidationReport) {
+    let r = &inner.risk;
+
+    for (field, value) in [
+        ("risk.max_hourly_fee_spend_usd", r.max_hourly_fee_spend_usd),
+        ("risk.max_daily_fee_spend_usd", r.max_daily_fee_spend_usd),
+    ] {
+        if value <= Decimal::ZERO {
+            report.errors.push(ConfigValidationError::InvalidValue {
+                field,
+                detail: "must be > 0".into(),
+            });
+        }
+    }
+
+    if r.max_hourly_fee_spend_usd > r.max_daily_fee_spend_usd {
+        report.errors.push(ConfigValidationError::InfeasibleRange {
+            field_low: "risk.max_hourly_fee_spend_usd",
+            value_low: r.max_hourly_fee_spend_usd,
+            field_high: "risk.max_daily_fee_spend_usd",
+            value_high: r.max_daily_fee_spend_usd,
         });
     }
 }

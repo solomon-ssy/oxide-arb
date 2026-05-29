@@ -25,6 +25,7 @@ use oxide_arb_models::{
 };
 use std::sync::Arc;
 
+#[derive(Clone)]
 pub struct CircuitBreaker {
     config: CircuitBreakerConfig,
     clock: Arc<dyn Clock>,

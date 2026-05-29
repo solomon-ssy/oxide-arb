@@ -1,7 +1,10 @@
 //! Load test: flood snapshots and verify backpressure without emergency halt.
 
 use oxide_arb_core::{
-    observability::{backpressure::BackpressurePolicy, metrics_hub::MetricsHub},
+    observability::{
+        alert_dispatcher::AlertDispatcher, backpressure::BackpressurePolicy,
+        metrics_hub::MetricsHub,
+    },
     pipeline::{
         book_store::BookStore,
         data_pipeline::{DataPipeline, DataPipelineDeps},
@@ -38,6 +41,7 @@ fn snapshot_cmd(token: &TokenId, ts: u64) -> PipelineEvent {
 #[tokio::test]
 async fn hundred_tokens_thousand_snapshots_monotonic_versions() {
     let metrics = Arc::new(MetricsHub::new());
+    let alerts = Arc::new(AlertDispatcher::new(None, None, None, 0));
     let backpressure = Arc::new(BackpressurePolicy::new(Arc::clone(&metrics), 4));
     let book_store = Arc::new(BookStore::new(Arc::clone(&metrics)));
     let market_registry = Arc::new(MarketRegistry::new());
@@ -55,6 +59,7 @@ async fn hundred_tokens_thousand_snapshots_monotonic_versions() {
         coalescer_tx,
         settlement_tx,
         metrics: Arc::clone(&metrics),
+        alerts,
         backpressure,
         book_shard_count: 4,
         book_channel_capacity: 8,

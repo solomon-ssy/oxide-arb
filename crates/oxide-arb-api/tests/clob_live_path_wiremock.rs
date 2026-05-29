@@ -35,6 +35,7 @@ use wiremock::{
 };
 
 #[tokio::test]
+#[ignore = "run with cargo test-network"]
 async fn live_fok_fill() {
     let server = MockServer::start().await;
     mount_derive_api_key(&server).await;
@@ -64,6 +65,7 @@ async fn live_fok_fill() {
 }
 
 #[tokio::test]
+#[ignore = "run with cargo test-network"]
 async fn live_fok_miss() {
     let server = MockServer::start().await;
     mount_derive_api_key(&server).await;
@@ -104,6 +106,7 @@ async fn live_fok_miss() {
 }
 
 #[tokio::test]
+#[ignore = "run with cargo test-network"]
 async fn live_partial_fill() {
     let server = MockServer::start().await;
     mount_derive_api_key(&server).await;
@@ -131,6 +134,7 @@ async fn live_partial_fill() {
 }
 
 #[tokio::test]
+#[ignore = "run with cargo test-network"]
 async fn live_fok_429_no_retry() {
     let server = MockServer::start().await;
     mount_derive_api_key(&server).await;
@@ -159,6 +163,7 @@ async fn live_fok_429_no_retry() {
 }
 
 #[tokio::test]
+#[ignore = "run with cargo test-network"]
 async fn live_gtc_429_retries() {
     let server = MockServer::start().await;
     mount_derive_api_key(&server).await;

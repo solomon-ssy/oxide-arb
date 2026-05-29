@@ -480,7 +480,67 @@ impl RiskCheck for HourlyLossCapCheck {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// #12 MaxSingleBet
+// #12 FeeSpend
+// ═══════════════════════════════════════════════════════════════════════════════
+
+pub struct FeeSpendCheck {
+    max_daily_fee_spend_usd: Decimal,
+    max_hourly_fee_spend_usd: Decimal,
+}
+
+impl FeeSpendCheck {
+    #[must_use]
+    pub const fn new(config: &RiskConfig) -> Self {
+        Self {
+            max_daily_fee_spend_usd: config.max_daily_fee_spend_usd,
+            max_hourly_fee_spend_usd: config.max_hourly_fee_spend_usd,
+        }
+    }
+}
+
+impl RiskCheck for FeeSpendCheck {
+    fn id(&self) -> RiskCheckId {
+        RiskCheckId::FeeSpend
+    }
+    fn kind(&self) -> RiskCheckKind {
+        RiskCheckKind::Gate
+    }
+    fn requires_metrics(&self) -> bool {
+        false
+    }
+    fn evaluate(&self, ctx: &PreTradeContext<'_>) -> RiskCheckResult {
+        if ctx.daily_fee().inner() >= self.max_daily_fee_spend_usd {
+            return RiskCheckResult::failed(
+                RiskCheckId::FeeSpend,
+                format!(
+                    "daily fees ${} ≥ cap ${}",
+                    ctx.daily_fee(),
+                    self.max_daily_fee_spend_usd
+                ),
+                format!("< ${}", self.max_daily_fee_spend_usd),
+                format!("${}", ctx.daily_fee()),
+            );
+        }
+
+        if ctx.hourly_fee().inner() >= self.max_hourly_fee_spend_usd {
+            return RiskCheckResult::failed(
+                RiskCheckId::FeeSpend,
+                format!(
+                    "hourly fees ${} ≥ cap ${}",
+                    ctx.hourly_fee(),
+                    self.max_hourly_fee_spend_usd
+                ),
+                format!("< ${}", self.max_hourly_fee_spend_usd),
+                format!("${}", ctx.hourly_fee()),
+            );
+        }
+
+        RiskCheckResult::passed(RiskCheckId::FeeSpend)
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// #13 MaxSingleBet
 // ═══════════════════════════════════════════════════════════════════════════════
 
 pub struct MaxSingleBetCheck {
@@ -672,7 +732,8 @@ impl RiskCheck for PotentialLossCapCheck {
         RiskCheckKind::Gate
     }
     fn evaluate(&self, ctx: &PreTradeContext<'_>) -> RiskCheckResult {
-        let post_trade_potential = ctx.total_potential_loss() + ctx.opportunity.total_cost;
+        let post_trade_potential =
+            ctx.total_potential_loss() + ctx.opportunity.total_cost + ctx.opportunity.total_fees;
 
         if post_trade_potential <= ctx.cash_balance() {
             RiskCheckResult::passed(RiskCheckId::PotentialLossCap)

@@ -30,6 +30,7 @@ fn sample_market(id: &str, neg_risk: bool) -> MarketRegistryInfo {
         slug: "test".into(),
         category: MarketCategory::Other,
         status: MarketStatus::Active,
+        outcome: None,
         neg_risk,
         tick_size: TickSize::Hundredth,
         tokens: vec![
@@ -51,6 +52,7 @@ fn sample_market(id: &str, neg_risk: bool) -> MarketRegistryInfo {
         volume_24h: Usd::ZERO,
         fee_schedule: None,
         end_date: None,
+        resolved_at: None,
         created_at: Utc::now(),
         updated_at: Utc::now(),
     }

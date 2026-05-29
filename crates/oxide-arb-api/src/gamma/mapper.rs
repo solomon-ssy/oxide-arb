@@ -137,7 +137,7 @@ fn map_market_dual(raw: RawGammaMarket, event_id: &EventId) -> (UpsertMarket, Ma
         event_id,
         category,
         status,
-        outcome,
+        outcome: outcome.clone(),
         yes_token: &yes_token,
         no_token: &no_token,
         tick_size,
@@ -155,10 +155,12 @@ fn map_market_dual(raw: RawGammaMarket, event_id: &EventId) -> (UpsertMarket, Ma
         no_token,
         category,
         status,
+        outcome,
         tick_size,
         tokens,
         fee_schedule,
         end_date,
+        resolved_at,
         created,
         updated,
     }
@@ -276,10 +278,12 @@ struct MarketRegistryParts<'a> {
     no_token: TokenId,
     category: MarketCategory,
     status: MarketStatus,
+    outcome: Option<String>,
     tick_size: TickSize,
     tokens: Vec<TokenInfo>,
     fee_schedule: Option<MarketFeeSchedule>,
     end_date: Option<DateTime<Utc>>,
+    resolved_at: Option<DateTime<Utc>>,
     created: DateTime<Utc>,
     updated: DateTime<Utc>,
 }
@@ -295,6 +299,7 @@ impl From<MarketRegistryParts<'_>> for MarketRegistryInfo {
             slug: parts.raw.slug.unwrap_or_default(),
             category: parts.category,
             status: parts.status,
+            outcome: parts.outcome,
             neg_risk: parts.raw.neg_risk.unwrap_or(false),
             tick_size: parts.tick_size,
             tokens: parts.tokens,
@@ -305,6 +310,7 @@ impl From<MarketRegistryParts<'_>> for MarketRegistryInfo {
             volume_24h: Usd::ZERO,
             fee_schedule: parts.fee_schedule,
             end_date: parts.end_date,
+            resolved_at: parts.resolved_at,
             created_at: parts.created,
             updated_at: parts.updated,
         }
@@ -374,6 +380,19 @@ pub fn map_market(raw: RawGammaMarket, event_id: &EventId) -> MarketRegistryInfo
     } else {
         MarketStatus::Paused
     };
+    let outcome = raw
+        .winning_outcome
+        .clone()
+        .or_else(|| raw.outcome.clone())
+        .filter(|value| !value.trim().is_empty());
+    let resolved_at = if raw.closed.unwrap_or(false) {
+        raw.resolved_at
+            .as_deref()
+            .and_then(|value| value.parse::<DateTime<Utc>>().ok())
+            .or(Some(updated_at))
+    } else {
+        None
+    };
 
     let yes_token = tokens
         .iter()
@@ -398,6 +417,7 @@ pub fn map_market(raw: RawGammaMarket, event_id: &EventId) -> MarketRegistryInfo
         slug: raw.slug.unwrap_or_default(),
         category,
         status,
+        outcome,
         neg_risk: raw.neg_risk.unwrap_or(false),
         tick_size,
         tokens,
@@ -408,6 +428,7 @@ pub fn map_market(raw: RawGammaMarket, event_id: &EventId) -> MarketRegistryInfo
         volume_24h: Usd::ZERO,
         fee_schedule,
         end_date: parse_gamma_datetime(raw.end_date.as_deref()),
+        resolved_at,
         created_at,
         updated_at,
     }

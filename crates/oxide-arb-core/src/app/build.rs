@@ -71,9 +71,9 @@ use oxide_arb_api::{
     keystore::Keystore,
     ws::{ClobWsManager, WsEventDropHook},
 };
-use oxide_arb_error::OxideResult;
+use oxide_arb_error::{OxideError, OxideResult};
 use oxide_arb_models::{
-    config::Settings,
+    config::{CalibrationConfig, Settings},
     domain::{risk::RiskEngineState, settlement::MarketSettlementRequest},
     enums::common::ExecutionMode,
     types::{MarketId, MicroUsd, TokenId, Usd},
@@ -231,6 +231,7 @@ impl AppContext {
                 market_registry: Arc::clone(&trading.market_registry),
                 voting_oracle: Arc::clone(&clients.voting_oracle),
                 metrics: Arc::clone(&infra.metrics),
+                alerts: Arc::clone(&infra.alerts),
                 audit_writer: Arc::clone(&audit_writer),
                 metrics_refresh: risk.metrics_refresh.clone(),
                 config: Arc::new(settings.settlement.clone()),
@@ -549,7 +550,10 @@ async fn wire_risk(
             .build(risk_metrics.as_ref())?,
     );
 
-    let fsm = Arc::new(ExecutionFSM::new(Arc::clone(&infra.metrics)));
+    let fsm = Arc::new(ExecutionFSM::new(
+        Arc::clone(&infra.metrics),
+        Arc::clone(&infra.alerts),
+    ));
     let backpressure = Arc::new(BackpressurePolicy::new(
         Arc::clone(&infra.metrics),
         settings.execution.book_apply.shard_count.max(1),
@@ -830,6 +834,7 @@ fn wire_execution_loop(
         coalescer_tx: detection.token_tx.clone(),
         settlement_tx,
         metrics: Arc::clone(&infra.metrics),
+        alerts: Arc::clone(&infra.alerts),
         backpressure: Arc::clone(&risk.backpressure),
         book_shard_count: settings.execution.book_apply.shard_count,
         book_channel_capacity: settings.execution.book_apply.channel_capacity,
@@ -856,12 +861,12 @@ fn wire_execution_loop(
 
 async fn load_resolution_calibrator(
     calibration_repo: Arc<PgCalibrationRepository>,
-    config: oxide_arb_models::config::CalibrationConfig,
+    config: CalibrationConfig,
 ) -> OxideResult<Arc<ResolutionCalibrator>> {
     let buckets = calibration_repo
         .get_all_buckets()
         .await
-        .map_err(oxide_arb_error::OxideError::from)?;
+        .map_err(OxideError::from)?;
     let bucket_count = buckets.len();
     let entries: Vec<CalibrationEntry> = buckets.into_iter().map(CalibrationEntry::from).collect();
     let calibrator = Arc::new(if entries.is_empty() {

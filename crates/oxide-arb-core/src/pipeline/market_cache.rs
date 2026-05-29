@@ -105,6 +105,7 @@ mod tests {
             slug: "q".into(),
             category: MarketCategory::Other,
             status: MarketStatus::Active,
+            outcome: None,
             neg_risk: false,
             tick_size: TickSize::Hundredth,
             tokens: vec![
@@ -126,6 +127,7 @@ mod tests {
             volume_24h: Usd::ZERO,
             fee_schedule: None,
             end_date: None,
+            resolved_at: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

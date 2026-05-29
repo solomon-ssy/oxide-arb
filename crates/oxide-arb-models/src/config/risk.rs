@@ -25,6 +25,8 @@ pub struct RiskConfig {
     pub max_consecutive_misses: u32,
     #[serde(default = "default_max_hourly_loss")]
     pub max_hourly_loss_usd: Decimal,
+    #[serde(default = "default_max_hourly_fee_spend")]
+    pub max_hourly_fee_spend_usd: Decimal,
     #[serde(default = "default_base_cooldown")]
     pub base_cooldown_secs: u64,
     #[serde(default = "default_cooldown_mult")]
@@ -35,6 +37,8 @@ pub struct RiskConfig {
     // ── Daily / weekly loss caps ─────────────────────────────────────
     #[serde(default = "default_max_daily_loss")]
     pub max_daily_loss_usd: Decimal,
+    #[serde(default = "default_max_daily_fee_spend")]
+    pub max_daily_fee_spend_usd: Decimal,
     #[serde(default = "default_max_single_loss")]
     pub max_single_loss_usd: Decimal,
     #[serde(default = "default_max_weekly_loss")]
@@ -146,10 +150,12 @@ impl Default for RiskConfig {
             max_depth_usage_pct: default_max_depth_usage_pct(),
             max_consecutive_misses: default_max_misses(),
             max_hourly_loss_usd: default_max_hourly_loss(),
+            max_hourly_fee_spend_usd: default_max_hourly_fee_spend(),
             base_cooldown_secs: default_base_cooldown(),
             cooldown_multiplier: default_cooldown_mult(),
             max_cooldown_secs: default_max_cooldown(),
             max_daily_loss_usd: default_max_daily_loss(),
+            max_daily_fee_spend_usd: default_max_daily_fee_spend(),
             max_single_loss_usd: default_max_single_loss(),
             max_weekly_loss_usd: default_max_weekly_loss(),
             daily_budget_usd: default_daily_budget(),
@@ -210,6 +216,9 @@ const fn default_max_misses() -> u32 {
 const fn default_max_hourly_loss() -> Decimal {
     dec!(30)
 }
+const fn default_max_hourly_fee_spend() -> Decimal {
+    dec!(10)
+}
 const fn default_base_cooldown() -> u64 {
     900
 }
@@ -221,6 +230,9 @@ const fn default_max_cooldown() -> u64 {
 }
 const fn default_max_daily_loss() -> Decimal {
     dec!(75)
+}
+const fn default_max_daily_fee_spend() -> Decimal {
+    dec!(25)
 }
 const fn default_max_single_loss() -> Decimal {
     dec!(30)

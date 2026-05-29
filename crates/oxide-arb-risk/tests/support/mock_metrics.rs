@@ -100,6 +100,8 @@ impl RiskMetrics for MockMetrics {
         self.consecutive_misses
     }
 
+    fn record_trade_outcome(&self, _side: Side, _market_id: &MarketId, _was_miss: bool) {}
+
     fn ws_disconnect_secs(&self) -> u64 {
         self.ws_disconnect_secs
     }

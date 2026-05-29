@@ -151,6 +151,7 @@ pub struct CircuitBreakerSnapshot {
 #[derive(Debug, Clone, Copy)]
 pub struct DailyAccountingSnapshot {
     pub daily_loss: Usd,
+    pub daily_fee: Usd,
     pub daily_pnl: Usd,
     pub daily_budget_remaining: Usd,
 }
@@ -165,6 +166,7 @@ pub struct WeeklyAccountingSnapshot {
 #[derive(Debug, Clone, Copy)]
 pub struct HourlyAccountingSnapshot {
     pub hourly_loss: Usd,
+    pub hourly_fee: Usd,
 }
 
 /// Drawdown guard parameters frozen at snapshot time.
@@ -218,6 +220,7 @@ impl RiskSnapshot {
             },
             daily: DailyAccountingSnapshot {
                 daily_loss: Usd::ZERO,
+                daily_fee: Usd::ZERO,
                 daily_pnl: Usd::ZERO,
                 daily_budget_remaining: Usd::ZERO,
             },
@@ -226,6 +229,7 @@ impl RiskSnapshot {
             },
             hourly: HourlyAccountingSnapshot {
                 hourly_loss: Usd::ZERO,
+                hourly_fee: Usd::ZERO,
             },
             drawdown: DrawdownSnapshot {
                 hwm: Usd::ZERO,

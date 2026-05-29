@@ -82,9 +82,6 @@ use tokio_util::sync::CancellationToken;
 
 /// Max trades claimed per post-trade relay drain iteration.
 const POST_TRADE_RELAY_BATCH_SIZE: u64 = 128;
-/// Crash-recovery floor for the post-trade relay (notify drives the happy path).
-const POST_TRADE_RELAY_POLL_INTERVAL: Duration = Duration::from_secs(5);
-
 /// Infrastructure subsystem: storage, metrics, alerts.
 pub struct InfraBundle {
     pub pg: Arc<PostgresPool>,
@@ -258,7 +255,13 @@ impl AppContext {
             notify: Arc::clone(&exec.relay_notify),
             capital_manager: Arc::clone(&exec.capital_manager),
             batch_size: POST_TRADE_RELAY_BATCH_SIZE,
-            poll_interval: POST_TRADE_RELAY_POLL_INTERVAL,
+            poll_interval: Duration::from_secs(
+                self.config
+                    .execution
+                    .timeout
+                    .trade_confirm_poll_interval_secs
+                    .max(1),
+            ),
             stale_submitted_after: Duration::from_secs(
                 self.config.execution.timeout.trade_confirm_timeout_secs,
             ),

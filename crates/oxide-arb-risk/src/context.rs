@@ -172,8 +172,18 @@ impl PreTradeContext<'_> {
     }
 
     #[inline]
+    pub const fn hourly_fee(&self) -> Usd {
+        self.snap.hourly.hourly_fee
+    }
+
+    #[inline]
     pub const fn daily_loss(&self) -> Usd {
         self.snap.daily.daily_loss
+    }
+
+    #[inline]
+    pub const fn daily_fee(&self) -> Usd {
+        self.snap.daily.daily_fee
     }
 
     #[inline]

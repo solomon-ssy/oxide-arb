@@ -99,6 +99,8 @@ impl RiskMetrics for TestRiskMetrics {
         0
     }
 
+    fn record_trade_outcome(&self, _: Side, _: &MarketId, _: bool) {}
+
     fn ws_disconnect_secs(&self) -> u64 {
         0
     }

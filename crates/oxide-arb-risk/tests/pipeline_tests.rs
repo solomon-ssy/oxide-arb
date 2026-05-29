@@ -168,6 +168,7 @@ impl RiskMetrics for GoldenMetrics {
     fn consecutive_market_misses(&self, _: &MarketId) -> u32 {
         0
     }
+    fn record_trade_outcome(&self, _: Side, _: &MarketId, _: bool) {}
     fn ws_disconnect_secs(&self) -> u64 {
         0
     }
@@ -221,6 +222,7 @@ async fn pipeline_check_order_golden_test() {
         RiskCheckId::DailyLossCap,
         RiskCheckId::WeeklyLossCap,
         RiskCheckId::HourlyLossCap,
+        RiskCheckId::FeeSpend,
         RiskCheckId::MaxSingleBet,
         RiskCheckId::MarketExposure,
         RiskCheckId::TotalExposure,
@@ -238,8 +240,8 @@ async fn pipeline_check_order_golden_test() {
 
     assert_eq!(
         check_ids.len(),
-        25,
-        "expected exactly 25 checks, got {}",
+        26,
+        "expected exactly 26 checks, got {}",
         check_ids.len()
     );
     assert_eq!(check_ids, expected, "pipeline check order mismatch");
@@ -301,7 +303,7 @@ impl TestRiskPipeline {
 #[test]
 fn static_pipeline_check_order_matches_golden() {
     let pipeline = build_default_pipeline(&RiskConfig::default());
-    assert_eq!(pipeline.check_order().len(), 25);
+    assert_eq!(pipeline.check_order().len(), 26);
 }
 
 #[test]
@@ -329,6 +331,13 @@ fn metrics_split_index_matches_check_order() {
         );
     }
     for (id, needs_metrics) in profile.iter().skip(4) {
+        if *id == RiskCheckId::FeeSpend {
+            assert!(
+                !needs_metrics,
+                "{id} must not require live metrics (phase-1 fee spend)"
+            );
+            continue;
+        }
         assert!(*needs_metrics, "{id} must require live metrics (phase-2)");
     }
 
@@ -423,5 +432,5 @@ fn full_report_evaluates_all_checks() {
 fn static_pipeline_has_fixed_checks() {
     let pipeline = build_default_pipeline(&RiskConfig::default());
     assert!(!pipeline.is_empty());
-    assert_eq!(pipeline.len(), 25);
+    assert_eq!(pipeline.len(), 26);
 }

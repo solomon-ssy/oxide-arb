@@ -2,7 +2,7 @@
 
 use alloy::signers::Signer as _;
 use alloy::signers::local::LocalSigner;
-use oxide_arb_api::{clob::ClobClient, keystore::OrderSigner};
+use oxide_arb_api::{clob::ClobClient, infra::retry::RetryPolicy, keystore::OrderSigner};
 use oxide_arb_models::{
     domain::order::OrderRequest,
     enums::common::{OrderType, Side},
@@ -106,20 +106,35 @@ pub async fn test_sdk_client(server: &MockServer) -> Arc<SdkClient<Authenticated
         .expect("local signer")
         .with_chain_id(Some(POLYGON));
 
-    let config = SdkConfig::builder().use_server_time(true).build();
-    let client = SdkClient::new(&server.uri(), config)
+    let config = SdkConfig::builder().build();
+    let mut client = SdkClient::new(&server.uri(), config)
         .expect("sdk client")
         .authentication_builder(&signer)
         .authenticate()
         .await
         .expect("authenticate");
+    client
+        .stop_heartbeats()
+        .await
+        .expect("stop test heartbeat task");
 
     Arc::new(client)
 }
 
 pub async fn test_clob_client(server: &MockServer) -> ClobClient {
     let sdk = test_sdk_client(server).await;
-    ClobClient::from_sdk_for_test(sdk, test_signer())
+    ClobClient::from_sdk_for_test(sdk, test_signer()).with_order_retry_policy(fast_retry_policy())
+}
+
+const fn fast_retry_policy() -> RetryPolicy {
+    RetryPolicy {
+        max_attempts: Some(2),
+        initial_interval_ms: 1,
+        max_interval_ms: 1,
+        randomization_factor: 0.0,
+        multiplier: 1.0,
+        max_elapsed_time_ms: None,
+    }
 }
 
 pub fn test_order_request(order_type: OrderType) -> OrderRequest {

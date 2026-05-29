@@ -18,6 +18,7 @@ use std::collections::HashMap;
 /// The risk engine subtracts `total_potential_loss()` from available capital
 /// to ensure worst-case exposure is always accounted for. Maintains a running
 /// total for O(1) queries on the hot path.
+#[derive(Clone)]
 pub struct PotentialLossLedger {
     entries: HashMap<LedgerId, PotentialLossInfo>,
     running_total: Usd,

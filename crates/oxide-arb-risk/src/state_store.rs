@@ -51,12 +51,13 @@ pub fn recover_state(
         CircuitBreaker::from_snapshot(config.circuit_breaker.clone(), Arc::clone(clock), snapshot)?;
 
     let snapshot_date = snapshot.snapshot_at.date_naive();
-    let daily = if snapshot_date <= today {
+    let mut daily = if snapshot_date <= today {
         DailyAccounting::from_snapshot(
             snapshot_date,
             PeriodStats {
                 loss: snapshot.daily_loss_usd,
                 pnl: snapshot.daily_pnl,
+                fees: snapshot.daily_fee_usd,
                 trade_count: ToPrimitive::to_u32(&snapshot.daily_trade_count).unwrap_or(0),
                 success_count: ToPrimitive::to_u32(&snapshot.daily_success_count).unwrap_or(0),
                 miss_count: ToPrimitive::to_u32(&snapshot.daily_miss_count).unwrap_or(0),
@@ -72,7 +73,7 @@ pub fn recover_state(
         )));
     };
 
-    let weekly = WeeklyAccounting::from_snapshot(
+    let mut weekly = WeeklyAccounting::from_snapshot(
         snapshot.snapshot_at.date_naive(),
         PeriodStats {
             loss: snapshot.weekly_loss_usd,
@@ -82,11 +83,12 @@ pub fn recover_state(
         Arc::clone(clock),
     );
 
-    let hourly = HourlyAccounting::from_snapshot(
+    let mut hourly = HourlyAccounting::from_snapshot(
         snapshot.snapshot_at.hour(),
         snapshot.snapshot_at.date_naive(),
         PeriodStats {
             loss: snapshot.hourly_loss_usd,
+            fees: snapshot.hourly_fee_usd,
             trade_count: ToPrimitive::to_u32(&snapshot.hourly_trade_count).unwrap_or(0),
             success_count: ToPrimitive::to_u32(&snapshot.hourly_success_count).unwrap_or(0),
             miss_count: ToPrimitive::to_u32(&snapshot.hourly_miss_count).unwrap_or(0),
@@ -94,6 +96,10 @@ pub fn recover_state(
         },
         Arc::clone(clock),
     );
+
+    let _ = daily.maybe_rollover();
+    let _ = weekly.maybe_rollover();
+    let _ = hourly.maybe_rollover();
 
     if snapshot.daily_loss_usd.is_negative() {
         return Err(OxideError::Internal(
@@ -112,6 +118,19 @@ pub fn recover_state(
     }
 
     let potential_loss = PotentialLossLedger::from_entries(potential_loss_entries);
+    let active_potential_loss = potential_loss.active_count();
+    let open_positions = metrics.open_positions();
+    if active_potential_loss > 0 && open_positions.is_empty() {
+        return Err(OxideError::Internal(format!(
+            "recovery invariant failed: {active_potential_loss} active potential-loss entries but no open positions"
+        )));
+    }
+    if active_potential_loss > open_positions.len() {
+        return Err(OxideError::Internal(format!(
+            "recovery invariant failed: {active_potential_loss} active potential-loss entries exceed {} open positions",
+            open_positions.len()
+        )));
+    }
 
     let drawdown_hwm = if snapshot.hwm_equity.is_positive() {
         snapshot.hwm_equity

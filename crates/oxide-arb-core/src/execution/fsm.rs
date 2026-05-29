@@ -1,4 +1,8 @@
-use crate::observability::metrics_hub::MetricsHub;
+use crate::observability::{
+    alert_dispatcher::{Alert, AlertDispatcher, AlertSeverity},
+    metrics_hub::MetricsHub,
+};
+use chrono::Utc;
 use oxide_arb_risk::engine::RiskEngine;
 use std::sync::{
     Arc,
@@ -11,13 +15,15 @@ use std::sync::{
 pub struct ExecutionFSM {
     emergency: AtomicBool,
     metrics: Arc<MetricsHub>,
+    alerts: Arc<AlertDispatcher>,
 }
 
 impl ExecutionFSM {
-    pub const fn new(metrics: Arc<MetricsHub>) -> Self {
+    pub const fn new(metrics: Arc<MetricsHub>, alerts: Arc<AlertDispatcher>) -> Self {
         Self {
             emergency: AtomicBool::new(false),
             metrics,
+            alerts,
         }
     }
 
@@ -26,6 +32,12 @@ impl ExecutionFSM {
         self.emergency.store(true, Ordering::Release);
         tracing::error!(reason = reason, "execution emergency halt engaged");
         self.metrics.fsm_emergency_entries.inc();
+        self.alerts.dispatch_background(Alert {
+            severity: AlertSeverity::Critical,
+            title: "Execution emergency halt".to_owned(),
+            body: reason.to_owned(),
+            timestamp: Utc::now(),
+        });
     }
 
     pub fn clear_emergency(&self) {

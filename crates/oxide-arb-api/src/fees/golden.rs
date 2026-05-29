@@ -4,7 +4,7 @@ use super::{
     formula::calculate_fee,
     reference::{platform_fee_usd, production_fee_usd, round_fee},
 };
-use oxide_arb_models::types::{Price, Shares};
+use oxide_arb_models::types::{Price, Shares, Usd};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 
@@ -62,7 +62,7 @@ fn sub_minimum_fee_rounds_to_zero() {
         dec!(0.000001),
         dec!(1),
     );
-    assert_eq!(fee, oxide_arb_models::types::Usd::ZERO);
+    assert_eq!(fee, Usd::ZERO);
     assert_eq!(round_fee(dec!(0.000005)), Decimal::ZERO);
 }
 

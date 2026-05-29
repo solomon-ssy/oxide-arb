@@ -13,6 +13,7 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
+use oxide_arb_error::OxideResult;
 use oxide_arb_models::{
     config::{CircuitBreakerConfig, RiskConfig},
     domain::{
@@ -24,7 +25,7 @@ use oxide_arb_models::{
         trade::PostTradeInput,
     },
     enums::{
-        common::TradeBusinessOutcome,
+        common::{Side, TradeBusinessOutcome},
         risk::{BlacklistReason, BreakerStateName, RiskAuditEventType, TradeAccountingPhase},
     },
     types::{MarketId, Price, Shares, TokenId, TradeId, Usd},
@@ -63,20 +64,17 @@ impl CapturingPersistence {
 
 #[async_trait::async_trait]
 impl RiskFillCommitGuard for CapturingFillCommitGuard<'_> {
-    async fn commit(self: Box<Self>, commit: FillCommit) -> oxide_arb_error::OxideResult<()> {
+    async fn commit(self: Box<Self>, commit: FillCommit) -> OxideResult<()> {
         self.persistence.create_audit(commit.audit).await
     }
 }
 
 #[async_trait::async_trait]
 impl RiskPersistence for CapturingPersistence {
-    async fn upsert_state(
-        &self,
-        _state: UpsertRiskEngineState,
-    ) -> oxide_arb_error::OxideResult<()> {
+    async fn upsert_state(&self, _state: UpsertRiskEngineState) -> OxideResult<()> {
         Ok(())
     }
-    async fn load_state(&self) -> oxide_arb_error::OxideResult<RiskStateInfo> {
+    async fn load_state(&self) -> OxideResult<RiskStateInfo> {
         let now = chrono::Utc::now();
         Ok(RiskStateInfo {
             id: 1,
@@ -116,37 +114,28 @@ impl RiskPersistence for CapturingPersistence {
         &'a self,
         _trade_id: &TradeId,
         _applied_at: DateTime<Utc>,
-    ) -> oxide_arb_error::OxideResult<FillClaim<'a>> {
+    ) -> OxideResult<FillClaim<'a>> {
         Ok(FillClaim::Claimed(Box::new(CapturingFillCommitGuard {
             persistence: self,
         })))
     }
 
-    async fn upsert_blacklist(
-        &self,
-        _entry: UpsertBlacklistEntry,
-    ) -> oxide_arb_error::OxideResult<()> {
+    async fn upsert_blacklist(&self, _entry: UpsertBlacklistEntry) -> OxideResult<()> {
         Ok(())
     }
-    async fn remove_blacklist(&self, _market_id: &MarketId) -> oxide_arb_error::OxideResult<()> {
+    async fn remove_blacklist(&self, _market_id: &MarketId) -> OxideResult<()> {
         Ok(())
     }
-    async fn load_blacklist(&self) -> oxide_arb_error::OxideResult<Vec<BlacklistInfo>> {
+    async fn load_blacklist(&self) -> OxideResult<Vec<BlacklistInfo>> {
         Ok(Vec::new())
     }
-    async fn create_emergency(
-        &self,
-        _emergency: NewEmergencySnapshot,
-    ) -> oxide_arb_error::OxideResult<()> {
+    async fn create_emergency(&self, _emergency: NewEmergencySnapshot) -> OxideResult<()> {
         Ok(())
     }
-    async fn create_reconciliation(
-        &self,
-        _report: NewReconciliationReport,
-    ) -> oxide_arb_error::OxideResult<()> {
+    async fn create_reconciliation(&self, _report: NewReconciliationReport) -> OxideResult<()> {
         Ok(())
     }
-    async fn create_audit(&self, audit: NewRiskAuditEvent) -> oxide_arb_error::OxideResult<()> {
+    async fn create_audit(&self, audit: NewRiskAuditEvent) -> OxideResult<()> {
         self.audits.lock().unwrap().push(audit);
         Ok(())
     }
@@ -175,6 +164,7 @@ fn test_trade(outcome: TradeBusinessOutcome, profit: Decimal) -> PostTradeInput 
         trade_id: TradeId::generate(),
         market_id: MarketId::new("0xaudit_market"),
         token_id: TokenId::new("audit_token"),
+        side: Side::Buy,
         outcome,
         cost_usd: Usd::new(dec!(20)),
         fee_usd: Usd::new(dec!(0.40)),

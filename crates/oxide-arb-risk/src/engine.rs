@@ -89,6 +89,16 @@ where
     pub(crate) last_emergency: RwLock<Option<(DateTime<Utc>, String)>>,
 }
 
+struct MutableRiskState {
+    circuit_breaker: CircuitBreaker,
+    daily: DailyAccounting,
+    weekly: WeeklyAccounting,
+    hourly: HourlyAccounting,
+    potential_loss: PotentialLossLedger,
+    drawdown: DrawdownGuard,
+    state_version: crate::types::StateVersion,
+}
+
 /// Default engine type — dynamic persistence via [`Arc<dyn RiskPersistence>`].
 pub type DynRiskEngine = RiskEngine<Arc<dyn RiskPersistence>>;
 
@@ -160,6 +170,7 @@ where
                 ctx.equity(),
                 Usd::new(self.config.reserve_balance_usd),
                 ctx.reserved_usd(),
+                ctx.total_potential_loss(),
                 Usd::new(self.config.bankroll_usd),
             );
 
@@ -245,6 +256,8 @@ where
                 };
                 let previous_breaker_state = self.circuit_breaker.read().state().to_name();
                 let fill_potential_loss = Self::fill_potential_loss_entry(trade);
+                let pre_commit_state = self.capture_mutable_state();
+                metrics.record_trade_outcome(trade.side, &trade.market_id, trade.is_miss());
                 let (report, audit_event, auto_bl_entry) =
                     self.apply_trade_result(phase, trade, metrics);
                 let commit = FillCommit {
@@ -254,6 +267,7 @@ where
                     audit: audit_event,
                 };
                 if let Err(e) = fill_claim.commit(commit).await {
+                    self.restore_mutable_state(pre_commit_state);
                     self.halt_internal(format!("risk fill commit failed: {e}"));
                     return Err(e);
                 }
@@ -335,6 +349,7 @@ where
             trade_id: input.trade_id.clone(),
             market_id: input.market_id.clone(),
             token_id: input.token_id.clone(),
+            side: input.side,
             outcome: TradeBusinessOutcome::Success,
             cost_usd: input.cost_usd,
             fee_usd: input.fee_usd,
@@ -533,6 +548,15 @@ where
             escalate(&mut highest, CircuitBreakerLevel::Daily);
         }
 
+        let daily_fee = self.daily.read().fees();
+        if daily_fee.inner() >= self.config.max_daily_fee_spend_usd {
+            let reason = format!("daily fee spend cap breached: {daily_fee}");
+            self.circuit_breaker
+                .write()
+                .halt(CircuitBreakerLevel::Daily, reason);
+            escalate(&mut highest, CircuitBreakerLevel::Daily);
+        }
+
         let hourly_loss = self.hourly.read().hourly_loss();
         if hourly_loss.inner() >= self.config.max_hourly_loss_usd {
             let reason = format!("hourly loss cap breached: {hourly_loss}");
@@ -572,6 +596,24 @@ where
                 .write()
                 .trip(CircuitBreakerLevel::Session, reason);
             tripped = Some(CircuitBreakerLevel::Session);
+        }
+
+        let daily_fee = self.daily.read().fees();
+        if daily_fee.inner() >= self.config.max_daily_fee_spend_usd {
+            let reason = format!("daily fee spend cap breached: {daily_fee}");
+            self.circuit_breaker
+                .write()
+                .halt(CircuitBreakerLevel::Daily, reason);
+            tripped = Some(CircuitBreakerLevel::Daily);
+        }
+
+        let hourly_fee = self.hourly.read().fees();
+        if hourly_fee.inner() >= self.config.max_hourly_fee_spend_usd {
+            let reason = format!("hourly fee spend cap breached: {hourly_fee}");
+            self.circuit_breaker
+                .write()
+                .trip(CircuitBreakerLevel::Session, reason);
+            escalate(&mut tripped, CircuitBreakerLevel::Session);
         }
 
         let req_count = metrics.api_request_count();
@@ -769,6 +811,11 @@ where
         let snap = self.risk_snapshot.load();
         snap.circuit_breaker.circuit_breaker.allows_trading
             && snap.circuit_breaker.manual_halt.allows_trading()
+    }
+
+    #[must_use]
+    pub fn load_risk_snapshot(&self) -> Arc<RiskSnapshot> {
+        self.risk_snapshot.load_full()
     }
 
     /// Halt the engine and persist the state change.
@@ -991,6 +1038,29 @@ where
 
     // ── Private ─────────────────────────────────────────────────────────
 
+    fn capture_mutable_state(&self) -> MutableRiskState {
+        MutableRiskState {
+            circuit_breaker: self.circuit_breaker.read().clone(),
+            daily: self.daily.read().clone(),
+            weekly: self.weekly.read().clone(),
+            hourly: self.hourly.read().clone(),
+            potential_loss: self.potential_loss.read().clone(),
+            drawdown: self.drawdown.read().clone(),
+            state_version: self.state_version.load(),
+        }
+    }
+
+    fn restore_mutable_state(&self, state: MutableRiskState) {
+        *self.circuit_breaker.write() = state.circuit_breaker;
+        *self.daily.write() = state.daily;
+        *self.weekly.write() = state.weekly;
+        *self.hourly.write() = state.hourly;
+        *self.potential_loss.write() = state.potential_loss;
+        *self.drawdown.write() = state.drawdown;
+        self.state_version.store(state.state_version);
+        self.publish_risk_snapshot();
+    }
+
     async fn record_emergency(
         &self,
         level: CircuitBreakerLevel,
@@ -1122,6 +1192,7 @@ where
             },
             daily: DailyAccountingSnapshot {
                 daily_loss: daily.daily_loss(),
+                daily_fee: daily.fees(),
                 daily_pnl: daily.daily_pnl(),
                 daily_budget_remaining: daily.budget_remaining(),
             },
@@ -1130,6 +1201,7 @@ where
             },
             hourly: HourlyAccountingSnapshot {
                 hourly_loss: hourly.hourly_loss(),
+                hourly_fee: hourly.fees(),
             },
             drawdown: DrawdownSnapshot {
                 hwm: dg.hwm(),
@@ -1190,10 +1262,16 @@ fn escalate(current: &mut Option<CircuitBreakerLevel>, new: CircuitBreakerLevel)
 
 /// Effective bankroll for Kelly sizing: `min(dynamic, config_bankroll)`.
 ///
-/// `dynamic = balance - reserve - exposure - potential_loss`, floored at zero.
+/// `dynamic = equity - reserve - reserved - potential_loss`, floored at zero.
 #[inline]
-fn available_bankroll(equity: Usd, reserve: Usd, reserved_usd: Usd, config_bankroll: Usd) -> Usd {
-    let dynamic = (equity - reserve - reserved_usd).max(Usd::ZERO);
+fn available_bankroll(
+    equity: Usd,
+    reserve: Usd,
+    reserved_usd: Usd,
+    potential_loss: Usd,
+    config_bankroll: Usd,
+) -> Usd {
+    let dynamic = (equity - reserve - reserved_usd - potential_loss).max(Usd::ZERO);
     let capped = Usd::new(config_bankroll.inner().min(dynamic.inner()));
     capped.max(Usd::ZERO)
 }

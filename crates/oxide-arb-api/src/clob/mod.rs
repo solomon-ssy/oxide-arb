@@ -51,6 +51,7 @@ pub struct ClobClient {
     sdk: Arc<SdkClient<Authenticated<Normal>>>,
     signer: Arc<OrderSigner>,
     rate_limiter: RateLimiter,
+    order_retry_policy: RetryPolicy,
     on_book_level_rejected: Option<BookLevelRejectHook>,
 }
 
@@ -89,8 +90,15 @@ impl ClobClient {
             sdk: Arc::new(sdk),
             signer,
             rate_limiter: RateLimiter::new(),
+            order_retry_policy: RetryPolicy::clob_default(),
             on_book_level_rejected: None,
         })
+    }
+
+    #[must_use]
+    pub const fn with_order_retry_policy(mut self, retry_policy: RetryPolicy) -> Self {
+        self.order_retry_policy = retry_policy;
+        self
     }
 
     /// Attach a hook invoked when REST book ingest rejects an invalid level.
@@ -114,7 +122,10 @@ impl ClobClient {
         let order_type = req.order_type;
 
         let submitted_at = chrono::Utc::now();
-        let retry_policy = RetryPolicy::for_order_type(order_type);
+        let retry_policy = match order_type {
+            OrderType::Fok => RetryPolicy::no_retry(),
+            OrderType::Gtc | OrderType::Gtd { expiration: _ } => self.order_retry_policy,
+        };
 
         retry::retry_with_policy(&retry_policy, || {
             let sdk = Arc::clone(&sdk);
@@ -417,6 +428,7 @@ impl ClobClient {
             sdk,
             signer,
             rate_limiter: RateLimiter::new(),
+            order_retry_policy: RetryPolicy::clob_default(),
             on_book_level_rejected: None,
         }
     }

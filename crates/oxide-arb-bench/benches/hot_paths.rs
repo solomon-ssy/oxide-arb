@@ -31,7 +31,10 @@ use oxide_arb_core::{
     },
     exposure::in_memory::InMemoryExposureReservation,
     infra::async_writer::AsyncWriter,
-    observability::{execution_audit::ExecutionAuditWriter, metrics_hub::MetricsHub},
+    observability::{
+        alert_dispatcher::AlertDispatcher, execution_audit::ExecutionAuditWriter,
+        metrics_hub::MetricsHub,
+    },
     pipeline::{
         book_store::BookStore,
         dual_book_assembler::DualBookAssembler,
@@ -49,11 +52,13 @@ use oxide_arb_models::{
         MarketDataConfig, PolymarketConfig, RiskConfig, ScorerConfig, WebSocketConfig,
     },
     domain::{
-        book::{BookLevel, BookSnapshot, EndgameBookPair},
+        ProbabilityInput,
+        book::{self, BookLevel, BookSnapshot, EndgameBookPair},
         calibration::{BucketKey, CalibrationSnapshot},
         latency::LatencyTrace,
         market::MarketRegistryInfo,
         opportunity::{EndgameMeta, Opportunity},
+        position::PositionInfo,
     },
     enums::{
         calibration::{DurationBucket, PriceZone},
@@ -67,7 +72,8 @@ use oxide_arb_models::{
     },
 };
 use oxide_arb_risk::{
-    builder::RiskEngineBuilder, clock::utc_clock, traits::RiskMetrics, types::ReportMode,
+    builder::RiskEngineBuilder, clock::utc_clock, engine::RiskEngine, traits::RiskMetrics,
+    types::ReportMode,
 };
 use oxide_arb_test_support::mocks::MockTradeRepository;
 use polymarket_client_sdk_v2::{
@@ -169,7 +175,7 @@ impl RiskMetrics for BenchMetrics {
     fn open_position_count(&self) -> usize {
         0
     }
-    fn open_positions(&self) -> Vec<oxide_arb_models::domain::position::PositionInfo> {
+    fn open_positions(&self) -> Vec<PositionInfo> {
         Vec::new()
     }
     fn cash_balance(&self) -> Usd {
@@ -189,15 +195,16 @@ impl RiskMetrics for BenchMetrics {
     fn reserved_usd(&self) -> Usd {
         Usd::ZERO
     }
-    fn open_directional_count(&self, _: oxide_arb_models::enums::common::Side) -> usize {
+    fn open_directional_count(&self, _: Side) -> usize {
         0
     }
-    fn daily_directional_trades(&self, _: oxide_arb_models::enums::common::Side) -> u32 {
+    fn daily_directional_trades(&self, _: Side) -> u32 {
         0
     }
     fn consecutive_market_misses(&self, _: &MarketId) -> u32 {
         0
     }
+    fn record_trade_outcome(&self, _: Side, _: &MarketId, _: bool) {}
     fn ws_disconnect_secs(&self) -> u64 {
         0
     }
@@ -252,7 +259,7 @@ fn bench_opportunity() -> Opportunity {
             duration_bucket: DurationBucket::Medium,
             settlement_deadline: None,
         },
-        calibration: oxide_arb_models::domain::calibration::CalibrationSnapshot {
+        calibration: CalibrationSnapshot {
             bucket_key: BucketKey {
                 category: MarketCategory::Politics,
                 price_zone: PriceZone::Z97,
@@ -269,8 +276,8 @@ fn bench_opportunity() -> Opportunity {
     }
 }
 
-fn risk_engine() -> &'static oxide_arb_risk::engine::RiskEngine {
-    static ENGINE: OnceLock<oxide_arb_risk::engine::RiskEngine> = OnceLock::new();
+fn risk_engine() -> &'static RiskEngine {
+    static ENGINE: OnceLock<RiskEngine> = OnceLock::new();
     ENGINE.get_or_init(|| {
         let config = RiskConfig {
             max_total_exposure_usd: dec!(5000),
@@ -297,7 +304,7 @@ fn risk_engine() -> &'static oxide_arb_risk::engine::RiskEngine {
 
 fn bench_walker_micro(c: &mut Criterion, name: &str, n: usize) {
     let levels = sample_levels(n);
-    let depth = oxide_arb_models::domain::book::total_depth_usd(&levels);
+    let depth = book::total_depth_usd(&levels);
     let budget = MicroUsd::try_from_decimal(dec!(500)).unwrap();
     let floor = MicroPrice::try_from_decimal(dec!(0.95)).unwrap();
     c.bench_function(name, |b| {
@@ -375,7 +382,7 @@ fn bench_pipeline_process(c: &mut Criterion) {
 fn bench_pre_trade_pass(c: &mut Criterion) {
     let engine = risk_engine();
     let opp = bench_opportunity();
-    let probability = oxide_arb_models::domain::risk::ProbabilityInput {
+    let probability = ProbabilityInput {
         calibrated_win_prob: dec!(0.99),
         fill_prob: dec!(0.99),
         calibration_confidence: dec!(0.99),
@@ -398,8 +405,8 @@ fn bench_pre_trade_pass(c: &mut Criterion) {
     });
 }
 
-fn risk_engine_halted() -> &'static oxide_arb_risk::engine::RiskEngine {
-    static ENGINE: OnceLock<oxide_arb_risk::engine::RiskEngine> = OnceLock::new();
+fn risk_engine_halted() -> &'static RiskEngine {
+    static ENGINE: OnceLock<RiskEngine> = OnceLock::new();
     ENGINE.get_or_init(|| {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -433,7 +440,7 @@ fn risk_engine_halted() -> &'static oxide_arb_risk::engine::RiskEngine {
 fn bench_pre_trade_fail_short(c: &mut Criterion) {
     let engine = risk_engine_halted();
     let opp = bench_opportunity();
-    let probability = oxide_arb_models::domain::risk::ProbabilityInput {
+    let probability = ProbabilityInput {
         calibrated_win_prob: dec!(0.99),
         fill_prob: dec!(0.99),
         calibration_confidence: dec!(0.99),
@@ -512,7 +519,7 @@ fn bench_dual_book_assemble(c: &mut Criterion) {
 fn bench_coalescer_pair_flush(c: &mut Criterion) {
     let metrics = Arc::new(MetricsHub::new());
     let registry = Arc::new(MarketRegistry::new());
-    registry.register_market(oxide_arb_models::domain::market::MarketRegistryInfo {
+    registry.register_market(MarketRegistryInfo {
         market_id: MarketId::new("bench-m1"),
         event_id: EventId::new("evt"),
         token_yes: TokenId::new("bench-m1-yes"),
@@ -520,9 +527,10 @@ fn bench_coalescer_pair_flush(c: &mut Criterion) {
         question: "Q".into(),
         slug: "q".into(),
         category: MarketCategory::Other,
-        status: oxide_arb_models::enums::market::MarketStatus::Active,
+        status: MarketStatus::Active,
+        outcome: None,
         neg_risk: false,
-        tick_size: oxide_arb_models::enums::common::TickSize::Hundredth,
+        tick_size: TickSize::Hundredth,
         tokens: vec![],
         best_bid: None,
         best_ask: None,
@@ -531,6 +539,7 @@ fn bench_coalescer_pair_flush(c: &mut Criterion) {
         volume_24h: Usd::ZERO,
         fee_schedule: None,
         end_date: None,
+        resolved_at: None,
         created_at: Utc::now(),
         updated_at: Utc::now(),
     });
@@ -588,8 +597,8 @@ fn bench_funnel_immediate_dispatch(c: &mut Criterion) {
                 duration_bucket: DurationBucket::Short,
                 settlement_deadline: None,
             },
-            calibration: oxide_arb_models::domain::calibration::CalibrationSnapshot {
-                bucket_key: oxide_arb_models::domain::calibration::BucketKey {
+            calibration: CalibrationSnapshot {
+                bucket_key: BucketKey {
                     category: MarketCategory::Other,
                     price_zone: PriceZone::Z95,
                     duration_bucket: DurationBucket::Short,
@@ -690,6 +699,7 @@ fn bench_scanner_scan_market(c: &mut Criterion) {
         slug: "q".into(),
         category: MarketCategory::Geopolitics,
         status: MarketStatus::Active,
+        outcome: None,
         neg_risk: false,
         tick_size: TickSize::Hundredth,
         tokens: vec![],
@@ -700,6 +710,7 @@ fn bench_scanner_scan_market(c: &mut Criterion) {
         volume_24h: Usd::ZERO,
         fee_schedule: None,
         end_date: None,
+        resolved_at: None,
         created_at: Utc::now(),
         updated_at: Utc::now(),
     });
@@ -826,7 +837,7 @@ fn seed_execution_books(store: &BookStore, scored: &ScoredOpportunity) {
     store.apply_snapshot(&scored.token_no, no_bids, no_asks, now_ms, None);
 }
 
-fn execution_bench_risk_engine() -> Arc<oxide_arb_risk::engine::RiskEngine> {
+fn execution_bench_risk_engine() -> Arc<RiskEngine> {
     Arc::new(
         RiskEngineBuilder::new()
             .config(RiskConfig {
@@ -883,7 +894,8 @@ fn execution_bench_setup() -> (
     )> = OnceLock::new();
     SETUP.get_or_init(|| {
         let metrics = Arc::new(MetricsHub::new());
-        let fsm = Arc::new(ExecutionFSM::new(Arc::clone(&metrics)));
+        let alerts = Arc::new(AlertDispatcher::new(None, None, None, 0));
+        let fsm = Arc::new(ExecutionFSM::new(Arc::clone(&metrics), alerts));
         let book_store = Arc::new(BookStore::new(Arc::clone(&metrics)));
         let reservation_config = RiskConfig::default().exposure_reservation_config();
         let exposure = Arc::new(InMemoryExposureReservation::new(reservation_config.clone()));

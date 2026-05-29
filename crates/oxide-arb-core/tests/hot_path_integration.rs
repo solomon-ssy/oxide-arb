@@ -5,6 +5,7 @@ use oxide_arb_core::{
     detection::coalescer::Coalescer,
     execution::fsm::ExecutionFSM,
     observability::{
+        alert_dispatcher::AlertDispatcher,
         backpressure::{BackpressureAction, BackpressurePolicy},
         metrics_hub::MetricsHub,
     },
@@ -43,6 +44,7 @@ fn sample_market(id: &str) -> MarketRegistryInfo {
         slug: "q".into(),
         category: MarketCategory::Other,
         status: MarketStatus::Active,
+        outcome: None,
         neg_risk: false,
         tick_size: TickSize::Hundredth,
         tokens: vec![
@@ -64,6 +66,7 @@ fn sample_market(id: &str) -> MarketRegistryInfo {
         volume_24h: Usd::ZERO,
         fee_schedule: None,
         end_date: None,
+        resolved_at: None,
         created_at: Utc::now(),
         updated_at: Utc::now(),
     }
@@ -143,7 +146,8 @@ async fn coalescer_pair_complete_flushes_immediately() {
 #[test]
 fn backpressure_book_coalesce_does_not_halt() {
     let metrics = Arc::new(MetricsHub::new());
-    let fsm = Arc::new(ExecutionFSM::new(Arc::clone(&metrics)));
+    let alerts = Arc::new(AlertDispatcher::new(None, None, None, 0));
+    let fsm = Arc::new(ExecutionFSM::new(Arc::clone(&metrics), alerts));
     let bp = BackpressurePolicy::new(Arc::clone(&metrics), 1);
 
     let event = PipelineEvent::PriceDelta(PriceDeltaCmd {

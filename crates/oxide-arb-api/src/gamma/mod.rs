@@ -24,6 +24,7 @@ use types::RawGammaMarket;
 pub struct GammaClient {
     config: GammaConfig,
     http: reqwest::Client,
+    retry_policy: RetryPolicy,
 }
 
 impl GammaClient {
@@ -31,7 +32,20 @@ impl GammaClient {
         Self {
             config,
             http: reqwest::Client::new(),
+            retry_policy: RetryPolicy::gamma_default(),
         }
+    }
+
+    #[must_use]
+    pub fn with_http_client(mut self, http: reqwest::Client) -> Self {
+        self.http = http;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_retry_policy(mut self, retry_policy: RetryPolicy) -> Self {
+        self.retry_policy = retry_policy;
+        self
     }
 
     /// Full sync: paginate all active events + their markets.
@@ -116,8 +130,9 @@ impl GammaClient {
         let http = self.http.clone();
         let base_url = self.config.base_url.clone();
         let cid = condition_id.as_str().to_owned();
+        let retry_policy = self.retry_policy;
 
-        retry::retry_with_policy(&RetryPolicy::gamma_default(), || {
+        retry::retry_with_policy(&retry_policy, || {
             let http = http.clone();
             let base_url = base_url.clone();
             let cid = cid.clone();
@@ -157,8 +172,9 @@ impl GammaClient {
         let http = self.http.clone();
         let base_url = self.config.base_url.clone();
         let cid = condition_id.as_str().to_owned();
+        let retry_policy = self.retry_policy;
 
-        retry::retry_with_policy(&RetryPolicy::gamma_default(), || {
+        retry::retry_with_policy(&retry_policy, || {
             let http = http.clone();
             let base_url = base_url.clone();
             let cid = cid.clone();

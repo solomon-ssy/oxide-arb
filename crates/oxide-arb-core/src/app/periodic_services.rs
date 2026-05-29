@@ -30,7 +30,6 @@ use oxide_arb_risk::{engine::RiskEngine, traits::RiskMetrics};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 const RISK_TICK_INTERVAL_SECS: u64 = 5;
-const EXPOSURE_GC_INTERVAL_SECS: u64 = 30;
 const HEALTH_CHECK_INTERVAL_SECS: u64 = 30;
 const PERIODIC_JITTER_PCT: f64 = 0.1;
 
@@ -112,12 +111,13 @@ impl AppContext {
     fn queue_exposure_gc(&self) {
         let exposure = Arc::clone(&self.risk.exposure);
         let metrics = Arc::clone(&self.infra.metrics);
+        let interval = Duration::from_secs(self.config.risk.reservation_gc_interval_secs.max(1));
 
         self.pending_tasks
             .push(TaskId::ExposureGc, move |shutdown| async move {
                 if let Err(error) = PeriodicTask::run(
                     TaskId::ExposureGc.static_name(),
-                    Duration::from_secs(EXPOSURE_GC_INTERVAL_SECS),
+                    interval,
                     0.0,
                     false,
                     shutdown,

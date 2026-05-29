@@ -15,6 +15,12 @@ const DOCKER_SUITES: &[(&str, &str)] = &[
     ("oxide-arb-core", "gamma_service_sync"),
 ];
 
+const NETWORK_SUITES: &[(&str, &str)] = &[
+    ("oxide-arb-api", "http_gamma_wiremock"),
+    ("oxide-arb-api", "http_clob_wiremock"),
+    ("oxide-arb-api", "clob_live_path_wiremock"),
+];
+
 #[derive(Parser)]
 #[command(name = "oxide-arb-xtask")]
 #[command(about = "Task runner for oxide-arb", long_about = None)]
@@ -25,8 +31,12 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Run the default workspace tests, Docker suites, and network suites.
+    TestFull,
     /// Run testcontainers-based integration tests (requires Docker daemon).
     TestDocker,
+    /// Run network-shaped API tests that are ignored by default.
+    TestNetwork,
 }
 
 fn main() -> ExitCode {
@@ -41,7 +51,9 @@ fn main() -> ExitCode {
 
 fn run() -> Result<()> {
     match Cli::parse().command {
+        Commands::TestFull => test_full(),
         Commands::TestDocker => test_docker(),
+        Commands::TestNetwork => test_network(),
     }
 }
 
@@ -67,11 +79,50 @@ fn ensure_docker_daemon() -> Result<()> {
     }
 }
 
-fn test_docker() -> Result<()> {
-    ensure_docker_daemon()?;
+fn test_full() -> Result<()> {
+    test_workspace()?;
+    test_docker()?;
+    test_network()?;
+
+    eprintln!("All tests passed.");
+    Ok(())
+}
+
+fn test_workspace() -> Result<()> {
     let root = workspace_root()?;
 
-    for (pkg, test) in DOCKER_SUITES {
+    eprintln!("== workspace :: cargo test --workspace ==");
+    let status = Command::new("cargo")
+        .current_dir(&root)
+        .args(["test", "--workspace"])
+        .status()
+        .context("failed to run workspace test suite")?;
+    if !status.success() {
+        bail!("workspace test suite failed");
+    }
+
+    Ok(())
+}
+
+fn test_docker() -> Result<()> {
+    ensure_docker_daemon()?;
+    run_ignored_suites(DOCKER_SUITES, "docker")?;
+
+    eprintln!("All Docker integration tests passed.");
+    Ok(())
+}
+
+fn test_network() -> Result<()> {
+    run_ignored_suites(NETWORK_SUITES, "network")?;
+
+    eprintln!("All network integration tests passed.");
+    Ok(())
+}
+
+fn run_ignored_suites(suites: &[(&str, &str)], label: &str) -> Result<()> {
+    let root = workspace_root()?;
+
+    for (pkg, test) in suites {
         eprintln!("== {pkg} :: {test} ==");
         let status = Command::new("cargo")
             .current_dir(&root)
@@ -86,12 +137,11 @@ fn test_docker() -> Result<()> {
                 "--test-threads=1",
             ])
             .status()
-            .with_context(|| format!("failed to run docker suite {pkg}::{test}"))?;
+            .with_context(|| format!("failed to run {label} suite {pkg}::{test}"))?;
         if !status.success() {
-            bail!("docker suite failed: {pkg}::{test}");
+            bail!("{label} suite failed: {pkg}::{test}");
         }
     }
 
-    eprintln!("All Docker integration tests passed.");
     Ok(())
 }

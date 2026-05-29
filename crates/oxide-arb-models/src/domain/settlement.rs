@@ -1,7 +1,7 @@
 //! Market settlement domain messages and accounting inputs.
 
 use crate::{
-    enums::common::SettlementTrigger,
+    enums::common::{SettlementTrigger, Side},
     types::{MarketId, Price, Shares, TokenId, TradeId, Usd},
 };
 use chrono::{DateTime, Utc};
@@ -32,6 +32,7 @@ pub struct MarketSettlementInput {
     pub trade_id: TradeId,
     pub market_id: MarketId,
     pub token_id: TokenId,
+    pub side: Side,
     pub shares: Shares,
     pub entry_price: Price,
     pub cost_usd: Usd,

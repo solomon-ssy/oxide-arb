@@ -18,7 +18,10 @@ use arc_swap::ArcSwap;
 use oxide_arb_models::{
     config::FeesConfig,
     domain::fee::{FeeQuote, FeeQuoteInput, MarketFeeSchedule},
-    enums::{common::MarketCategory, fee::FeeLiquidityRole},
+    enums::{
+        common::{MarketCategory, Side},
+        fee::FeeLiquidityRole,
+    },
     types::{MarketId, Price, Shares, TokenId, Usd},
 };
 use std::sync::Arc;
@@ -58,7 +61,7 @@ impl FeeCalculator {
             market_id: MarketId::new(token_id.as_str()),
             token_id: token_id.clone(),
             category,
-            side: oxide_arb_models::enums::common::Side::Buy,
+            side: Side::Buy,
             liquidity_role: FeeLiquidityRole::Taker,
             shares,
             price,

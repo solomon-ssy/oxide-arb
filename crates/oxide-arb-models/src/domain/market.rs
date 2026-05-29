@@ -92,6 +92,7 @@ impl From<MarketInfo> for MarketRegistryInfo {
             slug: info.slug,
             category: info.category,
             status: info.status,
+            outcome: info.outcome,
             neg_risk: info.neg_risk,
             tick_size: info.tick_size,
             tokens,
@@ -102,6 +103,7 @@ impl From<MarketInfo> for MarketRegistryInfo {
             volume_24h: Usd::ZERO,
             fee_schedule,
             end_date: info.end_date,
+            resolved_at: info.resolved_at,
             created_at: info.created_at,
             updated_at: info.updated_at,
         }
@@ -131,6 +133,7 @@ pub struct MarketRegistryInfo {
     pub slug: String,
     pub category: MarketCategory,
     pub status: MarketStatus,
+    pub outcome: Option<String>,
     pub neg_risk: bool,
     pub tick_size: TickSize,
     pub tokens: Vec<TokenInfo>,
@@ -141,6 +144,7 @@ pub struct MarketRegistryInfo {
     pub volume_24h: Usd,
     pub fee_schedule: Option<MarketFeeSchedule>,
     pub end_date: Option<DateTime<Utc>>,
+    pub resolved_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -221,13 +225,13 @@ impl TryFrom<&MarketRegistryInfo> for UpsertMarket {
             slug: info.slug.clone(),
             category: info.category,
             status: info.status,
-            outcome: None,
+            outcome: info.outcome.clone(),
             yes_token_id,
             no_token_id,
             tick_size: info.tick_size,
             neg_risk: info.neg_risk,
             end_date: info.end_date,
-            resolved_at: None,
+            resolved_at: info.resolved_at,
             fees_enabled: info
                 .fee_schedule
                 .as_ref()

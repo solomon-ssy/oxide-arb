@@ -106,9 +106,9 @@ pub struct MetricsHub {
     pub post_trade_relay_processed: IntCounter,
     pub post_trade_relay_failed: IntCounter,
 
-    // Tiered execution
-    pub tier_fills: IntCounterVec,
-    pub tier_misses: IntCounterVec,
+    // FOK execution
+    pub fok_fills: IntCounter,
+    pub fok_misses: IntCounter,
 
     // Latency segments (WS → scan → dispatch → HTTP)
     pub latency_ws_to_scan_us: Histogram,
@@ -215,8 +215,8 @@ struct ExecutionMetrics {
     execution_market_busy: IntCounter,
     post_trade_relay_processed: IntCounter,
     post_trade_relay_failed: IntCounter,
-    tier_fills: IntCounterVec,
-    tier_misses: IntCounterVec,
+    fok_fills: IntCounter,
+    fok_misses: IntCounter,
     latency_ws_to_scan_us: Histogram,
     latency_scan_to_dispatch_us: Histogram,
     latency_tick_to_http_us: Histogram,
@@ -514,17 +514,15 @@ fn register_execution_metrics(registry: &Registry) -> ExecutionMetrics {
             "oxide_arb_post_trade_relay_failed_total",
             "Post-trade relay processing failures"
         ),
-        tier_fills: register_counter_vec!(
+        fok_fills: register_counter!(
             registry,
-            "oxide_arb_execution_tier_fills_total",
-            "Fills by execution tier",
-            &["tier"]
+            "oxide_arb_execution_fok_fills_total",
+            "Fills by FOK execution"
         ),
-        tier_misses: register_counter_vec!(
+        fok_misses: register_counter!(
             registry,
-            "oxide_arb_execution_tier_misses_total",
-            "Misses by execution tier",
-            &["tier"]
+            "oxide_arb_execution_fok_misses_total",
+            "Misses or failures by FOK execution"
         ),
         latency_ws_to_scan_us: latency.ws_to_scan,
         latency_scan_to_dispatch_us: latency.scan_to_dispatch,
@@ -782,8 +780,8 @@ impl MetricsHub {
             execution_market_busy: execution.execution_market_busy,
             post_trade_relay_processed: execution.post_trade_relay_processed,
             post_trade_relay_failed: execution.post_trade_relay_failed,
-            tier_fills: execution.tier_fills,
-            tier_misses: execution.tier_misses,
+            fok_fills: execution.fok_fills,
+            fok_misses: execution.fok_misses,
             latency_ws_to_scan_us: execution.latency_ws_to_scan_us,
             latency_scan_to_dispatch_us: execution.latency_scan_to_dispatch_us,
             latency_tick_to_http_us: execution.latency_tick_to_http_us,

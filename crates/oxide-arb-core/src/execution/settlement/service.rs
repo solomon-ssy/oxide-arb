@@ -1,7 +1,11 @@
 use crate::{
     bridge::risk_metrics::CoreRiskMetrics,
     execution::{fsm::ExecutionFSM, settlement::payout::compute_settlement_economics},
-    observability::{execution_audit::ExecutionAuditWriter, metrics_hub::MetricsHub},
+    observability::{
+        alert_dispatcher::{Alert, AlertDispatcher, AlertSeverity},
+        execution_audit::ExecutionAuditWriter,
+        metrics_hub::MetricsHub,
+    },
     pipeline::market_registry::MarketRegistry,
     service::risk_metrics::RiskMetricsRefreshService,
 };
@@ -44,6 +48,7 @@ pub struct MarketSettlementService {
     market_registry: Arc<MarketRegistry>,
     voting_oracle: Arc<VotingOracle>,
     metrics: Arc<MetricsHub>,
+    alerts: Arc<AlertDispatcher>,
     audit_writer: Arc<ExecutionAuditWriter>,
     metrics_refresh: Option<Arc<RiskMetricsRefreshService>>,
     config: Arc<SettlementConfig>,
@@ -61,6 +66,7 @@ pub struct MarketSettlementServiceDeps {
     pub market_registry: Arc<MarketRegistry>,
     pub voting_oracle: Arc<VotingOracle>,
     pub metrics: Arc<MetricsHub>,
+    pub alerts: Arc<AlertDispatcher>,
     pub audit_writer: Arc<ExecutionAuditWriter>,
     pub metrics_refresh: Option<Arc<RiskMetricsRefreshService>>,
     pub config: Arc<SettlementConfig>,
@@ -80,6 +86,7 @@ impl MarketSettlementService {
             market_registry: deps.market_registry,
             voting_oracle: deps.voting_oracle,
             metrics: deps.metrics,
+            alerts: deps.alerts,
             audit_writer: deps.audit_writer,
             metrics_refresh: deps.metrics_refresh,
             config: deps.config,
@@ -127,12 +134,36 @@ impl MarketSettlementService {
         if pos.redeem_attempts
             >= i32::try_from(self.config.lifecycle.max_redeem_attempts).unwrap_or(i32::MAX)
         {
+            let reason = format!(
+                "redeem max attempts reached: {} >= {}",
+                pos.redeem_attempts, self.config.lifecycle.max_redeem_attempts
+            );
             tracing::error!(
                 position_id = %pos.position_id,
                 attempts = pos.redeem_attempts,
-                "redeem max attempts reached"
+                reason = %reason,
+                "redeem terminal failure"
             );
-            return Ok(());
+            self.alerts.dispatch_background(Alert {
+                severity: AlertSeverity::Critical,
+                title: "Redeem terminal failure".to_owned(),
+                body: format!(
+                    "Position {} in market {} reached max redeem attempts: {reason}",
+                    pos.position_id, pos.market_id
+                ),
+                timestamp: Utc::now(),
+            });
+            self.position_repo
+                .mark_redeem_terminal(
+                    &pos.position_id,
+                    u32::try_from(pos.redeem_attempts).unwrap_or(u32::MAX),
+                    &req.winning_token_id,
+                    req.source,
+                    reason,
+                )
+                .await?;
+            self.metrics.settlement_redeem_failure_total.inc();
+            return Err(OxideError::Internal("redeem max attempts reached".into()));
         }
 
         let economics = compute_settlement_economics(
@@ -221,6 +252,7 @@ impl MarketSettlementService {
             trade_id: settled.trade_id.clone(),
             market_id: settled.market_id.clone(),
             token_id: settled.token_id.clone(),
+            side: settled.side,
             shares: settled.shares,
             entry_price: settled.avg_entry_price,
             cost_usd: settled.total_cost_usd,
@@ -373,11 +405,19 @@ impl MarketSettlementService {
                 .await
                 .ok()
                 .flatten(),
-        }?;
+        };
         let market = self.market_registry.get_market(&position.market_id)?;
-        if latest.outcome.eq_ignore_ascii_case("yes") {
+        let outcome = latest
+            .as_ref()
+            .and_then(|event| {
+                let outcome = event.outcome.trim();
+                (!outcome.is_empty()).then_some(outcome)
+            })
+            .or(market.outcome.as_deref())
+            .unwrap_or_default();
+        if outcome.eq_ignore_ascii_case("yes") {
             Some(market.token_yes)
-        } else if latest.outcome.eq_ignore_ascii_case("no") {
+        } else if outcome.eq_ignore_ascii_case("no") {
             Some(market.token_no)
         } else {
             None

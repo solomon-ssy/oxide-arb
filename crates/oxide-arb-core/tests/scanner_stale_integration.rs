@@ -40,6 +40,7 @@ fn sample_market(id: &str) -> MarketRegistryInfo {
         slug: "q".into(),
         category: MarketCategory::Politics,
         status: MarketStatus::Active,
+        outcome: None,
         neg_risk: false,
         tick_size: TickSize::Hundredth,
         tokens: vec![
@@ -61,6 +62,7 @@ fn sample_market(id: &str) -> MarketRegistryInfo {
         volume_24h: Usd::ZERO,
         fee_schedule: None,
         end_date: None,
+        resolved_at: None,
         created_at: Utc::now(),
         updated_at: Utc::now(),
     }
