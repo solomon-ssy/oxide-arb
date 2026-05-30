@@ -1,4 +1,6 @@
-use crate::schema::{dependency::TableDependency, index::IndexSpec, seed::SeedSpec};
+use crate::schema::{
+    dependency::TableDependency, index::IndexSpec, seed::SeedSpec, timestamp_with_write_default,
+};
 use oxide_arb_macros::oxide_schema;
 use sea_orm::sea_query::{ColumnDef, Table, TableCreateStatement};
 
@@ -23,9 +25,7 @@ pub fn table() -> TableCreateStatement {
                 .not_null(),
         )
         .col(ColumnDef::new(SeedApplication::Checksum).text().not_null())
-        .col(crate::schema::timestamp_with_write_default(
-            SeedApplication::AppliedAt,
-        ))
+        .col(timestamp_with_write_default(SeedApplication::AppliedAt))
         .col(
             ColumnDef::new(SeedApplication::RowsAffected)
                 .big_integer()

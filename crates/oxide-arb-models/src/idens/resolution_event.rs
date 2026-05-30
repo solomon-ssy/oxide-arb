@@ -10,6 +10,7 @@ use crate::{
         dependency::TableDependency,
         index::{IndexBuildMode, IndexSpec},
         seed::SeedSpec,
+        timestamp_with_write_default,
     },
 };
 
@@ -56,9 +57,7 @@ pub fn table() -> TableCreateStatement {
                 .timestamp_with_time_zone()
                 .not_null(),
         )
-        .col(crate::schema::timestamp_with_write_default(
-            ResolutionEvent::CreatedAt,
-        ))
+        .col(timestamp_with_write_default(ResolutionEvent::CreatedAt))
         .foreign_key(
             ForeignKey::create()
                 .name("fk_resolution_market")

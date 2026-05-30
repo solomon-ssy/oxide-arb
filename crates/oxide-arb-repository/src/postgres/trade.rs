@@ -34,7 +34,7 @@ impl PgTradeRepository {
 
     pub async fn successful_spend_total(&self) -> Result<Usd, StorageError> {
         let trades = Entity::find()
-            .filter(Column::BusinessOutcome.eq(TradeBusinessOutcome::Success.to_string()))
+            .filter(Column::BusinessOutcome.eq(TradeBusinessOutcome::Success))
             .all(&self.db)
             .await
             .map_err(StorageError::from)?;
@@ -51,7 +51,7 @@ pub struct PgTradeRepositoryTxn<'a> {
 
 #[derive(Debug, FromQueryResult)]
 struct OutcomeCount {
-    business_outcome: String,
+    business_outcome: TradeBusinessOutcome,
     count: i64,
 }
 
@@ -96,13 +96,10 @@ async fn do_mark_submitted(
     submitted_at: DateTime<Utc>,
 ) -> Result<bool, StorageError> {
     let result = Entity::update_many()
-        .col_expr(
-            Column::State,
-            Expr::value(TradeState::Submitted.to_string()),
-        )
+        .col_expr(Column::State, Expr::value(TradeState::Submitted))
         .col_expr(Column::SubmittedAt, Expr::value(Some(submitted_at)))
         .filter(Column::TradeId.eq(trade_id.clone()))
-        .filter(Column::State.eq(TradeState::Intent.to_string()))
+        .filter(Column::State.eq(TradeState::Intent))
         .exec(db)
         .await
         .map_err(StorageError::from)?;
@@ -122,7 +119,11 @@ async fn do_mark_observed(
     }
 
     let result = Entity::update_many()
-        .col_expr(Column::State, Expr::value(obs.state.to_string()))
+        .col_expr(Column::State, Expr::value(obs.state))
+        .col_expr(
+            Column::BusinessOutcome,
+            Expr::value(obs.state.business_outcome()),
+        )
         .col_expr(Column::Shares, Expr::value(obs.shares))
         .col_expr(Column::Price, Expr::value(obs.price))
         .col_expr(Column::CostUsd, Expr::value(obs.cost_usd))
@@ -134,7 +135,7 @@ async fn do_mark_observed(
         .col_expr(Column::ErrorMessage, Expr::value(obs.error_message))
         .col_expr(Column::ConfirmedAt, Expr::value(Some(obs.confirmed_at)))
         .filter(Column::TradeId.eq(trade_id.clone()))
-        .filter(Column::State.eq(TradeState::Submitted.to_string()))
+        .filter(Column::State.eq(TradeState::Submitted))
         .exec(db)
         .await
         .map_err(StorageError::from)?;
@@ -218,16 +219,16 @@ async fn do_claim_unprocessed(
 fn claimable_condition(lease_expired_before: DateTime<Utc>) -> Condition {
     Condition::any()
         .add(Column::State.is_in([
-            TradeState::FillObserved.to_string(),
-            TradeState::MissObserved.to_string(),
-            TradeState::FailObserved.to_string(),
+            TradeState::FillObserved,
+            TradeState::MissObserved,
+            TradeState::FailObserved,
         ]))
         .add(
             Condition::all()
                 .add(Column::State.is_in([
-                    TradeState::FillProcessing.to_string(),
-                    TradeState::MissProcessing.to_string(),
-                    TradeState::FailProcessing.to_string(),
+                    TradeState::FillProcessing,
+                    TradeState::MissProcessing,
+                    TradeState::FailProcessing,
                 ]))
                 .add(Column::PostTradeClaimedAt.lt(lease_expired_before)),
         )
@@ -246,7 +247,7 @@ async fn update_claimed_group(
     }
 
     let updated = Entity::update_many()
-        .col_expr(Column::State, Expr::value(processing_state.to_string()))
+        .col_expr(Column::State, Expr::value(processing_state))
         .col_expr(
             Column::PostTradeClaimOwner,
             Expr::value(Some(owner.to_owned())),
@@ -274,7 +275,8 @@ async fn do_advance_state(
     to: TradeState,
 ) -> Result<bool, StorageError> {
     let result = Entity::update_many()
-        .col_expr(Column::State, Expr::value(to.to_string()))
+        .col_expr(Column::State, Expr::value(to))
+        .col_expr(Column::BusinessOutcome, Expr::value(to.business_outcome()))
         .col_expr(
             Column::PostTradeClaimOwner,
             Expr::value(Option::<String>::None),
@@ -284,7 +286,7 @@ async fn do_advance_state(
             Expr::value(Option::<DateTime<Utc>>::None),
         )
         .filter(Column::TradeId.eq(trade_id.clone()))
-        .filter(Column::State.eq(from.to_string()))
+        .filter(Column::State.eq(from))
         .exec(db)
         .await
         .map_err(StorageError::from)?;
@@ -296,10 +298,14 @@ async fn do_mark_orphaned(
     trade_id: &TradeId,
 ) -> Result<bool, StorageError> {
     let result = Entity::update_many()
-        .col_expr(Column::State, Expr::value(TradeState::Orphaned.to_string()))
+        .col_expr(Column::State, Expr::value(TradeState::Orphaned))
+        .col_expr(
+            Column::BusinessOutcome,
+            Expr::value(Some(TradeBusinessOutcome::Failed)),
+        )
         .col_expr(Column::NeedsReconcile, Expr::value(true))
         .filter(Column::TradeId.eq(trade_id.clone()))
-        .filter(Column::State.eq(TradeState::Submitted.to_string()))
+        .filter(Column::State.eq(TradeState::Submitted))
         .exec(db)
         .await
         .map_err(StorageError::from)?;
@@ -312,7 +318,7 @@ async fn do_find_stale_submitted(
     limit: u64,
 ) -> Result<Vec<TradeInfo>, StorageError> {
     Entity::find()
-        .filter(Column::State.eq(TradeState::Submitted.to_string()))
+        .filter(Column::State.eq(TradeState::Submitted))
         .filter(Column::SubmittedAt.lt(older_than))
         .order_by_asc(Column::SubmittedAt)
         .limit(limit)
@@ -379,7 +385,7 @@ async fn do_find_recent(
 async fn do_count_by_outcome(
     db: &impl ConnectionTrait,
     since: DateTime<Utc>,
-) -> Result<HashMap<String, i64>, StorageError> {
+) -> Result<HashMap<TradeBusinessOutcome, i64>, StorageError> {
     let results: Vec<OutcomeCount> = Entity::find()
         .filter(Column::CreatedAt.gte(since))
         .filter(Column::BusinessOutcome.is_not_null())
@@ -535,7 +541,7 @@ impl TradeRepository for PgTradeRepository {
     async fn count_by_outcome(
         &self,
         since: DateTime<Utc>,
-    ) -> Result<HashMap<String, i64>, StorageError> {
+    ) -> Result<HashMap<TradeBusinessOutcome, i64>, StorageError> {
         do_count_by_outcome(&self.db, since).await
     }
 
@@ -632,7 +638,7 @@ impl TradeRepository for PgTradeRepositoryTxn<'_> {
     async fn count_by_outcome(
         &self,
         since: DateTime<Utc>,
-    ) -> Result<HashMap<String, i64>, StorageError> {
+    ) -> Result<HashMap<TradeBusinessOutcome, i64>, StorageError> {
         do_count_by_outcome(self.txn, since).await
     }
 

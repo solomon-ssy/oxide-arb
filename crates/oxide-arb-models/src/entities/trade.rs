@@ -34,7 +34,7 @@ pub struct Model {
     pub tx_hash: Option<String>,
     /// Lifecycle state machine — the single source of truth for the trade row.
     pub state: TradeState,
-    /// Business outcome derived from `state` by a PG generated column (read-only).
+    /// Business outcome maintained by repository state transitions.
     /// `None` while in-flight (`intent`/`submitted`).
     pub business_outcome: Option<TradeBusinessOutcome>,
     /// Frozen scored-opportunity snapshot captured at dispatch (post-trade audit).

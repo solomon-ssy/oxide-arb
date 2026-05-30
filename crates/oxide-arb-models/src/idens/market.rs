@@ -11,6 +11,7 @@ use crate::{
         dependency::TableDependency,
         index::{IndexBuildMode, IndexSpec},
         seed::SeedSpec,
+        timestamp_with_write_default,
     },
 };
 
@@ -102,12 +103,8 @@ pub fn table() -> TableCreateStatement {
                 .timestamp_with_time_zone()
                 .null(),
         )
-        .col(crate::schema::timestamp_with_write_default(
-            Market::CreatedAt,
-        ))
-        .col(crate::schema::timestamp_with_write_default(
-            Market::UpdatedAt,
-        ))
+        .col(timestamp_with_write_default(Market::CreatedAt))
+        .col(timestamp_with_write_default(Market::UpdatedAt))
         .foreign_key(
             ForeignKey::create()
                 .name("fk_market_event")

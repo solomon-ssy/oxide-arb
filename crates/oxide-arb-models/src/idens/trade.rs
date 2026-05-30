@@ -7,11 +7,13 @@ use sea_orm::{
 };
 
 use crate::{
+    enums::common::TradeState,
     idens::{event::Event, market::Market},
     schema::{
         dependency::TableDependency,
         index::{IndexBuildMode, IndexSpec},
         seed::SeedSpec,
+        timestamp_with_write_default,
     },
 };
 
@@ -78,21 +80,13 @@ pub fn table() -> TableCreateStatement {
         .col(ColumnDef::new(Trade::NetProfitUsd).text().null())
         .col(ColumnDef::new(Trade::OrderId).text().null())
         .col(ColumnDef::new(Trade::TxHash).text().null())
-        .col(ColumnDef::new(Trade::State).text().not_null())
-        .col(ColumnDef::new(Trade::BusinessOutcome).text().extra(
-            "GENERATED ALWAYS AS (CASE state \
-                 WHEN 'fill_observed' THEN 'success' \
-                 WHEN 'fill_processing' THEN 'success' \
-                 WHEN 'settled' THEN 'success' \
-                 WHEN 'miss_observed' THEN 'miss' \
-                 WHEN 'miss_processing' THEN 'miss' \
-                 WHEN 'missed' THEN 'miss' \
-                 WHEN 'fail_observed' THEN 'failed' \
-                 WHEN 'fail_processing' THEN 'failed' \
-                 WHEN 'failed' THEN 'failed' \
-                 WHEN 'orphaned' THEN 'failed' \
-                 ELSE NULL END) STORED",
-        ))
+        .col(
+            ColumnDef::new(Trade::State)
+                .text()
+                .not_null()
+                .default(TradeState::Intent),
+        )
+        .col(ColumnDef::new(Trade::BusinessOutcome).text().null())
         .col(
             ColumnDef::new(Trade::ScoredSnapshot)
                 .json_binary()
@@ -130,12 +124,8 @@ pub fn table() -> TableCreateStatement {
                 .timestamp_with_time_zone()
                 .null(),
         )
-        .col(crate::schema::timestamp_with_write_default(
-            Trade::CreatedAt,
-        ))
-        .col(crate::schema::timestamp_with_write_default(
-            Trade::UpdatedAt,
-        ))
+        .col(timestamp_with_write_default(Trade::CreatedAt))
+        .col(timestamp_with_write_default(Trade::UpdatedAt))
         .foreign_key(
             ForeignKey::create()
                 .name("fk_trade_market")

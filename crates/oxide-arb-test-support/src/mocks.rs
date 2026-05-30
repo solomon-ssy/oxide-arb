@@ -31,11 +31,23 @@ use std::{
 pub struct MockTradeRepository {
     trades: Mutex<HashMap<String, TradeInfo>>,
     create_should_fail: AtomicBool,
+    mark_submitted_should_fail: AtomicBool,
+    mark_observed_should_fail: AtomicBool,
 }
 
 impl MockTradeRepository {
     pub fn fail_create(&self) {
         self.create_should_fail.store(true, Ordering::Relaxed);
+    }
+
+    pub fn fail_mark_submitted(&self) {
+        self.mark_submitted_should_fail
+            .store(true, Ordering::Relaxed);
+    }
+
+    pub fn fail_mark_observed(&self) {
+        self.mark_observed_should_fail
+            .store(true, Ordering::Relaxed);
     }
 
     pub fn trade_count(&self) -> usize {
@@ -45,11 +57,21 @@ impl MockTradeRepository {
     pub fn find(&self, trade_id: &TradeId) -> Option<TradeInfo> {
         self.trades.lock().unwrap().get(trade_id.as_str()).cloned()
     }
+
+    pub fn trades_snapshot(&self) -> Vec<TradeInfo> {
+        self.trades.lock().unwrap().values().cloned().collect()
+    }
 }
 
 #[derive(Default)]
 pub struct MockPositionRepository {
     positions: Mutex<HashMap<String, PositionInfo>>,
+}
+
+impl MockPositionRepository {
+    pub fn positions_snapshot(&self) -> Vec<PositionInfo> {
+        self.positions.lock().unwrap().values().cloned().collect()
+    }
 }
 
 #[async_trait]
@@ -498,6 +520,11 @@ impl TradeRepository for MockTradeRepository {
         trade_id: &TradeId,
         submitted_at: chrono::DateTime<Utc>,
     ) -> Result<bool, StorageError> {
+        if self.mark_submitted_should_fail.load(Ordering::Relaxed) {
+            return Err(StorageError::Connection(
+                "mock mark_submitted failure".into(),
+            ));
+        }
         let mut guard = self.trades.lock().unwrap();
         let existing = guard
             .get_mut(trade_id.as_str())
@@ -521,6 +548,11 @@ impl TradeRepository for MockTradeRepository {
         trade_id: &TradeId,
         observation: TradeObservation,
     ) -> Result<(), StorageError> {
+        if self.mark_observed_should_fail.load(Ordering::Relaxed) {
+            return Err(StorageError::Connection(
+                "mock mark_observed failure".into(),
+            ));
+        }
         let mut guard = self.trades.lock().unwrap();
         let existing = guard
             .get_mut(trade_id.as_str())
@@ -685,7 +717,7 @@ impl TradeRepository for MockTradeRepository {
     async fn count_by_outcome(
         &self,
         _since: chrono::DateTime<Utc>,
-    ) -> Result<HashMap<String, i64>, StorageError> {
+    ) -> Result<HashMap<TradeBusinessOutcome, i64>, StorageError> {
         Ok(HashMap::new())
     }
 

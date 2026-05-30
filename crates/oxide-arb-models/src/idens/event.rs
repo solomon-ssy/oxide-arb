@@ -10,6 +10,7 @@ use crate::{
         dependency::TableDependency,
         index::{IndexBuildMode, IndexSpec},
         seed::SeedSpec,
+        timestamp_with_write_default,
     },
 };
 
@@ -59,12 +60,8 @@ pub fn table() -> TableCreateStatement {
                 .null(),
         )
         .col(ColumnDef::new(Event::RawGamma).json_binary().null())
-        .col(crate::schema::timestamp_with_write_default(
-            Event::CreatedAt,
-        ))
-        .col(crate::schema::timestamp_with_write_default(
-            Event::UpdatedAt,
-        ))
+        .col(timestamp_with_write_default(Event::CreatedAt))
+        .col(timestamp_with_write_default(Event::UpdatedAt))
         .to_owned()
 }
 

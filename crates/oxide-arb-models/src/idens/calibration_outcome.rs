@@ -10,6 +10,7 @@ use crate::{
         dependency::TableDependency,
         index::{IndexBuildMode, IndexSpec},
         seed::SeedSpec,
+        timestamp_with_write_default,
     },
 };
 
@@ -91,7 +92,7 @@ pub fn table() -> TableCreateStatement {
                 .timestamp_with_time_zone()
                 .null(),
         )
-        .col(crate::schema::timestamp_with_write_default(
+        .col(timestamp_with_write_default(
             EndgameCalibrationOutcome::CreatedAt,
         ))
         .foreign_key(

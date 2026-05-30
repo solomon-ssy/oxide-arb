@@ -17,7 +17,7 @@ use oxide_arb_models::{
         calibration::{DurationBucket, PriceZone},
         common::{
             ExecutionMode, MarketCategory, PositionStatus, RedeemStatus, ReportType,
-            SettlementTrigger, Side, TradeState,
+            SettlementTrigger, Side, TradeBusinessOutcome, TradeState,
         },
         risk::{
             BlacklistReason, BlacklistScope, BreakerStateName, CircuitBreakerLevel,
@@ -320,7 +320,13 @@ async fn trade_repository_crud() {
         .count_by_outcome(Utc::now() - chrono::Duration::hours(1))
         .await
         .unwrap();
-    assert!(counts.get("success").copied().unwrap_or(0) >= 1);
+    assert!(
+        counts
+            .get(&TradeBusinessOutcome::Success)
+            .copied()
+            .unwrap_or(0)
+            >= 1
+    );
 }
 
 #[tokio::test]

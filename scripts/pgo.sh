@@ -16,7 +16,10 @@ echo "== Train: hot_paths benchmarks =="
 cargo bench -p oxide-arb-bench --bench hot_paths
 
 echo "== Train: integration tests =="
-cargo test -p oxide-arb-core --test hot_path_integration --test execution_integration
+cargo test -p oxide-arb-core \
+  --test hot_path_integration \
+  --test execution_pipeline_live \
+  --test post_trade_relay
 
 echo "== Merge profiles =="
 llvm-profdata merge -o "$PGO_DIR/merged.profdata" "$PGO_DIR"/*.profraw

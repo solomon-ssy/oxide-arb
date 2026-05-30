@@ -11,6 +11,7 @@ use crate::{
         dependency::TableDependency,
         index::{IndexBuildMode, IndexSpec},
         seed::SeedSpec,
+        timestamp_with_write_default,
     },
 };
 
@@ -69,9 +70,7 @@ pub fn table() -> TableCreateStatement {
                 .not_null()
                 .default(LedgerStatus::Active),
         )
-        .col(crate::schema::timestamp_with_write_default(
-            PotentialLossLedger::CreatedAt,
-        ))
+        .col(timestamp_with_write_default(PotentialLossLedger::CreatedAt))
         .col(
             ColumnDef::new(PotentialLossLedger::ResolvedAt)
                 .timestamp_with_time_zone()

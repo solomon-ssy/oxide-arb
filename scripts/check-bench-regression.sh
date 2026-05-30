@@ -15,6 +15,9 @@ mkdir -p "$(dirname "$BASELINE")"
 if command -v critcmp >/dev/null 2>&1 && [[ -f "$BASELINE" ]]; then
   echo "Comparing against baseline $BASELINE (5% regression budget)..."
   critcmp "$BASELINE" "$RESULT" --threshold 5
+elif [[ "${CI:-}" == "true" ]]; then
+  echo "Regression gate cannot run in CI: install critcmp and provide $BASELINE." >&2
+  exit 1
 else
   echo "Saving snapshot to $BASELINE (install critcmp + re-run to enforce regression gate)."
   cp "$RESULT" "$BASELINE"

@@ -11,6 +11,7 @@ use crate::{
         dependency::TableDependency,
         index::{IndexBuildMode, IndexSpec},
         seed::SeedSpec,
+        timestamp_with_write_default,
     },
     types::Usd,
 };
@@ -72,9 +73,7 @@ pub fn table() -> TableCreateStatement {
                 .not_null()
                 .default(PositionStatus::Open),
         )
-        .col(crate::schema::timestamp_with_write_default(
-            Position::OpenedAt,
-        ))
+        .col(timestamp_with_write_default(Position::OpenedAt))
         .col(nullable_timestamp(Position::ClosedAt))
         .col(nullable_timestamp(Position::SettledAt))
         .col(ColumnDef::new(Position::WinningTokenId).text().null())

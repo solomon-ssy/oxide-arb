@@ -8,6 +8,7 @@ use crate::schema::{
     dependency::TableDependency,
     index::{IndexBuildMode, IndexSpec},
     seed::SeedSpec,
+    timestamp_with_write_default,
 };
 
 #[oxide_schema]
@@ -30,9 +31,7 @@ pub fn table() -> TableCreateStatement {
         .col(ColumnDef::new(Report::PeriodStart).date().not_null())
         .col(ColumnDef::new(Report::PeriodEnd).date().not_null())
         .col(ColumnDef::new(Report::Payload).json_binary().not_null())
-        .col(crate::schema::timestamp_with_write_default(
-            Report::CreatedAt,
-        ))
+        .col(timestamp_with_write_default(Report::CreatedAt))
         .to_owned()
 }
 

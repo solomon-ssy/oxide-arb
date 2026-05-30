@@ -44,6 +44,9 @@ jobs:
       - name: Run tests
         run: cargo test --workspace
 
+      - name: Run wiremock API tests
+        run: cargo test-network
+
   bench:
     name: Benchmarks
     runs-on: ubuntu-latest
@@ -64,6 +67,9 @@ jobs:
 
       - name: Enforce absolute micro SLO ceilings
         run: bash scripts/check-bench-slo.sh
+
+      - name: Run e2e path benchmarks
+        run: cargo bench -p oxide-arb-bench --bench e2e_paths -- --output-format bencher
 
       - name: Run benchmarks
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'

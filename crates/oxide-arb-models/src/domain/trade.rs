@@ -44,7 +44,7 @@ pub struct TradeInfo {
     pub tx_hash: Option<String>,
     /// Lifecycle state machine — single source of truth for the trade row.
     pub state: TradeState,
-    /// Read-only business-outcome bucket derived from `state` (PG generated column).
+    /// Business-outcome bucket maintained by repository state transitions.
     pub business_outcome: Option<TradeBusinessOutcome>,
     /// Frozen scored-opportunity snapshot captured at dispatch (post-trade audit).
     pub scored_snapshot: serde_json::Value,
@@ -129,9 +129,8 @@ impl PostTradeInput {
 ///
 /// Derives `DeriveIntoActiveModel` — calling `.into_active_model()` produces
 /// an `ActiveModel` with these fields `Set(...)` and all others `NotSet`.
-/// The entity's `ActiveModelBehavior::before_save` fills in `state` (`Intent`),
-/// `needs_reconcile`, timestamps, and nullable defaults automatically;
-/// `business_outcome` is computed by a PG generated column.
+/// The repository starts new rows in `Intent`; `business_outcome` remains `None`
+/// until an observed/terminal state transition sets it.
 #[derive(Debug, Clone, DeriveIntoActiveModel)]
 #[sea_orm(active_model = "crate::entities::trade::ActiveModel")]
 pub struct NewTrade {

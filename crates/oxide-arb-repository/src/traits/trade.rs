@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::{
     domain::{NewTrade, ReportTradeStats, TradeInfo, TradeObservation},
-    enums::common::TradeState,
+    enums::common::{TradeBusinessOutcome, TradeState},
     types::{MarketId, TradeId},
 };
 use std::collections::HashMap;
@@ -83,7 +83,7 @@ pub trait TradeRepository: Send + Sync {
     async fn count_by_outcome(
         &self,
         since: DateTime<Utc>,
-    ) -> Result<HashMap<String, i64>, StorageError>;
+    ) -> Result<HashMap<TradeBusinessOutcome, i64>, StorageError>;
 
     async fn aggregate_between(
         &self,

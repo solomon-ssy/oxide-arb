@@ -1,7 +1,9 @@
 use oxide_arb_macros::oxide_schema;
 use sea_orm::sea_query::{ColumnDef, Table, TableCreateStatement};
 
-use crate::schema::{dependency::TableDependency, index::IndexSpec, seed::SeedSpec};
+use crate::schema::{
+    dependency::TableDependency, index::IndexSpec, seed::SeedSpec, timestamp_with_write_default,
+};
 
 #[oxide_schema]
 pub enum BlacklistEntry {
@@ -40,12 +42,8 @@ pub fn table() -> TableCreateStatement {
                 .not_null()
                 .default(0),
         )
-        .col(crate::schema::timestamp_with_write_default(
-            BlacklistEntry::CreatedAt,
-        ))
-        .col(crate::schema::timestamp_with_write_default(
-            BlacklistEntry::UpdatedAt,
-        ))
+        .col(timestamp_with_write_default(BlacklistEntry::CreatedAt))
+        .col(timestamp_with_write_default(BlacklistEntry::UpdatedAt))
         .to_owned()
 }
 

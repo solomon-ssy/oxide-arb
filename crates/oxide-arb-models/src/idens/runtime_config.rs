@@ -1,5 +1,7 @@
 use crate::{
-    schema::{dependency::TableDependency, index::IndexSpec, seed::SeedSpec},
+    schema::{
+        dependency::TableDependency, index::IndexSpec, seed::SeedSpec, timestamp_with_write_default,
+    },
     seed::runtime_config,
 };
 use oxide_arb_macros::oxide_schema;
@@ -37,9 +39,7 @@ pub fn table() -> TableCreateStatement {
                 .not_null()
                 .default("system"),
         )
-        .col(crate::schema::timestamp_with_write_default(
-            RuntimeConfig::UpdatedAt,
-        ))
+        .col(timestamp_with_write_default(RuntimeConfig::UpdatedAt))
         .to_owned()
 }
 

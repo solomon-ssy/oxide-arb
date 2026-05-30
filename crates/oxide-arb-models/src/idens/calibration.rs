@@ -9,6 +9,7 @@ use crate::{
         dependency::TableDependency,
         index::{IndexBuildMode, IndexSpec},
         seed::SeedSpec,
+        timestamp_with_write_default,
     },
     types::Probability,
 };
@@ -83,7 +84,7 @@ pub fn table() -> TableCreateStatement {
                 .text()
                 .null(),
         )
-        .col(crate::schema::timestamp_with_write_default(
+        .col(timestamp_with_write_default(
             EndgameCalibrationBucket::UpdatedAt,
         ))
         .to_owned()

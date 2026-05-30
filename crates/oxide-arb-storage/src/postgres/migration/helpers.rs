@@ -11,7 +11,10 @@ use oxide_arb_models::{
     },
     seed::SeedContext,
 };
-use sea_orm::{ConnectionTrait, Statement};
+use sea_orm::{
+    ConnectionTrait, Statement,
+    sea_query::{PostgresQueryBuilder, TableCreateStatement},
+};
 use sea_orm_migration::prelude::*;
 use std::collections::{BTreeMap, BTreeSet};
 use tracing::info;
@@ -28,25 +31,29 @@ impl<'a> SchemaRunner<'a> {
 
     pub async fn create_schema(&self) -> Result<(), DbErr> {
         for spec in create_order() {
-            self.manager.create_table((spec.table)()).await?;
+            create_postgres_table(self.manager, (spec.table)(), &(spec.table_name)()).await?;
         }
 
-        self.execute_sql(["CREATE OR REPLACE FUNCTION trigger_set_updated_at() \
+        execute_sql(
+            self.manager,
+            ["CREATE OR REPLACE FUNCTION trigger_set_updated_at() \
           RETURNS TRIGGER AS $$ \
           BEGIN \
-              NEW.updated_at = statement_timestamp(); \
+              IF ROW(NEW.*) IS DISTINCT FROM ROW(OLD.*) THEN \
+                  NEW.updated_at = statement_timestamp(); \
+              END IF; \
               RETURN NEW; \
           END; \
-          $$ LANGUAGE plpgsql"])
-            .await?;
+          $$ LANGUAGE plpgsql"],
+        )
+        .await?;
 
         for spec in catalog::tables() {
             for trigger in (spec.triggers)() {
                 match trigger.kind {
                     TriggerKind::UpdatedAt => {
                         let table = (trigger.table_name)();
-                        self.execute_sql([create_updated_at_trigger(&table)])
-                            .await?;
+                        execute_sql(self.manager, [create_updated_at_trigger(&table)]).await?;
                     }
                 }
             }
@@ -61,14 +68,17 @@ impl<'a> SchemaRunner<'a> {
                 match trigger.kind {
                     TriggerKind::UpdatedAt => {
                         let table = (trigger.table_name)();
-                        self.execute_sql([drop_updated_at_trigger(&table)]).await?;
+                        execute_sql(self.manager, [drop_updated_at_trigger(&table)]).await?;
                     }
                 }
             }
         }
 
-        self.execute_sql(["DROP FUNCTION IF EXISTS trigger_set_updated_at"])
-            .await?;
+        execute_sql(
+            self.manager,
+            ["DROP FUNCTION IF EXISTS trigger_set_updated_at"],
+        )
+        .await?;
 
         for spec in drop_order() {
             self.manager
@@ -89,7 +99,7 @@ impl<'a> SchemaRunner<'a> {
             for index in (spec.indexes)() {
                 match index.statement {
                     IndexStatement::SeaQuery(stmt) => self.manager.create_index(*stmt).await?,
-                    IndexStatement::RawSql(sql) => self.execute_sql([sql]).await?,
+                    IndexStatement::RawSql(sql) => execute_sql(self.manager, [sql]).await?,
                 }
             }
         }
@@ -99,8 +109,11 @@ impl<'a> SchemaRunner<'a> {
     pub async fn drop_indexes(&self) -> Result<(), DbErr> {
         for spec in catalog::tables().into_iter().rev() {
             for index in (spec.indexes)().into_iter().rev() {
-                self.execute_sql([format!("DROP INDEX IF EXISTS {}", index.name)])
-                    .await?;
+                execute_sql(
+                    self.manager,
+                    [format!("DROP INDEX IF EXISTS {}", index.name)],
+                )
+                .await?;
             }
         }
         Ok(())
@@ -132,33 +145,17 @@ impl<'a> SchemaRunner<'a> {
 
         Ok(())
     }
-
-    pub async fn execute_sql(
-        &self,
-        statements: impl IntoIterator<Item = impl AsRef<str>>,
-    ) -> Result<(), DbErr> {
-        let conn = self.manager.get_connection();
-        for sql in statements {
-            conn.execute_unprepared(sql.as_ref()).await?;
-        }
-        Ok(())
-    }
 }
 
-/// Create the canonical `updated_at` trigger for a table.
-pub fn create_updated_at_trigger(table: &str) -> String {
-    format!(
-        "CREATE TRIGGER trg_{table}_updated_at \
-         BEFORE UPDATE ON {table} \
-         FOR EACH ROW \
-         WHEN (OLD.* IS DISTINCT FROM NEW.*) \
-         EXECUTE FUNCTION trigger_set_updated_at()"
-    )
-}
-
-/// Drop the canonical `updated_at` trigger for a table.
-pub fn drop_updated_at_trigger(table: &str) -> String {
-    format!("DROP TRIGGER IF EXISTS trg_{table}_updated_at ON {table}")
+async fn create_postgres_table(
+    manager: &SchemaManager<'_>,
+    statement: TableCreateStatement,
+    table: &str,
+) -> Result<(), DbErr> {
+    let sql = statement.to_string(PostgresQueryBuilder);
+    execute_sql(manager, [sql])
+        .await
+        .map_err(|error| DbErr::Custom(format!("create table `{table}` failed: {error}")))
 }
 
 /// Execute raw SQL statements `SeaORM` cannot express (partial indexes, extensions, etc.).
@@ -168,9 +165,27 @@ pub async fn execute_sql(
 ) -> Result<(), DbErr> {
     let conn = manager.get_connection();
     for sql in statements {
-        conn.execute_unprepared(sql.as_ref()).await?;
+        let sql = sql.as_ref();
+        conn.execute_unprepared(sql)
+            .await
+            .map_err(|error| DbErr::Custom(format!("raw SQL failed: {error}; sql: {sql}")))?;
     }
     Ok(())
+}
+
+/// Create the canonical `updated_at` trigger for a table.
+pub fn create_updated_at_trigger(table: &str) -> String {
+    format!(
+        "CREATE TRIGGER trg_{table}_updated_at \
+         BEFORE UPDATE ON {table} \
+         FOR EACH ROW \
+         EXECUTE FUNCTION trigger_set_updated_at()"
+    )
+}
+
+/// Drop the canonical `updated_at` trigger for a table.
+pub fn drop_updated_at_trigger(table: &str) -> String {
+    format!("DROP TRIGGER IF EXISTS trg_{table}_updated_at ON {table}")
 }
 
 fn ordered_seeds() -> Result<Vec<SeedSpec>, DbErr> {

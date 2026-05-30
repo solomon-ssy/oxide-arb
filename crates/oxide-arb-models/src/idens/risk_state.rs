@@ -1,6 +1,8 @@
 use crate::{
     enums::risk::BreakerStateName,
-    schema::{dependency::TableDependency, index::IndexSpec, seed::SeedSpec},
+    schema::{
+        dependency::TableDependency, index::IndexSpec, seed::SeedSpec, timestamp_with_write_default,
+    },
     seed::risk_engine_state,
     types::Usd,
 };
@@ -121,7 +123,7 @@ fn risk_engine_hourly_window_columns(table: &mut TableCreateStatement) {
         .col(default_zero_i32(RiskEngineState::HourlyTradeCount))
         .col(default_zero_i32(RiskEngineState::HourlySuccessCount))
         .col(default_zero_i32(RiskEngineState::HourlyMissCount))
-        .col(crate::schema::timestamp_with_write_default(
+        .col(timestamp_with_write_default(
             RiskEngineState::HourlyWindowStart,
         ));
 }
@@ -168,9 +170,7 @@ fn risk_engine_emergency_columns(table: &mut TableCreateStatement) {
                 .text()
                 .null(),
         )
-        .col(crate::schema::timestamp_with_write_default(
-            RiskEngineState::UpdatedAt,
-        ));
+        .col(timestamp_with_write_default(RiskEngineState::UpdatedAt));
 }
 
 fn default_zero_usd(column: RiskEngineState) -> ColumnDef {
