@@ -6,7 +6,7 @@ use oxide_arb_models::{
         execution::{ExecutionPlan, ReservationHandle},
         opportunity::Opportunity,
     },
-    types::{ExecutionId, Shares, Usd},
+    types::{ExecutionId, MICRO_SCALE, Shares, Usd},
 };
 use std::sync::Arc;
 
@@ -34,7 +34,8 @@ impl PlanBuilder {
         execution_id: ExecutionId,
     ) -> ExecutionPlan {
         let shares = if opp.entry_price.inner() > rust_decimal::Decimal::ZERO {
-            Shares::new((approved_size.inner() / opp.entry_price.inner()).round())
+            let scale = rust_decimal::Decimal::from(MICRO_SCALE);
+            Shares::new((approved_size.inner() / opp.entry_price.inner() * scale).floor() / scale)
         } else {
             Shares::ZERO
         };

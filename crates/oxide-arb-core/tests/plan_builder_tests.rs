@@ -14,7 +14,7 @@ use oxide_arb_models::{
         common::{MarketCategory, TickSize},
         market::MarketStatus,
     },
-    types::{EventId, ExecutionId, MarketId, ReservationId, TokenId, Usd},
+    types::{EventId, ExecutionId, MarketId, Price, ReservationId, TokenId, Usd},
 };
 use oxide_arb_test_support::fixtures::sample_opportunity;
 use rust_decimal_macros::dec;
@@ -108,4 +108,28 @@ fn plan_neg_risk_false_when_market_unknown() {
         !plan.neg_risk,
         "unknown market must default neg_risk to false (fail-safe until Gamma sync)"
     );
+}
+
+#[test]
+fn plan_shares_never_exceed_approved_notional() {
+    let registry = Arc::new(MarketRegistry::new());
+    let builder = PlanBuilder::new(Arc::new(FeeCalculator::default()), Arc::clone(&registry));
+
+    let mut opp = sample_opportunity();
+    opp.entry_price = Price::new(dec!(0.97));
+    let approved = Usd::new(dec!(20));
+    let reservation = ReservationHandle {
+        id: ReservationId::new_id(),
+        amount: approved,
+        market_id: opp.market_id.clone(),
+    };
+
+    let plan = builder.build(&opp, approved, &reservation, ExecutionId::generate());
+    let planned_notional = plan.shares * plan.limit_price;
+
+    assert!(
+        planned_notional <= approved,
+        "planned notional {planned_notional} must not exceed approved size {approved}"
+    );
+    assert_eq!(plan.shares.inner(), dec!(20.618556));
 }
