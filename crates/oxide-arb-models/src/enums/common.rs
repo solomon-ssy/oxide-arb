@@ -1,13 +1,10 @@
 //! Common enums used across the oxide-arb platform.
 //!
-//! Enums that appear as `SeaORM` entity columns derive `DeriveActiveEnum` +
-//! `IntoActiveValue` so they can be stored directly in the database without
-//! JSON serialization.
+//! Enums that appear as `SeaORM` entity columns use [`active_string_enum!`] so they
+//! can be stored directly in the database without JSON serialization.
 
-use oxide_arb_macros::IntoActiveValue;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
-use sea_orm::{DeriveActiveEnum, EnumIter};
 use serde::{Deserialize, Serialize};
 use std::{
     fmt::{self, Display, Formatter},
@@ -15,27 +12,12 @@ use std::{
 };
 use thiserror::Error;
 
-/// Trade direction.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Hash,
-    Serialize,
-    Deserialize,
-    EnumIter,
-    DeriveActiveEnum,
-    IntoActiveValue,
-)]
-#[sea_orm(rs_type = "String", db_type = "Text")]
-#[serde(rename_all = "snake_case")]
-pub enum Side {
-    #[sea_orm(string_value = "BUY")]
-    Buy,
-    #[sea_orm(string_value = "SELL")]
-    Sell,
+active_string_enum! {
+    /// Trade direction.
+    pub enum Side {
+        Buy => "BUY",
+        Sell => "SELL",
+    }
 }
 
 impl Side {
@@ -45,15 +27,6 @@ impl Side {
         match self {
             Self::Buy => Self::Sell,
             Self::Sell => Self::Buy,
-        }
-    }
-}
-
-impl Display for Side {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Buy => write!(f, "BUY"),
-            Self::Sell => write!(f, "SELL"),
         }
     }
 }
@@ -70,73 +43,29 @@ pub enum OrderType {
     Gtd { expiration: u64 },
 }
 
-/// Trade execution mode.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    Hash,
-    Serialize,
-    Deserialize,
-    EnumIter,
-    DeriveActiveEnum,
-    IntoActiveValue,
-)]
-#[sea_orm(rs_type = "String", db_type = "Text")]
-#[serde(rename_all = "snake_case")]
-pub enum ExecutionMode {
-    #[sea_orm(string_value = "dry_run")]
-    #[default]
-    DryRun,
-    #[sea_orm(string_value = "paper")]
-    Paper,
-    #[sea_orm(string_value = "live")]
-    Live,
-}
-
-impl Display for ExecutionMode {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::DryRun => write!(f, "dry_run"),
-            Self::Paper => write!(f, "paper"),
-            Self::Live => write!(f, "live"),
-        }
+active_string_enum! {
+    /// Trade execution mode.
+    @derive(Default)
+    pub enum ExecutionMode {
+        #[default]
+        DryRun => "dry_run",
+        Paper => "paper",
+        Live => "live",
     }
 }
 
-/// Staleness classification for market-data snapshots.
-///
-/// Variants are ordered from freshest to most stale. The derived `Ord`
-/// follows this ordering so `Fresh < Acceptable < Stale < Expired`.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    Serialize,
-    Deserialize,
-    EnumIter,
-    DeriveActiveEnum,
-    IntoActiveValue,
-)]
-#[sea_orm(rs_type = "String", db_type = "Text")]
-#[serde(rename_all = "snake_case")]
-pub enum StalenessLevel {
-    #[sea_orm(string_value = "fresh")]
-    Fresh,
-    #[sea_orm(string_value = "acceptable")]
-    Acceptable,
-    #[sea_orm(string_value = "stale")]
-    Stale,
-    #[sea_orm(string_value = "expired")]
-    Expired,
+active_string_enum! {
+    /// Staleness classification for market-data snapshots.
+    ///
+    /// Variants are ordered from freshest to most stale. The derived `Ord`
+    /// follows this ordering so `Fresh < Acceptable < Stale < Expired`.
+    @derive(PartialOrd, Ord)
+    pub enum StalenessLevel {
+        Fresh => "fresh",
+        Acceptable => "acceptable",
+        Stale => "stale",
+        Expired => "expired",
+    }
 }
 
 impl StalenessLevel {
@@ -149,132 +78,64 @@ impl StalenessLevel {
             other
         }
     }
+}
 
-    #[must_use]
-    #[inline]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Fresh => "fresh",
-            Self::Acceptable => "acceptable",
-            Self::Stale => "stale",
-            Self::Expired => "expired",
-        }
+active_string_enum! {
+    /// Success/miss/failed bucket derived from [`TradeState`].
+    ///
+    /// This is not the trade's stored state: the `trade` row has exactly one state
+    /// field, while this bucket is surfaced as a read-only PG generated column for
+    /// risk accounting, reporting, and audit.
+    pub enum TradeBusinessOutcome {
+        /// Order filled, position opened.
+        Success => "success",
+        /// FOK not filled (book moved or insufficient depth).
+        Miss => "miss",
+        /// Order failed/errored, or submitted-but-unconfirmed (orphaned).
+        Failed => "failed",
     }
 }
 
-impl Display for StalenessLevel {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
+active_string_enum! {
+    /// Durable trade lifecycle state machine — single source of truth on the `trade` row.
+    ///
+    /// Replaces the former `phase × outcome` two-column model: one field makes illegal
+    /// states unrepresentable (e.g. "processed but no outcome" cannot occur). The
+    /// business-outcome classification (success/miss/failed) is derived via
+    /// [`TradeState::business_outcome`] in Rust and a PG generated column for reporting.
+    ///
+    /// Transitions:
+    /// `Intent` → `Submitted` → (`FillObserved` | `MissObserved` | `FailObserved`)
+    ///   → (`FillProcessing` | `MissProcessing` | `FailProcessing`)
+    ///   → (`Settled` | `Missed` | `Failed`); stale `Submitted` → `Orphaned`.
+    /// The `*Observed` states are unclaimed durable work. The `*Processing` states
+    /// are lease-backed claims and may be reclaimed after lease expiry.
+    pub enum TradeState {
+        /// Row inserted, order not yet submitted to the venue.
+        Intent => "intent",
+        /// Order signed and sent, venue outcome not yet observed (crash-orphan window).
+        Submitted => "submitted",
+        /// Fill observed; position + risk Fill accounting not yet applied (relay queue).
+        FillObserved => "fill_observed",
+        /// FOK miss observed; finalization not yet applied (relay queue).
+        MissObserved => "miss_observed",
+        /// Venue error/timeout observed; finalization not yet applied (relay queue).
+        FailObserved => "fail_observed",
+        /// Fill relay side-effects are currently claimed by a worker.
+        FillProcessing => "fill_processing",
+        /// Miss relay finalization is currently claimed by a worker.
+        MissProcessing => "miss_processing",
+        /// Failure relay finalization is currently claimed by a worker.
+        FailProcessing => "fail_processing",
+        /// Fill fully processed (position created, risk Fill accounted). Terminal.
+        Settled => "settled",
+        /// Miss fully processed. Terminal.
+        Missed => "missed",
+        /// Failure fully processed. Terminal.
+        Failed => "failed",
+        /// Submitted but never confirmed past the timeout — needs reconciliation. Terminal.
+        Orphaned => "orphaned",
     }
-}
-
-/// Success/miss/failed bucket derived from [`TradeState`].
-///
-/// This is not the trade's stored state: the `trade` row has exactly one state
-/// field, while this bucket is surfaced as a read-only PG generated column for
-/// risk accounting, reporting, and audit.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Hash,
-    Serialize,
-    Deserialize,
-    EnumIter,
-    DeriveActiveEnum,
-    IntoActiveValue,
-)]
-#[sea_orm(rs_type = "String", db_type = "Text")]
-#[serde(rename_all = "snake_case")]
-pub enum TradeBusinessOutcome {
-    /// Order filled, position opened.
-    #[sea_orm(string_value = "success")]
-    Success,
-    /// FOK not filled (book moved or insufficient depth).
-    #[sea_orm(string_value = "miss")]
-    Miss,
-    /// Order failed/errored, or submitted-but-unconfirmed (orphaned).
-    #[sea_orm(string_value = "failed")]
-    Failed,
-}
-
-impl Display for TradeBusinessOutcome {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Success => write!(f, "success"),
-            Self::Miss => write!(f, "miss"),
-            Self::Failed => write!(f, "failed"),
-        }
-    }
-}
-
-/// Durable trade lifecycle state machine — single source of truth on the `trade` row.
-///
-/// Replaces the former `phase × outcome` two-column model: one field makes illegal
-/// states unrepresentable (e.g. "processed but no outcome" cannot occur). The
-/// business-outcome classification (success/miss/failed) is derived via
-/// [`TradeState::business_outcome`] in Rust and a PG generated column for reporting.
-///
-/// Transitions:
-/// `Intent` → `Submitted` → (`FillObserved` | `MissObserved` | `FailObserved`)
-///   → (`FillProcessing` | `MissProcessing` | `FailProcessing`)
-///   → (`Settled` | `Missed` | `Failed`); stale `Submitted` → `Orphaned`.
-/// The `*Observed` states are unclaimed durable work. The `*Processing` states
-/// are lease-backed claims and may be reclaimed after lease expiry.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Hash,
-    Serialize,
-    Deserialize,
-    EnumIter,
-    DeriveActiveEnum,
-    IntoActiveValue,
-)]
-#[sea_orm(rs_type = "String", db_type = "Text")]
-#[serde(rename_all = "snake_case")]
-pub enum TradeState {
-    /// Row inserted, order not yet submitted to the venue.
-    #[sea_orm(string_value = "intent")]
-    Intent,
-    /// Order signed and sent, venue outcome not yet observed (crash-orphan window).
-    #[sea_orm(string_value = "submitted")]
-    Submitted,
-    /// Fill observed; position + risk Fill accounting not yet applied (relay queue).
-    #[sea_orm(string_value = "fill_observed")]
-    FillObserved,
-    /// FOK miss observed; finalization not yet applied (relay queue).
-    #[sea_orm(string_value = "miss_observed")]
-    MissObserved,
-    /// Venue error/timeout observed; finalization not yet applied (relay queue).
-    #[sea_orm(string_value = "fail_observed")]
-    FailObserved,
-    /// Fill relay side-effects are currently claimed by a worker.
-    #[sea_orm(string_value = "fill_processing")]
-    FillProcessing,
-    /// Miss relay finalization is currently claimed by a worker.
-    #[sea_orm(string_value = "miss_processing")]
-    MissProcessing,
-    /// Failure relay finalization is currently claimed by a worker.
-    #[sea_orm(string_value = "fail_processing")]
-    FailProcessing,
-    /// Fill fully processed (position created, risk Fill accounted). Terminal.
-    #[sea_orm(string_value = "settled")]
-    Settled,
-    /// Miss fully processed. Terminal.
-    #[sea_orm(string_value = "missed")]
-    Missed,
-    /// Failure fully processed. Terminal.
-    #[sea_orm(string_value = "failed")]
-    Failed,
-    /// Submitted but never confirmed past the timeout — needs reconciliation. Terminal.
-    #[sea_orm(string_value = "orphaned")]
-    Orphaned,
 }
 
 impl TradeState {
@@ -334,25 +195,6 @@ impl TradeState {
     }
 }
 
-impl Display for TradeState {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Intent => write!(f, "intent"),
-            Self::Submitted => write!(f, "submitted"),
-            Self::FillObserved => write!(f, "fill_observed"),
-            Self::MissObserved => write!(f, "miss_observed"),
-            Self::FailObserved => write!(f, "fail_observed"),
-            Self::FillProcessing => write!(f, "fill_processing"),
-            Self::MissProcessing => write!(f, "miss_processing"),
-            Self::FailProcessing => write!(f, "fail_processing"),
-            Self::Settled => write!(f, "settled"),
-            Self::Missed => write!(f, "missed"),
-            Self::Failed => write!(f, "failed"),
-            Self::Orphaned => write!(f, "orphaned"),
-        }
-    }
-}
-
 /// Origin of a market-data update.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -374,50 +216,20 @@ pub enum AlertLevel {
     Emergency,
 }
 
-/// Polymarket event category for fee-rate lookup and opportunity scoring.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    Serialize,
-    Deserialize,
-    EnumIter,
-    DeriveActiveEnum,
-    IntoActiveValue,
-)]
-#[sea_orm(rs_type = "String", db_type = "Text")]
-#[serde(rename_all = "snake_case")]
-pub enum MarketCategory {
-    #[sea_orm(string_value = "geopolitics")]
-    Geopolitics,
-    #[sea_orm(string_value = "sports")]
-    Sports,
-    #[sea_orm(string_value = "politics")]
-    Politics,
-    #[sea_orm(string_value = "finance")]
-    Finance,
-    #[sea_orm(string_value = "tech")]
-    Tech,
-    #[sea_orm(string_value = "culture")]
-    Culture,
-    #[sea_orm(string_value = "weather")]
-    Weather,
-    #[sea_orm(string_value = "economics")]
-    Economics,
-    #[sea_orm(string_value = "crypto")]
-    Crypto,
-    #[sea_orm(string_value = "other")]
-    Other,
-}
-
-impl Display for MarketCategory {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
+active_string_enum! {
+    /// Polymarket event category for fee-rate lookup and opportunity scoring.
+    @derive(PartialOrd, Ord)
+    pub enum MarketCategory {
+        Geopolitics => "geopolitics",
+        Sports => "sports",
+        Politics => "politics",
+        Finance => "finance",
+        Tech => "tech",
+        Culture => "culture",
+        Weather => "weather",
+        Economics => "economics",
+        Crypto => "crypto",
+        Other => "other",
     }
 }
 
@@ -451,23 +263,6 @@ impl MarketCategory {
             Self::Economics => 7,
             Self::Crypto => 8,
             Self::Other => 9,
-        }
-    }
-
-    #[must_use]
-    #[inline]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Geopolitics => "geopolitics",
-            Self::Sports => "sports",
-            Self::Politics => "politics",
-            Self::Finance => "finance",
-            Self::Tech => "tech",
-            Self::Culture => "culture",
-            Self::Weather => "weather",
-            Self::Economics => "economics",
-            Self::Crypto => "crypto",
-            Self::Other => "other",
         }
     }
 
@@ -509,31 +304,14 @@ impl FromStr for MarketCategory {
     }
 }
 
-/// Minimum price increment supported by a Polymarket CLOB market.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Hash,
-    Serialize,
-    Deserialize,
-    EnumIter,
-    DeriveActiveEnum,
-    IntoActiveValue,
-)]
-#[sea_orm(rs_type = "String", db_type = "Text")]
-#[serde(rename_all = "snake_case")]
-pub enum TickSize {
-    #[sea_orm(string_value = "0.1")]
-    Tenth,
-    #[sea_orm(string_value = "0.01")]
-    Hundredth,
-    #[sea_orm(string_value = "0.001")]
-    Thousandth,
-    #[sea_orm(string_value = "0.0001")]
-    TenThousandth,
+active_string_enum! {
+    /// Minimum price increment supported by a Polymarket CLOB market.
+    pub enum TickSize {
+        Tenth => "0.1",
+        Hundredth => "0.01",
+        Thousandth => "0.001",
+        TenThousandth => "0.0001",
+    }
 }
 
 /// Invalid tick size string from Gamma / CLOB wire format.
@@ -576,66 +354,23 @@ impl TryFrom<Decimal> for TickSize {
     }
 }
 
-/// Lifecycle status of a position.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Hash,
-    Serialize,
-    Deserialize,
-    EnumIter,
-    DeriveActiveEnum,
-    IntoActiveValue,
-)]
-#[sea_orm(rs_type = "String", db_type = "Text")]
-#[serde(rename_all = "snake_case")]
-pub enum PositionStatus {
-    #[sea_orm(string_value = "open")]
-    Open,
-    #[sea_orm(string_value = "closed")]
-    Closed,
-    #[sea_orm(string_value = "settled")]
-    Settled,
-}
-
-impl Display for PositionStatus {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Open => write!(f, "open"),
-            Self::Closed => write!(f, "closed"),
-            Self::Settled => write!(f, "settled"),
-        }
+active_string_enum! {
+    /// Lifecycle status of a position.
+    pub enum PositionStatus {
+        Open => "open",
+        Closed => "closed",
+        Settled => "settled",
     }
 }
 
-/// Lifecycle status of on-chain CTF redemption for a position.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Hash,
-    Serialize,
-    Deserialize,
-    EnumIter,
-    DeriveActiveEnum,
-    IntoActiveValue,
-)]
-#[sea_orm(rs_type = "String", db_type = "Text")]
-#[serde(rename_all = "snake_case")]
-pub enum RedeemStatus {
-    #[sea_orm(string_value = "not_required")]
-    NotRequired,
-    #[sea_orm(string_value = "pending")]
-    Pending,
-    #[sea_orm(string_value = "completed")]
-    Completed,
-    #[sea_orm(string_value = "failed")]
-    Failed,
+active_string_enum! {
+    /// Lifecycle status of on-chain CTF redemption for a position.
+    pub enum RedeemStatus {
+        NotRequired => "not_required",
+        Pending => "pending",
+        Completed => "completed",
+        Failed => "failed",
+    }
 }
 
 impl RedeemStatus {
@@ -652,17 +387,6 @@ impl RedeemStatus {
         match mode {
             ExecutionMode::DryRun | ExecutionMode::Paper => Self::NotRequired,
             ExecutionMode::Live => Self::Completed,
-        }
-    }
-}
-
-impl Display for RedeemStatus {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::NotRequired => write!(f, "not_required"),
-            Self::Pending => write!(f, "pending"),
-            Self::Completed => write!(f, "completed"),
-            Self::Failed => write!(f, "failed"),
         }
     }
 }
@@ -709,149 +433,38 @@ pub enum RedeemOutputAsset {
     Pusd,
 }
 
-/// Lifecycle status for post-redeem accounting persistence.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Hash,
-    Serialize,
-    Deserialize,
-    EnumIter,
-    DeriveActiveEnum,
-    IntoActiveValue,
-)]
-#[sea_orm(rs_type = "String", db_type = "Text")]
-#[serde(rename_all = "snake_case")]
-pub enum SettlementAccountingStatus {
-    #[sea_orm(string_value = "pending")]
-    Pending,
-    #[sea_orm(string_value = "redeemed")]
-    Redeemed,
-    #[sea_orm(string_value = "accounted")]
-    Accounted,
-    #[sea_orm(string_value = "failed")]
-    Failed,
-}
-
-/// Source that triggered market settlement processing.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Hash,
-    Serialize,
-    Deserialize,
-    EnumIter,
-    DeriveActiveEnum,
-    IntoActiveValue,
-)]
-#[sea_orm(rs_type = "String", db_type = "Text")]
-#[serde(rename_all = "snake_case")]
-pub enum SettlementTrigger {
-    #[sea_orm(string_value = "ws")]
-    Ws,
-    #[sea_orm(string_value = "periodic_retry")]
-    PeriodicRetry,
-    #[sea_orm(string_value = "manual")]
-    Manual,
-}
-
-impl SettlementTrigger {
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Ws => "ws",
-            Self::PeriodicRetry => "periodic_retry",
-            Self::Manual => "manual",
-        }
+active_string_enum! {
+    /// Lifecycle status for post-redeem accounting persistence.
+    pub enum SettlementAccountingStatus {
+        Pending => "pending",
+        Redeemed => "redeemed",
+        Accounted => "accounted",
+        Failed => "failed",
     }
 }
 
-impl Display for SettlementTrigger {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
+active_string_enum! {
+    /// Source that triggered market settlement processing.
+    pub enum SettlementTrigger {
+        Ws => "ws",
+        PeriodicRetry => "periodic_retry",
+        Manual => "manual",
     }
 }
 
-impl Display for SettlementAccountingStatus {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Pending => f.write_str("pending"),
-            Self::Redeemed => f.write_str("redeemed"),
-            Self::Accounted => f.write_str("accounted"),
-            Self::Failed => f.write_str("failed"),
-        }
+active_string_enum! {
+    /// Lifecycle status of a potential-loss ledger entry.
+    pub enum LedgerStatus {
+        Active => "active",
+        Resolved => "resolved",
+        Expired => "expired",
     }
 }
 
-/// Lifecycle status of a potential-loss ledger entry.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Hash,
-    Serialize,
-    Deserialize,
-    EnumIter,
-    DeriveActiveEnum,
-    IntoActiveValue,
-)]
-#[sea_orm(rs_type = "String", db_type = "Text")]
-#[serde(rename_all = "snake_case")]
-pub enum LedgerStatus {
-    #[sea_orm(string_value = "active")]
-    Active,
-    #[sea_orm(string_value = "resolved")]
-    Resolved,
-    #[sea_orm(string_value = "expired")]
-    Expired,
-}
-
-impl Display for LedgerStatus {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Active => write!(f, "active"),
-            Self::Resolved => write!(f, "resolved"),
-            Self::Expired => write!(f, "expired"),
-        }
-    }
-}
-
-/// Type of report snapshot.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Hash,
-    Serialize,
-    Deserialize,
-    EnumIter,
-    DeriveActiveEnum,
-    IntoActiveValue,
-)]
-#[sea_orm(rs_type = "String", db_type = "Text")]
-#[serde(rename_all = "snake_case")]
-pub enum ReportType {
-    #[sea_orm(string_value = "daily")]
-    Daily,
-    #[sea_orm(string_value = "weekly")]
-    Weekly,
-}
-
-impl Display for ReportType {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Daily => write!(f, "daily"),
-            Self::Weekly => write!(f, "weekly"),
-        }
+active_string_enum! {
+    /// Type of report snapshot.
+    pub enum ReportType {
+        Daily => "daily",
+        Weekly => "weekly",
     }
 }

@@ -14,7 +14,7 @@ use crate::{
     types::Usd,
 };
 
-#[oxide_schema]
+#[oxide_schema(lifecycle = "ledger")]
 pub enum AccountingPeriod {
     Table,
     PeriodId,

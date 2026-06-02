@@ -14,7 +14,7 @@ use crate::{
     types::Probability,
 };
 
-#[oxide_schema]
+#[oxide_schema(lifecycle = "core")]
 pub enum EndgameCalibrationBucket {
     Table,
     Id,

@@ -5,7 +5,7 @@ use crate::schema::{
     dependency::TableDependency, index::IndexSpec, seed::SeedSpec, timestamp_with_write_default,
 };
 
-#[oxide_schema]
+#[oxide_schema(lifecycle = "runtime")]
 pub enum BlacklistEntry {
     Table,
     MarketId,

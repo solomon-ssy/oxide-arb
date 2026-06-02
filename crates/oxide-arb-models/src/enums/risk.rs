@@ -1,95 +1,44 @@
 //! Risk engine enums — circuit breakers, blacklists, exposure reservations.
 
-use oxide_arb_macros::IntoActiveValue;
-use sea_orm::{DeriveActiveEnum, EnumIter};
-use serde::{Deserialize, Serialize};
 use std::fmt::{self, Display, Formatter};
 
-/// Persisted top-level state of the 5-state circuit breaker FSM.
-///
-/// ```text
-///                     ┌── Halted (L3 Daily / L4 System) ──┐
-///                     │   NO tick transition               │
-///                     │   manual ack only                  │
-///                     └──────────▲─────────────────────────┘
-///                                │ halt()
-/// Closed ──trip_session──▶ Open ──cooldown──▶ HalfOpen ──probes──▶ Recovered ──obs──▶ Closed
-///   ▲                         ▲                    │                                    │
-///   │                         └── probe fail ──────┘                                    │
-///   └───────────────────────── acknowledge_and_resume (from Halted) ────────────────────┘
-/// ```
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Hash,
-    Serialize,
-    Deserialize,
-    EnumIter,
-    DeriveActiveEnum,
-    IntoActiveValue,
-)]
-#[sea_orm(rs_type = "String", db_type = "Text")]
-#[serde(rename_all = "snake_case")]
-pub enum BreakerStateName {
-    /// Normal operation — execution permitted.
-    #[sea_orm(string_value = "closed")]
-    Closed,
-    /// Tripped (L2 Session) — execution blocked, cooldown timer running.
-    #[sea_orm(string_value = "open")]
-    Open,
-    /// Cooldown expired — allowing probe trades to test recovery.
-    #[sea_orm(string_value = "half_open")]
-    HalfOpen,
-    /// Probes succeeded — observation period before returning to Closed.
-    #[sea_orm(string_value = "recovered")]
-    Recovered,
-    /// Hard halt (L3 Daily / L4 System) — requires operator `acknowledge_and_resume`.
-    #[sea_orm(string_value = "halted")]
-    Halted,
-}
-
-impl Display for BreakerStateName {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Closed => f.write_str("closed"),
-            Self::Open => f.write_str("open"),
-            Self::HalfOpen => f.write_str("half_open"),
-            Self::Recovered => f.write_str("recovered"),
-            Self::Halted => f.write_str("halted"),
-        }
+active_string_enum! {
+    /// Persisted top-level state of the 5-state circuit breaker FSM.
+    ///
+    /// ```text
+    ///                     ┌── Halted (L3 Daily / L4 System) ──┐
+    ///                     │   NO tick transition               │
+    ///                     │   manual ack only                  │
+    ///                     └──────────▲─────────────────────────┘
+    ///                                │ halt()
+    /// Closed ──trip_session──▶ Open ──cooldown──▶ HalfOpen ──probes──▶ Recovered ──obs──▶ Closed
+    ///   ▲                         ▲                    │                                    │
+    ///   │                         └── probe fail ──────┘                                    │
+    ///   └───────────────────────── acknowledge_and_resume (from Halted) ────────────────────┘
+    /// ```
+    pub enum BreakerStateName {
+        /// Normal operation — execution permitted.
+        Closed => "closed",
+        /// Tripped (L2 Session) — execution blocked, cooldown timer running.
+        Open => "open",
+        /// Cooldown expired — allowing probe trades to test recovery.
+        HalfOpen => "half_open",
+        /// Probes succeeded — observation period before returning to Closed.
+        Recovered => "recovered",
+        /// Hard halt (L3 Daily / L4 System) — requires operator `acknowledge_and_resume`.
+        Halted => "halted",
     }
 }
 
-/// Severity level of a circuit-breaker trip (1–4).
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    Serialize,
-    Deserialize,
-    EnumIter,
-    DeriveActiveEnum,
-    IntoActiveValue,
-)]
-#[sea_orm(rs_type = "String", db_type = "Text")]
-#[serde(rename_all = "snake_case")]
-pub enum CircuitBreakerLevel {
-    #[sea_orm(string_value = "trade")]
-    Trade = 1,
-    #[sea_orm(string_value = "session")]
-    Session = 2,
-    #[sea_orm(string_value = "daily")]
-    Daily = 3,
-    #[sea_orm(string_value = "system")]
-    System = 4,
+active_string_enum! {
+    /// Severity level of a circuit-breaker trip (1–4).
+    @derive(PartialOrd, Ord)
+    pub enum CircuitBreakerLevel {
+        Trade = 1 => "trade",
+        Session = 2 => "session",
+        Daily = 3 => "daily",
+        System = 4 => "system",
+    }
 }
 
 impl CircuitBreakerLevel {
@@ -105,101 +54,28 @@ impl CircuitBreakerLevel {
     }
 }
 
-impl Display for CircuitBreakerLevel {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Trade => f.write_str("trade"),
-            Self::Session => f.write_str("session"),
-            Self::Daily => f.write_str("daily"),
-            Self::System => f.write_str("system"),
-        }
+active_string_enum! {
+    /// Severity scope for a blacklist entry.
+    ///
+    /// Ordered so that higher scopes include all lower ones via `>=` comparison.
+    @derive(PartialOrd, Ord, bitcode::Encode, bitcode::Decode)
+    pub enum BlacklistScope {
+        DataPath = 0 => "data_path",
+        TradingPath = 1 => "trading_path",
+        Full = 2 => "full",
     }
 }
 
-/// Severity scope for a blacklist entry.
-///
-/// Ordered so that higher scopes include all lower ones via `>=` comparison.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    Serialize,
-    Deserialize,
-    EnumIter,
-    DeriveActiveEnum,
-    IntoActiveValue,
-    bitcode::Encode,
-    bitcode::Decode,
-)]
-#[sea_orm(rs_type = "String", db_type = "Text")]
-#[serde(rename_all = "snake_case")]
-pub enum BlacklistScope {
-    #[sea_orm(string_value = "data_path")]
-    DataPath = 0,
-    #[sea_orm(string_value = "trading_path")]
-    TradingPath = 1,
-    #[sea_orm(string_value = "full")]
-    Full = 2,
-}
-
-impl Display for BlacklistScope {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::DataPath => f.write_str("data_path"),
-            Self::TradingPath => f.write_str("trading_path"),
-            Self::Full => f.write_str("full"),
-        }
-    }
-}
-
-/// Why a market or token was added to the blacklist.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Hash,
-    Serialize,
-    Deserialize,
-    EnumIter,
-    DeriveActiveEnum,
-    IntoActiveValue,
-    bitcode::Encode,
-    bitcode::Decode,
-)]
-#[sea_orm(rs_type = "String", db_type = "Text")]
-#[serde(rename_all = "snake_case")]
-pub enum BlacklistReason {
-    #[sea_orm(string_value = "consecutive_fok_failures")]
-    ConsecutiveFokFailures,
-    #[sea_orm(string_value = "trade_failed_after_matched")]
-    TradeFailedAfterMatched,
-    #[sea_orm(string_value = "depth_drop")]
-    DepthDrop,
-    #[sea_orm(string_value = "tick_change")]
-    TickChange,
-    #[sea_orm(string_value = "manual")]
-    Manual,
-    #[sea_orm(string_value = "data_not_found")]
-    DataNotFound,
-}
-
-impl Display for BlacklistReason {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::ConsecutiveFokFailures => f.write_str("consecutive_fok_failures"),
-            Self::TradeFailedAfterMatched => f.write_str("trade_failed_after_matched"),
-            Self::DepthDrop => f.write_str("depth_drop"),
-            Self::TickChange => f.write_str("tick_change"),
-            Self::Manual => f.write_str("manual"),
-            Self::DataNotFound => f.write_str("data_not_found"),
-        }
+active_string_enum! {
+    /// Why a market or token was added to the blacklist.
+    @derive(bitcode::Encode, bitcode::Decode)
+    pub enum BlacklistReason {
+        ConsecutiveFokFailures => "consecutive_fok_failures",
+        TradeFailedAfterMatched => "trade_failed_after_matched",
+        DepthDrop => "depth_drop",
+        TickChange => "tick_change",
+        Manual => "manual",
+        DataNotFound => "data_not_found",
     }
 }
 
@@ -211,7 +87,7 @@ impl Display for BlacklistReason {
 ///   happened yet).
 /// - `Settlement`: realized profit recorded, potential loss resolved,
 ///   breaker checks triggered.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TradeAccountingPhase {
     /// Trade was filled — record cost, counts, potential loss. No realized profit.
@@ -229,177 +105,47 @@ impl Display for TradeAccountingPhase {
     }
 }
 
-/// Overall outcome of a balance/exposure reconciliation run.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Hash,
-    Serialize,
-    Deserialize,
-    EnumIter,
-    DeriveActiveEnum,
-    IntoActiveValue,
-)]
-#[sea_orm(rs_type = "String", db_type = "Text")]
-#[serde(rename_all = "snake_case")]
-pub enum ReconciliationStatus {
-    #[sea_orm(string_value = "ok")]
-    Ok,
-    #[sea_orm(string_value = "warning")]
-    Warning,
-    #[sea_orm(string_value = "critical")]
-    Critical,
-}
-
-impl Display for ReconciliationStatus {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Ok => f.write_str("ok"),
-            Self::Warning => f.write_str("warning"),
-            Self::Critical => f.write_str("critical"),
-        }
+active_string_enum! {
+    /// Overall outcome of a balance/exposure reconciliation run.
+    pub enum ReconciliationStatus {
+        Ok => "ok",
+        Warning => "warning",
+        Critical => "critical",
     }
 }
 
-/// Type of risk audit event persisted for post-mortem analysis.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Hash,
-    Serialize,
-    Deserialize,
-    EnumIter,
-    DeriveActiveEnum,
-    IntoActiveValue,
-)]
-#[sea_orm(rs_type = "String", db_type = "Text")]
-#[serde(rename_all = "snake_case")]
-pub enum RiskAuditEventType {
-    #[sea_orm(string_value = "trade_allowed")]
-    TradeAllowed,
-    #[sea_orm(string_value = "trade_denied")]
-    TradeDenied,
-    #[sea_orm(string_value = "breaker_tripped")]
-    BreakerTripped,
-    #[sea_orm(string_value = "breaker_recovered")]
-    BreakerRecovered,
-    #[sea_orm(string_value = "breaker_reset")]
-    BreakerReset,
-    #[sea_orm(string_value = "blacklist_added")]
-    BlacklistAdded,
-    #[sea_orm(string_value = "blacklist_removed")]
-    BlacklistRemoved,
-    #[sea_orm(string_value = "accounting_rollover")]
-    AccountingRollover,
-    #[sea_orm(string_value = "reconciliation_completed")]
-    ReconciliationCompleted,
-    #[sea_orm(string_value = "engine_halted")]
-    EngineHalted,
-    #[sea_orm(string_value = "engine_resumed")]
-    EngineResumed,
-    #[sea_orm(string_value = "post_trade_update")]
-    PostTradeUpdate,
-}
-
-impl Display for RiskAuditEventType {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::TradeAllowed => f.write_str("trade_allowed"),
-            Self::TradeDenied => f.write_str("trade_denied"),
-            Self::BreakerTripped => f.write_str("breaker_tripped"),
-            Self::BreakerRecovered => f.write_str("breaker_recovered"),
-            Self::BreakerReset => f.write_str("breaker_reset"),
-            Self::BlacklistAdded => f.write_str("blacklist_added"),
-            Self::BlacklistRemoved => f.write_str("blacklist_removed"),
-            Self::AccountingRollover => f.write_str("accounting_rollover"),
-            Self::ReconciliationCompleted => f.write_str("reconciliation_completed"),
-            Self::EngineHalted => f.write_str("engine_halted"),
-            Self::EngineResumed => f.write_str("engine_resumed"),
-            Self::PostTradeUpdate => f.write_str("post_trade_update"),
-        }
+active_string_enum! {
+    /// Type of risk audit event persisted for post-mortem analysis.
+    pub enum RiskAuditEventType {
+        TradeAllowed => "trade_allowed",
+        TradeDenied => "trade_denied",
+        BreakerTripped => "breaker_tripped",
+        BreakerRecovered => "breaker_recovered",
+        BreakerReset => "breaker_reset",
+        BlacklistAdded => "blacklist_added",
+        BlacklistRemoved => "blacklist_removed",
+        AccountingRollover => "accounting_rollover",
+        ReconciliationCompleted => "reconciliation_completed",
+        EngineHalted => "engine_halted",
+        EngineResumed => "engine_resumed",
+        PostTradeUpdate => "post_trade_update",
     }
 }
 
-/// Lifecycle state of an exposure reservation.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Hash,
-    Serialize,
-    Deserialize,
-    EnumIter,
-    DeriveActiveEnum,
-    IntoActiveValue,
-)]
-#[sea_orm(rs_type = "String", db_type = "Text")]
-#[serde(rename_all = "snake_case")]
-pub enum ReservationStatus {
-    #[sea_orm(string_value = "pending")]
-    Pending,
-    #[sea_orm(string_value = "confirmed")]
-    Confirmed,
-    #[sea_orm(string_value = "released")]
-    Released,
-}
-
-impl Display for ReservationStatus {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Pending => f.write_str("pending"),
-            Self::Confirmed => f.write_str("confirmed"),
-            Self::Released => f.write_str("released"),
-        }
+active_string_enum! {
+    /// Lifecycle state of an exposure reservation.
+    pub enum ReservationStatus {
+        Pending => "pending",
+        Confirmed => "confirmed",
+        Released => "released",
     }
 }
 
-/// Granularity of a time-windowed risk accumulator.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Hash,
-    Serialize,
-    Deserialize,
-    EnumIter,
-    DeriveActiveEnum,
-    IntoActiveValue,
-)]
-#[sea_orm(rs_type = "String", db_type = "Text")]
-#[serde(rename_all = "snake_case")]
-pub enum WindowType {
-    #[sea_orm(string_value = "hourly")]
-    Hourly,
-    #[sea_orm(string_value = "daily")]
-    Daily,
-    #[sea_orm(string_value = "weekly")]
-    Weekly,
-}
-
-impl WindowType {
-    #[must_use]
-    #[inline]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Hourly => "hourly",
-            Self::Daily => "daily",
-            Self::Weekly => "weekly",
-        }
-    }
-}
-
-impl Display for WindowType {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
+active_string_enum! {
+    /// Granularity of a time-windowed risk accumulator.
+    pub enum WindowType {
+        Hourly => "hourly",
+        Daily => "daily",
+        Weekly => "weekly",
     }
 }

@@ -17,7 +17,7 @@ use crate::{
     },
 };
 
-#[oxide_schema]
+#[oxide_schema(lifecycle = "ledger")]
 pub enum Trade {
     Table,
     TradeId,

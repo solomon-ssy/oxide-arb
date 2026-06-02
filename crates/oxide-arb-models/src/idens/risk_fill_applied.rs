@@ -13,7 +13,7 @@ use crate::{
 ///
 /// One row exists per `trade_id`. The marker is inserted atomically with the
 /// risk-state snapshot so relay replay re-applies a fill at most once.
-#[oxide_schema]
+#[oxide_schema(lifecycle = "ledger")]
 pub enum RiskFillApplied {
     Table,
     TradeId,

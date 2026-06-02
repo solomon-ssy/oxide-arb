@@ -1,50 +1,28 @@
 //! Endgame calibration bucketing enums.
 
 use crate::types::Price;
-use oxide_arb_macros::IntoActiveValue;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
-use sea_orm::{DeriveActiveEnum, EnumIter};
-use serde::{Deserialize, Serialize};
-use std::fmt::{self, Display, Formatter};
 
-/// Price zone classification for endgame calibration bucketing.
-///
-/// Finer zones near 1.0 because small price differences at the extreme
-/// have outsized impact on expected return. All zones assume the price
-/// has already been normalised to the "winning side" perspective
-/// (i.e. the price of the token we intend to buy).
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Hash,
-    Serialize,
-    Deserialize,
-    EnumIter,
-    DeriveActiveEnum,
-    IntoActiveValue,
-)]
-#[sea_orm(rs_type = "String", db_type = "Text")]
-#[serde(rename_all = "snake_case")]
-pub enum PriceZone {
-    /// Price ∈ [0.95, 0.96) — weakest convergence signal.
-    #[sea_orm(string_value = "z95")]
-    Z95,
-    /// Price ∈ [0.96, 0.97).
-    #[sea_orm(string_value = "z96")]
-    Z96,
-    /// Price ∈ [0.97, 0.98).
-    #[sea_orm(string_value = "z97")]
-    Z97,
-    /// Price ∈ [0.98, 0.99).
-    #[sea_orm(string_value = "z98")]
-    Z98,
-    /// Price ∈ [0.99, 1.00] — strongest convergence signal.
-    #[sea_orm(string_value = "z99")]
-    Z99,
+active_string_enum! {
+    /// Price zone classification for endgame calibration bucketing.
+    ///
+    /// Finer zones near 1.0 because small price differences at the extreme
+    /// have outsized impact on expected return. All zones assume the price
+    /// has already been normalised to the "winning side" perspective
+    /// (i.e. the price of the token we intend to buy).
+    pub enum PriceZone {
+        /// Price ∈ [0.95, 0.96) — weakest convergence signal.
+        Z95 => "z95",
+        /// Price ∈ [0.96, 0.97).
+        Z96 => "z96",
+        /// Price ∈ [0.97, 0.98).
+        Z97 => "z97",
+        /// Price ∈ [0.98, 0.99).
+        Z98 => "z98",
+        /// Price ∈ [0.99, 1.00] — strongest convergence signal.
+        Z99 => "z99",
+    }
 }
 
 /// All price zone variants in ascending order.
@@ -97,50 +75,21 @@ impl PriceZone {
     }
 }
 
-impl Display for PriceZone {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Z95 => f.write_str("z95"),
-            Self::Z96 => f.write_str("z96"),
-            Self::Z97 => f.write_str("z97"),
-            Self::Z98 => f.write_str("z98"),
-            Self::Z99 => f.write_str("z99"),
-        }
+active_string_enum! {
+    /// Duration bucket for how long a market has been in the convergence zone.
+    ///
+    /// Longer convergence durations generally correlate with higher settlement
+    /// accuracy, so calibration is bucketed by duration to capture this effect.
+    pub enum DurationBucket {
+        /// 5 minutes – 1 hour (300..3600 seconds).
+        Short => "short",
+        /// 1 hour – 6 hours (3600..21600 seconds).
+        Medium => "medium",
+        /// 6 hours – 24 hours (21600..86400 seconds).
+        Long => "long",
+        /// More than 24 hours (86400+ seconds).
+        VeryLong => "very_long",
     }
-}
-
-/// Duration bucket for how long a market has been in the convergence zone.
-///
-/// Longer convergence durations generally correlate with higher settlement
-/// accuracy, so calibration is bucketed by duration to capture this effect.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Hash,
-    Serialize,
-    Deserialize,
-    EnumIter,
-    DeriveActiveEnum,
-    IntoActiveValue,
-)]
-#[sea_orm(rs_type = "String", db_type = "Text")]
-#[serde(rename_all = "snake_case")]
-pub enum DurationBucket {
-    /// 5 minutes – 1 hour (300..3600 seconds).
-    #[sea_orm(string_value = "short")]
-    Short,
-    /// 1 hour – 6 hours (3600..21600 seconds).
-    #[sea_orm(string_value = "medium")]
-    Medium,
-    /// 6 hours – 24 hours (21600..86400 seconds).
-    #[sea_orm(string_value = "long")]
-    Long,
-    /// More than 24 hours (86400+ seconds).
-    #[sea_orm(string_value = "very_long")]
-    VeryLong,
 }
 
 /// All duration bucket variants in ascending order.
@@ -167,16 +116,5 @@ impl DurationBucket {
     #[must_use]
     pub fn all() -> &'static [Self] {
         &ALL_DURATION_BUCKETS
-    }
-}
-
-impl Display for DurationBucket {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Short => f.write_str("short"),
-            Self::Medium => f.write_str("medium"),
-            Self::Long => f.write_str("long"),
-            Self::VeryLong => f.write_str("very_long"),
-        }
     }
 }

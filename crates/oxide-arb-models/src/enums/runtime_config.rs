@@ -1,88 +1,34 @@
 //! Runtime configuration key enum.
 
-use oxide_arb_macros::IntoActiveValue;
-use sea_orm::{DeriveActiveEnum, EnumIter};
-use serde::{Deserialize, Serialize};
-use std::{
-    fmt::{self, Display, Formatter},
-    str::FromStr,
-};
+use std::str::FromStr;
 
-/// Strongly-typed keys for the `runtime_config` table.
-///
-/// Each variant maps to a known configuration key. The `as_str()` method
-/// returns the canonical string used as the primary key in `PostgreSQL`.
-/// Adding a new runtime-tunable parameter means adding a variant here,
-/// ensuring compile-time coverage in any `match` expression.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Hash,
-    Serialize,
-    Deserialize,
-    EnumIter,
-    DeriveActiveEnum,
-    IntoActiveValue,
-)]
-#[sea_orm(rs_type = "String", db_type = "Text")]
-#[serde(rename_all = "snake_case")]
-pub enum RuntimeConfigKey {
-    // --- Risk parameters ---
-    #[sea_orm(string_value = "max_portfolio_exposure_usd")]
-    MaxPortfolioExposureUsd,
-    #[sea_orm(string_value = "max_single_position_usd")]
-    MaxSinglePositionUsd,
-    #[sea_orm(string_value = "max_daily_loss_usd")]
-    MaxDailyLossUsd,
-    #[sea_orm(string_value = "circuit_breaker_threshold")]
-    CircuitBreakerThreshold,
-    // --- Detection parameters ---
-    #[sea_orm(string_value = "min_profit_threshold_usd")]
-    MinProfitThresholdUsd,
-    #[sea_orm(string_value = "endgame_hours_before_close")]
-    EndgameHoursBeforeClose,
-    #[sea_orm(string_value = "convergence_threshold")]
-    ConvergenceThreshold,
-    // --- Execution parameters ---
-    #[sea_orm(string_value = "max_slippage_bps")]
-    MaxSlippageBps,
-    #[sea_orm(string_value = "order_timeout_secs")]
-    OrderTimeoutSecs,
-    #[sea_orm(string_value = "cooldown_after_trade_secs")]
-    CooldownAfterTradeSecs,
-    // --- Sizing parameters ---
-    #[sea_orm(string_value = "kelly_fraction")]
-    KellyFraction,
-    #[sea_orm(string_value = "max_position_fraction_of_book")]
-    MaxPositionFractionOfBook,
-    // --- General ---
-    #[sea_orm(string_value = "maintenance_mode")]
-    MaintenanceMode,
-    #[sea_orm(string_value = "dry_run_mode")]
-    DryRunMode,
-}
-
-impl RuntimeConfigKey {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::MaxPortfolioExposureUsd => "max_portfolio_exposure_usd",
-            Self::MaxSinglePositionUsd => "max_single_position_usd",
-            Self::MaxDailyLossUsd => "max_daily_loss_usd",
-            Self::CircuitBreakerThreshold => "circuit_breaker_threshold",
-            Self::MinProfitThresholdUsd => "min_profit_threshold_usd",
-            Self::EndgameHoursBeforeClose => "endgame_hours_before_close",
-            Self::ConvergenceThreshold => "convergence_threshold",
-            Self::MaxSlippageBps => "max_slippage_bps",
-            Self::OrderTimeoutSecs => "order_timeout_secs",
-            Self::CooldownAfterTradeSecs => "cooldown_after_trade_secs",
-            Self::KellyFraction => "kelly_fraction",
-            Self::MaxPositionFractionOfBook => "max_position_fraction_of_book",
-            Self::MaintenanceMode => "maintenance_mode",
-            Self::DryRunMode => "dry_run_mode",
-        }
+active_string_enum! {
+    /// Strongly-typed keys for the `runtime_config` table.
+    ///
+    /// Each variant maps to a known configuration key. The `as_str()` method
+    /// returns the canonical string used as the primary key in `PostgreSQL`.
+    /// Adding a new runtime-tunable parameter means adding a variant here,
+    /// ensuring compile-time coverage in any `match` expression.
+    pub enum RuntimeConfigKey {
+        // --- Risk parameters ---
+        MaxPortfolioExposureUsd => "max_portfolio_exposure_usd",
+        MaxSinglePositionUsd => "max_single_position_usd",
+        MaxDailyLossUsd => "max_daily_loss_usd",
+        CircuitBreakerThreshold => "circuit_breaker_threshold",
+        // --- Detection parameters ---
+        MinProfitThresholdUsd => "min_profit_threshold_usd",
+        EndgameHoursBeforeClose => "endgame_hours_before_close",
+        ConvergenceThreshold => "convergence_threshold",
+        // --- Execution parameters ---
+        MaxSlippageBps => "max_slippage_bps",
+        OrderTimeoutSecs => "order_timeout_secs",
+        CooldownAfterTradeSecs => "cooldown_after_trade_secs",
+        // --- Sizing parameters ---
+        KellyFraction => "kelly_fraction",
+        MaxPositionFractionOfBook => "max_position_fraction_of_book",
+        // --- General ---
+        MaintenanceMode => "maintenance_mode",
+        DryRunMode => "dry_run_mode",
     }
 }
 
@@ -107,11 +53,5 @@ impl FromStr for RuntimeConfigKey {
             "dry_run_mode" => Ok(Self::DryRunMode),
             other => Err(format!("unknown runtime config key: {other}")),
         }
-    }
-}
-
-impl Display for RuntimeConfigKey {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
     }
 }

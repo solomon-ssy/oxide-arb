@@ -226,7 +226,7 @@ workspace
 ├── oxide-arb-algorithm      ← Phase 3（Endgame 检测 + Calibration + Scoring）
 ├── oxide-arb-risk           ← Phase 4（CircuitBreaker + Kelly + Drawdown + Blacklist）
 ├── oxide-arb-core           ← Phase 4（App lifecycle + DataPipeline + Execution）
-├── oxide-arb-replay         ← Phase 5（Historical replay + paper-trade）
+├── oxide-arb-control        ← Phase 5（Control factor materialization + governance）
 ├── oxide-arb-web            ← Phase 6（actix-web REST + WS）
 └── oxide-arb (bin)          ← 二进制入口（CLI subcommands: serve, migrate, replay）
 ```

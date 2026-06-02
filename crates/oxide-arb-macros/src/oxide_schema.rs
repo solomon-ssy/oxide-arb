@@ -2,9 +2,9 @@
 
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
-use syn::{Data, DeriveInput, Error, Result};
+use syn::{Data, DeriveInput, Error, Expr, Lit, Meta, Result};
 
-pub fn expand(_args: TokenStream, input: TokenStream) -> Result<TokenStream> {
+pub fn expand(args: TokenStream, input: TokenStream) -> Result<TokenStream> {
     let input: DeriveInput = syn::parse2(input)?;
     let Data::Enum(enum_data) = &input.data else {
         return Err(Error::new_spanned(
@@ -34,6 +34,7 @@ pub fn expand(_args: TokenStream, input: TokenStream) -> Result<TokenStream> {
     let table_fn = format_ident!("__oxide_schema_{lower}_table_name");
     let triggers_fn = format_ident!("__oxide_schema_{lower}_auto_triggers");
     let static_ident = format_ident!("__OXIDE_SCHEMA_{upper}_TABLE_SPEC");
+    let lifecycle = parse_lifecycle(args)?;
 
     let triggers_body = if has_updated_at {
         quote! {
@@ -68,9 +69,55 @@ pub fn expand(_args: TokenStream, input: TokenStream) -> Result<TokenStream> {
             dependencies,
             triggers: #triggers_fn,
             seed_units,
-            lifecycle: crate::schema::table::TableLifecycle::Core,
+            lifecycle: #lifecycle,
         };
     };
 
     Ok(expanded)
+}
+
+fn parse_lifecycle(args: TokenStream) -> Result<TokenStream> {
+    if args.is_empty() {
+        return Ok(quote! { crate::schema::table::TableLifecycle::Core });
+    }
+
+    let meta: Meta = syn::parse2(args)?;
+    let Meta::NameValue(name_value) = meta else {
+        return Err(Error::new_spanned(
+            meta,
+            "expected `lifecycle = \"core|control|runtime|ledger|audit|report|seed_ledger\"`",
+        ));
+    };
+    if !name_value.path.is_ident("lifecycle") {
+        return Err(Error::new_spanned(
+            name_value.path,
+            "unsupported oxide_schema argument",
+        ));
+    }
+    let Expr::Lit(expr_lit) = name_value.value else {
+        return Err(Error::new_spanned(
+            name_value.value,
+            "lifecycle must be a string literal",
+        ));
+    };
+    let Lit::Str(lit) = expr_lit.lit else {
+        return Err(Error::new_spanned(
+            expr_lit.lit,
+            "lifecycle must be a string literal",
+        ));
+    };
+
+    match lit.value().as_str() {
+        "core" => Ok(quote! { crate::schema::table::TableLifecycle::Core }),
+        "control" => Ok(quote! { crate::schema::table::TableLifecycle::Control }),
+        "runtime" => Ok(quote! { crate::schema::table::TableLifecycle::Runtime }),
+        "ledger" => Ok(quote! { crate::schema::table::TableLifecycle::Ledger }),
+        "audit" => Ok(quote! { crate::schema::table::TableLifecycle::Audit }),
+        "report" => Ok(quote! { crate::schema::table::TableLifecycle::Report }),
+        "seed_ledger" => Ok(quote! { crate::schema::table::TableLifecycle::SeedLedger }),
+        other => Err(Error::new_spanned(
+            lit,
+            format!("unsupported table lifecycle `{other}`"),
+        )),
+    }
 }

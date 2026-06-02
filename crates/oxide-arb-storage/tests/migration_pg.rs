@@ -31,6 +31,9 @@ fn updated_at_trigger_catalog_is_complete() {
         tables,
         vec![
             "blacklist_entry",
+            "control_factor_materialization_run",
+            "control_factor_publication",
+            "control_factor_value",
             "endgame_calibration_bucket",
             "event",
             "market",

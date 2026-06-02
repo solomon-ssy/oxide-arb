@@ -23,6 +23,7 @@ pub mod algorithm;
 pub mod api;
 pub mod config;
 pub mod config_validation;
+pub mod control;
 pub mod market;
 pub mod redeem;
 pub mod reservation;
@@ -71,6 +72,9 @@ pub enum OxideError {
     // ── Configuration ───────────────────────────────────────────────────
     #[error(transparent)]
     Config(#[from] config::ConfigError),
+
+    #[error(transparent)]
+    Control(#[from] control::GovernanceError),
 
     // ── Market catalog ──────────────────────────────────────────────────
     #[error(transparent)]

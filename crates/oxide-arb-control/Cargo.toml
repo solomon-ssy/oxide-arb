@@ -1,0 +1,24 @@
+[package]
+name = "oxide-arb-control"
+description = "Control factor materialization and governance plane"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+oxide-arb-error = { workspace = true }
+oxide-arb-models = { workspace = true }
+chrono = { workspace = true }
+rust_decimal = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+blake3 = { workspace = true }
+hex = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+rust_decimal_macros = { workspace = true }
+
+[lints]
+workspace = true

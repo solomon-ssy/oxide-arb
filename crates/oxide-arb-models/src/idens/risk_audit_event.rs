@@ -11,7 +11,7 @@ use crate::schema::{
     timestamp_with_write_default,
 };
 
-#[oxide_schema]
+#[oxide_schema(lifecycle = "audit")]
 pub enum RiskAuditEvent {
     Table,
     Id,

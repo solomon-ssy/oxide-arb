@@ -9,7 +9,7 @@ use crate::{
 use oxide_arb_macros::oxide_schema;
 use sea_orm::sea_query::{ColumnDef, Expr, Table, TableCreateStatement};
 
-#[oxide_schema]
+#[oxide_schema(lifecycle = "core")]
 pub enum RiskEngineState {
     Table,
     Id,

@@ -15,7 +15,7 @@ use crate::{
     },
 };
 
-#[oxide_schema]
+#[oxide_schema(lifecycle = "core")]
 pub enum Market {
     Table,
     MarketId,

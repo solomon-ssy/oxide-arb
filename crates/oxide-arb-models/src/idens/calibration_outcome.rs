@@ -14,7 +14,7 @@ use crate::{
     },
 };
 
-#[oxide_schema]
+#[oxide_schema(lifecycle = "core")]
 pub enum EndgameCalibrationOutcome {
     Table,
     Id,

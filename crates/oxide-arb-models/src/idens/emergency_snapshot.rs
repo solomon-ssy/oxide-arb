@@ -3,7 +3,7 @@ use sea_orm::sea_query::{ColumnDef, Table, TableCreateStatement};
 
 use crate::schema::{dependency::TableDependency, index::IndexSpec, seed::SeedSpec};
 
-#[oxide_schema]
+#[oxide_schema(lifecycle = "audit")]
 pub enum EmergencySnapshot {
     Table,
     Id,

@@ -165,6 +165,66 @@ impl LedgerId {
 #[derive(TypedId, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ReportId(Arc<str>);
 
+/// Governed control-factor artifact identifier (UUID v7).
+#[derive(TypedId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ControlFactorId(Arc<str>);
+
+impl ControlFactorId {
+    /// Generate a fresh time-ordered control-factor ID.
+    #[must_use]
+    pub fn new_v7() -> Self {
+        Self(Arc::from(format!("cf_{}", Uuid::now_v7()).as_str()))
+    }
+}
+
+/// Control-factor publication identifier (UUID v7).
+#[derive(TypedId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FactorPublicationId(Arc<str>);
+
+impl FactorPublicationId {
+    /// Generate a fresh time-ordered publication ID.
+    #[must_use]
+    pub fn new_v7() -> Self {
+        Self(Arc::from(format!("cfp_{}", Uuid::now_v7()).as_str()))
+    }
+}
+
+/// Point-in-time materialization run identifier (UUID v7).
+#[derive(TypedId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MaterializationRunId(Arc<str>);
+
+impl MaterializationRunId {
+    /// Generate a fresh time-ordered materialization run ID.
+    #[must_use]
+    pub fn new_v7() -> Self {
+        Self(Arc::from(format!("cfmr_{}", Uuid::now_v7()).as_str()))
+    }
+}
+
+/// Evidence stage report identifier (UUID v7).
+#[derive(TypedId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct StageReportId(Arc<str>);
+
+impl StageReportId {
+    /// Generate a fresh time-ordered stage report ID.
+    #[must_use]
+    pub fn new_v7() -> Self {
+        Self(Arc::from(format!("cfsr_{}", Uuid::now_v7()).as_str()))
+    }
+}
+
+/// Runtime-config version identifier used by PIT evidence manifests.
+#[derive(TypedId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RuntimeConfigVersionId(Arc<str>);
+
+impl RuntimeConfigVersionId {
+    /// Generate a fresh time-ordered runtime-config version ID.
+    #[must_use]
+    pub fn new_v7() -> Self {
+        Self(Arc::from(format!("rcv_{}", Uuid::now_v7()).as_str()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

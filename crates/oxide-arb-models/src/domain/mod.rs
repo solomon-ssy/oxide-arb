@@ -67,6 +67,7 @@ macro_rules! info_from_model {
 pub mod blacklist;
 pub mod book;
 pub mod calibration;
+pub mod control_factor;
 pub mod execution;
 pub mod fee;
 pub mod latency;
@@ -88,6 +89,7 @@ pub mod trade;
 pub use blacklist::*;
 pub use book::*;
 pub use calibration::*;
+pub use control_factor::*;
 pub use execution::*;
 pub use latency::*;
 pub use market::*;

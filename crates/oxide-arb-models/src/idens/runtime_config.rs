@@ -7,7 +7,7 @@ use crate::{
 use oxide_arb_macros::oxide_schema;
 use sea_orm::sea_query::{ColumnDef, Table, TableCreateStatement};
 
-#[oxide_schema]
+#[oxide_schema(lifecycle = "runtime")]
 pub enum RuntimeConfig {
     Table,
     Key,

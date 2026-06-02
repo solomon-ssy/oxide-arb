@@ -7,6 +7,7 @@ members = [
   "crates/oxide-arb-api",
   "crates/oxide-arb-storage",
   "crates/oxide-arb-repository",
+  "crates/oxide-arb-control",
   "crates/oxide-arb-algorithm",
   "crates/oxide-arb-risk",
   "crates/oxide-arb-core",
@@ -140,6 +141,7 @@ governor = "0.10"
 # Security
 zeroize = { version = "1", features = ["derive"] }
 hex = "0.4"
+blake3 = "1"
 secrecy = "0.10"
 
 # URL parsing
@@ -178,6 +180,7 @@ oxide-arb-models = { path = "crates/oxide-arb-models" }
 oxide-arb-api = { path = "crates/oxide-arb-api" }
 oxide-arb-storage = { path = "crates/oxide-arb-storage" }
 oxide-arb-repository = { path = "crates/oxide-arb-repository" }
+oxide-arb-control = { path = "crates/oxide-arb-control" }
 oxide-arb-algorithm = { path = "crates/oxide-arb-algorithm" }
 oxide-arb-risk = { path = "crates/oxide-arb-risk" }
 oxide-arb-core = { path = "crates/oxide-arb-core" }

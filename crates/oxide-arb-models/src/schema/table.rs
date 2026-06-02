@@ -8,6 +8,7 @@ use super::{dependency::TableDependency, index::IndexSpec, seed::SeedSpec, trigg
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TableLifecycle {
     Core,
+    Control,
     Runtime,
     Ledger,
     Audit,

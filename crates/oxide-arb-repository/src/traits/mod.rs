@@ -3,6 +3,7 @@
 pub mod accounting;
 pub mod blacklist_persistence;
 pub mod calibration;
+pub mod control_factor;
 pub mod emergency;
 pub mod event;
 pub mod market;
@@ -20,6 +21,7 @@ pub mod trade;
 pub use accounting::AccountingRepository;
 pub use blacklist_persistence::BlacklistPersistenceRepository;
 pub use calibration::CalibrationRepository;
+pub use control_factor::ControlFactorRepository;
 pub use emergency::EmergencyRepository;
 pub use event::EventRepository;
 pub use market::MarketRepository;
