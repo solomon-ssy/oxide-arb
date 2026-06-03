@@ -27,3 +27,24 @@ pub enum ExecutionOutcome {
         execution_mode: ExecutionMode,
     },
 }
+
+/// Lightweight execution outcome for pipeline results — no clone of full [`ExecutionOutcome`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub enum ExecutionOutcomeSummary {
+    Filled { order_id: OrderId },
+    Miss,
+    Failed,
+}
+
+impl ExecutionOutcomeSummary {
+    #[must_use]
+    pub fn from_outcome(outcome: &ExecutionOutcome) -> Self {
+        match outcome {
+            ExecutionOutcome::Filled { order_id, .. } => Self::Filled {
+                order_id: order_id.clone(),
+            },
+            ExecutionOutcome::Miss { .. } => Self::Miss,
+            ExecutionOutcome::Failed { .. } => Self::Failed,
+        }
+    }
+}

@@ -9,11 +9,10 @@ use chrono::{DateTime, NaiveDate, Utc};
 use oxide_arb_models::{
     domain::{blacklist::BlacklistInfo, risk::NewRiskAuditEvent},
     enums::{
-        ReconciliationStatus,
         common::TradeBusinessOutcome,
         risk::{
-            BreakerStateName, CircuitBreakerLevel, RiskAuditEventType, TradeAccountingPhase,
-            WindowType,
+            BreakerStateName, CircuitBreakerLevel, ReconciliationStatus, RiskAuditEventType,
+            TradeAccountingPhase, WindowType,
         },
     },
     types::{MarketId, OpportunityId, TradeId, Usd},

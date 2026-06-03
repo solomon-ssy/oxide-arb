@@ -4,13 +4,16 @@
 //! bridge between the algorithm crate (pure computation) and I/O (DB, APIs).
 
 use super::{calibrator::ResolutionCalibrator, prior::estimate_mom_prior, types::CalibrationEntry};
-use num_traits::ToPrimitive;
 use oxide_arb_error::algorithm::AlgoError;
 use oxide_arb_models::{
+    clickhouse::{CalibrationSnapshotRow, ChDecimal64, ChProbability, ChSchemaVersion},
     config::CalibrationConfig,
     domain::calibration::{BucketKey, UpsertCalibration},
+    enums::clickhouse::{ChDurationBucket, ChFactSource, ChMarketCategory, ChPriceZone},
     types::MarketId,
 };
+use sha2::{Digest, Sha256};
+use std::fmt::Write;
 use std::sync::Arc;
 
 /// External data source for calibration — injected by `oxide-arb-core`.
@@ -30,6 +33,14 @@ pub trait CalibrationDataSource: Send + Sync + 'static {
 
     /// Persist updated calibration bucket entries to the database.
     async fn upsert_buckets(&self, entries: &[UpsertCalibration]) -> Result<(), AlgoError>;
+
+    /// Persist point-in-time calibration snapshots for evidence materialization.
+    async fn write_calibration_snapshots(
+        &self,
+        _snapshots: &[CalibrationSnapshotRow],
+    ) -> Result<(), AlgoError> {
+        Ok(())
+    }
 
     /// Mark an outcome as resolved in the database.
     async fn resolve_outcome(&self, outcome_id: i64, actual_yes: bool) -> Result<(), AlgoError>;
@@ -86,7 +97,7 @@ impl CalibrationUpdater {
     pub async fn tick(&self) -> Result<UpdateStats, AlgoError> {
         let unresolved = self.data_source.get_unresolved_outcomes().await?;
         let mut stats = UpdateStats {
-            total_unresolved: ToPrimitive::to_u32(&unresolved.len()).unwrap_or(u32::MAX),
+            total_unresolved: u32::try_from(unresolved.len()).unwrap_or(u32::MAX),
             ..Default::default()
         };
 
@@ -161,6 +172,73 @@ impl CalibrationUpdater {
             .map(CalibrationEntry::to_upsert)
             .collect();
         self.data_source.upsert_buckets(&upserts).await?;
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let snapshots = upserts
+            .iter()
+            .enumerate()
+            .map(|(idx, entry)| CalibrationSnapshotRow {
+                category: ChMarketCategory::from(entry.category),
+                price_zone: ChPriceZone::from(entry.price_zone),
+                duration_bucket: ChDurationBucket::from(entry.duration_bucket),
+                total_count: u32::try_from(entry.total_count).unwrap_or(0),
+                correct_count: u32::try_from(entry.correct_count).unwrap_or(0),
+                alpha_prior: ChDecimal64::from(entry.alpha_prior.inner()),
+                beta_prior: ChDecimal64::from(entry.beta_prior.inner()),
+                posterior_mean: entry
+                    .posterior_mean
+                    .map(|value| ChProbability::from(value.inner())),
+                fallback_tier: 1,
+                config_hash: calibration_config_hash(&self.config),
+                snapshot_hash: calibration_snapshot_hash(entry),
+                event_time: now_ms,
+                ingestion_time: now_ms,
+                sequence: u64::try_from(idx).unwrap_or(u64::MAX),
+                source: ChFactSource::CalibrationUpdater,
+                schema_version: ChSchemaVersion(2),
+            })
+            .collect::<Vec<_>>();
+        self.data_source
+            .write_calibration_snapshots(&snapshots)
+            .await?;
         Ok(())
     }
+}
+
+fn calibration_snapshot_hash(entry: &UpsertCalibration) -> String {
+    let mut canonical = String::new();
+    write!(
+        canonical,
+        "{}|{}|{}|{}|{}|{}|{}|{}",
+        entry.category,
+        entry.price_zone,
+        entry.duration_bucket,
+        entry.total_count,
+        entry.correct_count,
+        entry.alpha_prior,
+        entry.beta_prior,
+        entry
+            .posterior_mean
+            .map_or_else(|| "none".to_owned(), |value| value.to_string())
+    )
+    .expect("writing to String cannot fail");
+    let digest = Sha256::digest(canonical.as_bytes());
+    format!("{digest:x}")
+}
+
+fn calibration_config_hash(config: &CalibrationConfig) -> String {
+    let mut canonical = String::new();
+    write!(
+        canonical,
+        "{}|{}|{}|{}|{}|{}|{}",
+        config.min_sample_size,
+        config.refresh_interval_secs,
+        config.fusion_prior_strength,
+        config.fused_p_floor,
+        config.fused_p_ceiling,
+        config.bootstrap_alpha,
+        config.bootstrap_beta
+    )
+    .expect("writing to String cannot fail");
+    let digest = Sha256::digest(canonical.as_bytes());
+    format!("{digest:x}")
 }

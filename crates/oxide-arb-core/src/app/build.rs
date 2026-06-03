@@ -39,7 +39,8 @@ use crate::{
     },
     observability::{
         alert_dispatcher::AlertDispatcher, backpressure::BackpressurePolicy,
-        metrics_hub::MetricsHub,
+        balance_fact_writer::BalanceFactWriter, book_fact_writer::BookFactWriter,
+        execution_audit::ExecutionAuditWriter, metrics_hub::MetricsHub,
     },
     pipeline::{
         book_store::BookStore,
@@ -55,6 +56,7 @@ use crate::{
         ws_subscription::WsSubscriptionCoordinator,
     },
 };
+use num_traits::ToPrimitive;
 use oxide_arb_algorithm::{
     calibration::{CalibrationEntry, CalibrationUpdater, ResolutionCalibrator},
     cooldown::InMemoryEmissionCooldown,
@@ -74,22 +76,30 @@ use oxide_arb_api::{
 use oxide_arb_error::{OxideError, OxideResult};
 use oxide_arb_models::{
     config::{CalibrationConfig, Settings},
-    domain::{risk::RiskEngineState, settlement::MarketSettlementRequest},
-    enums::common::ExecutionMode,
-    types::{MarketId, MicroUsd, TokenId, Usd},
+    domain::{
+        DetectionRuntimeConfig, ExecutionRuntimeConfig, NewRuntimeConfigActivation,
+        NewRuntimeConfigVersion, OperatorRuntimeConfig, RiskLimitRuntimeConfig,
+        RuntimeConfigDocument, SizingRuntimeConfig, risk::RiskEngineState,
+        settlement::MarketSettlementRequest,
+    },
+    enums::{
+        common::ExecutionMode,
+        runtime_config::{RuntimeConfigActivationKind, RuntimeConfigVersionSource},
+    },
+    types::{MarketId, MicroUsd, RuntimeConfigActivationId, RuntimeConfigVersionId, TokenId, Usd},
 };
 use oxide_arb_repository::{
     clickhouse::ChTimeseriesRepository,
     postgres::{
         PgBlacklistPersistenceRepository, PgCalibrationRepository, PgEmergencyRepository,
-        PgEventRepository, PgMarketRepository, PgPositionRepository, PgPotentialLossRepository,
-        PgReconciliationRepository, PgReportRepository, PgResolutionEventRepository,
-        PgRiskAuditRepository, PgRiskStateRepository, PgTradeRepository,
-        risk_fill::PgRiskFillRepository,
+        PgEventRepository, PgFactDataRepository, PgMarketRepository, PgPositionRepository,
+        PgPotentialLossRepository, PgReconciliationRepository, PgReportRepository,
+        PgResolutionEventRepository, PgRiskAuditRepository, PgRiskStateRepository,
+        PgRuntimeConfigVersionRepository, PgTradeRepository, risk_fill::PgRiskFillRepository,
     },
     traits::{
         BlacklistPersistenceRepository, CalibrationRepository, PotentialLossRepository,
-        RiskStateRepository,
+        RiskStateRepository, RuntimeConfigVersionRepository,
     },
 };
 use oxide_arb_risk::{
@@ -105,6 +115,7 @@ use oxide_arb_storage::{
     },
 };
 use parking_lot::Mutex;
+use sha2::{Digest, Sha256};
 use std::{
     sync::{Arc, atomic::AtomicU32},
     time::Duration,
@@ -122,6 +133,8 @@ struct BuildRepos {
     resolution_event: Arc<PgResolutionEventRepository>,
     potential_loss: Arc<PgPotentialLossRepository>,
     calibration: Arc<PgCalibrationRepository>,
+    fact_data: Arc<PgFactDataRepository>,
+    runtime_config: Arc<PgRuntimeConfigVersionRepository>,
     market: Arc<PgMarketRepository>,
     event: Arc<PgEventRepository>,
     trade: Arc<PgTradeRepository>,
@@ -139,6 +152,39 @@ struct BuildInfra {
     risk_decision_audit_rx: Mutex<Option<flume::Receiver<RiskAuditEvent>>>,
     repos: BuildRepos,
     persistence: PersistenceBundle,
+    balance_fact_writer: Arc<BalanceFactWriter>,
+}
+
+struct BuildPersistence {
+    trade_repo: Arc<PgTradeRepository>,
+    timeseries: Arc<ChTimeseriesRepository>,
+    audit_writer: Arc<ExecutionAuditWriter>,
+    book_fact_writer: Arc<BookFactWriter>,
+}
+
+struct AssembledInfra {
+    pg_pool: Arc<PostgresPool>,
+    ch_pool: Arc<ClickHousePool>,
+    cache: Arc<TieredCache>,
+    metrics: Arc<MetricsHub>,
+    alerts: Arc<AlertDispatcher>,
+    risk_decision_audit: Arc<RiskDecisionAuditBuffer>,
+    risk_decision_audit_rx: Mutex<Option<flume::Receiver<RiskAuditEvent>>>,
+    repos: BuildRepos,
+    balance_fact_writer: Arc<BalanceFactWriter>,
+}
+
+struct AppContextAssembly {
+    config: Arc<Settings>,
+    infra: AssembledInfra,
+    clients: BuildClients,
+    risk: BuildRisk,
+    trading: BuildTrading,
+    persistence: BuildPersistence,
+    settlement_service: Arc<MarketSettlementService>,
+    settlement_dedup: Arc<SettlementDedup>,
+    shutdown: CancellationToken,
+    pending_tasks: PendingTaskQueue,
 }
 
 struct BuildClients {
@@ -148,6 +194,7 @@ struct BuildClients {
     voting_oracle: Arc<VotingOracle>,
     clob_client: Option<Arc<ClobClient>>,
     ctf_redeem: Option<Arc<CtfRedeemClient>>,
+    holder_address: String,
 }
 
 struct BuildRisk {
@@ -215,93 +262,161 @@ impl AppContext {
         let (risk, trading) =
             wire_risk_and_trading(&settings, mode, &infra, &clients, shutdown.clone()).await?;
 
-        let trade_repo = Arc::clone(&infra.persistence.trade_repo);
-        let position_repo = Arc::clone(&infra.repos.position);
-        let timeseries = Arc::clone(&infra.persistence.timeseries);
-        let audit_writer = Arc::clone(&infra.persistence.audit_writer);
-        let settlement_service =
-            Arc::new(MarketSettlementService::new(MarketSettlementServiceDeps {
-                position_repo: Arc::clone(&infra.repos.position),
-                resolution_event_repo: Arc::clone(&infra.repos.resolution_event),
-                trade_repo: Arc::clone(&trade_repo),
-                risk_engine: Arc::clone(&risk.engine),
-                risk_metrics: Arc::clone(&risk.metrics),
-                fsm: Arc::clone(&risk.fsm),
-                ctf_redeem: clients.ctf_redeem.clone(),
-                market_registry: Arc::clone(&trading.market_registry),
-                voting_oracle: Arc::clone(&clients.voting_oracle),
-                metrics: Arc::clone(&infra.metrics),
-                alerts: Arc::clone(&infra.alerts),
-                audit_writer: Arc::clone(&audit_writer),
-                metrics_refresh: risk.metrics_refresh.clone(),
-                config: Arc::new(settings.settlement.clone()),
-                execution_mode: mode,
-            }));
-        let settlement_dedup = Arc::new(SettlementDedup::new(Duration::from_secs(
-            settings.settlement.lifecycle.dedup_window_secs,
-        )));
+        let settlement = wire_settlement_bundle(&settings, mode, &infra, &clients, &risk, &trading);
+        let BuildInfra {
+            pg_pool,
+            ch_pool,
+            cache,
+            metrics,
+            alerts,
+            risk_decision_audit,
+            risk_decision_audit_rx,
+            repos,
+            persistence,
+            balance_fact_writer,
+        } = infra;
+        let persistence_handles = BuildPersistence {
+            trade_repo: Arc::clone(&persistence.trade_repo),
+            timeseries: Arc::clone(&persistence.timeseries),
+            audit_writer: Arc::clone(&persistence.audit_writer),
+            book_fact_writer: Arc::clone(&persistence.book_fact_writer),
+        };
         let mut pending_tasks = PendingTaskQueue::default();
-        infra
-            .persistence
-            .queue_background_tasks(persistence_workers, &mut pending_tasks);
+        persistence.queue_background_tasks(persistence_workers, &mut pending_tasks);
 
-        Ok(Self {
+        let (settlement_service, settlement_dedup) = settlement;
+        Ok(assemble_app_context(AppContextAssembly {
             config: settings,
-            infra: InfraBundle {
-                pg: infra.pg_pool,
-                ch: infra.ch_pool,
-                cache: infra.cache,
-                metrics: infra.metrics,
-                alerts: infra.alerts,
-                risk_decision_audit: infra.risk_decision_audit,
-                risk_decision_audit_rx: infra.risk_decision_audit_rx,
-                trade_repo,
-                position_repo,
-                report_repo: infra.repos.report,
-                risk_state_repo: infra.repos.risk_state,
-                timeseries,
-                audit_writer,
+            infra: AssembledInfra {
+                pg_pool,
+                ch_pool,
+                cache,
+                metrics,
+                alerts,
+                risk_decision_audit,
+                risk_decision_audit_rx,
+                repos,
+                balance_fact_writer,
             },
-            data: DataBundle {
-                book_store: trading.book_store,
-                market_registry: trading.market_registry,
-                market_cache: trading.market_cache,
-                data_pipeline: trading.data_pipeline,
-                gamma_service: trading.gamma_service,
-            },
-            risk: RiskBundle {
-                engine: risk.engine,
-                metrics: risk.metrics,
-                metrics_state: risk.metrics_state,
-                exposure: risk.exposure,
-                potential_loss_store: risk.potential_loss_store,
-                metrics_refresh: risk.metrics_refresh,
-            },
-            trading: TradingBundle {
-                opportunity_pipeline: trading.opportunity_pipeline,
-                calibrator: trading.calibrator,
-                calibration_updater: trading.calibration_updater,
-                scanner: trading.scanner,
-                coalescer: trading.coalescer,
-                funnel: trading.funnel,
-                fsm: risk.fsm,
-                execution: Some(trading.execution),
-                clob_client: clients.clob_client,
-                ws_manager: clients.ws_manager,
-            },
-            settlement: SettlementBundle {
-                service: settlement_service,
-                dedup: settlement_dedup,
-                settlement_rx: Mutex::new(Some(trading.settlement_rx)),
-            },
-            runtime: RuntimeChannels {
-                coalescer_token_rx: Mutex::new(Some(trading.token_rx)),
-                scanner_market_rx: Mutex::new(Some(trading.market_rx)),
-                execution_runners: Mutex::new(Some(trading.execution_runners)),
-            },
+            clients,
+            risk,
+            trading,
+            persistence: persistence_handles,
+            settlement_service,
+            settlement_dedup,
             shutdown,
             pending_tasks,
-        })
+        }))
+    }
+}
+
+fn wire_settlement_bundle(
+    settings: &Settings,
+    mode: ExecutionMode,
+    infra: &BuildInfra,
+    clients: &BuildClients,
+    risk: &BuildRisk,
+    trading: &BuildTrading,
+) -> (Arc<MarketSettlementService>, Arc<SettlementDedup>) {
+    let trade_repo = Arc::clone(&infra.persistence.trade_repo);
+    let audit_writer = Arc::clone(&infra.persistence.audit_writer);
+    let settlement_service = Arc::new(MarketSettlementService::new(MarketSettlementServiceDeps {
+        position_repo: Arc::clone(&infra.repos.position),
+        resolution_event_repo: Arc::clone(&infra.repos.resolution_event),
+        trade_repo,
+        risk_engine: Arc::clone(&risk.engine),
+        risk_metrics: Arc::clone(&risk.metrics),
+        fsm: Arc::clone(&risk.fsm),
+        ctf_redeem: clients.ctf_redeem.clone(),
+        market_registry: Arc::clone(&trading.market_registry),
+        voting_oracle: Arc::clone(&clients.voting_oracle),
+        metrics: Arc::clone(&infra.metrics),
+        alerts: Arc::clone(&infra.alerts),
+        audit_writer,
+        metrics_refresh: risk.metrics_refresh.clone(),
+        config: Arc::new(settings.settlement.clone()),
+        execution_mode: mode,
+    }));
+    let settlement_dedup = Arc::new(SettlementDedup::new(Duration::from_secs(
+        settings.settlement.lifecycle.dedup_window_secs,
+    )));
+    (settlement_service, settlement_dedup)
+}
+
+fn assemble_app_context(parts: AppContextAssembly) -> AppContext {
+    let AppContextAssembly {
+        config,
+        infra,
+        clients,
+        risk,
+        trading,
+        persistence,
+        settlement_service,
+        settlement_dedup,
+        shutdown,
+        pending_tasks,
+    } = parts;
+    AppContext {
+        config,
+        infra: InfraBundle {
+            pg: infra.pg_pool,
+            ch: infra.ch_pool,
+            cache: infra.cache,
+            metrics: infra.metrics,
+            alerts: infra.alerts,
+            risk_decision_audit: infra.risk_decision_audit,
+            risk_decision_audit_rx: infra.risk_decision_audit_rx,
+            trade_repo: persistence.trade_repo,
+            position_repo: infra.repos.position,
+            report_repo: infra.repos.report,
+            fact_data_repo: infra.repos.fact_data,
+            calibration_repo: infra.repos.calibration,
+            risk_state_repo: infra.repos.risk_state,
+            timeseries: persistence.timeseries,
+            audit_writer: persistence.audit_writer,
+            balance_fact_writer: infra.balance_fact_writer,
+            book_fact_writer: persistence.book_fact_writer,
+            holder_address: clients.holder_address,
+        },
+        data: DataBundle {
+            book_store: trading.book_store,
+            market_registry: trading.market_registry,
+            market_cache: trading.market_cache,
+            data_pipeline: trading.data_pipeline,
+            gamma_service: trading.gamma_service,
+        },
+        risk: RiskBundle {
+            engine: risk.engine,
+            metrics: risk.metrics,
+            metrics_state: risk.metrics_state,
+            exposure: risk.exposure,
+            potential_loss_store: risk.potential_loss_store,
+            metrics_refresh: risk.metrics_refresh,
+        },
+        trading: TradingBundle {
+            opportunity_pipeline: trading.opportunity_pipeline,
+            calibrator: trading.calibrator,
+            calibration_updater: trading.calibration_updater,
+            scanner: trading.scanner,
+            coalescer: trading.coalescer,
+            funnel: trading.funnel,
+            fsm: risk.fsm,
+            execution: Some(trading.execution),
+            clob_client: clients.clob_client,
+            ws_manager: clients.ws_manager,
+        },
+        settlement: SettlementBundle {
+            service: settlement_service,
+            dedup: settlement_dedup,
+            settlement_rx: Mutex::new(Some(trading.settlement_rx)),
+        },
+        runtime: RuntimeChannels {
+            coalescer_token_rx: Mutex::new(Some(trading.token_rx)),
+            scanner_market_rx: Mutex::new(Some(trading.market_rx)),
+            execution_runners: Mutex::new(Some(trading.execution_runners)),
+        },
+        shutdown,
+        pending_tasks,
     }
 }
 
@@ -364,12 +479,16 @@ async fn connect_infra(
         resolution_event: Arc::new(PgResolutionEventRepository::new(db.clone())),
         potential_loss: Arc::new(PgPotentialLossRepository::new(db.clone())),
         calibration: Arc::new(PgCalibrationRepository::new(db.clone())),
+        fact_data: Arc::new(PgFactDataRepository::new(db.clone())),
+        runtime_config: Arc::new(PgRuntimeConfigVersionRepository::new(db.clone())),
         market: Arc::new(PgMarketRepository::new(db.clone())),
         event: Arc::new(PgEventRepository::new(db.clone())),
         trade: Arc::new(PgTradeRepository::new(db.clone())),
         report: Arc::new(PgReportRepository::new(db.clone())),
         position: Arc::new(PgPositionRepository::new(db)),
     };
+    ensure_runtime_config_activation(settings, repos.runtime_config.as_ref()).await?;
+    let balance_fact_writer = Arc::new(BalanceFactWriter::new(Arc::clone(&repos.fact_data)));
 
     let (persistence, persistence_workers) = PersistenceBundle::wire(PersistenceWireInput {
         metrics: Arc::clone(&metrics),
@@ -389,9 +508,111 @@ async fn connect_infra(
             risk_decision_audit_rx,
             repos,
             persistence,
+            balance_fact_writer,
         },
         persistence_workers,
     ))
+}
+
+async fn ensure_runtime_config_activation(
+    settings: &Settings,
+    repo: &dyn RuntimeConfigVersionRepository,
+) -> OxideResult<()> {
+    let document = runtime_config_document(settings);
+    let config_json = serde_json::to_value(&document)
+        .map_err(|error| OxideError::Internal(format!("runtime config encode failed: {error}")))?;
+    let config_hash = runtime_config_hash(&config_json);
+    let current = repo.load_current().await?;
+    if current
+        .as_ref()
+        .is_some_and(|version| version.config_hash == config_hash)
+    {
+        return Ok(());
+    }
+
+    let version = match repo.load_by_hash(&config_hash).await? {
+        Some(version) => version,
+        None => {
+            repo.create_version(NewRuntimeConfigVersion {
+                runtime_config_version_id: RuntimeConfigVersionId::new_v7(),
+                config_hash: config_hash.clone(),
+                schema_version: document.schema_version,
+                config_json,
+                source: RuntimeConfigVersionSource::Bootstrap,
+                created_by: "system".to_owned(),
+                reason: "startup canonical runtime config import".to_owned(),
+            })
+            .await?
+        }
+    };
+
+    repo.activate_version(NewRuntimeConfigActivation {
+        runtime_config_activation_id: RuntimeConfigActivationId::new_v7(),
+        runtime_config_version_id: version.runtime_config_version_id.clone(),
+        activated_at: chrono::Utc::now(),
+        activated_by: "system".to_owned(),
+        reason: "startup runtime config activation".to_owned(),
+        activation_kind: if current.is_some() {
+            RuntimeConfigActivationKind::Promote
+        } else {
+            RuntimeConfigActivationKind::Initial
+        },
+        previous_runtime_config_version_id: current
+            .map(|version| version.runtime_config_version_id),
+        rollback_target_version_id: None,
+        audit_event_id: None,
+    })
+    .await?;
+    Ok(())
+}
+
+fn runtime_config_document(settings: &Settings) -> RuntimeConfigDocument {
+    RuntimeConfigDocument {
+        schema_version: 1,
+        operator: OperatorRuntimeConfig {
+            maintenance_mode: false,
+            dry_run_mode: settings.execution.execution_mode == ExecutionMode::DryRun,
+        },
+        detection: DetectionRuntimeConfig {
+            min_profit_threshold_usd: settings.detection.min_profit_threshold_usd,
+            endgame_hours_before_close: u32::try_from(
+                settings.detection.endgame.settlement_window_hours,
+            )
+            .unwrap_or(u32::MAX),
+            convergence_threshold: settings.detection.endgame.high_threshold,
+        },
+        execution: ExecutionRuntimeConfig {
+            max_slippage_bps: settings
+                .execution
+                .timeout
+                .max_validation_slippage_bps
+                .to_u32()
+                .unwrap_or(u32::MAX),
+            order_timeout_secs: u32::try_from(
+                settings.execution.timeout.dispatcher_timeout_ms / 1000,
+            )
+            .unwrap_or(u32::MAX),
+            cooldown_after_trade_secs: u32::try_from(settings.risk.base_cooldown_secs)
+                .unwrap_or(u32::MAX),
+        },
+        sizing: SizingRuntimeConfig {
+            kelly_fraction: settings.risk.kelly_fraction,
+            max_position_fraction_of_book: settings.risk.max_depth_usage_pct,
+        },
+        risk_limits: RiskLimitRuntimeConfig {
+            max_portfolio_exposure_usd: Usd::new(settings.risk.max_total_exposure_usd),
+            max_single_position_usd: Usd::new(settings.risk.max_single_market_exposure_usd),
+            max_daily_loss_usd: Usd::new(settings.risk.max_daily_loss_usd),
+            circuit_breaker_threshold: settings.risk.max_consecutive_misses,
+        },
+    }
+}
+
+fn runtime_config_hash(config_json: &serde_json::Value) -> String {
+    let canonical =
+        serde_json::to_string(config_json).expect("runtime config JSON is serializable");
+    let digest = Sha256::digest(canonical.as_bytes());
+    format!("sha256:{digest:x}")
 }
 
 async fn connect_clients(
@@ -438,8 +659,9 @@ async fn connect_clients(
         &settings.settlement.contracts,
     )?);
 
-    let (clob_client, ctf_redeem) = match Keystore::from_config(&settings.keys) {
+    let (clob_client, ctf_redeem, holder_address) = match Keystore::from_config(&settings.keys) {
         Ok(ks) => {
+            let holder_address = ks.address_string();
             let signer = ks.signer_arc();
             let ctf_redeem = match CtfRedeemClient::new(
                 Arc::clone(&signer),
@@ -463,11 +685,15 @@ async fn connect_clients(
                     None
                 }
             };
-            (clob_client, ctf_redeem)
+            (clob_client, ctf_redeem, holder_address)
         }
         Err(error) => {
             tracing::info!(%error, "Keystore unavailable — running without ClobClient");
-            (None, None)
+            (
+                None,
+                None,
+                format!("unavailable:{}", settings.execution.execution_mode.as_str()),
+            )
         }
     };
 
@@ -478,6 +704,7 @@ async fn connect_clients(
         voting_oracle,
         clob_client,
         ctf_redeem,
+        holder_address,
     })
 }
 
@@ -637,6 +864,7 @@ async fn wire_calibration_stack(
         clients.gamma_client.clone(),
         clients.voting_oracle.clone(),
         Arc::new(OracleHealthTracker::new()),
+        Arc::clone(&infra.persistence.timeseries),
     ));
     let calibration_updater = Arc::new(CalibrationUpdater::new(
         Arc::clone(&calibrator),
@@ -836,6 +1064,7 @@ fn wire_execution_loop(
         metrics: Arc::clone(&infra.metrics),
         alerts: Arc::clone(&infra.alerts),
         backpressure: Arc::clone(&risk.backpressure),
+        book_fact_writer: Some(Arc::clone(&infra.persistence.book_fact_writer)),
         book_shard_count: settings.execution.book_apply.shard_count,
         book_channel_capacity: settings.execution.book_apply.channel_capacity,
         shutdown,

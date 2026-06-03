@@ -1,13 +1,14 @@
-use crate::traits::TimeseriesRepository;
+use crate::traits::{EvidenceTimeseriesRepository, MarketFilter, TimeWindow, TimeseriesFactWriter};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::{
     clickhouse::{
         BookSnapshotRow, CalibrationSnapshotRow, OpportunityAuditRow, OpportunityDetectionRow,
-        TickEventRow,
+        TickEventL2Row, TickEventRow,
     },
     config::AnalyticsConfig,
+    types::{EventId, MarketId, OpportunityId, TokenId},
 };
 use oxide_arb_storage::clickhouse::{BatchInserter, ChWriteManager, ChWriteMetrics};
 use std::{sync::Arc, time::Duration};
@@ -22,6 +23,7 @@ pub struct ChTimeseriesRepository {
     client: clickhouse::Client,
     write_manager: Arc<ChWriteManager>,
     tick_inserter: BatchInserter<TickEventRow>,
+    l2_inserter: BatchInserter<TickEventL2Row>,
     book_inserter: BatchInserter<BookSnapshotRow>,
     audit_inserter: BatchInserter<OpportunityAuditRow>,
     detection_inserter: BatchInserter<OpportunityDetectionRow>,
@@ -43,6 +45,14 @@ impl ChTimeseriesRepository {
             tick_inserter: BatchInserter::new(
                 client.clone(),
                 "tick_events",
+                batch_size,
+                flush_interval,
+                metrics.clone(),
+                shutdown.clone(),
+            ),
+            l2_inserter: BatchInserter::new(
+                client.clone(),
+                "tick_events_l2",
                 batch_size,
                 flush_interval,
                 metrics.clone(),
@@ -95,7 +105,7 @@ impl ChTimeseriesRepository {
 }
 
 #[async_trait]
-impl TimeseriesRepository for ChTimeseriesRepository {
+impl TimeseriesFactWriter for ChTimeseriesRepository {
     async fn insert_tick_events(&self, events: &[TickEventRow]) -> Result<(), StorageError> {
         for event in events {
             self.tick_inserter.insert(event.clone()).await?;
@@ -103,25 +113,21 @@ impl TimeseriesRepository for ChTimeseriesRepository {
         Ok(())
     }
 
-    async fn insert_book_snapshot(&self, snapshot: &BookSnapshotRow) -> Result<(), StorageError> {
-        self.book_inserter.insert(snapshot.clone()).await
+    async fn insert_l2_events(&self, rows: &[TickEventL2Row]) -> Result<(), StorageError> {
+        for row in rows {
+            self.l2_inserter.insert(row.clone()).await?;
+        }
+        Ok(())
     }
 
-    async fn insert_opportunity_audit(
-        &self,
-        audit: &OpportunityAuditRow,
-    ) -> Result<(), StorageError> {
-        self.audit_inserter.insert(audit.clone()).await
+    async fn insert_book_snapshots(&self, rows: &[BookSnapshotRow]) -> Result<(), StorageError> {
+        for row in rows {
+            self.book_inserter.insert(row.clone()).await?;
+        }
+        Ok(())
     }
 
-    async fn insert_calibration_snapshot(
-        &self,
-        snapshot: &CalibrationSnapshotRow,
-    ) -> Result<(), StorageError> {
-        self.calibration_inserter.insert(snapshot.clone()).await
-    }
-
-    async fn insert_detection_batch(
+    async fn insert_detections(
         &self,
         rows: &[OpportunityDetectionRow],
     ) -> Result<(), StorageError> {
@@ -131,85 +137,177 @@ impl TimeseriesRepository for ChTimeseriesRepository {
         Ok(())
     }
 
-    async fn query_tick_events(
+    async fn insert_audits(&self, rows: &[OpportunityAuditRow]) -> Result<(), StorageError> {
+        for row in rows {
+            self.audit_inserter.insert(row.clone()).await?;
+        }
+        Ok(())
+    }
+
+    async fn insert_calibration_snapshots(
         &self,
-        token_id: &str,
-        from: DateTime<Utc>,
-        to: DateTime<Utc>,
+        rows: &[CalibrationSnapshotRow],
+    ) -> Result<(), StorageError> {
+        for row in rows {
+            self.calibration_inserter.insert(row.clone()).await?;
+        }
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl EvidenceTimeseriesRepository for ChTimeseriesRepository {
+    async fn tick_events(
+        &self,
+        token_ids: &[TokenId],
+        window: TimeWindow,
         limit: u64,
     ) -> Result<Vec<TickEventRow>, StorageError> {
+        let token_ids = token_ids_as_strings(token_ids);
         self.client
             .query(
                 "SELECT * FROM tick_events \
-                 WHERE token_id = ? \
-                   AND received_at >= fromUnixTimestamp64Milli(?) \
-                   AND received_at < fromUnixTimestamp64Milli(?) \
-                 ORDER BY received_at DESC LIMIT ?",
+                 WHERE token_id IN ? \
+                   AND event_time >= fromUnixTimestamp64Milli(?) \
+                   AND event_time < fromUnixTimestamp64Milli(?) \
+                 ORDER BY event_time ASC, ingestion_time ASC, sequence ASC \
+                 LIMIT ?",
             )
-            .bind(token_id)
-            .bind(from.timestamp_millis())
-            .bind(to.timestamp_millis())
+            .bind(token_ids)
+            .bind(window.from.timestamp_millis())
+            .bind(window.to.timestamp_millis())
             .bind(limit)
             .fetch_all::<TickEventRow>()
             .await
             .map_err(Into::into)
     }
 
-    async fn query_opportunity_audit(
+    async fn l2_events(
         &self,
-        from: DateTime<Utc>,
-        to: DateTime<Utc>,
-    ) -> Result<Vec<OpportunityAuditRow>, StorageError> {
+        token_ids: &[TokenId],
+        window: TimeWindow,
+    ) -> Result<Vec<TickEventL2Row>, StorageError> {
+        let token_ids = token_ids_as_strings(token_ids);
         self.client
             .query(
-                "SELECT * FROM opportunity_audit \
+                "SELECT * FROM tick_events_l2 \
+                 WHERE token_id IN ? \
+                   AND event_time >= fromUnixTimestamp64Milli(?) \
+                   AND event_time < fromUnixTimestamp64Milli(?) \
+                 ORDER BY event_time ASC, ingestion_time ASC, sequence ASC",
+            )
+            .bind(token_ids)
+            .bind(window.from.timestamp_millis())
+            .bind(window.to.timestamp_millis())
+            .fetch_all::<TickEventL2Row>()
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn book_snapshots_before(
+        &self,
+        token_ids: &[TokenId],
+        before: DateTime<Utc>,
+        limit_per_token: usize,
+    ) -> Result<Vec<BookSnapshotRow>, StorageError> {
+        let token_ids = token_ids_as_strings(token_ids);
+        self.client
+            .query(
+                "SELECT * FROM book_snapshots \
+                 WHERE token_id IN ? \
+                   AND event_time < fromUnixTimestamp64Milli(?) \
+                 ORDER BY token_id ASC, event_time DESC, ingestion_time DESC, sequence DESC \
+                 LIMIT ? BY token_id",
+            )
+            .bind(token_ids)
+            .bind(before.timestamp_millis())
+            .bind(u64::try_from(limit_per_token).unwrap_or(u64::MAX))
+            .fetch_all::<BookSnapshotRow>()
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn detections(
+        &self,
+        filter: MarketFilter,
+        window: TimeWindow,
+    ) -> Result<Vec<OpportunityDetectionRow>, StorageError> {
+        let market_ids = market_ids_as_strings(&filter.market_ids);
+        let event_ids = event_ids_as_strings(&filter.event_ids);
+        let token_ids = token_ids_as_strings(&filter.token_ids);
+        self.client
+            .query(
+                "SELECT * FROM opportunity_detection \
                  WHERE detected_at >= fromUnixTimestamp64Milli(?) \
                    AND detected_at < fromUnixTimestamp64Milli(?) \
-                 ORDER BY detected_at DESC",
+                   AND (empty(?) OR market_id IN ?) \
+                   AND (empty(?) OR event_id IN ?) \
+                   AND (empty(?) OR token_id IN ?) \
+                   AND (? IS NULL OR category = ?) \
+                 ORDER BY detected_at ASC, ingestion_time ASC, sequence ASC",
             )
-            .bind(from.timestamp_millis())
-            .bind(to.timestamp_millis())
-            .fetch_all::<OpportunityAuditRow>()
+            .bind(window.from.timestamp_millis())
+            .bind(window.to.timestamp_millis())
+            .bind(market_ids.clone())
+            .bind(market_ids)
+            .bind(event_ids.clone())
+            .bind(event_ids)
+            .bind(token_ids.clone())
+            .bind(token_ids)
+            .bind(filter.category)
+            .bind(filter.category)
+            .fetch_all::<OpportunityDetectionRow>()
             .await
             .map_err(Into::into)
     }
 
-    async fn query_opportunity_lifecycle(
+    async fn audits(
         &self,
-        opportunity_id: &str,
+        opportunity_ids: &[OpportunityId],
     ) -> Result<Vec<OpportunityAuditRow>, StorageError> {
+        let opportunity_ids = opportunity_ids
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
         self.client
             .query(
                 "SELECT * FROM opportunity_audit \
-                 WHERE opportunity_id = ? \
-                 ORDER BY stage_order ASC, stage_at ASC, updated_at ASC",
+                 WHERE opportunity_id IN ? \
+                 ORDER BY stage_at ASC, ingestion_time ASC, sequence ASC",
             )
-            .bind(opportunity_id)
+            .bind(opportunity_ids)
             .fetch_all::<OpportunityAuditRow>()
             .await
             .map_err(Into::into)
     }
 
-    async fn query_calibration_history(
+    async fn calibration_snapshots(
         &self,
-        category: &str,
-        price_zone: &str,
-        duration_bucket: &str,
-        days: u32,
+        window: TimeWindow,
     ) -> Result<Vec<CalibrationSnapshotRow>, StorageError> {
         self.client
             .query(
                 "SELECT * FROM calibration_snapshots \
-                 WHERE category = ? AND price_zone = ? AND duration_bucket = ? \
-                   AND snapshot_time >= now() - INTERVAL ? DAY \
-                 ORDER BY snapshot_time DESC",
+                 WHERE event_time >= fromUnixTimestamp64Milli(?) \
+                   AND event_time < fromUnixTimestamp64Milli(?) \
+                 ORDER BY event_time ASC, ingestion_time ASC, sequence ASC",
             )
-            .bind(category)
-            .bind(price_zone)
-            .bind(duration_bucket)
-            .bind(days)
+            .bind(window.from.timestamp_millis())
+            .bind(window.to.timestamp_millis())
             .fetch_all::<CalibrationSnapshotRow>()
             .await
             .map_err(Into::into)
     }
+}
+
+fn token_ids_as_strings(token_ids: &[TokenId]) -> Vec<String> {
+    token_ids.iter().map(ToString::to_string).collect()
+}
+
+fn market_ids_as_strings(market_ids: &[MarketId]) -> Vec<String> {
+    market_ids.iter().map(ToString::to_string).collect()
+}
+
+fn event_ids_as_strings(event_ids: &[EventId]) -> Vec<String> {
+    event_ids.iter().map(ToString::to_string).collect()
 }

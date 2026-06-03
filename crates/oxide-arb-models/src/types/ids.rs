@@ -225,6 +225,94 @@ impl RuntimeConfigVersionId {
     }
 }
 
+/// Runtime-config activation identifier (UUID v7).
+#[derive(TypedId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RuntimeConfigActivationId(Arc<str>);
+
+impl RuntimeConfigActivationId {
+    #[must_use]
+    pub fn new_v7() -> Self {
+        Self(Arc::from(format!("rca_{}", Uuid::now_v7()).as_str()))
+    }
+}
+
+/// Cash/collateral balance snapshot identifier (UUID v7).
+#[derive(TypedId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct BalanceSnapshotId(Arc<str>);
+
+impl BalanceSnapshotId {
+    #[must_use]
+    pub fn new_v7() -> Self {
+        Self(Arc::from(format!("bs_{}", Uuid::now_v7()).as_str()))
+    }
+}
+
+/// ERC-1155 token balance snapshot identifier (UUID v7).
+#[derive(TypedId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TokenBalanceSnapshotId(Arc<str>);
+
+impl TokenBalanceSnapshotId {
+    #[must_use]
+    pub fn new_v7() -> Self {
+        Self(Arc::from(format!("tbs_{}", Uuid::now_v7()).as_str()))
+    }
+}
+
+/// Control-factor training dataset manifest identifier (UUID v7).
+#[derive(TypedId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TrainingDatasetId(Arc<str>);
+
+impl TrainingDatasetId {
+    #[must_use]
+    pub fn new_v7() -> Self {
+        Self(Arc::from(format!("cftd_{}", Uuid::now_v7()).as_str()))
+    }
+}
+
+/// Shadow decision audit identifier (UUID v7).
+#[derive(TypedId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ShadowDecisionId(Arc<str>);
+
+impl ShadowDecisionId {
+    #[must_use]
+    pub fn new_v7() -> Self {
+        Self(Arc::from(format!("cfsd_{}", Uuid::now_v7()).as_str()))
+    }
+}
+
+/// Position exit plan identifier (UUID v7).
+#[derive(TypedId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ExitPlanId(Arc<str>);
+
+impl ExitPlanId {
+    #[must_use]
+    pub fn new_v7() -> Self {
+        Self(Arc::from(format!("ep_{}", Uuid::now_v7()).as_str()))
+    }
+}
+
+/// Position exit execution identifier (UUID v7).
+#[derive(TypedId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ExitExecutionId(Arc<str>);
+
+impl ExitExecutionId {
+    #[must_use]
+    pub fn new_v7() -> Self {
+        Self(Arc::from(format!("ee_{}", Uuid::now_v7()).as_str()))
+    }
+}
+
+/// Position unwind audit identifier (UUID v7).
+#[derive(TypedId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct UnwindAuditId(Arc<str>);
+
+impl UnwindAuditId {
+    #[must_use]
+    pub fn new_v7() -> Self {
+        Self(Arc::from(format!("uwa_{}", Uuid::now_v7()).as_str()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

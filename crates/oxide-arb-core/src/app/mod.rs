@@ -40,7 +40,8 @@ use crate::{
         risk_decision_audit_drain::spawn_risk_decision_audit_drain,
     },
     observability::{
-        alert_dispatcher::AlertDispatcher, execution_audit::ExecutionAuditWriter,
+        alert_dispatcher::AlertDispatcher, balance_fact_writer::BalanceFactWriter,
+        book_fact_writer::BookFactWriter, execution_audit::ExecutionAuditWriter,
         metrics_hub::MetricsHub,
     },
     pipeline::{
@@ -68,10 +69,10 @@ use oxide_arb_models::{
 use oxide_arb_repository::{
     clickhouse::ChTimeseriesRepository,
     postgres::{
-        PgPositionRepository, PgReportRepository, PgRiskAuditRepository, PgRiskStateRepository,
-        PgTradeRepository,
+        PgCalibrationRepository, PgFactDataRepository, PgPositionRepository, PgReportRepository,
+        PgRiskAuditRepository, PgRiskStateRepository, PgTradeRepository,
     },
-    traits::{PositionRepository, TradeRepository},
+    traits::{CalibrationRepository, PositionRepository, TradeRepository},
 };
 use oxide_arb_risk::{audit::RiskAuditEvent, engine::RiskEngine};
 use oxide_arb_storage::{cache::TieredCache, clickhouse::ClickHousePool, postgres::PostgresPool};
@@ -94,9 +95,14 @@ pub struct InfraBundle {
     pub trade_repo: Arc<PgTradeRepository>,
     pub position_repo: Arc<PgPositionRepository>,
     pub report_repo: Arc<PgReportRepository>,
+    pub fact_data_repo: Arc<PgFactDataRepository>,
+    pub calibration_repo: Arc<PgCalibrationRepository>,
     pub risk_state_repo: Arc<PgRiskStateRepository>,
     pub timeseries: Arc<ChTimeseriesRepository>,
     pub audit_writer: Arc<ExecutionAuditWriter>,
+    pub balance_fact_writer: Arc<BalanceFactWriter>,
+    pub book_fact_writer: Arc<BookFactWriter>,
+    pub holder_address: String,
 }
 
 /// Data pipeline subsystem: WS event loop, order books, market metadata.
@@ -237,12 +243,14 @@ impl AppContext {
 
         let trade_repo: Arc<dyn TradeRepository> = self.infra.trade_repo.clone();
         let position_repo: Arc<dyn PositionRepository> = self.infra.position_repo.clone();
+        let calibration_repo: Arc<dyn CalibrationRepository> = self.infra.calibration_repo.clone();
         let consumer = PostTradeConsumer {
             risk_engine: Arc::clone(&self.risk.engine),
             risk_metrics: Arc::clone(&self.risk.metrics),
             fsm: Arc::clone(&self.trading.fsm),
             trade_repo: Arc::clone(&trade_repo),
             position_repo,
+            calibration_repo,
             audit_writer: Arc::clone(&self.infra.audit_writer),
             metrics_state: Arc::clone(&self.risk.metrics_state),
             metrics_refresh: self.risk.metrics_refresh.clone(),

@@ -29,7 +29,9 @@ use oxide_arb_models::{
 };
 use oxide_arb_repository::traits::TradeRepository;
 use oxide_arb_risk::{builder::RiskEngineBuilder, clock::utc_clock, engine::RiskEngine};
-use oxide_arb_test_support::mocks::{MockPositionRepository, MockTradeRepository};
+use oxide_arb_test_support::mocks::{
+    MockCalibrationRepository, MockPositionRepository, MockTradeRepository,
+};
 use rust_decimal_macros::dec;
 use std::{sync::Arc, time::Duration};
 use tokio::sync::Notify;
@@ -38,17 +40,67 @@ use tokio_util::sync::CancellationToken;
 struct Harness {
     trade_repo: Arc<MockTradeRepository>,
     position_repo: Arc<MockPositionRepository>,
+    calibration_repo: Arc<MockCalibrationRepository>,
     consumer: PostTradeConsumer,
     capital_manager: Arc<CapitalManager>,
     metrics: Arc<MetricsHub>,
 }
 
+fn scored_snapshot_json(opportunity_id: &OpportunityId) -> serde_json::Value {
+    serde_json::json!({
+        "opportunity_id": opportunity_id,
+        "market_id": "0xpost-trade-market",
+        "event_id": "evt-post-trade",
+        "token_id": "12345",
+        "token_yes": "12345",
+        "token_no": "67890",
+        "side": "buy",
+        "category": "politics",
+        "entry_price": "0.92",
+        "edge_bps": "250",
+        "expected_net_profit": "5",
+        "net_profit_if_correct": "6",
+        "shares": "100",
+        "total_cost": "92",
+        "total_fees": "1",
+        "resolution_prob": 0.99,
+        "resolution_prob_decimal": "0.99",
+        "confidence": 0.99,
+        "confidence_decimal": "0.99",
+        "fill_probability": null,
+        "score": null,
+        "urgency_factor": null,
+        "category_weight": null,
+        "staleness_discount": null,
+        "convergence_secs": 3600,
+        "price_zone": "z97",
+        "duration_bucket": "medium",
+        "depth_used_pct": 10.0,
+        "depth_used_pct_decimal": "10",
+        "staleness": "fresh",
+        "calibration": {
+            "sample_size": 50,
+            "alpha_prior": "2",
+            "beta_prior": "1",
+            "posterior_mean": "0.93",
+            "fallback_tier": 1,
+            "snapshot_hash": null
+        },
+        "book": null,
+        "factors": null,
+        "missing_fields": [],
+        "detected_at": Utc::now(),
+        "schema_version": 2
+    })
+}
+
 fn new_trade(trade_id: TradeId, reservation_id: ReservationId) -> NewTrade {
+    let opportunity_id = OpportunityId::new_v7();
     NewTrade {
         trade_id,
         execution_id: ExecutionId::generate(),
         reservation_id,
-        opportunity_id: OpportunityId::new_v7(),
+        opportunity_id: opportunity_id.clone(),
         market_id: MarketId::new("0xpost-trade-market"),
         event_id: EventId::new("evt-post-trade"),
         token_id: TokenId::new("12345"),
@@ -59,12 +111,7 @@ fn new_trade(trade_id: TradeId, reservation_id: ReservationId) -> NewTrade {
         fee_usd: Usd::new(dec!(1)),
         detected_edge_bps: Some(Bps::new(dec!(250))),
         detected_profit_usd: Some(Usd::new(dec!(5))),
-        scored_snapshot: serde_json::json!({
-            "resolution_prob": 0.99,
-            "price_zone": "z97",
-            "duration_bucket": "medium",
-            "staleness": "fresh"
-        }),
+        scored_snapshot: scored_snapshot_json(&opportunity_id),
         category: MarketCategory::Politics,
         execution_mode: ExecutionMode::Live,
     }
@@ -194,6 +241,7 @@ fn harness() -> Harness {
     let metrics = Arc::new(MetricsHub::new());
     let trade_repo = Arc::new(MockTradeRepository::default());
     let position_repo = Arc::new(MockPositionRepository::default());
+    let calibration_repo = Arc::new(MockCalibrationRepository::default());
     let reservation_config = RiskConfig::default().exposure_reservation_config();
     let exposure = Arc::new(InMemoryExposureReservation::new(reservation_config.clone()));
     let capital_manager = Arc::new(CapitalManager::new(exposure.clone(), reservation_config));
@@ -211,6 +259,7 @@ fn harness() -> Harness {
         fsm,
         trade_repo: trade_repo.clone(),
         position_repo: position_repo.clone(),
+        calibration_repo: calibration_repo.clone(),
         audit_writer: audit_writer(metrics.clone()),
         metrics_state,
         metrics_refresh: None,
@@ -221,6 +270,7 @@ fn harness() -> Harness {
     Harness {
         trade_repo,
         position_repo,
+        calibration_repo,
         consumer,
         capital_manager,
         metrics,
@@ -260,6 +310,7 @@ async fn consumer_is_idempotent_for_replayed_fill() {
         Some(TradeBusinessOutcome::Success)
     );
     assert_eq!(harness.position_repo.positions_snapshot().len(), 1);
+    assert_eq!(harness.calibration_repo.outcome_count(), 1);
     assert_eq!(harness.metrics.post_trade_relay_processed.get(), 1);
 }
 

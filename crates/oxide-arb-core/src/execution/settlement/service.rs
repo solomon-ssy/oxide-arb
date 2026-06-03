@@ -24,10 +24,7 @@ use oxide_arb_models::{
             MarketSettlementInput, MarketSettlementRequest, NewResolutionEvent, SettlementEconomics,
         },
     },
-    enums::{
-        SettlementTrigger,
-        common::{ExecutionMode, RedeemStatus},
-    },
+    enums::common::{ExecutionMode, RedeemStatus, SettlementTrigger},
     types::TokenId,
 };
 use oxide_arb_repository::{

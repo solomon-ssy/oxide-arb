@@ -8,8 +8,7 @@ use super::{
 };
 use futures_util::StreamExt;
 use oxide_arb_models::{
-    domain::pipeline::{PipelineEvent, ShardConnectionStatus},
-    types::TokenId,
+    domain::pipeline::PipelineEvent, enums::pipeline::ShardConnectionStatus, types::TokenId,
 };
 use polymarket_client_sdk_v2::clob::ws::Client as SdkWsClient;
 use polymarket_client_sdk_v2::clob::ws::types::response::WsMessage;
@@ -211,7 +210,7 @@ impl WsShard {
 #[cfg(test)]
 mod dispatch_tests {
     use super::*;
-    use oxide_arb_models::domain::pipeline::ShardConnectionStatus;
+    use oxide_arb_models::enums::pipeline::ShardConnectionStatus;
     use std::sync::{
         Arc,
         atomic::{AtomicU64, Ordering},

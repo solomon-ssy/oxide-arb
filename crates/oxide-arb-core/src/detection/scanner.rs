@@ -105,7 +105,7 @@ impl Scanner {
             observe_ws_to_scan(&scored.trace, &self.metrics);
             self.metrics.opportunities_detected.inc();
             if let Some(writer) = &self.detection_writer {
-                writer.write(scored.opportunity.as_ref());
+                writer.write(scored);
             }
         }
         drop(timer);

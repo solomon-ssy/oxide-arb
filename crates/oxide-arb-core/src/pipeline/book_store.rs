@@ -172,6 +172,13 @@ impl BookStore {
         self.books.len()
     }
 
+    pub fn published_snapshots(&self) -> Vec<(TokenId, Arc<BookSnapshot>)> {
+        self.books
+            .iter()
+            .map(|entry| (entry.key().clone(), entry.value().published.load_full()))
+            .collect()
+    }
+
     /// Load YES+NO published snapshots without copying level data.
     #[inline]
     pub fn load_pair(&self, token_yes: &TokenId, token_no: &TokenId) -> Option<EndgameBookPair> {

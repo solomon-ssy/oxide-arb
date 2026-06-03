@@ -93,12 +93,27 @@ async fn create_outcome_q(
     db: &impl ConnectionTrait,
     outcome: NewCalibrationOutcome,
 ) -> Result<CalibrationOutcomeInfo, StorageError> {
+    let trade_id = outcome.trade_id.clone();
     let am = outcome.into_active_model();
-    let model = OutcomeEntity::insert(am)
-        .exec_with_returning(db)
+    OutcomeEntity::insert(am)
+        .on_conflict(
+            OnConflict::column(OutcomeColumn::TradeId)
+                .do_nothing()
+                .to_owned(),
+        )
+        .exec(db)
         .await
         .map_err(StorageError::from)?;
-    Ok(model.into())
+    OutcomeEntity::find()
+        .filter(OutcomeColumn::TradeId.eq(trade_id))
+        .one(db)
+        .await
+        .map_err(StorageError::from)?
+        .map(Into::into)
+        .ok_or_else(|| StorageError::NotFound {
+            entity: "endgame_calibration_outcome",
+            id: "inserted trade outcome".to_owned(),
+        })
 }
 
 async fn get_unresolved_outcomes_q(

@@ -51,6 +51,10 @@ pub enum TaskId {
     RiskAuditBatch,
     ExecutionAuditWriter,
     DetectionWriter,
+    TickEventsWriter,
+    BookL2Writer,
+    BookSnapshotWriter,
+    BookSnapshotPublisher,
     RiskStatePersist,
     RiskStateDebouncer,
 
@@ -76,7 +80,12 @@ impl TaskId {
             Self::ExecutionHeartbeat => TaskKind::ExecutionHeartbeat,
             Self::RiskTick | Self::ExposureGc | Self::ReportGenerator => TaskKind::ReportScheduler,
             Self::RiskAuditBatch => TaskKind::Audit,
-            Self::ExecutionAuditWriter | Self::DetectionWriter => TaskKind::AnalyticsWriter,
+            Self::ExecutionAuditWriter
+            | Self::DetectionWriter
+            | Self::TickEventsWriter
+            | Self::BookL2Writer
+            | Self::BookSnapshotWriter
+            | Self::BookSnapshotPublisher => TaskKind::AnalyticsWriter,
             Self::RiskStatePersist | Self::RiskStateDebouncer => TaskKind::PositionPersistence,
         }
     }

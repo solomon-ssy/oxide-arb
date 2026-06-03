@@ -45,7 +45,7 @@ Phase 5 不再设计成“Replay Analytics 报告系统”。它是 **Control Fa
 1. 历史成交、miss、risk denial、settlement、reconciliation 没有稳定反哺 live 决策。
 2. detector 复现正确不代表真实 FOK 能成交；成交也不代表组合风险长期可持续。
 3. 当前 CH / PG 事实不完整，无法证明“为什么这个 bucket、盘口、市场、组合状态以后应该降权或拒绝”。
-4. `runtime_config` 是粗粒度 operator overlay，不适合承载有 evidence、TTL、shadow、publication、rollback 的风险控制 artifact。
+4. 旧 mutable key-value `runtime_config` 无法提供 PIT、完整版本、activation history、rollback lineage 和 canonical hash；Phase 5 必须改为 `runtime_config_version` + `runtime_config_activation`。
 5. live hot path 不能查 ClickHouse / Postgres，所以必须把离线证据物化为可原子替换的内存快照。
 
 ### 0.1 非目标
@@ -53,7 +53,7 @@ Phase 5 不再设计成“Replay Analytics 报告系统”。它是 **Control Fa
 - 不提供用户可见 `ReplayMode`。
 - 不提供 `DetectorOnly` / `Execution` / `PortfolioRisk` / `Diagnostic` 等产品模式。
 - 不把 CLI 作为主入口。
-- 不把复杂 factor payload 塞进 `runtime_config`。
+- 不把复杂 factor payload 塞进 runtime config document；旧 mutable key-value `runtime_config` 必须删除。
 - 不设计一个吞掉所有语义的“总控因子”。
 - 不允许 live hot path 同步查询 ClickHouse 或 Postgres。
 - 不为了旧草案保留兼容 alias、re-export 或旧类型名。
@@ -106,7 +106,7 @@ Phase 5 完成时，系统必须做到：
 |---|---|---|
 | ClickHouse | 高容量事实库与物化输入 | append-only / replacing 型；不作为 live 决策系统 |
 | Postgres 交易状态 | trade、position、risk、settlement、reconciliation 权威 | 物化时做 point-in-time join；hot path 不每笔查询 |
-| Postgres 控制 registry | factor value、publication、audit、runtime config version 权威 | 所有状态转换可审计、可回滚 |
+| Postgres 控制 registry | factor value、publication、audit、runtime config version / activation 权威 | 所有状态转换可审计、可回滚 |
 | 内存快照 | live `ControlFactorSnapshot` | `ArcSwap` 原子替换，hot path 只读 |
 
 ### 1.3 Point-in-Time 正确性
@@ -169,7 +169,7 @@ Scheduled materialization 必须配置 `source_delay`，默认窗口为：
 | `endgame_calibration_bucket` | 已有 current state | 不能代替 PIT snapshot |
 | `endgame_calibration_outcome` | schema/trait 有，live writer 缺 | fill 后 unresolved，settlement 后 resolved |
 | `reconciliation_report` | 已有 | reconciliation factor evidence |
-| `runtime_config` | 表/repo 有，live consumer 弱 | 仅保留 coarse operator toggles；复杂控制面迁到 control factor registry |
+| `runtime_config` | 表/repo 有，但 mutable key-value 语义不满足 PIT/evidence | 删除旧表/repo/cache/seed；runtime config 统一迁到 immutable `runtime_config_version` + append-only `runtime_config_activation` |
 
 ### 2.3 新增必要状态
 
@@ -222,9 +222,11 @@ crates/
 
 `oxide-arb-core` owns live fact writers and live factor consumption. It should not own the materialization engine.
 
-### 3.2 为什么不能放进 `runtime_config`
+### 3.2 为什么不能放进 runtime config
 
-`runtime_config` is key-value operator state. Control factors need:
+Phase 5 不保留旧 mutable key-value `runtime_config`。运行时配置必须是 immutable `runtime_config_version` document，并通过 append-only `runtime_config_activation` 生效。
+
+Runtime config version is operator baseline, not evidence-governed control. Control factors need:
 
 - typed dimensions and payloads;
 - evidence and source run lineage;
@@ -235,7 +237,15 @@ crates/
 - immutable audit trail;
 - shadow decision deltas.
 
-Putting this into `runtime_config` would create stringly typed risk logic with no reliable evidence chain.
+Putting this into runtime config would create stringly typed risk logic with no reliable evidence chain.
+
+Phase 5 runtime config rules:
+
+- Delete old `runtime_config` table/entity/repository/cache/seed.
+- Do not add compatibility view, alias repository, or re-export.
+- Runtime config changes are create-version + activate-version, never per-key upsert/delete.
+- Materialization manifests reference fixed `runtime_config_version_id` and `config_hash`.
+- Evidence、TTL、shadow、publication、factor payload、factor rollback belong to control factor registry, not runtime config document.
 
 ---
 
@@ -1713,7 +1723,7 @@ Do not let `oxide-arb-control` depend on raw `clickhouse::Client` or `sea_orm::D
 | `tick_events_l2` | 扩 producer/query contract | 有 row/schema 但 live producer/query 不完整 |
 | `book_snapshots` | 补 writer 和 bootstrap 查询 | L2 replay 必需 |
 | `calibration_snapshots` | 补 producer 和 PIT query | 禁止 current calibration replay |
-| `runtime_config` | 降级为 coarse toggles | 复杂控制迁移到 `runtime_config_version` + factor registry |
+| `runtime_config` | 删除旧 mutable key-value 表/repo/cache/seed | runtime config 迁到 immutable `runtime_config_version` + append-only `runtime_config_activation`；复杂 evidence-governed 控制迁到 factor registry |
 | `endgame_calibration_outcome` | 补 live writer | bucket risk 训练 label |
 | `risk_engine_state` | 增强历史查询 | portfolio evidence 需要 PIT sequence |
 | `position` | 扩展 exit / unwind 字段 | 当前主要覆盖 buy-to-settlement，缺主动退出生命周期 |
@@ -3139,7 +3149,7 @@ Before merging any Phase 5 implementation PR, reviewers must check:
 - 删除旧 CLI-first 设计。
 - 如果存在旧 `DetectionInput` / `DetectionResult` 草案类型，直接删除。
 - Rename old analytics tables or planned tables to `control_factor_*`.
-- Replace `runtime_config`-based complex control with typed registry.
+- Delete old mutable `runtime_config`; replace runtime config with immutable version + append-only activation, and replace evidence-governed controls with typed registry.
 - 重构 scorer/risk/sizer 构造方式，使其消费 `ControlFactorSnapshot`。
 
 禁止：

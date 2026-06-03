@@ -6,19 +6,26 @@ use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::{
     clickhouse::{
         BookSnapshotRow, CalibrationSnapshotRow, OpportunityAuditRow, OpportunityDetectionRow,
-        TickEventRow,
+        TickEventL2Row, TickEventRow,
     },
     domain::{
-        MarkRedeemedParams, NewPosition, NewTrade, PositionInfo, PositionPatch, ReportTradeStats,
-        SettlePositionParams, SettledPositionStats, TradeInfo, TradeObservation,
+        CalibrationBucketInfo, CalibrationOutcomeInfo, MarkRedeemedParams, NewCalibrationOutcome,
+        NewPosition, NewTrade, PositionInfo, PositionPatch, ReportTradeStats, SettlePositionParams,
+        SettledPositionStats, TradeInfo, TradeObservation, UpsertCalibration,
     },
-    enums::common::{
-        PositionStatus, RedeemStatus, SettlementAccountingStatus, SettlementTrigger,
-        TradeBusinessOutcome, TradeState,
+    enums::{
+        calibration::{DurationBucket, PriceZone},
+        common::{
+            MarketCategory, PositionStatus, RedeemStatus, SettlementAccountingStatus,
+            SettlementTrigger, TradeBusinessOutcome, TradeState,
+        },
     },
-    types::{MarketId, PositionId, TradeId, Usd},
+    types::{MarketId, OpportunityId, PositionId, TokenId, TradeId, Usd},
 };
-use oxide_arb_repository::traits::{PositionRepository, TimeseriesRepository, TradeRepository};
+use oxide_arb_repository::traits::{
+    CalibrationRepository, EvidenceTimeseriesRepository, MarketFilter, PositionRepository,
+    TimeWindow, TimeseriesFactWriter, TradeRepository,
+};
 use std::{
     collections::HashMap,
     sync::{
@@ -68,9 +75,105 @@ pub struct MockPositionRepository {
     positions: Mutex<HashMap<String, PositionInfo>>,
 }
 
+#[derive(Default)]
+pub struct MockCalibrationRepository {
+    outcomes: Mutex<HashMap<String, CalibrationOutcomeInfo>>,
+}
+
+impl MockCalibrationRepository {
+    pub fn outcome_count(&self) -> usize {
+        self.outcomes.lock().unwrap().len()
+    }
+}
+
 impl MockPositionRepository {
     pub fn positions_snapshot(&self) -> Vec<PositionInfo> {
         self.positions.lock().unwrap().values().cloned().collect()
+    }
+}
+
+#[async_trait]
+impl CalibrationRepository for MockCalibrationRepository {
+    async fn get_bucket(
+        &self,
+        _category: MarketCategory,
+        _price_zone: PriceZone,
+        _duration_bucket: DurationBucket,
+    ) -> Result<Option<CalibrationBucketInfo>, StorageError> {
+        Ok(None)
+    }
+
+    async fn get_buckets_by_category(
+        &self,
+        _category: MarketCategory,
+    ) -> Result<Vec<CalibrationBucketInfo>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn get_all_buckets(&self) -> Result<Vec<CalibrationBucketInfo>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn upsert(
+        &self,
+        _bucket: UpsertCalibration,
+    ) -> Result<CalibrationBucketInfo, StorageError> {
+        Err(StorageError::Codec(
+            "MockCalibrationRepository::upsert is not implemented".into(),
+        ))
+    }
+
+    async fn create_outcome(
+        &self,
+        outcome: NewCalibrationOutcome,
+    ) -> Result<CalibrationOutcomeInfo, StorageError> {
+        let mut outcomes = self.outcomes.lock().unwrap();
+        if let Some(existing) = outcomes.get(outcome.trade_id.as_str()) {
+            return Ok(existing.clone());
+        }
+        let info = CalibrationOutcomeInfo {
+            id: i64::try_from(outcomes.len()).unwrap_or(i64::MAX) + 1,
+            trade_id: outcome.trade_id.clone(),
+            opportunity_id: outcome.opportunity_id,
+            market_id: outcome.market_id,
+            category: outcome.category,
+            price_zone: outcome.price_zone,
+            duration_bucket: outcome.duration_bucket,
+            predicted_yes: outcome.predicted_yes,
+            actual_yes: outcome.actual_yes,
+            entry_price: outcome.entry_price,
+            confidence_at_entry: outcome.confidence_at_entry,
+            convergence_secs: outcome.convergence_secs,
+            resolved_at: outcome.resolved_at,
+            created_at: Utc::now(),
+        };
+        outcomes.insert(outcome.trade_id.to_string(), info.clone());
+        drop(outcomes);
+        Ok(info)
+    }
+
+    async fn get_unresolved_outcomes(&self) -> Result<Vec<CalibrationOutcomeInfo>, StorageError> {
+        Ok(self
+            .outcomes
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|outcome| outcome.actual_yes.is_none())
+            .cloned()
+            .collect())
+    }
+
+    async fn resolve_outcome(&self, outcome_id: i64, actual_yes: bool) -> Result<(), StorageError> {
+        let mut outcomes = self.outcomes.lock().unwrap();
+        if let Some(outcome) = outcomes
+            .values_mut()
+            .find(|outcome| outcome.id == outcome_id)
+        {
+            outcome.actual_yes = Some(actual_yes);
+            outcome.resolved_at = Some(Utc::now());
+        }
+        drop(outcomes);
+        Ok(())
     }
 }
 
@@ -750,75 +853,96 @@ impl MockTimeseriesRepository {
 }
 
 #[async_trait]
-impl TimeseriesRepository for MockTimeseriesRepository {
+impl TimeseriesFactWriter for MockTimeseriesRepository {
     async fn insert_tick_events(&self, _events: &[TickEventRow]) -> Result<(), StorageError> {
         Ok(())
     }
 
-    async fn insert_book_snapshot(&self, _snapshot: &BookSnapshotRow) -> Result<(), StorageError> {
+    async fn insert_l2_events(&self, _rows: &[TickEventL2Row]) -> Result<(), StorageError> {
         Ok(())
     }
 
-    async fn insert_opportunity_audit(
-        &self,
-        audit: &OpportunityAuditRow,
-    ) -> Result<(), StorageError> {
-        self.audits.lock().unwrap().push(audit.clone());
+    async fn insert_book_snapshots(&self, _rows: &[BookSnapshotRow]) -> Result<(), StorageError> {
         Ok(())
     }
 
-    async fn insert_calibration_snapshot(
-        &self,
-        _snapshot: &CalibrationSnapshotRow,
-    ) -> Result<(), StorageError> {
-        Ok(())
-    }
-
-    async fn insert_detection_batch(
+    async fn insert_detections(
         &self,
         _rows: &[OpportunityDetectionRow],
     ) -> Result<(), StorageError> {
         Ok(())
     }
 
-    async fn query_tick_events(
+    async fn insert_audits(&self, rows: &[OpportunityAuditRow]) -> Result<(), StorageError> {
+        self.audits.lock().unwrap().extend(rows.iter().cloned());
+        Ok(())
+    }
+
+    async fn insert_calibration_snapshots(
         &self,
-        _token_id: &str,
-        _from: chrono::DateTime<Utc>,
-        _to: chrono::DateTime<Utc>,
+        _rows: &[CalibrationSnapshotRow],
+    ) -> Result<(), StorageError> {
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl EvidenceTimeseriesRepository for MockTimeseriesRepository {
+    async fn tick_events(
+        &self,
+        _token_ids: &[TokenId],
+        _window: TimeWindow,
         _limit: u64,
     ) -> Result<Vec<TickEventRow>, StorageError> {
         Ok(vec![])
     }
 
-    async fn query_opportunity_audit(
+    async fn l2_events(
         &self,
-        _from: chrono::DateTime<Utc>,
-        _to: chrono::DateTime<Utc>,
-    ) -> Result<Vec<OpportunityAuditRow>, StorageError> {
+        _token_ids: &[TokenId],
+        _window: TimeWindow,
+    ) -> Result<Vec<TickEventL2Row>, StorageError> {
         Ok(vec![])
     }
 
-    async fn query_opportunity_lifecycle(
+    async fn book_snapshots_before(
         &self,
-        opportunity_id: &str,
+        _token_ids: &[TokenId],
+        _before: chrono::DateTime<Utc>,
+        _limit_per_token: usize,
+    ) -> Result<Vec<BookSnapshotRow>, StorageError> {
+        Ok(vec![])
+    }
+
+    async fn detections(
+        &self,
+        _filter: MarketFilter,
+        _window: TimeWindow,
+    ) -> Result<Vec<OpportunityDetectionRow>, StorageError> {
+        Ok(vec![])
+    }
+
+    async fn audits(
+        &self,
+        opportunity_ids: &[OpportunityId],
     ) -> Result<Vec<OpportunityAuditRow>, StorageError> {
+        let ids = opportunity_ids
+            .iter()
+            .cloned()
+            .collect::<std::collections::HashSet<_>>();
         Ok(self
             .audits
             .lock()
             .unwrap()
             .iter()
-            .filter(|row| row.opportunity_id == opportunity_id)
+            .filter(|row| ids.contains(&row.opportunity_id))
             .cloned()
             .collect())
     }
 
-    async fn query_calibration_history(
+    async fn calibration_snapshots(
         &self,
-        _category: &str,
-        _price_zone: &str,
-        _duration_bucket: &str,
-        _days: u32,
+        _window: TimeWindow,
     ) -> Result<Vec<CalibrationSnapshotRow>, StorageError> {
         Ok(vec![])
     }

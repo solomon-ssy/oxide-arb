@@ -39,7 +39,7 @@ Live Facts
 - 不实现 API/UI/Scheduler。
 - 不接入 live hot path。
 - 不引入用户可见 `ReplayMode`、`DetectorOnly`、`Execution`、`PortfolioRisk`、`Diagnostic` 等产品模式。
-- 不把复杂 factor payload 塞回 `runtime_config`。
+- 不把复杂 factor payload 塞回 runtime config document；旧 mutable key-value `runtime_config` 不再作为 Phase 5 运行时配置事实源。
 - 不设计吞掉所有语义的“总控因子”。
 
 ---
@@ -52,7 +52,7 @@ Live Facts
 2. Money、price、shares 的业务计算必须使用 `Decimal` 或现有 newtypes：`Usd`、`Shares`、`Price`、`MicroUsd`、`MicroShares`、`MicroPrice`。CH row 可以为了压缩使用 primitive，但 evidence builder 和 factor builder 不得裸用 `f64` 表达业务不变量。
 3. Endgame 当前是 settlement directional bet，默认 hold-to-resolution。主动 exit/stop-loss 是单独产品决策，不能隐含在 control factor 中。
 4. 自动控制因子默认只能收紧风险。所有 multiplier 自动生成边界必须是 `0..=1`。降低 edge、放大 budget、放大 Kelly、提高 max positions 必须人工审批、短 TTL、可回滚、可审计。
-5. 缺 evidence 的控制因子等同于未治理 runtime config 变更，禁止进入 `Candidate` 或 `Published`。
+5. 缺 evidence 的控制因子等同于未治理 runtime config version 变更，禁止进入 `Candidate` 或 `Published`。
 
 ### 1.2 Data Plane / Control Plane / Hot Path
 
@@ -60,7 +60,7 @@ Live Facts
 |---|---|---|
 | ClickHouse facts | 高容量事实与 evidence 查询输入 | append-only / replacing 型，不作为 live 决策系统 |
 | Postgres trading state | trade、position、risk、settlement、reconciliation 权威 | materialization 做 PIT join；hot path 不每笔查询 |
-| Postgres control registry | factor、publication、audit、runtime config version 权威 | 所有状态转换可审计、可回滚 |
+| Postgres control registry | factor、publication、audit、runtime config version / activation 权威 | 所有状态转换可审计、可回滚 |
 | In-memory snapshot | live `ControlFactorSnapshot` | `ArcSwap` 原子替换，hot path 只读 |
 
 任何 live hot path 同步查询 ClickHouse/Postgres 都是 Phase 5 架构违规。
@@ -144,9 +144,11 @@ crates/
 
 `oxide-arb-control` 可以依赖 `models`、`algorithm`、`risk`、`repository`、`error`，但不能反向依赖 `core`。
 
-### 2.3 为什么不能放进 `runtime_config`
+### 2.3 为什么不能放进 runtime config
 
-`runtime_config` 是 coarse operator overlay。Control factors 需要：
+Phase 5 不保留旧 mutable key-value `runtime_config` 作为事实源。运行时配置必须是 immutable `runtime_config_version` document，并通过 append-only `runtime_config_activation` 生效。
+
+Runtime config version 是 operator baseline，不是 evidence artifact。Control factors 需要：
 
 - typed dimensions and payloads；
 - evidence and source run lineage；
@@ -157,7 +159,14 @@ crates/
 - immutable audit trail；
 - shadow decision deltas。
 
-把这些塞进 `runtime_config` 会得到 stringly typed 风险逻辑，缺少 evidence chain、publication boundary 和 rollback 语义。
+把这些塞进 runtime config document 会得到 stringly typed 风险逻辑，缺少 evidence chain、publication boundary 和 typed rollback 语义。
+
+因此：
+
+- 旧 `runtime_config` table/entity/repository/cache/seed 必须删除。
+- 不允许 compatibility view、alias repository、per-key upsert/delete API。
+- Runtime config 变更只能通过 create immutable version + append activation 完成。
+- Control factor 的 evidence、TTL、shadow、publication、payload、rollback 不得进入 runtime config document。
 
 ---
 
@@ -328,7 +337,7 @@ Phase 5 是控制面重构，不为旧草案保留兼容层。允许并推荐：
 - 删除旧 `DetectorOnly`/`Execution`/`PortfolioRisk`/`Diagnostic` 产品模式。
 - 如果存在旧 `DetectionInput`/`DetectionResult` 草案类型，直接删除。
 - Rename old analytics planned tables to `control_factor_*`。
-- Replace `runtime_config`-based complex control with typed registry。
+- Delete old mutable `runtime_config`; replace runtime config with immutable version + append-only activation, and replace evidence-governed controls with typed registry。
 - 重构 scorer/risk/sizer 构造方式，使其消费 `ControlFactorSnapshot`。
 
 绝对禁止：
@@ -364,7 +373,7 @@ Phase 5.0 完成后必须满足：
 
 1. 所有原 Phase 5 章节都有明确子阶段归属。
 2. 任何实施 PR 都能根据子阶段文件判断所属范围、前置依赖和退出条件。
-3. `runtime_config` 与 control factor registry 的边界清晰。
+3. `runtime_config_version` / `runtime_config_activation` 与 control factor registry 的边界清晰，且不保留旧 mutable `runtime_config`。
 4. `oxide-arb-control` 与 `oxide-arb-core` 的 ownership 清晰。
 5. 五类 factor 的 typed artifact、evidence、publication、expiry/load failure 语义冻结。
 6. 破坏式变更原则清晰，明确禁止 re-export/alias/compat shim。

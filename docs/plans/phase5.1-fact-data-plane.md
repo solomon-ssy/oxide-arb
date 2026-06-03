@@ -23,6 +23,28 @@ Phase 5.1 只解决一件事：**历史事实必须足够完整、可查询、�
 | Migration/schema tests | iden/entity/schema graph/migration tests |
 | Missing-value policy | nullable/coverage 语义，禁止 `0`/空字符串伪造事实 |
 
+### 0.1.1 Runtime config 裁决
+
+Phase 5.1 采用破坏式替换：旧 mutable key-value `runtime_config` 删除，`runtime_config_version` + `runtime_config_activation` 成为 runtime config 的唯一事实源。
+
+删除范围：
+
+- `runtime_config` table/entity/iden。
+- per-key `RuntimeConfigKey` 持久化行语义。
+- `RuntimeConfigRepository::{get, upsert, get_all, delete}`。
+- per-key cached runtime config wrapper。
+- 每个 key 一行的 seed。
+
+替代语义：
+
+- `runtime_config_version` 保存完整 immutable typed config document 与 canonical `config_hash`。
+- `runtime_config_activation` 保存 append-only 激活历史。
+- current config 由最新 activation 推导，PIT config 由 `load_active_at(timestamp)` 推导。
+- rollback 是追加一条指向旧 version 的 activation，不修改旧 row。
+- materialization manifest 必须引用固定 `runtime_config_version_id` + `config_hash`。
+
+`runtime_config_version` 是 operator baseline，不承载 evidence、TTL、shadow、publication、factor payload 或 factor rollback；这些属于 typed control factor registry。
+
 ### 0.2 非目标
 
 - 不实现 PIT resolver。
@@ -58,7 +80,8 @@ Phase 5.1 只解决一件事：**历史事实必须足够完整、可查询、�
 | `endgame_calibration_bucket` | 只能代表 current state，不能替代 PIT snapshot |
 | `endgame_calibration_outcome` | fill 后 unresolved，settlement 后 resolved |
 | `reconciliation_report` | 供 reconciliation evidence 使用 |
-| `runtime_config` | 降级为 coarse toggles；复杂控制迁移到 versioned config + factor registry |
+| `runtime_config` | 旧 mutable key-value 表必须删除；不能作为 current-state truth 继续存在 |
+| `runtime_config_version` / `runtime_config_activation` | runtime config 的唯一事实源；支持 immutable version、append-only activation、PIT lookup、rollback lineage |
 
 ### 1.3 新增状态
 
@@ -281,12 +304,61 @@ runtime_config_activation
 
 要求：
 
-- immutable version；
-- config hash；
-- activation record；
-- rollback target；
-- audit event；
-- materialization manifest 必须引用 fixed version/ref。
+- 删除旧 `runtime_config` mutable key-value 表，不保留 compatibility view/alias/re-export；
+- immutable full-document version；
+- canonical config hash；
+- append-only activation record；
+- rollback target as activation lineage；
+- audit event linkage；
+- `load_current()` 由最新 activation 推导；
+- `load_active_at(timestamp)` 由 activation history 推导；
+- materialization manifest 必须引用 fixed `runtime_config_version_id` + `config_hash`。
+
+`runtime_config_version` 最少字段：
+
+```text
+runtime_config_version_id UUID primary key
+config_hash text not null unique
+schema_version integer not null
+config_json jsonb not null
+source text not null -- bootstrap / operator / import
+created_by text not null
+reason text not null
+created_at timestamptz not null
+```
+
+`runtime_config_activation` 最少字段：
+
+```text
+activation_id UUID primary key
+runtime_config_version_id UUID not null
+activated_at timestamptz not null
+activated_by text not null
+reason text not null
+previous_runtime_config_version_id UUID null
+rollback_target_version_id UUID null
+audit_event_id UUID null
+created_at timestamptz not null
+```
+
+Runtime config document 必须是 typed document，而不是 key-value bag：
+
+```rust
+pub struct RuntimeConfigDocument {
+    pub schema_version: u32,
+    pub operator: OperatorRuntimeConfig,
+    pub detection: DetectionRuntimeConfig,
+    pub execution: ExecutionRuntimeConfig,
+    pub sizing: SizingRuntimeConfig,
+    pub risk_limits: RiskLimitRuntimeConfig,
+}
+```
+
+边界：
+
+- `maintenance_mode`、`dry_run_mode` 等 operator toggles 进入 runtime config document。
+- strategy/risk baseline 可进入 runtime config document，但自动 evidence-driven 调整必须走 control factor。
+- evidence、TTL、shadow、publication、factor payload、factor rollback 禁止进入 runtime config document。
 
 ### 3.3 Balance evidence
 
@@ -394,11 +466,12 @@ Settlement rows 不允许丢掉 detection/scoring attribution。
 
 1. Stop treating old planned `analytics_factor_*` names as valid。
 2. Create new `control_factor_*` schema from catalog。
-3. Extend or replace CH row types in `oxide-arb-models/src/clickhouse`。
-4. Update CH DDL under `oxide-arb-storage/src/clickhouse/sql`。
-5. Update `TimeseriesRepository` traits and implementations。
-6. Update writers in `oxide-arb-core`。
-7. Add migration tests and schema graph tests。
+3. Delete old mutable `runtime_config` schema/entity/repository/cache/seed；create `runtime_config_version` + `runtime_config_activation` as the only runtime config persistence path。
+4. Extend or replace CH row types in `oxide-arb-models/src/clickhouse`。
+5. Update CH DDL under `oxide-arb-storage/src/clickhouse/sql`。
+6. Update `TimeseriesRepository` traits and implementations。
+7. Update writers in `oxide-arb-core`。
+8. Add migration tests and schema graph tests。
 
 不要添加兼容 view，不要 re-export 旧名称。
 
@@ -414,6 +487,7 @@ Settlement rows 不允许丢掉 detection/scoring attribution。
 | Audit writer | rejection/terminal/settlement attribution 不丢失 |
 | Calibration snapshot | PIT snapshot 可查，current state 不污染历史 |
 | Balance/token snapshot | internal/external/drift 字段正确，token_id 粒度 |
+| Runtime config versioning | default version + initial activation、PIT lookup、rollback activation、旧 `runtime_config` 不存在 |
 | Migration tests | iden/entity/schema graph/migration consistent |
 | Missing-value tests | 缺字段不被 `0`/空字符串/default enum 替代 |
 
@@ -431,6 +505,7 @@ Phase 5.1 完成后必须满足：
 6. 新增 PG schema 全部通过 schema catalog 约束。
 7. `control_factor_*` baseline 表存在，且无旧 analytics alias/view/re-export。
 8. Missing values 进入 coverage report，而不是进入默认值。
+9. 旧 `runtime_config` mutable key-value 表、per-key repository/cache/seed 已删除；runtime config 只能通过 immutable version + activation 生效。
 
 ---
 
@@ -443,4 +518,5 @@ Phase 5.1 完成后必须满足：
 - token-level balance snapshot 不存在。
 - materialization 所需 queries 依赖 ad hoc SQL。
 - migration 中出现裸写业务 DDL。
+- 旧 `runtime_config` 表、compatibility view、alias repository、per-key upsert/delete API 仍存在。
 - 出现任何 compatibility re-export、alias endpoint、旧 planned table view。

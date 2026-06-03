@@ -4,7 +4,7 @@ use crate::{
     domain::trade::TradeObservation,
     enums::{
         common::{MarketCategory, Side, StalenessLevel, TradeBusinessOutcome, TradeState},
-        execution::ExecutionOutcome,
+        execution::{ExecutionOutcome, ExecutionOutcomeSummary},
     },
     types::{
         Bps, EventId, ExecutionId, MarketId, OpportunityId, OrderId, Price, ReservationId, Shares,
@@ -54,27 +54,6 @@ pub struct ExecutionPlan {
     pub reservation_id: ReservationId,
     pub detected_at: DateTime<Utc>,
     pub planned_at: DateTime<Utc>,
-}
-
-/// Lightweight execution outcome for pipeline results — no clone of full [`ExecutionOutcome`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub enum ExecutionOutcomeSummary {
-    Filled { order_id: OrderId },
-    Miss,
-    Failed,
-}
-
-impl ExecutionOutcomeSummary {
-    #[must_use]
-    pub fn from_outcome(outcome: &ExecutionOutcome) -> Self {
-        match outcome {
-            ExecutionOutcome::Filled { order_id, .. } => Self::Filled {
-                order_id: order_id.clone(),
-            },
-            ExecutionOutcome::Miss { .. } => Self::Miss,
-            ExecutionOutcome::Failed { .. } => Self::Failed,
-        }
-    }
 }
 
 /// Result of the full execution pipeline.

@@ -38,7 +38,6 @@ use oxide_arb_models::{
     domain::{
         book::BookLevel,
         calibration::{BucketKey, CalibrationSnapshot},
-        execution::ExecutionOutcomeSummary,
         latency::LatencyTrace,
         opportunity::{EndgameMeta, Opportunity},
     },
@@ -47,6 +46,7 @@ use oxide_arb_models::{
         common::{
             ExecutionMode, MarketCategory, Side, StalenessLevel, TradeBusinessOutcome, TradeState,
         },
+        execution::ExecutionOutcomeSummary,
         opportunity::PayoutModel,
     },
     types::{
@@ -54,7 +54,9 @@ use oxide_arb_models::{
     },
 };
 use oxide_arb_risk::{builder::RiskEngineBuilder, clock::utc_clock, engine::RiskEngine};
-use oxide_arb_test_support::mocks::{MockPositionRepository, MockTradeRepository};
+use oxide_arb_test_support::mocks::{
+    MockCalibrationRepository, MockPositionRepository, MockTradeRepository,
+};
 use polymarket_client_sdk_v2::{
     POLYGON,
     clob::{Client as SdkClient, Config as SdkConfig},
@@ -78,6 +80,7 @@ struct LiveFixture {
     scored: Arc<ScoredOpportunity>,
     trade_repo: Arc<MockTradeRepository>,
     position_repo: Arc<MockPositionRepository>,
+    calibration_repo: Arc<MockCalibrationRepository>,
     exposure: Arc<InMemoryExposureReservation>,
     fsm: Arc<ExecutionFSM>,
     risk_engine: Arc<RiskEngine>,
@@ -400,6 +403,7 @@ fn fixture(clob_client: Option<Arc<ClobClient>>) -> LiveFixture {
     seed_books(&book_store, &scored);
     let trade_repo = Arc::new(MockTradeRepository::default());
     let position_repo = Arc::new(MockPositionRepository::default());
+    let calibration_repo = Arc::new(MockCalibrationRepository::default());
     let fee_calculator = Arc::new(FeeCalculator::default());
     let metrics_state = Arc::new(RiskMetricsState::new(Arc::new(ApiHealthTracker::new(
         Duration::from_secs(60),
@@ -450,6 +454,7 @@ fn fixture(clob_client: Option<Arc<ClobClient>>) -> LiveFixture {
         scored,
         trade_repo,
         position_repo,
+        calibration_repo,
         exposure,
         fsm,
         risk_engine,
@@ -505,6 +510,7 @@ async fn live_pipeline_fill_observed_then_consumer_settles() {
         fsm: fixture.fsm,
         trade_repo: fixture.trade_repo.clone(),
         position_repo: fixture.position_repo,
+        calibration_repo: fixture.calibration_repo,
         audit_writer: fixture.audit_writer,
         metrics_state: fixture.metrics_state,
         metrics_refresh: None,

@@ -6,11 +6,12 @@ use crate::{
         common::{ExecutionMode, ReportType},
         lifecycle::ShutdownStage,
         risk::BreakerStateName,
-        runtime_config::RuntimeConfigKey,
+        runtime_config::{RuntimeConfigActivationKind, RuntimeConfigVersionSource},
     },
-    types::{PeriodId, Probability, Usd},
+    types::{PeriodId, Probability, RuntimeConfigActivationId, RuntimeConfigVersionId, Usd},
 };
 use chrono::{DateTime, NaiveDate, Utc};
+use rust_decimal::Decimal;
 use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
 use serde::{Deserialize, Serialize};
 
@@ -56,28 +57,129 @@ pub struct ShutdownProgress {
 
 // ── Runtime config ───────────────────────────────────────────────────
 
-/// DB row projection for the `runtime_config` table.
-#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]
-#[sea_orm(entity = "crate::entities::runtime_config::Entity")]
-pub struct RuntimeConfigInfo {
-    pub key: RuntimeConfigKey,
-    pub value: serde_json::Value,
-    pub description: Option<String>,
-    pub updated_by: String,
-    pub updated_at: DateTime<Utc>,
+/// Versioned runtime configuration document.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeConfigDocument {
+    pub schema_version: i32,
+    pub operator: OperatorRuntimeConfig,
+    pub detection: DetectionRuntimeConfig,
+    pub execution: ExecutionRuntimeConfig,
+    pub sizing: SizingRuntimeConfig,
+    pub risk_limits: RiskLimitRuntimeConfig,
 }
 
-info_from_model!(RuntimeConfigInfo, crate::entities::runtime_config::Model, {
-    key, value, description, updated_by, updated_at,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OperatorRuntimeConfig {
+    pub maintenance_mode: bool,
+    pub dry_run_mode: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DetectionRuntimeConfig {
+    pub min_profit_threshold_usd: Decimal,
+    pub endgame_hours_before_close: u32,
+    pub convergence_threshold: Decimal,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecutionRuntimeConfig {
+    pub max_slippage_bps: u32,
+    pub order_timeout_secs: u32,
+    pub cooldown_after_trade_secs: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SizingRuntimeConfig {
+    pub kelly_fraction: Decimal,
+    pub max_position_fraction_of_book: Decimal,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RiskLimitRuntimeConfig {
+    pub max_portfolio_exposure_usd: Usd,
+    pub max_single_position_usd: Usd,
+    pub max_daily_loss_usd: Usd,
+    pub circuit_breaker_threshold: u32,
+}
+
+/// DB row projection for the immutable `runtime_config_version` table.
+#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]
+#[sea_orm(entity = "crate::entities::runtime_config_version::Entity")]
+pub struct RuntimeConfigVersionInfo {
+    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub config_hash: String,
+    pub schema_version: i32,
+    pub config_json: serde_json::Value,
+    pub source: RuntimeConfigVersionSource,
+    pub created_by: String,
+    pub reason: String,
+    pub created_at: DateTime<Utc>,
+}
+
+info_from_model!(RuntimeConfigVersionInfo, crate::entities::runtime_config_version::Model, {
+    runtime_config_version_id, config_hash, schema_version, config_json, source,
+    created_by, reason, created_at,
 });
 
-/// Upsert payload for the `runtime_config` table.
+/// Insert payload for `runtime_config_version`.
 #[derive(Debug, Clone, DeriveIntoActiveModel)]
-#[sea_orm(active_model = "crate::entities::runtime_config::ActiveModel")]
-pub struct UpsertRuntimeConfig {
-    pub key: RuntimeConfigKey,
-    pub value: serde_json::Value,
-    pub updated_by: String,
+#[sea_orm(active_model = "crate::entities::runtime_config_version::ActiveModel")]
+pub struct NewRuntimeConfigVersion {
+    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub config_hash: String,
+    pub schema_version: i32,
+    pub config_json: serde_json::Value,
+    pub source: RuntimeConfigVersionSource,
+    pub created_by: String,
+    pub reason: String,
+}
+
+/// DB row projection for append-only runtime config activation history.
+#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]
+#[sea_orm(entity = "crate::entities::runtime_config_activation::Entity")]
+pub struct RuntimeConfigActivationInfo {
+    pub runtime_config_activation_id: RuntimeConfigActivationId,
+    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub activated_at: DateTime<Utc>,
+    pub activated_by: String,
+    pub reason: String,
+    pub activation_kind: RuntimeConfigActivationKind,
+    pub previous_runtime_config_version_id: Option<RuntimeConfigVersionId>,
+    pub rollback_target_version_id: Option<RuntimeConfigVersionId>,
+    pub audit_event_id: Option<i64>,
+    pub created_at: DateTime<Utc>,
+}
+
+info_from_model!(
+    RuntimeConfigActivationInfo,
+    crate::entities::runtime_config_activation::Model,
+    {
+        runtime_config_activation_id,
+        runtime_config_version_id,
+        activated_at,
+        activated_by,
+        reason,
+        activation_kind,
+        previous_runtime_config_version_id,
+        rollback_target_version_id,
+        audit_event_id,
+        created_at,
+    }
+);
+
+/// Insert payload for `runtime_config_activation`.
+#[derive(Debug, Clone, DeriveIntoActiveModel)]
+#[sea_orm(active_model = "crate::entities::runtime_config_activation::ActiveModel")]
+pub struct NewRuntimeConfigActivation {
+    pub runtime_config_activation_id: RuntimeConfigActivationId,
+    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub activated_at: DateTime<Utc>,
+    pub activated_by: String,
+    pub reason: String,
+    pub activation_kind: RuntimeConfigActivationKind,
+    pub previous_runtime_config_version_id: Option<RuntimeConfigVersionId>,
+    pub rollback_target_version_id: Option<RuntimeConfigVersionId>,
+    pub audit_event_id: Option<i64>,
 }
 
 // ── Accounting ───────────────────────────────────────────────────────

@@ -18,6 +18,8 @@ use crate::{
 pub enum EndgameCalibrationOutcome {
     Table,
     Id,
+    TradeId,
+    OpportunityId,
     MarketId,
     Category,
     PriceZone,
@@ -41,6 +43,16 @@ pub fn table() -> TableCreateStatement {
                 .not_null()
                 .auto_increment()
                 .primary_key(),
+        )
+        .col(
+            ColumnDef::new(EndgameCalibrationOutcome::TradeId)
+                .text()
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(EndgameCalibrationOutcome::OpportunityId)
+                .text()
+                .not_null(),
         )
         .col(
             ColumnDef::new(EndgameCalibrationOutcome::MarketId)
@@ -110,6 +122,18 @@ pub fn table() -> TableCreateStatement {
 
 pub fn indexes() -> Vec<IndexSpec> {
     vec![
+        IndexSpec::sea_query(
+            "idx_cal_outcomes_trade_unique",
+            calibration_outcome_table_name,
+            IndexBuildMode::Transactional,
+            Index::create()
+                .name("idx_cal_outcomes_trade_unique")
+                .table(EndgameCalibrationOutcome::Table)
+                .col(EndgameCalibrationOutcome::TradeId)
+                .unique()
+                .to_owned(),
+            "one calibration outcome per durable trade",
+        ),
         IndexSpec::sea_query(
             "idx_cal_outcomes_market",
             calibration_outcome_table_name,

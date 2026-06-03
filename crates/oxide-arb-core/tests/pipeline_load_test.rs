@@ -61,6 +61,7 @@ async fn hundred_tokens_thousand_snapshots_monotonic_versions() {
         metrics: Arc::clone(&metrics),
         alerts,
         backpressure,
+        book_fact_writer: None,
         book_shard_count: 4,
         book_channel_capacity: 8,
         shutdown: shutdown.clone(),

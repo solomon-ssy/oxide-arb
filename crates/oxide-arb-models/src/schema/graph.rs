@@ -83,6 +83,7 @@ fn topological_order(reverse: bool) -> Vec<&'static TableSpec> {
 #[cfg(test)]
 mod tests {
     use super::{create_order, drop_order};
+    use crate::schema::catalog;
 
     #[test]
     fn drop_order_is_reverse_create_order() {
@@ -97,6 +98,47 @@ mod tests {
                 .map(|spec| (spec.table_name)())
                 .rev()
                 .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn phase51_fact_plane_tables_are_cataloged_without_legacy_aliases() {
+        let tables = catalog::tables()
+            .into_iter()
+            .map(|spec| (spec.table_name)())
+            .collect::<std::collections::BTreeSet<_>>();
+
+        for required in [
+            "balance_snapshot",
+            "token_balance_snapshot",
+            "runtime_config_version",
+            "runtime_config_activation",
+            "control_factor_materialization_run",
+            "control_factor_stage_report",
+            "control_factor_value",
+            "control_factor_publication",
+            "control_factor_audit_event",
+            "control_factor_shadow_decision",
+            "control_factor_training_dataset",
+            "position_exit_plan",
+            "position_exit_execution",
+            "position_unwind_audit",
+        ] {
+            assert!(
+                tables.contains(required),
+                "Phase 5.1 required table `{required}` must be registered in the schema catalog"
+            );
+        }
+
+        assert!(
+            !tables.contains("runtime_config"),
+            "legacy mutable runtime_config table must not return"
+        );
+        assert!(
+            tables
+                .iter()
+                .all(|table| !table.starts_with("analytics_factor_")),
+            "legacy analytics_factor_* aliases are forbidden"
         );
     }
 }

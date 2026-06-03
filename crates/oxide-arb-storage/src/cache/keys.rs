@@ -8,9 +8,8 @@ use oxide_arb_models::{
     enums::{
         calibration::{DurationBucket, PriceZone},
         common::MarketCategory,
-        runtime_config::RuntimeConfigKey,
     },
-    types::{EventId, MarketId},
+    types::{EventId, MarketId, RuntimeConfigVersionId},
 };
 use std::time::Duration;
 
@@ -54,11 +53,11 @@ pub enum CacheKey {
     Balance,
 
     // ── Configuration ───────────────────────────────────────────────────
-    /// Runtime configuration key-value pair.
-    RuntimeConfig { key: RuntimeConfigKey },
+    /// Active runtime configuration version document.
+    ActiveRuntimeConfig,
 
-    /// Bulk cache of all runtime configuration entries.
-    AllRuntimeConfig,
+    /// Immutable runtime configuration version document by ID.
+    RuntimeConfigVersion { version_id: RuntimeConfigVersionId },
 }
 
 impl CacheKey {
@@ -78,8 +77,8 @@ impl CacheKey {
             Self::PositionSummary { market_id } => format!("pos:{market_id}"),
             Self::RiskState => "risk:state".to_owned(),
             Self::Balance => "bal:polymarket".to_owned(),
-            Self::RuntimeConfig { key } => format!("cfg:{}", key.as_str()),
-            Self::AllRuntimeConfig => "cfg:__all__".to_owned(),
+            Self::ActiveRuntimeConfig => "cfg:active".to_owned(),
+            Self::RuntimeConfigVersion { version_id } => format!("cfg:version:{version_id}"),
         }
     }
 
@@ -96,7 +95,7 @@ impl CacheKey {
                 Duration::from_secs(3600)
             }
             Self::PositionSummary { .. } => Duration::from_secs(30),
-            Self::RiskState | Self::RuntimeConfig { .. } | Self::AllRuntimeConfig => {
+            Self::RiskState | Self::ActiveRuntimeConfig | Self::RuntimeConfigVersion { .. } => {
                 Duration::from_secs(60)
             }
             Self::Balance => Duration::from_secs(15),
@@ -113,7 +112,7 @@ impl CacheKey {
             Self::PositionSummary { .. } => "position",
             Self::RiskState => "risk",
             Self::Balance => "balance",
-            Self::RuntimeConfig { .. } | Self::AllRuntimeConfig => "config",
+            Self::ActiveRuntimeConfig | Self::RuntimeConfigVersion { .. } => "config",
         }
     }
 }

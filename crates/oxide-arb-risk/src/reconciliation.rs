@@ -13,7 +13,7 @@ use chrono::Utc;
 use num_traits::ToPrimitive;
 use oxide_arb_error::OxideResult;
 use oxide_arb_models::{
-    enums::ReconciliationStatus,
+    enums::risk::ReconciliationStatus,
     types::{MarketId, Usd},
 };
 use rust_decimal::Decimal;

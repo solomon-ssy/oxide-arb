@@ -14,4 +14,4 @@ pub use calibration::CachedCalibrationRepository;
 pub use event::CachedEventRepository;
 pub use market::CachedMarketRepository;
 pub use risk_state::CachedRiskStateRepository;
-pub use runtime_config::CachedRuntimeConfigRepository;
+pub use runtime_config::CachedRuntimeConfigVersionRepository;

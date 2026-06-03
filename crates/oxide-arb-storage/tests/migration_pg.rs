@@ -3,10 +3,10 @@
 use chrono::{DateTime, Utc};
 use oxide_arb_models::{
     config::PostgresConfig,
-    entities::{blacklist_entry, risk_state, runtime_config},
-    enums::runtime_config::RuntimeConfigKey,
+    entities::{blacklist_entry, risk_state, runtime_config_version},
+    enums::runtime_config::RuntimeConfigVersionSource,
     schema::{catalog, trigger::TriggerKind},
-    types::MarketId,
+    types::{MarketId, RuntimeConfigVersionId},
 };
 use oxide_arb_storage::postgres::{
     PostgresPool,
@@ -37,8 +37,8 @@ fn updated_at_trigger_catalog_is_complete() {
             "endgame_calibration_bucket",
             "event",
             "market",
+            "position_exit_plan",
             "risk_engine_state",
-            "runtime_config",
             "trade",
         ]
     );
@@ -159,59 +159,39 @@ async fn bootstrap_idempotent() {
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn runtime_config_all_keys_seeded() {
+async fn runtime_config_uses_versioned_tables() {
     let (pool, _container) = setup_pool().await;
     let db = pool.connection();
 
     Migrator::up(db, None).await.expect("Migration up failed");
 
-    let rows: Vec<runtime_config::Model> = runtime_config::Entity::find()
-        .all(db)
+    let old_table = db
+        .query_one(sea_orm::Statement::from_string(
+            db.get_database_backend(),
+            "SELECT to_regclass('public.runtime_config')",
+        ))
         .await
-        .expect("Failed to query runtime_config");
-
-    let expected_count = 14; // one per RuntimeConfigKey variant
-    assert_eq!(
-        rows.len(),
-        expected_count,
-        "should have one row per RuntimeConfigKey variant"
+        .expect("query old runtime_config table")
+        .expect("old table regclass row");
+    let old_table_name: Option<String> = old_table.try_get_by_index(0).expect("read regclass");
+    assert!(
+        old_table_name.is_none(),
+        "old runtime_config table must not exist"
     );
-}
 
-#[tokio::test]
-#[ignore = "requires Docker"]
-async fn runtime_config_no_clobber() {
-    let (pool, _container) = setup_pool().await;
-    let db = pool.connection();
-
-    Migrator::up(db, None).await.expect("Migration up failed");
-
-    // Manually update a config value
-    let custom_value = serde_json::json!(99999.0);
-    let typed_key = RuntimeConfigKey::MaxPortfolioExposureUsd;
-    let key = typed_key.as_str();
-    db.execute(sea_orm::Statement::from_sql_and_values(
-        db.get_database_backend(),
-        "UPDATE runtime_config SET value = $1 WHERE key = $2",
-        [custom_value.clone().into(), key.into()],
-    ))
-    .await
-    .expect("Failed to update runtime_config");
-
-    // Re-run migrations — should not overwrite the custom value
-    Migrator::up(db, None)
+    let version_count: i64 = db
+        .query_one(sea_orm::Statement::from_string(
+            db.get_database_backend(),
+            "SELECT COUNT(*) FROM runtime_config_version",
+        ))
         .await
-        .expect("Second up (no-clobber) failed");
-
-    let row = runtime_config::Entity::find_by_id(typed_key)
-        .one(db)
-        .await
-        .expect("Failed to query runtime_config")
-        .expect("key should still exist");
-
+        .expect("query runtime_config_version")
+        .expect("version count row")
+        .try_get_by_index(0)
+        .expect("read version count");
     assert_eq!(
-        row.value, custom_value,
-        "operator-modified value must survive re-migration"
+        version_count, 0,
+        "Phase 5.1 baseline creates schema, not mutable defaults"
     );
 }
 
@@ -234,8 +214,8 @@ async fn seed_application_records_catalog_seeds() {
     let count: i64 = row.try_get_by_index(0).expect("read seed ledger count");
 
     assert_eq!(
-        count, 2,
-        "risk state and runtime config seeds should be recorded"
+        count, 1,
+        "only risk state seed should be recorded after removing runtime_config seed"
     );
 }
 
@@ -301,35 +281,36 @@ async fn db_defaults_fill_notset_timestamps_on_insert() {
         .try_get_by_index(0)
         .expect("read db timestamp");
 
-    let typed_key = RuntimeConfigKey::DryRunMode;
-    let key = typed_key.as_str();
+    let version_id = RuntimeConfigVersionId::new_v7();
 
+    // Insert a runtime_config_version row with created_at deliberately omitted.
     db.execute(sea_orm::Statement::from_sql_and_values(
         db.get_database_backend(),
-        "DELETE FROM runtime_config WHERE key = $1",
-        [key.into()],
-    ))
-    .await
-    .expect("delete seeded row");
-
-    // Insert a runtime_config row with updated_at deliberately omitted (DB default).
-    db.execute(sea_orm::Statement::from_sql_and_values(
-        db.get_database_backend(),
-        "INSERT INTO runtime_config (key, value, updated_by) VALUES ($1, $2, $3)",
-        [key.into(), serde_json::json!(42).into(), "test".into()],
+        "INSERT INTO runtime_config_version \
+         (runtime_config_version_id, config_hash, schema_version, config_json, source, created_by, reason) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        [
+            version_id.to_string().into(),
+            "hash:test".into(),
+            1_i32.into(),
+            serde_json::json!({"schema_version": 1}).into(),
+            RuntimeConfigVersionSource::Bootstrap.as_str().into(),
+            "test".into(),
+            "test default timestamp".into(),
+        ],
     ))
     .await
     .expect("raw INSERT");
 
-    let row = runtime_config::Entity::find_by_id(typed_key)
+    let row = runtime_config_version::Entity::find_by_id(version_id)
         .one(db)
         .await
         .expect("query")
         .expect("row");
 
     assert!(
-        row.updated_at >= before_insert,
-        "DB column default must fill updated_at on INSERT"
+        row.created_at >= before_insert,
+        "DB column default must fill created_at on INSERT"
     );
 }
 

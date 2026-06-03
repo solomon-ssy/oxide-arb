@@ -1,6 +1,7 @@
 //! `SeaORM` `DeriveIden` enums for DDL column definitions.
 
 pub mod accounting_period;
+pub mod balance_snapshot;
 pub mod blacklist_entry;
 pub mod calibration;
 pub mod calibration_outcome;
@@ -8,12 +9,17 @@ pub mod control_factor_audit_event;
 pub mod control_factor_materialization_run;
 pub mod control_factor_publication;
 pub mod control_factor_publication_factor;
+pub mod control_factor_shadow_decision;
 pub mod control_factor_stage_report;
+pub mod control_factor_training_dataset;
 pub mod control_factor_value;
 pub mod emergency_snapshot;
 pub mod event;
 pub mod market;
 pub mod position;
+pub mod position_exit_execution;
+pub mod position_exit_plan;
+pub mod position_unwind_audit;
 pub mod potential_loss_ledger;
 pub mod reconciliation_report;
 pub mod report;
@@ -21,6 +27,8 @@ pub mod resolution_event;
 pub mod risk_audit_event;
 pub mod risk_fill_applied;
 pub mod risk_state;
-pub mod runtime_config;
+pub mod runtime_config_activation;
+pub mod runtime_config_version;
 pub mod seed_application;
+pub mod token_balance_snapshot;
 pub mod trade;

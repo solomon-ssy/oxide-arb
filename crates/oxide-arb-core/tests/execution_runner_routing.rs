@@ -10,8 +10,7 @@ use oxide_arb_core::{
     observability::metrics_hub::MetricsHub,
 };
 use oxide_arb_models::{
-    domain::execution::{ExecutionOutcomeSummary, ExecutionResult},
-    types::MarketId,
+    domain::execution::ExecutionResult, enums::execution::ExecutionOutcomeSummary, types::MarketId,
 };
 use oxide_arb_test_support::fixtures::sample_scored;
 use parking_lot::Mutex;

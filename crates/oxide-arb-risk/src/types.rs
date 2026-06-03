@@ -7,10 +7,7 @@ use crate::audit::RiskDecisionTrace;
 use chrono::{DateTime, Utc};
 use oxide_arb_models::{
     domain::risk::RiskEngineState,
-    enums::{
-        ReconciliationStatus,
-        risk::{BreakerStateName, CircuitBreakerLevel},
-    },
+    enums::risk::{BreakerStateName, CircuitBreakerLevel, ReconciliationStatus},
     types::{MarketId, ReservationId, TokenId, Usd},
 };
 use rust_decimal::Decimal;

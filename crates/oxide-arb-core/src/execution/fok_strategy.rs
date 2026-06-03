@@ -107,6 +107,11 @@ impl FokOrderStrategy {
             }
             Ok(Err(e)) => {
                 self.metrics.fok_misses.inc();
+                tracing::error!(
+                    execution_id = %plan.execution_id,
+                    error = %e,
+                    "CLOB FOK order failed"
+                );
                 ExecutionOutcome::Failed {
                     error: e.to_string(),
                     execution_mode: ExecutionMode::Live,

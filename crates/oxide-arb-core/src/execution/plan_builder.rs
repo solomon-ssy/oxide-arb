@@ -6,9 +6,11 @@ use oxide_arb_models::{
         execution::{ExecutionPlan, ReservationHandle},
         opportunity::Opportunity,
     },
-    types::{ExecutionId, MICRO_SCALE, Shares, Usd},
+    types::{ExecutionId, Shares, Usd},
 };
 use std::sync::Arc;
+
+const CLOB_SHARE_DECIMAL_PLACES: u32 = 2;
 
 pub struct PlanBuilder {
     fee_calculator: Arc<FeeCalculator>,
@@ -34,8 +36,9 @@ impl PlanBuilder {
         execution_id: ExecutionId,
     ) -> ExecutionPlan {
         let shares = if opp.entry_price.inner() > rust_decimal::Decimal::ZERO {
-            let scale = rust_decimal::Decimal::from(MICRO_SCALE);
-            Shares::new((approved_size.inner() / opp.entry_price.inner() * scale).floor() / scale)
+            let raw = approved_size.inner() / opp.entry_price.inner();
+            let lot_scale = rust_decimal::Decimal::new(10_i64.pow(CLOB_SHARE_DECIMAL_PLACES), 0);
+            Shares::new((raw * lot_scale).floor() / lot_scale)
         } else {
             Shares::ZERO
         };

@@ -19,16 +19,16 @@ use chrono::Utc;
 use oxide_arb_algorithm::scorer::ScoredOpportunity;
 use oxide_arb_models::{
     domain::{
-        execution::{
-            ExecutionOutcomeSummary, ExecutionPlan, ExecutionResult, ReservationHandle,
-            ResolvedOutcome,
-        },
+        execution::{ExecutionPlan, ExecutionResult, ReservationHandle, ResolvedOutcome},
         opportunity::Opportunity,
         risk::ProbabilityInput,
         scored_snapshot::ScoredOpportunitySnapshot,
         trade::NewTrade,
     },
-    enums::{common::ExecutionMode, execution::ExecutionOutcome},
+    enums::{
+        common::ExecutionMode,
+        execution::{ExecutionOutcome, ExecutionOutcomeSummary},
+    },
     types::{ExecutionId, TradeId, Usd},
 };
 use oxide_arb_repository::{postgres::PgTradeRepository, traits::TradeRepository};
@@ -185,7 +185,21 @@ impl<R: TradeRepository + Send + Sync + 'static> ExecutionPipeline<R> {
             scored,
             opp,
             &execution_id,
-            &ScoredOpportunitySnapshot::from_opportunity(opp),
+            &ScoredOpportunitySnapshot::from_opportunity(opp)
+                .with_score_components(
+                    scored.fill_probability,
+                    scored.score,
+                    scored.urgency_factor,
+                    scored.category_weight,
+                    scored.staleness_discount,
+                )
+                .with_book_context(
+                    scored.token_yes.clone(),
+                    scored.token_no.clone(),
+                    scored.book_yes_version,
+                    scored.book_no_version,
+                )
+                .with_known_empty_factor_trace(),
         )?;
         self.persist_dispatch_plan(opp, approved_size, snapshot, execution_id)
             .await

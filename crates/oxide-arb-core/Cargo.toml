@@ -26,6 +26,7 @@ num-traits   = { workspace = true }
 # ── Serialization ──────────────────────────────────────────────────
 serde      = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+sha2       = { workspace = true }
 
 # ── Money / time ───────────────────────────────────────────────────
 rust_decimal       = { workspace = true }

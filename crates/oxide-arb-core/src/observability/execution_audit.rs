@@ -44,6 +44,11 @@ impl ExecutionAuditWriter {
         self.writer.write(row);
     }
 
+    pub fn write_terminal_missing_snapshot(&self, trade: &TradeInfo, reason: &str) {
+        let row = OpportunityAuditRow::from_terminal_trade_missing_snapshot(trade, reason);
+        self.writer.write(row);
+    }
+
     pub fn write_settlement(
         &self,
         trade: &TradeInfo,
@@ -51,7 +56,21 @@ impl ExecutionAuditWriter {
         request: &MarketSettlementRequest,
         economics: &SettlementEconomics,
     ) {
-        let row = (trade, position, request, economics).into();
+        let row = match serde_json::from_value::<ScoredOpportunitySnapshot>(
+            trade.scored_snapshot.clone(),
+        ) {
+            Ok(snapshot) => OpportunityAuditRow::from_settlement_trade(
+                trade, position, request, economics, &snapshot,
+            ),
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    trade_id = %trade.trade_id,
+                    "settlement audit scored snapshot deserialize failed"
+                );
+                (trade, position, request, economics).into()
+            }
+        };
         self.writer.write(row);
     }
 }

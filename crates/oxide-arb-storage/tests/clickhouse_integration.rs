@@ -1,8 +1,14 @@
 //! `ClickHouse` integration tests (requires Docker).
 
 use chrono::Utc;
-use oxide_arb_models::{clickhouse::TickEventRow, config::AnalyticsConfig};
+use oxide_arb_models::{
+    clickhouse::{ChBps, ChPrice, ChSchemaVersion, ChUsd, TickEventRow},
+    config::AnalyticsConfig,
+    enums::clickhouse::{ChBookEventType, ChFactSource},
+    types::{Price, TokenId, Usd},
+};
 use oxide_arb_storage::clickhouse::{BatchInserter, ChWriteMetrics, ClickHousePool};
+use rust_decimal_macros::dec;
 use std::{sync::Arc, time::Duration};
 use testcontainers::{
     ImageExt,
@@ -124,17 +130,79 @@ async fn clickhouse_table_ttl_policies() {
     }
 }
 
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn clickhouse_fact_contract_uses_decimal_and_enum_columns() {
+    let (_pool, client, _port, _container) = setup_clickhouse().await;
+    let expected: [(&str, &[&str]); 4] = [
+        (
+            "tick_events",
+            &[
+                "`best_bid` Nullable(Decimal(18, 8))",
+                "`last_trade_price` Nullable(Decimal(18, 8))",
+                "'ShardStatus' = 7",
+                "'WsShardStatus' = 11",
+            ],
+        ),
+        (
+            "tick_events_l2",
+            &[
+                "`bid_prices` Array(Decimal(18, 8))",
+                "`bid_sizes` Array(Decimal(38, 18))",
+            ],
+        ),
+        (
+            "opportunity_detection",
+            &[
+                "`entry_price` Decimal(18, 8)",
+                "`expected_net_profit_usd` Decimal(38, 18)",
+                "`fill_probability` Nullable(Decimal(18, 8))",
+            ],
+        ),
+        (
+            "opportunity_audit",
+            &[
+                "`trade_id` Nullable(String)",
+                "`settlement_status` Nullable(Enum8('Won' = 1, 'Lost' = 2))",
+                "`outcome` Nullable(Enum8('Rejected' = 1, 'Settled' = 2, 'Success' = 3, 'Miss' = 4, 'Failed' = 5))",
+            ],
+        ),
+    ];
+
+    for (table, fragments) in expected {
+        let ddl: TableDdl = client
+            .query(&format!("SHOW CREATE TABLE {table}"))
+            .fetch_one()
+            .await
+            .unwrap_or_else(|e| panic!("SHOW CREATE TABLE {table} failed: {e}"));
+        for fragment in fragments {
+            assert!(
+                ddl.statement.contains(fragment),
+                "table {table} should contain `{fragment}`; got:\n{}",
+                ddl.statement
+            );
+        }
+    }
+}
+
 fn sample_tick(token_id: &str, received_at: i64) -> TickEventRow {
     TickEventRow {
-        token_id: token_id.into(),
-        event_type: 1,
-        best_bid: 0.95,
-        best_ask: 0.96,
-        bid_depth_usd: 1000.0,
-        ask_depth_usd: 800.0,
-        spread_bps: 10,
-        raw_payload: r#"{"test":true}"#.into(),
-        received_at,
+        token_id: TokenId::new(token_id),
+        market_id: None,
+        event_type: ChBookEventType::Bbo,
+        best_bid: Some(ChPrice::from(Price::new(dec!(0.95)))),
+        best_ask: Some(ChPrice::from(Price::new(dec!(0.96)))),
+        last_trade_price: None,
+        bid_depth_usd: Some(ChUsd::from(Usd::new(dec!(1000)))),
+        ask_depth_usd: Some(ChUsd::from(Usd::new(dec!(800)))),
+        spread_bps: Some(ChBps::from(dec!(10))),
+        book_version: 1,
+        raw_payload_json: Some(r#"{"test":true}"#.into()),
+        event_time: received_at,
+        ingestion_time: received_at,
+        sequence: 1,
+        source: ChFactSource::WsBbo,
+        schema_version: ChSchemaVersion(2),
     }
 }
 

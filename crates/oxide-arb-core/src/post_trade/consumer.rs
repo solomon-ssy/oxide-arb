@@ -9,17 +9,18 @@ use crate::{
 use oxide_arb_error::OxideError;
 use oxide_arb_models::{
     domain::{
+        calibration::NewCalibrationOutcome,
         position::NewPosition,
         scored_snapshot::ScoredOpportunitySnapshot,
         trade::{PostTradeInput, TradeInfo},
     },
     enums::{
-        common::{ExecutionMode, RedeemStatus},
+        common::{ExecutionMode, RedeemStatus, Side},
         risk::TradeAccountingPhase,
     },
-    types::PositionId,
+    types::{PositionId, Probability},
 };
-use oxide_arb_repository::traits::{PositionRepository, TradeRepository};
+use oxide_arb_repository::traits::{CalibrationRepository, PositionRepository, TradeRepository};
 use oxide_arb_risk::engine::RiskEngine;
 use std::sync::Arc;
 
@@ -32,6 +33,7 @@ pub struct PostTradeConsumer {
     pub fsm: Arc<ExecutionFSM>,
     pub trade_repo: Arc<dyn TradeRepository>,
     pub position_repo: Arc<dyn PositionRepository>,
+    pub calibration_repo: Arc<dyn CalibrationRepository>,
     pub audit_writer: Arc<ExecutionAuditWriter>,
     pub metrics_state: Arc<RiskMetricsState>,
     pub metrics_refresh: Option<Arc<RiskMetricsRefreshService>>,
@@ -76,6 +78,13 @@ impl PostTradeConsumer {
             if let Err(error) = self.ensure_position(trade).await {
                 tracing::error!(%error, trade_id = %trade.trade_id, "position creation failed after fill");
                 self.fsm.enter_emergency("position create failed");
+                self.metrics.post_trade_relay_failed.inc();
+                return;
+            }
+            if let Err(error) = self.ensure_calibration_outcome(trade).await {
+                tracing::error!(%error, trade_id = %trade.trade_id, "calibration outcome creation failed after fill");
+                self.fsm
+                    .enter_emergency("calibration outcome create failed");
                 self.metrics.post_trade_relay_failed.inc();
                 return;
             }
@@ -134,12 +143,43 @@ impl PostTradeConsumer {
         Ok(())
     }
 
+    async fn ensure_calibration_outcome(&self, trade: &TradeInfo) -> Result<(), OxideError> {
+        let snapshot =
+            serde_json::from_value::<ScoredOpportunitySnapshot>(trade.scored_snapshot.clone())
+                .map_err(|error| OxideError::Internal(error.to_string()))?;
+        let bucket = snapshot.calibration_bucket_key();
+        self.calibration_repo
+            .create_outcome(NewCalibrationOutcome {
+                trade_id: trade.trade_id.clone(),
+                opportunity_id: trade.opportunity_id.clone(),
+                market_id: trade.market_id.clone(),
+                category: bucket.category,
+                price_zone: bucket.price_zone,
+                duration_bucket: bucket.duration_bucket,
+                predicted_yes: snapshot
+                    .token_yes
+                    .as_ref()
+                    .map_or(snapshot.side == Side::Buy, |token_yes| {
+                        token_yes == &trade.token_id
+                    }),
+                actual_yes: None,
+                entry_price: snapshot.entry_price,
+                confidence_at_entry: Probability::new(snapshot.confidence_decimal),
+                convergence_secs: i32::try_from(snapshot.convergence_secs).unwrap_or(i32::MAX),
+                resolved_at: None,
+            })
+            .await?;
+        Ok(())
+    }
+
     /// Best-effort terminal audit to `ClickHouse` (analytics; loss-tolerant).
     fn write_audit(&self, trade: &TradeInfo) {
         match serde_json::from_value::<ScoredOpportunitySnapshot>(trade.scored_snapshot.clone()) {
             Ok(snapshot) => self.audit_writer.write_terminal(trade, &snapshot),
             Err(error) => {
-                tracing::warn!(%error, trade_id = %trade.trade_id, "scored snapshot deserialize failed; skipping audit");
+                tracing::warn!(%error, trade_id = %trade.trade_id, "scored snapshot deserialize failed; writing missing-attribution audit");
+                self.audit_writer
+                    .write_terminal_missing_snapshot(trade, &error.to_string());
             }
         }
     }

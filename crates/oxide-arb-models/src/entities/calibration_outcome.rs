@@ -5,7 +5,7 @@ use crate::{
         calibration::{DurationBucket, PriceZone},
         common::MarketCategory,
     },
-    types::{MarketId, Price, Probability},
+    types::{MarketId, OpportunityId, Price, Probability, TradeId},
 };
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
@@ -15,6 +15,8 @@ use sea_orm::entity::prelude::*;
 pub struct Model {
     #[sea_orm(primary_key)]
     pub id: i64,
+    pub trade_id: TradeId,
+    pub opportunity_id: OpportunityId,
     pub market_id: MarketId,
     pub category: MarketCategory,
     pub price_zone: PriceZone,

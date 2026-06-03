@@ -131,5 +131,5 @@ fn plan_shares_never_exceed_approved_notional() {
         planned_notional <= approved,
         "planned notional {planned_notional} must not exceed approved size {approved}"
     );
-    assert_eq!(plan.shares.inner(), dec!(20.618556));
+    assert_eq!(plan.shares.inner(), dec!(20.61));
 }

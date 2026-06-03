@@ -10,7 +10,7 @@ use crate::{
         calibration::{DurationBucket, PriceZone},
         common::MarketCategory,
     },
-    types::{MarketId, Price, Probability},
+    types::{MarketId, OpportunityId, Price, Probability, TradeId},
 };
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
@@ -76,8 +76,8 @@ info_from_model!(CalibrationBucketInfo, crate::entities::calibration::Model, {
 });
 
 info_from_model!(CalibrationOutcomeInfo, crate::entities::calibration_outcome::Model, {
-    id, market_id, category, price_zone, duration_bucket, predicted_yes,
-    actual_yes, entry_price, confidence_at_entry, convergence_secs,
+    id, trade_id, opportunity_id, market_id, category, price_zone, duration_bucket,
+    predicted_yes, actual_yes, entry_price, confidence_at_entry, convergence_secs,
     resolved_at, created_at,
 });
 
@@ -106,6 +106,8 @@ pub struct UpsertCalibration {
 #[sea_orm(entity = "crate::entities::calibration_outcome::Entity")]
 pub struct CalibrationOutcomeInfo {
     pub id: i64,
+    pub trade_id: TradeId,
+    pub opportunity_id: OpportunityId,
     pub market_id: MarketId,
     pub category: MarketCategory,
     pub price_zone: PriceZone,
@@ -123,6 +125,8 @@ pub struct CalibrationOutcomeInfo {
 #[derive(Debug, Clone, DeriveIntoActiveModel)]
 #[sea_orm(active_model = "crate::entities::calibration_outcome::ActiveModel")]
 pub struct NewCalibrationOutcome {
+    pub trade_id: TradeId,
+    pub opportunity_id: OpportunityId,
     pub market_id: MarketId,
     pub category: MarketCategory,
     pub price_zone: PriceZone,

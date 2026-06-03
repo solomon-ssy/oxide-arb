@@ -8,10 +8,11 @@ use std::collections::HashSet;
 use chrono::{NaiveDate, Utc};
 use oxide_arb_models::{
     domain::{
-        NewAccountingPeriod, NewCalibrationOutcome, NewEmergencySnapshot, NewPosition,
-        NewPotentialLoss, NewReconciliationReport, NewRiskAuditEvent, NewTrade,
+        NewAccountingPeriod, NewBalanceSnapshot, NewCalibrationOutcome, NewEmergencySnapshot,
+        NewPosition, NewPotentialLoss, NewReconciliationReport, NewRiskAuditEvent,
+        NewRuntimeConfigActivation, NewRuntimeConfigVersion, NewTokenBalanceSnapshot, NewTrade,
         ResolvePotentialLoss, SettlePositionParams, TradeObservation, UpsertBlacklistEntry,
-        UpsertCalibration, UpsertRiskEngineState, UpsertRuntimeConfig,
+        UpsertCalibration, UpsertRiskEngineState,
     },
     enums::{
         calibration::{DurationBucket, PriceZone},
@@ -19,11 +20,12 @@ use oxide_arb_models::{
             ExecutionMode, MarketCategory, PositionStatus, RedeemStatus, ReportType,
             SettlementTrigger, Side, TradeBusinessOutcome, TradeState,
         },
+        fact::BalanceSnapshotSource,
         risk::{
             BlacklistReason, BlacklistScope, BreakerStateName, CircuitBreakerLevel,
             ReconciliationStatus, RiskAuditEventType,
         },
-        runtime_config::RuntimeConfigKey,
+        runtime_config::{RuntimeConfigActivationKind, RuntimeConfigVersionSource},
     },
     types::*,
 };
@@ -534,6 +536,8 @@ async fn calibration_repository_crud() {
     assert!(found.is_some());
 
     let outcome = NewCalibrationOutcome {
+        trade_id: TradeId::generate(),
+        opportunity_id: OpportunityId::new_v7(),
         market_id: MarketId::new("0xcal-mkt"),
         category: MarketCategory::Sports,
         price_zone: PriceZone::Z99,
@@ -645,27 +649,113 @@ async fn accounting_repository_crud() {
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn runtime_config_repository_crud() {
+async fn runtime_config_version_repository_records_activation_history() {
     let (pool, _container) = setup_pg().await;
-    let repo = PgRuntimeConfigRepository::new(pool.connection().clone());
+    let repo = PgRuntimeConfigVersionRepository::new(pool.connection().clone());
 
-    let key = RuntimeConfigKey::MinProfitThresholdUsd;
-    let config = UpsertRuntimeConfig {
-        key,
-        value: serde_json::json!({ "threshold_usd": 100.0 }),
-        updated_by: "test".into(),
-    };
-    let set = repo.upsert(config).await.unwrap();
-    assert_eq!(set.key, key);
+    let version_id = RuntimeConfigVersionId::new_v7();
+    let version = repo
+        .create_version(NewRuntimeConfigVersion {
+            runtime_config_version_id: version_id.clone(),
+            config_hash: "hash:repo-test".into(),
+            schema_version: 1,
+            config_json: serde_json::json!({ "schema_version": 1 }),
+            source: RuntimeConfigVersionSource::Operator,
+            created_by: "test".into(),
+            reason: "repository test".into(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(version.runtime_config_version_id, version_id);
+    let by_hash = repo
+        .load_by_hash("hash:repo-test")
+        .await
+        .unwrap()
+        .expect("version by hash");
+    assert_eq!(by_hash.runtime_config_version_id, version_id);
 
-    let got = repo.get(key).await.unwrap();
-    assert!(got.is_some());
+    let activated_at = Utc::now();
+    let activation = repo
+        .activate_version(NewRuntimeConfigActivation {
+            runtime_config_activation_id: RuntimeConfigActivationId::new_v7(),
+            runtime_config_version_id: version_id.clone(),
+            activated_at,
+            activated_by: "test".into(),
+            reason: "activate test version".into(),
+            activation_kind: RuntimeConfigActivationKind::Promote,
+            previous_runtime_config_version_id: None,
+            rollback_target_version_id: None,
+            audit_event_id: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(activation.runtime_config_version_id, version_id);
 
-    let all = repo.get_all().await.unwrap();
-    assert!(!all.is_empty());
+    let current = repo.load_current().await.unwrap().expect("current version");
+    assert_eq!(current.runtime_config_version_id, version_id);
 
-    assert!(repo.delete(key).await.unwrap());
-    assert!(repo.get(key).await.unwrap().is_none());
+    let active_at = repo
+        .load_active_at(activated_at + chrono::Duration::seconds(1))
+        .await
+        .unwrap()
+        .expect("active version at timestamp");
+    assert_eq!(active_at.runtime_config_version_id, version_id);
+
+    assert_eq!(repo.list_activations(10).await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn fact_data_repository_records_balance_and_token_snapshots() {
+    let (pool, _container) = setup_pg().await;
+    seed_market(&pool, "evt-facts", "0xfact-mkt", MarketCategory::Politics).await;
+    let repo = PgFactDataRepository::new(pool.connection().clone());
+    let observed_at = Utc::now();
+
+    let balance = repo
+        .create_balance_snapshot(NewBalanceSnapshot {
+            balance_snapshot_id: BalanceSnapshotId::new_v7(),
+            holder_address: "0xholder".into(),
+            internal_available_usd: Usd::new(dec!(900)),
+            internal_reserved_usd: Usd::new(dec!(100)),
+            external_available_usd: Usd::new(dec!(995)),
+            external_locked_usd: Usd::ZERO,
+            drift_usd: Usd::new(dec!(5)),
+            source: BalanceSnapshotSource::ClobApi,
+            block_number: None,
+            reconciliation_report_id: None,
+            observed_at,
+        })
+        .await
+        .unwrap();
+    assert_eq!(balance.drift_usd, Usd::new(dec!(5)));
+
+    let token_id = TokenId::new("tok-fact");
+    repo.create_token_balance_snapshots(vec![NewTokenBalanceSnapshot {
+        token_balance_snapshot_id: TokenBalanceSnapshotId::new_v7(),
+        holder_address: "0xholder".into(),
+        market_id: MarketId::new("0xfact-mkt"),
+        token_id: token_id.clone(),
+        side: Side::Buy,
+        internal_shares: Shares::new(dec!(10)),
+        external_shares: None,
+        drift_shares: None,
+        source: BalanceSnapshotSource::InternalLedger,
+        block_number: None,
+        reconciliation_report_id: None,
+        observed_at,
+    }])
+    .await
+    .unwrap();
+
+    let latest = repo
+        .latest_token_balance_before(&MarketId::new("0xfact-mkt"), &token_id, Utc::now())
+        .await
+        .unwrap()
+        .expect("token balance snapshot");
+    assert_eq!(latest.internal_shares, Shares::new(dec!(10)));
+    assert!(latest.external_shares.is_none());
+    assert!(latest.drift_shares.is_none());
 }
 
 #[tokio::test]

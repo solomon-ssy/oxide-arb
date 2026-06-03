@@ -6,10 +6,15 @@ use oxide_arb_api::{
 };
 use oxide_arb_error::algorithm::AlgoError;
 use oxide_arb_models::{
+    clickhouse::CalibrationSnapshotRow,
     domain::calibration::{BucketKey, UpsertCalibration},
     types::MarketId,
 };
-use oxide_arb_repository::{postgres::PgCalibrationRepository, traits::CalibrationRepository};
+use oxide_arb_repository::{
+    clickhouse::ChTimeseriesRepository,
+    postgres::PgCalibrationRepository,
+    traits::{CalibrationRepository, TimeseriesFactWriter},
+};
 use std::sync::Arc;
 
 pub struct CoreCalibrationDataSource {
@@ -17,6 +22,7 @@ pub struct CoreCalibrationDataSource {
     gamma_client: Arc<GammaClient>,
     voting_oracle: Arc<VotingOracle>,
     oracle_health_tracker: Arc<OracleHealthTracker>,
+    timeseries_repo: Arc<ChTimeseriesRepository>,
 }
 
 impl CoreCalibrationDataSource {
@@ -25,12 +31,14 @@ impl CoreCalibrationDataSource {
         gamma_client: Arc<GammaClient>,
         voting_oracle: Arc<VotingOracle>,
         oracle_health_tracker: Arc<OracleHealthTracker>,
+        timeseries_repo: Arc<ChTimeseriesRepository>,
     ) -> Self {
         Self {
             calibration_repo,
             gamma_client,
             voting_oracle,
             oracle_health_tracker,
+            timeseries_repo,
         }
     }
 }
@@ -111,6 +119,16 @@ impl CalibrationDataSource for CoreCalibrationDataSource {
     async fn resolve_outcome(&self, outcome_id: i64, actual_yes: bool) -> Result<(), AlgoError> {
         self.calibration_repo
             .resolve_outcome(outcome_id, actual_yes)
+            .await
+            .map_err(|e| AlgoError::DataSource(e.to_string()))
+    }
+
+    async fn write_calibration_snapshots(
+        &self,
+        snapshots: &[CalibrationSnapshotRow],
+    ) -> Result<(), AlgoError> {
+        self.timeseries_repo
+            .insert_calibration_snapshots(snapshots)
             .await
             .map_err(|e| AlgoError::DataSource(e.to_string()))
     }

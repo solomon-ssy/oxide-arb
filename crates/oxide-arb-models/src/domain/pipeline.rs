@@ -5,7 +5,10 @@
 
 use crate::{
     domain::book::BookLevel,
-    enums::common::{Side, TickSize},
+    enums::{
+        common::{Side, TickSize},
+        pipeline::ShardConnectionStatus,
+    },
     types::{MarketId, Price, Shares, TokenId},
 };
 use std::{sync::Arc, time::Instant};
@@ -72,14 +75,6 @@ pub struct PriceDeltaCmd {
     pub changes: Arc<[PriceLevelDelta]>,
     pub timestamp_ms: u64,
     pub trace: IngressTrace,
-}
-
-/// Connection status for a single WS shard.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ShardConnectionStatus {
-    Connected,
-    Disconnected,
-    Reconnecting { attempt: u32 },
 }
 
 /// Unified pipeline event: book data + control-plane WS events.

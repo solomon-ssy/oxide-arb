@@ -1,7 +1,9 @@
 //! Fire-and-forget CH writer for scanner detection events.
 
 use crate::infra::async_writer::AsyncWriter;
-use oxide_arb_models::{clickhouse::OpportunityDetectionRow, domain::opportunity::Opportunity};
+use chrono::Utc;
+use oxide_arb_algorithm::scorer::ScoredOpportunity;
+use oxide_arb_models::{clickhouse::OpportunityDetectionRow, domain::ScoredOpportunitySnapshot};
 use std::sync::Arc;
 
 /// Non-blocking writer for `ClickHouse` `opportunity_detection` rows.
@@ -16,8 +18,27 @@ impl DetectionWriter {
         Self { writer }
     }
 
-    pub fn write(&self, opp: &Opportunity) {
-        let row = opp.into();
+    pub fn write(&self, scored: &ScoredOpportunity) {
+        let opp = scored.opportunity.as_ref();
+        let snapshot = ScoredOpportunitySnapshot::from_opportunity(opp)
+            .with_score_components(
+                scored.fill_probability,
+                scored.score,
+                scored.urgency_factor,
+                scored.category_weight,
+                scored.staleness_discount,
+            )
+            .with_book_context(
+                scored.token_yes.clone(),
+                scored.token_no.clone(),
+                scored.book_yes_version,
+                scored.book_no_version,
+            )
+            .with_known_empty_factor_trace();
+        let mut row = OpportunityDetectionRow::from(&snapshot);
+        let now_ms = Utc::now().timestamp_millis();
+        row.ingestion_time = now_ms;
+        row.sequence = scored.book_yes_version.max(scored.book_no_version);
         self.writer.write(row);
     }
 }

@@ -6,7 +6,7 @@ use crate::{
 };
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use validator::Validate;
 
@@ -138,7 +138,7 @@ const fn default_max_convergence_age_secs() -> u64 {
 // ── Calibration ──────────────────────────────────────────────────────────────
 
 /// Calibration data pipeline configuration.
-#[derive(Debug, Clone, Deserialize, Validate)]
+#[derive(Debug, Clone, Deserialize, Serialize, Validate)]
 pub struct CalibrationConfig {
     /// Minimum sample size before a bucket's resolution rate is trusted.
     /// Below this threshold the fallback chain is activated.

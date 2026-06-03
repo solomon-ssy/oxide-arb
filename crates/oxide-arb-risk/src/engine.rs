@@ -50,11 +50,10 @@ use oxide_arb_models::{
         trade::PostTradeInput,
     },
     enums::{
-        ReconciliationStatus,
         common::{LedgerStatus, TradeBusinessOutcome},
         risk::{
-            BlacklistReason, BreakerStateName, CircuitBreakerLevel, TradeAccountingPhase,
-            WindowType,
+            BlacklistReason, BreakerStateName, CircuitBreakerLevel, ReconciliationStatus,
+            TradeAccountingPhase, WindowType,
         },
     },
     types::{LedgerId, MarketId, OpportunityId, Usd},

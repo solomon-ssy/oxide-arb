@@ -119,6 +119,7 @@ async fn five_hundred_markets_thousand_tokens_ingest_without_book_drops() {
         metrics: Arc::clone(&metrics),
         alerts,
         backpressure,
+        book_fact_writer: None,
         book_shard_count: 4,
         book_channel_capacity: 4096,
         shutdown: shutdown.clone(),
