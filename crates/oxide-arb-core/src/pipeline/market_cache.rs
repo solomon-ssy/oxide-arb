@@ -56,8 +56,8 @@ impl MarketCache {
             };
 
             let entry = Arc::new(CachedMarketScanEntry {
-                market_id: market.market_id,
-                event_id: market.event_id,
+                market_id: market.market_id.clone(),
+                event_id: market.event_id.clone(),
                 token_yes: market.token_yes.clone(),
                 token_no: market.token_no.clone(),
                 category: market.category,

@@ -1,6 +1,7 @@
 //! Evidence chain types required by every control-factor value.
 
-use crate::types::{MaterializationRunId, RuntimeConfigVersionId, StageReportId};
+use super::materialization::PointInTimeInputManifest;
+use crate::types::{MaterializationRunId, StageReportId};
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -59,19 +60,6 @@ impl DataCoverageReport {
             && self.coverage_ratio >= Decimal::ONE
             && self.insufficient_reasons.is_empty()
     }
-}
-
-/// Versioned point-in-time inputs used to rebuild a historical decision context.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PointInTimeInputManifest {
-    pub market_metadata_version: String,
-    pub token_mapping_version: String,
-    pub fee_schedule_version: String,
-    pub calibration_snapshot_version: String,
-    pub runtime_config_version_id: RuntimeConfigVersionId,
-    pub risk_state_snapshot_version: String,
-    pub balance_snapshot_version: String,
-    pub settlement_truth_version: String,
 }
 
 /// Confidence interval for an estimated factor effect.

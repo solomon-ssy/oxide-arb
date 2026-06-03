@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::{
     domain::settlement::{NewResolutionEvent, ResolutionEventInfo},
@@ -11,6 +12,12 @@ pub trait ResolutionEventRepository: Send + Sync {
     async fn latest_for_market(
         &self,
         market_id: &MarketId,
+    ) -> Result<Option<ResolutionEventInfo>, StorageError>;
+
+    async fn latest_before(
+        &self,
+        market_id: &MarketId,
+        before: DateTime<Utc>,
     ) -> Result<Option<ResolutionEventInfo>, StorageError>;
 
     async fn latest_by_source(

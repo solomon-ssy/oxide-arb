@@ -413,9 +413,9 @@ impl MarketSettlementService {
             .or(market.outcome.as_deref())
             .unwrap_or_default();
         if outcome.eq_ignore_ascii_case("yes") {
-            Some(market.token_yes)
+            Some(market.token_yes.clone())
         } else if outcome.eq_ignore_ascii_case("no") {
-            Some(market.token_no)
+            Some(market.token_no.clone())
         } else {
             None
         }
@@ -434,9 +434,9 @@ impl MarketSettlementService {
         match verdict {
             Ok(ResolutionVerdict::Resolved { actual_yes, .. }) => {
                 let oracle_token = if actual_yes {
-                    market.token_yes
+                    market.token_yes.clone()
                 } else {
-                    market.token_no
+                    market.token_no.clone()
                 };
                 self.persist_resolution_event(
                     req,
@@ -511,21 +511,22 @@ impl MarketSettlementService {
         &self,
         req: &MarketSettlementRequest,
     ) -> Result<RedeemOutcome, RedeemError> {
+        let market = self.market_registry.get_market(&req.market_id);
         let neg_risk = self
             .market_registry
-            .get_market(&req.market_id)
-            .is_some_and(|market| market.neg_risk);
+            .neg_risk(&req.market_id)
+            .unwrap_or(false);
         let request = RedeemRequest {
             condition_id: req.market_id.clone(),
             market_id: req.market_id.clone(),
-            yes_token_id: self
-                .market_registry
-                .get_market(&req.market_id)
-                .map_or_else(|| req.winning_token_id.clone(), |market| market.token_yes),
-            no_token_id: self
-                .market_registry
-                .get_market(&req.market_id)
-                .map_or_else(|| req.winning_token_id.clone(), |market| market.token_no),
+            yes_token_id: market.as_ref().map_or_else(
+                || req.winning_token_id.clone(),
+                |market| market.token_yes.clone(),
+            ),
+            no_token_id: market.as_ref().map_or_else(
+                || req.winning_token_id.clone(),
+                |market| market.token_no.clone(),
+            ),
             neg_risk,
             execution_mode: self.execution_mode,
         };

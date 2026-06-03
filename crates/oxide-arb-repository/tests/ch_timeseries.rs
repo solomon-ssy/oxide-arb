@@ -115,7 +115,7 @@ async fn timeseries_insert_and_query_roundtrip() {
     let now = Utc::now().timestamp_millis();
     let token = "tok-roundtrip";
 
-    repo.insert_tick_events(&[
+    repo.insert_tick_events(vec![
         sample_tick(token, now - 2_000),
         sample_tick(token, now - 1_000),
         sample_tick(token, now),
@@ -149,16 +149,16 @@ async fn evidence_timeseries_queries_roundtrip_core_fact_tables() {
     let now = Utc::now().timestamp_millis();
     let token = TokenId::new("tok-core-facts");
 
-    repo.insert_l2_events(&[
+    repo.insert_l2_events(vec![
         sample_l2(token.as_str(), now, 2),
         sample_l2(token.as_str(), now, 1),
     ])
     .await
     .expect("insert l2");
-    repo.insert_book_snapshots(&[sample_book(token.as_str(), now, 1)])
+    repo.insert_book_snapshots(vec![sample_book(token.as_str(), now, 1)])
         .await
         .expect("insert book");
-    repo.insert_calibration_snapshots(&[sample_calibration(now, 1)])
+    repo.insert_calibration_snapshots(vec![sample_calibration(now, 1)])
         .await
         .expect("insert calibration");
 

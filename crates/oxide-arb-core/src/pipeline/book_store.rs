@@ -1,7 +1,7 @@
 use super::order_book::OrderBook;
 use crate::observability::metrics_hub::MetricsHub;
 use arc_swap::ArcSwap;
-use dashmap::{DashMap, Entry};
+use dashmap::DashMap;
 use num_traits::ToPrimitive;
 use oxide_arb_models::{
     domain::{
@@ -51,25 +51,31 @@ impl BookStore {
     }
 
     fn get_or_create_state(&self, token_id: &TokenId) -> Arc<TokenBookState> {
-        match self.books.entry(token_id.clone()) {
-            Entry::Occupied(entry) => Arc::clone(entry.get()),
-            Entry::Vacant(entry) => {
-                let empty: Arc<[BookLevel]> = Arc::from([]);
-                let state = Arc::new(TokenBookState {
-                    live: Mutex::new(OrderBook::new(token_id.clone())),
-                    published: ArcSwap::from_pointee(BookSnapshot::new(
-                        Arc::clone(&empty),
-                        Arc::clone(&empty),
-                        0,
-                        0,
-                    )),
-                    version: AtomicU64::new(0),
-                });
-                entry.insert(Arc::clone(&state));
-                self.update_token_count_metric(true);
-                state
-            }
+        if let Some(entry) = self.books.get(token_id) {
+            return Arc::clone(entry.value());
         }
+
+        let empty: Arc<[BookLevel]> = Arc::from([]);
+        let state = Arc::new(TokenBookState {
+            live: Mutex::new(OrderBook::new(token_id.clone())),
+            published: ArcSwap::from_pointee(BookSnapshot::new(
+                Arc::clone(&empty),
+                Arc::clone(&empty),
+                0,
+                0,
+            )),
+            version: AtomicU64::new(0),
+        });
+        let inserted = self
+            .books
+            .entry(token_id.clone())
+            .or_insert_with(|| Arc::clone(&state));
+        let result = Arc::clone(inserted.value());
+        drop(inserted);
+        if Arc::ptr_eq(&result, &state) {
+            self.update_token_count_metric(true);
+        }
+        result
     }
 
     fn bump_and_publish(state: &TokenBookState, book: &OrderBook) -> u64 {

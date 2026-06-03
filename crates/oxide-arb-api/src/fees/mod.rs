@@ -73,7 +73,7 @@ impl FeeCalculator {
     pub fn quote(&self, input: &FeeQuoteInput) -> Result<FeeQuote, String> {
         let snapshot = self.rate_cache.load();
         let schedule = match snapshot.market_schedules.get(&input.market_id) {
-            Some(schedule) => schedule.clone(),
+            Some(schedule) => Arc::clone(schedule),
             None if input.allow_category_fallback => snapshot
                 .category_default_schedule(&input.market_id, input.category)
                 .ok_or_else(|| format!("missing fee schedule for {}", input.market_id))?,
@@ -101,11 +101,12 @@ impl FeeCalculator {
 
     pub fn ingest_market_fee_schedules(
         &self,
-        schedules: impl IntoIterator<Item = MarketFeeSchedule>,
+        schedules: impl IntoIterator<Item = impl Into<Arc<MarketFeeSchedule>>>,
     ) {
         let mut snapshot = self.rate_cache.load().as_ref().clone();
         let mut changed = false;
         for schedule in schedules {
+            let schedule = schedule.into();
             snapshot
                 .market_schedules
                 .insert(schedule.market_id.clone(), schedule);
@@ -117,9 +118,9 @@ impl FeeCalculator {
         }
     }
 
-    /// Return a clone of the current fee snapshot.
-    pub fn snapshot(&self) -> FeeSnapshot {
-        self.rate_cache.load().as_ref().clone()
+    /// Return the current fee snapshot.
+    pub fn snapshot(&self) -> Arc<FeeSnapshot> {
+        self.rate_cache.load_full()
     }
 }
 

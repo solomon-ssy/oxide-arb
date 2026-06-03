@@ -8,17 +8,25 @@ use std::collections::HashSet;
 use chrono::{NaiveDate, Utc};
 use oxide_arb_models::{
     domain::{
-        NewAccountingPeriod, NewBalanceSnapshot, NewCalibrationOutcome, NewEmergencySnapshot,
-        NewPosition, NewPotentialLoss, NewReconciliationReport, NewRiskAuditEvent,
-        NewRuntimeConfigActivation, NewRuntimeConfigVersion, NewTokenBalanceSnapshot, NewTrade,
-        ResolvePotentialLoss, SettlePositionParams, TradeObservation, UpsertBlacklistEntry,
-        UpsertCalibration, UpsertRiskEngineState,
+        AcquireMaterializationRunOutcome, CancelMaterializationRunOutcome,
+        EnqueueMaterializationRunOptions, EnqueueMaterializationRunOutcome,
+        MaterializationRunStatusPatch, NewAccountingPeriod, NewBalanceSnapshot,
+        NewCalibrationOutcome, NewControlFactorMaterializationRun, NewControlFactorStageReport,
+        NewEmergencySnapshot, NewPosition, NewPotentialLoss, NewReconciliationReport,
+        NewRiskAuditEvent, NewRuntimeConfigActivation, NewRuntimeConfigVersion,
+        NewTokenBalanceSnapshot, NewTrade, ResolvePotentialLoss, RunTransitionOutcome,
+        SettlePositionParams, TradeObservation, UpsertBlacklistEntry, UpsertCalibration,
+        UpsertRiskEngineState,
     },
     enums::{
         calibration::{DurationBucket, PriceZone},
         common::{
             ExecutionMode, MarketCategory, PositionStatus, RedeemStatus, ReportType,
             SettlementTrigger, Side, TradeBusinessOutcome, TradeState,
+        },
+        control_factor::{
+            EvidenceStageStatus, MaterializationOutputPolicy, MaterializationRunKind,
+            MaterializationRunStatus, MaterializationStageName, RunTriggerType,
         },
         fact::BalanceSnapshotSource,
         risk::{
@@ -704,6 +712,185 @@ async fn runtime_config_version_repository_records_activation_history() {
     assert_eq!(repo.list_activations(10).await.unwrap().len(), 1);
 }
 
+fn materialization_run(dedupe_key: Option<&str>) -> NewControlFactorMaterializationRun {
+    let now = Utc::now();
+    NewControlFactorMaterializationRun {
+        materialization_run_id: MaterializationRunId::new_v7(),
+        run_dedupe_key: dedupe_key.map(str::to_owned),
+        run_kind: MaterializationRunKind::Scheduled,
+        trigger_type: RunTriggerType::Scheduled,
+        trigger_ref: Some("test-schedule".into()),
+        status: MaterializationRunStatus::Queued,
+        window_from: now - chrono::Duration::hours(1),
+        window_to: now,
+        source_delay_secs: 900,
+        market_filter: serde_json::json!({ "market_ids": [] }),
+        requested_factor_types: serde_json::json!(["bucket_risk"]),
+        data_requirements: serde_json::json!({ "required_inputs": ["runtime_config"] }),
+        runtime_config_ref: serde_json::json!({ "mode": "active_at", "at": now }),
+        simulation_config_hash: "blake3:sim".into(),
+        quality_gate_policy_hash: "blake3:gate".into(),
+        output_policy: MaterializationOutputPolicy::NoFactorOutput,
+        manifest: serde_json::json!({ "run": "test" }),
+        manifest_hash: "blake3:manifest".into(),
+        report: serde_json::json!({}),
+        code_git_sha: "abc".into(),
+        created_by: "test".into(),
+        started_at: None,
+        finished_at: None,
+        failure_code: None,
+        failure_detail: None,
+        report_uri: None,
+    }
+}
+
+fn stage_report(
+    run_id: &MaterializationRunId,
+    status: EvidenceStageStatus,
+) -> NewControlFactorStageReport {
+    NewControlFactorStageReport {
+        stage_report_id: StageReportId::new_v7(),
+        materialization_run_id: run_id.clone(),
+        stage_name: MaterializationStageName::ResolveInputs,
+        status,
+        started_at: Utc::now(),
+        finished_at: Some(Utc::now()),
+        input_artifact_hashes: serde_json::json!([]),
+        output_artifact_hash: Some("blake3:artifact".into()),
+        coverage: serde_json::json!({ "coverage_ratio": "1" }),
+        metrics: serde_json::json!({ "records": 1 }),
+        records_read: 1,
+        records_written: 0,
+        warnings: serde_json::json!([]),
+        errors: serde_json::json!([]),
+        query_fingerprints: serde_json::json!(["runtime_config.load_active_at:v1"]),
+    }
+}
+
+async fn assert_failed_run_can_retry(
+    repo: &PgControlFactorRepository,
+    run_id: &MaterializationRunId,
+    previous_stage_report_id: &StageReportId,
+) {
+    let failed = repo
+        .transition_materialization_run(
+            run_id,
+            MaterializationRunStatus::Running,
+            MaterializationRunStatus::Failed,
+            MaterializationRunStatusPatch {
+                finished_at: Some(Utc::now()),
+                failure_code: Some("run.invalid_transition".into()),
+                failure_detail: Some("forced failure for retry test".into()),
+                report: None,
+                report_uri: None,
+            },
+        )
+        .await
+        .expect("fail run");
+    assert!(matches!(failed, RunTransitionOutcome::Transitioned(_)));
+    let retried = repo
+        .retry_materialization_run(run_id)
+        .await
+        .expect("retry run");
+    assert!(matches!(retried, RunTransitionOutcome::Transitioned(_)));
+    let reacquired = repo
+        .try_acquire_materialization_run(run_id, Utc::now())
+        .await
+        .expect("reacquire run");
+    assert!(matches!(
+        reacquired,
+        AcquireMaterializationRunOutcome::Acquired(_)
+    ));
+    let retried_stage = repo
+        .upsert_stage_report(stage_report(run_id, EvidenceStageStatus::Completed))
+        .await
+        .expect("upsert retried stage");
+    assert_eq!(&retried_stage.stage_report_id, previous_stage_report_id);
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn control_factor_materialization_run_lifecycle_is_idempotent() {
+    let (pool, _container) = setup_pg().await;
+    let repo = PgControlFactorRepository::new(pool.connection().clone());
+    let created = match repo
+        .enqueue_materialization_run(
+            materialization_run(Some("dedupe:test")),
+            EnqueueMaterializationRunOptions {
+                force_new_run: false,
+                reason: None,
+            },
+        )
+        .await
+        .expect("enqueue run")
+    {
+        EnqueueMaterializationRunOutcome::Created(run) => run,
+        other => panic!("expected created, got {other:?}"),
+    };
+    match repo
+        .enqueue_materialization_run(
+            materialization_run(Some("dedupe:test")),
+            EnqueueMaterializationRunOptions {
+                force_new_run: false,
+                reason: None,
+            },
+        )
+        .await
+        .expect("dedupe run")
+    {
+        EnqueueMaterializationRunOutcome::DuplicateActive(run) => {
+            assert_eq!(run.materialization_run_id, created.materialization_run_id);
+        }
+        other => panic!("expected duplicate active, got {other:?}"),
+    }
+    let acquired = repo
+        .try_acquire_materialization_run(&created.materialization_run_id, Utc::now())
+        .await
+        .expect("acquire run");
+    assert!(matches!(
+        acquired,
+        AcquireMaterializationRunOutcome::Acquired(_)
+    ));
+    let first = repo
+        .upsert_stage_report(stage_report(
+            &created.materialization_run_id,
+            EvidenceStageStatus::Completed,
+        ))
+        .await
+        .expect("insert stage");
+    let second = repo
+        .upsert_stage_report(stage_report(
+            &created.materialization_run_id,
+            EvidenceStageStatus::CompletedWithWarnings,
+        ))
+        .await
+        .expect("upsert stage");
+    assert_eq!(first.stage_report_id, second.stage_report_id);
+    let reports = repo
+        .list_stage_reports(&created.materialization_run_id)
+        .await
+        .expect("list stages");
+    assert_eq!(reports.len(), 1);
+    assert_failed_run_can_retry(
+        &repo,
+        &created.materialization_run_id,
+        &second.stage_report_id,
+    )
+    .await;
+    let cancelled = repo
+        .cancel_materialization_run(
+            &created.materialization_run_id,
+            "operator cancelled test",
+            Utc::now(),
+        )
+        .await
+        .expect("cancel run");
+    assert!(matches!(
+        cancelled,
+        CancelMaterializationRunOutcome::Cancelled(_)
+    ));
+}
+
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn fact_data_repository_records_balance_and_token_snapshots() {
@@ -749,7 +936,12 @@ async fn fact_data_repository_records_balance_and_token_snapshots() {
     .unwrap();
 
     let latest = repo
-        .latest_token_balance_before(&MarketId::new("0xfact-mkt"), &token_id, Utc::now())
+        .latest_token_balance_before(
+            "0xholder",
+            &MarketId::new("0xfact-mkt"),
+            &token_id,
+            Utc::now(),
+        )
         .await
         .unwrap()
         .expect("token balance snapshot");

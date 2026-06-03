@@ -2,6 +2,7 @@
 
 mod evidence;
 mod lifecycle;
+mod materialization;
 mod payload;
 mod persistence;
 mod publication;
@@ -10,6 +11,7 @@ mod value;
 
 pub use evidence::*;
 pub use lifecycle::FactorLifecycle;
+pub use materialization::*;
 pub use payload::*;
 pub use persistence::*;
 pub use publication::*;

@@ -55,6 +55,13 @@ impl<T: RowOwned + RowWrite + Clone + Send + Sync> BatchInserter<T> {
             .map_err(|_| StorageError::ChannelClosed("BatchInserter channel closed".into()))
     }
 
+    pub async fn insert_many(&self, rows: impl IntoIterator<Item = T>) -> Result<(), StorageError> {
+        for row in rows {
+            self.insert(row).await?;
+        }
+        Ok(())
+    }
+
     /// Initiate graceful shutdown by dropping the sender side of the channel.
     ///
     /// For explicit shutdown, prefer cancelling the `CancellationToken` passed

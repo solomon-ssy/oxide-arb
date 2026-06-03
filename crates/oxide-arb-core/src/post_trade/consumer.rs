@@ -74,6 +74,14 @@ impl PostTradeConsumer {
             return;
         }
 
+        let snapshot = match trade.scored_opportunity_snapshot() {
+            Ok(snapshot) => Some(snapshot),
+            Err(error) => {
+                tracing::warn!(%error, trade_id = %trade.trade_id, "scored snapshot deserialize failed");
+                None
+            }
+        };
+
         if trade.state.is_success() {
             if let Err(error) = self.ensure_position(trade).await {
                 tracing::error!(%error, trade_id = %trade.trade_id, "position creation failed after fill");
@@ -81,7 +89,13 @@ impl PostTradeConsumer {
                 self.metrics.post_trade_relay_failed.inc();
                 return;
             }
-            if let Err(error) = self.ensure_calibration_outcome(trade).await {
+            let Some(snapshot) = &snapshot else {
+                self.fsm
+                    .enter_emergency("calibration outcome create failed");
+                self.metrics.post_trade_relay_failed.inc();
+                return;
+            };
+            if let Err(error) = self.ensure_calibration_outcome(trade, snapshot).await {
                 tracing::error!(%error, trade_id = %trade.trade_id, "calibration outcome creation failed after fill");
                 self.fsm
                     .enter_emergency("calibration outcome create failed");
@@ -90,7 +104,7 @@ impl PostTradeConsumer {
             }
         }
 
-        self.write_audit(trade);
+        self.write_audit(trade, snapshot.as_ref());
 
         match self
             .trade_repo
@@ -143,10 +157,11 @@ impl PostTradeConsumer {
         Ok(())
     }
 
-    async fn ensure_calibration_outcome(&self, trade: &TradeInfo) -> Result<(), OxideError> {
-        let snapshot =
-            serde_json::from_value::<ScoredOpportunitySnapshot>(trade.scored_snapshot.clone())
-                .map_err(|error| OxideError::Internal(error.to_string()))?;
+    async fn ensure_calibration_outcome(
+        &self,
+        trade: &TradeInfo,
+        snapshot: &ScoredOpportunitySnapshot,
+    ) -> Result<(), OxideError> {
         let bucket = snapshot.calibration_bucket_key();
         self.calibration_repo
             .create_outcome(NewCalibrationOutcome {
@@ -173,14 +188,12 @@ impl PostTradeConsumer {
     }
 
     /// Best-effort terminal audit to `ClickHouse` (analytics; loss-tolerant).
-    fn write_audit(&self, trade: &TradeInfo) {
-        match serde_json::from_value::<ScoredOpportunitySnapshot>(trade.scored_snapshot.clone()) {
-            Ok(snapshot) => self.audit_writer.write_terminal(trade, &snapshot),
-            Err(error) => {
-                tracing::warn!(%error, trade_id = %trade.trade_id, "scored snapshot deserialize failed; writing missing-attribution audit");
-                self.audit_writer
-                    .write_terminal_missing_snapshot(trade, &error.to_string());
-            }
+    fn write_audit(&self, trade: &TradeInfo, snapshot: Option<&ScoredOpportunitySnapshot>) {
+        if let Some(snapshot) = snapshot {
+            self.audit_writer.write_terminal(trade, snapshot);
+        } else {
+            self.audit_writer
+                .write_terminal_missing_snapshot(trade, "scored snapshot deserialize failed");
         }
     }
 }

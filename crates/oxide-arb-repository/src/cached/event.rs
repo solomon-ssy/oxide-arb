@@ -48,6 +48,11 @@ impl<R: EventRepository> EventRepository for CachedEventRepository<R> {
     }
 
     #[inline]
+    async fn find_by_ids(&self, ids: &[EventId]) -> Result<Vec<EventInfo>, StorageError> {
+        self.inner.find_by_ids(ids).await
+    }
+
+    #[inline]
     async fn find_active(&self) -> Result<Vec<EventInfo>, StorageError> {
         self.inner.find_active().await
     }

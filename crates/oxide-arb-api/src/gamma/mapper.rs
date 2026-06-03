@@ -53,19 +53,17 @@ pub fn parse_sync_payload(raw_events: Vec<RawGammaEvent>) -> GammaCatalogBatch {
     let mut registry_events = Vec::with_capacity(raw_events.len());
     let mut registry_markets = Vec::new();
 
-    for raw in raw_events {
+    for mut raw in raw_events {
         let event_id = EventId::new(&raw.id);
-        let raw_markets_clone = raw.markets.clone().unwrap_or_default();
 
         upsert_events.push(map_upsert_event(&raw, &event_id));
+        registry_events.push(map_event_ref(&raw));
 
-        for rm in raw_markets_clone {
+        for rm in raw.markets.take().unwrap_or_default() {
             let (upsert, registry) = map_market_dual(rm, &event_id);
             upsert_markets.push(upsert);
             registry_markets.push(registry);
         }
-
-        registry_events.push(map_event(raw));
     }
 
     GammaCatalogBatch {
@@ -318,8 +316,46 @@ impl From<MarketRegistryParts<'_>> for MarketRegistryInfo {
 }
 
 pub fn map_event(raw: RawGammaEvent) -> EventRegistryInfo {
-    let event_id = EventId::new(&raw.id);
+    let id = raw.id;
+    let title = raw.title;
+    let slug = raw.slug;
+    let neg_risk = raw.neg_risk.unwrap_or(false);
+    let created_at = raw.created_at;
+    let updated_at = raw.updated_at;
     let markets = raw.markets.unwrap_or_default();
+    map_event_parts(
+        &id,
+        title,
+        slug,
+        neg_risk,
+        created_at.as_deref(),
+        updated_at.as_deref(),
+        &markets,
+    )
+}
+
+fn map_event_ref(raw: &RawGammaEvent) -> EventRegistryInfo {
+    map_event_parts(
+        &raw.id,
+        raw.title.clone(),
+        raw.slug.clone(),
+        raw.neg_risk.unwrap_or(false),
+        raw.created_at.as_deref(),
+        raw.updated_at.as_deref(),
+        raw.markets.as_deref().unwrap_or_default(),
+    )
+}
+
+fn map_event_parts(
+    id: &str,
+    title: String,
+    slug: String,
+    neg_risk: bool,
+    created_at: Option<&str>,
+    updated_at: Option<&str>,
+    markets: &[RawGammaMarket],
+) -> EventRegistryInfo {
+    let event_id = EventId::new(id);
     let market_ids: Vec<MarketId> = markets
         .iter()
         .map(|m| MarketId::new(&m.condition_id))
@@ -327,18 +363,14 @@ pub fn map_event(raw: RawGammaEvent) -> EventRegistryInfo {
 
     EventRegistryInfo {
         event_id,
-        title: raw.title,
-        slug: raw.slug,
+        title,
+        slug,
         market_ids,
-        neg_risk: raw.neg_risk.unwrap_or(false),
-        created_at: raw
-            .created_at
-            .as_deref()
+        neg_risk,
+        created_at: created_at
             .and_then(|value| value.parse::<DateTime<Utc>>().ok())
             .unwrap_or_else(Utc::now),
-        updated_at: raw
-            .updated_at
-            .as_deref()
+        updated_at: updated_at
             .and_then(|value| value.parse::<DateTime<Utc>>().ok())
             .unwrap_or_else(Utc::now),
     }

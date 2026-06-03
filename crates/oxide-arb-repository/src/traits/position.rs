@@ -14,6 +14,14 @@ use rust_decimal::Decimal;
 pub trait PositionRepository: Send + Sync {
     async fn find_open(&self) -> Result<Vec<PositionInfo>, StorageError>;
 
+    async fn open_as_of(&self, at: DateTime<Utc>) -> Result<Vec<PositionInfo>, StorageError>;
+
+    async fn changed_between(
+        &self,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> Result<Vec<PositionInfo>, StorageError>;
+
     async fn find_by_id(
         &self,
         position_id: &PositionId,

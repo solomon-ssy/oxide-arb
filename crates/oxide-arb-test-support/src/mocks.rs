@@ -1,7 +1,7 @@
 //! In-memory repository mocks for integration tests and benchmarks.
 
 use async_trait::async_trait;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::{
     clickhouse::{
@@ -188,6 +188,54 @@ impl PositionRepository for MockPositionRepository {
             .filter(|position| position.status == PositionStatus::Open)
             .cloned()
             .collect())
+    }
+
+    async fn open_as_of(&self, at: DateTime<Utc>) -> Result<Vec<PositionInfo>, StorageError> {
+        let mut positions: Vec<_> = self
+            .positions
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|position| {
+                position.opened_at <= at
+                    && position.closed_at.is_none_or(|closed_at| closed_at > at)
+            })
+            .cloned()
+            .collect();
+        positions.sort_by(|left, right| {
+            left.opened_at
+                .cmp(&right.opened_at)
+                .then_with(|| left.position_id.as_str().cmp(right.position_id.as_str()))
+        });
+        Ok(positions)
+    }
+
+    async fn changed_between(
+        &self,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> Result<Vec<PositionInfo>, StorageError> {
+        let in_window = |at: DateTime<Utc>| at >= start && at <= end;
+        let optional_in_window = |at: Option<DateTime<Utc>>| at.is_some_and(in_window);
+        let mut positions: Vec<_> = self
+            .positions
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|position| {
+                in_window(position.opened_at)
+                    || optional_in_window(position.closed_at)
+                    || optional_in_window(position.settled_at)
+                    || optional_in_window(position.settlement_accounted_at)
+            })
+            .cloned()
+            .collect();
+        positions.sort_by(|left, right| {
+            left.opened_at
+                .cmp(&right.opened_at)
+                .then_with(|| left.position_id.as_str().cmp(right.position_id.as_str()))
+        });
+        Ok(positions)
     }
 
     async fn find_by_id(
@@ -803,18 +851,69 @@ impl TradeRepository for MockTradeRepository {
 
     async fn find_by_market(
         &self,
-        _market_id: &MarketId,
-        _limit: u64,
+        market_id: &MarketId,
+        limit: u64,
     ) -> Result<Vec<TradeInfo>, StorageError> {
-        Ok(vec![])
+        let mut trades: Vec<_> = self
+            .trades
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|trade| &trade.market_id == market_id)
+            .cloned()
+            .collect();
+        trades.sort_by(|left, right| {
+            right
+                .created_at
+                .cmp(&left.created_at)
+                .then_with(|| right.trade_id.as_str().cmp(left.trade_id.as_str()))
+        });
+        trades.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
+        Ok(trades)
     }
 
     async fn find_recent(
         &self,
-        _since: chrono::DateTime<Utc>,
-        _limit: u64,
+        since: DateTime<Utc>,
+        limit: u64,
     ) -> Result<Vec<TradeInfo>, StorageError> {
-        Ok(vec![])
+        let mut trades: Vec<_> = self
+            .trades
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|trade| trade.created_at >= since)
+            .cloned()
+            .collect();
+        trades.sort_by(|left, right| {
+            right
+                .created_at
+                .cmp(&left.created_at)
+                .then_with(|| right.trade_id.as_str().cmp(left.trade_id.as_str()))
+        });
+        trades.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
+        Ok(trades)
+    }
+
+    async fn find_between(
+        &self,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> Result<Vec<TradeInfo>, StorageError> {
+        let mut trades: Vec<_> = self
+            .trades
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|trade| trade.created_at >= start && trade.created_at < end)
+            .cloned()
+            .collect();
+        trades.sort_by(|left, right| {
+            left.created_at
+                .cmp(&right.created_at)
+                .then_with(|| left.trade_id.as_str().cmp(right.trade_id.as_str()))
+        });
+        Ok(trades)
     }
 
     async fn count_by_outcome(
@@ -854,33 +953,33 @@ impl MockTimeseriesRepository {
 
 #[async_trait]
 impl TimeseriesFactWriter for MockTimeseriesRepository {
-    async fn insert_tick_events(&self, _events: &[TickEventRow]) -> Result<(), StorageError> {
+    async fn insert_tick_events(&self, _events: Vec<TickEventRow>) -> Result<(), StorageError> {
         Ok(())
     }
 
-    async fn insert_l2_events(&self, _rows: &[TickEventL2Row]) -> Result<(), StorageError> {
+    async fn insert_l2_events(&self, _rows: Vec<TickEventL2Row>) -> Result<(), StorageError> {
         Ok(())
     }
 
-    async fn insert_book_snapshots(&self, _rows: &[BookSnapshotRow]) -> Result<(), StorageError> {
+    async fn insert_book_snapshots(&self, _rows: Vec<BookSnapshotRow>) -> Result<(), StorageError> {
         Ok(())
     }
 
     async fn insert_detections(
         &self,
-        _rows: &[OpportunityDetectionRow],
+        _rows: Vec<OpportunityDetectionRow>,
     ) -> Result<(), StorageError> {
         Ok(())
     }
 
-    async fn insert_audits(&self, rows: &[OpportunityAuditRow]) -> Result<(), StorageError> {
-        self.audits.lock().unwrap().extend(rows.iter().cloned());
+    async fn insert_audits(&self, rows: Vec<OpportunityAuditRow>) -> Result<(), StorageError> {
+        self.audits.lock().unwrap().extend(rows);
         Ok(())
     }
 
     async fn insert_calibration_snapshots(
         &self,
-        _rows: &[CalibrationSnapshotRow],
+        _rows: Vec<CalibrationSnapshotRow>,
     ) -> Result<(), StorageError> {
         Ok(())
     }

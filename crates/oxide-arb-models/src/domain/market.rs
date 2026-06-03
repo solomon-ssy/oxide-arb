@@ -10,7 +10,7 @@ use crate::{
         fee::FeeSource,
         market::{EventStatus, MarketStatus},
     },
-    types::{EventId, MarketId, Price, TokenId, Usd},
+    types::{EventId, MarketId, MarketPitSnapshotId, Price, TokenId, Usd},
 };
 use chrono::{DateTime, Utc};
 use oxide_arb_error::market::MarketError;
@@ -54,6 +54,74 @@ info_from_model!(MarketInfo, crate::entities::market::Model, {
     fees_enabled, fee_rate, fee_exponent, fee_taker_only, fee_rebate_rate,
     fee_source, fee_observed_at, created_at, updated_at,
 });
+
+#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]
+#[sea_orm(entity = "crate::entities::market_pit_snapshot::Entity")]
+pub struct MarketPitSnapshotInfo {
+    pub market_pit_snapshot_id: MarketPitSnapshotId,
+    pub market_id: MarketId,
+    pub event_id: EventId,
+    pub question: String,
+    pub slug: String,
+    pub category: MarketCategory,
+    pub status: MarketStatus,
+    pub outcome: Option<String>,
+    pub yes_token_id: TokenId,
+    pub no_token_id: TokenId,
+    pub tick_size: TickSize,
+    pub neg_risk: bool,
+    pub end_date: Option<DateTime<Utc>>,
+    pub resolved_at: Option<DateTime<Utc>>,
+    pub fees_enabled: bool,
+    pub fee_rate: Option<Decimal>,
+    pub fee_exponent: Option<Decimal>,
+    pub fee_taker_only: Option<bool>,
+    pub fee_rebate_rate: Option<Decimal>,
+    pub fee_source: Option<String>,
+    pub fee_observed_at: Option<DateTime<Utc>>,
+    pub payload_hash: String,
+    pub observed_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+}
+
+info_from_model!(
+    MarketPitSnapshotInfo,
+    crate::entities::market_pit_snapshot::Model,
+    {
+        market_pit_snapshot_id, market_id, event_id, question, slug, category, status, outcome,
+        yes_token_id, no_token_id, tick_size, neg_risk, end_date, resolved_at, fees_enabled,
+        fee_rate, fee_exponent, fee_taker_only, fee_rebate_rate, fee_source, fee_observed_at,
+        payload_hash, observed_at, created_at,
+    }
+);
+
+#[derive(Debug, Clone, DeriveIntoActiveModel)]
+#[sea_orm(active_model = "crate::entities::market_pit_snapshot::ActiveModel")]
+pub struct NewMarketPitSnapshot {
+    pub market_pit_snapshot_id: MarketPitSnapshotId,
+    pub market_id: MarketId,
+    pub event_id: EventId,
+    pub question: String,
+    pub slug: String,
+    pub category: MarketCategory,
+    pub status: MarketStatus,
+    pub outcome: Option<String>,
+    pub yes_token_id: TokenId,
+    pub no_token_id: TokenId,
+    pub tick_size: TickSize,
+    pub neg_risk: bool,
+    pub end_date: Option<DateTime<Utc>>,
+    pub resolved_at: Option<DateTime<Utc>>,
+    pub fees_enabled: bool,
+    pub fee_rate: Option<Decimal>,
+    pub fee_exponent: Option<Decimal>,
+    pub fee_taker_only: Option<bool>,
+    pub fee_rebate_rate: Option<Decimal>,
+    pub fee_source: Option<String>,
+    pub fee_observed_at: Option<DateTime<Utc>>,
+    pub payload_hash: String,
+    pub observed_at: DateTime<Utc>,
+}
 
 impl From<MarketInfo> for MarketRegistryInfo {
     fn from(info: MarketInfo) -> Self {

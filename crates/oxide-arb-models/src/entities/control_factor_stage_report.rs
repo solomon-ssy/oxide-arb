@@ -1,7 +1,7 @@
 //! `control_factor_stage_report` table entity.
 
 use crate::{
-    enums::control_factor::EvidenceStageStatus,
+    enums::control_factor::{EvidenceStageStatus, MaterializationStageName},
     types::{MaterializationRunId, StageReportId},
 };
 use chrono::{DateTime, Utc};
@@ -13,15 +13,26 @@ pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub stage_report_id: StageReportId,
     pub materialization_run_id: MaterializationRunId,
-    #[sea_orm(column_type = "Text")]
-    pub stage_name: String,
+    pub stage_name: MaterializationStageName,
     pub status: EvidenceStageStatus,
-    pub window_from: DateTime<Utc>,
-    pub window_to: DateTime<Utc>,
+    pub started_at: DateTime<Utc>,
+    pub finished_at: Option<DateTime<Utc>>,
+    #[sea_orm(column_type = "JsonBinary")]
+    pub input_artifact_hashes: Json,
+    #[sea_orm(column_type = "Text", nullable)]
+    pub output_artifact_hash: Option<String>,
     #[sea_orm(column_type = "JsonBinary")]
     pub coverage: Json,
     #[sea_orm(column_type = "JsonBinary")]
+    pub metrics: Json,
+    pub records_read: i64,
+    pub records_written: i64,
+    #[sea_orm(column_type = "JsonBinary")]
     pub warnings: Json,
+    #[sea_orm(column_type = "JsonBinary")]
+    pub errors: Json,
+    #[sea_orm(column_type = "JsonBinary")]
+    pub query_fingerprints: Json,
     pub created_at: DateTime<Utc>,
 }
 

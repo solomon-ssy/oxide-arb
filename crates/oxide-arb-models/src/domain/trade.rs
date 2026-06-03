@@ -5,7 +5,7 @@
 //! - `NewTrade` / `TradeObservation` are write DTOs.
 
 use crate::{
-    domain::SettledPositionStats,
+    domain::{ScoredOpportunitySnapshot, SettledPositionStats},
     enums::{
         common::{ExecutionMode, MarketCategory, Side, TradeBusinessOutcome, TradeState},
         report::ReportSchemaVersion,
@@ -71,6 +71,14 @@ info_from_model!(TradeInfo, crate::entities::trade::Model, {
     execution_mode, latency_ms, error_message, submitted_at, confirmed_at,
     created_at, updated_at,
 });
+
+impl TradeInfo {
+    pub fn scored_opportunity_snapshot(
+        &self,
+    ) -> Result<ScoredOpportunitySnapshot, serde_json::Error> {
+        serde_json::from_value(self.scored_snapshot.clone())
+    }
+}
 
 /// Risk engine's view of a completed trade — minimal fields needed for
 /// post-trade accounting, blacklist logic, and potential-loss tracking.

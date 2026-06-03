@@ -9,11 +9,12 @@ use oxide_arb_models::{
     types::MarketId,
 };
 use rust_decimal::Decimal;
+use std::sync::Arc;
 
 /// Snapshot of fee parameters, atomically swapped on refresh.
 #[derive(Debug, Clone)]
 pub struct FeeSnapshot {
-    pub market_schedules: HashMap<MarketId, MarketFeeSchedule>,
+    pub market_schedules: HashMap<MarketId, Arc<MarketFeeSchedule>>,
     pub category_defaults: HashMap<MarketCategory, CategoryFeeParams>,
     pub updated_at: DateTime<Utc>,
 }
@@ -41,12 +42,12 @@ impl FeeSnapshot {
         &self,
         market_id: &MarketId,
         category: MarketCategory,
-    ) -> Option<MarketFeeSchedule> {
+    ) -> Option<Arc<MarketFeeSchedule>> {
         let params = self
             .category_defaults
             .get(&category)
             .or_else(|| self.category_defaults.get(&MarketCategory::Other))?;
-        Some(MarketFeeSchedule {
+        Some(Arc::new(MarketFeeSchedule {
             market_id: market_id.clone(),
             fees_enabled: params.fee_rate > Decimal::ZERO,
             fee_rate: params.fee_rate,
@@ -55,7 +56,7 @@ impl FeeSnapshot {
             rebate_rate: None,
             source: FeeSource::CategoryDefault,
             observed_at: self.updated_at,
-        })
+        }))
     }
 }
 

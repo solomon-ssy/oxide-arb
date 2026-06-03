@@ -306,6 +306,41 @@ pub struct NewEmergencySnapshot {
 }
 
 /// All fields required to persist a new reconciliation report.
+#[derive(Debug, Clone, DerivePartialModel, FromQueryResult)]
+#[sea_orm(entity = "crate::entities::reconciliation_report::Entity")]
+pub struct ReconciliationReportInfo {
+    pub id: i64,
+    pub status: ReconciliationStatus,
+    pub mismatches: serde_json::Value,
+    pub internal_balance: Usd,
+    pub external_balance: Usd,
+    pub internal_exposure: Usd,
+    pub external_exposure: Usd,
+    pub reserved: Usd,
+    pub tolerance: Usd,
+    pub checked_at: DateTime<Utc>,
+    pub duration_ms: i64,
+}
+
+info_from_model!(
+    ReconciliationReportInfo,
+    crate::entities::reconciliation_report::Model,
+    {
+        id,
+        status,
+        mismatches,
+        internal_balance,
+        external_balance,
+        internal_exposure,
+        external_exposure,
+        reserved,
+        tolerance,
+        checked_at,
+        duration_ms,
+    }
+);
+
+/// All fields required to persist a new reconciliation report.
 #[derive(Debug, Clone, DeriveIntoActiveModel)]
 #[sea_orm(active_model = "crate::entities::reconciliation_report::ActiveModel")]
 pub struct NewReconciliationReport {

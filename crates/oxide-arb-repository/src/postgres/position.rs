@@ -20,8 +20,8 @@ use oxide_arb_models::{
 use rust_decimal::Decimal;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, DatabaseTransaction,
-    EntityTrait, IntoActiveModel, JoinType, PaginatorTrait, QueryFilter, QuerySelect,
-    RelationTrait,
+    EntityTrait, IntoActiveModel, JoinType, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect,
+    RelationTrait, sea_query::Condition,
 };
 
 // ── helpers ──────────────────────────────────────────────────────────
@@ -29,6 +29,46 @@ use sea_orm::{
 async fn find_open_q(db: &impl ConnectionTrait) -> Result<Vec<PositionInfo>, StorageError> {
     Entity::find()
         .filter(Column::Status.eq(PositionStatus::Open))
+        .all(db)
+        .await
+        .map_err(StorageError::from)
+        .map(|v| v.into_iter().map(Into::into).collect())
+}
+
+async fn open_as_of_q(
+    db: &impl ConnectionTrait,
+    at: DateTime<Utc>,
+) -> Result<Vec<PositionInfo>, StorageError> {
+    Entity::find()
+        .filter(Column::OpenedAt.lte(at))
+        .filter(
+            Condition::any()
+                .add(Column::ClosedAt.is_null())
+                .add(Column::ClosedAt.gt(at)),
+        )
+        .order_by_asc(Column::OpenedAt)
+        .order_by_asc(Column::PositionId)
+        .all(db)
+        .await
+        .map_err(StorageError::from)
+        .map(|v| v.into_iter().map(Into::into).collect())
+}
+
+async fn changed_between_q(
+    db: &impl ConnectionTrait,
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+) -> Result<Vec<PositionInfo>, StorageError> {
+    Entity::find()
+        .filter(
+            Condition::any()
+                .add(Column::OpenedAt.between(start, end))
+                .add(Column::ClosedAt.between(start, end))
+                .add(Column::SettledAt.between(start, end))
+                .add(Column::SettlementAccountedAt.between(start, end)),
+        )
+        .order_by_asc(Column::OpenedAt)
+        .order_by_asc(Column::PositionId)
         .all(db)
         .await
         .map_err(StorageError::from)
@@ -444,6 +484,18 @@ impl PositionRepository for PgPositionRepository {
         find_open_q(&self.db).await
     }
 
+    async fn open_as_of(&self, at: DateTime<Utc>) -> Result<Vec<PositionInfo>, StorageError> {
+        open_as_of_q(&self.db, at).await
+    }
+
+    async fn changed_between(
+        &self,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> Result<Vec<PositionInfo>, StorageError> {
+        changed_between_q(&self.db, start, end).await
+    }
+
     async fn find_by_id(
         &self,
         position_id: &PositionId,
@@ -616,6 +668,18 @@ pub struct PgPositionRepositoryTxn<'a> {
 impl PositionRepository for PgPositionRepositoryTxn<'_> {
     async fn find_open(&self) -> Result<Vec<PositionInfo>, StorageError> {
         find_open_q(self.txn).await
+    }
+
+    async fn open_as_of(&self, at: DateTime<Utc>) -> Result<Vec<PositionInfo>, StorageError> {
+        open_as_of_q(self.txn, at).await
+    }
+
+    async fn changed_between(
+        &self,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> Result<Vec<PositionInfo>, StorageError> {
+        changed_between_q(self.txn, start, end).await
     }
 
     async fn find_by_id(

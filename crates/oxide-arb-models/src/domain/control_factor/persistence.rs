@@ -1,15 +1,19 @@
 //! Persistence projections and write DTOs for the control-factor registry.
 
-use super::{publication::ControlFactorPublication, value::ControlFactorValue};
+use super::{
+    materialization::StageReportBody, publication::ControlFactorPublication,
+    value::ControlFactorValue,
+};
 use crate::{
     enums::control_factor::{
         ControlAuditEventType, ControlFactorType, EvidenceStageStatus, FactorStatus,
-        MaterializationRunStatus, PublicationMode, PublicationStatus,
+        MaterializationOutputPolicy, MaterializationRunKind, MaterializationRunStatus,
+        MaterializationStageName, PublicationMode, PublicationStatus, RunTriggerType,
     },
     types::{ControlFactorId, FactorPublicationId, MaterializationRunId, StageReportId},
 };
 use chrono::{DateTime, Utc};
-use oxide_arb_error::control::FactorValueError;
+use oxide_arb_error::control::{ControlPersistenceError, FactorValueError};
 use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
 use serde::{Deserialize, Serialize};
 
@@ -323,16 +327,31 @@ pub struct NewControlFactorAuditEvent {
 #[sea_orm(entity = "crate::entities::control_factor_materialization_run::Entity")]
 pub struct ControlFactorMaterializationRunInfo {
     pub materialization_run_id: MaterializationRunId,
+    pub run_dedupe_key: Option<String>,
+    pub run_kind: MaterializationRunKind,
+    pub trigger_type: RunTriggerType,
+    pub trigger_ref: Option<String>,
     pub status: MaterializationRunStatus,
     pub window_from: DateTime<Utc>,
     pub window_to: DateTime<Utc>,
     pub source_delay_secs: i64,
+    pub market_filter: serde_json::Value,
+    pub requested_factor_types: serde_json::Value,
+    pub data_requirements: serde_json::Value,
+    pub runtime_config_ref: serde_json::Value,
+    pub simulation_config_hash: String,
+    pub quality_gate_policy_hash: String,
+    pub output_policy: MaterializationOutputPolicy,
     pub manifest: serde_json::Value,
+    pub manifest_hash: String,
     pub report: serde_json::Value,
     pub code_git_sha: String,
-    pub query_fingerprint: String,
+    pub created_by: String,
     pub started_at: Option<DateTime<Utc>>,
     pub finished_at: Option<DateTime<Utc>>,
+    pub failure_code: Option<String>,
+    pub failure_detail: Option<String>,
+    pub report_uri: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -342,16 +361,31 @@ info_from_model!(
     crate::entities::control_factor_materialization_run::Model,
     {
         materialization_run_id,
+        run_dedupe_key,
+        run_kind,
+        trigger_type,
+        trigger_ref,
         status,
         window_from,
         window_to,
         source_delay_secs,
+        market_filter,
+        requested_factor_types,
+        data_requirements,
+        runtime_config_ref,
+        simulation_config_hash,
+        quality_gate_policy_hash,
+        output_policy,
         manifest,
+        manifest_hash,
         report,
         code_git_sha,
-        query_fingerprint,
+        created_by,
         started_at,
         finished_at,
+        failure_code,
+        failure_detail,
+        report_uri,
         created_at,
         updated_at,
     }
@@ -362,16 +396,31 @@ info_from_model!(
 #[sea_orm(active_model = "crate::entities::control_factor_materialization_run::ActiveModel")]
 pub struct NewControlFactorMaterializationRun {
     pub materialization_run_id: MaterializationRunId,
+    pub run_dedupe_key: Option<String>,
+    pub run_kind: MaterializationRunKind,
+    pub trigger_type: RunTriggerType,
+    pub trigger_ref: Option<String>,
     pub status: MaterializationRunStatus,
     pub window_from: DateTime<Utc>,
     pub window_to: DateTime<Utc>,
     pub source_delay_secs: i64,
+    pub market_filter: serde_json::Value,
+    pub requested_factor_types: serde_json::Value,
+    pub data_requirements: serde_json::Value,
+    pub runtime_config_ref: serde_json::Value,
+    pub simulation_config_hash: String,
+    pub quality_gate_policy_hash: String,
+    pub output_policy: MaterializationOutputPolicy,
     pub manifest: serde_json::Value,
+    pub manifest_hash: String,
     pub report: serde_json::Value,
     pub code_git_sha: String,
-    pub query_fingerprint: String,
+    pub created_by: String,
     pub started_at: Option<DateTime<Utc>>,
     pub finished_at: Option<DateTime<Utc>>,
+    pub failure_code: Option<String>,
+    pub failure_detail: Option<String>,
+    pub report_uri: Option<String>,
 }
 
 /// DB row projection for `control_factor_stage_report`.
@@ -380,12 +429,19 @@ pub struct NewControlFactorMaterializationRun {
 pub struct ControlFactorStageReportInfo {
     pub stage_report_id: StageReportId,
     pub materialization_run_id: MaterializationRunId,
-    pub stage_name: String,
+    pub stage_name: MaterializationStageName,
     pub status: EvidenceStageStatus,
-    pub window_from: DateTime<Utc>,
-    pub window_to: DateTime<Utc>,
+    pub started_at: DateTime<Utc>,
+    pub finished_at: Option<DateTime<Utc>>,
+    pub input_artifact_hashes: serde_json::Value,
+    pub output_artifact_hash: Option<String>,
     pub coverage: serde_json::Value,
+    pub metrics: serde_json::Value,
+    pub records_read: i64,
+    pub records_written: i64,
     pub warnings: serde_json::Value,
+    pub errors: serde_json::Value,
+    pub query_fingerprints: serde_json::Value,
     pub created_at: DateTime<Utc>,
 }
 
@@ -397,10 +453,17 @@ info_from_model!(
         materialization_run_id,
         stage_name,
         status,
-        window_from,
-        window_to,
+        started_at,
+        finished_at,
+        input_artifact_hashes,
+        output_artifact_hash,
         coverage,
+        metrics,
+        records_read,
+        records_written,
         warnings,
+        errors,
+        query_fingerprints,
         created_at,
     }
 );
@@ -411,10 +474,111 @@ info_from_model!(
 pub struct NewControlFactorStageReport {
     pub stage_report_id: StageReportId,
     pub materialization_run_id: MaterializationRunId,
-    pub stage_name: String,
+    pub stage_name: MaterializationStageName,
     pub status: EvidenceStageStatus,
-    pub window_from: DateTime<Utc>,
-    pub window_to: DateTime<Utc>,
+    pub started_at: DateTime<Utc>,
+    pub finished_at: Option<DateTime<Utc>>,
+    pub input_artifact_hashes: serde_json::Value,
+    pub output_artifact_hash: Option<String>,
     pub coverage: serde_json::Value,
+    pub metrics: serde_json::Value,
+    pub records_read: i64,
+    pub records_written: i64,
     pub warnings: serde_json::Value,
+    pub errors: serde_json::Value,
+    pub query_fingerprints: serde_json::Value,
+}
+
+impl TryFrom<&StageReportBody> for NewControlFactorStageReport {
+    type Error = ControlPersistenceError;
+
+    fn try_from(report: &StageReportBody) -> Result<Self, Self::Error> {
+        Ok(Self {
+            stage_report_id: report.stage_report_id.clone(),
+            materialization_run_id: report.run_id.clone(),
+            stage_name: report.stage_name,
+            status: report.status,
+            started_at: report.started_at,
+            finished_at: report.finished_at,
+            input_artifact_hashes: encode_stage_json_field(
+                "input_artifact_hashes",
+                &report.input_artifact_hashes,
+            )?,
+            output_artifact_hash: report
+                .output_artifact_hash
+                .as_ref()
+                .map(|hash| hash.0.clone()),
+            coverage: encode_stage_json_field("coverage", &report.coverage)?,
+            metrics: report.metrics.clone(),
+            records_read: checked_u64_to_i64("records_read", report.records_read)?,
+            records_written: checked_u64_to_i64("records_written", report.records_written)?,
+            warnings: encode_stage_json_field("warnings", &report.warnings)?,
+            errors: encode_stage_json_field("errors", &report.errors)?,
+            query_fingerprints: encode_stage_json_field(
+                "query_fingerprints",
+                &report.query_fingerprints,
+            )?,
+        })
+    }
+}
+
+#[inline]
+fn encode_stage_json_field<T: Serialize>(
+    field: &'static str,
+    value: &T,
+) -> Result<serde_json::Value, ControlPersistenceError> {
+    serde_json::to_value(value).map_err(|error| ControlPersistenceError::Encode {
+        field,
+        message: error.to_string(),
+    })
+}
+
+#[inline]
+fn checked_u64_to_i64(field: &'static str, value: u64) -> Result<i64, ControlPersistenceError> {
+    i64::try_from(value).map_err(|_| ControlPersistenceError::IntegerOverflow { field, value })
+}
+
+#[derive(Debug, Clone)]
+pub struct EnqueueMaterializationRunOptions {
+    pub force_new_run: bool,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub enum EnqueueMaterializationRunOutcome {
+    Created(ControlFactorMaterializationRunInfo),
+    DuplicateActive(ControlFactorMaterializationRunInfo),
+    DuplicateCompleted(ControlFactorMaterializationRunInfo),
+}
+
+#[derive(Debug, Clone)]
+pub enum AcquireMaterializationRunOutcome {
+    Acquired(ControlFactorMaterializationRunInfo),
+    NotQueued(ControlFactorMaterializationRunInfo),
+    NotFound,
+}
+
+#[derive(Debug, Clone)]
+pub struct MaterializationRunStatusPatch {
+    pub finished_at: Option<DateTime<Utc>>,
+    pub failure_code: Option<String>,
+    pub failure_detail: Option<String>,
+    pub report: Option<serde_json::Value>,
+    pub report_uri: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub enum RunTransitionOutcome {
+    Transitioned(Box<ControlFactorMaterializationRunInfo>),
+    InvalidTransition {
+        current_status: MaterializationRunStatus,
+    },
+    NotFound,
+}
+
+#[derive(Debug, Clone)]
+pub enum CancelMaterializationRunOutcome {
+    Cancelled(ControlFactorMaterializationRunInfo),
+    AlreadyTerminal(ControlFactorMaterializationRunInfo),
+    NotFound,
 }

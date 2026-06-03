@@ -13,6 +13,17 @@ use uuid::Uuid;
 #[derive(TypedId, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct MarketId(Arc<str>);
 
+/// Point-in-time market metadata snapshot identifier.
+#[derive(TypedId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MarketPitSnapshotId(Arc<str>);
+
+impl MarketPitSnapshotId {
+    #[must_use]
+    pub fn new_v7() -> Self {
+        Self(Arc::from(format!("mps_{}", Uuid::now_v7()).as_str()))
+    }
+}
+
 /// Polymarket event identifier.
 #[derive(TypedId, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct EventId(Arc<str>);

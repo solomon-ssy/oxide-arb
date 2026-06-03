@@ -76,6 +76,9 @@ pub enum OxideError {
     #[error(transparent)]
     Control(#[from] control::GovernanceError),
 
+    #[error(transparent)]
+    Materialization(#[from] control::MaterializationError),
+
     // ── Market catalog ──────────────────────────────────────────────────
     #[error(transparent)]
     Market(#[from] market::MarketError),

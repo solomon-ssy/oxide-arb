@@ -151,10 +151,43 @@ active_string_enum! {
     pub enum MaterializationRunStatus {
         Queued => "queued",
         Running => "running",
-        Succeeded => "succeeded",
-        PartialFailed => "partial_failed",
+        Completed => "completed",
+        CompletedWithRejectedFactors => "completed_with_rejected_factors",
+        ReportOnly => "report_only",
         Failed => "failed",
         Cancelled => "cancelled",
+    }
+}
+
+active_string_enum! {
+    /// Why a materialization run exists.
+    pub enum MaterializationRunKind {
+        Scheduled => "scheduled",
+        Backfill => "backfill",
+        Incident => "incident",
+        ConfigComparison => "config_comparison",
+        ForensicReport => "forensic_report",
+    }
+}
+
+active_string_enum! {
+    /// External or internal source that created a materialization run.
+    pub enum RunTriggerType {
+        Scheduled => "scheduled",
+        Backfill => "backfill",
+        Incident => "incident",
+        ConfigComparison => "config_comparison",
+        ForensicReport => "forensic_report",
+    }
+}
+
+active_string_enum! {
+    /// What a materialization run is allowed to persist.
+    pub enum MaterializationOutputPolicy {
+        EmitDraftCandidates => "emit_draft_candidates",
+        EmitDraftOnly => "emit_draft_only",
+        ReportOnly => "report_only",
+        NoFactorOutput => "no_factor_output",
     }
 }
 
@@ -163,10 +196,172 @@ active_string_enum! {
     pub enum EvidenceStageStatus {
         Pending => "pending",
         Running => "running",
-        Succeeded => "succeeded",
+        Completed => "completed",
+        CompletedWithWarnings => "completed_with_warnings",
+        SkippedNotRequired => "skipped_not_required",
         InsufficientCoverage => "insufficient_coverage",
+        ReportOnly => "report_only",
         Failed => "failed",
-        Skipped => "skipped",
+    }
+}
+
+active_string_enum! {
+    /// Fixed stage names in the materialization graph.
+    pub enum MaterializationStageName {
+        ResolveInputs => "resolve_inputs",
+        BookReconstruction => "book_reconstruction",
+        DetectorEvidence => "detector_evidence",
+        ExecutionEvidence => "execution_evidence",
+        PortfolioRiskEvidence => "portfolio_risk_evidence",
+        SettlementReconciliationEvidence => "settlement_reconciliation_evidence",
+        FactorBuild => "factor_build",
+        QualityGateEvaluation => "quality_gate_evaluation",
+        DraftWrite => "draft_write",
+    }
+}
+
+/// Stable materialization error code used by UI, alerts, and retry policy.
+///
+/// This enum intentionally implements custom serde so JSON uses the stable
+/// dotted code strings rather than Rust variant names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MaterializationErrorCode {
+    InputMarketMappingMissing,
+    InputPitConfigMissing,
+    InputCalibrationSnapshotMissing,
+    InputFeeScheduleMissing,
+    InputBalanceSnapshotMissing,
+    InputTokenBalanceSnapshotMissing,
+    InputSettlementTruthMissing,
+    InputReconciliationStatusMissing,
+    InputCurrentStateFallbackForbidden,
+    ChCoverageL2Insufficient,
+    ChBookSnapshotGap,
+    AuditSettlementAttributionMissing,
+    RiskSequenceIncomplete,
+    GateSampleInsufficient,
+    GateNotConservative,
+    RunDedupeConflict,
+    RunInvalidTransition,
+    RunCancelled,
+    PublicationLockConflict,
+    SnapshotSchemaMismatch,
+}
+
+impl MaterializationErrorCode {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::InputMarketMappingMissing => "input.market_mapping_missing",
+            Self::InputPitConfigMissing => "input.pit_config_missing",
+            Self::InputCalibrationSnapshotMissing => "input.calibration_snapshot_missing",
+            Self::InputFeeScheduleMissing => "input.fee_schedule_missing",
+            Self::InputBalanceSnapshotMissing => "input.balance_snapshot_missing",
+            Self::InputTokenBalanceSnapshotMissing => "input.token_balance_snapshot_missing",
+            Self::InputSettlementTruthMissing => "input.settlement_truth_missing",
+            Self::InputReconciliationStatusMissing => "input.reconciliation_status_missing",
+            Self::InputCurrentStateFallbackForbidden => "input.current_state_fallback_forbidden",
+            Self::ChCoverageL2Insufficient => "ch.coverage_l2_insufficient",
+            Self::ChBookSnapshotGap => "ch.book_snapshot_gap",
+            Self::AuditSettlementAttributionMissing => "audit.settlement_attribution_missing",
+            Self::RiskSequenceIncomplete => "risk.sequence_incomplete",
+            Self::GateSampleInsufficient => "gate.sample_insufficient",
+            Self::GateNotConservative => "gate.not_conservative",
+            Self::RunDedupeConflict => "run.dedupe_conflict",
+            Self::RunInvalidTransition => "run.invalid_transition",
+            Self::RunCancelled => "run.cancelled",
+            Self::PublicationLockConflict => "publication.lock_conflict",
+            Self::SnapshotSchemaMismatch => "snapshot.schema_mismatch",
+        }
+    }
+
+    #[must_use]
+    pub const fn is_retryable(self) -> bool {
+        matches!(
+            self,
+            Self::ChCoverageL2Insufficient
+                | Self::ChBookSnapshotGap
+                | Self::AuditSettlementAttributionMissing
+                | Self::RiskSequenceIncomplete
+                | Self::PublicationLockConflict
+        )
+    }
+
+    #[must_use]
+    pub const fn is_fatal_for_production(self) -> bool {
+        matches!(
+            self,
+            Self::InputMarketMappingMissing
+                | Self::InputPitConfigMissing
+                | Self::InputCalibrationSnapshotMissing
+                | Self::InputFeeScheduleMissing
+                | Self::InputBalanceSnapshotMissing
+                | Self::InputTokenBalanceSnapshotMissing
+                | Self::InputSettlementTruthMissing
+                | Self::InputReconciliationStatusMissing
+                | Self::InputCurrentStateFallbackForbidden
+                | Self::RunInvalidTransition
+                | Self::SnapshotSchemaMismatch
+        )
+    }
+}
+
+impl std::fmt::Display for MaterializationErrorCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for MaterializationErrorCode {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "input.market_mapping_missing" => Ok(Self::InputMarketMappingMissing),
+            "input.pit_config_missing" => Ok(Self::InputPitConfigMissing),
+            "input.calibration_snapshot_missing" => Ok(Self::InputCalibrationSnapshotMissing),
+            "input.fee_schedule_missing" => Ok(Self::InputFeeScheduleMissing),
+            "input.balance_snapshot_missing" => Ok(Self::InputBalanceSnapshotMissing),
+            "input.token_balance_snapshot_missing" => Ok(Self::InputTokenBalanceSnapshotMissing),
+            "input.settlement_truth_missing" => Ok(Self::InputSettlementTruthMissing),
+            "input.reconciliation_status_missing" => Ok(Self::InputReconciliationStatusMissing),
+            "input.current_state_fallback_forbidden" => {
+                Ok(Self::InputCurrentStateFallbackForbidden)
+            }
+            "ch.coverage_l2_insufficient" => Ok(Self::ChCoverageL2Insufficient),
+            "ch.book_snapshot_gap" => Ok(Self::ChBookSnapshotGap),
+            "audit.settlement_attribution_missing" => Ok(Self::AuditSettlementAttributionMissing),
+            "risk.sequence_incomplete" => Ok(Self::RiskSequenceIncomplete),
+            "gate.sample_insufficient" => Ok(Self::GateSampleInsufficient),
+            "gate.not_conservative" => Ok(Self::GateNotConservative),
+            "run.dedupe_conflict" => Ok(Self::RunDedupeConflict),
+            "run.invalid_transition" => Ok(Self::RunInvalidTransition),
+            "run.cancelled" => Ok(Self::RunCancelled),
+            "publication.lock_conflict" => Ok(Self::PublicationLockConflict),
+            "snapshot.schema_mismatch" => Ok(Self::SnapshotSchemaMismatch),
+            _ => Err(format!("unknown materialization error code: {value}")),
+        }
+    }
+}
+
+impl Serialize for MaterializationErrorCode {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for MaterializationErrorCode {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use std::str::FromStr;
+
+        let value = String::deserialize(deserializer)?;
+        Self::from_str(&value).map_err(serde::de::Error::custom)
     }
 }
 

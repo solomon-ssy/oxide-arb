@@ -759,7 +759,8 @@ async fn wire_risk(
         .find_active()
         .await
         .unwrap_or_default();
-    let audit_sink: Arc<dyn AuditSink> = infra.risk_decision_audit.clone();
+    let audit_sink = Arc::clone(&infra.risk_decision_audit);
+    let audit_sink: Arc<dyn AuditSink> = audit_sink;
     let potential_loss_store = Arc::new(CorePotentialLossStore::new(
         infra.repos.potential_loss.clone(),
     ));
@@ -1032,14 +1033,15 @@ fn wire_execution_loop(
         market_inflight: Arc::clone(&market_inflight),
         metrics: Arc::clone(&infra.metrics),
         execution_mode: mode,
-        trade_repo: infra.persistence.trade_repo.clone(),
+        trade_repo: Arc::clone(&infra.persistence.trade_repo),
         audit_writer: Arc::clone(&infra.persistence.audit_writer),
         relay_notify: Arc::clone(&relay_notify),
         metrics_state: Arc::clone(&risk.metrics_state),
     }));
 
     let inflight = Arc::new(AtomicU32::new(0));
-    let pipeline_port: Arc<dyn ExecutionPort> = execution_pipeline.clone();
+    let pipeline_port = Arc::clone(&execution_pipeline);
+    let pipeline_port: Arc<dyn ExecutionPort> = pipeline_port;
     let (runner_pool, execution_runners) = ExecutionRunnerPool::new(
         settings.execution.book_apply.shard_count,
         &pipeline_port,

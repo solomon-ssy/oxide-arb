@@ -24,10 +24,17 @@ pub enum ControlFactorStageReport {
     MaterializationRunId,
     StageName,
     Status,
-    WindowFrom,
-    WindowTo,
+    StartedAt,
+    FinishedAt,
+    InputArtifactHashes,
+    OutputArtifactHash,
     Coverage,
+    Metrics,
+    RecordsRead,
+    RecordsWritten,
     Warnings,
+    Errors,
+    QueryFingerprints,
     CreatedAt,
 }
 
@@ -58,14 +65,24 @@ pub fn table() -> TableCreateStatement {
                 .default(EvidenceStageStatus::Pending),
         )
         .col(
-            ColumnDef::new(ControlFactorStageReport::WindowFrom)
+            ColumnDef::new(ControlFactorStageReport::StartedAt)
                 .timestamp_with_time_zone()
                 .not_null(),
         )
         .col(
-            ColumnDef::new(ControlFactorStageReport::WindowTo)
+            ColumnDef::new(ControlFactorStageReport::FinishedAt)
                 .timestamp_with_time_zone()
+                .null(),
+        )
+        .col(
+            ColumnDef::new(ControlFactorStageReport::InputArtifactHashes)
+                .json_binary()
                 .not_null(),
+        )
+        .col(
+            ColumnDef::new(ControlFactorStageReport::OutputArtifactHash)
+                .text()
+                .null(),
         )
         .col(
             ColumnDef::new(ControlFactorStageReport::Coverage)
@@ -73,7 +90,32 @@ pub fn table() -> TableCreateStatement {
                 .not_null(),
         )
         .col(
+            ColumnDef::new(ControlFactorStageReport::Metrics)
+                .json_binary()
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(ControlFactorStageReport::RecordsRead)
+                .big_integer()
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(ControlFactorStageReport::RecordsWritten)
+                .big_integer()
+                .not_null(),
+        )
+        .col(
             ColumnDef::new(ControlFactorStageReport::Warnings)
+                .json_binary()
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(ControlFactorStageReport::Errors)
+                .json_binary()
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(ControlFactorStageReport::QueryFingerprints)
                 .json_binary()
                 .not_null(),
         )
@@ -97,18 +139,33 @@ pub fn table() -> TableCreateStatement {
 }
 
 pub fn indexes() -> Vec<IndexSpec> {
-    vec![IndexSpec::sea_query(
-        "idx_control_factor_stage_report_run",
-        stage_report_table_name,
-        IndexBuildMode::Transactional,
-        Index::create()
-            .name("idx_control_factor_stage_report_run")
-            .table(ControlFactorStageReport::Table)
-            .col(ControlFactorStageReport::MaterializationRunId)
-            .col((ControlFactorStageReport::CreatedAt, IndexOrder::Desc))
-            .to_owned(),
-        "evidence stage reports by materialization run",
-    )]
+    vec![
+        IndexSpec::sea_query(
+            "uniq_cfm_stage",
+            stage_report_table_name,
+            IndexBuildMode::Transactional,
+            Index::create()
+                .name("uniq_cfm_stage")
+                .table(ControlFactorStageReport::Table)
+                .col(ControlFactorStageReport::MaterializationRunId)
+                .col(ControlFactorStageReport::StageName)
+                .unique()
+                .to_owned(),
+            "one retry-safe report per materialization run and stage",
+        ),
+        IndexSpec::sea_query(
+            "idx_cfm_stage_run_created",
+            stage_report_table_name,
+            IndexBuildMode::Transactional,
+            Index::create()
+                .name("idx_cfm_stage_run_created")
+                .table(ControlFactorStageReport::Table)
+                .col(ControlFactorStageReport::MaterializationRunId)
+                .col((ControlFactorStageReport::CreatedAt, IndexOrder::Desc))
+                .to_owned(),
+            "evidence stage reports by materialization run",
+        ),
+    ]
 }
 
 pub fn dependencies() -> Vec<TableDependency> {

@@ -172,7 +172,7 @@ impl ChWriteManager {
 
         Ok(WritePermit {
             _permit: permit,
-            metrics: self.metrics.clone(),
+            metrics: Arc::clone(&self.metrics),
         })
     }
 

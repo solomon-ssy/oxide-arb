@@ -98,10 +98,7 @@ mod tests {
         enums::control_factor::{
             ControlFactorType, FactorStatus, PublicationMode, PublicationStatus,
         },
-        types::{
-            ControlFactorId, FactorPublicationId, MaterializationRunId, RuntimeConfigVersionId,
-            StageReportId,
-        },
+        types::{ControlFactorId, FactorPublicationId, MaterializationRunId, StageReportId},
     };
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
@@ -141,14 +138,12 @@ mod tests {
                     insufficient_reasons: Vec::new(),
                 },
                 point_in_time_inputs: PointInTimeInputManifest {
-                    market_metadata_version: "v1".into(),
-                    token_mapping_version: "v1".into(),
-                    fee_schedule_version: "v1".into(),
-                    calibration_snapshot_version: "v1".into(),
-                    runtime_config_version_id: RuntimeConfigVersionId::new("cfg"),
-                    risk_state_snapshot_version: "v1".into(),
-                    balance_snapshot_version: "v1".into(),
-                    settlement_truth_version: "v1".into(),
+                    inputs: Vec::new(),
+                    production_eligible: true,
+                    missing_inputs: Vec::new(),
+                    fatal_errors: Vec::new(),
+                    warnings: Vec::new(),
+                    manifest_hash: "pit-hash".into(),
                 },
                 baseline_config_hash: "cfg".into(),
                 code_git_sha: "sha".into(),

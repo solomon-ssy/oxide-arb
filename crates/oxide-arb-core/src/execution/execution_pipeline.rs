@@ -181,26 +181,23 @@ impl<R: TradeRepository + Send + Sync + 'static> ExecutionPipeline<R> {
         opp: &Opportunity,
         execution_id: ExecutionId,
     ) -> Result<PreparedDispatch, ExecutionResult> {
-        let (approved_size, snapshot) = self.validate_and_size(
-            scored,
-            opp,
-            &execution_id,
-            &ScoredOpportunitySnapshot::from_opportunity(opp)
-                .with_score_components(
-                    scored.fill_probability,
-                    scored.score,
-                    scored.urgency_factor,
-                    scored.category_weight,
-                    scored.staleness_discount,
-                )
-                .with_book_context(
-                    scored.token_yes.clone(),
-                    scored.token_no.clone(),
-                    scored.book_yes_version,
-                    scored.book_no_version,
-                )
-                .with_known_empty_factor_trace(),
-        )?;
+        let snapshot = ScoredOpportunitySnapshot::from_opportunity(opp)
+            .with_score_components(
+                scored.fill_probability,
+                scored.score,
+                scored.urgency_factor,
+                scored.category_weight,
+                scored.staleness_discount,
+            )
+            .with_book_context(
+                scored.token_yes.clone(),
+                scored.token_no.clone(),
+                scored.book_yes_version,
+                scored.book_no_version,
+            )
+            .with_known_empty_factor_trace();
+        let (approved_size, snapshot) =
+            self.validate_and_size(scored, opp, &execution_id, snapshot)?;
         self.persist_dispatch_plan(opp, approved_size, snapshot, execution_id)
             .await
     }
@@ -210,7 +207,7 @@ impl<R: TradeRepository + Send + Sync + 'static> ExecutionPipeline<R> {
         scored: &ScoredOpportunity,
         opp: &Opportunity,
         execution_id: &ExecutionId,
-        snapshot: &ScoredOpportunitySnapshot,
+        snapshot: ScoredOpportunitySnapshot,
     ) -> Result<(Usd, ScoredOpportunitySnapshot), ExecutionResult> {
         if let Err(e) = self.validator.validate(
             opp,
@@ -225,7 +222,7 @@ impl<R: TradeRepository + Send + Sync + 'static> ExecutionPipeline<R> {
                 opp,
                 "validation",
                 &e.to_string(),
-                snapshot,
+                &snapshot,
             );
             return Err(Self::reject("validation", e));
         }
@@ -249,7 +246,7 @@ impl<R: TradeRepository + Send + Sync + 'static> ExecutionPipeline<R> {
                 .denial_reason
                 .unwrap_or_else(|| "risk denied".into());
             self.audit_writer
-                .write_rejection(execution_id, opp, "risk", &reason, snapshot);
+                .write_rejection(execution_id, opp, "risk", &reason, &snapshot);
             return Err(Self::reject("risk", reason));
         }
         tracing::info!(
@@ -268,7 +265,7 @@ impl<R: TradeRepository + Send + Sync + 'static> ExecutionPipeline<R> {
                 opp,
                 "sizing",
                 "Kelly sizing returned zero",
-                snapshot,
+                &snapshot,
             );
             return Err(Self::reject("sizing", "Kelly sizing returned zero"));
         }
@@ -279,7 +276,7 @@ impl<R: TradeRepository + Send + Sync + 'static> ExecutionPipeline<R> {
             approved_size_usd = %approved_size,
         );
 
-        Ok((approved_size, snapshot.clone()))
+        Ok((approved_size, snapshot))
     }
 
     async fn persist_dispatch_plan(

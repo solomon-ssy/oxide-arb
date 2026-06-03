@@ -6,6 +6,7 @@
 
 pub mod book;
 pub mod fixtures;
+pub mod materialization;
 pub mod mock_event;
 pub mod mocks;
 pub mod risk;

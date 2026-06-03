@@ -51,6 +51,21 @@ async fn do_find_active(db: &impl ConnectionTrait) -> Result<Vec<EventInfo>, Sto
         .map(|v| v.into_iter().map(Into::into).collect())
 }
 
+async fn do_find_by_ids(
+    db: &impl ConnectionTrait,
+    ids: &[EventId],
+) -> Result<Vec<EventInfo>, StorageError> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    Entity::find()
+        .filter(Column::EventId.is_in(ids.iter().map(EventId::as_str)))
+        .all(db)
+        .await
+        .map_err(StorageError::from)
+        .map(|v| v.into_iter().map(Into::into).collect())
+}
+
 async fn do_find_existing_ids(
     db: &impl ConnectionTrait,
     ids: &[EventId],
@@ -129,6 +144,10 @@ impl EventRepository for PgEventRepository {
         do_find_by_id(&self.db, id).await
     }
 
+    async fn find_by_ids(&self, ids: &[EventId]) -> Result<Vec<EventInfo>, StorageError> {
+        do_find_by_ids(&self.db, ids).await
+    }
+
     async fn find_active(&self) -> Result<Vec<EventInfo>, StorageError> {
         do_find_active(&self.db).await
     }
@@ -150,6 +169,10 @@ impl EventRepository for PgEventRepository {
 impl EventRepository for PgEventRepositoryTxn<'_> {
     async fn find_by_id(&self, id: &EventId) -> Result<Option<EventInfo>, StorageError> {
         do_find_by_id(self.txn, id).await
+    }
+
+    async fn find_by_ids(&self, ids: &[EventId]) -> Result<Vec<EventInfo>, StorageError> {
+        do_find_by_ids(self.txn, ids).await
     }
 
     async fn find_active(&self) -> Result<Vec<EventInfo>, StorageError> {

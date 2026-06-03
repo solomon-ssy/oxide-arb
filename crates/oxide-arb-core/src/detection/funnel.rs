@@ -24,7 +24,7 @@ struct ScoredEntry {
     scored: Arc<ScoredOpportunity>,
 }
 
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 struct HeapKey {
     score: MicroScore,
     received_at: Instant,
@@ -77,8 +77,8 @@ impl FunnelQueue {
     }
 
     fn push_heaps(&mut self, key: &HeapKey) {
-        self.max_heap.push(key.clone());
-        self.min_heap.push(Reverse(key.clone()));
+        self.max_heap.push(*key);
+        self.min_heap.push(Reverse(*key));
     }
 
     fn peek_min_score(&mut self) -> Option<MicroScore> {

@@ -13,6 +13,7 @@ use crate::{
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MarketFeeSchedule {
@@ -41,7 +42,7 @@ pub struct FeeQuoteInput {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FeeQuote {
     pub fee_usd: Usd,
-    pub schedule: MarketFeeSchedule,
+    pub schedule: Arc<MarketFeeSchedule>,
     pub formula_version: &'static str,
     pub rounded_scale: u32,
 }

@@ -11,7 +11,7 @@ use std::{collections::HashSet, sync::Arc};
 ///
 /// Populated by Gamma API sync; read by the Scanner/DataPipeline hot path.
 pub struct MarketRegistry {
-    markets: DashMap<MarketId, MarketRegistryInfo>,
+    markets: DashMap<MarketId, Arc<MarketRegistryInfo>>,
     token_to_market: DashMap<TokenId, MarketId>,
     events: DashMap<EventId, EventRegistryInfo>,
     active_markets: ArcSwap<Vec<MarketId>>,
@@ -69,7 +69,7 @@ impl MarketRegistry {
         }
         let is_active = entry.status == MarketStatus::Active;
         let market_id = entry.market_id.clone();
-        self.markets.insert(market_id.clone(), entry);
+        self.markets.insert(market_id.clone(), Arc::new(entry));
 
         if is_active {
             self.push_active(&market_id);
@@ -98,7 +98,7 @@ impl MarketRegistry {
 
             let is_active = entry.status == MarketStatus::Active;
             let market_id = entry.market_id.clone();
-            self.markets.insert(market_id.clone(), entry);
+            self.markets.insert(market_id.clone(), Arc::new(entry));
 
             if is_active {
                 if !active.iter().any(|id| id == &market_id) {
@@ -136,7 +136,8 @@ impl MarketRegistry {
 
         let mut deactivated = Vec::with_capacity(stale_ids.len());
         for id in stale_ids {
-            if let Some(mut market) = self.get_market(&id) {
+            if let Some(market) = self.get_market(&id) {
+                let mut market = (*market).clone();
                 market.status = MarketStatus::Paused;
                 deactivated.push(market);
             }
@@ -158,9 +159,14 @@ impl MarketRegistry {
             .map(|r| r.value().clone())
     }
 
-    /// Get a clone of the market entry.
-    pub fn get_market(&self, market_id: &MarketId) -> Option<MarketRegistryInfo> {
-        self.markets.get(market_id).map(|r| r.value().clone())
+    /// Get a shared market entry.
+    pub fn get_market(&self, market_id: &MarketId) -> Option<Arc<MarketRegistryInfo>> {
+        self.markets.get(market_id).map(|r| Arc::clone(r.value()))
+    }
+
+    /// Return whether a market is negative-risk without cloning the full entry.
+    pub fn neg_risk(&self, market_id: &MarketId) -> Option<bool> {
+        self.markets.get(market_id).map(|entry| entry.neg_risk)
     }
 
     /// Return (YES token, NO token) for a market.

@@ -128,7 +128,7 @@ impl CalibrationDataSource for CoreCalibrationDataSource {
         snapshots: &[CalibrationSnapshotRow],
     ) -> Result<(), AlgoError> {
         self.timeseries_repo
-            .insert_calibration_snapshots(snapshots)
+            .insert_calibration_snapshots(snapshots.to_vec())
             .await
             .map_err(|e| AlgoError::DataSource(e.to_string()))
     }

@@ -56,9 +56,7 @@ impl ExecutionAuditWriter {
         request: &MarketSettlementRequest,
         economics: &SettlementEconomics,
     ) {
-        let row = match serde_json::from_value::<ScoredOpportunitySnapshot>(
-            trade.scored_snapshot.clone(),
-        ) {
+        let row = match trade.scored_opportunity_snapshot() {
             Ok(snapshot) => OpportunityAuditRow::from_settlement_trade(
                 trade, position, request, economics, &snapshot,
             ),

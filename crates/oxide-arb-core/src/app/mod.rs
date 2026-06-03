@@ -72,7 +72,7 @@ use oxide_arb_repository::{
         PgCalibrationRepository, PgFactDataRepository, PgPositionRepository, PgReportRepository,
         PgRiskAuditRepository, PgRiskStateRepository, PgTradeRepository,
     },
-    traits::{CalibrationRepository, PositionRepository, TradeRepository},
+    traits::{PositionRepository, TradeRepository},
 };
 use oxide_arb_risk::{audit::RiskAuditEvent, engine::RiskEngine};
 use oxide_arb_storage::{cache::TieredCache, clickhouse::ClickHousePool, postgres::PostgresPool};
@@ -241,9 +241,11 @@ impl AppContext {
             return;
         };
 
-        let trade_repo: Arc<dyn TradeRepository> = self.infra.trade_repo.clone();
-        let position_repo: Arc<dyn PositionRepository> = self.infra.position_repo.clone();
-        let calibration_repo: Arc<dyn CalibrationRepository> = self.infra.calibration_repo.clone();
+        let trade_repo = Arc::clone(&self.infra.trade_repo);
+        let trade_repo: Arc<dyn TradeRepository> = trade_repo;
+        let position_repo = Arc::clone(&self.infra.position_repo);
+        let position_repo: Arc<dyn PositionRepository> = position_repo;
+        let calibration_repo = Arc::clone(&self.infra.calibration_repo);
         let consumer = PostTradeConsumer {
             risk_engine: Arc::clone(&self.risk.engine),
             risk_metrics: Arc::clone(&self.risk.metrics),

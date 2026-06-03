@@ -79,6 +79,12 @@ pub trait TradeRepository: Send + Sync {
         limit: u64,
     ) -> Result<Vec<TradeInfo>, StorageError>;
 
+    async fn find_between(
+        &self,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> Result<Vec<TradeInfo>, StorageError>;
+
     /// Count trades grouped by `business_outcome` (NULL/in-flight rows excluded).
     async fn count_by_outcome(
         &self,

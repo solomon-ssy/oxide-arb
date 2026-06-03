@@ -2,26 +2,79 @@ use chrono::{DateTime, Utc};
 use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::{
     domain::control_factor::{
+        AcquireMaterializationRunOutcome, CancelMaterializationRunOutcome,
         ControlFactorAuditEventInfo, ControlFactorMaterializationRunInfo,
         ControlFactorPublicationInfo, ControlFactorStageReportInfo, ControlFactorValueInfo,
-        NewControlFactorAuditEvent, NewControlFactorMaterializationRun,
-        NewControlFactorPublication, NewControlFactorStageReport, NewControlFactorValue,
+        EnqueueMaterializationRunOptions, EnqueueMaterializationRunOutcome,
+        MaterializationRunStatusPatch, NewControlFactorAuditEvent,
+        NewControlFactorMaterializationRun, NewControlFactorPublication,
+        NewControlFactorStageReport, NewControlFactorValue, RunTransitionOutcome,
     },
-    enums::control_factor::{FactorStatus, PublicationMode},
-    types::{ControlFactorId, FactorPublicationId},
+    enums::control_factor::{
+        FactorStatus, MaterializationRunStatus, MaterializationStageName, PublicationMode,
+    },
+    types::{ControlFactorId, FactorPublicationId, MaterializationRunId},
 };
 
 #[async_trait::async_trait]
 pub trait ControlFactorRepository: Send + Sync {
-    async fn create_materialization_run(
+    async fn enqueue_materialization_run(
         &self,
         run: NewControlFactorMaterializationRun,
-    ) -> Result<ControlFactorMaterializationRunInfo, StorageError>;
+        options: EnqueueMaterializationRunOptions,
+    ) -> Result<EnqueueMaterializationRunOutcome, StorageError>;
 
-    async fn create_stage_report(
+    async fn load_materialization_run(
+        &self,
+        run_id: &MaterializationRunId,
+    ) -> Result<Option<ControlFactorMaterializationRunInfo>, StorageError>;
+
+    async fn find_materialization_run_by_dedupe_key(
+        &self,
+        dedupe_key: &str,
+    ) -> Result<Option<ControlFactorMaterializationRunInfo>, StorageError>;
+
+    async fn try_acquire_materialization_run(
+        &self,
+        run_id: &MaterializationRunId,
+        started_at: DateTime<Utc>,
+    ) -> Result<AcquireMaterializationRunOutcome, StorageError>;
+
+    async fn retry_materialization_run(
+        &self,
+        run_id: &MaterializationRunId,
+    ) -> Result<RunTransitionOutcome, StorageError>;
+
+    async fn transition_materialization_run(
+        &self,
+        run_id: &MaterializationRunId,
+        expected_from: MaterializationRunStatus,
+        target: MaterializationRunStatus,
+        patch: MaterializationRunStatusPatch,
+    ) -> Result<RunTransitionOutcome, StorageError>;
+
+    async fn cancel_materialization_run(
+        &self,
+        run_id: &MaterializationRunId,
+        reason: &str,
+        cancelled_at: DateTime<Utc>,
+    ) -> Result<CancelMaterializationRunOutcome, StorageError>;
+
+    async fn upsert_stage_report(
         &self,
         report: NewControlFactorStageReport,
     ) -> Result<ControlFactorStageReportInfo, StorageError>;
+
+    async fn load_stage_report(
+        &self,
+        run_id: &MaterializationRunId,
+        stage_name: MaterializationStageName,
+    ) -> Result<Option<ControlFactorStageReportInfo>, StorageError>;
+
+    async fn list_stage_reports(
+        &self,
+        run_id: &MaterializationRunId,
+    ) -> Result<Vec<ControlFactorStageReportInfo>, StorageError>;
 
     async fn create_factor(
         &self,

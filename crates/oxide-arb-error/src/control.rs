@@ -2,6 +2,8 @@
 
 use thiserror::Error;
 
+use crate::storage::StorageError;
+
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum PayloadSafetyError {
     #[error("{field} must be in the inclusive range 0..=1")]
@@ -39,6 +41,17 @@ pub enum FactorValueError {
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum ControlPersistenceError {
+    #[error("failed to encode control persistence field {field}: {message}")]
+    Encode {
+        field: &'static str,
+        message: String,
+    },
+    #[error("control persistence integer field {field} overflowed with value {value}")]
+    IntegerOverflow { field: &'static str, value: u64 },
+}
+
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum GovernanceError {
     #[error(transparent)]
     FactorValue(#[from] FactorValueError),
@@ -61,4 +74,45 @@ pub enum GovernanceError {
         expected: String,
         actual: String,
     },
+}
+
+pub type MaterializationResult<T> = Result<T, MaterializationError>;
+
+#[derive(Debug, Error)]
+pub enum MaterializationError {
+    #[error("{code}: {message}")]
+    Stable { code: String, message: String },
+
+    #[error("storage error: {0}")]
+    Storage(#[from] StorageError),
+
+    #[error("codec error: {0}")]
+    Codec(String),
+
+    #[error(transparent)]
+    Persistence(#[from] ControlPersistenceError),
+}
+
+impl MaterializationError {
+    #[must_use]
+    pub fn stable(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self::Stable {
+            code: code.into(),
+            message: message.into(),
+        }
+    }
+
+    #[must_use]
+    pub fn code(&self) -> Option<&str> {
+        match self {
+            Self::Stable { code, .. } => Some(code.as_str()),
+            Self::Storage(_) | Self::Codec(_) | Self::Persistence(_) => None,
+        }
+    }
+
+    #[must_use]
+    pub fn failure_code(&self) -> String {
+        self.code()
+            .map_or_else(|| "run.storage_or_codec_error".to_owned(), str::to_owned)
+    }
 }

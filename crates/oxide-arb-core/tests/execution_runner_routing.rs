@@ -85,7 +85,8 @@ async fn multi_market_parallel_execution() {
     let shutdown = CancellationToken::new();
     let inflight = Arc::new(AtomicU32::new(0));
     let pipeline = Arc::new(CountingPipeline::new());
-    let pipeline_port: Arc<dyn ExecutionPort> = pipeline.clone();
+    let pipeline_port = Arc::clone(&pipeline);
+    let pipeline_port: Arc<dyn ExecutionPort> = pipeline_port;
 
     let (pool, runners) = ExecutionRunnerPool::new(
         DEFAULT_EXECUTION_SHARD_COUNT,
@@ -138,7 +139,8 @@ async fn runner_drains_until_shutdown() {
     let shutdown = CancellationToken::new();
     let inflight = Arc::new(AtomicU32::new(0));
     let pipeline = Arc::new(CountingPipeline::new());
-    let pipeline_port: Arc<dyn ExecutionPort> = pipeline.clone();
+    let pipeline_port = Arc::clone(&pipeline);
+    let pipeline_port: Arc<dyn ExecutionPort> = pipeline_port;
 
     let (pool, runners) =
         ExecutionRunnerPool::new(1, &pipeline_port, &shutdown, &inflight, &metrics);

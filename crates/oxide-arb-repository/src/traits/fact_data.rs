@@ -24,12 +24,27 @@ pub trait BalanceSnapshotRepository: Send + Sync {
         snapshots: Vec<NewTokenBalanceSnapshot>,
     ) -> Result<Vec<TokenBalanceSnapshotInfo>, StorageError>;
 
+    async fn latest_balance_before(
+        &self,
+        holder_address: &str,
+        before: DateTime<Utc>,
+    ) -> Result<Option<BalanceSnapshotInfo>, StorageError>;
+
     async fn latest_token_balance_before(
         &self,
+        holder_address: &str,
         market_id: &MarketId,
         token_id: &TokenId,
         before: DateTime<Utc>,
     ) -> Result<Option<TokenBalanceSnapshotInfo>, StorageError>;
+
+    async fn latest_token_balances_before(
+        &self,
+        holder_address: &str,
+        market_ids: &[MarketId],
+        token_ids: &[TokenId],
+        before: DateTime<Utc>,
+    ) -> Result<Vec<TokenBalanceSnapshotInfo>, StorageError>;
 }
 
 #[async_trait::async_trait]

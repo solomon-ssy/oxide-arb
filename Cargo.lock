@@ -4318,16 +4318,21 @@ dependencies = [
 name = "oxide-arb-control"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "blake3",
  "chrono",
  "hex",
  "oxide-arb-error",
  "oxide-arb-models",
+ "oxide-arb-repository",
+ "oxide-arb-test-support",
  "rust_decimal",
  "rust_decimal_macros",
  "serde",
  "serde_json",
- "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]
@@ -4437,8 +4442,10 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "bitcode",
+ "blake3",
  "chrono",
  "clickhouse",
+ "hex",
  "num-traits",
  "oxide-arb-error",
  "oxide-arb-models",
@@ -4446,6 +4453,7 @@ dependencies = [
  "rust_decimal",
  "rust_decimal_macros",
  "sea-orm",
+ "serde",
  "serde_json",
  "testcontainers",
  "testcontainers-modules",

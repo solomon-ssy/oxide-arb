@@ -4,7 +4,7 @@ use crate::traits::MarketRepository;
 use chrono::{DateTime, Utc};
 use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::{
-    domain::{MarketInfo, UpsertMarket},
+    domain::{MarketInfo, MarketPitSnapshotInfo, UpsertMarket},
     types::MarketId,
 };
 use oxide_arb_storage::cache::{CacheKey, TieredCache};
@@ -41,33 +41,47 @@ impl<R: MarketRepository> CachedMarketRepository<R> {
 #[async_trait::async_trait]
 impl<R: MarketRepository> MarketRepository for CachedMarketRepository<R> {
     #[inline]
-    async fn find_by_id(&self, id: &MarketId) -> Result<Option<MarketInfo>, StorageError> {
+    async fn find_by_id(&self, id: &MarketId) -> Result<Option<Arc<MarketInfo>>, StorageError> {
         let key = CacheKey::MarketInfo {
             market_id: id.clone(),
         };
         if let Some(cached) = self.cache.get_json::<MarketInfo>(&key).await? {
-            return Ok(Some(cached));
+            return Ok(Some(Arc::new(cached)));
         }
         let result = self.inner.find_by_id(id).await?;
         if let Some(ref info) = result {
-            let _ = self.cache.set_json(&key, info).await;
+            let _ = self.cache.set_json(&key, info.as_ref()).await;
         }
         Ok(result)
     }
 
     #[inline]
-    async fn find_active(&self) -> Result<Vec<MarketInfo>, StorageError> {
+    async fn find_by_ids(&self, ids: &[MarketId]) -> Result<Vec<Arc<MarketInfo>>, StorageError> {
+        self.inner.find_by_ids(ids).await
+    }
+
+    #[inline]
+    async fn latest_pit_snapshots_before(
+        &self,
+        ids: &[MarketId],
+        as_of: DateTime<Utc>,
+    ) -> Result<Vec<MarketPitSnapshotInfo>, StorageError> {
+        self.inner.latest_pit_snapshots_before(ids, as_of).await
+    }
+
+    #[inline]
+    async fn find_active(&self) -> Result<Arc<[MarketInfo]>, StorageError> {
         let key = CacheKey::ActiveMarkets;
         if let Some(cached) = self.cache.get_json::<Vec<MarketInfo>>(&key).await? {
-            return Ok(cached);
+            return Ok(cached.into());
         }
         let markets = self.inner.find_active().await?;
-        let _ = self.cache.set_json(&key, &markets).await;
+        let _ = self.cache.set_json(&key, &markets.as_ref()).await;
         Ok(markets)
     }
 
     #[inline]
-    async fn find_by_event(&self, event_id: &str) -> Result<Vec<MarketInfo>, StorageError> {
+    async fn find_by_event(&self, event_id: &str) -> Result<Vec<Arc<MarketInfo>>, StorageError> {
         self.inner.find_by_event(event_id).await
     }
 
@@ -75,7 +89,7 @@ impl<R: MarketRepository> MarketRepository for CachedMarketRepository<R> {
     async fn find_endgame_candidates(
         &self,
         before_deadline: DateTime<Utc>,
-    ) -> Result<Vec<MarketInfo>, StorageError> {
+    ) -> Result<Vec<Arc<MarketInfo>>, StorageError> {
         self.inner.find_endgame_candidates(before_deadline).await
     }
 
@@ -85,7 +99,7 @@ impl<R: MarketRepository> MarketRepository for CachedMarketRepository<R> {
     }
 
     #[inline]
-    async fn upsert(&self, dto: UpsertMarket) -> Result<MarketInfo, StorageError> {
+    async fn upsert(&self, dto: UpsertMarket) -> Result<Arc<MarketInfo>, StorageError> {
         let market_id = dto.market_id.clone();
         let result = self.inner.upsert(dto).await?;
         self.invalidate_market(&market_id).await;

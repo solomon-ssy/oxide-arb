@@ -16,6 +16,7 @@ pub mod control_factor_value;
 pub mod emergency_snapshot;
 pub mod event;
 pub mod market;
+pub mod market_pit_snapshot;
 pub mod position;
 pub mod position_exit_execution;
 pub mod position_exit_plan;

@@ -59,14 +59,15 @@ impl Coalescer {
         };
 
         let mut flush_now = false;
-        let mut entry = self
-            .pending
-            .entry(market_id.clone())
-            .or_insert_with(|| PendingMarket {
-                first_seen: Instant::now(),
-                yes_updated: false,
-                no_updated: false,
-            });
+        let mut entry = self.pending.get_mut(&market_id).unwrap_or_else(|| {
+            self.pending
+                .entry(market_id.clone())
+                .or_insert_with(|| PendingMarket {
+                    first_seen: Instant::now(),
+                    yes_updated: false,
+                    no_updated: false,
+                })
+        });
 
         if token_id == &yes {
             entry.yes_updated = true;

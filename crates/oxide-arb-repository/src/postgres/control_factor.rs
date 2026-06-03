@@ -3,15 +3,19 @@ use chrono::{DateTime, Utc};
 use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::{
     domain::control_factor::{
+        AcquireMaterializationRunOutcome, CancelMaterializationRunOutcome,
         ControlFactorAuditEventInfo, ControlFactorMaterializationRunInfo,
         ControlFactorPublicationInfo, ControlFactorPublicationRowInfo,
         ControlFactorStageReportInfo, ControlFactorValue, ControlFactorValueInfo,
-        NewControlFactorAuditEvent, NewControlFactorMaterializationRun,
-        NewControlFactorPublication, NewControlFactorPublicationFactor,
-        NewControlFactorPublicationRow, NewControlFactorStageReport, NewControlFactorValue,
+        EnqueueMaterializationRunOptions, EnqueueMaterializationRunOutcome,
+        MaterializationRunStatusPatch, NewControlFactorAuditEvent,
+        NewControlFactorMaterializationRun, NewControlFactorPublication,
+        NewControlFactorPublicationFactor, NewControlFactorPublicationRow,
+        NewControlFactorStageReport, NewControlFactorValue, RunTransitionOutcome,
     },
     entities::{
         control_factor_audit_event::Entity as AuditEntity,
+        control_factor_materialization_run::Column as RunColumn,
         control_factor_materialization_run::Entity as RunEntity,
         control_factor_publication::{
             Column as PublicationColumn, Entity as PublicationEntity, Model as PublicationModel,
@@ -19,17 +23,20 @@ use oxide_arb_models::{
         control_factor_publication_factor::{
             Column as PublicationFactorColumn, Entity as PublicationFactorEntity,
         },
-        control_factor_stage_report::Entity as StageReportEntity,
+        control_factor_stage_report::{Column as StageReportColumn, Entity as StageReportEntity},
         control_factor_value::{Column as FactorColumn, Entity as FactorEntity},
     },
     enums::control_factor::{
-        ControlAuditEventType, FactorStatus, PublicationMode, PublicationStatus,
+        ControlAuditEventType, FactorStatus, MaterializationRunStatus, MaterializationStageName,
+        PublicationMode, PublicationStatus,
     },
-    types::{ControlFactorId, FactorPublicationId},
+    types::{ControlFactorId, FactorPublicationId, MaterializationRunId},
 };
 use sea_orm::{
+    ActiveValue::Set,
     ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait, IntoActiveModel, QueryFilter,
-    TransactionTrait, sea_query::Expr,
+    QueryOrder, TransactionTrait,
+    sea_query::{Expr, OnConflict},
 };
 
 pub struct PgControlFactorRepository {
@@ -42,25 +49,282 @@ impl PgControlFactorRepository {
     }
 }
 
-async fn create_materialization_run_q(
+async fn load_materialization_run_q(
+    db: &impl ConnectionTrait,
+    run_id: &MaterializationRunId,
+) -> Result<Option<ControlFactorMaterializationRunInfo>, StorageError> {
+    RunEntity::find_by_id(run_id.clone())
+        .one(db)
+        .await
+        .map(|row| row.map(Into::into))
+        .map_err(StorageError::from)
+}
+
+async fn find_materialization_run_by_dedupe_key_q(
+    db: &impl ConnectionTrait,
+    dedupe_key: &str,
+) -> Result<Option<ControlFactorMaterializationRunInfo>, StorageError> {
+    RunEntity::find()
+        .filter(RunColumn::RunDedupeKey.eq(dedupe_key))
+        .one(db)
+        .await
+        .map(|row| row.map(Into::into))
+        .map_err(StorageError::from)
+}
+
+async fn enqueue_materialization_run_q(
     db: &impl ConnectionTrait,
     run: NewControlFactorMaterializationRun,
-) -> Result<ControlFactorMaterializationRunInfo, StorageError> {
-    RunEntity::insert(run.into_active_model())
+    options: EnqueueMaterializationRunOptions,
+) -> Result<EnqueueMaterializationRunOutcome, StorageError> {
+    if options.force_new_run && options.reason.as_deref().unwrap_or("").trim().is_empty() {
+        return Err(StorageError::Codec(
+            "force_new_run materialization enqueue requires a non-empty reason".into(),
+        ));
+    }
+
+    if !options.force_new_run
+        && let Some(dedupe_key) = run.run_dedupe_key.as_deref()
+        && let Some(existing) = find_materialization_run_by_dedupe_key_q(db, dedupe_key).await?
+    {
+        return Ok(if is_active_run_status(existing.status) {
+            EnqueueMaterializationRunOutcome::DuplicateActive(existing)
+        } else {
+            EnqueueMaterializationRunOutcome::DuplicateCompleted(existing)
+        });
+    }
+
+    let mut active_model = run.into_active_model();
+    if options.force_new_run {
+        active_model.run_dedupe_key = Set(None);
+    }
+    RunEntity::insert(active_model)
+        .exec_with_returning(db)
+        .await
+        .map(Into::into)
+        .map(EnqueueMaterializationRunOutcome::Created)
+        .map_err(StorageError::from)
+}
+
+async fn try_acquire_materialization_run_q(
+    db: &impl ConnectionTrait,
+    run_id: &MaterializationRunId,
+    started_at: DateTime<Utc>,
+) -> Result<AcquireMaterializationRunOutcome, StorageError> {
+    let Some(existing) = load_materialization_run_q(db, run_id).await? else {
+        return Ok(AcquireMaterializationRunOutcome::NotFound);
+    };
+    if existing.status != MaterializationRunStatus::Queued {
+        return Ok(AcquireMaterializationRunOutcome::NotQueued(existing));
+    }
+    RunEntity::update_many()
+        .col_expr(
+            RunColumn::Status,
+            Expr::value(MaterializationRunStatus::Running),
+        )
+        .col_expr(RunColumn::StartedAt, Expr::value(started_at))
+        .filter(RunColumn::MaterializationRunId.eq(run_id.clone()))
+        .filter(RunColumn::Status.eq(MaterializationRunStatus::Queued))
+        .exec(db)
+        .await
+        .map_err(StorageError::from)?;
+    let Some(updated) = load_materialization_run_q(db, run_id).await? else {
+        return Ok(AcquireMaterializationRunOutcome::NotFound);
+    };
+    if updated.status == MaterializationRunStatus::Running {
+        Ok(AcquireMaterializationRunOutcome::Acquired(updated))
+    } else {
+        Ok(AcquireMaterializationRunOutcome::NotQueued(updated))
+    }
+}
+
+async fn transition_materialization_run_q(
+    db: &impl ConnectionTrait,
+    run_id: &MaterializationRunId,
+    expected_from: MaterializationRunStatus,
+    target: MaterializationRunStatus,
+    patch: MaterializationRunStatusPatch,
+) -> Result<RunTransitionOutcome, StorageError> {
+    if target == MaterializationRunStatus::Failed && patch.failure_code.is_none() {
+        return Err(StorageError::Codec(
+            "failed materialization transition requires failure_code".into(),
+        ));
+    }
+    let Some(existing) = load_materialization_run_q(db, run_id).await? else {
+        return Ok(RunTransitionOutcome::NotFound);
+    };
+    if existing.status != expected_from {
+        return Ok(RunTransitionOutcome::InvalidTransition {
+            current_status: existing.status,
+        });
+    }
+
+    let mut update = RunEntity::update_many()
+        .col_expr(RunColumn::Status, Expr::value(target))
+        .filter(RunColumn::MaterializationRunId.eq(run_id.clone()))
+        .filter(RunColumn::Status.eq(expected_from));
+    if let Some(finished_at) = patch.finished_at {
+        update = update.col_expr(RunColumn::FinishedAt, Expr::value(finished_at));
+    }
+    if let Some(failure_code) = patch.failure_code {
+        update = update.col_expr(RunColumn::FailureCode, Expr::value(failure_code));
+    }
+    if let Some(failure_detail) = patch.failure_detail {
+        update = update.col_expr(RunColumn::FailureDetail, Expr::value(failure_detail));
+    }
+    if let Some(report) = patch.report {
+        update = update.col_expr(RunColumn::Report, Expr::value(report));
+    }
+    if let Some(report_uri) = patch.report_uri {
+        update = update.col_expr(RunColumn::ReportUri, Expr::value(report_uri));
+    }
+    update.exec(db).await.map_err(StorageError::from)?;
+    let Some(updated) = load_materialization_run_q(db, run_id).await? else {
+        return Ok(RunTransitionOutcome::NotFound);
+    };
+    Ok(RunTransitionOutcome::Transitioned(Box::new(updated)))
+}
+
+async fn retry_materialization_run_q(
+    db: &impl ConnectionTrait,
+    run_id: &MaterializationRunId,
+) -> Result<RunTransitionOutcome, StorageError> {
+    let Some(existing) = load_materialization_run_q(db, run_id).await? else {
+        return Ok(RunTransitionOutcome::NotFound);
+    };
+    if !matches!(
+        existing.status,
+        MaterializationRunStatus::Failed | MaterializationRunStatus::Cancelled
+    ) {
+        return Ok(RunTransitionOutcome::InvalidTransition {
+            current_status: existing.status,
+        });
+    }
+    RunEntity::update_many()
+        .col_expr(
+            RunColumn::Status,
+            Expr::value(MaterializationRunStatus::Queued),
+        )
+        .col_expr(
+            RunColumn::StartedAt,
+            Expr::value(Option::<DateTime<Utc>>::None),
+        )
+        .col_expr(
+            RunColumn::FinishedAt,
+            Expr::value(Option::<DateTime<Utc>>::None),
+        )
+        .col_expr(RunColumn::FailureCode, Expr::value(Option::<String>::None))
+        .col_expr(
+            RunColumn::FailureDetail,
+            Expr::value(Option::<String>::None),
+        )
+        .filter(RunColumn::MaterializationRunId.eq(run_id.clone()))
+        .filter(RunColumn::Status.eq(existing.status))
+        .exec(db)
+        .await
+        .map_err(StorageError::from)?;
+    let Some(updated) = load_materialization_run_q(db, run_id).await? else {
+        return Ok(RunTransitionOutcome::NotFound);
+    };
+    Ok(RunTransitionOutcome::Transitioned(Box::new(updated)))
+}
+
+async fn cancel_materialization_run_q(
+    db: &impl ConnectionTrait,
+    run_id: &MaterializationRunId,
+    reason: &str,
+    cancelled_at: DateTime<Utc>,
+) -> Result<CancelMaterializationRunOutcome, StorageError> {
+    let Some(existing) = load_materialization_run_q(db, run_id).await? else {
+        return Ok(CancelMaterializationRunOutcome::NotFound);
+    };
+    if is_terminal_run_status(existing.status) {
+        return Ok(CancelMaterializationRunOutcome::AlreadyTerminal(existing));
+    }
+    let patch = MaterializationRunStatusPatch {
+        finished_at: Some(cancelled_at),
+        failure_code: Some("run.cancelled".into()),
+        failure_detail: Some(reason.to_owned()),
+        report: None,
+        report_uri: None,
+    };
+    match transition_materialization_run_q(
+        db,
+        run_id,
+        existing.status,
+        MaterializationRunStatus::Cancelled,
+        patch,
+    )
+    .await?
+    {
+        RunTransitionOutcome::Transitioned(run) => {
+            Ok(CancelMaterializationRunOutcome::Cancelled(*run))
+        }
+        RunTransitionOutcome::InvalidTransition { .. } => {
+            let Some(run) = load_materialization_run_q(db, run_id).await? else {
+                return Ok(CancelMaterializationRunOutcome::NotFound);
+            };
+            Ok(CancelMaterializationRunOutcome::AlreadyTerminal(run))
+        }
+        RunTransitionOutcome::NotFound => Ok(CancelMaterializationRunOutcome::NotFound),
+    }
+}
+
+async fn upsert_stage_report_q(
+    db: &impl ConnectionTrait,
+    report: NewControlFactorStageReport,
+) -> Result<ControlFactorStageReportInfo, StorageError> {
+    StageReportEntity::insert(report.into_active_model())
+        .on_conflict(
+            OnConflict::columns([
+                StageReportColumn::MaterializationRunId,
+                StageReportColumn::StageName,
+            ])
+            .update_columns([
+                StageReportColumn::Status,
+                StageReportColumn::FinishedAt,
+                StageReportColumn::InputArtifactHashes,
+                StageReportColumn::OutputArtifactHash,
+                StageReportColumn::Coverage,
+                StageReportColumn::Metrics,
+                StageReportColumn::RecordsRead,
+                StageReportColumn::RecordsWritten,
+                StageReportColumn::Warnings,
+                StageReportColumn::Errors,
+                StageReportColumn::QueryFingerprints,
+            ])
+            .to_owned(),
+        )
         .exec_with_returning(db)
         .await
         .map(Into::into)
         .map_err(StorageError::from)
 }
 
-async fn create_stage_report_q(
+async fn load_stage_report_q(
     db: &impl ConnectionTrait,
-    report: NewControlFactorStageReport,
-) -> Result<ControlFactorStageReportInfo, StorageError> {
-    StageReportEntity::insert(report.into_active_model())
-        .exec_with_returning(db)
+    run_id: &MaterializationRunId,
+    stage_name: MaterializationStageName,
+) -> Result<Option<ControlFactorStageReportInfo>, StorageError> {
+    StageReportEntity::find()
+        .filter(StageReportColumn::MaterializationRunId.eq(run_id.clone()))
+        .filter(StageReportColumn::StageName.eq(stage_name))
+        .one(db)
         .await
-        .map(Into::into)
+        .map(|row| row.map(Into::into))
+        .map_err(StorageError::from)
+}
+
+async fn list_stage_reports_q(
+    db: &impl ConnectionTrait,
+    run_id: &MaterializationRunId,
+) -> Result<Vec<ControlFactorStageReportInfo>, StorageError> {
+    StageReportEntity::find()
+        .filter(StageReportColumn::MaterializationRunId.eq(run_id.clone()))
+        .order_by_asc(StageReportColumn::CreatedAt)
+        .all(db)
+        .await
+        .map(|rows| rows.into_iter().map(Into::into).collect())
         .map_err(StorageError::from)
 }
 
@@ -360,20 +624,115 @@ const fn factor_status_for_mode(mode: PublicationMode) -> FactorStatus {
     }
 }
 
+const fn is_active_run_status(status: MaterializationRunStatus) -> bool {
+    matches!(
+        status,
+        MaterializationRunStatus::Queued | MaterializationRunStatus::Running
+    )
+}
+
+const fn is_terminal_run_status(status: MaterializationRunStatus) -> bool {
+    matches!(
+        status,
+        MaterializationRunStatus::Completed
+            | MaterializationRunStatus::CompletedWithRejectedFactors
+            | MaterializationRunStatus::ReportOnly
+            | MaterializationRunStatus::Failed
+            | MaterializationRunStatus::Cancelled
+    )
+}
+
 #[async_trait::async_trait]
 impl ControlFactorRepository for PgControlFactorRepository {
-    async fn create_materialization_run(
+    async fn enqueue_materialization_run(
         &self,
         run: NewControlFactorMaterializationRun,
-    ) -> Result<ControlFactorMaterializationRunInfo, StorageError> {
-        create_materialization_run_q(&self.db, run).await
+        options: EnqueueMaterializationRunOptions,
+    ) -> Result<EnqueueMaterializationRunOutcome, StorageError> {
+        enqueue_materialization_run_q(&self.db, run, options).await
     }
 
-    async fn create_stage_report(
+    async fn load_materialization_run(
+        &self,
+        run_id: &MaterializationRunId,
+    ) -> Result<Option<ControlFactorMaterializationRunInfo>, StorageError> {
+        load_materialization_run_q(&self.db, run_id).await
+    }
+
+    async fn find_materialization_run_by_dedupe_key(
+        &self,
+        dedupe_key: &str,
+    ) -> Result<Option<ControlFactorMaterializationRunInfo>, StorageError> {
+        find_materialization_run_by_dedupe_key_q(&self.db, dedupe_key).await
+    }
+
+    async fn try_acquire_materialization_run(
+        &self,
+        run_id: &MaterializationRunId,
+        started_at: DateTime<Utc>,
+    ) -> Result<AcquireMaterializationRunOutcome, StorageError> {
+        let txn = self.db.begin().await.map_err(StorageError::from)?;
+        let outcome = try_acquire_materialization_run_q(&txn, run_id, started_at).await?;
+        txn.commit().await.map_err(StorageError::from)?;
+        Ok(outcome)
+    }
+
+    async fn retry_materialization_run(
+        &self,
+        run_id: &MaterializationRunId,
+    ) -> Result<RunTransitionOutcome, StorageError> {
+        let txn = self.db.begin().await.map_err(StorageError::from)?;
+        let outcome = retry_materialization_run_q(&txn, run_id).await?;
+        txn.commit().await.map_err(StorageError::from)?;
+        Ok(outcome)
+    }
+
+    async fn transition_materialization_run(
+        &self,
+        run_id: &MaterializationRunId,
+        expected_from: MaterializationRunStatus,
+        target: MaterializationRunStatus,
+        patch: MaterializationRunStatusPatch,
+    ) -> Result<RunTransitionOutcome, StorageError> {
+        let txn = self.db.begin().await.map_err(StorageError::from)?;
+        let outcome =
+            transition_materialization_run_q(&txn, run_id, expected_from, target, patch).await?;
+        txn.commit().await.map_err(StorageError::from)?;
+        Ok(outcome)
+    }
+
+    async fn cancel_materialization_run(
+        &self,
+        run_id: &MaterializationRunId,
+        reason: &str,
+        cancelled_at: DateTime<Utc>,
+    ) -> Result<CancelMaterializationRunOutcome, StorageError> {
+        let txn = self.db.begin().await.map_err(StorageError::from)?;
+        let outcome = cancel_materialization_run_q(&txn, run_id, reason, cancelled_at).await?;
+        txn.commit().await.map_err(StorageError::from)?;
+        Ok(outcome)
+    }
+
+    async fn upsert_stage_report(
         &self,
         report: NewControlFactorStageReport,
     ) -> Result<ControlFactorStageReportInfo, StorageError> {
-        create_stage_report_q(&self.db, report).await
+        upsert_stage_report_q(&self.db, report).await
+    }
+
+    async fn load_stage_report(
+        &self,
+        run_id: &MaterializationRunId,
+        stage_name: MaterializationStageName,
+    ) -> Result<Option<ControlFactorStageReportInfo>, StorageError> {
+        load_stage_report_q(&self.db, run_id, stage_name).await
+    }
+
+    async fn list_stage_reports(
+        &self,
+        run_id: &MaterializationRunId,
+    ) -> Result<Vec<ControlFactorStageReportInfo>, StorageError> {
+        list_stage_reports_q(&self.db, run_id).await
     }
 
     async fn create_factor(

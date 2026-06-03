@@ -30,20 +30,22 @@ pub struct MarketFilter {
 
 #[async_trait::async_trait]
 pub trait TimeseriesFactWriter: Send + Sync {
-    async fn insert_tick_events(&self, rows: &[TickEventRow]) -> Result<(), StorageError>;
+    async fn insert_tick_events(&self, rows: Vec<TickEventRow>) -> Result<(), StorageError>;
 
-    async fn insert_l2_events(&self, rows: &[TickEventL2Row]) -> Result<(), StorageError>;
+    async fn insert_l2_events(&self, rows: Vec<TickEventL2Row>) -> Result<(), StorageError>;
 
-    async fn insert_book_snapshots(&self, rows: &[BookSnapshotRow]) -> Result<(), StorageError>;
+    async fn insert_book_snapshots(&self, rows: Vec<BookSnapshotRow>) -> Result<(), StorageError>;
 
-    async fn insert_detections(&self, rows: &[OpportunityDetectionRow])
-    -> Result<(), StorageError>;
+    async fn insert_detections(
+        &self,
+        rows: Vec<OpportunityDetectionRow>,
+    ) -> Result<(), StorageError>;
 
-    async fn insert_audits(&self, rows: &[OpportunityAuditRow]) -> Result<(), StorageError>;
+    async fn insert_audits(&self, rows: Vec<OpportunityAuditRow>) -> Result<(), StorageError>;
 
     async fn insert_calibration_snapshots(
         &self,
-        rows: &[CalibrationSnapshotRow],
+        rows: Vec<CalibrationSnapshotRow>,
     ) -> Result<(), StorageError>;
 }
 

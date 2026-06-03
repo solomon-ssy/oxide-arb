@@ -49,7 +49,7 @@ impl PersistenceBundle {
             move |batch: Vec<OpportunityAuditRow>| {
                 let ts = Arc::clone(&ts_audit);
                 Box::pin(async move {
-                    ts.insert_audits(&batch).await?;
+                    ts.insert_audits(batch).await?;
                     Ok(())
                 })
             },
@@ -65,7 +65,7 @@ impl PersistenceBundle {
             move |batch: Vec<OpportunityDetectionRow>| {
                 let ts = Arc::clone(&ts_detection);
                 Box::pin(async move {
-                    ts.insert_detections(&batch).await?;
+                    ts.insert_detections(batch).await?;
                     Ok(())
                 })
             },
@@ -81,7 +81,7 @@ impl PersistenceBundle {
             move |batch: Vec<TickEventRow>| {
                 let ts = Arc::clone(&ts_tick);
                 Box::pin(async move {
-                    ts.insert_tick_events(&batch).await?;
+                    ts.insert_tick_events(batch).await?;
                     Ok(())
                 })
             },
@@ -97,7 +97,7 @@ impl PersistenceBundle {
             move |batch: Vec<TickEventL2Row>| {
                 let ts = Arc::clone(&ts_book_l2);
                 Box::pin(async move {
-                    ts.insert_l2_events(&batch).await?;
+                    ts.insert_l2_events(batch).await?;
                     Ok(())
                 })
             },
@@ -113,7 +113,7 @@ impl PersistenceBundle {
             move |batch: Vec<BookSnapshotRow>| {
                 let ts = Arc::clone(&ts_book_snapshot);
                 Box::pin(async move {
-                    ts.insert_book_snapshots(&batch).await?;
+                    ts.insert_book_snapshots(batch).await?;
                     Ok(())
                 })
             },

@@ -9,16 +9,21 @@ publish = false
 [dependencies]
 oxide-arb-error = { workspace = true }
 oxide-arb-models = { workspace = true }
+oxide-arb-repository = { workspace = true }
+async-trait = { workspace = true }
 chrono = { workspace = true }
 rust_decimal = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 blake3 = { workspace = true }
 hex = { workspace = true }
-thiserror = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
 
 [dev-dependencies]
+oxide-arb-test-support = { workspace = true }
 rust_decimal_macros = { workspace = true }
+tokio = { workspace = true }
 
 [lints]
 workspace = true

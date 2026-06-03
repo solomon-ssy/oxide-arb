@@ -136,7 +136,7 @@ impl GammaService {
         self.market_registry
             .register_markets(batch.registry_markets);
         self.fee_calculator
-            .ingest_market_fee_schedules(batch.fee_data.clone());
+            .ingest_market_fee_schedules(batch.fee_data);
 
         let deactivated = self.market_registry.deactivate_stale(&seen_ids);
         let deactivated_upserts = convert_registry_to_upsert(&deactivated);

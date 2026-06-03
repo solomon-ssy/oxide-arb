@@ -48,8 +48,8 @@ impl PlanBuilder {
 
         let neg_risk = self
             .market_registry
-            .get_market(&opp.market_id)
-            .is_some_and(|market| market.neg_risk);
+            .neg_risk(&opp.market_id)
+            .unwrap_or(false);
 
         ExecutionPlan {
             execution_id,

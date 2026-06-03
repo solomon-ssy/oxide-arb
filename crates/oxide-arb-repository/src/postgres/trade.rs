@@ -73,13 +73,30 @@ async fn do_create_batch(
     }
 
     let mut total = 0u64;
-    for chunk in batch::chunk_for_insert(&trades, TRADE_COLUMNS) {
+    let chunk_size = batch::max_rows_per_insert(TRADE_COLUMNS);
+    let mut chunk = Vec::with_capacity(chunk_size);
+    for trade in trades {
+        chunk.push(trade);
+        if chunk.len() < chunk_size {
+            continue;
+        }
         let chunk_len = ToPrimitive::to_u64(&chunk.len()).unwrap_or(u64::MAX);
-        let models: Vec<ActiveModel> = chunk
-            .iter()
-            .cloned()
+        let models = std::mem::take(&mut chunk)
+            .into_iter()
             .map(IntoActiveModel::into_active_model)
-            .collect();
+            .collect::<Vec<ActiveModel>>();
+        Entity::insert_many(models)
+            .exec(db)
+            .await
+            .map_err(StorageError::from)?;
+        total += chunk_len;
+    }
+    if !chunk.is_empty() {
+        let chunk_len = ToPrimitive::to_u64(&chunk.len()).unwrap_or(u64::MAX);
+        let models = chunk
+            .into_iter()
+            .map(IntoActiveModel::into_active_model)
+            .collect::<Vec<ActiveModel>>();
         Entity::insert_many(models)
             .exec(db)
             .await
@@ -382,6 +399,22 @@ async fn do_find_recent(
         .map(|v| v.into_iter().map(Into::into).collect())
 }
 
+async fn do_find_between(
+    db: &impl ConnectionTrait,
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+) -> Result<Vec<TradeInfo>, StorageError> {
+    Entity::find()
+        .filter(Column::CreatedAt.gte(start))
+        .filter(Column::CreatedAt.lt(end))
+        .order_by_asc(Column::CreatedAt)
+        .order_by_asc(Column::TradeId)
+        .all(db)
+        .await
+        .map_err(StorageError::from)
+        .map(|v| v.into_iter().map(Into::into).collect())
+}
+
 async fn do_count_by_outcome(
     db: &impl ConnectionTrait,
     since: DateTime<Utc>,
@@ -538,6 +571,14 @@ impl TradeRepository for PgTradeRepository {
         do_find_recent(&self.db, since, limit).await
     }
 
+    async fn find_between(
+        &self,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> Result<Vec<TradeInfo>, StorageError> {
+        do_find_between(&self.db, start, end).await
+    }
+
     async fn count_by_outcome(
         &self,
         since: DateTime<Utc>,
@@ -633,6 +674,14 @@ impl TradeRepository for PgTradeRepositoryTxn<'_> {
         limit: u64,
     ) -> Result<Vec<TradeInfo>, StorageError> {
         do_find_recent(self.txn, since, limit).await
+    }
+
+    async fn find_between(
+        &self,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> Result<Vec<TradeInfo>, StorageError> {
+        do_find_between(self.txn, start, end).await
     }
 
     async fn count_by_outcome(

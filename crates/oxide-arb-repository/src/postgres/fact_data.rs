@@ -13,7 +13,7 @@ use oxide_arb_models::{
         PositionUnwindAuditInfo, TokenBalanceSnapshotInfo,
     },
     entities::{
-        balance_snapshot::Entity as BalanceEntity,
+        balance_snapshot::{Column as BalanceColumn, Entity as BalanceEntity},
         control_factor_shadow_decision::Entity as ShadowDecisionEntity,
         control_factor_training_dataset::Entity as TrainingDatasetEntity,
         position_exit_execution::Entity as ExitExecutionEntity,
@@ -27,6 +27,7 @@ use oxide_arb_models::{
 use sea_orm::{
     ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder,
 };
+use std::collections::HashSet;
 
 pub struct PgFactDataRepository {
     db: DatabaseConnection,
@@ -69,13 +70,30 @@ impl BalanceSnapshotRepository for PgFactDataRepository {
         .map_err(StorageError::from)
     }
 
+    async fn latest_balance_before(
+        &self,
+        holder_address: &str,
+        before: DateTime<Utc>,
+    ) -> Result<Option<BalanceSnapshotInfo>, StorageError> {
+        BalanceEntity::find()
+            .filter(BalanceColumn::HolderAddress.eq(holder_address))
+            .filter(BalanceColumn::ObservedAt.lte(before))
+            .order_by_desc(BalanceColumn::ObservedAt)
+            .one(&self.db)
+            .await
+            .map_err(StorageError::from)
+            .map(|row| row.map(Into::into))
+    }
+
     async fn latest_token_balance_before(
         &self,
+        holder_address: &str,
         market_id: &MarketId,
         token_id: &TokenId,
         before: DateTime<Utc>,
     ) -> Result<Option<TokenBalanceSnapshotInfo>, StorageError> {
         TokenBalanceEntity::find()
+            .filter(TokenBalanceColumn::HolderAddress.eq(holder_address))
             .filter(TokenBalanceColumn::MarketId.eq(market_id.clone()))
             .filter(TokenBalanceColumn::TokenId.eq(token_id.clone()))
             .filter(TokenBalanceColumn::ObservedAt.lte(before))
@@ -84,6 +102,36 @@ impl BalanceSnapshotRepository for PgFactDataRepository {
             .await
             .map_err(StorageError::from)
             .map(|row| row.map(Into::into))
+    }
+
+    async fn latest_token_balances_before(
+        &self,
+        holder_address: &str,
+        market_ids: &[MarketId],
+        token_ids: &[TokenId],
+        before: DateTime<Utc>,
+    ) -> Result<Vec<TokenBalanceSnapshotInfo>, StorageError> {
+        if market_ids.is_empty() || token_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let rows = TokenBalanceEntity::find()
+            .filter(TokenBalanceColumn::HolderAddress.eq(holder_address))
+            .filter(TokenBalanceColumn::MarketId.is_in(market_ids.iter().map(MarketId::as_str)))
+            .filter(TokenBalanceColumn::TokenId.is_in(token_ids.iter().map(TokenId::as_str)))
+            .filter(TokenBalanceColumn::ObservedAt.lte(before))
+            .order_by_desc(TokenBalanceColumn::ObservedAt)
+            .all(&self.db)
+            .await
+            .map_err(StorageError::from)?;
+        let mut seen = HashSet::new();
+        let mut latest = Vec::new();
+        for row in rows {
+            let key = (row.market_id.clone(), row.token_id.clone());
+            if seen.insert(key) {
+                latest.push(row.into());
+            }
+        }
+        Ok(latest)
     }
 }
 

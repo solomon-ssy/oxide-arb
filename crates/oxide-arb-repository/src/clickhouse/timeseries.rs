@@ -39,7 +39,7 @@ impl ChTimeseriesRepository {
     ) -> Self {
         let batch_size = config.batch_size;
         let flush_interval = Duration::from_secs(config.flush_interval_secs);
-        let metrics = write_manager.metrics().clone();
+        let metrics = Arc::clone(write_manager.metrics());
 
         Self {
             tick_inserter: BatchInserter::new(
@@ -47,7 +47,7 @@ impl ChTimeseriesRepository {
                 "tick_events",
                 batch_size,
                 flush_interval,
-                metrics.clone(),
+                Arc::clone(&metrics),
                 shutdown.clone(),
             ),
             l2_inserter: BatchInserter::new(
@@ -55,7 +55,7 @@ impl ChTimeseriesRepository {
                 "tick_events_l2",
                 batch_size,
                 flush_interval,
-                metrics.clone(),
+                Arc::clone(&metrics),
                 shutdown.clone(),
             ),
             book_inserter: BatchInserter::new(
@@ -63,7 +63,7 @@ impl ChTimeseriesRepository {
                 "book_snapshots",
                 batch_size,
                 flush_interval,
-                metrics.clone(),
+                Arc::clone(&metrics),
                 shutdown.clone(),
             ),
             audit_inserter: BatchInserter::new(
@@ -71,7 +71,7 @@ impl ChTimeseriesRepository {
                 "opportunity_audit",
                 batch_size,
                 flush_interval,
-                metrics.clone(),
+                Arc::clone(&metrics),
                 shutdown.clone(),
             ),
             detection_inserter: BatchInserter::new(
@@ -79,7 +79,7 @@ impl ChTimeseriesRepository {
                 "opportunity_detection",
                 batch_size,
                 flush_interval,
-                metrics.clone(),
+                Arc::clone(&metrics),
                 shutdown.clone(),
             ),
             calibration_inserter: BatchInserter::new(
@@ -106,52 +106,34 @@ impl ChTimeseriesRepository {
 
 #[async_trait]
 impl TimeseriesFactWriter for ChTimeseriesRepository {
-    async fn insert_tick_events(&self, events: &[TickEventRow]) -> Result<(), StorageError> {
-        for event in events {
-            self.tick_inserter.insert(event.clone()).await?;
-        }
-        Ok(())
+    async fn insert_tick_events(&self, events: Vec<TickEventRow>) -> Result<(), StorageError> {
+        self.tick_inserter.insert_many(events).await
     }
 
-    async fn insert_l2_events(&self, rows: &[TickEventL2Row]) -> Result<(), StorageError> {
-        for row in rows {
-            self.l2_inserter.insert(row.clone()).await?;
-        }
-        Ok(())
+    async fn insert_l2_events(&self, rows: Vec<TickEventL2Row>) -> Result<(), StorageError> {
+        self.l2_inserter.insert_many(rows).await
     }
 
-    async fn insert_book_snapshots(&self, rows: &[BookSnapshotRow]) -> Result<(), StorageError> {
-        for row in rows {
-            self.book_inserter.insert(row.clone()).await?;
-        }
-        Ok(())
+    async fn insert_book_snapshots(&self, rows: Vec<BookSnapshotRow>) -> Result<(), StorageError> {
+        self.book_inserter.insert_many(rows).await
     }
 
     async fn insert_detections(
         &self,
-        rows: &[OpportunityDetectionRow],
+        rows: Vec<OpportunityDetectionRow>,
     ) -> Result<(), StorageError> {
-        for row in rows {
-            self.detection_inserter.insert(row.clone()).await?;
-        }
-        Ok(())
+        self.detection_inserter.insert_many(rows).await
     }
 
-    async fn insert_audits(&self, rows: &[OpportunityAuditRow]) -> Result<(), StorageError> {
-        for row in rows {
-            self.audit_inserter.insert(row.clone()).await?;
-        }
-        Ok(())
+    async fn insert_audits(&self, rows: Vec<OpportunityAuditRow>) -> Result<(), StorageError> {
+        self.audit_inserter.insert_many(rows).await
     }
 
     async fn insert_calibration_snapshots(
         &self,
-        rows: &[CalibrationSnapshotRow],
+        rows: Vec<CalibrationSnapshotRow>,
     ) -> Result<(), StorageError> {
-        for row in rows {
-            self.calibration_inserter.insert(row.clone()).await?;
-        }
-        Ok(())
+        self.calibration_inserter.insert_many(rows).await
     }
 }
 

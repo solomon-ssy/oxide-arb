@@ -53,7 +53,7 @@ impl MarketScanInput {
             category: self.category,
             staleness: self.staleness,
             settlement_deadline: self.settlement_deadline,
-            latency: self.latency.clone(),
+            latency: Arc::clone(&self.latency),
         }
     }
 }
