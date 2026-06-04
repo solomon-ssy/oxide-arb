@@ -8,12 +8,13 @@ use oxide_arb_models::{
             AcquireMaterializationRunOutcome, CancelMaterializationRunOutcome,
             EnqueueMaterializationRunOptions, EnqueueMaterializationRunOutcome,
             InputResolutionReport, MaterializationRunManifest, MaterializationRunStatusPatch,
-            NewControlFactorStageReport, RunTransitionOutcome, StageCoverageReport, StageError,
+            NewControlFactorAuditEvent, NewControlFactorStageReport, NewControlFactorValue,
+            QualityGateEvaluationArtifact, RunTransitionOutcome, StageCoverageReport, StageError,
             StageReportBody,
         },
     },
     enums::control_factor::{
-        ControlFactorType, EvidenceStageStatus, MaterializationErrorCode,
+        ControlAuditEventType, ControlFactorType, EvidenceStageStatus, MaterializationErrorCode,
         MaterializationOutputPolicy, MaterializationRunStatus, MaterializationStageName,
     },
     types::MaterializationRunId,
@@ -24,7 +25,14 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use crate::{
-    evidence::engine::EvidenceEngine,
+    evidence::{
+        book::BookReconstructionArtifact, detector::DetectorEvidenceArtifact,
+        engine::EvidenceEngine, execution::ExecutionEvidenceArtifact,
+        portfolio::PortfolioRiskEvidenceArtifact,
+        settlement::SettlementReconciliationEvidenceArtifact, training::TrainingExampleArtifact,
+    },
+    factor::{FactorBuildContext, FactorBuilderRegistry},
+    gates::{QualityGateContext, QualityGateEvaluator},
     materialization::{
         MaterializationError, MaterializationResult, PointInTimeResolver,
         SealedMaterializationManifest, StageReportBuilder,
@@ -105,7 +113,9 @@ impl MaterializationRunner {
             .retry_materialization_run(run_id)
             .await?
         {
-            RunTransitionOutcome::Transitioned(_) => self.execute_run(run_id, cancellation).await,
+            RunTransitionOutcome::Transitioned(_) => {
+                Box::pin(self.execute_run(run_id, cancellation)).await
+            }
             RunTransitionOutcome::InvalidTransition { current_status } => {
                 warn!(run_id = %run_id, status = %current_status, "invalid retry transition");
                 Ok(RunExecutionOutcome::NotQueued)
@@ -156,46 +166,17 @@ impl MaterializationRunner {
         stage_reports.push(resolve_stage_report);
         cancel_if_requested(&cancellation, "cancelled after resolve_inputs")?;
 
-        let book_output = self
-            .deps
-            .evidence_engine
-            .book_reconstruction(manifest, input_report.clone())
+        let decision_evidence = self
+            .execute_decision_evidence_stages(
+                manifest,
+                input_report.clone(),
+                &mut stage_reports,
+                &cancellation,
+            )
             .await?;
-        self.persist_stage_report(&book_output.stage_report).await?;
-        stage_reports.push(book_output.stage_report.clone());
-        cancel_if_requested(&cancellation, "cancelled after book_reconstruction")?;
-        let book = required_artifact(
-            book_output.artifact,
-            MaterializationStageName::BookReconstruction,
-        )?;
-
-        let detector_output = self
-            .deps
-            .evidence_engine
-            .detector_evidence(manifest, &book)
-            .await?;
-        self.persist_stage_report(&detector_output.stage_report)
-            .await?;
-        stage_reports.push(detector_output.stage_report.clone());
-        cancel_if_requested(&cancellation, "cancelled after detector_evidence")?;
-        let detector = required_artifact(
-            detector_output.artifact,
-            MaterializationStageName::DetectorEvidence,
-        )?;
-
-        let execution_output = self
-            .deps
-            .evidence_engine
-            .execution_evidence(manifest, &book, &detector)
-            .await?;
-        self.persist_stage_report(&execution_output.stage_report)
-            .await?;
-        stage_reports.push(execution_output.stage_report.clone());
-        cancel_if_requested(&cancellation, "cancelled after execution_evidence")?;
-        let execution = required_artifact(
-            execution_output.artifact,
-            MaterializationStageName::ExecutionEvidence,
-        )?;
+        let book = decision_evidence.book;
+        let detector = decision_evidence.detector;
+        let execution = decision_evidence.execution;
         let audit_funnel = self.deps.evidence_engine.audit_funnel(manifest).await?;
 
         let portfolio_output = self.deps.evidence_engine.portfolio_evidence(
@@ -209,6 +190,10 @@ impl MaterializationRunner {
             .await?;
         stage_reports.push(portfolio_output.stage_report.clone());
         cancel_if_requested(&cancellation, "cancelled after portfolio_risk_evidence")?;
+        let portfolio = required_artifact(
+            portfolio_output.artifact,
+            MaterializationStageName::PortfolioRiskEvidence,
+        )?;
 
         let settlement_output = self.deps.evidence_engine.settlement_evidence(
             manifest,
@@ -249,7 +234,27 @@ impl MaterializationRunner {
         )?;
         self.persist_stage_report(&training_output.stage_report)
             .await?;
-        stage_reports.push(training_output.stage_report);
+        stage_reports.push(training_output.stage_report.clone());
+        let training = required_artifact(
+            training_output.artifact,
+            MaterializationStageName::TrainingExampleBuild,
+        )?;
+
+        if manifest.production_output_allowed() {
+            self.execute_factor_stages(
+                manifest,
+                &mut stage_reports,
+                FactorStageInputs {
+                    input_report: &input_report,
+                    detector: &detector,
+                    training: &training,
+                    execution: &execution,
+                    portfolio: &portfolio,
+                    settlement: &settlement,
+                },
+            )
+            .await?;
+        }
 
         Ok(MaterializationRunReport {
             input_resolution: input_report,
@@ -388,6 +393,157 @@ impl MaterializationRunner {
         Ok(())
     }
 
+    async fn execute_decision_evidence_stages(
+        &self,
+        manifest: &MaterializationRunManifest,
+        input_report: InputResolutionReport,
+        stage_reports: &mut Vec<StageReportBody>,
+        cancellation: &CancellationToken,
+    ) -> MaterializationResult<DecisionEvidenceArtifacts> {
+        let book_output = self
+            .deps
+            .evidence_engine
+            .book_reconstruction(manifest, input_report)
+            .await?;
+        self.persist_stage_report(&book_output.stage_report).await?;
+        stage_reports.push(book_output.stage_report.clone());
+        cancel_if_requested(cancellation, "cancelled after book_reconstruction")?;
+        let book = required_artifact(
+            book_output.artifact,
+            MaterializationStageName::BookReconstruction,
+        )?;
+
+        let detector_output = self
+            .deps
+            .evidence_engine
+            .detector_evidence(manifest, &book)
+            .await?;
+        self.persist_stage_report(&detector_output.stage_report)
+            .await?;
+        stage_reports.push(detector_output.stage_report.clone());
+        cancel_if_requested(cancellation, "cancelled after detector_evidence")?;
+        let detector = required_artifact(
+            detector_output.artifact,
+            MaterializationStageName::DetectorEvidence,
+        )?;
+
+        let execution_output = self
+            .deps
+            .evidence_engine
+            .execution_evidence(manifest, &book, &detector)
+            .await?;
+        self.persist_stage_report(&execution_output.stage_report)
+            .await?;
+        stage_reports.push(execution_output.stage_report.clone());
+        cancel_if_requested(cancellation, "cancelled after execution_evidence")?;
+        let execution = required_artifact(
+            execution_output.artifact,
+            MaterializationStageName::ExecutionEvidence,
+        )?;
+        Ok(DecisionEvidenceArtifacts {
+            book,
+            detector,
+            execution,
+        })
+    }
+
+    async fn execute_factor_stages(
+        &self,
+        manifest: &MaterializationRunManifest,
+        stage_reports: &mut Vec<StageReportBody>,
+        inputs: FactorStageInputs<'_>,
+    ) -> MaterializationResult<()> {
+        let factor_build = FactorBuilderRegistry::default().build(&FactorBuildContext {
+            manifest,
+            pit_manifest: &inputs.input_report.manifest,
+            stage_reports,
+            training: inputs.training,
+            execution: inputs.execution,
+            portfolio: inputs.portfolio,
+            settlement: inputs.settlement,
+        });
+        let factor_stage = stage_report_for_artifact(
+            manifest,
+            MaterializationStageName::FactorBuild,
+            EvidenceStageStatus::Completed,
+            factor_build.factor_count(),
+            &factor_build,
+        )?;
+        self.persist_stage_report(&factor_stage).await?;
+        stage_reports.push(factor_stage);
+
+        let gate_artifact = QualityGateEvaluator::evaluate(
+            &manifest.quality_gate_policy,
+            manifest.output_policy,
+            factor_build,
+            &QualityGateContext {
+                policy: &manifest.quality_gate_policy,
+                output_policy: manifest.output_policy,
+                stage_reports,
+                pit_manifest: &inputs.input_report.manifest,
+                training: inputs.training,
+                detector: inputs.detector,
+                portfolio: inputs.portfolio,
+            },
+        );
+        let gate_status = if gate_artifact.report.has_blocking_failures() {
+            EvidenceStageStatus::CompletedWithWarnings
+        } else {
+            EvidenceStageStatus::Completed
+        };
+        let gate_stage = stage_report_for_artifact(
+            manifest,
+            MaterializationStageName::QualityGateEvaluation,
+            gate_status,
+            gate_artifact.report.evaluated_factor_count,
+            &gate_artifact,
+        )?;
+        self.persist_stage_report(&gate_stage).await?;
+        stage_reports.push(gate_stage);
+
+        let records_written = self.write_gate_factors(manifest, &gate_artifact).await?;
+        let draft_stage = stage_report_for_artifact(
+            manifest,
+            MaterializationStageName::DraftWrite,
+            EvidenceStageStatus::Completed,
+            records_written,
+            &gate_artifact.factors,
+        )?;
+        self.persist_stage_report(&draft_stage).await?;
+        stage_reports.push(draft_stage);
+        Ok(())
+    }
+
+    async fn write_gate_factors(
+        &self,
+        manifest: &MaterializationRunManifest,
+        gate_artifact: &QualityGateEvaluationArtifact,
+    ) -> MaterializationResult<u64> {
+        let mut records_written = 0_u64;
+        for factor in &gate_artifact.factors {
+            let new_factor = NewControlFactorValue::from_typed(factor)
+                .map_err(|error| MaterializationError::Codec(error.to_string()))?;
+            self.deps.control_factors.create_factor(new_factor).await?;
+            self.deps
+                .control_factors
+                .append_audit_event(NewControlFactorAuditEvent {
+                    event_type: ControlAuditEventType::FactorCreated,
+                    factor_id: Some(factor.factor_id.clone()),
+                    publication_id: None,
+                    actor: manifest.created_by.clone(),
+                    reason: "phase5.4 materialization draft write".to_owned(),
+                    payload: serde_json::json!({
+                        "run_id": manifest.run_id,
+                        "status": factor.status,
+                        "factor_type": factor.factor_type,
+                    }),
+                })
+                .await?;
+            records_written = records_written.saturating_add(1);
+        }
+        Ok(records_written)
+    }
+
     async fn cancel_run(
         &self,
         run_id: &MaterializationRunId,
@@ -446,6 +602,21 @@ pub struct MaterializationRunReport {
     pub stage_reports: Vec<StageReportBody>,
 }
 
+struct DecisionEvidenceArtifacts {
+    book: BookReconstructionArtifact,
+    detector: DetectorEvidenceArtifact,
+    execution: ExecutionEvidenceArtifact,
+}
+
+struct FactorStageInputs<'a> {
+    input_report: &'a InputResolutionReport,
+    detector: &'a DetectorEvidenceArtifact,
+    training: &'a TrainingExampleArtifact,
+    execution: &'a ExecutionEvidenceArtifact,
+    portfolio: &'a PortfolioRiskEvidenceArtifact,
+    settlement: &'a SettlementReconciliationEvidenceArtifact,
+}
+
 fn required_artifact<T>(
     artifact: Option<T>,
     stage_name: MaterializationStageName,
@@ -470,6 +641,29 @@ fn cancel_if_requested(
     } else {
         Ok(())
     }
+}
+
+fn stage_report_for_artifact<T: serde::Serialize>(
+    manifest: &MaterializationRunManifest,
+    stage_name: MaterializationStageName,
+    status: EvidenceStageStatus,
+    records: u64,
+    artifact: &T,
+) -> MaterializationResult<StageReportBody> {
+    let started_at = Utc::now();
+    let report = StageReportBuilder::new(manifest.run_id.clone(), stage_name, started_at)
+        .status(status)
+        .finished_at(Utc::now())
+        .coverage(StageCoverageReport::complete(records))
+        .metrics(
+            serde_json::to_value(artifact)
+                .map_err(|error| MaterializationError::Codec(error.to_string()))?,
+        )
+        .records_read(records)
+        .records_written(records)
+        .output_artifact(artifact)?
+        .build();
+    Ok(report)
 }
 
 fn terminal_status(
@@ -500,9 +694,22 @@ fn terminal_status(
         || has_non_production_stage
     {
         MaterializationRunStatus::ReportOnly
+    } else if gate_rejected_factor_count(report) > 0 {
+        MaterializationRunStatus::CompletedWithRejectedFactors
     } else {
         MaterializationRunStatus::Completed
     }
+}
+
+fn gate_rejected_factor_count(report: &MaterializationRunReport) -> u64 {
+    report
+        .stage_reports
+        .iter()
+        .find(|stage| stage.stage_name == MaterializationStageName::QualityGateEvaluation)
+        .and_then(|stage| {
+            serde_json::from_value::<QualityGateEvaluationArtifact>(stage.metrics.clone()).ok()
+        })
+        .map_or(0, |artifact| artifact.report.rejected_factor_count)
 }
 
 fn stage_required_for_requested(

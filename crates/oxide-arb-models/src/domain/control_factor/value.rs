@@ -1,27 +1,235 @@
-//! Governed control-factor value and transition validation.
+//! Governed control-factor value, typed dimensions, and transition validation.
 
 use super::{evidence::FactorEvidence, lifecycle::FactorLifecycle, payload::FactorPayload};
 use crate::{
     enums::{
         calibration::{DurationBucket, PriceZone},
-        common::MarketCategory,
-        control_factor::{ControlFactorType, FactorStatus},
+        common::{MarketCategory, StalenessLevel},
+        control_factor::{ControlFactorType, FactorSeverity, FactorStatus},
     },
-    types::{ControlFactorId, EventId, MarketId, TokenId},
+    types::{ControlFactorId, EventId, MarketId},
 };
 use chrono::{DateTime, Utc};
 use oxide_arb_error::control::FactorValueError;
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 /// Typed dimensional key describing where a factor applies.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct FactorDimensions {
+#[serde(tag = "factor_type", content = "dimensions", rename_all = "snake_case")]
+pub enum FactorDimensions {
+    BucketRisk(BucketRiskDimensions),
+    ExecutionQuality(ExecutionQualityDimensions),
+    PortfolioRisk(PortfolioRiskDimensions),
+    ReconciliationHealth(ReconciliationHealthDimensions),
+    MarketAnomaly(MarketAnomalyDimensions),
+    #[default]
+    Unspecified,
+}
+
+impl FactorDimensions {
+    #[must_use]
+    pub const fn factor_type(&self) -> Option<ControlFactorType> {
+        match self {
+            Self::BucketRisk(_) => Some(ControlFactorType::BucketRisk),
+            Self::ExecutionQuality(_) => Some(ControlFactorType::ExecutionQuality),
+            Self::PortfolioRisk(_) => Some(ControlFactorType::PortfolioRisk),
+            Self::ReconciliationHealth(_) => Some(ControlFactorType::ReconciliationHealth),
+            Self::MarketAnomaly(_) => Some(ControlFactorType::MarketAnomaly),
+            Self::Unspecified => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BucketRiskDimensions {
+    pub category: MarketCategory,
+    pub price_zone: PriceZone,
+    pub duration_bucket: DurationBucket,
+    pub hours_to_settlement_bucket: Option<TimeToSettlementBucket>,
+    pub neg_risk: Option<bool>,
+    pub fee_profile: Option<FeeProfileBucket>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecutionQualityDimensions {
+    pub category: MarketCategory,
+    pub price_zone: PriceZone,
+    pub spread_bucket: SpreadBucket,
+    pub depth_bucket: DepthBucket,
+    pub book_age_bucket: BookAgeBucket,
+    pub latency_bucket: LatencyBucket,
+    pub staleness_level: StalenessLevel,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PortfolioRiskDimensions {
+    pub portfolio_regime: PortfolioRegime,
+    pub category: Option<MarketCategory>,
+    pub open_position_bucket: CountBucket,
+    pub potential_loss_bucket: UsdExposureBucket,
+    pub drawdown_bucket: DrawdownBucket,
+    pub settlement_backlog_bucket: CountBucket,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReconciliationHealthDimensions {
+    pub account_scope: AccountScope,
+    pub asset_scope: AssetScope,
+    pub drift_severity: FactorSeverity,
+    pub metrics_freshness_bucket: MetricsFreshnessBucket,
+    pub redeem_status_bucket: RedeemStatusBucket,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MarketAnomalyDimensions {
     pub market_id: Option<MarketId>,
     pub event_id: Option<EventId>,
-    pub token_id: Option<TokenId>,
     pub category: Option<MarketCategory>,
-    pub price_zone: Option<PriceZone>,
-    pub duration_bucket: Option<DurationBucket>,
+    pub anomaly_type: AnomalyType,
+    pub severity: FactorSeverity,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TimeToSettlementBucket {
+    UnderOneHour,
+    OneToSixHours,
+    SixToTwentyFourHours,
+    OverTwentyFourHours,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FeeProfileBucket {
+    Zero,
+    Low,
+    Standard,
+    High,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SpreadBucket {
+    Tight,
+    Normal,
+    Wide,
+    VeryWide,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DepthBucket {
+    Thin,
+    Normal,
+    Deep,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BookAgeBucket {
+    Fresh,
+    Recent,
+    Stale,
+    VeryStale,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LatencyBucket {
+    Named(String),
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PortfolioRegime {
+    Normal,
+    CapitalPressure,
+    Drawdown,
+    SettlementBacklog,
+    Incident,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CountBucket {
+    Zero,
+    One,
+    TwoToFive,
+    SixToTen,
+    OverTen,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UsdExposureBucket {
+    None,
+    Low,
+    Medium,
+    High,
+    Critical,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DrawdownBucket {
+    None,
+    Low,
+    Medium,
+    High,
+    Critical,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "scope", content = "value")]
+pub enum AccountScope {
+    Global,
+    Holder(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "scope", content = "value")]
+pub enum AssetScope {
+    All,
+    Collateral,
+    ConditionalTokens,
+    Market(MarketId),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MetricsFreshnessBucket {
+    Fresh,
+    Delayed,
+    Stale,
+    Expired,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RedeemStatusBucket {
+    NotRedeemable,
+    Redeemable,
+    Delayed,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnomalyType {
+    PriceReversal,
+    AbnormalBook,
+    OracleMismatch,
+    SettlementDelay,
+    ManualIncident,
+    CategorySpike,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DecimalRange {
+    pub min: Decimal,
+    pub max: Decimal,
 }
 
 /// Governed factor artifact. This is the canonical business representation.
@@ -43,7 +251,7 @@ impl ControlFactorValue {
     pub fn validate_for_transition(
         &self,
         target: FactorStatus,
-        previous_payload: Option<&FactorPayload>,
+        _previous_payload: Option<&FactorPayload>,
     ) -> Result<(), FactorValueError> {
         FactorLifecycle::assert_transition(self.status, target)?;
         FactorLifecycle::assert_not_report_only_promotion(self.status, target)?;
@@ -54,12 +262,25 @@ impl ControlFactorValue {
                 payload_type: self.payload.factor_type().to_string(),
             });
         }
+        if self
+            .dimensions
+            .factor_type()
+            .is_some_and(|factor_type| factor_type != self.factor_type)
+        {
+            return Err(FactorValueError::PayloadTypeMismatch {
+                factor_type: self.factor_type.to_string(),
+                payload_type: self.dimensions.factor_type().map_or_else(
+                    || "unspecified".to_owned(),
+                    |factor_type| factor_type.to_string(),
+                ),
+            });
+        }
         if self.generated_at >= self.expires_at {
             return Err(FactorValueError::InvalidExpiry);
         }
 
         self.payload
-            .validate_safety_transition(previous_payload)
+            .validate_safety()
             .map_err(FactorValueError::from)?;
 
         if FactorLifecycle::requires_governed_evidence(target)
@@ -74,13 +295,17 @@ impl ControlFactorValue {
 
 #[cfg(test)]
 mod tests {
-    use super::{ControlFactorValue, FactorDimensions};
+    use super::{BucketRiskDimensions, ControlFactorValue, FactorDimensions};
     use crate::{
         domain::control_factor::{
             ConfidenceInterval, DataCoverageReport, FactorEvidence, FactorPayload,
-            PointInTimeInputManifest, TailRiskEvidence,
+            PointInTimeInputManifest, TailRiskEvidence, TimeToSettlementBucket,
         },
-        enums::control_factor::{ControlFactorType, FactorStatus},
+        enums::{
+            calibration::{DurationBucket, PriceZone},
+            common::MarketCategory,
+            control_factor::{ControlFactorType, FactorMaturity, FactorStatus},
+        },
         types::{ControlFactorId, MaterializationRunId, StageReportId},
     };
     use chrono::Utc;
@@ -92,15 +317,19 @@ mod tests {
         ControlFactorValue {
             factor_id: ControlFactorId::new_v7(),
             factor_type: ControlFactorType::BucketRisk,
-            dimensions: FactorDimensions::default(),
+            dimensions: FactorDimensions::BucketRisk(BucketRiskDimensions {
+                category: MarketCategory::Politics,
+                price_zone: PriceZone::Z99,
+                duration_bucket: DurationBucket::Short,
+                hours_to_settlement_bucket: Some(TimeToSettlementBucket::UnderOneHour),
+                neg_risk: Some(false),
+                fee_profile: None,
+            }),
             payload: FactorPayload::BucketRisk(crate::domain::control_factor::BucketRiskPayload {
                 resolution_haircut_factor: dec!(0.9),
                 size_multiplier: dec!(0.9),
                 min_edge_bps_addon: dec!(0),
-                kelly_fraction_multiplier: dec!(1),
-                max_open_positions: None,
-                active_config_max_open_positions: None,
-                manual_approval: None,
+                block_new_entries: false,
             }),
             evidence: FactorEvidence {
                 materialization_run_id: MaterializationRunId::new_v7(),
@@ -130,6 +359,9 @@ mod tests {
                 },
                 baseline_config_hash: "hash".into(),
                 code_git_sha: "sha".into(),
+                dataset_hash: "dataset".into(),
+                feature_schema_hash: "features".into(),
+                label_schema_hash: "labels".into(),
                 query_fingerprint: "fp".into(),
                 confidence_interval: ConfidenceInterval {
                     lower: dec!(0),
@@ -143,6 +375,8 @@ mod tests {
                     max_loss: dec!(0),
                     expected_shortfall: dec!(0),
                 },
+                maturity: FactorMaturity::StatisticallyMaterialized,
+                source_refs: Vec::new(),
                 warnings: Vec::new(),
             },
             status,

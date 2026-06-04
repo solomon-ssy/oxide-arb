@@ -1,6 +1,6 @@
 use oxide_arb_models::{
     domain::control_factor::{
-        ArtifactHash, MaterializationRunManifest, QualityGatePolicyRef, ReplayAccountScope,
+        ArtifactHash, MaterializationRunManifest, QualityGatePolicy, ReplayAccountScope,
         RuntimeConfigRef, SimulationConfig,
     },
     enums::{
@@ -34,7 +34,7 @@ struct DedupeCanonicalInput<'a> {
     requested_factor_types: Vec<&'a ControlFactorType>,
     runtime_config_ref: &'a RuntimeConfigRef,
     simulation_config: &'a SimulationConfig,
-    quality_gate_policy: &'a QualityGatePolicyRef,
+    quality_gate_policy: &'a QualityGatePolicy,
     code_git_sha: &'a str,
 }
 
@@ -102,7 +102,7 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use oxide_arb_models::{
         domain::control_factor::{
-            DataRequirements, MarketFilterSpec, MaterializationRunManifest, QualityGatePolicyRef,
+            DataRequirements, MarketFilterSpec, MaterializationRunManifest, QualityGatePolicy,
             RunTrigger, RuntimeConfigRef, SimulationConfig, TimeWindowSpec,
         },
         enums::control_factor::{
@@ -146,9 +146,7 @@ mod tests {
                 config_hash: "sha256:cfg".into(),
             },
             simulation_config: SimulationConfig::production_default(),
-            quality_gate_policy: QualityGatePolicyRef {
-                policy_hash: "blake3:gate".into(),
-            },
+            quality_gate_policy: QualityGatePolicy::default(),
             output_policy: MaterializationOutputPolicy::NoFactorOutput,
             code_git_sha: "abc".into(),
             created_by: "test".into(),

@@ -41,6 +41,16 @@ pub enum FactorValueError {
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum StatsError {
+    #[error("statistical sample is empty")]
+    EmptySample,
+    #[error("statistical denominator is zero")]
+    ZeroDenominator,
+}
+
+pub type StatsResult<T> = Result<T, StatsError>;
+
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum ControlPersistenceError {
     #[error("failed to encode control persistence field {field}: {message}")]
     Encode {

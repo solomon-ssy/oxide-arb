@@ -15,4 +15,4 @@ pub use materialization::*;
 pub use payload::*;
 pub use persistence::*;
 pub use publication::*;
-pub use value::{ControlFactorValue, FactorDimensions};
+pub use value::*;

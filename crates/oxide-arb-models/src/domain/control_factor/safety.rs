@@ -22,15 +22,3 @@ pub(super) fn ensure_non_negative(
     }
     Ok(())
 }
-
-pub(super) const fn ensure_block_monotonic(
-    field: &'static str,
-    previous: bool,
-    next: bool,
-    has_manual_approval: bool,
-) -> Result<(), PayloadSafetyError> {
-    if previous && !next && !has_manual_approval {
-        return Err(PayloadSafetyError::BlockFlagRelaxed { field });
-    }
-    Ok(())
-}

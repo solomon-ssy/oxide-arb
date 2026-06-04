@@ -10,7 +10,7 @@ use oxide_arb_models::{
         MarketInfo, MarketPitSnapshotInfo, NewRuntimeConfigActivation, NewRuntimeConfigVersion,
         RuntimeConfigActivationInfo, RuntimeConfigVersionInfo, UpsertMarket,
         control_factor::{
-            DataRequirements, MarketFilterSpec, MaterializationRunManifest, QualityGatePolicyRef,
+            DataRequirements, MarketFilterSpec, MaterializationRunManifest, QualityGatePolicy,
             RequiredInputDomain, RunTrigger, RuntimeConfigRef, SimulationConfig, TimeWindowSpec,
         },
     },
@@ -68,9 +68,7 @@ pub fn materialization_manifest(
             config_hash: "blake3:cfg".to_owned(),
         },
         simulation_config: SimulationConfig::production_default(),
-        quality_gate_policy: QualityGatePolicyRef {
-            policy_hash: "blake3:gate".to_owned(),
-        },
+        quality_gate_policy: QualityGatePolicy::default(),
         output_policy: MaterializationOutputPolicy::NoFactorOutput,
         code_git_sha: "abc".to_owned(),
         created_by: "test".to_owned(),

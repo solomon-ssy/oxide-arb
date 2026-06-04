@@ -2,7 +2,7 @@ use chrono::{DateTime, Duration, Utc};
 use oxide_arb_models::{
     domain::control_factor::{
         DataRequirements, MarketFilterSpec, MaterializationRunManifest,
-        NewControlFactorMaterializationRun, QualityGatePolicyRef, ReplayAccountScope, RunTrigger,
+        NewControlFactorMaterializationRun, QualityGatePolicy, ReplayAccountScope, RunTrigger,
         RuntimeConfigRef, SimulationConfig, TimeWindowSpec,
     },
     enums::control_factor::{
@@ -28,7 +28,7 @@ pub struct ManifestBuilder {
     data_requirements: DataRequirements,
     runtime_config_ref: RuntimeConfigRef,
     simulation_config: SimulationConfig,
-    quality_gate_policy: QualityGatePolicyRef,
+    quality_gate_policy: QualityGatePolicy,
     output_policy: MaterializationOutputPolicy,
     code_git_sha: String,
     created_by: String,
@@ -47,7 +47,7 @@ pub struct ManifestBuilderInput {
     pub data_requirements: DataRequirements,
     pub runtime_config_ref: RuntimeConfigRef,
     pub simulation_config: SimulationConfig,
-    pub quality_gate_policy: QualityGatePolicyRef,
+    pub quality_gate_policy: QualityGatePolicy,
     pub output_policy: MaterializationOutputPolicy,
     pub code_git_sha: String,
     pub created_by: String,
@@ -196,8 +196,8 @@ mod tests {
     use chrono::{Duration, TimeZone, Utc};
     use oxide_arb_models::{
         domain::control_factor::{
-            DataRequirements, MarketFilterSpec, QualityGatePolicyRef, RequiredInputDomain,
-            RunTrigger, RuntimeConfigRef, SimulationConfig,
+            DataRequirements, MarketFilterSpec, QualityGatePolicy, RequiredInputDomain, RunTrigger,
+            RuntimeConfigRef, SimulationConfig,
         },
         enums::control_factor::{MaterializationOutputPolicy, MaterializationRunKind},
         types::RuntimeConfigVersionId,
@@ -234,9 +234,7 @@ mod tests {
                 config_hash: "sha256:cfg".into(),
             },
             simulation_config: SimulationConfig::production_default(),
-            quality_gate_policy: QualityGatePolicyRef {
-                policy_hash: "blake3:gate".into(),
-            },
+            quality_gate_policy: QualityGatePolicy::default(),
             output_policy: MaterializationOutputPolicy::NoFactorOutput,
             code_git_sha: "abc".into(),
             created_by: "test".into(),

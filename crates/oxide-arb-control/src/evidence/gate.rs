@@ -48,7 +48,7 @@ impl EvidenceStageGate {
 mod tests {
     use oxide_arb_models::{
         domain::control_factor::StageCoverageReport,
-        enums::control_factor::MaterializationOutputPolicy,
+        enums::control_factor::{EvidenceStageStatus, MaterializationOutputPolicy},
     };
     use rust_decimal::Decimal;
 
@@ -66,10 +66,7 @@ mod tests {
         }
         .decide();
 
-        assert_eq!(
-            status,
-            oxide_arb_models::enums::control_factor::EvidenceStageStatus::ProductionIneligible
-        );
+        assert_eq!(status, EvidenceStageStatus::ProductionIneligible);
     }
 
     #[test]
@@ -90,9 +87,6 @@ mod tests {
         }
         .decide();
 
-        assert_eq!(
-            status,
-            oxide_arb_models::enums::control_factor::EvidenceStageStatus::InsufficientCoverage
-        );
+        assert_eq!(status, EvidenceStageStatus::InsufficientCoverage);
     }
 }

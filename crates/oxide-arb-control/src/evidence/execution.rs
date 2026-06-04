@@ -2,6 +2,7 @@ use chrono::{TimeZone, Utc};
 use oxide_arb_models::{
     clickhouse::{ChPrice, ChShares, ChUsd, OpportunityAuditRow},
     domain::{
+        book::BookLevel,
         control_factor::{QueryFingerprint, SimulationConfig},
         evidence::EvidenceMetric,
     },
@@ -321,10 +322,7 @@ fn token_book_for_audit<'a>(
     }
 }
 
-fn levels_for_side(
-    token_book: &DecisionTokenBookView,
-    side: ChSide,
-) -> &[oxide_arb_models::domain::BookLevel] {
+fn levels_for_side(token_book: &DecisionTokenBookView, side: ChSide) -> &[BookLevel] {
     match side {
         ChSide::Buy => &token_book.book.asks,
         ChSide::Sell => &token_book.book.bids,
@@ -363,7 +361,7 @@ fn latency_shifted_fill(
 }
 
 fn adverse_selection_loss_bps(
-    levels: &[oxide_arb_models::domain::BookLevel],
+    levels: &[BookLevel],
     request: FokReplayRequest,
     replay: FokReplayResult,
     simulation_config: &SimulationConfig,

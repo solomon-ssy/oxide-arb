@@ -16,6 +16,7 @@ use oxide_arb_models::{
     },
     enums::{
         calibration::{DurationBucket, PriceZone},
+        clickhouse::ChOpportunityAuditStage,
         common::{
             MarketCategory, PositionStatus, RedeemStatus, SettlementAccountingStatus,
             SettlementTrigger, TradeBusinessOutcome, TradeState,
@@ -524,7 +525,7 @@ impl PositionRepository for MockPositionRepository {
         &self,
         position_id: &PositionId,
         attempts: u32,
-        winning_token_id: &oxide_arb_models::types::TokenId,
+        winning_token_id: &TokenId,
         settlement_trigger: SettlementTrigger,
     ) -> Result<PositionInfo, StorageError> {
         let mut positions = self.positions.lock().unwrap();
@@ -548,7 +549,7 @@ impl PositionRepository for MockPositionRepository {
         &self,
         position_id: &PositionId,
         attempts: u32,
-        winning_token_id: &oxide_arb_models::types::TokenId,
+        winning_token_id: &TokenId,
         settlement_trigger: SettlementTrigger,
         reason: String,
     ) -> Result<PositionInfo, StorageError> {
@@ -1189,9 +1190,9 @@ impl EvidenceTimeseriesRepository for MockTimeseriesRepository {
         rows.retain(|row| {
             matches!(
                 row.stage,
-                oxide_arb_models::enums::clickhouse::ChOpportunityAuditStage::Filled
-                    | oxide_arb_models::enums::clickhouse::ChOpportunityAuditStage::Missed
-                    | oxide_arb_models::enums::clickhouse::ChOpportunityAuditStage::Failed
+                ChOpportunityAuditStage::Filled
+                    | ChOpportunityAuditStage::Missed
+                    | ChOpportunityAuditStage::Failed
             )
         });
         rows.sort_by(|left, right| {

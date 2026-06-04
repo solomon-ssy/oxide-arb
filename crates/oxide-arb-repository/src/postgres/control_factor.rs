@@ -364,6 +364,22 @@ async fn load_factor_q(
         .map(|opt| opt.map(Into::into))
 }
 
+async fn list_factors_by_run_q(
+    db: &impl ConnectionTrait,
+    run_id: &MaterializationRunId,
+) -> Result<Vec<ControlFactorValueInfo>, StorageError> {
+    FactorEntity::find()
+        .filter(Expr::cust_with_values(
+            "evidence->>'materialization_run_id' = ?",
+            [run_id.as_str().to_owned()],
+        ))
+        .order_by_asc(FactorColumn::GeneratedAt)
+        .all(db)
+        .await
+        .map_err(StorageError::from)
+        .map(|models| models.into_iter().map(Into::into).collect())
+}
+
 async fn create_publication_q(
     db: &impl ConnectionTrait,
     publication: NewControlFactorPublication,
@@ -742,6 +758,20 @@ impl ControlFactorRepository for PgControlFactorRepository {
         create_factor_q(&self.db, factor).await
     }
 
+    async fn load_factor(
+        &self,
+        factor_id: &ControlFactorId,
+    ) -> Result<Option<ControlFactorValueInfo>, StorageError> {
+        load_factor_q(&self.db, factor_id).await
+    }
+
+    async fn list_factors_by_run(
+        &self,
+        run_id: &MaterializationRunId,
+    ) -> Result<Vec<ControlFactorValueInfo>, StorageError> {
+        list_factors_by_run_q(&self.db, run_id).await
+    }
+
     async fn transition_factor(
         &self,
         factor_id: &ControlFactorId,
@@ -755,6 +785,13 @@ impl ControlFactorRepository for PgControlFactorRepository {
         publication: NewControlFactorPublication,
     ) -> Result<ControlFactorPublicationInfo, StorageError> {
         create_publication_q(&self.db, publication).await
+    }
+
+    async fn load_publication(
+        &self,
+        publication_id: &FactorPublicationId,
+    ) -> Result<Option<ControlFactorPublicationInfo>, StorageError> {
+        load_publication_info_q(&self.db, publication_id).await
     }
 
     async fn activate_publication(

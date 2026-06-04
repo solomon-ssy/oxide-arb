@@ -92,33 +92,40 @@ mod tests {
     use chrono::Utc;
     use oxide_arb_models::{
         domain::control_factor::{
-            ControlFactorPublication, DataCoverageReport, FactorDimensions, FactorEvidence,
+            BucketRiskDimensions, BucketRiskPayload, ConfidenceInterval, ControlFactorPublication,
+            ControlFactorValue, DataCoverageReport, FactorDimensions, FactorEvidence,
             FactorPayload, PointInTimeInputManifest, TailRiskEvidence,
         },
-        enums::control_factor::{
-            ControlFactorType, FactorStatus, PublicationMode, PublicationStatus,
+        enums::{
+            calibration::{DurationBucket, PriceZone},
+            common::MarketCategory,
+            control_factor::{
+                ControlFactorType, FactorMaturity, FactorStatus, PublicationMode, PublicationStatus,
+            },
         },
         types::{ControlFactorId, FactorPublicationId, MaterializationRunId, StageReportId},
     };
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
 
-    fn candidate_factor() -> oxide_arb_models::domain::control_factor::ControlFactorValue {
-        oxide_arb_models::domain::control_factor::ControlFactorValue {
+    fn candidate_factor() -> ControlFactorValue {
+        ControlFactorValue {
             factor_id: ControlFactorId::new_v7(),
             factor_type: ControlFactorType::BucketRisk,
-            dimensions: FactorDimensions::default(),
-            payload: FactorPayload::BucketRisk(
-                oxide_arb_models::domain::control_factor::BucketRiskPayload {
-                    resolution_haircut_factor: dec!(0.9),
-                    size_multiplier: dec!(0.9),
-                    min_edge_bps_addon: dec!(0),
-                    kelly_fraction_multiplier: dec!(1),
-                    max_open_positions: None,
-                    active_config_max_open_positions: None,
-                    manual_approval: None,
-                },
-            ),
+            dimensions: FactorDimensions::BucketRisk(BucketRiskDimensions {
+                category: MarketCategory::Politics,
+                price_zone: PriceZone::Z99,
+                duration_bucket: DurationBucket::Short,
+                hours_to_settlement_bucket: None,
+                neg_risk: Some(false),
+                fee_profile: None,
+            }),
+            payload: FactorPayload::BucketRisk(BucketRiskPayload {
+                resolution_haircut_factor: dec!(0.9),
+                size_multiplier: dec!(0.9),
+                min_edge_bps_addon: dec!(0),
+                block_new_entries: false,
+            }),
             evidence: FactorEvidence {
                 materialization_run_id: MaterializationRunId::new_v7(),
                 stage_report_ids: vec![StageReportId::new_v7()],
@@ -147,8 +154,11 @@ mod tests {
                 },
                 baseline_config_hash: "cfg".into(),
                 code_git_sha: "sha".into(),
+                dataset_hash: "dataset".into(),
+                feature_schema_hash: "features".into(),
+                label_schema_hash: "labels".into(),
                 query_fingerprint: "fp".into(),
-                confidence_interval: oxide_arb_models::domain::control_factor::ConfidenceInterval {
+                confidence_interval: ConfidenceInterval {
                     lower: dec!(0),
                     point_estimate: dec!(0),
                     upper: dec!(0),
@@ -160,6 +170,8 @@ mod tests {
                     max_loss: dec!(0),
                     expected_shortfall: dec!(0),
                 },
+                maturity: FactorMaturity::RuleSeeded,
+                source_refs: Vec::new(),
                 warnings: Vec::new(),
             },
             status: FactorStatus::Candidate,

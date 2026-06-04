@@ -13,6 +13,51 @@ active_string_enum! {
     }
 }
 
+active_string_enum! {
+    /// Factor build maturity. Phase 5.4 defaults to statistically materialized factors.
+    pub enum FactorMaturity {
+        RuleSeeded => "rule_seeded",
+        StatisticallyMaterialized => "statistically_materialized",
+        AdaptiveModelBacked => "adaptive_model_backed",
+    }
+}
+
+active_string_enum! {
+    /// Health state used by reconciliation safety factors.
+    pub enum TradingHealth {
+        Healthy => "healthy",
+        Degraded => "degraded",
+        MaintenanceRequired => "maintenance_required",
+        Halted => "halted",
+    }
+}
+
+active_string_enum! {
+    /// Blocking quality gates evaluated in Phase 5.4.
+    pub enum QualityGateName {
+        PointInTime => "point_in_time",
+        UpstreamStage => "upstream_stage",
+        Coverage => "coverage",
+        Sample => "sample",
+        Leakage => "leakage",
+        Stability => "stability",
+        TailRisk => "tail_risk",
+        Conservative => "conservative",
+        Ttl => "ttl",
+        Owner => "owner",
+        Rollback => "rollback",
+    }
+}
+
+active_string_enum! {
+    /// Outcome of one quality-gate decision.
+    pub enum QualityGateOutcome {
+        Passed => "passed",
+        Failed => "failed",
+        Skipped => "skipped",
+    }
+}
+
 /// Behavior when a control factor or publication TTL elapses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

@@ -81,6 +81,16 @@ pub trait ControlFactorRepository: Send + Sync {
         factor: NewControlFactorValue,
     ) -> Result<ControlFactorValueInfo, StorageError>;
 
+    async fn load_factor(
+        &self,
+        factor_id: &ControlFactorId,
+    ) -> Result<Option<ControlFactorValueInfo>, StorageError>;
+
+    async fn list_factors_by_run(
+        &self,
+        run_id: &MaterializationRunId,
+    ) -> Result<Vec<ControlFactorValueInfo>, StorageError>;
+
     async fn transition_factor(
         &self,
         factor_id: &ControlFactorId,
@@ -91,6 +101,11 @@ pub trait ControlFactorRepository: Send + Sync {
         &self,
         publication: NewControlFactorPublication,
     ) -> Result<ControlFactorPublicationInfo, StorageError>;
+
+    async fn load_publication(
+        &self,
+        publication_id: &FactorPublicationId,
+    ) -> Result<Option<ControlFactorPublicationInfo>, StorageError>;
 
     async fn activate_publication(
         &self,

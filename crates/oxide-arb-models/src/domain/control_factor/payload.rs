@@ -1,10 +1,7 @@
 //! Typed control-factor payloads and safety validation.
 
-use super::{
-    evidence::ManualApproval,
-    safety::{ensure_block_monotonic, ensure_multiplier, ensure_non_negative},
-};
-use crate::enums::control_factor::{ControlFactorType, FactorSeverity};
+use super::safety::{ensure_multiplier, ensure_non_negative};
+use crate::enums::control_factor::{ControlFactorType, FactorSeverity, TradingHealth};
 use oxide_arb_error::control::PayloadSafetyError;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -42,64 +39,16 @@ impl FactorPayload {
         }
     }
 
-    /// Validates automatic tightening rules that require a previous payload snapshot.
-    pub fn validate_safety_transition(
-        &self,
-        previous: Option<&Self>,
-    ) -> Result<(), PayloadSafetyError> {
-        self.validate_safety()?;
-        let Some(previous) = previous else {
-            return Ok(());
-        };
-        if self.factor_type() != previous.factor_type() {
-            return Ok(());
-        }
-        match (previous, self) {
-            (Self::ExecutionQuality(prev), Self::ExecutionQuality(next)) => ensure_block_monotonic(
-                "block_stale_books",
-                prev.block_stale_books,
-                next.block_stale_books,
-                next.manual_approval.is_some(),
-            ),
-            (Self::PortfolioRisk(prev), Self::PortfolioRisk(next)) => ensure_block_monotonic(
-                "block_new_positions",
-                prev.block_new_positions,
-                next.block_new_positions,
-                next.manual_approval.is_some(),
-            ),
-            (Self::ReconciliationHealth(prev), Self::ReconciliationHealth(next)) => {
-                ensure_block_monotonic(
-                    "block_trading",
-                    prev.block_trading,
-                    next.block_trading,
-                    next.manual_approval.is_some(),
-                )
-            }
-            (Self::MarketAnomaly(prev), Self::MarketAnomaly(next)) => ensure_block_monotonic(
-                "block_market",
-                prev.block_market,
-                next.block_market,
-                next.manual_approval.is_some(),
-            ),
-            _ => Ok(()),
-        }
-    }
-
-    #[must_use]
-    pub const fn manual_approval(&self) -> Option<&ManualApproval> {
-        match self {
-            Self::BucketRisk(payload) => payload.manual_approval.as_ref(),
-            Self::ExecutionQuality(payload) => payload.manual_approval.as_ref(),
-            Self::PortfolioRisk(payload) => payload.manual_approval.as_ref(),
-            Self::ReconciliationHealth(payload) => payload.manual_approval.as_ref(),
-            Self::MarketAnomaly(payload) => payload.manual_approval.as_ref(),
-        }
-    }
-
     #[must_use]
     pub const fn severity(&self) -> Option<FactorSeverity> {
         match self {
-            Self::ReconciliationHealth(payload) => Some(payload.severity),
+            Self::ReconciliationHealth(payload) => {
+                if payload.force_maintenance_mode {
+                    Some(FactorSeverity::Critical)
+                } else {
+                    Some(FactorSeverity::Warning)
+                }
+            }
             Self::MarketAnomaly(payload) => Some(payload.severity),
             _ => None,
         }
@@ -112,29 +61,14 @@ pub struct BucketRiskPayload {
     pub resolution_haircut_factor: Decimal,
     pub size_multiplier: Decimal,
     pub min_edge_bps_addon: Decimal,
-    pub kelly_fraction_multiplier: Decimal,
-    pub max_open_positions: Option<u32>,
-    pub active_config_max_open_positions: Option<u32>,
-    pub manual_approval: Option<ManualApproval>,
+    pub block_new_entries: bool,
 }
 
 impl BucketRiskPayload {
     fn validate_safety(&self) -> Result<(), PayloadSafetyError> {
         ensure_multiplier(self.resolution_haircut_factor, "resolution_haircut_factor")?;
         ensure_multiplier(self.size_multiplier, "size_multiplier")?;
-        ensure_multiplier(self.kelly_fraction_multiplier, "kelly_fraction_multiplier")?;
-        ensure_non_negative(self.min_edge_bps_addon, "min_edge_bps_addon")?;
-        if let (Some(limit), Some(active)) = (
-            self.max_open_positions,
-            self.active_config_max_open_positions,
-        ) {
-            if limit > active && self.manual_approval.is_none() {
-                return Err(PayloadSafetyError::RiskExpandingWithoutApproval {
-                    field: "max_open_positions",
-                });
-            }
-        }
-        Ok(())
+        ensure_non_negative(self.min_edge_bps_addon, "min_edge_bps_addon")
     }
 }
 
@@ -142,10 +76,9 @@ impl BucketRiskPayload {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecutionQualityPayload {
     pub fill_probability_multiplier: Decimal,
-    pub size_multiplier: Decimal,
+    pub max_depth_usage_pct: Option<Decimal>,
     pub slippage_bps_addon: Decimal,
-    pub block_stale_books: bool,
-    pub manual_approval: Option<ManualApproval>,
+    pub min_liquidity_score: Option<Decimal>,
 }
 
 impl ExecutionQualityPayload {
@@ -154,7 +87,12 @@ impl ExecutionQualityPayload {
             self.fill_probability_multiplier,
             "fill_probability_multiplier",
         )?;
-        ensure_multiplier(self.size_multiplier, "size_multiplier")?;
+        if let Some(max_depth_usage_pct) = self.max_depth_usage_pct {
+            ensure_multiplier(max_depth_usage_pct, "max_depth_usage_pct")?;
+        }
+        if let Some(min_liquidity_score) = self.min_liquidity_score {
+            ensure_multiplier(min_liquidity_score, "min_liquidity_score")?;
+        }
         ensure_non_negative(self.slippage_bps_addon, "slippage_bps_addon")
     }
 }
@@ -162,28 +100,32 @@ impl ExecutionQualityPayload {
 /// Portfolio-level throttles from exposure, drawdown, and liquidity evidence.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PortfolioRiskPayload {
+    pub global_size_multiplier: Decimal,
+    pub category_size_multiplier: Option<Decimal>,
     pub daily_budget_multiplier: Decimal,
+    pub max_open_positions: Option<u32>,
     pub kelly_fraction_multiplier: Decimal,
-    pub size_multiplier: Decimal,
-    pub block_new_positions: bool,
-    pub manual_approval: Option<ManualApproval>,
 }
 
 impl PortfolioRiskPayload {
     fn validate_safety(&self) -> Result<(), PayloadSafetyError> {
+        ensure_multiplier(self.global_size_multiplier, "global_size_multiplier")?;
+        if let Some(category_size_multiplier) = self.category_size_multiplier {
+            ensure_multiplier(category_size_multiplier, "category_size_multiplier")?;
+        }
         ensure_multiplier(self.daily_budget_multiplier, "daily_budget_multiplier")?;
-        ensure_multiplier(self.kelly_fraction_multiplier, "kelly_fraction_multiplier")?;
-        ensure_multiplier(self.size_multiplier, "size_multiplier")
+        ensure_multiplier(self.kelly_fraction_multiplier, "kelly_fraction_multiplier")
     }
 }
 
 /// Reconciliation health factor that may fail closed when critical.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReconciliationHealthPayload {
-    pub severity: FactorSeverity,
-    pub block_trading: bool,
+    pub trading_health: TradingHealth,
     pub size_multiplier: Decimal,
-    pub manual_approval: Option<ManualApproval>,
+    pub require_manual_ack: bool,
+    pub force_maintenance_mode: bool,
+    pub fail_closed_after_secs: Option<u64>,
 }
 
 impl ReconciliationHealthPayload {
@@ -197,21 +139,26 @@ impl ReconciliationHealthPayload {
 pub struct MarketAnomalyPayload {
     pub severity: FactorSeverity,
     pub block_market: bool,
-    pub size_multiplier: Decimal,
-    pub min_edge_bps_addon: Decimal,
-    pub manual_approval: Option<ManualApproval>,
+    pub block_event: bool,
+    pub category_cooldown_secs: Option<u64>,
+    pub reason_code: String,
+    pub manual_ack_required: bool,
 }
 
 impl MarketAnomalyPayload {
     fn validate_safety(&self) -> Result<(), PayloadSafetyError> {
-        ensure_multiplier(self.size_multiplier, "size_multiplier")?;
-        ensure_non_negative(self.min_edge_bps_addon, "min_edge_bps_addon")
+        if self.reason_code.trim().is_empty() {
+            return Err(PayloadSafetyError::RiskExpandingWithoutApproval {
+                field: "reason_code",
+            });
+        }
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ExecutionQualityPayload, FactorPayload};
+    use super::FactorPayload;
     use oxide_arb_error::control::PayloadSafetyError;
     use rust_decimal_macros::dec;
 
@@ -221,10 +168,7 @@ mod tests {
             resolution_haircut_factor: dec!(1.1),
             size_multiplier: dec!(1),
             min_edge_bps_addon: dec!(0),
-            kelly_fraction_multiplier: dec!(1),
-            max_open_positions: None,
-            active_config_max_open_positions: None,
-            manual_approval: None,
+            block_new_entries: false,
         });
 
         assert_eq!(
@@ -241,37 +185,9 @@ mod tests {
             resolution_haircut_factor: dec!(0.9),
             size_multiplier: dec!(0.8),
             min_edge_bps_addon: dec!(25),
-            kelly_fraction_multiplier: dec!(0.5),
-            max_open_positions: Some(2),
-            active_config_max_open_positions: Some(3),
-            manual_approval: None,
+            block_new_entries: true,
         });
 
         assert!(payload.validate_safety().is_ok());
-    }
-
-    #[test]
-    fn rejects_relaxing_block_flag_without_approval() {
-        let previous = FactorPayload::ExecutionQuality(ExecutionQualityPayload {
-            fill_probability_multiplier: dec!(1),
-            size_multiplier: dec!(1),
-            slippage_bps_addon: dec!(0),
-            block_stale_books: true,
-            manual_approval: None,
-        });
-        let next = FactorPayload::ExecutionQuality(ExecutionQualityPayload {
-            fill_probability_multiplier: dec!(1),
-            size_multiplier: dec!(1),
-            slippage_bps_addon: dec!(0),
-            block_stale_books: false,
-            manual_approval: None,
-        });
-
-        assert_eq!(
-            next.validate_safety_transition(Some(&previous)),
-            Err(PayloadSafetyError::BlockFlagRelaxed {
-                field: "block_stale_books"
-            })
-        );
     }
 }

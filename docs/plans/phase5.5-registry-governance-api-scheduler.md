@@ -10,6 +10,40 @@
 
 ---
 
+## 0. Phase 5.4 收尾边界（5.5 前置）
+
+Phase 5.4 已在 `oxide-arb-control` / `oxide-arb-models` 落地 **materialization → typed builders → blocking gates → draft persistence** 闭环。下列能力 **明确归属 Phase 5.5**，5.4 不再扩展：
+
+| 能力 | 5.4 现状 | 5.5 负责 |
+|---|---|---|
+| `RollbackGate` | 未在 materialization evaluator 执行（无 active publication） | publication manager + rollback API |
+| Shadow readiness 计算 | `min_shadow_opportunities` 仅在 `QualityGatePolicy`；无 `control_factor_shadow_decision` 写入 | shadow decision 采集、聚合、promotion review |
+| Champion / challenger | 无 runtime 比较产物 | Shadow publication + delta 指标 + promotion API |
+| Governance FSM | `FactorLifecycle` 类型存在；无 Candidate→Shadow→Published 事务 | registry + publication state machine |
+| Audit hash chain | materialization 仅 `FactorCreated` 类事件 | append-only `control_factor_audit_event` + `prev_event_hash` |
+| Operator API / RBAC | 无 HTTP surface | §4 API + §7 RBAC |
+| Scheduler | 无 enqueue worker | §6 scheduler（只 enqueue，never publish） |
+| Live hot path 消费 | 无 `ControlFactorSnapshot` 加载 | Phase 5.6+（本阶段非目标） |
+
+### 0.0 Phase 5.4 已交付（5.5 可依赖）
+
+- 五类 typed `FactorDimensions` / `FactorPayload` / `FactorEvidence`（含 `FactorMaturity::StatisticallyMaterialized`、`dataset_hash`、真实 `PointInTimeInputManifest` 克隆）。
+- `FactorBuilderRegistry`：按 bucket 分组 + parent-bucket shrink（`factor/bucket.rs`）；insufficient sample → `ReportOnly`。
+- `QualityGateEvaluator`：blocking gates — `PointInTime`、`UpstreamStage`、`Coverage`、`Sample`、`Leakage`、`Stability`、`TailRisk`、`Conservative`、`Ttl`、`Owner`（`enabled_gates` 可配置）。
+- Run 终态：`CompletedWithRejectedFactors` 当 gate 产生 rejected factors。
+- `StatsError` / `StatsResult` 统一在 `oxide-arb-error::control`。
+- 测试：`materialization_smoke` phase 5.3/5.4、gate upstream 单测、bucket shrink 单测。
+
+### 0.0.1 已知生产债（5.5 不必重复做，但发布前应规划）
+
+- **Detector replay leakage**：smoke 合成数据仍可能触发 per-opportunity `bucket`/`calibration_snapshot` mismatch；生产应用 `Leakage` gate，smoke 使用 `QualityGatePolicy::smoke_acceptance()` 关闭 Leakage/TailRisk 以便断言 Candidate 路径。
+- **Wilson / β-binomial**：`observed_rate_lower_bound` 为保守 bps band，非完整 Wilson；生产校准可后续收紧。
+- **Portfolio builder**：`sequence_complete` + drawdown metrics 不足时仅 `ReportOnly`；非完整 tail-capital 模型。
+- **MarketAnomaly**：无 incident evidence 时恒 `ReportOnly`（符合计划）。
+- **Training `entity_key`**：已从 `DetectorBucketRef` 派生；`hours_to_settlement` / spread-depth 等细粒度维度待 evidence 扩展后再 materialize 多因子行。
+
+---
+
 ## 0. 工作范围
 
 ### 0.1 交付物
@@ -26,10 +60,19 @@
 
 ### 0.2 非目标
 
-- 不实现 factor builder。
-- 不接入 live hot path。
+- 不实现 factor builder（含统计估计、training example 丰富化、gate 规则扩展）。
+- 不实现 materialization stage graph 新 stage（5.4 已覆盖 FactorBuild / QualityGateEvaluation / DraftWrite）。
+- 不接入 live hot path / CLOB hot-path factor 加载。
 - 不实现 UI 具体组件；这里只定义页面和 API 契约。
 - 不允许 scheduler 自动 publish factor。
+- 不重复实现 5.4 blocking quality gates（governance 只消费 gate 结果与 `QualityGateEvaluationReport`）。
+
+### 0.3 5.5 必须接上的 5.4 产物
+
+- `ControlFactorValue` 行：`Candidate` / `Rejected` / `ReportOnly` / `Draft`（DB status）。
+- `QualityGateEvaluation` stage report（`metrics` 内嵌 `QualityGateEvaluationArtifact`）。
+- `FactorEvidence`：`stage_report_ids`、`point_in_time_inputs`、`maturity`、`tail_risk`、`source_refs`。
+- Materialization run terminal status：`Completed` / `CompletedWithRejectedFactors` / `ReportOnly` / `Failed`。
 
 ---
 

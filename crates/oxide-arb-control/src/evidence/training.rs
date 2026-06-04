@@ -1,13 +1,23 @@
 use oxide_arb_error::control::MaterializationError;
 use oxide_arb_models::{
     domain::{
-        control_factor::{FactorDimensions, QueryFingerprint},
+        control_factor::{
+            AccountScope, AnomalyType, AssetScope, BookAgeBucket, BucketRiskDimensions,
+            CountBucket, DepthBucket, DrawdownBucket, ExecutionQualityDimensions, FactorDimensions,
+            LatencyBucket, MarketAnomalyDimensions, MetricsFreshnessBucket, PortfolioRegime,
+            PortfolioRiskDimensions, QueryFingerprint, ReconciliationHealthDimensions,
+            RedeemStatusBucket, SpreadBucket, StageArtifactRef, TimeToSettlementBucket,
+            UsdExposureBucket,
+        },
         evidence::{
             EvidenceSourceRef, EvidenceSourceRefs, FactorFeature, FactorFeatureValue,
             FactorFeatureVector, FactorLabel, FactorLabelRef, FactorTrainingExample,
         },
     },
-    enums::control_factor::ControlFactorType,
+    enums::{
+        common::StalenessLevel,
+        control_factor::{ControlFactorType, FactorSeverity, MaterializationStageName},
+    },
 };
 use serde::{Deserialize, Serialize};
 
@@ -29,6 +39,8 @@ pub struct TrainingExampleArtifact {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrainingExampleReport {
     pub dataset_hash: String,
+    pub feature_schema_hash: String,
+    pub label_schema_hash: String,
     pub entity_count: u64,
     pub example_count: u64,
     pub label_count: u64,
@@ -44,6 +56,7 @@ pub fn build(
 ) -> MaterializationResult<TrainingExampleArtifact> {
     let mut examples = Vec::new();
     let query_refs = source_refs(detector, execution, settlement);
+    let artifact_refs = artifact_refs(detector, execution, settlement)?;
     for detection in &detector.detections {
         for factor_type in &requested_factor_types {
             let settlement_label = settlement
@@ -75,10 +88,7 @@ pub fn build(
                 opportunity_id: detection.opportunity_id.clone(),
                 market_id: detection.market_id.clone(),
                 factor_type: *factor_type,
-                entity_key: FactorDimensions {
-                    market_id: Some(detection.market_id.clone()),
-                    ..FactorDimensions::default()
-                },
+                entity_key: entity_key(*factor_type, detection),
                 event_time: detection.detected_at,
                 features: FactorFeatureVector {
                     schema_version: 1,
@@ -88,12 +98,14 @@ pub fn build(
                 outcome_available_at,
                 source_refs: EvidenceSourceRefs {
                     query_refs: query_refs.clone(),
-                    artifact_refs: Vec::new(),
+                    artifact_refs: artifact_refs.clone(),
                 },
             });
         }
     }
     let dataset_hash = ArtifactHasher::compute(&examples)?.0;
+    let feature_schema_hash = ArtifactHasher::compute(&feature_schema_names(&examples))?.0;
+    let label_schema_hash = ArtifactHasher::compute(&label_schema_names(&examples))?.0;
     let label_count = examples
         .iter()
         .filter(|example| example.label.is_some())
@@ -103,6 +115,8 @@ pub fn build(
     Ok(TrainingExampleArtifact {
         report: TrainingExampleReport {
             dataset_hash,
+            feature_schema_hash,
+            label_schema_hash,
             entity_count: u64::try_from(detector.detections.len()).unwrap_or(u64::MAX),
             example_count: u64::try_from(examples.len()).unwrap_or(u64::MAX),
             label_count,
@@ -114,6 +128,109 @@ pub fn build(
         },
         examples,
     })
+}
+
+fn artifact_refs(
+    detector: &DetectorEvidenceArtifact,
+    execution: &ExecutionEvidenceArtifact,
+    settlement: &SettlementReconciliationEvidenceArtifact,
+) -> MaterializationResult<Vec<StageArtifactRef>> {
+    Ok(vec![
+        StageArtifactRef {
+            stage_name: MaterializationStageName::DetectorEvidence,
+            artifact_hash: ArtifactHasher::compute(detector)?,
+        },
+        StageArtifactRef {
+            stage_name: MaterializationStageName::ExecutionEvidence,
+            artifact_hash: ArtifactHasher::compute(execution)?,
+        },
+        StageArtifactRef {
+            stage_name: MaterializationStageName::SettlementReconciliationEvidence,
+            artifact_hash: ArtifactHasher::compute(settlement)?,
+        },
+    ])
+}
+
+fn feature_schema_names(examples: &[FactorTrainingExample]) -> Vec<String> {
+    let mut names = examples
+        .iter()
+        .flat_map(|example| {
+            example
+                .features
+                .entries
+                .iter()
+                .map(|entry| entry.name.clone())
+        })
+        .collect::<Vec<_>>();
+    names.sort();
+    names.dedup();
+    names
+}
+
+fn label_schema_names(examples: &[FactorTrainingExample]) -> Vec<String> {
+    let mut names = examples
+        .iter()
+        .filter_map(|example| example.label.as_ref())
+        .flat_map(|label| label.entries.iter().map(|entry| entry.name.clone()))
+        .collect::<Vec<_>>();
+    names.sort();
+    names.dedup();
+    names
+}
+
+fn entity_key(
+    factor_type: ControlFactorType,
+    detection: &DetectorDetectionRef,
+) -> FactorDimensions {
+    match factor_type {
+        ControlFactorType::BucketRisk => FactorDimensions::BucketRisk(BucketRiskDimensions {
+            category: detection.bucket.category,
+            price_zone: detection.bucket.price_zone,
+            duration_bucket: detection.bucket.duration_bucket,
+            hours_to_settlement_bucket: Some(TimeToSettlementBucket::UnderOneHour),
+            neg_risk: None,
+            fee_profile: None,
+        }),
+        ControlFactorType::ExecutionQuality => {
+            FactorDimensions::ExecutionQuality(ExecutionQualityDimensions {
+                category: detection.bucket.category,
+                price_zone: detection.bucket.price_zone,
+                spread_bucket: SpreadBucket::Tight,
+                depth_bucket: DepthBucket::Deep,
+                book_age_bucket: BookAgeBucket::Fresh,
+                latency_bucket: LatencyBucket::Unknown,
+                staleness_level: StalenessLevel::Fresh,
+            })
+        }
+        ControlFactorType::PortfolioRisk => {
+            FactorDimensions::PortfolioRisk(PortfolioRiskDimensions {
+                portfolio_regime: PortfolioRegime::Normal,
+                category: Some(detection.bucket.category),
+                open_position_bucket: CountBucket::One,
+                potential_loss_bucket: UsdExposureBucket::Low,
+                drawdown_bucket: DrawdownBucket::None,
+                settlement_backlog_bucket: CountBucket::Zero,
+            })
+        }
+        ControlFactorType::ReconciliationHealth => {
+            FactorDimensions::ReconciliationHealth(ReconciliationHealthDimensions {
+                account_scope: AccountScope::Global,
+                asset_scope: AssetScope::Market(detection.market_id.clone()),
+                drift_severity: FactorSeverity::Warning,
+                metrics_freshness_bucket: MetricsFreshnessBucket::Fresh,
+                redeem_status_bucket: RedeemStatusBucket::NotRedeemable,
+            })
+        }
+        ControlFactorType::MarketAnomaly => {
+            FactorDimensions::MarketAnomaly(MarketAnomalyDimensions {
+                market_id: Some(detection.market_id.clone()),
+                event_id: None,
+                category: Some(detection.bucket.category),
+                anomaly_type: AnomalyType::AbnormalBook,
+                severity: FactorSeverity::Warning,
+            })
+        }
+    }
 }
 
 fn source_refs(
@@ -235,10 +352,15 @@ mod tests {
         types::{MarketId, OpportunityId},
     };
 
+    use oxide_arb_models::enums::{
+        calibration::{DurationBucket, PriceZone},
+        common::MarketCategory,
+    };
+
     use crate::evidence::{
         detector::{
-            DetectorDetectionRef, DetectorEvidenceArtifact, DetectorEvidenceReport,
-            DetectorMismatchRef, DetectorReplayRef,
+            DetectorBucketRef, DetectorDetectionRef, DetectorEvidenceArtifact,
+            DetectorEvidenceReport, DetectorMismatchRef, DetectorReplayRef,
         },
         execution::{ExecutionEvidenceArtifact, ExecutionEvidenceReport},
         settlement::{
@@ -342,6 +464,11 @@ mod tests {
                     .timestamp_millis_opt(1_000)
                     .single()
                     .expect("fixed detection time"),
+                bucket: DetectorBucketRef {
+                    category: MarketCategory::Politics,
+                    price_zone: PriceZone::Z95,
+                    duration_bucket: DurationBucket::Short,
+                },
                 replay: DetectorReplayRef {
                     has_reconstructed_book: true,
                     materialized_detected: true,

@@ -13,8 +13,11 @@ use oxide_arb_control::{
 };
 use oxide_arb_models::{
     domain::control_factor::StageReportBody,
-    enums::control_factor::{EvidenceStageStatus, MaterializationStageName},
+    enums::control_factor::{
+        EvidenceStageStatus, FactorStatus, MaterializationOutputPolicy, MaterializationStageName,
+    },
 };
+use oxide_arb_repository::traits::ControlFactorRepository;
 use oxide_arb_test_support::materialization::{
     SMOKE_MARKET_ID, SMOKE_OPPORTUNITY_ID, SmokeRepositories, smoke_manifest,
 };
@@ -37,6 +40,48 @@ async fn phase53_materialization_smoke_passes_acceptance_criteria() {
     assert_portfolio_stage(&report);
     assert_settlement_stage(&report);
     assert_exit_and_training_stages(&report);
+}
+
+#[tokio::test]
+async fn phase54_materialization_smoke_writes_factor_build_gate_and_draft_stages() {
+    let repos = SmokeRepositories::build();
+    let mut manifest = smoke_manifest();
+    manifest.output_policy = MaterializationOutputPolicy::EmitDraftCandidates;
+    let runner = smoke_runner(&repos);
+    let report = runner
+        .execute_evidence_pipeline(&manifest)
+        .await
+        .expect("phase 5.4 materialization should complete");
+
+    assert!(stage_completed(
+        stage(&report, MaterializationStageName::FactorBuild).status
+    ));
+    assert!(
+        stage_completed(stage(&report, MaterializationStageName::QualityGateEvaluation).status)
+            || stage(&report, MaterializationStageName::QualityGateEvaluation).status
+                == EvidenceStageStatus::CompletedWithWarnings
+    );
+    assert!(stage_completed(
+        stage(&report, MaterializationStageName::DraftWrite).status
+    ));
+
+    let factors = repos
+        .control_factors
+        .list_factors_by_run(&manifest.run_id)
+        .await
+        .expect("recorded factors");
+    assert!(
+        factors
+            .iter()
+            .any(|factor| factor.status == FactorStatus::Candidate),
+        "phase 5.4 smoke expects at least one candidate factor"
+    );
+    assert!(
+        factors
+            .iter()
+            .any(|factor| factor.status == FactorStatus::ReportOnly),
+        "phase 5.4 smoke expects incomplete evidence to remain report-only"
+    );
 }
 
 fn smoke_runner(repos: &SmokeRepositories) -> MaterializationRunner {

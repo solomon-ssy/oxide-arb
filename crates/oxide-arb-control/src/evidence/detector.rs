@@ -66,10 +66,18 @@ impl DetectorEvidenceReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DetectorBucketRef {
+    pub category: MarketCategory,
+    pub price_zone: PriceZone,
+    pub duration_bucket: DurationBucket,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DetectorDetectionRef {
     pub opportunity_id: OpportunityId,
     pub market_id: MarketId,
     pub detected_at: DateTime<Utc>,
+    pub bucket: DetectorBucketRef,
     pub replay: DetectorReplayRef,
     pub mismatches: DetectorMismatchRef,
     pub score_delta: Option<i64>,
@@ -116,6 +124,11 @@ pub fn build(
                 opportunity_id: row.opportunity_id.clone(),
                 market_id: row.market_id.clone(),
                 detected_at,
+                bucket: DetectorBucketRef {
+                    category: MarketCategory::from(row.category),
+                    price_zone: PriceZone::from(row.price_zone),
+                    duration_bucket: DurationBucket::from(row.duration_bucket),
+                },
                 replay: DetectorReplayRef {
                     has_reconstructed_book,
                     materialized_detected,

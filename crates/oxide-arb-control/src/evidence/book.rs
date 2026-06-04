@@ -52,7 +52,7 @@ impl BookReconstructionReport {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MarketBookReconstruction {
-    pub market_id: oxide_arb_models::types::MarketId,
+    pub market_id: MarketId,
     pub yes_token_id: TokenId,
     pub no_token_id: TokenId,
     pub settlement_deadline: Option<DateTime<Utc>>,
@@ -690,7 +690,7 @@ fn percentile(values: &mut [u64], pct: usize) -> u64 {
 mod tests {
     use chrono::{TimeZone, Utc};
     use oxide_arb_models::{
-        clickhouse::{ChPrice, ChSchemaVersion, ChShares},
+        clickhouse::{BookSnapshotRow, ChPrice, ChSchemaVersion, ChShares, TickEventL2Row},
         domain::control_factor::{
             EvidenceSourceBundle, InputResolutionReport, MarketReplayContext,
             PointInTimeInputManifest, QueryFingerprint, TimeWindowSpec,
@@ -886,8 +886,8 @@ mod tests {
         ]
     }
 
-    fn snapshot(token_id: &str, event_time: i64) -> oxide_arb_models::clickhouse::BookSnapshotRow {
-        oxide_arb_models::clickhouse::BookSnapshotRow {
+    fn snapshot(token_id: &str, event_time: i64) -> BookSnapshotRow {
+        BookSnapshotRow {
             token_id: TokenId::new(token_id),
             market_id: Some(MarketId::new("market")),
             snapshot_reason: ChSnapshotReason::Periodic,
@@ -908,7 +908,7 @@ mod tests {
         }
     }
 
-    fn l2(token_id: &str, event_time: i64) -> oxide_arb_models::clickhouse::TickEventL2Row {
+    fn l2(token_id: &str, event_time: i64) -> TickEventL2Row {
         l2_with(
             token_id,
             event_time,
@@ -922,8 +922,8 @@ mod tests {
         event_time: i64,
         bids: &[(rust_decimal::Decimal, rust_decimal::Decimal)],
         asks: &[(rust_decimal::Decimal, rust_decimal::Decimal)],
-    ) -> oxide_arb_models::clickhouse::TickEventL2Row {
-        oxide_arb_models::clickhouse::TickEventL2Row {
+    ) -> TickEventL2Row {
+        TickEventL2Row {
             token_id: TokenId::new(token_id),
             market_id: Some(MarketId::new("market")),
             event_type: ChBookEventType::Delta,

@@ -7,23 +7,31 @@ use chrono::{DateTime, Duration, Utc};
 use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::{
     clickhouse::{
-        BookSnapshotRow, CalibrationSnapshotRow, ChBps, ChDecimal64, ChPrice, ChProbability,
-        ChSchemaVersion, ChShares, ChUsd, OpportunityAuditRow, OpportunityDetectionRow,
-        TickEventL2Row,
+        BookSnapshotRow, CalibrationSnapshotRow, ChBps, ChDecimal64, ChFactor, ChPrice,
+        ChProbability, ChSchemaVersion, ChShares, ChUsd, OpportunityAuditRow,
+        OpportunityDetectionRow, TickEventL2Row,
     },
     config::{CalibrationConfig, EndgameDetectionConfig},
     domain::{
-        BalanceSnapshotInfo, DetectionRuntimeConfig, ExecutionRuntimeConfig, MarketPitSnapshotInfo,
-        OperatorRuntimeConfig, PositionInfo, PotentialLossInfo, ReconciliationReportInfo,
-        RiskAuditEventInfo, RiskLimitRuntimeConfig, RuntimeConfigDocument,
-        RuntimeConfigVersionInfo, SizingRuntimeConfig, TradeInfo,
+        BalanceSnapshotInfo, ControlFactorStageReportInfo, DetectionRuntimeConfig,
+        ExecutionRuntimeConfig, MarketPitSnapshotInfo, NewBalanceSnapshot, NewPotentialLoss,
+        NewReconciliationReport, NewRiskAuditEvent, NewRuntimeConfigActivation,
+        NewRuntimeConfigVersion, NewTokenBalanceSnapshot, OperatorRuntimeConfig, PositionInfo,
+        PotentialLossInfo, ReconciliationReportInfo, ResolvePotentialLoss, RiskAuditEventInfo,
+        RiskLimitRuntimeConfig, RuntimeConfigActivationInfo, RuntimeConfigDocument,
+        RuntimeConfigVersionInfo, SizingRuntimeConfig, TokenBalanceSnapshotInfo, TradeInfo,
         control_factor::{
-            DataRequirements, MarketFilterSpec, MaterializationRunManifest, QualityGatePolicyRef,
-            ReplayAccountScope, RequiredInputDomain, RunTrigger, RuntimeConfigRef,
-            SimulationConfig, TimeWindowSpec,
+            AcquireMaterializationRunOutcome, CancelMaterializationRunOutcome,
+            ControlFactorAuditEventInfo, ControlFactorMaterializationRunInfo,
+            ControlFactorPublicationInfo, ControlFactorValueInfo, DataRequirements,
+            EnqueueMaterializationRunOptions, EnqueueMaterializationRunOutcome, MarketFilterSpec,
+            MaterializationRunManifest, MaterializationRunStatusPatch, NewControlFactorAuditEvent,
+            NewControlFactorMaterializationRun, NewControlFactorPublication,
+            NewControlFactorStageReport, NewControlFactorValue, QualityGatePolicy,
+            ReplayAccountScope, RequiredInputDomain, RunTransitionOutcome, RunTrigger,
+            RuntimeConfigRef, SimulationConfig, TimeWindowSpec,
         },
-        settlement::NewResolutionEvent,
-        settlement::ResolutionEventInfo,
+        settlement::{NewResolutionEvent, ResolutionEventInfo},
     },
     enums::{
         clickhouse::{
@@ -35,15 +43,18 @@ use oxide_arb_models::{
             ExecutionMode, LedgerStatus, MarketCategory, PositionStatus, RedeemStatus,
             SettlementAccountingStatus, SettlementTrigger, Side, TradeState,
         },
-        control_factor::{ControlFactorType, MaterializationOutputPolicy, MaterializationRunKind},
+        control_factor::{
+            ControlFactorType, FactorStatus, MaterializationOutputPolicy, MaterializationRunKind,
+            MaterializationRunStatus, MaterializationStageName, PublicationMode,
+        },
         fact::BalanceSnapshotSource,
         risk::{ReconciliationStatus, RiskAuditEventType},
         runtime_config::RuntimeConfigVersionSource,
     },
     types::{
-        BalanceSnapshotId, EventId, ExecutionId, LedgerId, MarketId, OpportunityId, PositionId,
-        Price, ReservationId, RuntimeConfigVersionId, Shares, TokenBalanceSnapshotId, TokenId,
-        TradeId, Usd,
+        BalanceSnapshotId, ControlFactorId, EventId, ExecutionId, FactorPublicationId, LedgerId,
+        MarketId, MaterializationRunId, OpportunityId, PositionId, Price, ReservationId,
+        RuntimeConfigVersionId, Shares, TokenBalanceSnapshotId, TokenId, TradeId, Usd,
     },
 };
 use oxide_arb_repository::traits::{
@@ -83,7 +94,7 @@ pub fn smoke_window() -> TimeWindowSpec {
 pub fn smoke_manifest() -> MaterializationRunManifest {
     let as_of = smoke_window().to;
     MaterializationRunManifest {
-        run_id: oxide_arb_models::types::MaterializationRunId::new_v7(),
+        run_id: MaterializationRunId::new_v7(),
         run_kind: MaterializationRunKind::Scheduled,
         trigger: RunTrigger::Scheduled {
             schedule_id: "phase5.3-smoke".to_owned(),
@@ -140,9 +151,7 @@ pub fn smoke_manifest() -> MaterializationRunManifest {
             config_hash: "blake3:smoke_cfg".to_owned(),
         },
         simulation_config: smoke_simulation_config(),
-        quality_gate_policy: QualityGatePolicyRef {
-            policy_hash: "blake3:smoke_gate".to_owned(),
-        },
+        quality_gate_policy: QualityGatePolicy::smoke_acceptance(),
         output_policy: MaterializationOutputPolicy::NoFactorOutput,
         code_git_sha: "smoke-local".to_owned(),
         created_by: "phase5.3-smoke".to_owned(),
@@ -374,15 +383,15 @@ pub struct SmokeRuntimeConfigRepository;
 impl RuntimeConfigVersionRepository for SmokeRuntimeConfigRepository {
     async fn create_version(
         &self,
-        _version: oxide_arb_models::domain::NewRuntimeConfigVersion,
+        _version: NewRuntimeConfigVersion,
     ) -> Result<RuntimeConfigVersionInfo, StorageError> {
         Err(StorageError::Codec("not implemented".into()))
     }
 
     async fn activate_version(
         &self,
-        _activation: oxide_arb_models::domain::NewRuntimeConfigActivation,
-    ) -> Result<oxide_arb_models::domain::RuntimeConfigActivationInfo, StorageError> {
+        _activation: NewRuntimeConfigActivation,
+    ) -> Result<RuntimeConfigActivationInfo, StorageError> {
         Err(StorageError::Codec("not implemented".into()))
     }
 
@@ -414,14 +423,14 @@ impl RuntimeConfigVersionRepository for SmokeRuntimeConfigRepository {
     async fn list_activations(
         &self,
         _limit: u64,
-    ) -> Result<Vec<oxide_arb_models::domain::RuntimeConfigActivationInfo>, StorageError> {
+    ) -> Result<Vec<RuntimeConfigActivationInfo>, StorageError> {
         Ok(Vec::new())
     }
 }
 
 pub struct SmokeBalanceRepository {
     balance: BalanceSnapshotInfo,
-    token_balances: Vec<oxide_arb_models::domain::TokenBalanceSnapshotInfo>,
+    token_balances: Vec<TokenBalanceSnapshotInfo>,
 }
 
 impl SmokeBalanceRepository {
@@ -461,15 +470,15 @@ impl SmokeBalanceRepository {
 impl BalanceSnapshotRepository for SmokeBalanceRepository {
     async fn create_balance_snapshot(
         &self,
-        _snapshot: oxide_arb_models::domain::NewBalanceSnapshot,
+        _snapshot: NewBalanceSnapshot,
     ) -> Result<BalanceSnapshotInfo, StorageError> {
         Err(StorageError::Codec("not implemented".into()))
     }
 
     async fn create_token_balance_snapshots(
         &self,
-        _snapshots: Vec<oxide_arb_models::domain::NewTokenBalanceSnapshot>,
-    ) -> Result<Vec<oxide_arb_models::domain::TokenBalanceSnapshotInfo>, StorageError> {
+        _snapshots: Vec<NewTokenBalanceSnapshot>,
+    ) -> Result<Vec<TokenBalanceSnapshotInfo>, StorageError> {
         Err(StorageError::Codec("not implemented".into()))
     }
 
@@ -491,7 +500,7 @@ impl BalanceSnapshotRepository for SmokeBalanceRepository {
         _market_id: &MarketId,
         _token_id: &TokenId,
         _before: DateTime<Utc>,
-    ) -> Result<Option<oxide_arb_models::domain::TokenBalanceSnapshotInfo>, StorageError> {
+    ) -> Result<Option<TokenBalanceSnapshotInfo>, StorageError> {
         Ok(None)
     }
 
@@ -501,7 +510,7 @@ impl BalanceSnapshotRepository for SmokeBalanceRepository {
         market_ids: &[MarketId],
         token_ids: &[TokenId],
         before: DateTime<Utc>,
-    ) -> Result<Vec<oxide_arb_models::domain::TokenBalanceSnapshotInfo>, StorageError> {
+    ) -> Result<Vec<TokenBalanceSnapshotInfo>, StorageError> {
         if holder_address != SMOKE_HOLDER {
             return Ok(Vec::new());
         }
@@ -542,10 +551,7 @@ impl SmokePotentialLossRepository {
 
 #[async_trait]
 impl PotentialLossRepository for SmokePotentialLossRepository {
-    async fn create(
-        &self,
-        _entry: oxide_arb_models::domain::NewPotentialLoss,
-    ) -> Result<PotentialLossInfo, StorageError> {
+    async fn create(&self, _entry: NewPotentialLoss) -> Result<PotentialLossInfo, StorageError> {
         Err(StorageError::Codec("not implemented".into()))
     }
 
@@ -588,7 +594,7 @@ impl PotentialLossRepository for SmokePotentialLossRepository {
     async fn resolve(
         &self,
         _ledger_id: &LedgerId,
-        _command: oxide_arb_models::domain::ResolvePotentialLoss,
+        _command: ResolvePotentialLoss,
     ) -> Result<PotentialLossInfo, StorageError> {
         Err(StorageError::Codec("not implemented".into()))
     }
@@ -623,17 +629,11 @@ impl SmokeRiskAuditRepository {
 
 #[async_trait]
 impl RiskAuditRepository for SmokeRiskAuditRepository {
-    async fn create(
-        &self,
-        _event: oxide_arb_models::domain::NewRiskAuditEvent,
-    ) -> Result<(), StorageError> {
+    async fn create(&self, _event: NewRiskAuditEvent) -> Result<(), StorageError> {
         Ok(())
     }
 
-    async fn create_batch(
-        &self,
-        _events: Vec<oxide_arb_models::domain::NewRiskAuditEvent>,
-    ) -> Result<(), StorageError> {
+    async fn create_batch(&self, _events: Vec<NewRiskAuditEvent>) -> Result<(), StorageError> {
         Ok(())
     }
 
@@ -677,10 +677,7 @@ impl SmokeReconciliationRepository {
 
 #[async_trait]
 impl ReconciliationRepository for SmokeReconciliationRepository {
-    async fn create(
-        &self,
-        _report: oxide_arb_models::domain::NewReconciliationReport,
-    ) -> Result<(), StorageError> {
+    async fn create(&self, _report: NewReconciliationReport) -> Result<(), StorageError> {
         Ok(())
     }
 
@@ -773,89 +770,74 @@ impl ResolutionEventRepository for SmokeResolutionEventRepository {
 
 #[derive(Default)]
 pub struct SmokeControlFactorRepository {
-    stage_reports:
-        Mutex<Vec<oxide_arb_models::domain::control_factor::NewControlFactorStageReport>>,
+    stage_reports: Mutex<Vec<NewControlFactorStageReport>>,
+    factors: Mutex<Vec<ControlFactorValueInfo>>,
+    audit_events: Mutex<Vec<NewControlFactorAuditEvent>>,
 }
 
 #[async_trait]
 impl ControlFactorRepository for SmokeControlFactorRepository {
     async fn enqueue_materialization_run(
         &self,
-        _run: oxide_arb_models::domain::control_factor::NewControlFactorMaterializationRun,
-        _options: oxide_arb_models::domain::control_factor::EnqueueMaterializationRunOptions,
-    ) -> Result<
-        oxide_arb_models::domain::control_factor::EnqueueMaterializationRunOutcome,
-        StorageError,
-    > {
+        _run: NewControlFactorMaterializationRun,
+        _options: EnqueueMaterializationRunOptions,
+    ) -> Result<EnqueueMaterializationRunOutcome, StorageError> {
         Err(StorageError::Codec("not implemented".into()))
     }
 
     async fn load_materialization_run(
         &self,
-        _run_id: &oxide_arb_models::types::MaterializationRunId,
-    ) -> Result<
-        Option<oxide_arb_models::domain::control_factor::ControlFactorMaterializationRunInfo>,
-        StorageError,
-    > {
+        _run_id: &MaterializationRunId,
+    ) -> Result<Option<ControlFactorMaterializationRunInfo>, StorageError> {
         Ok(None)
     }
 
     async fn find_materialization_run_by_dedupe_key(
         &self,
         _dedupe_key: &str,
-    ) -> Result<
-        Option<oxide_arb_models::domain::control_factor::ControlFactorMaterializationRunInfo>,
-        StorageError,
-    > {
+    ) -> Result<Option<ControlFactorMaterializationRunInfo>, StorageError> {
         Ok(None)
     }
 
     async fn try_acquire_materialization_run(
         &self,
-        _run_id: &oxide_arb_models::types::MaterializationRunId,
+        _run_id: &MaterializationRunId,
         _started_at: DateTime<Utc>,
-    ) -> Result<
-        oxide_arb_models::domain::control_factor::AcquireMaterializationRunOutcome,
-        StorageError,
-    > {
+    ) -> Result<AcquireMaterializationRunOutcome, StorageError> {
         Err(StorageError::Codec("not implemented".into()))
     }
 
     async fn retry_materialization_run(
         &self,
-        _run_id: &oxide_arb_models::types::MaterializationRunId,
-    ) -> Result<oxide_arb_models::domain::control_factor::RunTransitionOutcome, StorageError> {
+        _run_id: &MaterializationRunId,
+    ) -> Result<RunTransitionOutcome, StorageError> {
         Err(StorageError::Codec("not implemented".into()))
     }
 
     async fn transition_materialization_run(
         &self,
-        _run_id: &oxide_arb_models::types::MaterializationRunId,
-        _expected_from: oxide_arb_models::enums::control_factor::MaterializationRunStatus,
-        _target: oxide_arb_models::enums::control_factor::MaterializationRunStatus,
-        _patch: oxide_arb_models::domain::control_factor::MaterializationRunStatusPatch,
-    ) -> Result<oxide_arb_models::domain::control_factor::RunTransitionOutcome, StorageError> {
+        _run_id: &MaterializationRunId,
+        _expected_from: MaterializationRunStatus,
+        _target: MaterializationRunStatus,
+        _patch: MaterializationRunStatusPatch,
+    ) -> Result<RunTransitionOutcome, StorageError> {
         Err(StorageError::Codec("not implemented".into()))
     }
 
     async fn cancel_materialization_run(
         &self,
-        _run_id: &oxide_arb_models::types::MaterializationRunId,
+        _run_id: &MaterializationRunId,
         _reason: &str,
         _cancelled_at: DateTime<Utc>,
-    ) -> Result<
-        oxide_arb_models::domain::control_factor::CancelMaterializationRunOutcome,
-        StorageError,
-    > {
+    ) -> Result<CancelMaterializationRunOutcome, StorageError> {
         Err(StorageError::Codec("not implemented".into()))
     }
 
     async fn upsert_stage_report(
         &self,
-        report: oxide_arb_models::domain::control_factor::NewControlFactorStageReport,
-    ) -> Result<oxide_arb_models::domain::control_factor::ControlFactorStageReportInfo, StorageError>
-    {
-        let info = oxide_arb_models::domain::control_factor::ControlFactorStageReportInfo {
+        report: NewControlFactorStageReport,
+    ) -> Result<ControlFactorStageReportInfo, StorageError> {
+        let info = ControlFactorStageReportInfo {
             stage_report_id: report.stage_report_id.clone(),
             materialization_run_id: report.materialization_run_id.clone(),
             stage_name: report.stage_name,
@@ -879,70 +861,108 @@ impl ControlFactorRepository for SmokeControlFactorRepository {
 
     async fn load_stage_report(
         &self,
-        _run_id: &oxide_arb_models::types::MaterializationRunId,
-        _stage_name: oxide_arb_models::enums::control_factor::MaterializationStageName,
-    ) -> Result<
-        Option<oxide_arb_models::domain::control_factor::ControlFactorStageReportInfo>,
-        StorageError,
-    > {
-        Ok(None)
+        run_id: &MaterializationRunId,
+        stage_name: MaterializationStageName,
+    ) -> Result<Option<ControlFactorStageReportInfo>, StorageError> {
+        Ok(self
+            .list_stage_reports(run_id)
+            .await?
+            .into_iter()
+            .find(|report| report.stage_name == stage_name))
     }
 
     async fn list_stage_reports(
         &self,
-        _run_id: &oxide_arb_models::types::MaterializationRunId,
-    ) -> Result<
-        Vec<oxide_arb_models::domain::control_factor::ControlFactorStageReportInfo>,
-        StorageError,
-    > {
-        Ok(Vec::new())
+        run_id: &MaterializationRunId,
+    ) -> Result<Vec<ControlFactorStageReportInfo>, StorageError> {
+        Ok(self
+            .stage_reports
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|report| &report.materialization_run_id == run_id)
+            .map(stage_report_info_from_new)
+            .collect())
     }
 
     async fn create_factor(
         &self,
-        _factor: oxide_arb_models::domain::control_factor::NewControlFactorValue,
-    ) -> Result<oxide_arb_models::domain::control_factor::ControlFactorValueInfo, StorageError>
-    {
-        Err(StorageError::Codec("not implemented".into()))
+        factor: NewControlFactorValue,
+    ) -> Result<ControlFactorValueInfo, StorageError> {
+        let info = factor_info_from_new(factor);
+        self.factors.lock().unwrap().push(info.clone());
+        Ok(info)
+    }
+
+    async fn load_factor(
+        &self,
+        factor_id: &ControlFactorId,
+    ) -> Result<Option<ControlFactorValueInfo>, StorageError> {
+        Ok(self
+            .factors
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|factor| &factor.factor_id == factor_id)
+            .cloned())
+    }
+
+    async fn list_factors_by_run(
+        &self,
+        run_id: &MaterializationRunId,
+    ) -> Result<Vec<ControlFactorValueInfo>, StorageError> {
+        Ok(self
+            .factors
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|factor| {
+                factor
+                    .to_typed()
+                    .is_ok_and(|typed| &typed.evidence.materialization_run_id == run_id)
+            })
+            .cloned()
+            .collect())
     }
 
     async fn transition_factor(
         &self,
-        _factor_id: &oxide_arb_models::types::ControlFactorId,
-        _status: oxide_arb_models::enums::control_factor::FactorStatus,
-    ) -> Result<
-        Option<oxide_arb_models::domain::control_factor::ControlFactorValueInfo>,
-        StorageError,
-    > {
+        _factor_id: &ControlFactorId,
+        _status: FactorStatus,
+    ) -> Result<Option<ControlFactorValueInfo>, StorageError> {
         Ok(None)
     }
 
     async fn create_publication(
         &self,
-        _publication: oxide_arb_models::domain::control_factor::NewControlFactorPublication,
-    ) -> Result<oxide_arb_models::domain::control_factor::ControlFactorPublicationInfo, StorageError>
-    {
+        _publication: NewControlFactorPublication,
+    ) -> Result<ControlFactorPublicationInfo, StorageError> {
         Err(StorageError::Codec("not implemented".into()))
+    }
+
+    async fn load_publication(
+        &self,
+        _publication_id: &FactorPublicationId,
+    ) -> Result<Option<ControlFactorPublicationInfo>, StorageError> {
+        Ok(None)
     }
 
     async fn activate_publication(
         &self,
-        _publication_id: &oxide_arb_models::types::FactorPublicationId,
+        _publication_id: &FactorPublicationId,
         _actor: &str,
         _reason: &str,
-    ) -> Result<oxide_arb_models::domain::control_factor::ControlFactorPublicationInfo, StorageError>
-    {
+    ) -> Result<ControlFactorPublicationInfo, StorageError> {
         Err(StorageError::Codec("not implemented".into()))
     }
 
     async fn rollback_publication(
         &self,
-        _active_publication_id: &oxide_arb_models::types::FactorPublicationId,
-        _target_publication_id: &oxide_arb_models::types::FactorPublicationId,
+        _active_publication_id: &FactorPublicationId,
+        _target_publication_id: &FactorPublicationId,
         _actor: &str,
         _reason: &str,
-    ) -> Result<oxide_arb_models::domain::control_factor::ControlFactorPublicationInfo, StorageError>
-    {
+    ) -> Result<ControlFactorPublicationInfo, StorageError> {
         Err(StorageError::Codec("not implemented".into()))
     }
 
@@ -952,20 +972,66 @@ impl ControlFactorRepository for SmokeControlFactorRepository {
 
     async fn append_audit_event(
         &self,
-        _event: oxide_arb_models::domain::control_factor::NewControlFactorAuditEvent,
-    ) -> Result<oxide_arb_models::domain::control_factor::ControlFactorAuditEventInfo, StorageError>
-    {
-        Err(StorageError::Codec("not implemented".into()))
+        event: NewControlFactorAuditEvent,
+    ) -> Result<ControlFactorAuditEventInfo, StorageError> {
+        self.audit_events.lock().unwrap().push(event.clone());
+        Ok(ControlFactorAuditEventInfo {
+            id: i64::try_from(self.audit_events.lock().unwrap().len()).unwrap_or(i64::MAX),
+            event_type: event.event_type,
+            factor_id: event.factor_id,
+            publication_id: event.publication_id,
+            actor: event.actor,
+            reason: event.reason,
+            payload: event.payload,
+            created_at: Utc::now(),
+        })
     }
 
     async fn load_active_publication(
         &self,
-        _mode: oxide_arb_models::enums::control_factor::PublicationMode,
-    ) -> Result<
-        Option<oxide_arb_models::domain::control_factor::ControlFactorPublicationInfo>,
-        StorageError,
-    > {
+        _mode: PublicationMode,
+    ) -> Result<Option<ControlFactorPublicationInfo>, StorageError> {
         Ok(None)
+    }
+}
+
+fn stage_report_info_from_new(
+    report: &NewControlFactorStageReport,
+) -> ControlFactorStageReportInfo {
+    ControlFactorStageReportInfo {
+        stage_report_id: report.stage_report_id.clone(),
+        materialization_run_id: report.materialization_run_id.clone(),
+        stage_name: report.stage_name,
+        status: report.status,
+        started_at: report.started_at,
+        finished_at: report.finished_at,
+        input_artifact_hashes: report.input_artifact_hashes.clone(),
+        output_artifact_hash: report.output_artifact_hash.clone(),
+        coverage: report.coverage.clone(),
+        metrics: report.metrics.clone(),
+        records_read: report.records_read,
+        records_written: report.records_written,
+        warnings: report.warnings.clone(),
+        errors: report.errors.clone(),
+        query_fingerprints: report.query_fingerprints.clone(),
+        created_at: Utc::now(),
+    }
+}
+
+fn factor_info_from_new(factor: NewControlFactorValue) -> ControlFactorValueInfo {
+    ControlFactorValueInfo {
+        factor_id: factor.factor_id,
+        factor_type: factor.factor_type,
+        dimensions: factor.dimensions,
+        payload: factor.payload,
+        evidence: factor.evidence,
+        status: factor.status,
+        generated_at: factor.generated_at,
+        expires_at: factor.expires_at,
+        owner: factor.owner,
+        schema_version: factor.schema_version,
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
     }
 }
 
@@ -975,8 +1041,8 @@ fn token_balance_snapshot(
     side: Side,
     observed_at: DateTime<Utc>,
     window_to: DateTime<Utc>,
-) -> oxide_arb_models::domain::TokenBalanceSnapshotInfo {
-    oxide_arb_models::domain::TokenBalanceSnapshotInfo {
+) -> TokenBalanceSnapshotInfo {
+    TokenBalanceSnapshotInfo {
         token_balance_snapshot_id: TokenBalanceSnapshotId::new_v7(),
         holder_address: SMOKE_HOLDER.to_owned(),
         market_id: market_id.clone(),
@@ -1086,10 +1152,10 @@ fn detection_row(
         confidence: ChProbability::from(dec!(0.95)),
         fill_probability: Some(ChProbability::from(dec!(0.95))),
         score: Some(1),
-        urgency_factor: Some(oxide_arb_models::clickhouse::ChFactor::from(dec!(1))),
-        category_weight: Some(oxide_arb_models::clickhouse::ChFactor::from(dec!(1))),
-        staleness_discount: Some(oxide_arb_models::clickhouse::ChFactor::from(dec!(1))),
-        depth_used_pct: oxide_arb_models::clickhouse::ChFactor::from(dec!(0.25)),
+        urgency_factor: Some(ChFactor::from(dec!(1))),
+        category_weight: Some(ChFactor::from(dec!(1))),
+        staleness_discount: Some(ChFactor::from(dec!(1))),
+        depth_used_pct: ChFactor::from(dec!(0.25)),
         convergence_secs: 2,
         category: ChMarketCategory::Politics,
         price_zone: ChPriceZone::Z95,
