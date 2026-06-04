@@ -580,6 +580,8 @@ fn runtime_config_document(settings: &Settings) -> RuntimeConfigDocument {
             )
             .unwrap_or(u32::MAX),
             convergence_threshold: settings.detection.endgame.high_threshold,
+            endgame: Some(settings.detection.endgame.clone()),
+            calibration: Some(settings.detection.calibration.clone()),
         },
         execution: ExecutionRuntimeConfig {
             max_slippage_bps: settings

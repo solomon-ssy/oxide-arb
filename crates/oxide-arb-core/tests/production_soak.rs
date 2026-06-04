@@ -25,7 +25,7 @@ use oxide_arb_models::{
     },
     types::{EventId, MarketId, Price, Shares, TokenId, Usd},
 };
-use oxide_arb_test_support::mock_event::MockEventSource;
+use oxide_arb_test_support::mocks::MockEventSource;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use std::{

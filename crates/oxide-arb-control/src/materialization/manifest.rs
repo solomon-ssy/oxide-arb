@@ -13,7 +13,7 @@ use oxide_arb_models::{
 };
 
 use crate::materialization::{
-    DedupeKeyHasher, ManifestHasher, MaterializationError, MaterializationResult,
+    ArtifactHasher, DedupeKeyHasher, ManifestHasher, MaterializationError, MaterializationResult,
 };
 
 pub struct ManifestBuilder {
@@ -173,7 +173,7 @@ impl TryFrom<&SealedMaterializationManifest> for NewControlFactorMaterialization
                 .map_err(|error| MaterializationError::Codec(error.to_string()))?,
             runtime_config_ref: serde_json::to_value(&sealed.manifest.runtime_config_ref)
                 .map_err(|error| MaterializationError::Codec(error.to_string()))?,
-            simulation_config_hash: sealed.manifest.simulation_config.config_hash.clone(),
+            simulation_config_hash: ArtifactHasher::compute(&sealed.manifest.simulation_config)?.0,
             quality_gate_policy_hash: sealed.manifest.quality_gate_policy.policy_hash.clone(),
             output_policy: sealed.manifest.output_policy,
             manifest: serde_json::to_value(&sealed.manifest)
@@ -233,9 +233,7 @@ mod tests {
                 version_id: RuntimeConfigVersionId::new("rcv_test"),
                 config_hash: "sha256:cfg".into(),
             },
-            simulation_config: SimulationConfig {
-                config_hash: "blake3:sim".into(),
-            },
+            simulation_config: SimulationConfig::production_default(),
             quality_gate_policy: QualityGatePolicyRef {
                 policy_hash: "blake3:gate".into(),
             },

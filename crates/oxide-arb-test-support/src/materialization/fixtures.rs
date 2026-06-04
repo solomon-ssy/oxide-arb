@@ -27,7 +27,7 @@ use oxide_arb_models::{
 };
 use oxide_arb_repository::traits::{MarketRepository, RuntimeConfigVersionRepository};
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct FakeMarketRepository {
     pub snapshots: Vec<MarketPitSnapshotInfo>,
     pub current: Vec<MarketInfo>,
@@ -67,9 +67,7 @@ pub fn materialization_manifest(
             version_id: RuntimeConfigVersionId::new("rcv_test"),
             config_hash: "blake3:cfg".to_owned(),
         },
-        simulation_config: SimulationConfig {
-            config_hash: "blake3:sim".to_owned(),
-        },
+        simulation_config: SimulationConfig::production_default(),
         quality_gate_policy: QualityGatePolicyRef {
             policy_hash: "blake3:gate".to_owned(),
         },

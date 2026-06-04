@@ -1,11 +1,15 @@
 use chrono::{DateTime, Utc};
 use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::{
-    domain::{NewTrade, ReportTradeStats, TradeInfo, TradeObservation},
+    domain::{
+        NewTrade, ReportTradeStats, TradeInfo, TradeObservation, evidence::EvidenceQueryResult,
+    },
     enums::common::{TradeBusinessOutcome, TradeState},
     types::{MarketId, TradeId},
 };
 use std::collections::HashMap;
+
+use crate::traits::timeseries::evidence_query_result;
 
 #[async_trait::async_trait]
 pub trait TradeRepository: Send + Sync {
@@ -84,6 +88,22 @@ pub trait TradeRepository: Send + Sync {
         start: DateTime<Utc>,
         end: DateTime<Utc>,
     ) -> Result<Vec<TradeInfo>, StorageError>;
+
+    async fn find_between_evidence(
+        &self,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> Result<EvidenceQueryResult<TradeInfo>, StorageError> {
+        let rows = self.find_between(start, end).await?;
+        evidence_query_result(
+            "TradeRepository",
+            "find_between",
+            &(start, end),
+            vec!["created_at ASC".to_owned(), "trade_id ASC".to_owned()],
+            Some(1),
+            rows,
+        )
+    }
 
     /// Count trades grouped by `business_outcome` (NULL/in-flight rows excluded).
     async fn count_by_outcome(

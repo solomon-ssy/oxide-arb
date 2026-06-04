@@ -8,7 +8,7 @@ use oxide_arb_models::{
     domain::{
         MarketInfo, MarketPitSnapshotInfo,
         control_factor::{
-            InputFallbackPolicy, InputResolutionReport, MarketReplayContext,
+            EvidenceSourceBundle, InputFallbackPolicy, InputResolutionReport, MarketReplayContext,
             MaterializationRunManifest, MissingPointInTimeInput, PointInTimeInputManifest,
             PointInTimeInputSource, QueryFingerprint, RequiredInputDomain, RuntimeConfigRef,
             StageCoverageReport, StageWarning,
@@ -19,8 +19,9 @@ use oxide_arb_models::{
 };
 use oxide_arb_repository::traits::{
     BalanceSnapshotRepository, EventRepository, EvidenceTimeseriesRepository, MarketRepository,
-    PositionRepository, ReconciliationRepository, ResolutionEventRepository,
-    RuntimeConfigVersionRepository, TimeWindow, TradeRepository,
+    PositionRepository, PotentialLossRepository, ReconciliationRepository,
+    ResolutionEventRepository, RiskAuditRepository, RuntimeConfigVersionRepository, TimeWindow,
+    TradeRepository,
 };
 
 use crate::materialization::{ArtifactHasher, MaterializationResult};
@@ -34,6 +35,8 @@ pub struct ResolverRepositories {
     pub balances: Option<Arc<dyn BalanceSnapshotRepository>>,
     pub trades: Option<Arc<dyn TradeRepository>>,
     pub positions: Option<Arc<dyn PositionRepository>>,
+    pub potential_loss: Option<Arc<dyn PotentialLossRepository>>,
+    pub risk_audit: Option<Arc<dyn RiskAuditRepository>>,
     pub reconciliation: Option<Arc<dyn ReconciliationRepository>>,
     pub resolution_events: Option<Arc<dyn ResolutionEventRepository>>,
 }
@@ -61,6 +64,8 @@ impl PointInTimeResolver {
         Self::resolve_l2_coverage_requirement(manifest, &mut state);
         self.resolve_trades(manifest, &mut state).await?;
         self.resolve_positions(manifest, &mut state).await?;
+        self.resolve_potential_loss(manifest, &mut state).await?;
+        self.resolve_risk_audit(manifest, &mut state).await?;
         self.resolve_reconciliation(manifest, &mut state).await?;
         self.resolve_settlement_truth(manifest, &mut state).await?;
         self.resolve_balance_domains(manifest, &mut state).await?;
@@ -79,6 +84,7 @@ impl PointInTimeResolver {
             window: manifest.window,
             manifest: pit_manifest,
             market_contexts: state.market_contexts,
+            source_bundle: state.source_bundle,
         })
     }
 
@@ -95,19 +101,27 @@ impl PointInTimeResolver {
             );
             return Ok(());
         };
-        let row = match &manifest.runtime_config_ref {
-            RuntimeConfigRef::ActiveAt { at } => repo.load_active_at(*at).await?,
-            RuntimeConfigRef::Version { version_id, .. } => repo.load_version(version_id).await?,
-            RuntimeConfigRef::Hash { config_hash } => repo.load_by_hash(config_hash).await?,
+        let result = match &manifest.runtime_config_ref {
+            RuntimeConfigRef::ActiveAt { at } => repo.load_active_at_evidence(*at).await?,
+            RuntimeConfigRef::Version { version_id, .. } => {
+                repo.load_version_evidence(version_id).await?
+            }
+            RuntimeConfigRef::Hash { config_hash } => {
+                repo.load_by_hash_evidence(config_hash).await?
+            }
         };
-        match row {
-            Some(version) => state.source(
-                RequiredInputDomain::RuntimeConfig,
-                "runtime_config_version",
-                "RuntimeConfigVersionRepository",
-                1,
-                Some(version.config_hash),
-            ),
+        match result.rows.into_iter().next() {
+            Some(version) => {
+                state.source_with_fingerprint(
+                    RequiredInputDomain::RuntimeConfig,
+                    "runtime_config_version",
+                    "RuntimeConfigVersionRepository",
+                    1,
+                    Some(version.config_hash.clone()),
+                    result.fingerprint,
+                );
+                state.source_bundle.runtime_config = Some(version);
+            }
             None => state.missing(
                 RequiredInputDomain::RuntimeConfig,
                 MaterializationErrorCode::InputPitConfigMissing,
@@ -143,9 +157,10 @@ impl PointInTimeResolver {
             );
             return Ok(());
         }
-        let snapshots = repo
-            .latest_pit_snapshots_before(&manifest.markets.market_ids, state.as_of)
+        let snapshots_result = repo
+            .latest_pit_snapshots_before_evidence(&manifest.markets.market_ids, state.as_of)
             .await?;
+        let snapshots = snapshots_result.rows;
         let snapshot_ids = snapshots
             .iter()
             .map(|snapshot| snapshot.market_id.clone())
@@ -157,11 +172,14 @@ impl PointInTimeResolver {
             .filter(|market_id| !snapshot_ids.contains(*market_id))
             .cloned()
             .collect::<Vec<_>>();
-        let current_rows = if missing_snapshot_ids.is_empty() {
-            Vec::new()
+        let current_result = if missing_snapshot_ids.is_empty() {
+            None
         } else {
-            repo.find_by_ids(&missing_snapshot_ids).await?
+            Some(repo.find_by_ids_evidence(&missing_snapshot_ids).await?)
         };
+        let current_rows = current_result
+            .as_ref()
+            .map_or_else(Vec::new, |result| result.rows.clone());
         let current_by_market = current_rows
             .iter()
             .map(|market| (market.market_id.clone(), market.as_ref()))
@@ -170,13 +188,26 @@ impl PointInTimeResolver {
         let usable_current_rows = usable_current_market_rows(current_rows, &snapshot_ids, state);
         let source_hash = ArtifactHasher::compute(&(&snapshots, &usable_current_rows))?.0;
         let row_count = snapshots.len() + usable_current_rows.len();
-        state.source(
+        state.source_with_fingerprint(
             RequiredInputDomain::TokenMapping,
             "market_pit_snapshot",
             "MarketRepository",
             u64::try_from(row_count).unwrap_or(u64::MAX),
             Some(source_hash),
+            snapshots_result.fingerprint,
         );
+        if let Some(current_result) = current_result {
+            state.source_with_fingerprint(
+                RequiredInputDomain::TokenMapping,
+                "market",
+                "MarketRepository",
+                u64::try_from(current_result.len()).unwrap_or(u64::MAX),
+                ArtifactHasher::compute(&current_result.rows)
+                    .ok()
+                    .map(|hash| hash.0),
+                current_result.fingerprint,
+            );
+        }
         for snapshot in snapshots {
             state
                 .market_contexts
@@ -260,23 +291,25 @@ impl PointInTimeResolver {
             );
             return Ok(());
         };
-        let rows = repo
+        let result = repo
             .calibration_snapshots(TimeWindow::new(manifest.window.from, manifest.window.to))
             .await?;
-        if rows.is_empty() {
+        if result.is_empty() {
             state.missing(
                 RequiredInputDomain::CalibrationSnapshots,
                 MaterializationErrorCode::InputCalibrationSnapshotMissing,
                 "no calibration snapshots in materialization window",
             );
         } else {
-            state.source(
+            state.source_with_fingerprint(
                 RequiredInputDomain::CalibrationSnapshots,
                 "calibration_snapshots",
                 "EvidenceTimeseriesRepository",
-                u64::try_from(rows.len()).unwrap_or(u64::MAX),
+                u64::try_from(result.len()).unwrap_or(u64::MAX),
                 None,
+                result.fingerprint.clone(),
             );
+            state.source_bundle.calibration_snapshots = result.rows;
         }
         Ok(())
     }
@@ -289,15 +322,18 @@ impl PointInTimeResolver {
         let Some(repo) = &self.repos.trades else {
             return Ok(());
         };
-        let rows = repo
-            .find_between(manifest.window.from, manifest.window.to)
+        let result = repo
+            .find_between_evidence(manifest.window.from, manifest.window.to)
             .await?;
-        state.source(
+        let rows = result.rows;
+        state.source_bundle.trades.clone_from(&rows);
+        state.source_with_fingerprint(
             RequiredInputDomain::Trades,
             "trade",
             "TradeRepository",
             u64::try_from(rows.len()).unwrap_or(u64::MAX),
             None,
+            result.fingerprint,
         );
         Ok(())
     }
@@ -329,13 +365,100 @@ impl PointInTimeResolver {
         let Some(repo) = &self.repos.positions else {
             return Ok(());
         };
-        let rows = repo.open_as_of(manifest.window.to).await?;
-        state.source(
+        let result = repo.open_as_of_evidence(manifest.window.to).await?;
+        let rows = result.rows;
+        state.source_bundle.positions.clone_from(&rows);
+        state.source_with_fingerprint(
             RequiredInputDomain::Positions,
             "position",
             "PositionRepository",
             u64::try_from(rows.len()).unwrap_or(u64::MAX),
             None,
+            result.fingerprint,
+        );
+        Ok(())
+    }
+
+    async fn resolve_potential_loss(
+        &self,
+        manifest: &MaterializationRunManifest,
+        state: &mut ResolutionState<'_>,
+    ) -> MaterializationResult<()> {
+        if !state.is_required(RequiredInputDomain::RiskState) {
+            return Ok(());
+        }
+        let Some(repo) = &self.repos.potential_loss else {
+            if state.is_production_required(RequiredInputDomain::RiskState) {
+                state.missing(
+                    RequiredInputDomain::RiskState,
+                    MaterializationErrorCode::RiskSequenceIncomplete,
+                    "potential loss repository is not configured",
+                );
+            }
+            return Ok(());
+        };
+        let baseline_result = repo
+            .find_active_as_of_evidence(manifest.window.from)
+            .await?;
+        let changes_result = repo
+            .find_changed_between_evidence(manifest.window.from, manifest.window.to)
+            .await?;
+        let baseline = baseline_result.rows;
+        let changes = changes_result.rows;
+        let row_count = baseline.len().saturating_add(changes.len());
+        state.source_with_fingerprint(
+            RequiredInputDomain::RiskState,
+            "potential_loss_ledger",
+            "PotentialLossRepository",
+            u64::try_from(row_count).unwrap_or(u64::MAX),
+            ArtifactHasher::compute(&(&baseline, &changes))
+                .ok()
+                .map(|hash| hash.0),
+            baseline_result.fingerprint,
+        );
+        state.source_with_fingerprint(
+            RequiredInputDomain::RiskState,
+            "potential_loss_ledger",
+            "PotentialLossRepository",
+            u64::try_from(changes.len()).unwrap_or(u64::MAX),
+            ArtifactHasher::compute(&changes).ok().map(|hash| hash.0),
+            changes_result.fingerprint,
+        );
+        state.source_bundle.potential_loss_baseline = baseline;
+        state.source_bundle.potential_loss_changes = changes;
+        Ok(())
+    }
+
+    async fn resolve_risk_audit(
+        &self,
+        manifest: &MaterializationRunManifest,
+        state: &mut ResolutionState<'_>,
+    ) -> MaterializationResult<()> {
+        if !state.is_required(RequiredInputDomain::RiskState) {
+            return Ok(());
+        }
+        let Some(repo) = &self.repos.risk_audit else {
+            if state.is_production_required(RequiredInputDomain::RiskState) {
+                state.missing(
+                    RequiredInputDomain::RiskState,
+                    MaterializationErrorCode::RiskSequenceIncomplete,
+                    "risk audit repository is not configured",
+                );
+            }
+            return Ok(());
+        };
+        let result = repo
+            .find_between_evidence(manifest.window.from, manifest.window.to)
+            .await?;
+        let rows = result.rows;
+        state.source_bundle.risk_audit_events.clone_from(&rows);
+        state.source_with_fingerprint(
+            RequiredInputDomain::RiskState,
+            "risk_audit_event",
+            "RiskAuditRepository",
+            u64::try_from(rows.len()).unwrap_or(u64::MAX),
+            ArtifactHasher::compute(&rows).ok().map(|hash| hash.0),
+            result.fingerprint,
         );
         Ok(())
     }
@@ -356,15 +479,18 @@ impl PointInTimeResolver {
             );
             return Ok(());
         };
-        let rows = repo
-            .find_between(manifest.window.from, manifest.window.to)
+        let result = repo
+            .find_between_evidence(manifest.window.from, manifest.window.to)
             .await?;
-        state.source(
+        let rows = result.rows;
+        state.source_bundle.reconciliation_reports.clone_from(&rows);
+        state.source_with_fingerprint(
             RequiredInputDomain::ReconciliationStatus,
             "reconciliation_report",
             "ReconciliationRepository",
             u64::try_from(rows.len()).unwrap_or(u64::MAX),
             None,
+            result.fingerprint,
         );
         Ok(())
     }
@@ -385,16 +511,11 @@ impl PointInTimeResolver {
             );
             return Ok(());
         };
-        let mut row_count = 0u64;
-        for market_id in &manifest.markets.market_ids {
-            if repo
-                .latest_before(market_id, manifest.window.to)
-                .await?
-                .is_some()
-            {
-                row_count += 1;
-            }
-        }
+        let result = repo
+            .settlement_truth_before_evidence(&manifest.markets.market_ids, manifest.window.to)
+            .await?;
+        let row_count = u64::try_from(result.len()).unwrap_or(u64::MAX);
+        let rows = result.rows;
         if row_count == 0 {
             state.missing(
                 RequiredInputDomain::SettlementTruth,
@@ -402,13 +523,15 @@ impl PointInTimeResolver {
                 "no settlement truth resolved before materialization window end",
             );
         } else {
-            state.source(
+            state.source_with_fingerprint(
                 RequiredInputDomain::SettlementTruth,
                 "resolution_event",
                 "ResolutionEventRepository",
                 row_count,
                 None,
+                result.fingerprint,
             );
+            state.source_bundle.settlement_truth = rows;
         }
         Ok(())
     }
@@ -445,17 +568,21 @@ impl PointInTimeResolver {
             return Ok(());
         };
         if balance_required {
-            match repo
-                .latest_balance_before(&scope.holder_address, manifest.window.to)
-                .await?
-            {
-                Some(snapshot) => state.source(
-                    RequiredInputDomain::BalanceSnapshot,
-                    "balance_snapshot",
-                    "BalanceSnapshotRepository",
-                    1,
-                    Some(ArtifactHasher::compute(&snapshot)?.0),
-                ),
+            let result = repo
+                .latest_balance_before_evidence(&scope.holder_address, manifest.window.to)
+                .await?;
+            match result.rows.into_iter().next() {
+                Some(snapshot) => {
+                    state.source_with_fingerprint(
+                        RequiredInputDomain::BalanceSnapshot,
+                        "balance_snapshot",
+                        "BalanceSnapshotRepository",
+                        1,
+                        Some(ArtifactHasher::compute(&snapshot)?.0),
+                        result.fingerprint,
+                    );
+                    state.source_bundle.balance_snapshot = Some(snapshot);
+                }
                 None => state.missing(
                     RequiredInputDomain::BalanceSnapshot,
                     MaterializationErrorCode::InputBalanceSnapshotMissing,
@@ -473,14 +600,15 @@ impl PointInTimeResolver {
                 );
                 return Ok(());
             }
-            let rows = repo
-                .latest_token_balances_before(
+            let result = repo
+                .latest_token_balances_before_evidence(
                     &scope.holder_address,
                     &market_ids,
                     &token_ids,
                     manifest.window.to,
                 )
                 .await?;
+            let rows = result.rows;
             if rows.len() < token_ids.len() {
                 state.missing(
                     RequiredInputDomain::TokenBalanceSnapshot,
@@ -493,13 +621,15 @@ impl PointInTimeResolver {
                 );
             }
             if !rows.is_empty() {
-                state.source(
+                state.source_with_fingerprint(
                     RequiredInputDomain::TokenBalanceSnapshot,
                     "token_balance_snapshot",
                     "BalanceSnapshotRepository",
                     u64::try_from(rows.len()).unwrap_or(u64::MAX),
                     Some(ArtifactHasher::compute(&rows)?.0),
+                    result.fingerprint,
                 );
+                state.source_bundle.token_balance_snapshots = rows;
             }
         }
         Ok(())
@@ -657,6 +787,7 @@ fn market_context_from_snapshot(
         yes_token_id: snapshot.yes_token_id,
         no_token_id: snapshot.no_token_id,
         category: Some(snapshot.category),
+        settlement_deadline: snapshot.end_date,
         resolved_as_of: as_of,
         source_hash: snapshot.payload_hash,
     }
@@ -673,6 +804,7 @@ fn market_context_from_current(
         yes_token_id: market.yes_token_id.clone(),
         no_token_id: market.no_token_id.clone(),
         category: Some(market.category),
+        settlement_deadline: market.end_date,
         resolved_as_of: as_of,
         source_hash,
     })
@@ -686,6 +818,7 @@ struct ResolutionState<'a> {
     fatal_errors: Vec<MaterializationErrorCode>,
     warnings: Vec<StageWarning>,
     market_contexts: Vec<MarketReplayContext>,
+    source_bundle: EvidenceSourceBundle,
 }
 
 impl<'a> ResolutionState<'a> {
@@ -698,6 +831,7 @@ impl<'a> ResolutionState<'a> {
             fatal_errors: Vec::new(),
             warnings: Vec::new(),
             market_contexts: Vec::new(),
+            source_bundle: EvidenceSourceBundle::empty(),
         }
     }
 
@@ -723,13 +857,36 @@ impl<'a> ResolutionState<'a> {
         row_count: u64,
         snapshot_hash: Option<String>,
     ) {
+        let query_fingerprint = self.query_fingerprint(domain, source_repository, source_table);
+        self.source_with_fingerprint(
+            domain,
+            source_table,
+            source_repository,
+            row_count,
+            snapshot_hash,
+            query_fingerprint,
+        );
+    }
+
+    fn source_with_fingerprint(
+        &mut self,
+        domain: RequiredInputDomain,
+        source_table: &str,
+        source_repository: &str,
+        row_count: u64,
+        snapshot_hash: Option<String>,
+        query_fingerprint: QueryFingerprint,
+    ) {
+        self.source_bundle
+            .query_fingerprints
+            .push(query_fingerprint.clone());
         self.inputs.push(PointInTimeInputSource {
             domain,
             source_table: source_table.to_owned(),
             source_repository: source_repository.to_owned(),
             query_window: Some(self.manifest.window),
             as_of: self.as_of,
-            query_fingerprint: self.query_fingerprint(domain, source_repository, source_table),
+            query_fingerprint,
             row_count,
             coverage: StageCoverageReport::complete(row_count),
             snapshot_hash,
@@ -895,9 +1052,21 @@ mod tests {
             .resolve(&materialization_manifest(fixed_time(11), vec![market_id]))
             .await
             .expect("second resolve");
+        let first_mapping = first
+            .manifest
+            .inputs
+            .iter()
+            .find(|input| input.domain == RequiredInputDomain::TokenMapping)
+            .expect("first token mapping");
+        let second_mapping = second
+            .manifest
+            .inputs
+            .iter()
+            .find(|input| input.domain == RequiredInputDomain::TokenMapping)
+            .expect("second token mapping");
         assert_ne!(
-            first.manifest.inputs[0].query_fingerprint,
-            second.manifest.inputs[0].query_fingerprint
+            first_mapping.query_fingerprint,
+            second_mapping.query_fingerprint
         );
     }
 

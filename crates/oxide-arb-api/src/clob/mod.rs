@@ -26,19 +26,25 @@ use oxide_arb_models::{
     domain::{
         BookLevel,
         book::{EndgameBookSnapshot, OrderbookSide},
-        order::{OrderRequest, OrderResponse},
+        order::{OrderAmount, OrderRequest, OrderResponse},
     },
-    enums::{common::OrderType, order::OrderStatus},
+    enums::{
+        common::{OrderType, Side},
+        order::OrderStatus,
+    },
     types::{OrderId, Price, Shares, TokenId, Usd},
 };
-use polymarket_client_sdk_v2::auth::Normal;
-use polymarket_client_sdk_v2::auth::state::Authenticated;
-use polymarket_client_sdk_v2::clob::types::Side as SdkSide;
-use polymarket_client_sdk_v2::clob::types::request::{
-    BalanceAllowanceRequest, OrderBookSummaryRequest,
+use polymarket_client_sdk_v2::{
+    auth::{Normal, state::Authenticated},
+    clob::{
+        Client as SdkClient, Config as SdkConfig,
+        types::{
+            Amount, AssetType, OrderType as SdkOrderType, Side as SdkSide,
+            request::{BalanceAllowanceRequest, OrderBookSummaryRequest},
+            response::PostOrderResponse,
+        },
+    },
 };
-use polymarket_client_sdk_v2::clob::types::{AssetType, OrderType as SdkOrderType};
-use polymarket_client_sdk_v2::clob::{Client as SdkClient, Config as SdkConfig};
 use rust_decimal::Decimal;
 use std::{convert::TryFrom, sync::Arc};
 
@@ -69,6 +75,70 @@ fn push_rest_level(
                 hook();
             }
         }
+    }
+}
+
+fn sdk_amount(amount: OrderAmount) -> Result<Amount, ApiError> {
+    match amount {
+        OrderAmount::Usd(value) => Amount::usdc(value.inner()),
+        OrderAmount::Shares(value) => Amount::shares(value.inner()),
+    }
+    .map_err(|error| ApiError::Sdk(error.to_string()))
+}
+
+fn limit_order_shares(amount: OrderAmount) -> Result<Decimal, ApiError> {
+    amount
+        .as_shares()
+        .map(Shares::inner)
+        .ok_or_else(|| ApiError::Clob {
+            endpoint: "order.build".to_owned(),
+            code: "invalid_order_amount_unit".to_owned(),
+            message: "limit orders require share-denominated amount".to_owned(),
+            retryable: false,
+        })
+}
+
+fn map_post_order_response(
+    req: &OrderRequest,
+    order_type: OrderType,
+    order_amount: OrderAmount,
+    submitted_at: chrono::DateTime<chrono::Utc>,
+    resp: &PostOrderResponse,
+) -> OrderResponse {
+    let (filled_shares, cash_amount) = match req.side {
+        Side::Buy => (Shares::new(resp.taking_amount), resp.making_amount),
+        Side::Sell => (Shares::new(resp.making_amount), resp.taking_amount),
+    };
+    let status = if !resp.success || filled_shares.inner() <= Decimal::ZERO {
+        OrderStatus::Rejected
+    } else if order_type == OrderType::Fok
+        || order_amount
+            .as_shares()
+            .is_some_and(|shares| filled_shares >= shares)
+        || order_amount
+            .as_usd()
+            .is_some_and(|usd| cash_amount >= usd.inner())
+    {
+        OrderStatus::Filled
+    } else {
+        OrderStatus::PartiallyFilled
+    };
+
+    let avg_fill_price = if filled_shares.inner() > Decimal::ZERO {
+        Some(Price::new(cash_amount / filled_shares.inner()))
+    } else {
+        None
+    };
+
+    OrderResponse {
+        order_id: OrderId::new(&resp.order_id),
+        status,
+        tx_hash: resp.transaction_hashes.first().map(|h| format!("{h:#x}")),
+        filled_shares,
+        avg_fill_price,
+        fee_paid: Usd::ZERO,
+        submitted_at,
+        responded_at: chrono::Utc::now(),
     }
 }
 
@@ -118,7 +188,7 @@ impl ClobClient {
         let token_id = WireTokenId::try_from(&req.token_id)?.0;
         let order_side = SdkSide::from(ClobSide::from(req.side));
         let price = req.price.inner();
-        let share_qty = req.shares.inner();
+        let order_amount = req.amount;
         let order_type = req.order_type;
 
         let submitted_at = chrono::Utc::now();
@@ -132,20 +202,23 @@ impl ClobClient {
             let signer = Arc::clone(&signer);
             async move {
                 let unsigned = match order_type {
-                    OrderType::Fok => sdk
-                        .limit_order()
-                        .token_id(token_id)
-                        .order_type(SdkOrderType::FOK)
-                        .price(price)
-                        .size(share_qty)
-                        .side(order_side)
-                        .build()
-                        .await
-                        .map_err(|e| ApiError::from(sdk_error::SdkClobError(&e)))?,
+                    OrderType::Fok => {
+                        let amount = sdk_amount(order_amount)?;
+                        sdk.market_order()
+                            .token_id(token_id)
+                            .order_type(SdkOrderType::FOK)
+                            .price(price)
+                            .amount(amount)
+                            .side(order_side)
+                            .build()
+                            .await
+                            .map_err(|e| ApiError::from(sdk_error::SdkClobError(&e)))?
+                    }
                     OrderType::Gtd { expiration } => {
                         let exp = ToPrimitive::to_i64(&expiration)
                             .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0))
                             .unwrap_or_else(chrono::Utc::now);
+                        let share_qty = limit_order_shares(order_amount)?;
                         sdk.limit_order()
                             .token_id(token_id)
                             .order_type(SdkOrderType::GTD)
@@ -157,16 +230,18 @@ impl ClobClient {
                             .await
                             .map_err(|e| ApiError::from(sdk_error::SdkClobError(&e)))?
                     }
-                    OrderType::Gtc => sdk
-                        .limit_order()
-                        .token_id(token_id)
-                        .order_type(SdkOrderType::GTC)
-                        .price(price)
-                        .size(share_qty)
-                        .side(order_side)
-                        .build()
-                        .await
-                        .map_err(|e| ApiError::from(sdk_error::SdkClobError(&e)))?,
+                    OrderType::Gtc => {
+                        let share_qty = limit_order_shares(order_amount)?;
+                        sdk.limit_order()
+                            .token_id(token_id)
+                            .order_type(SdkOrderType::GTC)
+                            .price(price)
+                            .size(share_qty)
+                            .side(order_side)
+                            .build()
+                            .await
+                            .map_err(|e| ApiError::from(sdk_error::SdkClobError(&e)))?
+                    }
                 };
 
                 let signed_order = sdk
@@ -179,32 +254,13 @@ impl ClobClient {
                     .await
                     .map_err(|e| ApiError::from(sdk_error::SdkClobError(&e)))?;
 
-                let filled_shares = Shares::new(resp.making_amount);
-                let requested_shares = share_qty;
-                let status = if !resp.success || filled_shares.inner() <= Decimal::ZERO {
-                    OrderStatus::Rejected
-                } else if filled_shares.inner() >= requested_shares {
-                    OrderStatus::Filled
-                } else {
-                    OrderStatus::PartiallyFilled
-                };
-
-                let avg_fill_price = if filled_shares.inner() > Decimal::ZERO {
-                    Some(Price::new(resp.taking_amount / filled_shares.inner()))
-                } else {
-                    None
-                };
-
-                Ok(OrderResponse {
-                    order_id: OrderId::new(&resp.order_id),
-                    status,
-                    tx_hash: resp.transaction_hashes.first().map(|h| format!("{h:#x}")),
-                    filled_shares,
-                    avg_fill_price,
-                    fee_paid: Usd::ZERO,
+                Ok(map_post_order_response(
+                    req,
+                    order_type,
+                    order_amount,
                     submitted_at,
-                    responded_at: chrono::Utc::now(),
-                })
+                    &resp,
+                ))
             }
         })
         .await

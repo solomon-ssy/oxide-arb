@@ -6,6 +6,10 @@
 > **覆盖原章节**: 12, 15.2 balance/token tables, 18.4 exit/token items, 18.7 exit UI item  
 > **目标**: 把主动退出、SELL unwind、token inventory reservation、ERC1155 token-level reconciliation 和 exit evidence 明确为 Phase 5 的独立风险闭环。第一版先 report-only/manual review，禁止在 token truth 不完整时自动退出。
 
+> **Phase 5.3 contract dependency**: Phase 5.3 只产 report-only `Exit/Token` evidence，用于证明 book、settlement、token custody 和 false-exit 风险是否足够可解释；它不创建 `position_exit_plan`、`position_exit_execution`，不做 token reservation，不触发 live sell/redeem。Phase 5.7 必须显式消费 5.3 的 `Exit/Token` artifact contract，并在 token-level reconciliation 完整前保持 manual/report-only。
+
+> **Hard precondition**: Phase 5.7 的 exit/unwind 产品化必须建立在 Phase 5.3 已完成的 per-decision sell-side book replay、settlement outcome attribution、token balance snapshot joins、false-exit evidence 和 `EvidenceOnly`/`ProductionIneligible` gate 之上。若 Phase 5.3 只提供 bid coverage 或 unavailable metrics，Phase 5.7 只能继续 report-only/manual review。
+
 ---
 
 ## 0. 结论

@@ -1,4 +1,7 @@
-use crate::traits::{EvidenceTimeseriesRepository, MarketFilter, TimeWindow, TimeseriesFactWriter};
+use crate::traits::{
+    EvidenceTimeseriesRepository, MarketFilter, TimeWindow, TimeseriesFactWriter,
+    evidence_query_result,
+};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use oxide_arb_error::storage::StorageError;
@@ -8,7 +11,9 @@ use oxide_arb_models::{
         TickEventL2Row, TickEventRow,
     },
     config::AnalyticsConfig,
-    types::{EventId, MarketId, OpportunityId, TokenId},
+    domain::evidence::EvidenceQueryResult,
+    enums::clickhouse::ChOpportunityAuditStage,
+    types::{OpportunityId, TokenId},
 };
 use oxide_arb_storage::clickhouse::{BatchInserter, ChWriteManager, ChWriteMetrics};
 use std::{sync::Arc, time::Duration};
@@ -144,9 +149,9 @@ impl EvidenceTimeseriesRepository for ChTimeseriesRepository {
         token_ids: &[TokenId],
         window: TimeWindow,
         limit: u64,
-    ) -> Result<Vec<TickEventRow>, StorageError> {
-        let token_ids = token_ids_as_strings(token_ids);
-        self.client
+    ) -> Result<EvidenceQueryResult<TickEventRow>, StorageError> {
+        let rows = self
+            .client
             .query(
                 "SELECT * FROM tick_events \
                  WHERE token_id IN ? \
@@ -161,16 +166,28 @@ impl EvidenceTimeseriesRepository for ChTimeseriesRepository {
             .bind(limit)
             .fetch_all::<TickEventRow>()
             .await
-            .map_err(Into::into)
+            .map_err(StorageError::from)?;
+        evidence_query_result(
+            "ChTimeseriesRepository",
+            "tick_events",
+            &(token_ids, window, limit),
+            vec![
+                "event_time ASC".to_owned(),
+                "ingestion_time ASC".to_owned(),
+                "sequence ASC".to_owned(),
+            ],
+            Some(2),
+            rows,
+        )
     }
 
     async fn l2_events(
         &self,
         token_ids: &[TokenId],
         window: TimeWindow,
-    ) -> Result<Vec<TickEventL2Row>, StorageError> {
-        let token_ids = token_ids_as_strings(token_ids);
-        self.client
+    ) -> Result<EvidenceQueryResult<TickEventL2Row>, StorageError> {
+        let rows = self
+            .client
             .query(
                 "SELECT * FROM tick_events_l2 \
                  WHERE token_id IN ? \
@@ -183,7 +200,19 @@ impl EvidenceTimeseriesRepository for ChTimeseriesRepository {
             .bind(window.to.timestamp_millis())
             .fetch_all::<TickEventL2Row>()
             .await
-            .map_err(Into::into)
+            .map_err(StorageError::from)?;
+        evidence_query_result(
+            "ChTimeseriesRepository",
+            "l2_events",
+            &(token_ids, window),
+            vec![
+                "event_time ASC".to_owned(),
+                "ingestion_time ASC".to_owned(),
+                "sequence ASC".to_owned(),
+            ],
+            Some(2),
+            rows,
+        )
     }
 
     async fn book_snapshots_before(
@@ -191,9 +220,9 @@ impl EvidenceTimeseriesRepository for ChTimeseriesRepository {
         token_ids: &[TokenId],
         before: DateTime<Utc>,
         limit_per_token: usize,
-    ) -> Result<Vec<BookSnapshotRow>, StorageError> {
-        let token_ids = token_ids_as_strings(token_ids);
-        self.client
+    ) -> Result<EvidenceQueryResult<BookSnapshotRow>, StorageError> {
+        let rows = self
+            .client
             .query(
                 "SELECT * FROM book_snapshots \
                  WHERE token_id IN ? \
@@ -206,18 +235,41 @@ impl EvidenceTimeseriesRepository for ChTimeseriesRepository {
             .bind(u64::try_from(limit_per_token).unwrap_or(u64::MAX))
             .fetch_all::<BookSnapshotRow>()
             .await
-            .map_err(Into::into)
+            .map_err(StorageError::from)?;
+        evidence_query_result(
+            "ChTimeseriesRepository",
+            "book_snapshots_before",
+            &(token_ids, before, limit_per_token),
+            vec![
+                "token_id ASC".to_owned(),
+                "event_time DESC".to_owned(),
+                "ingestion_time DESC".to_owned(),
+                "sequence DESC".to_owned(),
+                "LIMIT BY token_id".to_owned(),
+            ],
+            Some(2),
+            rows,
+        )
     }
 
     async fn detections(
         &self,
         filter: MarketFilter,
         window: TimeWindow,
-    ) -> Result<Vec<OpportunityDetectionRow>, StorageError> {
-        let market_ids = market_ids_as_strings(&filter.market_ids);
-        let event_ids = event_ids_as_strings(&filter.event_ids);
-        let token_ids = token_ids_as_strings(&filter.token_ids);
-        self.client
+    ) -> Result<EvidenceQueryResult<OpportunityDetectionRow>, StorageError> {
+        let market_ids = filter.market_ids;
+        let event_ids = filter.event_ids;
+        let token_ids = filter.token_ids;
+        let categories = filter.categories;
+        let params = (
+            market_ids.clone(),
+            event_ids.clone(),
+            token_ids.clone(),
+            categories.clone(),
+            window,
+        );
+        let rows = self
+            .client
             .query(
                 "SELECT * FROM opportunity_detection \
                  WHERE detected_at >= fromUnixTimestamp64Milli(?) \
@@ -225,7 +277,7 @@ impl EvidenceTimeseriesRepository for ChTimeseriesRepository {
                    AND (empty(?) OR market_id IN ?) \
                    AND (empty(?) OR event_id IN ?) \
                    AND (empty(?) OR token_id IN ?) \
-                   AND (? IS NULL OR category = ?) \
+                   AND (empty(?) OR category IN ?) \
                  ORDER BY detected_at ASC, ingestion_time ASC, sequence ASC",
             )
             .bind(window.from.timestamp_millis())
@@ -236,22 +288,31 @@ impl EvidenceTimeseriesRepository for ChTimeseriesRepository {
             .bind(event_ids)
             .bind(token_ids.clone())
             .bind(token_ids)
-            .bind(filter.category)
-            .bind(filter.category)
+            .bind(categories.clone())
+            .bind(categories)
             .fetch_all::<OpportunityDetectionRow>()
             .await
-            .map_err(Into::into)
+            .map_err(StorageError::from)?;
+        evidence_query_result(
+            "ChTimeseriesRepository",
+            "detections",
+            &params,
+            vec![
+                "detected_at ASC".to_owned(),
+                "ingestion_time ASC".to_owned(),
+                "sequence ASC".to_owned(),
+            ],
+            Some(2),
+            rows,
+        )
     }
 
     async fn audits(
         &self,
         opportunity_ids: &[OpportunityId],
-    ) -> Result<Vec<OpportunityAuditRow>, StorageError> {
-        let opportunity_ids = opportunity_ids
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>();
-        self.client
+    ) -> Result<EvidenceQueryResult<OpportunityAuditRow>, StorageError> {
+        let rows = self
+            .client
             .query(
                 "SELECT * FROM opportunity_audit \
                  WHERE opportunity_id IN ? \
@@ -260,14 +321,123 @@ impl EvidenceTimeseriesRepository for ChTimeseriesRepository {
             .bind(opportunity_ids)
             .fetch_all::<OpportunityAuditRow>()
             .await
-            .map_err(Into::into)
+            .map_err(StorageError::from)?;
+        evidence_query_result(
+            "ChTimeseriesRepository",
+            "audits",
+            &opportunity_ids,
+            vec![
+                "stage_at ASC".to_owned(),
+                "ingestion_time ASC".to_owned(),
+                "sequence ASC".to_owned(),
+            ],
+            Some(2),
+            rows,
+        )
+    }
+
+    async fn terminal_audits(
+        &self,
+        opportunity_ids: &[OpportunityId],
+    ) -> Result<EvidenceQueryResult<OpportunityAuditRow>, StorageError> {
+        let terminal_stages = vec![
+            ChOpportunityAuditStage::Filled,
+            ChOpportunityAuditStage::Missed,
+            ChOpportunityAuditStage::Failed,
+        ];
+        let params = (opportunity_ids, terminal_stages.clone());
+        let rows = self
+            .client
+            .query(
+                "SELECT * FROM opportunity_audit FINAL \
+                 WHERE opportunity_id IN ? \
+                   AND stage IN ? \
+                 ORDER BY opportunity_id ASC, stage_order DESC, stage_at DESC, ingestion_time DESC, sequence DESC \
+                 LIMIT 1 BY opportunity_id",
+            )
+            .bind(opportunity_ids)
+            .bind(terminal_stages)
+            .fetch_all::<OpportunityAuditRow>()
+            .await
+            .map_err(StorageError::from)?;
+        evidence_query_result(
+            "ChTimeseriesRepository",
+            "terminal_audits",
+            &params,
+            vec![
+                "opportunity_id ASC".to_owned(),
+                "stage_order DESC".to_owned(),
+                "stage_at DESC".to_owned(),
+                "ingestion_time DESC".to_owned(),
+                "sequence DESC".to_owned(),
+                "LIMIT BY opportunity_id".to_owned(),
+            ],
+            Some(2),
+            rows,
+        )
+    }
+
+    async fn audit_funnel(
+        &self,
+        filter: MarketFilter,
+        window: TimeWindow,
+    ) -> Result<EvidenceQueryResult<OpportunityAuditRow>, StorageError> {
+        let market_ids = filter.market_ids;
+        let event_ids = filter.event_ids;
+        let token_ids = filter.token_ids;
+        let categories = filter.categories;
+        let params = (
+            market_ids.clone(),
+            event_ids.clone(),
+            token_ids.clone(),
+            categories.clone(),
+            window,
+        );
+        let rows = self
+            .client
+            .query(
+                "SELECT * FROM opportunity_audit FINAL \
+                 WHERE detected_at >= fromUnixTimestamp64Milli(?) \
+                   AND detected_at < fromUnixTimestamp64Milli(?) \
+                   AND (empty(?) OR market_id IN ?) \
+                   AND (empty(?) OR event_id IN ?) \
+                   AND (empty(?) OR token_id IN ?) \
+                   AND (empty(?) OR category IN ?) \
+                 ORDER BY stage_at ASC, ingestion_time ASC, sequence ASC",
+            )
+            .bind(window.from.timestamp_millis())
+            .bind(window.to.timestamp_millis())
+            .bind(market_ids.clone())
+            .bind(market_ids)
+            .bind(event_ids.clone())
+            .bind(event_ids)
+            .bind(token_ids.clone())
+            .bind(token_ids)
+            .bind(categories.clone())
+            .bind(categories)
+            .fetch_all::<OpportunityAuditRow>()
+            .await
+            .map_err(StorageError::from)?;
+        evidence_query_result(
+            "ChTimeseriesRepository",
+            "audit_funnel",
+            &params,
+            vec![
+                "stage_at ASC".to_owned(),
+                "ingestion_time ASC".to_owned(),
+                "sequence ASC".to_owned(),
+            ],
+            Some(2),
+            rows,
+        )
     }
 
     async fn calibration_snapshots(
         &self,
         window: TimeWindow,
-    ) -> Result<Vec<CalibrationSnapshotRow>, StorageError> {
-        self.client
+    ) -> Result<EvidenceQueryResult<CalibrationSnapshotRow>, StorageError> {
+        let rows = self
+            .client
             .query(
                 "SELECT * FROM calibration_snapshots \
                  WHERE event_time >= fromUnixTimestamp64Milli(?) \
@@ -278,18 +448,18 @@ impl EvidenceTimeseriesRepository for ChTimeseriesRepository {
             .bind(window.to.timestamp_millis())
             .fetch_all::<CalibrationSnapshotRow>()
             .await
-            .map_err(Into::into)
+            .map_err(StorageError::from)?;
+        evidence_query_result(
+            "ChTimeseriesRepository",
+            "calibration_snapshots",
+            &window,
+            vec![
+                "event_time ASC".to_owned(),
+                "ingestion_time ASC".to_owned(),
+                "sequence ASC".to_owned(),
+            ],
+            Some(2),
+            rows,
+        )
     }
-}
-
-fn token_ids_as_strings(token_ids: &[TokenId]) -> Vec<String> {
-    token_ids.iter().map(ToString::to_string).collect()
-}
-
-fn market_ids_as_strings(market_ids: &[MarketId]) -> Vec<String> {
-    market_ids.iter().map(ToString::to_string).collect()
-}
-
-fn event_ids_as_strings(event_ids: &[EventId]) -> Vec<String> {
-    event_ids.iter().map(ToString::to_string).collect()
 }

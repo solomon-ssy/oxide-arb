@@ -6,7 +6,7 @@ use oxide_arb_models::{
         common::{ExecutionMode, Side},
         execution::ExecutionOutcome,
     },
-    types::{OrderId, Price, Shares, TokenId},
+    types::{OrderId, Price, Shares, TokenId, Usd},
 };
 use std::sync::Arc;
 
@@ -80,17 +80,19 @@ impl Dispatcher {
 
     fn paper_trade(&self, plan: &ExecutionPlan) -> ExecutionOutcome {
         if let Some(book_store) = &self.book_store {
-            let available = Self::available_depth_at_price(
+            let sufficient = Self::has_sufficient_depth_at_price(
                 book_store,
                 &plan.token_id,
                 plan.side,
                 plan.limit_price,
+                plan.estimated_cost,
+                plan.shares,
             );
-            if available < plan.shares {
+            if !sufficient {
                 return ExecutionOutcome::Miss {
                     reason: format!(
-                        "paper: insufficient depth ({available} < {} shares at {})",
-                        plan.shares, plan.limit_price
+                        "paper: insufficient depth for {} at {}",
+                        plan.estimated_cost, plan.limit_price
                     ),
                     execution_mode: ExecutionMode::Paper,
                 };
@@ -114,18 +116,20 @@ impl Dispatcher {
         }
     }
 
-    fn available_depth_at_price(
+    fn has_sufficient_depth_at_price(
         book_store: &BookStore,
         token_id: &TokenId,
         side: Side,
         limit_price: Price,
-    ) -> Shares {
+        buy_budget: Usd,
+        sell_shares: Shares,
+    ) -> bool {
         let Some(book) = book_store.load(token_id) else {
-            return Shares::ZERO;
+            return false;
         };
         match side {
-            Side::Buy => book.ask_depth_up_to(limit_price),
-            Side::Sell => book.bid_depth_down_to(limit_price),
+            Side::Buy => book.ask_notional_up_to(limit_price) >= buy_budget,
+            Side::Sell => book.bid_depth_down_to(limit_price) >= sell_shares,
         }
     }
 }

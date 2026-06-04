@@ -306,7 +306,7 @@ pub struct NewEmergencySnapshot {
 }
 
 /// All fields required to persist a new reconciliation report.
-#[derive(Debug, Clone, DerivePartialModel, FromQueryResult)]
+#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]
 #[sea_orm(entity = "crate::entities::reconciliation_report::Entity")]
 pub struct ReconciliationReportInfo {
     pub id: i64,

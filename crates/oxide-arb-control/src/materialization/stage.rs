@@ -1,9 +1,8 @@
-use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use oxide_arb_models::{
     domain::control_factor::{
-        ArtifactHash, MaterializationRunManifest, QueryFingerprint, StageArtifactRef,
-        StageCoverageReport, StageError, StageOutput, StageReportBody, StageWarning,
+        ArtifactHash, QueryFingerprint, StageArtifactRef, StageCoverageReport, StageError,
+        StageReportBody, StageWarning,
     },
     enums::control_factor::{EvidenceStageStatus, MaterializationStageName},
     types::{MaterializationRunId, StageReportId},
@@ -11,24 +10,6 @@ use oxide_arb_models::{
 use serde::Serialize;
 
 use crate::materialization::{ArtifactHasher, MaterializationResult};
-
-#[derive(Debug, Clone)]
-pub struct StageExecutionContext {
-    pub run_id: MaterializationRunId,
-    pub manifest: MaterializationRunManifest,
-    pub started_at: DateTime<Utc>,
-}
-
-#[async_trait]
-pub trait MaterializationStage<T, U>: Send + Sync {
-    fn name(&self) -> MaterializationStageName;
-
-    async fn execute(
-        &self,
-        context: StageExecutionContext,
-        prior: Option<T>,
-    ) -> MaterializationResult<StageOutput<U>>;
-}
 
 pub struct StageReportBuilder {
     stage_report_id: StageReportId,
@@ -119,6 +100,12 @@ impl StageReportBuilder {
     #[must_use]
     pub fn error(mut self, error: StageError) -> Self {
         self.errors.push(error);
+        self
+    }
+
+    #[must_use]
+    pub fn input_artifact(mut self, artifact: StageArtifactRef) -> Self {
+        self.input_artifact_hashes.push(artifact);
         self
     }
 

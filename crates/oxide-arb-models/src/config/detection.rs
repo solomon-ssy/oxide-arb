@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use validator::Validate;
 
-#[derive(Debug, Clone, Deserialize, Validate)]
+#[derive(Debug, Clone, Deserialize, Serialize, Validate)]
 pub struct DetectionConfig {
     #[serde(default = "default_scan_interval_secs")]
     pub fallback_scan_interval_secs: u64,
@@ -63,7 +63,7 @@ const fn default_scan_concurrency() -> usize {
 // ── Endgame Detection ────────────────────────────────────────────────────────
 
 /// Endgame convergence detection configuration.
-#[derive(Debug, Clone, Deserialize, Validate)]
+#[derive(Debug, Clone, Deserialize, Serialize, Validate)]
 pub struct EndgameDetectionConfig {
     #[serde(default = "default_endgame_enabled")]
     pub enabled: bool,
@@ -205,7 +205,7 @@ const fn default_bootstrap_beta() -> Decimal {
 // ── Fill Probability ─────────────────────────────────────────────────────────
 
 /// Endgame-specific fill probability estimation parameters.
-#[derive(Debug, Clone, Deserialize, Validate)]
+#[derive(Debug, Clone, Deserialize, Serialize, Validate)]
 pub struct FillProbabilityConfig {
     /// Base fill probability for a single FOK order with fresh data.
     #[serde(default = "default_base_fill_prob")]
@@ -266,7 +266,7 @@ struct ScorerConfigSerde {
 }
 
 /// Endgame opportunity scorer configuration.
-#[derive(Debug, Clone, Validate)]
+#[derive(Debug, Clone, Serialize, Validate)]
 pub struct ScorerConfig {
     /// Minimum composite score to emit an opportunity.
     pub min_score: MicroScore,
@@ -381,7 +381,7 @@ pub fn default_category_weights() -> HashMap<MarketCategory, MicroProb> {
 // ── Emission Cooldown ────────────────────────────────────────────────────────
 
 /// Emission cooldown configuration preventing duplicate opportunity signals.
-#[derive(Debug, Clone, Deserialize, Validate)]
+#[derive(Debug, Clone, Deserialize, Serialize, Validate)]
 pub struct EmissionCooldownConfig {
     /// Base cooldown duration in seconds.
     #[serde(default = "default_base_cooldown_secs")]
@@ -417,7 +417,7 @@ const fn default_cooldown_capacity() -> u64 {
 // ── Convergence Tracker ──────────────────────────────────────────────────────
 
 /// Convergence tracker cache configuration.
-#[derive(Debug, Clone, Deserialize, Validate)]
+#[derive(Debug, Clone, Deserialize, Serialize, Validate)]
 pub struct ConvergenceTrackerConfig {
     /// Max idle time before eviction (seconds).
     #[serde(default = "default_tracker_max_idle")]

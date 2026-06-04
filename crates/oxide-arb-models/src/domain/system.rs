@@ -1,6 +1,7 @@
 //! System status, lifecycle, config, accounting, and reporting domain models.
 
 use crate::{
+    config::{CalibrationConfig, EndgameDetectionConfig},
     domain::{NullablePatch, Patch},
     enums::{
         common::{ExecutionMode, ReportType},
@@ -79,6 +80,10 @@ pub struct DetectionRuntimeConfig {
     pub min_profit_threshold_usd: Decimal,
     pub endgame_hours_before_close: u32,
     pub convergence_threshold: Decimal,
+    #[serde(default)]
+    pub endgame: Option<EndgameDetectionConfig>,
+    #[serde(default)]
+    pub calibration: Option<CalibrationConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

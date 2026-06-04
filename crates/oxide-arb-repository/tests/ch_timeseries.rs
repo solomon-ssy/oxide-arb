@@ -13,13 +13,13 @@ use oxide_arb_models::{
         ChSchemaVersion, ChShares, ChUsd, TickEventL2Row, TickEventRow,
     },
     enums::clickhouse::{
-        ChBookEventType, ChDurationBucket, ChFactSource, ChMarketCategory, ChPriceZone,
-        ChSnapshotReason,
+        ChAuditOutcome, ChBookEventType, ChDurationBucket, ChFactSource, ChMarketCategory,
+        ChOpportunityAuditStage, ChPriceZone, ChSide, ChSnapshotReason, ChStalenessLevel,
     },
-    types::{MarketId, Price, Shares, TokenId, Usd},
+    types::{EventId, ExecutionId, MarketId, OpportunityId, Price, Shares, TokenId, TradeId, Usd},
 };
 use oxide_arb_repository::traits::{
-    EvidenceTimeseriesRepository, TimeWindow, TimeseriesFactWriter,
+    EvidenceTimeseriesRepository, MarketFilter, TimeWindow, TimeseriesFactWriter,
 };
 use rust_decimal_macros::dec;
 
@@ -108,6 +108,132 @@ fn sample_calibration(ts: i64, sequence: u64) -> CalibrationSnapshotRow {
     }
 }
 
+fn sample_detection(
+    opportunity_id: &OpportunityId,
+    market_id: &MarketId,
+    event_id: &EventId,
+    token_id: &TokenId,
+    ts: i64,
+) -> oxide_arb_models::clickhouse::OpportunityDetectionRow {
+    oxide_arb_models::clickhouse::OpportunityDetectionRow {
+        opportunity_id: opportunity_id.clone(),
+        market_id: market_id.clone(),
+        event_id: event_id.clone(),
+        token_id: token_id.clone(),
+        token_yes: Some(token_id.clone()),
+        token_no: Some(TokenId::new("tok-no-core-facts")),
+        side: ChSide::Buy,
+        entry_price: ChPrice::from(Price::new(dec!(0.94))),
+        edge_bps: ChBps::from(dec!(250)),
+        expected_net_profit_usd: ChUsd::from(Usd::new(dec!(3))),
+        net_profit_if_correct_usd: ChUsd::from(Usd::new(dec!(6))),
+        shares: ChShares::from(Shares::new(dec!(10))),
+        total_cost_usd: ChUsd::from(Usd::new(dec!(9.4))),
+        total_fees_usd: ChUsd::from(Usd::new(dec!(0.1))),
+        resolution_prob: ChProbability::from(dec!(0.98)),
+        confidence: ChProbability::from(dec!(0.9)),
+        fill_probability: Some(ChProbability::from(dec!(0.8))),
+        score: Some(123),
+        urgency_factor: None,
+        category_weight: None,
+        staleness_discount: None,
+        depth_used_pct: oxide_arb_models::clickhouse::ChFactor::from(dec!(10)),
+        convergence_secs: 120,
+        category: ChMarketCategory::Politics,
+        price_zone: ChPriceZone::Z97,
+        duration_bucket: ChDurationBucket::Medium,
+        calibration_sample_size: 10,
+        calibration_fallback_tier: 1,
+        calibration_alpha: ChDecimal64::from(dec!(2)),
+        calibration_beta: ChDecimal64::from(dec!(1)),
+        calibration_posterior_mean: ChProbability::from(dec!(0.8)),
+        calibration_snapshot_hash: Some("calibration-hash".to_owned()),
+        book_age_ms: Some(10),
+        yes_book_version: Some(1),
+        no_book_version: Some(1),
+        control_publication_id: None,
+        score_components_json: "{}".to_owned(),
+        calibration_snapshot_json: "{}".to_owned(),
+        book_context_json: None,
+        applied_factors_json: None,
+        applied_factor_ids_json: None,
+        latency_trace_json: None,
+        missing_fields_json: None,
+        detected_at: ts,
+        ingestion_time: ts,
+        sequence: 1,
+        schema_version: ChSchemaVersion(2),
+    }
+}
+
+fn sample_audit(
+    opportunity_id: &OpportunityId,
+    market_id: &MarketId,
+    event_id: &EventId,
+    token_id: &TokenId,
+    stage: ChOpportunityAuditStage,
+    ts: i64,
+    sequence: u64,
+) -> oxide_arb_models::clickhouse::OpportunityAuditRow {
+    oxide_arb_models::clickhouse::OpportunityAuditRow {
+        opportunity_id: opportunity_id.clone(),
+        execution_id: ExecutionId::generate(),
+        trade_id: Some(TradeId::generate()),
+        market_id: market_id.clone(),
+        event_id: event_id.clone(),
+        token_id: token_id.clone(),
+        side: ChSide::Buy,
+        entry_price: Some(ChPrice::from(Price::new(dec!(0.94)))),
+        fill_price: Some(ChPrice::from(Price::new(dec!(0.94)))),
+        requested_shares: Some(ChShares::from(Shares::new(dec!(10)))),
+        filled_shares: Some(ChShares::from(Shares::new(dec!(10)))),
+        total_cost_usd: Some(ChUsd::from(Usd::new(dec!(9.4)))),
+        fees_usd: Some(ChUsd::from(Usd::new(dec!(0.1)))),
+        net_profit_usd: None,
+        expected_profit_usd: Some(ChUsd::from(Usd::new(dec!(3)))),
+        edge_bps: Some(ChBps::from(dec!(250))),
+        resolution_prob: Some(ChProbability::from(dec!(0.98))),
+        confidence: Some(ChProbability::from(dec!(0.9))),
+        fill_probability: Some(ChProbability::from(dec!(0.8))),
+        convergence_secs: Some(120),
+        price_zone: Some(ChPriceZone::Z97),
+        duration_bucket: Some(ChDurationBucket::Medium),
+        depth_used_pct: Some(oxide_arb_models::clickhouse::ChFactor::from(dec!(10))),
+        staleness: Some(ChStalenessLevel::Fresh),
+        category: Some(ChMarketCategory::Politics),
+        stage,
+        stage_order: match stage {
+            ChOpportunityAuditStage::Detected => 10,
+            ChOpportunityAuditStage::Filled => 70,
+            _ => 90,
+        },
+        stage_at: ts,
+        payout_usd: None,
+        realized_pnl_usd: None,
+        settlement_status: None,
+        settlement_trigger: None,
+        winning_token_id: None,
+        accounting_status: None,
+        fee_source: None,
+        outcome: if stage == ChOpportunityAuditStage::Filled {
+            Some(ChAuditOutcome::Success)
+        } else {
+            None
+        },
+        rejection_stage: None,
+        rejection_reason: None,
+        scored_snapshot_json: Some("{}".to_owned()),
+        book_context_json: None,
+        applied_factor_ids_json: None,
+        missing_fields_json: None,
+        detected_at: ts,
+        ingestion_time: ts,
+        sequence,
+        schema_version: ChSchemaVersion(2),
+        updated_at: ts,
+    }
+}
+
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn timeseries_insert_and_query_roundtrip() {
@@ -139,7 +265,13 @@ async fn timeseries_insert_and_query_roundtrip() {
         .expect("query");
 
     assert_eq!(rows.len(), 3, "expected all inserted tick events");
-    assert_eq!(rows[0].token_id, TokenId::new(token));
+    assert!(
+        rows.fingerprint
+            .0
+            .starts_with("ChTimeseriesRepository.tick_events:v1:blake3:"),
+        "expected canonical tick_events fingerprint"
+    );
+    assert_eq!(rows.rows[0].token_id, TokenId::new(token));
 }
 
 #[tokio::test]
@@ -148,6 +280,9 @@ async fn evidence_timeseries_queries_roundtrip_core_fact_tables() {
     let (repo, shutdown, _container) = setup_timeseries_repo().await;
     let now = Utc::now().timestamp_millis();
     let token = TokenId::new("tok-core-facts");
+    let market_id = MarketId::new("0xch-market");
+    let event_id = EventId::new("evt-core-facts");
+    let opportunity_id = OpportunityId::new_v7();
 
     repo.insert_l2_events(vec![
         sample_l2(token.as_str(), now, 2),
@@ -161,6 +296,37 @@ async fn evidence_timeseries_queries_roundtrip_core_fact_tables() {
     repo.insert_calibration_snapshots(vec![sample_calibration(now, 1)])
         .await
         .expect("insert calibration");
+    repo.insert_detections(vec![sample_detection(
+        &opportunity_id,
+        &market_id,
+        &event_id,
+        &token,
+        now,
+    )])
+    .await
+    .expect("insert detection");
+    repo.insert_audits(vec![
+        sample_audit(
+            &opportunity_id,
+            &market_id,
+            &event_id,
+            &token,
+            ChOpportunityAuditStage::Detected,
+            now,
+            1,
+        ),
+        sample_audit(
+            &opportunity_id,
+            &market_id,
+            &event_id,
+            &token,
+            ChOpportunityAuditStage::Filled,
+            now + 1,
+            2,
+        ),
+    ])
+    .await
+    .expect("insert audits");
 
     shutdown.cancel();
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -175,7 +341,7 @@ async fn evidence_timeseries_queries_roundtrip_core_fact_tables() {
         .unwrap();
     assert_eq!(l2.len(), 2);
     assert_eq!(
-        l2[0].sequence, 1,
+        l2.rows[0].sequence, 1,
         "same timestamp rows must be sequence ordered"
     );
 
@@ -184,9 +350,31 @@ async fn evidence_timeseries_queries_roundtrip_core_fact_tables() {
         .await
         .unwrap();
     assert_eq!(books.len(), 1);
-    assert_eq!(books[0].snapshot_reason, ChSnapshotReason::Periodic);
+    assert_eq!(books.rows[0].snapshot_reason, ChSnapshotReason::Periodic);
 
     let calibration = repo.calibration_snapshots(window).await.unwrap();
     assert_eq!(calibration.len(), 1);
-    assert!(calibration[0].posterior_mean.is_some());
+    assert!(calibration.rows[0].posterior_mean.is_some());
+
+    let filter = MarketFilter {
+        market_ids: vec![market_id.clone()],
+        event_ids: vec![event_id],
+        token_ids: vec![token],
+        categories: vec![ChMarketCategory::Politics],
+    };
+    let detections = repo.detections(filter.clone(), window).await.unwrap();
+    assert_eq!(detections.len(), 1);
+    assert_eq!(detections.rows[0].opportunity_id, opportunity_id);
+
+    let funnel = repo.audit_funnel(filter, window).await.unwrap();
+    assert_eq!(funnel.len(), 2);
+    assert_eq!(funnel.rows[0].stage, ChOpportunityAuditStage::Detected);
+    assert_eq!(funnel.rows[1].stage, ChOpportunityAuditStage::Filled);
+
+    let terminal = repo
+        .terminal_audits(std::slice::from_ref(&opportunity_id))
+        .await
+        .unwrap();
+    assert_eq!(terminal.len(), 1);
+    assert_eq!(terminal.rows[0].stage, ChOpportunityAuditStage::Filled);
 }

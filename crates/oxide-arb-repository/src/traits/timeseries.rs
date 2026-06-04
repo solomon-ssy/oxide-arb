@@ -1,13 +1,17 @@
 use chrono::{DateTime, Utc};
 use oxide_arb_error::storage::StorageError;
-use oxide_arb_models::clickhouse::{
-    BookSnapshotRow, CalibrationSnapshotRow, OpportunityAuditRow, OpportunityDetectionRow,
-    TickEventL2Row, TickEventRow,
-};
 use oxide_arb_models::enums::clickhouse::ChMarketCategory;
 use oxide_arb_models::types::{EventId, MarketId, OpportunityId, TokenId};
+use oxide_arb_models::{
+    clickhouse::{
+        BookSnapshotRow, CalibrationSnapshotRow, OpportunityAuditRow, OpportunityDetectionRow,
+        TickEventL2Row, TickEventRow,
+    },
+    domain::evidence::{EvidenceQueryResult, QueryContract},
+};
+use serde::Serialize;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize)]
 pub struct TimeWindow {
     pub from: DateTime<Utc>,
     pub to: DateTime<Utc>,
@@ -20,12 +24,35 @@ impl TimeWindow {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct MarketFilter {
     pub market_ids: Vec<MarketId>,
     pub event_ids: Vec<EventId>,
     pub token_ids: Vec<TokenId>,
-    pub category: Option<ChMarketCategory>,
+    pub categories: Vec<ChMarketCategory>,
+}
+
+pub fn evidence_query_result<T, P>(
+    repository: &str,
+    method: &str,
+    params: &P,
+    ordering: Vec<String>,
+    schema_version: Option<u32>,
+    rows: Vec<T>,
+) -> Result<EvidenceQueryResult<T>, StorageError>
+where
+    P: Serialize,
+{
+    let params_bytes =
+        serde_json::to_vec(params).map_err(|error| StorageError::Codec(error.to_string()))?;
+    let params_hash = format!(
+        "blake3:{}",
+        hex::encode(blake3::hash(&params_bytes).as_bytes())
+    );
+    Ok(EvidenceQueryResult::from_rows(
+        rows,
+        QueryContract::new(repository, method, params_hash, ordering, schema_version),
+    ))
 }
 
 #[async_trait::async_trait]
@@ -56,34 +83,45 @@ pub trait EvidenceTimeseriesRepository: Send + Sync {
         token_ids: &[TokenId],
         window: TimeWindow,
         limit: u64,
-    ) -> Result<Vec<TickEventRow>, StorageError>;
+    ) -> Result<EvidenceQueryResult<TickEventRow>, StorageError>;
 
     async fn l2_events(
         &self,
         token_ids: &[TokenId],
         window: TimeWindow,
-    ) -> Result<Vec<TickEventL2Row>, StorageError>;
+    ) -> Result<EvidenceQueryResult<TickEventL2Row>, StorageError>;
 
     async fn book_snapshots_before(
         &self,
         token_ids: &[TokenId],
         before: DateTime<Utc>,
         limit_per_token: usize,
-    ) -> Result<Vec<BookSnapshotRow>, StorageError>;
+    ) -> Result<EvidenceQueryResult<BookSnapshotRow>, StorageError>;
 
     async fn detections(
         &self,
         filter: MarketFilter,
         window: TimeWindow,
-    ) -> Result<Vec<OpportunityDetectionRow>, StorageError>;
+    ) -> Result<EvidenceQueryResult<OpportunityDetectionRow>, StorageError>;
 
     async fn audits(
         &self,
         opportunity_ids: &[OpportunityId],
-    ) -> Result<Vec<OpportunityAuditRow>, StorageError>;
+    ) -> Result<EvidenceQueryResult<OpportunityAuditRow>, StorageError>;
+
+    async fn terminal_audits(
+        &self,
+        opportunity_ids: &[OpportunityId],
+    ) -> Result<EvidenceQueryResult<OpportunityAuditRow>, StorageError>;
+
+    async fn audit_funnel(
+        &self,
+        filter: MarketFilter,
+        window: TimeWindow,
+    ) -> Result<EvidenceQueryResult<OpportunityAuditRow>, StorageError>;
 
     async fn calibration_snapshots(
         &self,
         window: TimeWindow,
-    ) -> Result<Vec<CalibrationSnapshotRow>, StorageError>;
+    ) -> Result<EvidenceQueryResult<CalibrationSnapshotRow>, StorageError>;
 }

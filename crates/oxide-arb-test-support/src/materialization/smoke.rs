@@ -1,0 +1,1336 @@
+//! End-to-end materialization smoke fixtures (synthetic CH/PG facts, no live infra).
+
+use std::sync::{Arc, Mutex};
+
+use async_trait::async_trait;
+use chrono::{DateTime, Duration, Utc};
+use oxide_arb_error::storage::StorageError;
+use oxide_arb_models::{
+    clickhouse::{
+        BookSnapshotRow, CalibrationSnapshotRow, ChBps, ChDecimal64, ChPrice, ChProbability,
+        ChSchemaVersion, ChShares, ChUsd, OpportunityAuditRow, OpportunityDetectionRow,
+        TickEventL2Row,
+    },
+    config::{CalibrationConfig, EndgameDetectionConfig},
+    domain::{
+        BalanceSnapshotInfo, DetectionRuntimeConfig, ExecutionRuntimeConfig, MarketPitSnapshotInfo,
+        OperatorRuntimeConfig, PositionInfo, PotentialLossInfo, ReconciliationReportInfo,
+        RiskAuditEventInfo, RiskLimitRuntimeConfig, RuntimeConfigDocument,
+        RuntimeConfigVersionInfo, SizingRuntimeConfig, TradeInfo,
+        control_factor::{
+            DataRequirements, MarketFilterSpec, MaterializationRunManifest, QualityGatePolicyRef,
+            ReplayAccountScope, RequiredInputDomain, RunTrigger, RuntimeConfigRef,
+            SimulationConfig, TimeWindowSpec,
+        },
+        settlement::NewResolutionEvent,
+        settlement::ResolutionEventInfo,
+    },
+    enums::{
+        clickhouse::{
+            ChAuditOutcome, ChBookEventType, ChDurationBucket, ChFactSource, ChMarketCategory,
+            ChOpportunityAuditStage, ChPriceZone, ChSettlementAccountingStatus,
+            ChSettlementOutcome, ChSettlementTrigger, ChSide, ChSnapshotReason,
+        },
+        common::{
+            ExecutionMode, LedgerStatus, MarketCategory, PositionStatus, RedeemStatus,
+            SettlementAccountingStatus, SettlementTrigger, Side, TradeState,
+        },
+        control_factor::{ControlFactorType, MaterializationOutputPolicy, MaterializationRunKind},
+        fact::BalanceSnapshotSource,
+        risk::{ReconciliationStatus, RiskAuditEventType},
+        runtime_config::RuntimeConfigVersionSource,
+    },
+    types::{
+        BalanceSnapshotId, EventId, ExecutionId, LedgerId, MarketId, OpportunityId, PositionId,
+        Price, ReservationId, RuntimeConfigVersionId, Shares, TokenBalanceSnapshotId, TokenId,
+        TradeId, Usd,
+    },
+};
+use oxide_arb_repository::traits::{
+    BalanceSnapshotRepository, ControlFactorRepository, PotentialLossRepository,
+    ReconciliationRepository, ResolutionEventRepository, RiskAuditRepository,
+    RuntimeConfigVersionRepository,
+};
+use rust_decimal_macros::dec;
+
+use super::fixtures::{FakeMarketRepository, fixed_time, market_snapshot};
+use crate::mocks::{MockPositionRepository, MockTimeseriesRepository, MockTradeRepository};
+
+pub const SMOKE_MARKET_ID: &str = "0xsmoke_acceptance";
+pub const SMOKE_YES_TOKEN: &str = "smoke_yes";
+pub const SMOKE_NO_TOKEN: &str = "smoke_no";
+pub const SMOKE_OPPORTUNITY_ID: &str = "opp_smoke_acceptance";
+pub const SMOKE_HOLDER: &str = "0xholder_smoke";
+
+#[must_use]
+pub fn smoke_simulation_config() -> SimulationConfig {
+    let mut config = SimulationConfig::production_default();
+    config.max_replay_gap_ms = 120_000;
+    config.stale_book_after_ms = 120_000;
+    config
+}
+
+/// Wall-clock window for the acceptance scenario.
+#[must_use]
+pub fn smoke_window() -> TimeWindowSpec {
+    let from = fixed_time(10);
+    let to = fixed_time(12);
+    TimeWindowSpec::new(from, to)
+}
+
+/// Manifest with production PIT inputs for all evidence stages.
+#[must_use]
+pub fn smoke_manifest() -> MaterializationRunManifest {
+    let as_of = smoke_window().to;
+    MaterializationRunManifest {
+        run_id: oxide_arb_models::types::MaterializationRunId::new_v7(),
+        run_kind: MaterializationRunKind::Scheduled,
+        trigger: RunTrigger::Scheduled {
+            schedule_id: "phase5.3-smoke".to_owned(),
+        },
+        window: smoke_window(),
+        source_delay_secs: 0,
+        markets: MarketFilterSpec {
+            market_ids: vec![MarketId::new(SMOKE_MARKET_ID)],
+            event_ids: vec![EventId::new("evt_smoke")],
+            token_ids: Vec::new(),
+            categories: vec![MarketCategory::Politics],
+        },
+        replay_account_scope: Some(ReplayAccountScope {
+            holder_address: SMOKE_HOLDER.to_owned(),
+        }),
+        requested_factor_types: vec![
+            ControlFactorType::BucketRisk,
+            ControlFactorType::ExecutionQuality,
+            ControlFactorType::PortfolioRisk,
+            ControlFactorType::ReconciliationHealth,
+        ],
+        data_requirements: DataRequirements {
+            required_inputs: vec![
+                RequiredInputDomain::TokenMapping,
+                RequiredInputDomain::RuntimeConfig,
+                RequiredInputDomain::CalibrationSnapshots,
+                RequiredInputDomain::FeeSchedule,
+                RequiredInputDomain::Trades,
+                RequiredInputDomain::Positions,
+                RequiredInputDomain::RiskState,
+                RequiredInputDomain::BalanceSnapshot,
+                RequiredInputDomain::TokenBalanceSnapshot,
+                RequiredInputDomain::SettlementTruth,
+                RequiredInputDomain::ReconciliationStatus,
+            ],
+            production_required_inputs: vec![
+                RequiredInputDomain::TokenMapping,
+                RequiredInputDomain::RuntimeConfig,
+                RequiredInputDomain::CalibrationSnapshots,
+                RequiredInputDomain::FeeSchedule,
+                RequiredInputDomain::Trades,
+                RequiredInputDomain::Positions,
+                RequiredInputDomain::BalanceSnapshot,
+                RequiredInputDomain::TokenBalanceSnapshot,
+                RequiredInputDomain::SettlementTruth,
+                RequiredInputDomain::ReconciliationStatus,
+            ],
+            min_l2_coverage_ratio: None,
+            require_settlement_truth: true,
+            require_token_balances: true,
+        },
+        runtime_config_ref: RuntimeConfigRef::Version {
+            version_id: RuntimeConfigVersionId::new("rcv_smoke"),
+            config_hash: "blake3:smoke_cfg".to_owned(),
+        },
+        simulation_config: smoke_simulation_config(),
+        quality_gate_policy: QualityGatePolicyRef {
+            policy_hash: "blake3:smoke_gate".to_owned(),
+        },
+        output_policy: MaterializationOutputPolicy::NoFactorOutput,
+        code_git_sha: "smoke-local".to_owned(),
+        created_by: "phase5.3-smoke".to_owned(),
+        created_at: as_of,
+    }
+}
+
+/// In-memory repositories populated with a single endgame acceptance scenario.
+pub struct SmokeRepositories {
+    pub timeseries: Arc<MockTimeseriesRepository>,
+    pub trades: Arc<MockTradeRepository>,
+    pub positions: Arc<MockPositionRepository>,
+    pub runtime_config: Arc<SmokeRuntimeConfigRepository>,
+    pub balances: Arc<SmokeBalanceRepository>,
+    pub potential_loss: Arc<SmokePotentialLossRepository>,
+    pub risk_audit: Arc<SmokeRiskAuditRepository>,
+    pub reconciliation: Arc<SmokeReconciliationRepository>,
+    pub resolution_events: Arc<SmokeResolutionEventRepository>,
+    pub control_factors: Arc<SmokeControlFactorRepository>,
+    pub markets: FakeMarketRepository,
+}
+
+struct SmokeScenarioIds {
+    market_id: MarketId,
+    yes: TokenId,
+    no: TokenId,
+    opportunity_id: OpportunityId,
+    trade_id: TradeId,
+    decision_at: DateTime<Utc>,
+    decision_ms: i64,
+    from_ms: i64,
+    l2_ms: i64,
+}
+
+fn smoke_scenario_ids(window: &TimeWindowSpec) -> SmokeScenarioIds {
+    let decision_at = window.from + Duration::milliseconds(800);
+    let from_ms = window.from.timestamp_millis();
+    SmokeScenarioIds {
+        market_id: MarketId::new(SMOKE_MARKET_ID),
+        yes: TokenId::new(SMOKE_YES_TOKEN),
+        no: TokenId::new(SMOKE_NO_TOKEN),
+        opportunity_id: OpportunityId::new(SMOKE_OPPORTUNITY_ID),
+        trade_id: TradeId::new("trade_smoke"),
+        decision_at,
+        decision_ms: decision_at.timestamp_millis(),
+        from_ms,
+        l2_ms: from_ms + 500,
+    }
+}
+
+fn build_smoke_timeseries(ids: &SmokeScenarioIds) -> Arc<MockTimeseriesRepository> {
+    let timeseries = Arc::new(MockTimeseriesRepository::default());
+    timeseries.set_book_snapshots(vec![
+        book_snapshot(
+            SMOKE_YES_TOKEN,
+            ids.from_ms,
+            dec!(0.94),
+            dec!(10),
+            dec!(0.95),
+            dec!(10),
+        ),
+        book_snapshot(
+            SMOKE_NO_TOKEN,
+            ids.from_ms,
+            dec!(0.05),
+            dec!(10),
+            dec!(0.06),
+            dec!(10),
+        ),
+    ]);
+    // Ask size must cover filled_audit buy budget (94 USD @ 0.95) or StrictFok yields false_miss.
+    timeseries.set_l2_events(vec![
+        l2_delta(
+            SMOKE_YES_TOKEN,
+            ids.l2_ms,
+            dec!(0.94),
+            dec!(20),
+            dec!(0.95),
+            dec!(120),
+        ),
+        l2_delta(
+            SMOKE_NO_TOKEN,
+            ids.l2_ms,
+            dec!(0.05),
+            dec!(20),
+            dec!(0.06),
+            dec!(120),
+        ),
+    ]);
+    timeseries.set_detections(vec![detection_row(
+        &ids.opportunity_id,
+        &ids.market_id,
+        &ids.yes,
+        &ids.no,
+        ids.decision_ms,
+    )]);
+    timeseries.set_calibration_snapshots(vec![calibration_snapshot(ids.decision_ms)]);
+    timeseries.set_audits(vec![
+        filled_audit(
+            &ids.opportunity_id,
+            &ids.market_id,
+            &ids.yes,
+            &ids.trade_id,
+            ids.decision_ms,
+            dec!(94),
+        ),
+        settled_audit(
+            &ids.opportunity_id,
+            &ids.market_id,
+            &ids.yes,
+            &ids.trade_id,
+            ids.decision_ms + 3_600_000,
+        ),
+    ]);
+    timeseries
+}
+
+impl SmokeRepositories {
+    #[must_use]
+    pub fn build() -> Self {
+        let window = smoke_window();
+        let ids = smoke_scenario_ids(&window);
+        let timeseries = build_smoke_timeseries(&ids);
+
+        let trades = Arc::new(MockTradeRepository::default());
+        trades.insert(smoke_trade(
+            &ids.trade_id,
+            &ids.opportunity_id,
+            &ids.market_id,
+            &ids.yes,
+            ids.decision_at,
+        ));
+
+        let positions = Arc::new(MockPositionRepository::default());
+        let position_closed_at = window.to + Duration::minutes(5);
+        positions.insert(smoke_position(
+            &ids.trade_id,
+            &ids.market_id,
+            &ids.yes,
+            ids.decision_at,
+            position_closed_at,
+        ));
+
+        Self {
+            timeseries,
+            trades,
+            positions,
+            runtime_config: Arc::new(SmokeRuntimeConfigRepository),
+            balances: Arc::new(SmokeBalanceRepository::new(ids.decision_at, window.to)),
+            potential_loss: Arc::new(SmokePotentialLossRepository::new(
+                &ids.market_id,
+                &ids.yes,
+                window.from,
+            )),
+            risk_audit: Arc::new(SmokeRiskAuditRepository::new(
+                ids.decision_at,
+                &ids.opportunity_id,
+                &ids.trade_id,
+            )),
+            reconciliation: Arc::new(SmokeReconciliationRepository::new(ids.decision_at)),
+            resolution_events: Arc::new(SmokeResolutionEventRepository::new(
+                &ids.market_id,
+                window.to - Duration::minutes(1),
+            )),
+            control_factors: Arc::new(SmokeControlFactorRepository::default()),
+            markets: FakeMarketRepository {
+                snapshots: vec![smoke_market_snapshot(
+                    &ids.market_id,
+                    window.from + Duration::minutes(5),
+                    window.to + Duration::hours(24),
+                )],
+                current: Vec::new(),
+            },
+        }
+    }
+}
+
+#[must_use]
+pub fn smoke_runtime_config_version() -> RuntimeConfigVersionInfo {
+    let endgame = EndgameDetectionConfig {
+        high_threshold: dec!(0.94),
+        min_convergence_duration_secs: 1,
+        ..Default::default()
+    };
+    RuntimeConfigVersionInfo {
+        runtime_config_version_id: RuntimeConfigVersionId::new("rcv_smoke"),
+        config_hash: "blake3:smoke_cfg".to_owned(),
+        schema_version: 1,
+        config_json: serde_json::to_value(RuntimeConfigDocument {
+            schema_version: 1,
+            operator: OperatorRuntimeConfig {
+                maintenance_mode: false,
+                dry_run_mode: true,
+            },
+            detection: DetectionRuntimeConfig {
+                min_profit_threshold_usd: dec!(0),
+                endgame_hours_before_close: 24,
+                convergence_threshold: dec!(0.94),
+                endgame: Some(endgame),
+                calibration: Some(CalibrationConfig::default()),
+            },
+            execution: ExecutionRuntimeConfig {
+                max_slippage_bps: 0,
+                order_timeout_secs: 1,
+                cooldown_after_trade_secs: 0,
+            },
+            sizing: SizingRuntimeConfig {
+                kelly_fraction: dec!(1),
+                max_position_fraction_of_book: dec!(1),
+            },
+            risk_limits: RiskLimitRuntimeConfig {
+                max_portfolio_exposure_usd: Usd::new(dec!(10_000)),
+                max_single_position_usd: Usd::new(dec!(1_000)),
+                max_daily_loss_usd: Usd::new(dec!(1_000)),
+                circuit_breaker_threshold: 10,
+            },
+        })
+        .expect("smoke runtime config json"),
+        source: RuntimeConfigVersionSource::Operator,
+        created_by: "phase5.3-smoke".to_owned(),
+        reason: "acceptance scenario".to_owned(),
+        created_at: smoke_window().from,
+    }
+}
+
+pub struct SmokeRuntimeConfigRepository;
+
+#[async_trait]
+impl RuntimeConfigVersionRepository for SmokeRuntimeConfigRepository {
+    async fn create_version(
+        &self,
+        _version: oxide_arb_models::domain::NewRuntimeConfigVersion,
+    ) -> Result<RuntimeConfigVersionInfo, StorageError> {
+        Err(StorageError::Codec("not implemented".into()))
+    }
+
+    async fn activate_version(
+        &self,
+        _activation: oxide_arb_models::domain::NewRuntimeConfigActivation,
+    ) -> Result<oxide_arb_models::domain::RuntimeConfigActivationInfo, StorageError> {
+        Err(StorageError::Codec("not implemented".into()))
+    }
+
+    async fn load_version(
+        &self,
+        _version_id: &RuntimeConfigVersionId,
+    ) -> Result<Option<RuntimeConfigVersionInfo>, StorageError> {
+        Ok(Some(smoke_runtime_config_version()))
+    }
+
+    async fn load_by_hash(
+        &self,
+        _config_hash: &str,
+    ) -> Result<Option<RuntimeConfigVersionInfo>, StorageError> {
+        Ok(Some(smoke_runtime_config_version()))
+    }
+
+    async fn load_current(&self) -> Result<Option<RuntimeConfigVersionInfo>, StorageError> {
+        Ok(Some(smoke_runtime_config_version()))
+    }
+
+    async fn load_active_at(
+        &self,
+        _at: DateTime<Utc>,
+    ) -> Result<Option<RuntimeConfigVersionInfo>, StorageError> {
+        Ok(Some(smoke_runtime_config_version()))
+    }
+
+    async fn list_activations(
+        &self,
+        _limit: u64,
+    ) -> Result<Vec<oxide_arb_models::domain::RuntimeConfigActivationInfo>, StorageError> {
+        Ok(Vec::new())
+    }
+}
+
+pub struct SmokeBalanceRepository {
+    balance: BalanceSnapshotInfo,
+    token_balances: Vec<oxide_arb_models::domain::TokenBalanceSnapshotInfo>,
+}
+
+impl SmokeBalanceRepository {
+    fn new(observed_at: DateTime<Utc>, window_to: DateTime<Utc>) -> Self {
+        let market_id = MarketId::new(SMOKE_MARKET_ID);
+        let token_id = TokenId::new(SMOKE_YES_TOKEN);
+        Self {
+            balance: BalanceSnapshotInfo {
+                balance_snapshot_id: BalanceSnapshotId::new_v7(),
+                holder_address: SMOKE_HOLDER.to_owned(),
+                internal_available_usd: Usd::new(dec!(5_000)),
+                internal_reserved_usd: Usd::new(dec!(95)),
+                external_available_usd: Usd::new(dec!(5_000)),
+                external_locked_usd: Usd::ZERO,
+                drift_usd: Usd::ZERO,
+                source: BalanceSnapshotSource::InternalLedger,
+                block_number: None,
+                reconciliation_report_id: Some(1),
+                observed_at: window_to - Duration::minutes(1),
+                created_at: observed_at,
+            },
+            token_balances: vec![
+                token_balance_snapshot(&market_id, token_id, Side::Buy, observed_at, window_to),
+                token_balance_snapshot(
+                    &market_id,
+                    TokenId::new(SMOKE_NO_TOKEN),
+                    Side::Buy,
+                    observed_at,
+                    window_to,
+                ),
+            ],
+        }
+    }
+}
+
+#[async_trait]
+impl BalanceSnapshotRepository for SmokeBalanceRepository {
+    async fn create_balance_snapshot(
+        &self,
+        _snapshot: oxide_arb_models::domain::NewBalanceSnapshot,
+    ) -> Result<BalanceSnapshotInfo, StorageError> {
+        Err(StorageError::Codec("not implemented".into()))
+    }
+
+    async fn create_token_balance_snapshots(
+        &self,
+        _snapshots: Vec<oxide_arb_models::domain::NewTokenBalanceSnapshot>,
+    ) -> Result<Vec<oxide_arb_models::domain::TokenBalanceSnapshotInfo>, StorageError> {
+        Err(StorageError::Codec("not implemented".into()))
+    }
+
+    async fn latest_balance_before(
+        &self,
+        holder_address: &str,
+        before: DateTime<Utc>,
+    ) -> Result<Option<BalanceSnapshotInfo>, StorageError> {
+        if holder_address == SMOKE_HOLDER && self.balance.observed_at < before {
+            Ok(Some(self.balance.clone()))
+        } else {
+            Ok(None)
+        }
+    }
+
+    async fn latest_token_balance_before(
+        &self,
+        _holder_address: &str,
+        _market_id: &MarketId,
+        _token_id: &TokenId,
+        _before: DateTime<Utc>,
+    ) -> Result<Option<oxide_arb_models::domain::TokenBalanceSnapshotInfo>, StorageError> {
+        Ok(None)
+    }
+
+    async fn latest_token_balances_before(
+        &self,
+        holder_address: &str,
+        market_ids: &[MarketId],
+        token_ids: &[TokenId],
+        before: DateTime<Utc>,
+    ) -> Result<Vec<oxide_arb_models::domain::TokenBalanceSnapshotInfo>, StorageError> {
+        if holder_address != SMOKE_HOLDER {
+            return Ok(Vec::new());
+        }
+        Ok(self
+            .token_balances
+            .iter()
+            .filter(|row| {
+                row.observed_at < before
+                    && market_ids.contains(&row.market_id)
+                    && token_ids.contains(&row.token_id)
+            })
+            .cloned()
+            .collect())
+    }
+}
+
+pub struct SmokePotentialLossRepository {
+    baseline: Vec<PotentialLossInfo>,
+}
+
+impl SmokePotentialLossRepository {
+    fn new(market_id: &MarketId, token_id: &TokenId, at: DateTime<Utc>) -> Self {
+        Self {
+            baseline: vec![PotentialLossInfo {
+                ledger_id: LedgerId::new("pl_smoke"),
+                market_id: market_id.clone(),
+                token_id: token_id.clone(),
+                shares: Shares::new(dec!(100)),
+                entry_price: Price::new(dec!(0.94)),
+                max_loss_usd: Usd::new(dec!(6)),
+                status: LedgerStatus::Active,
+                created_at: at,
+                resolved_at: None,
+            }],
+        }
+    }
+}
+
+#[async_trait]
+impl PotentialLossRepository for SmokePotentialLossRepository {
+    async fn create(
+        &self,
+        _entry: oxide_arb_models::domain::NewPotentialLoss,
+    ) -> Result<PotentialLossInfo, StorageError> {
+        Err(StorageError::Codec("not implemented".into()))
+    }
+
+    async fn find_active(&self) -> Result<Vec<PotentialLossInfo>, StorageError> {
+        Ok(self.baseline.clone())
+    }
+
+    async fn find_active_as_of(
+        &self,
+        at: DateTime<Utc>,
+    ) -> Result<Vec<PotentialLossInfo>, StorageError> {
+        Ok(self
+            .baseline
+            .iter()
+            .filter(|row| row.created_at <= at)
+            .cloned()
+            .collect())
+    }
+
+    async fn find_changed_between(
+        &self,
+        _from: DateTime<Utc>,
+        _to: DateTime<Utc>,
+    ) -> Result<Vec<PotentialLossInfo>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn find_by_market(
+        &self,
+        market_id: &MarketId,
+    ) -> Result<Vec<PotentialLossInfo>, StorageError> {
+        Ok(self
+            .baseline
+            .iter()
+            .filter(|row| &row.market_id == market_id)
+            .cloned()
+            .collect())
+    }
+
+    async fn resolve(
+        &self,
+        _ledger_id: &LedgerId,
+        _command: oxide_arb_models::domain::ResolvePotentialLoss,
+    ) -> Result<PotentialLossInfo, StorageError> {
+        Err(StorageError::Codec("not implemented".into()))
+    }
+
+    async fn total_active_loss(&self) -> Result<Usd, StorageError> {
+        Ok(self
+            .baseline
+            .iter()
+            .map(|row| row.max_loss_usd)
+            .fold(Usd::ZERO, |acc, value| acc + value))
+    }
+}
+
+pub struct SmokeRiskAuditRepository {
+    events: Vec<RiskAuditEventInfo>,
+}
+
+impl SmokeRiskAuditRepository {
+    fn new(at: DateTime<Utc>, opportunity_id: &OpportunityId, trade_id: &TradeId) -> Self {
+        Self {
+            events: vec![RiskAuditEventInfo {
+                id: 1,
+                event_type: RiskAuditEventType::TradeAllowed,
+                opportunity_id: Some(opportunity_id.clone()),
+                trade_id: Some(trade_id.clone()),
+                payload: serde_json::json!({}),
+                created_at: at,
+            }],
+        }
+    }
+}
+
+#[async_trait]
+impl RiskAuditRepository for SmokeRiskAuditRepository {
+    async fn create(
+        &self,
+        _event: oxide_arb_models::domain::NewRiskAuditEvent,
+    ) -> Result<(), StorageError> {
+        Ok(())
+    }
+
+    async fn create_batch(
+        &self,
+        _events: Vec<oxide_arb_models::domain::NewRiskAuditEvent>,
+    ) -> Result<(), StorageError> {
+        Ok(())
+    }
+
+    async fn find_between(
+        &self,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+    ) -> Result<Vec<RiskAuditEventInfo>, StorageError> {
+        Ok(self
+            .events
+            .iter()
+            .filter(|row| row.created_at >= from && row.created_at < to)
+            .cloned()
+            .collect())
+    }
+}
+
+pub struct SmokeReconciliationRepository {
+    reports: Vec<ReconciliationReportInfo>,
+}
+
+impl SmokeReconciliationRepository {
+    fn new(at: DateTime<Utc>) -> Self {
+        Self {
+            reports: vec![ReconciliationReportInfo {
+                id: 1,
+                status: ReconciliationStatus::Ok,
+                mismatches: serde_json::json!([]),
+                internal_balance: Usd::new(dec!(5_000)),
+                external_balance: Usd::new(dec!(5_000)),
+                internal_exposure: Usd::new(dec!(95)),
+                external_exposure: Usd::new(dec!(95)),
+                reserved: Usd::new(dec!(95)),
+                tolerance: Usd::new(dec!(1)),
+                checked_at: at,
+                duration_ms: 10,
+            }],
+        }
+    }
+}
+
+#[async_trait]
+impl ReconciliationRepository for SmokeReconciliationRepository {
+    async fn create(
+        &self,
+        _report: oxide_arb_models::domain::NewReconciliationReport,
+    ) -> Result<(), StorageError> {
+        Ok(())
+    }
+
+    async fn latest_before(
+        &self,
+        before: DateTime<Utc>,
+    ) -> Result<Option<ReconciliationReportInfo>, StorageError> {
+        Ok(self
+            .reports
+            .iter()
+            .filter(|row| row.checked_at < before)
+            .max_by_key(|row| row.checked_at)
+            .cloned())
+    }
+
+    async fn find_between(
+        &self,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+    ) -> Result<Vec<ReconciliationReportInfo>, StorageError> {
+        Ok(self
+            .reports
+            .iter()
+            .filter(|row| row.checked_at >= from && row.checked_at < to)
+            .cloned()
+            .collect())
+    }
+}
+
+pub struct SmokeResolutionEventRepository {
+    events: Vec<ResolutionEventInfo>,
+}
+
+impl SmokeResolutionEventRepository {
+    fn new(market_id: &MarketId, resolved_at: DateTime<Utc>) -> Self {
+        Self {
+            events: vec![ResolutionEventInfo {
+                resolution_id: "res_smoke".to_owned(),
+                market_id: market_id.clone(),
+                outcome: "yes".to_owned(),
+                source: "gamma".to_owned(),
+                gamma_agrees: Some(true),
+                ctf_agrees: Some(true),
+                evidence: None,
+                resolved_at,
+                created_at: resolved_at,
+            }],
+        }
+    }
+}
+
+#[async_trait]
+impl ResolutionEventRepository for SmokeResolutionEventRepository {
+    async fn append(&self, _event: NewResolutionEvent) -> Result<(), StorageError> {
+        Ok(())
+    }
+
+    async fn latest_for_market(
+        &self,
+        market_id: &MarketId,
+    ) -> Result<Option<ResolutionEventInfo>, StorageError> {
+        Ok(self
+            .events
+            .iter()
+            .find(|row| &row.market_id == market_id)
+            .cloned())
+    }
+
+    async fn latest_before(
+        &self,
+        market_id: &MarketId,
+        before: DateTime<Utc>,
+    ) -> Result<Option<ResolutionEventInfo>, StorageError> {
+        Ok(self
+            .events
+            .iter()
+            .filter(|row| &row.market_id == market_id && row.resolved_at < before)
+            .max_by_key(|row| row.resolved_at)
+            .cloned())
+    }
+
+    async fn latest_by_source(
+        &self,
+        _market_id: &MarketId,
+        _source: &str,
+    ) -> Result<Option<ResolutionEventInfo>, StorageError> {
+        Ok(None)
+    }
+}
+
+#[derive(Default)]
+pub struct SmokeControlFactorRepository {
+    stage_reports:
+        Mutex<Vec<oxide_arb_models::domain::control_factor::NewControlFactorStageReport>>,
+}
+
+#[async_trait]
+impl ControlFactorRepository for SmokeControlFactorRepository {
+    async fn enqueue_materialization_run(
+        &self,
+        _run: oxide_arb_models::domain::control_factor::NewControlFactorMaterializationRun,
+        _options: oxide_arb_models::domain::control_factor::EnqueueMaterializationRunOptions,
+    ) -> Result<
+        oxide_arb_models::domain::control_factor::EnqueueMaterializationRunOutcome,
+        StorageError,
+    > {
+        Err(StorageError::Codec("not implemented".into()))
+    }
+
+    async fn load_materialization_run(
+        &self,
+        _run_id: &oxide_arb_models::types::MaterializationRunId,
+    ) -> Result<
+        Option<oxide_arb_models::domain::control_factor::ControlFactorMaterializationRunInfo>,
+        StorageError,
+    > {
+        Ok(None)
+    }
+
+    async fn find_materialization_run_by_dedupe_key(
+        &self,
+        _dedupe_key: &str,
+    ) -> Result<
+        Option<oxide_arb_models::domain::control_factor::ControlFactorMaterializationRunInfo>,
+        StorageError,
+    > {
+        Ok(None)
+    }
+
+    async fn try_acquire_materialization_run(
+        &self,
+        _run_id: &oxide_arb_models::types::MaterializationRunId,
+        _started_at: DateTime<Utc>,
+    ) -> Result<
+        oxide_arb_models::domain::control_factor::AcquireMaterializationRunOutcome,
+        StorageError,
+    > {
+        Err(StorageError::Codec("not implemented".into()))
+    }
+
+    async fn retry_materialization_run(
+        &self,
+        _run_id: &oxide_arb_models::types::MaterializationRunId,
+    ) -> Result<oxide_arb_models::domain::control_factor::RunTransitionOutcome, StorageError> {
+        Err(StorageError::Codec("not implemented".into()))
+    }
+
+    async fn transition_materialization_run(
+        &self,
+        _run_id: &oxide_arb_models::types::MaterializationRunId,
+        _expected_from: oxide_arb_models::enums::control_factor::MaterializationRunStatus,
+        _target: oxide_arb_models::enums::control_factor::MaterializationRunStatus,
+        _patch: oxide_arb_models::domain::control_factor::MaterializationRunStatusPatch,
+    ) -> Result<oxide_arb_models::domain::control_factor::RunTransitionOutcome, StorageError> {
+        Err(StorageError::Codec("not implemented".into()))
+    }
+
+    async fn cancel_materialization_run(
+        &self,
+        _run_id: &oxide_arb_models::types::MaterializationRunId,
+        _reason: &str,
+        _cancelled_at: DateTime<Utc>,
+    ) -> Result<
+        oxide_arb_models::domain::control_factor::CancelMaterializationRunOutcome,
+        StorageError,
+    > {
+        Err(StorageError::Codec("not implemented".into()))
+    }
+
+    async fn upsert_stage_report(
+        &self,
+        report: oxide_arb_models::domain::control_factor::NewControlFactorStageReport,
+    ) -> Result<oxide_arb_models::domain::control_factor::ControlFactorStageReportInfo, StorageError>
+    {
+        let info = oxide_arb_models::domain::control_factor::ControlFactorStageReportInfo {
+            stage_report_id: report.stage_report_id.clone(),
+            materialization_run_id: report.materialization_run_id.clone(),
+            stage_name: report.stage_name,
+            status: report.status,
+            started_at: report.started_at,
+            finished_at: report.finished_at,
+            input_artifact_hashes: report.input_artifact_hashes.clone(),
+            output_artifact_hash: report.output_artifact_hash.clone(),
+            coverage: report.coverage.clone(),
+            metrics: report.metrics.clone(),
+            records_read: report.records_read,
+            records_written: report.records_written,
+            warnings: report.warnings.clone(),
+            errors: report.errors.clone(),
+            query_fingerprints: report.query_fingerprints.clone(),
+            created_at: Utc::now(),
+        };
+        self.stage_reports.lock().unwrap().push(report);
+        Ok(info)
+    }
+
+    async fn load_stage_report(
+        &self,
+        _run_id: &oxide_arb_models::types::MaterializationRunId,
+        _stage_name: oxide_arb_models::enums::control_factor::MaterializationStageName,
+    ) -> Result<
+        Option<oxide_arb_models::domain::control_factor::ControlFactorStageReportInfo>,
+        StorageError,
+    > {
+        Ok(None)
+    }
+
+    async fn list_stage_reports(
+        &self,
+        _run_id: &oxide_arb_models::types::MaterializationRunId,
+    ) -> Result<
+        Vec<oxide_arb_models::domain::control_factor::ControlFactorStageReportInfo>,
+        StorageError,
+    > {
+        Ok(Vec::new())
+    }
+
+    async fn create_factor(
+        &self,
+        _factor: oxide_arb_models::domain::control_factor::NewControlFactorValue,
+    ) -> Result<oxide_arb_models::domain::control_factor::ControlFactorValueInfo, StorageError>
+    {
+        Err(StorageError::Codec("not implemented".into()))
+    }
+
+    async fn transition_factor(
+        &self,
+        _factor_id: &oxide_arb_models::types::ControlFactorId,
+        _status: oxide_arb_models::enums::control_factor::FactorStatus,
+    ) -> Result<
+        Option<oxide_arb_models::domain::control_factor::ControlFactorValueInfo>,
+        StorageError,
+    > {
+        Ok(None)
+    }
+
+    async fn create_publication(
+        &self,
+        _publication: oxide_arb_models::domain::control_factor::NewControlFactorPublication,
+    ) -> Result<oxide_arb_models::domain::control_factor::ControlFactorPublicationInfo, StorageError>
+    {
+        Err(StorageError::Codec("not implemented".into()))
+    }
+
+    async fn activate_publication(
+        &self,
+        _publication_id: &oxide_arb_models::types::FactorPublicationId,
+        _actor: &str,
+        _reason: &str,
+    ) -> Result<oxide_arb_models::domain::control_factor::ControlFactorPublicationInfo, StorageError>
+    {
+        Err(StorageError::Codec("not implemented".into()))
+    }
+
+    async fn rollback_publication(
+        &self,
+        _active_publication_id: &oxide_arb_models::types::FactorPublicationId,
+        _target_publication_id: &oxide_arb_models::types::FactorPublicationId,
+        _actor: &str,
+        _reason: &str,
+    ) -> Result<oxide_arb_models::domain::control_factor::ControlFactorPublicationInfo, StorageError>
+    {
+        Err(StorageError::Codec("not implemented".into()))
+    }
+
+    async fn expire_factors(&self, _now: DateTime<Utc>) -> Result<u64, StorageError> {
+        Ok(0)
+    }
+
+    async fn append_audit_event(
+        &self,
+        _event: oxide_arb_models::domain::control_factor::NewControlFactorAuditEvent,
+    ) -> Result<oxide_arb_models::domain::control_factor::ControlFactorAuditEventInfo, StorageError>
+    {
+        Err(StorageError::Codec("not implemented".into()))
+    }
+
+    async fn load_active_publication(
+        &self,
+        _mode: oxide_arb_models::enums::control_factor::PublicationMode,
+    ) -> Result<
+        Option<oxide_arb_models::domain::control_factor::ControlFactorPublicationInfo>,
+        StorageError,
+    > {
+        Ok(None)
+    }
+}
+
+fn token_balance_snapshot(
+    market_id: &MarketId,
+    token_id: TokenId,
+    side: Side,
+    observed_at: DateTime<Utc>,
+    window_to: DateTime<Utc>,
+) -> oxide_arb_models::domain::TokenBalanceSnapshotInfo {
+    oxide_arb_models::domain::TokenBalanceSnapshotInfo {
+        token_balance_snapshot_id: TokenBalanceSnapshotId::new_v7(),
+        holder_address: SMOKE_HOLDER.to_owned(),
+        market_id: market_id.clone(),
+        token_id,
+        side,
+        internal_shares: Shares::new(dec!(100)),
+        external_shares: Some(Shares::new(dec!(100))),
+        drift_shares: Some(Shares::ZERO),
+        source: BalanceSnapshotSource::InternalLedger,
+        block_number: None,
+        reconciliation_report_id: Some(1),
+        observed_at: window_to - Duration::minutes(1),
+        created_at: observed_at,
+    }
+}
+
+fn smoke_market_snapshot(
+    market_id: &MarketId,
+    observed_at: DateTime<Utc>,
+    settlement_deadline: DateTime<Utc>,
+) -> MarketPitSnapshotInfo {
+    let mut snapshot = market_snapshot(market_id, SMOKE_YES_TOKEN, SMOKE_NO_TOKEN, observed_at);
+    snapshot.end_date = Some(settlement_deadline);
+    snapshot
+}
+
+fn book_snapshot(
+    token_id: &str,
+    event_time: i64,
+    bid: rust_decimal::Decimal,
+    bid_size: rust_decimal::Decimal,
+    ask: rust_decimal::Decimal,
+    ask_size: rust_decimal::Decimal,
+) -> BookSnapshotRow {
+    BookSnapshotRow {
+        token_id: TokenId::new(token_id),
+        market_id: Some(MarketId::new(SMOKE_MARKET_ID)),
+        snapshot_reason: ChSnapshotReason::Periodic,
+        top_n: 2,
+        bids_json: format!(r#"[["{bid}","{bid_size}"]]"#),
+        asks_json: format!(r#"[["{ask}","{ask_size}"]]"#),
+        bid_depth_usd: None,
+        ask_depth_usd: None,
+        mid_price: None,
+        spread_bps: None,
+        book_version: 1,
+        levels_count: 2,
+        event_time,
+        ingestion_time: event_time,
+        sequence: 1,
+        source: ChFactSource::WsSnapshot,
+        schema_version: ChSchemaVersion(1),
+    }
+}
+
+fn l2_delta(
+    token_id: &str,
+    event_time: i64,
+    bid_price: rust_decimal::Decimal,
+    bid_size: rust_decimal::Decimal,
+    ask_price: rust_decimal::Decimal,
+    ask_size: rust_decimal::Decimal,
+) -> TickEventL2Row {
+    TickEventL2Row {
+        token_id: TokenId::new(token_id),
+        market_id: Some(MarketId::new(SMOKE_MARKET_ID)),
+        event_type: ChBookEventType::Delta,
+        bid_prices: vec![ChPrice::from(Price::new(bid_price))],
+        bid_sizes: vec![ChShares::from(Shares::new(bid_size))],
+        ask_prices: vec![ChPrice::from(Price::new(ask_price))],
+        ask_sizes: vec![ChShares::from(Shares::new(ask_size))],
+        changed_levels_json: None,
+        book_version: 2,
+        levels_count: 2,
+        is_full_snapshot: false,
+        event_time,
+        ingestion_time: event_time,
+        sequence: 2,
+        source: ChFactSource::WsDelta,
+        schema_version: ChSchemaVersion(1),
+    }
+}
+
+fn detection_row(
+    opportunity_id: &OpportunityId,
+    market_id: &MarketId,
+    yes: &TokenId,
+    no: &TokenId,
+    detected_at: i64,
+) -> OpportunityDetectionRow {
+    OpportunityDetectionRow {
+        opportunity_id: opportunity_id.clone(),
+        market_id: market_id.clone(),
+        event_id: EventId::new("evt_smoke"),
+        token_id: yes.clone(),
+        token_yes: Some(yes.clone()),
+        token_no: Some(no.clone()),
+        side: ChSide::Buy,
+        entry_price: ChPrice::from(Price::new(dec!(0.94))),
+        edge_bps: ChBps::from(dec!(100)),
+        expected_net_profit_usd: ChUsd::from(Usd::new(dec!(1))),
+        net_profit_if_correct_usd: ChUsd::from(Usd::new(dec!(1))),
+        shares: ChShares::from(Shares::new(dec!(100))),
+        total_cost_usd: ChUsd::from(Usd::new(dec!(95))),
+        total_fees_usd: ChUsd::from(Usd::ZERO),
+        resolution_prob: ChProbability::from(dec!(0.95)),
+        confidence: ChProbability::from(dec!(0.95)),
+        fill_probability: Some(ChProbability::from(dec!(0.95))),
+        score: Some(1),
+        urgency_factor: Some(oxide_arb_models::clickhouse::ChFactor::from(dec!(1))),
+        category_weight: Some(oxide_arb_models::clickhouse::ChFactor::from(dec!(1))),
+        staleness_discount: Some(oxide_arb_models::clickhouse::ChFactor::from(dec!(1))),
+        depth_used_pct: oxide_arb_models::clickhouse::ChFactor::from(dec!(0.25)),
+        convergence_secs: 2,
+        category: ChMarketCategory::Politics,
+        price_zone: ChPriceZone::Z95,
+        duration_bucket: ChDurationBucket::Short,
+        calibration_sample_size: 1_000,
+        calibration_fallback_tier: 1,
+        calibration_alpha: ChDecimal64::from(dec!(2)),
+        calibration_beta: ChDecimal64::from(dec!(0.001)),
+        calibration_posterior_mean: ChProbability::from(dec!(0.995)),
+        calibration_snapshot_hash: Some("calibration_smoke".to_owned()),
+        book_age_ms: Some(0),
+        yes_book_version: Some(1),
+        no_book_version: Some(1),
+        control_publication_id: None,
+        score_components_json: "{}".to_owned(),
+        calibration_snapshot_json: "{}".to_owned(),
+        book_context_json: None,
+        applied_factors_json: None,
+        applied_factor_ids_json: None,
+        latency_trace_json: None,
+        missing_fields_json: None,
+        detected_at,
+        ingestion_time: detected_at,
+        sequence: 1,
+        schema_version: ChSchemaVersion(2),
+    }
+}
+
+fn calibration_snapshot(event_time: i64) -> CalibrationSnapshotRow {
+    CalibrationSnapshotRow {
+        category: ChMarketCategory::Politics,
+        price_zone: ChPriceZone::Z95,
+        duration_bucket: ChDurationBucket::Short,
+        total_count: 1_000,
+        correct_count: 1_000,
+        alpha_prior: ChDecimal64::from(dec!(2)),
+        beta_prior: ChDecimal64::from(dec!(0.001)),
+        posterior_mean: Some(ChProbability::from(dec!(0.995))),
+        fallback_tier: 1,
+        config_hash: "blake3:smoke_cfg".to_owned(),
+        snapshot_hash: "calibration_smoke".to_owned(),
+        event_time,
+        ingestion_time: event_time,
+        sequence: 1,
+        source: ChFactSource::CalibrationUpdater,
+        schema_version: ChSchemaVersion(1),
+    }
+}
+
+struct SmokeAuditRowSpec<'a> {
+    opportunity_id: &'a OpportunityId,
+    market_id: &'a MarketId,
+    token_id: &'a TokenId,
+    trade_id: &'a TradeId,
+    stage: ChOpportunityAuditStage,
+    stage_order: u8,
+    stage_at: i64,
+    outcome: Option<ChAuditOutcome>,
+    settlement_status: Option<ChSettlementOutcome>,
+    accounting_status: Option<ChSettlementAccountingStatus>,
+}
+
+fn filled_audit(
+    opportunity_id: &OpportunityId,
+    market_id: &MarketId,
+    token_id: &TokenId,
+    trade_id: &TradeId,
+    stage_at: i64,
+    total_cost: rust_decimal::Decimal,
+) -> OpportunityAuditRow {
+    let spec = SmokeAuditRowSpec {
+        opportunity_id,
+        market_id,
+        token_id,
+        trade_id,
+        stage: ChOpportunityAuditStage::Filled,
+        stage_order: 70_u8,
+        stage_at,
+        outcome: Some(ChAuditOutcome::Success),
+        settlement_status: None,
+        accounting_status: None,
+    };
+    let mut row = audit_row(&spec);
+    row.total_cost_usd = Some(ChUsd::from(Usd::new(total_cost)));
+    row
+}
+
+fn settled_audit(
+    opportunity_id: &OpportunityId,
+    market_id: &MarketId,
+    token_id: &TokenId,
+    trade_id: &TradeId,
+    stage_at: i64,
+) -> OpportunityAuditRow {
+    let spec = SmokeAuditRowSpec {
+        opportunity_id,
+        market_id,
+        token_id,
+        trade_id,
+        stage: ChOpportunityAuditStage::Settled,
+        stage_order: 100_u8,
+        stage_at,
+        outcome: None,
+        settlement_status: Some(ChSettlementOutcome::Won),
+        accounting_status: Some(ChSettlementAccountingStatus::Redeemed),
+    };
+    let mut row = audit_row(&spec);
+    row.payout_usd = Some(ChUsd::from(Usd::new(dec!(100))));
+    row.realized_pnl_usd = Some(ChUsd::from(Usd::new(dec!(4))));
+    row.winning_token_id = Some(token_id.clone());
+    row
+}
+
+fn audit_row(spec: &SmokeAuditRowSpec<'_>) -> OpportunityAuditRow {
+    OpportunityAuditRow {
+        opportunity_id: spec.opportunity_id.clone(),
+        execution_id: ExecutionId::generate(),
+        trade_id: Some(spec.trade_id.clone()),
+        market_id: spec.market_id.clone(),
+        event_id: EventId::new("evt_smoke"),
+        token_id: spec.token_id.clone(),
+        side: ChSide::Buy,
+        entry_price: Some(ChPrice::from(Price::new(dec!(0.95)))),
+        fill_price: Some(ChPrice::from(Price::new(dec!(0.94)))),
+        requested_shares: Some(ChShares::from(Shares::new(dec!(100)))),
+        filled_shares: Some(ChShares::from(Shares::new(dec!(100)))),
+        total_cost_usd: Some(ChUsd::from(Usd::new(dec!(94)))),
+        fees_usd: Some(ChUsd::from(Usd::ZERO)),
+        net_profit_usd: None,
+        expected_profit_usd: None,
+        edge_bps: None,
+        resolution_prob: None,
+        confidence: None,
+        fill_probability: None,
+        convergence_secs: None,
+        price_zone: None,
+        duration_bucket: None,
+        depth_used_pct: None,
+        staleness: None,
+        category: None,
+        stage: spec.stage,
+        stage_order: spec.stage_order,
+        stage_at: spec.stage_at,
+        payout_usd: None,
+        realized_pnl_usd: None,
+        settlement_status: spec.settlement_status,
+        settlement_trigger: Some(ChSettlementTrigger::from(SettlementTrigger::Ws)),
+        winning_token_id: None,
+        accounting_status: spec.accounting_status,
+        fee_source: None,
+        outcome: spec.outcome,
+        rejection_stage: None,
+        rejection_reason: None,
+        scored_snapshot_json: Some("{}".to_owned()),
+        book_context_json: None,
+        applied_factor_ids_json: None,
+        missing_fields_json: None,
+        detected_at: spec.stage_at.saturating_sub(1_800_000),
+        ingestion_time: spec.stage_at,
+        sequence: 1,
+        schema_version: ChSchemaVersion(2),
+        updated_at: spec.stage_at,
+    }
+}
+
+fn smoke_trade(
+    trade_id: &TradeId,
+    opportunity_id: &OpportunityId,
+    market_id: &MarketId,
+    token_id: &TokenId,
+    created_at: DateTime<Utc>,
+) -> TradeInfo {
+    TradeInfo {
+        trade_id: trade_id.clone(),
+        execution_id: ExecutionId::generate(),
+        reservation_id: ReservationId::new("res_smoke"),
+        opportunity_id: opportunity_id.clone(),
+        market_id: market_id.clone(),
+        event_id: EventId::new("evt_smoke"),
+        token_id: token_id.clone(),
+        side: Side::Buy,
+        shares: Shares::new(dec!(100)),
+        price: Price::new(dec!(0.94)),
+        cost_usd: Usd::new(dec!(94)),
+        fee_usd: Usd::ZERO,
+        detected_edge_bps: None,
+        detected_profit_usd: None,
+        net_profit_usd: None,
+        order_id: None,
+        tx_hash: None,
+        state: TradeState::Settled,
+        business_outcome: None,
+        scored_snapshot: serde_json::json!({}),
+        category: MarketCategory::Politics,
+        needs_reconcile: false,
+        post_trade_claim_owner: None,
+        post_trade_claimed_at: None,
+        post_trade_attempts: 0,
+        execution_mode: ExecutionMode::DryRun,
+        latency_ms: None,
+        error_message: None,
+        submitted_at: Some(created_at),
+        confirmed_at: Some(created_at),
+        created_at,
+        updated_at: created_at,
+    }
+}
+
+fn smoke_position(
+    trade_id: &TradeId,
+    market_id: &MarketId,
+    token_id: &TokenId,
+    opened_at: DateTime<Utc>,
+    settled_at: DateTime<Utc>,
+) -> PositionInfo {
+    PositionInfo {
+        position_id: PositionId::new("pos_smoke"),
+        trade_id: trade_id.clone(),
+        market_id: market_id.clone(),
+        token_id: token_id.clone(),
+        side: Side::Buy,
+        shares: Shares::new(dec!(100)),
+        avg_entry_price: Price::new(dec!(0.94)),
+        total_cost_usd: Usd::new(dec!(94)),
+        total_fees_usd: Usd::ZERO,
+        unrealized_pnl: Usd::ZERO,
+        realized_pnl: Usd::new(dec!(4)),
+        status: PositionStatus::Settled,
+        opened_at,
+        closed_at: Some(settled_at),
+        settled_at: Some(settled_at),
+        winning_token_id: Some(token_id.clone()),
+        settlement_payout_usd: Some(Usd::new(dec!(100))),
+        redeem_tx_hash: None,
+        redeem_status: RedeemStatus::Completed,
+        redeem_attempts: 0,
+        oracle_verdict: None,
+        settlement_trigger: Some(SettlementTrigger::Ws),
+        settlement_accounting_status: SettlementAccountingStatus::Redeemed,
+        settlement_accounting_error: None,
+        settlement_accounted_at: Some(settled_at),
+        redeem_terminal_reason: None,
+    }
+}

@@ -9,7 +9,7 @@ use oxide_arb_models::{
 };
 use sea_orm::{
     ColumnTrait, ConnectionTrait, DatabaseConnection, DatabaseTransaction, DeriveIntoActiveModel,
-    EntityTrait, IntoActiveModel, QueryFilter,
+    EntityTrait, IntoActiveModel, QueryFilter, QueryOrder,
 };
 
 pub struct PgPotentialLossRepository {
@@ -52,10 +52,47 @@ pub(crate) async fn do_create(
 async fn do_find_active(db: &impl ConnectionTrait) -> Result<Vec<PotentialLossInfo>, StorageError> {
     Entity::find()
         .filter(Column::Status.eq(LedgerStatus::Active))
+        .order_by_asc(Column::CreatedAt)
+        .order_by_asc(Column::LedgerId)
         .all(db)
         .await
         .map_err(StorageError::from)
         .map(|v| v.into_iter().map(Into::into).collect())
+}
+
+async fn do_find_active_as_of(
+    db: &impl ConnectionTrait,
+    at: DateTime<Utc>,
+) -> Result<Vec<PotentialLossInfo>, StorageError> {
+    Entity::find()
+        .filter(Column::CreatedAt.lte(at))
+        .filter(Column::ResolvedAt.is_null().or(Column::ResolvedAt.gt(at)))
+        .order_by_asc(Column::CreatedAt)
+        .order_by_asc(Column::LedgerId)
+        .all(db)
+        .await
+        .map_err(StorageError::from)
+        .map(|rows| rows.into_iter().map(Into::into).collect())
+}
+
+async fn do_find_changed_between(
+    db: &impl ConnectionTrait,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+) -> Result<Vec<PotentialLossInfo>, StorageError> {
+    Entity::find()
+        .filter(
+            Column::CreatedAt
+                .gte(from)
+                .and(Column::CreatedAt.lt(to))
+                .or(Column::ResolvedAt.gte(from).and(Column::ResolvedAt.lt(to))),
+        )
+        .order_by_asc(Column::CreatedAt)
+        .order_by_asc(Column::LedgerId)
+        .all(db)
+        .await
+        .map_err(StorageError::from)
+        .map(|rows| rows.into_iter().map(Into::into).collect())
 }
 
 async fn do_find_by_market(
@@ -117,6 +154,21 @@ impl PotentialLossRepository for PgPotentialLossRepository {
         do_find_active(&self.db).await
     }
 
+    async fn find_active_as_of(
+        &self,
+        at: DateTime<Utc>,
+    ) -> Result<Vec<PotentialLossInfo>, StorageError> {
+        do_find_active_as_of(&self.db, at).await
+    }
+
+    async fn find_changed_between(
+        &self,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+    ) -> Result<Vec<PotentialLossInfo>, StorageError> {
+        do_find_changed_between(&self.db, from, to).await
+    }
+
     async fn find_by_market(
         &self,
         market_id: &MarketId,
@@ -145,6 +197,21 @@ impl PotentialLossRepository for PgPotentialLossRepositoryTxn<'_> {
 
     async fn find_active(&self) -> Result<Vec<PotentialLossInfo>, StorageError> {
         do_find_active(self.txn).await
+    }
+
+    async fn find_active_as_of(
+        &self,
+        at: DateTime<Utc>,
+    ) -> Result<Vec<PotentialLossInfo>, StorageError> {
+        do_find_active_as_of(self.txn, at).await
+    }
+
+    async fn find_changed_between(
+        &self,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+    ) -> Result<Vec<PotentialLossInfo>, StorageError> {
+        do_find_changed_between(self.txn, from, to).await
     }
 
     async fn find_by_market(

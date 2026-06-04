@@ -5,6 +5,12 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    clickhouse::CalibrationSnapshotRow,
+    domain::{
+        BalanceSnapshotInfo, PositionInfo, PotentialLossInfo, ReconciliationReportInfo,
+        RiskAuditEventInfo, RuntimeConfigVersionInfo, TokenBalanceSnapshotInfo, TradeInfo,
+        settlement::ResolutionEventInfo,
+    },
     enums::{
         common::MarketCategory,
         control_factor::{
@@ -203,10 +209,84 @@ pub enum RuntimeConfigRef {
     },
 }
 
-/// Hash-only simulation policy reference for deterministic manifest identity.
+/// Deterministic replay and stress policy pinned into a materialization manifest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SimulationConfig {
-    pub config_hash: String,
+    pub max_replay_gap_ms: u64,
+    pub stale_book_after_ms: u64,
+    pub snapshot_limit_per_token: usize,
+    pub fill_models: Vec<ReplayFillModel>,
+    pub latency_buckets: Vec<LatencyBucketSpec>,
+    pub adverse_selection_bps: Vec<u32>,
+    pub exit_policy: ExitSimulationPolicy,
+}
+
+impl SimulationConfig {
+    #[must_use]
+    pub fn production_default() -> Self {
+        Self {
+            max_replay_gap_ms: 1_000,
+            stale_book_after_ms: 5_000,
+            snapshot_limit_per_token: 1,
+            fill_models: vec![
+                ReplayFillModel::StrictFok,
+                ReplayFillModel::LatencyShiftedFok,
+                ReplayFillModel::DepthWeighted,
+                ReplayFillModel::AdverseSelectionStress,
+            ],
+            latency_buckets: vec![
+                LatencyBucketSpec {
+                    name: "p50".to_owned(),
+                    shift_ms: 100,
+                },
+                LatencyBucketSpec {
+                    name: "p95".to_owned(),
+                    shift_ms: 500,
+                },
+            ],
+            adverse_selection_bps: vec![25, 50, 100],
+            exit_policy: ExitSimulationPolicy::report_only_default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplayFillModel {
+    StrictFok,
+    DepthWeighted,
+    LatencyShiftedFok,
+    AdverseSelectionStress,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LatencyBucketSpec {
+    pub name: String,
+    pub shift_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExitSimulationPolicy {
+    pub enabled: bool,
+    pub fixed_stop_bps: Option<u32>,
+    pub trailing_stop_bps: Option<u32>,
+    pub time_stop_secs: Option<u64>,
+    pub zone_invalidation_grace_secs: Option<u64>,
+    pub min_bid_depth_shares: Option<Decimal>,
+}
+
+impl ExitSimulationPolicy {
+    #[must_use]
+    pub const fn report_only_default() -> Self {
+        Self {
+            enabled: true,
+            fixed_stop_bps: Some(500),
+            trailing_stop_bps: Some(250),
+            time_stop_secs: Some(86_400),
+            zone_invalidation_grace_secs: Some(300),
+            min_bid_depth_shares: None,
+        }
+    }
 }
 
 /// Hash-only quality gate policy reference for deterministic manifest identity.
@@ -251,14 +331,6 @@ impl MaterializationRunManifest {
     pub const fn trigger_type(&self) -> RunTriggerType {
         self.trigger.trigger_type()
     }
-}
-
-/// Input passed to one materialization stage.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct StageInput<T> {
-    pub run_id: MaterializationRunId,
-    pub manifest: MaterializationRunManifest,
-    pub prior: Option<T>,
 }
 
 /// Output returned by one materialization stage.
@@ -412,12 +484,13 @@ impl PointInTimeInputManifest {
 }
 
 /// Output artifact of the `resolve_inputs` stage.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InputResolutionReport {
     pub run_id: MaterializationRunId,
     pub window: TimeWindowSpec,
     pub manifest: PointInTimeInputManifest,
     pub market_contexts: Vec<MarketReplayContext>,
+    pub source_bundle: EvidenceSourceBundle,
 }
 
 /// Market/token replay context resolved point-in-time.
@@ -428,14 +501,53 @@ pub struct MarketReplayContext {
     pub yes_token_id: TokenId,
     pub no_token_id: TokenId,
     pub category: Option<MarketCategory>,
+    pub settlement_deadline: Option<DateTime<Utc>>,
     pub resolved_as_of: DateTime<Utc>,
     pub source_hash: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EvidenceSourceBundle {
+    pub runtime_config: Option<RuntimeConfigVersionInfo>,
+    pub calibration_snapshots: Vec<CalibrationSnapshotRow>,
+    pub trades: Vec<TradeInfo>,
+    pub positions: Vec<PositionInfo>,
+    pub potential_loss_baseline: Vec<PotentialLossInfo>,
+    pub potential_loss_changes: Vec<PotentialLossInfo>,
+    pub risk_audit_events: Vec<RiskAuditEventInfo>,
+    pub balance_snapshot: Option<BalanceSnapshotInfo>,
+    pub token_balance_snapshots: Vec<TokenBalanceSnapshotInfo>,
+    pub settlement_truth: Vec<ResolutionEventInfo>,
+    pub reconciliation_reports: Vec<ReconciliationReportInfo>,
+    pub query_fingerprints: Vec<QueryFingerprint>,
+}
+
+impl EvidenceSourceBundle {
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self {
+            runtime_config: None,
+            calibration_snapshots: Vec::new(),
+            trades: Vec::new(),
+            positions: Vec::new(),
+            potential_loss_baseline: Vec::new(),
+            potential_loss_changes: Vec::new(),
+            risk_audit_events: Vec::new(),
+            balance_snapshot: None,
+            token_balance_snapshots: Vec::new(),
+            settlement_truth: Vec::new(),
+            reconciliation_reports: Vec::new(),
+            query_fingerprints: Vec::new(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use crate::enums::control_factor::MaterializationErrorCode;
     use std::str::FromStr;
+
+    use super::SimulationConfig;
+    use crate::enums::control_factor::{MaterializationErrorCode, MaterializationStageName};
 
     #[test]
     fn stable_error_code_round_trips_as_string() {
@@ -453,5 +565,29 @@ mod tests {
             MaterializationErrorCode::from_str("ch.coverage_l2_insufficient").expect("known code");
         assert!(code.is_retryable());
         assert!(!code.is_fatal_for_production());
+    }
+
+    #[test]
+    fn phase_53_stage_names_round_trip() {
+        assert_eq!(
+            MaterializationStageName::ExitTokenEvidence.as_str(),
+            "exit_token_evidence"
+        );
+        assert_eq!(
+            MaterializationStageName::TrainingExampleBuild.as_str(),
+            "training_example_build"
+        );
+        let encoded = serde_json::to_string(&MaterializationStageName::ExitTokenEvidence)
+            .expect("serialize stage");
+        assert_eq!(encoded, "\"exit_token_evidence\"");
+    }
+
+    #[test]
+    fn simulation_config_is_typed_not_hash_only() {
+        let config = SimulationConfig::production_default();
+        assert!(config.max_replay_gap_ms > 0);
+        assert!(config.stale_book_after_ms >= config.max_replay_gap_ms);
+        assert!(!config.fill_models.is_empty());
+        assert!(config.exit_policy.enabled);
     }
 }

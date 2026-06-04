@@ -12,6 +12,7 @@ use oxide_arb_models::{
         CalibrationBucketInfo, CalibrationOutcomeInfo, MarkRedeemedParams, NewCalibrationOutcome,
         NewPosition, NewTrade, PositionInfo, PositionPatch, ReportTradeStats, SettlePositionParams,
         SettledPositionStats, TradeInfo, TradeObservation, UpsertCalibration,
+        evidence::EvidenceQueryResult,
     },
     enums::{
         calibration::{DurationBucket, PriceZone},
@@ -24,10 +25,10 @@ use oxide_arb_models::{
 };
 use oxide_arb_repository::traits::{
     CalibrationRepository, EvidenceTimeseriesRepository, MarketFilter, PositionRepository,
-    TimeWindow, TimeseriesFactWriter, TradeRepository,
+    TimeWindow, TimeseriesFactWriter, TradeRepository, evidence_query_result,
 };
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{
         Mutex,
         atomic::{AtomicBool, Ordering},
@@ -43,6 +44,13 @@ pub struct MockTradeRepository {
 }
 
 impl MockTradeRepository {
+    pub fn insert(&self, trade: TradeInfo) {
+        self.trades
+            .lock()
+            .unwrap()
+            .insert(trade.trade_id.to_string(), trade);
+    }
+
     pub fn fail_create(&self) {
         self.create_should_fail.store(true, Ordering::Relaxed);
     }
@@ -87,6 +95,13 @@ impl MockCalibrationRepository {
 }
 
 impl MockPositionRepository {
+    pub fn insert(&self, position: PositionInfo) {
+        self.positions
+            .lock()
+            .unwrap()
+            .insert(position.position_id.to_string(), position);
+    }
+
     pub fn positions_snapshot(&self) -> Vec<PositionInfo> {
         self.positions.lock().unwrap().values().cloned().collect()
     }
@@ -943,11 +958,35 @@ impl TradeRepository for MockTradeRepository {
 #[derive(Default)]
 pub struct MockTimeseriesRepository {
     audits: Mutex<Vec<OpportunityAuditRow>>,
+    book_snapshots: Mutex<Vec<BookSnapshotRow>>,
+    l2_events: Mutex<Vec<TickEventL2Row>>,
+    detections: Mutex<Vec<OpportunityDetectionRow>>,
+    calibration_snapshots: Mutex<Vec<CalibrationSnapshotRow>>,
 }
 
 impl MockTimeseriesRepository {
     pub fn audit_rows(&self) -> Vec<OpportunityAuditRow> {
         self.audits.lock().unwrap().clone()
+    }
+
+    pub fn set_book_snapshots(&self, rows: Vec<BookSnapshotRow>) {
+        *self.book_snapshots.lock().unwrap() = rows;
+    }
+
+    pub fn set_l2_events(&self, rows: Vec<TickEventL2Row>) {
+        *self.l2_events.lock().unwrap() = rows;
+    }
+
+    pub fn set_detections(&self, rows: Vec<OpportunityDetectionRow>) {
+        *self.detections.lock().unwrap() = rows;
+    }
+
+    pub fn set_calibration_snapshots(&self, rows: Vec<CalibrationSnapshotRow>) {
+        *self.calibration_snapshots.lock().unwrap() = rows;
+    }
+
+    pub fn set_audits(&self, rows: Vec<OpportunityAuditRow>) {
+        *self.audits.lock().unwrap() = rows;
     }
 }
 
@@ -989,60 +1028,255 @@ impl TimeseriesFactWriter for MockTimeseriesRepository {
 impl EvidenceTimeseriesRepository for MockTimeseriesRepository {
     async fn tick_events(
         &self,
-        _token_ids: &[TokenId],
-        _window: TimeWindow,
-        _limit: u64,
-    ) -> Result<Vec<TickEventRow>, StorageError> {
-        Ok(vec![])
+        token_ids: &[TokenId],
+        window: TimeWindow,
+        limit: u64,
+    ) -> Result<EvidenceQueryResult<TickEventRow>, StorageError> {
+        evidence_query_result(
+            "MockTimeseriesRepository",
+            "tick_events",
+            &(token_ids, window, limit),
+            vec!["event_time ASC".to_owned()],
+            Some(2),
+            Vec::new(),
+        )
     }
 
     async fn l2_events(
         &self,
-        _token_ids: &[TokenId],
-        _window: TimeWindow,
-    ) -> Result<Vec<TickEventL2Row>, StorageError> {
-        Ok(vec![])
+        token_ids: &[TokenId],
+        window: TimeWindow,
+    ) -> Result<EvidenceQueryResult<TickEventL2Row>, StorageError> {
+        let token_set: HashSet<_> = token_ids.iter().collect();
+        let from_ms = window.from.timestamp_millis();
+        let to_ms = window.to.timestamp_millis();
+        let mut rows = self
+            .l2_events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|row| {
+                token_set.contains(&row.token_id)
+                    && row.event_time >= from_ms
+                    && row.event_time < to_ms
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        rows.sort_by(|left, right| {
+            left.event_time
+                .cmp(&right.event_time)
+                .then(left.ingestion_time.cmp(&right.ingestion_time))
+                .then(left.sequence.cmp(&right.sequence))
+        });
+        evidence_query_result(
+            "MockTimeseriesRepository",
+            "l2_events",
+            &(token_ids, window),
+            vec!["event_time ASC".to_owned()],
+            Some(2),
+            rows,
+        )
     }
 
     async fn book_snapshots_before(
         &self,
-        _token_ids: &[TokenId],
-        _before: chrono::DateTime<Utc>,
-        _limit_per_token: usize,
-    ) -> Result<Vec<BookSnapshotRow>, StorageError> {
-        Ok(vec![])
+        token_ids: &[TokenId],
+        before: chrono::DateTime<Utc>,
+        limit_per_token: usize,
+    ) -> Result<EvidenceQueryResult<BookSnapshotRow>, StorageError> {
+        let before_ms = before.timestamp_millis();
+        let mut rows = Vec::new();
+        for token_id in token_ids {
+            let mut token_rows = self
+                .book_snapshots
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|row| &row.token_id == token_id && row.event_time <= before_ms)
+                .cloned()
+                .collect::<Vec<_>>();
+            token_rows.sort_by(|left, right| {
+                right
+                    .event_time
+                    .cmp(&left.event_time)
+                    .then(right.ingestion_time.cmp(&left.ingestion_time))
+            });
+            token_rows.truncate(limit_per_token);
+            rows.extend(token_rows);
+        }
+        rows.sort_by(|left, right| {
+            left.token_id
+                .as_str()
+                .cmp(right.token_id.as_str())
+                .then(right.event_time.cmp(&left.event_time))
+        });
+        evidence_query_result(
+            "MockTimeseriesRepository",
+            "book_snapshots_before",
+            &(token_ids, before, limit_per_token),
+            vec!["token_id ASC".to_owned(), "event_time DESC".to_owned()],
+            Some(2),
+            rows,
+        )
     }
 
     async fn detections(
         &self,
-        _filter: MarketFilter,
-        _window: TimeWindow,
-    ) -> Result<Vec<OpportunityDetectionRow>, StorageError> {
-        Ok(vec![])
+        filter: MarketFilter,
+        window: TimeWindow,
+    ) -> Result<EvidenceQueryResult<OpportunityDetectionRow>, StorageError> {
+        let from_ms = window.from.timestamp_millis();
+        let to_ms = window.to.timestamp_millis();
+        let mut rows = self
+            .detections
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|row| {
+                row.detected_at >= from_ms
+                    && row.detected_at < to_ms
+                    && (filter.market_ids.is_empty() || filter.market_ids.contains(&row.market_id))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        rows.sort_by(|left, right| {
+            left.detected_at
+                .cmp(&right.detected_at)
+                .then(left.ingestion_time.cmp(&right.ingestion_time))
+                .then(left.sequence.cmp(&right.sequence))
+        });
+        evidence_query_result(
+            "MockTimeseriesRepository",
+            "detections",
+            &(filter, window),
+            vec!["detected_at ASC".to_owned()],
+            Some(2),
+            rows,
+        )
     }
 
     async fn audits(
         &self,
         opportunity_ids: &[OpportunityId],
-    ) -> Result<Vec<OpportunityAuditRow>, StorageError> {
+    ) -> Result<EvidenceQueryResult<OpportunityAuditRow>, StorageError> {
         let ids = opportunity_ids
             .iter()
             .cloned()
             .collect::<std::collections::HashSet<_>>();
-        Ok(self
+        let rows = self
             .audits
             .lock()
             .unwrap()
             .iter()
             .filter(|row| ids.contains(&row.opportunity_id))
             .cloned()
-            .collect())
+            .collect();
+        evidence_query_result(
+            "MockTimeseriesRepository",
+            "audits",
+            &opportunity_ids,
+            vec!["stage_at ASC".to_owned()],
+            Some(2),
+            rows,
+        )
+    }
+
+    async fn terminal_audits(
+        &self,
+        opportunity_ids: &[OpportunityId],
+    ) -> Result<EvidenceQueryResult<OpportunityAuditRow>, StorageError> {
+        let mut rows = self.audits(opportunity_ids).await?.rows;
+        rows.retain(|row| {
+            matches!(
+                row.stage,
+                oxide_arb_models::enums::clickhouse::ChOpportunityAuditStage::Filled
+                    | oxide_arb_models::enums::clickhouse::ChOpportunityAuditStage::Missed
+                    | oxide_arb_models::enums::clickhouse::ChOpportunityAuditStage::Failed
+            )
+        });
+        rows.sort_by(|left, right| {
+            left.opportunity_id
+                .as_str()
+                .cmp(right.opportunity_id.as_str())
+                .then(right.stage_order.cmp(&left.stage_order))
+                .then(right.stage_at.cmp(&left.stage_at))
+                .then(right.ingestion_time.cmp(&left.ingestion_time))
+                .then(right.sequence.cmp(&left.sequence))
+        });
+        rows.dedup_by(|left, right| left.opportunity_id == right.opportunity_id);
+        evidence_query_result(
+            "MockTimeseriesRepository",
+            "terminal_audits",
+            &opportunity_ids,
+            vec![
+                "opportunity_id ASC".to_owned(),
+                "stage_order DESC".to_owned(),
+                "stage_at DESC".to_owned(),
+            ],
+            Some(2),
+            rows,
+        )
+    }
+
+    async fn audit_funnel(
+        &self,
+        filter: MarketFilter,
+        window: TimeWindow,
+    ) -> Result<EvidenceQueryResult<OpportunityAuditRow>, StorageError> {
+        let mut rows = self
+            .audits
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|row| {
+                row.detected_at >= window.from.timestamp_millis()
+                    && row.detected_at < window.to.timestamp_millis()
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        rows.sort_by(|left, right| {
+            left.stage_at
+                .cmp(&right.stage_at)
+                .then(left.ingestion_time.cmp(&right.ingestion_time))
+                .then(left.sequence.cmp(&right.sequence))
+        });
+        evidence_query_result(
+            "MockTimeseriesRepository",
+            "audit_funnel",
+            &(filter, window),
+            vec!["stage_at ASC".to_owned()],
+            Some(2),
+            rows,
+        )
     }
 
     async fn calibration_snapshots(
         &self,
-        _window: TimeWindow,
-    ) -> Result<Vec<CalibrationSnapshotRow>, StorageError> {
-        Ok(vec![])
+        window: TimeWindow,
+    ) -> Result<EvidenceQueryResult<CalibrationSnapshotRow>, StorageError> {
+        let from_ms = window.from.timestamp_millis();
+        let to_ms = window.to.timestamp_millis();
+        let mut rows = self
+            .calibration_snapshots
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|row| row.event_time >= from_ms && row.event_time < to_ms)
+            .cloned()
+            .collect::<Vec<_>>();
+        rows.sort_by(|left, right| {
+            left.event_time
+                .cmp(&right.event_time)
+                .then(left.ingestion_time.cmp(&right.ingestion_time))
+                .then(left.sequence.cmp(&right.sequence))
+        });
+        evidence_query_result(
+            "MockTimeseriesRepository",
+            "calibration_snapshots",
+            &window,
+            vec!["event_time ASC".to_owned()],
+            Some(2),
+            rows,
+        )
     }
 }

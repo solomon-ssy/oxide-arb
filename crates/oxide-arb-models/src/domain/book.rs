@@ -5,7 +5,7 @@
 //! convert via [`BookLevel::from_decimal`] / [`BookLevel::price_decimal`].
 
 use crate::types::{
-    MicroConversionError, MicroPrice, MicroShares, MicroUsd, Price, Shares, TokenId,
+    MicroConversionError, MicroPrice, MicroShares, MicroUsd, Price, Shares, TokenId, Usd,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -130,6 +130,17 @@ pub fn bid_depth_down_to(levels: &[BookLevel], limit_price: Price) -> Shares {
         })
 }
 
+/// Sum ask-side notional at prices at or below `limit_price` (market BUY walk).
+#[must_use]
+pub fn ask_notional_up_to(levels: &[BookLevel], limit_price: Price) -> Usd {
+    levels
+        .iter()
+        .take_while(|level| level.price_decimal() <= limit_price)
+        .fold(Usd::ZERO, |acc, level| {
+            Usd::new(acc.inner() + level.price_decimal().inner() * level.size_decimal().inner())
+        })
+}
+
 /// Immutable published snapshot for a single token (Arc-backed, lock-free read).
 ///
 /// Sides use [`Arc<[BookLevel]>`] so readers share level storage without copying;
@@ -202,6 +213,13 @@ impl BookSnapshot {
     #[inline]
     pub fn ask_depth_up_to(&self, limit_price: Price) -> Shares {
         ask_depth_up_to(&self.asks, limit_price)
+    }
+
+    /// Available ask notional fillable at or below `limit_price`.
+    #[must_use]
+    #[inline]
+    pub fn ask_notional_up_to(&self, limit_price: Price) -> Usd {
+        ask_notional_up_to(&self.asks, limit_price)
     }
 
     /// Available bid depth fillable at or above `limit_price`.

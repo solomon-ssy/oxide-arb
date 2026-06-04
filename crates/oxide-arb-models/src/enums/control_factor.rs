@@ -200,7 +200,8 @@ active_string_enum! {
         CompletedWithWarnings => "completed_with_warnings",
         SkippedNotRequired => "skipped_not_required",
         InsufficientCoverage => "insufficient_coverage",
-        ReportOnly => "report_only",
+        EvidenceOnly => "evidence_only",
+        ProductionIneligible => "production_ineligible",
         Failed => "failed",
     }
 }
@@ -214,6 +215,8 @@ active_string_enum! {
         ExecutionEvidence => "execution_evidence",
         PortfolioRiskEvidence => "portfolio_risk_evidence",
         SettlementReconciliationEvidence => "settlement_reconciliation_evidence",
+        ExitTokenEvidence => "exit_token_evidence",
+        TrainingExampleBuild => "training_example_build",
         FactorBuild => "factor_build",
         QualityGateEvaluation => "quality_gate_evaluation",
         DraftWrite => "draft_write",

@@ -145,9 +145,7 @@ mod tests {
                 version_id: RuntimeConfigVersionId::new("rcv_test"),
                 config_hash: "sha256:cfg".into(),
             },
-            simulation_config: SimulationConfig {
-                config_hash: "blake3:sim".into(),
-            },
+            simulation_config: SimulationConfig::production_default(),
             quality_gate_policy: QualityGatePolicyRef {
                 policy_hash: "blake3:gate".into(),
             },

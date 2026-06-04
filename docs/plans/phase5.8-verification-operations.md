@@ -6,6 +6,8 @@
 > **覆盖原章节**: 18, 19  
 > **目标**: 将每个子阶段的退出条件、测试矩阵、观测指标、运维手册和 PR 防漂移审查固化，防止 Phase 5 落地时跑偏。
 
+> **Phase 5.3 contract dependency**: Verification 必须区分 stage-level `EvidenceOnly`/`ProductionIneligible`/`InsufficientCoverage`、run-level `ReportOnly`、factor-level `ReportOnly`。最终验收必须证明 5.4-5.8 没有绕过 5.3 production-usable evidence gate，也没有把 unavailable metrics、stub artifacts、current-state fallback 或 unordered query output 当作 production input。
+
 ---
 
 ## 0. 全阶段推进规则
@@ -26,7 +28,7 @@
 | 5.0 Foundation | 架构边界、typed artifact、publication-first、破坏式原则冻结 | `runtime_config` 与 factor registry 边界不清；允许 re-export/alias |
 | 5.1 Fact data plane | integration tests 中能写入 facts；hot path latency 不受影响；CH rows 包含必需 key | 缺 producer、缺 attribution、或 nullable 字段被当作 0 默认值 |
 | 5.2 PIT/runner | resolver 可在任意 timestamp 重建 market/token/config/calibration/fee state | 任一 resolver 静默 fallback 到 current state |
-| 5.3 Evidence engine | 每个 evidence stage 输出确定且包含 coverage metrics | stage output 依赖未排序查询结果 |
+| 5.3 Evidence engine | detector replay、per-decision book views、execution FOK replay、portfolio sequence、settlement/reconciliation drift、report-only exit/token evidence、typed training examples、canonical query fingerprints 全部可复现 | 任一 stage output 依赖未排序查询结果；使用 window-end book 冒充 execution-time book；terminal/funnel audit 混用；unavailable metrics 被当作 production input |
 | 5.4 Builders/gates | all five builders reject insufficient evidence and write typed payloads | payload is stringly typed or gates are only warnings |
 | 5.5 Registry/governance | publication, shadow, rollback, expiry, audit transactional | publication can leave two active Published versions |
 | 5.6 Live consumption | hot path 只读 ArcSwap snapshot；fail closed tests 通过 | 任意 hot path code 查询 CH/PG |

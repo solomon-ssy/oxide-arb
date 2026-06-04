@@ -90,6 +90,18 @@ impl From<PriceZone> for ChPriceZone {
     }
 }
 
+impl From<ChPriceZone> for PriceZone {
+    fn from(value: ChPriceZone) -> Self {
+        match value {
+            ChPriceZone::Z95 => Self::Z95,
+            ChPriceZone::Z96 => Self::Z96,
+            ChPriceZone::Z97 => Self::Z97,
+            ChPriceZone::Z98 => Self::Z98,
+            ChPriceZone::Z99 => Self::Z99,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
 #[repr(i8)]
 pub enum ChDurationBucket {
@@ -106,6 +118,17 @@ impl From<DurationBucket> for ChDurationBucket {
             DurationBucket::Medium => Self::Medium,
             DurationBucket::Long => Self::Long,
             DurationBucket::VeryLong => Self::VeryLong,
+        }
+    }
+}
+
+impl From<ChDurationBucket> for DurationBucket {
+    fn from(value: ChDurationBucket) -> Self {
+        match value {
+            ChDurationBucket::Short => Self::Short,
+            ChDurationBucket::Medium => Self::Medium,
+            ChDurationBucket::Long => Self::Long,
+            ChDurationBucket::VeryLong => Self::VeryLong,
         }
     }
 }
@@ -158,6 +181,23 @@ impl From<MarketCategory> for ChMarketCategory {
             MarketCategory::Economics => Self::Economics,
             MarketCategory::Crypto => Self::Crypto,
             MarketCategory::Other => Self::Other,
+        }
+    }
+}
+
+impl From<ChMarketCategory> for MarketCategory {
+    fn from(value: ChMarketCategory) -> Self {
+        match value {
+            ChMarketCategory::Geopolitics => Self::Geopolitics,
+            ChMarketCategory::Sports => Self::Sports,
+            ChMarketCategory::Politics => Self::Politics,
+            ChMarketCategory::Finance => Self::Finance,
+            ChMarketCategory::Tech => Self::Tech,
+            ChMarketCategory::Culture => Self::Culture,
+            ChMarketCategory::Weather => Self::Weather,
+            ChMarketCategory::Economics => Self::Economics,
+            ChMarketCategory::Crypto => Self::Crypto,
+            ChMarketCategory::Other => Self::Other,
         }
     }
 }

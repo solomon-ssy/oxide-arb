@@ -3,12 +3,14 @@ use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::{
     domain::{
         MarkRedeemedParams, NewPosition, PositionInfo, PositionPatch, SettlePositionParams,
-        SettledPositionStats,
+        SettledPositionStats, evidence::EvidenceQueryResult,
     },
     enums::common::SettlementTrigger,
     types::{MarketId, PositionId, TokenId, TradeId, Usd},
 };
 use rust_decimal::Decimal;
+
+use crate::traits::timeseries::evidence_query_result;
 
 #[async_trait::async_trait]
 pub trait PositionRepository: Send + Sync {
@@ -16,11 +18,42 @@ pub trait PositionRepository: Send + Sync {
 
     async fn open_as_of(&self, at: DateTime<Utc>) -> Result<Vec<PositionInfo>, StorageError>;
 
+    async fn open_as_of_evidence(
+        &self,
+        at: DateTime<Utc>,
+    ) -> Result<EvidenceQueryResult<PositionInfo>, StorageError> {
+        let rows = self.open_as_of(at).await?;
+        evidence_query_result(
+            "PositionRepository",
+            "open_as_of",
+            &at,
+            vec!["opened_at ASC".to_owned(), "position_id ASC".to_owned()],
+            Some(1),
+            rows,
+        )
+    }
+
     async fn changed_between(
         &self,
         start: DateTime<Utc>,
         end: DateTime<Utc>,
     ) -> Result<Vec<PositionInfo>, StorageError>;
+
+    async fn changed_between_evidence(
+        &self,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> Result<EvidenceQueryResult<PositionInfo>, StorageError> {
+        let rows = self.changed_between(start, end).await?;
+        evidence_query_result(
+            "PositionRepository",
+            "changed_between",
+            &(start, end),
+            vec!["opened_at ASC".to_owned(), "position_id ASC".to_owned()],
+            Some(1),
+            rows,
+        )
+    }
 
     async fn find_by_id(
         &self,

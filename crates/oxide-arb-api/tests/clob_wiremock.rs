@@ -4,9 +4,9 @@ use alloy::signers::Signer as _;
 use alloy::signers::local::LocalSigner;
 use oxide_arb_api::{clob::ClobClient, infra::retry::RetryPolicy, keystore::OrderSigner};
 use oxide_arb_models::{
-    domain::order::OrderRequest,
+    domain::order::{OrderAmount, OrderRequest},
     enums::common::{OrderType, Side},
-    types::{MarketId, Price, Shares, TokenId},
+    types::{MarketId, Price, Shares, TokenId, Usd},
 };
 use polymarket_client_sdk_v2::POLYGON;
 use polymarket_client_sdk_v2::auth::Normal;
@@ -142,7 +142,12 @@ pub fn test_order_request(order_type: OrderType) -> OrderRequest {
         market_id: MarketId::new("0xtest"),
         token_id: test_token_id(),
         side: Side::Buy,
-        shares: Shares::new(dec!(100)),
+        amount: match order_type {
+            OrderType::Fok => OrderAmount::Usd(Usd::new(dec!(100))),
+            OrderType::Gtc | OrderType::Gtd { expiration: _ } => {
+                OrderAmount::Shares(Shares::new(dec!(100)))
+            }
+        },
         price: Price::new(dec!(0.92)),
         order_type,
         neg_risk: false,

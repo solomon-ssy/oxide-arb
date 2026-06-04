@@ -9,9 +9,13 @@ use crate::{
 };
 use oxide_arb_api::{clob::ClobClient, fees::FeeCalculator};
 use oxide_arb_models::{
-    domain::{execution::ExecutionPlan, latency::LatencyTrace, order::OrderRequest},
+    domain::{
+        execution::ExecutionPlan,
+        latency::LatencyTrace,
+        order::{OrderAmount, OrderRequest},
+    },
     enums::{
-        common::{ExecutionMode, OrderType},
+        common::{ExecutionMode, OrderType, Side},
         execution::ExecutionOutcome,
     },
 };
@@ -81,7 +85,10 @@ impl FokOrderStrategy {
             market_id: plan.market_id.clone(),
             token_id: plan.token_id.clone(),
             side: plan.side,
-            shares: plan.shares,
+            amount: match plan.side {
+                Side::Buy => OrderAmount::Usd(plan.estimated_cost),
+                Side::Sell => OrderAmount::Shares(plan.shares),
+            },
             price: plan.limit_price,
             order_type: OrderType::Fok,
             neg_risk: plan.neg_risk,

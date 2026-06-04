@@ -1,8 +1,13 @@
 use crate::traits::RiskAuditRepository;
+use chrono::{DateTime, Utc};
 use oxide_arb_error::storage::StorageError;
-use oxide_arb_models::{domain::NewRiskAuditEvent, entities::risk_audit_event::Entity};
+use oxide_arb_models::{
+    domain::{NewRiskAuditEvent, RiskAuditEventInfo},
+    entities::risk_audit_event::{Column, Entity},
+};
 use sea_orm::{
-    ConnectionTrait, DatabaseConnection, EntityTrait, IntoActiveModel, TransactionTrait,
+    ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait, IntoActiveModel, QueryFilter,
+    QueryOrder, TransactionTrait,
 };
 
 pub struct PgRiskAuditRepository {
@@ -27,6 +32,22 @@ pub(crate) async fn do_create(
     Ok(())
 }
 
+async fn do_find_between(
+    db: &impl ConnectionTrait,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+) -> Result<Vec<RiskAuditEventInfo>, StorageError> {
+    Entity::find()
+        .filter(Column::CreatedAt.gte(from))
+        .filter(Column::CreatedAt.lt(to))
+        .order_by_asc(Column::CreatedAt)
+        .order_by_asc(Column::Id)
+        .all(db)
+        .await
+        .map_err(StorageError::from)
+        .map(|rows| rows.into_iter().map(Into::into).collect())
+}
+
 #[async_trait::async_trait]
 impl RiskAuditRepository for PgRiskAuditRepository {
     async fn create(&self, event: NewRiskAuditEvent) -> Result<(), StorageError> {
@@ -48,5 +69,13 @@ impl RiskAuditRepository for PgRiskAuditRepository {
             .map_err(StorageError::from)?;
         txn.commit().await.map_err(StorageError::from)?;
         Ok(())
+    }
+
+    async fn find_between(
+        &self,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+    ) -> Result<Vec<RiskAuditEventInfo>, StorageError> {
+        do_find_between(&self.db, from, to).await
     }
 }

@@ -3,12 +3,12 @@
 use oxide_arb_api::{clob::ClobClient, keystore::Keystore};
 use oxide_arb_models::{
     config::{KeySource, KeysConfig, PolymarketConfig},
-    domain::order::OrderRequest,
+    domain::order::{OrderAmount, OrderRequest},
     enums::{
         common::{OrderType, Side},
         order::OrderStatus,
     },
-    types::{MarketId, Price, Shares, TokenId},
+    types::{MarketId, Price, TokenId, Usd},
 };
 use rust_decimal_macros::dec;
 use std::env::var;
@@ -54,7 +54,7 @@ async fn fok_order_sign_and_submit() {
         market_id: MarketId::new(market_id),
         token_id: TokenId::new(token_id),
         side: Side::Buy,
-        shares: Shares::new(dec!(5)),
+        amount: OrderAmount::Usd(Usd::new(dec!(5))),
         price: Price::new(dec!(0.01)),
         order_type: OrderType::Fok,
         neg_risk: false,

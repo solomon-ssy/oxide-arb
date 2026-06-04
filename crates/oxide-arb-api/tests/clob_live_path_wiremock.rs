@@ -125,12 +125,16 @@ async fn live_partial_fill() {
     .await;
 
     let clob = test_clob_client(&server).await;
-    let req = test_order_request(OrderType::Fok);
+    let req = test_order_request(OrderType::Gtc);
     let resp = clob.place_order(&req).await.expect("place order");
 
     assert_eq!(resp.status, OrderStatus::PartiallyFilled);
-    assert_eq!(resp.filled_shares, Shares::new(dec!(40)));
-    assert!(resp.filled_shares.inner() < req.shares.inner());
+    assert_eq!(resp.filled_shares, Shares::new(dec!(20)));
+    assert!(
+        req.amount
+            .as_shares()
+            .is_some_and(|shares| resp.filled_shares < shares)
+    );
 }
 
 #[tokio::test]

@@ -6,6 +6,8 @@
 > **覆盖原章节**: 10.1-10.5, 10.7, 10.8, 17, 18.8  
 > **目标**: 将 Published/Shadow publication 以 immutable `ControlFactorSnapshot` 形式接入 detector、scorer、risk、sizer 和 audit。Hot path 只读内存快照，不查询 CH/PG。
 
+> **Phase 5.3-5.5 contract dependency**: Live consumption 只读取 governance 发布的 typed `ControlFactorSnapshot`。它不读取 5.3 evidence artifacts、training examples、query fingerprints 或 raw CH/PG facts；这些只用于 materialization/governance audit。任何由 5.3 标记为 `EvidenceOnly`、`ProductionIneligible` 或 `InsufficientCoverage` 的来源都不得通过 5.4/5.5 间接进入 Published snapshot。
+
 ---
 
 ## 0. 工作范围

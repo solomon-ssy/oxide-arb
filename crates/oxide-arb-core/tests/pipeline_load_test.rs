@@ -19,7 +19,7 @@ use oxide_arb_models::{
     },
     types::{Price, Shares, TokenId},
 };
-use oxide_arb_test_support::mock_event::MockEventSource;
+use oxide_arb_test_support::mocks::MockEventSource;
 use rust_decimal_macros::dec;
 use std::{
     sync::Arc,

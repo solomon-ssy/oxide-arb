@@ -365,3 +365,16 @@ Phase 5.3 完成后必须满足：
 - Settlement join 缺失被填成默认值。
 - Exit simulation 缺 sell-side bid coverage 却声称 executable。
 - Training features 存在未来信息泄漏。
+
+### 10.1 Phase 5.3 closure verification items
+
+以下项目属于 Phase 5.3 完成前必须关闭的 blocker，不能留给 Phase 5.4 builder 或后续 governance/live 阶段兜底：
+
+- Detector 必须使用 manifest-pinned runtime config、calibration snapshot 和 fee schedule 做 materialized replay；只把 live detections 标记为 `ProductionIneligible` 不算完成。
+- Book reconstruction 必须支持 per-decision timestamp views：至少能在 detection time 和 terminal execution `stage_at` 重建 YES/NO book pair。Window-end book 只能作为 diagnostic summary，不能作为 execution evidence 输入。
+- Execution evidence 必须区分 terminal audit rows 和 full audit funnel；StrictFok 必须按 Polymarket BUY=USD amount、SELL=shares amount、worst-price limit 语义模拟，并补 VWAP/slippage/latency/stress metrics 或明确 production-ineligible。
+- Portfolio evidence 必须由 PG trades、positions、risk audit、potential-loss baseline/events、reservations/balance facts 重建 deterministic sequence；永久 `sequence_complete=false` 的 placeholder 不能进入 Phase 5.4。
+- Settlement/reconciliation 必须 join settlement outcome、position redeem/accounting、balance snapshot、token balance snapshot，并计算 cash/token drift；仅 audit-row 聚合不算完成。
+- Exit/token evidence 在 Phase 5.3 只允许 report-only，但必须输出可解释的 executable/false-exit evidence；bid 非空或 sell-side coverage 不能冒充 executable。
+- Training examples 必须使用 typed `FactorTrainingExample`、PIT-visible features、delayed labels 和 source refs；string refs 或 `outcome_available_at=None` 的 production dataset 不能进入 Phase 5.4。
+- Evidence repository reads 必须返回或记录 canonical query fingerprints；stage 内自造 `format!("audits:{n}")` 之类摘要不能作为 production fingerprint。

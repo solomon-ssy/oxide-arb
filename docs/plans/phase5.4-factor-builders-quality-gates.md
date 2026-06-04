@@ -6,6 +6,10 @@
 > **覆盖原章节**: 7, 8, 9, 13, 18.5  
 > **目标**: 将 evidence 转为五类 typed control factor draft，并用 production quality gates 决定 Draft/Candidate/Rejected/ReportOnly。因子必须可解释、保守、可审计、可 shadow。
 
+> **Phase 5.3 contract dependency**: Builders 只能消费 Phase 5.3 标记为 production-usable 的 evidence artifacts、typed `FactorTrainingExample`、stage artifact hashes 和 repository/PIT query fingerprints。`EvidenceOnly`、`ProductionIneligible`、`InsufficientCoverage` 或带 production-blocking `EvidenceIssue` 的 stage output 只能生成 `ReportOnly`/`Rejected`，不能进入 Candidate。Phase 5.4 不重新解释 raw CH/PG facts，也不兼容旧 `EvidenceMetric::Missing` shell。
+
+> **Hard precondition**: Phase 5.4 不得开始实现 Candidate-producing builders，除非 Phase 5.3 已关闭 detector manifest-pinned replay、per-decision book views、terminal-vs-funnel audit split、execution BUY/SELL FOK semantics、portfolio deterministic sequence、settlement/reconciliation drift joins、report-only exit/token evidence、typed training examples 和 canonical query fingerprints。缺任一项时，builder 只能产 `ReportOnly`/`Rejected`。
+
 ---
 
 ## 0. 原则

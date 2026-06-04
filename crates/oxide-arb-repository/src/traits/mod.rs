@@ -21,6 +21,7 @@ pub mod trade;
 
 pub use timeseries::{
     EvidenceTimeseriesRepository, MarketFilter, TimeWindow, TimeseriesFactWriter,
+    evidence_query_result,
 };
 
 pub use accounting::AccountingRepository;

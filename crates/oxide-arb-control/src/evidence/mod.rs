@@ -1,3 +1,13 @@
-//! Evidence stage contracts for control-factor materialization.
-//!
-//! Concrete evidence builders land in Phase 5.3.
+//! Evidence engine for control-factor materialization.
+
+pub mod book;
+pub mod detector;
+pub mod engine;
+pub mod execution;
+pub mod exit_token;
+pub mod gate;
+pub mod metric_gate;
+pub mod portfolio;
+pub mod replay;
+pub mod settlement;
+pub mod training;
