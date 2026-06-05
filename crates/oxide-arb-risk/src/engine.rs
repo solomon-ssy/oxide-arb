@@ -26,7 +26,7 @@ use crate::{
     traits::{FillClaim, PotentialLossStore, RiskMetrics, RiskMetricsSnapshot, RiskPersistence},
     types::{
         AtomicStateVersion, BreakerState, ExecutionRiskEvent, PostTradeReport,
-        ReconciliationReport, ReportMode, RiskDecision,
+        ReconciliationReport, ReportMode, RiskDecision, StateVersion,
     },
 };
 use arc_swap::ArcSwap;
@@ -95,7 +95,7 @@ struct MutableRiskState {
     hourly: HourlyAccounting,
     potential_loss: PotentialLossLedger,
     drawdown: DrawdownGuard,
-    state_version: crate::types::StateVersion,
+    state_version: StateVersion,
 }
 
 /// Default engine type — dynamic persistence via [`Arc<dyn RiskPersistence>`].

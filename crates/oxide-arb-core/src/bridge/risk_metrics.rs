@@ -1,7 +1,8 @@
 //! Thin `RiskMetrics` trait adapter over shared state and live reservation/WS probes.
 
 use crate::{
-    exposure::in_memory::InMemoryExposureReservation, service::risk_metrics::RiskMetricsState,
+    exposure::in_memory::InMemoryExposureReservation,
+    service::risk_metrics::{RiskMetricsSource, RiskMetricsState},
 };
 use oxide_arb_api::ws::ClobWsManager;
 use oxide_arb_models::{
@@ -92,10 +93,7 @@ impl CoreRiskMetrics {
     fn is_authoritative_for_mode(&self) -> bool {
         match self.execution_mode {
             ExecutionMode::DryRun | ExecutionMode::Paper => true,
-            ExecutionMode::Live => {
-                self.state.source()
-                    == crate::service::risk_metrics::RiskMetricsSource::AuthoritativeClob
-            }
+            ExecutionMode::Live => self.state.source() == RiskMetricsSource::AuthoritativeClob,
         }
     }
 

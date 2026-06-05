@@ -1,14 +1,19 @@
 use oxide_arb_macros::oxide_schema;
 use sea_orm::{
     Iden,
-    sea_query::{ColumnDef, Index, IndexOrder, Table, TableCreateStatement},
+    sea_query::{
+        ColumnDef, ForeignKey, ForeignKeyAction, Index, IndexOrder, Table, TableCreateStatement,
+    },
 };
 
-use crate::schema::{
-    dependency::TableDependency,
-    index::{IndexBuildMode, IndexSpec},
-    seed::SeedSpec,
-    timestamp_with_write_default,
+use crate::{
+    idens::control_factor_publication::ControlFactorPublication,
+    schema::{
+        dependency::TableDependency,
+        index::{IndexBuildMode, IndexSpec},
+        seed::SeedSpec,
+        timestamp_with_write_default,
+    },
 };
 
 #[oxide_schema(lifecycle = "audit")]
@@ -17,11 +22,13 @@ pub enum ControlFactorShadowDecision {
     ShadowDecisionId,
     PublicationId,
     OpportunityId,
+    EventId,
     MarketId,
     DecisionType,
-    LiveDecision,
+    BaselineDecision,
     ShadowDecision,
     Delta,
+    AffectedFactorIds,
     DecidedAt,
     CreatedAt,
 }
@@ -47,6 +54,11 @@ pub fn table() -> TableCreateStatement {
                 .null(),
         )
         .col(
+            ColumnDef::new(ControlFactorShadowDecision::EventId)
+                .text()
+                .null(),
+        )
+        .col(
             ColumnDef::new(ControlFactorShadowDecision::MarketId)
                 .text()
                 .not_null(),
@@ -57,7 +69,7 @@ pub fn table() -> TableCreateStatement {
                 .not_null(),
         )
         .col(
-            ColumnDef::new(ControlFactorShadowDecision::LiveDecision)
+            ColumnDef::new(ControlFactorShadowDecision::BaselineDecision)
                 .json_binary()
                 .not_null(),
         )
@@ -72,6 +84,11 @@ pub fn table() -> TableCreateStatement {
                 .not_null(),
         )
         .col(
+            ColumnDef::new(ControlFactorShadowDecision::AffectedFactorIds)
+                .json_binary()
+                .not_null(),
+        )
+        .col(
             ColumnDef::new(ControlFactorShadowDecision::DecidedAt)
                 .timestamp_with_time_zone()
                 .not_null(),
@@ -79,26 +96,53 @@ pub fn table() -> TableCreateStatement {
         .col(timestamp_with_write_default(
             ControlFactorShadowDecision::CreatedAt,
         ))
+        .foreign_key(
+            ForeignKey::create()
+                .name("fk_control_factor_shadow_decision_publication")
+                .from(
+                    ControlFactorShadowDecision::Table,
+                    ControlFactorShadowDecision::PublicationId,
+                )
+                .to(
+                    ControlFactorPublication::Table,
+                    ControlFactorPublication::PublicationId,
+                )
+                .on_delete(ForeignKeyAction::Restrict),
+        )
         .to_owned()
 }
 
 pub fn indexes() -> Vec<IndexSpec> {
-    vec![IndexSpec::sea_query(
-        "idx_control_factor_shadow_decision_publication",
-        shadow_decision_table_name,
-        IndexBuildMode::Transactional,
-        Index::create()
-            .name("idx_control_factor_shadow_decision_publication")
-            .table(ControlFactorShadowDecision::Table)
-            .col(ControlFactorShadowDecision::PublicationId)
-            .col((ControlFactorShadowDecision::DecidedAt, IndexOrder::Desc))
-            .to_owned(),
-        "shadow decisions by publication and decision time",
-    )]
+    vec![
+        IndexSpec::sea_query(
+            "idx_control_factor_shadow_decision_publication",
+            shadow_decision_table_name,
+            IndexBuildMode::Transactional,
+            Index::create()
+                .name("idx_control_factor_shadow_decision_publication")
+                .table(ControlFactorShadowDecision::Table)
+                .col(ControlFactorShadowDecision::PublicationId)
+                .col((ControlFactorShadowDecision::DecidedAt, IndexOrder::Desc))
+                .to_owned(),
+            "shadow decisions by publication and decision time",
+        ),
+        IndexSpec::sea_query(
+            "idx_control_factor_shadow_decision_market",
+            shadow_decision_table_name,
+            IndexBuildMode::Transactional,
+            Index::create()
+                .name("idx_control_factor_shadow_decision_market")
+                .table(ControlFactorShadowDecision::Table)
+                .col(ControlFactorShadowDecision::MarketId)
+                .col((ControlFactorShadowDecision::DecidedAt, IndexOrder::Desc))
+                .to_owned(),
+            "shadow decisions by market and decision time",
+        ),
+    ]
 }
 
-pub const fn dependencies() -> Vec<TableDependency> {
-    Vec::new()
+pub fn dependencies() -> Vec<TableDependency> {
+    vec![TableDependency::foreign_key(publication_table_name)]
 }
 
 pub const fn seed_units() -> Vec<SeedSpec> {
@@ -107,4 +151,8 @@ pub const fn seed_units() -> Vec<SeedSpec> {
 
 fn shadow_decision_table_name() -> String {
     ControlFactorShadowDecision::Table.to_string()
+}
+
+fn publication_table_name() -> String {
+    ControlFactorPublication::Table.to_string()
 }

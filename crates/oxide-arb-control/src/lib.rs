@@ -10,3 +10,4 @@ pub mod gates;
 pub mod governance;
 pub mod materialization;
 pub mod report;
+pub mod scheduler;

@@ -4,6 +4,7 @@ use chrono::{DateTime, Utc};
 use oxide_arb_error::control::GovernanceError;
 use oxide_arb_models::{
     domain::control_factor::ControlFactorPublication,
+    hashing::CanonicalDigest,
     types::{ControlFactorId, FactorPublicationId},
 };
 use serde::Serialize;
@@ -26,8 +27,7 @@ pub struct PublicationHasher;
 impl PublicationHasher {
     /// Computes `blake3:<hex>` over the canonical publication payload.
     pub fn compute(publication: &ControlFactorPublication) -> Result<String, GovernanceError> {
-        let digest = canonical_digest(publication)?;
-        Ok(format!("blake3:{}", hex::encode(digest)))
+        Ok(CanonicalDigest::blake3_json(&canonical_input(publication))?)
     }
 
     /// Recomputes the digest and compares it to `publication.publication_hash`.
@@ -56,7 +56,7 @@ impl PublicationHasher {
     }
 }
 
-fn canonical_digest(publication: &ControlFactorPublication) -> Result<[u8; 32], GovernanceError> {
+fn canonical_input(publication: &ControlFactorPublication) -> PublicationCanonicalInput<'_> {
     let mut factor_ids = publication
         .factor_ids
         .iter()
@@ -65,7 +65,7 @@ fn canonical_digest(publication: &ControlFactorPublication) -> Result<[u8; 32], 
         .collect::<Vec<_>>();
     factor_ids.sort();
 
-    let input = PublicationCanonicalInput {
+    PublicationCanonicalInput {
         publication_id: publication.publication_id.as_str(),
         mode: publication.mode.as_str(),
         factor_ids,
@@ -77,11 +77,7 @@ fn canonical_digest(publication: &ControlFactorPublication) -> Result<[u8; 32], 
         expires_at: publication.expires_at,
         approved_by: publication.approved_by.as_deref(),
         approval_reason: publication.approval_reason.as_str(),
-    };
-
-    let bytes = serde_json::to_vec(&input)
-        .map_err(|error| GovernanceError::HashInput(error.to_string()))?;
-    Ok(*blake3::hash(&bytes).as_bytes())
+    }
 }
 
 #[cfg(test)]

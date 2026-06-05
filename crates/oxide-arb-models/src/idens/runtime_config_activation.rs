@@ -82,7 +82,7 @@ pub fn table() -> TableCreateStatement {
         )
         .col(
             ColumnDef::new(RuntimeConfigActivation::AuditEventId)
-                .big_integer()
+                .text()
                 .null(),
         )
         .col(timestamp_with_write_default(
@@ -153,7 +153,10 @@ fn audit_event_fk() -> ForeignKeyCreateStatement {
             RuntimeConfigActivation::Table,
             RuntimeConfigActivation::AuditEventId,
         )
-        .to(ControlFactorAuditEvent::Table, ControlFactorAuditEvent::Id)
+        .to(
+            ControlFactorAuditEvent::Table,
+            ControlFactorAuditEvent::EventId,
+        )
         .on_delete(ForeignKeyAction::SetNull)
         .to_owned()
 }

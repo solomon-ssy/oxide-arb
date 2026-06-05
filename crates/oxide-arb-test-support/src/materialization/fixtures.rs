@@ -2,6 +2,7 @@
 
 use std::{collections::HashSet, sync::Arc};
 
+use crate::mocks::EXECUTION_QUALITY_HOURLY_SCHEDULE_ID;
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use oxide_arb_error::storage::StorageError;
@@ -10,13 +11,17 @@ use oxide_arb_models::{
         MarketInfo, MarketPitSnapshotInfo, NewRuntimeConfigActivation, NewRuntimeConfigVersion,
         RuntimeConfigActivationInfo, RuntimeConfigVersionInfo, UpsertMarket,
         control_factor::{
-            DataRequirements, MarketFilterSpec, MaterializationRunManifest, QualityGatePolicy,
+            ControlFactorMaterializationRunInfo, DataRequirements, MarketFilterSpec,
+            MaterializationRunManifest, NewControlFactorAuditEvent, QualityGatePolicy,
             RequiredInputDomain, RunTrigger, RuntimeConfigRef, SimulationConfig, TimeWindowSpec,
         },
     },
     enums::{
         common::{MarketCategory, TickSize},
-        control_factor::{ControlFactorType, MaterializationOutputPolicy, MaterializationRunKind},
+        control_factor::{
+            ControlFactorType, MaterializationOutputPolicy, MaterializationRunKind,
+            MaterializationRunStatus, RunTriggerType,
+        },
         market::MarketStatus,
         runtime_config::RuntimeConfigVersionSource,
     },
@@ -148,6 +153,69 @@ pub fn fixed_time(hour: u32) -> DateTime<Utc> {
         .expect("fixed timestamp")
 }
 
+/// Fixed wall clock for materialization scheduler tests (2026-06-05 12:00 UTC).
+#[must_use]
+pub fn scheduler_fixed_now() -> DateTime<Utc> {
+    Utc.with_ymd_and_hms(2026, 6, 5, 12, 0, 0)
+        .single()
+        .expect("fixed timestamp")
+}
+
+/// Builds a scheduled materialization run row for scheduler mock seeding.
+#[must_use]
+pub fn scheduled_materialization_run_info(
+    schedule_id: &str,
+    status: MaterializationRunStatus,
+    created_at: DateTime<Utc>,
+    finished_at: Option<DateTime<Utc>>,
+) -> ControlFactorMaterializationRunInfo {
+    ControlFactorMaterializationRunInfo {
+        materialization_run_id: MaterializationRunId::new_v7(),
+        run_dedupe_key: None,
+        run_kind: MaterializationRunKind::Scheduled,
+        trigger_type: RunTriggerType::Scheduled,
+        trigger_ref: Some(schedule_id.to_owned()),
+        status,
+        window_from: created_at - Duration::hours(1),
+        window_to: created_at,
+        source_delay_secs: 900,
+        market_filter: serde_json::json!({}),
+        requested_factor_types: serde_json::json!([]),
+        data_requirements: serde_json::json!({}),
+        runtime_config_ref: serde_json::json!({}),
+        simulation_config_hash: "blake3:sim".into(),
+        quality_gate_policy_hash: "blake3:gate".into(),
+        output_policy: MaterializationOutputPolicy::EmitDraftCandidates,
+        manifest: serde_json::json!({}),
+        manifest_hash: "blake3:manifest".into(),
+        report: serde_json::json!({}),
+        code_git_sha: "abc".into(),
+        created_by: "scheduler".into(),
+        started_at: None,
+        finished_at,
+        failure_code: None,
+        failure_detail: None,
+        report_uri: None,
+        created_at,
+        updated_at: created_at,
+    }
+}
+
+/// Scheduled run fixture using [`EXECUTION_QUALITY_HOURLY_SCHEDULE_ID`].
+#[must_use]
+pub fn execution_quality_hourly_run(
+    status: MaterializationRunStatus,
+    created_at: DateTime<Utc>,
+    finished_at: Option<DateTime<Utc>>,
+) -> ControlFactorMaterializationRunInfo {
+    scheduled_materialization_run_info(
+        EXECUTION_QUALITY_HOURLY_SCHEDULE_ID,
+        status,
+        created_at,
+        finished_at,
+    )
+}
+
 pub fn runtime_config_repo() -> Arc<dyn RuntimeConfigVersionRepository> {
     Arc::new(FakeRuntimeConfigRepository)
 }
@@ -253,6 +321,26 @@ impl RuntimeConfigVersionRepository for FakeRuntimeConfigRepository {
     ) -> Result<RuntimeConfigActivationInfo, StorageError> {
         Err(StorageError::Codec(
             "FakeRuntimeConfigRepository::activate_version is not implemented".to_owned(),
+        ))
+    }
+
+    async fn create_version_governed(
+        &self,
+        _version: NewRuntimeConfigVersion,
+        _audit: NewControlFactorAuditEvent,
+    ) -> Result<RuntimeConfigVersionInfo, StorageError> {
+        Err(StorageError::Codec(
+            "FakeRuntimeConfigRepository::create_version_governed is not implemented".to_owned(),
+        ))
+    }
+
+    async fn activate_version_governed(
+        &self,
+        _activation: NewRuntimeConfigActivation,
+        _audit: NewControlFactorAuditEvent,
+    ) -> Result<RuntimeConfigActivationInfo, StorageError> {
+        Err(StorageError::Codec(
+            "FakeRuntimeConfigRepository::activate_version_governed is not implemented".to_owned(),
         ))
     }
 

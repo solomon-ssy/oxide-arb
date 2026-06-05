@@ -1,5 +1,7 @@
-use crate::execution::settlement::{dedup::SettlementDedup, service::MarketSettlementService};
-use crate::observability::metrics_hub::MetricsHub;
+use crate::{
+    execution::settlement::{dedup::SettlementDedup, service::MarketSettlementService},
+    observability::metrics_hub::MetricsHub,
+};
 use flume::Receiver;
 use oxide_arb_error::OxideError;
 use oxide_arb_models::domain::settlement::MarketSettlementRequest;

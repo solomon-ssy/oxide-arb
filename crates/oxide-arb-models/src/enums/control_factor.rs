@@ -419,11 +419,37 @@ active_string_enum! {
         FactorCreated => "factor_created",
         FactorTransitioned => "factor_transitioned",
         FactorRejected => "factor_rejected",
+        FactorExpired => "factor_expired",
         PublicationCreated => "publication_created",
         PublicationActivated => "publication_activated",
         PublicationRolledBack => "publication_rolled_back",
         PublicationExpired => "publication_expired",
+        RuntimeConfigVersionCreated => "runtime_config_version_created",
+        RuntimeConfigActivated => "runtime_config_activated",
+        RuntimeConfigRolledBack => "runtime_config_rolled_back",
         SnapshotLoadFailed => "snapshot_load_failed",
+    }
+}
+
+active_string_enum! {
+    /// Resource categories addressed by append-only audit events.
+    pub enum AuditResourceType {
+        Factor => "factor",
+        Publication => "publication",
+        MaterializationRun => "materialization_run",
+        RuntimeConfigVersion => "runtime_config_version",
+        Snapshot => "snapshot",
+    }
+}
+
+active_string_enum! {
+    /// Operator roles for governance RBAC (Phase 5.5 §7).
+    pub enum OperatorRole {
+        Viewer => "viewer",
+        Operator => "operator",
+        RiskOwner => "risk_owner",
+        Admin => "admin",
+        EmergencyOperator => "emergency_operator",
     }
 }
 

@@ -6,7 +6,7 @@ use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::{
     domain::{
         NewRuntimeConfigActivation, NewRuntimeConfigVersion, RuntimeConfigActivationInfo,
-        RuntimeConfigVersionInfo,
+        RuntimeConfigVersionInfo, control_factor::NewControlFactorAuditEvent,
     },
     types::RuntimeConfigVersionId,
 };
@@ -50,6 +50,32 @@ impl<R: RuntimeConfigVersionRepository> RuntimeConfigVersionRepository
         activation: NewRuntimeConfigActivation,
     ) -> Result<RuntimeConfigActivationInfo, StorageError> {
         let info = self.inner.activate_version(activation).await?;
+        self.invalidate_active().await;
+        Ok(info)
+    }
+
+    async fn create_version_governed(
+        &self,
+        version: NewRuntimeConfigVersion,
+        audit: NewControlFactorAuditEvent,
+    ) -> Result<RuntimeConfigVersionInfo, StorageError> {
+        let info = self.inner.create_version_governed(version, audit).await?;
+        let key = CacheKey::RuntimeConfigVersion {
+            version_id: info.runtime_config_version_id.clone(),
+        };
+        let _ = self.cache.set_json(&key, &info).await;
+        Ok(info)
+    }
+
+    async fn activate_version_governed(
+        &self,
+        activation: NewRuntimeConfigActivation,
+        audit: NewControlFactorAuditEvent,
+    ) -> Result<RuntimeConfigActivationInfo, StorageError> {
+        let info = self
+            .inner
+            .activate_version_governed(activation, audit)
+            .await?;
         self.invalidate_active().await;
         Ok(info)
     }

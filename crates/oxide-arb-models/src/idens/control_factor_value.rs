@@ -1,11 +1,14 @@
 use oxide_arb_macros::oxide_schema;
 use sea_orm::{
     Iden,
-    sea_query::{ColumnDef, Index, IndexOrder, Table, TableCreateStatement},
+    sea_query::{
+        ColumnDef, ForeignKey, ForeignKeyAction, Index, IndexOrder, Table, TableCreateStatement,
+    },
 };
 
 use crate::{
     enums::control_factor::FactorStatus,
+    idens::control_factor_materialization_run::ControlFactorMaterializationRun,
     schema::{
         dependency::TableDependency,
         index::{IndexBuildMode, IndexSpec},
@@ -18,11 +21,15 @@ use crate::{
 pub enum ControlFactorValue {
     Table,
     FactorId,
+    RunId,
     FactorType,
     Dimensions,
+    DimensionsHash,
     Payload,
+    PayloadHash,
     Evidence,
     Status,
+    StatusReason,
     GeneratedAt,
     ExpiresAt,
     Owner,
@@ -41,6 +48,7 @@ pub fn table() -> TableCreateStatement {
                 .not_null()
                 .primary_key(),
         )
+        .col(ColumnDef::new(ControlFactorValue::RunId).text().not_null())
         .col(
             ColumnDef::new(ControlFactorValue::FactorType)
                 .text()
@@ -52,8 +60,18 @@ pub fn table() -> TableCreateStatement {
                 .not_null(),
         )
         .col(
+            ColumnDef::new(ControlFactorValue::DimensionsHash)
+                .text()
+                .not_null(),
+        )
+        .col(
             ColumnDef::new(ControlFactorValue::Payload)
                 .json_binary()
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(ControlFactorValue::PayloadHash)
+                .text()
                 .not_null(),
         )
         .col(
@@ -66,6 +84,11 @@ pub fn table() -> TableCreateStatement {
                 .text()
                 .not_null()
                 .default(FactorStatus::Draft),
+        )
+        .col(
+            ColumnDef::new(ControlFactorValue::StatusReason)
+                .text()
+                .null(),
         )
         .col(
             ColumnDef::new(ControlFactorValue::GeneratedAt)
@@ -85,39 +108,76 @@ pub fn table() -> TableCreateStatement {
         )
         .col(timestamp_with_write_default(ControlFactorValue::CreatedAt))
         .col(timestamp_with_write_default(ControlFactorValue::UpdatedAt))
+        .foreign_key(
+            ForeignKey::create()
+                .name("fk_control_factor_value_run")
+                .from(ControlFactorValue::Table, ControlFactorValue::RunId)
+                .to(
+                    ControlFactorMaterializationRun::Table,
+                    ControlFactorMaterializationRun::MaterializationRunId,
+                )
+                .on_delete(ForeignKeyAction::Restrict),
+        )
         .to_owned()
 }
 
 pub fn indexes() -> Vec<IndexSpec> {
     vec![
         IndexSpec::sea_query(
-            "idx_control_factor_value_type_status",
+            "idx_control_factor_value_type_status_expires",
             control_factor_value_table_name,
             IndexBuildMode::Transactional,
             Index::create()
-                .name("idx_control_factor_value_type_status")
+                .name("idx_control_factor_value_type_status_expires")
                 .table(ControlFactorValue::Table)
                 .col(ControlFactorValue::FactorType)
                 .col(ControlFactorValue::Status)
+                .col((ControlFactorValue::ExpiresAt, IndexOrder::Asc))
                 .to_owned(),
-            "factor lookup by type and lifecycle status",
+            "factor lookup by type, lifecycle status, and expiry",
         ),
         IndexSpec::sea_query(
-            "idx_control_factor_value_expires_at",
+            "idx_control_factor_value_run",
             control_factor_value_table_name,
             IndexBuildMode::Transactional,
             Index::create()
-                .name("idx_control_factor_value_expires_at")
+                .name("idx_control_factor_value_run")
                 .table(ControlFactorValue::Table)
-                .col((ControlFactorValue::ExpiresAt, IndexOrder::Asc))
+                .col(ControlFactorValue::RunId)
                 .to_owned(),
-            "factor expiry scans",
+            "factor lookup by materialization run",
+        ),
+        IndexSpec::sea_query(
+            "idx_control_factor_value_dimensions_hash",
+            control_factor_value_table_name,
+            IndexBuildMode::Transactional,
+            Index::create()
+                .name("idx_control_factor_value_dimensions_hash")
+                .table(ControlFactorValue::Table)
+                .col(ControlFactorValue::DimensionsHash)
+                .to_owned(),
+            "factor lookup by dimensions hash",
+        ),
+        IndexSpec::sea_query(
+            "uniq_control_factor_value_run_payload",
+            control_factor_value_table_name,
+            IndexBuildMode::Transactional,
+            Index::create()
+                .name("uniq_control_factor_value_run_payload")
+                .table(ControlFactorValue::Table)
+                .col(ControlFactorValue::RunId)
+                .col(ControlFactorValue::FactorType)
+                .col(ControlFactorValue::DimensionsHash)
+                .col(ControlFactorValue::PayloadHash)
+                .unique()
+                .to_owned(),
+            "dedupe factor rows per run/type/dimensions/payload",
         ),
     ]
 }
 
-pub const fn dependencies() -> Vec<TableDependency> {
-    Vec::new()
+pub fn dependencies() -> Vec<TableDependency> {
+    vec![TableDependency::foreign_key(materialization_run_table_name)]
 }
 
 pub const fn seed_units() -> Vec<SeedSpec> {
@@ -126,4 +186,8 @@ pub const fn seed_units() -> Vec<SeedSpec> {
 
 fn control_factor_value_table_name() -> String {
     ControlFactorValue::Table.to_string()
+}
+
+fn materialization_run_table_name() -> String {
+    ControlFactorMaterializationRun::Table.to_string()
 }

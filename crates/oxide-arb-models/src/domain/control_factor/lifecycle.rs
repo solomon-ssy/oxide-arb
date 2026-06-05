@@ -38,12 +38,21 @@ impl FactorLifecycle {
         from == to || TRANSITIONS.contains(&(from, to))
     }
 
-    /// Statuses that materialization / quality gates may write directly.
+    /// Statuses a materialization run may persist directly.
+    ///
+    /// Quality gates run inside the materialization run, so a completed run may
+    /// emit `Candidate` (gates passed) alongside `Draft` (gates-off), `Rejected`
+    /// (gates failed), and `ReportOnly` (insufficient evidence). Governed
+    /// statuses driven by publication/expiry (`Shadow` / `Published` /
+    /// `Superseded` / `Expired` / `RolledBack`) must never be written by a run.
     #[must_use]
     pub const fn is_materialization_output(status: FactorStatus) -> bool {
         matches!(
             status,
-            FactorStatus::Draft | FactorStatus::Rejected | FactorStatus::ReportOnly
+            FactorStatus::Draft
+                | FactorStatus::Candidate
+                | FactorStatus::Rejected
+                | FactorStatus::ReportOnly
         )
     }
 

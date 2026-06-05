@@ -654,3 +654,104 @@ pub fn configure(cfg: &mut web::ServiceConfig, metrics_enabled: bool, serve_ui: 
 | `ws/` (handler + session + broadcaster + protocol) | ~500 | ~200 |
 | `static_files.rs` | ~50 | ~20 |
 | **合计** | **~2,160** | **~1,050** |
+
+---
+
+## 13. Phase 5.5 治理控制面接线 (Governance Control-Plane Wiring)
+
+> 本节是 **Phase 5.5 Governance Core 的交接说明**。Phase 5.5 故意只交付 transport-agnostic 的治理内核(`oxide-arb-control` 的 `ControlFactorRegistry` + `oxide-arb-repository` 的原子审计链),**不含 HTTP、不含 RBAC 授权**。这里明确 Phase 6 必须如何实现与接线,避免漂移。
+
+### 13.1 职责分层(必须遵守)
+
+| 层 | 归属 | 职责 |
+|---|---|---|
+| authN(身份) | `oxide-arb-web` 中间件 | JWT/API-key → 解析出 actor + role |
+| authZ(角色→是否放行) | `oxide-arb-web` RBAC(移植 ng-gateway Casbin) | 路由级:哪个角色能调哪个治理 endpoint |
+| 变更信封 | `oxide-arb-web` handler | 从 `Claims` + 请求体构造 `AuditActor { actor, actor_role, request_id, reason }` (+ publish 的 `idempotency_key`) |
+| 治理门控 | `ControlFactorRegistry`(已在 5.5 交付) | risk-expansion flag、rollback target、`AuditActor::validate()` reason 非空 |
+| 原子状态机 + 审计链 | `ControlFactorRepository`(已在 5.5 交付) | 一事务内校验+状态变更+全局哈希链 append |
+
+**关键原则**: authZ 不进入 `oxide-arb-control`/`oxide-arb-models`。治理内核**信任** web 层已经鉴权,只负责记录 `actor_role` 到审计链并执行治理不变量。`OperatorRole` 枚举(`oxide-arb-models::enums::control_factor`)是 web Casbin 角色码与审计 `actor_role` 列之间的**唯一规范来源**。
+
+### 13.2 移植 ng-gateway RBAC(评估结论)
+
+ng-gateway 的 RBAC = **JWT 登录 + Casbin(Postgres 策略,`g` user→role / `p` role→resource)+ Actix 路由级 `has_any_role`/`has_resource_operation`/`has_scope`**。评估:
+
+- **够用**:承担 authN + 路由级 authZ 完全胜任,且与本 crate 同为 actix-web。
+- **不可整体作为依赖**:跨 `models/common/web/repository/storage` 多 crate、与 IoT `EntityType`/`Operation` 耦合、角色为 DB 动态字符串(只 seed 了 `SYSTEM_ADMIN`)。**移植 = 复制其 Casbin 中间件模式**,不是加依赖。
+
+移植清单(Phase 6 实现):
+
+1. **拷贝模式**(非整 crate):`PermRule`/`CombinedPermRule`(`ng-gateway-models/src/rbac.rs`)、`NGPermChecker` 路由规则注册表(`ng-gateway-common/src/casbin/mod.rs`)、`NGCasbinService` + Postgres adapter(`ng-gateway-common/src/casbin/`)、`Authentication`/`CasbinService` 中间件(`ng-gateway-web/src/middleware/`)。
+2. **角色码**:在 Casbin `g`/`p` 策略里新增 `viewer / operator / risk_owner / admin / emergency_operator`,与 `OperatorRole` 一一对应。
+3. **修复 ng-gateway 已知缺陷**(移植时必须改):
+   - 路由未注册规则时 ng-gateway **默认放行**(`NGPermChecker::check` 返回 `Ok(true)`)→ 治理面必须**默认拒绝**(fail-closed)。
+   - WebSocket 路由在 ng-gateway 未挂鉴权 → 治理面无关,但若复用其 WS 代码需补鉴权。
+   - 超级用户 bypass 用的是 username `"system_admin"` 字面量 → 改为基于 role code。
+4. **per-endpoint 角色矩阵**(对应 Phase 5.5 §7,在 `init_rbac_rules` 注册):
+
+| Endpoint | 方法 | 允许角色 | 治理 command |
+|---|---|---|---|
+| `/api/v1/control-factor-materializations` | POST | operator, risk_owner, admin, emergency_operator | enqueue run |
+| `/api/v1/control-factors/candidates` 等 GET | GET | 全部(含 viewer) | 只读 |
+| `/api/v1/control-factors/{id}/reject` | POST | operator, risk_owner, admin | `ControlFactorRegistry::reject_factor` |
+| `/api/v1/control-factors/{id}/shadow` | POST | operator, risk_owner, admin | `ControlFactorRegistry::promote_to_shadow` |
+| `/api/v1/control-factors/{id}/publish` | POST | risk_owner(conservative & risk-expanding) | `ControlFactorRegistry::publish` |
+| `/api/v1/control-factors/publications/{id}/rollback` | POST | risk_owner, admin | `ControlFactorRegistry::rollback_publication` |
+| `/api/v1/control-factors/.../emergency` | POST | emergency_operator | `ControlFactorRegistry::publish`(short-TTL) |
+| `/api/v1/runtime-config/versions[/{id}/activate]` | POST | admin | `ControlFactorRegistry::create/activate_runtime_config_version` |
+
+> 注意:risk-expanding publish 的「角色必须是 risk_owner」由这里的路由规则保证;治理内核只校验 `manual_risk_expansion_approval` flag + justification + rollback target,二者叠加才放行。
+
+### 13.3 endpoint → command 映射 + 信封构造
+
+每个 mutating handler 的统一骨架:
+
+```rust
+// 1. authZ 已由 CasbinService 中间件完成(否则到不了这里)
+// 2. 从 Claims + 请求体构造审计信封
+let envelope = AuditActor {
+    actor: claims.user_id.clone(),
+    actor_role: map_casbin_role_to_operator_role(&roles)?, // → OperatorRole
+    request_id: request_id_header(&req),                    // X-Request-Id / 生成
+    reason: body.reason.clone(),                            // 必填,空 → 400
+};
+// 3. 调用治理内核(它再 validate envelope + 治理门控 + 原子审计链)
+let outcome = registry.publish(envelope, command).await?;
+```
+
+`reason` 缺失 → handler 校验或 `AuditActor::validate()` 返回 `GovernanceError::MissingReason`。`idempotency_key` 对 publish 来自请求体,放进 `PublishCommand`。
+
+### 13.4 error → HTTP status 映射(必须实现)
+
+`RegistryError` / `GovernanceError` → status:
+
+| 错误 | HTTP |
+|---|---|
+| `GovernanceError::MissingReason` / `MissingField` | 400 |
+| Casbin 拒绝(角色不足) | 403 |
+| `GovernanceError::RiskExpansionNotApproved` | 403 |
+| `GovernanceError::RollbackTargetMissing` | 409 |
+| `GovernanceError::PublicationLockConflict` | 409 |
+| `PublishPublicationOutcome::AlreadyApplied`(幂等重放) | 200(返回已存在 publication) |
+| `GovernanceError::FactorNotReadyForPublication` / `FactorSetMismatch` / `EmptyPublication` | 409 |
+| `GovernanceError::AuditChain(_)` / `Storage(_)` | 500 |
+| `StorageError::NotFound` | 404 |
+
+### 13.5 Scheduler 进程接线(Phase 5.5 D2 交接)
+
+Phase 5.5 D2 已交付**可测库**(`crates/oxide-arb-control/src/scheduler/`):`SchedulePolicy` / `ScheduledMaterialization`(策略数据 + `production_default(...)` 覆盖 4 个周期 cadence)、纯判定 helper(`is_due` / `staleness` / `is_overdue`)、以及 `MaterializationScheduler::tick(now) -> SchedulerCycleReport`(enqueue-only、`run_dedupe_key` 去重、missed/stale 告警作为数据返回)。进程接线在此明确:
+
+- **依赖**:`oxide-arb-core` 当前**未**依赖 `oxide-arb-control`;接线时在 `crates/oxide-arb-core/Cargo.toml` 增加该依赖(control 不依赖 core hot path,无循环)。
+- **位置 / tick 循环**:在 `crates/oxide-arb-core/src/app/bootstrap.rs` 的 `ctx.queue_periodic_services()` 旁新增 `ctx.queue_control_factor_scheduler()`,用现有 `PeriodicTask`(`crates/oxide-arb-core/src/infra/periodic_task.rs`)每个 interval 调用一次 `MaterializationScheduler::tick(Utc::now())`。
+- **execute worker(Phase 6 接线)**:tick 只产出 `Queued` run。另起一个独立 worker(同样由 `PeriodicTask` 或专用消费循环驱动)轮询 `Queued` run 并调用 `MaterializationRunner::execute_run`;调度循环与 execute worker **都**是 Phase 6 进程接线,scheduler 库本身不执行 run。
+- **`SchedulePolicy` 来源**:由 runtime config / `config/oxide-arb.toml` 注入(`production_default` 仅为缺省);`created_by` / `code_git_sha` 写入 manifest。
+- **仓库注入**:在 `AppContext::build`(`crates/oxide-arb-core/src/app/build.rs` 的 `BuildRepos`)构造 `PgControlFactorRepository`,注入 scheduler、execute worker 与未来 web。
+- **告警映射**:`SchedulerCycleReport::alerts` 中的 `ScheduleAlert::Overdue { schedule_id, last_run_at }` 与 `ScheduleAlert::Stale { schedule_id, last_success_at, threshold_secs }` 由接线层映射到现有 `AlertDispatcher`;manual backfill/incident run 写审计。
+- **行为**:4 个周期 cadence(execution-quality hourly / reconciliation hourly / bucket-risk daily / portfolio-risk daily)按 `run_dedupe_key` 去重 enqueue;`market-anomaly` 为事件驱动(incident run),不在周期 scheduler 内。
+- **never-publish 保证**:scheduler 只调用 `latest_run_for_schedule` + `enqueue_materialization_run`,无 `publish_publication` 访问路径(单测 `scheduler::tests` 断言 `publish_calls() == 0`)。
+- **shadow 聚合(promotion review)**:`ControlFactorShadowDecisionRepository::aggregate_shadow_decisions` / `list_shadow_decisions` 已就绪;promotion-review consumer 从 `list_shadow_decisions` 原始行计算 delta 分位分布(不入库)。
+
+### 13.6 Live refresher 接触点(Phase 5.6 备注)
+
+publish/rollback 后,Phase 5.6 的 `oxide-arb-core/src/control/factor_refresher.rs` 通过轮询 `load_active_publication(Published)` + 校验 TTL/hash 构建 `ArcSwap<ControlFactorSnapshot>`;web 的 publish/rollback 可选地发 notify 加速 refresh(periodic poll 兜底)。本阶段不实现。

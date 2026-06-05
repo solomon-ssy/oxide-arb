@@ -22,6 +22,8 @@ pub struct Model {
     #[sea_orm(column_type = "Text")]
     pub approval_reason: String,
     #[sea_orm(column_type = "Text")]
+    pub idempotency_key: String,
+    #[sea_orm(column_type = "Text")]
     pub publication_hash: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,

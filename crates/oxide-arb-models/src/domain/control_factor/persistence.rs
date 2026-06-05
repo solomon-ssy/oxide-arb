@@ -6,14 +6,20 @@ use super::{
 };
 use crate::{
     enums::control_factor::{
-        ControlAuditEventType, ControlFactorType, EvidenceStageStatus, FactorStatus,
-        MaterializationOutputPolicy, MaterializationRunKind, MaterializationRunStatus,
-        MaterializationStageName, PublicationMode, PublicationStatus, RunTriggerType,
+        AuditResourceType, ControlAuditEventType, ControlFactorType, EvidenceStageStatus,
+        FactorStatus, MaterializationOutputPolicy, MaterializationRunKind,
+        MaterializationRunStatus, MaterializationStageName, OperatorRole, PublicationMode,
+        PublicationStatus, RunTriggerType,
     },
-    types::{ControlFactorId, FactorPublicationId, MaterializationRunId, StageReportId},
+    hashing::CanonicalDigest,
+    types::{
+        AuditEventId, ControlFactorId, FactorPublicationId, MaterializationRunId, StageReportId,
+    },
 };
 use chrono::{DateTime, Utc};
-use oxide_arb_error::control::{ControlPersistenceError, FactorValueError};
+use oxide_arb_error::control::{
+    CanonicalDigestError, ControlPersistenceError, FactorValueError, GovernanceError,
+};
 use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
 use serde::{Deserialize, Serialize};
 
@@ -22,11 +28,15 @@ use serde::{Deserialize, Serialize};
 #[sea_orm(entity = "crate::entities::control_factor_value::Entity")]
 pub struct ControlFactorValueInfo {
     pub factor_id: ControlFactorId,
+    pub run_id: MaterializationRunId,
     pub factor_type: ControlFactorType,
     pub dimensions: serde_json::Value,
+    pub dimensions_hash: String,
     pub payload: serde_json::Value,
+    pub payload_hash: String,
     pub evidence: serde_json::Value,
     pub status: FactorStatus,
+    pub status_reason: Option<String>,
     pub generated_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
     pub owner: String,
@@ -40,11 +50,15 @@ info_from_model!(
     crate::entities::control_factor_value::Model,
     {
         factor_id,
+        run_id,
         factor_type,
         dimensions,
+        dimensions_hash,
         payload,
+        payload_hash,
         evidence,
         status,
+        status_reason,
         generated_at,
         expires_at,
         owner,
@@ -109,11 +123,15 @@ fn decode_json_field<T: serde::de::DeserializeOwned>(
 #[sea_orm(active_model = "crate::entities::control_factor_value::ActiveModel")]
 pub struct NewControlFactorValue {
     pub factor_id: ControlFactorId,
+    pub run_id: MaterializationRunId,
     pub factor_type: ControlFactorType,
     pub dimensions: serde_json::Value,
+    pub dimensions_hash: String,
     pub payload: serde_json::Value,
+    pub payload_hash: String,
     pub evidence: serde_json::Value,
     pub status: FactorStatus,
+    pub status_reason: Option<String>,
     pub generated_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
     pub owner: String,
@@ -121,14 +139,29 @@ pub struct NewControlFactorValue {
 }
 
 impl NewControlFactorValue {
-    pub fn from_typed(value: &ControlFactorValue) -> Result<Self, serde_json::Error> {
+    /// Builds an insert row from a typed factor, deriving `run_id` from evidence
+    /// and computing canonical `dimensions_hash` / `payload_hash` for dedupe.
+    pub fn from_typed(
+        value: &ControlFactorValue,
+        status_reason: Option<String>,
+    ) -> Result<Self, CanonicalDigestError> {
+        let dimensions = serde_json::to_value(&value.dimensions)
+            .map_err(|error| CanonicalDigestError::Serialize(error.to_string()))?;
+        let payload = serde_json::to_value(&value.payload)
+            .map_err(|error| CanonicalDigestError::Serialize(error.to_string()))?;
+        let evidence = serde_json::to_value(&value.evidence)
+            .map_err(|error| CanonicalDigestError::Serialize(error.to_string()))?;
         Ok(Self {
             factor_id: value.factor_id.clone(),
+            run_id: value.evidence.materialization_run_id.clone(),
             factor_type: value.factor_type,
-            dimensions: serde_json::to_value(&value.dimensions)?,
-            payload: serde_json::to_value(&value.payload)?,
-            evidence: serde_json::to_value(&value.evidence)?,
+            dimensions_hash: CanonicalDigest::blake3_json(&value.dimensions)?,
+            dimensions,
+            payload_hash: CanonicalDigest::blake3_json(&value.payload)?,
+            payload,
+            evidence,
             status: value.status,
+            status_reason,
             generated_at: value.generated_at,
             expires_at: value.expires_at,
             owner: value.owner.clone(),
@@ -239,6 +272,7 @@ pub struct NewControlFactorPublication {
     pub expires_at: DateTime<Utc>,
     pub approved_by: Option<String>,
     pub approval_reason: String,
+    pub idempotency_key: String,
     pub publication_hash: String,
 }
 
@@ -254,6 +288,7 @@ pub struct NewControlFactorPublicationRow {
     pub expires_at: DateTime<Utc>,
     pub approved_by: Option<String>,
     pub approval_reason: String,
+    pub idempotency_key: String,
     pub publication_hash: String,
 }
 
@@ -268,6 +303,7 @@ impl From<&NewControlFactorPublication> for NewControlFactorPublicationRow {
             expires_at: value.expires_at,
             approved_by: value.approved_by.clone(),
             approval_reason: value.approval_reason.clone(),
+            idempotency_key: value.idempotency_key.clone(),
             publication_hash: value.publication_hash.clone(),
         }
     }
@@ -281,17 +317,24 @@ pub struct NewControlFactorPublicationFactor {
     pub factor_id: ControlFactorId,
 }
 
-/// DB row projection for `control_factor_audit_event`.
+/// DB row projection for `control_factor_audit_event` (full chain row).
 #[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]
 #[sea_orm(entity = "crate::entities::control_factor_audit_event::Entity")]
 pub struct ControlFactorAuditEventInfo {
-    pub id: i64,
+    pub event_id: AuditEventId,
+    pub sequence: i64,
     pub event_type: ControlAuditEventType,
-    pub factor_id: Option<ControlFactorId>,
-    pub publication_id: Option<FactorPublicationId>,
     pub actor: String,
+    pub actor_role: OperatorRole,
+    pub resource_type: AuditResourceType,
+    pub resource_id: String,
+    pub request_id: String,
     pub reason: String,
-    pub payload: serde_json::Value,
+    pub before_hash: Option<String>,
+    pub after_hash: Option<String>,
+    pub diff: serde_json::Value,
+    pub prev_event_hash: Option<String>,
+    pub event_hash: String,
     pub created_at: DateTime<Utc>,
 }
 
@@ -299,27 +342,99 @@ info_from_model!(
     ControlFactorAuditEventInfo,
     crate::entities::control_factor_audit_event::Model,
     {
-        id,
+        event_id,
+        sequence,
         event_type,
-        factor_id,
-        publication_id,
         actor,
+        actor_role,
+        resource_type,
+        resource_id,
+        request_id,
         reason,
-        payload,
+        before_hash,
+        after_hash,
+        diff,
+        prev_event_hash,
+        event_hash,
         created_at,
     }
 );
 
-/// Insert payload for `control_factor_audit_event`.
-#[derive(Debug, Clone, DeriveIntoActiveModel)]
-#[sea_orm(active_model = "crate::entities::control_factor_audit_event::ActiveModel")]
+/// Semantic content of a governance audit event.
+///
+/// Chain fields (`event_id`, `sequence`, `prev_event_hash`, `event_hash`,
+/// `created_at`) are assigned atomically by the repository under the audit-chain
+/// advisory lock, so this DTO intentionally omits them and is **not** an
+/// `IntoActiveModel`.
+#[derive(Debug, Clone)]
 pub struct NewControlFactorAuditEvent {
     pub event_type: ControlAuditEventType,
-    pub factor_id: Option<ControlFactorId>,
-    pub publication_id: Option<FactorPublicationId>,
     pub actor: String,
+    pub actor_role: OperatorRole,
+    pub resource_type: AuditResourceType,
+    pub resource_id: String,
+    pub request_id: String,
     pub reason: String,
-    pub payload: serde_json::Value,
+    pub before_hash: Option<String>,
+    pub after_hash: Option<String>,
+    pub diff: serde_json::Value,
+}
+
+/// Mutation envelope for governance operations.
+///
+/// Carries who acted, at what role, the request id, and the human reason. Role
+/// *authorization* (which role may invoke which operation) is enforced at the
+/// transport boundary (oxide-arb-web RBAC); this envelope only carries the
+/// attribution recorded into the audit chain and is reused for multi-resource
+/// sweeps (e.g. TTL expiry).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuditActor {
+    pub actor: String,
+    pub actor_role: OperatorRole,
+    pub request_id: String,
+    pub reason: String,
+}
+
+impl AuditActor {
+    /// Validates envelope integrity (non-empty actor / `request_id` / reason).
+    pub fn validate(&self) -> Result<(), GovernanceError> {
+        if self.actor.trim().is_empty() {
+            return Err(GovernanceError::MissingField { field: "actor" });
+        }
+        if self.request_id.trim().is_empty() {
+            return Err(GovernanceError::MissingField {
+                field: "request_id",
+            });
+        }
+        if self.reason.trim().is_empty() {
+            return Err(GovernanceError::MissingReason);
+        }
+        Ok(())
+    }
+}
+
+/// Outcome of an idempotent publish.
+#[derive(Debug, Clone)]
+pub enum PublishPublicationOutcome {
+    /// Created and activated a new publication.
+    Published(ControlFactorPublicationInfo),
+    /// Returned an existing publication matching the idempotency key.
+    AlreadyApplied(ControlFactorPublicationInfo),
+}
+
+impl PublishPublicationOutcome {
+    #[must_use]
+    pub const fn publication(&self) -> &ControlFactorPublicationInfo {
+        match self {
+            Self::Published(info) | Self::AlreadyApplied(info) => info,
+        }
+    }
+}
+
+/// Outcome of a governed TTL expiry sweep.
+#[derive(Debug, Clone, Default)]
+pub struct ExpireFactorsOutcome {
+    pub expired: Vec<ControlFactorId>,
 }
 
 /// DB row projection for `control_factor_materialization_run`.
@@ -581,4 +696,59 @@ pub enum CancelMaterializationRunOutcome {
     Cancelled(ControlFactorMaterializationRunInfo),
     AlreadyTerminal(ControlFactorMaterializationRunInfo),
     NotFound,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AuditActor;
+    use crate::enums::control_factor::OperatorRole;
+    use oxide_arb_error::control::GovernanceError;
+
+    fn envelope() -> AuditActor {
+        AuditActor {
+            actor: "op".into(),
+            actor_role: OperatorRole::Operator,
+            request_id: "req-1".into(),
+            reason: "because".into(),
+        }
+    }
+
+    #[test]
+    fn audit_actor_validates_complete_envelope() {
+        assert!(envelope().validate().is_ok());
+    }
+
+    #[test]
+    fn audit_actor_requires_reason() {
+        let envelope = AuditActor {
+            reason: "   ".into(),
+            ..envelope()
+        };
+        assert!(matches!(
+            envelope.validate(),
+            Err(GovernanceError::MissingReason)
+        ));
+    }
+
+    #[test]
+    fn audit_actor_requires_identity_fields() {
+        let missing_actor = AuditActor {
+            actor: String::new(),
+            ..envelope()
+        };
+        assert!(matches!(
+            missing_actor.validate(),
+            Err(GovernanceError::MissingField { field: "actor" })
+        ));
+        let missing_request = AuditActor {
+            request_id: String::new(),
+            ..envelope()
+        };
+        assert!(matches!(
+            missing_request.validate(),
+            Err(GovernanceError::MissingField {
+                field: "request_id"
+            })
+        ));
+    }
 }

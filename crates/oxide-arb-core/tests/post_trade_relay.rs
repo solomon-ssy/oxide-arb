@@ -20,7 +20,7 @@ use oxide_arb_core::{
 use oxide_arb_models::{
     clickhouse::OpportunityAuditRow,
     config::{PolymarketConfig, RiskConfig, WebSocketConfig},
-    domain::{NewTrade, TradeObservation},
+    domain::{NewTrade, PositionInfo, TradeObservation},
     enums::common::{ExecutionMode, MarketCategory, Side, TradeBusinessOutcome, TradeState},
     types::{
         Bps, EventId, ExecutionId, MarketId, OpportunityId, Price, ReservationId, Shares, TokenId,
@@ -28,7 +28,9 @@ use oxide_arb_models::{
     },
 };
 use oxide_arb_repository::traits::TradeRepository;
-use oxide_arb_risk::{builder::RiskEngineBuilder, clock::utc_clock, engine::RiskEngine};
+use oxide_arb_risk::{
+    builder::RiskEngineBuilder, clock::utc_clock, engine::RiskEngine, traits::RiskMetrics,
+};
 use oxide_arb_test_support::mocks::{
     MockCalibrationRepository, MockPositionRepository, MockTradeRepository,
 };
@@ -146,7 +148,7 @@ fn risk_engine() -> Arc<RiskEngine> {
 
 struct StaticRiskMetrics;
 
-impl oxide_arb_risk::traits::RiskMetrics for StaticRiskMetrics {
+impl RiskMetrics for StaticRiskMetrics {
     fn total_exposure(&self) -> Usd {
         Usd::ZERO
     }
@@ -156,7 +158,7 @@ impl oxide_arb_risk::traits::RiskMetrics for StaticRiskMetrics {
     fn open_position_count(&self) -> usize {
         0
     }
-    fn open_positions(&self) -> Vec<oxide_arb_models::domain::position::PositionInfo> {
+    fn open_positions(&self) -> Vec<PositionInfo> {
         Vec::new()
     }
     fn cash_balance(&self) -> Usd {

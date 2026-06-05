@@ -14,8 +14,9 @@ use oxide_arb_models::{
         },
     },
     enums::control_factor::{
-        ControlAuditEventType, ControlFactorType, EvidenceStageStatus, MaterializationErrorCode,
-        MaterializationOutputPolicy, MaterializationRunStatus, MaterializationStageName,
+        AuditResourceType, ControlAuditEventType, ControlFactorType, EvidenceStageStatus,
+        MaterializationErrorCode, MaterializationOutputPolicy, MaterializationRunStatus,
+        MaterializationStageName, OperatorRole,
     },
     types::MaterializationRunId,
 };
@@ -521,23 +522,31 @@ impl MaterializationRunner {
     ) -> MaterializationResult<u64> {
         let mut records_written = 0_u64;
         for factor in &gate_artifact.factors {
-            let new_factor = NewControlFactorValue::from_typed(factor)
+            // Validate the materialization output row before persistence; builders
+            // must only emit Draft / Rejected / ReportOnly with safe payloads.
+            factor
+                .validate_as_materialization_output()
                 .map_err(|error| MaterializationError::Codec(error.to_string()))?;
-            self.deps.control_factors.create_factor(new_factor).await?;
+            let new_factor = NewControlFactorValue::from_typed(factor, None)?;
+            let audit = NewControlFactorAuditEvent {
+                event_type: ControlAuditEventType::FactorCreated,
+                actor: manifest.created_by.clone(),
+                actor_role: OperatorRole::Operator,
+                resource_type: AuditResourceType::Factor,
+                resource_id: factor.factor_id.as_str().to_owned(),
+                request_id: manifest.run_id.as_str().to_owned(),
+                reason: "materialization draft write".to_owned(),
+                before_hash: None,
+                after_hash: None,
+                diff: serde_json::json!({
+                    "run_id": manifest.run_id,
+                    "status": factor.status,
+                    "factor_type": factor.factor_type,
+                }),
+            };
             self.deps
                 .control_factors
-                .append_audit_event(NewControlFactorAuditEvent {
-                    event_type: ControlAuditEventType::FactorCreated,
-                    factor_id: Some(factor.factor_id.clone()),
-                    publication_id: None,
-                    actor: manifest.created_by.clone(),
-                    reason: "phase5.4 materialization draft write".to_owned(),
-                    payload: serde_json::json!({
-                        "run_id": manifest.run_id,
-                        "status": factor.status,
-                        "factor_type": factor.factor_type,
-                    }),
-                })
+                .create_factor(new_factor, audit)
                 .await?;
             records_written = records_written.saturating_add(1);
         }

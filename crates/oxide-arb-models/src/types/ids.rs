@@ -291,6 +291,18 @@ impl ShadowDecisionId {
     }
 }
 
+/// Append-only control-factor audit event identifier (UUID v7).
+#[derive(TypedId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct AuditEventId(Arc<str>);
+
+impl AuditEventId {
+    /// Generate a fresh time-ordered audit event ID.
+    #[must_use]
+    pub fn new_v7() -> Self {
+        Self(Arc::from(format!("cfae_{}", Uuid::now_v7()).as_str()))
+    }
+}
+
 /// Position exit plan identifier (UUID v7).
 #[derive(TypedId, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ExitPlanId(Arc<str>);

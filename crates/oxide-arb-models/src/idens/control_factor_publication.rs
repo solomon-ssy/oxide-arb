@@ -25,6 +25,7 @@ pub enum ControlFactorPublication {
     ExpiresAt,
     ApprovedBy,
     ApprovalReason,
+    IdempotencyKey,
     PublicationHash,
     CreatedAt,
     UpdatedAt,
@@ -77,6 +78,11 @@ pub fn table() -> TableCreateStatement {
                 .not_null(),
         )
         .col(
+            ColumnDef::new(ControlFactorPublication::IdempotencyKey)
+                .text()
+                .not_null(),
+        )
+        .col(
             ColumnDef::new(ControlFactorPublication::PublicationHash)
                 .text()
                 .not_null(),
@@ -113,6 +119,18 @@ pub fn indexes() -> Vec<IndexSpec> {
                 .col((ControlFactorPublication::EffectiveFrom, IndexOrder::Desc))
                 .to_owned(),
             "publication lookup by mode and effective time",
+        ),
+        IndexSpec::sea_query(
+            "uniq_control_factor_publication_idempotency",
+            publication_table_name,
+            IndexBuildMode::Transactional,
+            Index::create()
+                .name("uniq_control_factor_publication_idempotency")
+                .table(ControlFactorPublication::Table)
+                .col(ControlFactorPublication::IdempotencyKey)
+                .unique()
+                .to_owned(),
+            "idempotent publication creation key",
         ),
     ]
 }

@@ -7,18 +7,16 @@ use oxide_arb_models::{
         common::MarketCategory,
         control_factor::{ControlFactorType, MaterializationRunKind},
     },
+    hashing::CanonicalDigest,
     types::{EventId, MarketId, TokenId},
 };
 use serde::Serialize;
 
-use crate::materialization::{MaterializationError, MaterializationResult};
+use crate::materialization::MaterializationResult;
 
 pub struct ManifestHasher;
 pub struct DedupeKeyHasher;
 pub struct ArtifactHasher;
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct Blake3Digest(String);
 
 #[derive(Serialize)]
 struct DedupeCanonicalInput<'a> {
@@ -38,24 +36,9 @@ struct DedupeCanonicalInput<'a> {
     code_git_sha: &'a str,
 }
 
-impl Blake3Digest {
-    fn from_canonical_json<T: Serialize>(value: &T) -> MaterializationResult<Self> {
-        let bytes = serde_json::to_vec(value)
-            .map_err(|error| MaterializationError::Codec(error.to_string()))?;
-        Ok(Self(format!(
-            "blake3:{}",
-            hex::encode(blake3::hash(&bytes).as_bytes())
-        )))
-    }
-
-    fn into_string(self) -> String {
-        self.0
-    }
-}
-
 impl ManifestHasher {
     pub fn compute(manifest: &MaterializationRunManifest) -> MaterializationResult<String> {
-        Blake3Digest::from_canonical_json(manifest).map(Blake3Digest::into_string)
+        CanonicalDigest::blake3_json(manifest).map_err(Into::into)
     }
 }
 
@@ -87,13 +70,15 @@ impl DedupeKeyHasher {
             quality_gate_policy: &manifest.quality_gate_policy,
             code_git_sha: manifest.code_git_sha.as_str(),
         };
-        Blake3Digest::from_canonical_json(&input).map(Blake3Digest::into_string)
+        CanonicalDigest::blake3_json(&input).map_err(Into::into)
     }
 }
 
 impl ArtifactHasher {
     pub fn compute<T: Serialize>(artifact: &T) -> MaterializationResult<ArtifactHash> {
-        Blake3Digest::from_canonical_json(artifact).map(|digest| ArtifactHash(digest.into_string()))
+        CanonicalDigest::blake3_json(artifact)
+            .map(ArtifactHash)
+            .map_err(Into::into)
     }
 }
 

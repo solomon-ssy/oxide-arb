@@ -1,10 +1,12 @@
-use crate::traits::RuntimeConfigVersionRepository;
+use crate::{
+    postgres::control_factor::append_audit_event_chained_q, traits::RuntimeConfigVersionRepository,
+};
 use chrono::{DateTime, Utc};
 use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::{
     domain::{
         NewRuntimeConfigActivation, NewRuntimeConfigVersion, RuntimeConfigActivationInfo,
-        RuntimeConfigVersionInfo,
+        RuntimeConfigVersionInfo, control_factor::NewControlFactorAuditEvent,
     },
     entities::{
         runtime_config_activation::{Column as ActivationColumn, Entity as ActivationEntity},
@@ -14,7 +16,7 @@ use oxide_arb_models::{
 };
 use sea_orm::{
     ColumnTrait, ConnectionTrait, DatabaseConnection, DatabaseTransaction, EntityTrait,
-    IntoActiveModel, QueryFilter, QueryOrder, QuerySelect,
+    IntoActiveModel, QueryFilter, QueryOrder, QuerySelect, TransactionTrait,
 };
 
 pub struct PgRuntimeConfigVersionRepository {
@@ -55,6 +57,26 @@ async fn do_activate_version(
         .await
         .map(Into::into)
         .map_err(StorageError::from)
+}
+
+async fn do_create_version_governed(
+    db: &impl ConnectionTrait,
+    version: NewRuntimeConfigVersion,
+    audit: NewControlFactorAuditEvent,
+) -> Result<RuntimeConfigVersionInfo, StorageError> {
+    let info = do_create_version(db, version).await?;
+    append_audit_event_chained_q(db, audit, Utc::now()).await?;
+    Ok(info)
+}
+
+async fn do_activate_version_governed(
+    db: &impl ConnectionTrait,
+    mut activation: NewRuntimeConfigActivation,
+    audit: NewControlFactorAuditEvent,
+) -> Result<RuntimeConfigActivationInfo, StorageError> {
+    let event = append_audit_event_chained_q(db, audit, Utc::now()).await?;
+    activation.audit_event_id = Some(event.event_id);
+    do_activate_version(db, activation).await
 }
 
 async fn do_load_version(
@@ -110,6 +132,28 @@ impl RuntimeConfigVersionRepository for PgRuntimeConfigVersionRepository {
         do_activate_version(&self.db, activation).await
     }
 
+    async fn create_version_governed(
+        &self,
+        version: NewRuntimeConfigVersion,
+        audit: NewControlFactorAuditEvent,
+    ) -> Result<RuntimeConfigVersionInfo, StorageError> {
+        let txn = self.db.begin().await.map_err(StorageError::from)?;
+        let info = do_create_version_governed(&txn, version, audit).await?;
+        txn.commit().await.map_err(StorageError::from)?;
+        Ok(info)
+    }
+
+    async fn activate_version_governed(
+        &self,
+        activation: NewRuntimeConfigActivation,
+        audit: NewControlFactorAuditEvent,
+    ) -> Result<RuntimeConfigActivationInfo, StorageError> {
+        let txn = self.db.begin().await.map_err(StorageError::from)?;
+        let info = do_activate_version_governed(&txn, activation, audit).await?;
+        txn.commit().await.map_err(StorageError::from)?;
+        Ok(info)
+    }
+
     async fn load_version(
         &self,
         version_id: &RuntimeConfigVersionId,
@@ -157,6 +201,22 @@ impl RuntimeConfigVersionRepository for PgRuntimeConfigVersionRepositoryTxn<'_> 
         activation: NewRuntimeConfigActivation,
     ) -> Result<RuntimeConfigActivationInfo, StorageError> {
         do_activate_version(self.txn, activation).await
+    }
+
+    async fn create_version_governed(
+        &self,
+        version: NewRuntimeConfigVersion,
+        audit: NewControlFactorAuditEvent,
+    ) -> Result<RuntimeConfigVersionInfo, StorageError> {
+        do_create_version_governed(self.txn, version, audit).await
+    }
+
+    async fn activate_version_governed(
+        &self,
+        activation: NewRuntimeConfigActivation,
+        audit: NewControlFactorAuditEvent,
+    ) -> Result<RuntimeConfigActivationInfo, StorageError> {
+        do_activate_version_governed(self.txn, activation, audit).await
     }
 
     async fn load_version(

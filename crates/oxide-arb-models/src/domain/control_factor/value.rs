@@ -291,6 +291,20 @@ impl ControlFactorValue {
 
         Ok(())
     }
+
+    /// Validates a freshly materialized row before it is persisted as a draft output.
+    ///
+    /// Materialization may only emit `Draft` / `Rejected` / `ReportOnly`; promotion
+    /// into the governed funnel happens later through the registry service.
+    pub fn validate_as_materialization_output(&self) -> Result<(), FactorValueError> {
+        if !FactorLifecycle::is_materialization_output(self.status) {
+            return Err(FactorValueError::IllegalTransition {
+                from: self.status.to_string(),
+                to: "materialization_output_only".to_owned(),
+            });
+        }
+        self.validate_for_transition(self.status, None)
+    }
 }
 
 #[cfg(test)]
@@ -404,5 +418,62 @@ mod tests {
             factor.validate_for_transition(FactorStatus::Candidate, None),
             Err(FactorValueError::InsufficientEvidence)
         ));
+    }
+
+    #[test]
+    fn materialization_output_accepts_run_writable_statuses() {
+        for status in [
+            FactorStatus::Draft,
+            FactorStatus::Candidate,
+            FactorStatus::Rejected,
+            FactorStatus::ReportOnly,
+        ] {
+            let factor = minimal_factor(status);
+            assert!(
+                factor.validate_as_materialization_output().is_ok(),
+                "status {status} should be a valid materialization output"
+            );
+        }
+    }
+
+    #[test]
+    fn materialization_output_rejects_governed_statuses() {
+        let factor = minimal_factor(FactorStatus::Shadow);
+        assert!(matches!(
+            factor.validate_as_materialization_output(),
+            Err(FactorValueError::IllegalTransition { .. })
+        ));
+    }
+
+    #[test]
+    fn shadow_publication_requires_candidate_members() {
+        use crate::{
+            domain::control_factor::ControlFactorPublication,
+            enums::control_factor::{PublicationMode, PublicationStatus},
+            types::FactorPublicationId,
+        };
+
+        let factor = minimal_factor(FactorStatus::Candidate);
+        let publication = ControlFactorPublication {
+            publication_id: FactorPublicationId::new_v7(),
+            mode: PublicationMode::Shadow,
+            factor_ids: vec![factor.factor_id.clone()],
+            previous_publication_id: None,
+            status: PublicationStatus::Pending,
+            effective_from: Utc::now(),
+            expires_at: Utc::now() + chrono::Duration::days(1),
+            approved_by: Some("op".into()),
+            approval_reason: "shadow".into(),
+            publication_hash: String::new(),
+        };
+        assert!(publication.validate_for_activation(&[factor]).is_ok());
+
+        // A draft member cannot back a Shadow publication.
+        let draft = minimal_factor(FactorStatus::Draft);
+        let publication = ControlFactorPublication {
+            factor_ids: vec![draft.factor_id.clone()],
+            ..publication
+        };
+        assert!(publication.validate_for_activation(&[draft]).is_err());
     }
 }

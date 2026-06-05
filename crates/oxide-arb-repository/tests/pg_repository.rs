@@ -7,16 +7,28 @@ use std::collections::HashSet;
 
 use chrono::{NaiveDate, Utc};
 use oxide_arb_models::{
+    domain::control_factor::{
+        AuditChain, BucketRiskDimensions, BucketRiskPayload, ConfidenceInterval,
+        ControlFactorValue, DataCoverageReport, FactorDimensions, FactorEvidence, FactorPayload,
+        NewControlFactorAuditEvent, NewControlFactorPublication, NewControlFactorValue,
+        PointInTimeInputManifest, PublishPublicationOutcome, TailRiskEvidence,
+    },
+    enums::control_factor::{
+        AuditResourceType, ControlAuditEventType, ControlFactorType, FactorMaturity, FactorStatus,
+        OperatorRole, PublicationMode, PublicationStatus,
+    },
+};
+use oxide_arb_models::{
     domain::{
         AcquireMaterializationRunOutcome, CancelMaterializationRunOutcome,
         EnqueueMaterializationRunOptions, EnqueueMaterializationRunOutcome,
         MaterializationRunStatusPatch, NewAccountingPeriod, NewBalanceSnapshot,
-        NewCalibrationOutcome, NewControlFactorMaterializationRun, NewControlFactorStageReport,
-        NewEmergencySnapshot, NewPosition, NewPotentialLoss, NewReconciliationReport,
-        NewRiskAuditEvent, NewRuntimeConfigActivation, NewRuntimeConfigVersion,
-        NewTokenBalanceSnapshot, NewTrade, ResolvePotentialLoss, RunTransitionOutcome,
-        SettlePositionParams, TradeObservation, UpsertBlacklistEntry, UpsertCalibration,
-        UpsertRiskEngineState,
+        NewCalibrationOutcome, NewControlFactorMaterializationRun, NewControlFactorShadowDecision,
+        NewControlFactorStageReport, NewEmergencySnapshot, NewPosition, NewPotentialLoss,
+        NewReconciliationReport, NewRiskAuditEvent, NewRuntimeConfigActivation,
+        NewRuntimeConfigVersion, NewTokenBalanceSnapshot, NewTrade, ResolvePotentialLoss,
+        RunTransitionOutcome, SettlePositionParams, ShadowDecisionAggregate, TradeObservation,
+        UpsertBlacklistEntry, UpsertCalibration, UpsertRiskEngineState,
     },
     enums::{
         calibration::{DurationBucket, PriceZone},
@@ -28,7 +40,7 @@ use oxide_arb_models::{
             EvidenceStageStatus, MaterializationOutputPolicy, MaterializationRunKind,
             MaterializationRunStatus, MaterializationStageName, RunTriggerType,
         },
-        fact::BalanceSnapshotSource,
+        fact::{BalanceSnapshotSource, ShadowDecisionType},
         risk::{
             BlacklistReason, BlacklistScope, BreakerStateName, CircuitBreakerLevel,
             ReconciliationStatus, RiskAuditEventType,
@@ -1084,4 +1096,617 @@ async fn risk_audit_repository_create_batch() {
     }])
     .await
     .unwrap();
+}
+
+// ── Control-factor governance integration ──────────────────────────────────
+
+async fn seed_control_run(repo: &PgControlFactorRepository) -> MaterializationRunId {
+    let created = match repo
+        .enqueue_materialization_run(
+            materialization_run(None),
+            EnqueueMaterializationRunOptions {
+                force_new_run: false,
+                reason: None,
+            },
+        )
+        .await
+        .expect("enqueue run")
+    {
+        EnqueueMaterializationRunOutcome::Created(run) => run,
+        other => panic!("expected created, got {other:?}"),
+    };
+    created.materialization_run_id
+}
+
+fn candidate_factor(run_id: &MaterializationRunId, size_multiplier: Decimal) -> ControlFactorValue {
+    let now = Utc::now();
+    ControlFactorValue {
+        factor_id: ControlFactorId::new_v7(),
+        factor_type: ControlFactorType::BucketRisk,
+        dimensions: FactorDimensions::BucketRisk(BucketRiskDimensions {
+            category: MarketCategory::Politics,
+            price_zone: PriceZone::Z99,
+            duration_bucket: DurationBucket::Short,
+            hours_to_settlement_bucket: None,
+            neg_risk: Some(false),
+            fee_profile: None,
+        }),
+        payload: FactorPayload::BucketRisk(BucketRiskPayload {
+            resolution_haircut_factor: dec!(0.9),
+            size_multiplier,
+            min_edge_bps_addon: dec!(0),
+            block_new_entries: false,
+        }),
+        evidence: FactorEvidence {
+            materialization_run_id: run_id.clone(),
+            stage_report_ids: Vec::new(),
+            window_from: now - chrono::Duration::hours(1),
+            window_to: now,
+            source_delay_secs: 30,
+            market_count: 1,
+            event_count: 1,
+            opportunity_count: 1,
+            settlement_count: 0,
+            sample_count: 10,
+            data_coverage: DataCoverageReport {
+                expected_rows: 10,
+                observed_rows: 10,
+                missing_rows: 0,
+                coverage_ratio: Decimal::ONE,
+                insufficient_reasons: Vec::new(),
+            },
+            point_in_time_inputs: PointInTimeInputManifest {
+                inputs: Vec::new(),
+                production_eligible: true,
+                missing_inputs: Vec::new(),
+                fatal_errors: Vec::new(),
+                warnings: Vec::new(),
+                manifest_hash: "blake3:pit".into(),
+            },
+            baseline_config_hash: "blake3:cfg".into(),
+            code_git_sha: "abc".into(),
+            dataset_hash: "blake3:dataset".into(),
+            feature_schema_hash: "blake3:features".into(),
+            label_schema_hash: "blake3:labels".into(),
+            query_fingerprint: "fp".into(),
+            confidence_interval: ConfidenceInterval {
+                lower: dec!(0),
+                point_estimate: dec!(0),
+                upper: dec!(0),
+                confidence_level: dec!(0.95),
+            },
+            tail_risk: TailRiskEvidence {
+                p95_loss: dec!(0),
+                p99_loss: dec!(0),
+                max_loss: dec!(0),
+                expected_shortfall: dec!(0),
+            },
+            maturity: FactorMaturity::StatisticallyMaterialized,
+            source_refs: Vec::new(),
+            warnings: Vec::new(),
+        },
+        status: FactorStatus::Candidate,
+        generated_at: now,
+        expires_at: now + chrono::Duration::days(1),
+        owner: "materializer".into(),
+        schema_version: 1,
+    }
+}
+
+fn factor_audit(
+    event_type: ControlAuditEventType,
+    request_id: &str,
+    factor_id: &ControlFactorId,
+) -> NewControlFactorAuditEvent {
+    NewControlFactorAuditEvent {
+        event_type,
+        actor: "materializer".into(),
+        actor_role: OperatorRole::Operator,
+        resource_type: AuditResourceType::Factor,
+        resource_id: factor_id.as_str().to_owned(),
+        request_id: request_id.into(),
+        reason: "integration test".into(),
+        before_hash: None,
+        after_hash: None,
+        diff: serde_json::json!({}),
+    }
+}
+
+fn publication_audit(
+    request_id: &str,
+    publication_id: &FactorPublicationId,
+) -> NewControlFactorAuditEvent {
+    NewControlFactorAuditEvent {
+        event_type: ControlAuditEventType::PublicationCreated,
+        actor: "risk_owner_1".into(),
+        actor_role: OperatorRole::RiskOwner,
+        resource_type: AuditResourceType::Publication,
+        resource_id: publication_id.as_str().to_owned(),
+        request_id: request_id.into(),
+        reason: "integration governance test".into(),
+        before_hash: None,
+        after_hash: None,
+        diff: serde_json::json!({}),
+    }
+}
+
+fn shadow_publication(
+    factor_id: &ControlFactorId,
+    idempotency_key: &str,
+) -> NewControlFactorPublication {
+    let now = Utc::now();
+    NewControlFactorPublication {
+        publication_id: FactorPublicationId::new_v7(),
+        mode: PublicationMode::Shadow,
+        factor_ids: vec![factor_id.clone()],
+        previous_publication_id: None,
+        status: PublicationStatus::Pending,
+        effective_from: now,
+        expires_at: now + chrono::Duration::days(1),
+        approved_by: Some("risk_owner_1".into()),
+        approval_reason: "shadow window".into(),
+        idempotency_key: idempotency_key.into(),
+        publication_hash: "blake3:test".into(),
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn control_factor_publish_is_idempotent_one_active_and_chained() {
+    let (pool, _container) = setup_pg().await;
+    let repo = PgControlFactorRepository::new(pool.connection().clone());
+    let run_id = seed_control_run(&repo).await;
+
+    let factor = candidate_factor(&run_id, dec!(0.5));
+    repo.create_factor(
+        NewControlFactorValue::from_typed(&factor, None).expect("typed factor"),
+        factor_audit(
+            ControlAuditEventType::FactorCreated,
+            "req-factor",
+            &factor.factor_id,
+        ),
+    )
+    .await
+    .expect("create factor");
+
+    let publication = shadow_publication(&factor.factor_id, "idem-shadow-1");
+    let first_id = publication.publication_id.clone();
+    let outcome = repo
+        .publish_publication(publication, publication_audit("req-pub-1", &first_id))
+        .await
+        .expect("publish shadow");
+    assert!(matches!(outcome, PublishPublicationOutcome::Published(_)));
+
+    // Retry with the same idempotency key returns the existing publication.
+    let retry = shadow_publication(&factor.factor_id, "idem-shadow-1");
+    let retry_outcome = repo
+        .publish_publication(retry, publication_audit("req-pub-2", &first_id))
+        .await
+        .expect("idempotent retry");
+    match retry_outcome {
+        PublishPublicationOutcome::AlreadyApplied(info) => {
+            assert_eq!(info.publication_id, first_id);
+        }
+        PublishPublicationOutcome::Published(_) => {
+            panic!("expected idempotent replay, got a new publication")
+        }
+    }
+
+    // Exactly one active Shadow publication, and the member factor is Shadow.
+    let active = repo
+        .load_active_publication(PublicationMode::Shadow)
+        .await
+        .expect("load active")
+        .expect("active publication");
+    assert_eq!(active.publication_id, first_id);
+    assert_eq!(active.status, PublicationStatus::Active);
+    let stored_factor = repo
+        .load_factor(&factor.factor_id)
+        .await
+        .expect("load factor")
+        .expect("factor row");
+    assert_eq!(stored_factor.status, FactorStatus::Shadow);
+
+    // The audit chain is contiguous and verifiable; the retry wrote no new event.
+    let chain = repo.load_audit_chain(1, 1000).await.expect("audit chain");
+    assert_eq!(chain.len(), 2, "factor_created + publication_created");
+    assert_eq!(chain[0].sequence, 1);
+    assert_eq!(chain[1].sequence, 2);
+    AuditChain::verify(&chain).expect("chain verifies");
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn control_factor_reject_and_expire_write_chained_audit() {
+    let (pool, _container) = setup_pg().await;
+    let repo = PgControlFactorRepository::new(pool.connection().clone());
+    let run_id = seed_control_run(&repo).await;
+
+    let factor = candidate_factor(&run_id, dec!(0.5));
+    repo.create_factor(
+        NewControlFactorValue::from_typed(&factor, None).expect("typed factor"),
+        factor_audit(
+            ControlAuditEventType::FactorCreated,
+            "req-factor",
+            &factor.factor_id,
+        ),
+    )
+    .await
+    .expect("create factor");
+
+    let rejected = repo
+        .reject_factor(
+            &factor.factor_id,
+            "sample below minimum",
+            factor_audit(
+                ControlAuditEventType::FactorRejected,
+                "req-reject",
+                &factor.factor_id,
+            ),
+        )
+        .await
+        .expect("reject factor")
+        .expect("factor exists");
+    assert_eq!(rejected.status, FactorStatus::Rejected);
+    assert_eq!(
+        rejected.status_reason.as_deref(),
+        Some("sample below minimum")
+    );
+
+    let chain = repo.load_audit_chain(1, 1000).await.expect("audit chain");
+    assert_eq!(chain.len(), 2);
+    AuditChain::verify(&chain).expect("chain verifies");
+    assert_eq!(chain[1].event_type, ControlAuditEventType::FactorRejected);
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn control_factor_rollback_restores_previous_publication() {
+    let (pool, _container) = setup_pg().await;
+    let repo = PgControlFactorRepository::new(pool.connection().clone());
+    let run_id = seed_control_run(&repo).await;
+
+    // Two factors so we can stage two successive Published publications.
+    let factor_genesis = candidate_factor(&run_id, dec!(0.5));
+    let factor_successor = candidate_factor(&run_id, dec!(0.5));
+    for factor in [&factor_genesis, &factor_successor] {
+        repo.create_factor(
+            NewControlFactorValue::from_typed(factor, None).expect("typed factor"),
+            factor_audit(
+                ControlAuditEventType::FactorCreated,
+                factor.factor_id.as_str(),
+                &factor.factor_id,
+            ),
+        )
+        .await
+        .expect("create factor");
+    }
+
+    // Promote both to Shadow.
+    for (factor, key) in [
+        (&factor_genesis, "shadow-genesis"),
+        (&factor_successor, "shadow-successor"),
+    ] {
+        let publication = shadow_publication(&factor.factor_id, key);
+        let id = publication.publication_id.clone();
+        repo.publish_publication(publication, publication_audit(key, &id))
+            .await
+            .expect("shadow publish");
+    }
+
+    // Publish the genesis Published publication.
+    let mut genesis = shadow_publication(&factor_genesis.factor_id, "publish-genesis");
+    genesis.mode = PublicationMode::Published;
+    let genesis_id = genesis.publication_id.clone();
+    repo.publish_publication(genesis, publication_audit("publish-genesis", &genesis_id))
+        .await
+        .expect("publish genesis");
+
+    // Publish the successor, superseding genesis and recording it as rollback target.
+    let mut successor = shadow_publication(&factor_successor.factor_id, "publish-successor");
+    successor.mode = PublicationMode::Published;
+    successor.previous_publication_id = Some(genesis_id.clone());
+    let successor_id = successor.publication_id.clone();
+    repo.publish_publication(
+        successor,
+        publication_audit("publish-successor", &successor_id),
+    )
+    .await
+    .expect("publish successor");
+
+    // Roll back to the genesis publication.
+    repo.rollback_publication(
+        &successor_id,
+        &genesis_id,
+        publication_audit("rollback", &successor_id),
+    )
+    .await
+    .expect("rollback");
+
+    let active = repo
+        .load_active_publication(PublicationMode::Published)
+        .await
+        .expect("load active")
+        .expect("active publication");
+    assert_eq!(active.publication_id, genesis_id);
+
+    let chain = repo.load_audit_chain(1, 1000).await.expect("audit chain");
+    AuditChain::verify(&chain).expect("chain verifies");
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn runtime_config_governed_activation_links_audit_event() {
+    let (pool, _container) = setup_pg().await;
+    let repo = PgRuntimeConfigVersionRepository::new(pool.connection().clone());
+
+    let version_id = RuntimeConfigVersionId::new_v7();
+    let version = NewRuntimeConfigVersion {
+        runtime_config_version_id: version_id.clone(),
+        config_hash: "blake3:rcv-1".into(),
+        schema_version: 1,
+        config_json: serde_json::json!({ "mode": "live" }),
+        source: RuntimeConfigVersionSource::Operator,
+        created_by: "admin_1".into(),
+        reason: "initial".into(),
+    };
+    let version_audit = NewControlFactorAuditEvent {
+        event_type: ControlAuditEventType::RuntimeConfigVersionCreated,
+        actor: "admin_1".into(),
+        actor_role: OperatorRole::Admin,
+        resource_type: AuditResourceType::RuntimeConfigVersion,
+        resource_id: version_id.as_str().to_owned(),
+        request_id: "req-rcv-create".into(),
+        reason: "initial".into(),
+        before_hash: None,
+        after_hash: None,
+        diff: serde_json::json!({}),
+    };
+    repo.create_version_governed(version, version_audit)
+        .await
+        .expect("create version governed");
+
+    let activation = NewRuntimeConfigActivation {
+        runtime_config_activation_id: RuntimeConfigActivationId::new_v7(),
+        runtime_config_version_id: version_id.clone(),
+        activated_at: Utc::now(),
+        activated_by: "admin_1".into(),
+        reason: "activate".into(),
+        activation_kind: RuntimeConfigActivationKind::Initial,
+        previous_runtime_config_version_id: None,
+        rollback_target_version_id: None,
+        audit_event_id: None,
+    };
+    let activation_audit = NewControlFactorAuditEvent {
+        event_type: ControlAuditEventType::RuntimeConfigActivated,
+        actor: "admin_1".into(),
+        actor_role: OperatorRole::Admin,
+        resource_type: AuditResourceType::RuntimeConfigVersion,
+        resource_id: version_id.as_str().to_owned(),
+        request_id: "req-rcv-activate".into(),
+        reason: "activate".into(),
+        before_hash: None,
+        after_hash: None,
+        diff: serde_json::json!({}),
+    };
+    let activation_info = repo
+        .activate_version_governed(activation, activation_audit)
+        .await
+        .expect("activate version governed");
+
+    // The activation row links to the chained audit event.
+    assert!(activation_info.audit_event_id.is_some());
+
+    let control_repo = PgControlFactorRepository::new(pool.connection().clone());
+    let chain = control_repo
+        .load_audit_chain(1, 1000)
+        .await
+        .expect("audit chain");
+    assert_eq!(chain.len(), 2);
+    AuditChain::verify(&chain).expect("chain verifies");
+    let linked = activation_info.audit_event_id.expect("audit event id");
+    assert!(chain.iter().any(|event| event.event_id == linked));
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn latest_run_for_schedule_filters_by_trigger_ref_and_status() {
+    let (pool, _container) = setup_pg().await;
+    let repo = PgControlFactorRepository::new(pool.connection().clone());
+
+    // First run: drive it to Completed (Queued -> Running -> Completed).
+    let first = match repo
+        .enqueue_materialization_run(
+            materialization_run(None),
+            EnqueueMaterializationRunOptions {
+                force_new_run: false,
+                reason: None,
+            },
+        )
+        .await
+        .expect("enqueue first")
+    {
+        EnqueueMaterializationRunOutcome::Created(run) => run,
+        other => panic!("expected created, got {other:?}"),
+    };
+    let acquired = repo
+        .try_acquire_materialization_run(&first.materialization_run_id, Utc::now())
+        .await
+        .expect("acquire first");
+    assert!(matches!(
+        acquired,
+        AcquireMaterializationRunOutcome::Acquired(_)
+    ));
+    let completed = repo
+        .transition_materialization_run(
+            &first.materialization_run_id,
+            MaterializationRunStatus::Running,
+            MaterializationRunStatus::Completed,
+            MaterializationRunStatusPatch {
+                finished_at: Some(Utc::now()),
+                failure_code: None,
+                failure_detail: None,
+                report: None,
+                report_uri: None,
+            },
+        )
+        .await
+        .expect("complete first");
+    assert!(matches!(completed, RunTransitionOutcome::Transitioned(_)));
+
+    // Second run for the same schedule stays Queued and is the newest.
+    let second = match repo
+        .enqueue_materialization_run(
+            materialization_run(None),
+            EnqueueMaterializationRunOptions {
+                force_new_run: false,
+                reason: None,
+            },
+        )
+        .await
+        .expect("enqueue second")
+    {
+        EnqueueMaterializationRunOutcome::Created(run) => run,
+        other => panic!("expected created, got {other:?}"),
+    };
+
+    let latest_any = repo
+        .latest_run_for_schedule("test-schedule", &[])
+        .await
+        .expect("latest any")
+        .expect("a run exists");
+    assert_eq!(
+        latest_any.materialization_run_id,
+        second.materialization_run_id
+    );
+
+    let latest_completed = repo
+        .latest_run_for_schedule("test-schedule", &[MaterializationRunStatus::Completed])
+        .await
+        .expect("latest completed")
+        .expect("a completed run exists");
+    assert_eq!(
+        latest_completed.materialization_run_id,
+        first.materialization_run_id
+    );
+
+    let unknown = repo
+        .latest_run_for_schedule("no-such-schedule", &[])
+        .await
+        .expect("latest unknown");
+    assert!(unknown.is_none());
+}
+
+fn shadow_decision(
+    publication_id: &FactorPublicationId,
+    market_id: &str,
+    decision_type: ShadowDecisionType,
+    decided_at: chrono::DateTime<Utc>,
+) -> NewControlFactorShadowDecision {
+    NewControlFactorShadowDecision {
+        shadow_decision_id: ShadowDecisionId::new_v7(),
+        publication_id: publication_id.clone(),
+        opportunity_id: None,
+        event_id: None,
+        market_id: MarketId::new(market_id),
+        decision_type,
+        baseline_decision: serde_json::json!({ "size": "0" }),
+        shadow_decision: serde_json::json!({ "size": "1" }),
+        delta: serde_json::json!({ "size_delta": "1" }),
+        affected_factor_ids: serde_json::json!([]),
+        decided_at,
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn aggregate_shadow_decisions_counts_by_type_and_distinct_markets() {
+    let (pool, _container) = setup_pg().await;
+    let control_repo = PgControlFactorRepository::new(pool.connection().clone());
+    let run_id = seed_control_run(&control_repo).await;
+
+    let factor = candidate_factor(&run_id, dec!(0.5));
+    control_repo
+        .create_factor(
+            NewControlFactorValue::from_typed(&factor, None).expect("typed factor"),
+            factor_audit(
+                ControlAuditEventType::FactorCreated,
+                "req-shadow-factor",
+                &factor.factor_id,
+            ),
+        )
+        .await
+        .expect("create factor");
+    let publication = shadow_publication(&factor.factor_id, "idem-shadow-agg");
+    let publication_id = publication.publication_id.clone();
+    control_repo
+        .publish_publication(
+            publication,
+            publication_audit("req-shadow-pub", &publication_id),
+        )
+        .await
+        .expect("publish shadow");
+
+    let fact_repo = PgFactDataRepository::new(pool.connection().clone());
+    let now = Utc::now();
+    let in_window = [
+        ("0xmkt-a", ShadowDecisionType::WouldReject),
+        ("0xmkt-a", ShadowDecisionType::WouldReject),
+        ("0xmkt-b", ShadowDecisionType::WouldSize),
+        ("0xmkt-a", ShadowDecisionType::WouldScore),
+        ("0xmkt-c", ShadowDecisionType::NoEffect),
+    ];
+    for (offset, (market, decision_type)) in in_window.iter().enumerate() {
+        let decided_at = now - chrono::Duration::minutes(i64::try_from(offset).unwrap_or(0));
+        fact_repo
+            .append_shadow_decision(shadow_decision(
+                &publication_id,
+                market,
+                *decision_type,
+                decided_at,
+            ))
+            .await
+            .expect("append in-window decision");
+    }
+    // Out-of-window decision must be excluded from the aggregate and list.
+    fact_repo
+        .append_shadow_decision(shadow_decision(
+            &publication_id,
+            "0xmkt-d",
+            ShadowDecisionType::WouldReject,
+            now - chrono::Duration::hours(2),
+        ))
+        .await
+        .expect("append out-of-window decision");
+
+    let from = now - chrono::Duration::hours(1);
+    let to = now + chrono::Duration::hours(1);
+    let aggregate = fact_repo
+        .aggregate_shadow_decisions(&publication_id, from, to)
+        .await
+        .expect("aggregate shadow decisions");
+    assert_eq!(
+        aggregate,
+        ShadowDecisionAggregate {
+            publication_id: publication_id.clone(),
+            total: 5,
+            would_reject: 2,
+            would_size: 1,
+            would_score: 1,
+            no_effect: 1,
+            distinct_markets: 3,
+        }
+    );
+
+    let listed = fact_repo
+        .list_shadow_decisions(&publication_id, from, to, 100)
+        .await
+        .expect("list shadow decisions");
+    assert_eq!(listed.len(), 5);
+    // Ordered newest-first by decided_at.
+    assert!(
+        listed
+            .windows(2)
+            .all(|pair| pair[0].decided_at >= pair[1].decided_at)
+    );
 }

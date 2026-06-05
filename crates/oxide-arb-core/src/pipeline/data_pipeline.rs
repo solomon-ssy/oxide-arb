@@ -14,10 +14,13 @@ use chrono::Utc;
 use flume::{Receiver, Sender};
 use oxide_arb_error::OxideError;
 use oxide_arb_models::{
-    domain::{latency::LatencyTrace, pipeline::PipelineEvent, settlement::MarketSettlementRequest},
-    enums::clickhouse::ChSnapshotReason,
-    enums::common::SettlementTrigger,
-    enums::pipeline::ShardConnectionStatus,
+    domain::{
+        BookSnapshotCmd, PriceDeltaCmd, latency::LatencyTrace, pipeline::PipelineEvent,
+        settlement::MarketSettlementRequest,
+    },
+    enums::{
+        clickhouse::ChSnapshotReason, common::SettlementTrigger, pipeline::ShardConnectionStatus,
+    },
     types::TokenId,
 };
 use std::{sync::Arc, thread};
@@ -286,7 +289,7 @@ impl BookApplyWorker {
         }
     }
 
-    fn handle_book_snapshot(&self, cmd: &oxide_arb_models::domain::pipeline::BookSnapshotCmd) {
+    fn handle_book_snapshot(&self, cmd: &BookSnapshotCmd) {
         let version = self.book_store.apply_snapshot(
             &cmd.asset_id,
             Arc::clone(&cmd.bids.levels),
@@ -305,7 +308,7 @@ impl BookApplyWorker {
         self.metrics.book_snapshots_applied.inc();
     }
 
-    fn handle_price_delta(&self, cmd: &oxide_arb_models::domain::pipeline::PriceDeltaCmd) {
+    fn handle_price_delta(&self, cmd: &PriceDeltaCmd) {
         let version = self.book_store.apply_delta(
             &cmd.asset_id,
             cmd.changes.iter().map(|d| (d.side, d.price, d.size)),

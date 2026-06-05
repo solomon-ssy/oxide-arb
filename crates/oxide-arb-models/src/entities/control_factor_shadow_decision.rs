@@ -2,7 +2,7 @@
 
 use crate::{
     enums::fact::ShadowDecisionType,
-    types::{FactorPublicationId, MarketId, OpportunityId, ShadowDecisionId},
+    types::{EventId, FactorPublicationId, MarketId, OpportunityId, ShadowDecisionId},
 };
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
@@ -14,14 +14,17 @@ pub struct Model {
     pub shadow_decision_id: ShadowDecisionId,
     pub publication_id: FactorPublicationId,
     pub opportunity_id: Option<OpportunityId>,
+    pub event_id: Option<EventId>,
     pub market_id: MarketId,
     pub decision_type: ShadowDecisionType,
     #[sea_orm(column_type = "JsonBinary")]
-    pub live_decision: Json,
+    pub baseline_decision: Json,
     #[sea_orm(column_type = "JsonBinary")]
     pub shadow_decision: Json,
     #[sea_orm(column_type = "JsonBinary")]
     pub delta: Json,
+    #[sea_orm(column_type = "JsonBinary")]
+    pub affected_factor_ids: Json,
     pub decided_at: DateTime<Utc>,
     pub created_at: DateTime<Utc>,
 }

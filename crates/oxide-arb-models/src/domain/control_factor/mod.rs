@@ -1,5 +1,6 @@
 //! Typed control-factor artifacts, lifecycle rules, and persistence DTOs.
 
+mod audit;
 mod evidence;
 mod lifecycle;
 mod materialization;
@@ -9,6 +10,7 @@ mod publication;
 mod safety;
 mod value;
 
+pub use audit::*;
 pub use evidence::*;
 pub use lifecycle::FactorLifecycle;
 pub use materialization::*;

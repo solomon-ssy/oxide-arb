@@ -9,7 +9,9 @@ use crate::{
         risk::BreakerStateName,
         runtime_config::{RuntimeConfigActivationKind, RuntimeConfigVersionSource},
     },
-    types::{PeriodId, Probability, RuntimeConfigActivationId, RuntimeConfigVersionId, Usd},
+    types::{
+        AuditEventId, PeriodId, Probability, RuntimeConfigActivationId, RuntimeConfigVersionId, Usd,
+    },
 };
 use chrono::{DateTime, NaiveDate, Utc};
 use rust_decimal::Decimal;
@@ -151,7 +153,7 @@ pub struct RuntimeConfigActivationInfo {
     pub activation_kind: RuntimeConfigActivationKind,
     pub previous_runtime_config_version_id: Option<RuntimeConfigVersionId>,
     pub rollback_target_version_id: Option<RuntimeConfigVersionId>,
-    pub audit_event_id: Option<i64>,
+    pub audit_event_id: Option<AuditEventId>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -184,7 +186,7 @@ pub struct NewRuntimeConfigActivation {
     pub activation_kind: RuntimeConfigActivationKind,
     pub previous_runtime_config_version_id: Option<RuntimeConfigVersionId>,
     pub rollback_target_version_id: Option<RuntimeConfigVersionId>,
-    pub audit_event_id: Option<i64>,
+    pub audit_event_id: Option<AuditEventId>,
 }
 
 // ── Accounting ───────────────────────────────────────────────────────

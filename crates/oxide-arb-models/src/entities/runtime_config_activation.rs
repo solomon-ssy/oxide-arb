@@ -2,7 +2,7 @@
 
 use crate::{
     enums::runtime_config::RuntimeConfigActivationKind,
-    types::{RuntimeConfigActivationId, RuntimeConfigVersionId},
+    types::{AuditEventId, RuntimeConfigActivationId, RuntimeConfigVersionId},
 };
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
@@ -21,7 +21,7 @@ pub struct Model {
     pub activation_kind: RuntimeConfigActivationKind,
     pub previous_runtime_config_version_id: Option<RuntimeConfigVersionId>,
     pub rollback_target_version_id: Option<RuntimeConfigVersionId>,
-    pub audit_event_id: Option<i64>,
+    pub audit_event_id: Option<AuditEventId>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -36,7 +36,7 @@ pub enum Relation {
     #[sea_orm(
         belongs_to = "super::control_factor_audit_event::Entity",
         from = "Column::AuditEventId",
-        to = "super::control_factor_audit_event::Column::Id"
+        to = "super::control_factor_audit_event::Column::EventId"
     )]
     AuditEvent,
 }

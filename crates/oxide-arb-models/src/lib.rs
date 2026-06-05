@@ -24,6 +24,7 @@ pub mod entities;
 pub(crate) mod entities;
 
 pub mod enums;
+pub mod hashing;
 pub mod idens;
 pub mod schema;
 pub mod seed;

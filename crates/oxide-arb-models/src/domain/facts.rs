@@ -10,7 +10,7 @@ use crate::{
         },
     },
     types::{
-        BalanceSnapshotId, ExitExecutionId, ExitPlanId, FactorPublicationId, MarketId,
+        BalanceSnapshotId, EventId, ExitExecutionId, ExitPlanId, FactorPublicationId, MarketId,
         MaterializationRunId, OpportunityId, PositionId, Price, ShadowDecisionId, Shares,
         TokenBalanceSnapshotId, TokenId, TrainingDatasetId, UnwindAuditId, Usd,
     },
@@ -154,11 +154,13 @@ pub struct ControlFactorShadowDecisionInfo {
     pub shadow_decision_id: ShadowDecisionId,
     pub publication_id: FactorPublicationId,
     pub opportunity_id: Option<OpportunityId>,
+    pub event_id: Option<EventId>,
     pub market_id: MarketId,
     pub decision_type: ShadowDecisionType,
-    pub live_decision: serde_json::Value,
+    pub baseline_decision: serde_json::Value,
     pub shadow_decision: serde_json::Value,
     pub delta: serde_json::Value,
+    pub affected_factor_ids: serde_json::Value,
     pub decided_at: DateTime<Utc>,
     pub created_at: DateTime<Utc>,
 }
@@ -167,8 +169,8 @@ info_from_model!(
     ControlFactorShadowDecisionInfo,
     crate::entities::control_factor_shadow_decision::Model,
     {
-        shadow_decision_id, publication_id, opportunity_id, market_id, decision_type,
-        live_decision, shadow_decision, delta, decided_at, created_at,
+        shadow_decision_id, publication_id, opportunity_id, event_id, market_id, decision_type,
+        baseline_decision, shadow_decision, delta, affected_factor_ids, decided_at, created_at,
     }
 );
 
@@ -178,12 +180,58 @@ pub struct NewControlFactorShadowDecision {
     pub shadow_decision_id: ShadowDecisionId,
     pub publication_id: FactorPublicationId,
     pub opportunity_id: Option<OpportunityId>,
+    pub event_id: Option<EventId>,
     pub market_id: MarketId,
     pub decision_type: ShadowDecisionType,
-    pub live_decision: serde_json::Value,
+    pub baseline_decision: serde_json::Value,
     pub shadow_decision: serde_json::Value,
     pub delta: serde_json::Value,
+    pub affected_factor_ids: serde_json::Value,
     pub decided_at: DateTime<Utc>,
+}
+
+/// Aggregate counts over a publication's shadow-decision window.
+///
+/// Computed by the storage layer with a single `GROUP BY decision_type` query
+/// plus a `COUNT(DISTINCT market_id)`. Delta percentile distributions are
+/// intentionally **not** part of this aggregate; the promotion-review consumer
+/// derives those from the raw `list_shadow_decisions` rows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShadowDecisionAggregate {
+    pub publication_id: FactorPublicationId,
+    pub total: u64,
+    pub would_reject: u64,
+    pub would_size: u64,
+    pub would_score: u64,
+    pub no_effect: u64,
+    pub distinct_markets: u64,
+}
+
+impl ShadowDecisionAggregate {
+    /// Builds an empty aggregate for a publication with no decisions in window.
+    #[must_use]
+    pub const fn empty(publication_id: FactorPublicationId) -> Self {
+        Self {
+            publication_id,
+            total: 0,
+            would_reject: 0,
+            would_size: 0,
+            would_score: 0,
+            no_effect: 0,
+            distinct_markets: 0,
+        }
+    }
+
+    /// Accumulates one `(decision_type, count)` bucket and bumps the running total.
+    pub const fn add_bucket(&mut self, decision_type: ShadowDecisionType, count: u64) {
+        match decision_type {
+            ShadowDecisionType::WouldReject => self.would_reject = count,
+            ShadowDecisionType::WouldSize => self.would_size = count,
+            ShadowDecisionType::WouldScore => self.would_score = count,
+            ShadowDecisionType::NoEffect => self.no_effect = count,
+        }
+        self.total = self.total.saturating_add(count);
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]

@@ -21,15 +21,16 @@ use oxide_arb_models::{
         RiskLimitRuntimeConfig, RuntimeConfigActivationInfo, RuntimeConfigDocument,
         RuntimeConfigVersionInfo, SizingRuntimeConfig, TokenBalanceSnapshotInfo, TradeInfo,
         control_factor::{
-            AcquireMaterializationRunOutcome, CancelMaterializationRunOutcome,
-            ControlFactorAuditEventInfo, ControlFactorMaterializationRunInfo,
-            ControlFactorPublicationInfo, ControlFactorValueInfo, DataRequirements,
-            EnqueueMaterializationRunOptions, EnqueueMaterializationRunOutcome, MarketFilterSpec,
+            AcquireMaterializationRunOutcome, AuditActor, AuditEventContent,
+            CancelMaterializationRunOutcome, ControlFactorAuditEventInfo,
+            ControlFactorMaterializationRunInfo, ControlFactorPublicationInfo,
+            ControlFactorValueInfo, DataRequirements, EnqueueMaterializationRunOptions,
+            EnqueueMaterializationRunOutcome, ExpireFactorsOutcome, MarketFilterSpec,
             MaterializationRunManifest, MaterializationRunStatusPatch, NewControlFactorAuditEvent,
             NewControlFactorMaterializationRun, NewControlFactorPublication,
-            NewControlFactorStageReport, NewControlFactorValue, QualityGatePolicy,
-            ReplayAccountScope, RequiredInputDomain, RunTransitionOutcome, RunTrigger,
-            RuntimeConfigRef, SimulationConfig, TimeWindowSpec,
+            NewControlFactorStageReport, NewControlFactorValue, PublishPublicationOutcome,
+            QualityGatePolicy, ReplayAccountScope, RequiredInputDomain, RunTransitionOutcome,
+            RunTrigger, RuntimeConfigRef, SimulationConfig, TimeWindowSpec,
         },
         settlement::{NewResolutionEvent, ResolutionEventInfo},
     },
@@ -44,17 +45,19 @@ use oxide_arb_models::{
             SettlementAccountingStatus, SettlementTrigger, Side, TradeState,
         },
         control_factor::{
-            ControlFactorType, FactorStatus, MaterializationOutputPolicy, MaterializationRunKind,
-            MaterializationRunStatus, MaterializationStageName, PublicationMode,
+            AuditResourceType, ControlAuditEventType, ControlFactorType, FactorStatus,
+            MaterializationOutputPolicy, MaterializationRunKind, MaterializationRunStatus,
+            MaterializationStageName, PublicationMode, PublicationStatus,
         },
         fact::BalanceSnapshotSource,
         risk::{ReconciliationStatus, RiskAuditEventType},
         runtime_config::RuntimeConfigVersionSource,
     },
     types::{
-        BalanceSnapshotId, ControlFactorId, EventId, ExecutionId, FactorPublicationId, LedgerId,
-        MarketId, MaterializationRunId, OpportunityId, PositionId, Price, ReservationId,
-        RuntimeConfigVersionId, Shares, TokenBalanceSnapshotId, TokenId, TradeId, Usd,
+        AuditEventId, BalanceSnapshotId, ControlFactorId, EventId, ExecutionId,
+        FactorPublicationId, LedgerId, MarketId, MaterializationRunId, OpportunityId, PositionId,
+        Price, ReservationId, RuntimeConfigVersionId, Shares, TokenBalanceSnapshotId, TokenId,
+        TradeId, Usd,
     },
 };
 use oxide_arb_repository::traits::{
@@ -391,6 +394,22 @@ impl RuntimeConfigVersionRepository for SmokeRuntimeConfigRepository {
     async fn activate_version(
         &self,
         _activation: NewRuntimeConfigActivation,
+    ) -> Result<RuntimeConfigActivationInfo, StorageError> {
+        Err(StorageError::Codec("not implemented".into()))
+    }
+
+    async fn create_version_governed(
+        &self,
+        _version: NewRuntimeConfigVersion,
+        _audit: NewControlFactorAuditEvent,
+    ) -> Result<RuntimeConfigVersionInfo, StorageError> {
+        Err(StorageError::Codec("not implemented".into()))
+    }
+
+    async fn activate_version_governed(
+        &self,
+        _activation: NewRuntimeConfigActivation,
+        _audit: NewControlFactorAuditEvent,
     ) -> Result<RuntimeConfigActivationInfo, StorageError> {
         Err(StorageError::Codec("not implemented".into()))
     }
@@ -772,7 +791,57 @@ impl ResolutionEventRepository for SmokeResolutionEventRepository {
 pub struct SmokeControlFactorRepository {
     stage_reports: Mutex<Vec<NewControlFactorStageReport>>,
     factors: Mutex<Vec<ControlFactorValueInfo>>,
-    audit_events: Mutex<Vec<NewControlFactorAuditEvent>>,
+    audit_events: Mutex<Vec<ControlFactorAuditEventInfo>>,
+}
+
+impl SmokeControlFactorRepository {
+    /// In-memory analogue of the global audit chain (sequence + prev/event hash).
+    fn append_chained(
+        &self,
+        event: NewControlFactorAuditEvent,
+    ) -> Result<ControlFactorAuditEventInfo, StorageError> {
+        let mut events = self.audit_events.lock().unwrap();
+        let sequence = i64::try_from(events.len()).unwrap_or(i64::MAX) + 1;
+        let prev_event_hash = events.last().map(|event| event.event_hash.clone());
+        let now = Utc::now();
+        let event_hash = AuditEventContent {
+            sequence,
+            event_type: event.event_type,
+            actor: event.actor.as_str(),
+            actor_role: event.actor_role,
+            resource_type: event.resource_type,
+            resource_id: event.resource_id.as_str(),
+            request_id: event.request_id.as_str(),
+            reason: event.reason.as_str(),
+            before_hash: event.before_hash.as_deref(),
+            after_hash: event.after_hash.as_deref(),
+            diff: &event.diff,
+            prev_event_hash: prev_event_hash.as_deref(),
+            created_at: now,
+        }
+        .event_hash()
+        .map_err(|error| StorageError::Codec(error.to_string()))?;
+        let info = ControlFactorAuditEventInfo {
+            event_id: AuditEventId::new_v7(),
+            sequence,
+            event_type: event.event_type,
+            actor: event.actor,
+            actor_role: event.actor_role,
+            resource_type: event.resource_type,
+            resource_id: event.resource_id,
+            request_id: event.request_id,
+            reason: event.reason,
+            before_hash: event.before_hash,
+            after_hash: event.after_hash,
+            diff: event.diff,
+            prev_event_hash,
+            event_hash,
+            created_at: now,
+        };
+        events.push(info.clone());
+        drop(events);
+        Ok(info)
+    }
 }
 
 #[async_trait]
@@ -795,6 +864,14 @@ impl ControlFactorRepository for SmokeControlFactorRepository {
     async fn find_materialization_run_by_dedupe_key(
         &self,
         _dedupe_key: &str,
+    ) -> Result<Option<ControlFactorMaterializationRunInfo>, StorageError> {
+        Ok(None)
+    }
+
+    async fn latest_run_for_schedule(
+        &self,
+        _schedule_id: &str,
+        _statuses: &[MaterializationRunStatus],
     ) -> Result<Option<ControlFactorMaterializationRunInfo>, StorageError> {
         Ok(None)
     }
@@ -888,9 +965,11 @@ impl ControlFactorRepository for SmokeControlFactorRepository {
     async fn create_factor(
         &self,
         factor: NewControlFactorValue,
+        audit: NewControlFactorAuditEvent,
     ) -> Result<ControlFactorValueInfo, StorageError> {
         let info = factor_info_from_new(factor);
         self.factors.lock().unwrap().push(info.clone());
+        self.append_chained(audit)?;
         Ok(info)
     }
 
@@ -925,19 +1004,93 @@ impl ControlFactorRepository for SmokeControlFactorRepository {
             .collect())
     }
 
-    async fn transition_factor(
+    async fn list_factors_by_status(
         &self,
-        _factor_id: &ControlFactorId,
-        _status: FactorStatus,
-    ) -> Result<Option<ControlFactorValueInfo>, StorageError> {
-        Ok(None)
+        status: FactorStatus,
+        factor_type: Option<ControlFactorType>,
+    ) -> Result<Vec<ControlFactorValueInfo>, StorageError> {
+        Ok(self
+            .factors
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|factor| {
+                factor.status == status
+                    && factor_type.is_none_or(|wanted| factor.factor_type == wanted)
+            })
+            .cloned()
+            .collect())
     }
 
-    async fn create_publication(
+    async fn reject_factor(
+        &self,
+        factor_id: &ControlFactorId,
+        status_reason: &str,
+        audit: NewControlFactorAuditEvent,
+    ) -> Result<Option<ControlFactorValueInfo>, StorageError> {
+        let mut factors = self.factors.lock().unwrap();
+        let Some(factor) = factors
+            .iter_mut()
+            .find(|factor| &factor.factor_id == factor_id)
+        else {
+            return Ok(None);
+        };
+        factor.status = FactorStatus::Rejected;
+        factor.status_reason = Some(status_reason.to_owned());
+        let updated = factor.clone();
+        drop(factors);
+        self.append_chained(audit)?;
+        Ok(Some(updated))
+    }
+
+    async fn expire_factors(
+        &self,
+        now: DateTime<Utc>,
+        actor: AuditActor,
+    ) -> Result<ExpireFactorsOutcome, StorageError> {
+        let mut factors = self.factors.lock().unwrap();
+        let mut due: Vec<ControlFactorValueInfo> = Vec::new();
+        for factor in factors.iter_mut() {
+            let eligible = matches!(
+                factor.status,
+                FactorStatus::Candidate
+                    | FactorStatus::Shadow
+                    | FactorStatus::Published
+                    | FactorStatus::ReportOnly
+            );
+            if eligible && factor.expires_at <= now {
+                factor.status = FactorStatus::Expired;
+                due.push(factor.clone());
+            }
+        }
+        drop(factors);
+        let mut expired = Vec::with_capacity(due.len());
+        for factor in due {
+            self.append_chained(NewControlFactorAuditEvent {
+                event_type: ControlAuditEventType::FactorExpired,
+                actor: actor.actor.clone(),
+                actor_role: actor.actor_role,
+                resource_type: AuditResourceType::Factor,
+                resource_id: factor.factor_id.as_str().to_owned(),
+                request_id: actor.request_id.clone(),
+                reason: actor.reason.clone(),
+                before_hash: None,
+                after_hash: None,
+                diff: serde_json::json!({ "to_status": FactorStatus::Expired }),
+            })?;
+            expired.push(factor.factor_id);
+        }
+        Ok(ExpireFactorsOutcome { expired })
+    }
+
+    async fn publish_publication(
         &self,
         _publication: NewControlFactorPublication,
-    ) -> Result<ControlFactorPublicationInfo, StorageError> {
-        Err(StorageError::Codec("not implemented".into()))
+        _audit: NewControlFactorAuditEvent,
+    ) -> Result<PublishPublicationOutcome, StorageError> {
+        Err(StorageError::Codec(
+            "publication lifecycle is covered by Postgres integration tests".into(),
+        ))
     }
 
     async fn load_publication(
@@ -947,51 +1100,54 @@ impl ControlFactorRepository for SmokeControlFactorRepository {
         Ok(None)
     }
 
-    async fn activate_publication(
+    async fn load_active_publication(
         &self,
-        _publication_id: &FactorPublicationId,
-        _actor: &str,
-        _reason: &str,
-    ) -> Result<ControlFactorPublicationInfo, StorageError> {
-        Err(StorageError::Codec("not implemented".into()))
+        _mode: PublicationMode,
+    ) -> Result<Option<ControlFactorPublicationInfo>, StorageError> {
+        Ok(None)
+    }
+
+    async fn list_publications(
+        &self,
+        _mode: PublicationMode,
+        _status: Option<PublicationStatus>,
+        _limit: u64,
+    ) -> Result<Vec<ControlFactorPublicationInfo>, StorageError> {
+        Ok(Vec::new())
     }
 
     async fn rollback_publication(
         &self,
         _active_publication_id: &FactorPublicationId,
         _target_publication_id: &FactorPublicationId,
-        _actor: &str,
-        _reason: &str,
+        _audit: NewControlFactorAuditEvent,
     ) -> Result<ControlFactorPublicationInfo, StorageError> {
-        Err(StorageError::Codec("not implemented".into()))
-    }
-
-    async fn expire_factors(&self, _now: DateTime<Utc>) -> Result<u64, StorageError> {
-        Ok(0)
+        Err(StorageError::Codec(
+            "publication lifecycle is covered by Postgres integration tests".into(),
+        ))
     }
 
     async fn append_audit_event(
         &self,
         event: NewControlFactorAuditEvent,
     ) -> Result<ControlFactorAuditEventInfo, StorageError> {
-        self.audit_events.lock().unwrap().push(event.clone());
-        Ok(ControlFactorAuditEventInfo {
-            id: i64::try_from(self.audit_events.lock().unwrap().len()).unwrap_or(i64::MAX),
-            event_type: event.event_type,
-            factor_id: event.factor_id,
-            publication_id: event.publication_id,
-            actor: event.actor,
-            reason: event.reason,
-            payload: event.payload,
-            created_at: Utc::now(),
-        })
+        self.append_chained(event)
     }
 
-    async fn load_active_publication(
+    async fn load_audit_chain(
         &self,
-        _mode: PublicationMode,
-    ) -> Result<Option<ControlFactorPublicationInfo>, StorageError> {
-        Ok(None)
+        from_sequence: i64,
+        limit: u64,
+    ) -> Result<Vec<ControlFactorAuditEventInfo>, StorageError> {
+        Ok(self
+            .audit_events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|event| event.sequence >= from_sequence)
+            .take(usize::try_from(limit).unwrap_or(usize::MAX))
+            .cloned()
+            .collect())
     }
 }
 
@@ -1021,11 +1177,15 @@ fn stage_report_info_from_new(
 fn factor_info_from_new(factor: NewControlFactorValue) -> ControlFactorValueInfo {
     ControlFactorValueInfo {
         factor_id: factor.factor_id,
+        run_id: factor.run_id,
         factor_type: factor.factor_type,
         dimensions: factor.dimensions,
+        dimensions_hash: factor.dimensions_hash,
         payload: factor.payload,
+        payload_hash: factor.payload_hash,
         evidence: factor.evidence,
         status: factor.status,
+        status_reason: factor.status_reason,
         generated_at: factor.generated_at,
         expires_at: factor.expires_at,
         owner: factor.owner,

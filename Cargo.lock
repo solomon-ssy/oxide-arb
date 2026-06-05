@@ -4319,9 +4319,7 @@ name = "oxide-arb-control"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "blake3",
  "chrono",
- "hex",
  "num-traits",
  "oxide-arb-algorithm",
  "oxide-arb-error",

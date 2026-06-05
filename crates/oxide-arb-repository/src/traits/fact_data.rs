@@ -6,10 +6,11 @@ use oxide_arb_models::{
         NewBalanceSnapshot, NewControlFactorShadowDecision, NewControlFactorTrainingDataset,
         NewPositionExitExecution, NewPositionExitPlan, NewPositionUnwindAudit,
         NewTokenBalanceSnapshot, PositionExitExecutionInfo, PositionExitPlanInfo,
-        PositionUnwindAuditInfo, TokenBalanceSnapshotInfo, evidence::EvidenceQueryResult,
+        PositionUnwindAuditInfo, ShadowDecisionAggregate, TokenBalanceSnapshotInfo,
+        evidence::EvidenceQueryResult,
     },
     enums::fact::ExitPlanStatus,
-    types::{ExitPlanId, MarketId, PositionId, TokenId, TrainingDatasetId},
+    types::{ExitPlanId, FactorPublicationId, MarketId, PositionId, TokenId, TrainingDatasetId},
 };
 
 use crate::traits::timeseries::evidence_query_result;
@@ -123,6 +124,26 @@ pub trait ControlFactorShadowDecisionRepository: Send + Sync {
         &self,
         decision: NewControlFactorShadowDecision,
     ) -> Result<ControlFactorShadowDecisionInfo, StorageError>;
+
+    /// Lists raw shadow decisions for a publication within `[from, to)`, newest
+    /// first, capped at `limit`. The promotion-review consumer derives delta
+    /// percentile distributions from these rows.
+    async fn list_shadow_decisions(
+        &self,
+        publication_id: &FactorPublicationId,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+        limit: u64,
+    ) -> Result<Vec<ControlFactorShadowDecisionInfo>, StorageError>;
+
+    /// Aggregates shadow-decision counts for a publication within `[from, to)`,
+    /// grouped by `decision_type` plus a distinct-market count.
+    async fn aggregate_shadow_decisions(
+        &self,
+        publication_id: &FactorPublicationId,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+    ) -> Result<ShadowDecisionAggregate, StorageError>;
 }
 
 #[async_trait::async_trait]

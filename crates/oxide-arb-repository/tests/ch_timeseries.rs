@@ -9,8 +9,9 @@ use ch::setup_timeseries_repo;
 use chrono::Utc;
 use oxide_arb_models::{
     clickhouse::{
-        BookSnapshotRow, CalibrationSnapshotRow, ChBps, ChDecimal64, ChPrice, ChProbability,
-        ChSchemaVersion, ChShares, ChUsd, TickEventL2Row, TickEventRow,
+        BookSnapshotRow, CalibrationSnapshotRow, ChBps, ChDecimal64, ChFactor, ChPrice,
+        ChProbability, ChSchemaVersion, ChShares, ChUsd, OpportunityAuditRow,
+        OpportunityDetectionRow, TickEventL2Row, TickEventRow,
     },
     enums::clickhouse::{
         ChAuditOutcome, ChBookEventType, ChDurationBucket, ChFactSource, ChMarketCategory,
@@ -114,8 +115,8 @@ fn sample_detection(
     event_id: &EventId,
     token_id: &TokenId,
     ts: i64,
-) -> oxide_arb_models::clickhouse::OpportunityDetectionRow {
-    oxide_arb_models::clickhouse::OpportunityDetectionRow {
+) -> OpportunityDetectionRow {
+    OpportunityDetectionRow {
         opportunity_id: opportunity_id.clone(),
         market_id: market_id.clone(),
         event_id: event_id.clone(),
@@ -137,7 +138,7 @@ fn sample_detection(
         urgency_factor: None,
         category_weight: None,
         staleness_discount: None,
-        depth_used_pct: oxide_arb_models::clickhouse::ChFactor::from(dec!(10)),
+        depth_used_pct: ChFactor::from(dec!(10)),
         convergence_secs: 120,
         category: ChMarketCategory::Politics,
         price_zone: ChPriceZone::Z97,
@@ -174,8 +175,8 @@ fn sample_audit(
     stage: ChOpportunityAuditStage,
     ts: i64,
     sequence: u64,
-) -> oxide_arb_models::clickhouse::OpportunityAuditRow {
-    oxide_arb_models::clickhouse::OpportunityAuditRow {
+) -> OpportunityAuditRow {
+    OpportunityAuditRow {
         opportunity_id: opportunity_id.clone(),
         execution_id: ExecutionId::generate(),
         trade_id: Some(TradeId::generate()),
@@ -198,7 +199,7 @@ fn sample_audit(
         convergence_secs: Some(120),
         price_zone: Some(ChPriceZone::Z97),
         duration_bucket: Some(ChDurationBucket::Medium),
-        depth_used_pct: Some(oxide_arb_models::clickhouse::ChFactor::from(dec!(10))),
+        depth_used_pct: Some(ChFactor::from(dec!(10))),
         staleness: Some(ChStalenessLevel::Fresh),
         category: Some(ChMarketCategory::Politics),
         stage,

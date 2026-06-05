@@ -117,6 +117,7 @@ mod tests {
             "control_factor_stage_report",
             "control_factor_value",
             "control_factor_publication",
+            "control_factor_publication_factor",
             "control_factor_audit_event",
             "control_factor_shadow_decision",
             "control_factor_training_dataset",

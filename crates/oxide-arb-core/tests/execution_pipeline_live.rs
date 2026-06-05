@@ -36,6 +36,7 @@ use oxide_arb_models::{
     clickhouse::OpportunityAuditRow,
     config::{MarketDataConfig, PolymarketConfig, RiskConfig, WebSocketConfig},
     domain::{
+        PositionInfo, TradeInfo,
         book::BookLevel,
         calibration::{BucketKey, CalibrationSnapshot},
         latency::LatencyTrace,
@@ -53,7 +54,9 @@ use oxide_arb_models::{
         Bps, EventId, MarketId, MicroProb, MicroScore, OpportunityId, Price, Shares, TokenId, Usd,
     },
 };
-use oxide_arb_risk::{builder::RiskEngineBuilder, clock::utc_clock, engine::RiskEngine};
+use oxide_arb_risk::{
+    builder::RiskEngineBuilder, clock::utc_clock, engine::RiskEngine, traits::RiskMetrics,
+};
 use oxide_arb_test_support::mocks::{
     MockCalibrationRepository, MockPositionRepository, MockTradeRepository,
 };
@@ -297,7 +300,7 @@ fn risk_engine() -> Arc<RiskEngine> {
 
 struct StaticRiskMetrics;
 
-impl oxide_arb_risk::traits::RiskMetrics for StaticRiskMetrics {
+impl RiskMetrics for StaticRiskMetrics {
     fn total_exposure(&self) -> Usd {
         Usd::ZERO
     }
@@ -307,7 +310,7 @@ impl oxide_arb_risk::traits::RiskMetrics for StaticRiskMetrics {
     fn open_position_count(&self) -> usize {
         0
     }
-    fn open_positions(&self) -> Vec<oxide_arb_models::domain::position::PositionInfo> {
+    fn open_positions(&self) -> Vec<PositionInfo> {
         Vec::new()
     }
     fn cash_balance(&self) -> Usd {
@@ -465,7 +468,7 @@ fn fixture(clob_client: Option<Arc<ClobClient>>) -> LiveFixture {
     }
 }
 
-fn only_trade(repo: &MockTradeRepository) -> oxide_arb_models::domain::trade::TradeInfo {
+fn only_trade(repo: &MockTradeRepository) -> TradeInfo {
     let trades = repo.trades_snapshot();
     assert_eq!(trades.len(), 1);
     trades.into_iter().next().expect("one trade")

@@ -4,6 +4,32 @@ use thiserror::Error;
 
 use crate::storage::StorageError;
 
+/// Failure while computing a canonical BLAKE3 digest over a serializable value.
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum CanonicalDigestError {
+    #[error("failed to serialize value for canonical digest: {0}")]
+    Serialize(String),
+}
+
+/// Failure detected while verifying the append-only audit hash chain.
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum AuditChainError {
+    #[error("audit event at sequence {sequence} has hash {actual}, expected {expected}")]
+    HashMismatch {
+        sequence: i64,
+        expected: String,
+        actual: String,
+    },
+    #[error("audit chain sequence gap: expected {expected}, found {actual}")]
+    SequenceGap { expected: i64, actual: i64 },
+    #[error("audit event at sequence {sequence} does not link to its predecessor")]
+    BrokenLink { sequence: i64 },
+    #[error("genesis audit event at sequence {sequence} must have no predecessor hash")]
+    GenesisPrevNotNull { sequence: i64 },
+    #[error(transparent)]
+    Digest(#[from] CanonicalDigestError),
+}
+
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum PayloadSafetyError {
     #[error("{field} must be in the inclusive range 0..=1")]
@@ -71,8 +97,8 @@ pub enum GovernanceError {
     InvalidPublicationWindow,
     #[error("publication factor IDs do not match provided factor values")]
     FactorSetMismatch,
-    #[error("failed to serialize publication hash input: {0}")]
-    HashInput(String),
+    #[error(transparent)]
+    CanonicalDigest(#[from] CanonicalDigestError),
     #[error("publication hash mismatch: expected {expected}, got {actual}")]
     PublicationHashMismatch { expected: String, actual: String },
     #[error(
@@ -84,6 +110,31 @@ pub enum GovernanceError {
         expected: String,
         actual: String,
     },
+    #[error("mutating governance operation requires a non-empty reason")]
+    MissingReason,
+    #[error("mutating governance operation requires a non-empty {field}")]
+    MissingField { field: &'static str },
+    #[error("idempotency conflict for key {key}: a different request already exists")]
+    IdempotencyConflict { key: String },
+    #[error("risk-expanding change requires explicit risk-owner approval and justification")]
+    RiskExpansionNotApproved,
+    #[error("publication to Published requires a known-good rollback target")]
+    RollbackTargetMissing,
+    #[error("publication activation lost a concurrency race; retry")]
+    PublicationLockConflict,
+    #[error(transparent)]
+    AuditChain(#[from] AuditChainError),
+}
+
+/// Error surface of the control-factor registry service (orchestration layer).
+#[derive(Debug, Error)]
+pub enum RegistryError {
+    #[error(transparent)]
+    Governance(#[from] GovernanceError),
+    #[error(transparent)]
+    Storage(#[from] StorageError),
+    #[error(transparent)]
+    CanonicalDigest(#[from] CanonicalDigestError),
 }
 
 pub type MaterializationResult<T> = Result<T, MaterializationError>;
@@ -101,6 +152,9 @@ pub enum MaterializationError {
 
     #[error(transparent)]
     Persistence(#[from] ControlPersistenceError),
+
+    #[error(transparent)]
+    CanonicalDigest(#[from] CanonicalDigestError),
 }
 
 impl MaterializationError {
@@ -116,7 +170,9 @@ impl MaterializationError {
     pub fn code(&self) -> Option<&str> {
         match self {
             Self::Stable { code, .. } => Some(code.as_str()),
-            Self::Storage(_) | Self::Codec(_) | Self::Persistence(_) => None,
+            Self::Storage(_) | Self::Codec(_) | Self::Persistence(_) | Self::CanonicalDigest(_) => {
+                None
+            }
         }
     }
 

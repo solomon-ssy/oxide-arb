@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     domain::control_factor::{ArtifactHash, QueryFingerprint},
     enums::control_factor::{MaterializationErrorCode, MaterializationStageName},
+    hashing::CanonicalDigest,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -104,7 +105,7 @@ impl QueryContract {
             self.repository,
             self.method,
             self.version,
-            hex::encode(blake3::hash(&bytes).as_bytes())
+            CanonicalDigest::raw_hex(&bytes)
         ))
     }
 

@@ -59,6 +59,9 @@ pub enum StorageError {
     #[error("Stale data: {0}")]
     StaleData(String),
 
+    #[error("Conflict: {0}")]
+    Conflict(String),
+
     #[error("Operation `{operation}` timed out after {duration:?}")]
     Timeout {
         operation: String,

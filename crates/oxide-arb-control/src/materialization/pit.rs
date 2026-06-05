@@ -15,6 +15,7 @@ use oxide_arb_models::{
         },
     },
     enums::control_factor::MaterializationErrorCode,
+    hashing::CanonicalDigest,
     types::{EventId, MarketId, TokenId},
 };
 use oxide_arb_repository::traits::{
@@ -962,7 +963,7 @@ impl<'a> ResolutionState<'a> {
             |bytes| {
                 format!(
                     "{source_repository}.{source_table}:blake3:{}",
-                    hex::encode(blake3::hash(&bytes).as_bytes())
+                    CanonicalDigest::raw_hex(&bytes)
                 )
             },
         );
