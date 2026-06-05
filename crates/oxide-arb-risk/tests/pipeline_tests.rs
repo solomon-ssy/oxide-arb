@@ -34,8 +34,9 @@ use oxide_arb_risk::{
     pipeline::{
         RiskCheck, build_default_pipeline,
         checks::{
-            BlacklistCheck, CircuitBreakerCheck, ManualHaltCheck, MarketAnomalyBlockCheck,
-            ReconciliationMaintenanceCheck, TokenBlacklistCheck,
+            BlacklistCheck, CircuitBreakerCheck, ControlFactorSnapshotExpiredCheck,
+            ManualHaltCheck, MarketAnomalyBlockCheck, ReconciliationMaintenanceCheck,
+            TokenBlacklistCheck,
         },
     },
     sizing::MultiConstraintSizer,
@@ -229,6 +230,7 @@ async fn pipeline_check_order_golden_test() {
         RiskCheckId::TokenBlacklist,
         RiskCheckId::MarketAnomalyBlock,
         RiskCheckId::ReconciliationMaintenance,
+        RiskCheckId::ControlFactorSnapshotExpired,
         RiskCheckId::MetricsFreshness,
         RiskCheckId::MinDepth,
         RiskCheckId::MaxDepthUsage,
@@ -255,8 +257,8 @@ async fn pipeline_check_order_golden_test() {
 
     assert_eq!(
         check_ids.len(),
-        28,
-        "expected exactly 28 checks, got {}",
+        29,
+        "expected exactly 29 checks, got {}",
         check_ids.len()
     );
     assert_eq!(check_ids, expected, "pipeline check order mismatch");
@@ -318,16 +320,17 @@ impl TestRiskPipeline {
 #[test]
 fn static_pipeline_check_order_matches_golden() {
     let pipeline = build_default_pipeline(&RiskConfig::default());
-    assert_eq!(pipeline.check_order().len(), 28);
+    assert_eq!(pipeline.check_order().len(), 29);
 }
 
 #[test]
 fn metrics_split_index_matches_check_order() {
     let pipeline = build_default_pipeline(&RiskConfig::default());
 
-    // Six phase-1 gates now precede MetricsFreshness: halt, circuit breaker,
-    // blacklist, token blacklist, market-anomaly block, reconciliation maintenance.
-    assert_eq!(pipeline.metrics_split_index(), 6);
+    // Seven phase-1 gates now precede MetricsFreshness: halt, circuit breaker,
+    // blacklist, token blacklist, market-anomaly block, reconciliation maintenance,
+    // control-factor snapshot expiry.
+    assert_eq!(pipeline.metrics_split_index(), 7);
 
     assert!(!ManualHaltCheck.requires_metrics());
     assert!(!CircuitBreakerCheck.requires_metrics());
@@ -341,13 +344,13 @@ fn metrics_split_index_matches_check_order() {
         assert_eq!(*id, *expected_id);
     }
 
-    for (id, needs_metrics) in profile.iter().take(6) {
+    for (id, needs_metrics) in profile.iter().take(7) {
         assert!(
             !needs_metrics,
             "{id} must not require live metrics (phase-1 halt/CB/blacklist/factor gates)"
         );
     }
-    for (id, needs_metrics) in profile.iter().skip(6) {
+    for (id, needs_metrics) in profile.iter().skip(7) {
         if *id == RiskCheckId::FeeSpend {
             assert!(
                 !needs_metrics,
@@ -449,7 +452,7 @@ fn full_report_evaluates_all_checks() {
 fn static_pipeline_has_fixed_checks() {
     let pipeline = build_default_pipeline(&RiskConfig::default());
     assert!(!pipeline.is_empty());
-    assert_eq!(pipeline.len(), 28);
+    assert_eq!(pipeline.len(), 29);
 }
 
 // ── Control-factor named gates + sizer caps (Phase 5.6) ────────────────────
@@ -519,6 +522,29 @@ fn reconciliation_maintenance_check_is_named_hard_reject() {
     let result = ReconciliationMaintenanceCheck.evaluate(&ctx);
     assert!(!result.passed);
     assert_eq!(result.check_id, RiskCheckId::ReconciliationMaintenance);
+}
+
+#[test]
+fn control_factor_snapshot_expired_check_is_named_hard_reject() {
+    let frame = default_frame();
+    let factor_context = FactorDecisionContext {
+        publication_id: Some(FactorPublicationId::new_v7()),
+        snapshot_expired: true,
+        fail_closed: true,
+        ..FactorDecisionContext::neutral()
+    };
+    let ctx = ctx_with_factors(&frame, &factor_context);
+    let result = ControlFactorSnapshotExpiredCheck.evaluate(&ctx);
+    assert!(!result.passed);
+    assert_eq!(result.check_id, RiskCheckId::ControlFactorSnapshotExpired);
+
+    let neutral = FactorDecisionContext {
+        snapshot_expired: true,
+        fail_closed: false,
+        ..FactorDecisionContext::neutral()
+    };
+    let ctx = ctx_with_factors(&frame, &neutral);
+    assert!(ControlFactorSnapshotExpiredCheck.evaluate(&ctx).passed);
 }
 
 #[test]

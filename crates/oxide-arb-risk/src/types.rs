@@ -177,6 +177,8 @@ pub enum RiskCheckId {
     MarketAnomalyBlock,
     /// Control-factor `ReconciliationHealthFactor` forced maintenance mode.
     ReconciliationMaintenance,
+    /// Control-factor publication TTL elapsed under fail-closed policy.
+    ControlFactorSnapshotExpired,
     MetricsFreshness,
     MinDepth,
     MaxDepthUsage,

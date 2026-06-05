@@ -19,6 +19,7 @@ use crate::{
 use chrono::{DateTime, Utc};
 use oxide_arb_error::control::{
     CanonicalDigestError, ControlPersistenceError, FactorValueError, GovernanceError,
+    SnapshotBuildError,
 };
 use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
 use serde::{Deserialize, Serialize};
@@ -79,6 +80,46 @@ impl TryFrom<ControlFactorValueInfo> for ControlFactorValue {
 impl ControlFactorValueInfo {
     pub fn to_typed(&self) -> Result<ControlFactorValue, FactorValueError> {
         ControlFactorValue::from_info(self)
+    }
+
+    /// Recomputes canonical dimension/payload digests and compares them to the
+    /// persisted hashes. Tampered rows are rejected at snapshot compile time.
+    pub fn verify_stored_hashes(&self) -> Result<(), SnapshotBuildError> {
+        let factor_id = self.factor_id.as_str().to_owned();
+        let typed =
+            self.to_typed()
+                .map_err(|error| SnapshotBuildError::DimensionPayloadMismatch {
+                    factor_id: format!("{factor_id}: {error}"),
+                })?;
+        let expected_payload = CanonicalDigest::blake3_json(&typed.payload).map_err(|source| {
+            SnapshotBuildError::PayloadHashMismatch {
+                factor_id: factor_id.clone(),
+                expected: String::new(),
+                actual: format!("digest failed: {source}"),
+            }
+        })?;
+        if self.payload_hash != expected_payload {
+            return Err(SnapshotBuildError::PayloadHashMismatch {
+                factor_id,
+                expected: expected_payload,
+                actual: self.payload_hash.clone(),
+            });
+        }
+        let expected_dims = CanonicalDigest::blake3_json(&typed.dimensions).map_err(|source| {
+            SnapshotBuildError::DimensionsHashMismatch {
+                factor_id: self.factor_id.as_str().to_owned(),
+                expected: String::new(),
+                actual: format!("digest failed: {source}"),
+            }
+        })?;
+        if self.dimensions_hash != expected_dims {
+            return Err(SnapshotBuildError::DimensionsHashMismatch {
+                factor_id,
+                expected: expected_dims,
+                actual: self.dimensions_hash.clone(),
+            });
+        }
+        Ok(())
     }
 }
 

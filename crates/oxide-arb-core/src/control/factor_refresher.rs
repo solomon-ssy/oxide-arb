@@ -10,6 +10,7 @@ use crate::{
     control::factor_snapshot::FactorSnapshotStore, observability::metrics_hub::MetricsHub,
 };
 use chrono::Utc;
+use oxide_arb_control::governance::PublicationHasher;
 use oxide_arb_error::{OxideError, OxideResult, control::SnapshotBuildError};
 use oxide_arb_models::{
     domain::control_factor::{
@@ -175,6 +176,18 @@ impl FactorRefresher {
         fail_closed: bool,
     ) -> OxideResult<Compiled> {
         let publication = publication_info.to_publication();
+        PublicationHasher::verify(&publication).map_err(|error| {
+            OxideError::SnapshotBuild(match error {
+                oxide_arb_error::control::GovernanceError::PublicationHashMismatch {
+                    expected,
+                    actual,
+                } => SnapshotBuildError::PublicationHashMismatch { expected, actual },
+                other => SnapshotBuildError::MissingMember {
+                    factor_id: other.to_string(),
+                },
+            })
+        })?;
+
         let infos = self
             .repo
             .load_factors_by_ids(&publication.factor_ids)
@@ -182,6 +195,8 @@ impl FactorRefresher {
 
         let mut factors: Vec<ControlFactorValue> = Vec::with_capacity(infos.len());
         for info in &infos {
+            info.verify_stored_hashes()
+                .map_err(OxideError::SnapshotBuild)?;
             let typed = info.to_typed().map_err(|error| {
                 OxideError::SnapshotBuild(SnapshotBuildError::DimensionPayloadMismatch {
                     factor_id: format!("{}: {error}", info.factor_id.as_str()),

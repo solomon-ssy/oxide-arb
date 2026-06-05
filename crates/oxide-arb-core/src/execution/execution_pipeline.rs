@@ -281,7 +281,8 @@ impl<R: TradeRepository + Send + Sync + 'static> ExecutionPipeline<R> {
 
         // Resolve the execution-time factor decision bundle from the current
         // published snapshot (safety factors act on the freshest information).
-        let factor_context = Self::build_factor_context(&published, opp);
+        let fail_closed = self.execution_mode == ExecutionMode::Live;
+        let factor_context = Self::build_factor_context(&published, opp, Utc::now(), fail_closed);
 
         // Merge detection- and execution-time factor traces for the audit.
         let mut applied = scored.applied_factors.to_vec();
@@ -304,6 +305,7 @@ impl<R: TradeRepository + Send + Sync + 'static> ExecutionPipeline<R> {
                 .unwrap_or_else(|| "risk denied".into());
             if reason.starts_with("MarketAnomalyBlock")
                 || reason.starts_with("ReconciliationMaintenance")
+                || reason.starts_with("ControlFactorSnapshotExpired")
             {
                 self.metrics.control_factor_hard_rejects.inc();
             }
@@ -421,11 +423,14 @@ impl<R: TradeRepository + Send + Sync + 'static> ExecutionPipeline<R> {
     fn build_factor_context(
         published: &ControlFactorSnapshot,
         opp: &Opportunity,
+        now: chrono::DateTime<Utc>,
+        fail_closed: bool,
     ) -> FactorDecisionContext {
         let Some(publication_id) = published.publication_id.clone() else {
             return FactorDecisionContext::neutral();
         };
 
+        let snapshot_expired = published.is_expired_at(now);
         let reconciliation_health = published.reconciliation_health.decision(&publication_id);
         let market_anomaly =
             published
@@ -457,6 +462,8 @@ impl<R: TradeRepository + Send + Sync + 'static> ExecutionPipeline<R> {
 
         FactorDecisionContext {
             publication_id: Some(publication_id),
+            snapshot_expired,
+            fail_closed,
             reconciliation_health,
             market_anomaly,
             portfolio_risk,

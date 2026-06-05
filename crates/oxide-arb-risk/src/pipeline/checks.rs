@@ -216,7 +216,45 @@ impl RiskCheck for ReconciliationMaintenanceCheck {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// #7 MetricsFreshness
+// #7 ControlFactorSnapshotExpired (control factor)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Hard-rejects when the active publication TTL has elapsed and Live policy
+/// requires fail-closed behavior (retaining a stale snapshot after refresh
+/// failure must not admit new entries).
+pub struct ControlFactorSnapshotExpiredCheck;
+
+impl RiskCheck for ControlFactorSnapshotExpiredCheck {
+    fn requires_metrics(&self) -> bool {
+        false
+    }
+
+    fn id(&self) -> RiskCheckId {
+        RiskCheckId::ControlFactorSnapshotExpired
+    }
+
+    fn kind(&self) -> RiskCheckKind {
+        RiskCheckKind::Gate
+    }
+
+    fn evaluate(&self, ctx: &PreTradeContext<'_>) -> RiskCheckResult {
+        let Some(factor_context) = ctx.factor_context() else {
+            return RiskCheckResult::passed(RiskCheckId::ControlFactorSnapshotExpired);
+        };
+        if factor_context.is_snapshot_stale_fail_closed() {
+            return RiskCheckResult::failed(
+                RiskCheckId::ControlFactorSnapshotExpired,
+                "control-factor publication TTL expired".into(),
+                "publication active".into(),
+                "expired".into(),
+            );
+        }
+        RiskCheckResult::passed(RiskCheckId::ControlFactorSnapshotExpired)
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// #8 MetricsFreshness
 // ═══════════════════════════════════════════════════════════════════════════════
 
 pub struct MetricsFreshnessCheck {

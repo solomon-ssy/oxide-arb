@@ -9,14 +9,14 @@ pub mod checks;
 use crate::{
     context::PreTradeContext,
     pipeline::checks::{
-        ApiErrorRateCheck, BlacklistCheck, CircuitBreakerCheck, DailyBudgetCheck,
-        DailyDirectionalBudgetCheck, DailyLossCapCheck, DirectionalConcentrationCheck,
-        DrawdownGuardCheck, DuplicateMarketCheck, ExposurePctCheck, FeeSpendCheck,
-        HourlyLossCapCheck, ManualHaltCheck, MarketAnomalyBlockCheck, MarketExposureCheck,
-        MaxDepthUsageCheck, MaxPositionsCheck, MaxSingleBetCheck, MetricsFreshnessCheck,
-        MinBalanceCheck, MinDepthCheck, PotentialLossCapCheck, ReconciliationMaintenanceCheck,
-        StalenessCheck, TokenBlacklistCheck, TotalExposureCheck, WeeklyLossCapCheck,
-        WsConnectivityCheck,
+        ApiErrorRateCheck, BlacklistCheck, CircuitBreakerCheck, ControlFactorSnapshotExpiredCheck,
+        DailyBudgetCheck, DailyDirectionalBudgetCheck, DailyLossCapCheck,
+        DirectionalConcentrationCheck, DrawdownGuardCheck, DuplicateMarketCheck, ExposurePctCheck,
+        FeeSpendCheck, HourlyLossCapCheck, ManualHaltCheck, MarketAnomalyBlockCheck,
+        MarketExposureCheck, MaxDepthUsageCheck, MaxPositionsCheck, MaxSingleBetCheck,
+        MetricsFreshnessCheck, MinBalanceCheck, MinDepthCheck, PotentialLossCapCheck,
+        ReconciliationMaintenanceCheck, StalenessCheck, TokenBlacklistCheck, TotalExposureCheck,
+        WeeklyLossCapCheck, WsConnectivityCheck,
     },
     types::{PipelineReport, ReportMode, RiskCheckId, RiskCheckKind, RiskCheckResult},
 };
@@ -49,6 +49,7 @@ pub struct StaticRiskPipeline {
     token_blacklist: TokenBlacklistCheck,
     market_anomaly_block: MarketAnomalyBlockCheck,
     reconciliation_maintenance: ReconciliationMaintenanceCheck,
+    control_factor_snapshot_expired: ControlFactorSnapshotExpiredCheck,
     metrics_freshness: MetricsFreshnessCheck,
     min_depth: MinDepthCheck,
     max_depth_usage: MaxDepthUsageCheck,
@@ -78,7 +79,7 @@ pub struct StaticRiskPipeline {
 impl StaticRiskPipeline {
     #[must_use]
     pub const fn len(&self) -> usize {
-        28
+        29
     }
 
     #[must_use]
@@ -111,6 +112,7 @@ impl StaticRiskPipeline {
             RiskCheckId::TokenBlacklist,
             RiskCheckId::MarketAnomalyBlock,
             RiskCheckId::ReconciliationMaintenance,
+            RiskCheckId::ControlFactorSnapshotExpired,
             RiskCheckId::MetricsFreshness,
             RiskCheckId::MinDepth,
             RiskCheckId::MaxDepthUsage,
@@ -144,6 +146,7 @@ impl StaticRiskPipeline {
             &self.token_blacklist,
             &self.market_anomaly_block,
             &self.reconciliation_maintenance,
+            &self.control_factor_snapshot_expired,
             &self.metrics_freshness,
             &self.min_depth,
             &self.max_depth_usage,
@@ -229,6 +232,7 @@ impl StaticRiskPipeline {
             gate!(self.token_blacklist);
             gate!(self.market_anomaly_block);
             gate!(self.reconciliation_maintenance);
+            gate!(self.control_factor_snapshot_expired);
             gate!(self.metrics_freshness);
             gate!(self.min_depth);
             gate!(self.max_depth_usage);
@@ -304,6 +308,7 @@ pub fn build_default_pipeline(config: &RiskConfig) -> StaticRiskPipeline {
         token_blacklist: TokenBlacklistCheck,
         market_anomaly_block: MarketAnomalyBlockCheck,
         reconciliation_maintenance: ReconciliationMaintenanceCheck,
+        control_factor_snapshot_expired: ControlFactorSnapshotExpiredCheck,
         metrics_freshness: MetricsFreshnessCheck::new(config),
         min_depth: MinDepthCheck::new(config),
         max_depth_usage: MaxDepthUsageCheck::new(config),

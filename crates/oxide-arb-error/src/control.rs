@@ -97,6 +97,20 @@ pub enum SnapshotBuildError {
         expires_at: String,
         now: String,
     },
+    #[error("publication hash mismatch: expected {expected}, got {actual}")]
+    PublicationHashMismatch { expected: String, actual: String },
+    #[error("factor {factor_id} payload hash mismatch: expected {expected}, got {actual}")]
+    PayloadHashMismatch {
+        factor_id: String,
+        expected: String,
+        actual: String,
+    },
+    #[error("factor {factor_id} dimensions hash mismatch: expected {expected}, got {actual}")]
+    DimensionsHashMismatch {
+        factor_id: String,
+        expected: String,
+        actual: String,
+    },
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]

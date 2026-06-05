@@ -129,6 +129,10 @@ impl Default for PortfolioRiskDecision {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FactorDecisionContext {
     pub publication_id: Option<FactorPublicationId>,
+    /// Whether the active publication's TTL has elapsed at execution time.
+    pub snapshot_expired: bool,
+    /// When true (Live), an expired publication hard-rejects new entries.
+    pub fail_closed: bool,
     pub reconciliation_health: ReconciliationHealthDecision,
     pub market_anomaly: MarketAnomalyDecision,
     pub portfolio_risk: PortfolioRiskDecision,
@@ -150,12 +154,20 @@ impl FactorDecisionContext {
     pub fn neutral() -> Self {
         Self {
             publication_id: None,
+            snapshot_expired: false,
+            fail_closed: false,
             reconciliation_health: ReconciliationHealthDecision::default(),
             market_anomaly: MarketAnomalyDecision::default(),
             portfolio_risk: PortfolioRiskDecision::default(),
             bucket_size_multiplier: Decimal::ONE,
             applied_factors: Vec::new(),
         }
+    }
+
+    /// Whether the published snapshot TTL has elapsed under a fail-closed policy.
+    #[must_use]
+    pub const fn is_snapshot_stale_fail_closed(&self) -> bool {
+        self.snapshot_expired && self.fail_closed
     }
 
     /// Whether any named safety factor hard-rejects this trade.
