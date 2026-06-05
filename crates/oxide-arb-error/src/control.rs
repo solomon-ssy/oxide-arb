@@ -66,6 +66,39 @@ pub enum FactorValueError {
     PayloadSafety(#[from] PayloadSafetyError),
 }
 
+/// Failure while compiling an active publication into a live `ControlFactorSnapshot`.
+///
+/// Surfaced by the live refresher. Whether a given failure aborts Live startup
+/// or merely keeps the prior snapshot is a policy decision made by the caller
+/// (fail closed vs fail neutral); this enum only classifies the cause.
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum SnapshotBuildError {
+    #[error(
+        "factor {factor_id} schema version {actual} is incompatible with supported {supported}"
+    )]
+    SchemaMismatch {
+        factor_id: String,
+        actual: u32,
+        supported: u32,
+    },
+    #[error("factor {factor_id} payload type does not match its declared dimensions")]
+    DimensionPayloadMismatch { factor_id: String },
+    #[error("factor {factor_id} payload violates conservative safety constraints: {source}")]
+    PayloadConstraint {
+        factor_id: String,
+        #[source]
+        source: PayloadSafetyError,
+    },
+    #[error("publication member {factor_id} is not present in the resolved factor set")]
+    MissingMember { factor_id: String },
+    #[error("critical safety factor {factor_id} expired at {expires_at} (now {now})")]
+    ExpiredSafetyFactor {
+        factor_id: String,
+        expires_at: String,
+        now: String,
+    },
+}
+
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum StatsError {
     #[error("statistical sample is empty")]

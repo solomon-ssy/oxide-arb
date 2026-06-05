@@ -338,7 +338,7 @@ fn replay_detection(
             calibration_snapshot_mismatch: true,
         });
     }
-    let draft = scorer.score(&opportunity, detected_at);
+    let draft = scorer.score(&opportunity, detected_at, None);
     let detected = draft.score >= endgame_config.scorer.min_score;
     let score_delta = row.score.map(|score| draft.score.micro() - score);
     let replay_bucket = opportunity.meta.duration_bucket;

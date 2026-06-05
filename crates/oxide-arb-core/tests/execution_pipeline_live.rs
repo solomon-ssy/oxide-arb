@@ -9,6 +9,7 @@ use oxide_arb_api::{
 };
 use oxide_arb_core::{
     bridge::risk_metrics::CoreRiskMetrics,
+    control::factor_snapshot::FactorSnapshotStore,
     execution::{
         capital_manager::CapitalManager,
         dispatcher::Dispatcher,
@@ -252,6 +253,7 @@ fn scored_opportunity() -> Arc<ScoredOpportunity> {
         staleness_discount: MicroProb::ONE,
         book_yes_version: 1,
         book_no_version: 1,
+        applied_factors: Arc::from([]),
         trace: Arc::new(LatencyTrace::default()),
     })
 }
@@ -450,6 +452,8 @@ fn fixture(clob_client: Option<Arc<ClobClient>>) -> LiveFixture {
         audit_writer: Arc::clone(&audit_writer),
         relay_notify: Arc::new(Notify::new()),
         metrics_state: Arc::clone(&metrics_state),
+        factors: Arc::new(FactorSnapshotStore::new(chrono::Utc::now())),
+        shadow_writer: None,
     });
 
     LiveFixture {

@@ -417,6 +417,21 @@ async fn load_factor_q(
         .map(|opt| opt.map(Into::into))
 }
 
+async fn load_factors_by_ids_q(
+    db: &impl ConnectionTrait,
+    factor_ids: &[ControlFactorId],
+) -> Result<Vec<ControlFactorValueInfo>, StorageError> {
+    if factor_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    FactorEntity::find()
+        .filter(FactorColumn::FactorId.is_in(factor_ids.iter().cloned()))
+        .all(db)
+        .await
+        .map_err(StorageError::from)
+        .map(|models| models.into_iter().map(Into::into).collect())
+}
+
 async fn list_factors_by_run_q(
     db: &impl ConnectionTrait,
     run_id: &MaterializationRunId,
@@ -987,6 +1002,13 @@ impl ControlFactorRepository for PgControlFactorRepository {
         factor_id: &ControlFactorId,
     ) -> Result<Option<ControlFactorValueInfo>, StorageError> {
         load_factor_q(&self.db, factor_id).await
+    }
+
+    async fn load_factors_by_ids(
+        &self,
+        factor_ids: &[ControlFactorId],
+    ) -> Result<Vec<ControlFactorValueInfo>, StorageError> {
+        load_factors_by_ids_q(&self.db, factor_ids).await
     }
 
     async fn list_factors_by_run(

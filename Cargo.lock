@@ -4355,6 +4355,7 @@ dependencies = [
  "num-traits",
  "oxide-arb-algorithm",
  "oxide-arb-api",
+ "oxide-arb-control",
  "oxide-arb-error",
  "oxide-arb-models",
  "oxide-arb-repository",

@@ -41,7 +41,7 @@ impl FactorDimensions {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct BucketRiskDimensions {
     pub category: MarketCategory,
     pub price_zone: PriceZone,
@@ -51,7 +51,29 @@ pub struct BucketRiskDimensions {
     pub fee_profile: Option<FeeProfileBucket>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+impl BucketRiskDimensions {
+    /// Coarse live-lookup key built from an opportunity's endgame metadata.
+    ///
+    /// Optional dimensions are left unset; [`super::BucketRiskIndex::lookup`]
+    /// relaxes them so a coarse factor still matches.
+    #[must_use]
+    pub const fn coarse(
+        category: MarketCategory,
+        price_zone: PriceZone,
+        duration_bucket: DurationBucket,
+    ) -> Self {
+        Self {
+            category,
+            price_zone,
+            duration_bucket,
+            hours_to_settlement_bucket: None,
+            neg_risk: None,
+            fee_profile: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ExecutionQualityDimensions {
     pub category: MarketCategory,
     pub price_zone: PriceZone,
@@ -90,7 +112,7 @@ pub struct MarketAnomalyDimensions {
     pub severity: FactorSeverity,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TimeToSettlementBucket {
     UnderOneHour,
@@ -99,7 +121,7 @@ pub enum TimeToSettlementBucket {
     OverTwentyFourHours,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FeeProfileBucket {
     Zero,
@@ -108,7 +130,7 @@ pub enum FeeProfileBucket {
     High,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SpreadBucket {
     Tight,
@@ -117,7 +139,7 @@ pub enum SpreadBucket {
     VeryWide,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DepthBucket {
     Thin,
@@ -125,7 +147,7 @@ pub enum DepthBucket {
     Deep,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BookAgeBucket {
     Fresh,
@@ -134,7 +156,7 @@ pub enum BookAgeBucket {
     VeryStale,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LatencyBucket {
     Named(String),

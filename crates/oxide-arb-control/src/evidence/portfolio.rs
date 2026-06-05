@@ -352,6 +352,7 @@ const fn audit_source_priority(stage: ChOpportunityAuditStage) -> u8 {
     match stage {
         ChOpportunityAuditStage::Detected => 10,
         ChOpportunityAuditStage::ValidationRejected => 20,
+        ChOpportunityAuditStage::FactorValidationRejected => 25,
         ChOpportunityAuditStage::RiskRejected => 30,
         ChOpportunityAuditStage::SizingRejected => 40,
         ChOpportunityAuditStage::Filled

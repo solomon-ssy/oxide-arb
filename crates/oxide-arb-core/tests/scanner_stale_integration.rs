@@ -8,6 +8,7 @@ use oxide_arb_algorithm::{
 use oxide_arb_api::fees::FeeCalculator;
 use oxide_arb_core::{
     bridge::{CoreOpportunityPipeline, fee_estimator::CoreFeeEstimator},
+    control::factor_snapshot::FactorSnapshotStore,
     detection::scanner::Scanner,
     observability::metrics_hub::MetricsHub,
     pipeline::{
@@ -19,6 +20,7 @@ use oxide_arb_models::{
     config::Settings,
     domain::{
         book::BookLevel,
+        control_factor::ControlFactorProvider,
         market::{MarketRegistryInfo, TokenInfo},
     },
     enums::{
@@ -92,10 +94,13 @@ fn build_scanner(
     let cooldown = InMemoryEmissionCooldown::new(&settings.detection.endgame.emission_cooldown);
     let min_profit = MicroUsd::try_from_decimal(settings.detection.min_profit_threshold_usd)
         .unwrap_or(MicroUsd::ZERO);
+    let factors: Arc<dyn ControlFactorProvider> =
+        Arc::new(FactorSnapshotStore::new(chrono::Utc::now()));
     let pipeline: Arc<CoreOpportunityPipeline> = Arc::new(OpportunityPipeline::new(
         detector,
         scorer,
         cooldown,
+        factors,
         min_profit,
         &settings.detection.endgame.scorer,
     ));

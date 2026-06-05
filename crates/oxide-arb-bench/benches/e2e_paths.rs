@@ -10,6 +10,7 @@ use oxide_arb_algorithm::{
 use oxide_arb_api::{fees::FeeCalculator, ws::normalize::normalize_ws_message};
 use oxide_arb_core::{
     bridge::{CoreOpportunityPipeline, fee_estimator::CoreFeeEstimator},
+    control::factor_snapshot::FactorSnapshotStore,
     detection::{coalescer::Coalescer, scanner::Scanner},
     observability::metrics_hub::MetricsHub,
     pipeline::{
@@ -24,7 +25,10 @@ use oxide_arb_models::{
         CalibrationConfig, EmissionCooldownConfig, EndgameDetectionConfig, FillProbabilityConfig,
         MarketDataConfig, ScorerConfig,
     },
-    domain::{book::BookLevel, market::MarketRegistryInfo, pipeline::PipelineEvent},
+    domain::{
+        book::BookLevel, control_factor::ControlFactorProvider, market::MarketRegistryInfo,
+        pipeline::PipelineEvent,
+    },
     enums::{
         common::{MarketCategory, TickSize},
         market::MarketStatus,
@@ -53,6 +57,7 @@ fn make_core_pipeline() -> CoreOpportunityPipeline {
         detector,
         scorer,
         cooldown,
+        Arc::new(FactorSnapshotStore::new(Utc::now())) as Arc<dyn ControlFactorProvider>,
         MicroUsd::try_from_decimal(dec!(0.01)).unwrap(),
         &scorer_config,
     )

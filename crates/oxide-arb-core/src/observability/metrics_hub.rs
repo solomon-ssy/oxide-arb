@@ -162,6 +162,18 @@ pub struct MetricsHub {
     pub settlement_no_open_positions_total: IntCounter,
     pub settlement_duration_ms: Histogram,
 
+    // Control factors (Phase 5.6 live consumption)
+    pub control_factor_refresh_total: IntCounter,
+    pub control_factor_refresh_failures: IntCounter,
+    pub control_factor_version_changes: IntCounter,
+    pub control_factor_snapshot_load_age_seconds: IntGauge,
+    pub control_factor_active_count: IntGauge,
+    pub control_factor_hard_rejects: IntCounter,
+    pub control_factor_validation_rejections: IntCounter,
+    pub control_factor_shadow_decisions: IntCounter,
+    pub control_factor_shadow_dropped: IntCounter,
+    pub control_factor_fail_closed_events: IntCounter,
+
     // Shutdown
     pub shutdown_stage_progress_remaining: IntGaugeVec,
     pub shutdown_stage_timeouts: IntCounterVec,
@@ -257,6 +269,74 @@ struct SystemMetrics {
     metrics_refresh_failures: IntCounter,
     shutdown_stage_progress_remaining: IntGaugeVec,
     shutdown_stage_timeouts: IntCounterVec,
+}
+
+struct ControlFactorMetrics {
+    refresh_total: IntCounter,
+    refresh_failures: IntCounter,
+    version_changes: IntCounter,
+    snapshot_load_age_seconds: IntGauge,
+    active_count: IntGauge,
+    hard_rejects: IntCounter,
+    validation_rejections: IntCounter,
+    shadow_decisions: IntCounter,
+    shadow_dropped: IntCounter,
+    fail_closed_events: IntCounter,
+}
+
+fn register_control_factor_metrics(registry: &Registry) -> ControlFactorMetrics {
+    ControlFactorMetrics {
+        refresh_total: register_counter!(
+            registry,
+            "oxide_arb_control_factor_refresh_total",
+            "Control-factor snapshot refresh attempts"
+        ),
+        refresh_failures: register_counter!(
+            registry,
+            "oxide_arb_control_factor_refresh_failures_total",
+            "Control-factor snapshot refresh failures (prior snapshot retained)"
+        ),
+        version_changes: register_counter!(
+            registry,
+            "oxide_arb_control_factor_version_changes_total",
+            "Control-factor publication version changes applied"
+        ),
+        snapshot_load_age_seconds: register_gauge_int!(
+            registry,
+            "oxide_arb_control_factor_snapshot_load_age_seconds",
+            "Seconds since the active control-factor snapshot was loaded"
+        ),
+        active_count: register_gauge_int!(
+            registry,
+            "oxide_arb_control_factor_active_count",
+            "Number of factors in the active published snapshot"
+        ),
+        hard_rejects: register_counter!(
+            registry,
+            "oxide_arb_control_factor_hard_rejects_total",
+            "Trades hard-rejected by a named control-factor risk gate"
+        ),
+        validation_rejections: register_counter!(
+            registry,
+            "oxide_arb_control_factor_validation_rejections_total",
+            "Opportunities rejected by execution-quality factor validation"
+        ),
+        shadow_decisions: register_counter!(
+            registry,
+            "oxide_arb_control_factor_shadow_decisions_total",
+            "Shadow decisions recorded"
+        ),
+        shadow_dropped: register_counter!(
+            registry,
+            "oxide_arb_control_factor_shadow_dropped_total",
+            "Shadow decisions dropped under backpressure or write failure"
+        ),
+        fail_closed_events: register_counter!(
+            registry,
+            "oxide_arb_control_factor_fail_closed_events_total",
+            "Fail-closed events from expired/unloadable safety factors"
+        ),
+    }
 }
 
 struct SettlementMetrics {
@@ -739,6 +819,7 @@ impl MetricsHub {
         let cache = register_cache_metrics(&registry);
         let system = register_system_metrics(&registry);
         let settlement = register_settlement_metrics(&registry);
+        let control_factor = register_control_factor_metrics(&registry);
 
         Self {
             registry,
@@ -816,6 +897,16 @@ impl MetricsHub {
             settlement_channel_dropped_total: settlement.channel_dropped_total,
             settlement_no_open_positions_total: settlement.no_open_positions_total,
             settlement_duration_ms: settlement.duration_ms,
+            control_factor_refresh_total: control_factor.refresh_total,
+            control_factor_refresh_failures: control_factor.refresh_failures,
+            control_factor_version_changes: control_factor.version_changes,
+            control_factor_snapshot_load_age_seconds: control_factor.snapshot_load_age_seconds,
+            control_factor_active_count: control_factor.active_count,
+            control_factor_hard_rejects: control_factor.hard_rejects,
+            control_factor_validation_rejections: control_factor.validation_rejections,
+            control_factor_shadow_decisions: control_factor.shadow_decisions,
+            control_factor_shadow_dropped: control_factor.shadow_dropped,
+            control_factor_fail_closed_events: control_factor.fail_closed_events,
             shutdown_stage_progress_remaining: system.shutdown_stage_progress_remaining,
             shutdown_stage_timeouts: system.shutdown_stage_timeouts,
         }

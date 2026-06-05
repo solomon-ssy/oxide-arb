@@ -6,7 +6,9 @@ use crate::{
 use chrono::{DateTime, Utc};
 use oxide_arb_models::{
     config::{FillProbabilityConfig, ScorerConfig},
-    domain::{latency::LatencyTrace, opportunity::Opportunity},
+    domain::{
+        control_factor::AppliedControlFactor, latency::LatencyTrace, opportunity::Opportunity,
+    },
     types::{MicroPct, MicroProb, MicroScore, MicroUsd, OpportunityId, TokenId},
 };
 use std::sync::Arc;
@@ -23,6 +25,10 @@ pub struct ScoredOpportunity {
     pub urgency_factor: MicroProb,
     pub category_weight: MicroProb,
     pub staleness_discount: MicroProb,
+    /// Auditable control factors applied at detection/scoring time (bucket
+    /// resolution haircut, execution-quality fill discount). Empty when no
+    /// publication is active or no factor matched.
+    pub applied_factors: Arc<[AppliedControlFactor]>,
     pub trace: Arc<LatencyTrace>,
 }
 
@@ -34,6 +40,16 @@ pub struct ScoreDraft {
     pub urgency_factor: MicroProb,
     pub category_weight: MicroProb,
     pub staleness_discount: MicroProb,
+}
+
+/// Emit-time context bundled to keep [`EndgameScorer::finalize`] cohesive.
+pub struct EmitContext {
+    pub token_yes: TokenId,
+    pub token_no: TokenId,
+    pub book_yes_version: u64,
+    pub book_no_version: u64,
+    pub applied_factors: Arc<[AppliedControlFactor]>,
+    pub trace: Arc<LatencyTrace>,
 }
 
 pub struct EndgameScorer {
@@ -64,10 +80,36 @@ impl EndgameScorer {
         }
     }
 
-    /// Compute score from an opportunity reference — no heap allocation.
+    /// Baseline fill-probability estimate for an opportunity (pre-factor).
+    ///
+    /// Exposed so the pipeline can apply an `ExecutionQualityFactor` multiplier
+    /// to the base fill probability *before* the score is computed, keeping the
+    /// factor effect visible to risk sizing downstream.
     #[must_use]
     #[inline]
-    pub fn score(&self, opp: &Opportunity, now: DateTime<Utc>) -> ScoreDraft {
+    pub fn estimate_fill(&self, opp: &Opportunity, now: DateTime<Utc>) -> MicroProb {
+        let hours_to_settlement = opp
+            .meta
+            .settlement_deadline
+            .map_or(i64::MAX, |d| (d - now).num_hours());
+        let depth_pct =
+            MicroPct::try_from_pct_decimal(opp.depth_used_pct).unwrap_or(MicroPct::ZERO);
+        self.fill_estimator
+            .estimate(depth_pct, opp.staleness, hours_to_settlement)
+    }
+
+    /// Compute score from an opportunity reference — no heap allocation.
+    ///
+    /// `fill_override` supplies the execution-quality-adjusted fill probability;
+    /// when `None` the baseline estimate is used.
+    #[must_use]
+    #[inline]
+    pub fn score(
+        &self,
+        opp: &Opportunity,
+        now: DateTime<Utc>,
+        fill_override: Option<MicroProb>,
+    ) -> ScoreDraft {
         let category_weight = self.category_weights[opp.category.table_index()];
 
         let hours_to_settlement = opp
@@ -75,11 +117,7 @@ impl EndgameScorer {
             .settlement_deadline
             .map_or(i64::MAX, |d| (d - now).num_hours());
 
-        let depth_pct =
-            MicroPct::try_from_pct_decimal(opp.depth_used_pct).unwrap_or(MicroPct::ZERO);
-        let fill_prob = self
-            .fill_estimator
-            .estimate(depth_pct, opp.staleness, hours_to_settlement);
+        let fill_prob = fill_override.unwrap_or_else(|| self.estimate_fill(opp, now));
 
         let urgency =
             UrgencyFactor::compute(hours_to_settlement.max(0), self.settlement_window_hours);
@@ -107,28 +145,25 @@ impl EndgameScorer {
     pub fn finalize(
         mut opp: Opportunity,
         draft: ScoreDraft,
-        token_yes: TokenId,
-        token_no: TokenId,
-        book_yes_version: u64,
-        book_no_version: u64,
-        trace: Arc<LatencyTrace>,
+        ctx: EmitContext,
     ) -> Arc<ScoredOpportunity> {
         if opp.opportunity_id.is_pending() {
             opp.opportunity_id = OpportunityId::new_v7();
         }
-        let mut trace = Arc::unwrap_or_clone(trace);
+        let mut trace = Arc::unwrap_or_clone(ctx.trace);
         trace.mark_scan_emitted();
         Arc::new(ScoredOpportunity {
             opportunity: Arc::new(opp),
-            token_yes,
-            token_no,
-            book_yes_version,
-            book_no_version,
+            token_yes: ctx.token_yes,
+            token_no: ctx.token_no,
+            book_yes_version: ctx.book_yes_version,
+            book_no_version: ctx.book_no_version,
             score: draft.score,
             fill_probability: draft.fill_probability,
             urgency_factor: draft.urgency_factor,
             category_weight: draft.category_weight,
             staleness_discount: draft.staleness_discount,
+            applied_factors: ctx.applied_factors,
             trace: Arc::new(trace),
         })
     }

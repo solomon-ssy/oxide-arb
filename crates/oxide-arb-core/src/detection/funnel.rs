@@ -390,6 +390,7 @@ mod tests {
             staleness_discount: MicroProb::ONE,
             book_yes_version: 1,
             book_no_version: 1,
+            applied_factors: Arc::from([]),
             trace: Arc::new(LatencyTrace::default()),
         })
     }

@@ -112,6 +112,7 @@ fn with_context(
         },
         snap: &snap,
         metrics,
+        factor_context: None,
         now: Utc::now(),
     };
 

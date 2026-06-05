@@ -79,6 +79,9 @@ pub enum OxideError {
     #[error(transparent)]
     Materialization(#[from] control::MaterializationError),
 
+    #[error("control-factor snapshot build failed: {0}")]
+    SnapshotBuild(#[from] control::SnapshotBuildError),
+
     // ── Market catalog ──────────────────────────────────────────────────
     #[error(transparent)]
     Market(#[from] market::MarketError),

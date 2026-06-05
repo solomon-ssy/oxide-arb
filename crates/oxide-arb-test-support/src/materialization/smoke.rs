@@ -986,6 +986,20 @@ impl ControlFactorRepository for SmokeControlFactorRepository {
             .cloned())
     }
 
+    async fn load_factors_by_ids(
+        &self,
+        factor_ids: &[ControlFactorId],
+    ) -> Result<Vec<ControlFactorValueInfo>, StorageError> {
+        Ok(self
+            .factors
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|factor| factor_ids.contains(&factor.factor_id))
+            .cloned()
+            .collect())
+    }
+
     async fn list_factors_by_run(
         &self,
         run_id: &MaterializationRunId,

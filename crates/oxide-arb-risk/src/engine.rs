@@ -39,6 +39,7 @@ use oxide_arb_models::{
     domain::{
         BlacklistInfo,
         blacklist::UpsertBlacklistEntry,
+        control_factor::FactorDecisionContext,
         opportunity::Opportunity,
         potential_loss::{NewPotentialLoss, PotentialLossInfo},
         risk,
@@ -119,6 +120,7 @@ where
         opp: &Opportunity,
         probability: &ProbabilityInput,
         metrics: &M,
+        factor_context: Option<&FactorDecisionContext>,
         mode: ReportMode,
     ) -> RiskDecision {
         let eval_start = Instant::now();
@@ -131,6 +133,7 @@ where
             probability: *probability,
             snap: &snap,
             metrics: RiskMetricsSnapshot::zeroed(),
+            factor_context,
             now,
         };
         let metrics_split = self.pipeline.metrics_split_index();

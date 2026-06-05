@@ -163,7 +163,7 @@ impl MultiConstraintSizer {
             bankroll,
         );
 
-        let constraints = [
+        let mut constraints = vec![
             SizeConstraint {
                 name: "kelly_upper_bound",
                 max_usd: kelly.bet_usd,
@@ -213,6 +213,10 @@ impl MultiConstraintSizer {
             },
         ];
 
+        // Control-factor size caps are explicit constraints (never folded into
+        // bankroll), so the binding factor cap is visible in the audit trail.
+        Self::push_factor_constraints(ctx, &mut constraints);
+
         let binding = constraints
             .iter()
             .min_by(|a, b| a.max_usd.inner().cmp(&b.max_usd.inner()))
@@ -228,9 +232,54 @@ impl MultiConstraintSizer {
             bet_usd: final_usd,
             kelly_result: kelly,
             binding_constraint: binding.name,
-            breakdown: SizeBreakdown {
-                constraints: constraints.into_iter().collect(),
-            },
+            breakdown: SizeBreakdown { constraints },
+        }
+    }
+
+    /// Append explicit control-factor size caps (bucket / portfolio /
+    /// reconciliation) computed against the pre-factor binding size. Only
+    /// tightening multipliers (`< 1`) are added, so a neutral factor leaves the
+    /// binding constraint unchanged.
+    fn push_factor_constraints(ctx: &PreTradeContext<'_>, constraints: &mut Vec<SizeConstraint>) {
+        let Some(factor_context) = ctx.factor_context() else {
+            return;
+        };
+        let base = constraints
+            .iter()
+            .map(|constraint| constraint.max_usd)
+            .min_by(|a, b| a.inner().cmp(&b.inner()))
+            .unwrap_or(Usd::ZERO);
+
+        let scale = |multiplier: Decimal| -> Usd {
+            Usd::new(
+                (base.inner() * multiplier.clamp(Decimal::ZERO, Decimal::ONE)).max(Decimal::ZERO),
+            )
+        };
+
+        let bucket_multiplier = factor_context.bucket_size_multiplier;
+        if bucket_multiplier < Decimal::ONE {
+            constraints.push(SizeConstraint {
+                name: "factor_bucket_size_cap",
+                max_usd: scale(bucket_multiplier),
+            });
+        }
+
+        let portfolio = &factor_context.portfolio_risk;
+        let portfolio_multiplier = portfolio.global_size_multiplier
+            * portfolio.category_size_multiplier.unwrap_or(Decimal::ONE);
+        if portfolio_multiplier < Decimal::ONE {
+            constraints.push(SizeConstraint {
+                name: "factor_portfolio_size_cap",
+                max_usd: scale(portfolio_multiplier),
+            });
+        }
+
+        let reconciliation_multiplier = factor_context.reconciliation_health.size_multiplier;
+        if reconciliation_multiplier < Decimal::ONE {
+            constraints.push(SizeConstraint {
+                name: "factor_reconciliation_size_cap",
+                max_usd: scale(reconciliation_multiplier),
+            });
         }
     }
 }

@@ -1,7 +1,4 @@
-//! In-memory [`ControlFactorRepository`] mock for materialization scheduler tests.
-//!
-//! Implements enqueue + `latest_run_for_schedule` and records publish attempts so
-//! tests can assert the scheduler never publishes.
+//! Minimal [`ControlFactorRepository`] fake for governance notify wiring tests.
 
 use std::sync::Mutex;
 
@@ -27,49 +24,33 @@ use oxide_arb_models::{
 };
 use oxide_arb_repository::traits::ControlFactorRepository;
 
-/// Default `trigger_ref` used by [`crate::materialization::scheduled_materialization_run_info`].
-pub const EXECUTION_QUALITY_HOURLY_SCHEDULE_ID: &str = "execution-quality-hourly";
-
-/// Records enqueues and latest-run lookups for scheduler unit tests.
+/// Records governance publication calls and returns synthetic successes.
 #[derive(Default)]
-pub struct MockSchedulerControlFactorRepository {
-    runs: Mutex<Vec<ControlFactorMaterializationRunInfo>>,
-    enqueued: Mutex<Vec<NewControlFactorMaterializationRun>>,
+pub struct MockGovernanceControlFactorRepository {
     publish_calls: Mutex<u32>,
+    rollback_calls: Mutex<u32>,
 }
 
-impl MockSchedulerControlFactorRepository {
-    /// Pre-seeds materialization runs returned by [`ControlFactorRepository::latest_run_for_schedule`].
-    #[must_use]
-    pub fn with_runs(runs: Vec<ControlFactorMaterializationRunInfo>) -> Self {
-        Self {
-            runs: Mutex::new(runs),
-            ..Self::default()
-        }
-    }
-
-    /// Number of runs passed to [`ControlFactorRepository::enqueue_materialization_run`].
-    pub fn enqueued_count(&self) -> usize {
-        self.enqueued.lock().unwrap().len()
-    }
-
-    /// Number of times [`ControlFactorRepository::publish_publication`] was invoked.
+impl MockGovernanceControlFactorRepository {
+    /// Number of times [`ControlFactorRepository::publish_publication`] completed.
     pub fn publish_calls(&self) -> u32 {
         *self.publish_calls.lock().unwrap()
+    }
+
+    /// Number of times [`ControlFactorRepository::rollback_publication`] completed.
+    pub fn rollback_calls(&self) -> u32 {
+        *self.rollback_calls.lock().unwrap()
     }
 }
 
 #[async_trait]
-impl ControlFactorRepository for MockSchedulerControlFactorRepository {
+impl ControlFactorRepository for MockGovernanceControlFactorRepository {
     async fn enqueue_materialization_run(
         &self,
-        run: NewControlFactorMaterializationRun,
+        _run: NewControlFactorMaterializationRun,
         _options: EnqueueMaterializationRunOptions,
     ) -> Result<EnqueueMaterializationRunOutcome, StorageError> {
-        let info = materialization_run_info_from_new(&run);
-        self.enqueued.lock().unwrap().push(run);
-        self.runs.lock().unwrap().push(info.clone());
-        Ok(EnqueueMaterializationRunOutcome::Created(info))
+        Err(governance_unexpected("enqueue_materialization_run"))
     }
 
     async fn load_materialization_run(
@@ -88,16 +69,10 @@ impl ControlFactorRepository for MockSchedulerControlFactorRepository {
 
     async fn latest_run_for_schedule(
         &self,
-        schedule_id: &str,
-        statuses: &[MaterializationRunStatus],
+        _schedule_id: &str,
+        _statuses: &[MaterializationRunStatus],
     ) -> Result<Option<ControlFactorMaterializationRunInfo>, StorageError> {
-        let runs = self.runs.lock().unwrap();
-        Ok(runs
-            .iter()
-            .filter(|run| run.trigger_ref.as_deref() == Some(schedule_id))
-            .filter(|run| statuses.is_empty() || statuses.contains(&run.status))
-            .max_by_key(|run| run.created_at)
-            .cloned())
+        Ok(None)
     }
 
     async fn try_acquire_materialization_run(
@@ -105,14 +80,14 @@ impl ControlFactorRepository for MockSchedulerControlFactorRepository {
         _run_id: &MaterializationRunId,
         _started_at: DateTime<Utc>,
     ) -> Result<AcquireMaterializationRunOutcome, StorageError> {
-        Err(scheduler_unexpected("try_acquire_materialization_run"))
+        Err(governance_unexpected("try_acquire_materialization_run"))
     }
 
     async fn retry_materialization_run(
         &self,
         _run_id: &MaterializationRunId,
     ) -> Result<RunTransitionOutcome, StorageError> {
-        Err(scheduler_unexpected("retry_materialization_run"))
+        Err(governance_unexpected("retry_materialization_run"))
     }
 
     async fn transition_materialization_run(
@@ -122,7 +97,7 @@ impl ControlFactorRepository for MockSchedulerControlFactorRepository {
         _target: MaterializationRunStatus,
         _patch: MaterializationRunStatusPatch,
     ) -> Result<RunTransitionOutcome, StorageError> {
-        Err(scheduler_unexpected("transition_materialization_run"))
+        Err(governance_unexpected("transition_materialization_run"))
     }
 
     async fn cancel_materialization_run(
@@ -131,14 +106,14 @@ impl ControlFactorRepository for MockSchedulerControlFactorRepository {
         _reason: &str,
         _cancelled_at: DateTime<Utc>,
     ) -> Result<CancelMaterializationRunOutcome, StorageError> {
-        Err(scheduler_unexpected("cancel_materialization_run"))
+        Err(governance_unexpected("cancel_materialization_run"))
     }
 
     async fn upsert_stage_report(
         &self,
         _report: NewControlFactorStageReport,
     ) -> Result<ControlFactorStageReportInfo, StorageError> {
-        Err(scheduler_unexpected("upsert_stage_report"))
+        Err(governance_unexpected("upsert_stage_report"))
     }
 
     async fn load_stage_report(
@@ -161,7 +136,7 @@ impl ControlFactorRepository for MockSchedulerControlFactorRepository {
         _factor: NewControlFactorValue,
         _audit: NewControlFactorAuditEvent,
     ) -> Result<ControlFactorValueInfo, StorageError> {
-        Err(scheduler_unexpected("create_factor"))
+        Err(governance_unexpected("create_factor"))
     }
 
     async fn load_factor(
@@ -212,11 +187,13 @@ impl ControlFactorRepository for MockSchedulerControlFactorRepository {
 
     async fn publish_publication(
         &self,
-        _publication: NewControlFactorPublication,
+        publication: NewControlFactorPublication,
         _audit: NewControlFactorAuditEvent,
     ) -> Result<PublishPublicationOutcome, StorageError> {
         *self.publish_calls.lock().unwrap() += 1;
-        Err(scheduler_unexpected("publish_publication"))
+        Ok(PublishPublicationOutcome::Published(publication_info_from(
+            &publication,
+        )))
     }
 
     async fn load_publication(
@@ -230,6 +207,7 @@ impl ControlFactorRepository for MockSchedulerControlFactorRepository {
         &self,
         _mode: PublicationMode,
     ) -> Result<Option<ControlFactorPublicationInfo>, StorageError> {
+        // Genesis publish: no rollback target required.
         Ok(None)
     }
 
@@ -245,17 +223,18 @@ impl ControlFactorRepository for MockSchedulerControlFactorRepository {
     async fn rollback_publication(
         &self,
         _active_publication_id: &FactorPublicationId,
-        _target_publication_id: &FactorPublicationId,
+        target_publication_id: &FactorPublicationId,
         _audit: NewControlFactorAuditEvent,
     ) -> Result<ControlFactorPublicationInfo, StorageError> {
-        Err(scheduler_unexpected("rollback_publication"))
+        *self.rollback_calls.lock().unwrap() += 1;
+        Ok(rollback_target_info(target_publication_id))
     }
 
     async fn append_audit_event(
         &self,
         _event: NewControlFactorAuditEvent,
     ) -> Result<ControlFactorAuditEventInfo, StorageError> {
-        Err(scheduler_unexpected("append_audit_event"))
+        Err(governance_unexpected("append_audit_event"))
     }
 
     async fn load_audit_chain(
@@ -267,41 +246,46 @@ impl ControlFactorRepository for MockSchedulerControlFactorRepository {
     }
 }
 
-fn scheduler_unexpected(method: &str) -> StorageError {
-    StorageError::Codec(format!("scheduler must not call {method}"))
+fn governance_unexpected(method: &str) -> StorageError {
+    StorageError::Codec(format!("governance notify mock must not call {method}"))
 }
 
-fn materialization_run_info_from_new(
-    new: &NewControlFactorMaterializationRun,
-) -> ControlFactorMaterializationRunInfo {
-    ControlFactorMaterializationRunInfo {
-        materialization_run_id: new.materialization_run_id.clone(),
-        run_dedupe_key: new.run_dedupe_key.clone(),
-        run_kind: new.run_kind,
-        trigger_type: new.trigger_type,
-        trigger_ref: new.trigger_ref.clone(),
-        status: new.status,
-        window_from: new.window_from,
-        window_to: new.window_to,
-        source_delay_secs: new.source_delay_secs,
-        market_filter: new.market_filter.clone(),
-        requested_factor_types: new.requested_factor_types.clone(),
-        data_requirements: new.data_requirements.clone(),
-        runtime_config_ref: new.runtime_config_ref.clone(),
-        simulation_config_hash: new.simulation_config_hash.clone(),
-        quality_gate_policy_hash: new.quality_gate_policy_hash.clone(),
-        output_policy: new.output_policy,
-        manifest: new.manifest.clone(),
-        manifest_hash: new.manifest_hash.clone(),
-        report: new.report.clone(),
-        code_git_sha: new.code_git_sha.clone(),
-        created_by: new.created_by.clone(),
-        started_at: new.started_at,
-        finished_at: new.finished_at,
-        failure_code: new.failure_code.clone(),
-        failure_detail: new.failure_detail.clone(),
-        report_uri: new.report_uri.clone(),
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+fn publication_info_from(
+    publication: &NewControlFactorPublication,
+) -> ControlFactorPublicationInfo {
+    let now = Utc::now();
+    ControlFactorPublicationInfo {
+        publication_id: publication.publication_id.clone(),
+        mode: publication.mode,
+        factor_ids: publication.factor_ids.clone(),
+        previous_publication_id: publication.previous_publication_id.clone(),
+        status: PublicationStatus::Active,
+        effective_from: publication.effective_from,
+        expires_at: publication.expires_at,
+        approved_by: publication.approved_by.clone(),
+        approval_reason: publication.approval_reason.clone(),
+        publication_hash: publication.publication_hash.clone(),
+        created_at: now,
+        updated_at: now,
+    }
+}
+
+fn rollback_target_info(
+    target_publication_id: &FactorPublicationId,
+) -> ControlFactorPublicationInfo {
+    let now = Utc::now();
+    ControlFactorPublicationInfo {
+        publication_id: target_publication_id.clone(),
+        mode: PublicationMode::Published,
+        factor_ids: vec![ControlFactorId::new_v7()],
+        previous_publication_id: None,
+        status: PublicationStatus::Active,
+        effective_from: now - chrono::Duration::hours(1),
+        expires_at: now + chrono::Duration::days(1),
+        approved_by: Some("risk_owner".into()),
+        approval_reason: "rollback target".into(),
+        publication_hash: "blake3:rollback-target".into(),
+        created_at: now,
+        updated_at: now,
     }
 }

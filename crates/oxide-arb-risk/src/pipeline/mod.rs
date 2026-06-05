@@ -12,10 +12,11 @@ use crate::{
         ApiErrorRateCheck, BlacklistCheck, CircuitBreakerCheck, DailyBudgetCheck,
         DailyDirectionalBudgetCheck, DailyLossCapCheck, DirectionalConcentrationCheck,
         DrawdownGuardCheck, DuplicateMarketCheck, ExposurePctCheck, FeeSpendCheck,
-        HourlyLossCapCheck, ManualHaltCheck, MarketExposureCheck, MaxDepthUsageCheck,
-        MaxPositionsCheck, MaxSingleBetCheck, MetricsFreshnessCheck, MinBalanceCheck,
-        MinDepthCheck, PotentialLossCapCheck, StalenessCheck, TokenBlacklistCheck,
-        TotalExposureCheck, WeeklyLossCapCheck, WsConnectivityCheck,
+        HourlyLossCapCheck, ManualHaltCheck, MarketAnomalyBlockCheck, MarketExposureCheck,
+        MaxDepthUsageCheck, MaxPositionsCheck, MaxSingleBetCheck, MetricsFreshnessCheck,
+        MinBalanceCheck, MinDepthCheck, PotentialLossCapCheck, ReconciliationMaintenanceCheck,
+        StalenessCheck, TokenBlacklistCheck, TotalExposureCheck, WeeklyLossCapCheck,
+        WsConnectivityCheck,
     },
     types::{PipelineReport, ReportMode, RiskCheckId, RiskCheckKind, RiskCheckResult},
 };
@@ -46,6 +47,8 @@ pub struct StaticRiskPipeline {
     circuit_breaker: CircuitBreakerCheck,
     blacklist: BlacklistCheck,
     token_blacklist: TokenBlacklistCheck,
+    market_anomaly_block: MarketAnomalyBlockCheck,
+    reconciliation_maintenance: ReconciliationMaintenanceCheck,
     metrics_freshness: MetricsFreshnessCheck,
     min_depth: MinDepthCheck,
     max_depth_usage: MaxDepthUsageCheck,
@@ -75,7 +78,7 @@ pub struct StaticRiskPipeline {
 impl StaticRiskPipeline {
     #[must_use]
     pub const fn len(&self) -> usize {
-        26
+        28
     }
 
     #[must_use]
@@ -106,6 +109,8 @@ impl StaticRiskPipeline {
             RiskCheckId::CircuitBreaker,
             RiskCheckId::BlacklistTradingPath,
             RiskCheckId::TokenBlacklist,
+            RiskCheckId::MarketAnomalyBlock,
+            RiskCheckId::ReconciliationMaintenance,
             RiskCheckId::MetricsFreshness,
             RiskCheckId::MinDepth,
             RiskCheckId::MaxDepthUsage,
@@ -137,6 +142,8 @@ impl StaticRiskPipeline {
             &self.circuit_breaker,
             &self.blacklist,
             &self.token_blacklist,
+            &self.market_anomaly_block,
+            &self.reconciliation_maintenance,
             &self.metrics_freshness,
             &self.min_depth,
             &self.max_depth_usage,
@@ -220,6 +227,8 @@ impl StaticRiskPipeline {
             gate!(self.circuit_breaker);
             gate!(self.blacklist);
             gate!(self.token_blacklist);
+            gate!(self.market_anomaly_block);
+            gate!(self.reconciliation_maintenance);
             gate!(self.metrics_freshness);
             gate!(self.min_depth);
             gate!(self.max_depth_usage);
@@ -293,6 +302,8 @@ pub fn build_default_pipeline(config: &RiskConfig) -> StaticRiskPipeline {
         circuit_breaker: CircuitBreakerCheck,
         blacklist: BlacklistCheck,
         token_blacklist: TokenBlacklistCheck,
+        market_anomaly_block: MarketAnomalyBlockCheck,
+        reconciliation_maintenance: ReconciliationMaintenanceCheck,
         metrics_freshness: MetricsFreshnessCheck::new(config),
         min_depth: MinDepthCheck::new(config),
         max_depth_usage: MaxDepthUsageCheck::new(config),

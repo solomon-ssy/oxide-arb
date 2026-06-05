@@ -7,6 +7,10 @@
 
 use crate::{
     bridge::risk_metrics::CoreRiskMetrics,
+    control::{
+        factor_shadow::{ShadowDecisionWriter, ShadowEvaluator},
+        factor_snapshot::FactorSnapshotStore,
+    },
     execution::{
         capital_manager::CapitalManager, dispatcher::Dispatcher, fok_strategy::FokOrderStrategy,
         fsm::ExecutionFSM, market_inflight::MarketInFlightRegistry, plan_builder::PlanBuilder,
@@ -19,7 +23,15 @@ use chrono::Utc;
 use oxide_arb_algorithm::scorer::ScoredOpportunity;
 use oxide_arb_models::{
     domain::{
-        execution::{ExecutionPlan, ExecutionResult, ReservationHandle, ResolvedOutcome},
+        book::BookSnapshot,
+        control_factor::{
+            AppliedControlFactor, BucketRiskDimensions, ControlFactorSnapshot,
+            ExecutionQualityDimensions, FactorDecisionContext, effective_slippage_limit_bps,
+            execution_quality_dimensions,
+        },
+        execution::{
+            ExecutionPlan, ExecutionResult, ReservationHandle, ResolvedOutcome, ValidationResult,
+        },
         opportunity::Opportunity,
         risk::ProbabilityInput,
         scored_snapshot::ScoredOpportunitySnapshot,
@@ -29,10 +41,11 @@ use oxide_arb_models::{
         common::ExecutionMode,
         execution::{ExecutionOutcome, ExecutionOutcomeSummary},
     },
-    types::{ExecutionId, TradeId, Usd},
+    types::{ExecutionId, TokenId, TradeId, Usd},
 };
 use oxide_arb_repository::{postgres::PgTradeRepository, traits::TradeRepository};
 use oxide_arb_risk::{engine::RiskEngine, types::ReportMode};
+use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use std::{fmt::Display, sync::Arc, time::Instant};
 use tokio::sync::Notify;
@@ -55,6 +68,11 @@ pub struct ExecutionPipelineDeps<R: TradeRepository + Send + Sync + 'static = Pg
     /// Rung after each durable `*_observed` write to wake the post-trade relay.
     pub relay_notify: Arc<Notify>,
     pub metrics_state: Arc<RiskMetricsState>,
+    /// Live control-factor snapshots (published read for the decision context;
+    /// shadow read for the shadow evaluator).
+    pub factors: Arc<FactorSnapshotStore>,
+    /// Backpressure-safe shadow-decision writer; `None` disables shadow.
+    pub shadow_writer: Option<ShadowDecisionWriter>,
 }
 
 pub struct ExecutionPipeline<R: TradeRepository + Send + Sync + 'static = PgTradeRepository> {
@@ -73,6 +91,8 @@ pub struct ExecutionPipeline<R: TradeRepository + Send + Sync + 'static = PgTrad
     audit_writer: Arc<ExecutionAuditWriter>,
     relay_notify: Arc<Notify>,
     metrics_state: Arc<RiskMetricsState>,
+    factors: Arc<FactorSnapshotStore>,
+    shadow_writer: Option<ShadowDecisionWriter>,
 }
 
 struct PreparedDispatch {
@@ -100,6 +120,8 @@ impl<R: TradeRepository + Send + Sync + 'static> ExecutionPipeline<R> {
             audit_writer: deps.audit_writer,
             relay_notify: deps.relay_notify,
             metrics_state: deps.metrics_state,
+            factors: deps.factors,
+            shadow_writer: deps.shadow_writer,
         }
     }
 
@@ -194,8 +216,7 @@ impl<R: TradeRepository + Send + Sync + 'static> ExecutionPipeline<R> {
                 scored.token_no.clone(),
                 scored.book_yes_version,
                 scored.book_no_version,
-            )
-            .with_known_empty_factor_trace();
+            );
         let (approved_size, snapshot) =
             self.validate_and_size(scored, opp, &execution_id, snapshot)?;
         self.persist_dispatch_plan(opp, approved_size, snapshot, execution_id)
@@ -209,34 +230,70 @@ impl<R: TradeRepository + Send + Sync + 'static> ExecutionPipeline<R> {
         execution_id: &ExecutionId,
         snapshot: ScoredOpportunitySnapshot,
     ) -> Result<(Usd, ScoredOpportunitySnapshot), ExecutionResult> {
-        if let Err(e) = self.validator.validate(
+        let published = self.factors.published();
+        let publication_id = published.publication_id.clone();
+
+        // Stamp detection-time applied factors so any early rejection audit
+        // still preserves the factor trace.
+        let mut snapshot =
+            snapshot.with_applied_control_factors(publication_id.clone(), &scored.applied_factors);
+
+        let validation = match self.validator.validate(
             opp,
             &scored.token_yes,
             &scored.token_no,
             scored.book_yes_version,
             scored.book_no_version,
         ) {
-            self.metrics.validation_failures.inc();
-            self.audit_writer.write_rejection(
-                execution_id,
-                opp,
-                "validation",
-                &e.to_string(),
-                &snapshot,
-            );
-            return Err(Self::reject("validation", e));
-        }
+            Ok(validation) => validation,
+            Err(e) => {
+                self.metrics.validation_failures.inc();
+                self.audit_writer.write_rejection(
+                    execution_id,
+                    opp,
+                    "validation",
+                    &e.to_string(),
+                    &snapshot,
+                );
+                return Err(Self::reject("validation", e));
+            }
+        };
         tracing::info!(
             opportunity_id = %opp.opportunity_id,
             execution_id = %execution_id,
             phase = "validated",
         );
 
+        // Execution-quality factor: reject before risk sizing when the live book
+        // is stricter than the factor's depth/slippage tolerance.
+        if let Some(reason) = self.execution_quality_violation(&published, scored, opp, &validation)
+        {
+            self.metrics.control_factor_validation_rejections.inc();
+            self.audit_writer.write_rejection(
+                execution_id,
+                opp,
+                "factor_validation",
+                &reason,
+                &snapshot,
+            );
+            return Err(Self::reject("factor_validation", reason));
+        }
+
+        // Resolve the execution-time factor decision bundle from the current
+        // published snapshot (safety factors act on the freshest information).
+        let factor_context = Self::build_factor_context(&published, opp);
+
+        // Merge detection- and execution-time factor traces for the audit.
+        let mut applied = scored.applied_factors.to_vec();
+        applied.extend(factor_context.applied_factors.iter().cloned());
+        snapshot = snapshot.with_applied_control_factors(publication_id, &applied);
+
         let probability = build_probability_input(scored);
         let risk_decision = self.risk_engine.pre_trade_check_core(
             opp,
             &probability,
             self.risk_metrics.as_ref(),
+            Some(&factor_context),
             ReportMode::ShortCircuit,
         );
 
@@ -245,6 +302,11 @@ impl<R: TradeRepository + Send + Sync + 'static> ExecutionPipeline<R> {
             let reason = risk_decision
                 .denial_reason
                 .unwrap_or_else(|| "risk denied".into());
+            if reason.starts_with("MarketAnomalyBlock")
+                || reason.starts_with("ReconciliationMaintenance")
+            {
+                self.metrics.control_factor_hard_rejects.inc();
+            }
             self.audit_writer
                 .write_rejection(execution_id, opp, "risk", &reason, &snapshot);
             return Err(Self::reject("risk", reason));
@@ -276,7 +338,167 @@ impl<R: TradeRepository + Send + Sync + 'static> ExecutionPipeline<R> {
             approved_size_usd = %approved_size,
         );
 
+        // Shadow consumption: record what the Shadow publication would do versus
+        // this baseline. Never affects the real order path.
+        self.record_shadow(&published, scored, opp, approved_size);
+
         Ok((approved_size, snapshot))
+    }
+
+    /// Load the snapshot of the token actually being bought.
+    fn traded_book(
+        &self,
+        scored: &ScoredOpportunity,
+        opp: &Opportunity,
+    ) -> Option<Arc<BookSnapshot>> {
+        let token: &TokenId = if opp.meta.predicted_yes {
+            &scored.token_yes
+        } else {
+            &scored.token_no
+        };
+        self.validator.book_store().load(token)
+    }
+
+    /// Execution-quality dimensions for the traded token from the live book.
+    fn execution_quality_dims(
+        &self,
+        scored: &ScoredOpportunity,
+        opp: &Opportunity,
+    ) -> Option<ExecutionQualityDimensions> {
+        let book = self.traded_book(scored, opp)?;
+        let now_ms = u64::try_from(Utc::now().timestamp_millis()).unwrap_or(0);
+        Some(execution_quality_dimensions(
+            opp.category,
+            opp.meta.price_zone,
+            opp.staleness,
+            &book,
+            now_ms,
+        ))
+    }
+
+    /// Returns a rejection reason when a published `ExecutionQualityFactor` is
+    /// stricter than the live book's depth/slippage; `None` otherwise.
+    fn execution_quality_violation(
+        &self,
+        published: &ControlFactorSnapshot,
+        scored: &ScoredOpportunity,
+        opp: &Opportunity,
+        validation: &ValidationResult,
+    ) -> Option<String> {
+        published.publication_id.as_ref()?;
+        let dims = self.execution_quality_dims(scored, opp)?;
+        let found = published.execution_quality.lookup(&dims)?;
+        let payload = &found.payload;
+
+        if let Some(max_depth_usage) = payload.max_depth_usage_pct {
+            let used_fraction = opp.depth_used_pct / Decimal::from(100);
+            if used_fraction > max_depth_usage {
+                return Some(format!(
+                    "execution-quality depth usage {used_fraction} exceeds factor cap {max_depth_usage}"
+                ));
+            }
+        }
+
+        let effective_limit = effective_slippage_limit_bps(
+            self.validator.max_slippage_bps(),
+            payload.slippage_bps_addon,
+        );
+        if effective_limit < Decimal::ZERO {
+            return Some(
+                "execution-quality slippage addon leaves no admissible slippage".to_owned(),
+            );
+        }
+        if validation.slippage_bps.inner() > effective_limit {
+            return Some(format!(
+                "slippage {} exceeds execution-quality tightened limit {effective_limit} bps",
+                validation.slippage_bps.inner()
+            ));
+        }
+        None
+    }
+
+    /// Resolve the execution-time factor decision bundle from the published snapshot.
+    fn build_factor_context(
+        published: &ControlFactorSnapshot,
+        opp: &Opportunity,
+    ) -> FactorDecisionContext {
+        let Some(publication_id) = published.publication_id.clone() else {
+            return FactorDecisionContext::neutral();
+        };
+
+        let reconciliation_health = published.reconciliation_health.decision(&publication_id);
+        let market_anomaly =
+            published
+                .market_anomalies
+                .decision(&publication_id, &opp.market_id, &opp.event_id);
+        let portfolio_risk = published
+            .portfolio_risk
+            .decision(&publication_id, opp.category);
+
+        let bucket_dims = BucketRiskDimensions::coarse(
+            opp.category,
+            opp.meta.price_zone,
+            opp.meta.duration_bucket,
+        );
+        let bucket = published.bucket_risk.lookup(&bucket_dims);
+        let bucket_size_multiplier =
+            bucket.map_or(Decimal::ONE, |found| found.payload.size_multiplier);
+
+        let mut applied: Vec<AppliedControlFactor> = Vec::new();
+        if let Some(source) = reconciliation_health.source.clone() {
+            applied.push(source);
+        }
+        if let Some(source) = market_anomaly.source.clone() {
+            applied.push(source);
+        }
+        if let Some(source) = portfolio_risk.source.clone() {
+            applied.push(source);
+        }
+
+        FactorDecisionContext {
+            publication_id: Some(publication_id),
+            reconciliation_health,
+            market_anomaly,
+            portfolio_risk,
+            bucket_size_multiplier,
+            applied_factors: applied,
+        }
+    }
+
+    /// Enqueue a shadow decision comparing the Shadow publication to the
+    /// published baseline. Best-effort; failures never affect the live order.
+    fn record_shadow(
+        &self,
+        published: &ControlFactorSnapshot,
+        scored: &ScoredOpportunity,
+        opp: &Opportunity,
+        baseline_size: Usd,
+    ) {
+        let Some(writer) = &self.shadow_writer else {
+            return;
+        };
+        let shadow = self.factors.shadow();
+        if shadow.publication_id.is_none() {
+            return;
+        }
+        let Some(eq_dims) = self.execution_quality_dims(scored, opp) else {
+            return;
+        };
+        let bucket_dims = BucketRiskDimensions::coarse(
+            opp.category,
+            opp.meta.price_zone,
+            opp.meta.duration_bucket,
+        );
+        if let Some(decision) = ShadowEvaluator::evaluate(
+            published,
+            &shadow,
+            opp,
+            &bucket_dims,
+            &eq_dims,
+            baseline_size,
+        ) {
+            writer.record(decision);
+        }
     }
 
     async fn persist_dispatch_plan(

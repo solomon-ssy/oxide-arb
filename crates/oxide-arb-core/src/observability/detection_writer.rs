@@ -20,6 +20,10 @@ impl DetectionWriter {
 
     pub fn write(&self, scored: &ScoredOpportunity) {
         let opp = scored.opportunity.as_ref();
+        let publication_id = scored
+            .applied_factors
+            .first()
+            .map(|factor| factor.publication_id.clone());
         let snapshot = ScoredOpportunitySnapshot::from_opportunity(opp)
             .with_score_components(
                 scored.fill_probability,
@@ -34,7 +38,7 @@ impl DetectionWriter {
                 scored.book_yes_version,
                 scored.book_no_version,
             )
-            .with_known_empty_factor_trace();
+            .with_applied_control_factors(publication_id, &scored.applied_factors);
         let mut row = OpportunityDetectionRow::from(&snapshot);
         let now_ms = Utc::now().timestamp_millis();
         row.ingestion_time = now_ms;

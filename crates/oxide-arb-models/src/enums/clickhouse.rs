@@ -213,6 +213,7 @@ pub enum ChOpportunityAuditStage {
     Missed = 6,
     Failed = 7,
     Settled = 8,
+    FactorValidationRejected = 9,
 }
 
 impl From<OpportunityAuditStage> for ChOpportunityAuditStage {
@@ -220,6 +221,7 @@ impl From<OpportunityAuditStage> for ChOpportunityAuditStage {
         match value {
             OpportunityAuditStage::Detected => Self::Detected,
             OpportunityAuditStage::ValidationRejected => Self::ValidationRejected,
+            OpportunityAuditStage::FactorValidationRejected => Self::FactorValidationRejected,
             OpportunityAuditStage::RiskRejected => Self::RiskRejected,
             OpportunityAuditStage::SizingRejected => Self::SizingRejected,
             OpportunityAuditStage::Filled => Self::Filled,
@@ -320,6 +322,7 @@ pub enum ChRejectionStage {
     Risk = 2,
     Sizing = 3,
     SubmitPersist = 4,
+    FactorValidation = 5,
     Other = 127,
 }
 
@@ -331,6 +334,7 @@ impl ChRejectionStage {
             "risk" => Self::Risk,
             "sizing" => Self::Sizing,
             "submit_persist" => Self::SubmitPersist,
+            "factor_validation" => Self::FactorValidation,
             _ => Self::Other,
         }
     }

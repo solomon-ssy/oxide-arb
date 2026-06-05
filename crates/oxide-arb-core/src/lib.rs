@@ -8,6 +8,7 @@
 
 pub mod app;
 pub mod bridge;
+pub mod control;
 pub mod detection;
 pub mod execution;
 pub mod exposure;

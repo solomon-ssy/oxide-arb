@@ -228,12 +228,13 @@ impl MarketAnomalyPayload {
 #[cfg(test)]
 mod tests {
     use super::FactorPayload;
+    use crate::domain::{BucketRiskPayload, PortfolioRiskPayload};
     use oxide_arb_error::control::PayloadSafetyError;
     use rust_decimal_macros::dec;
 
     #[test]
     fn rejects_risk_expanding_multiplier() {
-        let payload = FactorPayload::BucketRisk(super::BucketRiskPayload {
+        let payload = FactorPayload::BucketRisk(BucketRiskPayload {
             resolution_haircut_factor: dec!(1.1),
             size_multiplier: dec!(1),
             min_edge_bps_addon: dec!(0),
@@ -250,7 +251,7 @@ mod tests {
 
     #[test]
     fn accepts_tightening_bucket_payload() {
-        let payload = FactorPayload::BucketRisk(super::BucketRiskPayload {
+        let payload = FactorPayload::BucketRisk(BucketRiskPayload {
             resolution_haircut_factor: dec!(0.9),
             size_multiplier: dec!(0.8),
             min_edge_bps_addon: dec!(25),
@@ -266,7 +267,7 @@ mod tests {
         addon: rust_decimal::Decimal,
         block: bool,
     ) -> FactorPayload {
-        FactorPayload::BucketRisk(super::BucketRiskPayload {
+        FactorPayload::BucketRisk(BucketRiskPayload {
             resolution_haircut_factor: haircut,
             size_multiplier: size,
             min_edge_bps_addon: addon,
@@ -296,14 +297,14 @@ mod tests {
     #[test]
     fn relaxes_handles_optional_caps() {
         // max_open_positions: None (unbounded) relaxes a finite cap.
-        let prior = FactorPayload::PortfolioRisk(super::PortfolioRiskPayload {
+        let prior = FactorPayload::PortfolioRisk(PortfolioRiskPayload {
             global_size_multiplier: dec!(0.5),
             category_size_multiplier: None,
             daily_budget_multiplier: dec!(0.5),
             max_open_positions: Some(5),
             kelly_fraction_multiplier: dec!(0.5),
         });
-        let current = FactorPayload::PortfolioRisk(super::PortfolioRiskPayload {
+        let current = FactorPayload::PortfolioRisk(PortfolioRiskPayload {
             global_size_multiplier: dec!(0.5),
             category_size_multiplier: None,
             daily_budget_multiplier: dec!(0.5),
@@ -317,7 +318,7 @@ mod tests {
     #[test]
     fn relaxes_is_false_across_families() {
         let prior = bucket(dec!(0.5), dec!(0.5), dec!(20), true);
-        let other = FactorPayload::PortfolioRisk(super::PortfolioRiskPayload {
+        let other = FactorPayload::PortfolioRisk(PortfolioRiskPayload {
             global_size_multiplier: dec!(1),
             category_size_multiplier: None,
             daily_budget_multiplier: dec!(1),

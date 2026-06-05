@@ -9,6 +9,10 @@ use oxide_arb_models::{
     config::RiskConfig,
     domain::{
         calibration::{BucketKey, CalibrationSnapshot},
+        control_factor::{
+            AppliedControlFactor, FactorDecisionContext, MarketAnomalyDecision,
+            ReconciliationHealthDecision,
+        },
         opportunity::{EndgameMeta, Opportunity},
         position::PositionInfo,
         risk::ProbabilityInput,
@@ -16,9 +20,12 @@ use oxide_arb_models::{
     enums::{
         calibration::{DurationBucket, PriceZone},
         common::{MarketCategory, Side, StalenessLevel},
+        control_factor::ControlFactorType,
         opportunity::PayoutModel,
     },
-    types::{Bps, EventId, MarketId, OpportunityId, Price, Shares, TokenId, Usd},
+    types::{
+        Bps, EventId, FactorPublicationId, MarketId, OpportunityId, Price, Shares, TokenId, Usd,
+    },
 };
 use oxide_arb_risk::{
     builder::RiskEngineBuilder,
@@ -26,8 +33,12 @@ use oxide_arb_risk::{
     context::PreTradeContext,
     pipeline::{
         RiskCheck, build_default_pipeline,
-        checks::{BlacklistCheck, CircuitBreakerCheck, ManualHaltCheck, TokenBlacklistCheck},
+        checks::{
+            BlacklistCheck, CircuitBreakerCheck, ManualHaltCheck, MarketAnomalyBlockCheck,
+            ReconciliationMaintenanceCheck, TokenBlacklistCheck,
+        },
     },
+    sizing::MultiConstraintSizer,
     snapshot::{DailyAccountingSnapshot, RiskSnapshot},
     traits::{RiskMetrics, RiskMetricsSnapshot},
     types::{PipelineReport, ReportMode, RiskCheckId, RiskCheckKind, RiskCheckResult},
@@ -64,6 +75,7 @@ impl TestFrame {
                 metrics_age_secs: 0,
                 ..RiskMetricsSnapshot::zeroed()
             },
+            factor_context: None,
             now: Utc::now(),
         }
     }
@@ -205,7 +217,8 @@ async fn pipeline_check_order_golden_test() {
     let frame = default_frame();
     let prob = frame.ctx().probability;
 
-    let decision = engine.pre_trade_check_core(&frame.opp, &prob, &metrics, ReportMode::FullReport);
+    let decision =
+        engine.pre_trade_check_core(&frame.opp, &prob, &metrics, None, ReportMode::FullReport);
 
     let check_ids: Vec<RiskCheckId> = decision.checks().iter().map(|r| r.check_id).collect();
 
@@ -214,6 +227,8 @@ async fn pipeline_check_order_golden_test() {
         RiskCheckId::CircuitBreaker,
         RiskCheckId::BlacklistTradingPath,
         RiskCheckId::TokenBlacklist,
+        RiskCheckId::MarketAnomalyBlock,
+        RiskCheckId::ReconciliationMaintenance,
         RiskCheckId::MetricsFreshness,
         RiskCheckId::MinDepth,
         RiskCheckId::MaxDepthUsage,
@@ -240,8 +255,8 @@ async fn pipeline_check_order_golden_test() {
 
     assert_eq!(
         check_ids.len(),
-        26,
-        "expected exactly 26 checks, got {}",
+        28,
+        "expected exactly 28 checks, got {}",
         check_ids.len()
     );
     assert_eq!(check_ids, expected, "pipeline check order mismatch");
@@ -303,14 +318,16 @@ impl TestRiskPipeline {
 #[test]
 fn static_pipeline_check_order_matches_golden() {
     let pipeline = build_default_pipeline(&RiskConfig::default());
-    assert_eq!(pipeline.check_order().len(), 26);
+    assert_eq!(pipeline.check_order().len(), 28);
 }
 
 #[test]
 fn metrics_split_index_matches_check_order() {
     let pipeline = build_default_pipeline(&RiskConfig::default());
 
-    assert_eq!(pipeline.metrics_split_index(), 4);
+    // Six phase-1 gates now precede MetricsFreshness: halt, circuit breaker,
+    // blacklist, token blacklist, market-anomaly block, reconciliation maintenance.
+    assert_eq!(pipeline.metrics_split_index(), 6);
 
     assert!(!ManualHaltCheck.requires_metrics());
     assert!(!CircuitBreakerCheck.requires_metrics());
@@ -324,13 +341,13 @@ fn metrics_split_index_matches_check_order() {
         assert_eq!(*id, *expected_id);
     }
 
-    for (id, needs_metrics) in profile.iter().take(4) {
+    for (id, needs_metrics) in profile.iter().take(6) {
         assert!(
             !needs_metrics,
-            "{id} must not require live metrics (phase-1 halt/CB/blacklist)"
+            "{id} must not require live metrics (phase-1 halt/CB/blacklist/factor gates)"
         );
     }
-    for (id, needs_metrics) in profile.iter().skip(4) {
+    for (id, needs_metrics) in profile.iter().skip(6) {
         if *id == RiskCheckId::FeeSpend {
             assert!(
                 !needs_metrics,
@@ -432,5 +449,120 @@ fn full_report_evaluates_all_checks() {
 fn static_pipeline_has_fixed_checks() {
     let pipeline = build_default_pipeline(&RiskConfig::default());
     assert!(!pipeline.is_empty());
-    assert_eq!(pipeline.len(), 26);
+    assert_eq!(pipeline.len(), 28);
+}
+
+// ── Control-factor named gates + sizer caps (Phase 5.6) ────────────────────
+
+fn applied(factor_type: ControlFactorType) -> AppliedControlFactor {
+    AppliedControlFactor::new(
+        oxide_arb_models::types::ControlFactorId::new_v7(),
+        factor_type,
+        FactorPublicationId::new_v7(),
+        dec!(1),
+        dec!(0.5),
+        "test",
+    )
+}
+
+fn ctx_with_factors<'a>(
+    frame: &'a TestFrame,
+    factor_context: &'a FactorDecisionContext,
+) -> PreTradeContext<'a> {
+    PreTradeContext {
+        opportunity: &frame.opp,
+        probability: frame.ctx().probability,
+        snap: &frame.snap,
+        metrics: RiskMetricsSnapshot::zeroed(),
+        factor_context: Some(factor_context),
+        now: Utc::now(),
+    }
+}
+
+#[test]
+fn market_anomaly_block_check_is_named_hard_reject() {
+    let frame = default_frame();
+    let factor_context = FactorDecisionContext {
+        market_anomaly: MarketAnomalyDecision {
+            block_market: true,
+            block_event: false,
+            reason_code: Some("oracle_mismatch".into()),
+            source: Some(applied(ControlFactorType::MarketAnomaly)),
+        },
+        ..FactorDecisionContext::neutral()
+    };
+    let ctx = ctx_with_factors(&frame, &factor_context);
+    let result = MarketAnomalyBlockCheck.evaluate(&ctx);
+    assert!(!result.passed);
+    assert_eq!(result.check_id, RiskCheckId::MarketAnomalyBlock);
+    assert_eq!(result.detail.as_deref(), Some("oracle_mismatch"));
+
+    // Neutral context passes.
+    let neutral = FactorDecisionContext::neutral();
+    let ctx = ctx_with_factors(&frame, &neutral);
+    assert!(MarketAnomalyBlockCheck.evaluate(&ctx).passed);
+}
+
+#[test]
+fn reconciliation_maintenance_check_is_named_hard_reject() {
+    let frame = default_frame();
+    let factor_context = FactorDecisionContext {
+        reconciliation_health: ReconciliationHealthDecision {
+            force_maintenance_mode: true,
+            size_multiplier: dec!(0),
+            require_manual_ack: true,
+            source: Some(applied(ControlFactorType::ReconciliationHealth)),
+        },
+        ..FactorDecisionContext::neutral()
+    };
+    let ctx = ctx_with_factors(&frame, &factor_context);
+    let result = ReconciliationMaintenanceCheck.evaluate(&ctx);
+    assert!(!result.passed);
+    assert_eq!(result.check_id, RiskCheckId::ReconciliationMaintenance);
+}
+
+#[test]
+fn sizer_emits_factor_bucket_size_cap_as_explicit_constraint() {
+    let frame = default_frame();
+    let factor_context = FactorDecisionContext {
+        bucket_size_multiplier: dec!(0.5),
+        ..FactorDecisionContext::neutral()
+    };
+    let ctx = ctx_with_factors(&frame, &factor_context);
+    let sizer = MultiConstraintSizer::new(&RiskConfig::default());
+    let result = sizer.size(&ctx, Usd::new(dec!(5000)), dec!(1));
+
+    // The factor cap is an explicit, auditable constraint (never folded into
+    // bankroll) and never exceeds any base constraint.
+    let cap = result
+        .breakdown
+        .constraints
+        .iter()
+        .find(|constraint| constraint.name == "factor_bucket_size_cap")
+        .expect("factor_bucket_size_cap present in breakdown");
+    let min_base = result
+        .breakdown
+        .constraints
+        .iter()
+        .filter(|constraint| !constraint.name.starts_with("factor_"))
+        .map(|constraint| constraint.max_usd)
+        .min_by(|a, b| a.inner().cmp(&b.inner()))
+        .expect("at least one base constraint");
+    assert!(cap.max_usd.inner() <= min_base.inner());
+}
+
+#[test]
+fn sizer_omits_factor_caps_when_neutral() {
+    let frame = default_frame();
+    let neutral = FactorDecisionContext::neutral();
+    let ctx = ctx_with_factors(&frame, &neutral);
+    let sizer = MultiConstraintSizer::new(&RiskConfig::default());
+    let result = sizer.size(&ctx, Usd::new(dec!(5000)), dec!(1));
+    let names: Vec<&str> = result
+        .breakdown
+        .constraints
+        .iter()
+        .map(|constraint| constraint.name)
+        .collect();
+    assert!(!names.iter().any(|name| name.starts_with("factor_")));
 }

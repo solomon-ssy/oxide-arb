@@ -138,7 +138,85 @@ impl RiskCheck for TokenBlacklistCheck {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// #5 MetricsFreshness
+// #5 MarketAnomalyBlock (control factor)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Hard-rejects when a published `MarketAnomalyFactor` blocks this market/event.
+///
+/// Reads only the execution-time [`FactorDecisionContext`]; neutral (passes)
+/// when no publication is active. Surfaces as a named denial, not an anonymous
+/// string.
+pub struct MarketAnomalyBlockCheck;
+
+impl RiskCheck for MarketAnomalyBlockCheck {
+    fn requires_metrics(&self) -> bool {
+        false
+    }
+
+    fn id(&self) -> RiskCheckId {
+        RiskCheckId::MarketAnomalyBlock
+    }
+    fn kind(&self) -> RiskCheckKind {
+        RiskCheckKind::Gate
+    }
+    fn evaluate(&self, ctx: &PreTradeContext<'_>) -> RiskCheckResult {
+        let Some(factor_context) = ctx.factor_context() else {
+            return RiskCheckResult::passed(RiskCheckId::MarketAnomalyBlock);
+        };
+        let anomaly = &factor_context.market_anomaly;
+        if anomaly.is_blocking() {
+            let detail = anomaly
+                .reason_code
+                .clone()
+                .unwrap_or_else(|| "market anomaly block".into());
+            return RiskCheckResult::failed(
+                RiskCheckId::MarketAnomalyBlock,
+                detail,
+                "no active anomaly block".into(),
+                "blocked".into(),
+            );
+        }
+        RiskCheckResult::passed(RiskCheckId::MarketAnomalyBlock)
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// #6 ReconciliationMaintenance (control factor)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Hard-rejects when a published `ReconciliationHealthFactor` forces maintenance
+/// mode. Reads only the execution-time [`FactorDecisionContext`].
+pub struct ReconciliationMaintenanceCheck;
+
+impl RiskCheck for ReconciliationMaintenanceCheck {
+    fn requires_metrics(&self) -> bool {
+        false
+    }
+
+    fn id(&self) -> RiskCheckId {
+        RiskCheckId::ReconciliationMaintenance
+    }
+    fn kind(&self) -> RiskCheckKind {
+        RiskCheckKind::Gate
+    }
+    fn evaluate(&self, ctx: &PreTradeContext<'_>) -> RiskCheckResult {
+        let Some(factor_context) = ctx.factor_context() else {
+            return RiskCheckResult::passed(RiskCheckId::ReconciliationMaintenance);
+        };
+        if factor_context.reconciliation_health.force_maintenance_mode {
+            return RiskCheckResult::failed(
+                RiskCheckId::ReconciliationMaintenance,
+                "reconciliation health forced maintenance mode".into(),
+                "trading healthy".into(),
+                "maintenance".into(),
+            );
+        }
+        RiskCheckResult::passed(RiskCheckId::ReconciliationMaintenance)
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// #7 MetricsFreshness
 // ═══════════════════════════════════════════════════════════════════════════════
 
 pub struct MetricsFreshnessCheck {

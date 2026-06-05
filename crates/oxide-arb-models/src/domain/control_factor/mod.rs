@@ -3,6 +3,7 @@
 mod audit;
 mod evidence;
 mod lifecycle;
+mod live;
 mod materialization;
 mod payload;
 mod persistence;
@@ -13,6 +14,7 @@ mod value;
 pub use audit::*;
 pub use evidence::*;
 pub use lifecycle::FactorLifecycle;
+pub use live::*;
 pub use materialization::*;
 pub use payload::*;
 pub use persistence::*;

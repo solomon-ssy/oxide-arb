@@ -87,20 +87,3 @@ impl ControlFactorPublication {
         Ok(())
     }
 }
-
-/// Immutable in-memory control-factor snapshot.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ControlFactorSnapshot {
-    pub publication: ControlFactorPublication,
-    pub factors: Vec<ControlFactorValue>,
-    pub loaded_at: DateTime<Utc>,
-    pub schema_version: u32,
-}
-
-impl ControlFactorSnapshot {
-    #[must_use]
-    pub fn is_expired_at(&self, now: DateTime<Utc>) -> bool {
-        self.publication.expires_at <= now
-            || self.factors.iter().any(|factor| factor.expires_at <= now)
-    }
-}

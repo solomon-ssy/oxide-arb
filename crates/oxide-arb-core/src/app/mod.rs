@@ -17,6 +17,10 @@ use crate::{
         CoreOpportunityPipeline, potential_loss_store::CorePotentialLossStore,
         risk_metrics::CoreRiskMetrics, trading_gate::TradingGate,
     },
+    control::{
+        ControlFactorRegistry, factor_refresher::FactorRefresher, factor_shadow::ShadowWriterTask,
+        factor_snapshot::FactorSnapshotStore,
+    },
     detection::{
         coalescer::Coalescer,
         funnel::Funnel,
@@ -167,6 +171,17 @@ pub struct TradingBundle {
     pub ws_manager: Arc<ClobWsManager>,
 }
 
+/// Live control-factor subsystem (Phase 5.6): snapshot store, refresher, and
+/// the shadow-decision writer drain task.
+pub struct ControlFactorBundle {
+    pub store: Arc<FactorSnapshotStore>,
+    pub refresher: Arc<FactorRefresher>,
+    /// Governance registry wired to the refresher notify handle (publish/rollback
+    /// wake the snapshot reload without waiting for the periodic poll).
+    pub registry: Arc<ControlFactorRegistry>,
+    pub shadow_writer_task: Mutex<Option<ShadowWriterTask>>,
+}
+
 /// Market settlement subsystem.
 pub struct SettlementBundle {
     pub service: Arc<MarketSettlementService>,
@@ -191,6 +206,7 @@ pub struct AppContext {
     pub data: DataBundle,
     pub risk: RiskBundle,
     pub trading: TradingBundle,
+    pub control: ControlFactorBundle,
     pub settlement: SettlementBundle,
     pub runtime: RuntimeChannels,
     pub shutdown: CancellationToken,
@@ -386,6 +402,20 @@ impl AppContext {
                     tracing::error!(%error, "funnel exited with error");
                 }
             });
+
+        // Live control-factor refresher (periodic + notify) and shadow writer.
+        let refresher = Arc::clone(&self.control.refresher);
+        self.pending_tasks
+            .push(TaskId::FactorRefresher, move |token| async move {
+                refresher.run(token).await;
+            });
+        let shadow_task = self.control.shadow_writer_task.lock().take();
+        if let Some(shadow_task) = shadow_task {
+            self.pending_tasks
+                .push(TaskId::ShadowDecisionWriter, move |token| async move {
+                    shadow_task.run(token).await;
+                });
+        }
 
         if self.trading.execution.is_some() {
             let runners = self.runtime.execution_runners.lock().take();

@@ -14,6 +14,7 @@ oxide-arb-api        = { workspace = true }
 oxide-arb-storage    = { workspace = true }
 oxide-arb-repository = { workspace = true }
 oxide-arb-algorithm  = { workspace = true }
+oxide-arb-control    = { workspace = true }
 oxide-arb-risk       = { workspace = true }
 
 # ── Async runtime ──────────────────────────────────────────────────

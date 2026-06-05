@@ -9,6 +9,7 @@ use std::fmt::{self, Display, Formatter};
 pub enum OpportunityAuditStage {
     Detected,
     ValidationRejected,
+    FactorValidationRejected,
     RiskRejected,
     SizingRejected,
     Filled,
@@ -23,6 +24,7 @@ impl OpportunityAuditStage {
         match self {
             Self::Detected => "detected",
             Self::ValidationRejected => "validation_rejected",
+            Self::FactorValidationRejected => "factor_validation_rejected",
             Self::RiskRejected => "risk_rejected",
             Self::SizingRejected => "sizing_rejected",
             Self::Filled => "filled",
@@ -37,6 +39,7 @@ impl OpportunityAuditStage {
         match self {
             Self::Detected => 10,
             Self::ValidationRejected => 20,
+            Self::FactorValidationRejected => 25,
             Self::RiskRejected => 30,
             Self::SizingRejected => 40,
             Self::Filled => 70,
@@ -50,6 +53,7 @@ impl OpportunityAuditStage {
     pub fn from_rejection_stage(stage: &str) -> Self {
         match stage {
             "validation" => Self::ValidationRejected,
+            "factor_validation" => Self::FactorValidationRejected,
             "risk" => Self::RiskRejected,
             "sizing" => Self::SizingRejected,
             _ => Self::Detected,

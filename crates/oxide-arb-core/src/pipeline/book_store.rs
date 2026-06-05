@@ -1,5 +1,5 @@
 use super::order_book::OrderBook;
-use crate::observability::metrics_hub::MetricsHub;
+use crate::{observability::metrics_hub::MetricsHub, pipeline::market_registry::MarketRegistry};
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use num_traits::ToPrimitive;
@@ -221,7 +221,7 @@ impl BookStore {
     /// Top-of-book via registry lookup (prefer [`Self::top_of_book_tokens`] on hot path).
     pub fn top_of_book(
         &self,
-        registry: &super::market_registry::MarketRegistry,
+        registry: &MarketRegistry,
         market_id: &MarketId,
         now_ms: u64,
     ) -> Option<TopOfBook> {

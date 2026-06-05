@@ -24,6 +24,7 @@ use oxide_arb_models::{
     types::{ControlFactorId, FactorPublicationId},
 };
 use oxide_arb_repository::traits::{ControlFactorRepository, RuntimeConfigVersionRepository};
+use tokio::sync::Notify;
 
 use crate::governance::publication::{PublicationDraft, PublicationManager};
 
@@ -40,6 +41,9 @@ pub struct PublicationRequest {
 pub struct ControlFactorRegistry {
     repo: Arc<dyn ControlFactorRepository>,
     runtime_config: Arc<dyn RuntimeConfigVersionRepository>,
+    /// Wakes the live snapshot refresher after publication mutations. The notify
+    /// is non-blocking and must never be awaited on the governance hot path.
+    snapshot_refresh_notify: Option<Arc<Notify>>,
 }
 
 impl ControlFactorRegistry {
@@ -51,7 +55,16 @@ impl ControlFactorRegistry {
         Self {
             repo,
             runtime_config,
+            snapshot_refresh_notify: None,
         }
+    }
+
+    /// Attach the live refresher wake handle (typically
+    /// [`FactorRefresher::notify_handle`] in `oxide-arb-core`).
+    #[must_use]
+    pub fn with_snapshot_refresh_notify(mut self, notify: Arc<Notify>) -> Self {
+        self.snapshot_refresh_notify = Some(notify);
+        self
     }
 
     /// Rejects a candidate factor with a reason and chained audit.
@@ -135,7 +148,9 @@ impl ControlFactorRegistry {
             }),
         );
 
-        Ok(self.repo.publish_publication(publication, audit).await?)
+        let outcome = self.repo.publish_publication(publication, audit).await?;
+        self.signal_snapshot_refresh();
+        Ok(outcome)
     }
 
     /// Rolls the active publication back to a known-good target.
@@ -152,10 +167,12 @@ impl ControlFactorRegistry {
             active_publication_id,
             serde_json::json!({ "target_publication_id": target_publication_id }),
         );
-        Ok(self
+        let info = self
             .repo
             .rollback_publication(active_publication_id, target_publication_id, audit)
-            .await?)
+            .await?;
+        self.signal_snapshot_refresh();
+        Ok(info)
     }
 
     /// Sweeps TTL-due factors, writing one chained `FactorExpired` audit each.
@@ -220,6 +237,14 @@ impl ControlFactorRegistry {
             }
         }
         Ok(typed)
+    }
+
+    /// Wake the live refresher so publication changes propagate without waiting
+    /// for the periodic poll fallback.
+    fn signal_snapshot_refresh(&self) {
+        if let Some(notify) = &self.snapshot_refresh_notify {
+            notify.notify_one();
+        }
     }
 }
 

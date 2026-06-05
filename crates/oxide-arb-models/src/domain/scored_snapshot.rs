@@ -176,6 +176,35 @@ impl ScoredOpportunitySnapshot {
         self
     }
 
+    /// Record the control factors actually applied to this decision.
+    ///
+    /// Replaces the empty placeholder so terminal/settlement audit and detection
+    /// rows preserve the publication id, factor ids, and per-factor input/output
+    /// effects rather than hiding them in logs.
+    #[must_use]
+    pub fn with_applied_control_factors(
+        mut self,
+        publication_id: Option<FactorPublicationId>,
+        applied: &[crate::domain::control_factor::AppliedControlFactor],
+    ) -> Self {
+        let factor_ids = applied
+            .iter()
+            .map(|factor| factor.factor_id.as_str().to_owned())
+            .collect();
+        let effects_json = if applied.is_empty() {
+            None
+        } else {
+            serde_json::to_value(applied).ok()
+        };
+        self.factors = Some(AppliedFactorTrace {
+            control_publication_id: publication_id,
+            factor_ids,
+            effects_json,
+        });
+        self.remove_missing(MissingEvidenceField::AppliedFactors);
+        self
+    }
+
     #[must_use]
     pub const fn calibration_bucket_key(&self) -> BucketKey {
         BucketKey {

@@ -7,7 +7,9 @@
 use crate::{snapshot::RiskSnapshot, traits::RiskMetricsSnapshot, types::DrawdownAction};
 use chrono::{DateTime, Utc};
 use oxide_arb_models::{
-    domain::{opportunity::Opportunity, risk::ProbabilityInput},
+    domain::{
+        control_factor::FactorDecisionContext, opportunity::Opportunity, risk::ProbabilityInput,
+    },
     types::Usd,
 };
 use rust_decimal::Decimal;
@@ -72,10 +74,21 @@ pub struct PreTradeContext<'a> {
     pub probability: ProbabilityInput,
     pub snap: &'a RiskSnapshot,
     pub metrics: RiskMetricsSnapshot,
+    /// Execution-time control-factor decision bundle (named safety factors and
+    /// size caps), resolved from the current published snapshot. `None` when no
+    /// publication is active.
+    pub factor_context: Option<&'a FactorDecisionContext>,
     pub now: DateTime<Utc>,
 }
 
-impl PreTradeContext<'_> {
+impl<'a> PreTradeContext<'a> {
+    /// The control-factor decision bundle, or a neutral borrow when absent.
+    #[inline]
+    #[must_use]
+    pub const fn factor_context(&self) -> Option<&'a FactorDecisionContext> {
+        self.factor_context
+    }
+
     #[inline]
     pub const fn manual_halt(&self) -> &ManualHaltGate {
         &self.snap.circuit_breaker.manual_halt
@@ -267,6 +280,7 @@ mod tests {
             probability: make_test_probability(),
             snap: &snap,
             metrics: RiskMetricsSnapshot::zeroed(),
+            factor_context: None,
             now: Utc::now(),
         };
         assert!(ctx.is_market_blacklisted_trading_path().is_none());

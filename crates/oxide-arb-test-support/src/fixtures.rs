@@ -85,6 +85,7 @@ pub fn sample_scored() -> Arc<ScoredOpportunity> {
         urgency_factor: MicroProb::ONE,
         category_weight: MicroProb::ONE,
         staleness_discount: MicroProb::ONE,
+        applied_factors: Arc::from([]),
         trace: Arc::new(LatencyTrace::default()),
     })
 }

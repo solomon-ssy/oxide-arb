@@ -1,8 +1,8 @@
 //! Application composition root — wires subsystems in dependency order.
 
 use super::{
-    AppContext, DataBundle, ExecutionBundle, InfraBundle, RiskBundle, RuntimeChannels,
-    SettlementBundle, TradingBundle, task_registry::PendingTaskQueue,
+    AppContext, ControlFactorBundle, DataBundle, ExecutionBundle, InfraBundle, RiskBundle,
+    RuntimeChannels, SettlementBundle, TradingBundle, task_registry::PendingTaskQueue,
 };
 use crate::{
     app::periodic_services::run_calibration_startup_tick,
@@ -11,6 +11,12 @@ use crate::{
         fee_estimator::CoreFeeEstimator, potential_loss_store::CorePotentialLossStore,
         risk_audit_sink::new_audit_sink, risk_metrics::CoreRiskMetrics,
         risk_persistence::CoreRiskPersistence,
+    },
+    control::{
+        ControlFactorRegistry,
+        factor_refresher::{FactorRefreshConfig, FactorRefresher},
+        factor_shadow::{ShadowDecisionWriter, ShadowWriterTask},
+        factor_snapshot::FactorSnapshotStore,
     },
     detection::{coalescer::Coalescer, funnel::Funnel, scanner::Scanner},
     execution::{
@@ -79,8 +85,8 @@ use oxide_arb_models::{
     domain::{
         DetectionRuntimeConfig, ExecutionRuntimeConfig, NewRuntimeConfigActivation,
         NewRuntimeConfigVersion, OperatorRuntimeConfig, RiskLimitRuntimeConfig,
-        RuntimeConfigDocument, SizingRuntimeConfig, risk::RiskEngineState,
-        settlement::MarketSettlementRequest,
+        RuntimeConfigDocument, SizingRuntimeConfig, control_factor::ControlFactorProvider,
+        risk::RiskEngineState, settlement::MarketSettlementRequest,
     },
     enums::{
         common::ExecutionMode,
@@ -91,15 +97,17 @@ use oxide_arb_models::{
 use oxide_arb_repository::{
     clickhouse::ChTimeseriesRepository,
     postgres::{
-        PgBlacklistPersistenceRepository, PgCalibrationRepository, PgEmergencyRepository,
-        PgEventRepository, PgFactDataRepository, PgMarketRepository, PgPositionRepository,
-        PgPotentialLossRepository, PgReconciliationRepository, PgReportRepository,
-        PgResolutionEventRepository, PgRiskAuditRepository, PgRiskStateRepository,
-        PgRuntimeConfigVersionRepository, PgTradeRepository, risk_fill::PgRiskFillRepository,
+        PgBlacklistPersistenceRepository, PgCalibrationRepository, PgControlFactorRepository,
+        PgEmergencyRepository, PgEventRepository, PgFactDataRepository, PgMarketRepository,
+        PgPositionRepository, PgPotentialLossRepository, PgReconciliationRepository,
+        PgReportRepository, PgResolutionEventRepository, PgRiskAuditRepository,
+        PgRiskStateRepository, PgRuntimeConfigVersionRepository, PgTradeRepository,
+        risk_fill::PgRiskFillRepository,
     },
     traits::{
-        BlacklistPersistenceRepository, CalibrationRepository, PotentialLossRepository,
-        RiskStateRepository, RuntimeConfigVersionRepository,
+        BlacklistPersistenceRepository, CalibrationRepository, ControlFactorRepository,
+        ControlFactorShadowDecisionRepository, PotentialLossRepository, RiskStateRepository,
+        RuntimeConfigVersionRepository,
     },
 };
 use oxide_arb_risk::{
@@ -134,12 +142,13 @@ struct BuildRepos {
     potential_loss: Arc<PgPotentialLossRepository>,
     calibration: Arc<PgCalibrationRepository>,
     fact_data: Arc<PgFactDataRepository>,
-    runtime_config: Arc<PgRuntimeConfigVersionRepository>,
+    runtime_config: Arc<dyn RuntimeConfigVersionRepository>,
     market: Arc<PgMarketRepository>,
     event: Arc<PgEventRepository>,
     trade: Arc<PgTradeRepository>,
     report: Arc<PgReportRepository>,
     position: Arc<PgPositionRepository>,
+    control_factor: Arc<dyn ControlFactorRepository>,
 }
 
 struct BuildInfra {
@@ -153,6 +162,11 @@ struct BuildInfra {
     repos: BuildRepos,
     persistence: PersistenceBundle,
     balance_fact_writer: Arc<BalanceFactWriter>,
+    factor_store: Arc<FactorSnapshotStore>,
+    factor_refresher: Arc<FactorRefresher>,
+    factor_registry: Arc<ControlFactorRegistry>,
+    shadow_writer: ShadowDecisionWriter,
+    shadow_writer_task: Mutex<Option<ShadowWriterTask>>,
 }
 
 struct BuildPersistence {
@@ -172,6 +186,10 @@ struct AssembledInfra {
     risk_decision_audit_rx: Mutex<Option<flume::Receiver<RiskAuditEvent>>>,
     repos: BuildRepos,
     balance_fact_writer: Arc<BalanceFactWriter>,
+    factor_store: Arc<FactorSnapshotStore>,
+    factor_refresher: Arc<FactorRefresher>,
+    factor_registry: Arc<ControlFactorRegistry>,
+    shadow_writer_task: Mutex<Option<ShadowWriterTask>>,
 }
 
 struct AppContextAssembly {
@@ -274,6 +292,11 @@ impl AppContext {
             repos,
             persistence,
             balance_fact_writer,
+            factor_store,
+            factor_refresher,
+            factor_registry,
+            shadow_writer: _shadow_writer,
+            shadow_writer_task,
         } = infra;
         let persistence_handles = BuildPersistence {
             trade_repo: Arc::clone(&persistence.trade_repo),
@@ -297,6 +320,10 @@ impl AppContext {
                 risk_decision_audit_rx,
                 repos,
                 balance_fact_writer,
+                factor_store,
+                factor_refresher,
+                factor_registry,
+                shadow_writer_task,
             },
             clients,
             risk,
@@ -405,6 +432,12 @@ fn assemble_app_context(parts: AppContextAssembly) -> AppContext {
             clob_client: clients.clob_client,
             ws_manager: clients.ws_manager,
         },
+        control: ControlFactorBundle {
+            store: infra.factor_store,
+            refresher: infra.factor_refresher,
+            registry: infra.factor_registry,
+            shadow_writer_task: infra.shadow_writer_task,
+        },
         settlement: SettlementBundle {
             service: settlement_service,
             dedup: settlement_dedup,
@@ -480,15 +513,26 @@ async fn connect_infra(
         potential_loss: Arc::new(PgPotentialLossRepository::new(db.clone())),
         calibration: Arc::new(PgCalibrationRepository::new(db.clone())),
         fact_data: Arc::new(PgFactDataRepository::new(db.clone())),
-        runtime_config: Arc::new(PgRuntimeConfigVersionRepository::new(db.clone())),
+        runtime_config: Arc::new(PgRuntimeConfigVersionRepository::new(db.clone()))
+            as Arc<dyn RuntimeConfigVersionRepository>,
         market: Arc::new(PgMarketRepository::new(db.clone())),
         event: Arc::new(PgEventRepository::new(db.clone())),
         trade: Arc::new(PgTradeRepository::new(db.clone())),
         report: Arc::new(PgReportRepository::new(db.clone())),
-        position: Arc::new(PgPositionRepository::new(db)),
+        position: Arc::new(PgPositionRepository::new(db.clone())),
+        control_factor: Arc::new(PgControlFactorRepository::new(db)),
     };
     ensure_runtime_config_activation(settings, repos.runtime_config.as_ref()).await?;
     let balance_fact_writer = Arc::new(BalanceFactWriter::new(Arc::clone(&repos.fact_data)));
+
+    let control = wire_control_factors(settings, &repos, &metrics).await?;
+    let ControlFactorWiring {
+        factor_store,
+        factor_refresher,
+        factor_registry,
+        shadow_writer,
+        shadow_writer_task,
+    } = control;
 
     let (persistence, persistence_workers) = PersistenceBundle::wire(PersistenceWireInput {
         metrics: Arc::clone(&metrics),
@@ -509,9 +553,60 @@ async fn connect_infra(
             repos,
             persistence,
             balance_fact_writer,
+            factor_store,
+            factor_refresher,
+            factor_registry,
+            shadow_writer,
+            shadow_writer_task,
         },
         persistence_workers,
     ))
+}
+
+/// Constructed live control-factor wiring returned by [`wire_control_factors`].
+struct ControlFactorWiring {
+    factor_store: Arc<FactorSnapshotStore>,
+    factor_refresher: Arc<FactorRefresher>,
+    factor_registry: Arc<ControlFactorRegistry>,
+    shadow_writer: ShadowDecisionWriter,
+    shadow_writer_task: Mutex<Option<ShadowWriterTask>>,
+}
+
+/// Build the live control-factor store, refresher, and shadow writer, then run
+/// the startup snapshot load (fail closed in Live when a critical safety factor
+/// is lost).
+async fn wire_control_factors(
+    settings: &Settings,
+    repos: &BuildRepos,
+    metrics: &Arc<MetricsHub>,
+) -> OxideResult<ControlFactorWiring> {
+    let factor_store = Arc::new(FactorSnapshotStore::new(chrono::Utc::now()));
+    let shadow_repo_concrete = Arc::clone(&repos.fact_data);
+    let shadow_repo: Arc<dyn ControlFactorShadowDecisionRepository> = shadow_repo_concrete;
+    let (shadow_writer, shadow_writer_task) =
+        ShadowDecisionWriter::new(shadow_repo, Arc::clone(metrics));
+    let mode = settings.execution.execution_mode;
+    let factor_refresher = Arc::new(FactorRefresher::new(
+        Arc::clone(&repos.control_factor),
+        Arc::clone(&factor_store),
+        Arc::clone(metrics),
+        FactorRefreshConfig::for_live(mode == ExecutionMode::Live),
+    ));
+    let factor_registry = Arc::new(
+        ControlFactorRegistry::new(
+            Arc::clone(&repos.control_factor),
+            Arc::clone(&repos.runtime_config),
+        )
+        .with_snapshot_refresh_notify(factor_refresher.notify_handle()),
+    );
+    factor_refresher.startup().await?;
+    Ok(ControlFactorWiring {
+        factor_store,
+        factor_refresher,
+        factor_registry,
+        shadow_writer,
+        shadow_writer_task: Mutex::new(Some(shadow_writer_task)),
+    })
 }
 
 async fn ensure_runtime_config_activation(
@@ -910,10 +1005,13 @@ async fn wire_detection(
     let cooldown = InMemoryEmissionCooldown::new(&settings.detection.endgame.emission_cooldown);
     let min_profit = MicroUsd::try_from_decimal(settings.detection.min_profit_threshold_usd)
         .unwrap_or(MicroUsd::ZERO);
+    let factor_store: Arc<FactorSnapshotStore> = Arc::clone(&infra.factor_store);
+    let factor_provider: Arc<dyn ControlFactorProvider> = factor_store;
     let opportunity_pipeline: Arc<CoreOpportunityPipeline> = Arc::new(OpportunityPipeline::new(
         detector,
         scorer,
         cooldown,
+        factor_provider,
         min_profit,
         &settings.detection.endgame.scorer,
     ));
@@ -1039,6 +1137,8 @@ fn wire_execution_loop(
         audit_writer: Arc::clone(&infra.persistence.audit_writer),
         relay_notify: Arc::clone(&relay_notify),
         metrics_state: Arc::clone(&risk.metrics_state),
+        factors: Arc::clone(&infra.factor_store),
+        shadow_writer: Some(infra.shadow_writer.clone()),
     }));
 
     let inflight = Arc::new(AtomicU32::new(0));

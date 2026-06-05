@@ -173,6 +173,10 @@ pub enum RiskCheckId {
     CircuitBreaker,
     BlacklistTradingPath,
     TokenBlacklist,
+    /// Control-factor `MarketAnomalyFactor` block on this market/event.
+    MarketAnomalyBlock,
+    /// Control-factor `ReconciliationHealthFactor` forced maintenance mode.
+    ReconciliationMaintenance,
     MetricsFreshness,
     MinDepth,
     MaxDepthUsage,

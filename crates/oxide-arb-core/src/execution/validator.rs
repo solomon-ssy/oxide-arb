@@ -38,6 +38,21 @@ impl Validator {
         }
     }
 
+    /// Configured maximum slippage (bps); execution-quality factors may only
+    /// tighten this, never loosen it.
+    #[must_use]
+    #[inline]
+    pub const fn max_slippage_bps(&self) -> rust_decimal::Decimal {
+        self.max_slippage_bps
+    }
+
+    /// Shared orderbook store (used to classify execution-quality dimensions).
+    #[must_use]
+    #[inline]
+    pub const fn book_store(&self) -> &Arc<BookStore> {
+        &self.book_store
+    }
+
     #[inline]
     pub fn validate(
         &self,

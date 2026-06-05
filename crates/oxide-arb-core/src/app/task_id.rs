@@ -31,6 +31,10 @@ pub enum TaskId {
     HealthChecker,
     RiskMetricsRefresh,
 
+    // ── Control factors (Phase 5.6 live consumption) ──────────────────
+    FactorRefresher,
+    ShadowDecisionWriter,
+
     // ── Detection ─────────────────────────────────────────────────────
     Scanner,
     Funnel,
@@ -68,7 +72,9 @@ impl TaskId {
     pub const fn kind(self) -> TaskKind {
         match self {
             Self::DataPipeline => TaskKind::WsIngress,
-            Self::GammaSync | Self::CalibrationUpdater => TaskKind::CatalogSync,
+            Self::GammaSync | Self::CalibrationUpdater | Self::FactorRefresher => {
+                TaskKind::CatalogSync
+            }
             Self::Coalescer => TaskKind::CacheWorker,
             Self::PotentialLossEscalation
             | Self::LedgerReconciliation
@@ -85,7 +91,8 @@ impl TaskId {
             | Self::TickEventsWriter
             | Self::BookL2Writer
             | Self::BookSnapshotWriter
-            | Self::BookSnapshotPublisher => TaskKind::AnalyticsWriter,
+            | Self::BookSnapshotPublisher
+            | Self::ShadowDecisionWriter => TaskKind::AnalyticsWriter,
             Self::RiskStatePersist | Self::RiskStateDebouncer => TaskKind::PositionPersistence,
         }
     }

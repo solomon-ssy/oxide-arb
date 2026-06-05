@@ -18,6 +18,7 @@ use oxide_arb_core::{
     bridge::{
         CoreOpportunityPipeline, fee_estimator::CoreFeeEstimator, risk_metrics::CoreRiskMetrics,
     },
+    control::factor_snapshot::FactorSnapshotStore,
     detection::{coalescer::Coalescer, funnel::Funnel, scanner::Scanner},
     execution::{
         capital_manager::CapitalManager,
@@ -55,6 +56,7 @@ use oxide_arb_models::{
         ProbabilityInput,
         book::{self, BookLevel, BookSnapshot, EndgameBookPair},
         calibration::{BucketKey, CalibrationSnapshot},
+        control_factor::ControlFactorProvider,
         latency::LatencyTrace,
         market::MarketRegistryInfo,
         opportunity::{EndgameMeta, Opportunity},
@@ -158,6 +160,7 @@ fn make_pipeline() -> OpportunityPipeline<ZeroFeeEstimator> {
         detector,
         scorer,
         cooldown,
+        Arc::new(FactorSnapshotStore::new(Utc::now())) as Arc<dyn ControlFactorProvider>,
         MicroUsd::try_from_decimal(dec!(0.01)).unwrap(),
         &scorer_config,
     )
@@ -399,6 +402,7 @@ fn bench_pre_trade_pass(c: &mut Criterion) {
                 black_box(&opp),
                 black_box(&probability),
                 black_box(&metrics),
+                None,
                 ReportMode::ShortCircuit,
             )
         });
@@ -457,6 +461,7 @@ fn bench_pre_trade_fail_short(c: &mut Criterion) {
                 black_box(&opp),
                 black_box(&probability),
                 black_box(&metrics),
+                None,
                 ReportMode::ShortCircuit,
             )
         });
@@ -621,6 +626,7 @@ fn bench_funnel_immediate_dispatch(c: &mut Criterion) {
         staleness_discount: MicroProb::ONE,
         book_yes_version: 1,
         book_no_version: 1,
+        applied_factors: Arc::from([]),
         trace: Arc::new(LatencyTrace::default()),
     });
 
@@ -681,6 +687,7 @@ fn make_core_pipeline() -> CoreOpportunityPipeline {
         detector,
         scorer,
         cooldown,
+        Arc::new(FactorSnapshotStore::new(Utc::now())) as Arc<dyn ControlFactorProvider>,
         MicroUsd::try_from_decimal(dec!(0.01)).unwrap(),
         &scorer_config,
     )
@@ -815,6 +822,7 @@ fn execution_bench_scored() -> ScoredOpportunity {
         staleness_discount: MicroProb::ONE,
         book_yes_version: 1,
         book_no_version: 1,
+        applied_factors: Arc::from([]),
         trace: Arc::new(LatencyTrace::default()),
     }
 }
@@ -956,6 +964,8 @@ fn execution_bench_setup() -> (
             metrics_state: Arc::new(RiskMetricsState::new(Arc::new(ApiHealthTracker::new(
                 std::time::Duration::from_secs(60),
             )))),
+            factors: Arc::new(FactorSnapshotStore::new(Utc::now())),
+            shadow_writer: None,
         });
 
         (pipeline, scored)

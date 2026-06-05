@@ -115,6 +115,17 @@ pub trait ControlFactorRepository: Send + Sync {
         factor_id: &ControlFactorId,
     ) -> Result<Option<ControlFactorValueInfo>, StorageError>;
 
+    /// Batch-loads factor rows for the given ids in one `IN` query.
+    ///
+    /// Used by the live refresher to resolve an active publication's member
+    /// factors without N round trips. The returned set may be smaller than the
+    /// input (missing ids are simply absent); membership/consistency is the
+    /// caller's responsibility via `ControlFactorPublication::validate_for_activation`.
+    async fn load_factors_by_ids(
+        &self,
+        factor_ids: &[ControlFactorId],
+    ) -> Result<Vec<ControlFactorValueInfo>, StorageError>;
+
     async fn list_factors_by_run(
         &self,
         run_id: &MaterializationRunId,
