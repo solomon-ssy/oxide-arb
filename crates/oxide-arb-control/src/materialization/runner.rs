@@ -16,7 +16,7 @@ use oxide_arb_models::{
     enums::control_factor::{
         AuditResourceType, ControlAuditEventType, ControlFactorType, EvidenceStageStatus,
         MaterializationErrorCode, MaterializationOutputPolicy, MaterializationRunStatus,
-        MaterializationStageName, OperatorRole,
+        MaterializationStageName,
     },
     types::MaterializationRunId,
 };
@@ -519,7 +519,7 @@ impl MaterializationRunner {
             let audit = NewControlFactorAuditEvent {
                 event_type: ControlAuditEventType::FactorCreated,
                 actor: manifest.created_by.clone(),
-                actor_role: OperatorRole::Operator,
+                actor_role: "operator".to_owned(),
                 resource_type: AuditResourceType::Factor,
                 resource_id: factor.factor_id.as_str().to_owned(),
                 request_id: manifest.run_id.as_str().to_owned(),

@@ -34,16 +34,26 @@ pub fn expand(args: TokenStream, input: TokenStream) -> Result<TokenStream> {
     let table_fn = format_ident!("__oxide_schema_{lower}_table_name");
     let triggers_fn = format_ident!("__oxide_schema_{lower}_auto_triggers");
     let static_ident = format_ident!("__OXIDE_SCHEMA_{upper}_TABLE_SPEC");
-    let lifecycle = parse_lifecycle(args)?;
+    let (lifecycle, is_audit) = parse_lifecycle(args)?;
 
-    let triggers_body = if has_updated_at {
-        quote! {
-            ::std::vec![crate::schema::trigger::TriggerSpec::updated_at(#table_fn)]
-        }
+    // Auto-registered triggers are derived purely from catalog metadata:
+    // an `UpdatedAt` column ⇒ maintenance trigger; an `audit` lifecycle ⇒
+    // append-only (WORM) guard. No hand-maintained per-table trigger lists.
+    let mut trigger_inits: Vec<TokenStream> = Vec::new();
+    if has_updated_at {
+        trigger_inits.push(quote! {
+            crate::schema::trigger::TriggerSpec::updated_at(#table_fn)
+        });
+    }
+    if is_audit {
+        trigger_inits.push(quote! {
+            crate::schema::trigger::TriggerSpec::append_only(#table_fn)
+        });
+    }
+    let triggers_body = if trigger_inits.is_empty() {
+        quote! { ::std::vec::Vec::new() }
     } else {
-        quote! {
-            ::std::vec::Vec::new()
-        }
+        quote! { ::std::vec![ #(#trigger_inits),* ] }
     };
 
     let expanded = quote! {
@@ -76,9 +86,12 @@ pub fn expand(args: TokenStream, input: TokenStream) -> Result<TokenStream> {
     Ok(expanded)
 }
 
-fn parse_lifecycle(args: TokenStream) -> Result<TokenStream> {
+/// Parse the `lifecycle = "..."` argument into its `TableLifecycle` token and a
+/// flag indicating whether it is the `audit` lifecycle (which drives append-only
+/// WORM trigger registration).
+fn parse_lifecycle(args: TokenStream) -> Result<(TokenStream, bool)> {
     if args.is_empty() {
-        return Ok(quote! { crate::schema::table::TableLifecycle::Core });
+        return Ok((quote! { crate::schema::table::TableLifecycle::Core }, false));
     }
 
     let meta: Meta = syn::parse2(args)?;
@@ -108,13 +121,28 @@ fn parse_lifecycle(args: TokenStream) -> Result<TokenStream> {
     };
 
     match lit.value().as_str() {
-        "core" => Ok(quote! { crate::schema::table::TableLifecycle::Core }),
-        "control" => Ok(quote! { crate::schema::table::TableLifecycle::Control }),
-        "runtime" => Ok(quote! { crate::schema::table::TableLifecycle::Runtime }),
-        "ledger" => Ok(quote! { crate::schema::table::TableLifecycle::Ledger }),
-        "audit" => Ok(quote! { crate::schema::table::TableLifecycle::Audit }),
-        "report" => Ok(quote! { crate::schema::table::TableLifecycle::Report }),
-        "seed_ledger" => Ok(quote! { crate::schema::table::TableLifecycle::SeedLedger }),
+        "core" => Ok((quote! { crate::schema::table::TableLifecycle::Core }, false)),
+        "control" => Ok((
+            quote! { crate::schema::table::TableLifecycle::Control },
+            false,
+        )),
+        "runtime" => Ok((
+            quote! { crate::schema::table::TableLifecycle::Runtime },
+            false,
+        )),
+        "ledger" => Ok((
+            quote! { crate::schema::table::TableLifecycle::Ledger },
+            false,
+        )),
+        "audit" => Ok((quote! { crate::schema::table::TableLifecycle::Audit }, true)),
+        "report" => Ok((
+            quote! { crate::schema::table::TableLifecycle::Report },
+            false,
+        )),
+        "seed_ledger" => Ok((
+            quote! { crate::schema::table::TableLifecycle::SeedLedger },
+            false,
+        )),
         other => Err(Error::new_spanned(
             lit,
             format!("unsupported table lifecycle `{other}`"),

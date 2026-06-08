@@ -15,7 +15,7 @@ use oxide_arb_models::{
     },
     enums::control_factor::{
         AuditResourceType, ControlAuditEventType, ControlFactorType, FactorMaturity, FactorStatus,
-        OperatorRole, PublicationMode, PublicationStatus,
+        PublicationMode, PublicationStatus,
     },
 };
 use oxide_arb_models::{
@@ -1176,7 +1176,7 @@ fn factor_audit(
     NewControlFactorAuditEvent {
         event_type,
         actor: "materializer".into(),
-        actor_role: OperatorRole::Operator,
+        actor_role: "operator".into(),
         resource_type: AuditResourceType::Factor,
         resource_id: factor_id.as_str().to_owned(),
         request_id: request_id.into(),
@@ -1194,7 +1194,7 @@ fn publication_audit(
     NewControlFactorAuditEvent {
         event_type: ControlAuditEventType::PublicationCreated,
         actor: "risk_owner_1".into(),
-        actor_role: OperatorRole::RiskOwner,
+        actor_role: "risk_owner".into(),
         resource_type: AuditResourceType::Publication,
         resource_id: publication_id.as_str().to_owned(),
         request_id: request_id.into(),
@@ -1428,7 +1428,7 @@ async fn runtime_config_governed_activation_links_audit_event() {
     let version_audit = NewControlFactorAuditEvent {
         event_type: ControlAuditEventType::RuntimeConfigVersionCreated,
         actor: "admin_1".into(),
-        actor_role: OperatorRole::Admin,
+        actor_role: "admin".into(),
         resource_type: AuditResourceType::RuntimeConfigVersion,
         resource_id: version_id.as_str().to_owned(),
         request_id: "req-rcv-create".into(),
@@ -1455,7 +1455,7 @@ async fn runtime_config_governed_activation_links_audit_event() {
     let activation_audit = NewControlFactorAuditEvent {
         event_type: ControlAuditEventType::RuntimeConfigActivated,
         actor: "admin_1".into(),
-        actor_role: OperatorRole::Admin,
+        actor_role: "admin".into(),
         resource_type: AuditResourceType::RuntimeConfigVersion,
         resource_id: version_id.as_str().to_owned(),
         request_id: "req-rcv-activate".into(),

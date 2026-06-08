@@ -752,7 +752,7 @@ impl SmokeControlFactorRepository {
             sequence,
             event_type: event.event_type,
             actor: event.actor.as_str(),
-            actor_role: event.actor_role,
+            actor_role: event.actor_role.as_str(),
             resource_type: event.resource_type,
             resource_id: event.resource_id.as_str(),
             request_id: event.request_id.as_str(),
@@ -1027,7 +1027,7 @@ impl ControlFactorRepository for SmokeControlFactorRepository {
             self.append_chained(NewControlFactorAuditEvent {
                 event_type: ControlAuditEventType::FactorExpired,
                 actor: actor.actor.clone(),
-                actor_role: actor.actor_role,
+                actor_role: actor.actor_role.clone(),
                 resource_type: AuditResourceType::Factor,
                 resource_id: factor.factor_id.as_str().to_owned(),
                 request_id: actor.request_id.clone(),

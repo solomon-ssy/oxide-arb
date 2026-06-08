@@ -6,7 +6,6 @@ use chrono::{Duration as ChronoDuration, Utc};
 use oxide_arb_control::governance::{ControlFactorRegistry, PublicationRequest};
 use oxide_arb_models::{
     domain::control_factor::AuditActor,
-    enums::control_factor::OperatorRole,
     types::{ControlFactorId, FactorPublicationId},
 };
 use oxide_arb_test_support::{
@@ -17,7 +16,7 @@ use tokio::sync::{Notify, oneshot};
 fn audit_envelope() -> AuditActor {
     AuditActor {
         actor: "risk_owner".into(),
-        actor_role: OperatorRole::RiskOwner,
+        actor_role: "risk_owner".into(),
         request_id: "req-governance-notify".into(),
         reason: "test publication".into(),
     }

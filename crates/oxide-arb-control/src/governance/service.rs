@@ -256,7 +256,7 @@ fn factor_audit(
     NewControlFactorAuditEvent {
         event_type,
         actor: envelope.actor.clone(),
-        actor_role: envelope.actor_role,
+        actor_role: envelope.actor_role.clone(),
         resource_type: AuditResourceType::Factor,
         resource_id: factor_id.as_str().to_owned(),
         request_id: envelope.request_id.clone(),
@@ -276,7 +276,7 @@ fn publication_audit(
     NewControlFactorAuditEvent {
         event_type,
         actor: envelope.actor.clone(),
-        actor_role: envelope.actor_role,
+        actor_role: envelope.actor_role.clone(),
         resource_type: AuditResourceType::Publication,
         resource_id: publication_id.as_str().to_owned(),
         request_id: envelope.request_id.clone(),
@@ -296,7 +296,7 @@ fn runtime_config_audit(
     NewControlFactorAuditEvent {
         event_type,
         actor: envelope.actor.clone(),
-        actor_role: envelope.actor_role,
+        actor_role: envelope.actor_role.clone(),
         resource_type: AuditResourceType::RuntimeConfigVersion,
         resource_id: version_id.to_owned(),
         request_id: envelope.request_id.clone(),

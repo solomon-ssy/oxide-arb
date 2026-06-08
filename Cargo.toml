@@ -173,6 +173,24 @@ teloxide = { version = "0.17", features = ["macros"] }
 testcontainers = { version = "0.27", features = ["http_wait"] }
 testcontainers-modules = { version = "0.15", features = ["postgres", "redis"] }
 
+# ── Phase 6: Web Layer + RBAC Dependencies ───────────────────────────────────
+
+# HTTP server stack (actix-web 4) — wired in later sub-phases
+actix-web = "4"
+actix-cors = "0.7"
+actix-files = "0.6"
+actix-ws = "0.4"
+tracing-actix-web = "0.7"
+
+# Dynamic RBAC authorization engine
+casbin = { version = "2", features = ["runtime-tokio"] }
+
+# JWT access/refresh tokens
+jsonwebtoken = "10"
+
+# Password hashing (argon2id) — shared by seed + web login
+argon2 = "0.5"
+
 # ── Internal Crates ──────────────────────────────────────────────────────────
 
 oxide-arb-error = { path = "crates/oxide-arb-error" }

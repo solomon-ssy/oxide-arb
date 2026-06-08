@@ -292,6 +292,83 @@ impl AuditEventId {
     }
 }
 
+// ── RBAC identifiers (Phase 6 web layer) ─────────────────────────────────────
+
+/// RBAC user identifier (UUID v7, `usr_` prefix).
+///
+/// This is the stable Casbin subject: renaming a user or changing their
+/// username never invalidates their role bindings.
+#[derive(TypedId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct UserId(Arc<str>);
+
+impl UserId {
+    /// Generate a fresh time-ordered user ID.
+    #[must_use]
+    pub fn new_v7() -> Self {
+        Self(Arc::from(format!("usr_{}", Uuid::now_v7()).as_str()))
+    }
+}
+
+/// RBAC role identifier (UUID v7, `rol_` prefix).
+#[derive(TypedId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RoleId(Arc<str>);
+
+impl RoleId {
+    /// Generate a fresh time-ordered role ID.
+    #[must_use]
+    pub fn new_v7() -> Self {
+        Self(Arc::from(format!("rol_{}", Uuid::now_v7()).as_str()))
+    }
+}
+
+/// RBAC menu identifier (UUID v7, `mnu_` prefix).
+#[derive(TypedId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MenuId(Arc<str>);
+
+impl MenuId {
+    /// Generate a fresh time-ordered menu ID.
+    #[must_use]
+    pub fn new_v7() -> Self {
+        Self(Arc::from(format!("mnu_{}", Uuid::now_v7()).as_str()))
+    }
+}
+
+/// `user_role` join-row identifier (UUID v7, `url_` prefix).
+#[derive(TypedId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct UserRoleId(Arc<str>);
+
+impl UserRoleId {
+    /// Generate a fresh time-ordered user-role binding ID.
+    #[must_use]
+    pub fn new_v7() -> Self {
+        Self(Arc::from(format!("url_{}", Uuid::now_v7()).as_str()))
+    }
+}
+
+/// `role_menu` join-row identifier (UUID v7, `rml_` prefix).
+#[derive(TypedId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RoleMenuId(Arc<str>);
+
+impl RoleMenuId {
+    /// Generate a fresh time-ordered role-menu binding ID.
+    #[must_use]
+    pub fn new_v7() -> Self {
+        Self(Arc::from(format!("rml_{}", Uuid::now_v7()).as_str()))
+    }
+}
+
+/// Append-only operation-log row identifier (UUID v7, `opl_` prefix).
+#[derive(TypedId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct OperationLogId(Arc<str>);
+
+impl OperationLogId {
+    /// Generate a fresh time-ordered operation-log ID.
+    #[must_use]
+    pub fn new_v7() -> Self {
+        Self(Arc::from(format!("opl_{}", Uuid::now_v7()).as_str()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

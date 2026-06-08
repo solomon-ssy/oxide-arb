@@ -1,7 +1,7 @@
 //! `control_factor_audit_event` table entity (append-only global hash chain).
 
 use crate::{
-    enums::control_factor::{AuditResourceType, ControlAuditEventType, OperatorRole},
+    enums::control_factor::{AuditResourceType, ControlAuditEventType},
     types::AuditEventId,
 };
 use chrono::{DateTime, Utc};
@@ -16,7 +16,8 @@ pub struct Model {
     pub event_type: ControlAuditEventType,
     #[sea_orm(column_type = "Text")]
     pub actor: String,
-    pub actor_role: OperatorRole,
+    #[sea_orm(column_type = "Text")]
+    pub actor_role: String,
     pub resource_type: AuditResourceType,
     #[sea_orm(column_type = "Text")]
     pub resource_id: String,

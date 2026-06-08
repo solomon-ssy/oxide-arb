@@ -72,4 +72,6 @@ pub enum ConfigWarning {
     },
     #[error("Paper mode without credentials; user-trade stream disabled")]
     NoCredentialsPaper,
+    #[error("web.jwt.secret is empty or a known placeholder; set a strong secret before Live")]
+    WeakJwtSecret,
 }

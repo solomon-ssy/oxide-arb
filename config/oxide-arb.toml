@@ -265,3 +265,21 @@ chat_id = ""
 [notification.webhook]
 enabled = false
 url = ""
+
+# ── Web Server + RBAC ────────────────────────────────────────────────────────
+
+[web]
+listen_host = "0.0.0.0"
+listen_port = 8080
+cors_allowed_origins = []
+serve_static_ui = false
+static_ui_dir = "static/ui"
+
+[web.jwt]
+# SECURITY: never commit a real secret. Provide it via env in production:
+#   OXIDE_ARB__WEB__JWT__SECRET=<strong-random-secret>
+# An empty/placeholder secret is fatal in Live mode and a warning otherwise.
+secret = ""
+issuer = "oxide-arb"
+access_ttl_secs = 900
+refresh_ttl_secs = 604800

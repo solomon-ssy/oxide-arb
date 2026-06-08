@@ -25,6 +25,7 @@ mod risk;
 pub mod settlement;
 mod treasury;
 pub mod validation;
+mod web;
 
 pub use analytics::*;
 pub use cache::*;
@@ -40,6 +41,7 @@ pub use polymarket::*;
 pub use risk::*;
 pub use settlement::*;
 pub use treasury::*;
+pub use web::*;
 
 use crate::{
     config::validation::{validate_settings_common, validate_settings_mode},
@@ -215,6 +217,8 @@ pub struct Inner {
     pub notification: NotificationConfig,
     #[serde(default)]
     pub settlement: SettlementConfig,
+    #[serde(default)]
+    pub web: WebConfig,
 }
 
 impl Inner {

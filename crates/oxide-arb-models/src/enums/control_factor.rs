@@ -437,17 +437,6 @@ active_string_enum! {
 }
 
 active_string_enum! {
-    /// Operator roles for governance RBAC (Phase 5.5 §7).
-    pub enum OperatorRole {
-        Viewer => "viewer",
-        Operator => "operator",
-        RiskOwner => "risk_owner",
-        Admin => "admin",
-        EmergencyOperator => "emergency_operator",
-    }
-}
-
-active_string_enum! {
     /// Operational severity used by anomaly and reconciliation factors.
     pub enum FactorSeverity {
         Info => "info",

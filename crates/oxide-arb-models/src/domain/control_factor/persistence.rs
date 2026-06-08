@@ -8,8 +8,8 @@ use crate::{
     enums::control_factor::{
         AuditResourceType, ControlAuditEventType, ControlFactorType, EvidenceStageStatus,
         FactorStatus, MaterializationOutputPolicy, MaterializationRunKind,
-        MaterializationRunStatus, MaterializationStageName, OperatorRole, PublicationMode,
-        PublicationStatus, RunTriggerType,
+        MaterializationRunStatus, MaterializationStageName, PublicationMode, PublicationStatus,
+        RunTriggerType,
     },
     hashing::CanonicalDigest,
     types::{
@@ -366,7 +366,7 @@ pub struct ControlFactorAuditEventInfo {
     pub sequence: i64,
     pub event_type: ControlAuditEventType,
     pub actor: String,
-    pub actor_role: OperatorRole,
+    pub actor_role: String,
     pub resource_type: AuditResourceType,
     pub resource_id: String,
     pub request_id: String,
@@ -411,7 +411,7 @@ info_from_model!(
 pub struct NewControlFactorAuditEvent {
     pub event_type: ControlAuditEventType,
     pub actor: String,
-    pub actor_role: OperatorRole,
+    pub actor_role: String,
     pub resource_type: AuditResourceType,
     pub resource_id: String,
     pub request_id: String,
@@ -431,7 +431,7 @@ pub struct NewControlFactorAuditEvent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuditActor {
     pub actor: String,
-    pub actor_role: OperatorRole,
+    pub actor_role: String,
     pub request_id: String,
     pub reason: String,
 }
@@ -742,13 +742,12 @@ pub enum CancelMaterializationRunOutcome {
 #[cfg(test)]
 mod tests {
     use super::AuditActor;
-    use crate::enums::control_factor::OperatorRole;
     use oxide_arb_error::control::GovernanceError;
 
     fn envelope() -> AuditActor {
         AuditActor {
             actor: "op".into(),
-            actor_role: OperatorRole::Operator,
+            actor_role: "operator".into(),
             request_id: "req-1".into(),
             reason: "because".into(),
         }

@@ -25,9 +25,11 @@ pub mod config;
 pub mod config_validation;
 pub mod control;
 pub mod market;
+pub mod rbac;
 pub mod redeem;
 pub mod reservation;
 pub mod rpc;
+pub mod security;
 pub mod seed;
 pub mod signing;
 pub mod storage;
@@ -68,6 +70,13 @@ pub enum OxideError {
     // ── Security ────────────────────────────────────────────────────────
     #[error(transparent)]
     Signing(#[from] signing::SigningError),
+
+    #[error(transparent)]
+    Password(#[from] security::PasswordError),
+
+    // ── Access control (RBAC) ────────────────────────────────────────────
+    #[error(transparent)]
+    Rbac(#[from] rbac::RbacError),
 
     // ── Configuration ───────────────────────────────────────────────────
     #[error(transparent)]

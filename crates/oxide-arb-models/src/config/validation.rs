@@ -492,8 +492,30 @@ pub fn validate_settings_mode(inner: &Inner, mode: ExecutionMode) -> ConfigValid
     }
 
     validate_settlement_mode(inner, mode, &mut report);
+    validate_web_mode(inner, mode, &mut report);
 
     report
+}
+
+/// Mode-aware web validation: a strong JWT secret is mandatory in `Live`.
+///
+/// In `Live` an empty/placeholder secret is fatal (fail-closed); in
+/// `DryRun`/`Paper` it is only a warning so local development stays frictionless.
+fn validate_web_mode(inner: &Inner, mode: ExecutionMode, report: &mut ConfigValidationReport) {
+    if !inner.web.jwt_secret_is_weak() {
+        return;
+    }
+    match mode {
+        ExecutionMode::Live => report.errors.push(ConfigValidationError::InvalidValue {
+            field: "web.jwt.secret",
+            detail: "Live mode requires a strong, non-placeholder JWT secret \
+                     (set OXIDE_ARB__WEB__JWT__SECRET)"
+                .to_owned(),
+        }),
+        ExecutionMode::DryRun | ExecutionMode::Paper => {
+            report.warnings.push(ConfigWarning::WeakJwtSecret);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -536,5 +558,34 @@ mod tests {
         let inner = Inner::default();
         let report = validate_settings_mode(&inner, ExecutionMode::DryRun);
         assert!(!report.has_errors());
+    }
+
+    #[test]
+    fn live_mode_rejects_weak_jwt_secret() {
+        let inner = Inner::default();
+        let mut report = ConfigValidationReport::default();
+        validate_web_mode(&inner, ExecutionMode::Live, &mut report);
+        assert!(
+            report.has_errors(),
+            "empty jwt secret must be fatal in Live"
+        );
+    }
+
+    #[test]
+    fn live_mode_accepts_strong_jwt_secret() {
+        let mut inner = Inner::default();
+        inner.web.jwt.secret = "a-strong-production-secret".to_owned();
+        let mut report = ConfigValidationReport::default();
+        validate_web_mode(&inner, ExecutionMode::Live, &mut report);
+        assert!(!report.has_errors(), "errors: {:?}", report.errors);
+    }
+
+    #[test]
+    fn dry_run_only_warns_on_weak_jwt_secret() {
+        let inner = Inner::default();
+        let mut report = ConfigValidationReport::default();
+        validate_web_mode(&inner, ExecutionMode::DryRun, &mut report);
+        assert!(!report.has_errors());
+        assert!(!report.warnings.is_empty(), "weak secret should warn");
     }
 }

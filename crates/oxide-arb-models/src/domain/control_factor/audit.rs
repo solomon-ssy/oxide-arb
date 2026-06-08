@@ -9,7 +9,7 @@
 
 use super::persistence::ControlFactorAuditEventInfo;
 use crate::{
-    enums::control_factor::{AuditResourceType, ControlAuditEventType, OperatorRole},
+    enums::control_factor::{AuditResourceType, ControlAuditEventType},
     hashing::CanonicalDigest,
 };
 use chrono::{DateTime, Utc};
@@ -25,7 +25,7 @@ pub struct AuditEventContent<'a> {
     pub sequence: i64,
     pub event_type: ControlAuditEventType,
     pub actor: &'a str,
-    pub actor_role: OperatorRole,
+    pub actor_role: &'a str,
     pub resource_type: AuditResourceType,
     pub resource_id: &'a str,
     pub request_id: &'a str,
@@ -81,7 +81,7 @@ impl AuditChain {
                 sequence: event.sequence,
                 event_type: event.event_type,
                 actor: event.actor.as_str(),
-                actor_role: event.actor_role,
+                actor_role: event.actor_role.as_str(),
                 resource_type: event.resource_type,
                 resource_id: event.resource_id.as_str(),
                 request_id: event.request_id.as_str(),
@@ -113,7 +113,7 @@ mod tests {
     use super::{AuditChain, AuditEventContent};
     use crate::{
         domain::control_factor::ControlFactorAuditEventInfo,
-        enums::control_factor::{AuditResourceType, ControlAuditEventType, OperatorRole},
+        enums::control_factor::{AuditResourceType, ControlAuditEventType},
         types::AuditEventId,
     };
     use chrono::{TimeZone, Utc};
@@ -129,7 +129,7 @@ mod tests {
             sequence,
             event_type: ControlAuditEventType::FactorCreated,
             actor: "op",
-            actor_role: OperatorRole::Operator,
+            actor_role: "operator",
             resource_type: AuditResourceType::Factor,
             resource_id: "cf_1",
             request_id: "req-1",
@@ -147,7 +147,7 @@ mod tests {
             sequence,
             event_type: ControlAuditEventType::FactorCreated,
             actor: "op".into(),
-            actor_role: OperatorRole::Operator,
+            actor_role: "operator".into(),
             resource_type: AuditResourceType::Factor,
             resource_id: "cf_1".into(),
             request_id: "req-1".into(),

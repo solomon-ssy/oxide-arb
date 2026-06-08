@@ -48,12 +48,27 @@ impl<'a> SchemaRunner<'a> {
         )
         .await?;
 
+        execute_sql(
+            self.manager,
+            ["CREATE OR REPLACE FUNCTION trigger_deny_write() \
+          RETURNS TRIGGER AS $$ \
+          BEGIN \
+              RAISE EXCEPTION 'table % is append-only (WORM); % is not permitted', \
+                  TG_TABLE_NAME, TG_OP; \
+          END; \
+          $$ LANGUAGE plpgsql"],
+        )
+        .await?;
+
         for spec in catalog::tables() {
             for trigger in (spec.triggers)() {
+                let table = (trigger.table_name)();
                 match trigger.kind {
                     TriggerKind::UpdatedAt => {
-                        let table = (trigger.table_name)();
                         execute_sql(self.manager, [create_updated_at_trigger(&table)]).await?;
+                    }
+                    TriggerKind::AppendOnly => {
+                        execute_sql(self.manager, [create_append_only_trigger(&table)]).await?;
                     }
                 }
             }
@@ -65,10 +80,13 @@ impl<'a> SchemaRunner<'a> {
     pub async fn drop_schema(&self) -> Result<(), DbErr> {
         for spec in catalog::tables() {
             for trigger in (spec.triggers)() {
+                let table = (trigger.table_name)();
                 match trigger.kind {
                     TriggerKind::UpdatedAt => {
-                        let table = (trigger.table_name)();
                         execute_sql(self.manager, [drop_updated_at_trigger(&table)]).await?;
+                    }
+                    TriggerKind::AppendOnly => {
+                        execute_sql(self.manager, [drop_append_only_trigger(&table)]).await?;
                     }
                 }
             }
@@ -79,6 +97,8 @@ impl<'a> SchemaRunner<'a> {
             ["DROP FUNCTION IF EXISTS trigger_set_updated_at"],
         )
         .await?;
+
+        execute_sql(self.manager, ["DROP FUNCTION IF EXISTS trigger_deny_write"]).await?;
 
         for spec in drop_order() {
             self.manager
@@ -174,10 +194,13 @@ pub async fn execute_sql(
 }
 
 /// Create the canonical `updated_at` trigger for a table.
+///
+/// The table name is double-quoted so reserved identifiers (e.g. `user`) are
+/// handled correctly.
 pub fn create_updated_at_trigger(table: &str) -> String {
     format!(
         "CREATE TRIGGER trg_{table}_updated_at \
-         BEFORE UPDATE ON {table} \
+         BEFORE UPDATE ON \"{table}\" \
          FOR EACH ROW \
          EXECUTE FUNCTION trigger_set_updated_at()"
     )
@@ -185,7 +208,26 @@ pub fn create_updated_at_trigger(table: &str) -> String {
 
 /// Drop the canonical `updated_at` trigger for a table.
 pub fn drop_updated_at_trigger(table: &str) -> String {
-    format!("DROP TRIGGER IF EXISTS trg_{table}_updated_at ON {table}")
+    format!("DROP TRIGGER IF EXISTS trg_{table}_updated_at ON \"{table}\"")
+}
+
+/// Create the append-only (WORM) guard trigger for a table.
+///
+/// Fires before any `UPDATE` or `DELETE` and raises an exception, making the
+/// table insert-only at the database level. The table name is double-quoted to
+/// support reserved identifiers.
+pub fn create_append_only_trigger(table: &str) -> String {
+    format!(
+        "CREATE TRIGGER trg_{table}_append_only \
+         BEFORE UPDATE OR DELETE ON \"{table}\" \
+         FOR EACH ROW \
+         EXECUTE FUNCTION trigger_deny_write()"
+    )
+}
+
+/// Drop the append-only (WORM) guard trigger for a table.
+pub fn drop_append_only_trigger(table: &str) -> String {
+    format!("DROP TRIGGER IF EXISTS trg_{table}_append_only ON \"{table}\"")
 }
 
 fn ordered_seeds() -> Result<Vec<SeedSpec>, DbErr> {

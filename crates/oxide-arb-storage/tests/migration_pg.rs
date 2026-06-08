@@ -37,9 +37,37 @@ fn updated_at_trigger_catalog_is_complete() {
             "endgame_calibration_bucket",
             "event",
             "market",
+            "menu",
             "risk_engine_state",
+            "role",
             "trade",
+            "user",
         ]
+    );
+}
+
+#[test]
+fn append_only_trigger_catalog_is_complete() {
+    let mut tables = catalog::tables()
+        .into_iter()
+        .flat_map(|spec| (spec.triggers)())
+        .filter(|trigger| trigger.kind == TriggerKind::AppendOnly)
+        .map(|trigger| (trigger.table_name)())
+        .collect::<Vec<_>>();
+    tables.sort();
+
+    assert_eq!(
+        tables,
+        vec![
+            "balance_snapshot",
+            "control_factor_audit_event",
+            "control_factor_shadow_decision",
+            "emergency_snapshot",
+            "market_pit_snapshot",
+            "operation_log",
+            "risk_audit_event",
+        ],
+        "every lifecycle=audit table must be append-only (WORM)"
     );
 }
 
@@ -213,8 +241,8 @@ async fn seed_application_records_catalog_seeds() {
     let count: i64 = row.try_get_by_index(0).expect("read seed ledger count");
 
     assert_eq!(
-        count, 1,
-        "only risk state seed should be recorded after removing runtime_config seed"
+        count, 7,
+        "risk state seed + 6 RBAC seeds (roles/menus/admin_user/user_role/role_menu/casbin)"
     );
 }
 
@@ -366,4 +394,204 @@ async fn blacklist_updated_at_trigger_fires_on_update() {
         after.updated_at
     );
     assert_eq!(after.miss_count, 1);
+}
+
+/// Count helper for raw `SELECT COUNT(*)` queries.
+async fn count_rows(db: &impl ConnectionTrait, sql: &str) -> i64 {
+    db.query_one(sea_orm::Statement::from_string(
+        db.get_database_backend(),
+        sql.to_owned(),
+    ))
+    .await
+    .expect("count query")
+    .expect("count row")
+    .try_get_by_index(0)
+    .expect("read count")
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn rbac_tables_are_created() {
+    let (pool, _container) = setup_pool().await;
+    let db = pool.connection();
+
+    Migrator::up(db, None).await.expect("Migration up failed");
+
+    for table in [
+        "user",
+        "role",
+        "menu",
+        "user_role",
+        "role_menu",
+        "casbin_rule",
+        "operation_log",
+    ] {
+        let regclass = db
+            .query_one(sea_orm::Statement::from_string(
+                db.get_database_backend(),
+                format!("SELECT to_regclass('public.\"{table}\"')::text"),
+            ))
+            .await
+            .expect("regclass query")
+            .expect("regclass row");
+        let name: Option<String> = regclass.try_get_by_index(0).expect("read regclass");
+        assert!(name.is_some(), "table `{table}` must exist after migration");
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn operation_log_is_append_only() {
+    let (pool, _container) = setup_pool().await;
+    let db = pool.connection();
+
+    Migrator::up(db, None).await.expect("Migration up failed");
+
+    db.execute(sea_orm::Statement::from_sql_and_values(
+        db.get_database_backend(),
+        "INSERT INTO operation_log \
+         (id, request_id, category, action, http_method, http_path, http_status, outcome, latency_ms) \
+         VALUES ($1, 'req-1', 'system', 'test.action', 'GET', '/x', 200, 'success', 5)",
+        ["opl_test_1".into()],
+    ))
+    .await
+    .expect("append-only table still accepts INSERT");
+
+    let update = db
+        .execute(sea_orm::Statement::from_sql_and_values(
+            db.get_database_backend(),
+            "UPDATE operation_log SET action = 'tampered' WHERE id = $1",
+            ["opl_test_1".into()],
+        ))
+        .await;
+    assert!(update.is_err(), "UPDATE on operation_log must be rejected");
+
+    let delete = db
+        .execute(sea_orm::Statement::from_sql_and_values(
+            db.get_database_backend(),
+            "DELETE FROM operation_log WHERE id = $1",
+            ["opl_test_1".into()],
+        ))
+        .await;
+    assert!(delete.is_err(), "DELETE on operation_log must be rejected");
+
+    let remaining = count_rows(db, "SELECT COUNT(*) FROM operation_log").await;
+    assert_eq!(remaining, 1, "row must survive rejected mutations");
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn control_factor_audit_event_is_append_only() {
+    let (pool, _container) = setup_pool().await;
+    let db = pool.connection();
+
+    Migrator::up(db, None).await.expect("Migration up failed");
+
+    db.execute(sea_orm::Statement::from_string(
+        db.get_database_backend(),
+        "INSERT INTO control_factor_audit_event \
+         (event_id, sequence, event_type, actor, actor_role, resource_type, resource_id, \
+          request_id, reason, diff, event_hash) \
+         VALUES ('cfae_t1', 1, 'factor_created', 'op', 'operator', 'factor', 'cf_1', \
+                 'req-1', 'r', '{}'::jsonb, 'blake3:test')"
+            .to_owned(),
+    ))
+    .await
+    .expect("audit insert");
+
+    let update = db
+        .execute(sea_orm::Statement::from_string(
+            db.get_database_backend(),
+            "UPDATE control_factor_audit_event SET reason = 'tampered' WHERE event_id = 'cfae_t1'"
+                .to_owned(),
+        ))
+        .await;
+    assert!(update.is_err(), "UPDATE on audit chain must be rejected");
+
+    let delete = db
+        .execute(sea_orm::Statement::from_string(
+            db.get_database_backend(),
+            "DELETE FROM control_factor_audit_event WHERE event_id = 'cfae_t1'".to_owned(),
+        ))
+        .await;
+    assert!(delete.is_err(), "DELETE on audit chain must be rejected");
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn rbac_seeds_populate_graph() {
+    let (pool, _container) = setup_pool().await;
+    let db = pool.connection();
+
+    Migrator::up(db, None).await.expect("Migration up failed");
+
+    // 6 built-in roles.
+    assert_eq!(count_rows(db, "SELECT COUNT(*) FROM role").await, 6);
+    // Exactly one bootstrap admin user.
+    assert_eq!(
+        count_rows(db, "SELECT COUNT(*) FROM \"user\" WHERE username = 'admin'").await,
+        1
+    );
+    // Menu tree is non-empty and fully assigned to super_admin.
+    let menu_count = count_rows(db, "SELECT COUNT(*) FROM menu").await;
+    assert!(menu_count > 0, "menu tree must be seeded");
+    assert_eq!(
+        count_rows(db, "SELECT COUNT(*) FROM role_menu").await,
+        menu_count,
+        "super_admin must be granted every menu"
+    );
+    // admin -> super_admin grouping + per-role permission policies.
+    assert_eq!(count_rows(db, "SELECT COUNT(*) FROM user_role").await, 1);
+    assert_eq!(
+        count_rows(db, "SELECT COUNT(*) FROM casbin_rule WHERE ptype = 'g'").await,
+        1
+    );
+    assert!(
+        count_rows(db, "SELECT COUNT(*) FROM casbin_rule WHERE ptype = 'p'").await > 0,
+        "built-in role permission policies must be seeded"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn rbac_seeds_are_idempotent() {
+    let (pool, _container) = setup_pool().await;
+    let db = pool.connection();
+
+    Migrator::up(db, None).await.expect("First up failed");
+
+    let admin_hash_before: String = db
+        .query_one(sea_orm::Statement::from_string(
+            db.get_database_backend(),
+            "SELECT password_hash FROM \"user\" WHERE username = 'admin'".to_owned(),
+        ))
+        .await
+        .expect("query admin")
+        .expect("admin row")
+        .try_get_by_index(0)
+        .expect("read hash");
+
+    Migrator::up(db, None).await.expect("Second up failed");
+
+    assert_eq!(count_rows(db, "SELECT COUNT(*) FROM role").await, 6);
+    assert_eq!(
+        count_rows(db, "SELECT COUNT(*) FROM \"user\" WHERE username = 'admin'").await,
+        1
+    );
+
+    let admin_hash_after: String = db
+        .query_one(sea_orm::Statement::from_string(
+            db.get_database_backend(),
+            "SELECT password_hash FROM \"user\" WHERE username = 'admin'".to_owned(),
+        ))
+        .await
+        .expect("query admin")
+        .expect("admin row")
+        .try_get_by_index(0)
+        .expect("read hash");
+
+    assert_eq!(
+        admin_hash_before, admin_hash_after,
+        "re-migration must not overwrite the admin password hash"
+    );
 }

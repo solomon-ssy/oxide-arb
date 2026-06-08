@@ -1,67 +1,168 @@
-# Phase 6 — Web 服务层
+# Phase 6 — Web 服务层 + RBAC 体系（父计划 / Umbrella）
 
-> **产出**: `oxide-arb-web` crate（actix-web 重写）
+> **状态**: 已拆分为 7 个子 phase 逐个推进。本文档为父计划/总览；具体落地以子 phase 文档为准。
 >
-> **前置条件**: Phase 0–4 核心系统可运行；Phase 5 replay 可选
+> **产出**: `oxide-arb-web` crate（actix-web）+ 完整动态 RBAC 体系 + 双轨审计（治理哈希链 + 通用操作日志）+ 治理控制面接线
 >
-> **验收标准**: 所有 REST 端点返回正确 JSON envelope；WebSocket 推送实时机会/交易/系统状态；Bearer token 认证拒绝未授权请求；运行时配置可通过 PATCH 热更新并记录审计日志；生产模式可服务静态 Vue 文件
+> **前置条件**: Phase 0–4 核心系统可运行；Phase 5.x 治理内核（`ControlFactorRegistry` / 审计链 / scheduler 库）已交付
+>
+> **验收标准**: JWT 登录签发 access/refresh token；Casbin 资源级授权对每个端点 fail-closed 鉴权；治理变更进入不可变哈希审计链并可校验；所有变更类请求/认证事件进入通用操作日志（`operation_log`）；runtime-config 走治理版本化（非裸 PATCH）；WebSocket 实时推送；生产模式 serve 静态 Vue 文件；全部破坏式变更落地（删除 `OperatorRole`、删除单用户 API-key）
 
 ---
 
-## 0. 工作范围
+## 子 phase 拆分（实施单元）
 
-1. RESTful API — 系统控制、数据查询、配置管理
-2. WebSocket — 实时推送 opportunities / trades / PnL / system status
-3. 静态文件服务 — 生产模式下直接 serve Vue 构建产物
-4. API Key 认证 — 单用户 Bearer token
-5. 运行时配置热更新 — PATCH 端点 + 审计日志
-6. CORS — 开发模式下 allow_any_origin
+> 每个子 phase 自带"可编译 + 可测试闭环"，块间停下供 review。逐个推进，前序未通过不进入下一子 phase。
+
+- **[Phase 6.1 — 模型与治理破坏式变更](phase6.1-models-governance-breaking.md)**：workspace 依赖 + `enums/rbac.rs` + `types/ids.rs` + 删除 `OperatorRole`（`actor_role: String`）+ 6 张 RBAC 表 + `operation_log` 表 + argon2id 密码原语 + `config/web.rs` + RBAC seeds（admin 密码写死）。
+- **[Phase 6.2 — Repository 层 + Casbin Adapter](phase6.2-repository-rbac-casbin.md)**：RBAC repos + `operation_log` repo + 自写 Casbin adapter（精确匹配，修复 ng-gateway `ptype`-only 去重）。
+- **[Phase 6.3 — Web 基座 + 认证](phase6.3-web-foundation-auth.md)**：`oxide-arb-web` 骨架（lib/state/response/error/extractors）+ jwt + argon2id + Redis 黑名单 + authn MW + auth 路由。
+- **[Phase 6.4 — 授权 + RBAC 路由](phase6.4-authorization-rbac-routes.md)**：Casbin model/service/checker/rules + authz MW（fail-closed）+ users/roles/menus/permissions + `init_rbac_rules`。
+- **[Phase 6.5 — 操作日志中间件 + 治理控制面](phase6.5-operation-log-governance-routes.md)**：`OperationAudit` MW + 异步 writer + control_factors + runtime_config 路由（acting_role + 审计信封）。
+- **[Phase 6.6 — 业务路由 + WebSocket + 静态 + Core 接线](phase6.6-business-routes-ws-static-wiring.md)**：业务读写路由 + WS 基础设施（actix-ws，先接非热路径事件）+ SPA 静态 + bootstrap（web task + scheduler tick + execute worker）。
+- **[Phase 6.7 — 热路径事件插桩](phase6.7-hotpath-event-instrumentation.md)**：opportunity / trade / pnl emit hooks 接入 WS 事件总线（独立、重点 review）。
+
+## 关键架构决策（父级，子 phase 遵循）
+
+- **双轨审计（不合并）**：`control_factor_audit_event` 保持窄哈希链（仅治理/钱，registry 在事务内原子写入）；新增 `operation_log` 通用活动日志（actix 中间件 + handler 富化、异步缓冲、DB 级 append-only、脱敏、不上哈希链）。治理动作同时出现在两处，`operation_log.governance_audit_event_id` 链接哈希链。依据：合规审计链 ≠ 运维活动日志，哈希链只上关键事件、敏感数据绝不入不可变日志。
+- **WS 技术选型**：`actix-ws`（轻量、per-session 订阅 fanout），替代原计划的 `actix-web-actors`。
+- **Bootstrap admin**：默认账号密码写死（const）；argon2id 密码原语下沉到 `oxide-arb-models`，seed 运行时哈希、web 登录校验复用同一实现。
+- **`super_admin` 旁路**：matcher `g(r.sub, "super_admin")`，subject = 稳定 `user_id`（非 username 字面量）。
+- **类型修正**：原计划 `TradeRecord` / `TradeOutcome` 不存在 → 使用 `TradeInfo` / `TradeBusinessOutcome`。
 
 ---
 
-## 1. 目录结构
+## 0. 设计原则（零容忍向前兼容）
+
+本阶段是**直接和钱相关**的控制面，遵循以下硬性原则：
+
+1. **Fail-closed 授权**：未注册 RBAC 规则的路由 **默认拒绝**（修复 ng-gateway 默认放行缺陷）。
+2. **强审计**：所有治理类变更进入全局哈希链（`control_factor_audit_event`），`actor / acting_role / request_id / reason` 必填，链上可独立 `verify`。
+3. **无向前兼容、无 re-export、无最小变更**：直接重构 / 破坏式变更。删除 `OperatorRole`、删除单用户 API-key、删除裸 PATCH config。
+4. **遵循 oxide-arb 约定**：`TypedId(UUID v7)` 主键、`active_string_enum!`（非 SMALLINT）、`#[oxide_schema]` 自动注册 DDL、`SeedSpec` + `SeedContext` 图序播种、`StorageError` 仓储边界、`Arc::clone` 显式共享。
+5. **authN/authZ 只在 web 层**：治理内核信任 web 已鉴权，只校验信封字段 + 治理不变量。
+
+---
+
+## 1. 工作范围
+
+1. **认证**：JWT 登录（用户名/密码 → access + refresh token）、刷新、登出黑名单（Redis）、`argon2id` 密码哈希。
+2. **授权**：Casbin 动态 RBAC（`g` user→role / `p` role→resource×operation）、路由级规则注册表、`super_admin` 旁路、治理端点 `acting_role` 显式授权。
+3. **RBAC 管理**：user / role / menu 的 CRUD + 角色分配 + 权限分配 + 菜单分配。
+4. **治理控制面**：control-factor 生命周期（reject/shadow/publish/rollback/emergency）、materialization 触发、runtime-config 版本化、审计链查询、shadow 决策聚合。
+5. **业务数据**：system / markets / opportunities / trades / pnl / risk / analytics / replay 的 read 与控制端点。
+6. **WebSocket**：实时推送 opportunities / trades / pnl / system / risk，订阅式 fanout。
+7. **静态文件**：生产模式 serve Vue 构建产物（SPA fallback）。
+8. **进程接线**：web server task、治理 scheduler tick 循环、materialization execute worker。
+
+---
+
+## 2. 核心设计决策
+
+| 维度 | 决策 | 理由 |
+|---|---|---|
+| 角色模型 | **纯动态 Casbin，删除 `OperatorRole` 枚举** | role 表为动态数据；`role.code` 为字符串；治理端点也走动态 `p` 策略 |
+| 超级用户 | `super_admin` 角色码，在 matcher 内 `g(r.sub, "super_admin")` 旁路一切 | 对标 ng-gateway `system_admin`，但基于 **role code + subject=user_id**（非 username 字面量） |
+| 权限粒度 | 完整 `ResourceType × Operation` 细粒度，可经 API 给角色分配 | 业务闭环；治理端点叠加 route-level 规则 |
+| 关联表 | 显式 join 表 `user_role` + `role_menu`（**不用** ng-gateway 多态 `relation`） | 语义精准；casbin 表只存策略 |
+| ID / subject | `UserId/RoleId/MenuId` = `TypedId(UUID v7)`；Casbin subject = 稳定 `user_id` | 改名不失效；符合 oxide-arb 约定 |
+| 会话 | access + refresh token + logout 黑名单（Redis）；`argon2id` | 生产级会话管理 |
+| 配置变更 | **统一治理版本化**（`create_runtime_config_version` + `activate` + 审计链），删除裸 PATCH/ArcSwap | money-critical，全审计 |
+
+### 2.1 审计归属语义（删除 `OperatorRole` 后）
+
+删除 `OperatorRole` 枚举后，不可变审计链字段 `actor_role` 改为 `String`（role code）。授权采用**显式 acting-role 模型**（比 ng-gateway「任一角色即可」更严、更可审计）：
+
+- 治理类变更端点的请求体必须携带 `acting_role`；
+- authZ = `g(user_id, acting_role)` 成立 **且** `has_policy(acting_role, resource, operation)` 成立；
+- 审计链 `actor_role` 记录该 `acting_role`（`super_admin` 操作记 `"super_admin"`）；
+- 非治理端点（read / RBAC 管理）走常规 `enforce(user_id, ...)`（任一角色即可），不写审计链。
+
+> `OperatorRole` 原本序列化为 snake_case（如 `"risk_owner"`），改为 `String` 后**审计哈希字节格式不变**；且系统无生产审计数据（greenfield），破坏式变更安全。`AuditEventContent` 字段顺序保持不变（顺序是哈希契约）。
+
+---
+
+## 3. 目录结构
 
 ```
 crates/oxide-arb-web/
 ├── Cargo.toml
 └── src/
-    ├── lib.rs                  # spawn_web_server() 入口
-    ├── state.rs                # AppState (AppContext wrapper)
-    ├── response.rs             # WebResponse<T> envelope + WebError
-    ├── extractors.rs           # ValidatedJson, Pagination, QueryFilter
+    ├── lib.rs                      # spawn_web_server(state, shutdown)
+    ├── state.rs                    # AppState { ctx, casbin, perm_checker, jwt, blacklist, repos }
+    ├── response.rs                 # WebResponse<T> envelope + Paginated<T>
+    ├── error.rs                    # WebError + ResponseError；映射 Registry/Governance/Storage/Rbac/Auth → HTTP
+    ├── extractors.rs               # ValidatedJson<T>, Pagination, AuthedActor, RequestId
+    ├── jwt.rs                      # Claims, encode/decode access+refresh, jti 黑名单
+    ├── auth/
+    │   ├── mod.rs
+    │   ├── password.rs             # argon2id hash / verify
+    │   └── casbin/
+    │       ├── mod.rs
+    │       ├── model.rs            # CASBIN_MODEL（4-tuple + super_admin 旁路）
+    │       ├── service.rs          # CasbinService（CachedEnforcer 封装）
+    │       ├── adapter.rs          # SeaOrmAdapter（casbin_rule 表）
+    │       ├── checker.rs          # PermChecker 路由规则注册表（fail-closed）
+    │       └── rules.rs            # Rule DSL: public / resource_op / acting_role_governed
     ├── middleware/
     │   ├── mod.rs
-    │   ├── auth.rs             # ApiKeyAuth Bearer token middleware
-    │   └── request_id.rs       # Request-ID tracing header
+    │   ├── request_id.rs           # X-Request-Id + tracing span
+    │   ├── authn.rs                # JWT 解析 → Claims + 角色加载 → extensions
+    │   └── authz.rs               # PermChecker.check(method, matched_path, claims)
     ├── routes/
-    │   ├── mod.rs              # configure() — 注册全部路由组
-    │   ├── health.rs           # GET /health, GET /ready
-    │   ├── metrics.rs          # GET /metrics (Prometheus)
-    │   ├── system.rs           # 系统控制端点
-    │   ├── markets.rs          # 市场数据端点
-    │   ├── opportunities.rs    # 机会数据端点
-    │   ├── trades.rs           # 交易数据端点
-    │   ├── risk.rs             # 风控端点
-    │   ├── config.rs           # 运行时配置端点
-    │   ├── pnl.rs              # PnL / analytics 端点
-    │   └── replay.rs           # Replay 触发端点
+    │   ├── mod.rs                  # configure() + init_rbac_rules()
+    │   ├── health.rs               # /health /ready
+    │   ├── metrics.rs              # /metrics (Prometheus)
+    │   ├── auth.rs                 # login / refresh / logout / me
+    │   ├── users.rs                # 用户 CRUD + 角色分配
+    │   ├── roles.rs                # 角色 CRUD + 权限/菜单分配
+    │   ├── menus.rs                # 菜单 CRUD + accessible 树
+    │   ├── permissions.rs          # 权限目录 + 角色权限查询
+    │   ├── system.rs               # 系统控制
+    │   ├── markets.rs
+    │   ├── opportunities.rs
+    │   ├── trades.rs
+    │   ├── pnl.rs
+    │   ├── risk.rs
+    │   ├── analytics.rs
+    │   ├── control_factors.rs      # 治理控制面
+    │   ├── runtime_config.rs       # 治理版本化配置
+    │   └── replay.rs
     ├── ws/
-    │   ├── mod.rs              # WebSocket server 入口
-    │   ├── handler.rs          # WS connection handler (upgrade + message loop)
-    │   ├── session.rs          # WsSession — per-connection state
-    │   ├── broadcaster.rs      # WsBroadcaster — fanout core events to all clients
-    │   └── protocol.rs         # WsMessage enum (JSON wire format)
-    └── static_files.rs         # 静态文件服务 (production Vue assets)
+    │   ├── mod.rs
+    │   ├── handler.rs              # upgrade + 鉴权
+    │   ├── session.rs              # per-connection state
+    │   ├── broadcaster.rs          # CoreEvent fanout
+    │   └── protocol.rs             # WsMessage / 客户端指令
+    └── static_files.rs             # SPA 静态服务
 ```
 
 ---
 
-## 2. Cargo.toml
+## 4. Cargo.toml 与 workspace 依赖
+
+### 4.1 新增根 `[workspace.dependencies]`
+
+```toml
+actix-web = "4"
+actix-cors = "0.7"
+actix-files = "0.6"
+actix-web-actors = "4"
+tracing-actix-web = "0.7"
+casbin = { version = "2", features = ["runtime-tokio"] }
+jsonwebtoken = "9"
+argon2 = "0.5"
+# 复用现有：deadpool-redis, redis, sea-orm, validator, uuid, chrono, serde, tokio, flume, thiserror
+```
+
+> 实现时以包管理器拉取最新兼容版本核对，确保与现有 `sea-orm = 1` / `tokio = 1` 对齐。**不引入 `sea-orm-adapter`**：自写 Casbin adapter，复用 `casbin_rule` entity 与 oxide-arb repository 约定，避免依赖版本错配。
+
+### 4.2 `crates/oxide-arb-web/Cargo.toml`
 
 ```toml
 [package]
 name = "oxide-arb-web"
-description = "HTTP API + WebSocket server for the oxide-arb trading system"
+description = "HTTP API + WebSocket + RBAC control-plane for oxide-arb"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -69,52 +170,41 @@ rust-version.workspace = true
 [dependencies]
 oxide-arb-error = { workspace = true }
 oxide-arb-models = { workspace = true }
+oxide-arb-control = { workspace = true }
 oxide-arb-core = { workspace = true }
 oxide-arb-repository = { workspace = true }
-oxide-arb-replay = { workspace = true }
 
-# HTTP framework
 actix-web = { workspace = true }
 actix-cors = { workspace = true }
-actix-web-actors = "4"
-actix-files = "0.6"
+actix-files = { workspace = true }
+actix-web-actors = { workspace = true }
 tracing-actix-web = { workspace = true }
+casbin = { workspace = true }
+jsonwebtoken = { workspace = true }
+argon2 = { workspace = true }
+deadpool-redis = { workspace = true }
+redis = { workspace = true }
 
-# Serialization
 serde = { workspace = true }
 serde_json = { workspace = true }
-
-# Validation
 validator = { workspace = true }
-
-# Data types
 rust_decimal = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
-
-# ORM (for query building in handlers)
 sea-orm = { workspace = true }
-
-# Async
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 flume = { workspace = true }
-
-# Logging
 tracing = { workspace = true }
-
-# Error
 thiserror = { workspace = true }
+async-trait = { workspace = true }
 
 [dev-dependencies]
 actix-rt = { workspace = true }
-tokio = { workspace = true, features = ["test-util"] }
-sea-orm = { workspace = true }
-sea-orm-migration = { workspace = true }
-oxide-arb-storage = { workspace = true, features = ["test-util"] }
+reqwest = { workspace = true }
 testcontainers = { workspace = true }
 testcontainers-modules = { workspace = true }
-reqwest = { workspace = true }
+oxide-arb-storage = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true
@@ -122,324 +212,542 @@ workspace = true
 
 ---
 
-## 3. 完整路由表
+## 5. 数据模型（oxide-arb-models）
 
-### 3.1 公开端点（无需认证）
+按 `idens/risk_state.rs` 定义 `table()/indexes()/dependencies()/seed_units()`，entity 按 `entities/risk_state.rs`。全部 `#[oxide_schema(lifecycle = "control")]`（与 control_factor 表同生命周期），状态/类型用 `active_string_enum!`，时间戳用 `timestamp_with_write_default`。
 
-| 方法 | 路径 | 说明 | 请求体 | 响应 |
-|---|---|---|---|---|
-| GET | `/health` | 健康检查（存活探针） | — | `{ "status": "ok" }` |
-| GET | `/ready` | 就绪检查（DB + CH + Redis） | — | `{ "ready": true, "checks": {...} }` |
-| GET | `/metrics` | Prometheus exposition format | — | text/plain |
+### 5.1 表结构
 
-### 3.2 系统控制（`/api/v1/system`）
+#### `user`
+| 列 | 类型 | 约束 |
+|---|---|---|
+| `id` | `UserId` (uuid, text) | PK |
+| `username` | text | NOT NULL, UNIQUE |
+| `password_hash` | text | NOT NULL（argon2id PHC string） |
+| `nickname` | text | NOT NULL |
+| `avatar` | text | NULL |
+| `email` | text | NULL |
+| `phone` | text | NULL |
+| `status` | `UserStatus` | NOT NULL, default `active` |
+| `created_at` / `updated_at` | timestamptz | write default |
 
-| 方法 | 路径 | 说明 | 请求体 | 响应 |
-|---|---|---|---|---|
-| GET | `/api/v1/system/status` | 系统状态概览 | — | `SystemStatusResponse` |
-| POST | `/api/v1/system/halt` | 紧急停止交易 | `{ "reason": "..." }` | `{ "halted": true }` |
-| POST | `/api/v1/system/resume` | 恢复交易 | — | `{ "resumed": true }` |
-| POST | `/api/v1/system/mode` | 切换执行模式 | `{ "mode": "Live\|Paper\|DryRun" }` | `{ "mode": "Live" }` |
-| GET | `/api/v1/system/health` | 详细健康报告 | — | `HealthReport` |
+索引：`uq_user_username (username)`。
 
-### 3.3 市场数据（`/api/v1/markets`）
+#### `role`
+| 列 | 类型 | 约束 |
+|---|---|---|
+| `id` | `RoleId` | PK |
+| `code` | text | NOT NULL, UNIQUE（Casbin 策略主体） |
+| `name` | text | NOT NULL |
+| `description` | text | NULL |
+| `kind` | `RoleKind` | NOT NULL（builtin/custom） |
+| `status` | `RoleStatus` | NOT NULL, default `enabled` |
+| `sort` | integer | NOT NULL, default 0 |
+| `created_at` / `updated_at` | timestamptz | |
 
-| 方法 | 路径 | 说明 | 请求体 | 响应 |
-|---|---|---|---|---|
-| GET | `/api/v1/markets` | 已监控市场列表 | `?status=active&page=1&size=50` | `Paginated<MarketSummary>` |
-| GET | `/api/v1/markets/{id}` | 市场详情 + 实时 orderbook | — | `MarketDetail` |
-| POST | `/api/v1/markets/{id}/subscribe` | 订阅市场数据流 | — | `{ "subscribed": true }` |
-| POST | `/api/v1/markets/{id}/unsubscribe` | 取消订阅 | — | `{ "unsubscribed": true }` |
-| GET | `/api/v1/markets/{id}/book` | 当前 L2 orderbook 快照 | `?depth=10` | `OrderbookSnapshot` |
+索引：`uq_role_code (code)`。
 
-### 3.4 机会数据（`/api/v1/opportunities`）
+#### `menu`
+| 列 | 类型 | 约束 |
+|---|---|---|
+| `id` | `MenuId` | PK |
+| `parent_id` | `MenuId` | NULL（根为 NULL） |
+| `name` | text | NOT NULL |
+| `kind` | `MenuKind` | NOT NULL（directory/menu/button） |
+| `path` | text | NULL（前端路由） |
+| `component` | text | NULL |
+| `title` | text | NOT NULL |
+| `icon` | text | NULL |
+| `permission_code` | text | NULL（关联 `ResourceType:Operation`，button 级权限点） |
+| `sort` | integer | NOT NULL, default 0 |
+| `keep_alive` | boolean | NOT NULL, default false |
+| `hide_in_menu` | boolean | NOT NULL, default false |
+| `status` | `RoleStatus`（复用 enabled/disabled） | |
+| `created_at` / `updated_at` | timestamptz | |
 
-| 方法 | 路径 | 说明 | 请求体 | 响应 |
-|---|---|---|---|---|
-| GET | `/api/v1/opportunities/recent` | 最近 N 个检测到的机会 | `?limit=50` | `Vec<OpportunitySummary>` |
-| GET | `/api/v1/opportunities/history` | 历史机会查询 | `?from=...&to=...&market_id=...` | `Paginated<OpportunitySummary>` |
-| GET | `/api/v1/opportunities/{id}` | 机会详情 | — | `OpportunityDetail` |
-| GET | `/api/v1/opportunities/stats` | 机会统计 | `?period=24h\|7d\|30d` | `OpportunityStats` |
+索引：`idx_menu_parent (parent_id, sort)`。
 
-### 3.5 交易数据（`/api/v1/trades`）
+#### `user_role`
+| 列 | 类型 | 约束 |
+|---|---|---|
+| `id` | uuid | PK |
+| `user_id` | `UserId` | FK → user.id |
+| `role_id` | `RoleId` | FK → role.id |
+| `created_at` | timestamptz | |
 
-| 方法 | 路径 | 说明 | 请求体 | 响应 |
-|---|---|---|---|---|
-| GET | `/api/v1/trades` | 交易列表 | `?from=...&to=...&outcome=...&page=1&size=50` | `Paginated<TradeSummary>` |
-| GET | `/api/v1/trades/{id}` | 交易详情（含决策链） | — | `TradeDetail` |
-| GET | `/api/v1/trades/{id}/decisions` | 单笔交易决策链 | — | `Vec<DecisionStep>` |
-| GET | `/api/v1/trades/pnl` | PnL 汇总 | `?period=daily\|weekly\|monthly` | `PnlSummary` |
-| GET | `/api/v1/trades/pnl/daily` | 每日 PnL 时序 | `?from=...&to=...` | `Vec<DailyPnl>` |
-| GET | `/api/v1/trades/pnl/attribution` | PnL 归因 | `?group_by=market\|category` | `Vec<PnlAttribution>` |
+索引：`uq_user_role (user_id, role_id)`、`idx_user_role_role (role_id)`。
 
-### 3.6 风控端点（`/api/v1/risk`）
+#### `role_menu`
+| 列 | 类型 | 约束 |
+|---|---|---|
+| `id` | uuid | PK |
+| `role_id` | `RoleId` | FK → role.id |
+| `menu_id` | `MenuId` | FK → menu.id |
 
-| 方法 | 路径 | 说明 | 请求体 | 响应 |
-|---|---|---|---|---|
-| GET | `/api/v1/risk/circuit-breaker` | 熔断器状态 | — | `CircuitBreakerStatus` |
-| POST | `/api/v1/risk/circuit-breaker/reset` | 重置熔断器 | `{ "level": 1 }` | `{ "reset": true }` |
-| GET | `/api/v1/risk/blacklist` | 黑名单列表 | — | `Vec<BlacklistEntry>` |
-| POST | `/api/v1/risk/blacklist` | 添加黑名单条目 | `{ "scope": "Market", "target": "...", "reason": "..." }` | `BlacklistEntry` |
-| DELETE | `/api/v1/risk/blacklist/{id}` | 移除黑名单条目 | — | `{ "removed": true }` |
-| GET | `/api/v1/risk/positions` | 持仓概览 | — | `Vec<PositionSummary>` |
-| GET | `/api/v1/risk/exposure` | 总风险敞口 | — | `ExposureReport` |
-| GET | `/api/v1/risk/daily-loss` | 当日亏损统计 | — | `DailyLossGauge` |
+索引：`uq_role_menu (role_id, menu_id)`。
 
-### 3.7 配置端点（`/api/v1/config`）
+#### `casbin_rule`
+| 列 | 类型 | 约束 |
+|---|---|---|
+| `id` | bigint | PK auto |
+| `ptype` | text | NOT NULL（`p` / `g`） |
+| `v0`..`v5` | text | NULL |
 
-| 方法 | 路径 | 说明 | 请求体 | 响应 |
-|---|---|---|---|---|
-| GET | `/api/v1/config` | 当前全量运行时配置 | — | `RuntimeConfig` |
-| PATCH | `/api/v1/config` | 部分更新运行时配置 | `{ "path.to.field": value }` | `RuntimeConfig` |
-| GET | `/api/v1/config/audit` | 配置变更审计日志 | `?limit=50` | `Vec<ConfigAuditEntry>` |
-| GET | `/api/v1/config/calibration` | 当前校准参数 | — | `CalibrationSnapshot` |
-| PATCH | `/api/v1/config/calibration` | 更新校准参数 | `{ ... }` | `CalibrationSnapshot` |
+索引：`idx_casbin_ptype (ptype)`、`idx_casbin_v0 (v0)`。
 
-### 3.8 分析端点（`/api/v1/analytics`）
+`dependencies()`：`user_role` 依赖 `user` + `role`；`role_menu` 依赖 `role` + `menu`（保证 DDL 拓扑顺序）。
 
-| 方法 | 路径 | 说明 | 请求体 | 响应 |
-|---|---|---|---|---|
-| GET | `/api/v1/analytics/daily` | 每日报告 | `?date=2025-01-15` | `DailyReport` |
-| GET | `/api/v1/analytics/weekly` | 每周报告 | `?week=2025-W03` | `WeeklyReport` |
-| GET | `/api/v1/analytics/edge-distribution` | Edge 分布图数据 | `?period=7d` | `EdgeDistribution` |
-| GET | `/api/v1/analytics/market-performance` | 市场表现排名 | `?sort=pnl&limit=20` | `Vec<MarketPerformance>` |
+### 5.2 新增 enums（`enums/rbac.rs`，`active_string_enum!`）
 
-### 3.9 Replay 端点（`/api/v1/replay`）
-
-| 方法 | 路径 | 说明 | 请求体 | 响应 |
-|---|---|---|---|---|
-| POST | `/api/v1/replay` | 提交 replay 任务 | `ReplayConfig` | `{ "task_id": "..." }` |
-| GET | `/api/v1/replay/{task_id}` | 查询 replay 状态/报告 | — | `ReplayTaskStatus` |
-| GET | `/api/v1/replay/history` | 历史 replay 列表 | `?limit=20` | `Vec<ReplayTaskSummary>` |
-
----
-
-## 4. WebSocket 协议设计
-
-### 4.1 连接端点
-
-```
-GET /api/v1/ws?token={api_key}
-```
-
-升级为 WebSocket 连接后，服务端推送实时事件，客户端可发送订阅/取消指令。
-
-### 4.2 消息格式（JSON）
-
-所有 WebSocket 消息使用统一 JSON envelope：
-
-```json
-{
-  "type": "event_type",
-  "timestamp": "2025-01-15T10:30:00.000Z",
-  "data": { ... }
+```rust
+active_string_enum! {
+    pub enum UserStatus { Active => "active", Disabled => "disabled" }
+}
+active_string_enum! {
+    pub enum RoleKind { Builtin => "builtin", Custom => "custom" }
+}
+active_string_enum! {
+    pub enum RoleStatus { Enabled => "enabled", Disabled => "disabled" }
+}
+active_string_enum! {
+    pub enum MenuKind { Directory => "directory", Menu => "menu", Button => "button" }
+}
+active_string_enum! {
+    /// Resource categories addressable by Casbin `p` policies.
+    pub enum ResourceType {
+        System => "system", Market => "market", Opportunity => "opportunity",
+        Trade => "trade", Pnl => "pnl", Risk => "risk", Blacklist => "blacklist",
+        RuntimeConfig => "runtime_config", ControlFactor => "control_factor",
+        Publication => "publication", Materialization => "materialization",
+        Replay => "replay", Analytics => "analytics", Audit => "audit",
+        User => "user", Role => "role", Menu => "menu", Permission => "permission",
+    }
+}
+active_string_enum! {
+    /// Operation verbs in Casbin `p` policies.
+    pub enum Operation {
+        Read => "read", Create => "create", Update => "update", Delete => "delete",
+        Assign => "assign", Halt => "halt", Resume => "resume", SwitchMode => "switch_mode",
+        Reset => "reset", Reject => "reject", Shadow => "shadow", Publish => "publish",
+        Rollback => "rollback", Activate => "activate", Enqueue => "enqueue",
+        Emergency => "emergency",
+    }
 }
 ```
 
-### 4.3 服务端推送消息类型
+`RESOURCE_OPERATIONS`：静态 `&[(ResourceType, &[Operation])]` 映射，用于：(a) seed `super_admin` / builtin 角色全量 `p`；(b) 校验角色权限分配请求的合法性（防止分配不存在的 resource×op 组合）。
 
-| type | 触发条件 | data 内容 |
+### 5.3 ID 新类型（`types/ids.rs`）
+
+```rust
+/// RBAC user identifier (`usr_<uuid v7>`).
+#[derive(TypedId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct UserId(Arc<str>);
+/// RBAC role identifier (`rol_<uuid v7>`).
+#[derive(TypedId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RoleId(Arc<str>);
+/// RBAC menu identifier (`mnu_<uuid v7>`).
+#[derive(TypedId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MenuId(Arc<str>);
+```
+
+各自 `new_v7()` 带前缀。
+
+### 5.4 破坏式变更：删除 `OperatorRole`
+
+- 删除 `enums/control_factor.rs` 中 `OperatorRole`。
+- `domain/control_factor/persistence.rs`：`AuditActor.actor_role: String`、`NewControlFactorAuditEvent.actor_role: String`、`ControlFactorAuditEventInfo.actor_role: String`。
+- `domain/control_factor/audit.rs`：`AuditEventContent.actor_role: &str`（字段顺序保持 → 哈希契约不变）。
+- `entities/control_factor_audit_event.rs`：`actor_role: String`（`#[sea_orm(column_type = "Text")]`）；DDL 列类型保持 `text`。
+- 连带同步：`oxide-arb-control/src/materialization/runner.rs`、`oxide-arb-repository`（pg impl + tests）、`oxide-arb-control/tests/governance_snapshot_notify.rs`、`oxide-arb-repository/tests/pg_repository.rs`。
+
+`AuditActor::validate()` 不变（仍校验 actor/request_id/reason 非空）。
+
+---
+
+## 6. 配置（`config/web.rs`，挂入 `Inner.web`）
+
+```rust
+#[derive(Debug, Clone, Deserialize)]
+pub struct WebConfig {
+    pub listen_host: String,          // default "0.0.0.0"
+    pub listen_port: u16,             // default 8080
+    pub cors_allowed_origins: Vec<String>,
+    pub serve_static_ui: bool,
+    pub static_ui_dir: String,        // default "static/ui"
+    pub jwt: JwtConfig,
+    pub bootstrap_admin: BootstrapAdmin,  // 仅首次 seed 使用
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct JwtConfig {
+    pub secret: String,               // env-only 推荐：OXIDE_ARB__WEB__JWT__SECRET
+    pub issuer: String,               // default "oxide-arb"
+    pub access_ttl_secs: i64,         // default 900 (15m)
+    pub refresh_ttl_secs: i64,        // default 604800 (7d)
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct BootstrapAdmin {
+    pub username: String,             // default "admin"
+    pub password: String,            // env-only：OXIDE_ARB__WEB__BOOTSTRAP_ADMIN__PASSWORD
+}
+```
+
+全字段 `#[serde(default)]`，env 覆盖 `OXIDE_ARB__WEB__*`。`Settings::ensure_valid_for_mode`：Live 模式必须配置非默认 `jwt.secret` 与 `bootstrap_admin.password`（fail-closed）。
+
+---
+
+## 7. 认证体系（JWT + argon2id + 黑名单）
+
+### 7.1 Claims
+
+```rust
+/// JWT claims. Roles are intentionally NOT embedded — they are loaded at
+/// request time so authorization changes take effect without re-login.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Claims {
+    pub jti: String,           // unique token id (blacklist key)
+    pub sub: String,           // user_id (stable Casbin subject)
+    pub iss: String,
+    pub iat: i64,
+    pub nbf: i64,
+    pub exp: i64,
+    pub username: String,
+    pub token_type: TokenType, // Access | Refresh
+}
+```
+
+### 7.2 端点
+
+| 方法 | 路径 | 说明 | 鉴权 |
+|---|---|---|---|
+| POST | `/api/v1/auth/login` | 用户名/密码 → access+refresh | public |
+| POST | `/api/v1/auth/refresh` | refresh → 旋转 access+refresh | public（校验 refresh + 黑名单） |
+| POST | `/api/v1/auth/logout` | access+refresh jti 入黑名单 | authN only |
+| GET | `/api/v1/auth/me` | 当前用户 + 角色 + 可访问菜单 | authN only |
+
+### 7.3 登录序列
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant W as authn/login handler
+    participant R as UserRepository
+    participant J as jwt.rs
+    C->>W: POST /auth/login {username, password}
+    W->>R: find_by_username(status=active)
+    R-->>W: User{password_hash}
+    W->>W: argon2id verify(password, hash)
+    alt 验证失败
+        W-->>C: 401 invalid credentials
+    else 验证成功
+        W->>J: encode access(jti_a) + refresh(jti_r)
+        J-->>W: tokens
+        W-->>C: 200 {access_token, refresh_token, expires_in}
+    end
+```
+
+### 7.4 黑名单（复用 Redis）
+
+- key：`oxide_arb:jwt:blacklist:<jti>`，value `1`，TTL = token 剩余有效期。
+- logout：access+refresh 的 jti 全部写入。
+- refresh 旋转：旧 refresh 的 jti 写入（防重放）。
+- authN 中间件：每次校验 jti 是否在黑名单 → 命中即 401。
+
+### 7.5 密码哈希（`auth/password.rs`）
+
+`argon2id` 默认参数，PHC string 存 `password_hash`。提供 `hash_password(&str) -> String`、`verify_password(&str, &str) -> bool`。
+
+---
+
+## 8. 授权体系（Casbin 动态，fail-closed）
+
+### 8.1 Casbin model（`auth/casbin/model.rs`）
+
+```text
+[request_definition]
+r = sub, obj, act, typ
+
+[policy_definition]
+p = sub, obj, act, typ
+
+[role_definition]
+g = _, _
+
+[policy_effect]
+e = some(where (p.eft == allow))
+
+[matchers]
+m = g(r.sub, "super_admin") \
+ || (p.typ == "resource" && g(r.sub, p.sub) && r.obj == p.obj && r.act == p.act)
+```
+
+- `g = (user_id, role_code)`，`p = (role_code, ResourceType, Operation, "resource")`。
+- `super_admin` 旁路：matcher 首项 `g(r.sub, "super_admin")`，subject 为稳定 user_id。
+
+### 8.2 CasbinService（`service.rs`）
+
+封装 `casbin::CachedEnforcer`：
+- `enforce(user_id, obj, act) -> bool`（typ 固定 `"resource"`）
+- `has_role(user_id, role_code) -> bool`
+- `has_policy(role_code, obj, act) -> bool`（acting_role 校验用）
+- `add_role_for_user / delete_role_for_user`（写 `g`）
+- `add_policy / remove_policy`（写 `p`）
+- `load_policy()`（分配变更后 reload）
+
+### 8.3 SeaOrm adapter（`adapter.rs`）
+
+实现 `casbin::Adapter`：`load_policy`（`SELECT * FROM casbin_rule` → model）、`add_policy`/`remove_policy`（按 ptype+v0..v5 精确匹配，**修复 ng-gateway 仅按 ptype 去重的粗糙逻辑**）、`save_policy`。复用 `entities::casbin_rule`。
+
+### 8.4 PermChecker 路由规则注册表（`checker.rs`）
+
+```rust
+/// Route-level authorization registry. Key = (method, actix matched path).
+/// Unregistered protected routes are DENIED (fail-closed), fixing the
+/// ng-gateway default-allow defect.
+pub struct PermChecker {
+    rules: HashMap<(Method, String), Rule>,
+}
+
+impl PermChecker {
+    pub async fn check(&self, method: &Method, path: &str, claims: &Claims,
+                       roles: &ActorRoles, casbin: &CasbinService) -> Result<(), WebError> {
+        // super_admin bypass
+        if roles.contains("super_admin") { return Ok(()); }
+        match self.rules.get(&(method.clone(), path.to_owned())) {
+            None => Err(WebError::Forbidden), // fail-closed
+            Some(rule) => rule.evaluate(claims, roles, casbin).await,
+        }
+    }
+}
+```
+
+### 8.5 Rule DSL（`rules.rs`）
+
+- `public()` — 跳过 authZ（仅 health/metrics/login/refresh）。
+- `resource_op(ResourceType, Operation)` — `casbin.enforce(user_id, obj, act)`（任一角色）。
+- `acting_role_governed(ResourceType, Operation)` — 治理变更：
+  1. 从 body 取 `acting_role`（缺失 → 400）；
+  2. `casbin.has_role(user_id, acting_role)`（否 → 403）；
+  3. `casbin.has_policy(acting_role, obj, act)`（否 → 403）；
+  4. 通过后将 `acting_role` 注入请求 extensions 供 handler 构造审计信封。
+
+### 8.6 鉴权链路
+
+```mermaid
+flowchart LR
+    Req[Request] --> RID[request_id MW]
+    RID --> AuthN[authn MW: JWT decode + blacklist + load roles]
+    AuthN -->|401| Reject1[401]
+    AuthN --> AuthZ[authz MW: PermChecker.check]
+    AuthZ -->|no rule| Deny[403 fail-closed]
+    AuthZ -->|403| Deny
+    AuthZ -->|ok| Handler[Route handler]
+```
+
+---
+
+## 9. Seed（GraphOrdered RBAC 图）
+
+按 `seed/risk_engine_state.rs` 模式，新增 `seed/rbac/*.rs`，`SeedConflictPolicy::GraphOrdered`，用 `SeedContext` 传递 ID。复用现有 `m20250601_000003_initial_seed` 第 3 lane（topological runner 已就绪）。
+
+```mermaid
+flowchart TD
+    A[rbac_roles\nseed super_admin + builtin\nproduces rbac.roles] --> D[rbac_admin_user\nargon2id bootstrap admin\nproduces rbac.admin_user]
+    B[rbac_menus\nseed menu tree\nproduces rbac.menus]
+    A --> E[rbac_user_role\nadmin -> super_admin]
+    D --> E
+    A --> F[rbac_role_menu\nsuper_admin -> all menus]
+    B --> F
+    A --> G[rbac_casbin\n g admin->super_admin + p builtin full set]
+    D --> G
+    B --> G
+    E --> G
+    F --> G
+```
+
+种子单元（`SeedSpec`，各表 `seed_units()` 返回）：
+1. `rbac.roles.bootstrap` — `produces: Artifact("rbac.roles")`（role code → RoleId 映射写入 ctx）。
+2. `rbac.menus.bootstrap` — `produces: Artifact("rbac.menus")`。
+3. `rbac.admin_user.bootstrap` — `depends_on: [Seed(rbac.roles)]`；密码 = `argon2id(config.web.bootstrap_admin.password)`；`produces: Artifact("rbac.admin_user")`。
+4. `rbac.user_role.bootstrap` — `depends_on: roles + admin_user`。
+5. `rbac.role_menu.bootstrap` — `depends_on: roles + menus`。
+6. `rbac.casbin.bootstrap` — `depends_on: [全部上游]`；写 `g(admin_id, "super_admin")` + 各 builtin 角色 `p` 全集（`RESOURCE_OPERATIONS`）；`conflict_policy: GraphOrdered`。
+
+> 幂等：`seed_application` ledger 按 `(id, version, checksum)`；改种子数据需 bump version/checksum。`InsertIfAbsent` 语义保证 admin 密码不被 re-migration 覆盖。
+
+---
+
+## 10. Repository 层（oxide-arb-repository）
+
+按 `PgRiskStateRepository` 模式（`StorageError` 边界、`New*`/DTO 入参、`DatabaseConnection`、`with_txn` 变体）。新增 `traits/rbac/` + `postgres/rbac/`：
+
+- `UserRepository`：`find_by_username`、`find_by_id`、`create`、`update`、`delete`、`change_status`、`change_password`、`page`。
+- `RoleRepository`：`list`、`find_by_id`、`find_by_code`、`create`、`update`、`delete`、`change_status`。
+- `MenuRepository`：`tree`、`accessible_for_roles(role_ids)`、CRUD。
+- `UserRoleRepository`：`assign`、`revoke`、`list_roles_for_user`（**事务内同步 casbin `g`**）。
+- `RoleMenuRepository`：`assign`、`revoke`、`list_menus_for_role`。
+- `RolePermissionRepository`（逻辑层，写 casbin `p`）：`assign_permissions(role_code, &[(ResourceType, Operation)])`、`list_permissions(role_code)`。
+- `CasbinRepository`：供 adapter 直接读写 `casbin_rule`。
+
+**事务一致性**：user-role（`g`）与 role-permission（`p`）的 DB 写入与 enforcer reload 在同一边界内完成（分配成功后 `casbin.load_policy()`）。
+
+接入 `BuildRepos`（`app/build.rs`）并通过新 `WebBundle` 暴露给 web。
+
+---
+
+## 11. 路由全表 + 权限映射
+
+> 全部 `/api/v1`（除 public）经 authN + authz；`init_rbac_rules` 注册规则；未注册 = 拒绝。
+
+### 11.1 公开（public）
+- `GET /health`、`GET /ready`、`GET /metrics`
+- `POST /api/v1/auth/login`、`POST /api/v1/auth/refresh`
+
+### 11.2 账户（authN only）
+- `POST /auth/logout`、`GET /auth/me`
+
+### 11.3 RBAC 管理（`resource_op`）
+| 端点 | 方法 | 权限 |
 |---|---|---|
-| `opportunity.detected` | 新机会检测到 | `OpportunitySummary` |
-| `opportunity.expired` | 机会过期/消失 | `{ "id": "..." }` |
-| `trade.opened` | 新交易开始执行 | `TradeSummary` |
-| `trade.filled` | 交易完全成交 | `TradeDetail` |
-| `trade.settled` | 交易结算 | `{ "id": "...", "outcome": "...", "pnl": "..." }` |
-| `pnl.update` | PnL 更新（每 5s） | `{ "daily_pnl": "...", "total_pnl": "..." }` |
-| `system.status` | 系统状态变化 | `SystemStatusSnapshot` |
-| `system.alert` | 系统告警 | `{ "level": "warn\|error", "message": "..." }` |
-| `risk.circuit_breaker` | 熔断器状态变化 | `CircuitBreakerStatus` |
-| `risk.position_update` | 持仓变动 | `PositionSummary` |
-| `market.book_update` | orderbook 更新（已订阅市场） | `{ "market_id": "...", "best_bid": ..., "best_ask": ... }` |
-| `market.resolved` | 市场结算 | `{ "market_id": "...", "outcome": "..." }` |
-| `config.changed` | 运行时配置变更 | `{ "path": "...", "old": ..., "new": ... }` |
+| `/users` | GET/POST | `User:Read` / `User:Create` |
+| `/users/{id}` | GET/PUT/DELETE | `User:Read/Update/Delete` |
+| `/users/{id}/status` | PUT | `User:Update` |
+| `/users/{id}/password` | PUT | `User:Update` |
+| `/users/{id}/roles` | POST | `User:Assign` |
+| `/roles` | GET/POST | `Role:Read/Create` |
+| `/roles/{id}` | GET/PUT/DELETE | `Role:Read/Update/Delete` |
+| `/roles/{id}/permissions` | GET/POST | `Permission:Read` / `Role:Assign` |
+| `/roles/{id}/menus` | POST | `Role:Assign` |
+| `/menus` | GET/POST | `Menu:Read/Create` |
+| `/menus/{id}` | PUT/DELETE | `Menu:Update/Delete` |
+| `/menus/accessible` | GET | authN only（按当前用户角色过滤） |
+| `/permissions/catalog` | GET | `Permission:Read` |
 
-### 4.4 客户端指令
+### 11.4 治理控制面（`acting_role_governed`，进审计链）
+| 端点 | 方法 | 权限 | 治理调用 |
+|---|---|---|---|
+| `/control-factor-materializations` | POST | `Materialization:Enqueue` | `MaterializationRunner::enqueue` |
+| `/control-factors` 系列 | GET | `ControlFactor:Read` | 只读 |
+| `/control-factors/{id}/reject` | POST | `ControlFactor:Reject` | `registry.reject_factor` |
+| `/control-factors/{id}/shadow` | POST | `ControlFactor:Shadow` | `registry.promote_to_shadow` |
+| `/control-factors/{id}/publish` | POST | `ControlFactor:Publish` | `registry.publish`（risk-expansion gate） |
+| `/control-factors/publications/{id}/rollback` | POST | `Publication:Rollback` | `registry.rollback_publication` |
+| `/control-factors/.../emergency` | POST | `ControlFactor:Emergency` | `registry.publish`（short-TTL） |
+| `/control-factors/audit` | GET | `Audit:Read` | `load_audit_chain` + `AuditChain::verify` |
+| `/control-factors/publications/{id}/shadow-decisions` | GET | `ControlFactor:Read` | `list/aggregate_shadow_decisions` |
 
+### 11.5 治理版本化配置（替代裸 PATCH）
+| 端点 | 方法 | 权限 | 调用 |
+|---|---|---|---|
+| `/runtime-config` | GET | `RuntimeConfig:Read` | 当前激活版本 |
+| `/runtime-config/versions` | GET/POST | `RuntimeConfig:Read` / `RuntimeConfig:Create` | `create_runtime_config_version` |
+| `/runtime-config/versions/{id}/activate` | POST | `RuntimeConfig:Activate` | `activate_runtime_config_version` |
+| `/runtime-config/versions/{id}/rollback` | POST | `RuntimeConfig:Rollback` | `activate_runtime_config_version`（rollback kind） |
+
+### 11.6 业务 read / 控制（`resource_op`）
+- `system`：`GET /system/status`(`System:Read`)、`POST /system/halt`(`System:Halt`)、`POST /system/resume`(`System:Resume`)、`POST /system/mode`(`System:SwitchMode`)、`GET /system/health`(`System:Read`)
+- `markets`：list/detail/book(`Market:Read`)、subscribe/unsubscribe(`Market:Update`)
+- `opportunities`：recent/history/detail/stats(`Opportunity:Read`)
+- `trades` / `pnl`：list/detail/decisions/pnl*(`Trade:Read` / `Pnl:Read`)
+- `risk`：circuit-breaker/positions/exposure/daily-loss(`Risk:Read`)、circuit-breaker/reset(`Risk:Reset`)、blacklist GET(`Blacklist:Read`)/POST(`Blacklist:Create`)/DELETE(`Blacklist:Delete`)
+- `analytics`：daily/weekly/edge-distribution/market-performance(`Analytics:Read`)
+- `replay`：POST(`Replay:Create`)、GET status/history(`Replay:Read`)
+
+### 11.7 WebSocket / 静态
+- `GET /api/v1/ws?token=<access>`：upgrade 前 JWT + 黑名单校验。
+- 生产：`actix-files` serve `static_ui_dir` + SPA fallback。
+
+---
+
+## 12. 治理控制面接线（Phase 5.5 交接）
+
+### 12.1 职责分层（必须遵守）
+| 层 | 归属 | 职责 |
+|---|---|---|
+| authN | `oxide-arb-web` authn MW | JWT → Claims（actor=user_id） |
+| authZ | `oxide-arb-web` Casbin | 路由级 + 治理 acting_role |
+| 变更信封 | `oxide-arb-web` handler | `AuditActor { actor, actor_role, request_id, reason }`（publish 带 `idempotency_key`） |
+| 治理门控 | `ControlFactorRegistry` | risk-expansion / rollback target / `validate()` |
+| 原子状态机 + 审计链 | `ControlFactorRepository` | 一事务校验+状态变更+全局哈希链 append |
+
+### 12.2 mutating handler 骨架
+
+```rust
+// authZ 已由 authz MW + acting_role_governed 规则完成
+let acting_role = req.extensions().get::<ActingRole>()?.0.clone();
+let envelope = AuditActor {
+    actor: claims.sub.clone(),          // user_id
+    actor_role: acting_role,            // String（acting_role；super_admin 记 "super_admin"）
+    request_id: request_id(&req),       // X-Request-Id / 生成
+    reason: body.reason.clone(),        // 必填，空 → 400
+};
+let outcome = state.ctx.control.registry.publish(envelope, request).await
+    .map_err(WebError::from)?;
+```
+
+### 12.3 `ControlFactorRegistry` API（已交付，web 调用）
+- `reject_factor(envelope, &factor_id) -> Option<ControlFactorValueInfo>`
+- `promote_to_shadow(envelope, PublicationRequest) -> PublishPublicationOutcome`
+- `publish(envelope, PublicationRequest) -> PublishPublicationOutcome`
+- `rollback_publication(envelope, &active_id, &target_id) -> ControlFactorPublicationInfo`
+- `expire_due_factors(envelope) -> ExpireFactorsOutcome`
+- `create_runtime_config_version(envelope, NewRuntimeConfigVersion) -> RuntimeConfigVersionInfo`
+- `activate_runtime_config_version(envelope, NewRuntimeConfigActivation) -> RuntimeConfigActivationInfo`
+- materialization enqueue 不在 registry：`MaterializationRunner::enqueue` / `ControlFactorRepository::enqueue_materialization_run`
+- 只读：`repo.load_active_publication`、`repo.load_audit_chain`、`shadow_repo.list/aggregate_shadow_decisions`
+
+### 12.4 error → HTTP 映射（`error.rs`）
+| 错误 | HTTP |
+|---|---|
+| `AuthError`（invalid/expired/blacklisted） | 401 |
+| authz 拒绝 / `GovernanceError::RiskExpansionNotApproved` | 403 |
+| `GovernanceError::MissingReason` / `MissingField` / validation | 400 |
+| `RollbackTargetMissing` / `FactorNotReadyForPublication` / `FactorSetMismatch` / `EmptyPublication` / `PublicationLockConflict` / `IdempotencyConflict` | 409 |
+| `PublishPublicationOutcome::AlreadyApplied`（幂等重放） | 200（返回已存在 publication） |
+| `StorageError::NotFound` / `RbacError::NotFound` | 404 |
+| `RbacError::Duplicate` | 409 |
+| `AuditChain(_)` / 其他 `Storage(_)` | 500 |
+
+### 12.5 Scheduler / execute worker 接线（进程层）
+- `oxide-arb-core` 增 `oxide-arb-control` 依赖（control 不依赖 core hot path，无循环）。
+- `app/mod.rs` 新增 `queue_control_factor_scheduler()`：用 `PeriodicTask` 每 interval 调 `MaterializationScheduler::tick(Utc::now())`（enqueue-only、`run_dedupe_key` 去重）。
+- **execute worker**：独立 `PeriodicTask`/消费循环轮询 `Queued` run → `MaterializationRunner::execute_run`。
+- `SchedulerCycleReport::alerts`（`Overdue` / `Stale`）映射到现有 `AlertDispatcher`。
+- `SchedulePolicy` 来源：runtime config / `config/oxide-arb.toml`（`production_default` 仅缺省）；`created_by` / `code_git_sha` 写 manifest。
+- never-publish 保证：scheduler 只走 `latest_run_for_schedule` + `enqueue_materialization_run`（单测断言 `publish_calls() == 0`）。
+
+### 12.6 Live refresher 接触点
+publish/rollback 后，`oxide-arb-core/src/control/factor_refresher.rs` 经 `notify_handle()` 被唤醒（registry 已配 `with_snapshot_refresh_notify`），轮询兜底；web 无需额外实现。
+
+---
+
+## 13. WebSocket
+
+### 13.1 连接与鉴权
+`GET /api/v1/ws?token=<access>`：upgrade 前复用 authN 逻辑校验 JWT + 黑名单（**修复 ng-gateway WS 无鉴权缺陷**）。
+
+### 13.2 消息 envelope（JSON）
 ```json
-// 订阅指定市场的 book 更新
+{ "type": "event_type", "timestamp": "2025-01-15T10:30:00.000Z", "data": { } }
+```
+
+### 13.3 服务端推送类型
+`opportunity.detected/expired`、`trade.opened/filled/settled`、`pnl.update`、`system.status/alert`、`risk.circuit_breaker/position_update`、`market.book_update/resolved`、`control.published/rolled_back`、`config.activated`。
+
+### 13.4 客户端指令
+```json
 { "action": "subscribe", "channel": "market.book", "market_id": "0x..." }
-
-// 取消订阅
 { "action": "unsubscribe", "channel": "market.book", "market_id": "0x..." }
-
-// Ping (心跳)
+{ "action": "sync" }
 { "action": "ping" }
 ```
 
-### 4.5 WsBroadcaster 架构
+### 13.5 Broadcaster
+核心子系统经 `flume::Sender<CoreEvent>` 发事件；`WsBroadcaster`（专用 tokio task）消费并按每 session 订阅 fanout。心跳：服务端每 15s ping，30s 无 pong 断开。连接后立即推 `system.status` 快照；`sync` 返回全量（持仓/熔断/最近 opportunities/当日 PnL）。
 
 ```rust
-/// Central fan-out broadcaster for all real-time events.
-///
-/// Core subsystems emit events to a flume channel. The broadcaster receives
-/// these events and fans out to all connected WsSession instances.
-pub struct WsBroadcaster {
-    /// Receive end of the core event channel.
-    event_rx: flume::Receiver<CoreEvent>,
-    /// Active WebSocket sessions.
-    sessions: DashMap<Uuid, WsSessionHandle>,
-}
-
-/// Per-connection state maintained by the broadcaster.
-pub struct WsSessionHandle {
-    /// Sender to push messages to this client's WebSocket.
-    tx: flume::Sender<WsMessage>,
-    /// Channels this client has subscribed to.
-    subscriptions: HashSet<String>,
-    /// Connected at timestamp.
-    connected_at: DateTime<Utc>,
-}
-
-impl WsBroadcaster {
-    /// Main broadcast loop — runs in a dedicated tokio task.
-    pub async fn run(self, shutdown: CancellationToken) {
-        loop {
-            tokio::select! {
-                Ok(event) = self.event_rx.recv_async() => {
-                    self.fanout(&event).await;
-                }
-                () = shutdown.cancelled() => break,
-            }
-        }
-    }
-
-    /// Send an event to all sessions whose subscriptions match.
-    async fn fanout(&self, event: &CoreEvent) {
-        let msg = WsMessage::from(event);
-        let channel = msg.channel();
-
-        for session in self.sessions.iter() {
-            if session.subscriptions.contains(channel) || msg.is_broadcast() {
-                let _ = session.tx.try_send(msg.clone());
-            }
-        }
-    }
-}
-```
-
-### 4.6 重连与状态同步
-
-客户端断线重连后的处理策略：
-
-1. 客户端连接后立即推送一个 `system.status` 快照
-2. 客户端可发送 `{ "action": "sync" }` 请求全量状态同步
-3. 服务端响应包含：当前持仓、熔断器状态、最近 10 个 opportunities、当日 PnL
-4. 心跳：服务端每 15s 发送 ping，客户端需 30s 内 pong，否则断开
-
----
-
-## 5. 认证中间件
-
-```rust
-/// API key authentication middleware.
-///
-/// Extracts bearer token from `Authorization` header.
-/// Health and metrics endpoints are excluded at the route level.
-pub struct ApiKeyAuth;
-
-/// Shared API key for single-user auth.
-pub struct ApiKey(pub Arc<str>);
-```
-
-认证流程：
-
-1. `Authorization: Bearer <token>` header 提取
-2. 与 `Settings.keys.api_key` 比对
-3. 不匹配 → `401 Unauthorized`（`WebResponse::error`）
-4. 未配置 API key → 跳过认证（开发模式）
-
-WebSocket 认证通过 URL query param `?token=<key>` 传递，在 upgrade 前校验。
-
----
-
-## 6. 运行时配置 API
-
-### 6.1 配置热更新流程
-
-```
-PATCH /api/v1/config
-{
-  "risk.circuit_breaker.l1_loss_usd": 100,
-  "sizing.max_position_usd": 200,
-  "detection.endgame.min_edge_bps": 300
-}
-```
-
-处理流程：
-
-1. 校验 JSON path 是否存在于 `RuntimeConfig` schema
-2. 校验值类型和范围（validator）
-3. 生成 `ConfigAuditEntry`（who, when, path, old_value, new_value）
-4. 原子更新 `ArcSwap<RuntimeConfig>` 快照
-5. 持久化到 PostgreSQL `runtime_config` 表
-6. 通过 WsBroadcaster 推送 `config.changed` 事件
-7. 返回更新后的完整配置
-
-### 6.2 审计日志
-
-```rust
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConfigAuditEntry {
-    pub id: Uuid,
-    pub timestamp: DateTime<Utc>,
-    pub path: String,
-    pub old_value: serde_json::Value,
-    pub new_value: serde_json::Value,
-    pub source: ConfigChangeSource,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ConfigChangeSource {
-    Api,
-    Cli,
-    StartupDefault,
-}
-```
-
-### 6.3 不可热更新字段
-
-以下字段仅在重启时生效（PATCH 返回 warning）：
-
-- `db.*`（数据库连接配置）
-- `analytics.*`（ClickHouse 连接配置）
-- `cache.redis.*`（Redis 连接配置）
-- `keys.*`（密钥配置）
-- `venues.polymarket.onchain.*`（链上合约地址）
-
----
-
-## 7. 实时数据推送架构
-
-```
-┌─────────────────┐
-│  Core Subsystems │
-│  (Detection,     │
-│   Execution,     │──── CoreEvent ────▶ flume::Sender
-│   Risk Engine)   │
-└─────────────────┘
-                                          │
-                                          ▼
-                                  ┌───────────────┐
-                                  │ WsBroadcaster  │ (dedicated tokio task)
-                                  │  - filter by   │
-                                  │    subscription │
-                                  │  - serialize    │
-                                  │    to WsMessage │
-                                  └───────┬───────┘
-                                          │
-                          ┌───────────────┼───────────────┐
-                          ▼               ▼               ▼
-                    ┌──────────┐   ┌──────────┐   ┌──────────┐
-                    │ Session1 │   │ Session2 │   │ Session3 │
-                    │ (UI tab) │   │ (mobile) │   │ (debug)  │
-                    └──────────┘   └──────────┘   └──────────┘
-```
-
-核心系统通过 `flume::Sender<CoreEvent>` 发送事件，无需知道 WS 层存在。`WsBroadcaster` 消费事件并根据每个 session 的订阅状态进行分发。
-
-```rust
-/// Events emitted by core subsystems, consumed by WsBroadcaster.
 pub enum CoreEvent {
     OpportunityDetected(Opportunity),
     OpportunityExpired(OpportunityId),
@@ -451,307 +759,122 @@ pub enum CoreEvent {
     CircuitBreakerTripped { level: u8, reason: String },
     PositionChanged(PositionInfo),
     MarketResolved { market_id: MarketId, outcome: bool },
-    ConfigChanged { path: String, old: serde_json::Value, new: serde_json::Value },
+    ControlPublished { publication_id: String, mode: PublicationMode },
+    ConfigActivated { version_id: String },
     Alert { level: AlertLevel, message: String },
 }
 ```
 
 ---
 
-## 8. 静态文件服务
+## 14. 静态文件
 
-生产模式下，Rust 二进制直接 serve Vue 构建产物：
-
-```rust
-/// Register static file serving for the Vue UI in production mode.
-pub fn configure_static_files(cfg: &mut web::ServiceConfig, ui_dir: &str) {
-    cfg.service(
-        actix_files::Files::new("/", ui_dir)
-            .index_file("index.html")
-            .default_handler(|req: actix_web::dev::ServiceRequest| {
-                let path = format!("{}/index.html", ui_dir);
-                // SPA fallback: serve index.html for all non-API routes
-                // so Vue Router handles client-side routing
-                async move {
-                    let response = actix_files::NamedFile::open(path)?
-                        .into_response(&req.request());
-                    Ok(req.into_response(response))
-                }
-            }),
-    );
-}
-```
-
-构建流程：
-1. `cd oxide-arb-ui && pnpm build` → 产物在 `dist/`
-2. 将 `dist/` 复制到 Rust 项目 `static/ui/`
-3. Rust 二进制启动时检测 `static/ui/` 是否存在
-4. 存在 → 注册静态文件路由；不存在 → 仅 API 模式
+生产模式 `actix-files::Files::new("/", static_ui_dir).index_file("index.html")`，`default_handler` 对所有非 API 路由回退 `index.html`（Vue Router 客户端路由）。启动检测目录存在则注册，否则仅 API 模式。
 
 ---
 
-## 9. 错误响应 Envelope
+## 15. 响应 envelope
 
-所有 API 响应使用统一 JSON 格式：
-
-### 9.1 成功响应
-
-```json
-{
-  "code": 200,
-  "message": "ok",
-  "data": { ... }
-}
-```
-
-### 9.2 错误响应
-
-```json
-{
-  "code": 400,
-  "message": "validation error: min_edge_bps must be >= 100",
-  "data": null
-}
-```
-
-### 9.3 分页响应
-
-```json
-{
-  "code": 200,
-  "message": "ok",
-  "data": {
-    "items": [ ... ],
-    "total": 1234,
-    "page": 1,
-    "size": 50,
-    "has_next": true
-  }
-}
-```
-
-### 9.4 WebError 枚举
+成功：`{ "code": 200, "message": "ok", "data": {...} }`
+错误：`{ "code": 400, "message": "...", "data": null }`
+分页：`{ "code": 200, "message": "ok", "data": { "items": [], "total": 1234, "page": 1, "size": 50, "has_next": true } }`
 
 ```rust
 #[derive(Debug, thiserror::Error)]
 pub enum WebError {
-    #[error("not found: {0}")]
-    NotFound(String),
-
-    #[error("bad request: {0}")]
-    BadRequest(String),
-
-    #[error("unauthorized")]
-    Unauthorized,
-
-    #[error("conflict: {0}")]
-    Conflict(String),
-
-    #[error("internal error: {0}")]
-    Internal(String),
-
-    #[error("risk denial [level {level}]: {reason}")]
-    RiskDenial { level: u8, reason: String },
-
-    #[error("service unavailable: {0}")]
-    ServiceUnavailable(String),
+    #[error("unauthorized: {0}")] Unauthorized(String),
+    #[error("forbidden")] Forbidden,
+    #[error("not found: {0}")] NotFound(String),
+    #[error("bad request: {0}")] BadRequest(String),
+    #[error("conflict: {0}")] Conflict(String),
+    #[error("internal error: {0}")] Internal(String),
+    #[error("service unavailable: {0}")] ServiceUnavailable(String),
 }
+```
 
-impl actix_web::ResponseError for WebError {
-    fn status_code(&self) -> StatusCode {
-        match self {
-            Self::NotFound(_) => StatusCode::NOT_FOUND,
-            Self::BadRequest(_) => StatusCode::BAD_REQUEST,
-            Self::Unauthorized => StatusCode::UNAUTHORIZED,
-            Self::Conflict(_) => StatusCode::CONFLICT,
-            Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            Self::RiskDenial { .. } => StatusCode::CONFLICT,
-            Self::ServiceUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
-        }
-    }
+`impl ResponseError for WebError`：`status_code()` 按上表；`error_response()` 输出统一 envelope。`From<RegistryError>` / `From<GovernanceError>` / `From<StorageError>` / `From<RbacError>` / `From<AuthError>` 实现 §12.4 映射。
 
-    fn error_response(&self) -> HttpResponse {
-        WebResponse::error(self.status_code(), self.to_string())
-    }
-}
+---
+
+## 16. AppContext / bootstrap 接线（oxide-arb-core）
+
+- `app/build.rs`：`BuildRepos` 增 RBAC repos；构造 `CasbinService`（连 PG adapter，`load_policy()`）；组装 `AppState`；新增 `WebBundle` 暴露 web 依赖。
+- `app/mod.rs`：新增 `queue_web_server()`（`pending_tasks.push(TaskId::WebServer, |shutdown| spawn_web_server(state, shutdown))`）+ `queue_control_factor_scheduler()` + execute worker。
+- `task_registry.rs`：`TaskId::WebServer` 注册 `ShutdownStage`（早于 detection 关停，先停止对外接受请求）。
+- `bootstrap.rs`：`AppContext::build` 后依次 `ctx.queue_web_server()` / `ctx.queue_control_factor_scheduler()`。
+
+```mermaid
+flowchart TD
+    Boot[bootstrap::run] --> Build[AppContext::build]
+    Build --> Mig[Migrator::up + RBAC seeds]
+    Build --> Repos[BuildRepos + RBAC repos]
+    Repos --> Casbin[CasbinService.load_policy]
+    Casbin --> State[AppState]
+    State --> QWeb[queue_web_server]
+    State --> QSched[queue_control_factor_scheduler]
+    State --> QExec[queue execute worker]
+    QWeb --> Runner[AppRunner.run]
+    QSched --> Runner
+    QExec --> Runner
 ```
 
 ---
 
-## 10. 路由注册
+## 17. 破坏式变更清单（零兼容）
 
-```rust
-pub fn configure(cfg: &mut web::ServiceConfig, metrics_enabled: bool, serve_ui: bool) {
-    // Public endpoints (no auth)
-    health::configure(cfg);
-    if metrics_enabled {
-        metrics::configure(cfg);
-    }
-
-    // Authenticated API
-    cfg.service(
-        web::scope("/api/v1")
-            .wrap(ApiKeyAuth)
-            .configure(system::configure)
-            .configure(markets::configure)
-            .configure(opportunities::configure)
-            .configure(trades::configure)
-            .configure(risk::configure)
-            .configure(config::configure)
-            .configure(pnl::configure)
-            .configure(replay::configure)
-            .route("/ws", web::get().to(ws::handler::ws_upgrade)),
-    );
-
-    // Static UI files (production only)
-    if serve_ui {
-        static_files::configure_static_files(cfg, "static/ui");
-    }
-}
-```
+- 删除 `OperatorRole` 枚举（8 文件：enums/control_factor、domain/persistence、domain/audit、entities/audit_event、control/runner、repository pg+tests、control tests）。
+- 审计 `actor_role`：`OperatorRole → String`。
+- 删除原单用户 API-key（`ApiKeyAuth` / `Settings.keys.api_key`）— 改为 JWT。
+- 删除原裸 `PATCH /api/v1/config` + `ArcSwap<RuntimeConfig>` 即时热更 — 改为治理版本化。
+- 关联表用显式 join（不引入 `relation` 多态表）。
+- 以上均无生产数据依赖（greenfield）。
 
 ---
 
-## 11. 验收检查清单
+## 18. 测试策略
 
-- [ ] 所有 REST 端点返回正确的 `WebResponse` JSON envelope
-- [ ] `GET /health` 返回 200 + `{ "status": "ok" }`
-- [ ] `GET /ready` 检查 PostgreSQL + ClickHouse + Redis 连通性
-- [ ] `GET /metrics` 返回 Prometheus text format
-- [ ] Bearer token 认证正确拦截未授权请求（401）
-- [ ] 未配置 API key 时跳过认证（开发模式）
-- [ ] WebSocket 连接成功建立，收到初始 `system.status` 快照
-- [ ] WebSocket 订阅/取消订阅指令正确过滤消息
-- [ ] 心跳超时（30s 无 pong）自动断开连接
-- [ ] 断线重连后 `sync` 指令返回全量状态
-- [ ] `PATCH /api/v1/config` 原子更新 `ArcSwap<RuntimeConfig>`
-- [ ] 配置变更写入 `runtime_config` 表并生成审计日志
-- [ ] 配置变更通过 WS 推送 `config.changed` 事件
-- [ ] 不可热更新字段返回 warning 而非 error
-- [ ] CORS 开发模式下 allow_any_origin
-- [ ] 生产模式下 serve 静态 Vue 文件，SPA fallback 正确工作
-- [ ] 分页参数校验（page >= 1, size ∈ [1, 100]）
-- [ ] 全部端点有 request-id tracing
-- [ ] `POST /api/v1/system/halt` 正确触发紧急停止
-- [ ] `POST /api/v1/replay` 异步提交 replay 任务，返回 task_id
+- **models**：`active_string_enum` round-trip；`RESOURCE_OPERATIONS` 完整性；删除 `OperatorRole` 后审计哈希与既有测试向量一致（`actor_role: String` 序列化等价）。
+- **repository（testcontainers PG）**：RBAC CRUD；user-role/role-menu 事务一致性；casbin adapter `load/save/add/remove` 精确匹配；权限分配后 enforce 生效。
+- **web（actix test + PG）**：login/refresh/logout（含黑名单重放拒绝）；authz 矩阵（每端点正确角色放行 / 越权 403 / 未注册路由 403）；`super_admin` 旁路；治理端点 `acting_role` 校验 + 审计链 append + `AuditChain::verify`；runtime-config 版本化幂等（`AlreadyApplied → 200`）。
+- **migration**：`migration_pg` 断言 RBAC seed 计数 + topological 顺序 + admin 不被 re-migration 覆盖。
+- **scheduler**：`tick` enqueue-only、`publish_calls() == 0`。
 
 ---
 
-## 12. 预估工作量
+## 19. 验收清单
 
-| 组件 | 源码 LoC | 测试 LoC |
-|---|---|---|
-| `lib.rs` + `state.rs` | ~100 | ~30 |
-| `response.rs` + `extractors.rs` | ~200 | ~120 |
-| `middleware/` (auth + request_id) | ~150 | ~80 |
-| `routes/system.rs` | ~120 | ~80 |
-| `routes/markets.rs` | ~180 | ~100 |
-| `routes/opportunities.rs` | ~150 | ~80 |
-| `routes/trades.rs` + `pnl.rs` | ~250 | ~120 |
-| `routes/risk.rs` | ~200 | ~100 |
-| `routes/config.rs` | ~180 | ~80 |
-| `routes/replay.rs` | ~80 | ~40 |
-| `ws/` (handler + session + broadcaster + protocol) | ~500 | ~200 |
-| `static_files.rs` | ~50 | ~20 |
-| **合计** | **~2,160** | **~1,050** |
+- [ ] 删除 `OperatorRole`，全 workspace 编译通过，审计链测试通过。
+- [ ] `POST /auth/login` argon2id 校验 + 签发 access/refresh。
+- [ ] `POST /auth/refresh` 旋转并将旧 refresh 入黑名单。
+- [ ] `POST /auth/logout` 后旧 token 被拒（401）。
+- [ ] 未注册路由返回 403（fail-closed）。
+- [ ] `super_admin` 旁路全部端点。
+- [ ] 角色权限/菜单分配落 casbin `p`/`g` + `role_menu` 并即时生效。
+- [ ] 治理端点缺 `reason` → 400；缺/越权 `acting_role` → 400/403。
+- [ ] publish/rollback 进审计链且 `AuditChain::verify` 通过。
+- [ ] runtime-config 仅经版本化变更（无裸 PATCH 路径）。
+- [ ] scheduler tick 周期 enqueue；execute worker 处理 Queued run；`Overdue/Stale` 告警分发。
+- [ ] WebSocket upgrade 前鉴权；订阅 fanout；心跳超时断开。
+- [ ] 生产模式 serve 静态 Vue + SPA fallback。
+- [ ] 全端点 request-id tracing；统一 envelope。
 
 ---
 
-## 13. Phase 5.5 治理控制面接线 (Governance Control-Plane Wiring)
+## 20. 实施顺序
 
-> 本节是 **Phase 5.5 Governance Core 的交接说明**。Phase 5.5 故意只交付 transport-agnostic 的治理内核(`oxide-arb-control` 的 `ControlFactorRegistry` + `oxide-arb-repository` 的原子审计链),**不含 HTTP、不含 RBAC 授权**。这里明确 Phase 6 必须如何实现与接线,避免漂移。
-
-### 13.1 职责分层(必须遵守)
-
-| 层 | 归属 | 职责 |
-|---|---|---|
-| authN(身份) | `oxide-arb-web` 中间件 | JWT/API-key → 解析出 actor + role |
-| authZ(角色→是否放行) | `oxide-arb-web` RBAC(移植 ng-gateway Casbin) | 路由级:哪个角色能调哪个治理 endpoint |
-| 变更信封 | `oxide-arb-web` handler | 从 `Claims` + 请求体构造 `AuditActor { actor, actor_role, request_id, reason }` (+ publish 的 `idempotency_key`) |
-| 治理门控 | `ControlFactorRegistry`(已在 5.5 交付) | risk-expansion flag、rollback target、`AuditActor::validate()` reason 非空 |
-| 原子状态机 + 审计链 | `ControlFactorRepository`(已在 5.5 交付) | 一事务内校验+状态变更+全局哈希链 append |
-
-**关键原则**: authZ 不进入 `oxide-arb-control`/`oxide-arb-models`。治理内核**信任** web 层已经鉴权,只负责记录 `actor_role` 到审计链并执行治理不变量。`OperatorRole` 枚举(`oxide-arb-models::enums::control_factor`)是 web Casbin 角色码与审计 `actor_role` 列之间的**唯一规范来源**。
-
-### 13.2 移植 ng-gateway RBAC(评估结论)
-
-ng-gateway 的 RBAC = **JWT 登录 + Casbin(Postgres 策略,`g` user→role / `p` role→resource)+ Actix 路由级 `has_any_role`/`has_resource_operation`/`has_scope`**。评估:
-
-- **够用**:承担 authN + 路由级 authZ 完全胜任,且与本 crate 同为 actix-web。
-- **不可整体作为依赖**:跨 `models/common/web/repository/storage` 多 crate、与 IoT `EntityType`/`Operation` 耦合、角色为 DB 动态字符串(只 seed 了 `SYSTEM_ADMIN`)。**移植 = 复制其 Casbin 中间件模式**,不是加依赖。
-
-移植清单(Phase 6 实现):
-
-1. **拷贝模式**(非整 crate):`PermRule`/`CombinedPermRule`(`ng-gateway-models/src/rbac.rs`)、`NGPermChecker` 路由规则注册表(`ng-gateway-common/src/casbin/mod.rs`)、`NGCasbinService` + Postgres adapter(`ng-gateway-common/src/casbin/`)、`Authentication`/`CasbinService` 中间件(`ng-gateway-web/src/middleware/`)。
-2. **角色码**:在 Casbin `g`/`p` 策略里新增 `viewer / operator / risk_owner / admin / emergency_operator`,与 `OperatorRole` 一一对应。
-3. **修复 ng-gateway 已知缺陷**(移植时必须改):
-   - 路由未注册规则时 ng-gateway **默认放行**(`NGPermChecker::check` 返回 `Ok(true)`)→ 治理面必须**默认拒绝**(fail-closed)。
-   - WebSocket 路由在 ng-gateway 未挂鉴权 → 治理面无关,但若复用其 WS 代码需补鉴权。
-   - 超级用户 bypass 用的是 username `"system_admin"` 字面量 → 改为基于 role code。
-4. **per-endpoint 角色矩阵**(对应 Phase 5.5 §7,在 `init_rbac_rules` 注册):
-
-| Endpoint | 方法 | 允许角色 | 治理 command |
-|---|---|---|---|
-| `/api/v1/control-factor-materializations` | POST | operator, risk_owner, admin, emergency_operator | enqueue run |
-| `/api/v1/control-factors/candidates` 等 GET | GET | 全部(含 viewer) | 只读 |
-| `/api/v1/control-factors/{id}/reject` | POST | operator, risk_owner, admin | `ControlFactorRegistry::reject_factor` |
-| `/api/v1/control-factors/{id}/shadow` | POST | operator, risk_owner, admin | `ControlFactorRegistry::promote_to_shadow` |
-| `/api/v1/control-factors/{id}/publish` | POST | risk_owner(conservative & risk-expanding) | `ControlFactorRegistry::publish` |
-| `/api/v1/control-factors/publications/{id}/rollback` | POST | risk_owner, admin | `ControlFactorRegistry::rollback_publication` |
-| `/api/v1/control-factors/.../emergency` | POST | emergency_operator | `ControlFactorRegistry::publish`(short-TTL) |
-| `/api/v1/runtime-config/versions[/{id}/activate]` | POST | admin | `ControlFactorRegistry::create/activate_runtime_config_version` |
-
-> 注意:risk-expanding publish 的「角色必须是 risk_owner」由这里的路由规则保证;治理内核只校验 `manual_risk_expansion_approval` flag + justification + rollback target,二者叠加才放行。
-
-### 13.3 endpoint → command 映射 + 信封构造
-
-每个 mutating handler 的统一骨架:
-
-```rust
-// 1. authZ 已由 CasbinService 中间件完成(否则到不了这里)
-// 2. 从 Claims + 请求体构造审计信封
-let envelope = AuditActor {
-    actor: claims.user_id.clone(),
-    actor_role: map_casbin_role_to_operator_role(&roles)?, // → OperatorRole
-    request_id: request_id_header(&req),                    // X-Request-Id / 生成
-    reason: body.reason.clone(),                            // 必填,空 → 400
-};
-// 3. 调用治理内核(它再 validate envelope + 治理门控 + 原子审计链)
-let outcome = registry.publish(envelope, command).await?;
-```
-
-`reason` 缺失 → handler 校验或 `AuditActor::validate()` 返回 `GovernanceError::MissingReason`。`idempotency_key` 对 publish 来自请求体,放进 `PublishCommand`。
-
-### 13.4 error → HTTP status 映射(必须实现)
-
-`RegistryError` / `GovernanceError` → status:
-
-| 错误 | HTTP |
-|---|---|
-| `GovernanceError::MissingReason` / `MissingField` | 400 |
-| Casbin 拒绝(角色不足) | 403 |
-| `GovernanceError::RiskExpansionNotApproved` | 403 |
-| `GovernanceError::RollbackTargetMissing` | 409 |
-| `GovernanceError::PublicationLockConflict` | 409 |
-| `PublishPublicationOutcome::AlreadyApplied`(幂等重放) | 200(返回已存在 publication) |
-| `GovernanceError::FactorNotReadyForPublication` / `FactorSetMismatch` / `EmptyPublication` | 409 |
-| `GovernanceError::AuditChain(_)` / `Storage(_)` | 500 |
-| `StorageError::NotFound` | 404 |
-
-### 13.5 Scheduler 进程接线(Phase 5.5 D2 交接)
-
-Phase 5.5 D2 已交付**可测库**(`crates/oxide-arb-control/src/scheduler/`):`SchedulePolicy` / `ScheduledMaterialization`(策略数据 + `production_default(...)` 覆盖 4 个周期 cadence)、纯判定 helper(`is_due` / `staleness` / `is_overdue`)、以及 `MaterializationScheduler::tick(now) -> SchedulerCycleReport`(enqueue-only、`run_dedupe_key` 去重、missed/stale 告警作为数据返回)。进程接线在此明确:
-
-- **依赖**:`oxide-arb-core` 当前**未**依赖 `oxide-arb-control`;接线时在 `crates/oxide-arb-core/Cargo.toml` 增加该依赖(control 不依赖 core hot path,无循环)。
-- **位置 / tick 循环**:在 `crates/oxide-arb-core/src/app/bootstrap.rs` 的 `ctx.queue_periodic_services()` 旁新增 `ctx.queue_control_factor_scheduler()`,用现有 `PeriodicTask`(`crates/oxide-arb-core/src/infra/periodic_task.rs`)每个 interval 调用一次 `MaterializationScheduler::tick(Utc::now())`。
-- **execute worker(Phase 6 接线)**:tick 只产出 `Queued` run。另起一个独立 worker(同样由 `PeriodicTask` 或专用消费循环驱动)轮询 `Queued` run 并调用 `MaterializationRunner::execute_run`;调度循环与 execute worker **都**是 Phase 6 进程接线,scheduler 库本身不执行 run。
-- **`SchedulePolicy` 来源**:由 runtime config / `config/oxide-arb.toml` 注入(`production_default` 仅为缺省);`created_by` / `code_git_sha` 写入 manifest。
-- **仓库注入**:在 `AppContext::build`(`crates/oxide-arb-core/src/app/build.rs` 的 `BuildRepos`)构造 `PgControlFactorRepository`,注入 scheduler、execute worker 与未来 web。
-- **告警映射**:`SchedulerCycleReport::alerts` 中的 `ScheduleAlert::Overdue { schedule_id, last_run_at }` 与 `ScheduleAlert::Stale { schedule_id, last_success_at, threshold_secs }` 由接线层映射到现有 `AlertDispatcher`;manual backfill/incident run 写审计。
-- **行为**:4 个周期 cadence(execution-quality hourly / reconciliation hourly / bucket-risk daily / portfolio-risk daily)按 `run_dedupe_key` 去重 enqueue;`market-anomaly` 为事件驱动(incident run),不在周期 scheduler 内。
-- **never-publish 保证**:scheduler 只调用 `latest_run_for_schedule` + `enqueue_materialization_run`,无 `publish_publication` 访问路径(单测 `scheduler::tests` 断言 `publish_calls() == 0`)。
-- **shadow 聚合(promotion review)**:`ControlFactorShadowDecisionRepository::aggregate_shadow_decisions` / `list_shadow_decisions` 已就绪;promotion-review consumer 从 `list_shadow_decisions` 原始行计算 delta 分位分布(不入库)。
-
-### 13.6 Live refresher 接触点(Phase 5.6 备注)
-
-publish/rollback 后,Phase 5.6 的 `oxide-arb-core/src/control/factor_refresher.rs` 通过轮询 `load_active_publication(Published)` + 校验 TTL/hash 构建 `ArcSwap<ControlFactorSnapshot>`;web 的 publish/rollback 可选地发 notify 加速 refresh(periodic poll 兜底)。本阶段不实现。
+1. 根 `Cargo.toml` workspace 依赖。
+2. models：`enums/rbac.rs` + `types/ids.rs`（UserId/RoleId/MenuId）。
+3. **删除 `OperatorRole`** + 审计 `actor_role: String`（连带 control/repository/tests）。
+4. models：RBAC idens + entities（6 表）。
+5. `config/web.rs` + `Inner.web` + `ensure_valid_for_mode`。
+6. RBAC seeds（GraphOrdered 图）。
+7. repository：RBAC traits + pg impl（含 casbin 同步）。
+8. web crate 骨架：lib/state/response/error/extractors。
+9. web 认证：jwt + argon2id + authn MW + auth 路由。
+10. web 授权：casbin model/adapter/service/checker/rules + authz MW。
+11. web RBAC 路由：users/roles/menus/permissions + `init_rbac_rules`。
+12. web 治理路由：control_factors + runtime_config（acting_role + 审计信封）。
+13. web 业务路由：system/markets/opportunities/trades/pnl/risk/analytics/replay。
+14. web ws + static。
+15. core 接线：build.rs/AppState/queue_web_server + scheduler tick + execute worker。
+16. 测试全量。
