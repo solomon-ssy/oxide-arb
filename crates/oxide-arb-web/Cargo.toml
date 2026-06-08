@@ -1,0 +1,38 @@
+[package]
+name = "oxide-arb-web"
+description = "HTTP API + RBAC control-plane for oxide-arb (Phase 6.3: foundation + authentication)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+oxide-arb-error = { workspace = true, features = ["storage"] }
+oxide-arb-models = { workspace = true, features = ["repository"] }
+oxide-arb-repository = { workspace = true }
+
+actix-web = { workspace = true }
+actix-cors = { workspace = true }
+tracing-actix-web = { workspace = true }
+jsonwebtoken = { workspace = true }
+deadpool-redis = { workspace = true }
+redis = { workspace = true }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+validator = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+
+[dev-dependencies]
+actix-rt = { workspace = true }
+oxide-arb-storage = { workspace = true, features = ["test-util"] }
+testcontainers = { workspace = true }
+testcontainers-modules = { workspace = true }
+
+[lints]
+workspace = true

@@ -11,6 +11,7 @@ members = [
   "crates/oxide-arb-algorithm",
   "crates/oxide-arb-risk",
   "crates/oxide-arb-core",
+  "crates/oxide-arb-web",
   "crates/oxide-arb-bench",
   "crates/oxide-arb-bin",
   "crates/oxide-arb-test-support",
@@ -35,6 +36,12 @@ module_name_repetitions = "allow"
 must_use_candidate = "allow"
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
+# actix-web's request types (`ServiceRequest` / `HttpRequest` / `Next`) are
+# `!Send` by design — each worker drives requests on a current-thread runtime —
+# so handler and middleware futures are intrinsically non-`Send`. This nursery
+# lint is architecturally inapplicable to the web layer; it is a project policy
+# decision, not a per-item suppression.
+future_not_send = "allow"
 
 [workspace.dependencies]
 # Async runtime
@@ -186,8 +193,15 @@ tracing-actix-web = "0.7"
 # Dynamic RBAC authorization engine
 casbin = { version = "2", features = ["runtime-tokio"] }
 
-# JWT access/refresh tokens
-jsonwebtoken = "10"
+# JWT access/refresh tokens.
+# jsonwebtoken 10 ships no crypto backend by default (`default = ["use_pem"]`),
+# which makes `encode`/`decode` panic at runtime. We sign HS256 only, so we
+# select the pure-Rust provider (`rust_crypto`, no native C toolchain) and drop
+# the unused PEM parsing pulled in by the default feature.
+jsonwebtoken = { version = "10", default-features = false, features = ["rust_crypto"] }
+
+# actix runtime (integration tests: #[actix_web::test])
+actix-rt = "2"
 
 # Password hashing (argon2id) — shared by seed + web login
 argon2 = "0.5"
@@ -204,6 +218,7 @@ oxide-arb-control = { path = "crates/oxide-arb-control" }
 oxide-arb-algorithm = { path = "crates/oxide-arb-algorithm" }
 oxide-arb-risk = { path = "crates/oxide-arb-risk" }
 oxide-arb-core = { path = "crates/oxide-arb-core" }
+oxide-arb-web = { path = "crates/oxide-arb-web" }
 oxide-arb-test-support = { path = "crates/oxide-arb-test-support" }
 
 # ═══════════════════════════════════════════════════════════════════════════════

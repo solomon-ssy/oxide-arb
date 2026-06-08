@@ -21,6 +21,7 @@
 
 pub mod algorithm;
 pub mod api;
+pub mod auth;
 pub mod config;
 pub mod config_validation;
 pub mod control;
@@ -77,6 +78,10 @@ pub enum OxideError {
     // ── Access control (RBAC) ────────────────────────────────────────────
     #[error(transparent)]
     Rbac(#[from] rbac::RbacError),
+
+    // ── Authentication (JWT / sessions) ──────────────────────────────────
+    #[error(transparent)]
+    Auth(#[from] auth::AuthError),
 
     // ── Configuration ───────────────────────────────────────────────────
     #[error(transparent)]
