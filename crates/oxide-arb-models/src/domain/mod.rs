@@ -64,52 +64,28 @@ macro_rules! info_from_model {
     };
 }
 
-pub mod blacklist;
-pub mod book;
-pub mod calibration;
+// Bounded-context groups.
+pub mod accounting;
 pub mod control_factor;
 pub mod evidence;
-pub mod execution;
-pub mod facts;
-pub mod fee;
-pub mod latency;
+pub mod governance;
 pub mod market;
-pub mod operation_log;
-pub mod opportunity;
-pub mod order;
-pub mod patch;
-pub mod pipeline;
-pub mod pnl;
-pub mod position;
-pub mod potential_loss;
 pub mod rbac;
-pub mod report;
 pub mod risk;
-pub mod scored_snapshot;
-pub mod settlement;
-pub mod system;
-pub mod trade;
+pub mod trading;
 
-pub use blacklist::*;
-pub use book::*;
-pub use calibration::*;
+// Cross-cutting helpers shared by every context.
+pub mod pagination;
+pub mod patch;
+
+// Flattened facade: every domain type is reachable directly under `domain::`.
+pub use accounting::*;
 pub use control_factor::*;
 pub use evidence::*;
-pub use execution::*;
-pub use facts::*;
-pub use latency::*;
+pub use governance::*;
 pub use market::*;
-pub use operation_log::*;
-pub use opportunity::*;
-pub use order::*;
+pub use pagination::*;
 pub use patch::*;
-pub use pipeline::*;
-pub use pnl::*;
-pub use position::*;
-pub use potential_loss::*;
 pub use rbac::*;
-pub use report::*;
 pub use risk::*;
-pub use scored_snapshot::*;
-pub use system::*;
-pub use trade::*;
+pub use trading::*;

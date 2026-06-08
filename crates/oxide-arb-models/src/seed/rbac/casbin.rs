@@ -12,7 +12,10 @@ use sea_orm::{
 
 use crate::{
     entities::casbin_rule,
-    enums::rbac::{Operation, ResourceType},
+    enums::rbac::{
+        Operation, ResourceType,
+        casbin::{OBJECT_TYPE_RESOURCE, PTYPE_GROUPING, PTYPE_POLICY},
+    },
     idens::casbin_rule::casbin_rule_table_name,
     schema::seed::{SeedArtifact, SeedDependency, SeedSpec},
     seed::{
@@ -32,13 +35,6 @@ const DEPENDS_ON: &[SeedDependency] = &[
     SeedDependency::Artifact(ADMIN_USER_ARTIFACT),
 ];
 const PRODUCES: &[SeedArtifact] = &[];
-
-/// Policy type for a permission line.
-const PTYPE_POLICY: &str = "p";
-/// Policy type for a role-grouping line.
-const PTYPE_GROUPING: &str = "g";
-/// Object type discriminator matched by the Casbin model (`p.typ == "resource"`).
-const POLICY_OBJECT_TYPE: &str = "resource";
 
 pub const CASBIN_SEED: SeedSpec = SeedSpec {
     id: SEED_ID,
@@ -168,7 +164,7 @@ fn policy_row(
         v0: Set(role_code.to_owned()),
         v1: Set(resource.as_str().to_owned()),
         v2: Set(operation.as_str().to_owned()),
-        v3: Set(POLICY_OBJECT_TYPE.to_owned()),
+        v3: Set(OBJECT_TYPE_RESOURCE.to_owned()),
         v4: Set(String::new()),
         v5: Set(String::new()),
         ..Default::default()

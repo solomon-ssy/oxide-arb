@@ -1,46 +1,26 @@
-//! Repository trait definitions.
+//! Repository trait definitions, grouped by bounded context.
+//!
+//! Every trait is also re-exported flat under `traits::` so callers can depend
+//! on `traits::MarketRepository` without threading the context path.
 
+// Bounded-context groups.
 pub mod accounting;
-pub mod blacklist_persistence;
-pub mod calibration;
+pub mod evidence;
+pub mod governance;
+pub mod rbac;
+pub mod risk;
+pub mod trading;
+
+// Single-trait contexts kept flat.
 pub mod control_factor;
-pub mod emergency;
-pub mod event;
-pub mod fact_data;
 pub mod market;
-pub mod position;
-pub mod potential_loss;
-pub mod reconciliation;
-pub mod report;
-pub mod resolution_event;
-pub mod risk_audit;
-pub mod risk_state;
-pub mod runtime_config;
-pub mod timeseries;
-pub mod trade;
 
-pub use timeseries::{
-    EvidenceTimeseriesRepository, MarketFilter, TimeWindow, TimeseriesFactWriter,
-    evidence_query_result,
-};
-
-pub use accounting::AccountingRepository;
-pub use blacklist_persistence::BlacklistPersistenceRepository;
-pub use calibration::CalibrationRepository;
-pub use control_factor::ControlFactorRepository;
-pub use emergency::EmergencyRepository;
-pub use event::EventRepository;
-pub use fact_data::{
-    BalanceSnapshotRepository, ControlFactorDatasetRepository,
-    ControlFactorShadowDecisionRepository,
-};
-pub use market::MarketRepository;
-pub use position::PositionRepository;
-pub use potential_loss::PotentialLossRepository;
-pub use reconciliation::ReconciliationRepository;
-pub use report::ReportRepository;
-pub use resolution_event::ResolutionEventRepository;
-pub use risk_audit::RiskAuditRepository;
-pub use risk_state::RiskStateRepository;
-pub use runtime_config::RuntimeConfigVersionRepository;
-pub use trade::TradeRepository;
+// Flattened facade.
+pub use accounting::*;
+pub use control_factor::*;
+pub use evidence::*;
+pub use governance::*;
+pub use market::*;
+pub use rbac::*;
+pub use risk::*;
+pub use trading::*;

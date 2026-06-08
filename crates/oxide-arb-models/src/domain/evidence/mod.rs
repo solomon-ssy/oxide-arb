@@ -1,9 +1,12 @@
-//! Canonical evidence contracts shared by materialization stages and builders.
+//! Canonical evidence contracts shared by materialization stages and builders,
+//! plus the raw fact-data DTOs they are built from.
 
+pub mod facts;
 pub mod metric;
 pub mod query;
 pub mod training;
 
+pub use facts::*;
 pub use metric::EvidenceMetric;
 pub use query::{
     EvidenceIssue, EvidenceIssueSeverity, EvidenceQueryResult, EvidenceSourceRef,

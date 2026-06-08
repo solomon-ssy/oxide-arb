@@ -1,6 +1,7 @@
 //! Operation-log DTOs (append-only activity trail).
 
 use crate::{
+    domain::pagination::PageRequest,
     enums::{
         operation_log::{OperationCategory, OperationOutcome},
         rbac::ResourceType,
@@ -72,6 +73,9 @@ info_from_model!(OperationLogInfo, crate::entities::operation_log::Model, {
 });
 
 /// Pagination + filter parameters for querying the operation log.
+///
+/// The pagination window is the shared [`PageRequest`], flattened so the query
+/// string stays flat alongside the filters.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct OperationLogQuery {
     pub actor_user_id: Option<UserId>,
@@ -81,6 +85,6 @@ pub struct OperationLogQuery {
     pub request_id: Option<String>,
     pub from: Option<DateTime<Utc>>,
     pub to: Option<DateTime<Utc>>,
-    pub page: u64,
-    pub size: u64,
+    #[serde(flatten)]
+    pub page: PageRequest,
 }

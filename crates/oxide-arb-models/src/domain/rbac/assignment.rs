@@ -6,6 +6,36 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 
+/// A single `resource × operation` grant — the typed form of a Casbin `p` line's
+/// `(obj, act)` pair.
+///
+/// Replaces the bare `(ResourceType, Operation)` tuple so the permission space
+/// is self-describing at every boundary (assignment payloads, repository
+/// returns, audit envelopes).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Permission {
+    pub resource: ResourceType,
+    pub operation: Operation,
+}
+
+impl Permission {
+    /// Construct a permission from its resource and operation.
+    #[must_use]
+    pub const fn new(resource: ResourceType, operation: Operation) -> Self {
+        Self {
+            resource,
+            operation,
+        }
+    }
+
+    /// Whether this pair exists in the canonical permission catalog
+    /// (`RESOURCE_OPERATIONS`) — i.e. is a real, assignable permission.
+    #[must_use]
+    pub fn is_valid(self) -> bool {
+        self.resource.allows(self.operation)
+    }
+}
+
 /// Replace the set of roles assigned to a user (writes `user_role` + Casbin `g`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AssignRoles {
@@ -22,10 +52,13 @@ pub struct AssignMenus {
 
 /// Replace the permission set of a role (writes Casbin `p`).
 ///
-/// Permissions are validated against `RESOURCE_OPERATIONS` before being applied
-/// so no phantom resource×operation combinations can be persisted.
+/// Keyed by `role_id` for symmetry with the other assignment DTOs and the
+/// `/roles/{id}/permissions` route; the repository resolves the immutable
+/// `role_code` (the Casbin subject) inside its transaction. Permissions are
+/// validated against `RESOURCE_OPERATIONS` before being applied so no phantom
+/// resource×operation combinations can be persisted.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AssignPermissions {
-    pub role_code: String,
-    pub permissions: Vec<(ResourceType, Operation)>,
+    pub role_id: RoleId,
+    pub permissions: Vec<Permission>,
 }

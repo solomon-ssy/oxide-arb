@@ -18,6 +18,31 @@ use std::str::FromStr;
 use oxide_arb_error::rbac::RbacError;
 use sea_orm::Iterable;
 
+/// Casbin policy-row layout — the single source of truth for how RBAC policy
+/// lines are encoded into the `casbin_rule` table's `(ptype, v0..v5)` shape.
+///
+/// Shared by the policy seed, the Postgres [`Adapter`] implementation, the
+/// transactional policy-sync helpers, and the web enforcer model, so the
+/// encoding can never drift between writer, reader, and matcher.
+///
+/// - Grouping (`g`) line: `v0 = user_id`, `v1 = role_code`.
+/// - Permission (`p`) line: `v0 = role_code`, `v1 = resource`, `v2 = operation`,
+///   and `v3` holds [`OBJECT_TYPE_RESOURCE`].
+///
+/// [`Adapter`]: https://docs.rs/casbin/latest/casbin/trait.Adapter.html
+pub mod casbin {
+    /// `ptype` discriminator for permission (`p`) lines.
+    pub const PTYPE_POLICY: &str = "p";
+    /// `ptype` discriminator for grouping (`g`) lines.
+    pub const PTYPE_GROUPING: &str = "g";
+    /// Object-type discriminator matched by the Casbin model (`p.typ`).
+    pub const OBJECT_TYPE_RESOURCE: &str = "resource";
+    /// Number of value columns on `casbin_rule` (`v0..v5`).
+    pub const VALUE_COLUMNS: usize = 6;
+    /// Policy sections persisted by a full `save_policy`, in `p`-then-`g` order.
+    pub const SECTIONS: [&str; 2] = [PTYPE_POLICY, PTYPE_GROUPING];
+}
+
 active_string_enum! {
     /// Lifecycle state of a user account.
     pub enum UserStatus {

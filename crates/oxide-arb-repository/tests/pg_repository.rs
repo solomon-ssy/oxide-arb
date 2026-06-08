@@ -1,11 +1,14 @@
 //! `PostgreSQL` repository integration tests (requires Docker).
 
+#[path = "common/market_fixtures.rs"]
+mod market_fixtures;
 #[path = "common/pg.rs"]
 mod pg;
 
 use std::collections::HashSet;
 
 use chrono::{NaiveDate, Utc};
+use market_fixtures::{make_event, make_market};
 use oxide_arb_models::{
     domain::control_factor::{
         AuditChain, BucketRiskDimensions, BucketRiskPayload, ConfidenceInterval,
@@ -51,7 +54,7 @@ use oxide_arb_models::{
 };
 use oxide_arb_repository::{postgres::*, traits::*};
 use oxide_arb_storage::postgres::PostgresPool;
-use pg::{make_event, make_market, setup_pg};
+use pg::setup_pg;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 

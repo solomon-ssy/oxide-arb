@@ -1,15 +1,6 @@
 //! Shared helpers for `PostgreSQL` repository integration tests.
 
-use chrono::Utc;
-use oxide_arb_models::{
-    config::PostgresConfig,
-    domain::{UpsertEvent, UpsertMarket},
-    enums::{
-        common::{MarketCategory, TickSize},
-        market::{EventStatus, MarketStatus},
-    },
-    types::*,
-};
+use oxide_arb_models::config::PostgresConfig;
 use oxide_arb_storage::postgres::{
     PostgresPool,
     migration::{Migrator, MigratorTrait},
@@ -58,49 +49,4 @@ pub async fn setup_pg() -> (PostgresPool, ContainerAsync<Postgres>) {
         .expect("migrate");
 
     (pool, container)
-}
-
-pub fn make_event(id: &str, title: &str, slug: &str, category: MarketCategory) -> UpsertEvent {
-    UpsertEvent {
-        event_id: EventId::new(id),
-        title: title.into(),
-        slug: slug.into(),
-        category,
-        status: EventStatus::Active,
-        neg_risk: false,
-        end_date: None,
-        raw_gamma: None,
-    }
-}
-
-pub fn make_market(
-    market_id: &str,
-    event_id: &str,
-    question: &str,
-    slug: &str,
-    category: MarketCategory,
-    end_date: Option<chrono::DateTime<Utc>>,
-) -> UpsertMarket {
-    UpsertMarket {
-        market_id: MarketId::new(market_id),
-        event_id: EventId::new(event_id),
-        question: question.into(),
-        slug: slug.into(),
-        category,
-        status: MarketStatus::Active,
-        outcome: None,
-        yes_token_id: TokenId::new("12345"),
-        no_token_id: TokenId::new("67890"),
-        tick_size: TickSize::Hundredth,
-        neg_risk: false,
-        end_date,
-        resolved_at: None,
-        fees_enabled: true,
-        fee_rate: None,
-        fee_exponent: None,
-        fee_taker_only: None,
-        fee_rebate_rate: None,
-        fee_source: None,
-        fee_observed_at: None,
-    }
 }
