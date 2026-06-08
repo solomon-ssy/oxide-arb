@@ -8,7 +8,7 @@ use crate::{
     clickhouse::CalibrationSnapshotRow,
     domain::{
         BalanceSnapshotInfo, PositionInfo, PotentialLossInfo, ReconciliationReportInfo,
-        RiskAuditEventInfo, RuntimeConfigVersionInfo, TokenBalanceSnapshotInfo, TradeInfo,
+        RiskAuditEventInfo, RuntimeConfigVersionInfo, TradeInfo,
         control_factor::{ControlFactorValue, QualityGateEvaluationReport},
         settlement::ResolutionEventInfo,
     },
@@ -146,7 +146,6 @@ pub enum RequiredInputDomain {
     Positions,
     RiskState,
     BalanceSnapshot,
-    TokenBalanceSnapshot,
     SettlementTruth,
     ReconciliationStatus,
 }
@@ -158,7 +157,6 @@ pub struct DataRequirements {
     pub production_required_inputs: Vec<RequiredInputDomain>,
     pub min_l2_coverage_ratio: Option<Decimal>,
     pub require_settlement_truth: bool,
-    pub require_token_balances: bool,
 }
 
 impl DataRequirements {
@@ -175,11 +173,6 @@ impl DataRequirements {
     #[must_use]
     pub fn requires_settlement_truth(&self) -> bool {
         self.require_settlement_truth || self.requires(RequiredInputDomain::SettlementTruth)
-    }
-
-    #[must_use]
-    pub fn requires_token_balances(&self) -> bool {
-        self.require_token_balances || self.requires(RequiredInputDomain::TokenBalanceSnapshot)
     }
 
     #[must_use]
@@ -219,7 +212,6 @@ pub struct SimulationConfig {
     pub fill_models: Vec<ReplayFillModel>,
     pub latency_buckets: Vec<LatencyBucketSpec>,
     pub adverse_selection_bps: Vec<u32>,
-    pub exit_policy: ExitSimulationPolicy,
 }
 
 impl SimulationConfig {
@@ -246,7 +238,6 @@ impl SimulationConfig {
                 },
             ],
             adverse_selection_bps: vec![25, 50, 100],
-            exit_policy: ExitSimulationPolicy::report_only_default(),
         }
     }
 }
@@ -264,30 +255,6 @@ pub enum ReplayFillModel {
 pub struct LatencyBucketSpec {
     pub name: String,
     pub shift_ms: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ExitSimulationPolicy {
-    pub enabled: bool,
-    pub fixed_stop_bps: Option<u32>,
-    pub trailing_stop_bps: Option<u32>,
-    pub time_stop_secs: Option<u64>,
-    pub zone_invalidation_grace_secs: Option<u64>,
-    pub min_bid_depth_shares: Option<Decimal>,
-}
-
-impl ExitSimulationPolicy {
-    #[must_use]
-    pub const fn report_only_default() -> Self {
-        Self {
-            enabled: true,
-            fixed_stop_bps: Some(500),
-            trailing_stop_bps: Some(250),
-            time_stop_secs: Some(86_400),
-            zone_invalidation_grace_secs: Some(300),
-            min_bid_depth_shares: None,
-        }
-    }
 }
 
 /// Quality gate policy pinned into a materialization manifest.
@@ -679,7 +646,6 @@ pub struct EvidenceSourceBundle {
     pub potential_loss_changes: Vec<PotentialLossInfo>,
     pub risk_audit_events: Vec<RiskAuditEventInfo>,
     pub balance_snapshot: Option<BalanceSnapshotInfo>,
-    pub token_balance_snapshots: Vec<TokenBalanceSnapshotInfo>,
     pub settlement_truth: Vec<ResolutionEventInfo>,
     pub reconciliation_reports: Vec<ReconciliationReportInfo>,
     pub query_fingerprints: Vec<QueryFingerprint>,
@@ -697,7 +663,6 @@ impl EvidenceSourceBundle {
             potential_loss_changes: Vec::new(),
             risk_audit_events: Vec::new(),
             balance_snapshot: None,
-            token_balance_snapshots: Vec::new(),
             settlement_truth: Vec::new(),
             reconciliation_reports: Vec::new(),
             query_fingerprints: Vec::new(),
@@ -733,16 +698,16 @@ mod tests {
     #[test]
     fn phase_53_stage_names_round_trip() {
         assert_eq!(
-            MaterializationStageName::ExitTokenEvidence.as_str(),
-            "exit_token_evidence"
+            MaterializationStageName::SettlementReconciliationEvidence.as_str(),
+            "settlement_reconciliation_evidence"
         );
         assert_eq!(
             MaterializationStageName::TrainingExampleBuild.as_str(),
             "training_example_build"
         );
-        let encoded = serde_json::to_string(&MaterializationStageName::ExitTokenEvidence)
+        let encoded = serde_json::to_string(&MaterializationStageName::TrainingExampleBuild)
             .expect("serialize stage");
-        assert_eq!(encoded, "\"exit_token_evidence\"");
+        assert_eq!(encoded, "\"training_example_build\"");
     }
 
     #[test]
@@ -751,6 +716,6 @@ mod tests {
         assert!(config.max_replay_gap_ms > 0);
         assert!(config.stale_book_after_ms >= config.max_replay_gap_ms);
         assert!(!config.fill_models.is_empty());
-        assert!(config.exit_policy.enabled);
+        assert!(!config.adverse_selection_bps.is_empty());
     }
 }

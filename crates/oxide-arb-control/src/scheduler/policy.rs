@@ -156,7 +156,6 @@ fn data_requirements(required: &[RequiredInputDomain]) -> DataRequirements {
         production_required_inputs: required.to_vec(),
         min_l2_coverage_ratio: None,
         require_settlement_truth: false,
-        require_token_balances: false,
     }
 }
 

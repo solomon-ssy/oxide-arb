@@ -3,8 +3,8 @@
 > **状态**: Production Design Target  
 > **父计划**: `docs/plans/phase5-replay-analytics.md`  
 > **前置依赖**: Phase 5.1, Phase 5.2  
-> **覆盖原章节**: 6.2-6.6, 9.2, 12.9, 18.4  
-> **目标**: 实现固定 stage graph，将 PIT inputs 转成 detector、execution、portfolio、settlement、reconciliation、exit/token evidence。Evidence 只产证据，不直接改变 live 行为。
+> **覆盖原章节**: 6.2-6.6, 9.2, 18.4  
+> **目标**: 实现固定 stage graph，将 PIT inputs 转成 detector、execution、portfolio、settlement、reconciliation evidence。Evidence 只产证据，不直接改变 live 行为。
 
 ---
 
@@ -17,8 +17,7 @@ flowchart TD
     detectorEvidence --> executionEvidence["Execution Evidence"]
     executionEvidence --> portfolioEvidence["Portfolio Risk Evidence"]
     portfolioEvidence --> settlementEvidence["Settlement Reconciliation Evidence"]
-    settlementEvidence --> exitEvidence["Exit / Token Evidence"]
-    exitEvidence --> trainingExamples["Training Example Builder"]
+    settlementEvidence --> trainingExamples["Training Example Builder"]
     trainingExamples --> factorBuild["Factor Build"]
     factorBuild --> qualityGate["Quality Gate Evaluation"]
     qualityGate --> draftWrite["Draft / Rejected / ReportOnly"]
@@ -35,7 +34,6 @@ flowchart TD
 | Execution evidence | FOK fill/miss confusion matrix、slippage/depth/latency metrics |
 | Portfolio risk evidence | deterministic sequence、capital pressure、denial/sizing attribution |
 | Settlement reconciliation evidence | outcome attribution、redeem/accounting/reconciliation health |
-| Exit/token evidence | report-only exit simulation、sell-side bid coverage、token reconciliation health |
 | Training example builder | typed examples、labels、dataset hash |
 
 ---
@@ -222,8 +220,8 @@ stale_metrics_window_ms
 
 - 将 fills join 到 settlement outcomes。
 - 归因 payout、realized PnL、redeem status、settlement delay。
-- Join reconciliation reports、balance snapshots、token balance snapshots。
-- 检测 drift、stale metrics、unresolved redeem、token mismatch。
+- Join reconciliation reports、balance snapshots。
+- 检测 drift、stale metrics、unresolved redeem。
 
 ### 5.2 Required joins
 
@@ -234,7 +232,6 @@ market_id -> settlement request
 winning_token_id -> position side
 position_id -> redeem/accounting status
 account scope -> balance_snapshot
-token_id -> token_balance_snapshot
 ```
 
 缺失 join 必须显式记录，不能用空字符串或 `0` 指标填充。
@@ -252,55 +249,13 @@ settlement_delay_p50/p95
 redeem_pending_count
 redeem_failed_count
 cash_drift_usd
-token_drift_shares
 critical_drift_count
 metrics_stale_secs
 ```
 
 ---
 
-## 6. Exit / Unwind Evidence
-
-Exit evidence 是 report-only 起步，不直接生成 live auto-exit。
-
-### 6.1 Simulation loop
-
-```text
-For each historical filled position:
-  reconstruct bid book after entry
-  simulate fixed stop / trailing stop / time stop / zone invalidation
-  compare:
-    hold_to_resolution_pnl
-    exit_pnl_after_slippage
-    missed_recovery_count
-    avoided_tail_loss
-    false_exit_count
-    executable_exit_rate
-```
-
-### 6.2 Required evidence
-
-- sell-side L2 bid book coverage；
-- token-level balance reconciliation；
-- exit accounting model；
-- enough historical examples；
-- evidence that shadow would not systematically sell final winners too early。
-
-### 6.3 Output
-
-```text
-ExitEvidenceReport
-exit_strategy_metrics
-sell_side_book_coverage
-executable_exit_rate
-false_exit_distribution
-avoided_tail_loss_distribution
-token_inventory_consistency
-```
-
----
-
-## 7. Training Example Builder
+## 6. Training Example Builder
 
 每类 factor 的 training examples 必须由 materialization run 生成，且带 PIT manifest。
 
@@ -325,7 +280,7 @@ pub struct FactorTrainingExample {
 
 ---
 
-## 8. 测试策略
+## 7. 测试策略
 
 | Stage | 必需测试 |
 |---|---|
@@ -334,14 +289,12 @@ pub struct FactorTrainingExample {
 | Execution evidence | strict FOK fill、miss、latency shifted miss、depth stress |
 | Portfolio evidence | risk reject、reservation pressure、drawdown、stale metrics |
 | Settlement evidence | won、lost、delayed settlement、redeem failure |
-| Reconciliation evidence | cash drift、token drift、stale balance、critical drift |
-| Exit evidence | fixed stop、trailing stop、time stop、zone invalidation、bid-depth unavailable |
-| Token reconciliation | PG 有 position 但链上无 token、链上有 token 但 PG 无 position、allowance missing、resolution 后 redeem |
+| Reconciliation evidence | cash drift、stale balance、critical drift |
 | Training examples | PIT feature leakage、delayed label、dataset hash reproducibility |
 
 ---
 
-## 9. 退出条件
+## 8. 退出条件
 
 Phase 5.3 完成后必须满足：
 
@@ -350,23 +303,21 @@ Phase 5.3 完成后必须满足：
 3. Detector evidence 能解释 live vs materialized 差异。
 4. Execution evidence 能输出 fill/miss confusion matrix 和 latency/depth/slippage metrics。
 5. Portfolio evidence 能 deterministic 重建 sequence 和 binding constraints。
-6. Settlement/reconciliation evidence 能 join outcome、redeem、balance、token drift。
-7. Exit materialization 至少 report-only，可输出 executable exit rate 和 false exit metrics。
-8. Training examples 有 PIT source refs 和 reproducible dataset hash。
+6. Settlement/reconciliation evidence 能 join outcome、redeem、balance、cash drift。
+7. Training examples 有 PIT source refs 和 reproducible dataset hash。
 
 ---
 
-## 10. 阻止进入 Phase 5.4 的情况
+## 9. 阻止进入 Phase 5.4 的情况
 
 - Stage output 依赖未排序查询结果。
 - Detector evidence 使用当前 config/calibration。
 - Execution evidence 在 L2 gap 超阈值时仍生成 production factor input。
 - Portfolio sequence 不可复现。
 - Settlement join 缺失被填成默认值。
-- Exit simulation 缺 sell-side bid coverage 却声称 executable。
 - Training features 存在未来信息泄漏。
 
-### 10.1 Phase 5.3 closure verification items
+### 9.1 Phase 5.3 closure verification items
 
 以下项目属于 Phase 5.3 完成前必须关闭的 blocker，不能留给 Phase 5.4 builder 或后续 governance/live 阶段兜底：
 
@@ -374,7 +325,6 @@ Phase 5.3 完成后必须满足：
 - Book reconstruction 必须支持 per-decision timestamp views：至少能在 detection time 和 terminal execution `stage_at` 重建 YES/NO book pair。Window-end book 只能作为 diagnostic summary，不能作为 execution evidence 输入。
 - Execution evidence 必须区分 terminal audit rows 和 full audit funnel；StrictFok 必须按 Polymarket BUY=USD amount、SELL=shares amount、worst-price limit 语义模拟，并补 VWAP/slippage/latency/stress metrics 或明确 production-ineligible。
 - Portfolio evidence 必须由 PG trades、positions、risk audit、potential-loss baseline/events、reservations/balance facts 重建 deterministic sequence；永久 `sequence_complete=false` 的 placeholder 不能进入 Phase 5.4。
-- Settlement/reconciliation 必须 join settlement outcome、position redeem/accounting、balance snapshot、token balance snapshot，并计算 cash/token drift；仅 audit-row 聚合不算完成。
-- Exit/token evidence 在 Phase 5.3 只允许 report-only，但必须输出可解释的 executable/false-exit evidence；bid 非空或 sell-side coverage 不能冒充 executable。
+- Settlement/reconciliation 必须 join settlement outcome、position redeem/accounting、balance snapshot，并计算 cash drift；仅 audit-row 聚合不算完成。
 - Training examples 必须使用 typed `FactorTrainingExample`、PIT-visible features、delayed labels 和 source refs；string refs 或 `outcome_available_at=None` 的 production dataset 不能进入 Phase 5.4。
 - Evidence repository reads 必须返回或记录 canonical query fingerprints；stage 内自造 `format!("audits:{n}")` 之类摘要不能作为 production fingerprint。

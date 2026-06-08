@@ -110,7 +110,6 @@ mod tests {
 
         for required in [
             "balance_snapshot",
-            "token_balance_snapshot",
             "runtime_config_version",
             "runtime_config_activation",
             "control_factor_materialization_run",
@@ -121,9 +120,6 @@ mod tests {
             "control_factor_audit_event",
             "control_factor_shadow_decision",
             "control_factor_training_dataset",
-            "position_exit_plan",
-            "position_exit_execution",
-            "position_unwind_audit",
         ] {
             assert!(
                 tables.contains(required),

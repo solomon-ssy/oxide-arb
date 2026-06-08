@@ -26,9 +26,9 @@ use oxide_arb_models::{
         NewCalibrationOutcome, NewControlFactorMaterializationRun, NewControlFactorShadowDecision,
         NewControlFactorStageReport, NewEmergencySnapshot, NewPosition, NewPotentialLoss,
         NewReconciliationReport, NewRiskAuditEvent, NewRuntimeConfigActivation,
-        NewRuntimeConfigVersion, NewTokenBalanceSnapshot, NewTrade, ResolvePotentialLoss,
-        RunTransitionOutcome, SettlePositionParams, ShadowDecisionAggregate, TradeObservation,
-        UpsertBlacklistEntry, UpsertCalibration, UpsertRiskEngineState,
+        NewRuntimeConfigVersion, NewTrade, ResolvePotentialLoss, RunTransitionOutcome,
+        SettlePositionParams, ShadowDecisionAggregate, TradeObservation, UpsertBlacklistEntry,
+        UpsertCalibration, UpsertRiskEngineState,
     },
     enums::{
         calibration::{DurationBucket, PriceZone},
@@ -905,7 +905,7 @@ async fn control_factor_materialization_run_lifecycle_is_idempotent() {
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn fact_data_repository_records_balance_and_token_snapshots() {
+async fn fact_data_repository_records_balance_snapshots() {
     let (pool, _container) = setup_pg().await;
     seed_market(&pool, "evt-facts", "0xfact-mkt", MarketCategory::Politics).await;
     let repo = PgFactDataRepository::new(pool.connection().clone());
@@ -929,37 +929,12 @@ async fn fact_data_repository_records_balance_and_token_snapshots() {
         .unwrap();
     assert_eq!(balance.drift_usd, Usd::new(dec!(5)));
 
-    let token_id = TokenId::new("tok-fact");
-    repo.create_token_balance_snapshots(vec![NewTokenBalanceSnapshot {
-        token_balance_snapshot_id: TokenBalanceSnapshotId::new_v7(),
-        holder_address: "0xholder".into(),
-        market_id: MarketId::new("0xfact-mkt"),
-        token_id: token_id.clone(),
-        side: Side::Buy,
-        internal_shares: Shares::new(dec!(10)),
-        external_shares: None,
-        drift_shares: None,
-        source: BalanceSnapshotSource::InternalLedger,
-        block_number: None,
-        reconciliation_report_id: None,
-        observed_at,
-    }])
-    .await
-    .unwrap();
-
     let latest = repo
-        .latest_token_balance_before(
-            "0xholder",
-            &MarketId::new("0xfact-mkt"),
-            &token_id,
-            Utc::now(),
-        )
+        .latest_balance_before("0xholder", Utc::now())
         .await
         .unwrap()
-        .expect("token balance snapshot");
-    assert_eq!(latest.internal_shares, Shares::new(dec!(10)));
-    assert!(latest.external_shares.is_none());
-    assert!(latest.drift_shares.is_none());
+        .expect("balance snapshot");
+    assert_eq!(latest.drift_usd, Usd::new(dec!(5)));
 }
 
 #[tokio::test]

@@ -258,17 +258,6 @@ impl BalanceSnapshotId {
     }
 }
 
-/// ERC-1155 token balance snapshot identifier (UUID v7).
-#[derive(TypedId, Debug, Clone, PartialEq, Eq, Hash)]
-pub struct TokenBalanceSnapshotId(Arc<str>);
-
-impl TokenBalanceSnapshotId {
-    #[must_use]
-    pub fn new_v7() -> Self {
-        Self(Arc::from(format!("tbs_{}", Uuid::now_v7()).as_str()))
-    }
-}
-
 /// Control-factor training dataset manifest identifier (UUID v7).
 #[derive(TypedId, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TrainingDatasetId(Arc<str>);
@@ -300,39 +289,6 @@ impl AuditEventId {
     #[must_use]
     pub fn new_v7() -> Self {
         Self(Arc::from(format!("cfae_{}", Uuid::now_v7()).as_str()))
-    }
-}
-
-/// Position exit plan identifier (UUID v7).
-#[derive(TypedId, Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ExitPlanId(Arc<str>);
-
-impl ExitPlanId {
-    #[must_use]
-    pub fn new_v7() -> Self {
-        Self(Arc::from(format!("ep_{}", Uuid::now_v7()).as_str()))
-    }
-}
-
-/// Position exit execution identifier (UUID v7).
-#[derive(TypedId, Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ExitExecutionId(Arc<str>);
-
-impl ExitExecutionId {
-    #[must_use]
-    pub fn new_v7() -> Self {
-        Self(Arc::from(format!("ee_{}", Uuid::now_v7()).as_str()))
-    }
-}
-
-/// Position unwind audit identifier (UUID v7).
-#[derive(TypedId, Debug, Clone, PartialEq, Eq, Hash)]
-pub struct UnwindAuditId(Arc<str>);
-
-impl UnwindAuditId {
-    #[must_use]
-    pub fn new_v7() -> Self {
-        Self(Arc::from(format!("uwa_{}", Uuid::now_v7()).as_str()))
     }
 }
 

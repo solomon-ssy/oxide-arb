@@ -2,11 +2,11 @@
 
 > **状态**: Production Design Target  
 > **父计划**: `docs/plans/phase5-replay-analytics.md`  
-> **前置依赖**: Phase 5.0-5.7  
+> **前置依赖**: Phase 5.0-5.6  
 > **覆盖原章节**: 18, 19  
 > **目标**: 将每个子阶段的退出条件、测试矩阵、观测指标、运维手册和 PR 防漂移审查固化，防止 Phase 5 落地时跑偏。
 
-> **Phase 5.3 contract dependency**: Verification 必须区分 stage-level `EvidenceOnly`/`ProductionIneligible`/`InsufficientCoverage`、run-level `ReportOnly`、factor-level `ReportOnly`。最终验收必须证明 5.4-5.8 没有绕过 5.3 production-usable evidence gate，也没有把 unavailable metrics、stub artifacts、current-state fallback 或 unordered query output 当作 production input。
+> **Phase 5.3 contract dependency**: Verification 必须区分 stage-level `ProductionIneligible`/`InsufficientCoverage`、run-level `ReportOnly`、factor-level `ReportOnly`。最终验收必须证明 5.4-5.8 没有绕过 5.3 production-usable evidence gate，也没有把 unavailable metrics、stub artifacts、current-state fallback 或 unordered query output 当作 production input。
 
 ---
 
@@ -28,11 +28,10 @@
 | 5.0 Foundation | 架构边界、typed artifact、publication-first、破坏式原则冻结 | `runtime_config` 与 factor registry 边界不清；允许 re-export/alias |
 | 5.1 Fact data plane | integration tests 中能写入 facts；hot path latency 不受影响；CH rows 包含必需 key | 缺 producer、缺 attribution、或 nullable 字段被当作 0 默认值 |
 | 5.2 PIT/runner | resolver 可在任意 timestamp 重建 market/token/config/calibration/fee state | 任一 resolver 静默 fallback 到 current state |
-| 5.3 Evidence engine | detector replay、per-decision book views、execution FOK replay、portfolio sequence、settlement/reconciliation drift、report-only exit/token evidence、typed training examples、canonical query fingerprints 全部可复现 | 任一 stage output 依赖未排序查询结果；使用 window-end book 冒充 execution-time book；terminal/funnel audit 混用；unavailable metrics 被当作 production input |
+| 5.3 Evidence engine | detector replay、per-decision book views、execution FOK replay、portfolio sequence、settlement/reconciliation drift、typed training examples、canonical query fingerprints 全部可复现 | 任一 stage output 依赖未排序查询结果；使用 window-end book 冒充 execution-time book；terminal/funnel audit 混用；unavailable metrics 被当作 production input |
 | 5.4 Builders/gates | all five builders reject insufficient evidence and write typed payloads | payload is stringly typed or gates are only warnings |
 | 5.5 Registry/governance | publication, shadow, rollback, expiry, audit transactional | publication can leave two active Published versions |
 | 5.6 Live consumption | hot path 只读 ArcSwap snapshot；fail closed tests 通过 | 任意 hot path code 查询 CH/PG |
-| 5.7 Exit/token | report-only exit materialization proves executable path and token reconciliation | auto-exit enabled before token-level reconciliation |
 | 5.8 Verification/ops | tests/metrics/runbooks/drift checks complete | PR review cannot prove no leakage/no re-export/no hot path DB |
 
 ---
@@ -46,9 +45,7 @@
 - [ ] Calibration snapshots are point-in-time queryable.
 - [ ] Detection rows contain score and calibration components.
 - [ ] Audit rows preserve terminal and settlement attribution.
-- [ ] Balance and token snapshots are available.
-- [ ] ERC1155 token balances are reconciled by `token_id` and shares.
-- [ ] Sell-side bid depth is available for exit materialization.
+- [ ] Balance snapshots are available.
 
 ### 2.2 Materialization
 
@@ -80,7 +77,6 @@
 - [ ] Hot path reads no CH/PG.
 - [ ] Safety factor load failure can fail closed.
 - [ ] Applied factors are written to audit.
-- [ ] No live auto-exit is enabled unless token-level reconciliation and exit accounting are complete.
 
 ---
 
@@ -94,13 +90,10 @@
 | Execution evidence | strict FOK fill、miss、latency shifted miss、depth stress |
 | Portfolio evidence | risk reject、reservation pressure、drawdown、stale metrics |
 | Settlement evidence | won、lost、delayed settlement、redeem failure |
-| Reconciliation evidence | cash drift、token drift、stale balance、critical drift |
-| Exit evidence | fixed stop、trailing stop、time stop、zone invalidation、bid-depth unavailable |
-| Token reconciliation | PG 有 position 但链上无 token、链上有 token 但 PG 无 position、allowance missing、resolution 后 redeem |
+| Reconciliation evidence | cash drift、stale balance、critical drift |
 | Factor builders | sufficient data、insufficient sample、insufficient coverage、non-conservative payload |
 | Governance | Draft->Candidate、Candidate->Shadow、Shadow->Published、rollback、expiry |
 | Live snapshot | startup success、startup fail closed、periodic refresh、notify refresh、schema mismatch |
-| SELL plan | USD budget vs shares amount、partial fill accounting、allowance missing |
 | Audit | hash chain verification、append-only、request id idempotency |
 
 ### 3.1 Mandatory end-to-end tests
@@ -138,16 +131,6 @@ historical detection at T
   -> resolver must use state visible at T, not T+1/T+2
 ```
 
-4. Exit report-only path:
-
-```text
-filled position
-  -> reconstruct bid books after entry
-  -> simulate fixed/trailing/time/zone exit
-  -> compare hold vs exit PnL
-  -> no live SELL submitted
-```
-
 ---
 
 ## 4. Observability
@@ -167,8 +150,6 @@ Required metrics：
 - PIT resolver missing input count by domain.
 - CH query row count and source delay lag.
 - Snapshot refresh success/failure and last good publication id.
-- Token balance drift count/value by severity.
-- Exit report false-exit rate and executable-exit rate.
 
 ### 4.1 Alerts
 
@@ -180,7 +161,6 @@ Required metrics：
 | `safety_factor_expired` | critical reconciliation/anomaly factor expired |
 | `audit_chain_broken` | hash-chain verification fails |
 | `pit_leakage_detected` | resolver uses state newer than event time |
-| `token_drift_critical` | token drift severity critical |
 | `shadow_delta_spike` | would-reject/size delta exceeds policy |
 
 ---
@@ -197,8 +177,6 @@ Required metrics：
 - [ ] Recover from snapshot schema mismatch.
 - [ ] Handle expired safety factor in Live mode.
 - [ ] Verify audit event chain.
-- [ ] Investigate exit report and decide whether to enable manual review / auto reduce.
-- [ ] Resolve token-level drift before publishing reconciliation health recovery.
 
 Each runbook must include:
 
@@ -225,8 +203,6 @@ Before merging any Phase 5 implementation PR, reviewers must check：
 - Does any CH/PG missing value become `0`, empty string, or default enum? Reject unless domain-correct.
 - Does any stage lack coverage metrics? Reject.
 - Does any API mutation lack actor, reason, request id, idempotency key? Reject.
-- Does any exit logic submit SELL without token inventory reservation and ERC1155 allowance check? Reject.
-- Does any reconciliation claim “complete” without token_id-level external balances? Reject.
 
 ---
 
@@ -241,7 +217,6 @@ Every implementation PR must update the relevant subphase document if it changes
 - fail-open/fail-closed behavior；
 - scheduler cadence/source delay；
 - live hot path application order；
-- exit policy progression；
 - runbook procedure。
 
 Docs updates must not add compatibility language such as “keep old name for now”, “temporarily re-export”, “alias endpoint”, or “fallback to current state”。
@@ -252,13 +227,12 @@ Docs updates must not add compatibility language such as “keep old name for no
 
 Phase 5 is complete only when：
 
-1. All data, materialization, factor, governance, live, exit/token, test, observability, and runbook checklists are complete.
+1. All data, materialization, factor, governance, live, test, observability, and runbook checklists are complete.
 2. Fact-to-snapshot E2E test passes.
 3. PIT leakage tests pass.
 4. Publication rollback tests pass.
 5. Snapshot expiry/fail-closed tests pass.
 6. Shadow decision delta tests pass.
-7. Exit materialization tests pass, but live auto-exit remains disabled unless Phase 5.7 conditions are explicitly met.
-8. No code path contains compatibility re-export/alias for old replay names.
-9. No hot path code queries ClickHouse/Postgres.
-10. Reviewers can trace every live factor decision to publication id, factor id, evidence run id, config hash, code sha, and audit event.
+7. No code path contains compatibility re-export/alias for old replay names.
+8. No hot path code queries ClickHouse/Postgres.
+9. Reviewers can trace every live factor decision to publication id, factor id, evidence run id, config hash, code sha, and audit event.

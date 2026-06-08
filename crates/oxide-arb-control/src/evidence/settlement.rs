@@ -12,7 +12,6 @@ use oxide_arb_models::{
     enums::risk::ReconciliationStatus,
     types::OpportunityId,
 };
-use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -36,7 +35,6 @@ pub struct SettlementReconciliationEvidenceReport {
     pub redeem_pending_count: u64,
     pub redeem_failed_count: u64,
     pub cash_drift_usd: EvidenceMetric<String>,
-    pub token_drift_shares: EvidenceMetric<String>,
     pub critical_drift_count: EvidenceMetric<u64>,
     pub metrics_stale_secs: EvidenceMetric<u64>,
     pub query_fingerprints: Vec<QueryFingerprint>,
@@ -107,7 +105,6 @@ pub fn build(
                     value: snapshot.drift_usd.to_string(),
                 },
             ),
-            token_drift_shares: token_drift_metric(source_bundle),
             critical_drift_count: EvidenceMetric::Available {
                 value: source_bundle
                     .reconciliation_reports
@@ -150,23 +147,6 @@ pub fn build(
                     })
             })
             .collect(),
-    }
-}
-
-fn token_drift_metric(source_bundle: &EvidenceSourceBundle) -> EvidenceMetric<String> {
-    if source_bundle.token_balance_snapshots.is_empty() {
-        return EvidenceMetric::Unavailable {
-            code: "reconciliation.token_drift_source_missing".to_owned(),
-            reason: "token drift requires token balance snapshot inputs".to_owned(),
-        };
-    }
-    let total = source_bundle
-        .token_balance_snapshots
-        .iter()
-        .filter_map(|snapshot| snapshot.drift_shares)
-        .fold(Decimal::ZERO, |acc, shares| acc + shares.inner());
-    EvidenceMetric::Available {
-        value: total.to_string(),
     }
 }
 
@@ -349,17 +329,6 @@ impl SettlementAccumulator {
                 opportunity_id: row.opportunity_id.clone(),
                 field: "balance_snapshot".to_owned(),
                 reason: "settlement reconciliation requires a PIT balance snapshot".to_owned(),
-            });
-        }
-        if !source_bundle
-            .token_balance_snapshots
-            .iter()
-            .any(|snapshot| snapshot.token_id == row.token_id)
-        {
-            self.missing_joins.push(MissingSettlementJoin {
-                opportunity_id: row.opportunity_id.clone(),
-                field: "token_balance_snapshot".to_owned(),
-                reason: "settlement reconciliation requires a token balance snapshot".to_owned(),
             });
         }
         if !source_bundle

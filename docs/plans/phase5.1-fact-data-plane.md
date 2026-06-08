@@ -17,7 +17,7 @@ Phase 5.1 只解决一件事：**历史事实必须足够完整、可查询、�
 | 交付物 | 说明 |
 |---|---|
 | CH facts contract | `tick_events_l2`、`book_snapshots`、`opportunity_detection`、`opportunity_audit`、`calibration_snapshots` 的行模型和查询契约 |
-| PG control schema baseline | `control_factor_*`、`runtime_config_version`、`runtime_config_activation`、`balance_snapshot`、`token_balance_snapshot` |
+| PG control schema baseline | `control_factor_*`、`runtime_config_version`、`runtime_config_activation`、`balance_snapshot` |
 | Fact writers | detection、execution terminal、settlement、calibration、balance/token balance writers |
 | Repository traits | `EvidenceTimeseriesRepository`、control factor repository traits |
 | Migration/schema tests | iden/entity/schema graph/migration tests |
@@ -95,11 +95,7 @@ control_factor_shadow_decision
 runtime_config_version
 runtime_config_activation
 balance_snapshot
-token_balance_snapshot
 control_factor_training_dataset
-position_exit_plan
-position_exit_execution
-position_unwind_audit
 ```
 
 所有 Postgres 表必须遵循 `docs/persistence/schema-catalog.md`：
@@ -364,24 +360,9 @@ pub struct RuntimeConfigDocument {
 
 ```text
 balance_snapshot
-token_balance_snapshot
 ```
 
-`token_balance_snapshot` 最少字段：
-
-```text
-snapshot_id UUID primary key
-holder_address text not null
-market_id text not null
-token_id text not null
-side text not null
-internal_shares decimal not null
-external_shares decimal not null
-drift_shares decimal not null
-block_number bigint null
-observed_at timestamptz not null
-source text not null -- CLOB API / on-chain ERC1155 / subgraph
-```
+`balance_snapshot` 记录 holder 的 USD collateral 内外账状态与 drift，供 settlement/reconciliation evidence 和 `ReconciliationHealthFactor` 使用。
 
 ### 3.4 Training dataset manifest
 
@@ -449,13 +430,11 @@ Settlement rows 不允许丢掉 detection/scoring attribution。
 - updated_at/event_time；
 - snapshot hash。
 
-### 4.4 Balance/token writer
+### 4.4 Balance writer
 
 必须新增：
 
 - collateral/cash balance snapshot；
-- ERC1155 token balance snapshot；
-- allowance observation；
 - reconciliation report linkage。
 
 ---

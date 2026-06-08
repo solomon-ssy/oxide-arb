@@ -6,7 +6,7 @@
 > **覆盖原章节**: 14, 15.3, 16, 18.6, 18.7  
 > **目标**: 建立 control factor registry、publication state machine、audit hash chain、operator API、RBAC 和 scheduler。Governance 负责“什么可以生效”，materialization 只负责“证据和候选”。
 
-> **Phase 5.3/5.4 contract dependency**: Governance 只接收 5.4 产出的 typed Draft/Candidate factor values；不得直接消费 5.3 `EvidenceOnly`/`ProductionIneligible` stage artifacts。API 展示 evidence 时必须保留 stage outcome、typed `EvidenceIssue`、artifact hashes 和 query fingerprints，不能把 stage-level production ineligibility 映射成 factor-level `ReportOnly` 之外的状态。
+> **Phase 5.3/5.4 contract dependency**: Governance 只接收 5.4 产出的 typed Draft/Candidate factor values；不得直接消费 5.3 `ProductionIneligible`/`InsufficientCoverage` stage artifacts。API 展示 evidence 时必须保留 stage outcome、typed `EvidenceIssue`、artifact hashes 和 query fingerprints，不能把 stage-level production ineligibility 映射成 factor-level `ReportOnly` 之外的状态。
 
 ---
 
@@ -377,8 +377,6 @@ Runtime config activation is governed like publication：
 - Shadow dashboard：would reject、would size、score delta、affected markets。
 - Publication dashboard：current snapshot、previous publication、expiry、rollback action。
 - Runtime config versions：diff、activation history、rollback。
-- Exit/unwind simulations：report-only before any live auto-exit。
-- Token reconciliation：internal vs external balances、drift severity、allowance status。
 
 ---
 

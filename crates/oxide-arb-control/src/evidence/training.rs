@@ -569,10 +569,6 @@ mod tests {
                     code: "test.cash_drift_missing".to_owned(),
                     reason: "cash_drift unavailable in fixture".to_owned(),
                 },
-                token_drift_shares: EvidenceMetric::Unavailable {
-                    code: "test.token_drift_missing".to_owned(),
-                    reason: "token_drift unavailable in fixture".to_owned(),
-                },
                 critical_drift_count: EvidenceMetric::Unavailable {
                     code: "test.critical_drift_missing".to_owned(),
                     reason: "critical_drift unavailable in fixture".to_owned(),

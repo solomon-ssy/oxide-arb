@@ -542,131 +542,57 @@ impl PointInTimeResolver {
         manifest: &MaterializationRunManifest,
         state: &mut ResolutionState<'_>,
     ) -> MaterializationResult<()> {
-        let balance_required = state.is_required(RequiredInputDomain::BalanceSnapshot);
-        let token_balance_required = manifest.data_requirements.requires_token_balances();
-        if !balance_required && !token_balance_required {
+        if !state.is_required(RequiredInputDomain::BalanceSnapshot) {
             return Ok(());
         }
         let Some(scope) = manifest.replay_account_scope.as_ref() else {
-            Self::missing_balance_scope(state, balance_required, token_balance_required);
+            Self::missing_balance_scope(state);
             return Ok(());
         };
         let Some(repo) = &self.repos.balances else {
-            if balance_required {
-                state.missing(
-                    RequiredInputDomain::BalanceSnapshot,
-                    MaterializationErrorCode::InputBalanceSnapshotMissing,
-                    "balance snapshot repository is not configured",
-                );
-            }
-            if token_balance_required {
-                state.missing(
-                    RequiredInputDomain::TokenBalanceSnapshot,
-                    MaterializationErrorCode::InputTokenBalanceSnapshotMissing,
-                    "token balance snapshot repository is not configured",
-                );
-            }
+            state.missing(
+                RequiredInputDomain::BalanceSnapshot,
+                MaterializationErrorCode::InputBalanceSnapshotMissing,
+                "balance snapshot repository is not configured",
+            );
             return Ok(());
         };
-        if balance_required {
-            let result = repo
-                .latest_balance_before_evidence(&scope.holder_address, manifest.window.to)
-                .await?;
-            match result.rows.into_iter().next() {
-                Some(snapshot) => {
-                    state.source_with_fingerprint(
-                        RequiredInputDomain::BalanceSnapshot,
-                        "balance_snapshot",
-                        "BalanceSnapshotRepository",
-                        1,
-                        Some(ArtifactHasher::compute(&snapshot)?.0),
-                        result.fingerprint,
-                    );
-                    state.source_bundle.balance_snapshot = Some(snapshot);
-                }
-                None => state.missing(
-                    RequiredInputDomain::BalanceSnapshot,
-                    MaterializationErrorCode::InputBalanceSnapshotMissing,
-                    "no balance snapshot resolved before materialization window end",
-                ),
-            }
-        }
-        if token_balance_required {
-            let (market_ids, token_ids) = token_balance_scope(&state.market_contexts);
-            if market_ids.is_empty() || token_ids.is_empty() {
-                state.missing(
-                    RequiredInputDomain::TokenBalanceSnapshot,
-                    MaterializationErrorCode::InputTokenBalanceSnapshotMissing,
-                    "token balance PIT lookup has no resolved market token scope",
-                );
-                return Ok(());
-            }
-            let result = repo
-                .latest_token_balances_before_evidence(
-                    &scope.holder_address,
-                    &market_ids,
-                    &token_ids,
-                    manifest.window.to,
-                )
-                .await?;
-            let rows = result.rows;
-            if rows.len() < token_ids.len() {
-                state.missing(
-                    RequiredInputDomain::TokenBalanceSnapshot,
-                    MaterializationErrorCode::InputTokenBalanceSnapshotMissing,
-                    format!(
-                        "resolved {} token balance snapshots for {} required tokens",
-                        rows.len(),
-                        token_ids.len()
-                    ),
-                );
-            }
-            if !rows.is_empty() {
+        let result = repo
+            .latest_balance_before_evidence(&scope.holder_address, manifest.window.to)
+            .await?;
+        match result.rows.into_iter().next() {
+            Some(snapshot) => {
                 state.source_with_fingerprint(
-                    RequiredInputDomain::TokenBalanceSnapshot,
-                    "token_balance_snapshot",
+                    RequiredInputDomain::BalanceSnapshot,
+                    "balance_snapshot",
                     "BalanceSnapshotRepository",
-                    u64::try_from(rows.len()).unwrap_or(u64::MAX),
-                    Some(ArtifactHasher::compute(&rows)?.0),
+                    1,
+                    Some(ArtifactHasher::compute(&snapshot)?.0),
                     result.fingerprint,
                 );
-                state.source_bundle.token_balance_snapshots = rows;
+                state.source_bundle.balance_snapshot = Some(snapshot);
             }
+            None => state.missing(
+                RequiredInputDomain::BalanceSnapshot,
+                MaterializationErrorCode::InputBalanceSnapshotMissing,
+                "no balance snapshot resolved before materialization window end",
+            ),
         }
         Ok(())
     }
 
-    fn missing_balance_scope(
-        state: &mut ResolutionState<'_>,
-        balance_required: bool,
-        token_balance_required: bool,
-    ) {
-        if balance_required {
-            state.warnings.push(StageWarning {
-                code: "input.balance_account_scope_absent".to_owned(),
-                message:
-                    "balance snapshot PIT lookup requires account scope, which is not present in the Phase 5.2 manifest"
-                        .to_owned(),
-            });
-            state.missing(
-                RequiredInputDomain::BalanceSnapshot,
-                MaterializationErrorCode::InputBalanceSnapshotMissing,
-                "balance snapshot account scope is absent from the materialization manifest",
-            );
-        }
-        if token_balance_required {
-            state.warnings.push(StageWarning {
-                code: "input.token_balance_account_scope_absent".to_owned(),
-                message:
-                    "token balance PIT lookup requires account scope, which is not present in the Phase 5.2 manifest"
-                        .to_owned(),
-            });
-            state.missing(
-                RequiredInputDomain::TokenBalanceSnapshot,
-                MaterializationErrorCode::InputTokenBalanceSnapshotMissing,
-                "token balance account scope is absent from the materialization manifest",
-            );
-        }
+    fn missing_balance_scope(state: &mut ResolutionState<'_>) {
+        state.warnings.push(StageWarning {
+            code: "input.balance_account_scope_absent".to_owned(),
+            message:
+                "balance snapshot PIT lookup requires account scope, which is not present in the Phase 5.2 manifest"
+                    .to_owned(),
+        });
+        state.missing(
+            RequiredInputDomain::BalanceSnapshot,
+            MaterializationErrorCode::InputBalanceSnapshotMissing,
+            "balance snapshot account scope is absent from the materialization manifest",
+        );
     }
 
     fn resolve_risk_state(_manifest: &MaterializationRunManifest, state: &mut ResolutionState<'_>) {
@@ -687,28 +613,6 @@ impl PointInTimeResolver {
             });
         }
     }
-}
-
-fn token_balance_scope(contexts: &[MarketReplayContext]) -> (Vec<MarketId>, Vec<TokenId>) {
-    let mut market_seen = HashSet::new();
-    let mut token_seen = HashSet::new();
-    let mut market_ids = Vec::new();
-    let mut token_ids = Vec::new();
-    for context in contexts {
-        let market_id = context.market_id.clone();
-        if market_seen.insert(market_id.clone()) {
-            market_ids.push(market_id);
-        }
-        let yes_token_id = context.yes_token_id.clone();
-        if token_seen.insert(yes_token_id.clone()) {
-            token_ids.push(yes_token_id);
-        }
-        let no_token_id = context.no_token_id.clone();
-        if token_seen.insert(no_token_id.clone()) {
-            token_ids.push(no_token_id);
-        }
-    }
-    (market_ids, token_ids)
 }
 
 fn record_missing_market_snapshots(

@@ -3,15 +3,8 @@ use oxide_arb_models::{
     enums::control_factor::{EvidenceStageStatus, MaterializationOutputPolicy},
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StageIntent {
-    Production,
-    EvidenceOnly,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvidenceStageGate {
-    pub intent: StageIntent,
     pub output_policy: MaterializationOutputPolicy,
     pub coverage: StageCoverageReport,
     pub blocking_issue_count: usize,
@@ -22,9 +15,6 @@ pub struct EvidenceStageGate {
 impl EvidenceStageGate {
     #[must_use]
     pub fn decide(&self) -> EvidenceStageStatus {
-        if matches!(self.intent, StageIntent::EvidenceOnly) {
-            return EvidenceStageStatus::EvidenceOnly;
-        }
         if !self.coverage.is_sufficient() {
             return EvidenceStageStatus::InsufficientCoverage;
         }
@@ -52,12 +42,11 @@ mod tests {
     };
     use rust_decimal::Decimal;
 
-    use crate::evidence::gate::{EvidenceStageGate, StageIntent};
+    use crate::evidence::gate::EvidenceStageGate;
 
     #[test]
     fn missing_required_metric_blocks_production() {
         let status = EvidenceStageGate {
-            intent: StageIntent::Production,
             output_policy: MaterializationOutputPolicy::EmitDraftCandidates,
             coverage: StageCoverageReport::complete(1),
             blocking_issue_count: 0,
@@ -72,7 +61,6 @@ mod tests {
     #[test]
     fn insufficient_coverage_takes_precedence() {
         let status = EvidenceStageGate {
-            intent: StageIntent::Production,
             output_policy: MaterializationOutputPolicy::EmitDraftCandidates,
             coverage: StageCoverageReport {
                 expected_rows: 2,

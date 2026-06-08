@@ -76,7 +76,7 @@ PointInTimeInputManifest
 - calibration required but unavailable；
 - fee schedule required but unavailable；
 - runtime config hash cannot be resolved；
-- required balance/token balance source missing for reconciliation/exit-sensitive evidence；
+- required balance source missing for reconciliation-sensitive evidence；
 - required settlement truth missing for outcome-dependent factor。
 
 Report-only run 可以继续，但必须把 failure 降级原因写入 stage report，不能产出 Candidate。

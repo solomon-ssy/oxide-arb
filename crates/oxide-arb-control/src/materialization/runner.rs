@@ -215,18 +215,6 @@ impl MaterializationRunner {
             MaterializationStageName::SettlementReconciliationEvidence,
         )?;
 
-        let exit_output = self.deps.evidence_engine.exit_token_evidence(
-            manifest,
-            &book,
-            &audit_funnel.rows,
-            vec![audit_funnel.fingerprint.clone()],
-            &book.source_bundle,
-            &execution,
-        )?;
-        self.persist_stage_report(&exit_output.stage_report).await?;
-        stage_reports.push(exit_output.stage_report.clone());
-        cancel_if_requested(&cancellation, "cancelled after exit_token_evidence")?;
-
         let training_output = self.deps.evidence_engine.training_examples(
             manifest,
             &detector,
@@ -692,7 +680,6 @@ fn terminal_status(
                 stage.status,
                 EvidenceStageStatus::InsufficientCoverage
                     | EvidenceStageStatus::ProductionIneligible
-                    | EvidenceStageStatus::EvidenceOnly
             )
     });
     if matches!(
@@ -759,8 +746,7 @@ const fn factor_requires_stage(
             factor_type,
             ControlFactorType::BucketRisk | ControlFactorType::ReconciliationHealth
         ),
-        MaterializationStageName::ExitTokenEvidence
-        | MaterializationStageName::FactorBuild
+        MaterializationStageName::FactorBuild
         | MaterializationStageName::QualityGateEvaluation
         | MaterializationStageName::DraftWrite => false,
     }

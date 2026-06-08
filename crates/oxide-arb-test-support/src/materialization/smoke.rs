@@ -16,10 +16,10 @@ use oxide_arb_models::{
         BalanceSnapshotInfo, ControlFactorStageReportInfo, DetectionRuntimeConfig,
         ExecutionRuntimeConfig, MarketPitSnapshotInfo, NewBalanceSnapshot, NewPotentialLoss,
         NewReconciliationReport, NewRiskAuditEvent, NewRuntimeConfigActivation,
-        NewRuntimeConfigVersion, NewTokenBalanceSnapshot, OperatorRuntimeConfig, PositionInfo,
-        PotentialLossInfo, ReconciliationReportInfo, ResolvePotentialLoss, RiskAuditEventInfo,
-        RiskLimitRuntimeConfig, RuntimeConfigActivationInfo, RuntimeConfigDocument,
-        RuntimeConfigVersionInfo, SizingRuntimeConfig, TokenBalanceSnapshotInfo, TradeInfo,
+        NewRuntimeConfigVersion, OperatorRuntimeConfig, PositionInfo, PotentialLossInfo,
+        ReconciliationReportInfo, ResolvePotentialLoss, RiskAuditEventInfo, RiskLimitRuntimeConfig,
+        RuntimeConfigActivationInfo, RuntimeConfigDocument, RuntimeConfigVersionInfo,
+        SizingRuntimeConfig, TradeInfo,
         control_factor::{
             AcquireMaterializationRunOutcome, AuditActor, AuditEventContent,
             CancelMaterializationRunOutcome, ControlFactorAuditEventInfo,
@@ -56,8 +56,7 @@ use oxide_arb_models::{
     types::{
         AuditEventId, BalanceSnapshotId, ControlFactorId, EventId, ExecutionId,
         FactorPublicationId, LedgerId, MarketId, MaterializationRunId, OpportunityId, PositionId,
-        Price, ReservationId, RuntimeConfigVersionId, Shares, TokenBalanceSnapshotId, TokenId,
-        TradeId, Usd,
+        Price, ReservationId, RuntimeConfigVersionId, Shares, TokenId, TradeId, Usd,
     },
 };
 use oxide_arb_repository::traits::{
@@ -129,7 +128,6 @@ pub fn smoke_manifest() -> MaterializationRunManifest {
                 RequiredInputDomain::Positions,
                 RequiredInputDomain::RiskState,
                 RequiredInputDomain::BalanceSnapshot,
-                RequiredInputDomain::TokenBalanceSnapshot,
                 RequiredInputDomain::SettlementTruth,
                 RequiredInputDomain::ReconciliationStatus,
             ],
@@ -141,13 +139,11 @@ pub fn smoke_manifest() -> MaterializationRunManifest {
                 RequiredInputDomain::Trades,
                 RequiredInputDomain::Positions,
                 RequiredInputDomain::BalanceSnapshot,
-                RequiredInputDomain::TokenBalanceSnapshot,
                 RequiredInputDomain::SettlementTruth,
                 RequiredInputDomain::ReconciliationStatus,
             ],
             min_l2_coverage_ratio: None,
             require_settlement_truth: true,
-            require_token_balances: true,
         },
         runtime_config_ref: RuntimeConfigRef::Version {
             version_id: RuntimeConfigVersionId::new("rcv_smoke"),
@@ -449,13 +445,10 @@ impl RuntimeConfigVersionRepository for SmokeRuntimeConfigRepository {
 
 pub struct SmokeBalanceRepository {
     balance: BalanceSnapshotInfo,
-    token_balances: Vec<TokenBalanceSnapshotInfo>,
 }
 
 impl SmokeBalanceRepository {
     fn new(observed_at: DateTime<Utc>, window_to: DateTime<Utc>) -> Self {
-        let market_id = MarketId::new(SMOKE_MARKET_ID);
-        let token_id = TokenId::new(SMOKE_YES_TOKEN);
         Self {
             balance: BalanceSnapshotInfo {
                 balance_snapshot_id: BalanceSnapshotId::new_v7(),
@@ -471,16 +464,6 @@ impl SmokeBalanceRepository {
                 observed_at: window_to - Duration::minutes(1),
                 created_at: observed_at,
             },
-            token_balances: vec![
-                token_balance_snapshot(&market_id, token_id, Side::Buy, observed_at, window_to),
-                token_balance_snapshot(
-                    &market_id,
-                    TokenId::new(SMOKE_NO_TOKEN),
-                    Side::Buy,
-                    observed_at,
-                    window_to,
-                ),
-            ],
         }
     }
 }
@@ -494,13 +477,6 @@ impl BalanceSnapshotRepository for SmokeBalanceRepository {
         Err(StorageError::Codec("not implemented".into()))
     }
 
-    async fn create_token_balance_snapshots(
-        &self,
-        _snapshots: Vec<NewTokenBalanceSnapshot>,
-    ) -> Result<Vec<TokenBalanceSnapshotInfo>, StorageError> {
-        Err(StorageError::Codec("not implemented".into()))
-    }
-
     async fn latest_balance_before(
         &self,
         holder_address: &str,
@@ -511,38 +487,6 @@ impl BalanceSnapshotRepository for SmokeBalanceRepository {
         } else {
             Ok(None)
         }
-    }
-
-    async fn latest_token_balance_before(
-        &self,
-        _holder_address: &str,
-        _market_id: &MarketId,
-        _token_id: &TokenId,
-        _before: DateTime<Utc>,
-    ) -> Result<Option<TokenBalanceSnapshotInfo>, StorageError> {
-        Ok(None)
-    }
-
-    async fn latest_token_balances_before(
-        &self,
-        holder_address: &str,
-        market_ids: &[MarketId],
-        token_ids: &[TokenId],
-        before: DateTime<Utc>,
-    ) -> Result<Vec<TokenBalanceSnapshotInfo>, StorageError> {
-        if holder_address != SMOKE_HOLDER {
-            return Ok(Vec::new());
-        }
-        Ok(self
-            .token_balances
-            .iter()
-            .filter(|row| {
-                row.observed_at < before
-                    && market_ids.contains(&row.market_id)
-                    && token_ids.contains(&row.token_id)
-            })
-            .cloned()
-            .collect())
     }
 }
 
@@ -1206,30 +1150,6 @@ fn factor_info_from_new(factor: NewControlFactorValue) -> ControlFactorValueInfo
         schema_version: factor.schema_version,
         created_at: Utc::now(),
         updated_at: Utc::now(),
-    }
-}
-
-fn token_balance_snapshot(
-    market_id: &MarketId,
-    token_id: TokenId,
-    side: Side,
-    observed_at: DateTime<Utc>,
-    window_to: DateTime<Utc>,
-) -> TokenBalanceSnapshotInfo {
-    TokenBalanceSnapshotInfo {
-        token_balance_snapshot_id: TokenBalanceSnapshotId::new_v7(),
-        holder_address: SMOKE_HOLDER.to_owned(),
-        market_id: market_id.clone(),
-        token_id,
-        side,
-        internal_shares: Shares::new(dec!(100)),
-        external_shares: Some(Shares::new(dec!(100))),
-        drift_shares: Some(Shares::ZERO),
-        source: BalanceSnapshotSource::InternalLedger,
-        block_number: None,
-        reconciliation_report_id: Some(1),
-        observed_at: window_to - Duration::minutes(1),
-        created_at: observed_at,
     }
 }
 

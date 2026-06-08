@@ -39,7 +39,6 @@ fn policy_with(cadence: Duration) -> SchedulePolicy {
                 production_required_inputs: vec![RequiredInputDomain::RuntimeConfig],
                 min_l2_coverage_ratio: None,
                 require_settlement_truth: false,
-                require_token_balances: false,
             },
             runtime_config_ref: RuntimeConfigRef::ActiveAt { at: now },
             simulation_config: SimulationConfig::production_default(),

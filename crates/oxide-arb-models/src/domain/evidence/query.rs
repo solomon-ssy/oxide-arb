@@ -10,7 +10,6 @@ use crate::{
 #[serde(rename_all = "snake_case")]
 pub enum EvidenceStageOutcome {
     Usable,
-    EvidenceOnly,
     Insufficient,
     Fatal,
 }

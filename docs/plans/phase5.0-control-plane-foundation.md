@@ -203,8 +203,6 @@ pub enum ControlFactorType {
 }
 ```
 
-暂不引入 `ExitQualityFactor`。Exit 先作为 report-only / policy workflow，等 token-level reconciliation、sell-side evidence、exit accounting 充分后再升级。
-
 ### 3.3 `FactorStatus`
 
 ```rust
@@ -358,11 +356,10 @@ Phase 5 是控制面重构，不为旧草案保留兼容层。允许并推荐：
 | 5.0 | `phase5.0-control-plane-foundation.md` | 架构契约、不变量、artifact、破坏式变更 | 0, 1, 3, 4, 8.2, 8.5, 9.4, 20 |
 | 5.1 | `phase5.1-fact-data-plane.md` | CH/PG 事实、schema、writers、migration | 2, 10.6, 11, 15.1, 15.2 |
 | 5.2 | `phase5.2-pit-materialization-runner.md` | PIT resolver、run manifest、幂等、错误码 | 1.3, 5, 6.1, 15.1.1 |
-| 5.3 | `phase5.3-evidence-engine.md` | book/detector/execution/portfolio/settlement evidence | 6.2-6.6, 9.2, 12.9 |
+| 5.3 | `phase5.3-evidence-engine.md` | book/detector/execution/portfolio/settlement evidence | 6.2-6.6, 9.2 |
 | 5.4 | `phase5.4-factor-builders-quality-gates.md` | 五类因子、统计物化、quality gates、shadow readiness | 7, 8, 9, 13 |
 | 5.5 | `phase5.5-registry-governance-api-scheduler.md` | registry、publication、audit、API、RBAC、scheduler | 14, 15.3, 16 |
 | 5.6 | `phase5.6-live-consumption.md` | `ControlFactorSnapshot`、hot path 接入、shadow decision | 10.1-10.5, 10.7, 17 |
-| 5.7 | `phase5.7-exit-unwind-token-reconciliation.md` | 主动退出、SELL path、token-level reconciliation | 12, 15.2 balance/token 表 |
 | 5.8 | `phase5.8-verification-operations.md` | 退出条件、测试矩阵、观测、runbooks、防漂移审查 | 18, 19 |
 
 ---

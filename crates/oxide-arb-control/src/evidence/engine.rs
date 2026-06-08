@@ -6,8 +6,7 @@ use crate::{
         },
         detector::{self, DetectorEvidenceArtifact},
         execution::{self, ExecutionEvidenceArtifact},
-        exit_token::{self, ExitTokenEvidenceArtifact},
-        gate::{EvidenceStageGate, StageIntent},
+        gate::EvidenceStageGate,
         metric_gate::{
             execution_production_required_missing_count,
             portfolio_production_required_missing_count,
@@ -169,7 +168,6 @@ impl EvidenceEngine {
             )
         };
         let status = EvidenceStageGate {
-            intent: StageIntent::Production,
             output_policy: manifest.output_policy,
             coverage: coverage_report.clone(),
             blocking_issue_count: 0,
@@ -255,7 +253,6 @@ impl EvidenceEngine {
             u64::try_from(artifact.examples.len()).unwrap_or(u64::MAX),
         );
         let status = EvidenceStageGate {
-            intent: StageIntent::Production,
             output_policy: manifest.output_policy,
             coverage: coverage_report.clone(),
             blocking_issue_count: 0,
@@ -330,7 +327,6 @@ impl EvidenceEngine {
             coverage(1, 0, report.insufficient_reasons.clone())
         };
         let status = EvidenceStageGate {
-            intent: StageIntent::Production,
             output_policy: manifest.output_policy,
             coverage: coverage_report.clone(),
             blocking_issue_count: usize::from(!artifact.sequence_complete),
@@ -402,7 +398,6 @@ impl EvidenceEngine {
                 .collect(),
         );
         let status = EvidenceStageGate {
-            intent: StageIntent::Production,
             output_policy: manifest.output_policy,
             coverage: coverage_report.clone(),
             blocking_issue_count: artifact.missing_joins.len(),
@@ -434,67 +429,6 @@ impl EvidenceEngine {
         })
     }
 
-    pub fn exit_token_evidence(
-        &self,
-        manifest: &MaterializationRunManifest,
-        book: &BookReconstructionArtifact,
-        audits: &[OpportunityAuditRow],
-        query_fingerprints: Vec<QueryFingerprint>,
-        source_bundle: &EvidenceSourceBundle,
-        execution: &ExecutionEvidenceArtifact,
-    ) -> MaterializationResult<StageOutput<ExitTokenEvidenceArtifact>> {
-        let started_at = Utc::now();
-        let artifact = exit_token::build(
-            book,
-            audits,
-            query_fingerprints,
-            source_bundle,
-            &manifest.simulation_config,
-        );
-        let report = artifact.report.clone();
-        let metrics = serde_json::to_value(&report)
-            .map_err(|error| MaterializationError::Codec(error.to_string()))?;
-        let coverage_report = coverage(
-            report.historical_filled_position_count,
-            report
-                .historical_filled_position_count
-                .saturating_mul(report.sell_side_book_coverage_bps)
-                / 10_000,
-            report.insufficient_reasons.clone(),
-        );
-        let status = EvidenceStageGate {
-            intent: StageIntent::EvidenceOnly,
-            output_policy: manifest.output_policy,
-            coverage: coverage_report.clone(),
-            blocking_issue_count: report.insufficient_reasons.len(),
-            warning_count: 0,
-            required_metric_missing_count: exit_missing_metric_count(&report),
-        }
-        .decide();
-        let stage_report = stage_report(
-            manifest,
-            StageReportSpec {
-                stage_name: MaterializationStageName::ExitTokenEvidence,
-                started_at,
-                status,
-                coverage: coverage_report,
-                metrics,
-                records_read: u64::try_from(audits.len()).unwrap_or(u64::MAX),
-                fingerprints: report.query_fingerprints,
-                warnings: Vec::new(),
-                input_artifacts: vec![
-                    artifact_ref(MaterializationStageName::BookReconstruction, book)?,
-                    artifact_ref(MaterializationStageName::ExecutionEvidence, execution)?,
-                ],
-            },
-            &artifact,
-        )?;
-        Ok(StageOutput {
-            stage_report,
-            artifact: Some(artifact),
-        })
-    }
-
     pub fn training_examples(
         &self,
         manifest: &MaterializationRunManifest,
@@ -514,7 +448,6 @@ impl EvidenceEngine {
             .map_err(|error| MaterializationError::Codec(error.to_string()))?;
         let coverage_report = StageCoverageReport::complete(report.example_count);
         let status = EvidenceStageGate {
-            intent: StageIntent::Production,
             output_policy: manifest.output_policy,
             coverage: coverage_report.clone(),
             blocking_issue_count: 0,
@@ -631,20 +564,8 @@ fn settlement_missing_metric_count(
         metric_missing(&report.settlement_delay_p50_ms),
         metric_missing(&report.settlement_delay_p95_ms),
         metric_missing(&report.cash_drift_usd),
-        metric_missing(&report.token_drift_shares),
         metric_missing(&report.critical_drift_count),
         metric_missing(&report.metrics_stale_secs),
-    ]
-    .into_iter()
-    .sum()
-}
-
-fn exit_missing_metric_count(report: &exit_token::ExitTokenEvidenceReport) -> usize {
-    [
-        metric_missing(&report.executable_exit_rate_bps),
-        metric_missing(&report.false_exit_count),
-        metric_missing(&report.avoided_tail_loss_count),
-        metric_missing(&report.token_inventory_consistency_bps),
     ]
     .into_iter()
     .sum()

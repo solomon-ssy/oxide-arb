@@ -21,11 +21,10 @@ Phase 5 已按 Phase 4 的推进方式拆成多个生产级子阶段文件。本
 | Phase 5.0 | [`phase5.0-control-plane-foundation.md`](./phase5.0-control-plane-foundation.md) | 架构契约、不变量、crate 边界、artifact 模型、破坏式变更原则 | 0, 1, 3, 4, 8.2, 8.5, 9.4, 20 |
 | Phase 5.1 | [`phase5.1-fact-data-plane.md`](./phase5.1-fact-data-plane.md) | CH/PG facts、schema、writer、repository、migration | 2, 10.6, 11, 15.1, 15.2, 18.1 |
 | Phase 5.2 | [`phase5.2-pit-materialization-runner.md`](./phase5.2-pit-materialization-runner.md) | PIT resolver、materialization manifest、run 状态机、幂等、错误码 | 1.3, 5, 6.1, 15.1.1, 18.2, 18.3 |
-| Phase 5.3 | [`phase5.3-evidence-engine.md`](./phase5.3-evidence-engine.md) | book/detector/execution/portfolio/settlement/reconciliation/exit evidence | 6.2-6.6, 9.2, 12.9, 18.4 |
+| Phase 5.3 | [`phase5.3-evidence-engine.md`](./phase5.3-evidence-engine.md) | book/detector/execution/portfolio/settlement/reconciliation evidence | 6.2-6.6, 9.2, 18.4 |
 | Phase 5.4 | [`phase5.4-factor-builders-quality-gates.md`](./phase5.4-factor-builders-quality-gates.md) | 五类 typed factor builders、统计物化、quality gates、shadow readiness | 7, 8, 9, 13, 18.5 |
 | Phase 5.5 | [`phase5.5-registry-governance-api-scheduler.md`](./phase5.5-registry-governance-api-scheduler.md) | registry、publication、audit、API、RBAC、scheduler | 14, 15.3, 16, 18.6, 18.7 |
 | Phase 5.6 | [`phase5.6-live-consumption.md`](./phase5.6-live-consumption.md) | `ControlFactorSnapshot`、live refresher、detector/scorer/risk/sizer 接入、shadow delta | 10.1-10.5, 10.7, 10.8, 17, 18.8 |
-| Phase 5.7 | [`phase5.7-exit-unwind-token-reconciliation.md`](./phase5.7-exit-unwind-token-reconciliation.md) | 主动退出、SELL unwind、token inventory reservation、ERC1155 token-level reconciliation | 12, 15.2 balance/token tables, 18.4 exit/token items, 18.7 exit UI item |
 | Phase 5.8 | [`phase5.8-verification-operations.md`](./phase5.8-verification-operations.md) | 退出条件、测试矩阵、观测、runbooks、防漂移审查 | 18, 19 |
 
 推进规则：
@@ -182,7 +181,6 @@ Scheduled materialization 必须配置 `source_delay`，默认窗口为：
 - `runtime_config_version`
 - `runtime_config_activation`
 - `balance_snapshot`
-- `token_balance_snapshot`
 
 所有 Postgres 表必须遵循 `docs/persistence/schema-catalog.md`：新增 iden module、entity、repository trait、schema graph tests、migration tests；禁止 migration 中裸写业务 schema；禁止兼容 re-export。
 
@@ -689,15 +687,15 @@ stale_metrics_window_ms
 
 - 将 fills join 到 settlement outcomes。
 - 归因 payout、realized PnL、redeem status、settlement delay。
-- Join reconciliation reports、balance snapshots、token balance snapshots。
-- 检测 drift、stale metrics、unresolved redeem、token mismatch。
+- Join reconciliation reports、balance snapshots。
+- 检测 drift、stale metrics、unresolved redeem。
 
 输出：
 
 - `SettlementReconciliationEvidenceReport`
 - realized outcome attribution;
 - reconciliation health timeline;
-- balance / token drift metrics.
+- balance drift metrics.
 
 Required joins:
 
@@ -708,7 +706,6 @@ market_id → settlement request
 winning_token_id → position side
 position_id → redeem/accounting status
 account scope → balance_snapshot
-token_id → token_balance_snapshot
 ```
 
 缺失 join 必须显式记录，不能用空字符串或 0 值指标填充。
@@ -911,8 +908,6 @@ redeem_status_bucket
 
 - reconciliation reports
 - balance snapshots
-- token balance snapshots
-- on-chain ERC1155 balances
 - redeem status
 - metrics freshness
 
@@ -1387,8 +1382,7 @@ else if balance_stale_secs > stale_threshold:
 
 可信度提升：
 
-- 不是靠更复杂模型，而是靠更完整的 on-chain / CLOB / PG 账实证据。
-- 增加 token-level reconciliation 后，因子可信度显著提升。
+- 不是靠更复杂模型，而是靠更完整的 CLOB / PG 账实证据。
 
 #### 9.3.5 `MarketAnomalyFactor`
 
@@ -1726,8 +1720,6 @@ Do not let `oxide-arb-control` depend on raw `clickhouse::Client` or `sea_orm::D
 | `runtime_config` | 删除旧 mutable key-value 表/repo/cache/seed | runtime config 迁到 immutable `runtime_config_version` + append-only `runtime_config_activation`；复杂 evidence-governed 控制迁到 factor registry |
 | `endgame_calibration_outcome` | 补 live writer | bucket risk 训练 label |
 | `risk_engine_state` | 增强历史查询 | portfolio evidence 需要 PIT sequence |
-| `position` | 扩展 exit / unwind 字段 | 当前主要覆盖 buy-to-settlement，缺主动退出生命周期 |
-| `trade` | 扩展 sell / exit intent 语义 | 当前 execution path 以 buy intent 为主，缺 exit-sell accounting |
 
 ### 11.2 推荐 CH 表/字段调整
 
@@ -1827,15 +1819,6 @@ Balance / reconciliation evidence:
 
 ```text
 balance_snapshot
-token_balance_snapshot
-```
-
-Exit / unwind:
-
-```text
-position_exit_plan
-position_exit_execution
-position_unwind_audit
 ```
 
 Training dataset manifest:
@@ -1878,354 +1861,9 @@ created_at timestamptz not null
 
 ---
 
-## 12. 主动退出、Unwind 与完整仓位对账
+## 12. （已移除）主动退出 / Unwind / Token 级对账
 
-Phase 5 的主线仍是控制因子物化，但 endgame 风险闭环如果只覆盖买入和结算，会留下一个明显缺口：**开仓后如果 thesis 失效、oracle/news/market status 改变、价格离开 endgame zone、账实漂移或二级市场仍有可接受 bid，系统是否应主动减仓或退出？**
-
-结论：
-
-- Phase 5 必须把主动退出设计清楚，并补齐 evidence / schema / API / accounting 边界。
-- 是否在第一版 live 自动执行 exit-sell，可以按风险分级推进。
-- 完整链上 token balance 对账必须进入 Phase 5，因为没有 token-level custody truth，主动 sell / redeem / merge 都不可靠。
-
-### 12.1 当前代码现实
-
-已有通用能力：
-
-- `Side::Sell` 存在于领域枚举。
-- `Dispatcher::available_depth_at_price` 对 `Side::Sell` 使用 `book.bid_depth_down_to(limit_price)`。
-- `ClobClient::place_order` 将 `OrderRequest.side` 传给 SDK，理论上可提交 SELL。
-- `ExecutionPlan.side` 来自 `Opportunity.side`。
-- `RiskMetricsState` 里已有 open buy/sell count 和 daily buy/sell trades 计数。
-
-缺口：
-
-- `EndgameDetector` / `OpportunityPipeline` 输出 buy-only opportunity，没有 exit signal。
-- `PlanBuilder::build` 根据 `approved_size / entry_price` 算 buy shares，不适合 sell：SELL 的 amount 是 shares，资金语义不同。
-- `ExecutionPipeline` 是 entry pipeline，不区分 entry intent 与 exit intent。
-- `CapitalManager` reservation 语义是 USD capital reservation，不是 token inventory reservation。
-- `PositionRepository` 有 close/settle/redeem，但没有部分减仓、多次 sell fill、exit plan、exit reason、exit PnL attribution。
-- `LedgerReconciler` 当前按 market exposure value 对账，不是 ERC1155 token_id + shares 级别对账。
-- CLOB SELL 需要 conditional token allowance；当前文档/代码未把 ERC1155 approval 和 allowance 纳入 startup assertion。
-- 没有 exit runner / exit scheduler / unwind task。
-
-### 12.2 是否应该做主动退出
-
-按 endgame 场景分类：
-
-| 场景 | 是否建议自动退出 | 原因 |
-|---|---:|---|
-| 价格短暂波动但 thesis 未变，接近结算 | 默认不退出 | endgame 流动性薄，stop 可能卖飞 |
-| oracle/news/market status 明确推翻 thesis | 建议减仓或退出 | 原始 probability edge 失效 |
-| 价格离开 endgame zone 且持续超时 | 建议进入 exit review / time stop | 说明收敛 thesis 可能失效 |
-| bid depth 足够且亏损可控 | 可执行 partial unwind | 有可行二级市场路径 |
-| bid depth 薄或 spread 极宽 | 不强制 market sell | 强行卖出可能比 hold-to-resolution 更差 |
-| reconciliation critical drift | 禁止新开仓；exit 需人工或安全策略 | token truth 不可靠时自动卖出危险 |
-| resolved / redeemable | 不走 sell，走 redeem | winner token worth $1，sell 可能不必要 |
-
-因此主动退出不是简单“价格跌了就卖”。它必须是 **ExitDecision → ExitPlan → ExitExecution → Accounting → Audit** 的完整管线。
-
-### 12.3 Exit 策略类型
-
-```rust
-pub enum ExitTriggerType {
-    FixedStop,
-    TrailingStop,
-    TimeStop,
-    EndgameZoneInvalidation,
-    OracleNewsInvalidation,
-    MarketStatusChange,
-    ReconciliationCritical,
-    ManualOperator,
-}
-
-pub enum ExitAction {
-    Hold,
-    Reduce { target_fraction: Decimal },
-    FullExit,
-    ManualReview,
-    RedeemIfResolved,
-}
-```
-
-#### Fixed stop
-
-适合普通 prediction market，但 near-resolution endgame 要谨慎。
-
-```text
-trigger if:
-  best_bid <= entry_price - stop_distance
-  and bid_depth_at_worst_price >= min_exit_shares
-  and market_status == active
-  and not within no_exit_before_resolution_window
-```
-
-#### Trailing stop
-
-只在 position 先显著盈利后激活，避免刚开仓就被薄盘口扫出。
-
-```text
-activation:
-  best_bid >= entry_price + activation_delta
-
-stop:
-  max(entry_price + breakeven_fee_buffer, high_water_bid - trail_distance)
-```
-
-#### Time stop
-
-用于“收敛太早但迟迟不结算”的场景。
-
-```text
-trigger if:
-  position_age_secs > max_endgame_hold_secs
-  and market not resolved
-  and price no longer in endgame zone
-```
-
-#### Endgame zone invalidation
-
-如果买入理由是 price convergence，则离开 convergence zone 是 thesis degradation。
-
-```text
-trigger if:
-  current_best_bid < exit_zone_floor
-  for invalidation_grace_secs
-```
-
-#### Oracle/news/market status invalidation
-
-需要事件源：
-
-- UMA oracle status；
-- Gamma market status；
-- manual incident；
-- trusted news/oracle adapter；
-- market paused / closed / disputed。
-
-第一版建议只做 `ManualOperator` + `MarketStatusChange` + `OracleStatusChange`，news 自动解析可以后续接入。
-
-### 12.4 二级市场 unwind path
-
-主动退出不能直接复用 entry FOK buy path。需要新的 exit pipeline：
-
-```text
-ExitSignal
-  → PositionInventoryResolver
-  → ExitPolicyEngine
-  → ExitPlanBuilder
-  → TokenReservation
-  → SellValidator
-  → ExitRiskGate
-  → CLOB SELL FOK/FAK
-  → ExitAccounting
-  → PositionPatch
-  → Audit / Materialization facts
-```
-
-Sell order 差异：
-
-| 维度 | BUY 开仓 | SELL 退出 |
-|---|---|---|
-| amount 语义 | USD 预算 | 要卖出的 shares |
-| book side | asks | bids |
-| limit price | max buy price | min sell price |
-| reservation | USD 资金 | ERC1155 token shares |
-| allowance | pUSD / collateral | conditional token allowance |
-| accounting | open/increase position | reduce/close position, realized exit PnL |
-| risk | pre-trade capital risk | execution/slippage + thesis invalidation risk |
-
-### 12.5 FOK vs FAK vs sliced unwind
-
-| 方法 | 适用场景 | 风险 |
-|---|---|---|
-| FOK SELL | 小仓位、深 bid、必须全部退出 | 容易 miss |
-| FAK SELL | 可接受部分减仓 | 需要 partial accounting |
-| 分片 unwind | 仓位大于 visible depth | 执行复杂，需防止自我冲击 |
-| Maker exit GTC/GTD | 想减少滑点 | 增加挂单管理和取消风险 |
-| 持有到结算 | bid 太薄、thesis 仍有效 | 承担 binary tail risk |
-
-Phase 5 第一版建议：
-
-1. 先支持 `ExitPlan` 和 report-only materialization。
-2. 再支持 FOK SELL full exit。
-3. 再支持 FAK partial reduce。
-4. 最后才考虑 sliced / maker unwind。
-
-### 12.6 Exit 数据模型
-
-新增 PG 表：
-
-```text
-position_exit_plan
-position_exit_execution
-position_unwind_audit
-```
-
-`position_exit_plan`:
-
-```text
-exit_plan_id UUID primary key
-position_id UUID not null
-market_id text not null
-token_id text not null
-trigger_type text not null
-action text not null
-target_shares decimal not null
-min_exit_price decimal not null
-reason jsonb not null
-policy_version text not null
-created_by text not null
-status text not null
-created_at timestamptz not null
-updated_at timestamptz not null
-```
-
-`position_exit_execution`:
-
-```text
-exit_execution_id UUID primary key
-exit_plan_id UUID not null
-order_id text null
-order_type text not null
-requested_shares decimal not null
-filled_shares decimal not null
-avg_exit_price decimal null
-fee_usd decimal not null
-realized_exit_pnl_usd decimal not null
-outcome text not null
-failure_reason text null
-submitted_at timestamptz null
-completed_at timestamptz null
-```
-
-`position_unwind_audit`:
-
-```text
-audit_id UUID primary key
-position_id UUID not null
-event_type text not null
-before_position jsonb not null
-after_position jsonb not null
-book_context jsonb not null
-token_balance_context jsonb not null
-reason text not null
-created_at timestamptz not null
-```
-
-Position table extensions:
-
-```text
-remaining_shares
-realized_exit_pnl_usd
-exit_status
-last_exit_at
-exit_reason
-```
-
-Trade table extensions:
-
-```text
-intent_type -- EntryBuy / ExitSell / Redeem / Merge
-parent_position_id
-exit_plan_id
-```
-
-### 12.7 完整 ERC1155 token balance 对账
-
-当前 reconciliation 主要对比 internal balance / external balance / market exposure，不能证明每个 token 的实际 custody。
-
-必须新增 token-level truth：
-
-```rust
-pub trait TokenBalanceQuerier {
-    async fn erc1155_balances(
-        &self,
-        holder: Address,
-        token_ids: &[TokenId],
-    ) -> OxideResult<Vec<TokenBalanceSnapshot>>;
-
-    async fn allowance_for_exchange(
-        &self,
-        holder: Address,
-        operator: Address,
-    ) -> OxideResult<bool>;
-}
-```
-
-`token_balance_snapshot` 必须至少包含：
-
-```text
-snapshot_id UUID primary key
-holder_address text not null
-market_id text not null
-token_id text not null
-side text not null
-internal_shares decimal not null
-external_shares decimal not null
-drift_shares decimal not null
-block_number bigint null
-observed_at timestamptz not null
-source text not null -- CLOB API / on-chain ERC1155 / subgraph
-```
-
-Reconciliation 必须能回答：
-
-- PG open positions 按 token 聚合后有多少 shares？
-- wallet / proxy / funder 实际 ERC1155 balance 有多少 shares？
-- CLOB exchange 是否有 conditional token allowance？
-- position 已 settlement/redeem 后 token balance 是否归零？
-- 是否存在外部 token 但 PG 无 position？
-- 是否存在 PG open position 但链上无 token？
-
-### 12.8 Exit 与 Control Factor 的关系
-
-主动退出不应该直接塞进现有五类 factor，但它需要被 Phase 5 evidence 支撑。
-
-新增可选 factor / policy：
-
-```rust
-pub enum ExitControlPolicy {
-    Disabled,
-    ReportOnly,
-    ManualReview,
-    AutoReduce,
-    AutoExit,
-}
-```
-
-建议先作为 runtime config version + evidence report，而不是第六类 factor。等 exit evidence 充足后，可以引入：
-
-```text
-ExitQualityFactor
-```
-
-但第一版不建议自动生成 `ExitQualityFactor`，避免把未验证的二级市场卖出逻辑直接推入 live。
-
-### 12.9 Exit Materialization
-
-Phase 5 materialization 必须支持 report-only 模拟：
-
-```text
-For each historical filled position:
-  reconstruct bid book after entry
-  simulate fixed stop / trailing stop / time stop / zone invalidation
-  compare:
-    hold_to_resolution_pnl
-    exit_pnl_after_slippage
-    missed_recovery_count
-    avoided_tail_loss
-    false_exit_count
-    executable_exit_rate
-```
-
-Exit 策略只有在以下条件满足后才能从 report-only 进入 shadow：
-
-- 有 token-level balance reconciliation。
-- 有 sell-side L2 bid book coverage。
-- 有 exit accounting model。
-- 有 enough historical examples。
-- Shadow 显示不会系统性卖飞最终正确仓位。
+> 本节原设计的主动退出（exit/stop-loss）、二级市场 unwind path、ERC1155 token-level 对账已整体移出系统范围。endgame 策略默认 hold-to-resolution；如需主动退出，作为单独产品决策手动处理，不在本计划内设计或实现。章节编号保留以维持其余章节与子阶段文档的交叉引用。
 
 ---
 
@@ -2452,7 +2090,6 @@ control_factor_shadow_decision
 runtime_config_version
 runtime_config_activation
 balance_snapshot
-token_balance_snapshot
 ```
 
 Schema requirements:
@@ -2935,9 +2572,7 @@ It writes `control_factor_shadow_decision` but does not change real orders.
 - 在 terminal 和 settlement audit rows 中保留 scored snapshot。
 - Write `calibration_snapshots` after calibrator updates.
 - fill 后写 calibration outcomes，settlement 后 resolve。
-- 新增 balance 和 token balance snapshots。
-- 新增 token-level ERC1155 balance snapshots。
-- 增加足够支持 exit materialization 的 sell-side bid book coverage。
+- 新增 balance snapshots。
 
 ### 18.2 Phase B — Point-in-Time 输入
 
@@ -2964,8 +2599,6 @@ It writes `control_factor_shadow_decision` but does not change real orders.
 - 构建 portfolio/risk evidence stage。
 - 构建 settlement/reconciliation evidence stage。
 - 增加 live-vs-materialized cross-check。
-- 为历史 filled positions 构建 exit/unwind report-only materialization。
-- 构建 token-level reconciliation evidence stage。
 
 ### 18.5 Phase E — 因子构建器与门禁
 
@@ -2991,8 +2624,6 @@ It writes `control_factor_shadow_decision` but does not change real orders.
 - 增加 publication and rollback API。
 - 增加 runtime config version activation API。
 - 增加 runs、evidence、factors、shadow、publication 的 UI 页面。
-- 在任何 live auto-exit 前，先增加 exit/unwind simulations 的 UI report。
-- 增加 token-level internal vs external balances 的 reconciliation UI。
 
 ### 18.8 Phase H — Live 消费
 
@@ -3016,7 +2647,6 @@ It writes `control_factor_shadow_decision` but does not change real orders.
 | F Registry/Governance | publication, shadow, rollback, expiry, and audit are transactional | publication can leave two active Published versions |
 | G API/UI/Scheduler | scheduler, manual backfill, review, publish, rollback flows are covered | mutating API lacks actor/reason/idempotency |
 | H Live 消费 | hot path 只读 ArcSwap snapshot；fail closed tests 通过 | 任意 hot path code 查询 CH/PG |
-| Exit/Unwind | report-only exit materialization proves executable exit path and token reconciliation | auto-exit is enabled before token-level reconciliation |
 
 ### 18.10 实现漂移检查
 
@@ -3031,8 +2661,6 @@ Before merging any Phase 5 implementation PR, reviewers must check:
 - Does any CH/PG missing value become `0`, empty string, or default enum? Reject unless domain-correct.
 - Does any stage lack coverage metrics? Reject.
 - Does any API mutation lack actor, reason, request id, idempotency key? Reject.
-- Does any exit logic submit SELL without token inventory reservation and ERC1155 allowance check? Reject.
-- Does any reconciliation claim “complete” without token_id-level external balances? Reject.
 
 ---
 
@@ -3045,9 +2673,7 @@ Before merging any Phase 5 implementation PR, reviewers must check:
 - [ ] Calibration snapshots are point-in-time queryable.
 - [ ] Detection rows contain score and calibration components.
 - [ ] Audit rows preserve terminal and settlement attribution.
-- [ ] Balance and token snapshots are available.
-- [ ] ERC1155 token balances are reconciled by `token_id` and shares.
-- [ ] Sell-side bid depth is available for exit materialization.
+- [ ] Balance snapshots are available.
 
 ### Materialization 物化
 
@@ -3079,7 +2705,6 @@ Before merging any Phase 5 implementation PR, reviewers must check:
 - [ ] Hot path reads no CH/PG.
 - [ ] Safety factor load failure can fail closed.
 - [ ] Applied factors are written to audit.
-- [ ] No live auto-exit is enabled unless token-level reconciliation and exit accounting are complete.
 
 ### Tests 测试
 
@@ -3090,9 +2715,6 @@ Before merging any Phase 5 implementation PR, reviewers must check:
 - [ ] Snapshot expiry tests.
 - [ ] Shadow decision delta tests.
 - [ ] End-to-end fact-to-snapshot test.
-- [ ] Exit materialization tests for fixed stop, trailing stop, time stop, zone invalidation.
-- [ ] SELL plan tests distinguish USD budget from shares amount.
-- [ ] ERC1155 token reconciliation tests detect missing internal/external positions.
 
 ### Observability 观测
 
@@ -3119,8 +2741,6 @@ Before merging any Phase 5 implementation PR, reviewers must check:
 - [ ] Recover from snapshot schema mismatch.
 - [ ] Handle expired safety factor in Live mode.
 - [ ] Verify audit event chain.
-- [ ] Investigate exit report and decide whether to enable manual review / auto reduce.
-- [ ] Resolve token-level drift before publishing reconciliation health recovery.
 
 ### Test Matrix 测试矩阵
 
@@ -3132,9 +2752,7 @@ Before merging any Phase 5 implementation PR, reviewers must check:
 | Execution evidence 执行证据 | strict FOK fill、miss、latency shifted miss、depth stress |
 | Portfolio evidence 组合证据 | risk reject、reservation pressure、drawdown、stale metrics |
 | Settlement evidence 结算证据 | won、lost、delayed settlement、redeem failure |
-| Reconciliation evidence 对账证据 | cash drift、token drift、stale balance、critical drift |
-| Exit evidence 退出证据 | fixed stop、trailing stop、time stop、zone invalidation、bid-depth unavailable |
-| Token reconciliation token 对账 | PG 有 position 但链上无 token、链上有 token 但 PG 无 position、allowance missing、resolution 后 redeem |
+| Reconciliation evidence 对账证据 | cash drift、stale balance、critical drift |
 | Factor builders 因子构建器 | sufficient data、insufficient sample、insufficient coverage、non-conservative payload |
 | Governance 治理 | Draft->Candidate、Candidate->Shadow、Shadow->Published、rollback、expiry |
 | Live snapshot 快照 | startup success、startup fail closed、periodic refresh、notify refresh、schema mismatch |

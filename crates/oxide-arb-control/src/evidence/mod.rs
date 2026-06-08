@@ -4,7 +4,6 @@ pub mod book;
 pub mod detector;
 pub mod engine;
 pub mod execution;
-pub mod exit_token;
 pub mod gate;
 pub mod metric_gate;
 pub mod portfolio;

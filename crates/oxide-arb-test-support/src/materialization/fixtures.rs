@@ -66,7 +66,6 @@ pub fn materialization_manifest(
             production_required_inputs: vec![RequiredInputDomain::TokenMapping],
             min_l2_coverage_ratio: None,
             require_settlement_truth: false,
-            require_token_balances: false,
         },
         runtime_config_ref: RuntimeConfigRef::Version {
             version_id: RuntimeConfigVersionId::new("rcv_test"),

@@ -245,7 +245,6 @@ active_string_enum! {
         CompletedWithWarnings => "completed_with_warnings",
         SkippedNotRequired => "skipped_not_required",
         InsufficientCoverage => "insufficient_coverage",
-        EvidenceOnly => "evidence_only",
         ProductionIneligible => "production_ineligible",
         Failed => "failed",
     }
@@ -260,7 +259,6 @@ active_string_enum! {
         ExecutionEvidence => "execution_evidence",
         PortfolioRiskEvidence => "portfolio_risk_evidence",
         SettlementReconciliationEvidence => "settlement_reconciliation_evidence",
-        ExitTokenEvidence => "exit_token_evidence",
         TrainingExampleBuild => "training_example_build",
         FactorBuild => "factor_build",
         QualityGateEvaluation => "quality_gate_evaluation",
@@ -279,7 +277,6 @@ pub enum MaterializationErrorCode {
     InputCalibrationSnapshotMissing,
     InputFeeScheduleMissing,
     InputBalanceSnapshotMissing,
-    InputTokenBalanceSnapshotMissing,
     InputSettlementTruthMissing,
     InputReconciliationStatusMissing,
     InputCurrentStateFallbackForbidden,
@@ -305,7 +302,6 @@ impl MaterializationErrorCode {
             Self::InputCalibrationSnapshotMissing => "input.calibration_snapshot_missing",
             Self::InputFeeScheduleMissing => "input.fee_schedule_missing",
             Self::InputBalanceSnapshotMissing => "input.balance_snapshot_missing",
-            Self::InputTokenBalanceSnapshotMissing => "input.token_balance_snapshot_missing",
             Self::InputSettlementTruthMissing => "input.settlement_truth_missing",
             Self::InputReconciliationStatusMissing => "input.reconciliation_status_missing",
             Self::InputCurrentStateFallbackForbidden => "input.current_state_fallback_forbidden",
@@ -344,7 +340,6 @@ impl MaterializationErrorCode {
                 | Self::InputCalibrationSnapshotMissing
                 | Self::InputFeeScheduleMissing
                 | Self::InputBalanceSnapshotMissing
-                | Self::InputTokenBalanceSnapshotMissing
                 | Self::InputSettlementTruthMissing
                 | Self::InputReconciliationStatusMissing
                 | Self::InputCurrentStateFallbackForbidden
@@ -370,7 +365,6 @@ impl std::str::FromStr for MaterializationErrorCode {
             "input.calibration_snapshot_missing" => Ok(Self::InputCalibrationSnapshotMissing),
             "input.fee_schedule_missing" => Ok(Self::InputFeeScheduleMissing),
             "input.balance_snapshot_missing" => Ok(Self::InputBalanceSnapshotMissing),
-            "input.token_balance_snapshot_missing" => Ok(Self::InputTokenBalanceSnapshotMissing),
             "input.settlement_truth_missing" => Ok(Self::InputSettlementTruthMissing),
             "input.reconciliation_status_missing" => Ok(Self::InputReconciliationStatusMissing),
             "input.current_state_fallback_forbidden" => {

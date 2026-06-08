@@ -509,7 +509,6 @@ async fn run_ledger_reconciliation(deps: LedgerReconciliationDeps<'_>) -> OxideR
     let success_spend = deps.trade_repo.successful_spend_total().await?;
     let settled_payout = deps.position_repo.settlement_payout_total().await?;
     let internal_cash = deps.configured_bankroll - success_spend + settled_payout;
-    let open_positions = deps.risk_metrics.open_positions();
     let reserved = deps.risk_metrics.reserved_usd();
 
     let report = deps.risk_engine.reconciler().reconcile_fetched(
@@ -529,7 +528,6 @@ async fn run_ledger_reconciliation(deps: LedgerReconciliationDeps<'_>) -> OxideR
             block_number: None,
             reconciliation_report_id: None,
             observed_at,
-            positions: open_positions,
         })
         .await?;
     deps.risk_engine

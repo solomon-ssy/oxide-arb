@@ -192,8 +192,6 @@ Sizer 已处理 Kelly / constraints / drawdown 等。
 - calibration outcome lifecycle：fill 后 unresolved，settlement 后 resolved。
 - settlement audit row 保留 scored snapshot，避免 bucket attribution 丢失。
 - balance snapshots。
-- token balance snapshots。
-- ERC1155 token-level reconciliation。
 - redeem pending / failed evidence。
 
 ---
@@ -210,9 +208,8 @@ Sizer 已处理 Kelly / constraints / drawdown 等。
 | `calibration_snapshots` | schema/repo 有，producer 缺 | 否 | CalibrationUpdater 后写 CH |
 | PG `trade` / `position` | 有 | 是 | 与 CH audit 建立稳定 replay join |
 | `endgame_calibration_outcome` | schema/trait 有，live writer 缺 | 否 | fill/settlement 写 outcome lifecycle |
-| `reconciliation_report` | 有 | 部分 | 与 balance/token snapshots 结合 |
+| `reconciliation_report` | 有 | 部分 | 与 balance snapshots 结合 |
 | `balance_snapshot` | 缺 | 否 | CLOB collateral、cash、equity、mark value |
-| `token_balance_snapshot` | 缺 | 否 | ERC1155 token-level holdings |
 | `runtime_config` | 表/repo 有，live consumer 弱 | 否 | 只保留 coarse toggles；复杂控制迁到 typed control factor |
 
 ---
@@ -329,7 +326,6 @@ Live 影响：
 必须覆盖：
 
 - internal vs external cash；
-- ERC1155 token balances；
 - position drift；
 - redeem pending / failure；
 - metrics freshness；
@@ -383,7 +379,6 @@ Live 影响：
 | calibration snapshot | `CalibrationUpdater` 更新后 | CH `calibration_snapshots` |
 | calibration outcome | fill 后 unresolved，settlement 后 resolved | PG `endgame_calibration_outcome` |
 | balance snapshot | metrics refresh / post-trade / settlement | PG/CH `balance_snapshot` |
-| token balance snapshot | on-chain reconciliation | PG/CH `token_balance_snapshot` |
 | reconciliation report | reconciliation 完成 | PG `reconciliation_report` |
 
 Materialization 不反向修改事实。
@@ -518,88 +513,7 @@ Hot path 只读 `ArcSwap<ControlFactorSnapshot>`，不读 CH/PG。
 
 ## 9. Product Decisions and Risk Boundaries
 
-### 9.1 Active Exit / Stop-loss
-
-当前系统默认 hold-to-resolution。主动 sell / stop-loss **需要设计**，但不应在没有 sell-side evidence 和 token-level reconciliation 前直接自动上线。
-
-业务判断：
-
-- 必须支持 report-only exit materialization，用历史 bid book 验证固定止损、trailing stop、time stop、价格离开 endgame zone 后平仓、oracle/news/market status invalidation。
-- 必须补齐二级市场 unwind path 的设计，因为 Polymarket CLOB 支持 SELL，但 SELL 语义是卖 shares，不是花 USD 买 shares。
-- 必须先完成 ERC1155 token balance 级别对账，否则系统无法确认自己是否真的持有可卖 token。
-- 第一版不建议直接全自动 stop-loss；推荐顺序是 `ReportOnly → ManualReview → AutoReduce → AutoExit`。
-
-好处：
-
-- 可能降低 oracle/news 反转后的尾部亏损。
-- 可以释放长期不结算或离开 endgame zone 的 capital。
-- 可以把“thesis 失效”从人工判断变成可审计策略。
-
-风险：
-
-- endgame book 常常很薄，止损可能卖飞。
-- 价格短暂离开 endgame zone 后又回归，自动 exit 会造成 false exit。
-- 大仓位卖出会自我冲击盘口。
-- CLOB degraded / allowance 缺失时，exit 可能失败。
-- 如果账实不一致，自动 SELL 可能提交超过真实 token balance 的订单。
-
-建议先用 materialization report-only 模拟：
-
-- price 从 0.97 跌到 0.90 / 0.80 / 0.60 时能否退出；
-- sell depth 是否存在；
-- stop-loss 是否降低 tail loss；
-- 是否增加 false exit。
-- trailing stop 在锁定利润时是否优于 hold-to-resolution；
-- time stop 是否减少 stale capital；
-- zone invalidation 是否识别 thesis 失效而不是普通噪声。
-
-### 9.1.1 Exit 类型边界
-
-| Exit 类型 | 建议阶段 | 说明 |
-|---|---|---|
-| Fixed stop | ReportOnly → ManualReview | near-resolution 下容易卖飞，必须证明可执行 |
-| Trailing stop | ReportOnly → ManualReview | 适合先盈利后保护利润，不适合刚开仓 |
-| Time stop | ReportOnly → ManualReview | 适合长时间不结算或 stale convergence |
-| Endgame zone invalidation | ReportOnly → ManualReview | 需要 grace window，避免噪声 |
-| Oracle/news/status invalidation | ManualReview → AutoReduce | thesis 明确失效时优先级最高 |
-| Reconciliation critical exit | ManualReview only | 账实不一致时自动卖出危险 |
-
-### 9.1.2 必须补齐的 exit 基础设施
-
-- `ExitSignal`：由 price/oracle/status/manual/reconciliation 产生。
-- `ExitPolicyEngine`：判断 Hold / Reduce / FullExit / ManualReview。
-- `ExitPlanBuilder`：按 shares、min exit price、book bid depth 构造 sell plan。
-- `TokenReservation`：锁定 ERC1155 token shares，避免重复卖出。
-- `SellValidator`：校验 bid depth、allowance、market status、slippage。
-- `ExitAccounting`：部分减仓、完整平仓、exit realized PnL、remaining shares。
-- `PositionExitAudit`：记录 trigger、book、token balance、before/after position。
-
-这些内容的 schema/API/实现规范以 Phase 5 canonical 文档为准，本文只记录业务边界。
-
-### 9.2 Complete On-chain Reconciliation
-
-Phase 5 必须补齐 token-level reconciliation。当前 reconciliation 只比较内部余额、外部余额和 market exposure，不等于完整链上仓位对账。
-
-- ERC1155 balances；
-- PG open positions vs wallet token balances；
-- redeem pending / failure；
-- neg-risk adapter route；
-- holder vs signer / proxy route。
-
-完整对账必须按 `token_id + shares` 聚合，而不是只按 market exposure USD 估值。原因：
-
-- SELL 需要实际持有 conditional token。
-- redeem 需要 winning token balance。
-- merge 需要 YES/NO 成对余额。
-- 账面 position 与链上 ERC1155 balance 漂移时，自动 exit 和 redeem 都不安全。
-
-未完成 token-level reconciliation 前：
-
-- 不允许 AutoExit。
-- 不允许宣称 reconciliation health 已完整覆盖仓位。
-- 只能使用 ManualReview 或 fail-closed 保护。
-
-### 9.3 Fee Schedule
+### 9.1 Fee Schedule
 
 Replay / materialization 必须使用 historical fee schedule：
 
@@ -610,11 +524,11 @@ Replay / materialization 必须使用 historical fee schedule：
 
 否则 PnL、edge、execution quality 都会偏。
 
-### 9.4 Low Threshold / Max Convergence Age
+### 9.2 Low Threshold / Max Convergence Age
 
 当前相关配置语义需要明确：
 
-- `low_threshold` 是否用于 opposite side invalidation / exit / anomaly detection。
+- `low_threshold` 是否用于 opposite side invalidation / anomaly detection。
 - `max_convergence_age_secs` 是否阻止“过早收敛但长期不结算”的 stale signal。
 - 这些规则是否作为 detector 逻辑、market anomaly evidence，还是单独 risk gate。
 

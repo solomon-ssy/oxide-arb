@@ -32,7 +32,7 @@ pub use emergency::EmergencyRepository;
 pub use event::EventRepository;
 pub use fact_data::{
     BalanceSnapshotRepository, ControlFactorDatasetRepository,
-    ControlFactorShadowDecisionRepository, PositionExitRepository,
+    ControlFactorShadowDecisionRepository,
 };
 pub use market::MarketRepository;
 pub use position::PositionRepository;

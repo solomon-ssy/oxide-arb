@@ -2,17 +2,12 @@
 
 use crate::{
     enums::{
-        common::Side,
         control_factor::ControlFactorType,
-        fact::{
-            BalanceSnapshotSource, ExitAction, ExitExecutionOutcome, ExitOrderType, ExitPlanStatus,
-            ExitTriggerType, ShadowDecisionType, UnwindAuditEventType,
-        },
+        fact::{BalanceSnapshotSource, ShadowDecisionType},
     },
     types::{
-        BalanceSnapshotId, EventId, ExitExecutionId, ExitPlanId, FactorPublicationId, MarketId,
-        MaterializationRunId, OpportunityId, PositionId, Price, ShadowDecisionId, Shares,
-        TokenBalanceSnapshotId, TokenId, TrainingDatasetId, UnwindAuditId, Usd,
+        BalanceSnapshotId, EventId, FactorPublicationId, MarketId, MaterializationRunId,
+        OpportunityId, ShadowDecisionId, TrainingDatasetId, Usd,
     },
 };
 use chrono::{DateTime, Utc};
@@ -52,51 +47,6 @@ pub struct NewBalanceSnapshot {
     pub external_available_usd: Usd,
     pub external_locked_usd: Usd,
     pub drift_usd: Usd,
-    pub source: BalanceSnapshotSource,
-    pub block_number: Option<i64>,
-    pub reconciliation_report_id: Option<i64>,
-    pub observed_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]
-#[sea_orm(entity = "crate::entities::token_balance_snapshot::Entity")]
-pub struct TokenBalanceSnapshotInfo {
-    pub token_balance_snapshot_id: TokenBalanceSnapshotId,
-    pub holder_address: String,
-    pub market_id: MarketId,
-    pub token_id: TokenId,
-    pub side: Side,
-    pub internal_shares: Shares,
-    pub external_shares: Option<Shares>,
-    pub drift_shares: Option<Shares>,
-    pub source: BalanceSnapshotSource,
-    pub block_number: Option<i64>,
-    pub reconciliation_report_id: Option<i64>,
-    pub observed_at: DateTime<Utc>,
-    pub created_at: DateTime<Utc>,
-}
-
-info_from_model!(
-    TokenBalanceSnapshotInfo,
-    crate::entities::token_balance_snapshot::Model,
-    {
-        token_balance_snapshot_id, holder_address, market_id, token_id, side,
-        internal_shares, external_shares, drift_shares, source, block_number,
-        reconciliation_report_id, observed_at, created_at,
-    }
-);
-
-#[derive(Debug, Clone, DeriveIntoActiveModel)]
-#[sea_orm(active_model = "crate::entities::token_balance_snapshot::ActiveModel")]
-pub struct NewTokenBalanceSnapshot {
-    pub token_balance_snapshot_id: TokenBalanceSnapshotId,
-    pub holder_address: String,
-    pub market_id: MarketId,
-    pub token_id: TokenId,
-    pub side: Side,
-    pub internal_shares: Shares,
-    pub external_shares: Option<Shares>,
-    pub drift_shares: Option<Shares>,
     pub source: BalanceSnapshotSource,
     pub block_number: Option<i64>,
     pub reconciliation_report_id: Option<i64>,
@@ -232,134 +182,4 @@ impl ShadowDecisionAggregate {
         }
         self.total = self.total.saturating_add(count);
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]
-#[sea_orm(entity = "crate::entities::position_exit_plan::Entity")]
-pub struct PositionExitPlanInfo {
-    pub exit_plan_id: ExitPlanId,
-    pub position_id: PositionId,
-    pub market_id: MarketId,
-    pub token_id: TokenId,
-    pub trigger_type: ExitTriggerType,
-    pub action: ExitAction,
-    pub target_shares: Shares,
-    pub min_exit_price: Price,
-    pub reason: serde_json::Value,
-    pub policy_version: String,
-    pub created_by: String,
-    pub status: ExitPlanStatus,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
-
-info_from_model!(PositionExitPlanInfo, crate::entities::position_exit_plan::Model, {
-    exit_plan_id, position_id, market_id, token_id, trigger_type, action,
-    target_shares, min_exit_price, reason, policy_version, created_by, status,
-    created_at, updated_at,
-});
-
-#[derive(Debug, Clone, DeriveIntoActiveModel)]
-#[sea_orm(active_model = "crate::entities::position_exit_plan::ActiveModel")]
-pub struct NewPositionExitPlan {
-    pub exit_plan_id: ExitPlanId,
-    pub position_id: PositionId,
-    pub market_id: MarketId,
-    pub token_id: TokenId,
-    pub trigger_type: ExitTriggerType,
-    pub action: ExitAction,
-    pub target_shares: Shares,
-    pub min_exit_price: Price,
-    pub reason: serde_json::Value,
-    pub policy_version: String,
-    pub created_by: String,
-    pub status: ExitPlanStatus,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]
-#[sea_orm(entity = "crate::entities::position_exit_execution::Entity")]
-pub struct PositionExitExecutionInfo {
-    pub exit_execution_id: ExitExecutionId,
-    pub exit_plan_id: ExitPlanId,
-    pub order_type: ExitOrderType,
-    pub requested_shares: Shares,
-    pub filled_shares: Shares,
-    pub avg_exit_price: Option<Price>,
-    pub fee_usd: Usd,
-    pub realized_exit_pnl_usd: Usd,
-    pub outcome: ExitExecutionOutcome,
-    pub failure_reason: Option<String>,
-    pub submitted_at: Option<DateTime<Utc>>,
-    pub completed_at: Option<DateTime<Utc>>,
-    pub created_at: DateTime<Utc>,
-}
-
-info_from_model!(
-    PositionExitExecutionInfo,
-    crate::entities::position_exit_execution::Model,
-    {
-        exit_execution_id, exit_plan_id, order_type, requested_shares, filled_shares,
-        avg_exit_price, fee_usd, realized_exit_pnl_usd, outcome, failure_reason,
-        submitted_at, completed_at, created_at,
-    }
-);
-
-#[derive(Debug, Clone, DeriveIntoActiveModel)]
-#[sea_orm(active_model = "crate::entities::position_exit_execution::ActiveModel")]
-pub struct NewPositionExitExecution {
-    pub exit_execution_id: ExitExecutionId,
-    pub exit_plan_id: ExitPlanId,
-    pub order_type: ExitOrderType,
-    pub requested_shares: Shares,
-    pub filled_shares: Shares,
-    pub avg_exit_price: Option<Price>,
-    pub fee_usd: Usd,
-    pub realized_exit_pnl_usd: Usd,
-    pub outcome: ExitExecutionOutcome,
-    pub failure_reason: Option<String>,
-    pub submitted_at: Option<DateTime<Utc>>,
-    pub completed_at: Option<DateTime<Utc>>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]
-#[sea_orm(entity = "crate::entities::position_unwind_audit::Entity")]
-pub struct PositionUnwindAuditInfo {
-    pub unwind_audit_id: UnwindAuditId,
-    pub position_id: PositionId,
-    pub exit_plan_id: Option<ExitPlanId>,
-    pub exit_execution_id: Option<ExitExecutionId>,
-    pub event_type: UnwindAuditEventType,
-    pub before_position: serde_json::Value,
-    pub after_position: serde_json::Value,
-    pub book_context: serde_json::Value,
-    pub token_balance_context: serde_json::Value,
-    pub reason: String,
-    pub actor: String,
-    pub created_at: DateTime<Utc>,
-}
-
-info_from_model!(
-    PositionUnwindAuditInfo,
-    crate::entities::position_unwind_audit::Model,
-    {
-        unwind_audit_id, position_id, exit_plan_id, exit_execution_id, event_type,
-        before_position, after_position, book_context, token_balance_context, reason,
-        actor, created_at,
-    }
-);
-
-#[derive(Debug, Clone, DeriveIntoActiveModel)]
-#[sea_orm(active_model = "crate::entities::position_unwind_audit::ActiveModel")]
-pub struct NewPositionUnwindAudit {
-    pub unwind_audit_id: UnwindAuditId,
-    pub position_id: PositionId,
-    pub exit_plan_id: Option<ExitPlanId>,
-    pub exit_execution_id: Option<ExitExecutionId>,
-    pub event_type: UnwindAuditEventType,
-    pub before_position: serde_json::Value,
-    pub after_position: serde_json::Value,
-    pub book_context: serde_json::Value,
-    pub token_balance_context: serde_json::Value,
-    pub reason: String,
-    pub actor: String,
 }

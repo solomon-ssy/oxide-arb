@@ -37,7 +37,6 @@ fn updated_at_trigger_catalog_is_complete() {
             "endgame_calibration_bucket",
             "event",
             "market",
-            "position_exit_plan",
             "risk_engine_state",
             "trade",
         ]

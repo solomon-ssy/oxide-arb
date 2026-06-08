@@ -39,7 +39,7 @@ async fn phase53_materialization_smoke_passes_acceptance_criteria() {
     assert_execution_stage(&report);
     assert_portfolio_stage(&report);
     assert_settlement_stage(&report);
-    assert_exit_and_training_stages(&report);
+    assert_training_stage(&report);
 }
 
 #[tokio::test]
@@ -190,14 +190,7 @@ fn assert_settlement_stage(report: &MaterializationRunReport) {
     );
 }
 
-fn assert_exit_and_training_stages(report: &MaterializationRunReport) {
-    let exit = stage(report, MaterializationStageName::ExitTokenEvidence);
-    assert_eq!(
-        exit.status,
-        EvidenceStageStatus::EvidenceOnly,
-        "exit/token stage must remain report-only in Phase 5.3"
-    );
-
+fn assert_training_stage(report: &MaterializationRunReport) {
     let training = stage(report, MaterializationStageName::TrainingExampleBuild);
     assert!(
         stage_completed(training.status),
@@ -206,8 +199,8 @@ fn assert_exit_and_training_stages(report: &MaterializationRunReport) {
     );
     assert_eq!(
         report.stage_reports.len(),
-        8,
-        "expected resolve + 7 evidence stages"
+        7,
+        "expected resolve + 6 evidence stages"
     );
 }
 
