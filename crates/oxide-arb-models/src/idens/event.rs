@@ -7,6 +7,7 @@ use sea_orm::{
 use crate::{
     enums::market::EventStatus,
     schema::{
+        column,
         dependency::TableDependency,
         index::{IndexBuildMode, IndexSpec},
         seed::SeedSpec,
@@ -33,12 +34,7 @@ pub fn table() -> TableCreateStatement {
     Table::create()
         .table(Event::Table)
         .if_not_exists()
-        .col(
-            ColumnDef::new(Event::EventId)
-                .text()
-                .not_null()
-                .primary_key(),
-        )
+        .col(column::text_id_pk(Event::EventId))
         .col(ColumnDef::new(Event::Title).text().not_null())
         .col(ColumnDef::new(Event::Slug).text().not_null())
         .col(ColumnDef::new(Event::Category).text().not_null())

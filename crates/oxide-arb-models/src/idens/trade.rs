@@ -10,6 +10,7 @@ use crate::{
     enums::common::TradeState,
     idens::{event::Event, market::Market},
     schema::{
+        column,
         dependency::TableDependency,
         index::{IndexBuildMode, IndexSpec},
         seed::SeedSpec,
@@ -58,27 +59,22 @@ pub fn table() -> TableCreateStatement {
     Table::create()
         .table(Trade::Table)
         .if_not_exists()
-        .col(
-            ColumnDef::new(Trade::TradeId)
-                .text()
-                .not_null()
-                .primary_key(),
-        )
-        .col(ColumnDef::new(Trade::ExecutionId).text().not_null())
-        .col(ColumnDef::new(Trade::ReservationId).text().not_null())
-        .col(ColumnDef::new(Trade::OpportunityId).text().not_null())
-        .col(ColumnDef::new(Trade::MarketId).text().not_null())
-        .col(ColumnDef::new(Trade::EventId).text().not_null())
-        .col(ColumnDef::new(Trade::TokenId).text().not_null())
+        .col(column::uuid_pk(Trade::TradeId))
+        .col(column::uuid_fk(Trade::ExecutionId))
+        .col(column::uuid_fk(Trade::ReservationId))
+        .col(column::uuid_fk(Trade::OpportunityId))
+        .col(column::market_id(Trade::MarketId))
+        .col(column::text_id(Trade::EventId))
+        .col(column::token_id(Trade::TokenId))
         .col(ColumnDef::new(Trade::Side).text().not_null())
-        .col(ColumnDef::new(Trade::Shares).text().not_null())
-        .col(ColumnDef::new(Trade::Price).text().not_null())
-        .col(ColumnDef::new(Trade::CostUsd).text().not_null())
-        .col(ColumnDef::new(Trade::FeeUsd).text().not_null())
-        .col(ColumnDef::new(Trade::DetectedEdgeBps).text().null())
-        .col(ColumnDef::new(Trade::DetectedProfitUsd).text().null())
-        .col(ColumnDef::new(Trade::NetProfitUsd).text().null())
-        .col(ColumnDef::new(Trade::OrderId).text().null())
+        .col(column::shares(Trade::Shares))
+        .col(column::price(Trade::Price))
+        .col(column::usd(Trade::CostUsd))
+        .col(column::usd(Trade::FeeUsd))
+        .col(column::bps_null(Trade::DetectedEdgeBps))
+        .col(column::usd_null(Trade::DetectedProfitUsd))
+        .col(column::usd_null(Trade::NetProfitUsd))
+        .col(column::text_id_null(Trade::OrderId))
         .col(ColumnDef::new(Trade::TxHash).text().null())
         .col(
             ColumnDef::new(Trade::State)

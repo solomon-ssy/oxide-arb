@@ -683,7 +683,7 @@ mod tests {
 
     fn detection_row() -> OpportunityDetectionRow {
         OpportunityDetectionRow {
-            opportunity_id: OpportunityId::new("opp"),
+            opportunity_id: OpportunityId::new(oxide_arb_test_support::seeded_uuid("opp")),
             market_id: MarketId::new("market"),
             event_id: EventId::new("event"),
             token_id: TokenId::new("yes"),
@@ -740,7 +740,9 @@ mod tests {
             ..Default::default()
         };
         RuntimeConfigVersionInfo {
-            runtime_config_version_id: RuntimeConfigVersionId::new("rcv"),
+            runtime_config_version_id: RuntimeConfigVersionId::new(
+                oxide_arb_test_support::seeded_uuid("rcv"),
+            ),
             config_hash: "cfg".to_owned(),
             schema_version: 1,
             config_json: serde_json::to_value(RuntimeConfigDocument {

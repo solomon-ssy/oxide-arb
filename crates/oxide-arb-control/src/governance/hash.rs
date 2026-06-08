@@ -3,23 +3,21 @@
 use chrono::{DateTime, Utc};
 use oxide_arb_error::control::GovernanceError;
 use oxide_arb_models::{
-    domain::control_factor::ControlFactorPublication,
-    hashing::CanonicalDigest,
-    types::{ControlFactorId, FactorPublicationId},
+    domain::control_factor::ControlFactorPublication, hashing::CanonicalDigest,
 };
 use serde::Serialize;
 
 /// Canonical publication fields hashed for tamper detection (excludes `publication_hash` and `status`).
 #[derive(Serialize)]
-struct PublicationCanonicalInput<'a> {
-    publication_id: &'a str,
-    mode: &'a str,
+struct PublicationCanonicalInput {
+    publication_id: String,
+    mode: String,
     factor_ids: Vec<String>,
-    previous_publication_id: Option<&'a str>,
+    previous_publication_id: Option<String>,
     effective_from: DateTime<Utc>,
     expires_at: DateTime<Utc>,
-    approved_by: Option<&'a str>,
-    approval_reason: &'a str,
+    approved_by: Option<String>,
+    approval_reason: String,
 }
 
 pub struct PublicationHasher;
@@ -56,27 +54,26 @@ impl PublicationHasher {
     }
 }
 
-fn canonical_input(publication: &ControlFactorPublication) -> PublicationCanonicalInput<'_> {
+fn canonical_input(publication: &ControlFactorPublication) -> PublicationCanonicalInput {
     let mut factor_ids = publication
         .factor_ids
         .iter()
-        .map(ControlFactorId::as_str)
-        .map(str::to_owned)
+        .map(ToString::to_string)
         .collect::<Vec<_>>();
     factor_ids.sort();
 
     PublicationCanonicalInput {
-        publication_id: publication.publication_id.as_str(),
-        mode: publication.mode.as_str(),
+        publication_id: publication.publication_id.to_string(),
+        mode: publication.mode.as_str().to_owned(),
         factor_ids,
         previous_publication_id: publication
             .previous_publication_id
             .as_ref()
-            .map(FactorPublicationId::as_str),
+            .map(ToString::to_string),
         effective_from: publication.effective_from,
         expires_at: publication.expires_at,
-        approved_by: publication.approved_by.as_deref(),
-        approval_reason: publication.approval_reason.as_str(),
+        approved_by: publication.approved_by.clone(),
+        approval_reason: publication.approval_reason.clone(),
     }
 }
 
@@ -89,6 +86,7 @@ mod tests {
         enums::control_factor::{PublicationMode, PublicationStatus},
         types::{ControlFactorId, FactorPublicationId},
     };
+    use oxide_arb_test_support::seeded_uuid;
 
     fn sample_publication(factor_ids: Vec<&str>) -> ControlFactorPublication {
         let effective_from = Utc
@@ -96,9 +94,12 @@ mod tests {
             .single()
             .expect("fixed test timestamp");
         ControlFactorPublication {
-            publication_id: FactorPublicationId::new("cfp_test"),
+            publication_id: FactorPublicationId::new(seeded_uuid("cfp_test")),
             mode: PublicationMode::Shadow,
-            factor_ids: factor_ids.into_iter().map(ControlFactorId::new).collect(),
+            factor_ids: factor_ids
+                .into_iter()
+                .map(|name| ControlFactorId::new(seeded_uuid(name)))
+                .collect(),
             previous_publication_id: None,
             status: PublicationStatus::Pending,
             effective_from,

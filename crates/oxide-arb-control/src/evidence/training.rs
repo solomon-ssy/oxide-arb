@@ -458,7 +458,7 @@ mod tests {
                 query_fingerprints: vec![QueryFingerprint("detector".to_owned())],
             },
             detections: vec![DetectorDetectionRef {
-                opportunity_id: OpportunityId::new("opp"),
+                opportunity_id: OpportunityId::new(oxide_arb_test_support::seeded_uuid("opp")),
                 market_id: MarketId::new("market"),
                 detected_at: Utc
                     .timestamp_millis_opt(1_000)
@@ -589,12 +589,12 @@ mod tests {
         let mut artifact = settlement();
         artifact.report.settled_trade_count = 1;
         artifact.settled_opportunities.push(SettledOpportunityRef {
-            opportunity_id: OpportunityId::new("opp"),
+            opportunity_id: OpportunityId::new(oxide_arb_test_support::seeded_uuid("opp")),
             settled_at: Utc.timestamp_millis_opt(2_000).single().expect("settled"),
         });
-        artifact
-            .settled_opportunity_ids
-            .push(OpportunityId::new("opp"));
+        artifact.settled_opportunity_ids.push(OpportunityId::new(
+            oxide_arb_test_support::seeded_uuid("opp"),
+        ));
         artifact
     }
 }

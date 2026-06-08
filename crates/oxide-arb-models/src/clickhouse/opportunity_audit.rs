@@ -449,7 +449,7 @@ mod tests {
 
     fn test_snapshot() -> ScoredOpportunitySnapshot {
         ScoredOpportunitySnapshot {
-            opportunity_id: OpportunityId::new_v7(),
+            opportunity_id: OpportunityId::from_v7(),
             market_id: MarketId::new("m1"),
             event_id: EventId::new("e1"),
             token_id: TokenId::new("tok1"),
@@ -503,10 +503,10 @@ mod tests {
     fn test_trade(resolved: &ResolvedOutcome) -> TradeInfo {
         let now = chrono::Utc::now();
         TradeInfo {
-            trade_id: TradeId::new("t1"),
-            execution_id: ExecutionId::generate(),
-            reservation_id: ReservationId::new("r1"),
-            opportunity_id: OpportunityId::new_v7(),
+            trade_id: TradeId::from_v7(),
+            execution_id: ExecutionId::from_v7(),
+            reservation_id: ReservationId::from_v7(),
+            opportunity_id: OpportunityId::from_v7(),
             market_id: MarketId::new("m1"),
             event_id: EventId::new("e1"),
             token_id: TokenId::new("tok1"),
@@ -616,7 +616,7 @@ mod tests {
         use crate::enums::opportunity::PayoutModel;
 
         let opp = Opportunity {
-            opportunity_id: OpportunityId::new_v7(),
+            opportunity_id: OpportunityId::from_v7(),
             market_id: MarketId::new("m1"),
             event_id: EventId::new("e1"),
             token_id: TokenId::new("tok1"),
@@ -661,7 +661,7 @@ mod tests {
             detected_at: chrono::Utc::now(),
         };
         let snapshot = ScoredOpportunitySnapshot::from_opportunity(&opp);
-        let exec_id = ExecutionId::generate();
+        let exec_id = ExecutionId::from_v7();
         let row = OpportunityAuditRow::from((&exec_id, &opp, "risk", "max exposure", &snapshot));
 
         assert_eq!(row.rejection_stage, Some(ChRejectionStage::Risk));
@@ -687,7 +687,7 @@ mod tests {
         let snapshot = test_snapshot();
         let now = chrono::Utc::now();
         let position = PositionInfo {
-            position_id: PositionId::generate(),
+            position_id: PositionId::from_v7(),
             trade_id: trade.trade_id.clone(),
             market_id: trade.market_id.clone(),
             token_id: trade.token_id.clone(),

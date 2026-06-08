@@ -401,7 +401,7 @@ fn market_replay_payload_hash(market: &MarketInfo) -> Result<String, StorageErro
 
 fn new_market_pit_snapshot(market: &MarketInfo, payload_hash: String) -> NewMarketPitSnapshot {
     NewMarketPitSnapshot {
-        market_pit_snapshot_id: MarketPitSnapshotId::new_v7(),
+        market_pit_snapshot_id: MarketPitSnapshotId::from_v7(),
         market_id: market.market_id.clone(),
         event_id: market.event_id.clone(),
         question: market.question.clone(),

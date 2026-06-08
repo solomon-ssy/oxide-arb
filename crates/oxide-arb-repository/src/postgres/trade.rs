@@ -6,7 +6,7 @@ use oxide_arb_models::{
     domain::{NewTrade, ReportTradeStats, TradeInfo, TradeObservation},
     entities::trade::{ActiveModel, Column, Entity},
     enums::common::{TradeBusinessOutcome, TradeState},
-    types::{MarketId, TradeId, Usd},
+    types::{ExecutionId, MarketId, TradeId, Usd},
 };
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, DatabaseTransaction,
@@ -358,10 +358,10 @@ async fn do_find_by_id(
 
 async fn do_find_by_execution(
     db: &impl ConnectionTrait,
-    execution_id: &str,
+    execution_id: &ExecutionId,
 ) -> Result<Vec<TradeInfo>, StorageError> {
     Entity::find()
-        .filter(Column::ExecutionId.eq(execution_id))
+        .filter(Column::ExecutionId.eq(execution_id.as_uuid()))
         .order_by_desc(Column::CreatedAt)
         .all(db)
         .await
@@ -551,7 +551,10 @@ impl TradeRepository for PgTradeRepository {
         do_find_by_id(&self.db, trade_id).await
     }
 
-    async fn find_by_execution(&self, execution_id: &str) -> Result<Vec<TradeInfo>, StorageError> {
+    async fn find_by_execution(
+        &self,
+        execution_id: &ExecutionId,
+    ) -> Result<Vec<TradeInfo>, StorageError> {
         do_find_by_execution(&self.db, execution_id).await
     }
 
@@ -656,7 +659,10 @@ impl TradeRepository for PgTradeRepositoryTxn<'_> {
         do_find_by_id(self.txn, trade_id).await
     }
 
-    async fn find_by_execution(&self, execution_id: &str) -> Result<Vec<TradeInfo>, StorageError> {
+    async fn find_by_execution(
+        &self,
+        execution_id: &ExecutionId,
+    ) -> Result<Vec<TradeInfo>, StorageError> {
         do_find_by_execution(self.txn, execution_id).await
     }
 

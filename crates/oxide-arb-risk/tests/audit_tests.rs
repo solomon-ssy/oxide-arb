@@ -161,7 +161,7 @@ fn test_config() -> RiskConfig {
 
 fn test_trade(outcome: TradeBusinessOutcome, profit: Decimal) -> PostTradeInput {
     PostTradeInput {
-        trade_id: TradeId::generate(),
+        trade_id: TradeId::from_v7(),
         market_id: MarketId::new("0xaudit_market"),
         token_id: TokenId::new("audit_token"),
         side: Side::Buy,

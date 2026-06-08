@@ -69,7 +69,7 @@ fn plan_neg_risk_from_market_registry() {
     opp.market_id = MarketId::new("0xneg_risk_market");
 
     let reservation = ReservationHandle {
-        id: ReservationId::new_id(),
+        id: ReservationId::from_v7(),
         amount: Usd::new(dec!(20)),
         market_id: opp.market_id.clone(),
     };
@@ -78,7 +78,7 @@ fn plan_neg_risk_from_market_registry() {
         &opp,
         Usd::new(dec!(20)),
         &reservation,
-        ExecutionId::generate(),
+        ExecutionId::from_v7(),
     );
     assert!(
         plan.neg_risk,
@@ -93,7 +93,7 @@ fn plan_neg_risk_false_when_market_unknown() {
 
     let opp = sample_opportunity();
     let reservation = ReservationHandle {
-        id: ReservationId::new_id(),
+        id: ReservationId::from_v7(),
         amount: Usd::new(dec!(20)),
         market_id: opp.market_id.clone(),
     };
@@ -102,7 +102,7 @@ fn plan_neg_risk_false_when_market_unknown() {
         &opp,
         Usd::new(dec!(20)),
         &reservation,
-        ExecutionId::generate(),
+        ExecutionId::from_v7(),
     );
     assert!(
         !plan.neg_risk,
@@ -119,12 +119,12 @@ fn plan_shares_never_exceed_approved_notional() {
     opp.entry_price = Price::new(dec!(0.97));
     let approved = Usd::new(dec!(20));
     let reservation = ReservationHandle {
-        id: ReservationId::new_id(),
+        id: ReservationId::from_v7(),
         amount: approved,
         market_id: opp.market_id.clone(),
     };
 
-    let plan = builder.build(&opp, approved, &reservation, ExecutionId::generate());
+    let plan = builder.build(&opp, approved, &reservation, ExecutionId::from_v7());
     let planned_notional = plan.shares * plan.limit_price;
 
     assert!(

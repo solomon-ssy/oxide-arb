@@ -143,7 +143,7 @@ mod tests {
         .event_hash()
         .expect("hash");
         ControlFactorAuditEventInfo {
-            event_id: AuditEventId::new_v7(),
+            event_id: AuditEventId::from_v7(),
             sequence,
             event_type: ControlAuditEventType::FactorCreated,
             actor: "op".into(),

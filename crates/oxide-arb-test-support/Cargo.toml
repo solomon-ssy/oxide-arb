@@ -23,6 +23,7 @@ rust_decimal = { workspace = true }
 rust_decimal_macros = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+uuid = { workspace = true, features = ["v5"] }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 

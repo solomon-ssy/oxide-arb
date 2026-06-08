@@ -9,6 +9,7 @@ use sea_orm::{
 use crate::{
     enums::rbac::RoleStatus,
     schema::{
+        column,
         dependency::TableDependency,
         index::{IndexBuildMode, IndexSpec},
         seed::SeedSpec,
@@ -16,6 +17,9 @@ use crate::{
     },
     seed::rbac::roles,
 };
+
+/// Maximum stored length of a role code (Casbin subject).
+const ROLE_CODE_LEN: u32 = 32;
 
 /// RBAC role. `code` (not the UUID id) is the stable Casbin policy subject.
 #[oxide_schema(lifecycle = "control")]
@@ -36,8 +40,12 @@ pub fn table() -> TableCreateStatement {
     Table::create()
         .table(Role::Table)
         .if_not_exists()
-        .col(ColumnDef::new(Role::Id).text().not_null().primary_key())
-        .col(ColumnDef::new(Role::Code).text().not_null())
+        .col(column::uuid_pk(Role::Id))
+        .col(
+            ColumnDef::new(Role::Code)
+                .string_len(ROLE_CODE_LEN)
+                .not_null(),
+        )
         .col(ColumnDef::new(Role::Name).text().not_null())
         .col(ColumnDef::new(Role::Description).text().null())
         .col(ColumnDef::new(Role::Kind).text().not_null())

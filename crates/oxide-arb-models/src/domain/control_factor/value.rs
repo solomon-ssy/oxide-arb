@@ -351,7 +351,7 @@ mod tests {
 
     fn minimal_factor(status: FactorStatus) -> ControlFactorValue {
         ControlFactorValue {
-            factor_id: ControlFactorId::new_v7(),
+            factor_id: ControlFactorId::from_v7(),
             factor_type: ControlFactorType::BucketRisk,
             dimensions: FactorDimensions::BucketRisk(BucketRiskDimensions {
                 category: MarketCategory::Politics,
@@ -368,8 +368,8 @@ mod tests {
                 block_new_entries: false,
             }),
             evidence: FactorEvidence {
-                materialization_run_id: MaterializationRunId::new_v7(),
-                stage_report_ids: vec![StageReportId::new_v7()],
+                materialization_run_id: MaterializationRunId::from_v7(),
+                stage_report_ids: vec![StageReportId::from_v7()],
                 window_from: Utc::now() - chrono::Duration::hours(1),
                 window_to: Utc::now(),
                 source_delay_secs: 60,
@@ -477,7 +477,7 @@ mod tests {
 
         let factor = minimal_factor(FactorStatus::Candidate);
         let publication = ControlFactorPublication {
-            publication_id: FactorPublicationId::new_v7(),
+            publication_id: FactorPublicationId::from_v7(),
             mode: PublicationMode::Shadow,
             factor_ids: vec![factor.factor_id.clone()],
             previous_publication_id: None,

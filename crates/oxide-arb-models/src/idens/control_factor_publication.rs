@@ -7,6 +7,7 @@ use sea_orm::{
 use crate::{
     enums::control_factor::PublicationStatus,
     schema::{
+        column,
         dependency::TableDependency,
         index::{IndexBuildMode, IndexSpec},
         seed::SeedSpec,
@@ -35,22 +36,15 @@ pub fn table() -> TableCreateStatement {
     Table::create()
         .table(ControlFactorPublication::Table)
         .if_not_exists()
-        .col(
-            ColumnDef::new(ControlFactorPublication::PublicationId)
-                .text()
-                .not_null()
-                .primary_key(),
-        )
+        .col(column::uuid_pk(ControlFactorPublication::PublicationId))
         .col(
             ColumnDef::new(ControlFactorPublication::Mode)
                 .text()
                 .not_null(),
         )
-        .col(
-            ColumnDef::new(ControlFactorPublication::PreviousPublicationId)
-                .text()
-                .null(),
-        )
+        .col(column::uuid_null(
+            ControlFactorPublication::PreviousPublicationId,
+        ))
         .col(
             ColumnDef::new(ControlFactorPublication::Status)
                 .text()

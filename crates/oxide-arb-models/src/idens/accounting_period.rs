@@ -4,14 +4,12 @@ use sea_orm::{
     sea_query::{ColumnDef, Index, Table, TableCreateStatement},
 };
 
-use crate::{
-    schema::{
-        dependency::TableDependency,
-        index::{IndexBuildMode, IndexSpec},
-        seed::SeedSpec,
-        timestamp_with_write_default,
-    },
-    types::Usd,
+use crate::schema::{
+    column,
+    dependency::TableDependency,
+    index::{IndexBuildMode, IndexSpec},
+    seed::SeedSpec,
+    timestamp_with_write_default,
 };
 
 #[oxide_schema(lifecycle = "ledger")]
@@ -37,12 +35,7 @@ pub fn table() -> TableCreateStatement {
     Table::create()
         .table(AccountingPeriod::Table)
         .if_not_exists()
-        .col(
-            ColumnDef::new(AccountingPeriod::PeriodId)
-                .text()
-                .not_null()
-                .primary_key(),
-        )
+        .col(column::uuid_pk(AccountingPeriod::PeriodId))
         .col(
             ColumnDef::new(AccountingPeriod::PeriodType)
                 .text()
@@ -54,8 +47,8 @@ pub fn table() -> TableCreateStatement {
                 .not_null(),
         )
         .col(ColumnDef::new(AccountingPeriod::EndDate).date().not_null())
-        .col(default_zero_usd(AccountingPeriod::RealizedPnl))
-        .col(default_zero_usd(AccountingPeriod::TotalFees))
+        .col(column::usd_default_zero(AccountingPeriod::RealizedPnl))
+        .col(column::usd_default_zero(AccountingPeriod::TotalFees))
         .col(
             ColumnDef::new(AccountingPeriod::TradeCount)
                 .integer()
@@ -80,8 +73,8 @@ pub fn table() -> TableCreateStatement {
                 .not_null()
                 .default(0),
         )
-        .col(default_zero_usd(AccountingPeriod::MaxDrawdown))
-        .col(ColumnDef::new(AccountingPeriod::SharpeRatio).text().null())
+        .col(column::usd_default_zero(AccountingPeriod::MaxDrawdown))
+        .col(column::probability_null(AccountingPeriod::SharpeRatio))
         .col(
             ColumnDef::new(AccountingPeriod::Finalized)
                 .boolean()
@@ -114,12 +107,6 @@ pub const fn dependencies() -> Vec<TableDependency> {
 
 pub const fn seed_units() -> Vec<SeedSpec> {
     Vec::new()
-}
-
-fn default_zero_usd(column: AccountingPeriod) -> ColumnDef {
-    let mut col = ColumnDef::new(column);
-    col.text().not_null().default(Usd::ZERO);
-    col
 }
 
 fn accounting_period_table_name() -> String {

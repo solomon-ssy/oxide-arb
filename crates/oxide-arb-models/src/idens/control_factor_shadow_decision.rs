@@ -9,6 +9,7 @@ use sea_orm::{
 use crate::{
     idens::control_factor_publication::ControlFactorPublication,
     schema::{
+        column,
         dependency::TableDependency,
         index::{IndexBuildMode, IndexSpec},
         seed::SeedSpec,
@@ -37,32 +38,13 @@ pub fn table() -> TableCreateStatement {
     Table::create()
         .table(ControlFactorShadowDecision::Table)
         .if_not_exists()
-        .col(
-            ColumnDef::new(ControlFactorShadowDecision::ShadowDecisionId)
-                .text()
-                .not_null()
-                .primary_key(),
-        )
-        .col(
-            ColumnDef::new(ControlFactorShadowDecision::PublicationId)
-                .text()
-                .not_null(),
-        )
-        .col(
-            ColumnDef::new(ControlFactorShadowDecision::OpportunityId)
-                .text()
-                .null(),
-        )
-        .col(
-            ColumnDef::new(ControlFactorShadowDecision::EventId)
-                .text()
-                .null(),
-        )
-        .col(
-            ColumnDef::new(ControlFactorShadowDecision::MarketId)
-                .text()
-                .not_null(),
-        )
+        .col(column::uuid_pk(
+            ControlFactorShadowDecision::ShadowDecisionId,
+        ))
+        .col(column::uuid_fk(ControlFactorShadowDecision::PublicationId))
+        .col(column::uuid_fk(ControlFactorShadowDecision::OpportunityId))
+        .col(column::text_id(ControlFactorShadowDecision::EventId))
+        .col(column::market_id(ControlFactorShadowDecision::MarketId))
         .col(
             ColumnDef::new(ControlFactorShadowDecision::DecisionType)
                 .text()

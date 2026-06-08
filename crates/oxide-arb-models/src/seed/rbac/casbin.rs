@@ -196,7 +196,7 @@ pub async fn load(db: &dyn ConnectionTrait, ctx: &mut SeedContext) -> Result<u64
         .map_err(|error| DbErr::Custom(error.to_string()))?
         .clone();
 
-    let mut models = vec![grouping_row(admin_id.as_str(), ROLE_SUPER_ADMIN)];
+    let mut models = vec![grouping_row(&admin_id.to_string(), ROLE_SUPER_ADMIN)];
     for (role_code, permissions) in builtin_role_policies() {
         for (resource, operation) in permissions {
             models.push(policy_row(role_code, resource, operation));

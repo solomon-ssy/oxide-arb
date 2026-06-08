@@ -4,6 +4,7 @@ use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::{
     domain::{RiskStateInfo, UpsertRiskEngineState},
     entities::risk_state::{ActiveModel, Column, Entity},
+    types::Usd,
 };
 use sea_orm::{
     ColumnTrait, ConnectionTrait, DatabaseConnection, DatabaseTransaction, EntityTrait,
@@ -89,8 +90,8 @@ pub(crate) async fn do_upsert(
 
 async fn do_reset_hourly_window(db: &impl ConnectionTrait) -> Result<(), StorageError> {
     Entity::update_many()
-        .col_expr(Column::HourlyLossUsd, Expr::value("0"))
-        .col_expr(Column::HourlyFeeUsd, Expr::value("0"))
+        .col_expr(Column::HourlyLossUsd, Expr::value(Usd::ZERO))
+        .col_expr(Column::HourlyFeeUsd, Expr::value(Usd::ZERO))
         .col_expr(Column::HourlyWindowStart, Expr::value(Utc::now()))
         .filter(Column::Id.eq(1))
         .exec(db)
@@ -101,9 +102,9 @@ async fn do_reset_hourly_window(db: &impl ConnectionTrait) -> Result<(), Storage
 
 async fn do_reset_daily_window(db: &impl ConnectionTrait) -> Result<(), StorageError> {
     Entity::update_many()
-        .col_expr(Column::DailyLossUsd, Expr::value("0"))
-        .col_expr(Column::DailyFeeUsd, Expr::value("0"))
-        .col_expr(Column::DailyPnl, Expr::value("0"))
+        .col_expr(Column::DailyLossUsd, Expr::value(Usd::ZERO))
+        .col_expr(Column::DailyFeeUsd, Expr::value(Usd::ZERO))
+        .col_expr(Column::DailyPnl, Expr::value(Usd::ZERO))
         .col_expr(
             Column::DailyWindowStart,
             Expr::value(Utc::now().date_naive()),
@@ -117,7 +118,7 @@ async fn do_reset_daily_window(db: &impl ConnectionTrait) -> Result<(), StorageE
 
 async fn do_reset_weekly_window(db: &impl ConnectionTrait) -> Result<(), StorageError> {
     Entity::update_many()
-        .col_expr(Column::WeeklyLossUsd, Expr::value("0"))
+        .col_expr(Column::WeeklyLossUsd, Expr::value(Usd::ZERO))
         .col_expr(
             Column::WeeklyWindowStart,
             Expr::value(Utc::now().date_naive()),

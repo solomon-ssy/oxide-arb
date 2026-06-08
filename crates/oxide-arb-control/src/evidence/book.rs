@@ -855,7 +855,7 @@ mod tests {
         let from = Utc.timestamp_millis_opt(1_000).single().expect("from");
         let to = Utc.timestamp_millis_opt(4_000).single().expect("to");
         InputResolutionReport {
-            run_id: MaterializationRunId::new("run"),
+            run_id: MaterializationRunId::new(oxide_arb_test_support::seeded_uuid("run")),
             window: TimeWindowSpec::new(from, to),
             manifest: PointInTimeInputManifest {
                 inputs: Vec::new(),

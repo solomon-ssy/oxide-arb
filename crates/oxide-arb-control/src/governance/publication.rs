@@ -121,7 +121,7 @@ mod tests {
 
     fn bucket_factor(size_multiplier: Decimal) -> ControlFactorValue {
         ControlFactorValue {
-            factor_id: ControlFactorId::new_v7(),
+            factor_id: ControlFactorId::from_v7(),
             factor_type: ControlFactorType::BucketRisk,
             dimensions: FactorDimensions::BucketRisk(BucketRiskDimensions {
                 category: MarketCategory::Politics,
@@ -138,8 +138,8 @@ mod tests {
                 block_new_entries: false,
             }),
             evidence: FactorEvidence {
-                materialization_run_id: MaterializationRunId::new_v7(),
-                stage_report_ids: vec![StageReportId::new_v7()],
+                materialization_run_id: MaterializationRunId::from_v7(),
+                stage_report_ids: vec![StageReportId::from_v7()],
                 window_from: Utc::now() - chrono::Duration::hours(1),
                 window_to: Utc::now(),
                 source_delay_secs: 30,
@@ -195,7 +195,7 @@ mod tests {
 
     #[test]
     fn rollback_gate_requires_target_for_live_published() {
-        let previous = FactorPublicationId::new_v7();
+        let previous = FactorPublicationId::from_v7();
         // Published superseding a live publication without a target is rejected.
         assert!(matches!(
             PublicationManager::check_rollback_target(PublicationMode::Published, None, true),

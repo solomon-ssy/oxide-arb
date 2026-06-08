@@ -116,7 +116,7 @@ async fn find_by_trade_id_q(
     trade_id: &TradeId,
 ) -> Result<Option<PositionInfo>, StorageError> {
     Entity::find()
-        .filter(Column::TradeId.eq(trade_id.as_str()))
+        .filter(Column::TradeId.eq(trade_id.as_uuid()))
         .one(db)
         .await
         .map_err(StorageError::from)

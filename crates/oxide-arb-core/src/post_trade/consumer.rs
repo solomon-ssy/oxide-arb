@@ -142,7 +142,7 @@ impl PostTradeConsumer {
             return Ok(());
         }
         let position = NewPosition {
-            position_id: PositionId::generate(),
+            position_id: PositionId::from_v7(),
             trade_id: trade.trade_id.clone(),
             market_id: trade.market_id.clone(),
             token_id: trade.token_id.clone(),

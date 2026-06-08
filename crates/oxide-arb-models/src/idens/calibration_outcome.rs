@@ -7,6 +7,7 @@ use sea_orm::{
 use crate::{
     idens::market::Market,
     schema::{
+        column,
         dependency::TableDependency,
         index::{IndexBuildMode, IndexSpec},
         seed::SeedSpec,
@@ -37,28 +38,10 @@ pub fn table() -> TableCreateStatement {
     Table::create()
         .table(EndgameCalibrationOutcome::Table)
         .if_not_exists()
-        .col(
-            ColumnDef::new(EndgameCalibrationOutcome::Id)
-                .big_integer()
-                .not_null()
-                .auto_increment()
-                .primary_key(),
-        )
-        .col(
-            ColumnDef::new(EndgameCalibrationOutcome::TradeId)
-                .text()
-                .not_null(),
-        )
-        .col(
-            ColumnDef::new(EndgameCalibrationOutcome::OpportunityId)
-                .text()
-                .not_null(),
-        )
-        .col(
-            ColumnDef::new(EndgameCalibrationOutcome::MarketId)
-                .text()
-                .not_null(),
-        )
+        .col(column::bigserial_pk(EndgameCalibrationOutcome::Id))
+        .col(column::uuid_fk(EndgameCalibrationOutcome::TradeId))
+        .col(column::uuid_fk(EndgameCalibrationOutcome::OpportunityId))
+        .col(column::market_id(EndgameCalibrationOutcome::MarketId))
         .col(
             ColumnDef::new(EndgameCalibrationOutcome::Category)
                 .text()
@@ -84,16 +67,10 @@ pub fn table() -> TableCreateStatement {
                 .boolean()
                 .null(),
         )
-        .col(
-            ColumnDef::new(EndgameCalibrationOutcome::EntryPrice)
-                .text()
-                .not_null(),
-        )
-        .col(
-            ColumnDef::new(EndgameCalibrationOutcome::ConfidenceAtEntry)
-                .text()
-                .not_null(),
-        )
+        .col(column::price(EndgameCalibrationOutcome::EntryPrice))
+        .col(column::probability(
+            EndgameCalibrationOutcome::ConfidenceAtEntry,
+        ))
         .col(
             ColumnDef::new(EndgameCalibrationOutcome::ConvergenceSecs)
                 .integer()

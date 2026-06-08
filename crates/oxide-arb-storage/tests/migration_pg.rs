@@ -6,7 +6,7 @@ use oxide_arb_models::{
     entities::{blacklist_entry, risk_state, runtime_config_version},
     enums::runtime_config::RuntimeConfigVersionSource,
     schema::{catalog, trigger::TriggerKind},
-    types::{MarketId, RuntimeConfigVersionId},
+    types::{AuditEventId, MarketId, OperationLogId, RuntimeConfigVersionId},
 };
 use oxide_arb_storage::postgres::{
     PostgresPool,
@@ -308,7 +308,7 @@ async fn db_defaults_fill_notset_timestamps_on_insert() {
         .try_get_by_index(0)
         .expect("read db timestamp");
 
-    let version_id = RuntimeConfigVersionId::new_v7();
+    let version_id = RuntimeConfigVersionId::from_v7();
 
     // Insert a runtime_config_version row with created_at deliberately omitted.
     db.execute(sea_orm::Statement::from_sql_and_values(
@@ -317,7 +317,7 @@ async fn db_defaults_fill_notset_timestamps_on_insert() {
          (runtime_config_version_id, config_hash, schema_version, config_json, source, created_by, reason) \
          VALUES ($1, $2, $3, $4, $5, $6, $7)",
         [
-            version_id.to_string().into(),
+            version_id.clone().into(),
             "hash:test".into(),
             1_i32.into(),
             serde_json::json!({"schema_version": 1}).into(),
@@ -447,12 +447,14 @@ async fn operation_log_is_append_only() {
 
     Migrator::up(db, None).await.expect("Migration up failed");
 
+    let log_id = OperationLogId::from_v7();
+
     db.execute(sea_orm::Statement::from_sql_and_values(
         db.get_database_backend(),
         "INSERT INTO operation_log \
          (id, request_id, category, action, http_method, http_path, http_status, outcome, latency_ms) \
          VALUES ($1, 'req-1', 'system', 'test.action', 'GET', '/x', 200, 'success', 5)",
-        ["opl_test_1".into()],
+        [log_id.clone().into()],
     ))
     .await
     .expect("append-only table still accepts INSERT");
@@ -461,7 +463,7 @@ async fn operation_log_is_append_only() {
         .execute(sea_orm::Statement::from_sql_and_values(
             db.get_database_backend(),
             "UPDATE operation_log SET action = 'tampered' WHERE id = $1",
-            ["opl_test_1".into()],
+            [log_id.clone().into()],
         ))
         .await;
     assert!(update.is_err(), "UPDATE on operation_log must be rejected");
@@ -470,7 +472,7 @@ async fn operation_log_is_append_only() {
         .execute(sea_orm::Statement::from_sql_and_values(
             db.get_database_backend(),
             "DELETE FROM operation_log WHERE id = $1",
-            ["opl_test_1".into()],
+            [log_id.clone().into()],
         ))
         .await;
     assert!(delete.is_err(), "DELETE on operation_log must be rejected");
@@ -487,31 +489,34 @@ async fn control_factor_audit_event_is_append_only() {
 
     Migrator::up(db, None).await.expect("Migration up failed");
 
-    db.execute(sea_orm::Statement::from_string(
+    let event_id = AuditEventId::from_v7();
+
+    db.execute(sea_orm::Statement::from_sql_and_values(
         db.get_database_backend(),
         "INSERT INTO control_factor_audit_event \
          (event_id, sequence, event_type, actor, actor_role, resource_type, resource_id, \
           request_id, reason, diff, event_hash) \
-         VALUES ('cfae_t1', 1, 'factor_created', 'op', 'operator', 'factor', 'cf_1', \
-                 'req-1', 'r', '{}'::jsonb, 'blake3:test')"
-            .to_owned(),
+         VALUES ($1, 1, 'factor_created', 'op', 'operator', 'factor', 'cf_1', \
+                 'req-1', 'r', '{}'::jsonb, 'blake3:test')",
+        [event_id.clone().into()],
     ))
     .await
     .expect("audit insert");
 
     let update = db
-        .execute(sea_orm::Statement::from_string(
+        .execute(sea_orm::Statement::from_sql_and_values(
             db.get_database_backend(),
-            "UPDATE control_factor_audit_event SET reason = 'tampered' WHERE event_id = 'cfae_t1'"
-                .to_owned(),
+            "UPDATE control_factor_audit_event SET reason = 'tampered' WHERE event_id = $1",
+            [event_id.clone().into()],
         ))
         .await;
     assert!(update.is_err(), "UPDATE on audit chain must be rejected");
 
     let delete = db
-        .execute(sea_orm::Statement::from_string(
+        .execute(sea_orm::Statement::from_sql_and_values(
             db.get_database_backend(),
-            "DELETE FROM control_factor_audit_event WHERE event_id = 'cfae_t1'".to_owned(),
+            "DELETE FROM control_factor_audit_event WHERE event_id = $1",
+            [event_id.clone().into()],
         ))
         .await;
     assert!(delete.is_err(), "DELETE on audit chain must be rejected");

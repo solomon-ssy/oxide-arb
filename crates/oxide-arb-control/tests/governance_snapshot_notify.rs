@@ -25,7 +25,7 @@ fn audit_envelope() -> AuditActor {
 fn shadow_publication_request() -> PublicationRequest {
     let now = Utc::now();
     PublicationRequest {
-        factor_ids: vec![ControlFactorId::new_v7()],
+        factor_ids: vec![ControlFactorId::from_v7()],
         idempotency_key: "idem-shadow-notify".into(),
         effective_from: Some(now),
         expires_at: now + ChronoDuration::days(1),
@@ -77,8 +77,8 @@ async fn rollback_publication_wakes_snapshot_refresh_notify() {
     let refresh_wait = spawn_refresh_waiter(Arc::clone(&notify));
 
     let registry = registry_with_notify(Arc::clone(&repo), notify);
-    let active = FactorPublicationId::new_v7();
-    let target = FactorPublicationId::new_v7();
+    let active = FactorPublicationId::from_v7();
+    let target = FactorPublicationId::from_v7();
     registry
         .rollback_publication(audit_envelope(), &active, &target)
         .await

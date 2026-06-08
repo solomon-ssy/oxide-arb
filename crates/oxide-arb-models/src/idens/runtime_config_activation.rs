@@ -13,6 +13,7 @@ use crate::{
         runtime_config_version::RuntimeConfigVersion,
     },
     schema::{
+        column,
         dependency::TableDependency,
         index::{IndexBuildMode, IndexSpec},
         seed::SeedSpec,
@@ -39,17 +40,12 @@ pub fn table() -> TableCreateStatement {
     let mut table = Table::create()
         .table(RuntimeConfigActivation::Table)
         .if_not_exists()
-        .col(
-            ColumnDef::new(RuntimeConfigActivation::RuntimeConfigActivationId)
-                .text()
-                .not_null()
-                .primary_key(),
-        )
-        .col(
-            ColumnDef::new(RuntimeConfigActivation::RuntimeConfigVersionId)
-                .text()
-                .not_null(),
-        )
+        .col(column::uuid_pk(
+            RuntimeConfigActivation::RuntimeConfigActivationId,
+        ))
+        .col(column::uuid_fk(
+            RuntimeConfigActivation::RuntimeConfigVersionId,
+        ))
         .col(
             ColumnDef::new(RuntimeConfigActivation::ActivatedAt)
                 .timestamp_with_time_zone()
@@ -70,21 +66,13 @@ pub fn table() -> TableCreateStatement {
                 .text()
                 .not_null(),
         )
-        .col(
-            ColumnDef::new(RuntimeConfigActivation::PreviousRuntimeConfigVersionId)
-                .text()
-                .null(),
-        )
-        .col(
-            ColumnDef::new(RuntimeConfigActivation::RollbackTargetVersionId)
-                .text()
-                .null(),
-        )
-        .col(
-            ColumnDef::new(RuntimeConfigActivation::AuditEventId)
-                .text()
-                .null(),
-        )
+        .col(column::uuid_null(
+            RuntimeConfigActivation::PreviousRuntimeConfigVersionId,
+        ))
+        .col(column::uuid_null(
+            RuntimeConfigActivation::RollbackTargetVersionId,
+        ))
+        .col(column::uuid_null(RuntimeConfigActivation::AuditEventId))
         .col(timestamp_with_write_default(
             RuntimeConfigActivation::CreatedAt,
         ))

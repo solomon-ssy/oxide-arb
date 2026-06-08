@@ -104,7 +104,7 @@ mod tests {
             .single()
             .expect("fixed timestamp");
         MaterializationRunManifest {
-            run_id: MaterializationRunId::new("cfmr_test"),
+            run_id: MaterializationRunId::new(oxide_arb_test_support::seeded_uuid("cfmr_test")),
             run_kind: MaterializationRunKind::Scheduled,
             trigger: RunTrigger::Scheduled {
                 schedule_id: "hourly".into(),
@@ -126,7 +126,9 @@ mod tests {
                 require_settlement_truth: false,
             },
             runtime_config_ref: RuntimeConfigRef::Version {
-                version_id: RuntimeConfigVersionId::new("rcv_test"),
+                version_id: RuntimeConfigVersionId::new(oxide_arb_test_support::seeded_uuid(
+                    "rcv_test",
+                )),
                 config_hash: "sha256:cfg".into(),
             },
             simulation_config: SimulationConfig::production_default(),
@@ -158,7 +160,7 @@ mod tests {
     fn manifest_hash_includes_run_id_but_dedupe_does_not() {
         let left = sample_manifest(vec![ControlFactorType::BucketRisk]);
         let mut right = left.clone();
-        right.run_id = MaterializationRunId::new("cfmr_other");
+        right.run_id = MaterializationRunId::new(oxide_arb_test_support::seeded_uuid("cfmr_other"));
         assert_ne!(
             ManifestHasher::compute(&left).expect("left manifest hash"),
             ManifestHasher::compute(&right).expect("right manifest hash")

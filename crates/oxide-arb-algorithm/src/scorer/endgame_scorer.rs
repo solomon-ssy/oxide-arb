@@ -9,7 +9,7 @@ use oxide_arb_models::{
     domain::{
         control_factor::AppliedControlFactor, latency::LatencyTrace, opportunity::Opportunity,
     },
-    types::{MicroPct, MicroProb, MicroScore, MicroUsd, OpportunityId, TokenId},
+    types::{MicroPct, MicroProb, MicroScore, MicroUsd, TokenId},
 };
 use std::sync::Arc;
 
@@ -140,16 +140,16 @@ impl EndgameScorer {
         }
     }
 
-    /// Wrap a scored opportunity for emission (assigns ID, allocates Arc once).
+    /// Wrap a scored opportunity for emission (allocates the `Arc` once).
+    ///
+    /// The opportunity already carries its identity (assigned at detection), so
+    /// finalization only attaches scoring outputs and emission context.
     #[must_use]
     pub fn finalize(
-        mut opp: Opportunity,
+        opp: Opportunity,
         draft: ScoreDraft,
         ctx: EmitContext,
     ) -> Arc<ScoredOpportunity> {
-        if opp.opportunity_id.is_pending() {
-            opp.opportunity_id = OpportunityId::new_v7();
-        }
         let mut trace = Arc::unwrap_or_clone(ctx.trace);
         trace.mark_scan_emitted();
         Arc::new(ScoredOpportunity {

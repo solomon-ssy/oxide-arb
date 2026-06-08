@@ -370,7 +370,7 @@ where
         }
 
         Some(NewPotentialLoss {
-            ledger_id: LedgerId::new(trade.trade_id.as_str()),
+            ledger_id: LedgerId::new(trade.trade_id.as_uuid()),
             market_id: trade.market_id.clone(),
             token_id: trade.token_id.clone(),
             shares: trade.shares,
@@ -384,7 +384,7 @@ where
             return Ok(());
         }
 
-        let ledger_id = LedgerId::new(trade.trade_id.as_str());
+        let ledger_id = LedgerId::new(trade.trade_id.as_uuid());
         if let Err(e) = self.potential_loss_store.resolve(&ledger_id).await {
             self.halt_internal(format!("potential loss resolve failed: {e}"));
             return Err(e);
@@ -479,7 +479,7 @@ where
 
         if trade.is_success() {
             self.potential_loss.write().record_entry(PotentialLossInfo {
-                ledger_id: LedgerId::new(trade.trade_id.as_str()),
+                ledger_id: LedgerId::new(trade.trade_id.as_uuid()),
                 market_id: trade.market_id.clone(),
                 token_id: trade.token_id.clone(),
                 shares: trade.shares,
@@ -510,7 +510,7 @@ where
             .write()
             .record_trade(net_profit, Usd::ZERO, trade.outcome);
 
-        let ledger_id = LedgerId::new(trade.trade_id.as_str());
+        let ledger_id = LedgerId::new(trade.trade_id.as_uuid());
         self.potential_loss.write().resolve(&ledger_id);
 
         (daily_rolled, weekly_rolled, hourly_rolled)

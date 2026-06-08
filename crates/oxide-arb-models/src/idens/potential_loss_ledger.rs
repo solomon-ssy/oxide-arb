@@ -8,6 +8,7 @@ use crate::{
     enums::common::LedgerStatus,
     idens::market::Market,
     schema::{
+        column,
         dependency::TableDependency,
         index::{IndexBuildMode, IndexSpec},
         seed::SeedSpec,
@@ -33,37 +34,12 @@ pub fn table() -> TableCreateStatement {
     Table::create()
         .table(PotentialLossLedger::Table)
         .if_not_exists()
-        .col(
-            ColumnDef::new(PotentialLossLedger::LedgerId)
-                .text()
-                .not_null()
-                .primary_key(),
-        )
-        .col(
-            ColumnDef::new(PotentialLossLedger::MarketId)
-                .text()
-                .not_null(),
-        )
-        .col(
-            ColumnDef::new(PotentialLossLedger::TokenId)
-                .text()
-                .not_null(),
-        )
-        .col(
-            ColumnDef::new(PotentialLossLedger::Shares)
-                .text()
-                .not_null(),
-        )
-        .col(
-            ColumnDef::new(PotentialLossLedger::EntryPrice)
-                .text()
-                .not_null(),
-        )
-        .col(
-            ColumnDef::new(PotentialLossLedger::MaxLossUsd)
-                .text()
-                .not_null(),
-        )
+        .col(column::uuid_pk(PotentialLossLedger::LedgerId))
+        .col(column::market_id(PotentialLossLedger::MarketId))
+        .col(column::token_id(PotentialLossLedger::TokenId))
+        .col(column::shares(PotentialLossLedger::Shares))
+        .col(column::price(PotentialLossLedger::EntryPrice))
+        .col(column::usd(PotentialLossLedger::MaxLossUsd))
         .col(
             ColumnDef::new(PotentialLossLedger::Status)
                 .text()

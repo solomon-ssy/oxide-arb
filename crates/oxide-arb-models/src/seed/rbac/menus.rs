@@ -80,7 +80,7 @@ impl MenuTree {
     }
 
     fn push(&mut self, spec: NodeSpec<'_>) -> MenuId {
-        let id = MenuId::new_v7();
+        let id = MenuId::from_v7();
         let sort = self.next_sort;
         self.next_sort += 1;
         let hide_in_menu = matches!(spec.kind, MenuKind::Button);

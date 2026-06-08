@@ -33,7 +33,7 @@ fn with_context(
     f: impl FnOnce(&PreTradeContext<'_>),
 ) {
     let opp = Opportunity {
-        opportunity_id: OpportunityId::new_v7(),
+        opportunity_id: OpportunityId::from_v7(),
         market_id: MarketId::new("0xtest"),
         event_id: EventId::new("evt_test"),
         token_id: TokenId::new("12345"),

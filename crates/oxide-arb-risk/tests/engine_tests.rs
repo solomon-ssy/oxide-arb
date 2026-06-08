@@ -51,7 +51,7 @@ use support::MockMetrics;
 
 fn test_opportunity() -> Opportunity {
     Opportunity {
-        opportunity_id: OpportunityId::new_v7(),
+        opportunity_id: OpportunityId::from_v7(),
         market_id: MarketId::new("0xtest_market"),
         event_id: EventId::new("test_event"),
         token_id: TokenId::new("12345"),
@@ -111,7 +111,7 @@ const fn test_probability() -> ProbabilityInput {
 
 fn test_trade_record(outcome: TradeBusinessOutcome, profit: Decimal) -> PostTradeInput {
     PostTradeInput {
-        trade_id: TradeId::generate(),
+        trade_id: TradeId::from_v7(),
         market_id: MarketId::new("0xtest_market"),
         token_id: TokenId::new("test_token"),
         side: Side::Buy,

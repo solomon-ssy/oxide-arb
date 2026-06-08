@@ -246,14 +246,14 @@ async fn trade_repository_crud() {
     seed_market(&pool, "evt-trade", "0xtrade-mkt", MarketCategory::Sports).await;
 
     let trade_repo = PgTradeRepository::new(pool.connection().clone());
-    let execution_id = ExecutionId::generate();
+    let execution_id = ExecutionId::from_v7();
 
     let created = trade_repo
         .create(NewTrade {
-            trade_id: TradeId::generate(),
+            trade_id: TradeId::from_v7(),
             execution_id: execution_id.clone(),
-            reservation_id: ReservationId::new("res-trade"),
-            opportunity_id: OpportunityId::new_v7(),
+            reservation_id: ReservationId::from_v7(),
+            opportunity_id: OpportunityId::from_v7(),
             market_id: MarketId::new("0xtrade-mkt"),
             event_id: EventId::new("evt-trade"),
             token_id: TokenId::new("999001"),
@@ -320,10 +320,7 @@ async fn trade_repository_crud() {
         Some("pg-repository-test")
     );
 
-    let by_exec = trade_repo
-        .find_by_execution(execution_id.as_str())
-        .await
-        .unwrap();
+    let by_exec = trade_repo.find_by_execution(&execution_id).await.unwrap();
     assert_eq!(by_exec.len(), 1);
 
     let by_market = trade_repo
@@ -360,10 +357,10 @@ async fn trade_repository_batch_create() {
     let trade_repo = PgTradeRepository::new(pool.connection().clone());
     let trades: Vec<NewTrade> = (0..3)
         .map(|i| NewTrade {
-            trade_id: TradeId::generate(),
-            execution_id: ExecutionId::generate(),
-            reservation_id: ReservationId::new(format!("res-batch-{i}")),
-            opportunity_id: OpportunityId::new_v7(),
+            trade_id: TradeId::from_v7(),
+            execution_id: ExecutionId::from_v7(),
+            reservation_id: ReservationId::from_v7(),
+            opportunity_id: OpportunityId::from_v7(),
             market_id: MarketId::new("0xbatch-mkt"),
             event_id: EventId::new("evt-batch"),
             token_id: TokenId::new(format!("batch-{i}")),
@@ -403,13 +400,13 @@ async fn position_lifecycle() {
     .await;
 
     let trade_repo = PgTradeRepository::new(pool.connection().clone());
-    let trade_id = TradeId::generate();
+    let trade_id = TradeId::from_v7();
     trade_repo
         .create(NewTrade {
             trade_id: trade_id.clone(),
-            execution_id: ExecutionId::new("exec-pos-test"),
-            reservation_id: ReservationId::new("res-pos-test"),
-            opportunity_id: OpportunityId::new_v7(),
+            execution_id: ExecutionId::from_v7(),
+            reservation_id: ReservationId::from_v7(),
+            opportunity_id: OpportunityId::from_v7(),
             market_id: MarketId::new("0xpos-market"),
             event_id: EventId::new("evt-pos-test"),
             token_id: TokenId::new("111"),
@@ -430,7 +427,7 @@ async fn position_lifecycle() {
     let position_repo = PgPositionRepository::new(pool.connection().clone());
     let opened = position_repo
         .create(NewPosition {
-            position_id: PositionId::generate(),
+            position_id: PositionId::from_v7(),
             trade_id,
             market_id: MarketId::new("0xpos-market"),
             token_id: TokenId::new("111"),
@@ -466,13 +463,13 @@ async fn position_settle() {
     seed_market(&pool, "evt-settle", "0xsettle-mkt", MarketCategory::Crypto).await;
 
     let trade_repo = PgTradeRepository::new(pool.connection().clone());
-    let trade_id = TradeId::generate();
+    let trade_id = TradeId::from_v7();
     trade_repo
         .create(NewTrade {
             trade_id: trade_id.clone(),
-            execution_id: ExecutionId::new("exec-settle"),
-            reservation_id: ReservationId::new("res-settle"),
-            opportunity_id: OpportunityId::new_v7(),
+            execution_id: ExecutionId::from_v7(),
+            reservation_id: ReservationId::from_v7(),
+            opportunity_id: OpportunityId::from_v7(),
             market_id: MarketId::new("0xsettle-mkt"),
             event_id: EventId::new("evt-settle"),
             token_id: TokenId::new("333"),
@@ -493,7 +490,7 @@ async fn position_settle() {
     let position_repo = PgPositionRepository::new(pool.connection().clone());
     let created = position_repo
         .create(NewPosition {
-            position_id: PositionId::generate(),
+            position_id: PositionId::from_v7(),
             trade_id,
             market_id: MarketId::new("0xsettle-mkt"),
             token_id: TokenId::new("333"),
@@ -556,8 +553,8 @@ async fn calibration_repository_crud() {
     assert!(found.is_some());
 
     let outcome = NewCalibrationOutcome {
-        trade_id: TradeId::generate(),
-        opportunity_id: OpportunityId::new_v7(),
+        trade_id: TradeId::from_v7(),
+        opportunity_id: OpportunityId::from_v7(),
         market_id: MarketId::new("0xcal-mkt"),
         category: MarketCategory::Sports,
         price_zone: PriceZone::Z99,
@@ -642,7 +639,7 @@ async fn accounting_repository_crud() {
     let (pool, _container) = setup_pg().await;
     let repo = PgAccountingRepository::new(pool.connection().clone());
     let today = Utc::now().date_naive();
-    let period_id = PeriodId::generate();
+    let period_id = PeriodId::from_v7();
 
     let period = NewAccountingPeriod {
         period_id: period_id.clone(),
@@ -673,7 +670,7 @@ async fn runtime_config_version_repository_records_activation_history() {
     let (pool, _container) = setup_pg().await;
     let repo = PgRuntimeConfigVersionRepository::new(pool.connection().clone());
 
-    let version_id = RuntimeConfigVersionId::new_v7();
+    let version_id = RuntimeConfigVersionId::from_v7();
     let version = repo
         .create_version(NewRuntimeConfigVersion {
             runtime_config_version_id: version_id.clone(),
@@ -697,7 +694,7 @@ async fn runtime_config_version_repository_records_activation_history() {
     let activated_at = Utc::now();
     let activation = repo
         .activate_version(NewRuntimeConfigActivation {
-            runtime_config_activation_id: RuntimeConfigActivationId::new_v7(),
+            runtime_config_activation_id: RuntimeConfigActivationId::from_v7(),
             runtime_config_version_id: version_id.clone(),
             activated_at,
             activated_by: "test".into(),
@@ -727,7 +724,7 @@ async fn runtime_config_version_repository_records_activation_history() {
 fn materialization_run(dedupe_key: Option<&str>) -> NewControlFactorMaterializationRun {
     let now = Utc::now();
     NewControlFactorMaterializationRun {
-        materialization_run_id: MaterializationRunId::new_v7(),
+        materialization_run_id: MaterializationRunId::from_v7(),
         run_dedupe_key: dedupe_key.map(str::to_owned),
         run_kind: MaterializationRunKind::Scheduled,
         trigger_type: RunTriggerType::Scheduled,
@@ -761,7 +758,7 @@ fn stage_report(
     status: EvidenceStageStatus,
 ) -> NewControlFactorStageReport {
     NewControlFactorStageReport {
-        stage_report_id: StageReportId::new_v7(),
+        stage_report_id: StageReportId::from_v7(),
         materialization_run_id: run_id.clone(),
         stage_name: MaterializationStageName::ResolveInputs,
         status,
@@ -913,7 +910,7 @@ async fn fact_data_repository_records_balance_snapshots() {
 
     let balance = repo
         .create_balance_snapshot(NewBalanceSnapshot {
-            balance_snapshot_id: BalanceSnapshotId::new_v7(),
+            balance_snapshot_id: BalanceSnapshotId::from_v7(),
             holder_address: "0xholder".into(),
             internal_available_usd: Usd::new(dec!(900)),
             internal_reserved_usd: Usd::new(dec!(100)),
@@ -944,7 +941,7 @@ async fn potential_loss_repository_crud() {
     seed_market(&pool, "evt-pll", "0xpll-mkt", MarketCategory::Tech).await;
 
     let repo = PgPotentialLossRepository::new(pool.connection().clone());
-    let ledger_id = LedgerId::generate();
+    let ledger_id = LedgerId::from_v7();
 
     let entry = NewPotentialLoss {
         ledger_id: ledger_id.clone(),
@@ -1096,7 +1093,7 @@ async fn seed_control_run(repo: &PgControlFactorRepository) -> MaterializationRu
 fn candidate_factor(run_id: &MaterializationRunId, size_multiplier: Decimal) -> ControlFactorValue {
     let now = Utc::now();
     ControlFactorValue {
-        factor_id: ControlFactorId::new_v7(),
+        factor_id: ControlFactorId::from_v7(),
         factor_type: ControlFactorType::BucketRisk,
         dimensions: FactorDimensions::BucketRisk(BucketRiskDimensions {
             category: MarketCategory::Politics,
@@ -1114,7 +1111,7 @@ fn candidate_factor(run_id: &MaterializationRunId, size_multiplier: Decimal) -> 
         }),
         evidence: FactorEvidence {
             materialization_run_id: run_id.clone(),
-            stage_report_ids: Vec::new(),
+            stage_report_ids: vec![StageReportId::from_v7()],
             window_from: now - chrono::Duration::hours(1),
             window_to: now,
             source_delay_secs: 30,
@@ -1178,7 +1175,7 @@ fn factor_audit(
         actor: "materializer".into(),
         actor_role: "operator".into(),
         resource_type: AuditResourceType::Factor,
-        resource_id: factor_id.as_str().to_owned(),
+        resource_id: factor_id.to_string(),
         request_id: request_id.into(),
         reason: "integration test".into(),
         before_hash: None,
@@ -1196,7 +1193,7 @@ fn publication_audit(
         actor: "risk_owner_1".into(),
         actor_role: "risk_owner".into(),
         resource_type: AuditResourceType::Publication,
-        resource_id: publication_id.as_str().to_owned(),
+        resource_id: publication_id.to_string(),
         request_id: request_id.into(),
         reason: "integration governance test".into(),
         before_hash: None,
@@ -1211,7 +1208,7 @@ fn shadow_publication(
 ) -> NewControlFactorPublication {
     let now = Utc::now();
     NewControlFactorPublication {
-        publication_id: FactorPublicationId::new_v7(),
+        publication_id: FactorPublicationId::from_v7(),
         mode: PublicationMode::Shadow,
         factor_ids: vec![factor_id.clone()],
         previous_publication_id: None,
@@ -1341,15 +1338,17 @@ async fn control_factor_rollback_restores_previous_publication() {
     let repo = PgControlFactorRepository::new(pool.connection().clone());
     let run_id = seed_control_run(&repo).await;
 
-    // Two factors so we can stage two successive Published publications.
+    // Two distinct factors so we can stage two successive Published publications.
+    // Different payloads keep their (run, type, dimensions, payload) dedup keys
+    // distinct under `uniq_control_factor_value_run_payload`.
     let factor_genesis = candidate_factor(&run_id, dec!(0.5));
-    let factor_successor = candidate_factor(&run_id, dec!(0.5));
+    let factor_successor = candidate_factor(&run_id, dec!(0.6));
     for factor in [&factor_genesis, &factor_successor] {
         repo.create_factor(
             NewControlFactorValue::from_typed(factor, None).expect("typed factor"),
             factor_audit(
                 ControlAuditEventType::FactorCreated,
-                factor.factor_id.as_str(),
+                &factor.factor_id.to_string(),
                 &factor.factor_id,
             ),
         )
@@ -1415,7 +1414,7 @@ async fn runtime_config_governed_activation_links_audit_event() {
     let (pool, _container) = setup_pg().await;
     let repo = PgRuntimeConfigVersionRepository::new(pool.connection().clone());
 
-    let version_id = RuntimeConfigVersionId::new_v7();
+    let version_id = RuntimeConfigVersionId::from_v7();
     let version = NewRuntimeConfigVersion {
         runtime_config_version_id: version_id.clone(),
         config_hash: "blake3:rcv-1".into(),
@@ -1430,7 +1429,7 @@ async fn runtime_config_governed_activation_links_audit_event() {
         actor: "admin_1".into(),
         actor_role: "admin".into(),
         resource_type: AuditResourceType::RuntimeConfigVersion,
-        resource_id: version_id.as_str().to_owned(),
+        resource_id: version_id.to_string(),
         request_id: "req-rcv-create".into(),
         reason: "initial".into(),
         before_hash: None,
@@ -1442,7 +1441,7 @@ async fn runtime_config_governed_activation_links_audit_event() {
         .expect("create version governed");
 
     let activation = NewRuntimeConfigActivation {
-        runtime_config_activation_id: RuntimeConfigActivationId::new_v7(),
+        runtime_config_activation_id: RuntimeConfigActivationId::from_v7(),
         runtime_config_version_id: version_id.clone(),
         activated_at: Utc::now(),
         activated_by: "admin_1".into(),
@@ -1457,7 +1456,7 @@ async fn runtime_config_governed_activation_links_audit_event() {
         actor: "admin_1".into(),
         actor_role: "admin".into(),
         resource_type: AuditResourceType::RuntimeConfigVersion,
-        resource_id: version_id.as_str().to_owned(),
+        resource_id: version_id.to_string(),
         request_id: "req-rcv-activate".into(),
         reason: "activate".into(),
         before_hash: None,
@@ -1579,10 +1578,10 @@ fn shadow_decision(
     decided_at: chrono::DateTime<Utc>,
 ) -> NewControlFactorShadowDecision {
     NewControlFactorShadowDecision {
-        shadow_decision_id: ShadowDecisionId::new_v7(),
+        shadow_decision_id: ShadowDecisionId::from_v7(),
         publication_id: publication_id.clone(),
-        opportunity_id: None,
-        event_id: None,
+        opportunity_id: OpportunityId::from_v7(),
+        event_id: EventId::new("evt-shadow"),
         market_id: MarketId::new(market_id),
         decision_type,
         baseline_decision: serde_json::json!({ "size": "0" }),

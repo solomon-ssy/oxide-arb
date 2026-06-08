@@ -485,8 +485,8 @@ mod tests {
         let detector = empty_detector_artifact();
         let portfolio = empty_portfolio_artifact();
         let stages = vec![StageReportBody {
-            stage_report_id: StageReportId::new_v7(),
-            run_id: MaterializationRunId::new_v7(),
+            stage_report_id: StageReportId::from_v7(),
+            run_id: MaterializationRunId::from_v7(),
             stage_name: MaterializationStageName::DetectorEvidence,
             status: EvidenceStageStatus::ProductionIneligible,
             started_at: chrono::Utc::now(),

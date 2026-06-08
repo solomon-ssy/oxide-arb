@@ -200,7 +200,7 @@ async fn test_clob_client(server: &MockServer) -> Arc<ClobClient> {
 fn scored_opportunity() -> Arc<ScoredOpportunity> {
     Arc::new(ScoredOpportunity {
         opportunity: Arc::new(Opportunity {
-            opportunity_id: OpportunityId::new_v7(),
+            opportunity_id: OpportunityId::from_v7(),
             market_id: MarketId::new("0xlive-pipeline-market"),
             event_id: EventId::new("evt-live-pipeline"),
             token_id: token_yes(),

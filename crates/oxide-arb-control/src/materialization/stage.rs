@@ -37,7 +37,7 @@ impl StageReportBuilder {
         started_at: DateTime<Utc>,
     ) -> Self {
         Self {
-            stage_report_id: StageReportId::new_v7(),
+            stage_report_id: StageReportId::from_v7(),
             run_id,
             stage_name,
             status: EvidenceStageStatus::Running,

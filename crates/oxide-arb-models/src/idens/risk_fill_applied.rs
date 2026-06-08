@@ -6,7 +6,7 @@ use sea_orm::{
 
 use crate::{
     idens::trade::Trade,
-    schema::{dependency::TableDependency, index::IndexSpec, seed::SeedSpec},
+    schema::{column, dependency::TableDependency, index::IndexSpec, seed::SeedSpec},
 };
 
 /// Durable idempotency marker for committed risk Fill accounting.
@@ -24,12 +24,7 @@ pub fn table() -> TableCreateStatement {
     Table::create()
         .table(RiskFillApplied::Table)
         .if_not_exists()
-        .col(
-            ColumnDef::new(RiskFillApplied::TradeId)
-                .text()
-                .not_null()
-                .primary_key(),
-        )
+        .col(column::uuid_pk(RiskFillApplied::TradeId))
         .col(
             ColumnDef::new(RiskFillApplied::AppliedAt)
                 .timestamp_with_time_zone()

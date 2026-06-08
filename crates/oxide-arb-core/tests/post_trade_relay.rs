@@ -97,10 +97,10 @@ fn scored_snapshot_json(opportunity_id: &OpportunityId) -> serde_json::Value {
 }
 
 fn new_trade(trade_id: TradeId, reservation_id: ReservationId) -> NewTrade {
-    let opportunity_id = OpportunityId::new_v7();
+    let opportunity_id = OpportunityId::from_v7();
     NewTrade {
         trade_id,
-        execution_id: ExecutionId::generate(),
+        execution_id: ExecutionId::from_v7(),
         reservation_id,
         opportunity_id: opportunity_id.clone(),
         market_id: MarketId::new("0xpost-trade-market"),
@@ -280,8 +280,8 @@ fn harness() -> Harness {
 }
 
 async fn create_observed_fill(repo: &MockTradeRepository) -> TradeId {
-    let trade_id = TradeId::generate();
-    let reservation_id = ReservationId::new_id();
+    let trade_id = TradeId::from_v7();
+    let reservation_id = ReservationId::from_v7();
     repo.create(new_trade(trade_id.clone(), reservation_id))
         .await
         .expect("create trade");
@@ -364,8 +364,8 @@ async fn relay_processes_observed_trade_to_terminal_state() {
 #[tokio::test]
 async fn relay_marks_stale_submitted_trade_orphaned() {
     let harness = harness();
-    let trade_id = TradeId::generate();
-    let reservation_id = ReservationId::new_id();
+    let trade_id = TradeId::from_v7();
+    let reservation_id = ReservationId::from_v7();
     harness
         .trade_repo
         .create(new_trade(trade_id.clone(), reservation_id))

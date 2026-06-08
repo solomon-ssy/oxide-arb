@@ -32,7 +32,7 @@ async fn phase53_materialization_smoke_passes_acceptance_criteria() {
         .await
         .expect("evidence pipeline should complete");
 
-    print_acceptance_summary(manifest.run_id.as_ref(), &report);
+    print_acceptance_summary(&manifest.run_id.to_string(), &report);
     assert_pit_resolution(&report);
     assert_book_stage(&report);
     assert_detector_stage(&report);

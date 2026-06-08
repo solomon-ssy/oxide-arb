@@ -5,6 +5,7 @@ use sea_orm::{
 };
 
 use crate::schema::{
+    column,
     dependency::TableDependency,
     index::{IndexBuildMode, IndexSpec},
     seed::SeedSpec,
@@ -26,16 +27,10 @@ pub fn table() -> TableCreateStatement {
     Table::create()
         .table(RiskAuditEvent::Table)
         .if_not_exists()
-        .col(
-            ColumnDef::new(RiskAuditEvent::Id)
-                .big_integer()
-                .not_null()
-                .auto_increment()
-                .primary_key(),
-        )
+        .col(column::bigserial_pk(RiskAuditEvent::Id))
         .col(ColumnDef::new(RiskAuditEvent::EventType).text().not_null())
-        .col(ColumnDef::new(RiskAuditEvent::OpportunityId).text().null())
-        .col(ColumnDef::new(RiskAuditEvent::TradeId).text().null())
+        .col(column::uuid_null(RiskAuditEvent::OpportunityId))
+        .col(column::uuid_null(RiskAuditEvent::TradeId))
         .col(
             ColumnDef::new(RiskAuditEvent::Payload)
                 .json_binary()

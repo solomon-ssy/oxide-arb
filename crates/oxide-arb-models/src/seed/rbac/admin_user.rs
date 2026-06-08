@@ -40,7 +40,7 @@ pub const ADMIN_USER_SEED: SeedSpec = SeedSpec {
 
 /// Insert the bootstrap admin user and publish its `UserId` to the context.
 pub async fn load(db: &dyn ConnectionTrait, ctx: &mut SeedContext) -> Result<u64, DbErr> {
-    let id = UserId::new_v7();
+    let id = UserId::from_v7();
     let password_hash =
         hash_password(DEFAULT_ADMIN_PASSWORD).map_err(|error| DbErr::Custom(error.to_string()))?;
 

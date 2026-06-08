@@ -23,6 +23,9 @@ use serde::{Deserialize, Serialize};
 /// Detected endgame opportunity ready for evaluation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Opportunity {
+    /// Stable identity assigned at detection. An opportunity always has an id;
+    /// its pipeline lifecycle (scored / risk-checked / executed / rejected) is
+    /// recorded per stage in the `opportunity_audit` log, not on this struct.
     pub opportunity_id: OpportunityId,
     pub market_id: MarketId,
     pub event_id: EventId,

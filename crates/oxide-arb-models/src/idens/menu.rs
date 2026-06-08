@@ -9,6 +9,7 @@ use sea_orm::{
 use crate::{
     enums::rbac::RoleStatus,
     schema::{
+        column,
         dependency::TableDependency,
         index::{IndexBuildMode, IndexSpec},
         seed::SeedSpec,
@@ -46,8 +47,8 @@ pub fn table() -> TableCreateStatement {
     Table::create()
         .table(Menu::Table)
         .if_not_exists()
-        .col(ColumnDef::new(Menu::Id).text().not_null().primary_key())
-        .col(ColumnDef::new(Menu::ParentId).text().null())
+        .col(column::uuid_pk(Menu::Id))
+        .col(column::uuid_null(Menu::ParentId))
         .col(ColumnDef::new(Menu::Name).text().not_null())
         .col(ColumnDef::new(Menu::Kind).text().not_null())
         .col(ColumnDef::new(Menu::Path).text().null())

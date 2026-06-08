@@ -301,7 +301,7 @@ mod tests {
 
     fn make_test_opportunity() -> Opportunity {
         Opportunity {
-            opportunity_id: OpportunityId::new_v7(),
+            opportunity_id: OpportunityId::from_v7(),
             market_id: MarketId::new("m"),
             event_id: EventId::new("e"),
             token_id: TokenId::new("t"),

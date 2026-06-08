@@ -9,6 +9,7 @@ use sea_orm::{
 use crate::{
     enums::rbac::UserStatus,
     schema::{
+        column,
         dependency::TableDependency,
         index::{IndexBuildMode, IndexSpec},
         seed::SeedSpec,
@@ -16,6 +17,9 @@ use crate::{
     },
     seed::rbac::admin_user,
 };
+
+/// Maximum stored length of an account username.
+const USERNAME_LEN: u32 = 64;
 
 /// RBAC user account. The primary key is the stable Casbin subject.
 #[oxide_schema(lifecycle = "control")]
@@ -37,8 +41,12 @@ pub fn table() -> TableCreateStatement {
     Table::create()
         .table(User::Table)
         .if_not_exists()
-        .col(ColumnDef::new(User::Id).text().not_null().primary_key())
-        .col(ColumnDef::new(User::Username).text().not_null())
+        .col(column::uuid_pk(User::Id))
+        .col(
+            ColumnDef::new(User::Username)
+                .string_len(USERNAME_LEN)
+                .not_null(),
+        )
         .col(ColumnDef::new(User::PasswordHash).text().not_null())
         .col(ColumnDef::new(User::Nickname).text().not_null())
         .col(ColumnDef::new(User::Avatar).text().null())

@@ -39,7 +39,7 @@ impl BalanceFactWriter {
         let external_total = observation.external_available_usd + observation.external_locked_usd;
         self.repo
             .create_balance_snapshot(NewBalanceSnapshot {
-                balance_snapshot_id: BalanceSnapshotId::new_v7(),
+                balance_snapshot_id: BalanceSnapshotId::from_v7(),
                 holder_address: observation.holder_address,
                 internal_available_usd: observation.internal_available_usd,
                 internal_reserved_usd: observation.internal_reserved_usd,

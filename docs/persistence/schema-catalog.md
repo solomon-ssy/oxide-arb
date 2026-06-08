@@ -14,6 +14,56 @@ schema catalog 是唯一事实源。storage migrations 只消费 catalog metadat
 - seed 依赖必须声明在 `SeedSpec` 中，禁止把 graph dependency 藏在 loader 函数体里。
 - 依赖上游 seed 输出时，loader 必须使用 `ctx.require<T>()?`，禁止 `unwrap()`。
 
+## 列类型规范（强制）
+
+所有列类型必须通过 `crate::schema::column` 的 builder 声明，禁止在 iden 中手写 `.text()` / `.decimal()` 作为标识列或金额列。
+
+### 标识符三分法
+
+```text
+是 UUID（系统内部生成）？ ── 是 ──> 原生 uuid 列；Rust = #[derive(UuidId)] (Arc<Uuid>)
+        │
+        否
+        │
+是外部定义的语义字符串？ ── 是 ──> text / varchar 列；Rust = #[derive(StrId)] (Arc<str>)
+        │
+        否
+        │
+仅为高频插入的代理键？ ──────────> bigint / integer 自增；无独立 Rust ID 类型
+```
+
+| 家族 | 例子 | Postgres 列类型 | builder |
+|---|---|---|---|
+| 内部 UUID | `TradeId` `UserId` `OpportunityId` `ControlFactorId` `ResolutionEventId` | `uuid` | `column::uuid_pk` / `uuid_fk` / `uuid_null` |
+| 外部字符串 | `MarketId`（`condition_id`） | `varchar(66)` | `column::market_id_pk` / `market_id` |
+| 外部字符串 | `TokenId`（CLOB 十进制） | `text` | `column::token_id` / `token_id_null` |
+| 外部字符串 | `EventId` `OrderId` `ReportId` | `text` | 直接 `.text()`（无定长语义） |
+| 代理键 | `casbin_rule.id`、审计/报告行、`risk_engine_state.id` | `bigint` / `integer` | 行内声明 |
+
+- **内部 ID 一律用原生 `uuid`**（16 字节定长），不得用 `text` 存 UUID，不得加 `prefix_` 前缀。命名空间安全由 Rust newtype 提供，可读性由结构化日志（`trade_id=%`）提供。
+- **联结表用复合主键**（如 `user_role` 的 `(user_id, role_id)`），禁止为联结行引入无业务意义的代理 UUID/BIGINT 主键。
+- UUID 由应用层生成：时间有序行用 `XxxId::from_v7()`（保持 B-tree 紧凑），纯随机行用 `XxxId::from_v4()`。DDL 不设 UUID 默认值，禁止空字符串 sentinel（用 `Option<XxxId>` 表达"未赋值"）。
+
+### 金额列
+
+金额一律用原生 `NUMERIC(precision, scale)`，禁止用 `TEXT` 存金额。`NUMERIC` 值域完全覆盖 `rust_decimal::Decimal`，round-trip 无损（workspace 已启用 `sea-orm/with-rust_decimal`）。
+
+| newtype | NUMERIC | builder |
+|---|---|---|
+| `Usd` | `(28, 8)` | `column::usd` / `usd_null` / `usd_default_zero` |
+| `Price` | `(20, 18)` | `column::price` |
+| `Shares` | `(38, 18)` | `column::shares` |
+| `Bps` | `(10, 4)` | `column::bps_null` |
+| `Probability` | `(20, 18)` | `column::probability` / `probability_null` / `probability_default_one` |
+
+精度由每个 newtype 的 `PRECISION` 常量统一定义；新增金额列必须复用上述 builder，不得自写 `default_zero_*` 私有 helper。
+
+### 定长字符串与 CHECK
+
+- `char(n)` **禁止**：Postgres 中 `char(n)`/`varchar(n)`/`text` 索引性能一致，`char(n)` 仅因 padding 浪费空间。
+- `varchar(n)` 仅用于**语义长度约束**（如 `market_id` 固定 66 字符，`username` ≤ 64，`role.code` ≤ 32），非性能优化。
+- `market_id` / `token_id` **不加格式正则 CHECK**：dry-run / paper 模式会持久化合成 id（非 `0x…` 格式），DB 级正则会误拒合法的非 live 行。格式校验留在类型层（`TokenId::debug_validate`）。
+
 ## 新增一张表
 
 1. 新增 `crates/oxide-arb-models/src/idens/<table>.rs`。
@@ -105,6 +155,7 @@ use crate::{
     enums::{common::TickSize, market::MarketStatus},
     idens::event::Event,
     schema::{
+        column,
         dependency::TableDependency,
         index::{IndexBuildMode, IndexSpec},
         seed::SeedSpec,
@@ -142,7 +193,7 @@ pub fn table() -> TableCreateStatement {
     Table::create()
         .table(Market::Table)
         .if_not_exists()
-        .col(ColumnDef::new(Market::MarketId).text().not_null().primary_key())
+        .col(column::market_id_pk(Market::MarketId))
         .col(ColumnDef::new(Market::EventId).text().not_null())
         .col(ColumnDef::new(Market::Question).text().not_null())
         .col(ColumnDef::new(Market::Slug).text().not_null())
@@ -154,8 +205,8 @@ pub fn table() -> TableCreateStatement {
                 .default(MarketStatus::Active),
         )
         .col(ColumnDef::new(Market::Outcome).text().null())
-        .col(ColumnDef::new(Market::YesTokenId).text().not_null())
-        .col(ColumnDef::new(Market::NoTokenId).text().not_null())
+        .col(column::token_id(Market::YesTokenId))
+        .col(column::token_id(Market::NoTokenId))
         .col(
             ColumnDef::new(Market::TickSize)
                 .text()

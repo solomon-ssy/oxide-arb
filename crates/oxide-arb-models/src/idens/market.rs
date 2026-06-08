@@ -8,6 +8,7 @@ use crate::{
     enums::{common::TickSize, market::MarketStatus},
     idens::event::Event,
     schema::{
+        column,
         dependency::TableDependency,
         index::{IndexBuildMode, IndexSpec},
         seed::SeedSpec,
@@ -46,13 +47,8 @@ pub fn table() -> TableCreateStatement {
     Table::create()
         .table(Market::Table)
         .if_not_exists()
-        .col(
-            ColumnDef::new(Market::MarketId)
-                .text()
-                .not_null()
-                .primary_key(),
-        )
-        .col(ColumnDef::new(Market::EventId).text().not_null())
+        .col(column::market_id_pk(Market::MarketId))
+        .col(column::text_id(Market::EventId))
         .col(ColumnDef::new(Market::Question).text().not_null())
         .col(ColumnDef::new(Market::Slug).text().not_null())
         .col(ColumnDef::new(Market::Category).text().not_null())
@@ -63,8 +59,8 @@ pub fn table() -> TableCreateStatement {
                 .default(MarketStatus::Active),
         )
         .col(ColumnDef::new(Market::Outcome).text().null())
-        .col(ColumnDef::new(Market::YesTokenId).text().not_null())
-        .col(ColumnDef::new(Market::NoTokenId).text().not_null())
+        .col(column::token_id(Market::YesTokenId))
+        .col(column::token_id(Market::NoTokenId))
         .col(
             ColumnDef::new(Market::TickSize)
                 .text()
@@ -93,10 +89,18 @@ pub fn table() -> TableCreateStatement {
                 .not_null()
                 .default(true),
         )
-        .col(ColumnDef::new(Market::FeeRate).decimal().null())
-        .col(ColumnDef::new(Market::FeeExponent).decimal().null())
+        .col(ColumnDef::new(Market::FeeRate).decimal_len(20, 18).null())
+        .col(
+            ColumnDef::new(Market::FeeExponent)
+                .decimal_len(20, 18)
+                .null(),
+        )
         .col(ColumnDef::new(Market::FeeTakerOnly).boolean().null())
-        .col(ColumnDef::new(Market::FeeRebateRate).decimal().null())
+        .col(
+            ColumnDef::new(Market::FeeRebateRate)
+                .decimal_len(20, 18)
+                .null(),
+        )
         .col(ColumnDef::new(Market::FeeSource).text().null())
         .col(
             ColumnDef::new(Market::FeeObservedAt)

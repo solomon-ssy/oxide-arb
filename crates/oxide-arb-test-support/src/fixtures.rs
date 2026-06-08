@@ -23,7 +23,7 @@ use std::sync::Arc;
 #[must_use]
 pub fn sample_opportunity() -> Opportunity {
     Opportunity {
-        opportunity_id: OpportunityId::new_v7(),
+        opportunity_id: OpportunityId::from_v7(),
         market_id: MarketId::new("0xtest_market"),
         event_id: EventId::new("test_event"),
         token_id: TokenId::new("yes-token"),

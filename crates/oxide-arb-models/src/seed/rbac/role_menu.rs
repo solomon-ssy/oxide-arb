@@ -14,7 +14,7 @@ use crate::{
         SeedConflictPolicy, SeedContext,
         rbac::{MENUS_ARTIFACT, ROLE_SUPER_ADMIN, ROLES_ARTIFACT, RoleIdMap},
     },
-    types::{MenuId, RoleMenuId},
+    types::MenuId,
 };
 
 const SEED_ID: &str = "rbac.role_menu.bootstrap";
@@ -53,7 +53,6 @@ pub async fn load(db: &dyn ConnectionTrait, ctx: &mut SeedContext) -> Result<u64
     let models = menu_ids
         .into_iter()
         .map(|menu_id| role_menu::ActiveModel {
-            id: Set(RoleMenuId::new_v7()),
             role_id: Set(super_admin_id.clone()),
             menu_id: Set(menu_id),
             ..Default::default()

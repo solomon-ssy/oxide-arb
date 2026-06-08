@@ -7,6 +7,7 @@ use sea_orm::{
 use crate::{
     idens::market::Market,
     schema::{
+        column,
         dependency::TableDependency,
         index::{IndexBuildMode, IndexSpec},
         seed::SeedSpec,
@@ -32,13 +33,8 @@ pub fn table() -> TableCreateStatement {
     Table::create()
         .table(ResolutionEvent::Table)
         .if_not_exists()
-        .col(
-            ColumnDef::new(ResolutionEvent::ResolutionId)
-                .text()
-                .not_null()
-                .primary_key(),
-        )
-        .col(ColumnDef::new(ResolutionEvent::MarketId).text().not_null())
+        .col(column::uuid_pk(ResolutionEvent::ResolutionId))
+        .col(column::market_id(ResolutionEvent::MarketId))
         .col(ColumnDef::new(ResolutionEvent::Outcome).text().not_null())
         .col(ColumnDef::new(ResolutionEvent::Source).text().not_null())
         .col(

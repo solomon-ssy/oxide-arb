@@ -10,6 +10,7 @@ use crate::{
     enums::control_factor::EvidenceStageStatus,
     idens::control_factor_materialization_run::ControlFactorMaterializationRun,
     schema::{
+        column,
         dependency::TableDependency,
         index::{IndexBuildMode, IndexSpec},
         seed::SeedSpec,
@@ -42,17 +43,10 @@ pub fn table() -> TableCreateStatement {
     Table::create()
         .table(ControlFactorStageReport::Table)
         .if_not_exists()
-        .col(
-            ColumnDef::new(ControlFactorStageReport::StageReportId)
-                .text()
-                .not_null()
-                .primary_key(),
-        )
-        .col(
-            ColumnDef::new(ControlFactorStageReport::MaterializationRunId)
-                .text()
-                .not_null(),
-        )
+        .col(column::uuid_pk(ControlFactorStageReport::StageReportId))
+        .col(column::uuid_fk(
+            ControlFactorStageReport::MaterializationRunId,
+        ))
         .col(
             ColumnDef::new(ControlFactorStageReport::StageName)
                 .text()

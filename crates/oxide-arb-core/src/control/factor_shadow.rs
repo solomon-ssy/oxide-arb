@@ -163,13 +163,13 @@ impl ShadowEvaluator {
         let affected: Vec<&AppliedControlFactor> = candidate.applied.iter().collect();
         let affected_factor_ids: Vec<String> = affected
             .iter()
-            .map(|factor| factor.factor_id.as_str().to_owned())
+            .map(|factor| factor.factor_id.to_string())
             .collect();
 
         Some(NewShadowDecision {
             publication_id,
-            opportunity_id: Some(opp.opportunity_id.clone()),
-            event_id: Some(opp.event_id.clone()),
+            opportunity_id: opp.opportunity_id.clone(),
+            event_id: opp.event_id.clone(),
             market_id: opp.market_id.clone(),
             decision_type,
             baseline: serde_json::json!({
@@ -197,8 +197,8 @@ impl ShadowEvaluator {
 #[derive(Debug, Clone)]
 pub struct NewShadowDecision {
     pub publication_id: FactorPublicationId,
-    pub opportunity_id: Option<OpportunityId>,
-    pub event_id: Option<EventId>,
+    pub opportunity_id: OpportunityId,
+    pub event_id: EventId,
     pub market_id: MarketId,
     pub decision_type: ShadowDecisionType,
     pub baseline: serde_json::Value,
@@ -266,7 +266,7 @@ impl ShadowWriterTask {
 
     async fn persist(&self, decision: NewShadowDecision) {
         let row = NewControlFactorShadowDecision {
-            shadow_decision_id: ShadowDecisionId::new_v7(),
+            shadow_decision_id: ShadowDecisionId::from_v7(),
             publication_id: decision.publication_id,
             opportunity_id: decision.opportunity_id,
             event_id: decision.event_id,

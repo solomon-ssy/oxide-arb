@@ -629,7 +629,7 @@ async fn ensure_runtime_config_activation(
         Some(version) => version,
         None => {
             repo.create_version(NewRuntimeConfigVersion {
-                runtime_config_version_id: RuntimeConfigVersionId::new_v7(),
+                runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
                 config_hash: config_hash.clone(),
                 schema_version: document.schema_version,
                 config_json,
@@ -642,7 +642,7 @@ async fn ensure_runtime_config_activation(
     };
 
     repo.activate_version(NewRuntimeConfigActivation {
-        runtime_config_activation_id: RuntimeConfigActivationId::new_v7(),
+        runtime_config_activation_id: RuntimeConfigActivationId::from_v7(),
         runtime_config_version_id: version.runtime_config_version_id.clone(),
         activated_at: chrono::Utc::now(),
         activated_by: "system".to_owned(),

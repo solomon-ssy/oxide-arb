@@ -2,7 +2,7 @@
 
 use std::{collections::HashSet, sync::Arc};
 
-use crate::mocks::EXECUTION_QUALITY_HOURLY_SCHEDULE_ID;
+use crate::{mocks::EXECUTION_QUALITY_HOURLY_SCHEDULE_ID, seeded_uuid};
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use oxide_arb_error::storage::StorageError;
@@ -46,7 +46,7 @@ pub fn materialization_manifest(
     market_ids: Vec<MarketId>,
 ) -> MaterializationRunManifest {
     MaterializationRunManifest {
-        run_id: MaterializationRunId::new_v7(),
+        run_id: MaterializationRunId::from_v7(),
         run_kind: MaterializationRunKind::Scheduled,
         trigger: RunTrigger::Scheduled {
             schedule_id: "test".to_owned(),
@@ -68,7 +68,7 @@ pub fn materialization_manifest(
             require_settlement_truth: false,
         },
         runtime_config_ref: RuntimeConfigRef::Version {
-            version_id: RuntimeConfigVersionId::new("rcv_test"),
+            version_id: RuntimeConfigVersionId::new(seeded_uuid("rcv_test")),
             config_hash: "blake3:cfg".to_owned(),
         },
         simulation_config: SimulationConfig::production_default(),
@@ -87,7 +87,7 @@ pub fn market_snapshot(
     observed_at: DateTime<Utc>,
 ) -> MarketPitSnapshotInfo {
     MarketPitSnapshotInfo {
-        market_pit_snapshot_id: MarketPitSnapshotId::new_v7(),
+        market_pit_snapshot_id: MarketPitSnapshotId::from_v7(),
         market_id: market_id.clone(),
         event_id: EventId::new("evt"),
         question: "question".to_owned(),
@@ -169,7 +169,7 @@ pub fn scheduled_materialization_run_info(
     finished_at: Option<DateTime<Utc>>,
 ) -> ControlFactorMaterializationRunInfo {
     ControlFactorMaterializationRunInfo {
-        materialization_run_id: MaterializationRunId::new_v7(),
+        materialization_run_id: MaterializationRunId::from_v7(),
         run_dedupe_key: None,
         run_kind: MaterializationRunKind::Scheduled,
         trigger_type: RunTriggerType::Scheduled,
@@ -355,13 +355,13 @@ impl RuntimeConfigVersionRepository for FakeRuntimeConfigRepository {
         _config_hash: &str,
     ) -> Result<Option<RuntimeConfigVersionInfo>, StorageError> {
         Ok(Some(runtime_config_version(RuntimeConfigVersionId::new(
-            "rcv_hash",
+            seeded_uuid("rcv_hash"),
         ))))
     }
 
     async fn load_current(&self) -> Result<Option<RuntimeConfigVersionInfo>, StorageError> {
         Ok(Some(runtime_config_version(RuntimeConfigVersionId::new(
-            "rcv_current",
+            seeded_uuid("rcv_current"),
         ))))
     }
 
@@ -370,7 +370,7 @@ impl RuntimeConfigVersionRepository for FakeRuntimeConfigRepository {
         _at: DateTime<Utc>,
     ) -> Result<Option<RuntimeConfigVersionInfo>, StorageError> {
         Ok(Some(runtime_config_version(RuntimeConfigVersionId::new(
-            "rcv_active",
+            seeded_uuid("rcv_active"),
         ))))
     }
 

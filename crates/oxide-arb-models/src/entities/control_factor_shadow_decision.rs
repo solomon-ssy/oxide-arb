@@ -13,8 +13,8 @@ pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub shadow_decision_id: ShadowDecisionId,
     pub publication_id: FactorPublicationId,
-    pub opportunity_id: Option<OpportunityId>,
-    pub event_id: Option<EventId>,
+    pub opportunity_id: OpportunityId,
+    pub event_id: EventId,
     pub market_id: MarketId,
     pub decision_type: ShadowDecisionType,
     #[sea_orm(column_type = "JsonBinary")]

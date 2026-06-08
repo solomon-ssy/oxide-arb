@@ -199,7 +199,7 @@ impl FactorRefresher {
                 .map_err(OxideError::SnapshotBuild)?;
             let typed = info.to_typed().map_err(|error| {
                 OxideError::SnapshotBuild(SnapshotBuildError::DimensionPayloadMismatch {
-                    factor_id: format!("{}: {error}", info.factor_id.as_str()),
+                    factor_id: format!("{}: {error}", info.factor_id),
                 })
             })?;
             factors.push(typed);
@@ -209,7 +209,7 @@ impl FactorRefresher {
             if !factors.iter().any(|factor| &factor.factor_id == member) {
                 return Err(OxideError::SnapshotBuild(
                     SnapshotBuildError::MissingMember {
-                        factor_id: member.as_str().to_owned(),
+                        factor_id: member.to_string(),
                     },
                 ));
             }

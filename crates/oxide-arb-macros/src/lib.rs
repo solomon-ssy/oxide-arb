@@ -1,12 +1,16 @@
 //! Procedural macros for the oxide-arb workspace.
 //!
-//! - [`TypedId`]: Generates a type-safe ID newtype backed by `Arc<str>`.
+//! - [`StrId`]: Generates a type-safe string ID newtype backed by `Arc<str>`
+//!   (external identifiers that are not UUIDs).
+//! - [`UuidId`]: Generates a type-safe UUID ID newtype backed by `Arc<Uuid>`
+//!   (internal, system-generated identifiers persisted as native `uuid`).
 //! - [`IntoActiveValue`]: Generates `IntoActiveValue` impl for enums stored as
 //!   strings in `SeaORM`.
 
 mod into_active_value;
 mod oxide_schema;
-mod typed_id;
+mod str_id;
+mod uuid_id;
 
 use proc_macro::TokenStream;
 
@@ -18,23 +22,46 @@ pub fn oxide_schema(args: TokenStream, input: TokenStream) -> TokenStream {
         .into()
 }
 
-/// Derive a type-safe ID newtype backed by `Arc<str>`.
+/// Derive a type-safe string ID newtype backed by `Arc<str>`.
 ///
 /// # Usage
 ///
 /// ```ignore
-/// #[derive(TypedId)]
-/// pub struct MarketId;
+/// #[derive(StrId)]
+/// pub struct MarketId(Arc<str>);
 /// ```
 ///
-/// This expands to a newtype `pub struct MarketId(Arc<str>)` with
-/// implementations of: `Debug`, `Clone`, `PartialEq`, `Eq`, `Hash`,
-/// `Display`, `FromStr`, `From<&str>`, `From<String>`, `Serialize`,
-/// `Deserialize`, and full `SeaORM` bindings (`TryGetable`, `ValueType`,
-/// `sea_query::ValueType`, `sea_query::Nullable`).
-#[proc_macro_derive(TypedId)]
-pub fn derive_typed_id(input: TokenStream) -> TokenStream {
-    typed_id::expand(input.into())
+/// This generates implementations of: `new`, `as_str`, `Display`, `FromStr`,
+/// `From<&str>`, `From<String>`, `AsRef<str>`, `Serialize`, `Deserialize`,
+/// and full `SeaORM` bindings (`TryGetable`, `ValueType`, `Nullable`,
+/// `IntoActiveValue`) backed by the `TEXT` column type.
+///
+/// Use this for externally defined identifiers that are not UUIDs, e.g.
+/// Polymarket `condition_id` or CLOB decimal token ids. Internal identifiers
+/// should use [`UuidId`].
+#[proc_macro_derive(StrId)]
+pub fn derive_str_id(input: TokenStream) -> TokenStream {
+    str_id::expand(input.into())
+        .unwrap_or_else(|e| e.to_compile_error())
+        .into()
+}
+
+/// Derive a type-safe UUID ID newtype backed by `Arc<Uuid>`.
+///
+/// # Usage
+///
+/// ```ignore
+/// #[derive(UuidId)]
+/// pub struct TradeId(Arc<Uuid>);
+/// ```
+///
+/// This generates `new`, `from_v7`, `as_uuid`, `into_uuid`, `Display`,
+/// `FromStr`, `Serialize`, `Deserialize`, and full `SeaORM` bindings backed by
+/// the native Postgres `uuid` column type. All generated ids are UUID v7
+/// (time-ordered); there is no v4 constructor.
+#[proc_macro_derive(UuidId)]
+pub fn derive_uuid_id(input: TokenStream) -> TokenStream {
+    uuid_id::expand(input.into())
         .unwrap_or_else(|e| e.to_compile_error())
         .into()
 }

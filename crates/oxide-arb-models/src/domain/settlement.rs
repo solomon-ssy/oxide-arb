@@ -2,7 +2,7 @@
 
 use crate::{
     enums::common::{SettlementTrigger, Side},
-    types::{MarketId, Price, Shares, TokenId, TradeId, Usd},
+    types::{MarketId, Price, ResolutionEventId, Shares, TokenId, TradeId, Usd},
 };
 use chrono::{DateTime, Utc};
 use sea_orm::DeriveIntoActiveModel;
@@ -45,7 +45,7 @@ pub struct MarketSettlementInput {
 /// Minimal persisted audit row for a market-resolution signal or oracle audit.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResolutionEventInfo {
-    pub resolution_id: String,
+    pub resolution_id: ResolutionEventId,
     pub market_id: MarketId,
     pub outcome: String,
     pub source: String,
@@ -64,7 +64,7 @@ info_from_model!(ResolutionEventInfo, crate::entities::resolution_event::Model, 
 #[derive(Debug, Clone, DeriveIntoActiveModel)]
 #[sea_orm(active_model = "crate::entities::resolution_event::ActiveModel")]
 pub struct NewResolutionEvent {
-    pub resolution_id: String,
+    pub resolution_id: ResolutionEventId,
     pub market_id: MarketId,
     pub outcome: String,
     pub source: String,

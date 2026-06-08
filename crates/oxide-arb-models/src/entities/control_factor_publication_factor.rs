@@ -7,9 +7,9 @@ use sea_orm::entity::prelude::*;
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "control_factor_publication_factor")]
 pub struct Model {
-    #[sea_orm(primary_key)]
-    pub id: i64,
+    #[sea_orm(primary_key, auto_increment = false)]
     pub publication_id: FactorPublicationId,
+    #[sea_orm(primary_key, auto_increment = false)]
     pub factor_id: ControlFactorId,
     pub created_at: DateTime<Utc>,
 }

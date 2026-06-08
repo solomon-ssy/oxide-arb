@@ -233,7 +233,7 @@ impl RiskMetrics for BenchMetrics {
 
 fn bench_opportunity() -> Opportunity {
     Opportunity {
-        opportunity_id: OpportunityId::new_v7(),
+        opportunity_id: OpportunityId::from_v7(),
         market_id: MarketId::new("bench_market"),
         event_id: EventId::new("bench_event"),
         token_id: TokenId::new("12345"),
@@ -573,7 +573,7 @@ fn bench_funnel_immediate_dispatch(c: &mut Criterion) {
     let funnel = Funnel::new(vec![tx], 50, std::time::Duration::from_millis(75), metrics);
     let scored = Arc::new(ScoredOpportunity {
         opportunity: Arc::new(Opportunity {
-            opportunity_id: OpportunityId::new_v7(),
+            opportunity_id: OpportunityId::from_v7(),
             market_id: MarketId::new("bench"),
             event_id: EventId::new("e"),
             token_id: TokenId::new("t"),
@@ -769,7 +769,7 @@ fn bench_scanner_scan_market(c: &mut Criterion) {
 fn execution_bench_scored() -> ScoredOpportunity {
     ScoredOpportunity {
         opportunity: Arc::new(Opportunity {
-            opportunity_id: OpportunityId::new_v7(),
+            opportunity_id: OpportunityId::from_v7(),
             market_id: MarketId::new("bench-exec"),
             event_id: EventId::new("e"),
             token_id: TokenId::new("bench-m1-yes"),

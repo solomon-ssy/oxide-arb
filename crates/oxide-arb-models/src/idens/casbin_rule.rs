@@ -13,6 +13,7 @@ use sea_orm::{
 
 use crate::{
     schema::{
+        column,
         dependency::TableDependency,
         index::{IndexBuildMode, IndexSpec},
         seed::SeedSpec,
@@ -39,32 +40,15 @@ pub fn table() -> TableCreateStatement {
     Table::create()
         .table(CasbinRule::Table)
         .if_not_exists()
-        .col(
-            ColumnDef::new(CasbinRule::Id)
-                .big_integer()
-                .not_null()
-                .auto_increment()
-                .primary_key(),
-        )
+        .col(column::bigserial_pk(CasbinRule::Id))
         .col(ColumnDef::new(CasbinRule::Ptype).text().not_null())
-        .col(casbin_value_column(CasbinRule::V0))
-        .col(casbin_value_column(CasbinRule::V1))
-        .col(casbin_value_column(CasbinRule::V2))
-        .col(casbin_value_column(CasbinRule::V3))
-        .col(casbin_value_column(CasbinRule::V4))
-        .col(casbin_value_column(CasbinRule::V5))
+        .col(column::casbin_policy_text(CasbinRule::V0))
+        .col(column::casbin_policy_text(CasbinRule::V1))
+        .col(column::casbin_policy_text(CasbinRule::V2))
+        .col(column::casbin_policy_text(CasbinRule::V3))
+        .col(column::casbin_policy_text(CasbinRule::V4))
+        .col(column::casbin_policy_text(CasbinRule::V5))
         .to_owned()
-}
-
-/// A Casbin policy value column.
-///
-/// `NOT NULL DEFAULT ''` (rather than nullable) so the `uq_casbin_rule` unique
-/// index de-duplicates exactly under standard semantics — Postgres treats NULLs
-/// as distinct, which would silently defeat de-duplication on unused fields.
-fn casbin_value_column(column: CasbinRule) -> ColumnDef {
-    let mut col = ColumnDef::new(column);
-    col.text().not_null().default("");
-    col
 }
 
 pub fn indexes() -> Vec<IndexSpec> {

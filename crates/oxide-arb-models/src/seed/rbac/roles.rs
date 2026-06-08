@@ -77,7 +77,7 @@ pub async fn load(db: &dyn ConnectionTrait, ctx: &mut SeedContext) -> Result<u64
     let mut id_map = RoleIdMap::new();
     let mut models = Vec::with_capacity(BUILTIN_ROLES.len());
     for (code, name, description, sort) in BUILTIN_ROLES {
-        let id = RoleId::new_v7();
+        let id = RoleId::from_v7();
         id_map.insert(*code, id.clone());
         models.push(role::ActiveModel {
             id: Set(id),

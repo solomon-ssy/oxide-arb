@@ -25,7 +25,7 @@ use oxide_arb_models::{
         },
     },
     enums::common::{ExecutionMode, RedeemStatus, SettlementTrigger},
-    types::TokenId,
+    types::{ResolutionEventId, TokenId},
 };
 use oxide_arb_repository::{
     postgres::{PgPositionRepository, PgResolutionEventRepository, PgTradeRepository},
@@ -493,7 +493,7 @@ impl MarketSettlementService {
         evidence: serde_json::Value,
     ) {
         let event = NewResolutionEvent {
-            resolution_id: format!("res_{}", uuid::Uuid::now_v7()),
+            resolution_id: ResolutionEventId::from_v7(),
             market_id: req.market_id.clone(),
             outcome: req.winning_outcome.clone(),
             source: source.to_owned(),

@@ -3,12 +3,13 @@
 use oxide_arb_macros::oxide_schema;
 use sea_orm::{
     Iden,
-    sea_query::{ColumnDef, ForeignKey, ForeignKeyAction, Index, Table, TableCreateStatement},
+    sea_query::{ForeignKey, ForeignKeyAction, Index, Table, TableCreateStatement},
 };
 
 use crate::{
     idens::{role::Role, user::User},
     schema::{
+        column,
         dependency::TableDependency,
         index::{IndexBuildMode, IndexSpec},
         seed::SeedSpec,
@@ -19,10 +20,12 @@ use crate::{
 
 /// Explicit user→role join. The Casbin `g` grouping policy is kept in sync by
 /// the repository layer; this table is the relational source of truth.
+///
+/// The composite primary key `(user_id, role_id)` is the natural key and its
+/// own uniqueness guarantee — there is no surrogate join-row id.
 #[oxide_schema(lifecycle = "control")]
 pub enum UserRole {
     Table,
-    Id,
     UserId,
     RoleId,
     CreatedAt,
@@ -32,10 +35,10 @@ pub fn table() -> TableCreateStatement {
     Table::create()
         .table(UserRole::Table)
         .if_not_exists()
-        .col(ColumnDef::new(UserRole::Id).text().not_null().primary_key())
-        .col(ColumnDef::new(UserRole::UserId).text().not_null())
-        .col(ColumnDef::new(UserRole::RoleId).text().not_null())
+        .col(column::uuid_fk(UserRole::UserId))
+        .col(column::uuid_fk(UserRole::RoleId))
         .col(timestamp_with_write_default(UserRole::CreatedAt))
+        .primary_key(Index::create().col(UserRole::UserId).col(UserRole::RoleId))
         .foreign_key(
             ForeignKey::create()
                 .name("fk_user_role_user")
@@ -54,32 +57,17 @@ pub fn table() -> TableCreateStatement {
 }
 
 pub fn indexes() -> Vec<IndexSpec> {
-    vec![
-        IndexSpec::sea_query(
-            "uq_user_role",
-            user_role_table_name,
-            IndexBuildMode::Transactional,
-            Index::create()
-                .name("uq_user_role")
-                .table(UserRole::Table)
-                .col(UserRole::UserId)
-                .col(UserRole::RoleId)
-                .unique()
-                .to_owned(),
-            "one assignment per (user, role)",
-        ),
-        IndexSpec::sea_query(
-            "idx_user_role_role",
-            user_role_table_name,
-            IndexBuildMode::Transactional,
-            Index::create()
-                .name("idx_user_role_role")
-                .table(UserRole::Table)
-                .col(UserRole::RoleId)
-                .to_owned(),
-            "reverse lookup: users in a role",
-        ),
-    ]
+    vec![IndexSpec::sea_query(
+        "idx_user_role_role",
+        user_role_table_name,
+        IndexBuildMode::Transactional,
+        Index::create()
+            .name("idx_user_role_role")
+            .table(UserRole::Table)
+            .col(UserRole::RoleId)
+            .to_owned(),
+        "reverse lookup: users in a role",
+    )]
 }
 
 pub fn dependencies() -> Vec<TableDependency> {

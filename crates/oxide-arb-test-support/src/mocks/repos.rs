@@ -22,7 +22,7 @@ use oxide_arb_models::{
             SettlementTrigger, TradeBusinessOutcome, TradeState,
         },
     },
-    types::{MarketId, OpportunityId, PositionId, TokenId, TradeId, Usd},
+    types::{ExecutionId, MarketId, OpportunityId, PositionId, TokenId, TradeId, Usd},
 };
 use oxide_arb_repository::traits::{
     CalibrationRepository, EvidenceTimeseriesRepository, MarketFilter, PositionRepository,
@@ -71,7 +71,11 @@ impl MockTradeRepository {
     }
 
     pub fn find(&self, trade_id: &TradeId) -> Option<TradeInfo> {
-        self.trades.lock().unwrap().get(trade_id.as_str()).cloned()
+        self.trades
+            .lock()
+            .unwrap()
+            .get(&trade_id.to_string())
+            .cloned()
     }
 
     pub fn trades_snapshot(&self) -> Vec<TradeInfo> {
@@ -144,7 +148,7 @@ impl CalibrationRepository for MockCalibrationRepository {
         outcome: NewCalibrationOutcome,
     ) -> Result<CalibrationOutcomeInfo, StorageError> {
         let mut outcomes = self.outcomes.lock().unwrap();
-        if let Some(existing) = outcomes.get(outcome.trade_id.as_str()) {
+        if let Some(existing) = outcomes.get(&outcome.trade_id.to_string()) {
             return Ok(existing.clone());
         }
         let info = CalibrationOutcomeInfo {
@@ -221,7 +225,7 @@ impl PositionRepository for MockPositionRepository {
         positions.sort_by(|left, right| {
             left.opened_at
                 .cmp(&right.opened_at)
-                .then_with(|| left.position_id.as_str().cmp(right.position_id.as_str()))
+                .then_with(|| left.position_id.as_uuid().cmp(&right.position_id.as_uuid()))
         });
         Ok(positions)
     }
@@ -249,7 +253,7 @@ impl PositionRepository for MockPositionRepository {
         positions.sort_by(|left, right| {
             left.opened_at
                 .cmp(&right.opened_at)
-                .then_with(|| left.position_id.as_str().cmp(right.position_id.as_str()))
+                .then_with(|| left.position_id.as_uuid().cmp(&right.position_id.as_uuid()))
         });
         Ok(positions)
     }
@@ -262,7 +266,7 @@ impl PositionRepository for MockPositionRepository {
             .positions
             .lock()
             .unwrap()
-            .get(position_id.as_str())
+            .get(&position_id.to_string())
             .cloned())
     }
 
@@ -412,7 +416,7 @@ impl PositionRepository for MockPositionRepository {
         let mut positions = self.positions.lock().unwrap();
         let position =
             positions
-                .get_mut(position_id.as_str())
+                .get_mut(&position_id.to_string())
                 .ok_or_else(|| StorageError::NotFound {
                     entity: "position",
                     id: position_id.to_string(),
@@ -432,7 +436,7 @@ impl PositionRepository for MockPositionRepository {
         let mut positions = self.positions.lock().unwrap();
         let position =
             positions
-                .get_mut(position_id.as_str())
+                .get_mut(&position_id.to_string())
                 .ok_or_else(|| StorageError::NotFound {
                     entity: "position",
                     id: position_id.to_string(),
@@ -461,7 +465,7 @@ impl PositionRepository for MockPositionRepository {
         let mut positions = self.positions.lock().unwrap();
         let position =
             positions
-                .get_mut(position_id.as_str())
+                .get_mut(&position_id.to_string())
                 .ok_or_else(|| StorageError::NotFound {
                     entity: "position",
                     id: position_id.to_string(),
@@ -486,7 +490,7 @@ impl PositionRepository for MockPositionRepository {
         let mut positions = self.positions.lock().unwrap();
         let position =
             positions
-                .get_mut(position_id.as_str())
+                .get_mut(&position_id.to_string())
                 .ok_or_else(|| StorageError::NotFound {
                     entity: "position",
                     id: position_id.to_string(),
@@ -509,7 +513,7 @@ impl PositionRepository for MockPositionRepository {
         let mut positions = self.positions.lock().unwrap();
         let position =
             positions
-                .get_mut(position_id.as_str())
+                .get_mut(&position_id.to_string())
                 .ok_or_else(|| StorageError::NotFound {
                     entity: "position",
                     id: position_id.to_string(),
@@ -531,7 +535,7 @@ impl PositionRepository for MockPositionRepository {
         let mut positions = self.positions.lock().unwrap();
         let position =
             positions
-                .get_mut(position_id.as_str())
+                .get_mut(&position_id.to_string())
                 .ok_or_else(|| StorageError::NotFound {
                     entity: "position",
                     id: position_id.to_string(),
@@ -556,7 +560,7 @@ impl PositionRepository for MockPositionRepository {
         let mut positions = self.positions.lock().unwrap();
         let position =
             positions
-                .get_mut(position_id.as_str())
+                .get_mut(&position_id.to_string())
                 .ok_or_else(|| StorageError::NotFound {
                     entity: "position",
                     id: position_id.to_string(),
@@ -581,7 +585,7 @@ impl PositionRepository for MockPositionRepository {
         let mut positions = self.positions.lock().unwrap();
         let position =
             positions
-                .get_mut(position_id.as_str())
+                .get_mut(&position_id.to_string())
                 .ok_or_else(|| StorageError::NotFound {
                     entity: "position",
                     id: position_id.to_string(),
@@ -693,12 +697,13 @@ impl TradeRepository for MockTradeRepository {
             ));
         }
         let mut guard = self.trades.lock().unwrap();
-        let existing = guard
-            .get_mut(trade_id.as_str())
-            .ok_or_else(|| StorageError::NotFound {
-                entity: "trade",
-                id: trade_id.to_string(),
-            })?;
+        let existing =
+            guard
+                .get_mut(&trade_id.to_string())
+                .ok_or_else(|| StorageError::NotFound {
+                    entity: "trade",
+                    id: trade_id.to_string(),
+                })?;
         if existing.state != TradeState::Intent {
             drop(guard);
             return Ok(false);
@@ -721,12 +726,13 @@ impl TradeRepository for MockTradeRepository {
             ));
         }
         let mut guard = self.trades.lock().unwrap();
-        let existing = guard
-            .get_mut(trade_id.as_str())
-            .ok_or_else(|| StorageError::NotFound {
-                entity: "trade",
-                id: trade_id.to_string(),
-            })?;
+        let existing =
+            guard
+                .get_mut(&trade_id.to_string())
+                .ok_or_else(|| StorageError::NotFound {
+                    entity: "trade",
+                    id: trade_id.to_string(),
+                })?;
         if existing.state != TradeState::Submitted {
             return Err(StorageError::StaleData(format!(
                 "trade {trade_id} was not in submitted state"
@@ -771,7 +777,7 @@ impl TradeRepository for MockTradeRepository {
 
         let mut claimed = Vec::with_capacity(claimable.len());
         for trade in claimable {
-            let Some(existing) = guard.get_mut(trade.trade_id.as_str()) else {
+            let Some(existing) = guard.get_mut(&trade.trade_id.to_string()) else {
                 continue;
             };
             existing.state = match existing.state {
@@ -798,12 +804,13 @@ impl TradeRepository for MockTradeRepository {
         to: TradeState,
     ) -> Result<bool, StorageError> {
         let mut guard = self.trades.lock().unwrap();
-        let existing = guard
-            .get_mut(trade_id.as_str())
-            .ok_or_else(|| StorageError::NotFound {
-                entity: "trade",
-                id: trade_id.to_string(),
-            })?;
+        let existing =
+            guard
+                .get_mut(&trade_id.to_string())
+                .ok_or_else(|| StorageError::NotFound {
+                    entity: "trade",
+                    id: trade_id.to_string(),
+                })?;
         if existing.state != from {
             drop(guard);
             return Ok(false);
@@ -819,12 +826,13 @@ impl TradeRepository for MockTradeRepository {
 
     async fn mark_orphaned(&self, trade_id: &TradeId) -> Result<bool, StorageError> {
         let mut guard = self.trades.lock().unwrap();
-        let existing = guard
-            .get_mut(trade_id.as_str())
-            .ok_or_else(|| StorageError::NotFound {
-                entity: "trade",
-                id: trade_id.to_string(),
-            })?;
+        let existing =
+            guard
+                .get_mut(&trade_id.to_string())
+                .ok_or_else(|| StorageError::NotFound {
+                    entity: "trade",
+                    id: trade_id.to_string(),
+                })?;
         if existing.state != TradeState::Submitted {
             drop(guard);
             return Ok(false);
@@ -861,7 +869,10 @@ impl TradeRepository for MockTradeRepository {
         Ok(self.find(trade_id))
     }
 
-    async fn find_by_execution(&self, _execution_id: &str) -> Result<Vec<TradeInfo>, StorageError> {
+    async fn find_by_execution(
+        &self,
+        _execution_id: &ExecutionId,
+    ) -> Result<Vec<TradeInfo>, StorageError> {
         Ok(vec![])
     }
 
@@ -882,7 +893,7 @@ impl TradeRepository for MockTradeRepository {
             right
                 .created_at
                 .cmp(&left.created_at)
-                .then_with(|| right.trade_id.as_str().cmp(left.trade_id.as_str()))
+                .then_with(|| right.trade_id.as_uuid().cmp(&left.trade_id.as_uuid()))
         });
         trades.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
         Ok(trades)
@@ -905,7 +916,7 @@ impl TradeRepository for MockTradeRepository {
             right
                 .created_at
                 .cmp(&left.created_at)
-                .then_with(|| right.trade_id.as_str().cmp(left.trade_id.as_str()))
+                .then_with(|| right.trade_id.as_uuid().cmp(&left.trade_id.as_uuid()))
         });
         trades.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
         Ok(trades)
@@ -927,7 +938,7 @@ impl TradeRepository for MockTradeRepository {
         trades.sort_by(|left, right| {
             left.created_at
                 .cmp(&right.created_at)
-                .then_with(|| left.trade_id.as_str().cmp(right.trade_id.as_str()))
+                .then_with(|| left.trade_id.as_uuid().cmp(&right.trade_id.as_uuid()))
         });
         Ok(trades)
     }
@@ -1195,10 +1206,14 @@ impl EvidenceTimeseriesRepository for MockTimeseriesRepository {
                     | ChOpportunityAuditStage::Failed
             )
         });
+        // Mirror the real ClickHouse `terminal_audits` ordering: group by
+        // opportunity_id (UUID byte order == the lowercase-hyphenated string
+        // order used by the `ORDER BY opportunity_id ASC` SQL column), order the
+        // most-terminal row first, then keep one row per opportunity.
         rows.sort_by(|left, right| {
             left.opportunity_id
-                .as_str()
-                .cmp(right.opportunity_id.as_str())
+                .as_uuid()
+                .cmp(&right.opportunity_id.as_uuid())
                 .then(right.stage_order.cmp(&left.stage_order))
                 .then(right.stage_at.cmp(&left.stage_at))
                 .then(right.ingestion_time.cmp(&left.ingestion_time))

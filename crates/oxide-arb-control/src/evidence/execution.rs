@@ -395,10 +395,19 @@ fn terminal_audits(audits: &[OpportunityAuditRow]) -> Vec<OpportunityAuditRow> {
         })
         .cloned()
         .collect::<Vec<_>>();
+    // Reduce to one most-terminal row per opportunity. This mirrors the
+    // ClickHouse `ORDER BY opportunity_id ASC, stage_order DESC, …` + `LIMIT 1
+    // BY opportunity_id` contract of `TimeseriesRepository::terminal_audits`,
+    // so the in-Rust reduction and the SQL query agree exactly.
+    //
+    // `opportunity_id` is a *grouping* key here, not a display order: comparing
+    // the UUID bytes (`as_uuid`) reproduces ClickHouse's `ORDER BY` on the
+    // lowercase-hyphenated string column (lexicographic order of that form is
+    // identical to binary UUID order), keeping `dedup_by` adjacency correct.
     rows.sort_by(|left, right| {
         left.opportunity_id
-            .as_str()
-            .cmp(right.opportunity_id.as_str())
+            .as_uuid()
+            .cmp(&right.opportunity_id.as_uuid())
             .then(right.stage_order.cmp(&left.stage_order))
             .then(right.stage_at.cmp(&left.stage_at))
             .then(right.ingestion_time.cmp(&left.ingestion_time))
@@ -584,9 +593,9 @@ mod tests {
 
     fn audit() -> OpportunityAuditRow {
         OpportunityAuditRow {
-            opportunity_id: OpportunityId::new("opp"),
-            execution_id: ExecutionId::generate(),
-            trade_id: Some(TradeId::generate()),
+            opportunity_id: OpportunityId::new(oxide_arb_test_support::seeded_uuid("opp")),
+            execution_id: ExecutionId::from_v7(),
+            trade_id: Some(TradeId::from_v7()),
             market_id: MarketId::new("market"),
             event_id: EventId::new("event"),
             token_id: TokenId::new("yes"),

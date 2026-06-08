@@ -5,6 +5,7 @@ use sea_orm::{
 };
 
 use crate::schema::{
+    column,
     dependency::TableDependency,
     index::{IndexBuildMode, IndexSpec},
     seed::SeedSpec,
@@ -33,17 +34,10 @@ pub fn table() -> TableCreateStatement {
     Table::create()
         .table(ControlFactorTrainingDataset::Table)
         .if_not_exists()
-        .col(
-            ColumnDef::new(ControlFactorTrainingDataset::DatasetId)
-                .text()
-                .not_null()
-                .primary_key(),
-        )
-        .col(
-            ColumnDef::new(ControlFactorTrainingDataset::MaterializationRunId)
-                .text()
-                .not_null(),
-        )
+        .col(column::uuid_pk(ControlFactorTrainingDataset::DatasetId))
+        .col(column::uuid_fk(
+            ControlFactorTrainingDataset::MaterializationRunId,
+        ))
         .col(
             ColumnDef::new(ControlFactorTrainingDataset::FactorType)
                 .text()

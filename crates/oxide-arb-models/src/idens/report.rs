@@ -5,6 +5,7 @@ use sea_orm::{
 };
 
 use crate::schema::{
+    column,
     dependency::TableDependency,
     index::{IndexBuildMode, IndexSpec},
     seed::SeedSpec,
@@ -26,7 +27,7 @@ pub fn table() -> TableCreateStatement {
     Table::create()
         .table(Report::Table)
         .if_not_exists()
-        .col(ColumnDef::new(Report::Id).text().not_null().primary_key())
+        .col(column::text_id_pk(Report::Id))
         .col(ColumnDef::new(Report::ReportType).text().not_null())
         .col(ColumnDef::new(Report::PeriodStart).date().not_null())
         .col(ColumnDef::new(Report::PeriodEnd).date().not_null())

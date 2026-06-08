@@ -139,7 +139,7 @@ mod tests {
 
     fn example_with_hours_bucket() -> FactorTrainingExample {
         FactorTrainingExample {
-            opportunity_id: OpportunityId::new("opp"),
+            opportunity_id: OpportunityId::new(oxide_arb_test_support::seeded_uuid("opp")),
             market_id: MarketId::new("market"),
             factor_type: ControlFactorType::BucketRisk,
             entity_key: FactorDimensions::BucketRisk(BucketRiskDimensions {

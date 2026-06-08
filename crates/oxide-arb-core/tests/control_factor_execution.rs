@@ -134,8 +134,8 @@ impl RiskMetrics for StaticRiskMetrics {
 fn evidence() -> FactorEvidence {
     let now = Utc::now();
     FactorEvidence {
-        materialization_run_id: oxide_arb_models::types::MaterializationRunId::new_v7(),
-        stage_report_ids: vec![oxide_arb_models::types::StageReportId::new_v7()],
+        materialization_run_id: oxide_arb_models::types::MaterializationRunId::from_v7(),
+        stage_report_ids: vec![oxide_arb_models::types::StageReportId::from_v7()],
         window_from: now - Duration::hours(1),
         window_to: now,
         source_delay_secs: 60,
@@ -186,7 +186,7 @@ fn evidence() -> FactorEvidence {
 fn scored_opportunity(depth_used_pct: Decimal) -> Arc<ScoredOpportunity> {
     Arc::new(ScoredOpportunity {
         opportunity: Arc::new(Opportunity {
-            opportunity_id: OpportunityId::new_v7(),
+            opportunity_id: OpportunityId::from_v7(),
             market_id: MarketId::new("0xfactor-exec-market"),
             event_id: EventId::new("evt-factor-exec"),
             token_id: TokenId::new(TOKEN_YES),
@@ -267,7 +267,7 @@ fn execution_quality_factor(
     max_depth_usage_pct: Decimal,
 ) -> ControlFactorValue {
     ControlFactorValue {
-        factor_id: oxide_arb_models::types::ControlFactorId::new_v7(),
+        factor_id: oxide_arb_models::types::ControlFactorId::from_v7(),
         factor_type: ControlFactorType::ExecutionQuality,
         dimensions: FactorDimensions::ExecutionQuality(dims),
         payload: FactorPayload::ExecutionQuality(ExecutionQualityPayload {
@@ -290,7 +290,7 @@ fn compiled_snapshot(
     publication_expires_at: chrono::DateTime<Utc>,
 ) -> ControlFactorSnapshot {
     let publication = ControlFactorPublication {
-        publication_id: oxide_arb_models::types::FactorPublicationId::new_v7(),
+        publication_id: oxide_arb_models::types::FactorPublicationId::from_v7(),
         mode: PublicationMode::Published,
         factor_ids: factors.iter().map(|f| f.factor_id.clone()).collect(),
         previous_publication_id: None,

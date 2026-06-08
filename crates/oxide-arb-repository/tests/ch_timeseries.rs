@@ -178,8 +178,8 @@ fn sample_audit(
 ) -> OpportunityAuditRow {
     OpportunityAuditRow {
         opportunity_id: opportunity_id.clone(),
-        execution_id: ExecutionId::generate(),
-        trade_id: Some(TradeId::generate()),
+        execution_id: ExecutionId::from_v7(),
+        trade_id: Some(TradeId::from_v7()),
         market_id: market_id.clone(),
         event_id: event_id.clone(),
         token_id: token_id.clone(),
@@ -283,7 +283,7 @@ async fn evidence_timeseries_queries_roundtrip_core_fact_tables() {
     let token = TokenId::new("tok-core-facts");
     let market_id = MarketId::new("0xch-market");
     let event_id = EventId::new("evt-core-facts");
-    let opportunity_id = OpportunityId::new_v7();
+    let opportunity_id = OpportunityId::from_v7();
 
     repo.insert_l2_events(vec![
         sample_l2(token.as_str(), now, 2),

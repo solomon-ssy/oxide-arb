@@ -2,7 +2,8 @@ use oxide_arb_macros::oxide_schema;
 use sea_orm::sea_query::{ColumnDef, Table, TableCreateStatement};
 
 use crate::schema::{
-    dependency::TableDependency, index::IndexSpec, seed::SeedSpec, timestamp_with_write_default,
+    column, dependency::TableDependency, index::IndexSpec, seed::SeedSpec,
+    timestamp_with_write_default,
 };
 
 #[oxide_schema(lifecycle = "runtime")]
@@ -22,13 +23,8 @@ pub fn table() -> TableCreateStatement {
     Table::create()
         .table(BlacklistEntry::Table)
         .if_not_exists()
-        .col(
-            ColumnDef::new(BlacklistEntry::MarketId)
-                .text()
-                .not_null()
-                .primary_key(),
-        )
-        .col(ColumnDef::new(BlacklistEntry::TokenId).text().null())
+        .col(column::market_id_pk(BlacklistEntry::MarketId))
+        .col(column::token_id_null(BlacklistEntry::TokenId))
         .col(ColumnDef::new(BlacklistEntry::Scope).text().not_null())
         .col(ColumnDef::new(BlacklistEntry::Reason).text().not_null())
         .col(

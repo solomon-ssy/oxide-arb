@@ -1,6 +1,7 @@
 //! Compile-time schema catalog for Postgres migrations.
 
 pub mod catalog;
+pub mod column;
 pub mod dependency;
 pub mod graph;
 pub mod index;

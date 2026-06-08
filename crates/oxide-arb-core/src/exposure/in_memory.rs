@@ -161,7 +161,7 @@ impl InMemoryExposureReservation {
             });
         }
 
-        let id = ReservationId::new_id();
+        let id = ReservationId::from_v7();
         self.reservations.insert(
             id.clone(),
             ReservationEntry {
@@ -176,12 +176,10 @@ impl InMemoryExposureReservation {
 
     /// Synchronous confirm — releases reservation tracking after a fill.
     pub fn confirm_sync(&self, id: &ReservationId) -> Result<(), ReservationError> {
-        let (_, entry) =
-            self.reservations
-                .remove(id)
-                .ok_or_else(|| ReservationError::NotFound {
-                    id: id.as_str().to_owned(),
-                })?;
+        let (_, entry) = self
+            .reservations
+            .remove(id)
+            .ok_or_else(|| ReservationError::NotFound { id: id.to_string() })?;
 
         self.total_reserved_cents
             .fetch_sub(entry.amount_cents, Ordering::AcqRel);

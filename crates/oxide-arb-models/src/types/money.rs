@@ -14,10 +14,11 @@
 //!
 //! # `SeaORM` persistence
 //!
-//! All monetary newtypes bind as `Value::String(Decimal::to_string)` and
-//! parse back in `TryGetable`. Columns are declared as `TEXT` in the DDL
-//! layer so the round-trip is lossless. Binding as `Value::Decimal` risks
-//! silent truncation to `REAL` / `f64` precision on some backends.
+//! All monetary newtypes bind as `Value::Decimal` and persist into native
+//! Postgres `NUMERIC(precision, scale)` columns. The mapping is lossless:
+//! Postgres `NUMERIC` covers the full range of `rust_decimal::Decimal`, so a
+//! round-trip never truncates. Each newtype declares its DDL precision via the
+//! `PRECISION` associated constant, consumed by the schema column builders.
 
 use rust_decimal::Decimal;
 use sea_orm::{
@@ -32,7 +33,7 @@ use std::{
 };
 
 macro_rules! decimal_newtype {
-    ($(#[$meta:meta])* $name:ident) => {
+    ($(#[$meta:meta])* $name:ident, precision = ($precision:expr, $scale:expr)) => {
         $(#[$meta])*
         #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
         #[serde(transparent)]
@@ -41,6 +42,12 @@ macro_rules! decimal_newtype {
         impl $name {
             pub const ZERO: Self = Self(Decimal::ZERO);
             pub const ONE: Self = Self(Decimal::ONE);
+
+            /// Postgres `NUMERIC(precision, scale)` declaration for this type.
+            ///
+            /// Consumed by the schema column builders so every persisted column
+            /// of this newtype uses one canonical precision.
+            pub const PRECISION: (u32, u32) = ($precision, $scale);
 
             #[must_use]
             #[inline]
@@ -141,19 +148,19 @@ macro_rules! decimal_newtype {
             }
         }
 
-        // ── SeaORM bindings (TEXT column, lossless round-trip) ──────
+        // ── SeaORM bindings (native NUMERIC column, lossless round-trip) ──
 
         impl From<$name> for Value {
             #[inline]
             fn from(v: $name) -> Self {
-                Value::String(Some(Box::new(v.0.to_string())))
+                Value::Decimal(Some(Box::new(v.0)))
             }
         }
 
         impl From<&$name> for Value {
             #[inline]
             fn from(v: &$name) -> Self {
-                Value::String(Some(Box::new(v.0.to_string())))
+                Value::Decimal(Some(Box::new(v.0)))
             }
         }
 
@@ -162,21 +169,7 @@ macro_rules! decimal_newtype {
                 res: &sea_orm::QueryResult,
                 index: I,
             ) -> Result<Self, TryGetError> {
-                let raw: String =
-                    <String as TryGetable>::try_get_by(res, index).map_err(|e| match e {
-                        TryGetError::DbErr(sea_orm::DbErr::Type(ref msg))
-                            if msg.contains("null value") =>
-                        {
-                            TryGetError::Null(format!("{index:?}"))
-                        }
-                        other => other,
-                    })?;
-                let inner: Decimal = raw.parse().map_err(|e| {
-                    TryGetError::DbErr(sea_orm::DbErr::Type(format!(
-                        "failed to parse {} from '{raw}': {e}",
-                        stringify!($name)
-                    )))
-                })?;
+                let inner: Decimal = <Decimal as TryGetable>::try_get_by(res, index)?;
                 Ok(Self(inner))
             }
         }
@@ -184,18 +177,20 @@ macro_rules! decimal_newtype {
         impl ValueType for $name {
             fn try_from(v: Value) -> Result<Self, ValueTypeErr> {
                 match v {
-                    Value::String(Some(s)) => s.parse::<Decimal>().map(Self).map_err(|_| ValueTypeErr),
+                    Value::Decimal(Some(d)) => Ok(Self(*d)),
                     _ => Err(ValueTypeErr),
                 }
             }
 
             fn type_name() -> String { stringify!($name).to_owned() }
-            fn array_type() -> ArrayType { ArrayType::String }
-            fn column_type() -> ColumnType { ColumnType::Text }
+            fn array_type() -> ArrayType { ArrayType::Decimal }
+            fn column_type() -> ColumnType {
+                ColumnType::Decimal(Some(($name::PRECISION.0, $name::PRECISION.1)))
+            }
         }
 
         impl Nullable for $name {
-            fn null() -> Value { Value::String(None) }
+            fn null() -> Value { Value::Decimal(None) }
         }
 
         impl IntoActiveValue<$name> for $name {
@@ -207,27 +202,32 @@ macro_rules! decimal_newtype {
 
 decimal_newtype!(
     /// USD-denominated monetary amount (`USDC.e` on Polygon).
-    Usd
+    Usd,
+    precision = (28, 8)
 );
 
 decimal_newtype!(
     /// Price per share in a prediction market. Range \[0, 1\].
-    Price
+    Price,
+    precision = (20, 18)
 );
 
 decimal_newtype!(
     /// Number of shares (condition tokens).
-    Shares
+    Shares,
+    precision = (38, 18)
 );
 
 decimal_newtype!(
     /// Basis points (1 bps = 0.01%).
-    Bps
+    Bps,
+    precision = (10, 4)
 );
 
 decimal_newtype!(
     /// Statistical probability, confidence, or model weight stored losslessly.
-    Probability
+    Probability,
+    precision = (20, 18)
 );
 
 // ── Cross-type arithmetic ───────────────────────────────────────────────

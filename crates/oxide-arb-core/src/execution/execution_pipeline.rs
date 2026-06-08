@@ -131,7 +131,7 @@ impl<R: TradeRepository + Send + Sync + 'static> ExecutionPipeline<R> {
         let intent_started = Instant::now();
         let timer = self.metrics.execution_latency.start_timer();
         let opp = scored.opportunity.as_ref();
-        let execution_id = ExecutionId::generate();
+        let execution_id = ExecutionId::from_v7();
 
         if self.fsm.is_emergency() || !self.risk_engine.allows_trading() {
             return Self::reject("halted", "execution halted — trading blocked");
@@ -533,7 +533,7 @@ impl<R: TradeRepository + Send + Sync + 'static> ExecutionPipeline<R> {
             }
         };
 
-        let trade_id = TradeId::generate();
+        let trade_id = TradeId::from_v7();
         let plan = self
             .plan_builder
             .build(opp, approved_size, &reservation, execution_id);

@@ -5,7 +5,7 @@ use oxide_arb_models::{
         NewTrade, ReportTradeStats, TradeInfo, TradeObservation, evidence::EvidenceQueryResult,
     },
     enums::common::{TradeBusinessOutcome, TradeState},
-    types::{MarketId, TradeId},
+    types::{ExecutionId, MarketId, TradeId},
 };
 use std::collections::HashMap;
 
@@ -69,7 +69,10 @@ pub trait TradeRepository: Send + Sync {
 
     async fn find_by_id(&self, trade_id: &TradeId) -> Result<Option<TradeInfo>, StorageError>;
 
-    async fn find_by_execution(&self, execution_id: &str) -> Result<Vec<TradeInfo>, StorageError>;
+    async fn find_by_execution(
+        &self,
+        execution_id: &ExecutionId,
+    ) -> Result<Vec<TradeInfo>, StorageError>;
 
     async fn find_by_market(
         &self,

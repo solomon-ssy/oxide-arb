@@ -85,7 +85,7 @@ impl ControlFactorValueInfo {
     /// Recomputes canonical dimension/payload digests and compares them to the
     /// persisted hashes. Tampered rows are rejected at snapshot compile time.
     pub fn verify_stored_hashes(&self) -> Result<(), SnapshotBuildError> {
-        let factor_id = self.factor_id.as_str().to_owned();
+        let factor_id = self.factor_id.to_string();
         let typed =
             self.to_typed()
                 .map_err(|error| SnapshotBuildError::DimensionPayloadMismatch {
@@ -107,7 +107,7 @@ impl ControlFactorValueInfo {
         }
         let expected_dims = CanonicalDigest::blake3_json(&typed.dimensions).map_err(|source| {
             SnapshotBuildError::DimensionsHashMismatch {
-                factor_id: self.factor_id.as_str().to_owned(),
+                factor_id: self.factor_id.to_string(),
                 expected: String::new(),
                 actual: format!("digest failed: {source}"),
             }

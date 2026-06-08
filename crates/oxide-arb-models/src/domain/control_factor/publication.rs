@@ -76,7 +76,7 @@ impl ControlFactorPublication {
             }
             if factor.status != required_current {
                 return Err(GovernanceError::FactorNotReadyForPublication {
-                    factor_id: factor.factor_id.as_str().to_owned(),
+                    factor_id: factor.factor_id.to_string(),
                     mode: self.mode.as_str().to_owned(),
                     expected: required_current.to_string(),
                     actual: factor.status.to_string(),

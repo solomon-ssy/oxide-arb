@@ -536,7 +536,7 @@ pub(crate) async fn append_audit_event_chained_q(
     .map_err(|error| StorageError::Codec(error.to_string()))?;
 
     let model = AuditActiveModel {
-        event_id: Set(AuditEventId::new_v7()),
+        event_id: Set(AuditEventId::from_v7()),
         sequence: Set(sequence),
         event_type: Set(event.event_type),
         actor: Set(event.actor),
@@ -1074,7 +1074,7 @@ impl ControlFactorRepository for PgControlFactorRepository {
                 actor: actor.actor.clone(),
                 actor_role: actor.actor_role.clone(),
                 resource_type: AuditResourceType::Factor,
-                resource_id: model.factor_id.as_str().to_owned(),
+                resource_id: model.factor_id.to_string(),
                 request_id: actor.request_id.clone(),
                 reason: actor.reason.clone(),
                 before_hash: None,

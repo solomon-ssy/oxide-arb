@@ -42,12 +42,14 @@ async fn live_fok_fill() {
     mount_clob_requirements(&server, &test_token_id()).await;
     mount_post_order(
         &server,
+        // Buy fill: makingAmount is USDC spent, takingAmount is shares received.
+        // 100 shares at the 0.92 limit price ⇒ 92 USDC.
         r#"{
             "success": true,
             "orderID": "0xfill",
             "status": "matched",
-            "makingAmount": "100",
-            "takingAmount": "92",
+            "makingAmount": "92",
+            "takingAmount": "100",
             "transactionHashes": ["0x0000000000000000000000000000000000000000000000000000000000000001"]
         }"#,
         1,
@@ -188,12 +190,14 @@ async fn live_gtc_429_retries() {
     Mock::given(method("POST"))
         .and(path("/order"))
         .respond_with(ResponseTemplate::new(200).set_body_string(
+            // Buy fill: makingAmount = USDC spent, takingAmount = shares received.
+            // The GTC order is for 100 shares; a full fill at 0.92 ⇒ 92 USDC.
             r#"{
                 "success": true,
                 "orderID": "0xgtc",
                 "status": "live",
-                "makingAmount": "100",
-                "takingAmount": "50"
+                "makingAmount": "92",
+                "takingAmount": "100"
             }"#,
         ))
         .mount(&server)
@@ -210,8 +214,8 @@ async fn live_gtc_429_retries() {
 
 fn sample_plan() -> ExecutionPlan {
     ExecutionPlan {
-        execution_id: ExecutionId::generate(),
-        opportunity_id: OpportunityId::new_v7(),
+        execution_id: ExecutionId::from_v7(),
+        opportunity_id: OpportunityId::from_v7(),
         market_id: MarketId::new("m1"),
         event_id: EventId::new("e1"),
         token_id: test_token_id(),
@@ -222,7 +226,7 @@ fn sample_plan() -> ExecutionPlan {
         estimated_fee: ModelsUsd::ZERO,
         category: MarketCategory::Other,
         neg_risk: false,
-        reservation_id: ReservationId::new_id(),
+        reservation_id: ReservationId::from_v7(),
         detected_at: Utc::now(),
         planned_at: Utc::now(),
     }

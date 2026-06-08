@@ -8,12 +8,12 @@ use crate::{
     enums::common::{PositionStatus, SettlementAccountingStatus},
     idens::{market::Market, trade::Trade},
     schema::{
+        column,
         dependency::TableDependency,
         index::{IndexBuildMode, IndexSpec},
         seed::SeedSpec,
         timestamp_with_write_default,
     },
-    types::Usd,
 };
 
 #[oxide_schema(lifecycle = "ledger")]
@@ -51,22 +51,17 @@ pub fn table() -> TableCreateStatement {
     Table::create()
         .table(Position::Table)
         .if_not_exists()
-        .col(
-            ColumnDef::new(Position::PositionId)
-                .text()
-                .not_null()
-                .primary_key(),
-        )
-        .col(ColumnDef::new(Position::TradeId).text().not_null())
-        .col(ColumnDef::new(Position::MarketId).text().not_null())
-        .col(ColumnDef::new(Position::TokenId).text().not_null())
+        .col(column::uuid_pk(Position::PositionId))
+        .col(column::uuid_fk(Position::TradeId))
+        .col(column::market_id(Position::MarketId))
+        .col(column::token_id(Position::TokenId))
         .col(ColumnDef::new(Position::Side).text().not_null())
-        .col(ColumnDef::new(Position::Shares).text().not_null())
-        .col(ColumnDef::new(Position::AvgEntryPrice).text().not_null())
-        .col(ColumnDef::new(Position::TotalCostUsd).text().not_null())
-        .col(ColumnDef::new(Position::TotalFeesUsd).text().not_null())
-        .col(default_zero_usd(Position::UnrealizedPnl))
-        .col(default_zero_usd(Position::RealizedPnl))
+        .col(column::shares(Position::Shares))
+        .col(column::price(Position::AvgEntryPrice))
+        .col(column::usd(Position::TotalCostUsd))
+        .col(column::usd(Position::TotalFeesUsd))
+        .col(column::usd_default_zero(Position::UnrealizedPnl))
+        .col(column::usd_default_zero(Position::RealizedPnl))
         .col(
             ColumnDef::new(Position::Status)
                 .text()
@@ -76,8 +71,8 @@ pub fn table() -> TableCreateStatement {
         .col(timestamp_with_write_default(Position::OpenedAt))
         .col(nullable_timestamp(Position::ClosedAt))
         .col(nullable_timestamp(Position::SettledAt))
-        .col(ColumnDef::new(Position::WinningTokenId).text().null())
-        .col(ColumnDef::new(Position::SettlementPayoutUsd).text().null())
+        .col(column::token_id_null(Position::WinningTokenId))
+        .col(column::usd_null(Position::SettlementPayoutUsd))
         .col(ColumnDef::new(Position::RedeemTxHash).text().null())
         .col(
             ColumnDef::new(Position::RedeemStatus)
@@ -173,12 +168,6 @@ pub fn dependencies() -> Vec<TableDependency> {
 
 pub const fn seed_units() -> Vec<SeedSpec> {
     Vec::new()
-}
-
-fn default_zero_usd(column: Position) -> ColumnDef {
-    let mut col = ColumnDef::new(column);
-    col.text().not_null().default(Usd::ZERO);
-    col
 }
 
 fn nullable_timestamp(column: Position) -> ColumnDef {

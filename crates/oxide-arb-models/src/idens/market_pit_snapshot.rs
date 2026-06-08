@@ -9,6 +9,7 @@ use sea_orm::{
 use crate::{
     idens::market::Market,
     schema::{
+        column,
         dependency::TableDependency,
         index::{IndexBuildMode, IndexSpec},
         seed::SeedSpec,
@@ -65,22 +66,13 @@ pub fn table() -> TableCreateStatement {
 
 fn add_identity_columns(table: &mut TableCreateStatement) {
     table
-        .col(
-            ColumnDef::new(MarketPitSnapshot::MarketPitSnapshotId)
-                .text()
-                .not_null()
-                .primary_key(),
-        )
-        .col(
-            ColumnDef::new(MarketPitSnapshot::MarketId)
-                .text()
-                .not_null(),
-        );
+        .col(column::uuid_pk(MarketPitSnapshot::MarketPitSnapshotId))
+        .col(column::market_id(MarketPitSnapshot::MarketId));
 }
 
 fn add_market_replay_columns(table: &mut TableCreateStatement) {
     table
-        .col(ColumnDef::new(MarketPitSnapshot::EventId).text().not_null())
+        .col(column::text_id(MarketPitSnapshot::EventId))
         .col(
             ColumnDef::new(MarketPitSnapshot::Question)
                 .text()
@@ -94,16 +86,8 @@ fn add_market_replay_columns(table: &mut TableCreateStatement) {
         )
         .col(ColumnDef::new(MarketPitSnapshot::Status).text().not_null())
         .col(ColumnDef::new(MarketPitSnapshot::Outcome).text().null())
-        .col(
-            ColumnDef::new(MarketPitSnapshot::YesTokenId)
-                .text()
-                .not_null(),
-        )
-        .col(
-            ColumnDef::new(MarketPitSnapshot::NoTokenId)
-                .text()
-                .not_null(),
-        )
+        .col(column::token_id(MarketPitSnapshot::YesTokenId))
+        .col(column::token_id(MarketPitSnapshot::NoTokenId))
         .col(
             ColumnDef::new(MarketPitSnapshot::TickSize)
                 .text()
@@ -133,10 +117,14 @@ fn add_fee_columns(table: &mut TableCreateStatement) {
                 .boolean()
                 .not_null(),
         )
-        .col(ColumnDef::new(MarketPitSnapshot::FeeRate).decimal().null())
+        .col(
+            ColumnDef::new(MarketPitSnapshot::FeeRate)
+                .decimal_len(20, 18)
+                .null(),
+        )
         .col(
             ColumnDef::new(MarketPitSnapshot::FeeExponent)
-                .decimal()
+                .decimal_len(20, 18)
                 .null(),
         )
         .col(
@@ -146,7 +134,7 @@ fn add_fee_columns(table: &mut TableCreateStatement) {
         )
         .col(
             ColumnDef::new(MarketPitSnapshot::FeeRebateRate)
-                .decimal()
+                .decimal_len(20, 18)
                 .null(),
         )
         .col(ColumnDef::new(MarketPitSnapshot::FeeSource).text().null())

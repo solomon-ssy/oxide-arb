@@ -5,6 +5,7 @@ use sea_orm::{
 };
 
 use crate::schema::{
+    column,
     dependency::TableDependency,
     index::{IndexBuildMode, IndexSpec},
     seed::SeedSpec,
@@ -32,38 +33,17 @@ pub fn table() -> TableCreateStatement {
     Table::create()
         .table(BalanceSnapshot::Table)
         .if_not_exists()
-        .col(
-            ColumnDef::new(BalanceSnapshot::BalanceSnapshotId)
-                .text()
-                .not_null()
-                .primary_key(),
-        )
+        .col(column::uuid_pk(BalanceSnapshot::BalanceSnapshotId))
         .col(
             ColumnDef::new(BalanceSnapshot::HolderAddress)
                 .text()
                 .not_null(),
         )
-        .col(
-            ColumnDef::new(BalanceSnapshot::InternalAvailableUsd)
-                .text()
-                .not_null(),
-        )
-        .col(
-            ColumnDef::new(BalanceSnapshot::InternalReservedUsd)
-                .text()
-                .not_null(),
-        )
-        .col(
-            ColumnDef::new(BalanceSnapshot::ExternalAvailableUsd)
-                .text()
-                .not_null(),
-        )
-        .col(
-            ColumnDef::new(BalanceSnapshot::ExternalLockedUsd)
-                .text()
-                .not_null(),
-        )
-        .col(ColumnDef::new(BalanceSnapshot::DriftUsd).text().not_null())
+        .col(column::usd(BalanceSnapshot::InternalAvailableUsd))
+        .col(column::usd(BalanceSnapshot::InternalReservedUsd))
+        .col(column::usd(BalanceSnapshot::ExternalAvailableUsd))
+        .col(column::usd(BalanceSnapshot::ExternalLockedUsd))
+        .col(column::usd(BalanceSnapshot::DriftUsd))
         .col(ColumnDef::new(BalanceSnapshot::Source).text().not_null())
         .col(
             ColumnDef::new(BalanceSnapshot::BlockNumber)

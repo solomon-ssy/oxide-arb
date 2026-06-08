@@ -14,7 +14,7 @@ use crate::{
         SeedConflictPolicy, SeedContext,
         rbac::{ADMIN_USER_ARTIFACT, ROLE_SUPER_ADMIN, ROLES_ARTIFACT, RoleIdMap},
     },
-    types::{UserId, UserRoleId},
+    types::UserId,
 };
 
 const SEED_ID: &str = "rbac.user_role.bootstrap";
@@ -51,7 +51,6 @@ pub async fn load(db: &dyn ConnectionTrait, ctx: &mut SeedContext) -> Result<u64
         .clone();
 
     let model = user_role::ActiveModel {
-        id: Set(UserRoleId::new_v7()),
         user_id: Set(admin_id),
         role_id: Set(super_admin_id),
         ..Default::default()

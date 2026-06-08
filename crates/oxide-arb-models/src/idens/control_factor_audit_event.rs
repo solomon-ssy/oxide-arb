@@ -5,6 +5,7 @@ use sea_orm::{
 };
 
 use crate::schema::{
+    column,
     dependency::TableDependency,
     index::{IndexBuildMode, IndexSpec},
     seed::SeedSpec,
@@ -43,12 +44,7 @@ pub fn table() -> TableCreateStatement {
     Table::create()
         .table(ControlFactorAuditEvent::Table)
         .if_not_exists()
-        .col(
-            ColumnDef::new(ControlFactorAuditEvent::EventId)
-                .text()
-                .not_null()
-                .primary_key(),
-        )
+        .col(column::uuid_pk(ControlFactorAuditEvent::EventId))
         .col(
             ColumnDef::new(ControlFactorAuditEvent::Sequence)
                 .big_integer()

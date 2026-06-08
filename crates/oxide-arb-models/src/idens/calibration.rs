@@ -4,14 +4,12 @@ use sea_orm::{
     sea_query::{ColumnDef, Index, Table, TableCreateStatement},
 };
 
-use crate::{
-    schema::{
-        dependency::TableDependency,
-        index::{IndexBuildMode, IndexSpec},
-        seed::SeedSpec,
-        timestamp_with_write_default,
-    },
-    types::Probability,
+use crate::schema::{
+    column,
+    dependency::TableDependency,
+    index::{IndexBuildMode, IndexSpec},
+    seed::SeedSpec,
+    timestamp_with_write_default,
 };
 
 #[oxide_schema(lifecycle = "core")]
@@ -33,13 +31,7 @@ pub fn table() -> TableCreateStatement {
     Table::create()
         .table(EndgameCalibrationBucket::Table)
         .if_not_exists()
-        .col(
-            ColumnDef::new(EndgameCalibrationBucket::Id)
-                .integer()
-                .not_null()
-                .auto_increment()
-                .primary_key(),
-        )
+        .col(column::int_identity_pk(EndgameCalibrationBucket::Id))
         .col(
             ColumnDef::new(EndgameCalibrationBucket::Category)
                 .text()
@@ -67,23 +59,15 @@ pub fn table() -> TableCreateStatement {
                 .not_null()
                 .default(0),
         )
-        .col(
-            ColumnDef::new(EndgameCalibrationBucket::AlphaPrior)
-                .text()
-                .not_null()
-                .default(Probability::ONE),
-        )
-        .col(
-            ColumnDef::new(EndgameCalibrationBucket::BetaPrior)
-                .text()
-                .not_null()
-                .default(Probability::ONE),
-        )
-        .col(
-            ColumnDef::new(EndgameCalibrationBucket::PosteriorMean)
-                .text()
-                .null(),
-        )
+        .col(column::probability_default_one(
+            EndgameCalibrationBucket::AlphaPrior,
+        ))
+        .col(column::probability_default_one(
+            EndgameCalibrationBucket::BetaPrior,
+        ))
+        .col(column::probability_null(
+            EndgameCalibrationBucket::PosteriorMean,
+        ))
         .col(timestamp_with_write_default(
             EndgameCalibrationBucket::UpdatedAt,
         ))

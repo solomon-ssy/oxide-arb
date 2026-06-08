@@ -277,7 +277,7 @@ fn rollback_target_info(
     ControlFactorPublicationInfo {
         publication_id: target_publication_id.clone(),
         mode: PublicationMode::Published,
-        factor_ids: vec![ControlFactorId::new_v7()],
+        factor_ids: vec![ControlFactorId::from_v7()],
         previous_publication_id: None,
         status: PublicationStatus::Active,
         effective_from: now - chrono::Duration::hours(1),

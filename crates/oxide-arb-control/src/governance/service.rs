@@ -126,7 +126,7 @@ impl ControlFactorRegistry {
         }
 
         let publication = PublicationManager::seal(PublicationDraft {
-            publication_id: FactorPublicationId::new_v7(),
+            publication_id: FactorPublicationId::from_v7(),
             mode,
             factor_ids: request.factor_ids,
             previous_publication_id: previous,
@@ -194,7 +194,7 @@ impl ControlFactorRegistry {
         let audit = runtime_config_audit(
             ControlAuditEventType::RuntimeConfigVersionCreated,
             &envelope,
-            version.runtime_config_version_id.as_str(),
+            &version.runtime_config_version_id.to_string(),
             serde_json::json!({ "config_hash": version.config_hash }),
         );
         Ok(self
@@ -214,7 +214,7 @@ impl ControlFactorRegistry {
         let audit = runtime_config_audit(
             ControlAuditEventType::RuntimeConfigActivated,
             &envelope,
-            activation.runtime_config_version_id.as_str(),
+            &activation.runtime_config_version_id.to_string(),
             serde_json::json!({
                 "activation_kind": activation.activation_kind,
                 "rollback_target_version_id": activation.rollback_target_version_id,
@@ -258,7 +258,7 @@ fn factor_audit(
         actor: envelope.actor.clone(),
         actor_role: envelope.actor_role.clone(),
         resource_type: AuditResourceType::Factor,
-        resource_id: factor_id.as_str().to_owned(),
+        resource_id: factor_id.to_string(),
         request_id: envelope.request_id.clone(),
         reason: envelope.reason.clone(),
         before_hash: None,
@@ -278,7 +278,7 @@ fn publication_audit(
         actor: envelope.actor.clone(),
         actor_role: envelope.actor_role.clone(),
         resource_type: AuditResourceType::Publication,
-        resource_id: publication_id.as_str().to_owned(),
+        resource_id: publication_id.to_string(),
         request_id: envelope.request_id.clone(),
         reason: envelope.reason.clone(),
         before_hash: None,

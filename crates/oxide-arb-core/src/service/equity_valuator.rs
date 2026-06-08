@@ -265,8 +265,8 @@ mod tests {
         entry: Decimal,
     ) -> PositionInfo {
         PositionInfo {
-            position_id: PositionId::generate(),
-            trade_id: TradeId::generate(),
+            position_id: PositionId::from_v7(),
+            trade_id: TradeId::from_v7(),
             market_id: market_id.clone(),
             token_id: token_id.clone(),
             side: Side::Buy,

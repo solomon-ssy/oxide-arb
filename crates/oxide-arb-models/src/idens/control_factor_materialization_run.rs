@@ -7,6 +7,7 @@ use sea_orm::{
 use crate::{
     enums::control_factor::MaterializationRunStatus,
     schema::{
+        column,
         dependency::TableDependency,
         index::{IndexBuildMode, IndexSpec},
         seed::SeedSpec,
@@ -62,12 +63,9 @@ pub fn table() -> TableCreateStatement {
 
 fn add_identity_columns(table: &mut TableCreateStatement) {
     table
-        .col(
-            ColumnDef::new(ControlFactorMaterializationRun::MaterializationRunId)
-                .text()
-                .not_null()
-                .primary_key(),
-        )
+        .col(column::uuid_pk(
+            ControlFactorMaterializationRun::MaterializationRunId,
+        ))
         .col(
             ColumnDef::new(ControlFactorMaterializationRun::RunDedupeKey)
                 .text()

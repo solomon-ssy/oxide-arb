@@ -215,8 +215,8 @@ async fn reconciliation_detects_internal_markets_not_present_externally() {
     let metrics = MockReconMetrics {
         market_exposures: vec![(market.clone(), Usd::new(dec!(50)))],
         positions: vec![PositionInfo {
-            position_id: PositionId::generate(),
-            trade_id: TradeId::generate(),
+            position_id: PositionId::from_v7(),
+            trade_id: TradeId::from_v7(),
             market_id: market,
             token_id: TokenId::new("tok"),
             side: Side::Buy,

@@ -1,5 +1,6 @@
 use crate::schema::{
-    dependency::TableDependency, index::IndexSpec, seed::SeedSpec, timestamp_with_write_default,
+    column, dependency::TableDependency, index::IndexSpec, seed::SeedSpec,
+    timestamp_with_write_default,
 };
 use oxide_arb_macros::oxide_schema;
 use sea_orm::sea_query::{ColumnDef, Table, TableCreateStatement};
@@ -18,7 +19,7 @@ pub fn table() -> TableCreateStatement {
     Table::create()
         .table(SeedApplication::Table)
         .if_not_exists()
-        .col(ColumnDef::new(SeedApplication::SeedId).text().not_null())
+        .col(column::text_id(SeedApplication::SeedId))
         .col(
             ColumnDef::new(SeedApplication::SeedVersion)
                 .integer()

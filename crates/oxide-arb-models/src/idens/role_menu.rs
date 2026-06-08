@@ -3,12 +3,13 @@
 use oxide_arb_macros::oxide_schema;
 use sea_orm::{
     Iden,
-    sea_query::{ColumnDef, ForeignKey, ForeignKeyAction, Index, Table, TableCreateStatement},
+    sea_query::{ForeignKey, ForeignKeyAction, Index, Table, TableCreateStatement},
 };
 
 use crate::{
     idens::{menu::Menu, role::Role},
     schema::{
+        column,
         dependency::TableDependency,
         index::{IndexBuildMode, IndexSpec},
         seed::SeedSpec,
@@ -18,10 +19,12 @@ use crate::{
 };
 
 /// Explicit role→menu join controlling which menu nodes a role can see.
+///
+/// The composite primary key `(role_id, menu_id)` is the natural key and its
+/// own uniqueness guarantee — there is no surrogate join-row id.
 #[oxide_schema(lifecycle = "control")]
 pub enum RoleMenu {
     Table,
-    Id,
     RoleId,
     MenuId,
     CreatedAt,
@@ -31,10 +34,10 @@ pub fn table() -> TableCreateStatement {
     Table::create()
         .table(RoleMenu::Table)
         .if_not_exists()
-        .col(ColumnDef::new(RoleMenu::Id).text().not_null().primary_key())
-        .col(ColumnDef::new(RoleMenu::RoleId).text().not_null())
-        .col(ColumnDef::new(RoleMenu::MenuId).text().not_null())
+        .col(column::uuid_fk(RoleMenu::RoleId))
+        .col(column::uuid_fk(RoleMenu::MenuId))
         .col(timestamp_with_write_default(RoleMenu::CreatedAt))
+        .primary_key(Index::create().col(RoleMenu::RoleId).col(RoleMenu::MenuId))
         .foreign_key(
             ForeignKey::create()
                 .name("fk_role_menu_role")
@@ -54,17 +57,15 @@ pub fn table() -> TableCreateStatement {
 
 pub fn indexes() -> Vec<IndexSpec> {
     vec![IndexSpec::sea_query(
-        "uq_role_menu",
+        "idx_role_menu_menu",
         role_menu_table_name,
         IndexBuildMode::Transactional,
         Index::create()
-            .name("uq_role_menu")
+            .name("idx_role_menu_menu")
             .table(RoleMenu::Table)
-            .col(RoleMenu::RoleId)
             .col(RoleMenu::MenuId)
-            .unique()
             .to_owned(),
-        "one assignment per (role, menu)",
+        "reverse lookup: roles that can see a menu",
     )]
 }
 

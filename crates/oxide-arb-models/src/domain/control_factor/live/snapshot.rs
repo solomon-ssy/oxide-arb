@@ -77,7 +77,7 @@ impl ControlFactorSnapshot {
             .clone_from(&publication.publication_hash);
 
         for factor in factors {
-            let factor_id = factor.factor_id.as_str().to_owned();
+            let factor_id = factor.factor_id.to_string();
 
             if factor.schema_version != LIVE_SNAPSHOT_SCHEMA_VERSION {
                 return Err(SnapshotBuildError::SchemaMismatch {
@@ -198,7 +198,7 @@ impl ControlFactorSnapshot {
             }
             _ => {
                 return Err(SnapshotBuildError::DimensionPayloadMismatch {
-                    factor_id: factor.factor_id.as_str().to_owned(),
+                    factor_id: factor.factor_id.to_string(),
                 });
             }
         }
@@ -237,8 +237,8 @@ mod tests {
     fn evidence() -> FactorEvidence {
         let now = Utc::now();
         FactorEvidence {
-            materialization_run_id: MaterializationRunId::new_v7(),
-            stage_report_ids: vec![StageReportId::new_v7()],
+            materialization_run_id: MaterializationRunId::from_v7(),
+            stage_report_ids: vec![StageReportId::from_v7()],
             window_from: now - Duration::hours(1),
             window_to: now,
             source_delay_secs: 60,
@@ -293,7 +293,7 @@ mod tests {
         expires_at: chrono::DateTime<Utc>,
     ) -> ControlFactorValue {
         ControlFactorValue {
-            factor_id: ControlFactorId::new_v7(),
+            factor_id: ControlFactorId::from_v7(),
             factor_type,
             dimensions,
             payload,
@@ -377,7 +377,7 @@ mod tests {
 
     fn publication(factors: &[ControlFactorValue]) -> ControlFactorPublication {
         ControlFactorPublication {
-            publication_id: FactorPublicationId::new_v7(),
+            publication_id: FactorPublicationId::from_v7(),
             mode: PublicationMode::Published,
             factor_ids: factors.iter().map(|f| f.factor_id.clone()).collect(),
             previous_publication_id: None,

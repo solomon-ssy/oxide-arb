@@ -1,6 +1,6 @@
 //! `user_role` table entity (user→role assignments).
 
-use crate::types::{RoleId, UserId, UserRoleId};
+use crate::types::{RoleId, UserId};
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 #[sea_orm(table_name = "user_role")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
-    pub id: UserRoleId,
     pub user_id: UserId,
+    #[sea_orm(primary_key, auto_increment = false)]
     pub role_id: RoleId,
     pub created_at: DateTime<Utc>,
 }

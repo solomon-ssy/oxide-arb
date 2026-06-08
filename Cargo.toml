@@ -91,6 +91,7 @@ sea-orm = { version = "1", features = [
   "with-chrono",
   "with-json",
   "with-rust_decimal",
+  "with-uuid",
 ] }
 sea-orm-migration = { version = "1", features = [
   "sqlx-postgres",

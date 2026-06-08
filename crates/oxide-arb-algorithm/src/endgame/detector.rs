@@ -244,7 +244,7 @@ impl<F: FeeEstimator> EndgameDetector<F> {
         let predicted_yes = matches!(input.direction, ConvergenceDirection::YesLikely);
 
         Opportunity {
-            opportunity_id: OpportunityId::pending(),
+            opportunity_id: OpportunityId::from_v7(),
             market_id: input.market_id.clone(),
             event_id: input.event_id.clone(),
             token_id: target_token.clone(),

@@ -103,8 +103,8 @@ pub struct NewControlFactorTrainingDataset {
 pub struct ControlFactorShadowDecisionInfo {
     pub shadow_decision_id: ShadowDecisionId,
     pub publication_id: FactorPublicationId,
-    pub opportunity_id: Option<OpportunityId>,
-    pub event_id: Option<EventId>,
+    pub opportunity_id: OpportunityId,
+    pub event_id: EventId,
     pub market_id: MarketId,
     pub decision_type: ShadowDecisionType,
     pub baseline_decision: serde_json::Value,
@@ -129,8 +129,8 @@ info_from_model!(
 pub struct NewControlFactorShadowDecision {
     pub shadow_decision_id: ShadowDecisionId,
     pub publication_id: FactorPublicationId,
-    pub opportunity_id: Option<OpportunityId>,
-    pub event_id: Option<EventId>,
+    pub opportunity_id: OpportunityId,
+    pub event_id: EventId,
     pub market_id: MarketId,
     pub decision_type: ShadowDecisionType,
     pub baseline_decision: serde_json::Value,

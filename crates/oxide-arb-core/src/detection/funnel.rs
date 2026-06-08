@@ -337,7 +337,7 @@ mod tests {
     fn sample_scored(market: &str, score: MicroScore) -> Arc<ScoredOpportunity> {
         Arc::new(ScoredOpportunity {
             opportunity: Arc::new(Opportunity {
-                opportunity_id: OpportunityId::new_v7(),
+                opportunity_id: OpportunityId::from_v7(),
                 market_id: MarketId::new(market),
                 event_id: EventId::new("e"),
                 token_id: TokenId::new("t"),

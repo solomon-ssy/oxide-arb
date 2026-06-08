@@ -56,7 +56,8 @@ use oxide_arb_models::{
     types::{
         AuditEventId, BalanceSnapshotId, ControlFactorId, EventId, ExecutionId,
         FactorPublicationId, LedgerId, MarketId, MaterializationRunId, OpportunityId, PositionId,
-        Price, ReservationId, RuntimeConfigVersionId, Shares, TokenId, TradeId, Usd,
+        Price, ReservationId, ResolutionEventId, RuntimeConfigVersionId, Shares, TokenId, TradeId,
+        Usd,
     },
 };
 use oxide_arb_repository::traits::{
@@ -96,7 +97,7 @@ pub fn smoke_window() -> TimeWindowSpec {
 pub fn smoke_manifest() -> MaterializationRunManifest {
     let as_of = smoke_window().to;
     MaterializationRunManifest {
-        run_id: MaterializationRunId::new_v7(),
+        run_id: MaterializationRunId::from_v7(),
         run_kind: MaterializationRunKind::Scheduled,
         trigger: RunTrigger::Scheduled {
             schedule_id: "phase5.3-smoke".to_owned(),
@@ -146,7 +147,7 @@ pub fn smoke_manifest() -> MaterializationRunManifest {
             require_settlement_truth: true,
         },
         runtime_config_ref: RuntimeConfigRef::Version {
-            version_id: RuntimeConfigVersionId::new("rcv_smoke"),
+            version_id: RuntimeConfigVersionId::new(crate::seeded_uuid("rcv_smoke")),
             config_hash: "blake3:smoke_cfg".to_owned(),
         },
         simulation_config: smoke_simulation_config(),
@@ -192,8 +193,8 @@ fn smoke_scenario_ids(window: &TimeWindowSpec) -> SmokeScenarioIds {
         market_id: MarketId::new(SMOKE_MARKET_ID),
         yes: TokenId::new(SMOKE_YES_TOKEN),
         no: TokenId::new(SMOKE_NO_TOKEN),
-        opportunity_id: OpportunityId::new(SMOKE_OPPORTUNITY_ID),
-        trade_id: TradeId::new("trade_smoke"),
+        opportunity_id: OpportunityId::new(crate::seeded_uuid(SMOKE_OPPORTUNITY_ID)),
+        trade_id: TradeId::new(crate::seeded_uuid("trade_smoke")),
         decision_at,
         decision_ms: decision_at.timestamp_millis(),
         from_ms,
@@ -336,7 +337,7 @@ pub fn smoke_runtime_config_version() -> RuntimeConfigVersionInfo {
         ..Default::default()
     };
     RuntimeConfigVersionInfo {
-        runtime_config_version_id: RuntimeConfigVersionId::new("rcv_smoke"),
+        runtime_config_version_id: RuntimeConfigVersionId::new(crate::seeded_uuid("rcv_smoke")),
         config_hash: "blake3:smoke_cfg".to_owned(),
         schema_version: 1,
         config_json: serde_json::to_value(RuntimeConfigDocument {
@@ -451,7 +452,7 @@ impl SmokeBalanceRepository {
     fn new(observed_at: DateTime<Utc>, window_to: DateTime<Utc>) -> Self {
         Self {
             balance: BalanceSnapshotInfo {
-                balance_snapshot_id: BalanceSnapshotId::new_v7(),
+                balance_snapshot_id: BalanceSnapshotId::from_v7(),
                 holder_address: SMOKE_HOLDER.to_owned(),
                 internal_available_usd: Usd::new(dec!(5_000)),
                 internal_reserved_usd: Usd::new(dec!(95)),
@@ -498,7 +499,7 @@ impl SmokePotentialLossRepository {
     fn new(market_id: &MarketId, token_id: &TokenId, at: DateTime<Utc>) -> Self {
         Self {
             baseline: vec![PotentialLossInfo {
-                ledger_id: LedgerId::new("pl_smoke"),
+                ledger_id: LedgerId::new(crate::seeded_uuid("pl_smoke")),
                 market_id: market_id.clone(),
                 token_id: token_id.clone(),
                 shares: Shares::new(dec!(100)),
@@ -678,7 +679,7 @@ impl SmokeResolutionEventRepository {
     fn new(market_id: &MarketId, resolved_at: DateTime<Utc>) -> Self {
         Self {
             events: vec![ResolutionEventInfo {
-                resolution_id: "res_smoke".to_owned(),
+                resolution_id: ResolutionEventId::new(crate::seeded_uuid("res_smoke")),
                 market_id: market_id.clone(),
                 outcome: "yes".to_owned(),
                 source: "gamma".to_owned(),
@@ -766,7 +767,7 @@ impl SmokeControlFactorRepository {
         .event_hash()
         .map_err(|error| StorageError::Codec(error.to_string()))?;
         let info = ControlFactorAuditEventInfo {
-            event_id: AuditEventId::new_v7(),
+            event_id: AuditEventId::from_v7(),
             sequence,
             event_type: event.event_type,
             actor: event.actor,
@@ -1029,7 +1030,7 @@ impl ControlFactorRepository for SmokeControlFactorRepository {
                 actor: actor.actor.clone(),
                 actor_role: actor.actor_role.clone(),
                 resource_type: AuditResourceType::Factor,
-                resource_id: factor.factor_id.as_str().to_owned(),
+                resource_id: factor.factor_id.to_string(),
                 request_id: actor.request_id.clone(),
                 reason: actor.reason.clone(),
                 before_hash: None,
@@ -1366,7 +1367,7 @@ fn settled_audit(
 fn audit_row(spec: &SmokeAuditRowSpec<'_>) -> OpportunityAuditRow {
     OpportunityAuditRow {
         opportunity_id: spec.opportunity_id.clone(),
-        execution_id: ExecutionId::generate(),
+        execution_id: ExecutionId::from_v7(),
         trade_id: Some(spec.trade_id.clone()),
         market_id: spec.market_id.clone(),
         event_id: EventId::new("evt_smoke"),
@@ -1424,8 +1425,8 @@ fn smoke_trade(
 ) -> TradeInfo {
     TradeInfo {
         trade_id: trade_id.clone(),
-        execution_id: ExecutionId::generate(),
-        reservation_id: ReservationId::new("res_smoke"),
+        execution_id: ExecutionId::from_v7(),
+        reservation_id: ReservationId::new(crate::seeded_uuid("res_smoke")),
         opportunity_id: opportunity_id.clone(),
         market_id: market_id.clone(),
         event_id: EventId::new("evt_smoke"),
@@ -1466,7 +1467,7 @@ fn smoke_position(
     settled_at: DateTime<Utc>,
 ) -> PositionInfo {
     PositionInfo {
-        position_id: PositionId::new("pos_smoke"),
+        position_id: PositionId::new(crate::seeded_uuid("pos_smoke")),
         trade_id: trade_id.clone(),
         market_id: market_id.clone(),
         token_id: token_id.clone(),

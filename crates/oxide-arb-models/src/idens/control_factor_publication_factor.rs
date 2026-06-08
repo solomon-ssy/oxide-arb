@@ -1,7 +1,7 @@
 use oxide_arb_macros::oxide_schema;
 use sea_orm::{
     Iden,
-    sea_query::{ColumnDef, ForeignKey, ForeignKeyAction, Index, Table, TableCreateStatement},
+    sea_query::{ForeignKey, ForeignKeyAction, Index, Table, TableCreateStatement},
 };
 
 use crate::{
@@ -10,6 +10,7 @@ use crate::{
         control_factor_value::ControlFactorValue,
     },
     schema::{
+        column,
         dependency::TableDependency,
         index::{IndexBuildMode, IndexSpec},
         seed::SeedSpec,
@@ -17,10 +18,13 @@ use crate::{
     },
 };
 
+/// Publication↔factor membership join.
+///
+/// The composite primary key `(publication_id, factor_id)` is the natural key
+/// and its own uniqueness guarantee — there is no surrogate join-row id.
 #[oxide_schema(lifecycle = "control")]
 pub enum ControlFactorPublicationFactor {
     Table,
-    Id,
     PublicationId,
     FactorId,
     CreatedAt,
@@ -30,26 +34,18 @@ pub fn table() -> TableCreateStatement {
     Table::create()
         .table(ControlFactorPublicationFactor::Table)
         .if_not_exists()
-        .col(
-            ColumnDef::new(ControlFactorPublicationFactor::Id)
-                .big_integer()
-                .not_null()
-                .auto_increment()
-                .primary_key(),
-        )
-        .col(
-            ColumnDef::new(ControlFactorPublicationFactor::PublicationId)
-                .text()
-                .not_null(),
-        )
-        .col(
-            ColumnDef::new(ControlFactorPublicationFactor::FactorId)
-                .text()
-                .not_null(),
-        )
+        .col(column::uuid_fk(
+            ControlFactorPublicationFactor::PublicationId,
+        ))
+        .col(column::uuid_fk(ControlFactorPublicationFactor::FactorId))
         .col(timestamp_with_write_default(
             ControlFactorPublicationFactor::CreatedAt,
         ))
+        .primary_key(
+            Index::create()
+                .col(ControlFactorPublicationFactor::PublicationId)
+                .col(ControlFactorPublicationFactor::FactorId),
+        )
         .foreign_key(
             ForeignKey::create()
                 .name("fk_control_factor_publication_factor_publication")
@@ -77,27 +73,17 @@ pub fn table() -> TableCreateStatement {
 }
 
 pub fn indexes() -> Vec<IndexSpec> {
-    vec![
-        IndexSpec::sea_query(
-            "idx_control_factor_publication_factor_pub",
-            publication_factor_table_name,
-            IndexBuildMode::Transactional,
-            Index::create()
-                .name("idx_control_factor_publication_factor_pub")
-                .table(ControlFactorPublicationFactor::Table)
-                .col(ControlFactorPublicationFactor::PublicationId)
-                .to_owned(),
-            "publication membership by publication",
-        ),
-        IndexSpec::raw(
-            "idx_control_factor_publication_factor_unique",
-            publication_factor_table_name,
-            IndexBuildMode::Transactional,
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_control_factor_publication_factor_unique \
-             ON control_factor_publication_factor (publication_id, factor_id)",
-            "prevent duplicate factor membership inside one publication",
-        ),
-    ]
+    vec![IndexSpec::sea_query(
+        "idx_control_factor_publication_factor_factor",
+        publication_factor_table_name,
+        IndexBuildMode::Transactional,
+        Index::create()
+            .name("idx_control_factor_publication_factor_factor")
+            .table(ControlFactorPublicationFactor::Table)
+            .col(ControlFactorPublicationFactor::FactorId)
+            .to_owned(),
+        "reverse lookup: publications containing a factor",
+    )]
 }
 
 pub fn dependencies() -> Vec<TableDependency> {

@@ -1,8 +1,13 @@
-//! `#[derive(TypedId)]` — type-safe ID newtype backed by `Arc<str>`.
+//! `#[derive(StrId)]` — type-safe string ID newtype backed by `Arc<str>`.
 //!
 //! Generates: `new`, `as_str`, `Debug`, `Clone`, `PartialEq`, `Eq`, `Hash`,
 //! `Display`, `FromStr`, `From<&str>`, `From<String>`, `AsRef<str>`,
 //! `Serialize`, `Deserialize`, and full `SeaORM` bindings.
+//!
+//! Used for identifiers whose value is an externally defined string and is
+//! **not** a UUID — for example Polymarket `condition_id` (`MarketId`), CLOB
+//! decimal token ids (`TokenId`), or semantic report keys (`ReportId`).
+//! Internal, system-generated identifiers use [`crate::UuidId`] instead.
 
 use proc_macro2::TokenStream;
 use quote::quote;
@@ -224,12 +229,12 @@ fn validate_struct(input: &DeriveInput) -> Result<()> {
             Fields::Unnamed(fields) if fields.unnamed.len() == 1 => Ok(()),
             _ => Err(Error::new_spanned(
                 input,
-                "TypedId requires a tuple struct with exactly one field: `struct Foo(Arc<str>)`",
+                "StrId requires a tuple struct with exactly one field: `struct Foo(Arc<str>)`",
             )),
         },
         _ => Err(Error::new_spanned(
             input,
-            "TypedId can only be derived on structs",
+            "StrId can only be derived on structs",
         )),
     }
 }

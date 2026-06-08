@@ -416,7 +416,7 @@ fn factor_value(
         .quality_gate_policy
         .thresholds_for(factor_type);
     ControlFactorValue {
-        factor_id: ControlFactorId::new_v7(),
+        factor_id: ControlFactorId::from_v7(),
         factor_type,
         dimensions,
         payload,

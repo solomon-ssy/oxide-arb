@@ -1,7 +1,7 @@
 use oxide_arb_macros::oxide_schema;
 use sea_orm::sea_query::{ColumnDef, Table, TableCreateStatement};
 
-use crate::schema::{dependency::TableDependency, index::IndexSpec, seed::SeedSpec};
+use crate::schema::{column, dependency::TableDependency, index::IndexSpec, seed::SeedSpec};
 
 #[oxide_schema(lifecycle = "audit")]
 pub enum EmergencySnapshot {
@@ -19,13 +19,7 @@ pub fn table() -> TableCreateStatement {
     Table::create()
         .table(EmergencySnapshot::Table)
         .if_not_exists()
-        .col(
-            ColumnDef::new(EmergencySnapshot::Id)
-                .big_integer()
-                .not_null()
-                .auto_increment()
-                .primary_key(),
-        )
+        .col(column::bigserial_pk(EmergencySnapshot::Id))
         .col(
             ColumnDef::new(EmergencySnapshot::TriggerLevel)
                 .text()

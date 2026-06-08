@@ -189,7 +189,7 @@ impl ScoredOpportunitySnapshot {
     ) -> Self {
         let factor_ids = applied
             .iter()
-            .map(|factor| factor.factor_id.as_str().to_owned())
+            .map(|factor| factor.factor_id.to_string())
             .collect();
         let effects_json = if applied.is_empty() {
             None

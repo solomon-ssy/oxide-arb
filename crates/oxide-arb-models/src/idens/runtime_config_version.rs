@@ -5,6 +5,7 @@ use sea_orm::{
 };
 
 use crate::schema::{
+    column,
     dependency::TableDependency,
     index::{IndexBuildMode, IndexSpec},
     seed::SeedSpec,
@@ -28,12 +29,9 @@ pub fn table() -> TableCreateStatement {
     Table::create()
         .table(RuntimeConfigVersion::Table)
         .if_not_exists()
-        .col(
-            ColumnDef::new(RuntimeConfigVersion::RuntimeConfigVersionId)
-                .text()
-                .not_null()
-                .primary_key(),
-        )
+        .col(column::uuid_pk(
+            RuntimeConfigVersion::RuntimeConfigVersionId,
+        ))
         .col(
             ColumnDef::new(RuntimeConfigVersion::ConfigHash)
                 .text()

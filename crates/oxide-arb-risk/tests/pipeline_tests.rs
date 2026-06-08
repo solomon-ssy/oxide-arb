@@ -84,7 +84,7 @@ impl TestFrame {
 
 fn default_frame() -> TestFrame {
     let opp = Opportunity {
-        opportunity_id: OpportunityId::new_v7(),
+        opportunity_id: OpportunityId::from_v7(),
         market_id: MarketId::new("0xtest"),
         event_id: EventId::new("evt_test"),
         token_id: TokenId::new("12345"),
@@ -459,9 +459,9 @@ fn static_pipeline_has_fixed_checks() {
 
 fn applied(factor_type: ControlFactorType) -> AppliedControlFactor {
     AppliedControlFactor::new(
-        oxide_arb_models::types::ControlFactorId::new_v7(),
+        oxide_arb_models::types::ControlFactorId::from_v7(),
         factor_type,
-        FactorPublicationId::new_v7(),
+        FactorPublicationId::from_v7(),
         dec!(1),
         dec!(0.5),
         "test",
@@ -528,7 +528,7 @@ fn reconciliation_maintenance_check_is_named_hard_reject() {
 fn control_factor_snapshot_expired_check_is_named_hard_reject() {
     let frame = default_frame();
     let factor_context = FactorDecisionContext {
-        publication_id: Some(FactorPublicationId::new_v7()),
+        publication_id: Some(FactorPublicationId::from_v7()),
         snapshot_expired: true,
         fail_closed: true,
         ..FactorDecisionContext::neutral()

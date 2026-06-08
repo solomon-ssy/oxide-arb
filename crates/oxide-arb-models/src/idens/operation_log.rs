@@ -13,6 +13,7 @@ use sea_orm::{
 };
 
 use crate::schema::{
+    column,
     dependency::TableDependency,
     index::{IndexBuildMode, IndexSpec},
     seed::SeedSpec,
@@ -48,15 +49,10 @@ pub fn table() -> TableCreateStatement {
     Table::create()
         .table(OperationLog::Table)
         .if_not_exists()
-        .col(
-            ColumnDef::new(OperationLog::Id)
-                .text()
-                .not_null()
-                .primary_key(),
-        )
+        .col(column::uuid_pk(OperationLog::Id))
         .col(timestamp_with_write_default(OperationLog::OccurredAt))
         .col(ColumnDef::new(OperationLog::RequestId).text().not_null())
-        .col(ColumnDef::new(OperationLog::ActorUserId).text().null())
+        .col(column::uuid_null(OperationLog::ActorUserId))
         .col(ColumnDef::new(OperationLog::ActorUsername).text().null())
         .col(ColumnDef::new(OperationLog::ActingRole).text().null())
         .col(ColumnDef::new(OperationLog::Category).text().not_null())
@@ -80,11 +76,7 @@ pub fn table() -> TableCreateStatement {
                 .not_null()
                 .default(Expr::cust("'{}'::jsonb")),
         )
-        .col(
-            ColumnDef::new(OperationLog::GovernanceAuditEventId)
-                .text()
-                .null(),
-        )
+        .col(column::uuid_null(OperationLog::GovernanceAuditEventId))
         .to_owned()
 }
 

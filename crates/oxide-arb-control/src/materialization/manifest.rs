@@ -80,7 +80,7 @@ impl ManifestBuilder {
     pub fn build(self) -> MaterializationResult<SealedMaterializationManifest> {
         let window = self.window()?;
         let manifest = MaterializationRunManifest {
-            run_id: MaterializationRunId::new_v7(),
+            run_id: MaterializationRunId::from_v7(),
             run_kind: self.run_kind,
             trigger: self.trigger,
             window,
@@ -229,7 +229,9 @@ mod tests {
                 require_settlement_truth: false,
             },
             runtime_config_ref: RuntimeConfigRef::Version {
-                version_id: RuntimeConfigVersionId::new("rcv_test"),
+                version_id: RuntimeConfigVersionId::new(oxide_arb_test_support::seeded_uuid(
+                    "rcv_test",
+                )),
                 config_hash: "sha256:cfg".into(),
             },
             simulation_config: SimulationConfig::production_default(),

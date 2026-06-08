@@ -280,8 +280,8 @@ fn unexpected(method: &str) -> StorageError {
 fn evidence() -> FactorEvidence {
     let now = Utc::now();
     FactorEvidence {
-        materialization_run_id: MaterializationRunId::new_v7(),
-        stage_report_ids: vec![StageReportId::new_v7()],
+        materialization_run_id: MaterializationRunId::from_v7(),
+        stage_report_ids: vec![StageReportId::from_v7()],
         window_from: now - Duration::hours(1),
         window_to: now,
         source_delay_secs: 60,
@@ -331,7 +331,7 @@ fn evidence() -> FactorEvidence {
 
 fn bucket_factor() -> ControlFactorValue {
     ControlFactorValue {
-        factor_id: ControlFactorId::new_v7(),
+        factor_id: ControlFactorId::from_v7(),
         factor_type: ControlFactorType::BucketRisk,
         dimensions: FactorDimensions::BucketRisk(BucketRiskDimensions::coarse(
             MarketCategory::Politics,
@@ -382,7 +382,7 @@ fn sealed_publication(
 ) -> (ControlFactorPublicationInfo, Vec<ControlFactorValueInfo>) {
     let factor_infos: Vec<ControlFactorValueInfo> = factors.iter().map(factor_info).collect();
     let mut publication = ControlFactorPublication {
-        publication_id: FactorPublicationId::new_v7(),
+        publication_id: FactorPublicationId::from_v7(),
         mode: PublicationMode::Published,
         factor_ids: factors.iter().map(|f| f.factor_id.clone()).collect(),
         previous_publication_id: None,
