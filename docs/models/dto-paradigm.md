@@ -9,8 +9,8 @@
 ```text
 idens/<table>.rs        表结构 / 索引 / seed          ← schema-catalog.md
 entities/<table>.rs     SeaORM Entity / Model        （由表结构派生）
-domain/<ctx>/<x>.rs     持久化 DTO：*Info / New* / *Patch / *Query
-domain/api/<x>.rs       API 契约：*Request / *View / *Response
+domain/<ctx>/<x>.rs     持久化 DTO：*Info / New* / *Patch
+domain/api/<x>.rs       API 契约：*Request / *Query / *View / *Response
 routes/<x>.rs (web)     handler：校验 → 翻译 → 持久化 → 投影
 ```
 
@@ -18,7 +18,7 @@ routes/<x>.rs (web)     handler：校验 → 翻译 → 持久化 → 投影
 
 ## 三类 DTO 的职责边界（不可合并）
 
-| 关注点 | `*Request`（入站契约） | `*Info` / `New*` / `*Patch`（持久化） | `*View` / `*Response`（出站契约） |
+| 关注点 | `*Request` / `*Query`（入站契约） | `*Info` / `New*` / `*Patch`（持久化） | `*View` / `*Response`（出站契约） |
 |---|---|---|---|
 | 所在模块 | `domain/api/` | `domain/<ctx>/` | `domain/api/` |
 | serde 方向 | `Deserialize` | 双向（read 模型） | `Serialize` only |
@@ -26,6 +26,8 @@ routes/<x>.rs (web)     handler：校验 → 翻译 → 持久化 → 投影
 | ORM 耦合 | 无 | `DeriveIntoActiveModel` / `DerivePartialModel` / `FromQueryResult` | 无 |
 | null 语义 | serde 三态（`double_option` → `Option<Option<T>>`） | 类型化 `Patch<T>` / `NullablePatch<T>` | 不适用 |
 | 敏感字段 | 携带明文凭证（如 `password`） | 携带哈希列（如 `password_hash`） | **必须剥离**（如不含 `password_hash`） |
+
+> **入站契约统一收口**：一个资源对外暴露的**全部** HTTP 契约（`*Request` 入站 body、`*PageQuery` / `*WindowQuery` 入站 query string、`*View` / `*Response` 出站投影）都集中在 `domain/api/<resource>.rs`。`domain/<ctx>/` 只保留与表一一对应的纯持久化 DTO（`*Info` / `New*` / `*Patch`）。`*Query` 虽被 repository 的 `page()` 读方法消费，但它本质是"外部不可信的查询入参契约"，因此归 `domain/api/`，与其它入站契约同处一地，便于发现与后续 OpenAPI 生成。
 
 合并会直接破坏三条安全 / 解耦不变量：
 
@@ -57,11 +59,6 @@ API 契约类型（`*Request` / `*View` / `*Response`）**留在 `oxide-arb-mode
 - `*Patch`：部分更新，非空列用 `Patch<T>`，可空列用 `NullablePatch<T>`，让「保持 / 设置 / 清空」三种写意图显式化。
 - **不可变列与敏感转换不进 `*Patch`**：凭证、`status` 等敏感转换必须各自走专用的单一职责方法（如 `change_password` / `change_status`），避免被通用列更新静默绕过。被排除的字段要在 doc 注释里写明原因。
 
-### 查询参数 `*Query`
-
-- 分页 + 过滤参数。复用共享的 `PageRequest`，用 `#[serde(flatten)]` 保持 query string 扁平（`?keyword=&status=&page=&size=`）。
-- 提供 `normalized(self) -> Self` 收敛分页窗口。
-
 ### 硬性约束
 
 - 任何公开签名 / 字段**禁止**出现 `ActiveModel` / `ActiveValue`。
@@ -70,6 +67,15 @@ API 契约类型（`*Request` / `*View` / `*Response`）**留在 `oxide-arb-mode
 - 命名固定：DB 读模型一律 `*Info`，运行时聚合 `*State`，审计冻结 `*Snapshot`。
 
 ## API 契约范式（`domain/api/`）
+
+一个资源对外的全部 HTTP 契约都住在这里：入站 body（`*Request`）、入站 query（`*Query`）、出站投影（`*View` / `*Response`）。
+
+### 入站查询 `*Query`
+
+- 分页 + 过滤参数（如 `MarketPageQuery`），或时间窗口参数（如 `TimeWindowQuery`）。分页类复用共享的 `PageRequest`，用 `#[serde(flatten)]` 保持 query string 扁平（`?keyword=&status=&page=&size=`）。
+- 提供 `normalized(self) -> Self` 收敛分页窗口；时间窗口类提供 `resolve(...)`，把 `from`/`to`/默认回看/最大跨度等校验收敛在契约类型内，返回**领域错误**（不依赖 `oxide-arb-web` 的 `WebError`），web 侧通过 `From<_> for WebError` 翻译。
+- `*Query` 是 repository 读方法（`page` / 窗口查询）的入参契约；尽管被持久层消费，它仍是"外部不可信入参"，归 `domain/api/`。
+- 跨资源复用的读过滤领域类型（`TimeWindow` / `MarketFilter`）住在 `domain/query.rs`，被 `domain/api` 的 `*Query::resolve()` 与 repository 读方法共用。
 
 ### 入站 `*Request`
 
@@ -120,8 +126,8 @@ ValidatedJson<CreateUserRequest>       // 提取 + 校验
 ## 新增一个资源的清单
 
 1. 按 schema-catalog 新增表 / entity。
-2. `domain/<ctx>/<x>.rs`：写 `XInfo`（+ `info_from_model!`）、`NewX`、`XPatch`、必要时 `XPageQuery`。
-3. `domain/api/<x>.rs`：写 `CreateXRequest` / `UpdateXRequest`（+ `From for XPatch`）/ 专用转换 Request。
+2. `domain/<ctx>/<x>.rs`：写 `XInfo`（+ `info_from_model!`）、`NewX`、`XPatch`。
+3. `domain/api/<x>.rs`：写 `CreateXRequest` / `UpdateXRequest`（+ `From for XPatch`）/ 专用转换 Request；以及入站查询 `XPageQuery` / `XWindowQuery`（含 `normalized` / `resolve`）。
 4. 出站视图写 `XView`（+ `From<XInfo>`）；放 `domain/api/<x>.rs` 或聚合所在的 `auth.rs`。
 5. 在 `domain/api/mod.rs` 挂模块并 `pub use`。
 6. repository 实现对应读写方法（只用五个写动词 + 专用敏感转换方法）。

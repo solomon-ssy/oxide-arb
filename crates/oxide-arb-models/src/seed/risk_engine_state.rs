@@ -10,8 +10,10 @@ use crate::{
 };
 use chrono::{DateTime, NaiveDate, Utc};
 use sea_orm::{
-    DeriveIntoActiveModel, EntityTrait, IntoActiveModel, QueryTrait, sea_query::OnConflict,
+    ConnectionTrait, DbErr, DeriveIntoActiveModel, EntityTrait, IntoActiveModel, QueryTrait,
+    sea_query::OnConflict,
 };
+use std::pin::Pin;
 
 const DEPENDS_ON: &[SeedDependency] = &[];
 const PRODUCES: &[SeedArtifact] = &[];
@@ -111,9 +113,9 @@ pub async fn load(
 }
 
 fn load_boxed<'a>(
-    db: &'a dyn sea_orm::ConnectionTrait,
+    db: &'a dyn ConnectionTrait,
     ctx: &'a mut SeedContext,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<u64, sea_orm::DbErr>> + Send + 'a>> {
+) -> Pin<Box<dyn Future<Output = Result<u64, DbErr>> + Send + 'a>> {
     Box::pin(load(db, ctx))
 }
 

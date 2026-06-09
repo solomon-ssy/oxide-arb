@@ -1,6 +1,9 @@
 //! End-to-end materialization smoke fixtures (synthetic CH/PG facts, no live infra).
 
-use std::sync::{Arc, Mutex};
+use std::{
+    cmp::Reverse,
+    sync::{Arc, Mutex},
+};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
@@ -16,10 +19,10 @@ use oxide_arb_models::{
         BalanceSnapshotInfo, ControlFactorStageReportInfo, DetectionRuntimeConfig,
         ExecutionRuntimeConfig, MarketPitSnapshotInfo, NewBalanceSnapshot, NewPotentialLoss,
         NewReconciliationReport, NewRiskAuditEvent, NewRuntimeConfigActivation,
-        NewRuntimeConfigVersion, OperatorRuntimeConfig, PositionInfo, PotentialLossInfo,
+        NewRuntimeConfigVersion, PageRequest, Paginated, PositionInfo, PotentialLossInfo,
         ReconciliationReportInfo, ResolvePotentialLoss, RiskAuditEventInfo, RiskLimitRuntimeConfig,
         RuntimeConfigActivationInfo, RuntimeConfigDocument, RuntimeConfigVersionInfo,
-        SizingRuntimeConfig, TradeInfo,
+        SizingRuntimeConfig, TimeWindow, TradeInfo,
         control_factor::{
             AcquireMaterializationRunOutcome, AuditActor, AuditEventContent, AuditedOutcome,
             CancelMaterializationRunOutcome, ControlFactorAuditEventInfo,
@@ -341,11 +344,7 @@ pub fn smoke_runtime_config_version() -> RuntimeConfigVersionInfo {
         config_hash: "blake3:smoke_cfg".to_owned(),
         schema_version: 1,
         config_json: serde_json::to_value(RuntimeConfigDocument {
-            schema_version: 1,
-            operator: OperatorRuntimeConfig {
-                maintenance_mode: false,
-                dry_run_mode: true,
-            },
+            schema_version: 2,
             detection: DetectionRuntimeConfig {
                 min_profit_threshold_usd: dec!(0),
                 endgame_hours_before_close: 24,
@@ -620,6 +619,28 @@ impl RiskAuditRepository for SmokeRiskAuditRepository {
             .cloned()
             .collect())
     }
+
+    async fn find_between_page(
+        &self,
+        window: TimeWindow,
+        page: PageRequest,
+    ) -> Result<Paginated<RiskAuditEventInfo>, StorageError> {
+        let window_page = page.normalized();
+        let mut items: Vec<RiskAuditEventInfo> = self
+            .events
+            .iter()
+            .filter(|row| row.created_at >= window.from && row.created_at < window.to)
+            .cloned()
+            .collect();
+        items.sort_by_key(|row| Reverse(row.created_at));
+        let total = items.len() as u64;
+        let page_items = items
+            .into_iter()
+            .skip(usize::try_from(window_page.offset()).unwrap_or(usize::MAX))
+            .take(usize::try_from(window_page.limit()).unwrap_or(usize::MAX))
+            .collect();
+        Ok(Paginated::from_request(page_items, total, &window_page))
+    }
 }
 
 pub struct SmokeReconciliationRepository {
@@ -818,6 +839,13 @@ impl ControlFactorRepository for SmokeControlFactorRepository {
         _dedupe_key: &str,
     ) -> Result<Option<ControlFactorMaterializationRunInfo>, StorageError> {
         Ok(None)
+    }
+
+    async fn list_queued_materialization_runs(
+        &self,
+        _limit: u64,
+    ) -> Result<Vec<MaterializationRunId>, StorageError> {
+        Ok(Vec::new())
     }
 
     async fn latest_run_for_schedule(

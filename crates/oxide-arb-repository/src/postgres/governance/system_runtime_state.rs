@@ -1,0 +1,67 @@
+//! Postgres implementation of [`SystemRuntimeStateRepository`].
+
+use crate::traits::SystemRuntimeStateRepository;
+use async_trait::async_trait;
+use chrono::Utc;
+use oxide_arb_error::storage::StorageError;
+use oxide_arb_models::{
+    domain::{SystemRuntimeStateInfo, UpsertSystemRuntimeState},
+    entities::system_runtime_state::{ActiveModel, Column, Entity},
+    enums::common::ExecutionMode,
+};
+use sea_orm::{DatabaseConnection, EntityTrait, IntoActiveModel, sea_query::OnConflict};
+
+/// The fixed primary key of the operational singleton row.
+const SINGLETON_ID: i32 = 1;
+
+pub struct PgSystemRuntimeStateRepository {
+    db: DatabaseConnection,
+}
+
+impl PgSystemRuntimeStateRepository {
+    pub const fn new(db: DatabaseConnection) -> Self {
+        Self { db }
+    }
+}
+
+#[async_trait]
+impl SystemRuntimeStateRepository for PgSystemRuntimeStateRepository {
+    async fn load(&self) -> Result<Option<SystemRuntimeStateInfo>, StorageError> {
+        Entity::find_by_id(SINGLETON_ID)
+            .one(&self.db)
+            .await
+            .map(|model| model.map(Into::into))
+            .map_err(StorageError::from)
+    }
+
+    async fn upsert_execution_mode(
+        &self,
+        mode: ExecutionMode,
+        changed_by: &str,
+        reason: &str,
+    ) -> Result<(), StorageError> {
+        let active_model: ActiveModel = UpsertSystemRuntimeState {
+            id: SINGLETON_ID,
+            execution_mode: mode,
+            changed_by: changed_by.to_owned(),
+            reason: reason.to_owned(),
+            changed_at: Utc::now(),
+        }
+        .into_active_model();
+        Entity::insert(active_model)
+            .on_conflict(
+                OnConflict::column(Column::Id)
+                    .update_columns([
+                        Column::ExecutionMode,
+                        Column::ChangedBy,
+                        Column::Reason,
+                        Column::ChangedAt,
+                    ])
+                    .to_owned(),
+            )
+            .exec(&self.db)
+            .await
+            .map_err(StorageError::from)?;
+        Ok(())
+    }
+}

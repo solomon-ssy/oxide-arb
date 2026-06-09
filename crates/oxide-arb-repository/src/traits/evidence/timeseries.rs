@@ -1,36 +1,17 @@
 use chrono::{DateTime, Utc};
 use oxide_arb_error::storage::StorageError;
-use oxide_arb_models::enums::clickhouse::ChMarketCategory;
-use oxide_arb_models::types::{EventId, MarketId, OpportunityId, TokenId};
+use oxide_arb_models::types::{OpportunityId, TokenId};
 use oxide_arb_models::{
     clickhouse::{
         BookSnapshotRow, CalibrationSnapshotRow, OpportunityAuditRow, OpportunityDetectionRow,
         TickEventL2Row, TickEventRow,
     },
-    domain::evidence::{EvidenceQueryResult, QueryContract},
+    domain::{
+        MarketFilter, PageRequest, Paginated, TimeWindow,
+        evidence::{EvidenceQueryResult, QueryContract},
+    },
 };
 use serde::Serialize;
-
-#[derive(Debug, Clone, Copy, Serialize)]
-pub struct TimeWindow {
-    pub from: DateTime<Utc>,
-    pub to: DateTime<Utc>,
-}
-
-impl TimeWindow {
-    #[must_use]
-    pub const fn new(from: DateTime<Utc>, to: DateTime<Utc>) -> Self {
-        Self { from, to }
-    }
-}
-
-#[derive(Debug, Clone, Default, Serialize)]
-pub struct MarketFilter {
-    pub market_ids: Vec<MarketId>,
-    pub event_ids: Vec<EventId>,
-    pub token_ids: Vec<TokenId>,
-    pub categories: Vec<ChMarketCategory>,
-}
 
 pub fn evidence_query_result<T, P>(
     repository: &str,
@@ -104,6 +85,15 @@ pub trait EvidenceTimeseriesRepository: Send + Sync {
         window: TimeWindow,
     ) -> Result<EvidenceQueryResult<OpportunityDetectionRow>, StorageError>;
 
+    /// Bounded, paginated detections for the web dashboard (drops the evidence
+    /// provenance contract the materialization path needs; returns a page + total).
+    async fn detections_page(
+        &self,
+        filter: MarketFilter,
+        window: TimeWindow,
+        page: PageRequest,
+    ) -> Result<Paginated<OpportunityDetectionRow>, StorageError>;
+
     async fn audits(
         &self,
         opportunity_ids: &[OpportunityId],
@@ -119,6 +109,14 @@ pub trait EvidenceTimeseriesRepository: Send + Sync {
         filter: MarketFilter,
         window: TimeWindow,
     ) -> Result<EvidenceQueryResult<OpportunityAuditRow>, StorageError>;
+
+    /// Bounded, paginated audit funnel for the web dashboard (page + total).
+    async fn audit_funnel_page(
+        &self,
+        filter: MarketFilter,
+        window: TimeWindow,
+        page: PageRequest,
+    ) -> Result<Paginated<OpportunityAuditRow>, StorageError>;
 
     async fn calibration_snapshots(
         &self,

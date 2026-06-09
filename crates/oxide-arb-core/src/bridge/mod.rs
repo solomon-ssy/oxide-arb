@@ -1,6 +1,8 @@
 pub mod balance_querier;
 pub mod calibration_source;
+pub mod execution_mode;
 pub mod fee_estimator;
+pub mod market_data;
 pub mod potential_loss_store;
 pub mod risk_audit_sink;
 pub mod risk_metrics;

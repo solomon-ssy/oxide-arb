@@ -8,9 +8,9 @@ use crate::{
     app::periodic_services::run_calibration_startup_tick,
     bridge::{
         CoreOpportunityPipeline, calibration_source::CoreCalibrationDataSource,
-        fee_estimator::CoreFeeEstimator, potential_loss_store::CorePotentialLossStore,
-        risk_audit_sink::new_audit_sink, risk_metrics::CoreRiskMetrics,
-        risk_persistence::CoreRiskPersistence,
+        execution_mode::ExecutionModeHandle, fee_estimator::CoreFeeEstimator,
+        potential_loss_store::CorePotentialLossStore, risk_audit_sink::new_audit_sink,
+        risk_metrics::CoreRiskMetrics, risk_persistence::CoreRiskPersistence,
     },
     control::{
         ControlFactorRegistry,
@@ -83,8 +83,8 @@ use oxide_arb_error::{OxideError, OxideResult};
 use oxide_arb_models::{
     config::{CalibrationConfig, Settings},
     domain::{
-        DetectionRuntimeConfig, ExecutionRuntimeConfig, NewRuntimeConfigActivation,
-        NewRuntimeConfigVersion, OperatorRuntimeConfig, RiskLimitRuntimeConfig,
+        CoreEvent, CoreEventPublisher, DetectionRuntimeConfig, ExecutionRuntimeConfig,
+        NewRuntimeConfigActivation, NewRuntimeConfigVersion, RiskLimitRuntimeConfig,
         RuntimeConfigDocument, SizingRuntimeConfig, control_factor::ControlFactorProvider,
         risk::RiskEngineState, runtime_config_hash, settlement::MarketSettlementRequest,
     },
@@ -101,13 +101,13 @@ use oxide_arb_repository::{
         PgEmergencyRepository, PgEventRepository, PgFactDataRepository, PgMarketRepository,
         PgPositionRepository, PgPotentialLossRepository, PgReconciliationRepository,
         PgReportRepository, PgResolutionEventRepository, PgRiskAuditRepository,
-        PgRiskStateRepository, PgRuntimeConfigVersionRepository, PgTradeRepository,
-        risk_fill::PgRiskFillRepository,
+        PgRiskStateRepository, PgRuntimeConfigVersionRepository, PgSystemRuntimeStateRepository,
+        PgTradeRepository, risk_fill::PgRiskFillRepository,
     },
     traits::{
         BlacklistPersistenceRepository, CalibrationRepository, ControlFactorRepository,
         ControlFactorShadowDecisionRepository, PotentialLossRepository, RiskStateRepository,
-        RuntimeConfigVersionRepository,
+        RuntimeConfigVersionRepository, SystemRuntimeStateRepository,
     },
 };
 use oxide_arb_risk::{
@@ -151,6 +151,9 @@ struct BuildRepos {
 }
 
 struct BuildInfra {
+    /// Effective execution mode after restoring the persisted operational state
+    /// (the `system_runtime_state` singleton, seeded to `DryRun`).
+    execution_mode: ExecutionMode,
     pg_pool: Arc<PostgresPool>,
     ch_pool: Arc<ClickHousePool>,
     cache: Arc<TieredCache>,
@@ -193,6 +196,9 @@ struct AssembledInfra {
 
 struct AppContextAssembly {
     config: Arc<Settings>,
+    execution_mode: ExecutionModeHandle,
+    events: CoreEventPublisher,
+    event_rx: flume::Receiver<CoreEvent>,
     infra: AssembledInfra,
     clients: BuildClients,
     risk: BuildRisk,
@@ -267,20 +273,43 @@ struct ExecutionLoop {
     execution_runners: Vec<ExecutionRunner>,
 }
 
+/// Bounded capacity of the real-time `CoreEvent` bus. Sized for short bursts of
+/// non-hot-path events; a full channel drops rather than blocking producers.
+const CORE_EVENT_CHANNEL_CAPACITY: usize = 4096;
+
 impl AppContext {
     /// Build all subsystems from loaded settings (PG/CH/Redis + trading loop).
     pub async fn build(settings: Arc<Settings>, shutdown: CancellationToken) -> OxideResult<Self> {
-        let mode = settings.execution.execution_mode;
-        settings.ensure_valid_for_mode(mode)?;
+        // Real-time event bus consumed by the WebSocket broadcaster. Bounded +
+        // non-blocking: a full channel drops events, never stalling producers.
+        let (events, event_rx) = CoreEventPublisher::bounded(CORE_EVENT_CHANNEL_CAPACITY);
 
+        // `connect_infra` migrates the schema and restores the persisted
+        // operational execution mode (the seeded `system_runtime_state`
+        // singleton), so that mode — not config — drives validation and wiring.
         let (infra, persistence_workers) = connect_infra(&settings, shutdown.clone()).await?;
+        let mode = infra.execution_mode;
+        settings.ensure_valid_for_mode(mode)?;
+        // Single source of truth for the live execution mode; every hot-path
+        // reader holds a clone and observes governed transitions atomically.
+        let execution_mode = ExecutionModeHandle::new(mode);
+
         let clients =
             connect_clients(&settings, shutdown.clone(), Arc::clone(&infra.metrics)).await?;
-        let (risk, trading) =
-            wire_risk_and_trading(&settings, mode, &infra, &clients, shutdown.clone()).await?;
+        let (risk, trading) = wire_risk_and_trading(
+            &settings,
+            &execution_mode,
+            &infra,
+            &clients,
+            &events,
+            shutdown.clone(),
+        )
+        .await?;
 
-        let settlement = wire_settlement_bundle(&settings, mode, &infra, &clients, &risk, &trading);
+        let settlement =
+            wire_settlement_bundle(&settings, &infra, &clients, &risk, &trading, &events);
         let BuildInfra {
+            execution_mode: _,
             pg_pool,
             ch_pool,
             cache,
@@ -309,6 +338,9 @@ impl AppContext {
         let (settlement_service, settlement_dedup) = settlement;
         Ok(assemble_app_context(AppContextAssembly {
             config: settings,
+            execution_mode,
+            events,
+            event_rx,
             infra: AssembledInfra {
                 pg_pool,
                 ch_pool,
@@ -338,11 +370,11 @@ impl AppContext {
 
 fn wire_settlement_bundle(
     settings: &Settings,
-    mode: ExecutionMode,
     infra: &BuildInfra,
     clients: &BuildClients,
     risk: &BuildRisk,
     trading: &BuildTrading,
+    events: &CoreEventPublisher,
 ) -> (Arc<MarketSettlementService>, Arc<SettlementDedup>) {
     let trade_repo = Arc::clone(&infra.persistence.trade_repo);
     let audit_writer = Arc::clone(&infra.persistence.audit_writer);
@@ -360,8 +392,8 @@ fn wire_settlement_bundle(
         alerts: Arc::clone(&infra.alerts),
         audit_writer,
         metrics_refresh: risk.metrics_refresh.clone(),
+        events: events.clone(),
         config: Arc::new(settings.settlement.clone()),
-        execution_mode: mode,
     }));
     let settlement_dedup = Arc::new(SettlementDedup::new(Duration::from_secs(
         settings.settlement.lifecycle.dedup_window_secs,
@@ -372,6 +404,9 @@ fn wire_settlement_bundle(
 fn assemble_app_context(parts: AppContextAssembly) -> AppContext {
     let AppContextAssembly {
         config,
+        execution_mode,
+        events,
+        event_rx,
         infra,
         clients,
         risk,
@@ -384,6 +419,9 @@ fn assemble_app_context(parts: AppContextAssembly) -> AppContext {
     } = parts;
     AppContext {
         config,
+        execution_mode,
+        events,
+        event_rx: Mutex::new(Some(event_rx)),
         infra: InfraBundle {
             pg: infra.pg_pool,
             ch: infra.ch_pool,
@@ -452,6 +490,31 @@ fn assemble_app_context(parts: AppContextAssembly) -> AppContext {
     }
 }
 
+/// Construct every Postgres repository over a shared connection clone.
+fn build_pg_repos(pg_pool: &PostgresPool) -> BuildRepos {
+    let db = pg_pool.connection().clone();
+    BuildRepos {
+        risk_state: Arc::new(PgRiskStateRepository::new(db.clone())),
+        blacklist: Arc::new(PgBlacklistPersistenceRepository::new(db.clone())),
+        audit: Arc::new(PgRiskAuditRepository::new(db.clone())),
+        risk_fill: Arc::new(PgRiskFillRepository::new(db.clone())),
+        emergency: Arc::new(PgEmergencyRepository::new(db.clone())),
+        reconciliation: Arc::new(PgReconciliationRepository::new(db.clone())),
+        resolution_event: Arc::new(PgResolutionEventRepository::new(db.clone())),
+        potential_loss: Arc::new(PgPotentialLossRepository::new(db.clone())),
+        calibration: Arc::new(PgCalibrationRepository::new(db.clone())),
+        fact_data: Arc::new(PgFactDataRepository::new(db.clone())),
+        runtime_config: Arc::new(PgRuntimeConfigVersionRepository::new(db.clone()))
+            as Arc<dyn RuntimeConfigVersionRepository>,
+        market: Arc::new(PgMarketRepository::new(db.clone())),
+        event: Arc::new(PgEventRepository::new(db.clone())),
+        trade: Arc::new(PgTradeRepository::new(db.clone())),
+        report: Arc::new(PgReportRepository::new(db.clone())),
+        position: Arc::new(PgPositionRepository::new(db.clone())),
+        control_factor: Arc::new(PgControlFactorRepository::new(db)),
+    }
+}
+
 async fn connect_infra(
     settings: &Settings,
     shutdown: CancellationToken,
@@ -491,7 +554,6 @@ async fn connect_infra(
         RedisBackend::new(&settings.cache.redis).await?,
     ));
 
-    let db = pg_pool.connection().clone();
     let write_manager = Arc::new(ChWriteManager::new_without_probe(
         settings.analytics.max_concurrent_inserts,
     ));
@@ -501,30 +563,21 @@ async fn connect_infra(
         write_manager,
         shutdown.clone(),
     ));
-    let repos = BuildRepos {
-        risk_state: Arc::new(PgRiskStateRepository::new(db.clone())),
-        blacklist: Arc::new(PgBlacklistPersistenceRepository::new(db.clone())),
-        audit: Arc::new(PgRiskAuditRepository::new(db.clone())),
-        risk_fill: Arc::new(PgRiskFillRepository::new(db.clone())),
-        emergency: Arc::new(PgEmergencyRepository::new(db.clone())),
-        reconciliation: Arc::new(PgReconciliationRepository::new(db.clone())),
-        resolution_event: Arc::new(PgResolutionEventRepository::new(db.clone())),
-        potential_loss: Arc::new(PgPotentialLossRepository::new(db.clone())),
-        calibration: Arc::new(PgCalibrationRepository::new(db.clone())),
-        fact_data: Arc::new(PgFactDataRepository::new(db.clone())),
-        runtime_config: Arc::new(PgRuntimeConfigVersionRepository::new(db.clone()))
-            as Arc<dyn RuntimeConfigVersionRepository>,
-        market: Arc::new(PgMarketRepository::new(db.clone())),
-        event: Arc::new(PgEventRepository::new(db.clone())),
-        trade: Arc::new(PgTradeRepository::new(db.clone())),
-        report: Arc::new(PgReportRepository::new(db.clone())),
-        position: Arc::new(PgPositionRepository::new(db.clone())),
-        control_factor: Arc::new(PgControlFactorRepository::new(db)),
-    };
+    let repos = build_pg_repos(&pg_pool);
     ensure_runtime_config_activation(settings, repos.runtime_config.as_ref()).await?;
     let balance_fact_writer = Arc::new(BalanceFactWriter::new(Arc::clone(&repos.fact_data)));
 
-    let control = wire_control_factors(settings, &repos, &metrics).await?;
+    // Restore the persisted operational execution mode. The singleton is seeded
+    // to `DryRun` by the migration seed lane, so it is the single source of
+    // truth: the operator's most recent deliberate `/system/mode` transition is
+    // authoritative across restarts. Entering Live still passes the boot
+    // preflight, so restore cannot escalate silently into an unsafe Live state.
+    let execution_mode = restore_execution_mode(&PgSystemRuntimeStateRepository::new(
+        pg_pool.connection().clone(),
+    ))
+    .await?;
+
+    let control = wire_control_factors(&repos, &metrics, execution_mode).await?;
     let ControlFactorWiring {
         factor_store,
         factor_refresher,
@@ -542,6 +595,7 @@ async fn connect_infra(
 
     Ok((
         BuildInfra {
+            execution_mode,
             pg_pool,
             ch_pool,
             cache,
@@ -574,17 +628,35 @@ struct ControlFactorWiring {
 /// Build the live control-factor store, refresher, and shadow writer, then run
 /// the startup snapshot load (fail closed in Live when a critical safety factor
 /// is lost).
+/// Restore the persisted operational execution mode (the single source of
+/// truth).
+///
+/// The migration seed lane guarantees the singleton exists in `DryRun`, so a
+/// normal boot just loads it. If the row is somehow absent (e.g. a truncated
+/// table), fail closed: re-seed `DryRun` rather than guessing an escalated mode.
+async fn restore_execution_mode(
+    repo: &PgSystemRuntimeStateRepository,
+) -> OxideResult<ExecutionMode> {
+    if let Some(state) = repo.load().await? {
+        return Ok(state.execution_mode);
+    }
+    tracing::warn!("system_runtime_state singleton missing; re-seeding DryRun (fail-closed)");
+    let mode = ExecutionMode::DryRun;
+    repo.upsert_execution_mode(mode, "bootstrap", "fail-closed re-seed (row missing)")
+        .await?;
+    Ok(mode)
+}
+
 async fn wire_control_factors(
-    settings: &Settings,
     repos: &BuildRepos,
     metrics: &Arc<MetricsHub>,
+    mode: ExecutionMode,
 ) -> OxideResult<ControlFactorWiring> {
     let factor_store = Arc::new(FactorSnapshotStore::new(chrono::Utc::now()));
     let shadow_repo_concrete = Arc::clone(&repos.fact_data);
     let shadow_repo: Arc<dyn ControlFactorShadowDecisionRepository> = shadow_repo_concrete;
     let (shadow_writer, shadow_writer_task) =
         ShadowDecisionWriter::new(shadow_repo, Arc::clone(metrics));
-    let mode = settings.execution.execution_mode;
     let factor_refresher = Arc::new(FactorRefresher::new(
         Arc::clone(&repos.control_factor),
         Arc::clone(&factor_store),
@@ -662,11 +734,7 @@ async fn ensure_runtime_config_activation(
 
 fn runtime_config_document(settings: &Settings) -> RuntimeConfigDocument {
     RuntimeConfigDocument {
-        schema_version: 1,
-        operator: OperatorRuntimeConfig {
-            maintenance_mode: false,
-            dry_run_mode: settings.execution.execution_mode == ExecutionMode::DryRun,
-        },
+        schema_version: 2,
         detection: DetectionRuntimeConfig {
             min_profit_threshold_usd: settings.detection.min_profit_threshold_usd,
             endgame_hours_before_close: u32::try_from(
@@ -778,11 +846,7 @@ async fn connect_clients(
         }
         Err(error) => {
             tracing::info!(%error, "Keystore unavailable — running without ClobClient");
-            (
-                None,
-                None,
-                format!("unavailable:{}", settings.execution.execution_mode.as_str()),
-            )
+            (None, None, "unavailable".to_owned())
         }
     };
 
@@ -799,21 +863,32 @@ async fn connect_clients(
 
 async fn wire_risk_and_trading(
     settings: &Settings,
-    mode: ExecutionMode,
+    execution_mode: &ExecutionModeHandle,
     infra: &BuildInfra,
     clients: &BuildClients,
+    events: &CoreEventPublisher,
     shutdown: CancellationToken,
 ) -> OxideResult<(BuildRisk, BuildTrading)> {
     let detection = wire_detection(settings, infra, clients, shutdown.clone()).await?;
-    let risk = wire_risk(settings, infra, clients, &detection).await?;
-    let trading = wire_trading(settings, mode, infra, clients, &risk, detection, shutdown);
+    let risk = wire_risk(settings, execution_mode, infra, clients, events, &detection).await?;
+    let trading = wire_trading(
+        settings,
+        execution_mode,
+        infra,
+        clients,
+        &risk,
+        detection,
+        shutdown,
+    );
     Ok((risk, trading))
 }
 
 async fn wire_risk(
     settings: &Settings,
+    execution_mode: &ExecutionModeHandle,
     infra: &BuildInfra,
     clients: &BuildClients,
+    events: &CoreEventPublisher,
     detection: &DetectionStack,
 ) -> OxideResult<BuildRisk> {
     let exposure = Arc::new(InMemoryExposureReservation::new(
@@ -821,7 +896,7 @@ async fn wire_risk(
     ));
     let api_tracker = Arc::new(ApiHealthTracker::new(Duration::from_secs(60)));
     let metrics_state = Arc::new(RiskMetricsState::new(api_tracker));
-    let mode = settings.execution.execution_mode;
+    let mode = execution_mode.current();
     if mode != ExecutionMode::Live {
         metrics_state.seed_simulated_snapshot(mode, Usd::new(settings.risk.bankroll_usd));
     }
@@ -829,7 +904,7 @@ async fn wire_risk(
         Arc::clone(&metrics_state),
         Arc::clone(&exposure),
         Arc::clone(&clients.ws_manager),
-        mode,
+        execution_mode.clone(),
     ));
 
     let risk_persistence = Arc::new(CoreRiskPersistence::new(
@@ -863,6 +938,7 @@ async fn wire_risk(
             .potential_loss_entries(potential_loss)
             .potential_loss_store(potential_loss_store.clone())
             .audit_sink(audit_sink)
+            .event_publisher(events.clone())
             .clock(utc_clock())
             .build(risk_metrics.as_ref())?,
     );
@@ -906,14 +982,22 @@ async fn wire_risk(
 
 fn wire_trading(
     settings: &Settings,
-    mode: ExecutionMode,
+    execution_mode: &ExecutionModeHandle,
     infra: &BuildInfra,
     clients: &BuildClients,
     risk: &BuildRisk,
     detection: DetectionStack,
     shutdown: CancellationToken,
 ) -> BuildTrading {
-    let execution = wire_execution_loop(settings, mode, infra, clients, risk, &detection, shutdown);
+    let execution = wire_execution_loop(
+        settings,
+        execution_mode,
+        infra,
+        clients,
+        risk,
+        &detection,
+        shutdown,
+    );
 
     BuildTrading {
         book_store: detection.book_store,
@@ -1075,7 +1159,7 @@ async fn wire_detection(
 
 fn wire_execution_loop(
     settings: &Settings,
-    mode: ExecutionMode,
+    execution_mode: &ExecutionModeHandle,
     infra: &BuildInfra,
     clients: &BuildClients,
     risk: &BuildRisk,
@@ -1103,16 +1187,13 @@ fn wire_execution_loop(
             Arc::clone(&detection.market_registry),
         ),
         dispatcher: Dispatcher::new(
-            mode,
-            match mode {
-                ExecutionMode::Paper => Some(Arc::clone(&detection.book_store)),
-                ExecutionMode::DryRun | ExecutionMode::Live => None,
-            },
+            execution_mode.clone(),
+            Arc::clone(&detection.book_store),
             clients.fee_calculator.clone(),
             Arc::clone(&infra.metrics),
         ),
         order_strategy: FokOrderStrategy::new(
-            mode,
+            execution_mode.clone(),
             clients.clob_client.clone(),
             clients.fee_calculator.clone(),
             settings.execution.timeout.dispatcher_timeout_ms,
@@ -1124,7 +1205,7 @@ fn wire_execution_loop(
         fsm: Arc::clone(&risk.fsm),
         market_inflight: Arc::clone(&market_inflight),
         metrics: Arc::clone(&infra.metrics),
-        execution_mode: mode,
+        mode: execution_mode.clone(),
         trade_repo: Arc::clone(&infra.persistence.trade_repo),
         audit_writer: Arc::clone(&infra.persistence.audit_writer),
         relay_notify: Arc::clone(&relay_notify),

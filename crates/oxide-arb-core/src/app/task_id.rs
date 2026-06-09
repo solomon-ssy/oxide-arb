@@ -11,6 +11,16 @@ use strum::IntoStaticStr;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, IntoStaticStr)]
 #[strum(serialize_all = "kebab-case")]
 pub enum TaskId {
+    // ── API / WebSocket ingress ───────────────────────────────────────
+    /// HTTP + WebSocket server. Drained first (stage 0) so the system stops
+    /// accepting outward-facing requests before detection/execution wind down.
+    WebServer,
+    /// Fans `CoreEvent`s out to subscribed WebSocket sessions.
+    WsBroadcaster,
+    /// Coalesces per-market order-book changes into throttled `MarketBookUpdate`
+    /// events for watching WebSocket sessions (off the hot path).
+    BookUpdateCoalescer,
+
     // ── Ingress ───────────────────────────────────────────────────────
     DataPipeline,
 
@@ -34,6 +44,13 @@ pub enum TaskId {
     // ── Control factors (Phase 5.6 live consumption) ──────────────────
     FactorRefresher,
     ShadowDecisionWriter,
+
+    // ── Governance materialization (offline control plane) ────────────
+    ControlFactorScheduler,
+    MaterializationExecuteWorker,
+
+    // ── Operation log writer (web audit pipeline) ─────────────────────
+    OperationLogWriter,
 
     // ── Detection ─────────────────────────────────────────────────────
     Scanner,
@@ -71,10 +88,15 @@ impl TaskId {
     #[must_use]
     pub const fn kind(self) -> TaskKind {
         match self {
-            Self::DataPipeline => TaskKind::WsIngress,
-            Self::GammaSync | Self::CalibrationUpdater | Self::FactorRefresher => {
-                TaskKind::CatalogSync
+            Self::WebServer | Self::WsBroadcaster | Self::BookUpdateCoalescer => {
+                TaskKind::ApiIngress
             }
+            Self::DataPipeline => TaskKind::WsIngress,
+            Self::GammaSync
+            | Self::CalibrationUpdater
+            | Self::FactorRefresher
+            | Self::ControlFactorScheduler
+            | Self::MaterializationExecuteWorker => TaskKind::CatalogSync,
             Self::Coalescer => TaskKind::CacheWorker,
             Self::PotentialLossEscalation
             | Self::LedgerReconciliation
@@ -85,7 +107,7 @@ impl TaskId {
             Self::ExecutionRunner { .. } | Self::PostTradeRelay => TaskKind::Execution,
             Self::ExecutionHeartbeat => TaskKind::ExecutionHeartbeat,
             Self::RiskTick | Self::ExposureGc | Self::ReportGenerator => TaskKind::ReportScheduler,
-            Self::RiskAuditBatch => TaskKind::Audit,
+            Self::RiskAuditBatch | Self::OperationLogWriter => TaskKind::Audit,
             Self::ExecutionAuditWriter
             | Self::DetectionWriter
             | Self::TickEventsWriter

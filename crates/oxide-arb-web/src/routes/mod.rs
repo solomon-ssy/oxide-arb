@@ -27,17 +27,26 @@
 //! established before authorization, and an unregistered protected route is
 //! denied (fail-closed).
 
+pub mod analytics;
 pub mod auth;
 pub mod control_factors;
 pub mod health;
+pub mod markets;
 pub mod menus;
 pub mod operation_logs;
+pub mod opportunities;
 pub mod permissions;
+pub mod pnl;
 pub mod registry;
+pub mod replay;
+pub mod risk;
 pub mod roles;
 pub mod runtime_config;
+pub mod system;
+pub mod trades;
 pub mod users;
 pub mod version;
+pub mod ws;
 
 use actix_web::{
     Resource,
@@ -66,6 +75,14 @@ fn protected_route_specs() -> Vec<RouteSpec> {
     specs.extend(control_factors::route_specs());
     specs.extend(runtime_config::route_specs());
     specs.extend(operation_logs::route_specs());
+    specs.extend(system::route_specs());
+    specs.extend(risk::route_specs());
+    specs.extend(markets::route_specs());
+    specs.extend(opportunities::route_specs());
+    specs.extend(trades::route_specs());
+    specs.extend(pnl::route_specs());
+    specs.extend(analytics::route_specs());
+    specs.extend(replay::route_specs());
     specs
 }
 
@@ -125,6 +142,11 @@ pub fn configure(cfg: &mut ServiceConfig) {
                 .guard(ApiV1Guard)
                 .route("/auth/login", web::post().to(auth::login))
                 .route("/auth/refresh", web::post().to(auth::refresh))
+                // WebSocket upgrade authenticates via query token before upgrade
+                // (browsers cannot set handshake headers), so it sits outside the
+                // Bearer-header authn scope and self-authenticates. Wired through
+                // `routes::ws` so every route is registered under `routes/`.
+                .configure(ws::configure)
                 .service(protected),
         );
 }

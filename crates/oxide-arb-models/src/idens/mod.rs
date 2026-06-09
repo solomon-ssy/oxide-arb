@@ -33,6 +33,7 @@ pub mod role_menu;
 pub mod runtime_config_activation;
 pub mod runtime_config_version;
 pub mod seed_application;
+pub mod system_runtime_state;
 pub mod trade;
 pub mod user;
 pub mod user_role;

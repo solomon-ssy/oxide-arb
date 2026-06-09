@@ -1,6 +1,7 @@
 //! Thin `RiskMetrics` trait adapter over shared state and live reservation/WS probes.
 
 use crate::{
+    bridge::execution_mode::ExecutionModeHandle,
     exposure::in_memory::InMemoryExposureReservation,
     service::risk_metrics::{RiskMetricsSource, RiskMetricsState},
 };
@@ -20,7 +21,7 @@ pub struct CoreRiskMetrics {
     state: Arc<RiskMetricsState>,
     exposure: Arc<InMemoryExposureReservation>,
     ws_manager: Arc<ClobWsManager>,
-    execution_mode: ExecutionMode,
+    mode: ExecutionModeHandle,
 }
 
 impl CoreRiskMetrics {
@@ -28,13 +29,13 @@ impl CoreRiskMetrics {
         state: Arc<RiskMetricsState>,
         exposure: Arc<InMemoryExposureReservation>,
         ws_manager: Arc<ClobWsManager>,
-        execution_mode: ExecutionMode,
+        mode: ExecutionModeHandle,
     ) -> Self {
         Self {
             state,
             exposure,
             ws_manager,
-            execution_mode,
+            mode,
         }
     }
 
@@ -73,7 +74,7 @@ impl CoreRiskMetrics {
 
     fn ws_disconnect_secs_for_mode(&self) -> u64 {
         self.ws_manager.last_message_age_ms().map_or_else(
-            || match self.execution_mode {
+            || match self.mode.current() {
                 ExecutionMode::Live => u64::MAX,
                 ExecutionMode::DryRun | ExecutionMode::Paper => 0,
             },
@@ -82,7 +83,7 @@ impl CoreRiskMetrics {
     }
 
     fn metrics_age_secs_for_mode(&self) -> u64 {
-        match self.execution_mode {
+        match self.mode.current() {
             ExecutionMode::DryRun | ExecutionMode::Paper => 0,
             ExecutionMode::Live => {
                 now_ms().saturating_sub(self.state.last_successful_refresh_ms()) / 1000
@@ -91,14 +92,14 @@ impl CoreRiskMetrics {
     }
 
     fn is_authoritative_for_mode(&self) -> bool {
-        match self.execution_mode {
+        match self.mode.current() {
             ExecutionMode::DryRun | ExecutionMode::Paper => true,
             ExecutionMode::Live => self.state.source() == RiskMetricsSource::AuthoritativeClob,
         }
     }
 
     fn is_stale_for_mode(&self) -> bool {
-        match self.execution_mode {
+        match self.mode.current() {
             ExecutionMode::DryRun | ExecutionMode::Paper => false,
             ExecutionMode::Live => self.state.is_stale(),
         }

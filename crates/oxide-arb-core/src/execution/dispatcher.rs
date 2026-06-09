@@ -1,4 +1,7 @@
-use crate::{observability::metrics_hub::MetricsHub, pipeline::book_store::BookStore};
+use crate::{
+    bridge::execution_mode::ExecutionModeHandle, observability::metrics_hub::MetricsHub,
+    pipeline::book_store::BookStore,
+};
 use oxide_arb_api::fees::FeeCalculator;
 use oxide_arb_models::{
     domain::execution::ExecutionPlan,
@@ -11,21 +14,21 @@ use oxide_arb_models::{
 use std::sync::Arc;
 
 pub struct Dispatcher {
-    execution_mode: ExecutionMode,
-    book_store: Option<Arc<BookStore>>,
+    mode: ExecutionModeHandle,
+    book_store: Arc<BookStore>,
     fee_calculator: Arc<FeeCalculator>,
     metrics: Arc<MetricsHub>,
 }
 
 impl Dispatcher {
     pub const fn new(
-        execution_mode: ExecutionMode,
-        book_store: Option<Arc<BookStore>>,
+        mode: ExecutionModeHandle,
+        book_store: Arc<BookStore>,
         fee_calculator: Arc<FeeCalculator>,
         metrics: Arc<MetricsHub>,
     ) -> Self {
         Self {
-            execution_mode,
+            mode,
             book_store,
             fee_calculator,
             metrics,
@@ -33,7 +36,7 @@ impl Dispatcher {
     }
 
     pub fn dispatch(&self, plan: &ExecutionPlan) -> ExecutionOutcome {
-        let outcome = match self.execution_mode {
+        let outcome = match self.mode.current() {
             ExecutionMode::DryRun => self.dry_run(plan),
             ExecutionMode::Paper => self.paper_trade(plan),
             ExecutionMode::Live => ExecutionOutcome::Failed {
@@ -79,24 +82,22 @@ impl Dispatcher {
     }
 
     fn paper_trade(&self, plan: &ExecutionPlan) -> ExecutionOutcome {
-        if let Some(book_store) = &self.book_store {
-            let sufficient = Self::has_sufficient_depth_at_price(
-                book_store,
-                &plan.token_id,
-                plan.side,
-                plan.limit_price,
-                plan.estimated_cost,
-                plan.shares,
-            );
-            if !sufficient {
-                return ExecutionOutcome::Miss {
-                    reason: format!(
-                        "paper: insufficient depth for {} at {}",
-                        plan.estimated_cost, plan.limit_price
-                    ),
-                    execution_mode: ExecutionMode::Paper,
-                };
-            }
+        let sufficient = Self::has_sufficient_depth_at_price(
+            &self.book_store,
+            &plan.token_id,
+            plan.side,
+            plan.limit_price,
+            plan.estimated_cost,
+            plan.shares,
+        );
+        if !sufficient {
+            return ExecutionOutcome::Miss {
+                reason: format!(
+                    "paper: insufficient depth for {} at {}",
+                    plan.estimated_cost, plan.limit_price
+                ),
+                execution_mode: ExecutionMode::Paper,
+            };
         }
 
         let fee = self.fee_calculator.calculate(

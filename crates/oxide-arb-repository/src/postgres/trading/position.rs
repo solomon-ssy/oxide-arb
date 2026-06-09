@@ -4,8 +4,8 @@ use num_traits::ToPrimitive;
 use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::{
     domain::{
-        MarkRedeemedParams, NewPosition, NullablePatch, Patch, PositionInfo, PositionPatch,
-        SettlePositionParams, SettledPositionStats,
+        MarkRedeemedParams, NewPosition, NullablePatch, Paginated, Patch, PositionInfo,
+        PositionPageQuery, PositionPatch, SettlePositionParams, SettledPositionStats,
     },
     entities::{
         market::Column as MarketColumn,
@@ -478,8 +478,53 @@ impl PgPositionRepository {
     }
 }
 
+fn page_condition(query: &PositionPageQuery) -> Condition {
+    let mut condition = Condition::all();
+    if let Some(market_id) = &query.market_id {
+        condition = condition.add(Column::MarketId.eq(market_id.as_str()));
+    }
+    if let Some(status) = query.status {
+        condition = condition.add(Column::Status.eq(status));
+    }
+    condition
+}
+
+async fn page_q(
+    db: &impl ConnectionTrait,
+    query: PositionPageQuery,
+) -> Result<Paginated<PositionInfo>, StorageError> {
+    let window = query.page.normalized();
+    let condition = page_condition(&query);
+    let total = Entity::find()
+        .filter(condition.clone())
+        .count(db)
+        .await
+        .map_err(StorageError::from)?;
+    if total == 0 {
+        return Ok(Paginated::from_request(Vec::new(), total, &window));
+    }
+    let models = Entity::find()
+        .filter(condition)
+        .order_by_desc(Column::OpenedAt)
+        .order_by_desc(Column::PositionId)
+        .offset(window.offset())
+        .limit(window.limit())
+        .all(db)
+        .await
+        .map_err(StorageError::from)?;
+    let items = models.into_iter().map(Into::into).collect();
+    Ok(Paginated::from_request(items, total, &window))
+}
+
 #[async_trait::async_trait]
 impl PositionRepository for PgPositionRepository {
+    async fn page(
+        &self,
+        query: PositionPageQuery,
+    ) -> Result<Paginated<PositionInfo>, StorageError> {
+        page_q(&self.db, query).await
+    }
+
     async fn find_open(&self) -> Result<Vec<PositionInfo>, StorageError> {
         find_open_q(&self.db).await
     }
@@ -666,6 +711,13 @@ pub struct PgPositionRepositoryTxn<'a> {
 
 #[async_trait::async_trait]
 impl PositionRepository for PgPositionRepositoryTxn<'_> {
+    async fn page(
+        &self,
+        query: PositionPageQuery,
+    ) -> Result<Paginated<PositionInfo>, StorageError> {
+        page_q(self.txn, query).await
+    }
+
     async fn find_open(&self) -> Result<Vec<PositionInfo>, StorageError> {
         find_open_q(self.txn).await
     }

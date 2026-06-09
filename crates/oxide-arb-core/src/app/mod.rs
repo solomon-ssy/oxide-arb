@@ -14,12 +14,17 @@ pub mod task_registry;
 use crate::{
     app::{task_id::TaskId, task_registry::PendingTaskQueue},
     bridge::{
-        CoreOpportunityPipeline, potential_loss_store::CorePotentialLossStore,
-        risk_metrics::CoreRiskMetrics, trading_gate::TradingGate,
+        CoreOpportunityPipeline, execution_mode::ExecutionModeHandle, market_data::CoreMarketData,
+        potential_loss_store::CorePotentialLossStore, risk_metrics::CoreRiskMetrics,
+        trading_gate::TradingGate,
     },
     control::{
-        ControlFactorRegistry, factor_refresher::FactorRefresher, factor_shadow::ShadowWriterTask,
+        ControlFactorRegistry,
+        factor_refresher::FactorRefresher,
+        factor_shadow::ShadowWriterTask,
         factor_snapshot::FactorSnapshotStore,
+        mode_transition::{CoreRuntimeControl, CoreRuntimeControlDeps},
+        replay::CoreReplay,
     },
     detection::{
         coalescer::Coalescer,
@@ -40,12 +45,15 @@ use crate::{
     },
     exposure::in_memory::InMemoryExposureReservation,
     infra::{
+        health_checker::HealthChecker, periodic_task::PeriodicTask,
         risk_decision_audit_buffer::RiskDecisionAuditBuffer,
         risk_decision_audit_drain::spawn_risk_decision_audit_drain,
     },
     observability::{
-        alert_dispatcher::AlertDispatcher, balance_fact_writer::BalanceFactWriter,
-        book_fact_writer::BookFactWriter, execution_audit::ExecutionAuditWriter,
+        alert_dispatcher::{Alert, AlertDispatcher},
+        balance_fact_writer::BalanceFactWriter,
+        book_fact_writer::BookFactWriter,
+        execution_audit::ExecutionAuditWriter,
         metrics_hub::MetricsHub,
     },
     pipeline::{
@@ -57,32 +65,62 @@ use crate::{
         relay::{PostTradeRelay, PostTradeRelayDeps},
     },
     service::{
+        book_update_coalescer::BookUpdateCoalescer,
         gamma::GammaService,
         risk_metrics::{RiskMetricsRefreshService, RiskMetricsState},
     },
 };
+use chrono::Utc;
 use flume::Receiver;
 use oxide_arb_algorithm::calibration::{CalibrationUpdater, ResolutionCalibrator};
 use oxide_arb_api::{clob::ClobClient, ws::ClobWsManager};
+use oxide_arb_control::{
+    evidence::engine::EvidenceEngine,
+    materialization::{
+        MaterializationRunner, MaterializationRunnerDeps, PointInTimeResolver, ResolverRepositories,
+    },
+    scheduler::{MaterializationScheduler, ScheduleAlert, SchedulePolicy},
+};
+use oxide_arb_error::{OxideError, OxideResult};
 use oxide_arb_models::{
     config::Settings,
-    domain::settlement::MarketSettlementRequest,
-    enums::common::ExecutionMode,
+    domain::{
+        CoreEvent, CoreEventPublisher, MarketDataPort, NewOperationLog, ReplayPort,
+        RuntimeConfigRef, RuntimeControlPort, settlement::MarketSettlementRequest,
+    },
+    enums::common::AlertLevel,
     types::{MarketId, MicroScore, TokenId},
 };
 use oxide_arb_repository::{
     clickhouse::ChTimeseriesRepository,
     postgres::{
-        PgCalibrationRepository, PgFactDataRepository, PgPositionRepository, PgReportRepository,
-        PgRiskAuditRepository, PgRiskStateRepository, PgTradeRepository,
+        PgCalibrationRepository, PgControlFactorRepository, PgEventRepository,
+        PgFactDataRepository, PgMarketRepository, PgMenuRepository, PgOperationLogRepository,
+        PgPositionRepository, PgPotentialLossRepository, PgReconciliationRepository,
+        PgReportRepository, PgResolutionEventRepository, PgRiskAuditRepository,
+        PgRiskStateRepository, PgRoleMenuRepository, PgRolePermissionRepository, PgRoleRepository,
+        PgRuntimeConfigVersionRepository, PgSystemRuntimeStateRepository, PgTradeRepository,
+        PgUserRepository, PgUserRoleRepository,
     },
-    traits::{PositionRepository, TradeRepository},
+    traits::{
+        ControlFactorRepository, ControlFactorShadowDecisionRepository,
+        EvidenceTimeseriesRepository, MarketRepository, OperationLogRepository, PositionRepository,
+        ReportRepository, RiskAuditRepository, RuntimeConfigVersionRepository, TradeRepository,
+    },
 };
 use oxide_arb_risk::{audit::RiskAuditEvent, engine::RiskEngine};
 use oxide_arb_storage::{cache::TieredCache, clickhouse::ClickHousePool, postgres::PostgresPool};
+use oxide_arb_web::{
+    AppState,
+    audit::{OperationLogBuffer, spawn_operation_log_writer},
+    auth::casbin::CasbinService,
+    jwt::{JwtService, RedisTokenBlacklist},
+    routes, spawn_web_server,
+    ws::{SessionRegistry, spawn_ws_broadcaster},
+};
 use parking_lot::Mutex;
 use std::{sync::Arc, time::Duration};
-use tokio::sync::Notify;
+use tokio::{sync::Notify, time::interval};
 use tokio_util::sync::CancellationToken;
 
 /// Max trades claimed per post-trade relay drain iteration.
@@ -202,6 +240,12 @@ pub struct RuntimeChannels {
 /// `RiskBundle`, `TradingBundle`) to avoid a 40+ flat-field struct.
 pub struct AppContext {
     pub config: Arc<Settings>,
+    /// Atomically swappable live execution mode shared by every hot-path reader.
+    pub execution_mode: ExecutionModeHandle,
+    /// Non-blocking producer handle for the real-time event bus.
+    pub events: CoreEventPublisher,
+    /// Receiver consumed once by the WebSocket broadcaster task.
+    pub event_rx: Mutex<Option<Receiver<CoreEvent>>>,
     pub infra: InfraBundle,
     pub data: DataBundle,
     pub risk: RiskBundle,
@@ -214,6 +258,13 @@ pub struct AppContext {
 }
 
 impl AppContext {
+    /// Clone the non-blocking event publisher for a producer (e.g. the web
+    /// governance handlers or a periodic service).
+    #[must_use]
+    pub fn event_publisher(&self) -> CoreEventPublisher {
+        self.events.clone()
+    }
+
     /// Queue the background task that drains pre-trade audit events to Postgres.
     ///
     /// Consumes `infra.risk_decision_audit_rx` — call at most once before `AppRunner::run`.
@@ -273,7 +324,6 @@ impl AppContext {
             metrics_state: Arc::clone(&self.risk.metrics_state),
             metrics_refresh: self.risk.metrics_refresh.clone(),
             metrics: Arc::clone(&self.infra.metrics),
-            execution_mode: self.config.execution.execution_mode,
         };
         let relay = PostTradeRelay::new(PostTradeRelayDeps {
             consumer,
@@ -302,8 +352,8 @@ impl AppContext {
             });
     }
 
-    /// Queue venue heartbeat probe (Live mode only).
-    pub fn queue_execution_heartbeat(&self, interval_secs: u64, execution_mode: ExecutionMode) {
+    /// Queue venue heartbeat probe (self-gates on the live mode each tick).
+    pub fn queue_execution_heartbeat(&self, interval_secs: u64) {
         let Some(clob_client) = self.trading.clob_client.as_ref() else {
             tracing::info!("execution heartbeat skipped — ClobClient unavailable");
             return;
@@ -311,6 +361,7 @@ impl AppContext {
         let clob_client = Arc::clone(clob_client);
         let risk_engine = Arc::clone(&self.risk.engine);
         let fsm = Arc::clone(&self.trading.fsm);
+        let mode = self.execution_mode.clone();
 
         self.pending_tasks
             .push(TaskId::ExecutionHeartbeat, move |shutdown| async move {
@@ -320,7 +371,7 @@ impl AppContext {
                     fsm,
                     interval_secs,
                     shutdown,
-                    execution_mode,
+                    mode,
                 );
                 if let Err(error) = task.run().await {
                     tracing::error!(%error, "execution heartbeat exited with error");
@@ -350,8 +401,6 @@ impl AppContext {
 
     /// Register the core trading loop tasks (WS → books → detect → execute).
     pub fn queue_runtime_tasks(&self) {
-        let mode = self.config.execution.execution_mode;
-
         let data_pipeline = Arc::clone(&self.data.data_pipeline);
         self.pending_tasks
             .push(TaskId::DataPipeline, move |_token| async move {
@@ -423,7 +472,357 @@ impl AppContext {
                 self.queue_execution_runners(runners);
             }
             self.queue_post_trade_relay();
-            self.queue_execution_heartbeat(30, mode);
+            self.queue_execution_heartbeat(30);
         }
     }
+}
+
+// ── Web + governance process wiring ─────────────────────────────────────────
+//
+// Assembles the `oxide-arb-web` `AppState` from core subsystems (the
+// dependency-inverted runtime control port, RBAC repositories, Casbin, JWT, and
+// the operation-log + event pipelines) and registers the web-facing background
+// tasks into the unified shutdown-staged task queue.
+
+/// Operation-log writer flush threshold (rows) and cadence.
+const OPERATION_LOG_BATCH_SIZE: usize = 64;
+const OPERATION_LOG_FLUSH_INTERVAL: Duration = Duration::from_millis(250);
+/// Operation-log buffer capacity (non-blocking producer).
+const OPERATION_LOG_BUFFER_CAPACITY: usize = 4096;
+/// Control-factor scheduler tick cadence.
+const SCHEDULER_TICK_INTERVAL: Duration = Duration::from_secs(300);
+const SCHEDULER_JITTER_PCT: f64 = 0.1;
+/// Materialization execute-worker poll cadence + per-tick claim budget.
+const EXECUTE_WORKER_POLL_INTERVAL: Duration = Duration::from_secs(30);
+const EXECUTE_WORKER_CLAIM_LIMIT: u64 = 4;
+
+impl AppContext {
+    /// Assemble the web [`AppState`] and the operation-log writer's receiver.
+    ///
+    /// Constructs the RBAC repositories, the live Casbin enforcer (with its
+    /// policy loaded), the JWT service (Redis-backed revocation), the
+    /// dependency-inverted runtime control port, and the operation-log buffer.
+    async fn assemble_web_state(&self) -> OxideResult<(AppState, Receiver<NewOperationLog>)> {
+        let db = self.infra.pg.connection().clone();
+
+        let blacklist = Arc::new(RedisTokenBlacklist::from_url(&self.config.cache.redis.url)?);
+        let jwt = Arc::new(JwtService::new(&self.config.web.jwt, blacklist));
+
+        let casbin = Arc::new(
+            CasbinService::new(db.clone())
+                .await
+                .map_err(|error| OxideError::Internal(format!("casbin init: {error}")))?,
+        );
+        let perm_checker = Arc::new(routes::init_rbac_rules());
+
+        let control_factors: Arc<dyn ControlFactorRepository> =
+            Arc::new(PgControlFactorRepository::new(db.clone()));
+        let runtime_config: Arc<dyn RuntimeConfigVersionRepository> =
+            Arc::new(PgRuntimeConfigVersionRepository::new(db.clone()));
+        let shadow_decisions: Arc<dyn ControlFactorShadowDecisionRepository> =
+            Arc::new(PgFactDataRepository::new(db.clone()));
+        let operation_logs: Arc<dyn OperationLogRepository> =
+            Arc::new(PgOperationLogRepository::new(db.clone()));
+        let trades: Arc<dyn TradeRepository> = Arc::new(PgTradeRepository::new(db.clone()));
+        let markets: Arc<dyn MarketRepository> = Arc::new(PgMarketRepository::new(db.clone()));
+        let reports: Arc<dyn ReportRepository> = Arc::new(PgReportRepository::new(db.clone()));
+        let risk_audit: Arc<dyn RiskAuditRepository> =
+            Arc::new(PgRiskAuditRepository::new(db.clone()));
+        let evidence: Arc<dyn EvidenceTimeseriesRepository> =
+            Arc::clone(&self.infra.timeseries) as Arc<dyn EvidenceTimeseriesRepository>;
+
+        let (operation_log, operation_log_rx) =
+            OperationLogBuffer::new(OPERATION_LOG_BUFFER_CAPACITY);
+
+        let control: Arc<dyn RuntimeControlPort> =
+            Arc::new(CoreRuntimeControl::new(self.control_deps()));
+        let market_data: Arc<dyn MarketDataPort> = Arc::new(CoreMarketData::new(
+            Arc::clone(&self.data.book_store),
+            Arc::clone(&self.trading.ws_manager),
+        ));
+        let replay: Arc<dyn ReplayPort> = Arc::new(CoreReplay::new(Arc::new(
+            PgControlFactorRepository::new(db.clone()),
+        )));
+
+        let state = AppState {
+            jwt,
+            users: Arc::new(PgUserRepository::new(db.clone())),
+            roles: Arc::new(PgRoleRepository::new(db.clone())),
+            menus: Arc::new(PgMenuRepository::new(db.clone())),
+            user_roles: Arc::new(PgUserRoleRepository::new(db.clone())),
+            role_menus: Arc::new(PgRoleMenuRepository::new(db.clone())),
+            role_permissions: Arc::new(PgRolePermissionRepository::new(db.clone())),
+            positions: Arc::new(PgPositionRepository::new(db)),
+            trades,
+            markets,
+            reports,
+            evidence,
+            risk_audit,
+            casbin,
+            perm_checker,
+            registry: Arc::clone(&self.control.registry),
+            control_factors,
+            runtime_config,
+            shadow_decisions,
+            operation_logs,
+            operation_log,
+            control,
+            market_data,
+            replay,
+            events: self.event_publisher(),
+            ws_sessions: SessionRegistry::default(),
+        };
+        Ok((state, operation_log_rx))
+    }
+
+    /// Build the runtime control port's dependencies from the live subsystems.
+    fn control_deps(&self) -> CoreRuntimeControlDeps {
+        let health_checker = Arc::new(HealthChecker::new(
+            Arc::clone(&self.infra.pg),
+            Arc::clone(&self.infra.ch),
+            Arc::clone(&self.trading.ws_manager),
+            self.trading.clob_client.clone(),
+            self.execution_mode.clone(),
+        ));
+        CoreRuntimeControlDeps {
+            execution_mode: self.execution_mode.clone(),
+            risk_engine: Arc::clone(&self.risk.engine),
+            fsm: Arc::clone(&self.trading.fsm),
+            exposure: Arc::clone(&self.risk.exposure),
+            metrics: Arc::clone(&self.risk.metrics),
+            metrics_state: Arc::clone(&self.risk.metrics_state),
+            metrics_refresh: self.risk.metrics_refresh.clone(),
+            clob_client: self.trading.clob_client.clone(),
+            market_registry: Arc::clone(&self.data.market_registry),
+            health_checker,
+            settings: Arc::clone(&self.config),
+            system_runtime_state: Arc::new(PgSystemRuntimeStateRepository::new(
+                self.infra.pg.connection().clone(),
+            )),
+        }
+    }
+
+    /// Assemble web state and queue the web server, operation-log writer, and the
+    /// WebSocket broadcaster (all over the shared session registry).
+    pub async fn queue_web_services(&self) -> OxideResult<()> {
+        let (state, operation_log_rx) = self.assemble_web_state().await?;
+        let operation_logs = Arc::clone(&state.operation_logs);
+        self.queue_operation_log_writer(operation_log_rx, operation_logs);
+        self.queue_ws_broadcaster(state.ws_sessions.clone());
+        self.queue_book_update_coalescer(state.ws_sessions.clone());
+        self.queue_web_server(state);
+        Ok(())
+    }
+
+    /// Queue the book-update coalescer: throttled per-market book pushes to the
+    /// `CoreEvent` bus for markets WebSocket sessions are actively watching.
+    fn queue_book_update_coalescer(&self, sessions: SessionRegistry) {
+        let coalescer = BookUpdateCoalescer::new(
+            Arc::clone(&self.data.book_store),
+            Arc::clone(&self.data.market_registry),
+            sessions,
+            self.events.clone(),
+        );
+        self.pending_tasks
+            .push(TaskId::BookUpdateCoalescer, move |shutdown| async move {
+                coalescer.run(shutdown).await;
+            });
+    }
+
+    /// Queue the WebSocket broadcaster, consuming the `CoreEvent` bus and fanning
+    /// out to the shared session registry. Consumes `event_rx` once.
+    fn queue_ws_broadcaster(&self, registry: SessionRegistry) {
+        let Some(event_rx) = self.event_rx.lock().take() else {
+            tracing::warn!("ws broadcaster already registered or event_rx unavailable");
+            return;
+        };
+        self.pending_tasks
+            .push(TaskId::WsBroadcaster, move |shutdown| async move {
+                spawn_ws_broadcaster(event_rx, registry, shutdown).await;
+            });
+    }
+
+    /// Queue the HTTP/WebSocket server (drained first, stage 0).
+    fn queue_web_server(&self, state: AppState) {
+        let config = self.config.web.clone();
+        self.pending_tasks
+            .push(TaskId::WebServer, move |shutdown| async move {
+                if let Err(error) = spawn_web_server(state, config, shutdown).await {
+                    tracing::error!(%error, "web server exited with error");
+                }
+            });
+    }
+
+    /// Queue the operation-log writer (drains the audit buffer to Postgres).
+    fn queue_operation_log_writer(
+        &self,
+        rx: Receiver<NewOperationLog>,
+        operation_logs: Arc<dyn OperationLogRepository>,
+    ) {
+        self.pending_tasks
+            .push(TaskId::OperationLogWriter, move |shutdown| async move {
+                spawn_operation_log_writer(
+                    rx,
+                    operation_logs,
+                    OPERATION_LOG_BATCH_SIZE,
+                    OPERATION_LOG_FLUSH_INTERVAL,
+                    shutdown,
+                )
+                .await;
+            });
+    }
+
+    /// Queue the enqueue-only control-factor materialization scheduler.
+    ///
+    /// The scheduler **never publishes**; it only evaluates cadences and enqueues
+    /// `Queued` runs, mapping overdue / stale cadences to alerts.
+    pub fn queue_control_factor_scheduler(&self) {
+        let repo: Arc<dyn ControlFactorRepository> = Arc::new(PgControlFactorRepository::new(
+            self.infra.pg.connection().clone(),
+        ));
+        let policy = SchedulePolicy::production_default(
+            RuntimeConfigRef::ActiveAt { at: Utc::now() },
+            "scheduler",
+            option_env!("GIT_SHA").unwrap_or("unknown"),
+        );
+        let scheduler = Arc::new(MaterializationScheduler::new(repo, policy));
+        let alerts = Arc::clone(&self.infra.alerts);
+        let events = self.event_publisher();
+
+        self.pending_tasks
+            .push(TaskId::ControlFactorScheduler, move |shutdown| async move {
+                let result = PeriodicTask::run(
+                    TaskId::ControlFactorScheduler.static_name(),
+                    SCHEDULER_TICK_INTERVAL,
+                    SCHEDULER_JITTER_PCT,
+                    true,
+                    shutdown,
+                    || {
+                        let scheduler = Arc::clone(&scheduler);
+                        let alerts = Arc::clone(&alerts);
+                        let events = events.clone();
+                        async move {
+                            let report = scheduler
+                                .tick(Utc::now())
+                                .await
+                                .map_err(|error| OxideError::Internal(error.to_string()))?;
+                            for alert in report.alerts {
+                                dispatch_schedule_alert(&alerts, &events, alert).await;
+                            }
+                            Ok(())
+                        }
+                    },
+                )
+                .await;
+                if let Err(error) = result {
+                    tracing::error!(%error, "control-factor scheduler exited with error");
+                }
+            });
+    }
+
+    /// Queue the materialization execute worker (claims `Queued` runs, runs them).
+    pub fn queue_materialization_execute_worker(&self) {
+        let db = self.infra.pg.connection().clone();
+        let control_factors: Arc<dyn ControlFactorRepository> =
+            Arc::new(PgControlFactorRepository::new(db.clone()));
+        let timeseries: Arc<dyn EvidenceTimeseriesRepository> =
+            Arc::clone(&self.infra.timeseries) as Arc<dyn EvidenceTimeseriesRepository>;
+        let resolver = Arc::new(PointInTimeResolver::new(ResolverRepositories {
+            runtime_config: Some(Arc::new(PgRuntimeConfigVersionRepository::new(db.clone()))),
+            timeseries: Some(Arc::clone(&timeseries)),
+            markets: Some(Arc::new(PgMarketRepository::new(db.clone()))),
+            events: Some(Arc::new(PgEventRepository::new(db.clone()))),
+            balances: Some(Arc::new(PgFactDataRepository::new(db.clone()))),
+            trades: Some(Arc::new(PgTradeRepository::new(db.clone()))),
+            positions: Some(Arc::new(PgPositionRepository::new(db.clone()))),
+            potential_loss: Some(Arc::new(PgPotentialLossRepository::new(db.clone()))),
+            risk_audit: Some(Arc::new(PgRiskAuditRepository::new(db.clone()))),
+            reconciliation: Some(Arc::new(PgReconciliationRepository::new(db.clone()))),
+            resolution_events: Some(Arc::new(PgResolutionEventRepository::new(db))),
+        }));
+        let evidence_engine = Arc::new(EvidenceEngine::new(timeseries));
+        let runner = Arc::new(MaterializationRunner::new(MaterializationRunnerDeps {
+            control_factors: Arc::clone(&control_factors),
+            pit_resolver: resolver,
+            evidence_engine,
+        }));
+
+        self.pending_tasks.push(
+            TaskId::MaterializationExecuteWorker,
+            move |shutdown| async move {
+                let mut ticker = interval(EXECUTE_WORKER_POLL_INTERVAL);
+                ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                loop {
+                    tokio::select! {
+                        () = shutdown.cancelled() => {
+                            tracing::info!("materialization execute worker shutting down");
+                            return;
+                        }
+                        _ = ticker.tick() => {
+                            let run_ids = match control_factors
+                                .list_queued_materialization_runs(EXECUTE_WORKER_CLAIM_LIMIT)
+                                .await
+                            {
+                                Ok(ids) => ids,
+                                Err(error) => {
+                                    tracing::error!(%error, "list queued materialization runs failed");
+                                    continue;
+                                }
+                            };
+                            for run_id in run_ids {
+                                if shutdown.is_cancelled() {
+                                    break;
+                                }
+                                if let Err(error) =
+                                    runner.execute_run(&run_id, shutdown.clone()).await
+                                {
+                                    tracing::error!(%error, %run_id, "materialization run failed");
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+        );
+    }
+}
+
+/// Dispatch a scheduler cadence alert to the operator alert channel and the
+/// real-time event bus.
+async fn dispatch_schedule_alert(
+    alerts: &Arc<AlertDispatcher>,
+    events: &CoreEventPublisher,
+    alert: ScheduleAlert,
+) {
+    let (title, body) = match &alert {
+        ScheduleAlert::Overdue {
+            schedule_id,
+            last_run_at,
+        } => (
+            "Materialization cadence overdue".to_owned(),
+            format!("schedule {schedule_id} last ran at {last_run_at}"),
+        ),
+        ScheduleAlert::Stale {
+            schedule_id,
+            last_success_at,
+            threshold_secs,
+        } => (
+            "Materialization cadence stale".to_owned(),
+            format!(
+                "schedule {schedule_id} no success within {threshold_secs}s (last success: {last_success_at:?})"
+            ),
+        ),
+    };
+    alerts
+        .dispatch(Alert {
+            severity: AlertLevel::Warning,
+            title: title.clone(),
+            body: body.clone(),
+            timestamp: Utc::now(),
+        })
+        .await;
+    events.publish(CoreEvent::Alert {
+        level: AlertLevel::Warning,
+        message: format!("{title}: {body}"),
+    });
 }

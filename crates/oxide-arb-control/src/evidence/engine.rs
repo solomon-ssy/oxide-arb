@@ -23,6 +23,7 @@ use chrono::Utc;
 use oxide_arb_models::{
     clickhouse::OpportunityAuditRow,
     domain::{
+        MarketFilter, TimeWindow,
         control_factor::{
             EvidenceSourceBundle, InputResolutionReport, MaterializationRunManifest,
             QueryFingerprint, StageArtifactRef, StageCoverageReport, StageOutput, StageReportBody,
@@ -35,7 +36,7 @@ use oxide_arb_models::{
         control_factor::{EvidenceStageStatus, MaterializationStageName},
     },
 };
-use oxide_arb_repository::traits::{EvidenceTimeseriesRepository, MarketFilter, TimeWindow};
+use oxide_arb_repository::traits::EvidenceTimeseriesRepository;
 use std::sync::Arc;
 
 pub struct EvidenceEngine {

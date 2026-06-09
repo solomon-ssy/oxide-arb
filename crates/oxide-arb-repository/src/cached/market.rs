@@ -4,7 +4,7 @@ use crate::traits::MarketRepository;
 use chrono::{DateTime, Utc};
 use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::{
-    domain::{MarketInfo, MarketPitSnapshotInfo, UpsertMarket},
+    domain::{MarketInfo, MarketPageQuery, MarketPitSnapshotInfo, Paginated, UpsertMarket},
     types::MarketId,
 };
 use oxide_arb_storage::cache::{CacheKey, TieredCache};
@@ -53,6 +53,11 @@ impl<R: MarketRepository> MarketRepository for CachedMarketRepository<R> {
             let _ = self.cache.set_json(&key, info.as_ref()).await;
         }
         Ok(result)
+    }
+
+    #[inline]
+    async fn page(&self, query: MarketPageQuery) -> Result<Paginated<MarketInfo>, StorageError> {
+        self.inner.page(query).await
     }
 
     #[inline]

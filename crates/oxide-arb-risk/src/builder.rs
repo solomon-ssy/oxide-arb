@@ -22,6 +22,7 @@ use oxide_arb_error::OxideResult;
 use oxide_arb_models::{
     config::RiskConfig,
     domain::{
+        CoreEventPublisher,
         blacklist::{BlacklistInfo, UpsertBlacklistEntry},
         potential_loss::{NewPotentialLoss, PotentialLossInfo},
         risk::{
@@ -49,6 +50,7 @@ pub struct RiskEngineBuilder {
     initial_equity: Option<Usd>,
     clock: Option<Arc<dyn Clock>>,
     audit_sink: Option<Arc<dyn AuditSink>>,
+    event_publisher: Option<CoreEventPublisher>,
 }
 
 impl RiskEngineBuilder {
@@ -64,6 +66,7 @@ impl RiskEngineBuilder {
             initial_equity: None,
             clock: None,
             audit_sink: None,
+            event_publisher: None,
         }
     }
 
@@ -112,6 +115,15 @@ impl RiskEngineBuilder {
     #[must_use]
     pub fn audit_sink(mut self, audit_sink: Arc<dyn AuditSink>) -> Self {
         self.audit_sink = Some(audit_sink);
+        self
+    }
+
+    /// Real-time event bus handle. When set, the engine emits a
+    /// `CoreEvent::CircuitBreakerTripped` whenever a post-trade/settlement
+    /// breaker trip is recorded (best-effort, non-blocking).
+    #[must_use]
+    pub fn event_publisher(mut self, publisher: CoreEventPublisher) -> Self {
+        self.event_publisher = Some(publisher);
         self
     }
 
@@ -217,6 +229,7 @@ impl RiskEngineBuilder {
             persistence,
             potential_loss_store,
             audit_sink: self.audit_sink,
+            event_publisher: self.event_publisher,
             state_version: AtomicStateVersion::new(0),
             clock,
             last_emergency: RwLock::new(last_emergency),

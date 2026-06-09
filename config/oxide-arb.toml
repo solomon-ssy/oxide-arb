@@ -80,9 +80,14 @@ min_sample_size = 30
 refresh_interval_secs = 3600
 
 # ── Execution ─────────────────────────────────────────────────────────────────
+#
+# NOTE: the active execution mode (dry_run / paper / live) is NOT configured
+# here. It is a money-critical, governed value owned by the `system_runtime_state`
+# singleton (seeded to dry_run on first migration) and changed only via the
+# audited `POST /system/mode` transition. This guarantees a fresh deployment
+# always boots in the safest mode.
 
 [execution]
-execution_mode = "dry_run"
 
 [execution.timeout]
 max_validation_time_ms = 500

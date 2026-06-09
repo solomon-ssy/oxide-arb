@@ -65,17 +65,10 @@ pub struct ShutdownProgress {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeConfigDocument {
     pub schema_version: i32,
-    pub operator: OperatorRuntimeConfig,
     pub detection: DetectionRuntimeConfig,
     pub execution: ExecutionRuntimeConfig,
     pub sizing: SizingRuntimeConfig,
     pub risk_limits: RiskLimitRuntimeConfig,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OperatorRuntimeConfig {
-    pub maintenance_mode: bool,
-    pub dry_run_mode: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -204,6 +197,49 @@ pub struct NewRuntimeConfigActivation {
     pub previous_runtime_config_version_id: Option<RuntimeConfigVersionId>,
     pub rollback_target_version_id: Option<RuntimeConfigVersionId>,
     pub audit_event_id: Option<AuditEventId>,
+}
+
+// ── System runtime state (operational control singleton) ─────────────
+
+/// DB row projection for the `system_runtime_state` singleton.
+///
+/// Carries the active execution mode and the metadata of its last change so the
+/// bootstrap can restore the operator's most recent deliberate mode across a
+/// restart. The singleton is seeded to `DryRun` by the migration seed lane.
+#[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]
+#[sea_orm(entity = "crate::entities::system_runtime_state::Entity")]
+pub struct SystemRuntimeStateInfo {
+    pub id: i32,
+    pub execution_mode: ExecutionMode,
+    pub changed_by: String,
+    pub reason: String,
+    pub changed_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+info_from_model!(
+    SystemRuntimeStateInfo,
+    crate::entities::system_runtime_state::Model,
+    {
+        id,
+        execution_mode,
+        changed_by,
+        reason,
+        changed_at,
+        updated_at,
+    }
+);
+
+/// Upsert payload for the execution-mode singleton (`id` is always the
+/// singleton key).
+#[derive(Debug, Clone, DeriveIntoActiveModel)]
+#[sea_orm(active_model = "crate::entities::system_runtime_state::ActiveModel")]
+pub struct UpsertSystemRuntimeState {
+    pub id: i32,
+    pub execution_mode: ExecutionMode,
+    pub changed_by: String,
+    pub reason: String,
+    pub changed_at: DateTime<Utc>,
 }
 
 // ── Accounting ───────────────────────────────────────────────────────

@@ -9,10 +9,11 @@ use oxide_arb_models::{
         TickEventL2Row, TickEventRow,
     },
     domain::{
-        CalibrationBucketInfo, CalibrationOutcomeInfo, MarkRedeemedParams, NewCalibrationOutcome,
-        NewPosition, NewTrade, PositionInfo, PositionPatch, ReportTradeStats, SettlePositionParams,
-        SettledPositionStats, TradeInfo, TradeObservation, UpsertCalibration,
-        evidence::EvidenceQueryResult,
+        CalibrationBucketInfo, CalibrationOutcomeInfo, EdgeBucket, MarkRedeemedParams,
+        MarketFilter, MarketPerformanceRow, NewCalibrationOutcome, NewPosition, NewTrade,
+        PageRequest, Paginated, PositionInfo, PositionPageQuery, PositionPatch, ReportTradeStats,
+        SettlePositionParams, SettledPositionStats, TimeWindow, TradeInfo, TradeObservation,
+        TradePageQuery, UpsertCalibration, evidence::EvidenceQueryResult,
     },
     enums::{
         calibration::{DurationBucket, PriceZone},
@@ -25,10 +26,12 @@ use oxide_arb_models::{
     types::{ExecutionId, MarketId, OpportunityId, PositionId, TokenId, TradeId, Usd},
 };
 use oxide_arb_repository::traits::{
-    CalibrationRepository, EvidenceTimeseriesRepository, MarketFilter, PositionRepository,
-    TimeWindow, TimeseriesFactWriter, TradeRepository, evidence_query_result,
+    CalibrationRepository, EvidenceTimeseriesRepository, PositionRepository, TimeseriesFactWriter,
+    TradeRepository, evidence_query_result,
 };
+use rust_decimal::Decimal;
 use std::{
+    cmp::Reverse,
     collections::{HashMap, HashSet},
     sync::{
         Mutex,
@@ -199,6 +202,30 @@ impl CalibrationRepository for MockCalibrationRepository {
 
 #[async_trait]
 impl PositionRepository for MockPositionRepository {
+    async fn page(
+        &self,
+        query: PositionPageQuery,
+    ) -> Result<Paginated<PositionInfo>, StorageError> {
+        let window = query.page.normalized();
+        let mut items: Vec<PositionInfo> = self
+            .positions
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|p| query.market_id.as_ref().is_none_or(|m| &p.market_id == m))
+            .filter(|p| query.status.is_none_or(|s| p.status == s))
+            .cloned()
+            .collect();
+        items.sort_by_key(|p| Reverse(p.opened_at));
+        let total = items.len() as u64;
+        let page = items
+            .into_iter()
+            .skip(usize::try_from(window.offset()).unwrap_or(usize::MAX))
+            .take(usize::try_from(window.limit()).unwrap_or(usize::MAX))
+            .collect();
+        Ok(Paginated::from_request(page, total, &window))
+    }
+
     async fn find_open(&self) -> Result<Vec<PositionInfo>, StorageError> {
         Ok(self
             .positions
@@ -631,6 +658,33 @@ impl PositionRepository for MockPositionRepository {
 
 #[async_trait]
 impl TradeRepository for MockTradeRepository {
+    async fn page(&self, query: TradePageQuery) -> Result<Paginated<TradeInfo>, StorageError> {
+        let window = query.page.normalized();
+        let mut items: Vec<TradeInfo> = self
+            .trades
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|t| query.market_id.as_ref().is_none_or(|m| &t.market_id == m))
+            .filter(|t| query.state.is_none_or(|s| t.state == s))
+            .filter(|t| {
+                query
+                    .business_outcome
+                    .is_none_or(|o| t.business_outcome == Some(o))
+            })
+            .filter(|t| query.execution_mode.is_none_or(|m| t.execution_mode == m))
+            .cloned()
+            .collect();
+        items.sort_by_key(|t| Reverse(t.created_at));
+        let total = items.len() as u64;
+        let page = items
+            .into_iter()
+            .skip(usize::try_from(window.offset()).unwrap_or(usize::MAX))
+            .take(usize::try_from(window.limit()).unwrap_or(usize::MAX))
+            .collect();
+        Ok(Paginated::from_request(page, total, &window))
+    }
+
     async fn create(&self, trade: NewTrade) -> Result<TradeInfo, StorageError> {
         if self.create_should_fail.load(Ordering::Relaxed) {
             return Err(StorageError::Connection("mock create failure".into()));
@@ -965,6 +1019,85 @@ impl TradeRepository for MockTradeRepository {
             fill_expected_pnl: Usd::ZERO,
         })
     }
+
+    async fn edge_histogram(&self, window: TimeWindow) -> Result<Vec<EdgeBucket>, StorageError> {
+        let bounds: [(&str, i64, i64); 6] = [
+            ("<0", i64::MIN, 0),
+            ("0-50", 0, 50),
+            ("50-100", 50, 100),
+            ("100-200", 100, 200),
+            ("200-500", 200, 500),
+            ("500+", 500, i64::MAX),
+        ];
+        let mut counts = [0_u64; 6];
+        for trade in self.trades.lock().unwrap().values() {
+            if trade.created_at < window.from || trade.created_at >= window.to {
+                continue;
+            }
+            let Some(bps) = trade.detected_edge_bps else {
+                continue;
+            };
+            let value = bps.inner();
+            for (index, (_, lo, hi)) in bounds.iter().enumerate() {
+                if value >= Decimal::from(*lo) && value < Decimal::from(*hi) {
+                    counts[index] += 1;
+                    break;
+                }
+            }
+        }
+        Ok(bounds
+            .iter()
+            .zip(counts)
+            .map(|((label, _, _), count)| EdgeBucket { label, count })
+            .collect())
+    }
+
+    async fn market_performance(
+        &self,
+        window: TimeWindow,
+        page: PageRequest,
+    ) -> Result<Paginated<MarketPerformanceRow>, StorageError> {
+        let window_page = page.normalized();
+        let mut by_market: HashMap<MarketId, MarketPerformanceRow> = HashMap::new();
+        for trade in self.trades.lock().unwrap().values() {
+            if trade.created_at < window.from || trade.created_at >= window.to {
+                continue;
+            }
+            let entry =
+                by_market
+                    .entry(trade.market_id.clone())
+                    .or_insert_with(|| MarketPerformanceRow {
+                        market_id: trade.market_id.clone(),
+                        trade_count: 0,
+                        success_count: 0,
+                        net_profit_usd: Usd::ZERO,
+                        total_cost_usd: Usd::ZERO,
+                    });
+            entry.trade_count += 1;
+            if trade.business_outcome == Some(TradeBusinessOutcome::Success) {
+                entry.success_count += 1;
+            }
+            if let Some(net) = trade.net_profit_usd {
+                entry.net_profit_usd += net;
+            }
+            entry.total_cost_usd += trade.cost_usd;
+        }
+        let mut rows: Vec<MarketPerformanceRow> = by_market.into_values().collect();
+        rows.sort_by(|left, right| {
+            right
+                .net_profit_usd
+                .inner()
+                .cmp(&left.net_profit_usd.inner())
+                .then_with(|| left.market_id.as_str().cmp(right.market_id.as_str()))
+        });
+        let total = rows.len() as u64;
+        let items = rows
+            .into_iter()
+            .skip(usize::try_from(window_page.offset()).unwrap_or(usize::MAX))
+            .take(usize::try_from(window_page.limit()).unwrap_or(usize::MAX))
+            .collect();
+        Ok(Paginated::from_request(items, total, &window_page))
+    }
 }
 
 #[derive(Default)]
@@ -1167,6 +1300,22 @@ impl EvidenceTimeseriesRepository for MockTimeseriesRepository {
         )
     }
 
+    async fn detections_page(
+        &self,
+        filter: MarketFilter,
+        window: TimeWindow,
+        page: PageRequest,
+    ) -> Result<Paginated<OpportunityDetectionRow>, StorageError> {
+        let all = self.detections(filter, window).await?.rows;
+        let total = all.len() as u64;
+        let items = all
+            .into_iter()
+            .skip(usize::try_from(page.offset()).unwrap_or(usize::MAX))
+            .take(usize::try_from(page.limit()).unwrap_or(usize::MAX))
+            .collect();
+        Ok(Paginated::from_request(items, total, &page))
+    }
+
     async fn audits(
         &self,
         opportunity_ids: &[OpportunityId],
@@ -1264,6 +1413,22 @@ impl EvidenceTimeseriesRepository for MockTimeseriesRepository {
             Some(2),
             rows,
         )
+    }
+
+    async fn audit_funnel_page(
+        &self,
+        filter: MarketFilter,
+        window: TimeWindow,
+        page: PageRequest,
+    ) -> Result<Paginated<OpportunityAuditRow>, StorageError> {
+        let all = self.audit_funnel(filter, window).await?.rows;
+        let total = all.len() as u64;
+        let items = all
+            .into_iter()
+            .skip(usize::try_from(page.offset()).unwrap_or(usize::MAX))
+            .take(usize::try_from(page.limit()).unwrap_or(usize::MAX))
+            .collect();
+        Ok(Paginated::from_request(items, total, &page))
     }
 
     async fn calibration_snapshots(

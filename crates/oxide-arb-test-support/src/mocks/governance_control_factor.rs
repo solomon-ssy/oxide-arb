@@ -75,6 +75,13 @@ impl ControlFactorRepository for MockGovernanceControlFactorRepository {
         Ok(None)
     }
 
+    async fn list_queued_materialization_runs(
+        &self,
+        _limit: u64,
+    ) -> Result<Vec<MaterializationRunId>, StorageError> {
+        Ok(Vec::new())
+    }
+
     async fn try_acquire_materialization_run(
         &self,
         _run_id: &MaterializationRunId,

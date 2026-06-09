@@ -8,7 +8,7 @@ use oxide_arb_api::{
     ws::ClobWsManager,
 };
 use oxide_arb_core::{
-    bridge::risk_metrics::CoreRiskMetrics,
+    bridge::{execution_mode::ExecutionModeHandle, risk_metrics::CoreRiskMetrics},
     control::factor_snapshot::FactorSnapshotStore,
     execution::{
         capital_manager::CapitalManager,
@@ -389,7 +389,7 @@ fn risk_metrics(
         metrics_state,
         exposure,
         ws_manager,
-        ExecutionMode::Live,
+        ExecutionModeHandle::new(ExecutionMode::Live),
     ))
 }
 
@@ -429,13 +429,13 @@ fn fixture(clob_client: Option<Arc<ClobClient>>) -> LiveFixture {
             Arc::new(MarketRegistry::new()),
         ),
         dispatcher: Dispatcher::new(
-            ExecutionMode::Live,
-            Some(Arc::clone(&book_store)),
+            ExecutionModeHandle::new(ExecutionMode::Live),
+            Arc::clone(&book_store),
             Arc::clone(&fee_calculator),
             Arc::clone(&metrics),
         ),
         order_strategy: FokOrderStrategy::new(
-            ExecutionMode::Live,
+            ExecutionModeHandle::new(ExecutionMode::Live),
             clob_client,
             fee_calculator,
             30_000,
@@ -447,7 +447,7 @@ fn fixture(clob_client: Option<Arc<ClobClient>>) -> LiveFixture {
         fsm: Arc::clone(&fsm),
         market_inflight: Arc::new(MarketInFlightRegistry::new()),
         metrics: Arc::clone(&metrics),
-        execution_mode: ExecutionMode::Live,
+        mode: ExecutionModeHandle::new(ExecutionMode::Live),
         trade_repo: Arc::clone(&trade_repo),
         audit_writer: Arc::clone(&audit_writer),
         relay_notify: Arc::new(Notify::new()),
@@ -522,7 +522,6 @@ async fn live_pipeline_fill_observed_then_consumer_settles() {
         metrics_state: fixture.metrics_state,
         metrics_refresh: None,
         metrics: fixture.metrics,
-        execution_mode: ExecutionMode::Live,
     };
     consumer.process(&observed).await;
 

@@ -3,7 +3,6 @@
 //! Endgame is a single-order strategy (FOK buy/sell held to settlement).
 //! No multi-leg orchestration, no hedging.
 
-use crate::enums::common::ExecutionMode;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
@@ -11,8 +10,6 @@ use validator::Validate;
 
 #[derive(Debug, Clone, Default, Deserialize, Validate)]
 pub struct ExecutionConfig {
-    #[serde(default)]
-    pub execution_mode: ExecutionMode,
     #[serde(default)]
     pub timeout: TradeTimeoutConfig,
     #[serde(default)]

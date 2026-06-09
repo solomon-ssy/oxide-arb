@@ -17,28 +17,46 @@ use actix_web::{
     test, web,
 };
 use async_trait::async_trait;
+use chrono::Utc;
 use oxide_arb_control::governance::ControlFactorRegistry;
 use oxide_arb_error::auth::AuthError;
-use oxide_arb_models::config::JwtConfig;
+use oxide_arb_models::{
+    config::JwtConfig,
+    domain::{
+        BlacklistInfo, CoreEventPublisher, HealthReport, MarketDataPort, ModeTransitionReport,
+        ReplayEnqueueRequest, ReplayEnqueueResult, ReplayPort, RiskEngineState,
+        RuntimeControlError, RuntimeControlPort, SystemStatus, market::book::BookSnapshot,
+    },
+    enums::{
+        common::ExecutionMode,
+        risk::{BlacklistReason, BreakerStateName},
+    },
+    types::{MarketId, TokenId, Usd},
+};
 use oxide_arb_repository::{
     postgres::{
-        PgControlFactorRepository, PgFactDataRepository, PgMenuRepository,
-        PgOperationLogRepository, PgRoleMenuRepository, PgRolePermissionRepository,
-        PgRoleRepository, PgRuntimeConfigVersionRepository, PgUserRepository, PgUserRoleRepository,
+        PgControlFactorRepository, PgFactDataRepository, PgMarketRepository, PgMenuRepository,
+        PgOperationLogRepository, PgPositionRepository, PgReportRepository, PgRiskAuditRepository,
+        PgRoleMenuRepository, PgRolePermissionRepository, PgRoleRepository,
+        PgRuntimeConfigVersionRepository, PgTradeRepository, PgUserRepository,
+        PgUserRoleRepository,
     },
     traits::{
         ControlFactorRepository, ControlFactorShadowDecisionRepository, OperationLogRepository,
         RuntimeConfigVersionRepository,
     },
 };
+use oxide_arb_test_support::mocks::MockTimeseriesRepository;
 use oxide_arb_web::{
     AppState,
     audit::{OperationLogBuffer, spawn_operation_log_writer},
     auth::casbin::CasbinService,
     jwt::{JwtService, RedisTokenBlacklist, TokenBlacklist},
     middleware, routes,
+    ws::SessionRegistry,
 };
 use serde_json::Value;
+use std::sync::Mutex;
 use testcontainers::ContainerAsync;
 use testcontainers_modules::{postgres::Postgres, redis::Redis};
 use tokio_util::sync::CancellationToken;
@@ -112,6 +130,7 @@ impl TestEnv {
             writer_shutdown.clone(),
         ));
 
+        let (events, _event_rx) = CoreEventPublisher::bounded(256);
         let state = AppState {
             jwt,
             users: Arc::new(PgUserRepository::new(db.clone())),
@@ -119,7 +138,13 @@ impl TestEnv {
             menus: Arc::new(PgMenuRepository::new(db.clone())),
             user_roles: Arc::new(PgUserRoleRepository::new(db.clone())),
             role_menus: Arc::new(PgRoleMenuRepository::new(db.clone())),
-            role_permissions: Arc::new(PgRolePermissionRepository::new(db)),
+            role_permissions: Arc::new(PgRolePermissionRepository::new(db.clone())),
+            positions: Arc::new(PgPositionRepository::new(db.clone())),
+            trades: Arc::new(PgTradeRepository::new(db.clone())),
+            markets: Arc::new(PgMarketRepository::new(db.clone())),
+            reports: Arc::new(PgReportRepository::new(db.clone())),
+            evidence: Arc::new(MockTimeseriesRepository::default()),
+            risk_audit: Arc::new(PgRiskAuditRepository::new(db)),
             casbin,
             perm_checker,
             registry,
@@ -128,6 +153,11 @@ impl TestEnv {
             shadow_decisions,
             operation_logs,
             operation_log,
+            control: Arc::new(MockRuntimeControl::default()),
+            market_data: Arc::new(MockMarketData),
+            replay: Arc::new(MockReplay),
+            events,
+            ws_sessions: SessionRegistry::default(),
         };
 
         Self {
@@ -223,6 +253,185 @@ pub async fn call(state: &AppState, req: test::TestRequest) -> Resp {
                 body,
             }
         }
+    }
+}
+
+/// A zeroed [`RiskEngineState`] for test responses.
+fn zero_risk_state(is_halted: bool) -> RiskEngineState {
+    let now = Utc::now();
+    let today = now.date_naive();
+    RiskEngineState {
+        breaker_state: BreakerStateName::Closed,
+        breaker_level: None,
+        is_halted,
+        halt_reason: None,
+        cooldown_until: None,
+        total_exposure: Usd::ZERO,
+        hourly_loss_usd: Usd::ZERO,
+        hourly_fee_usd: Usd::ZERO,
+        hourly_trade_count: 0,
+        hourly_success_count: 0,
+        hourly_miss_count: 0,
+        hourly_window_start: now,
+        daily_pnl: Usd::ZERO,
+        daily_loss_usd: Usd::ZERO,
+        daily_fee_usd: Usd::ZERO,
+        daily_budget_spent: Usd::ZERO,
+        daily_trade_count: 0,
+        daily_success_count: 0,
+        daily_miss_count: 0,
+        daily_window_start: today,
+        weekly_loss_usd: Usd::ZERO,
+        weekly_trade_count: 0,
+        weekly_window_start: today,
+        consecutive_misses: 0,
+        cooldown_multiplier: 1,
+        hwm_equity: Usd::ZERO,
+        last_emergency_at: None,
+        last_emergency_reason: None,
+        snapshot_at: now,
+    }
+}
+
+/// In-memory [`RuntimeControlPort`] double for web tests: records halt/mode/
+/// blacklist mutations and returns canned status without touching a live engine.
+#[derive(Default)]
+pub struct MockRuntimeControl {
+    mode: Mutex<Option<ExecutionMode>>,
+    halted: Mutex<bool>,
+    blacklist: Mutex<Vec<BlacklistInfo>>,
+}
+
+#[async_trait]
+impl RuntimeControlPort for MockRuntimeControl {
+    fn execution_mode(&self) -> ExecutionMode {
+        self.mode.lock().unwrap().unwrap_or(ExecutionMode::DryRun)
+    }
+
+    async fn switch_execution_mode(
+        &self,
+        target: ExecutionMode,
+        _operator_ack: &str,
+    ) -> Result<ModeTransitionReport, RuntimeControlError> {
+        let from = self.execution_mode();
+        *self.mode.lock().unwrap() = Some(target);
+        Ok(ModeTransitionReport { from, to: target })
+    }
+
+    async fn halt(&self, _reason: String) {
+        *self.halted.lock().unwrap() = true;
+    }
+
+    async fn resume(&self, _operator_ack: &str) -> Result<(), RuntimeControlError> {
+        *self.halted.lock().unwrap() = false;
+        Ok(())
+    }
+
+    async fn reset_circuit_breaker(&self, _reason: &str) -> Result<(), RuntimeControlError> {
+        Ok(())
+    }
+
+    fn risk_snapshot(&self) -> RiskEngineState {
+        zero_risk_state(*self.halted.lock().unwrap())
+    }
+
+    fn open_position_count(&self) -> u32 {
+        0
+    }
+
+    fn blacklist(&self) -> Vec<BlacklistInfo> {
+        self.blacklist.lock().unwrap().clone()
+    }
+
+    async fn add_blacklist(
+        &self,
+        market_id: MarketId,
+        reason: BlacklistReason,
+    ) -> Result<(), RuntimeControlError> {
+        self.blacklist.lock().unwrap().push(BlacklistInfo {
+            market_id,
+            token_id: None,
+            scope: oxide_arb_models::enums::risk::BlacklistScope::Full,
+            reason,
+            expires_at: None,
+            miss_count: 0,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        });
+        Ok(())
+    }
+
+    async fn remove_blacklist(
+        &self,
+        market_id: &MarketId,
+        _reason: &str,
+    ) -> Result<(), RuntimeControlError> {
+        self.blacklist
+            .lock()
+            .unwrap()
+            .retain(|entry| &entry.market_id != market_id);
+        Ok(())
+    }
+
+    async fn system_status(&self) -> SystemStatus {
+        SystemStatus {
+            execution_mode: self.execution_mode(),
+            breaker_state: BreakerStateName::Closed,
+            uptime_secs: 0,
+            active_markets: 0,
+            open_positions: 0,
+            pending_reservations: 0,
+            total_exposure: Usd::ZERO,
+            daily_pnl: Usd::ZERO,
+            checked_at: Utc::now(),
+        }
+    }
+
+    async fn health(&self) -> HealthReport {
+        HealthReport {
+            overall_healthy: true,
+            checks: Vec::new(),
+            checked_at: Utc::now(),
+        }
+    }
+}
+
+/// No-op market-data port for the harness (no live book / WS in tests).
+#[derive(Default)]
+pub struct MockMarketData;
+
+#[async_trait]
+impl MarketDataPort for MockMarketData {
+    fn book(
+        &self,
+        _yes_token: &TokenId,
+        _no_token: &TokenId,
+    ) -> (Option<Arc<BookSnapshot>>, Option<Arc<BookSnapshot>>) {
+        (None, None)
+    }
+
+    async fn subscribe(&self, _token_ids: Vec<TokenId>) -> Result<(), RuntimeControlError> {
+        Ok(())
+    }
+
+    async fn unsubscribe(&self, _token_ids: Vec<TokenId>) -> Result<(), RuntimeControlError> {
+        Ok(())
+    }
+}
+
+/// No-op replay port for the harness (enqueue is exercised in core, not here).
+#[derive(Default)]
+pub struct MockReplay;
+
+#[async_trait]
+impl ReplayPort for MockReplay {
+    async fn enqueue(
+        &self,
+        _request: ReplayEnqueueRequest,
+    ) -> Result<ReplayEnqueueResult, RuntimeControlError> {
+        Err(RuntimeControlError::Engine(
+            "replay enqueue not supported in the test harness".to_owned(),
+        ))
     }
 }
 

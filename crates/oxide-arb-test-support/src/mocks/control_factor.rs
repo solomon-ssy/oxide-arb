@@ -100,6 +100,19 @@ impl ControlFactorRepository for MockSchedulerControlFactorRepository {
             .cloned())
     }
 
+    async fn list_queued_materialization_runs(
+        &self,
+        limit: u64,
+    ) -> Result<Vec<MaterializationRunId>, StorageError> {
+        let runs = self.runs.lock().unwrap();
+        Ok(runs
+            .iter()
+            .filter(|run| run.status == MaterializationRunStatus::Queued)
+            .take(usize::try_from(limit).unwrap_or(usize::MAX))
+            .map(|run| run.materialization_run_id.clone())
+            .collect())
+    }
+
     async fn try_acquire_materialization_run(
         &self,
         _run_id: &MaterializationRunId,

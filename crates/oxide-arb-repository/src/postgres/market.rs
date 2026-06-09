@@ -3,7 +3,10 @@ use chrono::{DateTime, Utc};
 use num_traits::ToPrimitive;
 use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::{
-    domain::{MarketInfo, MarketPitSnapshotInfo, NewMarketPitSnapshot, UpsertMarket},
+    domain::{
+        MarketInfo, MarketPageQuery, MarketPitSnapshotInfo, NewMarketPitSnapshot, Paginated,
+        UpsertMarket,
+    },
     entities::{
         market::{
             ActiveModel as MarketActiveModel, Column as MarketColumn, Entity as MarketEntity,
@@ -21,8 +24,8 @@ use oxide_arb_models::{
 };
 use sea_orm::{
     ColumnTrait, ConnectionTrait, DatabaseConnection, DatabaseTransaction, EntityTrait,
-    IntoActiveModel, QueryFilter, QueryOrder, QuerySelect, TransactionTrait,
-    sea_query::{Expr, OnConflict},
+    IntoActiveModel, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, TransactionTrait,
+    sea_query::{Condition, Expr, OnConflict, extension::postgres::PgExpr},
 };
 use serde::Serialize;
 use std::{
@@ -427,10 +430,63 @@ fn new_market_pit_snapshot(market: &MarketInfo, payload_hash: String) -> NewMark
     }
 }
 
+fn page_condition(query: &MarketPageQuery) -> Condition {
+    let mut condition = Condition::all();
+    if let Some(status) = query.status {
+        condition = condition.add(MarketColumn::Status.eq(status));
+    }
+    if let Some(category) = query.category {
+        condition = condition.add(MarketColumn::Category.eq(category));
+    }
+    if let Some(event_id) = &query.event_id {
+        condition = condition.add(MarketColumn::EventId.eq(event_id.as_str()));
+    }
+    if let Some(keyword) = query.keyword.as_deref().filter(|kw| !kw.is_empty()) {
+        let pattern = format!("%{keyword}%");
+        condition = condition.add(
+            Condition::any()
+                .add(Expr::col(MarketColumn::Question).ilike(pattern.clone()))
+                .add(Expr::col(MarketColumn::Slug).ilike(pattern)),
+        );
+    }
+    condition
+}
+
+async fn do_page(
+    db: &impl ConnectionTrait,
+    query: MarketPageQuery,
+) -> Result<Paginated<MarketInfo>, StorageError> {
+    let window = query.page.normalized();
+    let condition = page_condition(&query);
+    let total = MarketEntity::find()
+        .filter(condition.clone())
+        .count(db)
+        .await
+        .map_err(StorageError::from)?;
+    if total == 0 {
+        return Ok(Paginated::from_request(Vec::new(), total, &window));
+    }
+    let models = MarketEntity::find()
+        .filter(condition)
+        .order_by_desc(MarketColumn::CreatedAt)
+        .order_by_desc(MarketColumn::MarketId)
+        .offset(window.offset())
+        .limit(window.limit())
+        .all(db)
+        .await
+        .map_err(StorageError::from)?;
+    let items = models.into_iter().map(Into::into).collect();
+    Ok(Paginated::from_request(items, total, &window))
+}
+
 #[async_trait::async_trait]
 impl MarketRepository for PgMarketRepository {
     async fn find_by_id(&self, id: &MarketId) -> Result<Option<Arc<MarketInfo>>, StorageError> {
         do_find_by_id(&self.db, id).await
+    }
+
+    async fn page(&self, query: MarketPageQuery) -> Result<Paginated<MarketInfo>, StorageError> {
+        do_page(&self.db, query).await
     }
 
     async fn find_by_ids(&self, ids: &[MarketId]) -> Result<Vec<Arc<MarketInfo>>, StorageError> {
@@ -495,6 +551,10 @@ impl MarketRepository for PgMarketRepository {
 impl MarketRepository for PgMarketRepositoryTxn<'_> {
     async fn find_by_id(&self, id: &MarketId) -> Result<Option<Arc<MarketInfo>>, StorageError> {
         do_find_by_id(self.txn, id).await
+    }
+
+    async fn page(&self, query: MarketPageQuery) -> Result<Paginated<MarketInfo>, StorageError> {
+        do_page(self.txn, query).await
     }
 
     async fn find_by_ids(&self, ids: &[MarketId]) -> Result<Vec<Arc<MarketInfo>>, StorageError> {

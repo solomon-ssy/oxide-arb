@@ -3,7 +3,7 @@
 use chrono::{Duration as ChronoDuration, Utc};
 use oxide_arb_api::ws::ClobWsManager;
 use oxide_arb_core::{
-    bridge::risk_metrics::CoreRiskMetrics,
+    bridge::{execution_mode::ExecutionModeHandle, risk_metrics::CoreRiskMetrics},
     execution::{capital_manager::CapitalManager, fsm::ExecutionFSM},
     exposure::in_memory::InMemoryExposureReservation,
     infra::async_writer::AsyncWriter,
@@ -235,7 +235,7 @@ fn risk_metrics(
         metrics_state,
         exposure,
         ws_manager,
-        ExecutionMode::Live,
+        ExecutionModeHandle::new(ExecutionMode::Live),
     ))
 }
 
@@ -266,7 +266,6 @@ fn harness() -> Harness {
         metrics_state,
         metrics_refresh: None,
         metrics: metrics.clone(),
-        execution_mode: ExecutionMode::Live,
     };
 
     Harness {

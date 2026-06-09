@@ -6,7 +6,7 @@
 //! source of truth for clients / `OpenAPI` generation.
 
 use crate::{
-    domain::OperationLogInfo,
+    domain::{OperationLogInfo, pagination::PageRequest},
     enums::{
         operation_log::{OperationCategory, OperationOutcome},
         rbac::ResourceType,
@@ -14,7 +14,7 @@ use crate::{
     types::{AuditEventId, OperationLogId, UserId},
 };
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Outbound view of one append-only operation-log row.
 #[derive(Debug, Serialize)]
@@ -64,6 +64,34 @@ impl From<OperationLogInfo> for OperationLogView {
             latency_ms: info.latency_ms,
             detail: info.detail,
             governance_audit_event_id: info.governance_audit_event_id,
+        }
+    }
+}
+
+/// Pagination + filter parameters for querying the operation log.
+///
+/// The pagination window is the shared [`PageRequest`], flattened so the query
+/// string stays flat alongside the filters.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct OperationLogQuery {
+    pub actor_user_id: Option<UserId>,
+    pub category: Option<OperationCategory>,
+    pub resource_type: Option<ResourceType>,
+    pub outcome: Option<OperationOutcome>,
+    pub request_id: Option<String>,
+    pub from: Option<DateTime<Utc>>,
+    pub to: Option<DateTime<Utc>>,
+    #[serde(flatten)]
+    pub page: PageRequest,
+}
+
+impl OperationLogQuery {
+    /// Return a copy with the embedded pagination window normalized.
+    #[must_use]
+    pub fn normalized(self) -> Self {
+        Self {
+            page: self.page.normalized(),
+            ..self
         }
     }
 }

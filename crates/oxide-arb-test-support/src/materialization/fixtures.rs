@@ -8,8 +8,9 @@ use chrono::{DateTime, Duration, TimeZone, Utc};
 use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::{
     domain::{
-        MarketInfo, MarketPitSnapshotInfo, NewRuntimeConfigActivation, NewRuntimeConfigVersion,
-        RuntimeConfigActivationInfo, RuntimeConfigVersionInfo, UpsertMarket,
+        MarketInfo, MarketPageQuery, MarketPitSnapshotInfo, NewRuntimeConfigActivation,
+        NewRuntimeConfigVersion, Paginated, RuntimeConfigActivationInfo, RuntimeConfigVersionInfo,
+        UpsertMarket,
         control_factor::{
             AuditedOutcome, ControlFactorMaterializationRunInfo, DataRequirements,
             MarketFilterSpec, MaterializationRunManifest, NewControlFactorAuditEvent,
@@ -222,6 +223,24 @@ pub fn runtime_config_repo() -> Arc<dyn RuntimeConfigVersionRepository> {
 
 #[async_trait]
 impl MarketRepository for FakeMarketRepository {
+    async fn page(&self, query: MarketPageQuery) -> Result<Paginated<MarketInfo>, StorageError> {
+        let window = query.page.normalized();
+        let items: Vec<MarketInfo> = self
+            .current
+            .iter()
+            .filter(|m| query.status.is_none_or(|s| m.status == s))
+            .filter(|m| query.category.is_none_or(|c| m.category == c))
+            .cloned()
+            .collect();
+        let total = items.len() as u64;
+        let page = items
+            .into_iter()
+            .skip(usize::try_from(window.offset()).unwrap_or(usize::MAX))
+            .take(usize::try_from(window.limit()).unwrap_or(usize::MAX))
+            .collect();
+        Ok(Paginated::from_request(page, total, &window))
+    }
+
     async fn find_by_id(&self, id: &MarketId) -> Result<Option<Arc<MarketInfo>>, StorageError> {
         Ok(self
             .current

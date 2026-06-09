@@ -2,8 +2,8 @@ use chrono::{DateTime, Utc};
 use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::{
     domain::{
-        MarkRedeemedParams, NewPosition, PositionInfo, PositionPatch, SettlePositionParams,
-        SettledPositionStats, evidence::EvidenceQueryResult,
+        MarkRedeemedParams, NewPosition, Paginated, PositionInfo, PositionPageQuery, PositionPatch,
+        SettlePositionParams, SettledPositionStats, evidence::EvidenceQueryResult,
     },
     enums::common::SettlementTrigger,
     types::{MarketId, PositionId, TokenId, TradeId, Usd},
@@ -14,6 +14,10 @@ use crate::traits::timeseries::evidence_query_result;
 
 #[async_trait::async_trait]
 pub trait PositionRepository: Send + Sync {
+    /// Paginated, filtered list for the web positions dashboard (newest first).
+    async fn page(&self, query: PositionPageQuery)
+    -> Result<Paginated<PositionInfo>, StorageError>;
+
     async fn find_open(&self) -> Result<Vec<PositionInfo>, StorageError>;
 
     async fn open_as_of(&self, at: DateTime<Utc>) -> Result<Vec<PositionInfo>, StorageError>;

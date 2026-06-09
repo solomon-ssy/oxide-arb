@@ -1,8 +1,9 @@
 use crate::observability::{
-    alert_dispatcher::{Alert, AlertDispatcher, AlertSeverity},
+    alert_dispatcher::{Alert, AlertDispatcher},
     metrics_hub::MetricsHub,
 };
 use chrono::Utc;
+use oxide_arb_models::enums::common::AlertLevel;
 use oxide_arb_risk::engine::RiskEngine;
 use std::sync::{
     Arc,
@@ -33,7 +34,7 @@ impl ExecutionFSM {
         tracing::error!(reason = reason, "execution emergency halt engaged");
         self.metrics.fsm_emergency_entries.inc();
         self.alerts.dispatch_background(Alert {
-            severity: AlertSeverity::Critical,
+            severity: AlertLevel::Critical,
             title: "Execution emergency halt".to_owned(),
             body: reason.to_owned(),
             timestamp: Utc::now(),

@@ -13,6 +13,8 @@ oxide-arb-control = { workspace = true }
 
 actix-web = { workspace = true }
 actix-cors = { workspace = true }
+actix-files = { workspace = true }
+actix-ws = { workspace = true }
 tracing-actix-web = { workspace = true }
 casbin = { workspace = true }
 jsonwebtoken = { workspace = true }
@@ -20,9 +22,12 @@ deadpool-redis = { workspace = true }
 redis = { workspace = true }
 sea-orm = { workspace = true }
 flume = { workspace = true }
+futures-util = { workspace = true }
+dashmap = { workspace = true }
 
 serde = { workspace = true }
 serde_json = { workspace = true }
+rust_decimal = { workspace = true }
 validator = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
@@ -35,6 +40,7 @@ async-trait = { workspace = true }
 [dev-dependencies]
 actix-rt = { workspace = true }
 oxide-arb-storage = { workspace = true, features = ["test-util"] }
+oxide-arb-test-support = { workspace = true }
 testcontainers = { workspace = true }
 testcontainers-modules = { workspace = true }
 

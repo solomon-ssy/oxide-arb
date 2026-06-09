@@ -4,6 +4,7 @@
 //! delegate to the dispatcher for deterministic simulated outcomes.
 
 use crate::{
+    bridge::execution_mode::ExecutionModeHandle,
     execution::{clob_outcome::map_order_response, dispatcher::Dispatcher},
     observability::{latency::observe_tick_to_http, metrics_hub::MetricsHub},
 };
@@ -25,7 +26,7 @@ use std::{
 };
 
 pub struct FokOrderStrategy {
-    execution_mode: ExecutionMode,
+    mode: ExecutionModeHandle,
     clob_client: Option<Arc<ClobClient>>,
     fee_calculator: Arc<FeeCalculator>,
     dispatcher_timeout_ms: u64,
@@ -34,14 +35,14 @@ pub struct FokOrderStrategy {
 
 impl FokOrderStrategy {
     pub const fn new(
-        execution_mode: ExecutionMode,
+        mode: ExecutionModeHandle,
         clob_client: Option<Arc<ClobClient>>,
         fee_calculator: Arc<FeeCalculator>,
         dispatcher_timeout_ms: u64,
         metrics: Arc<MetricsHub>,
     ) -> Self {
         Self {
-            execution_mode,
+            mode,
             clob_client,
             fee_calculator,
             dispatcher_timeout_ms,
@@ -55,7 +56,7 @@ impl FokOrderStrategy {
         plan: &ExecutionPlan,
         trace: &mut LatencyTrace,
     ) -> ExecutionOutcome {
-        match self.execution_mode {
+        match self.mode.current() {
             ExecutionMode::DryRun | ExecutionMode::Paper => {
                 trace.mark_http_sent();
                 observe_tick_to_http(trace, &self.metrics);

@@ -148,6 +148,22 @@ async fn latest_run_for_schedule_q(
         .map_err(StorageError::from)
 }
 
+async fn list_queued_materialization_runs_q(
+    db: &impl ConnectionTrait,
+    limit: u64,
+) -> Result<Vec<MaterializationRunId>, StorageError> {
+    RunEntity::find()
+        .select_only()
+        .column(RunColumn::MaterializationRunId)
+        .filter(RunColumn::Status.eq(MaterializationRunStatus::Queued))
+        .order_by_asc(RunColumn::CreatedAt)
+        .limit(limit)
+        .into_tuple::<MaterializationRunId>()
+        .all(db)
+        .await
+        .map_err(StorageError::from)
+}
+
 async fn try_acquire_materialization_run_q(
     db: &impl ConnectionTrait,
     run_id: &MaterializationRunId,
@@ -918,6 +934,13 @@ impl ControlFactorRepository for PgControlFactorRepository {
         statuses: &[MaterializationRunStatus],
     ) -> Result<Option<ControlFactorMaterializationRunInfo>, StorageError> {
         latest_run_for_schedule_q(&self.db, schedule_id, statuses).await
+    }
+
+    async fn list_queued_materialization_runs(
+        &self,
+        limit: u64,
+    ) -> Result<Vec<MaterializationRunId>, StorageError> {
+        list_queued_materialization_runs_q(&self.db, limit).await
     }
 
     async fn try_acquire_materialization_run(

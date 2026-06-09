@@ -20,9 +20,10 @@ use oxide_arb_control::governance::PublicationRequest;
 use oxide_arb_error::control::AuditChainError;
 use oxide_arb_models::{
     domain::{
-        AuditChainQuery, AuditChainResponse, ControlFactorListQuery, EmergencyPublishRequest,
-        PublicationListQuery, PublishPublicationRequest, RejectFactorRequest,
-        RollbackPublicationRequest, ShadowDecisionsQuery, ShadowDecisionsResponse,
+        AuditChainQuery, AuditChainResponse, ControlFactorListQuery, CoreEvent, CoreEventPublisher,
+        EmergencyPublishRequest, PublicationListQuery, PublishPublicationRequest,
+        RejectFactorRequest, RollbackPublicationRequest, ShadowDecisionsQuery,
+        ShadowDecisionsResponse,
         control_factor::{
             AuditActor, AuditChain, ControlFactorPublicationInfo, ControlFactorValueInfo,
             PublishPublicationOutcome,
@@ -236,6 +237,7 @@ pub async fn shadow_publication(
     let outcome = state.registry.promote_to_shadow(envelope, request).await?;
     Ok(WebResponse::ok(record_publication_outcome(
         &op_ctx,
+        &state.events,
         "control_factor.shadow",
         outcome,
     )))
@@ -256,6 +258,7 @@ pub async fn publish_publication(
     let outcome = state.registry.publish(envelope, request).await?;
     Ok(WebResponse::ok(record_publication_outcome(
         &op_ctx,
+        &state.events,
         "control_factor.publish",
         outcome,
     )))
@@ -284,6 +287,7 @@ pub async fn emergency_publish(
     let outcome = state.registry.publish(envelope, request).await?;
     Ok(WebResponse::ok(record_publication_outcome(
         &op_ctx,
+        &state.events,
         "control_factor.emergency",
         outcome,
     )))
@@ -313,6 +317,10 @@ pub async fn rollback_publication(
         "target_publication_id": body.target_publication_id,
     }));
     op_ctx.link_governance(outcome.audit_event_id);
+    state.events.publish(CoreEvent::ControlPublished {
+        publication_id: outcome.value.publication_id.to_string(),
+        mode: outcome.value.mode,
+    });
     Ok(WebResponse::ok(outcome.value))
 }
 
@@ -408,6 +416,7 @@ fn publication_request(body: &PublishPublicationRequest) -> PublicationRequest {
 /// replay appended no new event, so it is left unlinked.
 fn record_publication_outcome(
     op_ctx: &OperationCtx,
+    events: &CoreEventPublisher,
     action: &str,
     outcome: PublishPublicationOutcome,
 ) -> ControlFactorPublicationInfo {
@@ -419,10 +428,15 @@ fn record_publication_outcome(
     if let Some(event_id) = outcome.audit_event_id() {
         op_ctx.link_governance(event_id.clone());
     }
-    match outcome {
+    let info = match outcome {
         PublishPublicationOutcome::Published(audited) => audited.value,
         PublishPublicationOutcome::AlreadyApplied(info) => info,
-    }
+    };
+    events.publish(CoreEvent::ControlPublished {
+        publication_id: info.publication_id.to_string(),
+        mode: info.mode,
+    });
+    info
 }
 
 /// The first inconsistent sequence reported by a chain-verification failure, if

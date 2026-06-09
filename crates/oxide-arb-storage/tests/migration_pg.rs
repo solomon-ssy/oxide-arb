@@ -40,6 +40,7 @@ fn updated_at_trigger_catalog_is_complete() {
             "menu",
             "risk_engine_state",
             "role",
+            "system_runtime_state",
             "trade",
             "user",
         ]
@@ -241,8 +242,9 @@ async fn seed_application_records_catalog_seeds() {
     let count: i64 = row.try_get_by_index(0).expect("read seed ledger count");
 
     assert_eq!(
-        count, 7,
-        "risk state seed + 6 RBAC seeds (roles/menus/admin_user/user_role/role_menu/casbin)"
+        count, 8,
+        "risk state seed + system runtime state seed + 6 RBAC seeds \
+         (roles/menus/admin_user/user_role/role_menu/casbin)"
     );
 }
 

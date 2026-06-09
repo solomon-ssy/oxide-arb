@@ -76,26 +76,34 @@ macro_rules! info_from_model {
 pub mod accounting;
 pub mod api;
 pub mod control_factor;
+pub mod control_ports;
+pub mod event;
 pub mod evidence;
 pub mod governance;
 pub mod market;
 pub mod rbac;
 pub mod risk;
 pub mod trading;
+pub mod ws;
 
 // Cross-cutting helpers shared by every context.
 pub mod pagination;
 pub mod patch;
+pub mod query;
 
 // Flattened facade: every domain type is reachable directly under `domain::`.
 pub use accounting::*;
 pub use api::*;
 pub use control_factor::*;
+pub use control_ports::*;
+pub use event::*;
 pub use evidence::*;
 pub use governance::*;
 pub use market::*;
 pub use pagination::*;
 pub use patch::*;
+pub use query::*;
 pub use rbac::*;
 pub use risk::*;
 pub use trading::*;
+pub use ws::*;

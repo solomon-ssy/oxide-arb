@@ -7,7 +7,7 @@ use crate::{
         periodic_task::PeriodicTask,
     },
     observability::{
-        alert_dispatcher::{Alert, AlertSeverity},
+        alert_dispatcher::Alert,
         balance_fact_writer::{BalanceFactObservation, BalanceFactWriter},
         book_fact_writer::BookFactWriter,
         metrics_hub::MetricsHub,
@@ -21,8 +21,10 @@ use oxide_arb_algorithm::calibration::{CalibrationUpdater, ResolutionCalibrator}
 use oxide_arb_api::clob::ClobClient;
 use oxide_arb_error::{OxideError, OxideResult};
 use oxide_arb_models::{
-    domain::risk::UpsertRiskEngineState, enums::clickhouse::ChSnapshotReason,
-    enums::common::ExecutionMode, types::Usd,
+    domain::risk::UpsertRiskEngineState,
+    enums::clickhouse::ChSnapshotReason,
+    enums::common::{AlertLevel, ExecutionMode},
+    types::Usd,
 };
 use oxide_arb_repository::{
     postgres::{PgPositionRepository, PgTradeRepository},
@@ -391,7 +393,7 @@ impl AppContext {
         let ch = Arc::clone(&self.infra.ch);
         let ws = Arc::clone(&self.trading.ws_manager);
         let clob_client = self.trading.clob_client.clone();
-        let execution_mode = self.config.execution.execution_mode;
+        let execution_mode = self.execution_mode.clone();
         let metrics = Arc::clone(&self.infra.metrics);
         let alerts = Arc::clone(&self.infra.alerts);
 
@@ -424,7 +426,7 @@ impl AppContext {
                                 metrics_ref.health_check_failures.inc();
                                 alerts
                                     .dispatch(Alert {
-                                        severity: AlertSeverity::Critical,
+                                        severity: AlertLevel::Critical,
                                         title: "Health check unhealthy".into(),
                                         body: format!(
                                             "unhealthy subsystems: {}",

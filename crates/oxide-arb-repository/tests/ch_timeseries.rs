@@ -13,15 +13,14 @@ use oxide_arb_models::{
         ChProbability, ChSchemaVersion, ChShares, ChUsd, OpportunityAuditRow,
         OpportunityDetectionRow, TickEventL2Row, TickEventRow,
     },
+    domain::{MarketFilter, TimeWindow},
     enums::clickhouse::{
         ChAuditOutcome, ChBookEventType, ChDurationBucket, ChFactSource, ChMarketCategory,
         ChOpportunityAuditStage, ChPriceZone, ChSide, ChSnapshotReason, ChStalenessLevel,
     },
     types::{EventId, ExecutionId, MarketId, OpportunityId, Price, Shares, TokenId, TradeId, Usd},
 };
-use oxide_arb_repository::traits::{
-    EvidenceTimeseriesRepository, MarketFilter, TimeWindow, TimeseriesFactWriter,
-};
+use oxide_arb_repository::traits::{EvidenceTimeseriesRepository, TimeseriesFactWriter};
 use rust_decimal_macros::dec;
 
 fn sample_tick(token_id: &str, ts: i64) -> TickEventRow {

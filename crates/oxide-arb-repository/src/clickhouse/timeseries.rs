@@ -1,7 +1,4 @@
-use crate::traits::{
-    EvidenceTimeseriesRepository, MarketFilter, TimeWindow, TimeseriesFactWriter,
-    evidence_query_result,
-};
+use crate::traits::{EvidenceTimeseriesRepository, TimeseriesFactWriter, evidence_query_result};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use oxide_arb_error::storage::StorageError;
@@ -11,7 +8,7 @@ use oxide_arb_models::{
         TickEventL2Row, TickEventRow,
     },
     config::AnalyticsConfig,
-    domain::evidence::EvidenceQueryResult,
+    domain::{MarketFilter, PageRequest, Paginated, TimeWindow, evidence::EvidenceQueryResult},
     enums::clickhouse::ChOpportunityAuditStage,
     types::{OpportunityId, TokenId},
 };
@@ -33,6 +30,12 @@ pub struct ChTimeseriesRepository {
     audit_inserter: BatchInserter<OpportunityAuditRow>,
     detection_inserter: BatchInserter<OpportunityDetectionRow>,
     calibration_inserter: BatchInserter<CalibrationSnapshotRow>,
+}
+
+/// Scalar `count()` projection for paginated total-row queries.
+#[derive(clickhouse::Row, serde::Deserialize)]
+struct CountRow {
+    count: u64,
 }
 
 impl ChTimeseriesRepository {
@@ -307,6 +310,66 @@ impl EvidenceTimeseriesRepository for ChTimeseriesRepository {
         )
     }
 
+    async fn detections_page(
+        &self,
+        filter: MarketFilter,
+        window: TimeWindow,
+        page: PageRequest,
+    ) -> Result<Paginated<OpportunityDetectionRow>, StorageError> {
+        let market_ids = filter.market_ids;
+        let event_ids = filter.event_ids;
+        let token_ids = filter.token_ids;
+        let categories = filter.categories;
+        let window_filter = "detected_at >= fromUnixTimestamp64Milli(?) \
+             AND detected_at < fromUnixTimestamp64Milli(?) \
+             AND (empty(?) OR market_id IN ?) \
+             AND (empty(?) OR event_id IN ?) \
+             AND (empty(?) OR token_id IN ?) \
+             AND (empty(?) OR category IN ?)";
+        let total = self
+            .client
+            .query(&format!(
+                "SELECT count() AS count FROM opportunity_detection WHERE {window_filter}"
+            ))
+            .bind(window.from.timestamp_millis())
+            .bind(window.to.timestamp_millis())
+            .bind(market_ids.clone())
+            .bind(market_ids.clone())
+            .bind(event_ids.clone())
+            .bind(event_ids.clone())
+            .bind(token_ids.clone())
+            .bind(token_ids.clone())
+            .bind(categories.clone())
+            .bind(categories.clone())
+            .fetch_one::<CountRow>()
+            .await
+            .map_err(StorageError::from)?
+            .count;
+        let rows = self
+            .client
+            .query(&format!(
+                "SELECT * FROM opportunity_detection WHERE {window_filter} \
+                 ORDER BY detected_at ASC, ingestion_time ASC, sequence ASC \
+                 LIMIT ? OFFSET ?"
+            ))
+            .bind(window.from.timestamp_millis())
+            .bind(window.to.timestamp_millis())
+            .bind(market_ids.clone())
+            .bind(market_ids)
+            .bind(event_ids.clone())
+            .bind(event_ids)
+            .bind(token_ids.clone())
+            .bind(token_ids)
+            .bind(categories.clone())
+            .bind(categories)
+            .bind(page.limit())
+            .bind(page.offset())
+            .fetch_all::<OpportunityDetectionRow>()
+            .await
+            .map_err(StorageError::from)?;
+        Ok(Paginated::from_request(rows, total, &page))
+    }
+
     async fn audits(
         &self,
         opportunity_ids: &[OpportunityId],
@@ -430,6 +493,66 @@ impl EvidenceTimeseriesRepository for ChTimeseriesRepository {
             Some(2),
             rows,
         )
+    }
+
+    async fn audit_funnel_page(
+        &self,
+        filter: MarketFilter,
+        window: TimeWindow,
+        page: PageRequest,
+    ) -> Result<Paginated<OpportunityAuditRow>, StorageError> {
+        let market_ids = filter.market_ids;
+        let event_ids = filter.event_ids;
+        let token_ids = filter.token_ids;
+        let categories = filter.categories;
+        let window_filter = "detected_at >= fromUnixTimestamp64Milli(?) \
+             AND detected_at < fromUnixTimestamp64Milli(?) \
+             AND (empty(?) OR market_id IN ?) \
+             AND (empty(?) OR event_id IN ?) \
+             AND (empty(?) OR token_id IN ?) \
+             AND (empty(?) OR category IN ?)";
+        let total = self
+            .client
+            .query(&format!(
+                "SELECT count() AS count FROM opportunity_audit FINAL WHERE {window_filter}"
+            ))
+            .bind(window.from.timestamp_millis())
+            .bind(window.to.timestamp_millis())
+            .bind(market_ids.clone())
+            .bind(market_ids.clone())
+            .bind(event_ids.clone())
+            .bind(event_ids.clone())
+            .bind(token_ids.clone())
+            .bind(token_ids.clone())
+            .bind(categories.clone())
+            .bind(categories.clone())
+            .fetch_one::<CountRow>()
+            .await
+            .map_err(StorageError::from)?
+            .count;
+        let rows = self
+            .client
+            .query(&format!(
+                "SELECT * FROM opportunity_audit FINAL WHERE {window_filter} \
+                 ORDER BY stage_at ASC, ingestion_time ASC, sequence ASC \
+                 LIMIT ? OFFSET ?"
+            ))
+            .bind(window.from.timestamp_millis())
+            .bind(window.to.timestamp_millis())
+            .bind(market_ids.clone())
+            .bind(market_ids)
+            .bind(event_ids.clone())
+            .bind(event_ids)
+            .bind(token_ids.clone())
+            .bind(token_ids)
+            .bind(categories.clone())
+            .bind(categories)
+            .bind(page.limit())
+            .bind(page.offset())
+            .fetch_all::<OpportunityAuditRow>()
+            .await
+            .map_err(StorageError::from)?;
+        Ok(Paginated::from_request(rows, total, &page))
     }
 
     async fn calibration_snapshots(

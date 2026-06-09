@@ -16,6 +16,7 @@ oxide-arb-repository = { workspace = true }
 oxide-arb-algorithm  = { workspace = true }
 oxide-arb-control    = { workspace = true }
 oxide-arb-risk       = { workspace = true }
+oxide-arb-web        = { workspace = true }
 
 # ── Async runtime ──────────────────────────────────────────────────
 tokio      = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "time", "sync"] }

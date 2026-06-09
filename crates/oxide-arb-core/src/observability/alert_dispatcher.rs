@@ -1,34 +1,15 @@
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
+use oxide_arb_models::enums::common::AlertLevel;
 use std::{
-    fmt::{self, Display, Formatter},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 use teloxide::{prelude::*, types::ChatId};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum AlertSeverity {
-    Info,
-    Warning,
-    Critical,
-    Emergency,
-}
-
-impl Display for AlertSeverity {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Info => write!(f, "INFO"),
-            Self::Warning => write!(f, "WARNING"),
-            Self::Critical => write!(f, "CRITICAL"),
-            Self::Emergency => write!(f, "EMERGENCY"),
-        }
-    }
-}
-
 #[derive(Clone)]
 pub struct Alert {
-    pub severity: AlertSeverity,
+    pub severity: AlertLevel,
     pub title: String,
     pub body: String,
     pub timestamp: DateTime<Utc>,
@@ -122,14 +103,14 @@ impl AlertDispatcher {
         );
 
         match alert.severity {
-            AlertSeverity::Emergency | AlertSeverity::Critical => {
+            AlertLevel::Emergency | AlertLevel::Critical => {
                 self.send_telegram(&text).await;
                 self.send_webhook(&alert).await;
             }
-            AlertSeverity::Warning => {
+            AlertLevel::Warning => {
                 self.send_webhook(&alert).await;
             }
-            AlertSeverity::Info => {
+            AlertLevel::Info => {
                 tracing::info!(severity = %alert.severity, title = %alert.title, "{}", alert.body);
             }
         }
@@ -179,8 +160,9 @@ impl AlertDispatcher {
 
 #[cfg(test)]
 mod tests {
-    use super::{Alert, AlertDispatcher, AlertSeverity};
+    use super::{Alert, AlertDispatcher};
     use chrono::Utc;
+    use oxide_arb_models::enums::common::AlertLevel;
     use std::{
         sync::{Arc, Mutex},
         time::Duration,
@@ -188,7 +170,7 @@ mod tests {
 
     fn alert(title: &str) -> Alert {
         Alert {
-            severity: AlertSeverity::Critical,
+            severity: AlertLevel::Critical,
             title: title.to_owned(),
             body: "body".to_owned(),
             timestamp: Utc::now(),

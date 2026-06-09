@@ -37,7 +37,7 @@ use oxide_arb_models::types::MarketId as ModelsMarketId;
 use oxide_arb_models::{
     config::RiskConfig,
     domain::{
-        BlacklistInfo,
+        BlacklistInfo, CoreEvent, CoreEventPublisher,
         blacklist::UpsertBlacklistEntry,
         control_factor::FactorDecisionContext,
         opportunity::Opportunity,
@@ -84,6 +84,7 @@ where
     pub(crate) persistence: P,
     pub(crate) potential_loss_store: Arc<dyn PotentialLossStore>,
     pub(crate) audit_sink: Option<Arc<dyn AuditSink>>,
+    pub(crate) event_publisher: Option<CoreEventPublisher>,
     pub(crate) state_version: AtomicStateVersion,
     pub(crate) clock: Arc<dyn Clock>,
     pub(crate) last_emergency: RwLock<Option<(DateTime<Utc>, String)>>,
@@ -322,6 +323,13 @@ where
             };
             let _ = self.persistence.create_audit(tripped_audit.into()).await;
             let _ = self.record_emergency(tripped_level, &reason, metrics).await;
+            // Surface the trip to the real-time bus (best-effort, non-blocking).
+            if let Some(publisher) = &self.event_publisher {
+                publisher.publish(CoreEvent::CircuitBreakerTripped {
+                    level: tripped_level.as_u8(),
+                    reason,
+                });
+            }
         }
 
         if let Some(ref entry) = auto_bl_entry {

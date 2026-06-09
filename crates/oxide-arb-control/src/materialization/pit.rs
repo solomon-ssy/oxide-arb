@@ -6,7 +6,7 @@ use std::{
 use chrono::Utc;
 use oxide_arb_models::{
     domain::{
-        MarketInfo, MarketPitSnapshotInfo,
+        MarketInfo, MarketPitSnapshotInfo, TimeWindow,
         control_factor::{
             EvidenceSourceBundle, InputFallbackPolicy, InputResolutionReport, MarketReplayContext,
             MaterializationRunManifest, MissingPointInTimeInput, PointInTimeInputManifest,
@@ -21,7 +21,7 @@ use oxide_arb_models::{
 use oxide_arb_repository::traits::{
     BalanceSnapshotRepository, EventRepository, EvidenceTimeseriesRepository, MarketRepository,
     PositionRepository, PotentialLossRepository, ReconciliationRepository,
-    ResolutionEventRepository, RiskAuditRepository, RuntimeConfigVersionRepository, TimeWindow,
+    ResolutionEventRepository, RiskAuditRepository, RuntimeConfigVersionRepository,
     TradeRepository,
 };
 

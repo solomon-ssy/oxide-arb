@@ -6,7 +6,7 @@
 //! idempotently by [`crate::post_trade`], replayed from the row on crash.
 
 use crate::{
-    bridge::risk_metrics::CoreRiskMetrics,
+    bridge::{execution_mode::ExecutionModeHandle, risk_metrics::CoreRiskMetrics},
     control::{
         factor_shadow::{ShadowDecisionWriter, ShadowEvaluator},
         factor_snapshot::FactorSnapshotStore,
@@ -62,7 +62,7 @@ pub struct ExecutionPipelineDeps<R: TradeRepository + Send + Sync + 'static = Pg
     pub fsm: Arc<ExecutionFSM>,
     pub market_inflight: Arc<MarketInFlightRegistry>,
     pub metrics: Arc<MetricsHub>,
-    pub execution_mode: ExecutionMode,
+    pub mode: ExecutionModeHandle,
     pub trade_repo: Arc<R>,
     pub audit_writer: Arc<ExecutionAuditWriter>,
     /// Rung after each durable `*_observed` write to wake the post-trade relay.
@@ -86,7 +86,7 @@ pub struct ExecutionPipeline<R: TradeRepository + Send + Sync + 'static = PgTrad
     fsm: Arc<ExecutionFSM>,
     market_inflight: Arc<MarketInFlightRegistry>,
     metrics: Arc<MetricsHub>,
-    execution_mode: ExecutionMode,
+    mode: ExecutionModeHandle,
     trade_repo: Arc<R>,
     audit_writer: Arc<ExecutionAuditWriter>,
     relay_notify: Arc<Notify>,
@@ -115,7 +115,7 @@ impl<R: TradeRepository + Send + Sync + 'static> ExecutionPipeline<R> {
             fsm: deps.fsm,
             market_inflight: deps.market_inflight,
             metrics: deps.metrics,
-            execution_mode: deps.execution_mode,
+            mode: deps.mode,
             trade_repo: deps.trade_repo,
             audit_writer: deps.audit_writer,
             relay_notify: deps.relay_notify,
@@ -281,7 +281,7 @@ impl<R: TradeRepository + Send + Sync + 'static> ExecutionPipeline<R> {
 
         // Resolve the execution-time factor decision bundle from the current
         // published snapshot (safety factors act on the freshest information).
-        let fail_closed = self.execution_mode == ExecutionMode::Live;
+        let fail_closed = self.mode.current() == ExecutionMode::Live;
         let factor_context = Self::build_factor_context(&published, opp, Utc::now(), fail_closed);
 
         // Merge detection- and execution-time factor traces for the audit.
@@ -538,7 +538,7 @@ impl<R: TradeRepository + Send + Sync + 'static> ExecutionPipeline<R> {
             .plan_builder
             .build(opp, approved_size, &reservation, execution_id);
         let pending_trade =
-            match build_pending_trade(&trade_id, &plan, opp, &snapshot, self.execution_mode) {
+            match build_pending_trade(&trade_id, &plan, opp, &snapshot, self.mode.current()) {
                 Ok(trade) => trade,
                 Err(e) => {
                     let _ = self.capital_manager.release_sync(&reservation);
@@ -614,8 +614,8 @@ impl<R: TradeRepository + Send + Sync + 'static> ExecutionPipeline<R> {
         self.relay_notify.notify_one();
     }
 
-    pub const fn execution_mode(&self) -> ExecutionMode {
-        self.execution_mode
+    pub fn execution_mode(&self) -> ExecutionMode {
+        self.mode.current()
     }
 
     #[cold]

@@ -2,7 +2,8 @@ use chrono::{DateTime, Utc};
 use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::{
     domain::{
-        NewTrade, ReportTradeStats, TradeInfo, TradeObservation, evidence::EvidenceQueryResult,
+        EdgeBucket, MarketPerformanceRow, NewTrade, PageRequest, Paginated, ReportTradeStats,
+        TimeWindow, TradeInfo, TradeObservation, TradePageQuery, evidence::EvidenceQueryResult,
     },
     enums::common::{TradeBusinessOutcome, TradeState},
     types::{ExecutionId, MarketId, TradeId},
@@ -73,6 +74,23 @@ pub trait TradeRepository: Send + Sync {
         &self,
         execution_id: &ExecutionId,
     ) -> Result<Vec<TradeInfo>, StorageError>;
+
+    /// Paginated, filtered list for the web trades dashboard (newest first).
+    async fn page(&self, query: TradePageQuery) -> Result<Paginated<TradeInfo>, StorageError>;
+
+    /// Detected-edge histogram over the window, aggregated SQL-side (no per-trade
+    /// row load). Buckets are right-open basis-point ranges; rows with a NULL
+    /// `detected_edge_bps` are excluded.
+    async fn edge_histogram(&self, window: TimeWindow) -> Result<Vec<EdgeBucket>, StorageError>;
+
+    /// Per-market performance aggregate over the window, computed with SQL
+    /// `GROUP BY market_id` (so trade rows never materialize in memory), ordered
+    /// by net profit descending and paginated.
+    async fn market_performance(
+        &self,
+        window: TimeWindow,
+        page: PageRequest,
+    ) -> Result<Paginated<MarketPerformanceRow>, StorageError>;
 
     async fn find_by_market(
         &self,

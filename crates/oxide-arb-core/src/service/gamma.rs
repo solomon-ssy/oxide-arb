@@ -243,7 +243,7 @@ impl GammaService {
         };
         let tokens = self.market_registry.active_subscribable_tokens();
         let count = tokens.len();
-        coordinator.sync_to_tokens(tokens);
+        coordinator.sync_to_tokens(&tokens);
         tracing::info!(
             tokens = count,
             subscribed = coordinator.subscribed_count(),

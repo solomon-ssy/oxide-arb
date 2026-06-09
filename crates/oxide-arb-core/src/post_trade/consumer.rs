@@ -15,7 +15,7 @@ use oxide_arb_models::{
         trade::{PostTradeInput, TradeInfo},
     },
     enums::{
-        common::{ExecutionMode, RedeemStatus, Side},
+        common::{RedeemStatus, Side},
         risk::TradeAccountingPhase,
     },
     types::{PositionId, Probability},
@@ -38,7 +38,6 @@ pub struct PostTradeConsumer {
     pub metrics_state: Arc<RiskMetricsState>,
     pub metrics_refresh: Option<Arc<RiskMetricsRefreshService>>,
     pub metrics: Arc<MetricsHub>,
-    pub execution_mode: ExecutionMode,
 }
 
 impl PostTradeConsumer {
@@ -151,7 +150,7 @@ impl PostTradeConsumer {
             avg_entry_price: trade.price,
             total_cost_usd: trade.cost_usd,
             total_fees_usd: trade.fee_usd,
-            redeem_status: RedeemStatus::initial_for_mode(self.execution_mode),
+            redeem_status: RedeemStatus::initial_for_mode(trade.execution_mode),
         };
         self.position_repo.create(position).await?;
         Ok(())

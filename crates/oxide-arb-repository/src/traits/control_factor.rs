@@ -58,6 +58,14 @@ pub trait ControlFactorRepository: Send + Sync {
         statuses: &[MaterializationRunStatus],
     ) -> Result<Option<ControlFactorMaterializationRunInfo>, StorageError>;
 
+    /// Returns up to `limit` `Queued` materialization run ids, oldest first
+    /// (FIFO), for the execute worker to acquire and run. Read-only; the worker
+    /// claims each id atomically via [`Self::try_acquire_materialization_run`].
+    async fn list_queued_materialization_runs(
+        &self,
+        limit: u64,
+    ) -> Result<Vec<MaterializationRunId>, StorageError>;
+
     async fn try_acquire_materialization_run(
         &self,
         run_id: &MaterializationRunId,

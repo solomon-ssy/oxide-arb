@@ -522,8 +522,8 @@ mod tests {
         config::{CalibrationConfig, EndgameDetectionConfig},
         domain::{
             BookLevel, DetectionRuntimeConfig, EvidenceSourceBundle, ExecutionRuntimeConfig,
-            OperatorRuntimeConfig, RiskLimitRuntimeConfig, RuntimeConfigDocument,
-            RuntimeConfigVersionInfo, SizingRuntimeConfig, control_factor::QueryFingerprint,
+            RiskLimitRuntimeConfig, RuntimeConfigDocument, RuntimeConfigVersionInfo,
+            SizingRuntimeConfig, control_factor::QueryFingerprint,
         },
         enums::{
             clickhouse::{ChDurationBucket, ChFactSource, ChMarketCategory, ChPriceZone, ChSide},
@@ -746,11 +746,7 @@ mod tests {
             config_hash: "cfg".to_owned(),
             schema_version: 1,
             config_json: serde_json::to_value(RuntimeConfigDocument {
-                schema_version: 1,
-                operator: OperatorRuntimeConfig {
-                    maintenance_mode: false,
-                    dry_run_mode: true,
-                },
+                schema_version: 2,
                 detection: DetectionRuntimeConfig {
                     min_profit_threshold_usd: dec!(0),
                     endgame_hours_before_close: 24,

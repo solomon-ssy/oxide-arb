@@ -1,10 +1,7 @@
 //! User account DTOs (read model, insert, partial update, credential changes).
 
 use crate::{
-    domain::{
-        pagination::PageRequest,
-        patch::{NullablePatch, Patch},
-    },
+    domain::patch::{NullablePatch, Patch},
     enums::rbac::UserStatus,
     types::UserId,
 };
@@ -73,28 +70,4 @@ pub struct UserPatch {
 #[derive(Debug, Clone)]
 pub struct ChangeUserPassword {
     pub password_hash: String,
-}
-
-/// Pagination + filter parameters for listing users.
-///
-/// `keyword` is a case-insensitive substring match against `username` and
-/// `nickname`. The pagination window is the shared [`PageRequest`], flattened
-/// so the query string stays flat (`?keyword=&status=&page=&size=`).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct UserPageQuery {
-    pub keyword: Option<String>,
-    pub status: Option<UserStatus>,
-    #[serde(flatten)]
-    pub page: PageRequest,
-}
-
-impl UserPageQuery {
-    /// Return a copy with the embedded pagination window normalized.
-    #[must_use]
-    pub fn normalized(self) -> Self {
-        Self {
-            page: self.page.normalized(),
-            ..self
-        }
-    }
 }

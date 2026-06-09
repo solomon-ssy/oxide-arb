@@ -4,6 +4,7 @@ pub mod context;
 pub mod policy;
 pub mod rbac;
 pub mod risk_engine_state;
+pub mod system_runtime_state;
 
 pub use context::SeedContext;
 pub use policy::SeedConflictPolicy;

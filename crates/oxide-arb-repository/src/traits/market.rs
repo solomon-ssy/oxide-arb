@@ -1,7 +1,10 @@
 use chrono::{DateTime, Utc};
 use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::{
-    domain::{MarketInfo, MarketPitSnapshotInfo, UpsertMarket, evidence::EvidenceQueryResult},
+    domain::{
+        MarketInfo, MarketPageQuery, MarketPitSnapshotInfo, Paginated, UpsertMarket,
+        evidence::EvidenceQueryResult,
+    },
     types::MarketId,
 };
 use std::{collections::HashSet, sync::Arc};
@@ -59,6 +62,9 @@ pub trait MarketRepository: Send + Sync {
             rows,
         )
     }
+    /// Paginated, filtered list for the web markets dashboard (newest first).
+    async fn page(&self, query: MarketPageQuery) -> Result<Paginated<MarketInfo>, StorageError>;
+
     async fn find_active(&self) -> Result<Arc<[MarketInfo]>, StorageError>;
     async fn find_by_event(&self, event_id: &str) -> Result<Vec<Arc<MarketInfo>>, StorageError>;
     async fn find_endgame_candidates(

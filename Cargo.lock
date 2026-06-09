@@ -35,6 +35,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "actix-files"
+version = "0.6.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df8c4f30e3272d7c345f88ae0aac3848507ef5ba871f9cc2a41c8085a0f0523b"
+dependencies = [
+ "actix-http",
+ "actix-service",
+ "actix-utils",
+ "actix-web",
+ "bitflags",
+ "bytes",
+ "derive_more 2.1.1",
+ "futures-core",
+ "http-range",
+ "log",
+ "mime",
+ "mime_guess",
+ "percent-encoding",
+ "pin-project-lite",
+ "v_htmlescape",
+]
+
+[[package]]
 name = "actix-http"
 version = "3.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -199,6 +222,22 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "actix-ws"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "decf53c3cdd63dd6f289980b430238f9a2f6d19f8bce8e418272e08d3da43f0f"
+dependencies = [
+ "actix-codec",
+ "actix-http",
+ "actix-web",
+ "bytestring",
+ "futures-core",
+ "futures-sink",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -3555,6 +3594,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "http-range"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "21dec9db110f5f872ed9699c3ecf50cf16f423502706ba5c72462e28d3157573"
+
+[[package]]
 name = "httparse"
 version = "1.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4890,6 +4935,7 @@ dependencies = [
  "oxide-arb-risk",
  "oxide-arb-storage",
  "oxide-arb-test-support",
+ "oxide-arb-web",
  "parking_lot",
  "polymarket_client_sdk_v2",
  "prometheus",
@@ -4950,6 +4996,7 @@ dependencies = [
  "chrono",
  "clickhouse",
  "config",
+ "flume 0.12.0",
  "hex",
  "linkme",
  "num-traits",
@@ -5079,20 +5126,26 @@ name = "oxide-arb-web"
 version = "0.1.0"
 dependencies = [
  "actix-cors",
+ "actix-files",
  "actix-rt",
  "actix-web",
+ "actix-ws",
  "async-trait",
  "casbin",
  "chrono",
+ "dashmap",
  "deadpool-redis",
  "flume 0.12.0",
+ "futures-util",
  "jsonwebtoken",
  "oxide-arb-control",
  "oxide-arb-error",
  "oxide-arb-models",
  "oxide-arb-repository",
  "oxide-arb-storage",
+ "oxide-arb-test-support",
  "redis",
+ "rust_decimal",
  "sea-orm",
  "serde",
  "serde_json",
@@ -8442,6 +8495,12 @@ dependencies = [
  "sha1_smol",
  "wasm-bindgen",
 ]
+
+[[package]]
+name = "v_htmlescape"
+version = "0.15.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4e8257fbc510f0a46eb602c10215901938b5c2a7d5e70fc11483b1d3c9b5b18c"
 
 [[package]]
 name = "validator"

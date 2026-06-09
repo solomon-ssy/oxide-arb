@@ -12,10 +12,10 @@ use actix_web::{http::Method, web};
 use chrono::Utc;
 use oxide_arb_models::{
     domain::{
-        ActivateRuntimeConfigRequest, CreateRuntimeConfigVersionRequest,
-        NewRuntimeConfigActivation, NewRuntimeConfigVersion, RollbackRuntimeConfigRequest,
-        RuntimeConfigActivationInfo, RuntimeConfigVersionInfo, RuntimeConfigVersionListQuery,
-        control_factor::AuditActor, runtime_config_hash,
+        ActivateRuntimeConfigRequest, CoreEvent, CoreEventPublisher,
+        CreateRuntimeConfigVersionRequest, NewRuntimeConfigActivation, NewRuntimeConfigVersion,
+        RollbackRuntimeConfigRequest, RuntimeConfigActivationInfo, RuntimeConfigVersionInfo,
+        RuntimeConfigVersionListQuery, control_factor::AuditActor, runtime_config_hash,
     },
     enums::{
         operation_log::OperationCategory,
@@ -164,7 +164,7 @@ pub async fn activate_version(
     )
     .await?;
     op_ctx.set_action(OperationCategory::RuntimeConfig, "runtime_config.activate");
-    record_activation(&op_ctx, &outcome);
+    record_activation(&op_ctx, &state.events, &outcome);
     Ok(WebResponse::ok(outcome))
 }
 
@@ -189,7 +189,7 @@ pub async fn rollback_version(
     )
     .await?;
     op_ctx.set_action(OperationCategory::RuntimeConfig, "runtime_config.rollback");
-    record_activation(&op_ctx, &outcome);
+    record_activation(&op_ctx, &state.events, &outcome);
     Ok(WebResponse::ok(outcome))
 }
 
@@ -244,7 +244,11 @@ async fn transition_version(
 
 /// Stamp the operation log for a runtime-config activation, linking the chained
 /// audit event the registry assigned to the activation row.
-fn record_activation(op_ctx: &OperationCtx, activation: &RuntimeConfigActivationInfo) {
+fn record_activation(
+    op_ctx: &OperationCtx,
+    events: &CoreEventPublisher,
+    activation: &RuntimeConfigActivationInfo,
+) {
     op_ctx.set_resource(
         ResourceType::RuntimeConfig,
         activation.runtime_config_version_id.to_string(),
@@ -255,6 +259,9 @@ fn record_activation(op_ctx: &OperationCtx, activation: &RuntimeConfigActivation
     if let Some(event_id) = activation.audit_event_id.clone() {
         op_ctx.link_governance(event_id);
     }
+    events.publish(CoreEvent::ConfigActivated {
+        version_id: activation.runtime_config_version_id.to_string(),
+    });
 }
 
 /// Assemble the governance audit envelope from the request-scoped attributes.

@@ -10,16 +10,21 @@
 use std::sync::Arc;
 
 use oxide_arb_control::governance::ControlFactorRegistry;
+use oxide_arb_models::domain::{
+    CoreEventPublisher, MarketDataPort, ReplayPort, RuntimeControlPort,
+};
 use oxide_arb_repository::traits::{
-    ControlFactorRepository, ControlFactorShadowDecisionRepository, MenuRepository,
-    OperationLogRepository, RoleMenuRepository, RolePermissionRepository, RoleRepository,
-    RuntimeConfigVersionRepository, UserRepository, UserRoleRepository,
+    ControlFactorRepository, ControlFactorShadowDecisionRepository, EvidenceTimeseriesRepository,
+    MarketRepository, MenuRepository, OperationLogRepository, PositionRepository, ReportRepository,
+    RiskAuditRepository, RoleMenuRepository, RolePermissionRepository, RoleRepository,
+    RuntimeConfigVersionRepository, TradeRepository, UserRepository, UserRoleRepository,
 };
 
 use crate::{
     audit::OperationLogBuffer,
     auth::casbin::{CasbinService, PermChecker},
     jwt::JwtService,
+    ws::SessionRegistry,
 };
 
 /// Dependency bundle shared by all handlers and middleware.
@@ -56,4 +61,28 @@ pub struct AppState {
     pub operation_logs: Arc<dyn OperationLogRepository>,
     /// Non-blocking producer handle for the operation-log writer pipeline.
     pub operation_log: OperationLogBuffer,
+    /// Money-critical runtime control surface (mode/halt/resume/CB/blacklist),
+    /// dependency-inverted so the web layer never depends on `oxide-arb-core`.
+    pub control: Arc<dyn RuntimeControlPort>,
+    /// Live market-data surface (published book reads + WS subscription control).
+    pub market_data: Arc<dyn MarketDataPort>,
+    /// Replay enqueue surface (`POST /replay` → queued materialization run).
+    pub replay: Arc<dyn ReplayPort>,
+    /// Non-blocking producer for the real-time event bus (WS broadcaster +
+    /// governance/control-plane emissions).
+    pub events: CoreEventPublisher,
+    /// Open-position reads for the risk dashboard.
+    pub positions: Arc<dyn PositionRepository>,
+    /// Trade history reads (paginated list / detail) for the trades dashboard.
+    pub trades: Arc<dyn TradeRepository>,
+    /// Market metadata reads (paginated list / detail) for the markets dashboard.
+    pub markets: Arc<dyn MarketRepository>,
+    /// Settled `PnL` report reads (daily / weekly) for the `PnL` + analytics views.
+    pub reports: Arc<dyn ReportRepository>,
+    /// `ClickHouse` evidence timeseries reads (opportunity detections / audits).
+    pub evidence: Arc<dyn EvidenceTimeseriesRepository>,
+    /// Risk decision audit reads (trade decisions, risk events) over a window.
+    pub risk_audit: Arc<dyn RiskAuditRepository>,
+    /// Live WebSocket session registry (shared with the broadcaster task).
+    pub ws_sessions: SessionRegistry,
 }

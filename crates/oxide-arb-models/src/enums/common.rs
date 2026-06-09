@@ -216,6 +216,18 @@ pub enum AlertLevel {
     Emergency,
 }
 
+impl Display for AlertLevel {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        let label = match self {
+            Self::Info => "INFO",
+            Self::Warning => "WARNING",
+            Self::Critical => "CRITICAL",
+            Self::Emergency => "EMERGENCY",
+        };
+        f.write_str(label)
+    }
+}
+
 active_string_enum! {
     /// Polymarket event category for fee-rate lookup and opportunity scoring.
     @derive(PartialOrd, Ord)

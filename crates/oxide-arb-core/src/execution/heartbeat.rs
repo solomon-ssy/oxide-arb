@@ -1,6 +1,6 @@
 //! Periodic venue connectivity probe — feeds execution health into the risk engine.
 
-use crate::execution::fsm::ExecutionFSM;
+use crate::{bridge::execution_mode::ExecutionModeHandle, execution::fsm::ExecutionFSM};
 use oxide_arb_api::clob::ClobClient;
 use oxide_arb_error::OxideError;
 use oxide_arb_models::enums::common::ExecutionMode;
@@ -14,7 +14,7 @@ pub struct HeartbeatTask {
     fsm: Arc<ExecutionFSM>,
     interval_secs: u64,
     shutdown: CancellationToken,
-    execution_mode: ExecutionMode,
+    mode: ExecutionModeHandle,
 }
 
 impl HeartbeatTask {
@@ -24,7 +24,7 @@ impl HeartbeatTask {
         fsm: Arc<ExecutionFSM>,
         interval_secs: u64,
         shutdown: CancellationToken,
-        execution_mode: ExecutionMode,
+        mode: ExecutionModeHandle,
     ) -> Self {
         Self {
             clob_client,
@@ -32,17 +32,14 @@ impl HeartbeatTask {
             fsm,
             interval_secs: interval_secs.max(1),
             shutdown,
-            execution_mode,
+            mode,
         }
     }
 
     pub async fn run(self) -> Result<(), OxideError> {
-        if self.execution_mode != ExecutionMode::Live {
-            tracing::debug!("heartbeat task disabled outside Live mode");
-            self.shutdown.cancelled().await;
-            return Ok(());
-        }
-
+        // The probe self-gates on the live mode each tick so a governed
+        // transition into / out of Live activates or quiesces it without a
+        // task respawn.
         let mut ticker = tokio::time::interval(Duration::from_secs(self.interval_secs));
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         ticker.tick().await;
@@ -54,6 +51,9 @@ impl HeartbeatTask {
                     return Ok(());
                 }
                 _ = ticker.tick() => {
+                    if self.mode.current() != ExecutionMode::Live {
+                        continue;
+                    }
                     match self.clob_client.collateral_balance().await {
                         Ok(_) => {
                             tracing::debug!("heartbeat OK");

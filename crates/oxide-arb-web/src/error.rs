@@ -26,6 +26,7 @@ use oxide_arb_error::{
     rbac::RbacError,
     storage::StorageError,
 };
+use oxide_arb_models::domain::{RuntimeControlError, WindowQueryError};
 use thiserror::Error;
 
 use crate::response::WebResponse;
@@ -198,6 +199,30 @@ impl From<RegistryError> for WebError {
             RegistryError::Storage(inner) => inner.into(),
             // A canonical-digest failure is a server-side integrity fault.
             RegistryError::CanonicalDigest(inner) => Self::Internal(inner.to_string()),
+        }
+    }
+}
+
+impl From<WindowQueryError> for WebError {
+    fn from(error: WindowQueryError) -> Self {
+        // Both variants are caller-supplied window misuse → 400.
+        Self::BadRequest(error.to_string())
+    }
+}
+
+impl From<RuntimeControlError> for WebError {
+    fn from(error: RuntimeControlError) -> Self {
+        match error {
+            // 409 — the requested transition is invalid in the current state
+            // (e.g. entering Live without credentials / a metrics refresher).
+            RuntimeControlError::Precondition(_) => Self::Conflict(error.to_string()),
+            // 503 — the trading loop did not quiesce, or post-commit activation
+            // could not establish a safe state. The system stays halted.
+            RuntimeControlError::QuiesceTimeout { .. } | RuntimeControlError::Activation(_) => {
+                Self::ServiceUnavailable(error.to_string())
+            }
+            // 500 — an underlying engine operation failed (logged, masked).
+            RuntimeControlError::Engine(_) => Self::Internal(error.to_string()),
         }
     }
 }

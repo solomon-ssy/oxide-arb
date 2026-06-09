@@ -1,3 +1,4 @@
+use crate::bridge::execution_mode::ExecutionModeHandle;
 use chrono::Utc;
 use num_traits::ToPrimitive;
 use oxide_arb_api::{clob::ClobClient, ws::ClobWsManager};
@@ -13,7 +14,7 @@ pub struct HealthChecker {
     ch_pool: Arc<ClickHousePool>,
     ws_manager: Arc<ClobWsManager>,
     clob_client: Option<Arc<ClobClient>>,
-    execution_mode: ExecutionMode,
+    mode: ExecutionModeHandle,
 }
 
 impl HealthChecker {
@@ -22,14 +23,14 @@ impl HealthChecker {
         ch_pool: Arc<ClickHousePool>,
         ws_manager: Arc<ClobWsManager>,
         clob_client: Option<Arc<ClobClient>>,
-        execution_mode: ExecutionMode,
+        mode: ExecutionModeHandle,
     ) -> Self {
         Self {
             pg_pool,
             ch_pool,
             ws_manager,
             clob_client,
-            execution_mode,
+            mode,
         }
     }
 
@@ -119,7 +120,7 @@ impl HealthChecker {
     }
 
     async fn check_open_orders_invariant(&self) -> SubsystemHealth {
-        if self.execution_mode != ExecutionMode::Live {
+        if self.mode.current() != ExecutionMode::Live {
             return SubsystemHealth {
                 name: "clob_open_orders".into(),
                 healthy: true,

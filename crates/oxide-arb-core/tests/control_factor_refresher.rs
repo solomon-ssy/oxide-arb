@@ -89,6 +89,13 @@ impl ControlFactorRepository for MockRefresherRepo {
         Ok(None)
     }
 
+    async fn list_queued_materialization_runs(
+        &self,
+        _limit: u64,
+    ) -> Result<Vec<MaterializationRunId>, StorageError> {
+        Ok(Vec::new())
+    }
+
     async fn latest_run_for_schedule(
         &self,
         _schedule_id: &str,

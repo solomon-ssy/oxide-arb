@@ -5,7 +5,7 @@ use chrono::{Duration, Utc};
 use oxide_arb_algorithm::scorer::ScoredOpportunity;
 use oxide_arb_api::{fees::FeeCalculator, ws::ClobWsManager};
 use oxide_arb_core::{
-    bridge::risk_metrics::CoreRiskMetrics,
+    bridge::{execution_mode::ExecutionModeHandle, risk_metrics::CoreRiskMetrics},
     control::factor_snapshot::FactorSnapshotStore,
     execution::{
         capital_manager::CapitalManager,
@@ -364,7 +364,7 @@ fn factor_test_risk_metrics(
         metrics_state,
         exposure,
         ws_manager,
-        execution_mode,
+        ExecutionModeHandle::new(execution_mode),
     ))
 }
 
@@ -402,13 +402,13 @@ fn pipeline(
             Arc::new(MarketRegistry::new()),
         ),
         dispatcher: Dispatcher::new(
-            execution_mode,
-            Some(Arc::clone(&book_store)),
+            ExecutionModeHandle::new(execution_mode),
+            Arc::clone(&book_store),
             Arc::clone(&fee_calculator),
             Arc::clone(&metrics),
         ),
         order_strategy: FokOrderStrategy::new(
-            execution_mode,
+            ExecutionModeHandle::new(execution_mode),
             None,
             fee_calculator,
             30_000,
@@ -420,7 +420,7 @@ fn pipeline(
         fsm,
         market_inflight: Arc::new(MarketInFlightRegistry::new()),
         metrics,
-        execution_mode,
+        mode: ExecutionModeHandle::new(execution_mode),
         trade_repo: Arc::new(MockTradeRepository::default()),
         audit_writer,
         relay_notify: Arc::new(Notify::new()),

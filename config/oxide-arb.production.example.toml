@@ -64,9 +64,14 @@ full_sync_interval_secs = 300
 page_size = 100
 
 # ── Execution ─────────────────────────────────────────────────────────────────
+#
+# The active execution mode is NOT set here. It lives in the governed
+# `system_runtime_state` singleton (seeded to dry_run) and is escalated to
+# `live` only through the audited `POST /system/mode` transition (preflight +
+# quiesce + hash chain + operation log). A fresh production database therefore
+# always boots in dry_run until an operator deliberately switches it.
 
 [execution]
-execution_mode = "live"
 
 [execution.timeout]
 max_validation_time_ms = 500

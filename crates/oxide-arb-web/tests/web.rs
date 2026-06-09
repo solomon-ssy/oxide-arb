@@ -18,6 +18,8 @@ mod redis;
 mod auth;
 #[path = "web/authz.rs"]
 mod authz;
+#[path = "web/business.rs"]
+mod business;
 #[path = "web/governance.rs"]
 mod governance;
 #[path = "web/operation_log.rs"]

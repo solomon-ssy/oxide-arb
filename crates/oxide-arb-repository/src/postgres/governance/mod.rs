@@ -6,9 +6,11 @@ pub mod operation_log;
 pub mod report;
 pub mod resolution_event;
 pub mod runtime_config;
+pub mod system_runtime_state;
 
 pub use event::*;
 pub use operation_log::*;
 pub use report::*;
 pub use resolution_event::*;
 pub use runtime_config::*;
+pub use system_runtime_state::*;

@@ -8,7 +8,10 @@
 //! Optional env:
 //! - `OXIDE_ARB_TEST_TOKEN_ID` — decimal CLOB token id (skips Gamma discovery)
 
-use oxide_arb_api::{gamma::GammaClient, ws::ClobWsManager};
+use oxide_arb_api::{
+    gamma::GammaClient,
+    ws::{ClobWsManager, SubscriptionSource},
+};
 use oxide_arb_models::{
     config::{GammaConfig, PolymarketConfig, WebSocketConfig},
     domain::pipeline::PipelineEvent,
@@ -40,7 +43,7 @@ async fn ws_receives_book_snapshot_for_subscribed_token() {
         None,
         None,
     );
-    manager.subscribe(from_ref(&token));
+    manager.subscribe_tokens(SubscriptionSource::Engine, from_ref(&token));
     let events = manager.events();
 
     let result = tokio::time::timeout(Duration::from_secs(90), async {

@@ -2,7 +2,7 @@ use crate::{
     bridge::risk_metrics::CoreRiskMetrics,
     execution::{fsm::ExecutionFSM, settlement::payout::compute_settlement_economics},
     observability::{
-        alert_dispatcher::{Alert, AlertDispatcher, AlertSeverity},
+        alert_dispatcher::{Alert, AlertDispatcher},
         execution_audit::ExecutionAuditWriter,
         metrics_hub::MetricsHub,
     },
@@ -19,12 +19,13 @@ use oxide_arb_error::{OxideError, redeem::RedeemError};
 use oxide_arb_models::{
     config::settlement::SettlementConfig,
     domain::{
+        CoreEvent, CoreEventPublisher,
         position::{MarkRedeemedParams, PositionInfo},
         settlement::{
             MarketSettlementInput, MarketSettlementRequest, NewResolutionEvent, SettlementEconomics,
         },
     },
-    enums::common::{ExecutionMode, RedeemStatus, SettlementTrigger},
+    enums::common::{AlertLevel, ExecutionMode, RedeemStatus, SettlementTrigger},
     types::{ResolutionEventId, TokenId},
 };
 use oxide_arb_repository::{
@@ -48,8 +49,8 @@ pub struct MarketSettlementService {
     alerts: Arc<AlertDispatcher>,
     audit_writer: Arc<ExecutionAuditWriter>,
     metrics_refresh: Option<Arc<RiskMetricsRefreshService>>,
+    events: CoreEventPublisher,
     config: Arc<SettlementConfig>,
-    execution_mode: ExecutionMode,
 }
 
 pub struct MarketSettlementServiceDeps {
@@ -66,8 +67,8 @@ pub struct MarketSettlementServiceDeps {
     pub alerts: Arc<AlertDispatcher>,
     pub audit_writer: Arc<ExecutionAuditWriter>,
     pub metrics_refresh: Option<Arc<RiskMetricsRefreshService>>,
+    pub events: CoreEventPublisher,
     pub config: Arc<SettlementConfig>,
-    pub execution_mode: ExecutionMode,
 }
 
 impl MarketSettlementService {
@@ -86,8 +87,23 @@ impl MarketSettlementService {
             alerts: deps.alerts,
             audit_writer: deps.audit_writer,
             metrics_refresh: deps.metrics_refresh,
+            events: deps.events,
             config: deps.config,
-            execution_mode: deps.execution_mode,
+        }
+    }
+
+    /// Effective redeem mode for a position, derived from its persisted
+    /// `redeem_status` rather than the live global execution mode.
+    ///
+    /// Money-critical: a position opened in Live carries `redeem_status =
+    /// Pending` and must be redeemed on-chain even if the bot has since been
+    /// switched to a simulated mode; conversely a simulated position
+    /// (`NotRequired`) must never trigger a real redeem after a switch into
+    /// Live. The trade-origin mode is the source of truth, not the global one.
+    const fn position_redeem_mode(pos: &PositionInfo) -> ExecutionMode {
+        match pos.redeem_status {
+            RedeemStatus::Pending => ExecutionMode::Live,
+            _ => ExecutionMode::DryRun,
         }
     }
 
@@ -105,6 +121,16 @@ impl MarketSettlementService {
 
         for pos in positions {
             self.settle_position(req, pos).await?;
+        }
+
+        // Surface the resolution to the real-time bus. `outcome` is `true` when
+        // the winning token is the market's YES leg (best-effort: skipped when
+        // the market is not in the live registry).
+        if let Some(market) = self.market_registry.get_market(&req.market_id) {
+            self.events.publish(CoreEvent::MarketResolved {
+                market_id: req.market_id.clone(),
+                outcome: req.winning_token_id == market.token_yes,
+            });
         }
 
         if let Some(refresh) = &self.metrics_refresh {
@@ -142,7 +168,7 @@ impl MarketSettlementService {
                 "redeem terminal failure"
             );
             self.alerts.dispatch_background(Alert {
-                severity: AlertSeverity::Critical,
+                severity: AlertLevel::Critical,
                 title: "Redeem terminal failure".to_owned(),
                 body: format!(
                     "Position {} in market {} reached max redeem attempts: {reason}",
@@ -186,9 +212,9 @@ impl MarketSettlementService {
         req: &MarketSettlementRequest,
         pos: &PositionInfo,
     ) -> Result<Option<RedeemOutcome>, OxideError> {
-        match self.redeem_position(req).await {
+        match self.redeem_position(req, pos).await {
             Ok(outcome) => {
-                if self.execution_mode == ExecutionMode::Live {
+                if Self::position_redeem_mode(pos) == ExecutionMode::Live {
                     self.metrics.settlement_redeem_success_total.inc();
                 }
                 Ok(Some(outcome))
@@ -230,7 +256,7 @@ impl MarketSettlementService {
                     settlement_payout_usd: economics.payout_usd,
                     realized_pnl: economics.realized_pnl_usd,
                     redeem_tx_hash: redeem_outcome.tx_hash,
-                    redeem_status: RedeemStatus::settled_for_mode(self.execution_mode),
+                    redeem_status: RedeemStatus::settled_for_mode(Self::position_redeem_mode(pos)),
                     settlement_trigger: req.source,
                     redeem_terminal_reason: None,
                 },
@@ -510,7 +536,9 @@ impl MarketSettlementService {
     async fn redeem_position(
         &self,
         req: &MarketSettlementRequest,
+        pos: &PositionInfo,
     ) -> Result<RedeemOutcome, RedeemError> {
+        let mode = Self::position_redeem_mode(pos);
         let market = self.market_registry.get_market(&req.market_id);
         let neg_risk = self
             .market_registry
@@ -528,10 +556,10 @@ impl MarketSettlementService {
                 |market| market.token_no.clone(),
             ),
             neg_risk,
-            execution_mode: self.execution_mode,
+            execution_mode: mode,
         };
 
-        match self.execution_mode {
+        match mode {
             ExecutionMode::DryRun => Ok(RedeemOutcome::dry_run()),
             ExecutionMode::Paper => Ok(RedeemOutcome::paper(&req.market_id)),
             ExecutionMode::Live => {

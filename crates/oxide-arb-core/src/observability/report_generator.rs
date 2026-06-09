@@ -1,4 +1,4 @@
-use crate::observability::alert_dispatcher::{Alert, AlertDispatcher, AlertSeverity};
+use crate::observability::alert_dispatcher::{Alert, AlertDispatcher};
 use chrono::{DateTime, Datelike, Days, NaiveDate, TimeZone, Utc, Weekday};
 use oxide_arb_error::OxideError;
 use oxide_arb_models::{
@@ -6,7 +6,7 @@ use oxide_arb_models::{
         ReportRiskSummary, ReportTradeStats, SettledPnlStats, SettledPositionStats,
         trade::{DailyReport, WeeklyReport},
     },
-    enums::report::ReportSchemaVersion,
+    enums::{common::AlertLevel, report::ReportSchemaVersion},
     types::Usd,
 };
 use oxide_arb_repository::{
@@ -145,9 +145,9 @@ impl ReportGenerator {
 
     async fn dispatch_daily_alert(&self, report: &DailyReport) {
         let severity = if report.settled_pnl.failed_accounting_count > 0 {
-            AlertSeverity::Warning
+            AlertLevel::Warning
         } else {
-            AlertSeverity::Info
+            AlertLevel::Info
         };
         self.alerts
             .dispatch(Alert {
@@ -168,7 +168,7 @@ impl ReportGenerator {
     async fn dispatch_weekly_alert(&self, report: &WeeklyReport) {
         self.alerts
             .dispatch(Alert {
-                severity: AlertSeverity::Info,
+                severity: AlertLevel::Info,
                 title: format!("Weekly report {}", report.week_start),
                 body: format!(
                     "settled_pnl={} trades={} settled_positions={}",

@@ -4,7 +4,7 @@ use super::{
 use crate::{
     infra::sharding::shard_index,
     observability::{
-        alert_dispatcher::{Alert, AlertDispatcher, AlertSeverity},
+        alert_dispatcher::{Alert, AlertDispatcher},
         backpressure::BackpressurePolicy,
         book_fact_writer::BookFactWriter,
         metrics_hub::MetricsHub,
@@ -19,7 +19,9 @@ use oxide_arb_models::{
         settlement::MarketSettlementRequest,
     },
     enums::{
-        clickhouse::ChSnapshotReason, common::SettlementTrigger, pipeline::ShardConnectionStatus,
+        clickhouse::ChSnapshotReason,
+        common::{AlertLevel, SettlementTrigger},
+        pipeline::ShardConnectionStatus,
     },
     types::TokenId,
 };
@@ -218,7 +220,7 @@ impl BookApplyWorker {
                     self.metrics.settlement_channel_dropped_total.inc();
                     tracing::error!(%error, %market_id, "settlement channel send failed");
                     self.alerts.dispatch_background(Alert {
-                        severity: AlertSeverity::Warning,
+                        severity: AlertLevel::Warning,
                         title: "Settlement channel dropped".to_owned(),
                         body: format!(
                             "Market {market_id} resolution event was dropped; Gamma resolved-market retry is the safety net"

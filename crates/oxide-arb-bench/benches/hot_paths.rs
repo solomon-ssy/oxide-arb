@@ -16,7 +16,8 @@ use oxide_arb_api::{
 };
 use oxide_arb_core::{
     bridge::{
-        CoreOpportunityPipeline, fee_estimator::CoreFeeEstimator, risk_metrics::CoreRiskMetrics,
+        CoreOpportunityPipeline, execution_mode::ExecutionModeHandle,
+        fee_estimator::CoreFeeEstimator, risk_metrics::CoreRiskMetrics,
     },
     control::factor_snapshot::FactorSnapshotStore,
     detection::{coalescer::Coalescer, funnel::Funnel, scanner::Scanner},
@@ -888,7 +889,7 @@ fn execution_bench_risk_metrics(
         metrics_state,
         exposure,
         ws_manager,
-        ExecutionMode::Paper,
+        ExecutionModeHandle::new(ExecutionMode::Paper),
     ))
 }
 
@@ -939,13 +940,13 @@ fn execution_bench_setup() -> (
                 Arc::new(MarketRegistry::new()),
             ),
             dispatcher: Dispatcher::new(
-                ExecutionMode::Paper,
-                Some(Arc::clone(&book_store)),
+                ExecutionModeHandle::new(ExecutionMode::Paper),
+                Arc::clone(&book_store),
                 Arc::clone(&fee_calculator),
                 Arc::clone(&metrics),
             ),
             order_strategy: FokOrderStrategy::new(
-                ExecutionMode::Paper,
+                ExecutionModeHandle::new(ExecutionMode::Paper),
                 None,
                 fee_calculator,
                 30_000,
@@ -957,7 +958,7 @@ fn execution_bench_setup() -> (
             fsm,
             market_inflight: Arc::new(MarketInFlightRegistry::new()),
             metrics,
-            execution_mode: ExecutionMode::Paper,
+            mode: ExecutionModeHandle::new(ExecutionMode::Paper),
             trade_repo,
             audit_writer,
             relay_notify: Arc::new(Notify::new()),

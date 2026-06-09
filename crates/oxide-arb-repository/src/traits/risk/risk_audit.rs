@@ -1,6 +1,7 @@
 use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::domain::{
-    NewRiskAuditEvent, RiskAuditEventInfo, evidence::EvidenceQueryResult,
+    NewRiskAuditEvent, PageRequest, Paginated, RiskAuditEventInfo, TimeWindow,
+    evidence::EvidenceQueryResult,
 };
 
 use chrono::{DateTime, Utc};
@@ -16,6 +17,14 @@ pub trait RiskAuditRepository: Send + Sync {
         from: DateTime<Utc>,
         to: DateTime<Utc>,
     ) -> Result<Vec<RiskAuditEventInfo>, StorageError>;
+
+    /// Paginated risk-decision audit events in the window (newest first) for the
+    /// trades-decisions dashboard. Returns a page plus the total match count.
+    async fn find_between_page(
+        &self,
+        window: TimeWindow,
+        page: PageRequest,
+    ) -> Result<Paginated<RiskAuditEventInfo>, StorageError>;
 
     async fn find_between_evidence(
         &self,

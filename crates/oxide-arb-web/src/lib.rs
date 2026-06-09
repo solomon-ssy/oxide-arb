@@ -20,22 +20,17 @@ pub mod middleware;
 pub mod response;
 pub mod routes;
 pub mod state;
-
-use std::{sync::Arc, time::Duration};
+pub mod static_files;
+pub mod ws;
 
 use actix_cors::Cors;
 use actix_web::{App, HttpServer, middleware::from_fn, web};
-use flume::Receiver;
 use oxide_arb_error::{OxideError, OxideResult};
-use oxide_arb_models::{config::WebConfig, domain::NewOperationLog};
+use oxide_arb_models::config::WebConfig;
 use tokio_util::sync::CancellationToken;
 use tracing_actix_web::TracingLogger;
 
 pub use state::AppState;
-
-/// Operation-log writer flush threshold (rows) and cadence.
-const OPERATION_LOG_BATCH_SIZE: usize = 64;
-const OPERATION_LOG_FLUSH_INTERVAL: Duration = Duration::from_millis(250);
 
 /// Build the CORS middleware from configuration.
 ///
@@ -54,46 +49,35 @@ pub fn cors_from(config: &WebConfig) -> Cors {
 
 /// Run the HTTP server until `shutdown` is cancelled.
 ///
-/// Binds `listen_host:listen_port`, spawns the operation-log writer task (draining
-/// `operation_log_rx` into the operation log until `shutdown`), wraps every
-/// request with the operation-audit, request-id, tracing, and CORS middleware,
-/// and serves the configured routes. On cancellation it performs a graceful stop
-/// (draining in-flight requests); the writer flushes its tail on the same token.
+/// Binds `listen_host:listen_port`, wraps every request with the operation-audit,
+/// request-id, tracing, and CORS middleware, and serves the configured routes.
+/// On cancellation it performs a graceful stop (draining in-flight requests).
 ///
-/// `operation_log_rx` is the receiver paired with the
-/// [`OperationLogBuffer`](audit::OperationLogBuffer) held in
-/// `state.operation_log` — create both with
-/// [`OperationLogBuffer::new`](audit::OperationLogBuffer::new).
+/// The operation-log writer is a separate process-level task owned by
+/// `oxide-arb-core` (`queue_operation_log_writer`), draining the receiver paired
+/// with `state.operation_log`; it is intentionally *not* spawned here so that it
+/// participates in the unified staged shutdown.
 pub async fn spawn_web_server(
     state: AppState,
     config: WebConfig,
-    operation_log_rx: Receiver<NewOperationLog>,
     shutdown: CancellationToken,
 ) -> OxideResult<()> {
-    // Drain buffered operation-log rows into Postgres in the background.
-    let writer_repo = Arc::clone(&state.operation_logs);
-    let writer_shutdown = shutdown.clone();
-    tokio::spawn(audit::spawn_operation_log_writer(
-        operation_log_rx,
-        writer_repo,
-        OPERATION_LOG_BATCH_SIZE,
-        OPERATION_LOG_FLUSH_INTERVAL,
-        writer_shutdown,
-    ));
-
     let data = web::Data::new(state);
     let bind_addr = (config.listen_host.clone(), config.listen_port);
-    let cors_config = config.clone();
+    let app_config = config.clone();
 
     let server = HttpServer::new(move || {
+        let static_config = app_config.clone();
         App::new()
             .app_data(data.clone())
             .wrap(TracingLogger::default())
-            .wrap(cors_from(&cors_config))
+            .wrap(cors_from(&app_config))
             .wrap(from_fn(middleware::request_id))
             // Outermost: observes the final status + inner-injected attributes.
             .wrap(from_fn(middleware::operation_audit))
             .configure(routes::configure)
+            // Static SPA registered last so API routes take precedence.
+            .configure(move |cfg| static_files::configure_static(cfg, &static_config))
     })
     .bind(bind_addr)
     .map_err(|error| OxideError::Internal(format!("web server bind failed: {error}")))?

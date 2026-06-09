@@ -1,0 +1,290 @@
+//! Strongly-typed WebSocket channel taxonomy.
+//!
+//! [`WsChannel`] is the closed set of server-push channels a client can
+//! subscribe to. Each channel knows three things that previously lived as
+//! scattered string magic values:
+//!
+//! 1. its on-the-wire name (`as_str` / [`FromStr`]),
+//! 2. the RBAC [`ResourceType`] guarding it (`resource`), so a socket can never
+//!    bypass the same `(resource, Read)` check as its HTTP counterpart, and
+//! 3. whether it is fanned out globally or per-market (`scope`).
+//!
+//! [`SubscriptionKey`] pairs a channel with its optional market scope; it is the
+//! single value stored in a session's subscription set and produced by the event
+//! fan-out, so there is no longer any `"channel:market"` string parsing anywhere.
+
+use std::{
+    fmt::{self, Display, Formatter},
+    str::FromStr,
+};
+
+use serde::{Deserialize, Deserializer};
+
+use crate::{enums::rbac::ResourceType, types::MarketId};
+
+/// Fan-out scope of a [`WsChannel`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ChannelScope {
+    /// One stream for every subscriber (e.g. system status, `PnL` updates).
+    Global,
+    /// One stream per market; the [`MarketId`] is part of the fan-out key so
+    /// only sessions watching that market receive the push.
+    Market,
+}
+
+/// The closed set of server-to-client push channels.
+///
+/// The wire name is `"{namespace}.{leaf}"`; the namespace determines the RBAC
+/// [`ResourceType`]. Adding a variant forces a compile error in [`Self::as_str`],
+/// [`Self::resource`], and [`Self::scope`], keeping the taxonomy exhaustive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum WsChannel {
+    /// Connection/system status snapshot and subsequent status changes.
+    SystemStatus,
+    /// Operator-facing alerts (level + message).
+    SystemAlert,
+    /// Circuit-breaker trip notifications.
+    RiskCircuitBreaker,
+    /// Open-position changes.
+    RiskPositionUpdate,
+    /// Market resolution (the `market_id` rides in the payload, not the key).
+    MarketResolved,
+    /// Coalesced per-market order-book snapshots (market-scoped fan-out).
+    MarketBookUpdate,
+    /// A control-factor publication became effective.
+    ControlPublished,
+    /// A runtime-config version was activated.
+    ConfigActivated,
+    /// A new scored opportunity was detected.
+    OpportunityDetected,
+    /// A previously detected opportunity expired.
+    OpportunityExpired,
+    /// A trade was opened.
+    TradeOpened,
+    /// A trade was filled.
+    TradeFilled,
+    /// A trade settled (with business outcome + realized `PnL`).
+    TradeSettled,
+    /// Live `PnL` update (daily / total).
+    PnlUpdate,
+}
+
+impl WsChannel {
+    /// Every channel, used by exhaustiveness tests and reverse lookup.
+    pub const ALL: [Self; 14] = [
+        Self::SystemStatus,
+        Self::SystemAlert,
+        Self::RiskCircuitBreaker,
+        Self::RiskPositionUpdate,
+        Self::MarketResolved,
+        Self::MarketBookUpdate,
+        Self::ControlPublished,
+        Self::ConfigActivated,
+        Self::OpportunityDetected,
+        Self::OpportunityExpired,
+        Self::TradeOpened,
+        Self::TradeFilled,
+        Self::TradeSettled,
+        Self::PnlUpdate,
+    ];
+
+    /// The on-the-wire channel name.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SystemStatus => "system.status",
+            Self::SystemAlert => "system.alert",
+            Self::RiskCircuitBreaker => "risk.circuit_breaker",
+            Self::RiskPositionUpdate => "risk.position_update",
+            Self::MarketResolved => "market.resolved",
+            Self::MarketBookUpdate => "market.book_update",
+            Self::ControlPublished => "control.published",
+            Self::ConfigActivated => "config.activated",
+            Self::OpportunityDetected => "opportunity.detected",
+            Self::OpportunityExpired => "opportunity.expired",
+            Self::TradeOpened => "trade.opened",
+            Self::TradeFilled => "trade.filled",
+            Self::TradeSettled => "trade.settled",
+            Self::PnlUpdate => "pnl.update",
+        }
+    }
+
+    /// The RBAC resource a session must hold `Read` on to subscribe.
+    ///
+    /// This mirrors the HTTP route authorization for the same data, so a
+    /// WebSocket subscription can never read data a REST call would deny.
+    #[must_use]
+    pub const fn resource(self) -> ResourceType {
+        match self {
+            Self::SystemStatus | Self::SystemAlert => ResourceType::System,
+            Self::RiskCircuitBreaker | Self::RiskPositionUpdate => ResourceType::Risk,
+            Self::MarketResolved | Self::MarketBookUpdate => ResourceType::Market,
+            Self::ControlPublished => ResourceType::ControlFactor,
+            Self::ConfigActivated => ResourceType::RuntimeConfig,
+            Self::OpportunityDetected | Self::OpportunityExpired => ResourceType::Opportunity,
+            Self::TradeOpened | Self::TradeFilled | Self::TradeSettled => ResourceType::Trade,
+            Self::PnlUpdate => ResourceType::Pnl,
+        }
+    }
+
+    /// Whether this channel fans out globally or per-market.
+    #[must_use]
+    pub const fn scope(self) -> ChannelScope {
+        match self {
+            Self::MarketBookUpdate => ChannelScope::Market,
+            _ => ChannelScope::Global,
+        }
+    }
+}
+
+impl Display for WsChannel {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Error returned when a client names a channel that does not exist.
+///
+/// The session loop turns this into an `error` envelope and refuses the
+/// subscription (fail-closed): an unknown channel can never be silently retained.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownChannel(pub String);
+
+impl Display for UnknownChannel {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "unknown ws channel: {}", self.0)
+    }
+}
+
+impl std::error::Error for UnknownChannel {}
+
+impl FromStr for WsChannel {
+    type Err = UnknownChannel;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .into_iter()
+            .find(|channel| channel.as_str() == s)
+            .ok_or_else(|| UnknownChannel(s.to_owned()))
+    }
+}
+
+/// Deserialize from the on-the-wire channel name, rejecting unknown channels
+/// with a message that names the offender (so a client command carrying a bad
+/// channel can be answered with a precise error frame instead of failing
+/// opaquely).
+impl<'de> Deserialize<'de> for WsChannel {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        Self::from_str(&raw).map_err(serde::de::Error::custom)
+    }
+}
+
+/// A concrete fan-out / subscription target: a channel plus its market scope.
+///
+/// This is the typed value stored in a session's subscription set and produced
+/// by the event fan-out. Equality + hashing make membership checks exact, so the
+/// broadcaster never compares stringly-typed keys.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SubscriptionKey {
+    /// The channel being subscribed to.
+    pub channel: WsChannel,
+    /// The market scope, present iff the channel is [`ChannelScope::Market`].
+    pub market: Option<MarketId>,
+}
+
+impl SubscriptionKey {
+    /// Build a key, normalizing the market against the channel's scope: a market
+    /// supplied for a [`ChannelScope::Global`] channel is dropped (it would never
+    /// match), so a client cannot fragment a global stream by passing a market.
+    #[must_use]
+    pub fn new(channel: WsChannel, market: Option<MarketId>) -> Self {
+        let market = match channel.scope() {
+            ChannelScope::Market => market,
+            ChannelScope::Global => None,
+        };
+        Self { channel, market }
+    }
+
+    /// A global (unscoped) subscription key.
+    #[must_use]
+    pub const fn global(channel: WsChannel) -> Self {
+        Self {
+            channel,
+            market: None,
+        }
+    }
+
+    /// A market-scoped subscription key.
+    #[must_use]
+    pub const fn scoped(channel: WsChannel, market: MarketId) -> Self {
+        Self {
+            channel,
+            market: Some(market),
+        }
+    }
+}
+
+impl Display for SubscriptionKey {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match &self.market {
+            Some(market) => write!(f, "{}:{}", self.channel.as_str(), market.as_str()),
+            None => f.write_str(self.channel.as_str()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ChannelScope, SubscriptionKey, WsChannel};
+    use crate::types::MarketId;
+    use std::str::FromStr;
+
+    #[test]
+    fn channel_round_trips_via_from_str() {
+        for channel in WsChannel::ALL {
+            let parsed = WsChannel::from_str(channel.as_str()).expect("known channel");
+            assert_eq!(parsed, channel);
+        }
+    }
+
+    #[test]
+    fn from_str_rejects_unknown_channel() {
+        assert!(WsChannel::from_str("does.not_exist").is_err());
+    }
+
+    #[test]
+    fn only_book_update_is_market_scoped() {
+        for channel in WsChannel::ALL {
+            let expected = if channel == WsChannel::MarketBookUpdate {
+                ChannelScope::Market
+            } else {
+                ChannelScope::Global
+            };
+            assert_eq!(channel.scope(), expected, "scope of {channel}");
+        }
+    }
+
+    #[test]
+    fn new_drops_market_on_global_channels() {
+        let key = SubscriptionKey::new(WsChannel::SystemStatus, Some(MarketId::new("0xabc")));
+        assert_eq!(key.market, None, "global channel must not carry a market");
+
+        let scoped =
+            SubscriptionKey::new(WsChannel::MarketBookUpdate, Some(MarketId::new("0xabc")));
+        assert_eq!(scoped.market, Some(MarketId::new("0xabc")));
+    }
+
+    #[test]
+    fn display_matches_wire_key_format() {
+        assert_eq!(
+            SubscriptionKey::global(WsChannel::PnlUpdate).to_string(),
+            "pnl.update"
+        );
+        assert_eq!(
+            SubscriptionKey::scoped(WsChannel::MarketBookUpdate, MarketId::new("0xabc"))
+                .to_string(),
+            "market.book_update:0xabc"
+        );
+    }
+}

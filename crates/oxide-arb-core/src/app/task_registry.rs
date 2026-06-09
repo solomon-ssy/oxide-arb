@@ -78,6 +78,9 @@ impl ShutdownStage {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, IntoStaticStr)]
 #[strum(serialize_all = "snake_case")]
 pub enum TaskKind {
+    /// HTTP/WebSocket server + broadcaster — outward-facing request ingress,
+    /// drained first so the system stops accepting requests before detection.
+    ApiIngress,
     WsIngress,
     CatalogSync,
     CacheWorker,
@@ -97,7 +100,7 @@ impl TaskKind {
     #[must_use]
     pub const fn shutdown_stage(self) -> ShutdownStage {
         match self {
-            Self::WsIngress | Self::CatalogSync => ShutdownStage::WsIngress,
+            Self::ApiIngress | Self::WsIngress | Self::CatalogSync => ShutdownStage::WsIngress,
             Self::CacheWorker => ShutdownStage::CacheWorkers,
             Self::BookReconciliation | Self::LedgerReconciliation => ShutdownStage::Reconciliation,
             Self::HealthMonitor => ShutdownStage::HealthMonitor,
