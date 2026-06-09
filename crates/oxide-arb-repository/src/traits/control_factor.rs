@@ -2,14 +2,14 @@ use chrono::{DateTime, Utc};
 use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::{
     domain::control_factor::{
-        AcquireMaterializationRunOutcome, AuditActor, CancelMaterializationRunOutcome,
-        ControlFactorAuditEventInfo, ControlFactorMaterializationRunInfo,
-        ControlFactorPublicationInfo, ControlFactorStageReportInfo, ControlFactorValueInfo,
-        EnqueueMaterializationRunOptions, EnqueueMaterializationRunOutcome, ExpireFactorsOutcome,
-        MaterializationRunStatusPatch, NewControlFactorAuditEvent,
-        NewControlFactorMaterializationRun, NewControlFactorPublication,
-        NewControlFactorStageReport, NewControlFactorValue, PublishPublicationOutcome,
-        RunTransitionOutcome,
+        AcquireMaterializationRunOutcome, AuditActor, AuditedOutcome,
+        CancelMaterializationRunOutcome, ControlFactorAuditEventInfo,
+        ControlFactorMaterializationRunInfo, ControlFactorPublicationInfo,
+        ControlFactorStageReportInfo, ControlFactorValueInfo, EnqueueMaterializationRunOptions,
+        EnqueueMaterializationRunOutcome, ExpireFactorsOutcome, MaterializationRunStatusPatch,
+        NewControlFactorAuditEvent, NewControlFactorMaterializationRun,
+        NewControlFactorPublication, NewControlFactorStageReport, NewControlFactorValue,
+        PublishPublicationOutcome, RunTransitionOutcome,
     },
     enums::control_factor::{
         ControlFactorType, FactorStatus, MaterializationRunStatus, MaterializationStageName,
@@ -138,12 +138,16 @@ pub trait ControlFactorRepository: Send + Sync {
     ) -> Result<Vec<ControlFactorValueInfo>, StorageError>;
 
     /// Marks a factor `Rejected` with a reason and appends a chained audit event.
+    ///
+    /// Returns the rejected factor paired with the appended audit event id; `None`
+    /// when the factor does not exist or is not in a rejectable state (no event is
+    /// appended in that case).
     async fn reject_factor(
         &self,
         factor_id: &ControlFactorId,
         status_reason: &str,
         audit: NewControlFactorAuditEvent,
-    ) -> Result<Option<ControlFactorValueInfo>, StorageError>;
+    ) -> Result<Option<AuditedOutcome<ControlFactorValueInfo>>, StorageError>;
 
     /// Expires TTL-due factors, appending one `FactorExpired` chained audit event
     /// per affected factor.
@@ -184,12 +188,14 @@ pub trait ControlFactorRepository: Send + Sync {
 
     /// Rolls the active publication back to a known-good target in one
     /// transaction, transitioning member factors and appending the chained audit.
+    ///
+    /// Returns the restored publication paired with the appended audit event id.
     async fn rollback_publication(
         &self,
         active_publication_id: &FactorPublicationId,
         target_publication_id: &FactorPublicationId,
         audit: NewControlFactorAuditEvent,
-    ) -> Result<ControlFactorPublicationInfo, StorageError>;
+    ) -> Result<AuditedOutcome<ControlFactorPublicationInfo>, StorageError>;
 
     // ── Audit chain ─────────────────────────────────────────────────────
     /// Appends an event to the global audit hash chain under an advisory lock.

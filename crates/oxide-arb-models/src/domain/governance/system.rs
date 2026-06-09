@@ -17,6 +17,7 @@ use chrono::{DateTime, NaiveDate, Utc};
 use rust_decimal::Decimal;
 use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 /// Overall system status reported by the health endpoint.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -127,6 +128,22 @@ info_from_model!(RuntimeConfigVersionInfo, crate::entities::runtime_config_versi
     runtime_config_version_id, config_hash, schema_version, config_json, source,
     created_by, reason, created_at,
 });
+
+/// Canonical content hash of a runtime-config document's JSON, formatted
+/// `sha256:<hex>`.
+///
+/// The single source of truth for version identity and drift detection: the
+/// startup bootstrap activation and the governed `create_version` path must
+/// agree on this so re-submitting an identical config maps to the same version
+/// (dedupe via `load_by_hash`).
+#[must_use]
+pub fn runtime_config_hash(config_json: &serde_json::Value) -> String {
+    // `serde_json::Value` is always serializable; an empty string is an
+    // unreachable fallback that keeps this panic-free.
+    let canonical = serde_json::to_string(config_json).unwrap_or_default();
+    let digest = Sha256::digest(canonical.as_bytes());
+    format!("sha256:{digest:x}")
+}
 
 /// Insert payload for `runtime_config_version`.
 #[derive(Debug, Clone, DeriveIntoActiveModel)]

@@ -3,7 +3,8 @@ use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::{
     domain::{
         NewRuntimeConfigActivation, NewRuntimeConfigVersion, RuntimeConfigActivationInfo,
-        RuntimeConfigVersionInfo, control_factor::NewControlFactorAuditEvent,
+        RuntimeConfigVersionInfo,
+        control_factor::{AuditedOutcome, NewControlFactorAuditEvent},
         evidence::EvidenceQueryResult,
     },
     types::RuntimeConfigVersionId,
@@ -25,11 +26,14 @@ pub trait RuntimeConfigVersionRepository: Send + Sync {
 
     /// Creates an immutable version and appends a chained governance audit event
     /// in one transaction.
+    ///
+    /// Returns the created version paired with the appended audit event id so the
+    /// general operation log can hard-link the creation to the governance chain.
     async fn create_version_governed(
         &self,
         version: NewRuntimeConfigVersion,
         audit: NewControlFactorAuditEvent,
-    ) -> Result<RuntimeConfigVersionInfo, StorageError>;
+    ) -> Result<AuditedOutcome<RuntimeConfigVersionInfo>, StorageError>;
 
     /// Appends a chained governance audit event and records its `event_id` on the
     /// activation row, atomically, so activation lineage is traceable to the
@@ -101,6 +105,12 @@ pub trait RuntimeConfigVersionRepository: Send + Sync {
             rows,
         )
     }
+
+    /// Lists immutable runtime-config versions, most recent first.
+    async fn list_versions(
+        &self,
+        limit: u64,
+    ) -> Result<Vec<RuntimeConfigVersionInfo>, StorageError>;
 
     async fn list_activations(
         &self,

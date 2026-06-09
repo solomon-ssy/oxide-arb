@@ -11,9 +11,10 @@ use oxide_arb_models::{
         MarketInfo, MarketPitSnapshotInfo, NewRuntimeConfigActivation, NewRuntimeConfigVersion,
         RuntimeConfigActivationInfo, RuntimeConfigVersionInfo, UpsertMarket,
         control_factor::{
-            ControlFactorMaterializationRunInfo, DataRequirements, MarketFilterSpec,
-            MaterializationRunManifest, NewControlFactorAuditEvent, QualityGatePolicy,
-            RequiredInputDomain, RunTrigger, RuntimeConfigRef, SimulationConfig, TimeWindowSpec,
+            AuditedOutcome, ControlFactorMaterializationRunInfo, DataRequirements,
+            MarketFilterSpec, MaterializationRunManifest, NewControlFactorAuditEvent,
+            QualityGatePolicy, RequiredInputDomain, RunTrigger, RuntimeConfigRef, SimulationConfig,
+            TimeWindowSpec,
         },
     },
     enums::{
@@ -327,7 +328,7 @@ impl RuntimeConfigVersionRepository for FakeRuntimeConfigRepository {
         &self,
         _version: NewRuntimeConfigVersion,
         _audit: NewControlFactorAuditEvent,
-    ) -> Result<RuntimeConfigVersionInfo, StorageError> {
+    ) -> Result<AuditedOutcome<RuntimeConfigVersionInfo>, StorageError> {
         Err(StorageError::Codec(
             "FakeRuntimeConfigRepository::create_version_governed is not implemented".to_owned(),
         ))
@@ -372,6 +373,15 @@ impl RuntimeConfigVersionRepository for FakeRuntimeConfigRepository {
         Ok(Some(runtime_config_version(RuntimeConfigVersionId::new(
             seeded_uuid("rcv_active"),
         ))))
+    }
+
+    async fn list_versions(
+        &self,
+        _limit: u64,
+    ) -> Result<Vec<RuntimeConfigVersionInfo>, StorageError> {
+        Ok(vec![runtime_config_version(RuntimeConfigVersionId::new(
+            seeded_uuid("rcv_current"),
+        ))])
     }
 
     async fn list_activations(

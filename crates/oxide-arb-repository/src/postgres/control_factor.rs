@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::{
     domain::control_factor::{
-        AcquireMaterializationRunOutcome, AuditActor, AuditEventContent,
+        AcquireMaterializationRunOutcome, AuditActor, AuditEventContent, AuditedOutcome,
         CancelMaterializationRunOutcome, ControlFactorAuditEventInfo,
         ControlFactorMaterializationRunInfo, ControlFactorPublication,
         ControlFactorPublicationInfo, ControlFactorPublicationRowInfo,
@@ -683,7 +683,7 @@ async fn publish_publication_q(
         set_factor_status_q(db, factor_id, target_status, None).await?;
     }
 
-    append_audit_event_chained_q(db, audit, now).await?;
+    let event = append_audit_event_chained_q(db, audit, now).await?;
 
     let info = load_publication_info_q(db, &publication.publication_id)
         .await?
@@ -691,7 +691,10 @@ async fn publish_publication_q(
             entity: "control_factor_publication",
             id: publication.publication_id.to_string(),
         })?;
-    Ok(PublishPublicationOutcome::Published(info))
+    Ok(PublishPublicationOutcome::Published(AuditedOutcome::new(
+        info,
+        event.event_id,
+    )))
 }
 
 async fn rollback_publication_q(
@@ -700,7 +703,7 @@ async fn rollback_publication_q(
     target_publication_id: &FactorPublicationId,
     audit: NewControlFactorAuditEvent,
     now: DateTime<Utc>,
-) -> Result<ControlFactorPublicationInfo, StorageError> {
+) -> Result<AuditedOutcome<ControlFactorPublicationInfo>, StorageError> {
     let target = load_publication_model_q(db, target_publication_id).await?;
     advisory_xact_lock(db, publication_lock_key(target.mode)).await?;
 
@@ -744,14 +747,15 @@ async fn rollback_publication_q(
         set_factor_status_q(db, factor_id, target_factor_status, None).await?;
     }
 
-    append_audit_event_chained_q(db, audit, now).await?;
+    let event = append_audit_event_chained_q(db, audit, now).await?;
 
-    load_publication_info_q(db, target_publication_id)
+    let info = load_publication_info_q(db, target_publication_id)
         .await?
         .ok_or_else(|| StorageError::NotFound {
             entity: "control_factor_publication",
             id: target_publication_id.to_string(),
-        })
+        })?;
+    Ok(AuditedOutcome::new(info, event.event_id))
 }
 
 async fn list_publications_q(
@@ -1031,7 +1035,7 @@ impl ControlFactorRepository for PgControlFactorRepository {
         factor_id: &ControlFactorId,
         status_reason: &str,
         audit: NewControlFactorAuditEvent,
-    ) -> Result<Option<ControlFactorValueInfo>, StorageError> {
+    ) -> Result<Option<AuditedOutcome<ControlFactorValueInfo>>, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
         let Some(info) = load_factor_q(&txn, factor_id).await? else {
             txn.rollback().await.map_err(StorageError::from)?;
@@ -1042,10 +1046,16 @@ impl ControlFactorRepository for PgControlFactorRepository {
             .validate_for_transition(FactorStatus::Rejected, None)
             .map_err(|error| StorageError::Conflict(error.to_string()))?;
         set_factor_status_q(&txn, factor_id, FactorStatus::Rejected, Some(status_reason)).await?;
-        append_audit_event_chained_q(&txn, audit, Utc::now()).await?;
-        let updated = load_factor_q(&txn, factor_id).await?;
+        let event = append_audit_event_chained_q(&txn, audit, Utc::now()).await?;
+        let updated =
+            load_factor_q(&txn, factor_id)
+                .await?
+                .ok_or_else(|| StorageError::NotFound {
+                    entity: "control_factor_value",
+                    id: factor_id.to_string(),
+                })?;
         txn.commit().await.map_err(StorageError::from)?;
-        Ok(updated)
+        Ok(Some(AuditedOutcome::new(updated, event.event_id)))
     }
 
     async fn expire_factors(
@@ -1131,9 +1141,9 @@ impl ControlFactorRepository for PgControlFactorRepository {
         active_publication_id: &FactorPublicationId,
         target_publication_id: &FactorPublicationId,
         audit: NewControlFactorAuditEvent,
-    ) -> Result<ControlFactorPublicationInfo, StorageError> {
+    ) -> Result<AuditedOutcome<ControlFactorPublicationInfo>, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let publication = rollback_publication_q(
+        let outcome = rollback_publication_q(
             &txn,
             active_publication_id,
             target_publication_id,
@@ -1142,7 +1152,7 @@ impl ControlFactorRepository for PgControlFactorRepository {
         )
         .await?;
         txn.commit().await.map_err(StorageError::from)?;
-        Ok(publication)
+        Ok(outcome)
     }
 
     async fn append_audit_event(

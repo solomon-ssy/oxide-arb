@@ -16,9 +16,9 @@ use oxide_arb_core::{
 use oxide_arb_error::{OxideError, control::SnapshotBuildError, storage::StorageError};
 use oxide_arb_models::{
     domain::control_factor::{
-        AcquireMaterializationRunOutcome, AuditActor, BucketRiskDimensions, BucketRiskPayload,
-        CancelMaterializationRunOutcome, ConfidenceInterval, ControlFactorAuditEventInfo,
-        ControlFactorMaterializationRunInfo, ControlFactorPublication,
+        AcquireMaterializationRunOutcome, AuditActor, AuditedOutcome, BucketRiskDimensions,
+        BucketRiskPayload, CancelMaterializationRunOutcome, ConfidenceInterval,
+        ControlFactorAuditEventInfo, ControlFactorMaterializationRunInfo, ControlFactorPublication,
         ControlFactorPublicationInfo, ControlFactorStageReportInfo, ControlFactorValue,
         ControlFactorValueInfo, DataCoverageReport, EnqueueMaterializationRunOptions,
         EnqueueMaterializationRunOutcome, ExpireFactorsOutcome, FactorDimensions, FactorEvidence,
@@ -201,7 +201,7 @@ impl ControlFactorRepository for MockRefresherRepo {
         _factor_id: &ControlFactorId,
         _status_reason: &str,
         _audit: NewControlFactorAuditEvent,
-    ) -> Result<Option<ControlFactorValueInfo>, StorageError> {
+    ) -> Result<Option<AuditedOutcome<ControlFactorValueInfo>>, StorageError> {
         Ok(None)
     }
 
@@ -253,7 +253,7 @@ impl ControlFactorRepository for MockRefresherRepo {
         _active_publication_id: &FactorPublicationId,
         _target_publication_id: &FactorPublicationId,
         _audit: NewControlFactorAuditEvent,
-    ) -> Result<ControlFactorPublicationInfo, StorageError> {
+    ) -> Result<AuditedOutcome<ControlFactorPublicationInfo>, StorageError> {
         Err(unexpected("rollback_publication"))
     }
 

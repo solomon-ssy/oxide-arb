@@ -9,16 +9,22 @@
 //! must never cross the wire.
 
 mod auth;
+mod control_factor;
 mod health;
 mod menu;
+mod operation_log;
 mod permission;
 mod role;
+mod runtime_config;
 pub mod serde;
 mod user;
 
 pub use auth::*;
+pub use control_factor::*;
 pub use health::*;
 pub use menu::*;
+pub use operation_log::*;
 pub use permission::*;
 pub use role::*;
+pub use runtime_config::*;
 pub use user::*;

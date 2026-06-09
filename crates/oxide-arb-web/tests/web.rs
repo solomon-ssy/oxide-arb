@@ -5,6 +5,8 @@
 
 #[path = "common/auth_helpers.rs"]
 mod auth_helpers;
+#[path = "common/client.rs"]
+mod client;
 #[path = "common/harness.rs"]
 mod harness;
 #[path = "common/pg.rs"]
@@ -16,3 +18,9 @@ mod redis;
 mod auth;
 #[path = "web/authz.rs"]
 mod authz;
+#[path = "web/governance.rs"]
+mod governance;
+#[path = "web/operation_log.rs"]
+mod operation_log;
+#[path = "web/runtime_config.rs"]
+mod runtime_config;

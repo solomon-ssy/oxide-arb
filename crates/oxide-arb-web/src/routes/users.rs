@@ -15,12 +15,16 @@ use oxide_arb_models::{
         ChangeUserStatusRequest, CreateUserRequest, NewUser, Paginated, UpdateUserRequest,
         UserInfo, UserPageQuery, UserView,
     },
-    enums::rbac::{Operation, ResourceType, UserStatus},
+    enums::{
+        operation_log::OperationCategory,
+        rbac::{Operation, ResourceType, UserStatus},
+    },
     security::hash_password,
     types::UserId,
 };
 
 use crate::{
+    audit::OperationCtx,
     auth::casbin::Rule,
     error::WebError,
     extractors::ValidatedJson,
@@ -95,6 +99,7 @@ pub async fn list(
 /// `POST /api/users` — create a user with an argon2id-hashed password.
 pub async fn create(
     state: web::Data<AppState>,
+    op_ctx: OperationCtx,
     body: ValidatedJson<CreateUserRequest>,
 ) -> Result<WebResponse<UserView>, WebError> {
     let request = body.into_inner();
@@ -111,6 +116,10 @@ pub async fn create(
         status: request.status.unwrap_or(UserStatus::Active),
     };
     let user = state.users.create(new).await?;
+    op_ctx.set_action(OperationCategory::Rbac, "user.create");
+    op_ctx.set_resource(ResourceType::User, user.id.to_string());
+    // Redacted: the username identifies the row; the password never appears.
+    op_ctx.set_detail(serde_json::json!({ "username": user.username }));
     Ok(WebResponse::ok(UserView::from(user)))
 }
 
@@ -127,9 +136,12 @@ pub async fn get(
 pub async fn update(
     state: web::Data<AppState>,
     id: web::Path<UserId>,
+    op_ctx: OperationCtx,
     body: ValidatedJson<UpdateUserRequest>,
 ) -> Result<WebResponse<UserView>, WebError> {
     let user = state.users.update(&id, body.into_inner().into()).await?;
+    op_ctx.set_action(OperationCategory::Rbac, "user.update");
+    op_ctx.set_resource(ResourceType::User, id.to_string());
     Ok(WebResponse::ok(UserView::from(user)))
 }
 
@@ -138,9 +150,12 @@ pub async fn update(
 pub async fn delete(
     state: web::Data<AppState>,
     id: web::Path<UserId>,
+    op_ctx: OperationCtx,
 ) -> Result<WebResponse<()>, WebError> {
     state.users.delete(&id).await?;
     state.casbin.reload().await?;
+    op_ctx.set_action(OperationCategory::Rbac, "user.delete");
+    op_ctx.set_resource(ResourceType::User, id.to_string());
     Ok(WebResponse::ok(()))
 }
 
@@ -148,12 +163,14 @@ pub async fn delete(
 pub async fn change_status(
     state: web::Data<AppState>,
     id: web::Path<UserId>,
+    op_ctx: OperationCtx,
     body: ValidatedJson<ChangeUserStatusRequest>,
 ) -> Result<WebResponse<()>, WebError> {
-    state
-        .users
-        .change_status(&id, body.into_inner().status)
-        .await?;
+    let status = body.into_inner().status;
+    state.users.change_status(&id, status).await?;
+    op_ctx.set_action(OperationCategory::Rbac, "user.change_status");
+    op_ctx.set_resource(ResourceType::User, id.to_string());
+    op_ctx.set_detail(serde_json::json!({ "status": status }));
     Ok(WebResponse::ok(()))
 }
 
@@ -161,6 +178,7 @@ pub async fn change_status(
 pub async fn change_password(
     state: web::Data<AppState>,
     id: web::Path<UserId>,
+    op_ctx: OperationCtx,
     body: ValidatedJson<ChangePasswordRequest>,
 ) -> Result<WebResponse<()>, WebError> {
     let password_hash = hash_password(&body.into_inner().password)
@@ -169,6 +187,9 @@ pub async fn change_password(
         .users
         .change_password(&id, ChangeUserPassword { password_hash })
         .await?;
+    // Record the act only — never the new password or its hash.
+    op_ctx.set_action(OperationCategory::Rbac, "user.change_password");
+    op_ctx.set_resource(ResourceType::User, id.to_string());
     Ok(WebResponse::ok(()))
 }
 
@@ -177,14 +198,17 @@ pub async fn change_password(
 pub async fn set_roles(
     state: web::Data<AppState>,
     id: web::Path<UserId>,
+    op_ctx: OperationCtx,
     body: ValidatedJson<AssignRolesRequest>,
 ) -> Result<WebResponse<()>, WebError> {
+    let user_id = id.into_inner();
+    let role_ids = body.into_inner().role_ids;
+    op_ctx.set_action(OperationCategory::Rbac, "user.assign_roles");
+    op_ctx.set_resource(ResourceType::User, user_id.to_string());
+    op_ctx.set_detail(serde_json::json!({ "role_count": role_ids.len() }));
     state
         .user_roles
-        .set_roles_for_user(AssignRoles {
-            user_id: id.into_inner(),
-            role_ids: body.into_inner().role_ids,
-        })
+        .set_roles_for_user(AssignRoles { user_id, role_ids })
         .await?;
     state.casbin.reload().await?;
     Ok(WebResponse::ok(()))

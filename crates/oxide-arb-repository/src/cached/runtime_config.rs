@@ -6,7 +6,8 @@ use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::{
     domain::{
         NewRuntimeConfigActivation, NewRuntimeConfigVersion, RuntimeConfigActivationInfo,
-        RuntimeConfigVersionInfo, control_factor::NewControlFactorAuditEvent,
+        RuntimeConfigVersionInfo,
+        control_factor::{AuditedOutcome, NewControlFactorAuditEvent},
     },
     types::RuntimeConfigVersionId,
 };
@@ -58,13 +59,13 @@ impl<R: RuntimeConfigVersionRepository> RuntimeConfigVersionRepository
         &self,
         version: NewRuntimeConfigVersion,
         audit: NewControlFactorAuditEvent,
-    ) -> Result<RuntimeConfigVersionInfo, StorageError> {
-        let info = self.inner.create_version_governed(version, audit).await?;
+    ) -> Result<AuditedOutcome<RuntimeConfigVersionInfo>, StorageError> {
+        let outcome = self.inner.create_version_governed(version, audit).await?;
         let key = CacheKey::RuntimeConfigVersion {
-            version_id: info.runtime_config_version_id.clone(),
+            version_id: outcome.value.runtime_config_version_id.clone(),
         };
-        let _ = self.cache.set_json(&key, &info).await;
-        Ok(info)
+        let _ = self.cache.set_json(&key, &outcome.value).await;
+        Ok(outcome)
     }
 
     async fn activate_version_governed(
@@ -129,6 +130,13 @@ impl<R: RuntimeConfigVersionRepository> RuntimeConfigVersionRepository
         at: DateTime<Utc>,
     ) -> Result<Option<RuntimeConfigVersionInfo>, StorageError> {
         self.inner.load_active_at(at).await
+    }
+
+    async fn list_versions(
+        &self,
+        limit: u64,
+    ) -> Result<Vec<RuntimeConfigVersionInfo>, StorageError> {
+        self.inner.list_versions(limit).await
     }
 
     async fn list_activations(

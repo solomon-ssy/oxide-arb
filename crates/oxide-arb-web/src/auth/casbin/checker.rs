@@ -70,8 +70,11 @@ impl PermChecker {
 
     /// Authorize a request against the registry.
     ///
-    /// 1. An enabled `super_admin` bypasses everything (including unregistered
-    ///    routes).
+    /// 1. An enabled `super_admin` bypasses authorization (including unregistered
+    ///    routes). On a governed route the bypass still resolves an
+    ///    `acting_role` for the audit envelope (the explicit `X-Acting-Role`
+    ///    when held, else the literal `super_admin`) so governed handlers read a
+    ///    uniform [`ActingRole`](crate::extractors::ActingRole).
     /// 2. Otherwise the `(method, matched_path)` rule is evaluated; a missing
     ///    rule is **denied** (fail-closed).
     pub async fn check(
@@ -83,10 +86,14 @@ impl PermChecker {
         casbin: &CasbinService,
         acting_role: Option<&str>,
     ) -> Result<AuthzOutcome, WebError> {
+        let rule = self.rules.get(&(method.clone(), matched_path.to_owned()));
         if roles.contains_enabled(SUPER_ADMIN_ROLE) {
-            return Ok(AuthzOutcome::default());
+            let acting_role = rule
+                .filter(|rule| rule.is_governed())
+                .map(|_| Rule::resolve_super_admin_acting_role(roles, acting_role));
+            return Ok(AuthzOutcome { acting_role });
         }
-        match self.rules.get(&(method.clone(), matched_path.to_owned())) {
+        match rule {
             Some(rule) => rule.evaluate(claims, roles, casbin, acting_role).await,
             None => Err(WebError::Forbidden),
         }
@@ -98,7 +105,7 @@ mod tests {
     use chrono::Utc;
     use oxide_arb_models::{
         domain::RoleInfo,
-        enums::rbac::{RoleKind, RoleStatus},
+        enums::rbac::{Operation, ResourceType, RoleKind, RoleStatus},
         types::RoleId,
     };
 
@@ -155,6 +162,69 @@ mod tests {
             .await
             .expect("super_admin bypasses everything");
         assert!(outcome.acting_role.is_none());
+    }
+
+    #[actix_web::test]
+    async fn super_admin_on_governed_route_records_explicit_held_acting_role() {
+        let casbin = CasbinService::in_memory().await;
+        let mut checker = PermChecker::new();
+        checker.register(
+            Method::POST,
+            "/api/control-factors/{id}/publish",
+            Rule::ActingRoleGoverned(ResourceType::ControlFactor, Operation::Publish),
+        );
+        let outcome = checker
+            .check(
+                &Method::POST,
+                "/api/control-factors/{id}/publish",
+                &claims(),
+                &roles(&[
+                    (SUPER_ADMIN_ROLE, RoleStatus::Enabled),
+                    ("risk_owner", RoleStatus::Enabled),
+                ]),
+                &casbin,
+                Some("  risk_owner  "),
+            )
+            .await
+            .expect("super_admin bypasses governed authorization");
+        assert_eq!(outcome.acting_role.as_deref(), Some("risk_owner"));
+    }
+
+    #[actix_web::test]
+    async fn super_admin_on_governed_route_without_held_role_records_super_admin() {
+        let casbin = CasbinService::in_memory().await;
+        let mut checker = PermChecker::new();
+        checker.register(
+            Method::POST,
+            "/api/control-factors/{id}/publish",
+            Rule::ActingRoleGoverned(ResourceType::ControlFactor, Operation::Publish),
+        );
+        // No header at all → attributed to the literal super_admin.
+        let bare = checker
+            .check(
+                &Method::POST,
+                "/api/control-factors/{id}/publish",
+                &claims(),
+                &roles(&[(SUPER_ADMIN_ROLE, RoleStatus::Enabled)]),
+                &casbin,
+                None,
+            )
+            .await
+            .expect("super_admin bypass");
+        assert_eq!(bare.acting_role.as_deref(), Some(SUPER_ADMIN_ROLE));
+        // Header naming a role the caller does not hold → also super_admin.
+        let unheld = checker
+            .check(
+                &Method::POST,
+                "/api/control-factors/{id}/publish",
+                &claims(),
+                &roles(&[(SUPER_ADMIN_ROLE, RoleStatus::Enabled)]),
+                &casbin,
+                Some("risk_owner"),
+            )
+            .await
+            .expect("super_admin bypass");
+        assert_eq!(unheld.acting_role.as_deref(), Some(SUPER_ADMIN_ROLE));
     }
 
     #[actix_web::test]

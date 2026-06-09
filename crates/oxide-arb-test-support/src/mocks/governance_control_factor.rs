@@ -7,20 +7,20 @@ use chrono::{DateTime, Utc};
 use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::{
     domain::control_factor::{
-        AcquireMaterializationRunOutcome, AuditActor, CancelMaterializationRunOutcome,
-        ControlFactorAuditEventInfo, ControlFactorMaterializationRunInfo,
-        ControlFactorPublicationInfo, ControlFactorStageReportInfo, ControlFactorValueInfo,
-        EnqueueMaterializationRunOptions, EnqueueMaterializationRunOutcome, ExpireFactorsOutcome,
-        MaterializationRunStatusPatch, NewControlFactorAuditEvent,
-        NewControlFactorMaterializationRun, NewControlFactorPublication,
-        NewControlFactorStageReport, NewControlFactorValue, PublishPublicationOutcome,
-        RunTransitionOutcome,
+        AcquireMaterializationRunOutcome, AuditActor, AuditedOutcome,
+        CancelMaterializationRunOutcome, ControlFactorAuditEventInfo,
+        ControlFactorMaterializationRunInfo, ControlFactorPublicationInfo,
+        ControlFactorStageReportInfo, ControlFactorValueInfo, EnqueueMaterializationRunOptions,
+        EnqueueMaterializationRunOutcome, ExpireFactorsOutcome, MaterializationRunStatusPatch,
+        NewControlFactorAuditEvent, NewControlFactorMaterializationRun,
+        NewControlFactorPublication, NewControlFactorStageReport, NewControlFactorValue,
+        PublishPublicationOutcome, RunTransitionOutcome,
     },
     enums::control_factor::{
         ControlFactorType, FactorStatus, MaterializationRunStatus, MaterializationStageName,
         PublicationMode, PublicationStatus,
     },
-    types::{ControlFactorId, FactorPublicationId, MaterializationRunId},
+    types::{AuditEventId, ControlFactorId, FactorPublicationId, MaterializationRunId},
 };
 use oxide_arb_repository::traits::ControlFactorRepository;
 
@@ -173,7 +173,7 @@ impl ControlFactorRepository for MockGovernanceControlFactorRepository {
         _factor_id: &ControlFactorId,
         _status_reason: &str,
         _audit: NewControlFactorAuditEvent,
-    ) -> Result<Option<ControlFactorValueInfo>, StorageError> {
+    ) -> Result<Option<AuditedOutcome<ControlFactorValueInfo>>, StorageError> {
         Ok(None)
     }
 
@@ -191,8 +191,9 @@ impl ControlFactorRepository for MockGovernanceControlFactorRepository {
         _audit: NewControlFactorAuditEvent,
     ) -> Result<PublishPublicationOutcome, StorageError> {
         *self.publish_calls.lock().unwrap() += 1;
-        Ok(PublishPublicationOutcome::Published(publication_info_from(
-            &publication,
+        Ok(PublishPublicationOutcome::Published(AuditedOutcome::new(
+            publication_info_from(&publication),
+            AuditEventId::from_v7(),
         )))
     }
 
@@ -225,9 +226,12 @@ impl ControlFactorRepository for MockGovernanceControlFactorRepository {
         _active_publication_id: &FactorPublicationId,
         target_publication_id: &FactorPublicationId,
         _audit: NewControlFactorAuditEvent,
-    ) -> Result<ControlFactorPublicationInfo, StorageError> {
+    ) -> Result<AuditedOutcome<ControlFactorPublicationInfo>, StorageError> {
         *self.rollback_calls.lock().unwrap() += 1;
-        Ok(rollback_target_info(target_publication_id))
+        Ok(AuditedOutcome::new(
+            rollback_target_info(target_publication_id),
+            AuditEventId::from_v7(),
+        ))
     }
 
     async fn append_audit_event(

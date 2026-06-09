@@ -11,7 +11,10 @@
 use oxide_arb_models::enums::rbac::{Operation, ResourceType};
 
 use crate::{
-    auth::casbin::service::CasbinService, error::WebError, extractors::ActorRoles, jwt::Claims,
+    auth::casbin::{checker::SUPER_ADMIN_ROLE, service::CasbinService},
+    error::WebError,
+    extractors::ActorRoles,
+    jwt::Claims,
 };
 
 /// The result of a successful authorization check.
@@ -49,6 +52,32 @@ pub enum Rule {
 }
 
 impl Rule {
+    /// Whether this rule authorizes a governed, audited mutation.
+    #[must_use]
+    pub const fn is_governed(&self) -> bool {
+        matches!(self, Self::ActingRoleGoverned(..))
+    }
+
+    /// Resolves the `acting_role` recorded into the audit envelope when a
+    /// `super_admin` bypasses authorization on a governed route.
+    ///
+    /// A `super_admin` may act on behalf of an explicit role: when the
+    /// `X-Acting-Role` header names a role they actually hold (enabled), that
+    /// role is recorded; otherwise the bypass is attributed to the literal
+    /// `super_admin`. This keeps governed handlers uniform — they always read a
+    /// resolved [`ActingRole`](crate::extractors::ActingRole) from extensions.
+    #[must_use]
+    pub fn resolve_super_admin_acting_role(
+        roles: &ActorRoles,
+        acting_role: Option<&str>,
+    ) -> String {
+        acting_role
+            .map(str::trim)
+            .filter(|role| !role.is_empty())
+            .filter(|role| roles.contains_enabled(role))
+            .map_or_else(|| SUPER_ADMIN_ROLE.to_owned(), ToOwned::to_owned)
+    }
+
     /// Evaluate this rule for an already-authenticated actor.
     ///
     /// `acting_role` is the value of the `X-Acting-Role` header (if any),

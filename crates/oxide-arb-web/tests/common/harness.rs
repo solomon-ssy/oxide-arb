@@ -17,14 +17,23 @@ use actix_web::{
     test, web,
 };
 use async_trait::async_trait;
+use oxide_arb_control::governance::ControlFactorRegistry;
 use oxide_arb_error::auth::AuthError;
 use oxide_arb_models::config::JwtConfig;
-use oxide_arb_repository::postgres::{
-    PgMenuRepository, PgRoleMenuRepository, PgRolePermissionRepository, PgRoleRepository,
-    PgUserRepository, PgUserRoleRepository,
+use oxide_arb_repository::{
+    postgres::{
+        PgControlFactorRepository, PgFactDataRepository, PgMenuRepository,
+        PgOperationLogRepository, PgRoleMenuRepository, PgRolePermissionRepository,
+        PgRoleRepository, PgRuntimeConfigVersionRepository, PgUserRepository, PgUserRoleRepository,
+    },
+    traits::{
+        ControlFactorRepository, ControlFactorShadowDecisionRepository, OperationLogRepository,
+        RuntimeConfigVersionRepository,
+    },
 };
 use oxide_arb_web::{
     AppState,
+    audit::{OperationLogBuffer, spawn_operation_log_writer},
     auth::casbin::CasbinService,
     jwt::{JwtService, RedisTokenBlacklist, TokenBlacklist},
     middleware, routes,
@@ -32,6 +41,7 @@ use oxide_arb_web::{
 use serde_json::Value;
 use testcontainers::ContainerAsync;
 use testcontainers_modules::{postgres::Postgres, redis::Redis};
+use tokio_util::sync::CancellationToken;
 
 use crate::{pg, redis};
 
@@ -53,6 +63,8 @@ pub struct TestEnv {
     _pg: ContainerAsync<Postgres>,
     // Redis container guard; [`take_redis`] simulates an outage in auth tests.
     redis: Option<ContainerAsync<Redis>>,
+    // Cancels the background operation-log writer when the test env is dropped.
+    writer_shutdown: CancellationToken,
 }
 
 impl TestEnv {
@@ -72,6 +84,34 @@ impl TestEnv {
                 .expect("casbin service"),
         );
         let perm_checker = Arc::new(routes::init_rbac_rules());
+
+        // Governance control-plane: one registry over the shared repositories,
+        // plus read handles exposed directly on the state.
+        let control_factors: Arc<dyn ControlFactorRepository> =
+            Arc::new(PgControlFactorRepository::new(db.clone()));
+        let runtime_config: Arc<dyn RuntimeConfigVersionRepository> =
+            Arc::new(PgRuntimeConfigVersionRepository::new(db.clone()));
+        let shadow_decisions: Arc<dyn ControlFactorShadowDecisionRepository> =
+            Arc::new(PgFactDataRepository::new(db.clone()));
+        let operation_logs: Arc<dyn OperationLogRepository> =
+            Arc::new(PgOperationLogRepository::new(db.clone()));
+        let registry = Arc::new(ControlFactorRegistry::new(
+            Arc::clone(&control_factors),
+            Arc::clone(&runtime_config),
+        ));
+
+        // Operation-log pipeline: buffer in the state, writer drains to Postgres.
+        // A short flush interval keeps audit-trail assertions fast.
+        let (operation_log, operation_log_rx) = OperationLogBuffer::new(1024);
+        let writer_shutdown = CancellationToken::new();
+        tokio::spawn(spawn_operation_log_writer(
+            operation_log_rx,
+            Arc::clone(&operation_logs),
+            64,
+            Duration::from_millis(50),
+            writer_shutdown.clone(),
+        ));
+
         let state = AppState {
             jwt,
             users: Arc::new(PgUserRepository::new(db.clone())),
@@ -82,18 +122,32 @@ impl TestEnv {
             role_permissions: Arc::new(PgRolePermissionRepository::new(db)),
             casbin,
             perm_checker,
+            registry,
+            control_factors,
+            runtime_config,
+            shadow_decisions,
+            operation_logs,
+            operation_log,
         };
 
         Self {
             state,
             _pg: pg_container,
             redis: Some(redis_container),
+            writer_shutdown,
         }
     }
 
     /// Take the Redis container guard (auth outage tests only).
     pub const fn take_redis(&mut self) -> Option<ContainerAsync<Redis>> {
         self.redis.take()
+    }
+}
+
+impl Drop for TestEnv {
+    fn drop(&mut self) {
+        // Stop the background writer so it does not outlive the test's Postgres.
+        self.writer_shutdown.cancel();
     }
 }
 
@@ -139,6 +193,8 @@ pub async fn call(state: &AppState, req: test::TestRequest) -> Resp {
         App::new()
             .app_data(web::Data::new(state.clone()))
             .wrap(from_fn(middleware::request_id))
+            // Outermost (registered last), mirroring `spawn_web_server`.
+            .wrap(from_fn(middleware::operation_audit))
             .configure(routes::configure),
     )
     .await;

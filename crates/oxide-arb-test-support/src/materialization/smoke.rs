@@ -21,7 +21,7 @@ use oxide_arb_models::{
         RuntimeConfigActivationInfo, RuntimeConfigDocument, RuntimeConfigVersionInfo,
         SizingRuntimeConfig, TradeInfo,
         control_factor::{
-            AcquireMaterializationRunOutcome, AuditActor, AuditEventContent,
+            AcquireMaterializationRunOutcome, AuditActor, AuditEventContent, AuditedOutcome,
             CancelMaterializationRunOutcome, ControlFactorAuditEventInfo,
             ControlFactorMaterializationRunInfo, ControlFactorPublicationInfo,
             ControlFactorValueInfo, DataRequirements, EnqueueMaterializationRunOptions,
@@ -399,7 +399,7 @@ impl RuntimeConfigVersionRepository for SmokeRuntimeConfigRepository {
         &self,
         _version: NewRuntimeConfigVersion,
         _audit: NewControlFactorAuditEvent,
-    ) -> Result<RuntimeConfigVersionInfo, StorageError> {
+    ) -> Result<AuditedOutcome<RuntimeConfigVersionInfo>, StorageError> {
         Err(StorageError::Codec("not implemented".into()))
     }
 
@@ -434,6 +434,13 @@ impl RuntimeConfigVersionRepository for SmokeRuntimeConfigRepository {
         _at: DateTime<Utc>,
     ) -> Result<Option<RuntimeConfigVersionInfo>, StorageError> {
         Ok(Some(smoke_runtime_config_version()))
+    }
+
+    async fn list_versions(
+        &self,
+        _limit: u64,
+    ) -> Result<Vec<RuntimeConfigVersionInfo>, StorageError> {
+        Ok(vec![smoke_runtime_config_version()])
     }
 
     async fn list_activations(
@@ -986,7 +993,7 @@ impl ControlFactorRepository for SmokeControlFactorRepository {
         factor_id: &ControlFactorId,
         status_reason: &str,
         audit: NewControlFactorAuditEvent,
-    ) -> Result<Option<ControlFactorValueInfo>, StorageError> {
+    ) -> Result<Option<AuditedOutcome<ControlFactorValueInfo>>, StorageError> {
         let mut factors = self.factors.lock().unwrap();
         let Some(factor) = factors
             .iter_mut()
@@ -998,8 +1005,8 @@ impl ControlFactorRepository for SmokeControlFactorRepository {
         factor.status_reason = Some(status_reason.to_owned());
         let updated = factor.clone();
         drop(factors);
-        self.append_chained(audit)?;
-        Ok(Some(updated))
+        let event = self.append_chained(audit)?;
+        Ok(Some(AuditedOutcome::new(updated, event.event_id)))
     }
 
     async fn expire_factors(
@@ -1080,7 +1087,7 @@ impl ControlFactorRepository for SmokeControlFactorRepository {
         _active_publication_id: &FactorPublicationId,
         _target_publication_id: &FactorPublicationId,
         _audit: NewControlFactorAuditEvent,
-    ) -> Result<ControlFactorPublicationInfo, StorageError> {
+    ) -> Result<AuditedOutcome<ControlFactorPublicationInfo>, StorageError> {
         Err(StorageError::Codec(
             "publication lifecycle is covered by Postgres integration tests".into(),
         ))

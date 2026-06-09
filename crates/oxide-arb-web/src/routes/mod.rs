@@ -28,11 +28,14 @@
 //! denied (fail-closed).
 
 pub mod auth;
+pub mod control_factors;
 pub mod health;
 pub mod menus;
+pub mod operation_logs;
 pub mod permissions;
 pub mod registry;
 pub mod roles;
+pub mod runtime_config;
 pub mod users;
 pub mod version;
 
@@ -60,6 +63,9 @@ fn protected_route_specs() -> Vec<RouteSpec> {
     specs.extend(roles::route_specs());
     specs.extend(menus::route_specs());
     specs.extend(permissions::route_specs());
+    specs.extend(control_factors::route_specs());
+    specs.extend(runtime_config::route_specs());
+    specs.extend(operation_logs::route_specs());
     specs
 }
 

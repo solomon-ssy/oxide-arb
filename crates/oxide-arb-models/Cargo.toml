@@ -27,6 +27,7 @@ linkme = { workspace = true }
 serde_repr = "0.1.20"
 hex = { workspace = true }
 blake3 = { workspace = true }
+sha2 = { workspace = true }
 argon2 = { workspace = true }
 
 [features]

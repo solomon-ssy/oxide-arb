@@ -10,14 +10,14 @@ use chrono::{DateTime, Utc};
 use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::{
     domain::control_factor::{
-        AcquireMaterializationRunOutcome, AuditActor, CancelMaterializationRunOutcome,
-        ControlFactorAuditEventInfo, ControlFactorMaterializationRunInfo,
-        ControlFactorPublicationInfo, ControlFactorStageReportInfo, ControlFactorValueInfo,
-        EnqueueMaterializationRunOptions, EnqueueMaterializationRunOutcome, ExpireFactorsOutcome,
-        MaterializationRunStatusPatch, NewControlFactorAuditEvent,
-        NewControlFactorMaterializationRun, NewControlFactorPublication,
-        NewControlFactorStageReport, NewControlFactorValue, PublishPublicationOutcome,
-        RunTransitionOutcome,
+        AcquireMaterializationRunOutcome, AuditActor, AuditedOutcome,
+        CancelMaterializationRunOutcome, ControlFactorAuditEventInfo,
+        ControlFactorMaterializationRunInfo, ControlFactorPublicationInfo,
+        ControlFactorStageReportInfo, ControlFactorValueInfo, EnqueueMaterializationRunOptions,
+        EnqueueMaterializationRunOutcome, ExpireFactorsOutcome, MaterializationRunStatusPatch,
+        NewControlFactorAuditEvent, NewControlFactorMaterializationRun,
+        NewControlFactorPublication, NewControlFactorStageReport, NewControlFactorValue,
+        PublishPublicationOutcome, RunTransitionOutcome,
     },
     enums::control_factor::{
         ControlFactorType, FactorStatus, MaterializationRunStatus, MaterializationStageName,
@@ -198,7 +198,7 @@ impl ControlFactorRepository for MockSchedulerControlFactorRepository {
         _factor_id: &ControlFactorId,
         _status_reason: &str,
         _audit: NewControlFactorAuditEvent,
-    ) -> Result<Option<ControlFactorValueInfo>, StorageError> {
+    ) -> Result<Option<AuditedOutcome<ControlFactorValueInfo>>, StorageError> {
         Ok(None)
     }
 
@@ -247,7 +247,7 @@ impl ControlFactorRepository for MockSchedulerControlFactorRepository {
         _active_publication_id: &FactorPublicationId,
         _target_publication_id: &FactorPublicationId,
         _audit: NewControlFactorAuditEvent,
-    ) -> Result<ControlFactorPublicationInfo, StorageError> {
+    ) -> Result<AuditedOutcome<ControlFactorPublicationInfo>, StorageError> {
         Err(scheduler_unexpected("rollback_publication"))
     }
 

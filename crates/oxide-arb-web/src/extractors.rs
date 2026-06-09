@@ -144,10 +144,25 @@ impl ActorRoles {
 /// The role a caller explicitly acts as on a governed (audited) endpoint.
 ///
 /// Injected into request extensions by the authz middleware once an
-/// [`crate::auth::casbin::Rule::ActingRoleGoverned`] check passes, so the
-/// handler can stamp it onto the immutable audit envelope (Phase 6.5).
+/// [`crate::auth::casbin::Rule::ActingRoleGoverned`] check passes (resolved from
+/// the `X-Acting-Role` header, or `super_admin` on the super-admin bypass), so
+/// the handler can stamp it onto the immutable audit envelope.
 #[derive(Debug, Clone)]
 pub struct ActingRole(pub String);
+
+impl FromRequest for ActingRole {
+    type Error = ActixError;
+    type Future = Ready<Result<Self, ActixError>>;
+
+    fn from_request(req: &HttpRequest, _payload: &mut Payload) -> Self::Future {
+        // Governed routes always reach the handler with this injected by authz;
+        // its absence means the route was mis-wired, so fail closed.
+        req.extensions().get::<Self>().cloned().map_or_else(
+            || ready(Err(WebError::Forbidden.into())),
+            |role| ready(Ok(role)),
+        )
+    }
+}
 
 /// The authenticated actor: validated access-token claims plus loaded roles.
 pub struct AuthedActor {

@@ -1322,9 +1322,9 @@ async fn control_factor_reject_and_expire_write_chained_audit() {
         .await
         .expect("reject factor")
         .expect("factor exists");
-    assert_eq!(rejected.status, FactorStatus::Rejected);
+    assert_eq!(rejected.value.status, FactorStatus::Rejected);
     assert_eq!(
-        rejected.status_reason.as_deref(),
+        rejected.value.status_reason.as_deref(),
         Some("sample below minimum")
     );
 

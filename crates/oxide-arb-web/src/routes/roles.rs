@@ -12,11 +12,15 @@ use oxide_arb_models::{
         ChangeRoleStatusRequest, CreateRoleRequest, MenuInfo, NewRole, Permission, RoleInfo,
         UpdateRoleRequest,
     },
-    enums::rbac::{Operation, ResourceType, RoleKind, RoleStatus},
+    enums::{
+        operation_log::OperationCategory,
+        rbac::{Operation, ResourceType, RoleKind, RoleStatus},
+    },
     types::RoleId,
 };
 
 use crate::{
+    audit::OperationCtx,
     auth::casbin::Rule,
     error::WebError,
     extractors::ValidatedJson,
@@ -99,6 +103,7 @@ pub async fn list(state: web::Data<AppState>) -> Result<WebResponse<Vec<RoleInfo
 /// `POST /api/roles` — create a custom role.
 pub async fn create(
     state: web::Data<AppState>,
+    op_ctx: OperationCtx,
     body: ValidatedJson<CreateRoleRequest>,
 ) -> Result<WebResponse<RoleInfo>, WebError> {
     let request = body.into_inner();
@@ -111,7 +116,11 @@ pub async fn create(
         status: RoleStatus::Enabled,
         sort: request.sort,
     };
-    Ok(WebResponse::ok(state.roles.create(new).await?))
+    let role = state.roles.create(new).await?;
+    op_ctx.set_action(OperationCategory::Rbac, "role.create");
+    op_ctx.set_resource(ResourceType::Role, role.id.to_string());
+    op_ctx.set_detail(serde_json::json!({ "code": role.code }));
+    Ok(WebResponse::ok(role))
 }
 
 /// `GET /api/roles/{id}` — fetch a single role.
@@ -126,11 +135,13 @@ pub async fn get(
 pub async fn update(
     state: web::Data<AppState>,
     id: web::Path<RoleId>,
+    op_ctx: OperationCtx,
     body: ValidatedJson<UpdateRoleRequest>,
 ) -> Result<WebResponse<RoleInfo>, WebError> {
-    Ok(WebResponse::ok(
-        state.roles.update(&id, body.into_inner().into()).await?,
-    ))
+    let role = state.roles.update(&id, body.into_inner().into()).await?;
+    op_ctx.set_action(OperationCategory::Rbac, "role.update");
+    op_ctx.set_resource(ResourceType::Role, id.to_string());
+    Ok(WebResponse::ok(role))
 }
 
 /// `DELETE /api/roles/{id}` — delete a custom role, then reload the enforcer
@@ -138,9 +149,12 @@ pub async fn update(
 pub async fn delete(
     state: web::Data<AppState>,
     id: web::Path<RoleId>,
+    op_ctx: OperationCtx,
 ) -> Result<WebResponse<()>, WebError> {
     state.roles.delete(&id).await?;
     state.casbin.reload().await?;
+    op_ctx.set_action(OperationCategory::Rbac, "role.delete");
+    op_ctx.set_resource(ResourceType::Role, id.to_string());
     Ok(WebResponse::ok(()))
 }
 
@@ -152,13 +166,15 @@ pub async fn delete(
 pub async fn change_status(
     state: web::Data<AppState>,
     id: web::Path<RoleId>,
+    op_ctx: OperationCtx,
     body: ValidatedJson<ChangeRoleStatusRequest>,
 ) -> Result<WebResponse<()>, WebError> {
-    state
-        .roles
-        .change_status(&id, body.into_inner().status)
-        .await?;
+    let status = body.into_inner().status;
+    state.roles.change_status(&id, status).await?;
     state.casbin.reload().await?;
+    op_ctx.set_action(OperationCategory::Rbac, "role.change_status");
+    op_ctx.set_resource(ResourceType::Role, id.to_string());
+    op_ctx.set_detail(serde_json::json!({ "status": status }));
     Ok(WebResponse::ok(()))
 }
 
@@ -177,13 +193,19 @@ pub async fn list_permissions(
 pub async fn set_permissions(
     state: web::Data<AppState>,
     id: web::Path<RoleId>,
+    op_ctx: OperationCtx,
     body: ValidatedJson<AssignPermissionsRequest>,
 ) -> Result<WebResponse<()>, WebError> {
+    let role_id = id.into_inner();
+    let permissions = body.into_inner().permissions;
+    op_ctx.set_action(OperationCategory::Rbac, "role.assign_permissions");
+    op_ctx.set_resource(ResourceType::Role, role_id.to_string());
+    op_ctx.set_detail(serde_json::json!({ "permission_count": permissions.len() }));
     state
         .role_permissions
         .set_permissions_for_role(AssignPermissions {
-            role_id: id.into_inner(),
-            permissions: body.into_inner().permissions,
+            role_id,
+            permissions,
         })
         .await?;
     state.casbin.reload().await?;
@@ -205,14 +227,17 @@ pub async fn list_menus(
 pub async fn set_menus(
     state: web::Data<AppState>,
     id: web::Path<RoleId>,
+    op_ctx: OperationCtx,
     body: ValidatedJson<AssignMenusRequest>,
 ) -> Result<WebResponse<()>, WebError> {
+    let role_id = id.into_inner();
+    let menu_ids = body.into_inner().menu_ids;
+    op_ctx.set_action(OperationCategory::Rbac, "role.assign_menus");
+    op_ctx.set_resource(ResourceType::Role, role_id.to_string());
+    op_ctx.set_detail(serde_json::json!({ "menu_count": menu_ids.len() }));
     state
         .role_menus
-        .set_menus_for_role(AssignMenus {
-            role_id: id.into_inner(),
-            menu_ids: body.into_inner().menu_ids,
-        })
+        .set_menus_for_role(AssignMenus { role_id, menu_ids })
         .await?;
     Ok(WebResponse::ok(()))
 }

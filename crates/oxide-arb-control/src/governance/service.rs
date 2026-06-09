@@ -16,8 +16,9 @@ use oxide_arb_models::{
         NewRuntimeConfigActivation, NewRuntimeConfigVersion, RuntimeConfigActivationInfo,
         RuntimeConfigVersionInfo,
         control_factor::{
-            AuditActor, ControlFactorPublicationInfo, ControlFactorValue, ControlFactorValueInfo,
-            ExpireFactorsOutcome, NewControlFactorAuditEvent, PublishPublicationOutcome,
+            AuditActor, AuditedOutcome, ControlFactorPublicationInfo, ControlFactorValue,
+            ControlFactorValueInfo, ExpireFactorsOutcome, NewControlFactorAuditEvent,
+            PublishPublicationOutcome,
         },
     },
     enums::control_factor::{AuditResourceType, ControlAuditEventType, PublicationMode},
@@ -72,7 +73,7 @@ impl ControlFactorRegistry {
         &self,
         envelope: AuditActor,
         factor_id: &ControlFactorId,
-    ) -> Result<Option<ControlFactorValueInfo>, RegistryError> {
+    ) -> Result<Option<AuditedOutcome<ControlFactorValueInfo>>, RegistryError> {
         envelope.validate()?;
         let audit = factor_audit(ControlAuditEventType::FactorRejected, &envelope, factor_id);
         Ok(self
@@ -159,7 +160,7 @@ impl ControlFactorRegistry {
         envelope: AuditActor,
         active_publication_id: &FactorPublicationId,
         target_publication_id: &FactorPublicationId,
-    ) -> Result<ControlFactorPublicationInfo, RegistryError> {
+    ) -> Result<AuditedOutcome<ControlFactorPublicationInfo>, RegistryError> {
         envelope.validate()?;
         let audit = publication_audit(
             ControlAuditEventType::PublicationRolledBack,
@@ -167,12 +168,12 @@ impl ControlFactorRegistry {
             active_publication_id,
             serde_json::json!({ "target_publication_id": target_publication_id }),
         );
-        let info = self
+        let outcome = self
             .repo
             .rollback_publication(active_publication_id, target_publication_id, audit)
             .await?;
         self.signal_snapshot_refresh();
-        Ok(info)
+        Ok(outcome)
     }
 
     /// Sweeps TTL-due factors, writing one chained `FactorExpired` audit each.
@@ -189,7 +190,7 @@ impl ControlFactorRegistry {
         &self,
         envelope: AuditActor,
         version: NewRuntimeConfigVersion,
-    ) -> Result<RuntimeConfigVersionInfo, RegistryError> {
+    ) -> Result<AuditedOutcome<RuntimeConfigVersionInfo>, RegistryError> {
         envelope.validate()?;
         let audit = runtime_config_audit(
             ControlAuditEventType::RuntimeConfigVersionCreated,

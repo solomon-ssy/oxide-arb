@@ -7,11 +7,15 @@
 use actix_web::{http::Method, web};
 use oxide_arb_models::{
     domain::{CreateMenuRequest, MenuInfo, MenuTreeNode, NewMenu, UpdateMenuRequest},
-    enums::rbac::{Operation, ResourceType, RoleStatus},
+    enums::{
+        operation_log::OperationCategory,
+        rbac::{Operation, ResourceType, RoleStatus},
+    },
     types::MenuId,
 };
 
 use crate::{
+    audit::OperationCtx,
     auth::casbin::Rule,
     error::WebError,
     extractors::{AuthedActor, ValidatedJson},
@@ -64,6 +68,7 @@ pub async fn list(state: web::Data<AppState>) -> Result<WebResponse<Vec<MenuTree
 /// `POST /api/menus` — create a menu node.
 pub async fn create(
     state: web::Data<AppState>,
+    op_ctx: OperationCtx,
     body: ValidatedJson<CreateMenuRequest>,
 ) -> Result<WebResponse<MenuInfo>, WebError> {
     let request = body.into_inner();
@@ -82,26 +87,34 @@ pub async fn create(
         hide_in_menu: request.hide_in_menu,
         status: request.status.unwrap_or(RoleStatus::Enabled),
     };
-    Ok(WebResponse::ok(state.menus.create(new).await?))
+    let menu = state.menus.create(new).await?;
+    op_ctx.set_action(OperationCategory::Rbac, "menu.create");
+    op_ctx.set_resource(ResourceType::Menu, menu.id.to_string());
+    Ok(WebResponse::ok(menu))
 }
 
 /// `PUT /api/menus/{id}` — partial menu update.
 pub async fn update(
     state: web::Data<AppState>,
     id: web::Path<MenuId>,
+    op_ctx: OperationCtx,
     body: ValidatedJson<UpdateMenuRequest>,
 ) -> Result<WebResponse<MenuInfo>, WebError> {
-    Ok(WebResponse::ok(
-        state.menus.update(&id, body.into_inner().into()).await?,
-    ))
+    let menu = state.menus.update(&id, body.into_inner().into()).await?;
+    op_ctx.set_action(OperationCategory::Rbac, "menu.update");
+    op_ctx.set_resource(ResourceType::Menu, id.to_string());
+    Ok(WebResponse::ok(menu))
 }
 
 /// `DELETE /api/menus/{id}` — delete a menu node.
 pub async fn delete(
     state: web::Data<AppState>,
     id: web::Path<MenuId>,
+    op_ctx: OperationCtx,
 ) -> Result<WebResponse<()>, WebError> {
     state.menus.delete(&id).await?;
+    op_ctx.set_action(OperationCategory::Rbac, "menu.delete");
+    op_ctx.set_resource(ResourceType::Menu, id.to_string());
     Ok(WebResponse::ok(()))
 }
 

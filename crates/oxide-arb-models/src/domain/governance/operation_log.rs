@@ -88,3 +88,14 @@ pub struct OperationLogQuery {
     #[serde(flatten)]
     pub page: PageRequest,
 }
+
+impl OperationLogQuery {
+    /// Return a copy with the embedded pagination window normalized.
+    #[must_use]
+    pub fn normalized(self) -> Self {
+        Self {
+            page: self.page.normalized(),
+            ..self
+        }
+    }
+}

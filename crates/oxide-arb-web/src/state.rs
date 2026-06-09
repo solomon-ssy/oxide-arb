@@ -1,19 +1,23 @@
 //! Shared application state injected into every request.
 //!
-//! `AppState` is cheap to clone (every field is an [`Arc`]) and is registered
-//! once as actix `web::Data`. It bundles the authentication service, the RBAC
-//! repositories, the live Casbin enforcer, and the route-level permission
-//! registry. Later sub-phases extend it further (control-plane registry,
-//! business repositories, WebSocket broadcaster).
+//! `AppState` is cheap to clone (every field is an [`Arc`] or a cloneable
+//! handle) and is registered once as actix `web::Data`. It bundles the
+//! authentication service, the RBAC repositories, the live Casbin enforcer, the
+//! route-level permission registry, the governance control-plane (registry +
+//! read repositories), and the operation-log buffer. Later sub-phases extend it
+//! further (business repositories, WebSocket broadcaster).
 
 use std::sync::Arc;
 
+use oxide_arb_control::governance::ControlFactorRegistry;
 use oxide_arb_repository::traits::{
-    MenuRepository, RoleMenuRepository, RolePermissionRepository, RoleRepository, UserRepository,
-    UserRoleRepository,
+    ControlFactorRepository, ControlFactorShadowDecisionRepository, MenuRepository,
+    OperationLogRepository, RoleMenuRepository, RolePermissionRepository, RoleRepository,
+    RuntimeConfigVersionRepository, UserRepository, UserRoleRepository,
 };
 
 use crate::{
+    audit::OperationLogBuffer,
     auth::casbin::{CasbinService, PermChecker},
     jwt::JwtService,
 };
@@ -39,4 +43,17 @@ pub struct AppState {
     pub casbin: Arc<CasbinService>,
     /// Route-level authorization registry (fail-closed).
     pub perm_checker: Arc<PermChecker>,
+    /// Governance control-plane: state-machine mutations that write the audit
+    /// hash chain transactionally (publish / rollback / reject / runtime-config).
+    pub registry: Arc<ControlFactorRegistry>,
+    /// Read access to control-factor state, publications, and the audit chain.
+    pub control_factors: Arc<dyn ControlFactorRepository>,
+    /// Read access to immutable runtime-config versions and activations.
+    pub runtime_config: Arc<dyn RuntimeConfigVersionRepository>,
+    /// Read access to shadow-publication decision evidence.
+    pub shadow_decisions: Arc<dyn ControlFactorShadowDecisionRepository>,
+    /// Append-only operation log (paginated forensic queries).
+    pub operation_logs: Arc<dyn OperationLogRepository>,
+    /// Non-blocking producer handle for the operation-log writer pipeline.
+    pub operation_log: OperationLogBuffer,
 }

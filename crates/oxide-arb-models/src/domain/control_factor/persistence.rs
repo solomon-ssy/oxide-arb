@@ -454,20 +454,59 @@ impl AuditActor {
     }
 }
 
+/// Pairs a governed mutation's domain result with the hash-chain audit event it
+/// atomically appended in the same transaction.
+///
+/// Surfacing the appended `audit_event_id` lets the general operation log
+/// hard-link (foreign key) every governed change to the authoritative governance
+/// hash chain, so the two audit tracks can be cross-walked without relying on
+/// loose `request_id` correlation.
+#[derive(Debug, Clone)]
+pub struct AuditedOutcome<T> {
+    /// The domain result of the governed mutation.
+    pub value: T,
+    /// The hash-chain event appended for this mutation.
+    pub audit_event_id: AuditEventId,
+}
+
+impl<T> AuditedOutcome<T> {
+    /// Pairs a mutation result with the audit event it appended.
+    pub const fn new(value: T, audit_event_id: AuditEventId) -> Self {
+        Self {
+            value,
+            audit_event_id,
+        }
+    }
+}
+
 /// Outcome of an idempotent publish.
 #[derive(Debug, Clone)]
 pub enum PublishPublicationOutcome {
-    /// Created and activated a new publication.
-    Published(ControlFactorPublicationInfo),
-    /// Returned an existing publication matching the idempotency key.
+    /// Created and activated a new publication, with the appended audit event.
+    Published(AuditedOutcome<ControlFactorPublicationInfo>),
+    /// Returned an existing publication matching the idempotency key. An
+    /// idempotent replay appends **no** new chain event, so it carries no
+    /// `audit_event_id`.
     AlreadyApplied(ControlFactorPublicationInfo),
 }
 
 impl PublishPublicationOutcome {
+    /// The publication this outcome resolved to (newly created or pre-existing).
     #[must_use]
     pub const fn publication(&self) -> &ControlFactorPublicationInfo {
         match self {
-            Self::Published(info) | Self::AlreadyApplied(info) => info,
+            Self::Published(outcome) => &outcome.value,
+            Self::AlreadyApplied(info) => info,
+        }
+    }
+
+    /// The hash-chain audit event appended by this operation, if any. `None` for
+    /// an idempotent replay (`AlreadyApplied`), which mutates no state.
+    #[must_use]
+    pub const fn audit_event_id(&self) -> Option<&AuditEventId> {
+        match self {
+            Self::Published(outcome) => Some(&outcome.audit_event_id),
+            Self::AlreadyApplied(_) => None,
         }
     }
 }

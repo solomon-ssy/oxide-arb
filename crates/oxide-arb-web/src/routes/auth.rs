@@ -22,12 +22,13 @@ use oxide_arb_models::{
         LoginRequest, LogoutRequest, MeResponse, RefreshRequest, RoleView, TokenResponse, UserInfo,
         UserView,
     },
-    enums::rbac::UserStatus,
+    enums::{operation_log::OperationCategory, rbac::UserStatus},
     security::{hash_password, verify_password},
     types::UserId,
 };
 
 use crate::{
+    audit::OperationCtx,
     auth::casbin::Rule,
     error::WebError,
     extractors::{AuthedActor, ValidatedJson},
@@ -53,9 +54,14 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
 /// `POST /api/auth/login` (`v1`) — verify credentials and issue a token pair.
 pub async fn login(
     state: web::Data<AppState>,
+    op_ctx: OperationCtx,
     body: ValidatedJson<LoginRequest>,
 ) -> Result<WebResponse<TokenResponse>, WebError> {
     let request = body.into_inner();
+    // Attribute the attempt to the supplied username (never the password) so a
+    // failed login is auditable without leaking credentials.
+    op_ctx.set_action(OperationCategory::Auth, "auth.login");
+    op_ctx.set_actor_username(&request.username);
     let candidate = state.users.find_by_username(&request.username).await?;
 
     // Always run a verification so an unknown username takes the same time as a
@@ -71,6 +77,8 @@ pub async fn login(
         _ => return Err(AuthError::InvalidCredentials.into()),
     };
 
+    // Promote the attribution to the fully-resolved actor on success.
+    op_ctx.set_actor(user.id.clone(), &user.username);
     let tokens = issue_pair(&state, &user)?;
     Ok(WebResponse::ok(tokens))
 }
@@ -78,8 +86,10 @@ pub async fn login(
 /// `POST /api/auth/refresh` (`v1`) — rotate a refresh token into a fresh pair.
 pub async fn refresh(
     state: web::Data<AppState>,
+    op_ctx: OperationCtx,
     body: ValidatedJson<RefreshRequest>,
 ) -> Result<WebResponse<TokenResponse>, WebError> {
+    op_ctx.set_action(OperationCategory::Auth, "auth.refresh");
     let request = body.into_inner();
     let claims = state
         .jwt
@@ -106,6 +116,7 @@ pub async fn refresh(
     // be replayed.
     state.jwt.revoke(&claims).await?;
 
+    op_ctx.set_actor(user.id.clone(), &user.username);
     let tokens = issue_pair(&state, &user)?;
     Ok(WebResponse::ok(tokens))
 }
@@ -114,8 +125,10 @@ pub async fn refresh(
 pub async fn logout(
     state: web::Data<AppState>,
     actor: AuthedActor,
+    op_ctx: OperationCtx,
     body: Option<web::Json<LogoutRequest>>,
 ) -> Result<WebResponse<()>, WebError> {
+    op_ctx.set_action(OperationCategory::Auth, "auth.logout");
     state.jwt.revoke(&actor.claims).await?;
 
     if let Some(payload) = body {

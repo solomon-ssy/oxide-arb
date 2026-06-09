@@ -86,7 +86,7 @@ use oxide_arb_models::{
         DetectionRuntimeConfig, ExecutionRuntimeConfig, NewRuntimeConfigActivation,
         NewRuntimeConfigVersion, OperatorRuntimeConfig, RiskLimitRuntimeConfig,
         RuntimeConfigDocument, SizingRuntimeConfig, control_factor::ControlFactorProvider,
-        risk::RiskEngineState, settlement::MarketSettlementRequest,
+        risk::RiskEngineState, runtime_config_hash, settlement::MarketSettlementRequest,
     },
     enums::{
         common::ExecutionMode,
@@ -123,7 +123,6 @@ use oxide_arb_storage::{
     },
 };
 use parking_lot::Mutex;
-use sha2::{Digest, Sha256};
 use std::{
     sync::{Arc, atomic::AtomicU32},
     time::Duration,
@@ -703,13 +702,6 @@ fn runtime_config_document(settings: &Settings) -> RuntimeConfigDocument {
             circuit_breaker_threshold: settings.risk.max_consecutive_misses,
         },
     }
-}
-
-fn runtime_config_hash(config_json: &serde_json::Value) -> String {
-    let canonical =
-        serde_json::to_string(config_json).expect("runtime config JSON is serializable");
-    let digest = Sha256::digest(canonical.as_bytes());
-    format!("sha256:{digest:x}")
 }
 
 async fn connect_clients(
