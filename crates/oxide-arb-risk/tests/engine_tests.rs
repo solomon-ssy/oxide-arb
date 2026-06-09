@@ -10,7 +10,7 @@ use oxide_arb_error::{OxideError, OxideResult};
 use oxide_arb_models::{
     config::{CircuitBreakerConfig, RiskConfig},
     domain::{
-        BlacklistInfo, PositionInfo, UpsertBlacklistEntry,
+        BlacklistInfo, CoreEvent, CoreEventPublisher, PositionInfo, UpsertBlacklistEntry,
         calibration::{BucketKey, CalibrationSnapshot},
         opportunity::{EndgameMeta, Opportunity},
         risk::{
@@ -280,6 +280,7 @@ impl DedupePersistence {
             weekly_trade_count: 0,
             weekly_window_start: now.date_naive(),
             hwm_equity: Usd::ZERO,
+            total_realized_pnl: Usd::ZERO,
             last_emergency_at: None,
             last_emergency_reason: None,
             updated_at: now,
@@ -870,5 +871,65 @@ async fn loss_cap_records_emergency_in_snapshot() {
             .is_some_and(|reason| reason.contains("weekly loss cap")),
         "expected weekly loss reason, got {:?}",
         snapshot.last_emergency_reason
+    );
+}
+
+#[tokio::test]
+async fn settlement_emits_pnl_update_and_accumulates_lifetime_total() {
+    let metrics = MockMetrics::default();
+    let (events, rx) = CoreEventPublisher::bounded(16);
+    let engine = RiskEngineBuilder::new()
+        .config(RiskConfig::default())
+        .clock(utc_clock())
+        .initial_equity(Usd::new(dec!(5000)))
+        .event_publisher(events)
+        .build(&metrics)
+        .expect("engine should build");
+
+    // Two same-day realized settlements: +10 then +5 → daily == total == 15.
+    engine
+        .on_trade_result(
+            TradeAccountingPhase::Settlement,
+            &test_trade_record(TradeBusinessOutcome::Success, dec!(10)),
+            &metrics,
+        )
+        .await
+        .expect("first settlement");
+    engine
+        .on_trade_result(
+            TradeAccountingPhase::Settlement,
+            &test_trade_record(TradeBusinessOutcome::Success, dec!(5)),
+            &metrics,
+        )
+        .await
+        .expect("second settlement");
+
+    let mut last_pnl = None;
+    while let Ok(event) = rx.try_recv() {
+        if let CoreEvent::PnlUpdate { daily, total } = event {
+            last_pnl = Some((daily, total));
+        }
+    }
+    assert_eq!(
+        last_pnl,
+        Some((Usd::new(dec!(15)), Usd::new(dec!(15)))),
+        "latest PnlUpdate carries daily + lifetime total"
+    );
+
+    let snapshot = engine.snapshot(&metrics);
+    assert_eq!(snapshot.total_realized_pnl, Usd::new(dec!(15)));
+
+    // Restart safety: a fresh engine recovered from the snapshot preserves the
+    // lifetime total even though the daily window would reset.
+    let recovered = RiskEngineBuilder::new()
+        .config(RiskConfig::default())
+        .clock(utc_clock())
+        .snapshot(snapshot)
+        .build(&metrics)
+        .expect("engine recovers from snapshot");
+    assert_eq!(
+        recovered.snapshot(&metrics).total_realized_pnl,
+        Usd::new(dec!(15)),
+        "lifetime total survives restart"
     );
 }

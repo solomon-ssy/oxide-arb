@@ -57,10 +57,6 @@ pub enum WsChannel {
     ConfigActivated,
     /// A new scored opportunity was detected.
     OpportunityDetected,
-    /// A previously detected opportunity expired.
-    OpportunityExpired,
-    /// A trade was opened.
-    TradeOpened,
     /// A trade was filled.
     TradeFilled,
     /// A trade settled (with business outcome + realized `PnL`).
@@ -71,7 +67,7 @@ pub enum WsChannel {
 
 impl WsChannel {
     /// Every channel, used by exhaustiveness tests and reverse lookup.
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 12] = [
         Self::SystemStatus,
         Self::SystemAlert,
         Self::RiskCircuitBreaker,
@@ -81,8 +77,6 @@ impl WsChannel {
         Self::ControlPublished,
         Self::ConfigActivated,
         Self::OpportunityDetected,
-        Self::OpportunityExpired,
-        Self::TradeOpened,
         Self::TradeFilled,
         Self::TradeSettled,
         Self::PnlUpdate,
@@ -101,8 +95,6 @@ impl WsChannel {
             Self::ControlPublished => "control.published",
             Self::ConfigActivated => "config.activated",
             Self::OpportunityDetected => "opportunity.detected",
-            Self::OpportunityExpired => "opportunity.expired",
-            Self::TradeOpened => "trade.opened",
             Self::TradeFilled => "trade.filled",
             Self::TradeSettled => "trade.settled",
             Self::PnlUpdate => "pnl.update",
@@ -121,8 +113,8 @@ impl WsChannel {
             Self::MarketResolved | Self::MarketBookUpdate => ResourceType::Market,
             Self::ControlPublished => ResourceType::ControlFactor,
             Self::ConfigActivated => ResourceType::RuntimeConfig,
-            Self::OpportunityDetected | Self::OpportunityExpired => ResourceType::Opportunity,
-            Self::TradeOpened | Self::TradeFilled | Self::TradeSettled => ResourceType::Trade,
+            Self::OpportunityDetected => ResourceType::Opportunity,
+            Self::TradeFilled | Self::TradeSettled => ResourceType::Trade,
             Self::PnlUpdate => ResourceType::Pnl,
         }
     }

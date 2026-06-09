@@ -40,6 +40,9 @@ pub struct Model {
     pub weekly_trade_count: i32,
     pub weekly_window_start: NaiveDate,
     pub hwm_equity: Usd,
+    /// Lifetime cumulative realized `PnL` (same accounting basis as `daily_pnl`).
+    /// Write-only telemetry: never read by any pre-trade gate.
+    pub total_realized_pnl: Usd,
     pub last_emergency_at: Option<DateTime<Utc>>,
     #[sea_orm(column_type = "Text", nullable)]
     pub last_emergency_reason: Option<String>,

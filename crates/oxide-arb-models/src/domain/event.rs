@@ -10,7 +10,7 @@ use crate::{
         common::{AlertLevel, TradeBusinessOutcome},
         control_factor::PublicationMode,
     },
-    types::{MarketId, OpportunityId, TradeId, Usd},
+    types::{MarketId, TradeId, Usd},
 };
 use std::sync::{
     Arc,
@@ -20,21 +20,25 @@ use std::sync::{
 /// Real-time event emitted by core subsystems and the governance control plane,
 /// consumed by the WebSocket broadcaster and fanned out to subscribers.
 ///
-/// Hot-path variants (`OpportunityDetected`, `Trade*`, `PnlUpdate`,
-/// `PositionChanged`) are defined here but only emitted once Phase 6.7 wires the
-/// detection / execution / post-trade instrumentation. Phase 6.6 emits the
-/// non-hot-path variants (control / config / alert / system / risk).
+/// Every variant has exactly one wire channel (see `domain::ws::mapping`) and a
+/// stable [`Self::kind`] label used for drop accounting. Hot-path producers
+/// (scanner / post-trade / settlement / risk) publish through the non-blocking
+/// [`CoreEventPublisher`]; the governance control plane publishes the
+/// control / config / system / alert variants.
 #[derive(Debug, Clone)]
 pub enum CoreEvent {
+    /// A scored opportunity was detected (projected to the public `Opportunity`).
     OpportunityDetected(Opportunity),
-    OpportunityExpired(OpportunityId),
-    TradeOpened(TradeInfo),
+    /// A trade reached its terminal fill outcome (real DB-projected `TradeInfo`).
     TradeFilled(TradeInfo),
+    /// A trade's position was settled after market resolution + redemption.
     TradeSettled {
         trade_id: TradeId,
         outcome: TradeBusinessOutcome,
         pnl: Usd,
     },
+    /// Realized-`PnL` change: `daily` is the current trading day, `total` is the
+    /// lifetime cumulative realized `PnL` (same accounting basis as `daily`).
     PnlUpdate {
         daily: Usd,
         total: Usd,
@@ -69,6 +73,37 @@ pub enum CoreEvent {
     },
 }
 
+impl CoreEvent {
+    /// Stable, allocation-free label for this event kind.
+    ///
+    /// Matches the wire channel name (`domain::ws::channel::WsChannel::as_str`)
+    /// so drop metrics and fan-out share one vocabulary.
+    #[must_use]
+    pub const fn kind(&self) -> &'static str {
+        match self {
+            Self::OpportunityDetected(_) => "opportunity.detected",
+            Self::TradeFilled(_) => "trade.filled",
+            Self::TradeSettled { .. } => "trade.settled",
+            Self::PnlUpdate { .. } => "pnl.update",
+            Self::SystemStatusChanged(_) => "system.status",
+            Self::CircuitBreakerTripped { .. } => "risk.circuit_breaker",
+            Self::PositionChanged(_) => "risk.position_update",
+            Self::MarketBookUpdate { .. } => "market.book_update",
+            Self::MarketResolved { .. } => "market.resolved",
+            Self::ControlPublished { .. } => "control.published",
+            Self::ConfigActivated { .. } => "config.activated",
+            Self::Alert { .. } => "system.alert",
+        }
+    }
+}
+
+/// Per-kind drop observer for the event bus.
+///
+/// Invoked with [`CoreEvent::kind`] each time an event is dropped on a
+/// full/disconnected channel. Wired by the core process to a labeled Prometheus
+/// counter (`oxide_arb_ws_event_dropped_total{kind}`).
+pub type DropObserver = Arc<dyn Fn(&'static str) + Send + Sync>;
+
 /// Non-blocking producer handle for [`CoreEvent`]s.
 ///
 /// Backed by a bounded channel: on a full channel the event is dropped and a
@@ -77,6 +112,7 @@ pub enum CoreEvent {
 #[derive(Clone)]
 pub struct CoreEventPublisher {
     tx: flume::Sender<CoreEvent>,
+    on_drop: Option<DropObserver>,
     dropped: Arc<AtomicU64>,
 }
 
@@ -88,18 +124,30 @@ impl CoreEventPublisher {
         (
             Self {
                 tx,
+                on_drop: None,
                 dropped: Arc::new(AtomicU64::new(0)),
             },
             rx,
         )
     }
 
+    /// Attach a per-kind drop observer (consumed builder-style at wiring time).
+    #[must_use]
+    pub fn with_drop_hook(mut self, observer: DropObserver) -> Self {
+        self.on_drop = Some(observer);
+        self
+    }
+
     /// Publish an event without ever blocking. Drops and counts on a full or
-    /// disconnected channel.
+    /// disconnected channel, invoking the per-kind drop observer.
     pub fn publish(&self, event: CoreEvent) {
+        let kind = event.kind();
         if self.tx.try_send(event).is_err() {
             let dropped = self.dropped.fetch_add(1, Ordering::Relaxed) + 1;
-            tracing::warn!(dropped, "core event channel full; dropping event");
+            if let Some(observer) = &self.on_drop {
+                observer(kind);
+            }
+            tracing::warn!(dropped, kind, "core event channel full; dropping event");
         }
     }
 
@@ -107,5 +155,66 @@ impl CoreEventPublisher {
     #[must_use]
     pub fn dropped(&self) -> u64 {
         self.dropped.load(Ordering::Relaxed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CoreEvent, CoreEventPublisher};
+    use crate::{enums::common::AlertLevel, types::Usd};
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    fn alert() -> CoreEvent {
+        CoreEvent::Alert {
+            level: AlertLevel::Warning,
+            message: "x".to_owned(),
+        }
+    }
+
+    #[test]
+    fn kind_matches_wire_channel_names() {
+        assert_eq!(alert().kind(), "system.alert");
+        assert_eq!(
+            CoreEvent::PnlUpdate {
+                daily: Usd::ZERO,
+                total: Usd::ZERO
+            }
+            .kind(),
+            "pnl.update"
+        );
+    }
+
+    #[test]
+    fn publish_never_blocks_and_drops_on_full_channel() {
+        // Capacity 1: the second publish must drop instead of blocking, and the
+        // drop counter must advance — the hard non-blocking invariant.
+        let (publisher, rx) = CoreEventPublisher::bounded(1);
+        publisher.publish(alert());
+        publisher.publish(alert());
+        assert_eq!(publisher.dropped(), 1, "second publish dropped");
+        assert!(rx.try_recv().is_ok(), "first event buffered");
+        assert!(rx.try_recv().is_err(), "only one event buffered");
+    }
+
+    #[test]
+    fn drop_hook_receives_per_kind_label() {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let last: Arc<Mutex<Option<&'static str>>> = Arc::new(Mutex::new(None));
+        let hits_hook = Arc::clone(&hits);
+        let last_hook = Arc::clone(&last);
+        // Keep `rx` alive so the channel stays connected: the first publish
+        // buffers, only the capacity-overflow second publish drops.
+        let (publisher, _rx) = CoreEventPublisher::bounded(1);
+        let publisher = publisher.with_drop_hook(Arc::new(move |kind| {
+            hits_hook.fetch_add(1, Ordering::Relaxed);
+            *last_hook.lock().expect("hook mutex") = Some(kind);
+        }));
+        publisher.publish(alert());
+        publisher.publish(alert());
+        assert_eq!(hits.load(Ordering::Relaxed), 1, "hook fired once on drop");
+        assert_eq!(*last.lock().expect("assert mutex"), Some("system.alert"));
     }
 }

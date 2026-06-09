@@ -25,7 +25,9 @@ use oxide_arb_models::{
             MarketSettlementInput, MarketSettlementRequest, NewResolutionEvent, SettlementEconomics,
         },
     },
-    enums::common::{AlertLevel, ExecutionMode, RedeemStatus, SettlementTrigger},
+    enums::common::{
+        AlertLevel, ExecutionMode, RedeemStatus, SettlementTrigger, TradeBusinessOutcome,
+    },
     types::{ResolutionEventId, TokenId},
 };
 use oxide_arb_repository::{
@@ -301,6 +303,16 @@ impl MarketSettlementService {
             .mark_accounted(&settled.position_id, Utc::now())
             .await?;
         self.write_settlement_audit(req, settled, &economics).await;
+        // Real-time push: the position is settled and the trade's lifecycle is
+        // complete. `outcome` is the fill outcome (Success); the realized PnL
+        // sign rides in `pnl`. Fire-and-forget — never affects settlement.
+        self.events
+            .publish(CoreEvent::PositionChanged(settled.clone()));
+        self.events.publish(CoreEvent::TradeSettled {
+            trade_id: settled.trade_id.clone(),
+            outcome: TradeBusinessOutcome::Success,
+            pnl: economics.realized_pnl_usd,
+        });
         if report
             .as_ref()
             .is_some_and(|report| report.breaker_tripped.is_some())

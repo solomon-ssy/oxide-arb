@@ -11,7 +11,8 @@ use std::sync::Arc;
 
 use oxide_arb_control::governance::ControlFactorRegistry;
 use oxide_arb_models::domain::{
-    CoreEventPublisher, MarketDataPort, ReplayPort, RuntimeControlPort,
+    CoreEventPublisher, MarketDataPort, MetricsScrapePort, ReadinessPort, ReplayPort,
+    RuntimeControlPort,
 };
 use oxide_arb_repository::traits::{
     ControlFactorRepository, ControlFactorShadowDecisionRepository, EvidenceTimeseriesRepository,
@@ -85,4 +86,8 @@ pub struct AppState {
     pub risk_audit: Arc<dyn RiskAuditRepository>,
     /// Live WebSocket session registry (shared with the broadcaster task).
     pub ws_sessions: SessionRegistry,
+    /// Prometheus scrape surface (`GET /metrics`).
+    pub metrics: Arc<dyn MetricsScrapePort>,
+    /// Readiness probe surface (`GET /ready`).
+    pub readiness: Arc<dyn ReadinessPort>,
 }

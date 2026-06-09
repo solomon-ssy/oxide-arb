@@ -9,8 +9,9 @@ use crate::{
 use oxide_arb_error::OxideError;
 use oxide_arb_models::{
     domain::{
+        CoreEvent, CoreEventPublisher,
         calibration::NewCalibrationOutcome,
-        position::NewPosition,
+        position::{NewPosition, PositionInfo},
         scored_snapshot::ScoredOpportunitySnapshot,
         trade::{PostTradeInput, TradeInfo},
     },
@@ -38,6 +39,9 @@ pub struct PostTradeConsumer {
     pub metrics_state: Arc<RiskMetricsState>,
     pub metrics_refresh: Option<Arc<RiskMetricsRefreshService>>,
     pub metrics: Arc<MetricsHub>,
+    /// Non-blocking real-time bus handle: emits `TradeFilled` + `PositionChanged`
+    /// once a fill is durably advanced to its terminal state.
+    pub events: CoreEventPublisher,
 }
 
 impl PostTradeConsumer {
@@ -81,12 +85,18 @@ impl PostTradeConsumer {
             }
         };
 
+        // The position created by *this* worker (if any); `None` on idempotent
+        // replay where the position already existed.
+        let mut opened_position = None;
         if trade.state.is_success() {
-            if let Err(error) = self.ensure_position(trade).await {
-                tracing::error!(%error, trade_id = %trade.trade_id, "position creation failed after fill");
-                self.fsm.enter_emergency("position create failed");
-                self.metrics.post_trade_relay_failed.inc();
-                return;
+            match self.ensure_position(trade).await {
+                Ok(position) => opened_position = position,
+                Err(error) => {
+                    tracing::error!(%error, trade_id = %trade.trade_id, "position creation failed after fill");
+                    self.fsm.enter_emergency("position create failed");
+                    self.metrics.post_trade_relay_failed.inc();
+                    return;
+                }
             }
             let Some(snapshot) = &snapshot else {
                 self.fsm
@@ -110,7 +120,19 @@ impl PostTradeConsumer {
             .advance_state(&trade.trade_id, trade.state, terminal)
             .await
         {
-            Ok(true) => self.metrics.post_trade_relay_processed.inc(),
+            Ok(true) => {
+                self.metrics.post_trade_relay_processed.inc();
+                // Real-time push: only the worker that actually advanced the row
+                // emits, so at-least-once replay never double-publishes. A fill
+                // surfaces the terminal trade and, when this worker opened it,
+                // the new position.
+                if trade.state.is_success() {
+                    self.events.publish(CoreEvent::TradeFilled(trade.clone()));
+                    if let Some(position) = opened_position {
+                        self.events.publish(CoreEvent::PositionChanged(position));
+                    }
+                }
+            }
             Ok(false) => {
                 tracing::debug!(trade_id = %trade.trade_id, "trade already advanced by another worker");
             }
@@ -130,15 +152,17 @@ impl PostTradeConsumer {
         }
     }
 
-    /// Create the position for a filled trade, idempotently (one position per trade).
-    async fn ensure_position(&self, trade: &TradeInfo) -> Result<(), OxideError> {
+    /// Create the position for a filled trade, idempotently (one position per
+    /// trade). Returns `Some(position)` only when *this* call created it, so the
+    /// caller can emit `PositionChanged` exactly once; `None` on replay.
+    async fn ensure_position(&self, trade: &TradeInfo) -> Result<Option<PositionInfo>, OxideError> {
         if self
             .position_repo
             .find_by_trade_id(&trade.trade_id)
             .await?
             .is_some()
         {
-            return Ok(());
+            return Ok(None);
         }
         let position = NewPosition {
             position_id: PositionId::from_v7(),
@@ -152,8 +176,8 @@ impl PostTradeConsumer {
             total_fees_usd: trade.fee_usd,
             redeem_status: RedeemStatus::initial_for_mode(trade.execution_mode),
         };
-        self.position_repo.create(position).await?;
-        Ok(())
+        let created = self.position_repo.create(position).await?;
+        Ok(Some(created))
     }
 
     async fn ensure_calibration_outcome(

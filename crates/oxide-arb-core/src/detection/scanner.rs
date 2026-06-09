@@ -14,7 +14,7 @@ use crate::{
 use chrono::{DateTime, Utc};
 use num_traits::ToPrimitive;
 use oxide_arb_algorithm::{pipeline::MarketScanInputRef, scorer::ScoredOpportunity};
-use oxide_arb_models::domain::latency::LatencyTrace;
+use oxide_arb_models::domain::{CoreEvent, CoreEventPublisher, latency::LatencyTrace};
 use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
@@ -29,6 +29,8 @@ pub struct Scanner {
     staleness_classifier: StalenessClassifier,
     metrics: Arc<MetricsHub>,
     detection_writer: Option<Arc<DetectionWriter>>,
+    /// Non-blocking real-time bus handle; emits `OpportunityDetected` on detect.
+    events: CoreEventPublisher,
 }
 
 impl Scanner {
@@ -39,6 +41,7 @@ impl Scanner {
         staleness_classifier: StalenessClassifier,
         metrics: Arc<MetricsHub>,
         detection_writer: Option<Arc<DetectionWriter>>,
+        events: CoreEventPublisher,
     ) -> Self {
         Self {
             pipeline,
@@ -47,6 +50,7 @@ impl Scanner {
             staleness_classifier,
             metrics,
             detection_writer,
+            events,
         }
     }
 
@@ -107,6 +111,12 @@ impl Scanner {
             if let Some(writer) = &self.detection_writer {
                 writer.write(scored);
             }
+            // Surface the detection to the real-time bus. Project the public
+            // `Opportunity` (no internal algorithm/latency trace leakage);
+            // fire-and-forget, drops on a full bus rather than blocking the scan.
+            self.events.publish(CoreEvent::OpportunityDetected(
+                (*scored.opportunity).clone(),
+            ));
         }
         drop(timer);
         result

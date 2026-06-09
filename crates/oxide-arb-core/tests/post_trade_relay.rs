@@ -20,7 +20,7 @@ use oxide_arb_core::{
 use oxide_arb_models::{
     clickhouse::OpportunityAuditRow,
     config::{PolymarketConfig, RiskConfig, WebSocketConfig},
-    domain::{NewTrade, PositionInfo, TradeObservation},
+    domain::{CoreEvent, CoreEventPublisher, NewTrade, PositionInfo, TradeObservation},
     enums::common::{ExecutionMode, MarketCategory, Side, TradeBusinessOutcome, TradeState},
     types::{
         Bps, EventId, ExecutionId, MarketId, OpportunityId, Price, ReservationId, Shares, TokenId,
@@ -46,6 +46,7 @@ struct Harness {
     consumer: PostTradeConsumer,
     capital_manager: Arc<CapitalManager>,
     metrics: Arc<MetricsHub>,
+    events_rx: flume::Receiver<CoreEvent>,
 }
 
 fn scored_snapshot_json(opportunity_id: &OpportunityId) -> serde_json::Value {
@@ -255,6 +256,7 @@ fn harness() -> Harness {
         Arc::new(AlertDispatcher::new(None, None, None, 0)),
     ));
 
+    let (events, events_rx) = CoreEventPublisher::bounded(64);
     let consumer = PostTradeConsumer {
         risk_engine: risk_engine(),
         risk_metrics: risk_metrics(exposure, metrics_state.clone()),
@@ -266,6 +268,7 @@ fn harness() -> Harness {
         metrics_state,
         metrics_refresh: None,
         metrics: metrics.clone(),
+        events,
     };
 
     Harness {
@@ -275,6 +278,7 @@ fn harness() -> Harness {
         consumer,
         capital_manager,
         metrics,
+        events_rx,
     }
 }
 
@@ -313,6 +317,41 @@ async fn consumer_is_idempotent_for_replayed_fill() {
     assert_eq!(harness.position_repo.positions_snapshot().len(), 1);
     assert_eq!(harness.calibration_repo.outcome_count(), 1);
     assert_eq!(harness.metrics.post_trade_relay_processed.get(), 1);
+}
+
+#[tokio::test]
+async fn successful_fill_emits_trade_filled_and_position_changed() {
+    let harness = harness();
+    let trade_id = create_observed_fill(&harness.trade_repo).await;
+    let observed = harness.trade_repo.find(&trade_id).expect("observed trade");
+
+    harness.consumer.process(&observed).await;
+
+    let mut events = Vec::new();
+    while let Ok(event) = harness.events_rx.try_recv() {
+        events.push(event);
+    }
+    match events
+        .iter()
+        .find(|event| matches!(event, CoreEvent::TradeFilled(_)))
+    {
+        Some(CoreEvent::TradeFilled(trade)) => assert_eq!(trade.trade_id, trade_id),
+        _ => panic!("expected a TradeFilled event, got {events:?}"),
+    }
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, CoreEvent::PositionChanged(_))),
+        "expected a PositionChanged event, got {events:?}"
+    );
+
+    // At-least-once replay must not re-emit: only the worker that actually
+    // advanced the row publishes.
+    harness.consumer.process(&observed).await;
+    assert!(
+        harness.events_rx.try_recv().is_err(),
+        "idempotent replay must not re-emit"
+    );
 }
 
 #[tokio::test]

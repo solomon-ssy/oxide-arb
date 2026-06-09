@@ -1,6 +1,6 @@
 use prometheus::{
-    Gauge, Histogram, HistogramOpts, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts,
-    Registry,
+    Encoder, Gauge, Histogram, HistogramOpts, IntCounter, IntCounterVec, IntGauge, IntGaugeVec,
+    Opts, Registry, TextEncoder,
 };
 
 macro_rules! register_counter {
@@ -820,7 +820,6 @@ impl MetricsHub {
         let system = register_system_metrics(&registry);
         let settlement = register_settlement_metrics(&registry);
         let control_factor = register_control_factor_metrics(&registry);
-
         Self {
             registry,
             ws_events_received: pipeline.ws_events_received,
@@ -923,6 +922,37 @@ impl MetricsHub {
         self.shutdown_stage_progress_remaining
             .with_label_values(&[stage])
             .set(i64::try_from(remaining).unwrap_or(i64::MAX));
+    }
+
+    /// Gather all registered metrics in Prometheus text exposition format.
+    ///
+    /// Intended for the public `GET /metrics` scrape handler (see ng-gateway
+    /// `gather_prometheus_text`); encodes every family registered on this hub's
+    /// [`Registry`].
+    pub fn gather_prometheus_text(&self) -> Result<(String, Vec<u8>), String> {
+        let metric_families = self.registry.gather();
+        let encoder = TextEncoder::new();
+        let mut buffer = Vec::with_capacity(8 * 1024);
+        encoder
+            .encode(&metric_families, &mut buffer)
+            .map_err(|error| format!("prometheus encode failed: {error}"))?;
+        Ok((encoder.format_type().to_string(), buffer))
+    }
+
+    /// Register and return the per-kind real-time event-bus drop counter.
+    ///
+    /// Call exactly once at wiring time. The returned vec shares this hub's
+    /// registry, so `/metrics` exposes `oxide_arb_ws_event_dropped_total{kind}`;
+    /// it is wired into the [`CoreEventPublisher`](oxide_arb_models::domain::CoreEventPublisher)
+    /// drop hook so a full/disconnected bus is observable without a hub field.
+    #[must_use]
+    pub fn register_ws_event_dropped(&self) -> IntCounterVec {
+        register_counter_vec!(
+            &self.registry,
+            "oxide_arb_ws_event_dropped_total",
+            "Real-time CoreEvents dropped on a full/disconnected bus, by kind",
+            &["kind"]
+        )
     }
 }
 

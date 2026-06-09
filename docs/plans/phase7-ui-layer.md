@@ -8,7 +8,45 @@
 
 ---
 
-## 0. 工作范围
+## 0. API 契约（与 Phase 6 对齐）
+
+Phase 7 **必须**遵循 Phase 6 已落地的 HTTP/WS 契约，UI 不得假设旧版 `/api/v1/...` 路径或单用户 API key。
+
+### 0.1 版本化
+
+- **路径**：`/api/users`、`/api/trades` 等 — **无** URL 内嵌版本号。
+- **版本头**：每个 `/api/*` 请求携带 `Accept-Api-Version: v1`（axios/fetch 拦截器统一注入）。兼容 fallback：`X-API-Version: v1`。
+- **探针**：`GET /health`、`GET /ready`、`GET /metrics` 无版本头（K8s / Prometheus 直连）。
+
+### 0.2 认证
+
+- **登录**：`POST /api/auth/login` → `{ access_token, refresh_token, expires_in }`。
+- **刷新**：`POST /api/auth/refresh`（旋转 refresh，旧 refresh 入黑名单）。
+- **登出**：`POST /api/auth/logout` + Bearer access + body `{ refresh_token }`。
+- **业务请求**：`Authorization: Bearer <access_token>`（非 API key）。
+- **治理变更**：除 Bearer 外，带 `X-Acting-Role: <role_code>` + `X-Request-Id` + body `reason`。
+
+### 0.3 配置变更（无裸 PATCH）
+
+- **禁止** `PATCH /api/config` 或任意 in-place 热更。
+- 流程：`POST /api/runtime-config/versions` → `POST .../activate` 或 `.../rollback`；读当前：`GET /api/runtime-config`。
+- UI Config 页编辑的是**新版本草稿**，提交走 create + activate，审计见 operation log + 治理链。
+
+### 0.4 WebSocket
+
+- **URL**：`ws(s)://<host>/api/ws?token=<access_token>`（浏览器无法在 handshake 设 Bearer，故 query token）。
+- **客户端指令**：`subscribe` / `unsubscribe` / `sync` / `ping`。
+- **已删除事件**（Phase 6.7）：`trade.opened`（FOK 无驻留挂单）、`opportunity.expired`（无领域过期源）。UI 不得订阅或渲染这两者。
+- **配置推送**：`config.activated`（非 `config.changed`）。
+
+### 0.5 Materialization / Replay
+
+- Operator 触发 backfill：`POST /api/replay`（`Replay:Create`），非独立 materialization 路径。
+- 状态：`GET /api/replay/{run_id}`、`GET /api/replay/{run_id}/history`。
+
+---
+
+## 1. 工作范围（原 §0）
 
 1. Fork vue-vben-admin 并裁剪为 oxide-arb 专用 shell
 2. 构建 7 个核心 Dashboard 页面
@@ -18,7 +56,7 @@
 
 ---
 
-## 1. Fork 策略与定制方案
+## 2. Fork 策略与定制方案
 
 ### 1.1 Fork 来源
 
@@ -54,7 +92,7 @@ git remote add origin <your-repo>
 移除/替换：
 - 示例页面（全部删除）
 - Mock 数据（替换为真实 API）
-- 多角色权限（简化为单用户 + API key）
+- 多角色权限（简化为 **JWT + 动态 RBAC**，非单 API key）
 - 不需要的依赖（地图、富文本编辑器等）
 
 新增：
@@ -125,11 +163,11 @@ git remote add origin <your-repo>
 ```
 
 **数据源**:
-- KPI Cards: `GET /api/v1/trades/pnl` + `GET /api/v1/risk/positions` + WS `pnl.update`
-- PnL Curve: `GET /api/v1/trades/pnl/daily` + WS `pnl.update` 追加最新点
-- System Status: `GET /api/v1/system/status` + WS `system.status`
-- Circuit Breaker: `GET /api/v1/risk/circuit-breaker` + WS `risk.circuit_breaker`
-- Recent Trades: `GET /api/v1/trades?limit=10` + WS `trade.filled` / `trade.settled`
+- KPI Cards: `GET /api/trades/pnl` + `GET /api/risk/positions` + WS `pnl.update`
+- PnL Curve: `GET /api/trades/pnl/daily` + WS `pnl.update` 追加最新点
+- System Status: `GET /api/system/status` + WS `system.status`
+- Circuit Breaker: `GET /api/risk/circuit-breaker` + WS `risk.circuit_breaker`
+- Recent Trades: `GET /api/trades?limit=10` + WS `trade.filled` / `trade.settled`
 
 ### 3.2 Markets（市场页）
 
@@ -156,8 +194,8 @@ git remote add origin <your-repo>
 ```
 
 **交互**:
-- 复选框 Subscribe/Unsubscribe → `POST /api/v1/markets/{id}/subscribe`
-- 点击行展开 → 右侧抽屉显示详情（`GET /api/v1/markets/{id}`）
+- 复选框 Subscribe/Unsubscribe → `POST /api/markets/{id}/subscribe`
+- 点击行展开 → 右侧抽屉显示详情（`GET /api/markets/{id}`）
 - Orderbook heatmap 实时更新 via WS `market.book_update`
 
 ### 3.3 Opportunities（机会页）
@@ -189,9 +227,9 @@ git remote add origin <your-repo>
 ```
 
 **数据源**:
-- Live Feed: WS `opportunity.detected` + `opportunity.expired`
-- Statistics: `GET /api/v1/opportunities/stats?period=24h`
-- Edge Distribution: `GET /api/v1/analytics/edge-distribution`
+- Live Feed: WS `opportunity.detected` only（无 `opportunity.expired`）
+- Statistics: `GET /api/opportunities/stats?period=24h`
+- Edge Distribution: `GET /api/analytics/edge-distribution`
 
 ### 3.4 Trades（交易页）
 
@@ -229,10 +267,10 @@ Trade Detail Drawer (click 👁):
 ```
 
 **数据源**:
-- Trade List: `GET /api/v1/trades?...`
-- Trade Detail: `GET /api/v1/trades/{id}`
-- Decision Chain: `GET /api/v1/trades/{id}/decisions`
-- 实时新增: WS `trade.opened` / `trade.filled` / `trade.settled`
+- Trade List: `GET /api/trades?...`
+- Trade Detail: `GET /api/trades/{id}`
+- Decision Chain: `GET /api/trades/{id}/decisions`
+- 实时新增: WS `trade.filled` / `trade.settled`（无 `trade.opened`）
 
 ### 3.5 Risk（风控页）
 
@@ -269,9 +307,9 @@ Trade Detail Drawer (click 👁):
 ```
 
 **交互**:
-- Reset Circuit Breaker → `POST /api/v1/risk/circuit-breaker/reset`
-- Add Blacklist → `POST /api/v1/risk/blacklist`
-- Remove Blacklist → `DELETE /api/v1/risk/blacklist/{id}`
+- Reset Circuit Breaker → `POST /api/risk/circuit-breaker/reset`
+- Add Blacklist → `POST /api/risk/blacklist`
+- Remove Blacklist → `DELETE /api/risk/blacklist/{id}`
 - 实时: WS `risk.circuit_breaker`, `risk.position_update`
 
 ### 3.6 Config（配置页）
@@ -308,9 +346,9 @@ Trade Detail Drawer (click 👁):
 ```
 
 **交互**:
-- 编辑字段 + Save → `PATCH /api/v1/config`
-- 不可热更新字段显示 🔒 图标 + tooltip 说明需重启
-- 审计日志: `GET /api/v1/config/audit`
+- 创建新版本 + Activate → `POST /api/runtime-config/versions` + `POST .../activate`（治理 acting-role + reason）
+- 版本历史 / 回滚 → `GET /api/runtime-config/versions`、`POST .../rollback`
+- 审计：operation log + `GET /api/control-factors/audit`（治理链）
 
 ### 3.7 Analytics（分析页）
 
@@ -344,10 +382,10 @@ Trade Detail Drawer (click 👁):
 ```
 
 **数据源**:
-- PnL Trend: `GET /api/v1/trades/pnl/daily`
-- Edge Distribution: `GET /api/v1/analytics/edge-distribution`
-- Market Performance: `GET /api/v1/analytics/market-performance`
-- Replay Results: `GET /api/v1/replay/history`
+- PnL Trend: `GET /api/trades/pnl/daily`
+- Edge Distribution: `GET /api/analytics/edge-distribution`
+- Market Performance: `GET /api/analytics/market-performance`
+- Replay Results: `GET /api/replay` history endpoints
 
 ---
 
@@ -361,11 +399,11 @@ Trade Detail Drawer (click 👁):
 import { useWebSocket } from '@vueuse/core'
 
 export function useOxideWs() {
-  const token = useAuthStore().apiKey
+  const auth = useAuthStore()
   const baseUrl = import.meta.env.VITE_WS_URL || `ws://${window.location.host}`
 
   const { status, data, send, open, close } = useWebSocket(
-    `${baseUrl}/api/v1/ws?token=${token}`,
+    () => `${baseUrl}/api/ws?token=${encodeURIComponent(auth.accessToken)}`,
     {
       autoReconnect: {
         retries: Infinity,
@@ -378,7 +416,6 @@ export function useOxideWs() {
         pongTimeout: 30000,
       },
       onConnected() {
-        // Request full state sync after reconnect
         send(JSON.stringify({ action: 'sync' }))
       },
       onMessage(_ws, event) {
@@ -390,6 +427,16 @@ export function useOxideWs() {
 
   return { status, data, send, open, close }
 }
+```
+
+```typescript
+// src/api/client.ts — 所有 REST 请求统一注入版本头 + Bearer
+axios.interceptors.request.use((config) => {
+  config.headers['Accept-Api-Version'] = 'v1'
+  const token = useAuthStore().accessToken
+  if (token) config.headers.Authorization = `Bearer ${token}`
+  return config
+})
 ```
 
 ### 4.2 Store 分发
@@ -416,8 +463,8 @@ function dispatchToStores(msg: WsMessage) {
     case 'market.book_update':
       useMarketStore().updateBook(msg.data)
       break
-    case 'config.changed':
-      useConfigStore().applyChange(msg.data)
+    case 'config.activated':
+      useConfigStore().applyActivation(msg.data)
       break
     case 'system.alert':
       useNotification().warning({ message: msg.data.message })
@@ -509,10 +556,7 @@ export default defineConfig({
         target: 'http://localhost:8080',
         changeOrigin: true,
       },
-      '/ws': {
-        target: 'ws://localhost:8080',
-        ws: true,
-      },
+      // WS 与 API 同 host；开发时也可直连 /api/ws
     },
   },
 })
@@ -521,9 +565,9 @@ export default defineConfig({
 ### 6.4 环境变量
 
 ```bash
-VITE_API_BASE_URL=http://localhost:8080   # 开发模式 API 地址
-VITE_WS_URL=ws://localhost:8080           # 开发模式 WS 地址
-VITE_API_KEY=dev-key-123                  # 开发模式 API key
+VITE_API_BASE_URL=http://localhost:8080   # 开发模式 API 地址（可选，默认同源）
+VITE_WS_URL=ws://localhost:8080           # 开发模式 WS 地址（可选）
+# 认证走 login 流程，不使用静态 API key
 ```
 
 生产模式下这些变量不需要设置（API 和 UI 同源）。
@@ -539,7 +583,7 @@ VITE_API_KEY=dev-key-123                  # 开发模式 API key
 - [ ] **Opportunities 页**: Live feed 实时显示新检测到的机会；统计图表按时间段切换正确
 - [ ] **Trades 页**: 交易列表支持多条件筛选；Detail drawer 显示完整决策链；PnL attribution 数字正确
 - [ ] **Risk 页**: 熔断器面板实时更新；Reset 按钮工作；黑名单增/删正确；Daily loss gauge 准确
-- [ ] **Config 页**: 所有可热更新参数可编辑保存；不可热更新字段显示锁定图标；审计日志显示历史变更
+- [ ] **Config 页**: runtime-config 版本 create/activate/rollback；治理 acting-role + reason；审计链可查看
 - [ ] **Analytics 页**: 所有图表正确渲染；日期范围选择器工作；Replay 历史记录可查看
 - [ ] WebSocket 连接建立后收到初始状态
 - [ ] WebSocket 断线后 ≤ 5s 自动重连
@@ -547,5 +591,5 @@ VITE_API_KEY=dev-key-123                  # 开发模式 API key
 - [ ] Dark / Light 主题切换正常
 - [ ] `pnpm build` 产物 ≤ 5MB（gzip 后）
 - [ ] 构建产物嵌入 Rust 二进制后，访问 `http://host:port/` 可正常使用
-- [ ] 所有 API 请求携带 Bearer token
+- [ ] 所有 API 请求携带 `Accept-Api-Version: v1` + Bearer token
 - [ ] 响应式布局在 1280px / 768px / 375px 三个断点表现正常

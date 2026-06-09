@@ -17,6 +17,7 @@ pub mod error;
 pub mod extractors;
 pub mod jwt;
 pub mod middleware;
+pub mod readiness;
 pub mod response;
 pub mod routes;
 pub mod state;

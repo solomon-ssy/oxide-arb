@@ -617,6 +617,7 @@ async fn risk_state_repository_crud() {
         weekly_trade_count: state.weekly_trade_count,
         weekly_window_start: state.weekly_window_start,
         hwm_equity: state.hwm_equity,
+        total_realized_pnl: state.total_realized_pnl,
         last_emergency_at: state.last_emergency_at,
         last_emergency_reason: state.last_emergency_reason,
     };

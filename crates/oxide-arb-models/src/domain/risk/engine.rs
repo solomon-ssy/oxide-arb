@@ -47,6 +47,9 @@ pub struct RiskEngineState {
     pub consecutive_misses: i32,
     pub cooldown_multiplier: i32,
     pub hwm_equity: Usd,
+    /// Lifetime cumulative realized `PnL` (same accounting basis as `daily_pnl`).
+    /// Pure telemetry — never consulted by pre-trade checks.
+    pub total_realized_pnl: Usd,
     pub last_emergency_at: Option<DateTime<Utc>>,
     pub last_emergency_reason: Option<String>,
     pub snapshot_at: DateTime<Utc>,
@@ -85,6 +88,7 @@ pub struct RiskStateInfo {
     pub weekly_trade_count: i32,
     pub weekly_window_start: NaiveDate,
     pub hwm_equity: Usd,
+    pub total_realized_pnl: Usd,
     pub last_emergency_at: Option<DateTime<Utc>>,
     pub last_emergency_reason: Option<String>,
     pub updated_at: DateTime<Utc>,
@@ -98,7 +102,7 @@ info_from_model!(RiskStateInfo, crate::entities::risk_state::Model, {
     hourly_window_start, daily_loss_usd, daily_fee_usd, daily_pnl,
     daily_budget_spent, daily_trade_count, daily_success_count,
     daily_miss_count, daily_window_start, weekly_loss_usd,
-    weekly_trade_count, weekly_window_start, hwm_equity,
+    weekly_trade_count, weekly_window_start, hwm_equity, total_realized_pnl,
     last_emergency_at, last_emergency_reason, updated_at,
 });
 
@@ -132,6 +136,7 @@ impl From<&RiskStateInfo> for RiskEngineState {
             consecutive_misses: info.consecutive_misses,
             cooldown_multiplier: info.cooldown_multiplier,
             hwm_equity: info.hwm_equity,
+            total_realized_pnl: info.total_realized_pnl,
             last_emergency_at: info.last_emergency_at,
             last_emergency_reason: info.last_emergency_reason.clone(),
             snapshot_at: info.updated_at,
@@ -186,6 +191,7 @@ pub struct UpsertRiskEngineState {
     pub weekly_trade_count: i32,
     pub weekly_window_start: NaiveDate,
     pub hwm_equity: Usd,
+    pub total_realized_pnl: Usd,
     pub last_emergency_at: Option<DateTime<Utc>>,
     pub last_emergency_reason: Option<String>,
 }
@@ -220,6 +226,7 @@ impl From<&RiskEngineState> for UpsertRiskEngineState {
             weekly_trade_count: s.weekly_trade_count,
             weekly_window_start: s.weekly_window_start,
             hwm_equity: s.hwm_equity,
+            total_realized_pnl: s.total_realized_pnl,
             last_emergency_at: s.last_emergency_at,
             last_emergency_reason: s.last_emergency_reason.clone(),
         }

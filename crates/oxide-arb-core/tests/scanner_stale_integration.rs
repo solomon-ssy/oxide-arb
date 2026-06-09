@@ -19,6 +19,7 @@ use oxide_arb_core::{
 use oxide_arb_models::{
     config::Settings,
     domain::{
+        CoreEventPublisher,
         book::BookLevel,
         control_factor::ControlFactorProvider,
         market::{MarketRegistryInfo, TokenInfo},
@@ -106,7 +107,15 @@ fn build_scanner(
     ));
     let staleness = StalenessClassifier::new(&settings.market_data);
 
-    Scanner::new(pipeline, book_store, market_cache, staleness, metrics, None)
+    Scanner::new(
+        pipeline,
+        book_store,
+        market_cache,
+        staleness,
+        metrics,
+        None,
+        CoreEventPublisher::bounded(1).0,
+    )
 }
 
 fn seed_full_books(store: &BookStore, yes: &TokenId, no: &TokenId, timestamp_ms: u64) {

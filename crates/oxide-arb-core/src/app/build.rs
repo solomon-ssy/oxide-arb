@@ -274,7 +274,7 @@ struct ExecutionLoop {
 }
 
 /// Bounded capacity of the real-time `CoreEvent` bus. Sized for short bursts of
-/// non-hot-path events; a full channel drops rather than blocking producers.
+/// events; a full channel drops (counted per kind) rather than blocking producers.
 const CORE_EVENT_CHANNEL_CAPACITY: usize = 4096;
 
 impl AppContext {
@@ -288,6 +288,15 @@ impl AppContext {
         // operational execution mode (the seeded `system_runtime_state`
         // singleton), so that mode — not config — drives validation and wiring.
         let (infra, persistence_workers) = connect_infra(&settings, shutdown.clone()).await?;
+        // Attach the per-kind drop observer now that the metrics hub exists: a
+        // full or disconnected bus increments `oxide_arb_ws_event_dropped_total`
+        // labeled by `CoreEvent::kind`, never blocking the producer.
+        let events = {
+            let dropped = infra.metrics.register_ws_event_dropped();
+            events.with_drop_hook(Arc::new(move |kind| {
+                dropped.with_label_values(&[kind]).inc();
+            }))
+        };
         let mode = infra.execution_mode;
         settings.ensure_valid_for_mode(mode)?;
         // Single source of truth for the live execution mode; every hot-path
@@ -869,7 +878,7 @@ async fn wire_risk_and_trading(
     events: &CoreEventPublisher,
     shutdown: CancellationToken,
 ) -> OxideResult<(BuildRisk, BuildTrading)> {
-    let detection = wire_detection(settings, infra, clients, shutdown.clone()).await?;
+    let detection = wire_detection(settings, infra, clients, events, shutdown.clone()).await?;
     let risk = wire_risk(settings, execution_mode, infra, clients, events, &detection).await?;
     let trading = wire_trading(
         settings,
@@ -1058,6 +1067,7 @@ async fn wire_detection(
     settings: &Settings,
     infra: &BuildInfra,
     clients: &BuildClients,
+    events: &CoreEventPublisher,
     shutdown: CancellationToken,
 ) -> OxideResult<DetectionStack> {
     let book_store = Arc::new(BookStore::new(Arc::clone(&infra.metrics)));
@@ -1100,6 +1110,7 @@ async fn wire_detection(
         staleness,
         Arc::clone(&infra.metrics),
         Some(Arc::clone(&infra.persistence.detection_writer)),
+        events.clone(),
     ));
 
     let (token_tx, token_rx) = flume::bounded(8192);

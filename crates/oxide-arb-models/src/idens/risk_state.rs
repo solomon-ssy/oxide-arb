@@ -39,6 +39,7 @@ pub enum RiskEngineState {
     WeeklyTradeCount,
     WeeklyWindowStart,
     HwmEquity,
+    TotalRealizedPnl,
     LastEmergencyAt,
     LastEmergencyReason,
     UpdatedAt,
@@ -145,7 +146,8 @@ fn risk_engine_weekly_window_columns(table: &mut TableCreateStatement) {
                 .not_null()
                 .default(Expr::current_date()),
         )
-        .col(column::usd_default_zero(RiskEngineState::HwmEquity));
+        .col(column::usd_default_zero(RiskEngineState::HwmEquity))
+        .col(column::usd_default_zero(RiskEngineState::TotalRealizedPnl));
 }
 
 fn risk_engine_emergency_columns(table: &mut TableCreateStatement) {

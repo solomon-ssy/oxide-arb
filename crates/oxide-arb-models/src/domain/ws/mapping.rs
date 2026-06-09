@@ -73,16 +73,6 @@ pub fn event_envelope(event: &CoreEvent) -> Option<(SubscriptionKey, WsEnvelope)
             None,
             serde_json::to_value(opp).ok()?,
         ),
-        CoreEvent::OpportunityExpired(id) => (
-            WsChannel::OpportunityExpired,
-            None,
-            serde_json::json!({ "opportunity_id": id }),
-        ),
-        CoreEvent::TradeOpened(trade) => (
-            WsChannel::TradeOpened,
-            None,
-            serde_json::to_value(trade).ok()?,
-        ),
         CoreEvent::TradeFilled(trade) => (
             WsChannel::TradeFilled,
             None,

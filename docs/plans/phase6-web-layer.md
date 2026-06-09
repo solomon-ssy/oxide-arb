@@ -422,10 +422,10 @@ pub struct Claims {
 
 | 方法 | 路径 | 说明 | 鉴权 |
 |---|---|---|---|
-| POST | `/api/v1/auth/login` | 用户名/密码 → access+refresh | public |
-| POST | `/api/v1/auth/refresh` | refresh → 旋转 access+refresh | public（校验 refresh + 黑名单） |
-| POST | `/api/v1/auth/logout` | access+refresh jti 入黑名单 | authN only |
-| GET | `/api/v1/auth/me` | 当前用户 + 角色 + 可访问菜单 | authN only |
+| POST | `/api/auth/login` | 用户名/密码 → access+refresh | public（需 `Accept-Api-Version: v1`） |
+| POST | `/api/auth/refresh` | refresh → 旋转 access+refresh | public（校验 refresh + 黑名单） |
+| POST | `/api/auth/logout` | access+refresh jti 入黑名单 | authN only |
+| GET | `/api/auth/me` | 当前用户 + 角色 + 可访问菜单 | authN only |
 
 ### 7.3 登录序列
 
@@ -599,11 +599,13 @@ flowchart TD
 
 ## 11. 路由全表 + 权限映射
 
-> 全部 `/api/v1`（除 public）经 authN + authz；`init_rbac_rules` 注册规则；未注册 = 拒绝。
+> **API 版本化（已落地）**：路径**不含** `/v1` 前缀；客户端在每次 `/api/*` 请求携带 `Accept-Api-Version: v1`（兼容 fallback：`X-API-Version: v1`）。探针 `/health`、`/ready`、`/metrics` 无版本头。未匹配版本 → 404。
+>
+> 全部 `/api/*`（除 public auth login/refresh、WS）经 authN + authz；`init_rbac_rules` 注册规则；未注册 = 拒绝（403 fail-closed）。
 
 ### 11.1 公开（public）
-- `GET /health`、`GET /ready`、`GET /metrics`
-- `POST /api/v1/auth/login`、`POST /api/v1/auth/refresh`
+- `GET /health`、`GET /ready`（PG + Redis 探活）、`GET /metrics`（Prometheus text，同 web 端口）
+- `POST /api/auth/login`、`POST /api/auth/refresh`（需 `Accept-Api-Version: v1`）
 
 ### 11.2 账户（authN only）
 - `POST /auth/logout`、`GET /auth/me`
@@ -628,15 +630,19 @@ flowchart TD
 ### 11.4 治理控制面（`acting_role_governed`，进审计链）
 | 端点 | 方法 | 权限 | 治理调用 |
 |---|---|---|---|
-| `/control-factor-materializations` | POST | `Materialization:Enqueue` | `MaterializationRunner::enqueue` |
 | `/control-factors` 系列 | GET | `ControlFactor:Read` | 只读 |
 | `/control-factors/{id}/reject` | POST | `ControlFactor:Reject` | `registry.reject_factor` |
-| `/control-factors/{id}/shadow` | POST | `ControlFactor:Shadow` | `registry.promote_to_shadow` |
-| `/control-factors/{id}/publish` | POST | `ControlFactor:Publish` | `registry.publish`（risk-expansion gate） |
+| `/control-factors/publications/shadow` | POST | `ControlFactor:Shadow` | `registry.promote_to_shadow`（body: `factor_ids[]`） |
+| `/control-factors/publications/publish` | POST | `ControlFactor:Publish` | `registry.publish`（risk-expansion gate） |
+| `/control-factors/publications/emergency` | POST | `ControlFactor:Emergency` | `registry.publish`（short-TTL） |
 | `/control-factors/publications/{id}/rollback` | POST | `Publication:Rollback` | `registry.rollback_publication` |
-| `/control-factors/.../emergency` | POST | `ControlFactor:Emergency` | `registry.publish`（short-TTL） |
 | `/control-factors/audit` | GET | `Audit:Read` | `load_audit_chain` + `AuditChain::verify` |
 | `/control-factors/publications/{id}/shadow-decisions` | GET | `ControlFactor:Read` | `list/aggregate_shadow_decisions` |
+| **`/replay`** | **POST** | **`Replay:Create`** | **`ReplayPort::enqueue`（materialization / backfill run）** |
+| `/replay/{run_id}` | GET | `Replay:Read` | materialization run 状态 |
+| `/replay/{run_id}/history` | GET | `Replay:Read` | stage report 历史 |
+
+> **Materialization enqueue 路由语义（6.6 修正）**：不再使用独立 `/control-factor-materializations`。Operator 触发的 backfill / replay materialization 与 analytics replay 共用 **`POST /api/replay`**（`Replay:Create`），由 core `ReplayPort` 入队 `control_factor_materialization_run`。Scheduler tick 仍走进程内 `MaterializationScheduler::tick`（enqueue-only，never publish）。
 
 ### 11.5 治理版本化配置（替代裸 PATCH）
 | 端点 | 方法 | 权限 | 调用 |
@@ -653,10 +659,10 @@ flowchart TD
 - `trades` / `pnl`：list/detail/decisions/pnl*(`Trade:Read` / `Pnl:Read`)
 - `risk`：circuit-breaker/positions/exposure/daily-loss(`Risk:Read`)、circuit-breaker/reset(`Risk:Reset`)、blacklist GET(`Blacklist:Read`)/POST(`Blacklist:Create`)/DELETE(`Blacklist:Delete`)
 - `analytics`：daily/weekly/edge-distribution/market-performance(`Analytics:Read`)
-- `replay`：POST(`Replay:Create`)、GET status/history(`Replay:Read`)
+- `replay`：POST enqueue(`Replay:Create`)、GET status/history(`Replay:Read`) — **见 §11.4 materialization enqueue 语义**
 
 ### 11.7 WebSocket / 静态
-- `GET /api/v1/ws?token=<access>`：upgrade 前 JWT + 黑名单校验。
+- `GET /api/ws?token=<access>`：upgrade 前 JWT + 黑名单校验（query token，非 Bearer header）。
 - 生产：`actix-files` serve `static_ui_dir` + SPA fallback。
 
 ---
@@ -695,7 +701,7 @@ let outcome = state.ctx.control.registry.publish(envelope, request).await
 - `expire_due_factors(envelope) -> ExpireFactorsOutcome`
 - `create_runtime_config_version(envelope, NewRuntimeConfigVersion) -> RuntimeConfigVersionInfo`
 - `activate_runtime_config_version(envelope, NewRuntimeConfigActivation) -> RuntimeConfigActivationInfo`
-- materialization enqueue 不在 registry：`MaterializationRunner::enqueue` / `ControlFactorRepository::enqueue_materialization_run`
+- materialization enqueue 不在 registry：经 **`POST /api/replay`** → core `ReplayPort::enqueue` / `ControlFactorRepository::enqueue_materialization_run`；scheduler tick 进程内 enqueue-only
 - 只读：`repo.load_active_publication`、`repo.load_audit_chain`、`shadow_repo.list/aggregate_shadow_decisions`
 
 ### 12.4 error → HTTP 映射（`error.rs`）
@@ -726,7 +732,7 @@ publish/rollback 后，`oxide-arb-core/src/control/factor_refresher.rs` 经 `not
 ## 13. WebSocket
 
 ### 13.1 连接与鉴权
-`GET /api/v1/ws?token=<access>`：upgrade 前复用 authN 逻辑校验 JWT + 黑名单（**修复 ng-gateway WS 无鉴权缺陷**）。
+`GET /api/ws?token=<access>`：upgrade 前复用 authN 逻辑校验 JWT + 黑名单（**修复 ng-gateway WS 无鉴权缺陷**）。缺失/空 token → 401（非 400）。
 
 ### 13.2 消息 envelope（JSON）
 ```json
@@ -734,7 +740,9 @@ publish/rollback 后，`oxide-arb-core/src/control/factor_refresher.rs` 经 `not
 ```
 
 ### 13.3 服务端推送类型
-`opportunity.detected/expired`、`trade.opened/filled/settled`、`pnl.update`、`system.status/alert`、`risk.circuit_breaker/position_update`、`market.book_update/resolved`、`control.published/rolled_back`、`config.activated`。
+`opportunity.detected`、`trade.filled/settled`、`pnl.update`、`system.status/alert`、`risk.circuit_breaker/position_update`、`market.book_update/resolved`、`control.published/rolled_back`、`config.activated`。
+
+> Phase 6.7 落地: 删除 `trade.opened`（单笔 FOK 无驻留挂单）与 `opportunity.expired`（无真实领域过期源）。`pnl.update.total` = 终身累计已实现 PnL（持久化于 `risk_engine_state.total_realized_pnl`，重启安全，纯遥测）。
 
 ### 13.4 客户端指令
 ```json
@@ -750,14 +758,13 @@ publish/rollback 后，`oxide-arb-core/src/control/factor_refresher.rs` 经 `not
 ```rust
 pub enum CoreEvent {
     OpportunityDetected(Opportunity),
-    OpportunityExpired(OpportunityId),
-    TradeOpened(TradeInfo),
-    TradeFilled(TradeRecord),
-    TradeSettled { trade_id: TradeId, outcome: TradeOutcome, pnl: Usd },
+    TradeFilled(TradeInfo),
+    TradeSettled { trade_id: TradeId, outcome: TradeBusinessOutcome, pnl: Usd },
     PnlUpdate { daily: Usd, total: Usd },
     SystemStatusChanged(SystemStatus),
     CircuitBreakerTripped { level: u8, reason: String },
     PositionChanged(PositionInfo),
+    MarketBookUpdate { market_id: MarketId, view: Box<MarketBookView> },
     MarketResolved { market_id: MarketId, outcome: bool },
     ControlPublished { publication_id: String, mode: PublicationMode },
     ConfigActivated { version_id: String },

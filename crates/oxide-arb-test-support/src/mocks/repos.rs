@@ -69,6 +69,11 @@ impl MockTradeRepository {
             .store(true, Ordering::Relaxed);
     }
 
+    /// Drop all stored trades so benchmark iterations measure a steady path.
+    pub fn clear_all(&self) {
+        self.trades.lock().unwrap().clear();
+    }
+
     pub fn trade_count(&self) -> usize {
         self.trades.lock().unwrap().len()
     }

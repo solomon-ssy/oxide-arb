@@ -57,6 +57,7 @@ fn base_snapshot() -> RiskEngineState {
         consecutive_misses: 0,
         cooldown_multiplier: 0,
         hwm_equity: Usd::new(dec!(5000)),
+        total_realized_pnl: Usd::ZERO,
         last_emergency_at: None,
         last_emergency_reason: None,
         snapshot_at: now,

@@ -26,5 +26,5 @@ test ws_normalize_book_50 ... bench:        1498 ns/iter (+/- 52)
 
 test scanner_scan_market ... bench:          39 ns/iter (+/- 4)
 
-test execution_pipeline_paper_sync ... bench:         436 ns/iter (+/- 9)
+test execution_pipeline_paper_sync ... bench:        3131 ns/iter (+/- 5205)
 

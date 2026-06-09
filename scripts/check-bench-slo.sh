@@ -22,7 +22,7 @@ coalescer_pair_flush:100
 funnel_immediate_dispatch:200
 ws_normalize_book_50:1600
 scanner_scan_market:2000
-execution_pipeline_paper_sync:2000
+execution_pipeline_paper_sync:5000
 "
 
 DELTA_SNAPSHOT_RATIO_NUM=6

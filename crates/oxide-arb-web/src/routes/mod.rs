@@ -33,6 +33,7 @@ pub mod control_factors;
 pub mod health;
 pub mod markets;
 pub mod menus;
+pub mod metrics;
 pub mod operation_logs;
 pub mod opportunities;
 pub mod permissions;
@@ -137,6 +138,7 @@ pub fn configure(cfg: &mut ServiceConfig) {
 
     cfg.route("/health", web::get().to(health::health))
         .route("/ready", web::get().to(health::ready))
+        .route("/metrics", web::get().to(metrics::metrics))
         .service(
             web::scope(API_PREFIX)
                 .guard(ApiV1Guard)

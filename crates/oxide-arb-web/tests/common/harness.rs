@@ -19,6 +19,9 @@ use actix_web::{
 use async_trait::async_trait;
 use chrono::Utc;
 use oxide_arb_control::governance::ControlFactorRegistry;
+use oxide_arb_core::{
+    bridge::metrics_scrape::CoreMetricsScrape, observability::metrics_hub::MetricsHub,
+};
 use oxide_arb_error::auth::AuthError;
 use oxide_arb_models::{
     config::JwtConfig,
@@ -52,9 +55,12 @@ use oxide_arb_web::{
     audit::{OperationLogBuffer, spawn_operation_log_writer},
     auth::casbin::CasbinService,
     jwt::{JwtService, RedisTokenBlacklist, TokenBlacklist},
-    middleware, routes,
-    ws::SessionRegistry,
+    middleware,
+    readiness::PgRedisReadiness,
+    routes,
+    ws::{SessionRegistry, spawn_ws_broadcaster},
 };
+use sea_orm::DatabaseConnection;
 use serde_json::Value;
 use std::sync::Mutex;
 use testcontainers::ContainerAsync;
@@ -75,14 +81,18 @@ const TEST_ISSUER: &str = "oxide-arb-test";
 pub struct TestEnv {
     /// The state injected into the actix app.
     pub state: AppState,
+    /// Shared Postgres connection (pool kept alive by `_pg`).
+    pub db: DatabaseConnection,
     // Postgres container guard. `DatabaseConnection` clones inside the
     // repositories keep the connection pool alive, so the pool wrapper itself
     // need not be retained — only the container must outlive the test.
     _pg: ContainerAsync<Postgres>,
-    // Redis container guard; [`take_redis`] simulates an outage in auth tests.
+    // Redis container guard; [`take_redis`] simulates an outage in auth/ready tests.
     redis: Option<ContainerAsync<Redis>>,
     // Cancels the background operation-log writer when the test env is dropped.
     writer_shutdown: CancellationToken,
+    // Cancels the WebSocket broadcaster task.
+    ws_shutdown: CancellationToken,
 }
 
 impl TestEnv {
@@ -91,9 +101,9 @@ impl TestEnv {
         let (pool, pg_container) = pg::setup_pg().await;
         let (redis_url, redis_container) = redis::setup_redis().await;
 
-        let blacklist =
+        let blacklist: Arc<dyn TokenBlacklist> =
             Arc::new(RedisTokenBlacklist::from_url(&redis_url).expect("redis blacklist"));
-        let jwt = Arc::new(JwtService::new(&jwt_config(), blacklist));
+        let jwt = Arc::new(JwtService::new(&jwt_config(), Arc::clone(&blacklist)));
 
         let db = pool.connection().clone();
         let casbin = Arc::new(
@@ -130,7 +140,18 @@ impl TestEnv {
             writer_shutdown.clone(),
         ));
 
-        let (events, _event_rx) = CoreEventPublisher::bounded(256);
+        let (events, event_rx) = CoreEventPublisher::bounded(256);
+        let ws_sessions = SessionRegistry::default();
+        let ws_shutdown = CancellationToken::new();
+        tokio::spawn(spawn_ws_broadcaster(
+            event_rx,
+            ws_sessions.clone(),
+            ws_shutdown.clone(),
+        ));
+
+        let metrics = Arc::new(CoreMetricsScrape::new(Arc::new(MetricsHub::new())));
+        let readiness = Arc::new(PgRedisReadiness::new(db.clone(), Arc::clone(&blacklist)));
+
         let state = AppState {
             jwt,
             users: Arc::new(PgUserRepository::new(db.clone())),
@@ -144,7 +165,7 @@ impl TestEnv {
             markets: Arc::new(PgMarketRepository::new(db.clone())),
             reports: Arc::new(PgReportRepository::new(db.clone())),
             evidence: Arc::new(MockTimeseriesRepository::default()),
-            risk_audit: Arc::new(PgRiskAuditRepository::new(db)),
+            risk_audit: Arc::new(PgRiskAuditRepository::new(db.clone())),
             casbin,
             perm_checker,
             registry,
@@ -157,18 +178,22 @@ impl TestEnv {
             market_data: Arc::new(MockMarketData),
             replay: Arc::new(MockReplay),
             events,
-            ws_sessions: SessionRegistry::default(),
+            ws_sessions,
+            metrics,
+            readiness,
         };
 
         Self {
             state,
+            db,
             _pg: pg_container,
             redis: Some(redis_container),
             writer_shutdown,
+            ws_shutdown,
         }
     }
 
-    /// Take the Redis container guard (auth outage tests only).
+    /// Take the Redis container guard (auth / readiness outage tests only).
     pub const fn take_redis(&mut self) -> Option<ContainerAsync<Redis>> {
         self.redis.take()
     }
@@ -176,8 +201,9 @@ impl TestEnv {
 
 impl Drop for TestEnv {
     fn drop(&mut self) {
-        // Stop the background writer so it does not outlive the test's Postgres.
+        // Stop background tasks so they do not outlive the test's Postgres/Redis.
         self.writer_shutdown.cancel();
+        self.ws_shutdown.cancel();
     }
 }
 
@@ -209,6 +235,11 @@ impl Resp {
     /// Parse the body as JSON (panics if the body is not valid JSON).
     pub fn json(&self) -> Value {
         serde_json::from_slice(&self.body).expect("response body must be valid JSON")
+    }
+
+    /// Raw response body bytes.
+    pub fn body_bytes(&self) -> &[u8] {
+        &self.body
     }
 }
 
@@ -287,6 +318,7 @@ fn zero_risk_state(is_halted: bool) -> RiskEngineState {
         consecutive_misses: 0,
         cooldown_multiplier: 1,
         hwm_equity: Usd::ZERO,
+        total_realized_pnl: Usd::ZERO,
         last_emergency_at: None,
         last_emergency_reason: None,
         snapshot_at: now,
@@ -448,5 +480,9 @@ impl TokenBlacklist for NoopBlacklist {
 
     async fn is_revoked(&self, _jti: &str) -> Result<bool, AuthError> {
         Ok(false)
+    }
+
+    async fn health_check(&self) -> Result<(), AuthError> {
+        Ok(())
     }
 }

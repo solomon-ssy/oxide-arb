@@ -1,6 +1,6 @@
 //! WebSocket upgrade handler with pre-upgrade authentication.
 //!
-//! `GET /api/v1/ws?token=<access>` — the access token is supplied as a query
+//! `GET /api/ws?token=<access>` — the access token is supplied as a query
 //! parameter because browsers cannot set custom headers on a WebSocket
 //! handshake. The token is decoded and checked against the revocation blacklist
 //! **before** the upgrade; failure returns 401 and no socket is established
@@ -17,19 +17,23 @@ use crate::{
 };
 
 /// Query parameters for the WebSocket handshake.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Default)]
 pub struct WsAuthQuery {
-    /// A valid access token.
+    /// A valid access token. Omitted or empty → 401 before upgrade.
+    #[serde(default)]
     pub token: String,
 }
 
-/// `GET /api/v1/ws` — authenticate, upgrade, and spawn the session task.
+/// `GET /api/ws` — authenticate, upgrade, and spawn the session task.
 pub async fn ws_upgrade(
     req: HttpRequest,
     body: web::Payload,
     state: web::Data<AppState>,
     query: web::Query<WsAuthQuery>,
 ) -> Result<HttpResponse, actix_web::Error> {
+    if query.token.trim().is_empty() {
+        return Err(WebError::Unauthorized("missing access token".to_owned()).into());
+    }
     let claims = state
         .jwt
         .decode(&query.token, TokenType::Access)

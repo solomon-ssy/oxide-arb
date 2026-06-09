@@ -7,12 +7,14 @@ use std::{
 
 const DOCKER_SUITES: &[(&str, &str)] = &[
     ("oxide-arb-repository", "pg_repository"),
+    ("oxide-arb-repository", "pg_rbac"),
     ("oxide-arb-repository", "ch_timeseries"),
     ("oxide-arb-storage", "migration_pg"),
     ("oxide-arb-storage", "redis_integration"),
     ("oxide-arb-storage", "clickhouse_integration"),
     ("oxide-arb-storage", "cache_tiered_integration"),
     ("oxide-arb-core", "gamma_service_sync"),
+    ("oxide-arb-web", "web"),
 ];
 
 const NETWORK_SUITES: &[(&str, &str)] = &[

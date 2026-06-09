@@ -28,12 +28,14 @@ cargo test -p oxide-arb-core --test gamma_service_sync -- --ignored --test-threa
 | Crate | Test binary | Services |
 |-------|-------------|----------|
 | `oxide-arb-repository` | `pg_repository` | Postgres |
+| `oxide-arb-repository` | `pg_rbac` | Postgres |
 | `oxide-arb-repository` | `ch_timeseries` | ClickHouse |
 | `oxide-arb-storage` | `migration_pg` | Postgres |
 | `oxide-arb-storage` | `redis_integration` | Redis |
 | `oxide-arb-storage` | `clickhouse_integration` | ClickHouse |
 | `oxide-arb-storage` | `cache_tiered_integration` | Redis |
 | `oxide-arb-core` | `gamma_service_sync` | Postgres + Redis (wiremock Gamma) |
+| `oxide-arb-web` | `web` | Postgres + Redis (full HTTP/RBAC/WS E2E) |
 
 Implementation lives in `crates/oxide-arb-xtask` (`cargo xtask test-docker`).
 

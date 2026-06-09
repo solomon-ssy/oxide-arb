@@ -174,3 +174,52 @@ pub trait ReplayPort: Send + Sync {
         request: ReplayEnqueueRequest,
     ) -> Result<ReplayEnqueueResult, RuntimeControlError>;
 }
+
+/// Prometheus text exposition payload returned by [`MetricsScrapePort`].
+#[derive(Debug, Clone)]
+pub struct PrometheusTextPayload {
+    /// MIME type (typically `text/plain; version=0.0.4; charset=utf-8`).
+    pub content_type: String,
+    /// Encoded metric families in Prometheus text format.
+    pub body: Vec<u8>,
+}
+
+/// Prometheus scrape surface for the web `/metrics` handler (dependency-inverted).
+///
+/// Implemented by `oxide-arb-core` over [`MetricsHub`](../../oxide-arb-core) so
+/// the web crate never depends on the core observability module directly.
+pub trait MetricsScrapePort: Send + Sync {
+    /// Gather all registered metrics in Prometheus text exposition format.
+    fn scrape_prometheus(&self) -> Result<PrometheusTextPayload, String>;
+}
+
+/// One dependency probe result inside a [`ReadinessReport`].
+#[derive(Debug, Clone, Serialize)]
+pub struct DependencyCheck {
+    /// Stable dependency name (`postgresql`, `redis`, …).
+    pub name: &'static str,
+    /// Whether the probe succeeded.
+    pub ok: bool,
+    /// Error detail when `ok` is false.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+/// Outcome of a readiness probe (orchestrator-facing).
+#[derive(Debug, Clone, Serialize)]
+pub struct ReadinessReport {
+    /// True only when every required dependency probe succeeded.
+    pub ready: bool,
+    /// Per-dependency probe results (always populated for required deps).
+    pub checks: Vec<DependencyCheck>,
+}
+
+/// Readiness probe surface for `GET /ready` (dependency-inverted).
+///
+/// Web handlers treat a failed probe as HTTP 503 so load balancers stop
+/// routing traffic before auth/session infrastructure is usable.
+#[async_trait]
+pub trait ReadinessPort: Send + Sync {
+    /// Run all required dependency probes.
+    async fn check(&self) -> ReadinessReport;
+}

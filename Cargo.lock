@@ -97,6 +97,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "actix-http-test"
+version = "3.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "061d27c2a6fea968fdaca0961ff429d23a4ec878c4f68f5d08626663ade69c80"
+dependencies = [
+ "actix-codec",
+ "actix-rt",
+ "actix-server",
+ "actix-service",
+ "actix-tls",
+ "actix-utils",
+ "awc",
+ "bytes",
+ "futures-core",
+ "http 0.2.12",
+ "log",
+ "serde",
+ "serde_json",
+ "serde_urlencoded",
+ "slab",
+ "socket2 0.5.10",
+ "tokio",
+]
+
+[[package]]
 name = "actix-macros"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -157,6 +182,48 @@ checksum = "9e46f36bf0e5af44bdc4bdb36fbbd421aa98c79a9bce724e1edeb3894e10dc7f"
 dependencies = [
  "futures-core",
  "pin-project-lite",
+]
+
+[[package]]
+name = "actix-test"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "439022b5a7b5dac10798465029a9566e8e0cca7a6014541ed277b695691fac5f"
+dependencies = [
+ "actix-codec",
+ "actix-http",
+ "actix-http-test",
+ "actix-rt",
+ "actix-service",
+ "actix-utils",
+ "actix-web",
+ "awc",
+ "futures-core",
+ "futures-util",
+ "log",
+ "serde",
+ "serde_json",
+ "serde_urlencoded",
+ "tokio",
+]
+
+[[package]]
+name = "actix-tls"
+version = "3.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6176099de3f58fbddac916a7f8c6db297e021d706e7a6b99947785fee14abe9f"
+dependencies = [
+ "actix-rt",
+ "actix-service",
+ "actix-utils",
+ "futures-core",
+ "http 0.2.12",
+ "http 1.4.0",
+ "impl-more",
+ "pin-project-lite",
+ "tokio",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]
@@ -1368,6 +1435,39 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 
 [[package]]
+name = "awc"
+version = "3.8.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b7dc0207013c5059ddce268fe12045bd12b2e919318ee660c891bfe297a54f1f"
+dependencies = [
+ "actix-codec",
+ "actix-http",
+ "actix-rt",
+ "actix-service",
+ "actix-tls",
+ "actix-utils",
+ "base64",
+ "bytes",
+ "cfg-if",
+ "cookie",
+ "derive_more 2.1.1",
+ "futures-core",
+ "futures-util",
+ "h2 0.3.27",
+ "http 0.2.12",
+ "itoa",
+ "log",
+ "mime",
+ "percent-encoding",
+ "pin-project-lite",
+ "rand 0.9.4",
+ "serde",
+ "serde_json",
+ "serde_urlencoded",
+ "tokio",
+]
+
+[[package]]
 name = "aws-lc-rs"
 version = "1.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2300,6 +2400,7 @@ dependencies = [
  "ciborium",
  "clap",
  "criterion-plot 0.5.0",
+ "futures",
  "is-terminal",
  "itertools 0.10.5",
  "num-traits",
@@ -2312,6 +2413,7 @@ dependencies = [
  "serde_derive",
  "serde_json",
  "tinytemplate",
+ "tokio",
  "walkdir",
 ]
 
@@ -5127,7 +5229,9 @@ version = "0.1.0"
 dependencies = [
  "actix-cors",
  "actix-files",
+ "actix-http",
  "actix-rt",
+ "actix-test",
  "actix-web",
  "actix-ws",
  "async-trait",
@@ -5139,6 +5243,7 @@ dependencies = [
  "futures-util",
  "jsonwebtoken",
  "oxide-arb-control",
+ "oxide-arb-core",
  "oxide-arb-error",
  "oxide-arb-models",
  "oxide-arb-repository",
@@ -5146,6 +5251,7 @@ dependencies = [
  "oxide-arb-test-support",
  "redis",
  "rust_decimal",
+ "rust_decimal_macros",
  "sea-orm",
  "serde",
  "serde_json",

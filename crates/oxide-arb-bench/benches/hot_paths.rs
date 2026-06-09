@@ -54,7 +54,7 @@ use oxide_arb_models::{
         MarketDataConfig, PolymarketConfig, RiskConfig, ScorerConfig, WebSocketConfig,
     },
     domain::{
-        ProbabilityInput,
+        CoreEventPublisher, ProbabilityInput,
         book::{self, BookLevel, BookSnapshot, EndgameBookPair},
         calibration::{BucketKey, CalibrationSnapshot},
         control_factor::ControlFactorProvider,
@@ -749,6 +749,7 @@ fn bench_scanner_scan_market(c: &mut Criterion) {
         StalenessClassifier::new(&MarketDataConfig::default()),
         metrics,
         None,
+        CoreEventPublisher::bounded(1).0,
     );
     let entry = CachedMarketScanEntry {
         market_id: MarketId::new("bench-m1"),
@@ -893,14 +894,20 @@ fn execution_bench_risk_metrics(
     ))
 }
 
+type ExecutionBenchSetup = (
+    ExecutionPipeline<MockTradeRepository>,
+    Arc<ScoredOpportunity>,
+    Arc<MockTradeRepository>,
+    Arc<ExecutionFSM>,
+);
+
 fn execution_bench_setup() -> (
     &'static ExecutionPipeline<MockTradeRepository>,
     &'static Arc<ScoredOpportunity>,
+    &'static Arc<MockTradeRepository>,
+    &'static Arc<ExecutionFSM>,
 ) {
-    static SETUP: OnceLock<(
-        ExecutionPipeline<MockTradeRepository>,
-        Arc<ScoredOpportunity>,
-    )> = OnceLock::new();
+    static SETUP: OnceLock<ExecutionBenchSetup> = OnceLock::new();
     SETUP.get_or_init(|| {
         let metrics = Arc::new(MetricsHub::new());
         let alerts = Arc::new(AlertDispatcher::new(None, None, None, 0));
@@ -955,11 +962,11 @@ fn execution_bench_setup() -> (
             capital_manager: capital,
             risk_engine: execution_bench_risk_engine(),
             risk_metrics: execution_bench_risk_metrics(exposure),
-            fsm,
+            fsm: Arc::clone(&fsm),
             market_inflight: Arc::new(MarketInFlightRegistry::new()),
             metrics,
             mode: ExecutionModeHandle::new(ExecutionMode::Paper),
-            trade_repo,
+            trade_repo: Arc::clone(&trade_repo),
             audit_writer,
             relay_notify: Arc::new(Notify::new()),
             metrics_state: Arc::new(RiskMetricsState::new(Arc::new(ApiHealthTracker::new(
@@ -969,14 +976,16 @@ fn execution_bench_setup() -> (
             shadow_writer: None,
         });
 
-        (pipeline, scored)
+        (pipeline, scored, trade_repo, fsm)
     });
-    let (pipeline, scored) = SETUP.get().expect("execution bench setup");
-    (pipeline, scored)
+    let (pipeline, scored, trade_repo, fsm) = SETUP.get().expect("execution bench setup");
+    (pipeline, scored, trade_repo, fsm)
 }
 
 fn bench_execution_pipeline_paper_sync(c: &mut Criterion) {
-    let (pipeline, scored) = execution_bench_setup();
+    use criterion::BatchSize;
+
+    let (pipeline, scored, trade_repo, fsm) = execution_bench_setup();
 
     let rt = EXECUTION_RT.get_or_init(|| {
         tokio::runtime::Builder::new_current_thread()
@@ -990,11 +999,18 @@ fn bench_execution_pipeline_paper_sync(c: &mut Criterion) {
     });
 
     c.bench_function("execution_pipeline_paper_sync", |b| {
-        b.iter(|| {
-            rt.block_on(async {
-                black_box(pipeline.execute(Arc::clone(scored)).await);
-            });
-        });
+        b.iter_batched(
+            || {
+                trade_repo.clear_all();
+                fsm.clear_emergency();
+            },
+            |()| {
+                rt.block_on(async {
+                    black_box(pipeline.execute(Arc::clone(scored)).await);
+                });
+            },
+            BatchSize::SmallInput,
+        );
     });
 }
 

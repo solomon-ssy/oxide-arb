@@ -14,40 +14,58 @@
 2. **零分配/低开销优先**：发布点构造事件应轻量；大对象用 `Arc` 共享（与既有热路径 `Arc<ScoredOpportunity>` 一致）。
 3. **失败隔离**：WS/broadcaster 故障绝不回传影响交易；发布是 fire-and-forget。
 4. **可观测**：丢弃计数进 metrics（`ws_event_dropped_total{kind}`）。
-5. **可禁用**：事件发布可经配置开关（默认开），便于排障时隔离。
+5. **固定开启**：总线始终开启、容量固定 4096（`CORE_EVENT_CHANNEL_CAPACITY`）。无需配置开关——fire-and-forget + drop-on-full 已保证零热路径影响，再加 kill-switch 属过度设计。
 
 ---
 
 ## 1. 发布点（emit hooks）
 
-| CoreEvent | 插桩位置 | 现状参考 |
+> **落地状态**: 已实现。下表为最终设计（与计划讨论后的拍板项一致）。
+
+| CoreEvent | 插桩位置 | 实现 |
 |---|---|---|
-| `OpportunityDetected(Opportunity)` | `detection/scanner.rs` 检出 `ScoredOpportunity` 后（与 `detection_writer.write` 同处） | scanner.rs:103-109 |
-| `OpportunityExpired(OpportunityId)` | funnel/coalescer 过期路径 | funnel/coalescer |
-| `TradeOpened(TradeInfo)` | `ExecutionPipeline` 下单/建仓后 | execution_pipeline |
-| `TradeFilled(TradeInfo)` | 成交回执处理 | post-trade / execution |
-| `TradeSettled { trade_id, outcome, pnl }` | `PostTradeConsumer::process` 结算 | post_trade |
-| `PnlUpdate { daily, total }` | risk engine tick / post-trade PnL 更新 | run_risk_tick / post_trade |
-| `PositionChanged(PositionInfo)` | 持仓更新（post-trade / position store） | post_trade |
-| `CircuitBreakerTripped { level, reason }` | risk audit sink `BreakerTripped` 或 FSM `enter_emergency` | risk audit / ExecutionFSM |
-| `MarketResolved { market_id, outcome }` | `DataPipeline` market resolved（已有 AlertDispatcher 调用处） | data_pipeline |
+| `OpportunityDetected(Opportunity)` | `detection/scanner.rs::scan_market` 检出后（与 `detection_writer.write` 同处） | 投影 `(*scored.opportunity).clone()`，不泄漏算法/latency trace |
+| `TradeFilled(TradeInfo)` | `post_trade/consumer.rs::process` 终态推进成功（`advance_state == Ok(true)` 且 `state.is_success()`） | 仅实际推进的 worker 发出，至少一次重放不重复 |
+| `TradeSettled { trade_id, outcome, pnl }` | `execution/settlement/service.rs::apply_risk_settlement` 记账成功后 | `outcome = Success`（成交业务结果），`pnl = realized_pnl`（符号自带） |
+| `PnlUpdate { daily, total }` | `oxide-arb-risk` 引擎 `persist_post_trade_followups` 末尾单点（覆盖 Fill + Settlement） | `daily` = 当日已实现，`total` = **终身累计已实现**（持久化于 `risk_engine_state.total_realized_pnl`） |
+| `PositionChanged(PositionInfo)` | 建仓：`consumer.rs::ensure_position` 新建后；结算：`service.rs::apply_risk_settlement` | 建仓仅新建（非幂等重放）时发 |
+| `CircuitBreakerTripped { level, reason }` | risk 引擎 `persist_post_trade_followups`（已于 6.6 接入） | 不变 |
+| `MarketResolved { market_id, outcome }` | `settlement/service.rs::settle_market`（已于 6.6 接入） | 不变 |
 
 > `SystemStatusChanged` / `Alert` / `ControlPublished` / `ConfigActivated` 已在 6.6 接入（非热路径）。
+
+### 1.1 破坏式变更（删除）
+
+- **删除 `TradeOpened`**：endgame 为单笔 FOK（无驻留挂单），执行管线只持 `NewTrade` 无真实 `TradeInfo`；"下单"与"成交"几乎瞬时。`CoreEvent` / `WsChannel`（`trade.opened`）/ mapping 全部移除。
+- **删除 `OpportunityExpired`**：无真实领域过期源（funnel 仅在背压下淘汰低分项，语义是"丢弃"非"过期"，且高频）。`CoreEvent` / `WsChannel`（`opportunity.expired`）/ mapping 全部移除。
+
+### 1.2 `PnlUpdate.total` 语义（终身已实现 PnL）
+
+`daily` 与 `total` 同一记账口径：`daily` 是当日切片（跨日 rollover 重置），`total` 是自系统启动以来的累计已实现 PnL（永不重置）。终身值由 **风控引擎**唯一拥有：在 `apply_settlement` 与 `daily.record_trade` 同处累加 `net_profit`，写入 `risk_engine_state.total_realized_pnl` 持久化，启动时由 `state_store::recover_state` 经 builder 恢复 → 重启安全。该字段**纯遥测，绝不被任何 pre-trade gate 读取**。同时投影到 `LivePnlView.total_realized_pnl`，使 WS `sync` 快照与 `pnl.update` 推送一致。
 
 ---
 
 ## 2. 发布句柄注入
 
-- `AppContext.event_publisher()` 返回 `CoreEventPublisher`（轻封装 `flume::Sender<CoreEvent>` + drop 计数 metrics）。
-- 在 `wire_risk_and_trading` / `wire_detection` 构造 scanner/execution/post-trade 时注入 `Option<CoreEventPublisher>`（None = 禁用）。
-- 各组件持 `CoreEventPublisher`，在上述点 `publisher.emit(CoreEvent::...)`（内部 `try_send` + drop 计数）。
+- `AppContext.event_publisher()` 返回 `CoreEventPublisher`（轻封装 `flume::Sender<CoreEvent>` + 全局 drop 计数 + per-kind drop hook）。
+- `AppContext::build` 用 `CoreEventPublisher::bounded(CORE_EVENT_CHANNEL_CAPACITY)`（固定 4096）构造；`connect_infra` 返回后 `with_drop_hook(...)` 注入闭包，捕获 `MetricsHub::register_ws_event_dropped()` 句柄，按 `event.kind()` 打标签 `inc()`。
+- scanner / post-trade consumer / 风控引擎 / 结算服务各持 `CoreEventPublisher`（`Clone`），在上述点 `publisher.publish(CoreEvent::...)`。
 
 ```rust
-pub struct CoreEventPublisher { tx: Sender<CoreEvent>, dropped: Arc<DropCounter> }
+pub struct CoreEventPublisher {
+    tx: flume::Sender<CoreEvent>,
+    on_drop: Option<DropObserver>,        // Arc<dyn Fn(&'static str) + Send + Sync>
+    dropped: Arc<AtomicU64>,
+}
 impl CoreEventPublisher {
-    /// Non-blocking emit. Drops + counts on full channel; never blocks the caller.
-    pub fn emit(&self, event: CoreEvent) {
-        if self.tx.try_send(event).is_err() { self.dropped.inc(/* kind */); }
+    /// Non-blocking publish. Drops + counts (+ per-kind hook) on a
+    /// full/disconnected channel; never blocks the caller.
+    pub fn publish(&self, event: CoreEvent) {
+        let kind = event.kind();
+        if self.tx.try_send(event).is_err() {
+            self.dropped.fetch_add(1, Relaxed);
+            if let Some(observer) = &self.on_drop { observer(kind); }
+        }
     }
 }
 ```
@@ -81,7 +99,7 @@ impl CoreEventPublisher {
 2. 压测下热路径无可测量的额外延迟；channel 满时丢弃而非阻塞。
 3. broadcaster 故障与交易路径完全隔离。
 4. drop 计数进 metrics 可观测。
-5. 事件发布可经配置禁用。
+5. 总线固定开启、容量固定 4096（无配置开关）。
 
 ## 6. Phase 6 整体完成判定
 

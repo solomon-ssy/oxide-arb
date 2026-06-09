@@ -57,7 +57,9 @@ use std::{ops::Deref, path::PathBuf, sync::Arc};
 ///
 /// Wraps the deserialized [`Inner`] in an `Arc` for cheap cloning across
 /// async tasks. Runtime parameter adjustments (risk, detection) are handled
-/// via the Web API (`PATCH /api/v1/config/risk`), not by reloading this file.
+/// Runtime parameter adjustments (risk, detection, execution mode) are handled
+/// via the governance versioned runtime-config API (`POST /api/runtime-config/versions`),
+/// not by reloading this file.
 #[derive(Debug, Clone)]
 pub struct Settings {
     inner: Arc<Inner>,

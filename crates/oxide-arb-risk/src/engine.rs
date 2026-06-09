@@ -74,6 +74,11 @@ where
     pub(crate) weekly: RwLock<WeeklyAccounting>,
     pub(crate) hourly: RwLock<HourlyAccounting>,
     pub(crate) potential_loss: RwLock<PotentialLossLedger>,
+    /// Lifetime cumulative realized `PnL`, on the same accounting basis as
+    /// [`DailyAccounting::daily_pnl`]. Write-only telemetry — never consulted by
+    /// any pre-trade gate; surfaced through the snapshot and the `pnl.update`
+    /// event so the dashboard's "total" agrees with the persisted state.
+    pub(crate) lifetime_realized: RwLock<Usd>,
     pub(crate) pipeline: StaticRiskPipeline,
     pub(crate) risk_snapshot: ArcSwap<RiskSnapshot>,
     pub(crate) blacklist: BlacklistManager,
@@ -347,6 +352,18 @@ where
             }
         }
 
+        // Surface the post-commit realized-PnL change to the real-time bus.
+        // Single emission point for both Fill and Settlement phases (both reach
+        // here after their state is durably persisted), so the dashboard's
+        // daily/total always reflect committed accounting. Best-effort,
+        // non-blocking — never affects the trading path.
+        if let Some(publisher) = &self.event_publisher {
+            publisher.publish(CoreEvent::PnlUpdate {
+                daily: self.daily.read().daily_pnl(),
+                total: *self.lifetime_realized.read(),
+            });
+        }
+
         Ok(())
     }
 
@@ -505,6 +522,9 @@ where
     /// Settlement phase: realized profit flows into all accounting windows.
     fn apply_settlement(&self, trade: &PostTradeInput) -> (bool, bool, bool) {
         let net_profit = trade.net_profit_usd.unwrap_or(Usd::ZERO);
+        // Lifetime realized PnL tracks the same delta booked into the daily
+        // window (which resets at midnight); lifetime never resets.
+        *self.lifetime_realized.write() += net_profit;
         let daily_rolled =
             self.daily
                 .write()
@@ -1034,6 +1054,7 @@ where
             .unwrap_or(0),
             cooldown_multiplier: ToPrimitive::to_i32(&cb.l2_trip_count()).unwrap_or(i32::MAX),
             hwm_equity: dg.hwm(),
+            total_realized_pnl: *self.lifetime_realized.read(),
             last_emergency_at: {
                 let emergency = self.last_emergency.read();
                 emergency.as_ref().map(|(at, _)| *at)

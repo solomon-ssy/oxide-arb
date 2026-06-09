@@ -26,8 +26,8 @@ use oxide_arb_models::{
         MarketDataConfig, ScorerConfig,
     },
     domain::{
-        book::BookLevel, control_factor::ControlFactorProvider, market::MarketRegistryInfo,
-        pipeline::PipelineEvent,
+        CoreEventPublisher, book::BookLevel, control_factor::ControlFactorProvider,
+        market::MarketRegistryInfo, pipeline::PipelineEvent,
     },
     enums::{
         common::{MarketCategory, TickSize},
@@ -126,6 +126,7 @@ fn bench_e2e_ws_to_scan(c: &mut Criterion) {
         StalenessClassifier::new(&MarketDataConfig::default()),
         metrics,
         None,
+        CoreEventPublisher::bounded(1).0,
     );
     let entry = CachedMarketScanEntry {
         market_id: MarketId::new("bench-m1"),

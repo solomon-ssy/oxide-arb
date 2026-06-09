@@ -1,6 +1,7 @@
 //! Authorization integration tests.
 
 use actix_web::{
+    HttpResponse,
     http::{StatusCode, header::AUTHORIZATION},
     test::TestRequest,
 };
@@ -205,12 +206,12 @@ async fn permission_grant_takes_effect_after_reload() {
 
 #[actix_web::test]
 #[ignore = "requires Docker"]
-async fn invalid_permission_pair_is_bad_request() {
+async fn invalid_permission_pair_is_conflict() {
     let env = TestEnv::start().await;
     let admin = login(&env, "admin", "admin").await;
     let role_id = create_role(&env, &admin, "bad_perms").await;
 
-    // `user` does not allow `halt` — a structurally valid but invalid pairing.
+    // `user` does not allow `halt` — structurally valid but rejected as Conflict (409).
     let res = put(
         &env,
         &format!("/api/roles/{role_id}/permissions"),
@@ -218,7 +219,7 @@ async fn invalid_permission_pair_is_bad_request() {
         json!({ "permissions": [{ "resource": "user", "operation": "halt" }] }),
     )
     .await;
-    assert_eq!(res.status, StatusCode::BAD_REQUEST);
+    assert_eq!(res.status, StatusCode::CONFLICT);
 }
 
 #[actix_web::test]
@@ -375,4 +376,69 @@ async fn authority_is_keyed_by_stable_id_not_profile() {
         StatusCode::OK
     );
     assert_eq!(get(&env, "/api/users", &user).await.status, StatusCode::OK);
+}
+
+async fn fail_closed_probe() -> HttpResponse {
+    HttpResponse::Ok().finish()
+}
+
+#[actix_web::test]
+#[ignore = "requires Docker"]
+async fn fail_closed_unregistered_protected_route_returns_forbidden() {
+    use std::sync::Arc;
+
+    use actix_web::{App, middleware::from_fn, test, web};
+    use oxide_arb_web::{
+        auth::casbin::PermChecker,
+        middleware::{authn, authz},
+    };
+
+    let env = TestEnv::start().await;
+
+    // super_admin bypasses an empty PermChecker, so use a non-privileged actor.
+    let admin = login(&env, "admin", "admin").await;
+    let role_id = create_role(&env, &admin, "probe_reader").await;
+    put(
+        &env,
+        &format!("/api/roles/{role_id}/permissions"),
+        &admin,
+        json!({ "permissions": [{ "resource": "user", "operation": "read" }] }),
+    )
+    .await;
+    let user_id = create_user(&env, &admin, "probe1", "password123").await;
+    put(
+        &env,
+        &format!("/api/users/{user_id}/roles"),
+        &admin,
+        json!({ "role_ids": [role_id] }),
+    )
+    .await;
+    let token = login(&env, "probe1", "password123").await;
+
+    let mut state = env.state.clone();
+    state.perm_checker = Arc::new(PermChecker::new());
+
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(state))
+            .wrap(from_fn(authn))
+            .service(
+                web::scope("")
+                    .wrap(from_fn(authz))
+                    .route("/api/_fail_closed_probe", web::get().to(fail_closed_probe)),
+            ),
+    )
+    .await;
+
+    let req = TestRequest::get()
+        .uri("/api/_fail_closed_probe")
+        .insert_header(API_VERSION)
+        .insert_header(bearer(&token))
+        .to_request();
+
+    let status = match test::try_call_service(&app, req).await {
+        Ok(res) => res.status(),
+        Err(err) => err.error_response().status(),
+    };
+    assert_eq!(status, StatusCode::FORBIDDEN);
 }

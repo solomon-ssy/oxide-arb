@@ -15,8 +15,8 @@ use crate::{
     app::{task_id::TaskId, task_registry::PendingTaskQueue},
     bridge::{
         CoreOpportunityPipeline, execution_mode::ExecutionModeHandle, market_data::CoreMarketData,
-        potential_loss_store::CorePotentialLossStore, risk_metrics::CoreRiskMetrics,
-        trading_gate::TradingGate,
+        metrics_scrape::CoreMetricsScrape, potential_loss_store::CorePotentialLossStore,
+        risk_metrics::CoreRiskMetrics, trading_gate::TradingGate,
     },
     control::{
         ControlFactorRegistry,
@@ -114,7 +114,8 @@ use oxide_arb_web::{
     AppState,
     audit::{OperationLogBuffer, spawn_operation_log_writer},
     auth::casbin::CasbinService,
-    jwt::{JwtService, RedisTokenBlacklist},
+    jwt::{JwtService, RedisTokenBlacklist, TokenBlacklist},
+    readiness::PgRedisReadiness,
     routes, spawn_web_server,
     ws::{SessionRegistry, spawn_ws_broadcaster},
 };
@@ -324,6 +325,7 @@ impl AppContext {
             metrics_state: Arc::clone(&self.risk.metrics_state),
             metrics_refresh: self.risk.metrics_refresh.clone(),
             metrics: Arc::clone(&self.infra.metrics),
+            events: self.event_publisher(),
         };
         let relay = PostTradeRelay::new(PostTradeRelayDeps {
             consumer,
@@ -505,8 +507,14 @@ impl AppContext {
     async fn assemble_web_state(&self) -> OxideResult<(AppState, Receiver<NewOperationLog>)> {
         let db = self.infra.pg.connection().clone();
 
-        let blacklist = Arc::new(RedisTokenBlacklist::from_url(&self.config.cache.redis.url)?);
-        let jwt = Arc::new(JwtService::new(&self.config.web.jwt, blacklist));
+        let blacklist: Arc<dyn TokenBlacklist> =
+            Arc::new(RedisTokenBlacklist::from_url(&self.config.cache.redis.url)?);
+        let jwt = Arc::new(JwtService::new(
+            &self.config.web.jwt,
+            Arc::clone(&blacklist),
+        ));
+        let readiness = Arc::new(PgRedisReadiness::new(db.clone(), blacklist));
+        let metrics = Arc::new(CoreMetricsScrape::new(Arc::clone(&self.infra.metrics)));
 
         let casbin = Arc::new(
             CasbinService::new(db.clone())
@@ -571,6 +579,8 @@ impl AppContext {
             replay,
             events: self.event_publisher(),
             ws_sessions: SessionRegistry::default(),
+            metrics,
+            readiness,
         };
         Ok((state, operation_log_rx))
     }

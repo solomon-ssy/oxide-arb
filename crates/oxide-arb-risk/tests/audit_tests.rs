@@ -104,6 +104,7 @@ impl RiskPersistence for CapturingPersistence {
             weekly_trade_count: 0,
             weekly_window_start: now.date_naive(),
             hwm_equity: Usd::ZERO,
+            total_realized_pnl: Usd::ZERO,
             last_emergency_at: None,
             last_emergency_reason: None,
             updated_at: now,

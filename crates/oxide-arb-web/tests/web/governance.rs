@@ -137,3 +137,168 @@ async fn super_admin_governed_change_is_attributed_to_super_admin() {
     let rows = client::wait_for_oplog(&env, &admin, "super-admin-attr-2").await;
     assert_eq!(rows[0]["acting_role"], "super_admin");
 }
+
+#[actix_web::test]
+#[ignore = "requires Docker"]
+async fn shadow_publication_via_http_appends_verified_audit_chain() {
+    let env = TestEnv::start().await;
+    let admin = client::login(&env, "admin", "admin").await;
+    let repo = oxide_arb_repository::postgres::PgControlFactorRepository::new(env.db.clone());
+    let factor_id = crate::control_factor_fixture::seed_candidate_factor(&repo).await;
+    let expires = chrono::Utc::now() + chrono::Duration::days(1);
+
+    let res = client::post_with(
+        &env,
+        "/api/control-factors/publications/shadow",
+        &admin,
+        &[(REQUEST_ID, "gov-shadow-http")],
+        json!({
+            "factor_ids": [factor_id.to_string()],
+            "idempotency_key": "web-shadow-http-1",
+            "expires_at": expires,
+            "reason": "shadow via http"
+        }),
+    )
+    .await;
+    assert_eq!(res.status, StatusCode::OK, "shadow publication");
+
+    let audit = client::get(&env, "/api/control-factors/audit", &admin).await;
+    assert_eq!(audit.status, StatusCode::OK);
+    assert_eq!(audit.json()["data"]["verified"], json!(true));
+
+    let rows = client::wait_for_oplog(&env, &admin, "gov-shadow-http").await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["action"], "control_factor.shadow");
+}
+
+#[actix_web::test]
+#[ignore = "requires Docker"]
+async fn reject_factor_via_http_appends_verified_audit_chain() {
+    let env = TestEnv::start().await;
+    let admin = client::login(&env, "admin", "admin").await;
+    let repo = oxide_arb_repository::postgres::PgControlFactorRepository::new(env.db.clone());
+    let factor_id = crate::control_factor_fixture::seed_candidate_factor(&repo).await;
+
+    let res = client::post_with(
+        &env,
+        &format!("/api/control-factors/{factor_id}/reject"),
+        &admin,
+        &[(REQUEST_ID, "gov-reject-http")],
+        json!({ "reason": "reject via http" }),
+    )
+    .await;
+    assert_eq!(res.status, StatusCode::OK, "reject factor");
+
+    let audit = client::get(&env, "/api/control-factors/audit", &admin).await;
+    assert_eq!(audit.json()["data"]["verified"], json!(true));
+
+    let rows = client::wait_for_oplog(&env, &admin, "gov-reject-http").await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["action"], "control_factor.reject");
+}
+
+#[actix_web::test]
+#[ignore = "requires Docker"]
+async fn publish_and_rollback_via_http_restore_target_publication() {
+    let env = TestEnv::start().await;
+    let admin = client::login(&env, "admin", "admin").await;
+    let repo = oxide_arb_repository::postgres::PgControlFactorRepository::new(env.db.clone());
+    let genesis_factor = crate::control_factor_fixture::seed_candidate_factor(&repo).await;
+    let successor_factor = crate::control_factor_fixture::seed_candidate_factor(&repo).await;
+    let expires = chrono::Utc::now() + chrono::Duration::days(1);
+
+    // Shadow staging is required before a Published promotion.
+    let shadow_genesis = client::post_with(
+        &env,
+        "/api/control-factors/publications/shadow",
+        &admin,
+        &[(REQUEST_ID, "gov-shadow-genesis")],
+        json!({
+            "factor_ids": [genesis_factor.to_string()],
+            "idempotency_key": "web-shadow-genesis",
+            "expires_at": expires,
+            "reason": "shadow genesis"
+        }),
+    )
+    .await;
+    assert_eq!(shadow_genesis.status, StatusCode::OK);
+
+    let publish_genesis = client::post_with(
+        &env,
+        "/api/control-factors/publications/publish",
+        &admin,
+        &[(REQUEST_ID, "gov-publish-genesis")],
+        json!({
+            "factor_ids": [genesis_factor.to_string()],
+            "idempotency_key": "web-publish-genesis",
+            "expires_at": expires,
+            "manual_risk_expansion_approval": true,
+            "reason": "publish genesis"
+        }),
+    )
+    .await;
+    assert_eq!(publish_genesis.status, StatusCode::OK);
+    let genesis_pub_id = publish_genesis.json()["data"]["publication_id"]
+        .as_str()
+        .expect("genesis publication id")
+        .to_owned();
+
+    let shadow_successor = client::post_with(
+        &env,
+        "/api/control-factors/publications/shadow",
+        &admin,
+        &[(REQUEST_ID, "gov-shadow-successor")],
+        json!({
+            "factor_ids": [successor_factor.to_string()],
+            "idempotency_key": "web-shadow-successor",
+            "expires_at": expires,
+            "reason": "shadow successor"
+        }),
+    )
+    .await;
+    assert_eq!(shadow_successor.status, StatusCode::OK);
+
+    let publish_successor = client::post_with(
+        &env,
+        "/api/control-factors/publications/publish",
+        &admin,
+        &[(REQUEST_ID, "gov-publish-successor")],
+        json!({
+            "factor_ids": [successor_factor.to_string()],
+            "idempotency_key": "web-publish-successor",
+            "expires_at": expires,
+            "manual_risk_expansion_approval": true,
+            "reason": "publish successor"
+        }),
+    )
+    .await;
+    assert_eq!(publish_successor.status, StatusCode::OK);
+    let successor_pub_id = publish_successor.json()["data"]["publication_id"]
+        .as_str()
+        .expect("successor publication id")
+        .to_owned();
+
+    let rollback = client::post_with(
+        &env,
+        &format!("/api/control-factors/publications/{successor_pub_id}/rollback"),
+        &admin,
+        &[(REQUEST_ID, "gov-rollback-http")],
+        json!({
+            "target_publication_id": genesis_pub_id,
+            "reason": "rollback via http"
+        }),
+    )
+    .await;
+    assert_eq!(rollback.status, StatusCode::OK);
+    assert_eq!(
+        rollback.json()["data"]["publication_id"].as_str(),
+        Some(genesis_pub_id.as_str())
+    );
+
+    let audit = client::get(&env, "/api/control-factors/audit", &admin).await;
+    assert_eq!(audit.json()["data"]["verified"], json!(true));
+
+    let rows = client::wait_for_oplog(&env, &admin, "gov-rollback-http").await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["action"], "publication.rollback");
+}

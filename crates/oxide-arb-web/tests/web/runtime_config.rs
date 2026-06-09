@@ -134,7 +134,9 @@ async fn no_bare_patch_config_route_exists() {
     let env = TestEnv::start().await;
     let admin = client::login(&env, "admin", "admin").await;
 
-    // The legacy in-place hot-reload path must not exist under any verb.
+    // Legacy in-place hot reload is gone. There is no actix handler for
+    // `/api/config`, but authenticated requests still enter the protected scope;
+    // authz fails closed when `match_pattern()` is missing → 403 (not 404).
     let patch = TestRequest::patch()
         .uri("/api/config")
         .insert_header(API_VERSION)
@@ -145,7 +147,41 @@ async fn no_bare_patch_config_route_exists() {
         .set_json(json!({ "anything": true }));
     assert_eq!(
         harness::call(&env.state, patch).await.status,
-        StatusCode::NOT_FOUND
+        StatusCode::FORBIDDEN
+    );
+
+    // Same fail-closed behaviour for a non-privileged actor (not super_admin bypass).
+    let role_id = client::create_role(&env, &admin, "config_probe").await;
+    client::grant_permissions(
+        &env,
+        &admin,
+        &role_id,
+        json!([{ "resource": "runtime_config", "operation": "read" }]),
+    )
+    .await;
+    let user_id = client::create_user(&env, &admin, "cfg_probe", "password123").await;
+    client::assign_roles(&env, &admin, &user_id, &[&role_id]).await;
+    let reader = client::login(&env, "cfg_probe", "password123").await;
+
+    let patch = TestRequest::patch()
+        .uri("/api/config")
+        .insert_header(API_VERSION)
+        .insert_header((
+            actix_web::http::header::AUTHORIZATION,
+            format!("Bearer {reader}"),
+        ))
+        .set_json(json!({ "anything": true }));
+    assert_eq!(
+        harness::call(&env.state, patch).await.status,
+        StatusCode::FORBIDDEN
+    );
+
+    // The governed replacement path remains reachable (catalog list, no activation required).
+    assert_eq!(
+        client::get(&env, "/api/runtime-config/versions", &reader)
+            .await
+            .status,
+        StatusCode::OK
     );
 }
 

@@ -37,7 +37,7 @@ use oxide_arb_models::{
     clickhouse::OpportunityAuditRow,
     config::{MarketDataConfig, PolymarketConfig, RiskConfig, WebSocketConfig},
     domain::{
-        PositionInfo, TradeInfo,
+        CoreEventPublisher, PositionInfo, TradeInfo,
         book::BookLevel,
         calibration::{BucketKey, CalibrationSnapshot},
         latency::LatencyTrace,
@@ -522,6 +522,7 @@ async fn live_pipeline_fill_observed_then_consumer_settles() {
         metrics_state: fixture.metrics_state,
         metrics_refresh: None,
         metrics: fixture.metrics,
+        events: CoreEventPublisher::bounded(1).0,
     };
     consumer.process(&observed).await;
 

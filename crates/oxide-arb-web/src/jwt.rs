@@ -103,6 +103,9 @@ pub trait TokenBlacklist: Send + Sync {
 
     /// Whether `jti` is currently revoked.
     async fn is_revoked(&self, jti: &str) -> Result<bool, AuthError>;
+
+    /// Verify the revocation store is reachable (readiness probe).
+    async fn health_check(&self) -> Result<(), AuthError>;
 }
 
 /// Redis implementation of [`TokenBlacklist`] over a `deadpool` pool.
@@ -124,6 +127,20 @@ impl RedisTokenBlacklist {
             .create_pool(Some(Runtime::Tokio1))
             .map_err(|error| OxideError::Internal(format!("redis blacklist pool: {error}")))?;
         Ok(Self { pool })
+    }
+
+    /// Ping Redis to verify the revocation store is reachable.
+    async fn ping(&self) -> Result<(), AuthError> {
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|_| AuthError::BlacklistUnavailable)?;
+        redis::cmd("PING")
+            .query_async::<()>(&mut conn)
+            .await
+            .map_err(|_| AuthError::BlacklistUnavailable)?;
+        Ok(())
     }
 
     fn key(jti: &str) -> String {
@@ -157,6 +174,10 @@ impl TokenBlacklist for RedisTokenBlacklist {
             .await
             .map_err(|_| AuthError::BlacklistUnavailable)?;
         Ok(revoked)
+    }
+
+    async fn health_check(&self) -> Result<(), AuthError> {
+        self.ping().await
     }
 }
 

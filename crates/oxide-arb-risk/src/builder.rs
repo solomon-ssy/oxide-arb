@@ -213,12 +213,20 @@ impl RiskEngineBuilder {
             }
         });
 
+        // Restore lifetime realized PnL from the persisted snapshot (greenfield
+        // boots at zero); the accumulator never resets across daily rollovers.
+        let lifetime_realized = self
+            .snapshot
+            .as_ref()
+            .map_or(Usd::ZERO, |snap| snap.total_realized_pnl);
+
         let engine = RiskEngine {
             circuit_breaker: RwLock::new(breaker),
             daily: RwLock::new(daily),
             weekly: RwLock::new(weekly),
             hourly: RwLock::new(hourly),
             potential_loss: RwLock::new(potential_loss),
+            lifetime_realized: RwLock::new(lifetime_realized),
             pipeline: risk_pipeline,
             risk_snapshot: ArcSwap::from_pointee(RiskSnapshot::zeroed()),
             blacklist,
@@ -345,6 +353,7 @@ impl RiskPersistence for NoopPersistence {
             weekly_trade_count: 0,
             weekly_window_start: now.date_naive(),
             hwm_equity: Usd::ZERO,
+            total_realized_pnl: Usd::ZERO,
             last_emergency_at: None,
             last_emergency_reason: None,
             updated_at: now,
