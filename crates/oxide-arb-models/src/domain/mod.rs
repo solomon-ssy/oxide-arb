@@ -32,6 +32,14 @@
 //!   to `Upsert*` for persistence via `From`.
 //! - **`PostTradeInput`** — Cross-crate input for domain operations.
 //!
+//! ## API contract (`domain::api`)
+//!
+//! - **`*Request`** — Inbound JSON bodies (may carry plaintext credentials or
+//!   serde three-way null semantics). Validated at the web boundary, then mapped
+//!   into write DTOs before persistence.
+//! - **`*View` / `*Response`** — Outbound JSON projections. Views strip sensitive
+//!   columns (e.g. `password_hash`) that must never cross the wire.
+//!
 //! ## Conversions
 //!
 //! - `State → Upsert*` via `From` (complete, no silent defaults).
@@ -66,6 +74,7 @@ macro_rules! info_from_model {
 
 // Bounded-context groups.
 pub mod accounting;
+pub mod api;
 pub mod control_factor;
 pub mod evidence;
 pub mod governance;
@@ -80,6 +89,7 @@ pub mod patch;
 
 // Flattened facade: every domain type is reachable directly under `domain::`.
 pub use accounting::*;
+pub use api::*;
 pub use control_factor::*;
 pub use evidence::*;
 pub use governance::*;

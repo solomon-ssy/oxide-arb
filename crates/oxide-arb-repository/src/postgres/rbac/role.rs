@@ -6,7 +6,7 @@ use oxide_arb_models::{
     domain::{NewRole, RoleInfo, RolePatch},
     entities::{role, role_menu, user_role},
     enums::rbac::{RoleKind, RoleStatus},
-    types::RoleId,
+    types::{RoleId, UserId},
 };
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait, DatabaseConnection,
@@ -85,20 +85,60 @@ async fn do_update(
     }
 }
 
+/// Transition a role's status, keeping Casbin grouping (`g`) bindings in lockstep
+/// so the change takes effect the instant the enforcer reloads.
+///
+/// - **Disable** drops every `g` binding for the role (its `p` permissions and
+///   `user_role` membership survive), so no subject resolves the role anymore.
+/// - **Enable** rebuilds `g` from the surviving `user_role` membership.
+///
+/// All of it runs in one transaction, so the relational status column and the
+/// policy table can never diverge.
 async fn do_change_status(
-    db: &impl ConnectionTrait,
+    db: &DatabaseConnection,
     id: &RoleId,
     status: RoleStatus,
 ) -> Result<(), StorageError> {
-    let result = role::Entity::update_many()
+    let txn = db.begin().await.map_err(StorageError::from)?;
+
+    let Some(role) = role::Entity::find_by_id(id.clone())
+        .one(&txn)
+        .await
+        .map_err(StorageError::from)?
+    else {
+        txn.rollback().await.map_err(StorageError::from)?;
+        return Err(util::not_found("role", id));
+    };
+
+    // No-op transitions skip the policy churn entirely.
+    if role.status == status {
+        txn.rollback().await.map_err(StorageError::from)?;
+        return Ok(());
+    }
+
+    role::Entity::update_many()
         .col_expr(role::Column::Status, Expr::value(status))
         .filter(role::Column::Id.eq(id.clone()))
-        .exec(db)
+        .exec(&txn)
         .await
         .map_err(StorageError::from)?;
-    if result.rows_affected == 0 {
-        return Err(util::not_found("role", id));
+
+    match status {
+        RoleStatus::Disabled => sync::do_revoke_role_bindings(&txn, &role.code).await?,
+        RoleStatus::Enabled => {
+            let holders: Vec<UserId> = user_role::Entity::find()
+                .filter(user_role::Column::RoleId.eq(id.clone()))
+                .all(&txn)
+                .await
+                .map_err(StorageError::from)?
+                .into_iter()
+                .map(|row| row.user_id)
+                .collect();
+            sync::do_rebuild_role_bindings(&txn, &role.code, &holders).await?;
+        }
     }
+
+    txn.commit().await.map_err(StorageError::from)?;
     Ok(())
 }
 

@@ -1,21 +1,13 @@
-//! End-to-end authentication tests against a real Postgres + Redis stack.
-//!
-//! Covers the full auth surface and its security invariants: token issuance,
-//! the unified response/error envelope, refresh rotation with replay
-//! rejection, logout revocation, the authn failure matrix (missing / invalid /
-//! expired / wrong-type), header-based version negotiation, request-id
-//! propagation, the credential-free `/me` projection, and — critically for a
-//! money system — fail-closed behaviour when the revocation store is down.
-//!
-//! Every test needs Docker (testcontainers) and is therefore `#[ignore]` by
-//! default; run them with `cargo test -p oxide-arb-web -- --ignored`.
-
-mod common;
+//! Authentication integration tests.
 
 use actix_web::http::{StatusCode, header::AUTHORIZATION};
-use common::harness::{self, API_VERSION, TestEnv};
 use oxide_arb_models::domain::UserInfo;
 use serde_json::json;
+
+use crate::{
+    auth_helpers::{expired_access_token, kill_redis},
+    harness::{self, API_VERSION, TestEnv},
+};
 
 /// Authenticate as the seeded `admin` and return `(access, refresh)`.
 async fn login_admin(env: &TestEnv) -> (String, String) {
@@ -271,7 +263,7 @@ async fn authn_rejects_refresh_token_used_as_access() {
 async fn authn_rejects_expired_token() {
     let env = TestEnv::start().await;
     let admin = fetch_admin(&env).await;
-    let expired = harness::expired_access_token(&admin);
+    let expired = expired_access_token(&admin);
 
     let req = actix_web::test::TestRequest::get()
         .uri("/api/auth/me")
@@ -354,7 +346,7 @@ async fn authn_fails_closed_when_revocation_store_is_unavailable() {
     let (access, _refresh) = login_admin(&env).await;
 
     // Now the revocation store goes dark.
-    env.kill_redis().await;
+    kill_redis(&mut env).await;
 
     // The token is structurally valid, but its revocation status is unknown, so
     // authn must refuse to authenticate — 503, never a silent allow.

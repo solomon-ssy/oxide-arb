@@ -11,6 +11,7 @@
 //! 6.6. Integration tests build an equivalent `App` via [`cors_from`],
 //! [`middleware::request_id`], and [`routes::configure`].
 
+pub mod auth;
 pub mod error;
 pub mod extractors;
 pub mod jwt;

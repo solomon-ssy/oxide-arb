@@ -1,39 +1,124 @@
-//! Route registration.
+//! Route registration and the route → authorization manifest.
 //!
-//! Versioning is header-driven (see [`version::ApiV1Guard`]): every business
-//! endpoint lives under the unversioned path `/api/auth/...` and is selected for
-//! `v1` by the `Accept-Api-Version: v1` header. Liveness/readiness probes are
-//! infrastructure concerns, registered outside the versioned scope so
-//! orchestrators can reach them without negotiating an API version.
+//! Versioning is header-driven (see [`version::ApiV1Guard`]): every endpoint
+//! lives under the unversioned path `/api/...` and is selected for `v1` by the
+//! `Accept-Api-Version: v1` header. Liveness/readiness probes sit outside the
+//! versioned scope so orchestrators can reach them without negotiating a
+//! version.
 //!
-//! Within the `v1` scope, public routes (`login`, `refresh`) sit alongside a
-//! nested scope wrapped by [`crate::middleware::authn`] that carries the
-//! protected routes (`logout`, `me`). The two carry disjoint paths, so each
-//! concrete route resolves unambiguously while only the protected ones are
-//! authenticated.
+//! # Single-source authorization manifest
+//!
+//! [`protected_route_specs`] is the *one* declarative list of every protected
+//! route: its method, path pattern, authorization [`Rule`], and handler. Both
+//! [`configure`] (which registers the actix routes) and [`init_rbac_rules`]
+//! (which builds the [`PermChecker`]) derive from it, so every registered
+//! protected route is guaranteed to have a rule **by construction** — there is
+//! no way to add a route without also declaring how it is authorized.
+//!
+//! Each resource module owns its slice of the manifest via [`RouteSpec`] lists;
+//! this module only aggregates them and wires the actix scopes.
+//!
+//! # Pipeline
+//!
+//! Public routes (`login`, `refresh`) and probes are registered outside the
+//! authorized scope and never reach the checker. Everything else is wrapped by
+//! [`authn`](crate::middleware::authn) (outer scope) then
+//! [`authz`](crate::middleware::authz) (inner scope), so identity is always
+//! established before authorization, and an unregistered protected route is
+//! denied (fail-closed).
 
 pub mod auth;
 pub mod health;
+pub mod menus;
+pub mod permissions;
+pub mod registry;
+pub mod roles;
+pub mod users;
 pub mod version;
 
-use actix_web::{middleware::from_fn, web};
+use actix_web::{
+    Resource,
+    middleware::from_fn,
+    web::{self, ServiceConfig},
+};
 
-use crate::{middleware::authn, routes::version::ApiV1Guard};
+use crate::{
+    auth::casbin::PermChecker,
+    middleware::{authn, authz},
+    routes::{
+        registry::{API_PREFIX, RouteSpec},
+        version::ApiV1Guard,
+    },
+};
 
-/// Register all Phase 6.3 routes onto the service config.
-pub fn configure(cfg: &mut web::ServiceConfig) {
+/// The single declarative manifest of every protected route, assembled from the
+/// per-resource groups below.
+fn protected_route_specs() -> Vec<RouteSpec> {
+    let mut specs = Vec::new();
+    specs.extend(auth::route_specs());
+    specs.extend(users::route_specs());
+    specs.extend(roles::route_specs());
+    specs.extend(menus::route_specs());
+    specs.extend(permissions::route_specs());
+    specs
+}
+
+/// Build the route-level [`PermChecker`] from the manifest.
+///
+/// Keys are `(method, API_PREFIX + path)`, matching the pattern the authz
+/// middleware reads from `ServiceRequest::match_pattern()`.
+#[must_use]
+pub fn init_rbac_rules() -> PermChecker {
+    let mut checker = PermChecker::new();
+    for spec in protected_route_specs() {
+        checker.register(spec.method, format!("{API_PREFIX}{}", spec.path), spec.rule);
+    }
+    checker
+}
+
+/// Group the manifest's routes into one actix [`Resource`] per path (preserving
+/// declaration order) so multiple methods on the same path share a resource and
+/// resolve by their method guards.
+fn protected_resources() -> Vec<Resource> {
+    let mut grouped: Vec<(&'static str, Vec<_>)> = Vec::new();
+    for spec in protected_route_specs() {
+        if let Some(entry) = grouped.iter_mut().find(|(path, _)| *path == spec.path) {
+            entry.1.push(spec.route);
+        } else {
+            grouped.push((spec.path, vec![spec.route]));
+        }
+    }
+    grouped
+        .into_iter()
+        .map(|(path, routes)| {
+            routes
+                .into_iter()
+                .fold(web::resource(path), Resource::route)
+        })
+        .collect()
+}
+
+/// Register all routes onto the service config.
+///
+/// The protected routes live in two nested scopes so the middleware order is
+/// unambiguous: the outer scope's `authn` runs first (establishing identity),
+/// then the inner scope's `authz` authorizes against the manifest. Wrapped
+/// scopes have an un-nameable type, so the whole tree is built inline.
+pub fn configure(cfg: &mut ServiceConfig) {
+    let authorized = protected_resources()
+        .into_iter()
+        .fold(web::scope("").wrap(from_fn(authz)), |scope, resource| {
+            scope.service(resource)
+        });
+    let protected = web::scope("").wrap(from_fn(authn)).service(authorized);
+
     cfg.route("/health", web::get().to(health::health))
         .route("/ready", web::get().to(health::ready))
         .service(
-            web::scope("/api/auth")
+            web::scope(API_PREFIX)
                 .guard(ApiV1Guard)
-                .route("/login", web::post().to(auth::login))
-                .route("/refresh", web::post().to(auth::refresh))
-                .service(
-                    web::scope("")
-                        .wrap(from_fn(authn))
-                        .route("/logout", web::post().to(auth::logout))
-                        .route("/me", web::get().to(auth::me)),
-                ),
+                .route("/auth/login", web::post().to(auth::login))
+                .route("/auth/refresh", web::post().to(auth::refresh))
+                .service(protected),
         );
 }

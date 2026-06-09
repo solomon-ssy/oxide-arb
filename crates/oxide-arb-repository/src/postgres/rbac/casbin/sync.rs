@@ -68,6 +68,54 @@ pub async fn do_revoke_all_roles_for_user(
     Ok(())
 }
 
+/// Suspend a role's effect without losing data: drop every `g` grouping that
+/// binds a subject to `role_code`, leaving the role's `p` permissions and the
+/// relational `user_role` rows intact.
+///
+/// This is the disable half of the role-status lifecycle — once the groupings
+/// are gone, no subject resolves the role in the matcher, so its permissions
+/// stop granting immediately (after the enforcer reloads). Re-enabling rebuilds
+/// the groupings from the surviving `user_role` rows via
+/// [`do_rebuild_role_bindings`].
+pub async fn do_revoke_role_bindings(
+    conn: &impl ConnectionTrait,
+    role_code: &str,
+) -> Result<(), StorageError> {
+    Entity::delete_many()
+        .filter(Column::Ptype.eq(PTYPE_GROUPING))
+        .filter(Column::V1.eq(role_code))
+        .exec(conn)
+        .await
+        .map_err(StorageError::from)?;
+    Ok(())
+}
+
+/// Rebuild a role's `g` groupings from its current relational membership: insert
+/// one `g(user_id, role_code)` per holder, idempotent on the full tuple.
+///
+/// This is the enable half of the role-status lifecycle. `user_role` is the
+/// source of truth for membership, so the groupings can always be reconstructed
+/// losslessly after a disable.
+pub async fn do_rebuild_role_bindings(
+    conn: &impl ConnectionTrait,
+    role_code: &str,
+    user_ids: &[UserId],
+) -> Result<(), StorageError> {
+    if user_ids.is_empty() {
+        return Ok(());
+    }
+    let rows = user_ids
+        .iter()
+        .map(|user_id| row::grouping_row(user_id, role_code))
+        .collect::<Vec<_>>();
+    Entity::insert_many(rows)
+        .on_conflict(row::full_tuple_conflict().do_nothing().to_owned())
+        .exec_without_returning(conn)
+        .await
+        .map_err(StorageError::from)?;
+    Ok(())
+}
+
 /// Remove every trace of a role code: its `p` permissions and any `g` grouping
 /// that grants it to a subject (used when deleting the role).
 pub async fn do_purge_role_code(

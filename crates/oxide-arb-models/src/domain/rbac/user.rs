@@ -51,7 +51,14 @@ pub struct NewUser {
     pub status: UserStatus,
 }
 
-/// Partial update for a user's profile and status (never the password).
+/// Partial update for a user's profile attributes.
+///
+/// Neither the password nor the account `status` is mutable here: credentials
+/// flow through [`ChangeUserPassword`] and activation/deactivation through
+/// [`UserRepository::change_status`], keeping every sensitive transition on its
+/// own audited, single-purpose path.
+///
+/// [`UserRepository::change_status`]: ../../../oxide_arb_repository/traits/trait.UserRepository.html
 #[derive(Debug, Clone, Default, DeriveIntoActiveModel)]
 #[sea_orm(active_model = "crate::entities::user::ActiveModel")]
 pub struct UserPatch {
@@ -59,7 +66,6 @@ pub struct UserPatch {
     pub avatar: NullablePatch<String>,
     pub email: NullablePatch<String>,
     pub phone: NullablePatch<String>,
-    pub status: Patch<UserStatus>,
 }
 
 /// Dedicated credential change. `password_hash` is already argon2id-hashed by
@@ -80,4 +86,15 @@ pub struct UserPageQuery {
     pub status: Option<UserStatus>,
     #[serde(flatten)]
     pub page: PageRequest,
+}
+
+impl UserPageQuery {
+    /// Return a copy with the embedded pagination window normalized.
+    #[must_use]
+    pub fn normalized(self) -> Self {
+        Self {
+            page: self.page.normalized(),
+            ..self
+        }
+    }
 }

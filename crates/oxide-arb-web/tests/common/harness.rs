@@ -18,10 +18,14 @@ use actix_web::{
 };
 use async_trait::async_trait;
 use oxide_arb_error::auth::AuthError;
-use oxide_arb_models::{config::JwtConfig, domain::UserInfo};
-use oxide_arb_repository::postgres::{PgMenuRepository, PgUserRepository, PgUserRoleRepository};
+use oxide_arb_models::config::JwtConfig;
+use oxide_arb_repository::postgres::{
+    PgMenuRepository, PgRoleMenuRepository, PgRolePermissionRepository, PgRoleRepository,
+    PgUserRepository, PgUserRoleRepository,
+};
 use oxide_arb_web::{
     AppState,
+    auth::casbin::CasbinService,
     jwt::{JwtService, RedisTokenBlacklist, TokenBlacklist},
     middleware, routes,
 };
@@ -29,7 +33,7 @@ use serde_json::Value;
 use testcontainers::ContainerAsync;
 use testcontainers_modules::{postgres::Postgres, redis::Redis};
 
-use crate::common::{pg, redis};
+use crate::{pg, redis};
 
 /// The version header every `/api/auth/*` request must carry to match the `v1`
 /// scope (see `ApiV1Guard`).
@@ -47,7 +51,7 @@ pub struct TestEnv {
     // repositories keep the connection pool alive, so the pool wrapper itself
     // need not be retained — only the container must outlive the test.
     _pg: ContainerAsync<Postgres>,
-    // Redis container guard, taken to simulate an outage (see `kill_redis`).
+    // Redis container guard; [`take_redis`] simulates an outage in auth tests.
     redis: Option<ContainerAsync<Redis>>,
 }
 
@@ -62,12 +66,23 @@ impl TestEnv {
         let jwt = Arc::new(JwtService::new(&jwt_config(), blacklist));
 
         let db = pool.connection().clone();
-        let state = AppState::new(
-            jwt,
-            Arc::new(PgUserRepository::new(db.clone())),
-            Arc::new(PgUserRoleRepository::new(db.clone())),
-            Arc::new(PgMenuRepository::new(db)),
+        let casbin = Arc::new(
+            CasbinService::new(db.clone())
+                .await
+                .expect("casbin service"),
         );
+        let perm_checker = Arc::new(routes::init_rbac_rules());
+        let state = AppState {
+            jwt,
+            users: Arc::new(PgUserRepository::new(db.clone())),
+            roles: Arc::new(PgRoleRepository::new(db.clone())),
+            menus: Arc::new(PgMenuRepository::new(db.clone())),
+            user_roles: Arc::new(PgUserRoleRepository::new(db.clone())),
+            role_menus: Arc::new(PgRoleMenuRepository::new(db.clone())),
+            role_permissions: Arc::new(PgRolePermissionRepository::new(db)),
+            casbin,
+            perm_checker,
+        };
 
         Self {
             state,
@@ -76,27 +91,10 @@ impl TestEnv {
         }
     }
 
-    /// Simulate a Redis outage by tearing down the container. The blacklist pool
-    /// can no longer reach a server, so authn must fail closed (HTTP 503).
-    pub async fn kill_redis(&mut self) {
-        drop(self.redis.take());
-        // Allow container teardown to complete so subsequent connects fail fast.
-        tokio::time::sleep(Duration::from_millis(300)).await;
+    /// Take the Redis container guard (auth outage tests only).
+    pub const fn take_redis(&mut self) -> Option<ContainerAsync<Redis>> {
+        self.redis.take()
     }
-}
-
-/// Mint an already-expired access token signed with the harness key. Lets tests
-/// exercise the expired-token branch deterministically, without sleeping. Signed
-/// with the same secret/issuer the harness `JwtService` uses, so it passes
-/// signature + issuer validation and fails only on `exp`.
-pub fn expired_access_token(user: &UserInfo) -> String {
-    let mut cfg = jwt_config();
-    cfg.access_ttl_secs = -10;
-    let service = JwtService::new(&cfg, Arc::new(NoopBlacklist));
-    service
-        .encode_access(user)
-        .expect("encode expired access token")
-        .token
 }
 
 fn jwt_config() -> JwtConfig {
@@ -175,7 +173,7 @@ pub async fn call(state: &AppState, req: test::TestRequest) -> Resp {
 /// No-op blacklist used solely to mint test tokens; never consulted during the
 /// authn decode path (decode rejects expired/wrong-type tokens before any
 /// revocation check runs).
-struct NoopBlacklist;
+pub struct NoopBlacklist;
 
 #[async_trait]
 impl TokenBlacklist for NoopBlacklist {

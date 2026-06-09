@@ -75,6 +75,27 @@ fn new_role(code: &str) -> NewRole {
     }
 }
 
+/// Count `g(subject, role_code)` grouping rows currently in `casbin_rule`.
+async fn count_grouping(db: &sea_orm::DatabaseConnection, subject: &str, role_code: &str) -> u64 {
+    casbin_rule::Entity::find()
+        .filter(casbin_rule::Column::Ptype.eq("g"))
+        .filter(casbin_rule::Column::V0.eq(subject))
+        .filter(casbin_rule::Column::V1.eq(role_code))
+        .count(db)
+        .await
+        .expect("count grouping")
+}
+
+/// Count `p` permission rows currently held by `role_code`.
+async fn count_role_policies(db: &sea_orm::DatabaseConnection, role_code: &str) -> u64 {
+    casbin_rule::Entity::find()
+        .filter(casbin_rule::Column::Ptype.eq("p"))
+        .filter(casbin_rule::Column::V0.eq(role_code))
+        .count(db)
+        .await
+        .expect("count policies")
+}
+
 /// Build a raw Casbin `p` rule line `(role_code, obj, act, "resource")`.
 fn p_rule(role_code: &str, obj: &str, act: &str) -> Vec<String> {
     vec![
@@ -666,6 +687,124 @@ async fn enforce_reflects_assignments_and_super_admin_bypass() {
                 "resource"
             ))
             .expect("admin enforce")
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn role_disable_revokes_then_enable_rebuilds_grouping() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let users = PgUserRepository::new(db.clone());
+    let roles = PgRoleRepository::new(db.clone());
+    let user_role = PgUserRoleRepository::new(db.clone());
+    let perms = PgRolePermissionRepository::new(db.clone());
+
+    let role = roles.create(new_role("toggle_role")).await.expect("role");
+    perms
+        .set_permissions_for_role(AssignPermissions {
+            role_id: role.id.clone(),
+            permissions: vec![Permission::new(ResourceType::Market, Operation::Read)],
+        })
+        .await
+        .expect("perms");
+    let user = users.create(new_user("toggler")).await.expect("user");
+    user_role
+        .set_roles_for_user(AssignRoles {
+            user_id: user.id.clone(),
+            role_ids: vec![role.id.clone()],
+        })
+        .await
+        .expect("assign");
+
+    let subject = user.id.to_string();
+    let allows = |db: &sea_orm::DatabaseConnection| {
+        let db = db.clone();
+        let subject = subject.clone();
+        async move {
+            let model = DefaultModel::from_str(CASBIN_MODEL).await.expect("model");
+            let enforcer = Enforcer::new(model, PgCasbinAdapter::new(db))
+                .await
+                .expect("enforcer");
+            enforcer
+                .enforce((subject.as_str(), "market", "read", "resource"))
+                .expect("enforce")
+        }
+    };
+
+    assert!(
+        allows(&db).await,
+        "enabled role should grant its permission"
+    );
+
+    // Disable: the grouping is dropped, so the permission stops granting, but the
+    // `p` policy and the `user_role` membership survive.
+    roles
+        .change_status(&role.id, RoleStatus::Disabled)
+        .await
+        .expect("disable");
+    assert!(!allows(&db).await, "disabled role must grant nothing");
+    assert_eq!(
+        count_grouping(&db, &subject, "toggle_role").await,
+        0,
+        "disable removes the g binding"
+    );
+    assert_eq!(
+        count_role_policies(&db, "toggle_role").await,
+        1,
+        "disable preserves the p policy"
+    );
+
+    // Re-enable: the grouping is rebuilt from the surviving membership.
+    roles
+        .change_status(&role.id, RoleStatus::Enabled)
+        .await
+        .expect("enable");
+    assert!(allows(&db).await, "re-enabled role grants again");
+    assert_eq!(
+        count_grouping(&db, &subject, "toggle_role").await,
+        1,
+        "enable rebuilds the g binding from user_role"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn assigning_a_disabled_role_writes_no_grouping() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let users = PgUserRepository::new(db.clone());
+    let roles = PgRoleRepository::new(db.clone());
+    let user_role = PgUserRoleRepository::new(db.clone());
+
+    let role = roles.create(new_role("born_disabled")).await.expect("role");
+    roles
+        .change_status(&role.id, RoleStatus::Disabled)
+        .await
+        .expect("disable");
+    let user = users.create(new_user("late_joiner")).await.expect("user");
+    user_role
+        .set_roles_for_user(AssignRoles {
+            user_id: user.id.clone(),
+            role_ids: vec![role.id.clone()],
+        })
+        .await
+        .expect("assign");
+
+    // Membership is recorded relationally, but no Casbin grouping is projected.
+    assert_eq!(
+        user_role
+            .list_roles_for_user(&user.id)
+            .await
+            .expect("list")
+            .len(),
+        1,
+        "membership is recorded even for a disabled role"
+    );
+    assert_eq!(
+        count_grouping(&db, &user.id.to_string(), "born_disabled").await,
+        0,
+        "a disabled role projects no grouping on assignment"
     );
 }
 

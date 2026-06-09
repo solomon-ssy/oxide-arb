@@ -1,0 +1,221 @@
+//! The route → rule registry consulted by the authz middleware.
+//!
+//! Keyed by `(method, matched-path-pattern)` — e.g. `(GET, "/api/users/{id}")`
+//! — the registry is **fail-closed**: a protected route with no registered rule
+//! is denied (`403`), eliminating the ng-gateway default-allow defect where an
+//! unregistered route fell through to "permit".
+//!
+//! The registry is built once at startup from the single declarative route
+//! manifest (see [`crate::routes`]), so every registered protected route is
+//! guaranteed to have a rule by construction.
+
+use std::collections::HashMap;
+
+use actix_web::http::Method;
+
+use crate::{
+    auth::casbin::{
+        rules::{AuthzOutcome, Rule},
+        service::CasbinService,
+    },
+    error::WebError,
+    extractors::ActorRoles,
+    jwt::Claims,
+};
+
+/// The role code whose holders bypass all route-level authorization.
+pub const SUPER_ADMIN_ROLE: &str = "super_admin";
+
+/// Route-level authorization registry.
+#[derive(Debug, Default)]
+pub struct PermChecker {
+    rules: HashMap<(Method, String), Rule>,
+}
+
+impl PermChecker {
+    /// Create an empty registry.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Register `rule` for the `(method, path-pattern)` route.
+    ///
+    /// Panics on a duplicate `(method, path)` registration: the route manifest
+    /// is a compile-time-shaped constant, so a duplicate is a programming error
+    /// that must fail loudly at startup, never silently shadow a rule.
+    pub fn register(&mut self, method: Method, path: impl Into<String>, rule: Rule) {
+        let path = path.into();
+        let key = (method, path);
+        assert!(
+            !self.rules.contains_key(&key),
+            "duplicate authorization rule for {} {}",
+            key.0,
+            key.1
+        );
+        self.rules.insert(key, rule);
+    }
+
+    /// Number of registered rules (used by completeness tests).
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.rules.len()
+    }
+
+    /// Whether the registry is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.rules.is_empty()
+    }
+
+    /// Authorize a request against the registry.
+    ///
+    /// 1. An enabled `super_admin` bypasses everything (including unregistered
+    ///    routes).
+    /// 2. Otherwise the `(method, matched_path)` rule is evaluated; a missing
+    ///    rule is **denied** (fail-closed).
+    pub async fn check(
+        &self,
+        method: &Method,
+        matched_path: &str,
+        claims: &Claims,
+        roles: &ActorRoles,
+        casbin: &CasbinService,
+        acting_role: Option<&str>,
+    ) -> Result<AuthzOutcome, WebError> {
+        if roles.contains_enabled(SUPER_ADMIN_ROLE) {
+            return Ok(AuthzOutcome::default());
+        }
+        match self.rules.get(&(method.clone(), matched_path.to_owned())) {
+            Some(rule) => rule.evaluate(claims, roles, casbin, acting_role).await,
+            None => Err(WebError::Forbidden),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+    use oxide_arb_models::{
+        domain::RoleInfo,
+        enums::rbac::{RoleKind, RoleStatus},
+        types::RoleId,
+    };
+
+    use super::{
+        AuthzOutcome, CasbinService, Claims, Method, PermChecker, Rule, SUPER_ADMIN_ROLE, WebError,
+    };
+    use crate::{extractors::ActorRoles, jwt::TokenType};
+
+    fn claims() -> Claims {
+        Claims {
+            jti: "jti".to_owned(),
+            sub: "user-1".to_owned(),
+            iss: "oxide-arb".to_owned(),
+            iat: 0,
+            nbf: 0,
+            exp: 0,
+            username: "tester".to_owned(),
+            token_type: TokenType::Access,
+        }
+    }
+
+    fn roles(specs: &[(&str, RoleStatus)]) -> ActorRoles {
+        ActorRoles::new(
+            specs
+                .iter()
+                .map(|(code, status)| RoleInfo {
+                    id: RoleId::from_v7(),
+                    code: (*code).to_owned(),
+                    name: (*code).to_owned(),
+                    description: None,
+                    kind: RoleKind::Custom,
+                    status: *status,
+                    sort: 0,
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                })
+                .collect(),
+        )
+    }
+
+    #[actix_web::test]
+    async fn enabled_super_admin_bypasses_even_unregistered_routes() {
+        let casbin = CasbinService::in_memory().await;
+        let checker = PermChecker::new();
+        let outcome: AuthzOutcome = checker
+            .check(
+                &Method::DELETE,
+                "/api/anything/unregistered",
+                &claims(),
+                &roles(&[(SUPER_ADMIN_ROLE, RoleStatus::Enabled)]),
+                &casbin,
+                None,
+            )
+            .await
+            .expect("super_admin bypasses everything");
+        assert!(outcome.acting_role.is_none());
+    }
+
+    #[actix_web::test]
+    async fn disabled_super_admin_does_not_bypass() {
+        let casbin = CasbinService::in_memory().await;
+        let checker = PermChecker::new();
+        let result = checker
+            .check(
+                &Method::GET,
+                "/api/users",
+                &claims(),
+                &roles(&[(SUPER_ADMIN_ROLE, RoleStatus::Disabled)]),
+                &casbin,
+                None,
+            )
+            .await;
+        assert!(matches!(result, Err(WebError::Forbidden)));
+    }
+
+    #[actix_web::test]
+    async fn unregistered_route_is_denied_fail_closed() {
+        let casbin = CasbinService::in_memory().await;
+        let checker = PermChecker::new();
+        let result = checker
+            .check(
+                &Method::GET,
+                "/api/users",
+                &claims(),
+                &roles(&[("viewer", RoleStatus::Enabled)]),
+                &casbin,
+                None,
+            )
+            .await;
+        assert!(matches!(result, Err(WebError::Forbidden)));
+    }
+
+    #[actix_web::test]
+    async fn registered_authenticated_only_rule_is_admitted() {
+        let casbin = CasbinService::in_memory().await;
+        let mut checker = PermChecker::new();
+        checker.register(Method::GET, "/api/auth/me", Rule::AuthenticatedOnly);
+        assert!(
+            checker
+                .check(
+                    &Method::GET,
+                    "/api/auth/me",
+                    &claims(),
+                    &roles(&[("viewer", RoleStatus::Enabled)]),
+                    &casbin,
+                    None,
+                )
+                .await
+                .is_ok()
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "duplicate authorization rule")]
+    fn duplicate_registration_panics() {
+        let mut checker = PermChecker::new();
+        checker.register(Method::GET, "/api/users", Rule::AuthenticatedOnly);
+        checker.register(Method::GET, "/api/users", Rule::AuthenticatedOnly);
+    }
+}

@@ -7,6 +7,7 @@ use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::{
     domain::{AssignRoles, RoleInfo},
     entities::{role, user, user_role},
+    enums::rbac::RoleStatus,
     types::{RoleId, UserId},
 };
 use sea_orm::{
@@ -65,8 +66,12 @@ async fn do_set_roles(
         txn.rollback().await.map_err(StorageError::from)?;
         return Err(util::not_found("role", missing));
     }
-    let code_of: HashMap<RoleId, String> = target_roles
+    // Only *enabled* roles project a Casbin grouping (`g`): a disabled role keeps
+    // its relational `user_role` membership but grants nothing until re-enabled,
+    // at which point its groupings are rebuilt from that membership.
+    let enabled_code_of: HashMap<RoleId, String> = target_roles
         .iter()
+        .filter(|role| role.status == RoleStatus::Enabled)
         .map(|role| (role.id.clone(), role.code.clone()))
         .collect();
 
@@ -112,7 +117,7 @@ async fn do_set_roles(
             .await
             .map_err(StorageError::from)?;
         for role_id in &added {
-            if let Some(code) = code_of.get(role_id) {
+            if let Some(code) = enabled_code_of.get(role_id) {
                 sync::do_grant_role(&txn, &user_id, code).await?;
             }
         }

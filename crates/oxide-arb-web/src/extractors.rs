@@ -22,6 +22,7 @@ use actix_web::{
 use oxide_arb_error::auth::AuthError;
 use oxide_arb_models::{
     domain::{PageRequest, RoleInfo},
+    enums::rbac::RoleStatus,
     types::RoleId,
 };
 use serde::de::DeserializeOwned;
@@ -114,18 +115,39 @@ impl ActorRoles {
         &self.0
     }
 
-    /// Collect the role ids (used for menu accessibility queries).
+    /// Collect the **enabled** role ids (used for menu accessibility queries).
+    ///
+    /// Disabled roles grant nothing — neither permissions nor menus — so they
+    /// are excluded here just as they are from authorization decisions.
     #[must_use]
-    pub fn ids(&self) -> Vec<RoleId> {
-        self.0.iter().map(|role| role.id.clone()).collect()
+    pub fn enabled_ids(&self) -> Vec<RoleId> {
+        self.0
+            .iter()
+            .filter(|role| role.status == RoleStatus::Enabled)
+            .map(|role| role.id.clone())
+            .collect()
     }
 
-    /// Whether the actor holds the role with the given code.
+    /// Whether the actor holds an **enabled** role with the given code.
+    ///
+    /// Used for the `super_admin` bypass and explicit `acting_role` checks: a
+    /// disabled role never confers authority, regardless of relational
+    /// membership.
     #[must_use]
-    pub fn contains(&self, code: &str) -> bool {
-        self.0.iter().any(|role| role.code == code)
+    pub fn contains_enabled(&self, code: &str) -> bool {
+        self.0
+            .iter()
+            .any(|role| role.code == code && role.status == RoleStatus::Enabled)
     }
 }
+
+/// The role a caller explicitly acts as on a governed (audited) endpoint.
+///
+/// Injected into request extensions by the authz middleware once an
+/// [`crate::auth::casbin::Rule::ActingRoleGoverned`] check passes, so the
+/// handler can stamp it onto the immutable audit envelope (Phase 6.5).
+#[derive(Debug, Clone)]
+pub struct ActingRole(pub String);
 
 /// The authenticated actor: validated access-token claims plus loaded roles.
 pub struct AuthedActor {

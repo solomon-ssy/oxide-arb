@@ -1,15 +1,9 @@
 //! Liveness/readiness probes (public, unauthenticated).
 
 use actix_web::Responder;
-use serde::Serialize;
+use oxide_arb_models::domain::HealthStatus;
 
 use crate::response::WebResponse;
-
-/// Probe payload.
-#[derive(Debug, Serialize)]
-struct HealthStatus {
-    status: &'static str,
-}
 
 /// Liveness probe — the process is up.
 pub async fn health() -> impl Responder {

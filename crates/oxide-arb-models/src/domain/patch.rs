@@ -22,6 +22,14 @@ impl<T> Patch<T> {
         Self::Set(value)
     }
 
+    /// Build from a presence-only option: `None` keeps, `Some(v)` sets. The
+    /// inverse of [`Patch::into_option`], for mapping a request field where an
+    /// absent field means "leave unchanged".
+    #[must_use]
+    pub fn from_option(value: Option<T>) -> Self {
+        value.map_or(Self::Keep, Self::Set)
+    }
+
     #[must_use]
     pub fn into_option(self) -> Option<T> {
         match self {
@@ -69,6 +77,19 @@ impl<T> NullablePatch<T> {
     #[must_use]
     pub fn set_nullable(value: Option<T>) -> Self {
         value.map_or(Self::Clear, Self::Set)
+    }
+
+    /// Build from a nested option carrying the full three-way intent: `None`
+    /// keeps, `Some(None)` clears (SQL `NULL`), `Some(Some(v))` sets. The inverse
+    /// of [`NullablePatch::into_nested_option`], for mapping a request field
+    /// where absence means "leave unchanged" and explicit `null` means "clear".
+    #[must_use]
+    pub fn from_nested_option(value: Option<Option<T>>) -> Self {
+        match value {
+            None => Self::Keep,
+            Some(None) => Self::Clear,
+            Some(Some(value)) => Self::Set(value),
+        }
     }
 
     #[must_use]

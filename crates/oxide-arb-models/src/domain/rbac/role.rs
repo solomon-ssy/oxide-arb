@@ -41,12 +41,18 @@ pub struct NewRole {
     pub sort: i32,
 }
 
-/// Partial update for a role (its `code` and `kind` are immutable).
+/// Partial update for a role's descriptive attributes.
+///
+/// `code` and `kind` are immutable, and `status` is intentionally **absent**:
+/// enabling/disabling a role transitions Casbin grouping (`g`) bindings and
+/// therefore must flow exclusively through [`RoleRepository::change_status`],
+/// never a generic column update that would silently bypass the policy sync.
+///
+/// [`RoleRepository::change_status`]: ../../../oxide_arb_repository/traits/trait.RoleRepository.html
 #[derive(Debug, Clone, Default, DeriveIntoActiveModel)]
 #[sea_orm(active_model = "crate::entities::role::ActiveModel")]
 pub struct RolePatch {
     pub name: Patch<String>,
     pub description: NullablePatch<String>,
-    pub status: Patch<RoleStatus>,
     pub sort: Patch<i32>,
 }
