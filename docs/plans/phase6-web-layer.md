@@ -1,6 +1,6 @@
 # Phase 6 — Web 服务层 + RBAC 体系（父计划 / Umbrella）
 
-> **状态**: 已拆分为 7 个子 phase 逐个推进。本文档为父计划/总览；具体落地以子 phase 文档为准。
+> **状态**: Phase 6.1–6.7 已落地（2026-06）；§19 代码与清单对齐复核完成（2026-06，含 #15 ActingRoleGoverned 落地）。本文档为父计划/总览；具体实现以子 phase 文档 + 代码为准。
 >
 > **产出**: `oxide-arb-web` crate（actix-web）+ 完整动态 RBAC 体系 + 双轨审计（治理哈希链 + 通用操作日志）+ 治理控制面接线
 >
@@ -657,9 +657,9 @@ flowchart TD
 - `markets`：list/detail/book(`Market:Read`)、subscribe/unsubscribe(`Market:Update`)
 - `opportunities`：recent/history/detail/stats(`Opportunity:Read`)
 - `trades` / `pnl`：list/detail/decisions/pnl*(`Trade:Read` / `Pnl:Read`)
-- `risk`：circuit-breaker/positions/exposure/daily-loss(`Risk:Read`)、circuit-breaker/reset(`Risk:Reset`)、blacklist GET(`Blacklist:Read`)/POST(`Blacklist:Create`)/DELETE(`Blacklist:Delete`)
+- `risk`：circuit-breaker/positions/exposure/daily-loss(`Risk:Read`)、circuit-breaker/reset(`Risk:Reset`, **`ActingRoleGoverned`**)、blacklist GET(`Blacklist:Read`)/POST create(`Blacklist:Create`, **`ActingRoleGoverned`**)/POST `{market_id}/remove`(`Blacklist:Delete`, **`ActingRoleGoverned`**)
 - `analytics`：daily/weekly/edge-distribution/market-performance(`Analytics:Read`)
-- `replay`：POST enqueue(`Replay:Create`)、GET status/history(`Replay:Read`) — **见 §11.4 materialization enqueue 语义**
+- `replay`：POST enqueue(`Replay:Create`, **`ActingRoleGoverned`**)、GET status/history(`Replay:Read`) — **见 §11.4 materialization enqueue 语义**
 
 ### 11.7 WebSocket / 静态
 - `GET /api/ws?token=<access>`：upgrade 前 JWT + 黑名单校验（query token，非 Bearer header）。
@@ -842,7 +842,7 @@ flowchart TD
 
 - **models**：`active_string_enum` round-trip；`RESOURCE_OPERATIONS` 完整性；删除 `OperatorRole` 后审计哈希与既有测试向量一致（`actor_role: String` 序列化等价）。
 - **repository（testcontainers PG）**：RBAC CRUD；user-role/role-menu 事务一致性；casbin adapter `load/save/add/remove` 精确匹配；权限分配后 enforce 生效。
-- **web（actix test + PG）**：login/refresh/logout（含黑名单重放拒绝）；authz 矩阵（每端点正确角色放行 / 越权 403 / 未注册路由 403）；`super_admin` 旁路；治理端点 `acting_role` 校验 + 审计链 append + `AuditChain::verify`；runtime-config 版本化幂等（`AlreadyApplied → 200`）。
+- **web（actix test + PG + Redis）**：login/refresh/logout（含黑名单重放拒绝；Redis 经 `deadpool-redis` 显式池配置 + 启动 readiness PING）；authz 矩阵（每端点正确角色放行 / 越权 403 / 未注册路由 403）；`super_admin` 旁路；治理端点 `acting_role` 校验 + 审计链 append + `AuditChain::verify`；risk/replay governed 变更；runtime-config 版本化幂等（`AlreadyApplied → 200`）。优先 `cargo test-docker`（`--test-threads=1`）。
 - **migration**：`migration_pg` 断言 RBAC seed 计数 + topological 顺序 + admin 不被 re-migration 覆盖。
 - **scheduler**：`tick` enqueue-only、`publish_calls() == 0`。
 
@@ -850,20 +850,22 @@ flowchart TD
 
 ## 19. 验收清单
 
-- [ ] 删除 `OperatorRole`，全 workspace 编译通过，审计链测试通过。
-- [ ] `POST /auth/login` argon2id 校验 + 签发 access/refresh。
-- [ ] `POST /auth/refresh` 旋转并将旧 refresh 入黑名单。
-- [ ] `POST /auth/logout` 后旧 token 被拒（401）。
-- [ ] 未注册路由返回 403（fail-closed）。
-- [ ] `super_admin` 旁路全部端点。
-- [ ] 角色权限/菜单分配落 casbin `p`/`g` + `role_menu` 并即时生效。
-- [ ] 治理端点缺 `reason` → 400；缺/越权 `acting_role` → 400/403。
-- [ ] publish/rollback 进审计链且 `AuditChain::verify` 通过。
-- [ ] runtime-config 仅经版本化变更（无裸 PATCH 路径）。
-- [ ] scheduler tick 周期 enqueue；execute worker 处理 Queued run；`Overdue/Stale` 告警分发。
-- [ ] WebSocket upgrade 前鉴权；订阅 fanout；心跳超时断开。
-- [ ] 生产模式 serve 静态 Vue + SPA fallback。
-- [ ] 全端点 request-id tracing；统一 envelope。
+- [x] 删除 `OperatorRole`，全 workspace 编译通过，审计链测试通过。
+- [x] `POST /auth/login` argon2id 校验 + 签发 access/refresh。
+- [x] `POST /auth/refresh` 旋转并将旧 refresh 入黑名单。
+- [x] `POST /auth/logout` 后旧 token 被拒（401）。
+- [x] 未注册路由返回 403（fail-closed）。
+- [x] `super_admin` 旁路全部端点。
+- [x] 角色权限/菜单分配落 casbin `p`/`g` + `role_menu` 并即时生效。
+- [x] 治理端点缺 `reason` → 400；缺/越权 `acting_role` → 400/403（`X-Acting-Role` header）。
+- [x] publish/rollback 进审计链且 `AuditChain::verify` 通过。
+- [x] runtime-config 仅经版本化变更（无裸 PATCH 路径）。
+- [x] scheduler tick 周期 enqueue；execute worker 处理 Queued run；`Overdue/Stale` 告警分发。
+- [x] WebSocket upgrade 前鉴权；订阅 fanout；心跳超时断开。
+- [x] 生产模式 serve 静态 Vue + SPA fallback（`serve_static_ui` gated）。
+- [x] 全端点 request-id tracing；统一 envelope。
+- [x] 高风险 runtime 控制（circuit-breaker reset / blacklist / replay enqueue）走 `ActingRoleGoverned`。（2026-06 代码复核闭合）
+- [ ] JWT 黑名单 Redis 连接池可观测（`/metrics` gauges + pressure counters）。不在本次范围；运行时健康依赖 `TokenBlacklist::health_check` + `GET /ready`。
 
 ---
 

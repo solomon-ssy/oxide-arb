@@ -6,10 +6,12 @@ mod manager;
 mod metrics;
 mod moka;
 mod redis;
+mod redis_connect;
 mod tiered;
 
 pub use self::moka::MokaBackend;
 pub use self::redis::RedisBackend;
+pub use self::redis_connect::{connect_pool, deadpool_config, ping as ping_redis_pool};
 pub use backend::CacheBackend;
 pub use keys::CacheKey;
 pub use manager::CacheManager;

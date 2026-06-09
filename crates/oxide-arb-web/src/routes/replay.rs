@@ -1,8 +1,8 @@
 //! Replay (materialization run) read endpoints (`Replay:Read`).
 //!
 //! Exposes the status of a materialization/replay run and its per-stage report
-//! history. Enqueue (`POST /replay`, `Replay:Create`) is wired via the
-//! replay port in [`crate::routes::replay::enqueue`].
+//! history. Enqueue (`POST /replay`, `Replay:Create`, governed) is wired via
+//! the replay port in [`crate::routes::replay::enqueue`].
 
 use actix_web::{http::Method, web};
 use oxide_arb_models::{
@@ -21,7 +21,7 @@ use crate::{
     audit::OperationCtx,
     auth::casbin::Rule,
     error::WebError,
-    extractors::ValidatedJson,
+    extractors::{ActingRole, ValidatedJson},
     response::WebResponse,
     routes::registry::{RouteSpec, spec},
     state::AppState,
@@ -33,7 +33,7 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
         spec(
             Method::POST,
             "/replay",
-            Rule::ResourceOp(ResourceType::Replay, Operation::Create),
+            Rule::ActingRoleGoverned(ResourceType::Replay, Operation::Create),
             enqueue,
         ),
         spec(
@@ -54,6 +54,7 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
 /// `POST /api/replay` — enqueue a backfill/replay materialization run.
 pub async fn enqueue(
     state: web::Data<AppState>,
+    _acting_role: ActingRole,
     op_ctx: OperationCtx,
     body: ValidatedJson<ReplayCreateRequest>,
 ) -> Result<WebResponse<ReplayEnqueueView>, WebError> {

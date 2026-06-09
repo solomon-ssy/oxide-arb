@@ -100,9 +100,18 @@ impl TestEnv {
     pub async fn start() -> Self {
         let (pool, pg_container) = pg::setup_pg().await;
         let (redis_url, redis_container) = redis::setup_redis().await;
+        let redis_cfg = redis::test_redis_config(&redis_url);
 
-        let blacklist: Arc<dyn TokenBlacklist> =
-            Arc::new(RedisTokenBlacklist::from_url(&redis_url).expect("redis blacklist"));
+        let jwt_blacklist = Arc::new(
+            RedisTokenBlacklist::connect(&redis_cfg)
+                .await
+                .expect("redis blacklist"),
+        );
+        jwt_blacklist
+            .health_check()
+            .await
+            .expect("redis blacklist health");
+        let blacklist = Arc::clone(&jwt_blacklist) as Arc<dyn TokenBlacklist>;
         let jwt = Arc::new(JwtService::new(&jwt_config(), Arc::clone(&blacklist)));
 
         let db = pool.connection().clone();
@@ -154,6 +163,7 @@ impl TestEnv {
 
         let state = AppState {
             jwt,
+            jwt_blacklist,
             users: Arc::new(PgUserRepository::new(db.clone())),
             roles: Arc::new(PgRoleRepository::new(db.clone())),
             menus: Arc::new(PgMenuRepository::new(db.clone())),

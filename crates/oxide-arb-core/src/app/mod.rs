@@ -507,8 +507,12 @@ impl AppContext {
     async fn assemble_web_state(&self) -> OxideResult<(AppState, Receiver<NewOperationLog>)> {
         let db = self.infra.pg.connection().clone();
 
-        let blacklist: Arc<dyn TokenBlacklist> =
-            Arc::new(RedisTokenBlacklist::from_url(&self.config.cache.redis.url)?);
+        let jwt_blacklist = Arc::new(
+            RedisTokenBlacklist::connect(&self.config.cache.redis)
+                .await
+                .map_err(|error| OxideError::Internal(format!("jwt blacklist: {error}")))?,
+        );
+        let blacklist: Arc<dyn TokenBlacklist> = jwt_blacklist.clone();
         let jwt = Arc::new(JwtService::new(
             &self.config.web.jwt,
             Arc::clone(&blacklist),
@@ -554,6 +558,7 @@ impl AppContext {
 
         let state = AppState {
             jwt,
+            jwt_blacklist,
             users: Arc::new(PgUserRepository::new(db.clone())),
             roles: Arc::new(PgRoleRepository::new(db.clone())),
             menus: Arc::new(PgMenuRepository::new(db.clone())),

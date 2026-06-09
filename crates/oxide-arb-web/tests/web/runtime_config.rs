@@ -11,9 +11,8 @@ use serde_json::json;
 use crate::{
     client,
     harness::{self, API_VERSION, TestEnv},
+    headers::ACTING_ROLE,
 };
-
-const ACTING_ROLE: &str = "x-acting-role";
 
 /// Create a runtime-config version as admin and return its id.
 async fn create_version(env: &TestEnv, admin: &str, mode: &str) -> String {

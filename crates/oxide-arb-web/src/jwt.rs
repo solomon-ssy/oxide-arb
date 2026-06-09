@@ -16,12 +16,13 @@ use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use chrono::Utc;
-use deadpool_redis::{Config, Pool, Runtime};
+use deadpool_redis::Pool;
 use jsonwebtoken::{
     Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode, errors::ErrorKind,
 };
 use oxide_arb_error::{OxideError, auth::AuthError};
-use oxide_arb_models::{config::JwtConfig, domain::UserInfo};
+use oxide_arb_models::{config::JwtConfig, config::RedisConfig, domain::UserInfo};
+use oxide_arb_storage::cache::connect_pool;
 use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -120,13 +121,19 @@ impl RedisTokenBlacklist {
         Self { pool }
     }
 
-    /// Build a blacklist from a Redis connection URL (reuses the platform
-    /// Redis; only the key namespace differs).
-    pub fn from_url(url: &str) -> Result<Self, OxideError> {
-        let pool = Config::from_url(url)
-            .create_pool(Some(Runtime::Tokio1))
+    /// Connect using the platform [`RedisConfig`] with explicit pool size,
+    /// timeouts, and startup readiness PING. Reuses the shared Redis URL; JWT
+    /// keys use a dedicated namespace separate from the cache layer.
+    pub async fn connect(redis: &RedisConfig) -> Result<Self, OxideError> {
+        let pool = connect_pool(redis)
+            .await
             .map_err(|error| OxideError::Internal(format!("redis blacklist pool: {error}")))?;
         Ok(Self { pool })
+    }
+
+    /// Drain and close pooled connections (graceful process shutdown).
+    pub fn close_pool(&self) {
+        self.pool.close();
     }
 
     /// Ping Redis to verify the revocation store is reachable.

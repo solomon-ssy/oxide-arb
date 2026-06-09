@@ -2,15 +2,15 @@
 //!
 //! Reads (`Risk:Read` / `Blacklist:Read`) surface the live risk-engine snapshot
 //! (circuit breaker, exposure, daily loss), open positions, and the active
-//! blacklist. Controls drive the live engine: circuit-breaker reset (`Risk:Reset`)
-//! and blacklist add / remove (`Blacklist:Create` / `Blacklist:Delete`), each
-//! recorded on the operation log.
+//! blacklist. Controls drive the live engine: circuit-breaker reset
+//! (`Risk:Reset`, governed), blacklist add / remove (`Blacklist:Create` /
+//! `Blacklist:Delete`, governed), each recorded on the operation log.
 
 use actix_web::{http::Method, web};
 use oxide_arb_models::{
     domain::{
-        BlacklistCreateRequest, BlacklistInfo, CircuitBreakerResetRequest, PositionView,
-        RiskEngineStateView,
+        BlacklistCreateRequest, BlacklistInfo, BlacklistRemoveRequest, CircuitBreakerResetRequest,
+        PositionView, RiskEngineStateView,
     },
     enums::{
         operation_log::OperationCategory,
@@ -23,7 +23,7 @@ use crate::{
     audit::OperationCtx,
     auth::casbin::Rule,
     error::WebError,
-    extractors::ValidatedJson,
+    extractors::{ActingRole, ValidatedJson},
     response::WebResponse,
     routes::registry::{RouteSpec, spec},
     state::AppState,
@@ -59,7 +59,7 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
         spec(
             Method::POST,
             "/risk/circuit-breaker/reset",
-            Rule::ResourceOp(ResourceType::Risk, Operation::Reset),
+            Rule::ActingRoleGoverned(ResourceType::Risk, Operation::Reset),
             reset_circuit_breaker,
         ),
         spec(
@@ -71,13 +71,13 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
         spec(
             Method::POST,
             "/risk/blacklist",
-            Rule::ResourceOp(ResourceType::Blacklist, Operation::Create),
+            Rule::ActingRoleGoverned(ResourceType::Blacklist, Operation::Create),
             add_blacklist,
         ),
         spec(
-            Method::DELETE,
-            "/risk/blacklist/{market_id}",
-            Rule::ResourceOp(ResourceType::Blacklist, Operation::Delete),
+            Method::POST,
+            "/risk/blacklist/{market_id}/remove",
+            Rule::ActingRoleGoverned(ResourceType::Blacklist, Operation::Delete),
             remove_blacklist,
         ),
     ]
@@ -119,6 +119,7 @@ pub async fn daily_loss(state: web::Data<AppState>) -> Result<WebResponse<Usd>, 
 /// `POST /api/risk/circuit-breaker/reset` — force the breaker back to Closed.
 pub async fn reset_circuit_breaker(
     state: web::Data<AppState>,
+    _acting_role: ActingRole,
     op_ctx: OperationCtx,
     body: ValidatedJson<CircuitBreakerResetRequest>,
 ) -> Result<WebResponse<()>, WebError> {
@@ -139,6 +140,7 @@ pub async fn list_blacklist(
 /// `POST /api/risk/blacklist` — add a market to the runtime blacklist.
 pub async fn add_blacklist(
     state: web::Data<AppState>,
+    _acting_role: ActingRole,
     op_ctx: OperationCtx,
     body: ValidatedJson<BlacklistCreateRequest>,
 ) -> Result<WebResponse<()>, WebError> {
@@ -152,17 +154,21 @@ pub async fn add_blacklist(
     Ok(WebResponse::ok(()))
 }
 
-/// `DELETE /api/risk/blacklist/{market_id}` — remove a market from the blacklist.
+/// `POST /api/risk/blacklist/{market_id}/remove` — remove a market from the blacklist.
 pub async fn remove_blacklist(
     state: web::Data<AppState>,
     market_id: web::Path<MarketId>,
+    _acting_role: ActingRole,
     op_ctx: OperationCtx,
+    body: ValidatedJson<BlacklistRemoveRequest>,
 ) -> Result<WebResponse<()>, WebError> {
+    let body = body.into_inner();
     op_ctx.set_action(OperationCategory::Risk, "risk.blacklist.remove");
     op_ctx.set_resource(ResourceType::Blacklist, market_id.to_string());
+    op_ctx.set_detail(serde_json::json!({ "reason": body.reason }));
     state
         .control
-        .remove_blacklist(&market_id, "operator removal via control plane")
+        .remove_blacklist(&market_id, &body.reason)
         .await?;
     Ok(WebResponse::ok(()))
 }

@@ -10,10 +10,11 @@
 use actix_web::http::StatusCode;
 use serde_json::json;
 
-use crate::{client, harness::TestEnv};
-
-const REQUEST_ID: &str = "x-request-id";
-const ACTING_ROLE: &str = "x-acting-role";
+use crate::{
+    client,
+    harness::TestEnv,
+    headers::{ACTING_ROLE, REQUEST_ID},
+};
 
 #[actix_web::test]
 #[ignore = "requires Docker"]

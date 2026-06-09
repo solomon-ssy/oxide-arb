@@ -309,7 +309,7 @@ Trade Detail Drawer (click 👁):
 **交互**:
 - Reset Circuit Breaker → `POST /api/risk/circuit-breaker/reset`
 - Add Blacklist → `POST /api/risk/blacklist`
-- Remove Blacklist → `DELETE /api/risk/blacklist/{id}`
+- Remove Blacklist → `POST /api/risk/blacklist/{id}/remove`（`X-Acting-Role` + body `reason`）
 - 实时: WS `risk.circuit_breaker`, `risk.position_update`
 
 ### 3.6 Config（配置页）

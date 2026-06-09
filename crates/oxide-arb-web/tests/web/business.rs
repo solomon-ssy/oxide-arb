@@ -8,7 +8,7 @@ use actix_web::http::StatusCode;
 use serde_json::json;
 use uuid::Uuid;
 
-use crate::{client, harness::TestEnv};
+use crate::{client, harness::TestEnv, headers::ACTING_ROLE};
 
 #[actix_web::test]
 #[ignore = "requires Docker"]
@@ -88,17 +88,29 @@ async fn read_role_can_read_but_cannot_enqueue_replay() {
         "reader GET /markets"
     );
 
-    // `Replay:Create` is not granted — authz denies before the handler runs.
-    let res = client::post(
+    let replay_body = json!({
+        "from": "2026-06-01T00:00:00Z",
+        "to": "2026-06-02T00:00:00Z",
+        "requested_factor_types": ["execution_quality"],
+        "reason": "authz smoke"
+    });
+
+    // Governed endpoint: missing `X-Acting-Role` → 400.
+    assert_eq!(
+        client::post(&env, "/api/replay", &reader, replay_body.clone())
+            .await
+            .status,
+        StatusCode::BAD_REQUEST,
+        "reader POST /replay without acting role"
+    );
+
+    // `Replay:Create` is not granted — authz denies even with acting role.
+    let res = client::post_with(
         &env,
         "/api/replay",
         &reader,
-        json!({
-            "from": "2026-06-01T00:00:00Z",
-            "to": "2026-06-02T00:00:00Z",
-            "requested_factor_types": ["execution_quality"],
-            "reason": "authz smoke"
-        }),
+        &[(ACTING_ROLE, "biz_reader")],
+        replay_body,
     )
     .await;
     assert_eq!(

@@ -1,14 +1,15 @@
-//! `oxide-arb-web` — HTTP API + RBAC control-plane.
+//! `oxide-arb-web` — HTTP API + RBAC control-plane (Phase 6 complete).
 //!
-//! Phase 6.3 scope: the web foundation (state, response/error envelopes,
-//! extractors), JWT authentication (access/refresh + Redis revocation
-//! blacklist), the request-id and authn middleware, and the auth routes
-//! (`login` / `refresh` / `logout` / `me`). Authorization (Casbin) and the
-//! business/governance routes arrive in later sub-phases.
+//! Delivers the full web tier: JWT authentication (access/refresh + Redis
+//! revocation blacklist, fail-closed on store outage), Casbin authorization,
+//! dual-track audit (governance hash chain + operation log), governance routes
+//! (`ActingRoleGoverned` for money-critical runtime mutations), business reads
+//! and controls, WebSocket fanout, and production SPA static serving.
 //!
 //! [`spawn_web_server`] is the production entry point (bind + graceful
-//! shutdown). It is not yet wired into `oxide-arb-core`; that happens in Phase
-//! 6.6. Integration tests build an equivalent `App` via [`cors_from`],
+//! shutdown). It is queued by `oxide-arb-core::AppContext::queue_web_server`.
+//! The operation-log writer is owned by core for unified staged shutdown.
+//! Integration tests build an equivalent `App` via [`cors_from`],
 //! [`middleware::request_id`], and [`routes::configure`].
 
 pub mod audit;
@@ -23,6 +24,8 @@ pub mod routes;
 pub mod state;
 pub mod static_files;
 pub mod ws;
+
+use std::sync::Arc;
 
 use actix_cors::Cors;
 use actix_web::{App, HttpServer, middleware::from_fn, web};
@@ -63,6 +66,7 @@ pub async fn spawn_web_server(
     config: WebConfig,
     shutdown: CancellationToken,
 ) -> OxideResult<()> {
+    let jwt_blacklist = Arc::clone(&state.jwt_blacklist);
     let data = web::Data::new(state);
     let bind_addr = (config.listen_host.clone(), config.listen_port);
     let app_config = config.clone();
@@ -89,6 +93,7 @@ pub async fn spawn_web_server(
         biased;
         () = shutdown.cancelled() => {
             handle.stop(true).await;
+            jwt_blacklist.close_pool();
             Ok(())
         }
         result = server => {

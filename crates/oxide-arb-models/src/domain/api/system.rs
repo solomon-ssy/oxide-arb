@@ -52,3 +52,11 @@ pub struct BlacklistCreateRequest {
     /// Classification of why the market is excluded.
     pub reason: BlacklistReason,
 }
+
+/// Remove a market from the runtime blacklist (governed mutation).
+#[derive(Debug, Deserialize, Validate)]
+pub struct BlacklistRemoveRequest {
+    /// Operator justification, recorded on the operation log and risk audit.
+    #[validate(length(min = 1, max = 1024))]
+    pub reason: String,
+}

@@ -24,7 +24,7 @@ use oxide_arb_repository::traits::{
 use crate::{
     audit::OperationLogBuffer,
     auth::casbin::{CasbinService, PermChecker},
-    jwt::JwtService,
+    jwt::{JwtService, RedisTokenBlacklist},
     ws::SessionRegistry,
 };
 
@@ -33,6 +33,8 @@ use crate::{
 pub struct AppState {
     /// JWT signer/validator with its revocation blacklist.
     pub jwt: Arc<JwtService>,
+    /// JWT revocation pool handle (for graceful `close` on shutdown).
+    pub jwt_blacklist: Arc<RedisTokenBlacklist>,
     /// User account access (login, profile, CRUD).
     pub users: Arc<dyn UserRepository>,
     /// Role catalog access (CRUD, status transitions).

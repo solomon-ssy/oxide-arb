@@ -1,13 +1,12 @@
 //! Distributed L2 cache using Redis via deadpool.
 
-use crate::cache::backend::CacheBackend;
+use crate::cache::{backend::CacheBackend, redis_connect};
 use async_trait::async_trait;
-use deadpool_redis::{Config, Pool, Runtime};
+use deadpool_redis::Pool;
 use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::config::RedisConfig;
 use redis::AsyncCommands;
-use std::time::{Duration, Instant};
-use tokio::time::sleep;
+use std::time::Duration;
 use tracing::info;
 
 pub struct RedisBackend {
@@ -17,12 +16,7 @@ pub struct RedisBackend {
 
 impl RedisBackend {
     pub async fn new(config: &RedisConfig) -> Result<Self, StorageError> {
-        let cfg = Config::from_url(&config.url);
-        let pool = cfg
-            .create_pool(Some(Runtime::Tokio1))
-            .map_err(|e| StorageError::Connection(format!("Redis pool creation failed: {e}")))?;
-
-        Self::wait_until_ready(&pool, Duration::from_millis(config.timeout_ms)).await?;
+        let pool = redis_connect::connect_pool(config).await?;
 
         info!(url = %config.url, prefix = %config.key_prefix, "Redis cache connected");
 
@@ -33,40 +27,17 @@ impl RedisBackend {
     }
 
     pub async fn health_check(&self) -> Result<(), StorageError> {
-        Self::ping(&self.pool).await?;
-        Ok(())
+        redis_connect::ping(&self.pool).await
+    }
+
+    /// Underlying deadpool handle (graceful shutdown via [`Pool::close`]).
+    #[must_use]
+    pub const fn pool(&self) -> &Pool {
+        &self.pool
     }
 
     fn prefixed(&self, key: &str) -> String {
         format!("{}{}", self.key_prefix, key)
-    }
-
-    async fn wait_until_ready(pool: &Pool, timeout: Duration) -> Result<(), StorageError> {
-        let deadline = Instant::now() + timeout;
-        let retry_delay = Duration::from_millis(50);
-
-        loop {
-            match Self::ping(pool).await {
-                Ok(()) => return Ok(()),
-                Err(error) if Instant::now() < deadline => {
-                    let remaining = deadline.saturating_duration_since(Instant::now());
-                    sleep(retry_delay.min(remaining)).await;
-                    if remaining.is_zero() {
-                        return Err(error);
-                    }
-                }
-                Err(error) => return Err(error),
-            }
-        }
-    }
-
-    async fn ping(pool: &Pool) -> Result<(), StorageError> {
-        let mut conn = pool.get().await?;
-        redis::cmd("PING")
-            .query_async::<String>(&mut conn)
-            .await
-            .map_err(StorageError::Redis)?;
-        Ok(())
     }
 }
 

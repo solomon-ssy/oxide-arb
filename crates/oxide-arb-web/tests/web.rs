@@ -2,7 +2,8 @@
 //! and Redis via testcontainers.
 //!
 //! Run with `cargo test -p oxide-arb-web --test web -- --ignored`.
-//! Docker testcontainers may flake under parallel load; use `--test-threads=1` in CI if needed.
+//! Docker testcontainers may flake under parallel load; prefer `cargo test-docker`
+//! (serial) or pass `--test-threads=1` when running locally.
 
 #[path = "common/auth_helpers.rs"]
 mod auth_helpers;
@@ -12,6 +13,8 @@ mod client;
 mod control_factor_fixture;
 #[path = "common/harness.rs"]
 mod harness;
+#[path = "common/headers.rs"]
+mod headers;
 #[path = "common/pg.rs"]
 mod pg;
 #[path = "common/redis.rs"]
@@ -31,6 +34,10 @@ mod metrics;
 mod operation_log;
 #[path = "web/readiness.rs"]
 mod readiness;
+#[path = "web/replay_governance.rs"]
+mod replay_governance;
+#[path = "web/risk_governance.rs"]
+mod risk_governance;
 #[path = "web/runtime_config.rs"]
 mod runtime_config;
 #[path = "web/ws.rs"]

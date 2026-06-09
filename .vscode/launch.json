@@ -1,0 +1,161 @@
+{
+    // 使用 IntelliSense 了解相关属性。
+    // 悬停以查看现有属性的描述。
+    // 欲了解更多信息，请访问: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug executable 'oxide-arb'",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=oxide-arb",
+                    "--package=oxide-arb-bin"
+                ],
+                "filter": {
+                    "name": "oxide-arb",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PATH": "/Users/eason/.cargo/bin:${env:PATH}"
+            }
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in executable 'oxide-arb'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--bin=oxide-arb",
+                    "--package=oxide-arb-bin"
+                ],
+                "filter": {
+                    "name": "oxide-arb",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PATH": "/Users/eason/.cargo/bin:${env:PATH}"
+            }
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in library 'oxide_arb_core'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--lib",
+                    "--package=oxide-arb-core"
+                ],
+                "filter": {
+                    "name": "oxide_arb_core",
+                    "kind": "lib"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PATH": "/Users/eason/.cargo/bin:${env:PATH}"
+            }
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in library 'oxide_arb_algorithm'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--lib",
+                    "--package=oxide-arb-algorithm"
+                ],
+                "filter": {
+                    "name": "oxide_arb_algorithm",
+                    "kind": "lib"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PATH": "/Users/eason/.cargo/bin:${env:PATH}"
+            }
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in library 'oxide_arb_risk'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--lib",
+                    "--package=oxide-arb-risk"
+                ],
+                "filter": {
+                    "name": "oxide_arb_risk",
+                    "kind": "lib"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PATH": "/Users/eason/.cargo/bin:${env:PATH}"
+            }
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in library 'oxide_arb_error'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--lib",
+                    "--package=oxide-arb-error"
+                ],
+                "filter": {
+                    "name": "oxide_arb_error",
+                    "kind": "lib"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PATH": "/Users/eason/.cargo/bin:${env:PATH}"
+            }
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in library 'oxide_arb_web'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--lib",
+                    "--package=oxide-arb-web"
+                ],
+                "filter": {
+                    "name": "oxide_arb_web",
+                    "kind": "lib"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PATH": "/Users/eason/.cargo/bin:${env:PATH}"
+            }
+        }
+    ]
+}
