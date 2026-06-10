@@ -2,14 +2,14 @@
 
 use crate::{
     execution::capital_manager::CapitalManager, observability::metrics_hub::MetricsHub,
-    post_trade::consumer::PostTradeConsumer,
+    post_trade::consumer::PostTradeConsumer, runtime_config::RuntimeConfigStore,
 };
 use chrono::{Duration as ChronoDuration, Utc};
 use oxide_arb_error::OxideError;
 use oxide_arb_models::domain::{execution::ReservationHandle, trade::TradeInfo};
 use oxide_arb_repository::traits::TradeRepository;
 use std::{process, sync::Arc, time::Duration};
-use tokio::{sync::Notify, time::MissedTickBehavior};
+use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -17,17 +17,35 @@ use uuid::Uuid;
 ///
 /// The execution path wakes it via [`Notify`]. The periodic tick is the
 /// crash-recovery floor that reclaims expired leases after restart or missed wake.
+/// Confirmation timing (`execution.timeout.trade_confirm_*`) is read from the
+/// runtime-config store on every cycle, so activations apply without a restart.
 pub struct PostTradeRelay {
     consumer: PostTradeConsumer,
     trade_repo: Arc<dyn TradeRepository>,
     notify: Arc<Notify>,
     capital_manager: Arc<CapitalManager>,
     batch_size: u64,
-    poll_interval: Duration,
-    stale_submitted_after: Duration,
-    claim_lease: Duration,
+    runtime: Arc<RuntimeConfigStore>,
     claim_owner: String,
     metrics: Arc<MetricsHub>,
+}
+
+/// One relay cycle's view of `execution.timeout.trade_confirm_*`.
+struct ConfirmTiming {
+    /// Crash-recovery poll cadence.
+    poll_interval: Duration,
+    /// Age after which a `Submitted` trade is treated as orphaned.
+    stale_submitted_after: Duration,
+}
+
+impl ConfirmTiming {
+    /// Claim lease: generous multiple of the poll cadence so a healthy relay
+    /// never loses a claim to a competing instance.
+    fn claim_lease(&self) -> Duration {
+        self.poll_interval
+            .saturating_mul(3)
+            .max(Duration::from_secs(5))
+    }
 }
 
 pub struct PostTradeRelayDeps {
@@ -36,8 +54,7 @@ pub struct PostTradeRelayDeps {
     pub notify: Arc<Notify>,
     pub capital_manager: Arc<CapitalManager>,
     pub batch_size: u64,
-    pub poll_interval: Duration,
-    pub stale_submitted_after: Duration,
+    pub runtime: Arc<RuntimeConfigStore>,
     pub metrics: Arc<MetricsHub>,
 }
 
@@ -50,41 +67,49 @@ impl PostTradeRelay {
             notify: deps.notify,
             capital_manager: deps.capital_manager,
             batch_size: deps.batch_size,
-            poll_interval: deps.poll_interval,
-            stale_submitted_after: deps.stale_submitted_after,
-            claim_lease: deps
-                .poll_interval
-                .saturating_mul(3)
-                .max(Duration::from_secs(5)),
+            runtime: deps.runtime,
             claim_owner,
             metrics: deps.metrics,
         }
     }
 
+    /// Snapshot the confirmation timing knobs from the runtime-config store.
+    ///
+    /// Read exactly once per relay cycle so one cycle never observes a mix of
+    /// pre- and post-activation values (poll cadence vs orphan timeout).
+    fn confirm_timing(&self) -> ConfirmTiming {
+        let config = self.runtime.load();
+        let timeout = &config.execution.timeout;
+        ConfirmTiming {
+            // Clamped to >= 1s to avoid busy-looping.
+            poll_interval: Duration::from_secs(timeout.trade_confirm_poll_interval_secs.max(1)),
+            stale_submitted_after: Duration::from_secs(timeout.trade_confirm_timeout_secs),
+        }
+    }
+
     pub async fn run(self, shutdown: CancellationToken) -> Result<(), OxideError> {
-        let mut interval = tokio::time::interval(self.poll_interval);
-        interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
         loop {
-            self.drain().await;
-            self.scan_stale_submitted().await;
+            let timing = self.confirm_timing();
+            self.drain(&timing).await;
+            self.scan_stale_submitted(&timing).await;
             tokio::select! {
                 biased;
                 () = shutdown.cancelled() => {
-                    self.drain().await;
-                    self.scan_stale_submitted().await;
+                    self.drain(&timing).await;
+                    self.scan_stale_submitted(&timing).await;
                     return Ok(());
                 }
                 () = self.notify.notified() => {}
-                _ = interval.tick() => {}
+                () = tokio::time::sleep(timing.poll_interval) => {}
             }
         }
     }
 
     /// Claim and process unprocessed trades until the backlog is exhausted.
-    async fn drain(&self) {
+    async fn drain(&self, timing: &ConfirmTiming) {
         loop {
             let now = Utc::now();
-            let Ok(lease) = ChronoDuration::from_std(self.claim_lease) else {
+            let Ok(lease) = ChronoDuration::from_std(timing.claim_lease()) else {
                 tracing::warn!("post-trade relay claim lease exceeds chrono range");
                 return;
             };
@@ -123,8 +148,8 @@ impl PostTradeRelay {
         }
     }
 
-    async fn scan_stale_submitted(&self) {
-        let Ok(timeout) = ChronoDuration::from_std(self.stale_submitted_after) else {
+    async fn scan_stale_submitted(&self, timing: &ConfirmTiming) {
+        let Ok(timeout) = ChronoDuration::from_std(timing.stale_submitted_after) else {
             tracing::warn!("post-trade relay stale timeout exceeds chrono range");
             return;
         };

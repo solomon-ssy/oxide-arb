@@ -2,7 +2,7 @@
 
 use std::{sync::Arc, time::Duration};
 
-use oxide_arb_models::config::AnalyticsConfig;
+use oxide_arb_models::config::ClickHouseConfig;
 use oxide_arb_repository::clickhouse::ChTimeseriesRepository;
 use oxide_arb_storage::clickhouse::{ChWriteManager, ClickHousePool};
 use testcontainers::{
@@ -12,17 +12,15 @@ use testcontainers::{
 };
 use tokio_util::sync::CancellationToken;
 
-pub fn test_ch_config(port: u16) -> AnalyticsConfig {
-    AnalyticsConfig {
-        clickhouse_url: format!("http://localhost:{port}"),
-        clickhouse_database: "default".into(),
-        clickhouse_user: "default".into(),
-        clickhouse_password: String::new(),
+pub fn test_ch_config(port: u16) -> ClickHouseConfig {
+    ClickHouseConfig {
+        url: format!("http://localhost:{port}"),
+        database: "default".into(),
+        user: "default".into(),
+        password: String::new(),
         batch_size: 10,
         flush_interval_secs: 1,
         max_concurrent_inserts: 4,
-        max_lag_secs: 10.0,
-        lag_probe_interval_secs: 5,
     }
 }
 
@@ -48,9 +46,7 @@ pub async fn setup_timeseries_repo() -> (
     pool.ensure_schema().await.expect("schema");
 
     let shutdown = CancellationToken::new();
-    let write_manager = Arc::new(ChWriteManager::new_without_probe(
-        config.max_concurrent_inserts,
-    ));
+    let write_manager = Arc::new(ChWriteManager::new(config.max_concurrent_inserts));
     let repo = ChTimeseriesRepository::new(
         pool.client().clone(),
         &config,

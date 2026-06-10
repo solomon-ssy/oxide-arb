@@ -15,13 +15,16 @@ use oxide_arb_core::{
         consumer::PostTradeConsumer,
         relay::{PostTradeRelay, PostTradeRelayDeps},
     },
+    runtime_config::RuntimeConfigStore,
     service::risk_metrics::{ApiHealthTracker, RiskMetricsState},
 };
+use oxide_arb_models::runtime_config::{NotificationConfig, RuntimeConfig};
 use oxide_arb_models::{
     clickhouse::OpportunityAuditRow,
-    config::{PolymarketConfig, RiskConfig, WebSocketConfig},
+    config::{PolymarketConfig, WebSocketConfig},
     domain::{CoreEvent, CoreEventPublisher, NewTrade, PositionInfo, TradeObservation},
     enums::common::{ExecutionMode, MarketCategory, Side, TradeBusinessOutcome, TradeState},
+    runtime_config::RiskConfig,
     types::{
         Bps, EventId, ExecutionId, MarketId, OpportunityId, Price, ReservationId, Shares, TokenId,
         TradeId, Usd,
@@ -247,13 +250,13 @@ fn harness() -> Harness {
     let calibration_repo = Arc::new(MockCalibrationRepository::default());
     let reservation_config = RiskConfig::default().exposure_reservation_config();
     let exposure = Arc::new(InMemoryExposureReservation::new(reservation_config.clone()));
-    let capital_manager = Arc::new(CapitalManager::new(exposure.clone(), reservation_config));
+    let capital_manager = Arc::new(CapitalManager::new(exposure.clone(), &reservation_config));
     let metrics_state = Arc::new(RiskMetricsState::new(Arc::new(ApiHealthTracker::new(
         Duration::from_secs(60),
     ))));
     let fsm = Arc::new(ExecutionFSM::new(
         metrics.clone(),
-        Arc::new(AlertDispatcher::new(None, None, None, 0)),
+        Arc::new(AlertDispatcher::new(&NotificationConfig::default())),
     ));
 
     let (events, events_rx) = CoreEventPublisher::bounded(64);
@@ -385,8 +388,7 @@ async fn relay_processes_observed_trade_to_terminal_state() {
         notify: notify.clone(),
         capital_manager: harness.capital_manager,
         batch_size: 10,
-        poll_interval: Duration::from_millis(10),
-        stale_submitted_after: Duration::from_secs(60),
+        runtime: Arc::new(RuntimeConfigStore::new(RuntimeConfig::default())),
         metrics: harness.metrics,
     });
     let handle = tokio::spawn(relay.run(shutdown.clone()));
@@ -418,14 +420,17 @@ async fn relay_marks_stale_submitted_trade_orphaned() {
     );
 
     let shutdown = CancellationToken::new();
+    // Tight one-second confirmation budget: the trade was submitted five
+    // minutes ago, so the first stale scan must orphan it.
+    let mut config = RuntimeConfig::default();
+    config.execution.timeout.trade_confirm_timeout_secs = 1;
     let relay = PostTradeRelay::new(PostTradeRelayDeps {
         consumer: harness.consumer,
         trade_repo: harness.trade_repo.clone(),
         notify: Arc::new(Notify::new()),
         capital_manager: harness.capital_manager,
         batch_size: 10,
-        poll_interval: Duration::from_millis(10),
-        stale_submitted_after: Duration::from_millis(1),
+        runtime: Arc::new(RuntimeConfigStore::new(config)),
         metrics: harness.metrics,
     });
     let handle = tokio::spawn(relay.run(shutdown.clone()));

@@ -43,8 +43,6 @@ pub enum ConfigValidationError {
     },
     #[error("kelly_fraction must be in (0, 1], got {0}")]
     InvalidKellyFraction(Decimal),
-    #[error("endgame high_threshold ({high}) must be > low_threshold ({low})")]
-    InvertedEndgameThresholds { high: Decimal, low: Decimal },
     #[error("[{mode}] missing required credentials: {}", .missing.join(", "))]
     MissingCredentials {
         mode: String,

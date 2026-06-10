@@ -9,7 +9,7 @@ use crate::{
     pipeline::RiskCheck,
     types::{DrawdownAction, RiskCheckId, RiskCheckKind, RiskCheckResult},
 };
-use oxide_arb_models::{config::RiskConfig, enums::common::StalenessLevel, types::Usd};
+use oxide_arb_models::{enums::common::StalenessLevel, runtime_config::RiskConfig, types::Usd};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 

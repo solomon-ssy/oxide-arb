@@ -7,12 +7,12 @@ use oxide_arb_algorithm::{
     walker::OrderbookWalker,
 };
 use oxide_arb_models::{
-    config::{CalibrationConfig, FillProbabilityConfig},
     domain::{BookLevel, book},
     enums::{
         calibration::{DurationBucket, PriceZone},
         common::StalenessLevel,
     },
+    runtime_config::{CalibrationConfig, FillProbabilityConfig},
     types::{MicroPct, MicroPrice, MicroProb, MicroUsd, Price, Shares},
 };
 use proptest::prelude::*;

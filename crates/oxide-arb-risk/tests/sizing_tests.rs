@@ -4,8 +4,8 @@
 //! Kelly f* = (p * b - q) / b, where b = `net_odds`, q = 1 - `p_effective`.
 
 use oxide_arb_models::{
-    config::{KellyConfig, RiskConfig},
     domain::risk::ProbabilityInput,
+    runtime_config::{KellyConfig, RiskConfig},
     types::Usd,
 };
 use oxide_arb_risk::sizing::QuarterKellyCalculator;

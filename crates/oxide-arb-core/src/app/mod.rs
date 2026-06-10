@@ -64,6 +64,7 @@ use crate::{
         consumer::PostTradeConsumer,
         relay::{PostTradeRelay, PostTradeRelayDeps},
     },
+    runtime_config::{RuntimeConfigApplicator, RuntimeConfigStore},
     service::{
         book_update_coalescer::BookUpdateCoalescer,
         gamma::GammaService,
@@ -83,13 +84,14 @@ use oxide_arb_control::{
 };
 use oxide_arb_error::{OxideError, OxideResult};
 use oxide_arb_models::{
-    config::Settings,
+    config::DeployConfig,
     domain::{
         CoreEvent, CoreEventPublisher, MarketDataPort, NewOperationLog, ReplayPort,
-        RuntimeConfigRef, RuntimeControlPort, settlement::MarketSettlementRequest,
+        RuntimeConfigPort, RuntimeConfigRef, RuntimeControlPort,
+        settlement::MarketSettlementRequest,
     },
     enums::common::AlertLevel,
-    types::{MarketId, MicroScore, TokenId},
+    types::{MarketId, TokenId},
 };
 use oxide_arb_repository::{
     clickhouse::ChTimeseriesRepository,
@@ -240,7 +242,12 @@ pub struct RuntimeChannels {
 /// Decomposed into four bundles (`InfraBundle`, `DataBundle`,
 /// `RiskBundle`, `TradingBundle`) to avoid a 40+ flat-field struct.
 pub struct AppContext {
-    pub config: Arc<Settings>,
+    /// Deploy configuration (restart to apply).
+    pub config: Arc<DeployConfig>,
+    /// Active runtime-config snapshot (hot-reloadable via the applicator).
+    pub runtime_config: Arc<RuntimeConfigStore>,
+    /// Activation propagation surface (also the web `RuntimeConfigPort`).
+    pub applicator: Arc<RuntimeConfigApplicator>,
     /// Atomically swappable live execution mode shared by every hot-path reader.
     pub execution_mode: ExecutionModeHandle,
     /// Non-blocking producer handle for the real-time event bus.
@@ -327,22 +334,15 @@ impl AppContext {
             metrics: Arc::clone(&self.infra.metrics),
             events: self.event_publisher(),
         };
+        // Relay timing (trade_confirm_*) is read from the runtime-config store
+        // on every cycle, so activations apply on the next poll.
         let relay = PostTradeRelay::new(PostTradeRelayDeps {
             consumer,
             trade_repo,
             notify: Arc::clone(&exec.relay_notify),
             capital_manager: Arc::clone(&exec.capital_manager),
             batch_size: POST_TRADE_RELAY_BATCH_SIZE,
-            poll_interval: Duration::from_secs(
-                self.config
-                    .execution
-                    .timeout
-                    .trade_confirm_poll_interval_secs
-                    .max(1),
-            ),
-            stale_submitted_after: Duration::from_secs(
-                self.config.execution.timeout.trade_confirm_timeout_secs,
-            ),
+            runtime: Arc::clone(&self.runtime_config),
             metrics: Arc::clone(&self.infra.metrics),
         });
 
@@ -429,13 +429,7 @@ impl AppContext {
             scanner: Arc::clone(&self.trading.scanner),
             market_cache: Arc::clone(&self.data.market_cache),
             funnel: Arc::clone(&self.trading.funnel),
-            dispatch_immediate_threshold: MicroScore::try_from_decimal(
-                self.config
-                    .execution
-                    .endgame_latency
-                    .dispatch_immediate_threshold,
-            )
-            .unwrap_or(MicroScore::ZERO),
+            runtime: Arc::clone(&self.runtime_config),
             shutdown: self.shutdown.clone(),
         });
         self.pending_tasks
@@ -555,8 +549,12 @@ impl AppContext {
         let replay: Arc<dyn ReplayPort> = Arc::new(CoreReplay::new(Arc::new(
             PgControlFactorRepository::new(db.clone()),
         )));
+        let applicator = Arc::clone(&self.applicator);
+        let runtime_config_apply: Arc<dyn RuntimeConfigPort> = applicator;
 
         let state = AppState {
+            deploy: Arc::clone(&self.config),
+            runtime_config_apply,
             jwt,
             jwt_blacklist,
             users: Arc::new(PgUserRepository::new(db.clone())),
@@ -610,7 +608,8 @@ impl AppContext {
             clob_client: self.trading.clob_client.clone(),
             market_registry: Arc::clone(&self.data.market_registry),
             health_checker,
-            settings: Arc::clone(&self.config),
+            deploy: Arc::clone(&self.config),
+            runtime_config: Arc::clone(&self.runtime_config),
             system_runtime_state: Arc::new(PgSystemRuntimeStateRepository::new(
                 self.infra.pg.connection().clone(),
             )),
@@ -708,7 +707,7 @@ impl AppContext {
             .push(TaskId::ControlFactorScheduler, move |shutdown| async move {
                 let result = PeriodicTask::run(
                     TaskId::ControlFactorScheduler.static_name(),
-                    SCHEDULER_TICK_INTERVAL,
+                    || SCHEDULER_TICK_INTERVAL,
                     SCHEDULER_JITTER_PCT,
                     true,
                     shutdown,

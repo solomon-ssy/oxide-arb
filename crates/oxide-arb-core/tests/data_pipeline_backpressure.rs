@@ -13,6 +13,7 @@ use oxide_arb_core::{
         market_registry::MarketRegistry,
     },
 };
+use oxide_arb_models::runtime_config::NotificationConfig;
 use oxide_arb_models::{
     domain::{
         book::BookLevel,
@@ -42,7 +43,7 @@ fn snapshot_cmd(token: &TokenId, ask_price: rust_decimal::Decimal, ts: u64) -> P
 #[tokio::test]
 async fn flood_does_not_halt_fsm() {
     let metrics = Arc::new(MetricsHub::new());
-    let alerts = Arc::new(AlertDispatcher::new(None, None, None, 0));
+    let alerts = Arc::new(AlertDispatcher::new(&NotificationConfig::default()));
     let fsm = Arc::new(ExecutionFSM::new(Arc::clone(&metrics), Arc::clone(&alerts)));
     let backpressure = Arc::new(BackpressurePolicy::new(Arc::clone(&metrics), 1));
     let book_store = Arc::new(BookStore::new(Arc::clone(&metrics)));
@@ -107,7 +108,7 @@ async fn flood_does_not_halt_fsm() {
 #[tokio::test]
 async fn success_path_does_not_coalesce() {
     let metrics = Arc::new(MetricsHub::new());
-    let alerts = Arc::new(AlertDispatcher::new(None, None, None, 0));
+    let alerts = Arc::new(AlertDispatcher::new(&NotificationConfig::default()));
     let backpressure = Arc::new(BackpressurePolicy::new(Arc::clone(&metrics), 1));
     let book_store = Arc::new(BookStore::new(Arc::clone(&metrics)));
     let market_registry = Arc::new(MarketRegistry::new());

@@ -12,6 +12,7 @@ use oxide_arb_core::{
         market_registry::MarketRegistry,
     },
 };
+use oxide_arb_models::runtime_config::NotificationConfig;
 use oxide_arb_models::{
     domain::{
         book::BookLevel,
@@ -41,7 +42,7 @@ fn snapshot_cmd(token: &TokenId, ts: u64) -> PipelineEvent {
 #[tokio::test]
 async fn hundred_tokens_thousand_snapshots_monotonic_versions() {
     let metrics = Arc::new(MetricsHub::new());
-    let alerts = Arc::new(AlertDispatcher::new(None, None, None, 0));
+    let alerts = Arc::new(AlertDispatcher::new(&NotificationConfig::default()));
     let backpressure = Arc::new(BackpressurePolicy::new(Arc::clone(&metrics), 4));
     let book_store = Arc::new(BookStore::new(Arc::clone(&metrics)));
     let market_registry = Arc::new(MarketRegistry::new());

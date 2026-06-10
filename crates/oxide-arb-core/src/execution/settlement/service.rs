@@ -9,6 +9,7 @@ use crate::{
     pipeline::market_registry::MarketRegistry,
     service::risk_metrics::RiskMetricsRefreshService,
 };
+use arc_swap::ArcSwap;
 use chrono::Utc;
 use oxide_arb_api::ctf::{
     client::CtfRedeemClient,
@@ -17,7 +18,6 @@ use oxide_arb_api::ctf::{
 use oxide_arb_api::{VotingOracle, oracle::types::ResolutionVerdict};
 use oxide_arb_error::{OxideError, redeem::RedeemError};
 use oxide_arb_models::{
-    config::settlement::SettlementConfig,
     domain::{
         CoreEvent, CoreEventPublisher,
         position::{MarkRedeemedParams, PositionInfo},
@@ -28,6 +28,7 @@ use oxide_arb_models::{
     enums::common::{
         AlertLevel, ExecutionMode, RedeemStatus, SettlementTrigger, TradeBusinessOutcome,
     },
+    runtime_config::SettlementRuntimeConfig,
     types::{ResolutionEventId, TokenId},
 };
 use oxide_arb_repository::{
@@ -52,7 +53,7 @@ pub struct MarketSettlementService {
     audit_writer: Arc<ExecutionAuditWriter>,
     metrics_refresh: Option<Arc<RiskMetricsRefreshService>>,
     events: CoreEventPublisher,
-    config: Arc<SettlementConfig>,
+    config: ArcSwap<SettlementRuntimeConfig>,
 }
 
 pub struct MarketSettlementServiceDeps {
@@ -70,7 +71,7 @@ pub struct MarketSettlementServiceDeps {
     pub audit_writer: Arc<ExecutionAuditWriter>,
     pub metrics_refresh: Option<Arc<RiskMetricsRefreshService>>,
     pub events: CoreEventPublisher,
-    pub config: Arc<SettlementConfig>,
+    pub config: SettlementRuntimeConfig,
 }
 
 impl MarketSettlementService {
@@ -90,8 +91,17 @@ impl MarketSettlementService {
             audit_writer: deps.audit_writer,
             metrics_refresh: deps.metrics_refresh,
             events: deps.events,
-            config: deps.config,
+            config: ArcSwap::from_pointee(deps.config),
         }
+    }
+
+    /// Hot-reload settlement operational config (runtime-config activation).
+    ///
+    /// Oracle policy and retry/attempt limits apply to the next settlement;
+    /// the redeem route itself is reloaded on the [`CtfRedeemClient`] by the
+    /// applicator.
+    pub fn reload(&self, config: SettlementRuntimeConfig) {
+        self.config.store(Arc::new(config));
     }
 
     /// Effective redeem mode for a position, derived from its persisted
@@ -141,7 +151,7 @@ impl MarketSettlementService {
             }
         }
 
-        if self.config.oracle.enabled {
+        if self.config.load().oracle.enabled {
             self.audit_oracle(req).await;
         }
 
@@ -156,12 +166,11 @@ impl MarketSettlementService {
         req: &MarketSettlementRequest,
         pos: PositionInfo,
     ) -> Result<(), OxideError> {
-        if pos.redeem_attempts
-            >= i32::try_from(self.config.lifecycle.max_redeem_attempts).unwrap_or(i32::MAX)
-        {
+        let max_redeem_attempts = self.config.load().lifecycle.max_redeem_attempts;
+        if pos.redeem_attempts >= i32::try_from(max_redeem_attempts).unwrap_or(i32::MAX) {
             let reason = format!(
-                "redeem max attempts reached: {} >= {}",
-                pos.redeem_attempts, self.config.lifecycle.max_redeem_attempts
+                "redeem max attempts reached: {} >= {max_redeem_attempts}",
+                pos.redeem_attempts
             );
             tracing::error!(
                 position_id = %pos.position_id,
@@ -378,7 +387,7 @@ impl MarketSettlementService {
 
         let redeem_positions = self
             .position_repo
-            .find_redeem_retry_candidates(self.config.lifecycle.max_redeem_attempts)
+            .find_redeem_retry_candidates(self.config.load().lifecycle.max_redeem_attempts)
             .await?;
         for position in redeem_positions {
             let Some(winning_token_id) = position.winning_token_id.clone() else {
@@ -395,7 +404,7 @@ impl MarketSettlementService {
         }
         let accounting_positions = self
             .position_repo
-            .find_accounting_retry_candidates(self.config.lifecycle.max_redeem_attempts)
+            .find_accounting_retry_candidates(self.config.load().lifecycle.max_redeem_attempts)
             .await?;
         for position in accounting_positions {
             let Some(winning_token_id) = position.winning_token_id.clone() else {

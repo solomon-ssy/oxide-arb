@@ -52,10 +52,10 @@ use tokio::sync::Notify;
 
 /// Dependencies injected into [`ExecutionPipeline`].
 pub struct ExecutionPipelineDeps<R: TradeRepository + Send + Sync + 'static = PgTradeRepository> {
-    pub validator: Validator,
+    pub validator: Arc<Validator>,
     pub plan_builder: PlanBuilder,
     pub dispatcher: Dispatcher,
-    pub order_strategy: FokOrderStrategy,
+    pub order_strategy: Arc<FokOrderStrategy>,
     pub capital_manager: Arc<CapitalManager>,
     pub risk_engine: Arc<RiskEngine>,
     pub risk_metrics: Arc<CoreRiskMetrics>,
@@ -76,10 +76,10 @@ pub struct ExecutionPipelineDeps<R: TradeRepository + Send + Sync + 'static = Pg
 }
 
 pub struct ExecutionPipeline<R: TradeRepository + Send + Sync + 'static = PgTradeRepository> {
-    validator: Validator,
+    validator: Arc<Validator>,
     plan_builder: PlanBuilder,
     dispatcher: Dispatcher,
-    order_strategy: FokOrderStrategy,
+    order_strategy: Arc<FokOrderStrategy>,
     capital_manager: Arc<CapitalManager>,
     risk_engine: Arc<RiskEngine>,
     risk_metrics: Arc<CoreRiskMetrics>,

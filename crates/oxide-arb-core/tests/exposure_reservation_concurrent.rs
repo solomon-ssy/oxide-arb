@@ -3,7 +3,7 @@
 use oxide_arb_core::exposure::in_memory::InMemoryExposureReservation;
 use oxide_arb_error::reservation::ReservationError;
 use oxide_arb_models::{
-    config::ExposureReservationConfig,
+    runtime_config::ExposureReservationConfig,
     types::{MarketId, Usd},
 };
 use rust_decimal_macros::dec;

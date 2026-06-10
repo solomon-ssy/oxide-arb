@@ -21,7 +21,7 @@ use crate::{
     types::{PipelineReport, ReportMode, RiskCheckId, RiskCheckKind, RiskCheckResult},
 };
 use num_traits::ToPrimitive;
-use oxide_arb_models::config::RiskConfig;
+use oxide_arb_models::runtime_config::RiskConfig;
 use std::time::Instant;
 
 /// Trait implemented by each individual risk check.

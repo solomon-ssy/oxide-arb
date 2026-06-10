@@ -19,9 +19,9 @@ use chrono::{DateTime, Utc};
 use num_traits::ToPrimitive;
 use oxide_arb_error::{OxideError, OxideResult};
 use oxide_arb_models::{
-    config::CircuitBreakerConfig,
     domain::risk::RiskEngineState,
     enums::risk::{BreakerStateName, CircuitBreakerLevel},
+    runtime_config::CircuitBreakerConfig,
 };
 use std::sync::Arc;
 
@@ -48,6 +48,14 @@ impl CircuitBreaker {
             heartbeat_failures: 0,
             last_transition_at: now,
         }
+    }
+
+    /// Hot-reload cooldown / probe parameters (runtime-config activation).
+    ///
+    /// The FSM state, trip counters, and any in-flight cooldown deadline are
+    /// preserved — new durations apply from the next transition.
+    pub const fn set_config(&mut self, config: CircuitBreakerConfig) {
+        self.config = config;
     }
 
     /// Restore from a persisted snapshot (crash recovery).

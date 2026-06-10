@@ -1,4 +1,10 @@
 //! 8-step endgame detection pipeline.
+//!
+//! Endgame-only by design (ADR-001): there is no enable/disable switch.
+//! Detection parameters are hot-reloadable through [`EndgameDetector::reload`]
+//! (lock-free `ArcSwap` parameter snapshot); the convergence tracker state is
+//! preserved across reloads so accumulated convergence durations survive a
+//! runtime-config activation.
 
 use crate::{
     calibration::ResolutionCalibrator,
@@ -9,10 +15,10 @@ use crate::{
     fee::FeeEstimator,
     walker::{OrderbookWalker, WalkResult},
 };
+use arc_swap::ArcSwap;
 use chrono::{DateTime, Utc};
 use num_traits::ToPrimitive;
 use oxide_arb_models::{
-    config::{CalibrationConfig, EndgameDetectionConfig},
     domain::{
         book::{EndgameBookPair, EndgameBookView},
         calibration::BucketKey,
@@ -23,6 +29,7 @@ use oxide_arb_models::{
         common::{MarketCategory, Side, StalenessLevel},
         opportunity::PayoutModel,
     },
+    runtime_config::{CalibrationConfig, EndgameDetectionConfig},
     types::{
         Bps, EventId, MarketId, MicroPrice, MicroProb, MicroUsd, OpportunityId, Price, Shares,
         TokenId, Usd,
@@ -40,6 +47,8 @@ struct OpportunityBuildCtx<'a> {
     convergence_secs: u64,
     deadline: DateTime<Utc>,
     now: DateTime<Utc>,
+    fusion: &'a ConfidenceFusion,
+    high_threshold: MicroPrice,
 }
 
 /// Inputs for a single directional endgame detection pass.
@@ -55,16 +64,36 @@ pub struct EndgameDetectInput<'a> {
     pub settlement_deadline: Option<DateTime<Utc>>,
 }
 
-pub struct EndgameDetector<F: FeeEstimator> {
-    enabled: bool,
+/// Hot-swappable detection parameter snapshot (one allocation per reload).
+struct DetectorParams {
     settlement_window_hours: u64,
     min_convergence_duration_secs: u64,
     high_threshold: MicroPrice,
     max_investment_usd: MicroUsd,
     min_profit_per_share: MicroPrice,
+    fusion: ConfidenceFusion,
+}
+
+impl DetectorParams {
+    fn from_config(config: &EndgameDetectionConfig, calibration: &CalibrationConfig) -> Self {
+        Self {
+            settlement_window_hours: config.settlement_window_hours,
+            min_convergence_duration_secs: config.min_convergence_duration_secs,
+            high_threshold: MicroPrice::try_from_decimal(config.high_threshold)
+                .unwrap_or(MicroPrice::ZERO),
+            max_investment_usd: MicroUsd::try_from_decimal(config.max_investment_usd)
+                .unwrap_or(MicroUsd::ZERO),
+            min_profit_per_share: MicroPrice::try_from_decimal(config.min_profit_per_share)
+                .unwrap_or(MicroPrice::ZERO),
+            fusion: ConfidenceFusion::new(calibration),
+        }
+    }
+}
+
+pub struct EndgameDetector<F: FeeEstimator> {
+    params: ArcSwap<DetectorParams>,
     convergence: InMemoryConvergenceTracker,
     calibrator: Arc<ResolutionCalibrator>,
-    fusion: ConfidenceFusion,
     fee_estimator: F,
 }
 
@@ -77,36 +106,41 @@ impl<F: FeeEstimator> EndgameDetector<F> {
         fee_estimator: F,
     ) -> Self {
         Self {
-            enabled: config.enabled,
-            settlement_window_hours: config.settlement_window_hours,
-            min_convergence_duration_secs: config.min_convergence_duration_secs,
-            high_threshold: MicroPrice::try_from_decimal(config.high_threshold)
-                .unwrap_or(MicroPrice::ZERO),
-            max_investment_usd: MicroUsd::try_from_decimal(config.max_investment_usd)
-                .unwrap_or(MicroUsd::ZERO),
-            min_profit_per_share: MicroPrice::try_from_decimal(config.min_profit_per_share)
-                .unwrap_or(MicroPrice::ZERO),
+            params: ArcSwap::from_pointee(DetectorParams::from_config(config, calibration_config)),
             convergence: InMemoryConvergenceTracker::new(&config.convergence_tracker),
-            fusion: ConfidenceFusion::new(calibration_config),
             calibrator,
             fee_estimator,
         }
     }
 
+    /// Hot-reload detection parameters (runtime-config activation).
+    ///
+    /// Scalar thresholds and the confidence fusion are swapped atomically. The
+    /// convergence tracker keeps its state: the idle eviction bound is updated
+    /// in place, while capacity stays at its construction value (restart-bound)
+    /// so accumulated convergence durations survive the activation.
+    pub fn reload(&self, config: &EndgameDetectionConfig, calibration: &CalibrationConfig) {
+        self.params
+            .store(Arc::new(DetectorParams::from_config(config, calibration)));
+        self.convergence
+            .set_max_idle_secs(config.convergence_tracker.max_idle_secs);
+    }
+
     #[must_use]
     #[inline]
     pub fn detect_direction(&self, book: EndgameBookView<'_>) -> Option<ConvergenceDirection> {
+        let high_threshold = self.params.load().high_threshold;
         if book
             .yes_asks
             .best_price_micro()
-            .is_some_and(|p| p.micro() >= self.high_threshold.micro())
+            .is_some_and(|p| p.micro() >= high_threshold.micro())
         {
             return Some(ConvergenceDirection::YesLikely);
         }
         if book
             .no_asks
             .best_price_micro()
-            .is_some_and(|p| p.micro() >= self.high_threshold.micro())
+            .is_some_and(|p| p.micro() >= high_threshold.micro())
         {
             return Some(ConvergenceDirection::NoLikely);
         }
@@ -120,16 +154,13 @@ impl<F: FeeEstimator> EndgameDetector<F> {
         settlement_deadline: Option<DateTime<Utc>>,
         now: DateTime<Utc>,
     ) -> bool {
-        if !self.enabled {
-            return true;
-        }
         let Some(deadline) = settlement_deadline else {
             return true;
         };
+        let settlement_window_hours = self.params.load().settlement_window_hours;
         let hours_remaining = (deadline - now).num_hours();
         if hours_remaining < 0
-            || hours_remaining
-                > ToPrimitive::to_i64(&self.settlement_window_hours).unwrap_or(i64::MAX)
+            || hours_remaining > ToPrimitive::to_i64(&settlement_window_hours).unwrap_or(i64::MAX)
         {
             return true;
         }
@@ -142,14 +173,12 @@ impl<F: FeeEstimator> EndgameDetector<F> {
         input: &EndgameDetectInput<'_>,
         now: DateTime<Utc>,
     ) -> Option<Opportunity> {
-        if !self.enabled {
-            return None;
-        }
+        let params = self.params.load();
         let deadline = input.settlement_deadline?;
         let hours_remaining = (deadline - now).num_hours();
         if hours_remaining < 0
             || hours_remaining
-                > ToPrimitive::to_i64(&self.settlement_window_hours).unwrap_or(i64::MAX)
+                > ToPrimitive::to_i64(&params.settlement_window_hours).unwrap_or(i64::MAX)
         {
             self.convergence.remove(input.market_id);
             return None;
@@ -159,7 +188,7 @@ impl<F: FeeEstimator> EndgameDetector<F> {
         let convergence_secs =
             self.convergence
                 .update_and_get(input.market_id, input.direction, now);
-        if convergence_secs < self.min_convergence_duration_secs {
+        if convergence_secs < params.min_convergence_duration_secs {
             return None;
         }
 
@@ -170,8 +199,8 @@ impl<F: FeeEstimator> EndgameDetector<F> {
 
         let walk = OrderbookWalker::walk_asks_by_cost(
             target_asks.levels,
-            self.max_investment_usd,
-            self.high_threshold,
+            params.max_investment_usd,
+            params.high_threshold,
             target_asks.total_depth_usd,
         )?;
 
@@ -180,7 +209,7 @@ impl<F: FeeEstimator> EndgameDetector<F> {
         let min_edge = MicroPrice::ONE
             .micro()
             .saturating_sub(entry_price_micro.micro());
-        if min_edge < self.min_profit_per_share.micro() {
+        if min_edge < params.min_profit_per_share.micro() {
             return None;
         }
 
@@ -192,6 +221,8 @@ impl<F: FeeEstimator> EndgameDetector<F> {
             convergence_secs,
             deadline,
             now,
+            fusion: &params.fusion,
+            high_threshold: params.high_threshold,
         };
         Some(self.build_opportunity(&ctx))
     }
@@ -217,8 +248,8 @@ impl<F: FeeEstimator> EndgameDetector<F> {
         let entry_price_micro =
             MicroPrice::try_from_decimal(entry_price.inner()).unwrap_or(MicroPrice::ZERO);
         let realtime_conf =
-            compute_realtime_confidence(entry_price_micro, convergence_secs, self.high_threshold);
-        let fused_p = self.fusion.fuse(
+            compute_realtime_confidence(entry_price_micro, convergence_secs, ctx.high_threshold);
+        let fused_p = ctx.fusion.fuse(
             MicroProb::try_from_decimal(cal_entry.posterior_mean()).unwrap_or(MicroProb::ZERO),
             realtime_conf,
             cal_entry.sample_count(),

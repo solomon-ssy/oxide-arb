@@ -1,4 +1,9 @@
 //! End-to-end opportunity pipeline: detect → filter → score → cooldown → emit.
+//!
+//! [`OpportunityPipeline::reload`] is the single hot-reload entry point for
+//! the whole detection chain: it swaps the pipeline's own emit gates and
+//! propagates the new configuration to the detector, scorer, and emission
+//! cooldown atomically with respect to each component.
 
 use crate::{
     cooldown::InMemoryEmissionCooldown,
@@ -7,9 +12,9 @@ use crate::{
     scorer::{EmitContext, EndgameScorer, ScoredOpportunity},
     staleness::StalenessPolicy,
 };
+use arc_swap::ArcSwap;
 use chrono::{DateTime, Utc};
 use oxide_arb_models::{
-    config::ScorerConfig,
     domain::{
         book::{BookSnapshot, EndgameBookPair},
         control_factor::{
@@ -22,6 +27,7 @@ use oxide_arb_models::{
         opportunity::Opportunity,
     },
     enums::common::{MarketCategory, StalenessLevel},
+    runtime_config::DetectionConfig,
     types::{EventId, MarketId, MicroPct, MicroProb, MicroScore, MicroUsd, TokenId, Usd},
 };
 use std::sync::Arc;
@@ -68,14 +74,34 @@ impl MarketScanInput {
     }
 }
 
+/// Hot-swappable emit-gate parameters.
+struct PipelineParams {
+    min_profit_threshold_usd: MicroUsd,
+    max_depth_usage_pct: MicroPct,
+    min_score: MicroScore,
+}
+
+impl PipelineParams {
+    fn from_config(config: &DetectionConfig) -> Self {
+        Self {
+            min_profit_threshold_usd: MicroUsd::try_from_decimal(config.min_profit_threshold_usd)
+                .unwrap_or(MicroUsd::ZERO),
+            max_depth_usage_pct: MicroPct::try_from_pct_decimal(
+                config.endgame.scorer.max_depth_usage_pct,
+            )
+            .unwrap_or(MicroPct::ZERO),
+            min_score: MicroScore::try_from_decimal(config.endgame.scorer.min_score)
+                .unwrap_or(MicroScore::ZERO),
+        }
+    }
+}
+
 pub struct OpportunityPipeline<F: FeeEstimator> {
     detector: EndgameDetector<F>,
     scorer: EndgameScorer,
     cooldown: InMemoryEmissionCooldown,
     factors: Arc<dyn ControlFactorProvider>,
-    min_profit_threshold_usd: MicroUsd,
-    max_depth_usage_pct: MicroPct,
-    min_score: MicroScore,
+    params: ArcSwap<PipelineParams>,
 }
 
 impl<F: FeeEstimator> OpportunityPipeline<F> {
@@ -85,18 +111,32 @@ impl<F: FeeEstimator> OpportunityPipeline<F> {
         scorer: EndgameScorer,
         cooldown: InMemoryEmissionCooldown,
         factors: Arc<dyn ControlFactorProvider>,
-        min_profit_threshold_usd: MicroUsd,
-        scorer_config: &ScorerConfig,
+        config: &DetectionConfig,
     ) -> Self {
         Self {
             detector,
             scorer,
             cooldown,
             factors,
-            min_profit_threshold_usd,
-            max_depth_usage_pct: scorer_config.max_depth_usage_pct,
-            min_score: scorer_config.min_score,
+            params: ArcSwap::from_pointee(PipelineParams::from_config(config)),
         }
+    }
+
+    /// Hot-reload the full detection chain (runtime-config activation).
+    ///
+    /// Order: detector (thresholds + fusion) → scorer (weights + fill model) →
+    /// emission cooldown → own emit gates. Each component swap is atomic; the
+    /// chain converges to the new configuration within one scan iteration.
+    pub fn reload(&self, config: &DetectionConfig) {
+        self.detector.reload(&config.endgame, &config.calibration);
+        self.scorer.reload(
+            &config.endgame.scorer,
+            &config.endgame.fill_probability,
+            config.endgame.settlement_window_hours,
+        );
+        self.cooldown.reload(&config.endgame.emission_cooldown);
+        self.params
+            .store(Arc::new(PipelineParams::from_config(config)));
     }
 
     #[inline]
@@ -114,6 +154,7 @@ impl<F: FeeEstimator> OpportunityPipeline<F> {
         input: &MarketScanInputRef<'_>,
         now: DateTime<Utc>,
     ) -> Option<Arc<ScoredOpportunity>> {
+        let params = self.params.load();
         let snapshot = self.factors.snapshot();
 
         // Market-anomaly pre-gate: block/cooldown before any detection work.
@@ -174,13 +215,13 @@ impl<F: FeeEstimator> OpportunityPipeline<F> {
 
         let profit =
             MicroUsd::try_from_decimal(opp.expected_net_profit.inner()).unwrap_or(MicroUsd::ZERO);
-        if profit < self.min_profit_threshold_usd {
+        if profit < params.min_profit_threshold_usd {
             return None;
         }
 
         let depth_pct =
             MicroPct::try_from_pct_decimal(opp.depth_used_pct).unwrap_or(MicroPct::ZERO);
-        if depth_pct > self.max_depth_usage_pct {
+        if depth_pct > params.max_depth_usage_pct {
             return None;
         }
 
@@ -190,7 +231,7 @@ impl<F: FeeEstimator> OpportunityPipeline<F> {
             self.apply_execution_quality(&snapshot, &opp, input.book, now, &mut applied);
 
         let draft = self.scorer.score(&opp, now, fill_override);
-        if draft.score < self.min_score {
+        if draft.score < params.min_score {
             return None;
         }
 

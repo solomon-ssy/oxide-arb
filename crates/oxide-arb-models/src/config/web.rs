@@ -1,8 +1,8 @@
 //! Web server + JWT configuration (`[web]` / `[web.jwt]`).
 //!
-//! Mounted at [`Inner::web`](crate::config::Inner). The JWT secret must be
-//! provided via environment (`OXIDE_ARB__WEB__JWT__SECRET`) in production; an
-//! empty or placeholder secret is fatal in `Live` mode (see
+//! Mounted at [`DeployConfig::web`](crate::config::DeployConfig). The JWT
+//! secret must be provided via environment (`OXIDE_ARB__WEB__JWT__SECRET`) in
+//! production; an empty or placeholder secret is fatal in `Live` mode (see
 //! `config::validation`).
 
 use serde::Deserialize;
@@ -12,25 +12,20 @@ use serde::Deserialize;
 pub const JWT_SECRET_PLACEHOLDER: &str = "change-me-in-production";
 
 /// HTTP/WebSocket server configuration.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct WebConfig {
     /// Bind address (default `0.0.0.0`).
-    #[serde(default = "default_listen_host")]
     pub listen_host: String,
-    /// Bind port (default `8080`).
-    #[serde(default = "default_listen_port")]
+    /// Bind port (default `8080`). Also serves Prometheus `GET /metrics`.
     pub listen_port: u16,
     /// Allowed CORS origins; empty disables cross-origin requests.
-    #[serde(default)]
     pub cors_allowed_origins: Vec<String>,
     /// Whether to serve the bundled SPA from [`Self::static_ui_dir`].
-    #[serde(default)]
     pub serve_static_ui: bool,
     /// Directory of the built SPA assets (default `static/ui`).
-    #[serde(default = "default_static_ui_dir")]
     pub static_ui_dir: String,
     /// JWT signing/expiry parameters.
-    #[serde(default)]
     pub jwt: JwtConfig,
 }
 
@@ -58,19 +53,16 @@ impl WebConfig {
 }
 
 /// JWT access/refresh token configuration.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct JwtConfig {
     /// HMAC signing secret. Env-only in production: `OXIDE_ARB__WEB__JWT__SECRET`.
-    #[serde(default)]
     pub secret: String,
     /// Token issuer claim (default `oxide-arb`).
-    #[serde(default = "default_issuer")]
     pub issuer: String,
     /// Access-token lifetime in seconds (default 900 = 15m).
-    #[serde(default = "default_access_ttl")]
     pub access_ttl_secs: i64,
     /// Refresh-token lifetime in seconds (default 604800 = 7d).
-    #[serde(default = "default_refresh_ttl")]
     pub refresh_ttl_secs: i64,
 }
 

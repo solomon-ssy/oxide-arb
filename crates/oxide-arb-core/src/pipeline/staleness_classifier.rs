@@ -1,4 +1,13 @@
-use oxide_arb_models::{config::MarketDataConfig, enums::common::StalenessLevel};
+//! Book staleness classification against the runtime staleness ladder.
+//!
+//! A single classifier instance is built at startup and **cloned** into every
+//! consumer (scanner, validator); clones share one hot-swappable threshold
+//! snapshot, so a runtime-config activation updates all consumers atomically
+//! through [`StalenessClassifier::reload`].
+
+use arc_swap::ArcSwap;
+use oxide_arb_models::{enums::common::StalenessLevel, runtime_config::MarketDataStalenessConfig};
+use std::sync::Arc;
 
 /// Maps an age (in milliseconds) to a `StalenessLevel` using config thresholds.
 ///
@@ -10,30 +19,47 @@ struct StalenessThresholds {
     expired: u64,
 }
 
+impl StalenessThresholds {
+    const fn from_config(config: &MarketDataStalenessConfig) -> Self {
+        Self {
+            fresh: config.staleness_fresh_ms,
+            acceptable: config.staleness_acceptable_ms,
+            stale: config.staleness_stale_ms,
+            expired: config.staleness_expired_ms,
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct StalenessClassifier {
-    thresholds: StalenessThresholds,
+    thresholds: Arc<ArcSwap<StalenessThresholds>>,
 }
 
 impl StalenessClassifier {
-    #[inline]
-    pub const fn new(config: &MarketDataConfig) -> Self {
+    #[must_use]
+    pub fn new(config: &MarketDataStalenessConfig) -> Self {
         Self {
-            thresholds: StalenessThresholds {
-                fresh: config.staleness_fresh_ms,
-                acceptable: config.staleness_acceptable_ms,
-                stale: config.staleness_stale_ms,
-                expired: config.staleness_expired_ms,
-            },
+            thresholds: Arc::new(ArcSwap::from_pointee(StalenessThresholds::from_config(
+                config,
+            ))),
         }
     }
 
+    /// Hot-reload the staleness ladder (runtime-config activation). All clones
+    /// of this classifier observe the new thresholds on their next read.
+    pub fn reload(&self, config: &MarketDataStalenessConfig) {
+        self.thresholds
+            .store(Arc::new(StalenessThresholds::from_config(config)));
+    }
+
     #[inline]
-    pub const fn classify(&self, age_ms: u64) -> StalenessLevel {
-        if age_ms <= self.thresholds.fresh {
+    pub fn classify(&self, age_ms: u64) -> StalenessLevel {
+        let thresholds = self.thresholds.load();
+        if age_ms <= thresholds.fresh {
             StalenessLevel::Fresh
-        } else if age_ms <= self.thresholds.acceptable {
+        } else if age_ms <= thresholds.acceptable {
             StalenessLevel::Acceptable
-        } else if age_ms <= self.thresholds.stale {
+        } else if age_ms <= thresholds.stale {
             StalenessLevel::Stale
         } else {
             StalenessLevel::Expired
@@ -42,14 +68,14 @@ impl StalenessClassifier {
 
     /// Return the acceptable threshold (Fresh + Acceptable pass [`BookGate`]).
     #[inline]
-    pub const fn acceptable_ms(&self) -> u64 {
-        self.thresholds.acceptable
+    pub fn acceptable_ms(&self) -> u64 {
+        self.thresholds.load().acceptable
     }
 
     /// Return the expired threshold (legacy alias).
     #[inline]
-    pub const fn expired_ms(&self) -> u64 {
-        self.thresholds.expired
+    pub fn expired_ms(&self) -> u64 {
+        self.thresholds.load().expired
     }
 }
 
@@ -57,13 +83,12 @@ impl StalenessClassifier {
 mod tests {
     use super::*;
 
-    fn test_config() -> MarketDataConfig {
-        MarketDataConfig {
+    fn test_config() -> MarketDataStalenessConfig {
+        MarketDataStalenessConfig {
             staleness_fresh_ms: 1000,
             staleness_acceptable_ms: 3000,
             staleness_stale_ms: 5000,
             staleness_expired_ms: 10000,
-            ..Default::default()
         }
     }
 
@@ -85,5 +110,19 @@ mod tests {
     fn expired_threshold_accessor() {
         let c = StalenessClassifier::new(&test_config());
         assert_eq!(c.expired_ms(), 10000);
+    }
+
+    #[test]
+    fn reload_propagates_to_clones() {
+        let original = StalenessClassifier::new(&test_config());
+        let clone = original.clone();
+        original.reload(&MarketDataStalenessConfig {
+            staleness_fresh_ms: 10,
+            staleness_acceptable_ms: 20,
+            staleness_stale_ms: 30,
+            staleness_expired_ms: 40,
+        });
+        assert_eq!(clone.classify(15), StalenessLevel::Acceptable);
+        assert_eq!(clone.acceptable_ms(), 20);
     }
 }

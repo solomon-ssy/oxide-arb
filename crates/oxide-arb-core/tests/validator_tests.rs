@@ -9,8 +9,10 @@ use oxide_arb_core::{
 };
 use oxide_arb_error::trading::TradingError;
 use oxide_arb_models::{
-    config::MarketDataConfig,
     domain::book::BookLevel,
+    runtime_config::{
+        EndgameLatencyConfig, ExecutionRuntimeConfig, MarketDataStalenessConfig, TradeTimeoutConfig,
+    },
     types::{Price, Shares, TokenId},
 };
 use oxide_arb_test_support::fixtures::sample_opportunity;
@@ -19,6 +21,23 @@ use std::sync::Arc;
 
 fn level(price: rust_decimal::Decimal) -> BookLevel {
     BookLevel::from_decimal(Price::new(price), Shares::new(dec!(1000))).unwrap()
+}
+
+fn execution_config(
+    max_book_to_order_ms: u64,
+    max_slippage_bps: rust_decimal::Decimal,
+) -> ExecutionRuntimeConfig {
+    ExecutionRuntimeConfig {
+        timeout: TradeTimeoutConfig {
+            max_validation_slippage_bps: max_slippage_bps,
+            ..Default::default()
+        },
+        endgame_latency: EndgameLatencyConfig {
+            max_book_to_order_ms,
+            ..Default::default()
+        },
+        ..Default::default()
+    }
 }
 
 struct ValidatorFixture {
@@ -32,12 +51,11 @@ struct ValidatorFixture {
 fn fixture(max_book_to_order_ms: u64, max_slippage_bps: rust_decimal::Decimal) -> ValidatorFixture {
     let metrics = Arc::new(MetricsHub::new());
     let book_store = Arc::new(BookStore::new(Arc::clone(&metrics)));
-    let classifier = StalenessClassifier::new(&MarketDataConfig::default());
+    let classifier = StalenessClassifier::new(&MarketDataStalenessConfig::default());
     let validator = Validator::new(
         Arc::clone(&book_store),
         classifier,
-        max_slippage_bps,
-        max_book_to_order_ms,
+        &execution_config(max_book_to_order_ms, max_slippage_bps),
         Arc::clone(&metrics),
     );
     ValidatorFixture {
@@ -108,7 +126,7 @@ fn rejects_stale_book_age() {
 
 #[test]
 fn rejects_staleness_above_acceptable() {
-    let cfg = MarketDataConfig {
+    let cfg = MarketDataStalenessConfig {
         staleness_acceptable_ms: 1_000,
         staleness_stale_ms: 2_000,
         staleness_expired_ms: 10_000,
@@ -120,8 +138,7 @@ fn rejects_staleness_above_acceptable() {
     let validator = Validator::new(
         Arc::clone(&book_store),
         StalenessClassifier::new(&cfg),
-        dec!(50),
-        60_000,
+        &execution_config(60_000, dec!(50)),
         Arc::clone(&metrics),
     );
     let yes = TokenId::new("yes-token");

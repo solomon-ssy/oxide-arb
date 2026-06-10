@@ -1,166 +1,139 @@
-//! Application configuration tree.
+//! Deploy configuration tree (`config/oxide-arb.toml`, restart to apply).
 //!
-//! The config module is split into domain-specific sub-modules for clarity.
-//! [`Settings`] wraps the deserialized [`Inner`] in an `Arc` for cheap cloning
-//! across async tasks and retains the `config_path` for runtime persistence.
+//! [`DeployConfig`] owns everything that is structurally bound to a process
+//! start: connection endpoints and pools, channel capacities and shard counts,
+//! credential sources, the web server, and logging. Operator tunables that must
+//! change **without** a restart live in the versioned
+//! [`RuntimeConfig`](crate::runtime_config::RuntimeConfig) instead and are
+//! managed through the governed runtime-config API — never by editing TOML.
 //!
 //! # Loading precedence (high → low)
 //!
 //! 1. Environment variables (`OXIDE_ARB__*`)
 //! 2. `config/oxide-arb.toml`
-//! 3. Hard-coded defaults via `#[serde(default)]`
+//! 3. Hard-coded defaults
+//!
+//! Every section rejects unknown keys (`deny_unknown_fields`): a typo or a
+//! leftover runtime section in the TOML aborts startup instead of being
+//! silently ignored.
 
-mod analytics;
 mod cache;
 mod db;
-mod detection;
 mod execution;
 mod fees;
 mod keys;
 mod market_data;
-mod notification;
 mod observability;
 mod polymarket;
-mod risk;
-pub mod settlement;
-mod treasury;
+mod settlement;
 pub mod validation;
 mod web;
 
-pub use analytics::*;
 pub use cache::*;
 pub use db::*;
-pub use detection::*;
 pub use execution::*;
 pub use fees::*;
 pub use keys::*;
 pub use market_data::*;
-pub use notification::*;
 pub use observability::*;
 pub use polymarket::*;
-pub use risk::*;
 pub use settlement::*;
-pub use treasury::*;
 pub use web::*;
 
 use crate::{
-    config::validation::{validate_settings_common, validate_settings_mode},
+    config::validation::{validate_deploy_common, validate_deploy_for_mode},
     enums::common::ExecutionMode,
 };
 use oxide_arb_error::{
     OxideResult, config::ConfigError, config_validation::ConfigValidationReport,
 };
 use serde::Deserialize;
-use std::{ops::Deref, path::PathBuf, sync::Arc};
 
-/// Top-level application settings.
+/// Deserialized deploy-configuration root.
 ///
-/// Wraps the deserialized [`Inner`] in an `Arc` for cheap cloning across
-/// async tasks. Runtime parameter adjustments (risk, detection) are handled
-/// Runtime parameter adjustments (risk, detection, execution mode) are handled
-/// via the governance versioned runtime-config API (`POST /api/runtime-config/versions`),
-/// not by reloading this file.
-#[derive(Debug, Clone)]
-pub struct Settings {
-    inner: Arc<Inner>,
-    config_path: Arc<PathBuf>,
+/// Each section maps 1:1 to a `[section]` in `oxide-arb.toml`. Wrap in an
+/// `Arc` for sharing across async tasks — the struct itself is plain data.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct DeployConfig {
+    /// Polymarket platform endpoints, chain, and fee schedule.
+    pub polymarket: PolymarketConfig,
+    /// Market-data connections (CLOB WebSocket + Gamma catalog).
+    pub market_data: MarketDataDeployConfig,
+    /// Logging (level + format).
+    pub observability: ObservabilityConfig,
+    /// Postgres + `ClickHouse` connections and write batching.
+    pub db: DatabaseConfig,
+    /// Redis + in-process cache layer.
+    pub cache: CacheConfig,
+    /// Credential source (env or keystore).
+    pub keys: KeysConfig,
+    /// HTTP/WebSocket server + JWT.
+    pub web: WebConfig,
+    /// Execution structural parameters (book-apply sharding).
+    pub execution: ExecutionDeployConfig,
+    /// Settlement structural parameters (channel capacity).
+    pub settlement: SettlementDeployConfig,
 }
 
-impl Deref for Settings {
-    type Target = Inner;
-
-    #[inline]
-    fn deref(&self) -> &Self::Target {
-        self.inner.as_ref()
-    }
-}
-
-impl Settings {
+impl DeployConfig {
     /// Load configuration from the given directory.
     ///
-    /// Loads `{dir}/oxide-arb.toml` and merges `OXIDE_ARB__*` environment
-    /// variables on top. Runs semantic validation before returning — fatal
-    /// errors cause an immediate `Err`, warnings are logged via `tracing`.
-    pub fn new(config_dir: &str) -> OxideResult<Self> {
-        let config_path = PathBuf::from(config_dir);
+    /// Loads `{dir}/oxide-arb.toml` (optional — defaults apply when absent)
+    /// and merges `OXIDE_ARB__*` environment variables on top. Runs the
+    /// mode-agnostic semantic validation before returning — fatal errors abort
+    /// startup, warnings are logged via `tracing`.
+    pub fn load(config_dir: &str) -> OxideResult<Self> {
         let builder = config::Config::builder()
             .add_source(config::File::with_name(&format!("{config_dir}/oxide-arb")).required(false))
             .add_source(
                 config::Environment::with_prefix("OXIDE_ARB")
+                    .prefix_separator("__")
                     .separator("__")
                     .try_parsing(true),
             );
 
-        let inner: Inner = builder
+        let deploy: Self = builder
             .build()
             .map_err(ConfigError::Load)?
             .try_deserialize()
             .map_err(ConfigError::Load)?;
 
-        run_common_validation(&inner)?;
-
-        Ok(Self {
-            inner: Arc::new(inner),
-            config_path: Arc::new(config_path),
-        })
+        deploy.ensure_valid_common()?;
+        Ok(deploy)
     }
 
-    /// Convenience loader using the default `config/` directory.
-    #[inline]
-    pub fn load() -> OxideResult<Self> {
-        Self::new("config")
-    }
-
-    /// Returns the config directory path used during initialization.
-    #[inline]
-    pub fn config_path(&self) -> &PathBuf {
-        &self.config_path
-    }
-
-    /// Clone the deserialized configuration root for programmatic overrides
-    /// (tests, harnesses) without re-parsing TOML.
-    #[must_use]
-    pub fn clone_inner(&self) -> Inner {
-        self.inner.as_ref().clone()
-    }
-
-    /// Construct settings from a fully assembled [`Inner`].
+    /// Run the mode-agnostic validation and fail closed on errors.
     ///
-    /// Runs the same semantic validation as [`Settings::new`]. Use this when
-    /// building configuration in code (for example in integration tests).
-    pub fn from_parts(inner: Inner, config_path: PathBuf) -> OxideResult<Self> {
-        run_common_validation(&inner)?;
-
-        Ok(Self {
-            inner: Arc::new(inner),
-            config_path: Arc::new(config_path),
-        })
+    /// Warnings are streamed to `tracing::warn` as a side effect so callers
+    /// get uniform telemetry. Also used by [`Self::load`].
+    pub fn ensure_valid_common(&self) -> OxideResult<()> {
+        let report = validate_deploy_common(self);
+        for w in &report.warnings {
+            tracing::warn!("Deploy config warning: {w}");
+        }
+        if report.has_errors() {
+            return Err(ConfigError::from(report).into());
+        }
+        Ok(())
     }
 
-    /// Run the **mode-aware** portion of configuration validation.
-    ///
-    /// [`Settings::new`] and [`Settings::from_parts`] already execute the
-    /// mode-agnostic checks at load time. This method is called by the
-    /// CLI runner once the final [`ExecutionMode`] has been determined
-    /// (CLI subcommand overrides the TOML default), so that credential
-    /// policy and any future mode-sensitive invariants are evaluated
-    /// against the mode that will actually run.
-    ///
-    /// Warnings are logged via `tracing::warn`. Call [`Self::ensure_valid_for_mode`]
-    /// at startup to fail closed on errors.
+    /// Run the **mode-aware** portion of deploy validation (credential policy,
+    /// JWT strength). Called once the effective [`ExecutionMode`] is known —
+    /// the persisted operational mode, not a config value.
     #[must_use]
     pub fn validate_for_mode(&self, mode: ExecutionMode) -> ConfigValidationReport {
-        let report = validate_settings_mode(self.inner.as_ref(), mode);
+        let report = validate_deploy_for_mode(self, mode);
         for w in &report.warnings {
-            tracing::warn!(mode = ?mode, "Config warning: {w}");
+            tracing::warn!(mode = ?mode, "Deploy config warning: {w}");
         }
         report
     }
 
-    /// Fail-closed gate for mode-aware validation (mirrors [`run_common_validation`]).
+    /// Fail-closed gate for mode-aware validation.
     ///
-    /// Live/Paper credential policy and other mode-sensitive invariants must pass
-    /// before subsystems connect to PG/CLOB. Warnings are logged; only errors abort.
+    /// Live/Paper credential policy and JWT strength must pass before
+    /// subsystems connect to PG/CLOB. Warnings are logged; only errors abort.
     pub fn ensure_valid_for_mode(&self, mode: ExecutionMode) -> OxideResult<()> {
         let report = self.validate_for_mode(mode);
         if report.has_errors() {
@@ -170,148 +143,169 @@ impl Settings {
     }
 }
 
-/// Helper: run mode-agnostic validation and convert any fatal errors
-/// into a bail-worthy [`OxideError`]. Warnings are streamed to
-/// `tracing::warn` as a side effect so callers get uniform telemetry.
-fn run_common_validation(inner: &Inner) -> OxideResult<()> {
-    let report = validate_settings_common(inner);
-    for w in &report.warnings {
-        tracing::warn!("Config warning: {w}");
-    }
-    if report.has_errors() {
-        return Err(ConfigError::from(report).into());
-    }
-    Ok(())
-}
-
-/// Deserialized configuration root.
-///
-/// Each section maps 1:1 to a `[section]` in `oxide-arb.toml`.
-/// All fields carry `#[serde(default)]` so partial configs are always valid.
-///
-/// Single-strategy (endgame) + single-platform (polymarket) design.
-/// See ADR-001 for rationale.
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct Inner {
-    #[serde(default)]
-    pub polymarket: PolymarketConfig,
-    #[serde(default)]
-    pub detection: DetectionConfig,
-    #[serde(default)]
-    pub execution: ExecutionConfig,
-    #[serde(default)]
-    pub risk: RiskConfig,
-    #[serde(default)]
-    pub market_data: MarketDataConfig,
-    #[serde(default)]
-    pub observability: ObservabilityConfig,
-    #[serde(default)]
-    pub db: DatabaseConfig,
-    #[serde(default)]
-    pub analytics: AnalyticsConfig,
-    #[serde(default)]
-    pub cache: CacheConfig,
-    #[serde(default)]
-    pub treasury: TreasuryConfig,
-    #[serde(default)]
-    pub keys: KeysConfig,
-    #[serde(default)]
-    pub notification: NotificationConfig,
-    #[serde(default)]
-    pub settlement: SettlementConfig,
-    #[serde(default)]
-    pub web: WebConfig,
-}
-
-impl Inner {
-    /// Minimum net profit (USD) required to act on an opportunity.
-    ///
-    /// Authoritative field: `[detection].min_profit_threshold_usd` (ADR-001).
-    #[inline]
-    pub const fn min_profit_threshold_usd(&self) -> rust_decimal::Decimal {
-        self.detection.min_profit_threshold_usd
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::{env::var, path::Path};
 
     #[test]
-    fn default_config_deserializes() {
-        let settings = Settings::new("nonexistent_dir_for_test");
-        assert!(
-            settings.is_ok(),
-            "Default config should deserialize: {settings:?}"
-        );
+    fn default_config_loads_when_file_absent() {
+        let deploy = DeployConfig::load("nonexistent_dir_for_test");
+        assert!(deploy.is_ok(), "defaults should load: {deploy:?}");
     }
 
     #[test]
-    fn settings_deref_to_inner() {
-        let settings = Settings::new("nonexistent_dir_for_test").expect("should load defaults");
-        let _: &Inner = &settings;
-        assert_eq!(settings.market_data.staleness_fresh_ms, 2_000);
-    }
-
-    #[test]
-    fn from_parts_validates() {
-        let inner = Inner::default();
-        let result = Settings::from_parts(inner, PathBuf::from("test"));
-        assert!(result.is_ok());
+    fn defaults_validate_clean() {
+        DeployConfig::default()
+            .ensure_valid_common()
+            .expect("defaults must validate");
     }
 
     #[test]
     fn validate_for_mode_dry_run_permissive() {
-        let settings = Settings::new("nonexistent_dir_for_test").expect("defaults");
-        let report = settings.validate_for_mode(ExecutionMode::DryRun);
-        assert!(!report.has_errors());
+        let deploy = DeployConfig::default();
+        assert!(!deploy.validate_for_mode(ExecutionMode::DryRun).has_errors());
     }
 
     #[test]
     fn ensure_valid_for_mode_fails_on_live_missing_credentials() {
-        let settings = Settings::new("nonexistent_dir_for_test").expect("defaults");
-        let err = settings
+        let deploy = DeployConfig::default();
+        let err = deploy
             .ensure_valid_for_mode(ExecutionMode::Live)
             .expect_err("Live without credentials must fail closed");
         assert!(err.to_string().contains("missing required credentials"));
     }
 
     #[test]
-    fn ensure_valid_for_mode_passes_dry_run() {
-        let settings = Settings::new("nonexistent_dir_for_test").expect("defaults");
-        settings
-            .ensure_valid_for_mode(ExecutionMode::DryRun)
-            .expect("DryRun defaults should pass mode validation");
+    fn unknown_section_is_rejected() {
+        let toml = "[treasury]\ntarget_balance_usd = \"1000\"\n";
+        let result: Result<DeployConfig, _> = toml::from_str(toml);
+        assert!(result.is_err(), "stale [treasury] section must be fatal");
     }
 
     #[test]
-    fn min_profit_threshold_single_source_on_defaults() {
-        let inner = Inner::default();
-        assert_eq!(
-            inner.min_profit_threshold_usd(),
-            inner.detection.min_profit_threshold_usd
-        );
+    fn runtime_sections_are_rejected_in_deploy_toml() {
+        for section in [
+            "detection",
+            "risk",
+            "notification",
+            "analytics",
+            "sizing",
+            "treasury",
+        ] {
+            let toml = format!("[{section}]\n");
+            let result: Result<DeployConfig, _> = toml::from_str(&toml);
+            assert!(result.is_err(), "runtime section [{section}] must be fatal");
+        }
+    }
+
+    /// Resolve the workspace `config/` directory from the crate manifest.
+    fn workspace_config_dir() -> std::path::PathBuf {
+        let crate_dir = var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_owned());
+        Path::new(&crate_dir)
+            .ancestors()
+            .nth(2)
+            .expect("workspace root")
+            .join("config")
     }
 
     #[test]
     fn shipped_toml_template_deserializes() {
-        let crate_dir = var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_owned());
-        let workspace_root = Path::new(&crate_dir)
-            .ancestors()
-            .nth(2)
-            .expect("workspace root");
-        let config_dir = workspace_root.join("config");
-        let template = config_dir.join("oxide-arb.toml");
-        if !template.exists() {
-            eprintln!("skipping shipped_toml_template_deserializes: {template:?} missing");
+        let config_dir = workspace_config_dir();
+        if !config_dir.join("oxide-arb.toml").exists() {
+            eprintln!("skipping shipped_toml_template_deserializes: template missing");
             return;
         }
         let dir_str = config_dir.to_str().expect("utf-8");
-        let settings = Settings::new(dir_str);
+        let deploy = DeployConfig::load(dir_str);
         assert!(
-            settings.is_ok(),
-            "config/oxide-arb.toml failed to deserialize: {settings:?}"
+            deploy.is_ok(),
+            "config/oxide-arb.toml failed to deserialize: {deploy:?}"
         );
+    }
+
+    /// The dev template documents itself as "all values shown are the
+    /// compiled-in defaults" — hold it to that, so the TOML and the Rust
+    /// `Default` impls can never drift apart silently.
+    #[test]
+    fn shipped_toml_template_matches_rust_defaults() {
+        let template = workspace_config_dir().join("oxide-arb.toml");
+        if !template.exists() {
+            eprintln!("skipping shipped_toml_template_matches_rust_defaults: template missing");
+            return;
+        }
+        // Parse the file directly (no env overlay) so a developer's
+        // OXIDE_ARB__* variables cannot affect the comparison.
+        let raw = std::fs::read_to_string(&template).expect("read dev template");
+        let parsed: DeployConfig = toml::from_str(&raw).expect("dev template deserializes");
+        assert_eq!(
+            parsed,
+            DeployConfig::default(),
+            "config/oxide-arb.toml drifted from the compiled-in defaults"
+        );
+    }
+
+    /// Build a `DeployConfig` from an injected `OXIDE_ARB__*` map, exactly as
+    /// [`DeployConfig::load`] would merge the real process environment —
+    /// without mutating process-global state (parallel-test safe).
+    fn load_with_env(env: &[(&str, &str)]) -> Result<DeployConfig, config::ConfigError> {
+        let source = config::Environment::with_prefix("OXIDE_ARB")
+            .prefix_separator("__")
+            .separator("__")
+            .try_parsing(true)
+            .source(Some(
+                env.iter()
+                    .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+                    .collect(),
+            ));
+        config::Config::builder()
+            .add_source(source)
+            .build()?
+            .try_deserialize()
+    }
+
+    #[test]
+    fn env_overlay_overrides_defaults() {
+        let deploy = load_with_env(&[
+            ("OXIDE_ARB__DB__POSTGRES__HOST", "db.internal"),
+            ("OXIDE_ARB__DB__POSTGRES__PORT", "6432"),
+            ("OXIDE_ARB__OBSERVABILITY__LOG_JSON", "true"),
+        ])
+        .expect("env overlay must deserialize");
+        assert_eq!(deploy.db.postgres.host, "db.internal");
+        assert_eq!(deploy.db.postgres.port, 6432);
+        assert!(deploy.observability.log_json);
+        // Untouched keys keep their defaults.
+        assert_eq!(
+            deploy.db.postgres.database,
+            DeployConfig::default().db.postgres.database
+        );
+    }
+
+    #[test]
+    fn unknown_env_key_is_rejected_by_deny_unknown_fields() {
+        let result = load_with_env(&[("OXIDE_ARB__DB__POSTGRES__HOSTNAME_TYPO", "oops")]);
+        assert!(result.is_err(), "typo'd env key must abort startup");
+
+        let result = load_with_env(&[("OXIDE_ARB__TREASURY__TARGET_BALANCE_USD", "1000")]);
+        assert!(
+            result.is_err(),
+            "stale [treasury] env key must abort startup"
+        );
+    }
+
+    #[test]
+    fn production_example_toml_deserializes_and_validates() {
+        let template = workspace_config_dir().join("oxide-arb.production.example.toml");
+        if !template.exists() {
+            eprintln!("skipping production_example_toml_deserializes: {template:?} missing");
+            return;
+        }
+        let raw = std::fs::read_to_string(&template).expect("read production example");
+        let parsed: DeployConfig =
+            toml::from_str(&raw).expect("production example must deserialize");
+        parsed
+            .ensure_valid_common()
+            .expect("production example must pass mode-agnostic validation");
     }
 }

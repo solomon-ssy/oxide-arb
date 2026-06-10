@@ -15,8 +15,8 @@ use chrono::Timelike;
 use num_traits::ToPrimitive;
 use oxide_arb_error::{OxideError, OxideResult};
 use oxide_arb_models::{
-    config::RiskConfig,
     domain::{blacklist::BlacklistInfo, potential_loss::PotentialLossInfo, risk::RiskEngineState},
+    runtime_config::RiskConfig,
     types::Usd,
 };
 use std::sync::Arc;

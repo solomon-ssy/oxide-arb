@@ -84,7 +84,7 @@ impl AppContext {
             .push(TaskId::GammaSync, move |shutdown| async move {
                 if let Err(error) = PeriodicTask::run(
                     TaskId::GammaSync.static_name(),
-                    Duration::from_secs(interval_secs),
+                    move || Duration::from_secs(interval_secs),
                     PERIODIC_JITTER_PCT,
                     true,
                     shutdown,
@@ -108,7 +108,7 @@ impl AppContext {
             .push(TaskId::RiskTick, move |shutdown| async move {
                 if let Err(error) = PeriodicTask::run(
                     TaskId::RiskTick.static_name(),
-                    Duration::from_secs(RISK_TICK_INTERVAL_SECS),
+                    || Duration::from_secs(RISK_TICK_INTERVAL_SECS),
                     0.0,
                     false,
                     shutdown,
@@ -128,13 +128,22 @@ impl AppContext {
     fn queue_exposure_gc(&self) {
         let exposure = Arc::clone(&self.risk.exposure);
         let metrics = Arc::clone(&self.infra.metrics);
-        let interval = Duration::from_secs(self.config.risk.reservation_gc_interval_secs.max(1));
+        let runtime = Arc::clone(&self.runtime_config);
 
         self.pending_tasks
             .push(TaskId::ExposureGc, move |shutdown| async move {
+                let interval_runtime = Arc::clone(&runtime);
                 if let Err(error) = PeriodicTask::run(
                     TaskId::ExposureGc.static_name(),
-                    interval,
+                    move || {
+                        Duration::from_secs(
+                            interval_runtime
+                                .load()
+                                .risk
+                                .reservation_gc_interval_secs
+                                .max(1),
+                        )
+                    },
                     0.0,
                     false,
                     shutdown,
@@ -208,18 +217,13 @@ impl AppContext {
         let updater = Arc::clone(&self.trading.calibration_updater);
         let metrics = Arc::clone(&self.infra.metrics);
         let calibrator = Arc::clone(&self.trading.calibrator);
-        let interval_secs = self
-            .config
-            .detection
-            .calibration
-            .refresh_interval_secs
-            .max(300);
 
         self.pending_tasks
             .push(TaskId::CalibrationUpdater, move |shutdown| async move {
+                let interval_updater = Arc::clone(&updater);
                 if let Err(error) = PeriodicTask::run(
                     TaskId::CalibrationUpdater.static_name(),
-                    Duration::from_secs(interval_secs),
+                    move || Duration::from_secs(interval_updater.refresh_interval_secs().max(300)),
                     PERIODIC_JITTER_PCT,
                     true,
                     shutdown,
@@ -243,13 +247,22 @@ impl AppContext {
             return;
         };
         let refresher = Arc::clone(refresher);
-        let interval_secs = self.config.risk.metrics_refresh_interval_secs.max(1);
+        let runtime = Arc::clone(&self.runtime_config);
 
         self.pending_tasks
             .push(TaskId::RiskMetricsRefresh, move |shutdown| async move {
+                let interval_runtime = Arc::clone(&runtime);
                 if let Err(error) = PeriodicTask::run(
                     TaskId::RiskMetricsRefresh.static_name(),
-                    Duration::from_secs(interval_secs),
+                    move || {
+                        Duration::from_secs(
+                            interval_runtime
+                                .load()
+                                .risk
+                                .metrics_refresh_interval_secs
+                                .max(1),
+                        )
+                    },
                     PERIODIC_JITTER_PCT,
                     true,
                     shutdown,
@@ -282,14 +295,22 @@ impl AppContext {
         let position_repo = Arc::clone(&self.infra.position_repo);
         let balance_fact_writer = Arc::clone(&self.infra.balance_fact_writer);
         let holder_address = self.infra.holder_address.clone();
-        let configured_bankroll = Usd::new(self.config.risk.bankroll_usd);
-        let interval_secs = self.config.risk.reconciliation_interval_secs.max(30);
+        let runtime = Arc::clone(&self.runtime_config);
 
         self.pending_tasks
             .push(TaskId::LedgerReconciliation, move |shutdown| async move {
+                let interval_runtime = Arc::clone(&runtime);
                 if let Err(error) = PeriodicTask::run(
                     TaskId::LedgerReconciliation.static_name(),
-                    Duration::from_secs(interval_secs),
+                    move || {
+                        Duration::from_secs(
+                            interval_runtime
+                                .load()
+                                .risk
+                                .reconciliation_interval_secs
+                                .max(30),
+                        )
+                    },
                     PERIODIC_JITTER_PCT,
                     true,
                     shutdown,
@@ -301,6 +322,10 @@ impl AppContext {
                         let position_repo = Arc::clone(&position_repo);
                         let balance_fact_writer = Arc::clone(&balance_fact_writer);
                         let holder_address = holder_address.clone();
+                        // Bankroll is read per tick so a runtime-config
+                        // activation reshapes the internal ledger baseline
+                        // without a restart.
+                        let configured_bankroll = Usd::new(runtime.load().risk.bankroll_usd);
                         async move {
                             run_ledger_reconciliation(LedgerReconciliationDeps {
                                 risk_engine: &risk_engine,
@@ -325,13 +350,22 @@ impl AppContext {
 
     fn queue_market_settlement_retry(&self) {
         let settlement = Arc::clone(&self.settlement.service);
-        let interval_secs = self.config.settlement.lifecycle.retry_interval_secs.max(10);
+        let runtime = Arc::clone(&self.runtime_config);
 
         self.pending_tasks
             .push(TaskId::MarketSettlementRetry, move |shutdown| async move {
                 if let Err(error) = PeriodicTask::run(
                     TaskId::MarketSettlementRetry.static_name(),
-                    Duration::from_secs(interval_secs),
+                    move || {
+                        Duration::from_secs(
+                            runtime
+                                .load()
+                                .settlement
+                                .lifecycle
+                                .retry_interval_secs
+                                .max(10),
+                        )
+                    },
                     PERIODIC_JITTER_PCT,
                     true,
                     shutdown,
@@ -362,7 +396,7 @@ impl AppContext {
                 );
                 if let Err(error) = PeriodicTask::run(
                     TaskId::BookSnapshotPublisher.static_name(),
-                    Duration::from_secs(BOOK_SNAPSHOT_PUBLISH_INTERVAL_SECS),
+                    || Duration::from_secs(BOOK_SNAPSHOT_PUBLISH_INTERVAL_SECS),
                     PERIODIC_JITTER_PCT,
                     false,
                     shutdown,
@@ -402,7 +436,7 @@ impl AppContext {
                 let checker = HealthChecker::new(pg, ch, ws, clob_client, execution_mode);
                 if let Err(error) = PeriodicTask::run(
                     TaskId::HealthChecker.static_name(),
-                    Duration::from_secs(HEALTH_CHECK_INTERVAL_SECS),
+                    || Duration::from_secs(HEALTH_CHECK_INTERVAL_SECS),
                     0.0,
                     false,
                     shutdown,
@@ -448,12 +482,15 @@ impl AppContext {
     }
 
     fn queue_report_generator(&self) {
+        // `Arc<CoreRiskMetrics>` unsizes to `Arc<dyn RiskMetrics>` at the
+        // argument; the binding keeps `Arc::clone` inference on the concrete type.
+        let risk_metrics = Arc::clone(&self.risk.metrics);
         let generator = Arc::new(ReportGenerator::new(
             Arc::clone(&self.infra.trade_repo),
             Arc::clone(&self.infra.position_repo),
             Arc::clone(&self.infra.report_repo),
             Arc::clone(&self.risk.engine),
-            self.risk.metrics.clone(),
+            risk_metrics,
             Arc::clone(&self.infra.alerts),
         ));
 
@@ -461,7 +498,7 @@ impl AppContext {
             .push(TaskId::ReportGenerator, move |shutdown| async move {
                 if let Err(error) = PeriodicTask::run(
                     TaskId::ReportGenerator.static_name(),
-                    Duration::from_secs(3600),
+                    || Duration::from_secs(3600),
                     PERIODIC_JITTER_PCT,
                     false,
                     shutdown,

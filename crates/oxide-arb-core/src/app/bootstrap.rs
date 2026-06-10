@@ -1,18 +1,17 @@
-//! Application bootstrap — load config and run lifecycle.
+//! Application bootstrap — build subsystems and run the lifecycle.
 
 use crate::app::{AppContext, periodic_services, task_registry::AppRunner};
 use oxide_arb_error::OxideResult;
-use oxide_arb_models::config::Settings;
+use oxide_arb_models::config::DeployConfig;
 use oxide_arb_repository::postgres::PgRiskAuditRepository;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
-/// Load settings, build subsystems, register tasks, and run until shutdown.
-pub async fn run(config_dir: &str) -> OxideResult<()> {
-    let settings = Arc::new(Settings::new(config_dir)?);
-
+/// Build subsystems from the loaded deploy config, register tasks, and run
+/// until shutdown. The runtime config is seeded from Postgres during build.
+pub async fn run(deploy: Arc<DeployConfig>) -> OxideResult<()> {
     let shutdown = CancellationToken::new();
-    let ctx = AppContext::build(settings, shutdown.clone()).await?;
+    let ctx = AppContext::build(deploy, shutdown.clone()).await?;
     // Effective mode after restoring the persisted operational state.
     let mode = ctx.execution_mode.current();
     periodic_services::ensure_live_metrics_ready(mode, ctx.risk.metrics_refresh.as_deref()).await?;
@@ -33,7 +32,6 @@ pub async fn run(config_dir: &str) -> OxideResult<()> {
 
     tracing::info!(
         mode = ?mode,
-        config_dir,
         tasks = runner.registry_len(),
         "oxide-arb starting",
     );

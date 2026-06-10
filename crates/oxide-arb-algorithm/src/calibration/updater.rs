@@ -4,17 +4,17 @@
 //! bridge between the algorithm crate (pure computation) and I/O (DB, APIs).
 
 use super::{calibrator::ResolutionCalibrator, prior::estimate_mom_prior, types::CalibrationEntry};
+use arc_swap::ArcSwap;
 use oxide_arb_error::algorithm::AlgoError;
 use oxide_arb_models::{
     clickhouse::{CalibrationSnapshotRow, ChDecimal64, ChProbability, ChSchemaVersion},
-    config::CalibrationConfig,
     domain::calibration::{BucketKey, UpsertCalibration},
     enums::clickhouse::{ChDurationBucket, ChFactSource, ChMarketCategory, ChPriceZone},
+    runtime_config::CalibrationConfig,
     types::MarketId,
 };
 use sha2::{Digest, Sha256};
-use std::fmt::Write;
-use std::sync::Arc;
+use std::{fmt::Write, sync::Arc};
 
 /// External data source for calibration — injected by `oxide-arb-core`.
 ///
@@ -75,7 +75,7 @@ pub struct UpdateStats {
 pub struct CalibrationUpdater {
     calibrator: Arc<ResolutionCalibrator>,
     data_source: Arc<dyn CalibrationDataSource>,
-    config: CalibrationConfig,
+    config: ArcSwap<CalibrationConfig>,
 }
 
 impl CalibrationUpdater {
@@ -89,8 +89,25 @@ impl CalibrationUpdater {
         Self {
             calibrator,
             data_source,
-            config,
+            config: ArcSwap::from_pointee(config),
         }
+    }
+
+    /// Hot-reload the calibration configuration (runtime-config activation).
+    ///
+    /// Also pushes the new config into the shared calibrator so lookups and
+    /// the next prior re-estimation observe consistent parameters. The new
+    /// `refresh_interval_secs` is read dynamically by the periodic tick.
+    pub fn reload(&self, config: CalibrationConfig) {
+        self.calibrator.reload(config.clone());
+        self.config.store(Arc::new(config));
+    }
+
+    /// Active refresh cadence (seconds); read per tick by the periodic task so
+    /// interval changes apply without a restart.
+    #[must_use]
+    pub fn refresh_interval_secs(&self) -> u64 {
+        self.config.load().refresh_interval_secs
     }
 
     /// Execute one reconciliation cycle.
@@ -151,17 +168,18 @@ impl CalibrationUpdater {
 
     /// Re-estimate `MoM` priors and update sparse buckets.
     async fn update_priors(&self) -> Result<(), AlgoError> {
+        let config = self.config.load_full();
         let all_entries = self.calibrator.all_entries();
 
         let (alpha, beta) = estimate_mom_prior(
             &all_entries,
-            self.config.min_sample_size,
-            self.config.bootstrap_alpha,
-            self.config.bootstrap_beta,
+            config.min_sample_size,
+            config.bootstrap_alpha,
+            config.bootstrap_beta,
         );
 
         for mut entry in self.calibrator.buckets().iter_mut() {
-            if entry.total_count < self.config.min_sample_size {
+            if entry.total_count < config.min_sample_size {
                 entry.alpha_prior = alpha;
                 entry.beta_prior = beta;
             }
@@ -188,7 +206,7 @@ impl CalibrationUpdater {
                     .posterior_mean
                     .map(|value| ChProbability::from(value.inner())),
                 fallback_tier: 1,
-                config_hash: calibration_config_hash(&self.config),
+                config_hash: calibration_config_hash(&config),
                 snapshot_hash: calibration_snapshot_hash(entry),
                 event_time: now_ms,
                 ingestion_time: now_ms,

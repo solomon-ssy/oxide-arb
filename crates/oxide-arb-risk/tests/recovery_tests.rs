@@ -8,9 +8,9 @@ mod support;
 use chrono::{Duration, Utc};
 use oxide_arb_error::OxideError;
 use oxide_arb_models::{
-    config::RiskConfig,
     domain::risk::RiskEngineState,
     enums::risk::{BreakerStateName, CircuitBreakerLevel},
+    runtime_config::RiskConfig,
     types::Usd,
 };
 use oxide_arb_risk::{clock::utc_clock, state_store};

@@ -122,7 +122,6 @@ mod tests {
     };
     use oxide_arb_algorithm::calibration::CalibrationEntry;
     use oxide_arb_models::{
-        config::CalibrationConfig,
         domain::{
             BookLevel,
             market::{MarketRegistryInfo, TokenInfo},
@@ -135,6 +134,7 @@ mod tests {
             },
             market::MarketStatus,
         },
+        runtime_config::CalibrationConfig,
         types::{EventId, MarketId, PositionId, Shares, TokenId, TradeId},
     };
     use rust_decimal_macros::dec;

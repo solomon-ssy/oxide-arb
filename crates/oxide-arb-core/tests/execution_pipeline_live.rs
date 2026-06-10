@@ -33,9 +33,10 @@ use oxide_arb_core::{
     post_trade::consumer::PostTradeConsumer,
     service::risk_metrics::{ApiHealthTracker, RiskMetricsState},
 };
+use oxide_arb_models::runtime_config::NotificationConfig;
 use oxide_arb_models::{
     clickhouse::OpportunityAuditRow,
-    config::{MarketDataConfig, PolymarketConfig, RiskConfig, WebSocketConfig},
+    config::{PolymarketConfig, WebSocketConfig},
     domain::{
         CoreEventPublisher, PositionInfo, TradeInfo,
         book::BookLevel,
@@ -51,6 +52,7 @@ use oxide_arb_models::{
         execution::ExecutionOutcomeSummary,
         opportunity::PayoutModel,
     },
+    runtime_config::{ExecutionRuntimeConfig, MarketDataStalenessConfig, RiskConfig},
     types::{
         Bps, EventId, MarketId, MicroProb, MicroScore, OpportunityId, Price, Shares, TokenId, Usd,
     },
@@ -395,14 +397,14 @@ fn risk_metrics(
 
 fn fixture(clob_client: Option<Arc<ClobClient>>) -> LiveFixture {
     let metrics = Arc::new(MetricsHub::new());
-    let alerts = Arc::new(AlertDispatcher::new(None, None, None, 0));
+    let alerts = Arc::new(AlertDispatcher::new(&NotificationConfig::default()));
     let fsm = Arc::new(ExecutionFSM::new(Arc::clone(&metrics), alerts));
     let book_store = Arc::new(BookStore::new(Arc::clone(&metrics)));
     let reservation_config = RiskConfig::default().exposure_reservation_config();
     let exposure = Arc::new(InMemoryExposureReservation::new(reservation_config.clone()));
     let capital = Arc::new(CapitalManager::new(
         Arc::clone(&exposure),
-        reservation_config,
+        &reservation_config,
     ));
     let scored = scored_opportunity();
     seed_books(&book_store, &scored);
@@ -417,13 +419,18 @@ fn fixture(clob_client: Option<Arc<ClobClient>>) -> LiveFixture {
     let audit_writer = audit_writer(Arc::clone(&metrics));
     let risk_engine = risk_engine();
     let pipeline = ExecutionPipeline::new(ExecutionPipelineDeps {
-        validator: Validator::new(
+        validator: Arc::new(Validator::new(
             Arc::clone(&book_store),
-            StalenessClassifier::new(&MarketDataConfig::default()),
-            dec!(50),
-            5_000,
+            StalenessClassifier::new(&MarketDataStalenessConfig::default()),
+            &ExecutionRuntimeConfig {
+                endgame_latency: oxide_arb_models::runtime_config::EndgameLatencyConfig {
+                    max_book_to_order_ms: 5_000,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
             Arc::clone(&metrics),
-        ),
+        )),
         plan_builder: PlanBuilder::new(
             Arc::clone(&fee_calculator),
             Arc::new(MarketRegistry::new()),
@@ -434,13 +441,13 @@ fn fixture(clob_client: Option<Arc<ClobClient>>) -> LiveFixture {
             Arc::clone(&fee_calculator),
             Arc::clone(&metrics),
         ),
-        order_strategy: FokOrderStrategy::new(
+        order_strategy: Arc::new(FokOrderStrategy::new(
             ExecutionModeHandle::new(ExecutionMode::Live),
             clob_client,
             fee_calculator,
             30_000,
             Arc::clone(&metrics),
-        ),
+        )),
         capital_manager: capital,
         risk_engine: Arc::clone(&risk_engine),
         risk_metrics: Arc::clone(&risk_metrics),

@@ -28,7 +28,10 @@ async fn governed_change_hard_links_operation_log_to_audit_chain() {
         "/api/runtime-config/versions",
         &admin,
         &[(REQUEST_ID, "dual-track-1")],
-        json!({ "config_json": { "mode": "live" }, "reason": "dual track" }),
+        json!({
+            "config_json": { "risk": { "max_daily_loss_usd": "80" } },
+            "reason": "dual track",
+        }),
     )
     .await;
     assert_eq!(res.status, StatusCode::OK);
@@ -61,6 +64,85 @@ async fn governed_change_hard_links_operation_log_to_audit_chain() {
     assert_eq!(row["governance_audit_event_id"], json!(event_id));
 }
 
+/// Activate and rollback hard-link their operation-log rows to the exact
+/// chain event they appended — same dual-track contract as create.
+#[actix_web::test]
+#[ignore = "requires Docker"]
+async fn activate_and_rollback_hard_link_operation_log_to_audit_chain() {
+    let env = TestEnv::start().await;
+    let admin = client::login(&env, "admin", "admin").await;
+
+    let create = client::post_with(
+        &env,
+        "/api/runtime-config/versions",
+        &admin,
+        &[(REQUEST_ID, "act-link-create")],
+        json!({
+            "config_json": { "risk": { "max_daily_loss_usd": "80" } },
+            "reason": "activation link",
+        }),
+    )
+    .await;
+    assert_eq!(create.status, StatusCode::OK);
+    let version_id = create.json()["data"]["runtime_config_version_id"]
+        .as_str()
+        .expect("version id")
+        .to_owned();
+    let create_event = client::wait_for_oplog(&env, &admin, "act-link-create").await[0]
+        ["governance_audit_event_id"]
+        .clone();
+
+    let activate = client::post_with(
+        &env,
+        &format!("/api/runtime-config/versions/{version_id}/activate"),
+        &admin,
+        &[(REQUEST_ID, "act-link-activate")],
+        json!({ "reason": "go live" }),
+    )
+    .await;
+    assert_eq!(activate.status, StatusCode::OK);
+
+    let rows = client::wait_for_oplog(&env, &admin, "act-link-activate").await;
+    assert_eq!(rows.len(), 1);
+    let row = &rows[0];
+    assert_eq!(row["action"], "runtime_config.activate");
+    assert_eq!(row["category"], "runtime_config");
+    let activate_event = row["governance_audit_event_id"].clone();
+    assert!(
+        activate_event.is_string(),
+        "activate must hard-link a chain event"
+    );
+    assert_ne!(
+        activate_event, create_event,
+        "activate appends its own chain event"
+    );
+
+    // The linked event exists in the verified chain.
+    let audit = client::get(&env, "/api/control-factors/audit", &admin).await;
+    assert_eq!(audit.json()["data"]["verified"], json!(true));
+    let chained = audit.json()["data"]["events"]
+        .as_array()
+        .expect("events")
+        .iter()
+        .any(|event| event["event_id"] == activate_event);
+    assert!(chained, "linked activation event must be on the chain");
+
+    // Rollback hard-links the same way.
+    let rollback = client::post_with(
+        &env,
+        &format!("/api/runtime-config/versions/{version_id}/rollback"),
+        &admin,
+        &[(REQUEST_ID, "act-link-rollback")],
+        json!({ "reason": "revert" }),
+    )
+    .await;
+    assert_eq!(rollback.status, StatusCode::OK);
+    let rows = client::wait_for_oplog(&env, &admin, "act-link-rollback").await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["action"], "runtime_config.rollback");
+    assert!(rows[0]["governance_audit_event_id"].is_string());
+}
+
 #[actix_web::test]
 #[ignore = "requires Docker"]
 async fn audit_endpoint_reports_a_verified_chain() {
@@ -71,7 +153,10 @@ async fn audit_endpoint_reports_a_verified_chain() {
         &env,
         "/api/runtime-config/versions",
         &admin,
-        json!({ "config_json": { "mode": "live" }, "reason": "seed" }),
+        json!({
+            "config_json": { "risk": { "max_daily_loss_usd": "80" } },
+            "reason": "seed",
+        }),
     )
     .await;
     let version_id = create.json()["data"]["runtime_config_version_id"]
@@ -112,7 +197,10 @@ async fn super_admin_governed_change_is_attributed_to_super_admin() {
         "/api/runtime-config/versions",
         &admin,
         &[(REQUEST_ID, "super-admin-attr")],
-        json!({ "config_json": { "mode": "live" }, "reason": "by super admin" }),
+        json!({
+            "config_json": { "risk": { "max_daily_loss_usd": "80" } },
+            "reason": "by super admin",
+        }),
     )
     .await;
     assert_eq!(res.status, StatusCode::OK);
@@ -131,7 +219,10 @@ async fn super_admin_governed_change_is_attributed_to_super_admin() {
             (REQUEST_ID, "super-admin-attr-2"),
             (ACTING_ROLE, "risk_owner"),
         ],
-        json!({ "config_json": { "mode": "shadow" }, "reason": "still super admin" }),
+        json!({
+            "config_json": { "risk": { "max_daily_loss_usd": "90" } },
+            "reason": "still super admin",
+        }),
     )
     .await;
     assert_eq!(res.status, StatusCode::OK);

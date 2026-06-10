@@ -6,9 +6,9 @@
 
 use chrono::{Duration, Utc};
 use oxide_arb_models::{
-    config::CircuitBreakerConfig,
     domain::risk::RiskEngineState,
     enums::risk::{BreakerStateName, CircuitBreakerLevel},
+    runtime_config::CircuitBreakerConfig,
     types::Usd,
 };
 use oxide_arb_risk::{circuit_breaker::CircuitBreaker, clock::utc_clock, types::BreakerState};

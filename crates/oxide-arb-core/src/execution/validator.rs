@@ -2,48 +2,69 @@ use crate::{
     observability::metrics_hub::MetricsHub,
     pipeline::{book_store::BookStore, staleness_classifier::StalenessClassifier},
 };
+use arc_swap::ArcSwap;
 use chrono::Utc;
 use num_traits::ToPrimitive;
 use oxide_arb_error::trading::TradingError;
 use oxide_arb_models::{
     domain::{execution::ValidationResult, opportunity::Opportunity},
     enums::common::{Side, StalenessLevel},
+    runtime_config::ExecutionRuntimeConfig,
     types::{Bps, TokenId},
 };
 use rust_decimal_macros::dec;
 use std::sync::Arc;
 
+/// Hot-swappable validation thresholds.
+struct ValidatorParams {
+    max_slippage_bps: rust_decimal::Decimal,
+    max_book_to_order_ms: u64,
+}
+
+impl ValidatorParams {
+    const fn from_config(config: &ExecutionRuntimeConfig) -> Self {
+        Self {
+            max_slippage_bps: config.timeout.max_validation_slippage_bps,
+            max_book_to_order_ms: config.endgame_latency.max_book_to_order_ms,
+        }
+    }
+}
+
 pub struct Validator {
     book_store: Arc<BookStore>,
     staleness_classifier: StalenessClassifier,
-    max_slippage_bps: rust_decimal::Decimal,
-    max_book_to_order_ms: u64,
+    params: ArcSwap<ValidatorParams>,
     metrics: Arc<MetricsHub>,
 }
 
 impl Validator {
-    pub const fn new(
+    pub fn new(
         book_store: Arc<BookStore>,
         staleness_classifier: StalenessClassifier,
-        max_slippage_bps: rust_decimal::Decimal,
-        max_book_to_order_ms: u64,
+        config: &ExecutionRuntimeConfig,
         metrics: Arc<MetricsHub>,
     ) -> Self {
         Self {
             book_store,
             staleness_classifier,
-            max_slippage_bps,
-            max_book_to_order_ms,
+            params: ArcSwap::from_pointee(ValidatorParams::from_config(config)),
             metrics,
         }
+    }
+
+    /// Hot-reload validation thresholds (runtime-config activation). The
+    /// staleness classifier is a shared handle reloaded by the applicator.
+    pub fn reload(&self, config: &ExecutionRuntimeConfig) {
+        self.params
+            .store(Arc::new(ValidatorParams::from_config(config)));
     }
 
     /// Configured maximum slippage (bps); execution-quality factors may only
     /// tighten this, never loosen it.
     #[must_use]
     #[inline]
-    pub const fn max_slippage_bps(&self) -> rust_decimal::Decimal {
-        self.max_slippage_bps
+    pub fn max_slippage_bps(&self) -> rust_decimal::Decimal {
+        self.params.load().max_slippage_bps
     }
 
     /// Shared orderbook store (used to classify execution-quality dimensions).
@@ -62,6 +83,7 @@ impl Validator {
         book_yes_version: u64,
         book_no_version: u64,
     ) -> Result<ValidationResult, TradingError> {
+        let params = self.params.load();
         let now_ms = ToPrimitive::to_u64(&Utc::now().timestamp_millis().max(0)).unwrap_or(0);
         let top = self
             .book_store
@@ -75,11 +97,11 @@ impl Validator {
             ));
         }
 
-        if top.max_staleness_ms > self.max_book_to_order_ms {
+        if top.max_staleness_ms > params.max_book_to_order_ms {
             self.metrics.book_freshness_rejected.inc();
             return Err(TradingError::Validation(format!(
                 "book age {0}ms exceeds SLO-2 budget {1}ms",
-                top.max_staleness_ms, self.max_book_to_order_ms
+                top.max_staleness_ms, params.max_book_to_order_ms
             )));
         }
 
@@ -105,11 +127,11 @@ impl Validator {
             rust_decimal::Decimal::ZERO
         };
 
-        if slippage_bps > self.max_slippage_bps {
+        if slippage_bps > params.max_slippage_bps {
             self.metrics.validation_failures.inc();
             return Err(TradingError::Validation(format!(
                 "slippage {slippage_bps}bps exceeds max {}bps",
-                self.max_slippage_bps
+                params.max_slippage_bps
             )));
         }
 

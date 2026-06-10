@@ -47,12 +47,10 @@ use oxide_arb_core::{
     },
     service::risk_metrics::{ApiHealthTracker, RiskMetricsState},
 };
+use oxide_arb_models::runtime_config::NotificationConfig;
 use oxide_arb_models::{
     clickhouse::OpportunityAuditRow,
-    config::{
-        CalibrationConfig, EmissionCooldownConfig, EndgameDetectionConfig, FillProbabilityConfig,
-        MarketDataConfig, PolymarketConfig, RiskConfig, ScorerConfig, WebSocketConfig,
-    },
+    config::{PolymarketConfig, WebSocketConfig},
     domain::{
         CoreEventPublisher, ProbabilityInput,
         book::{self, BookLevel, BookSnapshot, EndgameBookPair},
@@ -68,6 +66,11 @@ use oxide_arb_models::{
         common::{ExecutionMode, MarketCategory, Side, StalenessLevel, TickSize},
         market::MarketStatus,
         opportunity::PayoutModel,
+    },
+    runtime_config::{
+        CalibrationConfig, DetectionConfig, EmissionCooldownConfig, EndgameDetectionConfig,
+        EndgameLatencyConfig, ExecutionRuntimeConfig, FillProbabilityConfig,
+        MarketDataStalenessConfig, RiskConfig,
     },
     types::{
         Bps, EventId, MarketId, MicroPrice, MicroProb, MicroScore, MicroUsd, OpportunityId, Price,
@@ -154,16 +157,22 @@ fn make_detector() -> EndgameDetector<ZeroFeeEstimator> {
 
 fn make_pipeline() -> OpportunityPipeline<ZeroFeeEstimator> {
     let detector = make_detector();
-    let scorer_config = ScorerConfig::default();
-    let scorer = EndgameScorer::new(scorer_config.clone(), &FillProbabilityConfig::default(), 24);
+    let detection_config = DetectionConfig {
+        min_profit_threshold_usd: dec!(0.01),
+        ..DetectionConfig::default()
+    };
+    let scorer = EndgameScorer::new(
+        &detection_config.endgame.scorer,
+        &FillProbabilityConfig::default(),
+        24,
+    );
     let cooldown = InMemoryEmissionCooldown::new(&EmissionCooldownConfig::default());
     OpportunityPipeline::new(
         detector,
         scorer,
         cooldown,
         Arc::new(FactorSnapshotStore::new(Utc::now())) as Arc<dyn ControlFactorProvider>,
-        MicroUsd::try_from_decimal(dec!(0.01)).unwrap(),
-        &scorer_config,
+        &detection_config,
     )
 }
 
@@ -681,16 +690,22 @@ fn make_core_pipeline() -> CoreOpportunityPipeline {
         calibrator,
         CoreFeeEstimator(Arc::new(FeeCalculator::default())),
     );
-    let scorer_config = ScorerConfig::default();
-    let scorer = EndgameScorer::new(scorer_config.clone(), &FillProbabilityConfig::default(), 24);
+    let detection_config = DetectionConfig {
+        min_profit_threshold_usd: dec!(0.01),
+        ..DetectionConfig::default()
+    };
+    let scorer = EndgameScorer::new(
+        &detection_config.endgame.scorer,
+        &FillProbabilityConfig::default(),
+        24,
+    );
     let cooldown = InMemoryEmissionCooldown::new(&EmissionCooldownConfig::default());
     OpportunityPipeline::new(
         detector,
         scorer,
         cooldown,
         Arc::new(FactorSnapshotStore::new(Utc::now())) as Arc<dyn ControlFactorProvider>,
-        MicroUsd::try_from_decimal(dec!(0.01)).unwrap(),
-        &scorer_config,
+        &detection_config,
     )
 }
 
@@ -746,7 +761,7 @@ fn bench_scanner_scan_market(c: &mut Criterion) {
         pipeline,
         book_store,
         market_cache,
-        StalenessClassifier::new(&MarketDataConfig::default()),
+        StalenessClassifier::new(&MarketDataStalenessConfig::default()),
         metrics,
         None,
         CoreEventPublisher::bounded(1).0,
@@ -910,14 +925,14 @@ fn execution_bench_setup() -> (
     static SETUP: OnceLock<ExecutionBenchSetup> = OnceLock::new();
     SETUP.get_or_init(|| {
         let metrics = Arc::new(MetricsHub::new());
-        let alerts = Arc::new(AlertDispatcher::new(None, None, None, 0));
+        let alerts = Arc::new(AlertDispatcher::new(&NotificationConfig::default()));
         let fsm = Arc::new(ExecutionFSM::new(Arc::clone(&metrics), alerts));
         let book_store = Arc::new(BookStore::new(Arc::clone(&metrics)));
         let reservation_config = RiskConfig::default().exposure_reservation_config();
         let exposure = Arc::new(InMemoryExposureReservation::new(reservation_config.clone()));
         let capital = Arc::new(CapitalManager::new(
             Arc::clone(&exposure),
-            reservation_config,
+            &reservation_config,
         ));
         let scored = Arc::new(execution_bench_scored());
         seed_execution_books(&book_store, &scored);
@@ -934,14 +949,20 @@ fn execution_bench_setup() -> (
         let audit_writer = Arc::new(ExecutionAuditWriter::new(Arc::new(audit_writer_inner)));
 
         let fee_calculator = Arc::new(FeeCalculator::default());
+        let execution_config = ExecutionRuntimeConfig {
+            endgame_latency: EndgameLatencyConfig {
+                max_book_to_order_ms: 5_000,
+                ..EndgameLatencyConfig::default()
+            },
+            ..ExecutionRuntimeConfig::default()
+        };
         let pipeline = ExecutionPipeline::new(ExecutionPipelineDeps {
-            validator: Validator::new(
+            validator: Arc::new(Validator::new(
                 Arc::clone(&book_store),
-                StalenessClassifier::new(&MarketDataConfig::default()),
-                dec!(50),
-                5_000,
+                StalenessClassifier::new(&MarketDataStalenessConfig::default()),
+                &execution_config,
                 Arc::clone(&metrics),
-            ),
+            )),
             plan_builder: PlanBuilder::new(
                 Arc::clone(&fee_calculator),
                 Arc::new(MarketRegistry::new()),
@@ -952,13 +973,13 @@ fn execution_bench_setup() -> (
                 Arc::clone(&fee_calculator),
                 Arc::clone(&metrics),
             ),
-            order_strategy: FokOrderStrategy::new(
+            order_strategy: Arc::new(FokOrderStrategy::new(
                 ExecutionModeHandle::new(ExecutionMode::Paper),
                 None,
                 fee_calculator,
                 30_000,
                 Arc::clone(&metrics),
-            ),
+            )),
             capital_manager: capital,
             risk_engine: execution_bench_risk_engine(),
             risk_metrics: execution_bench_risk_metrics(exposure),

@@ -9,6 +9,7 @@ use oxide_arb_error::OxideError;
 use oxide_arb_models::{
     domain::position::PositionInfo,
     enums::common::{ExecutionMode, Side},
+    runtime_config::RiskConfig,
     types::{MarketId, Usd},
 };
 use oxide_arb_repository::{postgres::PgPositionRepository, traits::PositionRepository};
@@ -342,6 +343,49 @@ impl RiskMetricsState {
             ExecutionMode::Live => RiskMetricsSource::AuthoritativeClob,
         };
         self.store_empty_position_snapshot(cash_balance, source);
+    }
+
+    /// Hot-reload reaction to a `risk.bankroll_usd` activation: rebase the
+    /// simulated cash balance from the previous config to the next.
+    ///
+    /// Applies the bankroll delta to the live snapshot — positions and
+    /// exposure are preserved, equity is recomputed — so exposure-percentage
+    /// and balance checks see the new bankroll immediately. Authoritative
+    /// CLOB snapshots are never touched: Live cash comes from the venue, not
+    /// from configuration.
+    pub fn reload(&self, previous: &RiskConfig, next: &RiskConfig) {
+        let previous_bankroll = Usd::new(previous.bankroll_usd);
+        let next_bankroll = Usd::new(next.bankroll_usd);
+        if previous_bankroll == next_bankroll {
+            return;
+        }
+        if !matches!(
+            self.source(),
+            RiskMetricsSource::SimulatedDryRun | RiskMetricsSource::SimulatedPaper
+        ) {
+            return;
+        }
+        let delta = next_bankroll - previous_bankroll;
+        self.snapshot.rcu(|prev| {
+            let cash_balance = prev.cash_balance + delta;
+            Arc::new(MetricsSnapshot {
+                cash_balance,
+                positions: prev.positions.clone(),
+                total_position_exposure: prev.total_position_exposure,
+                position_mark_value: prev.position_mark_value,
+                equity: cash_balance + prev.position_mark_value,
+                market_position_exposures: prev.market_position_exposures.clone(),
+                open_position_count: prev.open_position_count,
+                open_buy_count: prev.open_buy_count,
+                open_sell_count: prev.open_sell_count,
+                refresh_sequence: prev.refresh_sequence + 1,
+            })
+        });
+        tracing::info!(
+            %previous_bankroll,
+            %next_bankroll,
+            "simulated cash balance rebased after bankroll activation"
+        );
     }
 
     fn store_empty_position_snapshot(&self, cash_balance: Usd, source: RiskMetricsSource) {

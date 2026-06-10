@@ -7,12 +7,12 @@ use oxide_arb_algorithm::{
     fee::FeeEstimator,
 };
 use oxide_arb_models::{
-    config::{CalibrationConfig, EndgameDetectionConfig},
     domain::{
         Opportunity, OrderbookSide,
         book::{BookLevel, BookSnapshot, EndgameBookPair, EndgameBookSnapshot},
     },
     enums::common::{MarketCategory, StalenessLevel},
+    runtime_config::{CalibrationConfig, EndgameDetectionConfig},
     types::{EventId, MarketId, Price, Shares, TokenId, Usd},
 };
 use rust_decimal::Decimal;

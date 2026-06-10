@@ -8,7 +8,6 @@ mod support;
 use chrono::{DateTime, Utc};
 use oxide_arb_error::{OxideError, OxideResult};
 use oxide_arb_models::{
-    config::{CircuitBreakerConfig, RiskConfig},
     domain::{
         BlacklistInfo, CoreEvent, CoreEventPublisher, PositionInfo, UpsertBlacklistEntry,
         calibration::{BucketKey, CalibrationSnapshot},
@@ -25,6 +24,7 @@ use oxide_arb_models::{
         opportunity::PayoutModel,
         risk::{BreakerStateName, CircuitBreakerLevel, TradeAccountingPhase},
     },
+    runtime_config::{CircuitBreakerConfig, RiskConfig},
     types::{Bps, EventId, MarketId, OpportunityId, Price, Shares, TokenId, TradeId, Usd},
 };
 use oxide_arb_risk::{
@@ -931,5 +931,86 @@ async fn settlement_emits_pnl_update_and_accumulates_lifetime_total() {
         recovered.snapshot(&metrics).total_realized_pnl,
         Usd::new(dec!(15)),
         "lifetime total survives restart"
+    );
+}
+
+// ── Runtime-config hot reload ────────────────────────────────────────────────
+
+#[tokio::test]
+async fn reload_applies_new_limits_without_losing_state() {
+    let metrics = MockMetrics::default();
+    let engine = build_engine(&metrics);
+
+    // Book a settlement loss well under every original cap (daily 75,
+    // single-loss default 30).
+    let report = engine
+        .on_trade_result(
+            TradeAccountingPhase::Settlement,
+            &test_trade_record(TradeBusinessOutcome::Success, dec!(-20)),
+            &metrics,
+        )
+        .await
+        .expect("settlement accounting")
+        .expect("post-trade report");
+    assert!(report.breaker_tripped.is_none(), "20 < every original cap");
+
+    // Tighten the daily loss cap below the already-realized loss and reload.
+    let tightened = RiskConfig {
+        max_daily_loss_usd: dec!(15),
+        max_hourly_loss_usd: dec!(15),
+        max_weekly_loss_usd: dec!(120),
+        daily_budget_usd: dec!(200),
+        ..RiskConfig::default()
+    };
+    engine.reload(tightened.clone());
+    assert_eq!(engine.config().max_daily_loss_usd, dec!(15));
+
+    // Accounting state survived the reload: the next settlement loss breaches
+    // the tightened cap using the accumulated daily loss (21 >= 15).
+    let report = engine
+        .on_trade_result(
+            TradeAccountingPhase::Settlement,
+            &test_trade_record(TradeBusinessOutcome::Success, dec!(-1)),
+            &metrics,
+        )
+        .await
+        .expect("settlement accounting")
+        .expect("post-trade report");
+    assert_eq!(
+        report.breaker_tripped,
+        Some(CircuitBreakerLevel::Daily),
+        "accumulated 21 USD loss must breach the tightened 15 USD cap"
+    );
+}
+
+#[tokio::test]
+async fn reload_updates_circuit_breaker_cooldowns() {
+    let metrics = MockMetrics::default();
+    let engine = build_engine(&metrics);
+
+    let reloaded = RiskConfig {
+        circuit_breaker: CircuitBreakerConfig {
+            l2_cooldown_secs: 1,
+            ..CircuitBreakerConfig::default()
+        },
+        daily_budget_usd: dec!(200),
+        ..RiskConfig::default()
+    };
+    engine.reload(reloaded);
+
+    // Trip the session breaker; with the reloaded 1s cooldown the FSM reaches
+    // HalfOpen (probe mode permits trading) on the next tick.
+    engine.on_execution_event(ExecutionRiskEvent::FokFailure {
+        market_id: MarketId::new("0xtest_market"),
+        token_id: TokenId::new("test_token"),
+        consecutive: 3,
+    });
+    assert!(!engine.allows_trading(), "session breaker tripped");
+
+    sleep(Duration::from_millis(1_200));
+    let _ = engine.tick(&metrics).await.expect("tick");
+    assert!(
+        engine.allows_trading(),
+        "reloaded 1s cooldown must reach HalfOpen (probe mode allows trading)"
     );
 }

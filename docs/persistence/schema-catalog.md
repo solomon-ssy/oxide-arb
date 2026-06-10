@@ -109,6 +109,15 @@ seed metadata 必须通过相关表的 schema module 暴露。
 - operator-owned 数据，例如 `runtime_config`，必须使用 no-clobber 策略。
 - loader SQL 必须确定、幂等。
 
+`runtime_config_version.config_json` 的类型化 schema 是
+`oxide_arb_models::runtime_config::RuntimeConfig`（固定 `schema_version = 1`，
+`deny_unknown_fields`）。bootstrap 在无活动版本（或活动版本无法通过类型化解析）时
+以 `RuntimeConfig::default()` 重新播种（`source = Bootstrap`）；之后所有变更只
+通过治理 API（create → preflight → activate）写入，TOML 永不覆盖该表。激活后
+由 `RuntimeConfigApplicator` 按 push 模型传播到 `RuntimeConfigSubscribers` 的
+全部类型化订阅者字段（可失败 reload 先 stage、全部成功才 commit），最后 swap
+进程内 `RuntimeConfigStore`。
+
 依赖型 graph seed：
 
 - 在 `depends_on` 中声明所有上游 artifact。

@@ -7,9 +7,9 @@
 //! - Daily loss accumulator is always non-negative
 
 use oxide_arb_models::{
-    config::{KellyConfig, RiskConfig},
     domain::risk::ProbabilityInput,
     enums::common::TradeBusinessOutcome,
+    runtime_config::{KellyConfig, RiskConfig},
     types::Usd,
 };
 use oxide_arb_risk::{

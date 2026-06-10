@@ -5,7 +5,7 @@
 
 use num_traits::ToPrimitive;
 use oxide_arb_models::{
-    config::CalibrationConfig,
+    runtime_config::CalibrationConfig,
     types::{MICRO_SCALE, MicroPrice, MicroProb},
 };
 

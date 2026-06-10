@@ -1,7 +1,6 @@
 //! System status, lifecycle, config, accounting, and reporting domain models.
 
 use crate::{
-    config::{CalibrationConfig, EndgameDetectionConfig},
     domain::{NullablePatch, Patch},
     enums::{
         common::{ExecutionMode, ReportType},
@@ -14,7 +13,6 @@ use crate::{
     },
 };
 use chrono::{DateTime, NaiveDate, Utc};
-use rust_decimal::Decimal;
 use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -60,48 +58,9 @@ pub struct ShutdownProgress {
 }
 
 // ── Runtime config ───────────────────────────────────────────────────
-
-/// Versioned runtime configuration document.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RuntimeConfigDocument {
-    pub schema_version: i32,
-    pub detection: DetectionRuntimeConfig,
-    pub execution: ExecutionRuntimeConfig,
-    pub sizing: SizingRuntimeConfig,
-    pub risk_limits: RiskLimitRuntimeConfig,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DetectionRuntimeConfig {
-    pub min_profit_threshold_usd: Decimal,
-    pub endgame_hours_before_close: u32,
-    pub convergence_threshold: Decimal,
-    #[serde(default)]
-    pub endgame: Option<EndgameDetectionConfig>,
-    #[serde(default)]
-    pub calibration: Option<CalibrationConfig>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExecutionRuntimeConfig {
-    pub max_slippage_bps: u32,
-    pub order_timeout_secs: u32,
-    pub cooldown_after_trade_secs: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SizingRuntimeConfig {
-    pub kelly_fraction: Decimal,
-    pub max_position_fraction_of_book: Decimal,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RiskLimitRuntimeConfig {
-    pub max_portfolio_exposure_usd: Usd,
-    pub max_single_position_usd: Usd,
-    pub max_daily_loss_usd: Usd,
-    pub circuit_breaker_threshold: u32,
-}
+//
+// The typed schema for `config_json` is `crate::runtime_config::RuntimeConfig`
+// (`schema_version = 1`). This module only carries the persistence DTOs.
 
 /// DB row projection for the immutable `runtime_config_version` table.
 #[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]

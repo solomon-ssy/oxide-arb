@@ -337,16 +337,19 @@ audit_event_id UUID null
 created_at timestamptz not null
 ```
 
-Runtime config document 必须是 typed document，而不是 key-value bag：
+Runtime config document 必须是 typed document，而不是 key-value bag。落地实现为
+`oxide_arb_models::runtime_config::RuntimeConfig`（`schema_version = 1`，
+`deny_unknown_fields`）：
 
 ```rust
-pub struct RuntimeConfigDocument {
-    pub schema_version: u32,
-    pub operator: OperatorRuntimeConfig,
-    pub detection: DetectionRuntimeConfig,
+pub struct RuntimeConfig {
+    pub schema_version: i32,
+    pub market_data: MarketDataStalenessConfig,
+    pub detection: DetectionConfig,
     pub execution: ExecutionRuntimeConfig,
-    pub sizing: SizingRuntimeConfig,
-    pub risk_limits: RiskLimitRuntimeConfig,
+    pub risk: RiskConfig,
+    pub settlement: SettlementRuntimeConfig,
+    pub notification: NotificationConfig,
 }
 ```
 

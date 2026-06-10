@@ -15,7 +15,7 @@ use crate::{
     circuit_breaker::CircuitBreaker,
     clock::Clock,
     context::{CircuitBreakerGate, ManualHaltGate, PreTradeContext},
-    pipeline::StaticRiskPipeline,
+    pipeline::{StaticRiskPipeline, build_default_pipeline},
     position::PotentialLossLedger,
     reconciliation::LedgerReconciler,
     sizing::{DrawdownGuard, MultiConstraintSizer},
@@ -35,7 +35,6 @@ use num_traits::ToPrimitive;
 use oxide_arb_error::OxideResult;
 use oxide_arb_models::types::MarketId as ModelsMarketId;
 use oxide_arb_models::{
-    config::RiskConfig,
     domain::{
         BlacklistInfo, CoreEvent, CoreEventPublisher,
         blacklist::UpsertBlacklistEntry,
@@ -57,6 +56,7 @@ use oxide_arb_models::{
             TradeAccountingPhase, WindowType,
         },
     },
+    runtime_config::RiskConfig,
     types::{LedgerId, MarketId, OpportunityId, Usd},
 };
 use parking_lot::RwLock;
@@ -64,6 +64,31 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
+
+/// Atomically published derived parameter set: the risk configuration plus
+/// every subsystem deterministically rebuilt from it (static check pipeline,
+/// sizer, reconciler).
+///
+/// Hot-path readers load this once per decision, so a concurrent
+/// [`RiskEngine::reload`] can never expose a new pipeline alongside an
+/// old config (or vice versa) — the snapshot swaps as one unit.
+pub(crate) struct EngineParams {
+    pub(crate) config: Arc<RiskConfig>,
+    pub(crate) pipeline: StaticRiskPipeline,
+    pub(crate) sizer: MultiConstraintSizer,
+    pub(crate) reconciler: Arc<LedgerReconciler>,
+}
+
+impl EngineParams {
+    pub(crate) fn from_config(config: RiskConfig) -> Self {
+        Self {
+            pipeline: build_default_pipeline(&config),
+            sizer: MultiConstraintSizer::new(&config),
+            reconciler: Arc::new(LedgerReconciler::new(config.reconciliation_tolerance_usd)),
+            config: Arc::new(config),
+        }
+    }
+}
 
 pub struct RiskEngine<P = Arc<dyn RiskPersistence>>
 where
@@ -79,13 +104,11 @@ where
     /// any pre-trade gate; surfaced through the snapshot and the `pnl.update`
     /// event so the dashboard's "total" agrees with the persisted state.
     pub(crate) lifetime_realized: RwLock<Usd>,
-    pub(crate) pipeline: StaticRiskPipeline,
+    /// Config + config-derived subsystems, swapped as one unit on reload.
+    pub(crate) params: ArcSwap<EngineParams>,
     pub(crate) risk_snapshot: ArcSwap<RiskSnapshot>,
     pub(crate) blacklist: BlacklistManager,
-    pub(crate) sizer: MultiConstraintSizer,
     pub(crate) drawdown: RwLock<DrawdownGuard>,
-    pub(crate) reconciler: LedgerReconciler,
-    pub(crate) config: RiskConfig,
     pub(crate) persistence: P,
     pub(crate) potential_loss_store: Arc<dyn PotentialLossStore>,
     pub(crate) audit_sink: Option<Arc<dyn AuditSink>>,
@@ -133,6 +156,11 @@ where
         let now = self.clock.now();
         let version = self.state_version.load();
         let snap = self.risk_snapshot.load();
+        // Single load: config, pipeline, and sizer come from one consistent
+        // snapshot even if a reload lands mid-decision.
+        let params = self.params.load();
+        let config = &params.config;
+        let pipeline = &params.pipeline;
 
         let phase1_ctx = PreTradeContext {
             opportunity: opp,
@@ -142,10 +170,8 @@ where
             factor_context,
             now,
         };
-        let metrics_split = self.pipeline.metrics_split_index();
-        let mut gate_report = self
-            .pipeline
-            .evaluate_range(&phase1_ctx, mode, 0, metrics_split);
+        let metrics_split = pipeline.metrics_split_index();
+        let mut gate_report = pipeline.evaluate_range(&phase1_ctx, mode, 0, metrics_split);
 
         let ctx = if gate_report.has_failed_hard_gate && mode == ReportMode::ShortCircuit {
             phase1_ctx
@@ -155,55 +181,52 @@ where
                 metrics: metrics_snap,
                 ..phase1_ctx
             };
-            let phase2 =
-                self.pipeline
-                    .evaluate_range(&full_ctx, mode, metrics_split, self.pipeline.len());
+            let phase2 = pipeline.evaluate_range(&full_ctx, mode, metrics_split, pipeline.len());
             gate_report.merge(phase2);
             full_ctx
         };
 
-        let (allowed, denial_reason, recommended_size, sizing_breakdown) = if gate_report
-            .has_failed_hard_gate
-        {
-            let denial_reason = gate_report.results.iter().find(|c| !c.passed).map(|c| {
-                format!(
-                    "{}: {}",
-                    c.check_id,
-                    c.detail.as_deref().unwrap_or("failed")
-                )
-            });
-            (false, denial_reason, None, None)
-        } else {
-            let bankroll = available_bankroll(
-                ctx.equity(),
-                Usd::new(self.config.reserve_balance_usd),
-                ctx.reserved_usd(),
-                ctx.total_potential_loss(),
-                Usd::new(self.config.bankroll_usd),
-            );
-
-            let drawdown_factor = ctx.drawdown_factor();
-            let size_result = self.sizer.size(&ctx, bankroll, drawdown_factor);
-
-            let allowed = size_result.bet_usd > Usd::ZERO
-                && size_result.bet_usd >= Usd::new(self.config.min_trade_usd);
-
-            let denial_reason = if allowed {
-                None
+        let (allowed, denial_reason, recommended_size, sizing_breakdown) =
+            if gate_report.has_failed_hard_gate {
+                let denial_reason = gate_report.results.iter().find(|c| !c.passed).map(|c| {
+                    format!(
+                        "{}: {}",
+                        c.check_id,
+                        c.detail.as_deref().unwrap_or("failed")
+                    )
+                });
+                (false, denial_reason, None, None)
             } else {
-                Some(format!(
-                    "sizing returned {} (binding: {}, min_trade: {})",
-                    size_result.bet_usd, size_result.binding_constraint, self.config.min_trade_usd,
-                ))
+                let bankroll = available_bankroll(
+                    ctx.equity(),
+                    Usd::new(config.reserve_balance_usd),
+                    ctx.reserved_usd(),
+                    ctx.total_potential_loss(),
+                    Usd::new(config.bankroll_usd),
+                );
+
+                let drawdown_factor = ctx.drawdown_factor();
+                let size_result = params.sizer.size(&ctx, bankroll, drawdown_factor);
+
+                let allowed = size_result.bet_usd > Usd::ZERO
+                    && size_result.bet_usd >= Usd::new(config.min_trade_usd);
+
+                let denial_reason = if allowed {
+                    None
+                } else {
+                    Some(format!(
+                        "sizing returned {} (binding: {}, min_trade: {})",
+                        size_result.bet_usd, size_result.binding_constraint, config.min_trade_usd,
+                    ))
+                };
+
+                if allowed {
+                    (true, denial_reason, Some(size_result), None)
+                } else {
+                    let breakdown = size_result.breakdown;
+                    (false, denial_reason, None, Some(breakdown))
+                }
             };
-
-            if allowed {
-                (true, denial_reason, Some(size_result), None)
-            } else {
-                let breakdown = size_result.breakdown;
-                (false, denial_reason, None, Some(breakdown))
-            }
-        };
 
         let check_results = gate_report.results;
         let trace = RiskDecisionTrace {
@@ -550,9 +573,11 @@ where
     /// - Hourly cap → `trip()` (L2 — auto-recovery via `HalfOpen`)
     fn check_loss_caps(&self) -> Option<CircuitBreakerLevel> {
         let mut highest: Option<CircuitBreakerLevel> = None;
+        let params = self.params.load();
+        let config = &params.config;
 
         let daily_loss = self.daily.read().daily_loss();
-        if daily_loss.inner() >= self.config.max_daily_loss_usd {
+        if daily_loss.inner() >= config.max_daily_loss_usd {
             let reason = format!("daily loss cap breached: {daily_loss}");
             self.circuit_breaker
                 .write()
@@ -561,7 +586,7 @@ where
         }
 
         let weekly_loss = self.weekly.read().weekly_loss();
-        if weekly_loss.inner() >= self.config.max_weekly_loss_usd {
+        if weekly_loss.inner() >= config.max_weekly_loss_usd {
             let reason = format!("weekly loss cap breached: {weekly_loss}");
             self.circuit_breaker
                 .write()
@@ -570,7 +595,7 @@ where
         }
 
         let max_single = self.daily.read().stats().max_single_loss;
-        if max_single.inner() >= self.config.max_single_loss_usd {
+        if max_single.inner() >= config.max_single_loss_usd {
             let reason = format!("single loss cap breached: {max_single}");
             self.circuit_breaker
                 .write()
@@ -579,7 +604,7 @@ where
         }
 
         let daily_fee = self.daily.read().fees();
-        if daily_fee.inner() >= self.config.max_daily_fee_spend_usd {
+        if daily_fee.inner() >= config.max_daily_fee_spend_usd {
             let reason = format!("daily fee spend cap breached: {daily_fee}");
             self.circuit_breaker
                 .write()
@@ -588,7 +613,7 @@ where
         }
 
         let hourly_loss = self.hourly.read().hourly_loss();
-        if hourly_loss.inner() >= self.config.max_hourly_loss_usd {
+        if hourly_loss.inner() >= config.max_hourly_loss_usd {
             let reason = format!("hourly loss cap breached: {hourly_loss}");
             self.circuit_breaker
                 .write()
@@ -606,6 +631,8 @@ where
         metrics: &dyn RiskMetrics,
     ) -> Option<CircuitBreakerLevel> {
         let mut tripped = None;
+        let params = self.params.load();
+        let config = &params.config;
 
         {
             let mut cb = self.circuit_breaker.write();
@@ -617,10 +644,10 @@ where
         self.drawdown.write().update_equity(metrics.equity());
 
         let miss_count = metrics.consecutive_market_misses(&trade.market_id);
-        if miss_count >= self.config.max_consecutive_misses {
+        if miss_count >= config.max_consecutive_misses {
             let reason = format!(
                 "consecutive misses: {miss_count} >= {}",
-                self.config.max_consecutive_misses
+                config.max_consecutive_misses
             );
             self.circuit_breaker
                 .write()
@@ -629,7 +656,7 @@ where
         }
 
         let daily_fee = self.daily.read().fees();
-        if daily_fee.inner() >= self.config.max_daily_fee_spend_usd {
+        if daily_fee.inner() >= config.max_daily_fee_spend_usd {
             let reason = format!("daily fee spend cap breached: {daily_fee}");
             self.circuit_breaker
                 .write()
@@ -638,7 +665,7 @@ where
         }
 
         let hourly_fee = self.hourly.read().fees();
-        if hourly_fee.inner() >= self.config.max_hourly_fee_spend_usd {
+        if hourly_fee.inner() >= config.max_hourly_fee_spend_usd {
             let reason = format!("hourly fee spend cap breached: {hourly_fee}");
             self.circuit_breaker
                 .write()
@@ -650,10 +677,10 @@ where
         if req_count > 0 {
             let error_rate = rust_decimal::Decimal::from(metrics.api_error_count())
                 / rust_decimal::Decimal::from(req_count);
-            if error_rate >= self.config.api_error_rate_threshold {
+            if error_rate >= config.api_error_rate_threshold {
                 let reason = format!(
                     "API error rate {error_rate:.2} >= threshold {}",
-                    self.config.api_error_rate_threshold
+                    config.api_error_rate_threshold
                 );
                 self.circuit_breaker
                     .write()
@@ -694,17 +721,16 @@ where
         let weekly_rolled = self.weekly.write().maybe_rollover();
         let hourly_rolled = self.hourly.write().maybe_rollover();
         self.blacklist.gc();
+        let potential_loss_escalation_secs =
+            self.params.load().config.potential_loss_escalation_secs;
         let stale_potential_loss = self
             .potential_loss_store
-            .find_stale(Duration::from_secs(
-                self.config.potential_loss_escalation_secs,
-            ))
+            .find_stale(Duration::from_secs(potential_loss_escalation_secs))
             .await?;
         if !stale_potential_loss.is_empty() {
             let reason = format!(
-                "{} stale potential-loss entries exceeded {}s",
+                "{} stale potential-loss entries exceeded {potential_loss_escalation_secs}s",
                 stale_potential_loss.len(),
-                self.config.potential_loss_escalation_secs
             );
             self.circuit_breaker
                 .write()
@@ -992,9 +1018,48 @@ where
         &self.blacklist
     }
 
+    /// Snapshot of the active ledger reconciler (lock-free read).
     #[must_use]
-    pub const fn reconciler(&self) -> &LedgerReconciler {
-        &self.reconciler
+    pub fn reconciler(&self) -> Arc<LedgerReconciler> {
+        Arc::clone(&self.params.load().reconciler)
+    }
+
+    /// Snapshot of the active risk configuration (lock-free read).
+    #[must_use]
+    pub fn config(&self) -> Arc<RiskConfig> {
+        Arc::clone(&self.params.load().config)
+    }
+
+    /// Hot-reload the full risk configuration (runtime-config activation).
+    ///
+    /// The config and every subsystem derived from it (static check pipeline,
+    /// sizer, reconciler) are rebuilt off-path and published as **one**
+    /// [`EngineParams`] swap, so the hot path can never observe a new pipeline
+    /// paired with an old config. The independently locked subsystems
+    /// (circuit-breaker cooldowns, drawdown policy, daily budget, blacklist
+    /// thresholds) are updated next, then the lock-free risk snapshot is
+    /// republished. Accounting windows, breaker FSM state, potential-loss
+    /// ledger, and runtime blacklist entries are all preserved.
+    ///
+    /// Caller contract (enforced by the activation preflight): exposure
+    /// ceilings must not fall below currently reserved capital.
+    pub fn reload(&self, config: RiskConfig) {
+        let params = EngineParams::from_config(config);
+        self.circuit_breaker
+            .write()
+            .set_config(params.config.circuit_breaker.clone());
+        self.drawdown.write().set_params(
+            params.config.drawdown.max_drawdown_pct,
+            params.config.drawdown.drawdown_reduction_factor,
+        );
+        self.daily
+            .write()
+            .set_budget(Usd::new(params.config.daily_budget_usd));
+        self.blacklist.reload(&params.config);
+        self.params.store(Arc::new(params));
+        self.state_version.increment();
+        self.publish_risk_snapshot();
+        tracing::info!("risk engine configuration reloaded");
     }
 
     #[must_use]
@@ -1122,9 +1187,11 @@ where
 
     /// Process execution-layer health and blacklist signals.
     pub fn on_execution_event(&self, event: ExecutionRiskEvent) {
+        let params = self.params.load();
+        let config = &params.config;
         match event {
             ExecutionRiskEvent::HeartbeatFailure => {
-                let max_failures = self.config.heartbeat_max_failures;
+                let max_failures = config.heartbeat_max_failures;
                 let tripped = self
                     .circuit_breaker
                     .write()
@@ -1141,10 +1208,10 @@ where
                 market_id,
                 consecutive,
                 ..
-            } if consecutive >= self.config.max_consecutive_misses => {
+            } if consecutive >= config.max_consecutive_misses => {
                 let reason = format!(
                     "consecutive FOK failures on {market_id}: {consecutive} >= {}",
-                    self.config.max_consecutive_misses
+                    config.max_consecutive_misses
                 );
                 self.circuit_breaker
                     .write()
@@ -1195,6 +1262,8 @@ where
     }
 
     fn compile_risk_snapshot(&self) -> RiskSnapshot {
+        let params = self.params.load();
+        let config = &params.config;
         let cb = self.circuit_breaker.read();
         let daily = self.daily.read();
         let weekly = self.weekly.read();
@@ -1236,8 +1305,8 @@ where
             },
             drawdown: DrawdownSnapshot {
                 hwm: dg.hwm(),
-                max_drawdown_pct: self.config.drawdown.max_drawdown_pct,
-                reduction_factor: self.config.drawdown.drawdown_reduction_factor,
+                max_drawdown_pct: config.drawdown.max_drawdown_pct,
+                reduction_factor: config.drawdown.drawdown_reduction_factor,
             },
             total_potential_loss: pl.total_potential_loss(),
             blacklist: self.blacklist.build_bloom_snapshot(),

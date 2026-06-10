@@ -5,20 +5,21 @@
 
 use super::fees::FeesConfig;
 use serde::Deserialize;
-use validator::Validate;
 
 /// Polymarket platform configuration. Mounted at `[polymarket]` in TOML.
-#[derive(Debug, Clone, Deserialize, Validate)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct PolymarketConfig {
-    #[serde(default = "default_clob_url")]
+    /// CLOB REST base URL. Default: `https://clob.polymarket.com`.
     pub clob_base_url: String,
-    #[serde(default = "default_clob_ws_url")]
+    /// CLOB market-data WebSocket URL.
+    /// Default: `wss://ws-subscriptions-clob.polymarket.com/ws/market`.
     pub clob_ws_url: String,
-    #[serde(default = "default_chain_id")]
+    /// EVM chain ID; must be Polygon (`137`) — validated at startup.
     pub chain_id: u64,
-    #[serde(default)]
+    /// On-chain (Polygon RPC) parameters.
     pub onchain: OnchainConfig,
-    #[serde(default)]
+    /// Per-category fee schedule.
     pub fees: FeesConfig,
 }
 
@@ -45,11 +46,13 @@ const fn default_chain_id() -> u64 {
 }
 
 /// On-chain interaction parameters (Polygon RPC).
-#[derive(Debug, Clone, Deserialize, Validate)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct OnchainConfig {
-    #[serde(default = "default_rpc_url")]
+    /// Polygon JSON-RPC endpoint (CTF oracle + redeem transactions).
+    /// Default: `https://polygon-rpc.com`.
     pub rpc_url: String,
-    #[serde(default = "default_rpc_timeout")]
+    /// RPC request timeout (ms). Default: `10000`.
     pub rpc_timeout_ms: u64,
 }
 

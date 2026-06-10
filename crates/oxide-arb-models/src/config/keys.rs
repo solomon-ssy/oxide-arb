@@ -1,26 +1,23 @@
 //! API keys and credential source configuration.
 
 use serde::Deserialize;
-use validator::Validate;
 
-#[derive(Debug, Clone, Default, Deserialize, Validate)]
+/// Credential source and material. Sensitive values must be supplied via
+/// `OXIDE_ARB__KEYS__*` environment variables, never the TOML.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct KeysConfig {
-    #[serde(default)]
+    /// Where credentials are read from. Default: `env`.
     pub source: KeySource,
     /// Path to the encrypted keystore file (if `source` is `Keystore`).
-    #[serde(default)]
     pub keystore_path: Option<String>,
     /// Polymarket API key (if `source` is `Env`).
-    #[serde(default)]
     pub polymarket_api_key: Option<String>,
     /// Polymarket API secret (if `source` is `Env`).
-    #[serde(default)]
     pub polymarket_api_secret: Option<String>,
     /// Polymarket API passphrase (if `source` is `Env`).
-    #[serde(default)]
     pub polymarket_passphrase: Option<String>,
     /// Private key for on-chain signing (if `source` is `Env`).
-    #[serde(default)]
     pub private_key: Option<String>,
 }
 

@@ -13,21 +13,27 @@ use crate::{
 use dashmap::DashMap;
 use num_traits::ToPrimitive;
 use oxide_arb_models::{
-    config::RiskConfig,
     domain::blacklist::BlacklistInfo,
     enums::{
         blacklist::BlacklistCheckResult,
         risk::{BlacklistReason, BlacklistScope},
     },
+    runtime_config::RiskConfig,
     types::{MarketId, TokenId},
 };
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicU32, AtomicU64, Ordering},
+    },
+    time::Duration,
+};
 
 /// Concurrent blacklist projection with lazy TTL eviction.
 pub struct BlacklistManager {
     entries: DashMap<BlacklistKey, BlacklistInfo>,
-    market_miss_blacklist_count: u32,
-    market_miss_blacklist_duration_secs: u64,
+    market_miss_blacklist_count: AtomicU32,
+    market_miss_blacklist_duration_secs: AtomicU64,
     clock: Arc<dyn Clock>,
 }
 
@@ -36,13 +42,54 @@ impl BlacklistManager {
     /// from the config.
     #[must_use]
     pub fn new(config: &RiskConfig, clock: Arc<dyn Clock>) -> Self {
-        let entries = DashMap::new();
+        let manager = Self {
+            entries: DashMap::new(),
+            market_miss_blacklist_count: AtomicU32::new(config.market_miss_blacklist_count),
+            market_miss_blacklist_duration_secs: AtomicU64::new(
+                config.market_miss_blacklist_duration_secs,
+            ),
+            clock,
+        };
+        manager.merge_permanent_entries(config);
 
-        let now = clock.now();
+        if !manager.entries.is_empty() {
+            tracing::info!(
+                permanent_count = manager.entries.len(),
+                "blacklist manager initialized with permanent entries"
+            );
+        }
+        manager
+    }
+
+    /// Hot-reload blacklist parameters (runtime-config activation).
+    ///
+    /// Auto-blacklist thresholds apply immediately. Permanent lists are
+    /// **merged**: new config entries are added, but entries added at runtime
+    /// through the blacklist API (or by auto-blacklisting) are never removed —
+    /// removal stays an explicit, audited operator action.
+    pub fn reload(&self, config: &RiskConfig) {
+        self.market_miss_blacklist_count
+            .store(config.market_miss_blacklist_count, Ordering::Relaxed);
+        self.market_miss_blacklist_duration_secs.store(
+            config.market_miss_blacklist_duration_secs,
+            Ordering::Relaxed,
+        );
+        self.merge_permanent_entries(config);
+    }
+
+    /// Consecutive-miss count at which a market is auto-blacklisted.
+    #[must_use]
+    pub fn miss_threshold(&self) -> u32 {
+        self.market_miss_blacklist_count.load(Ordering::Relaxed)
+    }
+
+    /// Insert config-declared permanent entries that are not already present.
+    fn merge_permanent_entries(&self, config: &RiskConfig) {
+        let now = self.clock.now();
         for market_str in &config.permanent_blacklist_markets {
             let market_id = MarketId::new(market_str);
             let key = BlacklistKey::Market(market_id.clone());
-            let entry = BlacklistInfo {
+            self.entries.entry(key).or_insert_with(|| BlacklistInfo {
                 market_id,
                 token_id: None,
                 scope: BlacklistScope::Full,
@@ -51,14 +98,13 @@ impl BlacklistManager {
                 created_at: now,
                 miss_count: 0,
                 updated_at: now,
-            };
-            entries.insert(key, entry);
+            });
         }
 
         for token_str in &config.permanent_blacklist_tokens {
             let token_id = TokenId::new(token_str);
             let key = BlacklistKey::Token(token_id.clone());
-            let entry = BlacklistInfo {
+            self.entries.entry(key).or_insert_with(|| BlacklistInfo {
                 market_id: MarketId::new("_token_blacklist_"),
                 token_id: Some(token_id),
                 scope: BlacklistScope::Full,
@@ -67,22 +113,7 @@ impl BlacklistManager {
                 created_at: now,
                 miss_count: 0,
                 updated_at: now,
-            };
-            entries.insert(key, entry);
-        }
-
-        if !entries.is_empty() {
-            tracing::info!(
-                permanent_count = entries.len(),
-                "blacklist manager initialized with permanent entries"
-            );
-        }
-
-        Self {
-            entries,
-            market_miss_blacklist_count: config.market_miss_blacklist_count,
-            market_miss_blacklist_duration_secs: config.market_miss_blacklist_duration_secs,
-            clock,
+            });
         }
     }
 
@@ -269,7 +300,7 @@ impl BlacklistManager {
         market_id: &MarketId,
         consecutive_misses: u32,
     ) -> Option<BlacklistInfo> {
-        if consecutive_misses < self.market_miss_blacklist_count {
+        if consecutive_misses < self.market_miss_blacklist_count.load(Ordering::Relaxed) {
             return None;
         }
 
@@ -278,7 +309,10 @@ impl BlacklistManager {
             return None;
         }
 
-        let duration = Duration::from_secs(self.market_miss_blacklist_duration_secs);
+        let duration = Duration::from_secs(
+            self.market_miss_blacklist_duration_secs
+                .load(Ordering::Relaxed),
+        );
 
         let entry = self.add_temporary(
             market_id.clone(),
@@ -378,7 +412,7 @@ impl BlacklistManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use oxide_arb_models::{config::RiskConfig, enums::risk::BlacklistReason};
+    use oxide_arb_models::{enums::risk::BlacklistReason, runtime_config::RiskConfig};
 
     #[test]
     fn bloom_snapshot_blocks_trading_path_market() {

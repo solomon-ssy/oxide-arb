@@ -9,9 +9,7 @@ use oxide_arb_algorithm::{
 };
 use oxide_arb_models::{
     clickhouse::{CalibrationSnapshotRow, OpportunityDetectionRow},
-    config::CalibrationConfig,
     domain::{
-        RuntimeConfigDocument,
         book::{BookSnapshot, EndgameBookPair},
         calibration::BucketKey,
         control_factor::QueryFingerprint,
@@ -22,7 +20,8 @@ use oxide_arb_models::{
         clickhouse::{ChDurationBucket, ChPriceZone},
         common::{MarketCategory, StalenessLevel},
     },
-    types::{MarketId, OpportunityId, Price, Shares, TokenId, Usd},
+    runtime_config::{CalibrationConfig, RuntimeConfig},
+    types::{MarketId, MicroScore, OpportunityId, Price, Shares, TokenId, Usd},
 };
 use serde::{Deserialize, Serialize};
 
@@ -272,8 +271,8 @@ fn replay_detection(
     detected_at: DateTime<Utc>,
 ) -> Option<DetectorReplayOutcome> {
     let runtime_config = runtime_config(book)?;
-    let endgame_config = runtime_config.detection.endgame.as_ref()?;
-    let calibration_config = runtime_config.detection.calibration.as_ref()?;
+    let endgame_config = &runtime_config.detection.endgame;
+    let calibration_config = &runtime_config.detection.calibration;
     let decision_view = decision_view?;
     if !decision_view.production_eligible {
         return None;
@@ -297,7 +296,7 @@ fn replay_detection(
         },
     );
     let scorer = EndgameScorer::new(
-        endgame_config.scorer.clone(),
+        &endgame_config.scorer,
         &endgame_config.fill_probability,
         endgame_config.settlement_window_hours,
     );
@@ -330,7 +329,7 @@ fn replay_detection(
             calibration_snapshot_mismatch: true,
         });
     }
-    if opportunity.depth_used_pct > endgame_config.scorer.max_depth_usage_pct.to_pct_decimal() {
+    if opportunity.depth_used_pct > endgame_config.scorer.max_depth_usage_pct {
         return Some(DetectorReplayOutcome {
             detected: false,
             score_delta: None,
@@ -339,7 +338,9 @@ fn replay_detection(
         });
     }
     let draft = scorer.score(&opportunity, detected_at, None);
-    let detected = draft.score >= endgame_config.scorer.min_score;
+    let min_score =
+        MicroScore::try_from_decimal(endgame_config.scorer.min_score).unwrap_or(MicroScore::ZERO);
+    let detected = draft.score >= min_score;
     let score_delta = row.score.map(|score| draft.score.micro() - score);
     let replay_bucket = opportunity.meta.duration_bucket;
     let replay_zone = opportunity.meta.price_zone;
@@ -371,18 +372,15 @@ fn decision_view_for<'a>(
     })
 }
 
-fn runtime_config(book: &BookReconstructionArtifact) -> Option<RuntimeConfigDocument> {
+fn runtime_config(book: &BookReconstructionArtifact) -> Option<RuntimeConfig> {
     book.source_bundle
         .runtime_config
         .as_ref()
-        .and_then(|version| serde_json::from_value(version.config_json.clone()).ok())
+        .and_then(|version| RuntimeConfig::from_json(&version.config_json).ok())
 }
 
 fn detector_replay_inputs_complete(book: &BookReconstructionArtifact) -> bool {
-    book.source_bundle.runtime_config.as_ref().is_some()
-        && runtime_config(book).is_some_and(|config| {
-            config.detection.endgame.is_some() && config.detection.calibration.is_some()
-        })
+    runtime_config(book).is_some()
         && !book.source_bundle.calibration_snapshots.is_empty()
         && book
             .market_books
@@ -519,20 +517,20 @@ mod tests {
             CalibrationSnapshotRow, ChBps, ChDecimal64, ChFactor, ChPrice, ChProbability,
             ChSchemaVersion, ChShares, ChUsd, OpportunityDetectionRow,
         },
-        config::{CalibrationConfig, EndgameDetectionConfig},
         domain::{
-            BookLevel, DetectionRuntimeConfig, EvidenceSourceBundle, ExecutionRuntimeConfig,
-            RiskLimitRuntimeConfig, RuntimeConfigDocument, RuntimeConfigVersionInfo,
-            SizingRuntimeConfig, control_factor::QueryFingerprint,
+            BookLevel, EvidenceSourceBundle, RuntimeConfigVersionInfo,
+            control_factor::QueryFingerprint,
         },
         enums::{
             clickhouse::{ChDurationBucket, ChFactSource, ChMarketCategory, ChPriceZone, ChSide},
             runtime_config::RuntimeConfigVersionSource,
         },
+        runtime_config::RuntimeConfig,
         types::{
             EventId, MarketId, OpportunityId, Price, RuntimeConfigVersionId, Shares, TokenId, Usd,
         },
     };
+    use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
 
     use crate::evidence::{
@@ -558,17 +556,16 @@ mod tests {
     }
 
     #[test]
-    fn detector_replay_without_full_config_is_not_production_complete() {
+    fn detector_replay_with_invalid_config_is_not_production_complete() {
         let mut book = book();
         let version = book
             .source_bundle
             .runtime_config
             .as_mut()
             .expect("runtime config");
-        let mut config: RuntimeConfigDocument =
-            serde_json::from_value(version.config_json.clone()).expect("config");
-        config.detection.endgame = None;
-        version.config_json = serde_json::to_value(config).expect("config json");
+        // A document that fails the typed schema_version=1 parse (legacy
+        // shape) must mark the replay incomplete rather than guessing.
+        version.config_json = serde_json::json!({ "schema_version": 2, "sizing": {} });
         let artifact = build(
             &book,
             &[detection_row()],
@@ -734,43 +731,17 @@ mod tests {
     }
 
     fn runtime_config() -> RuntimeConfigVersionInfo {
-        let endgame = EndgameDetectionConfig {
-            high_threshold: dec!(0.94),
-            min_convergence_duration_secs: 1,
-            ..Default::default()
-        };
+        let mut config = RuntimeConfig::default();
+        config.detection.min_profit_threshold_usd = Decimal::ZERO;
+        config.detection.endgame.high_threshold = dec!(0.94);
+        config.detection.endgame.min_convergence_duration_secs = 1;
         RuntimeConfigVersionInfo {
             runtime_config_version_id: RuntimeConfigVersionId::new(
                 oxide_arb_test_support::seeded_uuid("rcv"),
             ),
             config_hash: "cfg".to_owned(),
-            schema_version: 1,
-            config_json: serde_json::to_value(RuntimeConfigDocument {
-                schema_version: 2,
-                detection: DetectionRuntimeConfig {
-                    min_profit_threshold_usd: dec!(0),
-                    endgame_hours_before_close: 24,
-                    convergence_threshold: dec!(0.94),
-                    endgame: Some(endgame),
-                    calibration: Some(CalibrationConfig::default()),
-                },
-                execution: ExecutionRuntimeConfig {
-                    max_slippage_bps: 0,
-                    order_timeout_secs: 1,
-                    cooldown_after_trade_secs: 0,
-                },
-                sizing: SizingRuntimeConfig {
-                    kelly_fraction: dec!(1),
-                    max_position_fraction_of_book: dec!(1),
-                },
-                risk_limits: RiskLimitRuntimeConfig {
-                    max_portfolio_exposure_usd: Usd::new(dec!(1_000)),
-                    max_single_position_usd: Usd::new(dec!(1_000)),
-                    max_daily_loss_usd: Usd::new(dec!(1_000)),
-                    circuit_breaker_threshold: 10,
-                },
-            })
-            .expect("runtime config"),
+            schema_version: config.schema_version,
+            config_json: config.to_json(),
             source: RuntimeConfigVersionSource::Operator,
             created_by: "test".to_owned(),
             reason: "test".to_owned(),

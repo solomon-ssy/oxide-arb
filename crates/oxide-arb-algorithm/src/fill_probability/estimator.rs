@@ -6,8 +6,8 @@
 
 use num_traits::ToPrimitive;
 use oxide_arb_models::{
-    config::FillProbabilityConfig,
     enums::common::StalenessLevel,
+    runtime_config::FillProbabilityConfig,
     types::{MICRO_SCALE, MicroPct, MicroProb},
 };
 

@@ -7,7 +7,13 @@
 //! and Redis — so [`call`] builds a fresh service per request, which keeps the
 //! helper's return type nameable while still sharing the external backends.
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
 use actix_web::{
     App,
@@ -24,15 +30,19 @@ use oxide_arb_core::{
 };
 use oxide_arb_error::auth::AuthError;
 use oxide_arb_models::{
-    config::JwtConfig,
+    config::{DeployConfig, JwtConfig},
     domain::{
         BlacklistInfo, CoreEventPublisher, HealthReport, MarketDataPort, ModeTransitionReport,
-        ReplayEnqueueRequest, ReplayEnqueueResult, ReplayPort, RiskEngineState,
+        ReplayEnqueueRequest, ReplayEnqueueResult, ReplayPort, RiskEngineState, RuntimeConfigPort,
         RuntimeControlError, RuntimeControlPort, SystemStatus, market::book::BookSnapshot,
     },
     enums::{
         common::ExecutionMode,
         risk::{BlacklistReason, BreakerStateName},
+    },
+    runtime_config::{
+        RuntimeConfig,
+        validation::{RuntimePreflightContext, preflight_runtime_config},
     },
     types::{MarketId, TokenId, Usd},
 };
@@ -60,6 +70,7 @@ use oxide_arb_web::{
     routes,
     ws::{SessionRegistry, spawn_ws_broadcaster},
 };
+use rust_decimal::Decimal;
 use sea_orm::DatabaseConnection;
 use serde_json::Value;
 use std::sync::Mutex;
@@ -81,6 +92,8 @@ const TEST_ISSUER: &str = "oxide-arb-test";
 pub struct TestEnv {
     /// The state injected into the actix app.
     pub state: AppState,
+    /// Typed handle to the runtime-config apply double (preflight context).
+    pub runtime_config_apply: Arc<MockRuntimeConfigApply>,
     /// Shared Postgres connection (pool kept alive by `_pg`).
     pub db: DatabaseConnection,
     // Postgres container guard. `DatabaseConnection` clones inside the
@@ -161,7 +174,10 @@ impl TestEnv {
         let metrics = Arc::new(CoreMetricsScrape::new(Arc::new(MetricsHub::new())));
         let readiness = Arc::new(PgRedisReadiness::new(db.clone(), Arc::clone(&blacklist)));
 
+        let runtime_config_apply = Arc::new(MockRuntimeConfigApply::default());
         let state = AppState {
+            deploy: Arc::new(DeployConfig::default()),
+            runtime_config_apply: Arc::clone(&runtime_config_apply) as _,
             jwt,
             jwt_blacklist,
             users: Arc::new(PgUserRepository::new(db.clone())),
@@ -195,6 +211,7 @@ impl TestEnv {
 
         Self {
             state,
+            runtime_config_apply,
             db,
             _pg: pg_container,
             redis: Some(redis_container),
@@ -332,6 +349,74 @@ fn zero_risk_state(is_halted: bool) -> RiskEngineState {
         last_emergency_at: None,
         last_emergency_reason: None,
         snapshot_at: now,
+    }
+}
+
+/// In-memory [`RuntimeConfigPort`] double for web tests: applies activations
+/// to a process-local snapshot and runs the **real** money-state preflight
+/// against a configurable context (defaults to zero reservations, so it
+/// accepts everything unless a test commits capital via [`Self::set_reserved`]).
+pub struct MockRuntimeConfigApply {
+    current: Mutex<Arc<RuntimeConfig>>,
+    preflight_ctx: Mutex<RuntimePreflightContext>,
+    fail_next_apply: AtomicBool,
+}
+
+impl Default for MockRuntimeConfigApply {
+    fn default() -> Self {
+        Self {
+            current: Mutex::new(Arc::new(RuntimeConfig::default())),
+            preflight_ctx: Mutex::new(RuntimePreflightContext {
+                mode: ExecutionMode::Paper,
+                reserved_total_usd: Decimal::ZERO,
+                max_market_reserved_usd: Decimal::ZERO,
+            }),
+            fail_next_apply: AtomicBool::new(false),
+        }
+    }
+}
+
+impl MockRuntimeConfigApply {
+    /// Simulate in-flight capital so the activation preflight has live money
+    /// state to reject against.
+    pub fn set_reserved(&self, total_usd: Decimal, max_market_usd: Decimal) {
+        let mut ctx = self.preflight_ctx.lock().unwrap();
+        ctx.reserved_total_usd = total_usd;
+        ctx.max_market_reserved_usd = max_market_usd;
+    }
+
+    /// Make the next [`RuntimeConfigPort::apply`] fail after preflight passed,
+    /// simulating a live propagation failure *after* the durable activation —
+    /// the split-brain scenario the web layer must compensate.
+    pub fn fail_next_apply(&self) {
+        self.fail_next_apply.store(true, Ordering::SeqCst);
+    }
+}
+
+#[async_trait]
+impl RuntimeConfigPort for MockRuntimeConfigApply {
+    fn current(&self) -> Arc<RuntimeConfig> {
+        Arc::clone(&self.current.lock().unwrap())
+    }
+
+    fn preflight(&self, candidate: &RuntimeConfig) -> Result<(), RuntimeControlError> {
+        let ctx = *self.preflight_ctx.lock().unwrap();
+        let report = preflight_runtime_config(candidate, &ctx);
+        if report.has_errors() {
+            return Err(RuntimeControlError::Precondition(report.to_string()));
+        }
+        Ok(())
+    }
+
+    async fn apply(&self, config: RuntimeConfig) -> Result<(), RuntimeControlError> {
+        if self.fail_next_apply.swap(false, Ordering::SeqCst) {
+            return Err(RuntimeControlError::Activation(
+                "injected apply failure".into(),
+            ));
+        }
+        self.preflight(&config)?;
+        *self.current.lock().unwrap() = Arc::new(config);
+        Ok(())
     }
 }
 

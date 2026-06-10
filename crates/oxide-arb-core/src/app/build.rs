@@ -1,4 +1,10 @@
 //! Application composition root — wires subsystems in dependency order.
+//!
+//! Infrastructure (connections, pools, channels, shards) is wired from the
+//! [`DeployConfig`]; every trading parameter is wired from the **runtime
+//! config snapshot** seeded out of Postgres (`runtime_config_version`), so the
+//! audited activation history — not the TOML — is the single source of truth
+//! for money-relevant behaviour.
 
 use super::{
     AppContext, ControlFactorBundle, DataBundle, ExecutionBundle, InfraBundle, RiskBundle,
@@ -55,6 +61,7 @@ use crate::{
         market_registry::MarketRegistry,
         staleness_classifier::StalenessClassifier,
     },
+    runtime_config::{RuntimeConfigApplicator, RuntimeConfigStore, RuntimeConfigSubscribers},
     service::{
         equity_valuator::EquityValuator,
         gamma::{GammaService, GammaServiceDeps},
@@ -62,7 +69,6 @@ use crate::{
         ws_subscription::WsSubscriptionCoordinator,
     },
 };
-use num_traits::ToPrimitive;
 use oxide_arb_algorithm::{
     calibration::{CalibrationEntry, CalibrationUpdater, ResolutionCalibrator},
     cooldown::InMemoryEmissionCooldown,
@@ -79,20 +85,23 @@ use oxide_arb_api::{
     keystore::Keystore,
     ws::{ClobWsManager, WsEventDropHook},
 };
-use oxide_arb_error::{OxideError, OxideResult};
+use oxide_arb_error::{OxideError, OxideResult, config::ConfigError};
 use oxide_arb_models::{
-    config::{CalibrationConfig, Settings},
+    config::DeployConfig,
     domain::{
-        CoreEvent, CoreEventPublisher, DetectionRuntimeConfig, ExecutionRuntimeConfig,
-        NewRuntimeConfigActivation, NewRuntimeConfigVersion, RiskLimitRuntimeConfig,
-        RuntimeConfigDocument, SizingRuntimeConfig, control_factor::ControlFactorProvider,
-        risk::RiskEngineState, runtime_config_hash, settlement::MarketSettlementRequest,
+        CoreEvent, CoreEventPublisher, NewRuntimeConfigActivation, NewRuntimeConfigVersion,
+        control_factor::ControlFactorProvider, risk::RiskEngineState, runtime_config_hash,
+        settlement::MarketSettlementRequest,
     },
     enums::{
         common::ExecutionMode,
         runtime_config::{RuntimeConfigActivationKind, RuntimeConfigVersionSource},
     },
-    types::{MarketId, MicroUsd, RuntimeConfigActivationId, RuntimeConfigVersionId, TokenId, Usd},
+    runtime_config::{
+        CalibrationConfig, RUNTIME_CONFIG_SCHEMA_VERSION, RuntimeConfig,
+        validation::validate_runtime_for_mode,
+    },
+    types::{MarketId, RuntimeConfigActivationId, RuntimeConfigVersionId, TokenId, Usd},
 };
 use oxide_arb_repository::{
     clickhouse::ChTimeseriesRepository,
@@ -154,6 +163,8 @@ struct BuildInfra {
     /// Effective execution mode after restoring the persisted operational state
     /// (the `system_runtime_state` singleton, seeded to `DryRun`).
     execution_mode: ExecutionMode,
+    /// In-process snapshot of the active runtime config (seeded from PG).
+    runtime_store: Arc<RuntimeConfigStore>,
     pg_pool: Arc<PostgresPool>,
     ch_pool: Arc<ClickHousePool>,
     cache: Arc<TieredCache>,
@@ -195,7 +206,9 @@ struct AssembledInfra {
 }
 
 struct AppContextAssembly {
-    config: Arc<Settings>,
+    config: Arc<DeployConfig>,
+    runtime_store: Arc<RuntimeConfigStore>,
+    applicator: Arc<RuntimeConfigApplicator>,
     execution_mode: ExecutionModeHandle,
     events: CoreEventPublisher,
     event_rx: flume::Receiver<CoreEvent>,
@@ -241,7 +254,10 @@ struct BuildTrading {
     calibration_updater: Arc<CalibrationUpdater>,
     scanner: Arc<Scanner>,
     coalescer: Arc<Coalescer>,
+    staleness: StalenessClassifier,
     funnel: Arc<Funnel>,
+    validator: Arc<Validator>,
+    order_strategy: Arc<FokOrderStrategy>,
     data_pipeline: Arc<DataPipeline>,
     execution: ExecutionBundle,
     settlement_rx: flume::Receiver<MarketSettlementRequest>,
@@ -260,6 +276,7 @@ struct DetectionStack {
     calibration_updater: Arc<CalibrationUpdater>,
     scanner: Arc<Scanner>,
     coalescer: Arc<Coalescer>,
+    staleness: StalenessClassifier,
     token_tx: flume::Sender<TokenId>,
     token_rx: flume::Receiver<TokenId>,
     market_rx: flume::Receiver<MarketId>,
@@ -267,6 +284,8 @@ struct DetectionStack {
 
 struct ExecutionLoop {
     funnel: Arc<Funnel>,
+    validator: Arc<Validator>,
+    order_strategy: Arc<FokOrderStrategy>,
     data_pipeline: Arc<DataPipeline>,
     execution: ExecutionBundle,
     settlement_rx: flume::Receiver<MarketSettlementRequest>,
@@ -278,16 +297,23 @@ struct ExecutionLoop {
 const CORE_EVENT_CHANNEL_CAPACITY: usize = 4096;
 
 impl AppContext {
-    /// Build all subsystems from loaded settings (PG/CH/Redis + trading loop).
-    pub async fn build(settings: Arc<Settings>, shutdown: CancellationToken) -> OxideResult<Self> {
+    /// Build all subsystems from the deploy config (PG/CH/Redis + trading loop).
+    ///
+    /// Trading parameters come from the runtime-config snapshot seeded out of
+    /// the `runtime_config_version` table during [`connect_infra`].
+    pub async fn build(
+        deploy: Arc<DeployConfig>,
+        shutdown: CancellationToken,
+    ) -> OxideResult<Self> {
         // Real-time event bus consumed by the WebSocket broadcaster. Bounded +
         // non-blocking: a full channel drops events, never stalling producers.
         let (events, event_rx) = CoreEventPublisher::bounded(CORE_EVENT_CHANNEL_CAPACITY);
 
-        // `connect_infra` migrates the schema and restores the persisted
-        // operational execution mode (the seeded `system_runtime_state`
-        // singleton), so that mode — not config — drives validation and wiring.
-        let (infra, persistence_workers) = connect_infra(&settings, shutdown.clone()).await?;
+        // `connect_infra` migrates the schema, seeds/loads the active runtime
+        // config, and restores the persisted operational execution mode (the
+        // seeded `system_runtime_state` singleton), so that mode — not config —
+        // drives validation and wiring.
+        let (infra, persistence_workers) = connect_infra(&deploy, shutdown.clone()).await?;
         // Attach the per-kind drop observer now that the metrics hub exists: a
         // full or disconnected bus increments `oxide_arb_ws_event_dropped_total`
         // labeled by `CoreEvent::kind`, never blocking the producer.
@@ -298,15 +324,27 @@ impl AppContext {
             }))
         };
         let mode = infra.execution_mode;
-        settings.ensure_valid_for_mode(mode)?;
+        deploy.ensure_valid_for_mode(mode)?;
+        let runtime_store = Arc::clone(&infra.runtime_store);
+        let runtime = runtime_store.current();
+        ensure_runtime_valid_for_mode(&runtime, mode)?;
         // Single source of truth for the live execution mode; every hot-path
         // reader holds a clone and observes governed transitions atomically.
         let execution_mode = ExecutionModeHandle::new(mode);
 
-        let clients =
-            connect_clients(&settings, shutdown.clone(), Arc::clone(&infra.metrics)).await?;
+        let clients = connect_clients(
+            &deploy,
+            &runtime,
+            shutdown.clone(),
+            Arc::clone(&infra.metrics),
+        )
+        .await?;
+        let wiring = WiringConfig {
+            deploy: &deploy,
+            runtime: &runtime,
+        };
         let (risk, trading) = wire_risk_and_trading(
-            &settings,
+            wiring,
             &execution_mode,
             &infra,
             &clients,
@@ -315,56 +353,32 @@ impl AppContext {
         )
         .await?;
 
-        let settlement =
-            wire_settlement_bundle(&settings, &infra, &clients, &risk, &trading, &events);
-        let BuildInfra {
-            execution_mode: _,
-            pg_pool,
-            ch_pool,
-            cache,
-            metrics,
-            alerts,
-            risk_decision_audit,
-            risk_decision_audit_rx,
-            repos,
-            persistence,
-            balance_fact_writer,
-            factor_store,
-            factor_refresher,
-            factor_registry,
-            shadow_writer: _shadow_writer,
-            shadow_writer_task,
-        } = infra;
-        let persistence_handles = BuildPersistence {
-            trade_repo: Arc::clone(&persistence.trade_repo),
-            timeseries: Arc::clone(&persistence.timeseries),
-            audit_writer: Arc::clone(&persistence.audit_writer),
-            book_fact_writer: Arc::clone(&persistence.book_fact_writer),
-        };
-        let mut pending_tasks = PendingTaskQueue::default();
-        persistence.queue_background_tasks(persistence_workers, &mut pending_tasks);
+        let (settlement_service, settlement_dedup) =
+            wire_settlement_bundle(&runtime, &infra, &clients, &risk, &trading, &events);
 
-        let (settlement_service, settlement_dedup) = settlement;
+        // Activation propagation: every live subscriber, risk-first.
+        let applicator = wire_applicator(WireApplicatorInput {
+            runtime_store: Arc::clone(&runtime_store),
+            execution_mode: execution_mode.clone(),
+            infra: &infra,
+            clients: &clients,
+            risk: &risk,
+            trading: &trading,
+            settlement_service: Arc::clone(&settlement_service),
+            settlement_dedup: Arc::clone(&settlement_dedup),
+        });
+
+        let (assembled_infra, persistence_handles, pending_tasks) =
+            finish_infra(infra, persistence_workers);
+
         Ok(assemble_app_context(AppContextAssembly {
-            config: settings,
+            config: deploy,
+            runtime_store,
+            applicator,
             execution_mode,
             events,
             event_rx,
-            infra: AssembledInfra {
-                pg_pool,
-                ch_pool,
-                cache,
-                metrics,
-                alerts,
-                risk_decision_audit,
-                risk_decision_audit_rx,
-                repos,
-                balance_fact_writer,
-                factor_store,
-                factor_refresher,
-                factor_registry,
-                shadow_writer_task,
-            },
+            infra: assembled_infra,
             clients,
             risk,
             trading,
@@ -377,8 +391,128 @@ impl AppContext {
     }
 }
 
+/// Consume [`BuildInfra`], queue persistence background workers, and project
+/// the handles needed by the final assembly.
+fn finish_infra(
+    infra: BuildInfra,
+    persistence_workers: PersistenceBackgroundWorkers,
+) -> (AssembledInfra, BuildPersistence, PendingTaskQueue) {
+    let BuildInfra {
+        execution_mode: _,
+        runtime_store: _,
+        pg_pool,
+        ch_pool,
+        cache,
+        metrics,
+        alerts,
+        risk_decision_audit,
+        risk_decision_audit_rx,
+        repos,
+        persistence,
+        balance_fact_writer,
+        factor_store,
+        factor_refresher,
+        factor_registry,
+        shadow_writer: _shadow_writer,
+        shadow_writer_task,
+    } = infra;
+    let persistence_handles = BuildPersistence {
+        trade_repo: Arc::clone(&persistence.trade_repo),
+        timeseries: Arc::clone(&persistence.timeseries),
+        audit_writer: Arc::clone(&persistence.audit_writer),
+        book_fact_writer: Arc::clone(&persistence.book_fact_writer),
+    };
+    let mut pending_tasks = PendingTaskQueue::default();
+    persistence.queue_background_tasks(persistence_workers, &mut pending_tasks);
+
+    let assembled = AssembledInfra {
+        pg_pool,
+        ch_pool,
+        cache,
+        metrics,
+        alerts,
+        risk_decision_audit,
+        risk_decision_audit_rx,
+        repos,
+        balance_fact_writer,
+        factor_store,
+        factor_refresher,
+        factor_registry,
+        shadow_writer_task,
+    };
+    (assembled, persistence_handles, pending_tasks)
+}
+
+/// Deploy + runtime configuration views shared by the wiring functions.
+#[derive(Clone, Copy)]
+struct WiringConfig<'a> {
+    deploy: &'a DeployConfig,
+    runtime: &'a RuntimeConfig,
+}
+
+/// Inputs for [`wire_applicator`].
+struct WireApplicatorInput<'a> {
+    runtime_store: Arc<RuntimeConfigStore>,
+    execution_mode: ExecutionModeHandle,
+    infra: &'a BuildInfra,
+    clients: &'a BuildClients,
+    risk: &'a BuildRisk,
+    trading: &'a BuildTrading,
+    settlement_service: Arc<MarketSettlementService>,
+    settlement_dedup: Arc<SettlementDedup>,
+}
+
+/// Assemble the activation applicator over every live subscriber handle.
+fn wire_applicator(input: WireApplicatorInput<'_>) -> Arc<RuntimeConfigApplicator> {
+    let WireApplicatorInput {
+        runtime_store,
+        execution_mode,
+        infra,
+        clients,
+        risk,
+        trading,
+        settlement_service,
+        settlement_dedup,
+    } = input;
+    Arc::new(RuntimeConfigApplicator::new(
+        runtime_store,
+        execution_mode,
+        RuntimeConfigSubscribers {
+            risk_engine: Arc::clone(&risk.engine),
+            metrics_state: Arc::clone(&risk.metrics_state),
+            exposure: Arc::clone(&risk.exposure),
+            capital: Arc::clone(&trading.execution.capital_manager),
+            opportunity_pipeline: Arc::clone(&trading.opportunity_pipeline),
+            calibration_updater: Arc::clone(&trading.calibration_updater),
+            staleness: trading.staleness.clone(),
+            validator: Arc::clone(&trading.validator),
+            order_strategy: Arc::clone(&trading.order_strategy),
+            coalescer: Arc::clone(&trading.coalescer),
+            funnel: Arc::clone(&trading.funnel),
+            settlement_service,
+            settlement_dedup,
+            voting_oracle: Arc::clone(&clients.voting_oracle),
+            ctf_redeem: clients.ctf_redeem.as_ref().map(Arc::clone),
+            alerts: Arc::clone(&infra.alerts),
+        },
+    ))
+}
+
+/// Fail-closed gate: the persisted operational mode must be valid for the
+/// active runtime config (e.g. Live with a disabled redeem route aborts boot).
+fn ensure_runtime_valid_for_mode(runtime: &RuntimeConfig, mode: ExecutionMode) -> OxideResult<()> {
+    let report = validate_runtime_for_mode(runtime, mode);
+    for w in &report.warnings {
+        tracing::warn!(mode = ?mode, "Runtime config warning: {w}");
+    }
+    if report.has_errors() {
+        return Err(ConfigError::from(report).into());
+    }
+    Ok(())
+}
+
 fn wire_settlement_bundle(
-    settings: &Settings,
+    runtime: &RuntimeConfig,
     infra: &BuildInfra,
     clients: &BuildClients,
     risk: &BuildRisk,
@@ -394,7 +528,7 @@ fn wire_settlement_bundle(
         risk_engine: Arc::clone(&risk.engine),
         risk_metrics: Arc::clone(&risk.metrics),
         fsm: Arc::clone(&risk.fsm),
-        ctf_redeem: clients.ctf_redeem.clone(),
+        ctf_redeem: clients.ctf_redeem.as_ref().map(Arc::clone),
         market_registry: Arc::clone(&trading.market_registry),
         voting_oracle: Arc::clone(&clients.voting_oracle),
         metrics: Arc::clone(&infra.metrics),
@@ -402,10 +536,10 @@ fn wire_settlement_bundle(
         audit_writer,
         metrics_refresh: risk.metrics_refresh.clone(),
         events: events.clone(),
-        config: Arc::new(settings.settlement.clone()),
+        config: runtime.settlement.clone(),
     }));
     let settlement_dedup = Arc::new(SettlementDedup::new(Duration::from_secs(
-        settings.settlement.lifecycle.dedup_window_secs,
+        runtime.settlement.lifecycle.dedup_window_secs,
     )));
     (settlement_service, settlement_dedup)
 }
@@ -413,6 +547,8 @@ fn wire_settlement_bundle(
 fn assemble_app_context(parts: AppContextAssembly) -> AppContext {
     let AppContextAssembly {
         config,
+        runtime_store,
+        applicator,
         execution_mode,
         events,
         event_rx,
@@ -428,6 +564,8 @@ fn assemble_app_context(parts: AppContextAssembly) -> AppContext {
     } = parts;
     AppContext {
         config,
+        runtime_config: runtime_store,
+        applicator,
         execution_mode,
         events,
         event_rx: Mutex::new(Some(event_rx)),
@@ -525,55 +663,40 @@ fn build_pg_repos(pg_pool: &PostgresPool) -> BuildRepos {
 }
 
 async fn connect_infra(
-    settings: &Settings,
+    deploy: &DeployConfig,
     shutdown: CancellationToken,
 ) -> OxideResult<(BuildInfra, PersistenceBackgroundWorkers)> {
     let metrics = Arc::new(MetricsHub::new());
-    let telegram_token = settings.notification.telegram.bot_token.trim();
-    let telegram_chat = settings.notification.telegram.chat_id.trim();
-    let webhook_url = settings.notification.webhook.url.trim();
-    let alerts = Arc::new(AlertDispatcher::new(
-        if settings.notification.telegram.enabled && !telegram_token.is_empty() {
-            Some(telegram_token)
-        } else {
-            None
-        },
-        if settings.notification.telegram.enabled && !telegram_chat.is_empty() {
-            telegram_chat.parse().ok()
-        } else {
-            None
-        },
-        if settings.notification.webhook.enabled && !webhook_url.is_empty() {
-            Some(webhook_url)
-        } else {
-            None
-        },
-        60,
-    ));
-    let (risk_decision_audit, risk_decision_audit_rx) = new_audit_sink(4096);
 
-    let pg_pool = Arc::new(PostgresPool::connect(&settings.db.postgres).await?);
+    let pg_pool = Arc::new(PostgresPool::connect(&deploy.db.postgres).await?);
     Migrator::up(pg_pool.connection(), None).await?;
 
-    let ch_pool = Arc::new(ClickHousePool::connect(&settings.analytics)?);
+    let repos = build_pg_repos(&pg_pool);
+    // Seed / load the active runtime config before anything trading-relevant
+    // is wired: the audited activation history is the source of truth.
+    let runtime = ensure_runtime_config_activation(repos.runtime_config.as_ref()).await?;
+    let alerts = Arc::new(AlertDispatcher::new(&runtime.notification));
+    let runtime_store = Arc::new(RuntimeConfigStore::new(runtime));
+
+    let (risk_decision_audit, risk_decision_audit_rx) = new_audit_sink(4096);
+
+    let ch_pool = Arc::new(ClickHousePool::connect(&deploy.db.clickhouse)?);
     ch_pool.ensure_schema().await?;
 
     let cache = Arc::new(TieredCache::new(
-        MokaBackend::new(settings.cache.moka.max_capacity),
-        RedisBackend::new(&settings.cache.redis).await?,
+        MokaBackend::new(deploy.cache.moka.max_capacity),
+        RedisBackend::new(&deploy.cache.redis).await?,
     ));
 
-    let write_manager = Arc::new(ChWriteManager::new_without_probe(
-        settings.analytics.max_concurrent_inserts,
+    let write_manager = Arc::new(ChWriteManager::new(
+        deploy.db.clickhouse.max_concurrent_inserts,
     ));
     let timeseries = Arc::new(ChTimeseriesRepository::new(
         ch_pool.client().clone(),
-        &settings.analytics,
+        &deploy.db.clickhouse,
         write_manager,
         shutdown.clone(),
     ));
-    let repos = build_pg_repos(&pg_pool);
-    ensure_runtime_config_activation(settings, repos.runtime_config.as_ref()).await?;
     let balance_fact_writer = Arc::new(BalanceFactWriter::new(Arc::clone(&repos.fact_data)));
 
     // Restore the persisted operational execution mode. The singleton is seeded
@@ -605,6 +728,7 @@ async fn connect_infra(
     Ok((
         BuildInfra {
             execution_mode,
+            runtime_store,
             pg_pool,
             ch_pool,
             cache,
@@ -634,9 +758,6 @@ struct ControlFactorWiring {
     shadow_writer_task: Mutex<Option<ShadowWriterTask>>,
 }
 
-/// Build the live control-factor store, refresher, and shadow writer, then run
-/// the startup snapshot load (fail closed in Live when a critical safety factor
-/// is lost).
 /// Restore the persisted operational execution mode (the single source of
 /// truth).
 ///
@@ -689,33 +810,47 @@ async fn wire_control_factors(
     })
 }
 
+/// Seed / load the active runtime configuration.
+///
+/// - No active version: create + activate [`RuntimeConfig::default`]
+///   (`source = Bootstrap`, `Initial`).
+/// - Active version parses as `schema_version = 1`: use it verbatim — TOML
+///   never overrides the audited activation history.
+/// - Active version fails the typed parse (legacy/corrupt document): reseed
+///   defaults with a fresh `Bootstrap` version and a loud warning. The project
+///   has exactly one schema version; no migration chain exists by design.
 async fn ensure_runtime_config_activation(
-    settings: &Settings,
     repo: &dyn RuntimeConfigVersionRepository,
-) -> OxideResult<()> {
-    let document = runtime_config_document(settings);
-    let config_json = serde_json::to_value(&document)
-        .map_err(|error| OxideError::Internal(format!("runtime config encode failed: {error}")))?;
-    let config_hash = runtime_config_hash(&config_json);
+) -> OxideResult<RuntimeConfig> {
     let current = repo.load_current().await?;
-    if current
-        .as_ref()
-        .is_some_and(|version| version.config_hash == config_hash)
-    {
-        return Ok(());
+    if let Some(version) = &current {
+        match RuntimeConfig::from_json(&version.config_json) {
+            Ok(config) => return Ok(config),
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    version_id = %version.runtime_config_version_id,
+                    "active runtime config is not a valid schema_version=1 document — \
+                     reseeding defaults"
+                );
+            }
+        }
     }
 
+    let config = RuntimeConfig::default();
+    let config_json = config.to_json();
+    let config_hash = runtime_config_hash(&config_json);
     let version = match repo.load_by_hash(&config_hash).await? {
         Some(version) => version,
         None => {
             repo.create_version(NewRuntimeConfigVersion {
                 runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
                 config_hash: config_hash.clone(),
-                schema_version: document.schema_version,
+                schema_version: RUNTIME_CONFIG_SCHEMA_VERSION,
                 config_json,
                 source: RuntimeConfigVersionSource::Bootstrap,
                 created_by: "system".to_owned(),
-                reason: "startup canonical runtime config import".to_owned(),
+                reason: "bootstrap default runtime config (schema_version=1)".to_owned(),
             })
             .await?
         }
@@ -726,7 +861,7 @@ async fn ensure_runtime_config_activation(
         runtime_config_version_id: version.runtime_config_version_id.clone(),
         activated_at: chrono::Utc::now(),
         activated_by: "system".to_owned(),
-        reason: "startup runtime config activation".to_owned(),
+        reason: "bootstrap runtime config activation".to_owned(),
         activation_kind: if current.is_some() {
             RuntimeConfigActivationKind::Promote
         } else {
@@ -738,51 +873,12 @@ async fn ensure_runtime_config_activation(
         audit_event_id: None,
     })
     .await?;
-    Ok(())
-}
-
-fn runtime_config_document(settings: &Settings) -> RuntimeConfigDocument {
-    RuntimeConfigDocument {
-        schema_version: 2,
-        detection: DetectionRuntimeConfig {
-            min_profit_threshold_usd: settings.detection.min_profit_threshold_usd,
-            endgame_hours_before_close: u32::try_from(
-                settings.detection.endgame.settlement_window_hours,
-            )
-            .unwrap_or(u32::MAX),
-            convergence_threshold: settings.detection.endgame.high_threshold,
-            endgame: Some(settings.detection.endgame.clone()),
-            calibration: Some(settings.detection.calibration.clone()),
-        },
-        execution: ExecutionRuntimeConfig {
-            max_slippage_bps: settings
-                .execution
-                .timeout
-                .max_validation_slippage_bps
-                .to_u32()
-                .unwrap_or(u32::MAX),
-            order_timeout_secs: u32::try_from(
-                settings.execution.timeout.dispatcher_timeout_ms / 1000,
-            )
-            .unwrap_or(u32::MAX),
-            cooldown_after_trade_secs: u32::try_from(settings.risk.base_cooldown_secs)
-                .unwrap_or(u32::MAX),
-        },
-        sizing: SizingRuntimeConfig {
-            kelly_fraction: settings.risk.kelly_fraction,
-            max_position_fraction_of_book: settings.risk.max_depth_usage_pct,
-        },
-        risk_limits: RiskLimitRuntimeConfig {
-            max_portfolio_exposure_usd: Usd::new(settings.risk.max_total_exposure_usd),
-            max_single_position_usd: Usd::new(settings.risk.max_single_market_exposure_usd),
-            max_daily_loss_usd: Usd::new(settings.risk.max_daily_loss_usd),
-            circuit_breaker_threshold: settings.risk.max_consecutive_misses,
-        },
-    }
+    Ok(config)
 }
 
 async fn connect_clients(
-    settings: &Settings,
+    deploy: &DeployConfig,
+    runtime: &RuntimeConfig,
     shutdown: CancellationToken,
     metrics: Arc<MetricsHub>,
 ) -> OxideResult<BuildClients> {
@@ -810,31 +906,29 @@ async fn connect_clients(
     };
 
     let ws_manager = Arc::new(ClobWsManager::new(
-        &settings.polymarket,
-        &settings.market_data.websocket,
+        &deploy.polymarket,
+        &deploy.market_data.websocket,
         shutdown,
         Some(on_events_dropped),
         Some(reject_hook),
     ));
-    let gamma_client = Arc::new(GammaClient::new(settings.market_data.gamma.clone()));
-    let fee_calculator = Arc::new(FeeCalculator::from_config(&settings.polymarket.fees));
+    let gamma_client = Arc::new(GammaClient::new(deploy.market_data.gamma.clone()));
+    let fee_calculator = Arc::new(FeeCalculator::from_config(&deploy.polymarket.fees));
     let voting_oracle = Arc::new(build_voting_oracle(
-        &settings.polymarket,
-        &settings.market_data.gamma,
-        &settings.settlement.oracle,
-        &settings.settlement.contracts,
+        &deploy.polymarket,
+        &deploy.market_data.gamma,
+        &runtime.settlement.oracle,
     )?);
 
-    let (clob_client, ctf_redeem, holder_address) = match Keystore::from_config(&settings.keys) {
+    let (clob_client, ctf_redeem, holder_address) = match Keystore::from_config(&deploy.keys) {
         Ok(ks) => {
             let holder_address = ks.address_string();
             let signer = ks.signer_arc();
             let ctf_redeem = match CtfRedeemClient::new(
                 Arc::clone(&signer),
-                settings.polymarket.onchain.rpc_url.clone(),
-                settings.settlement.contracts.clone(),
-                settings.settlement.redeem.clone(),
-                settings.polymarket.chain_id,
+                deploy.polymarket.onchain.rpc_url.clone(),
+                runtime.settlement.redeem.clone(),
+                deploy.polymarket.chain_id,
             ) {
                 Ok(client) => Some(Arc::new(client)),
                 Err(error) => {
@@ -842,7 +936,7 @@ async fn connect_clients(
                     None
                 }
             };
-            let clob_client = match ClobClient::connect(signer, &settings.polymarket).await {
+            let clob_client = match ClobClient::connect(signer, &deploy.polymarket).await {
                 Ok(client) => Some(Arc::new(
                     client.with_book_level_reject_hook(Some(rest_reject_hook)),
                 )),
@@ -871,17 +965,17 @@ async fn connect_clients(
 }
 
 async fn wire_risk_and_trading(
-    settings: &Settings,
+    wiring: WiringConfig<'_>,
     execution_mode: &ExecutionModeHandle,
     infra: &BuildInfra,
     clients: &BuildClients,
     events: &CoreEventPublisher,
     shutdown: CancellationToken,
 ) -> OxideResult<(BuildRisk, BuildTrading)> {
-    let detection = wire_detection(settings, infra, clients, events, shutdown.clone()).await?;
-    let risk = wire_risk(settings, execution_mode, infra, clients, events, &detection).await?;
+    let detection = wire_detection(wiring, infra, clients, events, shutdown.clone()).await?;
+    let risk = wire_risk(wiring, execution_mode, infra, clients, events, &detection).await?;
     let trading = wire_trading(
-        settings,
+        wiring,
         execution_mode,
         infra,
         clients,
@@ -893,21 +987,22 @@ async fn wire_risk_and_trading(
 }
 
 async fn wire_risk(
-    settings: &Settings,
+    wiring: WiringConfig<'_>,
     execution_mode: &ExecutionModeHandle,
     infra: &BuildInfra,
     clients: &BuildClients,
     events: &CoreEventPublisher,
     detection: &DetectionStack,
 ) -> OxideResult<BuildRisk> {
+    let WiringConfig { deploy, runtime } = wiring;
     let exposure = Arc::new(InMemoryExposureReservation::new(
-        settings.risk.exposure_reservation_config(),
+        runtime.risk.exposure_reservation_config(),
     ));
     let api_tracker = Arc::new(ApiHealthTracker::new(Duration::from_secs(60)));
     let metrics_state = Arc::new(RiskMetricsState::new(api_tracker));
     let mode = execution_mode.current();
     if mode != ExecutionMode::Live {
-        metrics_state.seed_simulated_snapshot(mode, Usd::new(settings.risk.bankroll_usd));
+        metrics_state.seed_simulated_snapshot(mode, Usd::new(runtime.risk.bankroll_usd));
     }
     let risk_metrics = Arc::new(CoreRiskMetrics::new(
         Arc::clone(&metrics_state),
@@ -940,7 +1035,7 @@ async fn wire_risk(
 
     let engine = Arc::new(
         RiskEngineBuilder::new()
-            .config(settings.risk.clone())
+            .config(runtime.risk.clone())
             .persistence(risk_persistence)
             .snapshot(RiskEngineState::from(&risk_state_info))
             .blacklist_entries(blacklist)
@@ -958,7 +1053,7 @@ async fn wire_risk(
     ));
     let backpressure = Arc::new(BackpressurePolicy::new(
         Arc::clone(&infra.metrics),
-        settings.execution.book_apply.shard_count.max(1),
+        deploy.execution.book_apply.shard_count.max(1),
     ));
 
     let metrics_refresh = clients.clob_client.as_ref().map(|clob_client| {
@@ -990,7 +1085,7 @@ async fn wire_risk(
 }
 
 fn wire_trading(
-    settings: &Settings,
+    wiring: WiringConfig<'_>,
     execution_mode: &ExecutionModeHandle,
     infra: &BuildInfra,
     clients: &BuildClients,
@@ -999,7 +1094,7 @@ fn wire_trading(
     shutdown: CancellationToken,
 ) -> BuildTrading {
     let execution = wire_execution_loop(
-        settings,
+        wiring,
         execution_mode,
         infra,
         clients,
@@ -1018,7 +1113,10 @@ fn wire_trading(
         calibration_updater: detection.calibration_updater,
         scanner: detection.scanner,
         coalescer: detection.coalescer,
+        staleness: detection.staleness,
         funnel: execution.funnel,
+        validator: execution.validator,
+        order_strategy: execution.order_strategy,
         data_pipeline: execution.data_pipeline,
         execution: execution.execution,
         settlement_rx: execution.settlement_rx,
@@ -1029,13 +1127,13 @@ fn wire_trading(
 }
 
 async fn wire_calibration_stack(
-    settings: &Settings,
+    runtime: &RuntimeConfig,
     infra: &BuildInfra,
     clients: &BuildClients,
 ) -> OxideResult<(Arc<ResolutionCalibrator>, Arc<CalibrationUpdater>)> {
     let calibrator = load_resolution_calibrator(
         Arc::clone(&infra.repos.calibration),
-        settings.detection.calibration.clone(),
+        runtime.detection.calibration.clone(),
     )
     .await?;
     infra
@@ -1052,7 +1150,7 @@ async fn wire_calibration_stack(
     let calibration_updater = Arc::new(CalibrationUpdater::new(
         Arc::clone(&calibrator),
         calibration_source,
-        settings.detection.calibration.clone(),
+        runtime.detection.calibration.clone(),
     ));
     run_calibration_startup_tick(
         calibration_updater.as_ref(),
@@ -1064,33 +1162,31 @@ async fn wire_calibration_stack(
 }
 
 async fn wire_detection(
-    settings: &Settings,
+    wiring: WiringConfig<'_>,
     infra: &BuildInfra,
     clients: &BuildClients,
     events: &CoreEventPublisher,
     shutdown: CancellationToken,
 ) -> OxideResult<DetectionStack> {
+    let WiringConfig { deploy, runtime } = wiring;
     let book_store = Arc::new(BookStore::new(Arc::clone(&infra.metrics)));
     let market_registry = Arc::new(MarketRegistry::new());
     let market_cache = Arc::new(MarketCache::new(Arc::clone(&market_registry)));
 
-    let (calibrator, calibration_updater) =
-        wire_calibration_stack(settings, infra, clients).await?;
+    let (calibrator, calibration_updater) = wire_calibration_stack(runtime, infra, clients).await?;
 
     let detector = EndgameDetector::new(
-        &settings.detection.endgame,
-        &settings.detection.calibration,
+        &runtime.detection.endgame,
+        &runtime.detection.calibration,
         Arc::clone(&calibrator),
         CoreFeeEstimator(clients.fee_calculator.clone()),
     );
     let scorer = EndgameScorer::new(
-        settings.detection.endgame.scorer.clone(),
-        &settings.detection.endgame.fill_probability,
-        settings.detection.endgame.settlement_window_hours,
+        &runtime.detection.endgame.scorer,
+        &runtime.detection.endgame.fill_probability,
+        runtime.detection.endgame.settlement_window_hours,
     );
-    let cooldown = InMemoryEmissionCooldown::new(&settings.detection.endgame.emission_cooldown);
-    let min_profit = MicroUsd::try_from_decimal(settings.detection.min_profit_threshold_usd)
-        .unwrap_or(MicroUsd::ZERO);
+    let cooldown = InMemoryEmissionCooldown::new(&runtime.detection.endgame.emission_cooldown);
     let factor_store: Arc<FactorSnapshotStore> = Arc::clone(&infra.factor_store);
     let factor_provider: Arc<dyn ControlFactorProvider> = factor_store;
     let opportunity_pipeline: Arc<CoreOpportunityPipeline> = Arc::new(OpportunityPipeline::new(
@@ -1098,16 +1194,17 @@ async fn wire_detection(
         scorer,
         cooldown,
         factor_provider,
-        min_profit,
-        &settings.detection.endgame.scorer,
+        &runtime.detection,
     ));
 
-    let staleness = StalenessClassifier::new(&settings.market_data);
+    // One classifier, cloned into scanner + validator; the applicator reloads
+    // it once and every consumer observes the new ladder.
+    let staleness = StalenessClassifier::new(&runtime.market_data);
     let scanner = Arc::new(Scanner::new(
         Arc::clone(&opportunity_pipeline),
         Arc::clone(&book_store),
         Arc::clone(&market_cache),
-        staleness,
+        staleness.clone(),
         Arc::clone(&infra.metrics),
         Some(Arc::clone(&infra.persistence.detection_writer)),
         events.clone(),
@@ -1118,25 +1215,25 @@ async fn wire_detection(
 
     let coalescer = Arc::new(Coalescer::new(
         Arc::clone(&market_registry),
-        Duration::from_millis(settings.execution.coalescer.coalesce_window_ms),
+        Duration::from_millis(runtime.execution.coalescer.coalesce_window_ms),
         market_tx,
         Arc::clone(&infra.metrics),
         shutdown,
     ));
 
     let gamma_service = Arc::new(GammaService::new(GammaServiceDeps {
-        gamma_client: clients.gamma_client.clone(),
+        gamma_client: Arc::clone(&clients.gamma_client),
         market_registry: Arc::clone(&market_registry),
         market_cache: Arc::clone(&market_cache),
-        fee_calculator: clients.fee_calculator.clone(),
-        market_repo: infra.repos.market.clone(),
-        event_repo: infra.repos.event.clone(),
-        cache: infra.cache.clone(),
-        metrics: infra.metrics.clone(),
+        fee_calculator: Arc::clone(&clients.fee_calculator),
+        market_repo: Arc::clone(&infra.repos.market),
+        event_repo: Arc::clone(&infra.repos.event),
+        cache: Arc::clone(&infra.cache),
+        metrics: Arc::clone(&infra.metrics),
         ws_subscription: Some(Arc::new(WsSubscriptionCoordinator::new(Arc::clone(
             &clients.ws_manager,
         )))),
-        full_sync_interval_secs: settings.market_data.gamma.full_sync_interval_secs,
+        full_sync_interval_secs: deploy.market_data.gamma.full_sync_interval_secs,
     }));
 
     gamma_service.sync().await.map_err(|error| {
@@ -1162,6 +1259,7 @@ async fn wire_detection(
         calibration_updater,
         scanner,
         coalescer,
+        staleness,
         token_tx,
         token_rx,
         market_rx,
@@ -1169,7 +1267,7 @@ async fn wire_detection(
 }
 
 fn wire_execution_loop(
-    settings: &Settings,
+    wiring: WiringConfig<'_>,
     execution_mode: &ExecutionModeHandle,
     infra: &BuildInfra,
     clients: &BuildClients,
@@ -1177,22 +1275,30 @@ fn wire_execution_loop(
     detection: &DetectionStack,
     shutdown: CancellationToken,
 ) -> ExecutionLoop {
+    let WiringConfig { deploy, runtime } = wiring;
     let relay_notify = Arc::new(Notify::new());
     let (settlement_tx, settlement_rx) =
-        flume::bounded(settings.settlement.lifecycle.channel_capacity);
+        flume::bounded(deploy.settlement.lifecycle.channel_capacity);
     let capital = Arc::new(CapitalManager::new(
         Arc::clone(&risk.exposure),
-        settings.risk.exposure_reservation_config(),
+        &runtime.risk.exposure_reservation_config(),
     ));
     let market_inflight = Arc::new(MarketInFlightRegistry::new());
+    let validator = Arc::new(Validator::new(
+        Arc::clone(&detection.book_store),
+        detection.staleness.clone(),
+        &runtime.execution,
+        Arc::clone(&infra.metrics),
+    ));
+    let order_strategy = Arc::new(FokOrderStrategy::new(
+        execution_mode.clone(),
+        clients.clob_client.clone(),
+        clients.fee_calculator.clone(),
+        runtime.execution.timeout.dispatcher_timeout_ms,
+        Arc::clone(&infra.metrics),
+    ));
     let execution_pipeline = Arc::new(ExecutionPipeline::new(ExecutionPipelineDeps {
-        validator: Validator::new(
-            Arc::clone(&detection.book_store),
-            StalenessClassifier::new(&settings.market_data),
-            settings.execution.timeout.max_validation_slippage_bps,
-            settings.execution.endgame_latency.max_book_to_order_ms,
-            Arc::clone(&infra.metrics),
-        ),
+        validator: Arc::clone(&validator),
         plan_builder: PlanBuilder::new(
             clients.fee_calculator.clone(),
             Arc::clone(&detection.market_registry),
@@ -1203,13 +1309,7 @@ fn wire_execution_loop(
             clients.fee_calculator.clone(),
             Arc::clone(&infra.metrics),
         ),
-        order_strategy: FokOrderStrategy::new(
-            execution_mode.clone(),
-            clients.clob_client.clone(),
-            clients.fee_calculator.clone(),
-            settings.execution.timeout.dispatcher_timeout_ms,
-            Arc::clone(&infra.metrics),
-        ),
+        order_strategy: Arc::clone(&order_strategy),
         capital_manager: Arc::clone(&capital),
         risk_engine: Arc::clone(&risk.engine),
         risk_metrics: Arc::clone(&risk.metrics),
@@ -1229,7 +1329,7 @@ fn wire_execution_loop(
     let pipeline_port = Arc::clone(&execution_pipeline);
     let pipeline_port: Arc<dyn ExecutionPort> = pipeline_port;
     let (runner_pool, execution_runners) = ExecutionRunnerPool::new(
-        settings.execution.book_apply.shard_count,
+        deploy.execution.book_apply.shard_count,
         &pipeline_port,
         &shutdown,
         &inflight,
@@ -1237,8 +1337,8 @@ fn wire_execution_loop(
     );
     let funnel = Arc::new(Funnel::with_backpressure(
         runner_pool.shard_senders().to_vec(),
-        settings.execution.funnel.max_queue_size,
-        Duration::from_millis(settings.execution.funnel.min_dispatch_interval_ms),
+        runtime.execution.funnel.max_queue_size,
+        Duration::from_millis(runtime.execution.funnel.min_dispatch_interval_ms),
         Arc::clone(&infra.metrics),
         Some(Arc::clone(&risk.backpressure)),
     ));
@@ -1253,22 +1353,24 @@ fn wire_execution_loop(
         alerts: Arc::clone(&infra.alerts),
         backpressure: Arc::clone(&risk.backpressure),
         book_fact_writer: Some(Arc::clone(&infra.persistence.book_fact_writer)),
-        book_shard_count: settings.execution.book_apply.shard_count,
-        book_channel_capacity: settings.execution.book_apply.channel_capacity,
+        book_shard_count: deploy.execution.book_apply.shard_count,
+        book_channel_capacity: deploy.execution.book_apply.channel_capacity,
         shutdown,
     }));
 
     let execution = ExecutionBundle::new(
         execution_pipeline,
         market_inflight,
-        risk.engine.clone(),
-        risk.fsm.clone(),
+        Arc::clone(&risk.engine),
+        Arc::clone(&risk.fsm),
         Arc::clone(&capital),
         relay_notify,
     );
 
     ExecutionLoop {
         funnel,
+        validator,
+        order_strategy,
         data_pipeline,
         execution,
         settlement_rx,

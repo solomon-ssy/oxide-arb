@@ -14,20 +14,54 @@ pub use source::OracleSource;
 pub use types::{ResolutionVerdict, SourceVote};
 pub use uma_source::UmaOracleSource;
 
+use arc_swap::ArcSwap;
 use futures_util::future::join_all;
 use oxide_arb_error::rpc::RpcError;
-use oxide_arb_models::{config::AllSourcesDownStrategy, types::MarketId};
+use oxide_arb_models::{
+    runtime_config::{AllSourcesDownStrategy, SettlementOracleConfig},
+    types::MarketId,
+};
 use std::{sync::Arc, time::Duration};
+
+/// Hot-swappable oracle voting policy + source set.
+///
+/// Sources are part of the snapshot because the UMA source is built from the
+/// runtime `settlement.oracle` section (endpoint + timeout) and must be
+/// rebuilt atomically with the policy on reload.
+struct OracleState {
+    sources: Vec<Arc<dyn OracleSource>>,
+    quorum: usize,
+    cross_check_delay: Duration,
+    all_sources_down: AllSourcesDownStrategy,
+}
 
 /// Multi-source voting oracle for settlement verification.
 ///
 /// Production default: 2-of-3 quorum (Gamma + CTF on-chain + UMA).
 /// Disagreement yields [`ResolutionVerdict::Disputed`] for manual review.
+/// Policy and the UMA source are hot-reloadable via
+/// [`VotingOracle::stage_reload`] + [`StagedOracleReload::commit`].
 pub struct VotingOracle {
-    sources: Vec<Arc<dyn OracleSource>>,
-    quorum: usize,
-    cross_check_delay: Duration,
-    all_sources_down: AllSourcesDownStrategy,
+    state: ArcSwap<OracleState>,
+}
+
+/// A fully built next oracle state, staged but not yet visible.
+///
+/// Produced by [`VotingOracle::stage_reload`]. Splitting the fallible build
+/// from the infallible publish lets the runtime-config applicator stage every
+/// fallible subscriber first and commit only when all of them succeeded — an
+/// aborted activation never leaves the oracle partially reloaded.
+#[must_use = "a staged reload has no effect until committed"]
+pub struct StagedOracleReload<'a> {
+    oracle: &'a VotingOracle,
+    state: Arc<OracleState>,
+}
+
+impl StagedOracleReload<'_> {
+    /// Publish the staged policy + source set (infallible).
+    pub fn commit(self) {
+        self.oracle.state.store(self.state);
+    }
 }
 
 impl VotingOracle {
@@ -38,26 +72,59 @@ impl VotingOracle {
         all_sources_down: AllSourcesDownStrategy,
     ) -> Self {
         Self {
-            sources,
-            quorum,
-            cross_check_delay,
-            all_sources_down,
+            state: ArcSwap::from_pointee(OracleState {
+                sources,
+                quorum,
+                cross_check_delay,
+                all_sources_down,
+            }),
         }
+    }
+
+    /// Stage a hot-reload of the voting policy (runtime-config activation).
+    ///
+    /// Quorum, cross-check delay, and the all-sources-down strategy apply to
+    /// the next resolution after commit. The UMA source is rebuilt from the
+    /// new endpoint / timeout; Gamma and CTF sources are connection-level
+    /// (deploy) and are carried over unchanged. Nothing becomes visible until
+    /// [`StagedOracleReload::commit`].
+    pub fn stage_reload(
+        &self,
+        config: &SettlementOracleConfig,
+    ) -> Result<StagedOracleReload<'_>, RpcError> {
+        let current = self.state.load();
+        let mut sources: Vec<Arc<dyn OracleSource>> = current
+            .sources
+            .iter()
+            .filter(|source| source.source_id() != "uma")
+            .map(Arc::clone)
+            .collect();
+        sources.push(Arc::new(UmaOracleSource::new(config)?));
+        Ok(StagedOracleReload {
+            oracle: self,
+            state: Arc::new(OracleState {
+                sources,
+                quorum: usize::from(config.voting_quorum.max(1)),
+                cross_check_delay: Duration::from_secs(config.cross_check_delay_secs),
+                all_sources_down: config.all_sources_down_strategy.clone(),
+            }),
+        })
     }
 
     /// Query all sources in parallel; require `quorum` agreeing votes.
     ///
-    /// When Gamma reports a resolution hint, waits [`VotingOracle::cross_check_delay`] before
-    /// querying all sources so slower on-chain / UMA sources can catch up.
+    /// When Gamma reports a resolution hint, waits the configured cross-check
+    /// delay before querying all sources so slower on-chain / UMA sources can
+    /// catch up.
     pub async fn resolve(
         &self,
         market_id: &MarketId,
         condition_id: &str,
     ) -> Result<ResolutionVerdict, RpcError> {
-        self.maybe_wait_for_gamma_hint(market_id, condition_id)
-            .await;
+        let state = self.state.load_full();
+        Self::maybe_wait_for_gamma_hint(&state, market_id, condition_id).await;
 
-        let query_futures = self.sources.iter().map(|source| {
+        let query_futures = state.sources.iter().map(|source| {
             let market_id = market_id.clone();
             let condition_id = condition_id.to_owned();
             async move {
@@ -86,7 +153,7 @@ impl VotingOracle {
             }
         }
 
-        let verdict = Self::tally_votes(&votes, self.quorum);
+        let verdict = Self::tally_votes(&votes, state.quorum);
 
         tracing::info!(
             event = "oracle.resolve",
@@ -95,34 +162,38 @@ impl VotingOracle {
             yes_votes = votes.iter().filter(|v| v.actual_yes).count(),
             no_votes = votes.iter().filter(|v| !v.actual_yes).count(),
             total_votes = votes.len(),
-            quorum = self.quorum,
+            quorum = state.quorum,
             source_errors,
             verdict = ?verdict,
         );
 
         if matches!(verdict, ResolutionVerdict::Unresolved { .. }) && votes.is_empty() {
-            return Ok(self.verdict_all_sources_down(source_errors));
+            return Ok(Self::verdict_all_sources_down(&state, source_errors));
         }
 
         Ok(verdict)
     }
 
-    async fn maybe_wait_for_gamma_hint(&self, market_id: &MarketId, condition_id: &str) {
-        if self.cross_check_delay.is_zero() {
+    async fn maybe_wait_for_gamma_hint(
+        state: &OracleState,
+        market_id: &MarketId,
+        condition_id: &str,
+    ) {
+        if state.cross_check_delay.is_zero() {
             return;
         }
 
-        let gamma = self.sources.iter().find(|s| s.source_id() == "gamma");
+        let gamma = state.sources.iter().find(|s| s.source_id() == "gamma");
         let Some(gamma) = gamma else {
             return;
         };
 
         if let Ok(Some(_)) = gamma.query_resolution(market_id, condition_id).await {
             tracing::debug!(
-                delay_secs = self.cross_check_delay.as_secs(),
+                delay_secs = state.cross_check_delay.as_secs(),
                 "Gamma resolution hint; delaying cross-check for on-chain sources"
             );
-            tokio::time::sleep(self.cross_check_delay).await;
+            tokio::time::sleep(state.cross_check_delay).await;
         }
     }
 
@@ -157,8 +228,8 @@ impl VotingOracle {
         }
     }
 
-    fn verdict_all_sources_down(&self, source_errors: u32) -> ResolutionVerdict {
-        let reason = match self.all_sources_down {
+    fn verdict_all_sources_down(state: &OracleState, source_errors: u32) -> ResolutionVerdict {
+        let reason = match state.all_sources_down {
             AllSourcesDownStrategy::ConservativeReject => {
                 format!("conservative_reject: no oracle votes ({source_errors} source errors)")
             }

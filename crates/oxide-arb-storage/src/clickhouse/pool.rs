@@ -2,7 +2,7 @@
 
 use crate::clickhouse::schema;
 use oxide_arb_error::storage::StorageError;
-use oxide_arb_models::config::AnalyticsConfig;
+use oxide_arb_models::config::ClickHouseConfig;
 use tracing::info;
 
 pub struct ClickHousePool {
@@ -11,22 +11,22 @@ pub struct ClickHousePool {
 }
 
 impl ClickHousePool {
-    pub fn connect(config: &AnalyticsConfig) -> Result<Self, StorageError> {
+    pub fn connect(config: &ClickHouseConfig) -> Result<Self, StorageError> {
         let client = clickhouse::Client::default()
-            .with_url(&config.clickhouse_url)
-            .with_database(&config.clickhouse_database)
-            .with_user(&config.clickhouse_user)
-            .with_password(&config.clickhouse_password);
+            .with_url(&config.url)
+            .with_database(&config.database)
+            .with_user(&config.user)
+            .with_password(&config.password);
 
         info!(
-            url = %config.clickhouse_url,
-            database = %config.clickhouse_database,
+            url = %config.url,
+            database = %config.database,
             "ClickHouse client initialized"
         );
 
         Ok(Self {
             client,
-            database: config.clickhouse_database.clone(),
+            database: config.database.clone(),
         })
     }
 

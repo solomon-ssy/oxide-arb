@@ -1,73 +1,75 @@
-//! Database configuration.
+//! Database configuration (`[db]`, deploy): Postgres OLTP + `ClickHouse` OLAP.
 
 use serde::Deserialize;
-use validator::Validate;
 
-#[derive(Debug, Clone, Default, Deserialize, Validate)]
+/// Postgres + `ClickHouse` connections.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct DatabaseConfig {
-    #[serde(default)]
+    /// Postgres (system of record: trades, positions, governance, RBAC).
     pub postgres: PostgresConfig,
+    /// `ClickHouse` (analytics timeseries: ticks, books, detections, evidence).
+    pub clickhouse: ClickHouseConfig,
 }
 
-#[derive(Debug, Clone, Deserialize, Validate)]
+/// Postgres connection + pool + per-session GUC parameters.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct PostgresConfig {
-    #[serde(default = "default_host")]
+    /// Server host. Default: `localhost`.
     pub host: String,
-    #[serde(default = "default_port")]
+    /// Server port. Default: `5432`.
     pub port: u16,
-    #[serde(default = "default_user")]
+    /// Role name. Default: `oxide`.
     pub user: String,
-    #[serde(default)]
+    /// Role password. Set via `OXIDE_ARB__DB__POSTGRES__PASSWORD` in
+    /// production — never in the TOML. Default: empty.
     pub password: String,
-    #[serde(default = "default_database")]
+    /// Database name. Default: `oxide_arb`.
     pub database: String,
-    #[serde(default = "default_schema")]
+    /// Schema search path. Default: `public`.
     pub schema: String,
-    #[serde(default = "default_max_conns")]
+    /// Pool upper bound. Size for worst-case concurrent repository access.
+    /// Default: `10`.
     pub max_connections: u32,
-    #[serde(default = "default_min_conns")]
+    /// Pool warm floor. Default: `2`.
     pub min_connections: u32,
-    #[serde(default = "default_connect_timeout")]
+    /// TCP connect timeout (seconds). Default: `10`.
     pub connect_timeout_secs: u64,
-    #[serde(default = "default_idle_timeout")]
+    /// Idle connection reap timeout (seconds). Default: `300`.
     pub idle_timeout_secs: u64,
-    #[serde(default = "default_acquire_timeout")]
+    /// Pool acquire timeout (seconds); exceeding indicates pool exhaustion.
+    /// Default: `10`.
     pub acquire_timeout_secs: u64,
-    #[serde(default = "default_max_lifetime")]
+    /// Max connection lifetime (seconds) before recycling. Default: `1800`.
     pub max_lifetime_secs: u64,
 
     /// `statement_timeout` prevents runaway queries. Applied per-connection via
-    /// libpq startup `options` parameter so every pool connection inherits it.
-    /// Unit: milliseconds. 0 = disabled.
-    #[serde(default = "default_statement_timeout_ms")]
+    /// libpq startup `options` so every pool connection inherits it.
+    /// Unit: milliseconds, `0` = disabled. Default: `30000`.
     pub statement_timeout_ms: u64,
 
     /// `idle_in_transaction_session_timeout` kills idle transactions that hold
-    /// locks. Unit: milliseconds. 0 = disabled.
-    #[serde(default = "default_idle_in_transaction_timeout_ms")]
+    /// locks. Unit: milliseconds, `0` = disabled. Default: `60000`.
     pub idle_in_transaction_timeout_ms: u64,
 
-    /// `lock_timeout` kills statements that wait too long for a row/table lock.
-    /// Unit: milliseconds. 0 = disabled.
-    #[serde(default = "default_lock_timeout_ms")]
+    /// `lock_timeout` kills statements that wait too long for a row/table
+    /// lock. Unit: milliseconds, `0` = disabled. Default: `5000`.
     pub lock_timeout_ms: u64,
 
-    /// Per-operation sort/hash memory. Passed as-is to `PostgreSQL`.
-    #[serde(default = "default_work_mem")]
+    /// Per-operation sort/hash memory, passed verbatim to `PostgreSQL`.
+    /// Default: `16MB`.
     pub work_mem: String,
 
-    /// Whether to run a post-connect self-check that verifies session-level GUC
-    /// parameters actually took effect. Catches `PgBouncer` stripping startup
-    /// `options`. On mismatch: abort startup with a descriptive error.
-    #[serde(default = "default_verify_session_params")]
+    /// Post-connect self-check that session GUC parameters actually took
+    /// effect (catches `PgBouncer` stripping startup `options`). On mismatch:
+    /// abort startup with a descriptive error. Default: `true`.
     pub verify_session_params: bool,
 
-    /// Statement cache capacity per-connection (sqlx `PreparedStatementCache`).
-    #[serde(default = "default_statement_cache_capacity")]
+    /// Prepared-statement cache capacity per connection. Default: `256`.
     pub statement_cache_capacity: u32,
 
-    /// Application name reported to `pg_stat_activity`.
-    #[serde(default = "default_application_name")]
+    /// Application name reported to `pg_stat_activity`. Default: `oxide-arb`.
     pub application_name: String,
 }
 
@@ -183,4 +185,60 @@ const fn default_statement_cache_capacity() -> u32 {
 }
 fn default_application_name() -> String {
     "oxide-arb".into()
+}
+
+/// `ClickHouse` connection + batched-write tuning.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ClickHouseConfig {
+    /// HTTP endpoint. Default: `http://localhost:8123`.
+    pub url: String,
+    /// Database name. Default: `oxide_arb`.
+    pub database: String,
+    /// User name. Default: `default`.
+    pub user: String,
+    /// Password. Set via `OXIDE_ARB__DB__CLICKHOUSE__PASSWORD` in production —
+    /// never in the TOML. Default: empty.
+    pub password: String,
+    /// Max age (seconds) of a partial batch before it is flushed. Lower =
+    /// fresher analytics, more insert requests. Default: `10`.
+    pub flush_interval_secs: u64,
+    /// Rows per insert batch; a full batch flushes immediately. Default: `1000`.
+    pub batch_size: usize,
+    /// Maximum concurrent insert operations (semaphore). Prevents overwhelming
+    /// the server under high tick ingestion rates. Default: `4`.
+    pub max_concurrent_inserts: usize,
+}
+
+impl Default for ClickHouseConfig {
+    fn default() -> Self {
+        Self {
+            url: default_ch_url(),
+            database: default_ch_database(),
+            user: default_ch_user(),
+            password: String::new(),
+            flush_interval_secs: default_ch_flush_interval(),
+            batch_size: default_ch_batch_size(),
+            max_concurrent_inserts: default_ch_max_concurrent_inserts(),
+        }
+    }
+}
+
+fn default_ch_url() -> String {
+    "http://localhost:8123".into()
+}
+fn default_ch_database() -> String {
+    "oxide_arb".into()
+}
+fn default_ch_user() -> String {
+    "default".into()
+}
+const fn default_ch_flush_interval() -> u64 {
+    10
+}
+const fn default_ch_batch_size() -> usize {
+    1000
+}
+const fn default_ch_max_concurrent_inserts() -> usize {
+    4
 }

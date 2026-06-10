@@ -7,7 +7,7 @@ use oxide_arb_models::{
         BookSnapshotRow, CalibrationSnapshotRow, OpportunityAuditRow, OpportunityDetectionRow,
         TickEventL2Row, TickEventRow,
     },
-    config::AnalyticsConfig,
+    config::ClickHouseConfig,
     domain::{MarketFilter, PageRequest, Paginated, TimeWindow, evidence::EvidenceQueryResult},
     enums::clickhouse::ChOpportunityAuditStage,
     types::{OpportunityId, TokenId},
@@ -41,7 +41,7 @@ struct CountRow {
 impl ChTimeseriesRepository {
     pub fn new(
         client: clickhouse::Client,
-        config: &AnalyticsConfig,
+        config: &ClickHouseConfig,
         write_manager: Arc<ChWriteManager>,
         shutdown: CancellationToken,
     ) -> Self {
@@ -105,10 +105,6 @@ impl ChTimeseriesRepository {
 
     pub fn write_metrics(&self) -> &Arc<ChWriteMetrics> {
         self.write_manager.metrics()
-    }
-
-    pub fn is_lagging(&self) -> bool {
-        self.write_manager.is_lagging()
     }
 }
 

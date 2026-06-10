@@ -4,7 +4,7 @@ use crate::{
     context::PreTradeContext,
     types::{DrawdownAction, KellyResult, SizeBreakdown, SizeConstraint, SizeResult},
 };
-use oxide_arb_models::{config::RiskConfig, domain::risk::ProbabilityInput, types::Usd};
+use oxide_arb_models::{domain::risk::ProbabilityInput, runtime_config::RiskConfig, types::Usd};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 
@@ -320,6 +320,12 @@ impl DrawdownGuard {
         if current_equity > self.hwm {
             self.hwm = current_equity;
         }
+    }
+    /// Hot-reload drawdown limits (runtime-config activation). The high-water
+    /// mark is preserved — only the policy parameters change.
+    pub const fn set_params(&mut self, max_drawdown_pct: Decimal, reduction_factor: Decimal) {
+        self.max_drawdown_pct = max_drawdown_pct;
+        self.reduction_factor = reduction_factor;
     }
     #[must_use]
     pub fn evaluate(&self, current_equity: Usd) -> (Decimal, DrawdownAction) {

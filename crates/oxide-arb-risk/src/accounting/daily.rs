@@ -43,6 +43,17 @@ impl DailyAccounting {
         }
     }
 
+    /// Hot-reload the daily budget (runtime-config activation).
+    ///
+    /// The amount already spent today is preserved: the remaining budget is
+    /// adjusted by the delta between the new and old budget (floored at zero
+    /// when the new budget is below today's spend — fail-closed).
+    pub fn set_budget(&mut self, budget: Usd) {
+        let spent = self.budget_spent();
+        self.initial_budget = budget;
+        self.budget_remaining = (budget - spent).max(Usd::ZERO);
+    }
+
     pub fn record_trade(
         &mut self,
         net_profit: Usd,

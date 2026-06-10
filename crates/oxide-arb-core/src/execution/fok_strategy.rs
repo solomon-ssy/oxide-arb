@@ -19,9 +19,13 @@ use oxide_arb_models::{
         common::{ExecutionMode, OrderType, Side},
         execution::ExecutionOutcome,
     },
+    runtime_config::TradeTimeoutConfig,
 };
 use std::{
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -29,7 +33,7 @@ pub struct FokOrderStrategy {
     mode: ExecutionModeHandle,
     clob_client: Option<Arc<ClobClient>>,
     fee_calculator: Arc<FeeCalculator>,
-    dispatcher_timeout_ms: u64,
+    dispatcher_timeout_ms: AtomicU64,
     metrics: Arc<MetricsHub>,
 }
 
@@ -45,9 +49,18 @@ impl FokOrderStrategy {
             mode,
             clob_client,
             fee_calculator,
-            dispatcher_timeout_ms,
+            dispatcher_timeout_ms: AtomicU64::new(dispatcher_timeout_ms),
             metrics,
         }
+    }
+
+    /// Hot-reload the FOK dispatch timeout (runtime-config activation).
+    ///
+    /// Consumes only `dispatcher_timeout_ms`; the other budgets in the
+    /// timeout section belong to the validator and the post-trade relay.
+    pub fn reload(&self, config: &TradeTimeoutConfig) {
+        self.dispatcher_timeout_ms
+            .store(config.dispatcher_timeout_ms, Ordering::Relaxed);
     }
 
     pub async fn execute(
@@ -98,7 +111,8 @@ impl FokOrderStrategy {
         trace.mark_http_sent();
         observe_tick_to_http(trace, &self.metrics);
 
-        let timeout = Duration::from_millis(self.dispatcher_timeout_ms);
+        let timeout_ms = self.dispatcher_timeout_ms.load(Ordering::Relaxed);
+        let timeout = Duration::from_millis(timeout_ms);
         match tokio::time::timeout(timeout, clob.place_order(&req)).await {
             Ok(Ok(resp)) => {
                 let outcome = map_order_response(
@@ -129,14 +143,11 @@ impl FokOrderStrategy {
                 self.metrics.fok_misses.inc();
                 tracing::error!(
                     execution_id = %plan.execution_id,
-                    timeout_ms = self.dispatcher_timeout_ms,
+                    timeout_ms,
                     "CLOB FOK order timed out"
                 );
                 ExecutionOutcome::Failed {
-                    error: format!(
-                        "CLOB FOK order timeout after {}ms",
-                        self.dispatcher_timeout_ms
-                    ),
+                    error: format!("CLOB FOK order timeout after {timeout_ms}ms"),
                     execution_mode: ExecutionMode::Live,
                 }
             }

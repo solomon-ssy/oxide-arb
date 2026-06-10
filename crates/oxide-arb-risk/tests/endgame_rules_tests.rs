@@ -2,7 +2,6 @@
 
 use chrono::Utc;
 use oxide_arb_models::{
-    config::RiskConfig,
     domain::{
         calibration::{BucketKey, CalibrationSnapshot},
         opportunity::{EndgameMeta, Opportunity},
@@ -13,6 +12,7 @@ use oxide_arb_models::{
         common::{MarketCategory, Side, StalenessLevel},
         opportunity::PayoutModel,
     },
+    runtime_config::RiskConfig,
     types::{Bps, EventId, MarketId, OpportunityId, Price, Shares, TokenId, Usd},
 };
 use oxide_arb_risk::{

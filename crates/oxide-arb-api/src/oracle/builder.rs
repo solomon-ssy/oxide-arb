@@ -5,24 +5,27 @@ use super::{
     source::OracleSource, uma_source::UmaOracleSource,
 };
 use oxide_arb_error::rpc::RpcError;
-use oxide_arb_models::config::{
-    GammaConfig, OnchainConfig, PolymarketConfig,
-    settlement::{SettlementContractsSection, SettlementOracleSection},
+use oxide_arb_models::{
+    config::{GammaConfig, OnchainConfig, PolymarketConfig},
+    constants::CTF_ADDRESS,
+    runtime_config::SettlementOracleConfig,
 };
 use std::{sync::Arc, time::Duration};
 
 /// Build the production 3-source settlement oracle (Gamma + CTF + UMA).
+///
+/// The CTF source reads the compiled-in conditional-tokens deployment
+/// (`constants::CTF_ADDRESS`).
 pub fn build_voting_oracle(
     polymarket: &PolymarketConfig,
     gamma: &GammaConfig,
-    oracle_cfg: &SettlementOracleSection,
-    contracts: &SettlementContractsSection,
+    oracle_cfg: &SettlementOracleConfig,
 ) -> Result<VotingOracle, RpcError> {
     let sources: Vec<Arc<dyn OracleSource>> = vec![
         Arc::new(GammaOracleSource::new(gamma.base_url.clone())),
         Arc::new(CtfOracleSource::new(
             polymarket.onchain.rpc_url.clone(),
-            &contracts.ctf_address,
+            CTF_ADDRESS,
         )?),
         Arc::new(UmaOracleSource::new(oracle_cfg)?),
     ];
@@ -43,8 +46,7 @@ pub fn build_voting_oracle(
 pub fn build_voting_oracle_from_urls(
     gamma_base_url: String,
     onchain: &OnchainConfig,
-    oracle_cfg: &SettlementOracleSection,
-    contracts: &SettlementContractsSection,
+    oracle_cfg: &SettlementOracleConfig,
 ) -> Result<VotingOracle, RpcError> {
     let polymarket = PolymarketConfig {
         onchain: onchain.clone(),
@@ -54,5 +56,5 @@ pub fn build_voting_oracle_from_urls(
         base_url: gamma_base_url,
         ..GammaConfig::default()
     };
-    build_voting_oracle(&polymarket, &gamma, oracle_cfg, contracts)
+    build_voting_oracle(&polymarket, &gamma, oracle_cfg)
 }

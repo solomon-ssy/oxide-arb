@@ -1,145 +1,173 @@
-//! Risk guard-rail configuration.
+//! Risk guard-rail runtime configuration (`risk` section).
 //!
-//! Single-strategy (endgame) risk model. All limits, position sizing,
-//! and endgame-specific parameters live in [`RiskConfig`].
-//! `PositionSizingConfig` has been absorbed here per ADR-001 §4.
+//! Single-strategy (endgame) risk model. All limits, position sizing, and
+//! endgame-specific parameters live in [`RiskConfig`] (`PositionSizingConfig`
+//! was absorbed here per ADR-001 §4). Every field is hot-reloadable through
+//! the versioned runtime-config activation path; tightening exposure limits
+//! below the currently reserved amounts is rejected by the activation
+//! preflight (fail-closed).
 
 use num_traits::ToPrimitive;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
-use serde::Deserialize;
-use validator::Validate;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Deserialize, Validate)]
+/// Risk limits, accounting caps, circuit breaker, and position sizing.
+///
+/// The whole section is money-critical: every field bounds money at risk, so
+/// the schema marks the container and the UI requires confirmation for all of
+/// it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+#[schemars(extend("x-money-critical" = true))]
 pub struct RiskConfig {
     // ── Per-opportunity static filters ───────────────────────────────
-    /// Minimum order-book depth (USD) required before execution.
-    #[serde(default = "default_min_depth_usd")]
+    /// Minimum order-book depth (USD) required before execution. Default: `200`.
+    #[schemars(with = "String")]
     pub min_depth_usd: Decimal,
     /// Maximum fraction of visible book depth a single order may consume (%).
-    #[serde(default = "default_max_depth_usage_pct")]
+    /// Default: `30`.
+    #[schemars(with = "String")]
     pub max_depth_usage_pct: Decimal,
 
     // ── Rolling counters + adaptive cooldown ─────────────────────────
-    #[serde(default = "default_max_misses")]
+    /// Consecutive misses before the session breaker trips. Default: `3`.
     pub max_consecutive_misses: u32,
-    #[serde(default = "default_max_hourly_loss")]
+    /// Rolling hourly loss cap (USD); breach trips the L2 breaker. Default: `30`.
+    #[schemars(with = "String")]
     pub max_hourly_loss_usd: Decimal,
-    #[serde(default = "default_max_hourly_fee_spend")]
+    /// Rolling hourly fee-spend cap (USD); breach trips the L2 breaker.
+    /// Default: `10`.
+    #[schemars(with = "String")]
     pub max_hourly_fee_spend_usd: Decimal,
-    #[serde(default = "default_base_cooldown")]
+    /// Base adaptive cooldown after repeated misses (seconds). Default: `900`.
     pub base_cooldown_secs: u64,
-    #[serde(default = "default_cooldown_mult")]
+    /// Exponential multiplier applied per consecutive cooldown. Default: `2.0`.
+    #[schemars(with = "String")]
     pub cooldown_multiplier: Decimal,
-    #[serde(default = "default_max_cooldown")]
+    /// Hard ceiling for the adaptive cooldown (seconds). Default: `7200`.
     pub max_cooldown_secs: u64,
 
     // ── Daily / weekly loss caps ─────────────────────────────────────
-    #[serde(default = "default_max_daily_loss")]
+    /// Daily realized-loss cap (USD); breach halts at L3. Default: `75`.
+    #[schemars(with = "String")]
     pub max_daily_loss_usd: Decimal,
-    #[serde(default = "default_max_daily_fee_spend")]
+    /// Daily fee-spend cap (USD); breach halts at L3. Default: `25`.
+    #[schemars(with = "String")]
     pub max_daily_fee_spend_usd: Decimal,
-    #[serde(default = "default_max_single_loss")]
+    /// Single-trade loss cap (USD); breach halts at L3. Default: `30`.
+    #[schemars(with = "String")]
     pub max_single_loss_usd: Decimal,
-    #[serde(default = "default_max_weekly_loss")]
+    /// Weekly realized-loss cap (USD); breach halts at L4. Default: `120`.
+    #[schemars(with = "String")]
     pub max_weekly_loss_usd: Decimal,
-    /// Independent daily budget (USD). Execution stops when exhausted.
-    #[serde(default = "default_daily_budget")]
+    /// Independent daily spend budget (USD). Execution stops when exhausted.
+    /// Default: `50`.
+    #[schemars(with = "String")]
     pub daily_budget_usd: Decimal,
 
     // ── Connectivity + balance health ────────────────────────────────
-    #[serde(default = "default_ws_disconnect_threshold")]
+    /// WS disconnect duration (seconds) before trading is gated. Default: `30`.
     pub ws_disconnect_threshold_secs: u64,
-    #[serde(default = "default_min_balance")]
+    /// Minimum CLOB collateral balance (USD); below this trading is gated.
+    /// Default: `50`.
+    #[schemars(with = "String")]
     pub min_balance_usd: Decimal,
 
     // ── Blacklist ────────────────────────────────────────────────────
-    #[serde(default = "default_blacklist_count")]
+    /// Consecutive misses on one market before auto-blacklisting. Default: `3`.
     pub market_miss_blacklist_count: u32,
-    #[serde(default = "default_blacklist_duration")]
+    /// Auto-blacklist TTL (seconds). Default: `3600`.
     pub market_miss_blacklist_duration_secs: u64,
-    #[serde(default)]
+    /// Permanently blacklisted market condition IDs. Reload merges with — and
+    /// never removes — entries added at runtime via the blacklist API.
+    /// Default: empty.
     pub permanent_blacklist_markets: Vec<String>,
-    #[serde(default)]
+    /// Permanently blacklisted CLOB token IDs. Same merge semantics as
+    /// `permanent_blacklist_markets`. Default: empty.
     pub permanent_blacklist_tokens: Vec<String>,
 
     // ── Exposure limits ──────────────────────────────────────────────
-    #[serde(default = "default_max_total_exposure")]
+    /// Maximum total exposure across all reservations (USD). Preflight rejects
+    /// activation when set below the currently reserved total. Default: `5000`.
+    #[schemars(with = "String")]
     pub max_total_exposure_usd: Decimal,
-    #[serde(default = "default_reserve_balance")]
+    /// Balance reserve (USD) excluded from the Kelly bankroll. Default: `100`.
+    #[schemars(with = "String")]
     pub reserve_balance_usd: Decimal,
-    #[serde(default = "default_max_open_positions")]
+    /// Maximum concurrently open positions. Default: `3`.
     pub max_open_positions: usize,
-    #[serde(default = "default_max_market_exposure")]
+    /// Maximum exposure per market (USD). Preflight rejects activation when set
+    /// below any in-flight market exposure. Default: `500`.
+    #[schemars(with = "String")]
     pub max_single_market_exposure_usd: Decimal,
-    /// Maximum USD for a single bet.
-    #[serde(default = "default_max_single_bet")]
+    /// Maximum USD for a single bet. Default: `25`.
+    #[schemars(with = "String")]
     pub max_single_bet_usd: Decimal,
-    /// Default TTL for in-flight capital reservations.
-    #[serde(default = "default_reservation_ttl_secs")]
+    /// Default TTL (seconds) for in-flight capital reservations. Default: `300`.
     pub reservation_ttl_secs: u64,
-    /// Interval for cleaning expired in-flight reservations.
-    #[serde(default = "default_reservation_gc_interval_secs")]
+    /// Interval (seconds) for cleaning expired in-flight reservations.
+    /// Default: `30`.
     pub reservation_gc_interval_secs: u64,
 
-    // ── Exposure as percentage of balance ─────────────────────────────
+    // ── Exposure as percentage of balance ────────────────────────────
     /// Maximum portfolio exposure as a percentage of available balance.
-    #[serde(default = "default_max_total_exposure_pct")]
+    /// Default: `80`.
+    #[schemars(with = "String")]
     pub max_total_exposure_pct: Decimal,
 
     // ── Reconciliation ───────────────────────────────────────────────
-    /// Interval (secs) between CLOB balance + open-position metrics refreshes.
-    #[serde(default = "default_metrics_refresh_interval")]
+    /// Interval (seconds) between CLOB balance + open-position metrics
+    /// refreshes. Default: `5`.
     pub metrics_refresh_interval_secs: u64,
-    /// Maximum age (secs) of the risk metrics snapshot allowed on Live hot path.
-    #[serde(default = "default_max_metrics_staleness")]
+    /// Maximum age (seconds) of the risk metrics snapshot allowed on the Live
+    /// hot path. Must be >= `metrics_refresh_interval_secs`. Default: `15`.
     pub max_metrics_staleness_secs: u64,
-    /// Interval (secs) between ledger reconciliation runs.
-    #[serde(default = "default_reconciliation_interval")]
+    /// Interval (seconds) between ledger reconciliation runs. Default: `300`.
     pub reconciliation_interval_secs: u64,
-    /// Maximum acceptable drift (USD) before triggering an alert.
-    #[serde(default = "default_reconciliation_tolerance")]
+    /// Maximum acceptable balance drift (USD) before alerting. Default: `1.0`.
+    #[schemars(with = "String")]
     pub reconciliation_tolerance_usd: Decimal,
 
     // ── Circuit breaker ──────────────────────────────────────────────
-    #[serde(default)]
+    /// 4-level circuit breaker cooldowns and recovery policy.
     pub circuit_breaker: CircuitBreakerConfig,
 
-    // ── Position Sizing (absorbed from PositionSizingConfig) ─────────
-    /// Quarter-Kelly fraction multiplier (f*/4).
-    #[serde(default = "default_kelly_fraction")]
+    // ── Position sizing (absorbed from PositionSizingConfig) ─────────
+    /// Quarter-Kelly fraction multiplier (`f*/4`). Default: `0.25`.
+    #[schemars(with = "String")]
     pub kelly_fraction: Decimal,
-    /// Total bankroll available for Kelly computation (USD).
-    #[serde(default = "default_bankroll")]
+    /// Total bankroll available for Kelly computation (USD). Also seeds the
+    /// simulated balance in `DryRun`/`Paper`. Default: `1000`.
+    #[schemars(with = "String")]
     pub bankroll_usd: Decimal,
-    /// Minimum trade size (below this, skip the opportunity).
-    #[serde(default = "default_min_trade")]
+    /// Minimum trade size (USD); sized below this the opportunity is skipped.
+    /// Default: `1`.
+    #[schemars(with = "String")]
     pub min_trade_usd: Decimal,
-    #[serde(default)]
+    /// Kelly criterion guards.
     pub kelly: KellyConfig,
-    #[serde(default)]
+    /// Drawdown protection.
     pub drawdown: DrawdownConfig,
 
-    // ── API health ────────────────────────────────────────────────────
-    /// API error rate threshold (0..1). Exceeding triggers L2 Session breaker.
-    #[serde(default = "default_api_error_rate_threshold")]
+    // ── API health ───────────────────────────────────────────────────
+    /// API error rate threshold (0..1). Exceeding trips the L2 Session breaker.
+    /// Default: `0.10`.
+    #[schemars(with = "String")]
     pub api_error_rate_threshold: Decimal,
-    /// Number of consecutive heartbeat failures before triggering L4 System halt.
-    #[serde(default = "default_heartbeat_max_failures")]
+    /// Consecutive heartbeat failures before an L4 System halt. Default: `3`.
     pub heartbeat_max_failures: u32,
 
-    // ── Potential loss escalation ──────────────────────────────────────
-    /// Maximum age (secs) of an active potential-loss entry before
-    /// escalation triggers an L4 System halt.
-    #[serde(default = "default_potential_loss_escalation")]
+    // ── Potential loss escalation ────────────────────────────────────
+    /// Maximum age (seconds) of an active potential-loss entry before
+    /// escalation triggers an L4 System halt. Default: `3600`.
     pub potential_loss_escalation_secs: u64,
 
     // ── Endgame-specific rules ───────────────────────────────────────
-    /// Max concurrent positions in the same directional side.
-    #[serde(default = "default_max_concurrent_directional")]
+    /// Max concurrent positions on the same directional side. Default: `3`.
     pub max_concurrent_directional: usize,
-    /// Daily budget of directional trades per side.
-    #[serde(default = "default_daily_directional_budget")]
+    /// Daily budget of directional trades per side. Default: `10`.
     pub daily_directional_budget: u32,
 }
 
@@ -193,6 +221,8 @@ impl Default for RiskConfig {
 }
 
 impl RiskConfig {
+    /// Derive the exposure-reservation limits from the risk limits so risk
+    /// gates and reservation accounting share one authority.
     #[must_use]
     pub fn exposure_reservation_config(&self) -> ExposureReservationConfig {
         ExposureReservationConfig {
@@ -311,22 +341,24 @@ const fn default_daily_directional_budget() -> u32 {
 }
 
 /// Kelly criterion sub-configuration.
-#[derive(Debug, Clone, Deserialize, Validate)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
 pub struct KellyConfig {
-    /// Maximum Kelly fraction before capping.
-    #[serde(default = "default_kelly_max")]
+    /// Maximum Kelly fraction before capping. Default: `0.25`.
+    #[schemars(with = "String")]
     pub max_kelly: Decimal,
-    /// Minimum edge (bps) below which Kelly returns zero.
-    #[serde(default = "default_kelly_min_edge")]
+    /// Minimum edge (bps) below which Kelly returns zero. Default: `200`.
+    #[schemars(with = "String")]
     pub min_edge_bps: Decimal,
     /// Minimum calibration confidence (0..1) below which Kelly returns zero.
-    #[serde(default = "default_kelly_min_confidence")]
+    /// Default: `0.3`.
+    #[schemars(with = "String")]
     pub min_probability_confidence: Decimal,
-    /// Minimum historical sample count required for calibration to be trusted.
-    #[serde(default = "default_kelly_min_samples")]
+    /// Minimum historical sample count for calibration to be trusted.
+    /// Default: `10`.
     pub min_calibration_samples: u32,
-    /// Maximum staleness (secs) of calibration model before Kelly returns zero.
-    #[serde(default = "default_kelly_max_staleness")]
+    /// Maximum staleness (seconds) of the calibration model before Kelly
+    /// returns zero. Default: `7200`.
     pub max_probability_staleness_secs: u64,
 }
 
@@ -359,13 +391,15 @@ const fn default_kelly_max_staleness() -> u64 {
 }
 
 /// Drawdown protection sub-configuration.
-#[derive(Debug, Clone, Deserialize, Validate)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
 pub struct DrawdownConfig {
-    /// Maximum drawdown (%) before reducing position sizes.
-    #[serde(default = "default_max_dd")]
+    /// Maximum drawdown (%) before position sizes are reduced. Default: `10`.
+    #[schemars(with = "String")]
     pub max_drawdown_pct: Decimal,
-    /// Size reduction factor when drawdown limit is hit.
-    #[serde(default = "default_dd_reduction")]
+    /// Size reduction factor applied when the drawdown limit is hit.
+    /// Default: `0.5`.
+    #[schemars(with = "String")]
     pub drawdown_reduction_factor: Decimal,
 }
 
@@ -396,28 +430,27 @@ const fn default_dd_reduction() -> Decimal {
 /// | L2 (Session) | Rolling window breach (misses, hourly loss) | 15min |
 /// | L3 (Daily) | Daily/weekly cap breach | 1h |
 /// | L4 (System) | Connectivity/balance emergency | 2h |
-#[derive(Debug, Clone, Deserialize, Validate)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
 pub struct CircuitBreakerConfig {
-    /// Level 1 (Trade): per-opportunity static filter failure cooldown.
-    #[serde(default = "default_cb_l1_cooldown")]
+    /// L1 (Trade): per-opportunity static filter failure cooldown (seconds).
+    /// Default: `60`.
     pub l1_cooldown_secs: u64,
-    /// Level 2 (Session): rolling window breach cooldown.
-    #[serde(default = "default_cb_l2_cooldown")]
+    /// L2 (Session): rolling window breach cooldown (seconds). Default: `900`.
     pub l2_cooldown_secs: u64,
-    /// Level 3 (Daily): daily/weekly cap breach cooldown.
-    #[serde(default = "default_cb_l3_cooldown")]
+    /// L3 (Daily): daily/weekly cap breach cooldown (seconds). Default: `3600`.
     pub l3_cooldown_secs: u64,
-    /// Level 4 (System): connectivity/balance emergency cooldown.
-    #[serde(default = "default_cb_l4_cooldown")]
+    /// L4 (System): connectivity/balance emergency cooldown (seconds).
+    /// Default: `7200`.
     pub l4_cooldown_secs: u64,
-    /// Number of successful probe trades required in `HalfOpen` before Recovered.
-    #[serde(default = "default_cb_half_open_probes")]
+    /// Successful probe trades required in `HalfOpen` before Recovered.
+    /// Default: `2`.
     pub half_open_probes: u32,
-    /// Observation period (secs) in Recovered state before returning to Closed.
-    #[serde(default = "default_cb_recovery_observation")]
+    /// Observation period (seconds) in Recovered before returning to Closed.
+    /// Default: `300`.
     pub recovery_observation_secs: u64,
-    /// Maximum cooldown duration (secs) for L2 exponential back-off.
-    #[serde(default = "default_cb_max_cooldown")]
+    /// Maximum cooldown duration (seconds) for L2 exponential back-off.
+    /// Default: `14400`.
     pub max_cooldown_secs: u64,
 }
 
@@ -434,56 +467,6 @@ impl Default for CircuitBreakerConfig {
         }
     }
 }
-
-// ── Exposure Reservation Config ──────────────────────────────────────────────
-
-/// Derived configuration for the exposure reservation system.
-///
-/// Production code must construct this from [`RiskConfig`] via
-/// [`RiskConfig::exposure_reservation_config`] so risk gates and reservation
-/// limits share one authority. Direct construction is kept for focused tests.
-#[derive(Debug, Clone, Deserialize, Validate)]
-pub struct ExposureReservationConfig {
-    /// Maximum total exposure across all active reservations (USD cents).
-    #[serde(default = "default_reservation_max_total_exposure_cents")]
-    pub max_total_exposure_cents: u64,
-    /// Maximum exposure per market (USD cents).
-    #[serde(default = "default_reservation_max_per_market_cents")]
-    pub max_per_market_cents: u64,
-    /// Default TTL for reservations in seconds (auto-expire if not confirmed/released).
-    #[serde(default = "default_reservation_ttl_secs")]
-    pub default_ttl_secs: u64,
-    /// GC interval in seconds for cleaning expired reservations.
-    #[serde(default = "default_reservation_gc_interval_secs")]
-    pub gc_interval_secs: u64,
-}
-
-impl Default for ExposureReservationConfig {
-    fn default() -> Self {
-        RiskConfig::default().exposure_reservation_config()
-    }
-}
-
-const fn default_reservation_ttl_secs() -> u64 {
-    300
-}
-const fn default_reservation_gc_interval_secs() -> u64 {
-    30
-}
-
-fn usd_decimal_to_cents(value: Decimal) -> u64 {
-    (value * dec!(100)).ceil().to_u64().unwrap_or(u64::MAX)
-}
-
-fn default_reservation_max_total_exposure_cents() -> u64 {
-    usd_decimal_to_cents(default_max_total_exposure())
-}
-
-fn default_reservation_max_per_market_cents() -> u64 {
-    usd_decimal_to_cents(default_max_market_exposure())
-}
-
-// ── Circuit Breaker Config defaults ─────────────────────────────────────────
 
 const fn default_cb_l1_cooldown() -> u64 {
     60
@@ -504,5 +487,43 @@ const fn default_cb_recovery_observation() -> u64 {
     300
 }
 const fn default_cb_max_cooldown() -> u64 {
-    14400
+    14_400
+}
+
+// ── Exposure Reservation Config ──────────────────────────────────────────────
+
+/// Derived configuration for the exposure reservation system.
+///
+/// Production code must construct this from [`RiskConfig`] via
+/// [`RiskConfig::exposure_reservation_config`] so risk gates and reservation
+/// limits share one authority. Direct construction is kept for focused tests.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ExposureReservationConfig {
+    /// Maximum total exposure across all active reservations (USD cents).
+    pub max_total_exposure_cents: u64,
+    /// Maximum exposure per market (USD cents).
+    pub max_per_market_cents: u64,
+    /// Default TTL for reservations in seconds (auto-expire if not
+    /// confirmed/released).
+    pub default_ttl_secs: u64,
+    /// GC interval in seconds for cleaning expired reservations.
+    pub gc_interval_secs: u64,
+}
+
+impl Default for ExposureReservationConfig {
+    fn default() -> Self {
+        RiskConfig::default().exposure_reservation_config()
+    }
+}
+
+const fn default_reservation_ttl_secs() -> u64 {
+    300
+}
+const fn default_reservation_gc_interval_secs() -> u64 {
+    30
+}
+
+fn usd_decimal_to_cents(value: Decimal) -> u64 {
+    (value * dec!(100)).ceil().to_u64().unwrap_or(u64::MAX)
 }

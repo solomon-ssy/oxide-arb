@@ -3,11 +3,11 @@
 //! Validates TTL eviction, scope ordering, auto-blacklist, and GC.
 
 use oxide_arb_models::{
-    config::RiskConfig,
     enums::{
         blacklist::BlacklistCheckResult,
         risk::{BlacklistReason, BlacklistScope},
     },
+    runtime_config::RiskConfig,
     types::MarketId,
 };
 use oxide_arb_risk::{blacklist::BlacklistManager, clock::utc_clock};
@@ -101,6 +101,40 @@ fn permanent_entry_never_expires() {
     // Even after "time passes" the permanent entry stays
     let result = mgr.check(&market_id, BlacklistScope::TradingPath);
     assert!(matches!(result, BlacklistCheckResult::Blocked { .. }));
+}
+
+// ── Reload merge semantics ──────────────────────────────────────────────────
+
+/// `reload` merges config-declared permanent entries and never removes
+/// entries added at runtime (API / auto-blacklist) — removal stays an
+/// explicit, audited operator action.
+#[test]
+fn reload_merges_permanent_entries_and_keeps_runtime_entries() {
+    let mgr = BlacklistManager::new(&test_config(), utc_clock());
+
+    let runtime_market = MarketId::new("0xruntime_added");
+    mgr.add_permanent(runtime_market.clone(), BlacklistReason::Manual);
+
+    let config_market = MarketId::new("0xconfig_added");
+    let reloaded = RiskConfig {
+        permanent_blacklist_markets: vec![config_market.to_string()],
+        market_miss_blacklist_count: 7,
+        ..test_config()
+    };
+    mgr.reload(&reloaded);
+
+    // The new config entry is blocked.
+    assert!(matches!(
+        mgr.check(&config_market, BlacklistScope::TradingPath),
+        BlacklistCheckResult::Blocked { .. }
+    ));
+    // The runtime-added entry survives a reload whose config does not list it.
+    assert!(matches!(
+        mgr.check(&runtime_market, BlacklistScope::TradingPath),
+        BlacklistCheckResult::Blocked { .. }
+    ));
+    // The auto-blacklist threshold applies immediately.
+    assert_eq!(mgr.miss_threshold(), 7);
 }
 
 // ── GC removes expired but keeps permanent ─────────────────────────────────

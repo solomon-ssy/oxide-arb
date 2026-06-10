@@ -1,11 +1,13 @@
 //! Governance versioned runtime-config integration tests.
 //!
-//! Verifies configuration changes flow only through immutable, audited versions
-//! (create → activate → rollback), that there is no bare in-place mutation
-//! route, and that governed mutations enforce the acting-role contract for
-//! non-super-admin callers.
+//! Verifies configuration changes flow only through immutable, audited
+//! versions (typed create → preflight → activate → live apply → rollback),
+//! that invalid documents are rejected fail-closed, that sensitive
+//! notification credentials are masked on every read, and that governed
+//! mutations enforce the acting-role contract for non-super-admin callers.
 
 use actix_web::{http::StatusCode, test::TestRequest};
+use rust_decimal_macros::dec;
 use serde_json::json;
 
 use crate::{
@@ -14,16 +16,31 @@ use crate::{
     headers::ACTING_ROLE,
 };
 
-/// Create a runtime-config version as admin and return its id.
-async fn create_version(env: &TestEnv, admin: &str, mode: &str) -> String {
+/// Create a runtime-config version with the given daily-loss cap (a valid
+/// partial document — defaults fill the rest) and return its id. The weekly
+/// cap is raised alongside so the daily ≤ weekly cross-check holds for every
+/// value the tests use.
+async fn create_version(env: &TestEnv, admin: &str, max_daily_loss_usd: &str) -> String {
     let res = client::post(
         env,
         "/api/runtime-config/versions",
         admin,
-        json!({ "config_json": { "mode": mode }, "reason": format!("set {mode}") }),
+        json!({
+            "config_json": {
+                "risk": {
+                    "max_daily_loss_usd": max_daily_loss_usd,
+                    "max_weekly_loss_usd": "1000",
+                }
+            },
+            "reason": format!("daily loss cap {max_daily_loss_usd}"),
+        }),
     )
     .await;
-    assert_eq!(res.status, StatusCode::OK, "create version {mode}");
+    assert_eq!(
+        res.status,
+        StatusCode::OK,
+        "create version {max_daily_loss_usd}"
+    );
     res.json()["data"]["runtime_config_version_id"]
         .as_str()
         .expect("version id")
@@ -32,28 +49,33 @@ async fn create_version(env: &TestEnv, admin: &str, mode: &str) -> String {
 
 #[actix_web::test]
 #[ignore = "requires Docker"]
-async fn create_activate_and_read_current() {
+async fn create_activate_applies_to_live_config() {
     let env = TestEnv::start().await;
     let admin = client::login(&env, "admin", "admin").await;
 
-    let version_id = create_version(&env, &admin, "live").await;
+    let version_id = create_version(&env, &admin, "150").await;
 
     let activate = client::post(
         &env,
         &format!("/api/runtime-config/versions/{version_id}/activate"),
         &admin,
-        json!({ "reason": "go live" }),
+        json!({ "reason": "raise the daily loss cap" }),
     )
     .await;
     assert_eq!(activate.status, StatusCode::OK);
 
+    // GET /runtime-config returns the *applied* live snapshot, proving the
+    // activation propagated through the apply port, not just the DB.
     let current = client::get(&env, "/api/runtime-config", &admin).await;
     assert_eq!(current.status, StatusCode::OK);
     assert_eq!(
-        current.json()["data"]["runtime_config_version_id"],
+        current.json()["data"]["version"]["runtime_config_version_id"],
         json!(version_id)
     );
-    assert_eq!(current.json()["data"]["config_json"]["mode"], "live");
+    assert_eq!(
+        current.json()["data"]["config"]["risk"]["max_daily_loss_usd"],
+        json!("150")
+    );
 
     let versions = client::get(&env, "/api/runtime-config/versions", &admin).await;
     assert_eq!(versions.status, StatusCode::OK);
@@ -71,7 +93,7 @@ async fn rollback_restores_previous_version() {
     let env = TestEnv::start().await;
     let admin = client::login(&env, "admin", "admin").await;
 
-    let v1 = create_version(&env, &admin, "conservative").await;
+    let v1 = create_version(&env, &admin, "60").await;
     client::post(
         &env,
         &format!("/api/runtime-config/versions/{v1}/activate"),
@@ -79,7 +101,7 @@ async fn rollback_restores_previous_version() {
         json!({ "reason": "v1" }),
     )
     .await;
-    let v2 = create_version(&env, &admin, "aggressive").await;
+    let v2 = create_version(&env, &admin, "200").await;
     client::post(
         &env,
         &format!("/api/runtime-config/versions/{v2}/activate"),
@@ -90,7 +112,7 @@ async fn rollback_restores_previous_version() {
     assert_eq!(
         client::get(&env, "/api/runtime-config", &admin)
             .await
-            .json()["data"]["runtime_config_version_id"],
+            .json()["data"]["version"]["runtime_config_version_id"],
         json!(v2)
     );
 
@@ -103,11 +125,81 @@ async fn rollback_restores_previous_version() {
     .await;
     assert_eq!(rollback.status, StatusCode::OK);
     assert_eq!(rollback.json()["data"]["activation_kind"], "rollback");
+    let current = client::get(&env, "/api/runtime-config", &admin).await;
     assert_eq!(
-        client::get(&env, "/api/runtime-config", &admin)
-            .await
-            .json()["data"]["runtime_config_version_id"],
+        current.json()["data"]["version"]["runtime_config_version_id"],
         json!(v1)
+    );
+    assert_eq!(
+        current.json()["data"]["config"]["risk"]["max_daily_loss_usd"],
+        json!("60"),
+        "rollback must re-apply the previous config to the live system"
+    );
+}
+
+#[actix_web::test]
+#[ignore = "requires Docker"]
+async fn activate_rejects_exposure_tightening_below_reserved_capital() {
+    let env = TestEnv::start().await;
+    let admin = client::login(&env, "admin", "admin").await;
+
+    // A version that tightens the total exposure ceiling to 600 USD. Creating
+    // it succeeds — versions are validated semantically, not against live
+    // money state.
+    let res = client::post(
+        &env,
+        "/api/runtime-config/versions",
+        &admin,
+        json!({
+            "config_json": { "risk": { "max_total_exposure_usd": "600" } },
+            "reason": "tighten exposure ceiling",
+        }),
+    )
+    .await;
+    assert_eq!(res.status, StatusCode::OK);
+    let version_id = res.json()["data"]["runtime_config_version_id"]
+        .as_str()
+        .expect("version id")
+        .to_owned();
+
+    // 700 USD is already committed in-flight: activation must fail closed.
+    env.runtime_config_apply.set_reserved(dec!(700), dec!(400));
+    let activate = client::post(
+        &env,
+        &format!("/api/runtime-config/versions/{version_id}/activate"),
+        &admin,
+        json!({ "reason": "tighten below reserved" }),
+    )
+    .await;
+    assert_eq!(
+        activate.status,
+        StatusCode::CONFLICT,
+        "preflight precondition failure must map to 409: {}",
+        activate.json()
+    );
+
+    // The live system keeps running on the previous configuration.
+    let current = client::get(&env, "/api/runtime-config", &admin).await;
+    assert_eq!(
+        current.json()["data"]["config"]["risk"]["max_total_exposure_usd"],
+        json!("5000"),
+        "rejected activation must not touch the live config"
+    );
+
+    // Once the committed capital unwinds, the same version activates cleanly.
+    env.runtime_config_apply.set_reserved(dec!(0), dec!(0));
+    let retry = client::post(
+        &env,
+        &format!("/api/runtime-config/versions/{version_id}/activate"),
+        &admin,
+        json!({ "reason": "reservations unwound" }),
+    )
+    .await;
+    assert_eq!(retry.status, StatusCode::OK);
+    let current = client::get(&env, "/api/runtime-config", &admin).await;
+    assert_eq!(
+        current.json()["data"]["config"]["risk"]["max_total_exposure_usd"],
+        json!("600")
     );
 }
 
@@ -121,10 +213,97 @@ async fn create_version_requires_reason() {
         &env,
         "/api/runtime-config/versions",
         &admin,
-        json!({ "config_json": { "mode": "live" }, "reason": "" }),
+        json!({ "config_json": {}, "reason": "" }),
     )
     .await;
     assert_eq!(res.status, StatusCode::BAD_REQUEST);
+}
+
+#[actix_web::test]
+#[ignore = "requires Docker"]
+async fn create_version_rejects_unknown_and_invalid_fields() {
+    let env = TestEnv::start().await;
+    let admin = client::login(&env, "admin", "admin").await;
+
+    // Unknown section (legacy/typo'd document) → typed parse failure → 400.
+    let unknown = client::post(
+        &env,
+        "/api/runtime-config/versions",
+        &admin,
+        json!({ "config_json": { "treasury": {} }, "reason": "legacy" }),
+    )
+    .await;
+    assert_eq!(unknown.status, StatusCode::BAD_REQUEST);
+
+    // Semantically invalid (hourly cap above daily cap) → validation → 400.
+    let invalid = client::post(
+        &env,
+        "/api/runtime-config/versions",
+        &admin,
+        json!({
+            "config_json": {
+                "risk": { "max_hourly_loss_usd": "500", "max_daily_loss_usd": "75" }
+            },
+            "reason": "inverted caps",
+        }),
+    )
+    .await;
+    assert_eq!(invalid.status, StatusCode::BAD_REQUEST);
+}
+
+#[actix_web::test]
+#[ignore = "requires Docker"]
+async fn notification_credentials_are_masked_on_read() {
+    let env = TestEnv::start().await;
+    let admin = client::login(&env, "admin", "admin").await;
+
+    let res = client::post(
+        &env,
+        "/api/runtime-config/versions",
+        &admin,
+        json!({
+            "config_json": {
+                "notification": {
+                    "telegram": { "enabled": true, "bot_token": "secret-token", "chat_id": "42" }
+                }
+            },
+            "reason": "rotate telegram token",
+        }),
+    )
+    .await;
+    assert_eq!(res.status, StatusCode::OK);
+    assert_eq!(
+        res.json()["data"]["config_json"]["notification"]["telegram"]["bot_token"],
+        json!("***"),
+        "bot token must never round-trip in plaintext"
+    );
+
+    let versions = client::get(&env, "/api/runtime-config/versions", &admin).await;
+    for version in versions.json()["data"].as_array().expect("versions") {
+        let token = &version["config_json"]["notification"]["telegram"]["bot_token"];
+        assert_ne!(token, &json!("secret-token"), "catalog leaks bot token");
+    }
+}
+
+#[actix_web::test]
+#[ignore = "requires Docker"]
+async fn schema_endpoint_describes_money_critical_fields() {
+    let env = TestEnv::start().await;
+    let admin = client::login(&env, "admin", "admin").await;
+
+    let res = client::get(&env, "/api/runtime-config/schema", &admin).await;
+    assert_eq!(res.status, StatusCode::OK);
+    let fields = res.json()["data"]
+        .as_array()
+        .expect("schema fields")
+        .clone();
+    assert!(!fields.is_empty());
+    let daily_loss = fields
+        .iter()
+        .find(|f| f["path"] == "risk.max_daily_loss_usd")
+        .expect("risk.max_daily_loss_usd in schema");
+    assert_eq!(daily_loss["money_critical"], json!(true));
+    assert!(!daily_loss["description"].as_str().expect("desc").is_empty());
 }
 
 #[actix_web::test]
@@ -184,6 +363,185 @@ async fn no_bare_patch_config_route_exists() {
     );
 }
 
+/// A live apply failure after the durable activation committed must not leave
+/// the active version pointing at a config the live system never adopted: the
+/// handler compensates with an automatic durable rollback.
+#[actix_web::test]
+#[ignore = "requires Docker"]
+async fn apply_failure_auto_reverts_durable_activation() {
+    let env = TestEnv::start().await;
+    let admin = client::login(&env, "admin", "admin").await;
+
+    let v1 = create_version(&env, &admin, "60").await;
+    let activate_v1 = client::post(
+        &env,
+        &format!("/api/runtime-config/versions/{v1}/activate"),
+        &admin,
+        json!({ "reason": "baseline" }),
+    )
+    .await;
+    assert_eq!(activate_v1.status, StatusCode::OK);
+
+    // The next apply fails *after* preflight passed and the durable
+    // activation was written — the split-brain window.
+    let v2 = create_version(&env, &admin, "200").await;
+    env.runtime_config_apply.fail_next_apply();
+    let activate_v2 = client::post(
+        &env,
+        &format!("/api/runtime-config/versions/{v2}/activate"),
+        &admin,
+        json!({ "reason": "will not propagate" }),
+    )
+    .await;
+    assert_eq!(activate_v2.status, StatusCode::CONFLICT);
+    assert!(
+        activate_v2.json()["message"]
+            .as_str()
+            .expect("conflict message")
+            .contains("automatically reverted"),
+        "operator must learn the durable state was compensated: {}",
+        activate_v2.json()
+    );
+
+    // Durable active version and live config agree on v1 again.
+    let current = client::get(&env, "/api/runtime-config", &admin).await;
+    assert_eq!(
+        current.json()["data"]["version"]["runtime_config_version_id"],
+        json!(v1),
+        "durable activation must be auto-reverted to the previous version"
+    );
+    assert_eq!(
+        current.json()["data"]["config"]["risk"]["max_daily_loss_usd"],
+        json!("60"),
+        "live system keeps the previous configuration"
+    );
+
+    // The failed version is intact and activates cleanly once apply recovers.
+    let retry = client::post(
+        &env,
+        &format!("/api/runtime-config/versions/{v2}/activate"),
+        &admin,
+        json!({ "reason": "apply recovered" }),
+    )
+    .await;
+    assert_eq!(retry.status, StatusCode::OK);
+    let current = client::get(&env, "/api/runtime-config", &admin).await;
+    assert_eq!(
+        current.json()["data"]["config"]["risk"]["max_daily_loss_usd"],
+        json!("200")
+    );
+}
+
+/// `schema_version` other than 1 must be rejected at the HTTP boundary —
+/// there is no migration chain, so an unknown document shape is fail-closed.
+#[actix_web::test]
+#[ignore = "requires Docker"]
+async fn schema_version_other_than_1_is_rejected() {
+    let env = TestEnv::start().await;
+    let admin = client::login(&env, "admin", "admin").await;
+
+    let res = client::post(
+        &env,
+        "/api/runtime-config/versions",
+        &admin,
+        json!({
+            "config_json": { "schema_version": 2 },
+            "reason": "future schema",
+        }),
+    )
+    .await;
+    assert_eq!(res.status, StatusCode::BAD_REQUEST);
+}
+
+/// `webhook.url` is as sensitive as `bot_token`: both must be masked on the
+/// live snapshot (`GET /runtime-config`) after activation, not only on the
+/// version catalog.
+#[actix_web::test]
+#[ignore = "requires Docker"]
+async fn webhook_url_and_bot_token_are_masked_on_live_snapshot() {
+    let env = TestEnv::start().await;
+    let admin = client::login(&env, "admin", "admin").await;
+
+    let res = client::post(
+        &env,
+        "/api/runtime-config/versions",
+        &admin,
+        json!({
+            "config_json": {
+                "notification": {
+                    "telegram": { "enabled": true, "bot_token": "tg-secret", "chat_id": "42" },
+                    "webhook": { "enabled": true, "url": "https://hooks.example/secret-path" }
+                }
+            },
+            "reason": "rotate notification credentials",
+        }),
+    )
+    .await;
+    assert_eq!(res.status, StatusCode::OK);
+    assert_eq!(
+        res.json()["data"]["config_json"]["notification"]["webhook"]["url"],
+        json!("***"),
+        "webhook url must never round-trip in plaintext"
+    );
+    let version_id = res.json()["data"]["runtime_config_version_id"]
+        .as_str()
+        .expect("version id")
+        .to_owned();
+
+    let activate = client::post(
+        &env,
+        &format!("/api/runtime-config/versions/{version_id}/activate"),
+        &admin,
+        json!({ "reason": "apply credentials" }),
+    )
+    .await;
+    assert_eq!(activate.status, StatusCode::OK);
+
+    let current = client::get(&env, "/api/runtime-config", &admin).await;
+    let notification = &current.json()["data"]["config"]["notification"];
+    assert_eq!(notification["telegram"]["bot_token"], json!("***"));
+    assert_eq!(notification["webhook"]["url"], json!("***"));
+    assert_eq!(
+        notification["telegram"]["chat_id"],
+        json!("42"),
+        "non-sensitive notification fields stay readable"
+    );
+}
+
+/// The deploy-config sibling surface is read-only and masked: key material is
+/// presence flags only, the Redis URL is always hidden, and the JWT secret is
+/// never echoed.
+#[actix_web::test]
+#[ignore = "requires Docker"]
+async fn deploy_config_endpoint_is_masked_read_only() {
+    let env = TestEnv::start().await;
+    let admin = client::login(&env, "admin", "admin").await;
+
+    let res = client::get(&env, "/api/system/deploy-config", &admin).await;
+    assert_eq!(res.status, StatusCode::OK);
+    let data = res.json()["data"].clone();
+
+    let keys = data["keys"].as_object().expect("keys section");
+    for (name, value) in keys {
+        if name != "source" {
+            assert!(
+                value.is_boolean(),
+                "keys.{name} must be a presence flag, got {value}"
+            );
+        }
+    }
+    assert_eq!(data["cache"]["redis"]["url"], json!("***"));
+    let jwt_secret = data["web"]["jwt"]["secret"].as_str().expect("jwt secret");
+    assert!(
+        jwt_secret.is_empty() || jwt_secret == "***",
+        "jwt secret must never be echoed: {jwt_secret}"
+    );
+    assert!(
+        data["db"]["postgres"]["host"].is_string(),
+        "non-sensitive deploy fields stay readable"
+    );
+}
+
 #[actix_web::test]
 #[ignore = "requires Docker"]
 async fn governed_create_enforces_acting_role_for_non_super_admin() {
@@ -203,7 +561,7 @@ async fn governed_create_enforces_acting_role_for_non_super_admin() {
     client::assign_roles(&env, &admin, &user_id, &[&role_id]).await;
     let author = client::login(&env, "cfg1", "password123").await;
 
-    let body = json!({ "config_json": { "mode": "live" }, "reason": "governed" });
+    let body = json!({ "config_json": {}, "reason": "governed" });
 
     // Missing X-Acting-Role → 400.
     assert_eq!(
@@ -232,6 +590,122 @@ async fn governed_create_enforces_acting_role_for_non_super_admin() {
             "/api/runtime-config/versions",
             &author,
             &[(ACTING_ROLE, "config_author")],
+            body,
+        )
+        .await
+        .status,
+        StatusCode::OK
+    );
+}
+
+/// Activate and rollback are governed exactly like create: RBAC denies a
+/// reader outright, the acting-role header is mandatory for non-super-admin
+/// callers, and the held + permitted role succeeds.
+#[actix_web::test]
+#[ignore = "requires Docker"]
+async fn governed_activate_and_rollback_enforce_acting_role_and_rbac() {
+    let env = TestEnv::start().await;
+    let admin = client::login(&env, "admin", "admin").await;
+
+    // Two versions; v1 active so v2's activation has a rollback target.
+    let v1 = create_version(&env, &admin, "60").await;
+    client::post(
+        &env,
+        &format!("/api/runtime-config/versions/{v1}/activate"),
+        &admin,
+        json!({ "reason": "baseline" }),
+    )
+    .await;
+    let v2 = create_version(&env, &admin, "200").await;
+
+    // A reader may list but holds no activate/rollback permission.
+    let reader_role = client::create_role(&env, &admin, "config_reader").await;
+    client::grant_permissions(
+        &env,
+        &admin,
+        &reader_role,
+        json!([{ "resource": "runtime_config", "operation": "read" }]),
+    )
+    .await;
+    let reader_id = client::create_user(&env, &admin, "cfg_reader", "password123").await;
+    client::assign_roles(&env, &admin, &reader_id, &[&reader_role]).await;
+    let reader = client::login(&env, "cfg_reader", "password123").await;
+
+    let body = json!({ "reason": "governed transition" });
+    assert_eq!(
+        client::post_with(
+            &env,
+            &format!("/api/runtime-config/versions/{v2}/activate"),
+            &reader,
+            &[(ACTING_ROLE, "config_reader")],
+            body.clone(),
+        )
+        .await
+        .status,
+        StatusCode::FORBIDDEN,
+        "read-only role must not activate"
+    );
+
+    // An operator role holding activate + rollback.
+    let operator_role = client::create_role(&env, &admin, "config_operator").await;
+    client::grant_permissions(
+        &env,
+        &admin,
+        &operator_role,
+        json!([
+            { "resource": "runtime_config", "operation": "activate" },
+            { "resource": "runtime_config", "operation": "rollback" }
+        ]),
+    )
+    .await;
+    let operator_id = client::create_user(&env, &admin, "cfg_op", "password123").await;
+    client::assign_roles(&env, &admin, &operator_id, &[&operator_role]).await;
+    let operator = client::login(&env, "cfg_op", "password123").await;
+
+    // Missing X-Acting-Role → 400.
+    assert_eq!(
+        client::post(
+            &env,
+            &format!("/api/runtime-config/versions/{v2}/activate"),
+            &operator,
+            body.clone(),
+        )
+        .await
+        .status,
+        StatusCode::BAD_REQUEST
+    );
+    // Acting as a role the caller does not hold → 403.
+    assert_eq!(
+        client::post_with(
+            &env,
+            &format!("/api/runtime-config/versions/{v2}/activate"),
+            &operator,
+            &[(ACTING_ROLE, "super_admin")],
+            body.clone(),
+        )
+        .await
+        .status,
+        StatusCode::FORBIDDEN
+    );
+    // Held + permitted role → activate and rollback both succeed.
+    assert_eq!(
+        client::post_with(
+            &env,
+            &format!("/api/runtime-config/versions/{v2}/activate"),
+            &operator,
+            &[(ACTING_ROLE, "config_operator")],
+            body.clone(),
+        )
+        .await
+        .status,
+        StatusCode::OK
+    );
+    assert_eq!(
+        client::post_with(
+            &env,
+            &format!("/api/runtime-config/versions/{v1}/rollback"),
+            &operator,
+            &[(ACTING_ROLE, "config_operator")],
             body,
         )
         .await

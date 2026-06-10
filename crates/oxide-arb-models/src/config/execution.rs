@@ -1,67 +1,30 @@
-//! Trade execution pipeline configuration.
+//! Execution structural configuration (`[execution]`, deploy).
 //!
-//! Endgame is a single-order strategy (FOK buy/sell held to settlement).
-//! No multi-leg orchestration, no hedging.
+//! Channel capacities and shard counts are bound to task/channel construction
+//! at startup and require a restart. Operational execution tunables (timeouts,
+//! funnel, coalescer, latency SLOs) are runtime configuration
+//! (`runtime_config::ExecutionRuntimeConfig`).
 
-use rust_decimal::Decimal;
-use rust_decimal_macros::dec;
-use serde::{Deserialize, Serialize};
-use validator::Validate;
+use serde::Deserialize;
 
-#[derive(Debug, Clone, Default, Deserialize, Validate)]
-pub struct ExecutionConfig {
-    #[serde(default)]
-    pub timeout: TradeTimeoutConfig,
-    #[serde(default)]
-    pub funnel: FunnelConfig,
-    #[serde(default)]
-    pub coalescer: CoalescerConfig,
-    #[serde(default)]
-    pub endgame_latency: EndgameLatencyConfig,
-    #[serde(default)]
+/// Execution structural parameters.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ExecutionDeployConfig {
+    /// Sharded book-apply / execution-runner topology.
     pub book_apply: BookApplyConfig,
 }
 
-/// Endgame-specific latency tuning (SLO-1 fast lane + SLO-3 coalesce).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EndgameLatencyConfig {
-    /// Scores at or above this bypass funnel sweep delay (immediate shard dispatch).
-    #[serde(default = "default_dispatch_immediate_threshold")]
-    pub dispatch_immediate_threshold: Decimal,
-    /// Funnel tick interval for low-score sweep only (ms).
-    #[serde(default = "default_funnel_sweep_interval_ms")]
-    pub funnel_sweep_interval_ms: u64,
-    /// Max ms from last book apply to order emit (SLO-2).
-    #[serde(default = "default_max_book_to_order_ms")]
-    pub max_book_to_order_ms: u64,
-}
-
-impl Default for EndgameLatencyConfig {
-    fn default() -> Self {
-        Self {
-            dispatch_immediate_threshold: default_dispatch_immediate_threshold(),
-            funnel_sweep_interval_ms: default_funnel_sweep_interval_ms(),
-            max_book_to_order_ms: default_max_book_to_order_ms(),
-        }
-    }
-}
-
-const fn default_dispatch_immediate_threshold() -> Decimal {
-    dec!(0.5)
-}
-const fn default_funnel_sweep_interval_ms() -> u64 {
-    75
-}
-const fn default_max_book_to_order_ms() -> u64 {
-    5
-}
-
-/// Sharded book-apply workers (500-market single host).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Sharded book-apply workers (sized for a 500-market single host).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct BookApplyConfig {
-    #[serde(default = "default_book_shard_count")]
+    /// Number of book-apply / execution-runner shards. Markets hash to a
+    /// shard, so this bounds intra-market ordering domains and worker
+    /// parallelism. Default: `4`.
     pub shard_count: usize,
-    #[serde(default = "default_book_channel_capacity")]
+    /// Per-shard bounded channel capacity; overflow triggers backpressure
+    /// accounting (never blocks the WS event loop). Default: `2048`.
     pub channel_capacity: usize,
 }
 
@@ -79,95 +42,4 @@ const fn default_book_shard_count() -> usize {
 }
 const fn default_book_channel_capacity() -> usize {
     2048
-}
-
-#[derive(Debug, Clone, Deserialize, Validate)]
-pub struct TradeTimeoutConfig {
-    /// Max time (ms) for validation (fresh book + risk + fees).
-    #[serde(default = "default_max_validation_ms")]
-    pub max_validation_time_ms: u64,
-    /// Max price slippage between detection and validation (bps).
-    #[serde(default = "default_max_slippage_bps")]
-    pub max_validation_slippage_bps: Decimal,
-    /// Hard-kill timeout (ms) for execution dispatch.
-    #[serde(default = "default_dispatcher_timeout")]
-    pub dispatcher_timeout_ms: u64,
-    /// Total time budget (s) to confirm trade reached terminal state.
-    #[serde(default = "default_confirm_timeout")]
-    pub trade_confirm_timeout_secs: u64,
-    /// Interval (s) between confirmation polls.
-    #[serde(default = "default_confirm_poll")]
-    pub trade_confirm_poll_interval_secs: u64,
-}
-
-impl Default for TradeTimeoutConfig {
-    fn default() -> Self {
-        Self {
-            max_validation_time_ms: default_max_validation_ms(),
-            max_validation_slippage_bps: default_max_slippage_bps(),
-            dispatcher_timeout_ms: default_dispatcher_timeout(),
-            trade_confirm_timeout_secs: default_confirm_timeout(),
-            trade_confirm_poll_interval_secs: default_confirm_poll(),
-        }
-    }
-}
-
-const fn default_max_validation_ms() -> u64 {
-    500
-}
-const fn default_max_slippage_bps() -> Decimal {
-    dec!(50)
-}
-const fn default_dispatcher_timeout() -> u64 {
-    30_000
-}
-const fn default_confirm_timeout() -> u64 {
-    60
-}
-const fn default_confirm_poll() -> u64 {
-    2
-}
-
-/// Funnel (rate-limited opportunity dispatch) configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FunnelConfig {
-    #[serde(default = "default_max_queue_size")]
-    pub max_queue_size: usize,
-    #[serde(default = "default_min_dispatch_interval_ms")]
-    pub min_dispatch_interval_ms: u64,
-}
-
-impl Default for FunnelConfig {
-    fn default() -> Self {
-        Self {
-            max_queue_size: default_max_queue_size(),
-            min_dispatch_interval_ms: default_min_dispatch_interval_ms(),
-        }
-    }
-}
-
-const fn default_max_queue_size() -> usize {
-    50
-}
-const fn default_min_dispatch_interval_ms() -> u64 {
-    75
-}
-
-/// Coalescer (multi-token → single-market scan dedup) configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CoalescerConfig {
-    #[serde(default = "default_coalesce_window_ms")]
-    pub coalesce_window_ms: u64,
-}
-
-impl Default for CoalescerConfig {
-    fn default() -> Self {
-        Self {
-            coalesce_window_ms: default_coalesce_window_ms(),
-        }
-    }
-}
-
-const fn default_coalesce_window_ms() -> u64 {
-    40
 }

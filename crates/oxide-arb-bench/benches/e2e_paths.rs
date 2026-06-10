@@ -21,10 +21,6 @@ use oxide_arb_core::{
     },
 };
 use oxide_arb_models::{
-    config::{
-        CalibrationConfig, EmissionCooldownConfig, EndgameDetectionConfig, FillProbabilityConfig,
-        MarketDataConfig, ScorerConfig,
-    },
     domain::{
         CoreEventPublisher, book::BookLevel, control_factor::ControlFactorProvider,
         market::MarketRegistryInfo, pipeline::PipelineEvent,
@@ -33,7 +29,11 @@ use oxide_arb_models::{
         common::{MarketCategory, TickSize},
         market::MarketStatus,
     },
-    types::{EventId, MarketId, MicroUsd, Price, Shares, TokenId, Usd},
+    runtime_config::{
+        CalibrationConfig, DetectionConfig, EmissionCooldownConfig, EndgameDetectionConfig,
+        FillProbabilityConfig, MarketDataStalenessConfig,
+    },
+    types::{EventId, MarketId, Price, Shares, TokenId, Usd},
 };
 use polymarket_client_sdk_v2::clob::ws::types::response::{BookUpdate, OrderBookLevel, WsMessage};
 use polymarket_client_sdk_v2::types::{B256, U256};
@@ -50,16 +50,22 @@ fn make_core_pipeline() -> CoreOpportunityPipeline {
         calibrator,
         CoreFeeEstimator(Arc::new(FeeCalculator::default())),
     );
-    let scorer_config = ScorerConfig::default();
-    let scorer = EndgameScorer::new(scorer_config.clone(), &FillProbabilityConfig::default(), 24);
+    let detection_config = DetectionConfig {
+        min_profit_threshold_usd: dec!(0.01),
+        ..DetectionConfig::default()
+    };
+    let scorer = EndgameScorer::new(
+        &detection_config.endgame.scorer,
+        &FillProbabilityConfig::default(),
+        24,
+    );
     let cooldown = InMemoryEmissionCooldown::new(&EmissionCooldownConfig::default());
     OpportunityPipeline::new(
         detector,
         scorer,
         cooldown,
         Arc::new(FactorSnapshotStore::new(Utc::now())) as Arc<dyn ControlFactorProvider>,
-        MicroUsd::try_from_decimal(dec!(0.01)).unwrap(),
-        &scorer_config,
+        &detection_config,
     )
 }
 
@@ -123,7 +129,7 @@ fn bench_e2e_ws_to_scan(c: &mut Criterion) {
         Arc::new(make_core_pipeline()),
         book_store,
         market_cache,
-        StalenessClassifier::new(&MarketDataConfig::default()),
+        StalenessClassifier::new(&MarketDataStalenessConfig::default()),
         metrics,
         None,
         CoreEventPublisher::bounded(1).0,

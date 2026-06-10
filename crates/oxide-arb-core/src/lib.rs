@@ -16,4 +16,5 @@ pub mod infra;
 pub mod observability;
 pub mod pipeline;
 pub mod post_trade;
+pub mod runtime_config;
 pub mod service;

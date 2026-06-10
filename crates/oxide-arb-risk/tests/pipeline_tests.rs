@@ -6,7 +6,6 @@
 use chrono::Utc;
 use num_traits::ToPrimitive;
 use oxide_arb_models::{
-    config::RiskConfig,
     domain::{
         calibration::{BucketKey, CalibrationSnapshot},
         control_factor::{
@@ -23,6 +22,7 @@ use oxide_arb_models::{
         control_factor::ControlFactorType,
         opportunity::PayoutModel,
     },
+    runtime_config::RiskConfig,
     types::{
         Bps, EventId, FactorPublicationId, MarketId, OpportunityId, Price, Shares, TokenId, Usd,
     },

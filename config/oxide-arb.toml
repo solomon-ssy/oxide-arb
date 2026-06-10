@@ -1,30 +1,68 @@
 # ═══════════════════════════════════════════════════════════════════════════════
-# oxide-arb — Development Configuration
+# oxide-arb — Deploy Configuration (Development)
 # ═══════════════════════════════════════════════════════════════════════════════
 #
-# All values shown are the compiled-in defaults. This file is optional:
-# if absent, all defaults apply. Override any field with OXIDE_ARB__* env vars.
+# This file contains ONLY deploy configuration: values that are structurally
+# bound to a process start (connections, pools, shard counts, channel
+# capacities, credentials source, web server, logging). Changing anything here
+# requires a restart.
 #
-# Naming: single-strategy (endgame) + single-platform (polymarket). See ADR-001.
+# Operator tunables (detection, risk, execution operations, settlement
+# operations, market-data staleness, notification channels) are NOT here.
+# They live in the versioned runtime configuration (schema_version = 1),
+# stored in Postgres and managed exclusively through the governed API:
+#
+#   GET  /api/runtime-config              — active config (secrets masked)
+#   POST /api/runtime-config/versions     — create an immutable version
+#   POST /api/runtime-config/versions/{id}/activate — audited hot activation
+#
+# All values shown below are the compiled-in defaults. The file is optional:
+# if absent, all defaults apply. Override any field with OXIDE_ARB__* env vars
+# (double underscore as the path separator, e.g. OXIDE_ARB__DB__POSTGRES__HOST).
+#
+# Unknown keys are FATAL at startup (deny_unknown_fields): a typo or a stale
+# runtime section aborts boot instead of being silently ignored.
 
 # ── Polymarket Platform ───────────────────────────────────────────────────────
 
 [polymarket]
+# Purpose: CLOB REST base URL (order placement, balances, market reads).
+# Impact: all REST trading traffic. Caution: change only for Polymarket
+# endpoint migrations. Default: "https://clob.polymarket.com".
 clob_base_url = "https://clob.polymarket.com"
+# Purpose: CLOB market-data WebSocket URL (books, ticks).
+# Impact: the entire real-time data pipeline. Default shown.
 clob_ws_url = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+# Purpose: EVM chain id. Impact: order signing domain + on-chain reads.
+# Caution: must be Polygon (137) — any other value is fatal at startup.
+# Default: 137.
 chain_id = 137
 
-# CTF oracle / on-chain reads. Alchemy: https://polygon-mainnet.g.alchemy.com/v2/<KEY>
+# CTF oracle / on-chain reads + Live redeem transactions.
 [polymarket.onchain]
+# Purpose: Polygon JSON-RPC endpoint. Impact: CTF resolution oracle and
+# on-chain redemption. Caution: public RPCs rate-limit — use a dedicated
+# provider in production (e.g. https://polygon-mainnet.g.alchemy.com/v2/<KEY>).
+# Default: "https://polygon-rpc.com".
 rpc_url = "https://polygon-rpc.com"
+# Purpose: RPC request timeout (ms). Impact: oracle/redeem failure latency.
+# Default: 10000.
 rpc_timeout_ms = 10000
 
 # Per-category feeRate (official 2026-04-04). Override when PM updates docs.
 # Exponent is always 1 per https://docs.polymarket.com/trading/fees
 [polymarket.fees]
+# Purpose: volatility exponent in fee = C × feeRate × p × (1 − p)^exponent.
+# Caution: Polymarket's official value is 1 — do not change without a docs
+# update. Default: "1".
 exponent = "1"
+# Purpose: fallback feeRate for categories missing from category_rates.
+# Impact: fee estimation → net-profit gating. Default: "0.05".
 unknown_category_rate = "0.05"
 
+# Purpose: per-category feeRate (fraction, not bps). Impact: fee estimation
+# feeds directly into expected-net-profit gates — wrong rates mean trading
+# unprofitable opportunities or skipping profitable ones. Defaults shown.
 [polymarket.fees.category_rates]
 geopolitics = "0"
 sports = "0.03"
@@ -37,129 +75,68 @@ culture = "0.05"
 weather = "0.05"
 other = "0.05"
 
-# ── Market Data Pipeline ──────────────────────────────────────────────────────
-
-[market_data]
-staleness_fresh_ms = 2000
-staleness_acceptable_ms = 5000
-staleness_stale_ms = 15000
-staleness_expired_ms = 30000
+# ── Market Data Connections ───────────────────────────────────────────────────
+# (Staleness thresholds are runtime config: market_data.staleness_*.)
 
 # Heartbeats: polymarket_client_sdk_v2 (`heartbeats` feature), not app-level ping.
 [market_data.websocket]
+# Purpose: initial reconnect backoff (ms) after a dropped WS connection.
+# Impact: data-gap duration after disconnects. Default: 1000.
 reconnect_delay_ms = 1000
+# Purpose: reconnect backoff ceiling (ms). Default: 30000.
 max_reconnect_delay_ms = 30000
+# Purpose: token subscriptions per WS connection before opening a new shard.
+# Impact: connection count vs per-connection event volume. Caution: Polymarket
+# enforces server-side limits — keep at or below 200. Default: 200.
 max_subscriptions_per_connection = 200
 
 [market_data.gamma]
+# Purpose: Gamma REST base URL (market catalog + resolution metadata).
+# Default: "https://gamma-api.polymarket.com".
 base_url = "https://gamma-api.polymarket.com"
+# Purpose: interval (s) between full market-catalog syncs (also the periodic
+# gamma task cadence). Impact: how quickly new/closed markets are picked up.
+# Default: 300.
 full_sync_interval_secs = 300
+# Purpose: catalog pagination page size. Impact: sync request count.
+# Default: 100.
 page_size = 100
 
-# ── Opportunity Detection ─────────────────────────────────────────────────────
-
-[detection]
-fallback_scan_interval_secs = 5
-min_profit_threshold_usd = "0.50"
-detection_warmup_secs = 90
-dedup_coalesce_window_ms = 300
-fallback_scan_concurrency = 32
-
-[detection.endgame]
-enabled = true
-settlement_window_hours = 24
-high_threshold = "0.95"
-low_threshold = "0.05"
-min_convergence_duration_secs = 300
-min_profit_per_share = "0.005"
-max_investment_usd = "500"
-max_convergence_age_secs = 7200
-
-[detection.calibration]
-min_sample_size = 30
-refresh_interval_secs = 3600
-
-# ── Execution ─────────────────────────────────────────────────────────────────
+# ── Execution Topology ────────────────────────────────────────────────────────
 #
 # NOTE: the active execution mode (dry_run / paper / live) is NOT configured
 # here. It is a money-critical, governed value owned by the `system_runtime_state`
 # singleton (seeded to dry_run on first migration) and changed only via the
 # audited `POST /system/mode` transition. This guarantees a fresh deployment
-# always boots in the safest mode.
+# always boots in the safest mode. Operational execution tunables (timeouts,
+# funnel, coalescer, latency SLOs) are runtime config.
 
-[execution]
+[execution.book_apply]
+# Purpose: number of book-apply / execution-runner shards. Impact: markets
+# hash to a shard, bounding intra-market ordering domains and worker
+# parallelism. Caution: sized for a 500-market single host; must be >= 1.
+# Default: 4.
+shard_count = 4
+# Purpose: per-shard bounded channel capacity. Impact: overflow triggers
+# backpressure accounting (never blocks the WS event loop). Caution: >= 16.
+# Default: 2048.
+channel_capacity = 2048
 
-[execution.timeout]
-max_validation_time_ms = 500
-max_validation_slippage_bps = "50"
-dispatcher_timeout_ms = 30000
-trade_confirm_timeout_secs = 60
-trade_confirm_poll_interval_secs = 2
+# ── Settlement Topology ───────────────────────────────────────────────────────
+# (Oracle policy, retries, and the redeem route are runtime config.)
 
-# ── Risk Management + Position Sizing ────────────────────────────────────────
-
-[risk]
-min_depth_usd = "200"
-max_depth_usage_pct = "30"
-max_consecutive_misses = 3
-max_hourly_loss_usd = "30"
-base_cooldown_secs = 900
-cooldown_multiplier = "2.0"
-max_cooldown_secs = 7200
-max_daily_loss_usd = "75"
-max_single_loss_usd = "30"
-max_weekly_loss_usd = "120"
-daily_budget_usd = "50"
-ws_disconnect_threshold_secs = 30
-min_balance_usd = "50"
-market_miss_blacklist_count = 3
-market_miss_blacklist_duration_secs = 3600
-max_total_exposure_usd = "5000"
-reserve_balance_usd = "100"
-max_open_positions = 3
-max_single_market_exposure_usd = "500"
-max_single_bet_usd = "25"
-reservation_ttl_secs = 300
-reservation_gc_interval_secs = 30
-
-max_total_exposure_pct = "80"
-metrics_refresh_interval_secs = 5
-reconciliation_interval_secs = 300
-reconciliation_tolerance_usd = "1.0"
-
-# Position sizing (absorbed from [sizing])
-kelly_fraction = "0.25"
-bankroll_usd = "1000"
-min_trade_usd = "1"
-
-# Endgame-specific rules
-max_concurrent_directional = 3
-daily_directional_budget = 10
-
-# 4-level circuit breaker (Closed → Open → HalfOpen → Recovered → Closed)
-[risk.circuit_breaker]
-l1_cooldown_secs = 60
-l2_cooldown_secs = 900
-l3_cooldown_secs = 3600
-l4_cooldown_secs = 7200
-half_open_probes = 2
-recovery_observation_secs = 300
-max_cooldown_secs = 14400
-
-[risk.kelly]
-max_kelly = "0.25"
-min_edge_bps = "200"
-min_probability_confidence = "0.3"
-min_calibration_samples = 10
-max_probability_staleness_secs = 7200
-
-[risk.drawdown]
-max_drawdown_pct = "10"
-drawdown_reduction_factor = "0.5"
+[settlement.lifecycle]
+# Purpose: bounded capacity of the market-settlement request channel between
+# the data pipeline and the settlement worker. Impact: burst absorption for
+# simultaneous market resolutions. Caution: >= 16. Default: 256.
+channel_capacity = 256
 
 # ── Keys / Credentials ───────────────────────────────────────────────────────
 
 [keys]
+# Purpose: credential source. "env" reads the OXIDE_ARB__KEYS__* variables
+# below; "keystore" reads keystore_path. Impact: Live/Paper trading identity.
+# Caution: never put secret values in this file. Default: "env".
 source = "env"
 # Credentials loaded from environment variables:
 #   OXIDE_ARB__KEYS__PRIVATE_KEY
@@ -167,124 +144,147 @@ source = "env"
 #   OXIDE_ARB__KEYS__POLYMARKET_API_SECRET
 #   OXIDE_ARB__KEYS__POLYMARKET_PASSPHRASE
 
-# ── Observability ────────────────────────────────────────────────────────────
+# ── Observability (logging only) ─────────────────────────────────────────────
+# Metrics are always-on via the web server's GET /metrics; operator alerting
+# (Telegram / webhook) is runtime config under `notification`.
 
 [observability]
+# Purpose: default tracing filter directive (e.g. "info",
+# "info,oxide_arb_core=debug"). Impact: log verbosity for the whole process.
+# Caution: the RUST_LOG environment variable, when set, overrides this value
+# entirely. Default: "info".
 log_level = "info"
+# Purpose: emit JSON-structured log lines instead of human-readable text.
+# Impact: machine-parseable logs for aggregation; enable in production.
+# Default: false.
 log_json = false
-
-[observability.metrics]
-enabled = true
-port = 9090
-
-[observability.alerts]
-enabled = false
-cooldown_secs = 300
 
 # ── Database ─────────────────────────────────────────────────────────────────
 
 [db.postgres]
+# Purpose: Postgres host (system of record: trades, positions, governance,
+# RBAC). Default: "localhost".
 host = "localhost"
+# Purpose: Postgres port. Default: 5432.
 port = 5432
+# Purpose: role name. Default: "oxide".
 user = "oxide"
+# Purpose: role password. Caution: set via OXIDE_ARB__DB__POSTGRES__PASSWORD
+# in production — never here. Default: "".
 password = ""
+# Purpose: database name. Default: "oxide_arb".
 database = "oxide_arb"
+# Purpose: schema search path. Default: "public".
 schema = "public"
+# Purpose: pool upper bound. Impact: worst-case concurrent repository access;
+# size against the server's max_connections. Default: 10.
 max_connections = 10
+# Purpose: pool warm floor. Default: 2.
 min_connections = 2
+# Purpose: TCP connect timeout (s). Default: 10.
 connect_timeout_secs = 10
+# Purpose: idle connection reap timeout (s). Default: 300.
 idle_timeout_secs = 300
+# Purpose: pool acquire timeout (s). Impact: exceeding indicates pool
+# exhaustion — queries fail fast instead of queueing forever. Default: 10.
+acquire_timeout_secs = 10
+# Purpose: max connection lifetime (s) before recycling. Default: 1800.
+max_lifetime_secs = 1800
+# Purpose: per-connection statement_timeout (ms); 0 disables. Impact: kills
+# runaway queries. Default: 30000.
+statement_timeout_ms = 30000
+# Purpose: idle_in_transaction_session_timeout (ms); 0 disables. Impact:
+# kills idle transactions holding locks. Default: 60000.
+idle_in_transaction_timeout_ms = 60000
+# Purpose: lock_timeout (ms); 0 disables. Default: 5000.
+lock_timeout_ms = 5000
+# Purpose: per-operation sort/hash memory, passed verbatim to PostgreSQL.
+# Default: "16MB".
+work_mem = "16MB"
+# Purpose: post-connect self-check that session GUCs took effect (catches
+# PgBouncer stripping startup options). Caution: keep enabled in production —
+# silently missing statement_timeout is dangerous. Default: true.
+verify_session_params = true
+# Purpose: prepared-statement cache capacity per connection. Default: 256.
+statement_cache_capacity = 256
+# Purpose: application name reported to pg_stat_activity. Default: "oxide-arb".
+application_name = "oxide-arb"
 
-# ── Analytics (ClickHouse) ───────────────────────────────────────────────────
-
-[analytics]
-clickhouse_url = "http://localhost:8123"
-clickhouse_database = "oxide_arb"
-clickhouse_user = "default"
-clickhouse_password = ""
+[db.clickhouse]
+# Purpose: ClickHouse HTTP endpoint (analytics timeseries: ticks, books,
+# detections, evidence). Default: "http://localhost:8123".
+url = "http://localhost:8123"
+# Purpose: database name. Default: "oxide_arb".
+database = "oxide_arb"
+# Purpose: user name. Default: "default".
+user = "default"
+# Purpose: password. Caution: set via OXIDE_ARB__DB__CLICKHOUSE__PASSWORD in
+# production — never here. Default: "".
+password = ""
+# Purpose: max age (s) of a partial batch before flush. Impact: analytics
+# freshness vs insert request volume. Default: 10.
 flush_interval_secs = 10
+# Purpose: rows per insert batch; a full batch flushes immediately.
+# Default: 1000.
 batch_size = 1000
+# Purpose: maximum concurrent insert operations (semaphore). Impact: caps
+# write pressure on the CH server under high tick rates. Default: 4.
+max_concurrent_inserts = 4
 
 # ── Cache ────────────────────────────────────────────────────────────────────
 
+[cache]
+# Purpose: global cache operation timeout (ms); per-domain overrides win.
+# Default: 500.
+operation_timeout_ms = 500
+# Purpose: cache failures are transparent to callers (fall through to the
+# source of truth). Caution: fail-closed (false) makes Redis a hard
+# dependency of every cached read. Default: true.
+fail_open = true
+# Purpose: disable the entire cache layer (all operations become no-ops).
+# Default: false.
+disabled = false
+
 [cache.redis]
+# Purpose: Redis connection URL (L2 cache + JWT revocation). Default shown.
 url = "redis://localhost:6379"
+# Purpose: connection pool size. Default: 8.
 pool_size = 8
+# Purpose: per-operation timeout (ms). Default: 1000.
 timeout_ms = 1000
+# Purpose: key namespace prefix. Default: "oarb:".
+key_prefix = "oarb:"
 
 [cache.moka]
+# Purpose: in-process (L1) cache entry capacity. Impact: memory vs hit rate.
+# TTLs are per-entry, chosen by each call site — no global TTL knob exists.
+# Default: 10000.
 max_capacity = 10000
-time_to_live_secs = 300
-time_to_idle_secs = 120
-
-# ── Treasury ─────────────────────────────────────────────────────────────────
-
-[treasury]
-target_balance_usd = "1000"
-refill_threshold_usd = "600"
-sweep_threshold_usd = "1400"
-
-[treasury.hot_wallet]
-address = ""
-balance_poll_interval_secs = 60
-
-# ── Settlement (Oracle + Lifecycle + Contracts + Redemption) ─────────────────
-
-[settlement.oracle]
-enabled = true
-voting_quorum = 2
-cross_check_delay_secs = 120
-uma_endpoint = "https://api.uma.xyz"
-uma_timeout_secs = 10
-
-[settlement.lifecycle]
-channel_capacity = 256
-retry_interval_secs = 60
-max_redeem_attempts = 5
-dedup_window_secs = 30
-settle_fail_closed = true
-
-[settlement.contracts]
-ctf_address = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
-usdc_e_address = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
-standard_ctf_exchange = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E"
-neg_risk_ctf_exchange = "0xC5d563A36AE78145C45a50134d48A1215220f80a"
-# neg_risk_adapter = "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296"
-# ctf_collateral_adapter = "0xAdA100Db00Ca00073811820692005400218FcE1f"
-# neg_risk_collateral_adapter = "0xadA2005600Dec949baf300f4C6120000bDB6eAab"
-
-[settlement.redeem]
-route = "disabled"
-output_asset = "usdc_e"
-gas_limit = 500000
-# holder_address = "0x..."
-# proxy_safe_address = "0x..."
-
-# ── Notification ─────────────────────────────────────────────────────────────
-
-[notification.telegram]
-enabled = false
-bot_token = ""
-chat_id = ""
-
-[notification.webhook]
-enabled = false
-url = ""
 
 # ── Web Server + RBAC ────────────────────────────────────────────────────────
 
 [web]
+# Purpose: bind address. Default: "0.0.0.0".
 listen_host = "0.0.0.0"
+# Purpose: bind port (REST + WS + Prometheus GET /metrics). Default: 8080.
 listen_port = 8080
+# Purpose: allowed CORS origins; empty disables cross-origin requests.
+# Default: [].
 cors_allowed_origins = []
+# Purpose: serve the bundled SPA from static_ui_dir. Default: false.
 serve_static_ui = false
+# Purpose: directory of the built SPA assets. Default: "static/ui".
 static_ui_dir = "static/ui"
 
 [web.jwt]
-# SECURITY: never commit a real secret. Provide it via env in production:
-#   OXIDE_ARB__WEB__JWT__SECRET=<strong-random-secret>
-# An empty/placeholder secret is fatal in Live mode and a warning otherwise.
+# Purpose: HMAC signing secret. SECURITY: never commit a real secret; provide
+# it via env in production: OXIDE_ARB__WEB__JWT__SECRET=<strong-random-secret>.
+# Caution: an empty/placeholder secret is fatal in Live mode and a warning
+# otherwise. Default: "".
 secret = ""
+# Purpose: token issuer claim. Default: "oxide-arb".
 issuer = "oxide-arb"
+# Purpose: access-token lifetime (s). Default: 900 (15m).
 access_ttl_secs = 900
+# Purpose: refresh-token lifetime (s). Default: 604800 (7d).
 refresh_ttl_secs = 604800

@@ -9,11 +9,14 @@ use crate::{
 use num_traits::ToPrimitive;
 use oxide_arb_algorithm::scorer::ScoredOpportunity;
 use oxide_arb_error::OxideError;
-use oxide_arb_models::types::MicroScore;
+use oxide_arb_models::{runtime_config::FunnelConfig, types::MicroScore};
 use std::{
     cmp::{Ordering, Reverse},
     collections::{BinaryHeap, HashMap},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering as AtomicOrdering},
+    },
     time::{Duration, Instant},
 };
 use tokio_util::sync::CancellationToken;
@@ -146,6 +149,20 @@ impl FunnelQueue {
         None
     }
 
+    /// Resize the queue; evicts lowest-scored entries when shrinking.
+    /// Returns the number of evicted entries.
+    fn set_max_size(&mut self, max_size: usize) -> usize {
+        self.max_size = max_size;
+        let mut evicted = 0;
+        while self.entries.len() > self.max_size {
+            if !self.evict_min() {
+                break;
+            }
+            evicted += 1;
+        }
+        evicted
+    }
+
     fn evict_lowest(&mut self) -> bool {
         self.evict_min()
     }
@@ -159,10 +176,12 @@ pub enum FastLaneDispatch {
 
 /// High-score opportunities should use [`Self::try_dispatch_immediate`] (fast lane).
 /// This funnel only sweeps lower-priority backlog on a fixed interval.
+///
+/// Queue capacity and sweep cadence are hot-reloadable via [`Self::reload`].
 pub struct Funnel {
     queue: parking_lot::Mutex<FunnelQueue>,
     shard_txs: Vec<flume::Sender<Arc<ScoredOpportunity>>>,
-    min_dispatch_interval: Duration,
+    min_dispatch_interval_ms: AtomicU64,
     metrics: Arc<MetricsHub>,
     backpressure: Option<Arc<BackpressurePolicy>>,
 }
@@ -193,9 +212,33 @@ impl Funnel {
         Self {
             queue: parking_lot::Mutex::new(FunnelQueue::new(max_queue_size)),
             shard_txs,
-            min_dispatch_interval,
+            min_dispatch_interval_ms: AtomicU64::new(
+                u64::try_from(min_dispatch_interval.as_millis()).unwrap_or(u64::MAX),
+            ),
             metrics,
             backpressure,
+        }
+    }
+
+    /// Hot-reload funnel parameters (runtime-config activation).
+    ///
+    /// A shrunken queue capacity evicts the lowest-scored entries immediately
+    /// (counted as execution-shard evictions); the sweep interval applies from
+    /// the next dispatch tick.
+    pub fn reload(&self, config: &FunnelConfig) {
+        self.min_dispatch_interval_ms
+            .store(config.min_dispatch_interval_ms, AtomicOrdering::Relaxed);
+        let evicted = {
+            let mut queue = self.queue.lock();
+            queue.set_max_size(config.max_queue_size)
+        };
+        for _ in 0..evicted {
+            self.record_execution_shard_evict();
+        }
+        if evicted > 0 {
+            self.metrics
+                .funnel_queue_depth
+                .set(ToPrimitive::to_i64(&self.queue.lock().len()).unwrap_or(i64::MAX));
         }
     }
 
@@ -239,12 +282,20 @@ impl Funnel {
     }
 
     /// Dispatch loop: pops the highest-scored entry every interval tick and routes to shard.
+    ///
+    /// The sweep interval is read per tick so a runtime-config activation takes
+    /// effect on the next dispatch.
     pub async fn run(&self, shutdown: CancellationToken) -> Result<(), OxideError> {
         loop {
+            let interval = Duration::from_millis(
+                self.min_dispatch_interval_ms
+                    .load(AtomicOrdering::Relaxed)
+                    .max(1),
+            );
             tokio::select! {
                 biased;
                 () = shutdown.cancelled() => return Ok(()),
-                () = tokio::time::sleep(self.min_dispatch_interval) => {
+                () = tokio::time::sleep(interval) => {
                     let entry = {
                         let mut queue = self.queue.lock();
                         let entry = queue.pop_best();

@@ -17,7 +17,6 @@ use oxide_arb_core::{
     },
 };
 use oxide_arb_models::{
-    config::Settings,
     domain::{
         CoreEventPublisher,
         book::BookLevel,
@@ -28,7 +27,8 @@ use oxide_arb_models::{
         common::{MarketCategory, TickSize},
         market::MarketStatus,
     },
-    types::{EventId, MarketId, MicroUsd, Price, Shares, TokenId, Usd},
+    runtime_config::RuntimeConfig,
+    types::{EventId, MarketId, Price, Shares, TokenId, Usd},
 };
 use rust_decimal_macros::dec;
 use std::sync::Arc;
@@ -76,25 +76,23 @@ fn build_scanner(
     market_cache: Arc<MarketCache>,
     metrics: Arc<MetricsHub>,
 ) -> Scanner {
-    let settings = Settings::new("nonexistent_dir_for_test").expect("default settings");
-    let fee_calculator = Arc::new(FeeCalculator::from_config(&settings.polymarket.fees));
+    let runtime = RuntimeConfig::default();
+    let fee_calculator = Arc::new(FeeCalculator::default());
     let calibrator = Arc::new(ResolutionCalibrator::empty(
-        settings.detection.calibration.clone(),
+        runtime.detection.calibration.clone(),
     ));
     let detector = EndgameDetector::new(
-        &settings.detection.endgame,
-        &settings.detection.calibration,
+        &runtime.detection.endgame,
+        &runtime.detection.calibration,
         Arc::clone(&calibrator),
         CoreFeeEstimator(fee_calculator),
     );
     let scorer = EndgameScorer::new(
-        settings.detection.endgame.scorer.clone(),
-        &settings.detection.endgame.fill_probability,
-        settings.detection.endgame.settlement_window_hours,
+        &runtime.detection.endgame.scorer,
+        &runtime.detection.endgame.fill_probability,
+        runtime.detection.endgame.settlement_window_hours,
     );
-    let cooldown = InMemoryEmissionCooldown::new(&settings.detection.endgame.emission_cooldown);
-    let min_profit = MicroUsd::try_from_decimal(settings.detection.min_profit_threshold_usd)
-        .unwrap_or(MicroUsd::ZERO);
+    let cooldown = InMemoryEmissionCooldown::new(&runtime.detection.endgame.emission_cooldown);
     let factors: Arc<dyn ControlFactorProvider> =
         Arc::new(FactorSnapshotStore::new(chrono::Utc::now()));
     let pipeline: Arc<CoreOpportunityPipeline> = Arc::new(OpportunityPipeline::new(
@@ -102,10 +100,9 @@ fn build_scanner(
         scorer,
         cooldown,
         factors,
-        min_profit,
-        &settings.detection.endgame.scorer,
+        &runtime.detection,
     ));
-    let staleness = StalenessClassifier::new(&settings.market_data);
+    let staleness = StalenessClassifier::new(&runtime.market_data);
 
     Scanner::new(
         pipeline,

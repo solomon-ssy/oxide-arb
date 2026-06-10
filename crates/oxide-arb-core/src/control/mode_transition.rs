@@ -37,18 +37,20 @@ use crate::{
     exposure::in_memory::InMemoryExposureReservation,
     infra::health_checker::HealthChecker,
     pipeline::market_registry::MarketRegistry,
+    runtime_config::RuntimeConfigStore,
     service::risk_metrics::{RiskMetricsRefreshService, RiskMetricsSource, RiskMetricsState},
 };
 use async_trait::async_trait;
 use chrono::Utc;
 use oxide_arb_api::clob::ClobClient;
 use oxide_arb_models::{
-    config::Settings,
+    config::DeployConfig,
     domain::{
         BlacklistInfo, HealthReport, ModeTransitionReport, RiskEngineState, RuntimeControlError,
         RuntimeControlPort, SystemStatus,
     },
     enums::{common::ExecutionMode, risk::BlacklistReason},
+    runtime_config::validation::validate_runtime_for_mode,
     types::{MarketId, Usd},
 };
 use oxide_arb_repository::traits::SystemRuntimeStateRepository;
@@ -76,7 +78,10 @@ pub struct CoreRuntimeControlDeps {
     pub clob_client: Option<Arc<ClobClient>>,
     pub market_registry: Arc<MarketRegistry>,
     pub health_checker: Arc<HealthChecker>,
-    pub settings: Arc<Settings>,
+    pub deploy: Arc<DeployConfig>,
+    /// Live runtime config: mode preflight + simulated bankroll reseeding read
+    /// the active snapshot, never a startup copy.
+    pub runtime_config: Arc<RuntimeConfigStore>,
     /// Persists the active mode so a transition survives a restart.
     pub system_runtime_state: Arc<dyn SystemRuntimeStateRepository>,
 }
@@ -93,7 +98,8 @@ pub struct CoreRuntimeControl {
     clob_client: Option<Arc<ClobClient>>,
     market_registry: Arc<MarketRegistry>,
     health_checker: Arc<HealthChecker>,
-    settings: Arc<Settings>,
+    deploy: Arc<DeployConfig>,
+    runtime_config: Arc<RuntimeConfigStore>,
     system_runtime_state: Arc<dyn SystemRuntimeStateRepository>,
     started_at: Instant,
 }
@@ -112,7 +118,8 @@ impl CoreRuntimeControl {
             clob_client: deps.clob_client,
             market_registry: deps.market_registry,
             health_checker: deps.health_checker,
-            settings: deps.settings,
+            deploy: deps.deploy,
+            runtime_config: deps.runtime_config,
             system_runtime_state: deps.system_runtime_state,
             started_at: Instant::now(),
         }
@@ -122,11 +129,19 @@ impl CoreRuntimeControl {
         self.metrics.as_ref()
     }
 
-    /// Validate that the target mode can be entered before any state change.
+    /// Validate that the target mode can be entered before any state change:
+    /// deploy credential/JWT policy **and** the active runtime config must
+    /// both be valid for the target mode (fail-closed).
     fn preflight(&self, target: ExecutionMode) -> Result<(), RuntimeControlError> {
-        self.settings
+        self.deploy
             .ensure_valid_for_mode(target)
             .map_err(|error| RuntimeControlError::Precondition(error.to_string()))?;
+        let runtime_report = validate_runtime_for_mode(&self.runtime_config.current(), target);
+        if runtime_report.has_errors() {
+            return Err(RuntimeControlError::Precondition(
+                runtime_report.to_string(),
+            ));
+        }
         if target == ExecutionMode::Live {
             if self.clob_client.is_none() {
                 return Err(RuntimeControlError::Precondition(
@@ -183,8 +198,10 @@ impl CoreRuntimeControl {
                 Ok(())
             }
             ExecutionMode::DryRun | ExecutionMode::Paper => {
-                self.metrics_state
-                    .seed_simulated_snapshot(target, Usd::new(self.settings.risk.bankroll_usd));
+                self.metrics_state.seed_simulated_snapshot(
+                    target,
+                    Usd::new(self.runtime_config.load().risk.bankroll_usd),
+                );
                 Ok(())
             }
         }

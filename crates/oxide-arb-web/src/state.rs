@@ -10,9 +10,12 @@
 use std::sync::Arc;
 
 use oxide_arb_control::governance::ControlFactorRegistry;
-use oxide_arb_models::domain::{
-    CoreEventPublisher, MarketDataPort, MetricsScrapePort, ReadinessPort, ReplayPort,
-    RuntimeControlPort,
+use oxide_arb_models::{
+    config::DeployConfig,
+    domain::{
+        CoreEventPublisher, MarketDataPort, MetricsScrapePort, ReadinessPort, ReplayPort,
+        RuntimeConfigPort, RuntimeControlPort,
+    },
 };
 use oxide_arb_repository::traits::{
     ControlFactorRepository, ControlFactorShadowDecisionRepository, EvidenceTimeseriesRepository,
@@ -31,6 +34,11 @@ use crate::{
 /// Dependency bundle shared by all handlers and middleware.
 #[derive(Clone)]
 pub struct AppState {
+    /// Deploy configuration (read-only; surfaced masked via the system API).
+    pub deploy: Arc<DeployConfig>,
+    /// Hot-reload surface for the versioned runtime config: preflight before
+    /// the durable activation, apply after it (dependency-inverted to core).
+    pub runtime_config_apply: Arc<dyn RuntimeConfigPort>,
     /// JWT signer/validator with its revocation blacklist.
     pub jwt: Arc<JwtService>,
     /// JWT revocation pool handle (for graceful `close` on shutdown).

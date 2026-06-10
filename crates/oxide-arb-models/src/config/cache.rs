@@ -1,31 +1,34 @@
-//! Cache layer configuration.
+//! Cache layer configuration (`[cache]`, deploy).
 
 use serde::Deserialize;
 use std::collections::HashMap;
-use validator::Validate;
 
-#[derive(Debug, Clone, Default, Deserialize, Validate)]
+/// Tiered cache (in-process Moka L1 + Redis L2) policy.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct CacheConfig {
-    #[serde(default)]
+    /// Redis (L2) connection.
     pub redis: RedisConfig,
-    #[serde(default)]
+    /// In-process Moka (L1) cache.
     pub moka: MokaConfig,
     /// Global operation timeout (ms). Per-domain overrides take precedence.
-    #[serde(default = "default_operation_timeout_ms")]
+    /// Default: `500`.
     pub operation_timeout_ms: u64,
-    /// Whether cache failures are transparent to callers (true = never propagate errors).
-    #[serde(default = "default_fail_open")]
+    /// Whether cache failures are transparent to callers (`true` = never
+    /// propagate errors; callers fall through to the source of truth).
+    /// Default: `true`.
     pub fail_open: bool,
     /// Disable the entire cache layer (all operations become no-ops).
-    #[serde(default)]
+    /// Default: `false`.
     pub disabled: bool,
-    /// Per-domain policy overrides. Key = domain name (e.g. "market", "config").
-    #[serde(default)]
+    /// Per-domain policy overrides. Key = domain name (e.g. `market`).
+    /// Default: empty.
     pub domains: HashMap<String, DomainCacheConfig>,
 }
 
 /// Per-domain cache policy override.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DomainCacheConfig {
     /// Override operation timeout for this domain (ms).
     pub timeout_ms: Option<u64>,
@@ -43,15 +46,30 @@ const fn default_fail_open() -> bool {
     true
 }
 
-#[derive(Debug, Clone, Deserialize, Validate)]
+impl Default for CacheConfig {
+    fn default() -> Self {
+        Self {
+            redis: RedisConfig::default(),
+            moka: MokaConfig::default(),
+            operation_timeout_ms: default_operation_timeout_ms(),
+            fail_open: default_fail_open(),
+            disabled: false,
+            domains: HashMap::new(),
+        }
+    }
+}
+
+/// Redis connection.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct RedisConfig {
-    #[serde(default = "default_redis_url")]
+    /// Connection URL. Default: `redis://localhost:6379`.
     pub url: String,
-    #[serde(default = "default_redis_pool")]
+    /// Connection pool size. Default: `8`.
     pub pool_size: u32,
-    #[serde(default = "default_redis_timeout")]
+    /// Per-operation timeout (ms). Default: `1000`.
     pub timeout_ms: u64,
-    #[serde(default = "default_redis_key_prefix")]
+    /// Key namespace prefix. Default: `oarb:`.
     pub key_prefix: String,
 }
 
@@ -79,32 +97,25 @@ fn default_redis_key_prefix() -> String {
     "oarb:".into()
 }
 
-#[derive(Debug, Clone, Deserialize, Validate)]
+/// In-process Moka (L1) cache.
+///
+/// TTLs are per-entry and chosen by each call site — there is no global
+/// time-to-live/time-to-idle knob by design.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct MokaConfig {
-    #[serde(default = "default_moka_max_cap")]
+    /// Maximum number of cached entries. Default: `10000`.
     pub max_capacity: u64,
-    #[serde(default = "default_moka_ttl")]
-    pub time_to_live_secs: u64,
-    #[serde(default = "default_moka_tti")]
-    pub time_to_idle_secs: u64,
 }
 
 impl Default for MokaConfig {
     fn default() -> Self {
         Self {
             max_capacity: default_moka_max_cap(),
-            time_to_live_secs: default_moka_ttl(),
-            time_to_idle_secs: default_moka_tti(),
         }
     }
 }
 
 const fn default_moka_max_cap() -> u64 {
     10_000
-}
-const fn default_moka_ttl() -> u64 {
-    300
-}
-const fn default_moka_tti() -> u64 {
-    120
 }

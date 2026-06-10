@@ -11,17 +11,15 @@ use serde::Deserialize;
 use std::collections::HashMap;
 
 /// Fee configuration mounted at `[polymarket.fees]` in TOML.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct FeesConfig {
     /// Volatility exponent in `fee = C × feeRate × p × (1 − p)^exponent`.
     /// Polymarket official value is **1** for all categories.
-    #[serde(default = "default_exponent")]
     pub exponent: Decimal,
     /// Fallback `feeRate` when a category is absent from [`Self::category_rates`].
-    #[serde(default = "default_unknown_category_rate")]
     pub unknown_category_rate: Decimal,
     /// Per-category `feeRate` (not basis points).
-    #[serde(default = "default_category_rates")]
     pub category_rates: HashMap<MarketCategory, Decimal>,
 }
 

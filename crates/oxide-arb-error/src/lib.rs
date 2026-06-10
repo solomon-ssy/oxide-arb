@@ -125,7 +125,7 @@ pub enum OxideError {
 // ── Convenience constructors for the String-accepting variants of OxideError ─
 
 impl OxideError {
-    /// Shorthand config error from a string message (used by Settings loader).
+    /// Shorthand config error from a string message (used by the deploy-config loader).
     pub fn config(msg: impl Into<String>) -> Self {
         Self::Config(
             ConfigValidationReport::single_error(ConfigValidationError::InvalidValue {

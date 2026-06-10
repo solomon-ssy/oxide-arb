@@ -6,11 +6,9 @@ use crate::{
     blacklist::BlacklistManager,
     circuit_breaker::CircuitBreaker,
     clock::{self, Clock},
-    engine::{DynRiskEngine, RiskEngine},
-    pipeline,
+    engine::{DynRiskEngine, EngineParams, RiskEngine},
     position::PotentialLossLedger,
-    reconciliation::LedgerReconciler,
-    sizing::{DrawdownGuard, MultiConstraintSizer},
+    sizing::DrawdownGuard,
     snapshot::RiskSnapshot,
     state_store,
     traits::{FillClaim, PotentialLossStore, RiskFillCommitGuard, RiskMetrics, RiskPersistence},
@@ -20,7 +18,6 @@ use arc_swap::ArcSwap;
 use chrono::{DateTime, Utc};
 use oxide_arb_error::OxideResult;
 use oxide_arb_models::{
-    config::RiskConfig,
     domain::{
         CoreEventPublisher,
         blacklist::{BlacklistInfo, UpsertBlacklistEntry},
@@ -34,6 +31,7 @@ use oxide_arb_models::{
         common::LedgerStatus,
         risk::{BreakerStateName, CircuitBreakerLevel},
     },
+    runtime_config::RiskConfig,
     types::{LedgerId, MarketId, TradeId, Usd},
 };
 use parking_lot::RwLock;
@@ -197,14 +195,11 @@ impl RiskEngineBuilder {
             blacklist.load_entries(self.blacklist_entries);
         }
 
-        let sizer = MultiConstraintSizer::new(&config);
         let drawdown = DrawdownGuard::new(
             drawdown_hwm,
             config.drawdown.max_drawdown_pct,
             config.drawdown.drawdown_reduction_factor,
         );
-        let reconciler = LedgerReconciler::new(config.reconciliation_tolerance_usd);
-        let risk_pipeline = pipeline::build_default_pipeline(&config);
 
         let last_emergency = self.snapshot.as_ref().and_then(|snap| {
             match (snap.last_emergency_at, snap.last_emergency_reason.clone()) {
@@ -227,13 +222,10 @@ impl RiskEngineBuilder {
             hourly: RwLock::new(hourly),
             potential_loss: RwLock::new(potential_loss),
             lifetime_realized: RwLock::new(lifetime_realized),
-            pipeline: risk_pipeline,
+            params: ArcSwap::from_pointee(EngineParams::from_config(config)),
             risk_snapshot: ArcSwap::from_pointee(RiskSnapshot::zeroed()),
             blacklist,
-            sizer,
             drawdown: RwLock::new(drawdown),
-            reconciler,
-            config,
             persistence,
             potential_loss_store,
             audit_sink: self.audit_sink,

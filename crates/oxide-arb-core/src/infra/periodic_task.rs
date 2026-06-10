@@ -6,29 +6,42 @@ use tokio_util::sync::CancellationToken;
 pub struct PeriodicTask;
 
 impl PeriodicTask {
-    pub async fn run<F, Fut>(
+    /// Periodic loop with a per-tick resolved interval.
+    ///
+    /// `interval_fn` is evaluated before every wait, so hot-reloadable
+    /// cadences (runtime-config activation) take effect on the next tick —
+    /// tasks must never capture an interval in their closure at startup.
+    /// Fixed cadences simply pass a constant closure (`|| INTERVAL`).
+    /// A zero interval is clamped to one second to avoid busy-looping on a
+    /// misconfigured cadence.
+    pub async fn run<F, Fut, I>(
         name: &str,
-        interval: Duration,
+        interval_fn: I,
         jitter_pct: f64,
         skip_first_tick: bool,
         shutdown: CancellationToken,
         task_fn: F,
     ) -> Result<(), OxideError>
     where
+        I: Fn() -> Duration,
         F: Fn() -> Fut,
         Fut: std::future::Future<Output = Result<(), OxideError>>,
     {
-        let mut timer = tokio::time::interval(interval);
-        timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        if skip_first_tick {
-            timer.tick().await;
+        if !skip_first_tick {
+            if shutdown.is_cancelled() {
+                return Ok(());
+            }
+            if let Err(e) = task_fn().await {
+                tracing::warn!(task = name, error = %e, "periodic task iteration failed");
+            }
         }
 
         loop {
+            let interval = interval_fn().max(Duration::from_secs(1));
             tokio::select! {
                 biased;
                 () = shutdown.cancelled() => return Ok(()),
-                _ = timer.tick() => {
+                () = tokio::time::sleep(interval) => {
                     if jitter_pct > 0.0 {
                         let max_jitter = interval.mul_f64(jitter_pct);
                         let jitter_roll = rand::rng().random_range(0.0..1.0);

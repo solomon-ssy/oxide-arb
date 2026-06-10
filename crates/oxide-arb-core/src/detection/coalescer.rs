@@ -1,9 +1,15 @@
 use crate::{observability::metrics_hub::MetricsHub, pipeline::market_registry::MarketRegistry};
 use dashmap::DashMap;
 use oxide_arb_error::OxideError;
-use oxide_arb_models::types::{MarketId, TokenId};
+use oxide_arb_models::{
+    runtime_config::CoalescerConfig,
+    types::{MarketId, TokenId},
+};
 use std::{
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 use tokio_util::sync::CancellationToken;
@@ -20,11 +26,12 @@ struct PendingMarket {
 /// Debounces per-token book updates into market-level scan triggers.
 ///
 /// Emits immediately when both YES and NO tokens have updated; otherwise waits
-/// up to `coalesce_window` for the second leg.
+/// up to the coalesce window for the second leg. The window is hot-reloadable
+/// through [`Coalescer::reload`].
 pub struct Coalescer {
     pending: DashMap<MarketId, PendingMarket>,
     market_registry: Arc<MarketRegistry>,
-    coalesce_window: Duration,
+    coalesce_window_ms: AtomicU64,
     token_tx: flume::Sender<MarketId>,
     metrics: Arc<MetricsHub>,
     shutdown: CancellationToken,
@@ -41,11 +48,20 @@ impl Coalescer {
         Self {
             pending: DashMap::new(),
             market_registry,
-            coalesce_window,
+            coalesce_window_ms: AtomicU64::new(
+                u64::try_from(coalesce_window.as_millis()).unwrap_or(u64::MAX),
+            ),
             token_tx,
             metrics,
             shutdown,
         }
+    }
+
+    /// Hot-reload the coalesce window (runtime-config activation). Applies to
+    /// the next flush evaluation; pending markets keep their first-seen stamp.
+    pub fn reload(&self, config: &CoalescerConfig) {
+        self.coalesce_window_ms
+            .store(config.coalesce_window_ms, Ordering::Relaxed);
     }
 
     /// Called by the data pipeline when a token book is updated.
@@ -124,10 +140,11 @@ impl Coalescer {
 
     fn flush_expired(&self) {
         let now = Instant::now();
+        let window = Duration::from_millis(self.coalesce_window_ms.load(Ordering::Relaxed));
         let mut ready = Vec::with_capacity(self.pending.len());
 
         self.pending.retain(|market_id, entry| {
-            if now.duration_since(entry.first_seen) >= self.coalesce_window {
+            if now.duration_since(entry.first_seen) >= window {
                 ready.push(market_id.clone());
                 false
             } else {

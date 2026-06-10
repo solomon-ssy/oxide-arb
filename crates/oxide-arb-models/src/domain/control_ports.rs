@@ -16,6 +16,7 @@ use crate::{
         market::book::BookSnapshot,
     },
     enums::{common::ExecutionMode, control_factor::ControlFactorType, risk::BlacklistReason},
+    runtime_config::RuntimeConfig,
     types::{MarketId, TokenId},
 };
 use async_trait::async_trait;
@@ -105,6 +106,29 @@ pub trait RuntimeControlPort: Send + Sync {
 
     /// Run all subsystem health checks.
     async fn health(&self) -> HealthReport;
+}
+
+/// Hot-reload surface for the versioned runtime configuration
+/// (dependency-inverted).
+///
+/// Implemented by the core `RuntimeConfigApplicator`: web governance handlers
+/// validate and persist a version through the audited registry, then call
+/// [`Self::apply`] so the activation reaches every live subscriber (risk
+/// engine, detection chain, execution chain, settlement, alerts) immediately.
+#[async_trait]
+pub trait RuntimeConfigPort: Send + Sync {
+    /// Currently active runtime config (lock-free snapshot read).
+    fn current(&self) -> Arc<RuntimeConfig>;
+
+    /// Money-state activation preflight (fail-closed): rejects candidates
+    /// whose exposure ceilings fall below capital that is already committed,
+    /// and mode-sensitive invariants for the mode that is currently running.
+    fn preflight(&self, candidate: &RuntimeConfig) -> Result<(), RuntimeControlError>;
+
+    /// Swap the in-process store and propagate to every registered subscriber
+    /// in the fixed order (risk before execution). Must only be called after a
+    /// successful [`Self::preflight`] and a durable, audited activation.
+    async fn apply(&self, config: RuntimeConfig) -> Result<(), RuntimeControlError>;
 }
 
 /// Live market-data surface exposed to the web layer (dependency-inverted).

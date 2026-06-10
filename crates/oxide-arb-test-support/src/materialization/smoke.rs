@@ -14,15 +14,12 @@ use oxide_arb_models::{
         ChProbability, ChSchemaVersion, ChShares, ChUsd, OpportunityAuditRow,
         OpportunityDetectionRow, TickEventL2Row,
     },
-    config::{CalibrationConfig, EndgameDetectionConfig},
     domain::{
-        BalanceSnapshotInfo, ControlFactorStageReportInfo, DetectionRuntimeConfig,
-        ExecutionRuntimeConfig, MarketPitSnapshotInfo, NewBalanceSnapshot, NewPotentialLoss,
-        NewReconciliationReport, NewRiskAuditEvent, NewRuntimeConfigActivation,
-        NewRuntimeConfigVersion, PageRequest, Paginated, PositionInfo, PotentialLossInfo,
-        ReconciliationReportInfo, ResolvePotentialLoss, RiskAuditEventInfo, RiskLimitRuntimeConfig,
-        RuntimeConfigActivationInfo, RuntimeConfigDocument, RuntimeConfigVersionInfo,
-        SizingRuntimeConfig, TimeWindow, TradeInfo,
+        BalanceSnapshotInfo, ControlFactorStageReportInfo, MarketPitSnapshotInfo,
+        NewBalanceSnapshot, NewPotentialLoss, NewReconciliationReport, NewRiskAuditEvent,
+        NewRuntimeConfigActivation, NewRuntimeConfigVersion, PageRequest, Paginated, PositionInfo,
+        PotentialLossInfo, ReconciliationReportInfo, ResolvePotentialLoss, RiskAuditEventInfo,
+        RuntimeConfigActivationInfo, RuntimeConfigVersionInfo, TimeWindow, TradeInfo,
         control_factor::{
             AcquireMaterializationRunOutcome, AuditActor, AuditEventContent, AuditedOutcome,
             CancelMaterializationRunOutcome, ControlFactorAuditEventInfo,
@@ -56,6 +53,7 @@ use oxide_arb_models::{
         risk::{ReconciliationStatus, RiskAuditEventType},
         runtime_config::RuntimeConfigVersionSource,
     },
+    runtime_config::RuntimeConfig,
     types::{
         AuditEventId, BalanceSnapshotId, ControlFactorId, EventId, ExecutionId,
         FactorPublicationId, LedgerId, MarketId, MaterializationRunId, OpportunityId, PositionId,
@@ -68,6 +66,7 @@ use oxide_arb_repository::traits::{
     ReconciliationRepository, ResolutionEventRepository, RiskAuditRepository,
     RuntimeConfigVersionRepository,
 };
+use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 
 use super::fixtures::{FakeMarketRepository, fixed_time, market_snapshot};
@@ -334,41 +333,15 @@ impl SmokeRepositories {
 
 #[must_use]
 pub fn smoke_runtime_config_version() -> RuntimeConfigVersionInfo {
-    let endgame = EndgameDetectionConfig {
-        high_threshold: dec!(0.94),
-        min_convergence_duration_secs: 1,
-        ..Default::default()
-    };
+    let mut config = RuntimeConfig::default();
+    config.detection.min_profit_threshold_usd = Decimal::ZERO;
+    config.detection.endgame.high_threshold = dec!(0.94);
+    config.detection.endgame.min_convergence_duration_secs = 1;
     RuntimeConfigVersionInfo {
         runtime_config_version_id: RuntimeConfigVersionId::new(crate::seeded_uuid("rcv_smoke")),
         config_hash: "blake3:smoke_cfg".to_owned(),
-        schema_version: 1,
-        config_json: serde_json::to_value(RuntimeConfigDocument {
-            schema_version: 2,
-            detection: DetectionRuntimeConfig {
-                min_profit_threshold_usd: dec!(0),
-                endgame_hours_before_close: 24,
-                convergence_threshold: dec!(0.94),
-                endgame: Some(endgame),
-                calibration: Some(CalibrationConfig::default()),
-            },
-            execution: ExecutionRuntimeConfig {
-                max_slippage_bps: 0,
-                order_timeout_secs: 1,
-                cooldown_after_trade_secs: 0,
-            },
-            sizing: SizingRuntimeConfig {
-                kelly_fraction: dec!(1),
-                max_position_fraction_of_book: dec!(1),
-            },
-            risk_limits: RiskLimitRuntimeConfig {
-                max_portfolio_exposure_usd: Usd::new(dec!(10_000)),
-                max_single_position_usd: Usd::new(dec!(1_000)),
-                max_daily_loss_usd: Usd::new(dec!(1_000)),
-                circuit_breaker_threshold: 10,
-            },
-        })
-        .expect("smoke runtime config json"),
+        schema_version: config.schema_version,
+        config_json: config.to_json(),
         source: RuntimeConfigVersionSource::Operator,
         created_by: "phase5.3-smoke".to_owned(),
         reason: "acceptance scenario".to_owned(),

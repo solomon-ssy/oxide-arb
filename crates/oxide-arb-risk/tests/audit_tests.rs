@@ -15,7 +15,6 @@ use std::{
 use chrono::{DateTime, Utc};
 use oxide_arb_error::OxideResult;
 use oxide_arb_models::{
-    config::{CircuitBreakerConfig, RiskConfig},
     domain::{
         blacklist::{BlacklistInfo, UpsertBlacklistEntry},
         risk::{
@@ -28,6 +27,7 @@ use oxide_arb_models::{
         common::{Side, TradeBusinessOutcome},
         risk::{BlacklistReason, BreakerStateName, RiskAuditEventType, TradeAccountingPhase},
     },
+    runtime_config::{CircuitBreakerConfig, RiskConfig},
     types::{MarketId, Price, Shares, TokenId, TradeId, Usd},
 };
 use oxide_arb_risk::{

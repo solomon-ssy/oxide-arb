@@ -1,107 +1,91 @@
-//! Opportunity detection configuration.
+//! Opportunity-detection runtime configuration (`detection` section).
+//!
+//! Endgame-only by design (ADR-001): there is no `enabled` switch — trading is
+//! stopped through the governed execution mode or the circuit breaker, never by
+//! silently disabling detection. All fields are hot-reloadable through the
+//! versioned runtime-config activation path.
 
-use crate::{
-    enums::common::MarketCategory,
-    types::{MicroPct, MicroProb, MicroScore},
-};
+use crate::enums::common::MarketCategory;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use validator::Validate;
 
-#[derive(Debug, Clone, Deserialize, Serialize, Validate)]
+/// Detection pipeline tunables.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
 pub struct DetectionConfig {
-    #[serde(default = "default_scan_interval_secs")]
-    pub fallback_scan_interval_secs: u64,
-    /// Authoritative minimum net profit (USD) for detection, validation, and risk.
-    /// Single source per ADR-001 — do not duplicate under `[execution]` or `[risk]`.
-    #[serde(default = "default_min_profit_threshold_usd")]
+    /// Authoritative minimum net profit (USD) for detection, validation, and
+    /// risk (single source per ADR-001 — never duplicated under `execution`
+    /// or `risk`). Opportunities below this expected net profit are dropped.
+    /// Default: `0.50`.
+    #[schemars(with = "String", extend("x-money-critical" = true))]
     pub min_profit_threshold_usd: Decimal,
-    #[serde(default = "default_warmup_secs")]
-    pub detection_warmup_secs: u64,
-    #[serde(default = "default_coalesce_ms")]
-    pub dedup_coalesce_window_ms: u64,
-    #[serde(default = "default_scan_concurrency")]
-    pub fallback_scan_concurrency: usize,
-    #[serde(default)]
+    /// Endgame convergence detection parameters.
     pub endgame: EndgameDetectionConfig,
-    #[serde(default)]
+    /// Resolution-calibration pipeline parameters.
     pub calibration: CalibrationConfig,
 }
 
 impl Default for DetectionConfig {
     fn default() -> Self {
         Self {
-            fallback_scan_interval_secs: default_scan_interval_secs(),
             min_profit_threshold_usd: default_min_profit_threshold_usd(),
-            detection_warmup_secs: default_warmup_secs(),
-            dedup_coalesce_window_ms: default_coalesce_ms(),
-            fallback_scan_concurrency: default_scan_concurrency(),
             endgame: EndgameDetectionConfig::default(),
             calibration: CalibrationConfig::default(),
         }
     }
 }
 
-const fn default_scan_interval_secs() -> u64 {
-    5
-}
 const fn default_min_profit_threshold_usd() -> Decimal {
     dec!(0.50)
-}
-const fn default_warmup_secs() -> u64 {
-    90
-}
-const fn default_coalesce_ms() -> u64 {
-    300
-}
-const fn default_scan_concurrency() -> usize {
-    32
 }
 
 // ── Endgame Detection ────────────────────────────────────────────────────────
 
 /// Endgame convergence detection configuration.
-#[derive(Debug, Clone, Deserialize, Serialize, Validate)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
 pub struct EndgameDetectionConfig {
-    #[serde(default = "default_endgame_enabled")]
-    pub enabled: bool,
-    #[serde(default = "default_settlement_window_hours")]
+    /// Only markets settling within this many hours are scanned. Larger windows
+    /// admit slower-converging markets but tie up capital longer. Default: `24`.
     pub settlement_window_hours: u64,
-    #[serde(default = "default_high_threshold")]
+    /// Best-ask price at or above this value marks a market as converged
+    /// (YES or NO side). Money-critical: lowering it admits less-certain
+    /// markets into the endgame funnel. Default: `0.95`.
+    #[schemars(with = "String", extend("x-money-critical" = true))]
     pub high_threshold: Decimal,
-    #[serde(default = "default_low_threshold")]
-    pub low_threshold: Decimal,
-    #[serde(default = "default_min_convergence_secs")]
+    /// A market must hold convergence for at least this long before an
+    /// opportunity may be emitted. Guards against transient spikes.
+    /// Default: `300` (5 minutes).
     pub min_convergence_duration_secs: u64,
-    #[serde(default = "default_min_profit_per_share")]
+    /// Minimum profit per share (`1 - entry VWAP`) to act. Below this the
+    /// edge cannot cover fees + slippage. Default: `0.005`.
+    #[schemars(with = "String", extend("x-money-critical" = true))]
     pub min_profit_per_share: Decimal,
-    #[serde(default = "default_max_investment_usd")]
+    /// Maximum USD walked into the order book per opportunity. Caps single-shot
+    /// sizing before risk sizing applies. Default: `500`.
+    #[schemars(with = "String", extend("x-money-critical" = true))]
     pub max_investment_usd: Decimal,
-    #[serde(default = "default_max_convergence_age_secs")]
-    pub max_convergence_age_secs: u64,
-    #[serde(default)]
+    /// Fill-probability estimation parameters.
     pub fill_probability: FillProbabilityConfig,
-    #[serde(default)]
+    /// Opportunity scoring parameters.
     pub scorer: ScorerConfig,
-    #[serde(default)]
+    /// Per-market emission cooldown (anti-flood) parameters.
     pub emission_cooldown: EmissionCooldownConfig,
-    #[serde(default)]
+    /// Convergence tracker cache parameters.
     pub convergence_tracker: ConvergenceTrackerConfig,
 }
 
 impl Default for EndgameDetectionConfig {
     fn default() -> Self {
         Self {
-            enabled: default_endgame_enabled(),
             settlement_window_hours: default_settlement_window_hours(),
             high_threshold: default_high_threshold(),
-            low_threshold: default_low_threshold(),
             min_convergence_duration_secs: default_min_convergence_secs(),
             min_profit_per_share: default_min_profit_per_share(),
             max_investment_usd: default_max_investment_usd(),
-            max_convergence_age_secs: default_max_convergence_age_secs(),
             fill_probability: FillProbabilityConfig::default(),
             scorer: ScorerConfig::default(),
             emission_cooldown: EmissionCooldownConfig::default(),
@@ -110,17 +94,11 @@ impl Default for EndgameDetectionConfig {
     }
 }
 
-const fn default_endgame_enabled() -> bool {
-    true
-}
 const fn default_settlement_window_hours() -> u64 {
     24
 }
 const fn default_high_threshold() -> Decimal {
     dec!(0.95)
-}
-const fn default_low_threshold() -> Decimal {
-    dec!(0.05)
 }
 const fn default_min_convergence_secs() -> u64 {
     300
@@ -131,38 +109,35 @@ const fn default_min_profit_per_share() -> Decimal {
 const fn default_max_investment_usd() -> Decimal {
     dec!(500)
 }
-const fn default_max_convergence_age_secs() -> u64 {
-    7200
-}
 
 // ── Calibration ──────────────────────────────────────────────────────────────
 
 /// Calibration data pipeline configuration.
-#[derive(Debug, Clone, Deserialize, Serialize, Validate)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
 pub struct CalibrationConfig {
     /// Minimum sample size before a bucket's resolution rate is trusted.
-    /// Below this threshold the fallback chain is activated.
-    #[serde(default = "default_min_sample_size")]
+    /// Below this threshold the fallback chain is activated. Default: `30`.
     pub min_sample_size: u32,
-    /// How often (seconds) to refresh calibration data from the DB.
-    #[serde(default = "default_refresh_interval_secs")]
+    /// How often (seconds) the background updater reconciles calibration data
+    /// from the DB and oracles. Default: `3600`.
     pub refresh_interval_secs: u64,
-    /// Prior strength parameter `n₀` for the dynamic fusion weight
-    /// `w(n) = n / (n + n₀)`. Higher values give more weight to the
-    /// calibrator (slower adaptation to real-time signals).
-    #[serde(default = "default_fusion_prior_strength")]
+    /// Prior strength `n₀` for the dynamic fusion weight `w(n) = n / (n + n₀)`.
+    /// Higher values give more weight to the calibrator (slower adaptation to
+    /// real-time signals). Default: `20`.
     pub fusion_prior_strength: u32,
-    /// Floor for fused probability output.
-    #[serde(default = "default_fused_p_floor")]
+    /// Floor for the fused probability output. Default: `0.80`.
+    #[schemars(with = "String")]
     pub fused_p_floor: Decimal,
-    /// Ceiling for fused probability output.
-    #[serde(default = "default_fused_p_ceiling")]
+    /// Ceiling for the fused probability output. Default: `0.995`.
+    #[schemars(with = "String")]
     pub fused_p_ceiling: Decimal,
     /// Bootstrap alpha prior (before `MoM` estimation is available).
-    #[serde(default = "default_bootstrap_alpha")]
+    /// Default: `2.0`.
+    #[schemars(with = "String")]
     pub bootstrap_alpha: Decimal,
-    /// Bootstrap beta prior.
-    #[serde(default = "default_bootstrap_beta")]
+    /// Bootstrap beta prior. Default: `0.2`.
+    #[schemars(with = "String")]
     pub bootstrap_beta: Decimal,
 }
 
@@ -181,7 +156,7 @@ impl Default for CalibrationConfig {
 }
 
 const fn default_min_sample_size() -> u32 {
-    10
+    30
 }
 const fn default_refresh_interval_secs() -> u64 {
     3600
@@ -205,22 +180,24 @@ const fn default_bootstrap_beta() -> Decimal {
 // ── Fill Probability ─────────────────────────────────────────────────────────
 
 /// Endgame-specific fill probability estimation parameters.
-#[derive(Debug, Clone, Deserialize, Serialize, Validate)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
 pub struct FillProbabilityConfig {
     /// Base fill probability for a single FOK order with fresh data.
-    #[serde(default = "default_base_fill_prob")]
+    /// Default: `0.90`.
+    #[schemars(with = "String")]
     pub base_fill_prob: Decimal,
-    /// Depth usage (%) above which fill probability drops.
-    #[serde(default = "default_depth_penalty_threshold")]
+    /// Depth usage (%) above which fill probability drops. Default: `20`.
+    #[schemars(with = "String")]
     pub depth_penalty_threshold_pct: Decimal,
-    /// Per-percentage-point penalty above the threshold.
-    #[serde(default = "default_depth_penalty_per_pct")]
+    /// Per-percentage-point penalty above the threshold. Default: `0.02`.
+    #[schemars(with = "String")]
     pub depth_penalty_per_pct: Decimal,
-    /// Per-`StalenessLevel`-step penalty.
-    #[serde(default = "default_staleness_penalty")]
+    /// Per-`StalenessLevel`-step penalty. Default: `0.05`.
+    #[schemars(with = "String")]
     pub staleness_penalty_per_level: Decimal,
-    /// Bonus for near-resolution markets (within 6 hours).
-    #[serde(default = "default_resolution_bonus")]
+    /// Bonus for near-resolution markets (within 6 hours). Default: `0.05`.
+    #[schemars(with = "String")]
     pub resolution_proximity_bonus: Decimal,
 }
 
@@ -254,58 +231,32 @@ const fn default_resolution_bonus() -> Decimal {
 
 // ── Scorer ───────────────────────────────────────────────────────────────────
 
-/// Serde wire format — decimals in config files; converted to Micro on load.
-#[derive(Debug, Deserialize)]
-struct ScorerConfigSerde {
-    #[serde(default = "default_min_score")]
-    min_score: Decimal,
-    #[serde(default = "default_max_depth_usage")]
-    max_depth_usage_pct: Decimal,
-    #[serde(default = "default_category_weights_decimal")]
-    category_weights: HashMap<MarketCategory, Decimal>,
-}
-
 /// Endgame opportunity scorer configuration.
-#[derive(Debug, Clone, Serialize, Validate)]
+///
+/// Wire format is decimal everywhere (symmetric serialize/deserialize so the
+/// stored runtime-config JSON round-trips exactly); the algorithm layer
+/// converts to fixed-point `Micro*` values at construction/reload time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
 pub struct ScorerConfig {
-    /// Minimum composite score to emit an opportunity.
-    pub min_score: MicroScore,
-    /// Maximum depth usage (%) to accept.
-    pub max_depth_usage_pct: MicroPct,
-    /// Per-category weight multipliers for scoring.
-    pub category_weights: HashMap<MarketCategory, MicroProb>,
-}
-
-impl<'de> Deserialize<'de> for ScorerConfig {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let raw = ScorerConfigSerde::deserialize(deserializer)?;
-        let category_weights = raw
-            .category_weights
-            .into_iter()
-            .map(|(cat, weight)| {
-                MicroProb::try_from_decimal(weight)
-                    .map(|w| (cat, MicroProb::from_factor_micro(w.micro())))
-                    .map_err(serde::de::Error::custom)
-            })
-            .collect::<Result<HashMap<_, _>, _>>()?;
-        Ok(Self {
-            min_score: MicroScore::try_from_decimal(raw.min_score)
-                .map_err(serde::de::Error::custom)?,
-            max_depth_usage_pct: MicroPct::try_from_pct_decimal(raw.max_depth_usage_pct)
-                .map_err(serde::de::Error::custom)?,
-            category_weights,
-        })
-    }
+    /// Minimum composite score (0..1) to emit an opportunity. Default: `0.10`.
+    #[schemars(with = "String")]
+    pub min_score: Decimal,
+    /// Maximum depth usage (%) the detector may accept. Default: `50`.
+    #[schemars(with = "String")]
+    pub max_depth_usage_pct: Decimal,
+    /// Per-category weight multipliers for scoring (lower fee categories are
+    /// weighted higher). Categories absent from the map default to `1.0` at
+    /// conversion time.
+    #[schemars(with = "HashMap<String, String>")]
+    pub category_weights: HashMap<MarketCategory, Decimal>,
 }
 
 impl Default for ScorerConfig {
     fn default() -> Self {
         Self {
-            min_score: MicroScore::from_micro(100_000),
-            max_depth_usage_pct: MicroPct::from_micro(500_000),
+            min_score: default_min_score(),
+            max_depth_usage_pct: default_max_depth_usage(),
             category_weights: default_category_weights(),
         }
     }
@@ -318,8 +269,9 @@ const fn default_max_depth_usage() -> Decimal {
     dec!(50)
 }
 
-/// Default category weights (decimal wire format for serde defaults).
-fn default_category_weights_decimal() -> HashMap<MarketCategory, Decimal> {
+/// Default category weights derived from fee rates: lower fees → higher weight.
+#[must_use]
+pub fn default_category_weights() -> HashMap<MarketCategory, Decimal> {
     HashMap::from([
         (MarketCategory::Geopolitics, dec!(1.5)),
         (MarketCategory::Sports, dec!(1.2)),
@@ -334,63 +286,21 @@ fn default_category_weights_decimal() -> HashMap<MarketCategory, Decimal> {
     ])
 }
 
-/// Default category weights derived from fee rates: lower fees → higher weight.
-#[must_use]
-pub fn default_category_weights() -> HashMap<MarketCategory, MicroProb> {
-    HashMap::from([
-        (
-            MarketCategory::Geopolitics,
-            MicroProb::from_factor_micro(1_500_000),
-        ),
-        (
-            MarketCategory::Sports,
-            MicroProb::from_factor_micro(1_200_000),
-        ),
-        (
-            MarketCategory::Politics,
-            MicroProb::from_factor_micro(1_000_000),
-        ),
-        (
-            MarketCategory::Finance,
-            MicroProb::from_factor_micro(1_000_000),
-        ),
-        (
-            MarketCategory::Tech,
-            MicroProb::from_factor_micro(1_000_000),
-        ),
-        (
-            MarketCategory::Culture,
-            MicroProb::from_factor_micro(800_000),
-        ),
-        (
-            MarketCategory::Weather,
-            MicroProb::from_factor_micro(800_000),
-        ),
-        (
-            MarketCategory::Economics,
-            MicroProb::from_factor_micro(800_000),
-        ),
-        (
-            MarketCategory::Crypto,
-            MicroProb::from_factor_micro(800_000),
-        ),
-        (MarketCategory::Other, MicroProb::from_factor_micro(800_000)),
-    ])
-}
-
 // ── Emission Cooldown ────────────────────────────────────────────────────────
 
 /// Emission cooldown configuration preventing duplicate opportunity signals.
-#[derive(Debug, Clone, Deserialize, Serialize, Validate)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
 pub struct EmissionCooldownConfig {
-    /// Base cooldown duration in seconds.
-    #[serde(default = "default_base_cooldown_secs")]
+    /// Base cooldown duration in seconds. Default: `30`.
     pub base_cooldown_secs: u64,
     /// Maximum exponential backoff multiplier for consecutive emissions.
-    #[serde(default = "default_cooldown_max_multiplier")]
+    /// Default: `16.0`.
+    #[schemars(with = "String")]
     pub max_multiplier: Decimal,
-    /// Maximum cache capacity (number of tracked markets).
-    #[serde(default = "default_cooldown_capacity")]
+    /// Maximum cache capacity (number of tracked markets). Caution: changing
+    /// this at runtime rebuilds the cache, clearing all in-flight cooldown
+    /// state. Default: `4096`.
     pub max_capacity: u64,
 }
 
@@ -417,13 +327,15 @@ const fn default_cooldown_capacity() -> u64 {
 // ── Convergence Tracker ──────────────────────────────────────────────────────
 
 /// Convergence tracker cache configuration.
-#[derive(Debug, Clone, Deserialize, Serialize, Validate)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
 pub struct ConvergenceTrackerConfig {
-    /// Max idle time before eviction (seconds).
-    #[serde(default = "default_tracker_max_idle")]
+    /// Max idle time before a market's convergence state is evicted (seconds).
+    /// Default: `7200`.
     pub max_idle_secs: u64,
-    /// Maximum number of tracked markets.
-    #[serde(default = "default_tracker_capacity")]
+    /// Maximum number of tracked markets. Caution: capacity changes only apply
+    /// to detectors constructed after activation (the live tracker keeps its
+    /// capacity to preserve accumulated convergence durations). Default: `10000`.
     pub max_capacity: u64,
 }
 

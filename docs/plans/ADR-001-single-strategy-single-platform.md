@@ -132,84 +132,57 @@ pub const USDC_SCALE: u64 = 1_000_000;
 
 ---
 
-## 5. Config 结构精简方案
+## 5. Config 两层架构（Deploy / Runtime，已落地）
 
-### 5.1 当前结构（12 个顶级字段）
+配置拆为两层，边界以「是否需要重启才能生效」为准：
 
-```
-Settings
-├── detection        ← 保留，但简化内部结构
-├── execution        ← 保留
-├── risk             ← 保留
-├── sizing           ← 保留
-├── market_data      ← 保留
-├── venue            ← 重命名为 polymarket
-├── observability    ← 保留
-├── db               ← 保留
-├── analytics        ← 保留
-├── cache            ← 保留
-├── treasury         ← 保留
-├── keys             ← 保留
-└── notification     ← 保留
-```
+### 5.1 DeployConfig（`config/oxide-arb.toml` + `OXIDE_ARB__*` env，重启生效）
 
-### 5.2 精简后结构
+只包含进程启动时结构性绑定的内容，全树 `deny_unknown_fields`（未知键/遗留段直接拒绝启动）：
 
 ```
-Settings
-├── polymarket       ← 原 venue，语义更精确（这是唯一的平台）
-│   ├── clob_base_url
-│   ├── clob_ws_url
-│   ├── chain_id
-│   └── onchain (rpc_url, rpc_timeout_ms)
-├── detection        ← 大幅简化：删除多策略路由壳
-│   ├── scan_interval_secs
-│   ├── warmup_secs
-│   ├── coalesce_window_ms
-│   ├── scan_concurrency
-│   ├── endgame (settlement_window_hours, thresholds, convergence params...)
-│   └── calibration (min_sample_size, refresh_interval, fusion params...)
-├── execution        ← Phase 0 仅 timeout + mode；FOK/GTD 分层字段 **Phase 4** 交付
-│   ├── mode (DryRun/Paper/Live)
-│   ├── timeout (validation / dispatcher / confirm)
-│   └── (Phase 4) fok_timeout_ms, gtd_expiry_secs, max_retries_per_tier, price_tolerance_ticks
-├── risk             ← 保留
-│   ├── circuit_breaker (L1-L4 thresholds, cooldown)
-│   ├── daily_loss_limit_usd
-│   ├── weekly_loss_limit_usd
-│   ├── max_single_market_exposure_usd
-│   ├── max_total_exposure_pct
-│   ├── reserve_balance_usd
-│   ├── max_concurrent_positions
-│   └── directional (daily_budget_usd, max_single_bet_usd)
-├── sizing           ← 保留
-│   ├── kelly_fraction
-│   ├── min_trade_usd
-│   ├── max_single_trade_usd
-│   ├── bankroll_usd
-│   ├── kelly (max_kelly, min_edge_bps)
-│   └── drawdown (max_drawdown_pct, reduction_factor)
-├── market_data      ← 保留
-│   ├── ws (max_tokens_per_shard, reconnect params)
-│   └── gamma (full_sync_interval, incremental_interval)
-├── observability    ← 保留
-├── db               ← 保留
-├── analytics        ← 保留
-├── cache            ← 保留
-├── treasury         ← 保留
-├── keys             ← 保留
-└── notification     ← 保留
+DeployConfig (oxide_arb_models::config)
+├── polymarket       ← 平台端点 + chain_id + onchain RPC + fees 费率表
+├── market_data      ← 仅连接层：websocket（重连/分片）+ gamma（catalog 同步）
+├── observability    ← 仅 log_level + log_json（接线 tracing init，RUST_LOG 可覆盖）
+├── db               ← postgres + clickhouse（连接、池、批量写入）
+├── cache            ← redis + moka(max_capacity) + 策略
+├── keys             ← 凭证来源（env / keystore）
+├── web              ← HTTP/WS 服务 + JWT
+├── execution        ← 仅 book_apply 结构参数（shard_count / channel_capacity）
+└── settlement       ← 仅 lifecycle.channel_capacity
 ```
 
-### 5.3 关键变更
+### 5.2 RuntimeConfig（`runtime_config_version.config_json`，schema_version = 1，热更新）
 
-| 变更 | 原因 |
+所有运营参数走版本化治理 API（create → preflight → activate → 全订阅者传播），
+存储于 Postgres，进程内 `RuntimeConfigStore`（ArcSwap）无锁读。传播是 push
+模型：`RuntimeConfigApplicator` 持有 `RuntimeConfigSubscribers`（每个订阅者是
+一个类型化字段，编译期完备），按固定顺序传播——先 stage 可失败的 reload
+（oracle 源重建、redeem 地址解析，任一失败则零变更中止），再 commit 并依次
+执行不可失败的 `reload(...)`（risk → exposure → detection → execution →
+settlement → notification），store 最后 swap：
+
+```
+RuntimeConfig (oxide_arb_models::runtime_config)
+├── market_data      ← staleness 四档阶梯
+├── detection        ← min_profit + endgame（thresholds/scorer/fill/cooldown/tracker）+ calibration
+├── execution        ← timeout / funnel / coalescer / endgame_latency
+├── risk             ← 全量（限额、熔断、sizing/kelly/drawdown、黑名单、对账）
+├── settlement       ← oracle 策略 / lifecycle 运营 / redeem 路由
+└── notification     ← alert_cooldown + telegram + webhook（全量，读取脱敏）
+```
+
+### 5.3 关键裁决
+
+| 裁决 | 原因 |
 |---|---|
-| `venue` → `polymarket` | 语义精确。这不是某个泛化的 "venue"，就是 Polymarket |
-| `detection.min_profit_threshold_usd` 从 constants.rs 吸收 | 单一数据源 |
-| `detection` 删除 `budget_targets_usd` | 这是多策略时代遗留的多档位投注概念，endgame 用 Kelly 定量 |
-| `sizing` 增加 `bankroll_usd` | Quarter-Kelly 需要 bankroll 参数 |
-| `risk.directional` 子段不需要，扁平化到 `risk` | 只有一种策略方向 |
+| 删除 `[treasury]` | 从未实现的第二套资金语义；能力已被 `risk.bankroll/min_balance/reserve` + exposure reservation 覆盖 |
+| 删除 `detection.endgame.enabled` | Endgame-only；停交易走 execution_mode / 熔断 |
+| `[analytics]` 并入 `db.clickhouse` | ClickHouse 是数据库，不是独立"分析"概念；lag probe（未接线）一并删除 |
+| `settlement.contracts` → `constants` | 链上部署地址是事实不是参数；仅保留 5 个真实消费地址 |
+| 删除 `observability.metrics/alerts` | metrics 永远开启走 web `/metrics`；告警冷却归入 `notification.alert_cooldown_secs` |
+| 不做 schema 迁移链 | 项目从未正式运行；仅 `schema_version = 1`，非 1 文档拒绝 activate |
 
 ---
 

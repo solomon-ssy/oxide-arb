@@ -2,7 +2,10 @@
 //! looks up market data, invokes the scanner, and dispatches results.
 
 use super::funnel::{FastLaneDispatch, Funnel};
-use crate::{detection::scanner::Scanner, pipeline::market_cache::MarketCache};
+use crate::{
+    detection::scanner::Scanner, pipeline::market_cache::MarketCache,
+    runtime_config::RuntimeConfigStore,
+};
 use oxide_arb_error::OxideError;
 use oxide_arb_models::types::{MarketId, MicroScore};
 use std::sync::Arc;
@@ -14,7 +17,9 @@ pub struct ScannerTaskDeps {
     pub scanner: Arc<Scanner>,
     pub market_cache: Arc<MarketCache>,
     pub funnel: Arc<Funnel>,
-    pub dispatch_immediate_threshold: MicroScore,
+    /// Live runtime config: the fast-lane threshold is read per scan so a
+    /// runtime-config activation applies without a restart.
+    pub runtime: Arc<RuntimeConfigStore>,
     pub shutdown: CancellationToken,
 }
 
@@ -23,7 +28,7 @@ pub struct ScannerTask {
     scanner: Arc<Scanner>,
     market_cache: Arc<MarketCache>,
     funnel: Arc<Funnel>,
-    dispatch_immediate_threshold: MicroScore,
+    runtime: Arc<RuntimeConfigStore>,
     shutdown: CancellationToken,
 }
 
@@ -34,7 +39,7 @@ impl ScannerTask {
             scanner: deps.scanner,
             market_cache: deps.market_cache,
             funnel: deps.funnel,
-            dispatch_immediate_threshold: deps.dispatch_immediate_threshold,
+            runtime: deps.runtime,
             shutdown: deps.shutdown,
         }
     }
@@ -65,8 +70,16 @@ impl ScannerTask {
         };
         let now = chrono::Utc::now();
         if let Some(scored) = self.scanner.scan_market(&entry, now) {
+            let threshold = MicroScore::try_from_decimal(
+                self.runtime
+                    .load()
+                    .execution
+                    .endgame_latency
+                    .dispatch_immediate_threshold,
+            )
+            .unwrap_or(MicroScore::ZERO);
             let mut scored = scored;
-            if scored.score >= self.dispatch_immediate_threshold {
+            if scored.score >= threshold {
                 match self.funnel.try_dispatch_immediate(Arc::clone(&scored)) {
                     FastLaneDispatch::Dispatched => return,
                     FastLaneDispatch::Backpressure(arc) => scored = arc,

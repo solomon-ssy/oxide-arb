@@ -3,7 +3,7 @@
 use chrono::Utc;
 use oxide_arb_models::{
     clickhouse::{ChBps, ChPrice, ChSchemaVersion, ChUsd, TickEventRow},
-    config::AnalyticsConfig,
+    config::ClickHouseConfig,
     enums::clickhouse::{ChBookEventType, ChFactSource},
     types::{Price, TokenId, Usd},
 };
@@ -17,17 +17,15 @@ use testcontainers::{
 };
 use tokio_util::sync::CancellationToken;
 
-fn test_ch_config(port: u16) -> AnalyticsConfig {
-    AnalyticsConfig {
-        clickhouse_url: format!("http://localhost:{port}"),
-        clickhouse_database: "default".into(),
-        clickhouse_user: "default".into(),
-        clickhouse_password: String::new(),
+fn test_ch_config(port: u16) -> ClickHouseConfig {
+    ClickHouseConfig {
+        url: format!("http://localhost:{port}"),
+        database: "default".into(),
+        user: "default".into(),
+        password: String::new(),
         batch_size: 100,
         flush_interval_secs: 5,
         max_concurrent_inserts: 4,
-        max_lag_secs: 10.0,
-        lag_probe_interval_secs: 5,
     }
 }
 

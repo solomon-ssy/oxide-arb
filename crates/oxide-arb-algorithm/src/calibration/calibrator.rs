@@ -7,17 +7,21 @@ use super::{
     fallback::{FallbackIndexes, lookup_with_fallback},
     types::CalibrationEntry,
 };
+use arc_swap::ArcSwap;
 use dashmap::{DashMap, mapref::entry::Entry};
-use oxide_arb_models::{config::CalibrationConfig, domain::calibration::BucketKey};
+use oxide_arb_models::{domain::calibration::BucketKey, runtime_config::CalibrationConfig};
+use std::sync::Arc;
 
 /// Thread-safe in-memory calibration store.
 ///
 /// Loaded from the database on startup and periodically refreshed by
 /// [`CalibrationUpdater`]. Detection reads are concurrent and lock-free.
+/// Configuration (fallback thresholds, bootstrap priors) is hot-reloadable
+/// through [`Self::reload`].
 pub struct ResolutionCalibrator {
     buckets: DashMap<BucketKey, CalibrationEntry>,
     indexes: FallbackIndexes,
-    config: CalibrationConfig,
+    config: ArcSwap<CalibrationConfig>,
 }
 
 impl ResolutionCalibrator {
@@ -32,7 +36,7 @@ impl ResolutionCalibrator {
         Self {
             buckets,
             indexes,
-            config,
+            config: ArcSwap::from_pointee(config),
         }
     }
 
@@ -42,8 +46,16 @@ impl ResolutionCalibrator {
         Self {
             buckets: DashMap::new(),
             indexes: FallbackIndexes::default(),
-            config,
+            config: ArcSwap::from_pointee(config),
         }
+    }
+
+    /// Hot-reload the calibration configuration (runtime-config activation).
+    ///
+    /// Bucket data is untouched; only the fallback threshold and bootstrap
+    /// priors used by subsequent lookups/outcomes change.
+    pub fn reload(&self, config: CalibrationConfig) {
+        self.config.store(Arc::new(config));
     }
 
     /// Lookup with 4-tier fallback chain.
@@ -54,13 +66,14 @@ impl ResolutionCalibrator {
     /// Tier 4: Global bootstrap prior `(α₀, β₀)`
     #[must_use]
     pub fn lookup(&self, key: &BucketKey) -> CalibrationEntry {
+        let config = self.config.load();
         lookup_with_fallback(
             &self.buckets,
             &self.indexes,
             key,
-            self.config.min_sample_size,
-            self.config.bootstrap_alpha,
-            self.config.bootstrap_beta,
+            config.min_sample_size,
+            config.bootstrap_alpha,
+            config.bootstrap_beta,
         )
     }
 
@@ -78,12 +91,13 @@ impl ResolutionCalibrator {
                 self.indexes.bump_outcome(key, was_correct);
             }
             Entry::Vacant(vacant) => {
+                let config = self.config.load();
                 let entry = CalibrationEntry {
                     bucket_key: *key,
                     total_count: 1,
                     correct_count: u32::from(was_correct),
-                    alpha_prior: self.config.bootstrap_alpha,
-                    beta_prior: self.config.bootstrap_beta,
+                    alpha_prior: config.bootstrap_alpha,
+                    beta_prior: config.bootstrap_beta,
                     fallback_tier: 1,
                 };
                 vacant.insert(entry);
@@ -95,7 +109,7 @@ impl ResolutionCalibrator {
     }
 
     /// Atomically replace all in-memory buckets (called after full DB reload).
-    pub fn reload(&self, entries: Vec<CalibrationEntry>) {
+    pub fn replace_entries(&self, entries: Vec<CalibrationEntry>) {
         self.buckets.clear();
         self.indexes.clear();
         for entry in entries {
@@ -124,10 +138,10 @@ impl ResolutionCalibrator {
         &self.buckets
     }
 
-    /// Access the calibration config.
+    /// Snapshot of the active calibration config (lock-free read).
     #[must_use]
-    pub const fn config(&self) -> &CalibrationConfig {
-        &self.config
+    pub fn config(&self) -> Arc<CalibrationConfig> {
+        self.config.load_full()
     }
 }
 
@@ -185,13 +199,13 @@ mod tests {
     }
 
     #[test]
-    fn reload_replaces_all_buckets() {
+    fn replace_entries_replaces_all_buckets() {
         let cal = ResolutionCalibrator::empty(default_config());
         let key = make_key(PriceZone::Z97);
         cal.record_outcome(&key, true);
         assert_eq!(cal.bucket_count(), 1);
 
-        cal.reload(vec![]);
+        cal.replace_entries(vec![]);
         assert_eq!(cal.bucket_count(), 0);
     }
 

@@ -5,7 +5,6 @@ use std::{collections::HashSet, mem::take, sync::Mutex};
 use chrono::{DateTime, Utc};
 use oxide_arb_error::OxideResult;
 use oxide_arb_models::{
-    config::{KellyConfig, RiskConfig},
     domain::{
         blacklist::{BlacklistInfo, UpsertBlacklistEntry},
         position::PositionInfo,
@@ -15,6 +14,7 @@ use oxide_arb_models::{
         },
     },
     enums::{common::Side, risk::BreakerStateName},
+    runtime_config::{KellyConfig, RiskConfig},
     types::{MarketId, TradeId, Usd},
 };
 use oxide_arb_risk::traits::{FillClaim, RiskFillCommitGuard, RiskMetrics, RiskPersistence};

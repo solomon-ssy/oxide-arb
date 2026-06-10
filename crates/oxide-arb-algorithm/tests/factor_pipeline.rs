@@ -11,10 +11,6 @@ use oxide_arb_algorithm::{
     scorer::EndgameScorer,
 };
 use oxide_arb_models::{
-    config::{
-        CalibrationConfig, EmissionCooldownConfig, EndgameDetectionConfig, FillProbabilityConfig,
-        ScorerConfig,
-    },
     domain::{
         book::{BookLevel, BookSnapshot, EndgameBookPair},
         control_factor::{
@@ -32,9 +28,13 @@ use oxide_arb_models::{
             FactorMaturity, FactorSeverity, FactorStatus, PublicationMode, PublicationStatus,
         },
     },
+    runtime_config::{
+        CalibrationConfig, DetectionConfig, EmissionCooldownConfig, EndgameDetectionConfig,
+        FillProbabilityConfig, ScorerConfig,
+    },
     types::{
-        ControlFactorId, EventId, FactorPublicationId, MarketId, MaterializationRunId, MicroUsd,
-        Price, Shares, StageReportId, TokenId, Usd,
+        ControlFactorId, EventId, FactorPublicationId, MarketId, MaterializationRunId, Price,
+        Shares, StageReportId, TokenId, Usd,
     },
 };
 use rust_decimal::Decimal;
@@ -86,33 +86,35 @@ fn book() -> EndgameBookPair {
 }
 
 fn pipeline(factors: Arc<dyn ControlFactorProvider>) -> OpportunityPipeline<ZeroFeeEstimator> {
-    let cal_config = CalibrationConfig::default();
-    let calibrator = Arc::new(ResolutionCalibrator::empty(cal_config.clone()));
-    let detector = EndgameDetector::new(
-        &EndgameDetectionConfig {
+    let detection_config = DetectionConfig {
+        min_profit_threshold_usd: Decimal::ZERO,
+        endgame: EndgameDetectionConfig {
             min_convergence_duration_secs: 0,
+            scorer: ScorerConfig {
+                min_score: Decimal::ZERO,
+                max_depth_usage_pct: dec!(100),
+                ..Default::default()
+            },
             ..Default::default()
         },
-        &cal_config,
+        calibration: CalibrationConfig::default(),
+    };
+    let calibrator = Arc::new(ResolutionCalibrator::empty(
+        detection_config.calibration.clone(),
+    ));
+    let detector = EndgameDetector::new(
+        &detection_config.endgame,
+        &detection_config.calibration,
         calibrator,
         ZeroFeeEstimator,
     );
-    let scorer_config = ScorerConfig {
-        min_score: oxide_arb_models::types::MicroScore::ZERO,
-        max_depth_usage_pct: oxide_arb_models::types::MicroPct::try_from_pct_decimal(dec!(100))
-            .unwrap(),
-        ..Default::default()
-    };
-    let scorer = EndgameScorer::new(scorer_config.clone(), &FillProbabilityConfig::default(), 48);
+    let scorer = EndgameScorer::new(
+        &detection_config.endgame.scorer,
+        &FillProbabilityConfig::default(),
+        48,
+    );
     let cooldown = InMemoryEmissionCooldown::new(&EmissionCooldownConfig::default());
-    OpportunityPipeline::new(
-        detector,
-        scorer,
-        cooldown,
-        factors,
-        MicroUsd::ZERO,
-        &scorer_config,
-    )
+    OpportunityPipeline::new(detector, scorer, cooldown, factors, &detection_config)
 }
 
 fn scan_input<'a>(
@@ -243,6 +245,68 @@ fn neutral_pipeline_emits_opportunity() {
     );
     assert!(scored.is_some(), "neutral pipeline should emit");
     assert!(scored.unwrap().applied_factors.is_empty());
+}
+
+#[test]
+fn reload_tightened_min_profit_suppresses_next_scan() {
+    let event = EventId::new("e1");
+    let book = book();
+    let now = Utc::now();
+    let pipe = pipeline(neutral_provider());
+
+    let m1 = MarketId::new("m1");
+    let (yes1, no1) = (TokenId::new("yes-1"), TokenId::new("no-1"));
+    assert!(
+        pipe.process_ref(
+            &scan_input(&m1, &event, &yes1, &no1, &book, now + Duration::hours(12)),
+            now,
+        )
+        .is_some(),
+        "baseline config emits"
+    );
+
+    // Hot-reload with an unreachable profit floor: the very next scan (on a
+    // fresh market, so no cooldown interference) must be suppressed.
+    let mut tightened = DetectionConfig {
+        min_profit_threshold_usd: dec!(1000000),
+        ..DetectionConfig::default()
+    };
+    tightened.endgame.min_convergence_duration_secs = 0;
+    tightened.endgame.scorer.min_score = Decimal::ZERO;
+    tightened.endgame.scorer.max_depth_usage_pct = dec!(100);
+    pipe.reload(&tightened);
+
+    let m2 = MarketId::new("m2");
+    let (yes2, no2) = (TokenId::new("yes-2"), TokenId::new("no-2"));
+    assert!(
+        pipe.process_ref(
+            &scan_input(&m2, &event, &yes2, &no2, &book, now + Duration::hours(12)),
+            now,
+        )
+        .is_none(),
+        "tightened min profit must suppress emission immediately after reload"
+    );
+
+    // Reloading the permissive config restores emission (third fresh market).
+    let mut permissive = DetectionConfig {
+        min_profit_threshold_usd: Decimal::ZERO,
+        ..DetectionConfig::default()
+    };
+    permissive.endgame.min_convergence_duration_secs = 0;
+    permissive.endgame.scorer.min_score = Decimal::ZERO;
+    permissive.endgame.scorer.max_depth_usage_pct = dec!(100);
+    pipe.reload(&permissive);
+
+    let m3 = MarketId::new("m3");
+    let (yes3, no3) = (TokenId::new("yes-3"), TokenId::new("no-3"));
+    assert!(
+        pipe.process_ref(
+            &scan_input(&m3, &event, &yes3, &no3, &book, now + Duration::hours(12)),
+            now,
+        )
+        .is_some(),
+        "permissive reload restores emission"
+    );
 }
 
 #[test]

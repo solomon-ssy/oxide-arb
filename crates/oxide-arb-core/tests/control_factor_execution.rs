@@ -29,9 +29,10 @@ use oxide_arb_core::{
     },
     service::risk_metrics::{ApiHealthTracker, RiskMetricsState},
 };
+use oxide_arb_models::runtime_config::NotificationConfig;
 use oxide_arb_models::{
     clickhouse::OpportunityAuditRow,
-    config::{MarketDataConfig, PolymarketConfig, RiskConfig, WebSocketConfig},
+    config::{PolymarketConfig, WebSocketConfig},
     domain::{
         book::BookLevel,
         control_factor::{
@@ -52,6 +53,7 @@ use oxide_arb_models::{
         },
         opportunity::PayoutModel,
     },
+    runtime_config::{ExecutionRuntimeConfig, MarketDataStalenessConfig, RiskConfig},
     types::{
         Bps, EventId, MarketId, MicroProb, MicroScore, OpportunityId, Price, Shares, TokenId, Usd,
     },
@@ -374,7 +376,7 @@ fn pipeline(
     scored: &Arc<ScoredOpportunity>,
 ) -> ExecutionPipeline<MockTradeRepository> {
     let metrics = Arc::new(MetricsHub::new());
-    let alerts = Arc::new(AlertDispatcher::new(None, None, None, 0));
+    let alerts = Arc::new(AlertDispatcher::new(&NotificationConfig::default()));
     let fsm = Arc::new(ExecutionFSM::new(Arc::clone(&metrics), alerts));
     let book_store = Arc::new(BookStore::new(Arc::clone(&metrics)));
     seed_books(&book_store, scored);
@@ -382,7 +384,7 @@ fn pipeline(
     let exposure = Arc::new(InMemoryExposureReservation::new(reservation_config.clone()));
     let capital = Arc::new(CapitalManager::new(
         Arc::clone(&exposure),
-        reservation_config,
+        &reservation_config,
     ));
     let fee_calculator = Arc::new(FeeCalculator::default());
     let risk_metrics = factor_test_risk_metrics(execution_mode, exposure);
@@ -390,13 +392,18 @@ fn pipeline(
     let risk_engine = factor_test_risk_engine();
 
     ExecutionPipeline::new(ExecutionPipelineDeps {
-        validator: Validator::new(
+        validator: Arc::new(Validator::new(
             Arc::clone(&book_store),
-            StalenessClassifier::new(&MarketDataConfig::default()),
-            dec!(50),
-            5_000,
+            StalenessClassifier::new(&MarketDataStalenessConfig::default()),
+            &ExecutionRuntimeConfig {
+                endgame_latency: oxide_arb_models::runtime_config::EndgameLatencyConfig {
+                    max_book_to_order_ms: 5_000,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
             Arc::clone(&metrics),
-        ),
+        )),
         plan_builder: PlanBuilder::new(
             Arc::clone(&fee_calculator),
             Arc::new(MarketRegistry::new()),
@@ -407,13 +414,13 @@ fn pipeline(
             Arc::clone(&fee_calculator),
             Arc::clone(&metrics),
         ),
-        order_strategy: FokOrderStrategy::new(
+        order_strategy: Arc::new(FokOrderStrategy::new(
             ExecutionModeHandle::new(execution_mode),
             None,
             fee_calculator,
             30_000,
             Arc::clone(&metrics),
-        ),
+        )),
         capital_manager: capital,
         risk_engine,
         risk_metrics,

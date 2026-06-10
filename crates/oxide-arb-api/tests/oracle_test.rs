@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use oxide_arb_api::oracle::{OracleSource, ResolutionVerdict, SourceVote, VotingOracle};
 use oxide_arb_error::rpc::RpcError;
-use oxide_arb_models::{config::AllSourcesDownStrategy, types::MarketId};
+use oxide_arb_models::{runtime_config::AllSourcesDownStrategy, types::MarketId};
 use rust_decimal::Decimal;
 use std::{sync::Arc, time::Duration};
 

@@ -13,6 +13,7 @@ use oxide_arb_core::{
         market_registry::MarketRegistry,
     },
 };
+use oxide_arb_models::runtime_config::NotificationConfig;
 use oxide_arb_models::{
     domain::{
         book::BookLevel,
@@ -100,7 +101,7 @@ fn register_markets(registry: &MarketRegistry) -> Vec<TokenId> {
 #[ignore = "production soak gate: run before Live promotion"]
 async fn five_hundred_markets_thousand_tokens_ingest_without_book_drops() {
     let metrics = Arc::new(MetricsHub::new());
-    let alerts = Arc::new(AlertDispatcher::new(None, None, None, 0));
+    let alerts = Arc::new(AlertDispatcher::new(&NotificationConfig::default()));
     let backpressure = Arc::new(BackpressurePolicy::new(Arc::clone(&metrics), 4));
     let book_store = Arc::new(BookStore::new(Arc::clone(&metrics)));
     let market_registry = Arc::new(MarketRegistry::new());

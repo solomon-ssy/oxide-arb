@@ -65,6 +65,9 @@ strum = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]
 oxide-arb-test-support = { workspace = true }
+# Disconnected `DatabaseConnection` handles for I/O-free repository wiring in
+# the runtime-config applicator propagation test.
+sea-orm = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 wiremock = { workspace = true }
 hex = { workspace = true }

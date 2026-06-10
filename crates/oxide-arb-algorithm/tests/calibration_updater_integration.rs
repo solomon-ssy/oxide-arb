@@ -10,12 +10,12 @@ use oxide_arb_algorithm::calibration::{
 };
 use oxide_arb_error::algorithm::AlgoError;
 use oxide_arb_models::{
-    config::CalibrationConfig,
     domain::calibration::{BucketKey, UpsertCalibration},
     enums::{
         calibration::{DurationBucket, PriceZone},
         common::MarketCategory,
     },
+    runtime_config::CalibrationConfig,
     types::MarketId,
 };
 use rust_decimal_macros::dec;

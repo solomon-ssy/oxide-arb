@@ -1,15 +1,19 @@
+use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use num_traits::ToPrimitive;
 use oxide_arb_error::reservation::ReservationError;
 use oxide_arb_models::{
-    config::ExposureReservationConfig,
+    runtime_config::ExposureReservationConfig,
     types::{MarketId, ReservationId, Usd},
 };
 use oxide_arb_risk::traits::ExposureReservationBackend;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use std::{
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -23,7 +27,7 @@ pub struct InMemoryExposureReservation {
     reservations: DashMap<ReservationId, ReservationEntry>,
     total_reserved_cents: AtomicU64,
     per_market_cents: DashMap<MarketId, AtomicU64>,
-    config: ExposureReservationConfig,
+    config: ArcSwap<ExposureReservationConfig>,
 }
 
 impl InMemoryExposureReservation {
@@ -32,8 +36,29 @@ impl InMemoryExposureReservation {
             reservations: DashMap::new(),
             total_reserved_cents: AtomicU64::new(0),
             per_market_cents: DashMap::new(),
-            config,
+            config: ArcSwap::from_pointee(config),
         }
+    }
+
+    /// Hot-reload exposure limits (runtime-config activation).
+    ///
+    /// In-flight reservations are untouched; new limits gate subsequent
+    /// reservations only. The activation preflight guarantees the new
+    /// ceilings are not below currently reserved totals.
+    pub fn reload(&self, config: ExposureReservationConfig) {
+        self.config.store(Arc::new(config));
+    }
+
+    /// Largest single-market in-flight exposure (preflight input).
+    #[must_use]
+    pub fn max_market_reserved_usd_sync(&self) -> Usd {
+        let max_cents = self
+            .per_market_cents
+            .iter()
+            .map(|entry| entry.value().load(Ordering::Acquire))
+            .max()
+            .unwrap_or(0);
+        Usd::new(Decimal::from(max_cents) / dec!(100))
     }
 
     #[inline]
@@ -106,6 +131,7 @@ impl InMemoryExposureReservation {
         ttl: Duration,
     ) -> Result<ReservationId, ReservationError> {
         let amount_cents = Self::usd_to_cents(amount)?;
+        let config = self.config.load();
 
         // CAS loop for global limit
         loop {
@@ -116,11 +142,11 @@ impl InMemoryExposureReservation {
                 ));
             };
 
-            if new_total > self.config.max_total_exposure_cents {
+            if new_total > config.max_total_exposure_cents {
                 return Err(ReservationError::ExceedsLimit {
                     current_cents: current,
                     requested_cents: amount_cents,
-                    max_cents: self.config.max_total_exposure_cents,
+                    max_cents: config.max_total_exposure_cents,
                 });
             }
 
@@ -149,7 +175,7 @@ impl InMemoryExposureReservation {
             ));
         };
 
-        if market_new_total > self.config.max_per_market_cents {
+        if market_new_total > config.max_per_market_cents {
             market_counter.fetch_sub(amount_cents, Ordering::AcqRel);
             drop(market_counter);
             self.total_reserved_cents
@@ -157,7 +183,7 @@ impl InMemoryExposureReservation {
             return Err(ReservationError::ExceedsLimit {
                 current_cents: market_current,
                 requested_cents: amount_cents,
-                max_cents: self.config.max_per_market_cents,
+                max_cents: config.max_per_market_cents,
             });
         }
 

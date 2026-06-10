@@ -11,6 +11,7 @@ use oxide_arb_core::{
     },
     pipeline::{book_store::BookStore, market_registry::MarketRegistry},
 };
+use oxide_arb_models::runtime_config::NotificationConfig;
 use oxide_arb_models::{
     domain::{
         book::BookLevel,
@@ -146,7 +147,7 @@ async fn coalescer_pair_complete_flushes_immediately() {
 #[test]
 fn backpressure_book_coalesce_does_not_halt() {
     let metrics = Arc::new(MetricsHub::new());
-    let alerts = Arc::new(AlertDispatcher::new(None, None, None, 0));
+    let alerts = Arc::new(AlertDispatcher::new(&NotificationConfig::default()));
     let fsm = Arc::new(ExecutionFSM::new(Arc::clone(&metrics), alerts));
     let bp = BackpressurePolicy::new(Arc::clone(&metrics), 1);
 
