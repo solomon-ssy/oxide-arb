@@ -1,4 +1,8 @@
 //! Cached wrapper for immutable runtime config versions.
+//!
+//! Cache reads are fail-open ([`CacheManager`] degrades errors and timeouts to
+//! a miss), so a Redis outage falls through to the inner repository instead of
+//! failing the read.
 
 use crate::traits::RuntimeConfigVersionRepository;
 use chrono::{DateTime, Utc};
@@ -11,22 +15,22 @@ use oxide_arb_models::{
     },
     types::RuntimeConfigVersionId,
 };
-use oxide_arb_storage::cache::{CacheKey, TieredCache};
+use oxide_arb_storage::cache::{CacheKey, CacheManager};
 use std::sync::Arc;
 
 /// Caching decorator for immutable runtime configuration versions.
 pub struct CachedRuntimeConfigVersionRepository<R: RuntimeConfigVersionRepository> {
     inner: R,
-    cache: Arc<TieredCache>,
+    cache: Arc<CacheManager>,
 }
 
 impl<R: RuntimeConfigVersionRepository> CachedRuntimeConfigVersionRepository<R> {
-    pub const fn new(inner: R, cache: Arc<TieredCache>) -> Self {
+    pub const fn new(inner: R, cache: Arc<CacheManager>) -> Self {
         Self { inner, cache }
     }
 
     async fn invalidate_active(&self) {
-        let _ = self.cache.invalidate(&CacheKey::ActiveRuntimeConfig).await;
+        self.cache.invalidate(&CacheKey::ActiveRuntimeConfig).await;
     }
 }
 
@@ -88,11 +92,7 @@ impl<R: RuntimeConfigVersionRepository> RuntimeConfigVersionRepository
         let key = CacheKey::RuntimeConfigVersion {
             version_id: version_id.clone(),
         };
-        if let Some(cached) = self
-            .cache
-            .get_json::<RuntimeConfigVersionInfo>(&key)
-            .await?
-        {
+        if let Some(cached) = self.cache.get_json::<RuntimeConfigVersionInfo>(&key).await {
             return Ok(Some(cached));
         }
         let result = self.inner.load_version(version_id).await?;
@@ -111,11 +111,7 @@ impl<R: RuntimeConfigVersionRepository> RuntimeConfigVersionRepository
 
     async fn load_current(&self) -> Result<Option<RuntimeConfigVersionInfo>, StorageError> {
         let key = CacheKey::ActiveRuntimeConfig;
-        if let Some(cached) = self
-            .cache
-            .get_json::<RuntimeConfigVersionInfo>(&key)
-            .await?
-        {
+        if let Some(cached) = self.cache.get_json::<RuntimeConfigVersionInfo>(&key).await {
             return Ok(Some(cached));
         }
         let result = self.inner.load_current().await?;

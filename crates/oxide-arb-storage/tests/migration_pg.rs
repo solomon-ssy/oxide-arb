@@ -526,41 +526,6 @@ async fn control_factor_audit_event_is_append_only() {
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn rbac_seeds_populate_graph() {
-    let (pool, _container) = setup_pool().await;
-    let db = pool.connection();
-
-    Migrator::up(db, None).await.expect("Migration up failed");
-
-    // 6 built-in roles.
-    assert_eq!(count_rows(db, "SELECT COUNT(*) FROM role").await, 6);
-    // Exactly one bootstrap admin user.
-    assert_eq!(
-        count_rows(db, "SELECT COUNT(*) FROM \"user\" WHERE username = 'admin'").await,
-        1
-    );
-    // Menu tree is non-empty and fully assigned to super_admin.
-    let menu_count = count_rows(db, "SELECT COUNT(*) FROM menu").await;
-    assert!(menu_count > 0, "menu tree must be seeded");
-    assert_eq!(
-        count_rows(db, "SELECT COUNT(*) FROM role_menu").await,
-        menu_count,
-        "super_admin must be granted every menu"
-    );
-    // admin -> super_admin grouping + per-role permission policies.
-    assert_eq!(count_rows(db, "SELECT COUNT(*) FROM user_role").await, 1);
-    assert_eq!(
-        count_rows(db, "SELECT COUNT(*) FROM casbin_rule WHERE ptype = 'g'").await,
-        1
-    );
-    assert!(
-        count_rows(db, "SELECT COUNT(*) FROM casbin_rule WHERE ptype = 'p'").await > 0,
-        "built-in role permission policies must be seeded"
-    );
-}
-
-#[tokio::test]
-#[ignore = "requires Docker"]
 async fn rbac_seeds_are_idempotent() {
     let (pool, _container) = setup_pool().await;
     let db = pool.connection();

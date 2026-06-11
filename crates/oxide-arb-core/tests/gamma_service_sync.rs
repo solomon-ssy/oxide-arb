@@ -11,12 +11,12 @@ use oxide_arb_core::{
 };
 use oxide_arb_error::{OxideError, market::MarketError};
 use oxide_arb_models::{
-    config::{GammaConfig, PostgresConfig, RedisConfig},
+    config::{CacheConfig, GammaConfig, PostgresConfig, RedisConfig},
     types::TokenId,
 };
 use oxide_arb_repository::postgres::{PgEventRepository, PgMarketRepository};
 use oxide_arb_storage::{
-    cache::{MokaBackend, RedisBackend, TieredCache},
+    cache::{CacheManager, MokaBackend, RedisBackend, TieredCache, connect_pool},
     postgres::{
         PostgresPool,
         migration::{Migrator, MigratorTrait},
@@ -109,11 +109,14 @@ async fn build_gamma_service(server_uri: &str) -> (GammaService, Arc<MarketRegis
     ));
     let metrics = Arc::new(MetricsHub::new());
     let fee_calculator = Arc::new(FeeCalculator::default());
-    let cache = Arc::new(TieredCache::new(
-        MokaBackend::new(100),
-        RedisBackend::new(&test_redis_config(redis_port))
-            .await
-            .expect("Redis connect"),
+    let redis_cfg = test_redis_config(redis_port);
+    let redis_pool = connect_pool(&redis_cfg).await.expect("Redis connect");
+    let cache = Arc::new(CacheManager::new(
+        TieredCache::new(
+            MokaBackend::new(100),
+            RedisBackend::new(redis_pool, &redis_cfg.key_prefix),
+        ),
+        &CacheConfig::default(),
     ));
 
     let db = pg_pool.connection().clone();

@@ -8,7 +8,9 @@ use url::Url;
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct CacheConfig {
-    /// Redis (L2) connection.
+    /// Platform Redis connection. One shared pool backs both the cache L2 and
+    /// the JWT revocation blacklist (split by key namespace), so this
+    /// connection is always established even when `disabled = true`.
     pub redis: RedisConfig,
     /// In-process Moka (L1) cache.
     pub moka: MokaConfig,
@@ -60,7 +62,8 @@ impl Default for CacheConfig {
     }
 }
 
-/// Redis connection (L2 cache + JWT revocation blacklist).
+/// Platform Redis connection — a single shared pool serving the cache L2 and
+/// the JWT revocation blacklist, separated only by key namespace.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct RedisConfig {
@@ -87,7 +90,9 @@ pub struct RedisConfig {
     /// per-operation deadline never starves initial connection establishment
     /// under load. Default: `5000`.
     pub connect_timeout_ms: u64,
-    /// Key namespace prefix. Default: `oarb:`.
+    /// Key namespace prefix applied to every platform Redis key (cache keys
+    /// directly; revoked JWT ids under `{key_prefix}jwt:blacklist:`).
+    /// Default: `oarb:`.
     pub key_prefix: String,
 }
 

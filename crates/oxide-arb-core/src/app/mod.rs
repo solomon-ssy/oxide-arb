@@ -112,7 +112,11 @@ use oxide_arb_repository::{
     },
 };
 use oxide_arb_risk::{audit::RiskAuditEvent, engine::RiskEngine};
-use oxide_arb_storage::{cache::TieredCache, clickhouse::ClickHousePool, postgres::PostgresPool};
+use oxide_arb_storage::{
+    cache::{CacheManager, RedisPool},
+    clickhouse::ClickHousePool,
+    postgres::PostgresPool,
+};
 use oxide_arb_web::{
     AppState,
     audit::{OperationLogBuffer, spawn_operation_log_writer},
@@ -133,8 +137,12 @@ const POST_TRADE_RELAY_BATCH_SIZE: u64 = 128;
 pub struct InfraBundle {
     pub pg: Arc<PostgresPool>,
     pub ch: Arc<ClickHousePool>,
-    pub cache: Arc<TieredCache>,
-    /// JWT revocation pool (dedicated Redis pool, created fail-fast at boot).
+    /// Shared Redis pool (cache L2 + JWT revocation), connected fail-fast at
+    /// boot and closed once by the composition root after shutdown drains.
+    pub redis: RedisPool,
+    /// Policy-gated cache facade (fail-open, per-domain routing, noop mode).
+    pub cache: Arc<CacheManager>,
+    /// JWT revocation store over the shared Redis pool (fail-closed).
     pub jwt_blacklist: Arc<RedisTokenBlacklist>,
     pub metrics: Arc<MetricsHub>,
     pub alerts: Arc<AlertDispatcher>,

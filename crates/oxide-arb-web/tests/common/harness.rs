@@ -60,6 +60,7 @@ use oxide_arb_repository::{
         RuntimeConfigVersionRepository,
     },
 };
+use oxide_arb_storage::cache::connect_pool;
 use oxide_arb_test_support::mocks::MockTimeseriesRepository;
 use oxide_arb_web::{
     AppState,
@@ -109,13 +110,11 @@ pub struct TestEnv {
     ws_shutdown: CancellationToken,
 }
 
-/// Connect the JWT revocation store and verify it is reachable.
+/// Connect the shared Redis pool, wrap the JWT revocation store over it, and
+/// verify it is reachable (mirrors the production composition root).
 async fn connect_blacklist(redis_cfg: &RedisConfig) -> Arc<RedisTokenBlacklist> {
-    let jwt_blacklist = Arc::new(
-        RedisTokenBlacklist::connect(redis_cfg)
-            .await
-            .expect("redis blacklist"),
-    );
+    let pool = connect_pool(redis_cfg).await.expect("redis pool");
+    let jwt_blacklist = Arc::new(RedisTokenBlacklist::new(pool, &redis_cfg.key_prefix));
     jwt_blacklist
         .health_check()
         .await

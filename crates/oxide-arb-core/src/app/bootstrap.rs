@@ -36,5 +36,12 @@ pub async fn run(deploy: Arc<DeployConfig>) -> OxideResult<()> {
         "oxide-arb starting",
     );
 
-    runner.run().await
+    let result = runner.run().await;
+
+    // Close the shared Redis pool (cache L2 + JWT revocation) only after every
+    // shutdown stage has drained — earlier stages may still read/write Redis.
+    ctx.infra.redis.close();
+    tracing::info!("shared Redis pool closed");
+
+    result
 }

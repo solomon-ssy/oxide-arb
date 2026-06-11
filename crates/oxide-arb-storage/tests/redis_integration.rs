@@ -1,7 +1,7 @@
 //! Redis cache backend integration tests (requires Docker).
 
 use oxide_arb_models::config::RedisConfig;
-use oxide_arb_storage::cache::{CacheBackend, RedisBackend};
+use oxide_arb_storage::cache::{CacheBackend, RedisBackend, connect_pool};
 use std::time::Duration;
 use testcontainers::runners::AsyncRunner;
 
@@ -26,7 +26,8 @@ async fn setup_redis() -> (
         .expect("Redis container");
     let port = container.get_host_port_ipv4(6379).await.expect("port");
     let config = test_redis_config(port);
-    let backend = RedisBackend::new(&config).await.expect("connect");
+    let pool = connect_pool(&config).await.expect("connect");
+    let backend = RedisBackend::new(pool, &config.key_prefix);
     (backend, container)
 }
 

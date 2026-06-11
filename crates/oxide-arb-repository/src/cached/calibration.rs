@@ -1,4 +1,8 @@
 //! Cached wrapper for [`CalibrationRepository`] — DB-first writes with invalidation.
+//!
+//! Cache reads are fail-open ([`CacheManager`] degrades errors and timeouts to
+//! a miss), so a Redis outage falls through to the inner repository instead of
+//! failing the read.
 
 use crate::traits::CalibrationRepository;
 use oxide_arb_error::storage::StorageError;
@@ -11,17 +15,17 @@ use oxide_arb_models::{
         common::MarketCategory,
     },
 };
-use oxide_arb_storage::cache::{CacheKey, TieredCache};
+use oxide_arb_storage::cache::{CacheKey, CacheManager};
 use std::sync::Arc;
 
 /// Caching decorator for any [`CalibrationRepository`] implementation.
 pub struct CachedCalibrationRepository<R: CalibrationRepository> {
     inner: R,
-    cache: Arc<TieredCache>,
+    cache: Arc<CacheManager>,
 }
 
 impl<R: CalibrationRepository> CachedCalibrationRepository<R> {
-    pub const fn new(inner: R, cache: Arc<TieredCache>) -> Self {
+    pub const fn new(inner: R, cache: Arc<CacheManager>) -> Self {
         Self { inner, cache }
     }
 
@@ -38,8 +42,7 @@ impl<R: CalibrationRepository> CachedCalibrationRepository<R> {
     }
 
     async fn invalidate_all(&self) {
-        let _ = self
-            .cache
+        self.cache
             .invalidate(&CacheKey::AllCalibrationBuckets)
             .await;
     }
@@ -55,7 +58,7 @@ impl<R: CalibrationRepository> CalibrationRepository for CachedCalibrationReposi
         duration_bucket: DurationBucket,
     ) -> Result<Option<CalibrationBucketInfo>, StorageError> {
         let key = Self::bucket_key(category, price_zone, duration_bucket);
-        if let Some(cached) = self.cache.get_json::<CalibrationBucketInfo>(&key).await? {
+        if let Some(cached) = self.cache.get_json::<CalibrationBucketInfo>(&key).await {
             return Ok(Some(cached));
         }
         let result = self
@@ -82,7 +85,7 @@ impl<R: CalibrationRepository> CalibrationRepository for CachedCalibrationReposi
         if let Some(cached) = self
             .cache
             .get_json::<Vec<CalibrationBucketInfo>>(&key)
-            .await?
+            .await
         {
             return Ok(cached);
         }
@@ -95,7 +98,7 @@ impl<R: CalibrationRepository> CalibrationRepository for CachedCalibrationReposi
     async fn upsert(&self, dto: UpsertCalibration) -> Result<CalibrationBucketInfo, StorageError> {
         let result = self.inner.upsert(dto).await?;
         let key = Self::bucket_key(result.category, result.price_zone, result.duration_bucket);
-        let _ = self.cache.invalidate(&key).await;
+        self.cache.invalidate(&key).await;
         self.invalidate_all().await;
         Ok(result)
     }

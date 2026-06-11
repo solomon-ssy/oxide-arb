@@ -1,24 +1,28 @@
 //! Cached wrapper for [`RiskStateRepository`] singleton state.
+//!
+//! Cache reads are fail-open ([`CacheManager`] degrades errors and timeouts to
+//! a miss), so a Redis outage falls through to the inner repository instead of
+//! failing the read.
 
 use crate::traits::RiskStateRepository;
 use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::domain::{RiskStateInfo, UpsertRiskEngineState};
-use oxide_arb_storage::cache::{CacheKey, TieredCache};
+use oxide_arb_storage::cache::{CacheKey, CacheManager};
 use std::sync::Arc;
 
 /// Caching decorator for the risk engine singleton state.
 pub struct CachedRiskStateRepository<R: RiskStateRepository> {
     inner: R,
-    cache: Arc<TieredCache>,
+    cache: Arc<CacheManager>,
 }
 
 impl<R: RiskStateRepository> CachedRiskStateRepository<R> {
-    pub const fn new(inner: R, cache: Arc<TieredCache>) -> Self {
+    pub const fn new(inner: R, cache: Arc<CacheManager>) -> Self {
         Self { inner, cache }
     }
 
     async fn invalidate_state(&self) {
-        let _ = self.cache.invalidate(&CacheKey::RiskState).await;
+        self.cache.invalidate(&CacheKey::RiskState).await;
     }
 }
 
@@ -27,7 +31,7 @@ impl<R: RiskStateRepository> RiskStateRepository for CachedRiskStateRepository<R
     #[inline]
     async fn load(&self) -> Result<RiskStateInfo, StorageError> {
         let key = CacheKey::RiskState;
-        if let Some(cached) = self.cache.get_json::<RiskStateInfo>(&key).await? {
+        if let Some(cached) = self.cache.get_json::<RiskStateInfo>(&key).await {
             return Ok(cached);
         }
         let state = self.inner.load().await?;

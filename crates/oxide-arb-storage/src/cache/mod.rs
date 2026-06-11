@@ -11,8 +11,9 @@ mod tiered;
 
 pub use self::moka::MokaBackend;
 pub use self::redis::RedisBackend;
-pub use self::redis_connect::{connect_pool, deadpool_config, ping as ping_redis_pool};
+pub use self::redis_connect::connect_pool;
 pub use backend::CacheBackend;
+pub use deadpool_redis::Pool as RedisPool;
 pub use keys::CacheKey;
 pub use manager::CacheManager;
 pub use metrics::CacheMetrics;

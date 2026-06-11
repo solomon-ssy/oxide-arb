@@ -1,4 +1,8 @@
 //! Cached wrapper for [`EventRepository`] using cache-aside reads.
+//!
+//! Cache reads are fail-open ([`CacheManager`] degrades errors and timeouts to
+//! a miss), so a Redis outage falls through to the inner repository instead of
+//! failing the read.
 
 use crate::traits::EventRepository;
 use oxide_arb_error::storage::StorageError;
@@ -6,23 +10,22 @@ use oxide_arb_models::{
     domain::{EventInfo, UpsertEvent},
     types::EventId,
 };
-use oxide_arb_storage::cache::{CacheKey, TieredCache};
+use oxide_arb_storage::cache::{CacheKey, CacheManager};
 use std::{collections::HashSet, sync::Arc};
 
 /// Caching decorator for event metadata reads.
 pub struct CachedEventRepository<R: EventRepository> {
     inner: R,
-    cache: Arc<TieredCache>,
+    cache: Arc<CacheManager>,
 }
 
 impl<R: EventRepository> CachedEventRepository<R> {
-    pub const fn new(inner: R, cache: Arc<TieredCache>) -> Self {
+    pub const fn new(inner: R, cache: Arc<CacheManager>) -> Self {
         Self { inner, cache }
     }
 
     async fn invalidate_event(&self, event_id: &EventId) {
-        let _ = self
-            .cache
+        self.cache
             .invalidate(&CacheKey::EventInfo {
                 event_id: event_id.clone(),
             })
@@ -37,7 +40,7 @@ impl<R: EventRepository> EventRepository for CachedEventRepository<R> {
         let key = CacheKey::EventInfo {
             event_id: id.clone(),
         };
-        if let Some(cached) = self.cache.get_json::<EventInfo>(&key).await? {
+        if let Some(cached) = self.cache.get_json::<EventInfo>(&key).await {
             return Ok(Some(cached));
         }
         let result = self.inner.find_by_id(id).await?;

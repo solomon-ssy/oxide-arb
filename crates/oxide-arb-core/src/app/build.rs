@@ -130,7 +130,7 @@ use oxide_arb_risk::{
     engine::RiskEngine,
 };
 use oxide_arb_storage::{
-    cache::{MokaBackend, RedisBackend, TieredCache},
+    cache::{CacheManager, MokaBackend, RedisBackend, RedisPool, TieredCache, connect_pool},
     clickhouse::{ChWriteManager, ClickHousePool},
     postgres::{
         PostgresPool,
@@ -174,9 +174,12 @@ struct BuildInfra {
     runtime_store: Arc<RuntimeConfigStore>,
     pg_pool: Arc<PostgresPool>,
     ch_pool: Arc<ClickHousePool>,
-    cache: Arc<TieredCache>,
-    /// JWT revocation pool — created fail-fast in the infra phase, isolated
-    /// from cache traffic on a dedicated Redis pool.
+    /// Shared Redis pool backing both the cache L2 and the JWT revocation
+    /// blacklist — connected once (fail-fast) and closed once by the
+    /// composition root after every shutdown stage has drained.
+    redis_pool: RedisPool,
+    cache: Arc<CacheManager>,
+    /// JWT revocation store over the shared Redis pool (fail-closed).
     jwt_blacklist: Arc<RedisTokenBlacklist>,
     /// Catalog warmup gate (`Warming` until the first successful Gamma sync).
     catalog: Arc<CatalogReadiness>,
@@ -204,7 +207,8 @@ struct BuildPersistence {
 struct AssembledInfra {
     pg_pool: Arc<PostgresPool>,
     ch_pool: Arc<ClickHousePool>,
-    cache: Arc<TieredCache>,
+    redis_pool: RedisPool,
+    cache: Arc<CacheManager>,
     jwt_blacklist: Arc<RedisTokenBlacklist>,
     catalog: Arc<CatalogReadiness>,
     metrics: Arc<MetricsHub>,
@@ -420,6 +424,7 @@ fn finish_infra(
         runtime_store: _,
         pg_pool,
         ch_pool,
+        redis_pool,
         cache,
         jwt_blacklist,
         catalog,
@@ -448,6 +453,7 @@ fn finish_infra(
     let assembled = AssembledInfra {
         pg_pool,
         ch_pool,
+        redis_pool,
         cache,
         jwt_blacklist,
         catalog,
@@ -598,6 +604,7 @@ fn assemble_app_context(parts: AppContextAssembly) -> AppContext {
         infra: InfraBundle {
             pg: infra.pg_pool,
             ch: infra.ch_pool,
+            redis: infra.redis_pool,
             cache: infra.cache,
             jwt_blacklist: infra.jwt_blacklist,
             metrics: infra.metrics,
@@ -711,17 +718,36 @@ async fn connect_infra(
     let ch_pool = Arc::new(ClickHousePool::connect(&deploy.db.clickhouse)?);
     ch_pool.ensure_schema().await?;
 
-    let cache = Arc::new(TieredCache::new(
-        MokaBackend::new(deploy.cache.moka.max_capacity),
-        RedisBackend::new(&deploy.cache.redis).await?,
-    ));
+    // The single shared Redis pool — connected (and PINGed) once here in the
+    // infra phase so a misconfigured / unreachable Redis fails the boot within
+    // seconds, before any market-data subscription can compete for the
+    // network. The cache L2 and the JWT revocation blacklist share it, split
+    // only by key namespace; the pool is always established because the
+    // fail-closed blacklist needs it even when the cache layer is disabled.
+    let redis_pool = connect_pool(&deploy.cache.redis).await?;
+    tracing::info!(
+        endpoint = %deploy.cache.redis.endpoint(),
+        prefix = %deploy.cache.redis.key_prefix,
+        "Redis connected (shared pool: cache L2 + JWT revocation)"
+    );
 
-    // JWT revocation blacklist pool — created here in the infra phase so a
-    // misconfigured / unreachable Redis fails the boot within seconds, before
-    // any market-data subscription can compete for the network. Kept as a
-    // dedicated pool (separate from the cache backend) so revocation checks
-    // are isolated from cache traffic.
-    let jwt_blacklist = Arc::new(RedisTokenBlacklist::connect(&deploy.cache.redis).await?);
+    let cache = Arc::new(CacheManager::new(
+        TieredCache::new(
+            MokaBackend::new(deploy.cache.moka.max_capacity),
+            RedisBackend::new(redis_pool.clone(), &deploy.cache.redis.key_prefix),
+        ),
+        &deploy.cache,
+    ));
+    cache
+        .register_metrics(&metrics.registry)
+        .map_err(|error| OxideError::Internal(format!("cache metrics registration: {error}")))?;
+
+    // JWT revocation blacklist over the shared pool (fail-closed semantics
+    // live in the store itself, not in the connection layer).
+    let jwt_blacklist = Arc::new(RedisTokenBlacklist::new(
+        redis_pool.clone(),
+        &deploy.cache.redis.key_prefix,
+    ));
 
     // Catalog warmup gate: detection stays fail-closed until the first
     // successful Gamma sync flips it to Ready (see `queue_gamma_sync`).
@@ -770,6 +796,7 @@ async fn connect_infra(
             runtime_store,
             pg_pool,
             ch_pool,
+            redis_pool,
             cache,
             jwt_blacklist,
             catalog,

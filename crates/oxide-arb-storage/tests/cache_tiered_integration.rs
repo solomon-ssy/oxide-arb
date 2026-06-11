@@ -4,7 +4,9 @@ use oxide_arb_models::{
     config::RedisConfig,
     types::{EventId, MarketId},
 };
-use oxide_arb_storage::cache::{CacheBackend, CacheKey, MokaBackend, RedisBackend, TieredCache};
+use oxide_arb_storage::cache::{
+    CacheBackend, CacheKey, MokaBackend, RedisBackend, TieredCache, connect_pool,
+};
 use testcontainers::runners::AsyncRunner;
 
 fn test_redis_config(port: u16) -> RedisConfig {
@@ -30,6 +32,12 @@ async fn setup_redis() -> (
     (port, container)
 }
 
+/// Connect a shared pool and wrap an L2 backend over it (composition-root shape).
+async fn redis_backend(config: &RedisConfig) -> RedisBackend {
+    let pool = connect_pool(config).await.expect("redis pool");
+    RedisBackend::new(pool, &config.key_prefix)
+}
+
 #[derive(bitcode::Encode, bitcode::Decode, Debug, PartialEq, Eq, Clone)]
 struct CachedMarketStub {
     market_id: String,
@@ -49,22 +57,16 @@ async fn tiered_l2_hit_backfills_l1() {
         question: "Will backfill work?".into(),
     };
 
-    let writer = TieredCache::new(
-        MokaBackend::new(100),
-        RedisBackend::new(&redis_cfg).await.unwrap(),
-    );
+    let writer = TieredCache::new(MokaBackend::new(100), redis_backend(&redis_cfg).await);
     writer.set(&key, &value).await.unwrap();
 
-    let reader = TieredCache::new(
-        MokaBackend::new(100),
-        RedisBackend::new(&redis_cfg).await.unwrap(),
-    );
+    let reader = TieredCache::new(MokaBackend::new(100), redis_backend(&redis_cfg).await);
 
     let first: Option<CachedMarketStub> = reader.get(&key).await.unwrap();
     assert_eq!(first.as_ref(), Some(&value));
 
     // Remove L2 entry; L1 on `reader` should still serve the backfilled value.
-    let l2_only = RedisBackend::new(&redis_cfg).await.unwrap();
+    let l2_only = redis_backend(&redis_cfg).await;
     l2_only.delete(&key.as_str()).await.unwrap();
     assert!(
         l2_only.get(&key.as_str()).await.unwrap().is_none(),
@@ -88,10 +90,7 @@ async fn tiered_both_miss_returns_none() {
         event_id: EventId::new("evt-missing"),
     };
 
-    let cache = TieredCache::new(
-        MokaBackend::new(100),
-        RedisBackend::new(&redis_cfg).await.unwrap(),
-    );
+    let cache = TieredCache::new(MokaBackend::new(100), redis_backend(&redis_cfg).await);
 
     let missing: Option<CachedMarketStub> = cache.get(&key).await.unwrap();
     assert!(missing.is_none());
@@ -110,13 +109,10 @@ async fn tiered_set_populates_both_levels() {
         question: "params".into(),
     };
 
-    let cache = TieredCache::new(
-        MokaBackend::new(100),
-        RedisBackend::new(&redis_cfg).await.unwrap(),
-    );
+    let cache = TieredCache::new(MokaBackend::new(100), redis_backend(&redis_cfg).await);
     cache.set(&key, &value).await.unwrap();
 
-    let l2 = RedisBackend::new(&redis_cfg).await.unwrap();
+    let l2 = redis_backend(&redis_cfg).await;
     let raw = l2.get(&key.as_str()).await.unwrap();
     assert!(
         raw.is_some(),

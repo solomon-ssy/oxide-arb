@@ -10,7 +10,6 @@ oxide-arb-error = { workspace = true, features = ["storage"] }
 oxide-arb-models = { workspace = true, features = ["repository"] }
 oxide-arb-repository = { workspace = true }
 oxide-arb-control = { workspace = true }
-oxide-arb-storage = { workspace = true }
 
 actix-web = { workspace = true }
 actix-cors = { workspace = true }

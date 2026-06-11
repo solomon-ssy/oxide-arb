@@ -6,9 +6,7 @@ use crate::{
         market_cache::MarketCache, market_registry::MarketRegistry,
         universe_filter::MarketUniverseFilter,
     },
-    service::{
-        cache_invalidation::invalidate_post_gamma_sync, ws_subscription::WsSubscriptionCoordinator,
-    },
+    service::ws_subscription::WsSubscriptionCoordinator,
 };
 use chrono::{DateTime, Utc};
 use num_traits::ToPrimitive;
@@ -29,7 +27,7 @@ use oxide_arb_repository::{
     postgres::{PgEventRepository, PgMarketRepository},
     traits::{EventRepository, MarketRepository},
 };
-use oxide_arb_storage::cache::TieredCache;
+use oxide_arb_storage::cache::{CacheKey, CacheManager};
 use std::{collections::HashSet, sync::Arc, time::Instant};
 
 const INCREMENTAL_FETCH_CONCURRENCY: usize = 10;
@@ -43,7 +41,7 @@ pub struct GammaServiceDeps {
     pub fee_calculator: Arc<FeeCalculator>,
     pub market_repo: Arc<PgMarketRepository>,
     pub event_repo: Arc<PgEventRepository>,
-    pub cache: Arc<TieredCache>,
+    pub cache: Arc<CacheManager>,
     pub metrics: Arc<MetricsHub>,
     pub ws_subscription: Option<Arc<WsSubscriptionCoordinator>>,
     /// Minimum seconds between full catalog refreshes (from `[market_data.gamma]`).
@@ -58,7 +56,7 @@ pub struct GammaService {
     fee_calculator: Arc<FeeCalculator>,
     market_repo: Arc<PgMarketRepository>,
     event_repo: Arc<PgEventRepository>,
-    cache: Arc<TieredCache>,
+    cache: Arc<CacheManager>,
     metrics: Arc<MetricsHub>,
     ws_subscription: Option<Arc<WsSubscriptionCoordinator>>,
     full_sync_interval_secs: u64,
@@ -111,7 +109,7 @@ impl GammaService {
         }
 
         *self.last_sync_at.lock() = Some(Utc::now());
-        invalidate_post_gamma_sync(&self.cache).await;
+        self.cache.invalidate(&CacheKey::ActiveMarkets).await;
         Ok(())
     }
 

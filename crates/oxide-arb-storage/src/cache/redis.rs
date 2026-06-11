@@ -1,13 +1,16 @@
-//! Distributed L2 cache using Redis via deadpool.
+//! Distributed L2 cache over a shared deadpool-redis pool.
+//!
+//! The pool is established once at the composition root (see
+//! [`crate::cache::connect_pool`]) and shared with every Redis consumer in the
+//! process (cache L2, JWT revocation blacklist). This backend only adds the
+//! cache key namespace on top.
 
 use crate::cache::{backend::CacheBackend, redis_connect};
 use async_trait::async_trait;
 use deadpool_redis::Pool;
 use oxide_arb_error::storage::StorageError;
-use oxide_arb_models::config::RedisConfig;
 use redis::AsyncCommands;
 use std::time::Duration;
-use tracing::info;
 
 pub struct RedisBackend {
     pool: Pool,
@@ -15,29 +18,21 @@ pub struct RedisBackend {
 }
 
 impl RedisBackend {
-    pub async fn new(config: &RedisConfig) -> Result<Self, StorageError> {
-        let pool = redis_connect::connect_pool(config).await?;
-
-        info!(
-            endpoint = %config.endpoint(),
-            prefix = %config.key_prefix,
-            "Redis cache connected"
-        );
-
-        Ok(Self {
+    /// Wrap a shared, already-verified connection pool.
+    ///
+    /// `key_prefix` is the platform namespace (e.g. `oarb:`) prepended to
+    /// every cache key before it reaches Redis.
+    #[must_use]
+    pub fn new(pool: Pool, key_prefix: &str) -> Self {
+        Self {
             pool,
-            key_prefix: config.key_prefix.clone(),
-        })
+            key_prefix: key_prefix.to_owned(),
+        }
     }
 
+    /// Ping Redis through the shared pool (readiness / health probes).
     pub async fn health_check(&self) -> Result<(), StorageError> {
         redis_connect::ping(&self.pool).await
-    }
-
-    /// Underlying deadpool handle (graceful shutdown via [`Pool::close`]).
-    #[must_use]
-    pub const fn pool(&self) -> &Pool {
-        &self.pool
     }
 
     fn prefixed(&self, key: &str) -> String {

@@ -64,7 +64,7 @@ Start Docker Desktop / Colima before running `cargo test-docker`.
 
 **`oxide-arb-web` auth tests: login 200 but refresh/logout 503**
 
-Usually Redis testcontainer cold-start or pool pressure under parallel runs. The web harness waits for a successful blacklist `health_check` after `RedisTokenBlacklist::connect`. Prefer `cargo test-docker` (serial) over parallel `cargo test -p oxide-arb-web --test web -- --ignored` without `--test-threads=1`.
+Usually Redis testcontainer cold-start or pool pressure under parallel runs. The web harness connects the shared Redis pool (`connect_pool`) and waits for a successful blacklist `health_check` before serving requests. Prefer `cargo test-docker` (serial) over parallel `cargo test -p oxide-arb-web --test web -- --ignored` without `--test-threads=1`.
 
 ## Test tiers (summary)
 

@@ -20,18 +20,17 @@ use deadpool_redis::Pool;
 use jsonwebtoken::{
     Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode, errors::ErrorKind,
 };
-use oxide_arb_error::{OxideError, auth::AuthError};
-use oxide_arb_models::{config::JwtConfig, config::RedisConfig, domain::UserInfo};
-use oxide_arb_storage::cache::connect_pool;
+use oxide_arb_error::auth::AuthError;
+use oxide_arb_models::{config::JwtConfig, domain::UserInfo};
 use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::error::WebError;
 
-/// Redis key namespace for revoked token ids (shares the unified `oarb:`
-/// prefix with the rest of the platform's Redis usage).
-const BLACKLIST_PREFIX: &str = "oarb:jwt:blacklist:";
+/// Sub-namespace for revoked token ids, appended to the platform key prefix
+/// (`{key_prefix}jwt:blacklist:{jti}`).
+const BLACKLIST_NAMESPACE: &str = "jwt:blacklist:";
 
 /// Small clock-skew tolerance (seconds) applied to `exp`/`nbf` validation.
 const CLOCK_SKEW_LEEWAY_SECS: u64 = 5;
@@ -109,31 +108,28 @@ pub trait TokenBlacklist: Send + Sync {
     async fn health_check(&self) -> Result<(), AuthError>;
 }
 
-/// Redis implementation of [`TokenBlacklist`] over a `deadpool` pool.
+/// Redis implementation of [`TokenBlacklist`] over the **shared** platform
+/// `deadpool` pool.
+///
+/// The pool is established once at the composition root and shared with the
+/// cache L2 backend; only the key namespace separates the two. Revocation
+/// state lives exclusively in Redis (never an in-process cache tier) so a
+/// revoked `jti` is visible immediately and the fail-closed contract holds.
 pub struct RedisTokenBlacklist {
     pool: Pool,
+    key_prefix: String,
 }
 
 impl RedisTokenBlacklist {
-    /// Wrap an existing connection pool.
+    /// Wrap the shared connection pool. `key_prefix` is the platform Redis
+    /// namespace (e.g. `oarb:`); revoked ids are stored under
+    /// `{key_prefix}jwt:blacklist:{jti}`.
     #[must_use]
-    pub const fn new(pool: Pool) -> Self {
-        Self { pool }
-    }
-
-    /// Connect using the platform [`RedisConfig`] with explicit pool size,
-    /// timeouts, and startup readiness PING. JWT keys use a dedicated namespace
-    /// separate from the cache layer.
-    pub async fn connect(redis: &RedisConfig) -> Result<Self, OxideError> {
-        let pool = connect_pool(redis)
-            .await
-            .map_err(|error| OxideError::Internal(format!("redis blacklist pool: {error}")))?;
-        Ok(Self { pool })
-    }
-
-    /// Drain and close pooled connections (graceful process shutdown).
-    pub fn close_pool(&self) {
-        self.pool.close();
+    pub fn new(pool: Pool, key_prefix: &str) -> Self {
+        Self {
+            pool,
+            key_prefix: format!("{key_prefix}{BLACKLIST_NAMESPACE}"),
+        }
     }
 
     /// Ping Redis to verify the revocation store is reachable.
@@ -150,8 +146,8 @@ impl RedisTokenBlacklist {
         Ok(())
     }
 
-    fn key(jti: &str) -> String {
-        format!("{BLACKLIST_PREFIX}{jti}")
+    fn key(&self, jti: &str) -> String {
+        format!("{}{jti}", self.key_prefix)
     }
 }
 
@@ -164,7 +160,7 @@ impl TokenBlacklist for RedisTokenBlacklist {
             .await
             .map_err(|_| AuthError::BlacklistUnavailable)?;
         let secs = ttl.as_secs().max(1);
-        conn.set_ex::<_, _, ()>(Self::key(jti), 1u8, secs)
+        conn.set_ex::<_, _, ()>(self.key(jti), 1u8, secs)
             .await
             .map_err(|_| AuthError::BlacklistUnavailable)?;
         Ok(())
@@ -177,7 +173,7 @@ impl TokenBlacklist for RedisTokenBlacklist {
             .await
             .map_err(|_| AuthError::BlacklistUnavailable)?;
         let revoked: bool = conn
-            .exists(Self::key(jti))
+            .exists(self.key(jti))
             .await
             .map_err(|_| AuthError::BlacklistUnavailable)?;
         Ok(revoked)
@@ -304,4 +300,21 @@ fn remaining_ttl(exp: i64) -> Duration {
     let now = Utc::now().timestamp();
     let secs = (exp - now).max(0);
     Duration::from_secs(secs.unsigned_abs())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RedisTokenBlacklist;
+    use deadpool_redis::{Config, Runtime};
+
+    #[tokio::test]
+    async fn blacklist_key_derivation_matches_legacy_default_prefix() {
+        // The pool is lazy — no connection is attempted until `get()`.
+        let pool = Config::from_url("redis://127.0.0.1:1")
+            .create_pool(Some(Runtime::Tokio1))
+            .expect("lazy pool");
+        let blacklist = RedisTokenBlacklist::new(pool, "oarb:");
+        // Byte-identical to the previously hardcoded `oarb:jwt:blacklist:`.
+        assert_eq!(blacklist.key("abc-123"), "oarb:jwt:blacklist:abc-123");
+    }
 }

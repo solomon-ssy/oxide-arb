@@ -25,8 +25,6 @@ pub mod state;
 pub mod static_files;
 pub mod ws;
 
-use std::sync::Arc;
-
 use actix_cors::Cors;
 use actix_web::{App, HttpServer, middleware::from_fn, web};
 use oxide_arb_error::{OxideError, OxideResult};
@@ -66,7 +64,6 @@ pub async fn spawn_web_server(
     config: WebConfig,
     shutdown: CancellationToken,
 ) -> OxideResult<()> {
-    let jwt_blacklist = Arc::clone(&state.jwt_blacklist);
     let data = web::Data::new(state);
     let bind_addr = (config.listen_host.clone(), config.listen_port);
     let app_config = config.clone();
@@ -92,8 +89,10 @@ pub async fn spawn_web_server(
     tokio::select! {
         biased;
         () = shutdown.cancelled() => {
+            // The shared Redis pool is intentionally NOT closed here: it backs
+            // the cache L2 for later shutdown stages and is closed once by the
+            // composition root after every stage has drained.
             handle.stop(true).await;
-            jwt_blacklist.close_pool();
             Ok(())
         }
         result = server => {

@@ -5,19 +5,25 @@
 //! application config file). No hardcoded domain behavior.
 //!
 //! Design principles:
-//! - **Fail-open**: Cache failures never block or fail the application.
-//!   A failed `get` returns `None`; a failed `set` is silently logged.
+//! - **Fail-open reads**: a failed or timed-out `get` degrades to a miss so
+//!   callers always fall through to the source of truth. Cache read failures
+//!   never propagate.
+//! - **Policy-driven writes**: `set` failures are swallowed (and logged) when
+//!   the domain is fail-open, propagated otherwise.
 //! - **Per-domain routing**: Each domain (market, config, calibration, etc.)
 //!   can be independently configured or disabled via config.
 //! - **Read-through**: On miss, an async loader populates the cache atomically.
 //! - **Noop mode**: When `config.disabled = true`, all operations are no-ops.
 //! - **Operation timeouts**: Every cache operation has a bounded deadline.
 
-use crate::cache::{CacheKey, CacheMetrics, TieredCache};
+use crate::cache::{CacheKey, TieredCache};
 use bitcode::{Decode, Encode};
 use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::config::CacheConfig;
+use prometheus::Registry;
+use serde::{Serialize, de::DeserializeOwned};
 use std::{collections::HashMap, future::Future, time::Duration};
+use tokio::time::timeout;
 use tracing::{debug, warn};
 
 /// Resolved per-domain cache behavior (computed from config at construction time).
@@ -29,6 +35,10 @@ pub struct DomainCachePolicy {
 }
 
 /// The production cache manager wrapping `TieredCache` with operational controls.
+///
+/// This is the **only** cache surface the rest of the platform consumes; the
+/// underlying [`TieredCache`] is never handed out, so every cache operation in
+/// the process goes through the same policy gate.
 pub struct CacheManager {
     cache: Option<TieredCache>,
     domain_policies: HashMap<String, DomainCachePolicy>,
@@ -90,90 +100,44 @@ impl CacheManager {
         }
     }
 
-    /// Get a value from cache with fail-open semantics and timeout.
-    /// Returns `None` on miss or any error (when `fail_open` = true).
+    /// Get a bitcode-encoded value. Returns `None` on miss, domain disabled,
+    /// backend error, or timeout (fail-open read).
     pub async fn get<T: for<'a> Decode<'a> + Send>(&self, key: &CacheKey) -> Option<T> {
-        let policy = self.policy_for(key.domain());
-        if !policy.enabled {
-            return None;
-        }
-
-        let cache = self.cache.as_ref()?;
-        let timeout = policy.operation_timeout;
-
-        match tokio::time::timeout(timeout, cache.get::<T>(key)).await {
-            Ok(Ok(value)) => value,
-            Ok(Err(e)) => {
-                if policy.fail_open {
-                    warn!(
-                        domain = key.domain(),
-                        key = %key.as_str(),
-                        error = %e,
-                        "Cache get failed (fail-open)"
-                    );
-                }
-                None
-            }
-            Err(_elapsed) => {
-                warn!(
-                    domain = key.domain(),
-                    key = %key.as_str(),
-                    timeout_ms = timeout.as_millis(),
-                    "Cache get timed out (fail-open)"
-                );
-                None
-            }
-        }
+        let (cache, policy) = self.active(key)?;
+        read_with_policy(policy, key, cache.get::<T>(key)).await
     }
 
-    /// Set a value in cache. Errors are logged but never propagated when fail-open.
+    /// Get a JSON-encoded value (for types that cannot derive `bitcode`
+    /// codecs, e.g. models with `DateTime` fields). Same fail-open semantics
+    /// as [`Self::get`].
+    pub async fn get_json<T: DeserializeOwned + Send>(&self, key: &CacheKey) -> Option<T> {
+        let (cache, policy) = self.active(key)?;
+        read_with_policy(policy, key, cache.get_json::<T>(key)).await
+    }
+
+    /// Set a bitcode-encoded value. Errors are swallowed (and logged) when the
+    /// domain is fail-open, propagated otherwise.
     pub async fn set<T: Encode + Send + Sync>(
         &self,
         key: &CacheKey,
         value: &T,
     ) -> Result<(), StorageError> {
-        let policy = self.policy_for(key.domain());
-        if !policy.enabled {
-            return Ok(());
-        }
-
-        let Some(cache) = self.cache.as_ref() else {
+        let Some((cache, policy)) = self.active(key) else {
             return Ok(());
         };
+        write_with_policy(policy, key, cache.set(key, value)).await
+    }
 
-        let timeout = policy.operation_timeout;
-        match tokio::time::timeout(timeout, cache.set(key, value)).await {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(e)) => {
-                if policy.fail_open {
-                    warn!(
-                        domain = key.domain(),
-                        key = %key.as_str(),
-                        error = %e,
-                        "Cache set failed (fail-open)"
-                    );
-                    Ok(())
-                } else {
-                    Err(e)
-                }
-            }
-            Err(_elapsed) => {
-                if policy.fail_open {
-                    warn!(
-                        domain = key.domain(),
-                        key = %key.as_str(),
-                        timeout_ms = timeout.as_millis(),
-                        "Cache set timed out (fail-open)"
-                    );
-                    Ok(())
-                } else {
-                    Err(StorageError::Timeout {
-                        operation: format!("cache set {}", key.as_str()),
-                        duration: timeout,
-                    })
-                }
-            }
-        }
+    /// Set a JSON-encoded value. Same policy semantics as [`Self::set`].
+    pub async fn set_json<T: Serialize + Send + Sync>(
+        &self,
+        key: &CacheKey,
+        value: &T,
+    ) -> Result<(), StorageError> {
+        let Some((cache, policy)) = self.active(key) else {
+            return Ok(());
+        };
+        write_with_policy(policy, key, cache.set_json(key, value)).await
     }
 
     /// Read-through: attempt cache get; on miss, call `loader`, populate cache,
@@ -197,41 +161,40 @@ impl CacheManager {
         Ok(value)
     }
 
-    /// Invalidate a cache entry (both L1 and L2). Fail-open.
+    /// Invalidate a cache entry (both L1 and L2). Always fail-open: a missed
+    /// invalidation only delays freshness until the entry's TTL expires.
     pub async fn invalidate(&self, key: &CacheKey) {
-        let policy = self.policy_for(key.domain());
-        if !policy.enabled {
-            return;
-        }
-
-        let Some(cache) = self.cache.as_ref() else {
+        let Some((cache, policy)) = self.active(key) else {
             return;
         };
 
-        let timeout = policy.operation_timeout;
-        match tokio::time::timeout(timeout, cache.invalidate(key)).await {
+        match timeout(policy.operation_timeout, cache.invalidate(key)).await {
             Ok(Ok(())) => {
                 debug!(key = %key.as_str(), "Cache entry invalidated");
             }
-            Ok(Err(e)) => {
+            Ok(Err(error)) => {
                 warn!(
                     key = %key.as_str(),
-                    error = %e,
+                    %error,
                     "Cache invalidate failed (fail-open)"
                 );
             }
-            Err(_) => {
+            Err(_elapsed) => {
                 warn!(
                     key = %key.as_str(),
+                    timeout_ms = policy.operation_timeout.as_millis(),
                     "Cache invalidate timed out (fail-open)"
                 );
             }
         }
     }
 
-    /// Access the underlying metrics (if cache is active).
-    pub fn metrics(&self) -> Option<&CacheMetrics> {
-        self.cache.as_ref().map(TieredCache::metrics)
+    /// Register the cache hit/miss counters into the process metrics registry.
+    /// A noop manager registers nothing.
+    pub fn register_metrics(&self, registry: &Registry) -> Result<(), prometheus::Error> {
+        self.cache
+            .as_ref()
+            .map_or(Ok(()), |cache| cache.metrics().register(registry))
     }
 
     /// Check if the cache is operating in noop mode.
@@ -239,9 +202,91 @@ impl CacheManager {
         self.cache.is_none()
     }
 
-    fn policy_for(&self, domain: &str) -> &DomainCachePolicy {
-        self.domain_policies
-            .get(domain)
-            .unwrap_or(&self.default_policy)
+    /// Resolve the live cache handle and policy for `key`'s domain.
+    /// `None` means the operation must be skipped (noop mode or domain disabled).
+    fn active(&self, key: &CacheKey) -> Option<(&TieredCache, &DomainCachePolicy)> {
+        let cache = self.cache.as_ref()?;
+        let policy = self
+            .domain_policies
+            .get(key.domain())
+            .unwrap_or(&self.default_policy);
+        policy.enabled.then_some((cache, policy))
+    }
+}
+
+/// Run a cache read under `policy`: backend errors and timeouts are logged and
+/// degrade to a miss, so callers always fall through to the source of truth.
+async fn read_with_policy<T, Fut>(
+    policy: &DomainCachePolicy,
+    key: &CacheKey,
+    operation: Fut,
+) -> Option<T>
+where
+    Fut: Future<Output = Result<Option<T>, StorageError>>,
+{
+    match timeout(policy.operation_timeout, operation).await {
+        Ok(Ok(value)) => value,
+        Ok(Err(error)) => {
+            warn!(
+                domain = key.domain(),
+                key = %key.as_str(),
+                %error,
+                "Cache get failed (fail-open)"
+            );
+            None
+        }
+        Err(_elapsed) => {
+            warn!(
+                domain = key.domain(),
+                key = %key.as_str(),
+                timeout_ms = policy.operation_timeout.as_millis(),
+                "Cache get timed out (fail-open)"
+            );
+            None
+        }
+    }
+}
+
+/// Run a cache write under `policy`: failures are swallowed (and logged) when
+/// the domain is fail-open, propagated otherwise.
+async fn write_with_policy<Fut>(
+    policy: &DomainCachePolicy,
+    key: &CacheKey,
+    operation: Fut,
+) -> Result<(), StorageError>
+where
+    Fut: Future<Output = Result<(), StorageError>>,
+{
+    match timeout(policy.operation_timeout, operation).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => {
+            if policy.fail_open {
+                warn!(
+                    domain = key.domain(),
+                    key = %key.as_str(),
+                    %error,
+                    "Cache set failed (fail-open)"
+                );
+                Ok(())
+            } else {
+                Err(error)
+            }
+        }
+        Err(_elapsed) => {
+            if policy.fail_open {
+                warn!(
+                    domain = key.domain(),
+                    key = %key.as_str(),
+                    timeout_ms = policy.operation_timeout.as_millis(),
+                    "Cache set timed out (fail-open)"
+                );
+                Ok(())
+            } else {
+                Err(StorageError::Timeout {
+                    operation: format!("cache set {}", key.as_str()),
+                    duration: policy.operation_timeout,
+                })
+            }
+        }
     }
 }

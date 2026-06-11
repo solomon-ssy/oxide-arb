@@ -1,4 +1,8 @@
 //! Cached wrapper for [`MarketRepository`] using cache-aside reads.
+//!
+//! Cache reads are fail-open ([`CacheManager`] degrades errors and timeouts to
+//! a miss), so a Redis outage falls through to the inner repository instead of
+//! failing the read.
 
 use crate::traits::MarketRepository;
 use chrono::{DateTime, Utc};
@@ -7,34 +11,32 @@ use oxide_arb_models::{
     domain::{MarketInfo, MarketPageQuery, MarketPitSnapshotInfo, Paginated, UpsertMarket},
     types::MarketId,
 };
-use oxide_arb_storage::cache::{CacheKey, TieredCache};
+use oxide_arb_storage::cache::{CacheKey, CacheManager};
 use std::{collections::HashSet, sync::Arc};
 
 /// Caching decorator for market metadata reads.
 pub struct CachedMarketRepository<R: MarketRepository> {
     inner: R,
-    cache: Arc<TieredCache>,
+    cache: Arc<CacheManager>,
 }
 
 impl<R: MarketRepository> CachedMarketRepository<R> {
-    pub const fn new(inner: R, cache: Arc<TieredCache>) -> Self {
+    pub const fn new(inner: R, cache: Arc<CacheManager>) -> Self {
         Self { inner, cache }
     }
 
     async fn invalidate_market(&self, market_id: &MarketId) {
-        let _ = self
-            .cache
+        self.cache
             .invalidate(&CacheKey::MarketInfo {
                 market_id: market_id.clone(),
             })
             .await;
-        let _ = self
-            .cache
+        self.cache
             .invalidate(&CacheKey::MarketMetadata {
                 market_id: market_id.clone(),
             })
             .await;
-        let _ = self.cache.invalidate(&CacheKey::ActiveMarkets).await;
+        self.cache.invalidate(&CacheKey::ActiveMarkets).await;
     }
 }
 
@@ -45,7 +47,7 @@ impl<R: MarketRepository> MarketRepository for CachedMarketRepository<R> {
         let key = CacheKey::MarketInfo {
             market_id: id.clone(),
         };
-        if let Some(cached) = self.cache.get_json::<MarketInfo>(&key).await? {
+        if let Some(cached) = self.cache.get_json::<MarketInfo>(&key).await {
             return Ok(Some(Arc::new(cached)));
         }
         let result = self.inner.find_by_id(id).await?;
@@ -77,7 +79,7 @@ impl<R: MarketRepository> MarketRepository for CachedMarketRepository<R> {
     #[inline]
     async fn find_active(&self) -> Result<Arc<[MarketInfo]>, StorageError> {
         let key = CacheKey::ActiveMarkets;
-        if let Some(cached) = self.cache.get_json::<Vec<MarketInfo>>(&key).await? {
+        if let Some(cached) = self.cache.get_json::<Vec<MarketInfo>>(&key).await {
             return Ok(cached.into());
         }
         let markets = self.inner.find_active().await?;
@@ -114,7 +116,7 @@ impl<R: MarketRepository> MarketRepository for CachedMarketRepository<R> {
     #[inline]
     async fn upsert_batch(&self, dtos: Vec<UpsertMarket>) -> Result<u64, StorageError> {
         let count = self.inner.upsert_batch(dtos).await?;
-        let _ = self.cache.invalidate(&CacheKey::ActiveMarkets).await;
+        self.cache.invalidate(&CacheKey::ActiveMarkets).await;
         Ok(count)
     }
 

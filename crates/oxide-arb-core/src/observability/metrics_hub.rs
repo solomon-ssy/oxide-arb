@@ -134,10 +134,6 @@ pub struct MetricsHub {
     pub calibration_resolved: IntCounter,
     pub calibration_bucket_count: IntGauge,
 
-    // Cache
-    pub cache_hits: IntCounterVec,
-    pub cache_misses: IntCounterVec,
-
     // System
     pub uptime_seconds: IntGauge,
     pub active_tasks: IntGauge,
@@ -254,11 +250,6 @@ struct CalibrationMetrics {
     update_total: IntCounter,
     resolved: IntCounter,
     bucket_count: IntGauge,
-}
-
-struct CacheMetrics {
-    cache_hits: IntCounterVec,
-    cache_misses: IntCounterVec,
 }
 
 struct SystemMetrics {
@@ -692,23 +683,6 @@ fn register_calibration_metrics(registry: &Registry) -> CalibrationMetrics {
     }
 }
 
-fn register_cache_metrics(registry: &Registry) -> CacheMetrics {
-    CacheMetrics {
-        cache_hits: register_counter_vec!(
-            registry,
-            "oxide_arb_cache_hits_total",
-            "Cache hits by domain",
-            &["domain"]
-        ),
-        cache_misses: register_counter_vec!(
-            registry,
-            "oxide_arb_cache_misses_total",
-            "Cache misses by domain",
-            &["domain"]
-        ),
-    }
-}
-
 fn register_system_metrics(registry: &Registry) -> SystemMetrics {
     SystemMetrics {
         uptime_seconds: register_gauge_int!(
@@ -839,7 +813,6 @@ struct MetricGroups {
     execution: ExecutionMetrics,
     risk: RiskMetrics,
     calibration: CalibrationMetrics,
-    cache: CacheMetrics,
     system: SystemMetrics,
     settlement: SettlementMetrics,
     control_factor: ControlFactorMetrics,
@@ -855,7 +828,6 @@ impl MetricsHub {
             execution: register_execution_metrics(&registry),
             risk: register_risk_metrics(&registry),
             calibration: register_calibration_metrics(&registry),
-            cache: register_cache_metrics(&registry),
             system: register_system_metrics(&registry),
             settlement: register_settlement_metrics(&registry),
             control_factor: register_control_factor_metrics(&registry),
@@ -865,7 +837,7 @@ impl MetricsHub {
 
     fn from_groups(registry: Registry, g: MetricGroups) -> Self {
         let (pipeline, detection, funnel) = (g.pipeline, g.detection, g.funnel);
-        let (execution, risk, calibration, cache) = (g.execution, g.risk, g.calibration, g.cache);
+        let (execution, risk, calibration) = (g.execution, g.risk, g.calibration);
         let (system, settlement, control_factor) = (g.system, g.settlement, g.control_factor);
         Self {
             registry,
@@ -925,8 +897,6 @@ impl MetricsHub {
             calibration_update_total: calibration.update_total,
             calibration_resolved: calibration.resolved,
             calibration_bucket_count: calibration.bucket_count,
-            cache_hits: cache.cache_hits,
-            cache_misses: cache.cache_misses,
             uptime_seconds: system.uptime_seconds,
             active_tasks: system.active_tasks,
             health_check_failures: system.health_check_failures,
