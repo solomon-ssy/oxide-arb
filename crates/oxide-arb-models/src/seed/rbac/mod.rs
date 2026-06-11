@@ -47,6 +47,8 @@ pub const ROLE_EMERGENCY_OPERATOR: &str = "emergency_operator";
 pub const ROLES_ARTIFACT: SeedArtifactKey = SeedArtifactKey::new("rbac.roles");
 /// Seed artifact: list of all seeded menu IDs produced by the menus seed.
 pub const MENUS_ARTIFACT: SeedArtifactKey = SeedArtifactKey::new("rbac.menus");
+/// Seed artifact: menu nodes for role-menu assignment (id, kind, permission).
+pub const MENU_GRANTS_ARTIFACT: SeedArtifactKey = SeedArtifactKey::new("rbac.menu_grants");
 /// Seed artifact: bootstrap admin `UserId` produced by the admin-user seed.
 pub const ADMIN_USER_ARTIFACT: SeedArtifactKey = SeedArtifactKey::new("rbac.admin_user");
 

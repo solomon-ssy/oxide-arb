@@ -19,7 +19,8 @@
 9. [Control Factor 沉淀与发布](#9-control-factor-沉淀与发布)
 10. [因子与 Live 热路径接线](#10-因子与-live-热路径接线)
 11. [Prometheus / SQL 验收清单](#11-prometheus--sql-验收清单)
-12. [常见问题与排错](#12-常见问题与排错)
+12. [Dev RBAC seed 重建（本地开发）](#12-dev-rbac-seed-重建本地开发)
+13. [常见问题与排错](#13-常见问题与排错)
 
 ---
 
@@ -923,7 +924,26 @@ Shadow 用于发布前验证；Published 用于 Live 真实生效。
 
 ---
 
-## 12. 常见问题与排错
+## 12. Dev RBAC seed 重建（本地开发）
+
+RBAC bootstrap seeds（`crates/oxide-arb-models/src/seed/rbac/`）在 ledger 中已记录且目标表有行时，loader 使用 `ON CONFLICT DO NOTHING`，**不会**覆盖已存在的 menu / role_menu / casbin 行。修改 seed 定义（菜单树、内置角色权限矩阵）后，若 UI 或 `/api/menus/accessible` 仍显示旧数据，需要清空相关表或重建库后再启动。
+
+**推荐做法（本地 dev）**：
+
+1. 停止 `oxide-arb-bin`。
+2. 清空 RBAC 相关表（顺序避免 FK 冲突）：
+   ```sql
+   TRUNCATE role_menu, user_role, casbin_rule, menu, role CASCADE;
+   DELETE FROM seed_application WHERE seed_id LIKE 'rbac.%';
+   ```
+   或对整个 Postgres schema 做 `drop + migrate`（最干净）。
+3. 重新启动：`cargo run -p oxide-arb-bin -- --config-dir config` — migration lane 会按 DAG 重跑 RBAC seeds。
+
+**验收**：`GET /api/auth/me` 返回的菜单树与 `menus.rs` 中 `build_tree()` 一致；默认 admin 仍可 `admin` / `admin` 登录。
+
+---
+
+## 13. 常见问题与排错
 
 | 现象 | 可能原因 | 处理 |
 |------|----------|------|

@@ -53,7 +53,6 @@ const READ_RESOURCES: &[ResourceType] = &[
     ResourceType::Market,
     ResourceType::Opportunity,
     ResourceType::Trade,
-    ResourceType::Pnl,
     ResourceType::Risk,
     ResourceType::Blacklist,
     ResourceType::RuntimeConfig,
@@ -94,7 +93,6 @@ fn operator_policies() -> Vec<(ResourceType, Operation)> {
         (ResourceType::Blacklist, Operation::Create),
         (ResourceType::Blacklist, Operation::Delete),
         (ResourceType::Replay, Operation::Create),
-        (ResourceType::Materialization, Operation::Enqueue),
     ]);
     policies
 }
