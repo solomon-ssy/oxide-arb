@@ -121,10 +121,7 @@ fn masked_deploy_view(deploy: &DeployConfig) -> serde_json::Value {
         "cache": masked_cache_view(deploy),
         "keys": {
             "source": format!("{:?}", deploy.keys.source),
-            "private_key_present": deploy.keys.private_key.is_some(),
-            "polymarket_api_key_present": deploy.keys.polymarket_api_key.is_some(),
-            "polymarket_api_secret_present": deploy.keys.polymarket_api_secret.is_some(),
-            "polymarket_passphrase_present": deploy.keys.polymarket_passphrase.is_some(),
+            "private_key_present": deploy.keys.private_key_present(),
         },
         "web": masked_web_view(deploy),
         "execution": {

@@ -48,12 +48,6 @@ pub enum ConfigValidationError {
         mode: String,
         missing: Vec<&'static str>,
     },
-    #[error("[{mode}] partial credentials (have: {}, missing: {})", .present.join(", "), .missing.join(", "))]
-    PartialCredentials {
-        mode: String,
-        present: Vec<&'static str>,
-        missing: Vec<&'static str>,
-    },
     #[error("{field}: {detail}")]
     InvalidValue { field: &'static str, detail: String },
 }
@@ -63,12 +57,7 @@ pub enum ConfigValidationError {
 pub enum ConfigWarning {
     #[error("kelly_fraction={0} is aggressive (>0.5); consider reducing")]
     LargeKellyFraction(Decimal),
-    #[error("DryRun with partial credentials (have: {}, missing: {})", .present.join(", "), .missing.join(", "))]
-    PartialCredentialsDryRun {
-        present: Vec<&'static str>,
-        missing: Vec<&'static str>,
-    },
-    #[error("Paper mode without credentials; user-trade stream disabled")]
+    #[error("Paper mode without private_key; user-trade stream disabled")]
     NoCredentialsPaper,
     #[error("web.jwt.secret is empty or a known placeholder; set a strong secret before Live")]
     WeakJwtSecret,

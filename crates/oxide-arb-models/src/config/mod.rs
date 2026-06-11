@@ -9,9 +9,12 @@
 //!
 //! # Loading precedence (high → low)
 //!
+//! The `config` crate merges sources in registration order; **later wins**:
+//!
 //! 1. Environment variables (`OXIDE_ARB__*`)
-//! 2. `config/oxide-arb.toml`
-//! 3. Hard-coded defaults
+//! 2. `config/oxide-arb.local.toml` (optional, gitignored — for local secrets)
+//! 3. `config/oxide-arb.toml`
+//! 4. Hard-coded defaults (`serde` `default` on each struct field)
 //!
 //! Every section rejects unknown keys (`deny_unknown_fields`): a typo or a
 //! leftover runtime section in the TOML aborts startup instead of being
@@ -28,6 +31,8 @@ mod polymarket;
 mod settlement;
 pub mod validation;
 mod web;
+
+use std::collections::HashMap;
 
 pub use cache::*;
 pub use db::*;
@@ -79,30 +84,45 @@ pub struct DeployConfig {
 impl DeployConfig {
     /// Load configuration from the given directory.
     ///
-    /// Loads `{dir}/oxide-arb.toml` (optional — defaults apply when absent)
-    /// and merges `OXIDE_ARB__*` environment variables on top. Runs the
-    /// mode-agnostic semantic validation before returning — fatal errors abort
-    /// startup, warnings are logged via `tracing`.
+    /// Loads `{dir}/oxide-arb.toml` and optional `{dir}/oxide-arb.local.toml`,
+    /// then merges `OXIDE_ARB__*` environment variables (env overrides file).
+    /// Runs mode-agnostic semantic validation before returning.
     pub fn load(config_dir: &str) -> OxideResult<Self> {
-        let builder = config::Config::builder()
-            .add_source(config::File::with_name(&format!("{config_dir}/oxide-arb")).required(false))
-            .add_source(
-                config::Environment::with_prefix("OXIDE_ARB")
-                    .prefix_separator("__")
-                    .separator("__")
-                    .try_parsing(true),
-            );
-
-        let deploy: Self = builder
-            .build()
+        let mut deploy: Self = build_config(config_dir, None)
             .map_err(ConfigError::Load)?
             .try_deserialize()
             .map_err(ConfigError::Load)?;
-
+        deploy.keys.normalize();
         deploy.ensure_valid_common()?;
         Ok(deploy)
     }
+}
 
+/// Shared config-crate builder: file → local overlay → environment.
+fn build_config(
+    config_dir: &str,
+    env: Option<HashMap<String, String>>,
+) -> Result<config::Config, config::ConfigError> {
+    let mut builder = config::Config::builder()
+        .add_source(config::File::with_name(&format!("{config_dir}/oxide-arb")).required(false))
+        .add_source(
+            config::File::with_name(&format!("{config_dir}/oxide-arb.local")).required(false),
+        );
+
+    let mut env_source = config::Environment::with_prefix("OXIDE_ARB")
+        .prefix_separator("__")
+        .separator("__")
+        .try_parsing(true);
+
+    if let Some(map) = env {
+        env_source = env_source.source(Some(map));
+    }
+
+    builder = builder.add_source(env_source);
+    builder.build()
+}
+
+impl DeployConfig {
     /// Run the mode-agnostic validation and fail closed on errors.
     ///
     /// Warnings are streamed to `tracing::warn` as a side effect so callers
@@ -228,19 +248,76 @@ mod tests {
     /// [`DeployConfig::load`] would merge the real process environment —
     /// without mutating process-global state (parallel-test safe).
     fn load_with_env(env: &[(&str, &str)]) -> Result<DeployConfig, config::ConfigError> {
-        let source = config::Environment::with_prefix("OXIDE_ARB")
-            .prefix_separator("__")
-            .separator("__")
-            .try_parsing(true)
-            .source(Some(
-                env.iter()
-                    .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
-                    .collect(),
-            ));
-        config::Config::builder()
-            .add_source(source)
-            .build()?
+        let map = env
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+            .collect();
+        let mut deploy: DeployConfig =
+            build_config("nonexistent_dir_for_test", Some(map))?.try_deserialize()?;
+        deploy.keys.normalize();
+        Ok(deploy)
+    }
+
+    #[test]
+    fn keys_env_overrides_toml_file() {
+        let dir = std::env::temp_dir().join(format!("oxide_arb_cfg_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp config dir");
+
+        let toml = r#"
+[keys]
+source = "env"
+private_key = "0xfrom_toml"
+"#;
+        std::fs::write(dir.join("oxide-arb.toml"), toml).expect("write toml");
+
+        let dir_str = dir.to_str().expect("utf-8");
+        let from_file = DeployConfig::load(dir_str).expect("load from toml");
+        assert_eq!(from_file.keys.private_key.as_deref(), Some("0xfrom_toml"));
+
+        let map = std::iter::once((
+            "OXIDE_ARB__KEYS__PRIVATE_KEY".to_owned(),
+            "0xfrom_env".to_owned(),
+        ))
+        .collect();
+        let mut from_env: DeployConfig = build_config(dir_str, Some(map))
+            .expect("build")
             .try_deserialize()
+            .expect("deserialize");
+        from_env.keys.normalize();
+        assert_eq!(from_env.keys.private_key.as_deref(), Some("0xfrom_env"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn keys_local_toml_overrides_base_toml() {
+        let dir =
+            std::env::temp_dir().join(format!("oxide_arb_local_cfg_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp config dir");
+
+        std::fs::write(
+            dir.join("oxide-arb.toml"),
+            r#"
+[keys]
+private_key = "0xbase"
+"#,
+        )
+        .expect("write base");
+        std::fs::write(
+            dir.join("oxide-arb.local.toml"),
+            r#"
+[keys]
+private_key = "0xlocal"
+"#,
+        )
+        .expect("write local");
+
+        let deploy = DeployConfig::load(dir.to_str().expect("utf-8")).expect("load");
+        assert_eq!(deploy.keys.private_key.as_deref(), Some("0xlocal"));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -13,17 +13,17 @@
 #   POST /api/runtime-config/versions                 — create a version
 #   POST /api/runtime-config/versions/{id}/activate   — audited hot activation
 #
-# All sensitive fields must be set via environment variables:
+# Loading precedence (later wins):
+#   1. OXIDE_ARB__* environment variables
+#   2. oxide-arb.local.toml  (optional, gitignored — see oxide-arb.local.toml.example)
+#   3. oxide-arb.toml
 #
-#   OXIDE_ARB__KEYS__PRIVATE_KEY=0x...
-#   OXIDE_ARB__KEYS__POLYMARKET_API_KEY=...
-#   OXIDE_ARB__KEYS__POLYMARKET_API_SECRET=...
-#   OXIDE_ARB__KEYS__POLYMARKET_PASSPHRASE=...
+# Sensitive fields — set via env OR oxide-arb.local.toml (never commit real values):
+#
+#   OXIDE_ARB__KEYS__PRIVATE_KEY=0x...   # bot wallet; L2 creds auto-derived at connect
 #   OXIDE_ARB__DB__POSTGRES__PASSWORD=...
 #   OXIDE_ARB__DB__CLICKHOUSE__PASSWORD=...
 #   OXIDE_ARB__WEB__JWT__SECRET=<strong-random-secret>
-#
-# DO NOT commit real secrets to version control.
 #
 # Unknown keys are FATAL at startup (deny_unknown_fields): stale sections from
 # older layouts ([detection], [risk], [sizing], [treasury], [analytics], ...)
@@ -139,12 +139,16 @@ channel_capacity = 2048
 channel_capacity = 256
 
 # ── Keys / Credentials ───────────────────────────────────────────────────────
+#
+# Prefer oxide-arb.local.toml or env for private_key (runbook §3.1.4 / §3.2).
+# Paper / Live: private_key required. L2 credentials are SDK-derived at connect.
 
 [keys]
-# Purpose: credential source. "env" reads the OXIDE_ARB__KEYS__* variables;
-# "keystore" reads keystore_path. Impact: Live/Paper trading identity.
-# Caution: never put secret values in this file. Default: "env".
+# Purpose: credential source. "env" = inline private_key; "keystore" = encrypted file
+# at keystore_path (reserved). Impact: Live/Paper trading identity. Default: "env".
 source = "env"
+
+# private_key = "0xREPLACE_WITH_BOT_PRIVATE_KEY"
 
 # ── Observability (logging only) ─────────────────────────────────────────────
 # Metrics are always-on via the web server's GET /metrics; operator alerting

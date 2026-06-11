@@ -19,6 +19,7 @@ use crate::{
     keystore::OrderSigner,
     ws::BookLevelRejectHook,
 };
+use alloy::signers::Signer;
 use num_traits::ToPrimitive;
 use oxide_arb_error::api::ApiError;
 use oxide_arb_models::{
@@ -148,10 +149,14 @@ impl ClobClient {
         signer: Arc<OrderSigner>,
         config: &PolymarketConfig,
     ) -> Result<Self, ApiError> {
+        // Polymarket L1 auth / EIP-712 requires `chain_id` on the alloy signer.
+        let mut auth_signer = signer.inner().clone();
+        auth_signer.set_chain_id(Some(config.chain_id));
+
         let sdk_config = SdkConfig::builder().use_server_time(true).build();
         let sdk = SdkClient::new(&config.clob_base_url, sdk_config)
             .map_err(|e| ApiError::from(sdk_error::SdkClobError(&e)))?
-            .authentication_builder(signer.inner())
+            .authentication_builder(&auth_signer)
             .authenticate()
             .await
             .map_err(|e| ApiError::from(sdk_error::SdkClobError(&e)))?;

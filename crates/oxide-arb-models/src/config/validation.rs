@@ -174,73 +174,23 @@ fn validate_credentials_mode(
     mode: ExecutionMode,
     report: &mut ConfigValidationReport,
 ) {
-    let keys = &deploy.keys;
-    let mut present = Vec::new();
-    let mut missing = Vec::new();
-
-    if keys.polymarket_api_key.is_some() {
-        present.push("api_key");
-    } else {
-        missing.push("api_key");
-    }
-    if keys.polymarket_api_secret.is_some() {
-        present.push("api_secret");
-    } else {
-        missing.push("api_secret");
-    }
-    if keys.polymarket_passphrase.is_some() {
-        present.push("passphrase");
-    } else {
-        missing.push("passphrase");
-    }
-    if keys.private_key.is_some() {
-        present.push("private_key");
-    } else {
-        missing.push("private_key");
+    if deploy.keys.private_key_present() {
+        return;
     }
 
-    let all_present = missing.is_empty();
-    let all_missing = present.is_empty();
     let mode_label = mode.to_string();
-
     match mode {
-        ExecutionMode::DryRun => {
-            if !all_present && !all_missing {
-                report
-                    .warnings
-                    .push(ConfigWarning::PartialCredentialsDryRun { present, missing });
-            }
-        }
+        ExecutionMode::DryRun => {}
         ExecutionMode::Paper => {
-            if all_missing {
-                report.warnings.push(ConfigWarning::NoCredentialsPaper);
-            } else if !all_present {
-                report
-                    .errors
-                    .push(ConfigValidationError::PartialCredentials {
-                        mode: mode_label,
-                        present,
-                        missing,
-                    });
-            }
+            report.warnings.push(ConfigWarning::NoCredentialsPaper);
         }
         ExecutionMode::Live => {
-            if all_missing {
-                report
-                    .errors
-                    .push(ConfigValidationError::MissingCredentials {
-                        mode: mode_label,
-                        missing,
-                    });
-            } else if !all_present {
-                report
-                    .errors
-                    .push(ConfigValidationError::PartialCredentials {
-                        mode: mode_label,
-                        present,
-                        missing,
-                    });
-            }
+            report
+                .errors
+                .push(ConfigValidationError::MissingCredentials {
+                    mode: mode_label,
+                    missing: vec!["private_key"],
+                });
         }
     }
 }
@@ -305,9 +255,6 @@ mod tests {
     #[test]
     fn live_mode_rejects_weak_jwt_secret() {
         let mut deploy = DeployConfig::default();
-        deploy.keys.polymarket_api_key = Some("k".into());
-        deploy.keys.polymarket_api_secret = Some("s".into());
-        deploy.keys.polymarket_passphrase = Some("p".into());
         deploy.keys.private_key = Some("0xabc".into());
         let report = validate_deploy_for_mode(&deploy, ExecutionMode::Live);
         assert!(
@@ -319,9 +266,6 @@ mod tests {
     #[test]
     fn live_mode_accepts_strong_jwt_secret_and_credentials() {
         let mut deploy = DeployConfig::default();
-        deploy.keys.polymarket_api_key = Some("k".into());
-        deploy.keys.polymarket_api_secret = Some("s".into());
-        deploy.keys.polymarket_passphrase = Some("p".into());
         deploy.keys.private_key = Some("0xabc".into());
         deploy.web.jwt.secret = "a-strong-production-secret".to_owned();
         let report = validate_deploy_for_mode(&deploy, ExecutionMode::Live);
