@@ -30,7 +30,7 @@ use oxide_arb_core::{
 };
 use oxide_arb_error::auth::AuthError;
 use oxide_arb_models::{
-    config::{DeployConfig, JwtConfig, RedisConfig},
+    config::{CacheConfig, DeployConfig, JwtConfig, RedisConfig},
     domain::{
         BlacklistInfo, CatalogState, CoreEventPublisher, HealthReport, MarketDataPort,
         ModeTransitionReport, ReplayEnqueueRequest, ReplayEnqueueResult, ReplayPort,
@@ -186,7 +186,7 @@ impl TestEnv {
 
         let runtime_config_apply = Arc::new(MockRuntimeConfigApply::default());
         let state = AppState {
-            deploy: Arc::new(DeployConfig::default()),
+            deploy: Arc::new(test_deploy_config()),
             runtime_config_apply: Arc::clone(&runtime_config_apply) as _,
             jwt,
             jwt_blacklist,
@@ -250,6 +250,23 @@ fn jwt_config() -> JwtConfig {
         issuer: TEST_ISSUER.to_owned(),
         access_ttl_secs: 900,
         refresh_ttl_secs: 604_800,
+    }
+}
+
+/// Deploy config exposed through the read-only `/api/system/deploy-config`
+/// endpoint. Secrets are deliberately non-empty (the shipped defaults are
+/// scrubbed to empty strings) so the masking tests verify that configured
+/// credentials are actually redacted, never echoed.
+fn test_deploy_config() -> DeployConfig {
+    DeployConfig {
+        cache: CacheConfig {
+            redis: RedisConfig {
+                password: "harness-redis-secret".to_owned(),
+                ..RedisConfig::default()
+            },
+            ..CacheConfig::default()
+        },
+        ..DeployConfig::default()
     }
 }
 

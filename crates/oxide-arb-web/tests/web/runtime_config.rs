@@ -519,6 +519,13 @@ async fn deploy_config_endpoint_is_masked_read_only() {
 
     let res = client::get(&env, "/api/system/deploy-config", &admin).await;
     assert_eq!(res.status, StatusCode::OK);
+    // The harness deploy config carries a non-empty Redis secret; it must not
+    // leak anywhere in the serialized response.
+    let raw = String::from_utf8_lossy(res.body_bytes());
+    assert!(
+        !raw.contains("harness-redis-secret"),
+        "configured redis secret must never be echoed in the response"
+    );
     let data = res.json()["data"].clone();
 
     let keys = data["keys"].as_object().expect("keys section");
