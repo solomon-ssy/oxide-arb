@@ -11,7 +11,10 @@ use oxide_arb_api::{fees::FeeCalculator, ws::normalize::normalize_ws_message};
 use oxide_arb_core::{
     bridge::{CoreOpportunityPipeline, fee_estimator::CoreFeeEstimator},
     control::factor_snapshot::FactorSnapshotStore,
-    detection::{coalescer::Coalescer, scanner::Scanner},
+    detection::{
+        coalescer::Coalescer,
+        scanner::{Scanner, ScannerDeps},
+    },
     observability::metrics_hub::MetricsHub,
     pipeline::{
         book_store::BookStore,
@@ -20,6 +23,7 @@ use oxide_arb_core::{
         staleness_classifier::StalenessClassifier,
         universe_filter::MarketUniverseFilter,
     },
+    service::catalog_readiness::CatalogReadiness,
 };
 use oxide_arb_models::{
     domain::{
@@ -129,15 +133,18 @@ fn bench_e2e_ws_to_scan(c: &mut Criterion) {
         None,
     );
 
-    let scanner = Scanner::new(
-        Arc::new(make_core_pipeline()),
+    let catalog = Arc::new(CatalogReadiness::new());
+    catalog.mark_ready(1, Utc::now());
+    let scanner = Scanner::new(ScannerDeps {
+        pipeline: Arc::new(make_core_pipeline()),
         book_store,
         market_cache,
-        StalenessClassifier::new(&MarketDataRuntimeConfig::default()),
+        staleness_classifier: StalenessClassifier::new(&MarketDataRuntimeConfig::default()),
         metrics,
-        None,
-        CoreEventPublisher::bounded(1).0,
-    );
+        detection_writer: None,
+        events: CoreEventPublisher::bounded(1).0,
+        catalog,
+    });
     let entry = CachedMarketScanEntry {
         market_id: MarketId::new("bench-m1"),
         event_id: EventId::new("evt"),

@@ -13,14 +13,29 @@ struct Cli {
     config_dir: String,
 }
 
+/// SDK WebSocket channel default: the SDK WARNs on every failed reconnect
+/// attempt, which multiplies across shards into log storms during outages.
+/// Shard connectivity is aggregated by the core `HealthChecker` instead.
+const SDK_WS_LOG_DIRECTIVE: &str = "polymarket_client_sdk_v2::ws=error";
+
 /// Initialize tracing from `[observability]`.
 ///
 /// The configured `log_level` is the default filter; a set `RUST_LOG`
-/// environment variable overrides it entirely. `log_json` switches the
-/// formatter to structured JSON lines for log aggregation.
+/// environment variable overrides it entirely. Unless the chosen filter
+/// already mentions the Polymarket SDK, its WS channel is capped at `error`
+/// (see [`SDK_WS_LOG_DIRECTIVE`]). `log_json` switches the formatter to
+/// structured JSON lines for log aggregation.
 fn init_tracing(observability: &ObservabilityConfig) {
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(observability.log_level.clone()));
+    let base = std::env::var(EnvFilter::DEFAULT_ENV)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| observability.log_level.clone());
+    let directives = if base.contains("polymarket_client_sdk_v2") {
+        base
+    } else {
+        format!("{base},{SDK_WS_LOG_DIRECTIVE}")
+    };
+    let filter = EnvFilter::new(directives);
     if observability.log_json {
         tracing_subscriber::fmt()
             .with_env_filter(filter)

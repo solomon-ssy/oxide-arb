@@ -14,11 +14,17 @@ use crate::{
         report_generator::{ReportGenerator, previous_utc_day, previous_utc_week_start},
     },
     pipeline::{book_store::BookStore, market_registry::MarketRegistry},
-    service::risk_metrics::RiskMetricsRefreshService,
+    service::{
+        catalog_readiness::CatalogReadiness, gamma::GammaService,
+        risk_metrics::RiskMetricsRefreshService,
+    },
 };
 use chrono::Datelike;
 use oxide_arb_algorithm::calibration::{CalibrationUpdater, ResolutionCalibrator};
-use oxide_arb_api::clob::ClobClient;
+use oxide_arb_api::{
+    clob::ClobClient,
+    infra::retry::{RetryController, RetryDecision, RetryPolicy},
+};
 use oxide_arb_error::{OxideError, OxideResult};
 use oxide_arb_models::{
     domain::risk::UpsertRiskEngineState,
@@ -31,7 +37,9 @@ use oxide_arb_repository::{
     traits::RiskStateRepository,
 };
 use oxide_arb_risk::{engine::RiskEngine, traits::RiskMetrics};
+use prometheus::IntGauge;
 use std::{sync::Arc, time::Duration};
+use tokio_util::sync::CancellationToken;
 
 const RISK_TICK_INTERVAL_SECS: u64 = 5;
 const HEALTH_CHECK_INTERVAL_SECS: u64 = 30;
@@ -52,9 +60,10 @@ struct LedgerReconciliationDeps<'a> {
 impl AppContext {
     /// Register all periodic background services into the pending task queue.
     ///
-    /// Call after `queue_runtime_tasks()` in bootstrap. Startup sync for gamma,
-    /// calibration, and Live metrics refresh must complete in `AppContext::build`
-    /// before this runs.
+    /// Call after `queue_runtime_tasks()` in bootstrap. Calibration startup
+    /// and the Live metrics refresh still complete in `AppContext::build`;
+    /// the first Gamma catalog sync runs as the warmup phase of the
+    /// `GammaSync` task (see [`Self::queue_gamma_sync`]).
     pub fn queue_periodic_services(&self) {
         self.queue_gamma_sync();
         self.queue_risk_tick();
@@ -71,8 +80,17 @@ impl AppContext {
 }
 
 impl AppContext {
+    /// Catalog warmup + periodic Gamma sync.
+    ///
+    /// Phase 1 (warmup): retry the first sync indefinitely with exponential
+    /// backoff — a Polymarket outage delays detection but never blocks or
+    /// kills the process. The first success flips [`CatalogReadiness`] to
+    /// `Ready`, unlocking the scanner. Phase 2: the regular periodic cadence.
     fn queue_gamma_sync(&self) {
         let gamma_service = Arc::clone(&self.data.gamma_service);
+        let catalog = Arc::clone(&self.data.catalog);
+        let market_registry = Arc::clone(&self.data.market_registry);
+        let catalog_ready_gauge = self.infra.metrics.catalog_ready.clone();
         let interval_secs = self
             .config
             .market_data
@@ -82,6 +100,15 @@ impl AppContext {
 
         self.pending_tasks
             .push(TaskId::GammaSync, move |shutdown| async move {
+                let deps = CatalogSyncDeps {
+                    gamma_service,
+                    catalog,
+                    market_registry,
+                    catalog_ready_gauge,
+                };
+                if !warmup_catalog(&deps, &shutdown).await {
+                    return;
+                }
                 if let Err(error) = PeriodicTask::run(
                     TaskId::GammaSync.static_name(),
                     move || Duration::from_secs(interval_secs),
@@ -89,8 +116,12 @@ impl AppContext {
                     true,
                     shutdown,
                     || {
-                        let gamma_service = Arc::clone(&gamma_service);
-                        async move { gamma_service.sync().await }
+                        let deps = deps.clone();
+                        async move {
+                            deps.gamma_service.sync().await?;
+                            deps.mark_ready();
+                            Ok(())
+                        }
                     },
                 )
                 .await
@@ -433,6 +464,7 @@ impl AppContext {
 
         self.pending_tasks
             .push(TaskId::HealthChecker, move |shutdown| async move {
+                let ws_summary_source = Arc::clone(&ws);
                 let checker = HealthChecker::new(pg, ch, ws, clob_client, execution_mode);
                 if let Err(error) = PeriodicTask::run(
                     TaskId::HealthChecker.static_name(),
@@ -444,7 +476,14 @@ impl AppContext {
                         let checker_ref = &checker;
                         let metrics_ref = &metrics;
                         let alerts = Arc::clone(&alerts);
+                        let ws_summary_source = Arc::clone(&ws_summary_source);
                         async move {
+                            // One aggregate line per cycle replaces per-shard
+                            // reconnect spam (shard logs are debug-level).
+                            let shards = ws_summary_source.shard_health();
+                            if shards.disconnected > 0 {
+                                tracing::warn!(%shards, "WS shard connectivity degraded");
+                            }
                             let report = checker_ref.check_all().await;
                             if !report.overall_healthy {
                                 let unhealthy = report
@@ -521,6 +560,74 @@ impl AppContext {
                     tracing::error!(%error, "report generator periodic task exited");
                 }
             });
+    }
+}
+
+/// Shared handles for catalog warmup and the periodic Gamma cadence.
+#[derive(Clone)]
+struct CatalogSyncDeps {
+    gamma_service: Arc<GammaService>,
+    catalog: Arc<CatalogReadiness>,
+    market_registry: Arc<MarketRegistry>,
+    catalog_ready_gauge: IntGauge,
+}
+
+impl CatalogSyncDeps {
+    /// Refresh the readiness snapshot (markets + timestamp) after a successful sync.
+    fn mark_ready(&self) {
+        let markets = u64::try_from(self.market_registry.market_count()).unwrap_or(u64::MAX);
+        self.catalog.mark_ready(markets, chrono::Utc::now());
+        self.catalog_ready_gauge.set(1);
+    }
+}
+
+/// First-sync retry loop (unlimited attempts, exponential backoff + jitter,
+/// 60 s ceiling). Returns `false` when shutdown was requested before success.
+async fn warmup_catalog(deps: &CatalogSyncDeps, shutdown: &CancellationToken) -> bool {
+    let mut controller = RetryController::new(&RetryPolicy {
+        max_attempts: None,
+        initial_interval_ms: 1_000,
+        max_interval_ms: 60_000,
+        randomization_factor: 0.25,
+        multiplier: 2.0,
+        max_elapsed_time_ms: None,
+    });
+
+    loop {
+        if shutdown.is_cancelled() {
+            return false;
+        }
+        match deps.gamma_service.sync().await {
+            Ok(()) => {
+                deps.mark_ready();
+                tracing::info!(
+                    markets = deps.market_registry.market_count(),
+                    attempts = controller.retries_used(),
+                    "catalog warmup complete — detection unlocked"
+                );
+                return true;
+            }
+            Err(error) => match controller.on_failure() {
+                RetryDecision::RetryAfter(delay) => {
+                    tracing::warn!(
+                        %error,
+                        attempt = controller.retries_used(),
+                        backoff_ms = delay.as_millis(),
+                        "catalog warmup sync failed — retrying"
+                    );
+                    tokio::select! {
+                        () = tokio::time::sleep(delay) => {}
+                        () = shutdown.cancelled() => return false,
+                    }
+                }
+                RetryDecision::Exhausted => {
+                    // Unreachable with max_attempts = None; fail loudly if the
+                    // policy is ever tightened without revisiting this loop.
+                    tracing::error!(%error, "catalog warmup retry budget exhausted");
+                    return false;
+                }
+            },
+        }
     }
 }
 

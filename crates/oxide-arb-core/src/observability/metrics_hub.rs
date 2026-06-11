@@ -69,6 +69,7 @@ pub struct MetricsHub {
     pub book_level_rejected: IntCounterVec,
     pub markets_resolved_ws: IntCounter,
     pub shard_status_changes: IntCounter,
+    pub ws_shard_connected: IntGaugeVec,
     pub book_store_token_count: IntGauge,
     pub book_apply_dropped: IntCounter,
     pub book_apply_coalesced_total: IntCounter,
@@ -149,6 +150,7 @@ pub struct MetricsHub {
     pub gamma_markets_total: IntGauge,
     pub gamma_last_sync_success: IntGauge,
     pub gamma_markets_rejected: IntCounterVec,
+    pub catalog_ready: IntGauge,
 
     // Metrics refresh
     pub metrics_refresh_failures: IntCounter,
@@ -189,6 +191,7 @@ struct PipelineMetrics {
     book_level_rejected: IntCounterVec,
     markets_resolved_ws: IntCounter,
     shard_status_changes: IntCounter,
+    ws_shard_connected: IntGaugeVec,
     book_store_token_count: IntGauge,
     book_apply_dropped: IntCounter,
     book_apply_coalesced_total: IntCounter,
@@ -268,6 +271,7 @@ struct SystemMetrics {
     gamma_markets_total: IntGauge,
     gamma_last_sync_success: IntGauge,
     gamma_markets_rejected: IntCounterVec,
+    catalog_ready: IntGauge,
     metrics_refresh_failures: IntCounter,
     shutdown_stage_progress_remaining: IntGaugeVec,
     shutdown_stage_timeouts: IntCounterVec,
@@ -394,6 +398,12 @@ fn register_pipeline_metrics(registry: &Registry) -> PipelineMetrics {
             registry,
             "oxide_arb_pipeline_shard_status_changes_total",
             "Shard status transitions"
+        ),
+        ws_shard_connected: register_gauge_vec!(
+            registry,
+            "oxide_arb_pipeline_ws_shard_connected",
+            "Per-shard CLOB WebSocket connection state (1 = connected)",
+            &["shard"]
         ),
         book_store_token_count: register_gauge_int!(
             registry,
@@ -748,6 +758,11 @@ fn register_system_metrics(registry: &Registry) -> SystemMetrics {
             "Markets dropped during Gamma catalog normalization, by reason",
             &["reason"]
         ),
+        catalog_ready: register_gauge_int!(
+            registry,
+            "oxide_arb_catalog_ready",
+            "1 once the first Gamma catalog sync completed (detection unlocked)"
+        ),
         metrics_refresh_failures: register_counter!(
             registry,
             "oxide_arb_system_metrics_refresh_failures_total",
@@ -862,6 +877,7 @@ impl MetricsHub {
             book_level_rejected: pipeline.book_level_rejected,
             markets_resolved_ws: pipeline.markets_resolved_ws,
             shard_status_changes: pipeline.shard_status_changes,
+            ws_shard_connected: pipeline.ws_shard_connected,
             book_store_token_count: pipeline.book_store_token_count,
             book_apply_dropped: pipeline.book_apply_dropped,
             book_apply_coalesced_total: pipeline.book_apply_coalesced_total,
@@ -920,6 +936,7 @@ impl MetricsHub {
             gamma_markets_total: system.gamma_markets_total,
             gamma_last_sync_success: system.gamma_last_sync_success,
             gamma_markets_rejected: system.gamma_markets_rejected,
+            catalog_ready: system.catalog_ready,
             metrics_refresh_failures: system.metrics_refresh_failures,
             settlement_requests_total: settlement.requests_total,
             settlement_positions_settled_total: settlement.positions_settled_total,

@@ -9,12 +9,13 @@ use oxide_arb_api::fees::FeeCalculator;
 use oxide_arb_core::{
     bridge::{CoreOpportunityPipeline, fee_estimator::CoreFeeEstimator},
     control::factor_snapshot::FactorSnapshotStore,
-    detection::scanner::Scanner,
+    detection::scanner::{Scanner, ScannerDeps},
     observability::metrics_hub::MetricsHub,
     pipeline::{
         book_store::BookStore, market_cache::MarketCache, market_registry::MarketRegistry,
         staleness_classifier::StalenessClassifier, universe_filter::MarketUniverseFilter,
     },
+    service::catalog_readiness::CatalogReadiness,
 };
 use oxide_arb_models::{
     domain::{
@@ -71,10 +72,17 @@ fn sample_market(id: &str) -> MarketRegistryInfo {
     }
 }
 
-fn build_scanner(
+fn ready_catalog() -> Arc<CatalogReadiness> {
+    let catalog = Arc::new(CatalogReadiness::new());
+    catalog.mark_ready(1, Utc::now());
+    catalog
+}
+
+fn build_scanner_with_catalog(
     book_store: Arc<BookStore>,
     market_cache: Arc<MarketCache>,
     metrics: Arc<MetricsHub>,
+    catalog: Arc<CatalogReadiness>,
 ) -> Scanner {
     let runtime = RuntimeConfig::default();
     let fee_calculator = Arc::new(FeeCalculator::default());
@@ -104,15 +112,24 @@ fn build_scanner(
     ));
     let staleness = StalenessClassifier::new(&runtime.market_data);
 
-    Scanner::new(
+    Scanner::new(ScannerDeps {
         pipeline,
         book_store,
         market_cache,
-        staleness,
+        staleness_classifier: staleness,
         metrics,
-        None,
-        CoreEventPublisher::bounded(1).0,
-    )
+        detection_writer: None,
+        events: CoreEventPublisher::bounded(1).0,
+        catalog,
+    })
+}
+
+fn build_scanner(
+    book_store: Arc<BookStore>,
+    market_cache: Arc<MarketCache>,
+    metrics: Arc<MetricsHub>,
+) -> Scanner {
+    build_scanner_with_catalog(book_store, market_cache, metrics, ready_catalog())
 }
 
 fn seed_full_books(store: &BookStore, yes: &TokenId, no: &TokenId, timestamp_ms: u64) {
@@ -178,6 +195,57 @@ fn scan_market_returns_none_when_books_are_stale() {
         metrics.scans_gate_rejected.get(),
         rejected_before + 1,
         "BookGate rejection should increment scans_gate_rejected"
+    );
+}
+
+#[test]
+fn scan_market_is_gated_while_catalog_is_warming() {
+    let metrics = Arc::new(MetricsHub::new());
+    let book_store = Arc::new(BookStore::new(Arc::clone(&metrics)));
+    let registry = Arc::new(MarketRegistry::new());
+    registry.register_market(sample_market("m-warming"));
+    let market_cache = Arc::new(MarketCache::new(
+        Arc::clone(&registry),
+        Arc::new(MarketUniverseFilter::default()),
+    ));
+    // Fail-closed gate: catalog stays Warming, fresh books notwithstanding.
+    let catalog = Arc::new(CatalogReadiness::new());
+    let scanner = build_scanner_with_catalog(
+        Arc::clone(&book_store),
+        Arc::clone(&market_cache),
+        Arc::clone(&metrics),
+        Arc::clone(&catalog),
+    );
+
+    let entry = market_cache
+        .entries()
+        .first()
+        .expect("cached market")
+        .clone();
+    let now_ms = 10_000u64;
+    seed_full_books(&book_store, &entry.token_yes, &entry.token_no, now_ms - 500);
+    let now = Utc
+        .timestamp_millis_opt(i64::try_from(now_ms).unwrap_or(i64::MAX))
+        .single()
+        .expect("valid timestamp");
+
+    assert!(
+        scanner.scan_market(&entry, now).is_none(),
+        "no opportunities while the catalog is warming"
+    );
+    assert!(
+        scanner.scan_all(now).is_empty(),
+        "scan_all is gated while warming"
+    );
+
+    // First successful sync unlocks detection without rebuilding the scanner.
+    catalog.mark_ready(1, Utc::now());
+    let rejected_before = metrics.scans_gate_rejected.get();
+    let _ = scanner.scan_market(&entry, now);
+    assert_eq!(
+        metrics.scans_gate_rejected.get(),
+        rejected_before,
+        "fresh books should reach BookGate once the catalog is ready"
     );
 }
 

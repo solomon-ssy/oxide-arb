@@ -10,11 +10,14 @@ use crate::{
         market_cache::{CachedMarketScanEntry, MarketCache},
         staleness_classifier::StalenessClassifier,
     },
+    service::catalog_readiness::CatalogReadiness,
 };
 use chrono::{DateTime, Utc};
 use num_traits::ToPrimitive;
 use oxide_arb_algorithm::{pipeline::MarketScanInputRef, scorer::ScoredOpportunity};
-use oxide_arb_models::domain::{CoreEvent, CoreEventPublisher, latency::LatencyTrace};
+use oxide_arb_models::domain::{
+    CatalogStatusPort, CoreEvent, CoreEventPublisher, latency::LatencyTrace,
+};
 use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
@@ -31,26 +34,34 @@ pub struct Scanner {
     detection_writer: Option<Arc<DetectionWriter>>,
     /// Non-blocking real-time bus handle; emits `OpportunityDetected` on detect.
     events: CoreEventPublisher,
+    /// Catalog warmup gate: no opportunities are produced while `Warming`
+    /// (fail-closed; lock-free atomic read on the hot path).
+    catalog: Arc<CatalogReadiness>,
+}
+
+/// Construction dependencies for [`Scanner`].
+pub struct ScannerDeps {
+    pub pipeline: Arc<CoreOpportunityPipeline>,
+    pub book_store: Arc<BookStore>,
+    pub market_cache: Arc<MarketCache>,
+    pub staleness_classifier: StalenessClassifier,
+    pub metrics: Arc<MetricsHub>,
+    pub detection_writer: Option<Arc<DetectionWriter>>,
+    pub events: CoreEventPublisher,
+    pub catalog: Arc<CatalogReadiness>,
 }
 
 impl Scanner {
-    pub const fn new(
-        pipeline: Arc<CoreOpportunityPipeline>,
-        book_store: Arc<BookStore>,
-        market_cache: Arc<MarketCache>,
-        staleness_classifier: StalenessClassifier,
-        metrics: Arc<MetricsHub>,
-        detection_writer: Option<Arc<DetectionWriter>>,
-        events: CoreEventPublisher,
-    ) -> Self {
+    pub fn new(deps: ScannerDeps) -> Self {
         Self {
-            pipeline,
-            book_store,
-            market_cache,
-            staleness_classifier,
-            metrics,
-            detection_writer,
-            events,
+            pipeline: deps.pipeline,
+            book_store: deps.book_store,
+            market_cache: deps.market_cache,
+            staleness_classifier: deps.staleness_classifier,
+            metrics: deps.metrics,
+            detection_writer: deps.detection_writer,
+            events: deps.events,
+            catalog: deps.catalog,
         }
     }
 
@@ -60,6 +71,9 @@ impl Scanner {
         entry: &CachedMarketScanEntry,
         now: DateTime<Utc>,
     ) -> Option<Arc<ScoredOpportunity>> {
+        if !self.catalog.is_ready() {
+            return None;
+        }
         let sample = SCAN_SAMPLE.fetch_add(1, Ordering::Relaxed).trailing_zeros() >= 6;
         let timer = sample.then(|| self.metrics.scan_duration_seconds.start_timer());
 

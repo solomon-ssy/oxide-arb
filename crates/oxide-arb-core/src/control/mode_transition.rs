@@ -38,7 +38,10 @@ use crate::{
     infra::health_checker::HealthChecker,
     pipeline::market_registry::MarketRegistry,
     runtime_config::RuntimeConfigStore,
-    service::risk_metrics::{RiskMetricsRefreshService, RiskMetricsSource, RiskMetricsState},
+    service::{
+        catalog_readiness::CatalogReadiness,
+        risk_metrics::{RiskMetricsRefreshService, RiskMetricsSource, RiskMetricsState},
+    },
 };
 use async_trait::async_trait;
 use chrono::Utc;
@@ -46,8 +49,8 @@ use oxide_arb_api::clob::ClobClient;
 use oxide_arb_models::{
     config::DeployConfig,
     domain::{
-        BlacklistInfo, HealthReport, ModeTransitionReport, RiskEngineState, RuntimeControlError,
-        RuntimeControlPort, SystemStatus,
+        BlacklistInfo, CatalogStatusPort, HealthReport, ModeTransitionReport, RiskEngineState,
+        RuntimeControlError, RuntimeControlPort, SystemStatus,
     },
     enums::{common::ExecutionMode, risk::BlacklistReason},
     runtime_config::validation::validate_runtime_for_mode,
@@ -70,6 +73,8 @@ const QUIESCE_POLL: Duration = Duration::from_millis(100);
 pub struct CoreRuntimeControlDeps {
     pub execution_mode: ExecutionModeHandle,
     pub risk_engine: Arc<RiskEngine>,
+    /// Catalog warmup gate surfaced through `GET /system`.
+    pub catalog: Arc<CatalogReadiness>,
     pub fsm: Arc<ExecutionFSM>,
     pub exposure: Arc<InMemoryExposureReservation>,
     pub metrics: Arc<CoreRiskMetrics>,
@@ -90,6 +95,7 @@ pub struct CoreRuntimeControlDeps {
 pub struct CoreRuntimeControl {
     execution_mode: ExecutionModeHandle,
     risk_engine: Arc<RiskEngine>,
+    catalog: Arc<CatalogReadiness>,
     fsm: Arc<ExecutionFSM>,
     exposure: Arc<InMemoryExposureReservation>,
     metrics: Arc<CoreRiskMetrics>,
@@ -110,6 +116,7 @@ impl CoreRuntimeControl {
         Self {
             execution_mode: deps.execution_mode,
             risk_engine: deps.risk_engine,
+            catalog: deps.catalog,
             fsm: deps.fsm,
             exposure: deps.exposure,
             metrics: deps.metrics,
@@ -322,6 +329,7 @@ impl RuntimeControlPort for CoreRuntimeControl {
                 .unwrap_or(u32::MAX),
             total_exposure: snapshot.total_exposure,
             daily_pnl: snapshot.daily_pnl,
+            catalog: self.catalog.catalog_state(),
             checked_at: Utc::now(),
         }
     }

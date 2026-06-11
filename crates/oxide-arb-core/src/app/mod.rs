@@ -67,6 +67,7 @@ use crate::{
     runtime_config::{RuntimeConfigApplicator, RuntimeConfigStore},
     service::{
         book_update_coalescer::BookUpdateCoalescer,
+        catalog_readiness::CatalogReadiness,
         gamma::GammaService,
         risk_metrics::{RiskMetricsRefreshService, RiskMetricsState},
     },
@@ -86,8 +87,8 @@ use oxide_arb_error::{OxideError, OxideResult};
 use oxide_arb_models::{
     config::DeployConfig,
     domain::{
-        CoreEvent, CoreEventPublisher, MarketDataPort, NewOperationLog, ReplayPort,
-        RuntimeConfigPort, RuntimeConfigRef, RuntimeControlPort,
+        CatalogStatusPort, CoreEvent, CoreEventPublisher, MarketDataPort, NewOperationLog,
+        ReplayPort, RuntimeConfigPort, RuntimeConfigRef, RuntimeControlPort,
         settlement::MarketSettlementRequest,
     },
     enums::common::AlertLevel,
@@ -133,6 +134,8 @@ pub struct InfraBundle {
     pub pg: Arc<PostgresPool>,
     pub ch: Arc<ClickHousePool>,
     pub cache: Arc<TieredCache>,
+    /// JWT revocation pool (dedicated Redis pool, created fail-fast at boot).
+    pub jwt_blacklist: Arc<RedisTokenBlacklist>,
     pub metrics: Arc<MetricsHub>,
     pub alerts: Arc<AlertDispatcher>,
     pub risk_decision_audit: Arc<RiskDecisionAuditBuffer>,
@@ -157,6 +160,8 @@ pub struct DataBundle {
     pub market_cache: Arc<MarketCache>,
     pub data_pipeline: Arc<DataPipeline>,
     pub gamma_service: Arc<GammaService>,
+    /// Catalog warmup gate — `Warming` until the first successful Gamma sync.
+    pub catalog: Arc<CatalogReadiness>,
 }
 
 /// Risk management subsystem.
@@ -501,17 +506,22 @@ impl AppContext {
     async fn assemble_web_state(&self) -> OxideResult<(AppState, Receiver<NewOperationLog>)> {
         let db = self.infra.pg.connection().clone();
 
-        let jwt_blacklist = Arc::new(
-            RedisTokenBlacklist::connect(&self.config.cache.redis)
-                .await
-                .map_err(|error| OxideError::Internal(format!("jwt blacklist: {error}")))?,
-        );
+        // The JWT blacklist pool was already established (and PINGed) during
+        // the infra phase of `AppContext::build`, so web assembly never blocks
+        // on Redis connectivity here.
+        let jwt_blacklist = Arc::clone(&self.infra.jwt_blacklist);
         let blacklist: Arc<dyn TokenBlacklist> = jwt_blacklist.clone();
         let jwt = Arc::new(JwtService::new(
             &self.config.web.jwt,
             Arc::clone(&blacklist),
         ));
-        let readiness = Arc::new(PgRedisReadiness::new(db.clone(), blacklist));
+        let catalog_status = Arc::clone(&self.data.catalog);
+        let catalog_status: Arc<dyn CatalogStatusPort> = catalog_status;
+        let readiness = Arc::new(PgRedisReadiness::new(
+            db.clone(),
+            blacklist,
+            Some(catalog_status),
+        ));
         let metrics = Arc::new(CoreMetricsScrape::new(Arc::clone(&self.infra.metrics)));
 
         let casbin = Arc::new(
@@ -600,6 +610,7 @@ impl AppContext {
         CoreRuntimeControlDeps {
             execution_mode: self.execution_mode.clone(),
             risk_engine: Arc::clone(&self.risk.engine),
+            catalog: Arc::clone(&self.data.catalog),
             fsm: Arc::clone(&self.trading.fsm),
             exposure: Arc::clone(&self.risk.exposure),
             metrics: Arc::clone(&self.risk.metrics),

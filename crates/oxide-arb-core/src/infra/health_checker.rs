@@ -97,24 +97,25 @@ impl HealthChecker {
 
     fn check_ws(&self) -> SubsystemHealth {
         let ws_healthy_threshold_ms: u64 = 30_000;
+        let shards = self.ws_manager.shard_health();
         match self.ws_manager.last_message_age_ms() {
             Some(age_ms) if age_ms < ws_healthy_threshold_ms => SubsystemHealth {
                 name: "websocket".into(),
                 healthy: true,
                 latency_ms: Some(age_ms),
-                detail: None,
+                detail: Some(shards.to_string()),
             },
             Some(age_ms) => SubsystemHealth {
                 name: "websocket".into(),
                 healthy: false,
                 latency_ms: Some(age_ms),
-                detail: Some(format!("no message for {age_ms}ms")),
+                detail: Some(format!("no message for {age_ms}ms; {shards}")),
             },
             None => SubsystemHealth {
                 name: "websocket".into(),
                 healthy: false,
                 latency_ms: None,
-                detail: Some("never connected".into()),
+                detail: Some(format!("never connected; {shards}")),
             },
         }
     }

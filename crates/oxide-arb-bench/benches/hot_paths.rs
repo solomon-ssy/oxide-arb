@@ -20,7 +20,11 @@ use oxide_arb_core::{
         fee_estimator::CoreFeeEstimator, risk_metrics::CoreRiskMetrics,
     },
     control::factor_snapshot::FactorSnapshotStore,
-    detection::{coalescer::Coalescer, funnel::Funnel, scanner::Scanner},
+    detection::{
+        coalescer::Coalescer,
+        funnel::Funnel,
+        scanner::{Scanner, ScannerDeps},
+    },
     execution::{
         capital_manager::CapitalManager,
         dispatcher::Dispatcher,
@@ -46,7 +50,10 @@ use oxide_arb_core::{
         staleness_classifier::StalenessClassifier,
         universe_filter::MarketUniverseFilter,
     },
-    service::risk_metrics::{ApiHealthTracker, RiskMetricsState},
+    service::{
+        catalog_readiness::CatalogReadiness,
+        risk_metrics::{ApiHealthTracker, RiskMetricsState},
+    },
 };
 use oxide_arb_models::runtime_config::NotificationConfig;
 use oxide_arb_models::{
@@ -761,15 +768,18 @@ fn bench_scanner_scan_market(c: &mut Criterion) {
     book_store.apply_snapshot(&no, no_bids, no_asks, now_ms, None);
 
     let pipeline = Arc::new(make_core_pipeline());
-    let scanner = Scanner::new(
+    let catalog = Arc::new(CatalogReadiness::new());
+    catalog.mark_ready(1, Utc::now());
+    let scanner = Scanner::new(ScannerDeps {
         pipeline,
         book_store,
         market_cache,
-        StalenessClassifier::new(&MarketDataRuntimeConfig::default()),
+        staleness_classifier: StalenessClassifier::new(&MarketDataRuntimeConfig::default()),
         metrics,
-        None,
-        CoreEventPublisher::bounded(1).0,
-    );
+        detection_writer: None,
+        events: CoreEventPublisher::bounded(1).0,
+        catalog,
+    });
     let entry = CachedMarketScanEntry {
         market_id: MarketId::new("bench-m1"),
         event_id: EventId::new("evt"),

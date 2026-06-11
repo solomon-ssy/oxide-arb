@@ -39,7 +39,7 @@ pub const MENUS_SEED: SeedSpec = SeedSpec {
 };
 
 /// Stable namespace for deterministic menu UUIDs (v5 over node `name`).
-fn menu_namespace() -> Uuid {
+const fn menu_namespace() -> Uuid {
     Uuid::from_u128(0x0000_0040_0080_0000_0000_0000_0000_0001)
 }
 
@@ -113,11 +113,10 @@ impl MenuTree {
         let sort = self.next_sort;
         self.next_sort += 1;
         let hide_in_menu = matches!(spec.kind, MenuKind::Button);
-        let permission_code = spec.permission_code.clone();
         self.grants.push(MenuGrantSpec {
             id: id.clone(),
             kind: spec.kind,
-            permission_code: permission_code.clone(),
+            permission_code: spec.permission_code.clone(),
         });
         self.models.push(menu::ActiveModel {
             id: Set(id.clone()),
@@ -194,11 +193,7 @@ fn build_tree() -> MenuTree {
 }
 
 fn build_dashboard(t: &mut MenuTree) {
-    let dashboard_root = t.dir(
-        "dashboard_root",
-        "page.menu.group.dashboard",
-        "dashboard",
-    );
+    let dashboard_root = t.dir("dashboard_root", "page.menu.group.dashboard", "dashboard");
     let overview = t.page(
         &dashboard_root,
         "dashboard",
@@ -300,11 +295,7 @@ fn build_risk(t: &mut MenuTree) {
 }
 
 fn build_analytics(t: &mut MenuTree) {
-    let analytics_root = t.dir(
-        "analytics-root",
-        "page.menu.group.analytics",
-        "analytics",
-    );
+    let analytics_root = t.dir("analytics-root", "page.menu.group.analytics", "analytics");
     t.page(
         &analytics_root,
         "analytics",
@@ -316,37 +307,8 @@ fn build_analytics(t: &mut MenuTree) {
 }
 
 fn build_operations(t: &mut MenuTree) {
-    let operations = t.dir(
-        "operations",
-        "page.menu.group.operations",
-        "governance",
-    );
-    let runtime_config = t.page(
-        &operations,
-        "runtime-config",
-        "page.menu.runtimeConfig",
-        "/runtime-config",
-        "runtime-config/index",
-        Some(perm(ResourceType::RuntimeConfig, Operation::Read)),
-    );
-    t.button(
-        &runtime_config,
-        "runtime_config:create",
-        "Create Version",
-        perm(ResourceType::RuntimeConfig, Operation::Create),
-    );
-    t.button(
-        &runtime_config,
-        "runtime_config:activate",
-        "Activate Version",
-        perm(ResourceType::RuntimeConfig, Operation::Activate),
-    );
-    t.button(
-        &runtime_config,
-        "runtime_config:rollback",
-        "Rollback Version",
-        perm(ResourceType::RuntimeConfig, Operation::Rollback),
-    );
+    let operations = t.dir("operations", "page.menu.group.operations", "governance");
+    build_operations_runtime_config(t, &operations);
     let control_factors = t.page(
         &operations,
         "control-factors",
@@ -425,12 +387,38 @@ fn build_operations(t: &mut MenuTree) {
     );
 }
 
-fn build_access_control(t: &mut MenuTree) {
-    let access = t.dir(
-        "access-control",
-        "page.menu.group.accessControl",
-        "access",
+/// Runtime-config page + version-lifecycle buttons under `operations`.
+fn build_operations_runtime_config(t: &mut MenuTree, operations: &MenuId) {
+    let runtime_config = t.page(
+        operations,
+        "runtime-config",
+        "page.menu.runtimeConfig",
+        "/runtime-config",
+        "runtime-config/index",
+        Some(perm(ResourceType::RuntimeConfig, Operation::Read)),
     );
+    t.button(
+        &runtime_config,
+        "runtime_config:create",
+        "Create Version",
+        perm(ResourceType::RuntimeConfig, Operation::Create),
+    );
+    t.button(
+        &runtime_config,
+        "runtime_config:activate",
+        "Activate Version",
+        perm(ResourceType::RuntimeConfig, Operation::Activate),
+    );
+    t.button(
+        &runtime_config,
+        "runtime_config:rollback",
+        "Rollback Version",
+        perm(ResourceType::RuntimeConfig, Operation::Rollback),
+    );
+}
+
+fn build_access_control(t: &mut MenuTree) {
+    let access = t.dir("access-control", "page.menu.group.accessControl", "access");
     let users = t.page(
         &access,
         "users",

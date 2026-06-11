@@ -30,11 +30,12 @@ use oxide_arb_core::{
 };
 use oxide_arb_error::auth::AuthError;
 use oxide_arb_models::{
-    config::{DeployConfig, JwtConfig},
+    config::{DeployConfig, JwtConfig, RedisConfig},
     domain::{
-        BlacklistInfo, CoreEventPublisher, HealthReport, MarketDataPort, ModeTransitionReport,
-        ReplayEnqueueRequest, ReplayEnqueueResult, ReplayPort, RiskEngineState, RuntimeConfigPort,
-        RuntimeControlError, RuntimeControlPort, SystemStatus, market::book::BookSnapshot,
+        BlacklistInfo, CatalogState, CoreEventPublisher, HealthReport, MarketDataPort,
+        ModeTransitionReport, ReplayEnqueueRequest, ReplayEnqueueResult, ReplayPort,
+        RiskEngineState, RuntimeConfigPort, RuntimeControlError, RuntimeControlPort, SystemStatus,
+        market::book::BookSnapshot,
     },
     enums::{
         common::ExecutionMode,
@@ -108,6 +109,20 @@ pub struct TestEnv {
     ws_shutdown: CancellationToken,
 }
 
+/// Connect the JWT revocation store and verify it is reachable.
+async fn connect_blacklist(redis_cfg: &RedisConfig) -> Arc<RedisTokenBlacklist> {
+    let jwt_blacklist = Arc::new(
+        RedisTokenBlacklist::connect(redis_cfg)
+            .await
+            .expect("redis blacklist"),
+    );
+    jwt_blacklist
+        .health_check()
+        .await
+        .expect("redis blacklist health");
+    jwt_blacklist
+}
+
 impl TestEnv {
     /// Bring up Postgres + Redis and assemble the production `AppState`.
     pub async fn start() -> Self {
@@ -115,15 +130,7 @@ impl TestEnv {
         let (redis_port, redis_container) = redis::setup_redis().await;
         let redis_cfg = redis::test_redis_config(redis_port);
 
-        let jwt_blacklist = Arc::new(
-            RedisTokenBlacklist::connect(&redis_cfg)
-                .await
-                .expect("redis blacklist"),
-        );
-        jwt_blacklist
-            .health_check()
-            .await
-            .expect("redis blacklist health");
+        let jwt_blacklist = connect_blacklist(&redis_cfg).await;
         let blacklist = Arc::clone(&jwt_blacklist) as Arc<dyn TokenBlacklist>;
         let jwt = Arc::new(JwtService::new(&jwt_config(), Arc::clone(&blacklist)));
 
@@ -172,7 +179,11 @@ impl TestEnv {
         ));
 
         let metrics = Arc::new(CoreMetricsScrape::new(Arc::new(MetricsHub::new())));
-        let readiness = Arc::new(PgRedisReadiness::new(db.clone(), Arc::clone(&blacklist)));
+        let readiness = Arc::new(PgRedisReadiness::new(
+            db.clone(),
+            Arc::clone(&blacklist),
+            None,
+        ));
 
         let runtime_config_apply = Arc::new(MockRuntimeConfigApply::default());
         let state = AppState {
@@ -510,6 +521,10 @@ impl RuntimeControlPort for MockRuntimeControl {
             pending_reservations: 0,
             total_exposure: Usd::ZERO,
             daily_pnl: Usd::ZERO,
+            catalog: CatalogState::Ready {
+                markets: 1,
+                synced_at: Utc::now(),
+            },
             checked_at: Utc::now(),
         }
     }

@@ -21,7 +21,7 @@ use crate::{
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -246,4 +246,43 @@ pub struct ReadinessReport {
 pub trait ReadinessPort: Send + Sync {
     /// Run all required dependency probes.
     async fn check(&self) -> ReadinessReport;
+}
+
+/// Market-catalog warmup state.
+///
+/// The catalog is `Warming` from process start until the first successful
+/// Gamma full sync; detection is gated off (fail-closed) while warming, but
+/// the web control plane stays fully available.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum CatalogState {
+    /// First Gamma sync has not completed yet.
+    Warming,
+    /// Catalog synced — markets registered and detection unlocked.
+    Ready {
+        /// Markets registered by the most recent successful sync.
+        markets: u64,
+        /// Completion time of the most recent successful sync.
+        synced_at: DateTime<Utc>,
+    },
+}
+
+impl CatalogState {
+    /// Whether the first catalog sync has completed.
+    #[must_use]
+    pub const fn is_ready(&self) -> bool {
+        matches!(self, Self::Ready { .. })
+    }
+}
+
+/// Catalog readiness surface (dependency-inverted).
+///
+/// Implemented by `oxide-arb-core` over its `CatalogReadiness` watch state so
+/// the web readiness report can include the catalog without depending on core.
+pub trait CatalogStatusPort: Send + Sync {
+    /// Current warmup state snapshot.
+    fn catalog_state(&self) -> CatalogState;
+
+    /// Cheap flag: `true` once the first sync completed (hot-path friendly).
+    fn is_ready(&self) -> bool;
 }

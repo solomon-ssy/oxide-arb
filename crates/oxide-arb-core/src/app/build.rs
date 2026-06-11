@@ -24,7 +24,11 @@ use crate::{
         factor_shadow::{ShadowDecisionWriter, ShadowWriterTask},
         factor_snapshot::FactorSnapshotStore,
     },
-    detection::{coalescer::Coalescer, funnel::Funnel, scanner::Scanner},
+    detection::{
+        coalescer::Coalescer,
+        funnel::Funnel,
+        scanner::{Scanner, ScannerDeps},
+    },
     execution::{
         capital_manager::CapitalManager,
         dispatcher::Dispatcher,
@@ -64,6 +68,7 @@ use crate::{
     },
     runtime_config::{RuntimeConfigApplicator, RuntimeConfigStore, RuntimeConfigSubscribers},
     service::{
+        catalog_readiness::CatalogReadiness,
         equity_valuator::EquityValuator,
         gamma::{GammaService, GammaServiceDeps},
         risk_metrics::{ApiHealthTracker, RiskMetricsRefreshService, RiskMetricsState},
@@ -132,6 +137,7 @@ use oxide_arb_storage::{
         migration::{Migrator, MigratorTrait},
     },
 };
+use oxide_arb_web::jwt::RedisTokenBlacklist;
 use parking_lot::Mutex;
 use std::{
     sync::{Arc, atomic::AtomicU32},
@@ -169,6 +175,11 @@ struct BuildInfra {
     pg_pool: Arc<PostgresPool>,
     ch_pool: Arc<ClickHousePool>,
     cache: Arc<TieredCache>,
+    /// JWT revocation pool — created fail-fast in the infra phase, isolated
+    /// from cache traffic on a dedicated Redis pool.
+    jwt_blacklist: Arc<RedisTokenBlacklist>,
+    /// Catalog warmup gate (`Warming` until the first successful Gamma sync).
+    catalog: Arc<CatalogReadiness>,
     metrics: Arc<MetricsHub>,
     alerts: Arc<AlertDispatcher>,
     risk_decision_audit: Arc<RiskDecisionAuditBuffer>,
@@ -194,6 +205,8 @@ struct AssembledInfra {
     pg_pool: Arc<PostgresPool>,
     ch_pool: Arc<ClickHousePool>,
     cache: Arc<TieredCache>,
+    jwt_blacklist: Arc<RedisTokenBlacklist>,
+    catalog: Arc<CatalogReadiness>,
     metrics: Arc<MetricsHub>,
     alerts: Arc<AlertDispatcher>,
     risk_decision_audit: Arc<RiskDecisionAuditBuffer>,
@@ -408,6 +421,8 @@ fn finish_infra(
         pg_pool,
         ch_pool,
         cache,
+        jwt_blacklist,
+        catalog,
         metrics,
         alerts,
         risk_decision_audit,
@@ -434,6 +449,8 @@ fn finish_infra(
         pg_pool,
         ch_pool,
         cache,
+        jwt_blacklist,
+        catalog,
         metrics,
         alerts,
         risk_decision_audit,
@@ -582,6 +599,7 @@ fn assemble_app_context(parts: AppContextAssembly) -> AppContext {
             pg: infra.pg_pool,
             ch: infra.ch_pool,
             cache: infra.cache,
+            jwt_blacklist: infra.jwt_blacklist,
             metrics: infra.metrics,
             alerts: infra.alerts,
             risk_decision_audit: infra.risk_decision_audit,
@@ -604,6 +622,7 @@ fn assemble_app_context(parts: AppContextAssembly) -> AppContext {
             market_cache: trading.market_cache,
             data_pipeline: trading.data_pipeline,
             gamma_service: trading.gamma_service,
+            catalog: infra.catalog,
         },
         risk: RiskBundle {
             engine: risk.engine,
@@ -697,6 +716,17 @@ async fn connect_infra(
         RedisBackend::new(&deploy.cache.redis).await?,
     ));
 
+    // JWT revocation blacklist pool — created here in the infra phase so a
+    // misconfigured / unreachable Redis fails the boot within seconds, before
+    // any market-data subscription can compete for the network. Kept as a
+    // dedicated pool (separate from the cache backend) so revocation checks
+    // are isolated from cache traffic.
+    let jwt_blacklist = Arc::new(RedisTokenBlacklist::connect(&deploy.cache.redis).await?);
+
+    // Catalog warmup gate: detection stays fail-closed until the first
+    // successful Gamma sync flips it to Ready (see `queue_gamma_sync`).
+    let catalog = Arc::new(CatalogReadiness::new());
+
     let write_manager = Arc::new(ChWriteManager::new(
         deploy.db.clickhouse.max_concurrent_inserts,
     ));
@@ -741,6 +771,8 @@ async fn connect_infra(
             pg_pool,
             ch_pool,
             cache,
+            jwt_blacklist,
+            catalog,
             metrics,
             alerts,
             risk_decision_audit,
@@ -1217,15 +1249,16 @@ async fn wire_detection(
     // One classifier, cloned into scanner + validator; the applicator reloads
     // it once and every consumer observes the new ladder.
     let staleness = StalenessClassifier::new(&runtime.market_data);
-    let scanner = Arc::new(Scanner::new(
-        Arc::clone(&opportunity_pipeline),
-        Arc::clone(&book_store),
-        Arc::clone(&market_cache),
-        staleness.clone(),
-        Arc::clone(&infra.metrics),
-        Some(Arc::clone(&infra.persistence.detection_writer)),
-        events.clone(),
-    ));
+    let scanner = Arc::new(Scanner::new(ScannerDeps {
+        pipeline: Arc::clone(&opportunity_pipeline),
+        book_store: Arc::clone(&book_store),
+        market_cache: Arc::clone(&market_cache),
+        staleness_classifier: staleness.clone(),
+        metrics: Arc::clone(&infra.metrics),
+        detection_writer: Some(Arc::clone(&infra.persistence.detection_writer)),
+        events: events.clone(),
+        catalog: Arc::clone(&infra.catalog),
+    }));
 
     let (token_tx, token_rx) = flume::bounded(8192);
     let (market_tx, market_rx) = flume::bounded(512);
@@ -1255,18 +1288,10 @@ async fn wire_detection(
         full_sync_interval_secs: deploy.market_data.gamma.full_sync_interval_secs,
     }));
 
-    gamma_service.sync().await.map_err(|error| {
-        tracing::error!(
-            %error,
-            "Gamma startup sync failed — cannot start without market catalog"
-        );
-        error
-    })?;
-
-    tracing::info!(
-        markets = market_registry.market_count(),
-        "Gamma startup sync complete"
-    );
+    // The first Gamma sync is NOT awaited here: catalog warmup runs as a
+    // background task with unlimited retry (see `queue_gamma_sync`), so the
+    // web control plane comes up in seconds and a Polymarket outage can never
+    // block or kill the boot. Detection stays gated until the catalog is Ready.
 
     Ok(DetectionStack {
         book_store,

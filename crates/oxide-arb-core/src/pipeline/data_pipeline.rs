@@ -248,11 +248,7 @@ impl BookApplyWorker {
             }
 
             PipelineEvent::ShardStatus { shard_id, status } => {
-                tracing::info!(shard_id, ?status, "Shard status change");
-                self.metrics.shard_status_changes.inc();
-                if let Some(writer) = &self.book_fact_writer {
-                    self.write_shard_status_facts(writer, shard_id, status);
-                }
+                self.on_shard_status(shard_id, status);
             }
 
             PipelineEvent::BestBidAsk {
@@ -333,6 +329,21 @@ impl BookApplyWorker {
             self.backpressure.on_coalescer_notify_success(asset_id);
         } else {
             self.backpressure.on_coalescer_channel_full(asset_id);
+        }
+    }
+
+    /// Shard connectivity surfaces: per-transition detail stays at debug —
+    /// aggregate health is the `HealthChecker` summary plus a per-shard gauge.
+    fn on_shard_status(&self, shard_id: usize, status: ShardConnectionStatus) {
+        tracing::debug!(shard_id, ?status, "Shard status change");
+        self.metrics.shard_status_changes.inc();
+        let connected = matches!(status, ShardConnectionStatus::Connected);
+        self.metrics
+            .ws_shard_connected
+            .with_label_values(&[&shard_id.to_string()])
+            .set(i64::from(connected));
+        if let Some(writer) = &self.book_fact_writer {
+            self.write_shard_status_facts(writer, shard_id, status);
         }
     }
 

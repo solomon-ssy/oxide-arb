@@ -1,7 +1,7 @@
 //! System status, lifecycle, config, accounting, and reporting domain models.
 
 use crate::{
-    domain::{NullablePatch, Patch},
+    domain::{NullablePatch, Patch, control_ports::CatalogState},
     enums::{
         common::{ExecutionMode, ReportType},
         lifecycle::ShutdownStage,
@@ -28,6 +28,8 @@ pub struct SystemStatus {
     pub pending_reservations: u32,
     pub total_exposure: Usd,
     pub daily_pnl: Usd,
+    /// Market-catalog warmup state (detection is gated until `Ready`).
+    pub catalog: CatalogState,
     pub checked_at: DateTime<Utc>,
 }
 

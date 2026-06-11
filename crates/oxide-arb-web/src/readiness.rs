@@ -7,23 +7,40 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use oxide_arb_models::domain::{DependencyCheck, ReadinessPort, ReadinessReport};
+use oxide_arb_models::domain::{
+    CatalogState, CatalogStatusPort, DependencyCheck, ReadinessPort, ReadinessReport,
+};
 use sea_orm::{ConnectionTrait, DatabaseConnection, Statement};
 use tracing::warn;
 
 use crate::jwt::TokenBlacklist;
 
 /// Readiness probe over the web tier's mandatory dependencies.
+///
+/// Postgres and Redis gate `ready` (the web tier cannot authenticate without
+/// them). The market-catalog check is **informational only**: the control
+/// plane must stay routable during catalog warmup, so a `Warming` catalog is
+/// reported in `checks` but never flips `ready` to false.
 pub struct PgRedisReadiness {
     db: DatabaseConnection,
     blacklist: Arc<dyn TokenBlacklist>,
+    catalog: Option<Arc<dyn CatalogStatusPort>>,
 }
 
 impl PgRedisReadiness {
-    /// Build a probe over the shared Postgres connection and JWT blacklist store.
+    /// Build a probe over the shared Postgres connection, the JWT blacklist
+    /// store, and (optionally) the market-catalog warmup gate.
     #[must_use]
-    pub fn new(db: DatabaseConnection, blacklist: Arc<dyn TokenBlacklist>) -> Self {
-        Self { db, blacklist }
+    pub fn new(
+        db: DatabaseConnection,
+        blacklist: Arc<dyn TokenBlacklist>,
+        catalog: Option<Arc<dyn CatalogStatusPort>>,
+    ) -> Self {
+        Self {
+            db,
+            blacklist,
+            catalog,
+        }
     }
 
     async fn check_postgres(&self) -> DependencyCheck {
@@ -69,14 +86,36 @@ impl PgRedisReadiness {
             }
         }
     }
+
+    /// Informational catalog check (never gates `ready`).
+    fn check_catalog(&self) -> Option<DependencyCheck> {
+        let catalog = self.catalog.as_ref()?;
+        Some(match catalog.catalog_state() {
+            CatalogState::Ready { markets, synced_at } => DependencyCheck {
+                name: "catalog",
+                ok: true,
+                detail: Some(format!("{markets} markets, synced at {synced_at}")),
+            },
+            CatalogState::Warming => DependencyCheck {
+                name: "catalog",
+                ok: false,
+                detail: Some("warming — first Gamma catalog sync pending".to_owned()),
+            },
+        })
+    }
 }
 
 #[async_trait]
 impl ReadinessPort for PgRedisReadiness {
     async fn check(&self) -> ReadinessReport {
         let (postgres, redis) = tokio::join!(self.check_postgres(), self.check_redis());
-        let checks = vec![postgres, redis];
+        let mut checks = vec![postgres, redis];
+        // `ready` is computed over the required dependencies only — the
+        // catalog check below is informational (warmup must not stop traffic).
         let ready = checks.iter().all(|check| check.ok);
+        if let Some(catalog) = self.check_catalog() {
+            checks.push(catalog);
+        }
         ReadinessReport { ready, checks }
     }
 }

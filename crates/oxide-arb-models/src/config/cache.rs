@@ -78,8 +78,15 @@ pub struct RedisConfig {
     pub database: u8,
     /// Connection pool size. Default: `8`.
     pub pool_size: u32,
-    /// Per-operation timeout (ms). Default: `1000`.
+    /// Per-operation timeout (ms): how long a caller waits for a pooled
+    /// connection at steady state. Default: `1000`.
     pub timeout_ms: u64,
+    /// Startup readiness budget (ms): how long pool creation may take to
+    /// establish and PING the first connection before the process fails
+    /// closed. Kept separate from [`timeout_ms`](Self::timeout_ms) so a tight
+    /// per-operation deadline never starves initial connection establishment
+    /// under load. Default: `5000`.
+    pub connect_timeout_ms: u64,
     /// Key namespace prefix. Default: `oarb:`.
     pub key_prefix: String,
 }
@@ -94,6 +101,7 @@ impl Default for RedisConfig {
             database: 0,
             pool_size: default_redis_pool(),
             timeout_ms: default_redis_timeout(),
+            connect_timeout_ms: default_redis_connect_timeout(),
             key_prefix: default_redis_key_prefix(),
         }
     }
@@ -158,6 +166,9 @@ const fn default_redis_pool() -> u32 {
 }
 const fn default_redis_timeout() -> u64 {
     1000
+}
+const fn default_redis_connect_timeout() -> u64 {
+    5000
 }
 fn default_redis_key_prefix() -> String {
     "oarb:".into()

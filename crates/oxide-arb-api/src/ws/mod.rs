@@ -6,6 +6,7 @@
 //! unified bounded channel.
 
 mod drop_hook;
+mod health;
 mod ingest_hooks;
 pub mod normalize;
 mod reconnect;
@@ -14,10 +15,12 @@ mod shard;
 mod token_intern;
 
 pub use drop_hook::WsEventDropHook;
+pub use health::{ShardHealthBoard, ShardHealthSummary};
 pub use ingest_hooks::BookLevelRejectHook;
 pub use reconnect::ReconnectPolicy;
 pub use token_intern::{TOKEN_INTERN, TokenInternPool, intern_str, intern_u256};
 
+use crate::infra::retry::RetryPolicy;
 use flume::Receiver;
 use num_traits::ToPrimitive;
 use oxide_arb_models::{
@@ -26,7 +29,13 @@ use oxide_arb_models::{
     types::TokenId,
 };
 use router::ShardRouter;
-use std::{collections::HashSet, sync::Arc, time::Instant};
+use shard::ShardDeps;
+use std::{
+    collections::HashSet,
+    sync::Arc,
+    time::{Duration, Instant},
+};
+use tokio::sync::Semaphore;
 
 /// Who requested a token subscription.
 ///
@@ -118,6 +127,11 @@ impl SubscriptionState {
     }
 }
 
+/// Upper bound on simultaneous connection establishments across all shards.
+/// Bounds the TLS-handshake burst after a catalog sync or network flap so the
+/// herd cannot overwhelm a proxy (e.g. TUN) or trip server-side rate limits.
+const MAX_CONCURRENT_CONNECTS: usize = 4;
+
 /// Manages sharded WebSocket connections to Polymarket CLOB.
 ///
 /// Each shard handles up to `max_subscriptions_per_connection` tokens.
@@ -128,10 +142,12 @@ pub struct ClobWsManager {
     ws_url: String,
     last_message_at: Arc<parking_lot::Mutex<Option<Instant>>>,
     subscriptions: parking_lot::Mutex<SubscriptionState>,
+    health: Arc<ShardHealthBoard>,
 }
 
 impl ClobWsManager {
-    /// Create a new manager. Shard tasks are spawned on first `subscribe` call.
+    /// Create a new manager. Shard actors are spawned on first `subscribe` call
+    /// and stay resident until shutdown.
     pub fn new(
         polymarket_config: &PolymarketConfig,
         ws_config: &WebSocketConfig,
@@ -141,14 +157,40 @@ impl ClobWsManager {
     ) -> Self {
         let (output_tx, output_rx) = flume::bounded(8192);
         let last_message_at = Arc::new(parking_lot::Mutex::new(None));
+        let health = Arc::new(ShardHealthBoard::default());
+        // `[market_data.websocket]` reconnect knobs drive both backoff layers:
+        // the shard loop and the SDK-internal reconnect.
+        let initial_backoff = Duration::from_millis(ws_config.reconnect_delay_ms.max(1));
+        let max_backoff = Duration::from_millis(
+            ws_config
+                .max_reconnect_delay_ms
+                .max(ws_config.reconnect_delay_ms),
+        );
+        let reconnect_policy = ReconnectPolicy::new(RetryPolicy {
+            max_attempts: None,
+            initial_interval_ms: ws_config.reconnect_delay_ms.max(1),
+            max_interval_ms: ws_config
+                .max_reconnect_delay_ms
+                .max(ws_config.reconnect_delay_ms),
+            randomization_factor: 0.2,
+            multiplier: 2.0,
+            max_elapsed_time_ms: None,
+        });
         let router = ShardRouter::new(
             ws_config.max_subscriptions_per_connection,
-            output_tx,
-            polymarket_config.clob_ws_url.clone(),
-            shutdown,
-            Arc::clone(&last_message_at),
-            on_events_dropped,
-            on_book_level_rejected,
+            ShardDeps {
+                output_tx,
+                ws_url: polymarket_config.clob_ws_url.clone(),
+                shutdown,
+                last_message_at: Arc::clone(&last_message_at),
+                on_events_dropped,
+                on_book_level_rejected,
+                reconnect_policy,
+                sdk_initial_backoff: initial_backoff,
+                sdk_max_backoff: max_backoff,
+                connect_limiter: Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTS)),
+                health: Arc::clone(&health),
+            },
         );
 
         Self {
@@ -157,6 +199,7 @@ impl ClobWsManager {
             ws_url: polymarket_config.clob_ws_url.clone(),
             last_message_at,
             subscriptions: parking_lot::Mutex::new(SubscriptionState::default()),
+            health,
         }
     }
 
@@ -212,6 +255,12 @@ impl ClobWsManager {
     /// Returns the number of active shards.
     pub fn shard_count(&self) -> usize {
         self.router.shard_count()
+    }
+
+    /// Aggregated per-shard connection health (operator summaries).
+    #[must_use]
+    pub fn shard_health(&self) -> ShardHealthSummary {
+        self.health.summary()
     }
 
     /// Get the WebSocket URL.

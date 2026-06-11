@@ -58,19 +58,11 @@ fn policy_sets() -> HashMap<&'static str, HashSet<String>> {
         .collect()
 }
 
-fn menu_granted(
-    kind: MenuKind,
-    permission_code: &Option<String>,
-    policies: &HashSet<String>,
-) -> bool {
+fn menu_granted(kind: MenuKind, permission_code: Option<&str>, policies: &HashSet<String>) -> bool {
     match kind {
         MenuKind::Directory => false,
-        MenuKind::Menu => permission_code
-            .as_ref()
-            .is_none_or(|code| policies.contains(code)),
-        MenuKind::Button => permission_code
-            .as_ref()
-            .is_some_and(|code| policies.contains(code)),
+        MenuKind::Menu => permission_code.is_none_or(|code| policies.contains(code)),
+        MenuKind::Button => permission_code.is_some_and(|code| policies.contains(code)),
     }
 }
 
@@ -88,14 +80,14 @@ pub async fn load(db: &dyn ConnectionTrait, ctx: &mut SeedContext) -> Result<u64
     let mut models = Vec::new();
 
     for row in &menu_grants {
-        for (role_code, role_id) in roles.iter() {
+        for (role_code, role_id) in roles {
             let grant = if *role_code == ROLE_SUPER_ADMIN {
                 true
             } else {
                 let Some(policies) = policies_by_role.get(role_code) else {
                     continue;
                 };
-                menu_granted(row.kind, &row.permission_code, policies)
+                menu_granted(row.kind, row.permission_code.as_deref(), policies)
             };
 
             if grant {
@@ -138,13 +130,9 @@ mod tests {
         let policies = sets.get("viewer").expect("viewer policies");
         assert!(!menu_granted(
             MenuKind::Button,
-            &Some("market:update".to_owned()),
+            Some("market:update"),
             policies,
         ));
-        assert!(menu_granted(
-            MenuKind::Menu,
-            &Some("market:read".to_owned()),
-            policies,
-        ));
+        assert!(menu_granted(MenuKind::Menu, Some("market:read"), policies));
     }
 }

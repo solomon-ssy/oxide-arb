@@ -279,8 +279,14 @@ password = ""
 database = 0
 # Purpose: connection pool size. Default: 8.
 pool_size = 8
-# Purpose: per-operation timeout (ms). Default: 1000.
+# Purpose: per-operation timeout (ms): how long a caller waits for a pooled
+# connection at steady state. Default: 1000.
 timeout_ms = 1000
+# Purpose: startup readiness budget (ms): total time allowed to establish and
+# PING the first connection (cache pool + JWT blacklist pool) before the
+# process fails closed. Kept separate from timeout_ms so a tight per-operation
+# deadline never starves initial connection establishment. Default: 5000.
+connect_timeout_ms = 5000
 # Purpose: key namespace prefix. Default: "oarb:".
 key_prefix = "oarb:"
 
@@ -295,8 +301,8 @@ max_capacity = 10000
 [web]
 # Purpose: bind address. Default: "0.0.0.0".
 listen_host = "0.0.0.0"
-# Purpose: bind port (REST + WS + Prometheus GET /metrics). Default: 8080.
-listen_port = 8080
+# Purpose: bind port (REST + WS + Prometheus GET /metrics). Default: 8088.
+listen_port = 8088
 # Purpose: allowed CORS origins; empty disables cross-origin requests.
 # Default: [].
 cors_allowed_origins = []
