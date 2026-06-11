@@ -686,12 +686,13 @@ fn market_context_from_snapshot(
     snapshot: MarketPitSnapshotInfo,
     as_of: chrono::DateTime<Utc>,
 ) -> MarketReplayContext {
+    let category = snapshot.category_set().fee_category();
     MarketReplayContext {
         market_id: snapshot.market_id,
         event_id: Some(snapshot.event_id),
         yes_token_id: snapshot.yes_token_id,
         no_token_id: snapshot.no_token_id,
-        category: Some(snapshot.category),
+        category: Some(category),
         settlement_deadline: snapshot.end_date,
         resolved_as_of: as_of,
         source_hash: snapshot.payload_hash,
@@ -708,7 +709,7 @@ fn market_context_from_current(
         event_id: Some(market.event_id.clone()),
         yes_token_id: market.yes_token_id.clone(),
         no_token_id: market.no_token_id.clone(),
-        category: Some(market.category),
+        category: Some(market.fee_category()),
         settlement_deadline: market.end_date,
         resolved_as_of: as_of,
         source_hash,

@@ -2,6 +2,7 @@
 
 use serde::Deserialize;
 use std::collections::HashMap;
+use url::Url;
 
 /// Tiered cache (in-process Moka L1 + Redis L2) policy.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -59,12 +60,22 @@ impl Default for CacheConfig {
     }
 }
 
-/// Redis connection.
+/// Redis connection (L2 cache + JWT revocation blacklist).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct RedisConfig {
-    /// Connection URL. Default: `redis://localhost:6379`.
-    pub url: String,
+    /// Server host. Default: `localhost`.
+    pub host: String,
+    /// Server port. Default: `6379`.
+    pub port: u16,
+    /// ACL username. Leave empty when the server uses password-only auth
+    /// (`requirepass`). Default: empty.
+    pub user: String,
+    /// Password. Set via `OXIDE_ARB__CACHE__REDIS__PASSWORD` in production —
+    /// never in the TOML. Default: empty.
+    pub password: String,
+    /// Logical database index (`SELECT`). Default: `0`.
+    pub database: u8,
     /// Connection pool size. Default: `8`.
     pub pool_size: u32,
     /// Per-operation timeout (ms). Default: `1000`.
@@ -76,7 +87,11 @@ pub struct RedisConfig {
 impl Default for RedisConfig {
     fn default() -> Self {
         Self {
-            url: default_redis_url(),
+            host: default_redis_host(),
+            port: default_redis_port(),
+            user: String::new(),
+            password: String::new(),
+            database: 0,
             pool_size: default_redis_pool(),
             timeout_ms: default_redis_timeout(),
             key_prefix: default_redis_key_prefix(),
@@ -84,8 +99,59 @@ impl Default for RedisConfig {
     }
 }
 
-fn default_redis_url() -> String {
-    "redis://localhost:6379".into()
+impl RedisConfig {
+    /// Human-readable endpoint for logs and diagnostics (never includes credentials).
+    #[must_use]
+    pub fn endpoint(&self) -> String {
+        if self.database == 0 {
+            format!("{}:{}", self.host, self.port)
+        } else {
+            format!("{}:{}/{}", self.host, self.port, self.database)
+        }
+    }
+
+    /// Build the Redis connection URL consumed by deadpool-redis / redis-rs.
+    ///
+    /// Userinfo components are percent-encoded per RFC 3986.
+    pub fn try_connection_url(&self) -> Result<String, url::ParseError> {
+        let mut url = Url::parse("redis://localhost/")?;
+        url.set_host(Some(self.host.as_str()))?;
+        url.set_port(Some(self.port)).ok();
+        if !self.user.is_empty() && url.set_username(&self.user).is_err() {
+            return Err(url::ParseError::InvalidDomainCharacter);
+        }
+        if !self.password.is_empty() {
+            url.set_password(Some(&self.password)).ok();
+        }
+        if self.database != 0 {
+            url.set_path(&format!("/{}", self.database));
+        } else {
+            url.set_path("");
+        }
+        Ok(url.to_string())
+    }
+
+    /// Build the Redis connection URL, panicking only when host/port are invalid.
+    ///
+    /// Callers should prefer [`Self::try_connection_url`] when surfacing errors
+    /// to operators; this helper exists for call sites that already validated
+    /// the deploy config at startup.
+    #[must_use]
+    pub fn connection_url(&self) -> String {
+        self.try_connection_url().unwrap_or_else(|error| {
+            panic!(
+                "invalid redis config (host={:?}, port={}): {error}",
+                self.host, self.port
+            )
+        })
+    }
+}
+
+fn default_redis_host() -> String {
+    "localhost".into()
+}
+const fn default_redis_port() -> u16 {
+    6379
 }
 const fn default_redis_pool() -> u32 {
     8
@@ -118,4 +184,57 @@ impl Default for MokaConfig {
 
 const fn default_moka_max_cap() -> u64 {
     10_000
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RedisConfig;
+
+    #[test]
+    fn connection_url_without_auth_uses_host_and_port() {
+        let cfg = RedisConfig::default();
+        assert_eq!(cfg.connection_url(), "redis://localhost:6379");
+        assert_eq!(cfg.endpoint(), "localhost:6379");
+    }
+
+    #[test]
+    fn connection_url_password_only_auth() {
+        let cfg = RedisConfig {
+            password: "s3cret".into(),
+            ..RedisConfig::default()
+        };
+        assert_eq!(cfg.connection_url(), "redis://:s3cret@localhost:6379");
+    }
+
+    #[test]
+    fn connection_url_user_and_password_auth() {
+        let cfg = RedisConfig {
+            user: "oxide".into(),
+            password: "s3cret".into(),
+            ..RedisConfig::default()
+        };
+        assert_eq!(cfg.connection_url(), "redis://oxide:s3cret@localhost:6379");
+    }
+
+    #[test]
+    fn connection_url_percent_encodes_special_characters() {
+        let cfg = RedisConfig {
+            password: "p@ss:w/rd".into(),
+            ..RedisConfig::default()
+        };
+        assert_eq!(
+            cfg.connection_url(),
+            "redis://:p%40ss%3Aw%2Frd@localhost:6379"
+        );
+    }
+
+    #[test]
+    fn connection_url_includes_database_when_non_zero() {
+        let cfg = RedisConfig {
+            database: 2,
+            ..RedisConfig::default()
+        };
+        assert_eq!(cfg.connection_url(), "redis://localhost:6379/2");
+        assert_eq!(cfg.endpoint(), "localhost:6379/2");
+    }
 }

@@ -1,7 +1,7 @@
 use oxide_arb_macros::oxide_schema;
 use sea_orm::{
     Iden,
-    sea_query::{ColumnDef, Index, Table, TableCreateStatement},
+    sea_query::{ColumnDef, ColumnType, Expr, Index, Table, TableCreateStatement},
 };
 
 use crate::{
@@ -21,8 +21,8 @@ pub enum Event {
     EventId,
     Title,
     Slug,
-    Category,
     Status,
+    Tags,
     NegRisk,
     EndDate,
     RawGamma,
@@ -37,12 +37,17 @@ pub fn table() -> TableCreateStatement {
         .col(column::text_id_pk(Event::EventId))
         .col(ColumnDef::new(Event::Title).text().not_null())
         .col(ColumnDef::new(Event::Slug).text().not_null())
-        .col(ColumnDef::new(Event::Category).text().not_null())
         .col(
             ColumnDef::new(Event::Status)
                 .text()
                 .not_null()
                 .default(EventStatus::Active),
+        )
+        .col(
+            ColumnDef::new(Event::Tags)
+                .array(ColumnType::Text)
+                .not_null()
+                .default(Expr::cust("'{}'::text[]")),
         )
         .col(
             ColumnDef::new(Event::NegRisk)
@@ -74,16 +79,13 @@ pub fn indexes() -> Vec<IndexSpec> {
                 .to_owned(),
             "event status filters",
         ),
-        IndexSpec::sea_query(
-            "idx_events_category",
+        IndexSpec::raw(
+            "idx_events_tags",
             event_table_name,
             IndexBuildMode::Transactional,
-            Index::create()
-                .name("idx_events_category")
-                .table(Event::Table)
-                .col(Event::Category)
-                .to_owned(),
-            "event category filters",
+            "CREATE INDEX IF NOT EXISTS idx_events_tags \
+             ON event USING GIN (tags)",
+            "tag membership filters on the text[] column",
         ),
     ]
 }

@@ -1,3 +1,4 @@
+use crate::pipeline::universe_filter::MarketUniverseFilter;
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use oxide_arb_models::{
@@ -184,9 +185,10 @@ impl MarketRegistry {
         self.active_markets.load_full()
     }
 
-    /// Active YES/NO tokens that should be subscribed on the CLOB websocket.
+    /// Active YES/NO tokens that should be subscribed on the CLOB websocket,
+    /// bounded by the tradeable-universe filter.
     #[must_use]
-    pub fn active_subscribable_tokens(&self) -> Vec<TokenId> {
+    pub fn active_subscribable_tokens(&self, universe: &MarketUniverseFilter) -> Vec<TokenId> {
         let active = self.active_markets();
         let mut tokens = Vec::with_capacity(active.len() * 2);
         for market_id in active.iter() {
@@ -194,6 +196,9 @@ impl MarketRegistry {
                 continue;
             };
             if market.status != MarketStatus::Active {
+                continue;
+            }
+            if !universe.is_enabled(market.categories) {
                 continue;
             }
             tokens.push(market.token_yes.clone());
@@ -233,7 +238,7 @@ mod tests {
     use chrono::Utc;
     use oxide_arb_models::{
         domain::market::TokenInfo,
-        enums::common::{MarketCategory, TickSize},
+        enums::common::{CategorySet, MarketCategory, TickSize},
         types::Usd,
     };
     use rust_decimal_macros::dec;
@@ -245,7 +250,7 @@ mod tests {
             token_no: TokenId::new(format!("{id}-no")),
             question: "Test?".into(),
             slug: "test".into(),
-            category: MarketCategory::Other,
+            categories: CategorySet::from(MarketCategory::Other),
             status,
             outcome: None,
             neg_risk: false,

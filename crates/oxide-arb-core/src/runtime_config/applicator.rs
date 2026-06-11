@@ -11,15 +11,19 @@ use crate::{
     },
     exposure::in_memory::InMemoryExposureReservation,
     observability::alert_dispatcher::AlertDispatcher,
-    pipeline::staleness_classifier::StalenessClassifier,
+    pipeline::{
+        market_cache::MarketCache, market_registry::MarketRegistry,
+        staleness_classifier::StalenessClassifier, universe_filter::MarketUniverseFilter,
+    },
     runtime_config::RuntimeConfigStore,
-    service::risk_metrics::RiskMetricsState,
+    service::{risk_metrics::RiskMetricsState, ws_subscription::WsSubscriptionCoordinator},
 };
 use async_trait::async_trait;
 use oxide_arb_algorithm::calibration::CalibrationUpdater;
 use oxide_arb_api::{VotingOracle, ctf::client::CtfRedeemClient};
 use oxide_arb_models::{
     domain::{RuntimeConfigPort, RuntimeControlError},
+    enums::common::CategorySet,
     runtime_config::{
         RuntimeConfig,
         validation::{RuntimePreflightContext, preflight_runtime_config, validate_runtime_config},
@@ -48,6 +52,14 @@ pub struct RuntimeConfigSubscribers {
     pub calibration_updater: Arc<CalibrationUpdater>,
     /// D1/E1 — staleness ladder shared by scanner and validator.
     pub staleness: StalenessClassifier,
+    /// D1 — tradeable-universe category filter.
+    pub universe: Arc<MarketUniverseFilter>,
+    /// D1 — registry backing the universe recomputation.
+    pub market_registry: Arc<MarketRegistry>,
+    /// D1 — scanner cache rebuilt after a universe change.
+    pub market_cache: Arc<MarketCache>,
+    /// D1 — CLOB websocket subscriptions resynced after a universe change.
+    pub ws_subscription: Option<Arc<WsSubscriptionCoordinator>>,
     /// E1 — validation slippage / book-age budgets.
     pub validator: Arc<Validator>,
     /// E2 — FOK dispatch timeout.
@@ -161,6 +173,28 @@ impl RuntimeConfigApplicator {
         subs.calibration_updater
             .reload(config.detection.calibration.clone());
         subs.staleness.reload(&config.market_data);
+
+        // Universe filter: swap the enabled set, rebuild the scanner cache,
+        // and resync websocket subscriptions to the new tradeable set.
+        let universe_changed = subs.universe.enabled()
+            != CategorySet::from(config.market_data.enabled_categories.as_slice());
+        if universe_changed {
+            subs.universe.reload(&config.market_data.enabled_categories);
+            subs.market_cache.rebuild();
+            if let Some(ws_subscription) = &subs.ws_subscription {
+                let tokens = subs
+                    .market_registry
+                    .active_subscribable_tokens(&subs.universe);
+                let token_count = tokens.len();
+                ws_subscription.sync_to_tokens(&tokens);
+                tracing::info!(
+                    enabled = ?subs.universe.enabled().iter().collect::<Vec<_>>(),
+                    tokens = token_count,
+                    subscribed = ws_subscription.subscribed_count(),
+                    "tradeable universe filter reloaded; websocket subscriptions resynced"
+                );
+            }
+        }
 
         subs.validator.reload(&config.execution);
         subs.order_strategy.reload(&config.execution.timeout);

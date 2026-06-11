@@ -14,7 +14,7 @@ use polymarket_client_sdk_v2::clob::ws::Client as SdkWsClient;
 use polymarket_client_sdk_v2::clob::ws::types::response::WsMessage;
 use polymarket_client_sdk_v2::types::U256;
 use polymarket_client_sdk_v2::ws::config::Config as SdkWsConfig;
-use std::{collections::HashSet, str::FromStr, sync::Arc, time::Instant};
+use std::{collections::HashSet, fmt::Display, str::FromStr, sync::Arc, time::Instant};
 use tokio_util::sync::CancellationToken;
 
 /// A single shard managing one SDK WebSocket connection.
@@ -108,7 +108,8 @@ impl WsShard {
         let client = SdkWsClient::new(&self.ws_url, ws_config)
             .map_err(|e| format!("WS client creation failed: {e}"))?;
 
-        // `subscribe_market_resolutions` first — enables SDK `custom_features` on the channel.
+        // `subscribe_market_resolutions` first — enables SDK `custom_features`
+        // on the channel (also required by `best_bid_ask`).
         let mut resolution_stream = Box::pin(
             client
                 .subscribe_market_resolutions(asset_ids.clone())
@@ -121,8 +122,23 @@ impl WsShard {
         );
         let mut price_stream = Box::pin(
             client
-                .subscribe_prices(asset_ids)
+                .subscribe_prices(asset_ids.clone())
                 .map_err(|e| format!("subscribe_prices: {e}"))?,
+        );
+        let mut last_trade_stream = Box::pin(
+            client
+                .subscribe_last_trade_price(asset_ids.clone())
+                .map_err(|e| format!("subscribe_last_trade_price: {e}"))?,
+        );
+        let mut tick_size_stream = Box::pin(
+            client
+                .subscribe_tick_size_change(asset_ids.clone())
+                .map_err(|e| format!("subscribe_tick_size_change: {e}"))?,
+        );
+        let mut bbo_stream = Box::pin(
+            client
+                .subscribe_best_bid_ask(asset_ids)
+                .map_err(|e| format!("subscribe_best_bid_ask: {e}"))?,
         );
 
         self.reconnect_state.reset();
@@ -131,49 +147,45 @@ impl WsShard {
         loop {
             tokio::select! {
                 () = self.shutdown.cancelled() => return Ok(()),
-                book = book_stream.next() => {
-                    match book {
-                        Some(Ok(update)) => {
-                            let ws_ingress = Instant::now();
-                            self.dispatch_events(normalize_ws_message(
-                                WsMessage::Book(update),
-                                ws_ingress,
-                                self.on_book_level_rejected.as_ref(),
-                            ));
-                        }
-                        Some(Err(e)) => tracing::warn!(shard_id = self.shard_id, error = %e, "book stream error"),
-                        None => return Err("book stream closed".into()),
-                    }
-                }
-                price = price_stream.next() => {
-                    match price {
-                        Some(Ok(pc)) => {
-                            let ws_ingress = Instant::now();
-                            self.dispatch_events(normalize_ws_message(
-                                WsMessage::PriceChange(pc),
-                                ws_ingress,
-                                self.on_book_level_rejected.as_ref(),
-                            ));
-                        }
-                        Some(Err(e)) => tracing::warn!(shard_id = self.shard_id, error = %e, "price stream error"),
-                        None => return Err("price stream closed".into()),
-                    }
-                }
-                res = resolution_stream.next() => {
-                    match res {
-                        Some(Ok(mr)) => {
-                            let ws_ingress = Instant::now();
-                            self.dispatch_events(normalize_ws_message(
-                                WsMessage::MarketResolved(mr),
-                                ws_ingress,
-                                self.on_book_level_rejected.as_ref(),
-                            ));
-                        }
-                        Some(Err(e)) => tracing::warn!(shard_id = self.shard_id, error = %e, "resolution stream error"),
-                        None => return Err("resolution stream closed".into()),
-                    }
-                }
+                item = book_stream.next() =>
+                    self.on_stream_item(item, "book", WsMessage::Book)?,
+                item = price_stream.next() =>
+                    self.on_stream_item(item, "price", WsMessage::PriceChange)?,
+                item = resolution_stream.next() =>
+                    self.on_stream_item(item, "resolution", WsMessage::MarketResolved)?,
+                item = last_trade_stream.next() =>
+                    self.on_stream_item(item, "last trade", WsMessage::LastTradePrice)?,
+                item = tick_size_stream.next() =>
+                    self.on_stream_item(item, "tick size", WsMessage::TickSizeChange)?,
+                item = bbo_stream.next() =>
+                    self.on_stream_item(item, "best bid/ask", WsMessage::BestBidAsk)?,
             }
+        }
+    }
+
+    /// Handle one multiplexed stream item: normalize + dispatch payloads,
+    /// log transient errors, and treat a closed stream as a reconnect signal.
+    fn on_stream_item<T, E: Display>(
+        &self,
+        item: Option<Result<T, E>>,
+        stream: &'static str,
+        into_message: impl FnOnce(T) -> WsMessage,
+    ) -> Result<(), String> {
+        match item {
+            Some(Ok(payload)) => {
+                let ws_ingress = Instant::now();
+                self.dispatch_events(normalize_ws_message(
+                    into_message(payload),
+                    ws_ingress,
+                    self.on_book_level_rejected.as_ref(),
+                ));
+                Ok(())
+            }
+            Some(Err(error)) => {
+                tracing::warn!(shard_id = self.shard_id, %error, stream, "stream error");
+                Ok(())
+            }
+            None => Err(format!("{stream} stream closed")),
         }
     }
 

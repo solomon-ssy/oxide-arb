@@ -19,7 +19,7 @@ use oxide_arb_models::{
         pipeline::{IngressTrace, PipelineEvent, PriceDeltaCmd, PriceLevelDelta},
     },
     enums::{
-        common::{MarketCategory, Side, TickSize},
+        common::{CategorySet, MarketCategory, Side, TickSize},
         market::MarketStatus,
     },
     types::{EventId, MarketId, Price, Shares, TokenId, Usd},
@@ -43,7 +43,7 @@ fn sample_market(id: &str) -> MarketRegistryInfo {
         token_no: TokenId::new(format!("{id}-no")),
         question: "Q".into(),
         slug: "q".into(),
-        category: MarketCategory::Other,
+        categories: CategorySet::from(MarketCategory::Other),
         status: MarketStatus::Active,
         outcome: None,
         neg_risk: false,

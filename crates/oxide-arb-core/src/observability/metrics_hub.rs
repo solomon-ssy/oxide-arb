@@ -148,6 +148,7 @@ pub struct MetricsHub {
     pub gamma_sync_duration_ms: IntGauge,
     pub gamma_markets_total: IntGauge,
     pub gamma_last_sync_success: IntGauge,
+    pub gamma_markets_rejected: IntCounterVec,
 
     // Metrics refresh
     pub metrics_refresh_failures: IntCounter,
@@ -266,6 +267,7 @@ struct SystemMetrics {
     gamma_sync_duration_ms: IntGauge,
     gamma_markets_total: IntGauge,
     gamma_last_sync_success: IntGauge,
+    gamma_markets_rejected: IntCounterVec,
     metrics_refresh_failures: IntCounter,
     shutdown_stage_progress_remaining: IntGaugeVec,
     shutdown_stage_timeouts: IntCounterVec,
@@ -740,6 +742,12 @@ fn register_system_metrics(registry: &Registry) -> SystemMetrics {
             "oxide_arb_gamma_last_sync_success",
             "1 if the last gamma sync succeeded, 0 otherwise"
         ),
+        gamma_markets_rejected: register_counter_vec!(
+            registry,
+            "oxide_arb_gamma_markets_rejected_total",
+            "Markets dropped during Gamma catalog normalization, by reason",
+            &["reason"]
+        ),
         metrics_refresh_failures: register_counter!(
             registry,
             "oxide_arb_system_metrics_refresh_failures_total",
@@ -807,19 +815,43 @@ fn register_settlement_metrics(registry: &Registry) -> SettlementMetrics {
     }
 }
 
+/// Registered metric groups, flattened into [`MetricsHub`] by
+/// [`MetricsHub::from_groups`].
+struct MetricGroups {
+    pipeline: PipelineMetrics,
+    detection: DetectionMetrics,
+    funnel: FunnelMetrics,
+    execution: ExecutionMetrics,
+    risk: RiskMetrics,
+    calibration: CalibrationMetrics,
+    cache: CacheMetrics,
+    system: SystemMetrics,
+    settlement: SettlementMetrics,
+    control_factor: ControlFactorMetrics,
+}
+
 impl MetricsHub {
     pub fn new() -> Self {
         let registry = Registry::new();
-        let pipeline = register_pipeline_metrics(&registry);
-        let detection = register_detection_metrics(&registry);
-        let funnel = register_funnel_metrics(&registry);
-        let execution = register_execution_metrics(&registry);
-        let risk = register_risk_metrics(&registry);
-        let calibration = register_calibration_metrics(&registry);
-        let cache = register_cache_metrics(&registry);
-        let system = register_system_metrics(&registry);
-        let settlement = register_settlement_metrics(&registry);
-        let control_factor = register_control_factor_metrics(&registry);
+        let groups = MetricGroups {
+            pipeline: register_pipeline_metrics(&registry),
+            detection: register_detection_metrics(&registry),
+            funnel: register_funnel_metrics(&registry),
+            execution: register_execution_metrics(&registry),
+            risk: register_risk_metrics(&registry),
+            calibration: register_calibration_metrics(&registry),
+            cache: register_cache_metrics(&registry),
+            system: register_system_metrics(&registry),
+            settlement: register_settlement_metrics(&registry),
+            control_factor: register_control_factor_metrics(&registry),
+        };
+        Self::from_groups(registry, groups)
+    }
+
+    fn from_groups(registry: Registry, g: MetricGroups) -> Self {
+        let (pipeline, detection, funnel) = (g.pipeline, g.detection, g.funnel);
+        let (execution, risk, calibration, cache) = (g.execution, g.risk, g.calibration, g.cache);
+        let (system, settlement, control_factor) = (g.system, g.settlement, g.control_factor);
         Self {
             registry,
             ws_events_received: pipeline.ws_events_received,
@@ -887,6 +919,7 @@ impl MetricsHub {
             gamma_sync_duration_ms: system.gamma_sync_duration_ms,
             gamma_markets_total: system.gamma_markets_total,
             gamma_last_sync_success: system.gamma_last_sync_success,
+            gamma_markets_rejected: system.gamma_markets_rejected,
             metrics_refresh_failures: system.metrics_refresh_failures,
             settlement_requests_total: settlement.requests_total,
             settlement_positions_settled_total: settlement.positions_settled_total,

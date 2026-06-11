@@ -32,7 +32,7 @@ use oxide_arb_core::{
         validator::Validator,
     },
     exposure::in_memory::InMemoryExposureReservation,
-    infra::async_writer::AsyncWriter,
+    infra::async_writer::{AsyncWriter, AsyncWriterConfig},
     observability::{
         alert_dispatcher::AlertDispatcher, execution_audit::ExecutionAuditWriter,
         metrics_hub::MetricsHub,
@@ -44,6 +44,7 @@ use oxide_arb_core::{
         market_registry::MarketRegistry,
         order_book::OrderBook,
         staleness_classifier::StalenessClassifier,
+        universe_filter::MarketUniverseFilter,
     },
     service::risk_metrics::{ApiHealthTracker, RiskMetricsState},
 };
@@ -63,14 +64,14 @@ use oxide_arb_models::{
     },
     enums::{
         calibration::{DurationBucket, PriceZone},
-        common::{ExecutionMode, MarketCategory, Side, StalenessLevel, TickSize},
+        common::{CategorySet, ExecutionMode, MarketCategory, Side, StalenessLevel, TickSize},
         market::MarketStatus,
         opportunity::PayoutModel,
     },
     runtime_config::{
         CalibrationConfig, DetectionConfig, EmissionCooldownConfig, EndgameDetectionConfig,
         EndgameLatencyConfig, ExecutionRuntimeConfig, FillProbabilityConfig,
-        MarketDataStalenessConfig, RiskConfig,
+        MarketDataRuntimeConfig, RiskConfig,
     },
     types::{
         Bps, EventId, MarketId, MicroPrice, MicroProb, MicroScore, MicroUsd, OpportunityId, Price,
@@ -541,7 +542,7 @@ fn bench_coalescer_pair_flush(c: &mut Criterion) {
         token_no: TokenId::new("bench-m1-no"),
         question: "Q".into(),
         slug: "q".into(),
-        category: MarketCategory::Other,
+        categories: CategorySet::from(MarketCategory::Other),
         status: MarketStatus::Active,
         outcome: None,
         neg_risk: false,
@@ -720,7 +721,7 @@ fn bench_scanner_scan_market(c: &mut Criterion) {
         token_no: TokenId::new("bench-m1-no"),
         question: "Q".into(),
         slug: "q".into(),
-        category: MarketCategory::Geopolitics,
+        categories: CategorySet::from(MarketCategory::Geopolitics),
         status: MarketStatus::Active,
         outcome: None,
         neg_risk: false,
@@ -737,7 +738,10 @@ fn bench_scanner_scan_market(c: &mut Criterion) {
         created_at: Utc::now(),
         updated_at: Utc::now(),
     });
-    let market_cache = Arc::new(MarketCache::new(registry));
+    let market_cache = Arc::new(MarketCache::new(
+        registry,
+        Arc::new(MarketUniverseFilter::default()),
+    ));
     let yes = TokenId::new("bench-m1-yes");
     let no = TokenId::new("bench-m1-no");
     let yes_asks = vec![BookLevel::from_decimal_unchecked(
@@ -761,7 +765,7 @@ fn bench_scanner_scan_market(c: &mut Criterion) {
         pipeline,
         book_store,
         market_cache,
-        StalenessClassifier::new(&MarketDataStalenessConfig::default()),
+        StalenessClassifier::new(&MarketDataRuntimeConfig::default()),
         metrics,
         None,
         CoreEventPublisher::bounded(1).0,
@@ -771,7 +775,8 @@ fn bench_scanner_scan_market(c: &mut Criterion) {
         event_id: EventId::new("evt"),
         token_yes: yes,
         token_no: no,
-        category: MarketCategory::Geopolitics,
+        categories: CategorySet::from(MarketCategory::Geopolitics),
+        fee_category: MarketCategory::Geopolitics,
         tick_size: TickSize::Hundredth,
         neg_risk: false,
         settlement_deadline: Some(Utc::now() + Duration::hours(12)),
@@ -939,9 +944,9 @@ fn execution_bench_setup() -> (
         let trade_repo = Arc::new(MockTradeRepository::default());
         let audit_shutdown = CancellationToken::new();
         let (audit_writer_inner, _audit_worker) = AsyncWriter::new(
-            "bench-audit",
-            1024,
-            std::time::Duration::from_secs(3600),
+            AsyncWriterConfig::new("bench-audit")
+                .batch_size(1024)
+                .flush_interval(std::time::Duration::from_secs(3600)),
             move |_batch: Vec<OpportunityAuditRow>| Box::pin(async move { Ok(()) }),
             Arc::clone(&metrics),
             audit_shutdown,
@@ -959,7 +964,7 @@ fn execution_bench_setup() -> (
         let pipeline = ExecutionPipeline::new(ExecutionPipelineDeps {
             validator: Arc::new(Validator::new(
                 Arc::clone(&book_store),
-                StalenessClassifier::new(&MarketDataStalenessConfig::default()),
+                StalenessClassifier::new(&MarketDataRuntimeConfig::default()),
                 &execution_config,
                 Arc::clone(&metrics),
             )),

@@ -13,7 +13,7 @@ use oxide_arb_core::{
     observability::metrics_hub::MetricsHub,
     pipeline::{
         book_store::BookStore, market_cache::MarketCache, market_registry::MarketRegistry,
-        staleness_classifier::StalenessClassifier,
+        staleness_classifier::StalenessClassifier, universe_filter::MarketUniverseFilter,
     },
 };
 use oxide_arb_models::{
@@ -24,7 +24,7 @@ use oxide_arb_models::{
         market::{MarketRegistryInfo, TokenInfo},
     },
     enums::{
-        common::{MarketCategory, TickSize},
+        common::{CategorySet, MarketCategory, TickSize},
         market::MarketStatus,
     },
     runtime_config::RuntimeConfig,
@@ -41,7 +41,7 @@ fn sample_market(id: &str) -> MarketRegistryInfo {
         token_no: TokenId::new(format!("{id}-no")),
         question: "Q".into(),
         slug: "q".into(),
-        category: MarketCategory::Politics,
+        categories: CategorySet::from(MarketCategory::Politics),
         status: MarketStatus::Active,
         outcome: None,
         neg_risk: false,
@@ -141,7 +141,10 @@ fn scan_market_returns_none_when_books_are_stale() {
     let book_store = Arc::new(BookStore::new(Arc::clone(&metrics)));
     let registry = Arc::new(MarketRegistry::new());
     registry.register_market(sample_market("m-stale"));
-    let market_cache = Arc::new(MarketCache::new(Arc::clone(&registry)));
+    let market_cache = Arc::new(MarketCache::new(
+        Arc::clone(&registry),
+        Arc::new(MarketUniverseFilter::default()),
+    ));
     let scanner = build_scanner(
         Arc::clone(&book_store),
         Arc::clone(&market_cache),
@@ -184,7 +187,10 @@ fn scan_market_passes_gate_with_fresh_books() {
     let book_store = Arc::new(BookStore::new(Arc::clone(&metrics)));
     let registry = Arc::new(MarketRegistry::new());
     registry.register_market(sample_market("m-fresh"));
-    let market_cache = Arc::new(MarketCache::new(Arc::clone(&registry)));
+    let market_cache = Arc::new(MarketCache::new(
+        Arc::clone(&registry),
+        Arc::new(MarketUniverseFilter::default()),
+    ));
     let scanner = build_scanner(
         Arc::clone(&book_store),
         Arc::clone(&market_cache),

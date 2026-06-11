@@ -45,7 +45,8 @@ pub struct MarketView {
     pub event_id: EventId,
     pub question: String,
     pub slug: String,
-    pub category: MarketCategory,
+    /// Category memberships (any-match filterable via `MarketPageQuery::category`).
+    pub categories: Vec<MarketCategory>,
     pub status: MarketStatus,
     pub outcome: Option<String>,
     pub yes_token_id: TokenId,
@@ -62,11 +63,11 @@ pub struct MarketView {
 impl From<MarketInfo> for MarketView {
     fn from(m: MarketInfo) -> Self {
         Self {
+            categories: m.categories,
             market_id: m.market_id,
             event_id: m.event_id,
             question: m.question,
             slug: m.slug,
-            category: m.category,
             status: m.status,
             outcome: m.outcome,
             yes_token_id: m.yes_token_id,

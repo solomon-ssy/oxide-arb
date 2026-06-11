@@ -3,7 +3,10 @@
 use oxide_arb_api::{fees::FeeCalculator, gamma::GammaClient};
 use oxide_arb_core::{
     observability::metrics_hub::MetricsHub,
-    pipeline::{market_cache::MarketCache, market_registry::MarketRegistry},
+    pipeline::{
+        market_cache::MarketCache, market_registry::MarketRegistry,
+        universe_filter::MarketUniverseFilter,
+    },
     service::gamma::{GammaService, GammaServiceDeps},
 };
 use oxide_arb_error::{OxideError, market::MarketError};
@@ -52,17 +55,19 @@ fn test_pg_config(port: u16) -> PostgresConfig {
 
 fn test_redis_config(port: u16) -> RedisConfig {
     RedisConfig {
-        url: format!("redis://127.0.0.1:{port}"),
+        host: "127.0.0.1".into(),
+        port,
         pool_size: 5,
         timeout_ms: 5000,
         key_prefix: "gamma-test:".into(),
+        ..RedisConfig::default()
     }
 }
 
-async fn mount_active_events_mock(server: &MockServer, body: serde_json::Value) {
+async fn mount_active_events_keyset_mock(server: &MockServer, body: serde_json::Value) {
     Mock::given(method("GET"))
-        .and(path("/events"))
-        .and(query_param("active", "true"))
+        .and(path("/events/keyset"))
+        .and(query_param("closed", "false"))
         .respond_with(ResponseTemplate::new(200).set_body_json(body))
         .mount(server)
         .await;
@@ -97,7 +102,11 @@ async fn build_gamma_service(server_uri: &str) -> (GammaService, Arc<MarketRegis
         .expect("Redis port");
 
     let market_registry = Arc::new(MarketRegistry::new());
-    let market_cache = Arc::new(MarketCache::new(Arc::clone(&market_registry)));
+    let universe = Arc::new(MarketUniverseFilter::default());
+    let market_cache = Arc::new(MarketCache::new(
+        Arc::clone(&market_registry),
+        Arc::clone(&universe),
+    ));
     let metrics = Arc::new(MetricsHub::new());
     let fee_calculator = Arc::new(FeeCalculator::default());
     let cache = Arc::new(TieredCache::new(
@@ -115,6 +124,7 @@ async fn build_gamma_service(server_uri: &str) -> (GammaService, Arc<MarketRegis
         })),
         market_registry: Arc::clone(&market_registry),
         market_cache,
+        universe,
         fee_calculator,
         market_repo: Arc::new(PgMarketRepository::new(db.clone())),
         event_repo: Arc::new(PgEventRepository::new(db)),
@@ -128,30 +138,30 @@ async fn build_gamma_service(server_uri: &str) -> (GammaService, Arc<MarketRegis
 }
 
 fn sample_gamma_events_payload() -> serde_json::Value {
-    serde_json::json!([{
-        "id": "evt-gamma-1",
-        "title": "Gamma sync test event",
-        "slug": "gamma-sync-test",
-        "markets": [{
-            "condition_id": "0xgamma_sync_market",
-            "question": "Will gamma sync populate the registry?",
-            "category": "sports",
-            "active": true,
-            "closed": false,
-            "fees_enabled": true,
-            "tokens": [
-                {"token_id": "1001", "outcome": "Yes"},
-                {"token_id": "1002", "outcome": "No"}
-            ]
+    serde_json::json!({
+        "events": [{
+            "id": "evt-gamma-1",
+            "title": "Gamma sync test event",
+            "slug": "gamma-sync-test",
+            "markets": [{
+                "conditionId": "0xgamma_sync_market",
+                "question": "Will gamma sync populate the registry?",
+                "category": "sports",
+                "active": true,
+                "closed": false,
+                "feesEnabled": true,
+                "clobTokenIds": ["1001", "1002"],
+                "outcomes": ["Yes", "No"]
+            }]
         }]
-    }])
+    })
 }
 
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn gamma_sync_populates_registry() {
     let server = MockServer::start().await;
-    mount_active_events_mock(&server, sample_gamma_events_payload()).await;
+    mount_active_events_keyset_mock(&server, sample_gamma_events_payload()).await;
 
     let (service, registry) = build_gamma_service(&server.uri()).await;
 
@@ -171,8 +181,8 @@ async fn gamma_sync_populates_registry() {
 async fn gamma_sync_fails_on_api_error() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
-        .and(path("/events"))
-        .and(query_param("active", "true"))
+        .and(path("/events/keyset"))
+        .and(query_param("closed", "false"))
         .respond_with(ResponseTemplate::new(503).set_body_string("gamma unavailable"))
         .mount(&server)
         .await;
@@ -194,7 +204,7 @@ async fn gamma_sync_fails_on_api_error() {
 #[ignore = "requires Docker"]
 async fn gamma_sync_rejects_empty_catalog() {
     let server = MockServer::start().await;
-    mount_active_events_mock(&server, serde_json::json!([])).await;
+    mount_active_events_keyset_mock(&server, serde_json::json!({ "events": [] })).await;
 
     let (service, registry) = build_gamma_service(&server.uri()).await;
 

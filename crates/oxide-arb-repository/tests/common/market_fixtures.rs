@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use oxide_arb_models::{
     domain::{UpsertEvent, UpsertMarket},
     enums::{
-        common::{MarketCategory, TickSize},
+        common::{CategorySet, MarketCategory, TickSize},
         market::{EventStatus, MarketStatus},
     },
     types::{EventId, MarketId, TokenId},
@@ -15,8 +15,8 @@ pub fn make_event(id: &str, title: &str, slug: &str, category: MarketCategory) -
         event_id: EventId::new(id),
         title: title.into(),
         slug: slug.into(),
-        category,
         status: EventStatus::Active,
+        tags: vec![category.as_str().to_owned()].into(),
         neg_risk: false,
         end_date: None,
         raw_gamma: None,
@@ -36,7 +36,7 @@ pub fn make_market(
         event_id: EventId::new(event_id),
         question: question.into(),
         slug: slug.into(),
-        category,
+        categories: CategorySet::from(category),
         status: MarketStatus::Active,
         outcome: None,
         yes_token_id: TokenId::new("12345"),

@@ -37,14 +37,14 @@ use oxide_arb_core::{
         validator::Validator,
     },
     exposure::in_memory::InMemoryExposureReservation,
-    infra::async_writer::AsyncWriter,
+    infra::async_writer::{AsyncWriter, AsyncWriterConfig},
     observability::{
         alert_dispatcher::AlertDispatcher, execution_audit::ExecutionAuditWriter,
         metrics_hub::MetricsHub,
     },
     pipeline::{
-        book_store::BookStore, market_registry::MarketRegistry,
-        staleness_classifier::StalenessClassifier,
+        book_store::BookStore, market_cache::MarketCache, market_registry::MarketRegistry,
+        staleness_classifier::StalenessClassifier, universe_filter::MarketUniverseFilter,
     },
     runtime_config::{RuntimeConfigApplicator, RuntimeConfigStore, RuntimeConfigSubscribers},
     service::risk_metrics::{ApiHealthTracker, RiskMetricsState},
@@ -112,9 +112,9 @@ struct Fixture {
 
 fn audit_writer(metrics: Arc<MetricsHub>) -> Arc<ExecutionAuditWriter> {
     let (writer, _worker) = AsyncWriter::new(
-        "test-applicator-audit",
-        16,
-        Duration::from_secs(3600),
+        AsyncWriterConfig::new("test-applicator-audit")
+            .batch_size(16)
+            .flush_interval(Duration::from_secs(3600)),
         move |_batch: Vec<OpportunityAuditRow>| Box::pin(async move { Ok(()) }),
         metrics,
         CancellationToken::new(),
@@ -310,6 +310,13 @@ fn fixture() -> Fixture {
         boot.settlement.lifecycle.dedup_window_secs,
     )));
 
+    let market_registry = Arc::new(MarketRegistry::new());
+    let universe = Arc::new(MarketUniverseFilter::default());
+    let market_cache = Arc::new(MarketCache::new(
+        Arc::clone(&market_registry),
+        Arc::clone(&universe),
+    ));
+
     let store = Arc::new(RuntimeConfigStore::new(boot));
     let applicator = RuntimeConfigApplicator::new(
         Arc::clone(&store),
@@ -322,6 +329,10 @@ fn fixture() -> Fixture {
             opportunity_pipeline,
             calibration_updater: Arc::clone(&calibration_updater),
             staleness: staleness.clone(),
+            universe,
+            market_registry,
+            market_cache,
+            ws_subscription: None,
             validator: Arc::clone(&validator),
             order_strategy,
             coalescer,

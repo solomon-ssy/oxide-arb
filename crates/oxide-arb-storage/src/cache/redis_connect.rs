@@ -21,9 +21,14 @@ const RECYCLE_TIMEOUT: Duration = Duration::from_secs(2);
 const READINESS_RETRY: Duration = Duration::from_millis(50);
 
 /// Map [`RedisConfig`] onto a deadpool [`Config`] with explicit pool limits.
-#[must_use]
-pub fn deadpool_config(redis: &RedisConfig) -> Config {
-    let mut cfg = Config::from_url(&redis.url);
+pub fn deadpool_config(redis: &RedisConfig) -> Result<Config, StorageError> {
+    let url = redis.try_connection_url().map_err(|error| {
+        StorageError::Connection(format!(
+            "invalid Redis connection settings (endpoint={}): {error}",
+            redis.endpoint()
+        ))
+    })?;
+    let mut cfg = Config::from_url(url);
     let mut pool_config = PoolConfig::new(redis.pool_size as usize);
     pool_config.timeouts = Timeouts {
         wait: Some(Duration::from_millis(redis.timeout_ms)),
@@ -31,12 +36,12 @@ pub fn deadpool_config(redis: &RedisConfig) -> Config {
         recycle: Some(RECYCLE_TIMEOUT),
     };
     cfg.pool = Some(pool_config);
-    cfg
+    Ok(cfg)
 }
 
 /// Create a pool from `redis` and block until PING succeeds (startup readiness).
 pub async fn connect_pool(redis: &RedisConfig) -> Result<Pool, StorageError> {
-    let pool = deadpool_config(redis)
+    let pool = deadpool_config(redis)?
         .create_pool(Some(Runtime::Tokio1))
         .map_err(|error| {
             StorageError::Connection(format!("Redis pool creation failed: {error}"))

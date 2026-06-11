@@ -229,14 +229,15 @@ user = "default"
 password = ""
 # Purpose: max age (s) of a partial batch before flush. Impact: analytics
 # freshness vs insert request volume. Caution: production favors a smaller
-# flush interval + larger batches for high tick volume. Default: 10.
+# flush interval + larger batches for high tick volume. Default: 5.
 flush_interval_secs = 5
 # Purpose: rows per insert batch; a full batch flushes immediately. Impact:
-# larger batches amortize insert overhead. Default: 1000.
+# larger batches amortize insert overhead; sized for the L2 tick feed
+# (~3K rows/s peaks). Default: 5000.
 batch_size = 5000
 # Purpose: maximum concurrent insert operations (semaphore). Impact: caps
-# write pressure on the CH server under burst load. Default: 4.
-max_concurrent_inserts = 4
+# write pressure on the CH server under burst load. Default: 8.
+max_concurrent_inserts = 8
 
 # ── Cache ────────────────────────────────────────────────────────────────────
 
@@ -253,10 +254,19 @@ fail_open = true
 disabled = false
 
 [cache.redis]
-# Purpose: Redis connection URL (L2 cache + JWT revocation). Caution: isolate
+# Purpose: Redis host (L2 cache + JWT revocation). Caution: isolate
 # environments — never share one Redis DB between prod and staging without
-# distinct key prefixes. Default: "redis://localhost:6379".
-url = "redis://REPLACE_WITH_REDIS_HOST:6379"
+# distinct key prefixes. Default: "localhost".
+host = "REPLACE_WITH_REDIS_HOST"
+# Purpose: Redis port. Default: 6379.
+port = 6379
+# Purpose: ACL username. Leave empty for password-only auth. Default: "".
+user = ""
+# Purpose: password. Caution: set via OXIDE_ARB__CACHE__REDIS__PASSWORD in
+# production — never here. Default: "".
+password = ""
+# Purpose: logical database index. Default: 0.
+database = 0
 # Purpose: connection pool size. Impact: size against peak concurrent web +
 # cache traffic. Default: 8.
 pool_size = 16

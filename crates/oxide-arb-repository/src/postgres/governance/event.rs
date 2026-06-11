@@ -1,4 +1,7 @@
-use crate::traits::EventRepository;
+use crate::{
+    postgres::bind_limit::{IN_LIST_CHUNK, max_rows_per_insert},
+    traits::EventRepository,
+};
 use num_traits::ToPrimitive;
 use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::{
@@ -9,7 +12,7 @@ use oxide_arb_models::{
 };
 use sea_orm::{
     ColumnTrait, ConnectionTrait, DatabaseConnection, DatabaseTransaction, EntityTrait,
-    IntoActiveModel, QueryFilter, QuerySelect, sea_query::OnConflict,
+    IntoActiveModel, Iterable, QueryFilter, QuerySelect, sea_query::OnConflict,
 };
 use std::collections::HashSet;
 
@@ -55,51 +58,57 @@ async fn do_find_by_ids(
     db: &impl ConnectionTrait,
     ids: &[EventId],
 ) -> Result<Vec<EventInfo>, StorageError> {
-    if ids.is_empty() {
-        return Ok(Vec::new());
+    let mut events = Vec::with_capacity(ids.len());
+    // Chunk the IN list to stay under the Postgres bind-parameter limit.
+    for chunk in ids.chunks(IN_LIST_CHUNK) {
+        let rows = Entity::find()
+            .filter(Column::EventId.is_in(chunk.iter().map(EventId::as_str)))
+            .all(db)
+            .await
+            .map_err(StorageError::from)?;
+        events.extend(rows.into_iter().map(Into::into));
     }
-    Entity::find()
-        .filter(Column::EventId.is_in(ids.iter().map(EventId::as_str)))
-        .all(db)
-        .await
-        .map_err(StorageError::from)
-        .map(|v| v.into_iter().map(Into::into).collect())
+    Ok(events)
 }
 
 async fn do_find_existing_ids(
     db: &impl ConnectionTrait,
     ids: &[EventId],
 ) -> Result<HashSet<String>, StorageError> {
-    if ids.is_empty() {
-        return Ok(HashSet::new());
+    let mut existing = HashSet::with_capacity(ids.len());
+    // Chunk the IN list to stay under the Postgres bind-parameter limit.
+    for chunk in ids.chunks(IN_LIST_CHUNK) {
+        let rows = Entity::find()
+            .filter(Column::EventId.is_in(chunk.iter().map(EventId::as_str)))
+            .select_only()
+            .column(Column::EventId)
+            .into_tuple::<String>()
+            .all(db)
+            .await?;
+        existing.extend(rows);
     }
-    let id_strs: Vec<&str> = ids.iter().map(EventId::as_str).collect();
-    let rows = Entity::find()
-        .filter(Column::EventId.is_in(id_strs))
-        .select_only()
-        .column(Column::EventId)
-        .into_tuple::<String>()
-        .all(db)
-        .await?;
-    Ok(rows.into_iter().collect())
+    Ok(existing)
+}
+
+/// `ON CONFLICT (event_id) DO UPDATE` clause shared by single and batch upserts.
+fn event_upsert_on_conflict() -> OnConflict {
+    OnConflict::column(Column::EventId)
+        .update_columns([
+            Column::Title,
+            Column::Slug,
+            Column::Status,
+            Column::Tags,
+            Column::NegRisk,
+            Column::EndDate,
+            Column::RawGamma,
+        ])
+        .to_owned()
 }
 
 async fn do_upsert(db: &impl ConnectionTrait, dto: UpsertEvent) -> Result<EventInfo, StorageError> {
     let am: ActiveModel = dto.into_active_model();
     let model = Entity::insert(am)
-        .on_conflict(
-            OnConflict::column(Column::EventId)
-                .update_columns([
-                    Column::Title,
-                    Column::Slug,
-                    Column::Category,
-                    Column::Status,
-                    Column::NegRisk,
-                    Column::EndDate,
-                    Column::RawGamma,
-                ])
-                .to_owned(),
-        )
+        .on_conflict(event_upsert_on_conflict())
         .exec_with_returning(db)
         .await
         .map_err(StorageError::from)?;
@@ -118,23 +127,17 @@ async fn do_upsert_batch(
         .into_iter()
         .map(IntoActiveModel::into_active_model)
         .collect();
-    Entity::insert_many(models)
-        .on_conflict(
-            OnConflict::column(Column::EventId)
-                .update_columns([
-                    Column::Title,
-                    Column::Slug,
-                    Column::Category,
-                    Column::Status,
-                    Column::NegRisk,
-                    Column::EndDate,
-                    Column::RawGamma,
-                ])
-                .to_owned(),
-        )
-        .exec(db)
-        .await
-        .map_err(StorageError::from)?;
+    // A full Gamma sync upserts thousands of events; one multi-row INSERT
+    // would exceed the Postgres bind-parameter limit, so split into bounded
+    // statements.
+    let rows_per_insert = max_rows_per_insert(Column::iter().count());
+    for chunk in models.chunks(rows_per_insert) {
+        Entity::insert_many(chunk.to_vec())
+            .on_conflict(event_upsert_on_conflict())
+            .exec(db)
+            .await
+            .map_err(StorageError::from)?;
+    }
     Ok(count)
 }
 

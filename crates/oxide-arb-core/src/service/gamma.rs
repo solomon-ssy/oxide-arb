@@ -2,14 +2,21 @@
 
 use crate::{
     observability::metrics_hub::MetricsHub,
-    pipeline::{market_cache::MarketCache, market_registry::MarketRegistry},
+    pipeline::{
+        market_cache::MarketCache, market_registry::MarketRegistry,
+        universe_filter::MarketUniverseFilter,
+    },
     service::{
         cache_invalidation::invalidate_post_gamma_sync, ws_subscription::WsSubscriptionCoordinator,
     },
 };
 use chrono::{DateTime, Utc};
 use num_traits::ToPrimitive;
-use oxide_arb_api::{fees::FeeCalculator, gamma::GammaClient, ws::TOKEN_INTERN};
+use oxide_arb_api::{
+    fees::FeeCalculator,
+    gamma::{GammaClient, RejectedMarket},
+    ws::TOKEN_INTERN,
+};
 use oxide_arb_error::{OxideError, market::MarketError};
 use oxide_arb_models::{
     domain::{
@@ -32,6 +39,7 @@ pub struct GammaServiceDeps {
     pub gamma_client: Arc<GammaClient>,
     pub market_registry: Arc<MarketRegistry>,
     pub market_cache: Arc<MarketCache>,
+    pub universe: Arc<MarketUniverseFilter>,
     pub fee_calculator: Arc<FeeCalculator>,
     pub market_repo: Arc<PgMarketRepository>,
     pub event_repo: Arc<PgEventRepository>,
@@ -46,6 +54,7 @@ pub struct GammaService {
     gamma_client: Arc<GammaClient>,
     market_registry: Arc<MarketRegistry>,
     market_cache: Arc<MarketCache>,
+    universe: Arc<MarketUniverseFilter>,
     fee_calculator: Arc<FeeCalculator>,
     market_repo: Arc<PgMarketRepository>,
     event_repo: Arc<PgEventRepository>,
@@ -62,6 +71,7 @@ impl GammaService {
             gamma_client: deps.gamma_client,
             market_registry: deps.market_registry,
             market_cache: deps.market_cache,
+            universe: deps.universe,
             fee_calculator: deps.fee_calculator,
             market_repo: deps.market_repo,
             event_repo: deps.event_repo,
@@ -114,6 +124,7 @@ impl GammaService {
 
         let event_count = batch.registry_events.len();
         let market_count = batch.registry_markets.len();
+        let rejected_count = batch.rejected.len();
 
         if market_count == 0 {
             return Err(MarketError::EmptyCatalog.into());
@@ -125,12 +136,7 @@ impl GammaService {
             .map(|m| m.market_id.clone())
             .collect();
 
-        tracing::info!(
-            events = event_count,
-            markets = market_count,
-            "gamma full sync fetched"
-        );
-
+        self.record_rejections(&batch.rejected);
         self.market_registry.register_events(batch.registry_events);
         prewarm_token_intern(&batch.registry_markets);
         self.market_registry
@@ -139,6 +145,7 @@ impl GammaService {
             .ingest_market_fee_schedules(batch.fee_data);
 
         let deactivated = self.market_registry.deactivate_stale(&seen_ids);
+        let deactivated_count = deactivated.len();
         let deactivated_upserts = convert_registry_to_upsert(&deactivated);
 
         let mut persist_batch = batch.markets;
@@ -155,7 +162,9 @@ impl GammaService {
 
         tracing::info!(
             events = event_count,
-            markets = market_count,
+            registered = market_count,
+            rejected = rejected_count,
+            deactivated = deactivated_count,
             "gamma full sync complete"
         );
 
@@ -173,11 +182,7 @@ impl GammaService {
             return Ok(());
         }
 
-        tracing::debug!(
-            events = batch.registry_events.len(),
-            "gamma incremental sync fetched"
-        );
-
+        self.record_rejections(&batch.rejected);
         self.market_registry
             .register_events(batch.registry_events.clone());
 
@@ -223,6 +228,7 @@ impl GammaService {
         }
 
         prewarm_token_intern(&all_registry);
+        let registered = all_registry.len();
         self.market_registry.register_markets(all_registry);
         self.fee_calculator.ingest_market_fee_schedules(fee_data);
 
@@ -234,14 +240,34 @@ impl GammaService {
         self.market_cache.rebuild();
         self.sync_ws_subscriptions();
 
+        tracing::info!(
+            events = batch.registry_events.len(),
+            registered,
+            rejected = batch.rejected.len(),
+            "gamma incremental sync complete"
+        );
+
         Ok(())
+    }
+
+    /// Count normalization rejects by reason (logging is per-row `debug!` at
+    /// the catalog layer; the counter + sync summary are the operator surface).
+    fn record_rejections(&self, rejected: &[RejectedMarket]) {
+        for rejection in rejected {
+            self.metrics
+                .gamma_markets_rejected
+                .with_label_values(&[rejection.reject.reason_label()])
+                .inc();
+        }
     }
 
     fn sync_ws_subscriptions(&self) {
         let Some(coordinator) = &self.ws_subscription else {
             return;
         };
-        let tokens = self.market_registry.active_subscribable_tokens();
+        let tokens = self
+            .market_registry
+            .active_subscribable_tokens(&self.universe);
         let count = tokens.len();
         coordinator.sync_to_tokens(&tokens);
         tracing::info!(
@@ -325,7 +351,7 @@ fn collect_missing_market_ids(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use oxide_arb_models::types::EventId;
+    use oxide_arb_models::{enums::common::CategorySet, types::EventId};
 
     #[test]
     fn collect_missing_dedupes_and_skips_embedded() {
@@ -338,6 +364,8 @@ mod tests {
                 MarketId::new("m2"),
                 MarketId::new("m1"),
             ],
+            categories: CategorySet::EMPTY,
+            tags: Vec::new(),
             neg_risk: false,
             created_at: Utc::now(),
             updated_at: Utc::now(),

@@ -99,7 +99,7 @@ impl Scanner {
             token_yes: &entry.token_yes,
             token_no: &entry.token_no,
             book: &pair,
-            category: entry.category,
+            category: entry.fee_category,
             staleness,
             settlement_deadline: entry.settlement_deadline,
             latency,

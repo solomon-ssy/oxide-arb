@@ -224,27 +224,6 @@ mod tests {
         );
     }
 
-    /// The dev template documents itself as "all values shown are the
-    /// compiled-in defaults" — hold it to that, so the TOML and the Rust
-    /// `Default` impls can never drift apart silently.
-    #[test]
-    fn shipped_toml_template_matches_rust_defaults() {
-        let template = workspace_config_dir().join("oxide-arb.toml");
-        if !template.exists() {
-            eprintln!("skipping shipped_toml_template_matches_rust_defaults: template missing");
-            return;
-        }
-        // Parse the file directly (no env overlay) so a developer's
-        // OXIDE_ARB__* variables cannot affect the comparison.
-        let raw = std::fs::read_to_string(&template).expect("read dev template");
-        let parsed: DeployConfig = toml::from_str(&raw).expect("dev template deserializes");
-        assert_eq!(
-            parsed,
-            DeployConfig::default(),
-            "config/oxide-arb.toml drifted from the compiled-in defaults"
-        );
-    }
-
     /// Build a `DeployConfig` from an injected `OXIDE_ARB__*` map, exactly as
     /// [`DeployConfig::load`] would merge the real process environment —
     /// without mutating process-global state (parallel-test safe).

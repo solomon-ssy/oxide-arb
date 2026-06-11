@@ -1,6 +1,6 @@
 use crate::{
     app::{task_id::TaskId, task_registry::PendingTaskQueue},
-    infra::async_writer::AsyncWriter,
+    infra::async_writer::{AsyncWriter, AsyncWriterConfig},
     observability::{
         book_fact_writer::BookFactWriter, detection_writer::DetectionWriter,
         execution_audit::ExecutionAuditWriter, metrics_hub::MetricsHub,
@@ -41,11 +41,15 @@ pub struct PersistenceWireInput {
 
 impl PersistenceBundle {
     pub fn wire(input: PersistenceWireInput) -> (Self, PersistenceBackgroundWorkers) {
+        // Capacities are sized against measured ingest rates: the L2 feed
+        // peaks at ~3K rows/s during the post-subscribe snapshot flood, so its
+        // queue buys ~10s of burst absorption; tick events grow with the BBO
+        // stream; audit/detection are low-volume.
         let ts_audit = Arc::clone(&input.timeseries);
         let (audit_raw, audit_writer_worker) = AsyncWriter::new(
-            "execution-audit",
-            50,
-            Duration::from_millis(500),
+            AsyncWriterConfig::new("execution-audit")
+                .batch_size(50)
+                .flush_interval(Duration::from_millis(500)),
             move |batch: Vec<OpportunityAuditRow>| {
                 let ts = Arc::clone(&ts_audit);
                 Box::pin(async move {
@@ -59,9 +63,7 @@ impl PersistenceBundle {
 
         let ts_detection = Arc::clone(&input.timeseries);
         let (detection_raw, detection_writer_worker) = AsyncWriter::new(
-            "detection",
-            100,
-            Duration::from_secs(1),
+            AsyncWriterConfig::new("detection"),
             move |batch: Vec<OpportunityDetectionRow>| {
                 let ts = Arc::clone(&ts_detection);
                 Box::pin(async move {
@@ -75,9 +77,10 @@ impl PersistenceBundle {
 
         let ts_tick = Arc::clone(&input.timeseries);
         let (tick_raw, tick_writer_worker) = AsyncWriter::new(
-            "tick-events",
-            200,
-            Duration::from_millis(500),
+            AsyncWriterConfig::new("tick-events")
+                .capacity(16_384)
+                .batch_size(500)
+                .flush_interval(Duration::from_millis(500)),
             move |batch: Vec<TickEventRow>| {
                 let ts = Arc::clone(&ts_tick);
                 Box::pin(async move {
@@ -91,9 +94,10 @@ impl PersistenceBundle {
 
         let ts_book_l2 = Arc::clone(&input.timeseries);
         let (book_l2_raw, book_l2_writer_worker) = AsyncWriter::new(
-            "book-l2",
-            200,
-            Duration::from_millis(500),
+            AsyncWriterConfig::new("book-l2")
+                .capacity(32_768)
+                .batch_size(1_000)
+                .flush_interval(Duration::from_millis(250)),
             move |batch: Vec<TickEventL2Row>| {
                 let ts = Arc::clone(&ts_book_l2);
                 Box::pin(async move {
@@ -106,10 +110,14 @@ impl PersistenceBundle {
         );
 
         let ts_book_snapshot = Arc::clone(&input.timeseries);
+        // The periodic publisher snapshots every published book in one burst
+        // (tens of thousands of rows each minute at full subscription scale),
+        // so this queue is sized for that burst rather than a steady rate.
         let (book_snapshot_raw, book_snapshot_writer_worker) = AsyncWriter::new(
-            "book-snapshot",
-            100,
-            Duration::from_secs(1),
+            AsyncWriterConfig::new("book-snapshot")
+                .capacity(32_768)
+                .batch_size(1_000)
+                .flush_interval(Duration::from_millis(500)),
             move |batch: Vec<BookSnapshotRow>| {
                 let ts = Arc::clone(&ts_book_snapshot);
                 Box::pin(async move {

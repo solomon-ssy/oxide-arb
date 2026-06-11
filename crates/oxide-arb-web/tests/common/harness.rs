@@ -112,8 +112,8 @@ impl TestEnv {
     /// Bring up Postgres + Redis and assemble the production `AppState`.
     pub async fn start() -> Self {
         let (pool, pg_container) = pg::setup_pg().await;
-        let (redis_url, redis_container) = redis::setup_redis().await;
-        let redis_cfg = redis::test_redis_config(&redis_url);
+        let (redis_port, redis_container) = redis::setup_redis().await;
+        let redis_cfg = redis::test_redis_config(redis_port);
 
         let jwt_blacklist = Arc::new(
             RedisTokenBlacklist::connect(&redis_cfg)

@@ -18,6 +18,7 @@ use oxide_arb_core::{
         market_cache::{CachedMarketScanEntry, MarketCache},
         market_registry::MarketRegistry,
         staleness_classifier::StalenessClassifier,
+        universe_filter::MarketUniverseFilter,
     },
 };
 use oxide_arb_models::{
@@ -26,12 +27,12 @@ use oxide_arb_models::{
         market::MarketRegistryInfo, pipeline::PipelineEvent,
     },
     enums::{
-        common::{MarketCategory, TickSize},
+        common::{CategorySet, MarketCategory, TickSize},
         market::MarketStatus,
     },
     runtime_config::{
         CalibrationConfig, DetectionConfig, EmissionCooldownConfig, EndgameDetectionConfig,
-        FillProbabilityConfig, MarketDataStalenessConfig,
+        FillProbabilityConfig, MarketDataRuntimeConfig,
     },
     types::{EventId, MarketId, Price, Shares, TokenId, Usd},
 };
@@ -80,7 +81,7 @@ fn bench_e2e_ws_to_scan(c: &mut Criterion) {
         token_no: TokenId::new("bench-m1-no"),
         question: "Q".into(),
         slug: "q".into(),
-        category: MarketCategory::Geopolitics,
+        categories: CategorySet::from(MarketCategory::Geopolitics),
         status: MarketStatus::Active,
         outcome: None,
         neg_risk: false,
@@ -97,7 +98,10 @@ fn bench_e2e_ws_to_scan(c: &mut Criterion) {
         created_at: Utc::now(),
         updated_at: Utc::now(),
     });
-    let market_cache = Arc::new(MarketCache::new(registry));
+    let market_cache = Arc::new(MarketCache::new(
+        registry,
+        Arc::new(MarketUniverseFilter::default()),
+    ));
     let yes = TokenId::new("bench-m1-yes");
     let no = TokenId::new("bench-m1-no");
     let now_ms = ToPrimitive::to_u64(&Utc::now().timestamp_millis().max(0)).unwrap_or(0);
@@ -129,7 +133,7 @@ fn bench_e2e_ws_to_scan(c: &mut Criterion) {
         Arc::new(make_core_pipeline()),
         book_store,
         market_cache,
-        StalenessClassifier::new(&MarketDataStalenessConfig::default()),
+        StalenessClassifier::new(&MarketDataRuntimeConfig::default()),
         metrics,
         None,
         CoreEventPublisher::bounded(1).0,
@@ -139,7 +143,8 @@ fn bench_e2e_ws_to_scan(c: &mut Criterion) {
         event_id: EventId::new("evt"),
         token_yes: yes,
         token_no: no,
-        category: MarketCategory::Geopolitics,
+        categories: CategorySet::from(MarketCategory::Geopolitics),
+        fee_category: MarketCategory::Geopolitics,
         tick_size: TickSize::Hundredth,
         neg_risk: false,
         settlement_deadline: Some(Utc::now() + Duration::hours(12)),
@@ -162,7 +167,7 @@ fn bench_e2e_ws_normalize_to_coalescer(c: &mut Criterion) {
         token_no: TokenId::new("bench-m1-no"),
         question: "Q".into(),
         slug: "q".into(),
-        category: MarketCategory::Other,
+        categories: CategorySet::from(MarketCategory::Other),
         status: MarketStatus::Active,
         outcome: None,
         neg_risk: false,

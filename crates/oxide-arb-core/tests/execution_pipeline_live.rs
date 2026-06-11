@@ -21,7 +21,7 @@ use oxide_arb_core::{
         validator::Validator,
     },
     exposure::in_memory::InMemoryExposureReservation,
-    infra::async_writer::AsyncWriter,
+    infra::async_writer::{AsyncWriter, AsyncWriterConfig},
     observability::{
         alert_dispatcher::AlertDispatcher, execution_audit::ExecutionAuditWriter,
         metrics_hub::MetricsHub,
@@ -52,7 +52,7 @@ use oxide_arb_models::{
         execution::ExecutionOutcomeSummary,
         opportunity::PayoutModel,
     },
-    runtime_config::{ExecutionRuntimeConfig, MarketDataStalenessConfig, RiskConfig},
+    runtime_config::{ExecutionRuntimeConfig, MarketDataRuntimeConfig, RiskConfig},
     types::{
         Bps, EventId, MarketId, MicroProb, MicroScore, OpportunityId, Price, Shares, TokenId, Usd,
     },
@@ -364,9 +364,9 @@ impl RiskMetrics for StaticRiskMetrics {
 
 fn audit_writer(metrics: Arc<MetricsHub>) -> Arc<ExecutionAuditWriter> {
     let (writer, _worker) = AsyncWriter::new(
-        "test-execution-audit",
-        128,
-        Duration::from_secs(3600),
+        AsyncWriterConfig::new("test-execution-audit")
+            .batch_size(128)
+            .flush_interval(Duration::from_secs(3600)),
         move |_batch: Vec<OpportunityAuditRow>| Box::pin(async move { Ok(()) }),
         metrics,
         CancellationToken::new(),
@@ -421,7 +421,7 @@ fn fixture(clob_client: Option<Arc<ClobClient>>) -> LiveFixture {
     let pipeline = ExecutionPipeline::new(ExecutionPipelineDeps {
         validator: Arc::new(Validator::new(
             Arc::clone(&book_store),
-            StalenessClassifier::new(&MarketDataStalenessConfig::default()),
+            StalenessClassifier::new(&MarketDataRuntimeConfig::default()),
             &ExecutionRuntimeConfig {
                 endgame_latency: oxide_arb_models::runtime_config::EndgameLatencyConfig {
                     max_book_to_order_ms: 5_000,

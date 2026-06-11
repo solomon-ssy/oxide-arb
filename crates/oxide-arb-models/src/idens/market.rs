@@ -1,7 +1,10 @@
 use oxide_arb_macros::oxide_schema;
 use sea_orm::{
     Iden,
-    sea_query::{ColumnDef, ForeignKey, ForeignKeyAction, Index, Table, TableCreateStatement},
+    sea_query::{
+        ColumnDef, ColumnType, Expr, ForeignKey, ForeignKeyAction, Index, Table,
+        TableCreateStatement,
+    },
 };
 
 use crate::{
@@ -23,7 +26,7 @@ pub enum Market {
     EventId,
     Question,
     Slug,
-    Category,
+    Categories,
     Status,
     Outcome,
     YesTokenId,
@@ -51,7 +54,12 @@ pub fn table() -> TableCreateStatement {
         .col(column::text_id(Market::EventId))
         .col(ColumnDef::new(Market::Question).text().not_null())
         .col(ColumnDef::new(Market::Slug).text().not_null())
-        .col(ColumnDef::new(Market::Category).text().not_null())
+        .col(
+            ColumnDef::new(Market::Categories)
+                .array(ColumnType::Text)
+                .not_null()
+                .default(Expr::cust("'{}'::text[]")),
+        )
         .col(
             ColumnDef::new(Market::Status)
                 .text()
@@ -164,6 +172,15 @@ pub fn indexes() -> Vec<IndexSpec> {
          ON market (end_date) \
          WHERE status = 'active' AND end_date IS NOT NULL",
         "scanner hot path for active endgame candidates",
+    ));
+
+    indexes.push(IndexSpec::raw(
+        "idx_markets_categories",
+        market_table_name,
+        IndexBuildMode::Transactional,
+        "CREATE INDEX IF NOT EXISTS idx_markets_categories \
+         ON market USING GIN (categories)",
+        "category membership filters on the text[] column",
     ));
 
     indexes

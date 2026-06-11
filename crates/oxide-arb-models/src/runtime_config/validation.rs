@@ -18,6 +18,7 @@ use oxide_arb_error::config_validation::{
 };
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
+use std::collections::HashSet;
 
 /// Live money-state inputs for the activation preflight.
 ///
@@ -124,6 +125,15 @@ fn validate_market_data(config: &RuntimeConfig, report: &mut ConfigValidationRep
                 detail: "staleness ladder must be strictly increasing \
                          (fresh < acceptable < stale < expired)"
                     .into(),
+            });
+        }
+    }
+    let mut seen = HashSet::new();
+    for category in &md.enabled_categories {
+        if !seen.insert(*category) {
+            report.errors.push(ConfigValidationError::InvalidValue {
+                field: "market_data.enabled_categories",
+                detail: format!("duplicate category: {category}"),
             });
         }
     }

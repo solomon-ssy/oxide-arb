@@ -21,7 +21,7 @@ use oxide_arb_models::{
         pipeline::{BookSideData, BookSnapshotCmd, IngressTrace, PipelineEvent},
     },
     enums::{
-        common::{MarketCategory, TickSize},
+        common::{CategorySet, MarketCategory, TickSize},
         market::MarketStatus,
     },
     types::{EventId, MarketId, Price, Shares, TokenId, Usd},
@@ -63,7 +63,7 @@ fn register_markets(registry: &MarketRegistry) -> Vec<TokenId> {
             token_no: no.clone(),
             question: format!("Soak market {i}?"),
             slug: format!("soak-market-{i}"),
-            category: MarketCategory::Other,
+            categories: CategorySet::from(MarketCategory::Other),
             status: MarketStatus::Active,
             outcome: None,
             neg_risk: false,

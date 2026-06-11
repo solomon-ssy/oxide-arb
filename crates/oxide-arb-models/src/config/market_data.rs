@@ -2,7 +2,7 @@
 //!
 //! Connection-level parameters only: WebSocket reconnect/sharding policy and
 //! the Gamma catalog client. Staleness thresholds are runtime configuration
-//! (`runtime_config::MarketDataStalenessConfig`).
+//! (`runtime_config::MarketDataRuntimeConfig`).
 
 use serde::Deserialize;
 

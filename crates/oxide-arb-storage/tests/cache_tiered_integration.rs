@@ -9,10 +9,12 @@ use testcontainers::runners::AsyncRunner;
 
 fn test_redis_config(port: u16) -> RedisConfig {
     RedisConfig {
-        url: format!("redis://127.0.0.1:{port}"),
+        host: "127.0.0.1".into(),
+        port,
         pool_size: 5,
         timeout_ms: 5000,
         key_prefix: "tiered-test:".into(),
+        ..RedisConfig::default()
     }
 }
 

@@ -97,6 +97,8 @@ pub fn validate_deploy_common(deploy: &DeployConfig) -> ConfigValidationReport {
         });
     }
 
+    validate_cache_redis(deploy, &mut report);
+
     if deploy
         .market_data
         .websocket
@@ -116,8 +118,42 @@ pub fn validate_deploy_common(deploy: &DeployConfig) -> ConfigValidationReport {
             detail: "page_size and full_sync_interval_secs must be > 0".into(),
         });
     }
+    if deploy.market_data.gamma.page_size > 500 {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "market_data.gamma.page_size",
+            detail: "must be <= 500 (Gamma /events/keyset limit)".into(),
+        });
+    }
 
     report
+}
+
+fn validate_cache_redis(deploy: &DeployConfig, report: &mut ConfigValidationReport) {
+    let redis = &deploy.cache.redis;
+    if redis.host.is_empty() {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "cache.redis.host",
+            detail: "must not be empty".into(),
+        });
+    }
+    if redis.port == 0 {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "cache.redis.port",
+            detail: "must be > 0".into(),
+        });
+    }
+    if redis.pool_size == 0 {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "cache.redis.pool_size",
+            detail: "must be > 0".into(),
+        });
+    }
+    if redis.try_connection_url().is_err() {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "cache.redis",
+            detail: "host/port/user/password produce an invalid connection URL".into(),
+        });
+    }
 }
 
 /// Mode-aware deploy validation: enforces credential and JWT policies based on

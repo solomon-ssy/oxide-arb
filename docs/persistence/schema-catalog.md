@@ -178,7 +178,7 @@ pub enum Market {
     EventId,
     Question,
     Slug,
-    Category,
+    Categories,
     Status,
     Outcome,
     YesTokenId,
@@ -206,7 +206,12 @@ pub fn table() -> TableCreateStatement {
         .col(ColumnDef::new(Market::EventId).text().not_null())
         .col(ColumnDef::new(Market::Question).text().not_null())
         .col(ColumnDef::new(Market::Slug).text().not_null())
-        .col(ColumnDef::new(Market::Category).text().not_null())
+        .col(
+            ColumnDef::new(Market::Categories)
+                .array(ColumnType::Text)
+                .not_null()
+                .default(Expr::cust("'{}'::text[]")),
+        )
         .col(
             ColumnDef::new(Market::Status)
                 .text()

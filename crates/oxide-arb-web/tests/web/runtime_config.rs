@@ -509,7 +509,7 @@ async fn webhook_url_and_bot_token_are_masked_on_live_snapshot() {
 }
 
 /// The deploy-config sibling surface is read-only and masked: key material is
-/// presence flags only, the Redis URL is always hidden, and the JWT secret is
+/// presence flags only, Redis credentials are masked, and the JWT secret is
 /// never echoed.
 #[actix_web::test]
 #[ignore = "requires Docker"]
@@ -530,7 +530,11 @@ async fn deploy_config_endpoint_is_masked_read_only() {
             );
         }
     }
-    assert_eq!(data["cache"]["redis"]["url"], json!("***"));
+    assert_eq!(data["cache"]["redis"]["password"], json!("***"));
+    assert!(
+        data["cache"]["redis"]["host"].is_string(),
+        "non-sensitive redis fields stay readable"
+    );
     let jwt_secret = data["web"]["jwt"]["secret"].as_str().expect("jwt secret");
     assert!(
         jwt_secret.is_empty() || jwt_secret == "***",

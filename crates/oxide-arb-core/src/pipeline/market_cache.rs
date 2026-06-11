@@ -1,8 +1,8 @@
-use super::market_registry::MarketRegistry;
+use super::{market_registry::MarketRegistry, universe_filter::MarketUniverseFilter};
 use arc_swap::ArcSwap;
 use chrono::{DateTime, Utc};
 use oxide_arb_models::{
-    enums::common::{MarketCategory, TickSize},
+    enums::common::{CategorySet, MarketCategory, TickSize},
     types::{EventId, MarketId, TokenId},
 };
 use std::{collections::HashMap, sync::Arc};
@@ -17,7 +17,11 @@ pub struct CachedMarketScanEntry {
     pub event_id: EventId,
     pub token_yes: TokenId,
     pub token_no: TokenId,
-    pub category: MarketCategory,
+    /// Category memberships (universe-filter source of truth).
+    pub categories: CategorySet,
+    /// Pre-derived `categories.fee_category()` — cached at rebuild so the
+    /// per-sweep scan never re-derives it.
+    pub fee_category: MarketCategory,
     pub tick_size: TickSize,
     pub neg_risk: bool,
     pub settlement_deadline: Option<DateTime<Utc>>,
@@ -26,25 +30,29 @@ pub struct CachedMarketScanEntry {
 /// Lock-free cache of active markets for the Scanner hot path.
 ///
 /// Backed by `ArcSwap` for wait-free reads. Rebuilt on Gamma sync
-/// (~every 5 minutes), so reads never block writes and vice versa.
+/// (~every 5 minutes) and on runtime-config activation (universe filter
+/// changes), so reads never block writes and vice versa.
 pub struct MarketCache {
     scan_entries: ArcSwap<Vec<Arc<CachedMarketScanEntry>>>,
     index: ArcSwap<HashMap<MarketId, Arc<CachedMarketScanEntry>>>,
     registry: Arc<MarketRegistry>,
+    universe: Arc<MarketUniverseFilter>,
 }
 
 impl MarketCache {
-    pub fn new(registry: Arc<MarketRegistry>) -> Self {
+    pub fn new(registry: Arc<MarketRegistry>, universe: Arc<MarketUniverseFilter>) -> Self {
         let cache = Self {
             scan_entries: ArcSwap::from_pointee(Vec::new()),
             index: ArcSwap::from_pointee(HashMap::new()),
             registry,
+            universe,
         };
         cache.rebuild();
         cache
     }
 
-    /// Reconstruct the cache from the current registry state.
+    /// Reconstruct the cache from the current registry state, admitting only
+    /// markets that pass the universe filter.
     pub fn rebuild(&self) {
         let active_ids = self.registry.active_markets();
         let mut entries = Vec::with_capacity(active_ids.len());
@@ -54,13 +62,17 @@ impl MarketCache {
             let Some(market) = self.registry.get_market(market_id) else {
                 continue;
             };
+            if !self.universe.is_enabled(market.categories) {
+                continue;
+            }
 
             let entry = Arc::new(CachedMarketScanEntry {
                 market_id: market.market_id.clone(),
                 event_id: market.event_id.clone(),
                 token_yes: market.token_yes.clone(),
                 token_no: market.token_no.clone(),
-                category: market.category,
+                categories: market.categories,
+                fee_category: market.fee_category(),
                 tick_size: market.tick_size,
                 neg_risk: market.neg_risk,
                 settlement_deadline: market.end_date,
@@ -95,7 +107,8 @@ mod tests {
         types::Usd,
     };
     use rust_decimal_macros::dec;
-    fn sample_entry(id: &str) -> MarketRegistryInfo {
+
+    fn sample_entry(id: &str, categories: CategorySet) -> MarketRegistryInfo {
         MarketRegistryInfo {
             market_id: MarketId::new(id),
             event_id: EventId::new("evt-1"),
@@ -103,7 +116,7 @@ mod tests {
             token_no: TokenId::new(format!("{id}-no")),
             question: "Q?".into(),
             slug: "q".into(),
-            category: MarketCategory::Other,
+            categories,
             status: MarketStatus::Active,
             outcome: None,
             neg_risk: false,
@@ -133,13 +146,17 @@ mod tests {
         }
     }
 
+    fn admit_all() -> Arc<MarketUniverseFilter> {
+        Arc::new(MarketUniverseFilter::default())
+    }
+
     #[test]
     fn rebuild_populates_entries() {
         let reg = Arc::new(MarketRegistry::new());
-        reg.register_market(sample_entry("m1"));
-        reg.register_market(sample_entry("m2"));
+        reg.register_market(sample_entry("m1", CategorySet::EMPTY));
+        reg.register_market(sample_entry("m2", CategorySet::EMPTY));
 
-        let cache = MarketCache::new(reg);
+        let cache = MarketCache::new(reg, admit_all());
         let entries = cache.entries();
         assert_eq!(entries.len(), 2);
     }
@@ -147,18 +164,43 @@ mod tests {
     #[test]
     fn get_returns_entry_by_market_id() {
         let reg = Arc::new(MarketRegistry::new());
-        reg.register_market(sample_entry("m1"));
+        reg.register_market(sample_entry("m1", CategorySet::EMPTY));
 
-        let cache = MarketCache::new(reg);
+        let cache = MarketCache::new(reg, admit_all());
         let entry = cache.get(&MarketId::new("m1")).unwrap();
         assert_eq!(entry.market_id.as_str(), "m1");
+        assert_eq!(entry.fee_category, MarketCategory::Other);
     }
 
     #[test]
     fn empty_registry_yields_empty_cache() {
         let reg = Arc::new(MarketRegistry::new());
-        let cache = MarketCache::new(reg);
+        let cache = MarketCache::new(reg, admit_all());
         assert!(cache.entries().is_empty());
         assert!(cache.get(&MarketId::new("missing")).is_none());
+    }
+
+    #[test]
+    fn universe_filter_bounds_rebuild() {
+        let reg = Arc::new(MarketRegistry::new());
+        reg.register_market(sample_entry(
+            "m-sports",
+            CategorySet::from(MarketCategory::Sports),
+        ));
+        reg.register_market(sample_entry(
+            "m-politics",
+            CategorySet::from(MarketCategory::Politics),
+        ));
+
+        let universe = Arc::new(MarketUniverseFilter::new(&[MarketCategory::Politics]));
+        let cache = MarketCache::new(Arc::clone(&reg), Arc::clone(&universe));
+        assert_eq!(cache.entries().len(), 1);
+        assert!(cache.get(&MarketId::new("m-politics")).is_some());
+        assert!(cache.get(&MarketId::new("m-sports")).is_none());
+
+        // Hot reload widens the universe; rebuild re-admits the sports market.
+        universe.reload(&[]);
+        cache.rebuild();
+        assert_eq!(cache.entries().len(), 2);
     }
 }

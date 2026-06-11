@@ -74,11 +74,17 @@ pub struct PostgresConfig {
 }
 
 impl PostgresConfig {
-    /// Build the connection URL.
+    /// Build the connection URL for the configured application database.
     pub fn to_url(&self) -> String {
+        self.to_url_with_database(&self.database)
+    }
+
+    /// Build a connection URL targeting a specific database name on the same
+    /// server (e.g. the `postgres` maintenance catalog).
+    pub fn to_url_with_database(&self, database: &str) -> String {
         format!(
             "postgres://{}:{}@{}:{}/{}?sslmode=prefer",
-            self.user, self.password, self.host, self.port, self.database,
+            self.user, self.password, self.host, self.port, database,
         )
     }
 
@@ -201,12 +207,14 @@ pub struct ClickHouseConfig {
     /// never in the TOML. Default: empty.
     pub password: String,
     /// Max age (seconds) of a partial batch before it is flushed. Lower =
-    /// fresher analytics, more insert requests. Default: `10`.
+    /// fresher analytics, more insert requests. Default: `5`.
     pub flush_interval_secs: u64,
-    /// Rows per insert batch; a full batch flushes immediately. Default: `1000`.
+    /// Rows per insert batch; a full batch flushes immediately. `ClickHouse`
+    /// favors large batches — sized for the L2 tick feed (~3K rows/s peaks).
+    /// Default: `5000`.
     pub batch_size: usize,
     /// Maximum concurrent insert operations (semaphore). Prevents overwhelming
-    /// the server under high tick ingestion rates. Default: `4`.
+    /// the server under high tick ingestion rates. Default: `8`.
     pub max_concurrent_inserts: usize,
 }
 
@@ -234,11 +242,11 @@ fn default_ch_user() -> String {
     "default".into()
 }
 const fn default_ch_flush_interval() -> u64 {
-    10
+    5
 }
 const fn default_ch_batch_size() -> usize {
-    1000
+    5000
 }
 const fn default_ch_max_concurrent_inserts() -> usize {
-    4
+    8
 }

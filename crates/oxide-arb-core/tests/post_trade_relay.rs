@@ -6,7 +6,7 @@ use oxide_arb_core::{
     bridge::{execution_mode::ExecutionModeHandle, risk_metrics::CoreRiskMetrics},
     execution::{capital_manager::CapitalManager, fsm::ExecutionFSM},
     exposure::in_memory::InMemoryExposureReservation,
-    infra::async_writer::AsyncWriter,
+    infra::async_writer::{AsyncWriter, AsyncWriterConfig},
     observability::{
         alert_dispatcher::AlertDispatcher, execution_audit::ExecutionAuditWriter,
         metrics_hub::MetricsHub,
@@ -212,9 +212,9 @@ impl RiskMetrics for StaticRiskMetrics {
 
 fn audit_writer(metrics: Arc<MetricsHub>) -> Arc<ExecutionAuditWriter> {
     let (writer, _worker) = AsyncWriter::new(
-        "post-trade-audit-test",
-        128,
-        Duration::from_secs(3600),
+        AsyncWriterConfig::new("post-trade-audit-test")
+            .batch_size(128)
+            .flush_interval(Duration::from_secs(3600)),
         move |_batch: Vec<OpportunityAuditRow>| Box::pin(async move { Ok(()) }),
         metrics,
         CancellationToken::new(),

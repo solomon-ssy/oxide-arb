@@ -51,7 +51,7 @@ pub struct RuntimeConfig {
     /// Document schema version; must equal [`RUNTIME_CONFIG_SCHEMA_VERSION`].
     pub schema_version: i32,
     /// Book staleness ladder (gates detection + validation).
-    pub market_data: MarketDataStalenessConfig,
+    pub market_data: MarketDataRuntimeConfig,
     /// Opportunity detection (endgame + calibration).
     pub detection: DetectionConfig,
     /// Execution operational tunables (timeouts, funnel, coalescer, latency).
@@ -68,7 +68,7 @@ impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
             schema_version: RUNTIME_CONFIG_SCHEMA_VERSION,
-            market_data: MarketDataStalenessConfig::default(),
+            market_data: MarketDataRuntimeConfig::default(),
             detection: DetectionConfig::default(),
             execution: ExecutionRuntimeConfig::default(),
             risk: RiskConfig::default(),

@@ -32,6 +32,7 @@ pub struct BackpressurePolicy {
     metrics: Arc<MetricsHub>,
     book_coalesce: Vec<DashMap<BookCoalesceKey, PipelineEvent>>,
     coalescer_dedup: DashMap<TokenId, Instant>,
+    coalescer_dedup_window: Duration,
 }
 
 impl BackpressurePolicy {
@@ -41,7 +42,16 @@ impl BackpressurePolicy {
             metrics,
             book_coalesce: (0..shard_count).map(|_| DashMap::new()).collect(),
             coalescer_dedup: DashMap::new(),
+            coalescer_dedup_window: COALESCER_DEDUP_WINDOW,
         }
+    }
+
+    /// Override the dedup window — tests only, for wall-clock determinism.
+    #[cfg(test)]
+    #[must_use]
+    const fn with_coalescer_dedup_window(mut self, window: Duration) -> Self {
+        self.coalescer_dedup_window = window;
+        self
     }
 
     /// Site 1 — `book_apply` channel full: latest-wins coalesce per (shard, token).
@@ -84,7 +94,7 @@ impl BackpressurePolicy {
     /// Site 2 — coalescer `token_tx` full: dedup within 500µs else count drop.
     pub fn on_coalescer_channel_full(&self, token: &TokenId) -> BackpressureAction {
         if let Some(last) = self.coalescer_dedup.get(token) {
-            if last.elapsed() < COALESCER_DEDUP_WINDOW {
+            if last.elapsed() < self.coalescer_dedup_window {
                 self.record_event("coalescer", "dedup");
                 return BackpressureAction::Deduped;
             }
@@ -175,7 +185,10 @@ mod tests {
     #[test]
     fn coalescer_dedup_within_window() {
         let metrics = Arc::new(MetricsHub::new());
-        let bp = BackpressurePolicy::new(Arc::clone(&metrics), 1);
+        // A generous window keeps the assertion deterministic under loaded
+        // parallel test runs (the production default is 500µs of wall clock).
+        let bp = BackpressurePolicy::new(Arc::clone(&metrics), 1)
+            .with_coalescer_dedup_window(Duration::from_secs(60));
         let token = TokenId::new("t1");
 
         bp.on_coalescer_notify_success(&token);

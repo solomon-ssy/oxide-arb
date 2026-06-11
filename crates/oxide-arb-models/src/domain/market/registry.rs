@@ -6,7 +6,7 @@
 use crate::{
     domain::fee::MarketFeeSchedule,
     enums::{
-        common::{MarketCategory, TickSize},
+        common::{CategorySet, MarketCategory, TickSize},
         fee::FeeSource,
         market::{EventStatus, MarketStatus},
     },
@@ -15,7 +15,9 @@ use crate::{
 use chrono::{DateTime, Utc};
 use oxide_arb_error::market::MarketError;
 use rust_decimal::Decimal;
-use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
+use sea_orm::{
+    ActiveValue, DeriveIntoActiveModel, DerivePartialModel, FromQueryResult, IntoActiveValue,
+};
 use serde::{Deserialize, Serialize};
 
 // ── Market read models ──────────────────────────────────────────────
@@ -28,7 +30,8 @@ pub struct MarketInfo {
     pub event_id: EventId,
     pub question: String,
     pub slug: String,
-    pub category: MarketCategory,
+    /// Persisted category memberships (`text[]`).
+    pub categories: Vec<MarketCategory>,
     pub status: MarketStatus,
     pub outcome: Option<String>,
     pub yes_token_id: TokenId,
@@ -49,11 +52,25 @@ pub struct MarketInfo {
 }
 
 info_from_model!(MarketInfo, crate::entities::market::Model, {
-    market_id, event_id, question, slug, category, status, outcome,
+    market_id, event_id, question, slug, categories, status, outcome,
     yes_token_id, no_token_id, tick_size, neg_risk, end_date, resolved_at,
     fees_enabled, fee_rate, fee_exponent, fee_taker_only, fee_rebate_rate,
     fee_source, fee_observed_at, created_at, updated_at,
 });
+
+impl MarketInfo {
+    /// Set view of the persisted category memberships.
+    #[must_use]
+    pub fn category_set(&self) -> CategorySet {
+        CategorySet::from(self.categories.as_slice())
+    }
+
+    /// Deterministic single category for fee estimation (conservative).
+    #[must_use]
+    pub fn fee_category(&self) -> MarketCategory {
+        self.category_set().fee_category()
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]
 #[sea_orm(entity = "crate::entities::market_pit_snapshot::Entity")]
@@ -63,7 +80,8 @@ pub struct MarketPitSnapshotInfo {
     pub event_id: EventId,
     pub question: String,
     pub slug: String,
-    pub category: MarketCategory,
+    /// Persisted category memberships (`text[]`) captured at snapshot time.
+    pub categories: Vec<MarketCategory>,
     pub status: MarketStatus,
     pub outcome: Option<String>,
     pub yes_token_id: TokenId,
@@ -88,12 +106,20 @@ info_from_model!(
     MarketPitSnapshotInfo,
     crate::entities::market_pit_snapshot::Model,
     {
-        market_pit_snapshot_id, market_id, event_id, question, slug, category, status, outcome,
+        market_pit_snapshot_id, market_id, event_id, question, slug, categories, status, outcome,
         yes_token_id, no_token_id, tick_size, neg_risk, end_date, resolved_at, fees_enabled,
         fee_rate, fee_exponent, fee_taker_only, fee_rebate_rate, fee_source, fee_observed_at,
         payload_hash, observed_at, created_at,
     }
 );
+
+impl MarketPitSnapshotInfo {
+    /// Set view of the snapshotted category memberships.
+    #[must_use]
+    pub fn category_set(&self) -> CategorySet {
+        CategorySet::from(self.categories.as_slice())
+    }
+}
 
 #[derive(Debug, Clone, DeriveIntoActiveModel)]
 #[sea_orm(active_model = "crate::entities::market_pit_snapshot::ActiveModel")]
@@ -103,7 +129,7 @@ pub struct NewMarketPitSnapshot {
     pub event_id: EventId,
     pub question: String,
     pub slug: String,
-    pub category: MarketCategory,
+    pub categories: CategorySet,
     pub status: MarketStatus,
     pub outcome: Option<String>,
     pub yes_token_id: TokenId,
@@ -158,7 +184,7 @@ impl From<MarketInfo> for MarketRegistryInfo {
             token_no: info.no_token_id.clone(),
             question: info.question,
             slug: info.slug,
-            category: info.category,
+            categories: CategorySet::from(info.categories.as_slice()),
             status: info.status,
             outcome: info.outcome,
             neg_risk: info.neg_risk,
@@ -186,6 +212,51 @@ pub struct TokenInfo {
     pub neg_risk: bool,
 }
 
+/// Resolve the canonical (YES, NO) token pair of a binary market.
+///
+/// This is the single source of truth shared by Gamma catalog mapping,
+/// persistence DTO conversion, and registry registration — every consumer
+/// observes the same pair by construction.
+///
+/// Rules (fail-closed, never guesses beyond them):
+/// 1. Exactly two tokens are required — Polymarket CLOB markets are
+///    structurally binary; anything else is rejected.
+/// 2. When both "Yes" and "No" outcome labels are present
+///    (case-insensitive), they win.
+/// 3. Otherwise the pair is positional: index 0 is the YES leg, index 1 the
+///    NO leg. Binary complement (`P0 + P1 = $1`) holds regardless of labels
+///    (team names, Over/Under), and settlement keys on `winning_token_id`,
+///    never on outcome labels, so positional assignment is safe.
+pub fn resolve_binary_pair(
+    market_id: &MarketId,
+    tokens: &[TokenInfo],
+) -> Result<(TokenId, TokenId), MarketError> {
+    let pair: &[TokenInfo; 2] = tokens
+        .try_into()
+        .map_err(|_| MarketError::NotBinaryMarket {
+            market_id: market_id.to_string(),
+            token_count: tokens.len(),
+        })?;
+    Ok(resolve_binary_pair_exact(pair))
+}
+
+/// Infallible core of [`resolve_binary_pair`] for inputs whose binary
+/// invariant is already enforced by the type system.
+#[must_use]
+pub fn resolve_binary_pair_exact(tokens: &[TokenInfo; 2]) -> (TokenId, TokenId) {
+    let labeled_yes = tokens
+        .iter()
+        .find(|token| token.outcome.eq_ignore_ascii_case("yes"));
+    let labeled_no = tokens
+        .iter()
+        .find(|token| token.outcome.eq_ignore_ascii_case("no"));
+
+    match (labeled_yes, labeled_no) {
+        (Some(yes), Some(no)) => (yes.token_id.clone(), no.token_id.clone()),
+        _ => (tokens[0].token_id.clone(), tokens[1].token_id.clone()),
+    }
+}
+
 /// In-memory enriched market view with runtime orderbook fields.
 ///
 /// Replaces the old `MarketEntry`. Not persisted directly; convert to
@@ -199,7 +270,10 @@ pub struct MarketRegistryInfo {
     pub token_no: TokenId,
     pub question: String,
     pub slug: String,
-    pub category: MarketCategory,
+    /// Every category membership derived from the parent event's Gamma tags.
+    /// Single source of truth: universe filtering matches the whole set, and
+    /// fee estimation collapses it via [`Self::fee_category`].
+    pub categories: CategorySet,
     pub status: MarketStatus,
     pub outcome: Option<String>,
     pub neg_risk: bool,
@@ -218,35 +292,20 @@ pub struct MarketRegistryInfo {
 }
 
 impl MarketRegistryInfo {
-    /// Populate cached [`Self::token_yes`] / [`Self::token_no`] from `tokens`.
+    /// Populate cached [`Self::token_yes`] / [`Self::token_no`] from `tokens`
+    /// via the canonical [`resolve_binary_pair`] rules.
     pub fn resolve_token_pair(&mut self) -> Result<(), MarketError> {
-        let (yes, no) = self.yes_no_tokens()?;
+        let (yes, no) = resolve_binary_pair(&self.market_id, &self.tokens)?;
         self.token_yes = yes;
         self.token_no = no;
         Ok(())
     }
 
-    /// Resolve YES/NO token IDs using outcome labels (case-insensitive).
-    ///
-    /// Fails closed when either leg is missing — never guesses by token order.
-    pub fn yes_no_tokens(&self) -> Result<(TokenId, TokenId), MarketError> {
-        let yes = self
-            .tokens
-            .iter()
-            .find(|t| t.outcome.eq_ignore_ascii_case("yes"))
-            .map(|t| t.token_id.clone());
-        let no = self
-            .tokens
-            .iter()
-            .find(|t| t.outcome.eq_ignore_ascii_case("no"))
-            .map(|t| t.token_id.clone());
-
-        match (yes, no) {
-            (Some(y), Some(n)) => Ok((y, n)),
-            _ => Err(MarketError::InvalidTokenPair {
-                market_id: self.market_id.to_string(),
-            }),
-        }
+    /// Deterministic single category for fee estimation, derived from
+    /// [`Self::categories`] with the fee-conservative tie-break.
+    #[must_use]
+    pub fn fee_category(&self) -> MarketCategory {
+        self.categories.fee_category()
     }
 }
 
@@ -263,7 +322,7 @@ pub struct UpsertMarket {
     pub event_id: EventId,
     pub question: String,
     pub slug: String,
-    pub category: MarketCategory,
+    pub categories: CategorySet,
     pub status: MarketStatus,
     pub outcome: Option<String>,
     pub yes_token_id: TokenId,
@@ -285,13 +344,13 @@ impl TryFrom<&MarketRegistryInfo> for UpsertMarket {
     type Error = MarketError;
 
     fn try_from(info: &MarketRegistryInfo) -> Result<Self, Self::Error> {
-        let (yes_token_id, no_token_id) = info.yes_no_tokens()?;
+        let (yes_token_id, no_token_id) = resolve_binary_pair(&info.market_id, &info.tokens)?;
         Ok(Self {
             market_id: info.market_id.clone(),
             event_id: info.event_id.clone(),
             question: info.question.clone(),
             slug: info.slug.clone(),
-            category: info.category,
+            categories: info.categories,
             status: info.status,
             outcome: info.outcome.clone(),
             yes_token_id,
@@ -343,8 +402,8 @@ pub struct EventInfo {
     pub event_id: EventId,
     pub title: String,
     pub slug: String,
-    pub category: MarketCategory,
     pub status: EventStatus,
+    pub tags: Vec<String>,
     pub neg_risk: bool,
     pub end_date: Option<DateTime<Utc>>,
     pub raw_gamma: Option<serde_json::Value>,
@@ -353,9 +412,17 @@ pub struct EventInfo {
 }
 
 info_from_model!(EventInfo, crate::entities::event::Model, {
-    event_id, title, slug, category, status, neg_risk, end_date,
+    event_id, title, slug, status, tags, neg_risk, end_date,
     raw_gamma, created_at, updated_at,
 });
+
+impl EventInfo {
+    /// Typed category memberships derived from the persisted Gamma tags.
+    #[must_use]
+    pub fn category_set(&self) -> CategorySet {
+        CategorySet::from_slugs(self.tags.iter().map(String::as_str))
+    }
+}
 
 /// In-memory enriched event view with associated market IDs.
 ///
@@ -367,6 +434,10 @@ pub struct EventRegistryInfo {
     pub title: String,
     pub slug: String,
     pub market_ids: Vec<MarketId>,
+    /// Every category membership derived from the Gamma tags.
+    pub categories: CategorySet,
+    /// Raw Gamma tag slugs (audit / rebuild source for `categories`).
+    pub tags: Vec<String>,
     pub neg_risk: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -384,9 +455,87 @@ pub struct UpsertEvent {
     pub event_id: EventId,
     pub title: String,
     pub slug: String,
-    pub category: MarketCategory,
     pub status: EventStatus,
+    /// Raw Gamma tag slugs — the official categorization source.
+    pub tags: EventTags,
     pub neg_risk: bool,
     pub end_date: Option<DateTime<Utc>>,
     pub raw_gamma: Option<serde_json::Value>,
+}
+
+/// Gamma tag slugs bound for the `event.tags` `text[]` column.
+///
+/// Newtype exists solely because `SeaORM` provides no
+/// `IntoActiveValue<Vec<String>>` blanket impl for array columns; the orphan
+/// rule forbids adding one, so the write DTO wraps the vector.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct EventTags(pub Vec<String>);
+
+impl IntoActiveValue<Vec<String>> for EventTags {
+    fn into_active_value(self) -> ActiveValue<Vec<String>> {
+        ActiveValue::Set(self.0)
+    }
+}
+
+impl From<Vec<String>> for EventTags {
+    fn from(slugs: Vec<String>) -> Self {
+        Self(slugs)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn token(id: &str, outcome: &str) -> TokenInfo {
+        TokenInfo {
+            token_id: TokenId::new(id),
+            outcome: outcome.into(),
+            neg_risk: false,
+        }
+    }
+
+    #[test]
+    fn binary_pair_prefers_yes_no_labels_regardless_of_order() {
+        let market_id = MarketId::new("0xm");
+        let tokens = [token("no-leg", "No"), token("yes-leg", "YES")];
+        let (yes, no) = resolve_binary_pair(&market_id, &tokens).expect("labeled pair");
+        assert_eq!(yes.as_str(), "yes-leg");
+        assert_eq!(no.as_str(), "no-leg");
+    }
+
+    #[test]
+    fn binary_pair_falls_back_to_positional_for_custom_outcomes() {
+        let market_id = MarketId::new("0xm");
+        let tokens = [token("t1", "Team A"), token("t2", "Team B")];
+        let (yes, no) = resolve_binary_pair(&market_id, &tokens).expect("positional pair");
+        assert_eq!(yes.as_str(), "t1");
+        assert_eq!(no.as_str(), "t2");
+    }
+
+    #[test]
+    fn binary_pair_is_positional_when_only_one_leg_is_labeled() {
+        let market_id = MarketId::new("0xm");
+        let tokens = [token("t1", "Over"), token("t2", "No")];
+        let (yes, no) = resolve_binary_pair(&market_id, &tokens).expect("positional pair");
+        assert_eq!(yes.as_str(), "t1");
+        assert_eq!(no.as_str(), "t2");
+    }
+
+    #[test]
+    fn non_binary_token_counts_are_rejected() {
+        let market_id = MarketId::new("0xm");
+        for tokens in [
+            Vec::new(),
+            vec![token("t1", "Yes")],
+            vec![token("t1", "A"), token("t2", "B"), token("t3", "C")],
+        ] {
+            let error = resolve_binary_pair(&market_id, &tokens).expect_err("must reject");
+            assert!(matches!(
+                error,
+                MarketError::NotBinaryMarket { token_count, .. } if token_count == tokens.len()
+            ));
+        }
+    }
 }

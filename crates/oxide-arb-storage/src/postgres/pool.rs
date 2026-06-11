@@ -9,6 +9,7 @@
 //! - Post-connect verification optionally confirms that GUCs actually took effect,
 //!   catching silent stripping by connection poolers like `PgBouncer` in transaction mode.
 
+use super::ensure;
 use num_traits::ToPrimitive;
 use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::config::PostgresConfig;
@@ -25,6 +26,8 @@ pub struct PostgresPool {
 
 impl PostgresPool {
     pub async fn connect(config: &PostgresConfig) -> Result<Self, StorageError> {
+        ensure::ensure_database(config).await?;
+
         let url = config.to_url();
         let mut opts = ConnectOptions::new(&url);
 

@@ -6,17 +6,19 @@ use testcontainers_modules::redis::Redis;
 
 /// Redis settings tuned for integration tests (larger pool + longer wait).
 #[must_use]
-pub fn test_redis_config(url: &str) -> RedisConfig {
+pub fn test_redis_config(port: u16) -> RedisConfig {
     RedisConfig {
-        url: url.to_owned(),
+        host: "127.0.0.1".into(),
+        port,
         pool_size: 16,
         timeout_ms: 5_000,
         key_prefix: "oarb:test:".to_owned(),
+        ..RedisConfig::default()
     }
 }
 
-/// Start Redis and return its connection URL plus the container guard.
-pub async fn setup_redis() -> (String, ContainerAsync<Redis>) {
+/// Start Redis and return its host port plus the container guard.
+pub async fn setup_redis() -> (u16, ContainerAsync<Redis>) {
     let container = Redis::default()
         .start()
         .await
@@ -25,6 +27,5 @@ pub async fn setup_redis() -> (String, ContainerAsync<Redis>) {
         .get_host_port_ipv4(6379)
         .await
         .expect("Redis host port");
-    let url = format!("redis://127.0.0.1:{port}");
-    (url, container)
+    (port, container)
 }

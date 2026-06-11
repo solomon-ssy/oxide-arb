@@ -22,7 +22,8 @@ pub struct Model {
     pub question: String,
     #[sea_orm(column_type = "Text")]
     pub slug: String,
-    pub category: MarketCategory,
+    /// Category memberships inherited from the parent event's Gamma tags.
+    pub categories: Vec<MarketCategory>,
     pub status: MarketStatus,
     #[sea_orm(column_type = "Text", nullable)]
     pub outcome: Option<String>,

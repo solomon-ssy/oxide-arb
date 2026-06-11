@@ -1,9 +1,6 @@
 //! `events` table entity.
 
-use crate::{
-    enums::{common::MarketCategory, market::EventStatus},
-    types::EventId,
-};
+use crate::{enums::market::EventStatus, types::EventId};
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -17,8 +14,9 @@ pub struct Model {
     pub title: String,
     #[sea_orm(column_type = "Text")]
     pub slug: String,
-    pub category: MarketCategory,
     pub status: EventStatus,
+    /// Raw Gamma tag slugs — the official categorization source.
+    pub tags: Vec<String>,
     pub neg_risk: bool,
     pub end_date: Option<DateTime<Utc>>,
     #[sea_orm(column_type = "JsonBinary", nullable)]

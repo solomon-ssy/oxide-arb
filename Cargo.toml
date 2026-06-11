@@ -103,6 +103,7 @@ sea-orm = { version = "1", features = [
   "with-json",
   "with-rust_decimal",
   "with-uuid",
+  "postgres-array",
 ] }
 sea-orm-migration = { version = "1", features = [
   "sqlx-postgres",
@@ -138,6 +139,11 @@ alloy = { version = "1.6", features = [
 
 # HTTP client (aligned with SDK's reqwest ^0.13)
 reqwest = { version = "0.13", features = ["json", "rustls"] }
+
+# TLS: the dependency tree enables both rustls crypto backends (`ring` via
+# sea-orm/sqlx, `aws-lc-rs` via reqwest), so the binary must install the
+# process-level CryptoProvider explicitly at startup (see oxide-arb-bin).
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }
 
 # Concurrency primitives
 arc-swap = "1"

@@ -18,7 +18,11 @@ impl RedisBackend {
     pub async fn new(config: &RedisConfig) -> Result<Self, StorageError> {
         let pool = redis_connect::connect_pool(config).await?;
 
-        info!(url = %config.url, prefix = %config.key_prefix, "Redis cache connected");
+        info!(
+            endpoint = %config.endpoint(),
+            prefix = %config.key_prefix,
+            "Redis cache connected"
+        );
 
         Ok(Self {
             pool,

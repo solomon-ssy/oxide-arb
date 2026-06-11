@@ -94,7 +94,7 @@ pub fn market_snapshot(
         event_id: EventId::new("evt"),
         question: "question".to_owned(),
         slug: "slug".to_owned(),
-        category: MarketCategory::Politics,
+        categories: vec![MarketCategory::Politics],
         status: MarketStatus::Active,
         outcome: None,
         yes_token_id: TokenId::new(yes_token_id),
@@ -127,7 +127,7 @@ pub fn market_info(
         event_id: EventId::new("evt"),
         question: "question".to_owned(),
         slug: "slug".to_owned(),
-        category: MarketCategory::Politics,
+        categories: vec![MarketCategory::Politics],
         status: MarketStatus::Active,
         outcome: None,
         yes_token_id: TokenId::new(yes_token_id),
@@ -229,7 +229,7 @@ impl MarketRepository for FakeMarketRepository {
             .current
             .iter()
             .filter(|m| query.status.is_none_or(|s| m.status == s))
-            .filter(|m| query.category.is_none_or(|c| m.category == c))
+            .filter(|m| query.category.is_none_or(|c| m.categories.contains(&c)))
             .cloned()
             .collect();
         let total = items.len() as u64;

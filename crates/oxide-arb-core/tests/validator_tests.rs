@@ -11,7 +11,7 @@ use oxide_arb_error::trading::TradingError;
 use oxide_arb_models::{
     domain::book::BookLevel,
     runtime_config::{
-        EndgameLatencyConfig, ExecutionRuntimeConfig, MarketDataStalenessConfig, TradeTimeoutConfig,
+        EndgameLatencyConfig, ExecutionRuntimeConfig, MarketDataRuntimeConfig, TradeTimeoutConfig,
     },
     types::{Price, Shares, TokenId},
 };
@@ -51,7 +51,7 @@ struct ValidatorFixture {
 fn fixture(max_book_to_order_ms: u64, max_slippage_bps: rust_decimal::Decimal) -> ValidatorFixture {
     let metrics = Arc::new(MetricsHub::new());
     let book_store = Arc::new(BookStore::new(Arc::clone(&metrics)));
-    let classifier = StalenessClassifier::new(&MarketDataStalenessConfig::default());
+    let classifier = StalenessClassifier::new(&MarketDataRuntimeConfig::default());
     let validator = Validator::new(
         Arc::clone(&book_store),
         classifier,
@@ -126,7 +126,7 @@ fn rejects_stale_book_age() {
 
 #[test]
 fn rejects_staleness_above_acceptable() {
-    let cfg = MarketDataStalenessConfig {
+    let cfg = MarketDataRuntimeConfig {
         staleness_acceptable_ms: 1_000,
         staleness_stale_ms: 2_000,
         staleness_expired_ms: 10_000,

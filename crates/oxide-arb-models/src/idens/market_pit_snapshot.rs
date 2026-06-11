@@ -2,7 +2,8 @@ use oxide_arb_macros::oxide_schema;
 use sea_orm::{
     Iden,
     sea_query::{
-        ColumnDef, ForeignKey, ForeignKeyAction, Index, IndexOrder, Table, TableCreateStatement,
+        ColumnDef, ColumnType, Expr, ForeignKey, ForeignKeyAction, Index, IndexOrder, Table,
+        TableCreateStatement,
     },
 };
 
@@ -25,7 +26,7 @@ pub enum MarketPitSnapshot {
     EventId,
     Question,
     Slug,
-    Category,
+    Categories,
     Status,
     Outcome,
     YesTokenId,
@@ -80,9 +81,10 @@ fn add_market_replay_columns(table: &mut TableCreateStatement) {
         )
         .col(ColumnDef::new(MarketPitSnapshot::Slug).text().not_null())
         .col(
-            ColumnDef::new(MarketPitSnapshot::Category)
-                .text()
-                .not_null(),
+            ColumnDef::new(MarketPitSnapshot::Categories)
+                .array(ColumnType::Text)
+                .not_null()
+                .default(Expr::cust("'{}'::text[]")),
         )
         .col(ColumnDef::new(MarketPitSnapshot::Status).text().not_null())
         .col(ColumnDef::new(MarketPitSnapshot::Outcome).text().null())

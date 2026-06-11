@@ -185,8 +185,11 @@ fn masked_db_view(deploy: &DeployConfig) -> serde_json::Value {
 fn masked_cache_view(deploy: &DeployConfig) -> serde_json::Value {
     serde_json::json!({
         "redis": {
-            // The URL may embed credentials — always masked.
-            "url": "***",
+            "host": deploy.cache.redis.host,
+            "port": deploy.cache.redis.port,
+            "user": deploy.cache.redis.user,
+            "password": mask_secret(&deploy.cache.redis.password),
+            "database": deploy.cache.redis.database,
             "pool_size": deploy.cache.redis.pool_size,
             "timeout_ms": deploy.cache.redis.timeout_ms,
             "key_prefix": deploy.cache.redis.key_prefix,

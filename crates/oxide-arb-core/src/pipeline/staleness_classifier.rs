@@ -6,7 +6,7 @@
 //! through [`StalenessClassifier::reload`].
 
 use arc_swap::ArcSwap;
-use oxide_arb_models::{enums::common::StalenessLevel, runtime_config::MarketDataStalenessConfig};
+use oxide_arb_models::{enums::common::StalenessLevel, runtime_config::MarketDataRuntimeConfig};
 use std::sync::Arc;
 
 /// Maps an age (in milliseconds) to a `StalenessLevel` using config thresholds.
@@ -20,7 +20,7 @@ struct StalenessThresholds {
 }
 
 impl StalenessThresholds {
-    const fn from_config(config: &MarketDataStalenessConfig) -> Self {
+    const fn from_config(config: &MarketDataRuntimeConfig) -> Self {
         Self {
             fresh: config.staleness_fresh_ms,
             acceptable: config.staleness_acceptable_ms,
@@ -37,7 +37,7 @@ pub struct StalenessClassifier {
 
 impl StalenessClassifier {
     #[must_use]
-    pub fn new(config: &MarketDataStalenessConfig) -> Self {
+    pub fn new(config: &MarketDataRuntimeConfig) -> Self {
         Self {
             thresholds: Arc::new(ArcSwap::from_pointee(StalenessThresholds::from_config(
                 config,
@@ -47,7 +47,7 @@ impl StalenessClassifier {
 
     /// Hot-reload the staleness ladder (runtime-config activation). All clones
     /// of this classifier observe the new thresholds on their next read.
-    pub fn reload(&self, config: &MarketDataStalenessConfig) {
+    pub fn reload(&self, config: &MarketDataRuntimeConfig) {
         self.thresholds
             .store(Arc::new(StalenessThresholds::from_config(config)));
     }
@@ -83,12 +83,13 @@ impl StalenessClassifier {
 mod tests {
     use super::*;
 
-    fn test_config() -> MarketDataStalenessConfig {
-        MarketDataStalenessConfig {
+    fn test_config() -> MarketDataRuntimeConfig {
+        MarketDataRuntimeConfig {
             staleness_fresh_ms: 1000,
             staleness_acceptable_ms: 3000,
             staleness_stale_ms: 5000,
             staleness_expired_ms: 10000,
+            ..MarketDataRuntimeConfig::default()
         }
     }
 
@@ -116,11 +117,12 @@ mod tests {
     fn reload_propagates_to_clones() {
         let original = StalenessClassifier::new(&test_config());
         let clone = original.clone();
-        original.reload(&MarketDataStalenessConfig {
+        original.reload(&MarketDataRuntimeConfig {
             staleness_fresh_ms: 10,
             staleness_acceptable_ms: 20,
             staleness_stale_ms: 30,
             staleness_expired_ms: 40,
+            ..MarketDataRuntimeConfig::default()
         });
         assert_eq!(clone.classify(15), StalenessLevel::Acceptable);
         assert_eq!(clone.acceptable_ms(), 20);

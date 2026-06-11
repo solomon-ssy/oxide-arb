@@ -122,8 +122,8 @@ impl RedisTokenBlacklist {
     }
 
     /// Connect using the platform [`RedisConfig`] with explicit pool size,
-    /// timeouts, and startup readiness PING. Reuses the shared Redis URL; JWT
-    /// keys use a dedicated namespace separate from the cache layer.
+    /// timeouts, and startup readiness PING. JWT keys use a dedicated namespace
+    /// separate from the cache layer.
     pub async fn connect(redis: &RedisConfig) -> Result<Self, OxideError> {
         let pool = connect_pool(redis)
             .await

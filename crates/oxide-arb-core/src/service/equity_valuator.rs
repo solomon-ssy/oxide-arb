@@ -91,7 +91,7 @@ impl EquityValuator {
 
         let seconds_to_end = end_date.signed_duration_since(now).num_seconds().max(0);
         let key = BucketKey {
-            category: market.category,
+            category: market.fee_category(),
             price_zone: PriceZone::from_price(bid),
             duration_bucket: DurationBucket::from_secs(u64::try_from(seconds_to_end).unwrap_or(0)),
         };
@@ -129,8 +129,8 @@ mod tests {
         enums::{
             calibration::{DurationBucket, PriceZone},
             common::{
-                MarketCategory, PositionStatus, RedeemStatus, SettlementAccountingStatus,
-                SettlementTrigger, Side, TickSize,
+                CategorySet, MarketCategory, PositionStatus, RedeemStatus,
+                SettlementAccountingStatus, SettlementTrigger, Side, TickSize,
             },
             market::MarketStatus,
         },
@@ -228,7 +228,7 @@ mod tests {
             token_no: no.clone(),
             question: "question".into(),
             slug: "slug".into(),
-            category: MarketCategory::Politics,
+            categories: CategorySet::from(MarketCategory::Politics),
             status: MarketStatus::Active,
             outcome: None,
             neg_risk: false,

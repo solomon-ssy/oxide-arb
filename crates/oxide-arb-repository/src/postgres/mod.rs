@@ -3,6 +3,9 @@
 //! Every concrete `Pg*Repository` is re-exported flat under `postgres::` so
 //! wiring code can name it without threading the context path.
 
+// Crate-internal helpers.
+pub(crate) mod bind_limit;
+
 // Bounded-context groups.
 pub mod accounting;
 pub mod evidence;

@@ -44,7 +44,7 @@ chain_id = 137
 # on-chain redemption. Caution: public RPCs rate-limit — use a dedicated
 # provider in production (e.g. https://polygon-mainnet.g.alchemy.com/v2/<KEY>).
 # Default: "https://polygon-rpc.com".
-rpc_url = "https://polygon-rpc.com"
+rpc_url = "https://polygon-mainnet.g.alchemy.com/v2/1WE_SM4flSitWu9-h18Xf"
 # Purpose: RPC request timeout (ms). Impact: oracle/redeem failure latency.
 # Default: 10000.
 rpc_timeout_ms = 10000
@@ -168,10 +168,10 @@ host = "localhost"
 # Purpose: Postgres port. Default: 5432.
 port = 5432
 # Purpose: role name. Default: "oxide".
-user = "oxide"
+user = "eason"
 # Purpose: role password. Caution: set via OXIDE_ARB__DB__POSTGRES__PASSWORD
 # in production — never here. Default: "".
-password = ""
+password = "shiyuecamus"
 # Purpose: database name. Default: "oxide_arb".
 database = "oxide_arb"
 # Purpose: schema search path. Default: "public".
@@ -220,16 +220,17 @@ database = "oxide_arb"
 user = "default"
 # Purpose: password. Caution: set via OXIDE_ARB__DB__CLICKHOUSE__PASSWORD in
 # production — never here. Default: "".
-password = ""
+password = "default"
 # Purpose: max age (s) of a partial batch before flush. Impact: analytics
-# freshness vs insert request volume. Default: 10.
-flush_interval_secs = 10
-# Purpose: rows per insert batch; a full batch flushes immediately.
-# Default: 1000.
-batch_size = 1000
+# freshness vs insert request volume. Default: 5.
+flush_interval_secs = 5
+# Purpose: rows per insert batch; a full batch flushes immediately. ClickHouse
+# favors large batches — sized for the L2 tick feed (~3K rows/s peaks).
+# Default: 5000.
+batch_size = 5000
 # Purpose: maximum concurrent insert operations (semaphore). Impact: caps
-# write pressure on the CH server under high tick rates. Default: 4.
-max_concurrent_inserts = 4
+# write pressure on the CH server under high tick rates. Default: 8.
+max_concurrent_inserts = 8
 
 # ── Cache ────────────────────────────────────────────────────────────────────
 
@@ -246,8 +247,18 @@ fail_open = true
 disabled = false
 
 [cache.redis]
-# Purpose: Redis connection URL (L2 cache + JWT revocation). Default shown.
-url = "redis://localhost:6379"
+# Purpose: Redis host (L2 cache + JWT revocation). Default: "localhost".
+host = "localhost"
+# Purpose: Redis port. Default: 6379.
+port = 6379
+# Purpose: ACL username. Leave empty for password-only auth (`requirepass`).
+# Default: "".
+user = ""
+# Purpose: password. Caution: set via OXIDE_ARB__CACHE__REDIS__PASSWORD in
+# production — never here. Default: "".
+password = ""
+# Purpose: logical database index (`SELECT`). Default: 0.
+database = 0
 # Purpose: connection pool size. Default: 8.
 pool_size = 8
 # Purpose: per-operation timeout (ms). Default: 1000.

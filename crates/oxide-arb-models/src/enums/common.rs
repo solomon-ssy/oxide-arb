@@ -5,6 +5,7 @@
 
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
+use sea_orm::{ActiveValue, IntoActiveValue};
 use serde::{Deserialize, Serialize};
 use std::{
     fmt::{self, Display, Formatter},
@@ -230,7 +231,7 @@ impl Display for AlertLevel {
 
 active_string_enum! {
     /// Polymarket event category for fee-rate lookup and opportunity scoring.
-    @derive(PartialOrd, Ord)
+    @derive(PartialOrd, Ord, schemars::JsonSchema)
     pub enum MarketCategory {
         Geopolitics => "geopolitics",
         Sports => "sports",
@@ -278,16 +279,168 @@ impl MarketCategory {
         }
     }
 
-    /// Parse Gamma API category labels; unknown labels map to [`Self::Other`].
+    /// Map a Gamma event tag slug to a fee category.
+    ///
+    /// The Gamma API exposes no dedicated category field anymore: the official
+    /// categorization is the event `tags[]` array, whose slugs correspond to
+    /// the site navigation tag pages. This curated mapping covers the slugs
+    /// that align with Polymarket's documented fee categories; every other
+    /// slug (team names, people, sub-topics) returns `None`.
     #[must_use]
-    pub fn from_gamma_label(label: Option<&str>) -> Self {
-        label.and_then(|s| s.parse().ok()).unwrap_or(Self::Other)
+    pub fn from_gamma_tag_slug(slug: &str) -> Option<Self> {
+        match slug.trim().to_ascii_lowercase().as_str() {
+            "politics" | "elections" => Some(Self::Politics),
+            "geopolitics" | "world" => Some(Self::Geopolitics),
+            "crypto" => Some(Self::Crypto),
+            "sports" => Some(Self::Sports),
+            "tech" | "technology" | "ai" => Some(Self::Tech),
+            "culture" | "pop-culture" => Some(Self::Culture),
+            "weather" | "climate" => Some(Self::Weather),
+            "economy" | "economics" => Some(Self::Economics),
+            "finance" => Some(Self::Finance),
+            _ => None,
+        }
+    }
+
+    /// Fee-conservatism rank: higher rank means a higher documented fee rate.
+    ///
+    /// Used to break ties when an event maps to several categories — picking
+    /// the highest-fee category overestimates (never underestimates) fees,
+    /// which is the safe direction for net-profit gating.
+    /// Order per Polymarket fee docs: crypto 0.072 > economics/culture/weather
+    /// 0.05 > politics/finance/tech 0.04 > sports 0.03 > geopolitics 0.
+    #[must_use]
+    #[inline]
+    pub const fn fee_rank(self) -> u8 {
+        match self {
+            Self::Crypto => 9,
+            Self::Economics => 8,
+            Self::Culture => 7,
+            Self::Weather => 6,
+            Self::Politics => 5,
+            Self::Finance => 4,
+            Self::Tech => 3,
+            Self::Sports => 2,
+            Self::Geopolitics => 1,
+            Self::Other => 0,
+        }
     }
 }
 
-impl From<Option<&str>> for MarketCategory {
-    fn from(label: Option<&str>) -> Self {
-        Self::from_gamma_label(label)
+/// Bit set of [`MarketCategory`] memberships derived from Gamma event tags.
+///
+/// One event frequently carries several category tags (e.g. politics +
+/// geopolitics + world). The set preserves every membership for universe
+/// filtering, while [`Self::fee_category`] collapses to a deterministic
+/// single category for fee estimation.
+///
+/// Serialized as an array of category names for registry snapshots and
+/// debuggability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct CategorySet(u16);
+
+impl CategorySet {
+    /// The empty set (no memberships).
+    pub const EMPTY: Self = Self(0);
+
+    /// Build a set from Gamma tag slugs; unknown slugs are ignored.
+    pub fn from_slugs<'a>(slugs: impl IntoIterator<Item = &'a str>) -> Self {
+        let mut set = Self::EMPTY;
+        for slug in slugs {
+            if let Some(category) = MarketCategory::from_gamma_tag_slug(slug) {
+                set.insert(category);
+            }
+        }
+        set
+    }
+
+    /// Add a category membership.
+    #[inline]
+    pub const fn insert(&mut self, category: MarketCategory) {
+        self.0 |= 1 << category.table_index();
+    }
+
+    /// Whether `category` is a member.
+    #[must_use]
+    #[inline]
+    pub const fn contains(self, category: MarketCategory) -> bool {
+        self.0 & (1 << category.table_index()) != 0
+    }
+
+    /// Whether the two sets share at least one member.
+    #[must_use]
+    #[inline]
+    pub const fn intersects(self, other: Self) -> bool {
+        self.0 & other.0 != 0
+    }
+
+    /// Whether the set has no members.
+    #[must_use]
+    #[inline]
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    /// Iterate the member categories in `ALL_VARIANTS` order.
+    pub fn iter(self) -> impl Iterator<Item = MarketCategory> {
+        MarketCategory::ALL_VARIANTS
+            .into_iter()
+            .filter(move |category| self.contains(*category))
+    }
+
+    /// Deterministic single category for fee estimation.
+    ///
+    /// Picks the member with the highest [`MarketCategory::fee_rank`]
+    /// (fee-conservative: overestimate, never underestimate). The empty set
+    /// collapses to [`MarketCategory::Other`].
+    #[must_use]
+    pub fn fee_category(self) -> MarketCategory {
+        self.iter()
+            .max_by_key(|category| category.fee_rank())
+            .unwrap_or(MarketCategory::Other)
+    }
+}
+
+impl From<MarketCategory> for CategorySet {
+    fn from(category: MarketCategory) -> Self {
+        let mut set = Self::EMPTY;
+        set.insert(category);
+        set
+    }
+}
+
+impl IntoActiveValue<Vec<MarketCategory>> for CategorySet {
+    fn into_active_value(self) -> ActiveValue<Vec<MarketCategory>> {
+        ActiveValue::Set(self.iter().collect())
+    }
+}
+
+impl From<&[MarketCategory]> for CategorySet {
+    fn from(categories: &[MarketCategory]) -> Self {
+        categories.iter().copied().collect()
+    }
+}
+
+impl FromIterator<MarketCategory> for CategorySet {
+    fn from_iter<I: IntoIterator<Item = MarketCategory>>(iter: I) -> Self {
+        let mut set = Self::EMPTY;
+        for category in iter {
+            set.insert(category);
+        }
+        set
+    }
+}
+
+impl Serialize for CategorySet {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(self.iter())
+    }
+}
+
+impl<'de> Deserialize<'de> for CategorySet {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let categories = Vec::<MarketCategory>::deserialize(deserializer)?;
+        Ok(categories.into_iter().collect())
     }
 }
 
@@ -478,5 +631,81 @@ active_string_enum! {
     pub enum ReportType {
         Daily => "daily",
         Weekly => "weekly",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn category_set_from_slugs_collects_every_match_and_ignores_unknowns() {
+        let set = CategorySet::from_slugs(["politics", "geopolitics", "world", "trump", "earn-4"]);
+        assert!(set.contains(MarketCategory::Politics));
+        assert!(set.contains(MarketCategory::Geopolitics));
+        assert!(!set.contains(MarketCategory::Other));
+        assert_eq!(set.iter().count(), 2);
+    }
+
+    #[test]
+    fn category_set_from_empty_slugs_is_empty() {
+        let set = CategorySet::from_slugs([] as [&str; 0]);
+        assert!(set.is_empty());
+        assert_eq!(set.fee_category(), MarketCategory::Other);
+    }
+
+    #[test]
+    fn fee_category_picks_the_highest_fee_member() {
+        // crypto 0.072 beats politics 0.04 beats geopolitics 0.
+        let set = CategorySet::from_slugs(["politics", "crypto", "geopolitics"]);
+        assert_eq!(set.fee_category(), MarketCategory::Crypto);
+
+        let set = CategorySet::from_slugs(["sports", "geopolitics"]);
+        assert_eq!(set.fee_category(), MarketCategory::Sports);
+    }
+
+    #[test]
+    fn fee_rank_is_a_total_order_over_all_variants() {
+        let mut ranks: Vec<u8> = MarketCategory::ALL_VARIANTS
+            .iter()
+            .map(|category| category.fee_rank())
+            .collect();
+        ranks.sort_unstable();
+        ranks.dedup();
+        assert_eq!(ranks.len(), MarketCategory::ALL_VARIANTS.len());
+    }
+
+    #[test]
+    fn category_set_intersects_any_membership() {
+        let multi = CategorySet::from_slugs(["politics", "geopolitics"]);
+        assert!(multi.intersects(CategorySet::from(MarketCategory::Geopolitics)));
+        assert!(!multi.intersects(CategorySet::from(MarketCategory::Sports)));
+        assert!(!multi.intersects(CategorySet::EMPTY));
+    }
+
+    #[test]
+    fn category_set_serde_round_trips_as_name_array() {
+        let set = CategorySet::from_slugs(["crypto", "sports"]);
+        let json = serde_json::to_string(&set).expect("serialize");
+        assert_eq!(json, r#"["sports","crypto"]"#);
+        let parsed: CategorySet = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed, set);
+    }
+
+    #[test]
+    fn tag_slug_mapping_covers_aliases() {
+        assert_eq!(
+            MarketCategory::from_gamma_tag_slug("pop-culture"),
+            Some(MarketCategory::Culture)
+        );
+        assert_eq!(
+            MarketCategory::from_gamma_tag_slug("economy"),
+            Some(MarketCategory::Economics)
+        );
+        assert_eq!(
+            MarketCategory::from_gamma_tag_slug("AI"),
+            Some(MarketCategory::Tech)
+        );
+        assert_eq!(MarketCategory::from_gamma_tag_slug("nba-finals"), None);
     }
 }

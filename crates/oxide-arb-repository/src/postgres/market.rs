@@ -1,4 +1,7 @@
-use crate::traits::MarketRepository;
+use crate::{
+    postgres::bind_limit::{IN_LIST_CHUNK, max_rows_per_insert},
+    traits::MarketRepository,
+};
 use chrono::{DateTime, Utc};
 use num_traits::ToPrimitive;
 use oxide_arb_error::storage::StorageError;
@@ -24,8 +27,12 @@ use oxide_arb_models::{
 };
 use sea_orm::{
     ColumnTrait, ConnectionTrait, DatabaseConnection, DatabaseTransaction, EntityTrait,
-    IntoActiveModel, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, TransactionTrait,
-    sea_query::{Condition, Expr, OnConflict, extension::postgres::PgExpr},
+    IntoActiveModel, Iterable, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect,
+    TransactionTrait,
+    sea_query::{
+        Condition, Expr, OnConflict,
+        extension::postgres::{PgBinOper, PgExpr},
+    },
 };
 use serde::Serialize;
 use std::{
@@ -75,15 +82,17 @@ async fn do_find_by_ids(
     db: &impl ConnectionTrait,
     ids: &[MarketId],
 ) -> Result<Vec<Arc<MarketInfo>>, StorageError> {
-    if ids.is_empty() {
-        return Ok(Vec::new());
+    let mut markets = Vec::with_capacity(ids.len());
+    // Chunk the IN list to stay under the Postgres bind-parameter limit.
+    for chunk in ids.chunks(IN_LIST_CHUNK) {
+        let rows = MarketEntity::find()
+            .filter(MarketColumn::MarketId.is_in(chunk.iter().map(MarketId::as_str)))
+            .all(db)
+            .await
+            .map_err(StorageError::from)?;
+        markets.extend(rows.into_iter().map(|model| Arc::new(model.into())));
     }
-    MarketEntity::find()
-        .filter(MarketColumn::MarketId.is_in(ids.iter().map(MarketId::as_str)))
-        .all(db)
-        .await
-        .map_err(StorageError::from)
-        .map(|v| v.into_iter().map(|model| Arc::new(model.into())).collect())
+    Ok(markets)
 }
 
 async fn do_find_by_event(
@@ -116,18 +125,46 @@ async fn do_find_existing_ids(
     db: &impl ConnectionTrait,
     ids: &[MarketId],
 ) -> Result<HashSet<String>, StorageError> {
-    if ids.is_empty() {
-        return Ok(HashSet::new());
+    let mut existing = HashSet::with_capacity(ids.len());
+    // Chunk the IN list to stay under the Postgres bind-parameter limit.
+    for chunk in ids.chunks(IN_LIST_CHUNK) {
+        let rows = MarketEntity::find()
+            .filter(MarketColumn::MarketId.is_in(chunk.iter().map(MarketId::as_str)))
+            .select_only()
+            .column(MarketColumn::MarketId)
+            .into_tuple::<String>()
+            .all(db)
+            .await?;
+        existing.extend(rows);
     }
-    let id_strs: Vec<&str> = ids.iter().map(MarketId::as_str).collect();
-    let rows = MarketEntity::find()
-        .filter(MarketColumn::MarketId.is_in(id_strs))
-        .select_only()
-        .column(MarketColumn::MarketId)
-        .into_tuple::<String>()
-        .all(db)
-        .await?;
-    Ok(rows.into_iter().collect())
+    Ok(existing)
+}
+
+/// `ON CONFLICT (market_id) DO UPDATE` clause shared by single and batch upserts.
+fn market_upsert_on_conflict() -> OnConflict {
+    OnConflict::column(MarketColumn::MarketId)
+        .update_columns([
+            MarketColumn::EventId,
+            MarketColumn::Question,
+            MarketColumn::Slug,
+            MarketColumn::Categories,
+            MarketColumn::Status,
+            MarketColumn::YesTokenId,
+            MarketColumn::NoTokenId,
+            MarketColumn::TickSize,
+            MarketColumn::NegRisk,
+            MarketColumn::Outcome,
+            MarketColumn::EndDate,
+            MarketColumn::ResolvedAt,
+            MarketColumn::FeesEnabled,
+            MarketColumn::FeeRate,
+            MarketColumn::FeeExponent,
+            MarketColumn::FeeTakerOnly,
+            MarketColumn::FeeRebateRate,
+            MarketColumn::FeeSource,
+            MarketColumn::FeeObservedAt,
+        ])
+        .to_owned()
 }
 
 async fn do_upsert(
@@ -136,31 +173,7 @@ async fn do_upsert(
 ) -> Result<Arc<MarketInfo>, StorageError> {
     let am: MarketActiveModel = dto.into_active_model();
     let model = MarketEntity::insert(am)
-        .on_conflict(
-            OnConflict::column(MarketColumn::MarketId)
-                .update_columns([
-                    MarketColumn::EventId,
-                    MarketColumn::Question,
-                    MarketColumn::Slug,
-                    MarketColumn::Category,
-                    MarketColumn::Status,
-                    MarketColumn::YesTokenId,
-                    MarketColumn::NoTokenId,
-                    MarketColumn::TickSize,
-                    MarketColumn::NegRisk,
-                    MarketColumn::Outcome,
-                    MarketColumn::EndDate,
-                    MarketColumn::ResolvedAt,
-                    MarketColumn::FeesEnabled,
-                    MarketColumn::FeeRate,
-                    MarketColumn::FeeExponent,
-                    MarketColumn::FeeTakerOnly,
-                    MarketColumn::FeeRebateRate,
-                    MarketColumn::FeeSource,
-                    MarketColumn::FeeObservedAt,
-                ])
-                .to_owned(),
-        )
+        .on_conflict(market_upsert_on_conflict())
         .exec_with_returning(db)
         .await
         .map_err(StorageError::from)?;
@@ -185,35 +198,17 @@ async fn do_upsert_batch(
         .into_iter()
         .map(IntoActiveModel::into_active_model)
         .collect();
-    MarketEntity::insert_many(models)
-        .on_conflict(
-            OnConflict::column(MarketColumn::MarketId)
-                .update_columns([
-                    MarketColumn::EventId,
-                    MarketColumn::Question,
-                    MarketColumn::Slug,
-                    MarketColumn::Category,
-                    MarketColumn::Status,
-                    MarketColumn::YesTokenId,
-                    MarketColumn::NoTokenId,
-                    MarketColumn::TickSize,
-                    MarketColumn::NegRisk,
-                    MarketColumn::Outcome,
-                    MarketColumn::EndDate,
-                    MarketColumn::ResolvedAt,
-                    MarketColumn::FeesEnabled,
-                    MarketColumn::FeeRate,
-                    MarketColumn::FeeExponent,
-                    MarketColumn::FeeTakerOnly,
-                    MarketColumn::FeeRebateRate,
-                    MarketColumn::FeeSource,
-                    MarketColumn::FeeObservedAt,
-                ])
-                .to_owned(),
-        )
-        .exec(db)
-        .await
-        .map_err(StorageError::from)?;
+    // A full Gamma sync upserts tens of thousands of markets; one multi-row
+    // INSERT would exceed the Postgres bind-parameter limit, so split into
+    // bounded statements (all within the caller's transaction).
+    let rows_per_insert = max_rows_per_insert(MarketColumn::iter().count());
+    for chunk in models.chunks(rows_per_insert) {
+        MarketEntity::insert_many(chunk.to_vec())
+            .on_conflict(market_upsert_on_conflict())
+            .exec(db)
+            .await
+            .map_err(StorageError::from)?;
+    }
     let markets = do_find_by_ids(db, &ids).await?;
     let markets = markets.iter().map(Arc::as_ref).collect::<Vec<_>>();
     write_market_pit_snapshots_if_changed(db, &markets).await?;
@@ -255,22 +250,23 @@ async fn do_latest_pit_snapshots_before(
     ids: &[MarketId],
     as_of: DateTime<Utc>,
 ) -> Result<Vec<MarketPitSnapshotInfo>, StorageError> {
-    if ids.is_empty() {
-        return Ok(Vec::new());
-    }
-    let rows = MarketPitSnapshotEntity::find()
-        .filter(MarketPitSnapshotColumn::MarketId.is_in(ids.iter().map(MarketId::as_str)))
-        .filter(MarketPitSnapshotColumn::ObservedAt.lte(as_of))
-        .order_by_asc(MarketPitSnapshotColumn::MarketId)
-        .order_by_desc(MarketPitSnapshotColumn::ObservedAt)
-        .all(db)
-        .await
-        .map_err(StorageError::from)?;
-    let mut seen = HashSet::new();
     let mut latest = Vec::new();
-    for row in rows {
-        if seen.insert(row.market_id.clone()) {
-            latest.push(row.into());
+    // Chunk the IN list to stay under the Postgres bind-parameter limit;
+    // ids are disjoint across chunks, so per-chunk dedup stays correct.
+    for chunk in ids.chunks(IN_LIST_CHUNK) {
+        let rows = MarketPitSnapshotEntity::find()
+            .filter(MarketPitSnapshotColumn::MarketId.is_in(chunk.iter().map(MarketId::as_str)))
+            .filter(MarketPitSnapshotColumn::ObservedAt.lte(as_of))
+            .order_by_asc(MarketPitSnapshotColumn::MarketId)
+            .order_by_desc(MarketPitSnapshotColumn::ObservedAt)
+            .all(db)
+            .await
+            .map_err(StorageError::from)?;
+        let mut seen = HashSet::new();
+        for row in rows {
+            if seen.insert(row.market_id.clone()) {
+                latest.push(row.into());
+            }
         }
     }
     Ok(latest)
@@ -309,10 +305,14 @@ async fn write_market_pit_snapshots_if_changed(
         .into_iter()
         .map(IntoActiveModel::into_active_model)
         .collect::<Vec<MarketPitSnapshotActiveModel>>();
-    MarketPitSnapshotEntity::insert_many(models)
-        .exec(db)
-        .await
-        .map_err(StorageError::from)?;
+    // Chunk the multi-row INSERT to stay under the bind-parameter limit.
+    let rows_per_insert = max_rows_per_insert(MarketPitSnapshotColumn::iter().count());
+    for chunk in models.chunks(rows_per_insert) {
+        MarketPitSnapshotEntity::insert_many(chunk.to_vec())
+            .exec(db)
+            .await
+            .map_err(StorageError::from)?;
+    }
     Ok(())
 }
 
@@ -327,21 +327,22 @@ async fn latest_pit_snapshots(
     db: &impl ConnectionTrait,
     ids: &[MarketId],
 ) -> Result<Vec<MarketPitSnapshotInfo>, StorageError> {
-    if ids.is_empty() {
-        return Ok(Vec::new());
-    }
-    let rows = MarketPitSnapshotEntity::find()
-        .filter(MarketPitSnapshotColumn::MarketId.is_in(ids.iter().map(MarketId::as_str)))
-        .order_by_asc(MarketPitSnapshotColumn::MarketId)
-        .order_by_desc(MarketPitSnapshotColumn::ObservedAt)
-        .all(db)
-        .await
-        .map_err(StorageError::from)?;
-    let mut seen = HashSet::new();
     let mut latest = Vec::new();
-    for row in rows {
-        if seen.insert(row.market_id.clone()) {
-            latest.push(row.into());
+    // Chunk the IN list to stay under the Postgres bind-parameter limit;
+    // ids are disjoint across chunks, so per-chunk dedup stays correct.
+    for chunk in ids.chunks(IN_LIST_CHUNK) {
+        let rows = MarketPitSnapshotEntity::find()
+            .filter(MarketPitSnapshotColumn::MarketId.is_in(chunk.iter().map(MarketId::as_str)))
+            .order_by_asc(MarketPitSnapshotColumn::MarketId)
+            .order_by_desc(MarketPitSnapshotColumn::ObservedAt)
+            .all(db)
+            .await
+            .map_err(StorageError::from)?;
+        let mut seen = HashSet::new();
+        for row in rows {
+            if seen.insert(row.market_id.clone()) {
+                latest.push(row.into());
+            }
         }
     }
     Ok(latest)
@@ -353,7 +354,7 @@ struct MarketReplayPayload<'a> {
     event_id: &'a EventId,
     question: &'a str,
     slug: &'a str,
-    category: MarketCategory,
+    categories: &'a [MarketCategory],
     status: MarketStatus,
     outcome: &'a Option<String>,
     yes_token_id: &'a TokenId,
@@ -377,7 +378,7 @@ fn market_replay_payload_hash(market: &MarketInfo) -> Result<String, StorageErro
         event_id: &market.event_id,
         question: &market.question,
         slug: &market.slug,
-        category: market.category,
+        categories: &market.categories,
         status: market.status,
         outcome: &market.outcome,
         yes_token_id: &market.yes_token_id,
@@ -409,7 +410,7 @@ fn new_market_pit_snapshot(market: &MarketInfo, payload_hash: String) -> NewMark
         event_id: market.event_id.clone(),
         question: market.question.clone(),
         slug: market.slug.clone(),
-        category: market.category,
+        categories: market.category_set(),
         status: market.status,
         outcome: market.outcome.clone(),
         yes_token_id: market.yes_token_id.clone(),
@@ -436,7 +437,11 @@ fn page_condition(query: &MarketPageQuery) -> Condition {
         condition = condition.add(MarketColumn::Status.eq(status));
     }
     if let Some(category) = query.category {
-        condition = condition.add(MarketColumn::Category.eq(category));
+        // Any-match against the text[] membership column (GIN-indexed).
+        condition = condition.add(
+            Expr::col(MarketColumn::Categories)
+                .binary(PgBinOper::Contains, Expr::val(vec![category])),
+        );
     }
     if let Some(event_id) = &query.event_id {
         condition = condition.add(MarketColumn::EventId.eq(event_id.as_str()));

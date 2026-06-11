@@ -60,6 +60,7 @@ use crate::{
         market_cache::MarketCache,
         market_registry::MarketRegistry,
         staleness_classifier::StalenessClassifier,
+        universe_filter::MarketUniverseFilter,
     },
     runtime_config::{RuntimeConfigApplicator, RuntimeConfigStore, RuntimeConfigSubscribers},
     service::{
@@ -248,6 +249,8 @@ struct BuildTrading {
     book_store: Arc<BookStore>,
     market_registry: Arc<MarketRegistry>,
     market_cache: Arc<MarketCache>,
+    universe: Arc<MarketUniverseFilter>,
+    ws_subscription: Arc<WsSubscriptionCoordinator>,
     gamma_service: Arc<GammaService>,
     opportunity_pipeline: Arc<CoreOpportunityPipeline>,
     calibrator: Arc<ResolutionCalibrator>,
@@ -270,6 +273,8 @@ struct DetectionStack {
     book_store: Arc<BookStore>,
     market_registry: Arc<MarketRegistry>,
     market_cache: Arc<MarketCache>,
+    universe: Arc<MarketUniverseFilter>,
+    ws_subscription: Arc<WsSubscriptionCoordinator>,
     gamma_service: Arc<GammaService>,
     opportunity_pipeline: Arc<CoreOpportunityPipeline>,
     calibrator: Arc<ResolutionCalibrator>,
@@ -485,6 +490,10 @@ fn wire_applicator(input: WireApplicatorInput<'_>) -> Arc<RuntimeConfigApplicato
             opportunity_pipeline: Arc::clone(&trading.opportunity_pipeline),
             calibration_updater: Arc::clone(&trading.calibration_updater),
             staleness: trading.staleness.clone(),
+            universe: Arc::clone(&trading.universe),
+            market_registry: Arc::clone(&trading.market_registry),
+            market_cache: Arc::clone(&trading.market_cache),
+            ws_subscription: Some(Arc::clone(&trading.ws_subscription)),
             validator: Arc::clone(&trading.validator),
             order_strategy: Arc::clone(&trading.order_strategy),
             coalescer: Arc::clone(&trading.coalescer),
@@ -1107,6 +1116,8 @@ fn wire_trading(
         book_store: detection.book_store,
         market_registry: detection.market_registry,
         market_cache: detection.market_cache,
+        universe: detection.universe,
+        ws_subscription: detection.ws_subscription,
         gamma_service: detection.gamma_service,
         opportunity_pipeline: detection.opportunity_pipeline,
         calibrator: detection.calibrator,
@@ -1171,7 +1182,13 @@ async fn wire_detection(
     let WiringConfig { deploy, runtime } = wiring;
     let book_store = Arc::new(BookStore::new(Arc::clone(&infra.metrics)));
     let market_registry = Arc::new(MarketRegistry::new());
-    let market_cache = Arc::new(MarketCache::new(Arc::clone(&market_registry)));
+    let universe = Arc::new(MarketUniverseFilter::new(
+        &runtime.market_data.enabled_categories,
+    ));
+    let market_cache = Arc::new(MarketCache::new(
+        Arc::clone(&market_registry),
+        Arc::clone(&universe),
+    ));
 
     let (calibrator, calibration_updater) = wire_calibration_stack(runtime, infra, clients).await?;
 
@@ -1221,18 +1238,20 @@ async fn wire_detection(
         shutdown,
     ));
 
+    let ws_subscription = Arc::new(WsSubscriptionCoordinator::new(Arc::clone(
+        &clients.ws_manager,
+    )));
     let gamma_service = Arc::new(GammaService::new(GammaServiceDeps {
         gamma_client: Arc::clone(&clients.gamma_client),
         market_registry: Arc::clone(&market_registry),
         market_cache: Arc::clone(&market_cache),
+        universe: Arc::clone(&universe),
         fee_calculator: Arc::clone(&clients.fee_calculator),
         market_repo: Arc::clone(&infra.repos.market),
         event_repo: Arc::clone(&infra.repos.event),
         cache: Arc::clone(&infra.cache),
         metrics: Arc::clone(&infra.metrics),
-        ws_subscription: Some(Arc::new(WsSubscriptionCoordinator::new(Arc::clone(
-            &clients.ws_manager,
-        )))),
+        ws_subscription: Some(Arc::clone(&ws_subscription)),
         full_sync_interval_secs: deploy.market_data.gamma.full_sync_interval_secs,
     }));
 
@@ -1253,6 +1272,8 @@ async fn wire_detection(
         book_store,
         market_registry,
         market_cache,
+        universe,
+        ws_subscription,
         gamma_service,
         opportunity_pipeline,
         calibrator,

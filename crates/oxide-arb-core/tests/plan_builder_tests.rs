@@ -11,7 +11,7 @@ use oxide_arb_models::{
         market::{MarketRegistryInfo, TokenInfo},
     },
     enums::{
-        common::{MarketCategory, TickSize},
+        common::{CategorySet, MarketCategory, TickSize},
         market::MarketStatus,
     },
     types::{EventId, ExecutionId, MarketId, Price, ReservationId, TokenId, Usd},
@@ -28,7 +28,7 @@ fn sample_market(id: &str, neg_risk: bool) -> MarketRegistryInfo {
         token_no: TokenId::new(format!("{id}-no")),
         question: "Test?".into(),
         slug: "test".into(),
-        category: MarketCategory::Other,
+        categories: CategorySet::from(MarketCategory::Other),
         status: MarketStatus::Active,
         outcome: None,
         neg_risk,
