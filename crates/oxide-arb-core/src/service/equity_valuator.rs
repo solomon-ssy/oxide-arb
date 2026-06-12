@@ -129,7 +129,7 @@ mod tests {
         enums::{
             calibration::{DurationBucket, PriceZone},
             common::{
-                CategorySet, MarketCategory, PositionStatus, RedeemStatus,
+                CategorySet, ExecutionMode, MarketCategory, PositionStatus, RedeemStatus,
                 SettlementAccountingStatus, SettlementTrigger, Side, TickSize,
             },
             market::MarketStatus,
@@ -270,6 +270,7 @@ mod tests {
             market_id: market_id.clone(),
             token_id: token_id.clone(),
             side: Side::Buy,
+            execution_mode: ExecutionMode::Paper,
             shares: Shares::new(shares),
             avg_entry_price: Price::new(entry),
             total_cost_usd: Usd::new(shares * entry),

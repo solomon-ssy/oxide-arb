@@ -26,7 +26,7 @@ use oxide_arb_error::{
     rbac::RbacError,
     storage::StorageError,
 };
-use oxide_arb_models::domain::{RuntimeControlError, WindowQueryError};
+use oxide_arb_models::domain::{DailySeriesRangeError, RuntimeControlError, WindowQueryError};
 use thiserror::Error;
 
 use crate::response::WebResponse;
@@ -206,6 +206,13 @@ impl From<RegistryError> for WebError {
 impl From<WindowQueryError> for WebError {
     fn from(error: WindowQueryError) -> Self {
         // Both variants are caller-supplied window misuse → 400.
+        Self::BadRequest(error.to_string())
+    }
+}
+
+impl From<DailySeriesRangeError> for WebError {
+    fn from(error: DailySeriesRangeError) -> Self {
+        // Caller-supplied `days` out of range → 400.
         Self::BadRequest(error.to_string())
     }
 }

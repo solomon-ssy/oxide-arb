@@ -1,5 +1,6 @@
 //! `ClickHouse` connection management, schema DDL, and batch inserter.
 
+mod ensure;
 mod inserter;
 mod pool;
 mod schema;

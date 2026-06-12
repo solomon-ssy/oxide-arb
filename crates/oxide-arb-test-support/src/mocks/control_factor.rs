@@ -9,15 +9,18 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::{
-    domain::control_factor::{
-        AcquireMaterializationRunOutcome, AuditActor, AuditedOutcome,
-        CancelMaterializationRunOutcome, ControlFactorAuditEventInfo,
-        ControlFactorMaterializationRunInfo, ControlFactorPublicationInfo,
-        ControlFactorStageReportInfo, ControlFactorValueInfo, EnqueueMaterializationRunOptions,
-        EnqueueMaterializationRunOutcome, ExpireFactorsOutcome, MaterializationRunStatusPatch,
-        NewControlFactorAuditEvent, NewControlFactorMaterializationRun,
-        NewControlFactorPublication, NewControlFactorStageReport, NewControlFactorValue,
-        PublishPublicationOutcome, RunTransitionOutcome,
+    domain::{
+        Paginated, ReplayPageQuery,
+        control_factor::{
+            AcquireMaterializationRunOutcome, AuditActor, AuditedOutcome,
+            CancelMaterializationRunOutcome, ControlFactorAuditEventInfo,
+            ControlFactorMaterializationRunInfo, ControlFactorPublicationInfo,
+            ControlFactorStageReportInfo, ControlFactorValueInfo, EnqueueMaterializationRunOptions,
+            EnqueueMaterializationRunOutcome, ExpireFactorsOutcome, MaterializationRunStatusPatch,
+            NewControlFactorAuditEvent, NewControlFactorMaterializationRun,
+            NewControlFactorPublication, NewControlFactorStageReport, NewControlFactorValue,
+            PublishPublicationOutcome, RunTransitionOutcome,
+        },
     },
     enums::control_factor::{
         ControlFactorType, FactorStatus, MaterializationRunStatus, MaterializationStageName,
@@ -111,6 +114,43 @@ impl ControlFactorRepository for MockSchedulerControlFactorRepository {
             .take(usize::try_from(limit).unwrap_or(usize::MAX))
             .map(|run| run.materialization_run_id.clone())
             .collect())
+    }
+
+    async fn list_active_materialization_runs(
+        &self,
+        limit: u64,
+    ) -> Result<Vec<ControlFactorMaterializationRunInfo>, StorageError> {
+        let runs = self.runs.lock().unwrap();
+        Ok(runs
+            .iter()
+            .filter(|run| {
+                matches!(
+                    run.status,
+                    MaterializationRunStatus::Queued | MaterializationRunStatus::Running
+                )
+            })
+            .take(usize::try_from(limit).unwrap_or(usize::MAX))
+            .cloned()
+            .collect())
+    }
+
+    async fn page_materialization_runs(
+        &self,
+        query: &ReplayPageQuery,
+    ) -> Result<Paginated<ControlFactorMaterializationRunInfo>, StorageError> {
+        let window = query.page.normalized();
+        let filtered: Vec<_> = {
+            let runs = self.runs.lock().unwrap();
+            runs.iter()
+                .filter(|run| query.status.is_none_or(|status| run.status == status))
+                .cloned()
+                .collect()
+        };
+        let total = u64::try_from(filtered.len()).unwrap_or(u64::MAX);
+        let offset = usize::try_from(window.offset()).unwrap_or(usize::MAX);
+        let limit = usize::try_from(window.limit()).unwrap_or(usize::MAX);
+        let items = filtered.into_iter().skip(offset).take(limit).collect();
+        Ok(Paginated::from_request(items, total, &window))
     }
 
     async fn try_acquire_materialization_run(

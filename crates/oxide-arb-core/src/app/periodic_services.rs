@@ -2,6 +2,8 @@
 
 use super::{AppContext, task_id::TaskId};
 use crate::{
+    bridge::execution_mode::ExecutionModeHandle,
+    control::status::SystemStatusNudge,
     infra::{
         debounced_writer::DebouncedWriter, health_checker::HealthChecker,
         periodic_task::PeriodicTask,
@@ -47,6 +49,11 @@ const BOOK_SNAPSHOT_PUBLISH_INTERVAL_SECS: u64 = 60;
 const PERIODIC_JITTER_PCT: f64 = 0.1;
 
 struct LedgerReconciliationDeps<'a> {
+    /// Live execution-mode handle, read per tick: external-balance
+    /// reconciliation only makes sense against real funds, so every
+    /// non-Live tick is skipped and a runtime switch to Live re-arms the
+    /// task without a restart.
+    execution_mode: &'a ExecutionModeHandle,
     risk_engine: &'a RiskEngine,
     risk_metrics: &'a dyn RiskMetrics,
     clob_client: &'a ClobClient,
@@ -91,6 +98,7 @@ impl AppContext {
         let catalog = Arc::clone(&self.data.catalog);
         let market_registry = Arc::clone(&self.data.market_registry);
         let catalog_ready_gauge = self.infra.metrics.catalog_ready.clone();
+        let status_nudge = self.system_status_nudge.clone();
         let interval_secs = self
             .config
             .market_data
@@ -105,6 +113,7 @@ impl AppContext {
                     catalog,
                     market_registry,
                     catalog_ready_gauge,
+                    status_nudge,
                 };
                 if !warmup_catalog(&deps, &shutdown).await {
                     return;
@@ -273,11 +282,7 @@ impl AppContext {
     }
 
     fn queue_risk_metrics_refresh(&self) {
-        let Some(refresher) = self.risk.metrics_refresh.as_ref() else {
-            tracing::info!("risk metrics refresh skipped — ClobClient unavailable");
-            return;
-        };
-        let refresher = Arc::clone(refresher);
+        let refresher = Arc::clone(&self.risk.metrics_refresh);
         let runtime = Arc::clone(&self.runtime_config);
 
         self.pending_tasks
@@ -320,6 +325,7 @@ impl AppContext {
             return;
         };
         let clob_client = Arc::clone(clob_client);
+        let execution_mode = self.execution_mode.clone();
         let risk_engine = Arc::clone(&self.risk.engine);
         let risk_metrics = Arc::clone(&self.risk.metrics);
         let trade_repo = Arc::clone(&self.infra.trade_repo);
@@ -347,6 +353,7 @@ impl AppContext {
                     shutdown,
                     || {
                         let clob_client = Arc::clone(&clob_client);
+                        let execution_mode = execution_mode.clone();
                         let risk_engine = Arc::clone(&risk_engine);
                         let risk_metrics = Arc::clone(&risk_metrics);
                         let trade_repo = Arc::clone(&trade_repo);
@@ -359,6 +366,7 @@ impl AppContext {
                         let configured_bankroll = Usd::new(runtime.load().risk.bankroll_usd);
                         async move {
                             run_ledger_reconciliation(LedgerReconciliationDeps {
+                                execution_mode: &execution_mode,
                                 risk_engine: &risk_engine,
                                 risk_metrics: risk_metrics.as_ref(),
                                 clob_client: &clob_client,
@@ -570,6 +578,7 @@ struct CatalogSyncDeps {
     catalog: Arc<CatalogReadiness>,
     market_registry: Arc<MarketRegistry>,
     catalog_ready_gauge: IntGauge,
+    status_nudge: SystemStatusNudge,
 }
 
 impl CatalogSyncDeps {
@@ -578,6 +587,7 @@ impl CatalogSyncDeps {
         let markets = u64::try_from(self.market_registry.market_count()).unwrap_or(u64::MAX);
         self.catalog.mark_ready(markets, chrono::Utc::now());
         self.catalog_ready_gauge.set(1);
+        self.status_nudge.nudge();
     }
 }
 
@@ -645,15 +655,34 @@ async fn run_risk_tick(
         })
 }
 
+/// Whether the external-ledger reconciliation tick should run for `mode`.
+///
+/// External-balance reconciliation compares the internal ledger against real
+/// venue funds; in DryRun/Paper the ledger tracks simulated money, so any
+/// comparison with the CLOB balance is meaningless and must never trip the
+/// breaker.
+#[must_use]
+pub const fn ledger_reconciliation_enabled(mode: ExecutionMode) -> bool {
+    matches!(mode, ExecutionMode::Live)
+}
+
 async fn run_ledger_reconciliation(deps: LedgerReconciliationDeps<'_>) -> OxideResult<()> {
+    // The gate re-evaluates per tick so a governed switch to Live re-arms
+    // reconciliation without a restart.
+    let mode = deps.execution_mode.current();
+    if !ledger_reconciliation_enabled(mode) {
+        tracing::debug!(%mode, "ledger reconciliation skipped — external balance reconciliation is Live-only");
+        return Ok(());
+    }
+
     let observed_at = chrono::Utc::now();
     let external_available = deps
         .clob_client
         .collateral_balance()
         .await
         .map_err(OxideError::from)?;
-    let success_spend = deps.trade_repo.successful_spend_total().await?;
-    let settled_payout = deps.position_repo.settlement_payout_total().await?;
+    let success_spend = deps.trade_repo.successful_spend_total(mode).await?;
+    let settled_payout = deps.position_repo.settlement_payout_total(mode).await?;
     let internal_cash = deps.configured_bankroll - success_spend + settled_payout;
     let reserved = deps.risk_metrics.reserved_usd();
 
@@ -733,18 +762,17 @@ async fn run_calibration_tick(
 }
 
 /// Live-mode gate: metrics snapshot must be fresh before trading loops start.
+///
+/// Simulated modes hydrate their derived ledger snapshot during wiring; only
+/// Live defers to this gate because the CLOB fetch must succeed (fail-closed)
+/// before any trading loop spins up.
 pub async fn ensure_live_metrics_ready(
     mode: ExecutionMode,
-    refresher: Option<&RiskMetricsRefreshService>,
+    refresher: &RiskMetricsRefreshService,
 ) -> OxideResult<()> {
     if mode != ExecutionMode::Live {
         return Ok(());
     }
-    let Some(refresher) = refresher else {
-        return Err(OxideError::Internal(
-            "Live mode requires ClobClient for risk metrics refresh".into(),
-        ));
-    };
     refresher.refresh().await.map_err(|error| {
         tracing::error!(
             %error,

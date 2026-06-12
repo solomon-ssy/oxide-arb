@@ -18,7 +18,7 @@ export function useOxideWs() {
   // url: `${wsBase}/api/ws?token=${encodeURIComponent(accessStore.accessToken)}`
   // autoReconnect: { retries: Infinity, delay: 1000(指数退避至 30s) }
   // heartbeat: { message: '{"action":"ping"}', interval: 15000, pongTimeout: 30000 }
-  // onConnected: send({action:'sync'}) + 重放当前已注册的 per-market 订阅
+  // onConnected: 按 accessCodes 批量 subscribe 全局通道 + send({action:'sync'}) + 重放 per-market 订阅
   // onMessage: dispatch(envelope) → 各 store
   return { status, subscribeMarket, unsubscribeMarket, connect, disconnect };
 }
@@ -28,7 +28,7 @@ export function useOxideWs() {
 
 - **生命周期**:登录成功(`isAccessChecked` 后)在 `basic.vue` 布局挂载时 `connect()`;登出 `disconnect()`。token 刷新后**不主动重连**(连接期校验只在握手时);若服务端因 token 失效断开,重连时自动取最新 token。
 - **`sync` 快照**:`{type:'sync', data: SyncSnapshot}`,字段(按权限省略):`system_status / risk / open_positions / pnl / recent_opportunities`;dispatch 时整体覆盖对应 store(重连后状态收敛)。
-- **订阅模型**:全局通道由服务端按权限自动推送;`market.book_update` 为 per-market,经 `subscribeMarket(marketId)` 发送 `{action:'subscribe', channel:'market.book_update', market_id}`,组件卸载时 unsubscribe;连接级注册表保证重连后重放。
+- **订阅模型**:后端 broadcaster 仅向**已 subscribe** 的 session 推送(connect 时服务端只主动 push 一次 `system.status`)。前端 onConnected 按 `accessCodes` 过滤通道权限表后批量 `{action:'subscribe', channel}` 全部授权全局通道,再发 `sync`;`market.book_update` 为 per-market,经 `subscribeMarket(marketId)` 发送 `{action:'subscribe', channel:'market.book_update', market_id}`,组件卸载时 unsubscribe;连接级 refCount 注册表保证重连后重放。
 - **错误帧**:`{type:'error'}` 记 console.warn,不 toast(避免风暴)。
 - **禁止**订阅 `trade.opened` / `opportunity.expired`(后端已删除)。
 
@@ -36,7 +36,7 @@ export function useOxideWs() {
 
 | WS `type` | payload | 目标 store | 动作 |
 |---|---|---|---|
-| `system.status` | `SystemStatus` | `useSystemStore` | 覆盖 `status` |
+| `system.status` | `SystemStatus` | `useSystemStore` | 覆盖 `status`;后端 **5s 周期广播** + catalog sync / 控制面操作 **即时 nudge** |
 | `system.alert` | `{level,message}` | — | `notification[level]` 全局提示 |
 | `risk.circuit_breaker` | `{level,reason}` | `useRiskStore` | 更新 breaker + 红色 notification |
 | `risk.position_update` | `PositionInfo` | `useRiskStore` | upsert `positions` |
@@ -44,23 +44,24 @@ export function useOxideWs() {
 | `market.book_update` | `MarketBookView` | `useMarketStore` | 写 `books[market_id]` |
 | `control.published` | `{publication_id,mode}` | — | info 提示;Publications 页 `usePolling`/手动刷新 |
 | `config.activated` | `{version_id}` | `useSystemStore` | 记录 `activeConfigVersion` + info 提示 |
-| `opportunity.detected` | `Opportunity` | `useOpportunityStore` | 头插 `feed`(环形缓冲,cap 200) |
-| `trade.filled` | `TradeInfo` | `useTradeStore` | 头插 `recent`(cap 50) |
+| `opportunity.detected` | `OpportunityView`(后端 wire 统一,与 `sync.recent_opportunities` 同形) | `useOpportunityStore` | 头插 `feed`(环形缓冲,cap 200) |
+| `trade.filled` | `TradeView`(后端 wire 统一,与 REST `GET /trades` 同形;forensic 字段已剥离) | `useTradeStore` | 头插 `recent`(cap 50) |
 | `trade.settled` | `{trade_id,outcome,pnl}` | `useTradeStore` | 更新对应 trade |
 | `pnl.update` | `{daily,total}` | `usePnlStore` | 覆盖 + 追加 `intradaySeries` 点(供曲线实时延伸) |
-| `sync` | `SyncSnapshot` | 多 store | 全量覆盖 |
+| `materialization.run_update` | `ControlFactorMaterializationRunView` | `useReplayStore` | upsert 活跃 run(Queued/Running);terminal 后移除 |
+| `sync` | `SyncSnapshot` | 多 store | 全量覆盖(含 `active_materialization_runs`) |
 | `pong` | — | `useWsStore` | 心跳活性 |
 
 ### 1.3 store 簇(`src/store/`)
 
 | store | state 要点 |
 |---|---|
-| `ws.ts` | `status: 'connected'\|'reconnecting'\|'disconnected'`、`lastSyncAt` |
+| `ws.ts` | `status`、`lastSyncAt`、**`lastSystemStatusAt`**(状态流遥测) |
 | `system.ts` | `status: SystemStatus \| null`、`activeConfigVersion` |
 | `risk.ts` | `breaker: RiskEngineStateView \| null`、`positions: PositionView[]` |
 | `market.ts` | `books: Record<MarketId, MarketBookView>`、`resolved: Set<MarketId>` |
 | `opportunity.ts` | `feed: OpportunityView[]`(cap 200) |
-| `trade.ts` | `recent: TradeInfo[]`(cap 50) |
+| `trade.ts` | `recent: TradeView[]`(cap 50) |
 | `pnl.ts` | `live: {daily,total} \| null`、`intradaySeries: [ts, UsdString][]` |
 
 规则:store 只存 wire 类型(`@vben/types`),格式化在组件层;REST 首屏数据与 WS 增量共用同一 store(页面 `onMounted` 拉 REST 填充,WS 持续更新)。
@@ -78,9 +79,9 @@ export function useOxideWs() {
 ### 2.1 `SystemStatusIndicator`
 
 - **显示**:状态点 + 简短文案。聚合规则:`breaker_state` 正常且未 halted → 绿「Running」;breaker 非 Closed/Recovered 或有 WARN → 黄;halted / breaker Halted → 红。数据源 `useSystemStore().status`(WS 实时)。
-- **Popover**(点击):`SystemStatus` 全字段卡(mode/breaker/uptime/active_markets/open_positions/exposure/daily_pnl)+ 两个治理按钮:
-  - **Halt**(`v-access:code="'system:halt'"`):`useGovernedAction`? — halt 非 governed(无 acting-role),但需 reason → 走 `prompt()` 收集 reason 后 `POST /system/halt {reason}`;
-  - **Resume**(`system:resume`):confirm 收集 `operator_ack` 勾选后 `POST /system/resume {operator_ack:true}`。
+- **Popover**(点击):`SystemStatus` 全字段卡(mode/breaker/uptime/active_markets/open_positions/exposure/daily_pnl/catalog)+ 两个治理按钮:
+  - **Halt**(`v-access:code="'system:halt'"`):halt 非 governed(无 acting-role),但需 reason(1–1024 字符)→ 专用 HaltReasonModal(与治理弹窗同风格,非浏览器 prompt)收集后 `POST /system/halt {reason}`;
+  - **Resume**(`system:resume`):ResumeAckModal 收集**字符串** `operator_ack`(1–256 字符,后端 `ResumeRequest.operator_ack: String`,非 boolean)后 `POST /system/resume {operator_ack}`。
 - 权限:无 `system:read` 时整个组件隐藏(WS 也不会推 system.status)。
 
 ### 2.2 `ExecutionModeSwitcher`
@@ -107,7 +108,7 @@ export function useOxideWs() {
 | 按钮码 | `system:halt` / `system:resume` / `system:switch_mode`(seed v2 挂本页) |
 | grid/drawer 选型 | 无 vxe-grid(纯仪表盘);最近交易用轻量 `Table`?**否**——用 `useVbenVxeGrid`(无 formOptions、无分页、`maxHeight` 固定)保持范式统一 |
 | i18n 前缀 | `page.dashboard.*` |
-| types | `SystemStatus / RiskEngineStateView / LivePnlView / DailyReport / TradeInfo / OpportunityView` |
+| types | `SystemStatus / RiskEngineStateView / LivePnlView / DailyPnlSeries / TradeView / OpportunityView` |
 
 ### 3.2 布局(四行网格,≥1280px 基准)
 
@@ -128,7 +129,7 @@ export function useOxideWs() {
 | 区块 | 内容与交互 | 数据源(REST 首屏 + WS 增量) | 权限 |
 |---|---|---|---|
 | KPI 卡(`StatCard`×4) | 日盈亏(`CellUsd` 着色规则同款格式化)、总盈亏、资金占用(`total_exposure` + `pending_reservations`,tooltip 标注「敞口口径,非钱包余额」)、持仓数(`open_positions / active_markets`) | `GET /pnl/live` + `GET /system/status`;WS `pnl.update` `system.status` | `pnl:read` / `system:read` |
-| PnL 曲线(`EchartsCard` + line) | 近 7 日累计曲线 + 今日实时段(`intradaySeries` 追加);hover tooltip;点击跳 `/analytics` | `GET /pnl/daily` + `GET /analytics/daily`(序列);WS `pnl.update` | `pnl:read` |
+| PnL 曲线(`EchartsCard` + line) | 近 7 日累计曲线 + 今日实时段(`intradaySeries` 追加);hover tooltip;点击跳 `/analytics` | `GET /pnl/daily-series?days=7`(升序 + 窗口内累计,空窗口返回 `points: []`);WS `pnl.update` | `pnl:read` |
 | 系统状态卡 | mode(`ExecutionModeTag`)、uptime、active_markets、checked_at;Halt/Resume 按钮(同 §2.1 Popover 逻辑,复用 `shared` handler) | `GET /system/status`;WS `system.status` | `system:read`(按钮另查 halt/resume 码) |
 | 熔断器卡(`BreakerBadge`) | breaker FSM 状态大徽标 + reason;非 Closed 时红底;「去风控页」链接 | `GET /risk/circuit-breaker`;WS `risk.circuit_breaker` | `risk:read` |
 | 运行中任务卡 | 活跃市场订阅数(`active_markets`)、in-flight 持仓(`open_positions`)、breaker 状态摘要、最近 replay 入队(本地 store 记录的 run_id 列表 + `usePolling` 状态);每项可跳对应页 | `system/status` + 本地 replay 记录 | `system:read` |
@@ -166,7 +167,7 @@ shared/components/
 | 模块 | 函数 | 端点 |
 |---|---|---|
 | `api/system.ts` | `getSystemStatus / getSystemHealth / haltSystem / resumeSystem / switchExecutionMode` | `GET /system/status`、`GET /system/health`、`POST /system/halt`、`POST /system/resume`、`POST /system/mode` |
-| `api/pnl.ts` | `getLivePnl / getDailyPnl / getWeeklyPnl` | `GET /pnl/live`、`/pnl/daily`、`/pnl/weekly` |
+| `api/pnl.ts` | `getLivePnl / getWeeklyPnl / getDailyPnlSeries` | `GET /pnl/live`、`/pnl/weekly`、`/pnl/daily-series?days=`(默认 7,上限 90) |
 | `api/trades.ts`(部分) | `fetchTradePage` | `GET /trades` |
 | `api/risk.ts`(部分) | `getCircuitBreaker` | `GET /risk/circuit-breaker` |
 

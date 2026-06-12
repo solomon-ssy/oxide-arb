@@ -1,5 +1,8 @@
 //! Post-trade consumer and relay recovery tests.
 
+#[path = "common/mod.rs"]
+mod common;
+
 use chrono::{Duration as ChronoDuration, Utc};
 use oxide_arb_api::ws::ClobWsManager;
 use oxide_arb_core::{
@@ -260,6 +263,11 @@ fn harness() -> Harness {
     ));
 
     let (events, events_rx) = CoreEventPublisher::bounded(64);
+    let metrics_refresh = common::disconnected_metrics_refresh(
+        Arc::clone(&metrics_state),
+        ExecutionMode::Live,
+        Arc::clone(&metrics),
+    );
     let consumer = PostTradeConsumer {
         risk_engine: risk_engine(),
         risk_metrics: risk_metrics(exposure, metrics_state.clone()),
@@ -269,7 +277,7 @@ fn harness() -> Harness {
         calibration_repo: calibration_repo.clone(),
         audit_writer: audit_writer(metrics.clone()),
         metrics_state,
-        metrics_refresh: None,
+        metrics_refresh,
         metrics: metrics.clone(),
         events,
     };
@@ -317,7 +325,11 @@ async fn consumer_is_idempotent_for_replayed_fill() {
         terminal.business_outcome,
         Some(TradeBusinessOutcome::Success)
     );
-    assert_eq!(harness.position_repo.positions_snapshot().len(), 1);
+    let positions = harness.position_repo.positions_snapshot();
+    assert_eq!(positions.len(), 1);
+    // The opened position inherits the trade's execution mode so ledger
+    // aggregates stay mode-scoped.
+    assert_eq!(positions[0].execution_mode, ExecutionMode::Live);
     assert_eq!(harness.calibration_repo.outcome_count(), 1);
     assert_eq!(harness.metrics.post_trade_relay_processed.get(), 1);
 }

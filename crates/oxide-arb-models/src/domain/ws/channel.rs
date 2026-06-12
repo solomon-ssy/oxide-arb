@@ -18,7 +18,7 @@ use std::{
     str::FromStr,
 };
 
-use serde::{Deserialize, Deserializer};
+use serde_with::DeserializeFromStr;
 
 use crate::{enums::rbac::ResourceType, types::MarketId};
 
@@ -37,7 +37,11 @@ pub enum ChannelScope {
 /// The wire name is `"{namespace}.{leaf}"`; the namespace determines the RBAC
 /// [`ResourceType`]. Adding a variant forces a compile error in [`Self::as_str`],
 /// [`Self::resource`], and [`Self::scope`], keeping the taxonomy exhaustive.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+///
+/// `DeserializeFromStr` routes deserialization through [`FromStr`], so an
+/// unknown channel is rejected with the precise [`UnknownChannel`] message and
+/// the session loop can answer with an exact error frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, DeserializeFromStr)]
 pub enum WsChannel {
     /// Connection/system status snapshot and subsequent status changes.
     SystemStatus,
@@ -63,11 +67,13 @@ pub enum WsChannel {
     TradeSettled,
     /// Live `PnL` update (daily / total).
     PnlUpdate,
+    /// Materialization / replay run lifecycle update for dashboard clients.
+    MaterializationRunUpdate,
 }
 
 impl WsChannel {
     /// Every channel, used by exhaustiveness tests and reverse lookup.
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::SystemStatus,
         Self::SystemAlert,
         Self::RiskCircuitBreaker,
@@ -80,6 +86,7 @@ impl WsChannel {
         Self::TradeFilled,
         Self::TradeSettled,
         Self::PnlUpdate,
+        Self::MaterializationRunUpdate,
     ];
 
     /// The on-the-wire channel name.
@@ -98,6 +105,7 @@ impl WsChannel {
             Self::TradeFilled => "trade.filled",
             Self::TradeSettled => "trade.settled",
             Self::PnlUpdate => "pnl.update",
+            Self::MaterializationRunUpdate => "materialization.run_update",
         }
     }
 
@@ -111,7 +119,7 @@ impl WsChannel {
             Self::SystemStatus | Self::SystemAlert => ResourceType::System,
             Self::RiskCircuitBreaker | Self::RiskPositionUpdate => ResourceType::Risk,
             Self::MarketResolved | Self::MarketBookUpdate => ResourceType::Market,
-            Self::ControlPublished => ResourceType::ControlFactor,
+            Self::ControlPublished | Self::MaterializationRunUpdate => ResourceType::ControlFactor,
             Self::ConfigActivated => ResourceType::RuntimeConfig,
             Self::OpportunityDetected => ResourceType::Opportunity,
             Self::TradeFilled | Self::TradeSettled => ResourceType::Trade,
@@ -158,17 +166,6 @@ impl FromStr for WsChannel {
             .into_iter()
             .find(|channel| channel.as_str() == s)
             .ok_or_else(|| UnknownChannel(s.to_owned()))
-    }
-}
-
-/// Deserialize from the on-the-wire channel name, rejecting unknown channels
-/// with a message that names the offender (so a client command carrying a bad
-/// channel can be answered with a precise error frame instead of failing
-/// opaquely).
-impl<'de> Deserialize<'de> for WsChannel {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let raw = String::deserialize(deserializer)?;
-        Self::from_str(&raw).map_err(serde::de::Error::custom)
     }
 }
 

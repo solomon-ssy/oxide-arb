@@ -19,8 +19,8 @@ use oxide_arb_models::{
         calibration::{DurationBucket, PriceZone},
         clickhouse::ChOpportunityAuditStage,
         common::{
-            MarketCategory, PositionStatus, RedeemStatus, SettlementAccountingStatus,
-            SettlementTrigger, TradeBusinessOutcome, TradeState,
+            ExecutionMode, MarketCategory, PositionStatus, RedeemStatus,
+            SettlementAccountingStatus, SettlementTrigger, TradeBusinessOutcome, TradeState,
         },
     },
     types::{ExecutionId, MarketId, OpportunityId, PositionId, TokenId, TradeId, Usd},
@@ -117,6 +117,18 @@ impl MockPositionRepository {
 
     pub fn positions_snapshot(&self) -> Vec<PositionInfo> {
         self.positions.lock().unwrap().values().cloned().collect()
+    }
+
+    /// All open positions regardless of execution mode (mode-agnostic
+    /// internals such as exposure totals and settlement scans).
+    fn open_positions(&self) -> Vec<PositionInfo> {
+        self.positions
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|position| position.status == PositionStatus::Open)
+            .cloned()
+            .collect()
     }
 }
 
@@ -231,13 +243,15 @@ impl PositionRepository for MockPositionRepository {
         Ok(Paginated::from_request(page, total, &window))
     }
 
-    async fn find_open(&self) -> Result<Vec<PositionInfo>, StorageError> {
+    async fn find_open(&self, mode: ExecutionMode) -> Result<Vec<PositionInfo>, StorageError> {
         Ok(self
             .positions
             .lock()
             .unwrap()
             .values()
-            .filter(|position| position.status == PositionStatus::Open)
+            .filter(|position| {
+                position.status == PositionStatus::Open && position.execution_mode == mode
+            })
             .cloned()
             .collect())
     }
@@ -368,7 +382,7 @@ impl PositionRepository for MockPositionRepository {
         limit: u64,
     ) -> Result<Vec<PositionInfo>, StorageError> {
         let limit = usize::try_from(limit).unwrap_or(usize::MAX);
-        Ok(self.find_open().await?.into_iter().take(limit).collect())
+        Ok(self.open_positions().into_iter().take(limit).collect())
     }
 
     async fn find_accounting_retry_candidates(
@@ -398,6 +412,7 @@ impl PositionRepository for MockPositionRepository {
             market_id: position.market_id,
             token_id: position.token_id,
             side: position.side,
+            execution_mode: position.execution_mode,
             shares: position.shares,
             avg_entry_price: position.avg_entry_price,
             total_cost_usd: position.total_cost_usd,
@@ -629,15 +644,14 @@ impl PositionRepository for MockPositionRepository {
 
     async fn total_exposure(&self) -> Result<Usd, StorageError> {
         Ok(self
-            .find_open()
-            .await?
+            .open_positions()
             .iter()
             .map(|position| position.total_cost_usd)
             .sum())
     }
 
     async fn count_open(&self) -> Result<usize, StorageError> {
-        Ok(self.find_open().await?.len())
+        Ok(self.open_positions().len())
     }
 
     async fn aggregate_settled_between(

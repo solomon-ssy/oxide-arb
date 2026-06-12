@@ -8,7 +8,7 @@ use oxide_arb_models::{
         TimeWindow, TradeInfo, TradeObservation, TradePageQuery,
     },
     entities::trade::{ActiveModel, Column, Entity},
-    enums::common::{TradeBusinessOutcome, TradeState},
+    enums::common::{ExecutionMode, TradeBusinessOutcome, TradeState},
     types::{ExecutionId, MarketId, TradeId, Usd},
 };
 use rust_decimal::Decimal;
@@ -36,17 +36,32 @@ impl PgTradeRepository {
         PgTradeRepositoryTxn { txn }
     }
 
-    pub async fn successful_spend_total(&self) -> Result<Usd, StorageError> {
-        let trades = Entity::find()
+    /// Total capital spent (cost + fees) on successful trades for one
+    /// execution mode.
+    ///
+    /// Mode-scoped so simulated (dry-run/paper) fills never leak into the
+    /// Live internal ledger and vice versa.
+    pub async fn successful_spend_total(&self, mode: ExecutionMode) -> Result<Usd, StorageError> {
+        let row = Entity::find()
+            .select_only()
+            .column_as(
+                Expr::expr(Expr::col(Column::CostUsd).add(Expr::col(Column::FeeUsd))).sum(),
+                "total",
+            )
             .filter(Column::BusinessOutcome.eq(TradeBusinessOutcome::Success))
-            .all(&self.db)
+            .filter(Column::ExecutionMode.eq(mode))
+            .into_model::<UsdTotal>()
+            .one(&self.db)
             .await
             .map_err(StorageError::from)?;
-        Ok(trades
-            .iter()
-            .map(|trade| trade.cost_usd + trade.fee_usd)
-            .sum())
+        Ok(row.and_then(|r| r.total).unwrap_or(Usd::ZERO))
     }
+}
+
+/// SQL-side scalar projection for `SUM(...)` ledger aggregates.
+#[derive(Debug, FromQueryResult)]
+struct UsdTotal {
+    total: Option<Usd>,
 }
 
 pub struct PgTradeRepositoryTxn<'a> {

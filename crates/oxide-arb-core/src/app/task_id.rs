@@ -17,6 +17,8 @@ pub enum TaskId {
     WebServer,
     /// Fans `CoreEvent`s out to subscribed WebSocket sessions.
     WsBroadcaster,
+    /// Periodic + nudged `SystemStatusChanged` pushes for dashboard clients.
+    SystemStatusBroadcaster,
     /// Coalesces per-market order-book changes into throttled `MarketBookUpdate`
     /// events for watching WebSocket sessions (off the hot path).
     BookUpdateCoalescer,
@@ -88,9 +90,10 @@ impl TaskId {
     #[must_use]
     pub const fn kind(self) -> TaskKind {
         match self {
-            Self::WebServer | Self::WsBroadcaster | Self::BookUpdateCoalescer => {
-                TaskKind::ApiIngress
-            }
+            Self::WebServer
+            | Self::WsBroadcaster
+            | Self::BookUpdateCoalescer
+            | Self::SystemStatusBroadcaster => TaskKind::ApiIngress,
             Self::DataPipeline => TaskKind::WsIngress,
             Self::GammaSync
             | Self::CalibrationUpdater

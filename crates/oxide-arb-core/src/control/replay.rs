@@ -12,14 +12,17 @@ use chrono::Utc;
 use oxide_arb_control::materialization::{ManifestBuilder, ManifestBuilderInput};
 use oxide_arb_models::{
     domain::{
-        ReplayEnqueueRequest, ReplayEnqueueResult, ReplayPort, RuntimeControlError,
+        CoreEvent, CoreEventPublisher, ReplayEnqueueRequest, ReplayEnqueueResult, ReplayPort,
+        RuntimeControlError,
         control_factor::{
             DataRequirements, EnqueueMaterializationRunOptions, EnqueueMaterializationRunOutcome,
             NewControlFactorMaterializationRun, QualityGatePolicy, RequiredInputDomain, RunTrigger,
             RuntimeConfigRef, SimulationConfig,
         },
     },
-    enums::control_factor::{MaterializationOutputPolicy, MaterializationRunKind},
+    enums::control_factor::{
+        MaterializationOutputPolicy, MaterializationRunKind, MaterializationRunStatus,
+    },
 };
 use oxide_arb_repository::traits::ControlFactorRepository;
 use std::sync::Arc;
@@ -28,15 +31,20 @@ use uuid::Uuid;
 /// Live replay enqueue port backing `POST /replay`.
 pub struct CoreReplay {
     control_factors: Arc<dyn ControlFactorRepository>,
+    events: CoreEventPublisher,
     code_git_sha: String,
     created_by: String,
 }
 
 impl CoreReplay {
     #[must_use]
-    pub fn new(control_factors: Arc<dyn ControlFactorRepository>) -> Self {
+    pub fn new(
+        control_factors: Arc<dyn ControlFactorRepository>,
+        events: CoreEventPublisher,
+    ) -> Self {
         Self {
             control_factors,
+            events,
             code_git_sha: option_env!("GIT_SHA").unwrap_or("unknown").to_owned(),
             created_by: "web-replay".to_owned(),
         }
@@ -121,6 +129,13 @@ impl ReplayPort for CoreReplay {
             EnqueueMaterializationRunOutcome::DuplicateActive(run)
             | EnqueueMaterializationRunOutcome::DuplicateCompleted(run) => (run, false),
         };
+        if matches!(
+            run.status,
+            MaterializationRunStatus::Queued | MaterializationRunStatus::Running
+        ) {
+            self.events
+                .publish(CoreEvent::MaterializationRunUpdated(run.clone()));
+        }
         Ok(ReplayEnqueueResult { run, created })
     }
 }

@@ -10,9 +10,8 @@ use crate::{
     types::RoleId,
 };
 use serde::{Deserialize, Serialize};
+use serde_with::rust::double_option;
 use validator::Validate;
-
-use super::serde::double_option;
 
 /// Create-user payload.
 #[derive(Debug, Deserialize, Validate)]
@@ -40,11 +39,11 @@ pub struct CreateUserRequest {
 pub struct UpdateUserRequest {
     #[validate(length(min = 1, max = 128))]
     pub nickname: Option<String>,
-    #[serde(default, deserialize_with = "double_option")]
+    #[serde(default, with = "double_option")]
     pub avatar: Option<Option<String>>,
-    #[serde(default, deserialize_with = "double_option")]
+    #[serde(default, with = "double_option")]
     pub email: Option<Option<String>>,
-    #[serde(default, deserialize_with = "double_option")]
+    #[serde(default, with = "double_option")]
     pub phone: Option<Option<String>>,
 }
 

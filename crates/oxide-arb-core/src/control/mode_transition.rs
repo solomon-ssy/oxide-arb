@@ -19,7 +19,8 @@
 //! 3. **Commit** — a single atomic [`ExecutionModeHandle::store`]; every hot-path
 //!    reader observes the new mode on its next access.
 //! 4. **Activate** — entering `Live` refreshes CLOB metrics and verifies they are
-//!    authoritative; leaving `Live` re-seeds the simulated metrics snapshot. The
+//!    authoritative; entering `DryRun`/`Paper` recomputes the derived simulated
+//!    ledger snapshot from Postgres and verifies the simulated source. The
 //!    heartbeat probe and fail-closed factor TTLs self-gate on the live mode, so
 //!    no task respawn is needed.
 //! 5. **Resume** — only after activation succeeds.
@@ -33,6 +34,7 @@ use crate::{
         risk_metrics::CoreRiskMetrics,
         trading_gate::{halt_trading, resume_trading},
     },
+    control::status::build_system_status,
     execution::fsm::ExecutionFSM,
     exposure::in_memory::InMemoryExposureReservation,
     infra::health_checker::HealthChecker,
@@ -41,20 +43,20 @@ use crate::{
     service::{
         catalog_readiness::CatalogReadiness,
         risk_metrics::{RiskMetricsRefreshService, RiskMetricsSource, RiskMetricsState},
+        system_status_publisher::SharedSystemStatusPublisher,
     },
 };
 use async_trait::async_trait;
-use chrono::Utc;
 use oxide_arb_api::clob::ClobClient;
 use oxide_arb_models::{
     config::DeployConfig,
     domain::{
-        BlacklistInfo, CatalogStatusPort, HealthReport, ModeTransitionReport, RiskEngineState,
-        RuntimeControlError, RuntimeControlPort, SystemStatus,
+        BlacklistInfo, HealthReport, ModeTransitionReport, RiskEngineState, RuntimeControlError,
+        RuntimeControlPort, SystemStatus,
     },
     enums::{common::ExecutionMode, risk::BlacklistReason},
     runtime_config::validation::validate_runtime_for_mode,
-    types::{MarketId, Usd},
+    types::MarketId,
 };
 use oxide_arb_repository::traits::SystemRuntimeStateRepository;
 use oxide_arb_risk::{engine::RiskEngine, traits::RiskMetrics};
@@ -70,6 +72,7 @@ const QUIESCE_TIMEOUT: Duration = Duration::from_secs(30);
 const QUIESCE_POLL: Duration = Duration::from_millis(100);
 
 /// Construction dependencies for [`CoreRuntimeControl`].
+#[derive(Clone)]
 pub struct CoreRuntimeControlDeps {
     pub execution_mode: ExecutionModeHandle,
     pub risk_engine: Arc<RiskEngine>,
@@ -79,16 +82,18 @@ pub struct CoreRuntimeControlDeps {
     pub exposure: Arc<InMemoryExposureReservation>,
     pub metrics: Arc<CoreRiskMetrics>,
     pub metrics_state: Arc<RiskMetricsState>,
-    pub metrics_refresh: Option<Arc<RiskMetricsRefreshService>>,
+    pub metrics_refresh: Arc<RiskMetricsRefreshService>,
     pub clob_client: Option<Arc<ClobClient>>,
     pub market_registry: Arc<MarketRegistry>,
     pub health_checker: Arc<HealthChecker>,
     pub deploy: Arc<DeployConfig>,
-    /// Live runtime config: mode preflight + simulated bankroll reseeding read
-    /// the active snapshot, never a startup copy.
+    /// Live runtime config: mode preflight reads the active snapshot, never a
+    /// startup copy.
     pub runtime_config: Arc<RuntimeConfigStore>,
     /// Persists the active mode so a transition survives a restart.
     pub system_runtime_state: Arc<dyn SystemRuntimeStateRepository>,
+    /// Optional publisher for immediate WebSocket status pushes after control ops.
+    pub status_publisher: Option<SharedSystemStatusPublisher>,
 }
 
 /// Live runtime control surface backing the web `/system` and `/risk` routes.
@@ -100,19 +105,20 @@ pub struct CoreRuntimeControl {
     exposure: Arc<InMemoryExposureReservation>,
     metrics: Arc<CoreRiskMetrics>,
     metrics_state: Arc<RiskMetricsState>,
-    metrics_refresh: Option<Arc<RiskMetricsRefreshService>>,
+    metrics_refresh: Arc<RiskMetricsRefreshService>,
     clob_client: Option<Arc<ClobClient>>,
     market_registry: Arc<MarketRegistry>,
     health_checker: Arc<HealthChecker>,
     deploy: Arc<DeployConfig>,
     runtime_config: Arc<RuntimeConfigStore>,
     system_runtime_state: Arc<dyn SystemRuntimeStateRepository>,
+    status_publisher: Option<SharedSystemStatusPublisher>,
     started_at: Instant,
 }
 
 impl CoreRuntimeControl {
     #[must_use]
-    pub fn new(deps: CoreRuntimeControlDeps) -> Self {
+    pub fn new(deps: CoreRuntimeControlDeps, started_at: Instant) -> Self {
         Self {
             execution_mode: deps.execution_mode,
             risk_engine: deps.risk_engine,
@@ -128,7 +134,34 @@ impl CoreRuntimeControl {
             deploy: deps.deploy,
             runtime_config: deps.runtime_config,
             system_runtime_state: deps.system_runtime_state,
-            started_at: Instant::now(),
+            status_publisher: deps.status_publisher,
+            started_at,
+        }
+    }
+
+    fn control_deps(&self) -> CoreRuntimeControlDeps {
+        CoreRuntimeControlDeps {
+            execution_mode: self.execution_mode.clone(),
+            risk_engine: Arc::clone(&self.risk_engine),
+            catalog: Arc::clone(&self.catalog),
+            fsm: Arc::clone(&self.fsm),
+            exposure: Arc::clone(&self.exposure),
+            metrics: Arc::clone(&self.metrics),
+            metrics_state: Arc::clone(&self.metrics_state),
+            metrics_refresh: Arc::clone(&self.metrics_refresh),
+            clob_client: self.clob_client.clone(),
+            market_registry: Arc::clone(&self.market_registry),
+            health_checker: Arc::clone(&self.health_checker),
+            deploy: Arc::clone(&self.deploy),
+            runtime_config: Arc::clone(&self.runtime_config),
+            system_runtime_state: Arc::clone(&self.system_runtime_state),
+            status_publisher: self.status_publisher.clone(),
+        }
+    }
+
+    fn publish_status_now(&self) {
+        if let Some(publisher) = &self.status_publisher {
+            publisher.publish_now();
         }
     }
 
@@ -149,17 +182,10 @@ impl CoreRuntimeControl {
                 runtime_report.to_string(),
             ));
         }
-        if target == ExecutionMode::Live {
-            if self.clob_client.is_none() {
-                return Err(RuntimeControlError::Precondition(
-                    "entering Live requires a CLOB client, but none was loaded at boot".to_owned(),
-                ));
-            }
-            if self.metrics_refresh.is_none() {
-                return Err(RuntimeControlError::Precondition(
-                    "entering Live requires a CLOB metrics refresher".to_owned(),
-                ));
-            }
+        if target == ExecutionMode::Live && self.clob_client.is_none() {
+            return Err(RuntimeControlError::Precondition(
+                "entering Live requires a CLOB client, but none was loaded at boot".to_owned(),
+            ));
         }
         Ok(())
     }
@@ -187,31 +213,28 @@ impl CoreRuntimeControl {
     }
 
     /// Mode-specific activation after the atomic commit.
+    ///
+    /// The mode-aware refresher reads the freshly committed mode, so a single
+    /// `refresh()` hydrates the correct snapshot: CLOB-authoritative for
+    /// `Live`, the Postgres-derived simulated ledger for `DryRun`/`Paper`.
+    /// The source assertion afterwards is the fail-closed guard against a
+    /// refresh racing a concurrent transition.
     async fn activate(&self, target: ExecutionMode) -> Result<(), RuntimeControlError> {
-        match target {
-            ExecutionMode::Live => {
-                let refresher = self.metrics_refresh.as_ref().ok_or_else(|| {
-                    RuntimeControlError::Activation("metrics refresher unavailable".to_owned())
-                })?;
-                refresher
-                    .refresh()
-                    .await
-                    .map_err(|error| RuntimeControlError::Activation(error.to_string()))?;
-                if self.metrics_state.source() != RiskMetricsSource::AuthoritativeClob {
-                    return Err(RuntimeControlError::Activation(
-                        "CLOB metrics not authoritative after refresh".to_owned(),
-                    ));
-                }
-                Ok(())
-            }
-            ExecutionMode::DryRun | ExecutionMode::Paper => {
-                self.metrics_state.seed_simulated_snapshot(
-                    target,
-                    Usd::new(self.runtime_config.load().risk.bankroll_usd),
-                );
-                Ok(())
-            }
+        self.metrics_refresh
+            .refresh()
+            .await
+            .map_err(|error| RuntimeControlError::Activation(error.to_string()))?;
+        let expected = match target {
+            ExecutionMode::Live => RiskMetricsSource::AuthoritativeClob,
+            ExecutionMode::DryRun => RiskMetricsSource::SimulatedDryRun,
+            ExecutionMode::Paper => RiskMetricsSource::SimulatedPaper,
+        };
+        if self.metrics_state.source() != expected {
+            return Err(RuntimeControlError::Activation(format!(
+                "metrics source mismatch after refresh for {target}"
+            )));
         }
+        Ok(())
     }
 }
 
@@ -262,24 +285,30 @@ impl RuntimeControlPort for CoreRuntimeControl {
             .map_err(|error| RuntimeControlError::Engine(error.to_string()))?;
 
         tracing::warn!(%from, %target, "execution mode transition committed");
+        self.publish_status_now();
         Ok(ModeTransitionReport { from, to: target })
     }
 
     async fn halt(&self, reason: String) {
         halt_trading(&self.risk_engine, &self.fsm, reason).await;
+        self.publish_status_now();
     }
 
     async fn resume(&self, operator_ack: &str) -> Result<(), RuntimeControlError> {
         resume_trading(&self.risk_engine, &self.fsm, operator_ack)
             .await
-            .map_err(|error| RuntimeControlError::Engine(error.to_string()))
+            .map_err(|error| RuntimeControlError::Engine(error.to_string()))?;
+        self.publish_status_now();
+        Ok(())
     }
 
     async fn reset_circuit_breaker(&self, reason: &str) -> Result<(), RuntimeControlError> {
         self.risk_engine
             .reset_circuit_breaker(reason, self.risk_metrics())
             .await
-            .map_err(|error| RuntimeControlError::Engine(error.to_string()))
+            .map_err(|error| RuntimeControlError::Engine(error.to_string()))?;
+        self.publish_status_now();
+        Ok(())
     }
 
     fn risk_snapshot(&self) -> RiskEngineState {
@@ -317,21 +346,7 @@ impl RuntimeControlPort for CoreRuntimeControl {
     }
 
     async fn system_status(&self) -> SystemStatus {
-        let snapshot = self.risk_snapshot();
-        SystemStatus {
-            execution_mode: self.execution_mode.current(),
-            breaker_state: snapshot.breaker_state,
-            uptime_secs: self.started_at.elapsed().as_secs(),
-            active_markets: u32::try_from(self.market_registry.active_markets().len())
-                .unwrap_or(u32::MAX),
-            open_positions: self.open_position_count(),
-            pending_reservations: u32::try_from(self.exposure.active_count_sync())
-                .unwrap_or(u32::MAX),
-            total_exposure: snapshot.total_exposure,
-            daily_pnl: snapshot.daily_pnl,
-            catalog: self.catalog.catalog_state(),
-            checked_at: Utc::now(),
-        }
+        build_system_status(&self.control_deps(), self.started_at)
     }
 
     async fn health(&self) -> HealthReport {

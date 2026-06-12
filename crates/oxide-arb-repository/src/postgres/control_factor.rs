@@ -2,25 +2,27 @@ use crate::traits::ControlFactorRepository;
 use chrono::{DateTime, Utc};
 use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::{
-    domain::control_factor::{
-        AcquireMaterializationRunOutcome, AuditActor, AuditEventContent, AuditedOutcome,
-        CancelMaterializationRunOutcome, ControlFactorAuditEventInfo,
-        ControlFactorMaterializationRunInfo, ControlFactorPublication,
-        ControlFactorPublicationInfo, ControlFactorPublicationRowInfo,
-        ControlFactorStageReportInfo, ControlFactorValue, ControlFactorValueInfo,
-        EnqueueMaterializationRunOptions, EnqueueMaterializationRunOutcome, ExpireFactorsOutcome,
-        MaterializationRunStatusPatch, NewControlFactorAuditEvent,
-        NewControlFactorMaterializationRun, NewControlFactorPublication,
-        NewControlFactorPublicationFactor, NewControlFactorPublicationRow,
-        NewControlFactorStageReport, NewControlFactorValue, PublishPublicationOutcome,
-        RunTransitionOutcome,
+    domain::{
+        Paginated, ReplayPageQuery,
+        control_factor::{
+            AcquireMaterializationRunOutcome, AuditActor, AuditEventContent, AuditedOutcome,
+            CancelMaterializationRunOutcome, ControlFactorAuditEventInfo,
+            ControlFactorMaterializationRunInfo, ControlFactorPublication,
+            ControlFactorPublicationInfo, ControlFactorPublicationRowInfo,
+            ControlFactorStageReportInfo, ControlFactorValue, ControlFactorValueInfo,
+            EnqueueMaterializationRunOptions, EnqueueMaterializationRunOutcome,
+            ExpireFactorsOutcome, MaterializationRunStatusPatch, NewControlFactorAuditEvent,
+            NewControlFactorMaterializationRun, NewControlFactorPublication,
+            NewControlFactorPublicationFactor, NewControlFactorPublicationRow,
+            NewControlFactorStageReport, NewControlFactorValue, PublishPublicationOutcome,
+            RunTransitionOutcome,
+        },
     },
     entities::{
         control_factor_audit_event::{
             ActiveModel as AuditActiveModel, Column as AuditColumn, Entity as AuditEntity,
         },
-        control_factor_materialization_run::Column as RunColumn,
-        control_factor_materialization_run::Entity as RunEntity,
+        control_factor_materialization_run::{Column as RunColumn, Entity as RunEntity},
         control_factor_publication::{
             Column as PublicationColumn, Entity as PublicationEntity, Model as PublicationModel,
         },
@@ -38,8 +40,8 @@ use oxide_arb_models::{
 };
 use sea_orm::{
     ActiveValue::Set,
-    ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait, IntoActiveModel, QueryFilter,
-    QueryOrder, QuerySelect, TransactionTrait,
+    ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait, IntoActiveModel, PaginatorTrait,
+    QueryFilter, QueryOrder, QuerySelect, TransactionTrait,
     sea_query::{Expr, OnConflict},
 };
 
@@ -162,6 +164,51 @@ async fn list_queued_materialization_runs_q(
         .all(db)
         .await
         .map_err(StorageError::from)
+}
+
+async fn list_active_materialization_runs_q(
+    db: &impl ConnectionTrait,
+    limit: u64,
+) -> Result<Vec<ControlFactorMaterializationRunInfo>, StorageError> {
+    RunEntity::find()
+        .filter(RunColumn::Status.is_in([
+            MaterializationRunStatus::Queued,
+            MaterializationRunStatus::Running,
+        ]))
+        .order_by_desc(RunColumn::UpdatedAt)
+        .limit(limit)
+        .all(db)
+        .await
+        .map(|rows| rows.into_iter().map(Into::into).collect())
+        .map_err(StorageError::from)
+}
+
+async fn page_materialization_runs_q(
+    db: &impl ConnectionTrait,
+    query: &ReplayPageQuery,
+) -> Result<Paginated<ControlFactorMaterializationRunInfo>, StorageError> {
+    let window = query.page.normalized();
+    let mut selector = RunEntity::find();
+    if let Some(status) = query.status {
+        selector = selector.filter(RunColumn::Status.eq(status));
+    }
+    let total = selector
+        .clone()
+        .count(db)
+        .await
+        .map_err(StorageError::from)?;
+    if total == 0 {
+        return Ok(Paginated::from_request(Vec::new(), total, &window));
+    }
+    let rows = selector
+        .order_by_desc(RunColumn::UpdatedAt)
+        .offset(window.offset())
+        .limit(window.limit())
+        .all(db)
+        .await
+        .map_err(StorageError::from)?;
+    let items = rows.into_iter().map(Into::into).collect();
+    Ok(Paginated::from_request(items, total, &window))
 }
 
 async fn try_acquire_materialization_run_q(
@@ -941,6 +988,20 @@ impl ControlFactorRepository for PgControlFactorRepository {
         limit: u64,
     ) -> Result<Vec<MaterializationRunId>, StorageError> {
         list_queued_materialization_runs_q(&self.db, limit).await
+    }
+
+    async fn list_active_materialization_runs(
+        &self,
+        limit: u64,
+    ) -> Result<Vec<ControlFactorMaterializationRunInfo>, StorageError> {
+        list_active_materialization_runs_q(&self.db, limit).await
+    }
+
+    async fn page_materialization_runs(
+        &self,
+        query: &ReplayPageQuery,
+    ) -> Result<Paginated<ControlFactorMaterializationRunInfo>, StorageError> {
+        page_materialization_runs_q(&self.db, query).await
     }
 
     async fn try_acquire_materialization_run(

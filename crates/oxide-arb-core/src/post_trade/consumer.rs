@@ -37,7 +37,7 @@ pub struct PostTradeConsumer {
     pub calibration_repo: Arc<dyn CalibrationRepository>,
     pub audit_writer: Arc<ExecutionAuditWriter>,
     pub metrics_state: Arc<RiskMetricsState>,
-    pub metrics_refresh: Option<Arc<RiskMetricsRefreshService>>,
+    pub metrics_refresh: Arc<RiskMetricsRefreshService>,
     pub metrics: Arc<MetricsHub>,
     /// Non-blocking real-time bus handle: emits `TradeFilled` + `PositionChanged`
     /// once a fill is durably advanced to its terminal state.
@@ -145,10 +145,8 @@ impl PostTradeConsumer {
         }
 
         self.metrics_state.mark_stale();
-        if let Some(refresher) = &self.metrics_refresh {
-            if let Err(error) = refresher.refresh().await {
-                tracing::warn!(%error, "post-trade metrics refresh failed");
-            }
+        if let Err(error) = self.metrics_refresh.refresh().await {
+            tracing::warn!(%error, "post-trade metrics refresh failed");
         }
     }
 
@@ -170,6 +168,7 @@ impl PostTradeConsumer {
             market_id: trade.market_id.clone(),
             token_id: trade.token_id.clone(),
             side: trade.side,
+            execution_mode: trade.execution_mode,
             shares: trade.shares,
             avg_entry_price: trade.price,
             total_cost_usd: trade.cost_usd,

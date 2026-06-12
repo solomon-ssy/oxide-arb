@@ -646,8 +646,9 @@ miss_rate = misses / (fills + misses)
 | 端点 | 用途 |
 |------|------|
 | `GET /pnl/live` | **内存中实时 PnL 快照** |
-| `GET /pnl/daily` | 最近持久化日报（hourly task 生成） |
+| `GET /pnl/daily-series?days=` | 近 N 日 PnL 曲线数据（默认 7，上限 90） |
 | `GET /pnl/weekly` | 最近周报 |
+| `GET /analytics/daily` | 最近持久化日报（hourly task 生成） |
 | `GET /analytics/edge-distribution?from=&to=` | **Edge 直方图**（基于 trade 历史） |
 | `GET /analytics/market-performance?from=&to=` | 分 market 聚合 PnL |
 
@@ -781,8 +782,11 @@ GROUP BY rejection_reason;
 | PG trade/position | Execution | ✓（sim id） | ✓ | ✓ |
 | PG market_pit_snapshot | Gamma upsert | ✓ | ✓ | ✓ |
 | PG resolution_event | Settlement | 需等 resolve | 需等 resolve | 需等 resolve |
-| PG balance_snapshot | Ledger reconciliation | 需私钥 | 需私钥 | ✓ |
-| PG reconciliation_report | Risk reconciler | 需私钥+合理 baseline | 同左 | ✓ |
+| PG balance_snapshot | Ledger reconciliation | ✗（Live-only） | ✗（Live-only） | ✓ |
+| PG reconciliation_report | Risk reconciler | ✗（Live-only） | ✗（Live-only） | ✓ |
+
+> 账本对账（外部余额 vs 内部账本）是 **Live-only** 的：DryRun/Paper 的账本追踪虚拟资金，
+> 与 CLOB 真实余额比较没有意义，每个 tick 按当前模式跳过；运行时切到 Live 自动恢复。
 
 ### 9.3 自动调度（进程内，无需额外启动）
 
@@ -952,7 +956,7 @@ RBAC bootstrap seeds（`crates/oxide-arb-models/src/seed/rbac/`）在 ledger 中
 | DryRun 有 Filled、Paper 全 Miss | 深度不足 | 降 `max_single_bet_usd`；看 CH miss reason |
 | Paper PnL 好、Live 差 | 竞争/latency/slippage | 正常；以 Live 为准 |
 | 因子全 ReportOnly | 样本不足或 PIT ineligible | 延长运行；配私钥改善 balance_snapshot |
-| 对账 drift 巨大（Paper） | `bankroll_usd` ≠ 钱包且未成交 | 预期；或对齐 bankroll / 忽略 Reconciliation 因子 |
+| 熔断器 Halted，reason 含 `reconciliation critical drift` | Live 内部账本与 CLOB 余额严重偏差 | 核对资金流后 `POST /api/system/resume`（operator_ack）；对账仅 Live 运行，Paper/DryRun 不会触发 |
 | 切 Live 失败 | preflight：redeem/JWT/metrics | 查 API 错误体与日志 |
 | ClobClient connect failed | 私钥/network | 查 `RUST_LOG` 与 Polymarket 状态 |
 

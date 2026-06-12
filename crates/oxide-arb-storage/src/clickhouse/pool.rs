@@ -1,6 +1,6 @@
 //! `ClickHouse` client wrapper.
 
-use crate::clickhouse::schema;
+use crate::clickhouse::{ensure, schema};
 use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::config::ClickHouseConfig;
 use tracing::info;
@@ -11,7 +11,10 @@ pub struct ClickHousePool {
 }
 
 impl ClickHousePool {
-    pub fn connect(config: &ClickHouseConfig) -> Result<Self, StorageError> {
+    /// Connect to the configured database, creating it on first boot when absent.
+    pub async fn connect(config: &ClickHouseConfig) -> Result<Self, StorageError> {
+        ensure::ensure_database(config).await?;
+
         let client = clickhouse::Client::default()
             .with_url(&config.url)
             .with_database(&config.database)

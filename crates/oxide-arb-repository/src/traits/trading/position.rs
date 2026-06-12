@@ -5,7 +5,7 @@ use oxide_arb_models::{
         MarkRedeemedParams, NewPosition, Paginated, PositionInfo, PositionPageQuery, PositionPatch,
         SettlePositionParams, SettledPositionStats, evidence::EvidenceQueryResult,
     },
-    enums::common::SettlementTrigger,
+    enums::common::{ExecutionMode, SettlementTrigger},
     types::{MarketId, PositionId, TokenId, TradeId, Usd},
 };
 use rust_decimal::Decimal;
@@ -18,7 +18,11 @@ pub trait PositionRepository: Send + Sync {
     async fn page(&self, query: PositionPageQuery)
     -> Result<Paginated<PositionInfo>, StorageError>;
 
-    async fn find_open(&self) -> Result<Vec<PositionInfo>, StorageError>;
+    /// Open positions for one execution mode.
+    ///
+    /// Active exposure is always mode-contextual: Live risk must never count
+    /// simulated (dry-run/paper) positions, and vice versa.
+    async fn find_open(&self, mode: ExecutionMode) -> Result<Vec<PositionInfo>, StorageError>;
 
     async fn open_as_of(&self, at: DateTime<Utc>) -> Result<Vec<PositionInfo>, StorageError>;
 

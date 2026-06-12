@@ -1,6 +1,13 @@
-//! Periodic refresh of risk metrics snapshot from CLOB balance and open positions.
+//! Mode-aware periodic refresh of the risk metrics snapshot.
+//!
+//! `Live` reads the authoritative CLOB collateral balance; `DryRun`/`Paper`
+//! derive the simulated cash ledger from Postgres facts. Open positions are
+//! always read from Postgres, scoped to the active execution mode.
 
-use crate::{observability::metrics_hub::MetricsHub, service::equity_valuator::EquityValuator};
+use crate::{
+    bridge::execution_mode::ExecutionModeHandle, observability::metrics_hub::MetricsHub,
+    runtime_config::RuntimeConfigStore, service::equity_valuator::EquityValuator,
+};
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use num_traits::ToPrimitive;
@@ -12,9 +19,13 @@ use oxide_arb_models::{
     runtime_config::RiskConfig,
     types::{MarketId, Usd},
 };
-use oxide_arb_repository::{postgres::PgPositionRepository, traits::PositionRepository};
+use oxide_arb_repository::{
+    postgres::{PgPositionRepository, PgTradeRepository},
+    traits::PositionRepository,
+};
 use std::{
     collections::HashMap,
+    fmt::Display,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering},
@@ -336,6 +347,12 @@ impl RiskMetricsState {
         self.last_successful_refresh.load(Ordering::Acquire)
     }
 
+    /// Store an empty-position snapshot with the given cash and the source
+    /// matching `mode`.
+    ///
+    /// Production paths hydrate snapshots exclusively through the mode-aware
+    /// [`RiskMetricsRefreshService`]; this seeding shortcut exists for tests
+    /// and benches that need a populated snapshot without Postgres.
     pub fn seed_simulated_snapshot(&self, mode: ExecutionMode, cash_balance: Usd) {
         let source = match mode {
             ExecutionMode::DryRun => RiskMetricsSource::SimulatedDryRun,
@@ -423,54 +440,128 @@ pub struct LoadedMetricsSnapshot {
     pub consecutive_market_misses: u32,
 }
 
+/// Construction dependencies for [`RiskMetricsRefreshService`].
+pub struct RiskMetricsRefreshDeps {
+    pub state: Arc<RiskMetricsState>,
+    pub execution_mode: ExecutionModeHandle,
+    pub runtime_config: Arc<RuntimeConfigStore>,
+    /// Optional: only the Live cash path needs the venue. Simulated modes
+    /// refresh from Postgres alone, so the service works without credentials.
+    pub clob_client: Option<Arc<ClobClient>>,
+    pub trade_repo: Arc<PgTradeRepository>,
+    pub position_repo: Arc<PgPositionRepository>,
+    pub equity_valuator: Arc<EquityValuator>,
+    pub metrics: Arc<MetricsHub>,
+}
+
+/// Mode-aware refresh of the [`RiskMetricsState`] snapshot.
+///
+/// Cash source per execution mode:
+/// - **Live** — authoritative CLOB collateral balance (fails closed without a
+///   `ClobClient`).
+/// - **`DryRun` / `Paper`** — derived simulated ledger
+///   `bankroll − successful spend(mode) + settlement payout(mode)`, fully
+///   recomputable from Postgres so simulated funds evolve with simulated
+///   fills and never touch the venue.
 pub struct RiskMetricsRefreshService {
     state: Arc<RiskMetricsState>,
-    clob_client: Arc<ClobClient>,
+    execution_mode: ExecutionModeHandle,
+    runtime_config: Arc<RuntimeConfigStore>,
+    clob_client: Option<Arc<ClobClient>>,
+    trade_repo: Arc<PgTradeRepository>,
     position_repo: Arc<PgPositionRepository>,
     equity_valuator: Arc<EquityValuator>,
     metrics: Arc<MetricsHub>,
 }
 
 impl RiskMetricsRefreshService {
-    pub const fn new(
-        state: Arc<RiskMetricsState>,
-        clob_client: Arc<ClobClient>,
-        position_repo: Arc<PgPositionRepository>,
-        equity_valuator: Arc<EquityValuator>,
-        metrics: Arc<MetricsHub>,
-    ) -> Self {
+    #[must_use]
+    pub fn new(deps: RiskMetricsRefreshDeps) -> Self {
         Self {
-            state,
-            clob_client,
-            position_repo,
-            equity_valuator,
-            metrics,
+            state: deps.state,
+            execution_mode: deps.execution_mode,
+            runtime_config: deps.runtime_config,
+            clob_client: deps.clob_client,
+            trade_repo: deps.trade_repo,
+            position_repo: deps.position_repo,
+            equity_valuator: deps.equity_valuator,
+            metrics: deps.metrics,
         }
     }
 
-    /// Refresh the snapshot from CLOB/PG. Called by the startup gate.
+    /// Refresh the snapshot for the currently active execution mode.
     pub async fn refresh(&self) -> Result<(), OxideError> {
-        self.fetch_and_store_snapshot().await?;
-        Ok(())
+        let mode = self.execution_mode.current();
+        let (cash_balance, source) = match mode {
+            ExecutionMode::Live => (
+                self.fetch_live_cash().await?,
+                RiskMetricsSource::AuthoritativeClob,
+            ),
+            ExecutionMode::DryRun => (
+                self.derive_simulated_cash(mode).await?,
+                RiskMetricsSource::SimulatedDryRun,
+            ),
+            ExecutionMode::Paper => (
+                self.derive_simulated_cash(mode).await?,
+                RiskMetricsSource::SimulatedPaper,
+            ),
+        };
+        self.store_position_snapshot(mode, cash_balance, source)
+            .await
     }
 
-    async fn fetch_and_store_snapshot(&self) -> Result<(Usd, Vec<(MarketId, Usd)>), OxideError> {
-        let cash_balance = match self.clob_client.collateral_balance().await {
-            Ok(b) => {
+    /// Live cash: authoritative CLOB collateral balance.
+    async fn fetch_live_cash(&self) -> Result<Usd, OxideError> {
+        let Some(clob_client) = &self.clob_client else {
+            self.note_refresh_failure(&"ClobClient unavailable", "Live cash refresh");
+            return Err(OxideError::Internal(
+                "Live risk metrics refresh requires a ClobClient".into(),
+            ));
+        };
+        match clob_client.collateral_balance().await {
+            Ok(balance) => {
                 self.state.api_tracker.record_request(true);
-                b
+                Ok(balance)
             }
             Err(error) => {
                 self.state.api_tracker.record_request(false);
-                tracing::warn!(%error, "risk metrics refresh: balance fetch failed");
-                self.metrics.metrics_refresh_failures.inc();
-                return Err(OxideError::from(error));
+                self.note_refresh_failure(&error, "CLOB balance fetch failed");
+                Err(OxideError::from(error))
             }
-        };
+        }
+    }
 
-        let positions = self.position_repo.find_open().await.map_err(|error| {
-            tracing::warn!(%error, "risk metrics refresh: position fetch failed");
-            self.metrics.metrics_refresh_failures.inc();
+    /// Simulated cash: deterministic mode-scoped ledger derived from Postgres.
+    async fn derive_simulated_cash(&self, mode: ExecutionMode) -> Result<Usd, OxideError> {
+        let bankroll = Usd::new(self.runtime_config.load().risk.bankroll_usd);
+        let spend = self
+            .trade_repo
+            .successful_spend_total(mode)
+            .await
+            .map_err(|error| {
+                self.note_refresh_failure(&error, "spend aggregate failed");
+                OxideError::from(error)
+            })?;
+        let payout = self
+            .position_repo
+            .settlement_payout_total(mode)
+            .await
+            .map_err(|error| {
+                self.note_refresh_failure(&error, "payout aggregate failed");
+                OxideError::from(error)
+            })?;
+        Ok(bankroll - spend + payout)
+    }
+
+    /// Aggregate mode-scoped open positions and publish the new snapshot.
+    async fn store_position_snapshot(
+        &self,
+        mode: ExecutionMode,
+        cash_balance: Usd,
+        source: RiskMetricsSource,
+    ) -> Result<(), OxideError> {
+        let positions = self.position_repo.find_open(mode).await.map_err(|error| {
+            self.note_refresh_failure(&error, "position fetch failed");
             OxideError::from(error)
         })?;
 
@@ -478,11 +569,6 @@ impl RiskMetricsRefreshService {
         let mut market_exps: HashMap<MarketId, Usd> = HashMap::new();
         let mut buy_count = 0usize;
         let mut sell_count = 0usize;
-        let ext_positions: Vec<(MarketId, Usd)> = positions
-            .iter()
-            .map(|p| (p.market_id.clone(), p.total_cost_usd))
-            .collect();
-
         for p in &positions {
             total_exp += p.total_cost_usd;
             *market_exps.entry(p.market_id.clone()).or_insert(Usd::ZERO) += p.total_cost_usd;
@@ -510,8 +596,14 @@ impl RiskMetricsRefreshService {
                 positions,
                 refresh_sequence: seq,
             },
-            RiskMetricsSource::AuthoritativeClob,
+            source,
         );
-        Ok((cash_balance, ext_positions))
+        Ok(())
+    }
+
+    /// Uniform failure observability: warn + bump the failure counter.
+    fn note_refresh_failure(&self, error: &dyn Display, what: &'static str) {
+        tracing::warn!(%error, what, "risk metrics refresh failed");
+        self.metrics.metrics_refresh_failures.inc();
     }
 }

@@ -12,7 +12,10 @@ use oxide_arb_models::{
         position::{Column, Entity, Relation},
     },
     enums::{
-        common::{PositionStatus, RedeemStatus, SettlementAccountingStatus, SettlementTrigger},
+        common::{
+            ExecutionMode, PositionStatus, RedeemStatus, SettlementAccountingStatus,
+            SettlementTrigger,
+        },
         market::MarketStatus,
     },
     types::{MarketId, PositionId, TokenId, TradeId, Usd},
@@ -20,15 +23,19 @@ use oxide_arb_models::{
 use rust_decimal::Decimal;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, DatabaseTransaction,
-    EntityTrait, IntoActiveModel, JoinType, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect,
-    RelationTrait, sea_query::Condition,
+    EntityTrait, FromQueryResult, IntoActiveModel, JoinType, PaginatorTrait, QueryFilter,
+    QueryOrder, QuerySelect, RelationTrait, sea_query::Condition,
 };
 
 // ── helpers ──────────────────────────────────────────────────────────
 
-async fn find_open_q(db: &impl ConnectionTrait) -> Result<Vec<PositionInfo>, StorageError> {
+async fn find_open_q(
+    db: &impl ConnectionTrait,
+    mode: ExecutionMode,
+) -> Result<Vec<PositionInfo>, StorageError> {
     Entity::find()
         .filter(Column::Status.eq(PositionStatus::Open))
+        .filter(Column::ExecutionMode.eq(mode))
         .all(db)
         .await
         .map_err(StorageError::from)
@@ -464,18 +471,30 @@ impl PgPositionRepository {
         PgPositionRepositoryTxn { txn }
     }
 
-    pub async fn settlement_payout_total(&self) -> Result<Usd, StorageError> {
-        let positions = Entity::find()
+    /// Total settlement payout credited back to the ledger for one
+    /// execution mode.
+    ///
+    /// Mode-scoped so simulated (dry-run/paper) settlements never leak into
+    /// the Live internal ledger and vice versa.
+    pub async fn settlement_payout_total(&self, mode: ExecutionMode) -> Result<Usd, StorageError> {
+        let row = Entity::find()
+            .select_only()
+            .column_as(Column::SettlementPayoutUsd.sum(), "total")
             .filter(Column::Status.eq(PositionStatus::Settled))
             .filter(Column::SettlementAccountingStatus.eq(SettlementAccountingStatus::Accounted))
-            .all(&self.db)
+            .filter(Column::ExecutionMode.eq(mode))
+            .into_model::<UsdTotal>()
+            .one(&self.db)
             .await
             .map_err(StorageError::from)?;
-        Ok(positions
-            .iter()
-            .filter_map(|position| position.settlement_payout_usd)
-            .sum())
+        Ok(row.and_then(|r| r.total).unwrap_or(Usd::ZERO))
     }
+}
+
+/// SQL-side scalar projection for `SUM(...)` ledger aggregates.
+#[derive(Debug, FromQueryResult)]
+struct UsdTotal {
+    total: Option<Usd>,
 }
 
 fn page_condition(query: &PositionPageQuery) -> Condition {
@@ -525,8 +544,8 @@ impl PositionRepository for PgPositionRepository {
         page_q(&self.db, query).await
     }
 
-    async fn find_open(&self) -> Result<Vec<PositionInfo>, StorageError> {
-        find_open_q(&self.db).await
+    async fn find_open(&self, mode: ExecutionMode) -> Result<Vec<PositionInfo>, StorageError> {
+        find_open_q(&self.db, mode).await
     }
 
     async fn open_as_of(&self, at: DateTime<Utc>) -> Result<Vec<PositionInfo>, StorageError> {
@@ -718,8 +737,8 @@ impl PositionRepository for PgPositionRepositoryTxn<'_> {
         page_q(self.txn, query).await
     }
 
-    async fn find_open(&self) -> Result<Vec<PositionInfo>, StorageError> {
-        find_open_q(self.txn).await
+    async fn find_open(&self, mode: ExecutionMode) -> Result<Vec<PositionInfo>, StorageError> {
+        find_open_q(self.txn, mode).await
     }
 
     async fn open_as_of(&self, at: DateTime<Utc>) -> Result<Vec<PositionInfo>, StorageError> {

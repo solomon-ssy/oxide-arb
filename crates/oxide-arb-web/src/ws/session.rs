@@ -18,8 +18,9 @@ use std::{
 
 use oxide_arb_models::{
     domain::{
-        ClientCommand, LivePnlView, MarketFilter, PageRequest, PositionView, RiskEngineStateView,
-        SubscriptionKey, SyncSnapshot, TimeWindow, WsChannel, WsEnvelope,
+        ClientCommand, ControlFactorMaterializationRunView, LivePnlView, MarketFilter,
+        OpportunityView, PageRequest, PositionView, RiskEngineStateView, SubscriptionKey,
+        SyncSnapshot, TimeWindow, WsChannel, WsEnvelope,
     },
     enums::rbac::{Operation, ResourceType},
 };
@@ -193,7 +194,7 @@ async fn sync_snapshot(ctx: &SessionContext) -> String {
         let open_positions: Vec<PositionView> = ctx
             .state
             .positions
-            .find_open()
+            .find_open(ctx.state.control.execution_mode())
             .await
             .unwrap_or_default()
             .into_iter()
@@ -219,9 +220,27 @@ async fn sync_snapshot(ctx: &SessionContext) -> String {
                 PageRequest::new(1, SYNC_RECENT_OPPS_LIMIT),
             )
             .await
-            .map(|page| page.items)
+            .map(|page| {
+                page.items
+                    .iter()
+                    .map(OpportunityView::from)
+                    .collect::<Vec<_>>()
+            })
             .unwrap_or_default();
         snapshot.recent_opportunities = Some(recent);
+    }
+    if ctx.can_read(ResourceType::ControlFactor).await {
+        const SYNC_ACTIVE_RUNS_LIMIT: u64 = 20;
+        let active = ctx
+            .state
+            .control_factors
+            .list_active_materialization_runs(SYNC_ACTIVE_RUNS_LIMIT)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(ControlFactorMaterializationRunView::from)
+            .collect();
+        snapshot.active_materialization_runs = Some(active);
     }
     let data = serde_json::to_value(&snapshot).unwrap_or_else(|_| serde_json::json!({}));
     WsEnvelope::sync(data).to_text()

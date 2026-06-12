@@ -2,7 +2,8 @@
 
 use crate::{
     enums::common::{
-        PositionStatus, RedeemStatus, SettlementAccountingStatus, SettlementTrigger, Side,
+        ExecutionMode, PositionStatus, RedeemStatus, SettlementAccountingStatus, SettlementTrigger,
+        Side,
     },
     types::{MarketId, PositionId, Price, Shares, TokenId, TradeId, Usd},
 };
@@ -18,6 +19,7 @@ pub struct Model {
     pub market_id: MarketId,
     pub token_id: TokenId,
     pub side: Side,
+    pub execution_mode: ExecutionMode,
     pub shares: Shares,
     pub avg_entry_price: Price,
     pub total_cost_usd: Usd,

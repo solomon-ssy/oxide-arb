@@ -24,6 +24,7 @@ pub enum Position {
     MarketId,
     TokenId,
     Side,
+    ExecutionMode,
     Shares,
     AvgEntryPrice,
     TotalCostUsd,
@@ -56,6 +57,7 @@ pub fn table() -> TableCreateStatement {
         .col(column::market_id(Position::MarketId))
         .col(column::token_id(Position::TokenId))
         .col(ColumnDef::new(Position::Side).text().not_null())
+        .col(ColumnDef::new(Position::ExecutionMode).text().not_null())
         .col(column::shares(Position::Shares))
         .col(column::price(Position::AvgEntryPrice))
         .col(column::usd(Position::TotalCostUsd))
@@ -126,6 +128,18 @@ pub fn indexes() -> Vec<IndexSpec> {
             "market lookup",
         ),
         simple_index("idx_positions_status", Position::Status, "status filters"),
+        IndexSpec::sea_query(
+            "idx_positions_mode_status",
+            position_table_name,
+            IndexBuildMode::Transactional,
+            Index::create()
+                .name("idx_positions_mode_status")
+                .table(Position::Table)
+                .col(Position::ExecutionMode)
+                .col(Position::Status)
+                .to_owned(),
+            "mode-scoped ledger aggregates and open-position scans",
+        ),
         IndexSpec::sea_query(
             "idx_position_trade_id",
             position_table_name,

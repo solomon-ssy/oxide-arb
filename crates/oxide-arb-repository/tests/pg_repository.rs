@@ -435,6 +435,7 @@ async fn position_lifecycle() {
             market_id: MarketId::new("0xpos-market"),
             token_id: TokenId::new("111"),
             side: Side::Buy,
+            execution_mode: ExecutionMode::Paper,
             shares: Shares::from(Decimal::new(100, 0)),
             avg_entry_price: Price::from(Decimal::new(95, 2)),
             total_cost_usd: Usd::from(Decimal::new(95, 0)),
@@ -498,6 +499,7 @@ async fn position_settle() {
             market_id: MarketId::new("0xsettle-mkt"),
             token_id: TokenId::new("333"),
             side: Side::Sell,
+            execution_mode: ExecutionMode::Paper,
             shares: Shares::from(Decimal::new(50, 0)),
             avg_entry_price: Price::from(Decimal::new(80, 2)),
             total_cost_usd: Usd::from(Decimal::new(40, 0)),
@@ -521,7 +523,234 @@ async fn position_settle() {
         )
         .await
         .expect("settle position");
-    assert!(position_repo.find_open().await.unwrap().is_empty());
+    assert!(
+        position_repo
+            .find_open(ExecutionMode::Paper)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+/// One successful (filled) trade in the given mode; returns its id.
+async fn seed_successful_trade(
+    trade_repo: &PgTradeRepository,
+    market_id: &str,
+    event_id: &str,
+    token_id: &str,
+    mode: ExecutionMode,
+    cost: Decimal,
+    fee: Decimal,
+) -> TradeId {
+    let trade_id = TradeId::from_v7();
+    let created = trade_repo
+        .create(NewTrade {
+            trade_id: trade_id.clone(),
+            execution_id: ExecutionId::from_v7(),
+            reservation_id: ReservationId::from_v7(),
+            opportunity_id: OpportunityId::from_v7(),
+            market_id: MarketId::new(market_id),
+            event_id: EventId::new(event_id),
+            token_id: TokenId::new(token_id),
+            side: Side::Buy,
+            shares: Shares::from(Decimal::new(100, 0)),
+            price: Price::from(Decimal::new(50, 2)),
+            cost_usd: Usd::from(cost),
+            fee_usd: Usd::from(fee),
+            detected_edge_bps: None,
+            detected_profit_usd: None,
+            scored_snapshot: serde_json::json!({}),
+            category: MarketCategory::Crypto,
+            execution_mode: mode,
+        })
+        .await
+        .expect("create trade");
+    assert!(
+        trade_repo
+            .mark_submitted(&created.trade_id, Utc::now())
+            .await
+            .expect("mark submitted")
+    );
+    trade_repo
+        .mark_observed(
+            &created.trade_id,
+            TradeObservation {
+                state: TradeState::FillObserved,
+                shares: created.shares,
+                price: created.price,
+                cost_usd: created.cost_usd,
+                fee_usd: created.fee_usd,
+                order_id: None,
+                tx_hash: None,
+                net_profit_usd: None,
+                latency_ms: None,
+                error_message: None,
+                confirmed_at: Utc::now(),
+            },
+        )
+        .await
+        .expect("mark observed");
+    trade_id
+}
+
+/// One open position on the mode-ledger market for the given mode.
+async fn seed_open_position(
+    position_repo: &PgPositionRepository,
+    trade_id: TradeId,
+    token_id: &str,
+    mode: ExecutionMode,
+    cost: Decimal,
+    fee: Decimal,
+) -> PositionId {
+    position_repo
+        .create(NewPosition {
+            position_id: PositionId::from_v7(),
+            trade_id,
+            market_id: MarketId::new("0xmode-ledger"),
+            token_id: TokenId::new(token_id),
+            side: Side::Buy,
+            execution_mode: mode,
+            shares: Shares::from(Decimal::new(100, 0)),
+            avg_entry_price: Price::from(Decimal::new(50, 2)),
+            total_cost_usd: Usd::from(cost),
+            total_fees_usd: Usd::from(fee),
+            redeem_status: RedeemStatus::NotRequired,
+        })
+        .await
+        .expect("create position")
+        .position_id
+}
+
+/// Seed one successful paper trade ($40 + $1) and one successful live trade
+/// ($70 + $2) on the shared mode-ledger market; returns their trade ids.
+async fn seed_mode_ledger_trades(pool: &PostgresPool) -> (TradeId, TradeId) {
+    seed_market(
+        pool,
+        "evt-mode-ledger",
+        "0xmode-ledger",
+        MarketCategory::Crypto,
+    )
+    .await;
+    let trade_repo = PgTradeRepository::new(pool.connection().clone());
+    let paper_trade = seed_successful_trade(
+        &trade_repo,
+        "0xmode-ledger",
+        "evt-mode-ledger",
+        "555001",
+        ExecutionMode::Paper,
+        Decimal::new(40, 0),
+        Decimal::ONE,
+    )
+    .await;
+    let live_trade = seed_successful_trade(
+        &trade_repo,
+        "0xmode-ledger",
+        "evt-mode-ledger",
+        "555002",
+        ExecutionMode::Live,
+        Decimal::new(70, 0),
+        Decimal::new(2, 0),
+    )
+    .await;
+    (paper_trade, live_trade)
+}
+
+async fn spend_total(repo: &PgTradeRepository, mode: ExecutionMode) -> Usd {
+    repo.successful_spend_total(mode)
+        .await
+        .expect("spend total")
+}
+
+async fn payout_total(repo: &PgPositionRepository, mode: ExecutionMode) -> Usd {
+    repo.settlement_payout_total(mode)
+        .await
+        .expect("payout total")
+}
+
+async fn open_count(repo: &PgPositionRepository, mode: ExecutionMode) -> usize {
+    repo.find_open(mode).await.expect("find open").len()
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn successful_spend_total_is_mode_scoped() {
+    let (pool, _container) = setup_pg().await;
+    seed_mode_ledger_trades(&pool).await;
+    let trade_repo = PgTradeRepository::new(pool.connection().clone());
+
+    // Spend aggregates must never mix modes: paper = 40+1, live = 70+2.
+    assert_eq!(
+        spend_total(&trade_repo, ExecutionMode::Paper).await,
+        Usd::from(Decimal::new(41, 0))
+    );
+    assert_eq!(
+        spend_total(&trade_repo, ExecutionMode::Live).await,
+        Usd::from(Decimal::new(72, 0))
+    );
+    assert_eq!(
+        spend_total(&trade_repo, ExecutionMode::DryRun).await,
+        Usd::ZERO
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn position_ledger_queries_are_mode_scoped() {
+    let (pool, _container) = setup_pg().await;
+    let (paper_trade, live_trade) = seed_mode_ledger_trades(&pool).await;
+    let position_repo = PgPositionRepository::new(pool.connection().clone());
+
+    let paper_position_id = seed_open_position(
+        &position_repo,
+        paper_trade,
+        "555001",
+        ExecutionMode::Paper,
+        Decimal::new(40, 0),
+        Decimal::ONE,
+    )
+    .await;
+    seed_open_position(
+        &position_repo,
+        live_trade,
+        "555002",
+        ExecutionMode::Live,
+        Decimal::new(70, 0),
+        Decimal::new(2, 0),
+    )
+    .await;
+
+    // Open positions are mode-contextual: one per mode here.
+    assert_eq!(open_count(&position_repo, ExecutionMode::Paper).await, 1);
+    assert_eq!(open_count(&position_repo, ExecutionMode::Live).await, 1);
+    assert_eq!(open_count(&position_repo, ExecutionMode::DryRun).await, 0);
+
+    // Settle only the paper position with a $100 payout.
+    position_repo
+        .settle_position(
+            &paper_position_id,
+            SettlePositionParams {
+                winning_token_id: TokenId::new("555001"),
+                settlement_payout_usd: Usd::from(Decimal::new(100, 0)),
+                realized_pnl: Decimal::new(59, 0),
+                redeem_tx_hash: None,
+                redeem_status: RedeemStatus::NotRequired,
+                settlement_trigger: SettlementTrigger::Manual,
+                oracle_verdict: None,
+            },
+        )
+        .await
+        .expect("settle paper position");
+
+    // Payout aggregates stay isolated per mode as well.
+    assert_eq!(
+        payout_total(&position_repo, ExecutionMode::Paper).await,
+        Usd::from(Decimal::new(100, 0))
+    );
+    assert_eq!(
+        payout_total(&position_repo, ExecutionMode::Live).await,
+        Usd::ZERO
+    );
+    assert_eq!(open_count(&position_repo, ExecutionMode::Paper).await, 0);
 }
 
 #[tokio::test]

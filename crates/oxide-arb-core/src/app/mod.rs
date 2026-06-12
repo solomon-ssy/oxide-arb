@@ -25,6 +25,7 @@ use crate::{
         factor_snapshot::FactorSnapshotStore,
         mode_transition::{CoreRuntimeControl, CoreRuntimeControlDeps},
         replay::CoreReplay,
+        status::SystemStatusNudge,
     },
     detection::{
         coalescer::Coalescer,
@@ -70,6 +71,8 @@ use crate::{
         catalog_readiness::CatalogReadiness,
         gamma::GammaService,
         risk_metrics::{RiskMetricsRefreshService, RiskMetricsState},
+        system_status_broadcaster::SystemStatusBroadcaster,
+        system_status_publisher::SystemStatusPublisher,
     },
 };
 use chrono::Utc;
@@ -81,7 +84,7 @@ use oxide_arb_control::{
     materialization::{
         MaterializationRunner, MaterializationRunnerDeps, PointInTimeResolver, ResolverRepositories,
     },
-    scheduler::{MaterializationScheduler, ScheduleAlert, SchedulePolicy},
+    scheduler::{MaterializationScheduler, ScheduleAlert, ScheduleOutcome, SchedulePolicy},
 };
 use oxide_arb_error::{OxideError, OxideResult};
 use oxide_arb_models::{
@@ -127,7 +130,10 @@ use oxide_arb_web::{
     ws::{SessionRegistry, spawn_ws_broadcaster},
 };
 use parking_lot::Mutex;
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use tokio::{sync::Notify, time::interval};
 use tokio_util::sync::CancellationToken;
 
@@ -179,7 +185,7 @@ pub struct RiskBundle {
     pub metrics_state: Arc<RiskMetricsState>,
     pub exposure: Arc<InMemoryExposureReservation>,
     pub potential_loss_store: Arc<CorePotentialLossStore>,
-    pub metrics_refresh: Option<Arc<RiskMetricsRefreshService>>,
+    pub metrics_refresh: Arc<RiskMetricsRefreshService>,
 }
 
 /// Execution subsystem wired after opportunity detection.
@@ -276,6 +282,10 @@ pub struct AppContext {
     pub runtime: RuntimeChannels,
     pub shutdown: CancellationToken,
     pub pending_tasks: PendingTaskQueue,
+    /// Process boot instant shared by uptime reporting and status broadcasts.
+    pub started_at: Instant,
+    /// Nudge handle for immediate system-status WebSocket pushes.
+    pub system_status_nudge: SystemStatusNudge,
 }
 
 impl AppContext {
@@ -343,7 +353,7 @@ impl AppContext {
             calibration_repo,
             audit_writer: Arc::clone(&self.infra.audit_writer),
             metrics_state: Arc::clone(&self.risk.metrics_state),
-            metrics_refresh: self.risk.metrics_refresh.clone(),
+            metrics_refresh: Arc::clone(&self.risk.metrics_refresh),
             metrics: Arc::clone(&self.infra.metrics),
             events: self.event_publisher(),
         };
@@ -558,15 +568,24 @@ impl AppContext {
         let (operation_log, operation_log_rx) =
             OperationLogBuffer::new(OPERATION_LOG_BUFFER_CAPACITY);
 
+        let mut control_deps = self.control_deps();
+        let status_publisher = Arc::new(SystemStatusPublisher::new(
+            control_deps.clone(),
+            self.event_publisher(),
+            self.started_at,
+        ));
+        control_deps.status_publisher = Some(Arc::clone(&status_publisher));
+
         let control: Arc<dyn RuntimeControlPort> =
-            Arc::new(CoreRuntimeControl::new(self.control_deps()));
+            Arc::new(CoreRuntimeControl::new(control_deps, self.started_at));
         let market_data: Arc<dyn MarketDataPort> = Arc::new(CoreMarketData::new(
             Arc::clone(&self.data.book_store),
             Arc::clone(&self.trading.ws_manager),
         ));
-        let replay: Arc<dyn ReplayPort> = Arc::new(CoreReplay::new(Arc::new(
-            PgControlFactorRepository::new(db.clone()),
-        )));
+        let replay: Arc<dyn ReplayPort> = Arc::new(CoreReplay::new(
+            Arc::new(PgControlFactorRepository::new(db.clone())),
+            self.event_publisher(),
+        ));
         let applicator = Arc::clone(&self.applicator);
         let runtime_config_apply: Arc<dyn RuntimeConfigPort> = applicator;
 
@@ -623,7 +642,7 @@ impl AppContext {
             exposure: Arc::clone(&self.risk.exposure),
             metrics: Arc::clone(&self.risk.metrics),
             metrics_state: Arc::clone(&self.risk.metrics_state),
-            metrics_refresh: self.risk.metrics_refresh.clone(),
+            metrics_refresh: Arc::clone(&self.risk.metrics_refresh),
             clob_client: self.trading.clob_client.clone(),
             market_registry: Arc::clone(&self.data.market_registry),
             health_checker,
@@ -632,6 +651,7 @@ impl AppContext {
             system_runtime_state: Arc::new(PgSystemRuntimeStateRepository::new(
                 self.infra.pg.connection().clone(),
             )),
+            status_publisher: None,
         }
     }
 
@@ -643,8 +663,27 @@ impl AppContext {
         self.queue_operation_log_writer(operation_log_rx, operation_logs);
         self.queue_ws_broadcaster(state.ws_sessions.clone());
         self.queue_book_update_coalescer(state.ws_sessions.clone());
+        self.queue_system_status_broadcaster();
         self.queue_web_server(state);
         Ok(())
+    }
+
+    /// Queue the periodic system-status broadcaster (5s + nudge-driven pushes).
+    fn queue_system_status_broadcaster(&self) {
+        let mut deps = self.control_deps();
+        let publisher = Arc::new(SystemStatusPublisher::new(
+            deps.clone(),
+            self.event_publisher(),
+            self.started_at,
+        ));
+        deps.status_publisher = Some(Arc::clone(&publisher));
+        let broadcaster = SystemStatusBroadcaster::new(publisher, self.system_status_nudge.clone());
+        self.pending_tasks.push(
+            TaskId::SystemStatusBroadcaster,
+            move |shutdown| async move {
+                broadcaster.run(shutdown).await;
+            },
+        );
     }
 
     /// Queue the book-update coalescer: throttled per-market book pushes to the
@@ -718,7 +757,7 @@ impl AppContext {
             "scheduler",
             option_env!("GIT_SHA").unwrap_or("unknown"),
         );
-        let scheduler = Arc::new(MaterializationScheduler::new(repo, policy));
+        let scheduler = Arc::new(MaterializationScheduler::new(repo.clone(), policy));
         let alerts = Arc::clone(&self.infra.alerts);
         let events = self.event_publisher();
 
@@ -732,6 +771,7 @@ impl AppContext {
                     shutdown,
                     || {
                         let scheduler = Arc::clone(&scheduler);
+                        let repo = Arc::clone(&repo);
                         let alerts = Arc::clone(&alerts);
                         let events = events.clone();
                         async move {
@@ -739,6 +779,17 @@ impl AppContext {
                                 .tick(Utc::now())
                                 .await
                                 .map_err(|error| OxideError::Internal(error.to_string()))?;
+                            for outcome in report.outcomes {
+                                if let ScheduleOutcome::Enqueued { run_id, .. } = outcome {
+                                    if let Ok(Some(run)) =
+                                        repo.load_materialization_run(&run_id).await
+                                    {
+                                        events.publish(CoreEvent::MaterializationRunUpdated(
+                                            run.clone(),
+                                        ));
+                                    }
+                                }
+                            }
                             for alert in report.alerts {
                                 dispatch_schedule_alert(&alerts, &events, alert).await;
                             }
@@ -778,6 +829,7 @@ impl AppContext {
             control_factors: Arc::clone(&control_factors),
             pit_resolver: resolver,
             evidence_engine,
+            events: self.event_publisher(),
         }));
 
         self.pending_tasks.push(

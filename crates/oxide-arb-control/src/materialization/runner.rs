@@ -3,6 +3,7 @@ use std::sync::Arc;
 use chrono::Utc;
 use oxide_arb_models::{
     domain::{
+        ControlFactorMaterializationRunInfo, CoreEvent, CoreEventPublisher,
         NewControlFactorMaterializationRun,
         control_factor::{
             AcquireMaterializationRunOutcome, CancelMaterializationRunOutcome,
@@ -45,6 +46,7 @@ pub struct MaterializationRunnerDeps {
     pub control_factors: Arc<dyn ControlFactorRepository>,
     pub pit_resolver: Arc<PointInTimeResolver>,
     pub evidence_engine: Arc<EvidenceEngine>,
+    pub events: CoreEventPublisher,
 }
 
 pub struct MaterializationRunner {
@@ -64,6 +66,12 @@ impl MaterializationRunner {
     #[must_use]
     pub const fn new(deps: MaterializationRunnerDeps) -> Self {
         Self { deps }
+    }
+
+    fn publish_run_update(&self, run: &ControlFactorMaterializationRunInfo) {
+        self.deps
+            .events
+            .publish(CoreEvent::MaterializationRunUpdated(run.clone()));
     }
 
     pub async fn enqueue(
@@ -95,6 +103,7 @@ impl MaterializationRunner {
             .await?;
         match acquired {
             AcquireMaterializationRunOutcome::Acquired(run) => {
+                self.publish_run_update(&run);
                 self.execute_acquired_run(run.manifest, run_id, cancellation)
                     .await
             }
@@ -279,7 +288,8 @@ impl MaterializationRunner {
             )
             .await?;
         match outcome {
-            RunTransitionOutcome::Transitioned(_) => {
+            RunTransitionOutcome::Transitioned(run) => {
+                self.publish_run_update(run.as_ref());
                 info!(run_id = %run_id, status = %target, "materialization run completed");
                 Ok(RunExecutionOutcome::Completed(target))
             }
@@ -552,7 +562,10 @@ impl MaterializationRunner {
             .cancel_materialization_run(run_id, reason, Utc::now())
             .await?
         {
-            CancelMaterializationRunOutcome::Cancelled(_) => Ok(RunExecutionOutcome::Cancelled),
+            CancelMaterializationRunOutcome::Cancelled(run) => {
+                self.publish_run_update(&run);
+                Ok(RunExecutionOutcome::Cancelled)
+            }
             CancelMaterializationRunOutcome::AlreadyTerminal(run) => {
                 Ok(RunExecutionOutcome::Completed(run.status))
             }
@@ -583,7 +596,10 @@ impl MaterializationRunner {
             )
             .await?
         {
-            RunTransitionOutcome::Transitioned(_) => Err(error),
+            RunTransitionOutcome::Transitioned(run) => {
+                self.publish_run_update(run.as_ref());
+                Err(error)
+            }
             RunTransitionOutcome::InvalidTransition { current_status } => {
                 warn!(run_id = %run_id, status = %current_status, "invalid failure transition");
                 Ok(RunExecutionOutcome::NotQueued)

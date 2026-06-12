@@ -18,8 +18,9 @@ use oxide_arb_models::{
         BalanceSnapshotInfo, ControlFactorStageReportInfo, MarketPitSnapshotInfo,
         NewBalanceSnapshot, NewPotentialLoss, NewReconciliationReport, NewRiskAuditEvent,
         NewRuntimeConfigActivation, NewRuntimeConfigVersion, PageRequest, Paginated, PositionInfo,
-        PotentialLossInfo, ReconciliationReportInfo, ResolvePotentialLoss, RiskAuditEventInfo,
-        RuntimeConfigActivationInfo, RuntimeConfigVersionInfo, TimeWindow, TradeInfo,
+        PotentialLossInfo, ReconciliationReportInfo, ReplayPageQuery, ResolvePotentialLoss,
+        RiskAuditEventInfo, RuntimeConfigActivationInfo, RuntimeConfigVersionInfo, TimeWindow,
+        TradeInfo,
         control_factor::{
             AcquireMaterializationRunOutcome, AuditActor, AuditEventContent, AuditedOutcome,
             CancelMaterializationRunOutcome, ControlFactorAuditEventInfo,
@@ -821,6 +822,24 @@ impl ControlFactorRepository for SmokeControlFactorRepository {
         Ok(Vec::new())
     }
 
+    async fn list_active_materialization_runs(
+        &self,
+        _limit: u64,
+    ) -> Result<Vec<ControlFactorMaterializationRunInfo>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn page_materialization_runs(
+        &self,
+        query: &ReplayPageQuery,
+    ) -> Result<Paginated<ControlFactorMaterializationRunInfo>, StorageError> {
+        Ok(Paginated::from_request(
+            Vec::new(),
+            0,
+            &query.page.normalized(),
+        ))
+    }
+
     async fn latest_run_for_schedule(
         &self,
         _schedule_id: &str,
@@ -1480,6 +1499,7 @@ fn smoke_position(
         market_id: market_id.clone(),
         token_id: token_id.clone(),
         side: Side::Buy,
+        execution_mode: ExecutionMode::Paper,
         shares: Shares::new(dec!(100)),
         avg_entry_price: Price::new(dec!(0.94)),
         total_cost_usd: Usd::new(dec!(94)),

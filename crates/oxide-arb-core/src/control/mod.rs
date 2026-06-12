@@ -10,6 +10,7 @@ pub mod factor_shadow;
 pub mod factor_snapshot;
 pub mod mode_transition;
 pub mod replay;
+pub mod status;
 
 pub use factor_refresher::{FactorRefreshConfig, FactorRefresher};
 pub use factor_shadow::{

@@ -2,7 +2,7 @@
 
 use crate::{
     domain::{
-        ReplayEnqueueRequest,
+        PageRequest, ReplayEnqueueRequest,
         control_factor::{
             ControlFactorMaterializationRunInfo, ControlFactorStageReportInfo, MarketFilterSpec,
             ReplayAccountScope,
@@ -21,6 +21,16 @@ use crate::{
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use validator::Validate;
+
+/// Paginated list query for materialization / replay runs.
+#[derive(Debug, Deserialize)]
+pub struct ReplayPageQuery {
+    /// Optional status filter.
+    #[serde(default)]
+    pub status: Option<MaterializationRunStatus>,
+    #[serde(flatten)]
+    pub page: PageRequest,
+}
 
 /// Operator request to enqueue a replay (backfill) materialization run.
 #[derive(Debug, Deserialize, Validate)]

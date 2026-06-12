@@ -5,6 +5,7 @@
 //! broadcaster consumer) can use it without a circular dependency.
 
 use crate::{
+    domain::control_factor::ControlFactorMaterializationRunInfo,
     domain::{MarketBookView, Opportunity, PositionInfo, SystemStatus, TradeInfo},
     enums::{
         common::{AlertLevel, TradeBusinessOutcome},
@@ -71,6 +72,8 @@ pub enum CoreEvent {
         level: AlertLevel,
         message: String,
     },
+    /// Materialization / replay run status changed (queued → running → terminal).
+    MaterializationRunUpdated(ControlFactorMaterializationRunInfo),
 }
 
 impl CoreEvent {
@@ -93,6 +96,7 @@ impl CoreEvent {
             Self::ControlPublished { .. } => "control.published",
             Self::ConfigActivated { .. } => "config.activated",
             Self::Alert { .. } => "system.alert",
+            Self::MaterializationRunUpdated(_) => "materialization.run_update",
         }
     }
 }

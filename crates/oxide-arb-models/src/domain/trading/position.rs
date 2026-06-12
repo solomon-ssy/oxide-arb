@@ -8,7 +8,8 @@ use crate::{
     domain::{NullablePatch, Patch},
     enums::{
         common::{
-            PositionStatus, RedeemStatus, SettlementAccountingStatus, SettlementTrigger, Side,
+            ExecutionMode, PositionStatus, RedeemStatus, SettlementAccountingStatus,
+            SettlementTrigger, Side,
         },
         risk::ReservationStatus,
     },
@@ -30,6 +31,7 @@ pub struct PositionInfo {
     pub market_id: MarketId,
     pub token_id: TokenId,
     pub side: Side,
+    pub execution_mode: ExecutionMode,
     pub shares: Shares,
     pub avg_entry_price: Price,
     pub total_cost_usd: Usd,
@@ -54,7 +56,7 @@ pub struct PositionInfo {
 }
 
 info_from_model!(PositionInfo, crate::entities::position::Model, {
-    position_id, trade_id, market_id, token_id, side, shares, avg_entry_price,
+    position_id, trade_id, market_id, token_id, side, execution_mode, shares, avg_entry_price,
     total_cost_usd, total_fees_usd, unrealized_pnl, realized_pnl,
     status, opened_at, closed_at, settled_at, winning_token_id,
     settlement_payout_usd, redeem_tx_hash, redeem_status, redeem_attempts,
@@ -90,6 +92,7 @@ pub struct NewPosition {
     pub market_id: MarketId,
     pub token_id: TokenId,
     pub side: Side,
+    pub execution_mode: ExecutionMode,
     pub shares: Shares,
     pub avg_entry_price: Price,
     pub total_cost_usd: Usd,

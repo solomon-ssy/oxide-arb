@@ -51,7 +51,7 @@ pub struct MarketSettlementService {
     metrics: Arc<MetricsHub>,
     alerts: Arc<AlertDispatcher>,
     audit_writer: Arc<ExecutionAuditWriter>,
-    metrics_refresh: Option<Arc<RiskMetricsRefreshService>>,
+    metrics_refresh: Arc<RiskMetricsRefreshService>,
     events: CoreEventPublisher,
     config: ArcSwap<SettlementRuntimeConfig>,
 }
@@ -69,7 +69,7 @@ pub struct MarketSettlementServiceDeps {
     pub metrics: Arc<MetricsHub>,
     pub alerts: Arc<AlertDispatcher>,
     pub audit_writer: Arc<ExecutionAuditWriter>,
-    pub metrics_refresh: Option<Arc<RiskMetricsRefreshService>>,
+    pub metrics_refresh: Arc<RiskMetricsRefreshService>,
     pub events: CoreEventPublisher,
     pub config: SettlementRuntimeConfig,
 }
@@ -145,10 +145,8 @@ impl MarketSettlementService {
             });
         }
 
-        if let Some(refresh) = &self.metrics_refresh {
-            if let Err(error) = refresh.refresh().await {
-                tracing::warn!(%error, "settlement metrics refresh failed");
-            }
+        if let Err(error) = self.metrics_refresh.refresh().await {
+            tracing::warn!(%error, "settlement metrics refresh failed");
         }
 
         if self.config.load().oracle.enabled {

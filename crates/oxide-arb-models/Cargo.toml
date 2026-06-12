@@ -11,6 +11,7 @@ rust_decimal = { workspace = true }
 rust_decimal_macros = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+serde_with = { workspace = true }
 schemars = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true, features = ["v5"] }

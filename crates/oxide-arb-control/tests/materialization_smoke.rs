@@ -12,7 +12,7 @@ use oxide_arb_control::{
     },
 };
 use oxide_arb_models::{
-    domain::control_factor::StageReportBody,
+    domain::{CoreEventPublisher, control_factor::StageReportBody},
     enums::control_factor::{
         EvidenceStageStatus, FactorStatus, MaterializationOutputPolicy, MaterializationStageName,
     },
@@ -102,6 +102,7 @@ fn smoke_runner(repos: &SmokeRepositories) -> MaterializationRunner {
         control_factors: repos.control_factors.clone(),
         pit_resolver: Arc::new(pit),
         evidence_engine: Arc::new(EvidenceEngine::new(repos.timeseries.clone())),
+        events: CoreEventPublisher::bounded(16).0,
     })
 }
 

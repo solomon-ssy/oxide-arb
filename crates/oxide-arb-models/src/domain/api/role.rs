@@ -9,9 +9,8 @@ use crate::{
     types::MenuId,
 };
 use serde::Deserialize;
+use serde_with::rust::double_option;
 use validator::Validate;
-
-use super::serde::double_option;
 
 /// Create-role payload (`kind` is fixed to `Custom`, `status` to `Enabled`).
 #[derive(Debug, Deserialize, Validate)]
@@ -32,7 +31,7 @@ pub struct CreateRoleRequest {
 pub struct UpdateRoleRequest {
     #[validate(length(min = 1, max = 128))]
     pub name: Option<String>,
-    #[serde(default, deserialize_with = "double_option")]
+    #[serde(default, with = "double_option")]
     pub description: Option<Option<String>>,
     pub sort: Option<i32>,
 }

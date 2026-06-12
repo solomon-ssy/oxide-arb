@@ -92,11 +92,14 @@ pub async fn circuit_breaker(
     )))
 }
 
-/// `GET /api/risk/positions` — currently open positions.
+/// `GET /api/risk/positions` — currently open positions in the active mode.
 pub async fn positions(
     state: web::Data<AppState>,
 ) -> Result<WebResponse<Vec<PositionView>>, WebError> {
-    let open = state.positions.find_open().await?;
+    let open = state
+        .positions
+        .find_open(state.control.execution_mode())
+        .await?;
     Ok(WebResponse::ok(
         open.into_iter().map(PositionView::from).collect(),
     ))

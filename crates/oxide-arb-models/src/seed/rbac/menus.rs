@@ -29,12 +29,12 @@ const PRODUCES: &[SeedArtifact] = &[
 
 pub const MENUS_SEED: SeedSpec = SeedSpec {
     id: SEED_ID,
-    version: 1,
+    version: 2,
     target_table: menu_table_name,
     depends_on: DEPENDS_ON,
     produces: PRODUCES,
     conflict_policy: SeedConflictPolicy::GraphOrdered,
-    checksum: "rbac.menus.bootstrap.v1",
+    checksum: "rbac.menus.bootstrap.v2",
     loader: load_boxed,
 };
 
@@ -81,6 +81,17 @@ struct NodeSpec<'a> {
     component: Option<&'a str>,
     icon: Option<&'a str>,
     permission_code: Option<String>,
+}
+
+/// Route page fields for [`MenuTree::page`].
+struct PageSpec<'a> {
+    parent: &'a MenuId,
+    name: &'a str,
+    title: &'a str,
+    path: &'a str,
+    component: &'a str,
+    permission_code: Option<String>,
+    icon: &'a str,
 }
 
 impl Default for NodeSpec<'_> {
@@ -148,24 +159,16 @@ impl MenuTree {
         })
     }
 
-    fn page(
-        &mut self,
-        parent: &MenuId,
-        name: &str,
-        title: &str,
-        path: &str,
-        component: &str,
-        permission_code: Option<String>,
-    ) -> MenuId {
+    fn page(&mut self, spec: PageSpec<'_>) -> MenuId {
         self.push(NodeSpec {
-            parent: Some(parent),
+            parent: Some(spec.parent),
             kind: MenuKind::Menu,
-            name,
-            title,
-            path: Some(path),
-            component: Some(component),
-            permission_code,
-            ..NodeSpec::default()
+            name: spec.name,
+            title: spec.title,
+            path: Some(spec.path),
+            component: Some(spec.component),
+            icon: Some(spec.icon),
+            permission_code: spec.permission_code,
         })
     }
 
@@ -193,15 +196,20 @@ fn build_tree() -> MenuTree {
 }
 
 fn build_dashboard(t: &mut MenuTree) {
-    let dashboard_root = t.dir("dashboard_root", "page.menu.group.dashboard", "dashboard");
-    let overview = t.page(
-        &dashboard_root,
-        "dashboard",
-        "page.menu.dashboard",
-        "/dashboard",
-        "dashboard/index",
-        None,
+    let dashboard_root = t.dir(
+        "dashboard_root",
+        "page.menu.group.dashboard",
+        "lucide:layout-dashboard",
     );
+    let overview = t.page(PageSpec {
+        parent: &dashboard_root,
+        name: "dashboard",
+        title: "page.menu.dashboard",
+        path: "/dashboard",
+        component: "dashboard/index",
+        permission_code: None,
+        icon: "lucide:home",
+    });
     t.button(
         &overview,
         "system:halt",
@@ -223,63 +231,68 @@ fn build_dashboard(t: &mut MenuTree) {
 }
 
 fn build_trading(t: &mut MenuTree) {
-    let trading = t.dir("trading", "page.menu.group.trading", "trading");
-    let markets = t.page(
-        &trading,
-        "markets",
-        "page.menu.markets",
-        "/markets",
-        "markets/index",
-        Some(perm(ResourceType::Market, Operation::Read)),
-    );
+    let trading = t.dir("trading", "page.menu.group.trading", "lucide:trending-up");
+    let markets = t.page(PageSpec {
+        parent: &trading,
+        name: "markets",
+        title: "page.menu.markets",
+        path: "/markets",
+        component: "markets/index",
+        permission_code: Some(perm(ResourceType::Market, Operation::Read)),
+        icon: "lucide:store",
+    });
     t.button(
         &markets,
         "market:update",
         "Subscribe / Unsubscribe",
         perm(ResourceType::Market, Operation::Update),
     );
-    t.page(
-        &trading,
-        "opportunities",
-        "page.menu.opportunities",
-        "/opportunities",
-        "opportunities/index",
-        Some(perm(ResourceType::Opportunity, Operation::Read)),
-    );
-    t.page(
-        &trading,
-        "trades",
-        "page.menu.trades",
-        "/trades",
-        "trades/index",
-        Some(perm(ResourceType::Trade, Operation::Read)),
-    );
+    t.page(PageSpec {
+        parent: &trading,
+        name: "opportunities",
+        title: "page.menu.opportunities",
+        path: "/opportunities",
+        component: "opportunities/index",
+        permission_code: Some(perm(ResourceType::Opportunity, Operation::Read)),
+        icon: "lucide:zap",
+    });
+    t.page(PageSpec {
+        parent: &trading,
+        name: "trades",
+        title: "page.menu.trades",
+        path: "/trades",
+        component: "trades/index",
+        permission_code: Some(perm(ResourceType::Trade, Operation::Read)),
+        icon: "lucide:receipt",
+    });
 }
 
 fn build_risk(t: &mut MenuTree) {
-    let risk = t.dir("risk", "page.menu.group.risk", "risk");
-    let risk_overview = t.page(
-        &risk,
-        "risk-overview",
-        "page.menu.risk",
-        "/risk",
-        "risk/index",
-        Some(perm(ResourceType::Risk, Operation::Read)),
-    );
+    let risk = t.dir("risk", "page.menu.group.risk", "lucide:shield");
+    let risk_overview = t.page(PageSpec {
+        parent: &risk,
+        name: "risk-overview",
+        title: "page.menu.risk",
+        path: "/risk",
+        component: "risk/index",
+        permission_code: Some(perm(ResourceType::Risk, Operation::Read)),
+        icon: "lucide:shield-alert",
+    });
     t.button(
         &risk_overview,
         "risk:reset",
         "Reset Circuit Breaker",
         perm(ResourceType::Risk, Operation::Reset),
     );
-    let blacklist = t.page(
-        &risk,
-        "blacklist",
-        "page.menu.blacklist",
-        "/blacklist",
-        "blacklist/index",
-        Some(perm(ResourceType::Blacklist, Operation::Read)),
-    );
+    let blacklist = t.page(PageSpec {
+        parent: &risk,
+        name: "blacklist",
+        title: "page.menu.blacklist",
+        path: "/blacklist",
+        component: "blacklist/index",
+        permission_code: Some(perm(ResourceType::Blacklist, Operation::Read)),
+        icon: "lucide:ban",
+    });
     t.button(
         &blacklist,
         "blacklist:create",
@@ -295,28 +308,38 @@ fn build_risk(t: &mut MenuTree) {
 }
 
 fn build_analytics(t: &mut MenuTree) {
-    let analytics_root = t.dir("analytics-root", "page.menu.group.analytics", "analytics");
-    t.page(
-        &analytics_root,
-        "analytics",
-        "page.menu.analytics",
-        "/analytics",
-        "analytics/index",
-        Some(perm(ResourceType::Analytics, Operation::Read)),
+    let analytics_root = t.dir(
+        "analytics-root",
+        "page.menu.group.analytics",
+        "lucide:bar-chart-3",
     );
+    t.page(PageSpec {
+        parent: &analytics_root,
+        name: "analytics",
+        title: "page.menu.analytics",
+        path: "/analytics",
+        component: "analytics/index",
+        permission_code: Some(perm(ResourceType::Analytics, Operation::Read)),
+        icon: "lucide:line-chart",
+    });
 }
 
 fn build_operations(t: &mut MenuTree) {
-    let operations = t.dir("operations", "page.menu.group.operations", "governance");
-    build_operations_runtime_config(t, &operations);
-    let control_factors = t.page(
-        &operations,
-        "control-factors",
-        "page.menu.controlFactors",
-        "/control-factors",
-        "control-factors/index",
-        Some(perm(ResourceType::ControlFactor, Operation::Read)),
+    let operations = t.dir(
+        "operations",
+        "page.menu.group.operations",
+        "lucide:settings-2",
     );
+    build_operations_runtime_config(t, &operations);
+    let control_factors = t.page(PageSpec {
+        parent: &operations,
+        name: "control-factors",
+        title: "page.menu.controlFactors",
+        path: "/control-factors",
+        component: "control-factors/index",
+        permission_code: Some(perm(ResourceType::ControlFactor, Operation::Read)),
+        icon: "lucide:git-branch",
+    });
     t.button(
         &control_factors,
         "control_factor:reject",
@@ -341,62 +364,67 @@ fn build_operations(t: &mut MenuTree) {
         "Emergency Publish",
         perm(ResourceType::ControlFactor, Operation::Emergency),
     );
-    let publications = t.page(
-        &operations,
-        "publications",
-        "page.menu.publications",
-        "/publications",
-        "publications/index",
-        Some(perm(ResourceType::ControlFactor, Operation::Read)),
-    );
+    let publications = t.page(PageSpec {
+        parent: &operations,
+        name: "publications",
+        title: "page.menu.publications",
+        path: "/publications",
+        component: "publications/index",
+        permission_code: Some(perm(ResourceType::ControlFactor, Operation::Read)),
+        icon: "lucide:rocket",
+    });
     t.button(
         &publications,
         "publication:rollback",
         "Rollback",
         perm(ResourceType::Publication, Operation::Rollback),
     );
-    let replay = t.page(
-        &operations,
-        "replay",
-        "page.menu.replay",
-        "/replay",
-        "replay/index",
-        Some(perm(ResourceType::Replay, Operation::Read)),
-    );
+    let replay = t.page(PageSpec {
+        parent: &operations,
+        name: "replay",
+        title: "page.menu.replay",
+        path: "/replay",
+        component: "replay/index",
+        permission_code: Some(perm(ResourceType::Replay, Operation::Read)),
+        icon: "lucide:history",
+    });
     t.button(
         &replay,
         "replay:create",
         "Start Replay",
         perm(ResourceType::Replay, Operation::Create),
     );
-    t.page(
-        &operations,
-        "audit",
-        "page.menu.audit",
-        "/audit",
-        "audit/index",
-        Some(perm(ResourceType::Audit, Operation::Read)),
-    );
-    t.page(
-        &operations,
-        "operation-log",
-        "page.menu.operationLog",
-        "/operation-log",
-        "operation-log/index",
-        Some(perm(ResourceType::OperationLog, Operation::Read)),
-    );
+    t.page(PageSpec {
+        parent: &operations,
+        name: "audit",
+        title: "page.menu.audit",
+        path: "/audit",
+        component: "audit/index",
+        permission_code: Some(perm(ResourceType::Audit, Operation::Read)),
+        icon: "lucide:file-search",
+    });
+    t.page(PageSpec {
+        parent: &operations,
+        name: "operation-log",
+        title: "page.menu.operationLog",
+        path: "/operation-log",
+        component: "operation-log/index",
+        permission_code: Some(perm(ResourceType::OperationLog, Operation::Read)),
+        icon: "lucide:scroll-text",
+    });
 }
 
 /// Runtime-config page + version-lifecycle buttons under `operations`.
 fn build_operations_runtime_config(t: &mut MenuTree, operations: &MenuId) {
-    let runtime_config = t.page(
-        operations,
-        "runtime-config",
-        "page.menu.runtimeConfig",
-        "/runtime-config",
-        "runtime-config/index",
-        Some(perm(ResourceType::RuntimeConfig, Operation::Read)),
-    );
+    let runtime_config = t.page(PageSpec {
+        parent: operations,
+        name: "runtime-config",
+        title: "page.menu.runtimeConfig",
+        path: "/runtime-config",
+        component: "runtime-config/index",
+        permission_code: Some(perm(ResourceType::RuntimeConfig, Operation::Read)),
+        icon: "lucide:sliders-horizontal",
+    });
     t.button(
         &runtime_config,
         "runtime_config:create",
@@ -418,15 +446,26 @@ fn build_operations_runtime_config(t: &mut MenuTree, operations: &MenuId) {
 }
 
 fn build_access_control(t: &mut MenuTree) {
-    let access = t.dir("access-control", "page.menu.group.accessControl", "access");
-    let users = t.page(
-        &access,
-        "users",
-        "page.menu.users",
-        "/users",
-        "users/index",
-        Some(perm(ResourceType::User, Operation::Read)),
+    let access = t.dir(
+        "access-control",
+        "page.menu.group.accessControl",
+        "lucide:lock",
     );
+    build_access_control_users(t, &access);
+    build_access_control_roles(t, &access);
+    build_access_control_menus(t, &access);
+}
+
+fn build_access_control_users(t: &mut MenuTree, access: &MenuId) {
+    let users = t.page(PageSpec {
+        parent: access,
+        name: "users",
+        title: "page.menu.users",
+        path: "/users",
+        component: "users/index",
+        permission_code: Some(perm(ResourceType::User, Operation::Read)),
+        icon: "lucide:users",
+    });
     t.button(
         &users,
         "user:create",
@@ -451,14 +490,18 @@ fn build_access_control(t: &mut MenuTree) {
         "Assign Roles",
         perm(ResourceType::User, Operation::Assign),
     );
-    let roles_page = t.page(
-        &access,
-        "roles",
-        "page.menu.roles",
-        "/roles",
-        "roles/index",
-        Some(perm(ResourceType::Role, Operation::Read)),
-    );
+}
+
+fn build_access_control_roles(t: &mut MenuTree, access: &MenuId) {
+    let roles_page = t.page(PageSpec {
+        parent: access,
+        name: "roles",
+        title: "page.menu.roles",
+        path: "/roles",
+        component: "roles/index",
+        permission_code: Some(perm(ResourceType::Role, Operation::Read)),
+        icon: "lucide:key-round",
+    });
     t.button(
         &roles_page,
         "role:create",
@@ -489,14 +532,18 @@ fn build_access_control(t: &mut MenuTree) {
         "View Permission Catalog",
         perm(ResourceType::Permission, Operation::Read),
     );
-    let menus_page = t.page(
-        &access,
-        "menus",
-        "page.menu.menus",
-        "/menus",
-        "menus/index",
-        Some(perm(ResourceType::Menu, Operation::Read)),
-    );
+}
+
+fn build_access_control_menus(t: &mut MenuTree, access: &MenuId) {
+    let menus_page = t.page(PageSpec {
+        parent: access,
+        name: "menus",
+        title: "page.menu.menus",
+        path: "/menus",
+        component: "menus/index",
+        permission_code: Some(perm(ResourceType::Menu, Operation::Read)),
+        icon: "lucide:menu",
+    });
     t.button(
         &menus_page,
         "menu:create",
@@ -545,6 +592,7 @@ mod tests {
     use std::collections::HashSet;
 
     use super::{build_tree, stable_menu_id};
+    use crate::enums::rbac::MenuKind;
 
     #[test]
     fn menu_ids_are_stable_for_node_name() {
@@ -571,5 +619,27 @@ mod tests {
         assert!(!names.contains("materializations"));
         assert!(!names.contains("system-control"));
         assert!(!names.contains("permissions"));
+    }
+
+    #[test]
+    fn directory_and_menu_nodes_use_iconify_icons() {
+        let tree = build_tree();
+        for model in &tree.models {
+            let kind = match &model.kind {
+                sea_orm::ActiveValue::Set(kind) => *kind,
+                _ => continue,
+            };
+            if !matches!(kind, MenuKind::Directory | MenuKind::Menu) {
+                continue;
+            }
+            let icon = match &model.icon {
+                sea_orm::ActiveValue::Set(Some(icon)) => icon.as_str(),
+                _ => panic!("menu node missing icon"),
+            };
+            assert!(
+                icon.contains(':'),
+                "icon must be Iconify collection:name format"
+            );
+        }
     }
 }

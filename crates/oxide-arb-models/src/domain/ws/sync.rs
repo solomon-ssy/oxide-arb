@@ -8,9 +8,9 @@
 
 use serde::Serialize;
 
-use crate::{
-    clickhouse::OpportunityDetectionRow,
-    domain::{LivePnlView, PositionView, RiskEngineStateView, SystemStatus},
+use crate::domain::{
+    ControlFactorMaterializationRunView, LivePnlView, OpportunityView, PositionView,
+    RiskEngineStateView, SystemStatus,
 };
 
 /// Authorized projection of live system state, returned for a `sync` command.
@@ -31,7 +31,12 @@ pub struct SyncSnapshot {
     /// Live `PnL` snapshot (requires `Pnl` read).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pnl: Option<LivePnlView>,
-    /// Recently detected opportunities (requires `Opportunity` read).
+    /// Recently detected opportunities (requires `Opportunity` read), projected
+    /// through the same [`OpportunityView`] as the `opportunity.detected` push
+    /// so the feed consumes one wire shape on both paths.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub recent_opportunities: Option<Vec<OpportunityDetectionRow>>,
+    pub recent_opportunities: Option<Vec<OpportunityView>>,
+    /// Active materialization runs (`Queued` / `Running`), requires `ControlFactor` read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_materialization_runs: Option<Vec<ControlFactorMaterializationRunView>>,
 }

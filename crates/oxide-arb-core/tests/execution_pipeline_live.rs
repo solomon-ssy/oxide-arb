@@ -1,5 +1,8 @@
 //! Live-mode execution pipeline tests backed by wiremock CLOB.
 
+#[path = "common/mod.rs"]
+mod common;
+
 use alloy::signers::{Signer as _, local::LocalSigner};
 use chrono::Utc;
 use oxide_arb_algorithm::scorer::ScoredOpportunity;
@@ -518,6 +521,11 @@ async fn live_pipeline_fill_observed_then_consumer_settles() {
     );
     assert_eq!(fixture.exposure.active_count_sync(), 0);
 
+    let metrics_refresh = common::disconnected_metrics_refresh(
+        Arc::clone(&fixture.metrics_state),
+        ExecutionMode::Live,
+        Arc::clone(&fixture.metrics),
+    );
     let consumer = PostTradeConsumer {
         risk_engine: fixture.risk_engine,
         risk_metrics: fixture.risk_metrics,
@@ -527,7 +535,7 @@ async fn live_pipeline_fill_observed_then_consumer_settles() {
         calibration_repo: fixture.calibration_repo,
         audit_writer: fixture.audit_writer,
         metrics_state: fixture.metrics_state,
-        metrics_refresh: None,
+        metrics_refresh,
         metrics: fixture.metrics,
         events: CoreEventPublisher::bounded(1).0,
     };

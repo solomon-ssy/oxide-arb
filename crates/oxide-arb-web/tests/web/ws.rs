@@ -27,13 +27,25 @@ use crate::{
 const WS_KEY: &str = "dGhlIHNhbXBsZSBub25jZQ==";
 
 fn ws_upgrade_request(uri: &str) -> TestRequest {
-    TestRequest::get()
+    ws_upgrade_request_with_api_version(uri, true)
+}
+
+/// Browser WebSocket handshakes cannot set `Accept-Api-Version`; regression guard.
+fn ws_upgrade_request_without_api_version(uri: &str) -> TestRequest {
+    ws_upgrade_request_with_api_version(uri, false)
+}
+
+fn ws_upgrade_request_with_api_version(uri: &str, with_api_version: bool) -> TestRequest {
+    let mut req = TestRequest::get()
         .uri(uri)
-        .insert_header(API_VERSION)
         .insert_header(("Connection", "Upgrade"))
         .insert_header(("Upgrade", "websocket"))
         .insert_header(("Sec-WebSocket-Version", "13"))
-        .insert_header(("Sec-WebSocket-Key", WS_KEY))
+        .insert_header(("Sec-WebSocket-Key", WS_KEY));
+    if with_api_version {
+        req = req.insert_header(API_VERSION);
+    }
+    req
 }
 
 fn start_ws_server(state: oxide_arb_web::AppState) -> TestServer {
@@ -148,6 +160,19 @@ async fn ws_upgrade_succeeds_with_valid_access_token() {
 
 #[actix_web::test]
 #[ignore = "requires Docker"]
+async fn ws_upgrade_succeeds_without_api_version_header() {
+    let env = TestEnv::start().await;
+    let token = client::login(&env, "admin", "admin").await;
+    let res = harness::call(
+        &env.state,
+        ws_upgrade_request_without_api_version(&format!("/api/ws?token={token}")),
+    )
+    .await;
+    assert_eq!(res.status, StatusCode::SWITCHING_PROTOCOLS);
+}
+
+#[actix_web::test]
+#[ignore = "requires Docker"]
 async fn ws_ping_command_returns_pong_frame() {
     let env = TestEnv::start().await;
     let token = client::login(&env, "admin", "admin").await;
@@ -242,4 +267,35 @@ async fn ws_broadcaster_delivers_subscribed_core_event() {
     let envelope: serde_json::Value = serde_json::from_str(&text).expect("json envelope");
     assert_eq!(envelope["type"], "system.alert");
     assert_eq!(envelope["data"]["message"], "ws-bus-integration");
+}
+
+#[actix_web::test]
+#[ignore = "requires Docker"]
+async fn ws_subscribe_receives_multiple_system_status_events() {
+    let env = TestEnv::start().await;
+    let token = client::login(&env, "admin", "admin").await;
+    let mut server = start_ws_server(env.state.clone());
+    attach_api_version(&mut server);
+    let mut session = connect_ws(&mut server, &token).await;
+
+    session
+        .send(WsMessage::Text(
+            r#"{"action":"subscribe","channel":"system.status"}"#.into(),
+        ))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let status = env.state.control.system_status().await;
+    env.state
+        .events
+        .publish(CoreEvent::SystemStatusChanged(status.clone()));
+    let first = recv_until_type(&mut session, "system.status", Duration::from_secs(2)).await;
+    assert!(first["data"]["checked_at"].is_string());
+
+    env.state
+        .events
+        .publish(CoreEvent::SystemStatusChanged(status));
+    let second = recv_until_type(&mut session, "system.status", Duration::from_secs(2)).await;
+    assert!(second["data"]["checked_at"].is_string());
 }

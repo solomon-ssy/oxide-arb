@@ -52,6 +52,10 @@ futures-util = "0.3"
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Canonical serde adapters (PickFirst/DisplayFromStr for query-string number
+# coercion, rust::double_option for three-way-null PATCH fields, and the
+# SerializeDisplay / DeserializeFromStr derives) — never hand-roll these.
+serde_with = { version = "3", features = ["macros"] }
 sha2 = "0.10"
 
 # JSON Schema generation (runtime-config schema metadata; doc comments become

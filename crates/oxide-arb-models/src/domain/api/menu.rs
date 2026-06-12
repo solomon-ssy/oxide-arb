@@ -9,9 +9,8 @@ use crate::{
     types::MenuId,
 };
 use serde::Deserialize;
+use serde_with::rust::double_option;
 use validator::Validate;
-
-use super::serde::double_option;
 
 /// Create-menu payload.
 #[derive(Debug, Deserialize, Validate)]
@@ -43,20 +42,20 @@ pub struct CreateMenuRequest {
 /// Partial menu update. Absent fields keep; explicit `null` clears nullables.
 #[derive(Debug, Deserialize, Validate)]
 pub struct UpdateMenuRequest {
-    #[serde(default, deserialize_with = "double_option")]
+    #[serde(default, with = "double_option")]
     pub parent_id: Option<Option<MenuId>>,
     #[validate(length(min = 1, max = 128))]
     pub name: Option<String>,
     pub kind: Option<MenuKind>,
-    #[serde(default, deserialize_with = "double_option")]
+    #[serde(default, with = "double_option")]
     pub path: Option<Option<String>>,
-    #[serde(default, deserialize_with = "double_option")]
+    #[serde(default, with = "double_option")]
     pub component: Option<Option<String>>,
     #[validate(length(min = 1, max = 128))]
     pub title: Option<String>,
-    #[serde(default, deserialize_with = "double_option")]
+    #[serde(default, with = "double_option")]
     pub icon: Option<Option<String>>,
-    #[serde(default, deserialize_with = "double_option")]
+    #[serde(default, with = "double_option")]
     pub permission_code: Option<Option<String>>,
     pub sort: Option<i32>,
     pub keep_alive: Option<bool>,

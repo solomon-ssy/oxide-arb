@@ -10,6 +10,7 @@ use super::{
     AppContext, ControlFactorBundle, DataBundle, ExecutionBundle, InfraBundle, RiskBundle,
     RuntimeChannels, SettlementBundle, TradingBundle, task_registry::PendingTaskQueue,
 };
+use crate::control::status::SystemStatusNudge;
 use crate::{
     app::periodic_services::run_calibration_startup_tick,
     bridge::{
@@ -71,7 +72,9 @@ use crate::{
         catalog_readiness::CatalogReadiness,
         equity_valuator::EquityValuator,
         gamma::{GammaService, GammaServiceDeps},
-        risk_metrics::{ApiHealthTracker, RiskMetricsRefreshService, RiskMetricsState},
+        risk_metrics::{
+            ApiHealthTracker, RiskMetricsRefreshDeps, RiskMetricsRefreshService, RiskMetricsState,
+        },
         ws_subscription::WsSubscriptionCoordinator,
     },
 };
@@ -107,7 +110,7 @@ use oxide_arb_models::{
         CalibrationConfig, RUNTIME_CONFIG_SCHEMA_VERSION, RuntimeConfig,
         validation::validate_runtime_for_mode,
     },
-    types::{MarketId, RuntimeConfigActivationId, RuntimeConfigVersionId, TokenId, Usd},
+    types::{MarketId, RuntimeConfigActivationId, RuntimeConfigVersionId, TokenId},
 };
 use oxide_arb_repository::{
     clickhouse::ChTimeseriesRepository,
@@ -141,7 +144,7 @@ use oxide_arb_web::jwt::RedisTokenBlacklist;
 use parking_lot::Mutex;
 use std::{
     sync::{Arc, atomic::AtomicU32},
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
@@ -257,7 +260,7 @@ struct BuildRisk {
     metrics_state: Arc<RiskMetricsState>,
     engine: Arc<RiskEngine>,
     potential_loss_store: Arc<CorePotentialLossStore>,
-    metrics_refresh: Option<Arc<RiskMetricsRefreshService>>,
+    metrics_refresh: Arc<RiskMetricsRefreshService>,
     fsm: Arc<ExecutionFSM>,
     backpressure: Arc<BackpressurePolicy>,
 }
@@ -566,7 +569,7 @@ fn wire_settlement_bundle(
         metrics: Arc::clone(&infra.metrics),
         alerts: Arc::clone(&infra.alerts),
         audit_writer,
-        metrics_refresh: risk.metrics_refresh.clone(),
+        metrics_refresh: Arc::clone(&risk.metrics_refresh),
         events: events.clone(),
         config: runtime.settlement.clone(),
     }));
@@ -669,6 +672,8 @@ fn assemble_app_context(parts: AppContextAssembly) -> AppContext {
         },
         shutdown,
         pending_tasks,
+        started_at: Instant::now(),
+        system_status_nudge: SystemStatusNudge::default(),
     }
 }
 
@@ -715,7 +720,7 @@ async fn connect_infra(
 
     let (risk_decision_audit, risk_decision_audit_rx) = new_audit_sink(4096);
 
-    let ch_pool = Arc::new(ClickHousePool::connect(&deploy.db.clickhouse)?);
+    let ch_pool = Arc::new(ClickHousePool::connect(&deploy.db.clickhouse).await?);
     ch_pool.ensure_schema().await?;
 
     // The single shared Redis pool — connected (and PINGed) once here in the
@@ -1068,9 +1073,26 @@ async fn wire_risk(
     ));
     let api_tracker = Arc::new(ApiHealthTracker::new(Duration::from_secs(60)));
     let metrics_state = Arc::new(RiskMetricsState::new(api_tracker));
-    let mode = execution_mode.current();
-    if mode != ExecutionMode::Live {
-        metrics_state.seed_simulated_snapshot(mode, Usd::new(runtime.risk.bankroll_usd));
+    let equity_valuator = Arc::new(EquityValuator::new(
+        Arc::clone(&detection.market_registry),
+        Arc::clone(&detection.book_store),
+        Arc::clone(&detection.calibrator),
+    ));
+    let metrics_refresh = Arc::new(RiskMetricsRefreshService::new(RiskMetricsRefreshDeps {
+        state: Arc::clone(&metrics_state),
+        execution_mode: execution_mode.clone(),
+        runtime_config: Arc::clone(&infra.runtime_store),
+        clob_client: clients.clob_client.clone(),
+        trade_repo: Arc::clone(&infra.repos.trade),
+        position_repo: Arc::clone(&infra.repos.position),
+        equity_valuator,
+        metrics: Arc::clone(&infra.metrics),
+    }));
+    // Simulated modes hydrate the derived ledger snapshot (bankroll − spend +
+    // payout from Postgres) before the engine builds; Live defers to the
+    // startup gate (`ensure_live_metrics_ready`) after wiring completes.
+    if execution_mode.current() != ExecutionMode::Live {
+        metrics_refresh.refresh().await?;
     }
     let risk_metrics = Arc::new(CoreRiskMetrics::new(
         Arc::clone(&metrics_state),
@@ -1123,22 +1145,6 @@ async fn wire_risk(
         Arc::clone(&infra.metrics),
         deploy.execution.book_apply.shard_count.max(1),
     ));
-
-    let metrics_refresh = clients.clob_client.as_ref().map(|clob_client| {
-        let position_repo = Arc::clone(&infra.repos.position);
-        let equity_valuator = Arc::new(EquityValuator::new(
-            Arc::clone(&detection.market_registry),
-            Arc::clone(&detection.book_store),
-            Arc::clone(&detection.calibrator),
-        ));
-        Arc::new(RiskMetricsRefreshService::new(
-            Arc::clone(&metrics_state),
-            Arc::clone(clob_client),
-            position_repo,
-            equity_valuator,
-            Arc::clone(&infra.metrics),
-        ))
-    });
 
     Ok(BuildRisk {
         exposure,

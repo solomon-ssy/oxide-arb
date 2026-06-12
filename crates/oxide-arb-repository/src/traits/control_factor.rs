@@ -11,6 +11,7 @@ use oxide_arb_models::{
         NewControlFactorPublication, NewControlFactorStageReport, NewControlFactorValue,
         PublishPublicationOutcome, RunTransitionOutcome,
     },
+    domain::{Paginated, ReplayPageQuery},
     enums::control_factor::{
         ControlFactorType, FactorStatus, MaterializationRunStatus, MaterializationStageName,
         PublicationMode, PublicationStatus,
@@ -65,6 +66,18 @@ pub trait ControlFactorRepository: Send + Sync {
         &self,
         limit: u64,
     ) -> Result<Vec<MaterializationRunId>, StorageError>;
+
+    /// Active runs (`Queued` / `Running`) for dashboard sync, newest first.
+    async fn list_active_materialization_runs(
+        &self,
+        limit: u64,
+    ) -> Result<Vec<ControlFactorMaterializationRunInfo>, StorageError>;
+
+    /// Paginated materialization run listing for the replay index page.
+    async fn page_materialization_runs(
+        &self,
+        query: &ReplayPageQuery,
+    ) -> Result<Paginated<ControlFactorMaterializationRunInfo>, StorageError>;
 
     async fn try_acquire_materialization_run(
         &self,

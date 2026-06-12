@@ -7,8 +7,8 @@
 use actix_web::{http::Method, web};
 use oxide_arb_models::{
     domain::{
-        ControlFactorMaterializationRunView, ControlFactorStageReportView, ReplayCreateRequest,
-        ReplayEnqueueView,
+        ControlFactorMaterializationRunView, ControlFactorStageReportView, Paginated,
+        ReplayCreateRequest, ReplayEnqueueView, ReplayPageQuery,
     },
     enums::{
         operation_log::OperationCategory,
@@ -35,6 +35,12 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
             "/replay",
             Rule::ActingRoleGoverned(ResourceType::Replay, Operation::Create),
             enqueue,
+        ),
+        spec(
+            Method::GET,
+            "/replay",
+            Rule::ResourceOp(ResourceType::Replay, Operation::Read),
+            list,
         ),
         spec(
             Method::GET,
@@ -70,6 +76,25 @@ pub async fn enqueue(
     Ok(WebResponse::ok(ReplayEnqueueView {
         created: result.created,
         run: result.run.into(),
+    }))
+}
+
+/// `GET /api/replay` — paginated materialization / replay run index.
+pub async fn list(
+    state: web::Data<AppState>,
+    query: web::Query<ReplayPageQuery>,
+) -> Result<WebResponse<Paginated<ControlFactorMaterializationRunView>>, WebError> {
+    let query = query.into_inner();
+    let page = state
+        .control_factors
+        .page_materialization_runs(&query)
+        .await?;
+    Ok(WebResponse::ok(Paginated {
+        items: page.items.into_iter().map(Into::into).collect(),
+        total: page.total,
+        page: page.page,
+        size: page.size,
+        has_next: page.has_next,
     }))
 }
 

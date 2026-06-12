@@ -48,10 +48,43 @@ async fn setup_clickhouse() -> (
         .expect("ClickHouse container");
     let port = container.get_host_port_ipv4(8123).await.expect("port");
     let config = test_ch_config(port);
-    let pool = ClickHousePool::connect(&config).expect("connect");
+    let pool = ClickHousePool::connect(&config).await.expect("connect");
     pool.ensure_schema().await.expect("schema");
     let client = pool.client().clone();
     (pool, client, port, container)
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn clickhouse_database_bootstrap_creates_missing_database() {
+    let container = testcontainers::GenericImage::new("clickhouse/clickhouse-server", "24")
+        .with_exposed_port(8123.into())
+        .with_wait_for(WaitFor::http(
+            HttpWaitStrategy::new("/ping")
+                .with_port(8123.into())
+                .with_expected_status_code(200u16),
+        ))
+        .with_startup_timeout(Duration::from_secs(120))
+        .start()
+        .await
+        .expect("ClickHouse container");
+    let port = container.get_host_port_ipv4(8123).await.expect("port");
+    let config = ClickHouseConfig {
+        database: "oxide_arb_bootstrap_it".into(),
+        ..test_ch_config(port)
+    };
+
+    let pool = ClickHousePool::connect(&config).await.expect("connect");
+    pool.ensure_schema().await.expect("schema");
+
+    let count: u64 = pool
+        .client()
+        .query("SELECT count() FROM system.databases WHERE name = ?")
+        .bind("oxide_arb_bootstrap_it")
+        .fetch_one()
+        .await
+        .expect("database should exist");
+    assert_eq!(count, 1);
 }
 
 #[tokio::test]

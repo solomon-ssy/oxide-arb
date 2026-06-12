@@ -6,15 +6,18 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::{
-    domain::control_factor::{
-        AcquireMaterializationRunOutcome, AuditActor, AuditedOutcome,
-        CancelMaterializationRunOutcome, ControlFactorAuditEventInfo,
-        ControlFactorMaterializationRunInfo, ControlFactorPublicationInfo,
-        ControlFactorStageReportInfo, ControlFactorValueInfo, EnqueueMaterializationRunOptions,
-        EnqueueMaterializationRunOutcome, ExpireFactorsOutcome, MaterializationRunStatusPatch,
-        NewControlFactorAuditEvent, NewControlFactorMaterializationRun,
-        NewControlFactorPublication, NewControlFactorStageReport, NewControlFactorValue,
-        PublishPublicationOutcome, RunTransitionOutcome,
+    domain::{
+        Paginated, ReplayPageQuery,
+        control_factor::{
+            AcquireMaterializationRunOutcome, AuditActor, AuditedOutcome,
+            CancelMaterializationRunOutcome, ControlFactorAuditEventInfo,
+            ControlFactorMaterializationRunInfo, ControlFactorPublicationInfo,
+            ControlFactorStageReportInfo, ControlFactorValueInfo, EnqueueMaterializationRunOptions,
+            EnqueueMaterializationRunOutcome, ExpireFactorsOutcome, MaterializationRunStatusPatch,
+            NewControlFactorAuditEvent, NewControlFactorMaterializationRun,
+            NewControlFactorPublication, NewControlFactorStageReport, NewControlFactorValue,
+            PublishPublicationOutcome, RunTransitionOutcome,
+        },
     },
     enums::control_factor::{
         ControlFactorType, FactorStatus, MaterializationRunStatus, MaterializationStageName,
@@ -80,6 +83,24 @@ impl ControlFactorRepository for MockGovernanceControlFactorRepository {
         _limit: u64,
     ) -> Result<Vec<MaterializationRunId>, StorageError> {
         Ok(Vec::new())
+    }
+
+    async fn list_active_materialization_runs(
+        &self,
+        _limit: u64,
+    ) -> Result<Vec<ControlFactorMaterializationRunInfo>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn page_materialization_runs(
+        &self,
+        query: &ReplayPageQuery,
+    ) -> Result<Paginated<ControlFactorMaterializationRunInfo>, StorageError> {
+        Ok(Paginated::from_request(
+            Vec::new(),
+            0,
+            &query.page.normalized(),
+        ))
     }
 
     async fn try_acquire_materialization_run(

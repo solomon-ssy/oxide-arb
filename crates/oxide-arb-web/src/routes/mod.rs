@@ -2,9 +2,9 @@
 //!
 //! Versioning is header-driven (see [`version::ApiV1Guard`]): every endpoint
 //! lives under the unversioned path `/api/...` and is selected for `v1` by the
-//! `Accept-Api-Version: v1` header. Liveness/readiness probes sit outside the
-//! versioned scope so orchestrators can reach them without negotiating a
-//! version.
+//! `Accept-Api-Version: v1` header. Liveness/readiness probes and the WebSocket
+//! upgrade (`/api/ws`) sit outside the versioned scope — probes for
+//! orchestrators, WS because browsers cannot set handshake headers.
 //!
 //! # Single-source authorization manifest
 //!
@@ -141,14 +141,17 @@ pub fn configure(cfg: &mut ServiceConfig) {
         .route("/metrics", web::get().to(metrics::metrics))
         .service(
             web::scope(API_PREFIX)
-                .guard(ApiV1Guard)
-                .route("/auth/login", web::post().to(auth::login))
-                .route("/auth/refresh", web::post().to(auth::refresh))
-                // WebSocket upgrade authenticates via query token before upgrade
-                // (browsers cannot set handshake headers), so it sits outside the
-                // Bearer-header authn scope and self-authenticates. Wired through
-                // `routes::ws` so every route is registered under `routes/`.
+                // WebSocket upgrade authenticates via query token before upgrade.
+                // It deliberately sits outside `ApiV1Guard` (browsers cannot set
+                // `Accept-Api-Version` on the handshake) and outside Bearer `authn`
+                // (self-authenticates in the handler).
                 .configure(ws::configure)
-                .service(protected),
+                .service(
+                    web::scope("")
+                        .guard(ApiV1Guard)
+                        .route("/auth/login", web::post().to(auth::login))
+                        .route("/auth/refresh", web::post().to(auth::refresh))
+                        .service(protected),
+                ),
         );
 }

@@ -15,18 +15,22 @@ use oxide_arb_core::{
 };
 use oxide_arb_error::{OxideError, control::SnapshotBuildError, storage::StorageError};
 use oxide_arb_models::{
-    domain::control_factor::{
-        AcquireMaterializationRunOutcome, AuditActor, AuditedOutcome, BucketRiskDimensions,
-        BucketRiskPayload, CancelMaterializationRunOutcome, ConfidenceInterval,
-        ControlFactorAuditEventInfo, ControlFactorMaterializationRunInfo, ControlFactorPublication,
-        ControlFactorPublicationInfo, ControlFactorStageReportInfo, ControlFactorValue,
-        ControlFactorValueInfo, DataCoverageReport, EnqueueMaterializationRunOptions,
-        EnqueueMaterializationRunOutcome, ExpireFactorsOutcome, FactorDimensions, FactorEvidence,
-        FactorPayload, LIVE_SNAPSHOT_SCHEMA_VERSION, MaterializationRunStatusPatch,
-        NewControlFactorAuditEvent, NewControlFactorMaterializationRun,
-        NewControlFactorPublication, NewControlFactorStageReport, NewControlFactorValue,
-        PointInTimeInputManifest, PublishPublicationOutcome, RunTransitionOutcome,
-        TailRiskEvidence,
+    domain::{
+        Paginated, ReplayPageQuery,
+        control_factor::{
+            AcquireMaterializationRunOutcome, AuditActor, AuditedOutcome, BucketRiskDimensions,
+            BucketRiskPayload, CancelMaterializationRunOutcome, ConfidenceInterval,
+            ControlFactorAuditEventInfo, ControlFactorMaterializationRunInfo,
+            ControlFactorPublication, ControlFactorPublicationInfo, ControlFactorStageReportInfo,
+            ControlFactorValue, ControlFactorValueInfo, DataCoverageReport,
+            EnqueueMaterializationRunOptions, EnqueueMaterializationRunOutcome,
+            ExpireFactorsOutcome, FactorDimensions, FactorEvidence, FactorPayload,
+            LIVE_SNAPSHOT_SCHEMA_VERSION, MaterializationRunStatusPatch,
+            NewControlFactorAuditEvent, NewControlFactorMaterializationRun,
+            NewControlFactorPublication, NewControlFactorStageReport, NewControlFactorValue,
+            PointInTimeInputManifest, PublishPublicationOutcome, RunTransitionOutcome,
+            TailRiskEvidence,
+        },
     },
     enums::{
         calibration::{DurationBucket, PriceZone},
@@ -94,6 +98,24 @@ impl ControlFactorRepository for MockRefresherRepo {
         _limit: u64,
     ) -> Result<Vec<MaterializationRunId>, StorageError> {
         Ok(Vec::new())
+    }
+
+    async fn list_active_materialization_runs(
+        &self,
+        _limit: u64,
+    ) -> Result<Vec<ControlFactorMaterializationRunInfo>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn page_materialization_runs(
+        &self,
+        query: &ReplayPageQuery,
+    ) -> Result<Paginated<ControlFactorMaterializationRunInfo>, StorageError> {
+        Ok(Paginated::from_request(
+            Vec::new(),
+            0,
+            &query.page.normalized(),
+        ))
     }
 
     async fn latest_run_for_schedule(

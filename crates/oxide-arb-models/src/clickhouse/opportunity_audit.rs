@@ -692,6 +692,7 @@ mod tests {
             market_id: trade.market_id.clone(),
             token_id: trade.token_id.clone(),
             side: Side::Buy,
+            execution_mode: trade.execution_mode,
             shares: Shares::new(dec!(80)),
             avg_entry_price: Price::new(dec!(0.93)),
             total_cost_usd: Usd::new(dec!(74.4)),

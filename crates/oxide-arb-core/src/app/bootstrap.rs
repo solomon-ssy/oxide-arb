@@ -14,7 +14,7 @@ pub async fn run(deploy: Arc<DeployConfig>) -> OxideResult<()> {
     let ctx = AppContext::build(deploy, shutdown.clone()).await?;
     // Effective mode after restoring the persisted operational state.
     let mode = ctx.execution_mode.current();
-    periodic_services::ensure_live_metrics_ready(mode, ctx.risk.metrics_refresh.as_deref()).await?;
+    periodic_services::ensure_live_metrics_ready(mode, &ctx.risk.metrics_refresh).await?;
     ctx.queue_runtime_tasks();
     ctx.queue_market_settlement_task();
     ctx.queue_risk_decision_audit_drain(Arc::new(PgRiskAuditRepository::new(

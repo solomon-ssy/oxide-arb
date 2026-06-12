@@ -1,6 +1,9 @@
 use oxide_arb_api::clob::ClobClient;
 use oxide_arb_error::{OxideError, OxideResult};
-use oxide_arb_models::types::{MarketId, Usd};
+use oxide_arb_models::{
+    enums::common::ExecutionMode,
+    types::{MarketId, Usd},
+};
 use oxide_arb_repository::{postgres::PgPositionRepository, traits::PositionRepository};
 use oxide_arb_risk::traits::BalanceQuerier;
 use std::sync::Arc;
@@ -36,9 +39,11 @@ impl BalanceQuerier for CoreBalanceQuerier {
     }
 
     async fn query_positions(&self) -> OxideResult<Vec<(MarketId, Usd)>> {
+        // External-balance reconciliation only makes sense against real
+        // funds, so this querier is exclusively a Live-mode surface.
         let positions = self
             .position_repo
-            .find_open()
+            .find_open(ExecutionMode::Live)
             .await
             .map_err(OxideError::from)?;
 

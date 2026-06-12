@@ -1,6 +1,7 @@
 //! Generic pagination envelope shared by the repository layer and the web API.
 
 use serde::{Deserialize, Serialize};
+use serde_with::{DisplayFromStr, PickFirst, serde_as};
 
 /// Reusable pagination request parameters embedded by every list query DTO.
 ///
@@ -12,12 +13,21 @@ use serde::{Deserialize, Serialize};
 /// result set. List DTOs compose this with `#[serde(flatten)]` so the
 /// query string stays flat (`?page=&size=`), which the web `Query` extractor
 /// consumes directly.
+///
+/// `PickFirst<(_, DisplayFromStr)>`: `#[serde(flatten)]` buffers all fields
+/// through serde's internal `Content` tree, which preserves query-string values
+/// as strings and performs no string→number coercion, so a plain `u64` field
+/// would reject `?page=1`. The adapter accepts a native number first (JSON) and
+/// falls back to `FromStr` (query string), while serializing as a number.
+#[serde_as]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PageRequest {
     /// 1-based page index (defaults to [`PageRequest::DEFAULT_PAGE`]).
+    #[serde_as(as = "PickFirst<(_, DisplayFromStr)>")]
     #[serde(default = "PageRequest::default_page")]
     pub page: u64,
     /// Requested page size (defaults to [`PageRequest::DEFAULT_SIZE`]).
+    #[serde_as(as = "PickFirst<(_, DisplayFromStr)>")]
     #[serde(default = "PageRequest::default_size")]
     pub size: u64,
 }
@@ -143,6 +153,38 @@ impl<T> Paginated<T> {
 #[cfg(test)]
 mod tests {
     use super::{PageRequest, Paginated};
+
+    #[test]
+    fn deserializes_string_query_params() {
+        let request: PageRequest =
+            serde_json::from_value(serde_json::json!({ "page": "1", "size": "10" }))
+                .expect("string page/size from query string");
+        assert_eq!(request.page, 1);
+        assert_eq!(request.size, 10);
+    }
+
+    #[test]
+    fn deserializes_numeric_json_params() {
+        let request: PageRequest =
+            serde_json::from_value(serde_json::json!({ "page": 2, "size": 50 }))
+                .expect("numeric page/size from JSON");
+        assert_eq!(request.page, 2);
+        assert_eq!(request.size, 50);
+    }
+
+    #[test]
+    fn rejects_non_numeric_and_negative_params() {
+        assert!(
+            serde_json::from_value::<PageRequest>(serde_json::json!({ "page": "abc" })).is_err()
+        );
+        assert!(serde_json::from_value::<PageRequest>(serde_json::json!({ "page": -1 })).is_err());
+    }
+
+    #[test]
+    fn serializes_as_native_numbers() {
+        let json = serde_json::to_value(PageRequest::new(2, 50)).expect("serialize");
+        assert_eq!(json, serde_json::json!({ "page": 2, "size": 50 }));
+    }
 
     #[test]
     fn default_is_first_page_default_size() {

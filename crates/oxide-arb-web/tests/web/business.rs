@@ -5,6 +5,13 @@
 //! matrix (read for every role; `Replay:Create` only for operator-class roles).
 
 use actix_web::http::StatusCode;
+use chrono::{NaiveDate, Utc};
+use oxide_arb_models::{
+    domain::{DailyReport, ReportRiskSummary, ReportTradeStats, SettledPnlStats},
+    enums::report::ReportSchemaVersion,
+    types::Usd,
+};
+use rust_decimal::Decimal;
 use serde_json::json;
 use uuid::Uuid;
 
@@ -42,11 +49,13 @@ async fn business_read_routes_are_registered_and_authorized() {
         "GET /analytics/edge-distribution"
     );
 
-    // No report seeded yet — route registered + handler reached → 404.
+    // No report seeded yet — analytics daily route registered + handler reached → 404.
     assert_eq!(
-        client::get(&env, "/api/pnl/daily", &admin).await.status,
+        client::get(&env, "/api/analytics/daily", &admin)
+            .await
+            .status,
         StatusCode::NOT_FOUND,
-        "GET /pnl/daily with no report"
+        "GET /analytics/daily with no report"
     );
 
     // Unknown replay run → 404.
@@ -58,6 +67,133 @@ async fn business_read_routes_are_registered_and_authorized() {
         StatusCode::NOT_FOUND,
         "GET /replay/{{unknown}}"
     );
+}
+
+/// Minimal daily report payload carrying only the values the series projects.
+fn daily_report_payload(date: NaiveDate, pnl: i64) -> serde_json::Value {
+    let pnl = Usd::new(Decimal::from(pnl));
+    let report = DailyReport {
+        date,
+        schema_version: ReportSchemaVersion::V1,
+        generated_at: Utc::now(),
+        period_start: date,
+        period_end: date,
+        settled_pnl: SettledPnlStats {
+            realized_pnl: pnl,
+            total_payout: Usd::ZERO,
+            total_cost: Usd::ZERO,
+            total_fees: Usd::ZERO,
+            settled_position_count: 0,
+            winning_position_count: 0,
+            losing_position_count: 0,
+            unsettled_position_count: 0,
+            failed_accounting_count: 0,
+            largest_single_profit: Usd::ZERO,
+            largest_single_loss: Usd::ZERO,
+        },
+        execution: ReportTradeStats {
+            trade_count: 0,
+            success_count: 0,
+            miss_count: 0,
+            failed_count: 0,
+            total_fill_cost: Usd::ZERO,
+            total_fill_fees: Usd::ZERO,
+            fill_expected_pnl: Usd::ZERO,
+        },
+        risk: ReportRiskSummary {
+            daily_pnl: pnl,
+            daily_loss: Usd::ZERO,
+            weekly_loss: Usd::ZERO,
+            total_exposure: Usd::ZERO,
+            open_position_count: 0,
+        },
+        total_pnl: pnl,
+        total_fees_paid: Usd::ZERO,
+        total_gas_paid: Usd::ZERO,
+        trade_count: 0,
+        success_count: 0,
+        miss_count: 0,
+        largest_single_loss: Usd::ZERO,
+        largest_single_profit: Usd::ZERO,
+    };
+    serde_json::to_value(&report).expect("daily report serializes")
+}
+
+#[actix_web::test]
+#[ignore = "requires Docker"]
+async fn pnl_daily_series_is_ascending_bounded_and_accumulated() {
+    let env = TestEnv::start().await;
+    let admin = client::login(&env, "admin", "admin").await;
+
+    // Empty database → 200 with an empty series, not a 404.
+    let empty = client::get(&env, "/api/pnl/daily-series", &admin).await;
+    assert_eq!(empty.status, StatusCode::OK, "empty series is 200");
+    assert_eq!(
+        empty.json()["data"]["points"]
+            .as_array()
+            .expect("points array")
+            .len(),
+        0,
+        "no reports → empty points"
+    );
+
+    // Seed three daily reports out of order; the series must sort ascending.
+    let day = |d: u32| NaiveDate::from_ymd_opt(2026, 6, d).expect("valid date");
+    for (date, pnl) in [(day(3), -2), (day(1), 10), (day(2), 5)] {
+        env.state
+            .reports
+            .save_daily(date, daily_report_payload(date, pnl))
+            .await
+            .expect("seed daily report");
+    }
+
+    let series = client::get(&env, "/api/pnl/daily-series?days=7", &admin).await;
+    assert_eq!(series.status, StatusCode::OK, "GET /pnl/daily-series");
+    let points = series.json()["data"]["points"]
+        .as_array()
+        .cloned()
+        .expect("points array");
+    assert_eq!(points.len(), 3, "all seeded days included");
+    let dates: Vec<&str> = points
+        .iter()
+        .map(|p| p["date"].as_str().expect("date"))
+        .collect();
+    assert_eq!(
+        dates,
+        vec!["2026-06-01", "2026-06-02", "2026-06-03"],
+        "ascending by date"
+    );
+    let cumulative: Vec<&str> = points
+        .iter()
+        .map(|p| p["total_pnl"].as_str().expect("total_pnl"))
+        .collect();
+    assert_eq!(cumulative, vec!["10", "15", "13"], "running window total");
+    assert_eq!(points[2]["daily_pnl"], "-2", "per-day settled pnl");
+
+    // `days` truncates to the most recent N reports, still ascending.
+    let truncated = client::get(&env, "/api/pnl/daily-series?days=2", &admin).await;
+    let truncated_points = truncated.json()["data"]["points"]
+        .as_array()
+        .cloned()
+        .expect("points array");
+    assert_eq!(truncated_points.len(), 2, "days=2 keeps two newest days");
+    assert_eq!(truncated_points[0]["date"], "2026-06-02");
+    assert_eq!(truncated_points[1]["date"], "2026-06-03");
+
+    // Out-of-range `days` is rejected at the boundary.
+    for invalid in ["0", "91"] {
+        assert_eq!(
+            client::get(
+                &env,
+                &format!("/api/pnl/daily-series?days={invalid}"),
+                &admin
+            )
+            .await
+            .status,
+            StatusCode::BAD_REQUEST,
+            "days={invalid} must be 400"
+        );
+    }
 }
 
 #[actix_web::test]

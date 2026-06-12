@@ -8,6 +8,9 @@
 //! observable on each component — including the simulated-bankroll rebase and
 //! the fail-closed exposure preflight that must leave all state untouched.
 
+#[path = "common/mod.rs"]
+mod common;
+
 use async_trait::async_trait;
 use oxide_arb_algorithm::{
     calibration::{
@@ -186,6 +189,11 @@ fn settlement_chain(deps: SettlementChainDeps<'_>) -> Arc<MarketSettlementServic
         None,
         None,
     ));
+    let metrics_refresh = common::disconnected_metrics_refresh(
+        Arc::clone(&deps.metrics_state),
+        ExecutionMode::Paper,
+        Arc::clone(&deps.metrics),
+    );
     let risk_metrics = Arc::new(CoreRiskMetrics::new(
         deps.metrics_state,
         deps.exposure,
@@ -207,7 +215,7 @@ fn settlement_chain(deps: SettlementChainDeps<'_>) -> Arc<MarketSettlementServic
         metrics: Arc::clone(&deps.metrics),
         alerts: deps.alerts,
         audit_writer: audit_writer(Arc::clone(&deps.metrics)),
-        metrics_refresh: None,
+        metrics_refresh,
         events: CoreEventPublisher::bounded(16).0,
         config: deps.boot.settlement.clone(),
     }))

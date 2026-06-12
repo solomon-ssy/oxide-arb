@@ -11,8 +11,8 @@ use actix_web::{http::Method, web};
 use oxide_arb_models::{
     config::DeployConfig,
     domain::{
-        CoreEvent, HaltRequest, HealthReport, ModeTransitionReport, ResumeRequest,
-        SwitchModeRequest, SystemStatus,
+        HaltRequest, HealthReport, ModeTransitionReport, ResumeRequest, SwitchModeRequest,
+        SystemStatus,
     },
     enums::{
         operation_log::OperationCategory,
@@ -234,7 +234,6 @@ pub async fn halt(
     op_ctx.set_action(OperationCategory::System, "system.halt");
     op_ctx.set_detail(serde_json::json!({ "reason": body.reason }));
     state.control.halt(body.reason).await;
-    publish_status(&state).await;
     Ok(WebResponse::ok(()))
 }
 
@@ -247,7 +246,6 @@ pub async fn resume(
     let body = body.into_inner();
     op_ctx.set_action(OperationCategory::System, "system.resume");
     state.control.resume(&body.operator_ack).await?;
-    publish_status(&state).await;
     Ok(WebResponse::ok(()))
 }
 
@@ -272,15 +270,7 @@ pub async fn switch_mode(
         .control
         .switch_execution_mode(body.mode, &actor.claims.sub)
         .await?;
-    publish_status(&state).await;
     Ok(WebResponse::ok(report))
-}
-
-/// Publish a fresh `SystemStatusChanged` event after a control action so live
-/// WebSocket clients observe the new state immediately.
-async fn publish_status(state: &AppState) {
-    let status = state.control.system_status().await;
-    state.events.publish(CoreEvent::SystemStatusChanged(status));
 }
 
 #[cfg(test)]

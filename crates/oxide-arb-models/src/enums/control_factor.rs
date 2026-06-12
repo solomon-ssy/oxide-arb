@@ -1,6 +1,7 @@
 //! Control-factor lifecycle enums.
 
 use serde::{Deserialize, Serialize};
+use serde_with::{DeserializeFromStr, SerializeDisplay};
 
 active_string_enum! {
     /// Typed control-factor families supported by Phase 5.
@@ -268,9 +269,11 @@ active_string_enum! {
 
 /// Stable materialization error code used by UI, alerts, and retry policy.
 ///
-/// This enum intentionally implements custom serde so JSON uses the stable
-/// dotted code strings rather than Rust variant names.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// JSON uses the stable dotted code strings (e.g. `ch.book_snapshot_gap`)
+/// rather than Rust variant names: `SerializeDisplay` / `DeserializeFromStr`
+/// route serde through [`Display`](std::fmt::Display) / [`FromStr`](std::str::FromStr),
+/// which are defined over [`Self::as_str`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, SerializeDisplay, DeserializeFromStr)]
 pub enum MaterializationErrorCode {
     InputMarketMappingMissing,
     InputPitConfigMissing,
@@ -383,27 +386,6 @@ impl std::str::FromStr for MaterializationErrorCode {
             "snapshot.schema_mismatch" => Ok(Self::SnapshotSchemaMismatch),
             _ => Err(format!("unknown materialization error code: {value}")),
         }
-    }
-}
-
-impl Serialize for MaterializationErrorCode {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_str(self.as_str())
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for MaterializationErrorCode {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        use std::str::FromStr;
-
-        let value = String::deserialize(deserializer)?;
-        Self::from_str(&value).map_err(serde::de::Error::custom)
     }
 }
 

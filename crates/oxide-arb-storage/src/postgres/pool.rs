@@ -37,7 +37,7 @@ impl PostgresPool {
             .idle_timeout(Duration::from_secs(config.idle_timeout_secs))
             .acquire_timeout(Duration::from_secs(config.acquire_timeout_secs))
             .max_lifetime(Duration::from_secs(config.max_lifetime_secs))
-            .sqlx_logging(cfg!(debug_assertions))
+            .sqlx_logging(false)
             .test_before_acquire(true)
             .set_schema_search_path(&config.schema);
 

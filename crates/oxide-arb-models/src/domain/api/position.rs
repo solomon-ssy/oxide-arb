@@ -6,7 +6,7 @@
 
 use crate::{
     domain::{PositionInfo, pagination::PageRequest},
-    enums::common::{PositionStatus, RedeemStatus, Side},
+    enums::common::{ExecutionMode, PositionStatus, RedeemStatus, Side},
     types::{MarketId, PositionId, Price, Shares, TokenId, TradeId, Usd},
 };
 use chrono::{DateTime, Utc};
@@ -43,6 +43,7 @@ pub struct PositionView {
     pub market_id: MarketId,
     pub token_id: TokenId,
     pub side: Side,
+    pub execution_mode: ExecutionMode,
     pub shares: Shares,
     pub avg_entry_price: Price,
     pub total_cost_usd: Usd,
@@ -67,6 +68,7 @@ impl From<PositionInfo> for PositionView {
             market_id: p.market_id,
             token_id: p.token_id,
             side: p.side,
+            execution_mode: p.execution_mode,
             shares: p.shares,
             avg_entry_price: p.avg_entry_price,
             total_cost_usd: p.total_cost_usd,

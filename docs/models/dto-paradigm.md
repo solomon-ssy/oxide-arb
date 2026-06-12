@@ -24,7 +24,7 @@ routes/<x>.rs (web)     handler：校验 → 翻译 → 持久化 → 投影
 | serde 方向 | `Deserialize` | 双向（read 模型） | `Serialize` only |
 | 校验 | `#[derive(Validate)]` + `#[validate(..)]` | 无 | 无 |
 | ORM 耦合 | 无 | `DeriveIntoActiveModel` / `DerivePartialModel` / `FromQueryResult` | 无 |
-| null 语义 | serde 三态（`double_option` → `Option<Option<T>>`） | 类型化 `Patch<T>` / `NullablePatch<T>` | 不适用 |
+| null 语义 | serde 三态（`serde_with::rust::double_option` → `Option<Option<T>>`） | 类型化 `Patch<T>` / `NullablePatch<T>` | 不适用 |
 | 敏感字段 | 携带明文凭证（如 `password`） | 携带哈希列（如 `password_hash`） | **必须剥离**（如不含 `password_hash`） |
 
 > **入站契约统一收口**：一个资源对外暴露的**全部** HTTP 契约（`*Request` 入站 body、`*PageQuery` / `*WindowQuery` 入站 query string、`*View` / `*Response` 出站投影）都集中在 `domain/api/<resource>.rs`。`domain/<ctx>/` 只保留与表一一对应的纯持久化 DTO（`*Info` / `New*` / `*Patch`）。`*Query` 虽被 repository 的 `page()` 读方法消费，但它本质是"外部不可信的查询入参契约"，因此归 `domain/api/`，与其它入站契约同处一地，便于发现与后续 OpenAPI 生成。
@@ -80,7 +80,7 @@ API 契约类型（`*Request` / `*View` / `*Response`）**留在 `oxide-arb-mode
 ### 入站 `*Request`
 
 - `#[derive(Debug, Deserialize, Validate)]`，所有外部约束以 `#[validate(length / email / range ...)]` 表达。
-- 部分更新字段用 `#[serde(default, deserialize_with = "double_option")]` 表达 null 三态，对应 `Option<Option<T>>`。
+- 部分更新字段用 `#[serde(default, with = "double_option")]`（`serde_with::rust::double_option`）表达 null 三态，对应 `Option<Option<T>>`。
 - 可省略字段用 `Option<T>` + `#[serde(default)]`；默认值（如 `status` 缺省为 `Active`）在 handler 内补齐，不在 `Request` 内写死。
 - 与持久化 DTO 的差异通过 `From` / `TryFrom` 翻译：`From<UpdateXRequest> for XPatch` 用 `Patch::from_option` / `NullablePatch::from_nested_option` 桥接。
 
@@ -93,7 +93,11 @@ API 契约类型（`*Request` / `*View` / `*Response`）**留在 `oxide-arb-mode
 
 ### serde 辅助
 
-- 三态 null 统一用 `domain/api/serde.rs::double_option`，配 `#[serde(default, deserialize_with = "double_option")]`，直接对接 `NullablePatch::from_nested_option`。
+统一使用 `serde_with` 的官方适配器，**禁止手写等价 deserializer**：
+
+- 三态 null：`serde_with::rust::double_option`，配 `#[serde(default, with = "double_option")]`，直接对接 `NullablePatch::from_nested_option`。
+- query-string 数字：`#[serde(flatten)]` 会把字段缓冲进 serde 的 `Content` 树，丢失 query string 的 string→number 自描述强制转换；被 flatten 的数字字段（如 `PageRequest::page/size`）用 `#[serde_as(as = "PickFirst<(_, DisplayFromStr)>")]`（JSON 数字优先，query string 回退 `FromStr`，序列化恒为数字）。未经 flatten 的 query 字段由 `serde_urlencoded` 原生解析，**不要**画蛇添足地标注。
+- 字符串语义枚举（wire 名与变体名不同，如 `MaterializationErrorCode` 的点分代码、`WsChannel` 的通道名）：实现 `Display` + `FromStr` 后派生 `SerializeDisplay` / `DeserializeFromStr`，不再手写 `impl Serialize / Deserialize`。
 
 ## 转换方向（`From` / `TryFrom`）
 
