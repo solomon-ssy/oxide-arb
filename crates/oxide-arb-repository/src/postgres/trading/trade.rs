@@ -408,6 +408,9 @@ fn page_condition(query: &TradePageQuery) -> Condition {
     if let Some(market_id) = &query.market_id {
         condition = condition.add(Column::MarketId.eq(market_id.as_str()));
     }
+    if let Some(side) = query.side {
+        condition = condition.add(Column::Side.eq(side));
+    }
     if let Some(state) = query.state {
         condition = condition.add(Column::State.eq(state));
     }

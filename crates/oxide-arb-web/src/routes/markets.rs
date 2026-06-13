@@ -6,13 +6,17 @@
 
 use actix_web::{http::Method, web};
 use oxide_arb_models::{
-    domain::{MarketBookSideView, MarketBookView, MarketPageQuery, MarketView, Paginated},
+    domain::{
+        MarketBookSideView, MarketBookSummaryView, MarketBookView, MarketDataPort, MarketInfo,
+        MarketPageQuery, MarketView, Paginated,
+    },
     enums::{
         operation_log::OperationCategory,
         rbac::{Operation, ResourceType},
     },
-    types::MarketId,
+    types::{MarketId, TokenId},
 };
+use std::collections::HashSet;
 
 use crate::{
     audit::OperationCtx,
@@ -59,22 +63,40 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
     ]
 }
 
-/// `GET /api/markets` — paginated, filtered market list (newest first).
+/// Project a persisted market row through the runtime overlay: live book
+/// digest (published snapshots, lock-free) and CLOB WS subscription state.
+/// `subscribed_union` must contain the union-live tokens for the whole batch.
+fn project_market(
+    market_data: &dyn MarketDataPort,
+    subscribed_union: &HashSet<TokenId>,
+    market: MarketInfo,
+) -> MarketView {
+    let (yes, no) = market_data.book(&market.yes_token_id, &market.no_token_id);
+    let book = MarketBookSummaryView::from_snapshots(yes.as_deref(), no.as_deref());
+    let subscribed = subscribed_union.contains(&market.yes_token_id)
+        && subscribed_union.contains(&market.no_token_id);
+    MarketView::project(market, subscribed, book)
+}
+
+/// `GET /api/markets` — paginated, filtered market list (newest first), each
+/// row enriched with the live book digest and WS subscription state.
 pub async fn list(
     state: web::Data<AppState>,
     query: web::Query<MarketPageQuery>,
 ) -> Result<WebResponse<Paginated<MarketView>>, WebError> {
     let page = state.markets.page(query.into_inner().normalized()).await?;
-    Ok(WebResponse::ok(Paginated {
-        items: page.items.into_iter().map(MarketView::from).collect(),
-        total: page.total,
-        page: page.page,
-        size: page.size,
-        has_next: page.has_next,
-    }))
+    let tokens: Vec<_> = page
+        .items
+        .iter()
+        .flat_map(|m| [m.yes_token_id.clone(), m.no_token_id.clone()])
+        .collect();
+    let subscribed_union = state.market_data.subscribed_tokens(&tokens);
+    Ok(WebResponse::ok(page.map(|market| {
+        project_market(state.market_data.as_ref(), &subscribed_union, market)
+    })))
 }
 
-/// `GET /api/markets/{market_id}` — single market detail.
+/// `GET /api/markets/{market_id}` — single market detail with runtime overlay.
 pub async fn detail(
     state: web::Data<AppState>,
     market_id: web::Path<MarketId>,
@@ -85,7 +107,15 @@ pub async fn detail(
         .find_by_id(&market_id)
         .await?
         .ok_or_else(|| WebError::NotFound(format!("market not found: {market_id}")))?;
-    Ok(WebResponse::ok(MarketView::from((*market).clone())))
+    let market = (*market).clone();
+    let subscribed_union = state
+        .market_data
+        .subscribed_tokens(&[market.yes_token_id.clone(), market.no_token_id.clone()]);
+    Ok(WebResponse::ok(project_market(
+        state.market_data.as_ref(),
+        &subscribed_union,
+        market,
+    )))
 }
 
 /// `GET /api/markets/{market_id}/book` — published YES/NO order books.

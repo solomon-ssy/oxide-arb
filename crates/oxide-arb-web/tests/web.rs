@@ -32,6 +32,8 @@ mod governance;
 mod metrics;
 #[path = "web/operation_log.rs"]
 mod operation_log;
+#[path = "web/opportunities.rs"]
+mod opportunities;
 #[path = "web/readiness.rs"]
 mod readiness;
 #[path = "web/replay_governance.rs"]

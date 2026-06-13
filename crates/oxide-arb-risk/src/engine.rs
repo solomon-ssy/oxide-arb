@@ -248,7 +248,13 @@ where
             trace,
         };
 
-        self.enqueue_pre_trade_audit(allowed, &decision.trace, opp.opportunity_id.clone(), mode);
+        self.enqueue_pre_trade_audit(
+            allowed,
+            &decision.trace,
+            opp.opportunity_id.clone(),
+            opp.market_id.clone(),
+            mode,
+        );
         decision
     }
 
@@ -1323,6 +1329,7 @@ where
         allowed: bool,
         trace: &RiskDecisionTrace,
         opportunity_id: OpportunityId,
+        market_id: MarketId,
         mode: ReportMode,
     ) {
         let Some(sink) = &self.audit_sink else {
@@ -1332,6 +1339,7 @@ where
         let audit = if allowed && mode == ReportMode::ShortCircuit {
             RiskAuditEvent::TradeAllowedSummary {
                 opportunity_id,
+                market_id,
                 state_version: trace.state_version,
                 check_count: trace.check_results.len(),
                 total_elapsed_us: trace.total_elapsed_us,
@@ -1341,11 +1349,13 @@ where
             RiskAuditEvent::TradeAllowed {
                 trace: trace.clone(),
                 opportunity_id,
+                market_id,
             }
         } else {
             RiskAuditEvent::TradeDenied {
                 trace: trace.clone(),
                 opportunity_id,
+                market_id,
             }
         };
 

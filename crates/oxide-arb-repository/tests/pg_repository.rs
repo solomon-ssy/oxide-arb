@@ -30,8 +30,8 @@ use oxide_arb_models::{
         NewControlFactorStageReport, NewEmergencySnapshot, NewPosition, NewPotentialLoss,
         NewReconciliationReport, NewRiskAuditEvent, NewRuntimeConfigActivation,
         NewRuntimeConfigVersion, NewTrade, ResolvePotentialLoss, RunTransitionOutcome,
-        SettlePositionParams, ShadowDecisionAggregate, TradeObservation, UpsertBlacklistEntry,
-        UpsertCalibration, UpsertRiskEngineState,
+        SettlePositionParams, ShadowDecisionAggregate, TradeObservation, TradePageQuery,
+        UpsertBlacklistEntry, UpsertCalibration, UpsertRiskEngineState,
     },
     enums::{
         calibration::{DurationBucket, PriceZone},
@@ -242,6 +242,29 @@ async fn market_insert_then_update() {
     assert_eq!(ids.len(), 2, "each market_id should appear once");
 }
 
+/// Insert payload for one BUY trade on the seeded `0xtrade-mkt` market.
+fn sample_buy_trade(execution_id: &ExecutionId) -> NewTrade {
+    NewTrade {
+        trade_id: TradeId::from_v7(),
+        execution_id: execution_id.clone(),
+        reservation_id: ReservationId::from_v7(),
+        opportunity_id: OpportunityId::from_v7(),
+        market_id: MarketId::new("0xtrade-mkt"),
+        event_id: EventId::new("evt-trade"),
+        token_id: TokenId::new("999001"),
+        side: Side::Buy,
+        shares: Shares::from(Decimal::new(10, 0)),
+        price: Price::from(Decimal::new(95, 2)),
+        cost_usd: Usd::from(Decimal::new(95, 1)),
+        fee_usd: Usd::ONE,
+        detected_edge_bps: Some(Bps::from(Decimal::from(200))),
+        detected_profit_usd: Some(Usd::from(Decimal::new(5, 0))),
+        scored_snapshot: serde_json::json!({}),
+        category: MarketCategory::Sports,
+        execution_mode: ExecutionMode::DryRun,
+    }
+}
+
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn trade_repository_crud() {
@@ -252,25 +275,7 @@ async fn trade_repository_crud() {
     let execution_id = ExecutionId::from_v7();
 
     let created = trade_repo
-        .create(NewTrade {
-            trade_id: TradeId::from_v7(),
-            execution_id: execution_id.clone(),
-            reservation_id: ReservationId::from_v7(),
-            opportunity_id: OpportunityId::from_v7(),
-            market_id: MarketId::new("0xtrade-mkt"),
-            event_id: EventId::new("evt-trade"),
-            token_id: TokenId::new("999001"),
-            side: Side::Buy,
-            shares: Shares::from(Decimal::new(10, 0)),
-            price: Price::from(Decimal::new(95, 2)),
-            cost_usd: Usd::from(Decimal::new(95, 1)),
-            fee_usd: Usd::ONE,
-            detected_edge_bps: Some(Bps::from(Decimal::from(200))),
-            detected_profit_usd: Some(Usd::from(Decimal::new(5, 0))),
-            scored_snapshot: serde_json::json!({}),
-            category: MarketCategory::Sports,
-            execution_mode: ExecutionMode::DryRun,
-        })
+        .create(sample_buy_trade(&execution_id))
         .await
         .expect("create trade");
     assert_eq!(created.state, TradeState::Intent);
@@ -349,6 +354,36 @@ async fn trade_repository_crud() {
             .unwrap_or(0)
             >= 1
     );
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn trade_page_filters_by_side() {
+    let (pool, _container) = setup_pg().await;
+    seed_market(&pool, "evt-trade", "0xtrade-mkt", MarketCategory::Sports).await;
+    let trade_repo = PgTradeRepository::new(pool.connection().clone());
+    trade_repo
+        .create(sample_buy_trade(&ExecutionId::from_v7()))
+        .await
+        .expect("create trade");
+
+    // The seeded trade is a BUY, so SELL must page empty.
+    let buys = trade_repo
+        .page(TradePageQuery {
+            side: Some(Side::Buy),
+            ..TradePageQuery::default()
+        })
+        .await
+        .expect("page buys");
+    assert_eq!(buys.total, 1, "side=BUY matches the seeded trade");
+    let sells = trade_repo
+        .page(TradePageQuery {
+            side: Some(Side::Sell),
+            ..TradePageQuery::default()
+        })
+        .await
+        .expect("page sells");
+    assert_eq!(sells.total, 0, "side=SELL matches nothing");
 }
 
 #[tokio::test]
@@ -1295,8 +1330,10 @@ async fn risk_audit_repository_create_batch() {
 
     repo.create_batch(vec![NewRiskAuditEvent {
         event_type: RiskAuditEventType::EngineHalted,
+        market_id: None,
         opportunity_id: None,
         trade_id: None,
+        rejection_reason: Some("test halt".to_owned()),
         payload: serde_json::json!({"reason": "test"}),
     }])
     .await

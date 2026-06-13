@@ -10,7 +10,7 @@
 use crate::{
     domain::{RiskAuditEventInfo, RiskEngineState},
     enums::risk::{BreakerStateName, CircuitBreakerLevel, RiskAuditEventType},
-    types::{OpportunityId, TradeId, Usd},
+    types::{MarketId, OpportunityId, TradeId, Usd},
 };
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::Serialize;
@@ -87,11 +87,15 @@ impl From<RiskEngineState> for RiskEngineStateView {
 ///
 /// Drops the raw database primary key (`id`); the dashboard keys off the
 /// event's domain identifiers (`opportunity_id` / `trade_id`) and timestamp.
+/// `market_id` / `rejection_reason` are the queryable columns lifted at
+/// persist time — rows written before those columns existed surface `null`.
 #[derive(Debug, Clone, Serialize)]
 pub struct RiskAuditEventView {
     pub event_type: RiskAuditEventType,
+    pub market_id: Option<MarketId>,
     pub opportunity_id: Option<OpportunityId>,
     pub trade_id: Option<TradeId>,
+    pub rejection_reason: Option<String>,
     pub payload: serde_json::Value,
     pub created_at: DateTime<Utc>,
 }
@@ -100,8 +104,10 @@ impl From<RiskAuditEventInfo> for RiskAuditEventView {
     fn from(info: RiskAuditEventInfo) -> Self {
         Self {
             event_type: info.event_type,
+            market_id: info.market_id,
             opportunity_id: info.opportunity_id,
             trade_id: info.trade_id,
+            rejection_reason: info.rejection_reason,
             payload: info.payload,
             created_at: info.created_at,
         }
@@ -119,8 +125,10 @@ mod tests {
         let info = RiskAuditEventInfo {
             id: 42,
             event_type: RiskAuditEventType::TradeAllowed,
+            market_id: None,
             opportunity_id: None,
             trade_id: None,
+            rejection_reason: None,
             payload: serde_json::json!({ "decision": "allowed" }),
             created_at: Utc::now(),
         };
@@ -131,5 +139,9 @@ mod tests {
         );
         assert!(json.get("event_type").is_some());
         assert!(json.get("payload").is_some());
+        assert!(
+            json.get("market_id").is_some() && json.get("rejection_reason").is_some(),
+            "lifted decision columns must be part of the wire shape (null for legacy rows)"
+        );
     }
 }

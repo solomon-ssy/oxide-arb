@@ -3,8 +3,8 @@ use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::types::{OpportunityId, TokenId};
 use oxide_arb_models::{
     clickhouse::{
-        BookSnapshotRow, CalibrationSnapshotRow, OpportunityAuditRow, OpportunityDetectionRow,
-        TickEventL2Row, TickEventRow,
+        AuditStageCountRow, BookSnapshotRow, CalibrationSnapshotRow, OpportunityAuditRow,
+        OpportunityDetectionRow, TickEventL2Row, TickEventRow,
     },
     domain::{
         MarketFilter, PageRequest, Paginated, TimeWindow,
@@ -12,6 +12,20 @@ use oxide_arb_models::{
     },
 };
 use serde::Serialize;
+
+/// Aggregated funnel statistics for a time window.
+///
+/// `total_detected` is the scanner baseline from `opportunity_detection`;
+/// `stages` carries per-stage distinct-opportunity counts from
+/// `opportunity_audit` (which records rejection / terminal / settlement
+/// stages only).
+#[derive(Debug, Clone)]
+pub struct AuditFunnelStats {
+    /// Distinct opportunities detected inside the window.
+    pub total_detected: u64,
+    /// Distinct-opportunity count per audit stage (unordered).
+    pub stages: Vec<AuditStageCountRow>,
+}
 
 pub fn evidence_query_result<T, P>(
     repository: &str,
@@ -117,6 +131,14 @@ pub trait EvidenceTimeseriesRepository: Send + Sync {
         window: TimeWindow,
         page: PageRequest,
     ) -> Result<Paginated<OpportunityAuditRow>, StorageError>;
+
+    /// Aggregated funnel statistics: detection baseline + per-stage
+    /// distinct-opportunity counts for the window.
+    async fn audit_funnel_stats(
+        &self,
+        filter: MarketFilter,
+        window: TimeWindow,
+    ) -> Result<AuditFunnelStats, StorageError>;
 
     async fn calibration_snapshots(
         &self,

@@ -5,7 +5,7 @@ use crate::{
     enums::risk::{
         BreakerStateName, CircuitBreakerLevel, ReconciliationStatus, RiskAuditEventType,
     },
-    types::{OpportunityId, TradeId, Usd},
+    types::{MarketId, OpportunityId, TradeId, Usd},
 };
 use chrono::{DateTime, NaiveDate, Utc};
 use rust_decimal::Decimal;
@@ -239,14 +239,16 @@ impl From<&RiskEngineState> for UpsertRiskEngineState {
 pub struct RiskAuditEventInfo {
     pub id: i64,
     pub event_type: RiskAuditEventType,
+    pub market_id: Option<MarketId>,
     pub opportunity_id: Option<OpportunityId>,
     pub trade_id: Option<TradeId>,
+    pub rejection_reason: Option<String>,
     pub payload: serde_json::Value,
     pub created_at: DateTime<Utc>,
 }
 
 info_from_model!(RiskAuditEventInfo, crate::entities::risk_audit_event::Model, {
-    id, event_type, opportunity_id, trade_id, payload, created_at,
+    id, event_type, market_id, opportunity_id, trade_id, rejection_reason, payload, created_at,
 });
 
 /// DB row projection for reconciliation reports.
@@ -295,8 +297,10 @@ info_from_model!(EmergencySnapshotInfo, crate::entities::emergency_snapshot::Mod
 #[sea_orm(active_model = "crate::entities::risk_audit_event::ActiveModel")]
 pub struct NewRiskAuditEvent {
     pub event_type: RiskAuditEventType,
+    pub market_id: Option<MarketId>,
     pub opportunity_id: Option<OpportunityId>,
     pub trade_id: Option<TradeId>,
+    pub rejection_reason: Option<String>,
     pub payload: serde_json::Value,
 }
 

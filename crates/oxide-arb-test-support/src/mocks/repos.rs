@@ -5,8 +5,8 @@ use chrono::{DateTime, Utc};
 use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::{
     clickhouse::{
-        BookSnapshotRow, CalibrationSnapshotRow, OpportunityAuditRow, OpportunityDetectionRow,
-        TickEventL2Row, TickEventRow,
+        AuditStageCountRow, BookSnapshotRow, CalibrationSnapshotRow, OpportunityAuditRow,
+        OpportunityDetectionRow, TickEventL2Row, TickEventRow,
     },
     domain::{
         CalibrationBucketInfo, CalibrationOutcomeInfo, EdgeBucket, MarkRedeemedParams,
@@ -26,8 +26,8 @@ use oxide_arb_models::{
     types::{ExecutionId, MarketId, OpportunityId, PositionId, TokenId, TradeId, Usd},
 };
 use oxide_arb_repository::traits::{
-    CalibrationRepository, EvidenceTimeseriesRepository, PositionRepository, TimeseriesFactWriter,
-    TradeRepository, evidence_query_result,
+    AuditFunnelStats, CalibrationRepository, EvidenceTimeseriesRepository, PositionRepository,
+    TimeseriesFactWriter, TradeRepository, evidence_query_result,
 };
 use rust_decimal::Decimal;
 use std::{
@@ -685,6 +685,7 @@ impl TradeRepository for MockTradeRepository {
             .unwrap()
             .values()
             .filter(|t| query.market_id.as_ref().is_none_or(|m| &t.market_id == m))
+            .filter(|t| query.side.is_none_or(|s| t.side == s))
             .filter(|t| query.state.is_none_or(|s| t.state == s))
             .filter(|t| {
                 query
@@ -1077,7 +1078,7 @@ impl TradeRepository for MockTradeRepository {
         page: PageRequest,
     ) -> Result<Paginated<MarketPerformanceRow>, StorageError> {
         let window_page = page.normalized();
-        let mut by_market: HashMap<MarketId, MarketPerformanceRow> = HashMap::new();
+        let mut by_market = HashMap::new();
         for trade in self.trades.lock().unwrap().values() {
             if trade.created_at < window.from || trade.created_at >= window.to {
                 continue;
@@ -1448,6 +1449,52 @@ impl EvidenceTimeseriesRepository for MockTimeseriesRepository {
             .take(usize::try_from(page.limit()).unwrap_or(usize::MAX))
             .collect();
         Ok(Paginated::from_request(items, total, &page))
+    }
+
+    async fn audit_funnel_stats(
+        &self,
+        filter: MarketFilter,
+        window: TimeWindow,
+    ) -> Result<AuditFunnelStats, StorageError> {
+        let from_ms = window.from.timestamp_millis();
+        let to_ms = window.to.timestamp_millis();
+        let market_ids = &filter.market_ids;
+        let total_detected = self
+            .detections
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|row| {
+                row.detected_at >= from_ms
+                    && row.detected_at < to_ms
+                    && (market_ids.is_empty() || market_ids.contains(&row.market_id))
+            })
+            .map(|row| row.opportunity_id.clone())
+            .collect::<HashSet<_>>()
+            .len() as u64;
+        let mut per_stage: HashMap<ChOpportunityAuditStage, HashSet<OpportunityId>> =
+            HashMap::new();
+        for row in self.audits.lock().unwrap().iter() {
+            let in_window = row.detected_at >= from_ms && row.detected_at < to_ms;
+            let in_filter = market_ids.is_empty() || market_ids.contains(&row.market_id);
+            if in_window && in_filter {
+                per_stage
+                    .entry(row.stage)
+                    .or_default()
+                    .insert(row.opportunity_id.clone());
+            }
+        }
+        let stages = per_stage
+            .into_iter()
+            .map(|(stage, ids)| AuditStageCountRow {
+                stage,
+                count: ids.len() as u64,
+            })
+            .collect();
+        Ok(AuditFunnelStats {
+            total_detected,
+            stages,
+        })
     }
 
     async fn calibration_snapshots(

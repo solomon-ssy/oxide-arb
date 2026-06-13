@@ -194,11 +194,13 @@ fn decimal_to_i128(mut value: Decimal, scale: u32) -> i128 {
 }
 
 fn decimal_from_i64(value: i64, scale: u32) -> Decimal {
-    Decimal::from_i128_with_scale(i128::from(value), scale)
+    decimal_from_i128(i128::from(value), scale)
 }
 
+/// Trailing zeros are stripped so projections serialize the canonical form
+/// (`"250"`, not `"250.0000"`); the numeric value is unchanged.
 fn decimal_from_i128(value: i128, scale: u32) -> Decimal {
-    Decimal::from_i128_with_scale(value, scale)
+    Decimal::from_i128_with_scale(value, scale).normalize()
 }
 
 #[cfg(test)]

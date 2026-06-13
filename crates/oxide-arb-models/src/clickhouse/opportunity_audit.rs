@@ -21,6 +21,16 @@ use crate::{
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
+/// Aggregated `GROUP BY stage` projection over `opportunity_audit`.
+///
+/// One row per stage with the count of distinct opportunities recorded at
+/// that stage; consumed by the funnel stats endpoint.
+#[derive(Debug, Clone, Copy, clickhouse::Row, Serialize, Deserialize)]
+pub struct AuditStageCountRow {
+    pub stage: ChOpportunityAuditStage,
+    pub count: u64,
+}
+
 /// `ClickHouse` row for `opportunity_audit` table.
 #[derive(Debug, Clone, clickhouse::Row, Serialize, Deserialize)]
 pub struct OpportunityAuditRow {

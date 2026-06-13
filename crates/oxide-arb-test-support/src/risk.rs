@@ -346,8 +346,10 @@ mod tests {
         persistence
             .create_audit(NewRiskAuditEvent {
                 event_type: RiskAuditEventType::EngineHalted,
+                market_id: None,
                 opportunity_id: None,
                 trade_id: None,
+                rejection_reason: None,
                 payload: serde_json::json!({}),
             })
             .await

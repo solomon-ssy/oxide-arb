@@ -137,6 +137,21 @@ impl<T> Paginated<T> {
         Self::new(items, total, window.page, window.size)
     }
 
+    /// Project every item through `f`, preserving the paging metadata.
+    ///
+    /// The canonical bridge from a repository page (`Paginated<XRow>` /
+    /// `Paginated<XInfo>`) to its outbound contract (`Paginated<XView>`).
+    #[must_use]
+    pub fn map<U>(self, f: impl FnMut(T) -> U) -> Paginated<U> {
+        Paginated {
+            items: self.items.into_iter().map(f).collect(),
+            total: self.total,
+            page: self.page,
+            size: self.size,
+            has_next: self.has_next,
+        }
+    }
+
     /// An empty page for the given window (no rows, `total = 0`).
     #[must_use]
     pub const fn empty(page: u64, size: u64) -> Self {

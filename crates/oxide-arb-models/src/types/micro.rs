@@ -77,9 +77,11 @@ macro_rules! micro_newtype {
                     .ok_or(MicroConversionError)
             }
 
+            /// Normalized so callers serialize the canonical form
+            /// (`"1.5"`, not `"1.50"`).
             #[must_use]
             pub fn to_decimal(self) -> Decimal {
-                Decimal::from(self.0) / Decimal::from(MICRO_SCALE)
+                (Decimal::from(self.0) / Decimal::from(MICRO_SCALE)).normalize()
             }
         }
 
@@ -276,9 +278,10 @@ impl MicroProb {
         MicroPrice::try_from_decimal(d).map(|p| Self(p.micro()))
     }
 
+    /// Normalized so callers serialize the canonical form.
     #[must_use]
     pub fn to_decimal(self) -> Decimal {
-        Decimal::from(self.0) / Decimal::from(MICRO_SCALE)
+        (Decimal::from(self.0) / Decimal::from(MICRO_SCALE)).normalize()
     }
 
     /// `self × other / MICRO_SCALE` with saturation.

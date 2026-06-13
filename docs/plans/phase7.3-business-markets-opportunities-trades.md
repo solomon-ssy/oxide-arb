@@ -18,12 +18,12 @@
 | grid/drawer | `useVbenVxeGrid`(搜索+分页)+ 详情 `useVbenDrawer`(connectedComponent,只读) |
 | WS | `market.book_update`(per-market,详情抽屉打开时订阅)、`market.resolved` |
 | i18n | `page.markets.*` |
-| types | `MarketView / MarketBookView / BookLevel`(`packages/types/src/oxide/market.ts`) |
+| types | `MarketView / MarketBookSummaryView / MarketBookView / BookLevelView`(`packages/types/src/market.ts`,types 平铺无 `oxide/` 子目录) |
 
 ### 1.2 布局与交互
 
 ```text
-┌ 搜索表单(formOptions): 关键词(name/condition_id) | 状态 | 是否已订阅 ┐
+┌ 搜索表单(formOptions): 关键词(question/slug) | 状态 | 类目 ┐
 ├ Grid: 名称 | MarketId(CellMarketId) | Yes Bid/Ask(CellPrice) | 深度(CellUsd) | 状态(CellTag) | 订阅(CellSwitch) | 操作(CellOperation) ┤
 └ MarketDetailDrawer(点击行/操作"详情"): 基础信息 + 实时订单簿面板 ┘
 ```
@@ -31,6 +31,7 @@
 - **订阅开关**:`CellSwitch` + `beforeChange` 钩子 → `handleRequest(() => subscribeMarket(id))` / `unsubscribeMarket`;无 `market:update` 码时列只读(`useColumns` 内 `hasAccessByCodes` 控制 disabled)。该操作非治理(无 reason)。
 - **详情抽屉**(`market-detail-drawer.vue`):打开时 `getMarketById` + `getMarketBook` 首屏,同时 `useOxideWs().subscribeMarket(id)` 实时刷新订单簿;关闭时 unsubscribe。订单簿面板 `orderbook-panel.vue`:Yes/No 双侧 5 档深度条形图(横向 bar,买绿卖红),数据 `useMarketStore().books[id]`。
 - **resolved 标记**:`market.resolved` 推送后行内状态 Tag 变更(store 驱动,`gridApi` 局部刷新)。
+- **偏差说明**:搜索表单不含「是否已订阅」过滤 —— `subscribed` 是运行时内存态(CLOB WS 订阅集合),无法进入 Postgres 分页查询;仅作列展示 + 开关。
 
 ### 1.3 API(`api/markets.ts`)
 
@@ -65,7 +66,7 @@ views/markets/
 | grid/drawer | 上半 LiveFeed(自定义组件)+ 下半 Tabs:历史 `useVbenVxeGrid` / 漏斗统计 `useVbenVxeGrid`;审计明细 `useVbenDrawer`(只读) |
 | WS | `opportunity.detected`(全局,store 驱动 Feed) |
 | i18n | `page.opportunities.*` |
-| types | `OpportunityView / OpportunityAuditRow / OpportunityStatsRow`(`oxide/opportunity.ts`) |
+| types | `OpportunityListView / OpportunityAuditView / OpportunityFunnelView`(`packages/types/src/opportunity.ts`);WS feed 仍是 5 字段 `OpportunityView` |
 
 ### 2.2 布局与交互
 
@@ -79,9 +80,9 @@ views/markets/
 └ OpportunityAuditDrawer: GET /opportunities/{id} 审计轨迹垂直时间线          ┘
 ```
 
-- LiveFeed 数据源 `useOpportunityStore().feed`(7.2 已建);「暂停」只是冻结视图,store 持续累积。
-- **审计抽屉**(`audit-drawer.vue`):`OpportunityAuditRow[]` 渲染为时间线(阶段/结论/耗时/快照值);复用到 Trades 决策链样式(共用 `shared/components/audit-timeline.vue`,两页都用 → 放 shared)。
-- 漏斗统计行点击 → 带 market_id 跳历史 Tab。
+- LiveFeed 数据源 `useOpportunityStore().feed`(7.2 已建);「暂停」只是冻结视图,store 持续累积(恢复时显示累积条数)。组件为 `shared/components/opportunity-feed.vue`(自 dashboard **迁移**,`variant: compact | full` 双形态)。
+- **审计抽屉**(`shared/components/opportunity-audit-drawer.vue`,Trades 决策链同用):`OpportunityAuditView[]` 渲染为时间线(阶段/结论/相对检测耗时/快照折叠),时间线本体为 `shared/components/audit-timeline.vue`。
+- **偏差说明**:漏斗为聚合统计(阶段 × 去重机会数 × 占 detected 比率),聚合行无 market 维度 —— 原「漏斗行点击带 market_id 跳历史 Tab」联动取消。
 
 ### 2.3 API(`api/opportunities.ts`)
 
@@ -89,8 +90,8 @@ views/markets/
 |---|---|---|
 | `fetchRecentOpportunities({page,size})` | `GET /opportunities/recent` | opportunity:read |
 | `fetchOpportunityHistory({from,to,market_id,page,size})` | `GET /opportunities/history` | opportunity:read |
-| `fetchOpportunityStats({from,to,market_id,page,size})` | `GET /opportunities/stats` | opportunity:read |
-| `getOpportunityAudit(id)` | `GET /opportunities/{opportunity_id}` → `OpportunityAuditRow[]` | opportunity:read |
+| `fetchOpportunityStats({from,to,market_id})` | `GET /opportunities/stats` → `OpportunityFunnelView`(聚合,无分页) | opportunity:read |
+| `getOpportunityAudit(id)` | `GET /opportunities/{opportunity_id}` → `OpportunityAuditView[]` | opportunity:read |
 
 ### 2.4 文件清单
 
@@ -98,9 +99,10 @@ views/markets/
 views/opportunities/
 ├── index.vue
 └── modules/
-    ├── schemas/{index,search-form,table-columns}.ts   # table-columns 导出 useRecentColumns/useHistoryColumns/useStatsColumns
-    └── widgets/{live-feed.vue, audit-drawer.vue}
-shared/components/audit-timeline.vue                   # 时间线通用组件(本页 + trades 共用)
+    └── schemas/{index,search-form,table-columns}.ts   # useDetectionColumns(recent/history 共用)/ useFunnelColumns
+shared/components/opportunity-feed.vue                 # dashboard 迁移而来,compact/full 双形态
+shared/components/opportunity-audit-drawer.vue         # 审计抽屉(本页 + trades 决策审计共用)
+shared/components/audit-timeline.vue                   # 时间线通用组件(审计抽屉 + trades 决策链共用)
 ```
 
 ---
@@ -116,14 +118,14 @@ shared/components/audit-timeline.vue                   # 时间线通用组件(�
 | grid/drawer | 主 Grid `useVbenVxeGrid`;详情(决策链 + PnL 归因)`useVbenDrawer` 只读;风控决策审计 Tab 二级 Grid |
 | WS | `trade.filled` / `trade.settled`(store 头插 → 顶部「N 条新交易」提示条,点击刷新,**不**自动打断分页浏览) |
 | i18n | `page.trades.*` |
-| types | `TradeView / TradeDecisionRow`(`oxide/trade.ts`) |
+| types | `TradeView`(含 `opportunity_id`,`packages/types/src/trade.ts`)/ `RiskAuditEventView`(`packages/types/src/risk.ts`,即原 TradeDecisionRow) |
 
 ### 3.2 布局与交互
 
 ```text
 ┌ Tabs: [交易列表] [风控决策审计]                                            ┐
 │ 交易列表:                                                                  │
-│   搜索: 时间范围 | market_id | 结果(outcome) | 方向                        │
+│   搜索: 时间范围 | market_id | 方向(side) | 结果(outcome) | 状态 | 模式     │
 │   Grid: 时间(CellDateTime) | 市场(CellMarketId) | 方向(CellTag) | 数量      │
 │         | 价格(CellPrice) | 金额(CellUsd) | PnL(CellUsd) | 结果(CellTag)    │
 │         | 操作(CellOperation: 详情)                                        │
@@ -134,7 +136,8 @@ shared/components/audit-timeline.vue                   # 时间线通用组件(�
    ③ PnL 归因(毛利/费用/净 edge,CellUsd 格式化)
 ```
 
-- 决策链数据:`getTradeById` 概要 + 关联 `getOpportunityAudit`(经 trade 的 opportunity_id,若存在)拼装;费用归因字段以 `TradeView` 实际 serde 字段为准。
+- 决策链数据:`getTradeById` 概要 + 关联 `getOpportunityAudit`(经 trade 的 `opportunity_id`)拼装;PnL 归因 = `cost_usd / fee_usd / detected_profit_usd / net_profit_usd`。
+- 决策审计行的 `market_id` / `rejection_reason` 为持久化时提升的可查询列(`risk_audit_event` 表),历史行(若有)显示空。
 - WS 新交易提示条:`useTradeStore().recent` 与当前页首条对比计数;点击 `gridApi.query()`。
 
 ### 3.3 API(`api/trades.ts`)

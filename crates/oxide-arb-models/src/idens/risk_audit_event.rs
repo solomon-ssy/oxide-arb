@@ -17,8 +17,10 @@ pub enum RiskAuditEvent {
     Table,
     Id,
     EventType,
+    MarketId,
     OpportunityId,
     TradeId,
+    RejectionReason,
     Payload,
     CreatedAt,
 }
@@ -29,8 +31,14 @@ pub fn table() -> TableCreateStatement {
         .if_not_exists()
         .col(column::bigserial_pk(RiskAuditEvent::Id))
         .col(ColumnDef::new(RiskAuditEvent::EventType).text().not_null())
+        .col(ColumnDef::new(RiskAuditEvent::MarketId).text().null())
         .col(column::uuid_null(RiskAuditEvent::OpportunityId))
         .col(column::uuid_null(RiskAuditEvent::TradeId))
+        .col(
+            ColumnDef::new(RiskAuditEvent::RejectionReason)
+                .text()
+                .null(),
+        )
         .col(
             ColumnDef::new(RiskAuditEvent::Payload)
                 .json_binary()

@@ -11,7 +11,7 @@ use oxide_arb_models::{
     domain::{MarketDataPort, RuntimeControlError, market::book::BookSnapshot},
     types::TokenId,
 };
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 /// Live market-data port backing the markets dashboard book read + WS controls.
 pub struct CoreMarketData {
@@ -40,6 +40,10 @@ impl MarketDataPort for CoreMarketData {
             self.book_store.load(yes_token),
             self.book_store.load(no_token),
         )
+    }
+
+    fn subscribed_tokens(&self, token_ids: &[TokenId]) -> HashSet<TokenId> {
+        self.ws_manager.subscribed_tokens(token_ids)
     }
 
     async fn subscribe(&self, token_ids: Vec<TokenId>) -> Result<(), RuntimeControlError> {

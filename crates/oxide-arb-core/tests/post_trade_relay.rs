@@ -63,7 +63,7 @@ fn scored_snapshot_json(opportunity_id: &OpportunityId) -> serde_json::Value {
         "token_id": "12345",
         "token_yes": "12345",
         "token_no": "67890",
-        "side": "buy",
+        "side": "BUY",
         "category": "politics",
         "entry_price": "0.92",
         "edge_bps": "250",

@@ -247,6 +247,19 @@ impl ClobWsManager {
         state.split(source).0.len()
     }
 
+    /// Subset of `tokens` currently live on the transport (union of all
+    /// sources), resolved under a single lock so callers can label a whole
+    /// page of markets consistently.
+    #[must_use]
+    pub fn subscribed_tokens(&self, tokens: &[TokenId]) -> HashSet<TokenId> {
+        let state = self.subscriptions.lock();
+        tokens
+            .iter()
+            .filter(|token| state.engine.contains(*token) || state.web.contains(*token))
+            .cloned()
+            .collect()
+    }
+
     /// Returns the unified event receiver for all shards.
     pub const fn events(&self) -> &Receiver<PipelineEvent> {
         &self.output_rx

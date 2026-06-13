@@ -8,6 +8,7 @@
 //! helper's return type nameable while still sharing the external backends.
 
 use std::{
+    collections::HashSet,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -96,6 +97,8 @@ pub struct TestEnv {
     pub state: AppState,
     /// Typed handle to the runtime-config apply double (preflight context).
     pub runtime_config_apply: Arc<MockRuntimeConfigApply>,
+    /// Typed handle to the in-memory evidence repository (seed detections / audits).
+    pub evidence: Arc<MockTimeseriesRepository>,
     /// Shared Postgres connection (pool kept alive by `_pg`).
     pub db: DatabaseConnection,
     // Postgres container guard. `DatabaseConnection` clones inside the
@@ -185,6 +188,7 @@ impl TestEnv {
         ));
 
         let runtime_config_apply = Arc::new(MockRuntimeConfigApply::default());
+        let evidence = Arc::new(MockTimeseriesRepository::default());
         let state = AppState {
             deploy: Arc::new(test_deploy_config()),
             runtime_config_apply: Arc::clone(&runtime_config_apply) as _,
@@ -200,7 +204,7 @@ impl TestEnv {
             trades: Arc::new(PgTradeRepository::new(db.clone())),
             markets: Arc::new(PgMarketRepository::new(db.clone())),
             reports: Arc::new(PgReportRepository::new(db.clone())),
-            evidence: Arc::new(MockTimeseriesRepository::default()),
+            evidence: Arc::clone(&evidence) as _,
             risk_audit: Arc::new(PgRiskAuditRepository::new(db.clone())),
             casbin,
             perm_checker,
@@ -222,6 +226,7 @@ impl TestEnv {
         Self {
             state,
             runtime_config_apply,
+            evidence,
             db,
             _pg: pg_container,
             redis: Some(redis_container),
@@ -566,6 +571,10 @@ impl MarketDataPort for MockMarketData {
         _no_token: &TokenId,
     ) -> (Option<Arc<BookSnapshot>>, Option<Arc<BookSnapshot>>) {
         (None, None)
+    }
+
+    fn subscribed_tokens(&self, _token_ids: &[TokenId]) -> HashSet<TokenId> {
+        HashSet::new()
     }
 
     async fn subscribe(&self, _token_ids: Vec<TokenId>) -> Result<(), RuntimeControlError> {

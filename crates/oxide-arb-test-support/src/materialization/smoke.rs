@@ -562,8 +562,10 @@ impl SmokeRiskAuditRepository {
             events: vec![RiskAuditEventInfo {
                 id: 1,
                 event_type: RiskAuditEventType::TradeAllowed,
+                market_id: None,
                 opportunity_id: Some(opportunity_id.clone()),
                 trade_id: Some(trade_id.clone()),
+                rejection_reason: None,
                 payload: serde_json::json!({}),
                 created_at: at,
             }],

@@ -8,7 +8,7 @@
 use crate::{
     domain::{TradeInfo, pagination::PageRequest},
     enums::common::{ExecutionMode, MarketCategory, Side, TradeBusinessOutcome, TradeState},
-    types::{Bps, EventId, MarketId, OrderId, Price, Shares, TokenId, TradeId, Usd},
+    types::{Bps, EventId, MarketId, OpportunityId, OrderId, Price, Shares, TokenId, TradeId, Usd},
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TradePageQuery {
     pub market_id: Option<MarketId>,
+    pub side: Option<Side>,
     pub state: Option<TradeState>,
     pub business_outcome: Option<TradeBusinessOutcome>,
     pub execution_mode: Option<ExecutionMode>,
@@ -44,6 +45,9 @@ impl TradePageQuery {
 #[derive(Debug, Clone, Serialize)]
 pub struct TradeView {
     pub trade_id: TradeId,
+    /// Originating opportunity — the join key into the audit trail
+    /// (`GET /opportunities/{id}`) for the decision-chain timeline.
+    pub opportunity_id: OpportunityId,
     pub market_id: MarketId,
     pub event_id: EventId,
     pub token_id: TokenId,
@@ -73,6 +77,7 @@ impl From<TradeInfo> for TradeView {
     fn from(t: TradeInfo) -> Self {
         Self {
             trade_id: t.trade_id,
+            opportunity_id: t.opportunity_id,
             market_id: t.market_id,
             event_id: t.event_id,
             token_id: t.token_id,

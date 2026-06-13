@@ -1,6 +1,8 @@
 /// Declarative macro for Postgres `TEXT` enums persisted via `DeriveActiveEnum`.
 ///
-/// Generates `as_str()`, `Display`, serde (`snake_case`), and `IntoActiveValue`.
+/// Generates `as_str()`, `Display`, serde (wire value == DB `string_value`,
+/// e.g. `Side::Buy` ⇄ `"BUY"`, `TickSize::Tenth` ⇄ `"0.1"`), and
+/// `IntoActiveValue`.
 ///
 /// Optional modifiers:
 /// - `@derive(PartialOrd, Ord, Default, …)` — extra `#[derive]` traits
@@ -33,10 +35,10 @@ macro_rules! active_string_enum {
             oxide_arb_macros::IntoActiveValue,
         )]
         #[sea_orm(rs_type = "String", db_type = "Text")]
-        #[serde(rename_all = "snake_case")]
         pub enum $name {
             $(
                 #[sea_orm(string_value = $value)]
+                #[serde(rename = $value)]
                 $(#[$variant_meta])*
                 $variant $(= $discriminant)?,
             )+

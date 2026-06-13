@@ -1,11 +1,13 @@
-use crate::traits::{EvidenceTimeseriesRepository, TimeseriesFactWriter, evidence_query_result};
+use crate::traits::{
+    AuditFunnelStats, EvidenceTimeseriesRepository, TimeseriesFactWriter, evidence_query_result,
+};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::{
     clickhouse::{
-        BookSnapshotRow, CalibrationSnapshotRow, OpportunityAuditRow, OpportunityDetectionRow,
-        TickEventL2Row, TickEventRow,
+        AuditStageCountRow, BookSnapshotRow, CalibrationSnapshotRow, OpportunityAuditRow,
+        OpportunityDetectionRow, TickEventL2Row, TickEventRow,
     },
     config::ClickHouseConfig,
     domain::{MarketFilter, PageRequest, Paginated, TimeWindow, evidence::EvidenceQueryResult},
@@ -549,6 +551,68 @@ impl EvidenceTimeseriesRepository for ChTimeseriesRepository {
             .await
             .map_err(StorageError::from)?;
         Ok(Paginated::from_request(rows, total, &page))
+    }
+
+    async fn audit_funnel_stats(
+        &self,
+        filter: MarketFilter,
+        window: TimeWindow,
+    ) -> Result<AuditFunnelStats, StorageError> {
+        let market_ids = filter.market_ids;
+        let event_ids = filter.event_ids;
+        let token_ids = filter.token_ids;
+        let categories = filter.categories;
+        let window_filter = "detected_at >= fromUnixTimestamp64Milli(?) \
+             AND detected_at < fromUnixTimestamp64Milli(?) \
+             AND (empty(?) OR market_id IN ?) \
+             AND (empty(?) OR event_id IN ?) \
+             AND (empty(?) OR token_id IN ?) \
+             AND (empty(?) OR category IN ?)";
+        let total_detected = self
+            .client
+            .query(&format!(
+                "SELECT uniqExact(opportunity_id) AS count \
+                 FROM opportunity_detection WHERE {window_filter}"
+            ))
+            .bind(window.from.timestamp_millis())
+            .bind(window.to.timestamp_millis())
+            .bind(market_ids.clone())
+            .bind(market_ids.clone())
+            .bind(event_ids.clone())
+            .bind(event_ids.clone())
+            .bind(token_ids.clone())
+            .bind(token_ids.clone())
+            .bind(categories.clone())
+            .bind(categories.clone())
+            .fetch_one::<CountRow>()
+            .await
+            .map_err(StorageError::from)?
+            .count;
+        let stages = self
+            .client
+            .query(&format!(
+                "SELECT stage, uniqExact(opportunity_id) AS count \
+                 FROM opportunity_audit FINAL WHERE {window_filter} \
+                 GROUP BY stage \
+                 ORDER BY stage ASC"
+            ))
+            .bind(window.from.timestamp_millis())
+            .bind(window.to.timestamp_millis())
+            .bind(market_ids.clone())
+            .bind(market_ids)
+            .bind(event_ids.clone())
+            .bind(event_ids)
+            .bind(token_ids.clone())
+            .bind(token_ids)
+            .bind(categories.clone())
+            .bind(categories)
+            .fetch_all::<AuditStageCountRow>()
+            .await
+            .map_err(StorageError::from)?;
+        Ok(AuditFunnelStats {
+            total_detected,
+            stages,
+        })
     }
 
     async fn calibration_snapshots(

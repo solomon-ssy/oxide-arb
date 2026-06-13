@@ -229,13 +229,18 @@ mod tests {
         let data = &envelope.data;
         assert_eq!(data["trade_id"], trade_id.to_string());
         assert_eq!(data["market_id"], "0xabc");
+        // `opportunity_id` is part of the contract: it joins the trade to its
+        // audit trail for the decision-chain timeline.
+        assert!(
+            data.get("opportunity_id").is_some(),
+            "`opportunity_id` must survive the trade.filled projection"
+        );
         // The WS push shares the REST `TradeView` projection: forensic /
         // persistence-internal columns must never cross the wire.
         for stripped in [
             "scored_snapshot",
             "execution_id",
             "reservation_id",
-            "opportunity_id",
             "post_trade_claim_owner",
             "post_trade_claimed_at",
             "post_trade_attempts",

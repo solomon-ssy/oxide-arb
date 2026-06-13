@@ -22,7 +22,7 @@ use crate::{
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 use thiserror::Error;
 
 /// Outcome of a successful governed execution-mode transition.
@@ -145,6 +145,11 @@ pub trait MarketDataPort: Send + Sync {
         yes_token: &TokenId,
         no_token: &TokenId,
     ) -> (Option<Arc<BookSnapshot>>, Option<Arc<BookSnapshot>>);
+
+    /// Subset of `token_ids` currently live on the CLOB WS transport (union of
+    /// the engine baseline and the web overlay), resolved in one batch so a
+    /// whole page of markets is labelled consistently.
+    fn subscribed_tokens(&self, token_ids: &[TokenId]) -> HashSet<TokenId>;
 
     /// Add tokens to the live CLOB WS subscription set (best-effort, immediate).
     async fn subscribe(&self, token_ids: Vec<TokenId>) -> Result<(), RuntimeControlError>;

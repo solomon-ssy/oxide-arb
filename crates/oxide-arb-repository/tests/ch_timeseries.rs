@@ -20,7 +20,9 @@ use oxide_arb_models::{
     },
     types::{EventId, ExecutionId, MarketId, OpportunityId, Price, Shares, TokenId, TradeId, Usd},
 };
-use oxide_arb_repository::traits::{EvidenceTimeseriesRepository, TimeseriesFactWriter};
+use oxide_arb_repository::traits::{
+    AuditFunnelStats, EvidenceTimeseriesRepository, TimeseriesFactWriter,
+};
 use rust_decimal_macros::dec;
 
 fn sample_tick(token_id: &str, ts: i64) -> TickEventRow {
@@ -274,6 +276,21 @@ async fn timeseries_insert_and_query_roundtrip() {
     assert_eq!(rows.rows[0].token_id, TokenId::new(token));
 }
 
+/// One detected + one filled audit row → baseline 1 with two distinct stages.
+fn assert_funnel_stats(stats: &AuditFunnelStats) {
+    assert_eq!(stats.total_detected, 1, "one distinct detected opportunity");
+    assert_eq!(stats.stages.len(), 2, "two distinct audit stages recorded");
+    let stage_count = |stage: ChOpportunityAuditStage| {
+        stats
+            .stages
+            .iter()
+            .find(|row| row.stage == stage)
+            .map(|row| row.count)
+    };
+    assert_eq!(stage_count(ChOpportunityAuditStage::Detected), Some(1));
+    assert_eq!(stage_count(ChOpportunityAuditStage::Filled), Some(1));
+}
+
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn evidence_timeseries_queries_roundtrip_core_fact_tables() {
@@ -366,10 +383,14 @@ async fn evidence_timeseries_queries_roundtrip_core_fact_tables() {
     assert_eq!(detections.len(), 1);
     assert_eq!(detections.rows[0].opportunity_id, opportunity_id);
 
-    let funnel = repo.audit_funnel(filter, window).await.unwrap();
+    let funnel = repo.audit_funnel(filter.clone(), window).await.unwrap();
     assert_eq!(funnel.len(), 2);
     assert_eq!(funnel.rows[0].stage, ChOpportunityAuditStage::Detected);
     assert_eq!(funnel.rows[1].stage, ChOpportunityAuditStage::Filled);
+
+    // Aggregated funnel stats: detection baseline + per-stage distinct counts.
+    let stats = repo.audit_funnel_stats(filter, window).await.unwrap();
+    assert_funnel_stats(&stats);
 
     let terminal = repo
         .terminal_audits(std::slice::from_ref(&opportunity_id))

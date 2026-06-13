@@ -4,7 +4,7 @@
 //! every discriminant here must match the DDL exactly.
 
 use crate::enums::{
-    audit::OpportunityAuditStage,
+    audit::{AuditOutcome, OpportunityAuditStage, RejectionStage, SettlementOutcome},
     calibration::{DurationBucket, PriceZone},
     common::{
         MarketCategory, SettlementAccountingStatus, SettlementTrigger, Side, StalenessLevel,
@@ -25,6 +25,15 @@ impl From<Side> for ChSide {
         match value {
             Side::Buy => Self::Buy,
             Side::Sell => Self::Sell,
+        }
+    }
+}
+
+impl From<ChSide> for Side {
+    fn from(value: ChSide) -> Self {
+        match value {
+            ChSide::Buy => Self::Buy,
+            ChSide::Sell => Self::Sell,
         }
     }
 }
@@ -153,6 +162,17 @@ impl From<StalenessLevel> for ChStalenessLevel {
     }
 }
 
+impl From<ChStalenessLevel> for StalenessLevel {
+    fn from(value: ChStalenessLevel) -> Self {
+        match value {
+            ChStalenessLevel::Fresh => Self::Fresh,
+            ChStalenessLevel::Acceptable => Self::Acceptable,
+            ChStalenessLevel::Stale => Self::Stale,
+            ChStalenessLevel::Expired => Self::Expired,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
 #[repr(i8)]
 pub enum ChMarketCategory {
@@ -202,7 +222,7 @@ impl From<ChMarketCategory> for MarketCategory {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize_repr, Deserialize_repr)]
 #[repr(i8)]
 pub enum ChOpportunityAuditStage {
     Detected = 1,
@@ -232,11 +252,45 @@ impl From<OpportunityAuditStage> for ChOpportunityAuditStage {
     }
 }
 
+impl From<ChOpportunityAuditStage> for OpportunityAuditStage {
+    fn from(value: ChOpportunityAuditStage) -> Self {
+        match value {
+            ChOpportunityAuditStage::Detected => Self::Detected,
+            ChOpportunityAuditStage::ValidationRejected => Self::ValidationRejected,
+            ChOpportunityAuditStage::FactorValidationRejected => Self::FactorValidationRejected,
+            ChOpportunityAuditStage::RiskRejected => Self::RiskRejected,
+            ChOpportunityAuditStage::SizingRejected => Self::SizingRejected,
+            ChOpportunityAuditStage::Filled => Self::Filled,
+            ChOpportunityAuditStage::Missed => Self::Missed,
+            ChOpportunityAuditStage::Failed => Self::Failed,
+            ChOpportunityAuditStage::Settled => Self::Settled,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
 #[repr(i8)]
 pub enum ChSettlementOutcome {
     Won = 1,
     Lost = 2,
+}
+
+impl From<SettlementOutcome> for ChSettlementOutcome {
+    fn from(value: SettlementOutcome) -> Self {
+        match value {
+            SettlementOutcome::Won => Self::Won,
+            SettlementOutcome::Lost => Self::Lost,
+        }
+    }
+}
+
+impl From<ChSettlementOutcome> for SettlementOutcome {
+    fn from(value: ChSettlementOutcome) -> Self {
+        match value {
+            ChSettlementOutcome::Won => Self::Won,
+            ChSettlementOutcome::Lost => Self::Lost,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
@@ -257,6 +311,16 @@ impl From<SettlementTrigger> for ChSettlementTrigger {
     }
 }
 
+impl From<ChSettlementTrigger> for SettlementTrigger {
+    fn from(value: ChSettlementTrigger) -> Self {
+        match value {
+            ChSettlementTrigger::Ws => Self::Ws,
+            ChSettlementTrigger::PeriodicRetry => Self::PeriodicRetry,
+            ChSettlementTrigger::Manual => Self::Manual,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
 #[repr(i8)]
 pub enum ChSettlementAccountingStatus {
@@ -273,6 +337,17 @@ impl From<SettlementAccountingStatus> for ChSettlementAccountingStatus {
             SettlementAccountingStatus::Redeemed => Self::Redeemed,
             SettlementAccountingStatus::Accounted => Self::Accounted,
             SettlementAccountingStatus::Failed => Self::Failed,
+        }
+    }
+}
+
+impl From<ChSettlementAccountingStatus> for SettlementAccountingStatus {
+    fn from(value: ChSettlementAccountingStatus) -> Self {
+        match value {
+            ChSettlementAccountingStatus::Pending => Self::Pending,
+            ChSettlementAccountingStatus::Redeemed => Self::Redeemed,
+            ChSettlementAccountingStatus::Accounted => Self::Accounted,
+            ChSettlementAccountingStatus::Failed => Self::Failed,
         }
     }
 }
@@ -315,6 +390,30 @@ impl From<TradeBusinessOutcome> for ChAuditOutcome {
     }
 }
 
+impl From<AuditOutcome> for ChAuditOutcome {
+    fn from(value: AuditOutcome) -> Self {
+        match value {
+            AuditOutcome::Rejected => Self::Rejected,
+            AuditOutcome::Settled => Self::Settled,
+            AuditOutcome::Success => Self::Success,
+            AuditOutcome::Miss => Self::Miss,
+            AuditOutcome::Failed => Self::Failed,
+        }
+    }
+}
+
+impl From<ChAuditOutcome> for AuditOutcome {
+    fn from(value: ChAuditOutcome) -> Self {
+        match value {
+            ChAuditOutcome::Rejected => Self::Rejected,
+            ChAuditOutcome::Settled => Self::Settled,
+            ChAuditOutcome::Success => Self::Success,
+            ChAuditOutcome::Miss => Self::Miss,
+            ChAuditOutcome::Failed => Self::Failed,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
 #[repr(i8)]
 pub enum ChRejectionStage {
@@ -336,6 +435,32 @@ impl ChRejectionStage {
             "submit_persist" => Self::SubmitPersist,
             "factor_validation" => Self::FactorValidation,
             _ => Self::Other,
+        }
+    }
+}
+
+impl From<RejectionStage> for ChRejectionStage {
+    fn from(value: RejectionStage) -> Self {
+        match value {
+            RejectionStage::Validation => Self::Validation,
+            RejectionStage::Risk => Self::Risk,
+            RejectionStage::Sizing => Self::Sizing,
+            RejectionStage::SubmitPersist => Self::SubmitPersist,
+            RejectionStage::FactorValidation => Self::FactorValidation,
+            RejectionStage::Other => Self::Other,
+        }
+    }
+}
+
+impl From<ChRejectionStage> for RejectionStage {
+    fn from(value: ChRejectionStage) -> Self {
+        match value {
+            ChRejectionStage::Validation => Self::Validation,
+            ChRejectionStage::Risk => Self::Risk,
+            ChRejectionStage::Sizing => Self::Sizing,
+            ChRejectionStage::SubmitPersist => Self::SubmitPersist,
+            ChRejectionStage::FactorValidation => Self::FactorValidation,
+            ChRejectionStage::Other => Self::Other,
         }
     }
 }
