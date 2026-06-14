@@ -6,9 +6,13 @@ use oxide_arb_risk::engine::RiskEngine;
 use std::sync::Arc;
 
 /// Halt risk + engage execution kill switch atomically from the core layer.
+///
+/// Uses a planned-halt alert profile (info, no toast) so mode transitions and
+/// operator halts do not latch the header indicator as a critical fault after
+/// [`resume_trading`] succeeds.
 pub async fn halt_trading(risk: &RiskEngine, fsm: &ExecutionFSM, reason: String) {
     risk.halt(reason.clone()).await;
-    fsm.enter_emergency(&reason);
+    fsm.enter_planned_halt(&reason);
 }
 
 /// Resume risk after operator ack; clears kill switch when trading is allowed again.

@@ -28,7 +28,7 @@ impl ExecutionFSM {
         }
     }
 
-    /// Halt all new executions (e.g. L4 circuit breaker, manual kill).
+    /// Halt all new executions (e.g. L4 circuit breaker, pipeline fault).
     pub fn enter_emergency(&self, reason: &str) {
         self.emergency.store(true, Ordering::Release);
         tracing::error!(reason = reason, "execution emergency halt engaged");
@@ -44,6 +44,29 @@ impl ExecutionFSM {
                 Utc::now(),
             )
             .with_affects_trading(true),
+        );
+    }
+
+    /// Engage the kill switch for operator-controlled quiesce (mode transition,
+    /// manual halt). Blocks execution identically to [`Self::enter_emergency`],
+    /// but emits an informational alert so the UI status light follows
+    /// `system.status.breaker_state` instead of latching a critical fault.
+    pub fn enter_planned_halt(&self, reason: &str) {
+        self.emergency.store(true, Ordering::Release);
+        tracing::warn!(reason = reason, "execution planned halt engaged");
+        self.metrics.fsm_emergency_entries.inc();
+        self.alerts.dispatch_background(
+            Alert::new(
+                "execution.planned_halt",
+                AlertLevel::Info,
+                AlertCategory::TradingSafety,
+                AlertSource::Execution,
+                "Execution paused",
+                reason,
+                Utc::now(),
+            )
+            .with_affects_trading(false)
+            .with_visible_toast(false),
         );
     }
 
