@@ -14,7 +14,8 @@
 mod policy;
 
 pub use policy::{
-    SchedulePolicy, ScheduledMaterialization, StaleSeverity, is_due, is_overdue, staleness,
+    ScheduleActivation, ScheduleInactiveReason, ScheduleModeContract, SchedulePolicy,
+    ScheduledMaterialization, StaleSeverity, is_due, is_overdue, staleness,
     staleness_threshold_secs,
 };
 
@@ -61,6 +62,11 @@ pub enum ScheduleOutcome {
     },
     /// The cadence has not elapsed since the last run.
     NotDue { schedule_id: String },
+    /// The cadence is intentionally inactive for the current execution mode.
+    Inactive {
+        schedule_id: String,
+        reason: ScheduleInactiveReason,
+    },
     /// Sealing the manifest or building the insert row failed; nothing was
     /// enqueued. Carries the stable failure code for triage.
     BuildFailed { schedule_id: String, code: String },
@@ -111,6 +117,13 @@ impl MaterializationScheduler {
         let mut outcomes = Vec::with_capacity(self.policy.tasks.len());
         let mut alerts = Vec::new();
         for task in &self.policy.tasks {
+            if let ScheduleActivation::Inactive { reason } = task.activation {
+                outcomes.push(ScheduleOutcome::Inactive {
+                    schedule_id: task.schedule_id.clone(),
+                    reason,
+                });
+                continue;
+            }
             let latest_any = self
                 .repo
                 .latest_run_for_schedule(&task.schedule_id, &[])
@@ -235,7 +248,7 @@ impl MaterializationScheduler {
         let last_success_at = success
             .as_ref()
             .map(|run| run.finished_at.unwrap_or(run.created_at));
-        if staleness(now, last_success_at, task.cadence).is_some() {
+        if last_run_at.is_some() && staleness(now, last_success_at, task.cadence).is_some() {
             alerts.push(ScheduleAlert::Stale {
                 schedule_id: task.schedule_id.clone(),
                 last_success_at,

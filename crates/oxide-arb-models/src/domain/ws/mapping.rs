@@ -30,10 +30,10 @@ pub fn event_envelope(event: &CoreEvent) -> Option<(SubscriptionKey, WsEnvelope)
             None,
             serde_json::to_value(status).ok()?,
         ),
-        CoreEvent::Alert { level, message } => (
+        CoreEvent::Alert(alert) => (
             WsChannel::SystemAlert,
             None,
-            serde_json::json!({ "level": level, "message": message }),
+            serde_json::to_value(alert).ok()?,
         ),
         CoreEvent::CircuitBreakerTripped { level, reason } => (
             WsChannel::RiskCircuitBreaker,

@@ -94,7 +94,7 @@ use oxide_arb_models::{
         ReplayPort, RuntimeConfigPort, RuntimeConfigRef, RuntimeControlPort,
         settlement::MarketSettlementRequest,
     },
-    enums::common::AlertLevel,
+    enums::common::{AlertCategory, AlertLevel, AlertSource},
     types::{MarketId, TokenId},
 };
 use oxide_arb_repository::{
@@ -752,13 +752,8 @@ impl AppContext {
         let repo: Arc<dyn ControlFactorRepository> = Arc::new(PgControlFactorRepository::new(
             self.infra.pg.connection().clone(),
         ));
-        let policy = SchedulePolicy::production_default(
-            RuntimeConfigRef::ActiveAt { at: Utc::now() },
-            "scheduler",
-            option_env!("GIT_SHA").unwrap_or("unknown"),
-        );
-        let scheduler = Arc::new(MaterializationScheduler::new(repo.clone(), policy));
         let alerts = Arc::clone(&self.infra.alerts);
+        let execution_mode = self.execution_mode.clone();
         let events = self.event_publisher();
 
         self.pending_tasks
@@ -770,13 +765,22 @@ impl AppContext {
                     true,
                     shutdown,
                     || {
-                        let scheduler = Arc::clone(&scheduler);
                         let repo = Arc::clone(&repo);
                         let alerts = Arc::clone(&alerts);
+                        let execution_mode = execution_mode.clone();
                         let events = events.clone();
                         async move {
+                            let now = Utc::now();
+                            let policy = SchedulePolicy::for_mode(
+                                execution_mode.current(),
+                                RuntimeConfigRef::ActiveAt { at: now },
+                                "scheduler",
+                                option_env!("GIT_SHA").unwrap_or("unknown"),
+                            );
+                            let scheduler =
+                                MaterializationScheduler::new(Arc::clone(&repo), policy);
                             let report = scheduler
-                                .tick(Utc::now())
+                                .tick(now)
                                 .await
                                 .map_err(|error| OxideError::Internal(error.to_string()))?;
                             for outcome in report.outcomes {
@@ -791,7 +795,7 @@ impl AppContext {
                                 }
                             }
                             for alert in report.alerts {
-                                dispatch_schedule_alert(&alerts, &events, alert).await;
+                                dispatch_schedule_alert(&alerts, alert).await;
                             }
                             Ok(())
                         }
@@ -874,11 +878,7 @@ impl AppContext {
 
 /// Dispatch a scheduler cadence alert to the operator alert channel and the
 /// real-time event bus.
-async fn dispatch_schedule_alert(
-    alerts: &Arc<AlertDispatcher>,
-    events: &CoreEventPublisher,
-    alert: ScheduleAlert,
-) {
+async fn dispatch_schedule_alert(alerts: &Arc<AlertDispatcher>, alert: ScheduleAlert) {
     let (title, body) = match &alert {
         ScheduleAlert::Overdue {
             schedule_id,
@@ -899,15 +899,25 @@ async fn dispatch_schedule_alert(
         ),
     };
     alerts
-        .dispatch(Alert {
-            severity: AlertLevel::Warning,
-            title: title.clone(),
-            body: body.clone(),
-            timestamp: Utc::now(),
-        })
+        .dispatch(
+            Alert::new(
+                format!("materialization.scheduler.{}", schedule_alert_key(&alert)),
+                AlertLevel::Warning,
+                AlertCategory::SchedulerHealth,
+                AlertSource::Scheduler,
+                title,
+                body,
+                Utc::now(),
+            )
+            .with_affects_trading(false)
+            .with_visible_toast(true),
+        )
         .await;
-    events.publish(CoreEvent::Alert {
-        level: AlertLevel::Warning,
-        message: format!("{title}: {body}"),
-    });
+}
+
+fn schedule_alert_key(alert: &ScheduleAlert) -> String {
+    match alert {
+        ScheduleAlert::Overdue { schedule_id, .. } => format!("{schedule_id}.overdue"),
+        ScheduleAlert::Stale { schedule_id, .. } => format!("{schedule_id}.stale"),
+    }
 }

@@ -11,8 +11,8 @@ use actix_web::{http::Method, web};
 use oxide_arb_models::{
     config::DeployConfig,
     domain::{
-        HaltRequest, HealthReport, ModeTransitionReport, ResumeRequest, SwitchModeRequest,
-        SystemStatus,
+        HaltRequest, HealthReport, MaterializationScheduleStatusView, ModeTransitionReport,
+        ResumeRequest, SwitchModeRequest, SystemStatus,
     },
     enums::{
         operation_log::OperationCategory,
@@ -44,6 +44,12 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
             "/system/health",
             Rule::ResourceOp(ResourceType::System, Operation::Read),
             health,
+        ),
+        spec(
+            Method::GET,
+            "/system/materialization-schedules",
+            Rule::ResourceOp(ResourceType::ControlFactor, Operation::Read),
+            materialization_schedules,
         ),
         spec(
             Method::POST,
@@ -222,6 +228,15 @@ pub async fn status(state: web::Data<AppState>) -> Result<WebResponse<SystemStat
 /// `GET /api/system/health` — subsystem health report.
 pub async fn health(state: web::Data<AppState>) -> Result<WebResponse<HealthReport>, WebError> {
     Ok(WebResponse::ok(state.control.health().await))
+}
+
+/// `GET /api/system/materialization-schedules` — mode-aware schedule status.
+pub async fn materialization_schedules(
+    state: web::Data<AppState>,
+) -> Result<WebResponse<Vec<MaterializationScheduleStatusView>>, WebError> {
+    Ok(WebResponse::ok(
+        state.materialization_schedule_statuses().await?,
+    ))
 }
 
 /// `POST /api/system/halt` — halt trading (risk halt + execution kill switch).

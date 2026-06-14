@@ -20,7 +20,7 @@ use oxide_arb_models::{
     },
     enums::{
         clickhouse::ChSnapshotReason,
-        common::{AlertLevel, SettlementTrigger},
+        common::{AlertCategory, AlertLevel, AlertSource, SettlementTrigger},
         pipeline::ShardConnectionStatus,
     },
     types::TokenId,
@@ -219,14 +219,17 @@ impl BookApplyWorker {
                 if let Err(error) = self.settlement_tx.try_send(request) {
                     self.metrics.settlement_channel_dropped_total.inc();
                     tracing::error!(%error, %market_id, "settlement channel send failed");
-                    self.alerts.dispatch_background(Alert {
-                        severity: AlertLevel::Warning,
-                        title: "Settlement channel dropped".to_owned(),
-                        body: format!(
+                    self.alerts.dispatch_background(Alert::new(
+                        format!("settlement.channel_dropped.{market_id}"),
+                        AlertLevel::Warning,
+                        AlertCategory::Infrastructure,
+                        AlertSource::DataPipeline,
+                        "Settlement channel dropped",
+                        format!(
                             "Market {market_id} resolution event was dropped; Gamma resolved-market retry is the safety net"
                         ),
-                        timestamp: Utc::now(),
-                    });
+                        Utc::now(),
+                    ));
                 }
             }
 

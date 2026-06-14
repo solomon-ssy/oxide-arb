@@ -241,6 +241,12 @@ async fn sync_snapshot(ctx: &SessionContext) -> String {
             .map(ControlFactorMaterializationRunView::from)
             .collect();
         snapshot.active_materialization_runs = Some(active);
+        snapshot.materialization_schedules = Some(
+            ctx.state
+                .materialization_schedule_statuses()
+                .await
+                .unwrap_or_default(),
+        );
     }
     let data = serde_json::to_value(&snapshot).unwrap_or_else(|_| serde_json::json!({}));
     WsEnvelope::sync(data).to_text()

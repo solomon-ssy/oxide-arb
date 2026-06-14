@@ -8,15 +8,36 @@ use crate::{
     domain::control_factor::ControlFactorMaterializationRunInfo,
     domain::{MarketBookView, Opportunity, PositionInfo, SystemStatus, TradeInfo},
     enums::{
-        common::{AlertLevel, TradeBusinessOutcome},
+        common::{AlertCategory, AlertLevel, AlertSource, TradeBusinessOutcome},
         control_factor::PublicationMode,
     },
     types::{MarketId, TradeId, Usd},
 };
+use serde::{Deserialize, Serialize};
 use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
 };
+
+/// Structured `system.alert` payload shared by alert routing and WebSocket
+/// clients.
+///
+/// `affects_trading` is the explicit boundary used by clients to distinguish
+/// trading degradation from non-money-critical operator notices. `visible_toast`
+/// controls transient UI popups; notification centers may still retain the
+/// alert for auditability.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SystemAlertEvent {
+    pub idempotency_key: String,
+    pub level: AlertLevel,
+    pub category: AlertCategory,
+    pub source: AlertSource,
+    pub title: String,
+    pub message: String,
+    pub affects_trading: bool,
+    pub visible_toast: bool,
+    pub dedupe_secs: u64,
+}
 
 /// Real-time event emitted by core subsystems and the governance control plane,
 /// consumed by the WebSocket broadcaster and fanned out to subscribers.
@@ -68,10 +89,7 @@ pub enum CoreEvent {
     ConfigActivated {
         version_id: String,
     },
-    Alert {
-        level: AlertLevel,
-        message: String,
-    },
+    Alert(SystemAlertEvent),
     /// Materialization / replay run status changed (queued → running → terminal).
     MaterializationRunUpdated(ControlFactorMaterializationRunInfo),
 }
@@ -95,7 +113,7 @@ impl CoreEvent {
             Self::MarketResolved { .. } => "market.resolved",
             Self::ControlPublished { .. } => "control.published",
             Self::ConfigActivated { .. } => "config.activated",
-            Self::Alert { .. } => "system.alert",
+            Self::Alert(_) => "system.alert",
             Self::MaterializationRunUpdated(_) => "materialization.run_update",
         }
     }
@@ -164,18 +182,28 @@ impl CoreEventPublisher {
 
 #[cfg(test)]
 mod tests {
-    use super::{CoreEvent, CoreEventPublisher};
-    use crate::{enums::common::AlertLevel, types::Usd};
+    use super::{CoreEvent, CoreEventPublisher, SystemAlertEvent};
+    use crate::{
+        enums::common::{AlertCategory, AlertLevel, AlertSource},
+        types::Usd,
+    };
     use std::sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     };
 
     fn alert() -> CoreEvent {
-        CoreEvent::Alert {
+        CoreEvent::Alert(SystemAlertEvent {
+            idempotency_key: "test.alert".to_owned(),
             level: AlertLevel::Warning,
+            category: AlertCategory::OperatorNotice,
+            source: AlertSource::System,
+            title: "test".to_owned(),
             message: "x".to_owned(),
-        }
+            affects_trading: false,
+            visible_toast: false,
+            dedupe_secs: 60,
+        })
     }
 
     #[test]

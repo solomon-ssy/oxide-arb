@@ -14,8 +14,8 @@ use actix_test::{TestServer, start as start_test_server};
 use actix_web::{App, http::StatusCode, middleware::from_fn, test::TestRequest, web};
 use futures_util::{SinkExt, StreamExt};
 use oxide_arb_models::{
-    domain::{CoreEvent, SubscriptionKey, WsChannel},
-    enums::common::AlertLevel,
+    domain::{CoreEvent, SubscriptionKey, SystemAlertEvent, WsChannel},
+    enums::common::{AlertCategory, AlertLevel, AlertSource},
 };
 use oxide_arb_web::ws::SessionHandle;
 
@@ -23,6 +23,20 @@ use crate::{
     client,
     harness::{self, API_VERSION, TestEnv},
 };
+
+fn test_alert(key: &str, message: &str) -> CoreEvent {
+    CoreEvent::Alert(SystemAlertEvent {
+        idempotency_key: key.to_owned(),
+        level: AlertLevel::Warning,
+        category: AlertCategory::OperatorNotice,
+        source: AlertSource::System,
+        title: "Test alert".to_owned(),
+        message: message.to_owned(),
+        affects_trading: false,
+        visible_toast: false,
+        dedupe_secs: 60,
+    })
+}
 
 const WS_KEY: &str = "dGhlIHNhbXBsZSBub25jZQ==";
 
@@ -233,10 +247,9 @@ async fn ws_subscribe_receives_fanned_alert_over_framed_connection() {
     // Allow the server-side session task to apply the subscription before fan-out.
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    env.state.events.publish(CoreEvent::Alert {
-        level: AlertLevel::Warning,
-        message: "ws-framed-integration".to_owned(),
-    });
+    env.state
+        .events
+        .publish(test_alert("test.ws_framed", "ws-framed-integration"));
 
     let envelope = recv_until_type(&mut session, "system.alert", Duration::from_secs(2)).await;
     assert_eq!(envelope["data"]["message"], "ws-framed-integration");
@@ -255,10 +268,9 @@ async fn ws_broadcaster_delivers_subscribed_core_event() {
         subscriptions,
     });
 
-    env.state.events.publish(CoreEvent::Alert {
-        level: AlertLevel::Warning,
-        message: "ws-bus-integration".to_owned(),
-    });
+    env.state
+        .events
+        .publish(test_alert("test.ws_bus", "ws-bus-integration"));
 
     let text = tokio::time::timeout(Duration::from_secs(2), rx.recv_async())
         .await

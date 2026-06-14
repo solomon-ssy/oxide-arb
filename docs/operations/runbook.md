@@ -803,6 +803,27 @@ Schedule IDs：
 - `bucket-risk-daily`
 - `portfolio-risk-daily`
 
+调度器是 **mode-aware** 的：只有当前模式下 `runnable` 的 cadence 会 enqueue、
+参与 `stale`/`overdue` 判断并可能发 `SchedulerHealth` 告警。
+
+| Schedule | DryRun | Paper | Live |
+|----------|--------|-------|------|
+| `execution-quality-hourly` | runnable | runnable | runnable |
+| `bucket-risk-daily` | runnable（settlement 不足时多为 ReportOnly） | runnable（settlement 不足时多为 ReportOnly） | runnable |
+| `reconciliation-health-hourly` | inactive：Live-only external ledger evidence | inactive：Live-only external ledger evidence | runnable |
+| `portfolio-risk-daily` | inactive：settlement / PIT risk evidence warmup | inactive：settlement / PIT risk evidence warmup | runnable |
+
+查看当前 contract：
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" \
+  http://localhost:8080/api/system/materialization-schedules
+```
+
+`inactive` 表示该 cadence 在当前 execution mode 下业务上不适用，不应解释为
+materialization 失败，也不会驱动 Web 顶栏降级。真正的降级只来自 breaker、
+catalog/infra health 或 `affects_trading=true` 的结构化告警。
+
 ### 9.4 Production Quality Gate 默认门槛
 
 （`QualityGatePolicy::default`，`oxide-arb-models`）

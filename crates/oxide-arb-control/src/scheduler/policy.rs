@@ -8,11 +8,18 @@
 
 use chrono::{DateTime, Duration, Utc};
 use oxide_arb_models::{
-    domain::control_factor::{
-        DataRequirements, MarketFilterSpec, QualityGatePolicy, ReplayAccountScope,
-        RequiredInputDomain, RuntimeConfigRef, SimulationConfig,
+    domain::{
+        MaterializationScheduleActivationView, MaterializationScheduleInactiveReasonView,
+        MaterializationScheduleModeContractView,
+        control_factor::{
+            DataRequirements, MarketFilterSpec, QualityGatePolicy, ReplayAccountScope,
+            RequiredInputDomain, RuntimeConfigRef, SimulationConfig,
+        },
     },
-    enums::control_factor::{ControlFactorType, MaterializationOutputPolicy},
+    enums::{
+        common::ExecutionMode,
+        control_factor::{ControlFactorType, MaterializationOutputPolicy},
+    },
 };
 
 /// One scheduled materialization cadence and its sealed-manifest inputs.
@@ -44,6 +51,40 @@ pub struct ScheduledMaterialization {
     pub output_policy: MaterializationOutputPolicy,
     /// Optional account boundary for balance / token-balance evidence.
     pub replay_account_scope: Option<ReplayAccountScope>,
+    /// Whether this cadence is active for the current execution mode.
+    pub activation: ScheduleActivation,
+    /// Stable operator-facing mode contract for this cadence.
+    pub mode_contract: ScheduleModeContract,
+}
+
+/// Runtime activation state of a scheduled cadence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScheduleActivation {
+    Runnable,
+    Inactive { reason: ScheduleInactiveReason },
+}
+
+impl ScheduleActivation {
+    #[must_use]
+    pub const fn is_runnable(self) -> bool {
+        matches!(self, Self::Runnable)
+    }
+}
+
+/// Why a schedule is inactive for the current execution mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScheduleInactiveReason {
+    UnsupportedExecutionMode,
+    LiveOnlyEvidence,
+    EvidenceWarmup,
+}
+
+/// Stable mode contract documented for operator surfaces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScheduleModeContract {
+    AllModes,
+    LiveOnly,
+    LiveAfterEvidenceWarmup,
 }
 
 /// Full set of scheduled cadences plus shared attribution metadata.
@@ -58,13 +99,15 @@ pub struct SchedulePolicy {
 }
 
 impl SchedulePolicy {
-    /// Production defaults covering the four periodic cadences from master §6.
+    /// Mode-aware production schedule catalog covering the periodic cadences
+    /// from master §6.
     ///
     /// `market-anomaly-event` is intentionally excluded: it is incident-driven
     /// (event-triggered runs) rather than periodic, so it is not part of the
     /// periodic scheduler.
     #[must_use]
-    pub fn production_default(
+    pub fn for_mode(
+        mode: ExecutionMode,
         runtime_config_ref: RuntimeConfigRef,
         created_by: impl Into<String>,
         code_git_sha: impl Into<String>,
@@ -87,6 +130,8 @@ impl SchedulePolicy {
                 quality_gate_policy: QualityGatePolicy::default(),
                 output_policy: MaterializationOutputPolicy::EmitDraftCandidates,
                 replay_account_scope: None,
+                activation: ScheduleActivation::Runnable,
+                mode_contract: ScheduleModeContract::AllModes,
             },
             ScheduledMaterialization {
                 schedule_id: "reconciliation-health-hourly".to_owned(),
@@ -104,6 +149,8 @@ impl SchedulePolicy {
                 quality_gate_policy: QualityGatePolicy::default(),
                 output_policy: MaterializationOutputPolicy::EmitDraftCandidates,
                 replay_account_scope: None,
+                activation: live_only_activation(mode, ScheduleInactiveReason::LiveOnlyEvidence),
+                mode_contract: ScheduleModeContract::LiveOnly,
             },
             ScheduledMaterialization {
                 schedule_id: "bucket-risk-daily".to_owned(),
@@ -122,6 +169,8 @@ impl SchedulePolicy {
                 quality_gate_policy: QualityGatePolicy::default(),
                 output_policy: MaterializationOutputPolicy::EmitDraftCandidates,
                 replay_account_scope: None,
+                activation: ScheduleActivation::Runnable,
+                mode_contract: ScheduleModeContract::AllModes,
             },
             ScheduledMaterialization {
                 schedule_id: "portfolio-risk-daily".to_owned(),
@@ -140,6 +189,8 @@ impl SchedulePolicy {
                 quality_gate_policy: QualityGatePolicy::default(),
                 output_policy: MaterializationOutputPolicy::EmitDraftCandidates,
                 replay_account_scope: None,
+                activation: live_only_activation(mode, ScheduleInactiveReason::EvidenceWarmup),
+                mode_contract: ScheduleModeContract::LiveAfterEvidenceWarmup,
             },
         ];
         Self {
@@ -147,6 +198,18 @@ impl SchedulePolicy {
             created_by: created_by.into(),
             code_git_sha: code_git_sha.into(),
         }
+    }
+}
+
+const fn live_only_activation(
+    mode: ExecutionMode,
+    inactive_reason: ScheduleInactiveReason,
+) -> ScheduleActivation {
+    match mode {
+        ExecutionMode::Live => ScheduleActivation::Runnable,
+        ExecutionMode::DryRun | ExecutionMode::Paper => ScheduleActivation::Inactive {
+            reason: inactive_reason,
+        },
     }
 }
 
@@ -215,6 +278,37 @@ pub fn staleness_threshold_secs(cadence: Duration) -> u64 {
     u64::try_from((cadence * 2).num_seconds()).unwrap_or(0)
 }
 
+impl From<ScheduleInactiveReason> for MaterializationScheduleInactiveReasonView {
+    fn from(reason: ScheduleInactiveReason) -> Self {
+        match reason {
+            ScheduleInactiveReason::UnsupportedExecutionMode => Self::UnsupportedExecutionMode,
+            ScheduleInactiveReason::LiveOnlyEvidence => Self::LiveOnlyEvidence,
+            ScheduleInactiveReason::EvidenceWarmup => Self::EvidenceWarmup,
+        }
+    }
+}
+
+impl From<ScheduleActivation> for MaterializationScheduleActivationView {
+    fn from(activation: ScheduleActivation) -> Self {
+        match activation {
+            ScheduleActivation::Runnable => Self::Runnable,
+            ScheduleActivation::Inactive { reason } => Self::Inactive {
+                reason: reason.into(),
+            },
+        }
+    }
+}
+
+impl From<ScheduleModeContract> for MaterializationScheduleModeContractView {
+    fn from(contract: ScheduleModeContract) -> Self {
+        match contract {
+            ScheduleModeContract::AllModes => Self::AllModes,
+            ScheduleModeContract::LiveOnly => Self::LiveOnly,
+            ScheduleModeContract::LiveAfterEvidenceWarmup => Self::LiveAfterEvidenceWarmup,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
@@ -222,7 +316,12 @@ mod tests {
     use chrono::{Duration, TimeZone, Utc};
     use oxide_arb_test_support::materialization::scheduler_fixed_now;
 
-    use super::{RuntimeConfigRef, SchedulePolicy, StaleSeverity, is_due, is_overdue, staleness};
+    use oxide_arb_models::enums::common::ExecutionMode;
+
+    use super::{
+        RuntimeConfigRef, ScheduleActivation, SchedulePolicy, StaleSeverity, is_due, is_overdue,
+        staleness,
+    };
 
     fn at(hours: i64) -> chrono::DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 6, 5, 0, 0, 0)
@@ -269,8 +368,9 @@ mod tests {
     }
 
     #[test]
-    fn production_default_excludes_market_anomaly() {
-        let policy = SchedulePolicy::production_default(
+    fn mode_aware_catalog_excludes_market_anomaly() {
+        let policy = SchedulePolicy::for_mode(
+            ExecutionMode::Live,
             RuntimeConfigRef::ActiveAt {
                 at: scheduler_fixed_now(),
             },
@@ -288,5 +388,48 @@ mod tests {
         assert!(ids.contains("bucket-risk-daily"));
         assert!(ids.contains("portfolio-risk-daily"));
         assert!(!ids.contains("market-anomaly-event"));
+    }
+
+    #[test]
+    fn dry_run_disables_live_only_and_warmup_schedules() {
+        let policy = SchedulePolicy::for_mode(
+            ExecutionMode::DryRun,
+            RuntimeConfigRef::ActiveAt {
+                at: scheduler_fixed_now(),
+            },
+            "scheduler",
+            "abc",
+        );
+
+        let recon = policy
+            .tasks
+            .iter()
+            .find(|task| task.schedule_id == "reconciliation-health-hourly")
+            .expect("reconciliation schedule");
+        let portfolio = policy
+            .tasks
+            .iter()
+            .find(|task| task.schedule_id == "portfolio-risk-daily")
+            .expect("portfolio schedule");
+        assert!(!recon.activation.is_runnable());
+        assert!(!portfolio.activation.is_runnable());
+    }
+
+    #[test]
+    fn live_enables_all_schedules() {
+        let policy = SchedulePolicy::for_mode(
+            ExecutionMode::Live,
+            RuntimeConfigRef::ActiveAt {
+                at: scheduler_fixed_now(),
+            },
+            "scheduler",
+            "abc",
+        );
+        assert!(
+            policy
+                .tasks
+                .iter()
+                .all(|task| task.activation == ScheduleActivation::Runnable)
+        );
     }
 }

@@ -26,7 +26,8 @@ use oxide_arb_models::{
         },
     },
     enums::common::{
-        AlertLevel, ExecutionMode, RedeemStatus, SettlementTrigger, TradeBusinessOutcome,
+        AlertCategory, AlertLevel, AlertSource, ExecutionMode, RedeemStatus, SettlementTrigger,
+        TradeBusinessOutcome,
     },
     runtime_config::SettlementRuntimeConfig,
     types::{ResolutionEventId, TokenId},
@@ -176,15 +177,21 @@ impl MarketSettlementService {
                 reason = %reason,
                 "redeem terminal failure"
             );
-            self.alerts.dispatch_background(Alert {
-                severity: AlertLevel::Critical,
-                title: "Redeem terminal failure".to_owned(),
-                body: format!(
-                    "Position {} in market {} reached max redeem attempts: {reason}",
-                    pos.position_id, pos.market_id
-                ),
-                timestamp: Utc::now(),
-            });
+            self.alerts.dispatch_background(
+                Alert::new(
+                    format!("settlement.redeem_terminal.{}", pos.position_id),
+                    AlertLevel::Critical,
+                    AlertCategory::TradingSafety,
+                    AlertSource::Settlement,
+                    "Redeem terminal failure",
+                    format!(
+                        "Position {} in market {} reached max redeem attempts: {reason}",
+                        pos.position_id, pos.market_id
+                    ),
+                    Utc::now(),
+                )
+                .with_affects_trading(true),
+            );
             self.position_repo
                 .mark_redeem_terminal(
                     &pos.position_id,

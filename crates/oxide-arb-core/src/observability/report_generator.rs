@@ -6,7 +6,10 @@ use oxide_arb_models::{
         ReportRiskSummary, ReportTradeStats, SettledPnlStats, SettledPositionStats,
         trade::{DailyReport, WeeklyReport},
     },
-    enums::{common::AlertLevel, report::ReportSchemaVersion},
+    enums::{
+        common::{AlertCategory, AlertLevel, AlertSource},
+        report::ReportSchemaVersion,
+    },
     types::Usd,
 };
 use oxide_arb_repository::{
@@ -150,34 +153,46 @@ impl ReportGenerator {
             AlertLevel::Info
         };
         self.alerts
-            .dispatch(Alert {
-                severity,
-                title: format!("Daily report {}", report.date),
-                body: format!(
-                    "settled_pnl={} trades={} settled_positions={} failed_accounting={}",
-                    report.total_pnl,
-                    report.trade_count,
-                    report.settled_pnl.settled_position_count,
-                    report.settled_pnl.failed_accounting_count
-                ),
-                timestamp: Utc::now(),
-            })
+            .dispatch(
+                Alert::new(
+                    format!("report.daily.{}", report.date),
+                    severity,
+                    AlertCategory::OperatorNotice,
+                    AlertSource::ReportGenerator,
+                    format!("Daily report {}", report.date),
+                    format!(
+                        "settled_pnl={} trades={} settled_positions={} failed_accounting={}",
+                        report.total_pnl,
+                        report.trade_count,
+                        report.settled_pnl.settled_position_count,
+                        report.settled_pnl.failed_accounting_count
+                    ),
+                    Utc::now(),
+                )
+                .with_visible_toast(false),
+            )
             .await;
     }
 
     async fn dispatch_weekly_alert(&self, report: &WeeklyReport) {
         self.alerts
-            .dispatch(Alert {
-                severity: AlertLevel::Info,
-                title: format!("Weekly report {}", report.week_start),
-                body: format!(
-                    "settled_pnl={} trades={} settled_positions={}",
-                    report.settled_pnl.realized_pnl,
-                    report.execution.trade_count,
-                    report.settled_pnl.settled_position_count
-                ),
-                timestamp: Utc::now(),
-            })
+            .dispatch(
+                Alert::new(
+                    format!("report.weekly.{}", report.week_start),
+                    AlertLevel::Info,
+                    AlertCategory::OperatorNotice,
+                    AlertSource::ReportGenerator,
+                    format!("Weekly report {}", report.week_start),
+                    format!(
+                        "settled_pnl={} trades={} settled_positions={}",
+                        report.settled_pnl.realized_pnl,
+                        report.execution.trade_count,
+                        report.settled_pnl.settled_position_count
+                    ),
+                    Utc::now(),
+                )
+                .with_visible_toast(false),
+            )
             .await;
     }
 }

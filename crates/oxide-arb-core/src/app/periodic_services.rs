@@ -31,7 +31,7 @@ use oxide_arb_error::{OxideError, OxideResult};
 use oxide_arb_models::{
     domain::risk::UpsertRiskEngineState,
     enums::clickhouse::ChSnapshotReason,
-    enums::common::{AlertLevel, ExecutionMode},
+    enums::common::{AlertCategory, AlertLevel, AlertSource, ExecutionMode},
     types::Usd,
 };
 use oxide_arb_repository::{
@@ -506,15 +506,15 @@ impl AppContext {
                                 );
                                 metrics_ref.health_check_failures.inc();
                                 alerts
-                                    .dispatch(Alert {
-                                        severity: AlertLevel::Critical,
-                                        title: "Health check unhealthy".into(),
-                                        body: format!(
-                                            "unhealthy subsystems: {}",
-                                            unhealthy.join(", ")
-                                        ),
-                                        timestamp: chrono::Utc::now(),
-                                    })
+                                    .dispatch(Alert::new(
+                                        format!("health.unhealthy.{}", unhealthy.join(".")),
+                                        AlertLevel::Critical,
+                                        AlertCategory::Infrastructure,
+                                        AlertSource::HealthChecker,
+                                        "Health check unhealthy",
+                                        format!("unhealthy subsystems: {}", unhealthy.join(", ")),
+                                        chrono::Utc::now(),
+                                    ))
                                     .await;
                             }
                             Ok(())

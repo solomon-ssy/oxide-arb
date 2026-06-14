@@ -5,10 +5,14 @@
 //! (lock-free `ArcSwap` snapshot), so an operator can rotate a bot token or
 //! webhook URL without a restart.
 
-use arc_swap::ArcSwap;
+use arc_swap::{ArcSwap, ArcSwapOption};
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
-use oxide_arb_models::{enums::common::AlertLevel, runtime_config::NotificationConfig};
+use oxide_arb_models::{
+    domain::{CoreEvent, CoreEventPublisher, SystemAlertEvent},
+    enums::common::{AlertCategory, AlertLevel, AlertSource},
+    runtime_config::NotificationConfig,
+};
 use std::{
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -17,10 +21,87 @@ use teloxide::{prelude::*, types::ChatId};
 
 #[derive(Clone)]
 pub struct Alert {
+    pub idempotency_key: String,
     pub severity: AlertLevel,
+    pub category: AlertCategory,
+    pub source: AlertSource,
     pub title: String,
     pub body: String,
+    pub affects_trading: bool,
+    pub visible_toast: bool,
+    pub dedupe_secs: u64,
     pub timestamp: DateTime<Utc>,
+}
+
+impl Alert {
+    #[must_use]
+    pub fn new(
+        idempotency_key: impl Into<String>,
+        severity: AlertLevel,
+        category: AlertCategory,
+        source: AlertSource,
+        title: impl Into<String>,
+        body: impl Into<String>,
+        timestamp: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            idempotency_key: idempotency_key.into(),
+            severity,
+            category,
+            source,
+            title: title.into(),
+            body: body.into(),
+            affects_trading: default_affects_trading(category),
+            visible_toast: default_visible_toast(severity, category),
+            dedupe_secs: 0,
+            timestamp,
+        }
+    }
+
+    #[must_use]
+    pub const fn with_dedupe_secs(mut self, secs: u64) -> Self {
+        self.dedupe_secs = secs;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_affects_trading(mut self, affects_trading: bool) -> Self {
+        self.affects_trading = affects_trading;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_visible_toast(mut self, visible_toast: bool) -> Self {
+        self.visible_toast = visible_toast;
+        self
+    }
+
+    #[must_use]
+    pub fn event(&self, fallback_dedupe_secs: u64) -> SystemAlertEvent {
+        SystemAlertEvent {
+            idempotency_key: self.idempotency_key.clone(),
+            level: self.severity,
+            category: self.category,
+            source: self.source,
+            title: self.title.clone(),
+            message: self.body.clone(),
+            affects_trading: self.affects_trading,
+            visible_toast: self.visible_toast,
+            dedupe_secs: self.dedupe_secs.max(fallback_dedupe_secs),
+        }
+    }
+}
+
+const fn default_affects_trading(category: AlertCategory) -> bool {
+    matches!(
+        category,
+        AlertCategory::TradingSafety | AlertCategory::Infrastructure
+    )
+}
+
+const fn default_visible_toast(severity: AlertLevel, category: AlertCategory) -> bool {
+    matches!(severity, AlertLevel::Critical | AlertLevel::Emergency)
+        || matches!(category, AlertCategory::TradingSafety)
 }
 
 struct TelegramChannel {
@@ -73,6 +154,7 @@ impl Channels {
 
 pub struct AlertDispatcher {
     channels: ArcSwap<Channels>,
+    events: ArcSwapOption<CoreEventPublisher>,
     cooldown: DashMap<String, Instant>,
     recordings: Option<Arc<Mutex<Vec<Alert>>>>,
 }
@@ -83,6 +165,7 @@ impl AlertDispatcher {
     pub fn new(config: &NotificationConfig) -> Self {
         Self {
             channels: ArcSwap::from_pointee(Channels::from_config(config)),
+            events: ArcSwapOption::empty(),
             cooldown: DashMap::new(),
             recordings: None,
         }
@@ -110,21 +193,34 @@ impl AlertDispatcher {
                 webhook: None,
                 cooldown_duration,
             }),
+            events: ArcSwapOption::empty(),
             cooldown: DashMap::new(),
             recordings: Some(recordings),
         }
     }
 
+    /// Attach the real-time event bus so the dispatcher is the single alert
+    /// router for external channels and WebSocket clients.
+    pub fn attach_event_publisher(&self, events: CoreEventPublisher) {
+        self.events.store(Some(Arc::new(events)));
+    }
+
     pub async fn dispatch(&self, alert: Alert) {
         let channels = self.channels.load_full();
-        let cooldown_key = format!("{}:{}", alert.severity, alert.title);
+        let event = alert.event(channels.cooldown_duration.as_secs());
+        let cooldown_key = event.idempotency_key.clone();
+        let cooldown_duration = Duration::from_secs(event.dedupe_secs);
         if let Some(last) = self.cooldown.get(&cooldown_key) {
-            if last.elapsed() < channels.cooldown_duration {
-                tracing::debug!(title = %alert.title, "alert suppressed by cooldown");
+            if last.elapsed() < cooldown_duration {
+                tracing::debug!(alert_key = %event.idempotency_key, title = %event.title, "alert suppressed by cooldown");
                 return;
             }
         }
         self.cooldown.insert(cooldown_key, Instant::now());
+
+        if let Some(events) = self.events.load_full() {
+            events.publish(CoreEvent::Alert(event.clone()));
+        }
 
         if let Some(recordings) = &self.recordings {
             if let Ok(mut guard) = recordings.lock() {
@@ -134,10 +230,10 @@ impl AlertDispatcher {
 
         let text = format!(
             "[{}] {}\n{}\n{}",
-            alert.severity, alert.title, alert.body, alert.timestamp
+            event.level, event.title, event.message, alert.timestamp
         );
 
-        match alert.severity {
+        match event.level {
             AlertLevel::Emergency | AlertLevel::Critical => {
                 send_telegram(&channels, &text).await;
                 send_webhook(&channels, &alert).await;
@@ -146,7 +242,7 @@ impl AlertDispatcher {
                 send_webhook(&channels, &alert).await;
             }
             AlertLevel::Info => {
-                tracing::info!(severity = %alert.severity, title = %alert.title, "{}", alert.body);
+                tracing::info!(severity = %event.level, title = %event.title, "{}", event.message);
             }
         }
     }
@@ -176,9 +272,13 @@ async fn send_telegram(channels: &Channels, text: &str) {
 async fn send_webhook(channels: &Channels, alert: &Alert) {
     let Some(wh) = &channels.webhook else { return };
     let payload = serde_json::json!({
+        "idempotency_key": &alert.idempotency_key,
         "severity": format!("{}", alert.severity),
-        "title": alert.title,
-        "body": alert.body,
+        "category": alert.category,
+        "source": alert.source,
+        "title": &alert.title,
+        "body": &alert.body,
+        "affects_trading": alert.affects_trading,
         "timestamp": alert.timestamp.to_rfc3339(),
     });
     let result = wh
@@ -197,19 +297,25 @@ async fn send_webhook(channels: &Channels, alert: &Alert) {
 mod tests {
     use super::{Alert, AlertDispatcher};
     use chrono::Utc;
-    use oxide_arb_models::{enums::common::AlertLevel, runtime_config::NotificationConfig};
+    use oxide_arb_models::{
+        enums::common::{AlertCategory, AlertLevel, AlertSource},
+        runtime_config::NotificationConfig,
+    };
     use std::{
         sync::{Arc, Mutex},
         time::Duration,
     };
 
     fn alert(title: &str) -> Alert {
-        Alert {
-            severity: AlertLevel::Critical,
-            title: title.to_owned(),
-            body: "body".to_owned(),
-            timestamp: Utc::now(),
-        }
+        Alert::new(
+            format!("test.{title}"),
+            AlertLevel::Critical,
+            AlertCategory::Infrastructure,
+            AlertSource::System,
+            title,
+            "body",
+            Utc::now(),
+        )
     }
 
     #[tokio::test]

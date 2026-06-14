@@ -217,6 +217,37 @@ pub enum AlertLevel {
     Emergency,
 }
 
+/// Business category for an operational alert.
+///
+/// This separates money-critical trading state from informational operator
+/// notices, so dashboards do not infer trading degradation from every warning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AlertCategory {
+    /// A trading-safety signal that can affect order admission or capital safety.
+    TradingSafety,
+    /// Infrastructure availability, storage, WebSocket, or service-health signal.
+    Infrastructure,
+    /// Scheduled materialization health for currently runnable cadences.
+    SchedulerHealth,
+    /// Operator-facing information that does not affect trading state.
+    OperatorNotice,
+}
+
+/// Subsystem that produced an operational alert.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AlertSource {
+    Scheduler,
+    HealthChecker,
+    DataPipeline,
+    Execution,
+    Settlement,
+    ReportGenerator,
+    RiskEngine,
+    System,
+}
+
 impl Display for AlertLevel {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         let label = match self {

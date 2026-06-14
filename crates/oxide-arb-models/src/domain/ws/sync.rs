@@ -9,8 +9,8 @@
 use serde::Serialize;
 
 use crate::domain::{
-    ControlFactorMaterializationRunView, LivePnlView, OpportunityView, PositionView,
-    RiskEngineStateView, SystemStatus,
+    ControlFactorMaterializationRunView, LivePnlView, MaterializationScheduleStatusView,
+    OpportunityView, PositionView, RiskEngineStateView, SystemStatus,
 };
 
 /// Authorized projection of live system state, returned for a `sync` command.
@@ -39,4 +39,7 @@ pub struct SyncSnapshot {
     /// Active materialization runs (`Queued` / `Running`), requires `ControlFactor` read.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active_materialization_runs: Option<Vec<ControlFactorMaterializationRunView>>,
+    /// Mode-aware materialization schedule status, requires `ControlFactor` read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub materialization_schedules: Option<Vec<MaterializationScheduleStatusView>>,
 }

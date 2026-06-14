@@ -9,13 +9,15 @@
 
 use std::sync::Arc;
 
-use oxide_arb_control::governance::ControlFactorRegistry;
+use chrono::Utc;
+use oxide_arb_control::{governance::ControlFactorRegistry, scheduler::SchedulePolicy};
 use oxide_arb_models::{
     config::DeployConfig,
     domain::{
-        CoreEventPublisher, MarketDataPort, MetricsScrapePort, ReadinessPort, ReplayPort,
-        RuntimeConfigPort, RuntimeControlPort,
+        CoreEventPublisher, MarketDataPort, MaterializationScheduleStatusView, MetricsScrapePort,
+        ReadinessPort, ReplayPort, RuntimeConfigPort, RuntimeConfigRef, RuntimeControlPort,
     },
+    enums::control_factor::MaterializationRunStatus,
 };
 use oxide_arb_repository::traits::{
     ControlFactorRepository, ControlFactorShadowDecisionRepository, EvidenceTimeseriesRepository,
@@ -27,6 +29,7 @@ use oxide_arb_repository::traits::{
 use crate::{
     audit::OperationLogBuffer,
     auth::casbin::{CasbinService, PermChecker},
+    error::WebError,
     jwt::{JwtService, RedisTokenBlacklist},
     ws::SessionRegistry,
 };
@@ -100,4 +103,61 @@ pub struct AppState {
     pub metrics: Arc<dyn MetricsScrapePort>,
     /// Readiness probe surface (`GET /ready`).
     pub readiness: Arc<dyn ReadinessPort>,
+}
+
+const MATERIALIZATION_SUCCESS_STATUSES: &[MaterializationRunStatus] = &[
+    MaterializationRunStatus::Completed,
+    MaterializationRunStatus::CompletedWithRejectedFactors,
+    MaterializationRunStatus::ReportOnly,
+];
+
+impl AppState {
+    /// Mode-aware materialization schedule status projection for REST and WS sync.
+    pub async fn materialization_schedule_statuses(
+        &self,
+    ) -> Result<Vec<MaterializationScheduleStatusView>, WebError> {
+        let now = Utc::now();
+        let policy = SchedulePolicy::for_mode(
+            self.control.execution_mode(),
+            RuntimeConfigRef::ActiveAt { at: now },
+            "scheduler",
+            option_env!("GIT_SHA").unwrap_or("unknown"),
+        );
+        let mut views = Vec::with_capacity(policy.tasks.len());
+        for task in policy.tasks {
+            let latest_any = self
+                .control_factors
+                .latest_run_for_schedule(&task.schedule_id, &[])
+                .await?;
+            let latest_success = self
+                .control_factors
+                .latest_run_for_schedule(&task.schedule_id, MATERIALIZATION_SUCCESS_STATUSES)
+                .await?;
+            let last_run_at = latest_any.as_ref().map(|run| run.created_at);
+            let last_success_at = latest_success
+                .as_ref()
+                .map(|run| run.finished_at.unwrap_or(run.created_at));
+            let last_terminal_status = latest_any.as_ref().map(|run| run.status).filter(|status| {
+                !matches!(
+                    *status,
+                    MaterializationRunStatus::Queued | MaterializationRunStatus::Running
+                )
+            });
+            let next_due_at = if task.activation.is_runnable() {
+                Some(last_run_at.map_or(now, |last| last + task.cadence))
+            } else {
+                None
+            };
+            views.push(MaterializationScheduleStatusView {
+                schedule_id: task.schedule_id,
+                activation: task.activation.into(),
+                mode_contract: task.mode_contract.into(),
+                last_run_at,
+                last_success_at,
+                last_terminal_status,
+                next_due_at,
+            });
+        }
+        Ok(views)
+    }
 }

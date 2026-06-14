@@ -348,6 +348,7 @@ impl AppContext {
                 dropped.with_label_values(&[kind]).inc();
             }))
         };
+        infra.alerts.attach_event_publisher(events.clone());
         let mode = infra.execution_mode;
         deploy.ensure_valid_for_mode(mode)?;
         let runtime_store = Arc::clone(&infra.runtime_store);

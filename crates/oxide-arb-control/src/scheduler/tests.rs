@@ -22,7 +22,10 @@ use oxide_arb_test_support::{
     mocks::{EXECUTION_QUALITY_HOURLY_SCHEDULE_ID, MockSchedulerControlFactorRepository},
 };
 
-use super::{MaterializationScheduler, ScheduleAlert, ScheduleOutcome, ScheduledMaterialization};
+use super::{
+    MaterializationScheduler, ScheduleActivation, ScheduleAlert, ScheduleInactiveReason,
+    ScheduleModeContract, ScheduleOutcome, ScheduledMaterialization,
+};
 use crate::scheduler::{SchedulePolicy, SchedulerCycleReport};
 
 fn policy_with(cadence: Duration) -> SchedulePolicy {
@@ -45,10 +48,20 @@ fn policy_with(cadence: Duration) -> SchedulePolicy {
             quality_gate_policy: QualityGatePolicy::default(),
             output_policy: MaterializationOutputPolicy::EmitDraftCandidates,
             replay_account_scope: None,
+            activation: ScheduleActivation::Runnable,
+            mode_contract: ScheduleModeContract::AllModes,
         }],
         created_by: "scheduler".to_owned(),
         code_git_sha: "abc".to_owned(),
     }
+}
+
+fn inactive_policy_with(cadence: Duration) -> SchedulePolicy {
+    let mut policy = policy_with(cadence);
+    policy.tasks[0].activation = ScheduleActivation::Inactive {
+        reason: ScheduleInactiveReason::LiveOnlyEvidence,
+    };
+    policy
 }
 
 async fn tick_with(
@@ -76,6 +89,25 @@ async fn due_schedule_enqueues_a_single_run() {
     ));
     assert_eq!(repo.enqueued_count(), 1);
     assert_eq!(repo.publish_calls(), 0);
+}
+
+#[tokio::test]
+async fn inactive_schedule_does_not_enqueue_or_alert() {
+    let now = scheduler_fixed_now();
+    let repo = Arc::new(MockSchedulerControlFactorRepository::with_runs(Vec::new()));
+    let scheduler = MaterializationScheduler::new(
+        Arc::clone(&repo) as _,
+        inactive_policy_with(Duration::hours(1)),
+    );
+    let report = scheduler.tick(now).await.expect("tick succeeds");
+    assert!(matches!(
+        report.outcomes.as_slice(),
+        [ScheduleOutcome::Inactive { schedule_id, reason }]
+            if schedule_id == EXECUTION_QUALITY_HOURLY_SCHEDULE_ID
+                && *reason == ScheduleInactiveReason::LiveOnlyEvidence
+    ));
+    assert!(report.alerts.is_empty());
+    assert_eq!(repo.enqueued_count(), 0);
 }
 
 #[tokio::test]
