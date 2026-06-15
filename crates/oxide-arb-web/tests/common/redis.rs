@@ -1,7 +1,7 @@
 //! Redis testcontainer bring-up for the JWT revocation blacklist.
 
 use oxide_arb_models::config::RedisConfig;
-use testcontainers::{ContainerAsync, runners::AsyncRunner};
+use testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner};
 use testcontainers_modules::redis::Redis;
 
 /// Redis settings tuned for integration tests (larger pool + longer wait).
@@ -19,7 +19,7 @@ pub fn test_redis_config(port: u16) -> RedisConfig {
 
 /// Start Redis and return its host port plus the container guard.
 pub async fn setup_redis() -> (u16, ContainerAsync<Redis>) {
-    let container = Redis::default()
+    let container = Redis::default().with_tag("7-alpine")
         .start()
         .await
         .expect("start Redis container");

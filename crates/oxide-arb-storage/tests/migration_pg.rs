@@ -14,7 +14,7 @@ use oxide_arb_storage::postgres::{
 };
 use sea_orm::{ConnectionTrait, EntityTrait};
 use std::time::Duration;
-use testcontainers::runners::AsyncRunner;
+use testcontainers::{ImageExt, runners::AsyncRunner};
 use tokio::time::sleep;
 
 #[test]
@@ -104,6 +104,7 @@ async fn setup_pool() -> (
         .with_db_name("test_oxide_arb")
         .with_user("postgres")
         .with_password("postgres")
+        .with_tag("16")
         .start()
         .await
         .expect("Failed to start PostgreSQL container");

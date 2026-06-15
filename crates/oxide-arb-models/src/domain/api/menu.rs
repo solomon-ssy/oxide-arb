@@ -35,6 +35,8 @@ pub struct CreateMenuRequest {
     pub keep_alive: bool,
     #[serde(default)]
     pub hide_in_menu: bool,
+    #[serde(default)]
+    pub affix_tab: bool,
     /// Defaults to enabled when omitted.
     pub status: Option<RoleStatus>,
 }
@@ -60,6 +62,7 @@ pub struct UpdateMenuRequest {
     pub sort: Option<i32>,
     pub keep_alive: Option<bool>,
     pub hide_in_menu: Option<bool>,
+    pub affix_tab: Option<bool>,
     pub status: Option<RoleStatus>,
 }
 
@@ -77,6 +80,7 @@ impl From<UpdateMenuRequest> for MenuPatch {
             sort: Patch::from_option(request.sort),
             keep_alive: Patch::from_option(request.keep_alive),
             hide_in_menu: Patch::from_option(request.hide_in_menu),
+            affix_tab: Patch::from_option(request.affix_tab),
             status: Patch::from_option(request.status),
         }
     }

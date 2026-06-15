@@ -7,7 +7,7 @@ use oxide_arb_models::{
 use oxide_arb_storage::cache::{
     CacheBackend, CacheKey, MokaBackend, RedisBackend, TieredCache, connect_pool,
 };
-use testcontainers::runners::AsyncRunner;
+use testcontainers::{ImageExt, runners::AsyncRunner};
 
 fn test_redis_config(port: u16) -> RedisConfig {
     RedisConfig {
@@ -25,6 +25,7 @@ async fn setup_redis() -> (
     testcontainers::ContainerAsync<testcontainers_modules::redis::Redis>,
 ) {
     let container = testcontainers_modules::redis::Redis::default()
+        .with_tag("7-alpine")
         .start()
         .await
         .expect("Redis container");

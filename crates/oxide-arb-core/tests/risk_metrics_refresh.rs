@@ -49,7 +49,7 @@ use oxide_arb_storage::postgres::{
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use std::sync::Arc;
-use testcontainers::runners::AsyncRunner;
+use testcontainers::{ImageExt, runners::AsyncRunner};
 
 const MARKET: &str = "0xrefresh-market";
 const EVENT: &str = "evt-refresh";
@@ -275,6 +275,7 @@ async fn simulated_refresh_derives_mode_scoped_ledger() {
         .with_db_name("test_oxide_arb")
         .with_user("postgres")
         .with_password("postgres")
+        .with_tag("16")
         .start()
         .await
         .expect("PG container");

@@ -38,6 +38,7 @@ pub enum Menu {
     Sort,
     KeepAlive,
     HideInMenu,
+    AffixTab,
     Status,
     CreatedAt,
     UpdatedAt,
@@ -65,6 +66,12 @@ pub fn table() -> TableCreateStatement {
         )
         .col(
             ColumnDef::new(Menu::HideInMenu)
+                .boolean()
+                .not_null()
+                .default(false),
+        )
+        .col(
+            ColumnDef::new(Menu::AffixTab)
                 .boolean()
                 .not_null()
                 .default(false),

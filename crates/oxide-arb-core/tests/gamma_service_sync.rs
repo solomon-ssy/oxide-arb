@@ -23,7 +23,7 @@ use oxide_arb_storage::{
     },
 };
 use std::sync::Arc;
-use testcontainers::runners::AsyncRunner;
+use testcontainers::{ImageExt, runners::AsyncRunner};
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
     matchers::{method, path, query_param},
@@ -78,6 +78,7 @@ async fn build_gamma_service(server_uri: &str) -> (GammaService, Arc<MarketRegis
         .with_db_name("test_oxide_arb")
         .with_user("postgres")
         .with_password("postgres")
+        .with_tag("16")
         .start()
         .await
         .expect("PG container");
@@ -93,6 +94,7 @@ async fn build_gamma_service(server_uri: &str) -> (GammaService, Arc<MarketRegis
         .expect("migrate");
 
     let redis_container = testcontainers_modules::redis::Redis::default()
+        .with_tag("7-alpine")
         .start()
         .await
         .expect("Redis container");

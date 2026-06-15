@@ -30,6 +30,7 @@ pub struct Model {
     pub sort: i32,
     pub keep_alive: bool,
     pub hide_in_menu: bool,
+    pub affix_tab: bool,
     pub status: RoleStatus,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,

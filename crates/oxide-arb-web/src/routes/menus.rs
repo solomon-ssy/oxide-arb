@@ -85,6 +85,7 @@ pub async fn create(
         sort: request.sort,
         keep_alive: request.keep_alive,
         hide_in_menu: request.hide_in_menu,
+        affix_tab: request.affix_tab,
         status: request.status.unwrap_or(RoleStatus::Enabled),
     };
     let menu = state.menus.create(new).await?;

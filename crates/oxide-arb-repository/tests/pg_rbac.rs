@@ -120,6 +120,7 @@ fn new_menu(title: &str, parent_id: Option<MenuId>, kind: MenuKind, sort: i32) -
         sort,
         keep_alive: false,
         hide_in_menu: false,
+        affix_tab: false,
         status: RoleStatus::Enabled,
     }
 }

@@ -29,12 +29,12 @@ const PRODUCES: &[SeedArtifact] = &[
 
 pub const MENUS_SEED: SeedSpec = SeedSpec {
     id: SEED_ID,
-    version: 2,
+    version: 4,
     target_table: menu_table_name,
     depends_on: DEPENDS_ON,
     produces: PRODUCES,
     conflict_policy: SeedConflictPolicy::GraphOrdered,
-    checksum: "rbac.menus.bootstrap.v2",
+    checksum: "rbac.menus.bootstrap.v4",
     loader: load_boxed,
 };
 
@@ -81,6 +81,7 @@ struct NodeSpec<'a> {
     component: Option<&'a str>,
     icon: Option<&'a str>,
     permission_code: Option<String>,
+    affix_tab: bool,
 }
 
 /// Route page fields for [`MenuTree::page`].
@@ -105,6 +106,7 @@ impl Default for NodeSpec<'_> {
             component: None,
             icon: None,
             permission_code: None,
+            affix_tab: false,
         }
     }
 }
@@ -142,6 +144,7 @@ impl MenuTree {
             sort: Set(sort),
             keep_alive: Set(false),
             hide_in_menu: Set(hide_in_menu),
+            affix_tab: Set(spec.affix_tab),
             status: Set(RoleStatus::Enabled),
             ..Default::default()
         });
@@ -160,6 +163,14 @@ impl MenuTree {
     }
 
     fn page(&mut self, spec: PageSpec<'_>) -> MenuId {
+        self.push_page(spec, false)
+    }
+
+    fn page_affixed(&mut self, spec: PageSpec<'_>) -> MenuId {
+        self.push_page(spec, true)
+    }
+
+    fn push_page(&mut self, spec: PageSpec<'_>, affix_tab: bool) -> MenuId {
         self.push(NodeSpec {
             parent: Some(spec.parent),
             kind: MenuKind::Menu,
@@ -169,6 +180,7 @@ impl MenuTree {
             component: Some(spec.component),
             icon: Some(spec.icon),
             permission_code: spec.permission_code,
+            affix_tab,
         })
     }
 
@@ -189,7 +201,6 @@ fn build_tree() -> MenuTree {
     build_dashboard(&mut t);
     build_trading(&mut t);
     build_risk(&mut t);
-    build_analytics(&mut t);
     build_operations(&mut t);
     build_access_control(&mut t);
     t
@@ -201,7 +212,7 @@ fn build_dashboard(t: &mut MenuTree) {
         "page.menu.group.dashboard",
         "lucide:layout-dashboard",
     );
-    let overview = t.page(PageSpec {
+    let overview = t.page_affixed(PageSpec {
         parent: &dashboard_root,
         name: "dashboard",
         title: "page.menu.dashboard",
@@ -228,6 +239,15 @@ fn build_dashboard(t: &mut MenuTree) {
         "Switch Mode",
         perm(ResourceType::System, Operation::SwitchMode),
     );
+    t.page(PageSpec {
+        parent: &dashboard_root,
+        name: "analytics",
+        title: "page.menu.analytics",
+        path: "/analytics",
+        component: "analytics/index",
+        permission_code: Some(perm(ResourceType::Analytics, Operation::Read)),
+        icon: "lucide:line-chart",
+    });
 }
 
 fn build_trading(t: &mut MenuTree) {
@@ -305,23 +325,6 @@ fn build_risk(t: &mut MenuTree) {
         "Remove Entry",
         perm(ResourceType::Blacklist, Operation::Delete),
     );
-}
-
-fn build_analytics(t: &mut MenuTree) {
-    let analytics_root = t.dir(
-        "analytics-root",
-        "page.menu.group.analytics",
-        "lucide:bar-chart-3",
-    );
-    t.page(PageSpec {
-        parent: &analytics_root,
-        name: "analytics",
-        title: "page.menu.analytics",
-        path: "/analytics",
-        component: "analytics/index",
-        permission_code: Some(perm(ResourceType::Analytics, Operation::Read)),
-        icon: "lucide:line-chart",
-    });
 }
 
 fn build_operations(t: &mut MenuTree) {
@@ -619,6 +622,40 @@ mod tests {
         assert!(!names.contains("materializations"));
         assert!(!names.contains("system-control"));
         assert!(!names.contains("permissions"));
+        assert!(!names.contains("analytics-root"));
+    }
+
+    #[test]
+    fn dashboard_overview_is_affixed_by_default() {
+        let tree = build_tree();
+        let dashboard = tree
+            .models
+            .iter()
+            .find(|model| {
+                matches!(&model.name, sea_orm::ActiveValue::Set(name) if name == "dashboard")
+            })
+            .expect("dashboard menu node");
+        assert_eq!(
+            dashboard.affix_tab,
+            sea_orm::ActiveValue::Set(true),
+        );
+    }
+
+    #[test]
+    fn analytics_page_is_under_dashboard() {
+        let tree = build_tree();
+        let dashboard_root = stable_menu_id("dashboard_root");
+        let analytics = tree
+            .models
+            .iter()
+            .find(|model| {
+                matches!(&model.name, sea_orm::ActiveValue::Set(name) if name == "analytics")
+            })
+            .expect("analytics menu node");
+        assert_eq!(
+            analytics.parent_id,
+            sea_orm::ActiveValue::Set(Some(dashboard_root))
+        );
     }
 
     #[test]

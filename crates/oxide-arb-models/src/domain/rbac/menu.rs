@@ -25,6 +25,7 @@ pub struct MenuInfo {
     pub sort: i32,
     pub keep_alive: bool,
     pub hide_in_menu: bool,
+    pub affix_tab: bool,
     pub status: RoleStatus,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -32,7 +33,7 @@ pub struct MenuInfo {
 
 info_from_model!(MenuInfo, crate::entities::menu::Model, {
     id, parent_id, name, kind, path, component, title, icon, permission_code,
-    sort, keep_alive, hide_in_menu, status, created_at, updated_at,
+    sort, keep_alive, hide_in_menu, affix_tab, status, created_at, updated_at,
 });
 
 /// Insert payload for a new menu node.
@@ -51,6 +52,7 @@ pub struct NewMenu {
     pub sort: i32,
     pub keep_alive: bool,
     pub hide_in_menu: bool,
+    pub affix_tab: bool,
     pub status: RoleStatus,
 }
 
@@ -69,6 +71,7 @@ pub struct MenuPatch {
     pub sort: Patch<i32>,
     pub keep_alive: Patch<bool>,
     pub hide_in_menu: Patch<bool>,
+    pub affix_tab: Patch<bool>,
     pub status: Patch<RoleStatus>,
 }
 
