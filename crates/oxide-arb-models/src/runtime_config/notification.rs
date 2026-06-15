@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 pub struct NotificationConfig {
     /// Minimum interval (seconds) between alerts with the same severity+title
     /// (anti-flood; applies to all channels). Default: `60`.
+    #[schemars(extend("x-format" = "integer"))]
     pub alert_cooldown_secs: u64,
     /// Telegram channel (Emergency/Critical alerts).
     pub telegram: TelegramConfig,

@@ -37,9 +37,8 @@ pub struct NewOperationLog {
     pub latency_ms: i32,
     pub detail: serde_json::Value,
     pub governance_audit_event_id: Option<AuditEventId>,
+    pub governance_audit_sequence: Option<i64>,
 }
-
-/// DB row projection for the `operation_log` table.
 #[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]
 #[sea_orm(entity = "crate::entities::operation_log::Entity")]
 pub struct OperationLogInfo {
@@ -62,11 +61,12 @@ pub struct OperationLogInfo {
     pub latency_ms: i32,
     pub detail: serde_json::Value,
     pub governance_audit_event_id: Option<AuditEventId>,
+    pub governance_audit_sequence: Option<i64>,
 }
 
 info_from_model!(OperationLogInfo, crate::entities::operation_log::Model, {
     id, occurred_at, request_id, actor_user_id, actor_username, acting_role,
     category, action, resource_type, resource_id, http_method, http_path,
     http_status, outcome, client_ip, user_agent, latency_ms, detail,
-    governance_audit_event_id,
+    governance_audit_event_id, governance_audit_sequence,
 });

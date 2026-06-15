@@ -88,6 +88,9 @@ fn page_condition(query: &OperationLogQuery) -> Condition {
     if let Some(request_id) = query.request_id.as_deref().filter(|id| !id.is_empty()) {
         condition = condition.add(Column::RequestId.eq(request_id));
     }
+    if let Some(event_id) = &query.governance_audit_event_id {
+        condition = condition.add(Column::GovernanceAuditEventId.eq(event_id.clone()));
+    }
     if let Some(from) = query.from {
         condition = condition.add(Column::OccurredAt.gte(from));
     }

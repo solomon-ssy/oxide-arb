@@ -47,6 +47,8 @@ pub struct OperationEnrichment {
     pub detail: Option<Value>,
     /// Linked governance hash-chain event (dual-track hard link).
     pub governance_audit_event_id: Option<AuditEventId>,
+    /// Monotonic sequence of the linked governance audit event.
+    pub governance_audit_sequence: Option<i64>,
     /// Outcome override (otherwise derived from the HTTP status).
     pub outcome: Option<OperationOutcome>,
     /// Actor id override for endpoints where no `Claims` exist yet (login).
@@ -87,8 +89,10 @@ impl OperationContext {
 
     /// Hard-link this operation to its governance hash-chain event, enabling a
     /// foreign-key cross-walk between the two audit tracks.
-    pub fn link_governance(&self, audit_event_id: AuditEventId) {
-        self.inner.borrow_mut().governance_audit_event_id = Some(audit_event_id);
+    pub fn link_governance(&self, audit_event_id: AuditEventId, audit_sequence: i64) {
+        let mut inner = self.inner.borrow_mut();
+        inner.governance_audit_event_id = Some(audit_event_id);
+        inner.governance_audit_sequence = Some(audit_sequence);
     }
 
     /// Override the outcome that would otherwise be derived from the HTTP status

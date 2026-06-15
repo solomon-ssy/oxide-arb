@@ -16,7 +16,7 @@ use oxide_arb_models::{
         ControlFactorType, FactorStatus, MaterializationRunStatus, MaterializationStageName,
         PublicationMode, PublicationStatus,
     },
-    types::{ControlFactorId, FactorPublicationId, MaterializationRunId},
+    types::{AuditEventId, ControlFactorId, FactorPublicationId, MaterializationRunId},
 };
 
 /// Authoritative persistence for the control-factor registry and its append-only
@@ -230,6 +230,19 @@ pub trait ControlFactorRepository: Send + Sync {
     async fn load_audit_chain(
         &self,
         from_sequence: i64,
+        limit: u64,
+    ) -> Result<Vec<ControlFactorAuditEventInfo>, StorageError>;
+
+    /// Loads one audit event by primary key (`event_id`).
+    async fn load_audit_event_by_id(
+        &self,
+        event_id: &AuditEventId,
+    ) -> Result<Option<ControlFactorAuditEventInfo>, StorageError>;
+
+    /// Loads governance audit events whose `resource_id` matches the factor id.
+    async fn load_audit_events_by_resource(
+        &self,
+        resource_id: &str,
         limit: u64,
     ) -> Result<Vec<ControlFactorAuditEventInfo>, StorageError>;
 }

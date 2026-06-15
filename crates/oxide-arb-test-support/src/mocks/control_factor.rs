@@ -26,7 +26,7 @@ use oxide_arb_models::{
         ControlFactorType, FactorStatus, MaterializationRunStatus, MaterializationStageName,
         PublicationMode, PublicationStatus,
     },
-    types::{ControlFactorId, FactorPublicationId, MaterializationRunId},
+    types::{AuditEventId, ControlFactorId, FactorPublicationId, MaterializationRunId},
 };
 use oxide_arb_repository::traits::ControlFactorRepository;
 
@@ -314,6 +314,21 @@ impl ControlFactorRepository for MockSchedulerControlFactorRepository {
     async fn load_audit_chain(
         &self,
         _from_sequence: i64,
+        _limit: u64,
+    ) -> Result<Vec<ControlFactorAuditEventInfo>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn load_audit_event_by_id(
+        &self,
+        _event_id: &AuditEventId,
+    ) -> Result<Option<ControlFactorAuditEventInfo>, StorageError> {
+        Ok(None)
+    }
+
+    async fn load_audit_events_by_resource(
+        &self,
+        _resource_id: &str,
         _limit: u64,
     ) -> Result<Vec<ControlFactorAuditEventInfo>, StorageError> {
         Ok(Vec::new())

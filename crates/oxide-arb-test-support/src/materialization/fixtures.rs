@@ -357,10 +357,16 @@ impl RuntimeConfigVersionRepository for FakeRuntimeConfigRepository {
         &self,
         _activation: NewRuntimeConfigActivation,
         _audit: NewControlFactorAuditEvent,
-    ) -> Result<RuntimeConfigActivationInfo, StorageError> {
+    ) -> Result<AuditedOutcome<RuntimeConfigActivationInfo>, StorageError> {
         Err(StorageError::Codec(
             "FakeRuntimeConfigRepository::activate_version_governed is not implemented".to_owned(),
         ))
+    }
+
+    async fn load_current_activation(
+        &self,
+    ) -> Result<Option<RuntimeConfigActivationInfo>, StorageError> {
+        Ok(None)
     }
 
     async fn load_version(

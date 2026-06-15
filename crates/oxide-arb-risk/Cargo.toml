@@ -25,7 +25,7 @@ uuid = { workspace = true }
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 rust_decimal_macros = { workspace = true }
-proptest = "1"
+proptest = { workspace = true }
 
 [lints]
 workspace = true

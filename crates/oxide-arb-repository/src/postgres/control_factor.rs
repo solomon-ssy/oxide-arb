@@ -637,6 +637,32 @@ async fn load_audit_chain_q(
         .map_err(StorageError::from)
 }
 
+async fn load_audit_event_by_id_q(
+    db: &impl ConnectionTrait,
+    event_id: &AuditEventId,
+) -> Result<Option<ControlFactorAuditEventInfo>, StorageError> {
+    AuditEntity::find_by_id(event_id.clone())
+        .one(db)
+        .await
+        .map(|row| row.map(Into::into))
+        .map_err(StorageError::from)
+}
+
+async fn load_audit_events_by_resource_q(
+    db: &impl ConnectionTrait,
+    resource_id: &str,
+    limit: u64,
+) -> Result<Vec<ControlFactorAuditEventInfo>, StorageError> {
+    AuditEntity::find()
+        .filter(AuditColumn::ResourceId.eq(resource_id))
+        .order_by_desc(AuditColumn::Sequence)
+        .limit(limit)
+        .all(db)
+        .await
+        .map(|rows| rows.into_iter().map(Into::into).collect())
+        .map_err(StorageError::from)
+}
+
 // ── Publications ────────────────────────────────────────────────────────────
 
 async fn find_publication_by_idempotency_q(
@@ -757,6 +783,7 @@ async fn publish_publication_q(
     Ok(PublishPublicationOutcome::Published(AuditedOutcome::new(
         info,
         event.event_id,
+        event.sequence,
     )))
 }
 
@@ -818,7 +845,7 @@ async fn rollback_publication_q(
             entity: "control_factor_publication",
             id: target_publication_id.to_string(),
         })?;
-    Ok(AuditedOutcome::new(info, event.event_id))
+    Ok(AuditedOutcome::new(info, event.event_id, event.sequence))
 }
 
 async fn list_publications_q(
@@ -1139,7 +1166,11 @@ impl ControlFactorRepository for PgControlFactorRepository {
                     id: factor_id.to_string(),
                 })?;
         txn.commit().await.map_err(StorageError::from)?;
-        Ok(Some(AuditedOutcome::new(updated, event.event_id)))
+        Ok(Some(AuditedOutcome::new(
+            updated,
+            event.event_id,
+            event.sequence,
+        )))
     }
 
     async fn expire_factors(
@@ -1255,5 +1286,20 @@ impl ControlFactorRepository for PgControlFactorRepository {
         limit: u64,
     ) -> Result<Vec<ControlFactorAuditEventInfo>, StorageError> {
         load_audit_chain_q(&self.db, from_sequence, limit).await
+    }
+
+    async fn load_audit_event_by_id(
+        &self,
+        event_id: &AuditEventId,
+    ) -> Result<Option<ControlFactorAuditEventInfo>, StorageError> {
+        load_audit_event_by_id_q(&self.db, event_id).await
+    }
+
+    async fn load_audit_events_by_resource(
+        &self,
+        resource_id: &str,
+        limit: u64,
+    ) -> Result<Vec<ControlFactorAuditEventInfo>, StorageError> {
+        load_audit_events_by_resource_q(&self.db, resource_id, limit).await
     }
 }

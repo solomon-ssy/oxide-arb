@@ -20,7 +20,7 @@ pub struct DetectionConfig {
     /// risk (single source per ADR-001 — never duplicated under `execution`
     /// or `risk`). Opportunities below this expected net profit are dropped.
     /// Default: `0.50`.
-    #[schemars(with = "String", extend("x-money-critical" = true))]
+    #[schemars(with = "String", extend("x-format" = "decimal", "x-money-critical" = true))]
     pub min_profit_threshold_usd: Decimal,
     /// Endgame convergence detection parameters.
     pub endgame: EndgameDetectionConfig,
@@ -50,23 +50,25 @@ const fn default_min_profit_threshold_usd() -> Decimal {
 pub struct EndgameDetectionConfig {
     /// Only markets settling within this many hours are scanned. Larger windows
     /// admit slower-converging markets but tie up capital longer. Default: `24`.
+    #[schemars(extend("x-format" = "integer"))]
     pub settlement_window_hours: u64,
     /// Best-ask price at or above this value marks a market as converged
     /// (YES or NO side). Money-critical: lowering it admits less-certain
     /// markets into the endgame funnel. Default: `0.95`.
-    #[schemars(with = "String", extend("x-money-critical" = true))]
+    #[schemars(with = "String", extend("x-format" = "decimal", "x-money-critical" = true))]
     pub high_threshold: Decimal,
     /// A market must hold convergence for at least this long before an
     /// opportunity may be emitted. Guards against transient spikes.
     /// Default: `300` (5 minutes).
+    #[schemars(extend("x-format" = "integer"))]
     pub min_convergence_duration_secs: u64,
     /// Minimum profit per share (`1 - entry VWAP`) to act. Below this the
     /// edge cannot cover fees + slippage. Default: `0.005`.
-    #[schemars(with = "String", extend("x-money-critical" = true))]
+    #[schemars(with = "String", extend("x-format" = "decimal", "x-money-critical" = true))]
     pub min_profit_per_share: Decimal,
     /// Maximum USD walked into the order book per opportunity. Caps single-shot
     /// sizing before risk sizing applies. Default: `500`.
-    #[schemars(with = "String", extend("x-money-critical" = true))]
+    #[schemars(with = "String", extend("x-format" = "decimal", "x-money-critical" = true))]
     pub max_investment_usd: Decimal,
     /// Fill-probability estimation parameters.
     pub fill_probability: FillProbabilityConfig,
@@ -118,26 +120,29 @@ const fn default_max_investment_usd() -> Decimal {
 pub struct CalibrationConfig {
     /// Minimum sample size before a bucket's resolution rate is trusted.
     /// Below this threshold the fallback chain is activated. Default: `30`.
+    #[schemars(extend("x-format" = "integer"))]
     pub min_sample_size: u32,
     /// How often (seconds) the background updater reconciles calibration data
     /// from the DB and oracles. Default: `3600`.
+    #[schemars(extend("x-format" = "integer"))]
     pub refresh_interval_secs: u64,
     /// Prior strength `n₀` for the dynamic fusion weight `w(n) = n / (n + n₀)`.
     /// Higher values give more weight to the calibrator (slower adaptation to
     /// real-time signals). Default: `20`.
+    #[schemars(extend("x-format" = "integer"))]
     pub fusion_prior_strength: u32,
     /// Floor for the fused probability output. Default: `0.80`.
-    #[schemars(with = "String")]
+    #[schemars(with = "String", extend("x-format" = "decimal"))]
     pub fused_p_floor: Decimal,
     /// Ceiling for the fused probability output. Default: `0.995`.
-    #[schemars(with = "String")]
+    #[schemars(with = "String", extend("x-format" = "decimal"))]
     pub fused_p_ceiling: Decimal,
     /// Bootstrap alpha prior (before `MoM` estimation is available).
     /// Default: `2.0`.
-    #[schemars(with = "String")]
+    #[schemars(with = "String", extend("x-format" = "decimal"))]
     pub bootstrap_alpha: Decimal,
     /// Bootstrap beta prior. Default: `0.2`.
-    #[schemars(with = "String")]
+    #[schemars(with = "String", extend("x-format" = "decimal"))]
     pub bootstrap_beta: Decimal,
 }
 
@@ -185,19 +190,19 @@ const fn default_bootstrap_beta() -> Decimal {
 pub struct FillProbabilityConfig {
     /// Base fill probability for a single FOK order with fresh data.
     /// Default: `0.90`.
-    #[schemars(with = "String")]
+    #[schemars(with = "String", extend("x-format" = "decimal"))]
     pub base_fill_prob: Decimal,
     /// Depth usage (%) above which fill probability drops. Default: `20`.
-    #[schemars(with = "String")]
+    #[schemars(with = "String", extend("x-format" = "decimal"))]
     pub depth_penalty_threshold_pct: Decimal,
     /// Per-percentage-point penalty above the threshold. Default: `0.02`.
-    #[schemars(with = "String")]
+    #[schemars(with = "String", extend("x-format" = "decimal"))]
     pub depth_penalty_per_pct: Decimal,
     /// Per-`StalenessLevel`-step penalty. Default: `0.05`.
-    #[schemars(with = "String")]
+    #[schemars(with = "String", extend("x-format" = "decimal"))]
     pub staleness_penalty_per_level: Decimal,
     /// Bonus for near-resolution markets (within 6 hours). Default: `0.05`.
-    #[schemars(with = "String")]
+    #[schemars(with = "String", extend("x-format" = "decimal"))]
     pub resolution_proximity_bonus: Decimal,
 }
 
@@ -240,15 +245,18 @@ const fn default_resolution_bonus() -> Decimal {
 #[serde(default, deny_unknown_fields)]
 pub struct ScorerConfig {
     /// Minimum composite score (0..1) to emit an opportunity. Default: `0.10`.
-    #[schemars(with = "String")]
+    #[schemars(with = "String", extend("x-format" = "decimal"))]
     pub min_score: Decimal,
     /// Maximum depth usage (%) the detector may accept. Default: `50`.
-    #[schemars(with = "String")]
+    #[schemars(with = "String", extend("x-format" = "decimal"))]
     pub max_depth_usage_pct: Decimal,
     /// Per-category weight multipliers for scoring (lower fee categories are
     /// weighted higher). Categories absent from the map default to `1.0` at
     /// conversion time.
-    #[schemars(with = "HashMap<String, String>")]
+    #[schemars(
+        with = "HashMap<String, String>",
+        extend("x-map-key-enum" = "market_category", "x-value-format" = "decimal")
+    )]
     pub category_weights: HashMap<MarketCategory, Decimal>,
 }
 
@@ -293,14 +301,16 @@ pub fn default_category_weights() -> HashMap<MarketCategory, Decimal> {
 #[serde(default, deny_unknown_fields)]
 pub struct EmissionCooldownConfig {
     /// Base cooldown duration in seconds. Default: `30`.
+    #[schemars(extend("x-format" = "integer"))]
     pub base_cooldown_secs: u64,
     /// Maximum exponential backoff multiplier for consecutive emissions.
     /// Default: `16.0`.
-    #[schemars(with = "String")]
+    #[schemars(with = "String", extend("x-format" = "decimal"))]
     pub max_multiplier: Decimal,
     /// Maximum cache capacity (number of tracked markets). Caution: changing
     /// this at runtime rebuilds the cache, clearing all in-flight cooldown
     /// state. Default: `4096`.
+    #[schemars(extend("x-format" = "integer"))]
     pub max_capacity: u64,
 }
 
@@ -332,10 +342,12 @@ const fn default_cooldown_capacity() -> u64 {
 pub struct ConvergenceTrackerConfig {
     /// Max idle time before a market's convergence state is evicted (seconds).
     /// Default: `7200`.
+    #[schemars(extend("x-format" = "integer"))]
     pub max_idle_secs: u64,
     /// Maximum number of tracked markets. Caution: capacity changes only apply
     /// to detectors constructed after activation (the live tracker keeps its
     /// capacity to preserve accumulated convergence durations). Default: `10000`.
+    #[schemars(extend("x-format" = "integer"))]
     pub max_capacity: u64,
 }
 

@@ -2039,13 +2039,16 @@ async fn runtime_config_governed_activation_links_audit_event() {
         after_hash: None,
         diff: serde_json::json!({}),
     };
-    let activation_info = repo
+    let activation_outcome = repo
         .activate_version_governed(activation, activation_audit)
         .await
         .expect("activate version governed");
 
     // The activation row links to the chained audit event.
-    assert!(activation_info.audit_event_id.is_some());
+    assert_eq!(
+        activation_outcome.value.audit_event_id.as_ref(),
+        Some(&activation_outcome.audit_event_id),
+    );
 
     let control_repo = PgControlFactorRepository::new(pool.connection().clone());
     let chain = control_repo
@@ -2054,7 +2057,7 @@ async fn runtime_config_governed_activation_links_audit_event() {
         .expect("audit chain");
     assert_eq!(chain.len(), 2);
     AuditChain::verify(&chain).expect("chain verifies");
-    let linked = activation_info.audit_event_id.expect("audit event id");
+    let linked = activation_outcome.audit_event_id;
     assert!(chain.iter().any(|event| event.event_id == linked));
 }
 

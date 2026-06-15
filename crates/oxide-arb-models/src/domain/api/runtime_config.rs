@@ -6,32 +6,48 @@
 //! chained audit event; the acting role is supplied via the `X-Acting-Role`
 //! header and authorized by the authz middleware.
 //!
-//! `config_json` is **typed**: handlers parse it into
-//! [`RuntimeConfig`](crate::runtime_config::RuntimeConfig) (`schema_version =
-//! 1`, unknown fields rejected) and run semantic validation before anything is
-//! persisted. Sensitive notification credentials are masked on every read.
+//! UI preference edits submit a sparse [`CreateRuntimeConfigVersionRequest::config_patch`];
+//! advanced JSON editing submits a full [`CreateRuntimeConfigVersionRequest::config_json`].
+
+use std::collections::BTreeMap;
 
 use crate::{
-    domain::governance::RuntimeConfigVersionInfo,
-    enums::runtime_config::RuntimeConfigVersionSource, types::RuntimeConfigVersionId,
+    domain::governance::{RuntimeConfigActivationInfo, RuntimeConfigVersionInfo},
+    enums::runtime_config::RuntimeConfigVersionSource,
+    runtime_config::ui_enum::EnumItemView,
+    runtime_config::ui_text::UiText,
+    runtime_config::ui_widget::{FieldSemantics, FieldWhen, FieldWidget},
+    types::RuntimeConfigVersionId,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use validator::Validate;
 
 /// Create a new immutable runtime-config version.
 ///
-/// The handler typed-parses `config_json` as `schema_version = 1`, validates
-/// it semantically (fail-closed), canonicalizes the JSON, derives the content
-/// hash, mints the version id, sets the source to `Operator`, and records
-/// `created_by` from the authenticated actor.
+/// Exactly one of [`config_patch`](Self::config_patch) or
+/// [`config_json`](Self::config_json) must be supplied. Patch mode merges
+/// against the live config without transmitting unchanged sensitive fields.
 #[derive(Debug, Deserialize, Validate)]
 pub struct CreateRuntimeConfigVersionRequest {
-    /// The full runtime-config document as JSON (partial documents are filled
-    /// with schema defaults; unknown fields are rejected).
-    pub config_json: serde_json::Value,
+    /// Sparse UI patch: dotted path → new leaf value (governed preference drawer).
+    pub config_patch: Option<BTreeMap<String, Value>>,
+    /// Full-document advanced editor payload (governed JSON drawer).
+    pub config_json: Option<Value>,
     #[validate(length(min = 1, max = 1024))]
     pub reason: String,
+}
+
+impl CreateRuntimeConfigVersionRequest {
+    /// Fail-closed body validation beyond field-level `#[validate]`.
+    pub fn ensure_payload(&self) -> Result<(), String> {
+        match (&self.config_patch, &self.config_json) {
+            (Some(_), None) | (None, Some(_)) => Ok(()),
+            (None, None) => Err("either config_patch or config_json is required".into()),
+            (Some(_), Some(_)) => Err("config_patch and config_json are mutually exclusive".into()),
+        }
+    }
 }
 
 /// Activate an existing runtime-config version (Promote).
@@ -63,7 +79,7 @@ pub struct RuntimeConfigVersionView {
     pub schema_version: i32,
     /// Document JSON with `notification.telegram.bot_token` and
     /// `notification.webhook.url` masked.
-    pub config_json: serde_json::Value,
+    pub config_json: Value,
     pub source: RuntimeConfigVersionSource,
     pub created_by: String,
     pub reason: String,
@@ -73,10 +89,7 @@ pub struct RuntimeConfigVersionView {
 impl RuntimeConfigVersionView {
     /// Project a persistence row into the masked read view.
     #[must_use]
-    pub fn from_info(
-        info: RuntimeConfigVersionInfo,
-        masked_config_json: serde_json::Value,
-    ) -> Self {
+    pub fn from_info(info: RuntimeConfigVersionInfo, masked_config_json: Value) -> Self {
         Self {
             runtime_config_version_id: info.runtime_config_version_id,
             config_hash: info.config_hash,
@@ -97,42 +110,114 @@ pub struct RuntimeConfigCurrentView {
     /// Active version row (masked); `None` only before the bootstrap seed.
     pub version: Option<RuntimeConfigVersionView>,
     /// The live, currently-applied runtime config (masked).
-    pub config: serde_json::Value,
+    pub config: Value,
+    /// Latest activation row for the active version (promote / rollback lineage).
+    pub activation: Option<RuntimeConfigActivationInfo>,
 }
 
-/// JSON value type of a runtime-config schema field, as rendered by the UI
-/// form (`string` | `number` | `boolean` | `array` | `object`).
+/// JSON value type of a runtime-config schema field, as rendered by the UI form.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum JsonValueType {
     String,
     Number,
     Boolean,
+    /// Free-form JSON array — fallback tree editor only.
     Array,
+    /// Free-form JSON object — fallback tree editor only.
     Object,
+    /// Scalar enum (single select).
+    Enum,
+    /// `Vec<Enum>` — multi-select (e.g. enabled trade categories).
+    EnumArray,
+    /// `Vec<String>` — tag list (e.g. permanent blacklist IDs).
+    StringArray,
+    /// Enum-keyed map with decimal string values (e.g. category scoring weights).
+    EnumDecimalMap,
+}
+
+/// Wire format hint for string leaves (decimal money fields, durations, etc.).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SchemaFieldFormat {
+    Decimal,
+    Integer,
+    DurationMs,
+}
+
+/// Machine-readable constraints extracted from JSON Schema for client validation.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct SchemaFieldConstraints {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub minimum: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub maximum: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exclusive_minimum: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exclusive_maximum: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_length: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_length: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pattern: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enum_values: Option<Vec<Value>>,
+}
+
+/// One preferences group in `GET /runtime-config/schema`.
+#[derive(Debug, Clone, Serialize)]
+pub struct RuntimeConfigSchemaGroupView {
+    pub id: String,
+    pub label: UiText,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<UiText>,
+    pub order: u16,
+}
+
+/// Envelope returned by `GET /runtime-config/schema` for the preferences UI.
+#[derive(Debug, Clone, Serialize)]
+pub struct RuntimeConfigSchemaView {
+    pub groups: Vec<RuntimeConfigSchemaGroupView>,
+    pub fields: Vec<RuntimeConfigSchemaFieldView>,
 }
 
 /// One field of the runtime-config schema (`GET /runtime-config/schema`),
 /// rendered by the UI as a typed form.
-///
-/// Derived from the generated JSON Schema
-/// ([`RuntimeConfig::json_schema`](crate::runtime_config::RuntimeConfig::json_schema)):
-/// `description` comes from the field Rustdoc, `money_critical` / `sensitive`
-/// from the `x-money-critical` / `x-sensitive` schema keywords declared next
-/// to the field definitions.
 #[derive(Debug, Clone, Serialize)]
 pub struct RuntimeConfigSchemaFieldView {
     /// Dotted path within the document (e.g. `risk.max_daily_loss_usd`).
     pub path: String,
+    /// Root document section (e.g. `risk`, `detection`).
+    pub group: String,
+    /// Display order within the group.
+    pub order: u16,
+    /// Localized field title.
+    pub label: UiText,
+    /// Localized helper / tooltip body.
+    pub help: UiText,
     /// JSON value type.
     pub value_type: JsonValueType,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub format: Option<SchemaFieldFormat>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub widget: Option<FieldWidget>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub semantics: Option<FieldSemantics>,
     /// Compiled-in default value.
-    pub default: serde_json::Value,
-    /// Human-readable purpose of the field (from the field Rustdoc).
+    pub default: Value,
+    /// Human-readable purpose of the field (from Rustdoc; audit fallback only).
     pub description: String,
     /// Whether the field directly bounds money at risk (UI renders a
     /// confirmation affordance for these).
     pub money_critical: bool,
     /// Whether reads mask the value (notification credentials).
     pub sensitive: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub constraints: Option<SchemaFieldConstraints>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enum_items: Option<Vec<EnumItemView>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub when: Option<Vec<FieldWhen>>,
 }

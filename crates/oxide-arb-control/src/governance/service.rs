@@ -210,7 +210,7 @@ impl ControlFactorRegistry {
         &self,
         envelope: AuditActor,
         activation: NewRuntimeConfigActivation,
-    ) -> Result<RuntimeConfigActivationInfo, RegistryError> {
+    ) -> Result<AuditedOutcome<RuntimeConfigActivationInfo>, RegistryError> {
         envelope.validate()?;
         let audit = runtime_config_audit(
             ControlAuditEventType::RuntimeConfigActivated,

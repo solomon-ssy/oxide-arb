@@ -7,6 +7,9 @@
 //! mutations enforce the acting-role contract for non-super-admin callers.
 
 use actix_web::{http::StatusCode, test::TestRequest};
+use oxide_arb_models::{
+    domain::RuntimeConfigPort, runtime_config::RuntimeConfig, types::RuntimeConfigVersionId,
+};
 use rust_decimal_macros::dec;
 use serde_json::json;
 
@@ -287,23 +290,115 @@ async fn notification_credentials_are_masked_on_read() {
 
 #[actix_web::test]
 #[ignore = "requires Docker"]
+async fn masked_credentials_round_trip_to_current_plaintext_on_create() {
+    let env = TestEnv::start().await;
+    let admin = client::login(&env, "admin", "admin").await;
+
+    let seed = client::post(
+        &env,
+        "/api/runtime-config/versions",
+        &admin,
+        json!({
+            "config_json": {
+                "notification": {
+                    "telegram": { "enabled": true, "bot_token": "seed-token", "chat_id": "42" },
+                    "webhook": { "enabled": true, "url": "https://hooks.example/seed" }
+                }
+            },
+            "reason": "seed notification credentials",
+        }),
+    )
+    .await;
+    assert_eq!(seed.status, StatusCode::OK);
+    let seed_id = seed.json()["data"]["runtime_config_version_id"]
+        .as_str()
+        .expect("seed version id")
+        .to_owned();
+    let activate_seed = client::post(
+        &env,
+        &format!("/api/runtime-config/versions/{seed_id}/activate"),
+        &admin,
+        json!({ "reason": "activate credentials" }),
+    )
+    .await;
+    assert_eq!(activate_seed.status, StatusCode::OK);
+
+    let current = client::get(&env, "/api/runtime-config", &admin).await;
+    let mut masked_config = current.json()["data"]["config"].clone();
+    masked_config["risk"]["max_daily_loss_usd"] = json!("175");
+    masked_config["risk"]["max_weekly_loss_usd"] = json!("1000");
+
+    let derived = client::post(
+        &env,
+        "/api/runtime-config/versions",
+        &admin,
+        json!({
+            "config_json": masked_config,
+            "reason": "derive from masked UI document",
+        }),
+    )
+    .await;
+    assert_eq!(derived.status, StatusCode::OK);
+    let derived_id = derived.json()["data"]["runtime_config_version_id"]
+        .as_str()
+        .expect("derived version id")
+        .to_owned();
+    let derived_version_id: RuntimeConfigVersionId =
+        derived_id.parse().expect("runtime config version id");
+    let stored = env
+        .state
+        .runtime_config
+        .load_version(&derived_version_id)
+        .await
+        .expect("load derived version")
+        .expect("derived version exists");
+    let stored_config =
+        RuntimeConfig::from_json(&stored.config_json).expect("stored config parses");
+
+    assert_eq!(stored_config.notification.telegram.bot_token, "seed-token");
+    assert_eq!(
+        stored_config.notification.webhook.url,
+        "https://hooks.example/seed"
+    );
+    assert_eq!(stored_config.risk.max_daily_loss_usd, dec!(175));
+}
+
+#[actix_web::test]
+#[ignore = "requires Docker"]
 async fn schema_endpoint_describes_money_critical_fields() {
     let env = TestEnv::start().await;
     let admin = client::login(&env, "admin", "admin").await;
 
     let res = client::get(&env, "/api/runtime-config/schema", &admin).await;
     assert_eq!(res.status, StatusCode::OK);
-    let fields = res.json()["data"]
-        .as_array()
-        .expect("schema fields")
-        .clone();
+    let data = &res.json()["data"];
+    let groups = data["groups"].as_array().expect("schema groups");
+    let fields = data["fields"].as_array().expect("schema fields");
+    assert!(!groups.is_empty());
     assert!(!fields.is_empty());
     let daily_loss = fields
         .iter()
         .find(|f| f["path"] == "risk.max_daily_loss_usd")
         .expect("risk.max_daily_loss_usd in schema");
     assert_eq!(daily_loss["money_critical"], json!(true));
-    assert!(!daily_loss["description"].as_str().expect("desc").is_empty());
+    assert_eq!(daily_loss["label"]["kind"], json!("localized"));
+    assert!(
+        daily_loss["label"]["locales"]["en-US"]
+            .as_str()
+            .is_some_and(|s| !s.is_empty())
+    );
+    let route = fields
+        .iter()
+        .find(|f| f["path"] == "settlement.redeem.route")
+        .expect("redeem route in schema");
+    let enum_items = route["enum_items"]
+        .as_array()
+        .expect("redeem route enum_items");
+    assert_eq!(enum_items.len(), 6);
+    assert!(
+        fields.iter().all(|f| f["path"] != "schema_version"),
+        "schema_version must not appear in preferences fields"
+    );
 }
 
 #[actix_web::test]
@@ -723,4 +818,91 @@ async fn governed_activate_and_rollback_enforce_acting_role_and_rbac() {
         .status,
         StatusCode::OK
     );
+}
+
+#[actix_web::test]
+#[ignore = "requires Docker"]
+async fn sparse_patch_updates_only_changed_leaf() {
+    let env = TestEnv::start().await;
+    let admin = client::login(&env, "admin", "admin").await;
+
+    let seed = client::post(
+        &env,
+        "/api/runtime-config/versions",
+        &admin,
+        json!({
+            "config_json": {
+                "risk": {
+                    "max_daily_loss_usd": "100",
+                    "max_weekly_loss_usd": "1000",
+                },
+                "notification": {
+                    "telegram": { "bot_token": "seed-token", "chat_id": "1" }
+                }
+            },
+            "reason": "seed",
+        }),
+    )
+    .await;
+    assert_eq!(seed.status, StatusCode::OK);
+    let seed_id = seed.json()["data"]["runtime_config_version_id"]
+        .as_str()
+        .expect("seed version id")
+        .to_owned();
+    let activate_seed = client::post(
+        &env,
+        &format!("/api/runtime-config/versions/{seed_id}/activate"),
+        &admin,
+        json!({ "reason": "activate seed" }),
+    )
+    .await;
+    assert_eq!(activate_seed.status, StatusCode::OK, "activate seed");
+    assert_eq!(
+        env.runtime_config_apply
+            .current()
+            .notification
+            .telegram
+            .bot_token,
+        "seed-token",
+        "live config must carry credentials after activate"
+    );
+
+    let patched = client::post(
+        &env,
+        "/api/runtime-config/versions",
+        &admin,
+        json!({
+            "config_patch": {
+                "risk.max_daily_loss_usd": "120"
+            },
+            "reason": "patch daily loss only",
+        }),
+    )
+    .await;
+    assert_eq!(patched.status, StatusCode::OK);
+    let patched_config = patched.json()["data"]["config_json"].clone();
+    assert_eq!(patched_config["risk"]["max_daily_loss_usd"], json!("120"));
+    assert_eq!(
+        patched_config["notification"]["telegram"]["bot_token"],
+        json!("***")
+    );
+}
+
+#[actix_web::test]
+#[ignore = "requires Docker"]
+async fn patch_and_json_are_mutually_exclusive() {
+    let env = TestEnv::start().await;
+    let admin = client::login(&env, "admin", "admin").await;
+    let res = client::post(
+        &env,
+        "/api/runtime-config/versions",
+        &admin,
+        json!({
+            "config_patch": { "risk.max_daily_loss_usd": "50" },
+            "config_json": { "risk": { "max_daily_loss_usd": "50" } },
+            "reason": "invalid",
+        }),
+    )
+    .await;
+    assert_eq!(res.status, StatusCode::BAD_REQUEST);
 }

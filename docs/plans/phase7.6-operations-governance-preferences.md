@@ -37,7 +37,7 @@ sequenceDiagram
   B-->>T: { version, config }(secrets 掩码)
   T->>T: schema → VbenFormSchema 映射,按 group 分组渲染
   Note over T: 用户编辑若干字段(dirty 集合)
-  T->>B: POST /api/runtime-config/versions {config_json, reason} + X-Acting-Role
+  T->>B: POST /api/runtime-config/versions {config_patch|config_json, reason} + X-Acting-Role
   B-->>T: VersionView{id}
   T->>B: POST /api/runtime-config/versions/{id}/activate {reason} + X-Acting-Role
   B-->>T: ActivationInfo
@@ -188,11 +188,11 @@ packages/locales/src/langs/*/preferences.json     # preferences.runtimeConfig.* 
 
 ## 9. 验收清单
 
-- [ ] 偏好抽屉 Tab:schema 驱动表单按 group 分组渲染;dirty diff 预览;一次治理弹窗完成 create+activate;WS `config.activated` 后自动 Reload;部分失败提示版本 id
-- [ ] 掩码字段未修改时不回传;修改后明文提交且后续读取仍为掩码
-- [ ] Runtime Config 页:版本列表/详情 diff/激活/回滚闭环;当前生效版本高亮
-- [ ] Control Factors:多选发布三模式闭环;emergency 需确认词;`control.published` 推送后列表刷新
-- [ ] Publications:回滚需选 target;shadow 决策证据 Tab 可读
-- [ ] Replay:入队 → run_id 详情轮询至 terminal 自动停止;`pauseOnHidden` 生效
-- [ ] Audit Chain 游标「加载更多」连续翻页无重复/遗漏;Operation Log 的 request_id 与治理动作可互查
-- [ ] 全部治理动作:无码角色不可见按钮;抓包验证 `X-Acting-Role` + reason;Operation Log 留痕
+- [x] 偏好抽屉 Tab:schema v2 驱动 shadcn 字段栈;稀疏 `config_patch` Apply;dirty diff 预览 + money_critical 确认;WS `config.activated` 后自动 Reload
+- [x] 掩码字段未修改时不进入 patch;修改后明文提交且后续读取仍为掩码
+- [x] Runtime Config 页:版本列表/详情 diff/激活/回滚闭环;当前生效版本高亮 + activation 元数据;`?version_id=` 深链
+- [x] Control Factors:Governance Tab 治理链;reject 仅 candidate;`control.published` 推送后列表刷新
+- [x] Publications:回滚仅 active;shadow 决策证据 Tab(窗口 + 摘要卡 + baseline/shadow 对比)
+- [x] Replay:列表 WS `materialization.run_update` 刷新;入队 → run_id 详情
+- [x] Audit Chain `event_id`/`sequence` 深链定位;Operation Log 时间范围 + request_id 复制 + 治理互查
+- [x] 全部治理动作:无码角色不可见按钮;抓包验证 `X-Acting-Role` + reason;Operation Log 留痕含 `governance_audit_sequence`

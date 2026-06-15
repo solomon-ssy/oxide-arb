@@ -67,17 +67,30 @@ async fn do_create_version_governed(
 ) -> Result<AuditedOutcome<RuntimeConfigVersionInfo>, StorageError> {
     let info = do_create_version(db, version).await?;
     let event = append_audit_event_chained_q(db, audit, Utc::now()).await?;
-    Ok(AuditedOutcome::new(info, event.event_id))
+    Ok(AuditedOutcome::new(info, event.event_id, event.sequence))
 }
 
 async fn do_activate_version_governed(
     db: &impl ConnectionTrait,
     mut activation: NewRuntimeConfigActivation,
     audit: NewControlFactorAuditEvent,
-) -> Result<RuntimeConfigActivationInfo, StorageError> {
+) -> Result<AuditedOutcome<RuntimeConfigActivationInfo>, StorageError> {
     let event = append_audit_event_chained_q(db, audit, Utc::now()).await?;
+    let event_id = event.event_id.clone();
     activation.audit_event_id = Some(event.event_id);
-    do_activate_version(db, activation).await
+    let info = do_activate_version(db, activation).await?;
+    Ok(AuditedOutcome::new(info, event_id, event.sequence))
+}
+
+async fn do_load_current_activation(
+    db: &impl ConnectionTrait,
+) -> Result<Option<RuntimeConfigActivationInfo>, StorageError> {
+    ActivationEntity::find()
+        .order_by_desc(ActivationColumn::ActivatedAt)
+        .one(db)
+        .await
+        .map_err(StorageError::from)
+        .map(|row| row.map(Into::into))
 }
 
 async fn do_load_version(
@@ -148,11 +161,17 @@ impl RuntimeConfigVersionRepository for PgRuntimeConfigVersionRepository {
         &self,
         activation: NewRuntimeConfigActivation,
         audit: NewControlFactorAuditEvent,
-    ) -> Result<RuntimeConfigActivationInfo, StorageError> {
+    ) -> Result<AuditedOutcome<RuntimeConfigActivationInfo>, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
-        let info = do_activate_version_governed(&txn, activation, audit).await?;
+        let outcome = do_activate_version_governed(&txn, activation, audit).await?;
         txn.commit().await.map_err(StorageError::from)?;
-        Ok(info)
+        Ok(outcome)
+    }
+
+    async fn load_current_activation(
+        &self,
+    ) -> Result<Option<RuntimeConfigActivationInfo>, StorageError> {
+        do_load_current_activation(&self.db).await
     }
 
     async fn load_version(
@@ -223,8 +242,14 @@ impl RuntimeConfigVersionRepository for PgRuntimeConfigVersionRepositoryTxn<'_> 
         &self,
         activation: NewRuntimeConfigActivation,
         audit: NewControlFactorAuditEvent,
-    ) -> Result<RuntimeConfigActivationInfo, StorageError> {
+    ) -> Result<AuditedOutcome<RuntimeConfigActivationInfo>, StorageError> {
         do_activate_version_governed(self.txn, activation, audit).await
+    }
+
+    async fn load_current_activation(
+        &self,
+    ) -> Result<Option<RuntimeConfigActivationInfo>, StorageError> {
+        do_load_current_activation(self.txn).await
     }
 
     async fn load_version(

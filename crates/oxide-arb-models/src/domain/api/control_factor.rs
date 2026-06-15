@@ -14,7 +14,7 @@ use crate::{
         evidence::{ControlFactorShadowDecisionInfo, ShadowDecisionAggregate},
     },
     enums::control_factor::{ControlFactorType, FactorStatus, PublicationMode, PublicationStatus},
-    types::{ControlFactorId, FactorPublicationId},
+    types::{AuditEventId, ControlFactorId, FactorPublicationId},
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -90,11 +90,21 @@ pub struct PublicationListQuery {
     pub limit: Option<u64>,
 }
 
-/// Audit-chain slice query (`from_sequence` defaults to 1, `limit` is capped in
-/// the handler).
+/// Audit-chain slice query.
+///
+/// `from_sequence` defaults to 1; `limit` is capped in the handler. When
+/// `event_id` is set it is mutually exclusive with `from_sequence` and returns
+/// a window that includes the target event.
 #[derive(Debug, Deserialize)]
 pub struct AuditChainQuery {
     pub from_sequence: Option<i64>,
+    pub limit: Option<u64>,
+    pub event_id: Option<AuditEventId>,
+}
+
+/// Governance audit events linked to a single control factor (`resource_id`).
+#[derive(Debug, Deserialize)]
+pub struct GovernanceEventsQuery {
     pub limit: Option<u64>,
 }
 

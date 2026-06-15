@@ -40,6 +40,8 @@ pub struct OperationLogView {
     pub detail: serde_json::Value,
     /// Hard link to the governance hash-chain event, when this row mirrors one.
     pub governance_audit_event_id: Option<AuditEventId>,
+    /// Monotonic sequence of the linked governance audit event.
+    pub governance_audit_sequence: Option<i64>,
 }
 
 impl From<OperationLogInfo> for OperationLogView {
@@ -64,6 +66,7 @@ impl From<OperationLogInfo> for OperationLogView {
             latency_ms: info.latency_ms,
             detail: info.detail,
             governance_audit_event_id: info.governance_audit_event_id,
+            governance_audit_sequence: info.governance_audit_sequence,
         }
     }
 }
@@ -79,6 +82,7 @@ pub struct OperationLogQuery {
     pub resource_type: Option<ResourceType>,
     pub outcome: Option<OperationOutcome>,
     pub request_id: Option<String>,
+    pub governance_audit_event_id: Option<AuditEventId>,
     pub from: Option<DateTime<Utc>>,
     pub to: Option<DateTime<Utc>>,
     #[serde(flatten)]

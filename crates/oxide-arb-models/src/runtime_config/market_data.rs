@@ -17,15 +17,19 @@ use serde::{Deserialize, Serialize};
 #[serde(default, deny_unknown_fields)]
 pub struct MarketDataRuntimeConfig {
     /// Book age (ms) at or below which data is `Fresh`. Default: `2000`.
+    #[schemars(extend("x-format" = "duration_ms"))]
     pub staleness_fresh_ms: u64,
     /// Book age (ms) at or below which data is `Acceptable` (still tradeable).
     /// Default: `5000`.
+    #[schemars(extend("x-format" = "duration_ms"))]
     pub staleness_acceptable_ms: u64,
     /// Book age (ms) at or below which data is `Stale` (scored with discount,
     /// never traded). Default: `15000`.
+    #[schemars(extend("x-format" = "duration_ms"))]
     pub staleness_stale_ms: u64,
     /// Book age (ms) above `staleness_stale_ms` is `Expired` and ignored. This
     /// field documents the ladder's outer bound. Default: `30000`.
+    #[schemars(extend("x-format" = "duration_ms"))]
     pub staleness_expired_ms: u64,
     /// Categories admitted into the tradeable universe (WS subscriptions +
     /// scanner sweep). An event matches when any of its tag-derived categories
@@ -33,6 +37,7 @@ pub struct MarketDataRuntimeConfig {
     /// ingested and persisted regardless of this filter — it only bounds the
     /// hot trading set, so narrowing it never loses settlement or evidence
     /// data. Default: empty (all categories).
+    #[schemars(extend("x-enum-id" = "market_category"))]
     pub enabled_categories: Vec<MarketCategory>,
 }
 

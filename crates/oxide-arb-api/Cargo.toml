@@ -71,7 +71,7 @@ serde_json = { workspace = true }
 hex = { workspace = true }
 uuid = { workspace = true }
 alloy = { workspace = true }
-oxide-arb-core = { path = "../oxide-arb-core" }
+oxide-arb-core = { workspace = true }
 
 [features]
 integration = []

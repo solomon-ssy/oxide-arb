@@ -38,9 +38,9 @@ thiserror = { workspace = true }
 async-trait = { workspace = true }
 
 [dev-dependencies]
-actix-http = { version = "3", features = ["ws"] }
+actix-http = { workspace = true }
 actix-rt = { workspace = true }
-actix-test = "0.1"
+actix-test = { workspace = true }
 oxide-arb-core = { workspace = true }
 oxide-arb-storage = { workspace = true, features = ["test-util"] }
 oxide-arb-test-support = { workspace = true }

@@ -54,6 +54,7 @@ async fn governed_change_hard_links_operation_log_to_audit_chain() {
         .find(|event| event["resource_id"] == json!(version_id))
         .expect("chain event for the created version");
     let event_id = event["event_id"].as_str().expect("event id").to_owned();
+    let event_sequence = event["sequence"].as_i64().expect("event sequence");
 
     // Track two: the operation-log row links the exact chain event id.
     let rows = client::wait_for_oplog(&env, &admin, "dual-track-1").await;
@@ -62,6 +63,7 @@ async fn governed_change_hard_links_operation_log_to_audit_chain() {
     assert_eq!(row["action"], "runtime_config.create_version");
     assert_eq!(row["category"], "runtime_config");
     assert_eq!(row["governance_audit_event_id"], json!(event_id));
+    assert_eq!(row["governance_audit_sequence"], json!(event_sequence));
 }
 
 /// Activate and rollback hard-link their operation-log rows to the exact

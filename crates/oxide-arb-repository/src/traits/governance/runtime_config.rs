@@ -42,7 +42,12 @@ pub trait RuntimeConfigVersionRepository: Send + Sync {
         &self,
         activation: NewRuntimeConfigActivation,
         audit: NewControlFactorAuditEvent,
-    ) -> Result<RuntimeConfigActivationInfo, StorageError>;
+    ) -> Result<AuditedOutcome<RuntimeConfigActivationInfo>, StorageError>;
+
+    /// Latest activation row (current live promotion / rollback record).
+    async fn load_current_activation(
+        &self,
+    ) -> Result<Option<RuntimeConfigActivationInfo>, StorageError>;
 
     async fn load_version(
         &self,

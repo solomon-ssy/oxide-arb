@@ -21,10 +21,11 @@ use chrono::Utc;
 use oxide_arb_models::{
     domain::{
         ActivateRuntimeConfigRequest, CoreEvent, CoreEventPublisher,
-        CreateRuntimeConfigVersionRequest, JsonValueType, NewRuntimeConfigActivation,
-        NewRuntimeConfigVersion, RollbackRuntimeConfigRequest, RuntimeConfigActivationInfo,
-        RuntimeConfigCurrentView, RuntimeConfigSchemaFieldView, RuntimeConfigVersionListQuery,
-        RuntimeConfigVersionView, RuntimeControlError, control_factor::AuditActor,
+        CreateRuntimeConfigVersionRequest, NewRuntimeConfigActivation, NewRuntimeConfigVersion,
+        RollbackRuntimeConfigRequest, RuntimeConfigActivationInfo, RuntimeConfigCurrentView,
+        RuntimeConfigSchemaView, RuntimeConfigVersionListQuery, RuntimeConfigVersionView,
+        RuntimeControlError,
+        control_factor::{AuditActor, AuditedOutcome},
         runtime_config_hash,
     },
     enums::{
@@ -32,7 +33,10 @@ use oxide_arb_models::{
         rbac::{Operation, ResourceType},
         runtime_config::{RuntimeConfigActivationKind, RuntimeConfigVersionSource},
     },
-    runtime_config::{RuntimeConfig, mask_config_json, validation::validate_runtime_config},
+    runtime_config::{
+        RuntimeConfig, apply_runtime_config_patch, build_preferences_schema, mask_config_json,
+        unmask_with, validation::validate_runtime_config,
+    },
     types::{RuntimeConfigActivationId, RuntimeConfigVersionId},
 };
 
@@ -97,6 +101,7 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
 pub async fn current(
     state: web::Data<AppState>,
 ) -> Result<WebResponse<RuntimeConfigCurrentView>, WebError> {
+    let activation = state.runtime_config.load_current_activation().await?;
     let version = state.runtime_config.load_current().await?.map(|info| {
         let masked = mask_config_json(&info.config_json);
         RuntimeConfigVersionView::from_info(info, masked)
@@ -105,13 +110,13 @@ pub async fn current(
     Ok(WebResponse::ok(RuntimeConfigCurrentView {
         version,
         config,
+        activation,
     }))
 }
 
-/// `GET /api/runtime-config/schema` — field metadata (path / type / default /
-/// description / money-critical / sensitive) for the UI form renderer.
-pub async fn schema() -> Result<WebResponse<Vec<RuntimeConfigSchemaFieldView>>, WebError> {
-    Ok(WebResponse::ok(build_schema()))
+/// `GET /api/runtime-config/schema` — preferences envelope for the UI form renderer.
+pub async fn schema() -> Result<WebResponse<RuntimeConfigSchemaView>, WebError> {
+    Ok(WebResponse::ok(build_preferences_schema()))
 }
 
 /// `GET /api/runtime-config/versions` — the immutable version catalog (masked).
@@ -151,7 +156,16 @@ pub async fn create_version(
     body: ValidatedJson<CreateRuntimeConfigVersionRequest>,
 ) -> Result<WebResponse<RuntimeConfigVersionView>, WebError> {
     let body = body.into_inner();
-    let config = parse_and_validate(&body.config_json)?;
+    body.ensure_payload().map_err(WebError::BadRequest)?;
+    let current = state.runtime_config_apply.current();
+    let config = if let Some(patch) = body.config_patch {
+        apply_runtime_config_patch(&current, &patch)
+            .map_err(|error| WebError::BadRequest(error.to_string()))?
+    } else {
+        let mut config_json = body.config_json.expect("validated payload");
+        unmask_with(&mut config_json, &current);
+        parse_and_validate(&config_json)?
+    };
 
     let config_json = config.to_json();
     let config_hash = runtime_config_hash(&config_json);
@@ -161,7 +175,7 @@ pub async fn create_version(
         schema_version: config.schema_version,
         config_json,
         source: RuntimeConfigVersionSource::Operator,
-        created_by: actor.claims.sub.clone(),
+        created_by: actor.claims.username.clone(),
         reason: body.reason.clone(),
     };
     let envelope = governance_envelope(&actor, acting_role, &request_id, body.reason);
@@ -179,7 +193,7 @@ pub async fn create_version(
         outcome.value.runtime_config_version_id.to_string(),
     );
     op_ctx.set_detail(serde_json::json!({ "config_hash": config_hash }));
-    op_ctx.link_governance(outcome.audit_event_id);
+    op_ctx.link_governance(outcome.audit_event_id, outcome.audit_sequence);
     let masked = mask_config_json(&outcome.value.config_json);
     Ok(WebResponse::ok(RuntimeConfigVersionView::from_info(
         outcome.value,
@@ -198,7 +212,7 @@ pub async fn activate_version(
     op_ctx: OperationCtx,
     body: ValidatedJson<ActivateRuntimeConfigRequest>,
 ) -> Result<WebResponse<RuntimeConfigActivationInfo>, WebError> {
-    let outcome = transition_version(
+    let audited = transition_version(
         &state,
         id.into_inner(),
         &actor,
@@ -209,8 +223,8 @@ pub async fn activate_version(
     )
     .await?;
     op_ctx.set_action(OperationCategory::RuntimeConfig, "runtime_config.activate");
-    record_activation(&op_ctx, &state.events, &outcome);
-    Ok(WebResponse::ok(outcome))
+    record_activation(&op_ctx, &state.events, &audited);
+    Ok(WebResponse::ok(audited.value))
 }
 
 /// `POST /api/runtime-config/versions/{id}/rollback` — roll back to a version
@@ -224,7 +238,7 @@ pub async fn rollback_version(
     op_ctx: OperationCtx,
     body: ValidatedJson<RollbackRuntimeConfigRequest>,
 ) -> Result<WebResponse<RuntimeConfigActivationInfo>, WebError> {
-    let outcome = transition_version(
+    let audited = transition_version(
         &state,
         id.into_inner(),
         &actor,
@@ -235,8 +249,8 @@ pub async fn rollback_version(
     )
     .await?;
     op_ctx.set_action(OperationCategory::RuntimeConfig, "runtime_config.rollback");
-    record_activation(&op_ctx, &state.events, &outcome);
-    Ok(WebResponse::ok(outcome))
+    record_activation(&op_ctx, &state.events, &audited);
+    Ok(WebResponse::ok(audited.value))
 }
 
 /// Typed parse + semantic validation (fail-closed, HTTP 400 on any error).
@@ -261,7 +275,7 @@ async fn transition_version(
     request_id: &RequestId,
     reason: String,
     kind: RuntimeConfigActivationKind,
-) -> Result<RuntimeConfigActivationInfo, WebError> {
+) -> Result<AuditedOutcome<RuntimeConfigActivationInfo>, WebError> {
     let Some(version) = state.runtime_config.load_version(&version_id).await? else {
         return Err(WebError::NotFound(format!(
             "runtime config version not found: {version_id}"
@@ -284,7 +298,7 @@ async fn transition_version(
         runtime_config_activation_id: RuntimeConfigActivationId::from_v7(),
         runtime_config_version_id: version_id,
         activated_at: Utc::now(),
-        activated_by: actor.claims.sub.clone(),
+        activated_by: actor.claims.username.clone(),
         reason: reason.clone(),
         activation_kind: kind,
         previous_runtime_config_version_id: previous.clone(),
@@ -293,7 +307,7 @@ async fn transition_version(
         audit_event_id: None,
     };
     let envelope = governance_envelope(actor, acting_role.clone(), request_id, reason);
-    let outcome = state
+    let audited = state
         .registry
         .activate_runtime_config_version(envelope, activation)
         .await?;
@@ -309,14 +323,14 @@ async fn transition_version(
             actor,
             acting_role,
             request_id,
-            &outcome,
+            &audited.value,
             previous,
             &error,
         )
         .await);
     }
 
-    Ok(outcome)
+    Ok(audited)
 }
 
 /// Compensate a durable activation whose live apply failed.
@@ -354,7 +368,7 @@ async fn revert_unapplied_activation(
         runtime_config_activation_id: RuntimeConfigActivationId::from_v7(),
         runtime_config_version_id: previous_id.clone(),
         activated_at: Utc::now(),
-        activated_by: actor.claims.sub.clone(),
+        activated_by: actor.claims.username.clone(),
         reason: reason.clone(),
         activation_kind: RuntimeConfigActivationKind::Rollback,
         previous_runtime_config_version_id: Some(failed_version.clone()),
@@ -401,8 +415,9 @@ async fn revert_unapplied_activation(
 fn record_activation(
     op_ctx: &OperationCtx,
     events: &CoreEventPublisher,
-    activation: &RuntimeConfigActivationInfo,
+    audited: &AuditedOutcome<RuntimeConfigActivationInfo>,
 ) {
+    let activation = &audited.value;
     op_ctx.set_resource(
         ResourceType::RuntimeConfig,
         activation.runtime_config_version_id.to_string(),
@@ -410,9 +425,7 @@ fn record_activation(
     op_ctx.set_detail(serde_json::json!({
         "activation_kind": activation.activation_kind,
     }));
-    if let Some(event_id) = activation.audit_event_id.clone() {
-        op_ctx.link_governance(event_id);
-    }
+    op_ctx.link_governance(audited.audit_event_id.clone(), audited.audit_sequence);
     events.publish(CoreEvent::ConfigActivated {
         version_id: activation.runtime_config_version_id.to_string(),
     });
@@ -430,183 +443,5 @@ fn governance_envelope(
         actor_role: acting_role.0,
         request_id: request_id.0.clone(),
         reason,
-    }
-}
-
-// ── Schema metadata ──────────────────────────────────────────────────────────
-
-/// Build the flat field-metadata list by walking the generated JSON Schema.
-///
-/// Descriptions come from the field Rustdoc on
-/// `oxide_arb_models::runtime_config` (schemars maps doc comments to the
-/// schema `description`), and the `x-money-critical` / `x-sensitive` keywords
-/// are declared next to the field definitions — the schema is the single
-/// source of truth, never duplicated here. Each leaf is paired with its
-/// compiled-in default from [`RuntimeConfig::default`].
-fn build_schema() -> Vec<RuntimeConfigSchemaFieldView> {
-    let schema = RuntimeConfig::json_schema();
-    let defaults = RuntimeConfig::default().to_json();
-    let mut fields = Vec::with_capacity(128);
-    walk_schema(&schema, &defaults, String::new(), false, &mut fields);
-    fields
-}
-
-/// Recursive schema walk: objects with `properties` are sections, everything
-/// else (scalars, arrays, open maps) is a leaf field. `money_critical` is
-/// inherited from marked containers (e.g. the whole `risk` section) and
-/// combined with field-level markers.
-fn walk_schema(
-    schema: &serde_json::Value,
-    default: &serde_json::Value,
-    path: String,
-    inherited_money_critical: bool,
-    fields: &mut Vec<RuntimeConfigSchemaFieldView>,
-) {
-    let money_critical = inherited_money_critical || schema_flag(schema, "x-money-critical");
-    if let Some(properties) = schema.get("properties").and_then(|p| p.as_object()) {
-        for (key, child_schema) in properties {
-            let child_path = if path.is_empty() {
-                key.clone()
-            } else {
-                format!("{path}.{key}")
-            };
-            let child_default = default.get(key).cloned().unwrap_or(serde_json::Value::Null);
-            walk_schema(
-                child_schema,
-                &child_default,
-                child_path,
-                money_critical,
-                fields,
-            );
-        }
-        return;
-    }
-    fields.push(RuntimeConfigSchemaFieldView {
-        value_type: schema_value_type(schema),
-        default: default.clone(),
-        description: schema
-            .get("description")
-            .and_then(|d| d.as_str())
-            .unwrap_or_default()
-            .to_owned(),
-        money_critical,
-        sensitive: schema_flag(schema, "x-sensitive"),
-        path,
-    });
-}
-
-/// Whether a boolean `x-` keyword is set on the schema node.
-fn schema_flag(schema: &serde_json::Value, flag: &str) -> bool {
-    schema.get(flag).and_then(serde_json::Value::as_bool) == Some(true)
-}
-
-/// Map the JSON Schema `type` keyword to the UI form value type. Nullable
-/// types (`["string", "null"]`) resolve to their non-null member; schemas
-/// without a `type` (e.g. enum `oneOf`) render as strings.
-fn schema_value_type(schema: &serde_json::Value) -> JsonValueType {
-    let type_name = match schema.get("type") {
-        Some(serde_json::Value::String(name)) => Some(name.as_str()),
-        Some(serde_json::Value::Array(names)) => names
-            .iter()
-            .filter_map(serde_json::Value::as_str)
-            .find(|name| *name != "null"),
-        _ => None,
-    };
-    match type_name {
-        Some("number" | "integer") => JsonValueType::Number,
-        Some("boolean") => JsonValueType::Boolean,
-        Some("array") => JsonValueType::Array,
-        Some("object") => JsonValueType::Object,
-        _ => JsonValueType::String,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{JsonValueType, build_schema};
-
-    #[test]
-    fn schema_covers_every_leaf_with_a_description() {
-        let fields = build_schema();
-        assert!(!fields.is_empty());
-        let undescribed: Vec<_> = fields
-            .iter()
-            .filter(|field| field.description.trim().is_empty())
-            .map(|field| field.path.clone())
-            .collect();
-        assert!(
-            undescribed.is_empty(),
-            "undescribed fields: {undescribed:?}"
-        );
-    }
-
-    #[test]
-    fn sensitive_fields_are_flagged() {
-        let fields = build_schema();
-        let token = fields
-            .iter()
-            .find(|f| f.path == "notification.telegram.bot_token")
-            .expect("token field present");
-        assert!(token.sensitive);
-        assert!(
-            fields
-                .iter()
-                .filter(|f| f.sensitive)
-                .all(|f| !f.money_critical)
-        );
-    }
-
-    #[test]
-    fn money_critical_sections_propagate_to_leaves() {
-        let fields = build_schema();
-        let risk_leaves: Vec<_> = fields
-            .iter()
-            .filter(|f| f.path.starts_with("risk."))
-            .collect();
-        assert!(!risk_leaves.is_empty());
-        assert!(
-            risk_leaves.iter().all(|f| f.money_critical),
-            "every risk.* leaf inherits the container marker"
-        );
-        let redeem_leaves: Vec<_> = fields
-            .iter()
-            .filter(|f| f.path.starts_with("settlement.redeem."))
-            .collect();
-        assert!(!redeem_leaves.is_empty());
-        assert!(redeem_leaves.iter().all(|f| f.money_critical));
-        let threshold = fields
-            .iter()
-            .find(|f| f.path == "detection.endgame.high_threshold")
-            .expect("high_threshold present");
-        assert!(threshold.money_critical);
-    }
-
-    #[test]
-    fn value_types_and_defaults_match_the_wire_format() {
-        let fields = build_schema();
-        let by_path = |path: &str| {
-            fields
-                .iter()
-                .find(|f| f.path == path)
-                .unwrap_or_else(|| panic!("missing field {path}"))
-        };
-        // Decimal money fields are strings on the wire.
-        let daily_loss = by_path("risk.max_daily_loss_usd");
-        assert_eq!(daily_loss.value_type, JsonValueType::String);
-        assert!(daily_loss.default.is_string());
-        // Integer cadences are numbers.
-        assert_eq!(
-            by_path("risk.reservation_ttl_secs").value_type,
-            JsonValueType::Number
-        );
-        // Category weights surface as one object-typed leaf.
-        let weights = by_path("detection.endgame.scorer.category_weights");
-        assert_eq!(weights.value_type, JsonValueType::Object);
-        assert!(weights.default.is_object());
-        // Blacklists are arrays.
-        assert_eq!(
-            by_path("risk.permanent_blacklist_markets").value_type,
-            JsonValueType::Array
-        );
     }
 }

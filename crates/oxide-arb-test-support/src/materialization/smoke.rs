@@ -380,8 +380,14 @@ impl RuntimeConfigVersionRepository for SmokeRuntimeConfigRepository {
         &self,
         _activation: NewRuntimeConfigActivation,
         _audit: NewControlFactorAuditEvent,
-    ) -> Result<RuntimeConfigActivationInfo, StorageError> {
+    ) -> Result<AuditedOutcome<RuntimeConfigActivationInfo>, StorageError> {
         Err(StorageError::Codec("not implemented".into()))
+    }
+
+    async fn load_current_activation(
+        &self,
+    ) -> Result<Option<RuntimeConfigActivationInfo>, StorageError> {
+        Ok(None)
     }
 
     async fn load_version(
@@ -1028,7 +1034,11 @@ impl ControlFactorRepository for SmokeControlFactorRepository {
         let updated = factor.clone();
         drop(factors);
         let event = self.append_chained(audit)?;
-        Ok(Some(AuditedOutcome::new(updated, event.event_id)))
+        Ok(Some(AuditedOutcome::new(
+            updated,
+            event.event_id,
+            event.sequence,
+        )))
     }
 
     async fn expire_factors(
@@ -1133,6 +1143,36 @@ impl ControlFactorRepository for SmokeControlFactorRepository {
             .unwrap()
             .iter()
             .filter(|event| event.sequence >= from_sequence)
+            .take(usize::try_from(limit).unwrap_or(usize::MAX))
+            .cloned()
+            .collect())
+    }
+
+    async fn load_audit_event_by_id(
+        &self,
+        event_id: &AuditEventId,
+    ) -> Result<Option<ControlFactorAuditEventInfo>, StorageError> {
+        Ok(self
+            .audit_events
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|event| &event.event_id == event_id)
+            .cloned())
+    }
+
+    async fn load_audit_events_by_resource(
+        &self,
+        resource_id: &str,
+        limit: u64,
+    ) -> Result<Vec<ControlFactorAuditEventInfo>, StorageError> {
+        Ok(self
+            .audit_events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|event| event.resource_id == resource_id)
+            .rev()
             .take(usize::try_from(limit).unwrap_or(usize::MAX))
             .cloned()
             .collect())

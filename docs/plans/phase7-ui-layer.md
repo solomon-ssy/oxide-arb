@@ -149,7 +149,7 @@ Access Control
 | 缺口 | 影响页面 | 处理 |
 |---|---|---|
 | 无「账户余额 / 可用资金」端点 | Overview KPI | 以 `GET /api/system/status`(`total_exposure` / `pending_reservations`)+ `GET /api/pnl/live` 组合呈现「资金占用视图」;真实钱包余额留待后端补 `GET /api/system/balance` 后接入 |
-| 无 replay run **列表**端点(仅 `GET /api/replay/{run_id}`) | Replay 页 | 7.6 标注:需后端补 `GET /api/replay`(分页列表);落地前 UI 以「输入 run_id 查询 + 本地最近入队记录」过渡 |
+| 无 replay run **列表**端点(仅 `GET /api/replay/{run_id}`) | Replay 页 | **已补齐** `GET /api/replay` 分页列表 + WS `materialization.run_update` 列表刷新 |
 | 菜单 seed v1 与最终 IA 有差异(PnL 页 / Materializations 页 / System Control 页冗余) | 全局导航 | 7.1 给出 seed v2 对齐清单(后端小改:bump `MENUS_SEED` version + checksum) |
 | 菜单 `title` 为英文明文 | 菜单国际化 | seed v2 将 `title` 改为 i18n key(`page.menu.*`),前端 `meta.title` 走 `$t` |
 

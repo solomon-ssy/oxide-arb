@@ -24,110 +24,134 @@ use serde::{Deserialize, Serialize};
 pub struct RiskConfig {
     // ── Per-opportunity static filters ───────────────────────────────
     /// Minimum order-book depth (USD) required before execution. Default: `200`.
-    #[schemars(with = "String")]
+    #[schemars(with = "String", extend("x-format" = "decimal"))]
     pub min_depth_usd: Decimal,
     /// Maximum fraction of visible book depth a single order may consume (%).
     /// Default: `30`.
-    #[schemars(with = "String")]
+    #[schemars(with = "String", extend("x-format" = "decimal"))]
     pub max_depth_usage_pct: Decimal,
 
     // ── Rolling counters + adaptive cooldown ─────────────────────────
     /// Consecutive misses before the session breaker trips. Default: `3`.
+    #[schemars(extend("x-format" = "integer"))]
     pub max_consecutive_misses: u32,
     /// Rolling hourly loss cap (USD); breach trips the L2 breaker. Default: `30`.
-    #[schemars(with = "String")]
+    #[schemars(with = "String", extend("x-format" = "decimal"))]
     pub max_hourly_loss_usd: Decimal,
     /// Rolling hourly fee-spend cap (USD); breach trips the L2 breaker.
     /// Default: `10`.
-    #[schemars(with = "String")]
+    #[schemars(with = "String", extend("x-format" = "decimal"))]
     pub max_hourly_fee_spend_usd: Decimal,
     /// Base adaptive cooldown after repeated misses (seconds). Default: `900`.
+    #[schemars(extend("x-format" = "integer"))]
     pub base_cooldown_secs: u64,
     /// Exponential multiplier applied per consecutive cooldown. Default: `2.0`.
-    #[schemars(with = "String")]
+    #[schemars(with = "String", extend("x-format" = "decimal"))]
     pub cooldown_multiplier: Decimal,
     /// Hard ceiling for the adaptive cooldown (seconds). Default: `7200`.
+    #[schemars(extend("x-format" = "integer"))]
     pub max_cooldown_secs: u64,
 
     // ── Daily / weekly loss caps ─────────────────────────────────────
     /// Daily realized-loss cap (USD); breach halts at L3. Default: `75`.
-    #[schemars(with = "String")]
+    #[schemars(with = "String", extend("x-format" = "decimal"))]
     pub max_daily_loss_usd: Decimal,
     /// Daily fee-spend cap (USD); breach halts at L3. Default: `25`.
-    #[schemars(with = "String")]
+    #[schemars(with = "String", extend("x-format" = "decimal"))]
     pub max_daily_fee_spend_usd: Decimal,
     /// Single-trade loss cap (USD); breach halts at L3. Default: `30`.
-    #[schemars(with = "String")]
+    #[schemars(with = "String", extend("x-format" = "decimal"))]
     pub max_single_loss_usd: Decimal,
     /// Weekly realized-loss cap (USD); breach halts at L4. Default: `120`.
-    #[schemars(with = "String")]
+    #[schemars(with = "String", extend("x-format" = "decimal"))]
     pub max_weekly_loss_usd: Decimal,
     /// Independent daily spend budget (USD). Execution stops when exhausted.
     /// Default: `50`.
-    #[schemars(with = "String")]
+    #[schemars(with = "String", extend("x-format" = "decimal"))]
     pub daily_budget_usd: Decimal,
 
     // ── Connectivity + balance health ────────────────────────────────
     /// WS disconnect duration (seconds) before trading is gated. Default: `30`.
+    #[schemars(extend("x-format" = "integer"))]
     pub ws_disconnect_threshold_secs: u64,
     /// Minimum CLOB collateral balance (USD); below this trading is gated.
     /// Default: `50`.
-    #[schemars(with = "String")]
+    #[schemars(with = "String", extend("x-format" = "decimal"))]
     pub min_balance_usd: Decimal,
 
     // ── Blacklist ────────────────────────────────────────────────────
     /// Consecutive misses on one market before auto-blacklisting. Default: `3`.
+    #[schemars(extend("x-format" = "integer"))]
     pub market_miss_blacklist_count: u32,
     /// Auto-blacklist TTL (seconds). Default: `3600`.
+    #[schemars(extend("x-format" = "integer"))]
     pub market_miss_blacklist_duration_secs: u64,
     /// Permanently blacklisted market condition IDs. Reload merges with — and
     /// never removes — entries added at runtime via the blacklist API.
     /// Default: empty.
+    #[schemars(extend(
+        "items" = {
+            "type": "string",
+            "pattern": "^0x[0-9a-fA-F]{64}$"
+        }
+    ))]
     pub permanent_blacklist_markets: Vec<String>,
     /// Permanently blacklisted CLOB token IDs. Same merge semantics as
     /// `permanent_blacklist_markets`. Default: empty.
+    #[schemars(extend(
+        "items" = {
+            "type": "string",
+            "pattern": "^[0-9]+$"
+        }
+    ))]
     pub permanent_blacklist_tokens: Vec<String>,
 
     // ── Exposure limits ──────────────────────────────────────────────
     /// Maximum total exposure across all reservations (USD). Preflight rejects
     /// activation when set below the currently reserved total. Default: `5000`.
-    #[schemars(with = "String")]
+    #[schemars(with = "String", extend("x-format" = "decimal"))]
     pub max_total_exposure_usd: Decimal,
     /// Balance reserve (USD) excluded from the Kelly bankroll. Default: `100`.
-    #[schemars(with = "String")]
+    #[schemars(with = "String", extend("x-format" = "decimal"))]
     pub reserve_balance_usd: Decimal,
     /// Maximum concurrently open positions. Default: `3`.
+    #[schemars(extend("x-format" = "integer"))]
     pub max_open_positions: usize,
     /// Maximum exposure per market (USD). Preflight rejects activation when set
     /// below any in-flight market exposure. Default: `500`.
-    #[schemars(with = "String")]
+    #[schemars(with = "String", extend("x-format" = "decimal"))]
     pub max_single_market_exposure_usd: Decimal,
     /// Maximum USD for a single bet. Default: `25`.
-    #[schemars(with = "String")]
+    #[schemars(with = "String", extend("x-format" = "decimal"))]
     pub max_single_bet_usd: Decimal,
     /// Default TTL (seconds) for in-flight capital reservations. Default: `300`.
+    #[schemars(extend("x-format" = "integer"))]
     pub reservation_ttl_secs: u64,
     /// Interval (seconds) for cleaning expired in-flight reservations.
     /// Default: `30`.
+    #[schemars(extend("x-format" = "integer"))]
     pub reservation_gc_interval_secs: u64,
 
     // ── Exposure as percentage of balance ────────────────────────────
     /// Maximum portfolio exposure as a percentage of available balance.
     /// Default: `80`.
-    #[schemars(with = "String")]
+    #[schemars(with = "String", extend("x-format" = "decimal"))]
     pub max_total_exposure_pct: Decimal,
 
     // ── Reconciliation ───────────────────────────────────────────────
     /// Interval (seconds) between CLOB balance + open-position metrics
     /// refreshes. Default: `5`.
+    #[schemars(extend("x-format" = "integer"))]
     pub metrics_refresh_interval_secs: u64,
     /// Maximum age (seconds) of the risk metrics snapshot allowed on the Live
     /// hot path. Must be >= `metrics_refresh_interval_secs`. Default: `15`.
+    #[schemars(extend("x-format" = "integer"))]
     pub max_metrics_staleness_secs: u64,
     /// Interval (seconds) between ledger reconciliation runs. Default: `300`.
+    #[schemars(extend("x-format" = "integer"))]
     pub reconciliation_interval_secs: u64,
     /// Maximum acceptable balance drift (USD) before alerting. Default: `1.0`.
-    #[schemars(with = "String")]
+    #[schemars(with = "String", extend("x-format" = "decimal"))]
     pub reconciliation_tolerance_usd: Decimal,
 
     // ── Circuit breaker ──────────────────────────────────────────────
@@ -136,15 +160,15 @@ pub struct RiskConfig {
 
     // ── Position sizing (absorbed from PositionSizingConfig) ─────────
     /// Quarter-Kelly fraction multiplier (`f*/4`). Default: `0.25`.
-    #[schemars(with = "String")]
+    #[schemars(with = "String", extend("x-format" = "decimal"))]
     pub kelly_fraction: Decimal,
     /// Total bankroll available for Kelly computation (USD). Also seeds the
     /// simulated balance in `DryRun`/`Paper`. Default: `1000`.
-    #[schemars(with = "String")]
+    #[schemars(with = "String", extend("x-format" = "decimal"))]
     pub bankroll_usd: Decimal,
     /// Minimum trade size (USD); sized below this the opportunity is skipped.
     /// Default: `1`.
-    #[schemars(with = "String")]
+    #[schemars(with = "String", extend("x-format" = "decimal"))]
     pub min_trade_usd: Decimal,
     /// Kelly criterion guards.
     pub kelly: KellyConfig,
@@ -154,20 +178,24 @@ pub struct RiskConfig {
     // ── API health ───────────────────────────────────────────────────
     /// API error rate threshold (0..1). Exceeding trips the L2 Session breaker.
     /// Default: `0.10`.
-    #[schemars(with = "String")]
+    #[schemars(with = "String", extend("x-format" = "decimal"))]
     pub api_error_rate_threshold: Decimal,
     /// Consecutive heartbeat failures before an L4 System halt. Default: `3`.
+    #[schemars(extend("x-format" = "integer"))]
     pub heartbeat_max_failures: u32,
 
     // ── Potential loss escalation ────────────────────────────────────
     /// Maximum age (seconds) of an active potential-loss entry before
     /// escalation triggers an L4 System halt. Default: `3600`.
+    #[schemars(extend("x-format" = "integer"))]
     pub potential_loss_escalation_secs: u64,
 
     // ── Endgame-specific rules ───────────────────────────────────────
     /// Max concurrent positions on the same directional side. Default: `3`.
+    #[schemars(extend("x-format" = "integer"))]
     pub max_concurrent_directional: usize,
     /// Daily budget of directional trades per side. Default: `10`.
+    #[schemars(extend("x-format" = "integer"))]
     pub daily_directional_budget: u32,
 }
 
@@ -345,20 +373,22 @@ const fn default_daily_directional_budget() -> u32 {
 #[serde(default, deny_unknown_fields)]
 pub struct KellyConfig {
     /// Maximum Kelly fraction before capping. Default: `0.25`.
-    #[schemars(with = "String")]
+    #[schemars(with = "String", extend("x-format" = "decimal"))]
     pub max_kelly: Decimal,
     /// Minimum edge (bps) below which Kelly returns zero. Default: `200`.
-    #[schemars(with = "String")]
+    #[schemars(with = "String", extend("x-format" = "decimal"))]
     pub min_edge_bps: Decimal,
     /// Minimum calibration confidence (0..1) below which Kelly returns zero.
     /// Default: `0.3`.
-    #[schemars(with = "String")]
+    #[schemars(with = "String", extend("x-format" = "decimal"))]
     pub min_probability_confidence: Decimal,
     /// Minimum historical sample count for calibration to be trusted.
     /// Default: `10`.
+    #[schemars(extend("x-format" = "integer"))]
     pub min_calibration_samples: u32,
     /// Maximum staleness (seconds) of the calibration model before Kelly
     /// returns zero. Default: `7200`.
+    #[schemars(extend("x-format" = "integer"))]
     pub max_probability_staleness_secs: u64,
 }
 
@@ -395,11 +425,11 @@ const fn default_kelly_max_staleness() -> u64 {
 #[serde(default, deny_unknown_fields)]
 pub struct DrawdownConfig {
     /// Maximum drawdown (%) before position sizes are reduced. Default: `10`.
-    #[schemars(with = "String")]
+    #[schemars(with = "String", extend("x-format" = "decimal"))]
     pub max_drawdown_pct: Decimal,
     /// Size reduction factor applied when the drawdown limit is hit.
     /// Default: `0.5`.
-    #[schemars(with = "String")]
+    #[schemars(with = "String", extend("x-format" = "decimal"))]
     pub drawdown_reduction_factor: Decimal,
 }
 
@@ -435,22 +465,29 @@ const fn default_dd_reduction() -> Decimal {
 pub struct CircuitBreakerConfig {
     /// L1 (Trade): per-opportunity static filter failure cooldown (seconds).
     /// Default: `60`.
+    #[schemars(extend("x-format" = "integer"))]
     pub l1_cooldown_secs: u64,
     /// L2 (Session): rolling window breach cooldown (seconds). Default: `900`.
+    #[schemars(extend("x-format" = "integer"))]
     pub l2_cooldown_secs: u64,
     /// L3 (Daily): daily/weekly cap breach cooldown (seconds). Default: `3600`.
+    #[schemars(extend("x-format" = "integer"))]
     pub l3_cooldown_secs: u64,
     /// L4 (System): connectivity/balance emergency cooldown (seconds).
     /// Default: `7200`.
+    #[schemars(extend("x-format" = "integer"))]
     pub l4_cooldown_secs: u64,
     /// Successful probe trades required in `HalfOpen` before Recovered.
     /// Default: `2`.
+    #[schemars(extend("x-format" = "integer"))]
     pub half_open_probes: u32,
     /// Observation period (seconds) in Recovered before returning to Closed.
     /// Default: `300`.
+    #[schemars(extend("x-format" = "integer"))]
     pub recovery_observation_secs: u64,
     /// Maximum cooldown duration (seconds) for L2 exponential back-off.
     /// Default: `14400`.
+    #[schemars(extend("x-format" = "integer"))]
     pub max_cooldown_secs: u64,
 }
 

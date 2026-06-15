@@ -222,6 +222,7 @@ impl ControlFactorRepository for MockGovernanceControlFactorRepository {
         Ok(PublishPublicationOutcome::Published(AuditedOutcome::new(
             publication_info_from(&publication),
             AuditEventId::from_v7(),
+            1,
         )))
     }
 
@@ -259,6 +260,7 @@ impl ControlFactorRepository for MockGovernanceControlFactorRepository {
         Ok(AuditedOutcome::new(
             rollback_target_info(target_publication_id),
             AuditEventId::from_v7(),
+            1,
         ))
     }
 
@@ -272,6 +274,21 @@ impl ControlFactorRepository for MockGovernanceControlFactorRepository {
     async fn load_audit_chain(
         &self,
         _from_sequence: i64,
+        _limit: u64,
+    ) -> Result<Vec<ControlFactorAuditEventInfo>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn load_audit_event_by_id(
+        &self,
+        _event_id: &AuditEventId,
+    ) -> Result<Option<ControlFactorAuditEventInfo>, StorageError> {
+        Ok(None)
+    }
+
+    async fn load_audit_events_by_resource(
+        &self,
+        _resource_id: &str,
         _limit: u64,
     ) -> Result<Vec<ControlFactorAuditEventInfo>, StorageError> {
         Ok(Vec::new())

@@ -835,6 +835,7 @@ async fn operation_log_appends_and_pages_and_is_worm() {
         latency_ms: 5,
         detail: serde_json::json!({"k": "v"}),
         governance_audit_event_id: None,
+        governance_audit_sequence: None,
     };
 
     repo.append(make("single", OperationOutcome::Success))

@@ -32,16 +32,19 @@ pub struct ExecutionRuntimeConfig {
 pub struct TradeTimeoutConfig {
     /// Max price slippage between detection and validation (bps). Exceeding
     /// this rejects the trade. Default: `50`.
-    #[schemars(with = "String", extend("x-money-critical" = true))]
+    #[schemars(with = "String", extend("x-format" = "decimal", "x-money-critical" = true))]
     pub max_validation_slippage_bps: Decimal,
     /// Hard-kill timeout (ms) for execution dispatch (FOK order round trip).
     /// Default: `30000`.
+    #[schemars(extend("x-format" = "duration_ms"))]
     pub dispatcher_timeout_ms: u64,
     /// Total time budget (s) to confirm a trade reached a terminal state.
     /// Read per relay poll — takes effect on the next cycle. Default: `60`.
+    #[schemars(extend("x-format" = "integer"))]
     pub trade_confirm_timeout_secs: u64,
     /// Interval (s) between confirmation polls. Read per relay poll — takes
     /// effect on the next cycle. Default: `2`.
+    #[schemars(extend("x-format" = "integer"))]
     pub trade_confirm_poll_interval_secs: u64,
 }
 
@@ -77,9 +80,11 @@ const fn default_confirm_poll() -> u64 {
 pub struct FunnelConfig {
     /// Bounded priority-queue capacity; overflow evicts the lowest score.
     /// Default: `50`.
+    #[schemars(extend("x-format" = "integer"))]
     pub max_queue_size: usize,
     /// Sweep interval (ms) between low-priority dispatches (high-score
     /// opportunities bypass via the fast lane). Default: `75`.
+    #[schemars(extend("x-format" = "duration_ms"))]
     pub min_dispatch_interval_ms: u64,
 }
 
@@ -107,6 +112,7 @@ const fn default_min_dispatch_interval_ms() -> u64 {
 pub struct CoalescerConfig {
     /// Max wait (ms) for the second token leg before flushing a market scan.
     /// Lower = lower latency, more duplicate scans. Default: `40`.
+    #[schemars(extend("x-format" = "duration_ms"))]
     pub coalesce_window_ms: u64,
 }
 
@@ -130,10 +136,11 @@ const fn default_coalesce_window_ms() -> u64 {
 pub struct EndgameLatencyConfig {
     /// Scores at or above this bypass the funnel sweep delay (immediate shard
     /// dispatch). Default: `0.5`.
-    #[schemars(with = "String")]
+    #[schemars(with = "String", extend("x-format" = "decimal"))]
     pub dispatch_immediate_threshold: Decimal,
     /// Max ms from last book apply to order emit (SLO-2); older books fail
     /// validation. Default: `5`.
+    #[schemars(extend("x-format" = "duration_ms"))]
     pub max_book_to_order_ms: u64,
 }
 

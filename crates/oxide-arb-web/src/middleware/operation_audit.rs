@@ -111,6 +111,7 @@ pub async fn operation_audit<B: MessageBody>(
             latency_ms: i32::try_from(started.elapsed().as_millis()).unwrap_or(i32::MAX),
             detail: enrichment.detail.unwrap_or_else(|| serde_json::json!({})),
             governance_audit_event_id: enrichment.governance_audit_event_id,
+            governance_audit_sequence: enrichment.governance_audit_sequence,
         };
         buffer.try_enqueue(log);
     }

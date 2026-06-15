@@ -76,13 +76,19 @@ impl<R: RuntimeConfigVersionRepository> RuntimeConfigVersionRepository
         &self,
         activation: NewRuntimeConfigActivation,
         audit: NewControlFactorAuditEvent,
-    ) -> Result<RuntimeConfigActivationInfo, StorageError> {
-        let info = self
+    ) -> Result<AuditedOutcome<RuntimeConfigActivationInfo>, StorageError> {
+        let outcome = self
             .inner
             .activate_version_governed(activation, audit)
             .await?;
         self.invalidate_active().await;
-        Ok(info)
+        Ok(outcome)
+    }
+
+    async fn load_current_activation(
+        &self,
+    ) -> Result<Option<RuntimeConfigActivationInfo>, StorageError> {
+        self.inner.load_current_activation().await
     }
 
     async fn load_version(

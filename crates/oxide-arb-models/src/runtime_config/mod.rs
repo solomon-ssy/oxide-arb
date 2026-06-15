@@ -26,9 +26,25 @@ mod detection;
 mod execution;
 mod market_data;
 mod notification;
+pub mod preferences_schema;
 mod risk;
+pub mod schema_fields;
+pub mod schema_format;
 mod settlement;
+pub mod ui_catalog;
+pub mod ui_enum;
+pub mod ui_groups;
+pub mod ui_registry;
+pub mod ui_text;
+pub mod ui_when;
+pub mod ui_widget;
 pub mod validation;
+
+pub use preferences_schema::build_preferences_schema;
+pub use schema_fields::{
+    RuntimeConfigPatchError, apply_runtime_config_patch, build_schema_fields, schema_leaf_paths,
+    sensitive_leaf_paths,
+};
 
 pub use detection::*;
 pub use execution::*;
@@ -49,6 +65,7 @@ pub const RUNTIME_CONFIG_SCHEMA_VERSION: i32 = 1;
 #[serde(default, deny_unknown_fields)]
 pub struct RuntimeConfig {
     /// Document schema version; must equal [`RUNTIME_CONFIG_SCHEMA_VERSION`].
+    #[schemars(extend("x-format" = "integer", "x-ui-visible" = false))]
     pub schema_version: i32,
     /// Book staleness ladder (gates detection + validation).
     pub market_data: MarketDataRuntimeConfig,
@@ -152,6 +169,45 @@ impl RuntimeConfig {
 /// Placeholder substituted for sensitive values on read surfaces.
 pub const MASKED_SECRET: &str = "***";
 
+/// Dotted document paths whose values are masked on read surfaces.
+#[must_use]
+pub fn sensitive_paths() -> Vec<String> {
+    let schema = RuntimeConfig::json_schema();
+    let mut paths = Vec::new();
+    schema_paths_with_flag(&schema, "x-sensitive", "", &mut paths);
+    paths.sort();
+    paths
+}
+
+/// Replace masked sensitive placeholders with values from the current config.
+///
+/// This allows UI clients to edit a masked read document without re-sending
+/// plaintext credentials. Only exact [`MASKED_SECRET`] leaves are replaced;
+/// changed plaintext values and intentionally empty values continue through the
+/// normal typed parse and semantic validation path.
+pub fn unmask_with(incoming: &mut serde_json::Value, current: &RuntimeConfig) {
+    let current_json = current.to_json();
+    for path in sensitive_paths() {
+        let segments = path.split('.').collect::<Vec<_>>();
+        let Some(incoming_leaf) = leaf_mut(incoming, &segments) else {
+            continue;
+        };
+        if *incoming_leaf != serde_json::json!(MASKED_SECRET) {
+            continue;
+        }
+        let Some(current_leaf) = leaf(&current_json, &segments) else {
+            continue;
+        };
+        if current_leaf
+            .as_str()
+            .is_some_and(|value| value.trim().is_empty())
+        {
+            continue;
+        }
+        *incoming_leaf = current_leaf.clone();
+    }
+}
+
 /// Mask a stored `config_json` document for a read surface.
 ///
 /// Documents that fail the typed parse (legacy rows) have their entire
@@ -168,6 +224,48 @@ pub fn mask_config_json(config_json: &serde_json::Value) -> serde_json::Value {
         },
         |config| config.to_masked_json(),
     )
+}
+
+/// Collect dotted paths of properties carrying a given `x-` keyword.
+fn schema_paths_with_flag(
+    schema: &serde_json::Value,
+    flag: &str,
+    prefix: &str,
+    out: &mut Vec<String>,
+) {
+    let Some(properties) = schema.get("properties").and_then(|p| p.as_object()) else {
+        return;
+    };
+    for (key, child) in properties {
+        let path = if prefix.is_empty() {
+            key.clone()
+        } else {
+            format!("{prefix}.{key}")
+        };
+        if child.get(flag).and_then(serde_json::Value::as_bool) == Some(true) {
+            out.push(path.clone());
+        }
+        schema_paths_with_flag(child, flag, &path, out);
+    }
+}
+
+fn leaf<'a>(document: &'a serde_json::Value, segments: &[&str]) -> Option<&'a serde_json::Value> {
+    let mut cursor = document;
+    for segment in segments {
+        cursor = cursor.get(*segment)?;
+    }
+    Some(cursor)
+}
+
+fn leaf_mut<'a>(
+    document: &'a mut serde_json::Value,
+    segments: &[&str],
+) -> Option<&'a mut serde_json::Value> {
+    let mut cursor = document;
+    for segment in segments {
+        cursor = cursor.get_mut(*segment)?;
+    }
+    Some(cursor)
 }
 
 #[cfg(test)]
@@ -231,29 +329,6 @@ mod tests {
         assert_eq!(parsed.detection, DetectionConfig::default());
     }
 
-    /// Collect dotted paths of properties carrying a given `x-` keyword.
-    fn schema_paths_with_flag(
-        schema: &serde_json::Value,
-        flag: &str,
-        prefix: &str,
-        out: &mut Vec<String>,
-    ) {
-        let Some(properties) = schema.get("properties").and_then(|p| p.as_object()) else {
-            return;
-        };
-        for (key, child) in properties {
-            let path = if prefix.is_empty() {
-                key.clone()
-            } else {
-                format!("{prefix}.{key}")
-            };
-            if child.get(flag).and_then(serde_json::Value::as_bool) == Some(true) {
-                out.push(path.clone());
-            }
-            schema_paths_with_flag(child, flag, &path, out);
-        }
-    }
-
     /// The `x-sensitive` schema markers and the masking implementation must
     /// agree exactly — a field masked but not marked (or vice versa) is a
     /// credential-leak hazard for the UI.
@@ -283,6 +358,50 @@ mod tests {
                 "notification.telegram.bot_token".to_owned(),
                 "notification.webhook.url".to_owned(),
             ]
+        );
+    }
+
+    #[test]
+    fn sensitive_paths_are_schema_derived() {
+        assert_eq!(
+            sensitive_paths(),
+            vec![
+                "notification.telegram.bot_token".to_owned(),
+                "notification.webhook.url".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn unmask_with_preserves_current_credentials_for_masked_leaves() {
+        let mut current = RuntimeConfig::default();
+        current.notification.telegram.bot_token = "tg-secret".to_owned();
+        current.notification.webhook.url = "https://hooks.example/secret".to_owned();
+
+        let mut incoming = current.to_masked_json();
+        incoming["risk"]["max_daily_loss_usd"] = json!("150");
+        unmask_with(&mut incoming, &current);
+
+        let parsed = RuntimeConfig::from_json(&incoming).expect("unmasked document parses");
+        assert_eq!(parsed.notification.telegram.bot_token, "tg-secret");
+        assert_eq!(
+            parsed.notification.webhook.url,
+            "https://hooks.example/secret"
+        );
+        assert_eq!(parsed.risk.max_daily_loss_usd, dec!(150));
+    }
+
+    #[test]
+    fn unmask_with_keeps_placeholder_when_current_secret_is_empty() {
+        let current = RuntimeConfig::default();
+        let mut incoming = current.to_json();
+        incoming["notification"]["telegram"]["bot_token"] = json!(MASKED_SECRET);
+
+        unmask_with(&mut incoming, &current);
+
+        assert_eq!(
+            incoming["notification"]["telegram"]["bot_token"],
+            json!(MASKED_SECRET)
         );
     }
 

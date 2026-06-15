@@ -220,6 +220,29 @@ actix-rt = "2"
 # Password hashing (argon2id) — shared by seed + web login
 argon2 = "0.5"
 
+# CLI / process entrypoints (oxide-arb-bin, oxide-arb-xtask)
+clap = { version = "4", features = ["derive"] }
+anyhow = "1.0"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Property-based / snapshot testing
+proptest = "1"
+insta = { version = "1.42", features = ["json"] }
+
+# Serialization helpers
+serde_repr = "0.1.20"
+toml = "1.1"
+
+# Text / pattern matching
+regex = "1.11"
+
+# Random number generation
+rand = "0.10"
+
+# actix integration tests (oxide-arb-web)
+actix-http = { version = "3", features = ["ws"] }
+actix-test = "0.1"
+
 # ── Internal Crates ──────────────────────────────────────────────────────────
 
 oxide-arb-error = { path = "crates/oxide-arb-error" }

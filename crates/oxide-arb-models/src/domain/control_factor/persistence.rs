@@ -467,14 +467,17 @@ pub struct AuditedOutcome<T> {
     pub value: T,
     /// The hash-chain event appended for this mutation.
     pub audit_event_id: AuditEventId,
+    /// Monotonic sequence assigned to the appended audit event.
+    pub audit_sequence: i64,
 }
 
 impl<T> AuditedOutcome<T> {
     /// Pairs a mutation result with the audit event it appended.
-    pub const fn new(value: T, audit_event_id: AuditEventId) -> Self {
+    pub const fn new(value: T, audit_event_id: AuditEventId, audit_sequence: i64) -> Self {
         Self {
             value,
             audit_event_id,
+            audit_sequence,
         }
     }
 }

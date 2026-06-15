@@ -44,6 +44,7 @@ pub struct Model {
     #[sea_orm(column_type = "JsonBinary")]
     pub detail: Json,
     pub governance_audit_event_id: Option<AuditEventId>,
+    pub governance_audit_sequence: Option<i64>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

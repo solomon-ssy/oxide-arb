@@ -31,16 +31,20 @@ pub struct SettlementOracleConfig {
     pub enabled: bool,
     /// Sources that must agree before a resolution verdict is accepted.
     /// Default: `2` (of Gamma / CTF / UMA).
+    #[schemars(extend("x-format" = "integer"))]
     pub voting_quorum: u8,
     /// Delay (seconds) before the post-settlement cross-check re-queries
     /// sources. Default: `120`.
+    #[schemars(extend("x-format" = "integer"))]
     pub cross_check_delay_secs: u64,
     /// Behaviour when every oracle source is unavailable. Default:
     /// `conservative_reject` (fail-closed; never settle blind).
+    #[schemars(extend("x-enum-id" = "all_sources_down_strategy"))]
     pub all_sources_down_strategy: AllSourcesDownStrategy,
     /// UMA optimistic-oracle API endpoint. Default: `https://api.uma.xyz`.
     pub uma_endpoint: String,
     /// UMA request timeout (seconds). Default: `10`.
+    #[schemars(extend("x-format" = "integer"))]
     pub uma_timeout_secs: u64,
 }
 
@@ -66,13 +70,16 @@ impl Default for SettlementOracleConfig {
 pub struct SettlementLifecycleConfig {
     /// Interval (seconds) between retry sweeps over failed settlements.
     /// Default: `60`.
+    #[schemars(extend("x-format" = "integer"))]
     pub retry_interval_secs: u64,
     /// Maximum redeem attempts per position before terminal failure (operator
     /// alert + manual intervention). Default: `5`.
+    #[schemars(extend("x-format" = "integer"))]
     pub max_redeem_attempts: u32,
     /// Window (seconds) for deduplicating settlement triggers for the same
     /// market. Caution: shrinking it mid-flight admits duplicate triggers for
     /// markets settled within the old window. Default: `30`.
+    #[schemars(extend("x-format" = "integer"))]
     pub dedup_window_secs: u64,
 }
 
@@ -98,10 +105,10 @@ impl Default for SettlementLifecycleConfig {
 pub struct SettlementRedeemConfig {
     /// Active redemption route. `disabled` blocks Live redemption (fail-closed:
     /// Live mode validation requires an explicit route). Default: `disabled`.
-    #[schemars(with = "String")]
+    #[schemars(with = "String", extend("x-enum-id" = "redeem_route"))]
     pub route: RedeemRoute,
     /// Output asset for adapter routes. Default: `usdc_e`.
-    #[schemars(with = "String")]
+    #[schemars(with = "String", extend("x-enum-id" = "redeem_output_asset"))]
     pub output_asset: RedeemOutputAsset,
     /// Token holder address when it differs from the signer (e.g. proxy
     /// wallet). `None` uses the signer address. Default: `None`.
@@ -110,6 +117,7 @@ pub struct SettlementRedeemConfig {
     /// validation when that route is selected. Default: `None`.
     pub proxy_safe_address: Option<String>,
     /// Gas limit for redeem transactions. Default: `500000`.
+    #[schemars(extend("x-format" = "integer"))]
     pub gas_limit: u64,
 }
 

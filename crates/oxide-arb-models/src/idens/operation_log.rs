@@ -43,6 +43,7 @@ pub enum OperationLog {
     LatencyMs,
     Detail,
     GovernanceAuditEventId,
+    GovernanceAuditSequence,
 }
 
 pub fn table() -> TableCreateStatement {
@@ -77,6 +78,11 @@ pub fn table() -> TableCreateStatement {
                 .default(Expr::cust("'{}'::jsonb")),
         )
         .col(column::uuid_null(OperationLog::GovernanceAuditEventId))
+        .col(
+            ColumnDef::new(OperationLog::GovernanceAuditSequence)
+                .big_integer()
+                .null(),
+        )
         .to_owned()
 }
 

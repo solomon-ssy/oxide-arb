@@ -21,12 +21,12 @@ use oxide_arb_error::control::AuditChainError;
 use oxide_arb_models::{
     domain::{
         AuditChainQuery, AuditChainResponse, ControlFactorListQuery, CoreEvent, CoreEventPublisher,
-        EmergencyPublishRequest, PublicationListQuery, PublishPublicationRequest,
-        RejectFactorRequest, RollbackPublicationRequest, ShadowDecisionsQuery,
-        ShadowDecisionsResponse,
+        EmergencyPublishRequest, GovernanceEventsQuery, PublicationListQuery,
+        PublishPublicationRequest, RejectFactorRequest, RollbackPublicationRequest,
+        ShadowDecisionsQuery, ShadowDecisionsResponse,
         control_factor::{
-            AuditActor, AuditChain, ControlFactorPublicationInfo, ControlFactorValueInfo,
-            PublishPublicationOutcome,
+            AuditActor, AuditChain, ControlFactorAuditEventInfo, ControlFactorPublicationInfo,
+            ControlFactorValueInfo, PublishPublicationOutcome,
         },
     },
     enums::{
@@ -34,7 +34,7 @@ use oxide_arb_models::{
         operation_log::OperationCategory,
         rbac::{Operation, ResourceType},
     },
-    types::{ControlFactorId, FactorPublicationId},
+    types::{AuditEventId, ControlFactorId, FactorPublicationId},
 };
 
 use crate::{
@@ -75,6 +75,12 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
             "/control-factors/audit",
             Rule::ResourceOp(ResourceType::Audit, Operation::Read),
             audit_chain,
+        ),
+        spec(
+            Method::GET,
+            "/control-factors/audit/events/{event_id}",
+            Rule::ResourceOp(ResourceType::Audit, Operation::Read),
+            get_audit_event,
         ),
         spec(
             Method::GET,
@@ -123,6 +129,12 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
             "/control-factors/{id}",
             Rule::ResourceOp(ResourceType::ControlFactor, Operation::Read),
             get_factor,
+        ),
+        spec(
+            Method::GET,
+            "/control-factors/{id}/governance-events",
+            Rule::ResourceOp(ResourceType::Audit, Operation::Read),
+            factor_governance_events,
         ),
         spec(
             Method::POST,
@@ -187,7 +199,7 @@ pub async fn reject_factor(
 
     op_ctx.set_action(OperationCategory::Governance, "control_factor.reject");
     op_ctx.set_resource(ResourceType::ControlFactor, id.to_string());
-    op_ctx.link_governance(outcome.audit_event_id);
+    op_ctx.link_governance(outcome.audit_event_id, outcome.audit_sequence);
     Ok(WebResponse::ok(outcome.value))
 }
 
@@ -316,7 +328,7 @@ pub async fn rollback_publication(
     op_ctx.set_detail(serde_json::json!({
         "target_publication_id": body.target_publication_id,
     }));
-    op_ctx.link_governance(outcome.audit_event_id);
+    op_ctx.link_governance(outcome.audit_event_id, outcome.audit_sequence);
     state.events.publish(CoreEvent::ControlPublished {
         publication_id: outcome.value.publication_id.to_string(),
         mode: outcome.value.mode,
@@ -333,11 +345,26 @@ pub async fn audit_chain(
     query: web::Query<AuditChainQuery>,
 ) -> Result<WebResponse<AuditChainResponse>, WebError> {
     let query = query.into_inner();
-    let from_sequence = query.from_sequence.unwrap_or(1).max(1);
+    if query.event_id.is_some() && query.from_sequence.is_some() {
+        return Err(WebError::BadRequest(
+            "event_id and from_sequence are mutually exclusive".into(),
+        ));
+    }
     let limit = query
         .limit
         .unwrap_or(DEFAULT_AUDIT_LIMIT)
         .min(MAX_AUDIT_LIMIT);
+    let from_sequence = if let Some(event_id) = query.event_id {
+        let target = state
+            .control_factors
+            .load_audit_event_by_id(&event_id)
+            .await?
+            .ok_or_else(|| WebError::NotFound(format!("audit event not found: {event_id}")))?;
+        let half = i64::try_from(limit / 2).unwrap_or(0);
+        (target.sequence - half).max(1)
+    } else {
+        query.from_sequence.unwrap_or(1).max(1)
+    };
     let events = state
         .control_factors
         .load_audit_chain(from_sequence, limit)
@@ -351,6 +378,38 @@ pub async fn audit_chain(
         verified,
         broken_at,
     }))
+}
+
+/// `GET /api/control-factors/audit/events/{event_id}` — fetch one audit event.
+pub async fn get_audit_event(
+    state: web::Data<AppState>,
+    event_id: web::Path<AuditEventId>,
+) -> Result<WebResponse<ControlFactorAuditEventInfo>, WebError> {
+    let event = state
+        .control_factors
+        .load_audit_event_by_id(&event_id)
+        .await?
+        .ok_or_else(|| WebError::NotFound(format!("audit event not found: {}", *event_id)))?;
+    Ok(WebResponse::ok(event))
+}
+
+/// `GET /api/control-factors/{id}/governance-events` — audit events for a factor.
+pub async fn factor_governance_events(
+    state: web::Data<AppState>,
+    id: web::Path<ControlFactorId>,
+    query: web::Query<GovernanceEventsQuery>,
+) -> Result<WebResponse<Vec<ControlFactorAuditEventInfo>>, WebError> {
+    let limit = query
+        .into_inner()
+        .limit
+        .unwrap_or(DEFAULT_AUDIT_LIMIT)
+        .min(MAX_AUDIT_LIMIT);
+    Ok(WebResponse::ok(
+        state
+            .control_factors
+            .load_audit_events_by_resource(&id.to_string(), limit)
+            .await?,
+    ))
 }
 
 /// `GET /api/control-factors/publications/{id}/shadow-decisions` — windowed
@@ -425,8 +484,8 @@ fn record_publication_outcome(
         ResourceType::Publication,
         outcome.publication().publication_id.to_string(),
     );
-    if let Some(event_id) = outcome.audit_event_id() {
-        op_ctx.link_governance(event_id.clone());
+    if let PublishPublicationOutcome::Published(audited) = &outcome {
+        op_ctx.link_governance(audited.audit_event_id.clone(), audited.audit_sequence);
     }
     let info = match outcome {
         PublishPublicationOutcome::Published(audited) => audited.value,
