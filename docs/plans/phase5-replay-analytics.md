@@ -20,6 +20,7 @@ Phase 5 已按 Phase 4 的推进方式拆成多个生产级子阶段文件。本
 |---|---|---|---|
 | Phase 5.0 | [`phase5.0-control-plane-foundation.md`](./phase5.0-control-plane-foundation.md) | 架构契约、不变量、crate 边界、artifact 模型、破坏式变更原则 | 0, 1, 3, 4, 8.2, 8.5, 9.4, 20 |
 | Phase 5.1 | [`phase5.1-fact-data-plane.md`](./phase5.1-fact-data-plane.md) | CH/PG facts、schema、writer、repository、migration | 2, 10.6, 11, 15.1, 15.2, 18.1 |
+| Phase 5.1a | [`phase5.1a-l2-book-facts-retention.md`](./phase5.1a-l2-book-facts-retention.md) | L2 book facts retention、decision-time book evidence、microstructure aggregates | 2, 6.2, 10.6, 11, 18.1, 18.4 |
 | Phase 5.2 | [`phase5.2-pit-materialization-runner.md`](./phase5.2-pit-materialization-runner.md) | PIT resolver、materialization manifest、run 状态机、幂等、错误码 | 1.3, 5, 6.1, 15.1.1, 18.2, 18.3 |
 | Phase 5.3 | [`phase5.3-evidence-engine.md`](./phase5.3-evidence-engine.md) | book/detector/execution/portfolio/settlement/reconciliation evidence | 6.2-6.6, 9.2, 18.4 |
 | Phase 5.4 | [`phase5.4-factor-builders-quality-gates.md`](./phase5.4-factor-builders-quality-gates.md) | 五类 typed factor builders、统计物化、quality gates、shadow readiness | 7, 8, 9, 13, 18.5 |
