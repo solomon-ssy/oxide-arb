@@ -35,10 +35,10 @@ pub fn event_envelope(event: &CoreEvent) -> Option<(SubscriptionKey, WsEnvelope)
             None,
             serde_json::to_value(alert).ok()?,
         ),
-        CoreEvent::CircuitBreakerTripped { level, reason } => (
+        CoreEvent::CircuitBreakerChanged(risk) => (
             WsChannel::RiskCircuitBreaker,
             None,
-            serde_json::json!({ "level": level, "reason": reason }),
+            serde_json::to_value(risk).ok()?,
         ),
         CoreEvent::PositionChanged(position) => (
             WsChannel::RiskPositionUpdate,
@@ -111,7 +111,7 @@ mod tests {
     use super::event_envelope;
     use crate::{
         domain::{
-            CoreEvent, MarketBookView,
+            CoreEvent, MarketBookView, RiskEngineStateView,
             calibration::{BucketKey, CalibrationSnapshot},
             opportunity::{EndgameMeta, Opportunity},
             trade::TradeInfo,
@@ -124,13 +124,14 @@ mod tests {
                 TradeState,
             },
             opportunity::PayoutModel,
+            risk::BreakerStateName,
         },
         types::{
             Bps, EventId, ExecutionId, MarketId, OpportunityId, OrderId, Price, ReservationId,
             Shares, TokenId, TradeId, Usd,
         },
     };
-    use chrono::Utc;
+    use chrono::{NaiveDate, Utc};
     use rust_decimal_macros::dec;
 
     fn test_opportunity() -> Opportunity {
@@ -219,6 +220,37 @@ mod tests {
         }
     }
 
+    fn test_risk_view() -> RiskEngineStateView {
+        RiskEngineStateView {
+            breaker_state: BreakerStateName::Closed,
+            breaker_level: None,
+            is_halted: false,
+            halt_reason: None,
+            cooldown_until: None,
+            total_exposure: Usd::ZERO,
+            hourly_loss_usd: Usd::ZERO,
+            hourly_fee_usd: Usd::ZERO,
+            hourly_trade_count: 0,
+            hourly_success_count: 0,
+            hourly_miss_count: 0,
+            daily_pnl: Usd::ZERO,
+            daily_loss_usd: Usd::ZERO,
+            daily_fee_usd: Usd::ZERO,
+            daily_budget_spent: Usd::ZERO,
+            daily_trade_count: 0,
+            daily_success_count: 0,
+            daily_miss_count: 0,
+            daily_window_start: NaiveDate::from_ymd_opt(2026, 1, 1).expect("valid date"),
+            weekly_loss_usd: Usd::ZERO,
+            weekly_trade_count: 0,
+            consecutive_misses: 0,
+            hwm_equity: Usd::ZERO,
+            last_emergency_at: None,
+            last_emergency_reason: None,
+            snapshot_at: "2026-01-01T00:00:00Z".parse().expect("valid timestamp"),
+        }
+    }
+
     #[test]
     fn trade_filled_projects_outbound_trade_view() {
         let trade = test_trade();
@@ -300,14 +332,16 @@ mod tests {
     }
 
     #[test]
-    fn circuit_breaker_tripped_maps_to_global_risk_key() {
-        let event = CoreEvent::CircuitBreakerTripped {
-            level: 3,
-            reason: "daily loss cap".to_owned(),
-        };
+    fn circuit_breaker_changed_maps_full_state_view_to_global_risk_key() {
+        let event = CoreEvent::CircuitBreakerChanged(test_risk_view());
         let (key, envelope) = event_envelope(&event).expect("breaker maps");
         assert_eq!(key, SubscriptionKey::global(WsChannel::RiskCircuitBreaker));
         assert_eq!(envelope.kind.as_str(), "risk.circuit_breaker");
+        assert_eq!(envelope.data["breaker_state"], "closed");
+        assert_eq!(
+            envelope.data["snapshot_at"].as_str(),
+            Some("2026-01-01T00:00:00Z")
+        );
     }
 
     #[test]

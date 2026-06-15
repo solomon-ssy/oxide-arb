@@ -88,7 +88,8 @@ async fn blacklist_mutations_enforce_acting_role() {
 
     let add_body = json!({
         "market_id": TEST_MARKET_ID,
-        "reason": "manual"
+        "blacklist_reason": "manual",
+        "reason": "operator reviewed liquidity cliff"
     });
     assert_eq!(
         client::post(&env, "/api/risk/blacklist", &operator, add_body.clone())
@@ -100,7 +101,7 @@ async fn blacklist_mutations_enforce_acting_role() {
         &env,
         "/api/risk/blacklist",
         &operator,
-        &[(ACTING_ROLE, RISK_GOV_ROLE)],
+        &[(REQUEST_ID, "bl-add-gov"), (ACTING_ROLE, RISK_GOV_ROLE)],
         add_body,
     )
     .await;
@@ -127,4 +128,13 @@ async fn blacklist_mutations_enforce_acting_role() {
     let rows = client::wait_for_oplog(&env, &admin, "bl-remove-gov").await;
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["acting_role"], RISK_GOV_ROLE);
+
+    let rows = client::wait_for_oplog(&env, &admin, "bl-add-gov").await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["acting_role"], RISK_GOV_ROLE);
+    assert_eq!(rows[0]["detail"]["blacklist_reason"], "manual");
+    assert_eq!(
+        rows[0]["detail"]["reason"],
+        "operator reviewed liquidity cliff"
+    );
 }

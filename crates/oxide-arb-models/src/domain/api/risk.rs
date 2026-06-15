@@ -8,12 +8,15 @@
 //! primary key.
 
 use crate::{
-    domain::{RiskAuditEventInfo, RiskEngineState},
-    enums::risk::{BreakerStateName, CircuitBreakerLevel, RiskAuditEventType},
-    types::{MarketId, OpportunityId, TradeId, Usd},
+    domain::{BlacklistInfo, RiskAuditEventInfo, RiskEngineState},
+    enums::risk::{
+        BlacklistReason, BlacklistScope, BreakerStateName, CircuitBreakerLevel, RiskAuditEventType,
+    },
+    types::{MarketId, OpportunityId, TokenId, TradeId, Usd},
 };
 use chrono::{DateTime, NaiveDate, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use validator::Validate;
 
 /// Outbound projection of the live risk-engine snapshot for the dashboard.
 ///
@@ -79,6 +82,57 @@ impl From<RiskEngineState> for RiskEngineStateView {
             last_emergency_at: s.last_emergency_at,
             last_emergency_reason: s.last_emergency_reason,
             snapshot_at: s.snapshot_at,
+        }
+    }
+}
+
+/// Add a market to the runtime blacklist.
+#[derive(Debug, Deserialize, Validate)]
+pub struct BlacklistCreateRequest {
+    /// Polymarket `condition_id` to exclude from trading.
+    pub market_id: MarketId,
+    /// Business classification of why the market is excluded.
+    pub blacklist_reason: BlacklistReason,
+    /// Operator justification, recorded on the operation log and risk audit.
+    #[validate(length(min = 1, max = 1024))]
+    pub reason: String,
+}
+
+/// Remove a market from the runtime blacklist (governed mutation).
+#[derive(Debug, Deserialize, Validate)]
+pub struct BlacklistRemoveRequest {
+    /// Operator justification, recorded on the operation log and risk audit.
+    #[validate(length(min = 1, max = 1024))]
+    pub reason: String,
+}
+
+/// Operator-facing blacklist entry view.
+///
+/// Uses `blacklist_reason` on the wire so the business classification cannot be
+/// confused with governed operator `reason` fields on mutating requests.
+#[derive(Debug, Clone, Serialize)]
+pub struct BlacklistEntryView {
+    pub market_id: MarketId,
+    pub token_id: Option<TokenId>,
+    pub scope: BlacklistScope,
+    pub blacklist_reason: BlacklistReason,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub miss_count: i32,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl From<BlacklistInfo> for BlacklistEntryView {
+    fn from(info: BlacklistInfo) -> Self {
+        Self {
+            market_id: info.market_id,
+            token_id: info.token_id,
+            scope: info.scope,
+            blacklist_reason: info.reason,
+            expires_at: info.expires_at,
+            miss_count: info.miss_count,
+            created_at: info.created_at,
+            updated_at: info.updated_at,
         }
     }
 }

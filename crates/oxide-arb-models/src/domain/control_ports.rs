@@ -91,7 +91,8 @@ pub trait RuntimeControlPort: Send + Sync {
     async fn add_blacklist(
         &self,
         market_id: MarketId,
-        reason: BlacklistReason,
+        blacklist_reason: BlacklistReason,
+        operator_reason: &str,
     ) -> Result<(), RuntimeControlError>;
 
     /// Remove a market from the runtime blacklist.

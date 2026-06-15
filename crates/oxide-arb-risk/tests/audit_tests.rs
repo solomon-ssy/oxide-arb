@@ -215,6 +215,7 @@ async fn add_blacklist_emits_blacklist_added() {
         .add_blacklist(
             MarketId::new("0xblacklist_test"),
             BlacklistReason::Manual,
+            "operator reviewed order-book anomaly",
             &metrics,
         )
         .await
@@ -222,6 +223,14 @@ async fn add_blacklist_emits_blacklist_added() {
 
     let audits = persistence.take_audits();
     assert!(!audits.is_empty(), "expected BlacklistAdded audit event");
+    assert_eq!(
+        audits[0].rejection_reason.as_deref(),
+        Some("operator reviewed order-book anomaly")
+    );
+    assert_eq!(
+        audits[0].payload["BlacklistAdded"]["operator_reason"],
+        "operator reviewed order-book anomaly"
+    );
 }
 
 #[tokio::test]
@@ -231,7 +240,12 @@ async fn remove_blacklist_emits_blacklist_removed() {
 
     let market_id = MarketId::new("0xremove_test");
     engine
-        .add_blacklist(market_id.clone(), BlacklistReason::Manual, &metrics)
+        .add_blacklist(
+            market_id.clone(),
+            BlacklistReason::Manual,
+            "operator add before remove test",
+            &metrics,
+        )
         .await
         .unwrap();
 

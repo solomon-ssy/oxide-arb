@@ -5,12 +5,7 @@
 //! additionally governed by the `X-Acting-Role` header (authorized by the authz
 //! middleware) since entering `Live` is the highest-risk operator action.
 
-use crate::{
-    enums::{
-        common::ExecutionMode, control_factor::MaterializationRunStatus, risk::BlacklistReason,
-    },
-    types::MarketId,
-};
+use crate::enums::{common::ExecutionMode, control_factor::MaterializationRunStatus};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use validator::Validate;
@@ -85,21 +80,4 @@ pub struct MaterializationScheduleStatusView {
     pub last_success_at: Option<DateTime<Utc>>,
     pub last_terminal_status: Option<MaterializationRunStatus>,
     pub next_due_at: Option<DateTime<Utc>>,
-}
-
-/// Add a market to the runtime blacklist.
-#[derive(Debug, Deserialize, Validate)]
-pub struct BlacklistCreateRequest {
-    /// Polymarket `condition_id` to exclude from trading.
-    pub market_id: MarketId,
-    /// Classification of why the market is excluded.
-    pub reason: BlacklistReason,
-}
-
-/// Remove a market from the runtime blacklist (governed mutation).
-#[derive(Debug, Deserialize, Validate)]
-pub struct BlacklistRemoveRequest {
-    /// Operator justification, recorded on the operation log and risk audit.
-    #[validate(length(min = 1, max = 1024))]
-    pub reason: String,
 }

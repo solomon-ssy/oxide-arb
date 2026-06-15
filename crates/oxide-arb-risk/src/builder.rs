@@ -116,9 +116,9 @@ impl RiskEngineBuilder {
         self
     }
 
-    /// Real-time event bus handle. When set, the engine emits a
-    /// `CoreEvent::CircuitBreakerTripped` whenever a post-trade/settlement
-    /// breaker trip is recorded (best-effort, non-blocking).
+    /// Real-time event bus handle. When set, the engine emits full
+    /// `CoreEvent::CircuitBreakerChanged` state whenever the breaker changes
+    /// (best-effort, non-blocking).
     #[must_use]
     pub fn event_publisher(mut self, publisher: CoreEventPublisher) -> Self {
         self.event_publisher = Some(publisher);

@@ -36,7 +36,7 @@ use oxide_arb_error::OxideResult;
 use oxide_arb_models::types::MarketId as ModelsMarketId;
 use oxide_arb_models::{
     domain::{
-        BlacklistInfo, CoreEvent, CoreEventPublisher,
+        BlacklistInfo, CoreEvent, CoreEventPublisher, RiskEngineStateView,
         blacklist::UpsertBlacklistEntry,
         control_factor::FactorDecisionContext,
         opportunity::Opportunity,
@@ -359,10 +359,9 @@ where
             let _ = self.record_emergency(tripped_level, &reason, metrics).await;
             // Surface the trip to the real-time bus (best-effort, non-blocking).
             if let Some(publisher) = &self.event_publisher {
-                publisher.publish(CoreEvent::CircuitBreakerTripped {
-                    level: tripped_level.as_u8(),
-                    reason,
-                });
+                publisher.publish(CoreEvent::CircuitBreakerChanged(RiskEngineStateView::from(
+                    self.snapshot(metrics),
+                )));
             }
         }
 
@@ -742,6 +741,7 @@ where
                 .write()
                 .halt(CircuitBreakerLevel::System, reason.clone());
             self.publish_risk_snapshot();
+            self.publish_breaker_state(metrics);
             self.record_emergency(CircuitBreakerLevel::System, &reason, metrics)
                 .await?;
             return Ok(true);
@@ -787,6 +787,7 @@ where
         }
 
         if cb_transitioned {
+            self.publish_breaker_state(metrics);
             let post_state = self.circuit_breaker.read().state().to_name();
             if pre_state == BreakerStateName::Recovered && post_state == BreakerStateName::Closed {
                 let audit = RiskAuditEvent::BreakerRecovered {
@@ -926,6 +927,7 @@ where
         self.circuit_breaker.write().reset(reason);
         self.state_version.increment();
         self.publish_risk_snapshot();
+        self.publish_breaker_state(metrics);
 
         let snapshot = self.snapshot(metrics);
         let audit = RiskAuditEvent::BreakerReset {
@@ -945,10 +947,11 @@ where
     pub async fn add_blacklist(
         &self,
         market_id: MarketId,
-        reason: BlacklistReason,
+        blacklist_reason: BlacklistReason,
+        operator_reason: &str,
         metrics: &dyn RiskMetrics,
     ) -> OxideResult<()> {
-        let entry = self.blacklist.add_permanent(market_id, reason);
+        let entry = self.blacklist.add_permanent(market_id, blacklist_reason);
 
         let upsert = UpsertBlacklistEntry {
             market_id: entry.market_id.clone(),
@@ -965,9 +968,11 @@ where
 
         self.state_version.increment();
         self.publish_risk_snapshot();
+        self.publish_breaker_state(metrics);
         let snapshot = self.snapshot(metrics);
         let audit = RiskAuditEvent::BlacklistAdded {
             entry: entry.clone(),
+            operator_reason: operator_reason.to_owned(),
         };
         self.persist_and_audit(&snapshot, audit.into()).await?;
 
@@ -1322,6 +1327,15 @@ where
     pub(crate) fn publish_risk_snapshot(&self) {
         self.risk_snapshot
             .store(Arc::new(self.compile_risk_snapshot()));
+    }
+
+    fn publish_breaker_state(&self, metrics: &dyn RiskMetrics) {
+        let Some(publisher) = &self.event_publisher else {
+            return;
+        };
+        publisher.publish(CoreEvent::CircuitBreakerChanged(RiskEngineStateView::from(
+            self.snapshot(metrics),
+        )));
     }
 
     fn enqueue_pre_trade_audit(

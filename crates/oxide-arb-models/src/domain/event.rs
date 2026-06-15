@@ -5,8 +5,10 @@
 //! broadcaster consumer) can use it without a circular dependency.
 
 use crate::{
-    domain::control_factor::ControlFactorMaterializationRunInfo,
-    domain::{MarketBookView, Opportunity, PositionInfo, SystemStatus, TradeInfo},
+    domain::{
+        MarketBookView, Opportunity, PositionView, RiskEngineStateView, SystemStatus, TradeInfo,
+        control_factor::ControlFactorMaterializationRunInfo,
+    },
     enums::{
         common::{AlertCategory, AlertLevel, AlertSource, TradeBusinessOutcome},
         control_factor::PublicationMode,
@@ -66,11 +68,8 @@ pub enum CoreEvent {
         total: Usd,
     },
     SystemStatusChanged(SystemStatus),
-    CircuitBreakerTripped {
-        level: u8,
-        reason: String,
-    },
-    PositionChanged(PositionInfo),
+    CircuitBreakerChanged(RiskEngineStateView),
+    PositionChanged(PositionView),
     /// Throttled, coalesced per-market order-book update emitted by the
     /// `BookUpdateCoalescer` (never on the detection hot path) for markets a
     /// dashboard is actively watching.
@@ -107,7 +106,7 @@ impl CoreEvent {
             Self::TradeSettled { .. } => "trade.settled",
             Self::PnlUpdate { .. } => "pnl.update",
             Self::SystemStatusChanged(_) => "system.status",
-            Self::CircuitBreakerTripped { .. } => "risk.circuit_breaker",
+            Self::CircuitBreakerChanged(_) => "risk.circuit_breaker",
             Self::PositionChanged(_) => "risk.position_update",
             Self::MarketBookUpdate { .. } => "market.book_update",
             Self::MarketResolved { .. } => "market.resolved",

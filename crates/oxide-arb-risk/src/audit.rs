@@ -58,6 +58,7 @@ pub enum RiskAuditEvent {
     },
     BlacklistAdded {
         entry: BlacklistInfo,
+        operator_reason: String,
     },
     BlacklistRemoved {
         market_id: MarketId,
@@ -207,8 +208,12 @@ fn audit_event_columns(event: &RiskAuditEvent) -> AuditEventColumns {
         RiskAuditEvent::BreakerReset { .. } => {
             AuditEventColumns::bare(RiskAuditEventType::BreakerReset)
         }
-        RiskAuditEvent::BlacklistAdded { entry } => AuditEventColumns {
+        RiskAuditEvent::BlacklistAdded {
+            entry,
+            operator_reason,
+        } => AuditEventColumns {
             market_id: Some(entry.market_id.clone()),
+            rejection_reason: Some(operator_reason.clone()),
             ..AuditEventColumns::bare(RiskAuditEventType::BlacklistAdded)
         },
         RiskAuditEvent::BlacklistRemoved { market_id, .. } => AuditEventColumns {

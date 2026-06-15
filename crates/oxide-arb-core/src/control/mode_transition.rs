@@ -326,10 +326,16 @@ impl RuntimeControlPort for CoreRuntimeControl {
     async fn add_blacklist(
         &self,
         market_id: MarketId,
-        reason: BlacklistReason,
+        blacklist_reason: BlacklistReason,
+        operator_reason: &str,
     ) -> Result<(), RuntimeControlError> {
         self.risk_engine
-            .add_blacklist(market_id, reason, self.risk_metrics())
+            .add_blacklist(
+                market_id,
+                blacklist_reason,
+                operator_reason,
+                self.risk_metrics(),
+            )
             .await
             .map_err(|error| RuntimeControlError::Engine(error.to_string()))
     }

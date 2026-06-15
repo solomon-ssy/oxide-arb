@@ -19,7 +19,7 @@ use oxide_arb_api::{VotingOracle, oracle::types::ResolutionVerdict};
 use oxide_arb_error::{OxideError, redeem::RedeemError};
 use oxide_arb_models::{
     domain::{
-        CoreEvent, CoreEventPublisher,
+        CoreEvent, CoreEventPublisher, PositionView,
         position::{MarkRedeemedParams, PositionInfo},
         settlement::{
             MarketSettlementInput, MarketSettlementRequest, NewResolutionEvent, SettlementEconomics,
@@ -321,7 +321,9 @@ impl MarketSettlementService {
         // complete. `outcome` is the fill outcome (Success); the realized PnL
         // sign rides in `pnl`. Fire-and-forget — never affects settlement.
         self.events
-            .publish(CoreEvent::PositionChanged(settled.clone()));
+            .publish(CoreEvent::PositionChanged(PositionView::from(
+                settled.clone(),
+            )));
         self.events.publish(CoreEvent::TradeSettled {
             trade_id: settled.trade_id.clone(),
             outcome: TradeBusinessOutcome::Success,

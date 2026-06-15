@@ -40,7 +40,7 @@ use oxide_arb_models::{
     },
     enums::{
         common::ExecutionMode,
-        risk::{BlacklistReason, BreakerStateName},
+        risk::{BlacklistReason, BlacklistScope, BreakerStateName},
     },
     runtime_config::{
         RuntimeConfig,
@@ -505,13 +505,14 @@ impl RuntimeControlPort for MockRuntimeControl {
     async fn add_blacklist(
         &self,
         market_id: MarketId,
-        reason: BlacklistReason,
+        blacklist_reason: BlacklistReason,
+        _operator_reason: &str,
     ) -> Result<(), RuntimeControlError> {
         self.blacklist.lock().unwrap().push(BlacklistInfo {
             market_id,
             token_id: None,
-            scope: oxide_arb_models::enums::risk::BlacklistScope::Full,
-            reason,
+            scope: BlacklistScope::Full,
+            reason: blacklist_reason,
             expires_at: None,
             miss_count: 0,
             created_at: Utc::now(),

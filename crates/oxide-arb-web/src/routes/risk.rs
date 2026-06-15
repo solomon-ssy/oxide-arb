@@ -9,8 +9,8 @@
 use actix_web::{http::Method, web};
 use oxide_arb_models::{
     domain::{
-        BlacklistCreateRequest, BlacklistInfo, BlacklistRemoveRequest, CircuitBreakerResetRequest,
-        PositionView, RiskEngineStateView,
+        BlacklistCreateRequest, BlacklistEntryView, BlacklistRemoveRequest,
+        CircuitBreakerResetRequest, PositionView, RiskEngineStateView,
     },
     enums::{
         operation_log::OperationCategory,
@@ -136,23 +136,36 @@ pub async fn reset_circuit_breaker(
 /// `GET /api/risk/blacklist` — active blacklist entries.
 pub async fn list_blacklist(
     state: web::Data<AppState>,
-) -> Result<WebResponse<Vec<BlacklistInfo>>, WebError> {
-    Ok(WebResponse::ok(state.control.blacklist()))
+) -> Result<WebResponse<Vec<BlacklistEntryView>>, WebError> {
+    Ok(WebResponse::ok(
+        state
+            .control
+            .blacklist()
+            .into_iter()
+            .map(BlacklistEntryView::from)
+            .collect(),
+    ))
 }
 
 /// `POST /api/risk/blacklist` — add a market to the runtime blacklist.
 pub async fn add_blacklist(
     state: web::Data<AppState>,
-    _acting_role: ActingRole,
+    acting_role: ActingRole,
     op_ctx: OperationCtx,
     body: ValidatedJson<BlacklistCreateRequest>,
 ) -> Result<WebResponse<()>, WebError> {
     let body = body.into_inner();
     op_ctx.set_action(OperationCategory::Risk, "risk.blacklist.add");
     op_ctx.set_resource(ResourceType::Blacklist, body.market_id.to_string());
+    op_ctx.set_detail(serde_json::json!({
+        "market_id": body.market_id,
+        "blacklist_reason": body.blacklist_reason,
+        "reason": body.reason,
+        "acting_role": acting_role.0,
+    }));
     state
         .control
-        .add_blacklist(body.market_id, body.reason)
+        .add_blacklist(body.market_id, body.blacklist_reason, &body.reason)
         .await?;
     Ok(WebResponse::ok(()))
 }

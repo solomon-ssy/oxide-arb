@@ -9,7 +9,7 @@ use crate::{
 use oxide_arb_error::OxideError;
 use oxide_arb_models::{
     domain::{
-        CoreEvent, CoreEventPublisher,
+        CoreEvent, CoreEventPublisher, PositionView,
         calibration::NewCalibrationOutcome,
         position::{NewPosition, PositionInfo},
         scored_snapshot::ScoredOpportunitySnapshot,
@@ -129,7 +129,8 @@ impl PostTradeConsumer {
                 if trade.state.is_success() {
                     self.events.publish(CoreEvent::TradeFilled(trade.clone()));
                     if let Some(position) = opened_position {
-                        self.events.publish(CoreEvent::PositionChanged(position));
+                        self.events
+                            .publish(CoreEvent::PositionChanged(PositionView::from(position)));
                     }
                 }
             }
