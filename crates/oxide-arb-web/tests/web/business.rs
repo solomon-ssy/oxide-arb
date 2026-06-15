@@ -7,7 +7,7 @@
 use actix_web::http::StatusCode;
 use chrono::{NaiveDate, Utc};
 use oxide_arb_models::{
-    domain::{DailyReport, ReportRiskSummary, ReportTradeStats, SettledPnlStats},
+    domain::{DailyReport, ReportRiskSummary, ReportTradeStats, SettledPnlStats, WeeklyReport},
     enums::report::ReportSchemaVersion,
     types::Usd,
 };
@@ -49,13 +49,20 @@ async fn business_read_routes_are_registered_and_authorized() {
         "GET /analytics/edge-distribution"
     );
 
-    // No report seeded yet — analytics daily route registered + handler reached → 404.
+    // Analytics report endpoints are chart-friendly on a fresh deployment.
     assert_eq!(
         client::get(&env, "/api/analytics/daily", &admin)
             .await
             .status,
-        StatusCode::NOT_FOUND,
+        StatusCode::OK,
         "GET /analytics/daily with no report"
+    );
+    assert_eq!(
+        client::get(&env, "/api/analytics/weekly", &admin)
+            .await
+            .status,
+        StatusCode::OK,
+        "GET /analytics/weekly with no report"
     );
 
     // Unknown replay run → 404.
@@ -117,6 +124,111 @@ fn daily_report_payload(date: NaiveDate, pnl: i64) -> serde_json::Value {
         largest_single_profit: Usd::ZERO,
     };
     serde_json::to_value(&report).expect("daily report serializes")
+}
+
+/// Minimal weekly report payload carrying the latest summary card values.
+fn weekly_report_payload(week_start: NaiveDate, week_end: NaiveDate) -> serde_json::Value {
+    let report = WeeklyReport {
+        week_start,
+        week_end,
+        schema_version: ReportSchemaVersion::V1,
+        generated_at: Utc::now(),
+        settled_pnl: SettledPnlStats {
+            realized_pnl: Usd::ZERO,
+            total_payout: Usd::ZERO,
+            total_cost: Usd::ZERO,
+            total_fees: Usd::ZERO,
+            settled_position_count: 0,
+            winning_position_count: 0,
+            losing_position_count: 0,
+            unsettled_position_count: 0,
+            failed_accounting_count: 0,
+            largest_single_profit: Usd::ZERO,
+            largest_single_loss: Usd::ZERO,
+        },
+        execution: ReportTradeStats {
+            trade_count: 0,
+            success_count: 0,
+            miss_count: 0,
+            failed_count: 0,
+            total_fill_cost: Usd::ZERO,
+            total_fill_fees: Usd::ZERO,
+            fill_expected_pnl: Usd::ZERO,
+        },
+        risk: ReportRiskSummary {
+            daily_pnl: Usd::ZERO,
+            daily_loss: Usd::ZERO,
+            weekly_loss: Usd::ZERO,
+            total_exposure: Usd::ZERO,
+            open_position_count: 0,
+        },
+        daily_reports: Vec::new(),
+    };
+    serde_json::to_value(&report).expect("weekly report serializes")
+}
+
+#[actix_web::test]
+#[ignore = "requires Docker"]
+async fn analytics_reports_are_windowed_and_empty_safe() {
+    let env = TestEnv::start().await;
+    let admin = client::login(&env, "admin", "admin").await;
+    let day = |d: u32| NaiveDate::from_ymd_opt(2026, 6, d).expect("valid date");
+
+    let empty_daily = client::get(&env, "/api/analytics/daily", &admin).await;
+    assert_eq!(empty_daily.status, StatusCode::OK, "empty daily is 200");
+    assert_eq!(
+        empty_daily.json()["data"]["points"]
+            .as_array()
+            .expect("daily points array")
+            .len(),
+        0,
+        "no reports -> empty daily points"
+    );
+
+    let empty_weekly = client::get(&env, "/api/analytics/weekly", &admin).await;
+    assert_eq!(empty_weekly.status, StatusCode::OK, "empty weekly is 200");
+    assert!(empty_weekly.json()["data"].is_null(), "no report -> null");
+
+    for (date, pnl) in [(day(3), -2), (day(1), 10), (day(2), 5)] {
+        env.state
+            .reports
+            .save_daily(date, daily_report_payload(date, pnl))
+            .await
+            .expect("seed daily report");
+    }
+    env.state
+        .reports
+        .save_weekly(day(1), day(7), weekly_report_payload(day(1), day(7)))
+        .await
+        .expect("seed weekly report");
+
+    let daily = client::get(
+        &env,
+        "/api/analytics/daily?from=2026-06-01T00:00:00Z&to=2026-06-03T23:59:59Z",
+        &admin,
+    )
+    .await;
+    assert_eq!(daily.status, StatusCode::OK, "GET /analytics/daily");
+    let rows = daily.json()["data"]["points"]
+        .as_array()
+        .cloned()
+        .expect("daily points");
+    assert_eq!(rows.len(), 3, "window includes all seeded reports");
+    let dates: Vec<&str> = rows
+        .iter()
+        .map(|row| row["date"].as_str().expect("date"))
+        .collect();
+    assert_eq!(
+        dates,
+        vec!["2026-06-01", "2026-06-02", "2026-06-03"],
+        "daily reports are oldest first"
+    );
+    assert_eq!(rows[0]["daily_pnl"], "10");
+    assert_eq!(rows[2]["cumulative_pnl"], "13");
+
+    let weekly = client::get(&env, "/api/analytics/weekly", &admin).await;
+    assert_eq!(weekly.status, StatusCode::OK, "GET /analytics/weekly");
+    assert_eq!(weekly.json()["data"]["week_start"], "2026-06-01");
 }
 
 #[actix_web::test]

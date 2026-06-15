@@ -5,7 +5,7 @@ use oxide_arb_storage::postgres::{
     PostgresPool,
     migration::{Migrator, MigratorTrait},
 };
-use testcontainers::{ContainerAsync, runners::AsyncRunner};
+use testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner};
 use testcontainers_modules::postgres::Postgres;
 
 pub fn test_pg_config(port: u16) -> PostgresConfig {
@@ -37,6 +37,7 @@ pub async fn setup_pg() -> (PostgresPool, ContainerAsync<Postgres>) {
         .with_db_name("test_oxide_arb")
         .with_user("postgres")
         .with_password("postgres")
+        .with_tag("16")
         .start()
         .await
         .expect("PG container");

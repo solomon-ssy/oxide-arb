@@ -224,11 +224,11 @@ async fn do_update_status(
     let mut stmt = MarketEntity::update_many().col_expr(MarketColumn::Status, Expr::value(status));
 
     if let Some(o) = outcome {
-        stmt = stmt.col_expr(MarketColumn::Outcome, Expr::value(Some(o.to_string())));
+        stmt = stmt.col_expr(MarketColumn::Outcome, Expr::value(Some(o)));
     }
 
     let result = stmt
-        .filter(MarketColumn::MarketId.eq(id.as_str()))
+        .filter(MarketColumn::MarketId.eq(id))
         .exec(db)
         .await
         .map_err(StorageError::from)?;
@@ -444,7 +444,7 @@ fn page_condition(query: &MarketPageQuery) -> Condition {
         );
     }
     if let Some(event_id) = &query.event_id {
-        condition = condition.add(MarketColumn::EventId.eq(event_id.as_str()));
+        condition = condition.add(MarketColumn::EventId.eq(event_id));
     }
     if let Some(keyword) = query.keyword.as_deref().filter(|kw| !kw.is_empty()) {
         let pattern = format!("%{keyword}%");

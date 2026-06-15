@@ -3,7 +3,8 @@ use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::{
     domain::{
         EdgeBucket, MarketPerformanceRow, NewTrade, PageRequest, Paginated, ReportTradeStats,
-        TimeWindow, TradeInfo, TradeObservation, TradePageQuery, evidence::EvidenceQueryResult,
+        TradeAnalyticsFilter, TradeInfo, TradeObservation, TradePageQuery,
+        evidence::EvidenceQueryResult,
     },
     enums::common::{TradeBusinessOutcome, TradeState},
     types::{ExecutionId, MarketId, TradeId},
@@ -81,14 +82,16 @@ pub trait TradeRepository: Send + Sync {
     /// Detected-edge histogram over the window, aggregated SQL-side (no per-trade
     /// row load). Buckets are right-open basis-point ranges; rows with a NULL
     /// `detected_edge_bps` are excluded.
-    async fn edge_histogram(&self, window: TimeWindow) -> Result<Vec<EdgeBucket>, StorageError>;
+    async fn edge_histogram(
+        &self,
+        filter: TradeAnalyticsFilter,
+    ) -> Result<Vec<EdgeBucket>, StorageError>;
 
-    /// Per-market performance aggregate over the window, computed with SQL
-    /// `GROUP BY market_id` (so trade rows never materialize in memory), ordered
-    /// by net profit descending and paginated.
+    /// Per-market execution performance over the window: SQL `GROUP BY` with
+    /// `ORDER BY net_profit_usd DESC` and server-side `LIMIT`/`OFFSET`.
     async fn market_performance(
         &self,
-        window: TimeWindow,
+        filter: TradeAnalyticsFilter,
         page: PageRequest,
     ) -> Result<Paginated<MarketPerformanceRow>, StorageError>;
 

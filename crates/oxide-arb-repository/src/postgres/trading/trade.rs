@@ -5,7 +5,7 @@ use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::{
     domain::{
         EdgeBucket, MarketPerformanceRow, NewTrade, PageRequest, Paginated, ReportTradeStats,
-        TimeWindow, TradeInfo, TradeObservation, TradePageQuery,
+        TradeAnalyticsFilter, TradeInfo, TradeObservation, TradePageQuery,
     },
     entities::trade::{ActiveModel, Column, Entity},
     enums::common::{ExecutionMode, TradeBusinessOutcome, TradeState},
@@ -16,7 +16,7 @@ use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, DatabaseTransaction,
     EntityTrait, FromQueryResult, IntoActiveModel, PaginatorTrait, QueryFilter, QueryOrder,
     QuerySelect, TransactionTrait,
-    sea_query::{Condition, Expr, LockBehavior, LockType},
+    sea_query::{Condition, Expr, Func, LockBehavior, LockType, NullOrdering, Order, SimpleExpr},
 };
 use std::collections::HashMap;
 
@@ -380,7 +380,7 @@ async fn do_find_by_execution(
     execution_id: &ExecutionId,
 ) -> Result<Vec<TradeInfo>, StorageError> {
     Entity::find()
-        .filter(Column::ExecutionId.eq(execution_id.as_uuid()))
+        .filter(Column::ExecutionId.eq(execution_id))
         .order_by_desc(Column::CreatedAt)
         .all(db)
         .await
@@ -394,7 +394,7 @@ async fn do_find_by_market(
     limit: u64,
 ) -> Result<Vec<TradeInfo>, StorageError> {
     Entity::find()
-        .filter(Column::MarketId.eq(market_id.as_str()))
+        .filter(Column::MarketId.eq(market_id))
         .order_by_desc(Column::CreatedAt)
         .limit(limit)
         .all(db)
@@ -406,7 +406,7 @@ async fn do_find_by_market(
 fn page_condition(query: &TradePageQuery) -> Condition {
     let mut condition = Condition::all();
     if let Some(market_id) = &query.market_id {
-        condition = condition.add(Column::MarketId.eq(market_id.as_str()));
+        condition = condition.add(Column::MarketId.eq(market_id));
     }
     if let Some(side) = query.side {
         condition = condition.add(Column::Side.eq(side));
@@ -509,53 +509,66 @@ async fn do_count_by_outcome(
         .collect())
 }
 
+/// SQL-side scalar projection for windowed trade rollups.
+#[derive(Debug, FromQueryResult)]
+struct AggregatedReportStats {
+    trade_count: i64,
+    success_count: i64,
+    miss_count: i64,
+    failed_count: i64,
+    total_fill_cost: Option<Usd>,
+    total_fill_fees: Option<Usd>,
+    fill_expected_pnl: Option<Usd>,
+}
+
 async fn do_aggregate_between(
     db: &impl ConnectionTrait,
     start: DateTime<Utc>,
     end: DateTime<Utc>,
 ) -> Result<ReportTradeStats, StorageError> {
-    let trades: Vec<TradeInfo> = Entity::find()
-        .filter(Column::CreatedAt.gte(start))
-        .filter(Column::CreatedAt.lt(end))
-        .all(db)
-        .await
-        .map_err(StorageError::from)?
-        .into_iter()
-        .map(Into::into)
-        .collect();
-
-    let mut stats = ReportTradeStats {
-        trade_count: 0,
-        success_count: 0,
-        miss_count: 0,
-        failed_count: 0,
-        total_fill_cost: Usd::ZERO,
-        total_fill_fees: Usd::ZERO,
-        fill_expected_pnl: Usd::ZERO,
+    let outcome_count = |outcome: TradeBusinessOutcome| {
+        Func::sum(Expr::case(Column::BusinessOutcome.eq(outcome), 1).finally(0))
     };
 
-    for trade in trades {
-        stats.trade_count = stats.trade_count.saturating_add(1);
-        stats.total_fill_cost += trade.cost_usd;
-        stats.total_fill_fees += trade.fee_usd;
-        if let Some(pnl) = trade.net_profit_usd {
-            stats.fill_expected_pnl += pnl;
-        }
-        match trade.business_outcome {
-            Some(TradeBusinessOutcome::Success) => {
-                stats.success_count = stats.success_count.saturating_add(1);
-            }
-            Some(TradeBusinessOutcome::Miss) => {
-                stats.miss_count = stats.miss_count.saturating_add(1);
-            }
-            Some(TradeBusinessOutcome::Failed) => {
-                stats.failed_count = stats.failed_count.saturating_add(1);
-            }
-            None => {}
-        }
-    }
+    let row = Entity::find()
+        .filter(Column::CreatedAt.gte(start))
+        .filter(Column::CreatedAt.lt(end))
+        .select_only()
+        .column_as(Column::TradeId.count(), "trade_count")
+        .expr_as(
+            outcome_count(TradeBusinessOutcome::Success),
+            "success_count",
+        )
+        .expr_as(outcome_count(TradeBusinessOutcome::Miss), "miss_count")
+        .expr_as(outcome_count(TradeBusinessOutcome::Failed), "failed_count")
+        .column_as(Column::CostUsd.sum(), "total_fill_cost")
+        .column_as(Column::FeeUsd.sum(), "total_fill_fees")
+        .column_as(Column::NetProfitUsd.sum(), "fill_expected_pnl")
+        .into_model::<AggregatedReportStats>()
+        .one(db)
+        .await
+        .map_err(StorageError::from)?;
 
-    Ok(stats)
+    Ok(row.map_or(
+        ReportTradeStats {
+            trade_count: 0,
+            success_count: 0,
+            miss_count: 0,
+            failed_count: 0,
+            total_fill_cost: Usd::ZERO,
+            total_fill_fees: Usd::ZERO,
+            fill_expected_pnl: Usd::ZERO,
+        },
+        |stats| ReportTradeStats {
+            trade_count: u32::try_from(stats.trade_count.max(0)).unwrap_or(0),
+            success_count: u32::try_from(stats.success_count.max(0)).unwrap_or(0),
+            miss_count: u32::try_from(stats.miss_count.max(0)).unwrap_or(0),
+            failed_count: u32::try_from(stats.failed_count.max(0)).unwrap_or(0),
+            total_fill_cost: stats.total_fill_cost.unwrap_or(Usd::ZERO),
+            total_fill_fees: stats.total_fill_fees.unwrap_or(Usd::ZERO),
+            fill_expected_pnl: stats.fill_expected_pnl.unwrap_or(Usd::ZERO),
+        },
+    ))
 }
 
 /// Detected-edge histogram bucket bounds in basis points (right-open `[lo, hi)`).
@@ -569,31 +582,26 @@ const EDGE_BUCKET_BOUNDS: [(&str, Option<i64>, Option<i64>); 6] = [
     ("500+", Some(500), None),
 ];
 
-/// SQL-side per-market aggregate row (one row per market in the window).
-#[derive(Debug, FromQueryResult)]
-struct MarketPerfAgg {
-    market_id: MarketId,
-    trade_count: i64,
-    net_profit_usd: Option<Usd>,
-    total_cost_usd: Option<Usd>,
-}
-
-/// SQL-side per-market success count (one row per market with ≥1 success).
-#[derive(Debug, FromQueryResult)]
-struct MarketSuccessAgg {
-    market_id: MarketId,
-    success_count: i64,
+/// Shared `trade` row predicate for analytics aggregations.
+fn analytics_trade_condition(filter: TradeAnalyticsFilter) -> Condition {
+    let mut condition = Condition::all()
+        .add(Column::CreatedAt.gte(filter.window.from))
+        .add(Column::CreatedAt.lt(filter.window.to));
+    if let Some(mode) = filter.execution_mode {
+        condition = condition.add(Column::ExecutionMode.eq(mode));
+    }
+    condition
 }
 
 async fn do_edge_histogram(
     db: &impl ConnectionTrait,
-    window: TimeWindow,
+    filter: TradeAnalyticsFilter,
 ) -> Result<Vec<EdgeBucket>, StorageError> {
+    let base = analytics_trade_condition(filter);
     let mut buckets = Vec::with_capacity(EDGE_BUCKET_BOUNDS.len());
     for (label, lo, hi) in EDGE_BUCKET_BOUNDS {
         let mut query = Entity::find()
-            .filter(Column::CreatedAt.gte(window.from))
-            .filter(Column::CreatedAt.lt(window.to))
+            .filter(base.clone())
             .filter(Column::DetectedEdgeBps.is_not_null());
         if let Some(lo) = lo {
             query = query.filter(Column::DetectedEdgeBps.gte(Decimal::from(lo)));
@@ -607,76 +615,84 @@ async fn do_edge_histogram(
     Ok(buckets)
 }
 
+/// SQL-side paginated market-performance row (one row per market).
+#[derive(Debug, FromQueryResult)]
+struct MarketPerfPageRow {
+    market_id: MarketId,
+    trade_count: i64,
+    success_count: i64,
+    net_profit_usd: Option<Usd>,
+    total_cost_usd: Option<Usd>,
+    avg_edge_bps: Option<Decimal>,
+}
+
+#[derive(Debug, FromQueryResult)]
+struct MarketPerfCountRow {
+    total: i64,
+}
+
+/// Conditional `SUM(CASE …)` for per-market success counts.
+fn success_trade_count() -> SimpleExpr {
+    Func::sum(Expr::case(Column::BusinessOutcome.eq(TradeBusinessOutcome::Success), 1).finally(0))
+        .into()
+}
+
 async fn do_market_performance(
     db: &impl ConnectionTrait,
-    window: TimeWindow,
+    filter: TradeAnalyticsFilter,
     page: PageRequest,
 ) -> Result<Paginated<MarketPerformanceRow>, StorageError> {
     let window_page = page.normalized();
+    let base_condition = analytics_trade_condition(filter);
 
-    // SQL does the heavy lifting: one aggregated row per market, never the raw
-    // trade rows. The aggregated result set is bounded by the number of distinct
-    // markets traded in the window, so the order/page step below is cheap.
-    let aggs: Vec<MarketPerfAgg> = Entity::find()
+    let count_row = Entity::find()
+        .filter(base_condition.clone())
         .select_only()
-        .column(Column::MarketId)
-        .column_as(Column::TradeId.count(), "trade_count")
-        .column_as(Column::NetProfitUsd.sum(), "net_profit_usd")
-        .column_as(Column::CostUsd.sum(), "total_cost_usd")
-        .filter(Column::CreatedAt.gte(window.from))
-        .filter(Column::CreatedAt.lt(window.to))
-        .group_by(Column::MarketId)
-        .into_model::<MarketPerfAgg>()
-        .all(db)
+        .expr_as(Func::count_distinct(Expr::col(Column::MarketId)), "total")
+        .into_model::<MarketPerfCountRow>()
+        .one(db)
         .await
-        .map_err(StorageError::from)?;
-    if aggs.is_empty() {
+        .map_err(StorageError::from)?
+        .unwrap_or(MarketPerfCountRow { total: 0 });
+    let total = u64::try_from(count_row.total.max(0)).unwrap_or(0);
+    if total == 0 {
         return Ok(Paginated::from_request(Vec::new(), 0, &window_page));
     }
 
-    let successes: Vec<MarketSuccessAgg> = Entity::find()
+    let rows = Entity::find()
+        .filter(base_condition)
         .select_only()
         .column(Column::MarketId)
-        .column_as(Column::TradeId.count(), "success_count")
-        .filter(Column::CreatedAt.gte(window.from))
-        .filter(Column::CreatedAt.lt(window.to))
-        .filter(Column::BusinessOutcome.eq(TradeBusinessOutcome::Success))
+        .column_as(Column::TradeId.count(), "trade_count")
+        .expr_as(success_trade_count(), "success_count")
+        .column_as(Column::NetProfitUsd.sum(), "net_profit_usd")
+        .column_as(Column::CostUsd.sum(), "total_cost_usd")
+        .expr_as(
+            Func::avg(Expr::col(Column::DetectedEdgeBps)),
+            "avg_edge_bps",
+        )
         .group_by(Column::MarketId)
-        .into_model::<MarketSuccessAgg>()
+        .order_by_with_nulls(Column::NetProfitUsd.sum(), Order::Desc, NullOrdering::Last)
+        .order_by_asc(Column::MarketId)
+        .offset(window_page.offset())
+        .limit(window_page.limit())
+        .into_model::<MarketPerfPageRow>()
         .all(db)
         .await
         .map_err(StorageError::from)?;
-    let success_by_market: HashMap<MarketId, i64> = successes
-        .into_iter()
-        .map(|row| (row.market_id, row.success_count))
-        .collect();
 
-    let mut rows: Vec<MarketPerformanceRow> = aggs
-        .into_iter()
-        .map(|agg| {
-            let success_count = success_by_market.get(&agg.market_id).copied().unwrap_or(0);
-            MarketPerformanceRow {
-                trade_count: u64::try_from(agg.trade_count).unwrap_or(0),
-                success_count: u64::try_from(success_count).unwrap_or(0),
-                net_profit_usd: agg.net_profit_usd.unwrap_or(Usd::ZERO),
-                total_cost_usd: agg.total_cost_usd.unwrap_or(Usd::ZERO),
-                market_id: agg.market_id,
-            }
-        })
-        .collect();
-    rows.sort_by(|left, right| {
-        right
-            .net_profit_usd
-            .inner()
-            .cmp(&left.net_profit_usd.inner())
-            .then_with(|| left.market_id.as_str().cmp(right.market_id.as_str()))
-    });
-    let total = ToPrimitive::to_u64(&rows.len()).unwrap_or(u64::MAX);
     let items = rows
         .into_iter()
-        .skip(usize::try_from(window_page.offset()).unwrap_or(usize::MAX))
-        .take(usize::try_from(window_page.limit()).unwrap_or(usize::MAX))
+        .map(|row| MarketPerformanceRow {
+            market_id: row.market_id,
+            trade_count: u64::try_from(row.trade_count).unwrap_or(0),
+            success_count: u64::try_from(row.success_count).unwrap_or(0),
+            net_profit_usd: row.net_profit_usd.unwrap_or(Usd::ZERO),
+            total_cost_usd: row.total_cost_usd.unwrap_or(Usd::ZERO),
+            avg_edge_bps: row.avg_edge_bps,
+        })
         .collect();
+
     Ok(Paginated::from_request(items, total, &window_page))
 }
 
@@ -756,16 +772,19 @@ impl TradeRepository for PgTradeRepository {
         do_page(&self.db, query).await
     }
 
-    async fn edge_histogram(&self, window: TimeWindow) -> Result<Vec<EdgeBucket>, StorageError> {
-        do_edge_histogram(&self.db, window).await
+    async fn edge_histogram(
+        &self,
+        filter: TradeAnalyticsFilter,
+    ) -> Result<Vec<EdgeBucket>, StorageError> {
+        do_edge_histogram(&self.db, filter).await
     }
 
     async fn market_performance(
         &self,
-        window: TimeWindow,
+        filter: TradeAnalyticsFilter,
         page: PageRequest,
     ) -> Result<Paginated<MarketPerformanceRow>, StorageError> {
-        do_market_performance(&self.db, window, page).await
+        do_market_performance(&self.db, filter, page).await
     }
 
     async fn find_by_market(
@@ -869,16 +888,19 @@ impl TradeRepository for PgTradeRepositoryTxn<'_> {
         do_page(self.txn, query).await
     }
 
-    async fn edge_histogram(&self, window: TimeWindow) -> Result<Vec<EdgeBucket>, StorageError> {
-        do_edge_histogram(self.txn, window).await
+    async fn edge_histogram(
+        &self,
+        filter: TradeAnalyticsFilter,
+    ) -> Result<Vec<EdgeBucket>, StorageError> {
+        do_edge_histogram(self.txn, filter).await
     }
 
     async fn market_performance(
         &self,
-        window: TimeWindow,
+        filter: TradeAnalyticsFilter,
         page: PageRequest,
     ) -> Result<Paginated<MarketPerformanceRow>, StorageError> {
-        do_market_performance(self.txn, window, page).await
+        do_market_performance(self.txn, filter, page).await
     }
 
     async fn find_by_id(&self, trade_id: &TradeId) -> Result<Option<TradeInfo>, StorageError> {

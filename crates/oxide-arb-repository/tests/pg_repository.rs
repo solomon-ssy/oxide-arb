@@ -29,9 +29,13 @@ use oxide_arb_models::{
         NewCalibrationOutcome, NewControlFactorMaterializationRun, NewControlFactorShadowDecision,
         NewControlFactorStageReport, NewEmergencySnapshot, NewPosition, NewPotentialLoss,
         NewReconciliationReport, NewRiskAuditEvent, NewRuntimeConfigActivation,
-        NewRuntimeConfigVersion, NewTrade, ResolvePotentialLoss, RunTransitionOutcome,
+        NewRuntimeConfigVersion,         NewTrade, ResolvePotentialLoss, RunTransitionOutcome,
         SettlePositionParams, ShadowDecisionAggregate, TradeObservation, TradePageQuery,
         UpsertBlacklistEntry, UpsertCalibration, UpsertRiskEngineState,
+    },
+    domain::{
+        pagination::PageRequest,
+        query::{TimeWindow, TradeAnalyticsFilter},
     },
     enums::{
         calibration::{DurationBucket, PriceZone},
@@ -626,6 +630,308 @@ async fn seed_successful_trade(
         .await
         .expect("mark observed");
     trade_id
+}
+
+/// Seed payload for analytics aggregation tests.
+struct ObservedTradeSpec {
+    market_id: &'static str,
+    event_id: &'static str,
+    token_id: &'static str,
+    mode: ExecutionMode,
+    state: TradeState,
+    cost: Decimal,
+    fee: Decimal,
+    net_profit: Option<Decimal>,
+    edge_bps: Option<Decimal>,
+}
+
+/// Insert one trade row and optionally drive it through submit + observe.
+async fn seed_observed_trade(
+    trade_repo: &PgTradeRepository,
+    spec: ObservedTradeSpec,
+) -> TradeId {
+    let trade_id = TradeId::from_v7();
+    let created = trade_repo
+        .create(NewTrade {
+            trade_id: trade_id.clone(),
+            execution_id: ExecutionId::from_v7(),
+            reservation_id: ReservationId::from_v7(),
+            opportunity_id: OpportunityId::from_v7(),
+            market_id: MarketId::new(spec.market_id),
+            event_id: EventId::new(spec.event_id),
+            token_id: TokenId::new(spec.token_id),
+            side: Side::Buy,
+            shares: Shares::from(Decimal::new(100, 0)),
+            price: Price::from(Decimal::new(50, 2)),
+            cost_usd: Usd::from(spec.cost),
+            fee_usd: Usd::from(spec.fee),
+            detected_edge_bps: spec.edge_bps.map(Bps::from),
+            detected_profit_usd: None,
+            scored_snapshot: serde_json::json!({}),
+            category: MarketCategory::Crypto,
+            execution_mode: spec.mode,
+        })
+        .await
+        .expect("create trade");
+
+    if spec.state == TradeState::Intent {
+        return trade_id;
+    }
+
+    assert!(
+        trade_repo
+            .mark_submitted(&created.trade_id, Utc::now())
+            .await
+            .expect("mark submitted")
+    );
+    trade_repo
+        .mark_observed(
+            &created.trade_id,
+            TradeObservation {
+                state: spec.state,
+                shares: created.shares,
+                price: created.price,
+                cost_usd: created.cost_usd,
+                fee_usd: created.fee_usd,
+                order_id: None,
+                tx_hash: None,
+                net_profit_usd: spec.net_profit.map(Usd::from),
+                latency_ms: None,
+                error_message: None,
+                confirmed_at: Utc::now(),
+            },
+        )
+        .await
+        .expect("mark observed");
+    trade_id
+}
+
+fn analytics_window() -> TimeWindow {
+    TimeWindow::new(
+        Utc::now() - chrono::Duration::hours(1),
+        Utc::now() + chrono::Duration::hours(1),
+    )
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn trade_aggregate_between_counts_outcomes_and_sums() {
+    let (pool, _container) = setup_pg().await;
+    seed_market(
+        &pool,
+        "evt-agg-a",
+        "0xagg-a",
+        MarketCategory::Crypto,
+    )
+    .await;
+    seed_market(
+        &pool,
+        "evt-agg-b",
+        "0xagg-b",
+        MarketCategory::Crypto,
+    )
+    .await;
+
+    let trade_repo = PgTradeRepository::new(pool.connection().clone());
+    seed_observed_trade(
+        &trade_repo,
+        ObservedTradeSpec {
+            market_id: "0xagg-a",
+            event_id: "evt-agg-a",
+            token_id: "agg-a-1",
+            mode: ExecutionMode::Paper,
+            state: TradeState::FillObserved,
+            cost: dec!(10),
+            fee: dec!(1),
+            net_profit: Some(dec!(5)),
+            edge_bps: None,
+        },
+    )
+    .await;
+    seed_observed_trade(
+        &trade_repo,
+        ObservedTradeSpec {
+            market_id: "0xagg-b",
+            event_id: "evt-agg-b",
+            token_id: "agg-b-1",
+            mode: ExecutionMode::Paper,
+            state: TradeState::MissObserved,
+            cost: dec!(8),
+            fee: dec!(1),
+            net_profit: None,
+            edge_bps: None,
+        },
+    )
+    .await;
+    seed_observed_trade(
+        &trade_repo,
+        ObservedTradeSpec {
+            market_id: "0xagg-a",
+            event_id: "evt-agg-a",
+            token_id: "agg-a-2",
+            mode: ExecutionMode::Paper,
+            state: TradeState::FailObserved,
+            cost: dec!(20),
+            fee: dec!(2),
+            net_profit: Some(dec!(-3)),
+            edge_bps: None,
+        },
+    )
+    .await;
+    seed_observed_trade(
+        &trade_repo,
+        ObservedTradeSpec {
+            market_id: "0xagg-b",
+            event_id: "evt-agg-b",
+            token_id: "agg-b-2",
+            mode: ExecutionMode::Paper,
+            state: TradeState::Intent,
+            cost: dec!(5),
+            fee: dec!(0),
+            net_profit: None,
+            edge_bps: None,
+        },
+    )
+    .await;
+
+    let window = analytics_window();
+    let stats = trade_repo
+        .aggregate_between(window.from, window.to)
+        .await
+        .expect("aggregate_between");
+
+    assert_eq!(stats.trade_count, 4);
+    assert_eq!(stats.success_count, 1);
+    assert_eq!(stats.miss_count, 1);
+    assert_eq!(stats.failed_count, 1);
+    assert_eq!(stats.total_fill_cost, Usd::from(dec!(43)));
+    assert_eq!(stats.total_fill_fees, Usd::from(dec!(4)));
+    assert_eq!(stats.fill_expected_pnl, Usd::from(dec!(2)));
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn trade_market_performance_groups_pages_and_filters_by_mode() {
+    let (pool, _container) = setup_pg().await;
+    seed_market(
+        &pool,
+        "evt-perf-a",
+        "0xperf-a",
+        MarketCategory::Crypto,
+    )
+    .await;
+    seed_market(
+        &pool,
+        "evt-perf-b",
+        "0xperf-b",
+        MarketCategory::Crypto,
+    )
+    .await;
+
+    let trade_repo = PgTradeRepository::new(pool.connection().clone());
+    seed_observed_trade(
+        &trade_repo,
+        ObservedTradeSpec {
+            market_id: "0xperf-a",
+            event_id: "evt-perf-a",
+            token_id: "perf-a-1",
+            mode: ExecutionMode::Paper,
+            state: TradeState::FillObserved,
+            cost: dec!(10),
+            fee: dec!(1),
+            net_profit: Some(dec!(10)),
+            edge_bps: Some(dec!(100)),
+        },
+    )
+    .await;
+    seed_observed_trade(
+        &trade_repo,
+        ObservedTradeSpec {
+            market_id: "0xperf-a",
+            event_id: "evt-perf-a",
+            token_id: "perf-a-2",
+            mode: ExecutionMode::Paper,
+            state: TradeState::MissObserved,
+            cost: dec!(6),
+            fee: dec!(0),
+            net_profit: None,
+            edge_bps: Some(dec!(50)),
+        },
+    )
+    .await;
+    seed_observed_trade(
+        &trade_repo,
+        ObservedTradeSpec {
+            market_id: "0xperf-b",
+            event_id: "evt-perf-b",
+            token_id: "perf-b-1",
+            mode: ExecutionMode::Paper,
+            state: TradeState::FillObserved,
+            cost: dec!(15),
+            fee: dec!(2),
+            net_profit: Some(dec!(30)),
+            edge_bps: Some(dec!(200)),
+        },
+    )
+    .await;
+    // Live trade on the same market must be excluded by the mode filter.
+    seed_observed_trade(
+        &trade_repo,
+        ObservedTradeSpec {
+            market_id: "0xperf-a",
+            event_id: "evt-perf-a",
+            token_id: "perf-a-live",
+            mode: ExecutionMode::Live,
+            state: TradeState::FillObserved,
+            cost: dec!(99),
+            fee: dec!(9),
+            net_profit: Some(dec!(99)),
+            edge_bps: Some(dec!(999)),
+        },
+    )
+    .await;
+
+    let window = analytics_window();
+    let filter = TradeAnalyticsFilter {
+        window,
+        execution_mode: Some(ExecutionMode::Paper),
+    };
+
+    let page = trade_repo
+        .market_performance(filter, PageRequest::new(1, 10))
+        .await
+        .expect("market_performance page 1");
+    assert_eq!(page.total, 2, "two paper markets");
+    assert_eq!(page.items.len(), 2);
+    assert_eq!(page.items[0].market_id, MarketId::new("0xperf-b"));
+    assert_eq!(page.items[0].trade_count, 1);
+    assert_eq!(page.items[0].success_count, 1);
+    assert_eq!(page.items[0].net_profit_usd, Usd::from(dec!(30)));
+    assert_eq!(page.items[0].total_cost_usd, Usd::from(dec!(15)));
+    assert_eq!(page.items[0].avg_edge_bps, Some(dec!(200)));
+
+    let perf_a = &page.items[1];
+    assert_eq!(perf_a.market_id, MarketId::new("0xperf-a"));
+    assert_eq!(perf_a.trade_count, 2);
+    assert_eq!(perf_a.success_count, 1);
+    assert_eq!(perf_a.net_profit_usd, Usd::from(dec!(10)));
+    assert_eq!(perf_a.total_cost_usd, Usd::from(dec!(16)));
+    assert_eq!(perf_a.avg_edge_bps, Some(dec!(75)));
+
+    let page_one = trade_repo
+        .market_performance(filter, PageRequest::new(1, 1))
+        .await
+        .expect("market_performance paginated");
+    assert_eq!(page_one.total, 2);
+    assert_eq!(page_one.items.len(), 1);
+    assert_eq!(page_one.items[0].market_id, MarketId::new("0xperf-b"));
+
+    let page_two = trade_repo
+        .market_performance(filter, PageRequest::new(2, 1))
+        .await
+        .expect("market_performance page 2");
+    assert_eq!(page_two.items.len(), 1);
+    assert_eq!(page_two.items[0].market_id, MarketId::new("0xperf-a"));
 }
 
 /// One open position on the mode-ledger market for the given mode.

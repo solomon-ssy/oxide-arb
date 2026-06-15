@@ -71,6 +71,22 @@ impl ReportRepository for PgReportRepository {
             .map(|v| v.into_iter().map(Into::into).collect())
     }
 
+    async fn find_daily_between(
+        &self,
+        from: NaiveDate,
+        to: NaiveDate,
+    ) -> Result<Vec<ReportInfo>, StorageError> {
+        ReportEntity::find()
+            .filter(ReportColumn::ReportType.eq(ReportType::Daily))
+            .filter(ReportColumn::PeriodStart.gte(from))
+            .filter(ReportColumn::PeriodStart.lte(to))
+            .order_by_asc(ReportColumn::PeriodStart)
+            .all(&self.db)
+            .await
+            .map_err(StorageError::from)
+            .map(|v| v.into_iter().map(Into::into).collect())
+    }
+
     async fn find_latest(
         &self,
         report_type: ReportType,

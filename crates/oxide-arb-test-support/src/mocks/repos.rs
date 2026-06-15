@@ -12,8 +12,8 @@ use oxide_arb_models::{
         CalibrationBucketInfo, CalibrationOutcomeInfo, EdgeBucket, MarkRedeemedParams,
         MarketFilter, MarketPerformanceRow, NewCalibrationOutcome, NewPosition, NewTrade,
         PageRequest, Paginated, PositionInfo, PositionPageQuery, PositionPatch, ReportTradeStats,
-        SettlePositionParams, SettledPositionStats, TimeWindow, TradeInfo, TradeObservation,
-        TradePageQuery, UpsertCalibration, evidence::EvidenceQueryResult,
+        SettlePositionParams, SettledPositionStats, TimeWindow, TradeAnalyticsFilter, TradeInfo,
+        TradeObservation, TradePageQuery, UpsertCalibration, evidence::EvidenceQueryResult,
     },
     enums::{
         calibration::{DurationBucket, PriceZone},
@@ -1040,7 +1040,10 @@ impl TradeRepository for MockTradeRepository {
         })
     }
 
-    async fn edge_histogram(&self, window: TimeWindow) -> Result<Vec<EdgeBucket>, StorageError> {
+    async fn edge_histogram(
+        &self,
+        filter: TradeAnalyticsFilter,
+    ) -> Result<Vec<EdgeBucket>, StorageError> {
         let bounds: [(&str, i64, i64); 6] = [
             ("<0", i64::MIN, 0),
             ("0-50", 0, 50),
@@ -1051,7 +1054,12 @@ impl TradeRepository for MockTradeRepository {
         ];
         let mut counts = [0_u64; 6];
         for trade in self.trades.lock().unwrap().values() {
-            if trade.created_at < window.from || trade.created_at >= window.to {
+            if trade.created_at < filter.window.from || trade.created_at >= filter.window.to {
+                continue;
+            }
+            if let Some(mode) = filter.execution_mode
+                && trade.execution_mode != mode
+            {
                 continue;
             }
             let Some(bps) = trade.detected_edge_bps else {
@@ -1074,35 +1082,63 @@ impl TradeRepository for MockTradeRepository {
 
     async fn market_performance(
         &self,
-        window: TimeWindow,
+        filter: TradeAnalyticsFilter,
         page: PageRequest,
     ) -> Result<Paginated<MarketPerformanceRow>, StorageError> {
+        struct MarketPerfDraft {
+            row: MarketPerformanceRow,
+            edge_count: u64,
+            edge_sum: Decimal,
+        }
+
         let window_page = page.normalized();
-        let mut by_market = HashMap::new();
+        let mut by_market: HashMap<MarketId, MarketPerfDraft> = HashMap::new();
         for trade in self.trades.lock().unwrap().values() {
-            if trade.created_at < window.from || trade.created_at >= window.to {
+            if trade.created_at < filter.window.from || trade.created_at >= filter.window.to {
+                continue;
+            }
+            if let Some(mode) = filter.execution_mode
+                && trade.execution_mode != mode
+            {
                 continue;
             }
             let entry =
                 by_market
                     .entry(trade.market_id.clone())
-                    .or_insert_with(|| MarketPerformanceRow {
-                        market_id: trade.market_id.clone(),
-                        trade_count: 0,
-                        success_count: 0,
-                        net_profit_usd: Usd::ZERO,
-                        total_cost_usd: Usd::ZERO,
+                    .or_insert_with(|| MarketPerfDraft {
+                        row: MarketPerformanceRow {
+                            market_id: trade.market_id.clone(),
+                            trade_count: 0,
+                            success_count: 0,
+                            net_profit_usd: Usd::ZERO,
+                            total_cost_usd: Usd::ZERO,
+                            avg_edge_bps: None,
+                        },
+                        edge_count: 0,
+                        edge_sum: Decimal::ZERO,
                     });
-            entry.trade_count += 1;
+            entry.row.trade_count += 1;
             if trade.business_outcome == Some(TradeBusinessOutcome::Success) {
-                entry.success_count += 1;
+                entry.row.success_count += 1;
             }
             if let Some(net) = trade.net_profit_usd {
-                entry.net_profit_usd += net;
+                entry.row.net_profit_usd += net;
             }
-            entry.total_cost_usd += trade.cost_usd;
+            entry.row.total_cost_usd += trade.cost_usd;
+            if let Some(edge_bps) = trade.detected_edge_bps {
+                entry.edge_sum += edge_bps.inner();
+                entry.edge_count += 1;
+            }
         }
-        let mut rows: Vec<MarketPerformanceRow> = by_market.into_values().collect();
+        let mut rows: Vec<MarketPerformanceRow> = by_market
+            .into_values()
+            .map(|mut draft| {
+                if draft.edge_count > 0 {
+                    draft.row.avg_edge_bps = Some(draft.edge_sum / Decimal::from(draft.edge_count));
+                }
+                draft.row
+            })
+            .collect();
         rows.sort_by(|left, right| {
             right
                 .net_profit_usd

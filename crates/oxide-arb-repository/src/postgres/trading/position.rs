@@ -98,7 +98,7 @@ async fn find_by_market_q(
     market_id: &MarketId,
 ) -> Result<Vec<PositionInfo>, StorageError> {
     Entity::find()
-        .filter(Column::MarketId.eq(market_id.as_str()))
+        .filter(Column::MarketId.eq(market_id))
         .all(db)
         .await
         .map_err(StorageError::from)
@@ -110,7 +110,7 @@ async fn find_open_by_market_q(
     market_id: &MarketId,
 ) -> Result<Vec<PositionInfo>, StorageError> {
     Entity::find()
-        .filter(Column::MarketId.eq(market_id.as_str()))
+        .filter(Column::MarketId.eq(market_id))
         .filter(Column::Status.eq(PositionStatus::Open))
         .all(db)
         .await
@@ -123,7 +123,7 @@ async fn find_by_trade_id_q(
     trade_id: &TradeId,
 ) -> Result<Option<PositionInfo>, StorageError> {
     Entity::find()
-        .filter(Column::TradeId.eq(trade_id.as_uuid()))
+        .filter(Column::TradeId.eq(trade_id))
         .one(db)
         .await
         .map_err(StorageError::from)
@@ -500,7 +500,7 @@ struct UsdTotal {
 fn page_condition(query: &PositionPageQuery) -> Condition {
     let mut condition = Condition::all();
     if let Some(market_id) = &query.market_id {
-        condition = condition.add(Column::MarketId.eq(market_id.as_str()));
+        condition = condition.add(Column::MarketId.eq(market_id));
     }
     if let Some(status) = query.status {
         condition = condition.add(Column::Status.eq(status));

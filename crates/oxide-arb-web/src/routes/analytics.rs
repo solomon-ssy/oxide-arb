@@ -1,20 +1,18 @@
 //! Analytics dashboard read endpoints (`Analytics:Read`).
 //!
-//! Daily / weekly reuse the persisted settlement reports; edge-distribution and
-//! market-performance are computed on demand from the trade history over a
-//! bounded window.
+//! All windowed routes share [`AnalyticsQuery`] → [`AnalyticsScope`]:
+//! settlement charts read persisted daily reports; execution aggregates read
+//! the `trade` table over the same half-open UTC execution window.
 
 use actix_web::{http::Method, web};
 use chrono::Duration;
 use oxide_arb_models::{
     domain::{
-        DailyReport, EdgeBucket, MarketPerformanceRow, PageRequest, Paginated, TimeWindowQuery,
-        WeeklyReport,
+        AnalyticsDailySeries, AnalyticsQuery, EdgeBucket, MarketPerformanceRow, PageRequest,
+        Paginated, WeeklyReport,
     },
-    enums::{
-        common::ReportType,
-        rbac::{Operation, ResourceType},
-    },
+    enums::common::ReportType,
+    enums::rbac::{Operation, ResourceType},
 };
 
 use crate::{
@@ -60,56 +58,65 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
     ]
 }
 
-/// `GET /api/analytics/daily` — latest daily settlement report.
-pub async fn daily(state: web::Data<AppState>) -> Result<WebResponse<DailyReport>, WebError> {
-    let report = state
+/// `GET /api/analytics/daily` — settlement-basis daily `PnL` series (ascending).
+pub async fn daily(
+    state: web::Data<AppState>,
+    query: web::Query<AnalyticsQuery>,
+) -> Result<WebResponse<AnalyticsDailySeries>, WebError> {
+    let scope = query
+        .into_inner()
+        .resolve(Duration::days(DEFAULT_WINDOW_DAYS), MAX_WINDOW_DAYS)?;
+    let reports = state
         .reports
-        .find_latest(ReportType::Daily)
-        .await?
-        .ok_or_else(|| WebError::NotFound("no daily report available yet".to_owned()))?;
-    let parsed = serde_json::from_value(report.payload)
-        .map_err(|error| WebError::Internal(format!("decode daily report: {error}")))?;
-    Ok(WebResponse::ok(parsed))
+        .find_daily_between(scope.settlement_from, scope.settlement_to)
+        .await?;
+    let mut parsed = Vec::with_capacity(reports.len());
+    for report in reports {
+        let daily = serde_json::from_value(report.payload)
+            .map_err(|error| WebError::Internal(format!("decode daily report: {error}")))?;
+        parsed.push(daily);
+    }
+    Ok(WebResponse::ok(AnalyticsDailySeries::from_daily_reports(
+        parsed,
+    )))
 }
 
 /// `GET /api/analytics/weekly` — latest weekly settlement report.
-pub async fn weekly(state: web::Data<AppState>) -> Result<WebResponse<WeeklyReport>, WebError> {
-    let report = state
-        .reports
-        .find_latest(ReportType::Weekly)
-        .await?
-        .ok_or_else(|| WebError::NotFound("no weekly report available yet".to_owned()))?;
+pub async fn weekly(
+    state: web::Data<AppState>,
+) -> Result<WebResponse<Option<WeeklyReport>>, WebError> {
+    let Some(report) = state.reports.find_latest(ReportType::Weekly).await? else {
+        return Ok(WebResponse::ok(None));
+    };
     let parsed = serde_json::from_value(report.payload)
         .map_err(|error| WebError::Internal(format!("decode weekly report: {error}")))?;
-    Ok(WebResponse::ok(parsed))
+    Ok(WebResponse::ok(Some(parsed)))
 }
 
-/// `GET /api/analytics/edge-distribution?from=&to=` — detected-edge histogram
-/// over the trade history in the window (aggregated SQL-side).
+/// `GET /api/analytics/edge-distribution` — execution-basis edge histogram.
 pub async fn edge_distribution(
     state: web::Data<AppState>,
-    window: web::Query<TimeWindowQuery>,
+    query: web::Query<AnalyticsQuery>,
 ) -> Result<WebResponse<Vec<EdgeBucket>>, WebError> {
-    let resolved = window
+    let scope = query
         .into_inner()
         .resolve(Duration::days(DEFAULT_WINDOW_DAYS), MAX_WINDOW_DAYS)?;
-    let distribution = state.trades.edge_histogram(resolved).await?;
+    let distribution = state.trades.edge_histogram(scope.trade_filter()).await?;
     Ok(WebResponse::ok(distribution))
 }
 
-/// `GET /api/analytics/market-performance?from=&to=&page=&size=` — per-market
-/// aggregates, computed and paginated SQL-side (ordered by net profit desc).
+/// `GET /api/analytics/market-performance` — execution-basis per-market rollup.
 pub async fn market_performance(
     state: web::Data<AppState>,
-    window: web::Query<TimeWindowQuery>,
+    query: web::Query<AnalyticsQuery>,
     page: web::Query<PageRequest>,
 ) -> Result<WebResponse<Paginated<MarketPerformanceRow>>, WebError> {
-    let resolved = window
+    let scope = query
         .into_inner()
         .resolve(Duration::days(DEFAULT_WINDOW_DAYS), MAX_WINDOW_DAYS)?;
     let rows = state
         .trades
-        .market_performance(resolved, page.into_inner())
+        .market_performance(scope.trade_filter(), page.into_inner())
         .await?;
     Ok(WebResponse::ok(rows))
 }

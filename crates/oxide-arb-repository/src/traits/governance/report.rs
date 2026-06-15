@@ -35,6 +35,14 @@ pub trait ReportRepository: Send + Sync {
         limit: u64,
     ) -> Result<Vec<ReportInfo>, StorageError>;
 
+    /// Daily settlement reports whose calendar `date` (`period_start`) falls in
+    /// the inclusive `[from, to]` UTC range, ordered oldest first.
+    async fn find_daily_between(
+        &self,
+        from: NaiveDate,
+        to: NaiveDate,
+    ) -> Result<Vec<ReportInfo>, StorageError>;
+
     /// Find the most recent report of a given type.
     async fn find_latest(
         &self,

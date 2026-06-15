@@ -106,7 +106,7 @@ async fn latest_for_market_q(
     market_id: &MarketId,
 ) -> Result<Option<ResolutionEventInfo>, StorageError> {
     Entity::find()
-        .filter(Column::MarketId.eq(market_id.as_str()))
+        .filter(Column::MarketId.eq(market_id))
         .order_by_desc(Column::CreatedAt)
         .one(db)
         .await
@@ -120,7 +120,7 @@ async fn latest_before_q(
     before: DateTime<Utc>,
 ) -> Result<Option<ResolutionEventInfo>, StorageError> {
     Entity::find()
-        .filter(Column::MarketId.eq(market_id.as_str()))
+        .filter(Column::MarketId.eq(market_id))
         .filter(Column::ResolvedAt.lte(before))
         .order_by_desc(Column::ResolvedAt)
         .order_by_desc(Column::CreatedAt)
@@ -136,7 +136,7 @@ async fn latest_by_source_q(
     source: &str,
 ) -> Result<Option<ResolutionEventInfo>, StorageError> {
     Entity::find()
-        .filter(Column::MarketId.eq(market_id.as_str()))
+        .filter(Column::MarketId.eq(market_id))
         .filter(Column::Source.eq(source))
         .order_by_desc(Column::CreatedAt)
         .one(db)

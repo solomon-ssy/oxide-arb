@@ -8,10 +8,20 @@
 
 use crate::{
     enums::clickhouse::ChMarketCategory,
+    enums::common::ExecutionMode,
     types::{EventId, MarketId, TokenId},
 };
 use chrono::{DateTime, Utc};
 use serde::Serialize;
+
+/// Windowed trade aggregation scope for analytics endpoints.
+#[derive(Debug, Clone, Copy)]
+pub struct TradeAnalyticsFilter {
+    /// Half-open UTC execution window `[from, to)`.
+    pub window: TimeWindow,
+    /// When `None`, all execution modes are included.
+    pub execution_mode: Option<ExecutionMode>,
+}
 
 /// A closed `[from, to]` time window for windowed reads.
 #[derive(Debug, Clone, Copy, Serialize)]
