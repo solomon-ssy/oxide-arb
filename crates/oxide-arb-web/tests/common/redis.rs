@@ -19,7 +19,8 @@ pub fn test_redis_config(port: u16) -> RedisConfig {
 
 /// Start Redis and return its host port plus the container guard.
 pub async fn setup_redis() -> (u16, ContainerAsync<Redis>) {
-    let container = Redis::default().with_tag("7-alpine")
+    let container = Redis::default()
+        .with_tag("7-alpine")
         .start()
         .await
         .expect("start Redis container");

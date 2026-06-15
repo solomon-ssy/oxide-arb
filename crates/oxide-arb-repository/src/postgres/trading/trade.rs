@@ -510,12 +510,15 @@ async fn do_count_by_outcome(
 }
 
 /// SQL-side scalar projection for windowed trade rollups.
+///
+/// Outcome counts use `SUM(CASE …)`; `PostgreSQL` returns `NULL` (not `0`) when
+/// the filtered set is empty, so those fields are optional at decode time.
 #[derive(Debug, FromQueryResult)]
 struct AggregatedReportStats {
     trade_count: i64,
-    success_count: i64,
-    miss_count: i64,
-    failed_count: i64,
+    success_count: Option<i64>,
+    miss_count: Option<i64>,
+    failed_count: Option<i64>,
     total_fill_cost: Option<Usd>,
     total_fill_fees: Option<Usd>,
     fill_expected_pnl: Option<Usd>,
@@ -561,9 +564,9 @@ async fn do_aggregate_between(
         },
         |stats| ReportTradeStats {
             trade_count: u32::try_from(stats.trade_count.max(0)).unwrap_or(0),
-            success_count: u32::try_from(stats.success_count.max(0)).unwrap_or(0),
-            miss_count: u32::try_from(stats.miss_count.max(0)).unwrap_or(0),
-            failed_count: u32::try_from(stats.failed_count.max(0)).unwrap_or(0),
+            success_count: u32::try_from(stats.success_count.unwrap_or(0).max(0)).unwrap_or(0),
+            miss_count: u32::try_from(stats.miss_count.unwrap_or(0).max(0)).unwrap_or(0),
+            failed_count: u32::try_from(stats.failed_count.unwrap_or(0).max(0)).unwrap_or(0),
             total_fill_cost: stats.total_fill_cost.unwrap_or(Usd::ZERO),
             total_fill_fees: stats.total_fill_fees.unwrap_or(Usd::ZERO),
             fill_expected_pnl: stats.fill_expected_pnl.unwrap_or(Usd::ZERO),

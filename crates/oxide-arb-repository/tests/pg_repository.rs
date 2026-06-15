@@ -29,7 +29,7 @@ use oxide_arb_models::{
         NewCalibrationOutcome, NewControlFactorMaterializationRun, NewControlFactorShadowDecision,
         NewControlFactorStageReport, NewEmergencySnapshot, NewPosition, NewPotentialLoss,
         NewReconciliationReport, NewRiskAuditEvent, NewRuntimeConfigActivation,
-        NewRuntimeConfigVersion,         NewTrade, ResolvePotentialLoss, RunTransitionOutcome,
+        NewRuntimeConfigVersion, NewTrade, ResolvePotentialLoss, RunTransitionOutcome,
         SettlePositionParams, ShadowDecisionAggregate, TradeObservation, TradePageQuery,
         UpsertBlacklistEntry, UpsertCalibration, UpsertRiskEngineState,
     },
@@ -646,10 +646,7 @@ struct ObservedTradeSpec {
 }
 
 /// Insert one trade row and optionally drive it through submit + observe.
-async fn seed_observed_trade(
-    trade_repo: &PgTradeRepository,
-    spec: ObservedTradeSpec,
-) -> TradeId {
+async fn seed_observed_trade(trade_repo: &PgTradeRepository, spec: ObservedTradeSpec) -> TradeId {
     let trade_id = TradeId::from_v7();
     let created = trade_repo
         .create(NewTrade {
@@ -715,22 +712,33 @@ fn analytics_window() -> TimeWindow {
 
 #[tokio::test]
 #[ignore = "requires Docker"]
+async fn trade_aggregate_between_empty_window_returns_zeros() {
+    let (pool, _container) = setup_pg().await;
+    let trade_repo = PgTradeRepository::new(pool.connection().clone());
+
+    let stats = trade_repo
+        .aggregate_between(
+            Utc::now() - chrono::Duration::days(365),
+            Utc::now() - chrono::Duration::days(364),
+        )
+        .await
+        .expect("aggregate_between on empty window");
+
+    assert_eq!(stats.trade_count, 0);
+    assert_eq!(stats.success_count, 0);
+    assert_eq!(stats.miss_count, 0);
+    assert_eq!(stats.failed_count, 0);
+    assert_eq!(stats.total_fill_cost, Usd::ZERO);
+    assert_eq!(stats.total_fill_fees, Usd::ZERO);
+    assert_eq!(stats.fill_expected_pnl, Usd::ZERO);
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
 async fn trade_aggregate_between_counts_outcomes_and_sums() {
     let (pool, _container) = setup_pg().await;
-    seed_market(
-        &pool,
-        "evt-agg-a",
-        "0xagg-a",
-        MarketCategory::Crypto,
-    )
-    .await;
-    seed_market(
-        &pool,
-        "evt-agg-b",
-        "0xagg-b",
-        MarketCategory::Crypto,
-    )
-    .await;
+    seed_market(&pool, "evt-agg-a", "0xagg-a", MarketCategory::Crypto).await;
+    seed_market(&pool, "evt-agg-b", "0xagg-b", MarketCategory::Crypto).await;
 
     let trade_repo = PgTradeRepository::new(pool.connection().clone());
     seed_observed_trade(
@@ -809,28 +817,10 @@ async fn trade_aggregate_between_counts_outcomes_and_sums() {
     assert_eq!(stats.fill_expected_pnl, Usd::from(dec!(2)));
 }
 
-#[tokio::test]
-#[ignore = "requires Docker"]
-async fn trade_market_performance_groups_pages_and_filters_by_mode() {
-    let (pool, _container) = setup_pg().await;
-    seed_market(
-        &pool,
-        "evt-perf-a",
-        "0xperf-a",
-        MarketCategory::Crypto,
-    )
-    .await;
-    seed_market(
-        &pool,
-        "evt-perf-b",
-        "0xperf-b",
-        MarketCategory::Crypto,
-    )
-    .await;
-
-    let trade_repo = PgTradeRepository::new(pool.connection().clone());
+/// Paper trades on two markets plus one live trade excluded by mode filter.
+async fn seed_market_performance_trades(trade_repo: &PgTradeRepository) {
     seed_observed_trade(
-        &trade_repo,
+        trade_repo,
         ObservedTradeSpec {
             market_id: "0xperf-a",
             event_id: "evt-perf-a",
@@ -845,7 +835,7 @@ async fn trade_market_performance_groups_pages_and_filters_by_mode() {
     )
     .await;
     seed_observed_trade(
-        &trade_repo,
+        trade_repo,
         ObservedTradeSpec {
             market_id: "0xperf-a",
             event_id: "evt-perf-a",
@@ -860,7 +850,7 @@ async fn trade_market_performance_groups_pages_and_filters_by_mode() {
     )
     .await;
     seed_observed_trade(
-        &trade_repo,
+        trade_repo,
         ObservedTradeSpec {
             market_id: "0xperf-b",
             event_id: "evt-perf-b",
@@ -874,9 +864,8 @@ async fn trade_market_performance_groups_pages_and_filters_by_mode() {
         },
     )
     .await;
-    // Live trade on the same market must be excluded by the mode filter.
     seed_observed_trade(
-        &trade_repo,
+        trade_repo,
         ObservedTradeSpec {
             market_id: "0xperf-a",
             event_id: "evt-perf-a",
@@ -890,6 +879,17 @@ async fn trade_market_performance_groups_pages_and_filters_by_mode() {
         },
     )
     .await;
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn trade_market_performance_groups_pages_and_filters_by_mode() {
+    let (pool, _container) = setup_pg().await;
+    seed_market(&pool, "evt-perf-a", "0xperf-a", MarketCategory::Crypto).await;
+    seed_market(&pool, "evt-perf-b", "0xperf-b", MarketCategory::Crypto).await;
+
+    let trade_repo = PgTradeRepository::new(pool.connection().clone());
+    seed_market_performance_trades(&trade_repo).await;
 
     let window = analytics_window();
     let filter = TradeAnalyticsFilter {

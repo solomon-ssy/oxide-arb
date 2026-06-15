@@ -635,10 +635,7 @@ mod tests {
                 matches!(&model.name, sea_orm::ActiveValue::Set(name) if name == "dashboard")
             })
             .expect("dashboard menu node");
-        assert_eq!(
-            dashboard.affix_tab,
-            sea_orm::ActiveValue::Set(true),
-        );
+        assert_eq!(dashboard.affix_tab, sea_orm::ActiveValue::Set(true),);
     }
 
     #[test]
