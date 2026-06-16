@@ -5,18 +5,25 @@
 //! trades are written exclusively by the execution pipeline.
 
 use actix_web::{http::Method, web};
-use chrono::Duration;
+use chrono::{Duration, Utc};
 use oxide_arb_models::{
     domain::{
-        PageRequest, Paginated, RiskAuditEventView, TimeWindowQuery, TradePageQuery, TradeView,
+        PageRequest, Paginated, ReconcileTradeRequest, RiskAuditEventView, TimeWindowQuery,
+        TradePageQuery, TradeView,
     },
-    enums::rbac::{Operation, ResourceType},
+    enums::{
+        common::TradeReconcileResolution,
+        operation_log::OperationCategory,
+        rbac::{Operation, ResourceType},
+    },
     types::TradeId,
 };
 
 use crate::{
+    audit::OperationCtx,
     auth::casbin::Rule,
     error::WebError,
+    extractors::{ActingRole, ValidatedJson},
     response::WebResponse,
     routes::registry::{RouteSpec, spec},
     state::AppState,
@@ -44,6 +51,18 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
         ),
         spec(
             Method::GET,
+            "/trades/reconciliation",
+            Rule::ResourceOp(ResourceType::Trade, Operation::Read),
+            reconciliation,
+        ),
+        spec(
+            Method::POST,
+            "/trades/{trade_id}/reconcile",
+            Rule::ActingRoleGoverned(ResourceType::Trade, Operation::Update),
+            reconcile_trade,
+        ),
+        spec(
+            Method::GET,
             "/trades/{trade_id}",
             Rule::ResourceOp(ResourceType::Trade, Operation::Read),
             detail,
@@ -64,6 +83,60 @@ pub async fn list(
         size: page.size,
         has_next: page.has_next,
     }))
+}
+
+/// `GET /api/trades/reconciliation` — unresolved unknown venue outcomes.
+pub async fn reconciliation(
+    state: web::Data<AppState>,
+    page: web::Query<PageRequest>,
+) -> Result<WebResponse<Paginated<TradeView>>, WebError> {
+    let window = page.into_inner().normalized();
+    let items = state.trades.find_needs_reconcile(window.limit()).await?;
+    let total = u64::try_from(items.len()).unwrap_or(u64::MAX);
+    Ok(WebResponse::ok(Paginated::from_request(
+        items.into_iter().map(TradeView::from).collect(),
+        total,
+        &window,
+    )))
+}
+
+/// `POST /api/trades/{trade_id}/reconcile` — manually close an ambiguous trade.
+pub async fn reconcile_trade(
+    state: web::Data<AppState>,
+    trade_id: web::Path<TradeId>,
+    _acting_role: ActingRole,
+    op_ctx: OperationCtx,
+    body: ValidatedJson<ReconcileTradeRequest>,
+) -> Result<WebResponse<TradeView>, WebError> {
+    let trade_id = trade_id.into_inner();
+    let body = body.into_inner();
+    if body.resolution != TradeReconcileResolution::Unresolvable {
+        return Err(WebError::BadRequest(
+            "manual reconciliation currently only accepts unresolvable; filled/miss must be proven by external evidence"
+                .into(),
+        ));
+    }
+    op_ctx.set_action(OperationCategory::Risk, "trade.reconcile");
+    op_ctx.set_detail(serde_json::json!({
+        "trade_id": trade_id,
+        "resolution": body.resolution.as_str(),
+        "note": body.note.clone(),
+    }));
+    let updated = state
+        .trades
+        .mark_reconciled(&trade_id, body.resolution, &body.note, Utc::now())
+        .await?;
+    if !updated {
+        return Err(WebError::Conflict(format!(
+            "trade {trade_id} is not pending reconciliation"
+        )));
+    }
+    let trade = state
+        .trades
+        .find_by_id(&trade_id)
+        .await?
+        .ok_or_else(|| WebError::NotFound(format!("trade not found: {trade_id}")))?;
+    Ok(WebResponse::ok(TradeView::from(trade)))
 }
 
 /// `GET /api/trades/{trade_id}` — single trade detail.

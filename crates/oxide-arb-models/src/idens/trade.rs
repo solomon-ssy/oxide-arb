@@ -43,6 +43,9 @@ pub enum Trade {
     ScoredSnapshot,
     Category,
     NeedsReconcile,
+    ReconcileResolution,
+    ReconciledAt,
+    ReconcileNote,
     PostTradeClaimOwner,
     PostTradeClaimedAt,
     PostTradeAttempts,
@@ -95,6 +98,13 @@ pub fn table() -> TableCreateStatement {
                 .not_null()
                 .default(false),
         )
+        .col(ColumnDef::new(Trade::ReconcileResolution).text().null())
+        .col(
+            ColumnDef::new(Trade::ReconciledAt)
+                .timestamp_with_time_zone()
+                .null(),
+        )
+        .col(ColumnDef::new(Trade::ReconcileNote).text().null())
         .col(ColumnDef::new(Trade::PostTradeClaimOwner).text().null())
         .col(
             ColumnDef::new(Trade::PostTradeClaimedAt)
@@ -178,6 +188,15 @@ pub fn indexes() -> Vec<IndexSpec> {
              ON trade (submitted_at) \
              WHERE state = 'submitted'",
             "orphan scan of stale submitted trades",
+        ),
+        IndexSpec::raw(
+            "idx_trade_needs_reconcile",
+            trade_table_name,
+            IndexBuildMode::Transactional,
+            "CREATE INDEX IF NOT EXISTS idx_trade_needs_reconcile \
+             ON trade (created_at, trade_id) \
+             WHERE needs_reconcile = TRUE",
+            "operator and worker scans for unresolved venue outcomes",
         ),
         IndexSpec::sea_query(
             "idx_trades_created_at",

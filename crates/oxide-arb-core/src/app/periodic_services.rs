@@ -25,6 +25,7 @@ use chrono::Datelike;
 use oxide_arb_algorithm::calibration::{CalibrationUpdater, ResolutionCalibrator};
 use oxide_arb_api::{
     clob::ClobClient,
+    ctf::client::CtfRedeemClient,
     infra::retry::{RetryController, RetryDecision, RetryPolicy},
 };
 use oxide_arb_error::{OxideError, OxideResult};
@@ -32,12 +33,13 @@ use oxide_arb_models::{
     domain::risk::UpsertRiskEngineState,
     enums::clickhouse::ChSnapshotReason,
     enums::common::{AlertCategory, AlertLevel, AlertSource, ExecutionMode},
-    types::Usd,
+    types::{MarketId, Shares, Usd},
 };
 use oxide_arb_repository::traits::RiskStateRepository;
 use oxide_arb_risk::{engine::RiskEngine, traits::RiskMetrics};
 use prometheus::IntGauge;
-use std::{sync::Arc, time::Duration};
+use rust_decimal::Decimal;
+use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
 
 const RISK_TICK_INTERVAL_SECS: u64 = 5;
@@ -54,6 +56,7 @@ struct LedgerReconciliationDeps<'a> {
     risk_engine: &'a RiskEngine,
     risk_metrics: &'a dyn RiskMetrics,
     clob_client: &'a ClobClient,
+    ctf_redeem: &'a CtfRedeemClient,
     balance_fact_writer: &'a BalanceFactWriter,
     holder_address: &'a str,
 }
@@ -318,7 +321,12 @@ impl AppContext {
             tracing::info!("ledger reconciliation skipped — ClobClient unavailable");
             return;
         };
+        let Some(ctf_redeem) = self.trading.ctf_redeem.as_ref() else {
+            tracing::info!("ledger reconciliation skipped — CTF redeem client unavailable");
+            return;
+        };
         let clob_client = Arc::clone(clob_client);
+        let ctf_redeem = Arc::clone(ctf_redeem);
         let execution_mode = self.execution_mode.clone();
         let risk_engine = Arc::clone(&self.risk.engine);
         let risk_metrics = Arc::clone(&self.risk.metrics);
@@ -345,6 +353,7 @@ impl AppContext {
                     shutdown,
                     || {
                         let clob_client = Arc::clone(&clob_client);
+                        let ctf_redeem = Arc::clone(&ctf_redeem);
                         let execution_mode = execution_mode.clone();
                         let risk_engine = Arc::clone(&risk_engine);
                         let risk_metrics = Arc::clone(&risk_metrics);
@@ -356,6 +365,7 @@ impl AppContext {
                                 risk_engine: &risk_engine,
                                 risk_metrics: risk_metrics.as_ref(),
                                 clob_client: &clob_client,
+                                ctf_redeem: &ctf_redeem,
                                 balance_fact_writer: &balance_fact_writer,
                                 holder_address: &holder_address,
                             })
@@ -669,13 +679,16 @@ async fn run_ledger_reconciliation(deps: LedgerReconciliationDeps<'_>) -> OxideR
     // never be reused as a Live cash ledger.
     let internal_cash = deps.risk_metrics.cash_balance();
     let reserved = deps.risk_metrics.reserved_usd();
+    let external_positions =
+        fetch_external_position_values(deps.risk_metrics, deps.ctf_redeem, deps.holder_address)
+            .await?;
 
     let report = deps.risk_engine.reconciler().reconcile_fetched(
         deps.risk_metrics,
         internal_cash,
         external_available,
         Usd::ZERO,
-        None,
+        Some(&external_positions),
     );
     deps.balance_fact_writer
         .write_observation(BalanceFactObservation {
@@ -692,6 +705,29 @@ async fn run_ledger_reconciliation(deps: LedgerReconciliationDeps<'_>) -> OxideR
     deps.risk_engine
         .on_reconciliation_result(&report, deps.risk_metrics)
         .await
+}
+
+async fn fetch_external_position_values(
+    risk_metrics: &dyn RiskMetrics,
+    ctf_redeem: &CtfRedeemClient,
+    holder_address: &str,
+) -> OxideResult<Vec<(MarketId, Usd)>> {
+    let mut by_market = HashMap::<MarketId, Usd>::new();
+    for position in risk_metrics.open_positions() {
+        let chain_shares = ctf_redeem
+            .position_balance(holder_address, &position.token_id)
+            .await
+            .map_err(OxideError::from)?;
+        if position.shares <= Shares::ZERO {
+            continue;
+        }
+        let ratio = (chain_shares.inner() / position.shares.inner()).min(Decimal::ONE);
+        let external_value = position.total_cost_usd * ratio;
+        *by_market
+            .entry(position.market_id.clone())
+            .or_insert(Usd::ZERO) += external_value;
+    }
+    Ok(by_market.into_iter().collect())
 }
 
 fn publish_book_snapshots(

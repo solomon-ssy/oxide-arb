@@ -1,10 +1,12 @@
 //! Order submission, cancellation, and query types.
 
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+
 use oxide_arb_models::{
     enums::common::Side,
-    types::{OrderId, Price, Shares, TokenId},
+    types::{MarketId, OrderId, Price, Shares, TokenId},
 };
-use serde::{Deserialize, Serialize};
 
 /// Result of cancelling a single order.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -30,4 +32,18 @@ pub struct OpenOrder {
     pub price: Price,
     pub size: Shares,
     pub filled: Shares,
+}
+
+/// Authenticated account trade from CLOB data history.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClobTrade {
+    pub trade_id: String,
+    pub order_id: OrderId,
+    pub market_id: MarketId,
+    pub token_id: TokenId,
+    pub side: Side,
+    pub size: Shares,
+    pub price: Price,
+    pub tx_hash: String,
+    pub matched_at: DateTime<Utc>,
 }

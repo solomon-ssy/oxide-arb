@@ -471,6 +471,7 @@ fn pipeline(
         trade_repo: Arc::new(MockTradeRepository::default()),
         audit_writer,
         relay_notify: Arc::new(Notify::new()),
+        reconcile_notify: Arc::new(Notify::new()),
         metrics_state: Arc::new(RiskMetricsState::new(Arc::new(ApiHealthTracker::new(
             StdDuration::from_secs(60),
         )))),

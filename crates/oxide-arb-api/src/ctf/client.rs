@@ -22,11 +22,13 @@ use oxide_arb_error::redeem::{RedeemError, RedeemSendError};
 use oxide_arb_models::{
     constants::{
         CTF_ADDRESS, CTF_COLLATERAL_ADAPTER_ADDRESS, NEG_RISK_ADAPTER_ADDRESS,
-        NEG_RISK_COLLATERAL_ADAPTER_ADDRESS, POLYGON_CHAIN_ID, USDC_E_ADDRESS,
+        NEG_RISK_COLLATERAL_ADAPTER_ADDRESS, POLYGON_CHAIN_ID, USDC_E_ADDRESS, USDC_SCALE,
     },
     enums::common::{ExecutionMode, ResolvedRedeemRoute},
     runtime_config::{RedeemRoutingPolicy, ResolvedRedeemPlan},
+    types::{Shares, TokenId},
 };
+use rust_decimal::Decimal;
 use std::{str::FromStr, sync::Arc};
 
 sol! {
@@ -163,6 +165,40 @@ impl CtfRedeemClient {
             }
             ExecutionMode::Live => self.redeem_live(req).await,
         }
+    }
+
+    /// Query CTF ERC-1155 token balance for a holder and convert base units to shares.
+    pub async fn position_balance(
+        &self,
+        holder_address: &str,
+        token_id: &TokenId,
+    ) -> Result<Shares, RedeemError> {
+        let holder =
+            Address::from_str(holder_address).map_err(|e| RedeemError::InvalidAddress {
+                value: holder_address.to_owned(),
+                reason: e.to_string(),
+            })?;
+        let rpc_url = self
+            .rpc_url
+            .parse()
+            .map_err(|e: url::ParseError| RedeemError::RpcTimeout(e.to_string()))?;
+        let ctf_address = parse_constant_address(CTF_ADDRESS)?;
+        let token =
+            U256::from_str(token_id.as_str()).map_err(|e| RedeemError::InvalidConditionId {
+                value: token_id.to_string(),
+                reason: e.to_string(),
+            })?;
+        let provider = ProviderBuilder::new().connect_http(rpc_url);
+        let ctf = IConditionalTokensRedeemer::new(ctf_address, &provider);
+        let raw = ctf
+            .balanceOf(holder, token)
+            .call()
+            .await
+            .map_err(|e| RedeemError::RpcTimeout(e.to_string()))?;
+        let value = Decimal::from_str(&raw.to_string())
+            .map_err(|e| RedeemError::RpcTimeout(e.to_string()))?
+            / Decimal::from(USDC_SCALE);
+        Ok(Shares::new(value))
     }
 
     async fn redeem_live(&self, req: &RedeemRequest) -> Result<RedeemOutcome, RedeemError> {

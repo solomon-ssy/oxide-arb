@@ -72,6 +72,8 @@ pub struct ExecutionPipelineDeps<R: TradeRepository + Send + Sync + 'static = Pg
     pub audit_writer: Arc<ExecutionAuditWriter>,
     /// Rung after each durable `*_observed` write to wake the post-trade relay.
     pub relay_notify: Arc<Notify>,
+    /// Rung after each unknown venue outcome to wake the reconciliation worker.
+    pub reconcile_notify: Arc<Notify>,
     pub metrics_state: Arc<RiskMetricsState>,
     pub runtime_config: Arc<RuntimeConfigStore>,
     /// Live control-factor snapshots (published read for the decision context;
@@ -96,6 +98,7 @@ pub struct ExecutionPipeline<R: TradeRepository + Send + Sync + 'static = PgTrad
     trade_repo: Arc<R>,
     audit_writer: Arc<ExecutionAuditWriter>,
     relay_notify: Arc<Notify>,
+    reconcile_notify: Arc<Notify>,
     metrics_state: Arc<RiskMetricsState>,
     runtime_config: Arc<RuntimeConfigStore>,
     factors: Arc<FactorSnapshotStore>,
@@ -126,6 +129,7 @@ impl<R: TradeRepository + Send + Sync + 'static> ExecutionPipeline<R> {
             trade_repo: deps.trade_repo,
             audit_writer: deps.audit_writer,
             relay_notify: deps.relay_notify,
+            reconcile_notify: deps.reconcile_notify,
             metrics_state: deps.metrics_state,
             runtime_config: deps.runtime_config,
             factors: deps.factors,
@@ -598,12 +602,27 @@ impl<R: TradeRepository + Send + Sync + 'static> ExecutionPipeline<R> {
         if let ExecutionOutcome::Unknown { reason, .. } = outcome {
             match self.trade_repo.mark_orphaned(&prepared.trade_id).await {
                 Ok(true) => {
+                    if let Err(error) = self
+                        .capital_manager
+                        .pin_for_reconciliation_sync(&prepared.reservation)
+                    {
+                        tracing::error!(
+                            %error,
+                            trade_id = %prepared.trade_id,
+                            reservation_id = %prepared.reservation.id,
+                            "unknown outcome reservation pin failed"
+                        );
+                        self.fsm
+                            .enter_emergency("unknown outcome reservation pin failed");
+                        return;
+                    }
                     tracing::warn!(
                         trade_id = %prepared.trade_id,
                         %reason,
                         "trade marked needs_reconcile after unknown venue outcome"
                     );
                     self.metrics_state.mark_stale();
+                    self.reconcile_notify.notify_one();
                 }
                 Ok(false) => {
                     tracing::warn!(
@@ -627,11 +646,19 @@ impl<R: TradeRepository + Send + Sync + 'static> ExecutionPipeline<R> {
             return;
         }
 
-        let resolved = ResolvedOutcome::resolve(
+        let Some(resolved) = ResolvedOutcome::try_resolve(
             outcome,
             prepared.plan.limit_price,
             prepared.snapshot.resolution_prob,
-        );
+        ) else {
+            tracing::error!(
+                trade_id = %prepared.trade_id,
+                "known-outcome observation attempted to resolve an unknown venue outcome"
+            );
+            self.fsm
+                .enter_emergency("unknown outcome reached observed resolution path");
+            return;
+        };
         if let Err(error) = self
             .trade_repo
             .mark_observed(&prepared.trade_id, resolved.to_observation())

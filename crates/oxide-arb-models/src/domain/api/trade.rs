@@ -7,11 +7,15 @@
 
 use crate::{
     domain::{TradeInfo, pagination::PageRequest},
-    enums::common::{ExecutionMode, MarketCategory, Side, TradeBusinessOutcome, TradeState},
+    enums::common::{
+        ExecutionMode, MarketCategory, Side, TradeBusinessOutcome, TradeReconcileResolution,
+        TradeState,
+    },
     types::{Bps, EventId, MarketId, OpportunityId, OrderId, Price, Shares, TokenId, TradeId, Usd},
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use validator::Validate;
 
 /// Filter + pagination query for the trades list endpoint.
 ///
@@ -28,6 +32,14 @@ pub struct TradePageQuery {
     pub to: Option<DateTime<Utc>>,
     #[serde(flatten)]
     pub page: PageRequest,
+}
+
+/// Operator request to record a manual reconciliation conclusion.
+#[derive(Debug, Clone, Deserialize, Validate)]
+pub struct ReconcileTradeRequest {
+    pub resolution: TradeReconcileResolution,
+    #[validate(length(min = 1, max = 1024))]
+    pub note: String,
 }
 
 impl TradePageQuery {
@@ -62,6 +74,10 @@ pub struct TradeView {
     pub state: TradeState,
     pub business_outcome: Option<TradeBusinessOutcome>,
     pub category: MarketCategory,
+    pub needs_reconcile: bool,
+    pub reconcile_resolution: Option<TradeReconcileResolution>,
+    pub reconciled_at: Option<DateTime<Utc>>,
+    pub reconcile_note: Option<String>,
     pub execution_mode: ExecutionMode,
     pub order_id: Option<OrderId>,
     pub tx_hash: Option<String>,
@@ -92,6 +108,10 @@ impl From<TradeInfo> for TradeView {
             state: t.state,
             business_outcome: t.business_outcome,
             category: t.category,
+            needs_reconcile: t.needs_reconcile,
+            reconcile_resolution: t.reconcile_resolution,
+            reconciled_at: t.reconciled_at,
+            reconcile_note: t.reconcile_note,
             execution_mode: t.execution_mode,
             order_id: t.order_id,
             tx_hash: t.tx_hash,

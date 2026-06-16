@@ -187,7 +187,7 @@ pub static RESOURCE_OPERATIONS: &[(ResourceType, &[Operation])] = &[
     ),
     (ResourceType::Market, &[Operation::Read, Operation::Update]),
     (ResourceType::Opportunity, &[Operation::Read]),
-    (ResourceType::Trade, &[Operation::Read]),
+    (ResourceType::Trade, &[Operation::Read, Operation::Update]),
     (ResourceType::Pnl, &[Operation::Read]),
     (ResourceType::Risk, &[Operation::Read, Operation::Reset]),
     (

@@ -90,6 +90,28 @@ fn gc_expired_clears_counters() {
 }
 
 #[test]
+fn gc_preserves_reconciliation_pinned_reservations() {
+    let backend = Arc::new(InMemoryExposureReservation::new(tight_config()));
+    let market = MarketId::new("m1");
+    let id = backend
+        .try_reserve_sync(&market, Usd::new(dec!(3)), Duration::from_millis(1))
+        .expect("reserve");
+    backend
+        .pin_for_reconciliation_sync(&id)
+        .expect("pin reservation");
+    thread::sleep(Duration::from_millis(5));
+
+    let expired = backend.gc_expired();
+    assert_eq!(expired, 0);
+    assert_eq!(backend.active_count_sync(), 1);
+    assert_eq!(backend.total_reserved_usd_sync(), Usd::new(dec!(3)));
+
+    backend.release_sync(&id).expect("release pinned");
+    assert_eq!(backend.active_count_sync(), 0);
+    assert_eq!(backend.total_reserved_usd_sync(), Usd::ZERO);
+}
+
+#[test]
 fn per_market_limit_enforced_under_contention() {
     let backend = Arc::new(InMemoryExposureReservation::new(tight_config()));
     let market = MarketId::new("m1");

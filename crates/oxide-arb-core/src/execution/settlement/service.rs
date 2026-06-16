@@ -508,7 +508,21 @@ impl MarketSettlementService {
         } else if outcome.eq_ignore_ascii_case("no") {
             Some(market.token_no.clone())
         } else {
-            None
+            match self
+                .voting_oracle
+                .resolve(&position.market_id, position.market_id.as_str())
+                .await
+            {
+                Ok(ResolutionVerdict::Resolved { actual_yes, .. }) => {
+                    if actual_yes {
+                        Some(market.token_yes.clone())
+                    } else {
+                        Some(market.token_no.clone())
+                    }
+                }
+                Ok(ResolutionVerdict::Disputed { .. } | ResolutionVerdict::Unresolved { .. })
+                | Err(_) => None,
+            }
         }
     }
 

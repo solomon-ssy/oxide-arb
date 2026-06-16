@@ -59,6 +59,13 @@ impl CapitalManager {
         self.backend.release_sync(&handle.id)
     }
 
+    pub fn pin_for_reconciliation_sync(
+        &self,
+        handle: &ReservationHandle,
+    ) -> Result<(), ReservationError> {
+        self.backend.pin_for_reconciliation_sync(&handle.id)
+    }
+
     pub fn reserve(
         &self,
         market_id: &MarketId,
@@ -73,5 +80,12 @@ impl CapitalManager {
 
     pub fn release(&self, handle: &ReservationHandle) -> Result<(), ReservationError> {
         self.release_sync(handle)
+    }
+
+    pub fn pin_for_reconciliation(
+        &self,
+        handle: &ReservationHandle,
+    ) -> Result<(), ReservationError> {
+        self.pin_for_reconciliation_sync(handle)
     }
 }

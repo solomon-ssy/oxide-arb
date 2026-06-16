@@ -63,6 +63,7 @@ use crate::{
     },
     post_trade::{
         consumer::PostTradeConsumer,
+        reconciliation_worker::{ReconciliationWorker, ReconciliationWorkerDeps},
         relay::{PostTradeRelay, PostTradeRelayDeps},
     },
     runtime_config::{RuntimeConfigApplicator, RuntimeConfigStore},
@@ -78,7 +79,7 @@ use crate::{
 use chrono::Utc;
 use flume::Receiver;
 use oxide_arb_algorithm::calibration::{CalibrationUpdater, ResolutionCalibrator};
-use oxide_arb_api::{clob::ClobClient, ws::ClobWsManager};
+use oxide_arb_api::{clob::ClobClient, ctf::client::CtfRedeemClient, ws::ClobWsManager};
 use oxide_arb_control::{
     evidence::engine::EvidenceEngine,
     materialization::{
@@ -196,6 +197,8 @@ pub struct ExecutionBundle {
     pub capital_manager: Arc<CapitalManager>,
     /// Shared with the pipeline; rung after each `*_observed` write to wake the relay.
     pub relay_notify: Arc<Notify>,
+    /// Shared with the pipeline; rung after Unknown outcomes to wake reconciliation.
+    pub reconcile_notify: Arc<Notify>,
 }
 
 impl ExecutionBundle {
@@ -206,6 +209,7 @@ impl ExecutionBundle {
         fsm: Arc<ExecutionFSM>,
         capital_manager: Arc<CapitalManager>,
         relay_notify: Arc<Notify>,
+        reconcile_notify: Arc<Notify>,
     ) -> Self {
         Self {
             pipeline,
@@ -213,6 +217,7 @@ impl ExecutionBundle {
             trading_gate: TradingGate::new(risk_engine, fsm),
             capital_manager,
             relay_notify,
+            reconcile_notify,
         }
     }
 }
@@ -228,6 +233,7 @@ pub struct TradingBundle {
     pub fsm: Arc<ExecutionFSM>,
     pub execution: Option<ExecutionBundle>,
     pub clob_client: Option<Arc<ClobClient>>,
+    pub ctf_redeem: Option<Arc<CtfRedeemClient>>,
     pub ws_manager: Arc<ClobWsManager>,
 }
 
@@ -380,6 +386,41 @@ impl AppContext {
             });
     }
 
+    /// Queue the unknown-outcome reconciliation worker.
+    pub fn queue_reconciliation_worker(&self) {
+        let Some(exec) = &self.trading.execution else {
+            tracing::warn!("reconciliation worker skipped — execution bundle not configured");
+            return;
+        };
+        let Some(clob_client) = self.trading.clob_client.as_ref() else {
+            tracing::info!("reconciliation worker skipped — ClobClient unavailable");
+            return;
+        };
+        let Some(ctf_redeem) = self.trading.ctf_redeem.as_ref() else {
+            tracing::info!("reconciliation worker skipped — CTF redeem client unavailable");
+            return;
+        };
+
+        let trade_repo = Arc::clone(&self.infra.trade_repo);
+        let trade_repo: Arc<dyn TradeRepository> = trade_repo;
+        let worker = ReconciliationWorker::new(ReconciliationWorkerDeps {
+            trade_repo,
+            clob_client: Arc::clone(clob_client),
+            ctf_redeem: Arc::clone(ctf_redeem),
+            holder_address: self.infra.holder_address.clone(),
+            capital_manager: Arc::clone(&exec.capital_manager),
+            fsm: Arc::clone(&self.trading.fsm),
+            metrics_state: Arc::clone(&self.risk.metrics_state),
+            reconcile_notify: Arc::clone(&exec.reconcile_notify),
+            relay_notify: Arc::clone(&exec.relay_notify),
+        });
+
+        self.pending_tasks
+            .push(TaskId::ReconciliationWorker, move |shutdown| async move {
+                worker.run(shutdown).await;
+            });
+    }
+
     /// Queue venue heartbeat probe (self-gates on the live mode each tick).
     pub fn queue_execution_heartbeat(&self, interval_secs: u64) {
         let Some(clob_client) = self.trading.clob_client.as_ref() else {
@@ -494,6 +535,7 @@ impl AppContext {
                 self.queue_execution_runners(runners);
             }
             self.queue_post_trade_relay();
+            self.queue_reconciliation_worker();
             self.queue_execution_heartbeat(30);
         }
     }
@@ -648,7 +690,7 @@ impl AppContext {
             metrics_refresh: Arc::clone(&self.risk.metrics_refresh),
             clob_client: self.trading.clob_client.clone(),
             market_registry: Arc::clone(&self.data.market_registry),
-            health_checker,
+            health_checker: Some(health_checker),
             deploy: Arc::clone(&self.config),
             runtime_config: Arc::clone(&self.runtime_config),
             position_repo: {

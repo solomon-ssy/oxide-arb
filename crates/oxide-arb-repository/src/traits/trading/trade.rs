@@ -6,7 +6,7 @@ use oxide_arb_models::{
         TradeAnalyticsFilter, TradeInfo, TradeObservation, TradePageQuery,
         evidence::EvidenceQueryResult,
     },
-    enums::common::{TradeBusinessOutcome, TradeState},
+    enums::common::{TradeBusinessOutcome, TradeReconcileResolution, TradeState},
     types::{ExecutionId, MarketId, TradeId},
 };
 use std::collections::HashMap;
@@ -36,6 +36,21 @@ pub trait TradeRepository: Send + Sync {
         trade_id: &TradeId,
         observation: TradeObservation,
     ) -> Result<(), StorageError>;
+
+    /// `Orphaned` → `*_observed` after external reconciliation proves a venue
+    /// outcome. The normal post-trade relay owns side effects after this write.
+    async fn mark_reconciled_observed(
+        &self,
+        trade_id: &TradeId,
+        observation: TradeObservation,
+        resolution: TradeReconcileResolution,
+        note: &str,
+    ) -> Result<bool, StorageError> {
+        let _ = (trade_id, observation, resolution, note);
+        Err(StorageError::StaleData(
+            "mark_reconciled_observed is not implemented for this repository".into(),
+        ))
+    }
 
     /// Lease a batch of unprocessed or expired-processing trades for relay work.
     ///
@@ -68,6 +83,30 @@ pub trait TradeRepository: Send + Sync {
         older_than: DateTime<Utc>,
         limit: u64,
     ) -> Result<Vec<TradeInfo>, StorageError>;
+
+    /// Trades whose venue outcome is unknown and must be reconciled before they
+    /// can participate in business-outcome reporting or release pinned exposure.
+    async fn find_needs_reconcile(&self, limit: u64) -> Result<Vec<TradeInfo>, StorageError> {
+        let _ = limit;
+        Err(StorageError::StaleData(
+            "find_needs_reconcile is not implemented for this repository".into(),
+        ))
+    }
+
+    /// Record a terminal reconciliation conclusion that could not safely be
+    /// mapped into normal Fill/Miss post-trade processing.
+    async fn mark_reconciled(
+        &self,
+        trade_id: &TradeId,
+        resolution: TradeReconcileResolution,
+        note: &str,
+        reconciled_at: DateTime<Utc>,
+    ) -> Result<bool, StorageError> {
+        let _ = (trade_id, resolution, note, reconciled_at);
+        Err(StorageError::StaleData(
+            "mark_reconciled is not implemented for this repository".into(),
+        ))
+    }
 
     async fn find_by_id(&self, trade_id: &TradeId) -> Result<Option<TradeInfo>, StorageError>;
 

@@ -179,12 +179,15 @@ impl PostTradeRelay {
                     amount: trade.cost_usd,
                     market_id: trade.market_id.clone(),
                 };
-                if let Err(error) = self.capital_manager.release_sync(&reservation) {
-                    tracing::debug!(
+                if let Err(error) = self
+                    .capital_manager
+                    .pin_for_reconciliation_sync(&reservation)
+                {
+                    tracing::error!(
                         %error,
                         trade_id = %trade.trade_id,
                         reservation_id = %trade.reservation_id,
-                        "stale submitted reservation was already absent"
+                        "stale submitted reservation pin failed"
                     );
                 }
                 tracing::warn!(

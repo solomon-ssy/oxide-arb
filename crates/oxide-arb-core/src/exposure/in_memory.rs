@@ -21,6 +21,7 @@ struct ReservationEntry {
     market_id: MarketId,
     amount_cents: u64,
     expires_at: Instant,
+    reconcile_pinned: bool,
 }
 
 pub struct InMemoryExposureReservation {
@@ -95,7 +96,7 @@ impl InMemoryExposureReservation {
         let mut expired_count = 0u32;
 
         self.reservations.retain(|_, entry| {
-            if now >= entry.expires_at {
+            if now >= entry.expires_at && !entry.reconcile_pinned {
                 self.total_reserved_cents
                     .fetch_sub(entry.amount_cents, Ordering::AcqRel);
                 if let Some(market_total) = self.per_market_cents.get(&entry.market_id) {
@@ -194,10 +195,26 @@ impl InMemoryExposureReservation {
                 market_id: market_id.clone(),
                 amount_cents,
                 expires_at: Instant::now() + ttl,
+                reconcile_pinned: false,
             },
         );
 
         Ok(id)
+    }
+
+    /// Pin an existing reservation for venue-outcome reconciliation.
+    ///
+    /// Pinned reservations are intentionally excluded from TTL GC: a timeout
+    /// means the venue may have filled the order, so exposure must remain visible
+    /// until a reconciliation worker or operator terminally resolves the trade.
+    pub fn pin_for_reconciliation_sync(&self, id: &ReservationId) -> Result<(), ReservationError> {
+        let mut entry = self
+            .reservations
+            .get_mut(id)
+            .ok_or_else(|| ReservationError::NotFound { id: id.to_string() })?;
+        entry.reconcile_pinned = true;
+        drop(entry);
+        Ok(())
     }
 
     /// Synchronous confirm — releases reservation tracking after a fill.

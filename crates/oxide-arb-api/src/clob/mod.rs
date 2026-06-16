@@ -9,7 +9,7 @@ mod token;
 
 pub use book::OrderbookSnapshot;
 pub use convert::{ClobSide, SdkSideConversionError};
-pub use orders::{CancelAllResult, CancelResult, OpenOrder};
+pub use orders::{CancelAllResult, CancelResult, ClobTrade, OpenOrder};
 pub use rate_limiter::RateLimiter;
 pub use sdk_error::SdkClobError;
 pub use token::WireTokenId;
@@ -33,7 +33,7 @@ use oxide_arb_models::{
         common::{OrderType, Side},
         order::OrderStatus,
     },
-    types::{OrderId, Price, Shares, TokenId, Usd},
+    types::{MarketId, OrderId, Price, Shares, TokenId, Usd},
 };
 use polymarket_client_sdk_v2::{
     auth::{Normal, state::Authenticated},
@@ -41,13 +41,14 @@ use polymarket_client_sdk_v2::{
         Client as SdkClient, Config as SdkConfig,
         types::{
             Amount, AssetType, OrderType as SdkOrderType, Side as SdkSide,
-            request::{BalanceAllowanceRequest, OrderBookSummaryRequest},
+            request::{BalanceAllowanceRequest, OrderBookSummaryRequest, TradesRequest},
             response::PostOrderResponse,
         },
     },
+    types::{B256, U256},
 };
 use rust_decimal::Decimal;
-use std::{convert::TryFrom, sync::Arc};
+use std::{convert::TryFrom, str::FromStr, sync::Arc};
 
 /// Polymarket CLOB REST client backed by the official SDK.
 ///
@@ -431,6 +432,71 @@ impl ClobClient {
                     .map_err(|e| ApiError::from(SdkClobError(&e)))?;
 
                 Ok(Usd::new(resp.balance))
+            }
+        })
+        .await
+    }
+
+    /// List authenticated account trades, optionally filtered by market, token,
+    /// and unix-second lower bound.
+    #[tracing::instrument(skip(self), fields(market_id = ?market_id, token_id = ?token_id))]
+    pub async fn get_trades(
+        &self,
+        market_id: Option<&MarketId>,
+        token_id: Option<&TokenId>,
+        after: Option<i64>,
+    ) -> Result<Vec<ClobTrade>, ApiError> {
+        self.rate_limiter.acquire("GET /data/trades").await;
+
+        let sdk = Arc::clone(&self.sdk);
+        let market = market_id
+            .map(|id| B256::from_str(id.as_str()))
+            .transpose()
+            .map_err(|error| ApiError::Deserialize {
+                context: "CLOB trades market id".into(),
+                detail: error.to_string(),
+            })?;
+        let asset_id = token_id
+            .map(|id| U256::from_str(id.as_str()))
+            .transpose()
+            .map_err(|error| ApiError::Deserialize {
+                context: "CLOB trades token id".into(),
+                detail: error.to_string(),
+            })?;
+
+        retry::retry_with_policy(&RetryPolicy::clob_default(), || {
+            let sdk = Arc::clone(&sdk);
+            async move {
+                let mut request = TradesRequest::builder().build();
+                request.market = market;
+                request.asset_id = asset_id;
+                request.after = after;
+                let resp = sdk
+                    .trades(&request, None)
+                    .await
+                    .map_err(|e| ApiError::from(sdk_error::SdkClobError(&e)))?;
+
+                resp.data
+                    .into_iter()
+                    .map(|trade| {
+                        Ok(ClobTrade {
+                            trade_id: trade.id,
+                            order_id: OrderId::new(&trade.taker_order_id),
+                            market_id: MarketId::new(format!("{:#x}", trade.market)),
+                            token_id: TokenId::new(trade.asset_id.to_string()),
+                            side: ClobSide::try_from(trade.side).map(|s| s.0).map_err(|e| {
+                                ApiError::Deserialize {
+                                    context: "CLOB trade side".into(),
+                                    detail: e.to_string(),
+                                }
+                            })?,
+                            size: Shares::new(trade.size),
+                            price: Price::new(trade.price),
+                            tx_hash: format!("{:#x}", trade.transaction_hash),
+                            matched_at: trade.match_time,
+                        })
+                    })
+                    .collect()
             }
         })
         .await

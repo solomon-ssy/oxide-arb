@@ -64,6 +64,7 @@ pub enum TaskId {
         shard: u8,
     },
     PostTradeRelay,
+    ReconciliationWorker,
     ExecutionHeartbeat,
 
     // ── Risk / periodic ───────────────────────────────────────────────
@@ -107,7 +108,9 @@ impl TaskId {
             | Self::MarketSettlementRetry => TaskKind::LedgerReconciliation,
             Self::HealthChecker | Self::RiskMetricsRefresh => TaskKind::HealthMonitor,
             Self::Scanner | Self::Funnel => TaskKind::Detection,
-            Self::ExecutionRunner { .. } | Self::PostTradeRelay => TaskKind::Execution,
+            Self::ExecutionRunner { .. } | Self::PostTradeRelay | Self::ReconciliationWorker => {
+                TaskKind::Execution
+            }
             Self::ExecutionHeartbeat => TaskKind::ExecutionHeartbeat,
             Self::RiskTick | Self::ExposureGc | Self::ReportGenerator => TaskKind::ReportScheduler,
             Self::RiskAuditBatch | Self::OperationLogWriter => TaskKind::Audit,

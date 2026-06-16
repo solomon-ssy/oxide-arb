@@ -207,6 +207,9 @@ mod tests {
             scored_snapshot: serde_json::json!({ "internal": "forensic blob" }),
             category: MarketCategory::Politics,
             needs_reconcile: false,
+            reconcile_resolution: None,
+            reconciled_at: None,
+            reconcile_note: None,
             post_trade_claim_owner: Some("relay-1".to_owned()),
             post_trade_claimed_at: Some(now),
             post_trade_attempts: 2,
@@ -276,13 +279,16 @@ mod tests {
             "post_trade_claim_owner",
             "post_trade_claimed_at",
             "post_trade_attempts",
-            "needs_reconcile",
         ] {
             assert!(
                 data.get(stripped).is_none(),
                 "`{stripped}` must be stripped from trade.filled"
             );
         }
+        assert!(
+            data.get("needs_reconcile").is_some(),
+            "`needs_reconcile` is operator-visible money-state, not relay internals"
+        );
     }
 
     #[test]

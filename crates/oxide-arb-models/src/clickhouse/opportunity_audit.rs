@@ -545,6 +545,9 @@ mod tests {
             scored_snapshot: serde_json::to_value(test_snapshot()).expect("snapshot json"),
             category: MarketCategory::Politics,
             needs_reconcile: false,
+            reconcile_resolution: None,
+            reconciled_at: None,
+            reconcile_note: None,
             post_trade_claim_owner: None,
             post_trade_claimed_at: None,
             post_trade_attempts: 0,
@@ -571,7 +574,8 @@ mod tests {
             execution_mode: ExecutionMode::Paper,
             latency_ms: 42,
         };
-        let resolved = ResolvedOutcome::resolve(&outcome, Price::new(dec!(0.92)), 0.95);
+        let resolved = ResolvedOutcome::try_resolve(&outcome, Price::new(dec!(0.92)), 0.95)
+            .expect("test outcome is known");
         let trade = test_trade(&resolved);
         let snapshot = test_snapshot();
         let row = OpportunityAuditRow::from_terminal_trade(&trade, &snapshot);
@@ -612,7 +616,8 @@ mod tests {
             reason: "no fill".into(),
             execution_mode: ExecutionMode::Paper,
         };
-        let resolved = ResolvedOutcome::resolve(&outcome, Price::new(dec!(0.92)), 0.95);
+        let resolved = ResolvedOutcome::try_resolve(&outcome, Price::new(dec!(0.92)), 0.95)
+            .expect("test outcome is known");
         let trade = test_trade(&resolved);
         let snapshot = test_snapshot();
         let row = OpportunityAuditRow::from_terminal_trade(&trade, &snapshot);
@@ -702,7 +707,8 @@ mod tests {
             execution_mode: ExecutionMode::Paper,
             latency_ms: 42,
         };
-        let resolved = ResolvedOutcome::resolve(&outcome, Price::new(dec!(0.92)), 0.95);
+        let resolved = ResolvedOutcome::try_resolve(&outcome, Price::new(dec!(0.92)), 0.95)
+            .expect("test outcome is known");
         let trade = test_trade(&resolved);
         let snapshot = test_snapshot();
         let now = chrono::Utc::now();

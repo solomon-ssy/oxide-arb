@@ -7,7 +7,10 @@
 use crate::{
     domain::{ScoredOpportunitySnapshot, SettledPositionStats},
     enums::{
-        common::{ExecutionMode, MarketCategory, Side, TradeBusinessOutcome, TradeState},
+        common::{
+            ExecutionMode, MarketCategory, Side, TradeBusinessOutcome, TradeReconcileResolution,
+            TradeState,
+        },
         report::ReportSchemaVersion,
     },
     types::{
@@ -50,6 +53,9 @@ pub struct TradeInfo {
     pub scored_snapshot: serde_json::Value,
     pub category: MarketCategory,
     pub needs_reconcile: bool,
+    pub reconcile_resolution: Option<TradeReconcileResolution>,
+    pub reconciled_at: Option<DateTime<Utc>>,
+    pub reconcile_note: Option<String>,
     pub post_trade_claim_owner: Option<String>,
     pub post_trade_claimed_at: Option<DateTime<Utc>>,
     pub post_trade_attempts: i32,
@@ -67,9 +73,9 @@ info_from_model!(TradeInfo, crate::entities::trade::Model, {
     side, shares, price, cost_usd, fee_usd, detected_edge_bps,
     detected_profit_usd, net_profit_usd, order_id, tx_hash, state,
     business_outcome, scored_snapshot, category, needs_reconcile,
-    post_trade_claim_owner, post_trade_claimed_at, post_trade_attempts,
-    execution_mode, latency_ms, error_message, submitted_at, confirmed_at,
-    created_at, updated_at,
+    reconcile_resolution, reconciled_at, reconcile_note, post_trade_claim_owner,
+    post_trade_claimed_at, post_trade_attempts, execution_mode, latency_ms,
+    error_message, submitted_at, confirmed_at, created_at, updated_at,
 });
 
 impl TradeInfo {

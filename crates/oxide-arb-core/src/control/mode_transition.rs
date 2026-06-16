@@ -54,7 +54,7 @@ use oxide_arb_models::{
     config::DeployConfig,
     domain::{
         BlacklistInfo, HealthReport, ModeTransitionReport, RiskEngineState, RuntimeControlError,
-        RuntimeControlPort, SystemBalanceView, SystemStatus,
+        RuntimeControlPort, SubsystemHealth, SystemBalanceView, SystemStatus,
     },
     enums::{common::ExecutionMode, risk::BlacklistReason},
     runtime_config::validation::validate_runtime_for_mode,
@@ -69,7 +69,10 @@ use std::{
 
 /// Maximum time to wait for the trading loop to quiesce before aborting a mode
 /// transition (fail-closed: stays halted on timeout).
+#[cfg(not(test))]
 const QUIESCE_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(test)]
+const QUIESCE_TIMEOUT: Duration = Duration::from_millis(100);
 /// Poll cadence while waiting for capital reservations to drain.
 const QUIESCE_POLL: Duration = Duration::from_millis(100);
 
@@ -87,7 +90,7 @@ pub struct CoreRuntimeControlDeps {
     pub metrics_refresh: Arc<RiskMetricsRefreshService>,
     pub clob_client: Option<Arc<ClobClient>>,
     pub market_registry: Arc<MarketRegistry>,
-    pub health_checker: Arc<HealthChecker>,
+    pub health_checker: Option<Arc<HealthChecker>>,
     pub deploy: Arc<DeployConfig>,
     /// Live runtime config: mode preflight reads the active snapshot, never a
     /// startup copy.
@@ -112,7 +115,7 @@ pub struct CoreRuntimeControl {
     metrics_refresh: Arc<RiskMetricsRefreshService>,
     clob_client: Option<Arc<ClobClient>>,
     market_registry: Arc<MarketRegistry>,
-    health_checker: Arc<HealthChecker>,
+    health_checker: Option<Arc<HealthChecker>>,
     deploy: Arc<DeployConfig>,
     runtime_config: Arc<RuntimeConfigStore>,
     position_repo: Arc<dyn PositionRepository>,
@@ -157,7 +160,7 @@ impl CoreRuntimeControl {
             metrics_refresh: Arc::clone(&self.metrics_refresh),
             clob_client: self.clob_client.clone(),
             market_registry: Arc::clone(&self.market_registry),
-            health_checker: Arc::clone(&self.health_checker),
+            health_checker: self.health_checker.clone(),
             deploy: Arc::clone(&self.deploy),
             runtime_config: Arc::clone(&self.runtime_config),
             position_repo: Arc::clone(&self.position_repo),
@@ -377,6 +380,18 @@ impl RuntimeControlPort for CoreRuntimeControl {
     }
 
     async fn health(&self) -> HealthReport {
-        self.health_checker.check_all().await
+        match &self.health_checker {
+            Some(checker) => checker.check_all().await,
+            None => HealthReport {
+                overall_healthy: false,
+                checks: vec![SubsystemHealth {
+                    name: "health_checker".into(),
+                    healthy: false,
+                    latency_ms: None,
+                    detail: Some("health checker unavailable".into()),
+                }],
+                checked_at: chrono::Utc::now(),
+            },
+        }
     }
 }

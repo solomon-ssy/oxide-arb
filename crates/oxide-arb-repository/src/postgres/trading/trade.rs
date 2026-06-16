@@ -8,7 +8,7 @@ use oxide_arb_models::{
         TradeAnalyticsFilter, TradeInfo, TradeObservation, TradePageQuery,
     },
     entities::trade::{ActiveModel, Column, Entity},
-    enums::common::{ExecutionMode, TradeBusinessOutcome, TradeState},
+    enums::common::{ExecutionMode, TradeBusinessOutcome, TradeReconcileResolution, TradeState},
     types::{ExecutionId, MarketId, TradeId, Usd},
 };
 use rust_decimal::Decimal;
@@ -20,7 +20,7 @@ use sea_orm::{
 };
 use std::collections::HashMap;
 
-/// Number of columns in the `trade` table used for bind-variable calculations.
+/// Number of `NewTrade` columns used for bind-variable calculations.
 const TRADE_COLUMNS: usize = 28;
 
 pub struct PgTradeRepository {
@@ -183,6 +183,51 @@ async fn do_mark_observed(
     Ok(())
 }
 
+async fn do_mark_reconciled_observed(
+    db: &impl ConnectionTrait,
+    trade_id: &TradeId,
+    obs: TradeObservation,
+    resolution: TradeReconcileResolution,
+    note: &str,
+) -> Result<bool, StorageError> {
+    if !obs.state.is_unprocessed() {
+        return Err(StorageError::StaleData(format!(
+            "reconciled observation state {} is not claimable",
+            obs.state
+        )));
+    }
+
+    let reconciled_at = Utc::now();
+    let result = Entity::update_many()
+        .col_expr(Column::State, Expr::value(obs.state))
+        .col_expr(
+            Column::BusinessOutcome,
+            Expr::value(obs.state.business_outcome()),
+        )
+        .col_expr(Column::Shares, Expr::value(obs.shares))
+        .col_expr(Column::Price, Expr::value(obs.price))
+        .col_expr(Column::CostUsd, Expr::value(obs.cost_usd))
+        .col_expr(Column::FeeUsd, Expr::value(obs.fee_usd))
+        .col_expr(Column::OrderId, Expr::value(obs.order_id))
+        .col_expr(Column::TxHash, Expr::value(obs.tx_hash))
+        .col_expr(Column::NetProfitUsd, Expr::value(obs.net_profit_usd))
+        .col_expr(Column::LatencyMs, Expr::value(obs.latency_ms))
+        .col_expr(Column::ErrorMessage, Expr::value(obs.error_message))
+        .col_expr(Column::ConfirmedAt, Expr::value(Some(obs.confirmed_at)))
+        .col_expr(Column::NeedsReconcile, Expr::value(false))
+        .col_expr(Column::ReconcileResolution, Expr::value(Some(resolution)))
+        .col_expr(Column::ReconciledAt, Expr::value(Some(reconciled_at)))
+        .col_expr(Column::ReconcileNote, Expr::value(Some(note.to_owned())))
+        .filter(Column::TradeId.eq(trade_id.clone()))
+        .filter(Column::State.eq(TradeState::Orphaned))
+        .filter(Column::NeedsReconcile.eq(true))
+        .filter(Column::ReconcileResolution.is_null())
+        .exec(db)
+        .await
+        .map_err(StorageError::from)?;
+    Ok(result.rows_affected > 0)
+}
+
 async fn do_claim_unprocessed(
     txn: &DatabaseTransaction,
     limit: u64,
@@ -337,7 +382,7 @@ async fn do_mark_orphaned(
         .col_expr(Column::State, Expr::value(TradeState::Orphaned))
         .col_expr(
             Column::BusinessOutcome,
-            Expr::value(Some(TradeBusinessOutcome::Failed)),
+            Expr::value(Option::<TradeBusinessOutcome>::None),
         )
         .col_expr(Column::NeedsReconcile, Expr::value(true))
         .filter(Column::TradeId.eq(trade_id.clone()))
@@ -362,6 +407,42 @@ async fn do_find_stale_submitted(
         .await
         .map_err(StorageError::from)
         .map(|v| v.into_iter().map(Into::into).collect())
+}
+
+async fn do_find_needs_reconcile(
+    db: &impl ConnectionTrait,
+    limit: u64,
+) -> Result<Vec<TradeInfo>, StorageError> {
+    Entity::find()
+        .filter(Column::NeedsReconcile.eq(true))
+        .filter(Column::ReconcileResolution.is_null())
+        .order_by_asc(Column::CreatedAt)
+        .order_by_asc(Column::TradeId)
+        .limit(limit)
+        .all(db)
+        .await
+        .map_err(StorageError::from)
+        .map(|v| v.into_iter().map(Into::into).collect())
+}
+
+async fn do_mark_reconciled(
+    db: &impl ConnectionTrait,
+    trade_id: &TradeId,
+    resolution: TradeReconcileResolution,
+    note: &str,
+    reconciled_at: DateTime<Utc>,
+) -> Result<bool, StorageError> {
+    let result = Entity::update_many()
+        .col_expr(Column::ReconcileResolution, Expr::value(Some(resolution)))
+        .col_expr(Column::ReconciledAt, Expr::value(Some(reconciled_at)))
+        .col_expr(Column::ReconcileNote, Expr::value(Some(note.to_owned())))
+        .filter(Column::TradeId.eq(trade_id.clone()))
+        .filter(Column::NeedsReconcile.eq(true))
+        .filter(Column::ReconcileResolution.is_null())
+        .exec(db)
+        .await
+        .map_err(StorageError::from)?;
+    Ok(result.rows_affected > 0)
 }
 
 async fn do_find_by_id(
@@ -493,6 +574,7 @@ async fn do_count_by_outcome(
 ) -> Result<HashMap<TradeBusinessOutcome, i64>, StorageError> {
     let results: Vec<OutcomeCount> = Entity::find()
         .filter(Column::CreatedAt.gte(since))
+        .filter(Column::NeedsReconcile.eq(false))
         .filter(Column::BusinessOutcome.is_not_null())
         .select_only()
         .column(Column::BusinessOutcome)
@@ -536,6 +618,7 @@ async fn do_aggregate_between(
     let row = Entity::find()
         .filter(Column::CreatedAt.gte(start))
         .filter(Column::CreatedAt.lt(end))
+        .filter(Column::NeedsReconcile.eq(false))
         .select_only()
         .column_as(Column::TradeId.count(), "trade_count")
         .expr_as(
@@ -725,6 +808,16 @@ impl TradeRepository for PgTradeRepository {
         do_mark_observed(&self.db, trade_id, observation).await
     }
 
+    async fn mark_reconciled_observed(
+        &self,
+        trade_id: &TradeId,
+        observation: TradeObservation,
+        resolution: TradeReconcileResolution,
+        note: &str,
+    ) -> Result<bool, StorageError> {
+        do_mark_reconciled_observed(&self.db, trade_id, observation, resolution, note).await
+    }
+
     async fn claim_unprocessed(
         &self,
         limit: u64,
@@ -758,6 +851,20 @@ impl TradeRepository for PgTradeRepository {
         limit: u64,
     ) -> Result<Vec<TradeInfo>, StorageError> {
         do_find_stale_submitted(&self.db, older_than, limit).await
+    }
+
+    async fn find_needs_reconcile(&self, limit: u64) -> Result<Vec<TradeInfo>, StorageError> {
+        do_find_needs_reconcile(&self.db, limit).await
+    }
+
+    async fn mark_reconciled(
+        &self,
+        trade_id: &TradeId,
+        resolution: TradeReconcileResolution,
+        note: &str,
+        reconciled_at: DateTime<Utc>,
+    ) -> Result<bool, StorageError> {
+        do_mark_reconciled(&self.db, trade_id, resolution, note, reconciled_at).await
     }
 
     async fn find_by_id(&self, trade_id: &TradeId) -> Result<Option<TradeInfo>, StorageError> {
@@ -856,6 +963,16 @@ impl TradeRepository for PgTradeRepositoryTxn<'_> {
         do_mark_observed(self.txn, trade_id, observation).await
     }
 
+    async fn mark_reconciled_observed(
+        &self,
+        trade_id: &TradeId,
+        observation: TradeObservation,
+        resolution: TradeReconcileResolution,
+        note: &str,
+    ) -> Result<bool, StorageError> {
+        do_mark_reconciled_observed(self.txn, trade_id, observation, resolution, note).await
+    }
+
     async fn claim_unprocessed(
         &self,
         limit: u64,
@@ -885,6 +1002,20 @@ impl TradeRepository for PgTradeRepositoryTxn<'_> {
         limit: u64,
     ) -> Result<Vec<TradeInfo>, StorageError> {
         do_find_stale_submitted(self.txn, older_than, limit).await
+    }
+
+    async fn find_needs_reconcile(&self, limit: u64) -> Result<Vec<TradeInfo>, StorageError> {
+        do_find_needs_reconcile(self.txn, limit).await
+    }
+
+    async fn mark_reconciled(
+        &self,
+        trade_id: &TradeId,
+        resolution: TradeReconcileResolution,
+        note: &str,
+        reconciled_at: DateTime<Utc>,
+    ) -> Result<bool, StorageError> {
+        do_mark_reconciled(self.txn, trade_id, resolution, note, reconciled_at).await
     }
 
     async fn page(&self, query: TradePageQuery) -> Result<Paginated<TradeInfo>, StorageError> {

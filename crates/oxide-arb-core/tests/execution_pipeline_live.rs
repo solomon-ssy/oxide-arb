@@ -505,6 +505,7 @@ fn fixture(clob_client: Option<Arc<ClobClient>>, dispatcher_timeout_ms: u64) -> 
         trade_repo: Arc::clone(&trade_repo),
         audit_writer: Arc::clone(&audit_writer),
         relay_notify: Arc::new(Notify::new()),
+        reconcile_notify: Arc::new(Notify::new()),
         metrics_state: Arc::clone(&metrics_state),
         runtime_config: Arc::new(RuntimeConfigStore::new(RuntimeConfig::default())),
         factors: Arc::new(FactorSnapshotStore::new(chrono::Utc::now())),

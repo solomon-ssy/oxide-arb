@@ -777,6 +777,9 @@ impl TradeRepository for MockTradeRepository {
             scored_snapshot: trade.scored_snapshot.clone(),
             category: trade.category,
             needs_reconcile: false,
+            reconcile_resolution: None,
+            reconciled_at: None,
+            reconcile_note: None,
             post_trade_claim_owner: None,
             post_trade_claimed_at: None,
             post_trade_attempts: 0,
@@ -956,7 +959,7 @@ impl TradeRepository for MockTradeRepository {
             return Ok(false);
         }
         existing.state = TradeState::Orphaned;
-        existing.business_outcome = Some(TradeBusinessOutcome::Failed);
+        existing.business_outcome = None;
         existing.needs_reconcile = true;
         existing.updated_at = Utc::now();
         drop(guard);

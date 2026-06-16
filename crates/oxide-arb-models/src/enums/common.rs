@@ -92,8 +92,24 @@ active_string_enum! {
         Success => "success",
         /// FOK not filled (book moved or insufficient depth).
         Miss => "miss",
-        /// Order failed/errored, or submitted-but-unconfirmed (orphaned).
+        /// Order definitely failed/errored.
         Failed => "failed",
+    }
+}
+
+active_string_enum! {
+    /// Operator/worker conclusion for a trade that entered the reconciliation queue.
+    ///
+    /// This is intentionally separate from [`TradeBusinessOutcome`]: pending
+    /// reconciliation is not a business outcome, and an unresolved ambiguity must
+    /// never be counted as a failed trade.
+    pub enum TradeReconcileResolution {
+        /// External evidence proves the venue filled the order.
+        Filled => "filled",
+        /// External evidence proves the venue did not fill the order.
+        Miss => "miss",
+        /// External evidence could not resolve the order safely.
+        Unresolvable => "unresolvable",
     }
 }
 
@@ -109,6 +125,9 @@ active_string_enum! {
     /// `Intent` → `Submitted` → (`FillObserved` | `MissObserved` | `FailObserved`)
     ///   → (`FillProcessing` | `MissProcessing` | `FailProcessing`)
     ///   → (`Settled` | `Missed` | `Failed`); stale `Submitted` → `Orphaned`.
+    /// `Orphaned` means "unknown venue outcome, needs reconciliation"; it is
+    /// deliberately not a failed trade until an explicit reconciliation terminal
+    /// resolution says so.
     /// The `*Observed` states are unclaimed durable work. The `*Processing` states
     /// are lease-backed claims and may be reclaimed after lease expiry.
     pub enum TradeState {
@@ -134,7 +153,7 @@ active_string_enum! {
         Missed => "missed",
         /// Failure fully processed. Terminal.
         Failed => "failed",
-        /// Submitted but never confirmed past the timeout — needs reconciliation. Terminal.
+        /// Submitted but never confirmed past the timeout — needs reconciliation.
         Orphaned => "orphaned",
     }
 }
@@ -179,10 +198,10 @@ impl TradeState {
             Self::MissObserved | Self::MissProcessing | Self::Missed => {
                 Some(TradeBusinessOutcome::Miss)
             }
-            Self::FailObserved | Self::FailProcessing | Self::Failed | Self::Orphaned => {
+            Self::FailObserved | Self::FailProcessing | Self::Failed => {
                 Some(TradeBusinessOutcome::Failed)
             }
-            Self::Intent | Self::Submitted => None,
+            Self::Intent | Self::Submitted | Self::Orphaned => None,
         }
     }
 

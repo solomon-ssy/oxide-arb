@@ -150,15 +150,21 @@ pub struct ResolvedOutcome {
 }
 
 impl ResolvedOutcome {
-    /// Single resolution point for [`ExecutionOutcome`] — call once per post-trade job.
+    /// Single resolution point for known [`ExecutionOutcome`] values.
     ///
     /// For fills, `net_profit_usd` is computed from actual execution economics
     /// and the frozen `resolution_prob` via [`fill_expected_net_profit`].
     ///
     /// `entry_price` is the planned entry (fallback when the venue omits an
     /// average fill price); `resolution_prob` is the frozen scored probability.
+    /// Returns `None` for [`ExecutionOutcome::Unknown`], which must enter the
+    /// reconciliation queue instead of being flattened into a business outcome.
     #[must_use]
-    pub fn resolve(outcome: &ExecutionOutcome, entry_price: Price, resolution_prob: f64) -> Self {
+    pub fn try_resolve(
+        outcome: &ExecutionOutcome,
+        entry_price: Price,
+        resolution_prob: f64,
+    ) -> Option<Self> {
         match outcome {
             ExecutionOutcome::Filled {
                 order_id,
@@ -173,7 +179,7 @@ impl ResolvedOutcome {
                 let cost = *filled_shares * price;
                 let fused_p = Decimal::try_from(resolution_prob).unwrap_or(Decimal::ZERO);
                 let ev = fill_expected_net_profit(fused_p, *filled_shares, cost, *fee_paid);
-                Self {
+                Some(Self {
                     business_outcome: TradeBusinessOutcome::Success,
                     filled_shares: *filled_shares,
                     avg_fill_price: price,
@@ -184,9 +190,9 @@ impl ResolvedOutcome {
                     tx_hash: tx_hash.clone(),
                     latency_ms: Some(*latency_ms),
                     error_message: None,
-                }
+                })
             }
-            ExecutionOutcome::Miss { reason, .. } => Self {
+            ExecutionOutcome::Miss { reason, .. } => Some(Self {
                 business_outcome: TradeBusinessOutcome::Miss,
                 filled_shares: Shares::ZERO,
                 avg_fill_price: entry_price,
@@ -197,8 +203,8 @@ impl ResolvedOutcome {
                 tx_hash: None,
                 latency_ms: None,
                 error_message: Some(reason.clone()),
-            },
-            ExecutionOutcome::Failed { error, .. } => Self {
+            }),
+            ExecutionOutcome::Failed { error, .. } => Some(Self {
                 business_outcome: TradeBusinessOutcome::Failed,
                 filled_shares: Shares::ZERO,
                 avg_fill_price: entry_price,
@@ -209,19 +215,8 @@ impl ResolvedOutcome {
                 tx_hash: None,
                 latency_ms: None,
                 error_message: Some(error.clone()),
-            },
-            ExecutionOutcome::Unknown { reason, .. } => Self {
-                business_outcome: TradeBusinessOutcome::Failed,
-                filled_shares: Shares::ZERO,
-                avg_fill_price: entry_price,
-                cost_usd: Usd::ZERO,
-                fee_usd: Usd::ZERO,
-                net_profit_usd: None,
-                order_id: None,
-                tx_hash: None,
-                latency_ms: None,
-                error_message: Some(reason.clone()),
-            },
+            }),
+            ExecutionOutcome::Unknown { .. } => None,
         }
     }
 
@@ -264,7 +259,8 @@ mod tests {
 
     /// Planned entry price + frozen resolution probability used across resolve tests.
     fn resolve(outcome: &ExecutionOutcome) -> ResolvedOutcome {
-        ResolvedOutcome::resolve(outcome, Price::new(dec!(0.92)), 0.95)
+        ResolvedOutcome::try_resolve(outcome, Price::new(dec!(0.92)), 0.95)
+            .expect("test outcome is known")
     }
 
     #[test]

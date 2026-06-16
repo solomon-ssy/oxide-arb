@@ -655,6 +655,7 @@ fn assemble_app_context(parts: AppContextAssembly) -> AppContext {
             fsm: risk.fsm,
             execution: Some(trading.execution),
             clob_client: clients.clob_client,
+            ctf_redeem: clients.ctf_redeem,
             ws_manager: clients.ws_manager,
         },
         control: ControlFactorBundle {
@@ -1360,7 +1361,7 @@ fn wire_execution_loop(
     shutdown: CancellationToken,
 ) -> ExecutionLoop {
     let WiringConfig { deploy, runtime } = wiring;
-    let relay_notify = Arc::new(Notify::new());
+    let (relay_notify, reconcile_notify) = execution_notifiers();
     let (settlement_tx, settlement_rx) =
         flume::bounded(deploy.settlement.lifecycle.channel_capacity);
     let capital = Arc::new(CapitalManager::new(
@@ -1404,6 +1405,7 @@ fn wire_execution_loop(
         trade_repo: Arc::clone(&infra.persistence.trade_repo),
         audit_writer: Arc::clone(&infra.persistence.audit_writer),
         relay_notify: Arc::clone(&relay_notify),
+        reconcile_notify: Arc::clone(&reconcile_notify),
         metrics_state: Arc::clone(&risk.metrics_state),
         runtime_config: Arc::clone(&infra.runtime_store),
         factors: Arc::clone(&infra.factor_store),
@@ -1450,6 +1452,7 @@ fn wire_execution_loop(
         Arc::clone(&risk.fsm),
         Arc::clone(&capital),
         relay_notify,
+        reconcile_notify,
     );
 
     ExecutionLoop {
@@ -1461,6 +1464,10 @@ fn wire_execution_loop(
         settlement_rx,
         execution_runners,
     }
+}
+
+fn execution_notifiers() -> (Arc<Notify>, Arc<Notify>) {
+    (Arc::new(Notify::new()), Arc::new(Notify::new()))
 }
 
 async fn load_resolution_calibrator(

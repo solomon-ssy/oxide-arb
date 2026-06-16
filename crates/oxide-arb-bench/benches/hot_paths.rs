@@ -1008,6 +1008,7 @@ fn execution_bench_setup() -> (
             trade_repo: Arc::clone(&trade_repo),
             audit_writer,
             relay_notify: Arc::new(Notify::new()),
+            reconcile_notify: Arc::new(Notify::new()),
             metrics_state: Arc::new(RiskMetricsState::new(Arc::new(ApiHealthTracker::new(
                 std::time::Duration::from_secs(60),
             )))),

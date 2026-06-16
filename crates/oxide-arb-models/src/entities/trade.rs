@@ -1,7 +1,10 @@
 //! `trades` table entity.
 
 use crate::{
-    enums::common::{ExecutionMode, MarketCategory, Side, TradeBusinessOutcome, TradeState},
+    enums::common::{
+        ExecutionMode, MarketCategory, Side, TradeBusinessOutcome, TradeReconcileResolution,
+        TradeState,
+    },
     types::{
         Bps, EventId, ExecutionId, MarketId, OpportunityId, OrderId, Price, ReservationId, Shares,
         TokenId, TradeId, Usd,
@@ -44,6 +47,13 @@ pub struct Model {
     pub category: MarketCategory,
     /// Set when an orphaned/ambiguous trade needs operator/reconciliation review.
     pub needs_reconcile: bool,
+    /// Explicit terminal conclusion for a trade that entered reconciliation.
+    pub reconcile_resolution: Option<TradeReconcileResolution>,
+    /// Time at which reconciliation produced `reconcile_resolution`.
+    pub reconciled_at: Option<DateTime<Utc>>,
+    /// Human-readable operator/worker note explaining the reconciliation result.
+    #[sea_orm(column_type = "Text", nullable)]
+    pub reconcile_note: Option<String>,
     /// Current relay lease owner for `*_processing` rows.
     #[sea_orm(column_type = "Text", nullable)]
     pub post_trade_claim_owner: Option<String>,

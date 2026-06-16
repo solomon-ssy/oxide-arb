@@ -552,9 +552,6 @@ async fn relay_marks_stale_submitted_trade_orphaned() {
 
     let orphaned = harness.trade_repo.find(&trade_id).expect("orphaned trade");
     assert_eq!(orphaned.state, TradeState::Orphaned);
-    assert_eq!(
-        orphaned.business_outcome,
-        Some(TradeBusinessOutcome::Failed)
-    );
+    assert_eq!(orphaned.business_outcome, None);
     assert!(orphaned.needs_reconcile);
 }
