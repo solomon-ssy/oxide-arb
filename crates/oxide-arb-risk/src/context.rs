@@ -4,7 +4,11 @@
 //! [`RiskMetricsSnapshot`]. Checks read only from this context — no I/O or
 //! subsystem locks on the hot path.
 
-use crate::{snapshot::RiskSnapshot, traits::RiskMetricsSnapshot, types::DrawdownAction};
+use crate::{
+    snapshot::RiskSnapshot,
+    traits::RiskMetricsSnapshot,
+    types::{DrawdownAction, ReportMode},
+};
 use chrono::{DateTime, Utc};
 use oxide_arb_models::{
     domain::{
@@ -15,6 +19,44 @@ use oxide_arb_models::{
     types::Usd,
 };
 use rust_decimal::Decimal;
+
+/// Kelly-sized trade intent for post-sizing exposure gates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SizedIntent {
+    pub bet_usd: Usd,
+    pub fee_usd: Usd,
+}
+
+/// Bundled inputs for post-Kelly exposure re-checks.
+#[derive(Debug, Clone, Copy)]
+pub struct SizedPreTradeInput<'a, M> {
+    pub opportunity: &'a Opportunity,
+    pub approved_size: Usd,
+    pub approved_fee: Usd,
+    pub metrics: &'a M,
+    pub factor_context: Option<&'a FactorDecisionContext>,
+    pub settlement_gate: SettlementGateInput<'a>,
+    pub mode: ReportMode,
+}
+
+/// Borrowed view of all state for one pre-trade decision.
+#[derive(Debug, Clone, Copy)]
+pub struct PreTradeContext<'a> {
+    pub opportunity: &'a Opportunity,
+    pub probability: ProbabilityInput,
+    pub snap: &'a RiskSnapshot,
+    pub metrics: RiskMetricsSnapshot,
+    /// Execution-time control-factor decision bundle (named safety factors and
+    /// size caps), resolved from the current published snapshot. `None` when no
+    /// publication is active.
+    pub factor_context: Option<&'a FactorDecisionContext>,
+    /// Live-only redeem routing gate (registry `neg_risk` + policy resolve).
+    pub settlement_gate: SettlementGateInput<'a>,
+    pub now: DateTime<Utc>,
+    /// Post-Kelly sized intent; when set, exposure gates use this instead of
+    /// detection-time `opportunity.total_cost`.
+    pub sized_intent: Option<SizedIntent>,
+}
 
 /// Circuit breaker gate snapshot for pre-trade evaluation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,22 +119,6 @@ pub struct SettlementGateInput<'a> {
     pub redeem_policy: Option<&'a RedeemRoutingPolicy>,
 }
 
-/// Borrowed view of all state for one pre-trade decision.
-#[derive(Debug, Clone, Copy)]
-pub struct PreTradeContext<'a> {
-    pub opportunity: &'a Opportunity,
-    pub probability: ProbabilityInput,
-    pub snap: &'a RiskSnapshot,
-    pub metrics: RiskMetricsSnapshot,
-    /// Execution-time control-factor decision bundle (named safety factors and
-    /// size caps), resolved from the current published snapshot. `None` when no
-    /// publication is active.
-    pub factor_context: Option<&'a FactorDecisionContext>,
-    /// Live-only redeem routing gate (registry `neg_risk` + policy resolve).
-    pub settlement_gate: SettlementGateInput<'a>,
-    pub now: DateTime<Utc>,
-}
-
 impl<'a> PreTradeContext<'a> {
     /// The control-factor decision bundle, or a neutral borrow when absent.
     #[inline]
@@ -119,6 +145,22 @@ impl<'a> PreTradeContext<'a> {
     #[inline]
     pub const fn total_exposure_before(&self) -> Usd {
         self.metrics.total_exposure
+    }
+
+    /// Trade cost used by exposure gates (sized intent or detection snapshot).
+    #[inline]
+    #[must_use]
+    pub fn intended_cost_usd(&self) -> Usd {
+        self.sized_intent
+            .map_or(self.opportunity.total_cost, |intent| intent.bet_usd)
+    }
+
+    /// Trade fees used by exposure gates (sized intent or detection snapshot).
+    #[inline]
+    #[must_use]
+    pub fn intended_fee_usd(&self) -> Usd {
+        self.sized_intent
+            .map_or(self.opportunity.total_fees, |intent| intent.fee_usd)
     }
 
     #[inline]
@@ -295,6 +337,7 @@ mod tests {
             factor_context: None,
             settlement_gate: SettlementGateInput::default(),
             now: Utc::now(),
+            sized_intent: None,
         };
         assert!(ctx.is_market_blacklisted_trading_path().is_none());
         assert!(!ctx.is_token_blacklisted());

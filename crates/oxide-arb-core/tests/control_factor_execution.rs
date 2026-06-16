@@ -478,6 +478,8 @@ fn pipeline(
         runtime_config: Arc::new(RuntimeConfigStore::new(RuntimeConfig::default())),
         factors: store,
         shadow_writer: None,
+        ctf_redeem: None,
+        holder_address: String::new(),
     })
 }
 

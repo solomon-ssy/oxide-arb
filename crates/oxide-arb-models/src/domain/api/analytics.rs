@@ -185,6 +185,7 @@ mod tests {
                 failed_accounting_count: 0,
                 largest_single_profit: Usd::ZERO,
                 largest_single_loss: Usd::ZERO,
+                total_gas_paid: Usd::ZERO,
             },
             execution: ReportTradeStats {
                 trade_count: 2,

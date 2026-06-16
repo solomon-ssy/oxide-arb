@@ -121,7 +121,6 @@ impl FokOrderStrategy {
                     ExecutionMode::Live,
                     started,
                     &self.fee_calculator,
-                    plan.category,
                     &plan.token_id,
                 );
                 self.record_fok_metrics(&outcome);

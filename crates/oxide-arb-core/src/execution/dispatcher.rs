@@ -70,6 +70,7 @@ impl Dispatcher {
             plan.shares,
             plan.limit_price,
             plan.category,
+            &plan.market_id,
             &plan.token_id,
         );
         ExecutionOutcome::Filled {
@@ -106,6 +107,7 @@ impl Dispatcher {
             plan.shares,
             plan.limit_price,
             plan.category,
+            &plan.market_id,
             &plan.token_id,
         );
         ExecutionOutcome::Filled {

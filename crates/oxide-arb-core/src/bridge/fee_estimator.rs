@@ -2,7 +2,7 @@ use oxide_arb_algorithm::fee::FeeEstimator;
 use oxide_arb_api::fees::FeeCalculator;
 use oxide_arb_models::{
     enums::common::MarketCategory,
-    types::{Price, Shares, TokenId, Usd},
+    types::{MarketId, Price, Shares, TokenId, Usd},
 };
 use std::sync::Arc;
 
@@ -16,6 +16,12 @@ impl FeeEstimator for CoreFeeEstimator {
         category: MarketCategory,
         token_id: &TokenId,
     ) -> Usd {
-        self.0.calculate(shares, price, category, token_id)
+        self.0.calculate(
+            shares,
+            price,
+            category,
+            &MarketId::new(token_id.as_str()),
+            token_id,
+        )
     }
 }

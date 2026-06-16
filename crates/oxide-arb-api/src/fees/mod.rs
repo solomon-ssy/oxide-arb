@@ -17,9 +17,9 @@ pub use rate_cache::{CategoryFeeParams, FeeSnapshot};
 use arc_swap::ArcSwap;
 use oxide_arb_models::{
     config::FeesConfig,
-    domain::fee::{FeeQuote, FeeQuoteInput, MarketFeeSchedule},
+    domain::fee::{FeeQuote, FeeQuoteError, FeeQuoteInput, MarketFeeSchedule},
     enums::{
-        common::{MarketCategory, Side},
+        common::{ExecutionMode, MarketCategory, Side},
         fee::FeeLiquidityRole,
     },
     types::{MarketId, Price, Shares, TokenId, Usd},
@@ -44,21 +44,20 @@ impl FeeCalculator {
         }
     }
 
-    /// Calculate the fee for a trade.
+    /// Calculate the fee for a trade (simulated modes only).
     ///
-    /// Prefer [`Self::quote`] in new code. This method remains as a thin
-    /// adapter for call sites that have not yet been moved to market-scoped
-    /// quotes; it uses explicit category fallback and must not be used in Live
-    /// fail-closed paths.
+    /// Live paths must use [`Self::quote_for_mode`] with fail-closed schedule
+    /// resolution.
     pub fn calculate(
         &self,
         shares: Shares,
         price: Price,
         category: MarketCategory,
+        market_id: &MarketId,
         token_id: &TokenId,
     ) -> Usd {
         let input = FeeQuoteInput {
-            market_id: MarketId::new(token_id.as_str()),
+            market_id: market_id.clone(),
             token_id: token_id.clone(),
             category,
             side: Side::Buy,
@@ -70,14 +69,22 @@ impl FeeCalculator {
         self.quote(&input).map_or(Usd::ZERO, |quote| quote.fee_usd)
     }
 
-    pub fn quote(&self, input: &FeeQuoteInput) -> Result<FeeQuote, String> {
+    pub fn quote(&self, input: &FeeQuoteInput) -> Result<FeeQuote, FeeQuoteError> {
         let snapshot = self.rate_cache.load();
         let schedule = match snapshot.market_schedules.get(&input.market_id) {
             Some(schedule) => Arc::clone(schedule),
             None if input.allow_category_fallback => snapshot
                 .category_default_schedule(&input.market_id, input.category)
-                .ok_or_else(|| format!("missing fee schedule for {}", input.market_id))?,
-            None => return Err(format!("missing fee schedule for {}", input.market_id)),
+                .ok_or_else(|| FeeQuoteError::MissingSchedule {
+                    market_id: input.market_id.to_string(),
+                    detail: format!("no category fallback for {}", input.category),
+                })?,
+            None => {
+                return Err(FeeQuoteError::MissingSchedule {
+                    market_id: input.market_id.to_string(),
+                    detail: "category fallback disabled".into(),
+                });
+            }
         };
 
         let fee_usd = if !schedule.fees_enabled || input.liquidity_role == FeeLiquidityRole::Maker {
@@ -97,6 +104,18 @@ impl FeeCalculator {
             formula_version: "polymarket-v1",
             rounded_scale: 5,
         })
+    }
+
+    /// Mode-aware fee quote: Live forces `allow_category_fallback = false`.
+    pub fn quote_for_mode(
+        &self,
+        mode: ExecutionMode,
+        mut input: FeeQuoteInput,
+    ) -> Result<FeeQuote, FeeQuoteError> {
+        if mode == ExecutionMode::Live {
+            input.allow_category_fallback = false;
+        }
+        self.quote(&input)
     }
 
     pub fn ingest_market_fee_schedules(

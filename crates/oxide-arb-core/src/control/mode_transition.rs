@@ -30,17 +30,22 @@
 
 use crate::{
     bridge::{
-        execution_mode::ExecutionModeHandle,
-        risk_metrics::CoreRiskMetrics,
-        trading_gate::{halt_trading, resume_trading},
+        execution_mode::ExecutionModeHandle, risk_metrics::CoreRiskMetrics,
+        trading_gate::resume_trading,
     },
     control::status::{build_system_balance, build_system_status},
     execution::{
-        fsm::ExecutionFSM, settlement::redeem_preflight::ensure_live_pending_redeem_portfolio,
+        capital_manager::CapitalManager,
+        fsm::{EmergencyAckError, EmergencyClass, ExecutionFSM},
+        settlement::redeem_preflight::ensure_live_pending_redeem_portfolio,
+        trade_safety_gate::TradeSafetyGate,
+        venue_guard::halt_trading_and_cancel_open_orders,
     },
     exposure::in_memory::InMemoryExposureReservation,
     infra::health_checker::HealthChecker,
+    observability::alert_dispatcher::AlertDispatcher,
     pipeline::market_registry::MarketRegistry,
+    post_trade::reconciliation::CloseUnresolvableService,
     runtime_config::RuntimeConfigStore,
     service::{
         catalog_readiness::CatalogReadiness,
@@ -49,7 +54,7 @@ use crate::{
     },
 };
 use async_trait::async_trait;
-use oxide_arb_api::clob::ClobClient;
+use oxide_arb_api::{clob::ClobClient, ctf::client::CtfRedeemClient};
 use oxide_arb_models::{
     config::DeployConfig,
     domain::{
@@ -58,9 +63,11 @@ use oxide_arb_models::{
     },
     enums::{common::ExecutionMode, risk::BlacklistReason},
     runtime_config::validation::validate_runtime_for_mode,
-    types::MarketId,
+    types::{MarketId, TradeId},
 };
-use oxide_arb_repository::traits::{PositionRepository, SystemRuntimeStateRepository};
+use oxide_arb_repository::traits::{
+    PositionRepository, SystemRuntimeStateRepository, TradeRepository,
+};
 use oxide_arb_risk::{engine::RiskEngine, traits::RiskMetrics};
 use std::{
     sync::Arc,
@@ -89,6 +96,8 @@ pub struct CoreRuntimeControlDeps {
     pub metrics_state: Arc<RiskMetricsState>,
     pub metrics_refresh: Arc<RiskMetricsRefreshService>,
     pub clob_client: Option<Arc<ClobClient>>,
+    pub ctf_redeem: Option<Arc<CtfRedeemClient>>,
+    pub holder_address: String,
     pub market_registry: Arc<MarketRegistry>,
     pub health_checker: Option<Arc<HealthChecker>>,
     pub deploy: Arc<DeployConfig>,
@@ -99,6 +108,9 @@ pub struct CoreRuntimeControlDeps {
     pub position_repo: Arc<dyn PositionRepository>,
     /// Persists the active mode so a transition survives a restart.
     pub system_runtime_state: Arc<dyn SystemRuntimeStateRepository>,
+    pub trade_repo: Arc<dyn TradeRepository>,
+    pub capital_manager: Arc<CapitalManager>,
+    pub alerts: Arc<AlertDispatcher>,
     /// Optional publisher for immediate WebSocket status pushes after control ops.
     pub status_publisher: Option<SharedSystemStatusPublisher>,
 }
@@ -114,12 +126,18 @@ pub struct CoreRuntimeControl {
     metrics_state: Arc<RiskMetricsState>,
     metrics_refresh: Arc<RiskMetricsRefreshService>,
     clob_client: Option<Arc<ClobClient>>,
+    ctf_redeem: Option<Arc<CtfRedeemClient>>,
+    holder_address: String,
     market_registry: Arc<MarketRegistry>,
     health_checker: Option<Arc<HealthChecker>>,
     deploy: Arc<DeployConfig>,
     runtime_config: Arc<RuntimeConfigStore>,
     position_repo: Arc<dyn PositionRepository>,
     system_runtime_state: Arc<dyn SystemRuntimeStateRepository>,
+    trade_repo: Arc<dyn TradeRepository>,
+    capital_manager: Arc<CapitalManager>,
+    alerts: Arc<AlertDispatcher>,
+    close_unresolvable: CloseUnresolvableService,
     status_publisher: Option<SharedSystemStatusPublisher>,
     started_at: Instant,
 }
@@ -127,6 +145,13 @@ pub struct CoreRuntimeControl {
 impl CoreRuntimeControl {
     #[must_use]
     pub fn new(deps: CoreRuntimeControlDeps, started_at: Instant) -> Self {
+        let close_unresolvable = CloseUnresolvableService::new(
+            Arc::clone(&deps.trade_repo),
+            Arc::clone(&deps.capital_manager),
+            Arc::clone(&deps.fsm),
+            Arc::clone(&deps.alerts),
+            Arc::clone(&deps.metrics_state),
+        );
         Self {
             execution_mode: deps.execution_mode,
             risk_engine: deps.risk_engine,
@@ -137,12 +162,18 @@ impl CoreRuntimeControl {
             metrics_state: deps.metrics_state,
             metrics_refresh: deps.metrics_refresh,
             clob_client: deps.clob_client,
+            ctf_redeem: deps.ctf_redeem,
+            holder_address: deps.holder_address,
             market_registry: deps.market_registry,
             health_checker: deps.health_checker,
             deploy: deps.deploy,
             runtime_config: deps.runtime_config,
             position_repo: deps.position_repo,
             system_runtime_state: deps.system_runtime_state,
+            trade_repo: deps.trade_repo,
+            capital_manager: deps.capital_manager,
+            alerts: deps.alerts,
+            close_unresolvable,
             status_publisher: deps.status_publisher,
             started_at,
         }
@@ -159,12 +190,17 @@ impl CoreRuntimeControl {
             metrics_state: Arc::clone(&self.metrics_state),
             metrics_refresh: Arc::clone(&self.metrics_refresh),
             clob_client: self.clob_client.clone(),
+            ctf_redeem: self.ctf_redeem.clone(),
+            holder_address: self.holder_address.clone(),
             market_registry: Arc::clone(&self.market_registry),
             health_checker: self.health_checker.clone(),
             deploy: Arc::clone(&self.deploy),
             runtime_config: Arc::clone(&self.runtime_config),
             position_repo: Arc::clone(&self.position_repo),
             system_runtime_state: Arc::clone(&self.system_runtime_state),
+            trade_repo: Arc::clone(&self.trade_repo),
+            capital_manager: Arc::clone(&self.capital_manager),
+            alerts: Arc::clone(&self.alerts),
             status_publisher: self.status_publisher.clone(),
         }
     }
@@ -192,10 +228,23 @@ impl CoreRuntimeControl {
                 runtime_report.to_string(),
             ));
         }
-        if target == ExecutionMode::Live && self.clob_client.is_none() {
-            return Err(RuntimeControlError::Precondition(
-                "entering Live requires a CLOB client, but none was loaded at boot".to_owned(),
-            ));
+        if target == ExecutionMode::Live {
+            if self.clob_client.is_none() {
+                return Err(RuntimeControlError::Precondition(
+                    "entering Live requires a CLOB client, but none was loaded at boot".to_owned(),
+                ));
+            }
+            if self.ctf_redeem.is_none() {
+                return Err(RuntimeControlError::Precondition(
+                    "entering Live requires a CTF redeem client, but none was loaded at boot"
+                        .to_owned(),
+                ));
+            }
+            if self.holder_address == "unavailable" {
+                return Err(RuntimeControlError::Precondition(
+                    "entering Live requires a configured holder address".to_owned(),
+                ));
+            }
         }
         Ok(())
     }
@@ -278,10 +327,13 @@ impl RuntimeControlPort for CoreRuntimeControl {
         }
 
         // 2. Quiesce: halt then wait for the loop to drain.
-        halt_trading(
+        halt_trading_and_cancel_open_orders(
+            self.execution_mode.current(),
+            self.clob_client.as_deref(),
             &self.risk_engine,
             &self.fsm,
             format!("execution mode transition {from} -> {target}"),
+            EmergencyClass::VenueFault,
         )
         .await;
         self.quiesce().await?;
@@ -310,7 +362,15 @@ impl RuntimeControlPort for CoreRuntimeControl {
     }
 
     async fn halt(&self, reason: String) {
-        halt_trading(&self.risk_engine, &self.fsm, reason).await;
+        halt_trading_and_cancel_open_orders(
+            self.execution_mode.current(),
+            self.clob_client.as_deref(),
+            &self.risk_engine,
+            &self.fsm,
+            reason,
+            EmergencyClass::VenueFault,
+        )
+        .await;
         self.publish_status_now();
     }
 
@@ -318,6 +378,18 @@ impl RuntimeControlPort for CoreRuntimeControl {
         resume_trading(&self.risk_engine, &self.fsm, operator_ack)
             .await
             .map_err(|error| RuntimeControlError::Engine(error.to_string()))?;
+        self.publish_status_now();
+        Ok(())
+    }
+
+    async fn ack_execution_emergency(&self, operator_ack: &str) -> Result<(), RuntimeControlError> {
+        let gate = TradeSafetyGate::new(Arc::clone(&self.trade_repo));
+        let class = self
+            .fsm
+            .ack_operator_emergency(&gate, &self.risk_engine)
+            .await
+            .map_err(map_emergency_ack_error)?;
+        tracing::info!(?class, operator_ack, "execution emergency acknowledged");
         self.publish_status_now();
         Ok(())
     }
@@ -393,5 +465,24 @@ impl RuntimeControlPort for CoreRuntimeControl {
                 checked_at: chrono::Utc::now(),
             },
         }
+    }
+
+    async fn close_unresolvable_trade(
+        &self,
+        trade_id: &TradeId,
+        note: &str,
+        operator: &str,
+    ) -> Result<bool, RuntimeControlError> {
+        self.close_unresolvable
+            .close(trade_id, note, operator)
+            .await
+            .map_err(|error| RuntimeControlError::Engine(error.to_string()))
+    }
+}
+
+fn map_emergency_ack_error(error: EmergencyAckError) -> RuntimeControlError {
+    match error {
+        EmergencyAckError::Gate(gate) => RuntimeControlError::Engine(gate.to_string()),
+        other => RuntimeControlError::Precondition(other.to_string()),
     }
 }

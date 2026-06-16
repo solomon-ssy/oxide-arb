@@ -46,7 +46,7 @@ use oxide_arb_models::{
         RuntimeConfig,
         validation::{RuntimePreflightContext, preflight_runtime_config},
     },
-    types::{MarketId, TokenId, Usd},
+    types::{MarketId, TokenId, TradeId, Usd},
 };
 use oxide_arb_repository::{
     postgres::{
@@ -486,6 +486,10 @@ impl RuntimeControlPort for MockRuntimeControl {
         Ok(())
     }
 
+    async fn ack_execution_emergency(&self, _operator_ack: &str) -> Result<(), RuntimeControlError> {
+        Ok(())
+    }
+
     async fn reset_circuit_breaker(&self, _reason: &str) -> Result<(), RuntimeControlError> {
         Ok(())
     }
@@ -578,6 +582,15 @@ impl RuntimeControlPort for MockRuntimeControl {
             checks: Vec::new(),
             checked_at: Utc::now(),
         }
+    }
+
+    async fn close_unresolvable_trade(
+        &self,
+        _trade_id: &TradeId,
+        _note: &str,
+        _operator: &str,
+    ) -> Result<bool, RuntimeControlError> {
+        Ok(false)
     }
 }
 

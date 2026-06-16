@@ -21,10 +21,11 @@ use oxide_arb_models::{
         clickhouse::ChOpportunityAuditStage,
         common::{
             ExecutionMode, MarketCategory, PositionStatus, RedeemStatus,
-            SettlementAccountingStatus, SettlementTrigger, TradeBusinessOutcome, TradeState,
+            SettlementAccountingStatus, SettlementTrigger, TradeBusinessOutcome,
+            TradeReconcileResolution, TradeState,
         },
     },
-    types::{ExecutionId, MarketId, OpportunityId, PositionId, TokenId, TradeId, Usd},
+    types::{ExecutionId, MarketId, OpportunityId, PositionId, Shares, TokenId, TradeId, Usd},
 };
 use oxide_arb_repository::traits::{
     AuditFunnelStats, CalibrationRepository, EvidenceTimeseriesRepository, PositionRepository,
@@ -89,6 +90,20 @@ impl MockTradeRepository {
 
     pub fn trades_snapshot(&self) -> Vec<TradeInfo> {
         self.trades.lock().unwrap().values().cloned().collect()
+    }
+
+    fn mutate_trade<F>(&self, trade_id: &TradeId, mutate: F) -> bool
+    where
+        F: FnOnce(&mut TradeInfo),
+    {
+        self.trades
+            .lock()
+            .unwrap()
+            .get_mut(&trade_id.to_string())
+            .is_some_and(|existing| {
+                mutate(existing);
+                true
+            })
     }
 }
 
@@ -478,6 +493,7 @@ impl PositionRepository for MockPositionRepository {
             redeem_holder_address: position.redeem_holder_address,
             redeem_resolution: position.redeem_resolution,
             redeem_gas_limit: position.redeem_gas_limit,
+            redeem_gas_paid_usd: None,
         };
         self.positions
             .lock()
@@ -715,6 +731,7 @@ impl PositionRepository for MockPositionRepository {
             failed_accounting_count: 0,
             largest_single_profit: Usd::ZERO,
             largest_single_loss: Usd::ZERO,
+            total_gas_paid: Usd::ZERO,
         })
     }
 }
@@ -780,6 +797,9 @@ impl TradeRepository for MockTradeRepository {
             reconcile_resolution: None,
             reconciled_at: None,
             reconcile_note: None,
+            pre_submit_ctf_balance: None,
+            reconcile_attempts: 0,
+            reconcile_defer_until: None,
             post_trade_claim_owner: None,
             post_trade_claimed_at: None,
             post_trade_attempts: 0,
@@ -984,6 +1004,135 @@ impl TradeRepository for MockTradeRepository {
         stale.sort_by_key(|trade| trade.submitted_at);
         stale.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
         Ok(stale)
+    }
+
+    async fn find_needs_reconcile(&self, limit: u64) -> Result<Vec<TradeInfo>, StorageError> {
+        let now = Utc::now();
+        let mut pending: Vec<_> = self
+            .trades
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|trade| {
+                trade.needs_reconcile
+                    && trade.reconcile_defer_until.is_none_or(|until| until <= now)
+            })
+            .cloned()
+            .collect();
+        pending.sort_by_key(|trade| trade.created_at);
+        pending.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
+        Ok(pending)
+    }
+
+    async fn count_blocking_trades(&self) -> Result<u64, StorageError> {
+        let count = self
+            .trades
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|trade| {
+                trade.state == TradeState::Submitted
+                    || trade.state == TradeState::Orphaned
+                    || trade.needs_reconcile
+            })
+            .count();
+        Ok(count as u64)
+    }
+
+    async fn count_competing_pending_reconcile(
+        &self,
+        market_id: &MarketId,
+        submitted_at: Option<chrono::DateTime<Utc>>,
+    ) -> Result<u64, StorageError> {
+        let count = self
+            .trades
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|trade| {
+                trade.needs_reconcile
+                    && trade.market_id == *market_id
+                    && submitted_at.is_none_or(|at| trade.submitted_at == Some(at))
+            })
+            .count();
+        Ok(count as u64)
+    }
+
+    async fn record_reconcile_defer(
+        &self,
+        trade_id: &TradeId,
+        defer_until: chrono::DateTime<Utc>,
+        note: &str,
+    ) -> Result<bool, StorageError> {
+        let note = note.to_owned();
+        Ok(self.mutate_trade(trade_id, |existing| {
+            existing.reconcile_defer_until = Some(defer_until);
+            existing.reconcile_attempts = existing.reconcile_attempts.saturating_add(1);
+            existing.reconcile_note = Some(note);
+            existing.updated_at = Utc::now();
+        }))
+    }
+
+    async fn set_pre_submit_ctf_balance(
+        &self,
+        trade_id: &TradeId,
+        balance: Shares,
+    ) -> Result<bool, StorageError> {
+        Ok(self.mutate_trade(trade_id, |existing| {
+            existing.pre_submit_ctf_balance = Some(balance);
+            existing.updated_at = Utc::now();
+        }))
+    }
+
+    async fn close_unresolvable_terminal(
+        &self,
+        trade_id: &TradeId,
+        note: &str,
+        _operator: &str,
+        closed_at: chrono::DateTime<Utc>,
+    ) -> Result<bool, StorageError> {
+        let note = note.to_owned();
+        Ok(self
+            .trades
+            .lock()
+            .unwrap()
+            .get_mut(&trade_id.to_string())
+            .is_some_and(|existing| {
+                if !existing.needs_reconcile {
+                    return false;
+                }
+                existing.state = TradeState::FailObserved;
+                existing.business_outcome = Some(TradeBusinessOutcome::Failed);
+                existing.needs_reconcile = false;
+                existing.reconcile_resolution = Some(TradeReconcileResolution::Unresolvable);
+                existing.reconcile_note = Some(note);
+                existing.reconciled_at = Some(closed_at);
+                existing.updated_at = closed_at;
+                true
+            }))
+    }
+
+    async fn mark_reconciled(
+        &self,
+        trade_id: &TradeId,
+        resolution: TradeReconcileResolution,
+        note: &str,
+        reconciled_at: chrono::DateTime<Utc>,
+    ) -> Result<bool, StorageError> {
+        let note = note.to_owned();
+        Ok(self
+            .trades
+            .lock()
+            .unwrap()
+            .get_mut(&trade_id.to_string())
+            .is_some_and(|existing| {
+                existing.needs_reconcile = false;
+                existing.reconcile_resolution = Some(resolution);
+                existing.reconcile_note = Some(note);
+                existing.reconciled_at = Some(reconciled_at);
+                existing.updated_at = reconciled_at;
+                true
+            }))
     }
 
     async fn find_by_id(&self, trade_id: &TradeId) -> Result<Option<TradeInfo>, StorageError> {

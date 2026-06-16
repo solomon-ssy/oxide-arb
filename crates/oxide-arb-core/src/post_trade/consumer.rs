@@ -2,7 +2,10 @@
 
 use crate::{
     bridge::risk_metrics::CoreRiskMetrics,
-    execution::{capital_manager::CapitalManager, fsm::ExecutionFSM},
+    execution::{
+        capital_manager::CapitalManager,
+        fsm::{EmergencyClass, ExecutionFSM},
+    },
     observability::{execution_audit::ExecutionAuditWriter, metrics_hub::MetricsHub},
     pipeline::market_registry::MarketRegistry,
     runtime_config::RuntimeConfigStore,
@@ -21,7 +24,7 @@ use oxide_arb_models::{
     enums::{
         common::{
             ExecutionMode, NegRiskRedeemRoute, RedeemResolutionSource, RedeemStatus, Side,
-            StandardRedeemRoute,
+            StandardRedeemRoute, TradeState,
         },
         risk::TradeAccountingPhase,
     },
@@ -81,8 +84,10 @@ impl PostTradeConsumer {
             .await
         {
             tracing::error!(%error, trade_id = %trade.trade_id, "post-trade fill accounting failed");
-            self.fsm
-                .enter_emergency("post-trade fill accounting failed");
+            self.fsm.enter_emergency(
+                crate::execution::fsm::EmergencyClass::PersistenceFault,
+                "post-trade fill accounting failed",
+            );
             self.metrics.post_trade_relay_failed.inc();
             return;
         }
@@ -95,36 +100,72 @@ impl PostTradeConsumer {
             }
         };
 
-        // The position created by *this* worker (if any); `None` on idempotent
-        // replay where the position already existed.
-        let mut opened_position = None;
-        if trade.state.is_success() {
-            match self.ensure_position(trade).await {
-                Ok(position) => opened_position = position,
-                Err(error) => {
-                    tracing::error!(%error, trade_id = %trade.trade_id, "position creation failed after fill");
-                    self.fsm.enter_emergency("position create failed");
-                    self.metrics.post_trade_relay_failed.inc();
-                    return;
-                }
-            }
-            let Some(snapshot) = &snapshot else {
-                self.fsm
-                    .enter_emergency("calibration outcome create failed");
-                self.metrics.post_trade_relay_failed.inc();
-                return;
-            };
-            if let Err(error) = self.ensure_calibration_outcome(trade, snapshot).await {
-                tracing::error!(%error, trade_id = %trade.trade_id, "calibration outcome creation failed after fill");
-                self.fsm
-                    .enter_emergency("calibration outcome create failed");
-                self.metrics.post_trade_relay_failed.inc();
-                return;
-            }
-        }
+        let Ok(opened_position) = self
+            .apply_success_side_effects(trade, snapshot.as_ref())
+            .await
+        else {
+            return;
+        };
 
         self.write_audit(trade, snapshot.as_ref());
 
+        if !self
+            .advance_trade_and_publish(trade, terminal, opened_position)
+            .await
+        {
+            return;
+        }
+
+        self.metrics_state.mark_stale();
+        if let Err(error) = self.metrics_refresh.refresh().await {
+            tracing::warn!(%error, "post-trade metrics refresh failed");
+        }
+    }
+
+    async fn apply_success_side_effects(
+        &self,
+        trade: &TradeInfo,
+        snapshot: Option<&ScoredOpportunitySnapshot>,
+    ) -> Result<Option<PositionInfo>, ()> {
+        if !trade.state.is_success() {
+            return Ok(None);
+        }
+        let opened_position = match self.ensure_position(trade).await {
+            Ok(position) => position,
+            Err(error) => {
+                tracing::error!(%error, trade_id = %trade.trade_id, "position creation failed after fill");
+                self.fsm
+                    .enter_emergency(EmergencyClass::PersistenceFault, "position create failed");
+                self.metrics.post_trade_relay_failed.inc();
+                return Err(());
+            }
+        };
+        let Some(snapshot) = snapshot else {
+            self.fsm.enter_emergency(
+                EmergencyClass::PersistenceFault,
+                "calibration outcome create failed",
+            );
+            self.metrics.post_trade_relay_failed.inc();
+            return Err(());
+        };
+        if let Err(error) = self.ensure_calibration_outcome(trade, snapshot).await {
+            tracing::error!(%error, trade_id = %trade.trade_id, "calibration outcome creation failed after fill");
+            self.fsm.enter_emergency(
+                EmergencyClass::PersistenceFault,
+                "calibration outcome create failed",
+            );
+            self.metrics.post_trade_relay_failed.inc();
+            return Err(());
+        }
+        Ok(opened_position)
+    }
+
+    async fn advance_trade_and_publish(
+        &self,
+        trade: &TradeInfo,
+        terminal: TradeState,
+        opened_position: Option<PositionInfo>,
+    ) -> bool {
         match self
             .trade_repo
             .advance_state(&trade.trade_id, trade.state, terminal)
@@ -135,10 +176,6 @@ impl PostTradeConsumer {
                     self.release_fill_reservation(trade);
                 }
                 self.metrics.post_trade_relay_processed.inc();
-                // Real-time push: only the worker that actually advanced the row
-                // emits, so at-least-once replay never double-publishes. A fill
-                // surfaces the terminal trade and, when this worker opened it,
-                // the new position.
                 if trade.state.is_success() {
                     self.events.publish(CoreEvent::TradeFilled(trade.clone()));
                     if let Some(position) = opened_position {
@@ -146,21 +183,21 @@ impl PostTradeConsumer {
                             .publish(CoreEvent::PositionChanged(PositionView::from(position)));
                     }
                 }
+                true
             }
             Ok(false) => {
                 tracing::debug!(trade_id = %trade.trade_id, "trade already advanced by another worker");
+                true
             }
             Err(error) => {
                 tracing::error!(%error, trade_id = %trade.trade_id, "trade state advance failed");
-                self.fsm.enter_emergency("trade state advance failed");
+                self.fsm.enter_emergency(
+                    crate::execution::fsm::EmergencyClass::PersistenceFault,
+                    "trade state advance failed",
+                );
                 self.metrics.post_trade_relay_failed.inc();
-                return;
+                false
             }
-        }
-
-        self.metrics_state.mark_stale();
-        if let Err(error) = self.metrics_refresh.refresh().await {
-            tracing::warn!(%error, "post-trade metrics refresh failed");
         }
     }
 
@@ -222,6 +259,7 @@ impl PostTradeConsumer {
             redeem_holder_address,
             redeem_resolution,
             redeem_gas_limit,
+            redeem_gas_paid_usd: None,
         };
         let created = self.position_repo.create(position).await?;
         Ok(Some(created))

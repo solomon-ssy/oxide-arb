@@ -407,6 +407,32 @@ fn validate_execution(config: &RuntimeConfig, report: &mut ConfigValidationRepor
             detail: "must be in [0, 1]".into(),
         });
     }
+
+    let reconcile = &execution.reconciliation;
+    if reconcile.backoff_base_secs == 0 || reconcile.backoff_max_secs == 0 {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "execution.reconciliation.backoff",
+            detail: "backoff_base_secs and backoff_max_secs must be > 0".into(),
+        });
+    }
+    if reconcile.backoff_base_secs > reconcile.backoff_max_secs {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "execution.reconciliation.backoff",
+            detail: "backoff_base_secs must be <= backoff_max_secs".into(),
+        });
+    }
+    if reconcile.min_miss_age_secs == 0 {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "execution.reconciliation.min_miss_age_secs",
+            detail: "must be > 0".into(),
+        });
+    }
+    if reconcile.min_fill_ratio <= Decimal::ZERO || reconcile.min_fill_ratio > Decimal::ONE {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "execution.reconciliation.min_fill_ratio",
+            detail: "must be in (0, 1]".into(),
+        });
+    }
 }
 
 fn validate_risk(config: &RuntimeConfig, report: &mut ConfigValidationReport) {
@@ -796,6 +822,12 @@ fn validate_settlement(config: &RuntimeConfig, report: &mut ConfigValidationRepo
             detail: "must be > 0".into(),
         });
     }
+    if redeem.matic_usd_price <= Decimal::ZERO {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "settlement.redeem.matic_usd_price",
+            detail: "must be > 0".into(),
+        });
+    }
 
     if let Some(standard) = &redeem.standard {
         if let Some(holder) = standard.holder_address.as_deref() {
@@ -857,6 +889,12 @@ fn validate_settlement_mode(
         report.errors.push(ConfigValidationError::InvalidValue {
             field: "settlement.redeem",
             detail: "Live mode requires at least one of standard or neg_risk class policy".into(),
+        });
+    }
+    if redeem.matic_usd_price <= Decimal::ZERO {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "settlement.redeem.matic_usd_price",
+            detail: "Live mode requires a positive MATIC/USD price for gas accounting".into(),
         });
     }
 }

@@ -11,7 +11,7 @@ use oxide_arb_models::{
         market::{MarketRegistryInfo, TokenInfo},
     },
     enums::{
-        common::{CategorySet, MarketCategory, TickSize},
+        common::{CategorySet, ExecutionMode, MarketCategory, TickSize},
         market::MarketStatus,
     },
     types::{EventId, ExecutionId, MarketId, Price, ReservationId, TokenId, Usd},
@@ -74,12 +74,15 @@ fn plan_neg_risk_from_market_registry() {
         market_id: opp.market_id.clone(),
     };
 
-    let plan = builder.build(
-        &opp,
-        Usd::new(dec!(20)),
-        &reservation,
-        ExecutionId::from_v7(),
-    );
+    let plan = builder
+        .build(
+            ExecutionMode::Paper,
+            &opp,
+            Usd::new(dec!(20)),
+            &reservation,
+            ExecutionId::from_v7(),
+        )
+        .expect("fee quote should succeed in paper mode");
     assert!(
         plan.neg_risk,
         "neg_risk market must propagate to execution plan"
@@ -98,12 +101,15 @@ fn plan_neg_risk_false_when_market_unknown() {
         market_id: opp.market_id.clone(),
     };
 
-    let plan = builder.build(
-        &opp,
-        Usd::new(dec!(20)),
-        &reservation,
-        ExecutionId::from_v7(),
-    );
+    let plan = builder
+        .build(
+            ExecutionMode::Paper,
+            &opp,
+            Usd::new(dec!(20)),
+            &reservation,
+            ExecutionId::from_v7(),
+        )
+        .expect("fee quote should succeed in paper mode");
     assert!(
         !plan.neg_risk,
         "unknown market must default neg_risk to false (fail-safe until Gamma sync)"
@@ -124,7 +130,15 @@ fn plan_shares_never_exceed_approved_notional() {
         market_id: opp.market_id.clone(),
     };
 
-    let plan = builder.build(&opp, approved, &reservation, ExecutionId::from_v7());
+    let plan = builder
+        .build(
+            ExecutionMode::Paper,
+            &opp,
+            approved,
+            &reservation,
+            ExecutionId::from_v7(),
+        )
+        .expect("fee quote should succeed in paper mode");
     let planned_notional = plan.shares * plan.limit_price;
 
     assert!(

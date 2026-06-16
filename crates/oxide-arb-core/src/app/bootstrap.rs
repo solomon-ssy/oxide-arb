@@ -1,6 +1,6 @@
 //! Application bootstrap — build subsystems and run the lifecycle.
 
-use crate::app::{AppContext, periodic_services, task_registry::AppRunner};
+use crate::app::{AppContext, task_registry::AppRunner};
 use oxide_arb_error::OxideResult;
 use oxide_arb_models::config::DeployConfig;
 use oxide_arb_repository::postgres::PgRiskAuditRepository;
@@ -12,9 +12,7 @@ use tokio_util::sync::CancellationToken;
 pub async fn run(deploy: Arc<DeployConfig>) -> OxideResult<()> {
     let shutdown = CancellationToken::new();
     let ctx = AppContext::build(deploy, shutdown.clone()).await?;
-    // Effective mode after restoring the persisted operational state.
-    let mode = ctx.execution_mode.current();
-    periodic_services::ensure_live_metrics_ready(mode, &ctx.risk.metrics_refresh).await?;
+    ctx.ensure_live_ready().await?;
     ctx.queue_runtime_tasks();
     ctx.queue_market_settlement_task();
     ctx.queue_risk_decision_audit_drain(Arc::new(PgRiskAuditRepository::new(
@@ -27,6 +25,7 @@ pub async fn run(deploy: Arc<DeployConfig>) -> OxideResult<()> {
     ctx.queue_control_factor_scheduler();
     ctx.queue_materialization_execute_worker();
 
+    let mode = ctx.execution_mode.current();
     let mut runner = AppRunner::for_mode(shutdown, mode);
     runner.absorb_pending_queue(&ctx.pending_tasks);
 

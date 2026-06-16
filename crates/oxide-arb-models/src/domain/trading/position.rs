@@ -65,6 +65,8 @@ pub struct PositionInfo {
     pub redeem_resolution: RedeemResolutionSource,
     /// Snapshotted at fill: gas limit for the redeem transaction.
     pub redeem_gas_limit: i64,
+    /// Actual gas cost (USD) paid on redeem, when known.
+    pub redeem_gas_paid_usd: Option<Usd>,
 }
 
 info_from_model!(PositionInfo, crate::entities::position::Model, {
@@ -76,6 +78,7 @@ info_from_model!(PositionInfo, crate::entities::position::Model, {
     settlement_accounting_status, settlement_accounting_error,
     settlement_accounted_at, redeem_terminal_reason,
     redeem_neg_risk, redeem_route, redeem_holder_address, redeem_resolution, redeem_gas_limit,
+    redeem_gas_paid_usd,
 });
 
 impl PositionInfo {
@@ -193,6 +196,7 @@ pub struct NewPosition {
     pub redeem_holder_address: Option<String>,
     pub redeem_resolution: RedeemResolutionSource,
     pub redeem_gas_limit: i64,
+    pub redeem_gas_paid_usd: Option<Usd>,
 }
 
 /// Fields that can change when a position is updated (add/reduce/close/settle).
@@ -219,6 +223,7 @@ pub struct PositionPatch {
     pub settlement_accounting_error: NullablePatch<String>,
     pub settlement_accounted_at: NullablePatch<DateTime<Utc>>,
     pub redeem_terminal_reason: NullablePatch<String>,
+    pub redeem_gas_paid_usd: NullablePatch<Usd>,
 }
 
 /// Atomic payload for closing the open-position lifecycle at market settlement.
@@ -242,6 +247,7 @@ pub struct MarkRedeemedParams {
     pub redeem_status: RedeemStatus,
     pub settlement_trigger: SettlementTrigger,
     pub redeem_terminal_reason: Option<String>,
+    pub redeem_gas_paid_usd: Option<Usd>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -257,6 +263,7 @@ pub struct SettledPositionStats {
     pub failed_accounting_count: u32,
     pub largest_single_profit: Usd,
     pub largest_single_loss: Usd,
+    pub total_gas_paid: Usd,
 }
 
 #[cfg(test)]

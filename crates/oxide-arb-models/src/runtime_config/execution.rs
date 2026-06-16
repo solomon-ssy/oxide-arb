@@ -16,6 +16,8 @@ use serde::{Deserialize, Serialize};
 pub struct ExecutionRuntimeConfig {
     /// Validation / dispatch / confirmation time budgets.
     pub timeout: TradeTimeoutConfig,
+    /// Unknown-venue-outcome reconciliation policy.
+    pub reconciliation: ReconciliationConfig,
     /// Rate-limited low-priority dispatch queue parameters.
     pub funnel: FunnelConfig,
     /// Multi-token → single-market scan dedup parameters.
@@ -70,6 +72,61 @@ const fn default_confirm_timeout() -> u64 {
 }
 const fn default_confirm_poll() -> u64 {
     2
+}
+
+// ── Reconciliation ───────────────────────────────────────────────────────────
+
+/// Policy for resolving unknown FOK venue outcomes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct ReconciliationConfig {
+    /// Base delay (seconds) for exponential backoff when evidence is insufficient.
+    #[schemars(extend("x-format" = "integer"))]
+    pub backoff_base_secs: u64,
+    /// Maximum defer delay (seconds) between reconciliation scans.
+    #[schemars(extend("x-format" = "integer"))]
+    pub backoff_max_secs: u64,
+    /// Minimum age (seconds) after submit before a proven-negative Miss is allowed.
+    #[schemars(extend("x-format" = "integer"))]
+    pub min_miss_age_secs: u64,
+    /// Minimum fill ratio (0..=1) for CTF delta evidence to count as filled.
+    #[schemars(with = "String", extend("x-format" = "decimal"))]
+    pub min_fill_ratio: Decimal,
+    /// CLOB trade lookback (seconds) before `submitted_at` for L2 matching.
+    #[schemars(extend("x-format" = "integer"))]
+    pub trade_lookback_secs: i64,
+}
+
+impl Default for ReconciliationConfig {
+    fn default() -> Self {
+        Self {
+            backoff_base_secs: default_reconcile_backoff_base_secs(),
+            backoff_max_secs: default_reconcile_backoff_max_secs(),
+            min_miss_age_secs: default_min_miss_age_secs(),
+            min_fill_ratio: default_min_fill_ratio(),
+            trade_lookback_secs: default_trade_lookback_secs(),
+        }
+    }
+}
+
+const fn default_reconcile_backoff_base_secs() -> u64 {
+    5
+}
+
+const fn default_reconcile_backoff_max_secs() -> u64 {
+    300
+}
+
+const fn default_min_miss_age_secs() -> u64 {
+    120
+}
+
+const fn default_min_fill_ratio() -> Decimal {
+    dec!(1)
+}
+
+const fn default_trade_lookback_secs() -> i64 {
+    5
 }
 
 // ── Funnel ───────────────────────────────────────────────────────────────────

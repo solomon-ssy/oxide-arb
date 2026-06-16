@@ -10,5 +10,5 @@
 //! the trade row is the single durable source of truth, replayed on restart.
 
 pub mod consumer;
-pub mod reconciliation_worker;
+pub mod reconciliation;
 pub mod relay;

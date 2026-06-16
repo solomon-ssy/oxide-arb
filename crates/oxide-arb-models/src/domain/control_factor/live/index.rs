@@ -226,9 +226,15 @@ impl MarketAnomalyIndex {
         let market = self.market_block(market_id);
         let event = self.event_block(event_id);
         let source = market.or(event);
+        let market_entry = self.blocked_markets.get(market_id);
+        let event_entry = self.blocked_events.get(event_id);
+        let manual_ack_required = market_entry
+            .is_some_and(|entry| entry.payload.manual_ack_required)
+            || event_entry.is_some_and(|entry| entry.payload.manual_ack_required);
         MarketAnomalyDecision {
             block_market: market.is_some(),
             block_event: event.is_some(),
+            manual_ack_required,
             reason_code: source.map(|entry| entry.payload.reason_code.clone()),
             source: source.map(|entry| {
                 AppliedControlFactor::new(

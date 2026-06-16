@@ -14,7 +14,10 @@ use crate::{
     blacklist::BlacklistManager,
     circuit_breaker::CircuitBreaker,
     clock::Clock,
-    context::{CircuitBreakerGate, ManualHaltGate, PreTradeContext, SettlementGateInput},
+    context::{
+        CircuitBreakerGate, ManualHaltGate, PreTradeContext, SettlementGateInput, SizedIntent,
+        SizedPreTradeInput,
+    },
     pipeline::{StaticRiskPipeline, build_default_pipeline},
     position::PotentialLossLedger,
     reconciliation::LedgerReconciler,
@@ -60,6 +63,7 @@ use oxide_arb_models::{
     types::{LedgerId, MarketId, OpportunityId, Usd},
 };
 use parking_lot::RwLock;
+use rust_decimal::Decimal;
 use std::{
     sync::Arc,
     time::{Duration, Instant},
@@ -171,6 +175,7 @@ where
             factor_context,
             settlement_gate,
             now,
+            sized_intent: None,
         };
         let metrics_split = pipeline.metrics_split_index();
         let mut gate_report = pipeline.evaluate_range(&phase1_ctx, mode, 0, metrics_split);
@@ -256,6 +261,86 @@ where
             opp.opportunity_id.clone(),
             opp.market_id.clone(),
             mode,
+        );
+        decision
+    }
+
+    /// Post-Kelly exposure gates using the sized intent (bet + fee).
+    #[must_use]
+    #[inline]
+    pub fn pre_trade_check_sized<M: RiskMetrics>(
+        &self,
+        input: &SizedPreTradeInput<'_, M>,
+    ) -> RiskDecision {
+        let eval_start = Instant::now();
+        let now = self.clock.now();
+        let version = self.state_version.load();
+        let snap = self.risk_snapshot.load();
+        let params = self.params.load();
+        let pipeline = &params.pipeline;
+        let metrics_snap = input.metrics.snapshot_for(&input.opportunity.market_id);
+
+        let ctx = PreTradeContext {
+            opportunity: input.opportunity,
+            probability: ProbabilityInput {
+                calibrated_win_prob: input.opportunity.calibration.fused_probability,
+                fill_prob: Decimal::ONE,
+                calibration_confidence: input.opportunity.meta.confidence,
+                sample_size: input.opportunity.calibration.sample_size,
+                model_staleness_secs: 0,
+                expected_slippage_pct: Decimal::ZERO,
+                expected_failure_cost_pct: Decimal::ZERO,
+            },
+            snap: &snap,
+            metrics: metrics_snap,
+            factor_context: input.factor_context,
+            settlement_gate: input.settlement_gate,
+            now,
+            sized_intent: Some(SizedIntent {
+                bet_usd: input.approved_size,
+                fee_usd: input.approved_fee,
+            }),
+        };
+
+        let gate_report = pipeline.evaluate_sized_gates(&ctx, input.mode);
+        let (allowed, denial_reason) = if gate_report.has_failed_hard_gate {
+            let denial_reason = gate_report.results.iter().find(|c| !c.passed).map(|c| {
+                format!(
+                    "{}: {}",
+                    c.check_id,
+                    c.detail.as_deref().unwrap_or("failed")
+                )
+            });
+            (false, denial_reason)
+        } else {
+            (true, None)
+        };
+
+        let trace = RiskDecisionTrace {
+            check_results: gate_report.results,
+            sizing_breakdown: None,
+            state_version: version,
+            total_elapsed_us: ToPrimitive::to_u64(&eval_start.elapsed().as_micros())
+                .unwrap_or(u64::MAX),
+            evaluated_at: now,
+        };
+
+        let decision = RiskDecision {
+            allowed,
+            denial_reason,
+            recommended_size: None,
+            drawdown_factor: ctx.drawdown_factor(),
+            evaluated_at: now,
+            state_version: version,
+            trace,
+        };
+
+        self.enqueue_pre_trade_audit(
+            allowed,
+            &decision.trace,
+            input.opportunity.opportunity_id.clone(),
+            input.opportunity.market_id.clone(),
+            input.mode,
         );
         decision
     }

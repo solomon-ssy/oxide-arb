@@ -54,6 +54,12 @@ pub struct Model {
     /// Human-readable operator/worker note explaining the reconciliation result.
     #[sea_orm(column_type = "Text", nullable)]
     pub reconcile_note: Option<String>,
+    /// CTF token balance snapshot taken immediately before venue submit (Live).
+    pub pre_submit_ctf_balance: Option<Shares>,
+    /// Number of deferrals while reconciliation evidence was insufficient.
+    pub reconcile_attempts: i32,
+    /// Earliest time the reconciliation worker should re-scan this row.
+    pub reconcile_defer_until: Option<DateTime<Utc>>,
     /// Current relay lease owner for `*_processing` rows.
     #[sea_orm(column_type = "Text", nullable)]
     pub post_trade_claim_owner: Option<String>,

@@ -34,9 +34,9 @@ use oxide_arb_risk::{
     pipeline::{
         RiskCheck, build_default_pipeline,
         checks::{
-            BlacklistCheck, CircuitBreakerCheck, ControlFactorSnapshotExpiredCheck,
-            ManualHaltCheck, MarketAnomalyBlockCheck, ReconciliationMaintenanceCheck,
-            RedeemRouteResolvableCheck, TokenBlacklistCheck,
+            BlacklistCheck, CircuitBreakerCheck, ControlFactorManualAckRequiredCheck,
+            ControlFactorSnapshotExpiredCheck, ManualHaltCheck, MarketAnomalyBlockCheck,
+            ReconciliationMaintenanceCheck, RedeemRouteResolvableCheck, TokenBlacklistCheck,
         },
     },
     sizing::MultiConstraintSizer,
@@ -79,6 +79,7 @@ impl TestFrame {
             factor_context: None,
             settlement_gate: SettlementGateInput::default(),
             now: Utc::now(),
+            sized_intent: None,
         }
     }
 }
@@ -237,6 +238,7 @@ async fn pipeline_check_order_golden_test() {
         RiskCheckId::TokenBlacklist,
         RiskCheckId::MarketAnomalyBlock,
         RiskCheckId::ReconciliationMaintenance,
+        RiskCheckId::ControlFactorManualAckRequired,
         RiskCheckId::ControlFactorSnapshotExpired,
         RiskCheckId::RedeemRouteResolvable,
         RiskCheckId::MetricsFreshness,
@@ -265,8 +267,8 @@ async fn pipeline_check_order_golden_test() {
 
     assert_eq!(
         check_ids.len(),
-        30,
-        "expected exactly 30 checks, got {}",
+        31,
+        "expected exactly 31 checks, got {}",
         check_ids.len()
     );
     assert_eq!(check_ids, expected, "pipeline check order mismatch");
@@ -399,17 +401,17 @@ impl TestRiskPipeline {
 #[test]
 fn static_pipeline_check_order_matches_golden() {
     let pipeline = build_default_pipeline(&RiskConfig::default());
-    assert_eq!(pipeline.check_order().len(), 30);
+    assert_eq!(pipeline.check_order().len(), 31);
 }
 
 #[test]
 fn metrics_split_index_matches_check_order() {
     let pipeline = build_default_pipeline(&RiskConfig::default());
 
-    // Eight phase-1 gates now precede MetricsFreshness: halt, circuit breaker,
+    // Nine phase-1 gates now precede MetricsFreshness: halt, circuit breaker,
     // blacklist, token blacklist, market-anomaly block, reconciliation maintenance,
-    // control-factor snapshot expiry, redeem route resolvable.
-    assert_eq!(pipeline.metrics_split_index(), 8);
+    // control-factor manual ack, control-factor snapshot expiry, redeem route resolvable.
+    assert_eq!(pipeline.metrics_split_index(), 9);
 
     assert!(!ManualHaltCheck.requires_metrics());
     assert!(!CircuitBreakerCheck.requires_metrics());
@@ -423,13 +425,13 @@ fn metrics_split_index_matches_check_order() {
         assert_eq!(*id, *expected_id);
     }
 
-    for (id, needs_metrics) in profile.iter().take(8) {
+    for (id, needs_metrics) in profile.iter().take(9) {
         assert!(
             !needs_metrics,
             "{id} must not require live metrics (phase-1 halt/CB/blacklist/factor gates)"
         );
     }
-    for (id, needs_metrics) in profile.iter().skip(8) {
+    for (id, needs_metrics) in profile.iter().skip(9) {
         if *id == RiskCheckId::FeeSpend {
             assert!(
                 !needs_metrics,
@@ -531,7 +533,7 @@ fn full_report_evaluates_all_checks() {
 fn static_pipeline_has_fixed_checks() {
     let pipeline = build_default_pipeline(&RiskConfig::default());
     assert!(!pipeline.is_empty());
-    assert_eq!(pipeline.len(), 30);
+    assert_eq!(pipeline.len(), 31);
 }
 
 // ── Control-factor named gates + sizer caps (Phase 5.6) ────────────────────
@@ -559,6 +561,7 @@ fn ctx_with_factors<'a>(
         factor_context: Some(factor_context),
         settlement_gate: SettlementGateInput::default(),
         now: Utc::now(),
+        sized_intent: None,
     }
 }
 
@@ -569,6 +572,7 @@ fn market_anomaly_block_check_is_named_hard_reject() {
         market_anomaly: MarketAnomalyDecision {
             block_market: true,
             block_event: false,
+            manual_ack_required: false,
             reason_code: Some("oracle_mismatch".into()),
             source: Some(applied(ControlFactorType::MarketAnomaly)),
         },
@@ -625,6 +629,22 @@ fn control_factor_snapshot_expired_check_is_named_hard_reject() {
     };
     let ctx = ctx_with_factors(&frame, &neutral);
     assert!(ControlFactorSnapshotExpiredCheck.evaluate(&ctx).passed);
+}
+
+#[test]
+fn control_factor_manual_ack_required_check_is_named_hard_reject() {
+    let frame = default_frame();
+    let factor_context = FactorDecisionContext {
+        reconciliation_health: ReconciliationHealthDecision {
+            require_manual_ack: true,
+            ..ReconciliationHealthDecision::default()
+        },
+        ..FactorDecisionContext::neutral()
+    };
+    let ctx = ctx_with_factors(&frame, &factor_context);
+    let result = ControlFactorManualAckRequiredCheck.evaluate(&ctx);
+    assert!(!result.passed);
+    assert_eq!(result.check_id, RiskCheckId::ControlFactorManualAckRequired);
 }
 
 #[test]

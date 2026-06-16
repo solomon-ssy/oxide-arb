@@ -5037,6 +5037,7 @@ dependencies = [
  "sea-orm",
  "serde",
  "serde_json",
+ "serde_repr",
  "sha2",
  "strum 0.28.0",
  "teloxide",

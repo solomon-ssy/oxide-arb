@@ -113,10 +113,21 @@ fn map_post_order_response(
     };
     let status = if !resp.success || filled_shares.inner() <= Decimal::ZERO {
         OrderStatus::Rejected
-    } else if order_type == OrderType::Fok
-        || order_amount
+    } else if order_type == OrderType::Fok {
+        if order_amount
             .as_shares()
             .is_some_and(|shares| filled_shares >= shares)
+            || order_amount
+                .as_usd()
+                .is_some_and(|usd| cash_amount >= usd.inner())
+        {
+            OrderStatus::Filled
+        } else {
+            OrderStatus::PartiallyFilled
+        }
+    } else if order_amount
+        .as_shares()
+        .is_some_and(|shares| filled_shares >= shares)
         || order_amount
             .as_usd()
             .is_some_and(|usd| cash_amount >= usd.inner())

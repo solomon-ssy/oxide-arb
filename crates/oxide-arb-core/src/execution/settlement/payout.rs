@@ -8,12 +8,13 @@ pub fn compute_settlement_economics(
     shares: Shares,
     total_cost_usd: Usd,
     total_fees_usd: Usd,
+    gas_paid_usd: Usd,
     position_token_id: &TokenId,
     winning_token_id: &TokenId,
 ) -> SettlementEconomics {
     let won = position_token_id == winning_token_id;
     let payout_usd = if won { shares * Price::ONE } else { Usd::ZERO };
-    let realized_pnl_usd = payout_usd - total_cost_usd - total_fees_usd;
+    let realized_pnl_usd = payout_usd - total_cost_usd - total_fees_usd - gas_paid_usd;
 
     SettlementEconomics {
         won,

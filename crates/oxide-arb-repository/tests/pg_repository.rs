@@ -485,6 +485,7 @@ async fn position_lifecycle() {
             redeem_holder_address: None,
             redeem_resolution: RedeemResolutionSource::ClassStandard,
             redeem_gas_limit: 500_000,
+            redeem_gas_paid_usd: None,
         })
         .await
         .expect("create position");
@@ -554,6 +555,7 @@ async fn position_settle() {
             redeem_holder_address: None,
             redeem_resolution: RedeemResolutionSource::ClassStandard,
             redeem_gas_limit: 500_000,
+            redeem_gas_paid_usd: None,
         })
         .await
         .expect("create position");
@@ -971,6 +973,7 @@ async fn seed_open_position(
             redeem_holder_address: None,
             redeem_resolution: RedeemResolutionSource::ClassStandard,
             redeem_gas_limit: 500_000,
+            redeem_gas_paid_usd: None,
         })
         .await
         .expect("create position")

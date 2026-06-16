@@ -237,6 +237,7 @@ async fn seed_ledger_rows(pool: &PostgresPool) {
             redeem_holder_address: None,
             redeem_resolution: RedeemResolutionSource::ClassStandard,
             redeem_gas_limit: 500_000,
+            redeem_gas_paid_usd: None,
         })
         .await
         .expect("create paper position");
@@ -273,6 +274,7 @@ async fn seed_ledger_rows(pool: &PostgresPool) {
             redeem_holder_address: None,
             redeem_resolution: RedeemResolutionSource::ClassStandard,
             redeem_gas_limit: 500_000,
+            redeem_gas_paid_usd: None,
         })
         .await
         .expect("create live position");

@@ -139,6 +139,7 @@ mod tests {
             redeem_holder_address: None,
             redeem_resolution: RedeemResolutionSource::ClassStandard,
             redeem_gas_limit: 500_000,
+            redeem_gas_paid_usd: None,
         }
     }
 

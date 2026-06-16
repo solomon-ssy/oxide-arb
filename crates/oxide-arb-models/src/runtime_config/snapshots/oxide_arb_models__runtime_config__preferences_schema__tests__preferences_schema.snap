@@ -1,6 +1,5 @@
 ---
 source: crates/oxide-arb-models/src/runtime_config/preferences_schema.rs
-assertion_line: 248
 expression: view
 ---
 {
@@ -1088,6 +1087,35 @@ expression: view
       }
     },
     {
+      "path": "execution.reconciliation.backoff_base_secs",
+      "group": "execution",
+      "order": 320,
+      "label": {
+        "kind": "localized",
+        "locales": {
+          "en-US": "Reconciliation backoff base (seconds)",
+          "zh-CN": "对账退避基数 (秒)"
+        }
+      },
+      "help": {
+        "kind": "localized",
+        "locales": {
+          "en-US": "Base delay (seconds) for exponential backoff when reconciliation evidence is insufficient. Default: `5`.",
+          "zh-CN": "证据不足时对账退避的基数 (秒)。默认：5。"
+        }
+      },
+      "value_type": "number",
+      "format": "integer",
+      "widget": "integer",
+      "default": 5,
+      "description": "Base delay (seconds) for exponential backoff when evidence is insufficient.",
+      "money_critical": false,
+      "sensitive": false,
+      "constraints": {
+        "minimum": 0.0
+      }
+    },
+    {
       "path": "execution.timeout.dispatcher_timeout_ms",
       "group": "execution",
       "order": 320,
@@ -1110,6 +1138,64 @@ expression: view
       "widget": "duration_ms",
       "default": 30000,
       "description": "Hard-kill timeout (ms) for execution dispatch (FOK order round trip).\nDefault: `30000`.",
+      "money_critical": false,
+      "sensitive": false,
+      "constraints": {
+        "minimum": 0.0
+      }
+    },
+    {
+      "path": "execution.reconciliation.backoff_max_secs",
+      "group": "execution",
+      "order": 325,
+      "label": {
+        "kind": "localized",
+        "locales": {
+          "en-US": "Reconciliation backoff maximum (seconds)",
+          "zh-CN": "对账退避上限 (秒)"
+        }
+      },
+      "help": {
+        "kind": "localized",
+        "locales": {
+          "en-US": "Maximum defer delay (seconds) between reconciliation scans. Default: `300`.",
+          "zh-CN": "对账扫描之间的最大延迟 (秒)。默认：300。"
+        }
+      },
+      "value_type": "number",
+      "format": "integer",
+      "widget": "integer",
+      "default": 300,
+      "description": "Maximum defer delay (seconds) between reconciliation scans.",
+      "money_critical": false,
+      "sensitive": false,
+      "constraints": {
+        "minimum": 0.0
+      }
+    },
+    {
+      "path": "execution.reconciliation.min_miss_age_secs",
+      "group": "execution",
+      "order": 330,
+      "label": {
+        "kind": "localized",
+        "locales": {
+          "en-US": "Minimum miss evidence age (seconds)",
+          "zh-CN": "Miss 证据最小年龄 (秒)"
+        }
+      },
+      "help": {
+        "kind": "localized",
+        "locales": {
+          "en-US": "Minimum age (seconds) after submit before a proven-negative Miss is allowed. Default: `120`.",
+          "zh-CN": "允许判定 Miss 的最小提交后等待时间 (秒)。默认：120。"
+        }
+      },
+      "value_type": "number",
+      "format": "integer",
+      "widget": "integer",
+      "default": 120,
+      "description": "Minimum age (seconds) after submit before a proven-negative Miss is allowed.",
       "money_critical": false,
       "sensitive": false,
       "constraints": {
@@ -1140,6 +1226,58 @@ expression: view
       "default": "50",
       "description": "Max price slippage between detection and validation (bps). Exceeding\nthis rejects the trade. Default: `50`.",
       "money_critical": true,
+      "sensitive": false
+    },
+    {
+      "path": "execution.reconciliation.min_fill_ratio",
+      "group": "execution",
+      "order": 335,
+      "label": {
+        "kind": "localized",
+        "locales": {
+          "en-US": "Minimum CTF fill ratio",
+          "zh-CN": "CTF 最小成交比例"
+        }
+      },
+      "help": {
+        "kind": "localized",
+        "locales": {
+          "en-US": "Minimum fill ratio (0..=1) for CTF balance-delta evidence to count as filled. Default: `1`.",
+          "zh-CN": "CTF 余额增量视为成交所需的最小比例 (0..=1)。默认：1。"
+        }
+      },
+      "value_type": "string",
+      "format": "decimal",
+      "widget": "decimal_string",
+      "default": "1",
+      "description": "Minimum fill ratio (0..=1) for CTF delta evidence to count as filled.",
+      "money_critical": false,
+      "sensitive": false
+    },
+    {
+      "path": "execution.reconciliation.trade_lookback_secs",
+      "group": "execution",
+      "order": 340,
+      "label": {
+        "kind": "localized",
+        "locales": {
+          "en-US": "CLOB trade lookback (seconds)",
+          "zh-CN": "CLOB 成交回溯 (秒)"
+        }
+      },
+      "help": {
+        "kind": "localized",
+        "locales": {
+          "en-US": "CLOB trade lookback (seconds) before `submitted_at` for L2 matching. Default: `5`.",
+          "zh-CN": "L2 匹配时在 submitted_at 之前回溯 CLOB 成交的秒数。默认：5。"
+        }
+      },
+      "value_type": "number",
+      "format": "integer",
+      "widget": "integer",
+      "default": 5,
+      "description": "CLOB trade lookback (seconds) before `submitted_at` for L2 matching.",
+      "money_critical": false,
       "sensitive": false
     },
     {
@@ -3411,6 +3549,32 @@ expression: view
       "constraints": {
         "minimum": 0.0
       }
+    },
+    {
+      "path": "settlement.redeem.matic_usd_price",
+      "group": "settlement",
+      "order": 1100,
+      "label": {
+        "kind": "localized",
+        "locales": {
+          "en-US": "MATIC/USD price",
+          "zh-CN": "MATIC/USD 价格"
+        }
+      },
+      "help": {
+        "kind": "localized",
+        "locales": {
+          "en-US": "MATIC/USD price for converting on-chain redeem gas to USD in Live settlement PnL. Default: `0.5`.",
+          "zh-CN": "Live 结算中将链上赎回 Gas 换算为 USD 的 MATIC/USD 价格。默认：0.5。"
+        }
+      },
+      "value_type": "string",
+      "format": "decimal",
+      "widget": "decimal_string",
+      "default": "0.5",
+      "description": "MATIC/USD price for converting on-chain gas to USD in Live settlement.",
+      "money_critical": true,
+      "sensitive": false
     },
     {
       "path": "settlement.redeem.neg_risk.holder_address",

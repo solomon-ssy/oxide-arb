@@ -1,7 +1,7 @@
 use oxide_arb_models::{
     enums::common::ExecutionMode,
     runtime_config::ResolvedRedeemPlan,
-    types::{MarketId, TokenId},
+    types::{MarketId, TokenId, Usd},
 };
 
 #[derive(Debug, Clone)]
@@ -19,6 +19,8 @@ pub struct RedeemRequest {
 pub struct RedeemOutcome {
     pub tx_hash: Option<String>,
     pub simulated: bool,
+    /// Gas cost in USD when redeem was executed on-chain.
+    pub gas_paid_usd: Option<Usd>,
 }
 
 impl RedeemOutcome {
@@ -27,6 +29,7 @@ impl RedeemOutcome {
         Self {
             tx_hash: None,
             simulated: true,
+            gas_paid_usd: Some(Usd::ZERO),
         }
     }
 
@@ -38,14 +41,16 @@ impl RedeemOutcome {
                 condition_id.as_str().trim_start_matches("0x")
             )),
             simulated: true,
+            gas_paid_usd: Some(Usd::ZERO),
         }
     }
 
     #[must_use]
-    pub const fn live(tx_hash: String) -> Self {
+    pub const fn live(tx_hash: String, gas_paid_usd: Option<Usd>) -> Self {
         Self {
             tx_hash: Some(tx_hash),
             simulated: false,
+            gas_paid_usd,
         }
     }
 }

@@ -12,6 +12,8 @@ use crate::{
     },
     types::MarketId,
 };
+use rust_decimal::Decimal;
+use rust_decimal_macros::dec;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -120,6 +122,9 @@ pub struct RedeemRoutingPolicy {
     /// Gas limit for redeem transactions. Default: `500000`.
     #[schemars(extend("x-format" = "integer"))]
     pub gas_limit: u64,
+    /// MATIC/USD price for converting on-chain gas to USD in Live settlement.
+    #[schemars(with = "String", extend("x-format" = "decimal", "x-money-critical" = true))]
+    pub matic_usd_price: Decimal,
 }
 
 impl Default for RedeemRoutingPolicy {
@@ -129,6 +134,7 @@ impl Default for RedeemRoutingPolicy {
             neg_risk: Some(NegRiskRedeemPolicy::default()),
             overrides: HashMap::new(),
             gas_limit: default_redeem_gas_limit(),
+            matic_usd_price: default_matic_usd_price(),
         }
     }
 }
@@ -241,4 +247,8 @@ const fn default_dedup_window_secs() -> u64 {
 
 const fn default_redeem_gas_limit() -> u64 {
     500_000
+}
+
+const fn default_matic_usd_price() -> Decimal {
+    dec!(0.5)
 }

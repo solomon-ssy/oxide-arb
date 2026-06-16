@@ -14,6 +14,7 @@ use alloy::{
     network::EthereumWallet,
     primitives::{Address, FixedBytes, U256},
     providers::ProviderBuilder,
+    rpc::types::TransactionReceipt,
     signers::Signer,
     sol,
 };
@@ -26,7 +27,7 @@ use oxide_arb_models::{
     },
     enums::common::{ExecutionMode, ResolvedRedeemRoute},
     runtime_config::{RedeemRoutingPolicy, ResolvedRedeemPlan},
-    types::{Shares, TokenId},
+    types::{Shares, TokenId, Usd},
 };
 use rust_decimal::Decimal;
 use std::{str::FromStr, sync::Arc};
@@ -285,7 +286,10 @@ impl CtfRedeemClient {
             });
         }
 
-        Ok(RedeemOutcome::live(tx_hash))
+        Ok(RedeemOutcome::live(
+            tx_hash,
+            gas_paid_usd_from_receipt(&receipt, self.redeem.load().policy.matic_usd_price),
+        ))
     }
 
     async fn redeem_neg_risk_legacy(
@@ -352,8 +356,24 @@ impl CtfRedeemClient {
                 reason: "receipt status false".into(),
             });
         }
-        Ok(RedeemOutcome::live(tx_hash))
+        Ok(RedeemOutcome::live(
+            tx_hash,
+            gas_paid_usd_from_receipt(&receipt, self.redeem.load().policy.matic_usd_price),
+        ))
     }
+}
+
+fn gas_paid_usd_from_receipt(
+    receipt: &TransactionReceipt,
+    matic_usd_price: Decimal,
+) -> Option<Usd> {
+    if matic_usd_price <= Decimal::ZERO {
+        return None;
+    }
+    let gas_used = Decimal::from(receipt.gas_used);
+    let gas_price = Decimal::from(receipt.effective_gas_price);
+    let matic_cost = gas_used * gas_price / Decimal::from(10u64.pow(18));
+    Some(Usd::new(matic_cost * matic_usd_price))
 }
 
 fn parse_constant_address(value: &str) -> Result<Address, RedeemError> {

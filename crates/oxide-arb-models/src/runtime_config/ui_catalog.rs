@@ -51,6 +51,7 @@ fn build_fields_execution() -> Vec<FieldUiEntry> {
     out.extend(build_fields_execution_coalescer());
     out.extend(build_fields_execution_endgame_latency());
     out.extend(build_fields_execution_funnel());
+    out.extend(build_fields_execution_reconciliation());
     out.extend(build_fields_execution_timeout());
     out
 }
@@ -661,6 +662,84 @@ fn build_fields_execution_timeout() -> Vec<FieldUiEntry> {
                 zh = "成交确认总超时 (秒)。默认：60。"
             ),
             order: 350,
+            widget: Some(FieldWidget::Integer),
+            semantics: None,
+            visible: true,
+        },
+    ]
+}
+
+/// Fields: `execution.reconciliation.backoff_base_secs … execution.reconciliation.trade_lookback_secs`.
+fn build_fields_execution_reconciliation() -> Vec<FieldUiEntry> {
+    vec![
+        FieldUiEntry {
+            path: "execution.reconciliation.backoff_base_secs",
+            label: ui_text!(
+                en = "Reconciliation backoff base (seconds)",
+                zh = "对账退避基数 (秒)"
+            ),
+            help: ui_text!(
+                en = "Base delay (seconds) for exponential backoff when reconciliation evidence is insufficient. Default: `5`.",
+                zh = "证据不足时对账退避的基数 (秒)。默认：5。"
+            ),
+            order: 320,
+            widget: Some(FieldWidget::Integer),
+            semantics: None,
+            visible: true,
+        },
+        FieldUiEntry {
+            path: "execution.reconciliation.backoff_max_secs",
+            label: ui_text!(
+                en = "Reconciliation backoff maximum (seconds)",
+                zh = "对账退避上限 (秒)"
+            ),
+            help: ui_text!(
+                en = "Maximum defer delay (seconds) between reconciliation scans. Default: `300`.",
+                zh = "对账扫描之间的最大延迟 (秒)。默认：300。"
+            ),
+            order: 325,
+            widget: Some(FieldWidget::Integer),
+            semantics: None,
+            visible: true,
+        },
+        FieldUiEntry {
+            path: "execution.reconciliation.min_miss_age_secs",
+            label: ui_text!(
+                en = "Minimum miss evidence age (seconds)",
+                zh = "Miss 证据最小年龄 (秒)"
+            ),
+            help: ui_text!(
+                en = "Minimum age (seconds) after submit before a proven-negative Miss is allowed. Default: `120`.",
+                zh = "允许判定 Miss 的最小提交后等待时间 (秒)。默认：120。"
+            ),
+            order: 330,
+            widget: Some(FieldWidget::Integer),
+            semantics: None,
+            visible: true,
+        },
+        FieldUiEntry {
+            path: "execution.reconciliation.min_fill_ratio",
+            label: ui_text!(en = "Minimum CTF fill ratio", zh = "CTF 最小成交比例"),
+            help: ui_text!(
+                en = "Minimum fill ratio (0..=1) for CTF balance-delta evidence to count as filled. Default: `1`.",
+                zh = "CTF 余额增量视为成交所需的最小比例 (0..=1)。默认：1。"
+            ),
+            order: 335,
+            widget: Some(FieldWidget::DecimalString),
+            semantics: None,
+            visible: true,
+        },
+        FieldUiEntry {
+            path: "execution.reconciliation.trade_lookback_secs",
+            label: ui_text!(
+                en = "CLOB trade lookback (seconds)",
+                zh = "CLOB 成交回溯 (秒)"
+            ),
+            help: ui_text!(
+                en = "CLOB trade lookback (seconds) before `submitted_at` for L2 matching. Default: `5`.",
+                zh = "L2 匹配时在 submitted_at 之前回溯 CLOB 成交的秒数。默认：5。"
+            ),
+            order: 340,
             widget: Some(FieldWidget::Integer),
             semantics: None,
             visible: true,
@@ -1854,6 +1933,18 @@ fn build_fields_settlement_redeem() -> Vec<FieldUiEntry> {
             ),
             order: 1090,
             widget: None,
+            semantics: None,
+            visible: true,
+        },
+        FieldUiEntry {
+            path: "settlement.redeem.matic_usd_price",
+            label: ui_text!(en = "MATIC/USD price", zh = "MATIC/USD 价格"),
+            help: ui_text!(
+                en = "MATIC/USD price for converting on-chain redeem gas to USD in Live settlement PnL. Default: `0.5`.",
+                zh = "Live 结算中将链上赎回 Gas 换算为 USD 的 MATIC/USD 价格。默认：0.5。"
+            ),
+            order: 1100,
+            widget: Some(FieldWidget::DecimalString),
             semantics: None,
             visible: true,
         },

@@ -66,6 +66,14 @@ impl CapitalManager {
         self.backend.pin_for_reconciliation_sync(&handle.id)
     }
 
+    pub fn resize_sync(
+        &self,
+        handle: &ReservationHandle,
+        new_amount: Usd,
+    ) -> Result<(), ReservationError> {
+        self.backend.resize_sync(&handle.id, new_amount)
+    }
+
     pub fn reserve(
         &self,
         market_id: &MarketId,

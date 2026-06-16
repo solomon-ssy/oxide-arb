@@ -46,6 +46,9 @@ pub enum Trade {
     ReconcileResolution,
     ReconciledAt,
     ReconcileNote,
+    PreSubmitCtfBalance,
+    ReconcileAttempts,
+    ReconcileDeferUntil,
     PostTradeClaimOwner,
     PostTradeClaimedAt,
     PostTradeAttempts,
@@ -59,6 +62,10 @@ pub enum Trade {
 }
 
 pub fn table() -> TableCreateStatement {
+    trade_table_tail_columns(trade_table_core_columns(trade_table_head()))
+}
+
+fn trade_table_head() -> TableCreateStatement {
     Table::create()
         .table(Trade::Table)
         .if_not_exists()
@@ -92,6 +99,11 @@ pub fn table() -> TableCreateStatement {
                 .not_null(),
         )
         .col(ColumnDef::new(Trade::Category).text().not_null())
+        .to_owned()
+}
+
+fn trade_table_core_columns(mut table: TableCreateStatement) -> TableCreateStatement {
+    table
         .col(
             ColumnDef::new(Trade::NeedsReconcile)
                 .boolean()
@@ -105,6 +117,27 @@ pub fn table() -> TableCreateStatement {
                 .null(),
         )
         .col(ColumnDef::new(Trade::ReconcileNote).text().null())
+        .col(
+            ColumnDef::new(Trade::PreSubmitCtfBalance)
+                .decimal_len(38, 18)
+                .null(),
+        )
+        .col(
+            ColumnDef::new(Trade::ReconcileAttempts)
+                .integer()
+                .not_null()
+                .default(0),
+        )
+        .col(
+            ColumnDef::new(Trade::ReconcileDeferUntil)
+                .timestamp_with_time_zone()
+                .null(),
+        )
+        .to_owned()
+}
+
+fn trade_table_tail_columns(mut table: TableCreateStatement) -> TableCreateStatement {
+    table
         .col(ColumnDef::new(Trade::PostTradeClaimOwner).text().null())
         .col(
             ColumnDef::new(Trade::PostTradeClaimedAt)

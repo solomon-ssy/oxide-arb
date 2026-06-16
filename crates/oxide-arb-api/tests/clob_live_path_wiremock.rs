@@ -101,7 +101,6 @@ async fn live_fok_miss() {
         ExecutionMode::Live,
         Instant::now(),
         &fee_calculator,
-        plan.category,
         &plan.token_id,
     );
     assert!(matches!(outcome, ExecutionOutcome::Miss { .. }));

@@ -1015,6 +1015,8 @@ fn execution_bench_setup() -> (
             runtime_config: Arc::new(RuntimeConfigStore::new(RuntimeConfig::default())),
             factors: Arc::new(FactorSnapshotStore::new(Utc::now())),
             shadow_writer: None,
+            ctf_redeem: None,
+            holder_address: String::new(),
         });
 
         (pipeline, scored, trade_repo, fsm)

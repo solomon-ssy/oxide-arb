@@ -237,6 +237,34 @@ impl InMemoryExposureReservation {
         self.confirm_sync(id)
     }
 
+    /// Adjust a pinned reservation to a new amount (partial-fill reconciliation).
+    pub fn resize_sync(&self, id: &ReservationId, new_amount: Usd) -> Result<(), ReservationError> {
+        let new_cents = Self::usd_to_cents(new_amount)?;
+        let mut entry = self
+            .reservations
+            .get_mut(id)
+            .ok_or_else(|| ReservationError::NotFound { id: id.to_string() })?;
+        let old_cents = entry.amount_cents;
+        if new_cents == old_cents {
+            return Ok(());
+        }
+        if new_cents > old_cents {
+            return Err(ReservationError::Backend(
+                "resize cannot increase reservation amount".into(),
+            ));
+        }
+        let delta = old_cents - new_cents;
+        entry.amount_cents = new_cents;
+        let market_id = entry.market_id.clone();
+        drop(entry);
+
+        self.total_reserved_cents.fetch_sub(delta, Ordering::AcqRel);
+        if let Some(market_total) = self.per_market_cents.get(&market_id) {
+            market_total.fetch_sub(delta, Ordering::AcqRel);
+        }
+        Ok(())
+    }
+
     /// Integration-test helper: snapshot active reservation ids for race injection.
     #[doc(hidden)]
     pub fn test_snapshot_active_ids(&self) -> Vec<ReservationId> {

@@ -7,7 +7,7 @@ use oxide_arb_models::{
         evidence::EvidenceQueryResult,
     },
     enums::common::{TradeBusinessOutcome, TradeReconcileResolution, TradeState},
-    types::{ExecutionId, MarketId, TradeId},
+    types::{ExecutionId, MarketId, Shares, TradeId},
 };
 use std::collections::HashMap;
 
@@ -90,6 +90,64 @@ pub trait TradeRepository: Send + Sync {
         let _ = limit;
         Err(StorageError::StaleData(
             "find_needs_reconcile is not implemented for this repository".into(),
+        ))
+    }
+
+    /// Trades blocking safe resumption: submitted, orphaned, or reconcile-pending.
+    async fn count_blocking_trades(&self) -> Result<u64, StorageError> {
+        Err(StorageError::StaleData(
+            "count_blocking_trades is not implemented for this repository".into(),
+        ))
+    }
+
+    /// Count other reconcile-pending trades on the same market in the submit window.
+    async fn count_competing_pending_reconcile(
+        &self,
+        market_id: &MarketId,
+        submitted_at: Option<DateTime<Utc>>,
+    ) -> Result<u64, StorageError> {
+        let _ = (market_id, submitted_at);
+        Err(StorageError::StaleData(
+            "count_competing_pending_reconcile is not implemented for this repository".into(),
+        ))
+    }
+
+    /// Persist a reconciliation deferral with exponential backoff metadata.
+    async fn record_reconcile_defer(
+        &self,
+        trade_id: &TradeId,
+        defer_until: DateTime<Utc>,
+        note: &str,
+    ) -> Result<bool, StorageError> {
+        let _ = (trade_id, defer_until, note);
+        Err(StorageError::StaleData(
+            "record_reconcile_defer is not implemented for this repository".into(),
+        ))
+    }
+
+    /// Store the CTF balance snapshot immediately before venue submit (Live).
+    async fn set_pre_submit_ctf_balance(
+        &self,
+        trade_id: &TradeId,
+        balance: Shares,
+    ) -> Result<bool, StorageError> {
+        let _ = (trade_id, balance);
+        Err(StorageError::StaleData(
+            "set_pre_submit_ctf_balance is not implemented for this repository".into(),
+        ))
+    }
+
+    /// Operator terminal closure for unresolvable reconciliation trades.
+    async fn close_unresolvable_terminal(
+        &self,
+        trade_id: &TradeId,
+        note: &str,
+        operator: &str,
+        closed_at: DateTime<Utc>,
+    ) -> Result<bool, StorageError> {
+        let _ = (trade_id, note, operator, closed_at);
+        Err(StorageError::StaleData(
+            "close_unresolvable_terminal is not implemented for this repository".into(),
         ))
     }
 

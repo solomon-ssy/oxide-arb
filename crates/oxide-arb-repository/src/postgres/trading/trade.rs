@@ -9,7 +9,7 @@ use oxide_arb_models::{
     },
     entities::trade::{ActiveModel, Column, Entity},
     enums::common::{ExecutionMode, TradeBusinessOutcome, TradeReconcileResolution, TradeState},
-    types::{ExecutionId, MarketId, TradeId, Usd},
+    types::{ExecutionId, MarketId, Shares, TradeId, Usd},
 };
 use rust_decimal::Decimal;
 use sea_orm::{
@@ -413,9 +413,15 @@ async fn do_find_needs_reconcile(
     db: &impl ConnectionTrait,
     limit: u64,
 ) -> Result<Vec<TradeInfo>, StorageError> {
+    let now = Utc::now();
     Entity::find()
         .filter(Column::NeedsReconcile.eq(true))
         .filter(Column::ReconcileResolution.is_null())
+        .filter(
+            Condition::any()
+                .add(Column::ReconcileDeferUntil.is_null())
+                .add(Column::ReconcileDeferUntil.lte(now)),
+        )
         .order_by_asc(Column::CreatedAt)
         .order_by_asc(Column::TradeId)
         .limit(limit)
@@ -423,6 +429,106 @@ async fn do_find_needs_reconcile(
         .await
         .map_err(StorageError::from)
         .map(|v| v.into_iter().map(Into::into).collect())
+}
+
+async fn do_count_blocking_trades(db: &impl ConnectionTrait) -> Result<u64, StorageError> {
+    Entity::find()
+        .filter(
+            Condition::any()
+                .add(Column::State.eq(TradeState::Submitted))
+                .add(Column::State.eq(TradeState::Orphaned))
+                .add(Column::NeedsReconcile.eq(true)),
+        )
+        .count(db)
+        .await
+        .map_err(StorageError::from)
+}
+
+async fn do_count_competing_pending_reconcile(
+    db: &impl ConnectionTrait,
+    market_id: &MarketId,
+    submitted_at: Option<DateTime<Utc>>,
+) -> Result<u64, StorageError> {
+    let mut query = Entity::find()
+        .filter(Column::MarketId.eq(market_id.clone()))
+        .filter(Column::NeedsReconcile.eq(true))
+        .filter(Column::ReconcileResolution.is_null());
+    if let Some(submitted_at) = submitted_at {
+        query = query.filter(Column::SubmittedAt.eq(submitted_at));
+    }
+    query.count(db).await.map_err(StorageError::from)
+}
+
+async fn do_record_reconcile_defer(
+    db: &impl ConnectionTrait,
+    trade_id: &TradeId,
+    defer_until: DateTime<Utc>,
+    note: &str,
+) -> Result<bool, StorageError> {
+    let result = Entity::update_many()
+        .col_expr(
+            Column::ReconcileAttempts,
+            Expr::col(Column::ReconcileAttempts).add(1),
+        )
+        .col_expr(Column::ReconcileDeferUntil, Expr::value(Some(defer_until)))
+        .col_expr(Column::ReconcileNote, Expr::value(Some(note.to_owned())))
+        .filter(Column::TradeId.eq(trade_id.clone()))
+        .filter(Column::NeedsReconcile.eq(true))
+        .filter(Column::ReconcileResolution.is_null())
+        .exec(db)
+        .await
+        .map_err(StorageError::from)?;
+    Ok(result.rows_affected > 0)
+}
+
+async fn do_set_pre_submit_ctf_balance(
+    db: &impl ConnectionTrait,
+    trade_id: &TradeId,
+    balance: Shares,
+) -> Result<bool, StorageError> {
+    let result = Entity::update_many()
+        .col_expr(Column::PreSubmitCtfBalance, Expr::value(Some(balance)))
+        .filter(Column::TradeId.eq(trade_id.clone()))
+        .filter(Column::State.eq(TradeState::Submitted))
+        .exec(db)
+        .await
+        .map_err(StorageError::from)?;
+    Ok(result.rows_affected > 0)
+}
+
+async fn do_close_unresolvable_terminal(
+    db: &impl ConnectionTrait,
+    trade_id: &TradeId,
+    note: &str,
+    operator: &str,
+    closed_at: DateTime<Utc>,
+) -> Result<bool, StorageError> {
+    let terminal_note = format!("{operator}: {note}");
+    let result = Entity::update_many()
+        .col_expr(Column::State, Expr::value(TradeState::Failed))
+        .col_expr(
+            Column::BusinessOutcome,
+            Expr::value(TradeState::Failed.business_outcome()),
+        )
+        .col_expr(Column::NeedsReconcile, Expr::value(false))
+        .col_expr(
+            Column::ReconcileResolution,
+            Expr::value(Some(TradeReconcileResolution::Unresolvable)),
+        )
+        .col_expr(Column::ReconciledAt, Expr::value(Some(closed_at)))
+        .col_expr(Column::ReconcileNote, Expr::value(Some(terminal_note)))
+        .col_expr(
+            Column::ReconcileDeferUntil,
+            Expr::value(None::<DateTime<Utc>>),
+        )
+        .filter(Column::TradeId.eq(trade_id.clone()))
+        .filter(Column::State.eq(TradeState::Orphaned))
+        .filter(Column::NeedsReconcile.eq(true))
+        .filter(Column::ReconcileResolution.is_null())
+        .exec(db)
+        .await
+        .map_err(StorageError::from)?;
+    Ok(result.rows_affected > 0)
 }
 
 async fn do_mark_reconciled(
@@ -857,6 +963,45 @@ impl TradeRepository for PgTradeRepository {
         do_find_needs_reconcile(&self.db, limit).await
     }
 
+    async fn count_blocking_trades(&self) -> Result<u64, StorageError> {
+        do_count_blocking_trades(&self.db).await
+    }
+
+    async fn count_competing_pending_reconcile(
+        &self,
+        market_id: &MarketId,
+        submitted_at: Option<DateTime<Utc>>,
+    ) -> Result<u64, StorageError> {
+        do_count_competing_pending_reconcile(&self.db, market_id, submitted_at).await
+    }
+
+    async fn record_reconcile_defer(
+        &self,
+        trade_id: &TradeId,
+        defer_until: DateTime<Utc>,
+        note: &str,
+    ) -> Result<bool, StorageError> {
+        do_record_reconcile_defer(&self.db, trade_id, defer_until, note).await
+    }
+
+    async fn set_pre_submit_ctf_balance(
+        &self,
+        trade_id: &TradeId,
+        balance: Shares,
+    ) -> Result<bool, StorageError> {
+        do_set_pre_submit_ctf_balance(&self.db, trade_id, balance).await
+    }
+
+    async fn close_unresolvable_terminal(
+        &self,
+        trade_id: &TradeId,
+        note: &str,
+        operator: &str,
+        closed_at: DateTime<Utc>,
+    ) -> Result<bool, StorageError> {
+        do_close_unresolvable_terminal(&self.db, trade_id, note, operator, closed_at).await
+    }
+
     async fn mark_reconciled(
         &self,
         trade_id: &TradeId,
@@ -1006,6 +1151,45 @@ impl TradeRepository for PgTradeRepositoryTxn<'_> {
 
     async fn find_needs_reconcile(&self, limit: u64) -> Result<Vec<TradeInfo>, StorageError> {
         do_find_needs_reconcile(self.txn, limit).await
+    }
+
+    async fn count_blocking_trades(&self) -> Result<u64, StorageError> {
+        do_count_blocking_trades(self.txn).await
+    }
+
+    async fn count_competing_pending_reconcile(
+        &self,
+        market_id: &MarketId,
+        submitted_at: Option<DateTime<Utc>>,
+    ) -> Result<u64, StorageError> {
+        do_count_competing_pending_reconcile(self.txn, market_id, submitted_at).await
+    }
+
+    async fn record_reconcile_defer(
+        &self,
+        trade_id: &TradeId,
+        defer_until: DateTime<Utc>,
+        note: &str,
+    ) -> Result<bool, StorageError> {
+        do_record_reconcile_defer(self.txn, trade_id, defer_until, note).await
+    }
+
+    async fn set_pre_submit_ctf_balance(
+        &self,
+        trade_id: &TradeId,
+        balance: Shares,
+    ) -> Result<bool, StorageError> {
+        do_set_pre_submit_ctf_balance(self.txn, trade_id, balance).await
+    }
+
+    async fn close_unresolvable_terminal(
+        &self,
+        trade_id: &TradeId,
+        note: &str,
+        operator: &str,
+        closed_at: DateTime<Utc>,
+    ) -> Result<bool, StorageError> {
+        do_close_unresolvable_terminal(self.txn, trade_id, note, operator, closed_at).await
     }
 
     async fn mark_reconciled(

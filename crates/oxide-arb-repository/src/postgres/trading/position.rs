@@ -327,6 +327,7 @@ async fn mark_redeemed_q(
         redeem_status: Patch::set(params.redeem_status),
         settlement_trigger: NullablePatch::set(params.settlement_trigger),
         redeem_terminal_reason: NullablePatch::set_nullable(params.redeem_terminal_reason),
+        redeem_gas_paid_usd: NullablePatch::set_nullable(params.redeem_gas_paid_usd),
         settlement_accounting_status: Patch::set(SettlementAccountingStatus::Redeemed),
         ..Default::default()
     };
@@ -471,6 +472,7 @@ async fn aggregate_settled_between_q(
         failed_accounting_count: ToPrimitive::to_u32(&failed_count).unwrap_or(u32::MAX),
         largest_single_profit: Usd::ZERO,
         largest_single_loss: Usd::ZERO,
+        total_gas_paid: Usd::ZERO,
     };
 
     for position in settled {
@@ -478,6 +480,9 @@ async fn aggregate_settled_between_q(
         stats.realized_pnl += position.realized_pnl;
         stats.total_cost += position.total_cost_usd;
         stats.total_fees += position.total_fees_usd;
+        if let Some(gas) = position.redeem_gas_paid_usd {
+            stats.total_gas_paid += gas;
+        }
         if let Some(payout) = position.settlement_payout_usd {
             stats.total_payout += payout;
             if payout > Usd::ZERO {

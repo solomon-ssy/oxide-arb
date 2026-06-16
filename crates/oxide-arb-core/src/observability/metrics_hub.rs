@@ -118,6 +118,7 @@ pub struct MetricsHub {
 
     // Kill switch
     pub fsm_emergency_entries: IntCounter,
+    pub venue_cancel_all_total: IntCounter,
 
     // Risk
     pub risk_checks_total: IntCounter,
@@ -233,6 +234,7 @@ struct ExecutionMetrics {
     latency_scan_to_dispatch_us: Histogram,
     latency_tick_to_http_us: Histogram,
     fsm_emergency_entries: IntCounter,
+    venue_cancel_all_total: IntCounter,
 }
 
 struct RiskMetrics {
@@ -615,6 +617,11 @@ fn register_execution_metrics(registry: &Registry) -> ExecutionMetrics {
             "oxide_arb_fsm_emergency_entries_total",
             "Emergency state entries"
         ),
+        venue_cancel_all_total: register_counter!(
+            registry,
+            "oxide_arb_venue_cancel_all_total",
+            "Emergency cancel_all invocations"
+        ),
     }
 }
 
@@ -888,6 +895,7 @@ impl MetricsHub {
             latency_scan_to_dispatch_us: execution.latency_scan_to_dispatch_us,
             latency_tick_to_http_us: execution.latency_tick_to_http_us,
             fsm_emergency_entries: execution.fsm_emergency_entries,
+            venue_cancel_all_total: execution.venue_cancel_all_total,
             risk_checks_total: risk.checks_total,
             risk_exposure_usd: risk.exposure_usd,
             risk_daily_pnl_usd: risk.daily_pnl_usd,

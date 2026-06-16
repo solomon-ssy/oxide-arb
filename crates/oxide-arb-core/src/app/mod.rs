@@ -43,6 +43,7 @@ use crate::{
         settlement::{
             dedup::SettlementDedup, service::MarketSettlementService, task::MarketSettlementTask,
         },
+        trade_safety_gate::TradeSafetyGate,
     },
     exposure::in_memory::InMemoryExposureReservation,
     infra::{
@@ -63,7 +64,7 @@ use crate::{
     },
     post_trade::{
         consumer::PostTradeConsumer,
-        reconciliation_worker::{ReconciliationWorker, ReconciliationWorkerDeps},
+        reconciliation::{ReconciliationWorker, ReconciliationWorkerDeps},
         relay::{PostTradeRelay, PostTradeRelayDeps},
     },
     runtime_config::{RuntimeConfigApplicator, RuntimeConfigStore},
@@ -79,7 +80,9 @@ use crate::{
 use chrono::Utc;
 use flume::Receiver;
 use oxide_arb_algorithm::calibration::{CalibrationUpdater, ResolutionCalibrator};
-use oxide_arb_api::{clob::ClobClient, ctf::client::CtfRedeemClient, ws::ClobWsManager};
+use oxide_arb_api::{
+    clob::ClobClient, ctf::client::CtfRedeemClient, fees::FeeCalculator, ws::ClobWsManager,
+};
 use oxide_arb_control::{
     evidence::engine::EvidenceEngine,
     materialization::{
@@ -95,7 +98,7 @@ use oxide_arb_models::{
         ReplayPort, RuntimeConfigPort, RuntimeConfigRef, RuntimeControlPort,
         settlement::MarketSettlementRequest,
     },
-    enums::common::{AlertCategory, AlertLevel, AlertSource},
+    enums::common::{AlertCategory, AlertLevel, AlertSource, ExecutionMode},
     types::{MarketId, TokenId},
 };
 use oxide_arb_repository::{
@@ -166,6 +169,7 @@ pub struct InfraBundle {
     pub balance_fact_writer: Arc<BalanceFactWriter>,
     pub book_fact_writer: Arc<BookFactWriter>,
     pub holder_address: String,
+    pub fee_calculator: Arc<FeeCalculator>,
 }
 
 /// Data pipeline subsystem: WS event loop, order books, market metadata.
@@ -201,23 +205,29 @@ pub struct ExecutionBundle {
     pub reconcile_notify: Arc<Notify>,
 }
 
+/// Construction inputs for [`ExecutionBundle`].
+pub struct ExecutionBundleDeps {
+    pub pipeline: Arc<ExecutionPipeline>,
+    pub market_inflight: Arc<MarketInFlightRegistry>,
+    pub risk_engine: Arc<RiskEngine>,
+    pub fsm: Arc<ExecutionFSM>,
+    pub capital_manager: Arc<CapitalManager>,
+    pub relay_notify: Arc<Notify>,
+    pub reconcile_notify: Arc<Notify>,
+    pub clob: Option<Arc<ClobClient>>,
+    pub mode: ExecutionModeHandle,
+}
+
 impl ExecutionBundle {
-    pub fn new(
-        pipeline: Arc<ExecutionPipeline>,
-        market_inflight: Arc<MarketInFlightRegistry>,
-        risk_engine: Arc<RiskEngine>,
-        fsm: Arc<ExecutionFSM>,
-        capital_manager: Arc<CapitalManager>,
-        relay_notify: Arc<Notify>,
-        reconcile_notify: Arc<Notify>,
-    ) -> Self {
+    #[must_use]
+    pub fn new(deps: ExecutionBundleDeps) -> Self {
         Self {
-            pipeline,
-            market_inflight,
-            trading_gate: TradingGate::new(risk_engine, fsm),
-            capital_manager,
-            relay_notify,
-            reconcile_notify,
+            pipeline: deps.pipeline,
+            market_inflight: deps.market_inflight,
+            trading_gate: TradingGate::new(deps.risk_engine, deps.fsm, deps.clob, deps.mode),
+            capital_manager: deps.capital_manager,
+            relay_notify: deps.relay_notify,
+            reconcile_notify: deps.reconcile_notify,
         }
     }
 }
@@ -295,6 +305,50 @@ pub struct AppContext {
 }
 
 impl AppContext {
+    /// Live-mode gate: metrics must be fresh and venue subsystems must be wired.
+    pub async fn ensure_live_ready(&self) -> OxideResult<()> {
+        let mode = self.execution_mode.current();
+        if mode != ExecutionMode::Live {
+            return Ok(());
+        }
+        self.risk.metrics_refresh.refresh().await.map_err(|error| {
+            tracing::error!(
+                %error,
+                "Live startup metrics refresh failed — refusing to start"
+            );
+            error
+        })?;
+        self.ensure_live_subsystems(mode)
+    }
+
+    /// Fatal when Live is requested but venue/reconciliation subsystems are missing.
+    pub fn ensure_live_subsystems(&self, mode: ExecutionMode) -> OxideResult<()> {
+        if mode != ExecutionMode::Live {
+            return Ok(());
+        }
+        if self.trading.clob_client.is_none() {
+            return Err(OxideError::Internal(
+                "Live mode requires ClobClient — check keystore configuration".into(),
+            ));
+        }
+        if self.trading.ctf_redeem.is_none() {
+            return Err(OxideError::Internal(
+                "Live mode requires CtfRedeemClient — check keystore/RPC configuration".into(),
+            ));
+        }
+        if self.infra.holder_address == "unavailable" {
+            return Err(OxideError::Internal(
+                "Live mode requires a configured holder address".into(),
+            ));
+        }
+        if self.trading.execution.is_none() {
+            return Err(OxideError::Internal(
+                "Live mode requires the execution bundle to be wired".into(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Clone the non-blocking event publisher for a producer (e.g. the web
     /// governance handlers or a periodic service).
     #[must_use]
@@ -389,15 +443,15 @@ impl AppContext {
     /// Queue the unknown-outcome reconciliation worker.
     pub fn queue_reconciliation_worker(&self) {
         let Some(exec) = &self.trading.execution else {
-            tracing::warn!("reconciliation worker skipped — execution bundle not configured");
+            tracing::error!("reconciliation worker unavailable — execution bundle not configured");
             return;
         };
         let Some(clob_client) = self.trading.clob_client.as_ref() else {
-            tracing::info!("reconciliation worker skipped — ClobClient unavailable");
+            tracing::error!("reconciliation worker unavailable — ClobClient missing");
             return;
         };
         let Some(ctf_redeem) = self.trading.ctf_redeem.as_ref() else {
-            tracing::info!("reconciliation worker skipped — CTF redeem client unavailable");
+            tracing::error!("reconciliation worker unavailable — CTF redeem client missing");
             return;
         };
 
@@ -407,10 +461,12 @@ impl AppContext {
             trade_repo,
             clob_client: Arc::clone(clob_client),
             ctf_redeem: Arc::clone(ctf_redeem),
+            fee_calculator: Arc::clone(&self.infra.fee_calculator),
             holder_address: self.infra.holder_address.clone(),
             capital_manager: Arc::clone(&exec.capital_manager),
             fsm: Arc::clone(&self.trading.fsm),
             metrics_state: Arc::clone(&self.risk.metrics_state),
+            runtime_config: Arc::clone(&self.runtime_config),
             reconcile_notify: Arc::clone(&exec.reconcile_notify),
             relay_notify: Arc::clone(&exec.relay_notify),
         });
@@ -430,6 +486,9 @@ impl AppContext {
         let clob_client = Arc::clone(clob_client);
         let risk_engine = Arc::clone(&self.risk.engine);
         let fsm = Arc::clone(&self.trading.fsm);
+        let trade_repo = Arc::clone(&self.infra.trade_repo);
+        let trade_repo: Arc<dyn TradeRepository> = trade_repo;
+        let trade_safety_gate = Arc::new(TradeSafetyGate::new(trade_repo));
         let mode = self.execution_mode.clone();
 
         self.pending_tasks
@@ -438,6 +497,7 @@ impl AppContext {
                     clob_client,
                     risk_engine,
                     fsm,
+                    trade_safety_gate,
                     interval_secs,
                     shutdown,
                     mode,
@@ -689,6 +749,8 @@ impl AppContext {
             metrics_state: Arc::clone(&self.risk.metrics_state),
             metrics_refresh: Arc::clone(&self.risk.metrics_refresh),
             clob_client: self.trading.clob_client.clone(),
+            ctf_redeem: self.trading.ctf_redeem.clone(),
+            holder_address: self.infra.holder_address.clone(),
             market_registry: Arc::clone(&self.data.market_registry),
             health_checker: Some(health_checker),
             deploy: Arc::clone(&self.config),
@@ -700,6 +762,19 @@ impl AppContext {
             system_runtime_state: Arc::new(PgSystemRuntimeStateRepository::new(
                 self.infra.pg.connection().clone(),
             )),
+            trade_repo: {
+                let repo = Arc::clone(&self.infra.trade_repo);
+                repo as Arc<dyn TradeRepository>
+            },
+            capital_manager: Arc::clone(
+                &self
+                    .trading
+                    .execution
+                    .as_ref()
+                    .expect("execution bundle")
+                    .capital_manager,
+            ),
+            alerts: Arc::clone(&self.infra.alerts),
             status_publisher: None,
         }
     }

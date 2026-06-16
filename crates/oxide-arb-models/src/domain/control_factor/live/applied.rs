@@ -81,6 +81,8 @@ pub struct MarketAnomalyDecision {
     pub block_market: bool,
     /// Hard block this market's event.
     pub block_event: bool,
+    /// Whether a matched anomaly factor requires operator acknowledgement.
+    pub manual_ack_required: bool,
     /// Reason code carried from the matched anomaly factor.
     pub reason_code: Option<String>,
     /// The factor backing this decision, if any matched.

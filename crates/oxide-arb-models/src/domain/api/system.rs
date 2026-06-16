@@ -38,6 +38,9 @@ pub struct ResumeRequest {
     pub operator_ack: String,
 }
 
+/// Acknowledge a reservation/persistence execution emergency halt.
+pub type EmergencyAckRequest = ResumeRequest;
+
 /// Force the circuit breaker back to `Closed`.
 #[derive(Debug, Deserialize, Validate)]
 pub struct CircuitBreakerResetRequest {

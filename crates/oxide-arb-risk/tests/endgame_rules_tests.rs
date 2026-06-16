@@ -115,6 +115,7 @@ fn with_context(
         factor_context: None,
         settlement_gate: SettlementGateInput::default(),
         now: Utc::now(),
+        sized_intent: None,
     };
 
     f(&ctx);

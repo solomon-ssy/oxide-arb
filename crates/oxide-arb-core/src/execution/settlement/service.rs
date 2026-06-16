@@ -30,7 +30,7 @@ use oxide_arb_models::{
         TradeBusinessOutcome,
     },
     runtime_config::SettlementRuntimeConfig,
-    types::{ResolutionEventId, TokenId},
+    types::{ResolutionEventId, TokenId, Usd},
 };
 use oxide_arb_repository::{
     postgres::{PgPositionRepository, PgResolutionEventRepository, PgTradeRepository},
@@ -208,16 +208,18 @@ impl MarketSettlementService {
             return Err(OxideError::Internal("redeem max attempts reached".into()));
         }
 
+        let Some(redeem_outcome) = self.redeem_or_record_failure(req, &pos).await? else {
+            return Ok(());
+        };
+        let gas_paid = redeem_outcome.gas_paid_usd.unwrap_or(Usd::ZERO);
         let economics = compute_settlement_economics(
             pos.shares,
             pos.total_cost_usd,
             pos.total_fees_usd,
+            gas_paid,
             &pos.token_id,
             &req.winning_token_id,
         );
-        let Some(redeem_outcome) = self.redeem_or_record_failure(req, &pos).await? else {
-            return Ok(());
-        };
         let settled = self
             .persist_position_settlement(req, &pos, &economics, redeem_outcome)
             .await?;
@@ -312,6 +314,7 @@ impl MarketSettlementService {
                     redeem_status: RedeemStatus::settled_for_mode(Self::position_redeem_mode(pos)),
                     settlement_trigger: req.source,
                     redeem_terminal_reason: None,
+                    redeem_gas_paid_usd: redeem_outcome.gas_paid_usd,
                 },
             )
             .await
@@ -370,8 +373,10 @@ impl MarketSettlementService {
             .as_ref()
             .is_some_and(|report| report.breaker_tripped.is_some())
         {
-            self.fsm
-                .enter_emergency("circuit breaker tripped after market settlement");
+            self.fsm.enter_emergency(
+                crate::execution::fsm::EmergencyClass::VenueFault,
+                "circuit breaker tripped after market settlement",
+            );
         }
         Ok(())
     }
@@ -454,10 +459,12 @@ impl MarketSettlementService {
             let Some(winning_token_id) = position.winning_token_id.clone() else {
                 continue;
             };
+            let gas_paid = position.redeem_gas_paid_usd.unwrap_or(Usd::ZERO);
             let economics = compute_settlement_economics(
                 position.shares,
                 position.total_cost_usd,
                 position.total_fees_usd,
+                gas_paid,
                 &position.token_id,
                 &winning_token_id,
             );

@@ -5,7 +5,7 @@ use oxide_arb_api::ws::ClobWsManager;
 use oxide_arb_core::{
     bridge::{execution_mode::ExecutionModeHandle, risk_metrics::CoreRiskMetrics},
     control::mode_transition::{CoreRuntimeControl, CoreRuntimeControlDeps},
-    execution::fsm::ExecutionFSM,
+    execution::{capital_manager::CapitalManager, fsm::ExecutionFSM},
     exposure::in_memory::InMemoryExposureReservation,
     observability::{alert_dispatcher::AlertDispatcher, metrics_hub::MetricsHub},
     pipeline::market_registry::MarketRegistry,
@@ -22,7 +22,10 @@ use oxide_arb_models::{
 };
 use oxide_arb_repository::traits::SystemRuntimeStateRepository;
 use oxide_arb_risk::builder::RiskEngineBuilder;
-use oxide_arb_test_support::{mocks::MockPositionRepository, risk::TestRiskMetrics};
+use oxide_arb_test_support::{
+    mocks::{MockPositionRepository, MockTradeRepository},
+    risk::TestRiskMetrics,
+};
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 
@@ -98,7 +101,14 @@ fn runtime_control(
             .expect("risk engine"),
     );
     let alerts = Arc::new(AlertDispatcher::new(&NotificationConfig::default()));
-    let fsm = Arc::new(ExecutionFSM::new(Arc::clone(&metrics_hub), alerts));
+    let fsm = Arc::new(ExecutionFSM::new(
+        Arc::clone(&metrics_hub),
+        Arc::clone(&alerts),
+    ));
+    let capital_manager = Arc::new(CapitalManager::new(
+        Arc::clone(&exposure),
+        &RuntimeConfig::default().risk.exposure_reservation_config(),
+    ));
     let system_runtime_state = Arc::new(MockSystemRuntimeState::new());
     let control = CoreRuntimeControl::new(
         CoreRuntimeControlDeps {
@@ -115,12 +125,17 @@ fn runtime_control(
                 Arc::clone(&metrics_hub),
             ),
             clob_client: None,
+            ctf_redeem: None,
+            holder_address: "unavailable".into(),
             market_registry: Arc::new(MarketRegistry::new()),
             health_checker: None,
             deploy: Arc::new(DeployConfig::default()),
             runtime_config,
             position_repo: Arc::new(MockPositionRepository::default()),
             system_runtime_state: system_runtime_state.clone(),
+            trade_repo: Arc::new(MockTradeRepository::default()),
+            capital_manager,
+            alerts,
             status_publisher: None,
         },
         std::time::Instant::now(),

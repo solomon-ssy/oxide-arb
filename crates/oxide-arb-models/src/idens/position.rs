@@ -51,6 +51,7 @@ pub enum Position {
     RedeemHolderAddress,
     RedeemResolution,
     RedeemGasLimit,
+    RedeemGasPaidUsd,
 }
 
 pub fn table() -> TableCreateStatement {
@@ -133,6 +134,7 @@ pub fn table() -> TableCreateStatement {
                 .not_null()
                 .default(500_000_i64),
         )
+        .col(column::usd_null(Position::RedeemGasPaidUsd))
         .foreign_key(
             ForeignKey::create()
                 .name("fk_position_market")

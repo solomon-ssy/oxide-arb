@@ -11,8 +11,8 @@ use actix_web::{http::Method, web};
 use oxide_arb_models::{
     config::DeployConfig,
     domain::{
-        HaltRequest, HealthReport, MaterializationScheduleStatusView, ModeTransitionReport,
-        ResumeRequest, SwitchModeRequest, SystemBalanceView, SystemStatus,
+        EmergencyAckRequest, HaltRequest, HealthReport, MaterializationScheduleStatusView,
+        ModeTransitionReport, ResumeRequest, SwitchModeRequest, SystemBalanceView, SystemStatus,
     },
     enums::{
         operation_log::OperationCategory,
@@ -68,6 +68,12 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
             "/system/resume",
             Rule::ResourceOp(ResourceType::System, Operation::Resume),
             resume,
+        ),
+        spec(
+            Method::POST,
+            "/system/emergency/ack",
+            Rule::ResourceOp(ResourceType::System, Operation::Resume),
+            ack_execution_emergency,
         ),
         spec(
             Method::POST,
@@ -274,6 +280,19 @@ pub async fn resume(
     let body = body.into_inner();
     op_ctx.set_action(OperationCategory::System, "system.resume");
     state.control.resume(&body.operator_ack).await?;
+    Ok(WebResponse::ok(()))
+}
+
+/// `POST /api/system/emergency/ack` — clear reservation/persistence execution emergency.
+pub async fn ack_execution_emergency(
+    state: web::Data<AppState>,
+    op_ctx: OperationCtx,
+    body: ValidatedJson<EmergencyAckRequest>,
+) -> Result<WebResponse<()>, WebError> {
+    let body = body.into_inner();
+    op_ctx.set_action(OperationCategory::System, "system.emergency.ack");
+    op_ctx.set_detail(serde_json::json!({ "operator_ack": body.operator_ack }));
+    state.control.ack_execution_emergency(&body.operator_ack).await?;
     Ok(WebResponse::ok(()))
 }
 

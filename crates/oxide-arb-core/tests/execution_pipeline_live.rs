@@ -45,6 +45,7 @@ use oxide_arb_models::{
         CoreEventPublisher, PositionInfo, TradeInfo,
         book::BookLevel,
         calibration::{BucketKey, CalibrationSnapshot},
+        fee::MarketFeeSchedule,
         latency::LatencyTrace,
         market::{MarketRegistryInfo, TokenInfo},
         opportunity::{EndgameMeta, Opportunity},
@@ -56,6 +57,7 @@ use oxide_arb_models::{
             TradeBusinessOutcome, TradeState,
         },
         execution::ExecutionOutcomeSummary,
+        fee::FeeSource,
         market::MarketStatus,
         opportunity::PayoutModel,
     },
@@ -208,6 +210,25 @@ async fn test_clob_client(server: &MockServer) -> Arc<ClobClient> {
     )
 }
 
+fn live_market_fee_schedule() -> Arc<MarketFeeSchedule> {
+    Arc::new(MarketFeeSchedule {
+        market_id: MarketId::new("0xlive-pipeline-market"),
+        fees_enabled: true,
+        fee_rate: dec!(0.02),
+        exponent: dec!(1),
+        taker_only: true,
+        rebate_rate: None,
+        source: FeeSource::GammaFeeSchedule,
+        observed_at: Utc::now(),
+    })
+}
+
+fn live_pipeline_fee_calculator() -> Arc<FeeCalculator> {
+    let calculator = Arc::new(FeeCalculator::default());
+    calculator.ingest_market_fee_schedules([live_market_fee_schedule()]);
+    calculator
+}
+
 fn live_pipeline_market_registry() -> Arc<MarketRegistry> {
     let registry = Arc::new(MarketRegistry::new());
     registry.register_market(MarketRegistryInfo {
@@ -239,7 +260,7 @@ fn live_pipeline_market_registry() -> Arc<MarketRegistry> {
         depth_usd: None,
         min_order_size: dec!(5),
         volume_24h: Usd::ZERO,
-        fee_schedule: None,
+        fee_schedule: Some((*live_market_fee_schedule()).clone()),
         end_date: None,
         resolved_at: None,
         created_at: Utc::now(),
@@ -460,7 +481,7 @@ fn fixture(clob_client: Option<Arc<ClobClient>>, dispatcher_timeout_ms: u64) -> 
     let trade_repo = Arc::new(MockTradeRepository::default());
     let position_repo = Arc::new(MockPositionRepository::default());
     let calibration_repo = Arc::new(MockCalibrationRepository::default());
-    let fee_calculator = Arc::new(FeeCalculator::default());
+    let fee_calculator = live_pipeline_fee_calculator();
     let metrics_state = Arc::new(RiskMetricsState::new(Arc::new(ApiHealthTracker::new(
         Duration::from_secs(60),
     ))));
@@ -510,6 +531,8 @@ fn fixture(clob_client: Option<Arc<ClobClient>>, dispatcher_timeout_ms: u64) -> 
         runtime_config: Arc::new(RuntimeConfigStore::new(RuntimeConfig::default())),
         factors: Arc::new(FactorSnapshotStore::new(chrono::Utc::now())),
         shadow_writer: None,
+        ctf_redeem: None,
+        holder_address: String::new(),
     });
 
     LiveFixture {
@@ -698,7 +721,7 @@ async fn live_pipeline_timeout_marks_needs_reconcile_without_releasing_reservati
         .mount(&server)
         .await;
 
-    let fixture = fixture(Some(test_clob_client(&server).await), 1);
+    let fixture = fixture(Some(test_clob_client(&server).await), 15);
     let result = fixture.pipeline.execute(Arc::clone(&fixture.scored)).await;
     assert!(
         result.rejection_stage.is_none(),

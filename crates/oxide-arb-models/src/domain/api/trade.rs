@@ -8,8 +8,8 @@
 use crate::{
     domain::{TradeInfo, pagination::PageRequest},
     enums::common::{
-        ExecutionMode, MarketCategory, Side, TradeBusinessOutcome, TradeReconcileResolution,
-        TradeState,
+        ExecutionMode, MarketCategory, NetProfitKind, Side, TradeBusinessOutcome,
+        TradeReconcileResolution, TradeState,
     },
     types::{Bps, EventId, MarketId, OpportunityId, OrderId, Price, Shares, TokenId, TradeId, Usd},
 };
@@ -71,6 +71,8 @@ pub struct TradeView {
     pub detected_edge_bps: Option<Bps>,
     pub detected_profit_usd: Option<Usd>,
     pub net_profit_usd: Option<Usd>,
+    /// Semantic kind of [`Self::net_profit_usd`] — fill-time EV, not realized `PnL`.
+    pub net_profit_kind: NetProfitKind,
     pub state: TradeState,
     pub business_outcome: Option<TradeBusinessOutcome>,
     pub category: MarketCategory,
@@ -105,6 +107,7 @@ impl From<TradeInfo> for TradeView {
             detected_edge_bps: t.detected_edge_bps,
             detected_profit_usd: t.detected_profit_usd,
             net_profit_usd: t.net_profit_usd,
+            net_profit_kind: NetProfitKind::for_net_profit(&t.net_profit_usd),
             state: t.state,
             business_outcome: t.business_outcome,
             category: t.category,

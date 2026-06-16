@@ -56,6 +56,9 @@ pub struct TradeInfo {
     pub reconcile_resolution: Option<TradeReconcileResolution>,
     pub reconciled_at: Option<DateTime<Utc>>,
     pub reconcile_note: Option<String>,
+    pub pre_submit_ctf_balance: Option<Shares>,
+    pub reconcile_attempts: i32,
+    pub reconcile_defer_until: Option<DateTime<Utc>>,
     pub post_trade_claim_owner: Option<String>,
     pub post_trade_claimed_at: Option<DateTime<Utc>>,
     pub post_trade_attempts: i32,
@@ -73,7 +76,8 @@ info_from_model!(TradeInfo, crate::entities::trade::Model, {
     side, shares, price, cost_usd, fee_usd, detected_edge_bps,
     detected_profit_usd, net_profit_usd, order_id, tx_hash, state,
     business_outcome, scored_snapshot, category, needs_reconcile,
-    reconcile_resolution, reconciled_at, reconcile_note, post_trade_claim_owner,
+    reconcile_resolution, reconciled_at, reconcile_note, pre_submit_ctf_balance,
+    reconcile_attempts, reconcile_defer_until, post_trade_claim_owner,
     post_trade_claimed_at, post_trade_attempts, execution_mode, latency_ms,
     error_message, submitted_at, confirmed_at, created_at, updated_at,
 });
@@ -226,6 +230,8 @@ pub struct SettledPnlStats {
     pub failed_accounting_count: u32,
     pub largest_single_profit: Usd,
     pub largest_single_loss: Usd,
+    /// Aggregate gas paid across redeemed positions in the window.
+    pub total_gas_paid: Usd,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -274,6 +280,7 @@ impl From<&SettledPositionStats> for SettledPnlStats {
             failed_accounting_count: stats.failed_accounting_count,
             largest_single_profit: stats.largest_single_profit,
             largest_single_loss: stats.largest_single_loss,
+            total_gas_paid: stats.total_gas_paid,
         }
     }
 }

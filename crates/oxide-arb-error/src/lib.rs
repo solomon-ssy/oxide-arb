@@ -25,6 +25,7 @@ pub mod auth;
 pub mod config;
 pub mod config_validation;
 pub mod control;
+pub mod fee;
 pub mod market;
 pub mod rbac;
 pub mod redeem;
@@ -110,6 +111,9 @@ pub enum OxideError {
 
     #[error(transparent)]
     Redeem(#[from] redeem::RedeemError),
+
+    #[error(transparent)]
+    FeeQuote(#[from] fee::FeeQuoteError),
 
     #[error(transparent)]
     Seed(#[from] seed::SeedError),

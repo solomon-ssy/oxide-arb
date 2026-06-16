@@ -12,8 +12,12 @@ use crate::{
         factor_snapshot::FactorSnapshotStore,
     },
     execution::{
-        capital_manager::CapitalManager, dispatcher::Dispatcher, fok_strategy::FokOrderStrategy,
-        fsm::ExecutionFSM, market_inflight::MarketInFlightRegistry, plan_builder::PlanBuilder,
+        capital_manager::CapitalManager,
+        dispatcher::Dispatcher,
+        fok_strategy::FokOrderStrategy,
+        fsm::{EmergencyClass, ExecutionFSM},
+        market_inflight::MarketInFlightRegistry,
+        plan_builder::PlanBuilder,
         validator::Validator,
     },
     observability::{execution_audit::ExecutionAuditWriter, metrics_hub::MetricsHub},
@@ -22,6 +26,7 @@ use crate::{
 };
 use chrono::Utc;
 use oxide_arb_algorithm::scorer::ScoredOpportunity;
+use oxide_arb_api::ctf::client::CtfRedeemClient;
 use oxide_arb_models::{
     domain::{
         book::BookSnapshot,
@@ -46,7 +51,7 @@ use oxide_arb_models::{
 };
 use oxide_arb_repository::{postgres::PgTradeRepository, traits::TradeRepository};
 use oxide_arb_risk::{
-    context::SettlementGateInput,
+    context::{SettlementGateInput, SizedPreTradeInput},
     engine::RiskEngine,
     types::{ReportMode, RiskDecision},
 };
@@ -81,6 +86,10 @@ pub struct ExecutionPipelineDeps<R: TradeRepository + Send + Sync + 'static = Pg
     pub factors: Arc<FactorSnapshotStore>,
     /// Backpressure-safe shadow-decision writer; `None` disables shadow.
     pub shadow_writer: Option<ShadowDecisionWriter>,
+    /// Live CTF client for pre-submit balance snapshots; `None` in dry-run builds.
+    pub ctf_redeem: Option<Arc<CtfRedeemClient>>,
+    /// Holder address paired with [`Self::ctf_redeem`].
+    pub holder_address: String,
 }
 
 pub struct ExecutionPipeline<R: TradeRepository + Send + Sync + 'static = PgTradeRepository> {
@@ -103,6 +112,8 @@ pub struct ExecutionPipeline<R: TradeRepository + Send + Sync + 'static = PgTrad
     runtime_config: Arc<RuntimeConfigStore>,
     factors: Arc<FactorSnapshotStore>,
     shadow_writer: Option<ShadowDecisionWriter>,
+    ctf_redeem: Option<Arc<CtfRedeemClient>>,
+    holder_address: String,
 }
 
 struct PreparedDispatch {
@@ -134,6 +145,8 @@ impl<R: TradeRepository + Send + Sync + 'static> ExecutionPipeline<R> {
             runtime_config: deps.runtime_config,
             factors: deps.factors,
             shadow_writer: deps.shadow_writer,
+            ctf_redeem: deps.ctf_redeem,
+            holder_address: deps.holder_address,
         }
     }
 
@@ -159,26 +172,9 @@ impl<R: TradeRepository + Send + Sync + 'static> ExecutionPipeline<R> {
             Err(result) => return result,
         };
 
-        // Persist "order submitted, outcome unknown" before the venue round-trip so a
-        // crash leaves a `submitted` row the orphan scan can reconcile (fail-closed).
-        match self
-            .trade_repo
-            .mark_submitted(&prepared.trade_id, Utc::now())
-            .await
-        {
-            Ok(true) => {}
-            Ok(false) => {
-                tracing::error!(trade_id = %prepared.trade_id, "trade was not in intent state");
-                let _ = self.capital_manager.release_sync(&prepared.reservation);
-                self.fsm.enter_emergency("mark submitted skipped");
-                return Self::reject("submit_persist", "trade was not in intent state");
-            }
-            Err(error) => {
-                tracing::error!(%error, trade_id = %prepared.trade_id, "mark submitted failed");
-                let _ = self.capital_manager.release_sync(&prepared.reservation);
-                self.fsm.enter_emergency("mark submitted failed");
-                return Self::reject("submit_persist", error);
-            }
+        // Live-only CTF snapshot + durable submitted marker before venue I/O.
+        if let Err(result) = self.persist_pre_submit_state(&prepared).await {
+            return result;
         }
 
         let mut trace = Arc::clone(&scored.trace);
@@ -233,6 +229,93 @@ impl<R: TradeRepository + Send + Sync + 'static> ExecutionPipeline<R> {
             self.validate_and_size(scored, opp, &execution_id, snapshot)?;
         self.persist_dispatch_plan(opp, approved_size, snapshot, execution_id)
             .await
+    }
+
+    async fn persist_pre_submit_state(
+        &self,
+        prepared: &PreparedDispatch,
+    ) -> Result<(), ExecutionResult> {
+        if self.mode.current() == ExecutionMode::Live {
+            self.capture_pre_submit_ctf_balance(prepared).await?;
+        }
+        self.mark_submitted_or_abort(prepared).await
+    }
+
+    async fn capture_pre_submit_ctf_balance(
+        &self,
+        prepared: &PreparedDispatch,
+    ) -> Result<(), ExecutionResult> {
+        let Some(ctf) = &self.ctf_redeem else {
+            return Ok(());
+        };
+        match ctf
+            .position_balance(&self.holder_address, &prepared.plan.token_id)
+            .await
+        {
+            Ok(balance) => {
+                if let Err(error) = self
+                    .trade_repo
+                    .set_pre_submit_ctf_balance(&prepared.trade_id, balance)
+                    .await
+                {
+                    tracing::error!(
+                        %error,
+                        trade_id = %prepared.trade_id,
+                        "pre-submit CTF balance snapshot failed"
+                    );
+                    let _ = self.capital_manager.release_sync(&prepared.reservation);
+                    self.fsm.enter_emergency(
+                        EmergencyClass::PersistenceFault,
+                        "pre-submit CTF balance snapshot failed",
+                    );
+                    return Err(Self::reject("submit_persist", error));
+                }
+                Ok(())
+            }
+            Err(error) => {
+                tracing::error!(
+                    %error,
+                    trade_id = %prepared.trade_id,
+                    "pre-submit CTF balance read failed"
+                );
+                let _ = self.capital_manager.release_sync(&prepared.reservation);
+                self.fsm.enter_emergency(
+                    EmergencyClass::VenueFault,
+                    "pre-submit CTF balance read failed",
+                );
+                Err(Self::reject("submit_persist", error))
+            }
+        }
+    }
+
+    async fn mark_submitted_or_abort(
+        &self,
+        prepared: &PreparedDispatch,
+    ) -> Result<(), ExecutionResult> {
+        match self
+            .trade_repo
+            .mark_submitted(&prepared.trade_id, Utc::now())
+            .await
+        {
+            Ok(true) => Ok(()),
+            Ok(false) => {
+                tracing::error!(trade_id = %prepared.trade_id, "trade was not in intent state");
+                let _ = self.capital_manager.release_sync(&prepared.reservation);
+                self.fsm
+                    .enter_emergency(EmergencyClass::PersistenceFault, "mark submitted skipped");
+                Err(Self::reject(
+                    "submit_persist",
+                    "trade was not in intent state",
+                ))
+            }
+            Err(error) => {
+                tracing::error!(%error, trade_id = %prepared.trade_id, "mark submitted failed");
+                let _ = self.capital_manager.release_sync(&prepared.reservation);
+                self.fsm
+                    .enter_emergency(EmergencyClass::PersistenceFault, "mark submitted failed");
+                Err(Self::reject("submit_persist", error))
+            }
+        }
     }
 
     fn validate_and_size(
@@ -350,7 +433,52 @@ impl<R: TradeRepository + Send + Sync + 'static> ExecutionPipeline<R> {
         // this baseline. Never affects the real order path.
         self.record_shadow(&published, scored, opp, approved_size);
 
-        Ok((approved_size, snapshot))
+        self.gate_sized_exposure(opp, execution_id, approved_size, &factor_context, &snapshot)
+    }
+
+    fn gate_sized_exposure(
+        &self,
+        opp: &Opportunity,
+        execution_id: &ExecutionId,
+        approved_size: Usd,
+        factor_context: &FactorDecisionContext,
+        snapshot: &ScoredOpportunitySnapshot,
+    ) -> Result<(Usd, ScoredOpportunitySnapshot), ExecutionResult> {
+        let mode = self.mode.current();
+        let approved_fee = match self.plan_builder.preview_fee(mode, opp, approved_size) {
+            Ok(fee) => fee,
+            Err(error) => {
+                self.metrics.validation_failures.inc();
+                self.audit_writer.write_rejection(
+                    execution_id,
+                    opp,
+                    "fee_quote",
+                    &error.to_string(),
+                    snapshot,
+                );
+                return Err(Self::reject("fee_quote", error));
+            }
+        };
+
+        let settlement_gate = SettlementGateInput {
+            mode,
+            market_neg_risk: self.plan_builder.market_registry().neg_risk(&opp.market_id),
+            redeem_policy: Some(&self.runtime_config.load().settlement.redeem),
+        };
+        let sized_decision = self.risk_engine.pre_trade_check_sized(&SizedPreTradeInput {
+            opportunity: opp,
+            approved_size,
+            approved_fee,
+            metrics: self.risk_metrics.as_ref(),
+            factor_context: Some(factor_context),
+            settlement_gate,
+            mode: ReportMode::ShortCircuit,
+        });
+        if !sized_decision.allowed {
+            return Err(self.record_risk_denial(execution_id, opp, &sized_decision, snapshot));
+        }
+
+        Ok((approved_size, snapshot.clone()))
     }
 
     /// Load the snapshot of the token actually being bought.
@@ -540,16 +668,36 @@ impl<R: TradeRepository + Send + Sync + 'static> ExecutionPipeline<R> {
         };
 
         let trade_id = TradeId::from_v7();
-        let plan = self
-            .plan_builder
-            .build(opp, approved_size, &reservation, execution_id);
+        let execution_id_for_audit = execution_id.clone();
+        let plan = match self.plan_builder.build(
+            self.mode.current(),
+            opp,
+            approved_size,
+            &reservation,
+            execution_id,
+        ) {
+            Ok(plan) => plan,
+            Err(error) => {
+                let _ = self.capital_manager.release_sync(&reservation);
+                self.audit_writer.write_rejection(
+                    &execution_id_for_audit,
+                    opp,
+                    "fee_quote",
+                    &error.to_string(),
+                    &snapshot,
+                );
+                return Err(Self::reject("fee_quote", error));
+            }
+        };
         let pending_trade =
             match build_pending_trade(&trade_id, &plan, opp, &snapshot, self.mode.current()) {
                 Ok(trade) => trade,
                 Err(e) => {
                     let _ = self.capital_manager.release_sync(&reservation);
-                    self.fsm
-                        .enter_emergency("scored snapshot serialization failed");
+                    self.fsm.enter_emergency(
+                        crate::execution::fsm::EmergencyClass::PersistenceFault,
+                        "scored snapshot serialization failed",
+                    );
                     return Err(Self::reject("trade_persist", e));
                 }
             };
@@ -586,7 +734,10 @@ impl<R: TradeRepository + Send + Sync + 'static> ExecutionPipeline<R> {
             ExecutionOutcome::Miss { .. } | ExecutionOutcome::Failed { .. } => {
                 if let Err(e) = self.capital_manager.release_sync(reservation) {
                     tracing::error!(error = %e, "reservation release failed");
-                    self.fsm.enter_emergency("reservation release failed");
+                    self.fsm.enter_emergency(
+                        crate::execution::fsm::EmergencyClass::ReservationFault,
+                        "reservation release failed",
+                    );
                 }
             }
             ExecutionOutcome::Filled { .. } | ExecutionOutcome::Unknown { .. } => {
@@ -612,8 +763,10 @@ impl<R: TradeRepository + Send + Sync + 'static> ExecutionPipeline<R> {
                             reservation_id = %prepared.reservation.id,
                             "unknown outcome reservation pin failed"
                         );
-                        self.fsm
-                            .enter_emergency("unknown outcome reservation pin failed");
+                        self.fsm.enter_emergency(
+                            crate::execution::fsm::EmergencyClass::ReservationFault,
+                            "unknown outcome reservation pin failed",
+                        );
                         return;
                     }
                     tracing::warn!(
@@ -630,8 +783,10 @@ impl<R: TradeRepository + Send + Sync + 'static> ExecutionPipeline<R> {
                         %reason,
                         "unknown venue outcome could not mark trade for reconciliation"
                     );
-                    self.fsm
-                        .enter_emergency("unknown outcome reconciliation mark skipped");
+                    self.fsm.enter_emergency(
+                        crate::execution::fsm::EmergencyClass::PersistenceFault,
+                        "unknown outcome reconciliation mark skipped",
+                    );
                 }
                 Err(error) => {
                     tracing::error!(
@@ -639,8 +794,10 @@ impl<R: TradeRepository + Send + Sync + 'static> ExecutionPipeline<R> {
                         trade_id = %prepared.trade_id,
                         "unknown outcome reconciliation mark failed"
                     );
-                    self.fsm
-                        .enter_emergency("unknown outcome reconciliation mark failed");
+                    self.fsm.enter_emergency(
+                        crate::execution::fsm::EmergencyClass::PersistenceFault,
+                        "unknown outcome reconciliation mark failed",
+                    );
                 }
             }
             return;
@@ -655,8 +812,10 @@ impl<R: TradeRepository + Send + Sync + 'static> ExecutionPipeline<R> {
                 trade_id = %prepared.trade_id,
                 "known-outcome observation attempted to resolve an unknown venue outcome"
             );
-            self.fsm
-                .enter_emergency("unknown outcome reached observed resolution path");
+            self.fsm.enter_emergency(
+                crate::execution::fsm::EmergencyClass::PersistenceFault,
+                "unknown outcome reached observed resolution path",
+            );
             return;
         };
         if let Err(error) = self
@@ -665,7 +824,10 @@ impl<R: TradeRepository + Send + Sync + 'static> ExecutionPipeline<R> {
             .await
         {
             tracing::error!(%error, trade_id = %prepared.trade_id, "mark observed failed");
-            self.fsm.enter_emergency("mark observed failed");
+            self.fsm.enter_emergency(
+                crate::execution::fsm::EmergencyClass::PersistenceFault,
+                "mark observed failed",
+            );
             return;
         }
         self.metrics_state.mark_stale();
@@ -692,6 +854,7 @@ impl<R: TradeRepository + Send + Sync + 'static> ExecutionPipeline<R> {
             .unwrap_or_else(|| "risk denied".into());
         if reason.starts_with("MarketAnomalyBlock")
             || reason.starts_with("ReconciliationMaintenance")
+            || reason.starts_with("ControlFactorManualAckRequired")
             || reason.starts_with("ControlFactorSnapshotExpired")
         {
             self.metrics.control_factor_hard_rejects.inc();

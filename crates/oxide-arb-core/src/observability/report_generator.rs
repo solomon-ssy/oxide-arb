@@ -10,7 +10,6 @@ use oxide_arb_models::{
         common::{AlertCategory, AlertLevel, AlertSource},
         report::ReportSchemaVersion,
     },
-    types::Usd,
 };
 use oxide_arb_repository::{
     postgres::{PgPositionRepository, PgReportRepository, PgTradeRepository},
@@ -122,7 +121,7 @@ impl ReportGenerator {
             period_end: date,
             total_pnl: settled_pnl.realized_pnl,
             total_fees_paid: settled_pnl.total_fees,
-            total_gas_paid: Usd::ZERO,
+            total_gas_paid: settled_pnl.total_gas_paid,
             trade_count: execution.trade_count,
             success_count: execution.success_count,
             miss_count: execution.miss_count,

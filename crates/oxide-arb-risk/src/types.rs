@@ -177,6 +177,8 @@ pub enum RiskCheckId {
     MarketAnomalyBlock,
     /// Control-factor `ReconciliationHealthFactor` forced maintenance mode.
     ReconciliationMaintenance,
+    /// Control-factor requires operator acknowledgement before new entries.
+    ControlFactorManualAckRequired,
     /// Control-factor publication TTL elapsed under fail-closed policy.
     ControlFactorSnapshotExpired,
     /// Live settlement redeem route must resolve for the target market class.

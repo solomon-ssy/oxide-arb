@@ -5,7 +5,7 @@
 //! trades are written exclusively by the execution pipeline.
 
 use actix_web::{http::Method, web};
-use chrono::{Duration, Utc};
+use chrono::Duration;
 use oxide_arb_models::{
     domain::{
         PageRequest, Paginated, ReconcileTradeRequest, RiskAuditEventView, TimeWindowQuery,
@@ -104,7 +104,7 @@ pub async fn reconciliation(
 pub async fn reconcile_trade(
     state: web::Data<AppState>,
     trade_id: web::Path<TradeId>,
-    _acting_role: ActingRole,
+    acting_role: ActingRole,
     op_ctx: OperationCtx,
     body: ValidatedJson<ReconcileTradeRequest>,
 ) -> Result<WebResponse<TradeView>, WebError> {
@@ -121,10 +121,11 @@ pub async fn reconcile_trade(
         "trade_id": trade_id,
         "resolution": body.resolution.as_str(),
         "note": body.note.clone(),
+        "acting_role": acting_role.0,
     }));
     let updated = state
-        .trades
-        .mark_reconciled(&trade_id, body.resolution, &body.note, Utc::now())
+        .control
+        .close_unresolvable_trade(&trade_id, &body.note, &acting_role.0)
         .await?;
     if !updated {
         return Err(WebError::Conflict(format!(

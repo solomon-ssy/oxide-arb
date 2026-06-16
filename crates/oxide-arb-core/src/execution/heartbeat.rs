@@ -1,6 +1,9 @@
 //! Periodic venue connectivity probe — feeds execution health into the risk engine.
 
-use crate::{bridge::execution_mode::ExecutionModeHandle, execution::fsm::ExecutionFSM};
+use crate::{
+    bridge::execution_mode::ExecutionModeHandle,
+    execution::{fsm::ExecutionFSM, trade_safety_gate::TradeSafetyGate},
+};
 use oxide_arb_api::clob::ClobClient;
 use oxide_arb_error::OxideError;
 use oxide_arb_models::enums::common::ExecutionMode;
@@ -12,6 +15,7 @@ pub struct HeartbeatTask {
     clob_client: Arc<ClobClient>,
     risk_engine: Arc<RiskEngine>,
     fsm: Arc<ExecutionFSM>,
+    trade_safety_gate: Arc<TradeSafetyGate>,
     interval_secs: u64,
     shutdown: CancellationToken,
     mode: ExecutionModeHandle,
@@ -22,6 +26,7 @@ impl HeartbeatTask {
         clob_client: Arc<ClobClient>,
         risk_engine: Arc<RiskEngine>,
         fsm: Arc<ExecutionFSM>,
+        trade_safety_gate: Arc<TradeSafetyGate>,
         interval_secs: u64,
         shutdown: CancellationToken,
         mode: ExecutionModeHandle,
@@ -30,6 +35,7 @@ impl HeartbeatTask {
             clob_client,
             risk_engine,
             fsm,
+            trade_safety_gate,
             interval_secs: interval_secs.max(1),
             shutdown,
             mode,
@@ -37,9 +43,6 @@ impl HeartbeatTask {
     }
 
     pub async fn run(self) -> Result<(), OxideError> {
-        // The probe self-gates on the live mode each tick so a governed
-        // transition into / out of Live activates or quiesces it without a
-        // task respawn.
         let mut ticker = tokio::time::interval(Duration::from_secs(self.interval_secs));
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         ticker.tick().await;
@@ -59,15 +62,20 @@ impl HeartbeatTask {
                             tracing::debug!("heartbeat OK");
                             self.risk_engine
                                 .on_execution_event(ExecutionRiskEvent::HeartbeatSuccess);
-                            let _ = self.fsm.try_auto_recover(&self.risk_engine);
+                            let _ = self
+                                .fsm
+                                .try_auto_recover(&self.trade_safety_gate, &self.risk_engine)
+                                .await;
                         }
                         Err(e) => {
                             tracing::warn!(error = %e, "heartbeat failed");
                             self.risk_engine
                                 .on_execution_event(ExecutionRiskEvent::HeartbeatFailure);
                             if !self.risk_engine.allows_trading() && !self.fsm.is_emergency() {
-                                self.fsm
-                                    .enter_emergency("risk circuit breaker blocking trades");
+                                self.fsm.enter_emergency(
+                                    crate::execution::fsm::EmergencyClass::VenueFault,
+                                    "risk circuit breaker blocking trades",
+                                );
                             }
                         }
                     }

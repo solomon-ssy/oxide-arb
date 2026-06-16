@@ -9,14 +9,15 @@ pub mod checks;
 use crate::{
     context::PreTradeContext,
     pipeline::checks::{
-        ApiErrorRateCheck, BlacklistCheck, CircuitBreakerCheck, ControlFactorSnapshotExpiredCheck,
-        DailyBudgetCheck, DailyDirectionalBudgetCheck, DailyLossCapCheck,
-        DirectionalConcentrationCheck, DrawdownGuardCheck, DuplicateMarketCheck, ExposurePctCheck,
-        FeeSpendCheck, HourlyLossCapCheck, ManualHaltCheck, MarketAnomalyBlockCheck,
-        MarketExposureCheck, MaxDepthUsageCheck, MaxPositionsCheck, MaxSingleBetCheck,
-        MetricsFreshnessCheck, MinBalanceCheck, MinDepthCheck, PotentialLossCapCheck,
-        ReconciliationMaintenanceCheck, RedeemRouteResolvableCheck, StalenessCheck,
-        TokenBlacklistCheck, TotalExposureCheck, WeeklyLossCapCheck, WsConnectivityCheck,
+        ApiErrorRateCheck, BlacklistCheck, CircuitBreakerCheck,
+        ControlFactorManualAckRequiredCheck, ControlFactorSnapshotExpiredCheck, DailyBudgetCheck,
+        DailyDirectionalBudgetCheck, DailyLossCapCheck, DirectionalConcentrationCheck,
+        DrawdownGuardCheck, DuplicateMarketCheck, ExposurePctCheck, FeeSpendCheck,
+        HourlyLossCapCheck, ManualHaltCheck, MarketAnomalyBlockCheck, MarketExposureCheck,
+        MaxDepthUsageCheck, MaxPositionsCheck, MaxSingleBetCheck, MetricsFreshnessCheck,
+        MinBalanceCheck, MinDepthCheck, PotentialLossCapCheck, ReconciliationMaintenanceCheck,
+        RedeemRouteResolvableCheck, StalenessCheck, TokenBlacklistCheck, TotalExposureCheck,
+        WeeklyLossCapCheck, WsConnectivityCheck,
     },
     types::{PipelineReport, ReportMode, RiskCheckId, RiskCheckKind, RiskCheckResult},
 };
@@ -49,6 +50,7 @@ pub struct StaticRiskPipeline {
     token_blacklist: TokenBlacklistCheck,
     market_anomaly_block: MarketAnomalyBlockCheck,
     reconciliation_maintenance: ReconciliationMaintenanceCheck,
+    control_factor_manual_ack_required: ControlFactorManualAckRequiredCheck,
     control_factor_snapshot_expired: ControlFactorSnapshotExpiredCheck,
     redeem_route_resolvable: RedeemRouteResolvableCheck,
     metrics_freshness: MetricsFreshnessCheck,
@@ -80,7 +82,7 @@ pub struct StaticRiskPipeline {
 impl StaticRiskPipeline {
     #[must_use]
     pub const fn len(&self) -> usize {
-        30
+        31
     }
 
     #[must_use]
@@ -113,6 +115,7 @@ impl StaticRiskPipeline {
             RiskCheckId::TokenBlacklist,
             RiskCheckId::MarketAnomalyBlock,
             RiskCheckId::ReconciliationMaintenance,
+            RiskCheckId::ControlFactorManualAckRequired,
             RiskCheckId::ControlFactorSnapshotExpired,
             RiskCheckId::RedeemRouteResolvable,
             RiskCheckId::MetricsFreshness,
@@ -148,6 +151,7 @@ impl StaticRiskPipeline {
             &self.token_blacklist,
             &self.market_anomaly_block,
             &self.reconciliation_maintenance,
+            &self.control_factor_manual_ack_required,
             &self.control_factor_snapshot_expired,
             &self.redeem_route_resolvable,
             &self.metrics_freshness,
@@ -185,6 +189,93 @@ impl StaticRiskPipeline {
     #[must_use]
     pub fn evaluate(&self, ctx: &PreTradeContext<'_>, mode: ReportMode) -> PipelineReport {
         self.evaluate_range(ctx, mode, 0, self.len())
+    }
+
+    /// Post-Kelly exposure gates using [`PreTradeContext::sized_intent`].
+    #[must_use]
+    pub fn evaluate_sized_gates(
+        &self,
+        ctx: &PreTradeContext<'_>,
+        mode: ReportMode,
+    ) -> PipelineReport {
+        let pipeline_start = Instant::now();
+        let mut results = Vec::with_capacity(6);
+        let mut has_failed_hard_gate = false;
+        let mut first_failure: Option<RiskCheckId> = None;
+
+        macro_rules! run_gate {
+            ($check:expr) => {
+                run_check(
+                    &$check,
+                    RiskCheckKind::Gate,
+                    ctx,
+                    mode,
+                    &mut results,
+                    &mut has_failed_hard_gate,
+                    &mut first_failure,
+                )
+            };
+        }
+
+        let _ = run_gate!(self.daily_budget);
+        if has_failed_hard_gate && mode == ReportMode::ShortCircuit {
+            return PipelineReport {
+                results,
+                has_failed_hard_gate,
+                first_failure,
+                total_elapsed_us: ToPrimitive::to_u64(&pipeline_start.elapsed().as_micros())
+                    .unwrap_or(u64::MAX),
+            };
+        }
+        let _ = run_gate!(self.max_single_bet);
+        if has_failed_hard_gate && mode == ReportMode::ShortCircuit {
+            return PipelineReport {
+                results,
+                has_failed_hard_gate,
+                first_failure,
+                total_elapsed_us: ToPrimitive::to_u64(&pipeline_start.elapsed().as_micros())
+                    .unwrap_or(u64::MAX),
+            };
+        }
+        let _ = run_gate!(self.market_exposure);
+        if has_failed_hard_gate && mode == ReportMode::ShortCircuit {
+            return PipelineReport {
+                results,
+                has_failed_hard_gate,
+                first_failure,
+                total_elapsed_us: ToPrimitive::to_u64(&pipeline_start.elapsed().as_micros())
+                    .unwrap_or(u64::MAX),
+            };
+        }
+        let _ = run_gate!(self.total_exposure);
+        if has_failed_hard_gate && mode == ReportMode::ShortCircuit {
+            return PipelineReport {
+                results,
+                has_failed_hard_gate,
+                first_failure,
+                total_elapsed_us: ToPrimitive::to_u64(&pipeline_start.elapsed().as_micros())
+                    .unwrap_or(u64::MAX),
+            };
+        }
+        let _ = run_gate!(self.exposure_pct);
+        if has_failed_hard_gate && mode == ReportMode::ShortCircuit {
+            return PipelineReport {
+                results,
+                has_failed_hard_gate,
+                first_failure,
+                total_elapsed_us: ToPrimitive::to_u64(&pipeline_start.elapsed().as_micros())
+                    .unwrap_or(u64::MAX),
+            };
+        }
+        let _ = run_gate!(self.potential_loss_cap);
+
+        PipelineReport {
+            results,
+            has_failed_hard_gate,
+            first_failure,
+            total_elapsed_us: ToPrimitive::to_u64(&pipeline_start.elapsed().as_micros())
+                .unwrap_or(u64::MAX),
+        }
     }
 
     /// Evaluate gates `[start, end)` — used for lazy phase-1 / phase-2 split.
@@ -235,6 +326,7 @@ impl StaticRiskPipeline {
             gate!(self.token_blacklist);
             gate!(self.market_anomaly_block);
             gate!(self.reconciliation_maintenance);
+            gate!(self.control_factor_manual_ack_required);
             gate!(self.control_factor_snapshot_expired);
             gate!(self.redeem_route_resolvable);
             gate!(self.metrics_freshness);
@@ -312,6 +404,7 @@ pub fn build_default_pipeline(config: &RiskConfig) -> StaticRiskPipeline {
         token_blacklist: TokenBlacklistCheck,
         market_anomaly_block: MarketAnomalyBlockCheck,
         reconciliation_maintenance: ReconciliationMaintenanceCheck,
+        control_factor_manual_ack_required: ControlFactorManualAckRequiredCheck,
         control_factor_snapshot_expired: ControlFactorSnapshotExpiredCheck,
         redeem_route_resolvable: RedeemRouteResolvableCheck,
         metrics_freshness: MetricsFreshnessCheck::new(config),

@@ -250,6 +250,7 @@ async fn reconciliation_detects_internal_markets_not_present_externally() {
             redeem_holder_address: None,
             redeem_resolution: RedeemResolutionSource::ClassStandard,
             redeem_gas_limit: 500_000,
+            redeem_gas_paid_usd: None,
         }],
         ..Default::default()
     };
@@ -311,6 +312,7 @@ async fn reconciliation_skips_position_drift_when_external_positions_are_unknown
             redeem_holder_address: None,
             redeem_resolution: RedeemResolutionSource::ClassStandard,
             redeem_gas_limit: 500_000,
+            redeem_gas_paid_usd: None,
         }],
         reserved: Usd::ZERO,
     };

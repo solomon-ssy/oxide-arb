@@ -548,6 +548,9 @@ mod tests {
             reconcile_resolution: None,
             reconciled_at: None,
             reconcile_note: None,
+            pre_submit_ctf_balance: None,
+            reconcile_attempts: 0,
+            reconcile_defer_until: None,
             post_trade_claim_owner: None,
             post_trade_claimed_at: None,
             post_trade_attempts: 0,
@@ -745,6 +748,7 @@ mod tests {
             redeem_holder_address: None,
             redeem_resolution: RedeemResolutionSource::ClassStandard,
             redeem_gas_limit: 500_000,
+            redeem_gas_paid_usd: None,
         };
         let request = MarketSettlementRequest {
             market_id: trade.market_id.clone(),

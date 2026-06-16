@@ -47,6 +47,8 @@ pub struct Model {
     pub redeem_holder_address: Option<String>,
     pub redeem_resolution: RedeemResolutionSource,
     pub redeem_gas_limit: i64,
+    /// On-chain gas cost (USD) for the redeem transaction, when known.
+    pub redeem_gas_paid_usd: Option<Usd>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

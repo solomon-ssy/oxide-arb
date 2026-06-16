@@ -220,6 +220,58 @@ impl RiskCheck for ReconciliationMaintenanceCheck {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// #6b ControlFactorManualAckRequired (control factor)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Hard-rejects when a published control factor requires operator acknowledgement
+/// before admitting new entries (reconciliation health or market anomaly).
+pub struct ControlFactorManualAckRequiredCheck;
+
+impl RiskCheck for ControlFactorManualAckRequiredCheck {
+    fn requires_metrics(&self) -> bool {
+        false
+    }
+
+    fn id(&self) -> RiskCheckId {
+        RiskCheckId::ControlFactorManualAckRequired
+    }
+
+    fn kind(&self) -> RiskCheckKind {
+        RiskCheckKind::Gate
+    }
+
+    fn evaluate(&self, ctx: &PreTradeContext<'_>) -> RiskCheckResult {
+        let Some(factor_context) = ctx.factor_context() else {
+            return RiskCheckResult::passed(RiskCheckId::ControlFactorManualAckRequired);
+        };
+        if factor_context.reconciliation_health.require_manual_ack {
+            return RiskCheckResult::failed(
+                RiskCheckId::ControlFactorManualAckRequired,
+                "reconciliation health requires manual acknowledgement".into(),
+                "acknowledged".into(),
+                "pending".into(),
+            );
+        }
+        if factor_context.market_anomaly.manual_ack_required {
+            return RiskCheckResult::failed(
+                RiskCheckId::ControlFactorManualAckRequired,
+                factor_context
+                    .market_anomaly
+                    .reason_code
+                    .clone()
+                    .map_or_else(
+                        || "market anomaly requires manual acknowledgement".to_owned(),
+                        |code| format!("market anomaly {code} requires manual acknowledgement"),
+                    ),
+                "acknowledged".into(),
+                "pending".into(),
+            );
+        }
+        RiskCheckResult::passed(RiskCheckId::ControlFactorManualAckRequired)
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // #7 ControlFactorSnapshotExpired (control factor)
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -516,7 +568,7 @@ impl RiskCheck for DailyBudgetCheck {
         RiskCheckKind::Gate
     }
     fn evaluate(&self, ctx: &PreTradeContext<'_>) -> RiskCheckResult {
-        if ctx.daily_budget_remaining() > Usd::ZERO {
+        if ctx.daily_budget_remaining() >= ctx.intended_cost_usd() {
             RiskCheckResult::passed(RiskCheckId::DailyBudget)
         } else {
             RiskCheckResult::failed(
@@ -743,7 +795,7 @@ impl RiskCheck for MaxSingleBetCheck {
         RiskCheckKind::Gate
     }
     fn evaluate(&self, ctx: &PreTradeContext<'_>) -> RiskCheckResult {
-        let actual = ctx.opportunity.total_cost;
+        let actual = ctx.intended_cost_usd();
 
         if actual <= self.max_single_bet_usd {
             RiskCheckResult::passed(RiskCheckId::MaxSingleBet)
@@ -783,7 +835,7 @@ impl RiskCheck for MarketExposureCheck {
         RiskCheckKind::Gate
     }
     fn evaluate(&self, ctx: &PreTradeContext<'_>) -> RiskCheckResult {
-        let post_trade = ctx.market_exposure_before() + ctx.opportunity.total_cost;
+        let post_trade = ctx.market_exposure_before() + ctx.intended_cost_usd();
 
         if post_trade <= self.max_single_market_exposure_usd {
             RiskCheckResult::passed(RiskCheckId::MarketExposure)
@@ -826,7 +878,7 @@ impl RiskCheck for TotalExposureCheck {
         RiskCheckKind::Gate
     }
     fn evaluate(&self, ctx: &PreTradeContext<'_>) -> RiskCheckResult {
-        let post_trade = ctx.total_exposure_before() + ctx.opportunity.total_cost;
+        let post_trade = ctx.total_exposure_before() + ctx.intended_cost_usd();
 
         if post_trade <= self.max_total_exposure_usd {
             RiskCheckResult::passed(RiskCheckId::TotalExposure)
@@ -878,7 +930,7 @@ impl RiskCheck for ExposurePctCheck {
             );
         }
 
-        let post_trade = ctx.total_exposure_before().inner() + ctx.opportunity.total_cost.inner();
+        let post_trade = ctx.total_exposure_before().inner() + ctx.intended_cost_usd().inner();
         let pct = post_trade / ctx.cash_balance().inner() * dec!(100);
 
         if pct <= self.max_total_exposure_pct {
@@ -912,7 +964,7 @@ impl RiskCheck for PotentialLossCapCheck {
     }
     fn evaluate(&self, ctx: &PreTradeContext<'_>) -> RiskCheckResult {
         let post_trade_potential =
-            ctx.total_potential_loss() + ctx.opportunity.total_cost + ctx.opportunity.total_fees;
+            ctx.total_potential_loss() + ctx.intended_cost_usd() + ctx.intended_fee_usd();
 
         if post_trade_potential <= ctx.cash_balance() {
             RiskCheckResult::passed(RiskCheckId::PotentialLossCap)

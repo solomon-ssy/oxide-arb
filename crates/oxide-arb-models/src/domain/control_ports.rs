@@ -75,6 +75,10 @@ pub trait RuntimeControlPort: Send + Sync {
     /// Resume trading after operator acknowledgement.
     async fn resume(&self, operator_ack: &str) -> Result<(), RuntimeControlError>;
 
+    /// Acknowledge a reservation or persistence execution emergency after the
+    /// underlying fault is resolved (`ReservationFault` / `PersistenceFault`).
+    async fn ack_execution_emergency(&self, operator_ack: &str) -> Result<(), RuntimeControlError>;
+
     /// Force the circuit breaker back to `Closed`.
     async fn reset_circuit_breaker(&self, reason: &str) -> Result<(), RuntimeControlError>;
 
@@ -110,6 +114,17 @@ pub trait RuntimeControlPort: Send + Sync {
 
     /// Run all subsystem health checks.
     async fn health(&self) -> HealthReport;
+
+    /// Operator closure for an orphaned trade that cannot be proven filled or missed.
+    ///
+    /// Returns `Ok(true)` when the trade was closed, `Ok(false)` when the row was
+    /// not eligible (not orphaned / not pending reconcile).
+    async fn close_unresolvable_trade(
+        &self,
+        trade_id: &crate::types::TradeId,
+        note: &str,
+        operator: &str,
+    ) -> Result<bool, RuntimeControlError>;
 }
 
 /// Hot-reload surface for the versioned runtime configuration

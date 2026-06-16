@@ -151,6 +151,7 @@ mod tests {
             neg_risk: Some(NegRiskRedeemPolicy::default()),
             overrides: HashMap::new(),
             gas_limit: 500_000,
+            matic_usd_price: RedeemRoutingPolicy::default().matic_usd_price,
         };
         assert!(policy.resolve(&market("0xabc"), false).is_none());
         assert!(policy.resolve(&market("0xabc"), true).is_some());

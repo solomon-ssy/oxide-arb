@@ -7,8 +7,8 @@
 //! for money-relevant behaviour.
 
 use super::{
-    AppContext, ControlFactorBundle, DataBundle, ExecutionBundle, InfraBundle, RiskBundle,
-    RuntimeChannels, SettlementBundle, TradingBundle, task_registry::PendingTaskQueue,
+    AppContext, ControlFactorBundle, DataBundle, ExecutionBundle, ExecutionBundleDeps, InfraBundle,
+    RiskBundle, RuntimeChannels, SettlementBundle, TradingBundle, task_registry::PendingTaskQueue,
 };
 use crate::control::status::SystemStatusNudge;
 use crate::{
@@ -628,6 +628,7 @@ fn assemble_app_context(parts: AppContextAssembly) -> AppContext {
             balance_fact_writer: infra.balance_fact_writer,
             book_fact_writer: persistence.book_fact_writer,
             holder_address: clients.holder_address,
+            fee_calculator: clients.fee_calculator,
         },
         data: DataBundle {
             book_store: trading.book_store,
@@ -1351,6 +1352,68 @@ async fn wire_detection(
     })
 }
 
+struct ExecutionPipelineWiring<'a> {
+    /// Owned handle — moved into the pipeline after one clone for the dispatcher.
+    execution_mode: ExecutionModeHandle,
+    infra: &'a BuildInfra,
+    clients: &'a BuildClients,
+    risk: &'a BuildRisk,
+    detection: &'a DetectionStack,
+    capital: &'a Arc<CapitalManager>,
+    market_inflight: &'a Arc<MarketInFlightRegistry>,
+    validator: &'a Arc<Validator>,
+    order_strategy: &'a Arc<FokOrderStrategy>,
+    relay_notify: &'a Arc<Notify>,
+    reconcile_notify: &'a Arc<Notify>,
+}
+
+fn build_execution_pipeline(wiring: ExecutionPipelineWiring<'_>) -> Arc<ExecutionPipeline> {
+    let ExecutionPipelineWiring {
+        execution_mode,
+        infra,
+        clients,
+        risk,
+        detection,
+        capital,
+        market_inflight,
+        validator,
+        order_strategy,
+        relay_notify,
+        reconcile_notify,
+    } = wiring;
+    Arc::new(ExecutionPipeline::new(ExecutionPipelineDeps {
+        validator: Arc::clone(validator),
+        plan_builder: PlanBuilder::new(
+            clients.fee_calculator.clone(),
+            Arc::clone(&detection.market_registry),
+        ),
+        dispatcher: Dispatcher::new(
+            execution_mode.clone(),
+            Arc::clone(&detection.book_store),
+            clients.fee_calculator.clone(),
+            Arc::clone(&infra.metrics),
+        ),
+        order_strategy: Arc::clone(order_strategy),
+        capital_manager: Arc::clone(capital),
+        risk_engine: Arc::clone(&risk.engine),
+        risk_metrics: Arc::clone(&risk.metrics),
+        fsm: Arc::clone(&risk.fsm),
+        market_inflight: Arc::clone(market_inflight),
+        metrics: Arc::clone(&infra.metrics),
+        mode: execution_mode,
+        trade_repo: Arc::clone(&infra.persistence.trade_repo),
+        audit_writer: Arc::clone(&infra.persistence.audit_writer),
+        relay_notify: Arc::clone(relay_notify),
+        reconcile_notify: Arc::clone(reconcile_notify),
+        metrics_state: Arc::clone(&risk.metrics_state),
+        runtime_config: Arc::clone(&infra.runtime_store),
+        factors: Arc::clone(&infra.factor_store),
+        shadow_writer: Some(infra.shadow_writer.clone()),
+        ctf_redeem: clients.ctf_redeem.clone(),
+        holder_address: clients.holder_address.clone(),
+    }))
+}
+
 fn wire_execution_loop(
     wiring: WiringConfig<'_>,
     execution_mode: &ExecutionModeHandle,
@@ -1375,42 +1438,27 @@ fn wire_execution_loop(
         &runtime.execution,
         Arc::clone(&infra.metrics),
     ));
+    let mode_handle = execution_mode.clone();
     let order_strategy = Arc::new(FokOrderStrategy::new(
-        execution_mode.clone(),
+        mode_handle.clone(),
         clients.clob_client.clone(),
         clients.fee_calculator.clone(),
         runtime.execution.timeout.dispatcher_timeout_ms,
         Arc::clone(&infra.metrics),
     ));
-    let execution_pipeline = Arc::new(ExecutionPipeline::new(ExecutionPipelineDeps {
-        validator: Arc::clone(&validator),
-        plan_builder: PlanBuilder::new(
-            clients.fee_calculator.clone(),
-            Arc::clone(&detection.market_registry),
-        ),
-        dispatcher: Dispatcher::new(
-            execution_mode.clone(),
-            Arc::clone(&detection.book_store),
-            clients.fee_calculator.clone(),
-            Arc::clone(&infra.metrics),
-        ),
-        order_strategy: Arc::clone(&order_strategy),
-        capital_manager: Arc::clone(&capital),
-        risk_engine: Arc::clone(&risk.engine),
-        risk_metrics: Arc::clone(&risk.metrics),
-        fsm: Arc::clone(&risk.fsm),
-        market_inflight: Arc::clone(&market_inflight),
-        metrics: Arc::clone(&infra.metrics),
-        mode: execution_mode.clone(),
-        trade_repo: Arc::clone(&infra.persistence.trade_repo),
-        audit_writer: Arc::clone(&infra.persistence.audit_writer),
-        relay_notify: Arc::clone(&relay_notify),
-        reconcile_notify: Arc::clone(&reconcile_notify),
-        metrics_state: Arc::clone(&risk.metrics_state),
-        runtime_config: Arc::clone(&infra.runtime_store),
-        factors: Arc::clone(&infra.factor_store),
-        shadow_writer: Some(infra.shadow_writer.clone()),
-    }));
+    let execution_pipeline = build_execution_pipeline(ExecutionPipelineWiring {
+        execution_mode: mode_handle,
+        infra,
+        clients,
+        risk,
+        detection,
+        capital: &capital,
+        market_inflight: &market_inflight,
+        validator: &validator,
+        order_strategy: &order_strategy,
+        relay_notify: &relay_notify,
+        reconcile_notify: &reconcile_notify,
+    });
 
     let inflight = Arc::new(AtomicU32::new(0));
     let pipeline_port = Arc::clone(&execution_pipeline);
@@ -1445,15 +1493,17 @@ fn wire_execution_loop(
         shutdown,
     }));
 
-    let execution = ExecutionBundle::new(
-        execution_pipeline,
+    let execution = ExecutionBundle::new(ExecutionBundleDeps {
+        pipeline: execution_pipeline,
         market_inflight,
-        Arc::clone(&risk.engine),
-        Arc::clone(&risk.fsm),
-        Arc::clone(&capital),
+        risk_engine: Arc::clone(&risk.engine),
+        fsm: Arc::clone(&risk.fsm),
+        capital_manager: Arc::clone(&capital),
         relay_notify,
         reconcile_notify,
-    );
+        clob: clients.clob_client.clone(),
+        mode: execution_mode.clone(),
+    });
 
     ExecutionLoop {
         funnel,

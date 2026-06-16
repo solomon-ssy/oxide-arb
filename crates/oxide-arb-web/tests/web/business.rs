@@ -155,6 +155,7 @@ fn daily_report_payload(date: NaiveDate, pnl: i64) -> serde_json::Value {
             failed_accounting_count: 0,
             largest_single_profit: Usd::ZERO,
             largest_single_loss: Usd::ZERO,
+            total_gas_paid: Usd::ZERO,
         },
         execution: ReportTradeStats {
             trade_count: 0,
@@ -203,6 +204,7 @@ fn weekly_report_payload(week_start: NaiveDate, week_end: NaiveDate) -> serde_js
             failed_accounting_count: 0,
             largest_single_profit: Usd::ZERO,
             largest_single_loss: Usd::ZERO,
+            total_gas_paid: Usd::ZERO,
         },
         execution: ReportTradeStats {
             trade_count: 0,

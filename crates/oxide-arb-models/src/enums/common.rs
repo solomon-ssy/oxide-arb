@@ -113,6 +113,28 @@ active_string_enum! {
     }
 }
 
+/// Semantic kind of a trade row's `net_profit_usd` on the API wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NetProfitKind {
+    /// No fill-time EV is recorded.
+    None,
+    /// Fill-time expected value — not realized settlement `PnL`.
+    FillEv,
+}
+
+impl NetProfitKind {
+    /// Derive the wire kind from the persisted optional EV column.
+    #[must_use]
+    pub const fn for_net_profit(net_profit_usd: &Option<crate::types::Usd>) -> Self {
+        if net_profit_usd.is_some() {
+            Self::FillEv
+        } else {
+            Self::None
+        }
+    }
+}
+
 active_string_enum! {
     /// Durable trade lifecycle state machine — single source of truth on the `trade` row.
     ///
