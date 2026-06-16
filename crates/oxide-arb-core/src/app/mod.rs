@@ -348,6 +348,7 @@ impl AppContext {
             risk_engine: Arc::clone(&self.risk.engine),
             risk_metrics: Arc::clone(&self.risk.metrics),
             fsm: Arc::clone(&self.trading.fsm),
+            capital_manager: Arc::clone(&exec.capital_manager),
             trade_repo: Arc::clone(&trade_repo),
             position_repo,
             calibration_repo,

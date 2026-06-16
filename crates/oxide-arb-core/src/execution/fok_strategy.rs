@@ -144,10 +144,10 @@ impl FokOrderStrategy {
                 tracing::error!(
                     execution_id = %plan.execution_id,
                     timeout_ms,
-                    "CLOB FOK order timed out"
+                    "CLOB FOK order timed out with unknown venue outcome"
                 );
-                ExecutionOutcome::Failed {
-                    error: format!("CLOB FOK order timeout after {timeout_ms}ms"),
+                ExecutionOutcome::Unknown {
+                    reason: format!("CLOB FOK order timeout after {timeout_ms}ms"),
                     execution_mode: ExecutionMode::Live,
                 }
             }
@@ -159,7 +159,9 @@ impl FokOrderStrategy {
             ExecutionOutcome::Filled { .. } => {
                 self.metrics.fok_fills.inc();
             }
-            ExecutionOutcome::Miss { .. } | ExecutionOutcome::Failed { .. } => {
+            ExecutionOutcome::Miss { .. }
+            | ExecutionOutcome::Failed { .. }
+            | ExecutionOutcome::Unknown { .. } => {
                 self.metrics.fok_misses.inc();
             }
         }

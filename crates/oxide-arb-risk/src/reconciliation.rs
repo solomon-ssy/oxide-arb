@@ -49,21 +49,23 @@ impl LedgerReconciler {
             metrics.cash_balance(),
             ext_available,
             ext_locked,
-            &ext_positions,
+            Some(&ext_positions),
         ))
     }
 
     /// Reconcile using pre-fetched external data — **zero additional I/O**.
     ///
-    /// Used by [`RiskMetricsRefreshService`] to piggyback reconciliation on the
-    /// same CLOB balance + PG position fetch that updates the snapshot.
+    /// Pass `None` for `ext_positions` only when the caller has no authoritative
+    /// external position snapshot. An absent snapshot is different from an empty
+    /// venue portfolio; treating it as empty would false-trip Live accounts that
+    /// legitimately have open positions.
     pub fn reconcile_fetched(
         &self,
         metrics: &dyn RiskMetrics,
         internal_balance: Usd,
         ext_available: Usd,
         ext_locked: Usd,
-        ext_positions: &[(MarketId, Usd)],
+        ext_positions: Option<&[(MarketId, Usd)]>,
     ) -> ReconciliationReport {
         let start = Instant::now();
 
@@ -85,33 +87,35 @@ impl LedgerReconciler {
         let positions = metrics.open_positions();
         let mut external_exposure = Usd::ZERO;
 
-        for (ext_market_id, ext_value) in ext_positions {
-            external_exposure += *ext_value;
-            let internal_value = metrics.market_exposure(ext_market_id);
-            let drift = internal_value - *ext_value;
+        if let Some(ext_positions) = ext_positions {
+            for (ext_market_id, ext_value) in ext_positions {
+                external_exposure += *ext_value;
+                let internal_value = metrics.market_exposure(ext_market_id);
+                let drift = internal_value - *ext_value;
 
-            if drift.abs() > self.tolerance {
-                mismatches.push(ReconciliationMismatch::PositionDrift {
-                    market_id: ext_market_id.clone(),
-                    internal: internal_value,
-                    external: *ext_value,
-                    drift,
-                });
-            }
-        }
-
-        let ext_market_set: HashSet<_> = ext_positions.iter().map(|(m, _)| m.clone()).collect();
-
-        for pos in &positions {
-            if !ext_market_set.contains(&pos.market_id) {
-                let internal_value = metrics.market_exposure(&pos.market_id);
-                if internal_value.abs() > self.tolerance {
+                if drift.abs() > self.tolerance {
                     mismatches.push(ReconciliationMismatch::PositionDrift {
-                        market_id: pos.market_id.clone(),
+                        market_id: ext_market_id.clone(),
                         internal: internal_value,
-                        external: Usd::ZERO,
-                        drift: internal_value,
+                        external: *ext_value,
+                        drift,
                     });
+                }
+            }
+
+            let ext_market_set: HashSet<_> = ext_positions.iter().map(|(m, _)| m.clone()).collect();
+
+            for pos in &positions {
+                if !ext_market_set.contains(&pos.market_id) {
+                    let internal_value = metrics.market_exposure(&pos.market_id);
+                    if internal_value.abs() > self.tolerance {
+                        mismatches.push(ReconciliationMismatch::PositionDrift {
+                            market_id: pos.market_id.clone(),
+                            internal: internal_value,
+                            external: Usd::ZERO,
+                            drift: internal_value,
+                        });
+                    }
                 }
             }
         }

@@ -270,3 +270,67 @@ async fn reconciliation_detects_internal_markets_not_present_externally() {
         report.mismatches
     );
 }
+
+#[tokio::test]
+async fn reconciliation_skips_position_drift_when_external_positions_are_unknown() {
+    let market = MarketId::new("0xunknown_external_positions");
+    let metrics = MockReconMetrics {
+        balance: Usd::new(dec!(1000)),
+        total_exposure: Usd::new(dec!(50)),
+        market_exposures: vec![(market.clone(), Usd::new(dec!(50)))],
+        positions: vec![PositionInfo {
+            position_id: PositionId::from_v7(),
+            trade_id: TradeId::from_v7(),
+            market_id: market,
+            token_id: TokenId::new("tok"),
+            side: Side::Buy,
+            execution_mode: ExecutionMode::Live,
+            shares: Shares::new(dec!(10)),
+            avg_entry_price: Price::new(dec!(5)),
+            total_cost_usd: Usd::new(dec!(50)),
+            total_fees_usd: Usd::ZERO,
+            unrealized_pnl: Usd::ZERO,
+            realized_pnl: Usd::ZERO,
+            status: PositionStatus::Open,
+            opened_at: chrono::Utc::now(),
+            closed_at: None,
+            settled_at: None,
+            winning_token_id: None,
+            settlement_payout_usd: None,
+            redeem_tx_hash: None,
+            redeem_status: RedeemStatus::NotRequired,
+            redeem_attempts: 0,
+            oracle_verdict: None,
+            settlement_trigger: None,
+            settlement_accounting_status: SettlementAccountingStatus::Pending,
+            settlement_accounting_error: None,
+            settlement_accounted_at: None,
+            redeem_terminal_reason: None,
+            redeem_neg_risk: false,
+            redeem_route: "standard_ctf".into(),
+            redeem_holder_address: None,
+            redeem_resolution: RedeemResolutionSource::ClassStandard,
+            redeem_gas_limit: 500_000,
+        }],
+        reserved: Usd::ZERO,
+    };
+    let reconciler = LedgerReconciler::new(dec!(1));
+
+    let report = reconciler.reconcile_fetched(
+        &metrics,
+        metrics.cash_balance(),
+        metrics.cash_balance(),
+        Usd::ZERO,
+        None,
+    );
+
+    assert_eq!(report.status, ReconciliationStatus::Ok);
+    assert!(
+        report
+            .mismatches
+            .iter()
+            .all(|m| !matches!(m, ReconciliationMismatch::PositionDrift { .. })),
+        "external positions are unknown, not empty: {:?}",
+        report.mismatches
+    );
+}

@@ -35,8 +35,8 @@ use oxide_arb_models::{
     domain::{
         BlacklistInfo, CatalogState, CoreEventPublisher, HealthReport, MarketDataPort,
         ModeTransitionReport, ReplayEnqueueRequest, ReplayEnqueueResult, ReplayPort,
-        RiskEngineState, RuntimeConfigPort, RuntimeControlError, RuntimeControlPort, SystemStatus,
-        market::book::BookSnapshot,
+        RiskEngineState, RuntimeConfigPort, RuntimeControlError, RuntimeControlPort,
+        SystemBalanceSource, SystemBalanceView, SystemStatus, market::book::BookSnapshot,
     },
     enums::{
         common::ExecutionMode,
@@ -547,6 +547,27 @@ impl RuntimeControlPort for MockRuntimeControl {
                 markets: 1,
                 synced_at: Utc::now(),
             },
+            checked_at: Utc::now(),
+        }
+    }
+
+    async fn system_balance(&self) -> SystemBalanceView {
+        SystemBalanceView {
+            execution_mode: self.execution_mode(),
+            source: SystemBalanceSource::SimulatedDryRun,
+            cash_balance_usd: Usd::new(rust_decimal_macros::dec!(1000)),
+            position_mark_value_usd: Usd::ZERO,
+            equity_usd: Usd::new(rust_decimal_macros::dec!(1000)),
+            bankroll_cap_usd: Usd::new(rust_decimal_macros::dec!(1000)),
+            reserve_balance_usd: Usd::new(rust_decimal_macros::dec!(100)),
+            reserved_usd: Usd::ZERO,
+            total_exposure_usd: Usd::ZERO,
+            available_before_potential_loss_usd: Usd::new(rust_decimal_macros::dec!(900)),
+            open_position_count: 0,
+            active_reservation_count: 0,
+            metrics_age_secs: 0,
+            is_authoritative: true,
+            is_stale: false,
             checked_at: Utc::now(),
         }
     }

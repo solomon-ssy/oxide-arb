@@ -52,7 +52,9 @@ impl Dispatcher {
         match outcome {
             ExecutionOutcome::Filled { .. } => self.metrics.trades_filled.inc(),
             ExecutionOutcome::Miss { .. } => self.metrics.trades_missed.inc(),
-            ExecutionOutcome::Failed { .. } => self.metrics.trades_failed.inc(),
+            ExecutionOutcome::Failed { .. } | ExecutionOutcome::Unknown { .. } => {
+                self.metrics.trades_failed.inc();
+            }
         }
     }
 

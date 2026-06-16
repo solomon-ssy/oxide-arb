@@ -322,6 +322,7 @@ fn harness_with_config(config: RuntimeConfig) -> Harness {
         risk_engine: risk_engine(),
         risk_metrics: risk_metrics(exposure, metrics_state.clone()),
         fsm,
+        capital_manager: Arc::clone(&capital_manager),
         trade_repo: trade_repo.clone(),
         position_repo: position_repo.clone(),
         calibration_repo: calibration_repo.clone(),

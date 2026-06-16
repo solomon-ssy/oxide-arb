@@ -579,23 +579,54 @@ impl<R: TradeRepository + Send + Sync + 'static> ExecutionPipeline<R> {
 
     fn settle_reservation(&self, outcome: &ExecutionOutcome, reservation: &ReservationHandle) {
         match outcome {
-            ExecutionOutcome::Filled { .. } => {
-                if let Err(e) = self.capital_manager.confirm_sync(reservation) {
-                    tracing::error!(error = %e, "reservation confirm failed");
-                    self.fsm.enter_emergency("reservation confirm failed");
-                }
-            }
             ExecutionOutcome::Miss { .. } | ExecutionOutcome::Failed { .. } => {
                 if let Err(e) = self.capital_manager.release_sync(reservation) {
                     tracing::error!(error = %e, "reservation release failed");
                     self.fsm.enter_emergency("reservation release failed");
                 }
             }
+            ExecutionOutcome::Filled { .. } | ExecutionOutcome::Unknown { .. } => {
+                // Filled: keep visible until the relay durably creates the
+                // position. Unknown: keep reserved until reconciliation proves
+                // whether the venue filled, missed, or failed the order.
+            }
         }
     }
 
     /// Durably record the venue outcome on the trade row, then wake the relay.
     async fn observe_outcome(&self, prepared: &PreparedDispatch, outcome: &ExecutionOutcome) {
+        if let ExecutionOutcome::Unknown { reason, .. } = outcome {
+            match self.trade_repo.mark_orphaned(&prepared.trade_id).await {
+                Ok(true) => {
+                    tracing::warn!(
+                        trade_id = %prepared.trade_id,
+                        %reason,
+                        "trade marked needs_reconcile after unknown venue outcome"
+                    );
+                    self.metrics_state.mark_stale();
+                }
+                Ok(false) => {
+                    tracing::warn!(
+                        trade_id = %prepared.trade_id,
+                        %reason,
+                        "unknown venue outcome could not mark trade for reconciliation"
+                    );
+                    self.fsm
+                        .enter_emergency("unknown outcome reconciliation mark skipped");
+                }
+                Err(error) => {
+                    tracing::error!(
+                        %error,
+                        trade_id = %prepared.trade_id,
+                        "unknown outcome reconciliation mark failed"
+                    );
+                    self.fsm
+                        .enter_emergency("unknown outcome reconciliation mark failed");
+                }
+            }
+            return;
+        }
+
         let resolved = ResolvedOutcome::resolve(
             outcome,
             prepared.plan.limit_price,

@@ -9,7 +9,7 @@
 
 use crate::{
     domain::{
-        BlacklistInfo, HealthReport, RiskEngineState, SystemStatus,
+        BlacklistInfo, HealthReport, RiskEngineState, SystemBalanceView, SystemStatus,
         control_factor::{
             ControlFactorMaterializationRunInfo, MarketFilterSpec, ReplayAccountScope,
         },
@@ -104,6 +104,9 @@ pub trait RuntimeControlPort: Send + Sync {
 
     /// Assemble the aggregate system-status view.
     async fn system_status(&self) -> SystemStatus;
+
+    /// Assemble the operator money-state view.
+    async fn system_balance(&self) -> SystemBalanceView;
 
     /// Run all subsystem health checks.
     async fn health(&self) -> HealthReport;

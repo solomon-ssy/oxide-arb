@@ -26,6 +26,10 @@ pub enum ExecutionOutcome {
         error: String,
         execution_mode: ExecutionMode,
     },
+    Unknown {
+        reason: String,
+        execution_mode: ExecutionMode,
+    },
 }
 
 /// Lightweight execution outcome for pipeline results — no clone of full [`ExecutionOutcome`].
@@ -34,6 +38,7 @@ pub enum ExecutionOutcomeSummary {
     Filled { order_id: OrderId },
     Miss,
     Failed,
+    Unknown,
 }
 
 impl ExecutionOutcomeSummary {
@@ -45,6 +50,7 @@ impl ExecutionOutcomeSummary {
             },
             ExecutionOutcome::Miss { .. } => Self::Miss,
             ExecutionOutcome::Failed { .. } => Self::Failed,
+            ExecutionOutcome::Unknown { .. } => Self::Unknown,
         }
     }
 }

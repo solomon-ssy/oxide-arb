@@ -210,6 +210,18 @@ impl ResolvedOutcome {
                 latency_ms: None,
                 error_message: Some(error.clone()),
             },
+            ExecutionOutcome::Unknown { reason, .. } => Self {
+                business_outcome: TradeBusinessOutcome::Failed,
+                filled_shares: Shares::ZERO,
+                avg_fill_price: entry_price,
+                cost_usd: Usd::ZERO,
+                fee_usd: Usd::ZERO,
+                net_profit_usd: None,
+                order_id: None,
+                tx_hash: None,
+                latency_ms: None,
+                error_message: Some(reason.clone()),
+            },
         }
     }
 

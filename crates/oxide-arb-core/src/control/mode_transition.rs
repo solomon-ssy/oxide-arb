@@ -34,7 +34,7 @@ use crate::{
         risk_metrics::CoreRiskMetrics,
         trading_gate::{halt_trading, resume_trading},
     },
-    control::status::build_system_status,
+    control::status::{build_system_balance, build_system_status},
     execution::{
         fsm::ExecutionFSM, settlement::redeem_preflight::ensure_live_pending_redeem_portfolio,
     },
@@ -54,7 +54,7 @@ use oxide_arb_models::{
     config::DeployConfig,
     domain::{
         BlacklistInfo, HealthReport, ModeTransitionReport, RiskEngineState, RuntimeControlError,
-        RuntimeControlPort, SystemStatus,
+        RuntimeControlPort, SystemBalanceView, SystemStatus,
     },
     enums::{common::ExecutionMode, risk::BlacklistReason},
     runtime_config::validation::validate_runtime_for_mode,
@@ -370,6 +370,10 @@ impl RuntimeControlPort for CoreRuntimeControl {
 
     async fn system_status(&self) -> SystemStatus {
         build_system_status(&self.control_deps(), self.started_at)
+    }
+
+    async fn system_balance(&self) -> SystemBalanceView {
+        build_system_balance(&self.control_deps())
     }
 
     async fn health(&self) -> HealthReport {

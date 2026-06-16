@@ -34,10 +34,7 @@ use oxide_arb_models::{
     enums::common::{AlertCategory, AlertLevel, AlertSource, ExecutionMode},
     types::Usd,
 };
-use oxide_arb_repository::{
-    postgres::{PgPositionRepository, PgTradeRepository},
-    traits::RiskStateRepository,
-};
+use oxide_arb_repository::traits::RiskStateRepository;
 use oxide_arb_risk::{engine::RiskEngine, traits::RiskMetrics};
 use prometheus::IntGauge;
 use std::{sync::Arc, time::Duration};
@@ -57,11 +54,8 @@ struct LedgerReconciliationDeps<'a> {
     risk_engine: &'a RiskEngine,
     risk_metrics: &'a dyn RiskMetrics,
     clob_client: &'a ClobClient,
-    trade_repo: &'a PgTradeRepository,
-    position_repo: &'a PgPositionRepository,
     balance_fact_writer: &'a BalanceFactWriter,
     holder_address: &'a str,
-    configured_bankroll: Usd,
 }
 
 impl AppContext {
@@ -328,8 +322,6 @@ impl AppContext {
         let execution_mode = self.execution_mode.clone();
         let risk_engine = Arc::clone(&self.risk.engine);
         let risk_metrics = Arc::clone(&self.risk.metrics);
-        let trade_repo = Arc::clone(&self.infra.trade_repo);
-        let position_repo = Arc::clone(&self.infra.position_repo);
         let balance_fact_writer = Arc::clone(&self.infra.balance_fact_writer);
         let holder_address = self.infra.holder_address.clone();
         let runtime = Arc::clone(&self.runtime_config);
@@ -356,25 +348,16 @@ impl AppContext {
                         let execution_mode = execution_mode.clone();
                         let risk_engine = Arc::clone(&risk_engine);
                         let risk_metrics = Arc::clone(&risk_metrics);
-                        let trade_repo = Arc::clone(&trade_repo);
-                        let position_repo = Arc::clone(&position_repo);
                         let balance_fact_writer = Arc::clone(&balance_fact_writer);
                         let holder_address = holder_address.clone();
-                        // Bankroll is read per tick so a runtime-config
-                        // activation reshapes the internal ledger baseline
-                        // without a restart.
-                        let configured_bankroll = Usd::new(runtime.load().risk.bankroll_usd);
                         async move {
                             run_ledger_reconciliation(LedgerReconciliationDeps {
                                 execution_mode: &execution_mode,
                                 risk_engine: &risk_engine,
                                 risk_metrics: risk_metrics.as_ref(),
                                 clob_client: &clob_client,
-                                trade_repo: &trade_repo,
-                                position_repo: &position_repo,
                                 balance_fact_writer: &balance_fact_writer,
                                 holder_address: &holder_address,
-                                configured_bankroll,
                             })
                             .await
                         }
@@ -681,9 +664,10 @@ async fn run_ledger_reconciliation(deps: LedgerReconciliationDeps<'_>) -> OxideR
         .collateral_balance()
         .await
         .map_err(OxideError::from)?;
-    let success_spend = deps.trade_repo.successful_spend_total(mode).await?;
-    let settled_payout = deps.position_repo.settlement_payout_total(mode).await?;
-    let internal_cash = deps.configured_bankroll - success_spend + settled_payout;
+    // In Live, CLOB collateral is the only authoritative cash truth. Runtime
+    // `bankroll_usd` remains a sizing cap and simulated-mode baseline; it must
+    // never be reused as a Live cash ledger.
+    let internal_cash = deps.risk_metrics.cash_balance();
     let reserved = deps.risk_metrics.reserved_usd();
 
     let report = deps.risk_engine.reconciler().reconcile_fetched(
@@ -691,7 +675,7 @@ async fn run_ledger_reconciliation(deps: LedgerReconciliationDeps<'_>) -> OxideR
         internal_cash,
         external_available,
         Usd::ZERO,
-        &[],
+        None,
     );
     deps.balance_fact_writer
         .write_observation(BalanceFactObservation {

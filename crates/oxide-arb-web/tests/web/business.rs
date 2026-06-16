@@ -15,7 +15,11 @@ use rust_decimal::Decimal;
 use serde_json::json;
 use uuid::Uuid;
 
-use crate::{client, harness::TestEnv, headers::ACTING_ROLE};
+use crate::{
+    client,
+    harness::TestEnv,
+    headers::{ACTING_ROLE, REQUEST_ID},
+};
 
 #[actix_web::test]
 #[ignore = "requires Docker"]
@@ -40,6 +44,13 @@ async fn business_read_routes_are_registered_and_authorized() {
         client::get(&env, "/api/pnl/live", &admin).await.status,
         StatusCode::OK,
         "GET /pnl/live"
+    );
+    let balance = client::get(&env, "/api/system/balance", &admin).await;
+    assert_eq!(balance.status, StatusCode::OK, "GET /system/balance");
+    assert_eq!(
+        balance.json()["data"]["source"],
+        "simulated_dry_run",
+        "system balance exposes the single money-state source"
     );
     assert_eq!(
         client::get(&env, "/api/analytics/edge-distribution", &admin)
@@ -73,6 +84,53 @@ async fn business_read_routes_are_registered_and_authorized() {
             .status,
         StatusCode::NOT_FOUND,
         "GET /replay/{{unknown}}"
+    );
+}
+
+#[actix_web::test]
+#[ignore = "requires Docker"]
+async fn system_mode_switch_is_governed_and_audited() {
+    let env = TestEnv::start().await;
+    let admin = client::login(&env, "admin", "admin").await;
+
+    let bypass = client::post(
+        &env,
+        "/api/system/mode",
+        &admin,
+        json!({
+            "mode": "paper",
+            "reason": "paper smoke"
+        }),
+    )
+    .await;
+    assert_eq!(bypass.status, StatusCode::OK);
+    assert_eq!(bypass.json()["data"]["from"], "dry_run");
+    assert_eq!(bypass.json()["data"]["to"], "paper");
+
+    let res = client::post_with(
+        &env,
+        "/api/system/mode",
+        &admin,
+        &[
+            (ACTING_ROLE, "super_admin"),
+            (REQUEST_ID, "system-mode-test"),
+        ],
+        json!({
+            "mode": "dry_run",
+            "reason": "back to dry run"
+        }),
+    )
+    .await;
+    assert_eq!(res.status, StatusCode::OK);
+    assert_eq!(res.json()["data"]["from"], "paper");
+    assert_eq!(res.json()["data"]["to"], "dry_run");
+
+    let rows = client::wait_for_oplog(&env, &admin, "system-mode-test").await;
+    assert!(
+        rows.iter().any(|row| row["category"] == "system"
+            && row["detail"]["target_mode"] == "dry_run"
+            && row["acting_role"] == "super_admin"),
+        "system.switch_mode operation log missing: {rows:?}"
     );
 }
 

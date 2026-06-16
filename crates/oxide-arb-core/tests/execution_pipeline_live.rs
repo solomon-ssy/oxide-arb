@@ -96,6 +96,7 @@ struct LiveFixture {
     calibration_repo: Arc<MockCalibrationRepository>,
     market_registry: Arc<MarketRegistry>,
     exposure: Arc<InMemoryExposureReservation>,
+    capital_manager: Arc<CapitalManager>,
     fsm: Arc<ExecutionFSM>,
     risk_engine: Arc<RiskEngine>,
     risk_metrics: Arc<CoreRiskMetrics>,
@@ -443,7 +444,7 @@ fn risk_metrics(
     ))
 }
 
-fn fixture(clob_client: Option<Arc<ClobClient>>) -> LiveFixture {
+fn fixture(clob_client: Option<Arc<ClobClient>>, dispatcher_timeout_ms: u64) -> LiveFixture {
     let metrics = Arc::new(MetricsHub::new());
     let alerts = Arc::new(AlertDispatcher::new(&NotificationConfig::default()));
     let fsm = Arc::new(ExecutionFSM::new(Arc::clone(&metrics), alerts));
@@ -491,10 +492,10 @@ fn fixture(clob_client: Option<Arc<ClobClient>>) -> LiveFixture {
             ExecutionModeHandle::new(ExecutionMode::Live),
             clob_client,
             fee_calculator,
-            30_000,
+            dispatcher_timeout_ms,
             Arc::clone(&metrics),
         )),
-        capital_manager: capital,
+        capital_manager: Arc::clone(&capital),
         risk_engine: Arc::clone(&risk_engine),
         risk_metrics: Arc::clone(&risk_metrics),
         fsm: Arc::clone(&fsm),
@@ -518,6 +519,7 @@ fn fixture(clob_client: Option<Arc<ClobClient>>) -> LiveFixture {
         calibration_repo,
         market_registry,
         exposure,
+        capital_manager: capital,
         fsm,
         risk_engine,
         risk_metrics,
@@ -551,7 +553,7 @@ async fn live_pipeline_fill_observed_then_consumer_settles() {
     )
     .await;
 
-    let fixture = fixture(Some(test_clob_client(&server).await));
+    let fixture = fixture(Some(test_clob_client(&server).await), 30_000);
     let result = fixture.pipeline.execute(Arc::clone(&fixture.scored)).await;
     assert!(
         result.rejection_stage.is_none(),
@@ -564,7 +566,17 @@ async fn live_pipeline_fill_observed_then_consumer_settles() {
         observed.business_outcome,
         Some(TradeBusinessOutcome::Success)
     );
-    assert_eq!(fixture.exposure.active_count_sync(), 0);
+    assert_eq!(
+        fixture.exposure.active_count_sync(),
+        1,
+        "fill reservation must remain until position is durably created"
+    );
+    let duplicate = fixture.pipeline.execute(Arc::clone(&fixture.scored)).await;
+    assert_eq!(
+        duplicate.rejection_stage.as_deref(),
+        Some("risk"),
+        "same-market execution must be blocked while filled exposure is pending"
+    );
 
     let metrics_refresh = common::disconnected_metrics_refresh(
         Arc::clone(&fixture.metrics_state),
@@ -575,6 +587,7 @@ async fn live_pipeline_fill_observed_then_consumer_settles() {
         risk_engine: fixture.risk_engine,
         risk_metrics: fixture.risk_metrics,
         fsm: fixture.fsm,
+        capital_manager: fixture.capital_manager,
         trade_repo: fixture.trade_repo.clone(),
         position_repo: fixture.position_repo,
         calibration_repo: fixture.calibration_repo,
@@ -593,6 +606,11 @@ async fn live_pipeline_fill_observed_then_consumer_settles() {
     assert_eq!(
         terminal.business_outcome,
         Some(TradeBusinessOutcome::Success)
+    );
+    assert_eq!(
+        fixture.exposure.active_count_sync(),
+        0,
+        "post-trade terminal fill releases the reservation after position creation"
     );
 }
 
@@ -613,7 +631,7 @@ async fn live_pipeline_miss_releases_reservation() {
     )
     .await;
 
-    let fixture = fixture(Some(test_clob_client(&server).await));
+    let fixture = fixture(Some(test_clob_client(&server).await), 30_000);
     let result = fixture.pipeline.execute(Arc::clone(&fixture.scored)).await;
     assert!(
         result.rejection_stage.is_none(),
@@ -642,7 +660,7 @@ async fn live_pipeline_clob_failure_records_fail_observed() {
         .mount(&server)
         .await;
 
-    let fixture = fixture(Some(test_clob_client(&server).await));
+    let fixture = fixture(Some(test_clob_client(&server).await), 30_000);
     let result = fixture.pipeline.execute(Arc::clone(&fixture.scored)).await;
     assert!(
         result.rejection_stage.is_none(),
@@ -656,8 +674,53 @@ async fn live_pipeline_clob_failure_records_fail_observed() {
 }
 
 #[tokio::test]
+async fn live_pipeline_timeout_marks_needs_reconcile_without_releasing_reservation() {
+    let server = MockServer::start().await;
+    mount_derive_api_key(&server).await;
+    mount_clob_requirements(&server).await;
+    Mock::given(method("POST"))
+        .and(path("/order"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(Duration::from_millis(50))
+                .set_body_string(
+                    r#"{
+                        "success": true,
+                        "orderID": "0xtimeout",
+                        "status": "matched",
+                        "makingAmount": "100",
+                        "takingAmount": "92"
+                    }"#,
+                ),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let fixture = fixture(Some(test_clob_client(&server).await), 1);
+    let result = fixture.pipeline.execute(Arc::clone(&fixture.scored)).await;
+    assert!(
+        result.rejection_stage.is_none(),
+        "unexpected rejection: {result:?}"
+    );
+    assert!(matches!(
+        result.outcome_summary,
+        Some(ExecutionOutcomeSummary::Unknown)
+    ));
+    assert_eq!(
+        fixture.exposure.active_count_sync(),
+        1,
+        "unknown venue outcome must keep capital reserved"
+    );
+
+    let trade = only_trade(&fixture.trade_repo);
+    assert_eq!(trade.state, TradeState::Orphaned);
+    assert!(trade.needs_reconcile);
+}
+
+#[tokio::test]
 async fn live_pipeline_mark_submitted_failure_releases_and_enters_emergency() {
-    let fixture = fixture(None);
+    let fixture = fixture(None, 30_000);
     fixture.trade_repo.fail_mark_submitted();
 
     let result = fixture.pipeline.execute(Arc::clone(&fixture.scored)).await;
@@ -683,7 +746,7 @@ async fn live_pipeline_mark_observed_failure_enters_emergency() {
     )
     .await;
 
-    let fixture = fixture(Some(test_clob_client(&server).await));
+    let fixture = fixture(Some(test_clob_client(&server).await), 30_000);
     fixture.trade_repo.fail_mark_observed();
     let result = fixture.pipeline.execute(Arc::clone(&fixture.scored)).await;
     assert!(
@@ -691,7 +754,11 @@ async fn live_pipeline_mark_observed_failure_enters_emergency() {
         "unexpected rejection: {result:?}"
     );
     assert!(fixture.fsm.is_emergency());
-    assert_eq!(fixture.exposure.active_count_sync(), 0);
+    assert_eq!(
+        fixture.exposure.active_count_sync(),
+        1,
+        "mark_observed failure after a fill must preserve reserved exposure"
+    );
 
     let trade = only_trade(&fixture.trade_repo);
     assert_eq!(trade.state, TradeState::Submitted);

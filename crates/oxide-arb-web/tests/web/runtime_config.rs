@@ -535,7 +535,7 @@ async fn apply_failure_auto_reverts_durable_activation() {
     );
 }
 
-/// `schema_version` other than 1 must be rejected at the HTTP boundary —
+/// `schema_version` other than the current schema must be rejected at the HTTP boundary —
 /// there is no migration chain, so an unknown document shape is fail-closed.
 #[actix_web::test]
 #[ignore = "requires Docker"]
@@ -548,7 +548,7 @@ async fn schema_version_other_than_1_is_rejected() {
         "/api/runtime-config/versions",
         &admin,
         json!({
-            "config_json": { "schema_version": 2 },
+            "config_json": { "schema_version": 1 },
             "reason": "future schema",
         }),
     )

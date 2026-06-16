@@ -2,7 +2,7 @@
 
 use crate::{
     bridge::risk_metrics::CoreRiskMetrics,
-    execution::fsm::ExecutionFSM,
+    execution::{capital_manager::CapitalManager, fsm::ExecutionFSM},
     observability::{execution_audit::ExecutionAuditWriter, metrics_hub::MetricsHub},
     pipeline::market_registry::MarketRegistry,
     runtime_config::RuntimeConfigStore,
@@ -13,6 +13,7 @@ use oxide_arb_models::{
     domain::{
         CoreEvent, CoreEventPublisher, PositionView,
         calibration::NewCalibrationOutcome,
+        execution::ReservationHandle,
         position::{NewPosition, PositionInfo, PositionRedeemSnapshot},
         scored_snapshot::ScoredOpportunitySnapshot,
         trade::{PostTradeInput, TradeInfo},
@@ -38,6 +39,7 @@ pub struct PostTradeConsumer {
     pub risk_engine: Arc<RiskEngine>,
     pub risk_metrics: Arc<CoreRiskMetrics>,
     pub fsm: Arc<ExecutionFSM>,
+    pub capital_manager: Arc<CapitalManager>,
     pub trade_repo: Arc<dyn TradeRepository>,
     pub position_repo: Arc<dyn PositionRepository>,
     pub calibration_repo: Arc<dyn CalibrationRepository>,
@@ -129,6 +131,9 @@ impl PostTradeConsumer {
             .await
         {
             Ok(true) => {
+                if trade.state.is_success() {
+                    self.release_fill_reservation(trade);
+                }
                 self.metrics.post_trade_relay_processed.inc();
                 // Real-time push: only the worker that actually advanced the row
                 // emits, so at-least-once replay never double-publishes. A fill
@@ -156,6 +161,22 @@ impl PostTradeConsumer {
         self.metrics_state.mark_stale();
         if let Err(error) = self.metrics_refresh.refresh().await {
             tracing::warn!(%error, "post-trade metrics refresh failed");
+        }
+    }
+
+    fn release_fill_reservation(&self, trade: &TradeInfo) {
+        let reservation = ReservationHandle {
+            id: trade.reservation_id.clone(),
+            amount: trade.cost_usd,
+            market_id: trade.market_id.clone(),
+        };
+        if let Err(error) = self.capital_manager.release_sync(&reservation) {
+            tracing::debug!(
+                %error,
+                trade_id = %trade.trade_id,
+                reservation_id = %trade.reservation_id,
+                "filled trade reservation was already absent"
+            );
         }
     }
 

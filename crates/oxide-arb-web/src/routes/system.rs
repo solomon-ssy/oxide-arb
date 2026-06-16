@@ -12,7 +12,7 @@ use oxide_arb_models::{
     config::DeployConfig,
     domain::{
         HaltRequest, HealthReport, MaterializationScheduleStatusView, ModeTransitionReport,
-        ResumeRequest, SwitchModeRequest, SystemStatus,
+        ResumeRequest, SwitchModeRequest, SystemBalanceView, SystemStatus,
     },
     enums::{
         operation_log::OperationCategory,
@@ -44,6 +44,12 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
             "/system/health",
             Rule::ResourceOp(ResourceType::System, Operation::Read),
             health,
+        ),
+        spec(
+            Method::GET,
+            "/system/balance",
+            Rule::ResourceOp(ResourceType::System, Operation::Read),
+            balance,
         ),
         spec(
             Method::GET,
@@ -228,6 +234,13 @@ pub async fn status(state: web::Data<AppState>) -> Result<WebResponse<SystemStat
 /// `GET /api/system/health` — subsystem health report.
 pub async fn health(state: web::Data<AppState>) -> Result<WebResponse<HealthReport>, WebError> {
     Ok(WebResponse::ok(state.control.health().await))
+}
+
+/// `GET /api/system/balance` — single operator money-state view.
+pub async fn balance(
+    state: web::Data<AppState>,
+) -> Result<WebResponse<SystemBalanceView>, WebError> {
+    Ok(WebResponse::ok(state.control.system_balance().await))
 }
 
 /// `GET /api/system/materialization-schedules` — mode-aware schedule status.
