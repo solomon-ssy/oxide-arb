@@ -28,12 +28,39 @@ impl PlanBuilder {
         }
     }
 
+    #[must_use]
+    pub fn market_registry(&self) -> &MarketRegistry {
+        &self.market_registry
+    }
+
     pub fn build(
         &self,
         opp: &Opportunity,
         approved_size: Usd,
         reservation: &ReservationHandle,
         execution_id: ExecutionId,
+    ) -> ExecutionPlan {
+        let neg_risk = self
+            .market_registry
+            .neg_risk(&opp.market_id)
+            .unwrap_or(false);
+        Self::build_plan_inner(
+            self,
+            opp,
+            approved_size,
+            reservation,
+            execution_id,
+            neg_risk,
+        )
+    }
+
+    fn build_plan_inner(
+        &self,
+        opp: &Opportunity,
+        approved_size: Usd,
+        reservation: &ReservationHandle,
+        execution_id: ExecutionId,
+        neg_risk: bool,
     ) -> ExecutionPlan {
         let shares = if opp.entry_price.inner() > rust_decimal::Decimal::ZERO {
             let raw = approved_size.inner() / opp.entry_price.inner();
@@ -45,11 +72,6 @@ impl PlanBuilder {
         let fee =
             self.fee_calculator
                 .calculate(shares, opp.entry_price, opp.category, &opp.token_id);
-
-        let neg_risk = self
-            .market_registry
-            .neg_risk(&opp.market_id)
-            .unwrap_or(false);
 
         ExecutionPlan {
             execution_id,

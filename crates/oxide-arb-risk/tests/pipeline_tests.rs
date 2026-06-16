@@ -18,11 +18,11 @@ use oxide_arb_models::{
     },
     enums::{
         calibration::{DurationBucket, PriceZone},
-        common::{MarketCategory, Side, StalenessLevel},
+        common::{ExecutionMode, MarketCategory, Side, StalenessLevel},
         control_factor::ControlFactorType,
         opportunity::PayoutModel,
     },
-    runtime_config::RiskConfig,
+    runtime_config::{NegRiskRedeemPolicy, RedeemRoutingPolicy, RiskConfig},
     types::{
         Bps, EventId, FactorPublicationId, MarketId, OpportunityId, Price, Shares, TokenId, Usd,
     },
@@ -30,13 +30,13 @@ use oxide_arb_models::{
 use oxide_arb_risk::{
     builder::RiskEngineBuilder,
     clock::utc_clock,
-    context::PreTradeContext,
+    context::{PreTradeContext, SettlementGateInput},
     pipeline::{
         RiskCheck, build_default_pipeline,
         checks::{
             BlacklistCheck, CircuitBreakerCheck, ControlFactorSnapshotExpiredCheck,
             ManualHaltCheck, MarketAnomalyBlockCheck, ReconciliationMaintenanceCheck,
-            TokenBlacklistCheck,
+            RedeemRouteResolvableCheck, TokenBlacklistCheck,
         },
     },
     sizing::MultiConstraintSizer,
@@ -77,6 +77,7 @@ impl TestFrame {
                 ..RiskMetricsSnapshot::zeroed()
             },
             factor_context: None,
+            settlement_gate: SettlementGateInput::default(),
             now: Utc::now(),
         }
     }
@@ -218,8 +219,14 @@ async fn pipeline_check_order_golden_test() {
     let frame = default_frame();
     let prob = frame.ctx().probability;
 
-    let decision =
-        engine.pre_trade_check_core(&frame.opp, &prob, &metrics, None, ReportMode::FullReport);
+    let decision = engine.pre_trade_check_core(
+        &frame.opp,
+        &prob,
+        &metrics,
+        None,
+        SettlementGateInput::default(),
+        ReportMode::FullReport,
+    );
 
     let check_ids: Vec<RiskCheckId> = decision.checks().iter().map(|r| r.check_id).collect();
 
@@ -231,6 +238,7 @@ async fn pipeline_check_order_golden_test() {
         RiskCheckId::MarketAnomalyBlock,
         RiskCheckId::ReconciliationMaintenance,
         RiskCheckId::ControlFactorSnapshotExpired,
+        RiskCheckId::RedeemRouteResolvable,
         RiskCheckId::MetricsFreshness,
         RiskCheckId::MinDepth,
         RiskCheckId::MaxDepthUsage,
@@ -257,11 +265,82 @@ async fn pipeline_check_order_golden_test() {
 
     assert_eq!(
         check_ids.len(),
-        29,
-        "expected exactly 29 checks, got {}",
+        30,
+        "expected exactly 30 checks, got {}",
         check_ids.len()
     );
     assert_eq!(check_ids, expected, "pipeline check order mismatch");
+}
+
+#[test]
+fn live_redeem_route_check_rejects_registry_miss() {
+    let frame = default_frame();
+    let policy = RedeemRoutingPolicy::default();
+    let mut ctx = frame.ctx();
+    ctx.settlement_gate = SettlementGateInput {
+        mode: ExecutionMode::Live,
+        market_neg_risk: None,
+        redeem_policy: Some(&policy),
+    };
+
+    let result = RedeemRouteResolvableCheck.evaluate(&ctx);
+
+    assert_eq!(result.check_id, RiskCheckId::RedeemRouteResolvable);
+    assert!(!result.passed);
+    assert!(
+        result
+            .detail
+            .as_deref()
+            .is_some_and(|reason| reason.contains("not in registry"))
+    );
+}
+
+#[test]
+fn live_redeem_route_check_rejects_missing_class_policy() {
+    let frame = default_frame();
+    let policy = RedeemRoutingPolicy {
+        standard: None,
+        neg_risk: Some(NegRiskRedeemPolicy::default()),
+        ..RedeemRoutingPolicy::default()
+    };
+    let mut ctx = frame.ctx();
+    ctx.settlement_gate = SettlementGateInput {
+        mode: ExecutionMode::Live,
+        market_neg_risk: Some(false),
+        redeem_policy: Some(&policy),
+    };
+
+    let result = RedeemRouteResolvableCheck.evaluate(&ctx);
+
+    assert_eq!(result.check_id, RiskCheckId::RedeemRouteResolvable);
+    assert!(!result.passed);
+    assert!(
+        result
+            .detail
+            .as_deref()
+            .is_some_and(|reason| reason.contains("no route"))
+    );
+}
+
+#[test]
+fn simulated_modes_do_not_require_redeem_route_resolution() {
+    let frame = default_frame();
+    let policy = RedeemRoutingPolicy {
+        standard: None,
+        neg_risk: None,
+        ..RedeemRoutingPolicy::default()
+    };
+    let mut ctx = frame.ctx();
+    ctx.settlement_gate = SettlementGateInput {
+        mode: ExecutionMode::Paper,
+        market_neg_risk: None,
+        redeem_policy: Some(&policy),
+    };
+
+    let result = RedeemRouteResolvableCheck.evaluate(&ctx);
+
+    assert_eq!(result.check_id, RiskCheckId::RedeemRouteResolvable);
+    assert!(result.passed);
 }
 
 // ── Short-circuit / full-report behaviour (test-only dynamic pipeline) ─────
@@ -320,17 +399,17 @@ impl TestRiskPipeline {
 #[test]
 fn static_pipeline_check_order_matches_golden() {
     let pipeline = build_default_pipeline(&RiskConfig::default());
-    assert_eq!(pipeline.check_order().len(), 29);
+    assert_eq!(pipeline.check_order().len(), 30);
 }
 
 #[test]
 fn metrics_split_index_matches_check_order() {
     let pipeline = build_default_pipeline(&RiskConfig::default());
 
-    // Seven phase-1 gates now precede MetricsFreshness: halt, circuit breaker,
+    // Eight phase-1 gates now precede MetricsFreshness: halt, circuit breaker,
     // blacklist, token blacklist, market-anomaly block, reconciliation maintenance,
-    // control-factor snapshot expiry.
-    assert_eq!(pipeline.metrics_split_index(), 7);
+    // control-factor snapshot expiry, redeem route resolvable.
+    assert_eq!(pipeline.metrics_split_index(), 8);
 
     assert!(!ManualHaltCheck.requires_metrics());
     assert!(!CircuitBreakerCheck.requires_metrics());
@@ -344,13 +423,13 @@ fn metrics_split_index_matches_check_order() {
         assert_eq!(*id, *expected_id);
     }
 
-    for (id, needs_metrics) in profile.iter().take(7) {
+    for (id, needs_metrics) in profile.iter().take(8) {
         assert!(
             !needs_metrics,
             "{id} must not require live metrics (phase-1 halt/CB/blacklist/factor gates)"
         );
     }
-    for (id, needs_metrics) in profile.iter().skip(7) {
+    for (id, needs_metrics) in profile.iter().skip(8) {
         if *id == RiskCheckId::FeeSpend {
             assert!(
                 !needs_metrics,
@@ -452,7 +531,7 @@ fn full_report_evaluates_all_checks() {
 fn static_pipeline_has_fixed_checks() {
     let pipeline = build_default_pipeline(&RiskConfig::default());
     assert!(!pipeline.is_empty());
-    assert_eq!(pipeline.len(), 29);
+    assert_eq!(pipeline.len(), 30);
 }
 
 // ── Control-factor named gates + sizer caps (Phase 5.6) ────────────────────
@@ -478,6 +557,7 @@ fn ctx_with_factors<'a>(
         snap: &frame.snap,
         metrics: RiskMetricsSnapshot::zeroed(),
         factor_context: Some(factor_context),
+        settlement_gate: SettlementGateInput::default(),
         now: Utc::now(),
     }
 }

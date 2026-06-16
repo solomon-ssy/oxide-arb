@@ -4,6 +4,7 @@ use oxide_arb_models::{
     domain::{
         MarkRedeemedParams, NewPosition, Paginated, PositionInfo, PositionPageQuery, PositionPatch,
         SettlePositionParams, SettledPositionStats, evidence::EvidenceQueryResult,
+        position::PositionRedeemSnapshot,
     },
     enums::common::{ExecutionMode, SettlementTrigger},
     types::{MarketId, PositionId, TokenId, TradeId, Usd},
@@ -85,6 +86,16 @@ pub trait PositionRepository: Send + Sync {
         &self,
         max_attempts: u32,
     ) -> Result<Vec<PositionInfo>, StorageError>;
+
+    /// Open positions awaiting on-chain redeem (any execution mode).
+    async fn find_open_pending_redeem(&self) -> Result<Vec<PositionInfo>, StorageError>;
+
+    /// Persist a backfilled or corrected redeem snapshot on an open position.
+    async fn update_redeem_snapshot(
+        &self,
+        position_id: &PositionId,
+        snapshot: &PositionRedeemSnapshot,
+    ) -> Result<PositionInfo, StorageError>;
 
     async fn find_open_for_resolved_markets(
         &self,

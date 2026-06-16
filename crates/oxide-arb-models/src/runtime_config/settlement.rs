@@ -1,13 +1,20 @@
 //! Settlement runtime configuration (`settlement` section).
 //!
 //! Operational settlement tunables only: the oracle voting policy, lifecycle
-//! retry/dedup behaviour, and the on-chain redeem route. Contract addresses
-//! are immutable chain facts and live in [`crate::constants`]; the settlement
-//! channel capacity is structural and lives in `config::SettlementDeployConfig`.
+//! retry/dedup behaviour, and the on-chain redeem routing policy. Contract
+//! addresses are immutable chain facts and live in [`crate::constants`]; the
+//! settlement channel capacity is structural and lives in
+//! `config::SettlementDeployConfig`.
 
-use crate::enums::common::{RedeemOutputAsset, RedeemRoute};
+use crate::{
+    enums::common::{
+        NegRiskRedeemRoute, RedeemResolutionSource, ResolvedRedeemRoute, StandardRedeemRoute,
+    },
+    types::MarketId,
+};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// Settlement operational tunables (hot-reloadable).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -17,8 +24,8 @@ pub struct SettlementRuntimeConfig {
     pub oracle: SettlementOracleConfig,
     /// Settlement lifecycle (retry / dedup) policy.
     pub lifecycle: SettlementLifecycleConfig,
-    /// On-chain redemption route and parameters.
-    pub redeem: SettlementRedeemConfig,
+    /// On-chain redemption routing policy (per-market class + overrides).
+    pub redeem: RedeemRoutingPolicy,
 }
 
 /// Multi-source resolution oracle policy.
@@ -93,44 +100,100 @@ impl Default for SettlementLifecycleConfig {
     }
 }
 
-/// On-chain redemption route and parameters.
+/// Money-critical on-chain redemption routing policy.
 ///
-/// Contract addresses for every route are compiled in (`crate::constants`);
-/// only the route selection and gas / holder parameters are configurable.
-/// The whole section is money-critical: it controls on-chain redemption of
-/// settled positions.
+/// Resolves a per-market redeem plan from class defaults (`standard` /
+/// `neg_risk`) and optional per-market overrides. Positions snapshot the
+/// resolved plan at fill time; settlement never re-reads live config.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 #[schemars(extend("x-money-critical" = true))]
-pub struct SettlementRedeemConfig {
-    /// Active redemption route. `disabled` blocks Live redemption (fail-closed:
-    /// Live mode validation requires an explicit route). Default: `disabled`.
-    #[schemars(with = "String", extend("x-enum-id" = "redeem_route"))]
-    pub route: RedeemRoute,
-    /// Output asset for adapter routes. Default: `usdc_e`.
-    #[schemars(with = "String", extend("x-enum-id" = "redeem_output_asset"))]
-    pub output_asset: RedeemOutputAsset,
-    /// Token holder address when it differs from the signer (e.g. proxy
-    /// wallet). `None` uses the signer address. Default: `None`.
-    pub holder_address: Option<String>,
-    /// Gnosis Safe address for the `proxy_safe` route. Required by Live-mode
-    /// validation when that route is selected. Default: `None`.
-    pub proxy_safe_address: Option<String>,
+pub struct RedeemRoutingPolicy {
+    /// Standard (`neg_risk = false`) markets. `None` = class unsupported in Live.
+    pub standard: Option<StandardRedeemPolicy>,
+    /// Neg-risk markets. `None` = class unsupported in Live.
+    pub neg_risk: Option<NegRiskRedeemPolicy>,
+    /// Per-market overrides; wins over class policy. Keys are Polymarket
+    /// `condition_id` values (`MarketId`).
+    #[schemars(with = "HashMap<String, String>")]
+    pub overrides: HashMap<MarketId, RedeemClassPolicy>,
     /// Gas limit for redeem transactions. Default: `500000`.
     #[schemars(extend("x-format" = "integer"))]
     pub gas_limit: u64,
 }
 
-impl Default for SettlementRedeemConfig {
+impl Default for RedeemRoutingPolicy {
     fn default() -> Self {
         Self {
-            route: RedeemRoute::default(),
-            output_asset: RedeemOutputAsset::default(),
-            holder_address: None,
-            proxy_safe_address: None,
+            standard: Some(StandardRedeemPolicy::default()),
+            neg_risk: Some(NegRiskRedeemPolicy::default()),
+            overrides: HashMap::new(),
             gas_limit: default_redeem_gas_limit(),
         }
     }
+}
+
+/// Redeem policy for standard (non-neg-risk) markets.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct StandardRedeemPolicy {
+    /// On-chain redeem path for standard (non-neg-risk) markets in Live mode.
+    #[schemars(with = "String", extend("x-enum-id" = "standard_redeem_route"))]
+    pub route: StandardRedeemRoute,
+    /// Token holder when it differs from the signer EOA. `None` uses the signer.
+    pub holder_address: Option<String>,
+}
+
+/// Redeem policy for neg-risk markets.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct NegRiskRedeemPolicy {
+    /// On-chain redeem path for neg-risk markets in Live mode.
+    #[schemars(with = "String", extend("x-enum-id" = "neg_risk_redeem_route"))]
+    pub route: NegRiskRedeemRoute,
+    /// Token holder when it differs from the signer EOA. `None` uses the signer.
+    pub holder_address: Option<String>,
+}
+
+/// Per-market override redeem policy (variant must match market `neg_risk`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum RedeemClassPolicy {
+    Standard(StandardRedeemPolicy),
+    NegRisk(NegRiskRedeemPolicy),
+}
+
+impl RedeemClassPolicy {
+    #[must_use]
+    pub const fn expects_neg_risk(&self) -> bool {
+        matches!(self, Self::NegRisk(_))
+    }
+
+    #[must_use]
+    pub fn holder_address(&self) -> Option<&str> {
+        match self {
+            Self::Standard(policy) => policy.holder_address.as_deref(),
+            Self::NegRisk(policy) => policy.holder_address.as_deref(),
+        }
+    }
+
+    #[must_use]
+    pub fn route(&self) -> ResolvedRedeemRoute {
+        match self {
+            Self::Standard(policy) => policy.route.into(),
+            Self::NegRisk(policy) => policy.route.into(),
+        }
+    }
+}
+
+/// Resolved redeem execution plan (snapshotted on position at fill time).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedRedeemPlan {
+    pub route: ResolvedRedeemRoute,
+    pub holder_address: Option<String>,
+    pub neg_risk: bool,
+    pub gas_limit: u64,
+    pub resolution: RedeemResolutionSource,
 }
 
 /// Behaviour when every oracle source is unavailable.

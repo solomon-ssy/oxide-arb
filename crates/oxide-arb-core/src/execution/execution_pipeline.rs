@@ -17,6 +17,7 @@ use crate::{
         validator::Validator,
     },
     observability::{execution_audit::ExecutionAuditWriter, metrics_hub::MetricsHub},
+    runtime_config::RuntimeConfigStore,
     service::risk_metrics::RiskMetricsState,
 };
 use chrono::Utc;
@@ -44,7 +45,11 @@ use oxide_arb_models::{
     types::{ExecutionId, TokenId, TradeId, Usd},
 };
 use oxide_arb_repository::{postgres::PgTradeRepository, traits::TradeRepository};
-use oxide_arb_risk::{engine::RiskEngine, types::ReportMode};
+use oxide_arb_risk::{
+    context::SettlementGateInput,
+    engine::RiskEngine,
+    types::{ReportMode, RiskDecision},
+};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use std::{fmt::Display, sync::Arc, time::Instant};
@@ -68,6 +73,7 @@ pub struct ExecutionPipelineDeps<R: TradeRepository + Send + Sync + 'static = Pg
     /// Rung after each durable `*_observed` write to wake the post-trade relay.
     pub relay_notify: Arc<Notify>,
     pub metrics_state: Arc<RiskMetricsState>,
+    pub runtime_config: Arc<RuntimeConfigStore>,
     /// Live control-factor snapshots (published read for the decision context;
     /// shadow read for the shadow evaluator).
     pub factors: Arc<FactorSnapshotStore>,
@@ -91,6 +97,7 @@ pub struct ExecutionPipeline<R: TradeRepository + Send + Sync + 'static = PgTrad
     audit_writer: Arc<ExecutionAuditWriter>,
     relay_notify: Arc<Notify>,
     metrics_state: Arc<RiskMetricsState>,
+    runtime_config: Arc<RuntimeConfigStore>,
     factors: Arc<FactorSnapshotStore>,
     shadow_writer: Option<ShadowDecisionWriter>,
 }
@@ -120,6 +127,7 @@ impl<R: TradeRepository + Send + Sync + 'static> ExecutionPipeline<R> {
             audit_writer: deps.audit_writer,
             relay_notify: deps.relay_notify,
             metrics_state: deps.metrics_state,
+            runtime_config: deps.runtime_config,
             factors: deps.factors,
             shadow_writer: deps.shadow_writer,
         }
@@ -290,28 +298,22 @@ impl<R: TradeRepository + Send + Sync + 'static> ExecutionPipeline<R> {
         snapshot = snapshot.with_applied_control_factors(publication_id, &applied);
 
         let probability = build_probability_input(scored);
+        let settlement_gate = SettlementGateInput {
+            mode: self.mode.current(),
+            market_neg_risk: self.plan_builder.market_registry().neg_risk(&opp.market_id),
+            redeem_policy: Some(&self.runtime_config.load().settlement.redeem),
+        };
         let risk_decision = self.risk_engine.pre_trade_check_core(
             opp,
             &probability,
             self.risk_metrics.as_ref(),
             Some(&factor_context),
+            settlement_gate,
             ReportMode::ShortCircuit,
         );
 
         if !risk_decision.allowed {
-            self.metrics.risk_denials.inc();
-            let reason = risk_decision
-                .denial_reason
-                .unwrap_or_else(|| "risk denied".into());
-            if reason.starts_with("MarketAnomalyBlock")
-                || reason.starts_with("ReconciliationMaintenance")
-                || reason.starts_with("ControlFactorSnapshotExpired")
-            {
-                self.metrics.control_factor_hard_rejects.inc();
-            }
-            self.audit_writer
-                .write_rejection(execution_id, opp, "risk", &reason, &snapshot);
-            return Err(Self::reject("risk", reason));
+            return Err(self.record_risk_denial(execution_id, opp, &risk_decision, &snapshot));
         }
         tracing::info!(
             opportunity_id = %opp.opportunity_id,
@@ -616,6 +618,29 @@ impl<R: TradeRepository + Send + Sync + 'static> ExecutionPipeline<R> {
 
     pub fn execution_mode(&self) -> ExecutionMode {
         self.mode.current()
+    }
+
+    fn record_risk_denial(
+        &self,
+        execution_id: &ExecutionId,
+        opp: &Opportunity,
+        risk_decision: &RiskDecision,
+        snapshot: &ScoredOpportunitySnapshot,
+    ) -> ExecutionResult {
+        self.metrics.risk_denials.inc();
+        let reason = risk_decision
+            .denial_reason
+            .clone()
+            .unwrap_or_else(|| "risk denied".into());
+        if reason.starts_with("MarketAnomalyBlock")
+            || reason.starts_with("ReconciliationMaintenance")
+            || reason.starts_with("ControlFactorSnapshotExpired")
+        {
+            self.metrics.control_factor_hard_rejects.inc();
+        }
+        self.audit_writer
+            .write_rejection(execution_id, opp, "risk", &reason, snapshot);
+        Self::reject("risk", reason)
     }
 
     #[cold]

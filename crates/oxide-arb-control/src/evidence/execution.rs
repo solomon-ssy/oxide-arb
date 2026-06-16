@@ -628,6 +628,8 @@ mod tests {
             winning_token_id: None,
             accounting_status: None,
             fee_source: None,
+            redeem_route: None,
+            redeem_resolution: None,
             outcome: Some(ChAuditOutcome::Success),
             rejection_stage: None,
             rejection_reason: None,

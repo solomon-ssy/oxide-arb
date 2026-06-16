@@ -387,14 +387,22 @@ async fn schema_endpoint_describes_money_critical_fields() {
             .as_str()
             .is_some_and(|s| !s.is_empty())
     );
-    let route = fields
+    let standard_route = fields
         .iter()
-        .find(|f| f["path"] == "settlement.redeem.route")
-        .expect("redeem route in schema");
-    let enum_items = route["enum_items"]
+        .find(|f| f["path"] == "settlement.redeem.standard.route")
+        .expect("standard redeem route in schema");
+    let neg_risk_route = fields
+        .iter()
+        .find(|f| f["path"] == "settlement.redeem.neg_risk.route")
+        .expect("neg-risk redeem route in schema");
+    let standard_enum_items = standard_route["enum_items"]
         .as_array()
-        .expect("redeem route enum_items");
-    assert_eq!(enum_items.len(), 6);
+        .expect("standard redeem route enum_items");
+    let neg_risk_enum_items = neg_risk_route["enum_items"]
+        .as_array()
+        .expect("neg-risk redeem route enum_items");
+    assert_eq!(standard_enum_items.len(), 2);
+    assert_eq!(neg_risk_enum_items.len(), 2);
     assert!(
         fields.iter().all(|f| f["path"] != "schema_version"),
         "schema_version must not appear in preferences fields"

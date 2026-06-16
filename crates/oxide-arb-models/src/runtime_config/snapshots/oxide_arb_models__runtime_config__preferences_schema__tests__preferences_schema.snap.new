@@ -1,5 +1,6 @@
 ---
 source: crates/oxide-arb-models/src/runtime_config/preferences_schema.rs
+assertion_line: 248
 expression: view
 ---
 {
@@ -3412,68 +3413,21 @@ expression: view
       }
     },
     {
-      "path": "settlement.redeem.standard.route",
+      "path": "settlement.redeem.neg_risk.holder_address",
       "group": "settlement",
       "order": 1100,
       "label": {
         "kind": "localized",
         "locales": {
-          "en-US": "Standard market redeem route",
-          "zh-CN": "普通市场赎回路由"
+          "en-US": "Neg-risk market token holder",
+          "zh-CN": "Neg-risk Holder 地址"
         }
       },
       "help": {
         "kind": "localized",
         "locales": {
-          "en-US": "On-chain route for standard (`neg_risk=false`) markets. Required for mixed Live portfolios unless every pending position is neg-risk.",
-          "zh-CN": "普通市场（neg_risk=false）的链上赎回路由。"
-        }
-      },
-      "value_type": "string",
-      "widget": "enum_select",
-      "default": "standard_ctf",
-      "description": "On-chain redeem path for standard (non-neg-risk) markets in Live mode.",
-      "money_critical": true,
-      "sensitive": false,
-      "enum_items": [
-        {
-          "key": "standard_ctf",
-          "label": {
-            "kind": "localized",
-            "locales": {
-              "en-US": "Standard CTF",
-              "zh-CN": "标准 CTF"
-            }
-          }
-        },
-        {
-          "key": "ctf_collateral_adapter",
-          "label": {
-            "kind": "localized",
-            "locales": {
-              "en-US": "CTF collateral adapter",
-              "zh-CN": "CTF 抵押品适配器"
-            }
-          }
-        }
-      ]
-    },
-    {
-      "path": "settlement.redeem.standard.holder_address",
-      "group": "settlement",
-      "order": 1110,
-      "label": {
-        "kind": "localized",
-        "locales": {
-          "en-US": "Standard market token holder (optional)",
-          "zh-CN": "普通市场 Holder 地址"
-        }
-      },
-      "help": {
-        "kind": "localized",
-        "locales": {
-          "en-US": "EOA holder override for standard markets. `None` uses the signer address.",
-          "zh-CN": "普通市场 Holder 地址。None 表示使用签名地址。"
+          "en-US": "Token holder for neg-risk markets when it differs from the signer. `None` uses the signer address.",
+          "zh-CN": "Neg-risk 市场 token holder 与 signer 不同时填写；None 表示使用 signer 地址。"
         }
       },
       "value_type": "string",
@@ -3486,7 +3440,7 @@ expression: view
     {
       "path": "settlement.redeem.neg_risk.route",
       "group": "settlement",
-      "order": 1120,
+      "order": 1110,
       "label": {
         "kind": "localized",
         "locales": {
@@ -3497,8 +3451,8 @@ expression: view
       "help": {
         "kind": "localized",
         "locales": {
-          "en-US": "On-chain route for neg-risk markets. Required for mixed Live portfolios unless every pending position is standard.",
-          "zh-CN": "Neg-risk 市场的链上赎回路由。"
+          "en-US": "Route used for neg-risk markets. Default: `neg_risk_legacy_adapter`.",
+          "zh-CN": "Neg-risk 市场使用的赎回路由。默认：neg_risk_legacy_adapter。"
         }
       },
       "value_type": "string",
@@ -3531,21 +3485,46 @@ expression: view
       ]
     },
     {
-      "path": "settlement.redeem.neg_risk.holder_address",
+      "path": "settlement.redeem.overrides",
       "group": "settlement",
-      "order": 1130,
+      "order": 1120,
       "label": {
         "kind": "localized",
         "locales": {
-          "en-US": "Neg-risk market token holder (optional)",
-          "zh-CN": "Neg-risk Holder 地址"
+          "en-US": "Per-market redeem overrides",
+          "zh-CN": "按市场赎回覆盖"
         }
       },
       "help": {
         "kind": "localized",
         "locales": {
-          "en-US": "EOA holder override for neg-risk markets. `None` uses the signer address.",
-          "zh-CN": "Neg-risk 市场 Holder 地址。None 表示使用签名地址。"
+          "en-US": "Optional condition_id keyed overrides. Each override must match the market's standard or neg-risk class.",
+          "zh-CN": "可选的 condition_id 覆盖配置；每条覆盖必须匹配市场的 standard 或 neg-risk 类别。"
+        }
+      },
+      "value_type": "object",
+      "widget": "json_tree",
+      "default": {},
+      "description": "Per-market overrides; wins over class policy. Keys are Polymarket\n`condition_id` values (`MarketId`).",
+      "money_critical": true,
+      "sensitive": false
+    },
+    {
+      "path": "settlement.redeem.standard.holder_address",
+      "group": "settlement",
+      "order": 1130,
+      "label": {
+        "kind": "localized",
+        "locales": {
+          "en-US": "Standard market token holder",
+          "zh-CN": "普通市场 Holder 地址"
+        }
+      },
+      "help": {
+        "kind": "localized",
+        "locales": {
+          "en-US": "Token holder for standard markets when it differs from the signer. `None` uses the signer address.",
+          "zh-CN": "普通市场 token holder 与 signer 不同时填写；None 表示使用 signer 地址。"
         }
       },
       "value_type": "string",
@@ -3554,6 +3533,53 @@ expression: view
       "description": "Token holder when it differs from the signer EOA. `None` uses the signer.",
       "money_critical": true,
       "sensitive": false
+    },
+    {
+      "path": "settlement.redeem.standard.route",
+      "group": "settlement",
+      "order": 1140,
+      "label": {
+        "kind": "localized",
+        "locales": {
+          "en-US": "Standard market redeem route",
+          "zh-CN": "普通市场赎回路由"
+        }
+      },
+      "help": {
+        "kind": "localized",
+        "locales": {
+          "en-US": "Route used for standard (non-neg-risk) markets. Default: `standard_ctf`.",
+          "zh-CN": "普通（非 neg-risk）市场使用的赎回路由。默认：standard_ctf。"
+        }
+      },
+      "value_type": "string",
+      "widget": "enum_select",
+      "default": "standard_ctf",
+      "description": "On-chain redeem path for standard (non-neg-risk) markets in Live mode.",
+      "money_critical": true,
+      "sensitive": false,
+      "enum_items": [
+        {
+          "key": "standard_ctf",
+          "label": {
+            "kind": "localized",
+            "locales": {
+              "en-US": "Standard CTF",
+              "zh-CN": "标准 CTF"
+            }
+          }
+        },
+        {
+          "key": "ctf_collateral_adapter",
+          "label": {
+            "kind": "localized",
+            "locales": {
+              "en-US": "CTF collateral adapter",
+              "zh-CN": "CTF 抵押品适配器"
+            }
+          }
+        }
+      ]
     }
   ]
 }

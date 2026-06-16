@@ -42,8 +42,9 @@ use oxide_arb_models::{
             ChSettlementOutcome, ChSettlementTrigger, ChSide, ChSnapshotReason,
         },
         common::{
-            ExecutionMode, LedgerStatus, MarketCategory, PositionStatus, RedeemStatus,
-            SettlementAccountingStatus, SettlementTrigger, Side, TradeState,
+            ExecutionMode, LedgerStatus, MarketCategory, PositionStatus, RedeemResolutionSource,
+            RedeemStatus, ResolvedRedeemRoute, SettlementAccountingStatus, SettlementTrigger, Side,
+            TradeState,
         },
         control_factor::{
             AuditResourceType, ControlAuditEventType, ControlFactorType, FactorStatus,
@@ -1469,6 +1470,8 @@ fn audit_row(spec: &SmokeAuditRowSpec<'_>) -> OpportunityAuditRow {
         settlement_trigger: Some(ChSettlementTrigger::from(SettlementTrigger::Ws)),
         winning_token_id: None,
         accounting_status: spec.accounting_status,
+        redeem_route: None,
+        redeem_resolution: None,
         fee_source: None,
         outcome: spec.outcome,
         rejection_stage: None,
@@ -1563,5 +1566,10 @@ fn smoke_position(
         settlement_accounting_error: None,
         settlement_accounted_at: Some(settled_at),
         redeem_terminal_reason: None,
+        redeem_neg_risk: false,
+        redeem_route: ResolvedRedeemRoute::StandardCtf.as_str().to_owned(),
+        redeem_holder_address: None,
+        redeem_resolution: RedeemResolutionSource::ClassStandard,
+        redeem_gas_limit: 500_000,
     }
 }

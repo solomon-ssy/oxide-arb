@@ -1,5 +1,5 @@
-//! Generated field UI catalog — do not edit by hand.
-//! Regenerate: `node oxide-arb-ui/scripts/generate-runtime-config-ui-catalog.mjs`
+//! Field UI catalog for preferences rendering.
+//! Hand-maintained: add or update `FieldUiEntry` rows here when runtime-config fields change.
 
 use crate::ui_text;
 
@@ -13,34 +13,108 @@ pub fn fields() -> &'static [FieldUiEntry] {
 }
 
 fn build_fields() -> Vec<FieldUiEntry> {
-    let mut out = Vec::with_capacity(113);
-    out.extend(build_fields_part_0());
-    out.extend(build_fields_part_1());
-    out.extend(build_fields_part_2());
-    out.extend(build_fields_part_3());
-    out.extend(build_fields_part_4());
-    out.extend(build_fields_part_5());
-    out.extend(build_fields_part_6());
-    out.extend(build_fields_part_7());
-    out.extend(build_fields_part_8());
-    out.extend(build_fields_part_9());
-    out.extend(build_fields_part_10());
-    out.extend(build_fields_part_11());
-    out.extend(build_fields_part_12());
-    out.extend(build_fields_part_13());
-    out.extend(build_fields_part_14());
-    out.extend(build_fields_part_15());
-    out.extend(build_fields_part_16());
-    out.extend(build_fields_part_17());
-    out.extend(build_fields_part_18());
-    out.extend(build_fields_part_19());
-    out.extend(build_fields_part_20());
-    out.extend(build_fields_part_21());
-    out.extend(build_fields_part_22());
+    let mut out = Vec::with_capacity(114);
+    out.extend(build_fields_market_data());
+    out.extend(build_fields_detection());
+    out.extend(build_fields_execution());
+    out.extend(build_fields_risk());
+    out.extend(build_fields_settlement());
+    out.extend(build_fields_notification());
     out
 }
 
-fn build_fields_part_0() -> Vec<FieldUiEntry> {
+/// `market_data` preferences section.
+fn build_fields_market_data() -> Vec<FieldUiEntry> {
+    let mut out = Vec::new();
+    out.extend(build_fields_market_data_enabled());
+    out.extend(build_fields_market_data_staleness());
+    out
+}
+
+/// `detection` preferences section.
+fn build_fields_detection() -> Vec<FieldUiEntry> {
+    let mut out = Vec::new();
+    out.extend(build_fields_detection_calibration_from_bootstrap_alpha());
+    out.extend(build_fields_detection_calibration_from_min_sample_size());
+    out.extend(build_fields_detection_endgame_convergence_tracker());
+    out.extend(build_fields_detection_endgame_emission_cooldown());
+    out.extend(build_fields_detection_endgame_fill_probability());
+    out.extend(build_fields_detection_endgame());
+    out.extend(build_fields_detection_endgame_scorer());
+    out.extend(build_fields_detection_min());
+    out
+}
+
+/// `execution` preferences section.
+fn build_fields_execution() -> Vec<FieldUiEntry> {
+    let mut out = Vec::new();
+    out.extend(build_fields_execution_coalescer());
+    out.extend(build_fields_execution_endgame_latency());
+    out.extend(build_fields_execution_funnel());
+    out.extend(build_fields_execution_timeout());
+    out
+}
+
+/// `risk` preferences section.
+fn build_fields_risk() -> Vec<FieldUiEntry> {
+    let mut out = Vec::new();
+    out.extend(build_fields_risk_api());
+    out.extend(build_fields_risk_bankroll());
+    out.extend(build_fields_risk_base());
+    out.extend(build_fields_risk_circuit_breaker_from_half_open_probes());
+    out.extend(build_fields_risk_circuit_breaker_from_max_cooldown_secs());
+    out.extend(build_fields_risk_cooldown());
+    out.extend(build_fields_risk_daily());
+    out.extend(build_fields_risk_drawdown());
+    out.extend(build_fields_risk_heartbeat());
+    out.extend(build_fields_risk_kelly_from_max_kelly());
+    out.extend(build_fields_risk_kelly_from_kelly_fraction());
+    out.extend(build_fields_risk_market());
+    out.extend(build_fields_risk_max_concurrent());
+    out.extend(build_fields_risk_max_consecutive());
+    out.extend(build_fields_risk_max_cooldown());
+    out.extend(build_fields_risk_max_daily());
+    out.extend(build_fields_risk_max_depth());
+    out.extend(build_fields_risk_max_hourly());
+    out.extend(build_fields_risk_max_metrics());
+    out.extend(build_fields_risk_max_open());
+    out.extend(build_fields_risk_max_single());
+    out.extend(build_fields_risk_max_total());
+    out.extend(build_fields_risk_max_weekly());
+    out.extend(build_fields_risk_metrics());
+    out.extend(build_fields_risk_min());
+    out.extend(build_fields_risk_permanent());
+    out.extend(build_fields_risk_potential());
+    out.extend(build_fields_risk_reconciliation());
+    out.extend(build_fields_risk_reservation());
+    out.extend(build_fields_risk_reserve());
+    out.extend(build_fields_risk_ws());
+    out
+}
+
+/// `settlement` preferences section.
+fn build_fields_settlement() -> Vec<FieldUiEntry> {
+    let mut out = Vec::new();
+    out.extend(build_fields_settlement_lifecycle());
+    out.extend(build_fields_settlement_oracle_from_all_sources_down_strategy());
+    out.extend(build_fields_settlement_oracle_from_voting_quorum());
+    out.extend(build_fields_settlement_redeem());
+    out.extend(build_fields_settlement_redeem_neg_risk());
+    out.extend(build_fields_settlement_redeem_standard());
+    out
+}
+
+/// `notification` preferences section.
+fn build_fields_notification() -> Vec<FieldUiEntry> {
+    let mut out = Vec::new();
+    out.extend(build_fields_notification_alert());
+    out.extend(build_fields_notification_telegram());
+    out.extend(build_fields_notification_webhook());
+    out
+}
+
+/// Fields: `detection.calibration.bootstrap_alpha … detection.calibration.fusion_prior_strength`.
+fn build_fields_detection_calibration_from_bootstrap_alpha() -> Vec<FieldUiEntry> {
     vec![
         FieldUiEntry {
             path: "detection.calibration.bootstrap_alpha",
@@ -115,7 +189,8 @@ fn build_fields_part_0() -> Vec<FieldUiEntry> {
     ]
 }
 
-fn build_fields_part_1() -> Vec<FieldUiEntry> {
+/// Fields: `detection.calibration.min_sample_size … detection.calibration.refresh_interval_secs`.
+fn build_fields_detection_calibration_from_min_sample_size() -> Vec<FieldUiEntry> {
     vec![
         FieldUiEntry {
             path: "detection.calibration.min_sample_size",
@@ -144,6 +219,12 @@ fn build_fields_part_1() -> Vec<FieldUiEntry> {
             semantics: None,
             visible: true,
         },
+    ]
+}
+
+/// Fields: `detection.endgame.convergence_tracker.max_capacity … detection.endgame.convergence_tracker.max_idle_secs`.
+fn build_fields_detection_endgame_convergence_tracker() -> Vec<FieldUiEntry> {
+    vec![
         FieldUiEntry {
             path: "detection.endgame.convergence_tracker.max_capacity",
             label: ui_text!(
@@ -174,6 +255,12 @@ fn build_fields_part_1() -> Vec<FieldUiEntry> {
             semantics: None,
             visible: true,
         },
+    ]
+}
+
+/// Fields: `detection.endgame.emission_cooldown.base_cooldown_secs … detection.endgame.emission_cooldown.max_multiplier`.
+fn build_fields_detection_endgame_emission_cooldown() -> Vec<FieldUiEntry> {
+    vec![
         FieldUiEntry {
             path: "detection.endgame.emission_cooldown.base_cooldown_secs",
             label: ui_text!(
@@ -189,11 +276,6 @@ fn build_fields_part_1() -> Vec<FieldUiEntry> {
             semantics: None,
             visible: true,
         },
-    ]
-}
-
-fn build_fields_part_2() -> Vec<FieldUiEntry> {
-    vec![
         FieldUiEntry {
             path: "detection.endgame.emission_cooldown.max_capacity",
             label: ui_text!(en = "Maximum cache capacity", zh = "发射冷却缓存容量"),
@@ -221,6 +303,12 @@ fn build_fields_part_2() -> Vec<FieldUiEntry> {
             semantics: None,
             visible: true,
         },
+    ]
+}
+
+/// Fields: `detection.endgame.fill_probability.base_fill_prob … detection.endgame.fill_probability.staleness_penalty_per_level`.
+fn build_fields_detection_endgame_fill_probability() -> Vec<FieldUiEntry> {
+    vec![
         FieldUiEntry {
             path: "detection.endgame.fill_probability.base_fill_prob",
             label: ui_text!(
@@ -263,11 +351,6 @@ fn build_fields_part_2() -> Vec<FieldUiEntry> {
             semantics: None,
             visible: true,
         },
-    ]
-}
-
-fn build_fields_part_3() -> Vec<FieldUiEntry> {
-    vec![
         FieldUiEntry {
             path: "detection.endgame.fill_probability.resolution_proximity_bonus",
             label: ui_text!(
@@ -298,6 +381,12 @@ fn build_fields_part_3() -> Vec<FieldUiEntry> {
             semantics: None,
             visible: true,
         },
+    ]
+}
+
+/// Fields: `detection.endgame.high_threshold … detection.endgame.settlement_window_hours`.
+fn build_fields_detection_endgame() -> Vec<FieldUiEntry> {
+    vec![
         FieldUiEntry {
             path: "detection.endgame.high_threshold",
             label: ui_text!(
@@ -343,11 +432,6 @@ fn build_fields_part_3() -> Vec<FieldUiEntry> {
             semantics: None,
             visible: true,
         },
-    ]
-}
-
-fn build_fields_part_4() -> Vec<FieldUiEntry> {
-    vec![
         FieldUiEntry {
             path: "detection.endgame.min_profit_per_share",
             label: ui_text!(en = "Minimum profit per share", zh = "最低每股利润"),
@@ -360,6 +444,27 @@ fn build_fields_part_4() -> Vec<FieldUiEntry> {
             semantics: None,
             visible: true,
         },
+        FieldUiEntry {
+            path: "detection.endgame.settlement_window_hours",
+            label: ui_text!(
+                en = "Only markets settling within this many hours are scanned",
+                zh = "结算扫描窗口 (小时)"
+            ),
+            help: ui_text!(
+                en = "Only markets settling within this many hours are scanned. Larger windows admit slower-converging markets but tie up capital longer. Default: `24`.",
+                zh = "结算扫描窗口 (小时)。默认：24。"
+            ),
+            order: 250,
+            widget: None,
+            semantics: None,
+            visible: true,
+        },
+    ]
+}
+
+/// Fields: `detection.endgame.scorer.category_weights … detection.endgame.scorer.min_score`.
+fn build_fields_detection_endgame_scorer() -> Vec<FieldUiEntry> {
+    vec![
         FieldUiEntry {
             path: "detection.endgame.scorer.category_weights",
             label: ui_text!(
@@ -399,53 +504,47 @@ fn build_fields_part_4() -> Vec<FieldUiEntry> {
             semantics: None,
             visible: true,
         },
-        FieldUiEntry {
-            path: "detection.endgame.settlement_window_hours",
-            label: ui_text!(
-                en = "Only markets settling within this many hours are scanned",
-                zh = "结算扫描窗口 (小时)"
-            ),
-            help: ui_text!(
-                en = "Only markets settling within this many hours are scanned. Larger windows admit slower-converging markets but tie up capital longer. Default: `24`.",
-                zh = "结算扫描窗口 (小时)。默认：24。"
-            ),
-            order: 250,
-            widget: None,
-            semantics: None,
-            visible: true,
-        },
     ]
 }
 
-fn build_fields_part_5() -> Vec<FieldUiEntry> {
+/// Fields: `detection.min_profit_threshold_usd … detection.min_profit_threshold_usd`.
+fn build_fields_detection_min() -> Vec<FieldUiEntry> {
+    vec![FieldUiEntry {
+        path: "detection.min_profit_threshold_usd",
+        label: ui_text!(
+            en = "Authoritative minimum net profit",
+            zh = "最低净利润阈值 (USD)"
+        ),
+        help: ui_text!(
+            en = "Authoritative minimum net profit (USD) for detection, validation, and risk (single source per ADR-001 — never duplicated under `execution` or `risk`). Opportunities below this expected net profit are dropped. Default: `0.50`.",
+            zh = "最低净利润阈值 (USD)。默认：0.50。"
+        ),
+        order: 260,
+        widget: Some(FieldWidget::DecimalString),
+        semantics: None,
+        visible: true,
+    }]
+}
+
+/// Fields: `execution.coalescer.coalesce_window_ms … execution.coalescer.coalesce_window_ms`.
+fn build_fields_execution_coalescer() -> Vec<FieldUiEntry> {
+    vec![FieldUiEntry {
+        path: "execution.coalescer.coalesce_window_ms",
+        label: ui_text!(en = "Max wait", zh = "双 token 合并窗口 (ms)"),
+        help: ui_text!(
+            en = "Max wait (ms) for the second token leg before flushing a market scan. Lower = lower latency, more duplicate scans. Default: `40`.",
+            zh = "双 token 合并窗口 (ms)。默认：40。"
+        ),
+        order: 270,
+        widget: Some(FieldWidget::DurationMs),
+        semantics: None,
+        visible: true,
+    }]
+}
+
+/// Fields: `execution.endgame_latency.dispatch_immediate_threshold … execution.endgame_latency.max_book_to_order_ms`.
+fn build_fields_execution_endgame_latency() -> Vec<FieldUiEntry> {
     vec![
-        FieldUiEntry {
-            path: "detection.min_profit_threshold_usd",
-            label: ui_text!(
-                en = "Authoritative minimum net profit",
-                zh = "最低净利润阈值 (USD)"
-            ),
-            help: ui_text!(
-                en = "Authoritative minimum net profit (USD) for detection, validation, and risk (single source per ADR-001 — never duplicated under `execution` or `risk`). Opportunities below this expected net profit are dropped. Default: `0.50`.",
-                zh = "最低净利润阈值 (USD)。默认：0.50。"
-            ),
-            order: 260,
-            widget: Some(FieldWidget::DecimalString),
-            semantics: None,
-            visible: true,
-        },
-        FieldUiEntry {
-            path: "execution.coalescer.coalesce_window_ms",
-            label: ui_text!(en = "Max wait", zh = "双 token 合并窗口 (ms)"),
-            help: ui_text!(
-                en = "Max wait (ms) for the second token leg before flushing a market scan. Lower = lower latency, more duplicate scans. Default: `40`.",
-                zh = "双 token 合并窗口 (ms)。默认：40。"
-            ),
-            order: 270,
-            widget: Some(FieldWidget::DurationMs),
-            semantics: None,
-            visible: true,
-        },
         FieldUiEntry {
             path: "execution.endgame_latency.dispatch_immediate_threshold",
             label: ui_text!(
@@ -476,6 +575,12 @@ fn build_fields_part_5() -> Vec<FieldUiEntry> {
             semantics: None,
             visible: true,
         },
+    ]
+}
+
+/// Fields: `execution.funnel.max_queue_size … execution.funnel.min_dispatch_interval_ms`.
+fn build_fields_execution_funnel() -> Vec<FieldUiEntry> {
+    vec![
         FieldUiEntry {
             path: "execution.funnel.max_queue_size",
             label: ui_text!(
@@ -491,11 +596,6 @@ fn build_fields_part_5() -> Vec<FieldUiEntry> {
             semantics: None,
             visible: true,
         },
-    ]
-}
-
-fn build_fields_part_6() -> Vec<FieldUiEntry> {
-    vec![
         FieldUiEntry {
             path: "execution.funnel.min_dispatch_interval_ms",
             label: ui_text!(en = "Sweep interval", zh = "低优先级分发间隔 (ms)"),
@@ -508,6 +608,12 @@ fn build_fields_part_6() -> Vec<FieldUiEntry> {
             semantics: None,
             visible: true,
         },
+    ]
+}
+
+/// Fields: `execution.timeout.dispatcher_timeout_ms … execution.timeout.trade_confirm_timeout_secs`.
+fn build_fields_execution_timeout() -> Vec<FieldUiEntry> {
+    vec![
         FieldUiEntry {
             path: "execution.timeout.dispatcher_timeout_ms",
             label: ui_text!(en = "Hard-kill timeout", zh = "执行派发超时 (ms)"),
@@ -562,23 +668,28 @@ fn build_fields_part_6() -> Vec<FieldUiEntry> {
     ]
 }
 
-fn build_fields_part_7() -> Vec<FieldUiEntry> {
+/// Fields: `market_data.enabled_categories … market_data.enabled_categories`.
+fn build_fields_market_data_enabled() -> Vec<FieldUiEntry> {
+    vec![FieldUiEntry {
+        path: "market_data.enabled_categories",
+        label: ui_text!(
+            en = "Categories admitted into the tradeable universe",
+            zh = "启用交易品类"
+        ),
+        help: ui_text!(
+            en = "Categories admitted into the tradeable universe (WS subscriptions + scanner sweep). An event matches when any of its tag-derived categories is enabled. Empty list = every category. The full catalog is always ingested and persisted regardless of this filter — it only bounds the hot trading set, so narrowing it never loses settlement or evidence data. Default: empty (all categories).",
+            zh = "启用交易品类。空列表表示全部品类可交易；仅收窄热交易集合，不影响全量入库与结算证据。默认：空。"
+        ),
+        order: 360,
+        widget: Some(FieldWidget::EnumSet),
+        semantics: Some(FieldSemantics::EmptyMeansAll),
+        visible: true,
+    }]
+}
+
+/// Fields: `market_data.staleness_acceptable_ms … market_data.staleness_stale_ms`.
+fn build_fields_market_data_staleness() -> Vec<FieldUiEntry> {
     vec![
-        FieldUiEntry {
-            path: "market_data.enabled_categories",
-            label: ui_text!(
-                en = "Categories admitted into the tradeable universe",
-                zh = "启用交易品类"
-            ),
-            help: ui_text!(
-                en = "Categories admitted into the tradeable universe (WS subscriptions + scanner sweep). An event matches when any of its tag-derived categories is enabled. Empty list = every category. The full catalog is always ingested and persisted regardless of this filter — it only bounds the hot trading set, so narrowing it never loses settlement or evidence data. Default: empty (all categories).",
-                zh = "启用交易品类。空列表表示全部品类可交易；仅收窄热交易集合，不影响全量入库与结算证据。默认：空。"
-            ),
-            order: 360,
-            widget: Some(FieldWidget::EnumSet),
-            semantics: Some(FieldSemantics::EmptyMeansAll),
-            visible: true,
-        },
         FieldUiEntry {
             path: "market_data.staleness_acceptable_ms",
             label: ui_text!(en = "Book age", zh = "可接受陈旧度 (ms)"),
@@ -630,20 +741,25 @@ fn build_fields_part_7() -> Vec<FieldUiEntry> {
     ]
 }
 
-fn build_fields_part_8() -> Vec<FieldUiEntry> {
+/// Fields: `notification.alert_cooldown_secs … notification.alert_cooldown_secs`.
+fn build_fields_notification_alert() -> Vec<FieldUiEntry> {
+    vec![FieldUiEntry {
+        path: "notification.alert_cooldown_secs",
+        label: ui_text!(en = "Minimum interval", zh = "告警冷却 (秒)"),
+        help: ui_text!(
+            en = "Minimum interval (seconds) between alerts with the same severity+title (anti-flood; applies to all channels). Default: `60`.",
+            zh = "告警冷却 (秒)。默认：60。"
+        ),
+        order: 410,
+        widget: Some(FieldWidget::Integer),
+        semantics: None,
+        visible: true,
+    }]
+}
+
+/// Fields: `notification.telegram.bot_token … notification.telegram.enabled`.
+fn build_fields_notification_telegram() -> Vec<FieldUiEntry> {
     vec![
-        FieldUiEntry {
-            path: "notification.alert_cooldown_secs",
-            label: ui_text!(en = "Minimum interval", zh = "告警冷却 (秒)"),
-            help: ui_text!(
-                en = "Minimum interval (seconds) between alerts with the same severity+title (anti-flood; applies to all channels). Default: `60`.",
-                zh = "告警冷却 (秒)。默认：60。"
-            ),
-            order: 410,
-            widget: Some(FieldWidget::Integer),
-            semantics: None,
-            visible: true,
-        },
         FieldUiEntry {
             path: "notification.telegram.bot_token",
             label: ui_text!(en = "Bot token", zh = "Telegram Bot Token"),
@@ -683,6 +799,12 @@ fn build_fields_part_8() -> Vec<FieldUiEntry> {
             semantics: None,
             visible: true,
         },
+    ]
+}
+
+/// Fields: `notification.webhook.enabled … notification.webhook.url`.
+fn build_fields_notification_webhook() -> Vec<FieldUiEntry> {
+    vec![
         FieldUiEntry {
             path: "notification.webhook.enabled",
             label: ui_text!(
@@ -698,11 +820,6 @@ fn build_fields_part_8() -> Vec<FieldUiEntry> {
             semantics: None,
             visible: true,
         },
-    ]
-}
-
-fn build_fields_part_9() -> Vec<FieldUiEntry> {
-    vec![
         FieldUiEntry {
             path: "notification.webhook.url",
             label: ui_text!(en = "POST target URL", zh = "Webhook URL"),
@@ -715,48 +832,66 @@ fn build_fields_part_9() -> Vec<FieldUiEntry> {
             semantics: None,
             visible: true,
         },
-        FieldUiEntry {
-            path: "risk.api_error_rate_threshold",
-            label: ui_text!(en = "API error rate threshold", zh = "API 错误率阈值"),
-            help: ui_text!(
-                en = "API error rate threshold (0..1). Exceeding trips the L2 Session breaker. Default: `0.10`.",
-                zh = "API 错误率阈值。默认：0.10。"
-            ),
-            order: 470,
-            widget: Some(FieldWidget::DecimalString),
-            semantics: None,
-            visible: true,
-        },
-        FieldUiEntry {
-            path: "risk.bankroll_usd",
-            label: ui_text!(
-                en = "Total bankroll available for Kelly computation",
-                zh = "Kelly 总资金 (USD)"
-            ),
-            help: ui_text!(
-                en = "Total bankroll available for Kelly computation (USD). Also seeds the simulated balance in `DryRun`/`Paper`. Default: `1000`.",
-                zh = "Kelly 总资金 (USD)。默认：1000。"
-            ),
-            order: 480,
-            widget: Some(FieldWidget::DecimalString),
-            semantics: None,
-            visible: true,
-        },
-        FieldUiEntry {
-            path: "risk.base_cooldown_secs",
-            label: ui_text!(
-                en = "Base adaptive cooldown after repeated misses",
-                zh = "基础冷却 (秒)"
-            ),
-            help: ui_text!(
-                en = "Base adaptive cooldown after repeated misses (seconds). Default: `900`.",
-                zh = "基础冷却 (秒)。默认：900。"
-            ),
-            order: 490,
-            widget: Some(FieldWidget::Integer),
-            semantics: None,
-            visible: true,
-        },
+    ]
+}
+
+/// Fields: `risk.api_error_rate_threshold … risk.api_error_rate_threshold`.
+fn build_fields_risk_api() -> Vec<FieldUiEntry> {
+    vec![FieldUiEntry {
+        path: "risk.api_error_rate_threshold",
+        label: ui_text!(en = "API error rate threshold", zh = "API 错误率阈值"),
+        help: ui_text!(
+            en = "API error rate threshold (0..1). Exceeding trips the L2 Session breaker. Default: `0.10`.",
+            zh = "API 错误率阈值。默认：0.10。"
+        ),
+        order: 470,
+        widget: Some(FieldWidget::DecimalString),
+        semantics: None,
+        visible: true,
+    }]
+}
+
+/// Fields: `risk.bankroll_usd … risk.bankroll_usd`.
+fn build_fields_risk_bankroll() -> Vec<FieldUiEntry> {
+    vec![FieldUiEntry {
+        path: "risk.bankroll_usd",
+        label: ui_text!(
+            en = "Total bankroll available for Kelly computation",
+            zh = "Kelly 总资金 (USD)"
+        ),
+        help: ui_text!(
+            en = "Total bankroll available for Kelly computation (USD). Also seeds the simulated balance in `DryRun`/`Paper`. Default: `1000`.",
+            zh = "Kelly 总资金 (USD)。默认：1000。"
+        ),
+        order: 480,
+        widget: Some(FieldWidget::DecimalString),
+        semantics: None,
+        visible: true,
+    }]
+}
+
+/// Fields: `risk.base_cooldown_secs … risk.base_cooldown_secs`.
+fn build_fields_risk_base() -> Vec<FieldUiEntry> {
+    vec![FieldUiEntry {
+        path: "risk.base_cooldown_secs",
+        label: ui_text!(
+            en = "Base adaptive cooldown after repeated misses",
+            zh = "基础冷却 (秒)"
+        ),
+        help: ui_text!(
+            en = "Base adaptive cooldown after repeated misses (seconds). Default: `900`.",
+            zh = "基础冷却 (秒)。默认：900。"
+        ),
+        order: 490,
+        widget: Some(FieldWidget::Integer),
+        semantics: None,
+        visible: true,
+    }]
+}
+
+/// Fields: `risk.circuit_breaker.half_open_probes … risk.circuit_breaker.l4_cooldown_secs`.
+fn build_fields_risk_circuit_breaker_from_half_open_probes() -> Vec<FieldUiEntry> {
+    vec![
         FieldUiEntry {
             path: "risk.circuit_breaker.half_open_probes",
             label: ui_text!(
@@ -772,11 +907,6 @@ fn build_fields_part_9() -> Vec<FieldUiEntry> {
             semantics: None,
             visible: true,
         },
-    ]
-}
-
-fn build_fields_part_10() -> Vec<FieldUiEntry> {
-    vec![
         FieldUiEntry {
             path: "risk.circuit_breaker.l1_cooldown_secs",
             label: ui_text!(en = "L1", zh = "L1 冷却 (秒)"),
@@ -825,6 +955,12 @@ fn build_fields_part_10() -> Vec<FieldUiEntry> {
             semantics: None,
             visible: true,
         },
+    ]
+}
+
+/// Fields: `risk.circuit_breaker.max_cooldown_secs … risk.circuit_breaker.recovery_observation_secs`.
+fn build_fields_risk_circuit_breaker_from_max_cooldown_secs() -> Vec<FieldUiEntry> {
+    vec![
         FieldUiEntry {
             path: "risk.circuit_breaker.max_cooldown_secs",
             label: ui_text!(en = "Maximum cooldown duration", zh = "L2 最大冷却 (秒)"),
@@ -837,11 +973,6 @@ fn build_fields_part_10() -> Vec<FieldUiEntry> {
             semantics: None,
             visible: true,
         },
-    ]
-}
-
-fn build_fields_part_11() -> Vec<FieldUiEntry> {
-    vec![
         FieldUiEntry {
             path: "risk.circuit_breaker.recovery_observation_secs",
             label: ui_text!(en = "Observation period", zh = "恢复观察期 (秒)"),
@@ -854,21 +985,31 @@ fn build_fields_part_11() -> Vec<FieldUiEntry> {
             semantics: None,
             visible: true,
         },
-        FieldUiEntry {
-            path: "risk.cooldown_multiplier",
-            label: ui_text!(
-                en = "Exponential multiplier applied per consecutive cooldown",
-                zh = "冷却指数倍数"
-            ),
-            help: ui_text!(
-                en = "Exponential multiplier applied per consecutive cooldown. Default: `2.0`.",
-                zh = "冷却指数倍数。默认：2.0。"
-            ),
-            order: 570,
-            widget: Some(FieldWidget::DecimalString),
-            semantics: None,
-            visible: true,
-        },
+    ]
+}
+
+/// Fields: `risk.cooldown_multiplier … risk.cooldown_multiplier`.
+fn build_fields_risk_cooldown() -> Vec<FieldUiEntry> {
+    vec![FieldUiEntry {
+        path: "risk.cooldown_multiplier",
+        label: ui_text!(
+            en = "Exponential multiplier applied per consecutive cooldown",
+            zh = "冷却指数倍数"
+        ),
+        help: ui_text!(
+            en = "Exponential multiplier applied per consecutive cooldown. Default: `2.0`.",
+            zh = "冷却指数倍数。默认：2.0。"
+        ),
+        order: 570,
+        widget: Some(FieldWidget::DecimalString),
+        semantics: None,
+        visible: true,
+    }]
+}
+
+/// Fields: `risk.daily_budget_usd … risk.daily_directional_budget`.
+fn build_fields_risk_daily() -> Vec<FieldUiEntry> {
+    vec![
         FieldUiEntry {
             path: "risk.daily_budget_usd",
             label: ui_text!(en = "Independent daily spend budget", zh = "日预算 (USD)"),
@@ -896,6 +1037,12 @@ fn build_fields_part_11() -> Vec<FieldUiEntry> {
             semantics: None,
             visible: true,
         },
+    ]
+}
+
+/// Fields: `risk.drawdown.drawdown_reduction_factor … risk.drawdown.max_drawdown_pct`.
+fn build_fields_risk_drawdown() -> Vec<FieldUiEntry> {
+    vec![
         FieldUiEntry {
             path: "risk.drawdown.drawdown_reduction_factor",
             label: ui_text!(
@@ -912,11 +1059,6 @@ fn build_fields_part_11() -> Vec<FieldUiEntry> {
             semantics: None,
             visible: true,
         },
-    ]
-}
-
-fn build_fields_part_12() -> Vec<FieldUiEntry> {
-    vec![
         FieldUiEntry {
             path: "risk.drawdown.max_drawdown_pct",
             label: ui_text!(en = "Maximum drawdown", zh = "最大回撤 (%)"),
@@ -929,21 +1071,31 @@ fn build_fields_part_12() -> Vec<FieldUiEntry> {
             semantics: None,
             visible: true,
         },
-        FieldUiEntry {
-            path: "risk.heartbeat_max_failures",
-            label: ui_text!(
-                en = "Consecutive heartbeat failures before an L4 System halt",
-                zh = "心跳失败阈值"
-            ),
-            help: ui_text!(
-                en = "Consecutive heartbeat failures before an L4 System halt. Default: `3`.",
-                zh = "心跳失败阈值。默认：3。"
-            ),
-            order: 620,
-            widget: None,
-            semantics: None,
-            visible: true,
-        },
+    ]
+}
+
+/// Fields: `risk.heartbeat_max_failures … risk.heartbeat_max_failures`.
+fn build_fields_risk_heartbeat() -> Vec<FieldUiEntry> {
+    vec![FieldUiEntry {
+        path: "risk.heartbeat_max_failures",
+        label: ui_text!(
+            en = "Consecutive heartbeat failures before an L4 System halt",
+            zh = "心跳失败阈值"
+        ),
+        help: ui_text!(
+            en = "Consecutive heartbeat failures before an L4 System halt. Default: `3`.",
+            zh = "心跳失败阈值。默认：3。"
+        ),
+        order: 620,
+        widget: None,
+        semantics: None,
+        visible: true,
+    }]
+}
+
+/// Fields: `risk.kelly.max_kelly … risk.kelly.min_probability_confidence`.
+fn build_fields_risk_kelly_from_max_kelly() -> Vec<FieldUiEntry> {
+    vec![
         FieldUiEntry {
             path: "risk.kelly.max_kelly",
             label: ui_text!(
@@ -987,11 +1139,6 @@ fn build_fields_part_12() -> Vec<FieldUiEntry> {
             semantics: None,
             visible: true,
         },
-    ]
-}
-
-fn build_fields_part_13() -> Vec<FieldUiEntry> {
-    vec![
         FieldUiEntry {
             path: "risk.kelly.min_edge_bps",
             label: ui_text!(en = "Minimum edge", zh = "Kelly 最小边际 (bps)"),
@@ -1019,21 +1166,31 @@ fn build_fields_part_13() -> Vec<FieldUiEntry> {
             semantics: None,
             visible: true,
         },
-        FieldUiEntry {
-            path: "risk.kelly_fraction",
-            label: ui_text!(
-                en = "Quarter-Kelly fraction multiplier",
-                zh = "四分之一 Kelly 倍数"
-            ),
-            help: ui_text!(
-                en = "Quarter-Kelly fraction multiplier (`f*/4`). Default: `0.25`.",
-                zh = "四分之一 Kelly 倍数。默认：0.25。"
-            ),
-            order: 680,
-            widget: None,
-            semantics: None,
-            visible: true,
-        },
+    ]
+}
+
+/// Fields: `risk.kelly_fraction … risk.kelly_fraction`.
+fn build_fields_risk_kelly_from_kelly_fraction() -> Vec<FieldUiEntry> {
+    vec![FieldUiEntry {
+        path: "risk.kelly_fraction",
+        label: ui_text!(
+            en = "Quarter-Kelly fraction multiplier",
+            zh = "四分之一 Kelly 倍数"
+        ),
+        help: ui_text!(
+            en = "Quarter-Kelly fraction multiplier (`f*/4`). Default: `0.25`.",
+            zh = "四分之一 Kelly 倍数。默认：0.25。"
+        ),
+        order: 680,
+        widget: None,
+        semantics: None,
+        visible: true,
+    }]
+}
+
+/// Fields: `risk.market_miss_blacklist_count … risk.market_miss_blacklist_duration_secs`.
+fn build_fields_risk_market() -> Vec<FieldUiEntry> {
+    vec![
         FieldUiEntry {
             path: "risk.market_miss_blacklist_count",
             label: ui_text!(
@@ -1064,53 +1221,66 @@ fn build_fields_part_13() -> Vec<FieldUiEntry> {
     ]
 }
 
-fn build_fields_part_14() -> Vec<FieldUiEntry> {
+/// Fields: `risk.max_concurrent_directional … risk.max_concurrent_directional`.
+fn build_fields_risk_max_concurrent() -> Vec<FieldUiEntry> {
+    vec![FieldUiEntry {
+        path: "risk.max_concurrent_directional",
+        label: ui_text!(
+            en = "Max concurrent positions on the same directional side",
+            zh = "同方向最大并发"
+        ),
+        help: ui_text!(
+            en = "Max concurrent positions on the same directional side. Default: `3`.",
+            zh = "同方向最大并发。默认：3。"
+        ),
+        order: 710,
+        widget: None,
+        semantics: None,
+        visible: true,
+    }]
+}
+
+/// Fields: `risk.max_consecutive_misses … risk.max_consecutive_misses`.
+fn build_fields_risk_max_consecutive() -> Vec<FieldUiEntry> {
+    vec![FieldUiEntry {
+        path: "risk.max_consecutive_misses",
+        label: ui_text!(
+            en = "Consecutive misses before the session breaker trips",
+            zh = "会话连续未命中阈值"
+        ),
+        help: ui_text!(
+            en = "Consecutive misses before the session breaker trips. Default: `3`.",
+            zh = "会话连续未命中阈值。默认：3。"
+        ),
+        order: 720,
+        widget: None,
+        semantics: None,
+        visible: true,
+    }]
+}
+
+/// Fields: `risk.max_cooldown_secs … risk.max_cooldown_secs`.
+fn build_fields_risk_max_cooldown() -> Vec<FieldUiEntry> {
+    vec![FieldUiEntry {
+        path: "risk.max_cooldown_secs",
+        label: ui_text!(
+            en = "Hard ceiling for the adaptive cooldown",
+            zh = "自适应冷却上限 (秒)"
+        ),
+        help: ui_text!(
+            en = "Hard ceiling for the adaptive cooldown (seconds). Default: `7200`.",
+            zh = "自适应冷却上限 (秒)。默认：7200。"
+        ),
+        order: 730,
+        widget: Some(FieldWidget::Integer),
+        semantics: None,
+        visible: true,
+    }]
+}
+
+/// Fields: `risk.max_daily_fee_spend_usd … risk.max_daily_loss_usd`.
+fn build_fields_risk_max_daily() -> Vec<FieldUiEntry> {
     vec![
-        FieldUiEntry {
-            path: "risk.max_concurrent_directional",
-            label: ui_text!(
-                en = "Max concurrent positions on the same directional side",
-                zh = "同方向最大并发"
-            ),
-            help: ui_text!(
-                en = "Max concurrent positions on the same directional side. Default: `3`.",
-                zh = "同方向最大并发。默认：3。"
-            ),
-            order: 710,
-            widget: None,
-            semantics: None,
-            visible: true,
-        },
-        FieldUiEntry {
-            path: "risk.max_consecutive_misses",
-            label: ui_text!(
-                en = "Consecutive misses before the session breaker trips",
-                zh = "会话连续未命中阈值"
-            ),
-            help: ui_text!(
-                en = "Consecutive misses before the session breaker trips. Default: `3`.",
-                zh = "会话连续未命中阈值。默认：3。"
-            ),
-            order: 720,
-            widget: None,
-            semantics: None,
-            visible: true,
-        },
-        FieldUiEntry {
-            path: "risk.max_cooldown_secs",
-            label: ui_text!(
-                en = "Hard ceiling for the adaptive cooldown",
-                zh = "自适应冷却上限 (秒)"
-            ),
-            help: ui_text!(
-                en = "Hard ceiling for the adaptive cooldown (seconds). Default: `7200`.",
-                zh = "自适应冷却上限 (秒)。默认：7200。"
-            ),
-            order: 730,
-            widget: Some(FieldWidget::Integer),
-            semantics: None,
-            visible: true,
-        },
         FieldUiEntry {
             path: "risk.max_daily_fee_spend_usd",
             label: ui_text!(en = "Daily fee-spend cap", zh = "日手续费上限 (USD)"),
@@ -1138,23 +1308,28 @@ fn build_fields_part_14() -> Vec<FieldUiEntry> {
     ]
 }
 
-fn build_fields_part_15() -> Vec<FieldUiEntry> {
+/// Fields: `risk.max_depth_usage_pct … risk.max_depth_usage_pct`.
+fn build_fields_risk_max_depth() -> Vec<FieldUiEntry> {
+    vec![FieldUiEntry {
+        path: "risk.max_depth_usage_pct",
+        label: ui_text!(
+            en = "Maximum fraction of visible book depth a single order may consume",
+            zh = "最大深度占用 (%)"
+        ),
+        help: ui_text!(
+            en = "Maximum fraction of visible book depth a single order may consume (%). Default: `30`.",
+            zh = "最大深度占用 (%)。默认：30。"
+        ),
+        order: 760,
+        widget: Some(FieldWidget::DecimalString),
+        semantics: None,
+        visible: true,
+    }]
+}
+
+/// Fields: `risk.max_hourly_fee_spend_usd … risk.max_hourly_loss_usd`.
+fn build_fields_risk_max_hourly() -> Vec<FieldUiEntry> {
     vec![
-        FieldUiEntry {
-            path: "risk.max_depth_usage_pct",
-            label: ui_text!(
-                en = "Maximum fraction of visible book depth a single order may consume",
-                zh = "最大深度占用 (%)"
-            ),
-            help: ui_text!(
-                en = "Maximum fraction of visible book depth a single order may consume (%). Default: `30`.",
-                zh = "最大深度占用 (%)。默认：30。"
-            ),
-            order: 760,
-            widget: Some(FieldWidget::DecimalString),
-            semantics: None,
-            visible: true,
-        },
         FieldUiEntry {
             path: "risk.max_hourly_fee_spend_usd",
             label: ui_text!(
@@ -1182,37 +1357,46 @@ fn build_fields_part_15() -> Vec<FieldUiEntry> {
             semantics: None,
             visible: true,
         },
-        FieldUiEntry {
-            path: "risk.max_metrics_staleness_secs",
-            label: ui_text!(en = "Maximum age", zh = "Live 指标最大陈旧度 (秒)"),
-            help: ui_text!(
-                en = "Maximum age (seconds) of the risk metrics snapshot allowed on the Live hot path. Must be >= `metrics_refresh_interval_secs`. Default: `15`.",
-                zh = "Live 指标最大陈旧度 (秒)。默认：15。"
-            ),
-            order: 790,
-            widget: Some(FieldWidget::Integer),
-            semantics: None,
-            visible: true,
-        },
-        FieldUiEntry {
-            path: "risk.max_open_positions",
-            label: ui_text!(
-                en = "Maximum concurrently open positions",
-                zh = "最大持仓数"
-            ),
-            help: ui_text!(
-                en = "Maximum concurrently open positions. Default: `3`.",
-                zh = "最大持仓数。默认：3。"
-            ),
-            order: 800,
-            widget: None,
-            semantics: None,
-            visible: true,
-        },
     ]
 }
 
-fn build_fields_part_16() -> Vec<FieldUiEntry> {
+/// Fields: `risk.max_metrics_staleness_secs … risk.max_metrics_staleness_secs`.
+fn build_fields_risk_max_metrics() -> Vec<FieldUiEntry> {
+    vec![FieldUiEntry {
+        path: "risk.max_metrics_staleness_secs",
+        label: ui_text!(en = "Maximum age", zh = "Live 指标最大陈旧度 (秒)"),
+        help: ui_text!(
+            en = "Maximum age (seconds) of the risk metrics snapshot allowed on the Live hot path. Must be >= `metrics_refresh_interval_secs`. Default: `15`.",
+            zh = "Live 指标最大陈旧度 (秒)。默认：15。"
+        ),
+        order: 790,
+        widget: Some(FieldWidget::Integer),
+        semantics: None,
+        visible: true,
+    }]
+}
+
+/// Fields: `risk.max_open_positions … risk.max_open_positions`.
+fn build_fields_risk_max_open() -> Vec<FieldUiEntry> {
+    vec![FieldUiEntry {
+        path: "risk.max_open_positions",
+        label: ui_text!(
+            en = "Maximum concurrently open positions",
+            zh = "最大持仓数"
+        ),
+        help: ui_text!(
+            en = "Maximum concurrently open positions. Default: `3`.",
+            zh = "最大持仓数。默认：3。"
+        ),
+        order: 800,
+        widget: None,
+        semantics: None,
+        visible: true,
+    }]
+}
+
+/// Fields: `risk.max_single_bet_usd … risk.max_single_market_exposure_usd`.
+fn build_fields_risk_max_single() -> Vec<FieldUiEntry> {
     vec![
         FieldUiEntry {
             path: "risk.max_single_bet_usd",
@@ -1256,6 +1440,12 @@ fn build_fields_part_16() -> Vec<FieldUiEntry> {
             semantics: None,
             visible: true,
         },
+    ]
+}
+
+/// Fields: `risk.max_total_exposure_pct … risk.max_total_exposure_usd`.
+fn build_fields_risk_max_total() -> Vec<FieldUiEntry> {
+    vec![
         FieldUiEntry {
             path: "risk.max_total_exposure_pct",
             label: ui_text!(
@@ -1289,32 +1479,41 @@ fn build_fields_part_16() -> Vec<FieldUiEntry> {
     ]
 }
 
-fn build_fields_part_17() -> Vec<FieldUiEntry> {
+/// Fields: `risk.max_weekly_loss_usd … risk.max_weekly_loss_usd`.
+fn build_fields_risk_max_weekly() -> Vec<FieldUiEntry> {
+    vec![FieldUiEntry {
+        path: "risk.max_weekly_loss_usd",
+        label: ui_text!(en = "Weekly realized-loss cap", zh = "周亏损上限 (USD)"),
+        help: ui_text!(
+            en = "Weekly realized-loss cap (USD); breach halts at L4. Default: `120`.",
+            zh = "周亏损上限 (USD)。默认：120。"
+        ),
+        order: 860,
+        widget: Some(FieldWidget::DecimalString),
+        semantics: None,
+        visible: true,
+    }]
+}
+
+/// Fields: `risk.metrics_refresh_interval_secs … risk.metrics_refresh_interval_secs`.
+fn build_fields_risk_metrics() -> Vec<FieldUiEntry> {
+    vec![FieldUiEntry {
+        path: "risk.metrics_refresh_interval_secs",
+        label: ui_text!(en = "Interval", zh = "指标刷新间隔 (秒)"),
+        help: ui_text!(
+            en = "Interval (seconds) between CLOB balance + open-position metrics refreshes. Default: `5`.",
+            zh = "指标刷新间隔 (秒)。默认：5。"
+        ),
+        order: 870,
+        widget: Some(FieldWidget::Integer),
+        semantics: None,
+        visible: true,
+    }]
+}
+
+/// Fields: `risk.min_balance_usd … risk.min_trade_usd`.
+fn build_fields_risk_min() -> Vec<FieldUiEntry> {
     vec![
-        FieldUiEntry {
-            path: "risk.max_weekly_loss_usd",
-            label: ui_text!(en = "Weekly realized-loss cap", zh = "周亏损上限 (USD)"),
-            help: ui_text!(
-                en = "Weekly realized-loss cap (USD); breach halts at L4. Default: `120`.",
-                zh = "周亏损上限 (USD)。默认：120。"
-            ),
-            order: 860,
-            widget: Some(FieldWidget::DecimalString),
-            semantics: None,
-            visible: true,
-        },
-        FieldUiEntry {
-            path: "risk.metrics_refresh_interval_secs",
-            label: ui_text!(en = "Interval", zh = "指标刷新间隔 (秒)"),
-            help: ui_text!(
-                en = "Interval (seconds) between CLOB balance + open-position metrics refreshes. Default: `5`.",
-                zh = "指标刷新间隔 (秒)。默认：5。"
-            ),
-            order: 870,
-            widget: Some(FieldWidget::Integer),
-            semantics: None,
-            visible: true,
-        },
         FieldUiEntry {
             path: "risk.min_balance_usd",
             label: ui_text!(
@@ -1357,7 +1556,8 @@ fn build_fields_part_17() -> Vec<FieldUiEntry> {
     ]
 }
 
-fn build_fields_part_18() -> Vec<FieldUiEntry> {
+/// Fields: `risk.permanent_blacklist_markets … risk.permanent_blacklist_tokens`.
+fn build_fields_risk_permanent() -> Vec<FieldUiEntry> {
     vec![
         FieldUiEntry {
             path: "risk.permanent_blacklist_markets",
@@ -1389,18 +1589,28 @@ fn build_fields_part_18() -> Vec<FieldUiEntry> {
             semantics: None,
             visible: true,
         },
-        FieldUiEntry {
-            path: "risk.potential_loss_escalation_secs",
-            label: ui_text!(en = "Maximum age", zh = "潜在亏损升级超时 (秒)"),
-            help: ui_text!(
-                en = "Maximum age (seconds) of an active potential-loss entry before escalation triggers an L4 System halt. Default: `3600`.",
-                zh = "潜在亏损升级超时 (秒)。默认：3600。"
-            ),
-            order: 930,
-            widget: Some(FieldWidget::Integer),
-            semantics: None,
-            visible: true,
-        },
+    ]
+}
+
+/// Fields: `risk.potential_loss_escalation_secs … risk.potential_loss_escalation_secs`.
+fn build_fields_risk_potential() -> Vec<FieldUiEntry> {
+    vec![FieldUiEntry {
+        path: "risk.potential_loss_escalation_secs",
+        label: ui_text!(en = "Maximum age", zh = "潜在亏损升级超时 (秒)"),
+        help: ui_text!(
+            en = "Maximum age (seconds) of an active potential-loss entry before escalation triggers an L4 System halt. Default: `3600`.",
+            zh = "潜在亏损升级超时 (秒)。默认：3600。"
+        ),
+        order: 930,
+        widget: Some(FieldWidget::Integer),
+        semantics: None,
+        visible: true,
+    }]
+}
+
+/// Fields: `risk.reconciliation_interval_secs … risk.reconciliation_tolerance_usd`.
+fn build_fields_risk_reconciliation() -> Vec<FieldUiEntry> {
+    vec![
         FieldUiEntry {
             path: "risk.reconciliation_interval_secs",
             label: ui_text!(en = "Interval", zh = "对账间隔 (秒)"),
@@ -1431,7 +1641,8 @@ fn build_fields_part_18() -> Vec<FieldUiEntry> {
     ]
 }
 
-fn build_fields_part_19() -> Vec<FieldUiEntry> {
+/// Fields: `risk.reservation_gc_interval_secs … risk.reservation_ttl_secs`.
+fn build_fields_risk_reservation() -> Vec<FieldUiEntry> {
     vec![
         FieldUiEntry {
             path: "risk.reservation_gc_interval_secs",
@@ -1457,30 +1668,44 @@ fn build_fields_part_19() -> Vec<FieldUiEntry> {
             semantics: None,
             visible: true,
         },
-        FieldUiEntry {
-            path: "risk.reserve_balance_usd",
-            label: ui_text!(en = "Balance reserve", zh = "Kelly 预留余额 (USD)"),
-            help: ui_text!(
-                en = "Balance reserve (USD) excluded from the Kelly bankroll. Default: `100`.",
-                zh = "Kelly 预留余额 (USD)。默认：100。"
-            ),
-            order: 980,
-            widget: Some(FieldWidget::DecimalString),
-            semantics: None,
-            visible: true,
-        },
-        FieldUiEntry {
-            path: "risk.ws_disconnect_threshold_secs",
-            label: ui_text!(en = "WS disconnect duration", zh = "WS 断连阈值 (秒)"),
-            help: ui_text!(
-                en = "WS disconnect duration (seconds) before trading is gated. Default: `30`.",
-                zh = "WS 断连阈值 (秒)。默认：30。"
-            ),
-            order: 990,
-            widget: Some(FieldWidget::Integer),
-            semantics: None,
-            visible: true,
-        },
+    ]
+}
+
+/// Fields: `risk.reserve_balance_usd … risk.reserve_balance_usd`.
+fn build_fields_risk_reserve() -> Vec<FieldUiEntry> {
+    vec![FieldUiEntry {
+        path: "risk.reserve_balance_usd",
+        label: ui_text!(en = "Balance reserve", zh = "Kelly 预留余额 (USD)"),
+        help: ui_text!(
+            en = "Balance reserve (USD) excluded from the Kelly bankroll. Default: `100`.",
+            zh = "Kelly 预留余额 (USD)。默认：100。"
+        ),
+        order: 980,
+        widget: Some(FieldWidget::DecimalString),
+        semantics: None,
+        visible: true,
+    }]
+}
+
+/// Fields: `risk.ws_disconnect_threshold_secs … risk.ws_disconnect_threshold_secs`.
+fn build_fields_risk_ws() -> Vec<FieldUiEntry> {
+    vec![FieldUiEntry {
+        path: "risk.ws_disconnect_threshold_secs",
+        label: ui_text!(en = "WS disconnect duration", zh = "WS 断连阈值 (秒)"),
+        help: ui_text!(
+            en = "WS disconnect duration (seconds) before trading is gated. Default: `30`.",
+            zh = "WS 断连阈值 (秒)。默认：30。"
+        ),
+        order: 990,
+        widget: Some(FieldWidget::Integer),
+        semantics: None,
+        visible: true,
+    }]
+}
+
+/// Fields: `settlement.lifecycle.dedup_window_secs … settlement.lifecycle.retry_interval_secs`.
+fn build_fields_settlement_lifecycle() -> Vec<FieldUiEntry> {
+    vec![
         FieldUiEntry {
             path: "settlement.lifecycle.dedup_window_secs",
             label: ui_text!(en = "Window", zh = "结算去重窗口 (秒)"),
@@ -1493,11 +1718,6 @@ fn build_fields_part_19() -> Vec<FieldUiEntry> {
             semantics: None,
             visible: true,
         },
-    ]
-}
-
-fn build_fields_part_20() -> Vec<FieldUiEntry> {
-    vec![
         FieldUiEntry {
             path: "settlement.lifecycle.max_redeem_attempts",
             label: ui_text!(
@@ -1525,6 +1745,12 @@ fn build_fields_part_20() -> Vec<FieldUiEntry> {
             semantics: None,
             visible: true,
         },
+    ]
+}
+
+/// Fields: `settlement.oracle.all_sources_down_strategy … settlement.oracle.uma_timeout_secs`.
+fn build_fields_settlement_oracle_from_all_sources_down_strategy() -> Vec<FieldUiEntry> {
+    vec![
         FieldUiEntry {
             path: "settlement.oracle.all_sources_down_strategy",
             label: ui_text!(
@@ -1567,11 +1793,6 @@ fn build_fields_part_20() -> Vec<FieldUiEntry> {
             semantics: None,
             visible: true,
         },
-    ]
-}
-
-fn build_fields_part_21() -> Vec<FieldUiEntry> {
-    vec![
         FieldUiEntry {
             path: "settlement.oracle.uma_endpoint",
             label: ui_text!(en = "UMA optimistic-oracle API endpoint", zh = "UMA 端点"),
@@ -1596,21 +1817,31 @@ fn build_fields_part_21() -> Vec<FieldUiEntry> {
             semantics: None,
             visible: true,
         },
-        FieldUiEntry {
-            path: "settlement.oracle.voting_quorum",
-            label: ui_text!(
-                en = "Sources that must agree before a resolution verdict is accepted",
-                zh = "投票法定人数"
-            ),
-            help: ui_text!(
-                en = "Sources that must agree before a resolution verdict is accepted. Default: `2` (of Gamma / CTF / UMA).",
-                zh = "投票法定人数。默认：2。"
-            ),
-            order: 1080,
-            widget: None,
-            semantics: None,
-            visible: true,
-        },
+    ]
+}
+
+/// Fields: `settlement.oracle.voting_quorum … settlement.oracle.voting_quorum`.
+fn build_fields_settlement_oracle_from_voting_quorum() -> Vec<FieldUiEntry> {
+    vec![FieldUiEntry {
+        path: "settlement.oracle.voting_quorum",
+        label: ui_text!(
+            en = "Sources that must agree before a resolution verdict is accepted",
+            zh = "投票法定人数"
+        ),
+        help: ui_text!(
+            en = "Sources that must agree before a resolution verdict is accepted. Default: `2` (of Gamma / CTF / UMA).",
+            zh = "投票法定人数。默认：2。"
+        ),
+        order: 1080,
+        widget: None,
+        semantics: None,
+        visible: true,
+    }]
+}
+
+/// Fields: `settlement.redeem.gas_limit … settlement.redeem.overrides`.
+fn build_fields_settlement_redeem() -> Vec<FieldUiEntry> {
+    vec![
         FieldUiEntry {
             path: "settlement.redeem.gas_limit",
             label: ui_text!(
@@ -1627,16 +1858,13 @@ fn build_fields_part_21() -> Vec<FieldUiEntry> {
             visible: true,
         },
         FieldUiEntry {
-            path: "settlement.redeem.holder_address",
-            label: ui_text!(
-                en = "Token holder address when it differs from the signer",
-                zh = "Holder 地址"
-            ),
+            path: "settlement.redeem.overrides",
+            label: ui_text!(en = "Per-market redeem overrides", zh = "按市场赎回覆盖"),
             help: ui_text!(
-                en = "Token holder address when it differs from the signer (e.g. proxy wallet). `None` uses the signer address. Default: `None`.",
-                zh = "Holder 地址。默认：None。"
+                en = "Optional condition_id keyed overrides. Each override must match the market's standard or neg-risk class.",
+                zh = "可选的 condition_id 覆盖配置；每条覆盖必须匹配市场的 standard 或 neg-risk 类别。"
             ),
-            order: 1100,
+            order: 1120,
             widget: None,
             semantics: None,
             visible: true,
@@ -1644,43 +1872,68 @@ fn build_fields_part_21() -> Vec<FieldUiEntry> {
     ]
 }
 
-fn build_fields_part_22() -> Vec<FieldUiEntry> {
+/// Fields: `settlement.redeem.neg_risk.holder_address … settlement.redeem.neg_risk.route`.
+fn build_fields_settlement_redeem_neg_risk() -> Vec<FieldUiEntry> {
     vec![
         FieldUiEntry {
-            path: "settlement.redeem.output_asset",
-            label: ui_text!(en = "Output asset for adapter routes", zh = "输出资产"),
+            path: "settlement.redeem.neg_risk.holder_address",
+            label: ui_text!(
+                en = "Neg-risk market token holder",
+                zh = "Neg-risk Holder 地址"
+            ),
             help: ui_text!(
-                en = "Output asset for adapter routes. Default: `usdc_e`.",
-                zh = "输出资产。默认：usdc_e。"
+                en = "Token holder for neg-risk markets when it differs from the signer. `None` uses the signer address.",
+                zh = "Neg-risk 市场 token holder 与 signer 不同时填写；None 表示使用 signer 地址。"
+            ),
+            order: 1100,
+            widget: None,
+            semantics: None,
+            visible: true,
+        },
+        FieldUiEntry {
+            path: "settlement.redeem.neg_risk.route",
+            label: ui_text!(
+                en = "Neg-risk market redeem route",
+                zh = "Neg-risk 赎回路由"
+            ),
+            help: ui_text!(
+                en = "Route used for neg-risk markets. Default: `neg_risk_legacy_adapter`.",
+                zh = "Neg-risk 市场使用的赎回路由。默认：neg_risk_legacy_adapter。"
             ),
             order: 1110,
             widget: Some(FieldWidget::EnumSelect),
             semantics: None,
             visible: true,
         },
+    ]
+}
+
+/// Fields: `settlement.redeem.standard.holder_address … settlement.redeem.standard.route`.
+fn build_fields_settlement_redeem_standard() -> Vec<FieldUiEntry> {
+    vec![
         FieldUiEntry {
-            path: "settlement.redeem.proxy_safe_address",
+            path: "settlement.redeem.standard.holder_address",
             label: ui_text!(
-                en = "Gnosis Safe address for the proxy_safe route",
-                zh = "Proxy Safe 地址"
+                en = "Standard market token holder",
+                zh = "普通市场 Holder 地址"
             ),
             help: ui_text!(
-                en = "Gnosis Safe address for the `proxy_safe` route. Required by Live-mode validation when that route is selected. Default: `None`.",
-                zh = "Proxy Safe 地址。默认：None。"
+                en = "Token holder for standard markets when it differs from the signer. `None` uses the signer address.",
+                zh = "普通市场 token holder 与 signer 不同时填写；None 表示使用 signer 地址。"
             ),
-            order: 1120,
+            order: 1130,
             widget: None,
             semantics: None,
             visible: true,
         },
         FieldUiEntry {
-            path: "settlement.redeem.route",
-            label: ui_text!(en = "Active redemption route", zh = "赎回路由"),
+            path: "settlement.redeem.standard.route",
+            label: ui_text!(en = "Standard market redeem route", zh = "普通市场赎回路由"),
             help: ui_text!(
-                en = "Active redemption route. `disabled` blocks Live redemption (fail-closed: Live mode validation requires an explicit route). Default: `disabled`.",
-                zh = "赎回路由。失败关闭：异常情况下拒绝操作，不会盲目放行。默认：disabled。"
+                en = "Route used for standard (non-neg-risk) markets. Default: `standard_ctf`.",
+                zh = "普通（非 neg-risk）市场使用的赎回路由。默认：standard_ctf。"
             ),
-            order: 1130,
+            order: 1140,
             widget: Some(FieldWidget::EnumSelect),
             semantics: None,
             visible: true,

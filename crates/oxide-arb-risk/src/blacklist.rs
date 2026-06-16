@@ -412,11 +412,12 @@ impl BlacklistManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::clock;
     use oxide_arb_models::{enums::risk::BlacklistReason, runtime_config::RiskConfig};
 
     #[test]
     fn bloom_snapshot_blocks_trading_path_market() {
-        let clock = crate::clock::utc_clock();
+        let clock = clock::utc_clock();
         let manager = BlacklistManager::new(&RiskConfig::default(), clock);
         manager.add_permanent(MarketId::new("blocked"), BlacklistReason::Manual);
         let snap = manager.build_bloom_snapshot();

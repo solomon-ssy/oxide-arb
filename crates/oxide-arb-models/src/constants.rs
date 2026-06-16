@@ -32,13 +32,13 @@ pub const CTF_ADDRESS: &str = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045";
 pub const USDC_E_ADDRESS: &str = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
 
 /// Neg-risk adapter (legacy) — `redeemPositions(conditionId, amounts)` target
-/// for neg-risk markets when `settlement.redeem.route = neg_risk_legacy_adapter`.
+/// for neg-risk markets when `settlement.redeem.neg_risk.route = neg_risk_legacy_adapter`.
 pub const NEG_RISK_ADAPTER_ADDRESS: &str = "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296";
 
 /// CTF collateral adapter — alternative standard-market redeem target when
-/// `settlement.redeem.route = ctf_collateral_adapter`.
+/// `settlement.redeem.standard.route = ctf_collateral_adapter`.
 pub const CTF_COLLATERAL_ADAPTER_ADDRESS: &str = "0xAdA100Db00Ca00073811820692005400218FcE1f";
 
 /// Neg-risk collateral adapter — alternative neg-risk redeem target when
-/// `settlement.redeem.route = neg_risk_collateral_adapter`.
+/// `settlement.redeem.neg_risk.route = neg_risk_collateral_adapter`.
 pub const NEG_RISK_COLLATERAL_ADAPTER_ADDRESS: &str = "0xadA2005600Dec949baf300f4C6120000bDB6eAab";

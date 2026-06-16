@@ -11,9 +11,10 @@ use oxide_arb_models::{
     domain::{
         CalibrationBucketInfo, CalibrationOutcomeInfo, EdgeBucket, MarkRedeemedParams,
         MarketFilter, MarketPerformanceRow, NewCalibrationOutcome, NewPosition, NewTrade,
-        PageRequest, Paginated, PositionInfo, PositionPageQuery, PositionPatch, ReportTradeStats,
-        SettlePositionParams, SettledPositionStats, TimeWindow, TradeAnalyticsFilter, TradeInfo,
-        TradeObservation, TradePageQuery, UpsertCalibration, evidence::EvidenceQueryResult,
+        PageRequest, Paginated, PositionInfo, PositionPageQuery, PositionPatch,
+        PositionRedeemSnapshot, ReportTradeStats, SettlePositionParams, SettledPositionStats,
+        TimeWindow, TradeAnalyticsFilter, TradeInfo, TradeObservation, TradePageQuery,
+        UpsertCalibration, evidence::EvidenceQueryResult,
     },
     enums::{
         calibration::{DurationBucket, PriceZone},
@@ -377,6 +378,44 @@ impl PositionRepository for MockPositionRepository {
             .collect())
     }
 
+    async fn find_open_pending_redeem(&self) -> Result<Vec<PositionInfo>, StorageError> {
+        Ok(self
+            .positions
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|position| {
+                position.status == PositionStatus::Open
+                    && position.redeem_status == RedeemStatus::Pending
+            })
+            .cloned()
+            .collect())
+    }
+
+    async fn update_redeem_snapshot(
+        &self,
+        position_id: &PositionId,
+        snapshot: &PositionRedeemSnapshot,
+    ) -> Result<PositionInfo, StorageError> {
+        let (neg_risk, route, holder, resolution, gas_limit) = snapshot.into();
+        let mut positions = self.positions.lock().unwrap();
+        let position =
+            positions
+                .get_mut(&position_id.to_string())
+                .ok_or_else(|| StorageError::NotFound {
+                    entity: "position",
+                    id: position_id.to_string(),
+                })?;
+        position.redeem_neg_risk = neg_risk;
+        position.redeem_route = route;
+        position.redeem_holder_address = holder;
+        position.redeem_resolution = resolution;
+        position.redeem_gas_limit = gas_limit;
+        let updated = position.clone();
+        drop(positions);
+        Ok(updated)
+    }
+
     async fn find_open_for_resolved_markets(
         &self,
         limit: u64,
@@ -434,6 +473,11 @@ impl PositionRepository for MockPositionRepository {
             settlement_accounting_error: None,
             settlement_accounted_at: None,
             redeem_terminal_reason: None,
+            redeem_neg_risk: position.redeem_neg_risk,
+            redeem_route: position.redeem_route,
+            redeem_holder_address: position.redeem_holder_address,
+            redeem_resolution: position.redeem_resolution,
+            redeem_gas_limit: position.redeem_gas_limit,
         };
         self.positions
             .lock()

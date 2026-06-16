@@ -30,6 +30,7 @@ use oxide_arb_models::{
 use oxide_arb_risk::{
     builder::RiskEngineBuilder,
     clock::utc_clock,
+    context::SettlementGateInput,
     engine::RiskEngine,
     traits::{FillClaim, RiskFillCommitGuard, RiskMetrics, RiskPersistence},
     types::{ExecutionRiskEvent, ReportMode},
@@ -354,6 +355,7 @@ async fn healthy_engine_allows_trade() {
         &prob,
         &metrics,
         None,
+        SettlementGateInput::default(),
         ReportMode::ShortCircuit,
     );
 
@@ -380,6 +382,7 @@ async fn halted_engine_denies_trade() {
         &prob,
         &metrics,
         None,
+        SettlementGateInput::default(),
         ReportMode::ShortCircuit,
     );
 
@@ -416,6 +419,7 @@ async fn tripped_breaker_denies_trade() {
         &prob,
         &metrics,
         None,
+        SettlementGateInput::default(),
         ReportMode::ShortCircuit,
     );
 
@@ -446,6 +450,7 @@ async fn low_balance_denies_trade() {
         &prob,
         &metrics,
         None,
+        SettlementGateInput::default(),
         ReportMode::ShortCircuit,
     );
 
@@ -462,8 +467,14 @@ async fn full_report_runs_all_checks() {
 
     let opp = Arc::new(test_opportunity());
     let prob = test_probability();
-    let decision =
-        engine.pre_trade_check_core(opp.as_ref(), &prob, &metrics, None, ReportMode::FullReport);
+    let decision = engine.pre_trade_check_core(
+        opp.as_ref(),
+        &prob,
+        &metrics,
+        None,
+        SettlementGateInput::default(),
+        ReportMode::FullReport,
+    );
 
     assert!(!decision.allowed);
     assert!(
@@ -598,6 +609,7 @@ async fn active_potential_loss_reduces_available_bankroll_to_zero() {
         &prob,
         &metrics,
         None,
+        SettlementGateInput::default(),
         ReportMode::ShortCircuit,
     );
 
@@ -664,6 +676,7 @@ async fn tick_drives_breaker_transitions() {
         &prob,
         &metrics,
         None,
+        SettlementGateInput::default(),
         ReportMode::ShortCircuit,
     );
     assert!(!decision.allowed, "should deny while breaker is open");
@@ -680,6 +693,7 @@ async fn tick_drives_breaker_transitions() {
         &prob,
         &metrics_normal,
         None,
+        SettlementGateInput::default(),
         ReportMode::ShortCircuit,
     );
     assert!(
@@ -712,6 +726,7 @@ async fn acknowledge_and_resume_clears_halt() {
         &prob,
         &metrics,
         None,
+        SettlementGateInput::default(),
         ReportMode::ShortCircuit,
     );
     assert!(

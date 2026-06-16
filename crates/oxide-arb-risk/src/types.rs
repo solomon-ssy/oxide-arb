@@ -179,6 +179,8 @@ pub enum RiskCheckId {
     ReconciliationMaintenance,
     /// Control-factor publication TTL elapsed under fail-closed policy.
     ControlFactorSnapshotExpired,
+    /// Live settlement redeem route must resolve for the target market class.
+    RedeemRouteResolvable,
     MetricsFreshness,
     MinDepth,
     MaxDepthUsage,

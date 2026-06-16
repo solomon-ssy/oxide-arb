@@ -14,6 +14,7 @@ use oxide_arb_core::{
         alert_dispatcher::AlertDispatcher, execution_audit::ExecutionAuditWriter,
         metrics_hub::MetricsHub,
     },
+    pipeline::market_registry::MarketRegistry,
     post_trade::{
         consumer::PostTradeConsumer,
         relay::{PostTradeRelay, PostTradeRelayDeps},
@@ -25,8 +26,17 @@ use oxide_arb_models::runtime_config::{NotificationConfig, RuntimeConfig};
 use oxide_arb_models::{
     clickhouse::OpportunityAuditRow,
     config::{PolymarketConfig, WebSocketConfig},
-    domain::{CoreEvent, CoreEventPublisher, NewTrade, PositionInfo, TradeObservation},
-    enums::common::{ExecutionMode, MarketCategory, Side, TradeBusinessOutcome, TradeState},
+    domain::{
+        CoreEvent, CoreEventPublisher, NewTrade, PositionInfo, TradeObservation,
+        market::{MarketRegistryInfo, TokenInfo},
+    },
+    enums::{
+        common::{
+            CategorySet, ExecutionMode, MarketCategory, RedeemResolutionSource, RedeemStatus, Side,
+            TickSize, TradeBusinessOutcome, TradeState,
+        },
+        market::MarketStatus,
+    },
     runtime_config::RiskConfig,
     types::{
         Bps, EventId, ExecutionId, MarketId, OpportunityId, Price, ReservationId, Shares, TokenId,
@@ -246,7 +256,47 @@ fn risk_metrics(
     ))
 }
 
-fn harness() -> Harness {
+fn post_trade_market_registry() -> Arc<MarketRegistry> {
+    let registry = Arc::new(MarketRegistry::new());
+    registry.register_market(MarketRegistryInfo {
+        market_id: MarketId::new("0xpost-trade-market"),
+        event_id: EventId::new("evt-post-trade"),
+        token_yes: TokenId::new("post-trade-yes"),
+        token_no: TokenId::new("post-trade-no"),
+        question: "Post trade test?".into(),
+        slug: "post-trade".into(),
+        categories: CategorySet::from(MarketCategory::Politics),
+        status: MarketStatus::Active,
+        outcome: None,
+        neg_risk: false,
+        tick_size: TickSize::Hundredth,
+        tokens: vec![
+            TokenInfo {
+                token_id: TokenId::new("post-trade-yes"),
+                outcome: "Yes".into(),
+                neg_risk: false,
+            },
+            TokenInfo {
+                token_id: TokenId::new("post-trade-no"),
+                outcome: "No".into(),
+                neg_risk: false,
+            },
+        ],
+        best_bid: None,
+        best_ask: None,
+        depth_usd: None,
+        min_order_size: dec!(5),
+        volume_24h: Usd::ZERO,
+        fee_schedule: None,
+        end_date: None,
+        resolved_at: None,
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    });
+    registry
+}
+
+fn harness_with_config(config: RuntimeConfig) -> Harness {
     let metrics = Arc::new(MetricsHub::new());
     let trade_repo = Arc::new(MockTradeRepository::default());
     let position_repo = Arc::new(MockPositionRepository::default());
@@ -280,6 +330,8 @@ fn harness() -> Harness {
         metrics_refresh,
         metrics: metrics.clone(),
         events,
+        market_registry: post_trade_market_registry(),
+        runtime_config: Arc::new(RuntimeConfigStore::new(config)),
     };
 
     Harness {
@@ -291,6 +343,10 @@ fn harness() -> Harness {
         metrics,
         events_rx,
     }
+}
+
+fn harness() -> Harness {
+    harness_with_config(RuntimeConfig::default())
 }
 
 async fn create_observed_fill(repo: &MockTradeRepository) -> TradeId {
@@ -332,6 +388,49 @@ async fn consumer_is_idempotent_for_replayed_fill() {
     assert_eq!(positions[0].execution_mode, ExecutionMode::Live);
     assert_eq!(harness.calibration_repo.outcome_count(), 1);
     assert_eq!(harness.metrics.post_trade_relay_processed.get(), 1);
+}
+
+#[tokio::test]
+async fn simulated_fill_snapshots_default_redeem_plan_when_policy_has_no_live_classes() {
+    let mut config = RuntimeConfig::default();
+    config.settlement.redeem.standard = None;
+    config.settlement.redeem.neg_risk = None;
+    let harness = harness_with_config(config);
+    let trade_id = TradeId::from_v7();
+    let reservation_id = ReservationId::from_v7();
+    let mut trade = new_trade(trade_id.clone(), reservation_id);
+    trade.execution_mode = ExecutionMode::Paper;
+    harness
+        .trade_repo
+        .create(trade)
+        .await
+        .expect("create paper trade");
+    assert!(
+        harness
+            .trade_repo
+            .mark_submitted(&trade_id, Utc::now())
+            .await
+            .expect("mark submitted")
+    );
+    harness
+        .trade_repo
+        .mark_observed(&trade_id, fill_observation())
+        .await
+        .expect("mark observed");
+    let observed = harness.trade_repo.find(&trade_id).expect("observed trade");
+
+    harness.consumer.process(&observed).await;
+
+    let positions = harness.position_repo.positions_snapshot();
+    assert_eq!(positions.len(), 1);
+    assert_eq!(positions[0].execution_mode, ExecutionMode::Paper);
+    assert_eq!(positions[0].redeem_status, RedeemStatus::NotRequired);
+    assert!(!positions[0].redeem_neg_risk);
+    assert_eq!(positions[0].redeem_route, "standard_ctf");
+    assert_eq!(
+        positions[0].redeem_resolution,
+        RedeemResolutionSource::ClassStandard
+    );
 }
 
 #[tokio::test]

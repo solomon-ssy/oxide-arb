@@ -522,9 +522,25 @@ paper: insufficient depth for {cost} at {limit_price}
 
 **Live 额外 runtime 校验：**
 
-- `settlement.redeem.route` ≠ `disabled`
+- `settlement.redeem.standard` 与/或 `settlement.redeem.neg_risk` 至少一类已配置（推荐两类都配，以支持混合 portfolio）
+- 所有 `redeem_status = pending` 的 open 仓位具备有效 redeem 快照（历史仓位会在切 Live / 激活配置时自动 backfill）
 - 启用的通知渠道凭证完整
 - Metrics refresh 成功且 authoritative
+
+**推荐 Live redeem 配置（EOA + USDC.e）：**
+
+```json
+"settlement": {
+  "redeem": {
+    "standard": { "route": "standard_ctf", "holder_address": null },
+    "neg_risk": { "route": "neg_risk_legacy_adapter", "holder_address": null },
+    "overrides": {},
+    "gas_limit": 500000
+  }
+}
+```
+
+每笔成交会冻结 redeem 计划（route + resolution）；后续配置热更新仅影响**新**成交，pending 仓位继续用 DB 快照。
 
 ### 6.5 模式切换注意事项
 
@@ -943,7 +959,7 @@ Shadow 用于发布前验证；Published 用于 Live 真实生效。
 
 - [ ] private_key + JWT + RPC 已配置
 - [ ] `GET /system/status` metrics authoritative
-- [ ] `settlement.redeem.route` 有效
+- [ ] `settlement.redeem.standard` / `neg_risk` 双类路由已配置（或确认 pending 仓位均可 backfill）
 - [ ] 至少一套 Published 因子或确认无因子时 baseline 行为可接受
 - [ ] 断路器 Closed，halt 未激活
 

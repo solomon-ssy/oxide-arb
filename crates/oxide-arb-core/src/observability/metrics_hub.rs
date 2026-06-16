@@ -154,8 +154,8 @@ pub struct MetricsHub {
     // Settlement
     pub settlement_requests_total: IntCounterVec,
     pub settlement_positions_settled_total: IntCounter,
-    pub settlement_redeem_success_total: IntCounter,
-    pub settlement_redeem_failure_total: IntCounter,
+    pub settlement_redeem_success_total: IntCounterVec,
+    pub settlement_redeem_failure_total: IntCounterVec,
     pub settlement_oracle_mismatch_total: IntCounter,
     pub settlement_channel_dropped_total: IntCounter,
     pub settlement_no_open_positions_total: IntCounter,
@@ -339,8 +339,8 @@ fn register_control_factor_metrics(registry: &Registry) -> ControlFactorMetrics 
 struct SettlementMetrics {
     requests_total: IntCounterVec,
     positions_settled_total: IntCounter,
-    redeem_success_total: IntCounter,
-    redeem_failure_total: IntCounter,
+    redeem_success_total: IntCounterVec,
+    redeem_failure_total: IntCounterVec,
     oracle_mismatch_total: IntCounter,
     channel_dropped_total: IntCounter,
     no_open_positions_total: IntCounter,
@@ -770,15 +770,17 @@ fn register_settlement_metrics(registry: &Registry) -> SettlementMetrics {
             "oxide_arb_settlement_positions_settled_total",
             "Positions settled"
         ),
-        redeem_success_total: register_counter!(
+        redeem_success_total: register_counter_vec!(
             registry,
             "oxide_arb_settlement_redeem_success_total",
-            "CTF redeem successes"
+            "CTF redeem successes",
+            &["route", "resolution"]
         ),
-        redeem_failure_total: register_counter!(
+        redeem_failure_total: register_counter_vec!(
             registry,
             "oxide_arb_settlement_redeem_failure_total",
-            "CTF redeem failures"
+            "CTF redeem failures",
+            &["route", "error_class"]
         ),
         oracle_mismatch_total: register_counter!(
             registry,

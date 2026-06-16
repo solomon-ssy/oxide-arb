@@ -2,8 +2,8 @@
 
 use crate::{
     enums::common::{
-        ExecutionMode, PositionStatus, RedeemStatus, SettlementAccountingStatus, SettlementTrigger,
-        Side,
+        ExecutionMode, PositionStatus, RedeemResolutionSource, RedeemStatus,
+        SettlementAccountingStatus, SettlementTrigger, Side,
     },
     types::{MarketId, PositionId, Price, Shares, TokenId, TradeId, Usd},
 };
@@ -42,6 +42,11 @@ pub struct Model {
     pub settlement_accounting_error: Option<String>,
     pub settlement_accounted_at: Option<DateTime<Utc>>,
     pub redeem_terminal_reason: Option<String>,
+    pub redeem_neg_risk: bool,
+    pub redeem_route: String,
+    pub redeem_holder_address: Option<String>,
+    pub redeem_resolution: RedeemResolutionSource,
+    pub redeem_gas_limit: i64,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

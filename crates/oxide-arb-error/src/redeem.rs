@@ -10,8 +10,6 @@ pub enum RedeemError {
     UnsupportedRoute { route: String, reason: String },
     #[error("redeem holder {holder} differs from signer {signer}; proxy execution is required")]
     WrongHolder { holder: String, signer: String },
-    #[error("signer {signer} is not an owner of Safe {safe}")]
-    ProxySafeOwnerMismatch { safe: String, signer: String },
     #[error("RPC timeout or transport failure: {0}")]
     RpcTimeout(String),
     #[error("insufficient gas or gas estimation failure: {0}")]
@@ -66,15 +64,28 @@ impl RedeemError {
     pub const fn is_configuration_error(&self) -> bool {
         matches!(
             self,
-            Self::InvalidAddress { .. }
-                | Self::UnsupportedRoute { .. }
-                | Self::WrongHolder { .. }
-                | Self::ProxySafeOwnerMismatch { .. }
+            Self::InvalidAddress { .. } | Self::UnsupportedRoute { .. } | Self::WrongHolder { .. }
         )
     }
 
     #[must_use]
     pub const fn is_terminal_success_equivalent(&self) -> bool {
         matches!(self, Self::AlreadyRedeemed(_))
+    }
+
+    /// Stable Prometheus label for [`settlement_redeem_failure_total`].
+    #[must_use]
+    pub const fn metrics_error_class(&self) -> &'static str {
+        match self {
+            Self::InvalidAddress { .. } => "invalid_address",
+            Self::InvalidConditionId { .. } => "invalid_condition_id",
+            Self::UnsupportedRoute { .. } => "unsupported_route",
+            Self::WrongHolder { .. } => "wrong_holder",
+            Self::RpcTimeout(_) => "rpc_timeout",
+            Self::InsufficientGas(_) => "insufficient_gas",
+            Self::ContractRevert(_) => "contract_revert",
+            Self::AlreadyRedeemed(_) => "already_redeemed",
+            Self::TransactionFailed { .. } => "transaction_failed",
+        }
     }
 }

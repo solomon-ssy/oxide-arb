@@ -105,6 +105,11 @@ impl GammaClient {
         sync::discover_active_token(&self.http, &self.config).await
     }
 
+    /// Discover up to `limit` active CLOB token ids (keyset walk).
+    pub async fn discover_active_tokens(&self, limit: usize) -> Result<Vec<TokenId>, ApiError> {
+        sync::discover_active_tokens(&self.http, &self.config, limit).await
+    }
+
     /// Incremental sync: events changed since timestamp.
     pub async fn incremental_sync(
         &self,

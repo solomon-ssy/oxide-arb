@@ -232,8 +232,8 @@ mod tests {
     fn in_and_not_in_work_on_arrays() {
         assert!(evaluate_when(
             WhenOperator::In,
-            Some(&json!("proxy_safe")),
-            &json!(["disabled", "proxy_safe"]),
+            Some(&json!("live")),
+            &json!(["paper", "live"]),
         ));
         assert!(evaluate_when(
             WhenOperator::NotIn,

@@ -9,8 +9,8 @@ use super::ui_text::UiText;
 
 mod all_sources_down_strategy;
 mod market_category;
-mod redeem_output_asset;
-mod redeem_route;
+mod neg_risk_redeem_route;
+mod standard_redeem_route;
 
 /// One selectable enum wire value with localized label for the UI.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -24,8 +24,8 @@ pub struct EnumItemView {
 pub fn enum_items_for_id(enum_id: &str) -> Option<Vec<EnumItemView>> {
     match enum_id {
         "market_category" => Some(market_category::items()),
-        "redeem_route" => Some(redeem_route::items()),
-        "redeem_output_asset" => Some(redeem_output_asset::items()),
+        "standard_redeem_route" => Some(standard_redeem_route::items()),
+        "neg_risk_redeem_route" => Some(neg_risk_redeem_route::items()),
         "all_sources_down_strategy" => Some(all_sources_down_strategy::items()),
         _ => None,
     }

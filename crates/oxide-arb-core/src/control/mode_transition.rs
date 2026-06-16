@@ -35,7 +35,9 @@ use crate::{
         trading_gate::{halt_trading, resume_trading},
     },
     control::status::build_system_status,
-    execution::fsm::ExecutionFSM,
+    execution::{
+        fsm::ExecutionFSM, settlement::redeem_preflight::ensure_live_pending_redeem_portfolio,
+    },
     exposure::in_memory::InMemoryExposureReservation,
     infra::health_checker::HealthChecker,
     pipeline::market_registry::MarketRegistry,
@@ -58,7 +60,7 @@ use oxide_arb_models::{
     runtime_config::validation::validate_runtime_for_mode,
     types::MarketId,
 };
-use oxide_arb_repository::traits::SystemRuntimeStateRepository;
+use oxide_arb_repository::traits::{PositionRepository, SystemRuntimeStateRepository};
 use oxide_arb_risk::{engine::RiskEngine, traits::RiskMetrics};
 use std::{
     sync::Arc,
@@ -90,6 +92,8 @@ pub struct CoreRuntimeControlDeps {
     /// Live runtime config: mode preflight reads the active snapshot, never a
     /// startup copy.
     pub runtime_config: Arc<RuntimeConfigStore>,
+    /// Open positions for pending-redeem portfolio preflight when entering Live.
+    pub position_repo: Arc<dyn PositionRepository>,
     /// Persists the active mode so a transition survives a restart.
     pub system_runtime_state: Arc<dyn SystemRuntimeStateRepository>,
     /// Optional publisher for immediate WebSocket status pushes after control ops.
@@ -111,6 +115,7 @@ pub struct CoreRuntimeControl {
     health_checker: Arc<HealthChecker>,
     deploy: Arc<DeployConfig>,
     runtime_config: Arc<RuntimeConfigStore>,
+    position_repo: Arc<dyn PositionRepository>,
     system_runtime_state: Arc<dyn SystemRuntimeStateRepository>,
     status_publisher: Option<SharedSystemStatusPublisher>,
     started_at: Instant,
@@ -133,6 +138,7 @@ impl CoreRuntimeControl {
             health_checker: deps.health_checker,
             deploy: deps.deploy,
             runtime_config: deps.runtime_config,
+            position_repo: deps.position_repo,
             system_runtime_state: deps.system_runtime_state,
             status_publisher: deps.status_publisher,
             started_at,
@@ -154,6 +160,7 @@ impl CoreRuntimeControl {
             health_checker: Arc::clone(&self.health_checker),
             deploy: Arc::clone(&self.deploy),
             runtime_config: Arc::clone(&self.runtime_config),
+            position_repo: Arc::clone(&self.position_repo),
             system_runtime_state: Arc::clone(&self.system_runtime_state),
             status_publisher: self.status_publisher.clone(),
         }
@@ -256,6 +263,16 @@ impl RuntimeControlPort for CoreRuntimeControl {
 
         // 1. Preflight (no state change yet).
         self.preflight(target)?;
+        if target == ExecutionMode::Live {
+            let policy = self.runtime_config.current().settlement.redeem.clone();
+            ensure_live_pending_redeem_portfolio(
+                self.position_repo.as_ref(),
+                &self.market_registry,
+                &policy,
+                target,
+            )
+            .await?;
+        }
 
         // 2. Quiesce: halt then wait for the loop to drain.
         halt_trading(

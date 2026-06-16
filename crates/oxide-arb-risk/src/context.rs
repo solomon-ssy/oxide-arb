@@ -10,6 +10,8 @@ use oxide_arb_models::{
     domain::{
         control_factor::FactorDecisionContext, opportunity::Opportunity, risk::ProbabilityInput,
     },
+    enums::common::ExecutionMode,
+    runtime_config::RedeemRoutingPolicy,
     types::Usd,
 };
 use rust_decimal::Decimal;
@@ -67,6 +69,14 @@ impl BlacklistGate {
     }
 }
 
+/// Live settlement gate inputs for redeem-route resolution.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SettlementGateInput<'a> {
+    pub mode: ExecutionMode,
+    pub market_neg_risk: Option<bool>,
+    pub redeem_policy: Option<&'a RedeemRoutingPolicy>,
+}
+
 /// Borrowed view of all state for one pre-trade decision.
 #[derive(Debug, Clone, Copy)]
 pub struct PreTradeContext<'a> {
@@ -78,6 +88,8 @@ pub struct PreTradeContext<'a> {
     /// size caps), resolved from the current published snapshot. `None` when no
     /// publication is active.
     pub factor_context: Option<&'a FactorDecisionContext>,
+    /// Live-only redeem routing gate (registry `neg_risk` + policy resolve).
+    pub settlement_gate: SettlementGateInput<'a>,
     pub now: DateTime<Utc>,
 }
 
@@ -281,6 +293,7 @@ mod tests {
             snap: &snap,
             metrics: RiskMetricsSnapshot::zeroed(),
             factor_context: None,
+            settlement_gate: SettlementGateInput::default(),
             now: Utc::now(),
         };
         assert!(ctx.is_market_blacklisted_trading_path().is_none());

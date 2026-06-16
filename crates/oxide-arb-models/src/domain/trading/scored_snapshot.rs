@@ -1,5 +1,6 @@
 use crate::{
     domain::{
+        AppliedControlFactor,
         calibration::{BucketKey, CalibrationSnapshot},
         opportunity::Opportunity,
     },
@@ -185,7 +186,7 @@ impl ScoredOpportunitySnapshot {
     pub fn with_applied_control_factors(
         mut self,
         publication_id: Option<FactorPublicationId>,
-        applied: &[crate::domain::control_factor::AppliedControlFactor],
+        applied: &[AppliedControlFactor],
     ) -> Self {
         let factor_ids = applied
             .iter()

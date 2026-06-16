@@ -224,6 +224,57 @@ pub async fn discover_active_token(
     })
 }
 
+/// Collect up to `limit` active CLOB token ids by walking Gamma keyset pages.
+pub async fn discover_active_tokens(
+    http: &reqwest::Client,
+    config: &GammaConfig,
+    limit: usize,
+) -> Result<Vec<TokenId>, ApiError> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+
+    let mut config = config.clone();
+    config.page_size = effective_keyset_page_size(config.page_size.min(50));
+
+    let mut tokens = Vec::with_capacity(limit);
+    let mut cursor: Option<String> = None;
+
+    while tokens.len() < limit {
+        let page = fetch_events_keyset_page(http, &config, cursor.as_deref()).await?;
+        let catalog = normalize_wire_events(page.events);
+
+        for event in &catalog {
+            for market in &event.markets {
+                if market.status != MarketStatus::Active {
+                    continue;
+                }
+                for token in &market.tokens {
+                    tokens.push(TokenId::new(&token.token_id));
+                    if tokens.len() >= limit {
+                        return Ok(tokens);
+                    }
+                }
+            }
+        }
+
+        cursor = page.next_cursor;
+        if cursor.is_none() {
+            break;
+        }
+    }
+
+    if tokens.is_empty() {
+        return Err(ApiError::Gamma {
+            endpoint: EVENTS_KEYSET_PATH.into(),
+            status: 0,
+            body: format!("no active tokens found while collecting limit={limit}"),
+        });
+    }
+
+    Ok(tokens)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{effective_keyset_page_size, events_keyset_url};

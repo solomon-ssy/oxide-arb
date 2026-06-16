@@ -12,7 +12,10 @@
 //!    exposure limits below currently committed capital.
 
 use super::{RiskConfig, RuntimeConfig};
-use crate::enums::common::{ExecutionMode, RedeemRoute};
+use crate::{
+    domain::position::PositionInfo,
+    enums::common::{ExecutionMode, RedeemStatus},
+};
 use oxide_arb_error::config_validation::{
     ConfigValidationError, ConfigValidationReport, ConfigWarning,
 };
@@ -56,6 +59,28 @@ pub fn validate_runtime_for_mode(
     let mut report = ConfigValidationReport::default();
     validate_settlement_mode(config, mode, &mut report);
     validate_notification_mode(config, mode, &mut report);
+    report
+}
+
+/// Validate that every open position awaiting on-chain redeem has a usable
+/// snapshotted redeem plan (immutable at fill time).
+#[must_use]
+pub fn validate_pending_redeem_snapshots(positions: &[PositionInfo]) -> ConfigValidationReport {
+    let mut report = ConfigValidationReport::default();
+    for position in positions
+        .iter()
+        .filter(|p| p.redeem_status == RedeemStatus::Pending)
+    {
+        if let Err(error) = position.redeem_plan() {
+            report.errors.push(ConfigValidationError::InvalidValue {
+                field: "position.redeem_plan",
+                detail: format!(
+                    "position {} market {} has invalid redeem snapshot: {error}",
+                    position.position_id, position.market_id
+                ),
+            });
+        }
+    }
     report
 }
 
@@ -772,18 +797,29 @@ fn validate_settlement(config: &RuntimeConfig, report: &mut ConfigValidationRepo
         });
     }
 
-    for (field, value) in [
-        (
-            "settlement.redeem.holder_address",
-            redeem.holder_address.as_deref(),
-        ),
-        (
-            "settlement.redeem.proxy_safe_address",
-            redeem.proxy_safe_address.as_deref(),
-        ),
-    ] {
-        if let Some(address) = value {
-            validate_address(field, address, report);
+    if let Some(standard) = &redeem.standard {
+        if let Some(holder) = standard.holder_address.as_deref() {
+            validate_address("settlement.redeem.standard.holder_address", holder, report);
+        }
+    }
+    if let Some(neg_risk) = &redeem.neg_risk {
+        if let Some(holder) = neg_risk.holder_address.as_deref() {
+            validate_address("settlement.redeem.neg_risk.holder_address", holder, report);
+        }
+    }
+
+    for (market_id, override_policy) in &redeem.overrides {
+        if !is_condition_id(market_id.as_str().trim()) {
+            report.errors.push(ConfigValidationError::InvalidValue {
+                field: "settlement.redeem.overrides",
+                detail: format!(
+                    "'{}' is not a condition id (0x + 64 hex chars expected)",
+                    market_id.as_str()
+                ),
+            });
+        }
+        if let Some(holder) = override_policy.holder_address() {
+            validate_address("settlement.redeem.overrides", holder, report);
         }
     }
 
@@ -817,16 +853,10 @@ fn validate_settlement_mode(
         return;
     }
     let redeem = &config.settlement.redeem;
-    if redeem.route == RedeemRoute::Disabled {
+    if !redeem.has_any_live_class() {
         report.errors.push(ConfigValidationError::InvalidValue {
-            field: "settlement.redeem.route",
-            detail: "Live mode requires an explicit redeem route".into(),
-        });
-    }
-    if redeem.route == RedeemRoute::ProxySafe && redeem.proxy_safe_address.is_none() {
-        report.errors.push(ConfigValidationError::InvalidValue {
-            field: "settlement.redeem.proxy_safe_address",
-            detail: "required when settlement.redeem.route=proxy_safe".into(),
+            field: "settlement.redeem",
+            detail: "Live mode requires at least one of standard or neg_risk class policy".into(),
         });
     }
 }
@@ -914,13 +944,16 @@ mod tests {
     }
 
     #[test]
-    fn live_requires_explicit_redeem_route() {
-        let config = RuntimeConfig::default();
+    fn live_requires_at_least_one_redeem_class() {
+        let mut config = RuntimeConfig::default();
+        config.settlement.redeem.standard = None;
+        config.settlement.redeem.neg_risk = None;
         let report = validate_runtime_for_mode(&config, ExecutionMode::Live);
-        assert!(report.has_errors(), "disabled route must fail Live");
+        assert!(report.has_errors(), "no class policy must fail Live");
         assert!(
-            !validate_runtime_for_mode(&config, ExecutionMode::DryRun).has_errors(),
-            "DryRun tolerates a disabled route"
+            !validate_runtime_for_mode(&RuntimeConfig::default(), ExecutionMode::DryRun)
+                .has_errors(),
+            "DryRun tolerates default dual-class policy"
         );
     }
 

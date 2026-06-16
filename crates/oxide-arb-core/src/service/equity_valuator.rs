@@ -129,8 +129,8 @@ mod tests {
         enums::{
             calibration::{DurationBucket, PriceZone},
             common::{
-                CategorySet, ExecutionMode, MarketCategory, PositionStatus, RedeemStatus,
-                SettlementAccountingStatus, SettlementTrigger, Side, TickSize,
+                CategorySet, ExecutionMode, MarketCategory, PositionStatus, RedeemResolutionSource,
+                RedeemStatus, SettlementAccountingStatus, SettlementTrigger, Side, TickSize,
             },
             market::MarketStatus,
         },
@@ -292,6 +292,11 @@ mod tests {
             settlement_accounting_error: None,
             settlement_accounted_at: None,
             redeem_terminal_reason: None,
+            redeem_neg_risk: false,
+            redeem_route: "standard_ctf".into(),
+            redeem_holder_address: None,
+            redeem_resolution: RedeemResolutionSource::ClassStandard,
+            redeem_gas_limit: 500_000,
         }
     }
 

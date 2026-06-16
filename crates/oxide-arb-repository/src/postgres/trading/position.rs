@@ -5,7 +5,8 @@ use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::{
     domain::{
         MarkRedeemedParams, NewPosition, NullablePatch, Paginated, Patch, PositionInfo,
-        PositionPageQuery, PositionPatch, SettlePositionParams, SettledPositionStats,
+        PositionPageQuery, PositionPatch, PositionRedeemSnapshot, SettlePositionParams,
+        SettledPositionStats,
     },
     entities::{
         market::Column as MarketColumn,
@@ -24,7 +25,8 @@ use rust_decimal::Decimal;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, DatabaseTransaction,
     EntityTrait, FromQueryResult, IntoActiveModel, JoinType, PaginatorTrait, QueryFilter,
-    QueryOrder, QuerySelect, RelationTrait, sea_query::Condition,
+    QueryOrder, QuerySelect, RelationTrait,
+    sea_query::{Condition, Expr},
 };
 
 // ── helpers ──────────────────────────────────────────────────────────
@@ -143,6 +145,45 @@ async fn find_redeem_retry_candidates_q(
         .await
         .map_err(StorageError::from)
         .map(|v| v.into_iter().map(Into::into).collect())
+}
+
+async fn find_open_pending_redeem_q(
+    db: &impl ConnectionTrait,
+) -> Result<Vec<PositionInfo>, StorageError> {
+    Entity::find()
+        .filter(Column::Status.eq(PositionStatus::Open))
+        .filter(Column::RedeemStatus.eq(RedeemStatus::Pending))
+        .all(db)
+        .await
+        .map_err(StorageError::from)
+        .map(|v| v.into_iter().map(Into::into).collect())
+}
+
+async fn update_redeem_snapshot_q(
+    db: &impl ConnectionTrait,
+    position_id: &PositionId,
+    snapshot: &PositionRedeemSnapshot,
+) -> Result<PositionInfo, StorageError> {
+    let (neg_risk, route, holder, resolution, gas_limit) = snapshot.into();
+    let models = Entity::update_many()
+        .col_expr(Column::RedeemNegRisk, Expr::value(neg_risk))
+        .col_expr(Column::RedeemRoute, Expr::value(route))
+        .col_expr(Column::RedeemHolderAddress, Expr::value(holder))
+        .col_expr(Column::RedeemResolution, Expr::value(resolution))
+        .col_expr(Column::RedeemGasLimit, Expr::value(gas_limit))
+        .filter(Column::PositionId.eq(position_id.clone()))
+        .exec_with_returning(db)
+        .await
+        .map_err(StorageError::from)?;
+
+    models
+        .into_iter()
+        .next()
+        .map(Into::into)
+        .ok_or_else(|| StorageError::NotFound {
+            entity: "position",
+            id: position_id.to_string(),
+        })
 }
 
 async fn find_open_for_resolved_markets_q(
@@ -595,6 +636,18 @@ impl PositionRepository for PgPositionRepository {
         find_redeem_retry_candidates_q(&self.db, max_attempts).await
     }
 
+    async fn find_open_pending_redeem(&self) -> Result<Vec<PositionInfo>, StorageError> {
+        find_open_pending_redeem_q(&self.db).await
+    }
+
+    async fn update_redeem_snapshot(
+        &self,
+        position_id: &PositionId,
+        snapshot: &PositionRedeemSnapshot,
+    ) -> Result<PositionInfo, StorageError> {
+        update_redeem_snapshot_q(&self.db, position_id, snapshot).await
+    }
+
     async fn find_open_for_resolved_markets(
         &self,
         limit: u64,
@@ -786,6 +839,18 @@ impl PositionRepository for PgPositionRepositoryTxn<'_> {
         max_attempts: u32,
     ) -> Result<Vec<PositionInfo>, StorageError> {
         find_redeem_retry_candidates_q(self.txn, max_attempts).await
+    }
+
+    async fn find_open_pending_redeem(&self) -> Result<Vec<PositionInfo>, StorageError> {
+        find_open_pending_redeem_q(self.txn).await
+    }
+
+    async fn update_redeem_snapshot(
+        &self,
+        position_id: &PositionId,
+        snapshot: &PositionRedeemSnapshot,
+    ) -> Result<PositionInfo, StorageError> {
+        update_redeem_snapshot_q(self.txn, position_id, snapshot).await
     }
 
     async fn find_open_for_resolved_markets(

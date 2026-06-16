@@ -68,7 +68,7 @@ use oxide_arb_repository::postgres::{
     PgPositionRepository, PgResolutionEventRepository, PgTradeRepository,
 };
 use oxide_arb_risk::{builder::RiskEngineBuilder, clock::utc_clock, engine::RiskEngine};
-use oxide_arb_test_support::risk::TestRiskMetrics;
+use oxide_arb_test_support::{mocks::MockPositionRepository, risk::TestRiskMetrics};
 use rust_decimal_macros::dec;
 use sea_orm::DatabaseConnection;
 use std::{sync::Arc, time::Duration};
@@ -329,6 +329,7 @@ fn fixture() -> Fixture {
     let applicator = RuntimeConfigApplicator::new(
         Arc::clone(&store),
         mode,
+        Arc::new(MockPositionRepository::default()),
         RuntimeConfigSubscribers {
             risk_engine: Arc::clone(&risk_engine),
             metrics_state: Arc::clone(&metrics_state),

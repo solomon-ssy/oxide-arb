@@ -27,8 +27,8 @@ use oxide_arb_models::{
     },
     enums::{
         common::{
-            CategorySet, ExecutionMode, MarketCategory, RedeemStatus, SettlementTrigger, Side,
-            TickSize, TradeState,
+            CategorySet, ExecutionMode, MarketCategory, RedeemResolutionSource, RedeemStatus,
+            SettlementTrigger, Side, TickSize, TradeState,
         },
         market::{EventStatus, MarketStatus},
     },
@@ -232,6 +232,11 @@ async fn seed_ledger_rows(pool: &PostgresPool) {
             total_cost_usd: Usd::new(dec!(40)),
             total_fees_usd: Usd::new(dec!(1)),
             redeem_status: RedeemStatus::NotRequired,
+            redeem_neg_risk: false,
+            redeem_route: "standard_ctf".into(),
+            redeem_holder_address: None,
+            redeem_resolution: RedeemResolutionSource::ClassStandard,
+            redeem_gas_limit: 500_000,
         })
         .await
         .expect("create paper position");
@@ -263,6 +268,11 @@ async fn seed_ledger_rows(pool: &PostgresPool) {
             total_cost_usd: Usd::new(dec!(70)),
             total_fees_usd: Usd::new(dec!(2)),
             redeem_status: RedeemStatus::Pending,
+            redeem_neg_risk: false,
+            redeem_route: "standard_ctf".into(),
+            redeem_holder_address: None,
+            redeem_resolution: RedeemResolutionSource::ClassStandard,
+            redeem_gas_limit: 500_000,
         })
         .await
         .expect("create live position");

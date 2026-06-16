@@ -27,9 +27,10 @@ use oxide_arb_core::{
         book_store::BookStore, market_registry::MarketRegistry,
         staleness_classifier::StalenessClassifier,
     },
+    runtime_config::RuntimeConfigStore,
     service::risk_metrics::{ApiHealthTracker, RiskMetricsState},
 };
-use oxide_arb_models::runtime_config::NotificationConfig;
+use oxide_arb_models::runtime_config::{NotificationConfig, RuntimeConfig};
 use oxide_arb_models::{
     clickhouse::OpportunityAuditRow,
     config::{PolymarketConfig, WebSocketConfig},
@@ -43,14 +44,16 @@ use oxide_arb_models::{
             execution_quality_dimensions,
         },
         latency::LatencyTrace,
+        market::{MarketRegistryInfo, TokenInfo},
         opportunity::{EndgameMeta, Opportunity},
     },
     enums::{
         calibration::{DurationBucket, PriceZone},
-        common::{ExecutionMode, MarketCategory, Side, StalenessLevel},
+        common::{CategorySet, ExecutionMode, MarketCategory, Side, StalenessLevel, TickSize},
         control_factor::{
             ControlFactorType, FactorMaturity, FactorStatus, PublicationMode, PublicationStatus,
         },
+        market::MarketStatus,
         opportunity::PayoutModel,
     },
     runtime_config::{ExecutionRuntimeConfig, MarketDataRuntimeConfig, RiskConfig},
@@ -370,6 +373,46 @@ fn factor_test_risk_metrics(
     ))
 }
 
+fn factor_test_market_registry() -> Arc<MarketRegistry> {
+    let registry = Arc::new(MarketRegistry::new());
+    registry.register_market(MarketRegistryInfo {
+        market_id: MarketId::new("0xfactor-exec-market"),
+        event_id: EventId::new("evt-factor-exec"),
+        token_yes: TokenId::new(TOKEN_YES),
+        token_no: TokenId::new(TOKEN_NO),
+        question: "Factor exec test?".into(),
+        slug: "factor-exec".into(),
+        categories: CategorySet::from(MarketCategory::Politics),
+        status: MarketStatus::Active,
+        outcome: None,
+        neg_risk: false,
+        tick_size: TickSize::Hundredth,
+        tokens: vec![
+            TokenInfo {
+                token_id: TokenId::new(TOKEN_YES),
+                outcome: "Yes".into(),
+                neg_risk: false,
+            },
+            TokenInfo {
+                token_id: TokenId::new(TOKEN_NO),
+                outcome: "No".into(),
+                neg_risk: false,
+            },
+        ],
+        best_bid: None,
+        best_ask: None,
+        depth_usd: None,
+        min_order_size: dec!(5),
+        volume_24h: Usd::ZERO,
+        fee_schedule: None,
+        end_date: None,
+        resolved_at: None,
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    });
+    registry
+}
+
 fn pipeline(
     store: Arc<FactorSnapshotStore>,
     execution_mode: ExecutionMode,
@@ -404,10 +447,7 @@ fn pipeline(
             },
             Arc::clone(&metrics),
         )),
-        plan_builder: PlanBuilder::new(
-            Arc::clone(&fee_calculator),
-            Arc::new(MarketRegistry::new()),
-        ),
+        plan_builder: PlanBuilder::new(Arc::clone(&fee_calculator), factor_test_market_registry()),
         dispatcher: Dispatcher::new(
             ExecutionModeHandle::new(execution_mode),
             Arc::clone(&book_store),
@@ -434,6 +474,7 @@ fn pipeline(
         metrics_state: Arc::new(RiskMetricsState::new(Arc::new(ApiHealthTracker::new(
             StdDuration::from_secs(60),
         )))),
+        runtime_config: Arc::new(RuntimeConfigStore::new(RuntimeConfig::default())),
         factors: store,
         shadow_writer: None,
     })

@@ -356,6 +356,8 @@ impl AppContext {
             metrics_refresh: Arc::clone(&self.risk.metrics_refresh),
             metrics: Arc::clone(&self.infra.metrics),
             events: self.event_publisher(),
+            market_registry: Arc::clone(&self.data.market_registry),
+            runtime_config: Arc::clone(&self.runtime_config),
         };
         // Relay timing (trade_confirm_*) is read from the runtime-config store
         // on every cycle, so activations apply on the next poll.
@@ -648,6 +650,10 @@ impl AppContext {
             health_checker,
             deploy: Arc::clone(&self.config),
             runtime_config: Arc::clone(&self.runtime_config),
+            position_repo: {
+                let repo = Arc::clone(&self.infra.position_repo);
+                repo as Arc<dyn PositionRepository>
+            },
             system_runtime_state: Arc::new(PgSystemRuntimeStateRepository::new(
                 self.infra.pg.connection().clone(),
             )),

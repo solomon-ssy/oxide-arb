@@ -7,7 +7,10 @@ use oxide_arb_error::OxideResult;
 use oxide_arb_models::{
     domain::position::PositionInfo,
     enums::{
-        common::{ExecutionMode, PositionStatus, RedeemStatus, SettlementAccountingStatus, Side},
+        common::{
+            ExecutionMode, PositionStatus, RedeemResolutionSource, RedeemStatus,
+            SettlementAccountingStatus, Side,
+        },
         risk::ReconciliationStatus,
     },
     types::{MarketId, PositionId, Price, Shares, TokenId, TradeId, Usd},
@@ -242,6 +245,11 @@ async fn reconciliation_detects_internal_markets_not_present_externally() {
             settlement_accounting_error: None,
             settlement_accounted_at: None,
             redeem_terminal_reason: None,
+            redeem_neg_risk: false,
+            redeem_route: "standard_ctf".into(),
+            redeem_holder_address: None,
+            redeem_resolution: RedeemResolutionSource::ClassStandard,
+            redeem_gas_limit: 500_000,
         }],
         ..Default::default()
     };

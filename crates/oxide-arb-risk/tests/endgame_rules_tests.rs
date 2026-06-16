@@ -16,7 +16,7 @@ use oxide_arb_models::{
     types::{Bps, EventId, MarketId, OpportunityId, Price, Shares, TokenId, Usd},
 };
 use oxide_arb_risk::{
-    context::PreTradeContext,
+    context::{PreTradeContext, SettlementGateInput},
     pipeline::{
         RiskCheck,
         checks::{DailyDirectionalBudgetCheck, DirectionalConcentrationCheck},
@@ -113,6 +113,7 @@ fn with_context(
         snap: &snap,
         metrics,
         factor_context: None,
+        settlement_gate: SettlementGateInput::default(),
         now: Utc::now(),
     };
 

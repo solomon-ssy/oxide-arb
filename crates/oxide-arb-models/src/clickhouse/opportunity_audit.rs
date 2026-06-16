@@ -68,6 +68,8 @@ pub struct OpportunityAuditRow {
     pub settlement_trigger: Option<ChSettlementTrigger>,
     pub winning_token_id: Option<TokenId>,
     pub accounting_status: Option<ChSettlementAccountingStatus>,
+    pub redeem_route: Option<String>,
+    pub redeem_resolution: Option<String>,
     pub fee_source: Option<String>,
     pub outcome: Option<ChAuditOutcome>,
     pub rejection_stage: Option<ChRejectionStage>,
@@ -130,6 +132,8 @@ impl OpportunityAuditRow {
             settlement_trigger: None,
             winning_token_id: None,
             accounting_status: None,
+            redeem_route: None,
+            redeem_resolution: None,
             fee_source: None,
             outcome: outcome.map(ChAuditOutcome::from),
             rejection_stage: None,
@@ -147,7 +151,7 @@ impl OpportunityAuditRow {
             detected_at: trade.created_at.timestamp_millis(),
             ingestion_time: Utc::now().timestamp_millis(),
             sequence: 0,
-            schema_version: ChSchemaVersion(2),
+            schema_version: ChSchemaVersion(3),
             updated_at: Utc::now().timestamp_millis(),
         }
     }
@@ -193,6 +197,8 @@ impl OpportunityAuditRow {
             settlement_trigger: None,
             winning_token_id: None,
             accounting_status: None,
+            redeem_route: None,
+            redeem_resolution: None,
             fee_source: None,
             outcome: outcome.map(ChAuditOutcome::from),
             rejection_stage: None,
@@ -215,7 +221,7 @@ impl OpportunityAuditRow {
             detected_at: trade.created_at.timestamp_millis(),
             ingestion_time: Utc::now().timestamp_millis(),
             sequence: 0,
-            schema_version: ChSchemaVersion(2),
+            schema_version: ChSchemaVersion(3),
             updated_at: Utc::now().timestamp_millis(),
         }
     }
@@ -315,6 +321,8 @@ impl
             settlement_trigger: None,
             winning_token_id: None,
             accounting_status: None,
+            redeem_route: None,
+            redeem_resolution: None,
             fee_source: None,
             outcome: Some(ChAuditOutcome::Rejected),
             rejection_stage: Some(ChRejectionStage::from_stage(stage)),
@@ -332,7 +340,7 @@ impl
             detected_at: opp.detected_at.timestamp_millis(),
             ingestion_time: Utc::now().timestamp_millis(),
             sequence: 0,
-            schema_version: ChSchemaVersion(2),
+            schema_version: ChSchemaVersion(3),
             updated_at: Utc::now().timestamp_millis(),
         }
     }
@@ -396,6 +404,8 @@ impl
             accounting_status: Some(ChSettlementAccountingStatus::from(
                 position.settlement_accounting_status,
             )),
+            redeem_route: Some(position.redeem_route.clone()),
+            redeem_resolution: Some(position.redeem_resolution.as_str().to_owned()),
             fee_source: None,
             outcome: Some(ChAuditOutcome::Settled),
             rejection_stage: None,
@@ -417,7 +427,7 @@ impl
             detected_at: trade.created_at.timestamp_millis(),
             ingestion_time: Utc::now().timestamp_millis(),
             sequence: 0,
-            schema_version: ChSchemaVersion(2),
+            schema_version: ChSchemaVersion(3),
             updated_at: Utc::now().timestamp_millis(),
         }
     }
@@ -445,8 +455,8 @@ mod tests {
         enums::{
             calibration::{DurationBucket, PriceZone},
             common::{
-                ExecutionMode, MarketCategory, PositionStatus, RedeemStatus,
-                SettlementAccountingStatus, SettlementTrigger, Side, StalenessLevel,
+                ExecutionMode, MarketCategory, PositionStatus, RedeemResolutionSource,
+                RedeemStatus, SettlementAccountingStatus, SettlementTrigger, Side, StalenessLevel,
             },
             execution::ExecutionOutcome,
         },
@@ -724,6 +734,11 @@ mod tests {
             settlement_accounting_error: None,
             settlement_accounted_at: None,
             redeem_terminal_reason: None,
+            redeem_neg_risk: false,
+            redeem_route: "standard_ctf".into(),
+            redeem_holder_address: None,
+            redeem_resolution: RedeemResolutionSource::ClassStandard,
+            redeem_gas_limit: 500_000,
         };
         let request = MarketSettlementRequest {
             market_id: trade.market_id.clone(),
@@ -751,6 +766,8 @@ mod tests {
             row.duration_bucket,
             Some(ChDurationBucket::from(snapshot.duration_bucket))
         );
+        assert_eq!(row.redeem_route.as_deref(), Some("standard_ctf"));
+        assert_eq!(row.redeem_resolution.as_deref(), Some("class_standard"));
         assert!(row.scored_snapshot_json.is_some());
         assert!(row.missing_fields_json.is_none());
     }

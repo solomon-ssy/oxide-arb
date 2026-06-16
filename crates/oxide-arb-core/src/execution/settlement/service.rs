@@ -201,7 +201,10 @@ impl MarketSettlementService {
                     reason,
                 )
                 .await?;
-            self.metrics.settlement_redeem_failure_total.inc();
+            self.metrics
+                .settlement_redeem_failure_total
+                .with_label_values(&[pos.redeem_route.as_str(), "max_attempts"])
+                .inc();
             return Err(OxideError::Internal("redeem max attempts reached".into()));
         }
 
@@ -231,30 +234,64 @@ impl MarketSettlementService {
         match self.redeem_position(req, pos).await {
             Ok(outcome) => {
                 if Self::position_redeem_mode(pos) == ExecutionMode::Live {
-                    self.metrics.settlement_redeem_success_total.inc();
+                    self.metrics
+                        .settlement_redeem_success_total
+                        .with_label_values(&[
+                            pos.redeem_route.as_str(),
+                            pos.redeem_resolution.as_str(),
+                        ])
+                        .inc();
                 }
                 Ok(Some(outcome))
-            }
-            Err(error) if error.is_retryable() => {
-                let attempts =
-                    u32::try_from(pos.redeem_attempts.saturating_add(1)).unwrap_or(u32::MAX);
-                self.position_repo
-                    .record_redeem_failure(
-                        &pos.position_id,
-                        attempts,
-                        &req.winning_token_id,
-                        req.source,
-                    )
-                    .await?;
-                self.metrics.settlement_redeem_failure_total.inc();
-                tracing::error!(%error, position_id = %pos.position_id, "redeem failed");
-                Ok(None)
             }
             Err(error) if error.is_terminal_success_equivalent() => {
                 Ok(Some(RedeemOutcome::dry_run()))
             }
-            Err(error) => Err(error.into()),
+            Err(error) => {
+                self.record_redeem_attempt_failure(req, pos, &error).await?;
+                Ok(None)
+            }
         }
+    }
+
+    async fn record_redeem_attempt_failure(
+        &self,
+        req: &MarketSettlementRequest,
+        pos: &PositionInfo,
+        error: &RedeemError,
+    ) -> Result<(), OxideError> {
+        let attempts = u32::try_from(pos.redeem_attempts.saturating_add(1)).unwrap_or(u32::MAX);
+        self.position_repo
+            .record_redeem_failure(
+                &pos.position_id,
+                attempts,
+                &req.winning_token_id,
+                req.source,
+            )
+            .await?;
+        self.metrics
+            .settlement_redeem_failure_total
+            .with_label_values(&[pos.redeem_route.as_str(), error.metrics_error_class()])
+            .inc();
+        if error.is_configuration_error() {
+            self.alerts.dispatch_background(
+                Alert::new(
+                    format!("settlement.redeem_config.{}", pos.position_id),
+                    AlertLevel::Critical,
+                    AlertCategory::TradingSafety,
+                    AlertSource::Settlement,
+                    "Redeem configuration error",
+                    format!(
+                        "Position {} in market {} failed redeem due to configuration: {error}",
+                        pos.position_id, pos.market_id
+                    ),
+                    Utc::now(),
+                )
+                .with_affects_trading(true),
+            );
+        }
+        tracing::error!(%error, position_id = %pos.position_id, "redeem failed");
+        Ok(())
     }
 
     async fn persist_position_settlement(
@@ -567,24 +604,29 @@ impl MarketSettlementService {
         pos: &PositionInfo,
     ) -> Result<RedeemOutcome, RedeemError> {
         let mode = Self::position_redeem_mode(pos);
+        let plan = pos.redeem_plan()?;
         let market = self.market_registry.get_market(&req.market_id);
-        let neg_risk = self
-            .market_registry
-            .neg_risk(&req.market_id)
-            .unwrap_or(false);
+        let yes_token_id = market.as_ref().map_or_else(
+            || req.winning_token_id.clone(),
+            |market| market.token_yes.clone(),
+        );
+        let no_token_id = market.as_ref().map_or_else(
+            || req.winning_token_id.clone(),
+            |market| market.token_no.clone(),
+        );
+        if market.is_none() && yes_token_id == no_token_id && plan.route.expects_neg_risk() {
+            return Err(RedeemError::UnsupportedRoute {
+                route: plan.route.to_string(),
+                reason: "registry miss: cannot resolve YES/NO token ids for neg-risk redeem".into(),
+            });
+        }
         let request = RedeemRequest {
             condition_id: req.market_id.clone(),
             market_id: req.market_id.clone(),
-            yes_token_id: market.as_ref().map_or_else(
-                || req.winning_token_id.clone(),
-                |market| market.token_yes.clone(),
-            ),
-            no_token_id: market.as_ref().map_or_else(
-                || req.winning_token_id.clone(),
-                |market| market.token_no.clone(),
-            ),
-            neg_risk,
+            yes_token_id,
+            no_token_id,
             execution_mode: mode,
+            plan,
         };
 
         match mode {

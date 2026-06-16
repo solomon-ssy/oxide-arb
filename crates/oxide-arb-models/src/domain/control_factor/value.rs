@@ -333,9 +333,12 @@ impl ControlFactorValue {
 mod tests {
     use super::{BucketRiskDimensions, ControlFactorValue, FactorDimensions};
     use crate::{
-        domain::control_factor::{
-            ConfidenceInterval, DataCoverageReport, FactorEvidence, FactorPayload,
-            PointInTimeInputManifest, TailRiskEvidence, TimeToSettlementBucket,
+        domain::{
+            BucketRiskPayload,
+            control_factor::{
+                ConfidenceInterval, DataCoverageReport, FactorEvidence, FactorPayload,
+                PointInTimeInputManifest, TailRiskEvidence, TimeToSettlementBucket,
+            },
         },
         enums::{
             calibration::{DurationBucket, PriceZone},
@@ -361,7 +364,7 @@ mod tests {
                 neg_risk: Some(false),
                 fee_profile: None,
             }),
-            payload: FactorPayload::BucketRisk(crate::domain::control_factor::BucketRiskPayload {
+            payload: FactorPayload::BucketRisk(BucketRiskPayload {
                 resolution_haircut_factor: dec!(0.9),
                 size_multiplier: dec!(0.9),
                 min_edge_bps_addon: dec!(0),

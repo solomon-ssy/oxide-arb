@@ -217,6 +217,8 @@ fn sample_audit(
         winning_token_id: None,
         accounting_status: None,
         fee_source: None,
+        redeem_route: None,
+        redeem_resolution: None,
         outcome: if stage == ChOpportunityAuditStage::Filled {
             Some(ChAuditOutcome::Success)
         } else {

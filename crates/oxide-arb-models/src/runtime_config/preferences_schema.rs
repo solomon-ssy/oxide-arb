@@ -1,17 +1,19 @@
 //! Preferences UI schema projection (`GET /runtime-config/schema`).
 
-use std::collections::{BTreeMap, HashSet};
-
-use serde_json::Value;
-
-use crate::domain::{
-    JsonValueType, RuntimeConfigSchemaFieldView, RuntimeConfigSchemaGroupView,
-    RuntimeConfigSchemaView, SchemaFieldFormat,
+use crate::{
+    domain::{
+        JsonValueType, RuntimeConfigSchemaFieldView, RuntimeConfigSchemaGroupView,
+        RuntimeConfigSchemaView, SchemaFieldFormat,
+    },
+    runtime_config::{
+        RuntimeConfig,
+        ui_enum::enum_items_for_id,
+        ui_registry::{field_ui_map, groups_ui},
+        ui_widget::{FieldWhen, FieldWidget},
+    },
 };
-use crate::runtime_config::RuntimeConfig;
-use crate::runtime_config::ui_enum::enum_items_for_id;
-use crate::runtime_config::ui_registry::{field_ui_map, groups_ui};
-use crate::runtime_config::ui_widget::{FieldWhen, FieldWidget};
+use serde_json::Value;
+use std::collections::{BTreeMap, HashSet};
 
 use super::schema_fields::walk_schema_leaves;
 
@@ -103,20 +105,6 @@ fn field_when_rules(path: &str) -> Option<Vec<FieldWhen>> {
     use crate::runtime_config::ui_widget::{WhenEffect, WhenOperator};
 
     match path {
-        "settlement.redeem.proxy_safe_address" => Some(vec![
-            FieldWhen {
-                target_path: "settlement.redeem.route".into(),
-                operator: WhenOperator::Eq,
-                value: serde_json::json!("proxy_safe"),
-                effect: WhenEffect::If,
-            },
-            FieldWhen {
-                target_path: "settlement.redeem.route".into(),
-                operator: WhenOperator::Eq,
-                value: serde_json::json!("proxy_safe"),
-                effect: WhenEffect::Require,
-            },
-        ]),
         "notification.telegram.bot_token" | "notification.telegram.chat_id" => Some(vec![
             FieldWhen {
                 target_path: "notification.telegram.enabled".into(),
@@ -230,7 +218,6 @@ pub fn preferences_schema_locale_gaps() -> Vec<String> {
 mod tests {
     use super::*;
     use crate::domain::JsonValueType;
-    use crate::runtime_config::ui_widget::WhenEffect;
 
     #[test]
     fn preferences_schema_has_no_ui_gaps() {
@@ -262,20 +249,27 @@ mod tests {
     }
 
     #[test]
-    fn redeem_route_enum_items_are_complete() {
+    fn standard_redeem_route_enum_items_are_complete() {
         let view = build_preferences_schema();
         let route = view
             .fields
             .iter()
-            .find(|field| field.path == "settlement.redeem.route")
-            .expect("redeem route field");
+            .find(|field| field.path == "settlement.redeem.standard.route")
+            .expect("standard redeem route field");
         let items = route.enum_items.as_ref().expect("enum items");
-        assert_eq!(items.len(), 6);
-        assert!(
-            items
-                .iter()
-                .any(|item| item.key == Value::String("proxy_safe".into()))
-        );
+        assert_eq!(items.len(), 2);
+    }
+
+    #[test]
+    fn neg_risk_redeem_route_enum_items_are_complete() {
+        let view = build_preferences_schema();
+        let route = view
+            .fields
+            .iter()
+            .find(|field| field.path == "settlement.redeem.neg_risk.route")
+            .expect("neg-risk redeem route field");
+        let items = route.enum_items.as_ref().expect("enum items");
+        assert_eq!(items.len(), 2);
     }
 
     #[test]
@@ -308,18 +302,5 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[test]
-    fn proxy_safe_address_has_visible_when_rule() {
-        let view = build_preferences_schema();
-        let field = view
-            .fields
-            .iter()
-            .find(|field| field.path == "settlement.redeem.proxy_safe_address")
-            .expect("proxy safe address field");
-        let rules = field.when.as_ref().expect("when rules");
-        assert!(rules.iter().any(|rule| rule.effect == WhenEffect::If));
-        assert!(rules.iter().any(|rule| rule.effect == WhenEffect::Require));
     }
 }

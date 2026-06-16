@@ -124,8 +124,8 @@ use oxide_arb_repository::{
     },
     traits::{
         BlacklistPersistenceRepository, CalibrationRepository, ControlFactorRepository,
-        ControlFactorShadowDecisionRepository, PotentialLossRepository, RiskStateRepository,
-        RuntimeConfigVersionRepository, SystemRuntimeStateRepository,
+        ControlFactorShadowDecisionRepository, PositionRepository, PotentialLossRepository,
+        RiskStateRepository, RuntimeConfigVersionRepository, SystemRuntimeStateRepository,
     },
 };
 use oxide_arb_risk::{
@@ -506,9 +506,11 @@ fn wire_applicator(input: WireApplicatorInput<'_>) -> Arc<RuntimeConfigApplicato
         settlement_service,
         settlement_dedup,
     } = input;
+    let position_repo = Arc::clone(&infra.repos.position) as Arc<dyn PositionRepository>;
     Arc::new(RuntimeConfigApplicator::new(
         runtime_store,
         execution_mode,
+        position_repo,
         RuntimeConfigSubscribers {
             risk_engine: Arc::clone(&risk.engine),
             metrics_state: Arc::clone(&risk.metrics_state),
@@ -904,7 +906,7 @@ async fn ensure_runtime_config_activation(
                 tracing::warn!(
                     %error,
                     version_id = %version.runtime_config_version_id,
-                    "active runtime config is not a valid schema_version=1 document — \
+                    "active runtime config is not a valid schema_version document — \
                      reseeding defaults"
                 );
             }
@@ -924,7 +926,9 @@ async fn ensure_runtime_config_activation(
                 config_json,
                 source: RuntimeConfigVersionSource::Bootstrap,
                 created_by: "system".to_owned(),
-                reason: "bootstrap default runtime config (schema_version=1)".to_owned(),
+                reason: format!(
+                    "bootstrap default runtime config (schema_version={RUNTIME_CONFIG_SCHEMA_VERSION})"
+                ),
             })
             .await?
         }
@@ -1401,6 +1405,7 @@ fn wire_execution_loop(
         audit_writer: Arc::clone(&infra.persistence.audit_writer),
         relay_notify: Arc::clone(&relay_notify),
         metrics_state: Arc::clone(&risk.metrics_state),
+        runtime_config: Arc::clone(&infra.runtime_store),
         factors: Arc::clone(&infra.factor_store),
         shadow_writer: Some(infra.shadow_writer.clone()),
     }));

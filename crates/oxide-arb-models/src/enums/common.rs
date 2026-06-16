@@ -587,46 +587,131 @@ impl RedeemStatus {
     }
 }
 
-/// Configured on-chain redemption route.
+/// On-chain redemption route for standard (non-neg-risk) markets.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum RedeemRoute {
+pub enum StandardRedeemRoute {
     #[default]
-    Disabled,
     StandardCtf,
-    NegRiskLegacyAdapter,
     CtfCollateralAdapter,
-    NegRiskCollateralAdapter,
-    ProxySafe,
 }
 
-impl RedeemRoute {
+impl StandardRedeemRoute {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::Disabled => "disabled",
             Self::StandardCtf => "standard_ctf",
-            Self::NegRiskLegacyAdapter => "neg_risk_legacy_adapter",
             Self::CtfCollateralAdapter => "ctf_collateral_adapter",
-            Self::NegRiskCollateralAdapter => "neg_risk_collateral_adapter",
-            Self::ProxySafe => "proxy_safe",
         }
     }
 }
 
-impl Display for RedeemRoute {
+impl Display for StandardRedeemRoute {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
     }
 }
 
-/// Settlement redeem output asset for adapter routes.
+/// On-chain redemption route for neg-risk markets.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum RedeemOutputAsset {
+pub enum NegRiskRedeemRoute {
     #[default]
-    UsdcE,
-    Pusd,
+    NegRiskLegacyAdapter,
+    NegRiskCollateralAdapter,
+}
+
+impl NegRiskRedeemRoute {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NegRiskLegacyAdapter => "neg_risk_legacy_adapter",
+            Self::NegRiskCollateralAdapter => "neg_risk_collateral_adapter",
+        }
+    }
+}
+
+impl Display for NegRiskRedeemRoute {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Resolved on-chain redemption route (all four live redeem paths).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResolvedRedeemRoute {
+    StandardCtf,
+    CtfCollateralAdapter,
+    NegRiskLegacyAdapter,
+    NegRiskCollateralAdapter,
+}
+
+impl ResolvedRedeemRoute {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::StandardCtf => "standard_ctf",
+            Self::CtfCollateralAdapter => "ctf_collateral_adapter",
+            Self::NegRiskLegacyAdapter => "neg_risk_legacy_adapter",
+            Self::NegRiskCollateralAdapter => "neg_risk_collateral_adapter",
+        }
+    }
+
+    #[must_use]
+    pub const fn expects_neg_risk(self) -> bool {
+        matches!(
+            self,
+            Self::NegRiskLegacyAdapter | Self::NegRiskCollateralAdapter
+        )
+    }
+}
+
+impl From<StandardRedeemRoute> for ResolvedRedeemRoute {
+    fn from(route: StandardRedeemRoute) -> Self {
+        match route {
+            StandardRedeemRoute::StandardCtf => Self::StandardCtf,
+            StandardRedeemRoute::CtfCollateralAdapter => Self::CtfCollateralAdapter,
+        }
+    }
+}
+
+impl From<NegRiskRedeemRoute> for ResolvedRedeemRoute {
+    fn from(route: NegRiskRedeemRoute) -> Self {
+        match route {
+            NegRiskRedeemRoute::NegRiskLegacyAdapter => Self::NegRiskLegacyAdapter,
+            NegRiskRedeemRoute::NegRiskCollateralAdapter => Self::NegRiskCollateralAdapter,
+        }
+    }
+}
+
+impl FromStr for ResolvedRedeemRoute {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "standard_ctf" => Ok(Self::StandardCtf),
+            "ctf_collateral_adapter" => Ok(Self::CtfCollateralAdapter),
+            "neg_risk_legacy_adapter" => Ok(Self::NegRiskLegacyAdapter),
+            "neg_risk_collateral_adapter" => Ok(Self::NegRiskCollateralAdapter),
+            _ => Err(()),
+        }
+    }
+}
+
+impl Display for ResolvedRedeemRoute {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+active_string_enum! {
+    /// How a position's redeem route was resolved at fill time.
+    pub enum RedeemResolutionSource {
+        Override => "override",
+        ClassStandard => "class_standard",
+        ClassNegRisk => "class_neg_risk",
+    }
 }
 
 active_string_enum! {

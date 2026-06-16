@@ -9,7 +9,11 @@ use crate::{
     pipeline::RiskCheck,
     types::{DrawdownAction, RiskCheckId, RiskCheckKind, RiskCheckResult},
 };
-use oxide_arb_models::{enums::common::StalenessLevel, runtime_config::RiskConfig, types::Usd};
+use oxide_arb_models::{
+    enums::common::{ExecutionMode, StalenessLevel},
+    runtime_config::RiskConfig,
+    types::Usd,
+};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 
@@ -254,7 +258,66 @@ impl RiskCheck for ControlFactorSnapshotExpiredCheck {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// #8 MetricsFreshness
+// #8 RedeemRouteResolvable (Live settlement)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Fail-closed Live gate: registry must expose `neg_risk` and policy must resolve.
+pub struct RedeemRouteResolvableCheck;
+
+impl RiskCheck for RedeemRouteResolvableCheck {
+    fn requires_metrics(&self) -> bool {
+        false
+    }
+
+    fn id(&self) -> RiskCheckId {
+        RiskCheckId::RedeemRouteResolvable
+    }
+
+    fn kind(&self) -> RiskCheckKind {
+        RiskCheckKind::Gate
+    }
+
+    fn evaluate(&self, ctx: &PreTradeContext<'_>) -> RiskCheckResult {
+        if ctx.settlement_gate.mode != ExecutionMode::Live {
+            return RiskCheckResult::passed(RiskCheckId::RedeemRouteResolvable);
+        }
+        let Some(neg_risk) = ctx.settlement_gate.market_neg_risk else {
+            return RiskCheckResult::failed(
+                RiskCheckId::RedeemRouteResolvable,
+                format!("market {} not in registry", ctx.opportunity.market_id),
+                "registry neg_risk".into(),
+                "missing".into(),
+            );
+        };
+        let Some(policy) = ctx.settlement_gate.redeem_policy else {
+            return RiskCheckResult::failed(
+                RiskCheckId::RedeemRouteResolvable,
+                "settlement.redeem policy unavailable".into(),
+                "policy present".into(),
+                "missing".into(),
+            );
+        };
+        if policy
+            .resolve(&ctx.opportunity.market_id, neg_risk)
+            .is_some()
+        {
+            RiskCheckResult::passed(RiskCheckId::RedeemRouteResolvable)
+        } else {
+            RiskCheckResult::failed(
+                RiskCheckId::RedeemRouteResolvable,
+                format!(
+                    "settlement.redeem: no route for market {} (neg_risk={neg_risk})",
+                    ctx.opportunity.market_id
+                ),
+                "resolvable route".into(),
+                "none".into(),
+            )
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// #9 MetricsFreshness
 // ═══════════════════════════════════════════════════════════════════════════════
 
 pub struct MetricsFreshnessCheck {

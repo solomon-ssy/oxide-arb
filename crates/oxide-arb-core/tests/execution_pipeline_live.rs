@@ -34,9 +34,10 @@ use oxide_arb_core::{
         staleness_classifier::StalenessClassifier,
     },
     post_trade::consumer::PostTradeConsumer,
+    runtime_config::RuntimeConfigStore,
     service::risk_metrics::{ApiHealthTracker, RiskMetricsState},
 };
-use oxide_arb_models::runtime_config::NotificationConfig;
+use oxide_arb_models::runtime_config::{NotificationConfig, RuntimeConfig};
 use oxide_arb_models::{
     clickhouse::OpportunityAuditRow,
     config::{PolymarketConfig, WebSocketConfig},
@@ -45,14 +46,17 @@ use oxide_arb_models::{
         book::BookLevel,
         calibration::{BucketKey, CalibrationSnapshot},
         latency::LatencyTrace,
+        market::{MarketRegistryInfo, TokenInfo},
         opportunity::{EndgameMeta, Opportunity},
     },
     enums::{
         calibration::{DurationBucket, PriceZone},
         common::{
-            ExecutionMode, MarketCategory, Side, StalenessLevel, TradeBusinessOutcome, TradeState,
+            CategorySet, ExecutionMode, MarketCategory, Side, StalenessLevel, TickSize,
+            TradeBusinessOutcome, TradeState,
         },
         execution::ExecutionOutcomeSummary,
+        market::MarketStatus,
         opportunity::PayoutModel,
     },
     runtime_config::{ExecutionRuntimeConfig, MarketDataRuntimeConfig, RiskConfig},
@@ -90,6 +94,7 @@ struct LiveFixture {
     trade_repo: Arc<MockTradeRepository>,
     position_repo: Arc<MockPositionRepository>,
     calibration_repo: Arc<MockCalibrationRepository>,
+    market_registry: Arc<MarketRegistry>,
     exposure: Arc<InMemoryExposureReservation>,
     fsm: Arc<ExecutionFSM>,
     risk_engine: Arc<RiskEngine>,
@@ -200,6 +205,46 @@ async fn test_clob_client(server: &MockServer) -> Arc<ClobClient> {
         ClobClient::from_sdk_for_test(Arc::new(sdk), order_signer)
             .with_order_retry_policy(retry_policy),
     )
+}
+
+fn live_pipeline_market_registry() -> Arc<MarketRegistry> {
+    let registry = Arc::new(MarketRegistry::new());
+    registry.register_market(MarketRegistryInfo {
+        market_id: MarketId::new("0xlive-pipeline-market"),
+        event_id: EventId::new("evt-live-pipeline"),
+        token_yes: token_yes(),
+        token_no: token_no(),
+        question: "Live pipeline test?".into(),
+        slug: "live-pipeline".into(),
+        categories: CategorySet::from(MarketCategory::Politics),
+        status: MarketStatus::Active,
+        outcome: None,
+        neg_risk: false,
+        tick_size: TickSize::Hundredth,
+        tokens: vec![
+            TokenInfo {
+                token_id: token_yes(),
+                outcome: "Yes".into(),
+                neg_risk: false,
+            },
+            TokenInfo {
+                token_id: token_no(),
+                outcome: "No".into(),
+                neg_risk: false,
+            },
+        ],
+        best_bid: None,
+        best_ask: None,
+        depth_usd: None,
+        min_order_size: dec!(5),
+        volume_24h: Usd::ZERO,
+        fee_schedule: None,
+        end_date: None,
+        resolved_at: None,
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    });
+    registry
 }
 
 fn scored_opportunity() -> Arc<ScoredOpportunity> {
@@ -421,6 +466,7 @@ fn fixture(clob_client: Option<Arc<ClobClient>>) -> LiveFixture {
     let risk_metrics = risk_metrics(Arc::clone(&exposure), Arc::clone(&metrics_state));
     let audit_writer = audit_writer(Arc::clone(&metrics));
     let risk_engine = risk_engine();
+    let market_registry = live_pipeline_market_registry();
     let pipeline = ExecutionPipeline::new(ExecutionPipelineDeps {
         validator: Arc::new(Validator::new(
             Arc::clone(&book_store),
@@ -434,10 +480,7 @@ fn fixture(clob_client: Option<Arc<ClobClient>>) -> LiveFixture {
             },
             Arc::clone(&metrics),
         )),
-        plan_builder: PlanBuilder::new(
-            Arc::clone(&fee_calculator),
-            Arc::new(MarketRegistry::new()),
-        ),
+        plan_builder: PlanBuilder::new(Arc::clone(&fee_calculator), Arc::clone(&market_registry)),
         dispatcher: Dispatcher::new(
             ExecutionModeHandle::new(ExecutionMode::Live),
             Arc::clone(&book_store),
@@ -462,6 +505,7 @@ fn fixture(clob_client: Option<Arc<ClobClient>>) -> LiveFixture {
         audit_writer: Arc::clone(&audit_writer),
         relay_notify: Arc::new(Notify::new()),
         metrics_state: Arc::clone(&metrics_state),
+        runtime_config: Arc::new(RuntimeConfigStore::new(RuntimeConfig::default())),
         factors: Arc::new(FactorSnapshotStore::new(chrono::Utc::now())),
         shadow_writer: None,
     });
@@ -472,6 +516,7 @@ fn fixture(clob_client: Option<Arc<ClobClient>>) -> LiveFixture {
         trade_repo,
         position_repo,
         calibration_repo,
+        market_registry,
         exposure,
         fsm,
         risk_engine,
@@ -538,6 +583,8 @@ async fn live_pipeline_fill_observed_then_consumer_settles() {
         metrics_refresh,
         metrics: fixture.metrics,
         events: CoreEventPublisher::bounded(1).0,
+        market_registry: Arc::clone(&fixture.market_registry),
+        runtime_config: Arc::new(RuntimeConfigStore::new(RuntimeConfig::default())),
     };
     consumer.process(&observed).await;
 

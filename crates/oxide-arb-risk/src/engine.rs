@@ -14,7 +14,7 @@ use crate::{
     blacklist::BlacklistManager,
     circuit_breaker::CircuitBreaker,
     clock::Clock,
-    context::{CircuitBreakerGate, ManualHaltGate, PreTradeContext},
+    context::{CircuitBreakerGate, ManualHaltGate, PreTradeContext, SettlementGateInput},
     pipeline::{StaticRiskPipeline, build_default_pipeline},
     position::PotentialLossLedger,
     reconciliation::LedgerReconciler,
@@ -150,6 +150,7 @@ where
         probability: &ProbabilityInput,
         metrics: &M,
         factor_context: Option<&FactorDecisionContext>,
+        settlement_gate: SettlementGateInput<'_>,
         mode: ReportMode,
     ) -> RiskDecision {
         let eval_start = Instant::now();
@@ -168,6 +169,7 @@ where
             snap: &snap,
             metrics: RiskMetricsSnapshot::zeroed(),
             factor_context,
+            settlement_gate,
             now,
         };
         let metrics_split = pipeline.metrics_split_index();

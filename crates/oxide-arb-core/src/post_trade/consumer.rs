@@ -4,6 +4,8 @@ use crate::{
     bridge::risk_metrics::CoreRiskMetrics,
     execution::fsm::ExecutionFSM,
     observability::{execution_audit::ExecutionAuditWriter, metrics_hub::MetricsHub},
+    pipeline::market_registry::MarketRegistry,
+    runtime_config::RuntimeConfigStore,
     service::risk_metrics::{RiskMetricsRefreshService, RiskMetricsState},
 };
 use oxide_arb_error::OxideError;
@@ -11,15 +13,19 @@ use oxide_arb_models::{
     domain::{
         CoreEvent, CoreEventPublisher, PositionView,
         calibration::NewCalibrationOutcome,
-        position::{NewPosition, PositionInfo},
+        position::{NewPosition, PositionInfo, PositionRedeemSnapshot},
         scored_snapshot::ScoredOpportunitySnapshot,
         trade::{PostTradeInput, TradeInfo},
     },
     enums::{
-        common::{RedeemStatus, Side},
+        common::{
+            ExecutionMode, NegRiskRedeemRoute, RedeemResolutionSource, RedeemStatus, Side,
+            StandardRedeemRoute,
+        },
         risk::TradeAccountingPhase,
     },
-    types::{PositionId, Probability},
+    runtime_config::{RedeemRoutingPolicy, ResolvedRedeemPlan},
+    types::{MarketId, PositionId, Probability},
 };
 use oxide_arb_repository::traits::{CalibrationRepository, PositionRepository, TradeRepository};
 use oxide_arb_risk::engine::RiskEngine;
@@ -39,6 +45,8 @@ pub struct PostTradeConsumer {
     pub metrics_state: Arc<RiskMetricsState>,
     pub metrics_refresh: Arc<RiskMetricsRefreshService>,
     pub metrics: Arc<MetricsHub>,
+    pub market_registry: Arc<MarketRegistry>,
+    pub runtime_config: Arc<RuntimeConfigStore>,
     /// Non-blocking real-time bus handle: emits `TradeFilled` + `PositionChanged`
     /// once a fill is durably advanced to its terminal state.
     pub events: CoreEventPublisher,
@@ -163,6 +171,19 @@ impl PostTradeConsumer {
         {
             return Ok(None);
         }
+        let redeem_snapshot = resolve_position_redeem_snapshot(
+            trade.execution_mode,
+            &trade.market_id,
+            self.market_registry.neg_risk(&trade.market_id),
+            &self.runtime_config.load().settlement.redeem,
+        )?;
+        let (
+            redeem_neg_risk,
+            redeem_route,
+            redeem_holder_address,
+            redeem_resolution,
+            redeem_gas_limit,
+        ) = (&redeem_snapshot).into();
         let position = NewPosition {
             position_id: PositionId::from_v7(),
             trade_id: trade.trade_id.clone(),
@@ -175,6 +196,11 @@ impl PostTradeConsumer {
             total_cost_usd: trade.cost_usd,
             total_fees_usd: trade.fee_usd,
             redeem_status: RedeemStatus::initial_for_mode(trade.execution_mode),
+            redeem_neg_risk,
+            redeem_route,
+            redeem_holder_address,
+            redeem_resolution,
+            redeem_gas_limit,
         };
         let created = self.position_repo.create(position).await?;
         Ok(Some(created))
@@ -218,5 +244,52 @@ impl PostTradeConsumer {
             self.audit_writer
                 .write_terminal_missing_snapshot(trade, "scored snapshot deserialize failed");
         }
+    }
+}
+
+/// Resolve and validate the immutable redeem snapshot for a new position.
+fn resolve_position_redeem_snapshot(
+    mode: ExecutionMode,
+    market_id: &MarketId,
+    registry_neg_risk: Option<bool>,
+    policy: &RedeemRoutingPolicy,
+) -> Result<PositionRedeemSnapshot, OxideError> {
+    let neg_risk = match (mode, registry_neg_risk) {
+        (ExecutionMode::Live, None) => {
+            return Err(OxideError::Internal(format!(
+                "market {market_id} missing from registry; cannot snapshot redeem plan for Live position"
+            )));
+        }
+        (_, Some(value)) => value,
+        (_, None) => false,
+    };
+    let plan = match policy.resolve(market_id, neg_risk) {
+        Some(plan) => plan,
+        None if mode == ExecutionMode::Live => {
+            return Err(OxideError::Internal(format!(
+                "settlement.redeem: no route for market {market_id} (neg_risk={neg_risk})"
+            )));
+        }
+        None => simulated_redeem_plan(neg_risk, policy.gas_limit),
+    };
+    Ok(PositionRedeemSnapshot::from_plan(neg_risk, plan))
+}
+
+fn simulated_redeem_plan(neg_risk: bool, gas_limit: u64) -> ResolvedRedeemPlan {
+    if neg_risk {
+        return ResolvedRedeemPlan {
+            route: NegRiskRedeemRoute::default().into(),
+            holder_address: None,
+            neg_risk,
+            gas_limit,
+            resolution: RedeemResolutionSource::ClassNegRisk,
+        };
+    }
+    ResolvedRedeemPlan {
+        route: StandardRedeemRoute::default().into(),
+        holder_address: None,
+        neg_risk,
+        gas_limit,
+        resolution: RedeemResolutionSource::ClassStandard,
     }
 }

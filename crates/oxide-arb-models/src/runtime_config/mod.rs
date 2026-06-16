@@ -1,4 +1,4 @@
-//! Versioned, hot-reloadable runtime configuration (`schema_version = 1`).
+//! Versioned, hot-reloadable runtime configuration (`schema_version = 2`).
 //!
 //! [`RuntimeConfig`] is the single typed schema for the JSON stored in the
 //! `runtime_config_version.config_json` column. It owns every operator tunable
@@ -19,14 +19,15 @@
 //! 3. Activation swaps the in-process store and propagates to every subscriber
 //!    (risk engine, detection chain, execution chain, settlement, alerts).
 //!
-//! There is exactly one schema version; non-`1` documents are rejected at
-//! create/activate time (the project has no legacy data to migrate).
+//! There is exactly one schema version; non-`2` documents are rejected at
+//! create/activate time.
 
 mod detection;
 mod execution;
 mod market_data;
 mod notification;
 pub mod preferences_schema;
+mod redeem_routing;
 mod risk;
 pub mod schema_fields;
 pub mod schema_format;
@@ -58,7 +59,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// The only supported runtime-config schema version.
-pub const RUNTIME_CONFIG_SCHEMA_VERSION: i32 = 1;
+pub const RUNTIME_CONFIG_SCHEMA_VERSION: i32 = 2;
 
 /// Root of the hot-reloadable runtime configuration document.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -282,22 +283,22 @@ mod tests {
     }
 
     #[test]
-    fn schema_version_is_one() {
+    fn schema_version_is_two() {
         assert_eq!(
             RuntimeConfig::default().schema_version,
             RUNTIME_CONFIG_SCHEMA_VERSION
         );
-        assert_eq!(RUNTIME_CONFIG_SCHEMA_VERSION, 1);
+        assert_eq!(RUNTIME_CONFIG_SCHEMA_VERSION, 2);
     }
 
     #[test]
     fn rejects_unsupported_schema_version() {
         let mut document = RuntimeConfig::default().to_json();
-        document["schema_version"] = json!(2);
-        let error = RuntimeConfig::from_json(&document).expect_err("schema_version 2 rejected");
+        document["schema_version"] = json!(1);
+        let error = RuntimeConfig::from_json(&document).expect_err("schema_version 1 rejected");
         assert!(matches!(
             error,
-            RuntimeConfigError::UnsupportedSchemaVersion { found: 2 }
+            RuntimeConfigError::UnsupportedSchemaVersion { found: 1 }
         ));
     }
 

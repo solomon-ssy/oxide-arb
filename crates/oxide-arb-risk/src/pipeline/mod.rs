@@ -15,8 +15,8 @@ use crate::{
         FeeSpendCheck, HourlyLossCapCheck, ManualHaltCheck, MarketAnomalyBlockCheck,
         MarketExposureCheck, MaxDepthUsageCheck, MaxPositionsCheck, MaxSingleBetCheck,
         MetricsFreshnessCheck, MinBalanceCheck, MinDepthCheck, PotentialLossCapCheck,
-        ReconciliationMaintenanceCheck, StalenessCheck, TokenBlacklistCheck, TotalExposureCheck,
-        WeeklyLossCapCheck, WsConnectivityCheck,
+        ReconciliationMaintenanceCheck, RedeemRouteResolvableCheck, StalenessCheck,
+        TokenBlacklistCheck, TotalExposureCheck, WeeklyLossCapCheck, WsConnectivityCheck,
     },
     types::{PipelineReport, ReportMode, RiskCheckId, RiskCheckKind, RiskCheckResult},
 };
@@ -50,6 +50,7 @@ pub struct StaticRiskPipeline {
     market_anomaly_block: MarketAnomalyBlockCheck,
     reconciliation_maintenance: ReconciliationMaintenanceCheck,
     control_factor_snapshot_expired: ControlFactorSnapshotExpiredCheck,
+    redeem_route_resolvable: RedeemRouteResolvableCheck,
     metrics_freshness: MetricsFreshnessCheck,
     min_depth: MinDepthCheck,
     max_depth_usage: MaxDepthUsageCheck,
@@ -79,7 +80,7 @@ pub struct StaticRiskPipeline {
 impl StaticRiskPipeline {
     #[must_use]
     pub const fn len(&self) -> usize {
-        29
+        30
     }
 
     #[must_use]
@@ -113,6 +114,7 @@ impl StaticRiskPipeline {
             RiskCheckId::MarketAnomalyBlock,
             RiskCheckId::ReconciliationMaintenance,
             RiskCheckId::ControlFactorSnapshotExpired,
+            RiskCheckId::RedeemRouteResolvable,
             RiskCheckId::MetricsFreshness,
             RiskCheckId::MinDepth,
             RiskCheckId::MaxDepthUsage,
@@ -147,6 +149,7 @@ impl StaticRiskPipeline {
             &self.market_anomaly_block,
             &self.reconciliation_maintenance,
             &self.control_factor_snapshot_expired,
+            &self.redeem_route_resolvable,
             &self.metrics_freshness,
             &self.min_depth,
             &self.max_depth_usage,
@@ -233,6 +236,7 @@ impl StaticRiskPipeline {
             gate!(self.market_anomaly_block);
             gate!(self.reconciliation_maintenance);
             gate!(self.control_factor_snapshot_expired);
+            gate!(self.redeem_route_resolvable);
             gate!(self.metrics_freshness);
             gate!(self.min_depth);
             gate!(self.max_depth_usage);
@@ -309,6 +313,7 @@ pub fn build_default_pipeline(config: &RiskConfig) -> StaticRiskPipeline {
         market_anomaly_block: MarketAnomalyBlockCheck,
         reconciliation_maintenance: ReconciliationMaintenanceCheck,
         control_factor_snapshot_expired: ControlFactorSnapshotExpiredCheck,
+        redeem_route_resolvable: RedeemRouteResolvableCheck,
         metrics_freshness: MetricsFreshnessCheck::new(config),
         min_depth: MinDepthCheck::new(config),
         max_depth_usage: MaxDepthUsageCheck::new(config),

@@ -50,6 +50,7 @@ use oxide_arb_core::{
         staleness_classifier::StalenessClassifier,
         universe_filter::MarketUniverseFilter,
     },
+    runtime_config::RuntimeConfigStore,
     service::{
         catalog_readiness::CatalogReadiness,
         risk_metrics::{ApiHealthTracker, RiskMetricsState},
@@ -78,7 +79,7 @@ use oxide_arb_models::{
     runtime_config::{
         CalibrationConfig, DetectionConfig, EmissionCooldownConfig, EndgameDetectionConfig,
         EndgameLatencyConfig, ExecutionRuntimeConfig, FillProbabilityConfig,
-        MarketDataRuntimeConfig, RiskConfig,
+        MarketDataRuntimeConfig, RiskConfig, RuntimeConfig,
     },
     types::{
         Bps, EventId, MarketId, MicroPrice, MicroProb, MicroScore, MicroUsd, OpportunityId, Price,
@@ -86,8 +87,8 @@ use oxide_arb_models::{
     },
 };
 use oxide_arb_risk::{
-    builder::RiskEngineBuilder, clock::utc_clock, engine::RiskEngine, traits::RiskMetrics,
-    types::ReportMode,
+    builder::RiskEngineBuilder, clock::utc_clock, context::SettlementGateInput, engine::RiskEngine,
+    traits::RiskMetrics, types::ReportMode,
 };
 use oxide_arb_test_support::mocks::MockTradeRepository;
 use polymarket_client_sdk_v2::{
@@ -421,6 +422,7 @@ fn bench_pre_trade_pass(c: &mut Criterion) {
                 black_box(&probability),
                 black_box(&metrics),
                 None,
+                SettlementGateInput::default(),
                 ReportMode::ShortCircuit,
             )
         });
@@ -480,6 +482,7 @@ fn bench_pre_trade_fail_short(c: &mut Criterion) {
                 black_box(&probability),
                 black_box(&metrics),
                 None,
+                SettlementGateInput::default(),
                 ReportMode::ShortCircuit,
             )
         });
@@ -1008,6 +1011,7 @@ fn execution_bench_setup() -> (
             metrics_state: Arc::new(RiskMetricsState::new(Arc::new(ApiHealthTracker::new(
                 std::time::Duration::from_secs(60),
             )))),
+            runtime_config: Arc::new(RuntimeConfigStore::new(RuntimeConfig::default())),
             factors: Arc::new(FactorSnapshotStore::new(Utc::now())),
             shadow_writer: None,
         });

@@ -1,11 +1,10 @@
 //! CTF redemption client (Polygon on-chain).
 //!
 //! Contract addresses are compiled-in chain facts (`oxide_arb_models::constants`);
-//! only the redeem route and its parameters are configuration, and they are
-//! hot-reloadable through [`CtfRedeemClient::stage_reload`] +
-//! [`StagedRedeemReload::commit`] so an operator can enable or switch the
-//! redeem route without a restart (guarded by the runtime-config activation
-//! preflight).
+//! execution uses the immutable [`ResolvedRedeemPlan`] carried on each
+//! [`RedeemRequest`] (snapshotted at fill time). The routing policy itself is
+//! hot-reloadable through [`CtfRedeemClient::stage_reload`] for pre-trade
+//! gates and new position snapshots.
 
 use crate::{
     ctf::types::{RedeemOutcome, RedeemRequest},
@@ -25,8 +24,8 @@ use oxide_arb_models::{
         CTF_ADDRESS, CTF_COLLATERAL_ADAPTER_ADDRESS, NEG_RISK_ADAPTER_ADDRESS,
         NEG_RISK_COLLATERAL_ADAPTER_ADDRESS, POLYGON_CHAIN_ID, USDC_E_ADDRESS,
     },
-    enums::common::{ExecutionMode, RedeemRoute},
-    runtime_config::SettlementRedeemConfig,
+    enums::common::{ExecutionMode, ResolvedRedeemRoute},
+    runtime_config::{RedeemRoutingPolicy, ResolvedRedeemPlan},
 };
 use std::{str::FromStr, sync::Arc};
 
@@ -48,29 +47,45 @@ sol! {
     }
 }
 
-/// Redeem route configuration + the resolved holder address, swapped as one
-/// unit so a reload can never expose a route with a stale holder.
 struct RedeemState {
-    config: SettlementRedeemConfig,
-    holder_address: Address,
+    policy: RedeemRoutingPolicy,
 }
 
 impl RedeemState {
-    fn resolve(signer: &OrderSigner, config: SettlementRedeemConfig) -> Result<Self, RedeemError> {
-        let holder_address = match config.holder_address.clone() {
-            Some(address) => {
-                Address::from_str(&address).map_err(|e| RedeemError::InvalidAddress {
-                    value: address,
-                    reason: e.to_string(),
-                })?
-            }
-            None => signer.address(),
-        };
-        Ok(Self {
-            config,
-            holder_address,
-        })
+    fn validate_policy(policy: RedeemRoutingPolicy) -> Result<Self, RedeemError> {
+        if let Some(standard) = &policy.standard {
+            validate_optional_holder(standard.holder_address.as_deref())?;
+        }
+        if let Some(neg_risk) = &policy.neg_risk {
+            validate_optional_holder(neg_risk.holder_address.as_deref())?;
+        }
+        for override_policy in policy.overrides.values() {
+            validate_optional_holder(override_policy.holder_address())?;
+        }
+        Ok(Self { policy })
     }
+}
+
+fn validate_optional_holder(holder: Option<&str>) -> Result<(), RedeemError> {
+    if let Some(address) = holder {
+        Address::from_str(address).map_err(|e| RedeemError::InvalidAddress {
+            value: address.to_owned(),
+            reason: e.to_string(),
+        })?;
+    }
+    Ok(())
+}
+
+fn resolve_holder(signer: &OrderSigner, plan: &ResolvedRedeemPlan) -> Result<Address, RedeemError> {
+    plan.holder_address.as_deref().map_or_else(
+        || Ok(signer.address()),
+        |address| {
+            Address::from_str(address).map_err(|e| RedeemError::InvalidAddress {
+                value: address.to_owned(),
+                reason: e.to_string(),
+            })
+        },
+    )
 }
 
 pub struct CtfRedeemClient {
@@ -80,13 +95,7 @@ pub struct CtfRedeemClient {
     chain_id: u64,
 }
 
-/// A resolved next redeem route, staged but not yet visible.
-///
-/// Produced by [`CtfRedeemClient::stage_reload`]. Splitting the fallible
-/// holder resolution from the infallible publish lets the runtime-config
-/// applicator stage every fallible subscriber first and commit only when all
-/// of them succeeded — an aborted activation never leaves the redeem route
-/// partially reloaded.
+/// A staged routing-policy reload, published atomically on commit.
 #[must_use = "a staged reload has no effect until committed"]
 pub struct StagedRedeemReload<'a> {
     client: &'a CtfRedeemClient,
@@ -94,7 +103,7 @@ pub struct StagedRedeemReload<'a> {
 }
 
 impl StagedRedeemReload<'_> {
-    /// Publish the staged route + holder as one unit (infallible).
+    /// Publish the staged policy (infallible).
     pub fn commit(self) {
         self.client.redeem.store(self.state);
     }
@@ -104,10 +113,10 @@ impl CtfRedeemClient {
     pub fn new(
         signer: Arc<OrderSigner>,
         rpc_url: String,
-        redeem: SettlementRedeemConfig,
+        policy: RedeemRoutingPolicy,
         chain_id: u64,
     ) -> Result<Self, RedeemError> {
-        let state = RedeemState::resolve(&signer, redeem)?;
+        let state = RedeemState::validate_policy(policy)?;
         Ok(Self {
             signer,
             rpc_url,
@@ -116,16 +125,18 @@ impl CtfRedeemClient {
         })
     }
 
-    /// Stage a hot-reload of the redeem route (runtime-config activation).
-    ///
-    /// Re-resolves the holder address against the new config; an invalid
-    /// address rejects the staging, leaving the previous route active.
-    /// Nothing becomes visible until [`StagedRedeemReload::commit`].
+    /// Current routing policy (for pre-trade gates and diagnostics).
+    #[must_use]
+    pub fn policy(&self) -> RedeemRoutingPolicy {
+        self.redeem.load_full().policy.clone()
+    }
+
+    /// Stage a hot-reload of the redeem routing policy.
     pub fn stage_reload(
         &self,
-        redeem: SettlementRedeemConfig,
+        policy: RedeemRoutingPolicy,
     ) -> Result<StagedRedeemReload<'_>, RedeemError> {
-        let state = RedeemState::resolve(&self.signer, redeem)?;
+        let state = RedeemState::validate_policy(policy)?;
         Ok(StagedRedeemReload {
             client: self,
             state: Arc::new(state),
@@ -137,6 +148,7 @@ impl CtfRedeemClient {
             ExecutionMode::DryRun => {
                 tracing::info!(
                     condition_id = %req.condition_id,
+                    route = %req.plan.route,
                     "dry-run CTF redeem skipped"
                 );
                 Ok(RedeemOutcome::dry_run())
@@ -144,6 +156,7 @@ impl CtfRedeemClient {
             ExecutionMode::Paper => {
                 tracing::info!(
                     condition_id = %req.condition_id,
+                    route = %req.plan.route,
                     "paper CTF redeem simulated"
                 );
                 Ok(RedeemOutcome::paper(&req.condition_id))
@@ -153,66 +166,52 @@ impl CtfRedeemClient {
     }
 
     async fn redeem_live(&self, req: &RedeemRequest) -> Result<RedeemOutcome, RedeemError> {
-        let state = self.redeem.load_full();
+        let plan = &req.plan;
+        if plan.route.expects_neg_risk() != plan.neg_risk {
+            return Err(RedeemError::UnsupportedRoute {
+                route: plan.route.to_string(),
+                reason: format!(
+                    "snapshotted route does not match neg_risk={}",
+                    plan.neg_risk
+                ),
+            });
+        }
+
+        let holder_address = resolve_holder(&self.signer, plan)?;
         let signer_address = self.signer.address();
-        if signer_address != state.holder_address && state.config.route != RedeemRoute::ProxySafe {
+        if signer_address != holder_address {
             return Err(RedeemError::WrongHolder {
-                holder: state.holder_address.to_checksum(None),
+                holder: holder_address.to_checksum(None),
                 signer: signer_address.to_checksum(None),
             });
         }
 
-        match state.config.route {
-            RedeemRoute::Disabled => Err(RedeemError::UnsupportedRoute {
-                route: state.config.route.to_string(),
-                reason: "Live redeem route is disabled".into(),
-            }),
-            RedeemRoute::StandardCtf | RedeemRoute::CtfCollateralAdapter => {
-                if req.neg_risk {
-                    return Err(RedeemError::UnsupportedRoute {
-                        route: state.config.route.to_string(),
-                        reason: format!("route does not match market.neg_risk={}", req.neg_risk),
-                    });
-                }
-                self.redeem_standard(req, &state).await
+        match plan.route {
+            ResolvedRedeemRoute::StandardCtf
+            | ResolvedRedeemRoute::CtfCollateralAdapter
+            | ResolvedRedeemRoute::NegRiskCollateralAdapter => {
+                self.redeem_standard(req, plan, holder_address).await
             }
-            RedeemRoute::NegRiskLegacyAdapter => {
-                if !req.neg_risk {
-                    return Err(RedeemError::UnsupportedRoute {
-                        route: state.config.route.to_string(),
-                        reason: format!("route does not match market.neg_risk={}", req.neg_risk),
-                    });
-                }
-                self.redeem_neg_risk_legacy(req, &state).await
+            ResolvedRedeemRoute::NegRiskLegacyAdapter => {
+                self.redeem_neg_risk_legacy(req, plan, holder_address).await
             }
-            RedeemRoute::NegRiskCollateralAdapter => {
-                if !req.neg_risk {
-                    return Err(RedeemError::UnsupportedRoute {
-                        route: state.config.route.to_string(),
-                        reason: format!("route does not match market.neg_risk={}", req.neg_risk),
-                    });
-                }
-                self.redeem_standard(req, &state).await
-            }
-            RedeemRoute::ProxySafe => Err(RedeemError::UnsupportedRoute {
-                route: state.config.route.to_string(),
-                reason: "Proxy Safe execution requires Safe transaction support".into(),
-            }),
         }
     }
 
     async fn redeem_standard(
         &self,
         req: &RedeemRequest,
-        state: &RedeemState,
+        plan: &ResolvedRedeemPlan,
+        holder_address: Address,
     ) -> Result<RedeemOutcome, RedeemError> {
+        let _ = holder_address;
         let rpc_url = self
             .rpc_url
             .parse()
             .map_err(|e: url::ParseError| RedeemError::RpcTimeout(e.to_string()))?;
-        let target = match state.config.route {
-            RedeemRoute::CtfCollateralAdapter => CTF_COLLATERAL_ADAPTER_ADDRESS,
-            RedeemRoute::NegRiskCollateralAdapter => NEG_RISK_COLLATERAL_ADAPTER_ADDRESS,
+        let target = match plan.route {
+            ResolvedRedeemRoute::CtfCollateralAdapter => CTF_COLLATERAL_ADAPTER_ADDRESS,
+            ResolvedRedeemRoute::NegRiskCollateralAdapter => NEG_RISK_COLLATERAL_ADAPTER_ADDRESS,
             _ => CTF_ADDRESS,
         };
         let ctf_address = parse_constant_address(target)?;
@@ -233,7 +232,7 @@ impl CtfRedeemClient {
 
         let pending = ctf
             .redeemPositions(collateral, FixedBytes::<32>::ZERO, condition_id, index_sets)
-            .gas(state.config.gas_limit)
+            .gas(plan.gas_limit)
             .send()
             .await
             .map_err(|e| RedeemError::from(RedeemSendError::from_display(e)))?;
@@ -256,7 +255,8 @@ impl CtfRedeemClient {
     async fn redeem_neg_risk_legacy(
         &self,
         req: &RedeemRequest,
-        state: &RedeemState,
+        plan: &ResolvedRedeemPlan,
+        holder_address: Address,
     ) -> Result<RedeemOutcome, RedeemError> {
         let rpc_url = self
             .rpc_url
@@ -289,11 +289,11 @@ impl CtfRedeemClient {
             }
         })?;
         let amounts = vec![
-            ctf.balanceOf(state.holder_address, yes)
+            ctf.balanceOf(holder_address, yes)
                 .call()
                 .await
                 .map_err(|e| RedeemError::RpcTimeout(e.to_string()))?,
-            ctf.balanceOf(state.holder_address, no)
+            ctf.balanceOf(holder_address, no)
                 .call()
                 .await
                 .map_err(|e| RedeemError::RpcTimeout(e.to_string()))?,
@@ -301,7 +301,7 @@ impl CtfRedeemClient {
         let adapter = INegRiskAdapter::new(adapter_address, &provider);
         let pending = adapter
             .redeemPositions(condition_id, amounts)
-            .gas(state.config.gas_limit)
+            .gas(plan.gas_limit)
             .send()
             .await
             .map_err(|e| RedeemError::from(RedeemSendError::from_display(e)))?;
@@ -320,9 +320,6 @@ impl CtfRedeemClient {
     }
 }
 
-/// Parse a compiled-in contract address. The constants are verified Polygon
-/// deployments, so a failure here indicates a build-time defect; it is still
-/// surfaced as an error to keep the redeem path panic-free.
 fn parse_constant_address(value: &str) -> Result<Address, RedeemError> {
     Address::from_str(value).map_err(|e| RedeemError::InvalidAddress {
         value: value.to_owned(),

@@ -5,7 +5,7 @@ use sea_orm::{
 };
 
 use crate::{
-    enums::common::{PositionStatus, SettlementAccountingStatus},
+    enums::common::{PositionStatus, RedeemResolutionSource, SettlementAccountingStatus},
     idens::{market::Market, trade::Trade},
     schema::{
         column,
@@ -46,6 +46,11 @@ pub enum Position {
     SettlementAccountingError,
     SettlementAccountedAt,
     RedeemTerminalReason,
+    RedeemNegRisk,
+    RedeemRoute,
+    RedeemHolderAddress,
+    RedeemResolution,
+    RedeemGasLimit,
 }
 
 pub fn table() -> TableCreateStatement {
@@ -103,6 +108,31 @@ pub fn table() -> TableCreateStatement {
         )
         .col(nullable_timestamp(Position::SettlementAccountedAt))
         .col(ColumnDef::new(Position::RedeemTerminalReason).text().null())
+        .col(
+            ColumnDef::new(Position::RedeemNegRisk)
+                .boolean()
+                .not_null()
+                .default(false),
+        )
+        .col(
+            ColumnDef::new(Position::RedeemRoute)
+                .text()
+                .not_null()
+                .default("standard_ctf"),
+        )
+        .col(ColumnDef::new(Position::RedeemHolderAddress).text().null())
+        .col(
+            ColumnDef::new(Position::RedeemResolution)
+                .text()
+                .not_null()
+                .default(RedeemResolutionSource::ClassStandard),
+        )
+        .col(
+            ColumnDef::new(Position::RedeemGasLimit)
+                .big_integer()
+                .not_null()
+                .default(500_000_i64),
+        )
         .foreign_key(
             ForeignKey::create()
                 .name("fk_position_market")

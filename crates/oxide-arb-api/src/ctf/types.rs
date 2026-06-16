@@ -1,5 +1,6 @@
 use oxide_arb_models::{
     enums::common::ExecutionMode,
+    runtime_config::ResolvedRedeemPlan,
     types::{MarketId, TokenId},
 };
 
@@ -9,8 +10,9 @@ pub struct RedeemRequest {
     pub market_id: MarketId,
     pub yes_token_id: TokenId,
     pub no_token_id: TokenId,
-    pub neg_risk: bool,
     pub execution_mode: ExecutionMode,
+    /// Immutable redeem plan snapshotted on the position at fill time.
+    pub plan: ResolvedRedeemPlan,
 }
 
 #[derive(Debug, Clone)]

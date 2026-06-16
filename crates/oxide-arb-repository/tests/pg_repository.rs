@@ -40,8 +40,8 @@ use oxide_arb_models::{
     enums::{
         calibration::{DurationBucket, PriceZone},
         common::{
-            ExecutionMode, MarketCategory, PositionStatus, RedeemStatus, ReportType,
-            SettlementTrigger, Side, TradeBusinessOutcome, TradeState,
+            ExecutionMode, MarketCategory, PositionStatus, RedeemResolutionSource, RedeemStatus,
+            ReportType, SettlementTrigger, Side, TradeBusinessOutcome, TradeState,
         },
         control_factor::{
             EvidenceStageStatus, MaterializationOutputPolicy, MaterializationRunKind,
@@ -480,6 +480,11 @@ async fn position_lifecycle() {
             total_cost_usd: Usd::from(Decimal::new(95, 0)),
             total_fees_usd: Usd::from(Decimal::ONE),
             redeem_status: RedeemStatus::NotRequired,
+            redeem_neg_risk: false,
+            redeem_route: "standard_ctf".into(),
+            redeem_holder_address: None,
+            redeem_resolution: RedeemResolutionSource::ClassStandard,
+            redeem_gas_limit: 500_000,
         })
         .await
         .expect("create position");
@@ -544,6 +549,11 @@ async fn position_settle() {
             total_cost_usd: Usd::from(Decimal::new(40, 0)),
             total_fees_usd: Usd::ZERO,
             redeem_status: RedeemStatus::NotRequired,
+            redeem_neg_risk: false,
+            redeem_route: "standard_ctf".into(),
+            redeem_holder_address: None,
+            redeem_resolution: RedeemResolutionSource::ClassStandard,
+            redeem_gas_limit: 500_000,
         })
         .await
         .expect("create position");
@@ -956,6 +966,11 @@ async fn seed_open_position(
             total_cost_usd: Usd::from(cost),
             total_fees_usd: Usd::from(fee),
             redeem_status: RedeemStatus::NotRequired,
+            redeem_neg_risk: false,
+            redeem_route: "standard_ctf".into(),
+            redeem_holder_address: None,
+            redeem_resolution: RedeemResolutionSource::ClassStandard,
+            redeem_gas_limit: 500_000,
         })
         .await
         .expect("create position")

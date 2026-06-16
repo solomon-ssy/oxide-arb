@@ -5,8 +5,12 @@ use crate::{
     bridge::{CoreOpportunityPipeline, execution_mode::ExecutionModeHandle},
     detection::{coalescer::Coalescer, funnel::Funnel},
     execution::{
-        capital_manager::CapitalManager, fok_strategy::FokOrderStrategy,
-        settlement::dedup::SettlementDedup, settlement::service::MarketSettlementService,
+        capital_manager::CapitalManager,
+        fok_strategy::FokOrderStrategy,
+        settlement::{
+            dedup::SettlementDedup, redeem_preflight::ensure_live_pending_redeem_portfolio,
+            service::MarketSettlementService,
+        },
         validator::Validator,
     },
     exposure::in_memory::InMemoryExposureReservation,
@@ -29,6 +33,7 @@ use oxide_arb_models::{
         validation::{RuntimePreflightContext, preflight_runtime_config, validate_runtime_config},
     },
 };
+use oxide_arb_repository::traits::PositionRepository;
 use oxide_arb_risk::engine::RiskEngine;
 use std::sync::Arc;
 
@@ -88,6 +93,7 @@ pub struct RuntimeConfigSubscribers {
 pub struct RuntimeConfigApplicator {
     store: Arc<RuntimeConfigStore>,
     execution_mode: ExecutionModeHandle,
+    position_repo: Arc<dyn PositionRepository>,
     subscribers: RuntimeConfigSubscribers,
 }
 
@@ -96,11 +102,13 @@ impl RuntimeConfigApplicator {
     pub const fn new(
         store: Arc<RuntimeConfigStore>,
         execution_mode: ExecutionModeHandle,
+        position_repo: Arc<dyn PositionRepository>,
         subscribers: RuntimeConfigSubscribers,
     ) -> Self {
         Self {
             store,
             execution_mode,
+            position_repo,
             subscribers,
         }
     }
@@ -231,6 +239,13 @@ impl RuntimeConfigPort for RuntimeConfigApplicator {
         // activation, but reservations may have moved in between — re-check
         // against the live state at the moment of application.
         self.preflight_internal(&config)?;
+        ensure_live_pending_redeem_portfolio(
+            self.position_repo.as_ref(),
+            &self.subscribers.market_registry,
+            &config.settlement.redeem,
+            self.execution_mode.current(),
+        )
+        .await?;
         self.propagate(&Arc::new(config))
     }
 }

@@ -113,6 +113,8 @@ fn rejection_audit_row(opportunity_id: &OpportunityId, detected_at: i64) -> Oppo
         winning_token_id: None,
         accounting_status: None,
         fee_source: None,
+        redeem_route: None,
+        redeem_resolution: None,
         outcome: Some(ChAuditOutcome::Rejected),
         rejection_stage: Some(ChRejectionStage::Risk),
         rejection_reason: Some("max exposure".to_owned()),

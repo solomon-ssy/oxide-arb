@@ -33,6 +33,8 @@ CREATE TABLE IF NOT EXISTS opportunity_audit (
     settlement_trigger Nullable(Enum8('Ws' = 1, 'PeriodicRetry' = 2, 'Manual' = 3)),
     winning_token_id Nullable(String),
     accounting_status Nullable(Enum8('Pending' = 1, 'Redeemed' = 2, 'Accounted' = 3, 'Failed' = 4)),
+    redeem_route   Nullable(String),
+    redeem_resolution Nullable(String),
     fee_source      Nullable(String),
     outcome         Nullable(Enum8('Rejected' = 1, 'Settled' = 2, 'Success' = 3, 'Miss' = 4, 'Failed' = 5)),
     rejection_stage Nullable(Enum8('Validation' = 1, 'Risk' = 2, 'Sizing' = 3, 'SubmitPersist' = 4, 'FactorValidation' = 5, 'Other' = 127)),
