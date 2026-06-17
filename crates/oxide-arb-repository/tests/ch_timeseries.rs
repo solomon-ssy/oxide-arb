@@ -9,9 +9,9 @@ use ch::setup_timeseries_repo;
 use chrono::Utc;
 use oxide_arb_models::{
     clickhouse::{
-        BookSnapshotRow, CalibrationSnapshotRow, ChBps, ChDecimal64, ChFactor, ChPrice,
-        ChProbability, ChSchemaVersion, ChShares, ChUsd, OpportunityAuditRow,
-        OpportunityDetectionRow, TickEventL2Row, TickEventRow,
+        BookL2ReplayRow, BookSnapshotRow, CalibrationSnapshotRow, ChBps, ChDecimal64, ChFactor,
+        ChPrice, ChProbability, ChSchemaVersion, ChShares, ChUsd, OpportunityAuditRow,
+        OpportunityDetectionRow, TickEventRow,
     },
     domain::{MarketFilter, TimeWindow},
     enums::clickhouse::{
@@ -46,8 +46,8 @@ fn sample_tick(token_id: &str, ts: i64) -> TickEventRow {
     }
 }
 
-fn sample_l2(token_id: &str, ts: i64, sequence: u64) -> TickEventL2Row {
-    TickEventL2Row {
+fn sample_l2(token_id: &str, ts: i64, sequence: u64) -> BookL2ReplayRow {
+    BookL2ReplayRow {
         token_id: TokenId::new(token_id),
         market_id: Some(MarketId::new("0xch-market")),
         event_type: ChBookEventType::Snapshot,
@@ -55,7 +55,6 @@ fn sample_l2(token_id: &str, ts: i64, sequence: u64) -> TickEventL2Row {
         bid_sizes: vec![ChShares::from(Shares::new(dec!(10)))],
         ask_prices: vec![ChPrice::from(Price::new(dec!(0.95)))],
         ask_sizes: vec![ChShares::from(Shares::new(dec!(11)))],
-        changed_levels_json: None,
         book_version: sequence,
         levels_count: 2,
         is_full_snapshot: true,
@@ -63,6 +62,7 @@ fn sample_l2(token_id: &str, ts: i64, sequence: u64) -> TickEventL2Row {
         ingestion_time: ts,
         sequence,
         source: ChFactSource::WsSnapshot,
+        feed_event_hash: None,
         schema_version: ChSchemaVersion(2),
     }
 }
@@ -303,7 +303,7 @@ async fn evidence_timeseries_queries_roundtrip_core_fact_tables() {
     let event_id = EventId::new("evt-core-facts");
     let opportunity_id = OpportunityId::from_v7();
 
-    repo.insert_l2_events(vec![
+    repo.insert_book_l2_replay(vec![
         sample_l2(token.as_str(), now, 2),
         sample_l2(token.as_str(), now, 1),
     ])
@@ -355,7 +355,7 @@ async fn evidence_timeseries_queries_roundtrip_core_fact_tables() {
     );
 
     let l2 = repo
-        .l2_events(std::slice::from_ref(&token), window)
+        .book_l2_replay(std::slice::from_ref(&token), window)
         .await
         .unwrap();
     assert_eq!(l2.len(), 2);

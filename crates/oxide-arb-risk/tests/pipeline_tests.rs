@@ -38,7 +38,7 @@ use oxide_arb_risk::{
             BlacklistCheck, BlockingTradesCheck, CircuitBreakerCheck,
             ControlFactorManualAckRequiredCheck, ControlFactorSnapshotExpiredCheck,
             ManualHaltCheck, MarketAnomalyBlockCheck, ReconciliationMaintenanceCheck,
-            RedeemRouteResolvableCheck, TokenBlacklistCheck,
+            RedeemRouteResolvableCheck, TokenBlacklistCheck, WsConnectivityCheck,
         },
     },
     sizing::MultiConstraintSizer,
@@ -599,6 +599,20 @@ fn market_anomaly_block_check_is_named_hard_reject() {
     let neutral = FactorDecisionContext::neutral();
     let ctx = ctx_with_factors(&frame, &neutral);
     assert!(MarketAnomalyBlockCheck.evaluate(&ctx).passed);
+}
+
+#[test]
+fn ws_connectivity_uses_market_specific_freshness() {
+    let frame = default_frame();
+    let mut ctx = frame.ctx();
+    ctx.metrics.ws_disconnect_secs = 1;
+    ctx.metrics.market_ws_disconnect_secs = 31;
+
+    let check = WsConnectivityCheck::new(&RiskConfig::default());
+    let result = check.evaluate(&ctx);
+
+    assert!(!result.passed);
+    assert_eq!(result.check_id, RiskCheckId::WsConnectivity);
 }
 
 #[test]

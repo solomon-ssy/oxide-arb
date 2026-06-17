@@ -263,15 +263,11 @@ impl GammaService {
         let Some(coordinator) = &self.ws_subscription else {
             return;
         };
-        let tokens = self
-            .market_registry
-            .active_subscribable_tokens(&self.universe);
-        let count = tokens.len();
-        coordinator.sync_to_tokens(&tokens);
+        let count = coordinator.sync_engine_hotset(&self.market_registry, &self.universe);
         tracing::info!(
             tokens = count,
             subscribed = coordinator.subscribed_count(),
-            "CLOB websocket subscriptions synced after Gamma catalog update"
+            "CLOB websocket engine hotset synced after Gamma catalog update"
         );
     }
 

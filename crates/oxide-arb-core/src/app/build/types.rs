@@ -24,7 +24,8 @@ use crate::{
     infra::{health_checker::HealthChecker, risk_decision_audit_buffer::RiskDecisionAuditBuffer},
     observability::{
         alert_dispatcher::AlertDispatcher, backpressure::BackpressurePolicy,
-        balance_fact_writer::BalanceFactWriter, book_fact_writer::BookFactWriter,
+        balance_fact_writer::BalanceFactWriter,
+        book_decision_context_writer::BookDecisionContextWriter, book_fact_writer::BookFactWriter,
         execution_audit::ExecutionAuditWriter, metrics_hub::MetricsHub,
     },
     pipeline::{
@@ -255,6 +256,7 @@ pub(super) struct BuildPersistenceParts {
     pub(super) trade_repo: Arc<PgTradeRepository>,
     pub(super) timeseries: Arc<ChTimeseriesRepository>,
     pub(super) audit_writer: Arc<ExecutionAuditWriter>,
+    pub(super) book_decision_context_writer: Arc<BookDecisionContextWriter>,
     pub(super) book_fact_writer: Arc<BookFactWriter>,
 }
 
@@ -542,6 +544,7 @@ pub struct BuildPersistence {
     trade_repo: Arc<PgTradeRepository>,
     timeseries: Arc<ChTimeseriesRepository>,
     audit_writer: Arc<ExecutionAuditWriter>,
+    book_decision_context_writer: Arc<BookDecisionContextWriter>,
     book_fact_writer: Arc<BookFactWriter>,
 }
 
@@ -556,6 +559,10 @@ impl BuildPersistence {
 
     pub(super) const fn audit_writer(&self) -> &Arc<ExecutionAuditWriter> {
         &self.audit_writer
+    }
+
+    pub(super) const fn book_decision_context_writer(&self) -> &Arc<BookDecisionContextWriter> {
+        &self.book_decision_context_writer
     }
 
     pub(super) const fn book_fact_writer(&self) -> &Arc<BookFactWriter> {
@@ -1148,6 +1155,7 @@ impl BuildPersistence {
             trade_repo: parts.trade_repo,
             timeseries: parts.timeseries,
             audit_writer: parts.audit_writer,
+            book_decision_context_writer: parts.book_decision_context_writer,
             book_fact_writer: parts.book_fact_writer,
         }
     }

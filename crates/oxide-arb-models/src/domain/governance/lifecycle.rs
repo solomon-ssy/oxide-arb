@@ -33,6 +33,7 @@ pub enum OperationalDegradeReason {
     BreakerOpen,
     BreakerHalfOpen,
     MarketDataStale,
+    MarketDataCoverageDegraded,
     SubsystemUnhealthy { name: String },
     ControlFactorLiveWarn,
     ControlFactorSnapshotExpired,
@@ -41,7 +42,7 @@ pub enum OperationalDegradeReason {
 /// CLOB websocket connectivity snapshot for operator dashboards.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MarketDataConnectivity {
-    /// True when `last_message_age_ms` is present and below the stale threshold.
+    /// True when global traffic is fresh and every active WS transport shard is connected.
     pub ready: bool,
     pub last_message_age_ms: Option<u64>,
     pub ws_shards: WsShardConnectivity,
@@ -53,6 +54,8 @@ pub struct WsShardConnectivity {
     pub total: u32,
     pub disconnected: u32,
     pub oldest_disconnected_secs: Option<u64>,
+    /// Percentage of spawned WS transport shards that are currently connected.
+    pub connected_ratio_bps: u32,
 }
 
 impl OperationalPhase {
@@ -73,7 +76,10 @@ impl MarketDataConnectivity {
     /// Build readiness from the last websocket message age and shard summary.
     #[must_use]
     pub fn from_parts(last_message_age_ms: Option<u64>, ws_shards: WsShardConnectivity) -> Self {
-        let ready = last_message_age_ms.is_some_and(|age| age < WS_MARKET_DATA_STALE_THRESHOLD_MS);
+        let traffic_fresh =
+            last_message_age_ms.is_some_and(|age| age < WS_MARKET_DATA_STALE_THRESHOLD_MS);
+        let coverage_ready = ws_shards.total == 0 || ws_shards.disconnected == 0;
+        let ready = traffic_fresh && coverage_ready;
         Self {
             ready,
             last_message_age_ms,
@@ -104,11 +110,23 @@ mod tests {
             Some(WS_MARKET_DATA_STALE_THRESHOLD_MS - 1),
             WsShardConnectivity {
                 total: 10,
-                disconnected: 5,
-                oldest_disconnected_secs: Some(12),
+                disconnected: 0,
+                oldest_disconnected_secs: None,
+                connected_ratio_bps: 10_000,
             },
         );
         assert!(fresh.ready);
+
+        let degraded = MarketDataConnectivity::from_parts(
+            Some(WS_MARKET_DATA_STALE_THRESHOLD_MS - 1),
+            WsShardConnectivity {
+                total: 10,
+                disconnected: 5,
+                oldest_disconnected_secs: Some(12),
+                connected_ratio_bps: 5_000,
+            },
+        );
+        assert!(!degraded.ready);
 
         let stale = MarketDataConnectivity::from_parts(
             Some(WS_MARKET_DATA_STALE_THRESHOLD_MS),
@@ -116,6 +134,7 @@ mod tests {
                 total: 0,
                 disconnected: 0,
                 oldest_disconnected_secs: None,
+                connected_ratio_bps: 10_000,
             },
         );
         assert!(!stale.ready);

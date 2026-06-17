@@ -22,7 +22,7 @@ use crate::{
     service::{
         detection_readiness::DetectionReadiness,
         gamma::{GammaService, GammaServiceDeps},
-        ws_subscription::WsSubscriptionCoordinator,
+        ws_subscription::{MarketDataSubscriptionPolicy, WsSubscriptionCoordinator},
     },
 };
 use oxide_arb_algorithm::{
@@ -114,9 +114,13 @@ impl DetectionStack {
             shutdown,
         ));
 
-        let ws_subscription = Arc::new(WsSubscriptionCoordinator::new(Arc::clone(
-            clients.ws_manager(),
-        )));
+        let ws_subscription = Arc::new(WsSubscriptionCoordinator::new(
+            Arc::clone(clients.ws_manager()),
+            MarketDataSubscriptionPolicy::new(
+                deploy.market_data.websocket.engine_max_subscription_tokens,
+                deploy.market_data.websocket.engine_endgame_window_hours,
+            ),
+        ));
         let gamma_service = Arc::new(GammaService::new(GammaServiceDeps {
             gamma_client: Arc::clone(clients.gamma_client()),
             market_registry: Arc::clone(&market_registry),

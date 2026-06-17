@@ -133,7 +133,10 @@ fn publish(ledger: &RouterLedger, dirty: &HashSet<usize>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ws::{health::ShardHealthBoard, reconnect::ReconnectPolicy};
+    use crate::ws::{
+        health::{ShardHealthBoard, TokenFreshnessBoard},
+        reconnect::ReconnectPolicy,
+    };
     use std::{sync::Arc, time::Duration};
     use tokio::sync::Semaphore;
     use tokio_util::sync::CancellationToken;
@@ -154,6 +157,7 @@ mod tests {
                 sdk_max_backoff: Duration::from_secs(30),
                 connect_limiter: Arc::new(Semaphore::new(4)),
                 health: Arc::new(ShardHealthBoard::default()),
+                token_freshness: Arc::new(TokenFreshnessBoard::default()),
             },
         )
     }

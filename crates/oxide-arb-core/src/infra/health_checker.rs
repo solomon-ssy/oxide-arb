@@ -156,6 +156,9 @@ impl HealthChecker {
             return SubsystemHealth::skipped("websocket", reason);
         }
         let shards = self.ws_manager.shard_health();
+        if shards.disconnected > 0 {
+            return SubsystemHealth::unhealthy("websocket", None, shards.to_string());
+        }
         evaluate_ws_probe(self.ws_manager.last_message_age_ms(), shards.to_string())
     }
 

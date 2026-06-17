@@ -457,9 +457,9 @@ fn decimal_bps(numerator: Decimal, denominator: Decimal) -> u64 {
 mod tests {
     use crate::evidence::{
         book::{
-            BookReconstructionArtifact, BookReconstructionReport, DecisionBookView,
-            DecisionBookViewPurpose, DecisionTokenBookView, MarketBookReconstruction,
-            ReconstructedTokenBook, ReconstructedTokenBookTimeline,
+            BookEvidenceTier, BookReconstructionArtifact, BookReconstructionReport,
+            DecisionBookView, DecisionBookViewPurpose, DecisionTokenBookView,
+            MarketBookReconstruction, ReconstructedTokenBook, ReconstructedTokenBookTimeline,
         },
         execution::build,
     };
@@ -531,6 +531,7 @@ mod tests {
         let event_time = Utc.timestamp_millis_opt(1_000).single().expect("time");
         BookReconstructionArtifact {
             report: BookReconstructionReport {
+                evidence_tier: BookEvidenceTier::ExactReplay,
                 token_count_expected: 2,
                 token_count_reconstructed: 2,
                 l2_event_count: 0,

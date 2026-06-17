@@ -3,8 +3,9 @@ use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::types::{OpportunityId, TokenId};
 use oxide_arb_models::{
     clickhouse::{
-        AuditStageCountRow, BookSnapshotRow, CalibrationSnapshotRow, OpportunityAuditRow,
-        OpportunityDetectionRow, TickEventL2Row, TickEventRow,
+        AuditStageCountRow, BookDecisionContextRow, BookL2ReplayRow, BookMicrostructureRow,
+        BookSnapshotRow, CalibrationSnapshotRow, OpportunityAuditRow, OpportunityDetectionRow,
+        TickEventRow,
     },
     domain::{
         MarketFilter, PageRequest, Paginated, TimeWindow,
@@ -54,9 +55,19 @@ where
 pub trait TimeseriesFactWriter: Send + Sync {
     async fn insert_tick_events(&self, rows: Vec<TickEventRow>) -> Result<(), StorageError>;
 
-    async fn insert_l2_events(&self, rows: Vec<TickEventL2Row>) -> Result<(), StorageError>;
+    async fn insert_book_l2_replay(&self, rows: Vec<BookL2ReplayRow>) -> Result<(), StorageError>;
 
     async fn insert_book_snapshots(&self, rows: Vec<BookSnapshotRow>) -> Result<(), StorageError>;
+
+    async fn insert_book_decision_contexts(
+        &self,
+        rows: Vec<BookDecisionContextRow>,
+    ) -> Result<(), StorageError>;
+
+    async fn insert_book_microstructure_1s(
+        &self,
+        rows: Vec<BookMicrostructureRow>,
+    ) -> Result<(), StorageError>;
 
     async fn insert_detections(
         &self,
@@ -80,11 +91,11 @@ pub trait EvidenceTimeseriesRepository: Send + Sync {
         limit: u64,
     ) -> Result<EvidenceQueryResult<TickEventRow>, StorageError>;
 
-    async fn l2_events(
+    async fn book_l2_replay(
         &self,
         token_ids: &[TokenId],
         window: TimeWindow,
-    ) -> Result<EvidenceQueryResult<TickEventL2Row>, StorageError>;
+    ) -> Result<EvidenceQueryResult<BookL2ReplayRow>, StorageError>;
 
     async fn book_snapshots_before(
         &self,
@@ -92,6 +103,18 @@ pub trait EvidenceTimeseriesRepository: Send + Sync {
         before: DateTime<Utc>,
         limit_per_token: usize,
     ) -> Result<EvidenceQueryResult<BookSnapshotRow>, StorageError>;
+
+    async fn book_decision_contexts(
+        &self,
+        filter: MarketFilter,
+        window: TimeWindow,
+    ) -> Result<EvidenceQueryResult<BookDecisionContextRow>, StorageError>;
+
+    async fn book_microstructure_1m(
+        &self,
+        token_ids: &[TokenId],
+        window: TimeWindow,
+    ) -> Result<EvidenceQueryResult<BookMicrostructureRow>, StorageError>;
 
     async fn detections(
         &self,

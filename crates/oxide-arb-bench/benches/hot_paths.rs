@@ -38,8 +38,8 @@ use oxide_arb_core::{
     exposure::in_memory::InMemoryExposureReservation,
     infra::async_writer::{AsyncWriter, AsyncWriterConfig},
     observability::{
-        alert_dispatcher::AlertDispatcher, execution_audit::ExecutionAuditWriter,
-        metrics_hub::MetricsHub,
+        alert_dispatcher::AlertDispatcher, book_decision_context_writer::BookDecisionContextWriter,
+        execution_audit::ExecutionAuditWriter, metrics_hub::MetricsHub,
     },
     pipeline::{
         book_store::BookStore,
@@ -60,7 +60,7 @@ use oxide_arb_core::{
 };
 use oxide_arb_models::runtime_config::NotificationConfig;
 use oxide_arb_models::{
-    clickhouse::OpportunityAuditRow,
+    clickhouse::{BookDecisionContextRow, OpportunityAuditRow},
     config::{PolymarketConfig, WebSocketConfig},
     domain::{
         CoreEventPublisher, ProbabilityInput, TradeIntegritySnapshot,
@@ -940,9 +940,24 @@ fn execution_bench_risk_metrics(
     Arc::new(CoreRiskMetrics::new(
         metrics_state,
         exposure,
+        Arc::new(MarketRegistry::new()),
         ws_manager,
         ExecutionModeHandle::new(ExecutionMode::Paper),
     ))
+}
+
+fn execution_bench_decision_context_writer(
+    metrics: Arc<MetricsHub>,
+) -> Arc<BookDecisionContextWriter> {
+    let (writer, _worker) = AsyncWriter::new(
+        AsyncWriterConfig::new("bench-decision-context")
+            .batch_size(1024)
+            .flush_interval(std::time::Duration::from_secs(3600)),
+        move |_batch: Vec<BookDecisionContextRow>| Box::pin(async move { Ok(()) }),
+        metrics,
+        CancellationToken::new(),
+    );
+    Arc::new(BookDecisionContextWriter::new(Arc::new(writer)))
 }
 
 type ExecutionBenchSetup = (
@@ -990,6 +1005,8 @@ fn execution_bench_setup() -> (
             audit_shutdown,
         );
         let audit_writer = Arc::new(ExecutionAuditWriter::new(Arc::new(audit_writer_inner)));
+        let book_decision_context_writer =
+            execution_bench_decision_context_writer(Arc::clone(&metrics));
 
         let fee_calculator = Arc::new(FeeCalculator::default());
         let execution_config = ExecutionRuntimeConfig {
@@ -1032,6 +1049,7 @@ fn execution_bench_setup() -> (
             mode: ExecutionModeHandle::new(ExecutionMode::Paper),
             trade_repo: Arc::clone(&trade_repo),
             audit_writer,
+            book_decision_context_writer,
             relay_notify: Arc::new(Notify::new()),
             reconcile_notify: Arc::new(Notify::new()),
             metrics_state: Arc::new(RiskMetricsState::new(Arc::new(ApiHealthTracker::new(

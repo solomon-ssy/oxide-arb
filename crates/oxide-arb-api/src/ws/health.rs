@@ -4,8 +4,10 @@
 //! [`ShardHealthSummary`] so operators get one periodic aggregate line (via
 //! the core `HealthChecker`) instead of per-shard reconnect log spam.
 
+use oxide_arb_models::types::TokenId;
 use parking_lot::RwLock;
 use std::{
+    collections::HashMap,
     fmt::{self, Display, Formatter},
     time::Instant,
 };
@@ -16,11 +18,22 @@ pub struct ShardHealthBoard {
     slots: RwLock<Vec<ShardSlot>>,
 }
 
+/// Token-level market-data freshness observed by the CLOB WS transport.
+#[derive(Default)]
+pub struct TokenFreshnessBoard {
+    tokens: RwLock<HashMap<TokenId, TokenFreshnessSlot>>,
+}
+
 #[derive(Clone, Copy)]
 struct ShardSlot {
     connected: bool,
     /// When the slot last transitioned into its current state.
     since: Instant,
+}
+
+#[derive(Clone, Copy)]
+struct TokenFreshnessSlot {
+    last_message_at: Instant,
 }
 
 impl ShardHealthBoard {
@@ -65,7 +78,29 @@ impl ShardHealthBoard {
             total: slots.len(),
             disconnected,
             oldest_disconnected_secs,
+            connected_ratio_bps: connected_ratio_bps(slots.len(), disconnected),
         }
+    }
+}
+
+impl TokenFreshnessBoard {
+    /// Record that a token received at least one normalized WS event.
+    pub fn mark_token(&self, token_id: &TokenId, at: Instant) {
+        self.tokens.write().insert(
+            token_id.clone(),
+            TokenFreshnessSlot {
+                last_message_at: at,
+            },
+        );
+    }
+
+    /// Milliseconds since the last WS event for a token.
+    #[must_use]
+    pub fn token_age_ms(&self, token_id: &TokenId) -> Option<u64> {
+        self.tokens
+            .read()
+            .get(token_id)
+            .and_then(|slot| u64::try_from(slot.last_message_at.elapsed().as_millis()).ok())
     }
 }
 
@@ -78,6 +113,8 @@ pub struct ShardHealthSummary {
     pub disconnected: usize,
     /// Age (seconds) of the longest-standing disconnection, if any.
     pub oldest_disconnected_secs: Option<u64>,
+    /// Connected shard ratio in basis points (`10_000` means all connected).
+    pub connected_ratio_bps: u32,
 }
 
 impl Display for ShardHealthSummary {
@@ -94,6 +131,15 @@ impl Display for ShardHealthSummary {
             _ => write!(f, "all {} WS shards connected", self.total),
         }
     }
+}
+
+fn connected_ratio_bps(total: usize, disconnected: usize) -> u32 {
+    if total == 0 {
+        return 10_000;
+    }
+    let connected = total.saturating_sub(disconnected);
+    let bps = connected.saturating_mul(10_000) / total;
+    u32::try_from(bps).unwrap_or(u32::MAX)
 }
 
 #[cfg(test)]

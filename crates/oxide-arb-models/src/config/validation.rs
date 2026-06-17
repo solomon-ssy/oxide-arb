@@ -104,10 +104,12 @@ pub fn validate_deploy_common(deploy: &DeployConfig) -> ConfigValidationReport {
         .websocket
         .max_subscriptions_per_connection
         == 0
+        || deploy.market_data.websocket.engine_max_subscription_tokens == 0
+        || deploy.market_data.websocket.engine_endgame_window_hours == 0
     {
         report.errors.push(ConfigValidationError::InvalidValue {
-            field: "market_data.websocket.max_subscriptions_per_connection",
-            detail: "must be > 0".into(),
+            field: "market_data.websocket",
+            detail: "max_subscriptions_per_connection, engine_max_subscription_tokens, engine_endgame_window_hours must be > 0".into(),
         });
     }
     if deploy.market_data.gamma.page_size == 0

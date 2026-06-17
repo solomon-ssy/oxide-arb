@@ -10,9 +10,9 @@ use chrono::{DateTime, Duration, Utc};
 use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::{
     clickhouse::{
-        BookSnapshotRow, CalibrationSnapshotRow, ChBps, ChDecimal64, ChFactor, ChPrice,
-        ChProbability, ChSchemaVersion, ChShares, ChUsd, OpportunityAuditRow,
-        OpportunityDetectionRow, TickEventL2Row,
+        BookL2ReplayRow, BookSnapshotRow, CalibrationSnapshotRow, ChBps, ChDecimal64, ChFactor,
+        ChPrice, ChProbability, ChSchemaVersion, ChShares, ChUsd, OpportunityAuditRow,
+        OpportunityDetectionRow,
     },
     domain::{
         BalanceSnapshotInfo, ControlFactorStageReportInfo, MarketPitSnapshotInfo,
@@ -227,7 +227,7 @@ fn build_smoke_timeseries(ids: &SmokeScenarioIds) -> Arc<MockTimeseriesRepositor
         ),
     ]);
     // Ask size must cover filled_audit buy budget (94 USD @ 0.95) or StrictFok yields false_miss.
-    timeseries.set_l2_events(vec![
+    timeseries.set_book_l2_replay(vec![
         l2_delta(
             SMOKE_YES_TOKEN,
             ids.l2_ms,
@@ -1270,8 +1270,8 @@ fn l2_delta(
     bid_size: rust_decimal::Decimal,
     ask_price: rust_decimal::Decimal,
     ask_size: rust_decimal::Decimal,
-) -> TickEventL2Row {
-    TickEventL2Row {
+) -> BookL2ReplayRow {
+    BookL2ReplayRow {
         token_id: TokenId::new(token_id),
         market_id: Some(MarketId::new(SMOKE_MARKET_ID)),
         event_type: ChBookEventType::Delta,
@@ -1279,7 +1279,6 @@ fn l2_delta(
         bid_sizes: vec![ChShares::from(Shares::new(bid_size))],
         ask_prices: vec![ChPrice::from(Price::new(ask_price))],
         ask_sizes: vec![ChShares::from(Shares::new(ask_size))],
-        changed_levels_json: None,
         book_version: 2,
         levels_count: 2,
         is_full_snapshot: false,
@@ -1287,6 +1286,7 @@ fn l2_delta(
         ingestion_time: event_time,
         sequence: 2,
         source: ChFactSource::WsDelta,
+        feed_event_hash: None,
         schema_version: ChSchemaVersion(1),
     }
 }

@@ -535,9 +535,9 @@ mod tests {
 
     use crate::evidence::{
         book::{
-            BookReconstructionArtifact, BookReconstructionReport, DecisionBookView,
-            DecisionBookViewPurpose, DecisionTokenBookView, MarketBookReconstruction,
-            ReconstructedTokenBook, ReconstructedTokenBookTimeline,
+            BookEvidenceTier, BookReconstructionArtifact, BookReconstructionReport,
+            DecisionBookView, DecisionBookViewPurpose, DecisionTokenBookView,
+            MarketBookReconstruction, ReconstructedTokenBook, ReconstructedTokenBookTimeline,
         },
         detector::build,
     };
@@ -598,6 +598,7 @@ mod tests {
         source_bundle.calibration_snapshots = vec![calibration_snapshot()];
         BookReconstructionArtifact {
             report: BookReconstructionReport {
+                evidence_tier: BookEvidenceTier::ExactReplay,
                 token_count_expected: 2,
                 token_count_reconstructed: 2,
                 l2_event_count: 0,

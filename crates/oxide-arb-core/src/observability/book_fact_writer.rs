@@ -4,8 +4,8 @@ use crate::infra::async_writer::AsyncWriter;
 use chrono::Utc;
 use oxide_arb_models::{
     clickhouse::{
-        BookSnapshotRow, ChBps, ChPrice, ChSchemaVersion, ChShares, ChUsd, TickEventL2Row,
-        TickEventRow,
+        BookL2ReplayRow, BookMicrostructureRow, BookSnapshotRow, ChBps, ChDecimal64, ChPrice,
+        ChSchemaVersion, ChShares, ChUsd, TickEventRow,
     },
     domain::{
         book::{BookLevel, BookSnapshot},
@@ -14,15 +14,18 @@ use oxide_arb_models::{
     enums::clickhouse::{ChBookEventType, ChFactSource, ChSnapshotReason},
     enums::common::{Side, TickSize},
     enums::pipeline::ShardConnectionStatus,
-    types::{MarketId, Price, TokenId},
+    hashing::CanonicalDigest,
+    types::{MarketId, Price, TokenId, Usd},
 };
 use rust_decimal::Decimal;
+use serde::Serialize;
 use std::sync::Arc;
 
 pub struct BookFactWriter {
     ticks: Arc<AsyncWriter<TickEventRow>>,
-    l2: Arc<AsyncWriter<TickEventL2Row>>,
+    l2: Arc<AsyncWriter<BookL2ReplayRow>>,
     snapshots: Arc<AsyncWriter<BookSnapshotRow>>,
+    microstructure_1s: Arc<AsyncWriter<BookMicrostructureRow>>,
 }
 
 struct SnapshotLevels<'a> {
@@ -37,16 +40,48 @@ struct SnapshotLevels<'a> {
     source: ChFactSource,
 }
 
+#[derive(Serialize)]
+struct SnapshotHashPayload {
+    event_type: &'static str,
+    token_id: String,
+    event_time: u64,
+    bids: Vec<HashLevel>,
+    asks: Vec<HashLevel>,
+}
+
+#[derive(Serialize)]
+struct DeltaHashPayload {
+    event_type: &'static str,
+    token_id: String,
+    event_time: u64,
+    changes: Vec<HashChange>,
+}
+
+#[derive(Serialize)]
+struct HashLevel {
+    price: String,
+    size: String,
+}
+
+#[derive(Serialize)]
+struct HashChange {
+    side: &'static str,
+    price: String,
+    size: String,
+}
+
 impl BookFactWriter {
     pub const fn new(
         tick_writer: Arc<AsyncWriter<TickEventRow>>,
-        l2_writer: Arc<AsyncWriter<TickEventL2Row>>,
+        l2_writer: Arc<AsyncWriter<BookL2ReplayRow>>,
         snapshot_writer: Arc<AsyncWriter<BookSnapshotRow>>,
+        microstructure_1s_writer: Arc<AsyncWriter<BookMicrostructureRow>>,
     ) -> Self {
         Self {
             ticks: tick_writer,
             l2: l2_writer,
             snapshots: snapshot_writer,
+            microstructure_1s: microstructure_1s_writer,
         }
     }
 
@@ -59,7 +94,7 @@ impl BookFactWriter {
         let ingestion_time = Utc::now().timestamp_millis();
         let levels_count =
             u16::try_from(cmd.bids.levels.len() + cmd.asks.levels.len()).unwrap_or(u16::MAX);
-        let l2 = TickEventL2Row {
+        let l2 = BookL2ReplayRow {
             token_id: cmd.asset_id.clone(),
             market_id: market_id.clone(),
             event_type: ChBookEventType::Snapshot,
@@ -87,7 +122,6 @@ impl BookFactWriter {
                 .iter()
                 .map(|level| ChShares::from(level.size_decimal()))
                 .collect(),
-            changed_levels_json: None,
             book_version,
             levels_count,
             is_full_snapshot: true,
@@ -95,9 +129,23 @@ impl BookFactWriter {
             ingestion_time,
             sequence: book_version,
             source: ChFactSource::WsSnapshot,
+            feed_event_hash: snapshot_feed_event_hash(cmd),
             schema_version: ChSchemaVersion(2),
         };
         self.l2.write(l2);
+        let snapshot = BookSnapshot::new(
+            Arc::clone(&cmd.bids.levels),
+            Arc::clone(&cmd.asks.levels),
+            cmd.timestamp_ms,
+            book_version,
+        );
+        self.write_microstructure_observation(
+            &cmd.asset_id,
+            market_id.clone(),
+            &snapshot,
+            ChBookEventType::Snapshot,
+            0,
+        );
         self.write_snapshot_levels(SnapshotLevels {
             token_id: &cmd.asset_id,
             market_id,
@@ -147,7 +195,7 @@ impl BookFactWriter {
                 ask_sizes.push(ChShares::from(change.size));
             }
         }
-        let row = TickEventL2Row {
+        let row = BookL2ReplayRow {
             token_id: cmd.asset_id.clone(),
             market_id,
             event_type: ChBookEventType::Delta,
@@ -155,9 +203,6 @@ impl BookFactWriter {
             bid_sizes,
             ask_prices,
             ask_sizes,
-            changed_levels_json: Some(
-                serde_json::json!({ "changed_level_count": cmd.changes.len() }).to_string(),
-            ),
             book_version,
             levels_count: u16::try_from(cmd.changes.len()).unwrap_or(u16::MAX),
             is_full_snapshot: false,
@@ -165,9 +210,30 @@ impl BookFactWriter {
             ingestion_time,
             sequence: book_version,
             source: ChFactSource::WsDelta,
+            feed_event_hash: delta_feed_event_hash(cmd),
             schema_version: ChSchemaVersion(2),
         };
         self.l2.write(row);
+        // Full-book microstructure must be generated from the published
+        // snapshot after deltas are applied; callers pass it via
+        // `write_microstructure_snapshot`.
+    }
+
+    pub fn write_microstructure_snapshot(
+        &self,
+        token_id: &TokenId,
+        market_id: Option<MarketId>,
+        snapshot: &BookSnapshot,
+        event_type: ChBookEventType,
+        delete_count: u64,
+    ) {
+        self.write_microstructure_observation(
+            token_id,
+            market_id,
+            snapshot,
+            event_type,
+            delete_count,
+        );
     }
 
     pub fn write_bbo(
@@ -353,6 +419,26 @@ impl BookFactWriter {
             schema_version: ChSchemaVersion(2),
         });
     }
+
+    fn write_microstructure_observation(
+        &self,
+        token_id: &TokenId,
+        market_id: Option<MarketId>,
+        snapshot: &BookSnapshot,
+        event_type: ChBookEventType,
+        delete_count: u64,
+    ) {
+        let now_ms = Utc::now().timestamp_millis();
+        let second_observation = microstructure_row(
+            token_id,
+            market_id,
+            snapshot,
+            event_type,
+            delete_count,
+            bucket_ms(now_ms, 1_000),
+        );
+        self.microstructure_1s.write(second_observation);
+    }
 }
 
 fn levels_to_pairs(levels: &[BookLevel]) -> Vec<(String, String)> {
@@ -372,10 +458,123 @@ fn depth_usd(levels: &[BookLevel]) -> Decimal {
     })
 }
 
+fn top_depth_usd(levels: &[BookLevel], top_n: usize) -> Decimal {
+    levels.iter().take(top_n).fold(Decimal::ZERO, |acc, level| {
+        acc + level.depth_usd().to_decimal()
+    })
+}
+
+fn both_side_top_depth(snapshot: &BookSnapshot, top_n: usize) -> Decimal {
+    top_depth_usd(&snapshot.bids, top_n) + top_depth_usd(&snapshot.asks, top_n)
+}
+
+fn microstructure_row(
+    token_id: &TokenId,
+    market_id: Option<MarketId>,
+    snapshot: &BookSnapshot,
+    event_type: ChBookEventType,
+    delete_count: u64,
+    bucket_time: i64,
+) -> BookMicrostructureRow {
+    let best_bid = snapshot.best_bid();
+    let best_ask = snapshot.best_ask();
+    let spread = spread_bps(best_bid, best_ask);
+    let mid = mid_price(best_bid, best_ask);
+    let crossed = matches!((best_bid, best_ask), (Some(bid), Some(ask)) if bid >= ask);
+    BookMicrostructureRow {
+        token_id: token_id.clone(),
+        market_id,
+        bucket_time,
+        best_bid_open: best_bid.map(ChPrice::from),
+        best_bid_high: best_bid.map(ChPrice::from),
+        best_bid_low: best_bid.map(ChPrice::from),
+        best_bid_close: best_bid.map(ChPrice::from),
+        best_ask_open: best_ask.map(ChPrice::from),
+        best_ask_high: best_ask.map(ChPrice::from),
+        best_ask_low: best_ask.map(ChPrice::from),
+        best_ask_close: best_ask.map(ChPrice::from),
+        spread_bps_min: spread.map(ChBps::from),
+        spread_bps_avg: spread.map(ChBps::from),
+        spread_bps_max: spread.map(ChBps::from),
+        mid_price_open: mid.map(ChPrice::from),
+        mid_price_close: mid.map(ChPrice::from),
+        top1_depth_usd_avg: Some(ChUsd::from(Usd::new(both_side_top_depth(snapshot, 1)))),
+        top5_depth_usd_avg: Some(ChUsd::from(Usd::new(both_side_top_depth(snapshot, 5)))),
+        top20_depth_usd_avg: Some(ChUsd::from(Usd::new(both_side_top_depth(snapshot, 20)))),
+        imbalance_avg: imbalance(snapshot).map(ChDecimal64::from),
+        update_count: 1,
+        snapshot_count: u64::from(event_type == ChBookEventType::Snapshot),
+        delta_count: u64::from(event_type == ChBookEventType::Delta),
+        delete_count,
+        crossed_count: u64::from(crossed),
+        invalid_level_count: 0,
+        gap_count: 0,
+        last_trade_count: 0,
+        max_book_age_ms: u64::try_from(Utc::now().timestamp_millis())
+            .unwrap_or(0)
+            .saturating_sub(snapshot.timestamp_ms),
+        schema_version: ChSchemaVersion(1),
+    }
+}
+
+fn imbalance(snapshot: &BookSnapshot) -> Option<Decimal> {
+    let bid = snapshot.total_bid_depth_usd.to_decimal();
+    let ask = snapshot.total_ask_depth_usd.to_decimal();
+    let total = bid + ask;
+    if total.is_zero() {
+        return None;
+    }
+    Some((bid - ask) / total)
+}
+
+const fn bucket_ms(timestamp_ms: i64, interval_ms: i64) -> i64 {
+    timestamp_ms - timestamp_ms.rem_euclid(interval_ms)
+}
+
 fn mid_price(best_bid: Option<Price>, best_ask: Option<Price>) -> Option<Price> {
     let bid = best_bid?;
     let ask = best_ask?;
     Some(Price::new((bid.inner() + ask.inner()) / Decimal::from(2)))
+}
+
+fn snapshot_feed_event_hash(cmd: &BookSnapshotCmd) -> Option<String> {
+    let payload = SnapshotHashPayload {
+        event_type: "book_snapshot",
+        token_id: cmd.asset_id.to_string(),
+        event_time: cmd.timestamp_ms,
+        bids: hash_levels(&cmd.bids.levels),
+        asks: hash_levels(&cmd.asks.levels),
+    };
+    CanonicalDigest::blake3_json(&payload).ok()
+}
+
+fn delta_feed_event_hash(cmd: &PriceDeltaCmd) -> Option<String> {
+    let changes = cmd
+        .changes
+        .iter()
+        .map(|change| HashChange {
+            side: change.side.as_str(),
+            price: change.price.to_string(),
+            size: change.size.to_string(),
+        })
+        .collect();
+    let payload = DeltaHashPayload {
+        event_type: "price_delta",
+        token_id: cmd.asset_id.to_string(),
+        event_time: cmd.timestamp_ms,
+        changes,
+    };
+    CanonicalDigest::blake3_json(&payload).ok()
+}
+
+fn hash_levels(levels: &[BookLevel]) -> Vec<HashLevel> {
+    levels
+        .iter()
+        .map(|level| HashLevel {
+            price: level.price_decimal().to_string(),
+            size: level.size_decimal().to_string(),
+        })
+        .collect()
 }
 
 fn spread_bps(best_bid: Option<Price>, best_ask: Option<Price>) -> Option<Decimal> {

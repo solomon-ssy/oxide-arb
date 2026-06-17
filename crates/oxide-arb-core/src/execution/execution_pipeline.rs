@@ -20,7 +20,12 @@ use crate::{
         plan_builder::PlanBuilder,
         validator::Validator,
     },
-    observability::{execution_audit::ExecutionAuditWriter, metrics_hub::MetricsHub},
+    observability::{
+        book_decision_context_capture::{BookDecisionContextCapture, CapturedBookDecisionContext},
+        book_decision_context_writer::BookDecisionContextWriter,
+        execution_audit::ExecutionAuditWriter,
+        metrics_hub::MetricsHub,
+    },
     runtime_config::RuntimeConfigStore,
     service::risk_metrics::RiskMetricsState,
     trade_integrity::TradeIntegrityStore,
@@ -45,6 +50,7 @@ use oxide_arb_models::{
         trade::NewTrade,
     },
     enums::{
+        clickhouse::{ChBookDecisionStage, ChFactSource},
         common::ExecutionMode,
         execution::{ExecutionOutcome, ExecutionOutcomeSummary},
     },
@@ -76,6 +82,7 @@ pub struct ExecutionPipelineDeps<R: TradeRepository + Send + Sync + 'static = Pg
     pub mode: ExecutionModeHandle,
     pub trade_repo: Arc<R>,
     pub audit_writer: Arc<ExecutionAuditWriter>,
+    pub book_decision_context_writer: Arc<BookDecisionContextWriter>,
     /// Rung after each durable `*_observed` write to wake the post-trade relay.
     pub relay_notify: Arc<Notify>,
     /// Rung after each unknown venue outcome to wake the reconciliation worker.
@@ -109,6 +116,8 @@ pub struct ExecutionPipeline<R: TradeRepository + Send + Sync + 'static = PgTrad
     mode: ExecutionModeHandle,
     trade_repo: Arc<R>,
     audit_writer: Arc<ExecutionAuditWriter>,
+    book_decision_context_writer: Arc<BookDecisionContextWriter>,
+    book_decision_context_capture: BookDecisionContextCapture,
     relay_notify: Arc<Notify>,
     reconcile_notify: Arc<Notify>,
     metrics_state: Arc<RiskMetricsState>,
@@ -143,6 +152,8 @@ impl<R: TradeRepository + Send + Sync + 'static> ExecutionPipeline<R> {
             mode: deps.mode,
             trade_repo: deps.trade_repo,
             audit_writer: deps.audit_writer,
+            book_decision_context_writer: deps.book_decision_context_writer,
+            book_decision_context_capture: BookDecisionContextCapture::default(),
             relay_notify: deps.relay_notify,
             reconcile_notify: deps.reconcile_notify,
             metrics_state: deps.metrics_state,
@@ -197,6 +208,7 @@ impl<R: TradeRepository + Send + Sync + 'static> ExecutionPipeline<R> {
             .execute_intent_to_http_us
             .observe(intent_started.elapsed().as_secs_f64() * 1_000_000.0);
 
+        self.capture_terminal_context(&outcome, &scored, &prepared.plan.execution_id);
         self.settle_reservation(&outcome, &prepared.reservation);
         let outcome_summary = ExecutionOutcomeSummary::from_outcome(&outcome);
         self.observe_outcome(&prepared, &outcome).await;
@@ -229,9 +241,12 @@ impl<R: TradeRepository + Send + Sync + 'static> ExecutionPipeline<R> {
                 scored.token_no.clone(),
                 scored.book_yes_version,
                 scored.book_no_version,
+                None,
+                None,
             );
         let (approved_size, snapshot) =
             self.validate_and_size(scored, opp, &execution_id, snapshot)?;
+        self.capture_required_context(ChBookDecisionStage::OrderPrepared, scored, &execution_id)?;
         self.persist_dispatch_plan(opp, approved_size, snapshot, execution_id)
             .await
     }
@@ -389,28 +404,24 @@ impl<R: TradeRepository + Send + Sync + 'static> ExecutionPipeline<R> {
         applied.extend(factor_context.applied_factors.iter().cloned());
         snapshot = snapshot.with_applied_control_factors(publication_id, &applied);
 
-        let probability = build_probability_input(scored);
-        let settlement_gate = SettlementGateInput {
-            mode: self.mode.current(),
-            market_neg_risk: self.plan_builder.market_registry().neg_risk(&opp.market_id),
-            redeem_policy: Some(&self.runtime_config.load().settlement.redeem),
-        };
-        let integrity = self.trade_integrity.load();
-        let risk_decision = self.risk_engine.pre_trade_check_core(
-            opp,
-            &probability,
-            self.risk_metrics.as_ref(),
-            Some(&factor_context),
-            AdmissionGateInput {
-                settlement: settlement_gate,
-                integrity: &integrity,
-            },
-            ReportMode::ShortCircuit,
-        );
+        let risk_decision = self.pre_trade_risk_decision(opp, scored, &factor_context);
 
+        let risk_context = self.capture_scored_context(
+            ChBookDecisionStage::RiskGateEvaluated,
+            scored,
+            execution_id,
+        );
         if !risk_decision.allowed {
-            return Err(self.record_risk_denial(execution_id, opp, &risk_decision, &snapshot));
+            let denial_snapshot =
+                Self::risk_denial_snapshot(risk_context, snapshot, scored, opp, execution_id);
+            return Err(self.record_risk_denial(
+                execution_id,
+                opp,
+                &risk_decision,
+                &denial_snapshot,
+            ));
         }
+        snapshot = self.apply_allowed_risk_context(risk_context, &snapshot, scored)?;
         tracing::info!(
             opportunity_id = %opp.opportunity_id,
             execution_id = %execution_id,
@@ -442,11 +453,19 @@ impl<R: TradeRepository + Send + Sync + 'static> ExecutionPipeline<R> {
         // this baseline. Never affects the real order path.
         self.record_shadow(&published, scored, opp, approved_size);
 
-        self.gate_sized_exposure(opp, execution_id, approved_size, &factor_context, &snapshot)
+        self.gate_sized_exposure(
+            scored,
+            opp,
+            execution_id,
+            approved_size,
+            &factor_context,
+            &snapshot,
+        )
     }
 
     fn gate_sized_exposure(
         &self,
+        scored: &ScoredOpportunity,
         opp: &Opportunity,
         execution_id: &ExecutionId,
         approved_size: Usd,
@@ -488,8 +507,147 @@ impl<R: TradeRepository + Send + Sync + 'static> ExecutionPipeline<R> {
         if !sized_decision.allowed {
             return Err(self.record_risk_denial(execution_id, opp, &sized_decision, snapshot));
         }
+        let captured =
+            self.capture_required_context(ChBookDecisionStage::SizeComputed, scored, execution_id)?;
+        let snapshot = snapshot_with_context(snapshot, scored, &captured);
 
-        Ok((approved_size, snapshot.clone()))
+        Ok((approved_size, snapshot))
+    }
+
+    fn pre_trade_risk_decision(
+        &self,
+        opp: &Opportunity,
+        scored: &ScoredOpportunity,
+        factor_context: &FactorDecisionContext,
+    ) -> RiskDecision {
+        let probability = build_probability_input(scored);
+        let settlement_gate = SettlementGateInput {
+            mode: self.mode.current(),
+            market_neg_risk: self.plan_builder.market_registry().neg_risk(&opp.market_id),
+            redeem_policy: Some(&self.runtime_config.load().settlement.redeem),
+        };
+        let integrity = self.trade_integrity.load();
+        self.risk_engine.pre_trade_check_core(
+            opp,
+            &probability,
+            self.risk_metrics.as_ref(),
+            Some(factor_context),
+            AdmissionGateInput {
+                settlement: settlement_gate,
+                integrity: &integrity,
+            },
+            ReportMode::ShortCircuit,
+        )
+    }
+
+    fn risk_denial_snapshot(
+        risk_context: Result<CapturedBookDecisionContext, ExecutionResult>,
+        snapshot: ScoredOpportunitySnapshot,
+        scored: &ScoredOpportunity,
+        opp: &Opportunity,
+        execution_id: &ExecutionId,
+    ) -> ScoredOpportunitySnapshot {
+        if let Ok(captured) = risk_context {
+            return snapshot_with_context(&snapshot, scored, &captured);
+        }
+        tracing::warn!(
+            opportunity_id = %opp.opportunity_id,
+            execution_id = %execution_id,
+            "risk decision context capture failed before risk denial audit"
+        );
+        snapshot
+    }
+
+    fn apply_allowed_risk_context(
+        &self,
+        risk_context: Result<CapturedBookDecisionContext, ExecutionResult>,
+        snapshot: &ScoredOpportunitySnapshot,
+        scored: &ScoredOpportunity,
+    ) -> Result<ScoredOpportunitySnapshot, ExecutionResult> {
+        let captured = risk_context?;
+        if self.mode.current() == ExecutionMode::Live && !captured.production_eligible {
+            return Err(Self::reject(
+                "decision_context",
+                "risk decision context is insufficient for Live order admission",
+            ));
+        }
+        Ok(snapshot_with_context(snapshot, scored, &captured))
+    }
+
+    fn capture_required_context(
+        &self,
+        stage: ChBookDecisionStage,
+        scored: &ScoredOpportunity,
+        execution_id: &ExecutionId,
+    ) -> Result<CapturedBookDecisionContext, ExecutionResult> {
+        let captured = self.capture_scored_context(stage, scored, execution_id)?;
+        if self.mode.current() == ExecutionMode::Live && !captured.production_eligible {
+            return Err(Self::reject(
+                "decision_context",
+                "book decision context is insufficient for Live order admission",
+            ));
+        }
+        Ok(captured)
+    }
+
+    fn capture_scored_context(
+        &self,
+        stage: ChBookDecisionStage,
+        scored: &ScoredOpportunity,
+        execution_id: &ExecutionId,
+    ) -> Result<CapturedBookDecisionContext, ExecutionResult> {
+        let pair = self
+            .validator
+            .book_store()
+            .load_pair(&scored.token_yes, &scored.token_no)
+            .ok_or_else(|| Self::reject("decision_context", "book pair unavailable"))?;
+        let captured = self.book_decision_context_capture.capture_scored(
+            stage,
+            scored,
+            &pair,
+            Some(execution_id),
+            self.context_max_age_ms(),
+            ChFactSource::Execution,
+        );
+        if !self
+            .book_decision_context_writer
+            .write(captured.row.clone())
+            && self.mode.current() == ExecutionMode::Live
+        {
+            return Err(Self::reject(
+                "decision_context",
+                "book decision context writer unavailable",
+            ));
+        }
+        Ok(captured)
+    }
+
+    fn capture_terminal_context(
+        &self,
+        outcome: &ExecutionOutcome,
+        scored: &ScoredOpportunity,
+        execution_id: &ExecutionId,
+    ) {
+        let Some(stage) = terminal_context_stage(outcome) else {
+            return;
+        };
+        if let Err(result) = self.capture_scored_context(stage, scored, execution_id) {
+            tracing::warn!(
+                opportunity_id = %scored.opportunity.opportunity_id,
+                execution_id = %execution_id,
+                rejection_stage = ?result.rejection_stage,
+                rejection_reason = ?result.rejection_reason,
+                "terminal decision context capture failed"
+            );
+        }
+    }
+
+    fn context_max_age_ms(&self) -> u64 {
+        self.runtime_config
+            .load()
+            .execution
+            .endgame_latency
+            .max_book_to_order_ms
     }
 
     /// Load the snapshot of the token actually being bought.
@@ -908,6 +1066,38 @@ fn build_probability_input(scored: &ScoredOpportunity) -> ProbabilityInput {
         model_staleness_secs: 0,
         expected_slippage_pct: dec!(0.005),
         expected_failure_cost_pct: dec!(0.002),
+    }
+}
+
+const fn terminal_context_stage(outcome: &ExecutionOutcome) -> Option<ChBookDecisionStage> {
+    match outcome {
+        ExecutionOutcome::Filled { .. } => Some(ChBookDecisionStage::OrderFilled),
+        ExecutionOutcome::Miss { .. } => Some(ChBookDecisionStage::OrderMissed),
+        ExecutionOutcome::Failed { .. } => Some(ChBookDecisionStage::OrderFailed),
+        ExecutionOutcome::Unknown { .. } => None,
+    }
+}
+
+fn snapshot_with_context(
+    snapshot: &ScoredOpportunitySnapshot,
+    scored: &ScoredOpportunity,
+    captured: &CapturedBookDecisionContext,
+) -> ScoredOpportunitySnapshot {
+    snapshot.clone().with_book_context(
+        scored.token_yes.clone(),
+        scored.token_no.clone(),
+        scored.book_yes_version,
+        scored.book_no_version,
+        max_context_age(captured),
+        Some(captured.row.context_id.clone()),
+    )
+}
+
+fn max_context_age(captured: &CapturedBookDecisionContext) -> Option<u64> {
+    match (captured.row.yes_book_age_ms, captured.row.no_book_age_ms) {
+        (Some(yes), Some(no)) => Some(yes.max(no)),
+        (Some(age), None) | (None, Some(age)) => Some(age),
+        (None, None) => None,
     }
 }
 

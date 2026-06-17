@@ -226,7 +226,11 @@ impl<'a> PreTradeContext<'a> {
 
     #[inline]
     pub const fn ws_disconnect_secs(&self) -> u64 {
-        self.metrics.ws_disconnect_secs
+        if self.metrics.market_ws_disconnect_secs > self.metrics.ws_disconnect_secs {
+            self.metrics.market_ws_disconnect_secs
+        } else {
+            self.metrics.ws_disconnect_secs
+        }
     }
 
     #[inline]

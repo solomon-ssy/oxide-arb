@@ -541,6 +541,7 @@ impl RuntimeControlPort for MockRuntimeControl {
                     total: 1,
                     disconnected: 0,
                     oldest_disconnected_secs: None,
+                    connected_ratio_bps: 10_000,
                 },
             },
             control_factor_publication_id: None,

@@ -21,7 +21,8 @@ use crate::{
     exposure::in_memory::InMemoryExposureReservation,
     infra::risk_decision_audit_buffer::RiskDecisionAuditBuffer,
     observability::{
-        balance_fact_writer::BalanceFactWriter, book_fact_writer::BookFactWriter,
+        balance_fact_writer::BalanceFactWriter,
+        book_decision_context_writer::BookDecisionContextWriter, book_fact_writer::BookFactWriter,
         execution_audit::ExecutionAuditWriter, metrics_hub::MetricsHub,
     },
     pipeline::{
@@ -82,6 +83,7 @@ pub struct InfraBundle {
     pub risk_state_repo: Arc<PgRiskStateRepository>,
     pub timeseries: Arc<ChTimeseriesRepository>,
     pub audit_writer: Arc<ExecutionAuditWriter>,
+    pub book_decision_context_writer: Arc<BookDecisionContextWriter>,
     pub balance_fact_writer: Arc<BalanceFactWriter>,
     pub book_fact_writer: Arc<BookFactWriter>,
     pub holder_address: String,

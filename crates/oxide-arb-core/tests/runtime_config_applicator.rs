@@ -197,6 +197,7 @@ fn settlement_chain(deps: SettlementChainDeps<'_>) -> Arc<MarketSettlementServic
     let risk_metrics = Arc::new(CoreRiskMetrics::new(
         deps.metrics_state,
         deps.exposure,
+        Arc::new(MarketRegistry::new()),
         ws_manager,
         deps.mode,
     ));

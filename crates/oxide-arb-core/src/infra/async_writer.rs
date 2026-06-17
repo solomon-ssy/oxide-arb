@@ -152,11 +152,13 @@ impl<T: Send + 'static> AsyncWriter<T> {
         (writer, Box::pin(worker))
     }
 
-    pub fn write(&self, item: T) {
+    pub fn write(&self, item: T) -> bool {
         if self.tx.try_send(item).is_err() {
             self.drops.inc();
             self.note_drop();
+            return false;
         }
+        true
     }
 
     /// Aggregate drop warnings: at most one log line per

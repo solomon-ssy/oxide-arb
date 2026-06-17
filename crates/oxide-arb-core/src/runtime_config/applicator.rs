@@ -190,16 +190,13 @@ impl RuntimeConfigApplicator {
             subs.universe.reload(&config.market_data.enabled_categories);
             subs.market_cache.rebuild();
             if let Some(ws_subscription) = &subs.ws_subscription {
-                let tokens = subs
-                    .market_registry
-                    .active_subscribable_tokens(&subs.universe);
-                let token_count = tokens.len();
-                ws_subscription.sync_to_tokens(&tokens);
+                let token_count =
+                    ws_subscription.sync_engine_hotset(&subs.market_registry, &subs.universe);
                 tracing::info!(
                     enabled = ?subs.universe.enabled().iter().collect::<Vec<_>>(),
                     tokens = token_count,
                     subscribed = ws_subscription.subscribed_count(),
-                    "tradeable universe filter reloaded; websocket subscriptions resynced"
+                    "tradeable universe filter reloaded; websocket engine hotset resynced"
                 );
             }
         }

@@ -185,10 +185,12 @@ impl MarketRegistry {
         self.active_markets.load_full()
     }
 
-    /// Active YES/NO tokens that should be subscribed on the CLOB websocket,
-    /// bounded by the tradeable-universe filter.
+    /// Active YES/NO catalog tokens bounded by the tradeable-universe filter.
+    ///
+    /// This is a catalog helper, not the engine WS subscription policy. Trading
+    /// subscriptions must go through `MarketDataSubscriptionPolicy`.
     #[must_use]
-    pub fn active_subscribable_tokens(&self, universe: &MarketUniverseFilter) -> Vec<TokenId> {
+    pub fn active_catalog_tokens(&self, universe: &MarketUniverseFilter) -> Vec<TokenId> {
         let active = self.active_markets();
         let mut tokens = Vec::with_capacity(active.len() * 2);
         for market_id in active.iter() {

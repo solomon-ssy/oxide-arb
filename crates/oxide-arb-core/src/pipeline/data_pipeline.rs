@@ -20,11 +20,11 @@ use oxide_arb_models::{
         settlement::MarketSettlementRequest,
     },
     enums::{
-        clickhouse::ChSnapshotReason,
+        clickhouse::{ChBookEventType, ChSnapshotReason},
         common::{AlertCategory, AlertLevel, AlertSource, SettlementTrigger},
         pipeline::ShardConnectionStatus,
     },
-    types::TokenId,
+    types::{Shares, TokenId},
 };
 use std::{
     sync::{
@@ -325,11 +325,22 @@ impl BookApplyWorker {
             Some(LatencyTrace::from_ingress(cmd.trace.mono)),
         );
         if let Some(writer) = &self.book_fact_writer {
-            writer.write_delta(
-                cmd,
-                self.market_registry.market_for_token(&cmd.asset_id),
-                version,
-            );
+            let market_id = self.market_registry.market_for_token(&cmd.asset_id);
+            writer.write_delta(cmd, market_id.clone(), version);
+            if let Some(snapshot) = self.book_store.load(&cmd.asset_id) {
+                let delete_count = cmd
+                    .changes
+                    .iter()
+                    .filter(|change| change.size <= Shares::ZERO)
+                    .count();
+                writer.write_microstructure_snapshot(
+                    &cmd.asset_id,
+                    market_id,
+                    &snapshot,
+                    ChBookEventType::Delta,
+                    u64::try_from(delete_count).unwrap_or(u64::MAX),
+                );
+            }
         }
         self.notify_coalescer(&cmd.asset_id);
         self.metrics.price_changes_applied.inc();

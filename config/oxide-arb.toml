@@ -97,6 +97,14 @@ max_reconnect_delay_ms = 30000
 # Impact: connection count vs per-connection event volume. Caution: Polymarket
 # enforces server-side limits — keep at or below 200. Default: 200.
 max_subscriptions_per_connection = 200
+# Purpose: maximum engine-owned CLOB token subscriptions across all transport
+# shards. Impact: hard caps Polymarket WS pressure; operator Web subscriptions
+# remain an overlay. Default: 2000.
+engine_max_subscription_tokens = 2000
+# Purpose: look-ahead window (hours) for endgame engine WS subscriptions.
+# Impact: markets outside this window stay in catalog/storage but do not consume
+# trading WS capacity until they approach resolution. Default: 72.
+engine_endgame_window_hours = 72
 
 [market_data.gamma]
 # Purpose: Gamma REST base URL (market catalog + resolution metadata).

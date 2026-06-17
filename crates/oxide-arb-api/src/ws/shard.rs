@@ -8,7 +8,7 @@
 
 use super::{
     drop_hook::WsEventDropHook,
-    health::ShardHealthBoard,
+    health::{ShardHealthBoard, TokenFreshnessBoard},
     ingest_hooks::BookLevelRejectHook,
     normalize::normalize_ws_message,
     reconnect::{ReconnectPolicy, ReconnectState},
@@ -67,6 +67,8 @@ pub(super) struct ShardDeps {
     pub connect_limiter: Arc<Semaphore>,
     /// Aggregated connection-state board for health summaries.
     pub health: Arc<ShardHealthBoard>,
+    /// Token-level freshness used by market-aware risk gates.
+    pub token_freshness: Arc<TokenFreshnessBoard>,
 }
 
 /// Why a streaming session ended.
@@ -367,11 +369,13 @@ fn on_stream_item<T, E: Display>(
 }
 
 fn dispatch_events(deps: &ShardDeps, shard_id: usize, events: Vec<PipelineEvent>) {
+    let received_at = Instant::now();
     if !events.is_empty() {
-        *deps.last_message_at.lock() = Some(Instant::now());
+        *deps.last_message_at.lock() = Some(received_at);
     }
     let mut dropped = 0u64;
     for event in events {
+        mark_event_tokens(&deps.token_freshness, &event, received_at);
         if deps.output_tx.try_send(event).is_err() {
             dropped += 1;
         }
@@ -380,6 +384,18 @@ fn dispatch_events(deps: &ShardDeps, shard_id: usize, events: Vec<PipelineEvent>
         tracing::error!(shard_id, dropped, "WS output channel full — events dropped");
         if let Some(hook) = &deps.on_events_dropped {
             hook(dropped);
+        }
+    }
+}
+
+fn mark_event_tokens(freshness: &TokenFreshnessBoard, event: &PipelineEvent, received_at: Instant) {
+    if let Some(token_id) = event.asset_id() {
+        freshness.mark_token(token_id, received_at);
+        return;
+    }
+    if let PipelineEvent::MarketResolved { asset_ids, .. } = event {
+        for token_id in asset_ids.iter() {
+            freshness.mark_token(token_id, received_at);
         }
     }
 }
@@ -411,6 +427,7 @@ mod tests {
             sdk_max_backoff: Duration::from_secs(30),
             connect_limiter: Arc::new(Semaphore::new(4)),
             health: Arc::new(ShardHealthBoard::default()),
+            token_freshness: Arc::new(TokenFreshnessBoard::default()),
         }
     }
 

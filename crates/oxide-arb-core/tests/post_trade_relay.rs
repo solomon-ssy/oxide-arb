@@ -238,6 +238,7 @@ fn audit_writer(metrics: Arc<MetricsHub>) -> Arc<ExecutionAuditWriter> {
 fn risk_metrics(
     exposure: Arc<InMemoryExposureReservation>,
     metrics_state: Arc<RiskMetricsState>,
+    market_registry: Arc<MarketRegistry>,
 ) -> Arc<CoreRiskMetrics> {
     let ws_manager = Arc::new(ClobWsManager::new(
         &PolymarketConfig::default(),
@@ -247,10 +248,13 @@ fn risk_metrics(
         None,
     ));
     ws_manager.seed_test_connectivity();
+    ws_manager.seed_test_token_connectivity(&TokenId::new("post-trade-yes"));
+    ws_manager.seed_test_token_connectivity(&TokenId::new("post-trade-no"));
     metrics_state.seed_simulated_snapshot(ExecutionMode::Live, Usd::new(dec!(5000)));
     Arc::new(CoreRiskMetrics::new(
         metrics_state,
         exposure,
+        market_registry,
         ws_manager,
         ExecutionModeHandle::new(ExecutionMode::Live),
     ))
@@ -318,9 +322,14 @@ fn harness_with_config(config: RuntimeConfig) -> Harness {
         ExecutionMode::Live,
         Arc::clone(&metrics),
     );
+    let market_registry = post_trade_market_registry();
     let consumer = PostTradeConsumer {
         risk_engine: risk_engine(),
-        risk_metrics: risk_metrics(exposure, metrics_state.clone()),
+        risk_metrics: risk_metrics(
+            exposure,
+            metrics_state.clone(),
+            Arc::clone(&market_registry),
+        ),
         fsm,
         capital_manager: Arc::clone(&capital_manager),
         trade_repo: trade_repo.clone(),
@@ -331,7 +340,7 @@ fn harness_with_config(config: RuntimeConfig) -> Harness {
         metrics_refresh,
         metrics: metrics.clone(),
         events,
-        market_registry: post_trade_market_registry(),
+        market_registry,
         runtime_config: Arc::new(RuntimeConfigStore::new(config)),
     };
 

@@ -3,6 +3,7 @@
 use crate::{
     bridge::execution_mode::ExecutionModeHandle,
     exposure::in_memory::InMemoryExposureReservation,
+    pipeline::market_registry::MarketRegistry,
     service::risk_metrics::{RiskMetricsSource, RiskMetricsState},
 };
 use oxide_arb_api::ws::ClobWsManager;
@@ -20,6 +21,7 @@ use std::{
 pub struct CoreRiskMetrics {
     state: Arc<RiskMetricsState>,
     exposure: Arc<InMemoryExposureReservation>,
+    market_registry: Arc<MarketRegistry>,
     ws_manager: Arc<ClobWsManager>,
     mode: ExecutionModeHandle,
 }
@@ -28,12 +30,14 @@ impl CoreRiskMetrics {
     pub const fn new(
         state: Arc<RiskMetricsState>,
         exposure: Arc<InMemoryExposureReservation>,
+        market_registry: Arc<MarketRegistry>,
         ws_manager: Arc<ClobWsManager>,
         mode: ExecutionModeHandle,
     ) -> Self {
         Self {
             state,
             exposure,
+            market_registry,
             ws_manager,
             mode,
         }
@@ -48,6 +52,7 @@ impl CoreRiskMetrics {
         let (reserved, market_reserved, active_count) =
             self.exposure.reservation_snapshot_sync(market_id);
         let ws_disconnect_secs = self.ws_disconnect_secs_for_mode();
+        let market_ws_disconnect_secs = self.market_ws_disconnect_secs_for_mode(market_id);
         RiskMetricsSnapshot {
             version: self.state.metrics_version(),
             cash_balance: snap.cash_balance,
@@ -63,6 +68,7 @@ impl CoreRiskMetrics {
             daily_directional_trades_buy: snap.daily_buy_trades,
             daily_directional_trades_sell: snap.daily_sell_trades,
             consecutive_market_misses: snap.consecutive_market_misses,
+            market_ws_disconnect_secs,
             ws_disconnect_secs,
             api_error_count: self.state.api_tracker.errors_in_window(),
             api_request_count: self.state.api_tracker.requests_in_window(),
@@ -80,6 +86,25 @@ impl CoreRiskMetrics {
             },
             |ms| ms / 1000,
         )
+    }
+
+    fn market_ws_disconnect_secs_for_mode(&self, market_id: &MarketId) -> u64 {
+        let Some((yes_token, no_token)) = self.market_registry.token_pair(market_id) else {
+            return self.missing_market_data_age();
+        };
+        let yes_age = self.ws_manager.token_message_age_ms(&yes_token);
+        let no_age = self.ws_manager.token_message_age_ms(&no_token);
+        match (yes_age, no_age) {
+            (Some(yes_ms), Some(no_ms)) => yes_ms.max(no_ms) / 1000,
+            _ => self.missing_market_data_age(),
+        }
+    }
+
+    fn missing_market_data_age(&self) -> u64 {
+        match self.mode.current() {
+            ExecutionMode::Live => u64::MAX,
+            ExecutionMode::DryRun | ExecutionMode::Paper => 0,
+        }
     }
 
     fn metrics_age_secs_for_mode(&self) -> u64 {

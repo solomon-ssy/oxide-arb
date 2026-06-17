@@ -147,14 +147,16 @@ impl ScoredOpportunitySnapshot {
         token_no: TokenId,
         yes_book_version: u64,
         no_book_version: u64,
+        book_age_ms: Option<u64>,
+        context_id: Option<String>,
     ) -> Self {
         self.token_yes = Some(token_yes);
         self.token_no = Some(token_no);
         self.book = Some(BookEvidenceSnapshot {
             yes_book_version: Some(yes_book_version),
             no_book_version: Some(no_book_version),
-            book_age_ms: None,
-            context_json: None,
+            book_age_ms,
+            context_id,
         });
         self.remove_missing(MissingEvidenceField::TokenYes);
         self.remove_missing(MissingEvidenceField::TokenNo);
@@ -248,7 +250,7 @@ pub struct BookEvidenceSnapshot {
     pub yes_book_version: Option<u64>,
     pub no_book_version: Option<u64>,
     pub book_age_ms: Option<u64>,
-    pub context_json: Option<serde_json::Value>,
+    pub context_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

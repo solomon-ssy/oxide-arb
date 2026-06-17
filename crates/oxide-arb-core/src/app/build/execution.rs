@@ -193,6 +193,9 @@ impl ExecutionLoop {
             mode: execution_mode,
             trade_repo: Arc::clone(&infra.persistence().trade_repo),
             audit_writer: Arc::clone(&infra.persistence().audit_writer),
+            book_decision_context_writer: Arc::clone(
+                &infra.persistence().book_decision_context_writer,
+            ),
             relay_notify: Arc::clone(&owned.relay_notify),
             reconcile_notify: Arc::clone(&owned.reconcile_notify),
             metrics_state: Arc::clone(risk.metrics_state()),

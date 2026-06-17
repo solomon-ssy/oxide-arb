@@ -15,7 +15,7 @@ mod shard;
 mod token_intern;
 
 pub use drop_hook::WsEventDropHook;
-pub use health::{ShardHealthBoard, ShardHealthSummary};
+pub use health::{ShardHealthBoard, ShardHealthSummary, TokenFreshnessBoard};
 pub use ingest_hooks::BookLevelRejectHook;
 pub use reconnect::ReconnectPolicy;
 pub use token_intern::{TOKEN_INTERN, TokenInternPool, intern_str, intern_u256};
@@ -143,6 +143,7 @@ pub struct ClobWsManager {
     last_message_at: Arc<parking_lot::Mutex<Option<Instant>>>,
     subscriptions: parking_lot::Mutex<SubscriptionState>,
     health: Arc<ShardHealthBoard>,
+    token_freshness: Arc<TokenFreshnessBoard>,
 }
 
 impl ClobWsManager {
@@ -158,6 +159,7 @@ impl ClobWsManager {
         let (output_tx, output_rx) = flume::bounded(8192);
         let last_message_at = Arc::new(parking_lot::Mutex::new(None));
         let health = Arc::new(ShardHealthBoard::default());
+        let token_freshness = Arc::new(TokenFreshnessBoard::default());
         // `[market_data.websocket]` reconnect knobs drive both backoff layers:
         // the shard loop and the SDK-internal reconnect.
         let initial_backoff = Duration::from_millis(ws_config.reconnect_delay_ms.max(1));
@@ -190,6 +192,7 @@ impl ClobWsManager {
                 sdk_max_backoff: max_backoff,
                 connect_limiter: Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTS)),
                 health: Arc::clone(&health),
+                token_freshness: Arc::clone(&token_freshness),
             },
         );
 
@@ -200,6 +203,7 @@ impl ClobWsManager {
             last_message_at,
             subscriptions: parking_lot::Mutex::new(SubscriptionState::default()),
             health,
+            token_freshness,
         }
     }
 
@@ -288,10 +292,22 @@ impl ClobWsManager {
             .and_then(|ts| ToPrimitive::to_u64(&ts.elapsed().as_millis()))
     }
 
+    /// Milliseconds since a token last produced a normalized WS event.
+    #[must_use]
+    pub fn token_message_age_ms(&self, token_id: &TokenId) -> Option<u64> {
+        self.token_freshness.token_age_ms(token_id)
+    }
+
     /// Mark WS as connected for integration tests (no live socket required).
     #[doc(hidden)]
     pub fn seed_test_connectivity(&self) {
         *self.last_message_at.lock() = Some(Instant::now());
+    }
+
+    /// Mark a token as fresh for market-aware connectivity tests.
+    #[doc(hidden)]
+    pub fn seed_test_token_connectivity(&self, token_id: &TokenId) {
+        self.token_freshness.mark_token(token_id, Instant::now());
     }
 
     /// Mark WS as stale for lifecycle tests (`last_message_age_ms >= age_ms`).

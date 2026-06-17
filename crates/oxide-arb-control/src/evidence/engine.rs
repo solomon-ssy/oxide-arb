@@ -66,7 +66,7 @@ impl EvidenceEngine {
             .await?;
         let l2_events = self
             .timeseries
-            .l2_events(
+            .book_l2_replay(
                 &tokens,
                 TimeWindow::new(manifest.window.from, manifest.window.to),
             )

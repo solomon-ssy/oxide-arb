@@ -26,8 +26,8 @@ use oxide_arb_core::{
     exposure::in_memory::InMemoryExposureReservation,
     infra::async_writer::{AsyncWriter, AsyncWriterConfig},
     observability::{
-        alert_dispatcher::AlertDispatcher, execution_audit::ExecutionAuditWriter,
-        metrics_hub::MetricsHub,
+        alert_dispatcher::AlertDispatcher, book_decision_context_writer::BookDecisionContextWriter,
+        execution_audit::ExecutionAuditWriter, metrics_hub::MetricsHub,
     },
     pipeline::{
         book_store::BookStore, market_registry::MarketRegistry,
@@ -40,7 +40,7 @@ use oxide_arb_core::{
 };
 use oxide_arb_models::runtime_config::{NotificationConfig, RuntimeConfig};
 use oxide_arb_models::{
-    clickhouse::OpportunityAuditRow,
+    clickhouse::{BookDecisionContextRow, OpportunityAuditRow},
     config::{PolymarketConfig, WebSocketConfig},
     domain::{
         CoreEventPublisher, PositionInfo, TradeInfo,
@@ -446,9 +446,22 @@ fn audit_writer(metrics: Arc<MetricsHub>) -> Arc<ExecutionAuditWriter> {
     Arc::new(ExecutionAuditWriter::new(Arc::new(writer)))
 }
 
+fn decision_context_writer(metrics: Arc<MetricsHub>) -> Arc<BookDecisionContextWriter> {
+    let (writer, _worker) = AsyncWriter::new(
+        AsyncWriterConfig::new("test-book-decision-context")
+            .batch_size(128)
+            .flush_interval(Duration::from_secs(3600)),
+        move |_batch: Vec<BookDecisionContextRow>| Box::pin(async move { Ok(()) }),
+        metrics,
+        CancellationToken::new(),
+    );
+    Arc::new(BookDecisionContextWriter::new(Arc::new(writer)))
+}
+
 fn risk_metrics(
     exposure: Arc<InMemoryExposureReservation>,
     metrics_state: Arc<RiskMetricsState>,
+    market_registry: Arc<MarketRegistry>,
 ) -> Arc<CoreRiskMetrics> {
     let ws_manager = Arc::new(ClobWsManager::new(
         &PolymarketConfig::default(),
@@ -458,10 +471,13 @@ fn risk_metrics(
         None,
     ));
     ws_manager.seed_test_connectivity();
+    ws_manager.seed_test_token_connectivity(&token_yes());
+    ws_manager.seed_test_token_connectivity(&token_no());
     metrics_state.seed_simulated_snapshot(ExecutionMode::Live, Usd::new(dec!(5000)));
     Arc::new(CoreRiskMetrics::new(
         metrics_state,
         exposure,
+        market_registry,
         ws_manager,
         ExecutionModeHandle::new(ExecutionMode::Live),
     ))
@@ -487,10 +503,15 @@ fn fixture(clob_client: Option<Arc<ClobClient>>, dispatcher_timeout_ms: u64) -> 
     let metrics_state = Arc::new(RiskMetricsState::new(Arc::new(ApiHealthTracker::new(
         Duration::from_secs(60),
     ))));
-    let risk_metrics = risk_metrics(Arc::clone(&exposure), Arc::clone(&metrics_state));
-    let audit_writer = audit_writer(Arc::clone(&metrics));
-    let risk_engine = risk_engine();
     let market_registry = live_pipeline_market_registry();
+    let risk_metrics = risk_metrics(
+        Arc::clone(&exposure),
+        Arc::clone(&metrics_state),
+        Arc::clone(&market_registry),
+    );
+    let audit_writer = audit_writer(Arc::clone(&metrics));
+    let book_decision_context_writer = decision_context_writer(Arc::clone(&metrics));
+    let risk_engine = risk_engine();
     let trade_integrity = Arc::new(TradeIntegrityStore::new(
         Arc::clone(&trade_repo) as Arc<dyn TradeRepository>,
         Arc::clone(&exposure),
@@ -534,6 +555,7 @@ fn fixture(clob_client: Option<Arc<ClobClient>>, dispatcher_timeout_ms: u64) -> 
         mode: ExecutionModeHandle::new(ExecutionMode::Live),
         trade_repo: Arc::clone(&trade_repo),
         audit_writer: Arc::clone(&audit_writer),
+        book_decision_context_writer,
         relay_notify: Arc::new(Notify::new()),
         reconcile_notify: Arc::new(Notify::new()),
         metrics_state: Arc::clone(&metrics_state),

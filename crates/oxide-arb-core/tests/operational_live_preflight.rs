@@ -18,8 +18,10 @@ use oxide_arb_core::{
     pipeline::market_registry::MarketRegistry,
     runtime_config::RuntimeConfigStore,
     service::{
-        catalog_readiness::CatalogReadiness, detection_readiness::DetectionReadiness,
-        risk_metrics::RiskMetricsState, runtime_lifecycle::LatestUnhealthySubsystems,
+        catalog_readiness::CatalogReadiness,
+        detection_readiness::DetectionReadiness,
+        risk_metrics::{ApiHealthTracker, RiskMetricsState},
+        runtime_lifecycle::LatestUnhealthySubsystems,
     },
     trade_integrity::TradeIntegrityStore,
 };
@@ -45,18 +47,20 @@ use tokio_util::sync::CancellationToken;
 fn control_deps(catalog: Arc<CatalogReadiness>, ws: Arc<ClobWsManager>) -> CoreRuntimeControlDeps {
     let mode = ExecutionMode::Paper;
     let metrics_hub = Arc::new(MetricsHub::new());
-    let metrics_state = Arc::new(RiskMetricsState::new(Arc::new(
-        oxide_arb_core::service::risk_metrics::ApiHealthTracker::new(Duration::from_secs(60)),
-    )));
+    let metrics_state = Arc::new(RiskMetricsState::new(Arc::new(ApiHealthTracker::new(
+        Duration::from_secs(60),
+    ))));
     metrics_state.seed_simulated_snapshot(mode, Usd::new(rust_decimal_macros::dec!(1000)));
     let runtime_config = Arc::new(RuntimeConfigStore::new(RuntimeConfig::default()));
     let exposure = Arc::new(InMemoryExposureReservation::new(
         RuntimeConfig::default().risk.exposure_reservation_config(),
     ));
     let execution_mode = ExecutionModeHandle::new(mode);
+    let market_registry = Arc::new(MarketRegistry::new());
     let risk_metrics = Arc::new(CoreRiskMetrics::new(
         Arc::clone(&metrics_state),
         Arc::clone(&exposure),
+        market_registry,
         Arc::clone(&ws),
         execution_mode.clone(),
     ));

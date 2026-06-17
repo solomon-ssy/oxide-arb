@@ -455,7 +455,6 @@ impl AppContext {
         let metrics = Arc::clone(&self.infra.metrics);
         let alerts = Arc::clone(&self.infra.alerts);
         let nudge = self.system_status_nudge.clone();
-        let ws = Arc::clone(&self.trading.ws_manager);
 
         self.pending_tasks
             .push(TaskId::HealthChecker, move |shutdown| async move {
@@ -470,12 +469,7 @@ impl AppContext {
                         let metrics = Arc::clone(&metrics);
                         let alerts = Arc::clone(&alerts);
                         let nudge = nudge.clone();
-                        let ws = Arc::clone(&ws);
                         async move {
-                            let shards = ws.shard_health();
-                            if shards.disconnected > 0 {
-                                tracing::warn!(%shards, "WS shard connectivity degraded");
-                            }
                             let report = checker.check_all_and_notify(&alerts, &nudge).await;
                             if !report.overall_healthy {
                                 let unhealthy = report

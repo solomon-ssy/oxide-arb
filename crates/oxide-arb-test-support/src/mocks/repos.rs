@@ -5,8 +5,9 @@ use chrono::{DateTime, Utc};
 use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::{
     clickhouse::{
-        AuditStageCountRow, BookSnapshotRow, CalibrationSnapshotRow, OpportunityAuditRow,
-        OpportunityDetectionRow, TickEventL2Row, TickEventRow,
+        AuditStageCountRow, BookDecisionContextRow, BookL2ReplayRow, BookMicrostructureRow,
+        BookSnapshotRow, CalibrationSnapshotRow, OpportunityAuditRow, OpportunityDetectionRow,
+        TickEventRow,
     },
     domain::{
         CalibrationBucketInfo, CalibrationOutcomeInfo, EdgeBucket, MarkRedeemedParams,
@@ -1423,7 +1424,7 @@ impl TradeRepository for MockTradeRepository {
 pub struct MockTimeseriesRepository {
     audits: Mutex<Vec<OpportunityAuditRow>>,
     book_snapshots: Mutex<Vec<BookSnapshotRow>>,
-    l2_events: Mutex<Vec<TickEventL2Row>>,
+    book_l2_replay: Mutex<Vec<BookL2ReplayRow>>,
     detections: Mutex<Vec<OpportunityDetectionRow>>,
     calibration_snapshots: Mutex<Vec<CalibrationSnapshotRow>>,
 }
@@ -1437,8 +1438,8 @@ impl MockTimeseriesRepository {
         *self.book_snapshots.lock().unwrap() = rows;
     }
 
-    pub fn set_l2_events(&self, rows: Vec<TickEventL2Row>) {
-        *self.l2_events.lock().unwrap() = rows;
+    pub fn set_book_l2_replay(&self, rows: Vec<BookL2ReplayRow>) {
+        *self.book_l2_replay.lock().unwrap() = rows;
     }
 
     pub fn set_detections(&self, rows: Vec<OpportunityDetectionRow>) {
@@ -1460,11 +1461,25 @@ impl TimeseriesFactWriter for MockTimeseriesRepository {
         Ok(())
     }
 
-    async fn insert_l2_events(&self, _rows: Vec<TickEventL2Row>) -> Result<(), StorageError> {
+    async fn insert_book_l2_replay(&self, _rows: Vec<BookL2ReplayRow>) -> Result<(), StorageError> {
         Ok(())
     }
 
     async fn insert_book_snapshots(&self, _rows: Vec<BookSnapshotRow>) -> Result<(), StorageError> {
+        Ok(())
+    }
+
+    async fn insert_book_decision_contexts(
+        &self,
+        _rows: Vec<BookDecisionContextRow>,
+    ) -> Result<(), StorageError> {
+        Ok(())
+    }
+
+    async fn insert_book_microstructure_1s(
+        &self,
+        _rows: Vec<BookMicrostructureRow>,
+    ) -> Result<(), StorageError> {
         Ok(())
     }
 
@@ -1506,16 +1521,16 @@ impl EvidenceTimeseriesRepository for MockTimeseriesRepository {
         )
     }
 
-    async fn l2_events(
+    async fn book_l2_replay(
         &self,
         token_ids: &[TokenId],
         window: TimeWindow,
-    ) -> Result<EvidenceQueryResult<TickEventL2Row>, StorageError> {
+    ) -> Result<EvidenceQueryResult<BookL2ReplayRow>, StorageError> {
         let token_set: HashSet<_> = token_ids.iter().collect();
         let from_ms = window.from.timestamp_millis();
         let to_ms = window.to.timestamp_millis();
         let mut rows = self
-            .l2_events
+            .book_l2_replay
             .lock()
             .unwrap()
             .iter()
@@ -1534,7 +1549,7 @@ impl EvidenceTimeseriesRepository for MockTimeseriesRepository {
         });
         evidence_query_result(
             "MockTimeseriesRepository",
-            "l2_events",
+            "book_l2_replay",
             &(token_ids, window),
             vec!["event_time ASC".to_owned()],
             Some(2),
@@ -1581,6 +1596,36 @@ impl EvidenceTimeseriesRepository for MockTimeseriesRepository {
             vec!["token_id ASC".to_owned(), "event_time DESC".to_owned()],
             Some(2),
             rows,
+        )
+    }
+
+    async fn book_decision_contexts(
+        &self,
+        filter: MarketFilter,
+        window: TimeWindow,
+    ) -> Result<EvidenceQueryResult<BookDecisionContextRow>, StorageError> {
+        evidence_query_result(
+            "MockTimeseriesRepository",
+            "book_decision_contexts",
+            &(filter, window),
+            vec!["decision_time ASC".to_owned()],
+            Some(1),
+            Vec::new(),
+        )
+    }
+
+    async fn book_microstructure_1m(
+        &self,
+        token_ids: &[TokenId],
+        window: TimeWindow,
+    ) -> Result<EvidenceQueryResult<BookMicrostructureRow>, StorageError> {
+        evidence_query_result(
+            "MockTimeseriesRepository",
+            "book_microstructure_1m",
+            &(token_ids, window),
+            vec!["token_id ASC".to_owned(), "bucket_time ASC".to_owned()],
+            Some(1),
+            Vec::new(),
         )
     }
 

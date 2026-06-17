@@ -511,7 +511,7 @@ mod tests {
                 yes_book_version: Some(1),
                 no_book_version: Some(2),
                 book_age_ms: None,
-                context_json: None,
+                context_id: Some("ctx-1".to_owned()),
             }),
             factors: Some(AppliedFactorTrace::known_empty()),
             missing_fields: Vec::new(),

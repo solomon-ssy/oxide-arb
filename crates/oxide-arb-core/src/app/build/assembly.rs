@@ -220,6 +220,7 @@ impl BuildInfra {
             trade_repo: Arc::clone(&persistence.trade_repo),
             timeseries: Arc::clone(&persistence.timeseries),
             audit_writer: Arc::clone(&persistence.audit_writer),
+            book_decision_context_writer: Arc::clone(&persistence.book_decision_context_writer),
             book_fact_writer: Arc::clone(&persistence.book_fact_writer),
         });
         let mut pending_tasks = PendingTaskQueue::default();
@@ -319,6 +320,7 @@ impl BuildInfraCore {
             risk_state_repo: Arc::clone(repos.risk_state()),
             timeseries: Arc::clone(persistence.timeseries()),
             audit_writer: Arc::clone(persistence.audit_writer()),
+            book_decision_context_writer: Arc::clone(persistence.book_decision_context_writer()),
             balance_fact_writer,
             book_fact_writer: Arc::clone(persistence.book_fact_writer()),
             holder_address: clients.holder_address().to_owned(),

@@ -70,6 +70,7 @@ impl BuildRisk {
         let risk_metrics = Arc::new(CoreRiskMetrics::new(
             Arc::clone(&metrics_state),
             Arc::clone(&exposure),
+            Arc::clone(detection.market_registry()),
             Arc::clone(clients.ws_manager()),
             execution_mode.clone(),
         ));

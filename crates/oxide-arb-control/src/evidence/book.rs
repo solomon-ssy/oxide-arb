@@ -2,7 +2,7 @@ use std::{collections::HashMap, str::FromStr};
 
 use chrono::{DateTime, TimeZone, Utc};
 use oxide_arb_models::{
-    clickhouse::{BookSnapshotRow, ChPrice, ChShares, TickEventL2Row},
+    clickhouse::{BookL2ReplayRow, BookSnapshotRow, ChPrice, ChShares},
     domain::{
         book::BookLevel,
         control_factor::{
@@ -28,6 +28,7 @@ pub struct BookReconstructionArtifact {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BookReconstructionReport {
+    pub evidence_tier: BookEvidenceTier,
     pub token_count_expected: u64,
     pub token_count_reconstructed: u64,
     pub l2_event_count: u64,
@@ -43,10 +44,22 @@ pub struct BookReconstructionReport {
     pub query_fingerprints: Vec<QueryFingerprint>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BookEvidenceTier {
+    ExactReplay,
+    DecisionContext,
+    AggregateOnly,
+    Insufficient,
+}
+
 impl BookReconstructionReport {
     #[must_use]
     pub fn production_eligible(&self) -> bool {
-        self.insufficient_reasons.is_empty()
+        matches!(
+            self.evidence_tier,
+            BookEvidenceTier::ExactReplay | BookEvidenceTier::DecisionContext
+        ) && self.insufficient_reasons.is_empty()
     }
 }
 
@@ -211,7 +224,7 @@ impl BookReconstructionArtifact {
 pub struct BookReconstructionInput {
     pub input_report: InputResolutionReport,
     pub snapshots: Vec<BookSnapshotRow>,
-    pub l2_events: Vec<TickEventL2Row>,
+    pub l2_events: Vec<BookL2ReplayRow>,
     pub max_replay_gap_ms: u64,
     pub stale_book_after_ms: u64,
     pub query_fingerprints: Vec<QueryFingerprint>,
@@ -241,7 +254,13 @@ pub fn reconstruct(
         .iter()
         .map(|context| market_book(context, &state.books_by_token))
         .collect::<Vec<_>>();
+    let evidence_tier = if state.insufficient_reasons.is_empty() {
+        BookEvidenceTier::ExactReplay
+    } else {
+        BookEvidenceTier::Insufficient
+    };
     let report = BookReconstructionReport {
+        evidence_tier,
         token_count_expected: u64::try_from(token_ids.len()).unwrap_or(u64::MAX),
         token_count_reconstructed: u64::try_from(state.books_by_token.len()).unwrap_or(u64::MAX),
         l2_event_count: state.l2_event_count,
@@ -311,7 +330,7 @@ fn reconstruct_token(
     input: &BookReconstructionInput,
     token_id: &TokenId,
     snapshot: Option<BookSnapshotRow>,
-    events: &[TickEventL2Row],
+    events: &[BookL2ReplayRow],
     state: &mut ReconstructionState,
 ) -> MaterializationResult<()> {
     state.l2_event_count = state
@@ -407,8 +426,8 @@ fn latest_snapshots_by_token(rows: Vec<BookSnapshotRow>) -> HashMap<TokenId, Boo
     by_token
 }
 
-fn l2_events_by_token(rows: Vec<TickEventL2Row>) -> HashMap<TokenId, Vec<TickEventL2Row>> {
-    let mut by_token: HashMap<TokenId, Vec<TickEventL2Row>> = HashMap::new();
+fn l2_events_by_token(rows: Vec<BookL2ReplayRow>) -> HashMap<TokenId, Vec<BookL2ReplayRow>> {
+    let mut by_token: HashMap<TokenId, Vec<BookL2ReplayRow>> = HashMap::new();
     for row in rows {
         by_token.entry(row.token_id.clone()).or_default().push(row);
     }
@@ -451,7 +470,7 @@ fn token_book_from_snapshot(row: BookSnapshotRow) -> MaterializationResult<Recon
 
 fn apply_l2_event(
     book: &mut ReconstructedTokenBook,
-    row: &TickEventL2Row,
+    row: &BookL2ReplayRow,
 ) -> MaterializationResult<()> {
     let event_time = Utc
         .timestamp_millis_opt(row.event_time)
@@ -690,7 +709,7 @@ fn percentile(values: &mut [u64], pct: usize) -> u64 {
 mod tests {
     use chrono::{TimeZone, Utc};
     use oxide_arb_models::{
-        clickhouse::{BookSnapshotRow, ChPrice, ChSchemaVersion, ChShares, TickEventL2Row},
+        clickhouse::{BookL2ReplayRow, BookSnapshotRow, ChPrice, ChSchemaVersion, ChShares},
         domain::control_factor::{
             EvidenceSourceBundle, InputResolutionReport, MarketReplayContext,
             PointInTimeInputManifest, QueryFingerprint, TimeWindowSpec,
@@ -908,7 +927,7 @@ mod tests {
         }
     }
 
-    fn l2(token_id: &str, event_time: i64) -> TickEventL2Row {
+    fn l2(token_id: &str, event_time: i64) -> BookL2ReplayRow {
         l2_with(
             token_id,
             event_time,
@@ -922,8 +941,8 @@ mod tests {
         event_time: i64,
         bids: &[(rust_decimal::Decimal, rust_decimal::Decimal)],
         asks: &[(rust_decimal::Decimal, rust_decimal::Decimal)],
-    ) -> TickEventL2Row {
-        TickEventL2Row {
+    ) -> BookL2ReplayRow {
+        BookL2ReplayRow {
             token_id: TokenId::new(token_id),
             market_id: Some(MarketId::new("market")),
             event_type: ChBookEventType::Delta,
@@ -943,7 +962,6 @@ mod tests {
                 .iter()
                 .map(|(_, size)| ChShares::from(Shares::new(*size)))
                 .collect(),
-            changed_levels_json: None,
             book_version: 2,
             levels_count: 2,
             is_full_snapshot: false,
@@ -951,6 +969,7 @@ mod tests {
             ingestion_time: event_time,
             sequence: 2,
             source: ChFactSource::WsDelta,
+            feed_event_hash: None,
             schema_version: ChSchemaVersion(1),
         }
     }

@@ -76,8 +76,10 @@ pub enum TaskId {
     ExecutionAuditWriter,
     DetectionWriter,
     TickEventsWriter,
-    BookL2Writer,
+    BookL2ReplayWriter,
     BookSnapshotWriter,
+    BookDecisionContextWriter,
+    BookMicrostructure1sWriter,
     BookSnapshotPublisher,
     RiskStatePersist,
     RiskStateDebouncer,
@@ -117,8 +119,10 @@ impl TaskId {
             Self::ExecutionAuditWriter
             | Self::DetectionWriter
             | Self::TickEventsWriter
-            | Self::BookL2Writer
+            | Self::BookL2ReplayWriter
             | Self::BookSnapshotWriter
+            | Self::BookDecisionContextWriter
+            | Self::BookMicrostructure1sWriter
             | Self::BookSnapshotPublisher
             | Self::ShadowDecisionWriter => TaskKind::AnalyticsWriter,
             Self::RiskStatePersist | Self::RiskStateDebouncer => TaskKind::PositionPersistence,

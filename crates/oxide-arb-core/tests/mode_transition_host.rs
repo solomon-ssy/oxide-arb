@@ -89,6 +89,7 @@ fn runtime_control(
         RuntimeConfig::default().risk.exposure_reservation_config(),
     ));
     let execution_mode = ExecutionModeHandle::new(mode);
+    let market_registry = Arc::new(MarketRegistry::new());
     let ws = Arc::new(ClobWsManager::new(
         &PolymarketConfig::default(),
         &WebSocketConfig::default(),
@@ -99,6 +100,7 @@ fn runtime_control(
     let risk_metrics = Arc::new(CoreRiskMetrics::new(
         Arc::clone(&metrics_state),
         Arc::clone(&exposure),
+        market_registry,
         Arc::clone(&ws),
         execution_mode.clone(),
     ));

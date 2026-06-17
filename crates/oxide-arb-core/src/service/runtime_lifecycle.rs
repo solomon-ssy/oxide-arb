@@ -59,6 +59,7 @@ pub fn evaluate_lifecycle(
             total: u32::try_from(shard_summary.total).unwrap_or(u32::MAX),
             disconnected: u32::try_from(shard_summary.disconnected).unwrap_or(u32::MAX),
             oldest_disconnected_secs: shard_summary.oldest_disconnected_secs,
+            connected_ratio_bps: shard_summary.connected_ratio_bps,
         },
     );
 
@@ -72,9 +73,14 @@ pub fn evaluate_lifecycle(
 
     if !market_data.ready {
         if market_data.last_message_age_ms.is_some() {
+            let reason = if market_data.ws_shards.disconnected > 0 {
+                OperationalDegradeReason::MarketDataCoverageDegraded
+            } else {
+                OperationalDegradeReason::MarketDataStale
+            };
             return (
                 OperationalPhase::Degraded {
-                    reasons: vec![OperationalDegradeReason::MarketDataStale],
+                    reasons: vec![reason],
                 },
                 market_data,
             );

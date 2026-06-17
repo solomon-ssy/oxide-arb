@@ -83,12 +83,13 @@ impl Scanner {
 
         let pair =
             DualBookAssembler::assemble(&self.book_store, &entry.token_yes, &entry.token_no)?;
+        let acceptable_book_age_ms = self.staleness_classifier.acceptable_ms();
 
         let now_ms = ToPrimitive::to_u64(&now.timestamp_millis().max(0)).unwrap_or(0);
         if !BookGate::pass(
             &pair,
             now_ms,
-            self.staleness_classifier.acceptable_ms(),
+            acceptable_book_age_ms,
             &entry.token_yes,
             &entry.token_no,
         ) {
@@ -127,7 +128,7 @@ impl Scanner {
             observe_ws_to_scan(&scored.trace, &self.metrics);
             self.metrics.opportunities_detected.inc();
             if let Some(writer) = &self.detection_writer {
-                writer.write(scored);
+                writer.write(scored, &pair, acceptable_book_age_ms);
             }
             // Surface the detection to the real-time bus. Project the public
             // `Opportunity` (no internal algorithm/latency trace leakage);

@@ -6,8 +6,9 @@ use chrono::{DateTime, Utc};
 use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::{
     clickhouse::{
-        AuditStageCountRow, BookSnapshotRow, CalibrationSnapshotRow, OpportunityAuditRow,
-        OpportunityDetectionRow, TickEventL2Row, TickEventRow,
+        AuditStageCountRow, BookDecisionContextRow, BookL2ReplayRow, BookMicrostructureRow,
+        BookSnapshotRow, CalibrationSnapshotRow, OpportunityAuditRow, OpportunityDetectionRow,
+        TickEventRow,
     },
     config::ClickHouseConfig,
     domain::{MarketFilter, PageRequest, Paginated, TimeWindow, evidence::EvidenceQueryResult},
@@ -27,8 +28,10 @@ pub struct ChTimeseriesRepository {
     client: clickhouse::Client,
     write_manager: Arc<ChWriteManager>,
     tick_inserter: BatchInserter<TickEventRow>,
-    l2_inserter: BatchInserter<TickEventL2Row>,
+    l2_replay_inserter: BatchInserter<BookL2ReplayRow>,
     book_inserter: BatchInserter<BookSnapshotRow>,
+    decision_context_inserter: BatchInserter<BookDecisionContextRow>,
+    microstructure_1s_inserter: BatchInserter<BookMicrostructureRow>,
     audit_inserter: BatchInserter<OpportunityAuditRow>,
     detection_inserter: BatchInserter<OpportunityDetectionRow>,
     calibration_inserter: BatchInserter<CalibrationSnapshotRow>,
@@ -60,9 +63,9 @@ impl ChTimeseriesRepository {
                 Arc::clone(&metrics),
                 shutdown.clone(),
             ),
-            l2_inserter: BatchInserter::new(
+            l2_replay_inserter: BatchInserter::new(
                 client.clone(),
-                "tick_events_l2",
+                "book_l2_replay_hot",
                 batch_size,
                 flush_interval,
                 Arc::clone(&metrics),
@@ -71,6 +74,22 @@ impl ChTimeseriesRepository {
             book_inserter: BatchInserter::new(
                 client.clone(),
                 "book_snapshots",
+                batch_size,
+                flush_interval,
+                Arc::clone(&metrics),
+                shutdown.clone(),
+            ),
+            decision_context_inserter: BatchInserter::new(
+                client.clone(),
+                "book_decision_contexts",
+                batch_size,
+                flush_interval,
+                Arc::clone(&metrics),
+                shutdown.clone(),
+            ),
+            microstructure_1s_inserter: BatchInserter::new(
+                client.clone(),
+                "book_microstructure_1s",
                 batch_size,
                 flush_interval,
                 Arc::clone(&metrics),
@@ -116,12 +135,26 @@ impl TimeseriesFactWriter for ChTimeseriesRepository {
         self.tick_inserter.insert_many(events).await
     }
 
-    async fn insert_l2_events(&self, rows: Vec<TickEventL2Row>) -> Result<(), StorageError> {
-        self.l2_inserter.insert_many(rows).await
+    async fn insert_book_l2_replay(&self, rows: Vec<BookL2ReplayRow>) -> Result<(), StorageError> {
+        self.l2_replay_inserter.insert_many(rows).await
     }
 
     async fn insert_book_snapshots(&self, rows: Vec<BookSnapshotRow>) -> Result<(), StorageError> {
         self.book_inserter.insert_many(rows).await
+    }
+
+    async fn insert_book_decision_contexts(
+        &self,
+        rows: Vec<BookDecisionContextRow>,
+    ) -> Result<(), StorageError> {
+        self.decision_context_inserter.insert_many(rows).await
+    }
+
+    async fn insert_book_microstructure_1s(
+        &self,
+        rows: Vec<BookMicrostructureRow>,
+    ) -> Result<(), StorageError> {
+        self.microstructure_1s_inserter.insert_many(rows).await
     }
 
     async fn insert_detections(
@@ -182,15 +215,15 @@ impl EvidenceTimeseriesRepository for ChTimeseriesRepository {
         )
     }
 
-    async fn l2_events(
+    async fn book_l2_replay(
         &self,
         token_ids: &[TokenId],
         window: TimeWindow,
-    ) -> Result<EvidenceQueryResult<TickEventL2Row>, StorageError> {
+    ) -> Result<EvidenceQueryResult<BookL2ReplayRow>, StorageError> {
         let rows = self
             .client
             .query(
-                "SELECT * FROM tick_events_l2 \
+                "SELECT * FROM book_l2_replay_hot \
                  WHERE token_id IN ? \
                    AND event_time >= fromUnixTimestamp64Milli(?) \
                    AND event_time < fromUnixTimestamp64Milli(?) \
@@ -199,12 +232,12 @@ impl EvidenceTimeseriesRepository for ChTimeseriesRepository {
             .bind(token_ids)
             .bind(window.from.timestamp_millis())
             .bind(window.to.timestamp_millis())
-            .fetch_all::<TickEventL2Row>()
+            .fetch_all::<BookL2ReplayRow>()
             .await
             .map_err(StorageError::from)?;
         evidence_query_result(
             "ChTimeseriesRepository",
-            "l2_events",
+            "book_l2_replay",
             &(token_ids, window),
             vec![
                 "event_time ASC".to_owned(),
@@ -249,6 +282,79 @@ impl EvidenceTimeseriesRepository for ChTimeseriesRepository {
                 "LIMIT BY token_id".to_owned(),
             ],
             Some(2),
+            rows,
+        )
+    }
+
+    async fn book_decision_contexts(
+        &self,
+        filter: MarketFilter,
+        window: TimeWindow,
+    ) -> Result<EvidenceQueryResult<BookDecisionContextRow>, StorageError> {
+        let market_ids = filter.market_ids;
+        let token_ids = filter.token_ids;
+        let params = (market_ids.clone(), token_ids.clone(), window);
+        let rows = self
+            .client
+            .query(
+                "SELECT * FROM book_decision_contexts \
+                 WHERE decision_time >= fromUnixTimestamp64Milli(?) \
+                   AND decision_time < fromUnixTimestamp64Milli(?) \
+                   AND (empty(?) OR market_id IN ?) \
+                   AND (empty(?) OR yes_token_id IN ? OR no_token_id IN ?) \
+                 ORDER BY decision_time ASC, ingestion_time ASC, sequence ASC, context_id ASC",
+            )
+            .bind(window.from.timestamp_millis())
+            .bind(window.to.timestamp_millis())
+            .bind(market_ids.clone())
+            .bind(market_ids)
+            .bind(token_ids.clone())
+            .bind(token_ids.clone())
+            .bind(token_ids)
+            .fetch_all::<BookDecisionContextRow>()
+            .await
+            .map_err(StorageError::from)?;
+        evidence_query_result(
+            "ChTimeseriesRepository",
+            "book_decision_contexts",
+            &params,
+            vec![
+                "decision_time ASC".to_owned(),
+                "ingestion_time ASC".to_owned(),
+                "sequence ASC".to_owned(),
+                "context_id ASC".to_owned(),
+            ],
+            Some(1),
+            rows,
+        )
+    }
+
+    async fn book_microstructure_1m(
+        &self,
+        token_ids: &[TokenId],
+        window: TimeWindow,
+    ) -> Result<EvidenceQueryResult<BookMicrostructureRow>, StorageError> {
+        let rows = self
+            .client
+            .query(
+                "SELECT * FROM book_microstructure_1m \
+                 WHERE token_id IN ? \
+                   AND bucket_time >= fromUnixTimestamp64Milli(?) \
+                   AND bucket_time < fromUnixTimestamp64Milli(?) \
+                 ORDER BY token_id ASC, bucket_time ASC",
+            )
+            .bind(token_ids)
+            .bind(window.from.timestamp_millis())
+            .bind(window.to.timestamp_millis())
+            .fetch_all::<BookMicrostructureRow>()
+            .await
+            .map_err(StorageError::from)?;
+        evidence_query_result(
+            "ChTimeseriesRepository",
+            "book_microstructure_1m",
+            &(token_ids, window),
+            vec!["token_id ASC".to_owned(), "bucket_time ASC".to_owned()],
+            Some(1),
             rows,
         )
     }

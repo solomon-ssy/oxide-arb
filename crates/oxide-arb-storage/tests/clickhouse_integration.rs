@@ -176,7 +176,7 @@ async fn clickhouse_fact_contract_uses_decimal_and_enum_columns() {
             ],
         ),
         (
-            "tick_events_l2",
+            "book_l2_replay_hot",
             &[
                 "`bid_prices` Array(Decimal(18, 8))",
                 "`bid_sizes` Array(Decimal(38, 18))",

@@ -79,6 +79,40 @@ pub enum ChSnapshotReason {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
 #[repr(i8)]
+pub enum ChBookDecisionStage {
+    OpportunityDetected = 1,
+    RiskGateEvaluated = 2,
+    SizeComputed = 3,
+    OrderPrepared = 4,
+    OrderSubmitted = 5,
+    OrderFilled = 6,
+    OrderMissed = 7,
+    OrderFailed = 8,
+    SettlementAttributed = 9,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
+#[repr(i8)]
+pub enum ChBookQuality {
+    Fresh = 1,
+    Stale = 2,
+    Crossed = 3,
+    Gap = 4,
+    Invalid = 5,
+    Insufficient = 6,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
+#[repr(i8)]
+pub enum ChBookEvidenceTier {
+    ExactReplay = 1,
+    DecisionContext = 2,
+    AggregateOnly = 3,
+    Insufficient = 4,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
+#[repr(i8)]
 pub enum ChPriceZone {
     Z95 = 1,
     Z96 = 2,
