@@ -30,6 +30,12 @@ pub struct SystemStatus {
     pub daily_pnl: Usd,
     /// Market-catalog warmup state (detection is gated until `Ready`).
     pub catalog: CatalogState,
+    /// Active published control-factor publication id, if any.
+    pub control_factor_publication_id: Option<String>,
+    /// Whether the published control-factor snapshot TTL has elapsed.
+    pub control_factor_snapshot_expired: bool,
+    /// Live mode with no active published control-factor snapshot.
+    pub control_factor_live_warn: bool,
     pub checked_at: DateTime<Utc>,
 }
 

@@ -29,6 +29,7 @@ use oxide_arb_core::{
     },
     runtime_config::RuntimeConfigStore,
     service::risk_metrics::{ApiHealthTracker, RiskMetricsState},
+    trade_integrity::TradeIntegrityStore,
 };
 use oxide_arb_models::runtime_config::{NotificationConfig, RuntimeConfig};
 use oxide_arb_models::{
@@ -61,6 +62,7 @@ use oxide_arb_models::{
         Bps, EventId, MarketId, MicroProb, MicroScore, OpportunityId, Price, Shares, TokenId, Usd,
     },
 };
+use oxide_arb_repository::traits::TradeRepository;
 use oxide_arb_risk::{
     builder::RiskEngineBuilder, clock::utc_clock, engine::RiskEngine, traits::RiskMetrics,
 };
@@ -420,7 +422,7 @@ fn pipeline(
 ) -> ExecutionPipeline<MockTradeRepository> {
     let metrics = Arc::new(MetricsHub::new());
     let alerts = Arc::new(AlertDispatcher::new(&NotificationConfig::default()));
-    let fsm = Arc::new(ExecutionFSM::new(Arc::clone(&metrics), alerts));
+    let fsm = Arc::new(ExecutionFSM::new(Arc::clone(&metrics), Arc::clone(&alerts)));
     let book_store = Arc::new(BookStore::new(Arc::clone(&metrics)));
     seed_books(&book_store, scored);
     let reservation_config = RiskConfig::default().exposure_reservation_config();
@@ -430,9 +432,16 @@ fn pipeline(
         &reservation_config,
     ));
     let fee_calculator = Arc::new(FeeCalculator::default());
-    let risk_metrics = factor_test_risk_metrics(execution_mode, exposure);
+    let risk_metrics = factor_test_risk_metrics(execution_mode, Arc::clone(&exposure));
     let audit_writer = factor_test_audit_writer(Arc::clone(&metrics));
     let risk_engine = factor_test_risk_engine();
+    let trade_integrity = Arc::new(TradeIntegrityStore::new(
+        Arc::new(MockTradeRepository::default()) as Arc<dyn TradeRepository>,
+        Arc::clone(&exposure),
+        Arc::clone(&fsm),
+        Arc::new(RuntimeConfigStore::new(RuntimeConfig::default())),
+        alerts,
+    ));
 
     ExecutionPipeline::new(ExecutionPipelineDeps {
         validator: Arc::new(Validator::new(
@@ -480,6 +489,7 @@ fn pipeline(
         shadow_writer: None,
         ctf_redeem: None,
         holder_address: String::new(),
+        trade_integrity,
     })
 }
 

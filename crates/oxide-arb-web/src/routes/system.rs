@@ -292,7 +292,10 @@ pub async fn ack_execution_emergency(
     let body = body.into_inner();
     op_ctx.set_action(OperationCategory::System, "system.emergency.ack");
     op_ctx.set_detail(serde_json::json!({ "operator_ack": body.operator_ack }));
-    state.control.ack_execution_emergency(&body.operator_ack).await?;
+    state
+        .control
+        .ack_execution_emergency(&body.operator_ack)
+        .await?;
     Ok(WebResponse::ok(()))
 }
 

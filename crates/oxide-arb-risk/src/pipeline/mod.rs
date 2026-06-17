@@ -9,7 +9,7 @@ pub mod checks;
 use crate::{
     context::PreTradeContext,
     pipeline::checks::{
-        ApiErrorRateCheck, BlacklistCheck, CircuitBreakerCheck,
+        ApiErrorRateCheck, BlacklistCheck, BlockingTradesCheck, CircuitBreakerCheck,
         ControlFactorManualAckRequiredCheck, ControlFactorSnapshotExpiredCheck, DailyBudgetCheck,
         DailyDirectionalBudgetCheck, DailyLossCapCheck, DirectionalConcentrationCheck,
         DrawdownGuardCheck, DuplicateMarketCheck, ExposurePctCheck, FeeSpendCheck,
@@ -52,6 +52,7 @@ pub struct StaticRiskPipeline {
     reconciliation_maintenance: ReconciliationMaintenanceCheck,
     control_factor_manual_ack_required: ControlFactorManualAckRequiredCheck,
     control_factor_snapshot_expired: ControlFactorSnapshotExpiredCheck,
+    blocking_trades: BlockingTradesCheck,
     redeem_route_resolvable: RedeemRouteResolvableCheck,
     metrics_freshness: MetricsFreshnessCheck,
     min_depth: MinDepthCheck,
@@ -82,7 +83,7 @@ pub struct StaticRiskPipeline {
 impl StaticRiskPipeline {
     #[must_use]
     pub const fn len(&self) -> usize {
-        31
+        32
     }
 
     #[must_use]
@@ -117,6 +118,7 @@ impl StaticRiskPipeline {
             RiskCheckId::ReconciliationMaintenance,
             RiskCheckId::ControlFactorManualAckRequired,
             RiskCheckId::ControlFactorSnapshotExpired,
+            RiskCheckId::BlockingTrades,
             RiskCheckId::RedeemRouteResolvable,
             RiskCheckId::MetricsFreshness,
             RiskCheckId::MinDepth,
@@ -153,6 +155,7 @@ impl StaticRiskPipeline {
             &self.reconciliation_maintenance,
             &self.control_factor_manual_ack_required,
             &self.control_factor_snapshot_expired,
+            &self.blocking_trades,
             &self.redeem_route_resolvable,
             &self.metrics_freshness,
             &self.min_depth,
@@ -328,6 +331,7 @@ impl StaticRiskPipeline {
             gate!(self.reconciliation_maintenance);
             gate!(self.control_factor_manual_ack_required);
             gate!(self.control_factor_snapshot_expired);
+            gate!(self.blocking_trades);
             gate!(self.redeem_route_resolvable);
             gate!(self.metrics_freshness);
             gate!(self.min_depth);
@@ -406,6 +410,7 @@ pub fn build_default_pipeline(config: &RiskConfig) -> StaticRiskPipeline {
         reconciliation_maintenance: ReconciliationMaintenanceCheck,
         control_factor_manual_ack_required: ControlFactorManualAckRequiredCheck,
         control_factor_snapshot_expired: ControlFactorSnapshotExpiredCheck,
+        blocking_trades: BlockingTradesCheck,
         redeem_route_resolvable: RedeemRouteResolvableCheck,
         metrics_freshness: MetricsFreshnessCheck::new(config),
         min_depth: MinDepthCheck::new(config),

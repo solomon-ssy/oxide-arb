@@ -181,6 +181,8 @@ pub enum RiskCheckId {
     ControlFactorManualAckRequired,
     /// Control-factor publication TTL elapsed under fail-closed policy.
     ControlFactorSnapshotExpired,
+    /// Durable trades block new Live/Paper admission until reconciled.
+    BlockingTrades,
     /// Live settlement redeem route must resolve for the target market class.
     RedeemRouteResolvable,
     MetricsFreshness,

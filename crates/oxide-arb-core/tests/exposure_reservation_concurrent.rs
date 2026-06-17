@@ -4,10 +4,14 @@ use oxide_arb_core::exposure::in_memory::InMemoryExposureReservation;
 use oxide_arb_error::reservation::ReservationError;
 use oxide_arb_models::{
     runtime_config::ExposureReservationConfig,
-    types::{MarketId, Usd},
+    types::{MarketId, ReservationId, Usd},
 };
 use rust_decimal_macros::dec;
-use std::{sync::Arc, thread, time::Duration};
+use std::{
+    sync::Arc,
+    thread,
+    time::{Duration, Instant},
+};
 
 const fn tight_config() -> ExposureReservationConfig {
     ExposureReservationConfig {
@@ -48,23 +52,19 @@ fn concurrent_reserve_respects_global_limit() {
 }
 
 #[test]
-fn concurrent_reserve_confirm_release_no_panic() {
+fn concurrent_reserve_release_no_panic() {
     let backend = Arc::new(InMemoryExposureReservation::new(tight_config()));
     let market = MarketId::new("m1");
     let threads = 32usize;
     let mut handles = Vec::with_capacity(threads);
 
-    for i in 0..threads {
+    for _thread in 0..threads {
         let backend = Arc::clone(&backend);
         let market = market.clone();
         handles.push(thread::spawn(move || {
             let amount = Usd::new(dec!(1));
             if let Ok(id) = backend.try_reserve_sync(&market, amount, Duration::from_secs(60)) {
-                if i % 3 == 0 {
-                    let _ = backend.confirm_sync(&id);
-                } else {
-                    let _ = backend.release_sync(&id);
-                }
+                let _ = backend.release_sync(&id);
             }
         }));
     }
@@ -129,4 +129,23 @@ fn per_market_limit_enforced_under_contention() {
 
     assert_eq!(ok, 1, "per-market cap $5 allows one $3 reservation");
     assert_eq!(limit_hits, 3);
+}
+
+#[test]
+fn restore_sync_is_idempotent_for_same_reservation_id() {
+    let backend = InMemoryExposureReservation::new(tight_config());
+    let market = MarketId::new("m-restore");
+    let id = ReservationId::from_v7();
+    let amount = Usd::new(dec!(4));
+    let expires = Instant::now() + Duration::from_secs(300);
+
+    backend
+        .restore_sync(id.clone(), market.clone(), amount, false, expires)
+        .expect("first restore");
+    backend
+        .restore_sync(id, market, amount, false, expires)
+        .expect("duplicate restore must be idempotent");
+
+    assert_eq!(backend.active_count_sync(), 1);
+    assert_eq!(backend.total_reserved_usd_sync(), amount);
 }

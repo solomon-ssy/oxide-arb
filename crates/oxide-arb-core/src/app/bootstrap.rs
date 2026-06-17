@@ -12,6 +12,11 @@ use tokio_util::sync::CancellationToken;
 pub async fn run(deploy: Arc<DeployConfig>) -> OxideResult<()> {
     let shutdown = CancellationToken::new();
     let ctx = AppContext::build(deploy, shutdown.clone()).await?;
+    if let Some(execution) = ctx.trading.execution.as_ref() {
+        ctx.trade_integrity
+            .boot_rehydrate(&execution.capital_manager)
+            .await?;
+    }
     ctx.ensure_live_ready().await?;
     ctx.queue_runtime_tasks();
     ctx.queue_market_settlement_task();

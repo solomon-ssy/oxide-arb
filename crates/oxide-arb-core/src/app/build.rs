@@ -77,6 +77,7 @@ use crate::{
         },
         ws_subscription::WsSubscriptionCoordinator,
     },
+    trade_integrity::TradeIntegrityStore,
 };
 use oxide_arb_algorithm::{
     calibration::{CalibrationEntry, CalibrationUpdater, ResolutionCalibrator},
@@ -126,6 +127,7 @@ use oxide_arb_repository::{
         BlacklistPersistenceRepository, CalibrationRepository, ControlFactorRepository,
         ControlFactorShadowDecisionRepository, PositionRepository, PotentialLossRepository,
         RiskStateRepository, RuntimeConfigVersionRepository, SystemRuntimeStateRepository,
+        TradeRepository,
     },
 };
 use oxide_arb_risk::{
@@ -237,6 +239,7 @@ struct AppContextAssembly {
     clients: BuildClients,
     risk: BuildRisk,
     trading: BuildTrading,
+    trade_integrity: Arc<TradeIntegrityStore>,
     persistence: BuildPersistence,
     settlement_service: Arc<MarketSettlementService>,
     settlement_dedup: Arc<SettlementDedup>,
@@ -287,6 +290,7 @@ struct BuildTrading {
     token_rx: flume::Receiver<TokenId>,
     market_rx: flume::Receiver<MarketId>,
     execution_runners: Vec<ExecutionRunner>,
+    trade_integrity: Arc<TradeIntegrityStore>,
 }
 
 struct DetectionStack {
@@ -315,6 +319,7 @@ struct ExecutionLoop {
     execution: ExecutionBundle,
     settlement_rx: flume::Receiver<MarketSettlementRequest>,
     execution_runners: Vec<ExecutionRunner>,
+    trade_integrity: Arc<TradeIntegrityStore>,
 }
 
 /// Bounded capacity of the real-time `CoreEvent` bus. Sized for short bursts of
@@ -397,6 +402,7 @@ impl AppContext {
         let (assembled_infra, persistence_handles, pending_tasks) =
             finish_infra(infra, persistence_workers);
 
+        let trade_integrity = Arc::clone(&trading.trade_integrity);
         Ok(assemble_app_context(AppContextAssembly {
             config: deploy,
             runtime_store,
@@ -408,6 +414,7 @@ impl AppContext {
             clients,
             risk,
             trading,
+            trade_integrity,
             persistence: persistence_handles,
             settlement_service,
             settlement_dedup,
@@ -594,6 +601,7 @@ fn assemble_app_context(parts: AppContextAssembly) -> AppContext {
         clients,
         risk,
         trading,
+        trade_integrity,
         persistence,
         settlement_service,
         settlement_dedup,
@@ -607,6 +615,7 @@ fn assemble_app_context(parts: AppContextAssembly) -> AppContext {
         execution_mode,
         events,
         event_rx: Mutex::new(Some(event_rx)),
+        trade_integrity,
         infra: InfraBundle {
             pg: infra.pg_pool,
             ch: infra.ch_pool,
@@ -1206,6 +1215,7 @@ fn wire_trading(
         token_rx: detection.token_rx,
         market_rx: detection.market_rx,
         execution_runners: execution.execution_runners,
+        trade_integrity: execution.trade_integrity,
     }
 }
 
@@ -1365,6 +1375,7 @@ struct ExecutionPipelineWiring<'a> {
     order_strategy: &'a Arc<FokOrderStrategy>,
     relay_notify: &'a Arc<Notify>,
     reconcile_notify: &'a Arc<Notify>,
+    trade_integrity: &'a Arc<TradeIntegrityStore>,
 }
 
 fn build_execution_pipeline(wiring: ExecutionPipelineWiring<'_>) -> Arc<ExecutionPipeline> {
@@ -1380,6 +1391,7 @@ fn build_execution_pipeline(wiring: ExecutionPipelineWiring<'_>) -> Arc<Executio
         order_strategy,
         relay_notify,
         reconcile_notify,
+        trade_integrity,
     } = wiring;
     Arc::new(ExecutionPipeline::new(ExecutionPipelineDeps {
         validator: Arc::clone(validator),
@@ -1411,6 +1423,7 @@ fn build_execution_pipeline(wiring: ExecutionPipelineWiring<'_>) -> Arc<Executio
         shadow_writer: Some(infra.shadow_writer.clone()),
         ctf_redeem: clients.ctf_redeem.clone(),
         holder_address: clients.holder_address.clone(),
+        trade_integrity: Arc::clone(trade_integrity),
     }))
 }
 
@@ -1446,6 +1459,16 @@ fn wire_execution_loop(
         runtime.execution.timeout.dispatcher_timeout_ms,
         Arc::clone(&infra.metrics),
     ));
+    let trade_integrity = Arc::new(TradeIntegrityStore::new(
+        {
+            let repo = Arc::clone(&infra.persistence.trade_repo);
+            repo as Arc<dyn TradeRepository>
+        },
+        Arc::clone(&risk.exposure),
+        Arc::clone(&risk.fsm),
+        Arc::clone(&infra.runtime_store),
+        Arc::clone(&infra.alerts),
+    ));
     let execution_pipeline = build_execution_pipeline(ExecutionPipelineWiring {
         execution_mode: mode_handle,
         infra,
@@ -1458,6 +1481,7 @@ fn wire_execution_loop(
         order_strategy: &order_strategy,
         relay_notify: &relay_notify,
         reconcile_notify: &reconcile_notify,
+        trade_integrity: &trade_integrity,
     });
 
     let inflight = Arc::new(AtomicU32::new(0));
@@ -1496,13 +1520,9 @@ fn wire_execution_loop(
     let execution = ExecutionBundle::new(ExecutionBundleDeps {
         pipeline: execution_pipeline,
         market_inflight,
-        risk_engine: Arc::clone(&risk.engine),
-        fsm: Arc::clone(&risk.fsm),
         capital_manager: Arc::clone(&capital),
         relay_notify,
         reconcile_notify,
-        clob: clients.clob_client.clone(),
-        mode: execution_mode.clone(),
     });
 
     ExecutionLoop {
@@ -1513,6 +1533,7 @@ fn wire_execution_loop(
         execution,
         settlement_rx,
         execution_runners,
+        trade_integrity,
     }
 }
 

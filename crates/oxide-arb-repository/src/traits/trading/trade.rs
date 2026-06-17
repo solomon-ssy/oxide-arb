@@ -93,10 +93,42 @@ pub trait TradeRepository: Send + Sync {
         ))
     }
 
-    /// Trades blocking safe resumption: submitted, orphaned, or reconcile-pending.
+    /// Trades blocking safe resumption: intent, submitted, orphaned, or reconcile-pending.
     async fn count_blocking_trades(&self) -> Result<u64, StorageError> {
         Err(StorageError::StaleData(
             "count_blocking_trades is not implemented for this repository".into(),
+        ))
+    }
+
+    /// Durable rows that must have an in-memory reservation after process restart.
+    async fn find_reservation_obligations(
+        &self,
+        limit: u64,
+    ) -> Result<Vec<TradeInfo>, StorageError> {
+        let _ = limit;
+        Err(StorageError::StaleData(
+            "find_reservation_obligations is not implemented for this repository".into(),
+        ))
+    }
+
+    /// Active reconciliation queue depth (`needs_reconcile` without resolution).
+    async fn count_needs_reconcile(&self) -> Result<u64, StorageError> {
+        Err(StorageError::StaleData(
+            "count_needs_reconcile is not implemented for this repository".into(),
+        ))
+    }
+
+    /// Crash-orphaned intent rows awaiting operator closure.
+    async fn count_intent_orphans(&self) -> Result<u64, StorageError> {
+        Err(StorageError::StaleData(
+            "count_intent_orphans is not implemented for this repository".into(),
+        ))
+    }
+
+    /// Age in seconds of the oldest blocking admission row.
+    async fn oldest_blocking_age_secs(&self) -> Result<u64, StorageError> {
+        Err(StorageError::StaleData(
+            "oldest_blocking_age_secs is not implemented for this repository".into(),
         ))
     }
 

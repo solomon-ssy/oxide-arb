@@ -22,4 +22,9 @@ pub enum TradingError {
 
     #[error("Position limit reached: {0}")]
     PositionLimit(String),
+
+    #[error(
+        "Blocking trades unresolved: {count} durable row(s) must be reconciled before resuming"
+    )]
+    BlockingTradesUnresolved { count: u32 },
 }

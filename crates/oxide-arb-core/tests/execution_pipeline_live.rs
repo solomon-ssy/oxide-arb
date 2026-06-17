@@ -36,6 +36,7 @@ use oxide_arb_core::{
     post_trade::consumer::PostTradeConsumer,
     runtime_config::RuntimeConfigStore,
     service::risk_metrics::{ApiHealthTracker, RiskMetricsState},
+    trade_integrity::TradeIntegrityStore,
 };
 use oxide_arb_models::runtime_config::{NotificationConfig, RuntimeConfig};
 use oxide_arb_models::{
@@ -66,6 +67,7 @@ use oxide_arb_models::{
         Bps, EventId, MarketId, MicroProb, MicroScore, OpportunityId, Price, Shares, TokenId, Usd,
     },
 };
+use oxide_arb_repository::traits::TradeRepository;
 use oxide_arb_risk::{
     builder::RiskEngineBuilder, clock::utc_clock, engine::RiskEngine, traits::RiskMetrics,
 };
@@ -468,7 +470,7 @@ fn risk_metrics(
 fn fixture(clob_client: Option<Arc<ClobClient>>, dispatcher_timeout_ms: u64) -> LiveFixture {
     let metrics = Arc::new(MetricsHub::new());
     let alerts = Arc::new(AlertDispatcher::new(&NotificationConfig::default()));
-    let fsm = Arc::new(ExecutionFSM::new(Arc::clone(&metrics), alerts));
+    let fsm = Arc::new(ExecutionFSM::new(Arc::clone(&metrics), Arc::clone(&alerts)));
     let book_store = Arc::new(BookStore::new(Arc::clone(&metrics)));
     let reservation_config = RiskConfig::default().exposure_reservation_config();
     let exposure = Arc::new(InMemoryExposureReservation::new(reservation_config.clone()));
@@ -489,6 +491,13 @@ fn fixture(clob_client: Option<Arc<ClobClient>>, dispatcher_timeout_ms: u64) -> 
     let audit_writer = audit_writer(Arc::clone(&metrics));
     let risk_engine = risk_engine();
     let market_registry = live_pipeline_market_registry();
+    let trade_integrity = Arc::new(TradeIntegrityStore::new(
+        Arc::clone(&trade_repo) as Arc<dyn TradeRepository>,
+        Arc::clone(&exposure),
+        Arc::clone(&fsm),
+        Arc::new(RuntimeConfigStore::new(RuntimeConfig::default())),
+        alerts,
+    ));
     let pipeline = ExecutionPipeline::new(ExecutionPipelineDeps {
         validator: Arc::new(Validator::new(
             Arc::clone(&book_store),
@@ -533,6 +542,7 @@ fn fixture(clob_client: Option<Arc<ClobClient>>, dispatcher_timeout_ms: u64) -> 
         shadow_writer: None,
         ctf_redeem: None,
         holder_address: String::new(),
+        trade_integrity,
     });
 
     LiveFixture {

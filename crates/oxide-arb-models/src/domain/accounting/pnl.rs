@@ -31,14 +31,3 @@ pub struct WeeklyPnl {
     pub trade_count: u32,
     pub win_rate: rust_decimal::Decimal,
 }
-
-/// High-level cash flow summary for treasury monitoring.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CashFlowSummary {
-    pub total_deposited: Usd,
-    pub total_withdrawn: Usd,
-    pub current_balance: Usd,
-    pub locked_in_positions: Usd,
-    pub locked_in_reservations: Usd,
-    pub available_for_trading: Usd,
-}

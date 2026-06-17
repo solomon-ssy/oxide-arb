@@ -72,7 +72,7 @@ simulated_cash = bankroll_usd
 
 > R1 — simulated cash baseline (rebased on `bankroll_usd` activation in DryRun/Paper; **never touched on the authoritative Live source**).
 
-### 2.4 对账（reconciliation）中的 `bankroll_usd`
+### 2.4 对账（reconciliation）中的 Live 现金 baseline
 
 **Ledger reconciliation 是 Live-only 的**：外部余额对账只对真实资金有意义。
 DryRun/Paper 下账本追踪的是虚拟资金，与 CLOB 真实余额的任何比较都没有信息量，
@@ -83,18 +83,22 @@ DryRun/Paper 下账本追踪的是虚拟资金，与 CLOB 真实余额的任何�
 Live tick 读取：
 
 ```text
-internal_cash = configured_bankroll - successful_spend(Live) + settled_payout(Live)
+internal_cash = metrics.cash_balance()   // authoritative CLOB collateral snapshot
 external_available = clob_client.collateral_balance()
 ```
 
-- **internal**：以 `bankroll_usd` 为 baseline 的**账本模型**，聚合按
-  `execution_mode = live` 过滤 — 模拟时期的历史成交不会污染 Live 账本；
-- **external**：CLOB 真实 collateral。
+- **internal**：来自 `RiskMetricsRefreshService` 刷新的 **CLOB 权威现金**（不是
+  `bankroll_usd - spend + payout` 账本重算）；
+- **external**：同一 CLOB collateral 的实时 REST 探针。
 
 偏差 ≥ 10 × `reconciliation_tolerance_usd` 判为 Critical 并触发 **L4 System Halted**
 （fail-closed，需运维 `POST /api/system/resume` 确认恢复）。
 
-**Live 上线前建议**：将 `bankroll_usd` 设为接近实际投入策略的 USDC，并充值对齐。
+**Live 上线前建议**：将 `bankroll_usd` 设为 Kelly sizing cap（≤ 实际投入 USDC），并充值对齐。
+
+**Operator 读模型**：`GET /api/system/balance` 的 `available_for_sizing_usd` 与
+`potential_loss_usd` 来自 `RiskEngine::available_bankroll_for_sizing()` — 与 Kelly 同源，
+不再使用已删除的 `available_before_potential_loss_usd` 字段。
 
 ---
 
@@ -105,6 +109,7 @@ external_available = clob_client.collateral_balance()
 | **CLOB collateral** | `ClobClient::collateral_balance()` | Live 权威现金、对账 external |
 | **`risk.bankroll_usd`** | Runtime config | 模拟本金 / Live sizing 上限 |
 | **`risk.reserve_balance_usd`** | Runtime config | 从 Kelly 可用资金中永久扣除的保留额（默认 $100） |
+| **`GET /api/system/balance`** | `SystemBalanceView` | Kelly `available_for_sizing_usd`、integrity counts、exposure cap echo |
 
 Live 下 **equity** = CLOB 现金 + 持仓 mark value（`RiskMetricsRefreshService` 刷新）。
 

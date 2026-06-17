@@ -3,6 +3,7 @@
 use chrono::Utc;
 use oxide_arb_models::{
     domain::{
+        TradeIntegritySnapshot,
         calibration::{BucketKey, CalibrationSnapshot},
         opportunity::{EndgameMeta, Opportunity},
         risk::ProbabilityInput,
@@ -114,6 +115,7 @@ fn with_context(
         metrics,
         factor_context: None,
         settlement_gate: SettlementGateInput::default(),
+        integrity: &TradeIntegritySnapshot::zero(Utc::now()),
         now: Utc::now(),
         sized_intent: None,
     };

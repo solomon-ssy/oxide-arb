@@ -222,7 +222,9 @@ impl From<RuntimeControlError> for WebError {
         match error {
             // 409 — the requested transition is invalid in the current state
             // (e.g. entering Live without credentials / a metrics refresher).
-            RuntimeControlError::Precondition(_) => Self::Conflict(error.to_string()),
+            RuntimeControlError::Precondition(_) | RuntimeControlError::BlockingTrades { .. } => {
+                Self::Conflict(error.to_string())
+            }
             // 503 — the trading loop did not quiesce, or post-commit activation
             // could not establish a safe state. The system stays halted.
             RuntimeControlError::QuiesceTimeout { .. } | RuntimeControlError::Activation(_) => {

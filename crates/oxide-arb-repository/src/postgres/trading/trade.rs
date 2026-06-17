@@ -431,17 +431,86 @@ async fn do_find_needs_reconcile(
         .map(|v| v.into_iter().map(Into::into).collect())
 }
 
+/// Shared predicate: durable rows that block new Live/Paper admission.
+fn blocking_admission_filter() -> Condition {
+    Condition::any()
+        .add(Column::State.eq(TradeState::Intent))
+        .add(Column::State.eq(TradeState::Submitted))
+        .add(Column::State.eq(TradeState::Orphaned))
+        .add(Column::NeedsReconcile.eq(true))
+}
+
+/// Shared predicate: rows that must hold an in-memory reservation after restart.
+fn reservation_obligation_filter() -> Condition {
+    Condition::any()
+        .add(Column::State.eq(TradeState::Intent))
+        .add(Column::State.eq(TradeState::Submitted))
+        .add(Column::State.eq(TradeState::Orphaned))
+        .add(Column::State.eq(TradeState::FillObserved))
+        .add(Column::State.eq(TradeState::FillProcessing))
+        .add(Column::NeedsReconcile.eq(true))
+}
+
 async fn do_count_blocking_trades(db: &impl ConnectionTrait) -> Result<u64, StorageError> {
     Entity::find()
-        .filter(
-            Condition::any()
-                .add(Column::State.eq(TradeState::Submitted))
-                .add(Column::State.eq(TradeState::Orphaned))
-                .add(Column::NeedsReconcile.eq(true)),
-        )
+        .filter(blocking_admission_filter())
         .count(db)
         .await
         .map_err(StorageError::from)
+}
+
+async fn do_find_reservation_obligations(
+    db: &impl ConnectionTrait,
+    limit: u64,
+) -> Result<Vec<TradeInfo>, StorageError> {
+    Entity::find()
+        .filter(reservation_obligation_filter())
+        .order_by_asc(Column::CreatedAt)
+        .order_by_asc(Column::TradeId)
+        .limit(limit)
+        .all(db)
+        .await
+        .map_err(StorageError::from)
+        .map(|rows| rows.into_iter().map(Into::into).collect())
+}
+
+async fn do_count_needs_reconcile(db: &impl ConnectionTrait) -> Result<u64, StorageError> {
+    Entity::find()
+        .filter(Column::NeedsReconcile.eq(true))
+        .filter(Column::ReconcileResolution.is_null())
+        .count(db)
+        .await
+        .map_err(StorageError::from)
+}
+
+async fn do_count_intent_orphans(db: &impl ConnectionTrait) -> Result<u64, StorageError> {
+    Entity::find()
+        .filter(Column::State.eq(TradeState::Intent))
+        .count(db)
+        .await
+        .map_err(StorageError::from)
+}
+
+async fn do_oldest_blocking_age_secs(db: &impl ConnectionTrait) -> Result<u64, StorageError> {
+    #[derive(Debug, FromQueryResult)]
+    struct OldestCreated {
+        oldest: Option<DateTime<Utc>>,
+    }
+
+    let row = Entity::find()
+        .select_only()
+        .column_as(Expr::col(Column::CreatedAt).min(), "oldest")
+        .filter(blocking_admission_filter())
+        .into_model::<OldestCreated>()
+        .one(db)
+        .await
+        .map_err(StorageError::from)?;
+
+    let Some(oldest) = row.and_then(|r| r.oldest) else {
+        return Ok(0);
+    };
+    let age = Utc::now().signed_duration_since(oldest);
+    Ok(u64::try_from(age.num_seconds().max(0)).unwrap_or(u64::MAX))
 }
 
 async fn do_count_competing_pending_reconcile(
@@ -967,6 +1036,25 @@ impl TradeRepository for PgTradeRepository {
         do_count_blocking_trades(&self.db).await
     }
 
+    async fn find_reservation_obligations(
+        &self,
+        limit: u64,
+    ) -> Result<Vec<TradeInfo>, StorageError> {
+        do_find_reservation_obligations(&self.db, limit).await
+    }
+
+    async fn count_needs_reconcile(&self) -> Result<u64, StorageError> {
+        do_count_needs_reconcile(&self.db).await
+    }
+
+    async fn count_intent_orphans(&self) -> Result<u64, StorageError> {
+        do_count_intent_orphans(&self.db).await
+    }
+
+    async fn oldest_blocking_age_secs(&self) -> Result<u64, StorageError> {
+        do_oldest_blocking_age_secs(&self.db).await
+    }
+
     async fn count_competing_pending_reconcile(
         &self,
         market_id: &MarketId,
@@ -1155,6 +1243,25 @@ impl TradeRepository for PgTradeRepositoryTxn<'_> {
 
     async fn count_blocking_trades(&self) -> Result<u64, StorageError> {
         do_count_blocking_trades(self.txn).await
+    }
+
+    async fn find_reservation_obligations(
+        &self,
+        limit: u64,
+    ) -> Result<Vec<TradeInfo>, StorageError> {
+        do_find_reservation_obligations(self.txn, limit).await
+    }
+
+    async fn count_needs_reconcile(&self) -> Result<u64, StorageError> {
+        do_count_needs_reconcile(self.txn).await
+    }
+
+    async fn count_intent_orphans(&self) -> Result<u64, StorageError> {
+        do_count_intent_orphans(self.txn).await
+    }
+
+    async fn oldest_blocking_age_secs(&self) -> Result<u64, StorageError> {
+        do_oldest_blocking_age_secs(self.txn).await
     }
 
     async fn count_competing_pending_reconcile(

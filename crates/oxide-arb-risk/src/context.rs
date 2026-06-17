@@ -12,7 +12,8 @@ use crate::{
 use chrono::{DateTime, Utc};
 use oxide_arb_models::{
     domain::{
-        control_factor::FactorDecisionContext, opportunity::Opportunity, risk::ProbabilityInput,
+        TradeIntegritySnapshot, control_factor::FactorDecisionContext, opportunity::Opportunity,
+        risk::ProbabilityInput,
     },
     enums::common::ExecutionMode,
     runtime_config::RedeemRoutingPolicy,
@@ -36,6 +37,7 @@ pub struct SizedPreTradeInput<'a, M> {
     pub metrics: &'a M,
     pub factor_context: Option<&'a FactorDecisionContext>,
     pub settlement_gate: SettlementGateInput<'a>,
+    pub integrity: &'a TradeIntegritySnapshot,
     pub mode: ReportMode,
 }
 
@@ -52,6 +54,8 @@ pub struct PreTradeContext<'a> {
     pub factor_context: Option<&'a FactorDecisionContext>,
     /// Live-only redeem routing gate (registry `neg_risk` + policy resolve).
     pub settlement_gate: SettlementGateInput<'a>,
+    /// Durable-trade integrity snapshot (ArcSwap-published, zero I/O).
+    pub integrity: &'a TradeIntegritySnapshot,
     pub now: DateTime<Utc>,
     /// Post-Kelly sized intent; when set, exposure gates use this instead of
     /// detection-time `opportunity.total_cost`.
@@ -117,6 +121,13 @@ pub struct SettlementGateInput<'a> {
     pub mode: ExecutionMode,
     pub market_neg_risk: Option<bool>,
     pub redeem_policy: Option<&'a RedeemRoutingPolicy>,
+}
+
+/// Settlement plus durable-trade integrity inputs for pre-trade admission.
+#[derive(Debug, Clone, Copy)]
+pub struct AdmissionGateInput<'a> {
+    pub settlement: SettlementGateInput<'a>,
+    pub integrity: &'a TradeIntegritySnapshot,
 }
 
 impl<'a> PreTradeContext<'a> {
@@ -336,6 +347,7 @@ mod tests {
             metrics: RiskMetricsSnapshot::zeroed(),
             factor_context: None,
             settlement_gate: SettlementGateInput::default(),
+            integrity: &TradeIntegritySnapshot::zero(Utc::now()),
             now: Utc::now(),
             sized_intent: None,
         };

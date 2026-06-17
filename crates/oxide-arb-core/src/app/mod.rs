@@ -16,7 +16,7 @@ use crate::{
     bridge::{
         CoreOpportunityPipeline, execution_mode::ExecutionModeHandle, market_data::CoreMarketData,
         metrics_scrape::CoreMetricsScrape, potential_loss_store::CorePotentialLossStore,
-        risk_metrics::CoreRiskMetrics, trading_gate::TradingGate,
+        risk_metrics::CoreRiskMetrics,
     },
     control::{
         ControlFactorRegistry,
@@ -37,13 +37,12 @@ use crate::{
         capital_manager::CapitalManager,
         execution_pipeline::ExecutionPipeline,
         fsm::ExecutionFSM,
-        heartbeat::HeartbeatTask,
+        heartbeat::{HeartbeatTask, HeartbeatTaskConfig},
         market_inflight::MarketInFlightRegistry,
         runner::ExecutionRunner,
         settlement::{
             dedup::SettlementDedup, service::MarketSettlementService, task::MarketSettlementTask,
         },
-        trade_safety_gate::TradeSafetyGate,
     },
     exposure::in_memory::InMemoryExposureReservation,
     infra::{
@@ -76,6 +75,7 @@ use crate::{
         system_status_broadcaster::SystemStatusBroadcaster,
         system_status_publisher::SystemStatusPublisher,
     },
+    trade_integrity::TradeIntegrityStore,
 };
 use chrono::Utc;
 use flume::Receiver;
@@ -197,7 +197,6 @@ pub struct RiskBundle {
 pub struct ExecutionBundle {
     pub pipeline: Arc<ExecutionPipeline>,
     pub market_inflight: Arc<MarketInFlightRegistry>,
-    pub trading_gate: TradingGate,
     pub capital_manager: Arc<CapitalManager>,
     /// Shared with the pipeline; rung after each `*_observed` write to wake the relay.
     pub relay_notify: Arc<Notify>,
@@ -209,13 +208,9 @@ pub struct ExecutionBundle {
 pub struct ExecutionBundleDeps {
     pub pipeline: Arc<ExecutionPipeline>,
     pub market_inflight: Arc<MarketInFlightRegistry>,
-    pub risk_engine: Arc<RiskEngine>,
-    pub fsm: Arc<ExecutionFSM>,
     pub capital_manager: Arc<CapitalManager>,
     pub relay_notify: Arc<Notify>,
     pub reconcile_notify: Arc<Notify>,
-    pub clob: Option<Arc<ClobClient>>,
-    pub mode: ExecutionModeHandle,
 }
 
 impl ExecutionBundle {
@@ -224,7 +219,6 @@ impl ExecutionBundle {
         Self {
             pipeline: deps.pipeline,
             market_inflight: deps.market_inflight,
-            trading_gate: TradingGate::new(deps.risk_engine, deps.fsm, deps.clob, deps.mode),
             capital_manager: deps.capital_manager,
             relay_notify: deps.relay_notify,
             reconcile_notify: deps.reconcile_notify,
@@ -296,6 +290,8 @@ pub struct AppContext {
     pub control: ControlFactorBundle,
     pub settlement: SettlementBundle,
     pub runtime: RuntimeChannels,
+    /// Durable-trade integrity store (reservation rehydrate + blocking snapshot).
+    pub trade_integrity: Arc<TradeIntegrityStore>,
     pub shutdown: CancellationToken,
     pub pending_tasks: PendingTaskQueue,
     /// Process boot instant shared by uptime reporting and status broadcasts.
@@ -486,22 +482,26 @@ impl AppContext {
         let clob_client = Arc::clone(clob_client);
         let risk_engine = Arc::clone(&self.risk.engine);
         let fsm = Arc::clone(&self.trading.fsm);
-        let trade_repo = Arc::clone(&self.infra.trade_repo);
-        let trade_repo: Arc<dyn TradeRepository> = trade_repo;
-        let trade_safety_gate = Arc::new(TradeSafetyGate::new(trade_repo));
+        let integrity = Arc::clone(&self.trade_integrity);
+        let factor_store = Arc::clone(&self.control.store);
+        let alerts = Arc::clone(&self.infra.alerts);
+        let metrics = Arc::clone(&self.infra.metrics);
         let mode = self.execution_mode.clone();
 
         self.pending_tasks
             .push(TaskId::ExecutionHeartbeat, move |shutdown| async move {
-                let task = HeartbeatTask::new(
+                let task = HeartbeatTask::new(HeartbeatTaskConfig {
                     clob_client,
                     risk_engine,
                     fsm,
-                    trade_safety_gate,
+                    integrity,
+                    factor_store,
+                    alerts,
+                    metrics,
                     interval_secs,
                     shutdown,
                     mode,
-                );
+                });
                 if let Err(error) = task.run().await {
                     tracing::error!(%error, "execution heartbeat exited with error");
                 }
@@ -774,6 +774,8 @@ impl AppContext {
                     .expect("execution bundle")
                     .capital_manager,
             ),
+            trade_integrity: Arc::clone(&self.trade_integrity),
+            factor_store: Arc::clone(&self.control.store),
             alerts: Arc::clone(&self.infra.alerts),
             status_publisher: None,
         }

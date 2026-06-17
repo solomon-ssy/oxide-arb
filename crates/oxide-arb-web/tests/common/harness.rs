@@ -33,9 +33,9 @@ use oxide_arb_error::auth::AuthError;
 use oxide_arb_models::{
     config::{CacheConfig, DeployConfig, JwtConfig, RedisConfig},
     domain::{
-        BlacklistInfo, CatalogState, CoreEventPublisher, HealthReport, MarketDataPort,
-        ModeTransitionReport, ReplayEnqueueRequest, ReplayEnqueueResult, ReplayPort,
-        RiskEngineState, RuntimeConfigPort, RuntimeControlError, RuntimeControlPort,
+        BlacklistInfo, CatalogState, CoreEventPublisher, ExposureBindingLimit, HealthReport,
+        MarketDataPort, ModeTransitionReport, ReplayEnqueueRequest, ReplayEnqueueResult,
+        ReplayPort, RiskEngineState, RuntimeConfigPort, RuntimeControlError, RuntimeControlPort,
         SystemBalanceSource, SystemBalanceView, SystemStatus, market::book::BookSnapshot,
     },
     enums::{
@@ -486,7 +486,10 @@ impl RuntimeControlPort for MockRuntimeControl {
         Ok(())
     }
 
-    async fn ack_execution_emergency(&self, _operator_ack: &str) -> Result<(), RuntimeControlError> {
+    async fn ack_execution_emergency(
+        &self,
+        _operator_ack: &str,
+    ) -> Result<(), RuntimeControlError> {
         Ok(())
     }
 
@@ -551,6 +554,9 @@ impl RuntimeControlPort for MockRuntimeControl {
                 markets: 1,
                 synced_at: Utc::now(),
             },
+            control_factor_publication_id: None,
+            control_factor_snapshot_expired: false,
+            control_factor_live_warn: false,
             checked_at: Utc::now(),
         }
     }
@@ -566,7 +572,14 @@ impl RuntimeControlPort for MockRuntimeControl {
             reserve_balance_usd: Usd::new(rust_decimal_macros::dec!(100)),
             reserved_usd: Usd::ZERO,
             total_exposure_usd: Usd::ZERO,
-            available_before_potential_loss_usd: Usd::new(rust_decimal_macros::dec!(900)),
+            available_for_sizing_usd: Usd::new(rust_decimal_macros::dec!(900)),
+            potential_loss_usd: Usd::ZERO,
+            blocking_trade_count: 0,
+            needs_reconcile_count: 0,
+            max_total_exposure_usd: Usd::new(rust_decimal_macros::dec!(5000)),
+            max_single_market_exposure_usd: Usd::new(rust_decimal_macros::dec!(500)),
+            max_total_exposure_pct: rust_decimal_macros::dec!(50),
+            binding_exposure_limit: ExposureBindingLimit::BankrollCap,
             open_position_count: 0,
             active_reservation_count: 0,
             metrics_age_secs: 0,

@@ -264,7 +264,7 @@ CapitalManager — reserve capital before dispatch
          │
          ▼
 ExecutionPipeline
-  • TradeSafetyGate / VenueGuard / ExecutionFSM emergency check
+  • BlockingTradesCheck / VenueGuard / ExecutionFSM emergency check
   • CLOB order submission (Live) or simulation (DryRun/Paper)
   • durable trade row: create → submitted → observed
          │
@@ -308,7 +308,7 @@ SettlementService (when market resolves)
   • CTF payout / redeem routing
 ```
 
-Reconciliation can engage `ExecutionFSM` emergency halt when evidence is insufficient. `TradeSafetyGate` blocks auto-recovery while blocking durable trade rows exist.
+Reconciliation can engage `ExecutionFSM` emergency halt when evidence is insufficient. `BlockingTradesCheck` and `TradeIntegrityStore` block admission/resume while blocking durable trade rows exist.
 
 ### 6.5 Admin / Control Plane (Off Hot Path)
 

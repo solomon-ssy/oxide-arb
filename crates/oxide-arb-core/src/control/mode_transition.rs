@@ -33,12 +33,12 @@ use crate::{
         execution_mode::ExecutionModeHandle, risk_metrics::CoreRiskMetrics,
         trading_gate::resume_trading,
     },
+    control::factor_snapshot::FactorSnapshotStore,
     control::status::{build_system_balance, build_system_status},
     execution::{
         capital_manager::CapitalManager,
         fsm::{EmergencyAckError, EmergencyClass, ExecutionFSM},
         settlement::redeem_preflight::ensure_live_pending_redeem_portfolio,
-        trade_safety_gate::TradeSafetyGate,
         venue_guard::halt_trading_and_cancel_open_orders,
     },
     exposure::in_memory::InMemoryExposureReservation,
@@ -52,6 +52,7 @@ use crate::{
         risk_metrics::{RiskMetricsRefreshService, RiskMetricsSource, RiskMetricsState},
         system_status_publisher::SharedSystemStatusPublisher,
     },
+    trade_integrity::TradeIntegrityStore,
 };
 use async_trait::async_trait;
 use oxide_arb_api::{clob::ClobClient, ctf::client::CtfRedeemClient};
@@ -110,6 +111,8 @@ pub struct CoreRuntimeControlDeps {
     pub system_runtime_state: Arc<dyn SystemRuntimeStateRepository>,
     pub trade_repo: Arc<dyn TradeRepository>,
     pub capital_manager: Arc<CapitalManager>,
+    pub trade_integrity: Arc<TradeIntegrityStore>,
+    pub factor_store: Arc<FactorSnapshotStore>,
     pub alerts: Arc<AlertDispatcher>,
     /// Optional publisher for immediate WebSocket status pushes after control ops.
     pub status_publisher: Option<SharedSystemStatusPublisher>,
@@ -136,6 +139,8 @@ pub struct CoreRuntimeControl {
     system_runtime_state: Arc<dyn SystemRuntimeStateRepository>,
     trade_repo: Arc<dyn TradeRepository>,
     capital_manager: Arc<CapitalManager>,
+    trade_integrity: Arc<TradeIntegrityStore>,
+    factor_store: Arc<FactorSnapshotStore>,
     alerts: Arc<AlertDispatcher>,
     close_unresolvable: CloseUnresolvableService,
     status_publisher: Option<SharedSystemStatusPublisher>,
@@ -172,6 +177,8 @@ impl CoreRuntimeControl {
             system_runtime_state: deps.system_runtime_state,
             trade_repo: deps.trade_repo,
             capital_manager: deps.capital_manager,
+            trade_integrity: deps.trade_integrity,
+            factor_store: deps.factor_store,
             alerts: deps.alerts,
             close_unresolvable,
             status_publisher: deps.status_publisher,
@@ -200,6 +207,8 @@ impl CoreRuntimeControl {
             system_runtime_state: Arc::clone(&self.system_runtime_state),
             trade_repo: Arc::clone(&self.trade_repo),
             capital_manager: Arc::clone(&self.capital_manager),
+            trade_integrity: Arc::clone(&self.trade_integrity),
+            factor_store: Arc::clone(&self.factor_store),
             alerts: Arc::clone(&self.alerts),
             status_publisher: self.status_publisher.clone(),
         }
@@ -352,9 +361,13 @@ impl RuntimeControlPort for CoreRuntimeControl {
         self.activate(target).await?;
 
         // 5. Resume only after a fully successful activation.
-        resume_trading(&self.risk_engine, &self.fsm, operator_ack)
-            .await
-            .map_err(|error| RuntimeControlError::Engine(error.to_string()))?;
+        resume_trading(
+            &self.risk_engine,
+            &self.fsm,
+            &self.trade_integrity,
+            operator_ack,
+        )
+        .await?;
 
         tracing::warn!(%from, %target, "execution mode transition committed");
         self.publish_status_now();
@@ -375,20 +388,22 @@ impl RuntimeControlPort for CoreRuntimeControl {
     }
 
     async fn resume(&self, operator_ack: &str) -> Result<(), RuntimeControlError> {
-        resume_trading(&self.risk_engine, &self.fsm, operator_ack)
-            .await
-            .map_err(|error| RuntimeControlError::Engine(error.to_string()))?;
+        resume_trading(
+            &self.risk_engine,
+            &self.fsm,
+            &self.trade_integrity,
+            operator_ack,
+        )
+        .await?;
         self.publish_status_now();
         Ok(())
     }
 
     async fn ack_execution_emergency(&self, operator_ack: &str) -> Result<(), RuntimeControlError> {
-        let gate = TradeSafetyGate::new(Arc::clone(&self.trade_repo));
         let class = self
             .fsm
-            .ack_operator_emergency(&gate, &self.risk_engine)
-            .await
-            .map_err(map_emergency_ack_error)?;
+            .ack_operator_emergency(&self.trade_integrity, &self.risk_engine)
+            .await?;
         tracing::info!(?class, operator_ack, "execution emergency acknowledged");
         self.publish_status_now();
         Ok(())
@@ -480,9 +495,12 @@ impl RuntimeControlPort for CoreRuntimeControl {
     }
 }
 
-fn map_emergency_ack_error(error: EmergencyAckError) -> RuntimeControlError {
-    match error {
-        EmergencyAckError::Gate(gate) => RuntimeControlError::Engine(gate.to_string()),
-        other => RuntimeControlError::Precondition(other.to_string()),
+impl From<EmergencyAckError> for RuntimeControlError {
+    fn from(error: EmergencyAckError) -> Self {
+        match error {
+            EmergencyAckError::Gate(gate) => Self::Engine(gate.to_string()),
+            EmergencyAckError::BlockingTrades { count } => Self::BlockingTrades { count },
+            other => Self::Precondition(other.to_string()),
+        }
     }
 }

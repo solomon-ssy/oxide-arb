@@ -15,7 +15,7 @@ use crate::{
     circuit_breaker::CircuitBreaker,
     clock::Clock,
     context::{
-        CircuitBreakerGate, ManualHaltGate, PreTradeContext, SettlementGateInput, SizedIntent,
+        AdmissionGateInput, CircuitBreakerGate, ManualHaltGate, PreTradeContext, SizedIntent,
         SizedPreTradeInput,
     },
     pipeline::{StaticRiskPipeline, build_default_pipeline},
@@ -36,10 +36,9 @@ use arc_swap::ArcSwap;
 use chrono::{DateTime, Utc};
 use num_traits::ToPrimitive;
 use oxide_arb_error::OxideResult;
-use oxide_arb_models::types::MarketId as ModelsMarketId;
 use oxide_arb_models::{
     domain::{
-        BlacklistInfo, CoreEvent, CoreEventPublisher, RiskEngineStateView,
+        BlacklistInfo, CoreEvent, CoreEventPublisher, ExposureBindingLimit, RiskEngineStateView,
         blacklist::UpsertBlacklistEntry,
         control_factor::FactorDecisionContext,
         opportunity::Opportunity,
@@ -154,7 +153,7 @@ where
         probability: &ProbabilityInput,
         metrics: &M,
         factor_context: Option<&FactorDecisionContext>,
-        settlement_gate: SettlementGateInput<'_>,
+        admission: AdmissionGateInput<'_>,
         mode: ReportMode,
     ) -> RiskDecision {
         let eval_start = Instant::now();
@@ -173,7 +172,8 @@ where
             snap: &snap,
             metrics: RiskMetricsSnapshot::zeroed(),
             factor_context,
-            settlement_gate,
+            settlement_gate: admission.settlement,
+            integrity: admission.integrity,
             now,
             sized_intent: None,
         };
@@ -295,6 +295,7 @@ where
             metrics: metrics_snap,
             factor_context: input.factor_context,
             settlement_gate: input.settlement_gate,
+            integrity: input.integrity,
             now,
             sized_intent: Some(SizedIntent {
                 bet_usd: input.approved_size,
@@ -343,6 +344,71 @@ where
             input.mode,
         );
         decision
+    }
+
+    /// Kelly sizing bankroll using live metrics and current risk config.
+    #[must_use]
+    pub fn available_bankroll_for_sizing<M: RiskMetrics>(&self, metrics: &M) -> Usd {
+        let config = &self.params.load().config;
+        let snap = self.risk_snapshot.load();
+        available_bankroll(
+            metrics.equity(),
+            Usd::new(config.reserve_balance_usd),
+            metrics.reserved_usd(),
+            snap.total_potential_loss,
+            Usd::new(config.bankroll_usd),
+        )
+    }
+
+    /// Open potential-loss ledger total (Kelly bankroll deduction).
+    #[must_use]
+    pub fn total_potential_loss_usd(&self) -> Usd {
+        self.risk_snapshot.load().total_potential_loss
+    }
+
+    /// Exposure cap that would bind next sizing for `intent_cost` on `market_id`.
+    #[must_use]
+    pub fn binding_exposure_limit<M: RiskMetrics>(
+        &self,
+        metrics: &M,
+        intent_cost: Usd,
+        market_id: &MarketId,
+    ) -> ExposureBindingLimit {
+        let config = &self.params.load().config;
+        let reservation_config = config.exposure_reservation_config();
+        let total_exposure = metrics.total_exposure();
+        let market_exposure = metrics.market_exposure(market_id);
+        let cash = metrics.cash_balance();
+        let reserved = metrics.reserved_usd();
+
+        let total_headroom = Usd::new(config.max_total_exposure_usd) - total_exposure - intent_cost;
+        let market_headroom =
+            Usd::new(config.max_single_market_exposure_usd) - market_exposure - intent_cost;
+        let pct_cap_usd = if cash > Usd::ZERO {
+            Usd::new(cash.inner() * config.max_total_exposure_pct / Decimal::from(100))
+        } else {
+            Usd::ZERO
+        };
+        let pct_headroom = pct_cap_usd - total_exposure - intent_cost;
+        let reservation_cap = Usd::new(
+            Decimal::from(reservation_config.max_total_exposure_cents) / Decimal::from(100),
+        );
+        let reservation_headroom = reservation_cap - reserved;
+        let bankroll_headroom = self.available_bankroll_for_sizing(metrics) - intent_cost;
+
+        [
+            (ExposureBindingLimit::AbsoluteTotal, total_headroom),
+            (ExposureBindingLimit::AbsoluteMarket, market_headroom),
+            (ExposureBindingLimit::PercentOfCash, pct_headroom),
+            (
+                ExposureBindingLimit::ReservationBackend,
+                reservation_headroom,
+            ),
+            (ExposureBindingLimit::BankrollCap, bankroll_headroom),
+        ]
+        .into_iter()
+        .min_by(|left, right| left.1.inner().cmp(&right.1.inner()))
+        .map_or(ExposureBindingLimit::BankrollCap, |(limit, _)| limit)
     }
 
     // ── Post-trade (async mutation path) ────────────────────────────────
@@ -1212,7 +1278,7 @@ where
                 .unwrap_or(i32::MAX),
             weekly_window_start: weekly.week_start(),
             consecutive_misses: ToPrimitive::to_i32(
-                &metrics.consecutive_market_misses(&ModelsMarketId::new("_global_")),
+                &metrics.consecutive_market_misses(&MarketId::new("_global_")),
             )
             .unwrap_or(0),
             cooldown_multiplier: ToPrimitive::to_i32(&cb.l2_trip_count()).unwrap_or(i32::MAX),

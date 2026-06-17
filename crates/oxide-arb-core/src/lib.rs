@@ -18,3 +18,4 @@ pub mod pipeline;
 pub mod post_trade;
 pub mod runtime_config;
 pub mod service;
+pub mod trade_integrity;

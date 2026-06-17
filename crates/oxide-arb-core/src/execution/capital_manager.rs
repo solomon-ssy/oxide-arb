@@ -51,12 +51,24 @@ impl CapitalManager {
         })
     }
 
-    pub fn confirm_sync(&self, handle: &ReservationHandle) -> Result<(), ReservationError> {
-        self.backend.confirm_sync(&handle.id)
-    }
-
     pub fn release_sync(&self, handle: &ReservationHandle) -> Result<(), ReservationError> {
         self.backend.release_sync(&handle.id)
+    }
+
+    /// Restore a durable reservation row into the in-memory backend after restart.
+    pub fn restore_sync(
+        &self,
+        handle: &ReservationHandle,
+        reconcile_pinned: bool,
+        expires_at: std::time::Instant,
+    ) -> Result<(), ReservationError> {
+        self.backend.restore_sync(
+            handle.id.clone(),
+            handle.market_id.clone(),
+            handle.amount,
+            reconcile_pinned,
+            expires_at,
+        )
     }
 
     pub fn pin_for_reconciliation_sync(
@@ -83,7 +95,7 @@ impl CapitalManager {
     }
 
     pub fn confirm(&self, handle: &ReservationHandle) -> Result<(), ReservationError> {
-        self.confirm_sync(handle)
+        self.release_sync(handle)
     }
 
     pub fn release(&self, handle: &ReservationHandle) -> Result<(), ReservationError> {

@@ -736,6 +736,22 @@ impl PositionRepository for MockPositionRepository {
     }
 }
 
+fn mock_trade_blocks_admission(trade: &TradeInfo) -> bool {
+    trade.state == TradeState::Intent
+        || trade.state == TradeState::Submitted
+        || trade.state == TradeState::Orphaned
+        || trade.needs_reconcile
+}
+
+fn mock_trade_has_reservation_obligation(trade: &TradeInfo) -> bool {
+    trade.state == TradeState::Intent
+        || trade.state == TradeState::Submitted
+        || trade.state == TradeState::Orphaned
+        || trade.state == TradeState::FillObserved
+        || trade.state == TradeState::FillProcessing
+        || trade.needs_reconcile
+}
+
 #[async_trait]
 impl TradeRepository for MockTradeRepository {
     async fn page(&self, query: TradePageQuery) -> Result<Paginated<TradeInfo>, StorageError> {
@@ -1030,13 +1046,64 @@ impl TradeRepository for MockTradeRepository {
             .lock()
             .unwrap()
             .values()
-            .filter(|trade| {
-                trade.state == TradeState::Submitted
-                    || trade.state == TradeState::Orphaned
-                    || trade.needs_reconcile
-            })
+            .filter(|trade| mock_trade_blocks_admission(trade))
             .count();
         Ok(count as u64)
+    }
+
+    async fn find_reservation_obligations(
+        &self,
+        limit: u64,
+    ) -> Result<Vec<TradeInfo>, StorageError> {
+        let mut obligations: Vec<TradeInfo> = self
+            .trades
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|trade| mock_trade_has_reservation_obligation(trade))
+            .cloned()
+            .collect();
+        obligations.sort_by_key(|trade| trade.created_at);
+        obligations.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
+        Ok(obligations)
+    }
+
+    async fn count_needs_reconcile(&self) -> Result<u64, StorageError> {
+        let count = self
+            .trades
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|trade| trade.needs_reconcile && trade.reconcile_resolution.is_none())
+            .count();
+        Ok(count as u64)
+    }
+
+    async fn count_intent_orphans(&self) -> Result<u64, StorageError> {
+        let count = self
+            .trades
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|trade| trade.state == TradeState::Intent)
+            .count();
+        Ok(count as u64)
+    }
+
+    async fn oldest_blocking_age_secs(&self) -> Result<u64, StorageError> {
+        let oldest = self
+            .trades
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|trade| mock_trade_blocks_admission(trade))
+            .map(|trade| trade.created_at)
+            .min();
+        let Some(oldest) = oldest else {
+            return Ok(0);
+        };
+        let age = Utc::now().signed_duration_since(oldest);
+        Ok(u64::try_from(age.num_seconds().max(0)).unwrap_or(u64::MAX))
     }
 
     async fn count_competing_pending_reconcile(

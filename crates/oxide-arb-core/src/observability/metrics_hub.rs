@@ -173,6 +173,7 @@ pub struct MetricsHub {
     pub control_factor_shadow_decisions: IntCounter,
     pub control_factor_shadow_dropped: IntCounter,
     pub control_factor_fail_closed_events: IntCounter,
+    pub control_factor_publication_active: IntGauge,
 
     // Shutdown
     pub shutdown_stage_progress_remaining: IntGaugeVec,
@@ -281,6 +282,7 @@ struct ControlFactorMetrics {
     shadow_decisions: IntCounter,
     shadow_dropped: IntCounter,
     fail_closed_events: IntCounter,
+    publication_active: IntGauge,
 }
 
 fn register_control_factor_metrics(registry: &Registry) -> ControlFactorMetrics {
@@ -334,6 +336,11 @@ fn register_control_factor_metrics(registry: &Registry) -> ControlFactorMetrics 
             registry,
             "oxide_arb_control_factor_fail_closed_events_total",
             "Fail-closed events from expired/unloadable safety factors"
+        ),
+        publication_active: register_gauge_int!(
+            registry,
+            "oxide_arb_control_factor_publication_active",
+            "Whether a published control-factor snapshot is active in Live (1=yes, 0=no)"
         ),
     }
 }
@@ -936,6 +943,7 @@ impl MetricsHub {
             control_factor_shadow_decisions: control_factor.shadow_decisions,
             control_factor_shadow_dropped: control_factor.shadow_dropped,
             control_factor_fail_closed_events: control_factor.fail_closed_events,
+            control_factor_publication_active: control_factor.publication_active,
             shutdown_stage_progress_remaining: system.shutdown_stage_progress_remaining,
             shutdown_stage_timeouts: system.shutdown_stage_timeouts,
         }

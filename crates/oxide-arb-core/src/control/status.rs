@@ -6,7 +6,7 @@ use chrono::Utc;
 use oxide_arb_models::{
     domain::{CatalogStatusPort, SystemBalanceSource, SystemBalanceView, SystemStatus},
     enums::common::ExecutionMode,
-    types::Usd,
+    types::{MarketId, Usd},
 };
 use oxide_arb_risk::traits::RiskMetrics;
 use std::{
@@ -22,8 +22,15 @@ pub const SYSTEM_STATUS_BROADCAST_INTERVAL: Duration = Duration::from_secs(5);
 pub fn build_system_status(deps: &CoreRuntimeControlDeps, started_at: Instant) -> SystemStatus {
     let metrics = deps.metrics.as_ref();
     let snapshot = deps.risk_engine.snapshot(metrics);
+    let published = deps.factor_store.published();
+    let mode = deps.execution_mode.current();
+    let snapshot_expired = published
+        .publication_id
+        .as_ref()
+        .is_some_and(|_| published.is_expired_at(Utc::now()));
+    let live_warn = mode == ExecutionMode::Live && published.publication_id.is_none();
     SystemStatus {
-        execution_mode: deps.execution_mode.current(),
+        execution_mode: mode,
         breaker_state: snapshot.breaker_state,
         uptime_secs: started_at.elapsed().as_secs(),
         active_markets: u32::try_from(deps.market_registry.active_markets().len())
@@ -33,6 +40,9 @@ pub fn build_system_status(deps: &CoreRuntimeControlDeps, started_at: Instant) -
         total_exposure: snapshot.total_exposure,
         daily_pnl: snapshot.daily_pnl,
         catalog: deps.catalog.catalog_state(),
+        control_factor_publication_id: published.publication_id.as_ref().map(ToString::to_string),
+        control_factor_snapshot_expired: snapshot_expired,
+        control_factor_live_warn: live_warn,
         checked_at: Utc::now(),
     }
 }
@@ -42,27 +52,32 @@ pub fn build_system_balance(deps: &CoreRuntimeControlDeps) -> SystemBalanceView 
     let metrics = deps.metrics.as_ref();
     let mode = deps.execution_mode.current();
     let runtime = deps.runtime_config.current();
+    let integrity = deps.trade_integrity.load();
     let bankroll_cap = Usd::new(runtime.risk.bankroll_usd);
     let reserve_balance = Usd::new(runtime.risk.reserve_balance_usd);
-    let cash_balance = metrics.cash_balance();
-    let position_mark_value = metrics.position_mark_value();
-    let equity = metrics.equity();
-    let reserved = metrics.reserved_usd();
-    let available_dynamic = (equity - reserve_balance - reserved).max(Usd::ZERO);
-    let available_before_potential_loss =
-        Usd::new(bankroll_cap.inner().min(available_dynamic.inner())).max(Usd::ZERO);
-
+    let portfolio_market = MarketId::new("0x0");
     SystemBalanceView {
         execution_mode: mode,
         source: balance_source(mode, metrics.is_authoritative()),
-        cash_balance_usd: cash_balance,
-        position_mark_value_usd: position_mark_value,
-        equity_usd: equity,
+        cash_balance_usd: metrics.cash_balance(),
+        position_mark_value_usd: metrics.position_mark_value(),
+        equity_usd: metrics.equity(),
         bankroll_cap_usd: bankroll_cap,
         reserve_balance_usd: reserve_balance,
-        reserved_usd: reserved,
+        reserved_usd: metrics.reserved_usd(),
         total_exposure_usd: metrics.total_exposure(),
-        available_before_potential_loss_usd: available_before_potential_loss,
+        available_for_sizing_usd: deps.risk_engine.available_bankroll_for_sizing(metrics),
+        potential_loss_usd: deps.risk_engine.total_potential_loss_usd(),
+        blocking_trade_count: integrity.blocking_count,
+        needs_reconcile_count: integrity.needs_reconcile_count,
+        max_total_exposure_usd: Usd::new(runtime.risk.max_total_exposure_usd),
+        max_single_market_exposure_usd: Usd::new(runtime.risk.max_single_market_exposure_usd),
+        max_total_exposure_pct: runtime.risk.max_total_exposure_pct,
+        binding_exposure_limit: deps.risk_engine.binding_exposure_limit(
+            metrics,
+            Usd::ZERO,
+            &portfolio_market,
+        ),
         open_position_count: u32::try_from(metrics.open_position_count()).unwrap_or(u32::MAX),
         active_reservation_count: u32::try_from(metrics.active_reservation_count())
             .unwrap_or(u32::MAX),

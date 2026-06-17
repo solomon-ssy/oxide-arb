@@ -177,6 +177,8 @@ preflight
 
 ### P0-1 Live 定期对账口径与预交易余额模型不一致
 
+> **RESOLVED（2026-06）：** Live 定期 reconciliation baseline 已改为 CLOB `cash_balance()`（`periodic_services.rs`）；`bankroll_usd` 仅作 sizing cap。详见 `docs/operations/bankroll-and-risk-metrics.md` §2.4。
+
 #### 现象
 
 预交易路径中，Live cash 使用：
@@ -283,6 +285,8 @@ Submitted
 ---
 
 ### P0-3 成交后到 position 落库前存在 exposure 空窗
+
+> **RESOLVED（2026-06）：** Fill 后 reservation 改为 **keep-on-fill** 直至 post-trade 创建 position 并 `release_sync`；`confirm_sync` 已删除。
 
 #### 现象
 
@@ -693,6 +697,23 @@ canary 期间：
 - 连续监控 24-72h。
 - 等至少一个完整 settlement/redeem 周期。
 - 不允许自动放大资金。
+
+---
+
+## 9.1 Live Safety Remediation 追踪（2026-06）
+
+| 项 | 状态 | 说明 |
+| --- | --- | --- |
+| P0-1 Live reconciliation baseline | **RESOLVED** | CLOB `cash_balance()`；见 `bankroll-and-risk-metrics.md` §2.4 |
+| P0-3 Post-fill exposure 空窗 | **RESOLVED** | keep-on-fill；`confirm_sync` 已删除 |
+| Trade Integrity Core | **DONE** | `TradeIntegrityStore`、boot rehydrate、`BlockingTradesCheck`、统一 resume |
+| `GET /api/system/balance` | **DONE** | `available_for_sizing_usd`、`binding_exposure_limit`、integrity counts |
+| Control factor Live warn-only | **DONE** | 无 publication → Warning；不 hard block |
+| Manual 充提 SOP | **DONE** | `docs/operations/live-trading-sop.md` |
+| P0-2 FOK timeout unknown | **OPEN** | 仍待 UnknownObserved / reconciliation 闭环 |
+| P0-4 CI snapshot | **OPEN** | workspace snapshot 测试 |
+| Reconcile backlog 告警 | **DEFERRED** | 本轮范围外 |
+| Treasury API | **DEFERRED** | 本轮范围外 |
 
 ---
 

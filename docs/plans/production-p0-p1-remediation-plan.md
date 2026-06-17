@@ -1,5 +1,7 @@
 # oxide-arb P0/P1 生产修复实施计划
 
+> **SUPERSEDED（2026-06）：** 实盘安全收窄版已合并至 Live Safety Remediation 计划（Trade Integrity Core、Exposure 读模型、Control Factor warn-only、文档对齐）。下文 P0 细节仅作历史参考；实施请以当前代码与 `docs/operations/live-trading-sop.md` 为准。
+
 > 目标：关闭实盘前必须修复的资金、订单、敞口、感知、测试闭环问题。  
 > 原则：不做向前兼容包袱；删除错误语义，合并重复机制，保留单一清晰真相。
 

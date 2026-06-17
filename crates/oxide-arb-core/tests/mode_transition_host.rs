@@ -4,13 +4,17 @@ use common::disconnected_metrics_refresh;
 use oxide_arb_api::ws::ClobWsManager;
 use oxide_arb_core::{
     bridge::{execution_mode::ExecutionModeHandle, risk_metrics::CoreRiskMetrics},
-    control::mode_transition::{CoreRuntimeControl, CoreRuntimeControlDeps},
+    control::{
+        factor_snapshot::FactorSnapshotStore,
+        mode_transition::{CoreRuntimeControl, CoreRuntimeControlDeps},
+    },
     execution::{capital_manager::CapitalManager, fsm::ExecutionFSM},
     exposure::in_memory::InMemoryExposureReservation,
     observability::{alert_dispatcher::AlertDispatcher, metrics_hub::MetricsHub},
     pipeline::market_registry::MarketRegistry,
     runtime_config::RuntimeConfigStore,
     service::{catalog_readiness::CatalogReadiness, risk_metrics::RiskMetricsState},
+    trade_integrity::TradeIntegrityStore,
 };
 use oxide_arb_error::storage::StorageError;
 use oxide_arb_models::{
@@ -20,7 +24,7 @@ use oxide_arb_models::{
     runtime_config::{NotificationConfig, RuntimeConfig},
     types::{MarketId, Usd},
 };
-use oxide_arb_repository::traits::SystemRuntimeStateRepository;
+use oxide_arb_repository::traits::{SystemRuntimeStateRepository, TradeRepository};
 use oxide_arb_risk::builder::RiskEngineBuilder;
 use oxide_arb_test_support::{
     mocks::{MockPositionRepository, MockTradeRepository},
@@ -110,6 +114,14 @@ fn runtime_control(
         &RuntimeConfig::default().risk.exposure_reservation_config(),
     ));
     let system_runtime_state = Arc::new(MockSystemRuntimeState::new());
+    let factor_store = Arc::new(FactorSnapshotStore::new(chrono::Utc::now()));
+    let trade_integrity = Arc::new(TradeIntegrityStore::new(
+        Arc::new(MockTradeRepository::default()) as Arc<dyn TradeRepository>,
+        Arc::clone(&exposure),
+        Arc::clone(&fsm),
+        Arc::clone(&runtime_config),
+        Arc::clone(&alerts),
+    ));
     let control = CoreRuntimeControl::new(
         CoreRuntimeControlDeps {
             execution_mode: execution_mode.clone(),
@@ -135,6 +147,8 @@ fn runtime_control(
             system_runtime_state: system_runtime_state.clone(),
             trade_repo: Arc::new(MockTradeRepository::default()),
             capital_manager,
+            trade_integrity,
+            factor_store,
             alerts,
             status_publisher: None,
         },

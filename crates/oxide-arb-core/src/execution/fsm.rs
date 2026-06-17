@@ -1,11 +1,11 @@
 //! Global execution kill switch with emergency classification.
 
 use crate::{
-    execution::trade_safety_gate::TradeSafetyGate,
     observability::{
         alert_dispatcher::{Alert, AlertDispatcher},
         metrics_hub::MetricsHub,
     },
+    trade_integrity::TradeIntegrityStore,
 };
 use chrono::Utc;
 use oxide_arb_error::storage::StorageError;
@@ -49,8 +49,8 @@ pub enum EmergencyAckError {
     NotInEmergency,
     #[error("emergency class does not require operator ack — use resume or wait for auto-recover")]
     AutoRecoverable,
-    #[error("blocking trades remain — resolve reconciliation first")]
-    BlockingTrades,
+    #[error("blocking trades remain — resolve reconciliation first ({count} row(s))")]
+    BlockingTrades { count: u32 },
     #[error("risk engine still blocking new trades")]
     RiskBlocking,
     #[error("trade safety gate check failed: {0}")]
@@ -160,21 +160,18 @@ impl ExecutionFSM {
 
     /// Clear emergency halt when the risk engine permits trading and no
     /// blocking trades remain (guarded auto-recover).
-    pub async fn try_auto_recover(&self, gate: &TradeSafetyGate, risk_engine: &RiskEngine) -> bool {
+    pub fn try_auto_recover(
+        &self,
+        integrity: &TradeIntegrityStore,
+        risk_engine: &RiskEngine,
+    ) -> bool {
         if !self.is_emergency() {
             return false;
         }
         if !self.emergency_class().allows_auto_recover() {
             return false;
         }
-        let blocking = match gate.has_blocking_trades().await {
-            Ok(blocking) => blocking,
-            Err(error) => {
-                tracing::warn!(%error, "trade safety gate check failed — skip auto-recover");
-                return false;
-            }
-        };
-        if blocking {
+        if integrity.load().blocking_count > 0 {
             return false;
         }
         if risk_engine.allows_trading() {
@@ -189,7 +186,7 @@ impl ExecutionFSM {
     /// Clear a reservation or persistence emergency after operator confirmation.
     pub async fn ack_operator_emergency(
         &self,
-        gate: &TradeSafetyGate,
+        integrity: &TradeIntegrityStore,
         risk_engine: &RiskEngine,
     ) -> Result<EmergencyClass, EmergencyAckError> {
         if !self.is_emergency() {
@@ -199,8 +196,15 @@ impl ExecutionFSM {
         if class.allows_auto_recover() {
             return Err(EmergencyAckError::AutoRecoverable);
         }
-        if gate.has_blocking_trades().await? {
-            return Err(EmergencyAckError::BlockingTrades);
+        integrity
+            .refresh_async()
+            .await
+            .map_err(EmergencyAckError::Gate)?;
+        let blocking_count = integrity.load().blocking_count;
+        if blocking_count > 0 {
+            return Err(EmergencyAckError::BlockingTrades {
+                count: blocking_count,
+            });
         }
         if !risk_engine.allows_trading() {
             return Err(EmergencyAckError::RiskBlocking);

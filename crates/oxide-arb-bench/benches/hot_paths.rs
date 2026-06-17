@@ -55,13 +55,14 @@ use oxide_arb_core::{
         catalog_readiness::CatalogReadiness,
         risk_metrics::{ApiHealthTracker, RiskMetricsState},
     },
+    trade_integrity::TradeIntegrityStore,
 };
 use oxide_arb_models::runtime_config::NotificationConfig;
 use oxide_arb_models::{
     clickhouse::OpportunityAuditRow,
     config::{PolymarketConfig, WebSocketConfig},
     domain::{
-        CoreEventPublisher, ProbabilityInput,
+        CoreEventPublisher, ProbabilityInput, TradeIntegritySnapshot,
         book::{self, BookLevel, BookSnapshot, EndgameBookPair},
         calibration::{BucketKey, CalibrationSnapshot},
         control_factor::ControlFactorProvider,
@@ -86,9 +87,14 @@ use oxide_arb_models::{
         Shares, TokenId, Usd,
     },
 };
+use oxide_arb_repository::traits::TradeRepository;
 use oxide_arb_risk::{
-    builder::RiskEngineBuilder, clock::utc_clock, context::SettlementGateInput, engine::RiskEngine,
-    traits::RiskMetrics, types::ReportMode,
+    builder::RiskEngineBuilder,
+    clock::utc_clock,
+    context::{AdmissionGateInput, SettlementGateInput},
+    engine::RiskEngine,
+    traits::RiskMetrics,
+    types::ReportMode,
 };
 use oxide_arb_test_support::mocks::MockTradeRepository;
 use polymarket_client_sdk_v2::{
@@ -414,6 +420,7 @@ fn bench_pre_trade_pass(c: &mut Criterion) {
         expected_failure_cost_pct: dec!(0.001),
     };
     let metrics = BenchMetrics;
+    let integrity = TradeIntegritySnapshot::zero(Utc::now());
 
     c.bench_function("pre_trade_pass", |b| {
         b.iter(|| {
@@ -422,7 +429,10 @@ fn bench_pre_trade_pass(c: &mut Criterion) {
                 black_box(&probability),
                 black_box(&metrics),
                 None,
-                SettlementGateInput::default(),
+                AdmissionGateInput {
+                    settlement: SettlementGateInput::default(),
+                    integrity: black_box(&integrity),
+                },
                 ReportMode::ShortCircuit,
             )
         });
@@ -474,6 +484,7 @@ fn bench_pre_trade_fail_short(c: &mut Criterion) {
         expected_failure_cost_pct: dec!(0.001),
     };
     let metrics = BenchMetrics;
+    let integrity = TradeIntegritySnapshot::zero(Utc::now());
 
     c.bench_function("pre_trade_fail_short", |b| {
         b.iter(|| {
@@ -482,7 +493,10 @@ fn bench_pre_trade_fail_short(c: &mut Criterion) {
                 black_box(&probability),
                 black_box(&metrics),
                 None,
-                SettlementGateInput::default(),
+                AdmissionGateInput {
+                    settlement: SettlementGateInput::default(),
+                    integrity: black_box(&integrity),
+                },
                 ReportMode::ShortCircuit,
             )
         });
@@ -944,7 +958,7 @@ fn execution_bench_setup() -> (
     SETUP.get_or_init(|| {
         let metrics = Arc::new(MetricsHub::new());
         let alerts = Arc::new(AlertDispatcher::new(&NotificationConfig::default()));
-        let fsm = Arc::new(ExecutionFSM::new(Arc::clone(&metrics), alerts));
+        let fsm = Arc::new(ExecutionFSM::new(Arc::clone(&metrics), Arc::clone(&alerts)));
         let book_store = Arc::new(BookStore::new(Arc::clone(&metrics)));
         let reservation_config = RiskConfig::default().exposure_reservation_config();
         let exposure = Arc::new(InMemoryExposureReservation::new(reservation_config.clone()));
@@ -955,6 +969,13 @@ fn execution_bench_setup() -> (
         let scored = Arc::new(execution_bench_scored());
         seed_execution_books(&book_store, &scored);
         let trade_repo = Arc::new(MockTradeRepository::default());
+        let trade_integrity = Arc::new(TradeIntegrityStore::new(
+            Arc::clone(&trade_repo) as Arc<dyn TradeRepository>,
+            Arc::clone(&exposure),
+            Arc::clone(&fsm),
+            Arc::new(RuntimeConfigStore::new(RuntimeConfig::default())),
+            alerts,
+        ));
         let audit_shutdown = CancellationToken::new();
         let (audit_writer_inner, _audit_worker) = AsyncWriter::new(
             AsyncWriterConfig::new("bench-audit")
@@ -1017,6 +1038,7 @@ fn execution_bench_setup() -> (
             shadow_writer: None,
             ctf_redeem: None,
             holder_address: String::new(),
+            trade_integrity,
         });
 
         (pipeline, scored, trade_repo, fsm)

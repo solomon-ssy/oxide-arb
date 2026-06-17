@@ -310,7 +310,44 @@ impl RiskCheck for ControlFactorSnapshotExpiredCheck {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// #8 RedeemRouteResolvable (Live settlement)
+// #8 BlockingTrades (durable integrity)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Hard-rejects Live/Paper entries while unresolved durable trades exist.
+pub struct BlockingTradesCheck;
+
+impl RiskCheck for BlockingTradesCheck {
+    fn requires_metrics(&self) -> bool {
+        false
+    }
+
+    fn id(&self) -> RiskCheckId {
+        RiskCheckId::BlockingTrades
+    }
+
+    fn kind(&self) -> RiskCheckKind {
+        RiskCheckKind::Gate
+    }
+
+    fn evaluate(&self, ctx: &PreTradeContext<'_>) -> RiskCheckResult {
+        let mode = ctx.settlement_gate.mode;
+        if !ctx.integrity.blocks_admission(mode) {
+            return RiskCheckResult::passed(RiskCheckId::BlockingTrades);
+        }
+        RiskCheckResult::failed(
+            RiskCheckId::BlockingTrades,
+            format!(
+                "{} durable trade(s) block new entries — reconcile via GET /api/trades/reconciliation",
+                ctx.integrity.blocking_count
+            ),
+            "0 blocking".into(),
+            ctx.integrity.blocking_count.to_string(),
+        )
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// #9 RedeemRouteResolvable (Live settlement)
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// Fail-closed Live gate: registry must expose `neg_risk` and policy must resolve.

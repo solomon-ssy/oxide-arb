@@ -9,7 +9,8 @@ use chrono::{DateTime, Utc};
 use oxide_arb_error::{OxideError, OxideResult};
 use oxide_arb_models::{
     domain::{
-        BlacklistInfo, CoreEvent, CoreEventPublisher, PositionInfo, UpsertBlacklistEntry,
+        BlacklistInfo, CoreEvent, CoreEventPublisher, PositionInfo, TradeIntegritySnapshot,
+        UpsertBlacklistEntry,
         calibration::{BucketKey, CalibrationSnapshot},
         opportunity::{EndgameMeta, Opportunity},
         risk::{
@@ -30,7 +31,7 @@ use oxide_arb_models::{
 use oxide_arb_risk::{
     builder::RiskEngineBuilder,
     clock::utc_clock,
-    context::SettlementGateInput,
+    context::{AdmissionGateInput, SettlementGateInput},
     engine::RiskEngine,
     traits::{FillClaim, RiskFillCommitGuard, RiskMetrics, RiskPersistence},
     types::{ExecutionRiskEvent, ReportMode},
@@ -355,7 +356,10 @@ async fn healthy_engine_allows_trade() {
         &prob,
         &metrics,
         None,
-        SettlementGateInput::default(),
+        AdmissionGateInput {
+            settlement: SettlementGateInput::default(),
+            integrity: &TradeIntegritySnapshot::zero(Utc::now()),
+        },
         ReportMode::ShortCircuit,
     );
 
@@ -382,7 +386,10 @@ async fn halted_engine_denies_trade() {
         &prob,
         &metrics,
         None,
-        SettlementGateInput::default(),
+        AdmissionGateInput {
+            settlement: SettlementGateInput::default(),
+            integrity: &TradeIntegritySnapshot::zero(Utc::now()),
+        },
         ReportMode::ShortCircuit,
     );
 
@@ -419,7 +426,10 @@ async fn tripped_breaker_denies_trade() {
         &prob,
         &metrics,
         None,
-        SettlementGateInput::default(),
+        AdmissionGateInput {
+            settlement: SettlementGateInput::default(),
+            integrity: &TradeIntegritySnapshot::zero(Utc::now()),
+        },
         ReportMode::ShortCircuit,
     );
 
@@ -450,7 +460,10 @@ async fn low_balance_denies_trade() {
         &prob,
         &metrics,
         None,
-        SettlementGateInput::default(),
+        AdmissionGateInput {
+            settlement: SettlementGateInput::default(),
+            integrity: &TradeIntegritySnapshot::zero(Utc::now()),
+        },
         ReportMode::ShortCircuit,
     );
 
@@ -472,7 +485,10 @@ async fn full_report_runs_all_checks() {
         &prob,
         &metrics,
         None,
-        SettlementGateInput::default(),
+        AdmissionGateInput {
+            settlement: SettlementGateInput::default(),
+            integrity: &TradeIntegritySnapshot::zero(Utc::now()),
+        },
         ReportMode::FullReport,
     );
 
@@ -609,7 +625,10 @@ async fn active_potential_loss_reduces_available_bankroll_to_zero() {
         &prob,
         &metrics,
         None,
-        SettlementGateInput::default(),
+        AdmissionGateInput {
+            settlement: SettlementGateInput::default(),
+            integrity: &TradeIntegritySnapshot::zero(Utc::now()),
+        },
         ReportMode::ShortCircuit,
     );
 
@@ -676,7 +695,10 @@ async fn tick_drives_breaker_transitions() {
         &prob,
         &metrics,
         None,
-        SettlementGateInput::default(),
+        AdmissionGateInput {
+            settlement: SettlementGateInput::default(),
+            integrity: &TradeIntegritySnapshot::zero(Utc::now()),
+        },
         ReportMode::ShortCircuit,
     );
     assert!(!decision.allowed, "should deny while breaker is open");
@@ -693,7 +715,10 @@ async fn tick_drives_breaker_transitions() {
         &prob,
         &metrics_normal,
         None,
-        SettlementGateInput::default(),
+        AdmissionGateInput {
+            settlement: SettlementGateInput::default(),
+            integrity: &TradeIntegritySnapshot::zero(Utc::now()),
+        },
         ReportMode::ShortCircuit,
     );
     assert!(
@@ -726,7 +751,10 @@ async fn acknowledge_and_resume_clears_halt() {
         &prob,
         &metrics,
         None,
-        SettlementGateInput::default(),
+        AdmissionGateInput {
+            settlement: SettlementGateInput::default(),
+            integrity: &TradeIntegritySnapshot::zero(Utc::now()),
+        },
         ReportMode::ShortCircuit,
     );
     assert!(

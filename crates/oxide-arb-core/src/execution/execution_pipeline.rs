@@ -23,6 +23,7 @@ use crate::{
     observability::{execution_audit::ExecutionAuditWriter, metrics_hub::MetricsHub},
     runtime_config::RuntimeConfigStore,
     service::risk_metrics::RiskMetricsState,
+    trade_integrity::TradeIntegrityStore,
 };
 use chrono::Utc;
 use oxide_arb_algorithm::scorer::ScoredOpportunity;
@@ -51,7 +52,7 @@ use oxide_arb_models::{
 };
 use oxide_arb_repository::{postgres::PgTradeRepository, traits::TradeRepository};
 use oxide_arb_risk::{
-    context::{SettlementGateInput, SizedPreTradeInput},
+    context::{AdmissionGateInput, SettlementGateInput, SizedPreTradeInput},
     engine::RiskEngine,
     types::{ReportMode, RiskDecision},
 };
@@ -90,6 +91,8 @@ pub struct ExecutionPipelineDeps<R: TradeRepository + Send + Sync + 'static = Pg
     pub ctf_redeem: Option<Arc<CtfRedeemClient>>,
     /// Holder address paired with [`Self::ctf_redeem`].
     pub holder_address: String,
+    /// Durable-trade integrity snapshot publisher (`ArcSwap`, zero I/O on hot path).
+    pub trade_integrity: Arc<TradeIntegrityStore>,
 }
 
 pub struct ExecutionPipeline<R: TradeRepository + Send + Sync + 'static = PgTradeRepository> {
@@ -114,6 +117,7 @@ pub struct ExecutionPipeline<R: TradeRepository + Send + Sync + 'static = PgTrad
     shadow_writer: Option<ShadowDecisionWriter>,
     ctf_redeem: Option<Arc<CtfRedeemClient>>,
     holder_address: String,
+    trade_integrity: Arc<TradeIntegrityStore>,
 }
 
 struct PreparedDispatch {
@@ -147,6 +151,7 @@ impl<R: TradeRepository + Send + Sync + 'static> ExecutionPipeline<R> {
             shadow_writer: deps.shadow_writer,
             ctf_redeem: deps.ctf_redeem,
             holder_address: deps.holder_address,
+            trade_integrity: deps.trade_integrity,
         }
     }
 
@@ -390,12 +395,16 @@ impl<R: TradeRepository + Send + Sync + 'static> ExecutionPipeline<R> {
             market_neg_risk: self.plan_builder.market_registry().neg_risk(&opp.market_id),
             redeem_policy: Some(&self.runtime_config.load().settlement.redeem),
         };
+        let integrity = self.trade_integrity.load();
         let risk_decision = self.risk_engine.pre_trade_check_core(
             opp,
             &probability,
             self.risk_metrics.as_ref(),
             Some(&factor_context),
-            settlement_gate,
+            AdmissionGateInput {
+                settlement: settlement_gate,
+                integrity: &integrity,
+            },
             ReportMode::ShortCircuit,
         );
 
@@ -465,6 +474,7 @@ impl<R: TradeRepository + Send + Sync + 'static> ExecutionPipeline<R> {
             market_neg_risk: self.plan_builder.market_registry().neg_risk(&opp.market_id),
             redeem_policy: Some(&self.runtime_config.load().settlement.redeem),
         };
+        let integrity = self.trade_integrity.load();
         let sized_decision = self.risk_engine.pre_trade_check_sized(&SizedPreTradeInput {
             opportunity: opp,
             approved_size,
@@ -472,6 +482,7 @@ impl<R: TradeRepository + Send + Sync + 'static> ExecutionPipeline<R> {
             metrics: self.risk_metrics.as_ref(),
             factor_context: Some(factor_context),
             settlement_gate,
+            integrity: &integrity,
             mode: ReportMode::ShortCircuit,
         });
         if !sized_decision.allowed {
@@ -776,6 +787,13 @@ impl<R: TradeRepository + Send + Sync + 'static> ExecutionPipeline<R> {
                     );
                     self.metrics_state.mark_stale();
                     self.reconcile_notify.notify_one();
+                    if let Err(error) = self.trade_integrity.refresh_async().await {
+                        tracing::warn!(
+                            %error,
+                            trade_id = %prepared.trade_id,
+                            "integrity snapshot refresh failed after orphan mark"
+                        );
+                    }
                 }
                 Ok(false) => {
                     tracing::warn!(
@@ -834,6 +852,13 @@ impl<R: TradeRepository + Send + Sync + 'static> ExecutionPipeline<R> {
         // Near-instant happy-path processing; the relay's periodic poll is the
         // crash-recovery safety net if this wake is missed.
         self.relay_notify.notify_one();
+        if let Err(error) = self.trade_integrity.refresh_async().await {
+            tracing::warn!(
+                %error,
+                trade_id = %prepared.trade_id,
+                "integrity snapshot refresh failed after mark observed"
+            );
+        }
     }
 
     pub fn execution_mode(&self) -> ExecutionMode {

@@ -21,6 +21,7 @@ use crate::{
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use oxide_arb_error::{OxideError, trading::TradingError};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashSet, sync::Arc};
 use thiserror::Error;
@@ -49,6 +50,27 @@ pub enum RuntimeControlError {
     /// An underlying engine operation failed.
     #[error("control operation failed: {0}")]
     Engine(String),
+    /// Durable trades still block admission/resume.
+    #[error("{count} durable trade(s) block trading until reconciled")]
+    BlockingTrades { count: u32 },
+}
+
+impl From<TradingError> for RuntimeControlError {
+    fn from(error: TradingError) -> Self {
+        match error {
+            TradingError::BlockingTradesUnresolved { count } => Self::BlockingTrades { count },
+            other => Self::Engine(other.to_string()),
+        }
+    }
+}
+
+impl From<OxideError> for RuntimeControlError {
+    fn from(error: OxideError) -> Self {
+        match error {
+            OxideError::Trading(trading) => trading.into(),
+            other => Self::Engine(other.to_string()),
+        }
+    }
 }
 
 /// Money-critical runtime control surface exposed to the web control plane.

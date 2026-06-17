@@ -616,17 +616,49 @@ miss_rate = misses / (fills + misses)
 
 ## 8. 观测面速查（在哪看、拿什么结果）
 
-### 8.1 HTTP API（Base: `http://localhost:8080/api`，需 Bearer token）
+### 8.1 HTTP API（Base: `http://localhost:8088/api`，需 Bearer token；默认 `config/oxide-arb.toml` 的 `listen_port`）
 
 #### 系统与模式
 
 | 端点 | 用途 |
 |------|------|
-| `GET /system/status` | 当前 mode、组件健康、metrics source |
+| `GET /system/status` | 当前 mode、组件健康、metrics source、control-factor 告警字段 |
 | `GET /system/health` | 健康探针 |
 | `GET /system/deploy-config` | Deploy 配置（脱敏） |
+| `GET /system/balance` | **权威资金读模型**（见下表） |
 | `POST /system/mode` | 切换 dry_run / paper / live（治理） |
-| `POST /system/halt` / `/resume` | 紧急 halt |
+| `POST /system/halt` / `/resume` | 紧急 halt / 恢复（见 §8.1 Trade integrity） |
+
+**`GET /system/balance` 关键字段（`SystemBalanceView`）：**
+
+| 字段 | 含义 |
+|------|------|
+| `cash_balance_usd` | Live：CLOB collateral；Paper/DryRun：模拟快照 |
+| `equity_usd` | cash + position mark value |
+| `available_for_sizing_usd` | Kelly/sizer 同源可用资金（已扣 `potential_loss_usd`） |
+| `potential_loss_usd` | 未结算敞口潜在亏损扣减 |
+| `reserved_usd` / `active_reservation_count` | in-memory reservation 后端 |
+| `blocking_trade_count` / `needs_reconcile_count` | `TradeIntegritySnapshot`（与 admission gate 同源） |
+| `max_total_exposure_usd` / `max_single_market_exposure_usd` / `max_total_exposure_pct` | runtime risk cap echo |
+| `binding_exposure_limit` | 当前 sizing 绑定的 exposure 约束（与 sizer 同源） |
+
+**Trade integrity（boot / resume / admission）：**
+
+```text
+启动 → TradeIntegrityStore::boot_rehydrate（PG obligations → restore_sync → refresh）
+  → blocking_count > 0 → ExecutionFSM planned halt（所有模式）
+  → Live/Paper 新单：BlockingTradesCheck hard deny
+  → DryRun：pass + warn 日志
+```
+
+| 场景 | 操作 |
+|------|------|
+| Boot 后 FSM halt，`blocking_trade_count > 0` | 查 `GET /trades?state=...`；处理 Submitted/Orphaned/needs_reconcile；Intent+reservation 见 Intent orphan SOP |
+| `POST /api/system/resume` 返回 409 `BLOCKING_TRADES_UNRESOLVED` | 先 reconcile/关闭 blocking rows → `integrity.refresh`（heartbeat 自动）→ 再 resume |
+| Intent orphan（crash 后 Intent 行仍有 `reservation_id`） | Emergency 告警 `integrity.intent_orphan`；operator 关闭 trade 或走 reconciliation；禁止 resume 直至 `blocking_count=0` |
+| Live 无 control-factor publication | **Warning** 告警 + gauge=0；**不** block 新单（warn-only） |
+
+Manual 充提与 halt→reconcile→withdraw 顺序见 [`live-trading-sop.md`](live-trading-sop.md)。
 
 #### Runtime 配置
 
@@ -715,6 +747,7 @@ GET /api/ws?token=<access_token>
 | `oxide_arb_risk_exposure_usd` | Exposure |
 | `oxide_arb_pipeline_ws_events_received_total` | WS 事件 |
 | `oxide_arb_control_factor_active_count` | 已加载因子数 |
+| `oxide_arb_control_factor_publication_active` | Live 时 published snapshot 是否有效（0/1） |
 | `oxide_arb_control_factor_shadow_decisions_total` | Shadow 决策计数 |
 
 ### 8.3 PostgreSQL 快查
@@ -1032,6 +1065,7 @@ export RUST_LOG=info,oxide_arb_core=debug
 | 执行模式分发 | `crates/oxide-arb-core/src/execution/dispatcher.rs` |
 | Live FOK | `crates/oxide-arb-core/src/execution/fok_strategy.rs` |
 | 模式切换 | `crates/oxide-arb-core/src/control/mode_transition.rs` |
+| Trade integrity | `crates/oxide-arb-core/src/trade_integrity/` |
 | 物料化调度 | `crates/oxide-arb-core/src/app/mod.rs` |
 | 因子 refresher | `crates/oxide-arb-core/src/control/factor_refresher.rs` |
 | Quality gates | `crates/oxide-arb-control/src/gates/mod.rs` |

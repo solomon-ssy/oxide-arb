@@ -217,24 +217,104 @@ impl InMemoryExposureReservation {
         Ok(())
     }
 
-    /// Synchronous confirm — releases reservation tracking after a fill.
-    pub fn confirm_sync(&self, id: &ReservationId) -> Result<(), ReservationError> {
+    /// Rehydrate a durable reservation after process restart using the persisted id.
+    pub fn restore_sync(
+        &self,
+        id: ReservationId,
+        market_id: MarketId,
+        amount: Usd,
+        reconcile_pinned: bool,
+        expires_at: Instant,
+    ) -> Result<(), ReservationError> {
+        if self.reservations.contains_key(&id) {
+            return Ok(());
+        }
+
+        let amount_cents = Self::usd_to_cents(amount)?;
+        let config = self.config.load();
+
+        loop {
+            let current = self.total_reserved_cents.load(Ordering::Acquire);
+            let Some(new_total) = current.checked_add(amount_cents) else {
+                return Err(ReservationError::Backend(
+                    "reservation total overflow on restore".into(),
+                ));
+            };
+            if new_total > config.max_total_exposure_cents {
+                return Err(ReservationError::ExceedsLimit {
+                    current_cents: current,
+                    requested_cents: amount_cents,
+                    max_cents: config.max_total_exposure_cents,
+                });
+            }
+            if self
+                .total_reserved_cents
+                .compare_exchange_weak(current, new_total, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                break;
+            }
+        }
+
+        let market_counter = self
+            .per_market_cents
+            .entry(market_id.clone())
+            .or_insert_with(|| AtomicU64::new(0));
+        let market_current = market_counter.fetch_add(amount_cents, Ordering::AcqRel);
+        let Some(market_new_total) = market_current.checked_add(amount_cents) else {
+            market_counter.fetch_sub(amount_cents, Ordering::AcqRel);
+            drop(market_counter);
+            self.total_reserved_cents
+                .fetch_sub(amount_cents, Ordering::AcqRel);
+            return Err(ReservationError::Backend(
+                "reservation market total overflow on restore".into(),
+            ));
+        };
+        if market_new_total > config.max_per_market_cents {
+            market_counter.fetch_sub(amount_cents, Ordering::AcqRel);
+            drop(market_counter);
+            self.total_reserved_cents
+                .fetch_sub(amount_cents, Ordering::AcqRel);
+            return Err(ReservationError::ExceedsLimit {
+                current_cents: market_current,
+                requested_cents: amount_cents,
+                max_cents: config.max_per_market_cents,
+            });
+        }
+        drop(market_counter);
+
+        self.reservations.insert(
+            id,
+            ReservationEntry {
+                market_id,
+                amount_cents,
+                expires_at,
+                reconcile_pinned,
+            },
+        );
+        Ok(())
+    }
+
+    fn remove_reservation_entry(
+        &self,
+        id: &ReservationId,
+    ) -> Result<ReservationEntry, ReservationError> {
         let (_, entry) = self
             .reservations
             .remove(id)
             .ok_or_else(|| ReservationError::NotFound { id: id.to_string() })?;
-
         self.total_reserved_cents
             .fetch_sub(entry.amount_cents, Ordering::AcqRel);
         if let Some(market_total) = self.per_market_cents.get(&entry.market_id) {
             market_total.fetch_sub(entry.amount_cents, Ordering::AcqRel);
         }
-        Ok(())
+        Ok(entry)
     }
 
-    /// Synchronous release — same as confirm for in-memory backend.
+    /// Synchronous release — drops reservation tracking.
     pub fn release_sync(&self, id: &ReservationId) -> Result<(), ReservationError> {
-        self.confirm_sync(id)
+        let _ = self.remove_reservation_entry(id)?;
+        Ok(())
     }
 
     /// Adjust a pinned reservation to a new amount (partial-fill reconciliation).
@@ -287,7 +367,7 @@ impl ExposureReservationBackend for InMemoryExposureReservation {
     }
 
     async fn confirm(&self, id: &ReservationId) -> Result<(), ReservationError> {
-        self.confirm_sync(id)
+        self.release_sync(id)
     }
 
     async fn release(&self, id: &ReservationId) -> Result<(), ReservationError> {
