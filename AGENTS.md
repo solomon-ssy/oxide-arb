@@ -42,7 +42,7 @@ This document is the **primary onboarding and enforcement guide** for AI coding 
 3. Runs detection through Scanner / Funnel → Algorithm (walker, endgame detector, calibration, scoring).
 4. Produces **`ScoredOpportunity`** candidates.
 5. Evaluates each candidate through a **static risk pipeline** (no I/O on the hot path).
-6. Executes approved trades via **`ExecutionPipeline`** on the CLOB (FOK/GTD), with capital reservations and safety gates.
+6. Executes approved trades via **`ExecutionPipeline`** on the CLOB (**FOK-only**), with capital reservations and safety gates.
 7. Persists durable trade state and drives **post-trade** processing (fill accounting, positions, reconciliation, settlement/redeem).
 8. Exposes an **admin/control plane** (HTTP + WebSocket + RBAC) for operations, analytics, and governed mutations.
 
@@ -62,7 +62,7 @@ Full ADR: [`docs/plans/ADR-001-single-strategy-single-platform.md`](docs/plans/A
 |------|----------|
 | Strategy | Endgame convergence detection only |
 | Platform | Polymarket CLOB + Gamma + CTF on Polygon |
-| Execution | FOK + GTD layered execution; directional positions (no hedging) |
+| Execution | **FOK-only** execution; directional positions (no hedging) |
 | Scoring | Resolution calibration, Quarter-Kelly sizing, fill probability |
 | Oracle | 2-of-3 voting oracle for resolution (kept, but not for multi-platform abstraction) |
 
@@ -257,7 +257,7 @@ Registered checks include (non-exhaustive): manual halt, circuit breaker, blackl
 Approved ScoredOpportunity
          │
          ▼
-PlanBuilder — order plan (size, price, FOK/GTD layers)
+PlanBuilder — order plan (size, price, FOK)
          │
          ▼
 CapitalManager — reserve capital before dispatch

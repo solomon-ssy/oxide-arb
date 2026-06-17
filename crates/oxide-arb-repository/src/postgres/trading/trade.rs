@@ -412,6 +412,7 @@ async fn do_find_stale_submitted(
 async fn do_find_needs_reconcile(
     db: &impl ConnectionTrait,
     limit: u64,
+    offset: u64,
 ) -> Result<Vec<TradeInfo>, StorageError> {
     let now = Utc::now();
     Entity::find()
@@ -424,6 +425,7 @@ async fn do_find_needs_reconcile(
         )
         .order_by_asc(Column::CreatedAt)
         .order_by_asc(Column::TradeId)
+        .offset(offset)
         .limit(limit)
         .all(db)
         .await
@@ -1028,8 +1030,12 @@ impl TradeRepository for PgTradeRepository {
         do_find_stale_submitted(&self.db, older_than, limit).await
     }
 
-    async fn find_needs_reconcile(&self, limit: u64) -> Result<Vec<TradeInfo>, StorageError> {
-        do_find_needs_reconcile(&self.db, limit).await
+    async fn find_needs_reconcile(
+        &self,
+        limit: u64,
+        offset: u64,
+    ) -> Result<Vec<TradeInfo>, StorageError> {
+        do_find_needs_reconcile(&self.db, limit, offset).await
     }
 
     async fn count_blocking_trades(&self) -> Result<u64, StorageError> {
@@ -1237,8 +1243,12 @@ impl TradeRepository for PgTradeRepositoryTxn<'_> {
         do_find_stale_submitted(self.txn, older_than, limit).await
     }
 
-    async fn find_needs_reconcile(&self, limit: u64) -> Result<Vec<TradeInfo>, StorageError> {
-        do_find_needs_reconcile(self.txn, limit).await
+    async fn find_needs_reconcile(
+        &self,
+        limit: u64,
+        offset: u64,
+    ) -> Result<Vec<TradeInfo>, StorageError> {
+        do_find_needs_reconcile(self.txn, limit, offset).await
     }
 
     async fn count_blocking_trades(&self) -> Result<u64, StorageError> {

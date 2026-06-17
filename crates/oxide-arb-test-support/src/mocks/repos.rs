@@ -1023,7 +1023,11 @@ impl TradeRepository for MockTradeRepository {
         Ok(stale)
     }
 
-    async fn find_needs_reconcile(&self, limit: u64) -> Result<Vec<TradeInfo>, StorageError> {
+    async fn find_needs_reconcile(
+        &self,
+        limit: u64,
+        offset: u64,
+    ) -> Result<Vec<TradeInfo>, StorageError> {
         let now = Utc::now();
         let mut pending: Vec<_> = self
             .trades
@@ -1032,12 +1036,15 @@ impl TradeRepository for MockTradeRepository {
             .values()
             .filter(|trade| {
                 trade.needs_reconcile
+                    && trade.reconcile_resolution.is_none()
                     && trade.reconcile_defer_until.is_none_or(|until| until <= now)
             })
             .cloned()
             .collect();
         pending.sort_by_key(|trade| trade.created_at);
-        pending.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
+        let offset = usize::try_from(offset).unwrap_or(usize::MAX);
+        let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+        pending = pending.into_iter().skip(offset).take(limit).collect();
         Ok(pending)
     }
 

@@ -470,6 +470,8 @@ curl -s -X POST http://localhost:8080/api/auth/login \
 
 ## 6. 三种执行模式详解
 
+> **Live 执行策略（ADR-001）**：Endgame 仅 **FOK-only**，不挂 resting GTD。Miss 即 miss；未知结果进入对账队列（见 [live-production-guide.md](./live-production-guide.md)）。
+
 ### 6.1 对比总表
 
 | 维度 | DryRun | Paper | Live |

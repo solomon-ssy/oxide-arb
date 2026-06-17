@@ -121,7 +121,11 @@ impl ReconciliationWorker {
     }
 
     async fn drain_once(&self) {
-        let trades = match self.trade_repo.find_needs_reconcile(self.batch_size).await {
+        let trades = match self
+            .trade_repo
+            .find_needs_reconcile(self.batch_size, 0)
+            .await
+        {
             Ok(trades) => trades,
             Err(error) => {
                 tracing::warn!(%error, "reconciliation worker scan failed");

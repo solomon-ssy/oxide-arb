@@ -86,63 +86,36 @@ pub trait TradeRepository: Send + Sync {
 
     /// Trades whose venue outcome is unknown and must be reconciled before they
     /// can participate in business-outcome reporting or release pinned exposure.
-    async fn find_needs_reconcile(&self, limit: u64) -> Result<Vec<TradeInfo>, StorageError> {
-        let _ = limit;
-        Err(StorageError::StaleData(
-            "find_needs_reconcile is not implemented for this repository".into(),
-        ))
-    }
+    async fn find_needs_reconcile(
+        &self,
+        limit: u64,
+        offset: u64,
+    ) -> Result<Vec<TradeInfo>, StorageError>;
 
     /// Trades blocking safe resumption: intent, submitted, orphaned, or reconcile-pending.
-    async fn count_blocking_trades(&self) -> Result<u64, StorageError> {
-        Err(StorageError::StaleData(
-            "count_blocking_trades is not implemented for this repository".into(),
-        ))
-    }
+    async fn count_blocking_trades(&self) -> Result<u64, StorageError>;
 
     /// Durable rows that must have an in-memory reservation after process restart.
     async fn find_reservation_obligations(
         &self,
         limit: u64,
-    ) -> Result<Vec<TradeInfo>, StorageError> {
-        let _ = limit;
-        Err(StorageError::StaleData(
-            "find_reservation_obligations is not implemented for this repository".into(),
-        ))
-    }
+    ) -> Result<Vec<TradeInfo>, StorageError>;
 
     /// Active reconciliation queue depth (`needs_reconcile` without resolution).
-    async fn count_needs_reconcile(&self) -> Result<u64, StorageError> {
-        Err(StorageError::StaleData(
-            "count_needs_reconcile is not implemented for this repository".into(),
-        ))
-    }
+    async fn count_needs_reconcile(&self) -> Result<u64, StorageError>;
 
     /// Crash-orphaned intent rows awaiting operator closure.
-    async fn count_intent_orphans(&self) -> Result<u64, StorageError> {
-        Err(StorageError::StaleData(
-            "count_intent_orphans is not implemented for this repository".into(),
-        ))
-    }
+    async fn count_intent_orphans(&self) -> Result<u64, StorageError>;
 
     /// Age in seconds of the oldest blocking admission row.
-    async fn oldest_blocking_age_secs(&self) -> Result<u64, StorageError> {
-        Err(StorageError::StaleData(
-            "oldest_blocking_age_secs is not implemented for this repository".into(),
-        ))
-    }
+    async fn oldest_blocking_age_secs(&self) -> Result<u64, StorageError>;
 
     /// Count other reconcile-pending trades on the same market in the submit window.
     async fn count_competing_pending_reconcile(
         &self,
         market_id: &MarketId,
         submitted_at: Option<DateTime<Utc>>,
-    ) -> Result<u64, StorageError> {
-        let _ = (market_id, submitted_at);
-        Err(StorageError::StaleData(
-            "count_competing_pending_reconcile is not implemented for this repository".into(),
-        ))
-    }
+    ) -> Result<u64, StorageError>;
 
     /// Persist a reconciliation deferral with exponential backoff metadata.
     async fn record_reconcile_defer(
@@ -150,24 +123,14 @@ pub trait TradeRepository: Send + Sync {
         trade_id: &TradeId,
         defer_until: DateTime<Utc>,
         note: &str,
-    ) -> Result<bool, StorageError> {
-        let _ = (trade_id, defer_until, note);
-        Err(StorageError::StaleData(
-            "record_reconcile_defer is not implemented for this repository".into(),
-        ))
-    }
+    ) -> Result<bool, StorageError>;
 
     /// Store the CTF balance snapshot immediately before venue submit (Live).
     async fn set_pre_submit_ctf_balance(
         &self,
         trade_id: &TradeId,
         balance: Shares,
-    ) -> Result<bool, StorageError> {
-        let _ = (trade_id, balance);
-        Err(StorageError::StaleData(
-            "set_pre_submit_ctf_balance is not implemented for this repository".into(),
-        ))
-    }
+    ) -> Result<bool, StorageError>;
 
     /// Operator terminal closure for unresolvable reconciliation trades.
     async fn close_unresolvable_terminal(
@@ -176,12 +139,7 @@ pub trait TradeRepository: Send + Sync {
         note: &str,
         operator: &str,
         closed_at: DateTime<Utc>,
-    ) -> Result<bool, StorageError> {
-        let _ = (trade_id, note, operator, closed_at);
-        Err(StorageError::StaleData(
-            "close_unresolvable_terminal is not implemented for this repository".into(),
-        ))
-    }
+    ) -> Result<bool, StorageError>;
 
     /// Record a terminal reconciliation conclusion that could not safely be
     /// mapped into normal Fill/Miss post-trade processing.
@@ -191,12 +149,7 @@ pub trait TradeRepository: Send + Sync {
         resolution: TradeReconcileResolution,
         note: &str,
         reconciled_at: DateTime<Utc>,
-    ) -> Result<bool, StorageError> {
-        let _ = (trade_id, resolution, note, reconciled_at);
-        Err(StorageError::StaleData(
-            "mark_reconciled is not implemented for this repository".into(),
-        ))
-    }
+    ) -> Result<bool, StorageError>;
 
     async fn find_by_id(&self, trade_id: &TradeId) -> Result<Option<TradeInfo>, StorageError>;
 

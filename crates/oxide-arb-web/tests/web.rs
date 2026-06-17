@@ -44,5 +44,7 @@ mod replay_governance;
 mod risk_governance;
 #[path = "web/runtime_config.rs"]
 mod runtime_config;
+#[path = "web/trade_reconcile_governance.rs"]
+mod trade_reconcile_governance;
 #[path = "web/ws.rs"]
 mod ws;

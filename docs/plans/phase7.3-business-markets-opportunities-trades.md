@@ -114,16 +114,17 @@ shared/components/audit-timeline.vue                   # 时间线通用组件(�
 | 项 | 值 |
 |---|---|
 | 路由 / component | `/trades` / `trades/index` |
-| 菜单码 | `trade:read`(无 mutating 按钮) |
-| grid/drawer | 主 Grid `useVbenVxeGrid`;详情(决策链 + PnL 归因)`useVbenDrawer` 只读;风控决策审计 Tab 二级 Grid |
-| WS | `trade.filled` / `trade.settled`(store 头插 → 顶部「N 条新交易」提示条,点击刷新,**不**自动打断分页浏览) |
-| i18n | `page.trades.*` |
-| types | `TradeView`(含 `opportunity_id`,`packages/types/src/trade.ts`)/ `RiskAuditEventView`(`packages/types/src/risk.ts`,即原 TradeDecisionRow) |
+| 菜单码 | `trade:read` |
+| 按钮码 | `trade:reconcile` → `trade:update`(标记不可解析,治理 mutation) |
+| grid/drawer | 主 Grid `useVbenVxeGrid`;详情(决策链 + PnL 归因)`useVbenDrawer` 只读;风控决策审计 Tab 二级 Grid;**对账队列 Tab 三级 Grid** |
+| WS | `trade.filled` / `trade.settled`(store 头插 → 顶部「N 条新交易」提示条,点击刷新,**不**自动打断分页浏览);对账 Tab 在 `trade.filled` 且 `needs_reconcile` 时刷新 |
+| i18n | `page.trades.*`(含 `tabs.reconciliation`、`reconcile.*`) |
+| types | `TradeView`(含 `needs_reconcile` / `reconcile_resolution` / `error_message`,`packages/types/src/trade.ts`)/ `RiskAuditEventView`(`packages/types/src/risk.ts`,即原 TradeDecisionRow) |
 
 ### 3.2 布局与交互
 
 ```text
-┌ Tabs: [交易列表] [风控决策审计]                                            ┐
+┌ Tabs: [交易列表] [风控决策审计] [对账队列]                                    ┐
 │ 交易列表:                                                                  │
 │   搜索: 时间范围 | market_id | 方向(side) | 结果(outcome) | 状态 | 模式     │
 │   Grid: 时间(CellDateTime) | 市场(CellMarketId) | 方向(CellTag) | 数量      │
@@ -131,6 +132,10 @@ shared/components/audit-timeline.vue                   # 时间线通用组件(�
 │         | 操作(CellOperation: 详情)                                        │
 │ 风控决策审计:                                                              │
 │   搜索: 时间范围;Grid: 时间 | 市场 | 决策 | 拒绝原因 | 关联机会            │
+│ 对账队列:                                                                  │
+│   Tab badge = `needs_reconcile_count`(来自 `systemStore.balance`)          │
+│   Grid: 时间 | 市场 | 模式 | 状态 | 结果 | 成本 | 错误信息 | 待对账 | 操作   │
+│   操作: 详情(TradeDetailDrawer) | 标记不可解析(useGovernedAction)           │
 └ TradeDetailDrawer:                                                         ┘
    ① 概要(全字段) ② 决策链时间线(audit-timeline:检测→风控→定容→下单→成交→结算)
    ③ PnL 归因(毛利/费用/净 edge,CellUsd 格式化)
@@ -139,6 +144,7 @@ shared/components/audit-timeline.vue                   # 时间线通用组件(�
 - 决策链数据:`getTradeById` 概要 + 关联 `getOpportunityAudit`(经 trade 的 `opportunity_id`)拼装;PnL 归因 = `cost_usd / fee_usd / detected_profit_usd / net_profit_usd`。
 - 决策审计行的 `market_id` / `rejection_reason` 为持久化时提升的可查询列(`risk_audit_event` 表),历史行(若有)显示空。
 - WS 新交易提示条:`useTradeStore().recent` 与当前页首条对比计数;点击 `gridApi.query()`。
+- **对账 Tab 深链**:`?tab=reconciliation`(IntegrityBanner / 顶栏状态灯 Popover 跳转);仅 `trade:update` 角色可见「标记不可解析」;`useGovernedAction` + `confirmWord: unresolvable` + `POST /trades/{trade_id}/reconcile`(resolution 固定 `unresolvable`,note = acting-role reason)。
 
 ### 3.3 API(`api/trades.ts`)
 
@@ -147,6 +153,8 @@ shared/components/audit-timeline.vue                   # 时间线通用组件(�
 | `fetchTradePage(params: TradeApi.TradePageParams)` | `GET /trades` | trade:read |
 | `getTradeById(id)` | `GET /trades/{trade_id}` | trade:read |
 | `fetchTradeDecisions({from,to,page,size})` | `GET /trades/decisions` | trade:read |
+| `fetchReconciliationQueue(params: PageRequest)` | `GET /trades/reconciliation` | trade:read |
+| `reconcileTrade(id, body, ctx)` | `POST /trades/{trade_id}/reconcile` | trade:update + `X-Acting-Role` |
 
 ### 3.4 文件清单
 
@@ -154,9 +162,11 @@ shared/components/audit-timeline.vue                   # 时间线通用组件(�
 views/trades/
 ├── index.vue
 └── modules/
-    ├── schemas/{index,search-form,table-columns}.ts   # useTradeColumns / useDecisionColumns / 两份 search schema
+    ├── schemas/{index,search-form,table-columns,reconciliation-columns}.ts
     └── widgets/{trade-detail-drawer.vue, pnl-attribution.vue}
 ```
+
+**跨页联动**: `IntegrityBanner` / 顶栏 `SystemStatusIndicator` Popover 中的 blocking / needs-reconcile 计数 → `/trades?tab=reconciliation`。
 
 ---
 
@@ -167,5 +177,6 @@ views/trades/
 - [ ] Markets 详情抽屉打开期间订单簿经 WS 实时刷新,关闭后取消订阅(无泄漏,重复开关 5 次验证)
 - [ ] Opportunities LiveFeed 实时插入 + 暂停;审计抽屉时间线完整
 - [ ] Trades 决策链 + PnL 归因渲染正确;`trade.settled` 后已打开的详情数据刷新
+- [ ] Trades 对账 Tab: badge 与 `needs_reconcile_count` 一致;governed「标记不可解析」仅 `trade:update`;深链 `?tab=reconciliation` 可用
 - [ ] 三页所有金额/价格/bps 列经 cell 渲染器格式化,无裸 number
 - [ ] zh/en 文案完整;空态/loading/错误态(EchartsCard/Grid 空提示)覆盖

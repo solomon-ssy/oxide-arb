@@ -34,7 +34,7 @@ oxide-arb 重写的根本动因是**聚焦**：放弃之前代码中为多策略
 | Convergence Tracker | `Strategy` trait / dynamic dispatch |
 | Quarter-Kelly + fill probability | 多策略评分/排序逻辑 |
 | 方向性持仓管理 | Hedging 逻辑（endgame 不对冲） |
-| FOK+GTD 分层执行 | 多腿（multi-leg）订单构建 |
+| **FOK-only** 执行 | 多腿（multi-leg）订单构建；GTD resting 订单（Endgame Live 不使用） |
 
 **含义**：
 - `OpportunityType` 枚举只保留 `DirectionalBet`（或直接去掉枚举，因为只有一种类型）

@@ -1,5 +1,7 @@
 # Phase 4.2 — `oxide-arb-core` 详细设计
 
+> **⚠️ Obsolete (execution)**: Endgame Live 执行策略已收敛为 **FOK-only**（见 [ADR-001 §2.1](./ADR-001-single-strategy-single-platform.md)）。本文 §7「FOK + GTD 分层执行」为历史设计，保留供考古参考，**不得**作为 Live 实现依据。
+
 > **状态**: 待审核
 >
 > **日期**: 2025-06-22

@@ -29,12 +29,12 @@ const PRODUCES: &[SeedArtifact] = &[
 
 pub const MENUS_SEED: SeedSpec = SeedSpec {
     id: SEED_ID,
-    version: 4,
+    version: 5,
     target_table: menu_table_name,
     depends_on: DEPENDS_ON,
     produces: PRODUCES,
     conflict_policy: SeedConflictPolicy::GraphOrdered,
-    checksum: "rbac.menus.bootstrap.v4",
+    checksum: "rbac.menus.bootstrap.v5",
     loader: load_boxed,
 };
 
@@ -276,7 +276,7 @@ fn build_trading(t: &mut MenuTree) {
         permission_code: Some(perm(ResourceType::Opportunity, Operation::Read)),
         icon: "lucide:zap",
     });
-    t.page(PageSpec {
+    let trades_page = t.page(PageSpec {
         parent: &trading,
         name: "trades",
         title: "page.menu.trades",
@@ -285,6 +285,12 @@ fn build_trading(t: &mut MenuTree) {
         permission_code: Some(perm(ResourceType::Trade, Operation::Read)),
         icon: "lucide:receipt",
     });
+    t.button(
+        &trades_page,
+        "trade:reconcile",
+        "page.menu.tradeReconcile",
+        perm(ResourceType::Trade, Operation::Update),
+    );
 }
 
 fn build_risk(t: &mut MenuTree) {

@@ -24,7 +24,6 @@ use oxide_arb_core::{
         validator::Validator,
     },
     exposure::in_memory::InMemoryExposureReservation,
-    infra::async_writer::{AsyncWriter, AsyncWriterConfig},
     observability::{
         alert_dispatcher::AlertDispatcher, book_decision_context_writer::BookDecisionContextWriter,
         execution_audit::ExecutionAuditWriter, metrics_hub::MetricsHub,
@@ -71,8 +70,9 @@ use oxide_arb_repository::traits::TradeRepository;
 use oxide_arb_risk::{
     builder::RiskEngineBuilder, clock::utc_clock, engine::RiskEngine, traits::RiskMetrics,
 };
-use oxide_arb_test_support::mocks::{
-    MockCalibrationRepository, MockPositionRepository, MockTradeRepository,
+use oxide_arb_test_support::{
+    async_writer::{TestAsyncWriterGuard, spawn_test_async_writer},
+    mocks::{MockCalibrationRepository, MockPositionRepository, MockTradeRepository},
 };
 use polymarket_client_sdk_v2::{
     POLYGON,
@@ -107,6 +107,7 @@ struct LiveFixture {
     audit_writer: Arc<ExecutionAuditWriter>,
     metrics_state: Arc<RiskMetricsState>,
     metrics: Arc<MetricsHub>,
+    _async_writer_guards: Vec<TestAsyncWriterGuard>,
 }
 
 struct LivePipelineAssembly {
@@ -457,30 +458,24 @@ impl RiskMetrics for StaticRiskMetrics {
     }
 }
 
-fn audit_writer(metrics: Arc<MetricsHub>) -> Arc<ExecutionAuditWriter> {
-    let (writer, worker) = AsyncWriter::new(
-        AsyncWriterConfig::new("test-execution-audit")
-            .batch_size(128)
-            .flush_interval(Duration::from_secs(3600)),
+fn audit_writer(metrics: Arc<MetricsHub>) -> (Arc<ExecutionAuditWriter>, TestAsyncWriterGuard) {
+    let (writer, guard) = spawn_test_async_writer(
+        "test-execution-audit",
         move |_batch: Vec<OpportunityAuditRow>| Box::pin(async move { Ok(()) }),
         metrics,
-        CancellationToken::new(),
     );
-    tokio::spawn(worker);
-    Arc::new(ExecutionAuditWriter::new(Arc::new(writer)))
+    (Arc::new(ExecutionAuditWriter::new(writer)), guard)
 }
 
-fn decision_context_writer(metrics: Arc<MetricsHub>) -> Arc<BookDecisionContextWriter> {
-    let (writer, worker) = AsyncWriter::new(
-        AsyncWriterConfig::new("test-book-decision-context")
-            .batch_size(128)
-            .flush_interval(Duration::from_secs(3600)),
+fn decision_context_writer(
+    metrics: Arc<MetricsHub>,
+) -> (Arc<BookDecisionContextWriter>, TestAsyncWriterGuard) {
+    let (writer, guard) = spawn_test_async_writer(
+        "test-book-decision-context",
         move |_batch: Vec<BookDecisionContextRow>| Box::pin(async move { Ok(()) }),
         metrics,
-        CancellationToken::new(),
     );
-    tokio::spawn(worker);
-    Arc::new(BookDecisionContextWriter::new(Arc::new(writer)))
+    (Arc::new(BookDecisionContextWriter::new(writer)), guard)
 }
 
 fn risk_metrics(
@@ -602,8 +597,9 @@ fn fixture(clob_client: Option<Arc<ClobClient>>, dispatcher_timeout_ms: u64) -> 
         Arc::clone(&metrics_state),
         Arc::clone(&market_registry),
     );
-    let audit_writer = audit_writer(Arc::clone(&metrics));
-    let book_decision_context_writer = decision_context_writer(Arc::clone(&metrics));
+    let (audit_writer, audit_guard) = audit_writer(Arc::clone(&metrics));
+    let (book_decision_context_writer, decision_guard) =
+        decision_context_writer(Arc::clone(&metrics));
     let risk_engine = risk_engine();
     let trade_integrity = Arc::new(TradeIntegrityStore::new(
         Arc::clone(&trade_repo) as Arc<dyn TradeRepository>,
@@ -646,6 +642,7 @@ fn fixture(clob_client: Option<Arc<ClobClient>>, dispatcher_timeout_ms: u64) -> 
         audit_writer,
         metrics_state,
         metrics,
+        _async_writer_guards: vec![audit_guard, decision_guard],
     }
 }
 

@@ -21,6 +21,37 @@ use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+/// Execution kill-switch class exposed on operator dashboards.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionEmergencyClassView {
+    VenueFault,
+    ReservationFault,
+    PersistenceFault,
+}
+
+/// Execution kill-switch snapshot for operator dashboards and WS `system.status`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecutionEmergencyView {
+    pub active: bool,
+    pub class: ExecutionEmergencyClassView,
+    pub requires_operator_ack: bool,
+    pub last_reason: Option<String>,
+}
+
+impl ExecutionEmergencyView {
+    /// Idle snapshot when the execution FSM is not in emergency halt.
+    #[must_use]
+    pub const fn idle() -> Self {
+        Self {
+            active: false,
+            class: ExecutionEmergencyClassView::VenueFault,
+            requires_operator_ack: false,
+            last_reason: None,
+        }
+    }
+}
+
 /// Overall system status reported by the health endpoint.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemStatus {
@@ -44,6 +75,8 @@ pub struct SystemStatus {
     pub control_factor_snapshot_expired: bool,
     /// Live mode with no active published control-factor snapshot.
     pub control_factor_live_warn: bool,
+    /// Global execution kill-switch snapshot (distinct from risk circuit breaker).
+    pub execution_emergency: ExecutionEmergencyView,
     pub checked_at: DateTime<Utc>,
 }
 

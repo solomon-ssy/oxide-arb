@@ -91,8 +91,11 @@ pub async fn reconciliation(
     page: web::Query<PageRequest>,
 ) -> Result<WebResponse<Paginated<TradeView>>, WebError> {
     let window = page.into_inner().normalized();
-    let items = state.trades.find_needs_reconcile(window.limit()).await?;
-    let total = u64::try_from(items.len()).unwrap_or(u64::MAX);
+    let total = state.trades.count_needs_reconcile().await?;
+    let items = state
+        .trades
+        .find_needs_reconcile(window.limit(), window.offset())
+        .await?;
     Ok(WebResponse::ok(Paginated::from_request(
         items.into_iter().map(TradeView::from).collect(),
         total,

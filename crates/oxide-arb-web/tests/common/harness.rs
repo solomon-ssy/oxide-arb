@@ -33,11 +33,12 @@ use oxide_arb_error::auth::AuthError;
 use oxide_arb_models::{
     config::{CacheConfig, DeployConfig, JwtConfig, RedisConfig},
     domain::{
-        BlacklistInfo, CatalogState, CoreEventPublisher, ExposureBindingLimit, HealthReport,
-        MarketDataConnectivity, MarketDataPort, ModeTransitionReport, OperationalPhase,
-        ReplayEnqueueRequest, ReplayEnqueueResult, ReplayPort, RiskEngineState, RuntimeConfigPort,
-        RuntimeControlError, RuntimeControlPort, SystemBalanceSource, SystemBalanceView,
-        SystemStatus, WsShardConnectivity, market::book::BookSnapshot,
+        BlacklistInfo, CatalogState, CoreEventPublisher, ExecutionEmergencyView,
+        ExposureBindingLimit, HealthReport, MarketDataConnectivity, MarketDataPort,
+        ModeTransitionReport, OperationalPhase, ReplayEnqueueRequest, ReplayEnqueueResult,
+        ReplayPort, RiskEngineState, RuntimeConfigPort, RuntimeControlError, RuntimeControlPort,
+        SystemBalanceSource, SystemBalanceView, SystemStatus, WsShardConnectivity,
+        market::book::BookSnapshot,
     },
     enums::{
         common::ExecutionMode,
@@ -547,6 +548,7 @@ impl RuntimeControlPort for MockRuntimeControl {
             control_factor_publication_id: None,
             control_factor_snapshot_expired: false,
             control_factor_live_warn: false,
+            execution_emergency: ExecutionEmergencyView::idle(),
             checked_at: Utc::now(),
         }
     }

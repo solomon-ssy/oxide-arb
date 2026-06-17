@@ -9,8 +9,12 @@ use crate::{
 };
 use chrono::Utc;
 use oxide_arb_error::storage::StorageError;
-use oxide_arb_models::enums::common::{AlertCategory, AlertLevel, AlertSource};
+use oxide_arb_models::{
+    domain::{ExecutionEmergencyClassView, ExecutionEmergencyView},
+    enums::common::{AlertCategory, AlertLevel, AlertSource},
+};
 use oxide_arb_risk::engine::RiskEngine;
+use parking_lot::Mutex;
 use serde_repr::{Deserialize_repr, Serialize_repr};
 use std::sync::{
     Arc,
@@ -39,6 +43,16 @@ impl EmergencyClass {
     /// Whether only an explicit operator ack may clear the emergency halt.
     pub const fn requires_operator_ack(self) -> bool {
         !self.allows_auto_recover()
+    }
+
+    /// Wire projection for operator dashboards.
+    #[must_use]
+    pub const fn as_view(self) -> ExecutionEmergencyClassView {
+        match self {
+            Self::VenueFault => ExecutionEmergencyClassView::VenueFault,
+            Self::ReservationFault => ExecutionEmergencyClassView::ReservationFault,
+            Self::PersistenceFault => ExecutionEmergencyClassView::PersistenceFault,
+        }
     }
 }
 
@@ -89,6 +103,7 @@ impl AtomicEmergencyClass {
 pub struct ExecutionFSM {
     emergency: AtomicBool,
     class: AtomicEmergencyClass,
+    last_emergency_reason: Mutex<Option<String>>,
     metrics: Arc<MetricsHub>,
     alerts: Arc<AlertDispatcher>,
 }
@@ -98,6 +113,7 @@ impl ExecutionFSM {
         Self {
             emergency: AtomicBool::new(false),
             class: AtomicEmergencyClass::new(EmergencyClass::VenueFault),
+            last_emergency_reason: Mutex::new(None),
             metrics,
             alerts,
         }
@@ -107,6 +123,7 @@ impl ExecutionFSM {
     pub fn enter_emergency(&self, class: EmergencyClass, reason: &str) {
         self.emergency.store(true, Ordering::Release);
         self.class.store(class);
+        *self.last_emergency_reason.lock() = Some(reason.to_owned());
         tracing::error!(?class, reason = reason, "execution emergency halt engaged");
         self.metrics.fsm_emergency_entries.inc();
         self.alerts.dispatch_background(
@@ -130,6 +147,7 @@ impl ExecutionFSM {
     pub fn enter_planned_halt(&self, reason: &str) {
         self.emergency.store(true, Ordering::Release);
         self.class.store(EmergencyClass::VenueFault);
+        *self.last_emergency_reason.lock() = Some(reason.to_owned());
         tracing::warn!(reason = reason, "execution planned halt engaged");
         self.metrics.fsm_emergency_entries.inc();
         self.alerts.dispatch_background(
@@ -150,7 +168,21 @@ impl ExecutionFSM {
     pub fn clear_emergency(&self) {
         self.emergency.store(false, Ordering::Release);
         self.class.store(EmergencyClass::VenueFault);
+        *self.last_emergency_reason.lock() = None;
         tracing::info!("execution emergency halt cleared");
+    }
+
+    /// Operator-facing execution kill-switch snapshot for status broadcasts.
+    #[must_use]
+    pub fn operator_snapshot(&self) -> ExecutionEmergencyView {
+        let active = self.is_emergency();
+        let class = self.emergency_class();
+        ExecutionEmergencyView {
+            active,
+            class: class.as_view(),
+            requires_operator_ack: active && class.requires_operator_ack(),
+            last_reason: self.last_emergency_reason.lock().clone(),
+        }
     }
 
     #[must_use]

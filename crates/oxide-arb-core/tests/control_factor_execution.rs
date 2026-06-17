@@ -18,7 +18,6 @@ use oxide_arb_core::{
         validator::Validator,
     },
     exposure::in_memory::InMemoryExposureReservation,
-    infra::async_writer::{AsyncWriter, AsyncWriterConfig},
     observability::{
         alert_dispatcher::AlertDispatcher, book_decision_context_writer::BookDecisionContextWriter,
         execution_audit::ExecutionAuditWriter, metrics_hub::MetricsHub,
@@ -66,7 +65,7 @@ use oxide_arb_repository::traits::TradeRepository;
 use oxide_arb_risk::{
     builder::RiskEngineBuilder, clock::utc_clock, engine::RiskEngine, traits::RiskMetrics,
 };
-use oxide_arb_test_support::mocks::MockTradeRepository;
+use oxide_arb_test_support::{async_writer::spawn_test_async_writer, mocks::MockTradeRepository};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use std::{sync::Arc, time::Duration as StdDuration};
@@ -340,27 +339,23 @@ fn factor_test_risk_engine() -> Arc<RiskEngine> {
 }
 
 fn factor_test_audit_writer(metrics: Arc<MetricsHub>) -> Arc<ExecutionAuditWriter> {
-    let (writer, _worker) = AsyncWriter::new(
-        AsyncWriterConfig::new("test-factor-exec-audit")
-            .batch_size(128)
-            .flush_interval(StdDuration::from_secs(3600)),
+    let (writer, guard) = spawn_test_async_writer(
+        "test-factor-exec-audit",
         move |_batch: Vec<OpportunityAuditRow>| Box::pin(async move { Ok(()) }),
         metrics,
-        CancellationToken::new(),
     );
-    Arc::new(ExecutionAuditWriter::new(Arc::new(writer)))
+    std::mem::forget(guard);
+    Arc::new(ExecutionAuditWriter::new(writer))
 }
 
 fn factor_test_decision_context_writer(metrics: Arc<MetricsHub>) -> Arc<BookDecisionContextWriter> {
-    let (writer, _worker) = AsyncWriter::new(
-        AsyncWriterConfig::new("test-book-decision-context")
-            .batch_size(128)
-            .flush_interval(StdDuration::from_secs(3600)),
+    let (writer, guard) = spawn_test_async_writer(
+        "test-book-decision-context",
         move |_batch: Vec<BookDecisionContextRow>| Box::pin(async move { Ok(()) }),
         metrics,
-        CancellationToken::new(),
     );
-    Arc::new(BookDecisionContextWriter::new(Arc::new(writer)))
+    std::mem::forget(guard);
+    Arc::new(BookDecisionContextWriter::new(writer))
 }
 
 fn factor_test_risk_metrics(

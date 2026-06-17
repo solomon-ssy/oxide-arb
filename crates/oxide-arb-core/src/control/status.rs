@@ -99,6 +99,7 @@ pub fn build_system_status(deps: &CoreRuntimeControlDeps, started_at: Instant) -
         control_factor_publication_id: published.publication_id.as_ref().map(ToString::to_string),
         control_factor_snapshot_expired: snapshot_expired,
         control_factor_live_warn: live_warn,
+        execution_emergency: deps.fsm.operator_snapshot(),
         checked_at: Utc::now(),
     }
 }

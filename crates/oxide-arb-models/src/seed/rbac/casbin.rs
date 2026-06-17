@@ -38,12 +38,12 @@ const PRODUCES: &[SeedArtifact] = &[];
 
 pub const CASBIN_SEED: SeedSpec = SeedSpec {
     id: SEED_ID,
-    version: 1,
+    version: 2,
     target_table: casbin_rule_table_name,
     depends_on: DEPENDS_ON,
     produces: PRODUCES,
     conflict_policy: SeedConflictPolicy::GraphOrdered,
-    checksum: "rbac.casbin.bootstrap.v1",
+    checksum: "rbac.casbin.bootstrap.v2",
     loader: load_boxed,
 };
 
@@ -89,6 +89,7 @@ fn operator_policies() -> Vec<(ResourceType, Operation)> {
         (ResourceType::System, Operation::Resume),
         (ResourceType::System, Operation::SwitchMode),
         (ResourceType::Market, Operation::Update),
+        (ResourceType::Trade, Operation::Update),
         (ResourceType::Risk, Operation::Reset),
         (ResourceType::Blacklist, Operation::Create),
         (ResourceType::Blacklist, Operation::Delete),
@@ -109,6 +110,7 @@ fn risk_owner_policies() -> Vec<(ResourceType, Operation)> {
         (ResourceType::RuntimeConfig, Operation::Activate),
         (ResourceType::RuntimeConfig, Operation::Rollback),
         (ResourceType::Risk, Operation::Reset),
+        (ResourceType::Trade, Operation::Update),
         (ResourceType::Materialization, Operation::Enqueue),
         (ResourceType::Blacklist, Operation::Create),
         (ResourceType::Blacklist, Operation::Delete),

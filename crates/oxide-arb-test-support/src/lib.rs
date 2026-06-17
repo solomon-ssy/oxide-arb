@@ -4,6 +4,7 @@
 //! fixtures across `oxide-arb-core` integration tests and `oxide-arb-bench`
 //! benchmarks.
 
+pub mod async_writer;
 pub mod book;
 pub mod fixtures;
 pub mod materialization;
