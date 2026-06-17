@@ -2,6 +2,7 @@
 
 use chrono::Utc;
 use oxide_arb_core::{
+    control::status::SystemStatusNudge,
     observability::{
         alert_dispatcher::AlertDispatcher, backpressure::BackpressurePolicy,
         metrics_hub::MetricsHub,
@@ -124,6 +125,7 @@ async fn five_hundred_markets_thousand_tokens_ingest_without_book_drops() {
         book_shard_count: 4,
         book_channel_capacity: 4096,
         shutdown: shutdown.clone(),
+        status_nudge: SystemStatusNudge::default(),
     }));
     let handle = {
         let pipeline = Arc::clone(&pipeline);

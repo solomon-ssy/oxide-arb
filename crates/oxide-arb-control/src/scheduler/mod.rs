@@ -91,6 +91,40 @@ pub enum ScheduleAlert {
     },
 }
 
+impl ScheduleAlert {
+    /// Stable suffix for scheduler alert idempotency keys.
+    pub fn idempotency_suffix(&self) -> String {
+        match self {
+            Self::Overdue { schedule_id, .. } => format!("{schedule_id}.overdue"),
+            Self::Stale { schedule_id, .. } => format!("{schedule_id}.stale"),
+        }
+    }
+
+    /// Human-readable title and body for operator notifications.
+    pub fn operator_message(&self) -> (String, String) {
+        match self {
+            Self::Overdue {
+                schedule_id,
+                last_run_at,
+            } => (
+                "Materialization cadence overdue".to_owned(),
+                format!("schedule {schedule_id} last ran at {last_run_at}"),
+            ),
+            Self::Stale {
+                schedule_id,
+                last_success_at,
+                threshold_secs,
+            } => (
+                "Materialization cadence stale".to_owned(),
+                format!(
+                    "schedule {schedule_id} no success within {threshold_secs}s \
+                     (last success: {last_success_at:?})"
+                ),
+            ),
+        }
+    }
+}
+
 /// Result of a single scheduler tick across all policy tasks.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SchedulerCycleReport {

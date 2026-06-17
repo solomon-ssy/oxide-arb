@@ -1,6 +1,7 @@
 //! Load test: flood snapshots and verify backpressure without emergency halt.
 
 use oxide_arb_core::{
+    control::status::SystemStatusNudge,
     observability::{
         alert_dispatcher::AlertDispatcher, backpressure::BackpressurePolicy,
         metrics_hub::MetricsHub,
@@ -66,6 +67,7 @@ async fn hundred_tokens_thousand_snapshots_monotonic_versions() {
         book_shard_count: 4,
         book_channel_capacity: 8,
         shutdown: shutdown.clone(),
+        status_nudge: SystemStatusNudge::default(),
     }));
 
     let pipeline_handle = {

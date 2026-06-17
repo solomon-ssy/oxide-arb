@@ -2,6 +2,7 @@ use super::{
     book_store::BookStore, event_source::PipelineEventSource, market_registry::MarketRegistry,
 };
 use crate::{
+    control::status::SystemStatusNudge,
     infra::sharding::shard_index,
     observability::{
         alert_dispatcher::{Alert, AlertDispatcher},
@@ -25,7 +26,13 @@ use oxide_arb_models::{
     },
     types::TokenId,
 };
-use std::{sync::Arc, thread};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread,
+};
 use tokio_util::sync::CancellationToken;
 
 /// Sharded book-apply workers for ~500 markets / ~1000 tokens on one host.
@@ -46,6 +53,8 @@ pub struct DataPipelineDeps {
     pub book_shard_count: usize,
     pub book_channel_capacity: usize,
     pub shutdown: CancellationToken,
+    /// Nudge the system-status broadcaster on the first market-data book event.
+    pub status_nudge: SystemStatusNudge,
 }
 
 /// Main WS event loop: Tokio receives frames, dedicated OS threads apply books per shard.
@@ -62,6 +71,8 @@ pub struct DataPipeline {
     book_shard_count: usize,
     book_channel_capacity: usize,
     shutdown: CancellationToken,
+    status_nudge: SystemStatusNudge,
+    market_data_nudged: Arc<AtomicBool>,
 }
 
 impl DataPipeline {
@@ -79,6 +90,8 @@ impl DataPipeline {
             book_shard_count: deps.book_shard_count,
             book_channel_capacity: deps.book_channel_capacity,
             shutdown: deps.shutdown,
+            status_nudge: deps.status_nudge,
+            market_data_nudged: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -121,7 +134,14 @@ impl DataPipeline {
 
                 event = rx.recv_async() => {
                     if let Ok(pipeline_event) = event {
-                        let shard = book_shard_for_event(&pipeline_event, shard_count);
+                        if pipeline_event.is_market_data_event()
+                            && !self.market_data_nudged.swap(true, Ordering::AcqRel)
+                        {
+                            self.status_nudge.nudge();
+                        }
+                        let shard = pipeline_event
+                            .asset_id()
+                            .map_or(0, |asset_id| shard_index(asset_id.as_str(), shard_count));
                         if let Err(error) = book_senders[shard].try_send(pipeline_event) {
                             self.backpressure
                                 .on_book_channel_full(shard, error.into_inner());
@@ -146,18 +166,6 @@ impl DataPipeline {
         }
         Ok(())
     }
-}
-
-fn book_shard_for_event(event: &PipelineEvent, shard_count: usize) -> usize {
-    let id = match event {
-        PipelineEvent::BookSnapshot(cmd) => cmd.asset_id.as_str(),
-        PipelineEvent::PriceDelta(cmd) => cmd.asset_id.as_str(),
-        PipelineEvent::BestBidAsk { asset_id, .. }
-        | PipelineEvent::TickSizeChange { asset_id, .. }
-        | PipelineEvent::LastTradePrice { asset_id, .. } => asset_id.as_str(),
-        _ => return 0,
-    };
-    shard_index(id, shard_count)
 }
 
 struct BookApplyWorker {

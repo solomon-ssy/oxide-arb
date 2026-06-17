@@ -56,12 +56,12 @@ impl BackpressurePolicy {
 
     /// Site 1 — `book_apply` channel full: latest-wins coalesce per (shard, token).
     pub fn on_book_channel_full(&self, shard: usize, event: PipelineEvent) -> BackpressureAction {
-        let Some(token) = token_id_from_pipeline_event(&event) else {
+        let Some(token) = event.asset_id().cloned() else {
             self.record_book_drop();
             return BackpressureAction::Dropped;
         };
 
-        if !is_book_coalescable(&event) {
+        if !event.is_book_coalescable() {
             self.record_book_drop();
             return BackpressureAction::Dropped;
         }
@@ -128,24 +128,6 @@ impl BackpressurePolicy {
             .with_label_values(&[site, action])
             .inc();
     }
-}
-
-fn token_id_from_pipeline_event(event: &PipelineEvent) -> Option<TokenId> {
-    match event {
-        PipelineEvent::BookSnapshot(cmd) => Some(cmd.asset_id.clone()),
-        PipelineEvent::PriceDelta(cmd) => Some(cmd.asset_id.clone()),
-        PipelineEvent::BestBidAsk { asset_id, .. }
-        | PipelineEvent::TickSizeChange { asset_id, .. }
-        | PipelineEvent::LastTradePrice { asset_id, .. } => Some(asset_id.clone()),
-        _ => None,
-    }
-}
-
-const fn is_book_coalescable(event: &PipelineEvent) -> bool {
-    matches!(
-        event,
-        PipelineEvent::BookSnapshot(_) | PipelineEvent::PriceDelta(_)
-    )
 }
 
 #[cfg(test)]

@@ -14,7 +14,10 @@ use oxide_arb_models::{
     config::{CacheConfig, GammaConfig, PostgresConfig, RedisConfig},
     types::TokenId,
 };
-use oxide_arb_repository::postgres::{PgEventRepository, PgMarketRepository};
+use oxide_arb_repository::{
+    pg_arc_repo,
+    postgres::{PgEventRepository, PgMarketRepository},
+};
 use oxide_arb_storage::{
     cache::{CacheManager, MokaBackend, RedisBackend, TieredCache, connect_pool},
     postgres::{
@@ -131,8 +134,8 @@ async fn build_gamma_service(server_uri: &str) -> (GammaService, Arc<MarketRegis
         market_cache,
         universe,
         fee_calculator,
-        market_repo: Arc::new(PgMarketRepository::new(db.clone())),
-        event_repo: Arc::new(PgEventRepository::new(db)),
+        market_repo: pg_arc_repo!(db, PgMarketRepository),
+        event_repo: pg_arc_repo!(db, PgEventRepository),
         cache,
         metrics,
         ws_subscription: None,

@@ -10,7 +10,7 @@ use crate::{
         market_cache::{CachedMarketScanEntry, MarketCache},
         staleness_classifier::StalenessClassifier,
     },
-    service::catalog_readiness::CatalogReadiness,
+    service::{catalog_readiness::CatalogReadiness, detection_readiness::DetectionReadiness},
 };
 use chrono::{DateTime, Utc};
 use num_traits::ToPrimitive;
@@ -37,6 +37,8 @@ pub struct Scanner {
     /// Catalog warmup gate: no opportunities are produced while `Warming`
     /// (fail-closed; lock-free atomic read on the hot path).
     catalog: Arc<CatalogReadiness>,
+    /// Lifecycle detection gate mirrored from operational phase on status publish.
+    detection_readiness: Arc<DetectionReadiness>,
 }
 
 /// Construction dependencies for [`Scanner`].
@@ -49,6 +51,7 @@ pub struct ScannerDeps {
     pub detection_writer: Option<Arc<DetectionWriter>>,
     pub events: CoreEventPublisher,
     pub catalog: Arc<CatalogReadiness>,
+    pub detection_readiness: Arc<DetectionReadiness>,
 }
 
 impl Scanner {
@@ -62,6 +65,7 @@ impl Scanner {
             detection_writer: deps.detection_writer,
             events: deps.events,
             catalog: deps.catalog,
+            detection_readiness: deps.detection_readiness,
         }
     }
 
@@ -71,7 +75,7 @@ impl Scanner {
         entry: &CachedMarketScanEntry,
         now: DateTime<Utc>,
     ) -> Option<Arc<ScoredOpportunity>> {
-        if !self.catalog.is_ready() {
+        if !self.catalog.is_ready() || !self.detection_readiness.allows_detection() {
             return None;
         }
         let sample = SCAN_SAMPLE.fetch_add(1, Ordering::Relaxed).trailing_zeros() >= 6;

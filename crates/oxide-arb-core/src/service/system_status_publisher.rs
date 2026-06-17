@@ -31,6 +31,9 @@ impl SystemStatusPublisher {
     /// Snapshot current status and publish (non-blocking, drop-on-full).
     pub fn publish_now(&self) {
         let status = build_system_status(&self.deps, self.started_at);
+        self.deps
+            .detection_readiness
+            .update_from_phase(&status.operational_phase);
         self.events.publish(CoreEvent::SystemStatusChanged(status));
     }
 }

@@ -275,6 +275,21 @@ pub enum AlertCategory {
     OperatorNotice,
 }
 
+impl AlertCategory {
+    /// Whether alerts in this category affect trading by default.
+    #[must_use]
+    pub const fn default_affects_trading(self) -> bool {
+        matches!(self, Self::TradingSafety)
+    }
+
+    /// Whether alerts in this category should show a UI toast by default.
+    #[must_use]
+    pub const fn default_visible_toast(self, severity: AlertLevel) -> bool {
+        matches!(severity, AlertLevel::Critical | AlertLevel::Emergency)
+            || matches!(self, Self::TradingSafety)
+    }
+}
+
 /// Subsystem that produced an operational alert.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

@@ -4,12 +4,8 @@ use super::{AppContext, task_id::TaskId};
 use crate::{
     bridge::execution_mode::ExecutionModeHandle,
     control::status::SystemStatusNudge,
-    infra::{
-        debounced_writer::DebouncedWriter, health_checker::HealthChecker,
-        periodic_task::PeriodicTask,
-    },
+    infra::{debounced_writer::DebouncedWriter, periodic_task::PeriodicTask},
     observability::{
-        alert_dispatcher::Alert,
         balance_fact_writer::{BalanceFactObservation, BalanceFactWriter},
         book_fact_writer::BookFactWriter,
         metrics_hub::MetricsHub,
@@ -32,7 +28,7 @@ use oxide_arb_error::{OxideError, OxideResult};
 use oxide_arb_models::{
     domain::risk::UpsertRiskEngineState,
     enums::clickhouse::ChSnapshotReason,
-    enums::common::{AlertCategory, AlertLevel, AlertSource, ExecutionMode},
+    enums::common::ExecutionMode,
     types::{MarketId, Shares, Usd},
 };
 use oxide_arb_repository::traits::RiskStateRepository;
@@ -455,60 +451,46 @@ impl AppContext {
     }
 
     fn queue_health_checker(&self) {
-        let pg = Arc::clone(&self.infra.pg);
-        let ch = Arc::clone(&self.infra.ch);
-        let ws = Arc::clone(&self.trading.ws_manager);
-        let clob_client = self.trading.clob_client.clone();
-        let execution_mode = self.execution_mode.clone();
+        let checker = Arc::clone(&self.health_checker);
         let metrics = Arc::clone(&self.infra.metrics);
         let alerts = Arc::clone(&self.infra.alerts);
+        let nudge = self.system_status_nudge.clone();
+        let ws = Arc::clone(&self.trading.ws_manager);
 
         self.pending_tasks
             .push(TaskId::HealthChecker, move |shutdown| async move {
-                let ws_summary_source = Arc::clone(&ws);
-                let checker = HealthChecker::new(pg, ch, ws, clob_client, execution_mode);
                 if let Err(error) = PeriodicTask::run(
                     TaskId::HealthChecker.static_name(),
                     || Duration::from_secs(HEALTH_CHECK_INTERVAL_SECS),
                     0.0,
-                    false,
+                    true,
                     shutdown,
                     || {
-                        let checker_ref = &checker;
-                        let metrics_ref = &metrics;
+                        let checker = Arc::clone(&checker);
+                        let metrics = Arc::clone(&metrics);
                         let alerts = Arc::clone(&alerts);
-                        let ws_summary_source = Arc::clone(&ws_summary_source);
+                        let nudge = nudge.clone();
+                        let ws = Arc::clone(&ws);
                         async move {
-                            // One aggregate line per cycle replaces per-shard
-                            // reconnect spam (shard logs are debug-level).
-                            let shards = ws_summary_source.shard_health();
+                            let shards = ws.shard_health();
                             if shards.disconnected > 0 {
                                 tracing::warn!(%shards, "WS shard connectivity degraded");
                             }
-                            let report = checker_ref.check_all().await;
+                            let report = checker.check_all_and_notify(&alerts, &nudge).await;
                             if !report.overall_healthy {
                                 let unhealthy = report
                                     .checks
                                     .iter()
-                                    .filter(|c| !c.healthy)
-                                    .map(|c| c.name.as_str())
+                                    .filter(|check| {
+                                        check.counts_toward_overall() && !check.is_healthy()
+                                    })
+                                    .map(|check| check.name.as_str())
                                     .collect::<Vec<_>>();
                                 tracing::warn!(
                                     checks = ?unhealthy,
                                     "health check detected unhealthy subsystems"
                                 );
-                                metrics_ref.health_check_failures.inc();
-                                alerts
-                                    .dispatch(Alert::new(
-                                        format!("health.unhealthy.{}", unhealthy.join(".")),
-                                        AlertLevel::Critical,
-                                        AlertCategory::Infrastructure,
-                                        AlertSource::HealthChecker,
-                                        "Health check unhealthy",
-                                        format!("unhealthy subsystems: {}", unhealthy.join(", ")),
-                                        chrono::Utc::now(),
-                                    ))
-                                    .await;
+                                metrics.health_check_failures.inc();
                             }
                             Ok(())
                         }

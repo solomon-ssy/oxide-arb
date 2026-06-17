@@ -13,7 +13,10 @@ use oxide_arb_core::{
     observability::{alert_dispatcher::AlertDispatcher, metrics_hub::MetricsHub},
     pipeline::market_registry::MarketRegistry,
     runtime_config::RuntimeConfigStore,
-    service::{catalog_readiness::CatalogReadiness, risk_metrics::RiskMetricsState},
+    service::{
+        catalog_readiness::CatalogReadiness, detection_readiness::DetectionReadiness,
+        risk_metrics::RiskMetricsState, runtime_lifecycle::LatestUnhealthySubsystems,
+    },
     trade_integrity::TradeIntegrityStore,
 };
 use oxide_arb_error::storage::StorageError;
@@ -96,7 +99,7 @@ fn runtime_control(
     let risk_metrics = Arc::new(CoreRiskMetrics::new(
         Arc::clone(&metrics_state),
         Arc::clone(&exposure),
-        ws,
+        Arc::clone(&ws),
         execution_mode.clone(),
     ));
     let risk_engine = Arc::new(
@@ -140,6 +143,8 @@ fn runtime_control(
             ctf_redeem: None,
             holder_address: "unavailable".into(),
             market_registry: Arc::new(MarketRegistry::new()),
+            ws_manager: Arc::clone(&ws),
+            unhealthy_subsystems: Arc::new(LatestUnhealthySubsystems::default()),
             health_checker: None,
             deploy: Arc::new(DeployConfig::default()),
             runtime_config,
@@ -150,6 +155,7 @@ fn runtime_control(
             trade_integrity,
             factor_store,
             alerts,
+            detection_readiness: Arc::new(DetectionReadiness::default()),
             status_publisher: None,
         },
         std::time::Instant::now(),

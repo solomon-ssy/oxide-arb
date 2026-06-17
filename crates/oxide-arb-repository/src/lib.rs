@@ -11,3 +11,5 @@ pub mod cached;
 pub mod clickhouse;
 pub mod postgres;
 pub mod traits;
+
+pub use postgres::arc_repo;

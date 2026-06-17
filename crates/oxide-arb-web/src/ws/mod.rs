@@ -76,6 +76,18 @@ impl SessionRegistry {
         }
     }
 
+    /// Push operator-global frames to every connected session without requiring
+    /// an explicit subscribe (system status + alerts are always-on).
+    pub fn fanout_channel(&self, channel: WsChannel, text: &str) {
+        if matches!(channel, WsChannel::SystemStatus | WsChannel::SystemAlert) {
+            for entry in self.sessions.iter() {
+                let _ = entry.value().outbound.try_send(text.to_owned());
+            }
+            return;
+        }
+        self.fanout(&SubscriptionKey::global(channel), text);
+    }
+
     /// Number of live sessions (diagnostics / tests).
     #[must_use]
     pub fn session_count(&self) -> usize {
@@ -125,7 +137,7 @@ pub async fn spawn_ws_broadcaster(
                     return;
                 };
                 if let Some((key, envelope)) = event_envelope(&event) {
-                    registry.fanout(&key, &envelope.to_text());
+                    registry.fanout_channel(key.channel, &envelope.to_text());
                 }
             }
         }

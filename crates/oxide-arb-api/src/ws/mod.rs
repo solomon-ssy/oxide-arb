@@ -293,6 +293,15 @@ impl ClobWsManager {
     pub fn seed_test_connectivity(&self) {
         *self.last_message_at.lock() = Some(Instant::now());
     }
+
+    /// Mark WS as stale for lifecycle tests (`last_message_age_ms >= age_ms`).
+    #[doc(hidden)]
+    pub fn seed_test_stale_connectivity(&self, age_ms: u64) {
+        let stale_at = Instant::now()
+            .checked_sub(Duration::from_millis(age_ms))
+            .unwrap_or_else(Instant::now);
+        *self.last_message_at.lock() = Some(stale_at);
+    }
 }
 
 #[cfg(test)]

@@ -1,7 +1,11 @@
 //! System status, lifecycle, config, accounting, and reporting domain models.
 
 use crate::{
-    domain::{NullablePatch, Patch, control_ports::CatalogState},
+    domain::{
+        NullablePatch, Patch,
+        control_ports::CatalogState,
+        lifecycle::{MarketDataConnectivity, OperationalPhase},
+    },
     enums::{
         common::{ExecutionMode, ReportType},
         lifecycle::ShutdownStage,
@@ -30,6 +34,10 @@ pub struct SystemStatus {
     pub daily_pnl: Usd,
     /// Market-catalog warmup state (detection is gated until `Ready`).
     pub catalog: CatalogState,
+    /// Authoritative operator lifecycle (header UI + Live gate).
+    pub operational_phase: OperationalPhase,
+    /// CLOB websocket market-data readiness snapshot.
+    pub market_data: MarketDataConnectivity,
     /// Active published control-factor publication id, if any.
     pub control_factor_publication_id: Option<String>,
     /// Whether the published control-factor snapshot TTL has elapsed.
@@ -47,13 +55,88 @@ pub struct HealthReport {
     pub checked_at: DateTime<Utc>,
 }
 
+/// Outcome of a single subsystem health probe.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum SubsystemCheckStatus {
+    Healthy,
+    Unhealthy,
+    Skipped { reason: String },
+}
+
 /// Health status of a single subsystem.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubsystemHealth {
     pub name: String,
-    pub healthy: bool,
+    pub status: SubsystemCheckStatus,
     pub latency_ms: Option<u64>,
     pub detail: Option<String>,
+}
+
+impl SubsystemHealth {
+    /// Whether this probe counts toward `HealthReport::overall_healthy`.
+    #[must_use]
+    pub const fn counts_toward_overall(&self) -> bool {
+        !matches!(self.status, SubsystemCheckStatus::Skipped { .. })
+    }
+
+    /// Legacy-style healthy flag for metrics and quick checks.
+    #[must_use]
+    pub const fn is_healthy(&self) -> bool {
+        matches!(self.status, SubsystemCheckStatus::Healthy)
+    }
+
+    #[must_use]
+    pub fn healthy(name: impl Into<String>, latency_ms: Option<u64>) -> Self {
+        Self {
+            name: name.into(),
+            status: SubsystemCheckStatus::Healthy,
+            latency_ms,
+            detail: None,
+        }
+    }
+
+    #[must_use]
+    pub fn unhealthy(
+        name: impl Into<String>,
+        latency_ms: Option<u64>,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            status: SubsystemCheckStatus::Unhealthy,
+            latency_ms,
+            detail: Some(detail.into()),
+        }
+    }
+
+    #[must_use]
+    pub fn skipped(name: impl Into<String>, reason: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            status: SubsystemCheckStatus::Skipped {
+                reason: reason.into(),
+            },
+            latency_ms: None,
+            detail: None,
+        }
+    }
+}
+
+impl HealthReport {
+    /// Recompute aggregate health from non-skipped subsystem probes.
+    #[must_use]
+    pub fn from_checks(checks: Vec<SubsystemHealth>, checked_at: DateTime<Utc>) -> Self {
+        let overall_healthy = checks
+            .iter()
+            .filter(|check| check.counts_toward_overall())
+            .all(SubsystemHealth::is_healthy);
+        Self {
+            overall_healthy,
+            checks,
+            checked_at,
+        }
+    }
 }
 
 /// Shutdown progress tracking.

@@ -114,3 +114,31 @@ pub enum PipelineEvent {
         status: ShardConnectionStatus,
     },
 }
+
+impl PipelineEvent {
+    /// Full book snapshot or incremental delta — the variants that mutate
+    /// [`BookStore`] and qualify for latest-wins coalesce backpressure.
+    #[must_use]
+    pub const fn is_book_coalescable(&self) -> bool {
+        matches!(self, Self::BookSnapshot(_) | Self::PriceDelta(_))
+    }
+
+    /// Primary market book feed used to detect first live market-data ingress.
+    #[must_use]
+    pub const fn is_market_data_event(&self) -> bool {
+        self.is_book_coalescable()
+    }
+
+    /// Token id used for book-apply sharding and coalesce keys, when present.
+    #[must_use]
+    pub const fn asset_id(&self) -> Option<&TokenId> {
+        match self {
+            Self::BookSnapshot(cmd) => Some(&cmd.asset_id),
+            Self::PriceDelta(cmd) => Some(&cmd.asset_id),
+            Self::BestBidAsk { asset_id, .. }
+            | Self::TickSizeChange { asset_id, .. }
+            | Self::LastTradePrice { asset_id, .. } => Some(asset_id),
+            Self::MarketResolved { .. } | Self::ShardStatus { .. } => None,
+        }
+    }
+}

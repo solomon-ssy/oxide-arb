@@ -1,14 +1,19 @@
 //! Live [`SystemStatus`] assembly shared by the runtime control port and the
 //! WebSocket status publisher.
 
-use crate::control::mode_transition::CoreRuntimeControlDeps;
+use crate::{
+    control::{factor_snapshot::FactorSnapshotStore, mode_transition::CoreRuntimeControlDeps},
+    service::runtime_lifecycle::{
+        LatestUnhealthySubsystems, LifecycleSnapshot, evaluate_lifecycle, lifecycle_inputs,
+    },
+};
 use chrono::Utc;
 use oxide_arb_models::{
     domain::{CatalogStatusPort, SystemBalanceSource, SystemBalanceView, SystemStatus},
     enums::common::ExecutionMode,
     types::{MarketId, Usd},
 };
-use oxide_arb_risk::traits::RiskMetrics;
+use oxide_arb_risk::{engine::RiskEngine, traits::RiskMetrics};
 use std::{
     sync::Arc,
     time::{Duration, Instant},
@@ -18,17 +23,66 @@ use tokio::sync::{Notify, futures::Notified};
 /// Default interval between periodic `SystemStatusChanged` pushes.
 pub const SYSTEM_STATUS_BROADCAST_INTERVAL: Duration = Duration::from_secs(5);
 
+/// Collect lifecycle inputs shared by system status and health checks.
+#[must_use]
+pub fn lifecycle_snapshot(deps: &CoreRuntimeControlDeps) -> LifecycleSnapshot {
+    lifecycle_snapshot_from_parts(
+        deps.risk_engine.as_ref(),
+        deps.metrics.as_ref(),
+        deps.execution_mode.current(),
+        deps.factor_store.as_ref(),
+        deps.unhealthy_subsystems.as_ref(),
+    )
+}
+
+/// Build a lifecycle snapshot from subsystem handles (health checker path).
+#[must_use]
+pub fn lifecycle_snapshot_from_parts(
+    risk_engine: &RiskEngine,
+    metrics: &dyn RiskMetrics,
+    mode: ExecutionMode,
+    factor_store: &FactorSnapshotStore,
+    unhealthy_subsystems: &LatestUnhealthySubsystems,
+) -> LifecycleSnapshot {
+    let snapshot = risk_engine.snapshot(metrics);
+    let published = factor_store.published();
+    LifecycleSnapshot {
+        unhealthy: unhealthy_subsystems.snapshot(),
+        breaker_state: snapshot.breaker_state,
+        control_factor_snapshot_expired: published
+            .publication_id
+            .as_ref()
+            .is_some_and(|_| published.is_expired_at(Utc::now())),
+        control_factor_live_warn: mode == ExecutionMode::Live && published.publication_id.is_none(),
+    }
+}
+
+/// Evaluate operator lifecycle from a precomputed snapshot.
+#[must_use]
+pub fn evaluate_operational_lifecycle(
+    deps: &CoreRuntimeControlDeps,
+    snap: &LifecycleSnapshot,
+) -> (
+    oxide_arb_models::domain::OperationalPhase,
+    oxide_arb_models::domain::MarketDataConnectivity,
+) {
+    evaluate_lifecycle(&lifecycle_inputs(
+        deps.catalog.as_ref(),
+        deps.ws_manager.as_ref(),
+        snap,
+    ))
+}
+
 /// Build the aggregate system status snapshot from live subsystem handles.
 pub fn build_system_status(deps: &CoreRuntimeControlDeps, started_at: Instant) -> SystemStatus {
     let metrics = deps.metrics.as_ref();
     let snapshot = deps.risk_engine.snapshot(metrics);
     let published = deps.factor_store.published();
     let mode = deps.execution_mode.current();
-    let snapshot_expired = published
-        .publication_id
-        .as_ref()
-        .is_some_and(|_| published.is_expired_at(Utc::now()));
-    let live_warn = mode == ExecutionMode::Live && published.publication_id.is_none();
+    let lifecycle = lifecycle_snapshot(deps);
+    let (operational_phase, market_data) = evaluate_operational_lifecycle(deps, &lifecycle);
+    let snapshot_expired = lifecycle.control_factor_snapshot_expired;
+    let live_warn = lifecycle.control_factor_live_warn;
     SystemStatus {
         execution_mode: mode,
         breaker_state: snapshot.breaker_state,
@@ -40,6 +94,8 @@ pub fn build_system_status(deps: &CoreRuntimeControlDeps, started_at: Instant) -
         total_exposure: snapshot.total_exposure,
         daily_pnl: snapshot.daily_pnl,
         catalog: deps.catalog.catalog_state(),
+        operational_phase,
+        market_data,
         control_factor_publication_id: published.publication_id.as_ref().map(ToString::to_string),
         control_factor_snapshot_expired: snapshot_expired,
         control_factor_live_warn: live_warn,

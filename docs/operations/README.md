@@ -5,6 +5,7 @@
 | 文档 | 读者 | 内容 |
 |------|------|------|
 | [runbook.md](./runbook.md) | 运维、量化 | **主手册**（含 Bot 钱包、凭证、Polymarket、DryRun/Paper/Live、因子发布） |
+| [live-production-guide.md](./live-production-guide.md) | 运维、量化、决策 | **实盘生产指南**（Readiness 审计 + Live SOP + 充提 + 监控 + 上线门槛） |
 | [bankroll-and-risk-metrics.md](./bankroll-and-risk-metrics.md) | 研发、运维 | 为什么 `risk.bankroll_usd` 是配置而非权威钱包余额 |
 | [docker-integration.md](./docker-integration.md) | CI / 开发 | testcontainers 集成测试 |
 | [network-integration.md](./network-integration.md) | CI / 开发 | 需外网的 Polymarket / RPC 集成测试 |

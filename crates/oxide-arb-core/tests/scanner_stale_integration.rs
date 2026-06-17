@@ -15,7 +15,7 @@ use oxide_arb_core::{
         book_store::BookStore, market_cache::MarketCache, market_registry::MarketRegistry,
         staleness_classifier::StalenessClassifier, universe_filter::MarketUniverseFilter,
     },
-    service::catalog_readiness::CatalogReadiness,
+    service::{catalog_readiness::CatalogReadiness, detection_readiness::DetectionReadiness},
 };
 use oxide_arb_models::{
     domain::{
@@ -111,6 +111,8 @@ fn build_scanner_with_catalog(
         &runtime.detection,
     ));
     let staleness = StalenessClassifier::new(&runtime.market_data);
+    let detection_readiness = Arc::new(DetectionReadiness::default());
+    detection_readiness.update_from_phase(&oxide_arb_models::domain::OperationalPhase::Operational);
 
     Scanner::new(ScannerDeps {
         pipeline,
@@ -121,6 +123,7 @@ fn build_scanner_with_catalog(
         detection_writer: None,
         events: CoreEventPublisher::bounded(1).0,
         catalog,
+        detection_readiness,
     })
 }
 

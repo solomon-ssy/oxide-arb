@@ -283,6 +283,26 @@ async fn ws_broadcaster_delivers_subscribed_core_event() {
 
 #[actix_web::test]
 #[ignore = "requires Docker"]
+async fn ws_system_status_broadcast_without_subscribe() {
+    let env = TestEnv::start().await;
+    let token = client::login(&env, "admin", "admin").await;
+    let mut server = start_ws_server(env.state.clone());
+    attach_api_version(&mut server);
+    let mut session = connect_ws(&mut server, &token).await;
+
+    // Drain connect-time snapshot.
+    let _ = recv_until_type(&mut session, "system.status", Duration::from_millis(500)).await;
+
+    let status = env.state.control.system_status().await;
+    env.state
+        .events
+        .publish(CoreEvent::SystemStatusChanged(status));
+    let pushed = recv_until_type(&mut session, "system.status", Duration::from_secs(2)).await;
+    assert_eq!(pushed["data"]["operational_phase"]["phase"], "operational");
+}
+
+#[actix_web::test]
+#[ignore = "requires Docker"]
 async fn ws_subscribe_receives_multiple_system_status_events() {
     let env = TestEnv::start().await;
     let token = client::login(&env, "admin", "admin").await;

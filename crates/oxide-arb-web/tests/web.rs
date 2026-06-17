@@ -19,6 +19,8 @@ mod headers;
 mod pg;
 #[path = "common/redis.rs"]
 mod redis;
+#[path = "common/repos.rs"]
+mod repos;
 
 #[path = "web/auth.rs"]
 mod auth;

@@ -1,6 +1,7 @@
 //! Data pipeline backpressure under flood load — FSM must not enter emergency.
 
 use oxide_arb_core::{
+    control::status::SystemStatusNudge,
     execution::fsm::ExecutionFSM,
     observability::{
         alert_dispatcher::AlertDispatcher, backpressure::BackpressurePolicy,
@@ -68,6 +69,7 @@ async fn flood_does_not_halt_fsm() {
         book_shard_count: 1,
         book_channel_capacity: 4,
         shutdown: shutdown.clone(),
+        status_nudge: SystemStatusNudge::default(),
     }));
 
     let pipeline_handle = {
@@ -132,6 +134,7 @@ async fn success_path_does_not_coalesce() {
         book_shard_count: 1,
         book_channel_capacity: 256,
         shutdown: shutdown.clone(),
+        status_nudge: SystemStatusNudge::default(),
     }));
 
     let pipeline_handle = {

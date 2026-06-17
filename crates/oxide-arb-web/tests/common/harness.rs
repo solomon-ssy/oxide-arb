@@ -34,9 +34,10 @@ use oxide_arb_models::{
     config::{CacheConfig, DeployConfig, JwtConfig, RedisConfig},
     domain::{
         BlacklistInfo, CatalogState, CoreEventPublisher, ExposureBindingLimit, HealthReport,
-        MarketDataPort, ModeTransitionReport, ReplayEnqueueRequest, ReplayEnqueueResult,
-        ReplayPort, RiskEngineState, RuntimeConfigPort, RuntimeControlError, RuntimeControlPort,
-        SystemBalanceSource, SystemBalanceView, SystemStatus, market::book::BookSnapshot,
+        MarketDataConnectivity, MarketDataPort, ModeTransitionReport, OperationalPhase,
+        ReplayEnqueueRequest, ReplayEnqueueResult, ReplayPort, RiskEngineState, RuntimeConfigPort,
+        RuntimeControlError, RuntimeControlPort, SystemBalanceSource, SystemBalanceView,
+        SystemStatus, WsShardConnectivity, market::book::BookSnapshot,
     },
     enums::{
         common::ExecutionMode,
@@ -47,19 +48,6 @@ use oxide_arb_models::{
         validation::{RuntimePreflightContext, preflight_runtime_config},
     },
     types::{MarketId, TokenId, TradeId, Usd},
-};
-use oxide_arb_repository::{
-    postgres::{
-        PgControlFactorRepository, PgFactDataRepository, PgMarketRepository, PgMenuRepository,
-        PgOperationLogRepository, PgPositionRepository, PgReportRepository, PgRiskAuditRepository,
-        PgRoleMenuRepository, PgRolePermissionRepository, PgRoleRepository,
-        PgRuntimeConfigVersionRepository, PgTradeRepository, PgUserRepository,
-        PgUserRoleRepository,
-    },
-    traits::{
-        ControlFactorRepository, ControlFactorShadowDecisionRepository, OperationLogRepository,
-        RuntimeConfigVersionRepository,
-    },
 };
 use oxide_arb_storage::cache::connect_pool;
 use oxide_arb_test_support::mocks::MockTimeseriesRepository;
@@ -81,7 +69,7 @@ use testcontainers::ContainerAsync;
 use testcontainers_modules::{postgres::Postgres, redis::Redis};
 use tokio_util::sync::CancellationToken;
 
-use crate::{pg, redis};
+use crate::{pg, redis, repos::WebHarnessRepos};
 
 /// The version header every `/api/auth/*` request must carry to match the `v1`
 /// scope (see `ApiV1Guard`).
@@ -144,19 +132,10 @@ impl TestEnv {
         );
         let perm_checker = Arc::new(routes::init_rbac_rules());
 
-        // Governance control-plane: one registry over the shared repositories,
-        // plus read handles exposed directly on the state.
-        let control_factors: Arc<dyn ControlFactorRepository> =
-            Arc::new(PgControlFactorRepository::new(db.clone()));
-        let runtime_config: Arc<dyn RuntimeConfigVersionRepository> =
-            Arc::new(PgRuntimeConfigVersionRepository::new(db.clone()));
-        let shadow_decisions: Arc<dyn ControlFactorShadowDecisionRepository> =
-            Arc::new(PgFactDataRepository::new(db.clone()));
-        let operation_logs: Arc<dyn OperationLogRepository> =
-            Arc::new(PgOperationLogRepository::new(db.clone()));
+        let repos = WebHarnessRepos::from_connection(&db);
         let registry = Arc::new(ControlFactorRegistry::new(
-            Arc::clone(&control_factors),
-            Arc::clone(&runtime_config),
+            Arc::clone(&repos.control_factors),
+            Arc::clone(&repos.runtime_config),
         ));
 
         // Operation-log pipeline: buffer in the state, writer drains to Postgres.
@@ -165,7 +144,7 @@ impl TestEnv {
         let writer_shutdown = CancellationToken::new();
         tokio::spawn(spawn_operation_log_writer(
             operation_log_rx,
-            Arc::clone(&operation_logs),
+            Arc::clone(&repos.operation_logs),
             64,
             Duration::from_millis(50),
             writer_shutdown.clone(),
@@ -194,25 +173,25 @@ impl TestEnv {
             runtime_config_apply: Arc::clone(&runtime_config_apply) as _,
             jwt,
             jwt_blacklist,
-            users: Arc::new(PgUserRepository::new(db.clone())),
-            roles: Arc::new(PgRoleRepository::new(db.clone())),
-            menus: Arc::new(PgMenuRepository::new(db.clone())),
-            user_roles: Arc::new(PgUserRoleRepository::new(db.clone())),
-            role_menus: Arc::new(PgRoleMenuRepository::new(db.clone())),
-            role_permissions: Arc::new(PgRolePermissionRepository::new(db.clone())),
-            positions: Arc::new(PgPositionRepository::new(db.clone())),
-            trades: Arc::new(PgTradeRepository::new(db.clone())),
-            markets: Arc::new(PgMarketRepository::new(db.clone())),
-            reports: Arc::new(PgReportRepository::new(db.clone())),
+            users: Arc::clone(&repos.users),
+            roles: Arc::clone(&repos.roles),
+            menus: Arc::clone(&repos.menus),
+            user_roles: Arc::clone(&repos.user_roles),
+            role_menus: Arc::clone(&repos.role_menus),
+            role_permissions: Arc::clone(&repos.role_permissions),
+            positions: Arc::clone(&repos.positions),
+            trades: Arc::clone(&repos.trades),
+            markets: Arc::clone(&repos.markets),
+            reports: Arc::clone(&repos.reports),
             evidence: Arc::clone(&evidence) as _,
-            risk_audit: Arc::new(PgRiskAuditRepository::new(db.clone())),
+            risk_audit: Arc::clone(&repos.risk_audit),
             casbin,
             perm_checker,
             registry,
-            control_factors,
-            runtime_config,
-            shadow_decisions,
-            operation_logs,
+            control_factors: Arc::clone(&repos.control_factors),
+            runtime_config: Arc::clone(&repos.runtime_config),
+            shadow_decisions: Arc::clone(&repos.shadow_decisions),
+            operation_logs: Arc::clone(&repos.operation_logs),
             operation_log,
             control: Arc::new(MockRuntimeControl::default()),
             market_data: Arc::new(MockMarketData),
@@ -553,6 +532,16 @@ impl RuntimeControlPort for MockRuntimeControl {
             catalog: CatalogState::Ready {
                 markets: 1,
                 synced_at: Utc::now(),
+            },
+            operational_phase: OperationalPhase::Operational,
+            market_data: MarketDataConnectivity {
+                ready: true,
+                last_message_age_ms: Some(1),
+                ws_shards: WsShardConnectivity {
+                    total: 1,
+                    disconnected: 0,
+                    oldest_disconnected_secs: None,
+                },
             },
             control_factor_publication_id: None,
             control_factor_snapshot_expired: false,

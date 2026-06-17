@@ -23,7 +23,7 @@ use oxide_arb_core::{
         staleness_classifier::StalenessClassifier,
         universe_filter::MarketUniverseFilter,
     },
-    service::catalog_readiness::CatalogReadiness,
+    service::{catalog_readiness::CatalogReadiness, detection_readiness::DetectionReadiness},
 };
 use oxide_arb_models::{
     domain::{
@@ -135,6 +135,8 @@ fn bench_e2e_ws_to_scan(c: &mut Criterion) {
 
     let catalog = Arc::new(CatalogReadiness::new());
     catalog.mark_ready(1, Utc::now());
+    let detection_readiness = Arc::new(DetectionReadiness::default());
+    detection_readiness.update_from_phase(&oxide_arb_models::domain::OperationalPhase::Operational);
     let scanner = Scanner::new(ScannerDeps {
         pipeline: Arc::new(make_core_pipeline()),
         book_store,
@@ -144,6 +146,7 @@ fn bench_e2e_ws_to_scan(c: &mut Criterion) {
         detection_writer: None,
         events: CoreEventPublisher::bounded(1).0,
         catalog,
+        detection_readiness,
     });
     let entry = CachedMarketScanEntry {
         market_id: MarketId::new("bench-m1"),

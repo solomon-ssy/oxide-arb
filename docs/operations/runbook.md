@@ -447,12 +447,24 @@ curl -s -X POST http://localhost:8080/api/auth/login \
 
 ### 5.4 启动验收清单
 
-- [ ] `GET /api/system/health` → 200
-- [ ] `GET /api/system/status` → `execution_mode: dry_run`，WS/Gamma 状态正常
+- [ ] `GET /api/system/health` → 200（**诊断面**；warmup 期间 websocket 可能 `skipped`，不表示故障）
+- [ ] `GET /api/system/status` → `execution_mode: dry_run`
+- [ ] `operational_phase` 按序收敛：`catalog_warming` → `market_data_connecting`（大规模目录 1–3 分钟正常）→ `operational`
+- [ ] Admin UI 顶栏读 **`operational_phase`**（`starting` / `running`），**不**应因启动期 infrastructure alert 长期显示「降级」
 - [ ] `GET /metrics` → Prometheus 有数据
 - [ ] 日志：Gamma sync、WS connected、markets registered
 - [ ] PG：`SELECT count(*) FROM market;` > 0
 - [ ] 运行 10 分钟后 CH：`SELECT count() FROM opportunity_detection` 可能仍为 0（取决于当时是否有 endgame 机会，正常）
+
+**`operational_phase` 与 `GET /system/health` 解耦：**
+
+| 信号 | 用途 |
+|------|------|
+| `system.status.operational_phase` | 顶栏状态、Live 切换门控（必须 `operational`） |
+| `system.status.market_data` | `last_message_age_ms` 权威；`ws_shards` 仅展示 |
+| `system.health` | 子系统探针明细；warmup 时 WS 为 `skipped`，不计入 `overall_healthy` |
+
+**进入 Live 前：** `operational_phase.phase == operational` 且 `market_data.ready == true`，否则 `POST /system/mode` preflight 会 fail-closed 拒绝。
 
 ---
 
@@ -519,6 +531,8 @@ paper: insufficient depth for {cost} at {limit_price}
 - `fok_fills` / `fok_misses` metrics
 - 需要 boot 时 ClobClient 可用
 - 切 Live 协议（`mode_transition.rs`）：Preflight → Quiesce → Commit mode → Refresh authoritative metrics → Resume
+
+**Live preflight 运营阶段门控（fail-closed）：** 除 CLOB/CTF/holder/redeem 外，Preflight 读取 `build_system_status()` 的 `operational_phase`。仅当 `phase == operational`（目录就绪 + WS 已收到新鲜 book 消息）才允许进入 Live；否则返回明确 precondition（含 `market_data_ready`）。
 
 **Live 额外 runtime 校验：**
 
@@ -658,7 +672,7 @@ miss_rate = misses / (fills + misses)
 | Intent orphan（crash 后 Intent 行仍有 `reservation_id`） | Emergency 告警 `integrity.intent_orphan`；operator 关闭 trade 或走 reconciliation；禁止 resume 直至 `blocking_count=0` |
 | Live 无 control-factor publication | **Warning** 告警 + gauge=0；**不** block 新单（warn-only） |
 
-Manual 充提与 halt→reconcile→withdraw 顺序见 [`live-trading-sop.md`](live-trading-sop.md)。
+Manual 充提、Live canary、halt→reconcile→withdraw 与生产 Readiness 见 [`live-production-guide.md`](live-production-guide.md)。
 
 #### Runtime 配置
 
@@ -870,8 +884,9 @@ curl -H "Authorization: Bearer $TOKEN" \
 ```
 
 `inactive` 表示该 cadence 在当前 execution mode 下业务上不适用，不应解释为
-materialization 失败，也不会驱动 Web 顶栏降级。真正的降级只来自 breaker、
-catalog/infra health 或 `affects_trading=true` 的结构化告警。
+materialization 失败，也不会驱动 Web 顶栏降级。顶栏读 `system.status.operational_phase`；
+`degraded` / `critical` 来自 phase 派生（breaker、行情 stale、子系统 unhealthy 等），
+**不是**启动期 infrastructure alert latch。
 
 ### 9.4 Production Quality Gate 默认门槛
 

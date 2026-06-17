@@ -53,6 +53,7 @@ use oxide_arb_core::{
     runtime_config::RuntimeConfigStore,
     service::{
         catalog_readiness::CatalogReadiness,
+        detection_readiness::DetectionReadiness,
         risk_metrics::{ApiHealthTracker, RiskMetricsState},
     },
     trade_integrity::TradeIntegrityStore,
@@ -787,6 +788,8 @@ fn bench_scanner_scan_market(c: &mut Criterion) {
     let pipeline = Arc::new(make_core_pipeline());
     let catalog = Arc::new(CatalogReadiness::new());
     catalog.mark_ready(1, Utc::now());
+    let detection_readiness = Arc::new(DetectionReadiness::default());
+    detection_readiness.update_from_phase(&oxide_arb_models::domain::OperationalPhase::Operational);
     let scanner = Scanner::new(ScannerDeps {
         pipeline,
         book_store,
@@ -796,6 +799,7 @@ fn bench_scanner_scan_market(c: &mut Criterion) {
         detection_writer: None,
         events: CoreEventPublisher::bounded(1).0,
         catalog,
+        detection_readiness,
     });
     let entry = CachedMarketScanEntry {
         market_id: MarketId::new("bench-m1"),

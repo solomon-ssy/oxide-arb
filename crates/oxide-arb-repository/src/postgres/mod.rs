@@ -4,7 +4,10 @@
 //! wiring code can name it without threading the context path.
 
 // Crate-internal helpers.
+pub mod arc_repo;
 pub(crate) mod bind_limit;
+
+pub use arc_repo::arc_repo;
 
 // Bounded-context groups.
 pub mod accounting;

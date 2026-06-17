@@ -8,6 +8,7 @@
 use arc_swap::{ArcSwap, ArcSwapOption};
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
+use oxide_arb_control::scheduler::ScheduleAlert;
 use oxide_arb_models::{
     domain::{CoreEvent, CoreEventPublisher, SystemAlertEvent},
     enums::common::{AlertCategory, AlertLevel, AlertSource},
@@ -51,8 +52,8 @@ impl Alert {
             source,
             title: title.into(),
             body: body.into(),
-            affects_trading: default_affects_trading(category),
-            visible_toast: default_visible_toast(severity, category),
+            affects_trading: category.default_affects_trading(),
+            visible_toast: category.default_visible_toast(severity),
             dedupe_secs: 0,
             timestamp,
         }
@@ -90,18 +91,6 @@ impl Alert {
             dedupe_secs: self.dedupe_secs.max(fallback_dedupe_secs),
         }
     }
-}
-
-const fn default_affects_trading(category: AlertCategory) -> bool {
-    matches!(
-        category,
-        AlertCategory::TradingSafety | AlertCategory::Infrastructure
-    )
-}
-
-const fn default_visible_toast(severity: AlertLevel, category: AlertCategory) -> bool {
-    matches!(severity, AlertLevel::Critical | AlertLevel::Emergency)
-        || matches!(category, AlertCategory::TradingSafety)
 }
 
 struct TelegramChannel {
@@ -259,6 +248,26 @@ impl AlertDispatcher {
                 tracing::error!(%error, title = %alert.title, "cannot dispatch alert outside Tokio runtime");
             }
         }
+    }
+
+    /// Dispatch a materialization scheduler cadence alert to external channels
+    /// and the real-time event bus.
+    pub async fn dispatch_schedule_alert(&self, alert: ScheduleAlert) {
+        let (title, body) = alert.operator_message();
+        self.dispatch(
+            Alert::new(
+                format!("materialization.scheduler.{}", alert.idempotency_suffix()),
+                AlertLevel::Warning,
+                AlertCategory::SchedulerHealth,
+                AlertSource::Scheduler,
+                title,
+                body,
+                Utc::now(),
+            )
+            .with_affects_trading(false)
+            .with_visible_toast(true),
+        )
+        .await;
     }
 }
 

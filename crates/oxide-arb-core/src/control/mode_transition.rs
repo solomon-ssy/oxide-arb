@@ -49,13 +49,15 @@ use crate::{
     runtime_config::RuntimeConfigStore,
     service::{
         catalog_readiness::CatalogReadiness,
+        detection_readiness::DetectionReadiness,
         risk_metrics::{RiskMetricsRefreshService, RiskMetricsSource, RiskMetricsState},
+        runtime_lifecycle::LatestUnhealthySubsystems,
         system_status_publisher::SharedSystemStatusPublisher,
     },
     trade_integrity::TradeIntegrityStore,
 };
 use async_trait::async_trait;
-use oxide_arb_api::{clob::ClobClient, ctf::client::CtfRedeemClient};
+use oxide_arb_api::{clob::ClobClient, ctf::client::CtfRedeemClient, ws::ClobWsManager};
 use oxide_arb_models::{
     config::DeployConfig,
     domain::{
@@ -100,6 +102,8 @@ pub struct CoreRuntimeControlDeps {
     pub ctf_redeem: Option<Arc<CtfRedeemClient>>,
     pub holder_address: String,
     pub market_registry: Arc<MarketRegistry>,
+    pub ws_manager: Arc<ClobWsManager>,
+    pub unhealthy_subsystems: Arc<LatestUnhealthySubsystems>,
     pub health_checker: Option<Arc<HealthChecker>>,
     pub deploy: Arc<DeployConfig>,
     /// Live runtime config: mode preflight reads the active snapshot, never a
@@ -114,6 +118,8 @@ pub struct CoreRuntimeControlDeps {
     pub trade_integrity: Arc<TradeIntegrityStore>,
     pub factor_store: Arc<FactorSnapshotStore>,
     pub alerts: Arc<AlertDispatcher>,
+    /// Hot-path detection gate mirrored from operational phase on status publish.
+    pub detection_readiness: Arc<DetectionReadiness>,
     /// Optional publisher for immediate WebSocket status pushes after control ops.
     pub status_publisher: Option<SharedSystemStatusPublisher>,
 }
@@ -132,6 +138,8 @@ pub struct CoreRuntimeControl {
     ctf_redeem: Option<Arc<CtfRedeemClient>>,
     holder_address: String,
     market_registry: Arc<MarketRegistry>,
+    ws_manager: Arc<ClobWsManager>,
+    unhealthy_subsystems: Arc<LatestUnhealthySubsystems>,
     health_checker: Option<Arc<HealthChecker>>,
     deploy: Arc<DeployConfig>,
     runtime_config: Arc<RuntimeConfigStore>,
@@ -142,6 +150,7 @@ pub struct CoreRuntimeControl {
     trade_integrity: Arc<TradeIntegrityStore>,
     factor_store: Arc<FactorSnapshotStore>,
     alerts: Arc<AlertDispatcher>,
+    detection_readiness: Arc<DetectionReadiness>,
     close_unresolvable: CloseUnresolvableService,
     status_publisher: Option<SharedSystemStatusPublisher>,
     started_at: Instant,
@@ -170,6 +179,8 @@ impl CoreRuntimeControl {
             ctf_redeem: deps.ctf_redeem,
             holder_address: deps.holder_address,
             market_registry: deps.market_registry,
+            ws_manager: deps.ws_manager,
+            unhealthy_subsystems: deps.unhealthy_subsystems,
             health_checker: deps.health_checker,
             deploy: deps.deploy,
             runtime_config: deps.runtime_config,
@@ -180,6 +191,7 @@ impl CoreRuntimeControl {
             trade_integrity: deps.trade_integrity,
             factor_store: deps.factor_store,
             alerts: deps.alerts,
+            detection_readiness: deps.detection_readiness,
             close_unresolvable,
             status_publisher: deps.status_publisher,
             started_at,
@@ -200,6 +212,8 @@ impl CoreRuntimeControl {
             ctf_redeem: self.ctf_redeem.clone(),
             holder_address: self.holder_address.clone(),
             market_registry: Arc::clone(&self.market_registry),
+            ws_manager: Arc::clone(&self.ws_manager),
+            unhealthy_subsystems: Arc::clone(&self.unhealthy_subsystems),
             health_checker: self.health_checker.clone(),
             deploy: Arc::clone(&self.deploy),
             runtime_config: Arc::clone(&self.runtime_config),
@@ -210,6 +224,7 @@ impl CoreRuntimeControl {
             trade_integrity: Arc::clone(&self.trade_integrity),
             factor_store: Arc::clone(&self.factor_store),
             alerts: Arc::clone(&self.alerts),
+            detection_readiness: Arc::clone(&self.detection_readiness),
             status_publisher: self.status_publisher.clone(),
         }
     }
@@ -253,6 +268,13 @@ impl CoreRuntimeControl {
                 return Err(RuntimeControlError::Precondition(
                     "entering Live requires a configured holder address".to_owned(),
                 ));
+            }
+            let status = build_system_status(&self.control_deps(), self.started_at);
+            if !status.operational_phase.allows_live_trading() {
+                return Err(RuntimeControlError::Precondition(format!(
+                    "cannot enter Live while operational_phase is {:?}; market_data_ready={}",
+                    status.operational_phase, status.market_data.ready
+                )));
             }
         }
         Ok(())
@@ -471,12 +493,11 @@ impl RuntimeControlPort for CoreRuntimeControl {
             Some(checker) => checker.check_all().await,
             None => HealthReport {
                 overall_healthy: false,
-                checks: vec![SubsystemHealth {
-                    name: "health_checker".into(),
-                    healthy: false,
-                    latency_ms: None,
-                    detail: Some("health checker unavailable".into()),
-                }],
+                checks: vec![SubsystemHealth::unhealthy(
+                    "health_checker",
+                    None,
+                    "health checker unavailable",
+                )],
                 checked_at: chrono::Utc::now(),
             },
         }
