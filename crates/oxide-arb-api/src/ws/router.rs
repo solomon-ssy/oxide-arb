@@ -9,12 +9,15 @@
 use super::shard::{ShardDeps, WsShard};
 use oxide_arb_models::types::TokenId;
 use parking_lot::Mutex;
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 use tokio::sync::watch;
 
 /// One spawned shard: command channel plus its assignment ledger entry.
 struct ShardSlot {
-    tokens_tx: watch::Sender<HashSet<TokenId>>,
+    tokens_tx: watch::Sender<Arc<HashSet<TokenId>>>,
     assigned: HashSet<TokenId>,
 }
 
@@ -101,7 +104,7 @@ impl ShardRouter {
     /// Spawn a new resident shard actor (exactly once per `shard_id`).
     fn spawn_shard(&self, ledger: &mut RouterLedger) -> usize {
         let shard_id = ledger.shards.len();
-        let (tokens_tx, tokens_rx) = watch::channel(HashSet::new());
+        let (tokens_tx, tokens_rx) = watch::channel(Arc::new(HashSet::new()));
         self.deps.health.register(shard_id);
         tokio::spawn(WsShard::new(shard_id, tokens_rx, self.deps.clone()).run_loop());
         ledger.shards.push(ShardSlot {
@@ -118,6 +121,7 @@ impl ShardRouter {
         self.ledger.lock().shards[shard_id]
             .tokens_tx
             .borrow()
+            .as_ref()
             .clone()
     }
 }
@@ -126,7 +130,7 @@ impl ShardRouter {
 fn publish(ledger: &RouterLedger, dirty: &HashSet<usize>) {
     for &shard_id in dirty {
         let slot = &ledger.shards[shard_id];
-        slot.tokens_tx.send_replace(slot.assigned.clone());
+        slot.tokens_tx.send_replace(Arc::new(slot.assigned.clone()));
     }
 }
 

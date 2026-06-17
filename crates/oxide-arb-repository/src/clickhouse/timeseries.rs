@@ -52,7 +52,6 @@ impl ChTimeseriesRepository {
     ) -> Self {
         let batch_size = config.batch_size;
         let flush_interval = Duration::from_secs(config.flush_interval_secs);
-        let metrics = Arc::clone(write_manager.metrics());
 
         Self {
             tick_inserter: BatchInserter::new(
@@ -60,7 +59,7 @@ impl ChTimeseriesRepository {
                 "tick_events",
                 batch_size,
                 flush_interval,
-                Arc::clone(&metrics),
+                Arc::clone(&write_manager),
                 shutdown.clone(),
             ),
             l2_replay_inserter: BatchInserter::new(
@@ -68,7 +67,7 @@ impl ChTimeseriesRepository {
                 "book_l2_replay_hot",
                 batch_size,
                 flush_interval,
-                Arc::clone(&metrics),
+                Arc::clone(&write_manager),
                 shutdown.clone(),
             ),
             book_inserter: BatchInserter::new(
@@ -76,7 +75,7 @@ impl ChTimeseriesRepository {
                 "book_snapshots",
                 batch_size,
                 flush_interval,
-                Arc::clone(&metrics),
+                Arc::clone(&write_manager),
                 shutdown.clone(),
             ),
             decision_context_inserter: BatchInserter::new(
@@ -84,7 +83,7 @@ impl ChTimeseriesRepository {
                 "book_decision_contexts",
                 batch_size,
                 flush_interval,
-                Arc::clone(&metrics),
+                Arc::clone(&write_manager),
                 shutdown.clone(),
             ),
             microstructure_1s_inserter: BatchInserter::new(
@@ -92,7 +91,7 @@ impl ChTimeseriesRepository {
                 "book_microstructure_1s",
                 batch_size,
                 flush_interval,
-                Arc::clone(&metrics),
+                Arc::clone(&write_manager),
                 shutdown.clone(),
             ),
             audit_inserter: BatchInserter::new(
@@ -100,7 +99,7 @@ impl ChTimeseriesRepository {
                 "opportunity_audit",
                 batch_size,
                 flush_interval,
-                Arc::clone(&metrics),
+                Arc::clone(&write_manager),
                 shutdown.clone(),
             ),
             detection_inserter: BatchInserter::new(
@@ -108,7 +107,7 @@ impl ChTimeseriesRepository {
                 "opportunity_detection",
                 batch_size,
                 flush_interval,
-                Arc::clone(&metrics),
+                Arc::clone(&write_manager),
                 shutdown.clone(),
             ),
             calibration_inserter: BatchInserter::new(
@@ -116,7 +115,7 @@ impl ChTimeseriesRepository {
                 "calibration_snapshots",
                 batch_size,
                 flush_interval,
-                metrics,
+                Arc::clone(&write_manager),
                 shutdown,
             ),
             client,
@@ -132,47 +131,47 @@ impl ChTimeseriesRepository {
 #[async_trait]
 impl TimeseriesFactWriter for ChTimeseriesRepository {
     async fn insert_tick_events(&self, events: Vec<TickEventRow>) -> Result<(), StorageError> {
-        self.tick_inserter.insert_many(events).await
+        self.tick_inserter.insert_batch(events).await
     }
 
     async fn insert_book_l2_replay(&self, rows: Vec<BookL2ReplayRow>) -> Result<(), StorageError> {
-        self.l2_replay_inserter.insert_many(rows).await
+        self.l2_replay_inserter.insert_batch(rows).await
     }
 
     async fn insert_book_snapshots(&self, rows: Vec<BookSnapshotRow>) -> Result<(), StorageError> {
-        self.book_inserter.insert_many(rows).await
+        self.book_inserter.insert_batch(rows).await
     }
 
     async fn insert_book_decision_contexts(
         &self,
         rows: Vec<BookDecisionContextRow>,
     ) -> Result<(), StorageError> {
-        self.decision_context_inserter.insert_many(rows).await
+        self.decision_context_inserter.insert_batch(rows).await
     }
 
     async fn insert_book_microstructure_1s(
         &self,
         rows: Vec<BookMicrostructureRow>,
     ) -> Result<(), StorageError> {
-        self.microstructure_1s_inserter.insert_many(rows).await
+        self.microstructure_1s_inserter.insert_batch(rows).await
     }
 
     async fn insert_detections(
         &self,
         rows: Vec<OpportunityDetectionRow>,
     ) -> Result<(), StorageError> {
-        self.detection_inserter.insert_many(rows).await
+        self.detection_inserter.insert_batch(rows).await
     }
 
     async fn insert_audits(&self, rows: Vec<OpportunityAuditRow>) -> Result<(), StorageError> {
-        self.audit_inserter.insert_many(rows).await
+        self.audit_inserter.insert_batch(rows).await
     }
 
     async fn insert_calibration_snapshots(
         &self,
         rows: Vec<CalibrationSnapshotRow>,
     ) -> Result<(), StorageError> {
-        self.calibration_inserter.insert_many(rows).await
+        self.calibration_inserter.insert_batch(rows).await
     }
 }
 

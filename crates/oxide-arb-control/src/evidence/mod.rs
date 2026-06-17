@@ -9,4 +9,5 @@ pub mod metric_gate;
 pub mod portfolio;
 pub mod replay;
 pub mod settlement;
+pub mod stats;
 pub mod training;

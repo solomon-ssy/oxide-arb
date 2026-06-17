@@ -208,11 +208,9 @@ impl BookStore {
             yes_best_ask: yes.best_ask(),
             no_best_bid: no.best_bid(),
             no_best_ask: no.best_ask(),
-            max_staleness_ms: EndgameBookPair {
-                yes: Arc::clone(&yes),
-                no: Arc::clone(&no),
-            }
-            .max_staleness_ms(now_ms),
+            max_staleness_ms: now_ms
+                .saturating_sub(yes.timestamp_ms)
+                .max(now_ms.saturating_sub(no.timestamp_ms)),
             yes_version: yes.version,
             no_version: no.version,
         })

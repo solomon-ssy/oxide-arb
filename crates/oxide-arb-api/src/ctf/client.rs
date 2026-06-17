@@ -227,7 +227,7 @@ impl CtfRedeemClient {
             ResolvedRedeemRoute::StandardCtf
             | ResolvedRedeemRoute::CtfCollateralAdapter
             | ResolvedRedeemRoute::NegRiskCollateralAdapter => {
-                self.redeem_standard(req, plan, holder_address).await
+                self.redeem_standard(req, plan).await
             }
             ResolvedRedeemRoute::NegRiskLegacyAdapter => {
                 self.redeem_neg_risk_legacy(req, plan, holder_address).await
@@ -239,9 +239,7 @@ impl CtfRedeemClient {
         &self,
         req: &RedeemRequest,
         plan: &ResolvedRedeemPlan,
-        holder_address: Address,
     ) -> Result<RedeemOutcome, RedeemError> {
-        let _ = holder_address;
         let rpc_url = self
             .rpc_url
             .parse()

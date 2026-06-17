@@ -92,7 +92,7 @@ impl MarketCache {
 
     /// O(1) lookup for a single market scan entry (Arc clone, no struct copy).
     pub fn get(&self, market_id: &MarketId) -> Option<Arc<CachedMarketScanEntry>> {
-        self.index.load().get(market_id).cloned()
+        self.index.load().get(market_id).map(Arc::clone)
     }
 }
 

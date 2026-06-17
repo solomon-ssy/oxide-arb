@@ -7,7 +7,7 @@
 use oxide_arb_models::types::TokenId;
 use parking_lot::RwLock;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fmt::{self, Display, Formatter},
     time::Instant,
 };
@@ -101,6 +101,13 @@ impl TokenFreshnessBoard {
             .read()
             .get(token_id)
             .and_then(|slot| u64::try_from(slot.last_message_at.elapsed().as_millis()).ok())
+    }
+
+    /// Drop freshness slots for tokens no longer present in the transport union.
+    pub fn prune_tokens(&self, active_tokens: &HashSet<TokenId>) {
+        self.tokens
+            .write()
+            .retain(|token_id, _| active_tokens.contains(token_id));
     }
 }
 

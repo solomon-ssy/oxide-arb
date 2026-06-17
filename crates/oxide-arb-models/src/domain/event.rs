@@ -52,7 +52,7 @@ pub struct SystemAlertEvent {
 #[derive(Debug, Clone)]
 pub enum CoreEvent {
     /// A scored opportunity was detected (projected to the public `Opportunity`).
-    OpportunityDetected(Opportunity),
+    OpportunityDetected(Arc<Opportunity>),
     /// A trade reached its terminal fill outcome (real DB-projected `TradeInfo`).
     TradeFilled(TradeInfo),
     /// A trade's position was settled after market resolution + redemption.

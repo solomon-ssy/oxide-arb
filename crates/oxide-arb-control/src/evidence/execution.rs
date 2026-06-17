@@ -18,6 +18,7 @@ use crate::evidence::{
         DecisionTokenBookView,
     },
     replay::{FokReplayRequest, FokReplayResult, replay_fok, stress_levels},
+    stats::percentile_u64,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -425,20 +426,6 @@ fn percentile_metric(values: &[u64], pct: usize, code: &str, reason: &str) -> Ev
         },
         |value| EvidenceMetric::Available { value },
     )
-}
-
-fn percentile_u64(values: &[u64], pct: usize) -> Option<u64> {
-    if values.is_empty() {
-        return None;
-    }
-    let mut sorted = values.to_vec();
-    sorted.sort_unstable();
-    let idx = sorted
-        .len()
-        .saturating_sub(1)
-        .saturating_mul(pct)
-        .saturating_div(100);
-    Some(sorted[idx])
 }
 
 fn price_to_bps(price: Decimal) -> u64 {

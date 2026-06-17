@@ -86,14 +86,14 @@ enum StreamEnd {
 /// A single shard actor: one SDK WebSocket connection, multiplexed streams.
 pub struct WsShard {
     shard_id: usize,
-    tokens_rx: watch::Receiver<HashSet<TokenId>>,
+    tokens_rx: watch::Receiver<Arc<HashSet<TokenId>>>,
     deps: ShardDeps,
 }
 
 impl WsShard {
     pub(super) const fn new(
         shard_id: usize,
-        tokens_rx: watch::Receiver<HashSet<TokenId>>,
+        tokens_rx: watch::Receiver<Arc<HashSet<TokenId>>>,
         deps: ShardDeps,
     ) -> Self {
         Self {
@@ -195,7 +195,7 @@ fn stagger_slot(shard_id: usize) -> u32 {
 
 /// Wait for the token set to settle: every further change restarts the window.
 async fn debounce_token_changes(
-    tokens_rx: &mut watch::Receiver<HashSet<TokenId>>,
+    tokens_rx: &mut watch::Receiver<Arc<HashSet<TokenId>>>,
     shutdown: &CancellationToken,
 ) {
     loop {
@@ -218,10 +218,10 @@ async fn debounce_token_changes(
 async fn connect_and_stream(
     deps: &ShardDeps,
     shard_id: usize,
-    tokens_rx: &mut watch::Receiver<HashSet<TokenId>>,
+    tokens_rx: &mut watch::Receiver<Arc<HashSet<TokenId>>>,
     reconnect: &mut ReconnectState,
 ) -> StreamEnd {
-    let tokens: HashSet<TokenId> = tokens_rx.borrow_and_update().clone();
+    let tokens = Arc::clone(&tokens_rx.borrow_and_update());
     let asset_ids: Vec<U256> = tokens
         .iter()
         .filter_map(|t| U256::from_str(t.as_str()).ok())
@@ -295,7 +295,7 @@ async fn connect_and_stream(
                     return StreamEnd::RouterDropped;
                 }
                 debounce_token_changes(tokens_rx, &deps.shutdown).await;
-                if *tokens_rx.borrow_and_update() != tokens {
+                if tokens_rx.borrow_and_update().as_ref() != tokens.as_ref() {
                     return StreamEnd::Resubscribe;
                 }
             }
@@ -456,20 +456,23 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn debounce_waits_for_token_set_to_settle() {
-        let (tx, mut rx) = watch::channel(HashSet::<TokenId>::new());
+        let (tx, mut rx) = watch::channel(Arc::new(HashSet::<TokenId>::new()));
         let shutdown = CancellationToken::new();
 
-        tx.send_replace(HashSet::from([TokenId::new("1")]));
+        tx.send_replace(Arc::new(HashSet::from([TokenId::new("1")])));
         rx.changed().await.expect("sender alive");
 
         let debounce = tokio::spawn(async move {
             debounce_token_changes(&mut rx, &shutdown).await;
-            rx.borrow().clone()
+            Arc::clone(&rx.borrow())
         });
 
         // A second update inside the window must be folded into one rebuild.
         tokio::time::sleep(Duration::from_millis(200)).await;
-        tx.send_replace(HashSet::from([TokenId::new("1"), TokenId::new("2")]));
+        tx.send_replace(Arc::new(HashSet::from([
+            TokenId::new("1"),
+            TokenId::new("2"),
+        ])));
 
         let settled = debounce.await.expect("debounce task");
         assert_eq!(settled.len(), 2, "debounced set reflects the last write");

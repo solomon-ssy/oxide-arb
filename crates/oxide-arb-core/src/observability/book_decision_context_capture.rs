@@ -34,6 +34,26 @@ pub struct CapturedBookDecisionContext {
     pub production_eligible: bool,
 }
 
+/// Lightweight context reference retained after the full `ClickHouse` row is enqueued.
+#[derive(Debug, Clone)]
+pub struct BookDecisionContextSummary {
+    pub context_id: String,
+    pub yes_book_age_ms: Option<u64>,
+    pub no_book_age_ms: Option<u64>,
+    pub production_eligible: bool,
+}
+
+impl From<&CapturedBookDecisionContext> for BookDecisionContextSummary {
+    fn from(captured: &CapturedBookDecisionContext) -> Self {
+        Self {
+            context_id: captured.row.context_id.clone(),
+            yes_book_age_ms: captured.row.yes_book_age_ms,
+            no_book_age_ms: captured.row.no_book_age_ms,
+            production_eligible: captured.production_eligible,
+        }
+    }
+}
+
 #[derive(Serialize)]
 struct JsonLevel {
     price: String,

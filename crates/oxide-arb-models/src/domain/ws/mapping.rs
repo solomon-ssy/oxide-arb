@@ -74,7 +74,7 @@ pub fn event_envelope(event: &CoreEvent) -> Option<(SubscriptionKey, WsEnvelope)
         CoreEvent::OpportunityDetected(opp) => (
             WsChannel::OpportunityDetected,
             None,
-            serde_json::to_value(OpportunityView::from(opp)).ok()?,
+            serde_json::to_value(OpportunityView::from(opp.as_ref())).ok()?,
         ),
         CoreEvent::TradeFilled(trade) => (
             WsChannel::TradeFilled,
@@ -133,6 +133,7 @@ mod tests {
     };
     use chrono::{NaiveDate, Utc};
     use rust_decimal_macros::dec;
+    use std::sync::Arc;
 
     fn test_opportunity() -> Opportunity {
         Opportunity {
@@ -299,7 +300,8 @@ mod tests {
         let opportunity = test_opportunity();
         let opportunity_id = opportunity.opportunity_id.clone();
         let (key, envelope) =
-            event_envelope(&CoreEvent::OpportunityDetected(opportunity)).expect("opp maps");
+            event_envelope(&CoreEvent::OpportunityDetected(Arc::new(opportunity)))
+                .expect("opp maps");
         assert_eq!(key, SubscriptionKey::global(WsChannel::OpportunityDetected));
 
         let data = &envelope.data;

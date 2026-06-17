@@ -69,7 +69,7 @@ impl ScannerTask {
             return;
         };
         let now = chrono::Utc::now();
-        if let Some(scored) = self.scanner.scan_market(&entry, now) {
+        if let Some(mut scored) = self.scanner.scan_market(&entry, now) {
             let threshold = MicroScore::try_from_decimal(
                 self.runtime
                     .load()
@@ -78,9 +78,8 @@ impl ScannerTask {
                     .dispatch_immediate_threshold,
             )
             .unwrap_or(MicroScore::ZERO);
-            let mut scored = scored;
             if scored.score >= threshold {
-                match self.funnel.try_dispatch_immediate(Arc::clone(&scored)) {
+                match self.funnel.try_dispatch_immediate(scored) {
                     FastLaneDispatch::Dispatched => return,
                     FastLaneDispatch::Backpressure(arc) => scored = arc,
                 }

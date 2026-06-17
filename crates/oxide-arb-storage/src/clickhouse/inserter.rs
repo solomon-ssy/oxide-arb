@@ -1,6 +1,6 @@
 //! Async batch inserter for `ClickHouse` with backpressure, retry, and metrics.
 
-use crate::clickhouse::ChWriteMetrics;
+use crate::clickhouse::{ChWriteManager, ChWriteMetrics};
 use clickhouse::{Client, RowOwned, RowWrite};
 use num_traits::ToPrimitive;
 use oxide_arb_error::storage::StorageError;
@@ -13,8 +13,24 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 pub struct BatchInserter<T: RowOwned + RowWrite + Clone + Send + Sync> {
-    tx: mpsc::Sender<T>,
+    tx: mpsc::Sender<InsertMessage<T>>,
     _handle: JoinHandle<()>,
+}
+
+enum InsertMessage<T> {
+    Row(T),
+    Batch(Vec<T>),
+}
+
+struct FlushLoop<T: RowOwned + RowWrite + Clone + Send + Sync> {
+    client: Client,
+    table: &'static str,
+    rx: mpsc::Receiver<InsertMessage<T>>,
+    batch_size: usize,
+    flush_interval: Duration,
+    write_manager: Arc<ChWriteManager>,
+    metrics: Arc<ChWriteMetrics>,
+    shutdown: CancellationToken,
 }
 
 impl<T: RowOwned + RowWrite + Clone + Send + Sync> BatchInserter<T> {
@@ -27,20 +43,22 @@ impl<T: RowOwned + RowWrite + Clone + Send + Sync> BatchInserter<T> {
         table: &'static str,
         batch_size: usize,
         flush_interval: Duration,
-        metrics: Arc<ChWriteMetrics>,
+        write_manager: Arc<ChWriteManager>,
         shutdown: CancellationToken,
     ) -> Self {
         let (tx, rx) = mpsc::channel(batch_size * 4);
+        let metrics = Arc::clone(write_manager.metrics());
 
-        let handle = tokio::spawn(Self::flush_loop(
+        let handle = tokio::spawn(Self::flush_loop(FlushLoop {
             client,
             table,
             rx,
             batch_size,
             flush_interval,
+            write_manager,
             metrics,
             shutdown,
-        ));
+        }));
 
         Self {
             tx,
@@ -50,16 +68,23 @@ impl<T: RowOwned + RowWrite + Clone + Send + Sync> BatchInserter<T> {
 
     pub async fn insert(&self, row: T) -> Result<(), StorageError> {
         self.tx
-            .send(row)
+            .send(InsertMessage::Row(row))
             .await
             .map_err(|_| StorageError::ChannelClosed("BatchInserter channel closed".into()))
     }
 
     pub async fn insert_many(&self, rows: impl IntoIterator<Item = T>) -> Result<(), StorageError> {
-        for row in rows {
-            self.insert(row).await?;
+        self.insert_batch(rows.into_iter().collect()).await
+    }
+
+    pub async fn insert_batch(&self, rows: Vec<T>) -> Result<(), StorageError> {
+        if rows.is_empty() {
+            return Ok(());
         }
-        Ok(())
+        self.tx
+            .send(InsertMessage::Batch(rows))
+            .await
+            .map_err(|_| StorageError::ChannelClosed("BatchInserter channel closed".into()))
     }
 
     /// Initiate graceful shutdown by dropping the sender side of the channel.
@@ -72,47 +97,77 @@ impl<T: RowOwned + RowWrite + Clone + Send + Sync> BatchInserter<T> {
         drop(self.tx);
     }
 
-    async fn flush_loop(
-        client: Client,
-        table: &'static str,
-        mut rx: mpsc::Receiver<T>,
-        batch_size: usize,
-        flush_interval: Duration,
-        metrics: Arc<ChWriteMetrics>,
-        shutdown: CancellationToken,
-    ) {
+    async fn flush_loop(args: FlushLoop<T>) {
+        let FlushLoop {
+            client,
+            table,
+            mut rx,
+            batch_size,
+            flush_interval,
+            write_manager,
+            metrics,
+            shutdown,
+        } = args;
         let mut buffer = Vec::with_capacity(batch_size);
         let mut interval = tokio::time::interval(flush_interval);
 
         loop {
             tokio::select! {
                 () = shutdown.cancelled() => {
-                    while let Ok(row) = rx.try_recv() {
-                        buffer.push(row);
+                    while let Ok(message) = rx.try_recv() {
+                        push_message(&mut buffer, message);
                     }
                     if !buffer.is_empty() {
-                        Self::flush_with_retry(&client, table, &mut buffer, &metrics).await;
+                        Self::flush_with_retry(
+                            &client,
+                            table,
+                            &mut buffer,
+                            &write_manager,
+                            &metrics,
+                        )
+                        .await;
                     }
                     info!(table, "BatchInserter shut down via cancellation, all data flushed");
                     break;
                 }
-                Some(row) = rx.recv() => {
-                    buffer.push(row);
+                Some(message) = rx.recv() => {
+                    push_message(&mut buffer, message);
                     if buffer.len() >= batch_size {
-                        Self::flush_with_retry(&client, table, &mut buffer, &metrics).await;
+                        Self::flush_with_retry(
+                            &client,
+                            table,
+                            &mut buffer,
+                            &write_manager,
+                            &metrics,
+                        )
+                        .await;
                     }
                 }
                 _ = interval.tick() => {
                     if !buffer.is_empty() {
-                        Self::flush_with_retry(&client, table, &mut buffer, &metrics).await;
+                        Self::flush_with_retry(
+                            &client,
+                            table,
+                            &mut buffer,
+                            &write_manager,
+                            &metrics,
+                        )
+                        .await;
                     }
                 }
                 else => {
-                    while let Ok(row) = rx.try_recv() {
-                        buffer.push(row);
+                    while let Ok(message) = rx.try_recv() {
+                        push_message(&mut buffer, message);
                     }
                     if !buffer.is_empty() {
-                        Self::flush_with_retry(&client, table, &mut buffer, &metrics).await;
+                        Self::flush_with_retry(
+                            &client,
+                            table,
+                            &mut buffer,
+                            &write_manager,
+                            &metrics,
+                        )
+                        .await;
                     }
                     info!(table, "BatchInserter channel closed, all data flushed");
                     break;
@@ -125,6 +180,7 @@ impl<T: RowOwned + RowWrite + Clone + Send + Sync> BatchInserter<T> {
         client: &Client,
         table: &'static str,
         buffer: &mut Vec<T>,
+        write_manager: &ChWriteManager,
         metrics: &ChWriteMetrics,
     ) {
         const MAX_RETRIES: u32 = 3;
@@ -132,7 +188,17 @@ impl<T: RowOwned + RowWrite + Clone + Send + Sync> BatchInserter<T> {
 
         for attempt in 0..MAX_RETRIES {
             let start = Instant::now();
-            match Self::flush(client, table, buffer).await {
+            let permit = match write_manager.acquire_write_permit().await {
+                Ok(permit) => permit,
+                Err(e) => {
+                    metrics.insert_errors.with_label_values(&[table]).inc();
+                    error!(table, rows = count, error = %e, "ClickHouse write permit unavailable");
+                    return;
+                }
+            };
+            let result = Self::flush(client, table, buffer).await;
+            drop(permit);
+            match result {
                 Ok(()) => {
                     let elapsed = start.elapsed().as_secs_f64();
                     metrics
@@ -181,5 +247,12 @@ impl<T: RowOwned + RowWrite + Clone + Send + Sync> BatchInserter<T> {
         insert.end().await?;
         buffer.clear();
         Ok(())
+    }
+}
+
+fn push_message<T>(buffer: &mut Vec<T>, message: InsertMessage<T>) {
+    match message {
+        InsertMessage::Row(row) => buffer.push(row),
+        InsertMessage::Batch(rows) => buffer.extend(rows),
     }
 }

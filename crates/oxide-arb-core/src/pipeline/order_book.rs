@@ -82,6 +82,8 @@ impl OrderBook {
     where
         I: IntoIterator<Item = (Side, Price, Shares)>,
     {
+        let mut bid_changes = Vec::new();
+        let mut ask_changes = Vec::new();
         for (side, price, size) in changes {
             let Ok(level) = BookLevel::from_decimal(price, size) else {
                 continue;
@@ -92,33 +94,23 @@ impl OrderBook {
                 matches!(side, Side::Sell) || find_level(&self.asks, level.price, false).is_ok();
 
             if on_bids && !on_asks {
-                mutate_side(&mut self.bids, |levels| {
-                    apply_level_delta(levels, level, true);
-                });
+                bid_changes.push(level);
             } else if on_asks && !on_bids {
-                mutate_side(&mut self.asks, |levels| {
-                    apply_level_delta(levels, level, false);
-                });
+                ask_changes.push(level);
             } else if on_bids {
-                mutate_side(&mut self.bids, |levels| {
-                    apply_level_delta(levels, level, true);
-                });
+                bid_changes.push(level);
             } else if on_asks {
-                mutate_side(&mut self.asks, |levels| {
-                    apply_level_delta(levels, level, false);
-                });
+                ask_changes.push(level);
             } else if level.size.is_positive() {
                 if matches!(side, Side::Buy) || self.should_place_on_bids(price) {
-                    mutate_side(&mut self.bids, |levels| {
-                        apply_level_delta(levels, level, true);
-                    });
+                    bid_changes.push(level);
                 } else {
-                    mutate_side(&mut self.asks, |levels| {
-                        apply_level_delta(levels, level, false);
-                    });
+                    ask_changes.push(level);
                 }
             }
         }
+        apply_side_deltas(&mut self.bids, bid_changes, true);
+        apply_side_deltas(&mut self.asks, ask_changes, false);
         self.last_update_ms = timestamp_ms;
     }
 
@@ -217,9 +209,14 @@ impl OrderBook {
 }
 
 #[inline]
-fn mutate_side(side: &mut Arc<[BookLevel]>, mut f: impl FnMut(&mut Vec<BookLevel>)) {
+fn apply_side_deltas(side: &mut Arc<[BookLevel]>, changes: Vec<BookLevel>, descending: bool) {
+    if changes.is_empty() {
+        return;
+    }
     let mut levels = side.to_vec();
-    f(&mut levels);
+    for level in changes {
+        apply_level_delta(&mut levels, level, descending);
+    }
     *side = Arc::from(levels);
 }
 

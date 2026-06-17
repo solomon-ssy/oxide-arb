@@ -109,40 +109,10 @@ impl StaticRiskPipeline {
     /// Ordered list of check IDs (for golden tests).
     #[must_use]
     pub fn check_order(&self) -> Vec<RiskCheckId> {
-        vec![
-            RiskCheckId::ManualHalt,
-            RiskCheckId::CircuitBreaker,
-            RiskCheckId::BlacklistTradingPath,
-            RiskCheckId::TokenBlacklist,
-            RiskCheckId::MarketAnomalyBlock,
-            RiskCheckId::ReconciliationMaintenance,
-            RiskCheckId::ControlFactorManualAckRequired,
-            RiskCheckId::ControlFactorSnapshotExpired,
-            RiskCheckId::BlockingTrades,
-            RiskCheckId::RedeemRouteResolvable,
-            RiskCheckId::MetricsFreshness,
-            RiskCheckId::MinDepth,
-            RiskCheckId::MaxDepthUsage,
-            RiskCheckId::Staleness,
-            RiskCheckId::DailyBudget,
-            RiskCheckId::DailyLossCap,
-            RiskCheckId::WeeklyLossCap,
-            RiskCheckId::HourlyLossCap,
-            RiskCheckId::FeeSpend,
-            RiskCheckId::MaxSingleBet,
-            RiskCheckId::MarketExposure,
-            RiskCheckId::TotalExposure,
-            RiskCheckId::ExposurePct,
-            RiskCheckId::PotentialLossCap,
-            RiskCheckId::MaxPositions,
-            RiskCheckId::WsConnectivity,
-            RiskCheckId::ApiErrorRate,
-            RiskCheckId::MinBalance,
-            RiskCheckId::DirectionalConcentration,
-            RiskCheckId::DailyDirectionalBudget,
-            RiskCheckId::DuplicateMarket,
-            RiskCheckId::DrawdownGuard,
-        ]
+        self.check_refs_in_order()
+            .into_iter()
+            .map(RiskCheck::id)
+            .collect()
     }
 
     fn check_refs_in_order(&self) -> Vec<&dyn RiskCheck> {
@@ -189,6 +159,17 @@ impl StaticRiskPipeline {
             .unwrap_or(self.len())
     }
 
+    fn sized_gate_refs(&self) -> [&dyn RiskCheck; 6] {
+        [
+            &self.daily_budget,
+            &self.max_single_bet,
+            &self.market_exposure,
+            &self.total_exposure,
+            &self.exposure_pct,
+            &self.potential_loss_cap,
+        ]
+    }
+
     #[must_use]
     pub fn evaluate(&self, ctx: &PreTradeContext<'_>, mode: ReportMode) -> PipelineReport {
         self.evaluate_range(ctx, mode, 0, self.len())
@@ -206,71 +187,19 @@ impl StaticRiskPipeline {
         let mut has_failed_hard_gate = false;
         let mut first_failure: Option<RiskCheckId> = None;
 
-        macro_rules! run_gate {
-            ($check:expr) => {
-                run_check(
-                    &$check,
-                    RiskCheckKind::Gate,
-                    ctx,
-                    mode,
-                    &mut results,
-                    &mut has_failed_hard_gate,
-                    &mut first_failure,
-                )
-            };
+        for check in self.sized_gate_refs() {
+            if !run_check(
+                check,
+                RiskCheckKind::Gate,
+                ctx,
+                mode,
+                &mut results,
+                &mut has_failed_hard_gate,
+                &mut first_failure,
+            ) {
+                break;
+            }
         }
-
-        let _ = run_gate!(self.daily_budget);
-        if has_failed_hard_gate && mode == ReportMode::ShortCircuit {
-            return PipelineReport {
-                results,
-                has_failed_hard_gate,
-                first_failure,
-                total_elapsed_us: ToPrimitive::to_u64(&pipeline_start.elapsed().as_micros())
-                    .unwrap_or(u64::MAX),
-            };
-        }
-        let _ = run_gate!(self.max_single_bet);
-        if has_failed_hard_gate && mode == ReportMode::ShortCircuit {
-            return PipelineReport {
-                results,
-                has_failed_hard_gate,
-                first_failure,
-                total_elapsed_us: ToPrimitive::to_u64(&pipeline_start.elapsed().as_micros())
-                    .unwrap_or(u64::MAX),
-            };
-        }
-        let _ = run_gate!(self.market_exposure);
-        if has_failed_hard_gate && mode == ReportMode::ShortCircuit {
-            return PipelineReport {
-                results,
-                has_failed_hard_gate,
-                first_failure,
-                total_elapsed_us: ToPrimitive::to_u64(&pipeline_start.elapsed().as_micros())
-                    .unwrap_or(u64::MAX),
-            };
-        }
-        let _ = run_gate!(self.total_exposure);
-        if has_failed_hard_gate && mode == ReportMode::ShortCircuit {
-            return PipelineReport {
-                results,
-                has_failed_hard_gate,
-                first_failure,
-                total_elapsed_us: ToPrimitive::to_u64(&pipeline_start.elapsed().as_micros())
-                    .unwrap_or(u64::MAX),
-            };
-        }
-        let _ = run_gate!(self.exposure_pct);
-        if has_failed_hard_gate && mode == ReportMode::ShortCircuit {
-            return PipelineReport {
-                results,
-                has_failed_hard_gate,
-                first_failure,
-                total_elapsed_us: ToPrimitive::to_u64(&pipeline_start.elapsed().as_micros())
-                    .unwrap_or(u64::MAX),
-            };
-        }
-        let _ = run_gate!(self.potential_loss_cap);
 
         PipelineReport {
             results,
@@ -373,7 +302,7 @@ impl StaticRiskPipeline {
 }
 
 #[inline]
-fn run_check<C: RiskCheck>(
+fn run_check<C: RiskCheck + ?Sized>(
     check: &C,
     kind: RiskCheckKind,
     ctx: &PreTradeContext<'_>,

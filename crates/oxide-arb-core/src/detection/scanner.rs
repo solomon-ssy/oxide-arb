@@ -133,9 +133,10 @@ impl Scanner {
             // Surface the detection to the real-time bus. Project the public
             // `Opportunity` (no internal algorithm/latency trace leakage);
             // fire-and-forget, drops on a full bus rather than blocking the scan.
-            self.events.publish(CoreEvent::OpportunityDetected(
-                (*scored.opportunity).clone(),
-            ));
+            self.events
+                .publish(CoreEvent::OpportunityDetected(Arc::clone(
+                    &scored.opportunity,
+                )));
         }
         drop(timer);
         result

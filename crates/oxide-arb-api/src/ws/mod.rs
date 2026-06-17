@@ -125,6 +125,10 @@ impl SubscriptionState {
         *target = desired;
         (to_subscribe, to_unsubscribe)
     }
+
+    fn active_tokens(&self) -> HashSet<TokenId> {
+        self.engine.union(&self.web).cloned().collect()
+    }
 }
 
 /// Upper bound on simultaneous connection establishments across all shards.
@@ -225,9 +229,14 @@ impl ClobWsManager {
     /// it — so the web control plane can drop its overlay without ever tearing
     /// down a token the trading engine baseline depends on.
     pub fn unsubscribe_tokens(&self, source: SubscriptionSource, tokens: &[TokenId]) {
-        let gone = self.subscriptions.lock().remove(source, tokens);
+        let (gone, active_tokens) = {
+            let mut subscriptions = self.subscriptions.lock();
+            let gone = subscriptions.remove(source, tokens);
+            (gone, subscriptions.active_tokens())
+        };
         if !gone.is_empty() {
             self.router.remove_tokens(&gone);
+            self.token_freshness.prune_tokens(&active_tokens);
         }
     }
 
@@ -235,12 +244,17 @@ impl ClobWsManager {
     /// transport against the new union (the other source's baseline is protected).
     pub fn sync_tokens(&self, source: SubscriptionSource, tokens: &[TokenId]) {
         let desired: HashSet<TokenId> = tokens.iter().cloned().collect();
-        let (to_subscribe, to_unsubscribe) = self.subscriptions.lock().sync(source, desired);
+        let (to_subscribe, to_unsubscribe, active_tokens) = {
+            let mut subscriptions = self.subscriptions.lock();
+            let (to_subscribe, to_unsubscribe) = subscriptions.sync(source, desired);
+            (to_subscribe, to_unsubscribe, subscriptions.active_tokens())
+        };
         if !to_subscribe.is_empty() {
             self.router.assign_tokens(&to_subscribe);
         }
         if !to_unsubscribe.is_empty() {
             self.router.remove_tokens(&to_unsubscribe);
+            self.token_freshness.prune_tokens(&active_tokens);
         }
     }
 

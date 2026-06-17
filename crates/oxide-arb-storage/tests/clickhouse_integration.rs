@@ -7,7 +7,7 @@ use oxide_arb_models::{
     enums::clickhouse::{ChBookEventType, ChFactSource},
     types::{Price, TokenId, Usd},
 };
-use oxide_arb_storage::clickhouse::{BatchInserter, ChWriteMetrics, ClickHousePool};
+use oxide_arb_storage::clickhouse::{BatchInserter, ChWriteManager, ClickHousePool};
 use rust_decimal_macros::dec;
 use std::{sync::Arc, time::Duration};
 use testcontainers::{
@@ -262,14 +262,14 @@ async fn tick_events_direct_insert_roundtrip() {
 async fn batch_inserter_shutdown_drains_buffer() {
     let (_pool, client, _port, _container) = setup_clickhouse().await;
     let shutdown = CancellationToken::new();
-    let metrics = Arc::new(ChWriteMetrics::new());
+    let write_manager = Arc::new(ChWriteManager::new(4));
 
     let inserter = BatchInserter::new(
         client.clone(),
         "tick_events",
         10_000,
         Duration::from_secs(3600),
-        metrics.clone(),
+        Arc::clone(&write_manager),
         shutdown.clone(),
     );
 
@@ -297,14 +297,14 @@ async fn batch_inserter_shutdown_drains_buffer() {
 async fn batch_inserter_channel_close_drains_buffer() {
     let (_pool, client, _port, _container) = setup_clickhouse().await;
     let shutdown = CancellationToken::new();
-    let metrics = Arc::new(ChWriteMetrics::new());
+    let write_manager = Arc::new(ChWriteManager::new(4));
 
     let inserter = BatchInserter::new(
         client.clone(),
         "tick_events",
         10_000,
         Duration::from_secs(3600),
-        metrics,
+        write_manager,
         shutdown,
     );
 

@@ -70,7 +70,17 @@ impl DetectionWriter {
         let mut row = OpportunityDetectionRow::from(&snapshot);
         row.ingestion_time = now_ms;
         row.sequence = scored.book_yes_version.max(scored.book_no_version);
-        self.writer.write(row);
-        self.decision_context_writer.write(context_row);
+        if !self.writer.write(row) {
+            tracing::warn!(
+                opportunity_id = %opp.opportunity_id,
+                "opportunity detection row dropped by async writer"
+            );
+        }
+        if !self.decision_context_writer.write(context_row) {
+            tracing::warn!(
+                opportunity_id = %opp.opportunity_id,
+                "detection book decision context row dropped by async writer"
+            );
+        }
     }
 }

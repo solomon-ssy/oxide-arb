@@ -41,8 +41,6 @@ use oxide_arb_repository::{postgres::PgCalibrationRepository, traits::Calibratio
 use std::{sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
 
-use crate::control::factor_snapshot::FactorSnapshotStore;
-
 impl DetectionStack {
     pub(super) async fn wire(
         wiring: WiringConfig<'_>,
@@ -79,8 +77,8 @@ impl DetectionStack {
             runtime.detection.endgame.settlement_window_hours,
         );
         let cooldown = InMemoryEmissionCooldown::new(&runtime.detection.endgame.emission_cooldown);
-        let factor_store: Arc<FactorSnapshotStore> = Arc::clone(infra.factor_store());
-        let factor_provider: Arc<dyn ControlFactorProvider> = factor_store;
+        let factor_provider: Arc<dyn ControlFactorProvider> =
+            Arc::clone(infra.factor_store()) as Arc<dyn ControlFactorProvider>;
         let opportunity_pipeline: Arc<CoreOpportunityPipeline> =
             Arc::new(OpportunityPipeline::new(
                 detector,
@@ -159,9 +157,10 @@ impl DetectionStack {
         infra: &BuildInfra,
         clients: &BuildClients,
     ) -> OxideResult<(Arc<ResolutionCalibrator>, Arc<CalibrationUpdater>)> {
+        let calibration = runtime.detection.calibration.clone();
         let calibrator = Self::load_resolution_calibrator(
             Arc::clone(infra.repos().calibration()),
-            runtime.detection.calibration.clone(),
+            calibration.clone(),
         )
         .await?;
         infra
@@ -178,7 +177,7 @@ impl DetectionStack {
         let calibration_updater = Arc::new(CalibrationUpdater::new(
             Arc::clone(&calibrator),
             calibration_source,
-            runtime.detection.calibration.clone(),
+            calibration,
         ));
         run_calibration_startup_tick(
             calibration_updater.as_ref(),

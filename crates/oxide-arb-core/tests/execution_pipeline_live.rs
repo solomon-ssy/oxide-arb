@@ -38,7 +38,7 @@ use oxide_arb_core::{
     service::risk_metrics::{ApiHealthTracker, RiskMetricsState},
     trade_integrity::TradeIntegrityStore,
 };
-use oxide_arb_models::runtime_config::{NotificationConfig, RuntimeConfig};
+use oxide_arb_models::runtime_config::{EndgameLatencyConfig, NotificationConfig, RuntimeConfig};
 use oxide_arb_models::{
     clickhouse::{BookDecisionContextRow, OpportunityAuditRow},
     config::{PolymarketConfig, WebSocketConfig},
@@ -107,6 +107,25 @@ struct LiveFixture {
     audit_writer: Arc<ExecutionAuditWriter>,
     metrics_state: Arc<RiskMetricsState>,
     metrics: Arc<MetricsHub>,
+}
+
+struct LivePipelineAssembly {
+    metrics: Arc<MetricsHub>,
+    book_store: Arc<BookStore>,
+    clob_client: Option<Arc<ClobClient>>,
+    dispatcher_timeout_ms: u64,
+    fee_calculator: Arc<FeeCalculator>,
+    market_registry: Arc<MarketRegistry>,
+    capital: Arc<CapitalManager>,
+    risk_engine: Arc<RiskEngine>,
+    risk_metrics: Arc<CoreRiskMetrics>,
+    fsm: Arc<ExecutionFSM>,
+    trade_repo: Arc<MockTradeRepository>,
+    audit_writer: Arc<ExecutionAuditWriter>,
+    book_decision_context_writer: Arc<BookDecisionContextWriter>,
+    metrics_state: Arc<RiskMetricsState>,
+    runtime_store: Arc<RuntimeConfigStore>,
+    trade_integrity: Arc<TradeIntegrityStore>,
 }
 
 fn token_yes() -> TokenId {
@@ -333,6 +352,10 @@ fn scored_opportunity() -> Arc<ScoredOpportunity> {
 }
 
 fn seed_books(store: &BookStore, scored: &ScoredOpportunity) {
+    let yes_bids = vec![BookLevel::from_decimal_unchecked(
+        Price::new(dec!(0.91)),
+        Shares::new(dec!(1000)),
+    )];
     let yes_asks = vec![BookLevel::from_decimal_unchecked(
         Price::new(dec!(0.92)),
         Shares::new(dec!(1000)),
@@ -346,7 +369,7 @@ fn seed_books(store: &BookStore, scored: &ScoredOpportunity) {
         Shares::new(dec!(1000)),
     )];
     let now_ms = u64::try_from(Utc::now().timestamp_millis().max(0)).unwrap_or(0);
-    store.apply_snapshot(&scored.token_yes, vec![], yes_asks, now_ms, None);
+    store.apply_snapshot(&scored.token_yes, yes_bids, yes_asks, now_ms, None);
     store.apply_snapshot(&scored.token_no, no_bids, no_asks, now_ms, None);
 }
 
@@ -435,7 +458,7 @@ impl RiskMetrics for StaticRiskMetrics {
 }
 
 fn audit_writer(metrics: Arc<MetricsHub>) -> Arc<ExecutionAuditWriter> {
-    let (writer, _worker) = AsyncWriter::new(
+    let (writer, worker) = AsyncWriter::new(
         AsyncWriterConfig::new("test-execution-audit")
             .batch_size(128)
             .flush_interval(Duration::from_secs(3600)),
@@ -443,11 +466,12 @@ fn audit_writer(metrics: Arc<MetricsHub>) -> Arc<ExecutionAuditWriter> {
         metrics,
         CancellationToken::new(),
     );
+    tokio::spawn(worker);
     Arc::new(ExecutionAuditWriter::new(Arc::new(writer)))
 }
 
 fn decision_context_writer(metrics: Arc<MetricsHub>) -> Arc<BookDecisionContextWriter> {
-    let (writer, _worker) = AsyncWriter::new(
+    let (writer, worker) = AsyncWriter::new(
         AsyncWriterConfig::new("test-book-decision-context")
             .batch_size(128)
             .flush_interval(Duration::from_secs(3600)),
@@ -455,6 +479,7 @@ fn decision_context_writer(metrics: Arc<MetricsHub>) -> Arc<BookDecisionContextW
         metrics,
         CancellationToken::new(),
     );
+    tokio::spawn(worker);
     Arc::new(BookDecisionContextWriter::new(Arc::new(writer)))
 }
 
@@ -483,6 +508,66 @@ fn risk_metrics(
     ))
 }
 
+fn live_endgame_latency_config() -> EndgameLatencyConfig {
+    EndgameLatencyConfig {
+        max_book_to_order_ms: 60_000,
+        ..Default::default()
+    }
+}
+
+fn build_live_execution_pipeline(
+    assembly: &LivePipelineAssembly,
+) -> ExecutionPipeline<MockTradeRepository> {
+    let execution_runtime = ExecutionRuntimeConfig {
+        endgame_latency: live_endgame_latency_config(),
+        ..Default::default()
+    };
+    ExecutionPipeline::new(ExecutionPipelineDeps {
+        validator: Arc::new(Validator::new(
+            Arc::clone(&assembly.book_store),
+            StalenessClassifier::new(&MarketDataRuntimeConfig::default()),
+            &execution_runtime,
+            Arc::clone(&assembly.metrics),
+        )),
+        plan_builder: PlanBuilder::new(
+            Arc::clone(&assembly.fee_calculator),
+            Arc::clone(&assembly.market_registry),
+        ),
+        dispatcher: Dispatcher::new(
+            ExecutionModeHandle::new(ExecutionMode::Live),
+            Arc::clone(&assembly.book_store),
+            Arc::clone(&assembly.fee_calculator),
+            Arc::clone(&assembly.metrics),
+        ),
+        order_strategy: Arc::new(FokOrderStrategy::new(
+            ExecutionModeHandle::new(ExecutionMode::Live),
+            assembly.clob_client.clone(),
+            Arc::clone(&assembly.fee_calculator),
+            assembly.dispatcher_timeout_ms,
+            Arc::clone(&assembly.metrics),
+        )),
+        capital_manager: Arc::clone(&assembly.capital),
+        risk_engine: Arc::clone(&assembly.risk_engine),
+        risk_metrics: Arc::clone(&assembly.risk_metrics),
+        fsm: Arc::clone(&assembly.fsm),
+        market_inflight: Arc::new(MarketInFlightRegistry::new()),
+        metrics: Arc::clone(&assembly.metrics),
+        mode: ExecutionModeHandle::new(ExecutionMode::Live),
+        trade_repo: Arc::clone(&assembly.trade_repo),
+        audit_writer: Arc::clone(&assembly.audit_writer),
+        book_decision_context_writer: Arc::clone(&assembly.book_decision_context_writer),
+        relay_notify: Arc::new(Notify::new()),
+        reconcile_notify: Arc::new(Notify::new()),
+        metrics_state: Arc::clone(&assembly.metrics_state),
+        runtime_config: Arc::clone(&assembly.runtime_store),
+        factors: Arc::new(FactorSnapshotStore::new(chrono::Utc::now())),
+        shadow_writer: None,
+        ctf_redeem: None,
+        holder_address: String::new(),
+        trade_integrity: Arc::clone(&assembly.trade_integrity),
+    })
+}
+
 fn fixture(clob_client: Option<Arc<ClobClient>>, dispatcher_timeout_ms: u64) -> LiveFixture {
     let metrics = Arc::new(MetricsHub::new());
     let alerts = Arc::new(AlertDispatcher::new(&NotificationConfig::default()));
@@ -499,6 +584,14 @@ fn fixture(clob_client: Option<Arc<ClobClient>>, dispatcher_timeout_ms: u64) -> 
     let trade_repo = Arc::new(MockTradeRepository::default());
     let position_repo = Arc::new(MockPositionRepository::default());
     let calibration_repo = Arc::new(MockCalibrationRepository::default());
+    let runtime = RuntimeConfig {
+        execution: ExecutionRuntimeConfig {
+            endgame_latency: live_endgame_latency_config(),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let runtime_store = Arc::new(RuntimeConfigStore::new(runtime));
     let fee_calculator = live_pipeline_fee_calculator();
     let metrics_state = Arc::new(RiskMetricsState::new(Arc::new(ApiHealthTracker::new(
         Duration::from_secs(60),
@@ -516,54 +609,25 @@ fn fixture(clob_client: Option<Arc<ClobClient>>, dispatcher_timeout_ms: u64) -> 
         Arc::clone(&trade_repo) as Arc<dyn TradeRepository>,
         Arc::clone(&exposure),
         Arc::clone(&fsm),
-        Arc::new(RuntimeConfigStore::new(RuntimeConfig::default())),
+        Arc::clone(&runtime_store),
         alerts,
     ));
-    let pipeline = ExecutionPipeline::new(ExecutionPipelineDeps {
-        validator: Arc::new(Validator::new(
-            Arc::clone(&book_store),
-            StalenessClassifier::new(&MarketDataRuntimeConfig::default()),
-            &ExecutionRuntimeConfig {
-                endgame_latency: oxide_arb_models::runtime_config::EndgameLatencyConfig {
-                    max_book_to_order_ms: 5_000,
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
-            Arc::clone(&metrics),
-        )),
-        plan_builder: PlanBuilder::new(Arc::clone(&fee_calculator), Arc::clone(&market_registry)),
-        dispatcher: Dispatcher::new(
-            ExecutionModeHandle::new(ExecutionMode::Live),
-            Arc::clone(&book_store),
-            Arc::clone(&fee_calculator),
-            Arc::clone(&metrics),
-        ),
-        order_strategy: Arc::new(FokOrderStrategy::new(
-            ExecutionModeHandle::new(ExecutionMode::Live),
-            clob_client,
-            fee_calculator,
-            dispatcher_timeout_ms,
-            Arc::clone(&metrics),
-        )),
-        capital_manager: Arc::clone(&capital),
+    let pipeline = build_live_execution_pipeline(&LivePipelineAssembly {
+        metrics: Arc::clone(&metrics),
+        book_store: Arc::clone(&book_store),
+        clob_client,
+        dispatcher_timeout_ms,
+        fee_calculator,
+        market_registry: Arc::clone(&market_registry),
+        capital: Arc::clone(&capital),
         risk_engine: Arc::clone(&risk_engine),
         risk_metrics: Arc::clone(&risk_metrics),
         fsm: Arc::clone(&fsm),
-        market_inflight: Arc::new(MarketInFlightRegistry::new()),
-        metrics: Arc::clone(&metrics),
-        mode: ExecutionModeHandle::new(ExecutionMode::Live),
         trade_repo: Arc::clone(&trade_repo),
         audit_writer: Arc::clone(&audit_writer),
         book_decision_context_writer,
-        relay_notify: Arc::new(Notify::new()),
-        reconcile_notify: Arc::new(Notify::new()),
         metrics_state: Arc::clone(&metrics_state),
-        runtime_config: Arc::new(RuntimeConfigStore::new(RuntimeConfig::default())),
-        factors: Arc::new(FactorSnapshotStore::new(chrono::Utc::now())),
-        shadow_writer: None,
-        ctf_redeem: None,
-        holder_address: String::new(),
+        runtime_store,
         trade_integrity,
     });
 

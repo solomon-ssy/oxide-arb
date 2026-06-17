@@ -2,6 +2,7 @@
 
 use crate::infra::async_writer::AsyncWriter;
 use chrono::Utc;
+use dashmap::{DashMap, mapref::entry::Entry};
 use oxide_arb_models::{
     clickhouse::{
         BookL2ReplayRow, BookMicrostructureRow, BookSnapshotRow, ChBps, ChDecimal64, ChPrice,
@@ -19,13 +20,14 @@ use oxide_arb_models::{
 };
 use rust_decimal::Decimal;
 use serde::Serialize;
-use std::sync::Arc;
+use std::{mem, sync::Arc};
 
 pub struct BookFactWriter {
     ticks: Arc<AsyncWriter<TickEventRow>>,
     l2: Arc<AsyncWriter<BookL2ReplayRow>>,
     snapshots: Arc<AsyncWriter<BookSnapshotRow>>,
     microstructure_1s: Arc<AsyncWriter<BookMicrostructureRow>>,
+    microstructure_pending: DashMap<TokenId, BookMicrostructureRow>,
 }
 
 struct SnapshotLevels<'a> {
@@ -71,7 +73,7 @@ struct HashChange {
 }
 
 impl BookFactWriter {
-    pub const fn new(
+    pub fn new(
         tick_writer: Arc<AsyncWriter<TickEventRow>>,
         l2_writer: Arc<AsyncWriter<BookL2ReplayRow>>,
         snapshot_writer: Arc<AsyncWriter<BookSnapshotRow>>,
@@ -82,6 +84,7 @@ impl BookFactWriter {
             l2: l2_writer,
             snapshots: snapshot_writer,
             microstructure_1s: microstructure_1s_writer,
+            microstructure_pending: DashMap::new(),
         }
     }
 
@@ -141,22 +144,11 @@ impl BookFactWriter {
         );
         self.write_microstructure_observation(
             &cmd.asset_id,
-            market_id.clone(),
+            market_id,
             &snapshot,
             ChBookEventType::Snapshot,
             0,
         );
-        self.write_snapshot_levels(SnapshotLevels {
-            token_id: &cmd.asset_id,
-            market_id,
-            reason: ChSnapshotReason::WsSnapshot,
-            bids: &cmd.bids.levels,
-            asks: &cmd.asks.levels,
-            event_time: i64::try_from(cmd.timestamp_ms).unwrap_or(i64::MAX),
-            ingestion_time,
-            book_version,
-            source: ChFactSource::WsSnapshot,
-        });
     }
 
     pub fn write_published_snapshot(
@@ -437,8 +429,53 @@ impl BookFactWriter {
             delete_count,
             bucket_ms(now_ms, 1_000),
         );
-        self.microstructure_1s.write(second_observation);
+        if event_type == ChBookEventType::Snapshot {
+            self.microstructure_1s.write(second_observation);
+            return;
+        }
+
+        let mut stale_bucket = None;
+        match self.microstructure_pending.entry(token_id.clone()) {
+            Entry::Occupied(mut entry) => {
+                if entry.get().bucket_time == second_observation.bucket_time {
+                    merge_microstructure_row(entry.get_mut(), second_observation);
+                } else {
+                    stale_bucket = Some(mem::replace(entry.get_mut(), second_observation));
+                }
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(second_observation);
+            }
+        }
+        if let Some(row) = stale_bucket {
+            self.microstructure_1s.write(row);
+        }
     }
+}
+
+fn merge_microstructure_row(current: &mut BookMicrostructureRow, next: BookMicrostructureRow) {
+    current.market_id = next.market_id;
+    current.best_bid_close = next.best_bid_close;
+    current.best_ask_close = next.best_ask_close;
+    current.spread_bps_avg = next.spread_bps_avg;
+    current.mid_price_close = next.mid_price_close;
+    current.top1_depth_usd_avg = next.top1_depth_usd_avg;
+    current.top5_depth_usd_avg = next.top5_depth_usd_avg;
+    current.top20_depth_usd_avg = next.top20_depth_usd_avg;
+    current.imbalance_avg = next.imbalance_avg;
+    current.update_count = current.update_count.saturating_add(next.update_count);
+    current.snapshot_count = current.snapshot_count.saturating_add(next.snapshot_count);
+    current.delta_count = current.delta_count.saturating_add(next.delta_count);
+    current.delete_count = current.delete_count.saturating_add(next.delete_count);
+    current.crossed_count = current.crossed_count.saturating_add(next.crossed_count);
+    current.invalid_level_count = current
+        .invalid_level_count
+        .saturating_add(next.invalid_level_count);
+    current.gap_count = current.gap_count.saturating_add(next.gap_count);
+    current.last_trade_count = current
+        .last_trade_count
+        .saturating_add(next.last_trade_count);
+    current.max_book_age_ms = current.max_book_age_ms.max(next.max_book_age_ms);
 }
 
 fn levels_to_pairs(levels: &[BookLevel]) -> Vec<(String, String)> {

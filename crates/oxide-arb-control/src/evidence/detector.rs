@@ -1,3 +1,4 @@
+use super::stats::percentile_i64;
 use std::sync::Arc;
 
 use chrono::{DateTime, Duration, TimeZone, Utc};
@@ -170,7 +171,12 @@ fn build_report(
         .unwrap_or(u64::MAX);
     let matched_opportunity_count = refs
         .iter()
-        .filter(|detected| detected.replay.materialized_detected)
+        .filter(|detected| {
+            detected.replay.materialized_detected
+                && detected.score_delta.is_some()
+                && !detected.mismatches.bucket
+                && !detected.mismatches.calibration_snapshot
+        })
         .count()
         .try_into()
         .unwrap_or(u64::MAX);
@@ -493,20 +499,6 @@ fn calibration_snapshot_hash(
                 .then(left.sequence.cmp(&right.sequence))
         })
         .map(|snapshot| snapshot.snapshot_hash.clone())
-}
-
-fn percentile_i64(values: &[i64], pct: usize) -> Option<i64> {
-    if values.is_empty() {
-        return None;
-    }
-    let mut sorted = values.to_vec();
-    sorted.sort_unstable();
-    let idx = sorted
-        .len()
-        .saturating_sub(1)
-        .saturating_mul(pct)
-        .saturating_div(100);
-    Some(sorted[idx])
 }
 
 #[cfg(test)]
