@@ -20,6 +20,7 @@
 pub mod backend;
 pub mod calibration;
 pub mod cooldown;
+pub mod detection_reject;
 pub mod endgame;
 pub mod fee;
 pub mod fill_probability;
@@ -28,3 +29,5 @@ pub mod scorer;
 pub mod staleness;
 pub mod urgency;
 pub mod walker;
+
+pub use detection_reject::{DetectionProcessOutcome, DetectionRejectReason};

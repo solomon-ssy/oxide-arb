@@ -15,6 +15,7 @@ use crate::{
     },
     exposure::in_memory::InMemoryExposureReservation,
     observability::alert_dispatcher::AlertDispatcher,
+    observability::metrics_hub::MetricsHub,
     pipeline::{
         market_cache::MarketCache, market_registry::MarketRegistry,
         staleness_classifier::StalenessClassifier, universe_filter::MarketUniverseFilter,
@@ -65,6 +66,8 @@ pub struct RuntimeConfigSubscribers {
     pub market_cache: Arc<MarketCache>,
     /// D1 — CLOB websocket subscriptions resynced after a universe change.
     pub ws_subscription: Option<Arc<WsSubscriptionCoordinator>>,
+    /// Hotset metrics published during websocket resync.
+    pub metrics: Arc<MetricsHub>,
     /// E1 — validation slippage / book-age budgets.
     pub validator: Arc<Validator>,
     /// E2 — FOK dispatch timeout.
@@ -183,20 +186,39 @@ impl RuntimeConfigApplicator {
         subs.staleness.reload(&config.market_data);
 
         // Universe filter: swap the enabled set, rebuild the scanner cache,
-        // and resync websocket subscriptions to the new tradeable set.
+        // and resync websocket subscriptions when the tradeable set or detection
+        // window changes.
         let universe_changed = subs.universe.enabled()
             != CategorySet::from(config.market_data.enabled_categories.as_slice());
+        let detection_window_changed = self.store.load().detection.endgame.settlement_window_hours
+            != config.detection.endgame.settlement_window_hours;
         if universe_changed {
             subs.universe.reload(&config.market_data.enabled_categories);
             subs.market_cache.rebuild();
+        }
+        if universe_changed || detection_window_changed {
             if let Some(ws_subscription) = &subs.ws_subscription {
-                let token_count =
-                    ws_subscription.sync_engine_hotset(&subs.market_registry, &subs.universe);
+                let stats = ws_subscription.sync_engine_hotset(
+                    &subs.market_registry,
+                    &subs.universe,
+                    config.detection.endgame.settlement_window_hours,
+                    &subs.metrics,
+                );
                 tracing::info!(
                     enabled = ?subs.universe.enabled().iter().collect::<Vec<_>>(),
-                    tokens = token_count,
+                    selected_tokens = stats.selected_tokens,
+                    tier1_markets = stats.tier1_markets(),
+                    tier1_tokens = stats.tier1_tokens(),
+                    tier2_markets = stats.tier2_markets(),
+                    tier2_tokens = stats.tier2_tokens(),
+                    candidates_future_detect = stats.candidates_future_detect,
+                    candidates_future_prewarm = stats.candidates_future_prewarm,
+                    candidates_excluded_past = stats.candidates_past_deadline,
+                    detection_window_coverage = stats.detection_window_coverage_ratio(),
                     subscribed = ws_subscription.subscribed_count(),
-                    "tradeable universe filter reloaded; websocket engine hotset resynced"
+                    universe_changed,
+                    detection_window_changed,
+                    "websocket engine hotset resynced after runtime config activation"
                 );
             }
         }

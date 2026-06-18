@@ -99,6 +99,7 @@ fn detect(book: &EndgameBookPair) -> Option<Opportunity> {
         },
         now,
     )
+    .ok()
 }
 
 #[test]

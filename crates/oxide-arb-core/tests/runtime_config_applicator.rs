@@ -352,6 +352,7 @@ fn fixture() -> Fixture {
             voting_oracle,
             ctf_redeem: None,
             alerts,
+            metrics: Arc::clone(&metrics),
         },
     );
 

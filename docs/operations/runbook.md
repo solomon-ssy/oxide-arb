@@ -20,7 +20,9 @@
 10. [因子与 Live 热路径接线](#10-因子与-live-热路径接线)
 11. [Prometheus / SQL 验收清单](#11-prometheus--sql-验收清单)
 12. [Dev RBAC seed 重建（本地开发）](#12-dev-rbac-seed-重建本地开发)
-13. [常见问题与排错](#13-常见问题与排错)
+13. [WS Hotset 与 Detection 窗口](#13-ws-hotset-与-detection-窗口)
+14. [MarketStatus 与 Paused 三种来源](#14-marketstatus-与-paused-三种来源)
+15. [常见问题与排错](#15-常见问题与排错)
 
 ---
 
@@ -452,7 +454,9 @@ curl -s -X POST http://localhost:8080/api/auth/login \
 - [ ] `operational_phase` 按序收敛：`catalog_warming` → `market_data_connecting`（大规模目录 1–3 分钟正常）→ `operational`
 - [ ] Admin UI 顶栏读 **`operational_phase`**（`starting` / `running`），**不**应因启动期 infrastructure alert 长期显示「降级」
 - [ ] `GET /metrics` → Prometheus 有数据
-- [ ] 日志：Gamma sync、WS connected、markets registered
+- [ ] 日志：Gamma sync、WS connected、markets registered；hotset 日志含 `tier1_tokens` / `tier2_tokens`（`candidates_excluded_past` 仅统计被筛掉的过期候选）
+- [ ] `oxide_arb_hotset_detection_window_coverage_ratio` 在 catalog 就绪后有合理值（配额不足时可能 < 1）
+- [ ] sync 后日志 `tier1_tokens + tier2_tokens > 0`（有 24h/72h 内未来市场时）
 - [ ] PG：`SELECT count(*) FROM market;` > 0
 - [ ] 运行 10 分钟后 CH：`SELECT count() FROM opportunity_detection` 可能仍为 0（取决于当时是否有 endgame 机会，正常）
 
@@ -765,6 +769,11 @@ GET /api/ws?token=<access_token>
 | `oxide_arb_control_factor_active_count` | 已加载因子数 |
 | `oxide_arb_control_factor_publication_active` | Live 时 published snapshot 是否有效（0/1） |
 | `oxide_arb_control_factor_shadow_decisions_total` | Shadow 决策计数 |
+| `oxide_arb_hotset_candidates_total{kind=...}` | 每次 sync **累加**的候选市场分桶（`past_deadline` / `future_detect` / `future_prewarm` / `no_end_date`） |
+| `oxide_arb_hotset_selected_total{kind=...}` | 每次 sync **累加**的选中**市场数**（`future_detect` = Tier1，`future_prewarm` = Tier2；非 token 数） |
+| `oxide_arb_hotset_detection_window_coverage_ratio` | **Gauge**：最近一次 sync 的 Tier1 选中市场占 24h 候选市场的比例 |
+| `oxide_arb_gamma_markets_paused_total{reason=...}` | Catalog sync 降为 Paused 计数（`past_deadline` / `stale_catalog` / `gamma_wire`） |
+| `oxide_arb_catalog_ready` | 1 = 首次 Gamma full sync 完成，检测解锁 |
 
 ### 8.3 PostgreSQL 快查
 
@@ -999,6 +1008,9 @@ Shadow 用于发布前验证；Published 用于 Live 真实生效。
 ### 11.1 每日巡检（Paper 阶段）
 
 - [ ] `oxide_arb_pipeline_ws_events_received_total` 持续增长
+- [ ] `oxide_arb_catalog_ready` == 1
+- [ ] 最近一次 Gamma sync 日志：`tier1_tokens + tier2_tokens > 0`
+- [ ] `oxide_arb_hotset_detection_window_coverage_ratio` 合理（24h 候选 > 配额时可能 < 0.3，见 §13.4）
 - [ ] `oxide_arb_detection_opportunities_total` > 0
 - [ ] `fills / (fills+misses)` 符合预期
 - [ ] `oxide_arb_risk_daily_pnl_usd` 无异常跳变
@@ -1034,12 +1046,115 @@ RBAC bootstrap seeds（`crates/oxide-arb-models/src/seed/rbac/`）在 ledger 中
 
 ---
 
-## 13. 常见问题与排错
+## 13. WS Hotset 与 Detection 窗口
+
+全量 Gamma catalog（数万市场）**不会**全部订阅 CLOB WebSocket。引擎只维护有界 **hotset**（默认 ≤ 2000 token ≈ 1000 二元市场），供 BookStore → Scanner → EndgameDetector 使用。
+
+### 13.1 两套「小时窗口」（ intentionally 不同）
+
+| 配置 | 层级 | 位置 | 作用 |
+|------|------|------|------|
+| `engine_endgame_window_hours`（默认 **72**） | Deploy，改 TOML 需重启 | `config/oxide-arb.toml` → `[market_data.websocket]` | WS **候选池上界**：仅 `now < end_date ≤ now+72h` 可订书 |
+| `detection.endgame.settlement_window_hours`（默认 **24**） | Runtime，可热激活 | Postgres `runtime_config` / Admin API | 检测 **emit 门槛**：只 emit `0 < hours_to_end ≤ 24h` 的机会 |
+
+- **72h**：提前订书 + 收敛计时预热（Tier2）。
+- **24h**：允许交易检测（Tier1，与 emit 窗对齐）。
+- 修改 runtime `settlement_window_hours` 并 activate 后，下次 Gamma sync 或 applicator 会 **自动重排 hotset**，无需重启。
+
+### 13.2 Tier1 / Tier2 配额
+
+| 档位 | 时间范围 | 默认 token 份额 |
+|------|----------|-----------------|
+| **Tier1** | `now < end_date ≤ now + settlement_window_hours` | 80%（1600 token） |
+| **Tier2** | Tier1 上界 ～ `now + 72h` | 20%（400 token）；Tier1 未满时溢出给 Tier2 |
+
+选择规则：各档内按 **最近 `end_date`** 优先；`end_date ≤ now` 与无 `end_date` 市场 **永不** 进入 hotset。
+
+### 13.3 日志与指标（Gamma sync 后）
+
+结构化日志字段（`tracing` key=value）：
+
+| 字段 | 含义 |
+|------|------|
+| `tier1_markets` / `tier2_markets` | 各档选中的**市场数** |
+| `tier1_tokens` / `tier2_tokens` | 各档选中的 **CLOB token 数**（二元市场 × 2） |
+| `selected_tokens` | 合计订阅 token 数（`tier1_tokens + tier2_tokens`） |
+| `candidates_future_detect` | 24h 检测窗内候选市场总数（未截断前） |
+| `candidates_excluded_past` | 因 `end_date <= now` 被排除的 Active 候选数 |
+| `detection_window_coverage` | Tier1 选中市场 / `candidates_future_detect` |
+
+示例：
+
+```text
+selected_tokens=2000 tier1_markets=800 tier1_tokens=1600 tier2_markets=200 tier2_tokens=400
+candidates_future_detect=3200 candidates_excluded_past=4477 detection_window_coverage=0.25
+```
+
+| 告警条件 | 严重度 |
+|----------|--------|
+| `catalog_ready=1` 且最近一次 sync 日志 `tier1_tokens + tier2_tokens == 0` | **Critical** |
+| `oxide_arb_hotset_detection_window_coverage_ratio < 0.3` 持续，且日志 `candidates_future_detect × 2` 明显大于 token 预算 | Warning |
+| `opportunities_detected_total` 2h 无增量且 `catalog_ready=1` | Warning（继续排查收敛/净利门槛，见 §15） |
+
+> **说明**：过期市场不会进入 `tier1_*` / `tier2_*`；`candidates_excluded_past > 0` 属正常（表示 registry 里仍有待 sync 降级的僵尸候选）。不要用 `hotset_selected_total{past_deadline}` 做告警——该 label 不存在，且 selected 指标只统计 `future_detect` / `future_prewarm`。
+
+### 13.4 运营调优（非默认改代码）
+
+| 场景 | 建议 |
+|------|------|
+| 24h 内市场 > 1000，coverage 持续偏低 | 逐步提高 `engine_max_subscription_tokens`（如 3000→5000），观察 WS 断连与 `ws_events_dropped` |
+| crypto 5min Up/Down 无 detection | `enabled_categories` 排除该品类，或降低 `min_convergence_duration_secs` |
+| 收敛太慢 | 确认 Tier2 预热正常；检查 `settlement_window_hours` 是否过窄 |
+| universe 过窄 | 检查 `market_data.enabled_categories`（**空 = 全品类**） |
+
+---
+
+## 14. MarketStatus 与 Paused 三种来源
+
+`Paused` 表示：仍在 catalog/PG 可查询，**不参与**热路径（`active_markets()`、hotset、scanner cache），但 **`get_market()` 仍可查**（持仓/结算不受影响）。
+
+| 来源 | 触发 | `reason` 标签 |
+|------|------|----------------|
+| **Gamma 上游** | `closed=false` 且 `active=false` | `gamma_wire` |
+| **Catalog 幽灵** | full sync 批次中消失 | `stale_catalog` |
+| **本地过期** | wire `Active` 且 `end_date ≤ now` | `past_deadline` |
+
+**双层防御：**
+
+1. **热路径谓词**：hotset / MarketCache 要求 `end_date > now`（即使 PG 仍为 active 也挡在门外）。
+2. **Catalog 权威状态**：Gamma sync 将过期 wire-Active 写为 `Paused` + PG 持久化，`active_markets` KPI 与事实一致。
+
+恢复为 `Active`：后续 Gamma sync 再次送来 `active=true` **且** `end_date > now`（例如 Gamma 修正了 deadline）。
+
+---
+
+## 15. 常见问题与排错
+
+### 15.1 零 detection 排查树
+
+```text
+catalog_ready == 1 ?
+  ├─ 否 → 等 Gamma full sync；查 gamma_last_sync_success
+  └─ 是 → 日志 tier1_tokens + tier2_tokens > 0 ?
+        ├─ 否 → 查日志 candidates_* 分桶
+        │     ├─ candidates_excluded_past 高 → 等 sync 降级；查 PG active+过期
+        │     ├─ candidates_future_detect 低 → universe 过窄 / 无 24h 市场
+        │     └─ detection_window_coverage 低 → 提高 engine_max_subscription_tokens（§13.4）
+        └─ 是 → tick_events / book_snapshots 增长 ?
+              ├─ 否 → WS 连通性、shard 状态
+              └─ 是 → 算法门槛
+                    ├─ 收敛不足（min_convergence_duration_secs）
+                    ├─ 净利/edge 门槛
+                    └─ CH opportunity_audit stage 分布
+```
+
+### 15.2 现象速查表
 
 | 现象 | 可能原因 | 处理 |
 |------|----------|------|
 | 启动失败 PG/CH/Redis | 连接配置错误 | 查 `oxide-arb.toml` 与 env |
-| 无 detection | 当前无 24h 内 endgame 市场 / universe 过窄 | 查 Gamma markets；放宽 `enabled_categories` |
+| 无 detection | hotset 被过期市场占满（历史 bug）/ universe 过窄 / 无 24h endgame | §15.1 排查树；查 hotset metrics |
+| `active_markets` KPI 虚高 | PG 仍 active 但已过期 | 等 Gamma sync；`gamma_markets_paused_total{past_deadline}` |
 | DryRun 有 Filled、Paper 全 Miss | 深度不足 | 降 `max_single_bet_usd`；看 CH miss reason |
 | Paper PnL 好、Live 差 | 竞争/latency/slippage | 正常；以 Live 为准 |
 | 因子全 ReportOnly | 样本不足或 PIT ineligible | 延长运行；配私钥改善 balance_snapshot |

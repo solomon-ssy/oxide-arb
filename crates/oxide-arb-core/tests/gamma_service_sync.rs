@@ -7,9 +7,11 @@ use oxide_arb_core::{
         market_cache::MarketCache, market_registry::MarketRegistry,
         universe_filter::MarketUniverseFilter,
     },
+    runtime_config::RuntimeConfigStore,
     service::gamma::{GammaService, GammaServiceDeps},
 };
 use oxide_arb_error::{OxideError, market::MarketError};
+use oxide_arb_models::runtime_config::RuntimeConfig;
 use oxide_arb_models::{
     config::{CacheConfig, GammaConfig, PostgresConfig, RedisConfig},
     types::TokenId,
@@ -138,6 +140,7 @@ async fn build_gamma_service(server_uri: &str) -> (GammaService, Arc<MarketRegis
         event_repo: pg_arc_repo!(db, PgEventRepository),
         cache,
         metrics,
+        runtime_config: Arc::new(RuntimeConfigStore::new(RuntimeConfig::default())),
         ws_subscription: None,
         full_sync_interval_secs: 300,
     });

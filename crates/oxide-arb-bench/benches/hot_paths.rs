@@ -377,7 +377,9 @@ fn bench_detect_with_direction(c: &mut Criterion) {
     };
 
     c.bench_function("detect_with_direction", |b| {
-        b.iter(|| detector.detect_with_direction(black_box(&input), now));
+        b.iter(|| {
+            let _ = detector.detect_with_direction(black_box(&input), now);
+        });
     });
 }
 

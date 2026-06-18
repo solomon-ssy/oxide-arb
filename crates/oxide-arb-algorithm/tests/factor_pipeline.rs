@@ -239,12 +239,12 @@ fn neutral_pipeline_emits_opportunity() {
     let book = book();
     let now = Utc::now();
     let pipe = pipeline(neutral_provider());
-    let scored = pipe.process_ref(
+    let outcome = pipe.process_ref(
         &scan_input(&market, &event, &yes, &no, &book, now + Duration::hours(12)),
         now,
     );
-    assert!(scored.is_some(), "neutral pipeline should emit");
-    assert!(scored.unwrap().applied_factors.is_empty());
+    assert!(outcome.is_emitted(), "neutral pipeline should emit");
+    assert!(outcome.opportunity.expect("emit").applied_factors.is_empty());
 }
 
 #[test]
@@ -261,7 +261,7 @@ fn reload_tightened_min_profit_suppresses_next_scan() {
             &scan_input(&m1, &event, &yes1, &no1, &book, now + Duration::hours(12)),
             now,
         )
-        .is_some(),
+        .is_emitted(),
         "baseline config emits"
     );
 
@@ -278,13 +278,17 @@ fn reload_tightened_min_profit_suppresses_next_scan() {
 
     let m2 = MarketId::new("m2");
     let (yes2, no2) = (TokenId::new("yes-2"), TokenId::new("no-2"));
+    let tightened_outcome = pipe.process_ref(
+        &scan_input(&m2, &event, &yes2, &no2, &book, now + Duration::hours(12)),
+        now,
+    );
     assert!(
-        pipe.process_ref(
-            &scan_input(&m2, &event, &yes2, &no2, &book, now + Duration::hours(12)),
-            now,
-        )
-        .is_none(),
+        !tightened_outcome.is_emitted(),
         "tightened min profit must suppress emission immediately after reload"
+    );
+    assert_eq!(
+        tightened_outcome.reject,
+        Some(oxide_arb_algorithm::DetectionRejectReason::MinProfitThreshold)
     );
 
     // Reloading the permissive config restores emission (third fresh market).
@@ -304,7 +308,7 @@ fn reload_tightened_min_profit_suppresses_next_scan() {
             &scan_input(&m3, &event, &yes3, &no3, &book, now + Duration::hours(12)),
             now,
         )
-        .is_some(),
+        .is_emitted(),
         "permissive reload restores emission"
     );
 }
@@ -337,11 +341,15 @@ fn market_anomaly_block_skips_before_detection() {
     );
     let provider: Arc<dyn ControlFactorProvider> = Arc::new(StubProvider(snapshot(&[anomaly])));
     let pipe = pipeline(provider);
-    let scored = pipe.process_ref(
+    let outcome = pipe.process_ref(
         &scan_input(&market, &event, &yes, &no, &book, now + Duration::hours(12)),
         now,
     );
-    assert!(scored.is_none(), "blocked market must not emit");
+    assert!(!outcome.is_emitted(), "blocked market must not emit");
+    assert_eq!(
+        outcome.reject,
+        Some(oxide_arb_algorithm::DetectionRejectReason::MarketAnomaly)
+    );
 }
 
 /// Detect the bucket dimensions of the baseline (neutral) opportunity.
@@ -356,6 +364,7 @@ fn baseline_bucket_dims(
 ) -> BucketRiskDimensions {
     let baseline = pipeline(neutral_provider())
         .process_ref(&scan_input(market, event, yes, no, book, deadline), now)
+        .opportunity
         .expect("baseline emit");
     BucketRiskDimensions::coarse(
         baseline.opportunity.category,
@@ -387,12 +396,12 @@ fn bucket_haircut_re_gates_min_profit() {
         }),
     );
     let provider: Arc<dyn ControlFactorProvider> = Arc::new(StubProvider(snapshot(&[bucket])));
-    let scored = pipeline(provider).process_ref(
+    let outcome = pipeline(provider).process_ref(
         &scan_input(&market, &event, &yes, &no, &book, deadline),
         now,
     );
     assert!(
-        scored.is_none(),
+        !outcome.is_emitted(),
         "bucket haircut must re-gate min profit and reject"
     );
 }

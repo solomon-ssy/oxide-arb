@@ -1,4 +1,5 @@
 pub mod book_update_coalescer;
+pub mod catalog_lifecycle;
 pub mod catalog_readiness;
 pub mod detection_readiness;
 pub mod equity_valuator;

@@ -65,6 +65,12 @@ impl MarketCache {
             if !self.universe.is_enabled(market.categories) {
                 continue;
             }
+            if market
+                .end_date
+                .is_none_or(|deadline| deadline <= Utc::now())
+            {
+                continue;
+            }
 
             let entry = Arc::new(CachedMarketScanEntry {
                 market_id: market.market_id.clone(),
@@ -109,6 +115,18 @@ mod tests {
     use rust_decimal_macros::dec;
 
     fn sample_entry(id: &str, categories: CategorySet) -> MarketRegistryInfo {
+        sample_entry_with_end_date(
+            id,
+            categories,
+            Some(Utc::now() + chrono::Duration::hours(2)),
+        )
+    }
+
+    fn sample_entry_with_end_date(
+        id: &str,
+        categories: CategorySet,
+        end_date: Option<DateTime<Utc>>,
+    ) -> MarketRegistryInfo {
         MarketRegistryInfo {
             market_id: MarketId::new(id),
             event_id: EventId::new("evt-1"),
@@ -139,7 +157,7 @@ mod tests {
             min_order_size: dec!(5),
             volume_24h: Usd::ZERO,
             fee_schedule: None,
-            end_date: None,
+            end_date,
             resolved_at: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
@@ -148,6 +166,35 @@ mod tests {
 
     fn admit_all() -> Arc<MarketUniverseFilter> {
         Arc::new(MarketUniverseFilter::default())
+    }
+
+    #[test]
+    fn past_deadline_markets_are_excluded_from_cache() {
+        let reg = Arc::new(MarketRegistry::new());
+        reg.register_market(sample_entry_with_end_date(
+            "past",
+            CategorySet::EMPTY,
+            Some(Utc::now() - chrono::Duration::hours(1)),
+        ));
+        reg.register_market(sample_entry("future", CategorySet::EMPTY));
+
+        let cache = MarketCache::new(reg, admit_all());
+        assert_eq!(cache.entries().len(), 1);
+        assert!(cache.get(&MarketId::new("future")).is_some());
+        assert!(cache.get(&MarketId::new("past")).is_none());
+    }
+
+    #[test]
+    fn no_end_date_markets_are_excluded_from_cache() {
+        let reg = Arc::new(MarketRegistry::new());
+        reg.register_market(sample_entry_with_end_date(
+            "no-date",
+            CategorySet::EMPTY,
+            None,
+        ));
+
+        let cache = MarketCache::new(reg, admit_all());
+        assert!(cache.entries().is_empty());
     }
 
     #[test]

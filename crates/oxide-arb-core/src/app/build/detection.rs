@@ -129,6 +129,7 @@ impl DetectionStack {
             event_repo: Arc::clone(infra.repos().event()),
             cache: Arc::clone(infra.cache()),
             metrics: Arc::clone(infra.metrics()),
+            runtime_config: Arc::clone(infra.runtime_store()),
             ws_subscription: Some(Arc::clone(&ws_subscription)),
             full_sync_interval_secs: deploy.market_data.gamma.full_sync_interval_secs,
         }));

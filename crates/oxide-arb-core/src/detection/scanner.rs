@@ -14,9 +14,11 @@ use crate::{
 };
 use chrono::{DateTime, Utc};
 use num_traits::ToPrimitive;
-use oxide_arb_algorithm::{pipeline::MarketScanInputRef, scorer::ScoredOpportunity};
+use oxide_arb_algorithm::{
+    DetectionRejectReason, pipeline::MarketScanInputRef, scorer::ScoredOpportunity,
+};
 use oxide_arb_models::domain::{
-    CatalogStatusPort, CoreEvent, CoreEventPublisher, latency::LatencyTrace,
+    CatalogStatusPort, CoreEvent, CoreEventPublisher, book::EndgameBookPair, latency::LatencyTrace,
 };
 use std::sync::{
     Arc,
@@ -24,6 +26,9 @@ use std::sync::{
 };
 
 static SCAN_SAMPLE: AtomicU64 = AtomicU64::new(0);
+
+/// One-in-64 scans emit a structured debug line for human triage.
+const SCAN_LOG_SAMPLE_SHIFT: u32 = 6;
 
 pub struct Scanner {
     pipeline: Arc<CoreOpportunityPipeline>,
@@ -75,14 +80,25 @@ impl Scanner {
         entry: &CachedMarketScanEntry,
         now: DateTime<Utc>,
     ) -> Option<Arc<ScoredOpportunity>> {
-        if !self.catalog.is_ready() || !self.detection_readiness.allows_detection() {
-            return None;
-        }
-        let sample = SCAN_SAMPLE.fetch_add(1, Ordering::Relaxed).trailing_zeros() >= 6;
+        let sample =
+            SCAN_SAMPLE.fetch_add(1, Ordering::Relaxed).trailing_zeros() >= SCAN_LOG_SAMPLE_SHIFT;
         let timer = sample.then(|| self.metrics.scan_duration_seconds.start_timer());
 
-        let pair =
-            DualBookAssembler::assemble(&self.book_store, &entry.token_yes, &entry.token_no)?;
+        if !self.catalog.is_ready() {
+            self.record_reject(DetectionRejectReason::CatalogNotReady, entry, sample, None);
+            return None;
+        }
+        if !self.detection_readiness.allows_detection() {
+            self.record_reject(DetectionRejectReason::LifecycleGated, entry, sample, None);
+            return None;
+        }
+
+        let Some(pair) =
+            DualBookAssembler::assemble(&self.book_store, &entry.token_yes, &entry.token_no)
+        else {
+            self.record_reject(DetectionRejectReason::MissingBookPair, entry, sample, None);
+            return None;
+        };
         let acceptable_book_age_ms = self.staleness_classifier.acceptable_ms();
 
         let now_ms = ToPrimitive::to_u64(&now.timestamp_millis().max(0)).unwrap_or(0);
@@ -94,6 +110,7 @@ impl Scanner {
             &entry.token_no,
         ) {
             self.metrics.scans_gate_rejected.inc();
+            self.record_reject(DetectionRejectReason::BookGate, entry, sample, Some(&pair));
             return None;
         }
 
@@ -123,23 +140,30 @@ impl Scanner {
             settlement_deadline: entry.settlement_deadline,
             latency,
         };
-        let result = self.pipeline.process_ref(&input, now);
-        if let Some(ref scored) = result {
+        let outcome = self.pipeline.process_ref(&input, now);
+        if let Some(ref scored) = outcome.opportunity {
             observe_ws_to_scan(&scored.trace, &self.metrics);
             self.metrics.opportunities_detected.inc();
+            if sample {
+                tracing::debug!(
+                    market_id = %entry.market_id,
+                    category = ?entry.fee_category,
+                    score = %scored.score.to_decimal(),
+                    "detection opportunity emitted"
+                );
+            }
             if let Some(writer) = &self.detection_writer {
                 writer.write(scored, &pair, acceptable_book_age_ms);
             }
-            // Surface the detection to the real-time bus. Project the public
-            // `Opportunity` (no internal algorithm/latency trace leakage);
-            // fire-and-forget, drops on a full bus rather than blocking the scan.
             self.events
                 .publish(CoreEvent::OpportunityDetected(Arc::clone(
                     &scored.opportunity,
                 )));
+        } else if let Some(reason) = outcome.reject {
+            self.record_reject(reason, entry, sample, Some(&pair));
         }
         drop(timer);
-        result
+        outcome.opportunity
     }
 
     pub fn scan_all(&self, now: DateTime<Utc>) -> Vec<Arc<ScoredOpportunity>> {
@@ -153,5 +177,58 @@ impl Scanner {
             ToPrimitive::to_u32(&results.len()).unwrap_or(u32::MAX),
         ));
         results
+    }
+
+    fn record_reject(
+        &self,
+        reason: DetectionRejectReason,
+        entry: &CachedMarketScanEntry,
+        sample: bool,
+        pair: Option<&EndgameBookPair>,
+    ) {
+        self.metrics.record_scan_reject(reason);
+        if !sample {
+            return;
+        }
+        match (reason, pair) {
+            (DetectionRejectReason::NoConvergenceDirection, Some(pair)) => {
+                let view = pair.view();
+                tracing::debug!(
+                    market_id = %entry.market_id,
+                    category = ?entry.fee_category,
+                    reject_reason = %reason,
+                    yes_best_ask = ?view.yes_asks.best_price(),
+                    no_best_ask = ?view.no_asks.best_price(),
+                    "detection scan rejected"
+                );
+            }
+            (
+                DetectionRejectReason::ConvergenceInsufficient {
+                    elapsed_secs,
+                    required_secs,
+                },
+                Some(pair),
+            ) => {
+                let view = pair.view();
+                tracing::debug!(
+                    market_id = %entry.market_id,
+                    category = ?entry.fee_category,
+                    reject_reason = %reason,
+                    elapsed_secs,
+                    required_secs,
+                    yes_best_ask = ?view.yes_asks.best_price(),
+                    no_best_ask = ?view.no_asks.best_price(),
+                    "detection scan rejected"
+                );
+            }
+            _ => {
+                tracing::debug!(
+                    market_id = %entry.market_id,
+                    category = ?entry.fee_category,
+                    reject_reason = %reason,
+                    "detection scan rejected"
+                );
+            }
+        }
     }
 }

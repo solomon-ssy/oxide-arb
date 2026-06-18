@@ -1,6 +1,6 @@
 //! Scanner integration: stale books are rejected at `BookGate` before scoring.
 
-use chrono::{TimeZone, Utc};
+use chrono::{Duration, TimeZone, Utc};
 use oxide_arb_algorithm::{
     calibration::ResolutionCalibrator, cooldown::InMemoryEmissionCooldown,
     endgame::EndgameDetector, pipeline::OpportunityPipeline, scorer::EndgameScorer,
@@ -65,7 +65,7 @@ fn sample_market(id: &str) -> MarketRegistryInfo {
         min_order_size: dec!(1),
         volume_24h: Usd::ZERO,
         fee_schedule: None,
-        end_date: None,
+        end_date: Some(Utc::now() + Duration::hours(12)),
         resolved_at: None,
         created_at: Utc::now(),
         updated_at: Utc::now(),

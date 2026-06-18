@@ -151,6 +151,7 @@ impl BuildInfra {
                 voting_oracle: Arc::clone(wiring.clients.voting_oracle()),
                 ctf_redeem: wiring.clients.ctf_redeem().map(Arc::clone),
                 alerts: Arc::clone(self.alerts()),
+                metrics: Arc::clone(self.metrics()),
             },
         ))
     }

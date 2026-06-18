@@ -1,13 +1,13 @@
 {
-    // 使用 IntelliSense 了解相关属性。
-    // 悬停以查看现有属性的描述。
-    // 欲了解更多信息，请访问: https://go.microsoft.com/fwlink/?linkid=830387
+    // Cursor / VS Code Run and Debug — CodeLLDB + cargo build.
+    // Log level: RUST_LOG overrides [observability].log_level in config/oxide-arb.toml.
+    // When RUST_LOG is unset, the binary uses log_level from config (default: info).
     "version": "0.2.0",
     "configurations": [
         {
             "type": "lldb",
             "request": "launch",
-            "name": "Debug executable 'oxide-arb'",
+            "name": "oxide-arb (info — config default)",
             "cargo": {
                 "args": [
                     "build",
@@ -19,10 +19,66 @@
                     "kind": "bin"
                 }
             },
-            "args": [],
+            "args": [
+                "--config-dir",
+                "config"
+            ],
             "cwd": "${workspaceFolder}",
             "env": {
-                "PATH": "/Users/eason/.cargo/bin:${env:PATH}"
+                "PATH": "/Users/eason/.cargo/bin:${env:PATH}",
+                "OXIDE_ARB_CONFIG_DIR": "config"
+            }
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "oxide-arb (debug — full RUST_LOG)",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=oxide-arb",
+                    "--package=oxide-arb-bin"
+                ],
+                "filter": {
+                    "name": "oxide-arb",
+                    "kind": "bin"
+                }
+            },
+            "args": [
+                "--config-dir",
+                "config"
+            ],
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PATH": "/Users/eason/.cargo/bin:${env:PATH}",
+                "OXIDE_ARB_CONFIG_DIR": "config",
+                "RUST_LOG": "debug"
+            }
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "oxide-arb (detection funnel debug)",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=oxide-arb",
+                    "--package=oxide-arb-bin"
+                ],
+                "filter": {
+                    "name": "oxide-arb",
+                    "kind": "bin"
+                }
+            },
+            "args": [
+                "--config-dir",
+                "config"
+            ],
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PATH": "/Users/eason/.cargo/bin:${env:PATH}",
+                "OXIDE_ARB_CONFIG_DIR": "config",
+                "RUST_LOG": "info,oxide_arb_core::detection::scanner=debug,oxide_arb_algorithm::pipeline=debug"
             }
         },
         {

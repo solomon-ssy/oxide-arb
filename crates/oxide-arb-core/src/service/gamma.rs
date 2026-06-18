@@ -6,7 +6,11 @@ use crate::{
         market_cache::MarketCache, market_registry::MarketRegistry,
         universe_filter::MarketUniverseFilter,
     },
-    service::ws_subscription::WsSubscriptionCoordinator,
+    runtime_config::RuntimeConfigStore,
+    service::{
+        catalog_lifecycle::apply_past_deadline_to_sync_batch,
+        ws_subscription::WsSubscriptionCoordinator,
+    },
 };
 use chrono::{DateTime, Utc};
 use num_traits::ToPrimitive;
@@ -43,6 +47,7 @@ pub struct GammaServiceDeps {
     pub event_repo: Arc<PgEventRepository>,
     pub cache: Arc<CacheManager>,
     pub metrics: Arc<MetricsHub>,
+    pub runtime_config: Arc<RuntimeConfigStore>,
     pub ws_subscription: Option<Arc<WsSubscriptionCoordinator>>,
     /// Minimum seconds between full catalog refreshes (from `[market_data.gamma]`).
     pub full_sync_interval_secs: u64,
@@ -58,6 +63,7 @@ pub struct GammaService {
     event_repo: Arc<PgEventRepository>,
     cache: Arc<CacheManager>,
     metrics: Arc<MetricsHub>,
+    runtime_config: Arc<RuntimeConfigStore>,
     ws_subscription: Option<Arc<WsSubscriptionCoordinator>>,
     full_sync_interval_secs: u64,
     last_sync_at: parking_lot::Mutex<Option<DateTime<Utc>>>,
@@ -75,6 +81,7 @@ impl GammaService {
             event_repo: deps.event_repo,
             cache: deps.cache,
             metrics: deps.metrics,
+            runtime_config: deps.runtime_config,
             ws_subscription: deps.ws_subscription,
             full_sync_interval_secs: deps.full_sync_interval_secs.max(60),
             last_sync_at: parking_lot::Mutex::new(None),
@@ -114,7 +121,7 @@ impl GammaService {
     }
 
     async fn full_sync(&self) -> Result<(), OxideError> {
-        let batch = self
+        let mut batch = self
             .gamma_client
             .full_sync_with_fees()
             .await
@@ -135,6 +142,16 @@ impl GammaService {
             .collect();
 
         self.record_rejections(&batch.rejected);
+        let now = Utc::now();
+        let past_deadline_paused =
+            apply_past_deadline_to_sync_batch(&mut batch.registry_markets, &mut batch.markets, now);
+        if past_deadline_paused > 0 {
+            self.metrics
+                .gamma_markets_paused
+                .with_label_values(&["past_deadline"])
+                .inc_by(past_deadline_paused);
+        }
+
         self.market_registry.register_events(batch.registry_events);
         prewarm_token_intern(&batch.registry_markets);
         self.market_registry
@@ -144,6 +161,12 @@ impl GammaService {
 
         let deactivated = self.market_registry.deactivate_stale(&seen_ids);
         let deactivated_count = deactivated.len();
+        if deactivated_count > 0 {
+            self.metrics
+                .gamma_markets_paused
+                .with_label_values(&["stale_catalog"])
+                .inc_by(u64::try_from(deactivated_count).unwrap_or(u64::MAX));
+        }
         let deactivated_upserts = convert_registry_to_upsert(&deactivated);
 
         let mut persist_batch = batch.markets;
@@ -225,13 +248,24 @@ impl GammaService {
             return Ok(());
         }
 
+        let now = Utc::now();
+        let mut persist_upserts: Vec<UpsertMarket> = batch.markets;
+        persist_upserts.extend(extra_upserts);
+        let past_deadline_paused =
+            apply_past_deadline_to_sync_batch(&mut all_registry, &mut persist_upserts, now);
+        if past_deadline_paused > 0 {
+            self.metrics
+                .gamma_markets_paused
+                .with_label_values(&["past_deadline"])
+                .inc_by(past_deadline_paused);
+        }
+
         prewarm_token_intern(&all_registry);
         let registered = all_registry.len();
         self.market_registry.register_markets(all_registry);
         self.fee_calculator.ingest_market_fee_schedules(fee_data);
 
-        let mut persist_batch = batch.markets;
-        persist_batch.extend(extra_upserts);
+        let persist_batch = persist_upserts;
 
         self.persist_events(&batch.events).await;
         self.persist_markets(&persist_batch).await;
@@ -263,9 +297,28 @@ impl GammaService {
         let Some(coordinator) = &self.ws_subscription else {
             return;
         };
-        let count = coordinator.sync_engine_hotset(&self.market_registry, &self.universe);
+        let detection_window_hours = self
+            .runtime_config
+            .load()
+            .detection
+            .endgame
+            .settlement_window_hours;
+        let stats = coordinator.sync_engine_hotset(
+            &self.market_registry,
+            &self.universe,
+            detection_window_hours,
+            &self.metrics,
+        );
         tracing::info!(
-            tokens = count,
+            selected_tokens = stats.selected_tokens,
+            tier1_markets = stats.tier1_markets(),
+            tier1_tokens = stats.tier1_tokens(),
+            tier2_markets = stats.tier2_markets(),
+            tier2_tokens = stats.tier2_tokens(),
+            candidates_future_detect = stats.candidates_future_detect,
+            candidates_future_prewarm = stats.candidates_future_prewarm,
+            candidates_excluded_past = stats.candidates_past_deadline,
+            detection_window_coverage = stats.detection_window_coverage_ratio(),
             subscribed = coordinator.subscribed_count(),
             "CLOB websocket engine hotset synced after Gamma catalog update"
         );

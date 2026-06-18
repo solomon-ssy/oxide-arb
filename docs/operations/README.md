@@ -15,3 +15,5 @@
 - [schema-catalog.md](../persistence/schema-catalog.md) — Postgres 表生命周期
 - [replay-analytics-endgame-audit.md](../replay-analytics-endgame-audit.md) — control-factor 控制面动机
 - [phase5.6-live-consumption.md](../plans/phase5.6-live-consumption.md) — 热路径因子快照接入
+- [ADR-002](../plans/ADR-002-quant-signal-plane.md) — Quant Signal Plane 架构决策
+- [phase9-quant-signal-plane.md](../plans/phase9-quant-signal-plane.md) — Top-N 量化报告母计划

@@ -8,6 +8,7 @@
 
 use crate::{
     calibration::ResolutionCalibrator,
+    detection_reject::DetectionRejectReason,
     endgame::{
         confidence::{ConfidenceFusion, compute_realtime_confidence},
         convergence::{ConvergenceDirection, InMemoryConvergenceTracker},
@@ -167,21 +168,23 @@ impl<F: FeeEstimator> EndgameDetector<F> {
         direction.is_none()
     }
 
-    #[inline]
+    /// Directional detect; returns a reject reason when emit is skipped.
     pub fn detect_with_direction(
         &self,
         input: &EndgameDetectInput<'_>,
         now: DateTime<Utc>,
-    ) -> Option<Opportunity> {
+    ) -> Result<Opportunity, DetectionRejectReason> {
         let params = self.params.load();
-        let deadline = input.settlement_deadline?;
+        let Some(deadline) = input.settlement_deadline else {
+            return Err(DetectionRejectReason::OutsideSettlementWindow);
+        };
         let hours_remaining = (deadline - now).num_hours();
         if hours_remaining < 0
             || hours_remaining
                 > ToPrimitive::to_i64(&params.settlement_window_hours).unwrap_or(i64::MAX)
         {
             self.convergence.remove(input.market_id);
-            return None;
+            return Err(DetectionRejectReason::OutsideSettlementWindow);
         }
 
         let view = input.book.view();
@@ -189,7 +192,10 @@ impl<F: FeeEstimator> EndgameDetector<F> {
             self.convergence
                 .update_and_get(input.market_id, input.direction, now);
         if convergence_secs < params.min_convergence_duration_secs {
-            return None;
+            return Err(DetectionRejectReason::ConvergenceInsufficient {
+                elapsed_secs: convergence_secs,
+                required_secs: params.min_convergence_duration_secs,
+            });
         }
 
         let (target_asks, target_token) = match input.direction {
@@ -202,7 +208,8 @@ impl<F: FeeEstimator> EndgameDetector<F> {
             params.max_investment_usd,
             params.high_threshold,
             target_asks.total_depth_usd,
-        )?;
+        )
+        .ok_or(DetectionRejectReason::WalkFailed)?;
 
         let entry_price_micro = walk.vwap;
         let entry_price = Price::new(entry_price_micro.to_decimal());
@@ -210,7 +217,7 @@ impl<F: FeeEstimator> EndgameDetector<F> {
             .micro()
             .saturating_sub(entry_price_micro.micro());
         if min_edge < params.min_profit_per_share.micro() {
-            return None;
+            return Err(DetectionRejectReason::MinProfitPerShare);
         }
 
         let ctx = OpportunityBuildCtx {
@@ -224,7 +231,7 @@ impl<F: FeeEstimator> EndgameDetector<F> {
             fusion: &params.fusion,
             high_threshold: params.high_threshold,
         };
-        Some(self.build_opportunity(&ctx))
+        Ok(self.build_opportunity(&ctx))
     }
 
     fn build_opportunity(&self, ctx: &OpportunityBuildCtx<'_>) -> Opportunity {

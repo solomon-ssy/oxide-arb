@@ -1,3 +1,4 @@
+use oxide_arb_algorithm::DetectionRejectReason;
 use prometheus::{
     Encoder, Gauge, Histogram, HistogramOpts, IntCounter, IntCounterVec, IntGauge, IntGaugeVec,
     Opts, Registry, TextEncoder,
@@ -77,6 +78,7 @@ pub struct MetricsHub {
 
     // Detection
     pub scans_gate_rejected: IntCounter,
+    pub scan_rejects: IntCounterVec,
     pub coalesced_scans: IntCounter,
     pub coalescer_dropped: IntCounter,
     pub scan_results_total: Histogram,
@@ -147,7 +149,13 @@ pub struct MetricsHub {
     pub gamma_markets_total: IntGauge,
     pub gamma_last_sync_success: IntGauge,
     pub gamma_markets_rejected: IntCounterVec,
+    pub gamma_markets_paused: IntCounterVec,
     pub catalog_ready: IntGauge,
+
+    // WS hotset
+    pub hotset_candidates_total: IntCounterVec,
+    pub hotset_selected_total: IntCounterVec,
+    pub hotset_detection_window_coverage_ratio: Gauge,
 
     // Metrics refresh
     pub metrics_refresh_failures: IntCounter,
@@ -198,6 +206,7 @@ struct PipelineMetrics {
 
 struct DetectionMetrics {
     scans_gate_rejected: IntCounter,
+    scan_rejects: IntCounterVec,
     coalesced_scans: IntCounter,
     coalescer_dropped: IntCounter,
     scan_results_total: Histogram,
@@ -255,6 +264,12 @@ struct CalibrationMetrics {
     bucket_count: IntGauge,
 }
 
+struct HotsetMetrics {
+    candidates_total: IntCounterVec,
+    selected_total: IntCounterVec,
+    detection_window_coverage_ratio: Gauge,
+}
+
 struct SystemMetrics {
     uptime_seconds: IntGauge,
     active_tasks: IntGauge,
@@ -265,6 +280,7 @@ struct SystemMetrics {
     gamma_markets_total: IntGauge,
     gamma_last_sync_success: IntGauge,
     gamma_markets_rejected: IntCounterVec,
+    gamma_markets_paused: IntCounterVec,
     catalog_ready: IntGauge,
     metrics_refresh_failures: IntCounter,
     shutdown_stage_progress_remaining: IntGaugeVec,
@@ -435,6 +451,12 @@ fn register_detection_metrics(registry: &Registry) -> DetectionMetrics {
             registry,
             "oxide_arb_detection_scans_gate_rejected_total",
             "Scans rejected by gate"
+        ),
+        scan_rejects: register_counter_vec!(
+            registry,
+            "oxide_arb_detection_scan_rejects_total",
+            "Scans rejected by detection funnel stage",
+            &["reason"]
         ),
         coalesced_scans: register_counter!(
             registry,
@@ -746,6 +768,12 @@ fn register_system_metrics(registry: &Registry) -> SystemMetrics {
             "Markets dropped during Gamma catalog normalization, by reason",
             &["reason"]
         ),
+        gamma_markets_paused: register_counter_vec!(
+            registry,
+            "oxide_arb_gamma_markets_paused_total",
+            "Markets transitioned to paused during catalog sync, by reason",
+            &["reason"]
+        ),
         catalog_ready: register_gauge_int!(
             registry,
             "oxide_arb_catalog_ready",
@@ -767,6 +795,28 @@ fn register_system_metrics(registry: &Registry) -> SystemMetrics {
             "oxide_arb_shutdown_stage_timeouts_total",
             "Staged shutdown stage timeouts",
             &["stage"]
+        ),
+    }
+}
+
+fn register_hotset_metrics(registry: &Registry) -> HotsetMetrics {
+    HotsetMetrics {
+        candidates_total: register_counter_vec!(
+            registry,
+            "oxide_arb_hotset_candidates_total",
+            "WS hotset candidate markets by lifecycle bucket",
+            &["kind"]
+        ),
+        selected_total: register_counter_vec!(
+            registry,
+            "oxide_arb_hotset_selected_total",
+            "WS hotset selected markets by tier",
+            &["kind"]
+        ),
+        detection_window_coverage_ratio: register_gauge_float!(
+            registry,
+            "oxide_arb_hotset_detection_window_coverage_ratio",
+            "Fraction of detection-window candidates selected into the hotset"
         ),
     }
 }
@@ -832,6 +882,119 @@ struct MetricGroups {
     system: SystemMetrics,
     settlement: SettlementMetrics,
     control_factor: ControlFactorMetrics,
+    hotset: HotsetMetrics,
+}
+
+/// Operational metric handles assembled from non-data-plane registration groups.
+struct HubOperationalMetrics {
+    risk_checks_total: IntCounter,
+    risk_exposure_usd: Gauge,
+    risk_daily_pnl_usd: Gauge,
+    risk_daily_loss_usd: Gauge,
+    risk_weekly_loss_usd: Gauge,
+    risk_reservations_active: IntGauge,
+    risk_reservations_total_usd: Gauge,
+    exposure_gc_cleaned: IntCounter,
+    calibration_update_total: IntCounter,
+    calibration_resolved: IntCounter,
+    calibration_bucket_count: IntGauge,
+    uptime_seconds: IntGauge,
+    active_tasks: IntGauge,
+    health_check_failures: IntCounter,
+    post_trade_relay_pending: IntGauge,
+    async_writer_dropped: IntCounterVec,
+    gamma_sync_duration_ms: IntGauge,
+    gamma_markets_total: IntGauge,
+    gamma_last_sync_success: IntGauge,
+    gamma_markets_rejected: IntCounterVec,
+    gamma_markets_paused: IntCounterVec,
+    catalog_ready: IntGauge,
+    hotset_candidates_total: IntCounterVec,
+    hotset_selected_total: IntCounterVec,
+    hotset_detection_window_coverage_ratio: Gauge,
+    metrics_refresh_failures: IntCounter,
+    settlement_requests_total: IntCounterVec,
+    settlement_positions_settled_total: IntCounter,
+    settlement_redeem_success_total: IntCounterVec,
+    settlement_redeem_failure_total: IntCounterVec,
+    settlement_oracle_mismatch_total: IntCounter,
+    settlement_channel_dropped_total: IntCounter,
+    settlement_no_open_positions_total: IntCounter,
+    settlement_duration_ms: Histogram,
+    control_factor_refresh_total: IntCounter,
+    control_factor_refresh_failures: IntCounter,
+    control_factor_version_changes: IntCounter,
+    control_factor_snapshot_load_age_seconds: IntGauge,
+    control_factor_active_count: IntGauge,
+    control_factor_hard_rejects: IntCounter,
+    control_factor_validation_rejections: IntCounter,
+    control_factor_shadow_decisions: IntCounter,
+    control_factor_shadow_dropped: IntCounter,
+    control_factor_fail_closed_events: IntCounter,
+    control_factor_publication_active: IntGauge,
+    shutdown_stage_progress_remaining: IntGaugeVec,
+    shutdown_stage_timeouts: IntCounterVec,
+}
+
+impl HubOperationalMetrics {
+    fn from_groups(
+        risk: RiskMetrics,
+        calibration: CalibrationMetrics,
+        system: SystemMetrics,
+        settlement: SettlementMetrics,
+        control_factor: ControlFactorMetrics,
+        hotset: HotsetMetrics,
+    ) -> Self {
+        Self {
+            risk_checks_total: risk.checks_total,
+            risk_exposure_usd: risk.exposure_usd,
+            risk_daily_pnl_usd: risk.daily_pnl_usd,
+            risk_daily_loss_usd: risk.daily_loss_usd,
+            risk_weekly_loss_usd: risk.weekly_loss_usd,
+            risk_reservations_active: risk.reservations_active,
+            risk_reservations_total_usd: risk.reservations_total_usd,
+            exposure_gc_cleaned: risk.exposure_gc_cleaned,
+            calibration_update_total: calibration.update_total,
+            calibration_resolved: calibration.resolved,
+            calibration_bucket_count: calibration.bucket_count,
+            uptime_seconds: system.uptime_seconds,
+            active_tasks: system.active_tasks,
+            health_check_failures: system.health_check_failures,
+            post_trade_relay_pending: system.post_trade_relay_pending,
+            async_writer_dropped: system.async_writer_dropped,
+            gamma_sync_duration_ms: system.gamma_sync_duration_ms,
+            gamma_markets_total: system.gamma_markets_total,
+            gamma_last_sync_success: system.gamma_last_sync_success,
+            gamma_markets_rejected: system.gamma_markets_rejected,
+            gamma_markets_paused: system.gamma_markets_paused,
+            catalog_ready: system.catalog_ready,
+            hotset_candidates_total: hotset.candidates_total,
+            hotset_selected_total: hotset.selected_total,
+            hotset_detection_window_coverage_ratio: hotset.detection_window_coverage_ratio,
+            metrics_refresh_failures: system.metrics_refresh_failures,
+            settlement_requests_total: settlement.requests_total,
+            settlement_positions_settled_total: settlement.positions_settled_total,
+            settlement_redeem_success_total: settlement.redeem_success_total,
+            settlement_redeem_failure_total: settlement.redeem_failure_total,
+            settlement_oracle_mismatch_total: settlement.oracle_mismatch_total,
+            settlement_channel_dropped_total: settlement.channel_dropped_total,
+            settlement_no_open_positions_total: settlement.no_open_positions_total,
+            settlement_duration_ms: settlement.duration_ms,
+            control_factor_refresh_total: control_factor.refresh_total,
+            control_factor_refresh_failures: control_factor.refresh_failures,
+            control_factor_version_changes: control_factor.version_changes,
+            control_factor_snapshot_load_age_seconds: control_factor.snapshot_load_age_seconds,
+            control_factor_active_count: control_factor.active_count,
+            control_factor_hard_rejects: control_factor.hard_rejects,
+            control_factor_validation_rejections: control_factor.validation_rejections,
+            control_factor_shadow_decisions: control_factor.shadow_decisions,
+            control_factor_shadow_dropped: control_factor.shadow_dropped,
+            control_factor_fail_closed_events: control_factor.fail_closed_events,
+            control_factor_publication_active: control_factor.publication_active,
+            shutdown_stage_progress_remaining: system.shutdown_stage_progress_remaining,
+            shutdown_stage_timeouts: system.shutdown_stage_timeouts,
+        }
+    }
 }
 
 impl MetricsHub {
@@ -847,14 +1010,43 @@ impl MetricsHub {
             system: register_system_metrics(&registry),
             settlement: register_settlement_metrics(&registry),
             control_factor: register_control_factor_metrics(&registry),
+            hotset: register_hotset_metrics(&registry),
         };
         Self::from_groups(registry, groups)
     }
 
     fn from_groups(registry: Registry, g: MetricGroups) -> Self {
-        let (pipeline, detection, funnel) = (g.pipeline, g.detection, g.funnel);
-        let (execution, risk, calibration) = (g.execution, g.risk, g.calibration);
-        let (system, settlement, control_factor) = (g.system, g.settlement, g.control_factor);
+        let MetricGroups {
+            pipeline,
+            detection,
+            funnel,
+            execution,
+            risk,
+            calibration,
+            system,
+            settlement,
+            control_factor,
+            hotset,
+        } = g;
+        let operational = HubOperationalMetrics::from_groups(
+            risk,
+            calibration,
+            system,
+            settlement,
+            control_factor,
+            hotset,
+        );
+        Self::assemble_hub(registry, pipeline, detection, funnel, execution, operational)
+    }
+
+    fn assemble_hub(
+        registry: Registry,
+        pipeline: PipelineMetrics,
+        detection: DetectionMetrics,
+        funnel: FunnelMetrics,
+        execution: ExecutionMetrics,
+        operational: HubOperationalMetrics,
+    ) -> Self {
         Self {
             registry,
             ws_events_received: pipeline.ws_events_received,
@@ -871,6 +1063,7 @@ impl MetricsHub {
             book_apply_coalesced_total: pipeline.book_apply_coalesced_total,
             backpressure_events: pipeline.backpressure_events,
             scans_gate_rejected: detection.scans_gate_rejected,
+            scan_rejects: detection.scan_rejects,
             coalesced_scans: detection.coalesced_scans,
             coalescer_dropped: detection.coalescer_dropped,
             scan_results_total: detection.scan_results_total,
@@ -903,49 +1096,55 @@ impl MetricsHub {
             latency_tick_to_http_us: execution.latency_tick_to_http_us,
             fsm_emergency_entries: execution.fsm_emergency_entries,
             venue_cancel_all_total: execution.venue_cancel_all_total,
-            risk_checks_total: risk.checks_total,
-            risk_exposure_usd: risk.exposure_usd,
-            risk_daily_pnl_usd: risk.daily_pnl_usd,
-            risk_daily_loss_usd: risk.daily_loss_usd,
-            risk_weekly_loss_usd: risk.weekly_loss_usd,
-            risk_reservations_active: risk.reservations_active,
-            risk_reservations_total_usd: risk.reservations_total_usd,
-            exposure_gc_cleaned: risk.exposure_gc_cleaned,
-            calibration_update_total: calibration.update_total,
-            calibration_resolved: calibration.resolved,
-            calibration_bucket_count: calibration.bucket_count,
-            uptime_seconds: system.uptime_seconds,
-            active_tasks: system.active_tasks,
-            health_check_failures: system.health_check_failures,
-            post_trade_relay_pending: system.post_trade_relay_pending,
-            async_writer_dropped: system.async_writer_dropped,
-            gamma_sync_duration_ms: system.gamma_sync_duration_ms,
-            gamma_markets_total: system.gamma_markets_total,
-            gamma_last_sync_success: system.gamma_last_sync_success,
-            gamma_markets_rejected: system.gamma_markets_rejected,
-            catalog_ready: system.catalog_ready,
-            metrics_refresh_failures: system.metrics_refresh_failures,
-            settlement_requests_total: settlement.requests_total,
-            settlement_positions_settled_total: settlement.positions_settled_total,
-            settlement_redeem_success_total: settlement.redeem_success_total,
-            settlement_redeem_failure_total: settlement.redeem_failure_total,
-            settlement_oracle_mismatch_total: settlement.oracle_mismatch_total,
-            settlement_channel_dropped_total: settlement.channel_dropped_total,
-            settlement_no_open_positions_total: settlement.no_open_positions_total,
-            settlement_duration_ms: settlement.duration_ms,
-            control_factor_refresh_total: control_factor.refresh_total,
-            control_factor_refresh_failures: control_factor.refresh_failures,
-            control_factor_version_changes: control_factor.version_changes,
-            control_factor_snapshot_load_age_seconds: control_factor.snapshot_load_age_seconds,
-            control_factor_active_count: control_factor.active_count,
-            control_factor_hard_rejects: control_factor.hard_rejects,
-            control_factor_validation_rejections: control_factor.validation_rejections,
-            control_factor_shadow_decisions: control_factor.shadow_decisions,
-            control_factor_shadow_dropped: control_factor.shadow_dropped,
-            control_factor_fail_closed_events: control_factor.fail_closed_events,
-            control_factor_publication_active: control_factor.publication_active,
-            shutdown_stage_progress_remaining: system.shutdown_stage_progress_remaining,
-            shutdown_stage_timeouts: system.shutdown_stage_timeouts,
+            risk_checks_total: operational.risk_checks_total,
+            risk_exposure_usd: operational.risk_exposure_usd,
+            risk_daily_pnl_usd: operational.risk_daily_pnl_usd,
+            risk_daily_loss_usd: operational.risk_daily_loss_usd,
+            risk_weekly_loss_usd: operational.risk_weekly_loss_usd,
+            risk_reservations_active: operational.risk_reservations_active,
+            risk_reservations_total_usd: operational.risk_reservations_total_usd,
+            exposure_gc_cleaned: operational.exposure_gc_cleaned,
+            calibration_update_total: operational.calibration_update_total,
+            calibration_resolved: operational.calibration_resolved,
+            calibration_bucket_count: operational.calibration_bucket_count,
+            uptime_seconds: operational.uptime_seconds,
+            active_tasks: operational.active_tasks,
+            health_check_failures: operational.health_check_failures,
+            post_trade_relay_pending: operational.post_trade_relay_pending,
+            async_writer_dropped: operational.async_writer_dropped,
+            gamma_sync_duration_ms: operational.gamma_sync_duration_ms,
+            gamma_markets_total: operational.gamma_markets_total,
+            gamma_last_sync_success: operational.gamma_last_sync_success,
+            gamma_markets_rejected: operational.gamma_markets_rejected,
+            gamma_markets_paused: operational.gamma_markets_paused,
+            catalog_ready: operational.catalog_ready,
+            hotset_candidates_total: operational.hotset_candidates_total,
+            hotset_selected_total: operational.hotset_selected_total,
+            hotset_detection_window_coverage_ratio: operational
+                .hotset_detection_window_coverage_ratio,
+            metrics_refresh_failures: operational.metrics_refresh_failures,
+            settlement_requests_total: operational.settlement_requests_total,
+            settlement_positions_settled_total: operational.settlement_positions_settled_total,
+            settlement_redeem_success_total: operational.settlement_redeem_success_total,
+            settlement_redeem_failure_total: operational.settlement_redeem_failure_total,
+            settlement_oracle_mismatch_total: operational.settlement_oracle_mismatch_total,
+            settlement_channel_dropped_total: operational.settlement_channel_dropped_total,
+            settlement_no_open_positions_total: operational.settlement_no_open_positions_total,
+            settlement_duration_ms: operational.settlement_duration_ms,
+            control_factor_refresh_total: operational.control_factor_refresh_total,
+            control_factor_refresh_failures: operational.control_factor_refresh_failures,
+            control_factor_version_changes: operational.control_factor_version_changes,
+            control_factor_snapshot_load_age_seconds: operational
+                .control_factor_snapshot_load_age_seconds,
+            control_factor_active_count: operational.control_factor_active_count,
+            control_factor_hard_rejects: operational.control_factor_hard_rejects,
+            control_factor_validation_rejections: operational.control_factor_validation_rejections,
+            control_factor_shadow_decisions: operational.control_factor_shadow_decisions,
+            control_factor_shadow_dropped: operational.control_factor_shadow_dropped,
+            control_factor_fail_closed_events: operational.control_factor_fail_closed_events,
+            control_factor_publication_active: operational.control_factor_publication_active,
+            shutdown_stage_progress_remaining: operational.shutdown_stage_progress_remaining,
+            shutdown_stage_timeouts: operational.shutdown_stage_timeouts,
         }
     }
 
@@ -975,6 +1174,13 @@ impl MetricsHub {
             .encode(&metric_families, &mut buffer)
             .map_err(|error| format!("prometheus encode failed: {error}"))?;
         Ok((encoder.format_type().to_string(), buffer))
+    }
+
+    /// Increment the labeled detection-funnel reject counter.
+    pub fn record_scan_reject(&self, reason: DetectionRejectReason) {
+        self.scan_rejects
+            .with_label_values(&[reason.metric_label()])
+            .inc();
     }
 
     /// Register and return the per-kind real-time event-bus drop counter.

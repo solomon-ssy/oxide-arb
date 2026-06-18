@@ -319,7 +319,7 @@ fn replay_detection(
         settlement_deadline: Some(deadline),
     };
     warm_convergence(&detector, &detect_input, row, detected_at);
-    let Some(opportunity) = detector.detect_with_direction(&detect_input, detected_at) else {
+    let Some(opportunity) = detector.detect_with_direction(&detect_input, detected_at).ok() else {
         return Some(DetectorReplayOutcome {
             detected: false,
             score_delta: None,
@@ -446,7 +446,7 @@ fn warm_convergence<F: FeeEstimator>(
     detected_at: DateTime<Utc>,
 ) {
     let warm_at = detected_at - Duration::seconds(i64::from(row.convergence_secs.max(1)));
-    let _ = detector.detect_with_direction(input, warm_at);
+    let _ = detector.detect_with_direction(input, warm_at).ok();
 }
 
 fn calibrator_from_snapshots(

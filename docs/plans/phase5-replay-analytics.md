@@ -1864,7 +1864,9 @@ created_at timestamptz not null
 
 ## 12. （已移除）主动退出 / Unwind / Token 级对账
 
-> 本节原设计的主动退出（exit/stop-loss）、二级市场 unwind path、ERC1155 token-level 对账已整体移出系统范围。endgame 策略默认 hold-to-resolution；如需主动退出，作为单独产品决策手动处理，不在本计划内设计或实现。章节编号保留以维持其余章节与子阶段文档的交叉引用。
+> **Superseded（Quant 范围）**: [ADR-002](./ADR-002-quant-signal-plane.md) / [phase9.4-exit-lifecycle-sync.md](./phase9.4-exit-lifecycle-sync.md) 将 exit、FOK sell、外部成交 sync 纳入 **Quant Signal Plane** 产品范围。Phase 5 Control Factor 平面仍默认 hold-to-resolution；Legacy Auto Endgame 路径不受影响，直至 Legacy 退役。
+>
+> 本节原设计的主动退出（exit/stop-loss）、二级市场 unwind path、ERC1155 token-level 对账已整体移出 **Phase 5 Control Factor** 范围。endgame Legacy 策略默认 hold-to-resolution。章节编号保留以维持其余章节与子阶段文档的交叉引用。
 
 ---
 

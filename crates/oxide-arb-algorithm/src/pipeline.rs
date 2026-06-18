@@ -7,6 +7,7 @@
 
 use crate::{
     cooldown::InMemoryEmissionCooldown,
+    detection_reject::{DetectionProcessOutcome, DetectionRejectReason},
     endgame::{EndgameDetectInput, EndgameDetector},
     fee::FeeEstimator,
     scorer::{EmitContext, EndgameScorer, ScoredOpportunity},
@@ -140,20 +141,11 @@ impl<F: FeeEstimator> OpportunityPipeline<F> {
     }
 
     #[inline]
-    pub fn process(
-        &self,
-        input: &MarketScanInput,
-        now: DateTime<Utc>,
-    ) -> Option<Arc<ScoredOpportunity>> {
-        self.process_ref(&input.as_ref(), now)
-    }
-
-    #[inline]
     pub fn process_ref(
         &self,
         input: &MarketScanInputRef<'_>,
         now: DateTime<Utc>,
-    ) -> Option<Arc<ScoredOpportunity>> {
+    ) -> DetectionProcessOutcome {
         let params = self.params.load();
         let snapshot = self.factors.snapshot();
 
@@ -171,15 +163,15 @@ impl<F: FeeEstimator> OpportunityPipeline<F> {
                 .category_cooldown_secs(input.category)
                 .is_some()
         {
-            return None;
+            return DetectionProcessOutcome::rejected(DetectionRejectReason::MarketAnomaly);
         }
 
         if !self.cooldown.may_emit(input.market_id) {
-            return None;
+            return DetectionProcessOutcome::rejected(DetectionRejectReason::EmissionCooldown);
         }
 
         if !StalenessPolicy::is_tradeable(input.staleness) {
-            return None;
+            return DetectionProcessOutcome::rejected(DetectionRejectReason::StalenessExpired);
         }
 
         let direction = self.detector.detect_direction(input.book.view());
@@ -190,7 +182,11 @@ impl<F: FeeEstimator> OpportunityPipeline<F> {
             self.cooldown.reset(input.market_id);
         }
 
-        let direction = direction?;
+        let Some(direction) = direction else {
+            return DetectionProcessOutcome::rejected(
+                DetectionRejectReason::NoConvergenceDirection,
+            );
+        };
 
         let detect_input = EndgameDetectInput {
             market_id: input.market_id,
@@ -203,26 +199,32 @@ impl<F: FeeEstimator> OpportunityPipeline<F> {
             staleness: input.staleness,
             settlement_deadline: input.settlement_deadline,
         };
-        let mut opp = self.detector.detect_with_direction(&detect_input, now)?;
+        let mut opp = match self
+            .detector
+            .detect_with_direction(&detect_input, now)
+        {
+            Ok(opp) => opp,
+            Err(reason) => return DetectionProcessOutcome::rejected(reason),
+        };
 
         let mut applied: Vec<AppliedControlFactor> = Vec::new();
 
         // BucketRisk: recompute expected net profit under a haircut resolution
         // probability and re-gate on the tightened economics.
-        if Self::apply_bucket_risk(&snapshot, &mut opp, &mut applied) {
-            return None;
+        if let Some(reason) = Self::apply_bucket_risk(&snapshot, &mut opp, &mut applied) {
+            return DetectionProcessOutcome::rejected(reason);
         }
 
         let profit =
             MicroUsd::try_from_decimal(opp.expected_net_profit.inner()).unwrap_or(MicroUsd::ZERO);
         if profit < params.min_profit_threshold_usd {
-            return None;
+            return DetectionProcessOutcome::rejected(DetectionRejectReason::MinProfitThreshold);
         }
 
         let depth_pct =
             MicroPct::try_from_pct_decimal(opp.depth_used_pct).unwrap_or(MicroPct::ZERO);
         if depth_pct > params.max_depth_usage_pct {
-            return None;
+            return DetectionProcessOutcome::rejected(DetectionRejectReason::MaxDepthUsage);
         }
 
         // ExecutionQuality: discount the base fill probability before scoring so
@@ -232,49 +234,48 @@ impl<F: FeeEstimator> OpportunityPipeline<F> {
 
         let draft = self.scorer.score(&opp, now, fill_override);
         if draft.score < params.min_score {
-            return None;
+            return DetectionProcessOutcome::rejected(DetectionRejectReason::MinScore);
         }
 
         self.cooldown.record_emission(input.market_id);
-        Some(EndgameScorer::finalize(
-            opp,
-            draft,
-            EmitContext {
-                token_yes: input.token_yes.clone(),
-                token_no: input.token_no.clone(),
-                book_yes_version: input.book.yes.version,
-                book_no_version: input.book.no.version,
-                applied_factors: Arc::from(applied),
-                trace: input.latency.clone(),
-            },
-        ))
+        DetectionProcessOutcome {
+            opportunity: Some(EndgameScorer::finalize(
+                opp,
+                draft,
+                EmitContext {
+                    token_yes: input.token_yes.clone(),
+                    token_no: input.token_no.clone(),
+                    book_yes_version: input.book.yes.version,
+                    book_no_version: input.book.no.version,
+                    applied_factors: Arc::from(applied),
+                    trace: input.latency.clone(),
+                },
+            )),
+            reject: None,
+        }
     }
 
-    /// Apply the matching bucket-risk factor to `opp` in place. Returns `true`
+    /// Apply the matching bucket-risk factor to `opp` in place. Returns `Some`
     /// when the factor blocks new entries (caller must skip the opportunity).
     fn apply_bucket_risk(
         snapshot: &ControlFactorSnapshot,
         opp: &mut Opportunity,
         applied: &mut Vec<AppliedControlFactor>,
-    ) -> bool {
-        let Some(publication_id) = snapshot.publication_id.clone() else {
-            return false;
-        };
+    ) -> Option<DetectionRejectReason> {
+        let publication_id = snapshot.publication_id.clone()?;
         let dims = BucketRiskDimensions::coarse(
             opp.category,
             opp.meta.price_zone,
             opp.meta.duration_bucket,
         );
-        let Some(found) = snapshot.bucket_risk.lookup(&dims) else {
-            return false;
-        };
+        let found = snapshot.bucket_risk.lookup(&dims)?;
         let payload = &found.payload;
         if payload.block_new_entries {
-            return true;
+            return Some(DetectionRejectReason::BucketRiskBlocked);
         }
         // The bucket may demand an absolute minimum edge floor (bps).
         if opp.edge_bps.inner() < payload.min_edge_bps_addon {
-            return true;
+            return Some(DetectionRejectReason::BucketRiskEdgeFloor);
         }
         let base_prob = opp.resolution_adjust;
         let effective_prob =
@@ -295,7 +296,7 @@ impl<F: FeeEstimator> OpportunityPipeline<F> {
             base_prob,
             effective_prob,
         ));
-        false
+        None
     }
 
     /// Resolve the execution-quality fill multiplier for the traded token and
@@ -345,7 +346,7 @@ impl<F: FeeEstimator> OpportunityPipeline<F> {
     ) -> Vec<Arc<ScoredOpportunity>> {
         let mut results: Vec<Arc<ScoredOpportunity>> = inputs
             .iter()
-            .filter_map(|input| self.process(input, now))
+            .filter_map(|input| self.process_ref(&input.as_ref(), now).opportunity)
             .collect();
 
         results.sort_by(|a, b| a.score.cmp_desc(b.score));

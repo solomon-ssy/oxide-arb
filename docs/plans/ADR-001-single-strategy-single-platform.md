@@ -1,10 +1,12 @@
 # ADR-001: 单策略（Endgame）、单平台（Polymarket）架构决策
 
-> **状态**: 已批准
+> **状态**: 已批准（§2.1 单策略限制已被 [ADR-002](./ADR-002-quant-signal-plane.md) 部分废止）
 >
 > **日期**: 2025-05-20
 >
 > **影响范围**: 整个 oxide-arb workspace（所有 crate、配置、领域模型、API 设计）
+>
+> **后续**: Quant Signal Plane 见 [phase9-quant-signal-plane.md](./phase9-quant-signal-plane.md)
 
 ---
 
