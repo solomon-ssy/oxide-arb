@@ -8,6 +8,7 @@ pub mod index;
 pub mod seed;
 pub mod table;
 pub mod trigger;
+pub mod ui;
 
 use sea_orm::sea_query::{ColumnDef, Expr, IntoIden, SimpleExpr};
 

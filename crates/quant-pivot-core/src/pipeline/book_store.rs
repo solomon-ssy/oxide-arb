@@ -7,7 +7,7 @@ use parking_lot::Mutex;
 use quant_pivot_models::{
     domain::{
         BookLevel,
-        book::{BookSnapshot, EndgameBookPair, TopOfBook},
+        book::{BinaryBookPair, BookSnapshot, TopOfBook},
         latency::LatencyTrace,
     },
     enums::common::Side,
@@ -187,10 +187,10 @@ impl BookStore {
 
     /// Load YES+NO published snapshots without copying level data.
     #[inline]
-    pub fn load_pair(&self, token_yes: &TokenId, token_no: &TokenId) -> Option<EndgameBookPair> {
+    pub fn load_pair(&self, token_yes: &TokenId, token_no: &TokenId) -> Option<BinaryBookPair> {
         let yes = self.load(token_yes)?;
         let no = self.load(token_no)?;
-        Some(EndgameBookPair { yes, no })
+        Some(BinaryBookPair { yes, no })
     }
 
     /// Top-of-book for execution validation (four prices + staleness + versions).

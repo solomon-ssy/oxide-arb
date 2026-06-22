@@ -54,8 +54,7 @@ const TEST_ISSUER: &str = "quant-pivot-test";
 
 pub struct TestEnv {
     pub state: AppState,
-    pub runtime_config_apply: Arc<MockRuntimeConfigApply>,
-    _pg: ContainerAsync<Postgres>,
+    pg_container: ContainerAsync<Postgres>,
     redis: Option<ContainerAsync<Redis>>,
     writer_shutdown: CancellationToken,
     ws_shutdown: CancellationToken,
@@ -143,8 +142,7 @@ impl TestEnv {
 
         Self {
             state,
-            runtime_config_apply,
-            _pg: pg_container,
+            pg_container,
             redis: Some(redis_container),
             writer_shutdown,
             ws_shutdown,
@@ -158,6 +156,7 @@ impl TestEnv {
 
 impl Drop for TestEnv {
     fn drop(&mut self) {
+        std::hint::black_box(&self.pg_container);
         self.writer_shutdown.cancel();
         self.ws_shutdown.cancel();
     }
@@ -314,12 +313,6 @@ impl RuntimeConfigPort for MockRuntimeConfigApply {
         }
         *self.current.lock().unwrap() = Arc::new(config);
         Ok(())
-    }
-}
-
-impl MockRuntimeConfigApply {
-    pub fn fail_next_apply(&self) {
-        self.fail_next_apply.store(true, Ordering::SeqCst);
     }
 }
 

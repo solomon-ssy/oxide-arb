@@ -8,9 +8,10 @@ members = [
   "crates/quant-pivot-storage",
   "crates/quant-pivot-repository",
   "crates/quant-pivot-core",
+  "crates/quant-pivot-research",
   "crates/quant-pivot-web",
-  "crates/quant-pivot-bench",
   "crates/quant-pivot-bin",
+  "crates/quant-pivot-bench",
   "crates/quant-pivot-test-support",
   "crates/quant-pivot-xtask",
 ]
@@ -249,8 +250,10 @@ quant-pivot-api = { path = "crates/quant-pivot-api" }
 quant-pivot-storage = { path = "crates/quant-pivot-storage" }
 quant-pivot-repository = { path = "crates/quant-pivot-repository" }
 quant-pivot-core = { path = "crates/quant-pivot-core" }
-quant-pivot-web = { path = "crates/quant-pivot-web" }
+quant-pivot-research = { path = "crates/quant-pivot-research" }
 quant-pivot-test-support = { path = "crates/quant-pivot-test-support" }
+quant-pivot-bench = { path = "crates/quant-pivot-bench" }
+quant-pivot-web = { path = "crates/quant-pivot-web" }
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Cargo Profile Configuration

@@ -33,23 +33,11 @@ pub enum Relation {
         to = "super::runtime_config_version::Column::RuntimeConfigVersionId"
     )]
     Version,
-    #[sea_orm(
-        belongs_to = "super::control_factor_audit_event::Entity",
-        from = "Column::AuditEventId",
-        to = "super::control_factor_audit_event::Column::EventId"
-    )]
-    AuditEvent,
 }
 
 impl Related<super::runtime_config_version::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::Version.def()
-    }
-}
-
-impl Related<super::control_factor_audit_event::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::AuditEvent.def()
     }
 }
 

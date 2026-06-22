@@ -5,7 +5,6 @@
 //! benchmarks.
 
 pub mod async_writer;
-pub mod materialization;
 pub mod mocks;
 
 use uuid::Uuid;

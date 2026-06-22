@@ -19,9 +19,9 @@ use quant_pivot_models::{
     config::FeesConfig,
     domain::fee::{FeeQuote, FeeQuoteError, FeeQuoteInput, MarketFeeSchedule},
     enums::{
-        LegacyExecutionMode,
         common::{MarketCategory, Side},
         fee::FeeLiquidityRole,
+        quant::QuantRuntimeMode,
     },
     types::{MarketId, Price, Shares, TokenId, Usd},
 };
@@ -110,10 +110,10 @@ impl FeeCalculator {
     /// Mode-aware fee quote: Live forces `allow_category_fallback = false`.
     pub fn quote_for_mode(
         &self,
-        mode: LegacyExecutionMode,
+        mode: QuantRuntimeMode,
         mut input: FeeQuoteInput,
     ) -> Result<FeeQuote, FeeQuoteError> {
-        if mode == LegacyExecutionMode::Live {
+        if mode.allows_order_submission() {
             input.allow_category_fallback = false;
         }
         self.quote(&input)

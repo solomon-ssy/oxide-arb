@@ -106,8 +106,7 @@ fn event_upsert_on_conflict() -> OnConflict {
 }
 
 async fn do_upsert(db: &impl ConnectionTrait, dto: UpsertEvent) -> Result<EventInfo, StorageError> {
-    let am: ActiveModel = dto.into_active_model();
-    let model = Entity::insert(am)
+    let model = Entity::insert(dto.into_active_model())
         .on_conflict(event_upsert_on_conflict())
         .exec_with_returning(db)
         .await

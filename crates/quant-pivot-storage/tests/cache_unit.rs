@@ -1,12 +1,6 @@
 //! Unit tests for cache layer components (no external deps required).
 
-use quant_pivot_models::{
-    enums::{
-        calibration::{DurationBucket, PriceZone},
-        common::MarketCategory,
-    },
-    types::MarketId,
-};
+use quant_pivot_models::types::MarketId;
 use quant_pivot_storage::cache::{CacheBackend, CacheKey, MokaBackend};
 use std::time::Duration;
 
@@ -88,14 +82,6 @@ async fn cache_key_format_and_ttl() {
     assert_eq!(key.as_str(), "mkt:0xabc");
     assert_eq!(key.domain(), "market");
     assert_eq!(key.ttl(), Duration::from_secs(300));
-
-    let key = CacheKey::CalibrationBucket {
-        category: MarketCategory::Sports,
-        price_zone: PriceZone::Z99,
-        duration_bucket: DurationBucket::Short,
-    };
-    assert_eq!(key.as_str(), "cal:sports:z99:short");
-    assert_eq!(key.ttl(), Duration::from_secs(3600));
 }
 
 #[tokio::test]

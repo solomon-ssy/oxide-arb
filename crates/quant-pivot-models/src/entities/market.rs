@@ -53,27 +53,11 @@ pub enum Relation {
         to = "super::event::Column::EventId"
     )]
     Event,
-    #[sea_orm(has_many = "super::trade::Entity")]
-    Trade,
-    #[sea_orm(has_many = "super::position::Entity")]
-    Position,
 }
 
 impl Related<super::event::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::Event.def()
-    }
-}
-
-impl Related<super::trade::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::Trade.def()
-    }
-}
-
-impl Related<super::position::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::Position.def()
     }
 }
 

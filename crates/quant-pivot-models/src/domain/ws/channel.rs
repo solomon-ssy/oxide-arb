@@ -119,7 +119,7 @@ impl WsChannel {
             Self::SystemStatus | Self::SystemAlert => ResourceType::System,
             Self::RiskCircuitBreaker | Self::RiskPositionUpdate => ResourceType::Risk,
             Self::MarketResolved | Self::MarketBookUpdate => ResourceType::Market,
-            Self::ControlPublished | Self::MaterializationRunUpdate => ResourceType::ControlFactor,
+            Self::ControlPublished | Self::MaterializationRunUpdate => ResourceType::Publication,
             Self::ConfigActivated => ResourceType::RuntimeConfig,
             Self::OpportunityDetected => ResourceType::Opportunity,
             Self::TradeFilled | Self::TradeSettled => ResourceType::Trade,

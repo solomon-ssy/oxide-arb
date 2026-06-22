@@ -9,7 +9,8 @@ use super::catalog::{CatalogEvent, CatalogMarket, RejectedMarket};
 use chrono::{DateTime, Utc};
 use quant_pivot_models::{
     domain::{
-        fee::MarketFeeSchedule,
+        MarketRegistryError,
+        fee::{MarketFeeColumns, MarketFeeSchedule},
         market::{
             EventRegistryInfo, MarketRegistryInfo, TokenInfo, UpsertEvent, UpsertMarket,
             resolve_binary_pair_exact,
@@ -52,14 +53,27 @@ impl From<Vec<CatalogEvent>> for GammaCatalogBatch {
             let event_id = EventId::new(&event.id);
             let event_categories = event.categories;
             rejected.append(&mut event.rejected_markets);
-            upsert_events.push(event.to_upsert_event());
-            registry_events.push(event.to_registry_info());
+            upsert_events.push(UpsertEvent::from(&event));
+            registry_events.push(EventRegistryInfo::from(&event));
 
             for market in event.markets {
-                let (upsert, registry) =
-                    market.into_upsert_and_registry(event_id.clone(), event_categories);
-                upsert_markets.push(upsert);
-                registry_markets.push(registry);
+                let condition_id = market.condition_id.clone();
+                let ctx = CatalogMarketMapCtx {
+                    event_id: event_id.clone(),
+                    categories: event_categories,
+                };
+                match TryFrom::try_from(CatalogMarketWithCtx { market, ctx }) {
+                    Ok((upsert, registry)) => {
+                        upsert_markets.push(upsert);
+                        registry_markets.push(registry);
+                    }
+                    Err(error) => rejected.push(RejectedMarket {
+                        condition_id,
+                        reject: super::catalog::CatalogMarketReject::InvalidTokenPair {
+                            reason: error.to_string(),
+                        },
+                    }),
+                }
             }
         }
 
@@ -74,134 +88,142 @@ impl From<Vec<CatalogEvent>> for GammaCatalogBatch {
     }
 }
 
-impl CatalogEvent {
-    /// Maps a normalized catalog event to the in-memory registry view.
-    pub fn to_registry_info(&self) -> EventRegistryInfo {
-        EventRegistryInfo {
-            event_id: EventId::new(&self.id),
-            title: self.title.clone(),
-            slug: self.slug.clone(),
-            market_ids: self
+impl From<&CatalogEvent> for EventRegistryInfo {
+    fn from(event: &CatalogEvent) -> Self {
+        Self {
+            event_id: EventId::new(&event.id),
+            title: event.title.clone(),
+            slug: event.slug.clone(),
+            market_ids: event
                 .markets
                 .iter()
                 .map(|market| MarketId::new(&market.condition_id))
                 .collect(),
-            categories: self.categories,
-            tags: self.tags.clone(),
-            neg_risk: self.neg_risk,
-            created_at: self.created_at.unwrap_or_else(Utc::now),
-            updated_at: self.updated_at.unwrap_or_else(Utc::now),
-        }
-    }
-
-    /// Maps a normalized catalog event to the persistence upsert DTO.
-    pub fn to_upsert_event(&self) -> UpsertEvent {
-        UpsertEvent {
-            event_id: EventId::new(&self.id),
-            title: self.title.clone(),
-            slug: self.slug.clone(),
-            status: self.status,
-            tags: self.tags.clone().into(),
-            neg_risk: self.neg_risk,
-            end_date: self.end_date,
-            raw_gamma: Some(self.raw_wire.clone()),
+            categories: event.categories,
+            tags: event.tags.clone(),
+            neg_risk: event.neg_risk,
+            created_at: event.created_at.unwrap_or_else(Utc::now),
+            updated_at: event.updated_at.unwrap_or_else(Utc::now),
         }
     }
 }
 
-impl CatalogMarket {
-    /// Maps a normalized catalog market to persistence and registry domain rows.
-    ///
-    /// `CatalogMarket` construction guarantees the binary invariant, so the
-    /// canonical pair resolution cannot fail here; both rows are built from
-    /// the exact same (YES, NO) pair.
-    pub fn into_upsert_and_registry(
-        self,
-        event_id: EventId,
-        event_categories: CategorySet,
-    ) -> (UpsertMarket, MarketRegistryInfo) {
-        let tokens = token_infos(&self);
-        let market_id = MarketId::new(&self.condition_id);
-        // Infallible: the binary invariant is encoded in `CatalogMarket.tokens`.
-        let (yes_token, no_token) = resolve_binary_pair_exact(&tokens);
-        let status = self.status;
-        let created = self.created_at.unwrap_or_else(Utc::now);
-        let updated = self.updated_at.unwrap_or_else(Utc::now);
-        let fee_schedule = self.fee_schedule_with_observed_at(Some(updated));
-        let outcome = self
+impl From<&CatalogEvent> for UpsertEvent {
+    fn from(event: &CatalogEvent) -> Self {
+        Self {
+            event_id: EventId::new(&event.id),
+            title: event.title.clone(),
+            slug: event.slug.clone(),
+            status: event.status,
+            tags: event.tags.clone().into(),
+            neg_risk: event.neg_risk,
+            end_date: event.end_date,
+            raw_gamma: Some(event.raw_wire.clone()),
+        }
+    }
+}
+
+/// Context required to map a catalog market into persistence and registry rows.
+pub struct CatalogMarketMapCtx {
+    pub event_id: EventId,
+    pub categories: CategorySet,
+}
+
+/// Catalog market plus mapping context for domain conversion.
+pub struct CatalogMarketWithCtx {
+    pub market: CatalogMarket,
+    pub ctx: CatalogMarketMapCtx,
+}
+
+impl TryFrom<CatalogMarketWithCtx> for (UpsertMarket, MarketRegistryInfo) {
+    type Error = MarketRegistryError;
+
+    fn try_from(value: CatalogMarketWithCtx) -> Result<Self, Self::Error> {
+        let CatalogMarketWithCtx { market, ctx } = value;
+        let tokens = TokenInfoPair::from(&market);
+        let market_id = MarketId::new(&market.condition_id);
+        let (yes_token, no_token) = resolve_binary_pair_exact(&market_id, &tokens.0)?;
+        let status = market.status;
+        let created = market.created_at.unwrap_or_else(Utc::now);
+        let updated = market.updated_at.unwrap_or_else(Utc::now);
+        let fee_schedule = market.fee_schedule_with_observed_at(Some(updated));
+        let fee_columns = fee_schedule.as_ref().map_or_else(
+            MarketFeeColumns::disabled,
+            MarketFeeSchedule::to_market_fee_columns,
+        );
+        let outcome = market
             .settlement
             .as_ref()
             .map(|settlement| settlement.winning_outcome.clone());
         let resolved_at =
-            (status == MarketStatus::Settled).then(|| self.resolved_at.unwrap_or(updated));
+            (status == MarketStatus::Settled).then(|| market.resolved_at.unwrap_or(updated));
 
         let upsert = UpsertMarket {
             market_id: market_id.clone(),
-            event_id: event_id.clone(),
-            question: self.question.clone(),
-            slug: self.slug.clone().unwrap_or_default(),
-            categories: event_categories,
+            event_id: ctx.event_id.clone(),
+            question: market.question.clone(),
+            slug: market.slug.clone().unwrap_or_default(),
+            categories: ctx.categories,
             status,
             outcome: outcome.clone(),
             yes_token_id: yes_token.clone(),
             no_token_id: no_token.clone(),
-            tick_size: self.tick_size,
-            neg_risk: self.neg_risk,
-            end_date: self.end_date,
+            tick_size: market.tick_size,
+            neg_risk: market.neg_risk,
+            end_date: market.end_date,
             resolved_at,
-            fees_enabled: fee_schedule
-                .as_ref()
-                .is_none_or(|schedule| schedule.fees_enabled),
-            fee_rate: fee_schedule.as_ref().map(|schedule| schedule.fee_rate),
-            fee_exponent: fee_schedule.as_ref().map(|schedule| schedule.exponent),
-            fee_taker_only: fee_schedule.as_ref().map(|schedule| schedule.taker_only),
-            fee_rebate_rate: fee_schedule
-                .as_ref()
-                .and_then(|schedule| schedule.rebate_rate),
-            fee_source: fee_schedule
-                .as_ref()
-                .map(|schedule| schedule.source.as_str().to_owned()),
-            fee_observed_at: fee_schedule.as_ref().map(|schedule| schedule.observed_at),
+            fees_enabled: fee_columns.fees_enabled,
+            fee_rate: fee_columns.fee_rate,
+            fee_exponent: fee_columns.fee_exponent,
+            fee_taker_only: fee_columns.fee_taker_only,
+            fee_rebate_rate: fee_columns.fee_rebate_rate,
+            fee_source: fee_columns.fee_source,
+            fee_observed_at: fee_columns.fee_observed_at,
         };
 
         let registry = MarketRegistryInfo {
             market_id,
-            event_id,
+            event_id: ctx.event_id,
             token_yes: yes_token,
             token_no: no_token,
-            question: self.question,
-            slug: self.slug.unwrap_or_default(),
-            categories: event_categories,
+            question: market.question,
+            slug: market.slug.unwrap_or_default(),
+            categories: ctx.categories,
             status,
             outcome,
-            neg_risk: self.neg_risk,
-            tick_size: self.tick_size,
-            tokens: tokens.to_vec(),
+            neg_risk: market.neg_risk,
+            tick_size: market.tick_size,
+            tokens: tokens.0.to_vec(),
             best_bid: None,
             best_ask: None,
             depth_usd: None,
-            min_order_size: self.min_order_size,
+            min_order_size: market.min_order_size,
             volume_24h: Usd::ZERO,
             fee_schedule,
-            end_date: self.end_date,
+            end_date: market.end_date,
             resolved_at,
             created_at: created,
             updated_at: updated,
         };
 
-        (upsert, registry)
+        Ok((upsert, registry))
     }
+}
 
-    /// Maps a normalized catalog market to the in-memory registry view.
-    pub fn into_registry_info(
-        self,
-        event_id: EventId,
-        event_categories: CategorySet,
-    ) -> MarketRegistryInfo {
-        self.into_upsert_and_registry(event_id, event_categories).1
+struct TokenInfoPair([TokenInfo; 2]);
+
+impl From<&CatalogMarket> for TokenInfoPair {
+    fn from(market: &CatalogMarket) -> Self {
+        let leg = |index: usize| TokenInfo {
+            token_id: TokenId::new(&market.tokens[index].token_id),
+            outcome: market.tokens[index].outcome.clone(),
+            neg_risk: market.neg_risk,
+        };
+        Self([leg(0), leg(1)])
     }
+}
 
-    /// Typed fee schedule with an explicit observation timestamp.
+impl CatalogMarket {
     pub fn fee_schedule_with_observed_at(
         &self,
         observed_at: Option<DateTime<Utc>>,
@@ -218,15 +240,6 @@ impl CatalogMarket {
             observed_at: observed_at.unwrap_or_else(Utc::now),
         })
     }
-}
-
-fn token_infos(market: &CatalogMarket) -> [TokenInfo; 2] {
-    let leg = |index: usize| TokenInfo {
-        token_id: TokenId::new(&market.tokens[index].token_id),
-        outcome: market.tokens[index].outcome.clone(),
-        neg_risk: market.neg_risk,
-    };
-    [leg(0), leg(1)]
 }
 
 #[cfg(test)]

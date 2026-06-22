@@ -7,8 +7,6 @@ mod auth_helpers;
 mod client;
 #[path = "common/harness.rs"]
 mod harness;
-#[path = "common/headers.rs"]
-mod headers;
 #[path = "common/pg.rs"]
 mod pg;
 #[path = "common/redis.rs"]
@@ -28,7 +26,5 @@ mod operation_log;
 mod phase0;
 #[path = "web/readiness.rs"]
 mod readiness;
-#[path = "web/runtime_config.rs"]
-mod runtime_config;
 #[path = "web/ws.rs"]
 mod ws;

@@ -1,6 +1,6 @@
 //! WebSocket wire protocol — the strongly-typed contract for real-time push.
 //!
-//! Lives beside [`crate::domain::event::CoreEvent`] because the protocol and the
+//! Lives beside [`crate::domain::runtime::CoreEvent`] because the protocol and the
 //! event-to-wire projection are one cohesive real-time contract, shared by the
 //! `quant-pivot-web` session loop (server) and the `quant-pivot-core` book-update
 //! coalescer (which keys fan-out off [`channel::SubscriptionKey`]).

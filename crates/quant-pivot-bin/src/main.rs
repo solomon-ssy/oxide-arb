@@ -6,7 +6,10 @@ use std::{error::Error, sync::Arc};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
-#[command(name = "quant-pivot", about = "Endgame arbitrage engine")]
+#[command(
+    name = "quant-pivot",
+    about = "Polymarket quantitative report and execution platform"
+)]
 struct Cli {
     /// Directory containing quant-pivot.toml
     #[arg(long, env = "QUANT_PIVOT_CONFIG_DIR", default_value = "config")]

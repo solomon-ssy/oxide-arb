@@ -9,24 +9,15 @@ pub(crate) mod bind_limit;
 
 pub use arc_repo::arc_repo;
 
-// Bounded-context groups.
-pub mod accounting;
-pub mod evidence;
 pub mod governance;
+pub mod quant;
 pub mod rbac;
-pub mod risk;
-pub mod trading;
 
 // Single-repository contexts kept flat.
-pub mod control_factor;
 pub mod market;
 
 // Flattened facade.
-pub use accounting::*;
-pub use control_factor::*;
-pub use evidence::*;
 pub use governance::*;
 pub use market::*;
+pub use quant::*;
 pub use rbac::*;
-pub use risk::*;
-pub use trading::*;

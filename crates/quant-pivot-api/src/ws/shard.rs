@@ -20,7 +20,7 @@ use polymarket_client_sdk_v2::{
     ws::config::Config as SdkWsConfig,
 };
 use quant_pivot_models::{
-    domain::pipeline::PipelineEvent, enums::pipeline::ShardConnectionStatus, types::TokenId,
+    domain::pipeline::PipelineEvent, enums::system::ShardConnectionStatus, types::TokenId,
 };
 use std::{
     collections::HashSet,

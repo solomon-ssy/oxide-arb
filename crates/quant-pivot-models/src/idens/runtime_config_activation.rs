@@ -8,10 +8,7 @@ use sea_orm::{
 };
 
 use crate::{
-    idens::{
-        control_factor_audit_event::ControlFactorAuditEvent,
-        runtime_config_version::RuntimeConfigVersion,
-    },
+    idens::runtime_config_version::RuntimeConfigVersion,
     schema::{
         column,
         dependency::TableDependency,
@@ -80,12 +77,10 @@ pub fn table() -> TableCreateStatement {
     let mut version = version_fk();
     let mut previous = previous_version_fk();
     let mut rollback = rollback_target_fk();
-    let mut audit = audit_event_fk();
     table
         .foreign_key(&mut version)
         .foreign_key(&mut previous)
-        .foreign_key(&mut rollback)
-        .foreign_key(&mut audit);
+        .foreign_key(&mut rollback);
     table
 }
 
@@ -134,21 +129,6 @@ fn rollback_target_fk() -> ForeignKeyCreateStatement {
         .to_owned()
 }
 
-fn audit_event_fk() -> ForeignKeyCreateStatement {
-    ForeignKey::create()
-        .name("fk_runtime_config_activation_audit_event")
-        .from(
-            RuntimeConfigActivation::Table,
-            RuntimeConfigActivation::AuditEventId,
-        )
-        .to(
-            ControlFactorAuditEvent::Table,
-            ControlFactorAuditEvent::EventId,
-        )
-        .on_delete(ForeignKeyAction::SetNull)
-        .to_owned()
-}
-
 pub fn indexes() -> Vec<IndexSpec> {
     vec![
         IndexSpec::sea_query(
@@ -177,10 +157,9 @@ pub fn indexes() -> Vec<IndexSpec> {
 }
 
 pub fn dependencies() -> Vec<TableDependency> {
-    vec![
-        TableDependency::foreign_key(runtime_config_version_table_name),
-        TableDependency::foreign_key(control_factor_audit_event_table_name),
-    ]
+    vec![TableDependency::foreign_key(
+        runtime_config_version_table_name,
+    )]
 }
 
 pub const fn seed_units() -> Vec<SeedSpec> {
@@ -193,8 +172,4 @@ fn runtime_config_activation_table_name() -> String {
 
 fn runtime_config_version_table_name() -> String {
     RuntimeConfigVersion::Table.to_string()
-}
-
-fn control_factor_audit_event_table_name() -> String {
-    ControlFactorAuditEvent::Table.to_string()
 }

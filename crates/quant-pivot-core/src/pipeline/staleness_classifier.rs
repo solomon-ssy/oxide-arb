@@ -6,7 +6,7 @@
 //! through [`StalenessClassifier::reload`].
 
 use arc_swap::ArcSwap;
-use quant_pivot_models::{enums::common::StalenessLevel, runtime_config::MarketDataRuntimeConfig};
+use quant_pivot_models::{enums::common::StalenessLevel, runtime_config::DataQualityConfig};
 use std::sync::Arc;
 
 /// Maps an age (in milliseconds) to a `StalenessLevel` using config thresholds.
@@ -20,12 +20,12 @@ struct StalenessThresholds {
 }
 
 impl StalenessThresholds {
-    const fn from_config(config: &MarketDataRuntimeConfig) -> Self {
+    const fn from_config(config: &DataQualityConfig) -> Self {
         Self {
-            fresh: config.staleness_fresh_ms,
-            acceptable: config.staleness_acceptable_ms,
-            stale: config.staleness_stale_ms,
-            expired: config.staleness_expired_ms,
+            fresh: config.max_book_age_ms / 2,
+            acceptable: config.max_book_age_ms,
+            stale: config.max_book_age_ms.saturating_mul(2),
+            expired: config.max_book_age_ms.saturating_mul(4),
         }
     }
 }
@@ -37,7 +37,7 @@ pub struct StalenessClassifier {
 
 impl StalenessClassifier {
     #[must_use]
-    pub fn new(config: &MarketDataRuntimeConfig) -> Self {
+    pub fn new(config: &DataQualityConfig) -> Self {
         Self {
             thresholds: Arc::new(ArcSwap::from_pointee(StalenessThresholds::from_config(
                 config,
@@ -47,7 +47,7 @@ impl StalenessClassifier {
 
     /// Hot-reload the staleness ladder (runtime-config activation). All clones
     /// of this classifier observe the new thresholds on their next read.
-    pub fn reload(&self, config: &MarketDataRuntimeConfig) {
+    pub fn reload(&self, config: &DataQualityConfig) {
         self.thresholds
             .store(Arc::new(StalenessThresholds::from_config(config)));
     }
@@ -83,13 +83,10 @@ impl StalenessClassifier {
 mod tests {
     use super::*;
 
-    fn test_config() -> MarketDataRuntimeConfig {
-        MarketDataRuntimeConfig {
-            staleness_fresh_ms: 1000,
-            staleness_acceptable_ms: 3000,
-            staleness_stale_ms: 5000,
-            staleness_expired_ms: 10000,
-            ..MarketDataRuntimeConfig::default()
+    fn test_config() -> DataQualityConfig {
+        DataQualityConfig {
+            max_book_age_ms: 3_000,
+            ..DataQualityConfig::default()
         }
     }
 
@@ -117,12 +114,9 @@ mod tests {
     fn reload_propagates_to_clones() {
         let original = StalenessClassifier::new(&test_config());
         let clone = original.clone();
-        original.reload(&MarketDataRuntimeConfig {
-            staleness_fresh_ms: 10,
-            staleness_acceptable_ms: 20,
-            staleness_stale_ms: 30,
-            staleness_expired_ms: 40,
-            ..MarketDataRuntimeConfig::default()
+        original.reload(&DataQualityConfig {
+            max_book_age_ms: 20,
+            ..DataQualityConfig::default()
         });
         assert_eq!(clone.classify(15), StalenessLevel::Acceptable);
         assert_eq!(clone.acceptable_ms(), 20);

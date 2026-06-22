@@ -34,7 +34,10 @@ use crate::{
     extractors::{AuthedActor, ValidatedJson},
     jwt::TokenType,
     response::WebResponse,
-    routes::registry::{RouteSpec, spec},
+    routes::{
+        registry::{RouteSpec, spec},
+        version::ApiV1Guard,
+    },
     state::AppState,
 };
 
@@ -196,16 +199,6 @@ fn dummy_hash() -> &'static str {
 /// Register unauthenticated auth routes under the v1 scope.
 pub fn configure_public(cfg: &mut actix_web::web::ServiceConfig) {
     use actix_web::web;
-    cfg.route(
-        "/auth/login",
-        web::post()
-            .to(login)
-            .guard(crate::routes::version::ApiV1Guard),
-    )
-    .route(
-        "/auth/refresh",
-        web::post()
-            .to(refresh)
-            .guard(crate::routes::version::ApiV1Guard),
-    );
+    cfg.route("/auth/login", web::post().to(login).guard(ApiV1Guard))
+        .route("/auth/refresh", web::post().to(refresh).guard(ApiV1Guard));
 }

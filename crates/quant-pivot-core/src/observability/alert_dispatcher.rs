@@ -130,29 +130,29 @@ impl Channels {
     fn from_config(config: &NotificationConfig) -> Self {
         let token = config.telegram.bot_token.trim();
         let chat = config.telegram.chat_id.trim();
-        let telegram = if config.telegram.enabled && !token.is_empty() {
+        let telegram = if token.is_empty() {
+            None
+        } else {
             chat.parse().ok().map(|chat_id: i64| TelegramChannel {
                 bot: Bot::new(token),
                 chat_id: ChatId(chat_id),
             })
-        } else {
-            None
         };
 
         let url = config.webhook.url.trim();
-        let webhook = if config.webhook.enabled && !url.is_empty() {
+        let webhook = if url.is_empty() {
+            None
+        } else {
             Some(WebhookChannel {
                 client: reqwest::Client::new(),
                 url: url.to_owned(),
             })
-        } else {
-            None
         };
 
         Self {
             telegram,
             webhook,
-            cooldown_duration: Duration::from_secs(config.alert_cooldown_secs),
+            cooldown_duration: Duration::from_secs(60),
         }
     }
 }
@@ -365,10 +365,7 @@ mod tests {
         assert_eq!(recorded_titles, ["same", "different"]);
     }
 
-    /// `reload` must change suppression behaviour immediately: a runtime
-    /// config activation that lengthens `alert_cooldown_secs` suppresses
-    /// repeats that the previous (zero) cooldown allowed, while in-flight
-    /// cooldown stamps persist across the reload.
+    /// `reload` must rebuild channel state while preserving cooldown stamps.
     #[tokio::test]
     async fn reload_applies_new_cooldown_from_config() {
         let recordings = Arc::new(Mutex::new(Vec::new()));
@@ -378,10 +375,7 @@ mod tests {
         dispatcher.dispatch(alert("same")).await;
         assert_eq!(recordings.lock().expect("lock").len(), 2);
 
-        let config = NotificationConfig {
-            alert_cooldown_secs: 3600,
-            ..NotificationConfig::default()
-        };
+        let config = NotificationConfig::default();
         dispatcher.reload(&config);
 
         dispatcher.dispatch(alert("same")).await;

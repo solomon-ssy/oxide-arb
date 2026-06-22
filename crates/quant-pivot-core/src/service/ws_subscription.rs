@@ -143,7 +143,7 @@ impl HotsetSelectionStats {
 #[derive(Debug, Clone, Copy)]
 pub struct MarketDataSubscriptionPolicy {
     max_subscription_tokens: usize,
-    endgame_window_hours: u64,
+    universe_window_hours: u64,
 }
 
 pub struct WsSubscriptionCoordinator {
@@ -161,8 +161,8 @@ impl WsSubscriptionCoordinator {
         Self { ws_manager, policy }
     }
 
-    /// Reconcile the engine baseline to the policy-selected trading hotset.
-    pub fn sync_engine_hotset(
+    /// Reconcile the engine baseline to the policy-selected universe ingest set.
+    pub fn sync_universe_ingest(
         &self,
         registry: &MarketRegistry,
         universe: &MarketUniverseFilter,
@@ -187,10 +187,10 @@ impl WsSubscriptionCoordinator {
 
 impl MarketDataSubscriptionPolicy {
     #[must_use]
-    pub const fn new(max_subscription_tokens: usize, endgame_window_hours: u64) -> Self {
+    pub const fn new(max_subscription_tokens: usize, universe_window_hours: u64) -> Self {
         Self {
             max_subscription_tokens,
-            endgame_window_hours,
+            universe_window_hours,
         }
     }
 
@@ -284,7 +284,7 @@ impl MarketDataSubscriptionPolicy {
         let mut stats = HotsetSelectionStats::default();
         let mut tier1 = Vec::new();
         let mut tier2 = Vec::new();
-        let hours = i64::try_from(self.endgame_window_hours).unwrap_or(i64::MAX);
+        let hours = i64::try_from(self.universe_window_hours).unwrap_or(i64::MAX);
         let prewarm_cutoff = now + Duration::hours(hours);
         let detect_cutoff =
             now + Duration::hours(i64::try_from(detection_window_hours).unwrap_or(i64::MAX));

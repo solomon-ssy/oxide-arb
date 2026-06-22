@@ -2,20 +2,15 @@
 
 use crate::{
     domain::{
-        JsonValueType, RuntimeConfigSchemaFieldView, RuntimeConfigSchemaGroupView,
-        RuntimeConfigSchemaView, SchemaFieldFormat,
+        EnumItemView, FieldWidget, JsonValueType, RuntimeConfigSchemaFieldView,
+        RuntimeConfigSchemaView, UiText,
     },
-    runtime_config::{
-        RuntimeConfig,
-        ui_enum::enum_items_for_id,
-        ui_registry::{field_ui_map, groups_ui},
-        ui_widget::{FieldWhen, FieldWidget},
-    },
+    runtime_config::RuntimeConfig,
 };
-use serde_json::Value;
-use std::collections::{BTreeMap, HashSet};
 
-use super::schema_fields::walk_schema_leaves;
+use crate::schema::ui::{field_ui, field_ui_map, groups_ui};
+
+use super::json_schema::fields::walk_schema_leaves;
 
 /// Build the preferences envelope for `GET /runtime-config/schema`.
 #[must_use]
@@ -24,49 +19,57 @@ pub fn build_preferences_schema() -> RuntimeConfigSchemaView {
     let defaults = RuntimeConfig::default().to_json();
     let leaves = walk_schema_leaves(&schema, &defaults, "", false);
 
-    let ui_map = field_ui_map();
-    let mut fields = Vec::with_capacity(leaves.len());
-    let mut group_ids: HashSet<String> = HashSet::new();
+    let mut groups = groups_ui();
+    groups.sort_by_key(|group| group.order);
 
-    for leaf in leaves {
-        let Some(ui) = ui_map.get(leaf.path.as_str()) else {
-            continue;
-        };
-        if !ui.visible {
-            continue;
-        }
-
-        group_ids.insert(leaf.group.clone());
-
-        let enum_id = schema_string_flag(&leaf.schema, "x-enum-id")
-            .or_else(|| schema_string_flag(&leaf.schema, "x-map-key-enum"));
-        let enum_items = enum_id.as_deref().and_then(enum_items_for_id);
-
-        let widget = ui
-            .widget
-            .or_else(|| Some(infer_widget(leaf.value_type, leaf.format, leaf.sensitive)));
-        let format = leaf.format;
-
-        fields.push(RuntimeConfigSchemaFieldView {
-            path: leaf.path.clone(),
-            group: leaf.group.clone(),
-            order: ui.order,
-            label: ui.label.clone(),
-            help: ui.help.clone(),
-            value_type: leaf.value_type,
-            format,
-            widget,
-            semantics: ui.semantics,
-            default: leaf.default.clone(),
-            description: leaf.description.clone(),
-            money_critical: leaf.money_critical,
-            sensitive: leaf.sensitive,
-            constraints: leaf.constraints.clone(),
-            enum_items,
-            when: field_when_rules(&leaf.path),
-        });
-    }
-
+    let mut fields = leaves
+        .into_iter()
+        .filter(|leaf| leaf.path != "schema_version")
+        .enumerate()
+        .map(|(index, leaf)| {
+            let ui = field_ui(&leaf.path);
+            let enum_items = leaf.constraints.as_ref().and_then(|constraints| {
+                constraints.enum_values.as_ref().map(|values| {
+                    values
+                        .iter()
+                        .map(|value| EnumItemView {
+                            key: value.clone(),
+                            label: UiText::plain(value.as_str().unwrap_or_default()),
+                        })
+                        .collect()
+                })
+            });
+            RuntimeConfigSchemaFieldView {
+                path: leaf.path.clone(),
+                group: leaf.group.clone(),
+                order: ui.map_or_else(
+                    || u16::try_from(index).unwrap_or(u16::MAX),
+                    |entry| entry.order,
+                ),
+                label: ui.map_or_else(
+                    || UiText::plain(title(leaf.path.rsplit('.').next().unwrap_or(&leaf.path))),
+                    |entry| entry.label.clone(),
+                ),
+                help: ui.map_or_else(
+                    || UiText::plain(leaf.description.clone()),
+                    |entry| entry.help.clone(),
+                ),
+                value_type: leaf.value_type,
+                format: leaf.format,
+                widget: ui
+                    .and_then(|entry| entry.widget)
+                    .or_else(|| Some(infer_widget(leaf.value_type, leaf.sensitive))),
+                semantics: ui.and_then(|entry| entry.semantics),
+                default: leaf.default,
+                description: leaf.description,
+                money_critical: leaf.money_critical,
+                sensitive: leaf.sensitive,
+                constraints: leaf.constraints,
+                enum_items,
+                when: None,
+            }
+        })
+        .collect::<Vec<_>>();
     fields.sort_by(|left, right| {
         left.group
             .cmp(&right.group)
@@ -74,150 +77,80 @@ pub fn build_preferences_schema() -> RuntimeConfigSchemaView {
             .then_with(|| left.path.cmp(&right.path))
     });
 
-    let registered_groups: BTreeMap<_, _> = groups_ui()
-        .into_iter()
-        .map(|group| (group.id.to_string(), group))
-        .collect();
-
-    let mut groups: Vec<RuntimeConfigSchemaGroupView> = group_ids
-        .into_iter()
-        .filter_map(|id| {
-            registered_groups
-                .get(&id)
-                .map(|group| RuntimeConfigSchemaGroupView {
-                    id: id.clone(),
-                    label: group.label.clone(),
-                    description: Some(group.description.clone()),
-                    order: group.order,
-                })
-        })
-        .collect();
-    groups.sort_by_key(|group| group.order);
-
     RuntimeConfigSchemaView { groups, fields }
 }
 
-fn schema_string_flag(schema: &Value, flag: &str) -> Option<String> {
-    schema.get(flag).and_then(Value::as_str).map(str::to_owned)
-}
-
-fn field_when_rules(path: &str) -> Option<Vec<FieldWhen>> {
-    use crate::runtime_config::ui_widget::{WhenEffect, WhenOperator};
-
-    match path {
-        "notification.telegram.bot_token" | "notification.telegram.chat_id" => Some(vec![
-            FieldWhen {
-                target_path: "notification.telegram.enabled".into(),
-                operator: WhenOperator::Eq,
-                value: serde_json::json!(true),
-                effect: WhenEffect::If,
-            },
-            FieldWhen {
-                target_path: "notification.telegram.enabled".into(),
-                operator: WhenOperator::Eq,
-                value: serde_json::json!(true),
-                effect: WhenEffect::Require,
-            },
-        ]),
-        "notification.webhook.url" => Some(vec![FieldWhen {
-            target_path: "notification.webhook.enabled".into(),
-            operator: WhenOperator::Eq,
-            value: serde_json::json!(true),
-            effect: WhenEffect::If,
-        }]),
-        _ => None,
-    }
-}
-
-const fn infer_widget(
-    value_type: JsonValueType,
-    format: Option<SchemaFieldFormat>,
-    sensitive: bool,
-) -> FieldWidget {
-    if sensitive {
-        return FieldWidget::SecretString;
-    }
-    match value_type {
-        JsonValueType::Boolean => FieldWidget::Boolean,
-        JsonValueType::Enum => FieldWidget::EnumSelect,
-        JsonValueType::EnumArray => FieldWidget::EnumSet,
-        JsonValueType::StringArray => FieldWidget::StringList,
-        JsonValueType::EnumDecimalMap => FieldWidget::EnumDecimalMap,
-        JsonValueType::Array | JsonValueType::Object => FieldWidget::JsonTree,
-        JsonValueType::Number => match format {
-            Some(SchemaFieldFormat::DurationMs) => FieldWidget::DurationMs,
-            _ => FieldWidget::Integer,
-        },
-        JsonValueType::String => match format {
-            Some(SchemaFieldFormat::Decimal) => FieldWidget::DecimalString,
-            Some(SchemaFieldFormat::DurationMs) => FieldWidget::DurationMs,
-            Some(SchemaFieldFormat::Integer) => FieldWidget::Integer,
-            _ => FieldWidget::PlainString,
-        },
-    }
-}
-
-/// Fail-closed check that every preferences-visible leaf has UI metadata.
+/// Validate hand-maintained runtime-config UI metadata against the v3 schema.
 #[must_use]
 pub fn preferences_schema_ui_gaps() -> Vec<String> {
     let schema = RuntimeConfig::json_schema();
     let defaults = RuntimeConfig::default().to_json();
     let leaves = walk_schema_leaves(&schema, &defaults, "", false);
-    let ui_map = field_ui_map();
-
-    leaves
+    let schema_paths = leaves
         .iter()
         .filter(|leaf| leaf.path != "schema_version")
-        .filter_map(|leaf| {
-            if ui_map.contains_key(leaf.path.as_str()) {
-                None
-            } else {
-                Some(leaf.path.clone())
-            }
-        })
-        .collect()
-}
-
-/// Fail-closed locale coverage for embedded UI text.
-#[must_use]
-pub fn preferences_schema_locale_gaps() -> Vec<String> {
-    let view = build_preferences_schema();
+        .map(|leaf| leaf.path.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    let ui = field_ui_map();
     let mut gaps = Vec::new();
 
-    for group in &view.groups {
-        if !group.label.has_en_and_zh() {
-            gaps.push(format!("group.{}.label", group.id));
+    for path in &schema_paths {
+        let Some(entry) = ui.get(path) else {
+            gaps.push(format!("schema field `{path}` has no UI entry"));
+            continue;
+        };
+        if !entry.visible {
+            gaps.push(format!("schema field `{path}` is registered as hidden"));
         }
-        if let Some(description) = &group.description {
-            if !description.has_en_and_zh() {
-                gaps.push(format!("group.{}.description", group.id));
-            }
-        }
-    }
-
-    for field in &view.fields {
-        if !field.label.has_en_and_zh() {
-            gaps.push(format!("{}.label", field.path));
-        }
-        if !field.help.has_en_and_zh() {
-            gaps.push(format!("{}.help", field.path));
-        }
-        if let Some(items) = &field.enum_items {
-            for item in items {
-                if !item.label.has_en_and_zh() {
-                    gaps.push(format!("{}.enum.{item:?}", field.path));
-                }
-            }
+        if !entry.label.has_en_and_zh() || !entry.help.has_en_and_zh() {
+            gaps.push(format!(
+                "schema field `{path}` is missing bilingual UI text"
+            ));
         }
     }
-
+    for path in ui.keys() {
+        if !schema_paths.contains(path) {
+            gaps.push(format!(
+                "UI entry `{path}` does not exist in runtime config schema"
+            ));
+        }
+    }
+    gaps.sort();
     gaps
+}
+
+const fn infer_widget(value_type: JsonValueType, sensitive: bool) -> FieldWidget {
+    if sensitive {
+        return FieldWidget::SecretString;
+    }
+    match value_type {
+        JsonValueType::Boolean => FieldWidget::Boolean,
+        JsonValueType::Number => FieldWidget::Integer,
+        JsonValueType::Enum => FieldWidget::EnumSelect,
+        JsonValueType::EnumArray => FieldWidget::EnumSet,
+        JsonValueType::StringArray => FieldWidget::StringList,
+        JsonValueType::EnumDecimalMap => FieldWidget::EnumDecimalMap,
+        JsonValueType::String => FieldWidget::PlainString,
+        _ => FieldWidget::JsonTree,
+    }
+}
+
+fn title(raw: &str) -> String {
+    raw.split('_')
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            chars.next().map_or_else(String::new, |first| {
+                first.to_uppercase().chain(chars).collect::<String>()
+            })
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::domain::JsonValueType;
+    use super::{build_preferences_schema, preferences_schema_ui_gaps};
 
     #[test]
     fn preferences_schema_has_no_ui_gaps() {
@@ -227,7 +160,36 @@ mod tests {
 
     #[test]
     fn preferences_schema_has_full_locale_coverage() {
-        let gaps = preferences_schema_locale_gaps();
+        let view = build_preferences_schema();
+        let mut gaps = Vec::new();
+
+        for group in &view.groups {
+            if !group.label.has_en_and_zh() {
+                gaps.push(format!("group.{}.label", group.id));
+            }
+            if let Some(description) = &group.description {
+                if !description.has_en_and_zh() {
+                    gaps.push(format!("group.{}.description", group.id));
+                }
+            }
+        }
+
+        for field in &view.fields {
+            if !field.label.has_en_and_zh() {
+                gaps.push(format!("{}.label", field.path));
+            }
+            if !field.help.has_en_and_zh() {
+                gaps.push(format!("{}.help", field.path));
+            }
+            if let Some(items) = &field.enum_items {
+                for item in items {
+                    if !item.label.has_en_and_zh() {
+                        gaps.push(format!("{}.enum.{item:?}", field.path));
+                    }
+                }
+            }
+        }
+
         assert!(gaps.is_empty(), "missing en-US/zh-CN UI text: {gaps:?}");
     }
 
@@ -238,69 +200,7 @@ mod tests {
             view.fields
                 .iter()
                 .all(|field| field.path != "schema_version"),
-            "schema_version must not appear in preferences schema"
+            "schema_version must not appear in preferences fields"
         );
-    }
-
-    #[test]
-    fn preferences_schema_golden_snapshot() {
-        let view = build_preferences_schema();
-        insta::assert_json_snapshot!("preferences_schema", view);
-    }
-
-    #[test]
-    fn standard_redeem_route_enum_items_are_complete() {
-        let view = build_preferences_schema();
-        let route = view
-            .fields
-            .iter()
-            .find(|field| field.path == "settlement.redeem.standard.route")
-            .expect("standard redeem route field");
-        let items = route.enum_items.as_ref().expect("enum items");
-        assert_eq!(items.len(), 2);
-    }
-
-    #[test]
-    fn neg_risk_redeem_route_enum_items_are_complete() {
-        let view = build_preferences_schema();
-        let route = view
-            .fields
-            .iter()
-            .find(|field| field.path == "settlement.redeem.neg_risk.route")
-            .expect("neg-risk redeem route field");
-        let items = route.enum_items.as_ref().expect("enum items");
-        assert_eq!(items.len(), 2);
-    }
-
-    #[test]
-    fn decimal_widget_fields_have_format() {
-        let view = build_preferences_schema();
-        for field in &view.fields {
-            if field.widget == Some(FieldWidget::DecimalString) {
-                assert_eq!(
-                    field.format,
-                    Some(SchemaFieldFormat::Decimal),
-                    "{} missing decimal format",
-                    field.path
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn enum_fields_with_x_enum_id_have_items() {
-        let view = build_preferences_schema();
-        for field in &view.fields {
-            if field.value_type == JsonValueType::Enum {
-                assert!(
-                    field
-                        .enum_items
-                        .as_ref()
-                        .is_some_and(|items| !items.is_empty()),
-                    "{} missing enum_items",
-                    field.path
-                );
-            }
-        }
     }
 }

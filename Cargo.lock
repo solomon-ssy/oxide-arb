@@ -5626,7 +5626,6 @@ dependencies = [
  "quant-pivot-models",
  "quant-pivot-repository",
  "quant-pivot-storage",
- "quant-pivot-test-support",
  "quant-pivot-web",
  "rand 0.10.1",
  "reqwest 0.13.3",
@@ -5741,6 +5740,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "quant-pivot-research"
+version = "0.1.0"
+dependencies = [
+ "quant-pivot-error",
+ "quant-pivot-models",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "quant-pivot-storage"
 version = "0.1.0"
 dependencies = [
@@ -5817,7 +5826,6 @@ dependencies = [
  "quant-pivot-models",
  "quant-pivot-repository",
  "quant-pivot-storage",
- "quant-pivot-test-support",
  "redis",
  "rust_decimal",
  "rust_decimal_macros",

@@ -242,7 +242,7 @@ fn build_market_stack(
     let book_store = Arc::new(BookStore::new(Arc::clone(metrics)));
     let market_registry = Arc::new(MarketRegistry::new());
     let universe = Arc::new(MarketUniverseFilter::new(
-        &runtime.market_data.enabled_categories,
+        &runtime.universe.enabled_categories,
     ));
     let market_cache = Arc::new(MarketCache::new(
         Arc::clone(&market_registry),

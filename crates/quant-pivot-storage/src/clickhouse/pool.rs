@@ -54,7 +54,7 @@ impl ClickHousePool {
 
     pub async fn ensure_schema(&self) -> Result<(), StorageError> {
         for ddl in schema::all_ddl() {
-            self.client.query(ddl).execute().await?;
+            self.client.query(&ddl).execute().await?;
         }
         info!("ClickHouse schema ensured");
         Ok(())

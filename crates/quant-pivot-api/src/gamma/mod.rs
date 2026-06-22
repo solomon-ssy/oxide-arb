@@ -7,7 +7,7 @@ mod sync;
 mod wire;
 
 pub use catalog::{CatalogMarketReject, RejectedMarket};
-pub use mapper::GammaCatalogBatch;
+use mapper::{CatalogMarketMapCtx, CatalogMarketWithCtx, GammaCatalogBatch};
 pub use resolution::GammaResolution;
 
 use crate::infra::retry::{self, RetryPolicy};
@@ -152,7 +152,19 @@ impl GammaClient {
             context: format!("gamma get_market({cid})"),
             detail: reason.to_string(),
         })?;
-        Ok(catalog.into_registry_info(event_id, categories))
+        CatalogMarketWithCtx {
+            market: catalog,
+            ctx: CatalogMarketMapCtx {
+                event_id,
+                categories,
+            },
+        }
+        .try_into()
+        .map(|(_, registry)| registry)
+        .map_err(|reason| ApiError::Deserialize {
+            context: format!("gamma get_market({cid})"),
+            detail: reason.to_string(),
+        })
     }
 
     /// Check if a market is resolved and which leg won.

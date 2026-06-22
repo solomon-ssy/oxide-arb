@@ -1,3 +1,4 @@
 [submodule "oxide-arb-ui"]
 	path = oxide-arb-ui
 	url = git@github.com-solomon-ssy:solomon-ssy/oxide-arb-ui.git
+	branch = quant-pivot

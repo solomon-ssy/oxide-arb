@@ -1,7 +1,7 @@
 //! Orderbook domain types shared across the workspace.
 //!
 //! [`BookLevel`] stores fixed-point [`MicroPrice`] / [`MicroShares`] for hot paths.
-//! [`EndgameBookView`] provides zero-copy detection views; serde/API boundaries
+//! [`QuantBookView`] provides zero-copy detection views; serde/API boundaries
 //! convert via [`BookLevel::from_decimal`] / [`BookLevel::price_decimal`].
 
 use crate::types::{
@@ -260,14 +260,14 @@ impl BookSideView<'_> {
 
 /// Zero-copy YES+NO book view for the endgame detector hot path.
 #[derive(Debug, Clone, Copy)]
-pub struct EndgameBookView<'a> {
+pub struct QuantBookView<'a> {
     pub yes_bids: BookSideView<'a>,
     pub yes_asks: BookSideView<'a>,
     pub no_bids: BookSideView<'a>,
     pub no_asks: BookSideView<'a>,
 }
 
-impl EndgameBookView<'_> {
+impl QuantBookView<'_> {
     #[must_use]
     #[inline]
     pub fn max_staleness_ms(&self, now_ms: u64) -> u64 {
@@ -302,16 +302,16 @@ impl EndgameBookView<'_> {
 
 /// Arc-backed YES+NO pair loaded from `BookStore` (cheap to pass across threads).
 #[derive(Debug, Clone)]
-pub struct EndgameBookPair {
+pub struct BinaryBookPair {
     pub yes: Arc<BookSnapshot>,
     pub no: Arc<BookSnapshot>,
 }
 
-impl EndgameBookPair {
+impl BinaryBookPair {
     #[must_use]
     #[inline]
-    pub fn view(&self) -> EndgameBookView<'_> {
-        EndgameBookView {
+    pub fn view(&self) -> QuantBookView<'_> {
+        QuantBookView {
             yes_bids: self.yes.bid_view(),
             yes_asks: self.yes.ask_view(),
             no_bids: self.no.bid_view(),
@@ -377,18 +377,18 @@ impl OrderbookSide {
 
 /// Owned YES+NO snapshot for serde/API boundaries (not used on detect hot path).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EndgameBookSnapshot {
+pub struct QuantBookSnapshot {
     pub yes_bids: OrderbookSide,
     pub yes_asks: OrderbookSide,
     pub no_bids: OrderbookSide,
     pub no_asks: OrderbookSide,
 }
 
-impl EndgameBookSnapshot {
+impl QuantBookSnapshot {
     #[must_use]
     #[inline]
     pub fn max_staleness_ms(&self, now_ms: u64) -> u64 {
-        EndgameBookView {
+        QuantBookView {
             yes_bids: BookSideView {
                 levels: &self.yes_bids.levels,
                 timestamp_ms: self.yes_bids.timestamp_ms,
@@ -414,7 +414,7 @@ impl EndgameBookSnapshot {
     }
 
     #[must_use]
-    pub fn from_pair(pair: &EndgameBookPair) -> Self {
+    pub fn from_pair(pair: &BinaryBookPair) -> Self {
         let v = pair.view();
         Self {
             yes_bids: OrderbookSide::from_view(v.yes_bids),
@@ -442,7 +442,7 @@ mod tests {
 
     #[test]
     fn max_staleness_uses_oldest_side() {
-        let book = EndgameBookSnapshot {
+        let book = QuantBookSnapshot {
             yes_bids: side(dec!(0.96), 900),
             yes_asks: side(dec!(0.97), 950),
             no_bids: side(dec!(0.03), 700),
@@ -466,7 +466,7 @@ mod tests {
             700,
             0,
         ));
-        let pair = EndgameBookPair { yes, no };
+        let pair = BinaryBookPair { yes, no };
         assert_eq!(pair.max_staleness_ms(1000), 300);
     }
 

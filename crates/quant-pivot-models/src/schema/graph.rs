@@ -102,40 +102,52 @@ mod tests {
     }
 
     #[test]
-    fn phase51_fact_plane_tables_are_cataloged_without_legacy_aliases() {
+    fn phase1_quant_tables_are_cataloged_without_legacy_tables() {
         let tables = catalog::tables()
             .into_iter()
             .map(|spec| (spec.table_name)())
             .collect::<std::collections::BTreeSet<_>>();
 
         for required in [
-            "balance_snapshot",
             "runtime_config_version",
             "runtime_config_activation",
-            "control_factor_materialization_run",
-            "control_factor_stage_report",
-            "control_factor_value",
-            "control_factor_publication",
-            "control_factor_publication_factor",
-            "control_factor_audit_event",
-            "control_factor_shadow_decision",
-            "control_factor_training_dataset",
+            "quant_universe_snapshot",
+            "quant_universe_member",
+            "quant_feature_vector",
+            "quant_factor_definition",
+            "quant_factor_value",
+            "quant_model_spec",
+            "quant_model_version",
+            "quant_model_run",
+            "quant_portfolio_plan",
+            "quant_recommendation_report",
+            "quant_recommendation",
+            "quant_order_intent",
+            "quant_execution_order",
+            "quant_recommendation_attribution",
         ] {
             assert!(
                 tables.contains(required),
-                "Phase 5.1 required table `{required}` must be registered in the schema catalog"
+                "Phase 1 required table `{required}` must be registered in the schema catalog"
             );
         }
 
-        assert!(
-            !tables.contains("runtime_config"),
-            "legacy mutable runtime_config table must not return"
-        );
-        assert!(
-            tables
-                .iter()
-                .all(|table| !table.starts_with("analytics_factor_")),
-            "legacy analytics_factor_* aliases are forbidden"
-        );
+        for deleted in [
+            "trade",
+            "position",
+            "calibration",
+            "calibration_outcome",
+            "risk_state",
+            "risk_audit_event",
+            "risk_fill_applied",
+            "report",
+            "market_pit_snapshot",
+            "control_factor_value",
+        ] {
+            assert!(
+                !tables.contains(deleted),
+                "legacy table `{deleted}` must not remain in active schema catalog"
+            );
+        }
     }
 }

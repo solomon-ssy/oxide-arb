@@ -113,7 +113,7 @@ struct TableDdl {
 async fn clickhouse_table_ttl_policies() {
     let (_pool, client, _port, _container) = setup_clickhouse().await;
 
-    let expected: [(&str, [&str; 2]); 4] = [
+    let expected: [(&str, [&str; 2]); 2] = [
         (
             "tick_events",
             [
@@ -126,20 +126,6 @@ async fn clickhouse_table_ttl_policies() {
             [
                 "snapshot_date + INTERVAL 180 DAY",
                 "snapshot_date + toIntervalDay(180)",
-            ],
-        ),
-        (
-            "opportunity_audit",
-            [
-                "audit_date + INTERVAL 365 DAY",
-                "audit_date + toIntervalDay(365)",
-            ],
-        ),
-        (
-            "calibration_snapshots",
-            [
-                "snapshot_date + INTERVAL 365 DAY",
-                "snapshot_date + toIntervalDay(365)",
             ],
         ),
     ];
@@ -172,7 +158,7 @@ async fn clickhouse_fact_contract_uses_decimal_and_enum_columns() {
                 "`best_bid` Nullable(Decimal(18, 8))",
                 "`last_trade_price` Nullable(Decimal(18, 8))",
                 "'ShardStatus' = 7",
-                "'WsShardStatus' = 11",
+                "'WsShardStatus' = 9",
             ],
         ),
         (
@@ -183,19 +169,19 @@ async fn clickhouse_fact_contract_uses_decimal_and_enum_columns() {
             ],
         ),
         (
-            "opportunity_detection",
+            "quant_signal_candidate_event",
             &[
                 "`entry_price` Decimal(18, 8)",
-                "`expected_net_profit_usd` Decimal(38, 18)",
-                "`fill_probability` Nullable(Decimal(18, 8))",
+                "`score` Decimal(18, 8)",
+                "`confidence` Decimal(18, 8)",
             ],
         ),
         (
-            "opportunity_audit",
+            "quant_execution_event",
             &[
-                "`trade_id` Nullable(String)",
-                "`settlement_status` Nullable(Enum8('Won' = 1, 'Lost' = 2))",
-                "`outcome` Nullable(Enum8('Rejected' = 1, 'Settled' = 2, 'Success' = 3, 'Miss' = 4, 'Failed' = 5))",
+                "`price` Decimal(18, 8)",
+                "`shares` Decimal(38, 18)",
+                "`cost_usd` Decimal(38, 18)",
             ],
         ),
     ];

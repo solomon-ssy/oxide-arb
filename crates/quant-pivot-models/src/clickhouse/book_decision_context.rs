@@ -3,14 +3,14 @@ use serde::{Deserialize, Serialize};
 use crate::{
     clickhouse::{ChBps, ChPrice, ChSchemaVersion, ChUsd},
     enums::clickhouse::{ChBookDecisionStage, ChBookEvidenceTier, ChBookQuality, ChFactSource},
-    types::{MarketId, OpportunityId, TokenId},
+    types::{MarketId, RecommendationId, TokenId},
 };
 
 /// Immutable book context captured at a money-decision boundary.
 #[derive(Debug, Clone, clickhouse::Row, Serialize, Deserialize)]
 pub struct BookDecisionContextRow {
     pub context_id: String,
-    pub opportunity_id: Option<OpportunityId>,
+    pub recommendation_id: Option<RecommendationId>,
     pub execution_id: Option<String>,
     pub market_id: MarketId,
     pub yes_token_id: TokenId,

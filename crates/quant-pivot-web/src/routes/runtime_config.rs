@@ -3,7 +3,7 @@
 //! Runtime configuration changes only through immutable, audited versions —
 //! there is no bare in-place mutation. The full activation pipeline:
 //!
-//! 1. `POST /runtime-config/versions` — typed-parse (`schema_version = 1`,
+//! 1. `POST /runtime-config/versions` — typed-parse (`schema_version = 3`,
 //!    unknown fields rejected) + semantic validation, canonical JSON, content
 //!    hash, immutable row.
 //! 2. `POST .../activate` (or `.../rollback`) — re-parse + validate, audited
@@ -23,19 +23,16 @@ use quant_pivot_models::{
         CreateRuntimeConfigVersionRequest, NewRuntimeConfigActivation, NewRuntimeConfigVersion,
         RollbackRuntimeConfigRequest, RuntimeConfigActivationInfo, RuntimeConfigCurrentView,
         RuntimeConfigSchemaView, RuntimeConfigVersionListQuery, RuntimeConfigVersionView,
-        RuntimeControlError,
-        control_factor::{AuditActor, AuditedOutcome, NewControlFactorAuditEvent},
-        runtime_config_hash,
+        RuntimeControlError, runtime_config_hash,
     },
     enums::{
-        control_factor::{AuditResourceType, ControlAuditEventType},
         operation_log::OperationCategory,
         rbac::{Operation, ResourceType},
         runtime_config::{RuntimeConfigActivationKind, RuntimeConfigVersionSource},
     },
     runtime_config::{
         RuntimeConfig, apply_runtime_config_patch, build_preferences_schema, mask_config_json,
-        unmask_with, validation::validate_runtime_config,
+        unmask_with, validate_runtime_config,
     },
     types::{RuntimeConfigActivationId, RuntimeConfigVersionId},
 };
@@ -178,29 +175,7 @@ pub async fn create_version(
         created_by: actor.claims.username.clone(),
         reason: body.reason.clone(),
     };
-    let envelope = AuditActor {
-        actor: actor.claims.sub.clone(),
-        actor_role: acting_role.0.clone(),
-        request_id: request_id.0.clone(),
-        reason: body.reason.clone(),
-    };
-    envelope.validate().map_err(WebError::from)?;
-    let audit = NewControlFactorAuditEvent {
-        event_type: ControlAuditEventType::RuntimeConfigVersionCreated,
-        actor: envelope.actor.clone(),
-        actor_role: envelope.actor_role.clone(),
-        resource_type: AuditResourceType::RuntimeConfigVersion,
-        resource_id: version.runtime_config_version_id.to_string(),
-        request_id: envelope.request_id.clone(),
-        reason: envelope.reason.clone(),
-        before_hash: None,
-        after_hash: None,
-        diff: serde_json::json!({}),
-    };
-    let outcome = state
-        .runtime_config
-        .create_version_governed(version, audit)
-        .await?;
+    let version = state.runtime_config.create_version(version).await?;
 
     op_ctx.set_action(
         OperationCategory::RuntimeConfig,
@@ -208,14 +183,16 @@ pub async fn create_version(
     );
     op_ctx.set_resource(
         ResourceType::RuntimeConfig,
-        outcome.value.runtime_config_version_id.to_string(),
+        version.runtime_config_version_id.to_string(),
     );
-    op_ctx.set_detail(serde_json::json!({ "config_hash": config_hash }));
-    op_ctx.link_governance(outcome.audit_event_id, outcome.audit_sequence);
-    let masked = mask_config_json(&outcome.value.config_json);
+    op_ctx.set_detail(serde_json::json!({
+        "config_hash": config_hash,
+        "acting_role": acting_role.0,
+        "request_id": request_id.0,
+    }));
+    let masked = mask_config_json(&version.config_json);
     Ok(WebResponse::ok(RuntimeConfigVersionView::from_info(
-        outcome.value,
-        masked,
+        version, masked,
     )))
 }
 
@@ -234,15 +211,15 @@ pub async fn activate_version(
         &state,
         id.into_inner(),
         &actor,
-        acting_role,
+        acting_role.clone(),
         &request_id,
         body.into_inner().reason,
         RuntimeConfigActivationKind::Promote,
     )
     .await?;
     op_ctx.set_action(OperationCategory::RuntimeConfig, "runtime_config.activate");
-    record_activation(&op_ctx, &state.events, &audited);
-    Ok(WebResponse::ok(audited.value))
+    record_activation(&op_ctx, &state.events, &audited, &acting_role, &request_id);
+    Ok(WebResponse::ok(audited))
 }
 
 /// `POST /api/runtime-config/versions/{id}/rollback` — roll back to a version
@@ -260,15 +237,15 @@ pub async fn rollback_version(
         &state,
         id.into_inner(),
         &actor,
-        acting_role,
+        acting_role.clone(),
         &request_id,
         body.into_inner().reason,
         RuntimeConfigActivationKind::Rollback,
     )
     .await?;
     op_ctx.set_action(OperationCategory::RuntimeConfig, "runtime_config.rollback");
-    record_activation(&op_ctx, &state.events, &audited);
-    Ok(WebResponse::ok(audited.value))
+    record_activation(&op_ctx, &state.events, &audited, &acting_role, &request_id);
+    Ok(WebResponse::ok(audited))
 }
 
 /// Typed parse + semantic validation (fail-closed, HTTP 400 on any error).
@@ -293,7 +270,7 @@ async fn transition_version(
     request_id: &RequestId,
     reason: String,
     kind: RuntimeConfigActivationKind,
-) -> Result<AuditedOutcome<RuntimeConfigActivationInfo>, WebError> {
+) -> Result<RuntimeConfigActivationInfo, WebError> {
     let Some(version) = state.runtime_config.load_version(&version_id).await? else {
         return Err(WebError::NotFound(format!(
             "runtime config version not found: {version_id}"
@@ -324,32 +301,7 @@ async fn transition_version(
         // The registry assigns this from the chained audit event it appends.
         audit_event_id: None,
     };
-    let envelope = AuditActor {
-        actor: actor.claims.sub.clone(),
-        actor_role: acting_role.0.clone(),
-        request_id: request_id.0.clone(),
-        reason: reason.clone(),
-    };
-    envelope.validate().map_err(WebError::from)?;
-    let audit = NewControlFactorAuditEvent {
-        event_type: match kind {
-            RuntimeConfigActivationKind::Rollback => ControlAuditEventType::RuntimeConfigRolledBack,
-            _ => ControlAuditEventType::RuntimeConfigActivated,
-        },
-        actor: envelope.actor.clone(),
-        actor_role: envelope.actor_role.clone(),
-        resource_type: AuditResourceType::RuntimeConfigVersion,
-        resource_id: activation.runtime_config_version_id.to_string(),
-        request_id: envelope.request_id.clone(),
-        reason: envelope.reason.clone(),
-        before_hash: None,
-        after_hash: None,
-        diff: serde_json::json!({}),
-    };
-    let audited = state
-        .runtime_config
-        .activate_version_governed(activation, audit)
-        .await?;
+    let activation = state.runtime_config.activate_version(activation).await?;
 
     // Propagate to the live system. The applicator re-preflights against the
     // money state at this exact moment; a failure here means the durable
@@ -362,14 +314,14 @@ async fn transition_version(
             actor,
             acting_role,
             request_id,
-            &audited.value,
+            &activation,
             previous,
             &error,
         )
         .await);
     }
 
-    Ok(audited)
+    Ok(activation)
 }
 
 /// Compensate a durable activation whose live apply failed.
@@ -401,8 +353,11 @@ async fn revert_unapplied_activation(
         ));
     };
 
-    let reason =
-        format!("auto-revert: live apply of version {failed_version} failed: {apply_error}");
+    let reason = format!(
+        "auto-revert: live apply of version {failed_version} failed: {apply_error}; \
+         acting_role={}; request_id={}",
+        acting_role.0, request_id.0
+    );
     let activation = NewRuntimeConfigActivation {
         runtime_config_activation_id: RuntimeConfigActivationId::from_v7(),
         runtime_config_version_id: previous_id.clone(),
@@ -414,36 +369,13 @@ async fn revert_unapplied_activation(
         rollback_target_version_id: Some(previous_id),
         audit_event_id: None,
     };
-    let envelope = AuditActor {
-        actor: actor.claims.sub.clone(),
-        actor_role: acting_role.0.clone(),
-        request_id: request_id.0.clone(),
-        reason,
-    };
-    if let Err(error) = envelope.validate() {
-        return WebError::from(error);
-    }
-    let audit = NewControlFactorAuditEvent {
-        event_type: ControlAuditEventType::RuntimeConfigRolledBack,
-        actor: envelope.actor.clone(),
-        actor_role: envelope.actor_role.clone(),
-        resource_type: AuditResourceType::RuntimeConfigVersion,
-        resource_id: activation.runtime_config_version_id.to_string(),
-        request_id: envelope.request_id.clone(),
-        reason: envelope.reason.clone(),
-        before_hash: None,
-        after_hash: None,
-        diff: serde_json::json!({}),
-    };
-    match state
-        .runtime_config
-        .activate_version_governed(activation, audit)
-        .await
-    {
+    match state.runtime_config.activate_version(activation).await {
         Ok(_) => {
             tracing::warn!(
                 %apply_error,
                 version_id = %failed_version,
+                acting_role = %acting_role.0,
+                request_id = %request_id.0,
                 "runtime config activation not applied; durable state auto-reverted"
             );
             WebError::Conflict(format!(
@@ -457,6 +389,8 @@ async fn revert_unapplied_activation(
                 %apply_error,
                 %revert_error,
                 version_id = %failed_version,
+                acting_role = %acting_role.0,
+                request_id = %request_id.0,
                 "runtime config activation not applied AND auto-revert failed — \
                  active version diverges from the live config until rolled back"
             );
@@ -474,17 +408,23 @@ async fn revert_unapplied_activation(
 fn record_activation(
     op_ctx: &OperationCtx,
     events: &CoreEventPublisher,
-    audited: &AuditedOutcome<RuntimeConfigActivationInfo>,
+    activation: &RuntimeConfigActivationInfo,
+    acting_role: &ActingRole,
+    request_id: &RequestId,
 ) {
-    let activation = &audited.value;
     op_ctx.set_resource(
         ResourceType::RuntimeConfig,
         activation.runtime_config_version_id.to_string(),
     );
     op_ctx.set_detail(serde_json::json!({
         "activation_kind": activation.activation_kind,
+        "acting_role": acting_role.0,
+        "request_id": request_id.0,
+        "runtime_config_activation_id": activation.runtime_config_activation_id,
+        "runtime_config_version_id": activation.runtime_config_version_id,
+        "previous_runtime_config_version_id": activation.previous_runtime_config_version_id,
+        "rollback_target_version_id": activation.rollback_target_version_id,
     }));
-    op_ctx.link_governance(audited.audit_event_id.clone(), audited.audit_sequence);
     events.publish(CoreEvent::ConfigActivated {
         version_id: activation.runtime_config_version_id.to_string(),
     });

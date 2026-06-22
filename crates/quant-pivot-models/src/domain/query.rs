@@ -7,8 +7,7 @@
 //! resolve into them without depending on `quant-pivot-repository`.
 
 use crate::{
-    enums::clickhouse::ChMarketCategory,
-    enums::legacy::LegacyExecutionMode,
+    enums::{common::MarketCategory, quant::QuantRuntimeMode},
     types::{EventId, MarketId, TokenId},
 };
 use chrono::{DateTime, Utc};
@@ -20,7 +19,7 @@ pub struct TradeAnalyticsFilter {
     /// Half-open UTC execution window `[from, to)`.
     pub window: TimeWindow,
     /// When `None`, all execution modes are included.
-    pub execution_mode: Option<LegacyExecutionMode>,
+    pub runtime_mode: Option<QuantRuntimeMode>,
 }
 
 /// A closed `[from, to]` time window for windowed reads.
@@ -45,5 +44,5 @@ pub struct MarketFilter {
     pub market_ids: Vec<MarketId>,
     pub event_ids: Vec<EventId>,
     pub token_ids: Vec<TokenId>,
-    pub categories: Vec<ChMarketCategory>,
+    pub categories: Vec<MarketCategory>,
 }

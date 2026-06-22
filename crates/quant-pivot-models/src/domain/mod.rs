@@ -73,39 +73,33 @@ macro_rules! info_from_model {
 }
 
 // Bounded-context groups.
-pub mod accounting;
 pub mod api;
-pub mod control_factor;
-pub mod control_ports;
-pub mod event;
-pub mod evidence;
+pub mod data_plane;
 pub mod governance;
 pub mod market;
+pub mod order;
+pub mod ports;
+pub mod quant;
 pub mod rbac;
-pub mod risk;
-pub mod trading;
+pub mod runtime;
 pub mod ws;
 
 // Cross-cutting helpers shared by every context.
-pub mod legacy_queries;
 pub mod pagination;
 pub mod patch;
 pub mod query;
 
 // Flattened facade: every domain type is reachable directly under `domain::`.
-pub use accounting::*;
 pub use api::*;
-pub use control_factor::*;
-pub use control_ports::*;
-pub use event::*;
-pub use evidence::*;
+pub use data_plane::*;
 pub use governance::*;
-pub use legacy_queries::*;
 pub use market::*;
+pub use order::*;
 pub use pagination::*;
 pub use patch::*;
+pub use ports::*;
+pub use quant::*;
 pub use query::*;
 pub use rbac::*;
-pub use risk::*;
-pub use trading::*;
+pub use runtime::*;
 pub use ws::*;

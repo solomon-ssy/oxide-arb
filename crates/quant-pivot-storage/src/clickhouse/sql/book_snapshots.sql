@@ -14,7 +14,7 @@ CREATE TABLE IF NOT EXISTS book_snapshots (
     event_time      DateTime64(3, 'UTC'),
     ingestion_time  DateTime64(3, 'UTC'),
     sequence        UInt64,
-    source          Enum8('WsSnapshot' = 1, 'WsDelta' = 2, 'WsBbo' = 3, 'WsTickSize' = 4, 'WsLastTrade' = 5, 'WsMarketResolved' = 6, 'Scanner' = 7, 'Execution' = 8, 'Settlement' = 9, 'CalibrationUpdater' = 10, 'WsShardStatus' = 11),
+    source          Enum8('WsSnapshot' = 1, 'WsDelta' = 2, 'WsBbo' = 3, 'WsTickSize' = 4, 'WsLastTrade' = 5, 'WsMarketResolved' = 6, 'QuantPipeline' = 7, 'Execution' = 8, 'WsShardStatus' = 9),
     schema_version  UInt32,
     snapshot_date   Date MATERIALIZED toDate(event_time)
 )

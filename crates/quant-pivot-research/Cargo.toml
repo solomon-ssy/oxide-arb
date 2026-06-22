@@ -1,0 +1,16 @@
+[package]
+name = "quant-pivot-research"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Quant-pivot feature, factor, and model materialization pipeline"
+
+[dependencies]
+quant-pivot-error = { path = "../quant-pivot-error" }
+quant-pivot-models = { path = "../quant-pivot-models" }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[lints]
+workspace = true

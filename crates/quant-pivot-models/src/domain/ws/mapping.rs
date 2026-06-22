@@ -37,23 +37,10 @@ pub fn event_envelope(event: &CoreEvent) -> Option<(SubscriptionKey, WsEnvelope)
             Some(market_id.clone()),
             serde_json::to_value(view.as_ref()).ok()?,
         ),
-        CoreEvent::ControlPublished {
-            publication_id,
-            mode,
-        } => (
-            WsChannel::ControlPublished,
-            None,
-            serde_json::json!({ "publication_id": publication_id, "mode": mode }),
-        ),
         CoreEvent::ConfigActivated { version_id } => (
             WsChannel::ConfigActivated,
             None,
             serde_json::json!({ "version_id": version_id }),
-        ),
-        CoreEvent::MaterializationRunUpdated(run) => (
-            WsChannel::MaterializationRunUpdate,
-            None,
-            serde_json::to_value(run.as_ref()).ok()?,
         ),
     };
 

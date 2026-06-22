@@ -60,3 +60,18 @@ pub struct GovernanceBundle {
     pub applicator: Arc<RuntimeConfigApplicator>,
     pub runtime_mode: RuntimeModeHandle,
 }
+
+/// Research pipeline bundle (Phase 3+).
+pub struct ResearchBundle;
+
+/// Recommendation report bundle (Phase 4+).
+pub struct ReportBundle;
+
+/// Portfolio planning bundle (Phase 4+).
+pub struct PortfolioBundle;
+
+/// Execution intent bundle (Phase 5+).
+pub struct ExecutionIntentBundle;
+
+/// Cross-bundle runtime channels (Phase 2+).
+pub struct RuntimeChannels;

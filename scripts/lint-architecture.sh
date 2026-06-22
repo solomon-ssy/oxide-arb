@@ -34,6 +34,25 @@ if rg 'pipeline_event\.clone\(\)' crates/quant-pivot-core/src/pipeline/data_pipe
     ERRORS=$((ERRORS + 1))
 fi
 
+echo "=== Checking for legacy Endgame symbols in production code ==="
+if rg 'EndgameBook|EndgameDetector|ScoredOpportunity|sync_engine_hotset' crates/ --glob '!**/tests/**' 2>/dev/null; then
+    echo "ERROR: Legacy Endgame symbols found in production code"
+    ERRORS=$((ERRORS + 1))
+fi
+
+echo "=== Checking for manual IntoActiveModel in domain DTOs ==="
+if rg 'impl IntoActiveModel' crates/quant-pivot-models/src/domain/ 2>/dev/null; then
+    echo "ERROR: domain DTOs must use DeriveIntoActiveModel"
+    ERRORS=$((ERRORS + 1))
+fi
+
+echo "=== Checking postgres/quant monolith ==="
+if [ -f crates/quant-pivot-repository/src/postgres/quant/mod.rs ] && \
+   [ "$(wc -l < crates/quant-pivot-repository/src/postgres/quant/mod.rs)" -gt 50 ]; then
+    echo "ERROR: postgres/quant/mod.rs must be a thin re-export module"
+    ERRORS=$((ERRORS + 1))
+fi
+
 if [ $ERRORS -eq 0 ]; then
     echo "All architecture checks passed!"
 else

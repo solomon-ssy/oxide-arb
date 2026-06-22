@@ -3,7 +3,7 @@
 //! Enums that appear as `SeaORM` entity columns use [`active_string_enum!`] so they
 //! can be stored directly in the database without JSON serialization.
 
-use crate::enums::LegacyExecutionMode;
+use crate::enums::quant::QuantRuntimeMode;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use sea_orm::{ActiveValue, IntoActiveValue};
@@ -617,18 +617,18 @@ active_string_enum! {
 
 impl RedeemStatus {
     #[must_use]
-    pub const fn initial_for_mode(mode: LegacyExecutionMode) -> Self {
+    pub const fn initial_for_mode(mode: QuantRuntimeMode) -> Self {
         match mode {
-            LegacyExecutionMode::DryRun | LegacyExecutionMode::Paper => Self::NotRequired,
-            LegacyExecutionMode::Live => Self::Pending,
+            QuantRuntimeMode::ReportOnly => Self::NotRequired,
+            QuantRuntimeMode::SemiAuto | QuantRuntimeMode::AutoExecution => Self::Pending,
         }
     }
 
     #[must_use]
-    pub const fn settled_for_mode(mode: LegacyExecutionMode) -> Self {
+    pub const fn settled_for_mode(mode: QuantRuntimeMode) -> Self {
         match mode {
-            LegacyExecutionMode::DryRun | LegacyExecutionMode::Paper => Self::NotRequired,
-            LegacyExecutionMode::Live => Self::Completed,
+            QuantRuntimeMode::ReportOnly => Self::NotRequired,
+            QuantRuntimeMode::SemiAuto | QuantRuntimeMode::AutoExecution => Self::Completed,
         }
     }
 }

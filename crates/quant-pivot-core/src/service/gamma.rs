@@ -312,7 +312,7 @@ impl GammaService {
         let Some(coordinator) = &self.ws_subscription else {
             return;
         };
-        let stats = coordinator.sync_engine_hotset(
+        let stats = coordinator.sync_universe_ingest(
             &self.market_registry,
             &self.universe,
             self.subscription_window_hours,
@@ -329,7 +329,7 @@ impl GammaService {
             candidates_excluded_past = stats.candidates_past_deadline,
             detection_window_coverage = stats.detection_window_coverage_ratio(),
             subscribed = coordinator.subscribed_count(),
-            "CLOB websocket engine hotset synced after Gamma catalog update"
+            "CLOB websocket universe ingest synced after Gamma catalog update"
         );
     }
 

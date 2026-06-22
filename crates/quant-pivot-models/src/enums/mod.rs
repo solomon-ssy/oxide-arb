@@ -61,28 +61,13 @@ macro_rules! active_string_enum {
     };
 }
 
-pub mod audit;
-pub mod blacklist;
-pub mod calibration;
 pub mod clickhouse;
 pub mod common;
-pub mod control_factor;
-pub mod evidence;
-pub mod execution;
-pub mod fact;
 pub mod fee;
-pub mod legacy;
-pub mod lifecycle;
 pub mod market;
 pub mod operation_log;
-pub mod opportunity;
 pub mod order;
-pub mod pipeline;
 pub mod quant;
 pub mod rbac;
-pub mod report;
-pub mod risk;
 pub mod runtime_config;
 pub mod system;
-
-pub use legacy::LegacyExecutionMode;

@@ -3,7 +3,7 @@
 //! Identifiers fall into two families:
 //!
 //! - **External string ids** ([`MarketId`], [`TokenId`], [`EventId`],
-//!   [`OrderId`], [`ReportId`]) wrap `Arc<str>` via `#[derive(StrId)]`. Their
+//!   [`OrderId`]) wrap `Arc<str>` via `#[derive(StrId)]`. Their
 //!   value is defined by an external system or carries semantic structure, so
 //!   it is **not** a UUID and is persisted as `text` / `varchar`.
 //! - **Internal UUID ids** (everything else) wrap `Arc<Uuid>` via
@@ -53,95 +53,72 @@ impl TokenId {
 }
 
 /// CLOB order identifier returned by Polymarket after submission.
-///
-/// Live orders carry the venue-assigned string; dry-run / paper modes mint a
-/// synthetic value via [`OrderId::synthetic`].
 #[derive(StrId, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct OrderId(Arc<str>);
 
 impl OrderId {
-    /// Generate a synthetic order id for dry-run / paper-trade modes.
+    /// Generate a synthetic venue-order id for tests and local adapters.
     #[must_use]
     pub fn synthetic() -> Self {
         Self::new(Uuid::now_v7().to_string())
     }
 }
 
-/// Report snapshot identifier (e.g. `"daily_2025-06-01"`).
-#[derive(StrId, Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ReportId(Arc<str>);
-
 // ── Internal UUID identifiers (Arc<Uuid>) ────────────────────────────────
 
-/// Point-in-time market metadata snapshot identifier.
+/// Market universe snapshot used by a report or model run.
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
-pub struct MarketPitSnapshotId(Arc<Uuid>);
+pub struct UniverseSnapshotId(Arc<Uuid>);
 
-/// Detection-pipeline opportunity identifier.
-///
-/// Uses UUID v7 so the identifier is time-ordered — sorting `OpportunityId`
-/// is the same as sorting by detection instant. An opportunity that has not
-/// yet passed score gates is represented by `Option::None`, never a sentinel.
+/// Point-in-time feature vector snapshot identifier.
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
-pub struct OpportunityId(Arc<Uuid>);
+pub struct FeatureVectorId(Arc<Uuid>);
 
-/// Unique trade identifier.
-///
-/// Independent from [`OpportunityId`] — correlate via opportunity fields on
-/// trade records.
+/// Governed factor definition identifier.
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
-pub struct TradeId(Arc<Uuid>);
+pub struct FactorDefinitionId(Arc<Uuid>);
 
-/// Unique identifier for a single execution attempt.
+/// Persisted factor value identifier.
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ExecutionId(Arc<Uuid>);
+pub struct FactorValueId(Arc<Uuid>);
 
-impl Default for ExecutionId {
-    fn default() -> Self {
-        Self::from_v7()
-    }
-}
-
-/// Unique position lifecycle identifier.
-///
-/// Each open/close/settle cycle for a (market, token, side) triple generates a
-/// new `PositionId`, allowing full history tracking.
+/// Governed model specification identifier.
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
-pub struct PositionId(Arc<Uuid>);
+pub struct ModelSpecId(Arc<Uuid>);
 
-/// Exposure reservation identifier.
+/// Published model version identifier.
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ReservationId(Arc<Uuid>);
+pub struct ModelVersionId(Arc<Uuid>);
 
-/// Accounting period identifier.
+/// Model training, backtest, shadow, or inference run identifier.
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
-pub struct PeriodId(Arc<Uuid>);
+pub struct ModelRunId(Arc<Uuid>);
 
-/// Potential loss ledger entry identifier.
+/// Candidate signal emitted before portfolio pruning.
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
-pub struct LedgerId(Arc<Uuid>);
+pub struct SignalCandidateId(Arc<Uuid>);
 
-/// Market resolution event identifier.
+/// Portfolio plan identifier used by a recommendation report.
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ResolutionEventId(Arc<Uuid>);
+pub struct PortfolioPlanId(Arc<Uuid>);
 
-/// Governed control-factor artifact identifier.
+/// Immutable `TopN` recommendation report identifier.
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ControlFactorId(Arc<Uuid>);
+pub struct RecommendationReportId(Arc<Uuid>);
 
-/// Control-factor publication identifier.
+/// Single recommendation row identifier.
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
-pub struct FactorPublicationId(Arc<Uuid>);
+pub struct RecommendationId(Arc<Uuid>);
 
-/// Point-in-time materialization run identifier.
+/// Governed bridge from a recommendation to execution.
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
-pub struct MaterializationRunId(Arc<Uuid>);
+pub struct OrderIntentId(Arc<Uuid>);
 
-/// Evidence stage report identifier.
+/// Internal execution-order lifecycle identifier.
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
-pub struct StageReportId(Arc<Uuid>);
+pub struct ExecutionOrderId(Arc<Uuid>);
 
-/// Runtime-config version identifier used by PIT evidence manifests.
+/// Runtime-config version identifier used by governed config activation.
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RuntimeConfigVersionId(Arc<Uuid>);
 
@@ -149,19 +126,7 @@ pub struct RuntimeConfigVersionId(Arc<Uuid>);
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RuntimeConfigActivationId(Arc<Uuid>);
 
-/// Cash/collateral balance snapshot identifier.
-#[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
-pub struct BalanceSnapshotId(Arc<Uuid>);
-
-/// Control-factor training dataset manifest identifier.
-#[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
-pub struct TrainingDatasetId(Arc<Uuid>);
-
-/// Shadow decision audit identifier.
-#[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ShadowDecisionId(Arc<Uuid>);
-
-/// Append-only control-factor audit event identifier.
+/// Append-only operation-log row identifier.
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AuditEventId(Arc<Uuid>);
 
@@ -192,34 +157,34 @@ mod tests {
     use std::{thread::sleep, time::Duration};
 
     #[test]
-    fn opportunity_id_v7_sortable_by_time() {
+    fn recommendation_report_id_v7_sortable_by_time() {
         const N: usize = 50;
-        let mut ids: Vec<OpportunityId> = Vec::with_capacity(N);
+        let mut ids: Vec<RecommendationReportId> = Vec::with_capacity(N);
         for _ in 0..N {
-            ids.push(OpportunityId::from_v7());
+            ids.push(RecommendationReportId::from_v7());
             sleep(Duration::from_millis(2));
         }
         let mut sorted = ids.clone();
-        sorted.sort_by_key(OpportunityId::as_uuid);
-        let expected: Vec<Uuid> = ids.iter().map(OpportunityId::as_uuid).collect();
-        let got: Vec<Uuid> = sorted.iter().map(OpportunityId::as_uuid).collect();
+        sorted.sort_by_key(RecommendationReportId::as_uuid);
+        let expected: Vec<Uuid> = ids.iter().map(RecommendationReportId::as_uuid).collect();
+        let got: Vec<Uuid> = sorted.iter().map(RecommendationReportId::as_uuid).collect();
         assert_eq!(got, expected, "UUID v7 must be time-ordered");
     }
 
     #[test]
-    fn trade_id_from_v7_is_version_7() {
-        let id = TradeId::from_v7();
+    fn order_intent_id_from_v7_is_version_7() {
+        let id = OrderIntentId::from_v7();
         assert_eq!(id.as_uuid().get_version(), Some(uuid::Version::SortRand));
     }
 
     #[test]
     fn generated_ids_are_version_7() {
         assert_eq!(
-            ExecutionId::from_v7().as_uuid().get_version(),
+            ModelRunId::from_v7().as_uuid().get_version(),
             Some(uuid::Version::SortRand)
         );
         assert_eq!(
-            PositionId::from_v7().as_uuid().get_version(),
+            ExecutionOrderId::from_v7().as_uuid().get_version(),
             Some(uuid::Version::SortRand)
         );
     }
@@ -235,10 +200,10 @@ mod tests {
 
     #[test]
     fn uuid_id_roundtrip_serde() {
-        let id = TradeId::from_v7();
+        let id = RecommendationId::from_v7();
         let json = serde_json::to_string(&id).unwrap();
         assert_eq!(json, format!(r#""{}""#, id.as_uuid()));
-        let back: TradeId = serde_json::from_str(&json).unwrap();
+        let back: RecommendationId = serde_json::from_str(&json).unwrap();
         assert_eq!(back, id);
     }
 

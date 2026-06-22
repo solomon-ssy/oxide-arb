@@ -269,12 +269,12 @@ fn build_trading(t: &mut MenuTree) {
     );
     t.page(PageSpec {
         parent: &trading,
-        name: "opportunities",
-        title: "page.menu.opportunities",
-        path: "/opportunities",
-        component: "opportunities/index",
-        permission_code: Some(perm(ResourceType::Opportunity, Operation::Read)),
-        icon: "lucide:zap",
+        name: "quant-reports",
+        title: "page.menu.quantReports",
+        path: "/quant/reports",
+        component: "quant/reports/index",
+        permission_code: Some(perm(ResourceType::QuantReport, Operation::Read)),
+        icon: "lucide:bar-chart-3",
     });
     let trades_page = t.page(PageSpec {
         parent: &trading,
@@ -340,38 +340,38 @@ fn build_operations(t: &mut MenuTree) {
         "lucide:settings-2",
     );
     build_operations_runtime_config(t, &operations);
-    let control_factors = t.page(PageSpec {
+    let quant_models = t.page(PageSpec {
         parent: &operations,
-        name: "control-factors",
-        title: "page.menu.controlFactors",
-        path: "/control-factors",
-        component: "control-factors/index",
-        permission_code: Some(perm(ResourceType::ControlFactor, Operation::Read)),
+        name: "quant-models",
+        title: "page.menu.quantModels",
+        path: "/quant/models",
+        component: "quant/models/index",
+        permission_code: Some(perm(ResourceType::Publication, Operation::Read)),
         icon: "lucide:git-branch",
     });
     t.button(
-        &control_factors,
-        "control_factor:reject",
+        &quant_models,
+        "quant_model:reject",
         "Reject",
-        perm(ResourceType::ControlFactor, Operation::Reject),
+        perm(ResourceType::Publication, Operation::Reject),
     );
     t.button(
-        &control_factors,
-        "control_factor:shadow",
+        &quant_models,
+        "quant_model:shadow",
         "Promote to Shadow",
-        perm(ResourceType::ControlFactor, Operation::Shadow),
+        perm(ResourceType::Publication, Operation::Shadow),
     );
     t.button(
-        &control_factors,
-        "control_factor:publish",
+        &quant_models,
+        "quant_model:publish",
         "Publish",
-        perm(ResourceType::ControlFactor, Operation::Publish),
+        perm(ResourceType::Publication, Operation::Publish),
     );
     t.button(
-        &control_factors,
-        "control_factor:emergency",
+        &quant_models,
+        "quant_model:emergency",
         "Emergency Publish",
-        perm(ResourceType::ControlFactor, Operation::Emergency),
+        perm(ResourceType::Publication, Operation::Emergency),
     );
     let publications = t.page(PageSpec {
         parent: &operations,

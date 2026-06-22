@@ -137,7 +137,7 @@ pub async fn full_sync(
     let events = full_sync_raw(http, config).await?;
     Ok(events
         .into_iter()
-        .map(|event| event.to_registry_info())
+        .map(|event| EventRegistryInfo::from(&event))
         .collect())
 }
 
@@ -191,7 +191,7 @@ pub async fn incremental_sync(
     let events = incremental_sync_raw(http, config, since).await?;
     Ok(events
         .into_iter()
-        .map(|event| event.to_registry_info())
+        .map(|event| EventRegistryInfo::from(&event))
         .collect())
 }
 

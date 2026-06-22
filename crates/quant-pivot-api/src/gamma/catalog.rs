@@ -93,6 +93,8 @@ pub enum CatalogMarketReject {
     MissingClobTokenIds,
     #[error("{token_count} tokens — Polymarket CLOB markets must be binary")]
     NotBinary { token_count: usize },
+    #[error("invalid binary token pair: {reason}")]
+    InvalidTokenPair { reason: String },
 }
 
 impl CatalogMarketReject {
@@ -103,6 +105,7 @@ impl CatalogMarketReject {
             Self::EmptyConditionId => "empty_condition_id",
             Self::MissingClobTokenIds => "missing_clob_token_ids",
             Self::NotBinary { .. } => "not_binary",
+            Self::InvalidTokenPair { .. } => "invalid_token_pair",
         }
     }
 }

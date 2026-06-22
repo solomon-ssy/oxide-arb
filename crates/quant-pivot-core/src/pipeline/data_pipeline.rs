@@ -14,7 +14,7 @@ use quant_pivot_models::{
     domain::{BookSnapshotCmd, PriceDeltaCmd, latency::LatencyTrace, pipeline::PipelineEvent},
     enums::{
         clickhouse::{ChBookEventType, ChSnapshotReason},
-        pipeline::ShardConnectionStatus,
+        system::ShardConnectionStatus,
     },
     types::Shares,
 };

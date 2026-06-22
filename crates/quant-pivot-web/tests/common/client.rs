@@ -42,11 +42,6 @@ pub async fn get(env: &TestEnv, uri: &str, token: &str) -> Resp {
     harness::call(&env.state, req).await
 }
 
-/// Authenticated `POST` with a JSON body.
-pub async fn post(env: &TestEnv, uri: &str, token: &str, body: Value) -> Resp {
-    post_with(env, uri, token, &[], body).await
-}
-
 /// Authenticated `POST` with extra headers (e.g. `X-Acting-Role`, `X-Request-Id`).
 pub async fn post_with(
     env: &TestEnv,
@@ -64,72 +59,6 @@ pub async fn post_with(
         req = req.insert_header((*name, *value));
     }
     harness::call(&env.state, req).await
-}
-
-/// Authenticated `PUT` with a JSON body.
-pub async fn put(env: &TestEnv, uri: &str, token: &str, body: Value) -> Resp {
-    let req = TestRequest::put()
-        .uri(uri)
-        .insert_header(API_VERSION)
-        .insert_header(bearer(token))
-        .set_json(body);
-    harness::call(&env.state, req).await
-}
-
-/// Create a custom role (as admin) and return its id.
-pub async fn create_role(env: &TestEnv, admin: &str, code: &str) -> String {
-    let res = post(
-        env,
-        "/api/roles",
-        admin,
-        json!({ "code": code, "name": code }),
-    )
-    .await;
-    assert_eq!(res.status, StatusCode::OK, "create role {code}");
-    res.json()["data"]["id"]
-        .as_str()
-        .expect("role id")
-        .to_owned()
-}
-
-/// Grant a permission set to a role (replace-set) as admin.
-pub async fn grant_permissions(env: &TestEnv, admin: &str, role_id: &str, permissions: Value) {
-    let res = put(
-        env,
-        &format!("/api/roles/{role_id}/permissions"),
-        admin,
-        json!({ "permissions": permissions }),
-    )
-    .await;
-    assert_eq!(res.status, StatusCode::OK, "grant permissions to {role_id}");
-}
-
-/// Create a user (as admin) and return its id.
-pub async fn create_user(env: &TestEnv, admin: &str, username: &str, password: &str) -> String {
-    let res = post(
-        env,
-        "/api/users",
-        admin,
-        json!({ "username": username, "password": password, "nickname": username }),
-    )
-    .await;
-    assert_eq!(res.status, StatusCode::OK, "create user {username}");
-    res.json()["data"]["id"]
-        .as_str()
-        .expect("user id")
-        .to_owned()
-}
-
-/// Assign a role set to a user (as admin).
-pub async fn assign_roles(env: &TestEnv, admin: &str, user_id: &str, role_ids: &[&str]) {
-    let res = put(
-        env,
-        &format!("/api/users/{user_id}/roles"),
-        admin,
-        json!({ "role_ids": role_ids }),
-    )
-    .await;
-    assert_eq!(res.status, StatusCode::OK, "assign roles to {user_id}");
 }
 
 /// Poll the (asynchronously-written) operation log for rows correlated with

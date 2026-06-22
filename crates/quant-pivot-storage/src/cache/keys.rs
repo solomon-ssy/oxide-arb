@@ -4,13 +4,7 @@
 //! (Redis), and a domain label for metrics partitioning. L1 (Moka) TTL is
 //! derived as `ttl / 4` by the [`TieredCache`] layer.
 
-use quant_pivot_models::{
-    enums::{
-        calibration::{DurationBucket, PriceZone},
-        common::MarketCategory,
-    },
-    types::{EventId, MarketId, RuntimeConfigVersionId},
-};
+use quant_pivot_models::types::{EventId, MarketId, RuntimeConfigVersionId};
 use std::time::Duration;
 
 /// Strongly-typed cache key encompassing all cacheable domains.
@@ -31,27 +25,6 @@ pub enum CacheKey {
     /// Cached active market list used by scanner startup and periodic refresh.
     ActiveMarkets,
 
-    // ── Calibration ─────────────────────────────────────────────────────
-    /// Single calibration bucket entry.
-    CalibrationBucket {
-        category: MarketCategory,
-        price_zone: PriceZone,
-        duration_bucket: DurationBucket,
-    },
-
-    /// Bulk cache of all calibration buckets (startup / periodic reload).
-    AllCalibrationBuckets,
-
-    // ── Risk & Position ─────────────────────────────────────────────────
-    /// Per-market position summary (shares, avg cost, unrealized `PnL`).
-    PositionSummary { market_id: MarketId },
-
-    /// Singleton risk engine state snapshot (breaker level, counters).
-    RiskState,
-
-    /// Singleton available balance snapshot for the sole Polymarket venue.
-    Balance,
-
     // ── Configuration ───────────────────────────────────────────────────
     /// Active runtime configuration version document.
     ActiveRuntimeConfig,
@@ -68,15 +41,6 @@ impl CacheKey {
             Self::EventInfo { event_id } => format!("evt:{event_id}"),
             Self::MarketMetadata { market_id } => format!("mkt_meta:{market_id}"),
             Self::ActiveMarkets => "mkt:__active__".to_owned(),
-            Self::CalibrationBucket {
-                category,
-                price_zone,
-                duration_bucket,
-            } => format!("cal:{}:{price_zone}:{duration_bucket}", category.as_str()),
-            Self::AllCalibrationBuckets => "cal:__all__".to_owned(),
-            Self::PositionSummary { market_id } => format!("pos:{market_id}"),
-            Self::RiskState => "risk:state".to_owned(),
-            Self::Balance => "bal:polymarket".to_owned(),
             Self::ActiveRuntimeConfig => "cfg:active".to_owned(),
             Self::RuntimeConfigVersion { version_id } => format!("cfg:version:{version_id}"),
         }
@@ -91,14 +55,9 @@ impl CacheKey {
                 Duration::from_secs(300)
             }
             Self::MarketMetadata { .. } => Duration::from_secs(1800),
-            Self::CalibrationBucket { .. } | Self::AllCalibrationBuckets => {
-                Duration::from_secs(3600)
-            }
-            Self::PositionSummary { .. } => Duration::from_secs(30),
-            Self::RiskState | Self::ActiveRuntimeConfig | Self::RuntimeConfigVersion { .. } => {
+            Self::ActiveRuntimeConfig | Self::RuntimeConfigVersion { .. } => {
                 Duration::from_secs(60)
             }
-            Self::Balance => Duration::from_secs(15),
         }
     }
 
@@ -108,10 +67,6 @@ impl CacheKey {
             Self::MarketInfo { .. } | Self::ActiveMarkets => "market",
             Self::EventInfo { .. } => "event",
             Self::MarketMetadata { .. } => "market_metadata",
-            Self::CalibrationBucket { .. } | Self::AllCalibrationBuckets => "calibration",
-            Self::PositionSummary { .. } => "position",
-            Self::RiskState => "risk",
-            Self::Balance => "balance",
             Self::ActiveRuntimeConfig | Self::RuntimeConfigVersion { .. } => "config",
         }
     }

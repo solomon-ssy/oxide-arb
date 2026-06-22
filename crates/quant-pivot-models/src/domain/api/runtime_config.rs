@@ -14,15 +14,84 @@ use std::collections::BTreeMap;
 use crate::{
     domain::governance::{RuntimeConfigActivationInfo, RuntimeConfigVersionInfo},
     enums::runtime_config::RuntimeConfigVersionSource,
-    runtime_config::ui_enum::EnumItemView,
-    runtime_config::ui_text::UiText,
-    runtime_config::ui_widget::{FieldSemantics, FieldWhen, FieldWidget},
     types::RuntimeConfigVersionId,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use validator::Validate;
+
+/// Localized UI text payload.
+#[derive(Debug, Clone, Serialize)]
+pub struct UiText {
+    pub zh_cn: String,
+    pub en: String,
+}
+
+impl UiText {
+    #[must_use]
+    pub fn plain(value: impl Into<String>) -> Self {
+        let text = value.into();
+        Self {
+            zh_cn: text.clone(),
+            en: text,
+        }
+    }
+
+    #[must_use]
+    pub fn localized(en: impl Into<String>, zh_cn: impl Into<String>) -> Self {
+        Self {
+            zh_cn: zh_cn.into(),
+            en: en.into(),
+        }
+    }
+
+    #[must_use]
+    pub fn has_en_and_zh(&self) -> bool {
+        !self.en.trim().is_empty() && !self.zh_cn.trim().is_empty()
+    }
+}
+
+/// Optional runtime-config form widget hint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FieldWidget {
+    PlainString,
+    SecretString,
+    Integer,
+    DurationMs,
+    DecimalString,
+    Boolean,
+    EnumSelect,
+    EnumSet,
+    StringList,
+    EnumDecimalMap,
+    JsonTree,
+}
+
+/// Optional field semantics for client-side rendering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FieldSemantics {
+    Money,
+    RuntimeMode,
+    Credential,
+    EmptyMeansAll,
+}
+
+/// Enum item metadata for schema fields.
+#[derive(Debug, Clone, Serialize)]
+pub struct EnumItemView {
+    pub key: Value,
+    pub label: UiText,
+}
+
+/// Conditional display or validation rule.
+#[derive(Debug, Clone, Serialize)]
+pub struct FieldWhen {
+    pub target_path: String,
+    pub value: Value,
+}
 
 /// Create a new immutable runtime-config version.
 ///

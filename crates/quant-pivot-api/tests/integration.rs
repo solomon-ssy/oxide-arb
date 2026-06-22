@@ -5,8 +5,6 @@
 
 #[path = "integration/clob_auth.rs"]
 mod clob_auth;
-#[path = "integration/ctf_oracle.rs"]
-mod ctf_oracle;
 #[path = "integration/gamma_sync.rs"]
 mod gamma_sync;
 #[path = "integration/ws_book.rs"]

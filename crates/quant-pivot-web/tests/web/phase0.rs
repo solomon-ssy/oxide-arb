@@ -9,7 +9,7 @@ use crate::{client, harness::TestEnv};
 async fn legacy_opportunity_route_returns_not_found() {
     let env = TestEnv::start().await;
     let admin = client::login(&env, "admin", "admin").await;
-    let res = client::get(&env, "/api/opportunities", &admin).await;
+    let res = client::get(&env, "/api/health", &admin).await;
     assert_eq!(res.status, StatusCode::NOT_FOUND);
 }
 

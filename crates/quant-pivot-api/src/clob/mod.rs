@@ -38,7 +38,7 @@ use quant_pivot_models::{
     config::PolymarketConfig,
     domain::{
         BookLevel,
-        book::{EndgameBookSnapshot, OrderbookSide},
+        book::{OrderbookSide, QuantBookSnapshot},
         order::{OrderAmount, OrderRequest, OrderResponse},
     },
     enums::{
@@ -396,11 +396,11 @@ impl ClobClient {
         &self,
         yes_token: &TokenId,
         no_token: &TokenId,
-    ) -> Result<EndgameBookSnapshot, ApiError> {
+    ) -> Result<QuantBookSnapshot, ApiError> {
         let (yes_book, no_book) =
             tokio::try_join!(self.get_book(yes_token), self.get_book(no_token))?;
 
-        Ok(EndgameBookSnapshot {
+        Ok(QuantBookSnapshot {
             yes_bids: OrderbookSide {
                 levels: yes_book.bids,
                 timestamp_ms: yes_book.timestamp_ms,

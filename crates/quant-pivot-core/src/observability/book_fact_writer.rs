@@ -14,7 +14,7 @@ use quant_pivot_models::{
     },
     enums::clickhouse::{ChBookEventType, ChFactSource, ChSnapshotReason},
     enums::common::{Side, TickSize},
-    enums::pipeline::ShardConnectionStatus,
+    enums::system::ShardConnectionStatus,
     hashing::CanonicalDigest,
     types::{MarketId, Price, TokenId, Usd},
 };
@@ -168,7 +168,7 @@ impl BookFactWriter {
             event_time: i64::try_from(snapshot.timestamp_ms).unwrap_or(i64::MAX),
             ingestion_time: now_ms,
             book_version: snapshot.version,
-            source: ChFactSource::Scanner,
+            source: ChFactSource::QuantPipeline,
         });
     }
 

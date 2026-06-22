@@ -12,7 +12,7 @@ use crate::{
 use async_trait::async_trait;
 use quant_pivot_models::{
     domain::{RuntimeConfigPort, RuntimeControlError},
-    runtime_config::{RuntimeConfig, validation::validate_runtime_config},
+    runtime_config::{RUNTIME_CONFIG_SCHEMA_VERSION, RuntimeConfig},
 };
 use std::sync::Arc;
 
@@ -41,19 +41,20 @@ impl RuntimeConfigApplicator {
     }
 
     fn preflight_internal(candidate: &RuntimeConfig) -> Result<(), RuntimeControlError> {
-        let report = validate_runtime_config(candidate);
-        if report.has_errors() {
-            return Err(RuntimeControlError::Precondition(report.to_string()));
+        if candidate.schema_version != RUNTIME_CONFIG_SCHEMA_VERSION {
+            return Err(RuntimeControlError::Precondition(
+                "unsupported runtime config schema version".to_owned(),
+            ));
         }
         Ok(())
     }
 
     fn propagate(&self, config: &Arc<RuntimeConfig>) {
         let subs = &self.subscribers;
-        subs.universe.reload(&config.market_data.enabled_categories);
+        subs.universe.reload(&config.universe.enabled_categories);
         subs.market_cache.rebuild();
         if let Some(ws) = &subs.ws_subscription {
-            let _ = ws.sync_engine_hotset(
+            let _ = ws.sync_universe_ingest(
                 subs.market_registry.as_ref(),
                 subs.universe.as_ref(),
                 subs.subscription_window_hours,

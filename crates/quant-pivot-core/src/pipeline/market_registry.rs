@@ -59,7 +59,7 @@ impl MarketRegistry {
     }
 
     /// Register a single market. Rebuilds token→market index.
-    pub fn register_market(&self, mut entry: MarketRegistryInfo) {
+    pub fn register_market(&self, entry: MarketRegistryInfo) {
         if entry.resolve_token_pair().is_err() {
             tracing::warn!(market_id = %entry.market_id, "skipping market with invalid token pair");
             return;
@@ -87,7 +87,7 @@ impl MarketRegistry {
 
         let mut active = self.active_markets().iter().cloned().collect::<Vec<_>>();
 
-        for mut entry in entries {
+        for entry in entries {
             if entry.resolve_token_pair().is_err() {
                 tracing::warn!(market_id = %entry.market_id, "skipping market with invalid token pair");
                 continue;
