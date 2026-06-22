@@ -16,8 +16,8 @@
 use std::sync::OnceLock;
 
 use actix_web::{http::Method, web};
-use oxide_arb_error::{auth::AuthError, storage::StorageError};
-use oxide_arb_models::{
+use quant_pivot_error::{auth::AuthError, storage::StorageError};
+use quant_pivot_models::{
     domain::{
         LoginRequest, LogoutRequest, MeResponse, RefreshRequest, RoleView, TokenResponse, UserInfo,
         UserView,
@@ -187,8 +187,25 @@ fn issue_pair(state: &AppState, user: &UserInfo) -> Result<TokenResponse, WebErr
 fn dummy_hash() -> &'static str {
     static HASH: OnceLock<String> = OnceLock::new();
     HASH.get_or_init(|| {
-        hash_password("oxide-arb::login-timing-guard")
+        hash_password("quant-pivot::login-timing-guard")
             .expect("argon2id hashing of a static string must not fail")
     })
     .as_str()
+}
+
+/// Register unauthenticated auth routes under the v1 scope.
+pub fn configure_public(cfg: &mut actix_web::web::ServiceConfig) {
+    use actix_web::web;
+    cfg.route(
+        "/auth/login",
+        web::post()
+            .to(login)
+            .guard(crate::routes::version::ApiV1Guard),
+    )
+    .route(
+        "/auth/refresh",
+        web::post()
+            .to(refresh)
+            .guard(crate::routes::version::ApiV1Guard),
+    );
 }
