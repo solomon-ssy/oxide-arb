@@ -2,8 +2,8 @@
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use oxide_arb_error::storage::StorageError;
-use oxide_arb_models::{
+use quant_pivot_error::storage::StorageError;
+use quant_pivot_models::{
     clickhouse::{
         AuditStageCountRow, BookDecisionContextRow, BookL2ReplayRow, BookMicrostructureRow,
         BookSnapshotRow, CalibrationSnapshotRow, OpportunityAuditRow, OpportunityDetectionRow,
@@ -21,14 +21,14 @@ use oxide_arb_models::{
         calibration::{DurationBucket, PriceZone},
         clickhouse::ChOpportunityAuditStage,
         common::{
-            ExecutionMode, MarketCategory, PositionStatus, RedeemStatus,
-            SettlementAccountingStatus, SettlementTrigger, TradeBusinessOutcome,
-            TradeReconcileResolution, TradeState,
+            MarketCategory, PositionStatus, RedeemStatus, SettlementAccountingStatus,
+            SettlementTrigger, TradeBusinessOutcome, TradeReconcileResolution, TradeState,
         },
+        legacy::LegacyExecutionMode,
     },
     types::{ExecutionId, MarketId, OpportunityId, PositionId, Shares, TokenId, TradeId, Usd},
 };
-use oxide_arb_repository::traits::{
+use quant_pivot_repository::traits::{
     AuditFunnelStats, CalibrationRepository, EvidenceTimeseriesRepository, PositionRepository,
     TimeseriesFactWriter, TradeRepository, evidence_query_result,
 };
@@ -260,7 +260,10 @@ impl PositionRepository for MockPositionRepository {
         Ok(Paginated::from_request(page, total, &window))
     }
 
-    async fn find_open(&self, mode: ExecutionMode) -> Result<Vec<PositionInfo>, StorageError> {
+    async fn find_open(
+        &self,
+        mode: LegacyExecutionMode,
+    ) -> Result<Vec<PositionInfo>, StorageError> {
         Ok(self
             .positions
             .lock()

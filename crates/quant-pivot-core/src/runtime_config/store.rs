@@ -1,7 +1,7 @@
 //! Lock-free in-process snapshot of the active runtime configuration.
 
 use arc_swap::{ArcSwap, Guard};
-use oxide_arb_models::runtime_config::RuntimeConfig;
+use quant_pivot_models::runtime_config::RuntimeConfig;
 use std::sync::Arc;
 
 /// Process-wide holder of the active [`RuntimeConfig`].

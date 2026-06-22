@@ -1,10 +1,10 @@
 //! Durable-trade integrity snapshot for admission and recovery gates.
 //!
-//! Published via `ArcSwap` in `oxide-arb-core` so pre-trade checks and the
+//! Published via `ArcSwap` in `quant-pivot-core` so pre-trade checks and the
 //! execution FSM read a single zero-I/O view of blocking trades and in-flight
 //! reservations.
 
-use crate::{enums::common::ExecutionMode, types::Usd};
+use crate::{enums::legacy::LegacyExecutionMode, types::Usd};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -42,10 +42,10 @@ impl TradeIntegritySnapshot {
 
     /// Whether new entries should be denied for `mode`.
     #[must_use]
-    pub const fn blocks_admission(&self, mode: ExecutionMode) -> bool {
+    pub const fn blocks_admission(&self, mode: LegacyExecutionMode) -> bool {
         match mode {
-            ExecutionMode::Live | ExecutionMode::Paper => self.blocking_count > 0,
-            ExecutionMode::DryRun => false,
+            LegacyExecutionMode::Live | LegacyExecutionMode::Paper => self.blocking_count > 0,
+            LegacyExecutionMode::DryRun => false,
         }
     }
 }

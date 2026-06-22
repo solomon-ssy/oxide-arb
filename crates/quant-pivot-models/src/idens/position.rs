@@ -1,4 +1,4 @@
-use oxide_arb_macros::oxide_schema;
+use quant_pivot_macros::quant_schema;
 use sea_orm::{
     Iden,
     sea_query::{ColumnDef, ForeignKey, ForeignKeyAction, Index, Table, TableCreateStatement},
@@ -16,7 +16,7 @@ use crate::{
     },
 };
 
-#[oxide_schema(lifecycle = "ledger")]
+#[quant_schema(lifecycle = "ledger")]
 pub enum Position {
     Table,
     PositionId,
@@ -24,7 +24,7 @@ pub enum Position {
     MarketId,
     TokenId,
     Side,
-    ExecutionMode,
+    LegacyExecutionMode,
     Shares,
     AvgEntryPrice,
     TotalCostUsd,
@@ -63,7 +63,11 @@ pub fn table() -> TableCreateStatement {
         .col(column::market_id(Position::MarketId))
         .col(column::token_id(Position::TokenId))
         .col(ColumnDef::new(Position::Side).text().not_null())
-        .col(ColumnDef::new(Position::ExecutionMode).text().not_null())
+        .col(
+            ColumnDef::new(Position::LegacyExecutionMode)
+                .text()
+                .not_null(),
+        )
         .col(column::shares(Position::Shares))
         .col(column::price(Position::AvgEntryPrice))
         .col(column::usd(Position::TotalCostUsd))
@@ -167,7 +171,7 @@ pub fn indexes() -> Vec<IndexSpec> {
             Index::create()
                 .name("idx_positions_mode_status")
                 .table(Position::Table)
-                .col(Position::ExecutionMode)
+                .col(Position::LegacyExecutionMode)
                 .col(Position::Status)
                 .to_owned(),
             "mode-scoped ledger aggregates and open-position scans",

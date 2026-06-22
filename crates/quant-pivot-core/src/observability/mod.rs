@@ -1,11 +1,4 @@
 pub mod alert_dispatcher;
 pub mod backpressure;
-pub mod balance_fact_writer;
-pub mod book_decision_context_capture;
-pub mod book_decision_context_writer;
 pub mod book_fact_writer;
-pub mod detection_writer;
-pub mod execution_audit;
-pub mod latency;
 pub mod metrics_hub;
-pub mod report_generator;

@@ -1,4 +1,4 @@
-//! `SeaORM` entity definitions for the oxide-arb database schema.
+//! `SeaORM` entity definitions for the quant-pivot database schema.
 
 pub mod accounting_period;
 pub mod balance_snapshot;

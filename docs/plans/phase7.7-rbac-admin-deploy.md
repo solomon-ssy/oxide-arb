@@ -146,8 +146,8 @@ cd oxide-arb-ui && pnpm install && pnpm build:antdv-next   # turbo 过滤 @vben/
 # 产物 apps/web-antdv-next/dist/ → 同步到运行目录 static/ui/
 ```
 
-- 提供根脚本 `scripts/deploy/sync-ui.sh`(oxide-arb 仓库侧):`rsync --delete dist/ → <运行目录>/static/ui/`。
-- Rust 侧零改动:`WebConfig.serve_static_ui = true` + `static_ui_dir = "static/ui"`(`config/oxide-arb.toml` 或 `OXIDE_ARB__WEB__SERVE_STATIC_UI`);`static_files.rs` 已实现 SPA fallback(extensionless → index.html no-cache;hashed 资产 immutable 缓存)。
+- 提供根脚本 `scripts/deploy/sync-ui.sh`(quant-pivot 仓库侧):`rsync --delete dist/ → <运行目录>/static/ui/`。
+- Rust 侧零改动:`WebConfig.serve_static_ui = true` + `static_ui_dir = "static/ui"`(`config/quant-pivot.toml` 或 `QUANT_PIVOT__WEB__SERVE_STATIC_UI`);`static_files.rs` 已实现 SPA fallback(extensionless → index.html no-cache;hashed 资产 immutable 缓存)。
 
 ### 4.2 开发模式
 

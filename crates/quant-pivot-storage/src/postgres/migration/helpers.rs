@@ -1,7 +1,7 @@
 //! Catalog-driven Postgres migration helpers.
 
-use oxide_arb_error::seed::SeedError;
-use oxide_arb_models::{
+use quant_pivot_error::seed::SeedError;
+use quant_pivot_models::{
     schema::{
         catalog,
         graph::{create_order, drop_order},

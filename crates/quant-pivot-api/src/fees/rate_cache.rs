@@ -2,7 +2,7 @@
 
 use ahash::{HashMap, HashMapExt};
 use chrono::{DateTime, Utc};
-use oxide_arb_models::{
+use quant_pivot_models::{
     config::FeesConfig,
     domain::fee::MarketFeeSchedule,
     enums::{common::MarketCategory, fee::FeeSource},

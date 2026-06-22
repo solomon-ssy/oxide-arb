@@ -1,8 +1,8 @@
 //! Repository trait for report persistence.
 
 use chrono::NaiveDate;
-use oxide_arb_error::storage::StorageError;
-use oxide_arb_models::{
+use quant_pivot_error::storage::StorageError;
+use quant_pivot_models::{
     domain::{ReportInfo, UpsertReport},
     enums::common::ReportType,
 };

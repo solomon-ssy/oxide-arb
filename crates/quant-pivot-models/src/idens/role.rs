@@ -1,6 +1,6 @@
 //! `role` table — RBAC roles. `code` is the Casbin policy subject.
 
-use oxide_arb_macros::oxide_schema;
+use quant_pivot_macros::quant_schema;
 use sea_orm::{
     Iden,
     sea_query::{ColumnDef, Index, Table, TableCreateStatement},
@@ -22,7 +22,7 @@ use crate::{
 const ROLE_CODE_LEN: u32 = 32;
 
 /// RBAC role. `code` (not the UUID id) is the stable Casbin policy subject.
-#[oxide_schema(lifecycle = "control")]
+#[quant_schema(lifecycle = "control")]
 pub enum Role {
     Table,
     Id,

@@ -1,3 +1,5 @@
+> **SUPERSEDED** — This document describes the legacy Endgame arbitrage system. Active architecture: [quant-pivot/README.md](../plans/quant-pivot/README.md). For deletion inventory only.
+
 # `bankroll_usd` 与风险指标模型
 
 > 回答：**为什么 `risk.bankroll_usd` 是 runtime 配置，而不是直接读 Polymarket 钱包余额？**
@@ -40,7 +42,7 @@ dynamic = equity - reserve_balance_usd - reserved_usd - potential_loss
 effective_bankroll = min(dynamic, bankroll_usd)   // 再交给 Kelly sizer
 ```
 
-实现见 `oxide-arb-risk/src/engine.rs` 中 `available_bankroll()`。
+实现见 `quant-pivot-risk/src/engine.rs` 中 `available_bankroll()`。
 
 ### 2.2 DryRun / Paper 没有「权威 venue 余额」
 
@@ -144,9 +146,9 @@ Live 下 **equity** = CLOB 现金 + 持仓 mark value（`RiskMetricsRefreshServi
 
 | 文件 | 职责 |
 |------|------|
-| `crates/oxide-arb-models/src/runtime_config/risk.rs` | `bankroll_usd` 字段定义（默认 $1000） |
-| `crates/oxide-arb-core/src/service/risk_metrics.rs` | mode-aware 刷新（Live=CLOB / 模拟=PG 派生）、`reload()` delta rebase |
-| `crates/oxide-arb-risk/src/engine.rs` | `available_bankroll()` Kelly 输入 |
-| `crates/oxide-arb-core/src/app/periodic_services.rs` | Live-only 对账 + internal baseline（按模式聚合） |
-| `crates/oxide-arb-core/src/control/mode_transition.rs` | 切模式时统一 `refresh()` + source 断言（fail-closed） |
-| `crates/oxide-arb-repository/src/postgres/trading/` | `successful_spend_total(mode)` / `settlement_payout_total(mode)` / `find_open(mode)` |
+| `crates/quant-pivot-models/src/runtime_config/risk.rs` | `bankroll_usd` 字段定义（默认 $1000） |
+| `crates/quant-pivot-core/src/service/risk_metrics.rs` | mode-aware 刷新（Live=CLOB / 模拟=PG 派生）、`reload()` delta rebase |
+| `crates/quant-pivot-risk/src/engine.rs` | `available_bankroll()` Kelly 输入 |
+| `crates/quant-pivot-core/src/app/periodic_services.rs` | Live-only 对账 + internal baseline（按模式聚合） |
+| `crates/quant-pivot-core/src/control/mode_transition.rs` | 切模式时统一 `refresh()` + source 断言（fail-closed） |
+| `crates/quant-pivot-repository/src/postgres/trading/` | `successful_spend_total(mode)` / `settlement_payout_total(mode)` / `find_open(mode)` |

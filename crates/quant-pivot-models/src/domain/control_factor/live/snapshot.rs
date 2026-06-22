@@ -19,7 +19,7 @@ use crate::{
     types::FactorPublicationId,
 };
 use chrono::{DateTime, Utc};
-use oxide_arb_error::control::SnapshotBuildError;
+use quant_pivot_error::control::SnapshotBuildError;
 
 /// Schema version this build understands. A factor row carrying any other
 /// version is rejected rather than silently mis-decoded.
@@ -432,7 +432,7 @@ mod tests {
         let result = ControlFactorSnapshot::compile(&pubn, &factors, Utc::now(), true);
         assert!(matches!(
             result,
-            Err(oxide_arb_error::control::SnapshotBuildError::SchemaMismatch { .. })
+            Err(quant_pivot_error::control::SnapshotBuildError::SchemaMismatch { .. })
         ));
     }
 
@@ -446,7 +446,7 @@ mod tests {
         let result = ControlFactorSnapshot::compile(&pubn, &factors, Utc::now(), true);
         assert!(matches!(
             result,
-            Err(oxide_arb_error::control::SnapshotBuildError::ExpiredSafetyFactor { .. })
+            Err(quant_pivot_error::control::SnapshotBuildError::ExpiredSafetyFactor { .. })
         ));
     }
 

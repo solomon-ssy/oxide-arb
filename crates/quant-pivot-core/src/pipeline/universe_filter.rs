@@ -6,7 +6,7 @@
 //! (`ArcSwap`); reloads come exclusively from runtime-config activation.
 
 use arc_swap::ArcSwap;
-use oxide_arb_models::enums::common::{CategorySet, MarketCategory};
+use quant_pivot_models::enums::common::{CategorySet, MarketCategory};
 use std::sync::Arc;
 
 /// Lock-free view of `market_data.enabled_categories`.

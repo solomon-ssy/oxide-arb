@@ -1,6 +1,6 @@
 # 运维文档
 
-面向**运维 / 量化 / 研发**的操作指南：如何启动 oxide-arb、验证机会与 PnL、沉淀 control factors 并接入 Live。
+面向**运维 / 量化 / 研发**的操作指南：如何启动 quant-pivot、验证机会与 PnL、沉淀 control factors 并接入 Live。
 
 | 文档 | 读者 | 内容 |
 |------|------|------|

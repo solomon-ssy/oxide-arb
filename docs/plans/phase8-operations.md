@@ -77,7 +77,7 @@ volumes:
 
 ```yaml
 services:
-  oxide-arb:
+  quant-pivot:
     build:
       context: .
       dockerfile: Dockerfile
@@ -210,8 +210,8 @@ COPY crates/ crates/
 COPY src/ src/
 
 # Build release binary
-RUN cargo build --release --bin oxide-arb && \
-    strip target/release/oxide-arb
+RUN cargo build --release --bin quant-pivot && \
+    strip target/release/quant-pivot
 
 # ─── Stage 2: Runtime ────────────────────────────────────
 FROM debian:bookworm-slim
@@ -223,7 +223,7 @@ RUN apt-get update && \
     useradd -r -s /bin/false oxide
 
 WORKDIR /app
-COPY --from=builder /build/target/release/oxide-arb /app/oxide-arb
+COPY --from=builder /build/target/release/quant-pivot /app/quant-pivot
 COPY config/ /app/config/
 
 RUN chown -R oxide:oxide /app
@@ -233,17 +233,17 @@ USER oxide
 EXPOSE 8080
 
 ENTRYPOINT ["tini", "--"]
-CMD ["/app/oxide-arb", "serve", "--config-dir", "/app/config"]
+CMD ["/app/quant-pivot", "serve", "--config-dir", "/app/config"]
 ```
 
 **构建与推送**:
 
 ```bash
 # 本地构建
-docker build -t oxide-arb:latest .
+docker build -t quant-pivot:latest .
 
 # 带版本标签
-docker build -t oxide-arb:v0.1.0 .
+docker build -t quant-pivot:v0.1.0 .
 ```
 
 镜像体积目标：< 100MB（Rust static binary + minimal Debian runtime）。
@@ -296,7 +296,7 @@ jobs:
         env:
           POSTGRES_USER: oxide
           POSTGRES_PASSWORD: test
-          POSTGRES_DB: oxide_arb_test
+          POSTGRES_DB: quant_pivot_test
         ports:
           - 5432:5432
         options: >-
@@ -325,7 +325,7 @@ jobs:
 
       - name: Run tests
         env:
-          DATABASE_URL: postgres://oxide:test@localhost:5432/oxide_arb_test
+          DATABASE_URL: postgres://oxide:test@localhost:5432/quant_pivot_test
           CLICKHOUSE_URL: http://localhost:8123
           REDIS_URL: redis://localhost:6379
         run: cargo test --workspace
@@ -377,8 +377,8 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: oxide-arb-${{ matrix.target }}
-          path: target/${{ matrix.target }}/release/oxide-arb
+          name: quant-pivot-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/quant-pivot
           retention-days: 30
 
   # ─── Benchmarks ────────────────────────────────────────
@@ -409,15 +409,15 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          pattern: oxide-arb-*
+          pattern: quant-pivot-*
           path: artifacts/
 
       - name: Upload release assets
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            artifacts/oxide-arb-x86_64-unknown-linux-gnu/oxide-arb
-            artifacts/oxide-arb-aarch64-unknown-linux-gnu/oxide-arb
+            artifacts/quant-pivot-x86_64-unknown-linux-gnu/quant-pivot
+            artifacts/quant-pivot-aarch64-unknown-linux-gnu/quant-pivot
 ```
 
 ### 3.1 CI 流程图
@@ -463,9 +463,9 @@ PR / push to main
 | 面板 | 类型 | PromQL 查询 |
 |---|---|---|
 | Uptime | Stat | `process_uptime_seconds` |
-| Active Markets | Stat | `oxide_arb_active_markets` |
-| Execution Mode | Stat | `oxide_arb_execution_mode` |
-| System Status | State timeline | `oxide_arb_system_status` |
+| Active Markets | Stat | `quant_pivot_active_markets` |
+| Execution Mode | Stat | `quant_pivot_execution_mode` |
+| System Status | State timeline | `quant_pivot_system_status` |
 | CPU Usage | Time series | `rate(process_cpu_seconds_total[1m])` |
 | Memory Usage | Time series | `process_resident_memory_bytes` |
 | Open File Descriptors | Time series | `process_open_fds` |
@@ -475,40 +475,40 @@ PR / push to main
 
 | 面板 | 类型 | PromQL 查询 |
 |---|---|---|
-| Daily PnL | Stat (green/red) | `oxide_arb_daily_pnl_usd` |
-| Cumulative PnL | Time series | `oxide_arb_cumulative_pnl_usd` |
-| Trade Count (24h) | Stat | `increase(oxide_arb_trades_total[24h])` |
-| Win Rate (24h) | Gauge | `increase(oxide_arb_trades_total{outcome="success"}[24h]) / increase(oxide_arb_trades_total[24h])` |
-| Trade PnL Distribution | Histogram | `oxide_arb_trade_pnl_usd_bucket` |
-| Avg Edge (bps) | Time series | `oxide_arb_avg_edge_bps` |
-| Fill Rate | Time series | `rate(oxide_arb_fills_total[5m])` |
-| Execution Latency | Heatmap | `oxide_arb_execution_latency_seconds_bucket` |
-| Opportunities Detected | Time series | `rate(oxide_arb_opportunities_detected_total[5m])` |
-| Opportunity → Trade Conversion | Stat | `increase(oxide_arb_trades_total[24h]) / increase(oxide_arb_opportunities_detected_total[24h])` |
+| Daily PnL | Stat (green/red) | `quant_pivot_daily_pnl_usd` |
+| Cumulative PnL | Time series | `quant_pivot_cumulative_pnl_usd` |
+| Trade Count (24h) | Stat | `increase(quant_pivot_trades_total[24h])` |
+| Win Rate (24h) | Gauge | `increase(quant_pivot_trades_total{outcome="success"}[24h]) / increase(quant_pivot_trades_total[24h])` |
+| Trade PnL Distribution | Histogram | `quant_pivot_trade_pnl_usd_bucket` |
+| Avg Edge (bps) | Time series | `quant_pivot_avg_edge_bps` |
+| Fill Rate | Time series | `rate(quant_pivot_fills_total[5m])` |
+| Execution Latency | Heatmap | `quant_pivot_execution_latency_seconds_bucket` |
+| Opportunities Detected | Time series | `rate(quant_pivot_opportunities_detected_total[5m])` |
+| Opportunity → Trade Conversion | Stat | `increase(quant_pivot_trades_total[24h]) / increase(quant_pivot_opportunities_detected_total[24h])` |
 
 ### 4.4 Market Data Pipeline 面板
 
 | 面板 | 类型 | PromQL 查询 |
 |---|---|---|
-| WS Connection Status | State timeline | `oxide_arb_ws_connected` |
-| Tick Rate | Time series | `rate(oxide_arb_ticks_received_total[1m])` |
-| Book Update Latency | Heatmap | `oxide_arb_book_update_latency_seconds_bucket` |
-| Stale Books | Time series | `oxide_arb_stale_books_count` |
-| Gamma Sync Status | State timeline | `oxide_arb_gamma_last_sync_success` |
-| Gamma Sync Duration | Time series | `oxide_arb_gamma_sync_duration_ms` |
-| WS Reconnects | Counter | `increase(oxide_arb_ws_reconnects_total[1h])` |
-| CH Write Latency | Time series | `oxide_arb_ch_write_latency_seconds` |
+| WS Connection Status | State timeline | `quant_pivot_ws_connected` |
+| Tick Rate | Time series | `rate(quant_pivot_ticks_received_total[1m])` |
+| Book Update Latency | Heatmap | `quant_pivot_book_update_latency_seconds_bucket` |
+| Stale Books | Time series | `quant_pivot_stale_books_count` |
+| Gamma Sync Status | State timeline | `quant_pivot_gamma_last_sync_success` |
+| Gamma Sync Duration | Time series | `quant_pivot_gamma_sync_duration_ms` |
+| WS Reconnects | Counter | `increase(quant_pivot_ws_reconnects_total[1h])` |
+| CH Write Latency | Time series | `quant_pivot_ch_write_latency_seconds` |
 
 ### 4.5 Risk Engine 面板
 
 | 面板 | 类型 | PromQL 查询 |
 |---|---|---|
-| Circuit Breaker State | State timeline | `oxide_arb_circuit_breaker_level` |
-| Daily Loss vs Limit | Gauge | `oxide_arb_daily_loss_usd / oxide_arb_daily_loss_limit_usd` |
-| Open Positions | Stat | `oxide_arb_open_positions_count` |
-| Total Exposure (USD) | Stat | `oxide_arb_total_exposure_usd` |
-| Risk Check Latency | Heatmap | `oxide_arb_risk_check_latency_seconds_bucket` |
-| Risk Denials | Time series | `rate(oxide_arb_risk_denials_total[5m])` |
+| Circuit Breaker State | State timeline | `quant_pivot_circuit_breaker_level` |
+| Daily Loss vs Limit | Gauge | `quant_pivot_daily_loss_usd / quant_pivot_daily_loss_limit_usd` |
+| Open Positions | Stat | `quant_pivot_open_positions_count` |
+| Total Exposure (USD) | Stat | `quant_pivot_total_exposure_usd` |
+| Risk Check Latency | Heatmap | `quant_pivot_risk_check_latency_seconds_bucket` |
+| Risk Denials | Time series | `rate(quant_pivot_risk_denials_total[5m])` |
 
 ---
 
@@ -518,20 +518,20 @@ PR / push to main
 # config/alert-rules.yml
 
 groups:
-  - name: oxide-arb-critical
+  - name: quant-pivot-critical
     rules:
       # 系统级告警 — 应立即处理
       - alert: SystemDown
-        expr: up{job="oxide-arb"} == 0
+        expr: up{job="quant-pivot"} == 0
         for: 1m
         labels:
           severity: critical
         annotations:
-          summary: "oxide-arb 进程不可达"
-          description: "Prometheus 无法抓取 oxide-arb metrics 超过 1 分钟"
+          summary: "quant-pivot 进程不可达"
+          description: "Prometheus 无法抓取 quant-pivot metrics 超过 1 分钟"
 
       - alert: CircuitBreakerL4
-        expr: oxide_arb_circuit_breaker_level >= 4
+        expr: quant_pivot_circuit_breaker_level >= 4
         for: 0s
         labels:
           severity: critical
@@ -540,7 +540,7 @@ groups:
           description: "系统已进入紧急停止状态，所有交易暂停"
 
       - alert: DailyLossExceeded
-        expr: oxide_arb_daily_loss_usd > oxide_arb_daily_loss_limit_usd * 0.8
+        expr: quant_pivot_daily_loss_usd > quant_pivot_daily_loss_limit_usd * 0.8
         for: 0s
         labels:
           severity: critical
@@ -549,7 +549,7 @@ groups:
           description: "当日亏损 {{ $value }} USD，已接近限额"
 
       - alert: DatabaseDown
-        expr: oxide_arb_db_healthy == 0
+        expr: quant_pivot_db_healthy == 0
         for: 30s
         labels:
           severity: critical
@@ -557,18 +557,18 @@ groups:
           summary: "PostgreSQL 连接断开"
 
       - alert: ClickHouseDown
-        expr: oxide_arb_ch_healthy == 0
+        expr: quant_pivot_ch_healthy == 0
         for: 1m
         labels:
           severity: critical
         annotations:
           summary: "ClickHouse 连接断开"
 
-  - name: oxide-arb-warning
+  - name: quant-pivot-warning
     rules:
       # 预警 — 应在合理时间内处理
       - alert: HighLatencyExecution
-        expr: histogram_quantile(0.99, rate(oxide_arb_execution_latency_seconds_bucket[5m])) > 2
+        expr: histogram_quantile(0.99, rate(quant_pivot_execution_latency_seconds_bucket[5m])) > 2
         for: 5m
         labels:
           severity: warning
@@ -576,7 +576,7 @@ groups:
           summary: "交易执行延迟 P99 > 2s"
 
       - alert: StaleBookData
-        expr: oxide_arb_stale_books_count > 5
+        expr: quant_pivot_stale_books_count > 5
         for: 5m
         labels:
           severity: warning
@@ -584,7 +584,7 @@ groups:
           summary: "超过 5 个市场 book 数据过期"
 
       - alert: WsDisconnected
-        expr: oxide_arb_ws_connected == 0
+        expr: quant_pivot_ws_connected == 0
         for: 30s
         labels:
           severity: warning
@@ -600,7 +600,7 @@ groups:
           summary: "内存使用超过 2GB"
 
       - alert: CircuitBreakerL2
-        expr: oxide_arb_circuit_breaker_level >= 2
+        expr: quant_pivot_circuit_breaker_level >= 2
         for: 0s
         labels:
           severity: warning
@@ -686,21 +686,21 @@ docker compose exec -T postgres pg_dump \
   -U "$PG_USER" \
   -Fc \
   --no-owner \
-  oxide_arb > "$BACKUP_DIR/oxide_arb_${TIMESTAMP}.dump"
+  oxide_arb > "$BACKUP_DIR/quant_pivot_${TIMESTAMP}.dump"
 
 # Compress
-gzip "$BACKUP_DIR/oxide_arb_${TIMESTAMP}.dump"
+gzip "$BACKUP_DIR/quant_pivot_${TIMESTAMP}.dump"
 
 # Cleanup old backups
 find "$BACKUP_DIR" -name "*.dump.gz" -mtime +$RETAIN_DAYS -delete
 
-echo "PostgreSQL backup completed: oxide_arb_${TIMESTAMP}.dump.gz"
+echo "PostgreSQL backup completed: quant_pivot_${TIMESTAMP}.dump.gz"
 ```
 
 Cron 调度：每日 UTC 04:00（交易低谷期）
 
 ```cron
-0 4 * * * /opt/oxide-arb/scripts/backup-postgres.sh >> /var/log/oxide-arb-backup.log 2>&1
+0 4 * * * /opt/quant-pivot/scripts/backup-postgres.sh >> /var/log/quant-pivot-backup.log 2>&1
 ```
 
 ### 7.2 ClickHouse 备份
@@ -711,7 +711,7 @@ Cron 调度：每日 UTC 04:00（交易低谷期）
 
 BACKUP_DIR="/backup/clickhouse"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-BACKUP_NAME="oxide_arb_${TIMESTAMP}"
+BACKUP_NAME="quant_pivot_${TIMESTAMP}"
 RETAIN_DAYS=14
 
 # Use ClickHouse built-in BACKUP command
@@ -744,11 +744,11 @@ docker compose -f docker-compose.verify.yml up -d
 
 # Restore PostgreSQL
 gunzip -c "$LATEST_PG" | docker compose -f docker-compose.verify.yml \
-  exec -T postgres pg_restore -U oxide -d oxide_arb_verify --no-owner
+  exec -T postgres pg_restore -U oxide -d quant_pivot_verify --no-owner
 
 # Check table counts
 TRADE_COUNT=$(docker compose -f docker-compose.verify.yml exec -T postgres \
-  psql -U oxide -d oxide_arb_verify -t -c "SELECT COUNT(*) FROM trades")
+  psql -U oxide -d quant_pivot_verify -t -c "SELECT COUNT(*) FROM trades")
 
 echo "Backup verification: $TRADE_COUNT trades restored"
 
@@ -779,14 +779,14 @@ REDIS_PASSWORD=<generated-strong-password>
 REDIS_URL=redis://:<password>@redis:6379
 
 # ─── Trading Keys ───
-OXIDE_ARB__KEYS__PRIVATE_KEY_HEX=<ethereum-private-key>
+QUANT_PIVOT__KEYS__PRIVATE_KEY_HEX=<ethereum-private-key>
 
 # ─── API ───
-OXIDE_ARB__KEYS__API_KEY=<api-key-for-web-ui>
+QUANT_PIVOT__KEYS__API_KEY=<api-key-for-web-ui>
 
 # ─── Notifications ───
-OXIDE_ARB__NOTIFICATION__TELEGRAM__BOT_TOKEN=<telegram-bot-token>
-OXIDE_ARB__NOTIFICATION__TELEGRAM__CHAT_ID=<telegram-chat-id>
+QUANT_PIVOT__NOTIFICATION__TELEGRAM__BOT_TOKEN=<telegram-bot-token>
+QUANT_PIVOT__NOTIFICATION__TELEGRAM__CHAT_ID=<telegram-chat-id>
 
 # ─── Grafana ───
 GRAFANA_PASSWORD=<grafana-admin-password>
@@ -811,10 +811,10 @@ GRAFANA_PASSWORD=<grafana-admin-password>
 NEW_KEY=$(openssl rand -base64 32)
 
 # 2. 更新 .env.production
-sed -i "s/^OXIDE_ARB__KEYS__API_KEY=.*/OXIDE_ARB__KEYS__API_KEY=$NEW_KEY/" .env.production
+sed -i "s/^QUANT_PIVOT__KEYS__API_KEY=.*/QUANT_PIVOT__KEYS__API_KEY=$NEW_KEY/" .env.production
 
 # 3. 重启服务（graceful）
-docker compose -f docker-compose.prod.yml restart oxide-arb
+docker compose -f docker-compose.prod.yml restart quant-pivot
 
 # 4. 更新 UI 配置中的 API key
 echo "New API key: $NEW_KEY"
@@ -830,11 +830,11 @@ echo "New API key: $NEW_KEY"
 set -euo pipefail
 
 # ─── Configuration ──────────────────────────────────────
-DEPLOY_DIR="/opt/oxide-arb"
-REPO_URL="git@github.com:<user>/oxide-arb.git"
+DEPLOY_DIR="/opt/quant-pivot"
+REPO_URL="git@github.com:<user>/quant-pivot.git"
 BRANCH="${1:-main}"
 
-echo "=== oxide-arb deployment ==="
+echo "=== quant-pivot deployment ==="
 echo "Branch: $BRANCH"
 echo "Deploy dir: $DEPLOY_DIR"
 
@@ -874,8 +874,8 @@ echo "Building Docker images..."
 docker compose -f docker-compose.prod.yml build
 
 echo "Running database migrations..."
-docker compose -f docker-compose.prod.yml run --rm oxide-arb \
-  /app/oxide-arb migrate --config-dir /app/config
+docker compose -f docker-compose.prod.yml run --rm quant-pivot \
+  /app/quant-pivot migrate --config-dir /app/config
 
 echo "Starting services..."
 docker compose -f docker-compose.prod.yml up -d
@@ -884,12 +884,12 @@ docker compose -f docker-compose.prod.yml up -d
 echo "Waiting for health check..."
 for i in $(seq 1 30); do
   if curl -sf http://localhost:8080/health > /dev/null 2>&1; then
-    echo "✓ oxide-arb is healthy"
+    echo "✓ quant-pivot is healthy"
     break
   fi
   if [ "$i" -eq 30 ]; then
     echo "ERROR: Health check failed after 30 seconds"
-    docker compose -f docker-compose.prod.yml logs --tail 50 oxide-arb
+    docker compose -f docker-compose.prod.yml logs --tail 50 quant-pivot
     exit 1
   fi
   sleep 1
@@ -906,10 +906,10 @@ docker compose -f docker-compose.prod.yml ps
 ### 10.1 systemd Service（备选方案，如不用 Docker）
 
 ```ini
-# /etc/systemd/system/oxide-arb.service
+# /etc/systemd/system/quant-pivot.service
 
 [Unit]
-Description=oxide-arb prediction market arbitrage
+Description=quant-pivot prediction market arbitrage
 After=network-online.target postgresql.service clickhouse-server.service redis.service
 Wants=network-online.target
 
@@ -917,9 +917,9 @@ Wants=network-online.target
 Type=simple
 User=oxide
 Group=oxide
-WorkingDirectory=/opt/oxide-arb
-EnvironmentFile=/opt/oxide-arb/.env.production
-ExecStart=/opt/oxide-arb/oxide-arb serve --config-dir /opt/oxide-arb/config
+WorkingDirectory=/opt/quant-pivot
+EnvironmentFile=/opt/quant-pivot/.env.production
+ExecStart=/opt/quant-pivot/quant-pivot serve --config-dir /opt/quant-pivot/config
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=always
 RestartSec=5
@@ -930,7 +930,7 @@ StartLimitIntervalSec=60
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
-ReadWritePaths=/opt/oxide-arb/data /opt/oxide-arb/logs
+ReadWritePaths=/opt/quant-pivot/data /opt/quant-pivot/logs
 
 # Resource limits
 LimitNOFILE=65535
@@ -966,7 +966,7 @@ TELEGRAM_CHAT_ID="${TELEGRAM_CHAT_ID}"
 
 if ! curl -sf "$HEALTH_URL" > /dev/null 2>&1; then
   TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
-  MSG="⚠️ oxide-arb health check failed at $TIMESTAMP. Attempting restart..."
+  MSG="⚠️ quant-pivot health check failed at $TIMESTAMP. Attempting restart..."
 
   # Send Telegram alert
   curl -sf "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
@@ -974,19 +974,19 @@ if ! curl -sf "$HEALTH_URL" > /dev/null 2>&1; then
     -d "text=${MSG}" > /dev/null 2>&1
 
   # Restart
-  cd /opt/oxide-arb
-  docker compose -f docker-compose.prod.yml restart oxide-arb
+  cd /opt/quant-pivot
+  docker compose -f docker-compose.prod.yml restart quant-pivot
 
   # Wait and re-check
   sleep 15
   if curl -sf "$HEALTH_URL" > /dev/null 2>&1; then
     curl -sf "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
       -d "chat_id=${TELEGRAM_CHAT_ID}" \
-      -d "text=✅ oxide-arb recovered after restart" > /dev/null 2>&1
+      -d "text=✅ quant-pivot recovered after restart" > /dev/null 2>&1
   else
     curl -sf "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
       -d "chat_id=${TELEGRAM_CHAT_ID}" \
-      -d "text=🔴 oxide-arb STILL DOWN after restart. Manual intervention required." > /dev/null 2>&1
+      -d "text=🔴 quant-pivot STILL DOWN after restart. Manual intervention required." > /dev/null 2>&1
   fi
 fi
 ```
@@ -994,7 +994,7 @@ fi
 Cron 调度：
 
 ```cron
-* * * * * /opt/oxide-arb/scripts/watchdog.sh >> /var/log/oxide-arb-watchdog.log 2>&1
+* * * * * /opt/quant-pivot/scripts/watchdog.sh >> /var/log/quant-pivot-watchdog.log 2>&1
 ```
 
 ---

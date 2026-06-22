@@ -22,7 +22,7 @@ use actix_web::{
     http::header::{self, HeaderValue},
     web::ServiceConfig,
 };
-use oxide_arb_models::config::WebConfig;
+use quant_pivot_models::config::WebConfig;
 
 /// Register the static SPA service if enabled and present.
 pub fn configure_static(cfg: &mut ServiceConfig, config: &WebConfig) {

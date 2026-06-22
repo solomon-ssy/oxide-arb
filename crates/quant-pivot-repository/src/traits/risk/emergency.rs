@@ -1,5 +1,5 @@
-use oxide_arb_error::storage::StorageError;
-use oxide_arb_models::domain::NewEmergencySnapshot;
+use quant_pivot_error::storage::StorageError;
+use quant_pivot_models::domain::NewEmergencySnapshot;
 
 #[async_trait::async_trait]
 pub trait EmergencyRepository: Send + Sync {

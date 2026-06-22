@@ -1,7 +1,7 @@
 use crate::pipeline::universe_filter::MarketUniverseFilter;
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
-use oxide_arb_models::{
+use quant_pivot_models::{
     domain::market::{EventRegistryInfo, MarketRegistryInfo},
     enums::market::MarketStatus,
     types::{EventId, MarketId, TokenId},
@@ -238,7 +238,7 @@ impl Default for MarketRegistry {
 mod tests {
     use super::*;
     use chrono::Utc;
-    use oxide_arb_models::{
+    use quant_pivot_models::{
         domain::market::TokenInfo,
         enums::common::{CategorySet, MarketCategory, TickSize},
         types::Usd,

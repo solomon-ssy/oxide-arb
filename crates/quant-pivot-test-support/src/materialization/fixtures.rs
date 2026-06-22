@@ -5,8 +5,8 @@ use std::{collections::HashSet, sync::Arc};
 use crate::{mocks::EXECUTION_QUALITY_HOURLY_SCHEDULE_ID, seeded_uuid};
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, TimeZone, Utc};
-use oxide_arb_error::storage::StorageError;
-use oxide_arb_models::{
+use quant_pivot_error::storage::StorageError;
+use quant_pivot_models::{
     domain::{
         MarketInfo, MarketPageQuery, MarketPitSnapshotInfo, NewRuntimeConfigActivation,
         NewRuntimeConfigVersion, Paginated, RuntimeConfigActivationInfo, RuntimeConfigVersionInfo,
@@ -32,7 +32,7 @@ use oxide_arb_models::{
         TokenId,
     },
 };
-use oxide_arb_repository::traits::{MarketRepository, RuntimeConfigVersionRepository};
+use quant_pivot_repository::traits::{MarketRepository, RuntimeConfigVersionRepository};
 
 #[derive(Clone, Default)]
 pub struct FakeMarketRepository {

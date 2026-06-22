@@ -8,7 +8,7 @@
 
 ## 0. 决策摘要
 
-`oxide-arb` 必须从事件驱动的 Endgame arbitrage bot 重构为 Polymarket-only 的量化系统 `quant-pivot`。新系统的核心产物是周期性 TopN 量化建议报告；在受治理的运行模式下，系统可以停留在报告层，也可以等待人工确认后执行，或在严格风控下自动执行。
+`quant-pivot` 必须从事件驱动的 Endgame arbitrage bot 重构为 Polymarket-only 的量化系统 `quant-pivot`。新系统的核心产物是周期性 TopN 量化建议报告；在受治理的运行模式下，系统可以停留在报告层，也可以等待人工确认后执行，或在严格风控下自动执行。
 
 旧产品闭环是：
 
@@ -78,7 +78,7 @@ Polymarket facts -> features -> factors/models -> portfolio plan
 
 以下基础能力可以保留，但必须改名、改语义、改边界：
 
-- `oxide-arb-models` 中的 typed IDs 和 Decimal money newtypes。
+- `quant-pivot-models` 中的 typed IDs 和 Decimal money newtypes。
 - declarative schema catalog 与 migration graph。
 - DTO 三层契约：request/query、persistence DTO、view/response。
 - Postgres、Redis、ClickHouse storage 基础设施。

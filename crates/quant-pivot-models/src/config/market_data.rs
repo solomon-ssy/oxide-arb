@@ -36,8 +36,8 @@ pub struct WebSocketConfig {
     /// Maximum active engine tokens subscribed across all WS connections.
     /// Default: `2000`.
     pub engine_max_subscription_tokens: usize,
-    /// Endgame look-ahead window for the engine WS hotset. Default: `72`.
-    pub engine_endgame_window_hours: u64,
+    /// Look-ahead window (hours) for engine WS subscription hotset. Default: `72`.
+    pub engine_subscription_window_hours: u64,
 }
 
 impl Default for WebSocketConfig {
@@ -47,7 +47,7 @@ impl Default for WebSocketConfig {
             max_reconnect_delay_ms: default_ws_max_reconnect(),
             max_subscriptions_per_connection: default_ws_max_subscriptions(),
             engine_max_subscription_tokens: default_engine_max_subscription_tokens(),
-            engine_endgame_window_hours: default_engine_endgame_window_hours(),
+            engine_subscription_window_hours: default_engine_subscription_window_hours(),
         }
     }
 }
@@ -64,7 +64,7 @@ const fn default_ws_max_subscriptions() -> usize {
 const fn default_engine_max_subscription_tokens() -> usize {
     2_000
 }
-const fn default_engine_endgame_window_hours() -> u64 {
+const fn default_engine_subscription_window_hours() -> u64 {
     72
 }
 

@@ -2,7 +2,7 @@
 
 use thiserror::Error;
 
-/// Errors originating from the `oxide-arb-algorithm` crate.
+/// Errors originating from the `quant-pivot-algorithm` crate.
 #[derive(Debug, Error)]
 pub enum AlgoError {
     /// Calibration lookup or aggregation failed.

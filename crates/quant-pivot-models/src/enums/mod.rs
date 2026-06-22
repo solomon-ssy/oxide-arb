@@ -32,7 +32,7 @@ macro_rules! active_string_enum {
             serde::Deserialize,
             sea_orm::EnumIter,
             sea_orm::DeriveActiveEnum,
-            oxide_arb_macros::IntoActiveValue,
+            quant_pivot_macros::IntoActiveValue,
         )]
         #[sea_orm(rs_type = "String", db_type = "Text")]
         pub enum $name {
@@ -71,14 +71,18 @@ pub mod evidence;
 pub mod execution;
 pub mod fact;
 pub mod fee;
+pub mod legacy;
 pub mod lifecycle;
 pub mod market;
 pub mod operation_log;
 pub mod opportunity;
 pub mod order;
 pub mod pipeline;
+pub mod quant;
 pub mod rbac;
 pub mod report;
 pub mod risk;
 pub mod runtime_config;
 pub mod system;
+
+pub use legacy::LegacyExecutionMode;

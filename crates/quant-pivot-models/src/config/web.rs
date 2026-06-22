@@ -1,7 +1,7 @@
 //! Web server + JWT configuration (`[web]` / `[web.jwt]`).
 //!
 //! Mounted at [`DeployConfig::web`](crate::config::DeployConfig). The JWT
-//! secret must be provided via environment (`OXIDE_ARB__WEB__JWT__SECRET`) in
+//! secret must be provided via environment (`QUANT_PIVOT__WEB__JWT__SECRET`) in
 //! production; an empty or placeholder secret is fatal in `Live` mode (see
 //! `config::validation`).
 
@@ -56,9 +56,9 @@ impl WebConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct JwtConfig {
-    /// HMAC signing secret. Env-only in production: `OXIDE_ARB__WEB__JWT__SECRET`.
+    /// HMAC signing secret. Env-only in production: `QUANT_PIVOT__WEB__JWT__SECRET`.
     pub secret: String,
-    /// Token issuer claim (default `oxide-arb`).
+    /// Token issuer claim (default `quant-pivot`).
     pub issuer: String,
     /// Access-token lifetime in seconds (default 900 = 15m).
     pub access_ttl_secs: i64,
@@ -90,7 +90,7 @@ fn default_static_ui_dir() -> String {
 }
 
 fn default_issuer() -> String {
-    "oxide-arb".to_owned()
+    "quant-pivot".to_owned()
 }
 
 const fn default_access_ttl() -> i64 {
@@ -111,7 +111,7 @@ mod tests {
         assert_eq!(cfg.listen_host, "0.0.0.0");
         assert_eq!(cfg.listen_port, 8080);
         assert!(!cfg.serve_static_ui);
-        assert_eq!(cfg.jwt.issuer, "oxide-arb");
+        assert_eq!(cfg.jwt.issuer, "quant-pivot");
         assert_eq!(cfg.jwt.access_ttl_secs, 900);
         assert_eq!(cfg.jwt.refresh_ttl_secs, 604_800);
     }

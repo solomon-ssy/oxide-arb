@@ -15,7 +15,7 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-pub use oxide_arb_error::fee::FeeQuoteError;
+pub use quant_pivot_error::fee::FeeQuoteError;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MarketFeeSchedule {

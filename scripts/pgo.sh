@@ -10,13 +10,13 @@ mkdir -p "$PGO_DIR"
 
 echo "== PGO instrument (release-with-debug) =="
 RUSTFLAGS="-Cprofile-generate=$PGO_DIR" \
-  cargo build --profile release-with-debug -p oxide-arb-bin
+  cargo build --profile release-with-debug -p quant-pivot-bin
 
 echo "== Train: hot_paths benchmarks =="
-cargo bench -p oxide-arb-bench --bench hot_paths
+cargo bench -p quant-pivot-bench --bench hot_paths
 
 echo "== Train: integration tests =="
-cargo test -p oxide-arb-core \
+cargo test -p quant-pivot-core \
   --test hot_path_integration \
   --test execution_pipeline_live \
   --test post_trade_relay
@@ -26,6 +26,6 @@ llvm-profdata merge -o "$PGO_DIR/merged.profdata" "$PGO_DIR"/*.profraw
 
 echo "== PGO use (release) =="
 RUSTFLAGS="-Cprofile-use=$PGO_DIR/merged.profdata" \
-  cargo build --profile release -p oxide-arb-bin
+  cargo build --profile release -p quant-pivot-bin
 
 echo "Done. Compare release binary latency against non-PGO baseline."

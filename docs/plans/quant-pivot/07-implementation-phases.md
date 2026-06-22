@@ -24,16 +24,21 @@
 - 标记旧 phase docs 为 superseded。
 - 删除或归档缺失 ADR 引用。
 - 更新 `AGENTS.md` 和 `.cursor/rules/*` 的 Endgame 规则。
-- 删除 `oxide-arb-algorithm` crate。
+- 删除 `quant-pivot-algorithm` crate。
 - 删除 old `ExecutionMode` 设计引用。
 - 删除 old runtime-config sections 的 active docs。
 - 新建 quant-pivot docs 为唯一活跃计划。
 - 添加 CI gate：禁止 old Endgame symbols 回流。
+- **瘦身 `MetricsHub`**：删除 detection / execution / risk / settlement / control-factor 等 Endgame 指标；仅保留 ingest / catalog / hotset / shutdown（hotset **指标名** Phase 2 再 rename）。
+- **删除 `quant-pivot-test-support` 旧 materialization fixtures**（本 Phase 收尾项）。
+- **磁盘 `crates/oxide-arb-*`** 移入 `archive/` 或删除（非 workspace member）。
 
 ### 删除验收
 
 - active src 不再引用 `EndgameDetector`、`OpportunityPipeline`、`ScoredOpportunity`。
-- active config 不再暴露 `detection.endgame`。
+- active config hot path 不再读 `detection.endgame`（deploy `engine_subscription_window_hours` 替代）。
+- `MetricsHub` 不再注册 Endgame detection/execution/risk/settlement/control-factor 系列。
+- 首次 Gamma sync 成功后 `catalog_ready` = 1 且 `CatalogReadiness` 为 `Ready`。
 - docs 明确旧 phase 仅用于考古。
 - 无 compatibility re-export。
 
@@ -54,9 +59,19 @@
 - 新增 `quant_order_intent`、`quant_execution_order`。
 - 新增 `quant_recommendation_attribution`。
 - 新增 ClickHouse quant facts。
-- 删除 old trading/risk/calibration tables from active schema graph。
+- **删除 Postgres 旧表**（schema graph + migration + entity/idens/repository 全链路）：
+  `trade`, `position`, `calibration`, `calibration_outcome`, `resolution_event`,
+  `reconciliation_report`, `potential_loss_ledger`, `risk_state`, `risk_audit_event`,
+  `risk_fill_applied`, `emergency_snapshot`, `blacklist_entry`, `balance_snapshot`,
+  `accounting_period`, `report`, `market_pit_snapshot`。
+- **重建 control plane 表**：`control_factor_*` → `quant_factor_*` / `quant_model_*`（含
+  `control_factor_audit_event` 若 runtime-config 审计仍需要则保留或迁移表名）。
 - runtime-config v3 root。
 - deploy config 删除 old execution/settlement hot path。
+- **`quant-pivot-error`**：删除 `AlgoError` / `TradingError` / `ReservationError` / `RedeemError`
+  等 Endgame error arms（随表与路由删除一并完成）。
+- **`quant-pivot-repository`**：删除 trading/risk/calibration/control_factor 旧 repo impl 与
+  `pg_repository` 中对应集成测试。
 
 ### 验收
 
@@ -76,12 +91,13 @@
 
 - 保留 Gamma catalog sync。
 - 保留 CLOB WS book ingest。
-- 重命名 endgame hotset policy 为 quant universe ingest policy。
+- **重命名** endgame hotset policy → quant universe ingest policy（含
+  `hotset_*` Prometheus 系列 → `universe_ingest_*`，`WsSubscriptionCoordinator` 与 deploy 字段命名）。
+- **删除** backpressure 中 coalescer site-2 / execution-shard 路径（Phase 0 已删 execution-shard metric）。
 - 保留 BookStore published snapshot。
-- 删除 coalescer/scanner/funnel execution trigger。
-- 新增 fact writers。
+- 新增 fact writers（wire `ChWriteManager` + `book_fact_writer`）。
 - 新增 fact lag metrics。
-- 新增 data quality report。
+- 新增 data quality report（含 `book_level_rejected` / ingest validation metrics，若需要）。
 
 ### 验收
 
@@ -323,7 +339,7 @@
 
 ### 必删代码入口
 
-- `crates/oxide-arb-algorithm`
+- `crates/quant-pivot-algorithm`
 - `core/detection`
 - `core/execution` old path
 - `core/post_trade`

@@ -2,18 +2,21 @@
 //! recovery notifications when subsystems return to healthy.
 
 use crate::{
-    control::status::SystemStatusNudge,
     observability::alert_dispatcher::{Alert, AlertDispatcher},
+    service::system_status_nudge::SystemStatusNudge,
 };
 use chrono::Utc;
-use oxide_arb_models::{
+use parking_lot::Mutex;
+use quant_pivot_models::{
     domain::{
         HealthReport, OperationalPhase, SubsystemCheckStatus, SubsystemHealth,
         WS_MARKET_DATA_STALE_THRESHOLD_MS,
     },
-    enums::common::{AlertCategory, AlertLevel, AlertSource, ExecutionMode},
+    enums::{
+        common::{AlertCategory, AlertLevel, AlertSource},
+        quant::QuantRuntimeMode,
+    },
 };
-use parking_lot::Mutex;
 use std::collections::HashMap;
 
 /// Prior probe outcome per subsystem name.
@@ -46,7 +49,7 @@ impl HealthAlertState {
         &self,
         report: &HealthReport,
         phase: &OperationalPhase,
-        execution_mode: ExecutionMode,
+        quant_runtime_mode: QuantRuntimeMode,
         alerts: &AlertDispatcher,
         nudge: &SystemStatusNudge,
     ) {
@@ -73,7 +76,7 @@ impl HealthAlertState {
         for (previous, current, check) in transitions {
             match (previous, current) {
                 (Some(ProbeOutcome::Healthy) | None, ProbeOutcome::Unhealthy) => {
-                    dispatch_unhealthy_alert(&check, phase, execution_mode, alerts).await;
+                    dispatch_unhealthy_alert(&check, phase, quant_runtime_mode, alerts).await;
                 }
                 (Some(ProbeOutcome::Unhealthy), ProbeOutcome::Healthy) => {
                     dispatch_recovery_alert(&check.name, alerts).await;
@@ -92,12 +95,12 @@ impl HealthAlertState {
 async fn dispatch_unhealthy_alert(
     check: &SubsystemHealth,
     phase: &OperationalPhase,
-    execution_mode: ExecutionMode,
+    quant_runtime_mode: QuantRuntimeMode,
     alerts: &AlertDispatcher,
 ) {
     let detail = check.detail.as_deref().unwrap_or("subsystem unhealthy");
     let affects_trading = check.name == "websocket"
-        && execution_mode == ExecutionMode::Live
+        && quant_runtime_mode == QuantRuntimeMode::AutoExecution
         && matches!(
             phase,
             OperationalPhase::Operational | OperationalPhase::Degraded { .. }
@@ -170,15 +173,16 @@ pub fn evaluate_ws_probe(
 mod tests {
     use super::{HealthAlertState, ProbeOutcome, evaluate_ws_probe, ws_probe_skipped};
     use crate::{
-        control::status::SystemStatusNudge, observability::alert_dispatcher::AlertDispatcher,
+        observability::alert_dispatcher::AlertDispatcher,
+        service::system_status_nudge::SystemStatusNudge,
     };
     use chrono::Utc;
-    use oxide_arb_models::{
+    use quant_pivot_models::{
         domain::{
             HealthReport, OperationalPhase, SubsystemCheckStatus, SubsystemHealth,
             WS_MARKET_DATA_STALE_THRESHOLD_MS,
         },
-        enums::common::ExecutionMode,
+        enums::quant::QuantRuntimeMode,
     };
     use std::sync::Arc;
 
@@ -231,7 +235,7 @@ mod tests {
             .on_report(
                 &report,
                 &OperationalPhase::Operational,
-                ExecutionMode::DryRun,
+                QuantRuntimeMode::ReportOnly,
                 &alerts,
                 &nudge,
             )

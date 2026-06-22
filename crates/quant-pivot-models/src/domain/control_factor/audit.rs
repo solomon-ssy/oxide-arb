@@ -13,7 +13,7 @@ use crate::{
     hashing::CanonicalDigest,
 };
 use chrono::{DateTime, Utc};
-use oxide_arb_error::control::{AuditChainError, CanonicalDigestError};
+use quant_pivot_error::control::{AuditChainError, CanonicalDigestError};
 use serde::Serialize;
 
 /// Canonical, hashable content of one audit event.
@@ -117,7 +117,7 @@ mod tests {
         types::AuditEventId,
     };
     use chrono::{TimeZone, Utc};
-    use oxide_arb_error::control::AuditChainError;
+    use quant_pivot_error::control::AuditChainError;
 
     fn sealed_event(sequence: i64, prev_event_hash: Option<String>) -> ControlFactorAuditEventInfo {
         let created_at = Utc

@@ -9,7 +9,7 @@ use super::{
     task_id::TaskId,
 };
 use crate::observability::metrics_hub::MetricsHub;
-use oxide_arb_models::enums::common::ExecutionMode;
+use quant_pivot_models::enums::quant::QuantRuntimeMode;
 use std::{
     mem::take,
     sync::{
@@ -137,11 +137,10 @@ impl ShutdownBudget {
 
     /// Per-stage drain budget derived from the runtime execution mode.
     #[must_use]
-    pub const fn for_mode(mode: ExecutionMode) -> Self {
+    pub const fn for_quant_mode(mode: QuantRuntimeMode) -> Self {
         match mode {
-            ExecutionMode::DryRun => Self::dry_run(),
-            ExecutionMode::Paper => Self::paper(),
-            ExecutionMode::Live => Self::live(),
+            QuantRuntimeMode::ReportOnly => Self::dry_run(),
+            QuantRuntimeMode::SemiAuto | QuantRuntimeMode::AutoExecution => Self::live(),
         }
     }
 
@@ -487,16 +486,15 @@ pub struct AppRunner {
 impl AppRunner {
     #[must_use]
     pub fn new(shutdown: CancellationToken) -> Self {
-        Self::for_mode(shutdown, ExecutionMode::DryRun)
+        Self::for_quant_mode(shutdown, QuantRuntimeMode::ReportOnly)
     }
 
-    /// Build a runner whose staged drain budgets match the active execution mode.
     #[must_use]
-    pub fn for_mode(shutdown: CancellationToken, mode: ExecutionMode) -> Self {
+    pub fn for_quant_mode(shutdown: CancellationToken, mode: QuantRuntimeMode) -> Self {
         Self {
             shutdown: shutdown.clone(),
             registry: TaskRegistry::new(shutdown),
-            budget: ShutdownBudget::for_mode(mode),
+            budget: ShutdownBudget::for_quant_mode(mode),
             pending_tasks: PendingTaskQueue::default(),
         }
     }
@@ -558,7 +556,7 @@ impl AppRunner {
         self.registry.len()
     }
 
-    pub async fn run(mut self) -> Result<(), oxide_arb_error::OxideError> {
+    pub async fn run(mut self) -> Result<(), quant_pivot_error::QuantError> {
         self.absorb_pending_tasks();
 
         let root = self.shutdown.clone();
@@ -567,7 +565,7 @@ impl AppRunner {
         info!(
             tasks = self.registry.len(),
             total_budget_secs = self.budget.total().as_secs(),
-            "oxide-arb is running — press Ctrl+C to stop",
+            "quant-pivot is running — press Ctrl+C to stop",
         );
 
         root.cancelled().await;
@@ -642,11 +640,14 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_budget_scales_with_execution_mode() {
-        let dry = ShutdownBudget::for_mode(ExecutionMode::DryRun);
-        let live = ShutdownBudget::for_mode(ExecutionMode::Live);
-        assert_eq!(dry.stage(ShutdownStage::Execution), Duration::from_secs(8));
+        let report_only = ShutdownBudget::for_quant_mode(QuantRuntimeMode::ReportOnly);
+        let auto = ShutdownBudget::for_quant_mode(QuantRuntimeMode::AutoExecution);
         assert_eq!(
-            live.stage(ShutdownStage::Execution),
+            report_only.stage(ShutdownStage::Execution),
+            Duration::from_secs(8)
+        );
+        assert_eq!(
+            auto.stage(ShutdownStage::Execution),
             Duration::from_secs(20)
         );
     }

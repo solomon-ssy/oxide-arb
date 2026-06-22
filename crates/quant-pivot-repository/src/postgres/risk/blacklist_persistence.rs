@@ -1,6 +1,6 @@
 use crate::traits::BlacklistPersistenceRepository;
-use oxide_arb_error::storage::StorageError;
-use oxide_arb_models::{
+use quant_pivot_error::storage::StorageError;
+use quant_pivot_models::{
     domain::{BlacklistInfo, UpsertBlacklistEntry},
     entities::blacklist_entry::{Column, Entity},
     types::MarketId,

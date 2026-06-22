@@ -22,38 +22,38 @@
 
 ### 1.1 目标 crate 列表
 
-建议重命名为 `quant-pivot-*`，但若项目名暂时保留 `oxide-arb`，模块和公开语义仍必须改成 quant-pivot。
+建议重命名为 `quant-pivot-*`，但若项目名暂时保留 `quant-pivot`，模块和公开语义仍必须改成 quant-pivot。
 
 | 目标 crate | 来源 | 命运 |
 |---|---|---|
-| `quant-pivot-models` | `oxide-arb-models` | 大幅重建，保留 typed IDs、money、schema、RBAC 基础 |
-| `quant-pivot-error` | `oxide-arb-error` | 保留错误树模式，删除 trading/endgame error |
-| `quant-pivot-api` | `oxide-arb-api` | 保留 Polymarket data/order 客户端，删除 endgame oracle/redeem-first 语义 |
-| `quant-pivot-storage` | `oxide-arb-storage` | 保留 |
-| `quant-pivot-repository` | `oxide-arb-repository` | 删除 trading repos，新增 quant repos |
-| `quant-pivot-research` | `oxide-arb-control` + 新逻辑 | 负责 feature/factor/model/materialization |
-| `quant-pivot-core` | `oxide-arb-core` | 重建 app orchestration，删除旧 hot execution path |
-| `quant-pivot-risk` | `oxide-arb-risk` | 可选；建议重建为 portfolio/execution admission crate |
-| `quant-pivot-web` | `oxide-arb-web` | 保留 web foundation，删除 trading routes |
-| `quant-pivot-bin` | `oxide-arb-bin` | 重命名入口 |
-| `quant-pivot-bench` | `oxide-arb-bench` | 全部替换 benchmark |
-| `quant-pivot-test-support` | `oxide-arb-test-support` | 删除旧 fixtures，新增 quant fixtures |
-| `quant-pivot-macros` | `oxide-arb-macros` | 保留 |
-| `quant-pivot-xtask` | `oxide-arb-xtask` | 保留并改命令语义 |
+| `quant-pivot-models` | `quant-pivot-models` | 大幅重建，保留 typed IDs、money、schema、RBAC 基础 |
+| `quant-pivot-error` | `quant-pivot-error` | 保留错误树模式，删除 trading/endgame error |
+| `quant-pivot-api` | `quant-pivot-api` | 保留 Polymarket data/order 客户端，删除 endgame oracle/redeem-first 语义 |
+| `quant-pivot-storage` | `quant-pivot-storage` | 保留 |
+| `quant-pivot-repository` | `quant-pivot-repository` | 删除 trading repos，新增 quant repos |
+| `quant-pivot-research` | `quant-pivot-control` + 新逻辑 | 负责 feature/factor/model/materialization |
+| `quant-pivot-core` | `quant-pivot-core` | 重建 app orchestration，删除旧 hot execution path |
+| `quant-pivot-risk` | `quant-pivot-risk` | 可选；建议重建为 portfolio/execution admission crate |
+| `quant-pivot-web` | `quant-pivot-web` | 保留 web foundation，删除 trading routes |
+| `quant-pivot-bin` | `quant-pivot-bin` | 重命名入口 |
+| `quant-pivot-bench` | `quant-pivot-bench` | 全部替换 benchmark |
+| `quant-pivot-test-support` | `quant-pivot-test-support` | 删除旧 fixtures，新增 quant fixtures |
+| `quant-pivot-macros` | `quant-pivot-macros` | 保留 |
+| `quant-pivot-xtask` | `quant-pivot-xtask` | 保留并改命令语义 |
 
 ### 1.2 必删 crate
 
 | crate | 决策 | 原因 |
 |---|---|---|
-| `oxide-arb-algorithm` | 删除，不迁移 | 整个 crate 以 Endgame detector/scorer/calibration 为核心 |
-| `oxide-arb-risk` | 删除后重建 | 当前 risk 是 pre-trade arb gate，不是 portfolio recommendation risk |
-| `oxide-arb-bench` | 删除后重建 | benchmark 全部绑定 endgame hot path |
+| `quant-pivot-algorithm` | 删除，不迁移 | 整个 crate 以 Endgame detector/scorer/calibration 为核心 |
+| `quant-pivot-risk` | 删除后重建 | 当前 risk 是 pre-trade arb gate，不是 portfolio recommendation risk |
+| `quant-pivot-bench` | 删除后重建 | benchmark 全部绑定 endgame hot path |
 
-`oxide-arb-api` 不删除，因为平台仍为 Polymarket-only；但必须删除其“交易系统主路径”假设，保留为 Polymarket data/order SDK wrapper。
+`quant-pivot-api` 不删除，因为平台仍为 Polymarket-only；但必须删除其“交易系统主路径”假设，保留为 Polymarket data/order SDK wrapper。
 
-## 2. `oxide-arb-algorithm` 删除清单
+## 2. `quant-pivot-algorithm` 删除清单
 
-路径：`crates/oxide-arb-algorithm/`
+路径：`crates/quant-pivot-algorithm/`
 
 ### 2.1 整体删除
 
@@ -94,9 +94,9 @@
 - `InMemoryEmissionCooldown`
 - `DetectionRejectReason`
 
-## 3. `oxide-arb-core` 重构清单
+## 3. `quant-pivot-core` 重构清单
 
-路径：`crates/oxide-arb-core/src/`
+路径：`crates/quant-pivot-core/src/`
 
 ### 3.1 删除目录
 
@@ -166,9 +166,9 @@
 - attribution worker。
 - model/factor publication refresher。
 
-## 4. `oxide-arb-risk` 删除与重建
+## 4. `quant-pivot-risk` 删除与重建
 
-路径：`crates/oxide-arb-risk/`
+路径：`crates/quant-pivot-risk/`
 
 ### 4.1 删除
 
@@ -214,13 +214,13 @@ quant-pivot-risk/src/
 
 旧 `QuarterKelly` 不能作为默认 sizing。quant-pivot 可以有 Kelly factor，但 sizing 必须先由 portfolio planner 结合置信度、流动性、相关性、最大损失、报告 horizon 统一裁剪。
 
-## 5. `oxide-arb-control` 合并/改名
+## 5. `quant-pivot-control` 合并/改名
 
-路径：`crates/oxide-arb-control/`
+路径：`crates/quant-pivot-control/`
 
 ### 5.1 改名目标
 
-`oxide-arb-control` 改为 `quant-pivot-research` 或 `quant-pivot-lab`。它不再是 live hot-path control-factor plane，而是研究、训练、回测、模型治理平面。
+`quant-pivot-control` 改为 `quant-pivot-research` 或 `quant-pivot-lab`。它不再是 live hot-path control-factor plane，而是研究、训练、回测、模型治理平面。
 
 ### 5.2 删除模块
 
@@ -245,9 +245,9 @@ quant-pivot-risk/src/
 | `evidence/book.rs` | book feature evidence |
 | `evidence/training.rs` | training dataset builder |
 
-## 6. `oxide-arb-models` 删除/重建
+## 6. `quant-pivot-models` 删除/重建
 
-路径：`crates/oxide-arb-models/src/`
+路径：`crates/quant-pivot-models/src/`
 
 ### 6.1 删除 domain
 
@@ -330,9 +330,9 @@ quant-pivot-risk/src/
 - `runtime_config/execution.rs` 新语义
 - `runtime_config/notification.rs` 保留扩展
 
-## 7. `oxide-arb-api` 改造
+## 7. `quant-pivot-api` 改造
 
-路径：`crates/oxide-arb-api/src/`
+路径：`crates/quant-pivot-api/src/`
 
 ### 7.1 保留
 
@@ -359,7 +359,7 @@ quant-pivot-risk/src/
 
 禁止让 research/model/report 代码直接依赖 SDK raw types。
 
-## 8. `oxide-arb-web` 路由删除/新增
+## 8. `quant-pivot-web` 路由删除/新增
 
 ### 8.1 删除 routes
 
@@ -396,7 +396,7 @@ quant-pivot-risk/src/
 - `quant_attribution.rs`
 - `quant_research_runs.rs`
 
-## 9. `oxide-arb-repository` 删除/新增
+## 9. `quant-pivot-repository` 删除/新增
 
 删除 traits/postgres：
 
@@ -429,7 +429,7 @@ ClickHouse：
 - 删除 `opportunity_*` repo 方法。
 - 新增 quant facts insert/query。
 
-## 10. `oxide-arb-bin` 与 xtask
+## 10. `quant-pivot-bin` 与 xtask
 
 ### 10.1 bin
 
@@ -535,9 +535,9 @@ ClickHouse：
 必须重写：
 
 - `AGENTS.md`
-- `.cursor/rules/oxide-arb-domain.mdc`
-- `.cursor/rules/oxide-arb-rust-style.mdc` 中项目命名部分
-- `.cursor/rules/oxide-arb-clickhouse-rust.mdc`
+- `.cursor/rules/quant-pivot-domain.mdc`
+- `.cursor/rules/quant-pivot-rust-style.mdc` 中项目命名部分
+- `.cursor/rules/quant-pivot-clickhouse-rust.mdc`
 - `docs/persistence/schema-catalog.md` 的表目录
 - `docs/models/dto-paradigm.md` 中示例资源名
 
@@ -545,15 +545,15 @@ ClickHouse：
 
 删除或重写：
 
-- `crates/oxide-arb-algorithm/tests/*`
-- `crates/oxide-arb-core/tests/*execution*`
-- `crates/oxide-arb-core/tests/*funnel*`
-- `crates/oxide-arb-core/tests/*scanner*`
-- `crates/oxide-arb-core/tests/*settlement*`
-- `crates/oxide-arb-risk/tests/*`
-- `crates/oxide-arb-control/tests/*materialization*` 中 Endgame evidence cases
-- `crates/oxide-arb-bench/benches/hot_paths.rs`
-- `crates/oxide-arb-bench/benches/e2e_paths.rs`
+- `crates/quant-pivot-algorithm/tests/*`
+- `crates/quant-pivot-core/tests/*execution*`
+- `crates/quant-pivot-core/tests/*funnel*`
+- `crates/quant-pivot-core/tests/*scanner*`
+- `crates/quant-pivot-core/tests/*settlement*`
+- `crates/quant-pivot-risk/tests/*`
+- `crates/quant-pivot-control/tests/*materialization*` 中 Endgame evidence cases
+- `crates/quant-pivot-bench/benches/hot_paths.rs`
+- `crates/quant-pivot-bench/benches/e2e_paths.rs`
 
 新增：
 

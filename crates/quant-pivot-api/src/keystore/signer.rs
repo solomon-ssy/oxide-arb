@@ -4,7 +4,7 @@ use alloy::{
     primitives::Address,
     signers::{Signer, local::PrivateKeySigner},
 };
-use oxide_arb_error::signing::SigningError;
+use quant_pivot_error::signing::SigningError;
 
 /// Order signer backed by an alloy `PrivateKeySigner` (secp256k1).
 ///

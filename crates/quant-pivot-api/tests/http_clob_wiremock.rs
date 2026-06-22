@@ -1,8 +1,8 @@
 //! CLOB-shaped HTTP 429 retry: wiremock HTTP → domain error → retry policy.
 
-use oxide_arb_api::infra::retry::{RetryPolicy, retry_with_policy};
-use oxide_arb_error::api::ApiError;
-use oxide_arb_models::enums::common::OrderType;
+use quant_pivot_api::infra::retry::{RetryPolicy, retry_with_policy};
+use quant_pivot_error::api::ApiError;
+use quant_pivot_models::enums::common::OrderType;
 use reqwest::StatusCode;
 use std::sync::{
     Arc,

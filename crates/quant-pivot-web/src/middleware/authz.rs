@@ -19,7 +19,7 @@ use actix_web::{
     middleware::Next,
     web,
 };
-use oxide_arb_error::auth::AuthError;
+use quant_pivot_error::auth::AuthError;
 
 use crate::{
     error::WebError,

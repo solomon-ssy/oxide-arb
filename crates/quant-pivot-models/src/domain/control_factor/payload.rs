@@ -2,7 +2,7 @@
 
 use super::safety::{ensure_multiplier, ensure_non_negative};
 use crate::enums::control_factor::{ControlFactorType, FactorSeverity, TradingHealth};
-use oxide_arb_error::control::PayloadSafetyError;
+use quant_pivot_error::control::PayloadSafetyError;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
@@ -229,7 +229,7 @@ impl MarketAnomalyPayload {
 mod tests {
     use super::FactorPayload;
     use crate::domain::{BucketRiskPayload, PortfolioRiskPayload};
-    use oxide_arb_error::control::PayloadSafetyError;
+    use quant_pivot_error::control::PayloadSafetyError;
     use rust_decimal_macros::dec;
 
     #[test]

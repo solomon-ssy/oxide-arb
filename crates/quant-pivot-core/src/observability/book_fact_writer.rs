@@ -3,7 +3,7 @@
 use crate::infra::async_writer::AsyncWriter;
 use chrono::Utc;
 use dashmap::{DashMap, mapref::entry::Entry};
-use oxide_arb_models::{
+use quant_pivot_models::{
     clickhouse::{
         BookL2ReplayRow, BookMicrostructureRow, BookSnapshotRow, ChBps, ChDecimal64, ChPrice,
         ChSchemaVersion, ChShares, ChUsd, TickEventRow,

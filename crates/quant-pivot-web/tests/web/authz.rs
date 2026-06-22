@@ -388,7 +388,7 @@ async fn fail_closed_unregistered_protected_route_returns_forbidden() {
     use std::sync::Arc;
 
     use actix_web::{App, middleware::from_fn, test, web};
-    use oxide_arb_web::{
+    use quant_pivot_web::{
         auth::casbin::PermChecker,
         middleware::{authn, authz},
     };

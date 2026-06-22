@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Compile and run oxide-arb-bench hot_paths; optional baseline compare via critcmp.
+# Compile and run quant-pivot-bench hot_paths; optional baseline compare via critcmp.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -7,7 +7,7 @@ cd "$ROOT"
 
 echo "Running hot_paths benchmarks (release)..."
 RESULT="$(mktemp)"
-cargo bench -p oxide-arb-bench --bench hot_paths -- --output-format bencher | tee "$RESULT"
+cargo bench -p quant-pivot-bench --bench hot_paths -- --output-format bencher | tee "$RESULT"
 
 BASELINE="${BENCH_BASELINE:-$ROOT/benches/baseline/hot_paths.txt}"
 mkdir -p "$(dirname "$BASELINE")"

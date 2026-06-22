@@ -1,8 +1,9 @@
-//! Common enums used across the oxide-arb platform.
+//! Common enums used across the quant-pivot platform.
 //!
 //! Enums that appear as `SeaORM` entity columns use [`active_string_enum!`] so they
 //! can be stored directly in the database without JSON serialization.
 
+use crate::enums::LegacyExecutionMode;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use sea_orm::{ActiveValue, IntoActiveValue};
@@ -42,17 +43,6 @@ pub enum OrderType {
     Gtc,
     /// Good-Till-Date: rests on the book until `expiration` (unix timestamp).
     Gtd { expiration: u64 },
-}
-
-active_string_enum! {
-    /// Trade execution mode.
-    @derive(Default)
-    pub enum ExecutionMode {
-        #[default]
-        DryRun => "dry_run",
-        Paper => "paper",
-        Live => "live",
-    }
 }
 
 active_string_enum! {
@@ -627,18 +617,18 @@ active_string_enum! {
 
 impl RedeemStatus {
     #[must_use]
-    pub const fn initial_for_mode(mode: ExecutionMode) -> Self {
+    pub const fn initial_for_mode(mode: LegacyExecutionMode) -> Self {
         match mode {
-            ExecutionMode::DryRun | ExecutionMode::Paper => Self::NotRequired,
-            ExecutionMode::Live => Self::Pending,
+            LegacyExecutionMode::DryRun | LegacyExecutionMode::Paper => Self::NotRequired,
+            LegacyExecutionMode::Live => Self::Pending,
         }
     }
 
     #[must_use]
-    pub const fn settled_for_mode(mode: ExecutionMode) -> Self {
+    pub const fn settled_for_mode(mode: LegacyExecutionMode) -> Self {
         match mode {
-            ExecutionMode::DryRun | ExecutionMode::Paper => Self::NotRequired,
-            ExecutionMode::Live => Self::Completed,
+            LegacyExecutionMode::DryRun | LegacyExecutionMode::Paper => Self::NotRequired,
+            LegacyExecutionMode::Live => Self::Completed,
         }
     }
 }

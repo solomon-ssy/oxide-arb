@@ -1,14 +1,17 @@
 use crate::{batch, traits::TradeRepository};
 use chrono::{DateTime, Utc};
 use num_traits::ToPrimitive;
-use oxide_arb_error::storage::StorageError;
-use oxide_arb_models::{
+use quant_pivot_error::storage::StorageError;
+use quant_pivot_models::{
     domain::{
         EdgeBucket, MarketPerformanceRow, NewTrade, PageRequest, Paginated, ReportTradeStats,
         TradeAnalyticsFilter, TradeInfo, TradeObservation, TradePageQuery,
     },
     entities::trade::{ActiveModel, Column, Entity},
-    enums::common::{ExecutionMode, TradeBusinessOutcome, TradeReconcileResolution, TradeState},
+    enums::{
+        LegacyExecutionMode,
+        common::{TradeBusinessOutcome, TradeReconcileResolution, TradeState},
+    },
     types::{ExecutionId, MarketId, Shares, TradeId, Usd},
 };
 use rust_decimal::Decimal;
@@ -41,7 +44,10 @@ impl PgTradeRepository {
     ///
     /// Mode-scoped so simulated (dry-run/paper) fills never leak into the
     /// Live internal ledger and vice versa.
-    pub async fn successful_spend_total(&self, mode: ExecutionMode) -> Result<Usd, StorageError> {
+    pub async fn successful_spend_total(
+        &self,
+        mode: LegacyExecutionMode,
+    ) -> Result<Usd, StorageError> {
         let row = Entity::find()
             .select_only()
             .column_as(

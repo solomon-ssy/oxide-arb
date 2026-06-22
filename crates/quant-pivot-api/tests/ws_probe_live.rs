@@ -2,19 +2,19 @@
 //!
 //! ```bash
 //! # Single-token SDK probe (mirrors production shard subscribe order)
-//! cargo test -p oxide-arb-api probe_sdk_raw_single_token -- --ignored --nocapture
+//! cargo test -p quant-pivot-api probe_sdk_raw_single_token -- --ignored --nocapture
 //!
 //! # Single-token via ClobWsManager (production path)
-//! cargo test -p oxide-arb-api probe_manager_single_token -- --ignored --nocapture
+//! cargo test -p quant-pivot-api probe_manager_single_token -- --ignored --nocapture
 //!
 //! # Scale probe (default 100 tokens on one SDK connection)
-//! OXIDE_ARB_PROBE_TOKEN_COUNT=100 cargo test -p oxide-arb-api probe_sdk_scaled_tokens -- --ignored --nocapture
+//! QUANT_PIVOT_PROBE_TOKEN_COUNT=100 cargo test -p quant-pivot-api probe_sdk_scaled_tokens -- --ignored --nocapture
 //! ```
 //!
 //! Optional env:
-//! - `OXIDE_ARB_TEST_TOKEN_ID` — decimal CLOB token id (skips Gamma discovery)
-//! - `OXIDE_ARB_PROBE_TOKEN_COUNT` — tokens for the scale probe (default `100`)
-//! - `OXIDE_ARB_PROBE_TIMEOUT_SECS` — wait budget (default `45`)
+//! - `QUANT_PIVOT_TEST_TOKEN_ID` — decimal CLOB token id (skips Gamma discovery)
+//! - `QUANT_PIVOT_PROBE_TOKEN_COUNT` — tokens for the scale probe (default `100`)
+//! - `QUANT_PIVOT_PROBE_TIMEOUT_SECS` — wait budget (default `45`)
 
 use std::{
     collections::HashMap,
@@ -25,17 +25,17 @@ use std::{
 };
 
 use futures_util::StreamExt;
-use oxide_arb_api::{
+use polymarket_client_sdk_v2::{
+    clob::ws::Client as SdkWsClient, types::U256, ws::config::Config as SdkWsConfig,
+};
+use quant_pivot_api::{
     gamma::GammaClient,
     ws::{ClobWsManager, SubscriptionSource},
 };
-use oxide_arb_models::{
+use quant_pivot_models::{
     config::{GammaConfig, PolymarketConfig, WebSocketConfig},
     domain::pipeline::PipelineEvent,
     types::TokenId,
-};
-use polymarket_client_sdk_v2::{
-    clob::ws::Client as SdkWsClient, types::U256, ws::config::Config as SdkWsConfig,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -43,7 +43,7 @@ const DEFAULT_PROBE_TIMEOUT_SECS: u64 = 45;
 
 /// Resolve one active decimal CLOB token id from Gamma or env override.
 async fn resolve_token_id() -> TokenId {
-    if let Ok(id) = var("OXIDE_ARB_TEST_TOKEN_ID") {
+    if let Ok(id) = var("QUANT_PIVOT_TEST_TOKEN_ID") {
         return TokenId::new(id);
     }
     GammaClient::new(GammaConfig::default())
@@ -61,7 +61,7 @@ async fn resolve_token_batch(limit: usize) -> Vec<TokenId> {
 }
 
 fn probe_timeout() -> Duration {
-    let secs = var("OXIDE_ARB_PROBE_TIMEOUT_SECS")
+    let secs = var("QUANT_PIVOT_PROBE_TIMEOUT_SECS")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(DEFAULT_PROBE_TIMEOUT_SECS);
@@ -364,7 +364,7 @@ async fn probe_manager_single_token() {
 #[tokio::test]
 #[ignore = "live Polymarket CLOB WebSocket"]
 async fn probe_sdk_scaled_tokens() {
-    let count: usize = var("OXIDE_ARB_PROBE_TOKEN_COUNT")
+    let count: usize = var("QUANT_PIVOT_PROBE_TOKEN_COUNT")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(100);

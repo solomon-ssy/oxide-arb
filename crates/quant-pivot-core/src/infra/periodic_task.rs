@@ -1,4 +1,4 @@
-use oxide_arb_error::OxideError;
+use quant_pivot_error::QuantError;
 use rand::RngExt;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -21,11 +21,11 @@ impl PeriodicTask {
         skip_first_tick: bool,
         shutdown: CancellationToken,
         task_fn: F,
-    ) -> Result<(), OxideError>
+    ) -> Result<(), QuantError>
     where
         I: Fn() -> Duration,
         F: Fn() -> Fut,
-        Fut: std::future::Future<Output = Result<(), OxideError>>,
+        Fut: std::future::Future<Output = Result<(), QuantError>>,
     {
         if !skip_first_tick {
             if shutdown.is_cancelled() {

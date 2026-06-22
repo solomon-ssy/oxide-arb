@@ -1,15 +1,9 @@
 //! Operator alert dispatch (Telegram + webhook) with per-title cooldown.
-//!
-//! Channels and the cooldown are built from the runtime `notification`
-//! section and are fully hot-reloadable through [`AlertDispatcher::reload`]
-//! (lock-free `ArcSwap` snapshot), so an operator can rotate a bot token or
-//! webhook URL without a restart.
 
 use arc_swap::{ArcSwap, ArcSwapOption};
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
-use oxide_arb_control::scheduler::ScheduleAlert;
-use oxide_arb_models::{
+use quant_pivot_models::{
     domain::{CoreEvent, CoreEventPublisher, SystemAlertEvent},
     enums::common::{AlertCategory, AlertLevel, AlertSource},
     runtime_config::NotificationConfig,
@@ -19,6 +13,28 @@ use std::{
     time::{Duration, Instant},
 };
 use teloxide::{prelude::*, types::ChatId};
+
+/// Legacy scheduler alert payload retained for notification wiring tests.
+#[derive(Debug, Clone)]
+pub struct ScheduleAlert {
+    pub schedule_id: String,
+    pub detail: String,
+}
+
+impl ScheduleAlert {
+    #[must_use]
+    pub fn operator_message(&self) -> (String, String) {
+        (
+            format!("Scheduler alert: {}", self.schedule_id),
+            self.detail.clone(),
+        )
+    }
+
+    #[must_use]
+    pub fn idempotency_suffix(&self) -> &str {
+        self.schedule_id.as_str()
+    }
+}
 
 #[derive(Clone)]
 pub struct Alert {
@@ -250,8 +266,7 @@ impl AlertDispatcher {
         }
     }
 
-    /// Dispatch a materialization scheduler cadence alert to external channels
-    /// and the real-time event bus.
+    /// Dispatch a scheduler cadence alert (Phase 0 stub — materialization removed).
     pub async fn dispatch_schedule_alert(&self, alert: ScheduleAlert) {
         let (title, body) = alert.operator_message();
         self.dispatch(
@@ -306,7 +321,7 @@ async fn send_webhook(channels: &Channels, alert: &Alert) {
 mod tests {
     use super::{Alert, AlertDispatcher};
     use chrono::Utc;
-    use oxide_arb_models::{
+    use quant_pivot_models::{
         enums::common::{AlertCategory, AlertLevel, AlertSource},
         runtime_config::NotificationConfig,
     };

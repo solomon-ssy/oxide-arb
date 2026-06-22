@@ -1,7 +1,7 @@
 //! Factor registry status machine frozen by Phase 5.0.
 
 use crate::enums::control_factor::FactorStatus;
-use oxide_arb_error::control::FactorValueError;
+use quant_pivot_error::control::FactorValueError;
 
 /// Allowed `FactorStatus` transitions for the control-factor registry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

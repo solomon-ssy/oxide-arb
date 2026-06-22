@@ -3,7 +3,7 @@
 use crate::clickhouse::{ChWriteManager, ChWriteMetrics};
 use clickhouse::{Client, RowOwned, RowWrite};
 use num_traits::ToPrimitive;
-use oxide_arb_error::storage::StorageError;
+use quant_pivot_error::storage::StorageError;
 use std::{
     sync::Arc,
     time::{Duration, Instant},

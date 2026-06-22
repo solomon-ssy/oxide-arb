@@ -1,6 +1,6 @@
 //! `menu` table — frontend navigation tree + button-level permission points.
 
-use oxide_arb_macros::oxide_schema;
+use quant_pivot_macros::quant_schema;
 use sea_orm::{
     Iden,
     sea_query::{ColumnDef, Index, Table, TableCreateStatement},
@@ -23,7 +23,7 @@ use crate::{
 /// `parent_id` forms a self-referential tree (root nodes have a NULL parent).
 /// Tree integrity is maintained by the application; there is no self-FK so menu
 /// deletion does not require cascade reasoning at the database level.
-#[oxide_schema(lifecycle = "control")]
+#[quant_schema(lifecycle = "control")]
 pub enum Menu {
     Table,
     Id,

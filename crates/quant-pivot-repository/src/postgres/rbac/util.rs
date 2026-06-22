@@ -2,7 +2,7 @@
 
 use std::fmt::Display;
 
-use oxide_arb_error::storage::StorageError;
+use quant_pivot_error::storage::StorageError;
 use sea_orm::{DbErr, SqlErr};
 
 /// Map a `SeaORM` error, translating a unique-constraint violation into a

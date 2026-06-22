@@ -20,13 +20,13 @@
 //!   integrity). `RegistryError` recurses into its inner governance/storage error.
 
 use actix_web::{HttpResponse, ResponseError, http::StatusCode};
-use oxide_arb_error::{
+use quant_pivot_error::{
     auth::AuthError,
     control::{GovernanceError, RegistryError},
     rbac::RbacError,
     storage::StorageError,
 };
-use oxide_arb_models::domain::{DailySeriesRangeError, RuntimeControlError, WindowQueryError};
+use quant_pivot_models::domain::{RuntimeControlError, WindowQueryError};
 use thiserror::Error;
 
 use crate::response::WebResponse;
@@ -210,27 +210,10 @@ impl From<WindowQueryError> for WebError {
     }
 }
 
-impl From<DailySeriesRangeError> for WebError {
-    fn from(error: DailySeriesRangeError) -> Self {
-        // Caller-supplied `days` out of range → 400.
-        Self::BadRequest(error.to_string())
-    }
-}
-
 impl From<RuntimeControlError> for WebError {
     fn from(error: RuntimeControlError) -> Self {
         match error {
-            // 409 — the requested transition is invalid in the current state
-            // (e.g. entering Live without credentials / a metrics refresher).
-            RuntimeControlError::Precondition(_) | RuntimeControlError::BlockingTrades { .. } => {
-                Self::Conflict(error.to_string())
-            }
-            // 503 — the trading loop did not quiesce, or post-commit activation
-            // could not establish a safe state. The system stays halted.
-            RuntimeControlError::QuiesceTimeout { .. } | RuntimeControlError::Activation(_) => {
-                Self::ServiceUnavailable(error.to_string())
-            }
-            // 500 — an underlying engine operation failed (logged, masked).
+            RuntimeControlError::Precondition(_) => Self::Conflict(error.to_string()),
             RuntimeControlError::Engine(_) => Self::Internal(error.to_string()),
         }
     }

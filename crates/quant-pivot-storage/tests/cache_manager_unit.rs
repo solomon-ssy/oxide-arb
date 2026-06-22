@@ -5,12 +5,12 @@
 //! on first use, so construction succeeds and every L2 operation fails.
 
 use deadpool_redis::{Config, Runtime};
-use oxide_arb_models::{
+use prometheus::Registry;
+use quant_pivot_models::{
     config::{CacheConfig, DomainCacheConfig},
     types::MarketId,
 };
-use oxide_arb_storage::cache::{CacheKey, CacheManager, MokaBackend, RedisBackend, TieredCache};
-use prometheus::Registry;
+use quant_pivot_storage::cache::{CacheKey, CacheManager, MokaBackend, RedisBackend, TieredCache};
 use std::collections::HashMap;
 
 #[derive(

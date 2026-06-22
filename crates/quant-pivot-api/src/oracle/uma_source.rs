@@ -2,8 +2,8 @@
 
 use super::{source::OracleSource, types::SourceVote};
 use async_trait::async_trait;
-use oxide_arb_error::rpc::RpcError;
-use oxide_arb_models::{runtime_config::SettlementOracleConfig, types::MarketId};
+use quant_pivot_error::rpc::RpcError;
+use quant_pivot_models::{runtime_config::SettlementOracleConfig, types::MarketId};
 use std::time::Duration;
 
 /// Queries UMA DVM for assertion settlement status by `condition_id`.

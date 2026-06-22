@@ -13,7 +13,7 @@ cargo test-network
 cargo test-docker
 bash scripts/check-bench-slo.sh
 bash scripts/check-bench-regression.sh
-cargo bench -p oxide-arb-bench --bench e2e_paths -- --output-format bencher
-cargo test -p oxide-arb-core --test production_soak \
+cargo bench -p quant-pivot-bench --bench e2e_paths -- --output-format bencher
+cargo test -p quant-pivot-core --test production_soak \
   five_hundred_markets_thousand_tokens_ingest_without_book_drops \
   -- --ignored --exact --nocapture

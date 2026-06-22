@@ -11,8 +11,8 @@ use crate::{
     pipeline::{market_registry::MarketRegistry, universe_filter::MarketUniverseFilter},
 };
 use chrono::{DateTime, Duration, Utc};
-use oxide_arb_api::ws::{ClobWsManager, SubscriptionSource};
-use oxide_arb_models::{
+use quant_pivot_api::ws::{ClobWsManager, SubscriptionSource};
+use quant_pivot_models::{
     domain::market::MarketRegistryInfo, enums::market::MarketStatus, types::TokenId,
 };
 use std::sync::Arc;
@@ -329,7 +329,7 @@ mod tests {
     use super::*;
     use crate::pipeline::market_registry::MarketRegistry;
     use chrono::Duration;
-    use oxide_arb_models::{
+    use quant_pivot_models::{
         domain::market::{MarketRegistryInfo, TokenInfo},
         enums::common::MarketCategory,
         types::{EventId, MarketId, Usd},
@@ -348,7 +348,7 @@ mod tests {
             status: MarketStatus::Active,
             outcome: None,
             neg_risk: false,
-            tick_size: oxide_arb_models::enums::common::TickSize::Hundredth,
+            tick_size: quant_pivot_models::enums::common::TickSize::Hundredth,
             tokens: vec![
                 TokenInfo {
                     token_id: TokenId::new(format!("{id}-yes")),

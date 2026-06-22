@@ -1,5 +1,5 @@
-use oxide_arb_api::gamma::GammaClient;
-use oxide_arb_models::config::GammaConfig;
+use quant_pivot_api::gamma::GammaClient;
+use quant_pivot_models::config::GammaConfig;
 
 #[tokio::test]
 async fn gamma_full_sync_fetches_events() {

@@ -23,7 +23,7 @@ async fn metrics_endpoint_returns_prometheus_text() {
     );
     let body = String::from_utf8_lossy(res.body_bytes());
     assert!(
-        body.contains("oxide_arb_") || body.is_empty(),
+        body.contains("quant_pivot_") || body.is_empty(),
         "body should be valid prometheus text exposition"
     );
 }

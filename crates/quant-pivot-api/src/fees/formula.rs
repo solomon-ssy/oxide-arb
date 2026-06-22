@@ -3,7 +3,9 @@
 //! fee = shares × feeRate × (price × (1 - price))^exponent
 
 use num_traits::ToPrimitive;
-use oxide_arb_models::types::{MICRO_SCALE, MicroPrice, MicroShares, MicroUsd, Price, Shares, Usd};
+use quant_pivot_models::types::{
+    MICRO_SCALE, MicroPrice, MicroShares, MicroUsd, Price, Shares, Usd,
+};
 use rust_decimal::{Decimal, MathematicalOps};
 use rust_decimal_macros::dec;
 use std::sync::LazyLock;

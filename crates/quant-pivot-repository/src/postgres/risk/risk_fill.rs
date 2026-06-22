@@ -10,8 +10,8 @@ use crate::postgres::{
     risk::{risk_audit, risk_state},
 };
 use chrono::{DateTime, Utc};
-use oxide_arb_error::storage::StorageError;
-use oxide_arb_models::{
+use quant_pivot_error::storage::StorageError;
+use quant_pivot_models::{
     domain::risk::FillCommit,
     entities::risk_fill_applied::{ActiveModel, Column, Entity},
     types::TradeId,

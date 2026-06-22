@@ -14,8 +14,8 @@ use crate::infra::retry::{self, RetryPolicy};
 use catalog::CatalogMarket;
 use chrono::{DateTime, Utc};
 use futures_util::stream::{self, StreamExt};
-use oxide_arb_error::api::ApiError;
-use oxide_arb_models::{
+use quant_pivot_error::api::ApiError;
+use quant_pivot_models::{
     config::GammaConfig,
     domain::market::{EventRegistryInfo, MarketRegistryInfo},
     enums::{common::CategorySet, market::MarketStatus},

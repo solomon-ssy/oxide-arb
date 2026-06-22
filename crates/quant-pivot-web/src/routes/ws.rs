@@ -8,7 +8,7 @@
 //! `Accept-Api-Version` on upgrade). Per-channel authorization is enforced
 //! inside the session against the
 //! same `(resource, operation)` pairs as the HTTP routes (via
-//! [`oxide_arb_models::domain::WsChannel::resource`]), so a socket cannot bypass
+//! [`quant_pivot_models::domain::WsChannel::resource`]), so a socket cannot bypass
 //! route-level authorization.
 //!
 //! The handshake + session implementation lives in [`crate::ws`]; this module

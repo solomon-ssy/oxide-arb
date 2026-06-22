@@ -1,5 +1,5 @@
 [package]
-name = "oxide-arb-storage"
+name = "quant-pivot-storage"
 description = "Database initialization, connection management, schema migrations, and unified cache layer"
 version.workspace = true
 edition.workspace = true
@@ -10,8 +10,8 @@ default = []
 test-util = ["dep:testcontainers", "dep:testcontainers-modules"]
 
 [dependencies]
-oxide-arb-error = { workspace = true, features = ["storage"] }
-oxide-arb-models = { workspace = true, features = ["repository"] }
+quant-pivot-error = { workspace = true, features = ["storage"] }
+quant-pivot-models = { workspace = true, features = ["repository"] }
 num-traits = { workspace = true }
 sea-orm = { workspace = true }
 sea-orm-migration = { workspace = true }

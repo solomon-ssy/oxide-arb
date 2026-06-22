@@ -1,7 +1,5 @@
-pub mod book_gate;
 pub mod book_store;
 pub mod data_pipeline;
-pub mod dual_book_assembler;
 pub mod event_source;
 pub mod market_cache;
 pub mod market_registry;

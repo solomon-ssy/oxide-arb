@@ -4,8 +4,8 @@
 //! `pg_database`, and issues `CREATE DATABASE` when the configured target is
 //! missing. Idempotent and safe under concurrent first-start races.
 
-use oxide_arb_error::storage::StorageError;
-use oxide_arb_models::config::PostgresConfig;
+use quant_pivot_error::storage::StorageError;
+use quant_pivot_models::config::PostgresConfig;
 use sea_orm::{ConnectOptions, ConnectionTrait, Database, DbBackend, DbErr, Statement, Value};
 use std::time::Duration;
 use tracing::info;

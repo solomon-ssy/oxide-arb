@@ -23,7 +23,7 @@ use std::{
 };
 
 use actix_web::{Error as ActixError, FromRequest, HttpMessage, HttpRequest, dev::Payload};
-use oxide_arb_models::{
+use quant_pivot_models::{
     enums::{
         operation_log::{OperationCategory, OperationOutcome},
         rbac::ResourceType,

@@ -1,12 +1,12 @@
 [package]
-name = "oxide-arb-xtask"
+name = "quant-pivot-xtask"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish = false
 
 [[bin]]
-name = "oxide-arb-xtask"
+name = "quant-pivot-xtask"
 path = "src/main.rs"
 
 [dependencies]

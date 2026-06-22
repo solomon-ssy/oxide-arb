@@ -1,7 +1,7 @@
 //! Map Polymarket SDK errors into domain [`ApiError`] with retry semantics.
 
-use oxide_arb_error::api::ApiError;
 use polymarket_client_sdk_v2::error::{Error as SdkError, Kind, Status};
+use quant_pivot_error::api::ApiError;
 use reqwest::StatusCode;
 
 /// Local wrapper for orphan-safe [`From`] into [`ApiError`].

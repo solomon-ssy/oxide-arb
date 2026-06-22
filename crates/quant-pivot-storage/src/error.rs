@@ -1,3 +1,3 @@
 //! Storage error types.
 //!
-//! Use `oxide_arb_error::storage::StorageError` directly.
+//! Use `quant_pivot_error::storage::StorageError` directly.

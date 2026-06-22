@@ -4,8 +4,8 @@ use crate::{
 };
 use chrono::{DateTime, Utc};
 use num_traits::ToPrimitive;
-use oxide_arb_error::storage::StorageError;
-use oxide_arb_models::{
+use quant_pivot_error::storage::StorageError;
+use quant_pivot_models::{
     domain::{
         MarketInfo, MarketPageQuery, MarketPitSnapshotInfo, NewMarketPitSnapshot, Paginated,
         UpsertMarket,

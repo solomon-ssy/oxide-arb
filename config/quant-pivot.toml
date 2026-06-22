@@ -1,5 +1,5 @@
 # ═══════════════════════════════════════════════════════════════════════════════
-# oxide-arb — Deploy Configuration (Development)
+# quant-pivot — Deploy Configuration (Development)
 # ═══════════════════════════════════════════════════════════════════════════════
 #
 # This file contains ONLY deploy configuration: values that are structurally
@@ -20,13 +20,13 @@
 # if absent, all defaults apply.
 #
 # Loading precedence (later wins):
-#   1. OXIDE_ARB__* environment variables
-#   2. oxide-arb.local.toml  (optional, gitignored — copy from
-#      oxide-arb.local.toml.example for machine-specific secrets)
-#   3. oxide-arb.toml        (this file — shipped defaults only)
+#   1. QUANT_PIVOT__* environment variables
+#   2. quant-pivot.local.toml  (optional, gitignored — copy from
+#      quant-pivot.local.toml.example for machine-specific secrets)
+#   3. quant-pivot.toml        (this file — shipped defaults only)
 #   4. compiled-in defaults
 #
-# Path separator in env vars is double underscore, e.g. OXIDE_ARB__DB__POSTGRES__HOST.
+# Path separator in env vars is double underscore, e.g. QUANT_PIVOT__DB__POSTGRES__HOST.
 #
 # Unknown keys are FATAL at startup (deny_unknown_fields): a typo or a stale
 # runtime section aborts boot instead of being silently ignored.
@@ -101,10 +101,10 @@ max_subscriptions_per_connection = 200
 # shards. Impact: hard caps Polymarket WS pressure; operator Web subscriptions
 # remain an overlay. Default: 2000.
 engine_max_subscription_tokens = 2000
-# Purpose: look-ahead window (hours) for endgame engine WS subscriptions.
+# Purpose: look-ahead window (hours) for engine WS subscription hotset.
 # Impact: markets outside this window stay in catalog/storage but do not consume
-# trading WS capacity until they approach resolution. Default: 72.
-engine_endgame_window_hours = 72
+# WS capacity until they approach resolution. Default: 72.
+engine_subscription_window_hours = 72
 
 [market_data.gamma]
 # Purpose: Gamma REST base URL (market catalog + resolution metadata).
@@ -118,34 +118,17 @@ full_sync_interval_secs = 300
 # Default: 100.
 page_size = 100
 
-# ── Execution Topology ────────────────────────────────────────────────────────
-#
-# NOTE: the active execution mode (dry_run / paper / live) is NOT configured
-# here. It is a money-critical, governed value owned by the `system_runtime_state`
-# singleton (seeded to dry_run on first migration) and changed only via the
-# audited `POST /system/mode` transition. This guarantees a fresh deployment
-# always boots in the safest mode. Operational execution tunables (timeouts,
-# funnel, coalescer, latency SLOs) are runtime config.
+# ── Quant Pivot (Phase 0) ─────────────────────────────────────────────────────
 
-[execution.book_apply]
-# Purpose: number of book-apply / execution-runner shards. Impact: markets
-# hash to a shard, bounding intra-market ordering domains and worker
-# parallelism. Caution: sized for a 500-market single host; must be >= 1.
-# Default: 4.
-shard_count = 4
-# Purpose: per-shard bounded channel capacity. Impact: overflow triggers
-# backpressure accounting (never blocks the WS event loop). Caution: >= 16.
-# Default: 2048.
-channel_capacity = 2048
+[quant.workers]
+# Purpose: report scheduler tick interval (seconds). Phase 4 consumes this knob.
+# Default: 30.
+report_scheduler_tick_secs = 30
 
-# ── Settlement Topology ───────────────────────────────────────────────────────
-# (Oracle policy, retries, and the redeem route are runtime config.)
-
-[settlement.lifecycle]
-# Purpose: bounded capacity of the market-settlement request channel between
-# the data pipeline and the settlement worker. Impact: burst absorption for
-# simultaneous market resolutions. Caution: >= 16. Default: 256.
-channel_capacity = 256
+[quant.execution]
+# Purpose: when false, private keys are not required in ReportOnly mode.
+# Default: false.
+load_credentials_in_report_only = false
 
 # ── Keys / Credentials ───────────────────────────────────────────────────────
 #
@@ -153,11 +136,12 @@ channel_capacity = 256
 # automatically by the SDK at connect time (`ClobClient::connect`).
 #
 # Supply private_key via (env overrides file when both are set):
-#   A. OXIDE_ARB__KEYS__PRIVATE_KEY
-#   B. config/oxide-arb.local.toml  (gitignored — recommended on dev laptops)
+#   A. QUANT_PIVOT__KEYS__PRIVATE_KEY
+#   B. config/quant-pivot.local.toml  (gitignored — recommended on dev laptops)
 #   C. Uncomment `private_key` below (not recommended)
 #
-# Paper / Live: private_key required. DryRun: optional.
+# Paper / Live: private_key required. ReportOnly: optional unless
+# quant.execution.load_credentials_in_report_only = true.
 # Never commit real secrets. See docs/operations/runbook.md §3.2.
 
 [keys]
@@ -167,7 +151,7 @@ channel_capacity = 256
 source = "env"
 
 # Bot wallet private key (hex, 0x prefix optional). Rabby bot sub-account export.
-# Override: OXIDE_ARB__KEYS__PRIVATE_KEY
+# Override: QUANT_PIVOT__KEYS__PRIVATE_KEY
 # private_key = "0x..............................................................."
 
 # ── Observability (logging only) ─────────────────────────────────────────────
@@ -176,7 +160,7 @@ source = "env"
 
 [observability]
 # Purpose: default tracing filter directive (e.g. "info",
-# "info,oxide_arb_core=debug"). Impact: log verbosity for the whole process.
+# "info,quant_pivot_core=debug"). Impact: log verbosity for the whole process.
 # Caution: the RUST_LOG environment variable, when set, overrides this value
 # entirely. Default: "info".
 log_level = "info"
@@ -195,8 +179,8 @@ host = "localhost"
 port = 5432
 # Purpose: role name. Default: "oxide".
 user = "oxide"
-# Purpose: role password. Caution: set via OXIDE_ARB__DB__POSTGRES__PASSWORD
-# or oxide-arb.local.toml — never commit real values here. Default: "".
+# Purpose: role password. Caution: set via QUANT_PIVOT__DB__POSTGRES__PASSWORD
+# or quant-pivot.local.toml — never commit real values here. Default: "".
 password = ""
 # Purpose: database name. Default: "oxide_arb".
 database = "oxide_arb"
@@ -233,8 +217,8 @@ work_mem = "16MB"
 verify_session_params = true
 # Purpose: prepared-statement cache capacity per connection. Default: 256.
 statement_cache_capacity = 256
-# Purpose: application name reported to pg_stat_activity. Default: "oxide-arb".
-application_name = "oxide-arb"
+# Purpose: application name reported to pg_stat_activity. Default: "quant-pivot".
+application_name = "quant-pivot"
 
 [db.clickhouse]
 # Purpose: ClickHouse HTTP endpoint (analytics timeseries: ticks, books,
@@ -244,8 +228,8 @@ url = "http://localhost:8123"
 database = "oxide_arb"
 # Purpose: user name. Default: "default".
 user = "default"
-# Purpose: password. Caution: set via OXIDE_ARB__DB__CLICKHOUSE__PASSWORD or
-# oxide-arb.local.toml — never commit real values here. Default: "".
+# Purpose: password. Caution: set via QUANT_PIVOT__DB__CLICKHOUSE__PASSWORD or
+# quant-pivot.local.toml — never commit real values here. Default: "".
 password = ""
 # Purpose: max age (s) of a partial batch before flush. Impact: analytics
 # freshness vs insert request volume. Default: 5.
@@ -280,7 +264,7 @@ port = 6379
 # Purpose: ACL username. Leave empty for password-only auth (`requirepass`).
 # Default: "".
 user = ""
-# Purpose: password. Caution: set via OXIDE_ARB__CACHE__REDIS__PASSWORD in
+# Purpose: password. Caution: set via QUANT_PIVOT__CACHE__REDIS__PASSWORD in
 # production — never here. Default: "".
 password = ""
 # Purpose: logical database index (`SELECT`). Default: 0.
@@ -321,12 +305,12 @@ static_ui_dir = "static/ui"
 
 [web.jwt]
 # Purpose: HMAC signing secret. SECURITY: never commit a real secret; provide
-# it via env in production: OXIDE_ARB__WEB__JWT__SECRET=<strong-random-secret>.
+# it via env in production: QUANT_PIVOT__WEB__JWT__SECRET=<strong-random-secret>.
 # Caution: an empty/placeholder secret is fatal in Live mode and a warning
 # otherwise. Default: "".
 secret = ""
-# Purpose: token issuer claim. Default: "oxide-arb".
-issuer = "oxide-arb"
+# Purpose: token issuer claim. Default: "quant-pivot".
+issuer = "quant-pivot"
 # Purpose: access-token lifetime (s). Default: 900 (15m).
 access_ttl_secs = 900
 # Purpose: refresh-token lifetime (s). Default: 604800 (7d).

@@ -1,7 +1,7 @@
 //! Append-only operation-log repository contract.
 
-use oxide_arb_error::storage::StorageError;
-use oxide_arb_models::domain::{NewOperationLog, OperationLogInfo, OperationLogQuery, Paginated};
+use quant_pivot_error::storage::StorageError;
+use quant_pivot_models::domain::{NewOperationLog, OperationLogInfo, OperationLogQuery, Paginated};
 
 /// Persistence for the immutable operation-log activity trail.
 ///

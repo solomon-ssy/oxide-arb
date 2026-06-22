@@ -1,12 +1,12 @@
 use chrono::{DateTime, Utc};
-use oxide_arb_error::storage::StorageError;
-use oxide_arb_models::{
+use quant_pivot_error::storage::StorageError;
+use quant_pivot_models::{
     domain::{
         MarkRedeemedParams, NewPosition, Paginated, PositionInfo, PositionPageQuery, PositionPatch,
         SettlePositionParams, SettledPositionStats, evidence::EvidenceQueryResult,
         position::PositionRedeemSnapshot,
     },
-    enums::common::{ExecutionMode, SettlementTrigger},
+    enums::{LegacyExecutionMode, common::SettlementTrigger},
     types::{MarketId, PositionId, TokenId, TradeId, Usd},
 };
 use rust_decimal::Decimal;
@@ -23,7 +23,8 @@ pub trait PositionRepository: Send + Sync {
     ///
     /// Active exposure is always mode-contextual: Live risk must never count
     /// simulated (dry-run/paper) positions, and vice versa.
-    async fn find_open(&self, mode: ExecutionMode) -> Result<Vec<PositionInfo>, StorageError>;
+    async fn find_open(&self, mode: LegacyExecutionMode)
+    -> Result<Vec<PositionInfo>, StorageError>;
 
     async fn open_as_of(&self, at: DateTime<Utc>) -> Result<Vec<PositionInfo>, StorageError>;
 

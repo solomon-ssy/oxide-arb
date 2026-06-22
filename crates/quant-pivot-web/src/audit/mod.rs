@@ -9,7 +9,7 @@
 //! It is deliberately **best-effort**: a full channel or a failed write only
 //! emits a warning and is dropped — the audit log must never delay or fail a
 //! business response. Track one (the governance hash chain) is written
-//! synchronously and transactionally elsewhere (`oxide-arb-control`); the two
+//! synchronously and transactionally elsewhere (`quant-pivot-control`); the two
 //! tracks are linked by [`OperationContext::link_governance`].
 
 mod buffer;

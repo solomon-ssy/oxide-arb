@@ -12,7 +12,7 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
 };
 
-use oxide_arb_models::domain::NewOperationLog;
+use quant_pivot_models::domain::NewOperationLog;
 
 /// Producer handle for the operation-log pipeline, shared via [`AppState`].
 ///

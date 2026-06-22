@@ -16,7 +16,7 @@
 //! reference-count increment rather than a heap allocation, which matters on
 //! the hot path where ids flow through channels and live in many structures.
 
-use oxide_arb_macros::{StrId, UuidId};
+use quant_pivot_macros::{StrId, UuidId};
 use std::sync::Arc;
 use uuid::Uuid;
 

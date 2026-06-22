@@ -2,9 +2,9 @@
 
 use crate::traits::ReportRepository;
 use chrono::NaiveDate;
-use oxide_arb_error::storage::StorageError;
-use oxide_arb_models::entities::report::{Column as ReportColumn, Entity as ReportEntity};
-use oxide_arb_models::{
+use quant_pivot_error::storage::StorageError;
+use quant_pivot_models::entities::report::{Column as ReportColumn, Entity as ReportEntity};
+use quant_pivot_models::{
     domain::{ReportInfo, UpsertReport},
     enums::common::ReportType,
 };

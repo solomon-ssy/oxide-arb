@@ -10,8 +10,8 @@
 //!
 //! Configure via (highest precedence first):
 //!
-//! 1. `OXIDE_ARB__POLYMARKET__ONCHAIN__RPC_URL` — overrides TOML at runtime
-//! 2. `[polymarket.onchain].rpc_url` in `config/oxide-arb.toml`
+//! 1. `QUANT_PIVOT__POLYMARKET__ONCHAIN__RPC_URL` — overrides TOML at runtime
+//! 2. `[polymarket.onchain].rpc_url` in `config/quant-pivot.toml`
 //!
 //! Create the key in [Alchemy Dashboard](https://dashboard.alchemy.com/) → Apps →
 //! Polygon → copy the HTTPS URL. No special contract allowlist is required for
@@ -26,24 +26,24 @@
 //! - Polygonscan logs on `CTF_ADDRESS` (`0x4D97…6045`) for `PayoutRedemption`
 //! - Polymarket UI → market → developer tools / condition id in API payloads
 //!
-//! Set **`OXIDE_ARB_TEST_RESOLVED_CONDITION_ID`** to that value. There is no
+//! Set **`QUANT_PIVOT_TEST_RESOLVED_CONDITION_ID`** to that value. There is no
 //! baked-in default — placeholders rot when markets delist.
 
-use oxide_arb_api::oracle::{CtfOracleSource, OracleSource};
-use oxide_arb_models::{
+use quant_pivot_api::oracle::{CtfOracleSource, OracleSource};
+use quant_pivot_models::{
     config::{OnchainConfig, settlement::SettlementContractsSection},
     types::MarketId,
 };
 use std::env::var;
 
 fn onchain_from_env_or_config() -> OnchainConfig {
-    if let Ok(url) = var("OXIDE_ARB__POLYMARKET__ONCHAIN__RPC_URL") {
+    if let Ok(url) = var("QUANT_PIVOT__POLYMARKET__ONCHAIN__RPC_URL") {
         return OnchainConfig {
             rpc_url: url,
             ..OnchainConfig::default()
         };
     }
-    if let Ok(url) = var("OXIDE_ARB_TEST_POLYGON_RPC_URL") {
+    if let Ok(url) = var("QUANT_PIVOT_TEST_POLYGON_RPC_URL") {
         return OnchainConfig {
             rpc_url: url,
             ..OnchainConfig::default()
@@ -53,17 +53,17 @@ fn onchain_from_env_or_config() -> OnchainConfig {
 }
 
 fn require_resolved_condition_id() -> String {
-    var("OXIDE_ARB_TEST_RESOLVED_CONDITION_ID").unwrap_or_else(|_| {
+    var("QUANT_PIVOT_TEST_RESOLVED_CONDITION_ID").unwrap_or_else(|_| {
         panic!(
-            "set OXIDE_ARB_TEST_RESOLVED_CONDITION_ID to a settled market condition_id \
-             (0x + 64 hex). Also set OXIDE_ARB__POLYMARKET__ONCHAIN__RPC_URL or \
-             OXIDE_ARB_TEST_POLYGON_RPC_URL to your Alchemy Polygon mainnet URL."
+            "set QUANT_PIVOT_TEST_RESOLVED_CONDITION_ID to a settled market condition_id \
+             (0x + 64 hex). Also set QUANT_PIVOT__POLYMARKET__ONCHAIN__RPC_URL or \
+             QUANT_PIVOT_TEST_POLYGON_RPC_URL to your Alchemy Polygon mainnet URL."
         )
     })
 }
 
 #[tokio::test]
-#[ignore = "requires Polygon mainnet RPC + OXIDE_ARB_TEST_RESOLVED_CONDITION_ID"]
+#[ignore = "requires Polygon mainnet RPC + QUANT_PIVOT_TEST_RESOLVED_CONDITION_ID"]
 async fn ctf_oracle_reads_resolved_payout() {
     let condition_id = require_resolved_condition_id();
     assert!(

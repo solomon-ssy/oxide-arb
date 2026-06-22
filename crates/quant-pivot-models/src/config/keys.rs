@@ -5,9 +5,9 @@
 //! Same as the rest of [`DeployConfig`](super::DeployConfig): the `config`
 //! crate merges sources in registration order; **later sources win**.
 //!
-//! 1. `OXIDE_ARB__KEYS__PRIVATE_KEY` environment variable
-//! 2. `config/oxide-arb.local.toml` under `[keys]` (optional, gitignored)
-//! 3. `config/oxide-arb.toml` under `[keys]`
+//! 1. `QUANT_PIVOT__KEYS__PRIVATE_KEY` environment variable
+//! 2. `config/quant-pivot.local.toml` under `[keys]` (optional, gitignored)
+//! 3. `config/quant-pivot.toml` under `[keys]`
 //! 4. Unset (`None`)
 //!
 //! Polymarket CLOB L2 credentials (`api_key` / `secret` / `passphrase`) are
@@ -18,12 +18,12 @@ use serde::Deserialize;
 use std::fmt;
 
 /// Environment variable for the bot wallet private key.
-pub const ENV_PRIVATE_KEY: &str = "OXIDE_ARB__KEYS__PRIVATE_KEY";
+pub const ENV_PRIVATE_KEY: &str = "QUANT_PIVOT__KEYS__PRIVATE_KEY";
 
 /// Credential source and wallet private key.
 ///
-/// `private_key` may be supplied in `oxide-arb.toml`, `oxide-arb.local.toml`,
-/// and/or `OXIDE_ARB__KEYS__PRIVATE_KEY`. Environment variables override file
+/// `private_key` may be supplied in `quant-pivot.toml`, `quant-pivot.local.toml`,
+/// and/or `QUANT_PIVOT__KEYS__PRIVATE_KEY`. Environment variables override file
 /// values when present.
 #[derive(Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -78,7 +78,7 @@ impl KeysConfig {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum KeySource {
-    /// Inline `[keys].private_key` (TOML and/or `OXIDE_ARB__KEYS__PRIVATE_KEY`).
+    /// Inline `[keys].private_key` (TOML and/or `QUANT_PIVOT__KEYS__PRIVATE_KEY`).
     #[default]
     Env,
     /// Encrypted keystore file at `keystore_path` (reserved).

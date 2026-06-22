@@ -1,4 +1,4 @@
-use oxide_arb_models::{
+use quant_pivot_models::{
     domain::book::{BookLevel, BookSnapshot},
     enums::common::Side,
     types::{MicroPrice, Price, Shares, TokenId},

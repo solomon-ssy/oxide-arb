@@ -1,18 +1,18 @@
 [package]
-name = "oxide-arb-bin"
-description = "Binary entry point for the oxide-arb trading system"
+name = "quant-pivot-bin"
+description = "Binary entry point for the quant-pivot trading system"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish = false
 
 [[bin]]
-name = "oxide-arb"
+name = "quant-pivot"
 path = "src/main.rs"
 
 [dependencies]
-oxide-arb-core = { workspace = true }
-oxide-arb-models = { workspace = true }
+quant-pivot-core = { workspace = true }
+quant-pivot-models = { workspace = true }
 rustls = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

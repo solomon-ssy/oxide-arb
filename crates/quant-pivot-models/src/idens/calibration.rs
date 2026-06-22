@@ -1,4 +1,4 @@
-use oxide_arb_macros::oxide_schema;
+use quant_pivot_macros::quant_schema;
 use sea_orm::{
     Iden,
     sea_query::{ColumnDef, Index, Table, TableCreateStatement},
@@ -12,7 +12,7 @@ use crate::schema::{
     timestamp_with_write_default,
 };
 
-#[oxide_schema(lifecycle = "core")]
+#[quant_schema(lifecycle = "core")]
 pub enum EndgameCalibrationBucket {
     Table,
     Id,

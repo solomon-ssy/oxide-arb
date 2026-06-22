@@ -7,8 +7,8 @@
 //! coalesced update is corrected by the next one.
 
 use super::shard::{ShardDeps, WsShard};
-use oxide_arb_models::types::TokenId;
 use parking_lot::Mutex;
+use quant_pivot_models::types::TokenId;
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,

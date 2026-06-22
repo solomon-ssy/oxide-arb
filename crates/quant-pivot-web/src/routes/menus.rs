@@ -5,7 +5,7 @@
 //! part of the Casbin policy, so none of these endpoints touch the enforcer.
 
 use actix_web::{http::Method, web};
-use oxide_arb_models::{
+use quant_pivot_models::{
     domain::{CreateMenuRequest, MenuInfo, MenuTreeNode, NewMenu, UpdateMenuRequest},
     enums::{
         operation_log::OperationCategory,

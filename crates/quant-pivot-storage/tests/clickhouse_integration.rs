@@ -1,13 +1,13 @@
 //! `ClickHouse` integration tests (requires Docker).
 
 use chrono::Utc;
-use oxide_arb_models::{
+use quant_pivot_models::{
     clickhouse::{ChBps, ChPrice, ChSchemaVersion, ChUsd, TickEventRow},
     config::ClickHouseConfig,
     enums::clickhouse::{ChBookEventType, ChFactSource},
     types::{Price, TokenId, Usd},
 };
-use oxide_arb_storage::clickhouse::{BatchInserter, ChWriteManager, ClickHousePool};
+use quant_pivot_storage::clickhouse::{BatchInserter, ChWriteManager, ClickHousePool};
 use rust_decimal_macros::dec;
 use std::{sync::Arc, time::Duration};
 use testcontainers::{
@@ -70,7 +70,7 @@ async fn clickhouse_database_bootstrap_creates_missing_database() {
         .expect("ClickHouse container");
     let port = container.get_host_port_ipv4(8123).await.expect("port");
     let config = ClickHouseConfig {
-        database: "oxide_arb_bootstrap_it".into(),
+        database: "quant_pivot_bootstrap_it".into(),
         ..test_ch_config(port)
     };
 
@@ -80,7 +80,7 @@ async fn clickhouse_database_bootstrap_creates_missing_database() {
     let count: u64 = pool
         .client()
         .query("SELECT count() FROM system.databases WHERE name = ?")
-        .bind("oxide_arb_bootstrap_it")
+        .bind("quant_pivot_bootstrap_it")
         .fetch_one()
         .await
         .expect("database should exist");

@@ -1,10 +1,10 @@
-//! Test harness for [`oxide_arb_core::infra::async_writer::AsyncWriter`] workers.
+//! Test harness for [`quant_pivot_core::infra::async_writer::AsyncWriter`] workers.
 
-use oxide_arb_core::{
+use quant_pivot_core::{
     infra::async_writer::{AsyncWriter, AsyncWriterConfig},
     observability::metrics_hub::MetricsHub,
 };
-use oxide_arb_error::OxideError;
+use quant_pivot_error::QuantError;
 use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
 use tokio::{task::JoinHandle, time::timeout};
 use tokio_util::sync::CancellationToken;
@@ -45,7 +45,7 @@ pub fn spawn_test_async_writer<T, F>(
 ) -> (Arc<AsyncWriter<T>>, TestAsyncWriterGuard)
 where
     T: Send + 'static,
-    F: Fn(Vec<T>) -> Pin<Box<dyn Future<Output = Result<(), OxideError>> + Send>> + Send + 'static,
+    F: Fn(Vec<T>) -> Pin<Box<dyn Future<Output = Result<(), QuantError>> + Send>> + Send + 'static,
 {
     let shutdown = CancellationToken::new();
     let (writer, worker) = AsyncWriter::new(

@@ -1,19 +1,17 @@
 [package]
-name = "oxide-arb-bench"
-description = "Performance benchmarks for oxide-arb hot paths"
+name = "quant-pivot-bench"
+description = "Performance benchmarks for quant-pivot hot paths"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish = false
 
 [dependencies]
-oxide-arb-algorithm = { workspace = true }
-oxide-arb-api = { workspace = true }
-oxide-arb-core = { workspace = true }
-oxide-arb-models = { workspace = true }
-oxide-arb-repository = { workspace = true }
-oxide-arb-risk = { workspace = true }
-oxide-arb-test-support = { workspace = true }
+quant-pivot-api = { workspace = true }
+quant-pivot-core = { workspace = true }
+quant-pivot-models = { workspace = true }
+quant-pivot-repository = { workspace = true }
+quant-pivot-test-support = { workspace = true }
 rust_decimal = { workspace = true }
 rust_decimal_macros = { workspace = true }
 chrono = { workspace = true }

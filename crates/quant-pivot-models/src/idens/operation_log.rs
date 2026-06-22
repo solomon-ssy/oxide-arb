@@ -6,7 +6,7 @@
 //! deleting a user never rewrites or removes its historical activity. The
 //! actor's username and acting role are denormalized for the same reason.
 
-use oxide_arb_macros::oxide_schema;
+use quant_pivot_macros::quant_schema;
 use sea_orm::{
     Iden,
     sea_query::{ColumnDef, Expr, Index, IndexOrder, Table, TableCreateStatement},
@@ -21,7 +21,7 @@ use crate::schema::{
 };
 
 /// Append-only operation log row.
-#[oxide_schema(lifecycle = "audit")]
+#[quant_schema(lifecycle = "audit")]
 pub enum OperationLog {
     Table,
     Id,

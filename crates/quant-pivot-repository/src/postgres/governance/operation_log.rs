@@ -4,8 +4,8 @@
 //! repository exposes only INSERT and SELECT. No method ever issues an UPDATE
 //! or DELETE.
 
-use oxide_arb_error::storage::StorageError;
-use oxide_arb_models::{
+use quant_pivot_error::storage::StorageError;
+use quant_pivot_models::{
     domain::{NewOperationLog, OperationLogInfo, OperationLogQuery, Paginated},
     entities::operation_log::{ActiveModel, Column, Entity},
 };

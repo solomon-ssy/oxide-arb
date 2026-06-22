@@ -9,7 +9,7 @@
 //! deleting a user (cascades its `g` groupings) and replacing a user's roles.
 
 use actix_web::{http::Method, web};
-use oxide_arb_models::{
+use quant_pivot_models::{
     domain::{
         AssignRoles, AssignRolesRequest, ChangePasswordRequest, ChangeUserPassword,
         ChangeUserStatusRequest, CreateUserRequest, NewUser, Paginated, UpdateUserRequest,

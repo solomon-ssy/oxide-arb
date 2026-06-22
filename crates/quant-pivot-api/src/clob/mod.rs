@@ -21,20 +21,6 @@ use crate::{
 };
 use alloy::signers::Signer;
 use num_traits::ToPrimitive;
-use oxide_arb_error::api::ApiError;
-use oxide_arb_models::{
-    config::PolymarketConfig,
-    domain::{
-        BookLevel,
-        book::{EndgameBookSnapshot, OrderbookSide},
-        order::{OrderAmount, OrderRequest, OrderResponse},
-    },
-    enums::{
-        common::{OrderType, Side},
-        order::OrderStatus,
-    },
-    types::{MarketId, OrderId, Price, Shares, TokenId, Usd},
-};
 use polymarket_client_sdk_v2::{
     auth::{Normal, state::Authenticated},
     clob::{
@@ -46,6 +32,20 @@ use polymarket_client_sdk_v2::{
         },
     },
     types::{B256, U256},
+};
+use quant_pivot_error::api::ApiError;
+use quant_pivot_models::{
+    config::PolymarketConfig,
+    domain::{
+        BookLevel,
+        book::{EndgameBookSnapshot, OrderbookSide},
+        order::{OrderAmount, OrderRequest, OrderResponse},
+    },
+    enums::{
+        common::{OrderType, Side},
+        order::OrderStatus,
+    },
+    types::{MarketId, OrderId, Price, Shares, TokenId, Usd},
 };
 use rust_decimal::Decimal;
 use std::{convert::TryFrom, str::FromStr, sync::Arc};

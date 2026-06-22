@@ -5,9 +5,9 @@
 //! failing the read.
 
 use crate::traits::RiskStateRepository;
-use oxide_arb_error::storage::StorageError;
-use oxide_arb_models::domain::{RiskStateInfo, UpsertRiskEngineState};
-use oxide_arb_storage::cache::{CacheKey, CacheManager};
+use quant_pivot_error::storage::StorageError;
+use quant_pivot_models::domain::{RiskStateInfo, UpsertRiskEngineState};
+use quant_pivot_storage::cache::{CacheKey, CacheManager};
 use std::sync::Arc;
 
 /// Caching decorator for the risk engine singleton state.

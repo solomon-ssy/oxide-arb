@@ -1,6 +1,6 @@
 # DTO 与 API 契约范式
 
-本文档是 `oxide-arb` 后续所有「领域 DTO」与「HTTP API 契约类型」的统一范式，是这两层类型的唯一事实源。
+本文档是 `quant-pivot` 后续所有「领域 DTO」与「HTTP API 契约类型」的统一范式，是这两层类型的唯一事实源。
 
 它向上承接 [`docs/persistence/schema-catalog.md`](../persistence/schema-catalog.md)：schema-catalog 定义表结构 / 索引 / seed，本文档定义建立在表之上的读写 DTO 与对外契约类型。两份文档共同描述一条完整的纵向数据链路。
 
@@ -37,11 +37,11 @@ routes/<x>.rs (web)     handler：校验 → 翻译 → 持久化 → 投影
 
 ## 放置决策（已采纳）
 
-API 契约类型（`*Request` / `*View` / `*Response`）**留在 `oxide-arb-models` 的 `domain::api` 模块**，与持久化 DTO 同一个 crate。
+API 契约类型（`*Request` / `*View` / `*Response`）**留在 `quant-pivot-models` 的 `domain::api` 模块**，与持久化 DTO 同一个 crate。
 
-- 已知代价：`oxide-arb-models` 因此依赖 `validator`，且当前唯一消费者是 `oxide-arb-web`。这是被接受的取舍，目标是把一个资源的「请求 / 持久化 / 响应」契约集中在单一可发现位置，便于后续接入 OpenAPI 生成。
-- 触发重新评估的条件：出现 `oxide-arb-web` 之外的第二个契约消费者（如独立 CLI client）。届时应把 `domain::api` 抽成独立的 `oxide-arb-contract` crate，而非散落进 web。
-- 在重新评估之前，**不要**把 `*Request` / `*View` 移进 `oxide-arb-web`，保持本范式一致。
+- 已知代价：`quant-pivot-models` 因此依赖 `validator`，且当前唯一消费者是 `quant-pivot-web`。这是被接受的取舍，目标是把一个资源的「请求 / 持久化 / 响应」契约集中在单一可发现位置，便于后续接入 OpenAPI 生成。
+- 触发重新评估的条件：出现 `quant-pivot-web` 之外的第二个契约消费者（如独立 CLI client）。届时应把 `domain::api` 抽成独立的 `quant-pivot-contract` crate，而非散落进 web。
+- 在重新评估之前，**不要**把 `*Request` / `*View` 移进 `quant-pivot-web`，保持本范式一致。
 
 ## 持久化 DTO 范式（`domain/<ctx>/`）
 
@@ -73,7 +73,7 @@ API 契约类型（`*Request` / `*View` / `*Response`）**留在 `oxide-arb-mode
 ### 入站查询 `*Query`
 
 - 分页 + 过滤参数（如 `MarketPageQuery`），或时间窗口参数（如 `TimeWindowQuery`）。分页类复用共享的 `PageRequest`，用 `#[serde(flatten)]` 保持 query string 扁平（`?keyword=&status=&page=&size=`）。
-- 提供 `normalized(self) -> Self` 收敛分页窗口；时间窗口类提供 `resolve(...)`，把 `from`/`to`/默认回看/最大跨度等校验收敛在契约类型内，返回**领域错误**（不依赖 `oxide-arb-web` 的 `WebError`），web 侧通过 `From<_> for WebError` 翻译。
+- 提供 `normalized(self) -> Self` 收敛分页窗口；时间窗口类提供 `resolve(...)`，把 `from`/`to`/默认回看/最大跨度等校验收敛在契约类型内，返回**领域错误**（不依赖 `quant-pivot-web` 的 `WebError`），web 侧通过 `From<_> for WebError` 翻译。
 - `*Query` 是 repository 读方法（`page` / 窗口查询）的入参契约；尽管被持久层消费，它仍是"外部不可信入参"，归 `domain/api/`。
 - 跨资源复用的读过滤领域类型（`TimeWindow` / `MarketFilter`）住在 `domain/query.rs`，被 `domain/api` 的 `*Query::resolve()` 与 repository 读方法共用。
 
@@ -111,7 +111,7 @@ API 契约类型（`*Request` / `*View` / `*Response`）**留在 `oxide-arb-mode
 - 完整、无歧义的映射用 `From`；形变 / 可能失败的映射用 `TryFrom`。
 - 转换实现与「下游类型」同住一个模块，遵守孤儿规则。
 
-## Web handler 范式（`oxide-arb-web/routes/`）
+## Web handler 范式（`quant-pivot-web/routes/`）
 
 ```text
 ValidatedJson<CreateUserRequest>       // 提取 + 校验
@@ -144,4 +144,4 @@ ValidatedJson<CreateUserRequest>       // 提取 + 校验
 - ❌ 在持久化 DTO 上加 `#[validate]`，或在 `*Request` 上加 SeaORM 派生。
 - ❌ 在 `*Patch` 中放入凭证或 `status` 等需专用方法的敏感转换字段。
 - ❌ 在 handler 之外（如 DTO 的 `Default` / 构造器）写死业务默认值。
-- ❌ 在没有第二个消费者之前把 `domain::api` 移出 `oxide-arb-models`。
+- ❌ 在没有第二个消费者之前把 `domain::api` 移出 `quant-pivot-models`。

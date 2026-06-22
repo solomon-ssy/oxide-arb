@@ -4,8 +4,8 @@
 //! [`ShardHealthSummary`] so operators get one periodic aggregate line (via
 //! the core `HealthChecker`) instead of per-shard reconnect log spam.
 
-use oxide_arb_models::types::TokenId;
 use parking_lot::RwLock;
+use quant_pivot_models::types::TokenId;
 use std::{
     collections::{HashMap, HashSet},
     fmt::{self, Display, Formatter},

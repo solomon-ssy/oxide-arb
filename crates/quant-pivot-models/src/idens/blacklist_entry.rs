@@ -1,4 +1,4 @@
-use oxide_arb_macros::oxide_schema;
+use quant_pivot_macros::quant_schema;
 use sea_orm::sea_query::{ColumnDef, Table, TableCreateStatement};
 
 use crate::schema::{
@@ -6,7 +6,7 @@ use crate::schema::{
     timestamp_with_write_default,
 };
 
-#[oxide_schema(lifecycle = "runtime")]
+#[quant_schema(lifecycle = "runtime")]
 pub enum BlacklistEntry {
     Table,
     MarketId,

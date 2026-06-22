@@ -1,6 +1,6 @@
 //! CTF redemption client (Polygon on-chain).
 //!
-//! Contract addresses are compiled-in chain facts (`oxide_arb_models::constants`);
+//! Contract addresses are compiled-in chain facts (`quant_pivot_models::constants`);
 //! execution uses the immutable [`ResolvedRedeemPlan`] carried on each
 //! [`RedeemRequest`] (snapshotted at fill time). The routing policy itself is
 //! hot-reloadable through [`CtfRedeemClient::stage_reload`] for pre-trade
@@ -19,13 +19,13 @@ use alloy::{
     sol,
 };
 use arc_swap::ArcSwap;
-use oxide_arb_error::redeem::{RedeemError, RedeemSendError};
-use oxide_arb_models::{
+use quant_pivot_error::redeem::{RedeemError, RedeemSendError};
+use quant_pivot_models::{
     constants::{
         CTF_ADDRESS, CTF_COLLATERAL_ADAPTER_ADDRESS, NEG_RISK_ADAPTER_ADDRESS,
         NEG_RISK_COLLATERAL_ADAPTER_ADDRESS, POLYGON_CHAIN_ID, USDC_E_ADDRESS, USDC_SCALE,
     },
-    enums::common::{ExecutionMode, ResolvedRedeemRoute},
+    enums::{LegacyExecutionMode, common::ResolvedRedeemRoute},
     runtime_config::{RedeemRoutingPolicy, ResolvedRedeemPlan},
     types::{Shares, TokenId, Usd},
 };
@@ -148,7 +148,7 @@ impl CtfRedeemClient {
 
     pub async fn redeem(&self, req: &RedeemRequest) -> Result<RedeemOutcome, RedeemError> {
         match req.execution_mode {
-            ExecutionMode::DryRun => {
+            LegacyExecutionMode::DryRun => {
                 tracing::info!(
                     condition_id = %req.condition_id,
                     route = %req.plan.route,
@@ -156,7 +156,7 @@ impl CtfRedeemClient {
                 );
                 Ok(RedeemOutcome::dry_run())
             }
-            ExecutionMode::Paper => {
+            LegacyExecutionMode::Paper => {
                 tracing::info!(
                     condition_id = %req.condition_id,
                     route = %req.plan.route,
@@ -164,7 +164,7 @@ impl CtfRedeemClient {
                 );
                 Ok(RedeemOutcome::paper(&req.condition_id))
             }
-            ExecutionMode::Live => self.redeem_live(req).await,
+            LegacyExecutionMode::Live => self.redeem_live(req).await,
         }
     }
 

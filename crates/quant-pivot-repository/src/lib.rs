@@ -1,4 +1,4 @@
-//! Data access layer for the oxide-arb platform.
+//! Data access layer for the quant-pivot platform.
 //!
 //! Provides async repository traits and implementations for:
 //!

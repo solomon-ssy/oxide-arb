@@ -1,7 +1,7 @@
 use crate::traits::PotentialLossRepository;
 use chrono::{DateTime, Utc};
-use oxide_arb_error::storage::StorageError;
-use oxide_arb_models::{
+use quant_pivot_error::storage::StorageError;
+use quant_pivot_models::{
     domain::{NewPotentialLoss, PotentialLossInfo, ResolvePotentialLoss},
     entities::potential_loss_ledger::{Column, Entity},
     enums::common::LedgerStatus,
@@ -31,7 +31,7 @@ pub struct PgPotentialLossRepositoryTxn<'a> {
 }
 
 #[derive(Debug, Clone, DeriveIntoActiveModel)]
-#[sea_orm(active_model = "oxide_arb_models::entities::potential_loss_ledger::ActiveModel")]
+#[sea_orm(active_model = "quant_pivot_models::entities::potential_loss_ledger::ActiveModel")]
 struct ResolvePotentialLossPatch {
     status: LedgerStatus,
     resolved_at: Option<DateTime<Utc>>,

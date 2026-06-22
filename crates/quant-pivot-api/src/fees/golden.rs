@@ -4,7 +4,7 @@ use super::{
     formula::calculate_fee,
     reference::{platform_fee_usd, production_fee_usd, round_fee},
 };
-use oxide_arb_models::types::{Price, Shares, Usd};
+use quant_pivot_models::types::{Price, Shares, Usd};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 

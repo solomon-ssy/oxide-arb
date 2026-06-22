@@ -1,18 +1,11 @@
-//! System status + control endpoints.
-//!
-//! Reads (`System:Read`) project the live aggregate status / health views.
-//! Controls are money-critical: `halt` / `resume` engage the risk halt + the
-//! execution kill switch, and the execution-mode hot-swap is **governed**
-//! (`ActingRoleGoverned(System, SwitchMode)`) — entering `Live` is the highest
-//! risk operator action, so it requires the strict acting-role authorization and
-//! a mandatory reason, and is recorded on the operation log.
+//! System status + quant runtime mode endpoints (Phase 0).
 
 use actix_web::{http::Method, web};
-use oxide_arb_models::{
+use quant_pivot_models::{
     config::DeployConfig,
     domain::{
-        EmergencyAckRequest, HaltRequest, HealthReport, MaterializationScheduleStatusView,
-        ModeTransitionReport, ResumeRequest, SwitchModeRequest, SystemBalanceView, SystemStatus,
+        HealthReport, QuantModeTransitionReport, QuantModeView, SwitchQuantModeRequest,
+        SystemStatus,
     },
     enums::{
         operation_log::OperationCategory,
@@ -30,7 +23,6 @@ use crate::{
     state::AppState,
 };
 
-/// System status + control routes.
 pub(crate) fn route_specs() -> Vec<RouteSpec> {
     vec![
         spec(
@@ -47,39 +39,15 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
         ),
         spec(
             Method::GET,
-            "/system/balance",
+            "/system/quant-mode",
             Rule::ResourceOp(ResourceType::System, Operation::Read),
-            balance,
-        ),
-        spec(
-            Method::GET,
-            "/system/materialization-schedules",
-            Rule::ResourceOp(ResourceType::ControlFactor, Operation::Read),
-            materialization_schedules,
+            quant_mode,
         ),
         spec(
             Method::POST,
-            "/system/halt",
-            Rule::ResourceOp(ResourceType::System, Operation::Halt),
-            halt,
-        ),
-        spec(
-            Method::POST,
-            "/system/resume",
-            Rule::ResourceOp(ResourceType::System, Operation::Resume),
-            resume,
-        ),
-        spec(
-            Method::POST,
-            "/system/emergency/ack",
-            Rule::ResourceOp(ResourceType::System, Operation::Resume),
-            ack_execution_emergency,
-        ),
-        spec(
-            Method::POST,
-            "/system/mode",
+            "/system/quant-mode",
             Rule::ActingRoleGoverned(ResourceType::System, Operation::SwitchMode),
-            switch_mode,
+            switch_quant_mode,
         ),
         spec(
             Method::GET,
@@ -90,18 +58,12 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
     ]
 }
 
-/// `GET /api/system/deploy-config` — read-only deploy configuration, masked.
-///
-/// DB passwords and the JWT secret are masked; key material is never included
-/// (only presence flags). Deploy values change only with a restart — runtime
-/// tunables live under `/api/runtime-config`.
 pub async fn deploy_config(
     state: web::Data<AppState>,
 ) -> Result<WebResponse<serde_json::Value>, WebError> {
     Ok(WebResponse::ok(masked_deploy_view(&state.deploy)))
 }
 
-/// Build the masked deploy-config projection.
 fn masked_deploy_view(deploy: &DeployConfig) -> serde_json::Value {
     serde_json::json!({
         "polymarket": {
@@ -142,30 +104,13 @@ fn masked_deploy_view(deploy: &DeployConfig) -> serde_json::Value {
             "private_key_present": deploy.keys.private_key_present(),
         },
         "web": masked_web_view(deploy),
-        "execution": {
-            "book_apply": {
-                "shard_count": deploy.execution.book_apply.shard_count,
-                "channel_capacity": deploy.execution.book_apply.channel_capacity,
-            },
-        },
-        "settlement": {
-            "lifecycle": {
-                "channel_capacity": deploy.settlement.lifecycle.channel_capacity,
-            },
-        },
     })
 }
 
-/// Mask a secret: empty stays empty, anything else becomes `***`.
 const fn mask_secret(value: &str) -> &'static str {
     if value.is_empty() { "" } else { "***" }
 }
 
-/// Mask a URL that embeds credentials in its authority (`user:pass@host`).
-///
-/// URLs without userinfo pass through unchanged so operators can verify the
-/// endpoint; anything with an `@` in the authority is masked whole rather
-/// than risking a partial credential leak.
 fn mask_url_credentials(url: &str) -> &str {
     let authority = url.split_once("://").map_or(url, |(_, rest)| rest);
     let authority = authority.split(['/', '?', '#']).next().unwrap_or(authority);
@@ -185,7 +130,6 @@ fn masked_db_view(deploy: &DeployConfig) -> serde_json::Value {
             "min_connections": deploy.db.postgres.min_connections,
         },
         "clickhouse": {
-            // The URL may embed credentials in its authority — masked if so.
             "url": mask_url_credentials(&deploy.db.clickhouse.url),
             "database": deploy.db.clickhouse.database,
             "user": deploy.db.clickhouse.user,
@@ -232,120 +176,38 @@ fn masked_web_view(deploy: &DeployConfig) -> serde_json::Value {
     })
 }
 
-/// `GET /api/system/status` — aggregate live system status.
 pub async fn status(state: web::Data<AppState>) -> Result<WebResponse<SystemStatus>, WebError> {
-    Ok(WebResponse::ok(state.control.system_status().await))
+    Ok(WebResponse::ok(state.control.system_status()))
 }
 
-/// `GET /api/system/health` — subsystem health report.
 pub async fn health(state: web::Data<AppState>) -> Result<WebResponse<HealthReport>, WebError> {
     Ok(WebResponse::ok(state.control.health().await))
 }
 
-/// `GET /api/system/balance` — single operator money-state view.
-pub async fn balance(
+pub async fn quant_mode(
     state: web::Data<AppState>,
-) -> Result<WebResponse<SystemBalanceView>, WebError> {
-    Ok(WebResponse::ok(state.control.system_balance().await))
+) -> Result<WebResponse<QuantModeView>, WebError> {
+    Ok(WebResponse::ok(QuantModeView {
+        mode: state.control.quant_runtime_mode(),
+    }))
 }
 
-/// `GET /api/system/materialization-schedules` — mode-aware schedule status.
-pub async fn materialization_schedules(
+pub async fn switch_quant_mode(
     state: web::Data<AppState>,
-) -> Result<WebResponse<Vec<MaterializationScheduleStatusView>>, WebError> {
-    Ok(WebResponse::ok(
-        state.materialization_schedule_statuses().await?,
-    ))
-}
-
-/// `POST /api/system/halt` — halt trading (risk halt + execution kill switch).
-pub async fn halt(
-    state: web::Data<AppState>,
-    op_ctx: OperationCtx,
-    body: ValidatedJson<HaltRequest>,
-) -> Result<WebResponse<()>, WebError> {
-    let body = body.into_inner();
-    op_ctx.set_action(OperationCategory::System, "system.halt");
-    op_ctx.set_detail(serde_json::json!({ "reason": body.reason }));
-    state.control.halt(body.reason).await;
-    Ok(WebResponse::ok(()))
-}
-
-/// `POST /api/system/resume` — resume trading after operator acknowledgement.
-pub async fn resume(
-    state: web::Data<AppState>,
-    op_ctx: OperationCtx,
-    body: ValidatedJson<ResumeRequest>,
-) -> Result<WebResponse<()>, WebError> {
-    let body = body.into_inner();
-    op_ctx.set_action(OperationCategory::System, "system.resume");
-    state.control.resume(&body.operator_ack).await?;
-    Ok(WebResponse::ok(()))
-}
-
-/// `POST /api/system/emergency/ack` — clear reservation/persistence execution emergency.
-pub async fn ack_execution_emergency(
-    state: web::Data<AppState>,
-    op_ctx: OperationCtx,
-    body: ValidatedJson<EmergencyAckRequest>,
-) -> Result<WebResponse<()>, WebError> {
-    let body = body.into_inner();
-    op_ctx.set_action(OperationCategory::System, "system.emergency.ack");
-    op_ctx.set_detail(serde_json::json!({ "operator_ack": body.operator_ack }));
-    state
-        .control
-        .ack_execution_emergency(&body.operator_ack)
-        .await?;
-    Ok(WebResponse::ok(()))
-}
-
-/// `POST /api/system/mode` — governed runtime execution-mode hot-swap.
-///
-/// `ActingRoleGoverned`, so authz has already resolved an [`ActingRole`]; the
-/// operator's user id is used as the acknowledgement recorded on the risk audit.
-pub async fn switch_mode(
-    state: web::Data<AppState>,
-    actor: AuthedActor,
+    _actor: AuthedActor,
     _acting_role: ActingRole,
     op_ctx: OperationCtx,
-    body: ValidatedJson<SwitchModeRequest>,
-) -> Result<WebResponse<ModeTransitionReport>, WebError> {
+    body: ValidatedJson<SwitchQuantModeRequest>,
+) -> Result<WebResponse<QuantModeTransitionReport>, WebError> {
     let body = body.into_inner();
-    op_ctx.set_action(OperationCategory::System, "system.switch_mode");
+    op_ctx.set_action(OperationCategory::System, "system.switch_quant_mode");
     op_ctx.set_detail(serde_json::json!({
         "target_mode": body.mode.as_str(),
         "reason": body.reason,
     }));
     let report = state
         .control
-        .switch_execution_mode(body.mode, &actor.claims.sub)
+        .switch_quant_mode(body.mode, &body.reason)
         .await?;
     Ok(WebResponse::ok(report))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::mask_url_credentials;
-
-    #[test]
-    fn url_without_userinfo_passes_through() {
-        assert_eq!(
-            mask_url_credentials("http://ch.internal:8123"),
-            "http://ch.internal:8123"
-        );
-        // An `@` outside the authority (path/query) is not a credential.
-        assert_eq!(
-            mask_url_credentials("http://ch.internal:8123/db?owner=a@b"),
-            "http://ch.internal:8123/db?owner=a@b"
-        );
-    }
-
-    #[test]
-    fn url_with_embedded_credentials_is_masked_whole() {
-        assert_eq!(
-            mask_url_credentials("http://user:pass@ch.internal:8123"),
-            "***"
-        );
-        assert_eq!(mask_url_credentials("user:pass@ch.internal"), "***");
-    }
 }

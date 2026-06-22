@@ -2,29 +2,21 @@ use super::{
     book_store::BookStore, event_source::PipelineEventSource, market_registry::MarketRegistry,
 };
 use crate::{
-    control::status::SystemStatusNudge,
     infra::sharding::shard_index,
     observability::{
-        alert_dispatcher::{Alert, AlertDispatcher},
-        backpressure::BackpressurePolicy,
-        book_fact_writer::BookFactWriter,
-        metrics_hub::MetricsHub,
+        backpressure::BackpressurePolicy, book_fact_writer::BookFactWriter, metrics_hub::MetricsHub,
     },
+    service::system_status_nudge::SystemStatusNudge,
 };
-use chrono::Utc;
-use flume::{Receiver, Sender};
-use oxide_arb_error::OxideError;
-use oxide_arb_models::{
-    domain::{
-        BookSnapshotCmd, PriceDeltaCmd, latency::LatencyTrace, pipeline::PipelineEvent,
-        settlement::MarketSettlementRequest,
-    },
+use flume::Receiver;
+use quant_pivot_error::QuantError;
+use quant_pivot_models::{
+    domain::{BookSnapshotCmd, PriceDeltaCmd, latency::LatencyTrace, pipeline::PipelineEvent},
     enums::{
         clickhouse::{ChBookEventType, ChSnapshotReason},
-        common::{AlertCategory, AlertLevel, AlertSource, SettlementTrigger},
         pipeline::ShardConnectionStatus,
     },
-    types::{Shares, TokenId},
+    types::Shares,
 };
 use std::{
     sync::{
@@ -44,16 +36,12 @@ pub struct DataPipelineDeps {
     pub event_source: Arc<dyn PipelineEventSource>,
     pub book_store: Arc<BookStore>,
     pub market_registry: Arc<MarketRegistry>,
-    pub coalescer_tx: flume::Sender<TokenId>,
-    pub settlement_tx: flume::Sender<MarketSettlementRequest>,
     pub metrics: Arc<MetricsHub>,
-    pub alerts: Arc<AlertDispatcher>,
     pub backpressure: Arc<BackpressurePolicy>,
     pub book_fact_writer: Option<Arc<BookFactWriter>>,
     pub book_shard_count: usize,
     pub book_channel_capacity: usize,
     pub shutdown: CancellationToken,
-    /// Nudge the system-status broadcaster on the first market-data book event.
     pub status_nudge: SystemStatusNudge,
 }
 
@@ -62,10 +50,7 @@ pub struct DataPipeline {
     event_source: Arc<dyn PipelineEventSource>,
     book_store: Arc<BookStore>,
     market_registry: Arc<MarketRegistry>,
-    coalescer_tx: flume::Sender<TokenId>,
-    settlement_tx: flume::Sender<MarketSettlementRequest>,
     metrics: Arc<MetricsHub>,
-    alerts: Arc<AlertDispatcher>,
     backpressure: Arc<BackpressurePolicy>,
     book_fact_writer: Option<Arc<BookFactWriter>>,
     book_shard_count: usize,
@@ -81,10 +66,7 @@ impl DataPipeline {
             event_source: deps.event_source,
             book_store: deps.book_store,
             market_registry: deps.market_registry,
-            coalescer_tx: deps.coalescer_tx,
-            settlement_tx: deps.settlement_tx,
             metrics: deps.metrics,
-            alerts: deps.alerts,
             backpressure: deps.backpressure,
             book_fact_writer: deps.book_fact_writer,
             book_shard_count: deps.book_shard_count,
@@ -96,7 +78,7 @@ impl DataPipeline {
     }
 
     /// Run until shutdown or channel close.
-    pub async fn run(&self) -> Result<(), OxideError> {
+    pub async fn run(&self) -> Result<(), QuantError> {
         let shard_count = self.book_shard_count.max(1);
         let mut book_senders = Vec::with_capacity(shard_count);
         let mut book_receivers = Vec::with_capacity(shard_count);
@@ -112,10 +94,7 @@ impl DataPipeline {
                 shard_id,
                 book_store: Arc::clone(&self.book_store),
                 market_registry: Arc::clone(&self.market_registry),
-                coalescer_tx: self.coalescer_tx.clone(),
-                settlement_tx: self.settlement_tx.clone(),
                 metrics: Arc::clone(&self.metrics),
-                alerts: Arc::clone(&self.alerts),
                 backpressure: Arc::clone(&self.backpressure),
                 book_fact_writer: self.book_fact_writer.as_ref().map(Arc::clone),
             };
@@ -152,7 +131,7 @@ impl DataPipeline {
                         for handle in book_threads {
                             handle.join().ok();
                         }
-                        return Err(OxideError::Internal(
+                        return Err(QuantError::Internal(
                             "Pipeline event channel closed".into(),
                         ));
                     }
@@ -172,10 +151,7 @@ struct BookApplyWorker {
     shard_id: usize,
     book_store: Arc<BookStore>,
     market_registry: Arc<MarketRegistry>,
-    coalescer_tx: Sender<TokenId>,
-    settlement_tx: Sender<MarketSettlementRequest>,
     metrics: Arc<MetricsHub>,
-    alerts: Arc<AlertDispatcher>,
     backpressure: Arc<BackpressurePolicy>,
     book_fact_writer: Option<Arc<BookFactWriter>>,
 }
@@ -206,7 +182,7 @@ impl BookApplyWorker {
                 ..
             } => {
                 let known = self.market_registry.get_market(&market_id).is_some();
-                tracing::info!(%market_id, known, "Market resolved via WS");
+                tracing::info!(%market_id, known, "Market resolved via WS (ingest only)");
                 self.metrics.markets_resolved_ws.inc();
                 if let Some(writer) = &self.book_fact_writer {
                     writer.write_market_resolved(
@@ -216,28 +192,6 @@ impl BookApplyWorker {
                         &asset_ids,
                         timestamp_ms,
                     );
-                }
-                let request = MarketSettlementRequest {
-                    market_id: market_id.clone(),
-                    winning_token_id,
-                    winning_outcome,
-                    source: SettlementTrigger::Ws,
-                    observed_at: Utc::now(),
-                };
-                if let Err(error) = self.settlement_tx.try_send(request) {
-                    self.metrics.settlement_channel_dropped_total.inc();
-                    tracing::error!(%error, %market_id, "settlement channel send failed");
-                    self.alerts.dispatch_background(Alert::new(
-                        format!("settlement.channel_dropped.{market_id}"),
-                        AlertLevel::Warning,
-                        AlertCategory::Infrastructure,
-                        AlertSource::DataPipeline,
-                        "Settlement channel dropped",
-                        format!(
-                            "Market {market_id} resolution event was dropped; Gamma resolved-market retry is the safety net"
-                        ),
-                        Utc::now(),
-                    ));
                 }
             }
 
@@ -313,7 +267,6 @@ impl BookApplyWorker {
                 version,
             );
         }
-        self.notify_coalescer(&cmd.asset_id);
         self.metrics.book_snapshots_applied.inc();
     }
 
@@ -342,16 +295,7 @@ impl BookApplyWorker {
                 );
             }
         }
-        self.notify_coalescer(&cmd.asset_id);
         self.metrics.price_changes_applied.inc();
-    }
-
-    fn notify_coalescer(&self, asset_id: &TokenId) {
-        if self.coalescer_tx.try_send(asset_id.clone()).is_ok() {
-            self.backpressure.on_coalescer_notify_success(asset_id);
-        } else {
-            self.backpressure.on_coalescer_channel_full(asset_id);
-        }
     }
 
     /// Shard connectivity surfaces: per-transition detail stays at debug —

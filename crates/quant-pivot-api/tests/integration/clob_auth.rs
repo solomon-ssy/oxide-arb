@@ -1,7 +1,7 @@
 //! CLOB authentication: sign + optional live order probe.
 
-use oxide_arb_api::{clob::ClobClient, keystore::Keystore};
-use oxide_arb_models::{
+use quant_pivot_api::{clob::ClobClient, keystore::Keystore};
+use quant_pivot_models::{
     config::{KeySource, KeysConfig, PolymarketConfig},
     domain::order::{OrderAmount, OrderRequest},
     enums::{
@@ -14,7 +14,7 @@ use rust_decimal_macros::dec;
 use std::env::var;
 
 fn test_keystore() -> Option<Keystore> {
-    let key = var("OXIDE_ARB_TEST_PRIVATE_KEY").ok()?;
+    let key = var("QUANT_PIVOT_TEST_PRIVATE_KEY").ok()?;
     Keystore::from_config(&KeysConfig {
         source: KeySource::Env,
         private_key: Some(key),
@@ -26,10 +26,10 @@ fn test_keystore() -> Option<Keystore> {
 #[tokio::test]
 #[ignore = "requires credentials; posts FOK far from market (expect miss/reject, not auth error)"]
 async fn fok_order_sign_and_submit() {
-    let ks = test_keystore().expect("OXIDE_ARB_TEST_PRIVATE_KEY");
+    let ks = test_keystore().expect("QUANT_PIVOT_TEST_PRIVATE_KEY");
     let token_id =
-        var("OXIDE_ARB_TEST_TOKEN_ID").expect("OXIDE_ARB_TEST_TOKEN_ID decimal token id");
-    let market_id = var("OXIDE_ARB_TEST_MARKET_ID").unwrap_or_else(|_| "0x0".into());
+        var("QUANT_PIVOT_TEST_TOKEN_ID").expect("QUANT_PIVOT_TEST_TOKEN_ID decimal token id");
+    let market_id = var("QUANT_PIVOT_TEST_MARKET_ID").unwrap_or_else(|_| "0x0".into());
 
     let client = ClobClient::connect(ks.signer_arc(), &PolymarketConfig::default())
         .await

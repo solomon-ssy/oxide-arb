@@ -2,7 +2,7 @@
 //! (including the order-book projection).
 
 use crate::{
-    domain::{MarketInfo, market::book::BookSnapshot, pagination::PageRequest},
+    domain::{BookLevel, MarketInfo, market::book::BookSnapshot, pagination::PageRequest},
     enums::{
         common::{MarketCategory, TickSize},
         market::MarketStatus,
@@ -163,7 +163,7 @@ impl MarketBookSideView {
     /// Project a published [`BookSnapshot`] into decimal wire levels.
     #[must_use]
     pub fn from_snapshot(token_id: TokenId, snapshot: &BookSnapshot) -> Self {
-        let map = |levels: &[crate::domain::market::book::BookLevel]| {
+        let map = |levels: &[BookLevel]| {
             levels
                 .iter()
                 .map(|level| BookLevelView {

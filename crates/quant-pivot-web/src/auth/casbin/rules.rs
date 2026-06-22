@@ -8,7 +8,7 @@
 //!
 //! [`PermChecker`]: super::checker::PermChecker
 
-use oxide_arb_models::enums::rbac::{Operation, ResourceType};
+use quant_pivot_models::enums::rbac::{Operation, ResourceType};
 
 use crate::{
     auth::casbin::{checker::SUPER_ADMIN_ROLE, service::CasbinService},
@@ -133,7 +133,7 @@ impl Rule {
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
-    use oxide_arb_models::{
+    use quant_pivot_models::{
         domain::RoleInfo,
         enums::rbac::{Operation, ResourceType, RoleKind, RoleStatus},
         types::RoleId,
@@ -146,7 +146,7 @@ mod tests {
         Claims {
             jti: "jti".to_owned(),
             sub: "user-1".to_owned(),
-            iss: "oxide-arb".to_owned(),
+            iss: "quant-pivot".to_owned(),
             iat: 0,
             nbf: 0,
             exp: 0,

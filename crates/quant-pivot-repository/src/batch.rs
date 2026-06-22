@@ -30,7 +30,7 @@ pub const fn max_rows_per_insert(columns_per_row: usize) -> usize {
 /// # Example
 ///
 /// ```
-/// use oxide_arb_repository::batch::chunk_for_insert;
+/// use quant_pivot_repository::batch::chunk_for_insert;
 ///
 /// let items: Vec<i32> = (0..200).collect();
 /// // 10 columns per row -> 6553 rows max per batch

@@ -1,6 +1,6 @@
 //! Redis testcontainer bring-up for the JWT revocation blacklist.
 
-use oxide_arb_models::config::RedisConfig;
+use quant_pivot_models::config::RedisConfig;
 use testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner};
 use testcontainers_modules::redis::Redis;
 

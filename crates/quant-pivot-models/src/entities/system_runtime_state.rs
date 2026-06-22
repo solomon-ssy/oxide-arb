@@ -1,6 +1,6 @@
 //! `system_runtime_state` table entity (singleton row).
 
-use crate::enums::common::ExecutionMode;
+use crate::enums::quant::QuantRuntimeMode;
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub id: i32,
-    pub execution_mode: ExecutionMode,
+    pub quant_runtime_mode: QuantRuntimeMode,
     #[sea_orm(column_type = "Text")]
     pub changed_by: String,
     #[sea_orm(column_type = "Text")]

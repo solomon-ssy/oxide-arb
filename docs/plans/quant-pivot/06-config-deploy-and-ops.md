@@ -483,7 +483,7 @@ Warning：
 
 ## 11. 验收标准
 
-- `config/oxide-arb.toml` 不包含 old execution/settlement/endgame hotset。
+- `config/quant-pivot.toml` 不包含 old execution/settlement/endgame hotset。
 - `RuntimeConfig::schema_version == 3`。
 - runtime schema 不包含 `detection`、old `risk`、old `settlement`。
 - report_only 启动不需要 private key。

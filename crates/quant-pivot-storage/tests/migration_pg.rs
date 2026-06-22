@@ -1,14 +1,14 @@
 //! `PostgreSQL` migration integration tests (requires Docker).
 
 use chrono::{DateTime, Utc};
-use oxide_arb_models::{
+use quant_pivot_models::{
     config::PostgresConfig,
     entities::{blacklist_entry, risk_state, runtime_config_version},
     enums::runtime_config::RuntimeConfigVersionSource,
     schema::{catalog, trigger::TriggerKind},
     types::{AuditEventId, MarketId, OperationLogId, RuntimeConfigVersionId},
 };
-use oxide_arb_storage::postgres::{
+use quant_pivot_storage::postgres::{
     PostgresPool,
     migration::{Migrator, MigratorTrait},
 };
@@ -92,7 +92,7 @@ fn test_pg_config(port: u16) -> PostgresConfig {
         work_mem: "16MB".into(),
         verify_session_params: false,
         statement_cache_capacity: 100,
-        application_name: "oxide-arb-test".into(),
+        application_name: "quant-pivot-test".into(),
     }
 }
 

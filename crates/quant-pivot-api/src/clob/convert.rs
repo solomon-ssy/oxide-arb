@@ -1,7 +1,7 @@
 //! Conversions between domain [`Side`] and Polymarket SDK CLOB types.
 
-use oxide_arb_models::enums::common::Side;
 use polymarket_client_sdk_v2::clob::types::Side as SdkSide;
+use quant_pivot_models::enums::common::Side;
 use thiserror::Error;
 
 /// Failed to map CLOB SDK [`SdkSide`] into domain [`Side`].

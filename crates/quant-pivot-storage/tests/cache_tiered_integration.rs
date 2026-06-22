@@ -1,10 +1,10 @@
 //! `TieredCache` integration tests (requires Docker for Redis).
 
-use oxide_arb_models::{
+use quant_pivot_models::{
     config::RedisConfig,
     types::{EventId, MarketId},
 };
-use oxide_arb_storage::cache::{
+use quant_pivot_storage::cache::{
     CacheBackend, CacheKey, MokaBackend, RedisBackend, TieredCache, connect_pool,
 };
 use testcontainers::{ImageExt, runners::AsyncRunner};

@@ -1,23 +1,23 @@
 # Network integration tests
 
-Live tests for `oxide-arb-api` require outbound HTTPS/WSS to Polymarket and (optionally) Polygon mainnet RPC. They are **ignored by default** so `cargo test` stays deterministic in CI.
+Live tests for `quant-pivot-api` require outbound HTTPS/WSS to Polymarket and (optionally) Polygon mainnet RPC. They are **ignored by default** so `cargo test` stays deterministic in CI.
 
 ## Run all live tests
 
 ```bash
-export OXIDE_ARB__POLYMARKET__ONCHAIN__RPC_URL="https://polygon-mainnet.g.alchemy.com/v2/YOUR_KEY"
-export OXIDE_ARB_TEST_RESOLVED_CONDITION_ID="0x..."   # see CTF section below
+export QUANT_PIVOT__POLYMARKET__ONCHAIN__RPC_URL="https://polygon-mainnet.g.alchemy.com/v2/YOUR_KEY"
+export QUANT_PIVOT_TEST_RESOLVED_CONDITION_ID="0x..."   # see CTF section below
 
-cargo test -p oxide-arb-api --features integration -- --ignored --test-threads=1
+cargo test -p quant-pivot-api --features integration -- --ignored --test-threads=1
 ```
 
 Optional overrides:
 
 | Variable | Purpose |
 |----------|---------|
-| `OXIDE_ARB_TEST_TOKEN_ID` | CLOB decimal token id for WS book test (skips Gamma discovery) |
-| `OXIDE_ARB_TEST_POLYGON_RPC_URL` | Alias for Polygon RPC if you prefer not to use `OXIDE_ARB__*` |
-| `OXIDE_ARB_TEST_PRIVATE_KEY` | CLOB auth / FOK probe (`integration/clob_auth.rs`) |
+| `QUANT_PIVOT_TEST_TOKEN_ID` | CLOB decimal token id for WS book test (skips Gamma discovery) |
+| `QUANT_PIVOT_TEST_POLYGON_RPC_URL` | Alias for Polygon RPC if you prefer not to use `QUANT_PIVOT__*` |
+| `QUANT_PIVOT_TEST_PRIVATE_KEY` | CLOB auth / FOK probe (`integration/clob_auth.rs`) |
 
 ## Polygon RPC (Alchemy)
 
@@ -31,12 +31,12 @@ https://polygon-mainnet.g.alchemy.com/v2/<API_KEY>
 2. Copy **HTTPS** URL into config or env:
 
 ```bash
-export OXIDE_ARB__POLYMARKET__ONCHAIN__RPC_URL="https://polygon-mainnet.g.alchemy.com/v2/xxxx"
+export QUANT_PIVOT__POLYMARKET__ONCHAIN__RPC_URL="https://polygon-mainnet.g.alchemy.com/v2/xxxx"
 ```
 
 No contract allowlisting is required for the view calls used by `CtfOracleSource` (`payoutNumerators`, `payoutDenominator` on `CTF_ADDRESS`).
 
-## CTF oracle fixture (`OXIDE_ARB_TEST_RESOLVED_CONDITION_ID`)
+## CTF oracle fixture (`QUANT_PIVOT_TEST_RESOLVED_CONDITION_ID`)
 
 This must be a **condition_id** (66-char `0x` + 32 bytes), **not** a CLOB decimal `token_id`.
 
@@ -50,7 +50,7 @@ Verify on-chain: `payoutDenominator(conditionId) > 0`.
 
 ## WebSocket book test
 
-`tests/integration/ws_book.rs` subscribes via `ClobWsManager` and waits for a `BookSnapshot` with depth. Token id is discovered from Gamma unless `OXIDE_ARB_TEST_TOKEN_ID` is set.
+`tests/integration/ws_book.rs` subscribes via `ClobWsManager` and waits for a `BookSnapshot` with depth. Token id is discovered from Gamma unless `QUANT_PIVOT_TEST_TOKEN_ID` is set.
 
 ## CI
 

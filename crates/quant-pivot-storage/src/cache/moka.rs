@@ -3,7 +3,7 @@
 use crate::cache::backend::CacheBackend;
 use async_trait::async_trait;
 use moka::{Expiry, future::Cache};
-use oxide_arb_error::storage::StorageError;
+use quant_pivot_error::storage::StorageError;
 use std::time::{Duration, Instant};
 
 #[derive(Clone)]

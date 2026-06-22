@@ -1,6 +1,6 @@
 //! `user` table — RBAC account identities.
 
-use oxide_arb_macros::oxide_schema;
+use quant_pivot_macros::quant_schema;
 use sea_orm::{
     Iden,
     sea_query::{ColumnDef, Index, Table, TableCreateStatement},
@@ -22,7 +22,7 @@ use crate::{
 const USERNAME_LEN: u32 = 64;
 
 /// RBAC user account. The primary key is the stable Casbin subject.
-#[oxide_schema(lifecycle = "control")]
+#[quant_schema(lifecycle = "control")]
 pub enum User {
     Table,
     Id,

@@ -15,7 +15,7 @@
 
 use std::str::FromStr;
 
-use oxide_arb_error::rbac::RbacError;
+use quant_pivot_error::rbac::RbacError;
 use sea_orm::Iterable;
 
 /// Casbin policy-row layout — the single source of truth for how RBAC policy
@@ -93,6 +93,7 @@ active_string_enum! {
         Replay => "replay",
         Analytics => "analytics",
         Audit => "audit",
+        QuantReport => "quant_report",
         OperationLog => "operation_log",
         User => "user",
         Role => "role",
@@ -186,14 +187,17 @@ pub static RESOURCE_OPERATIONS: &[(ResourceType, &[Operation])] = &[
         ],
     ),
     (ResourceType::Market, &[Operation::Read, Operation::Update]),
+    (ResourceType::QuantReport, &[Operation::Read]),
     (ResourceType::Opportunity, &[Operation::Read]),
-    (ResourceType::Trade, &[Operation::Read, Operation::Update]),
+    (ResourceType::Trade, &[Operation::Read]),
     (ResourceType::Pnl, &[Operation::Read]),
-    (ResourceType::Risk, &[Operation::Read, Operation::Reset]),
-    (
-        ResourceType::Blacklist,
-        &[Operation::Read, Operation::Create, Operation::Delete],
-    ),
+    (ResourceType::Risk, &[Operation::Read]),
+    (ResourceType::Blacklist, &[Operation::Read]),
+    (ResourceType::ControlFactor, &[Operation::Read]),
+    (ResourceType::Publication, &[Operation::Read]),
+    (ResourceType::Materialization, &[Operation::Read]),
+    (ResourceType::Replay, &[Operation::Read]),
+    (ResourceType::Analytics, &[Operation::Read]),
     (
         ResourceType::RuntimeConfig,
         &[
@@ -203,20 +207,6 @@ pub static RESOURCE_OPERATIONS: &[(ResourceType, &[Operation])] = &[
             Operation::Rollback,
         ],
     ),
-    (
-        ResourceType::ControlFactor,
-        &[
-            Operation::Read,
-            Operation::Reject,
-            Operation::Shadow,
-            Operation::Publish,
-            Operation::Emergency,
-        ],
-    ),
-    (ResourceType::Publication, &[Operation::Rollback]),
-    (ResourceType::Materialization, &[Operation::Enqueue]),
-    (ResourceType::Replay, &[Operation::Read, Operation::Create]),
-    (ResourceType::Analytics, &[Operation::Read]),
     (ResourceType::Audit, &[Operation::Read]),
     (ResourceType::OperationLog, &[Operation::Read]),
     (
@@ -335,7 +325,7 @@ mod tests {
     fn resource_allows_matches_catalog() {
         assert!(ResourceType::System.allows(Operation::Halt));
         assert!(!ResourceType::System.allows(Operation::Publish));
-        assert!(ResourceType::ControlFactor.allows(Operation::Publish));
-        assert!(!ResourceType::Opportunity.allows(Operation::Delete));
+        assert!(ResourceType::QuantReport.allows(Operation::Read));
+        assert!(!ResourceType::QuantReport.allows(Operation::Delete));
     }
 }

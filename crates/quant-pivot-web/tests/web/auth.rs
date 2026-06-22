@@ -1,7 +1,7 @@
 //! Authentication integration tests.
 
 use actix_web::http::{StatusCode, header::AUTHORIZATION};
-use oxide_arb_models::domain::UserInfo;
+use quant_pivot_models::domain::UserInfo;
 use serde_json::json;
 
 use crate::{

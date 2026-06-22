@@ -8,8 +8,8 @@
 //!
 //! This string is the single source of truth for the model shape and is kept
 //! byte-for-byte in sync with the policy encoding in
-//! [`oxide_arb_models::enums::rbac::casbin`] and the adapter/repository tests
-//! (`crates/oxide-arb-repository/tests/pg_rbac.rs`).
+//! [`quant_pivot_models::enums::rbac::casbin`] and the adapter/repository tests
+//! (`crates/quant-pivot-repository/tests/pg_rbac.rs`).
 
 /// Casbin model definition: 4-tuple matching with a `super_admin` short-circuit.
 ///

@@ -20,8 +20,8 @@
 //! [`has_policy`]: CasbinService::has_policy
 
 use casbin::{CoreApi, DefaultModel, Enforcer, MgmtApi};
-use oxide_arb_models::enums::rbac::casbin::OBJECT_TYPE_RESOURCE;
-use oxide_arb_repository::postgres::PgCasbinAdapter;
+use quant_pivot_models::enums::rbac::casbin::OBJECT_TYPE_RESOURCE;
+use quant_pivot_repository::postgres::PgCasbinAdapter;
 use sea_orm::DatabaseConnection;
 use tokio::sync::RwLock;
 

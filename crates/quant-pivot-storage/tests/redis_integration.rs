@@ -1,7 +1,7 @@
 //! Redis cache backend integration tests (requires Docker).
 
-use oxide_arb_models::config::RedisConfig;
-use oxide_arb_storage::cache::{CacheBackend, RedisBackend, connect_pool};
+use quant_pivot_models::config::RedisConfig;
+use quant_pivot_storage::cache::{CacheBackend, RedisBackend, connect_pool};
 use std::time::Duration;
 use testcontainers::{ImageExt, runners::AsyncRunner};
 

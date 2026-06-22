@@ -6,7 +6,7 @@ use crate::{
     types::{ControlFactorId, FactorPublicationId},
 };
 use chrono::{DateTime, Utc};
-use oxide_arb_error::control::GovernanceError;
+use quant_pivot_error::control::GovernanceError;
 use serde::{Deserialize, Serialize};
 
 /// Publication pointer consumed by live refreshers. Live behavior follows the active row.

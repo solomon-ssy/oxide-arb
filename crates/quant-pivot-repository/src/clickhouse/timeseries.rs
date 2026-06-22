@@ -3,8 +3,8 @@ use crate::traits::{
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use oxide_arb_error::storage::StorageError;
-use oxide_arb_models::{
+use quant_pivot_error::storage::StorageError;
+use quant_pivot_models::{
     clickhouse::{
         AuditStageCountRow, BookDecisionContextRow, BookL2ReplayRow, BookMicrostructureRow,
         BookSnapshotRow, CalibrationSnapshotRow, OpportunityAuditRow, OpportunityDetectionRow,
@@ -15,7 +15,7 @@ use oxide_arb_models::{
     enums::clickhouse::ChOpportunityAuditStage,
     types::{OpportunityId, TokenId},
 };
-use oxide_arb_storage::clickhouse::{BatchInserter, ChWriteManager, ChWriteMetrics};
+use quant_pivot_storage::clickhouse::{BatchInserter, ChWriteManager, ChWriteMetrics};
 use std::{sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
 

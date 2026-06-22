@@ -8,16 +8,17 @@ use crate::{
     domain::{NullablePatch, Patch},
     enums::{
         common::{
-            ExecutionMode, PositionStatus, RedeemResolutionSource, RedeemStatus,
-            ResolvedRedeemRoute, SettlementAccountingStatus, SettlementTrigger, Side,
+            PositionStatus, RedeemResolutionSource, RedeemStatus, ResolvedRedeemRoute,
+            SettlementAccountingStatus, SettlementTrigger, Side,
         },
+        legacy::LegacyExecutionMode,
         risk::ReservationStatus,
     },
     runtime_config::ResolvedRedeemPlan,
     types::{MarketId, PositionId, Price, ReservationId, Shares, TokenId, TradeId, Usd},
 };
 use chrono::{DateTime, Utc};
-use oxide_arb_error::redeem::RedeemError;
+use quant_pivot_error::redeem::RedeemError;
 use rust_decimal::Decimal;
 use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
 use serde::{Deserialize, Serialize};
@@ -33,7 +34,7 @@ pub struct PositionInfo {
     pub market_id: MarketId,
     pub token_id: TokenId,
     pub side: Side,
-    pub execution_mode: ExecutionMode,
+    pub execution_mode: LegacyExecutionMode,
     pub shares: Shares,
     pub avg_entry_price: Price,
     pub total_cost_usd: Usd,
@@ -185,7 +186,7 @@ pub struct NewPosition {
     pub market_id: MarketId,
     pub token_id: TokenId,
     pub side: Side,
-    pub execution_mode: ExecutionMode,
+    pub execution_mode: LegacyExecutionMode,
     pub shares: Shares,
     pub avg_entry_price: Price,
     pub total_cost_usd: Usd,

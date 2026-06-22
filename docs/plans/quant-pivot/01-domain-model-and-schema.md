@@ -56,7 +56,7 @@
 
 ## 2. 新 Postgres 表
 
-所有表必须通过 `oxide_schema` iden、SeaORM entity、domain persistence DTO、repository trait、migration graph 增加。禁止手写裸 migration。
+所有表必须通过 `quant_schema` iden、SeaORM entity、domain persistence DTO、repository trait、migration graph 增加。禁止手写裸 migration。
 
 ### 2.1 Universe
 
@@ -591,7 +591,7 @@ RBAC / admin 基础表保留：
 目标布局：
 
 ```text
-crates/oxide-arb-models/src/domain/
+crates/quant-pivot-models/src/domain/
 ├── quant/
 │   ├── universe.rs
 │   ├── feature.rs
@@ -704,7 +704,7 @@ crates/oxide-arb-models/src/domain/
 
 ## 9. Schema 验收标准
 
-- `cargo test -p oxide-arb-models schema` 覆盖新增 idens。
+- `cargo test -p quant-pivot-models schema` 覆盖新增 idens。
 - Postgres migration test 覆盖新表创建、索引、外键、seed。
 - ClickHouse row serialization snapshot 覆盖所有新 fact。
 - DTO tests 覆盖 sensitive stripping、query normalization、status transition request。

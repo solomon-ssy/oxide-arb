@@ -6,8 +6,8 @@
 
 use crate::traits::RuntimeConfigVersionRepository;
 use chrono::{DateTime, Utc};
-use oxide_arb_error::storage::StorageError;
-use oxide_arb_models::{
+use quant_pivot_error::storage::StorageError;
+use quant_pivot_models::{
     domain::{
         NewRuntimeConfigActivation, NewRuntimeConfigVersion, RuntimeConfigActivationInfo,
         RuntimeConfigVersionInfo,
@@ -15,7 +15,7 @@ use oxide_arb_models::{
     },
     types::RuntimeConfigVersionId,
 };
-use oxide_arb_storage::cache::{CacheKey, CacheManager};
+use quant_pivot_storage::cache::{CacheKey, CacheManager};
 use std::sync::Arc;
 
 /// Caching decorator for immutable runtime configuration versions.

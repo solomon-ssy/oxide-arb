@@ -4,7 +4,6 @@ use crate::types::TradeId;
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
-#[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "risk_fill_applied")]
 pub struct Model {

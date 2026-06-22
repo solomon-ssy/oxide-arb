@@ -1,7 +1,7 @@
 //! Resolution probe result from `GET /markets?condition_ids={cid}`.
 
 use chrono::{DateTime, Utc};
-use oxide_arb_models::types::TokenId;
+use quant_pivot_models::types::TokenId;
 use serde::{Deserialize, Serialize};
 
 /// Settlement status derived from a single Gamma market payload.

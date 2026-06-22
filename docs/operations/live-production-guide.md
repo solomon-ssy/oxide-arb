@@ -1,3 +1,5 @@
+> **SUPERSEDED** — This document describes the legacy Endgame arbitrage system. Active architecture: [quant-pivot/README.md](../plans/quant-pivot/README.md). For deletion inventory only.
+
 # Live 生产上线指南
 
 面向**运维 / 量化 / 决策**的 Live 推广 SOP。日常操作细节见 [runbook.md](./runbook.md)；本文聚焦 **Readiness 审计 → Canary 规模 → 上线验证 → 事故恢复 → Production Gates**。
@@ -24,7 +26,7 @@
 
 ## 2. Canary 规模模板
 
-按资金档位选择运行时配置（`runtime_config` / `oxide-arb.toml`）：
+按资金档位选择运行时配置（`runtime_config` / `quant-pivot.toml`）：
 
 | 档位 | `bankroll_usd` | `max_single_bet` | `max_daily_loss` | 说明 |
 |------|----------------|------------------|------------------|------|
@@ -45,7 +47,7 @@ Canary 期间：**禁止**同时调高 bankroll 与 exposure 上限；一次只�
    - `operational_phase = operational`
    - `execution_emergency.active = false`
    - `market_data.ready = true`
-   - Prometheus：`oxide_arb_execution_fok_*` 有计数且无 persistence fault 告警
+   - Prometheus：`quant_pivot_execution_fok_*` 有计数且无 persistence fault 告警
    - UI Integrity Banner **无 critical 项**
 
 ---
@@ -74,7 +76,7 @@ Canary 期间：**禁止**同时调高 bankroll 与 exposure 上限；一次只�
 |------|------|------|
 | `GET /system/balance` + Dashboard KPI | 敞口、可用资金、integrity 计数 | WS ~秒级 |
 | `GET /pnl/live` | 日 / 总 realized PnL | WS + REST |
-| Prometheus `oxide_arb_*` | 告警、Grafana |  scrape 间隔 |
+| Prometheus `quant_pivot_*` | 告警、Grafana |  scrape 间隔 |
 | Telegram / 告警 dispatcher | critical / emergency | 事件驱动 |
 | ClickHouse opportunity / trade facts | 复盘、因子 replay | 分钟级 |
 
@@ -116,7 +118,7 @@ bash scripts/check-production-gates.sh
 
 包含：`fmt`、`clippy`、架构 lint、全 workspace 测试、`test-network`、`test-docker`、bench SLO/regression、e2e bench、production soak（ignored）。
 
-CI 另含 `cargo test -p oxide-arb-core --test execution_pipeline_live` 防止 Live 路径回归。
+CI 另含 `cargo test -p quant-pivot-core --test execution_pipeline_live` 防止 Live 路径回归。
 
 ---
 

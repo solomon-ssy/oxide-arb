@@ -3,15 +3,14 @@
 use crate::traits::SystemRuntimeStateRepository;
 use async_trait::async_trait;
 use chrono::Utc;
-use oxide_arb_error::storage::StorageError;
-use oxide_arb_models::{
+use quant_pivot_error::storage::StorageError;
+use quant_pivot_models::{
     domain::{SystemRuntimeStateInfo, UpsertSystemRuntimeState},
     entities::system_runtime_state::{ActiveModel, Column, Entity},
-    enums::common::ExecutionMode,
+    enums::quant::QuantRuntimeMode,
 };
 use sea_orm::{DatabaseConnection, EntityTrait, IntoActiveModel, sea_query::OnConflict};
 
-/// The fixed primary key of the operational singleton row.
 const SINGLETON_ID: i32 = 1;
 
 pub struct PgSystemRuntimeStateRepository {
@@ -34,15 +33,15 @@ impl SystemRuntimeStateRepository for PgSystemRuntimeStateRepository {
             .map_err(StorageError::from)
     }
 
-    async fn upsert_execution_mode(
+    async fn upsert_quant_runtime_mode(
         &self,
-        mode: ExecutionMode,
+        mode: QuantRuntimeMode,
         changed_by: &str,
         reason: &str,
     ) -> Result<(), StorageError> {
         let active_model: ActiveModel = UpsertSystemRuntimeState {
             id: SINGLETON_ID,
-            execution_mode: mode,
+            quant_runtime_mode: mode,
             changed_by: changed_by.to_owned(),
             reason: reason.to_owned(),
             changed_at: Utc::now(),
@@ -52,7 +51,7 @@ impl SystemRuntimeStateRepository for PgSystemRuntimeStateRepository {
             .on_conflict(
                 OnConflict::column(Column::Id)
                     .update_columns([
-                        Column::ExecutionMode,
+                        Column::QuantRuntimeMode,
                         Column::ChangedBy,
                         Column::Reason,
                         Column::ChangedAt,

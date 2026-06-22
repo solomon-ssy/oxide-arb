@@ -4,8 +4,8 @@
 //! and replace-set semantics. Keyed by [`RoleId`]; the Casbin subject
 //! (`role_code`) is resolved inside the transaction.
 
-use oxide_arb_error::storage::StorageError;
-use oxide_arb_models::{
+use quant_pivot_error::storage::StorageError;
+use quant_pivot_models::{
     domain::{AssignPermissions, Permission},
     entities::role,
     types::RoleId,

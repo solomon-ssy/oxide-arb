@@ -13,7 +13,7 @@ use crate::{
     types::{EventId, MarketId, MarketPitSnapshotId, Price, TokenId, Usd},
 };
 use chrono::{DateTime, Utc};
-use oxide_arb_error::market::MarketError;
+use quant_pivot_error::market::MarketError;
 use rust_decimal::Decimal;
 use sea_orm::{
     ActiveValue, DeriveIntoActiveModel, DerivePartialModel, FromQueryResult, IntoActiveValue,

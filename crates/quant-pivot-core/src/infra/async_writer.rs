@@ -1,7 +1,7 @@
 use crate::observability::metrics_hub::MetricsHub;
-use oxide_arb_error::OxideError;
 use parking_lot::Mutex;
 use prometheus::IntCounter;
+use quant_pivot_error::QuantError;
 use std::{
     future::Future,
     pin::Pin,
@@ -13,7 +13,7 @@ use std::{
 };
 use tokio_util::sync::CancellationToken;
 
-type AsyncWriterWorker = Pin<Box<dyn Future<Output = Result<(), OxideError>> + Send>>;
+type AsyncWriterWorker = Pin<Box<dyn Future<Output = Result<(), QuantError>> + Send>>;
 
 /// Minimum interval between aggregated drop warnings per writer.
 const DROP_WARN_INTERVAL: Duration = Duration::from_secs(5);
@@ -79,7 +79,7 @@ impl<T: Send + 'static> AsyncWriter<T> {
         shutdown: CancellationToken,
     ) -> (Self, AsyncWriterWorker)
     where
-        F: Fn(Vec<T>) -> Pin<Box<dyn Future<Output = Result<(), OxideError>> + Send>>
+        F: Fn(Vec<T>) -> Pin<Box<dyn Future<Output = Result<(), QuantError>> + Send>>
             + Send
             + 'static,
     {

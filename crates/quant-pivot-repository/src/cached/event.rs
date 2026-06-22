@@ -5,12 +5,12 @@
 //! failing the read.
 
 use crate::traits::EventRepository;
-use oxide_arb_error::storage::StorageError;
-use oxide_arb_models::{
+use quant_pivot_error::storage::StorageError;
+use quant_pivot_models::{
     domain::{EventInfo, UpsertEvent},
     types::EventId,
 };
-use oxide_arb_storage::cache::{CacheKey, CacheManager};
+use quant_pivot_storage::cache::{CacheKey, CacheManager};
 use std::{collections::HashSet, sync::Arc};
 
 /// Caching decorator for event metadata reads.

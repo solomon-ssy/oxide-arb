@@ -29,6 +29,8 @@ jobs:
 
       - name: Architecture lint
         run: bash scripts/lint-architecture.sh
+      - name: Quant pivot boundary gate
+        run: bash scripts/lint-quant-pivot-boundary.sh
 
       - name: Build
         run: cargo build --workspace
@@ -59,7 +61,7 @@ jobs:
         run: cargo install critcmp --locked
 
       - name: Compile benchmarks
-        run: cargo bench -p oxide-arb-bench --no-run
+        run: cargo bench -p quant-pivot-bench --no-run
 
       - name: Run hot_paths benchmarks (PR regression gate)
         if: github.event_name == 'pull_request'
@@ -69,7 +71,7 @@ jobs:
         run: bash scripts/check-bench-slo.sh
 
       - name: Run e2e path benchmarks
-        run: cargo bench -p oxide-arb-bench --bench e2e_paths -- --output-format bencher
+        run: cargo bench -p quant-pivot-bench --bench e2e_paths -- --output-format bencher
 
       - name: Run benchmarks
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -137,11 +139,11 @@ jobs:
 
   #     - name: Live integration tests
   #       env:
-  #         OXIDE_ARB__POLYMARKET__ONCHAIN__RPC_URL: ${{ secrets.POLYGON_RPC_URL }}
-  #         OXIDE_ARB_TEST_RESOLVED_CONDITION_ID: ${{ secrets.RESOLVED_CONDITION_ID }}
+  #         QUANT_PIVOT__POLYMARKET__ONCHAIN__RPC_URL: ${{ secrets.POLYGON_RPC_URL }}
+  #         QUANT_PIVOT_TEST_RESOLVED_CONDITION_ID: ${{ secrets.RESOLVED_CONDITION_ID }}
   #       run: |
-  #         if [ -z "$OXIDE_ARB__POLYMARKET__ONCHAIN__RPC_URL" ] || [ -z "$OXIDE_ARB_TEST_RESOLVED_CONDITION_ID" ]; then
+  #         if [ -z "$QUANT_PIVOT__POLYMARKET__ONCHAIN__RPC_URL" ] || [ -z "$QUANT_PIVOT_TEST_RESOLVED_CONDITION_ID" ]; then
   #           echo "Skipping: set POLYGON_RPC_URL and RESOLVED_CONDITION_ID repo secrets to enable."
   #           exit 0
   #         fi
-  #         cargo test -p oxide-arb-api --features integration -- --ignored --test-threads=1
+  #         cargo test -p quant-pivot-api --features integration -- --ignored --test-threads=1

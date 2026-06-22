@@ -1,7 +1,7 @@
 //! Polymarket platform configuration.
 //!
 //! This is the sole venue. There is no abstraction layer for "multiple venues" —
-//! oxide-arb operates exclusively on Polymarket (Polygon chain).
+//! quant-pivot operates exclusively on Polymarket (Polygon chain).
 
 use super::fees::FeesConfig;
 use serde::Deserialize;

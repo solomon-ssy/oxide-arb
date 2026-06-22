@@ -1,4 +1,4 @@
-use oxide_arb_macros::oxide_schema;
+use quant_pivot_macros::quant_schema;
 use sea_orm::{
     Iden,
     sea_query::{
@@ -17,7 +17,7 @@ use crate::{
     },
 };
 
-#[oxide_schema(lifecycle = "audit")]
+#[quant_schema(lifecycle = "audit")]
 pub enum ControlFactorShadowDecision {
     Table,
     ShadowDecisionId,

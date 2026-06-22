@@ -11,8 +11,8 @@
 
 use super::ensure;
 use num_traits::ToPrimitive;
-use oxide_arb_error::storage::StorageError;
-use oxide_arb_models::config::PostgresConfig;
+use quant_pivot_error::storage::StorageError;
+use quant_pivot_models::config::PostgresConfig;
 use sea_orm::{
     ConnectOptions, ConnectionTrait, Database, DatabaseConnection, DbBackend, Statement,
 };

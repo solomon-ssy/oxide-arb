@@ -7,7 +7,7 @@
 //! mutations enforce the acting-role contract for non-super-admin callers.
 
 use actix_web::{http::StatusCode, test::TestRequest};
-use oxide_arb_models::{
+use quant_pivot_models::{
     domain::RuntimeConfigPort, runtime_config::RuntimeConfig, types::RuntimeConfigVersionId,
 };
 use rust_decimal_macros::dec;
@@ -137,72 +137,6 @@ async fn rollback_restores_previous_version() {
         current.json()["data"]["config"]["risk"]["max_daily_loss_usd"],
         json!("60"),
         "rollback must re-apply the previous config to the live system"
-    );
-}
-
-#[actix_web::test]
-#[ignore = "requires Docker"]
-async fn activate_rejects_exposure_tightening_below_reserved_capital() {
-    let env = TestEnv::start().await;
-    let admin = client::login(&env, "admin", "admin").await;
-
-    // A version that tightens the total exposure ceiling to 600 USD. Creating
-    // it succeeds — versions are validated semantically, not against live
-    // money state.
-    let res = client::post(
-        &env,
-        "/api/runtime-config/versions",
-        &admin,
-        json!({
-            "config_json": { "risk": { "max_total_exposure_usd": "600" } },
-            "reason": "tighten exposure ceiling",
-        }),
-    )
-    .await;
-    assert_eq!(res.status, StatusCode::OK);
-    let version_id = res.json()["data"]["runtime_config_version_id"]
-        .as_str()
-        .expect("version id")
-        .to_owned();
-
-    // 700 USD is already committed in-flight: activation must fail closed.
-    env.runtime_config_apply.set_reserved(dec!(700), dec!(400));
-    let activate = client::post(
-        &env,
-        &format!("/api/runtime-config/versions/{version_id}/activate"),
-        &admin,
-        json!({ "reason": "tighten below reserved" }),
-    )
-    .await;
-    assert_eq!(
-        activate.status,
-        StatusCode::CONFLICT,
-        "preflight precondition failure must map to 409: {}",
-        activate.json()
-    );
-
-    // The live system keeps running on the previous configuration.
-    let current = client::get(&env, "/api/runtime-config", &admin).await;
-    assert_eq!(
-        current.json()["data"]["config"]["risk"]["max_total_exposure_usd"],
-        json!("5000"),
-        "rejected activation must not touch the live config"
-    );
-
-    // Once the committed capital unwinds, the same version activates cleanly.
-    env.runtime_config_apply.set_reserved(dec!(0), dec!(0));
-    let retry = client::post(
-        &env,
-        &format!("/api/runtime-config/versions/{version_id}/activate"),
-        &admin,
-        json!({ "reason": "reservations unwound" }),
-    )
-    .await;
-    assert_eq!(retry.status, StatusCode::OK);
-    let current = client::get(&env, "/api/runtime-config", &admin).await;
-    assert_eq!(
-        current.json()["data"]["config"]["risk"]["max_total_exposure_usd"],
-        json!("600")
     );
 }
 

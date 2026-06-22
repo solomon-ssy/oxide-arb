@@ -1,6 +1,6 @@
 //! `user_role` table — user→role assignments (mirrors Casbin `g`).
 
-use oxide_arb_macros::oxide_schema;
+use quant_pivot_macros::quant_schema;
 use sea_orm::{
     Iden,
     sea_query::{ForeignKey, ForeignKeyAction, Index, Table, TableCreateStatement},
@@ -23,7 +23,7 @@ use crate::{
 ///
 /// The composite primary key `(user_id, role_id)` is the natural key and its
 /// own uniqueness guarantee — there is no surrogate join-row id.
-#[oxide_schema(lifecycle = "control")]
+#[quant_schema(lifecycle = "control")]
 pub enum UserRole {
     Table,
     UserId,

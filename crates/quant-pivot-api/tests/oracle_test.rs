@@ -1,9 +1,9 @@
 //! Oracle voting logic tests.
 
 use async_trait::async_trait;
-use oxide_arb_api::oracle::{OracleSource, ResolutionVerdict, SourceVote, VotingOracle};
-use oxide_arb_error::rpc::RpcError;
-use oxide_arb_models::{runtime_config::AllSourcesDownStrategy, types::MarketId};
+use quant_pivot_api::oracle::{OracleSource, ResolutionVerdict, SourceVote, VotingOracle};
+use quant_pivot_error::rpc::RpcError;
+use quant_pivot_models::{runtime_config::AllSourcesDownStrategy, types::MarketId};
 use rust_decimal::Decimal;
 use std::{sync::Arc, time::Duration};
 

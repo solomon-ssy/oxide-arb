@@ -7,14 +7,14 @@
 //! - [`SessionRegistry`] + [`spawn_ws_broadcaster`] fan `CoreEvent`s out to the
 //!   sessions subscribed to each event's channel.
 //!
-//! The broadcaster is spawned by `oxide-arb-core` (so it joins the unified
+//! The broadcaster is spawned by `quant-pivot-core` (so it joins the unified
 //! staged shutdown) over the shared [`SessionRegistry`] held in `AppState`.
 
 pub mod handler;
 pub mod session;
 
 use dashmap::DashMap;
-use oxide_arb_models::{
+use quant_pivot_models::{
     domain::{CoreEvent, SubscriptionKey, WsChannel, event_envelope},
     types::MarketId,
 };
@@ -147,7 +147,7 @@ pub async fn spawn_ws_broadcaster(
 #[cfg(test)]
 mod tests {
     use super::{SessionHandle, SessionRegistry};
-    use oxide_arb_models::{
+    use quant_pivot_models::{
         domain::{SubscriptionKey, WsChannel},
         types::MarketId,
     };

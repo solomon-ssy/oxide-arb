@@ -2,8 +2,8 @@
 //! runs every migration (which also seeds the bootstrap `admin` user, the six
 //! built-in roles, and the `g(admin, super_admin)` grant).
 
-use oxide_arb_models::config::PostgresConfig;
-use oxide_arb_storage::postgres::{
+use quant_pivot_models::config::PostgresConfig;
+use quant_pivot_storage::postgres::{
     PostgresPool,
     migration::{Migrator, MigratorTrait},
 };
@@ -30,7 +30,7 @@ fn test_pg_config(port: u16) -> PostgresConfig {
         work_mem: "16MB".into(),
         verify_session_params: false,
         statement_cache_capacity: 100,
-        application_name: "oxide-arb-web-test".into(),
+        application_name: "quant-pivot-web-test".into(),
     }
 }
 

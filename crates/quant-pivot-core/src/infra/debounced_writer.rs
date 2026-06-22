@@ -1,5 +1,5 @@
-use oxide_arb_error::OxideError;
 use parking_lot::Mutex;
+use quant_pivot_error::QuantError;
 use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
 
@@ -13,9 +13,9 @@ impl<T: Clone + Send + 'static> DebouncedWriter<T> {
         interval: Duration,
         write_fn: F,
         shutdown: CancellationToken,
-    ) -> (Self, impl Future<Output = Result<(), OxideError>>)
+    ) -> (Self, impl Future<Output = Result<(), QuantError>>)
     where
-        F: Fn(T) -> Pin<Box<dyn Future<Output = Result<(), OxideError>> + Send>> + Send + 'static,
+        F: Fn(T) -> Pin<Box<dyn Future<Output = Result<(), QuantError>> + Send>> + Send + 'static,
     {
         let latest: Arc<Mutex<Option<T>>> = Arc::new(Mutex::new(None));
         let writer = Self {

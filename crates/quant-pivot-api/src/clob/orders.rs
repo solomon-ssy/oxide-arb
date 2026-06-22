@@ -3,7 +3,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use oxide_arb_models::{
+use quant_pivot_models::{
     enums::common::Side,
     types::{MarketId, OrderId, Price, Shares, TokenId},
 };

@@ -4,8 +4,8 @@
 //! `system.databases`, and issues `CREATE DATABASE` when the configured target
 //! is missing. Idempotent and safe under concurrent first-start races.
 
-use oxide_arb_error::storage::StorageError;
-use oxide_arb_models::config::ClickHouseConfig;
+use quant_pivot_error::storage::StorageError;
+use quant_pivot_models::config::ClickHouseConfig;
 use tracing::info;
 
 /// Maintenance catalog used for `CREATE DATABASE` bootstrap.

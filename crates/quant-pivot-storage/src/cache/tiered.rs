@@ -2,7 +2,7 @@
 
 use crate::cache::{CacheBackend, CacheKey, CacheMetrics, MokaBackend, RedisBackend};
 use bitcode::{Decode, Encode};
-use oxide_arb_error::storage::StorageError;
+use quant_pivot_error::storage::StorageError;
 use tracing::trace;
 
 pub struct TieredCache {
@@ -133,7 +133,7 @@ impl TieredCache {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use oxide_arb_models::types::{EventId, MarketId};
+    use quant_pivot_models::types::{EventId, MarketId};
     use std::{collections::HashMap, sync::Arc, time::Duration};
     use tokio::sync::Mutex;
 

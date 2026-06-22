@@ -9,8 +9,8 @@
 //! retry loop, classifying each error and applying backoff.
 
 use backoff::{ExponentialBackoff, backoff::Backoff};
-use oxide_arb_error::api::ApiError;
-use oxide_arb_models::enums::common::OrderType;
+use quant_pivot_error::api::ApiError;
+use quant_pivot_models::enums::common::OrderType;
 use serde::{Deserialize, Serialize};
 use std::{fmt::Display, future::Future, time::Duration};
 

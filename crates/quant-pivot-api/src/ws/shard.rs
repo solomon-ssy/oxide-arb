@@ -14,13 +14,13 @@ use super::{
     reconnect::{ReconnectPolicy, ReconnectState},
 };
 use futures_util::StreamExt;
-use oxide_arb_models::{
-    domain::pipeline::PipelineEvent, enums::pipeline::ShardConnectionStatus, types::TokenId,
-};
 use polymarket_client_sdk_v2::{
     clob::ws::{Client as SdkWsClient, types::response::WsMessage},
     types::U256,
     ws::config::Config as SdkWsConfig,
+};
+use quant_pivot_models::{
+    domain::pipeline::PipelineEvent, enums::pipeline::ShardConnectionStatus, types::TokenId,
 };
 use std::{
     collections::HashSet,

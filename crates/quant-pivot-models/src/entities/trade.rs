@@ -2,9 +2,9 @@
 
 use crate::{
     enums::common::{
-        ExecutionMode, MarketCategory, Side, TradeBusinessOutcome, TradeReconcileResolution,
-        TradeState,
+        MarketCategory, Side, TradeBusinessOutcome, TradeReconcileResolution, TradeState,
     },
+    enums::legacy::LegacyExecutionMode,
     types::{
         Bps, EventId, ExecutionId, MarketId, OpportunityId, OrderId, Price, ReservationId, Shares,
         TokenId, TradeId, Usd,
@@ -67,7 +67,7 @@ pub struct Model {
     pub post_trade_claimed_at: Option<DateTime<Utc>>,
     /// Number of relay claim attempts for this trade.
     pub post_trade_attempts: i32,
-    pub execution_mode: ExecutionMode,
+    pub execution_mode: LegacyExecutionMode,
     pub latency_ms: Option<i32>,
     #[sea_orm(column_type = "Text", nullable)]
     pub error_message: Option<String>,

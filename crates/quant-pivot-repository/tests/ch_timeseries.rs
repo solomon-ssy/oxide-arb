@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use ch::setup_timeseries_repo;
 use chrono::Utc;
-use oxide_arb_models::{
+use quant_pivot_models::{
     clickhouse::{
         BookL2ReplayRow, BookSnapshotRow, CalibrationSnapshotRow, ChBps, ChDecimal64, ChFactor,
         ChPrice, ChProbability, ChSchemaVersion, ChShares, ChUsd, OpportunityAuditRow,
@@ -20,7 +20,7 @@ use oxide_arb_models::{
     },
     types::{EventId, ExecutionId, MarketId, OpportunityId, Price, Shares, TokenId, TradeId, Usd},
 };
-use oxide_arb_repository::traits::{
+use quant_pivot_repository::traits::{
     AuditFunnelStats, EvidenceTimeseriesRepository, TimeseriesFactWriter,
 };
 use rust_decimal_macros::dec;

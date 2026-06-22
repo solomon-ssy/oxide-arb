@@ -2,17 +2,17 @@
 //!
 //! Run (requires outbound network):
 //! ```bash
-//! cargo test -p oxide-arb-api --features integration -- --ignored ws_book
+//! cargo test -p quant-pivot-api --features integration -- --ignored ws_book
 //! ```
 //!
 //! Optional env:
-//! - `OXIDE_ARB_TEST_TOKEN_ID` — decimal CLOB token id (skips Gamma discovery)
+//! - `QUANT_PIVOT_TEST_TOKEN_ID` — decimal CLOB token id (skips Gamma discovery)
 
-use oxide_arb_api::{
+use quant_pivot_api::{
     gamma::GammaClient,
     ws::{ClobWsManager, SubscriptionSource},
 };
-use oxide_arb_models::{
+use quant_pivot_models::{
     config::{GammaConfig, PolymarketConfig, WebSocketConfig},
     domain::pipeline::PipelineEvent,
     types::TokenId,
@@ -21,7 +21,7 @@ use std::{env::var, slice::from_ref, time::Duration};
 use tokio_util::sync::CancellationToken;
 
 async fn resolve_token_id() -> TokenId {
-    if let Ok(id) = var("OXIDE_ARB_TEST_TOKEN_ID") {
+    if let Ok(id) = var("QUANT_PIVOT_TEST_TOKEN_ID") {
         return TokenId::new(id);
     }
     let client = GammaClient::new(GammaConfig::default());

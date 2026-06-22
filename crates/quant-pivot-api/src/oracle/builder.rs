@@ -4,8 +4,8 @@ use super::{
     VotingOracle, ctf_source::CtfOracleSource, gamma_source::GammaOracleSource,
     source::OracleSource, uma_source::UmaOracleSource,
 };
-use oxide_arb_error::rpc::RpcError;
-use oxide_arb_models::{
+use quant_pivot_error::rpc::RpcError;
+use quant_pivot_models::{
     config::{GammaConfig, OnchainConfig, PolymarketConfig},
     constants::CTF_ADDRESS,
     runtime_config::SettlementOracleConfig,

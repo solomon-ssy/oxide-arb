@@ -1,13 +1,13 @@
 //! Unit tests for cache layer components (no external deps required).
 
-use oxide_arb_models::{
+use quant_pivot_models::{
     enums::{
         calibration::{DurationBucket, PriceZone},
         common::MarketCategory,
     },
     types::MarketId,
 };
-use oxide_arb_storage::cache::{CacheBackend, CacheKey, MokaBackend};
+use quant_pivot_storage::cache::{CacheBackend, CacheKey, MokaBackend};
 use std::time::Duration;
 
 #[tokio::test]

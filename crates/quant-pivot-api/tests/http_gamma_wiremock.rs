@@ -1,8 +1,8 @@
 //! Gamma HTTP client tests with wiremock (no live network).
 
 use chrono::{Duration, Utc};
-use oxide_arb_api::{gamma::GammaClient, infra::retry::RetryPolicy};
-use oxide_arb_models::{
+use quant_pivot_api::{gamma::GammaClient, infra::retry::RetryPolicy};
+use quant_pivot_models::{
     config::GammaConfig,
     enums::common::MarketCategory,
     types::{MarketId, TokenId},

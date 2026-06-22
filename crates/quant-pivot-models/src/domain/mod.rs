@@ -87,6 +87,7 @@ pub mod trading;
 pub mod ws;
 
 // Cross-cutting helpers shared by every context.
+pub mod legacy_queries;
 pub mod pagination;
 pub mod patch;
 pub mod query;
@@ -99,6 +100,7 @@ pub use control_ports::*;
 pub use event::*;
 pub use evidence::*;
 pub use governance::*;
+pub use legacy_queries::*;
 pub use market::*;
 pub use pagination::*;
 pub use patch::*;

@@ -20,8 +20,8 @@ use deadpool_redis::Pool;
 use jsonwebtoken::{
     Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode, errors::ErrorKind,
 };
-use oxide_arb_error::auth::AuthError;
-use oxide_arb_models::{config::JwtConfig, domain::UserInfo};
+use quant_pivot_error::auth::AuthError;
+use quant_pivot_models::{config::JwtConfig, domain::UserInfo};
 use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;

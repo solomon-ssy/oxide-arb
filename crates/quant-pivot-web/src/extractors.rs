@@ -19,8 +19,8 @@ use actix_web::{
     dev::Payload,
     web::{Json, Query},
 };
-use oxide_arb_error::auth::AuthError;
-use oxide_arb_models::{
+use quant_pivot_error::auth::AuthError;
+use quant_pivot_models::{
     domain::{PageRequest, RoleInfo},
     enums::rbac::RoleStatus,
     types::RoleId,

@@ -1,23 +1,19 @@
-//! Operational runtime-state singleton repository (active execution mode).
+//! Operational runtime-state singleton repository (active quant runtime mode).
 
 use async_trait::async_trait;
-use oxide_arb_error::storage::StorageError;
-use oxide_arb_models::{domain::SystemRuntimeStateInfo, enums::common::ExecutionMode};
+use quant_pivot_error::storage::StorageError;
+use quant_pivot_models::{domain::SystemRuntimeStateInfo, enums::quant::QuantRuntimeMode};
 
 /// Persistence for the `system_runtime_state` singleton.
-///
-/// The active execution mode survives restarts: the bootstrap restores the
-/// operator's most recent deliberate mode, and `/system/mode` writes the new
-/// mode here on every transition.
 #[async_trait]
 pub trait SystemRuntimeStateRepository: Send + Sync {
     /// Load the singleton, or `None` on a fresh database (first boot).
     async fn load(&self) -> Result<Option<SystemRuntimeStateInfo>, StorageError>;
 
-    /// Upsert the active execution mode with its change metadata.
-    async fn upsert_execution_mode(
+    /// Upsert the active quant runtime mode with its change metadata.
+    async fn upsert_quant_runtime_mode(
         &self,
-        mode: ExecutionMode,
+        mode: QuantRuntimeMode,
         changed_by: &str,
         reason: &str,
     ) -> Result<(), StorageError>;

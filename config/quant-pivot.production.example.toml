@@ -1,8 +1,8 @@
 # ═══════════════════════════════════════════════════════════════════════════════
-# oxide-arb — Deploy Configuration (Production Example)
+# quant-pivot — Deploy Configuration (Production Example)
 # ═══════════════════════════════════════════════════════════════════════════════
 #
-# Copy this file to `oxide-arb.toml` and fill in REAL values.
+# Copy this file to `quant-pivot.toml` and fill in REAL values.
 #
 # This file contains ONLY deploy configuration (restart to apply). Operator
 # tunables — detection, risk, execution operations, settlement operations,
@@ -14,16 +14,16 @@
 #   POST /api/runtime-config/versions/{id}/activate   — audited hot activation
 #
 # Loading precedence (later wins):
-#   1. OXIDE_ARB__* environment variables
-#   2. oxide-arb.local.toml  (optional, gitignored — see oxide-arb.local.toml.example)
-#   3. oxide-arb.toml
+#   1. QUANT_PIVOT__* environment variables
+#   2. quant-pivot.local.toml  (optional, gitignored — see quant-pivot.local.toml.example)
+#   3. quant-pivot.toml
 #
-# Sensitive fields — set via env OR oxide-arb.local.toml (never commit real values):
+# Sensitive fields — set via env OR quant-pivot.local.toml (never commit real values):
 #
-#   OXIDE_ARB__KEYS__PRIVATE_KEY=0x...   # bot wallet; L2 creds auto-derived at connect
-#   OXIDE_ARB__DB__POSTGRES__PASSWORD=...
-#   OXIDE_ARB__DB__CLICKHOUSE__PASSWORD=...
-#   OXIDE_ARB__WEB__JWT__SECRET=<strong-random-secret>
+#   QUANT_PIVOT__KEYS__PRIVATE_KEY=0x...   # bot wallet; L2 creds auto-derived at connect
+#   QUANT_PIVOT__DB__POSTGRES__PASSWORD=...
+#   QUANT_PIVOT__DB__CLICKHOUSE__PASSWORD=...
+#   QUANT_PIVOT__WEB__JWT__SECRET=<strong-random-secret>
 #
 # Unknown keys are FATAL at startup (deny_unknown_fields): stale sections from
 # older layouts ([detection], [risk], [sizing], [treasury], [analytics], ...)
@@ -48,7 +48,7 @@ chain_id = 137
 [polymarket.onchain]
 # Purpose: Polygon JSON-RPC endpoint. Impact: CTF resolution oracle and
 # on-chain redemption. Caution: public RPCs rate-limit — use a dedicated
-# provider in production. Override via OXIDE_ARB__POLYMARKET__ONCHAIN__RPC_URL.
+# provider in production. Override via QUANT_PIVOT__POLYMARKET__ONCHAIN__RPC_URL.
 # Default: "https://polygon-rpc.com".
 rpc_url = "https://polygon-mainnet.g.alchemy.com/v2/REPLACE_WITH_ALCHEMY_KEY"
 # Purpose: RPC request timeout (ms). Impact: oracle/redeem failure latency.
@@ -109,38 +109,17 @@ full_sync_interval_secs = 300
 # Default: 100.
 page_size = 100
 
-# ── Execution Topology ────────────────────────────────────────────────────────
-#
-# The active execution mode (dry_run / paper / live) is NOT configured here.
-# It lives in the governed `system_runtime_state` singleton (seeded to dry_run)
-# and is escalated to `live` only through the audited `POST /system/mode`
-# transition (preflight + quiesce + hash chain + operation log). A fresh
-# production database therefore always boots in dry_run until an operator
-# deliberately switches it.
+# ── Quant Pivot (Phase 0) ─────────────────────────────────────────────────────
 
-[execution.book_apply]
-# Purpose: number of book-apply / execution-runner shards. Impact: markets
-# hash to a shard, bounding intra-market ordering domains and worker
-# parallelism. Caution: sized for a 500-market single host; must be >= 1.
-# Default: 4.
-shard_count = 4
-# Purpose: per-shard bounded channel capacity. Impact: overflow triggers
-# backpressure accounting (never blocks the WS event loop). Caution: >= 16.
-# Default: 2048.
-channel_capacity = 2048
+[quant.workers]
+report_scheduler_tick_secs = 30
 
-# ── Settlement Topology ───────────────────────────────────────────────────────
-# (Oracle policy, retries, and the redeem route are runtime config.)
-
-[settlement.lifecycle]
-# Purpose: bounded capacity of the market-settlement request channel between
-# the data pipeline and the settlement worker. Impact: burst absorption for
-# simultaneous market resolutions. Caution: >= 16. Default: 256.
-channel_capacity = 256
+[quant.execution]
+load_credentials_in_report_only = false
 
 # ── Keys / Credentials ───────────────────────────────────────────────────────
 #
-# Prefer oxide-arb.local.toml or env for private_key (runbook §3.1.4 / §3.2).
+# Prefer quant-pivot.local.toml or env for private_key (runbook §3.1.4 / §3.2).
 # Paper / Live: private_key required. L2 credentials are SDK-derived at connect.
 
 [keys]
@@ -156,7 +135,7 @@ source = "env"
 
 [observability]
 # Purpose: default tracing filter directive (e.g. "info",
-# "info,oxide_arb_core=debug"). Impact: log verbosity for the whole process.
+# "info,quant_pivot_core=debug"). Impact: log verbosity for the whole process.
 # Caution: the RUST_LOG environment variable, when set, overrides this value
 # entirely. Default: "info".
 log_level = "info"
@@ -175,7 +154,7 @@ host = "REPLACE_WITH_PG_HOST"
 port = 5432
 # Purpose: role name. Default: "oxide".
 user = "oxide"
-# Purpose: role password. Caution: set via OXIDE_ARB__DB__POSTGRES__PASSWORD
+# Purpose: role password. Caution: set via QUANT_PIVOT__DB__POSTGRES__PASSWORD
 # in production — never here. Default: "".
 password = ""
 # Purpose: database name. Default: "oxide_arb".
@@ -217,8 +196,8 @@ verify_session_params = true
 # Purpose: prepared-statement cache capacity per connection. Default: 256.
 statement_cache_capacity = 256
 # Purpose: application name reported to pg_stat_activity (ops triage).
-# Default: "oxide-arb".
-application_name = "oxide-arb"
+# Default: "quant-pivot".
+application_name = "quant-pivot"
 
 [db.clickhouse]
 # Purpose: ClickHouse HTTP endpoint (analytics timeseries: ticks, books,
@@ -228,7 +207,7 @@ url = "http://REPLACE_WITH_CH_HOST:8123"
 database = "oxide_arb"
 # Purpose: user name. Default: "default".
 user = "default"
-# Purpose: password. Caution: set via OXIDE_ARB__DB__CLICKHOUSE__PASSWORD in
+# Purpose: password. Caution: set via QUANT_PIVOT__DB__CLICKHOUSE__PASSWORD in
 # production — never here. Default: "".
 password = ""
 # Purpose: max age (s) of a partial batch before flush. Impact: analytics
@@ -266,7 +245,7 @@ host = "REPLACE_WITH_REDIS_HOST"
 port = 6379
 # Purpose: ACL username. Leave empty for password-only auth. Default: "".
 user = ""
-# Purpose: password. Caution: set via OXIDE_ARB__CACHE__REDIS__PASSWORD in
+# Purpose: password. Caution: set via QUANT_PIVOT__CACHE__REDIS__PASSWORD in
 # production — never here. Default: "".
 password = ""
 # Purpose: logical database index. Default: 0.
@@ -303,12 +282,12 @@ static_ui_dir = "static/ui"
 
 [web.jwt]
 # Purpose: HMAC signing secret. SECURITY: never commit a real secret; provide
-# it via env in production: OXIDE_ARB__WEB__JWT__SECRET=<strong-random-secret>.
+# it via env in production: QUANT_PIVOT__WEB__JWT__SECRET=<strong-random-secret>.
 # Caution: an empty/placeholder secret is fatal in Live mode. Default: "".
 secret = ""
 # Purpose: token issuer claim. Caution: must match across restarts or all
-# sessions invalidate. Default: "oxide-arb".
-issuer = "oxide-arb"
+# sessions invalidate. Default: "quant-pivot".
+issuer = "quant-pivot"
 # Purpose: access-token lifetime (s). Impact: shorter = tighter security,
 # more refreshes. Default: 900 (15m).
 access_ttl_secs = 900

@@ -453,10 +453,11 @@ mod tests {
             trade::TradeInfo,
         },
         enums::{
+            LegacyExecutionMode,
             calibration::{DurationBucket, PriceZone},
             common::{
-                ExecutionMode, MarketCategory, PositionStatus, RedeemResolutionSource,
-                RedeemStatus, SettlementAccountingStatus, SettlementTrigger, Side, StalenessLevel,
+                MarketCategory, PositionStatus, RedeemResolutionSource, RedeemStatus,
+                SettlementAccountingStatus, SettlementTrigger, Side, StalenessLevel,
             },
             execution::ExecutionOutcome,
         },
@@ -554,7 +555,7 @@ mod tests {
             post_trade_claim_owner: None,
             post_trade_claimed_at: None,
             post_trade_attempts: 0,
-            execution_mode: ExecutionMode::Paper,
+            execution_mode: LegacyExecutionMode::Paper,
             latency_ms: resolved
                 .latency_ms
                 .map(|ms| i32::try_from(ms).unwrap_or(i32::MAX)),
@@ -574,7 +575,7 @@ mod tests {
             avg_fill_price: Some(Price::new(dec!(0.93))),
             fee_paid: Usd::new(dec!(0.50)),
             tx_hash: Some("0xabc".into()),
-            execution_mode: ExecutionMode::Paper,
+            execution_mode: LegacyExecutionMode::Paper,
             latency_ms: 42,
         };
         let resolved = ResolvedOutcome::try_resolve(&outcome, Price::new(dec!(0.92)), 0.95)
@@ -617,7 +618,7 @@ mod tests {
     fn from_execution_miss_zeros_financial() {
         let outcome = ExecutionOutcome::Miss {
             reason: "no fill".into(),
-            execution_mode: ExecutionMode::Paper,
+            execution_mode: LegacyExecutionMode::Paper,
         };
         let resolved = ResolvedOutcome::try_resolve(&outcome, Price::new(dec!(0.92)), 0.95)
             .expect("test outcome is known");
@@ -707,7 +708,7 @@ mod tests {
             avg_fill_price: Some(Price::new(dec!(0.93))),
             fee_paid: Usd::new(dec!(0.50)),
             tx_hash: Some("0xabc".into()),
-            execution_mode: ExecutionMode::Paper,
+            execution_mode: LegacyExecutionMode::Paper,
             latency_ms: 42,
         };
         let resolved = ResolvedOutcome::try_resolve(&outcome, Price::new(dec!(0.92)), 0.95)

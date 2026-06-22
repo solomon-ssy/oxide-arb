@@ -1,8 +1,8 @@
 //! Injectable [`PipelineEvent`] source for `DataPipeline` tests.
 
 use flume::{Receiver, Sender};
-use oxide_arb_core::pipeline::event_source::PipelineEventSource;
-use oxide_arb_models::domain::pipeline::PipelineEvent;
+use quant_pivot_core::pipeline::event_source::PipelineEventSource;
+use quant_pivot_models::domain::pipeline::PipelineEvent;
 
 /// Bounded in-memory pipeline event bus for tests.
 ///
@@ -48,7 +48,7 @@ impl PipelineEventSource for MockEventSource {
 #[cfg(test)]
 mod tests {
     use super::{MockEventInject, MockEventSource};
-    use oxide_arb_models::{
+    use quant_pivot_models::{
         domain::{
             book::BookLevel,
             pipeline::{BookSideData, BookSnapshotCmd, IngressTrace, PipelineEvent},

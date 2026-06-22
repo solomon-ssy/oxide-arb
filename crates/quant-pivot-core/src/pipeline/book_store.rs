@@ -3,7 +3,8 @@ use crate::{observability::metrics_hub::MetricsHub, pipeline::market_registry::M
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use num_traits::ToPrimitive;
-use oxide_arb_models::{
+use parking_lot::Mutex;
+use quant_pivot_models::{
     domain::{
         BookLevel,
         book::{BookSnapshot, EndgameBookPair, TopOfBook},
@@ -12,7 +13,6 @@ use oxide_arb_models::{
     enums::common::Side,
     types::{MarketId, Price, Shares, TokenId},
 };
-use parking_lot::Mutex;
 use std::sync::atomic::AtomicU64 as StdSyncAtomicU64;
 use std::sync::atomic::Ordering as StdSyncOrdering;
 use std::{
@@ -231,7 +231,7 @@ impl BookStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use oxide_arb_models::enums::common::Side;
+    use quant_pivot_models::enums::common::Side;
     use rust_decimal_macros::dec;
     fn make_level(price: rust_decimal::Decimal, size: rust_decimal::Decimal) -> BookLevel {
         BookLevel::from_decimal_unchecked(Price::new(price), Shares::new(size))

@@ -17,7 +17,7 @@ use crate::{
     },
 };
 use chrono::{DateTime, Utc};
-use oxide_arb_error::control::{
+use quant_pivot_error::control::{
     CanonicalDigestError, ControlPersistenceError, FactorValueError, GovernanceError,
     SnapshotBuildError,
 };
@@ -425,7 +425,7 @@ pub struct NewControlFactorAuditEvent {
 ///
 /// Carries who acted, at what role, the request id, and the human reason. Role
 /// *authorization* (which role may invoke which operation) is enforced at the
-/// transport boundary (oxide-arb-web RBAC); this envelope only carries the
+/// transport boundary (quant-pivot-web RBAC); this envelope only carries the
 /// attribution recorded into the audit chain and is reused for multi-resource
 /// sweeps (e.g. TTL expiry).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -784,7 +784,7 @@ pub enum CancelMaterializationRunOutcome {
 #[cfg(test)]
 mod tests {
     use super::AuditActor;
-    use oxide_arb_error::control::GovernanceError;
+    use quant_pivot_error::control::GovernanceError;
 
     fn envelope() -> AuditActor {
         AuditActor {

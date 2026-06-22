@@ -16,8 +16,8 @@ pub use uma_source::UmaOracleSource;
 
 use arc_swap::ArcSwap;
 use futures_util::future::join_all;
-use oxide_arb_error::rpc::RpcError;
-use oxide_arb_models::{
+use quant_pivot_error::rpc::RpcError;
+use quant_pivot_models::{
     runtime_config::{AllSourcesDownStrategy, SettlementOracleConfig},
     types::MarketId,
 };

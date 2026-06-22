@@ -1,8 +1,5 @@
 //! Seeds Casbin policies: the `admin → super_admin` grouping (`g`) and the full
 //! per-role permission matrix (`p`) for the built-in roles.
-//!
-//! `super_admin` is intentionally absent from the `p` policies — the Casbin
-//! matcher grants it unconditionally via `g(r.sub, "super_admin")`.
 
 use std::{future::Future, pin::Pin};
 
@@ -38,33 +35,25 @@ const PRODUCES: &[SeedArtifact] = &[];
 
 pub const CASBIN_SEED: SeedSpec = SeedSpec {
     id: SEED_ID,
-    version: 2,
+    version: 3,
     target_table: casbin_rule_table_name,
     depends_on: DEPENDS_ON,
     produces: PRODUCES,
     conflict_policy: SeedConflictPolicy::GraphOrdered,
-    checksum: "rbac.casbin.bootstrap.v2",
+    checksum: "rbac.casbin.bootstrap.v3",
     loader: load_boxed,
 };
 
-/// Resources granted read access to every non-super-admin built-in role.
+/// Resources granted read access to every non-super-admin built-in role (Phase 0).
 const READ_RESOURCES: &[ResourceType] = &[
     ResourceType::System,
     ResourceType::Market,
-    ResourceType::Opportunity,
-    ResourceType::Trade,
-    ResourceType::Risk,
-    ResourceType::Blacklist,
+    ResourceType::QuantReport,
     ResourceType::RuntimeConfig,
-    ResourceType::ControlFactor,
-    ResourceType::Replay,
-    ResourceType::Analytics,
     ResourceType::Audit,
     ResourceType::OperationLog,
 ];
 
-/// The complete `(role_code, permissions)` matrix for the built-in roles,
-/// excluding `super_admin` (matcher bypass).
 pub fn builtin_role_policies() -> Vec<(&'static str, Vec<(ResourceType, Operation)>)> {
     vec![
         (ROLE_VIEWER, read_only()),
@@ -89,11 +78,6 @@ fn operator_policies() -> Vec<(ResourceType, Operation)> {
         (ResourceType::System, Operation::Resume),
         (ResourceType::System, Operation::SwitchMode),
         (ResourceType::Market, Operation::Update),
-        (ResourceType::Trade, Operation::Update),
-        (ResourceType::Risk, Operation::Reset),
-        (ResourceType::Blacklist, Operation::Create),
-        (ResourceType::Blacklist, Operation::Delete),
-        (ResourceType::Replay, Operation::Create),
     ]);
     policies
 }
@@ -101,19 +85,9 @@ fn operator_policies() -> Vec<(ResourceType, Operation)> {
 fn risk_owner_policies() -> Vec<(ResourceType, Operation)> {
     let mut policies = read_only();
     policies.extend([
-        (ResourceType::ControlFactor, Operation::Reject),
-        (ResourceType::ControlFactor, Operation::Shadow),
-        (ResourceType::ControlFactor, Operation::Publish),
-        (ResourceType::ControlFactor, Operation::Emergency),
-        (ResourceType::Publication, Operation::Rollback),
         (ResourceType::RuntimeConfig, Operation::Create),
         (ResourceType::RuntimeConfig, Operation::Activate),
         (ResourceType::RuntimeConfig, Operation::Rollback),
-        (ResourceType::Risk, Operation::Reset),
-        (ResourceType::Trade, Operation::Update),
-        (ResourceType::Materialization, Operation::Enqueue),
-        (ResourceType::Blacklist, Operation::Create),
-        (ResourceType::Blacklist, Operation::Delete),
     ]);
     policies
 }
@@ -144,16 +118,10 @@ fn admin_policies() -> Vec<(ResourceType, Operation)> {
 
 fn emergency_operator_policies() -> Vec<(ResourceType, Operation)> {
     let mut policies = read_only();
-    policies.extend([
-        (ResourceType::System, Operation::Halt),
-        (ResourceType::ControlFactor, Operation::Emergency),
-        (ResourceType::Risk, Operation::Reset),
-        (ResourceType::Blacklist, Operation::Create),
-    ]);
+    policies.extend([(ResourceType::System, Operation::Halt)]);
     policies
 }
 
-/// Build a `p` policy active model row.
 fn policy_row(
     role_code: &str,
     resource: ResourceType,
@@ -171,7 +139,6 @@ fn policy_row(
     }
 }
 
-/// Build a `g` grouping active model row binding a subject to a role.
 fn grouping_row(subject: &str, role_code: &str) -> casbin_rule::ActiveModel {
     casbin_rule::ActiveModel {
         ptype: Set(PTYPE_GROUPING.to_owned()),
@@ -185,7 +152,6 @@ fn grouping_row(subject: &str, role_code: &str) -> casbin_rule::ActiveModel {
     }
 }
 
-/// Insert the grouping and permission policies for the built-in role set.
 pub async fn load(db: &dyn ConnectionTrait, ctx: &mut SeedContext) -> Result<u64, DbErr> {
     let admin_id = ctx
         .require::<UserId>(ADMIN_USER_ARTIFACT)

@@ -1,1 +1,1 @@
-//! Performance benchmark crate for oxide-arb hot paths.
+//! Performance benchmark crate for quant-pivot hot paths.

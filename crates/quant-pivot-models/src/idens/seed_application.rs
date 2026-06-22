@@ -2,10 +2,10 @@ use crate::schema::{
     column, dependency::TableDependency, index::IndexSpec, seed::SeedSpec,
     timestamp_with_write_default,
 };
-use oxide_arb_macros::oxide_schema;
+use quant_pivot_macros::quant_schema;
 use sea_orm::sea_query::{ColumnDef, Table, TableCreateStatement};
 
-#[oxide_schema(lifecycle = "seed_ledger")]
+#[quant_schema(lifecycle = "seed_ledger")]
 pub enum SeedApplication {
     Table,
     SeedId,

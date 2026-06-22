@@ -8,8 +8,8 @@
 use std::{sync::Arc, time::Duration};
 
 use flume::Receiver;
-use oxide_arb_models::domain::NewOperationLog;
-use oxide_arb_repository::traits::OperationLogRepository;
+use quant_pivot_models::domain::NewOperationLog;
+use quant_pivot_repository::traits::OperationLogRepository;
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 

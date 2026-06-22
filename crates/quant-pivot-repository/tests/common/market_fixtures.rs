@@ -1,7 +1,7 @@
 //! Market/event fixture builders for the catalog repository integration tests.
 
 use chrono::{DateTime, Utc};
-use oxide_arb_models::{
+use quant_pivot_models::{
     domain::{UpsertEvent, UpsertMarket},
     enums::{
         common::{CategorySet, MarketCategory, TickSize},

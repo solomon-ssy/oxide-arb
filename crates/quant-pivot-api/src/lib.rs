@@ -1,4 +1,4 @@
-//! Polymarket data access layer for oxide-arb.
+//! Polymarket data access layer for quant-pivot.
 //!
 //! This crate wraps [`polymarket_client_sdk_v2`] to provide:
 //!
@@ -9,7 +9,7 @@
 //! - **Settlement Oracle** — 2-of-3 multi-source resolution verification
 //! - **Keystore** — EIP-712 signing and L2 HMAC credential management
 //!
-//! All types propagate errors through [`oxide_arb_error`]'s sub-error system.
+//! All types propagate errors through [`quant_pivot_error`]'s sub-error system.
 
 pub mod clob;
 pub mod ctf;

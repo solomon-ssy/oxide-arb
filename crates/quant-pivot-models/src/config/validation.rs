@@ -1,31 +1,16 @@
 //! Deploy-config validation: detects infeasible values and credential-policy
 //! violations that would cause silent failure at runtime.
-//!
-//! Validation is split into **mode-agnostic** and **mode-aware** halves. The
-//! mode-agnostic half runs during [`DeployConfig::load`]; errors there abort
-//! startup regardless of which mode the operator will run. The mode-aware half
-//! runs once the persisted operational [`ExecutionMode`] has been restored.
-//!
-//! Runtime-config validation lives in [`crate::runtime_config::validation`].
-//!
-//! # Mode → severity matrix
-//!
-//! | Polymarket creds   | `DryRun` | `Paper` | `Live` |
-//! |--------------------|----------|---------|--------|
-//! | all populated      | pass     | pass    | pass   |
-//! | all empty          | pass     | warn    | fatal  |
-//! | partial (1-3 set)  | warn     | fatal   | fatal  |
 
 use super::DeployConfig;
-use crate::{constants::POLYGON_CHAIN_ID, enums::common::ExecutionMode};
-use oxide_arb_error::config_validation::{
+use crate::{constants::POLYGON_CHAIN_ID, enums::quant::QuantRuntimeMode};
+use quant_pivot_error::config_validation::{
     ConfigValidationError, ConfigValidationReport, ConfigWarning,
 };
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 
 /// Mode-agnostic deploy validation: structural and platform invariants that
-/// must hold regardless of execution mode.
+/// must hold regardless of quant runtime mode.
 #[must_use]
 pub fn validate_deploy_common(deploy: &DeployConfig) -> ConfigValidationReport {
     let mut report = ConfigValidationReport::default();
@@ -60,22 +45,10 @@ pub fn validate_deploy_common(deploy: &DeployConfig) -> ConfigValidationReport {
         });
     }
 
-    if deploy.execution.book_apply.shard_count == 0 {
+    if deploy.quant.workers.report_scheduler_tick_secs == 0 {
         report.errors.push(ConfigValidationError::InvalidValue {
-            field: "execution.book_apply.shard_count",
-            detail: "must be >= 1".into(),
-        });
-    }
-    if deploy.execution.book_apply.channel_capacity < 16 {
-        report.errors.push(ConfigValidationError::InvalidValue {
-            field: "execution.book_apply.channel_capacity",
-            detail: "must be >= 16".into(),
-        });
-    }
-    if deploy.settlement.lifecycle.channel_capacity < 16 {
-        report.errors.push(ConfigValidationError::InvalidValue {
-            field: "settlement.lifecycle.channel_capacity",
-            detail: "must be >= 16".into(),
+            field: "quant.workers.report_scheduler_tick_secs",
+            detail: "must be > 0".into(),
         });
     }
 
@@ -105,11 +78,15 @@ pub fn validate_deploy_common(deploy: &DeployConfig) -> ConfigValidationReport {
         .max_subscriptions_per_connection
         == 0
         || deploy.market_data.websocket.engine_max_subscription_tokens == 0
-        || deploy.market_data.websocket.engine_endgame_window_hours == 0
+        || deploy
+            .market_data
+            .websocket
+            .engine_subscription_window_hours
+            == 0
     {
         report.errors.push(ConfigValidationError::InvalidValue {
             field: "market_data.websocket",
-            detail: "max_subscriptions_per_connection, engine_max_subscription_tokens, engine_endgame_window_hours must be > 0".into(),
+            detail: "max_subscriptions_per_connection, engine_max_subscription_tokens, engine_subscription_window_hours must be > 0".into(),
         });
     }
     if deploy.market_data.gamma.page_size == 0
@@ -158,22 +135,21 @@ fn validate_cache_redis(deploy: &DeployConfig, report: &mut ConfigValidationRepo
     }
 }
 
-/// Mode-aware deploy validation: enforces credential and JWT policies based on
-/// the execution mode that will actually run.
+/// Quant-mode-aware deploy validation: enforces credential and JWT policies.
 #[must_use]
-pub fn validate_deploy_for_mode(
+pub fn validate_deploy_for_quant_mode(
     deploy: &DeployConfig,
-    mode: ExecutionMode,
+    mode: QuantRuntimeMode,
 ) -> ConfigValidationReport {
     let mut report = ConfigValidationReport::default();
-    validate_credentials_mode(deploy, mode, &mut report);
-    validate_web_mode(deploy, mode, &mut report);
+    validate_credentials_quant_mode(deploy, mode, &mut report);
+    validate_web_quant_mode(deploy, mode, &mut report);
     report
 }
 
-fn validate_credentials_mode(
+fn validate_credentials_quant_mode(
     deploy: &DeployConfig,
-    mode: ExecutionMode,
+    mode: QuantRuntimeMode,
     report: &mut ConfigValidationReport,
 ) {
     if deploy.keys.private_key_present() {
@@ -182,11 +158,12 @@ fn validate_credentials_mode(
 
     let mode_label = mode.to_string();
     match mode {
-        ExecutionMode::DryRun => {}
-        ExecutionMode::Paper => {
+        QuantRuntimeMode::ReportOnly if !deploy.quant.execution.load_credentials_in_report_only => {
+        }
+        QuantRuntimeMode::ReportOnly | QuantRuntimeMode::SemiAuto => {
             report.warnings.push(ConfigWarning::NoCredentialsPaper);
         }
-        ExecutionMode::Live => {
+        QuantRuntimeMode::AutoExecution => {
             report
                 .errors
                 .push(ConfigValidationError::MissingCredentials {
@@ -197,26 +174,24 @@ fn validate_credentials_mode(
     }
 }
 
-/// Mode-aware web validation: a strong JWT secret is mandatory in `Live`.
-///
-/// In `Live` an empty/placeholder secret is fatal (fail-closed); in
-/// `DryRun`/`Paper` it is only a warning so local development stays frictionless.
-fn validate_web_mode(
+fn validate_web_quant_mode(
     deploy: &DeployConfig,
-    mode: ExecutionMode,
+    mode: QuantRuntimeMode,
     report: &mut ConfigValidationReport,
 ) {
     if !deploy.web.jwt_secret_is_weak() {
         return;
     }
     match mode {
-        ExecutionMode::Live => report.errors.push(ConfigValidationError::InvalidValue {
-            field: "web.jwt.secret",
-            detail: "Live mode requires a strong, non-placeholder JWT secret \
-                     (set OXIDE_ARB__WEB__JWT__SECRET)"
-                .to_owned(),
-        }),
-        ExecutionMode::DryRun | ExecutionMode::Paper => {
+        QuantRuntimeMode::AutoExecution => {
+            report.errors.push(ConfigValidationError::InvalidValue {
+                field: "web.jwt.secret",
+                detail: "AutoExecution mode requires a strong, non-placeholder JWT secret \
+                         (set QUANT_PIVOT__WEB__JWT__SECRET)"
+                    .to_owned(),
+            });
+        }
+        QuantRuntimeMode::ReportOnly | QuantRuntimeMode::SemiAuto => {
             report.warnings.push(ConfigWarning::WeakJwtSecret);
         }
     }
@@ -241,43 +216,43 @@ mod tests {
     }
 
     #[test]
-    fn live_mode_requires_all_credentials() {
+    fn auto_execution_requires_credentials() {
         let deploy = DeployConfig::default();
-        let report = validate_deploy_for_mode(&deploy, ExecutionMode::Live);
+        let report = validate_deploy_for_quant_mode(&deploy, QuantRuntimeMode::AutoExecution);
         assert!(report.has_errors());
     }
 
     #[test]
-    fn dry_run_permits_empty_credentials() {
+    fn report_only_permits_empty_credentials() {
         let deploy = DeployConfig::default();
-        let report = validate_deploy_for_mode(&deploy, ExecutionMode::DryRun);
+        let report = validate_deploy_for_quant_mode(&deploy, QuantRuntimeMode::ReportOnly);
         assert!(!report.has_errors());
     }
 
     #[test]
-    fn live_mode_rejects_weak_jwt_secret() {
+    fn auto_execution_rejects_weak_jwt_secret() {
         let mut deploy = DeployConfig::default();
         deploy.keys.private_key = Some("0xabc".into());
-        let report = validate_deploy_for_mode(&deploy, ExecutionMode::Live);
+        let report = validate_deploy_for_quant_mode(&deploy, QuantRuntimeMode::AutoExecution);
         assert!(
             report.has_errors(),
-            "empty jwt secret must be fatal in Live"
+            "empty jwt secret must be fatal in AutoExecution"
         );
     }
 
     #[test]
-    fn live_mode_accepts_strong_jwt_secret_and_credentials() {
+    fn auto_execution_accepts_strong_jwt_secret_and_credentials() {
         let mut deploy = DeployConfig::default();
         deploy.keys.private_key = Some("0xabc".into());
         deploy.web.jwt.secret = "a-strong-production-secret".to_owned();
-        let report = validate_deploy_for_mode(&deploy, ExecutionMode::Live);
+        let report = validate_deploy_for_quant_mode(&deploy, QuantRuntimeMode::AutoExecution);
         assert!(!report.has_errors(), "errors: {:?}", report.errors);
     }
 
     #[test]
-    fn dry_run_only_warns_on_weak_jwt_secret() {
+    fn report_only_only_warns_on_weak_jwt_secret() {
         let deploy = DeployConfig::default();
-        let report = validate_deploy_for_mode(&deploy, ExecutionMode::DryRun);
+        let report = validate_deploy_for_quant_mode(&deploy, QuantRuntimeMode::ReportOnly);
         assert!(!report.has_errors());
         assert!(!report.warnings.is_empty(), "weak secret should warn");
     }

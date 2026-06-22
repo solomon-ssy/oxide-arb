@@ -19,7 +19,7 @@ use argon2::{
     Argon2,
     password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString, rand_core::OsRng},
 };
-use oxide_arb_error::security::PasswordError;
+use quant_pivot_error::security::PasswordError;
 
 /// Hash a plaintext password with argon2id and return its PHC string.
 ///

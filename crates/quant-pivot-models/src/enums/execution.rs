@@ -1,7 +1,7 @@
 //! Execution pipeline enums.
 
 use crate::{
-    enums::common::ExecutionMode,
+    enums::legacy::LegacyExecutionMode,
     types::{OrderId, Price, Shares, Usd},
 };
 use serde::Serialize;
@@ -15,20 +15,20 @@ pub enum ExecutionOutcome {
         avg_fill_price: Option<Price>,
         fee_paid: Usd,
         tx_hash: Option<String>,
-        execution_mode: ExecutionMode,
+        execution_mode: LegacyExecutionMode,
         latency_ms: u64,
     },
     Miss {
         reason: String,
-        execution_mode: ExecutionMode,
+        execution_mode: LegacyExecutionMode,
     },
     Failed {
         error: String,
-        execution_mode: ExecutionMode,
+        execution_mode: LegacyExecutionMode,
     },
     Unknown {
         reason: String,
-        execution_mode: ExecutionMode,
+        execution_mode: LegacyExecutionMode,
     },
 }
 

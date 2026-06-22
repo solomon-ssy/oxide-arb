@@ -6,26 +6,26 @@ use std::{
 };
 
 const DOCKER_SUITES: &[(&str, &str)] = &[
-    ("oxide-arb-repository", "pg_repository"),
-    ("oxide-arb-repository", "pg_rbac"),
-    ("oxide-arb-repository", "ch_timeseries"),
-    ("oxide-arb-storage", "migration_pg"),
-    ("oxide-arb-storage", "redis_integration"),
-    ("oxide-arb-storage", "clickhouse_integration"),
-    ("oxide-arb-storage", "cache_tiered_integration"),
-    ("oxide-arb-core", "gamma_service_sync"),
-    ("oxide-arb-web", "web"),
+    ("quant-pivot-repository", "pg_repository"),
+    ("quant-pivot-repository", "pg_rbac"),
+    ("quant-pivot-repository", "ch_timeseries"),
+    ("quant-pivot-storage", "migration_pg"),
+    ("quant-pivot-storage", "redis_integration"),
+    ("quant-pivot-storage", "clickhouse_integration"),
+    ("quant-pivot-storage", "cache_tiered_integration"),
+    ("quant-pivot-core", "gamma_service_sync"),
+    ("quant-pivot-web", "web"),
 ];
 
 const NETWORK_SUITES: &[(&str, &str)] = &[
-    ("oxide-arb-api", "http_gamma_wiremock"),
-    ("oxide-arb-api", "http_clob_wiremock"),
-    ("oxide-arb-api", "clob_live_path_wiremock"),
+    ("quant-pivot-api", "http_gamma_wiremock"),
+    ("quant-pivot-api", "http_clob_wiremock"),
+    ("quant-pivot-api", "clob_live_path_wiremock"),
 ];
 
 #[derive(Parser)]
-#[command(name = "oxide-arb-xtask")]
-#[command(about = "Task runner for oxide-arb", long_about = None)]
+#[command(name = "quant-pivot-xtask")]
+#[command(about = "Task runner for quant-pivot", long_about = None)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -66,7 +66,7 @@ fn workspace_root() -> Result<PathBuf> {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(|crates| crates.parent())
-        .context("oxide-arb-xtask must live under crates/")
+        .context("quant-pivot-xtask must live under crates/")
         .map(PathBuf::from)
 }
 

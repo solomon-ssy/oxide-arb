@@ -74,7 +74,7 @@ pub struct RedisConfig {
     /// ACL username. Leave empty when the server uses password-only auth
     /// (`requirepass`). Default: empty.
     pub user: String,
-    /// Password. Set via `OXIDE_ARB__CACHE__REDIS__PASSWORD` in production —
+    /// Password. Set via `QUANT_PIVOT__CACHE__REDIS__PASSWORD` in production —
     /// never in the TOML. Default: empty.
     pub password: String,
     /// Logical database index (`SELECT`). Default: `0`.

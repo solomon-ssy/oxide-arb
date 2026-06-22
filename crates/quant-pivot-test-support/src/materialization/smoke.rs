@@ -7,8 +7,8 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
-use oxide_arb_error::storage::StorageError;
-use oxide_arb_models::{
+use quant_pivot_error::storage::StorageError;
+use quant_pivot_models::{
     clickhouse::{
         BookL2ReplayRow, BookSnapshotRow, CalibrationSnapshotRow, ChBps, ChDecimal64, ChFactor,
         ChPrice, ChProbability, ChSchemaVersion, ChShares, ChUsd, OpportunityAuditRow,
@@ -42,9 +42,8 @@ use oxide_arb_models::{
             ChSettlementOutcome, ChSettlementTrigger, ChSide, ChSnapshotReason,
         },
         common::{
-            ExecutionMode, LedgerStatus, MarketCategory, PositionStatus, RedeemResolutionSource,
-            RedeemStatus, ResolvedRedeemRoute, SettlementAccountingStatus, SettlementTrigger, Side,
-            TradeState,
+            LedgerStatus, MarketCategory, PositionStatus, RedeemResolutionSource, RedeemStatus,
+            ResolvedRedeemRoute, SettlementAccountingStatus, SettlementTrigger, Side, TradeState,
         },
         control_factor::{
             AuditResourceType, ControlAuditEventType, ControlFactorType, FactorStatus,
@@ -52,6 +51,7 @@ use oxide_arb_models::{
             MaterializationStageName, PublicationMode, PublicationStatus,
         },
         fact::BalanceSnapshotSource,
+        legacy::LegacyExecutionMode,
         risk::{ReconciliationStatus, RiskAuditEventType},
         runtime_config::RuntimeConfigVersionSource,
     },
@@ -63,7 +63,7 @@ use oxide_arb_models::{
         Usd,
     },
 };
-use oxide_arb_repository::traits::{
+use quant_pivot_repository::traits::{
     BalanceSnapshotRepository, ControlFactorRepository, PotentialLossRepository,
     ReconciliationRepository, ResolutionEventRepository, RiskAuditRepository,
     RuntimeConfigVersionRepository,
@@ -1527,7 +1527,7 @@ fn smoke_trade(
         post_trade_claim_owner: None,
         post_trade_claimed_at: None,
         post_trade_attempts: 0,
-        execution_mode: ExecutionMode::DryRun,
+        execution_mode: LegacyExecutionMode::DryRun,
         latency_ms: None,
         error_message: None,
         submitted_at: Some(created_at),
@@ -1550,7 +1550,7 @@ fn smoke_position(
         market_id: market_id.clone(),
         token_id: token_id.clone(),
         side: Side::Buy,
-        execution_mode: ExecutionMode::Paper,
+        execution_mode: LegacyExecutionMode::Paper,
         shares: Shares::new(dec!(100)),
         avg_entry_price: Price::new(dec!(0.94)),
         total_cost_usd: Usd::new(dec!(94)),

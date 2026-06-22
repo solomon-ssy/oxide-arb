@@ -1,21 +1,18 @@
 [workspace]
 resolver = "2"
 members = [
-  "crates/oxide-arb-error",
-  "crates/oxide-arb-macros",
-  "crates/oxide-arb-models",
-  "crates/oxide-arb-api",
-  "crates/oxide-arb-storage",
-  "crates/oxide-arb-repository",
-  "crates/oxide-arb-control",
-  "crates/oxide-arb-algorithm",
-  "crates/oxide-arb-risk",
-  "crates/oxide-arb-core",
-  "crates/oxide-arb-web",
-  "crates/oxide-arb-bench",
-  "crates/oxide-arb-bin",
-  "crates/oxide-arb-test-support",
-  "crates/oxide-arb-xtask",
+  "crates/quant-pivot-error",
+  "crates/quant-pivot-macros",
+  "crates/quant-pivot-models",
+  "crates/quant-pivot-api",
+  "crates/quant-pivot-storage",
+  "crates/quant-pivot-repository",
+  "crates/quant-pivot-core",
+  "crates/quant-pivot-web",
+  "crates/quant-pivot-bench",
+  "crates/quant-pivot-bin",
+  "crates/quant-pivot-test-support",
+  "crates/quant-pivot-xtask",
 ]
 
 [workspace.package]
@@ -146,7 +143,7 @@ reqwest = { version = "0.13", features = ["json", "rustls"] }
 
 # TLS: the dependency tree enables both rustls crypto backends (`ring` via
 # sea-orm/sqlx, `aws-lc-rs` via reqwest), so the binary must install the
-# process-level CryptoProvider explicitly at startup (see oxide-arb-bin).
+# process-level CryptoProvider explicitly at startup (see quant-pivot-bin).
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }
 
 # Concurrency primitives
@@ -220,7 +217,7 @@ actix-rt = "2"
 # Password hashing (argon2id) — shared by seed + web login
 argon2 = "0.5"
 
-# CLI / process entrypoints (oxide-arb-bin, oxide-arb-xtask)
+# CLI / process entrypoints (quant-pivot-bin, quant-pivot-xtask)
 clap = { version = "4", features = ["derive"] }
 anyhow = "1.0"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
@@ -239,24 +236,21 @@ regex = "1.11"
 # Random number generation
 rand = "0.10"
 
-# actix integration tests (oxide-arb-web)
+# actix integration tests (quant-pivot-web)
 actix-http = { version = "3", features = ["ws"] }
 actix-test = "0.1"
 
 # ── Internal Crates ──────────────────────────────────────────────────────────
 
-oxide-arb-error = { path = "crates/oxide-arb-error" }
-oxide-arb-macros = { path = "crates/oxide-arb-macros" }
-oxide-arb-models = { path = "crates/oxide-arb-models" }
-oxide-arb-api = { path = "crates/oxide-arb-api" }
-oxide-arb-storage = { path = "crates/oxide-arb-storage" }
-oxide-arb-repository = { path = "crates/oxide-arb-repository" }
-oxide-arb-control = { path = "crates/oxide-arb-control" }
-oxide-arb-algorithm = { path = "crates/oxide-arb-algorithm" }
-oxide-arb-risk = { path = "crates/oxide-arb-risk" }
-oxide-arb-core = { path = "crates/oxide-arb-core" }
-oxide-arb-web = { path = "crates/oxide-arb-web" }
-oxide-arb-test-support = { path = "crates/oxide-arb-test-support" }
+quant-pivot-error = { path = "crates/quant-pivot-error" }
+quant-pivot-macros = { path = "crates/quant-pivot-macros" }
+quant-pivot-models = { path = "crates/quant-pivot-models" }
+quant-pivot-api = { path = "crates/quant-pivot-api" }
+quant-pivot-storage = { path = "crates/quant-pivot-storage" }
+quant-pivot-repository = { path = "crates/quant-pivot-repository" }
+quant-pivot-core = { path = "crates/quant-pivot-core" }
+quant-pivot-web = { path = "crates/quant-pivot-web" }
+quant-pivot-test-support = { path = "crates/quant-pivot-test-support" }
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Cargo Profile Configuration

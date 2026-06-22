@@ -1,13 +1,13 @@
 # Persistence Schema Catalog
 
-本文档是 `oxide-arb` 后续所有 Postgres 表结构、索引、trigger、seed 变更的统一范式。
+本文档是 `quant-pivot` 后续所有 Postgres 表结构、索引、trigger、seed 变更的统一范式。
 
 schema catalog 是唯一事实源。storage migrations 只消费 catalog metadata，禁止在 migration 里手写业务表字段、业务索引、trigger 表名列表或 seed 排序。
 
 ## 核心规则
 
-- 每个 iden enum 必须使用 `#[oxide_schema]`，禁止裸写 `#[derive(DeriveIden)]`。
-- 非 core 表必须显式声明 lifecycle，例如 `#[oxide_schema(lifecycle = "control")]` 或 `#[oxide_schema(lifecycle = "audit")]`。未声明时只允许作为 core schema。
+- 每个 iden enum 必须使用 `#[quant_schema]`，禁止裸写 `#[derive(DeriveIden)]`。
+- 非 core 表必须显式声明 lifecycle，例如 `#[quant_schema(lifecycle = "control")]` 或 `#[quant_schema(lifecycle = "audit")]`。未声明时只允许作为 core schema。
 - 表 DDL、索引、依赖、trigger、seed specs 都放在该表的 `idens/<table>.rs` schema module 中。
 - 不为 schema API 添加兼容 re-export。调用方必须使用明确模块路径。
 - 如果表需要 `UpdatedAt`，只在 enum 中声明 `UpdatedAt` variant，并在 `table()` 中使用 `timestamp_with_write_default(UpdatedAt)`。trigger metadata 会自动生成。
@@ -66,11 +66,11 @@ schema catalog 是唯一事实源。storage migrations 只消费 catalog metadat
 
 ## 新增一张表
 
-1. 新增 `crates/oxide-arb-models/src/idens/<table>.rs`。
-2. 在 `crates/oxide-arb-models/src/idens/mod.rs` 添加 module。
-3. 在 iden enum 上使用 `#[oxide_schema]`。
-   - control registry 表使用 `#[oxide_schema(lifecycle = "control")]`。
-   - append-only audit 表使用 `#[oxide_schema(lifecycle = "audit")]`。
+1. 新增 `crates/quant-pivot-models/src/idens/<table>.rs`。
+2. 在 `crates/quant-pivot-models/src/idens/mod.rs` 添加 module。
+3. 在 iden enum 上使用 `#[quant_schema]`。
+   - control registry 表使用 `#[quant_schema(lifecycle = "control")]`。
+   - append-only audit 表使用 `#[quant_schema(lifecycle = "audit")]`。
 4. 实现 `table() -> TableCreateStatement`。
 5. 实现 `indexes() -> Vec<IndexSpec>`。
 6. 实现 `dependencies() -> Vec<TableDependency>`。
@@ -110,7 +110,7 @@ seed metadata 必须通过相关表的 schema module 暴露。
 - loader SQL 必须确定、幂等。
 
 `runtime_config_version.config_json` 的类型化 schema 是
-`oxide_arb_models::runtime_config::RuntimeConfig`（固定 `schema_version = 1`，
+`quant_pivot_models::runtime_config::RuntimeConfig`（固定 `schema_version = 1`，
 `deny_unknown_fields`）。bootstrap 在无活动版本（或活动版本无法通过类型化解析）时
 以 `RuntimeConfig::default()` 重新播种（`source = Bootstrap`）；之后所有变更只
 通过治理 API（create → preflight → activate）写入，TOML 永不覆盖该表。激活后
@@ -152,7 +152,7 @@ MenuSeed
 ## 完整 Schema Module 示例
 
 ```rust
-use oxide_arb_macros::oxide_schema;
+use quant_pivot_macros::quant_schema;
 use sea_orm::{
     Iden,
     sea_query::{
@@ -171,7 +171,7 @@ use crate::{
     },
 };
 
-#[oxide_schema]
+#[quant_schema]
 pub enum Market {
     Table,
     MarketId,
@@ -293,7 +293,7 @@ fn event_table_name() -> String {
 
 说明：
 
-- `#[oxide_schema]` 注入 `DeriveIden` 并注册 `TableSpec`。
+- `#[quant_schema]` 注入 `DeriveIden` 并注册 `TableSpec`。
 - `UpdatedAt` trigger 自动生成。
 - `dependencies()` 是 create/drop 拓扑排序来源。
 - `indexes()` 是定义该表业务索引的唯一位置。

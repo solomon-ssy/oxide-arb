@@ -6,8 +6,8 @@
 //! server is provided by the semaphore: batched inserts queue on permits
 //! instead of piling additional requests onto a slow `ClickHouse`.
 
-use oxide_arb_error::storage::StorageError;
 use prometheus::{GaugeVec, IntCounterVec, IntGauge, Opts, Registry};
+use quant_pivot_error::storage::StorageError;
 use std::sync::Arc;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 

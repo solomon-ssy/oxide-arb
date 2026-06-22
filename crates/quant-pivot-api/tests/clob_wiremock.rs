@@ -2,16 +2,16 @@
 
 use alloy::signers::Signer as _;
 use alloy::signers::local::LocalSigner;
-use oxide_arb_api::{clob::ClobClient, infra::retry::RetryPolicy, keystore::OrderSigner};
-use oxide_arb_models::{
-    domain::order::{OrderAmount, OrderRequest},
-    enums::common::{OrderType, Side},
-    types::{MarketId, Price, Shares, TokenId, Usd},
-};
 use polymarket_client_sdk_v2::POLYGON;
 use polymarket_client_sdk_v2::auth::Normal;
 use polymarket_client_sdk_v2::auth::state::Authenticated;
 use polymarket_client_sdk_v2::clob::{Client as SdkClient, Config as SdkConfig};
+use quant_pivot_api::{clob::ClobClient, infra::retry::RetryPolicy, keystore::OrderSigner};
+use quant_pivot_models::{
+    domain::order::{OrderAmount, OrderRequest},
+    enums::common::{OrderType, Side},
+    types::{MarketId, Price, Shares, TokenId, Usd},
+};
 use rust_decimal_macros::dec;
 use std::str::FromStr as _;
 use std::sync::Arc;

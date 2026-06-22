@@ -11,7 +11,7 @@ use serde::Deserialize;
 #[serde(default, deny_unknown_fields)]
 pub struct ObservabilityConfig {
     /// Default `tracing` filter directive (e.g. `info`,
-    /// `info,oxide_arb_core=debug`). The `RUST_LOG` environment variable, when
+    /// `info,quant_pivot_core=debug`). The `RUST_LOG` environment variable, when
     /// set, overrides this value entirely. Default: `info`.
     pub log_level: String,
     /// Emit JSON-structured log lines instead of human-readable text. Enable

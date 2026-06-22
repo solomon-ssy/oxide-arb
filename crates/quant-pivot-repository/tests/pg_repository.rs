@@ -9,7 +9,8 @@ use std::collections::HashSet;
 
 use chrono::{NaiveDate, Utc};
 use market_fixtures::{make_event, make_market};
-use oxide_arb_models::{
+use pg::setup_pg;
+use quant_pivot_models::{
     domain::control_factor::{
         AuditChain, BucketRiskDimensions, BucketRiskPayload, ConfidenceInterval,
         ControlFactorValue, DataCoverageReport, FactorDimensions, FactorEvidence, FactorPayload,
@@ -21,7 +22,7 @@ use oxide_arb_models::{
         PublicationMode, PublicationStatus,
     },
 };
-use oxide_arb_models::{
+use quant_pivot_models::{
     domain::{
         AcquireMaterializationRunOutcome, CancelMaterializationRunOutcome,
         EnqueueMaterializationRunOptions, EnqueueMaterializationRunOutcome,
@@ -38,10 +39,11 @@ use oxide_arb_models::{
         query::{TimeWindow, TradeAnalyticsFilter},
     },
     enums::{
+        LegacyExecutionMode,
         calibration::{DurationBucket, PriceZone},
         common::{
-            ExecutionMode, MarketCategory, PositionStatus, RedeemResolutionSource, RedeemStatus,
-            ReportType, SettlementTrigger, Side, TradeBusinessOutcome, TradeState,
+            MarketCategory, PositionStatus, RedeemResolutionSource, RedeemStatus, ReportType,
+            SettlementTrigger, Side, TradeBusinessOutcome, TradeState,
         },
         control_factor::{
             EvidenceStageStatus, MaterializationOutputPolicy, MaterializationRunKind,
@@ -56,9 +58,8 @@ use oxide_arb_models::{
     },
     types::*,
 };
-use oxide_arb_repository::{postgres::*, traits::*};
-use oxide_arb_storage::postgres::PostgresPool;
-use pg::setup_pg;
+use quant_pivot_repository::{postgres::*, traits::*};
+use quant_pivot_storage::postgres::PostgresPool;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 
@@ -265,7 +266,7 @@ fn sample_buy_trade(execution_id: &ExecutionId) -> NewTrade {
         detected_profit_usd: Some(Usd::from(Decimal::new(5, 0))),
         scored_snapshot: serde_json::json!({}),
         category: MarketCategory::Sports,
-        execution_mode: ExecutionMode::DryRun,
+        execution_mode: LegacyExecutionMode::DryRun,
     }
 }
 
@@ -415,7 +416,7 @@ async fn trade_repository_batch_create() {
             detected_profit_usd: None,
             scored_snapshot: serde_json::json!({}),
             category: MarketCategory::Finance,
-            execution_mode: ExecutionMode::Paper,
+            execution_mode: LegacyExecutionMode::Paper,
         })
         .collect();
 
@@ -461,7 +462,7 @@ async fn position_lifecycle() {
             detected_profit_usd: None,
             scored_snapshot: serde_json::json!({}),
             category: MarketCategory::Politics,
-            execution_mode: ExecutionMode::Paper,
+            execution_mode: LegacyExecutionMode::Paper,
         })
         .await
         .expect("create trade");
@@ -474,7 +475,7 @@ async fn position_lifecycle() {
             market_id: MarketId::new("0xpos-market"),
             token_id: TokenId::new("111"),
             side: Side::Buy,
-            execution_mode: ExecutionMode::Paper,
+            execution_mode: LegacyExecutionMode::Paper,
             shares: Shares::from(Decimal::new(100, 0)),
             avg_entry_price: Price::from(Decimal::new(95, 2)),
             total_cost_usd: Usd::from(Decimal::new(95, 0)),
@@ -531,7 +532,7 @@ async fn position_settle() {
             detected_profit_usd: None,
             scored_snapshot: serde_json::json!({}),
             category: MarketCategory::Crypto,
-            execution_mode: ExecutionMode::Paper,
+            execution_mode: LegacyExecutionMode::Paper,
         })
         .await
         .expect("create trade");
@@ -544,7 +545,7 @@ async fn position_settle() {
             market_id: MarketId::new("0xsettle-mkt"),
             token_id: TokenId::new("333"),
             side: Side::Sell,
-            execution_mode: ExecutionMode::Paper,
+            execution_mode: LegacyExecutionMode::Paper,
             shares: Shares::from(Decimal::new(50, 0)),
             avg_entry_price: Price::from(Decimal::new(80, 2)),
             total_cost_usd: Usd::from(Decimal::new(40, 0)),
@@ -576,7 +577,7 @@ async fn position_settle() {
         .expect("settle position");
     assert!(
         position_repo
-            .find_open(ExecutionMode::Paper)
+            .find_open(LegacyExecutionMode::Paper)
             .await
             .unwrap()
             .is_empty()
@@ -589,7 +590,7 @@ async fn seed_successful_trade(
     market_id: &str,
     event_id: &str,
     token_id: &str,
-    mode: ExecutionMode,
+    mode: LegacyExecutionMode,
     cost: Decimal,
     fee: Decimal,
 ) -> TradeId {
@@ -649,7 +650,7 @@ struct ObservedTradeSpec {
     market_id: &'static str,
     event_id: &'static str,
     token_id: &'static str,
-    mode: ExecutionMode,
+    mode: LegacyExecutionMode,
     state: TradeState,
     cost: Decimal,
     fee: Decimal,
@@ -759,7 +760,7 @@ async fn trade_aggregate_between_counts_outcomes_and_sums() {
             market_id: "0xagg-a",
             event_id: "evt-agg-a",
             token_id: "agg-a-1",
-            mode: ExecutionMode::Paper,
+            mode: LegacyExecutionMode::Paper,
             state: TradeState::FillObserved,
             cost: dec!(10),
             fee: dec!(1),
@@ -774,7 +775,7 @@ async fn trade_aggregate_between_counts_outcomes_and_sums() {
             market_id: "0xagg-b",
             event_id: "evt-agg-b",
             token_id: "agg-b-1",
-            mode: ExecutionMode::Paper,
+            mode: LegacyExecutionMode::Paper,
             state: TradeState::MissObserved,
             cost: dec!(8),
             fee: dec!(1),
@@ -789,7 +790,7 @@ async fn trade_aggregate_between_counts_outcomes_and_sums() {
             market_id: "0xagg-a",
             event_id: "evt-agg-a",
             token_id: "agg-a-2",
-            mode: ExecutionMode::Paper,
+            mode: LegacyExecutionMode::Paper,
             state: TradeState::FailObserved,
             cost: dec!(20),
             fee: dec!(2),
@@ -804,7 +805,7 @@ async fn trade_aggregate_between_counts_outcomes_and_sums() {
             market_id: "0xagg-b",
             event_id: "evt-agg-b",
             token_id: "agg-b-2",
-            mode: ExecutionMode::Paper,
+            mode: LegacyExecutionMode::Paper,
             state: TradeState::Intent,
             cost: dec!(5),
             fee: dec!(0),
@@ -837,7 +838,7 @@ async fn seed_market_performance_trades(trade_repo: &PgTradeRepository) {
             market_id: "0xperf-a",
             event_id: "evt-perf-a",
             token_id: "perf-a-1",
-            mode: ExecutionMode::Paper,
+            mode: LegacyExecutionMode::Paper,
             state: TradeState::FillObserved,
             cost: dec!(10),
             fee: dec!(1),
@@ -852,7 +853,7 @@ async fn seed_market_performance_trades(trade_repo: &PgTradeRepository) {
             market_id: "0xperf-a",
             event_id: "evt-perf-a",
             token_id: "perf-a-2",
-            mode: ExecutionMode::Paper,
+            mode: LegacyExecutionMode::Paper,
             state: TradeState::MissObserved,
             cost: dec!(6),
             fee: dec!(0),
@@ -867,7 +868,7 @@ async fn seed_market_performance_trades(trade_repo: &PgTradeRepository) {
             market_id: "0xperf-b",
             event_id: "evt-perf-b",
             token_id: "perf-b-1",
-            mode: ExecutionMode::Paper,
+            mode: LegacyExecutionMode::Paper,
             state: TradeState::FillObserved,
             cost: dec!(15),
             fee: dec!(2),
@@ -882,7 +883,7 @@ async fn seed_market_performance_trades(trade_repo: &PgTradeRepository) {
             market_id: "0xperf-a",
             event_id: "evt-perf-a",
             token_id: "perf-a-live",
-            mode: ExecutionMode::Live,
+            mode: LegacyExecutionMode::Live,
             state: TradeState::FillObserved,
             cost: dec!(99),
             fee: dec!(9),
@@ -906,7 +907,7 @@ async fn trade_market_performance_groups_pages_and_filters_by_mode() {
     let window = analytics_window();
     let filter = TradeAnalyticsFilter {
         window,
-        execution_mode: Some(ExecutionMode::Paper),
+        execution_mode: Some(LegacyExecutionMode::Paper),
     };
 
     let page = trade_repo
@@ -951,7 +952,7 @@ async fn seed_open_position(
     position_repo: &PgPositionRepository,
     trade_id: TradeId,
     token_id: &str,
-    mode: ExecutionMode,
+    mode: LegacyExecutionMode,
     cost: Decimal,
     fee: Decimal,
 ) -> PositionId {
@@ -996,7 +997,7 @@ async fn seed_mode_ledger_trades(pool: &PostgresPool) -> (TradeId, TradeId) {
         "0xmode-ledger",
         "evt-mode-ledger",
         "555001",
-        ExecutionMode::Paper,
+        LegacyExecutionMode::Paper,
         Decimal::new(40, 0),
         Decimal::ONE,
     )
@@ -1006,7 +1007,7 @@ async fn seed_mode_ledger_trades(pool: &PostgresPool) -> (TradeId, TradeId) {
         "0xmode-ledger",
         "evt-mode-ledger",
         "555002",
-        ExecutionMode::Live,
+        LegacyExecutionMode::Live,
         Decimal::new(70, 0),
         Decimal::new(2, 0),
     )
@@ -1014,19 +1015,19 @@ async fn seed_mode_ledger_trades(pool: &PostgresPool) -> (TradeId, TradeId) {
     (paper_trade, live_trade)
 }
 
-async fn spend_total(repo: &PgTradeRepository, mode: ExecutionMode) -> Usd {
+async fn spend_total(repo: &PgTradeRepository, mode: LegacyExecutionMode) -> Usd {
     repo.successful_spend_total(mode)
         .await
         .expect("spend total")
 }
 
-async fn payout_total(repo: &PgPositionRepository, mode: ExecutionMode) -> Usd {
+async fn payout_total(repo: &PgPositionRepository, mode: LegacyExecutionMode) -> Usd {
     repo.settlement_payout_total(mode)
         .await
         .expect("payout total")
 }
 
-async fn open_count(repo: &PgPositionRepository, mode: ExecutionMode) -> usize {
+async fn open_count(repo: &PgPositionRepository, mode: LegacyExecutionMode) -> usize {
     repo.find_open(mode).await.expect("find open").len()
 }
 
@@ -1039,15 +1040,15 @@ async fn successful_spend_total_is_mode_scoped() {
 
     // Spend aggregates must never mix modes: paper = 40+1, live = 70+2.
     assert_eq!(
-        spend_total(&trade_repo, ExecutionMode::Paper).await,
+        spend_total(&trade_repo, LegacyExecutionMode::Paper).await,
         Usd::from(Decimal::new(41, 0))
     );
     assert_eq!(
-        spend_total(&trade_repo, ExecutionMode::Live).await,
+        spend_total(&trade_repo, LegacyExecutionMode::Live).await,
         Usd::from(Decimal::new(72, 0))
     );
     assert_eq!(
-        spend_total(&trade_repo, ExecutionMode::DryRun).await,
+        spend_total(&trade_repo, LegacyExecutionMode::DryRun).await,
         Usd::ZERO
     );
 }
@@ -1063,7 +1064,7 @@ async fn position_ledger_queries_are_mode_scoped() {
         &position_repo,
         paper_trade,
         "555001",
-        ExecutionMode::Paper,
+        LegacyExecutionMode::Paper,
         Decimal::new(40, 0),
         Decimal::ONE,
     )
@@ -1072,16 +1073,25 @@ async fn position_ledger_queries_are_mode_scoped() {
         &position_repo,
         live_trade,
         "555002",
-        ExecutionMode::Live,
+        LegacyExecutionMode::Live,
         Decimal::new(70, 0),
         Decimal::new(2, 0),
     )
     .await;
 
     // Open positions are mode-contextual: one per mode here.
-    assert_eq!(open_count(&position_repo, ExecutionMode::Paper).await, 1);
-    assert_eq!(open_count(&position_repo, ExecutionMode::Live).await, 1);
-    assert_eq!(open_count(&position_repo, ExecutionMode::DryRun).await, 0);
+    assert_eq!(
+        open_count(&position_repo, LegacyExecutionMode::Paper).await,
+        1
+    );
+    assert_eq!(
+        open_count(&position_repo, LegacyExecutionMode::Live).await,
+        1
+    );
+    assert_eq!(
+        open_count(&position_repo, LegacyExecutionMode::DryRun).await,
+        0
+    );
 
     // Settle only the paper position with a $100 payout.
     position_repo
@@ -1102,14 +1112,17 @@ async fn position_ledger_queries_are_mode_scoped() {
 
     // Payout aggregates stay isolated per mode as well.
     assert_eq!(
-        payout_total(&position_repo, ExecutionMode::Paper).await,
+        payout_total(&position_repo, LegacyExecutionMode::Paper).await,
         Usd::from(Decimal::new(100, 0))
     );
     assert_eq!(
-        payout_total(&position_repo, ExecutionMode::Live).await,
+        payout_total(&position_repo, LegacyExecutionMode::Live).await,
         Usd::ZERO
     );
-    assert_eq!(open_count(&position_repo, ExecutionMode::Paper).await, 0);
+    assert_eq!(
+        open_count(&position_repo, LegacyExecutionMode::Paper).await,
+        0
+    );
 }
 
 #[tokio::test]

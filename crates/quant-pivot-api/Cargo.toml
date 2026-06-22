@@ -1,12 +1,12 @@
 [package]
-name = "oxide-arb-api"
+name = "quant-pivot-api"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-oxide-arb-error = { workspace = true, features = ["serde"] }
-oxide-arb-models = { workspace = true }
+quant-pivot-error = { workspace = true, features = ["serde"] }
+quant-pivot-models = { workspace = true }
 num-traits = { workspace = true }
 
 # Polymarket SDK
@@ -71,7 +71,7 @@ serde_json = { workspace = true }
 hex = { workspace = true }
 uuid = { workspace = true }
 alloy = { workspace = true }
-oxide-arb-core = { workspace = true }
+quant-pivot-core = { workspace = true }
 
 [features]
 integration = []

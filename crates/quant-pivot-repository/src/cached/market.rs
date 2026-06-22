@@ -6,12 +6,12 @@
 
 use crate::traits::MarketRepository;
 use chrono::{DateTime, Utc};
-use oxide_arb_error::storage::StorageError;
-use oxide_arb_models::{
+use quant_pivot_error::storage::StorageError;
+use quant_pivot_models::{
     domain::{MarketInfo, MarketPageQuery, MarketPitSnapshotInfo, Paginated, UpsertMarket},
     types::MarketId,
 };
-use oxide_arb_storage::cache::{CacheKey, CacheManager};
+use quant_pivot_storage::cache::{CacheKey, CacheManager};
 use std::{collections::HashSet, sync::Arc};
 
 /// Caching decorator for market metadata reads.

@@ -1,7 +1,7 @@
 use super::{market_registry::MarketRegistry, universe_filter::MarketUniverseFilter};
 use arc_swap::ArcSwap;
 use chrono::{DateTime, Utc};
-use oxide_arb_models::{
+use quant_pivot_models::{
     enums::common::{CategorySet, MarketCategory, TickSize},
     types::{EventId, MarketId, TokenId},
 };
@@ -107,7 +107,7 @@ mod tests {
     use super::*;
     use crate::pipeline::market_registry::MarketRegistry;
     use chrono::Utc;
-    use oxide_arb_models::{
+    use quant_pivot_models::{
         domain::market::{MarketRegistryInfo, TokenInfo},
         enums::market::MarketStatus,
         types::Usd,

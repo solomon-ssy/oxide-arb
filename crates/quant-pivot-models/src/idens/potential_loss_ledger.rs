@@ -1,4 +1,4 @@
-use oxide_arb_macros::oxide_schema;
+use quant_pivot_macros::quant_schema;
 use sea_orm::{
     Iden,
     sea_query::{ColumnDef, ForeignKey, ForeignKeyAction, Index, Table, TableCreateStatement},
@@ -16,7 +16,7 @@ use crate::{
     },
 };
 
-#[oxide_schema(lifecycle = "ledger")]
+#[quant_schema(lifecycle = "ledger")]
 pub enum PotentialLossLedger {
     Table,
     LedgerId,

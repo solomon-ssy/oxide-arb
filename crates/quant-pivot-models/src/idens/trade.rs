@@ -1,4 +1,4 @@
-use oxide_arb_macros::oxide_schema;
+use quant_pivot_macros::quant_schema;
 use sea_orm::{
     Iden,
     sea_query::{
@@ -18,7 +18,7 @@ use crate::{
     },
 };
 
-#[oxide_schema(lifecycle = "ledger")]
+#[quant_schema(lifecycle = "ledger")]
 pub enum Trade {
     Table,
     TradeId,
@@ -52,7 +52,7 @@ pub enum Trade {
     PostTradeClaimOwner,
     PostTradeClaimedAt,
     PostTradeAttempts,
-    ExecutionMode,
+    LegacyExecutionMode,
     LatencyMs,
     ErrorMessage,
     SubmittedAt,
@@ -150,7 +150,7 @@ fn trade_table_tail_columns(mut table: TableCreateStatement) -> TableCreateState
                 .not_null()
                 .default(0),
         )
-        .col(ColumnDef::new(Trade::ExecutionMode).text().not_null())
+        .col(ColumnDef::new(Trade::LegacyExecutionMode).text().not_null())
         .col(ColumnDef::new(Trade::LatencyMs).integer().null())
         .col(ColumnDef::new(Trade::ErrorMessage).text().null())
         .col(

@@ -1,6 +1,6 @@
 //! Hot-path abstraction for reading the active control-factor snapshot.
 //!
-//! The concrete `ArcSwap`-backed implementation lives in `oxide-arb-core`; this
+//! The concrete `ArcSwap`-backed implementation lives in `quant-pivot-core`; this
 //! trait lets the algorithm, risk, and core crates consume the snapshot without
 //! depending on the live refresher's I/O. Implementations must be lock-free and
 //! cheap: a single `ArcSwap::load_full`.

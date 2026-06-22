@@ -1,5 +1,5 @@
-use oxide_arb_models::{
-    enums::common::ExecutionMode,
+use quant_pivot_models::{
+    enums::legacy::LegacyExecutionMode,
     runtime_config::ResolvedRedeemPlan,
     types::{MarketId, TokenId, Usd},
 };
@@ -10,7 +10,7 @@ pub struct RedeemRequest {
     pub market_id: MarketId,
     pub yes_token_id: TokenId,
     pub no_token_id: TokenId,
-    pub execution_mode: ExecutionMode,
+    pub execution_mode: LegacyExecutionMode,
     /// Immutable redeem plan snapshotted on the position at fill time.
     pub plan: ResolvedRedeemPlan,
 }

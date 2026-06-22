@@ -1,5 +1,5 @@
 //! Domain models, types, enums, configuration, and persistence entities
-//! for the oxide-arb platform.
+//! for the quant-pivot platform.
 //!
 //! This crate is the single source of truth for all data definitions.
 //! It contains zero business logic — only type definitions, serialization,
@@ -9,7 +9,7 @@
 //!
 //! The `entities` module (`SeaORM` `Model`/`ActiveModel`/`Entity`) is
 //! crate-private by default. Enable the `repository` feature to re-export
-//! it — only the `oxide-arb-repository` crate should do this. All other
+//! it — only the `quant-pivot-repository` crate should do this. All other
 //! crates interact with persistence through domain DTOs (`New*`, `Update*`,
 //! `Upsert*`) and read models (`*Info`).
 

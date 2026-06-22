@@ -1,6 +1,6 @@
 [package]
-name = "oxide-arb-core"
-description = "System hub: AppContext, data pipeline, execution engine, bridge layers"
+name = "quant-pivot-core"
+description = "System hub: AppContext, data ingest, governance"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,15 +8,12 @@ publish = false
 
 [dependencies]
 # ── Workspace internal ─────────────────────────────────────────────
-oxide-arb-error      = { workspace = true, features = ["storage", "config", "serde"] }
-oxide-arb-models     = { workspace = true }
-oxide-arb-api        = { workspace = true }
-oxide-arb-storage    = { workspace = true }
-oxide-arb-repository = { workspace = true }
-oxide-arb-algorithm  = { workspace = true }
-oxide-arb-control    = { workspace = true }
-oxide-arb-risk       = { workspace = true }
-oxide-arb-web        = { workspace = true }
+quant-pivot-error      = { workspace = true, features = ["storage", "config", "serde"] }
+quant-pivot-models     = { workspace = true }
+quant-pivot-api        = { workspace = true }
+quant-pivot-storage    = { workspace = true }
+quant-pivot-repository = { workspace = true }
+quant-pivot-web        = { workspace = true }
 
 # ── Async runtime ──────────────────────────────────────────────────
 tokio      = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "time", "sync"] }
@@ -65,7 +62,7 @@ rand = { workspace = true }
 strum = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]
-oxide-arb-test-support = { workspace = true }
+quant-pivot-test-support = { workspace = true }
 # Disconnected `DatabaseConnection` handles for I/O-free repository wiring in
 # the runtime-config applicator propagation test.
 sea-orm = { workspace = true }

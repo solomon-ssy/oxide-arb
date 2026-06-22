@@ -9,7 +9,7 @@
 mod pg;
 
 use casbin::{Adapter, CoreApi, DefaultModel, Enforcer, Model};
-use oxide_arb_models::{
+use quant_pivot_models::{
     domain::{
         AssignMenus, AssignPermissions, AssignRoles, ChangeUserPassword, NewMenu, NewOperationLog,
         NewRole, NewUser, OperationLogQuery, PageRequest, Permission, RolePatch, UserPageQuery,
@@ -22,7 +22,7 @@ use oxide_arb_models::{
     },
     types::{MenuId, OperationLogId, RoleId, UserId},
 };
-use oxide_arb_repository::{
+use quant_pivot_repository::{
     postgres::{
         PgCasbinAdapter, PgMenuRepository, PgOperationLogRepository, PgRoleMenuRepository,
         PgRolePermissionRepository, PgRoleRepository, PgUserRepository, PgUserRoleRepository,
@@ -149,7 +149,7 @@ async fn user_crud_paging_and_delete() {
     let dup = repo.create(new_user("alice")).await;
     assert!(matches!(
         dup,
-        Err(oxide_arb_error::storage::StorageError::Conflict(_))
+        Err(quant_pivot_error::storage::StorageError::Conflict(_))
     ));
 
     // Partial update + status + password.
@@ -208,7 +208,7 @@ async fn user_crud_paging_and_delete() {
     repo.delete(&created.id).await.expect("delete");
     assert!(matches!(
         repo.find_by_id(&created.id).await,
-        Err(oxide_arb_error::storage::StorageError::NotFound { .. })
+        Err(quant_pivot_error::storage::StorageError::NotFound { .. })
     ));
 }
 
@@ -224,7 +224,7 @@ async fn role_crud_and_builtin_protection() {
         .expect("create role");
     assert!(matches!(
         repo.create(new_role("custom_role_a")).await,
-        Err(oxide_arb_error::storage::StorageError::Conflict(_))
+        Err(quant_pivot_error::storage::StorageError::Conflict(_))
     ));
 
     let by_code = repo
@@ -260,7 +260,7 @@ async fn role_crud_and_builtin_protection() {
         .expect("seeded");
     assert!(matches!(
         repo.delete(&builtin.id).await,
-        Err(oxide_arb_error::storage::StorageError::Conflict(_))
+        Err(quant_pivot_error::storage::StorageError::Conflict(_))
     ));
     repo.delete(&created.id).await.expect("delete custom role");
     assert!(
@@ -304,7 +304,7 @@ async fn menu_tree_accessibility_and_delete_guard() {
     // Parent with children cannot be deleted.
     assert!(matches!(
         menus.delete(&root.id).await,
-        Err(oxide_arb_error::storage::StorageError::Conflict(_))
+        Err(quant_pivot_error::storage::StorageError::Conflict(_))
     ));
 
     // Accessibility: a role granted only the child still yields the full chain.
@@ -434,7 +434,7 @@ async fn assign_roles_replaces_join_and_casbin_grouping() {
                 role_ids: vec![RoleId::from_v7()],
             })
             .await,
-        Err(oxide_arb_error::storage::StorageError::NotFound { .. })
+        Err(quant_pivot_error::storage::StorageError::NotFound { .. })
     ));
 }
 
@@ -498,7 +498,7 @@ async fn assign_permissions_validates_and_round_trips() {
                 )],
             })
             .await,
-        Err(oxide_arb_error::storage::StorageError::Conflict(_))
+        Err(quant_pivot_error::storage::StorageError::Conflict(_))
     ));
 }
 
@@ -516,13 +516,13 @@ async fn set_permissions_for_unknown_role_is_not_found() {
         .await;
     assert!(matches!(
         result,
-        Err(oxide_arb_error::storage::StorageError::NotFound { .. })
+        Err(quant_pivot_error::storage::StorageError::NotFound { .. })
     ));
 
     let listed = perms.list_permissions(&RoleId::from_v7()).await;
     assert!(matches!(
         listed,
-        Err(oxide_arb_error::storage::StorageError::NotFound { .. })
+        Err(quant_pivot_error::storage::StorageError::NotFound { .. })
     ));
 }
 

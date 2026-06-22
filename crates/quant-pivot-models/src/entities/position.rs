@@ -2,9 +2,10 @@
 
 use crate::{
     enums::common::{
-        ExecutionMode, PositionStatus, RedeemResolutionSource, RedeemStatus,
-        SettlementAccountingStatus, SettlementTrigger, Side,
+        PositionStatus, RedeemResolutionSource, RedeemStatus, SettlementAccountingStatus,
+        SettlementTrigger, Side,
     },
+    enums::legacy::LegacyExecutionMode,
     types::{MarketId, PositionId, Price, Shares, TokenId, TradeId, Usd},
 };
 use chrono::{DateTime, Utc};
@@ -19,7 +20,7 @@ pub struct Model {
     pub market_id: MarketId,
     pub token_id: TokenId,
     pub side: Side,
-    pub execution_mode: ExecutionMode,
+    pub execution_mode: LegacyExecutionMode,
     pub shares: Shares,
     pub avg_entry_price: Price,
     pub total_cost_usd: Usd,

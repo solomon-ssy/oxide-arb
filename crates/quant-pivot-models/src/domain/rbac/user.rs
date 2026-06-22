@@ -55,7 +55,7 @@ pub struct NewUser {
 /// [`UserRepository::change_status`], keeping every sensitive transition on its
 /// own audited, single-purpose path.
 ///
-/// [`UserRepository::change_status`]: ../../../oxide_arb_repository/traits/trait.UserRepository.html
+/// [`UserRepository::change_status`]: ../../../quant_pivot_repository/traits/trait.UserRepository.html
 #[derive(Debug, Clone, Default, DeriveIntoActiveModel)]
 #[sea_orm(active_model = "crate::entities::user::ActiveModel")]
 pub struct UserPatch {

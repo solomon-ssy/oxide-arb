@@ -13,11 +13,11 @@ use actix_http::{
 use actix_test::{TestServer, start as start_test_server};
 use actix_web::{App, http::StatusCode, middleware::from_fn, test::TestRequest, web};
 use futures_util::{SinkExt, StreamExt};
-use oxide_arb_models::{
+use quant_pivot_models::{
     domain::{CoreEvent, SubscriptionKey, SystemAlertEvent, WsChannel},
     enums::common::{AlertCategory, AlertLevel, AlertSource},
 };
-use oxide_arb_web::ws::SessionHandle;
+use quant_pivot_web::ws::SessionHandle;
 
 use crate::{
     client,
@@ -62,13 +62,13 @@ fn ws_upgrade_request_with_api_version(uri: &str, with_api_version: bool) -> Tes
     req
 }
 
-fn start_ws_server(state: oxide_arb_web::AppState) -> TestServer {
+fn start_ws_server(state: quant_pivot_web::AppState) -> TestServer {
     start_test_server(move || {
         App::new()
             .app_data(web::Data::new(state.clone()))
-            .wrap(from_fn(oxide_arb_web::middleware::request_id))
-            .wrap(from_fn(oxide_arb_web::middleware::operation_audit))
-            .configure(oxide_arb_web::routes::configure)
+            .wrap(from_fn(quant_pivot_web::middleware::request_id))
+            .wrap(from_fn(quant_pivot_web::middleware::operation_audit))
+            .configure(quant_pivot_web::routes::configure)
     })
 }
 
@@ -293,12 +293,15 @@ async fn ws_system_status_broadcast_without_subscribe() {
     // Drain connect-time snapshot.
     let _ = recv_until_type(&mut session, "system.status", Duration::from_millis(500)).await;
 
-    let status = env.state.control.system_status().await;
+    let status = env.state.control.system_status();
     env.state
         .events
         .publish(CoreEvent::SystemStatusChanged(status));
     let pushed = recv_until_type(&mut session, "system.status", Duration::from_secs(2)).await;
-    assert_eq!(pushed["data"]["operational_phase"]["phase"], "operational");
+    assert_eq!(
+        pushed["data"]["operational_phase"]["phase"],
+        "catalog_warming"
+    );
 }
 
 #[actix_web::test]
@@ -318,7 +321,7 @@ async fn ws_subscribe_receives_multiple_system_status_events() {
         .unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let status = env.state.control.system_status().await;
+    let status = env.state.control.system_status();
     env.state
         .events
         .publish(CoreEvent::SystemStatusChanged(status.clone()));

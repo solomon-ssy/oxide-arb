@@ -15,11 +15,12 @@ mod reference;
 pub use rate_cache::{CategoryFeeParams, FeeSnapshot};
 
 use arc_swap::ArcSwap;
-use oxide_arb_models::{
+use quant_pivot_models::{
     config::FeesConfig,
     domain::fee::{FeeQuote, FeeQuoteError, FeeQuoteInput, MarketFeeSchedule},
     enums::{
-        common::{ExecutionMode, MarketCategory, Side},
+        LegacyExecutionMode,
+        common::{MarketCategory, Side},
         fee::FeeLiquidityRole,
     },
     types::{MarketId, Price, Shares, TokenId, Usd},
@@ -109,10 +110,10 @@ impl FeeCalculator {
     /// Mode-aware fee quote: Live forces `allow_category_fallback = false`.
     pub fn quote_for_mode(
         &self,
-        mode: ExecutionMode,
+        mode: LegacyExecutionMode,
         mut input: FeeQuoteInput,
     ) -> Result<FeeQuote, FeeQuoteError> {
-        if mode == ExecutionMode::Live {
+        if mode == LegacyExecutionMode::Live {
             input.allow_category_fallback = false;
         }
         self.quote(&input)

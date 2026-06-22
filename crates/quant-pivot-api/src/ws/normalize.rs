@@ -4,7 +4,10 @@ use super::{ingest_hooks::BookLevelRejectHook, token_intern::intern_u256};
 use crate::clob::ClobSide;
 use ahash::AHashMap;
 use num_traits::ToPrimitive;
-use oxide_arb_models::{
+use polymarket_client_sdk_v2::clob::ws::types::response::{
+    BestBidAsk, BookUpdate, LastTradePrice, MarketResolved, PriceChange, TickSizeChange, WsMessage,
+};
+use quant_pivot_models::{
     domain::{
         book::BookLevel,
         pipeline::{
@@ -14,9 +17,6 @@ use oxide_arb_models::{
     },
     enums::common::TickSize,
     types::{MarketId, Price, Shares, TokenId},
-};
-use polymarket_client_sdk_v2::clob::ws::types::response::{
-    BestBidAsk, BookUpdate, LastTradePrice, MarketResolved, PriceChange, TickSizeChange, WsMessage,
 };
 use std::{cell::RefCell, cmp::Reverse, sync::Arc, time::Instant};
 
@@ -214,7 +214,6 @@ fn market_resolved_event(mr: &MarketResolved, ws_ingress: Instant) -> PipelineEv
 #[cfg(test)]
 mod tests {
     use super::*;
-    use oxide_arb_models::domain::pipeline::PipelineEvent;
     use polymarket_client_sdk_v2::{
         clob::{
             types::Side,
@@ -222,6 +221,7 @@ mod tests {
         },
         types::{B256, U256},
     };
+    use quant_pivot_models::domain::pipeline::PipelineEvent;
     use rust_decimal_macros::dec;
     use std::sync::atomic::{AtomicU32, Ordering};
 

@@ -6,10 +6,10 @@ use crate::{
     },
     seed::risk_engine_state,
 };
-use oxide_arb_macros::oxide_schema;
+use quant_pivot_macros::quant_schema;
 use sea_orm::sea_query::{ColumnDef, Expr, Table, TableCreateStatement};
 
-#[oxide_schema(lifecycle = "core")]
+#[quant_schema(lifecycle = "core")]
 pub enum RiskEngineState {
     Table,
     Id,

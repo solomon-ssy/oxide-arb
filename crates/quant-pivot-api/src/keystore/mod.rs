@@ -5,8 +5,8 @@ mod signer;
 pub use signer::OrderSigner;
 
 use alloy::primitives::Address;
-use oxide_arb_error::signing::SigningError;
-use oxide_arb_models::config::KeysConfig;
+use quant_pivot_error::signing::SigningError;
+use quant_pivot_models::config::KeysConfig;
 use std::sync::Arc;
 use zeroize::Zeroizing;
 

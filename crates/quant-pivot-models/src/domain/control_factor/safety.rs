@@ -1,6 +1,6 @@
 //! Payload safety helpers for control-factor contracts.
 
-use oxide_arb_error::control::PayloadSafetyError;
+use quant_pivot_error::control::PayloadSafetyError;
 use rust_decimal::Decimal;
 
 pub(super) fn ensure_multiplier(

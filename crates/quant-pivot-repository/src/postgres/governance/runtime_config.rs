@@ -2,8 +2,8 @@ use crate::{
     postgres::control_factor::append_audit_event_chained_q, traits::RuntimeConfigVersionRepository,
 };
 use chrono::{DateTime, Utc};
-use oxide_arb_error::storage::StorageError;
-use oxide_arb_models::{
+use quant_pivot_error::storage::StorageError;
+use quant_pivot_models::{
     domain::{
         NewRuntimeConfigActivation, NewRuntimeConfigVersion, RuntimeConfigActivationInfo,
         RuntimeConfigVersionInfo,

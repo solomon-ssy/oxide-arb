@@ -7,7 +7,7 @@
 
 use super::catalog::{CatalogEvent, CatalogMarket, RejectedMarket};
 use chrono::{DateTime, Utc};
-use oxide_arb_models::{
+use quant_pivot_models::{
     domain::{
         fee::MarketFeeSchedule,
         market::{
@@ -233,7 +233,7 @@ fn token_infos(market: &CatalogMarket) -> [TokenInfo; 2] {
 mod tests {
     use super::*;
     use crate::gamma::wire::WireEvent;
-    use oxide_arb_models::enums::common::MarketCategory;
+    use quant_pivot_models::enums::common::MarketCategory;
 
     fn batch_from(json: &str) -> GammaCatalogBatch {
         let wire: WireEvent = serde_json::from_str(json).expect("wire event");

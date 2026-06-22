@@ -4,11 +4,12 @@ use crate::{
     domain::{
         NullablePatch, Patch,
         control_ports::CatalogState,
-        lifecycle::{MarketDataConnectivity, OperationalPhase},
+        lifecycle::{MarketDataConnectivity, OperationalPhase, WsShardConnectivity},
     },
     enums::{
-        common::{ExecutionMode, ReportType},
+        common::ReportType,
         lifecycle::ShutdownStage,
+        quant::QuantRuntimeMode,
         risk::BreakerStateName,
         runtime_config::{RuntimeConfigActivationKind, RuntimeConfigVersionSource},
     },
@@ -55,7 +56,7 @@ impl ExecutionEmergencyView {
 /// Overall system status reported by the health endpoint.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemStatus {
-    pub execution_mode: ExecutionMode,
+    pub quant_runtime_mode: QuantRuntimeMode,
     pub breaker_state: BreakerStateName,
     pub uptime_secs: u64,
     pub active_markets: u32,
@@ -152,6 +153,40 @@ impl SubsystemHealth {
             },
             latency_ms: None,
             detail: None,
+        }
+    }
+}
+
+impl SystemStatus {
+    /// Minimal Phase 0 bootstrap status projection.
+    #[must_use]
+    pub fn report_only_bootstrap(quant_runtime_mode: QuantRuntimeMode) -> Self {
+        Self {
+            quant_runtime_mode,
+            breaker_state: BreakerStateName::Closed,
+            uptime_secs: 0,
+            active_markets: 0,
+            open_positions: 0,
+            pending_reservations: 0,
+            total_exposure: Usd::ZERO,
+            daily_pnl: Usd::ZERO,
+            catalog: CatalogState::Warming,
+            operational_phase: OperationalPhase::CatalogWarming,
+            market_data: MarketDataConnectivity {
+                ready: false,
+                last_message_age_ms: None,
+                ws_shards: WsShardConnectivity {
+                    total: 0,
+                    disconnected: 0,
+                    oldest_disconnected_secs: None,
+                    connected_ratio_bps: 0,
+                },
+            },
+            control_factor_publication_id: None,
+            control_factor_snapshot_expired: false,
+            control_factor_live_warn: false,
+            execution_emergency: ExecutionEmergencyView::idle(),
+            checked_at: Utc::now(),
         }
     }
 }
@@ -285,15 +320,11 @@ pub struct NewRuntimeConfigActivation {
 // ── System runtime state (operational control singleton) ─────────────
 
 /// DB row projection for the `system_runtime_state` singleton.
-///
-/// Carries the active execution mode and the metadata of its last change so the
-/// bootstrap can restore the operator's most recent deliberate mode across a
-/// restart. The singleton is seeded to `DryRun` by the migration seed lane.
 #[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]
 #[sea_orm(entity = "crate::entities::system_runtime_state::Entity")]
 pub struct SystemRuntimeStateInfo {
     pub id: i32,
-    pub execution_mode: ExecutionMode,
+    pub quant_runtime_mode: crate::enums::quant::QuantRuntimeMode,
     pub changed_by: String,
     pub reason: String,
     pub changed_at: DateTime<Utc>,
@@ -305,7 +336,7 @@ info_from_model!(
     crate::entities::system_runtime_state::Model,
     {
         id,
-        execution_mode,
+        quant_runtime_mode,
         changed_by,
         reason,
         changed_at,
@@ -313,13 +344,12 @@ info_from_model!(
     }
 );
 
-/// Upsert payload for the execution-mode singleton (`id` is always the
-/// singleton key).
+/// Upsert payload for the runtime-mode singleton (`id` is always the singleton key).
 #[derive(Debug, Clone, DeriveIntoActiveModel)]
 #[sea_orm(active_model = "crate::entities::system_runtime_state::ActiveModel")]
 pub struct UpsertSystemRuntimeState {
     pub id: i32,
-    pub execution_mode: ExecutionMode,
+    pub quant_runtime_mode: QuantRuntimeMode,
     pub changed_by: String,
     pub reason: String,
     pub changed_at: DateTime<Utc>,

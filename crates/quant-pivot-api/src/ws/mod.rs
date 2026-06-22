@@ -23,7 +23,7 @@ pub use token_intern::{TOKEN_INTERN, TokenInternPool, intern_str, intern_u256};
 use crate::infra::retry::RetryPolicy;
 use flume::Receiver;
 use num_traits::ToPrimitive;
-use oxide_arb_models::{
+use quant_pivot_models::{
     config::{PolymarketConfig, WebSocketConfig},
     domain::pipeline::PipelineEvent,
     types::TokenId,
@@ -337,7 +337,7 @@ impl ClobWsManager {
 #[cfg(test)]
 mod tests {
     use super::{SubscriptionSource, SubscriptionState};
-    use oxide_arb_models::types::TokenId;
+    use quant_pivot_models::types::TokenId;
     use std::collections::HashSet;
 
     fn tok(s: &str) -> TokenId {

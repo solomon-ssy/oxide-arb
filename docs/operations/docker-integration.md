@@ -20,33 +20,33 @@ Tests run **serially** (`--test-threads=1`) to avoid port and resource contentio
 ## Run a single suite
 
 ```bash
-cargo test -p oxide-arb-core --test gamma_service_sync -- --ignored --test-threads=1
+cargo test -p quant-pivot-core --test gamma_service_sync -- --ignored --test-threads=1
 ```
 
 ## What each suite covers
 
 | Crate | Test binary | Services |
 |-------|-------------|----------|
-| `oxide-arb-repository` | `pg_repository` | Postgres |
-| `oxide-arb-repository` | `pg_rbac` | Postgres |
-| `oxide-arb-repository` | `ch_timeseries` | ClickHouse |
-| `oxide-arb-storage` | `migration_pg` | Postgres |
-| `oxide-arb-storage` | `redis_integration` | Redis |
-| `oxide-arb-storage` | `clickhouse_integration` | ClickHouse |
-| `oxide-arb-storage` | `cache_tiered_integration` | Redis |
-| `oxide-arb-core` | `gamma_service_sync` | Postgres + Redis (wiremock Gamma) |
-| `oxide-arb-web` | `web` | Postgres + Redis (full HTTP/RBAC/WS E2E) |
+| `quant-pivot-repository` | `pg_repository` | Postgres |
+| `quant-pivot-repository` | `pg_rbac` | Postgres |
+| `quant-pivot-repository` | `ch_timeseries` | ClickHouse |
+| `quant-pivot-storage` | `migration_pg` | Postgres |
+| `quant-pivot-storage` | `redis_integration` | Redis |
+| `quant-pivot-storage` | `clickhouse_integration` | ClickHouse |
+| `quant-pivot-storage` | `cache_tiered_integration` | Redis |
+| `quant-pivot-core` | `gamma_service_sync` | Postgres + Redis (wiremock Gamma) |
+| `quant-pivot-web` | `web` | Postgres + Redis (full HTTP/RBAC/WS E2E) |
 
-Implementation lives in `crates/oxide-arb-xtask` (`cargo xtask test-docker`).
+Implementation lives in `crates/quant-pivot-xtask` (`cargo xtask test-docker`).
 
 ## Do not use workspace-wide `--ignored`
 
 ```bash
-# Avoid — also runs live Polymarket / RPC tests in oxide-arb-api
+# Avoid — also runs live Polymarket / RPC tests in quant-pivot-api
 cargo test --workspace -- --ignored
 ```
 
-Network and credential-dependent tests live under `oxide-arb-api` with different ignore reasons. See [network-integration.md](./network-integration.md).
+Network and credential-dependent tests live under `quant-pivot-api` with different ignore reasons. See [network-integration.md](./network-integration.md).
 
 ## CI
 
@@ -62,9 +62,9 @@ Docker Hub rate limits or stale credentials in Docker Desktop. Fix: `docker logo
 
 Start Docker Desktop / Colima before running `cargo test-docker`.
 
-**`oxide-arb-web` auth tests: login 200 but refresh/logout 503**
+**`quant-pivot-web` auth tests: login 200 but refresh/logout 503**
 
-Usually Redis testcontainer cold-start or pool pressure under parallel runs. The web harness connects the shared Redis pool (`connect_pool`) and waits for a successful blacklist `health_check` before serving requests. Prefer `cargo test-docker` (serial) over parallel `cargo test -p oxide-arb-web --test web -- --ignored` without `--test-threads=1`.
+Usually Redis testcontainer cold-start or pool pressure under parallel runs. The web harness connects the shared Redis pool (`connect_pool`) and waits for a successful blacklist `health_check` before serving requests. Prefer `cargo test-docker` (serial) over parallel `cargo test -p quant-pivot-web --test web -- --ignored` without `--test-threads=1`.
 
 ## Test tiers (summary)
 
@@ -72,4 +72,4 @@ Usually Redis testcontainer cold-start or pool pressure under parallel runs. The
 |------|---------|----------|
 | Unit (default) | `cargo test --workspace` | nothing |
 | Docker | `cargo test-docker` | Docker daemon |
-| Network / live | `cargo test -p oxide-arb-api --features integration -- --ignored --test-threads=1` | outbound network + secrets |
+| Network / live | `cargo test -p quant-pivot-api --features integration -- --ignored --test-threads=1` | outbound network + secrets |

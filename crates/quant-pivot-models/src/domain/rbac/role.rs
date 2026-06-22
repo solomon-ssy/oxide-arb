@@ -48,7 +48,7 @@ pub struct NewRole {
 /// therefore must flow exclusively through [`RoleRepository::change_status`],
 /// never a generic column update that would silently bypass the policy sync.
 ///
-/// [`RoleRepository::change_status`]: ../../../oxide_arb_repository/traits/trait.RoleRepository.html
+/// [`RoleRepository::change_status`]: ../../../quant_pivot_repository/traits/trait.RoleRepository.html
 #[derive(Debug, Clone, Default, DeriveIntoActiveModel)]
 #[sea_orm(active_model = "crate::entities::role::ActiveModel")]
 pub struct RolePatch {

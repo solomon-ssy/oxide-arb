@@ -1,8 +1,8 @@
 //! `ClickHouse` client wrapper.
 
 use crate::clickhouse::{ensure, schema};
-use oxide_arb_error::storage::StorageError;
-use oxide_arb_models::config::ClickHouseConfig;
+use quant_pivot_error::storage::StorageError;
+use quant_pivot_models::config::ClickHouseConfig;
 use tracing::info;
 
 pub struct ClickHousePool {

@@ -1,4 +1,4 @@
-use oxide_arb_macros::oxide_schema;
+use quant_pivot_macros::quant_schema;
 use sea_orm::{
     Iden,
     sea_query::{
@@ -19,7 +19,7 @@ use crate::{
     },
 };
 
-#[oxide_schema(lifecycle = "core")]
+#[quant_schema(lifecycle = "core")]
 pub enum Market {
     Table,
     MarketId,

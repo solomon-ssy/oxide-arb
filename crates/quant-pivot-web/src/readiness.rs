@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use oxide_arb_models::domain::{
+use quant_pivot_models::domain::{
     CatalogState, CatalogStatusPort, DependencyCheck, ReadinessPort, ReadinessReport,
 };
 use sea_orm::{ConnectionTrait, DatabaseConnection, Statement};
@@ -54,14 +54,14 @@ impl PgRedisReadiness {
             .await;
         match result {
             Ok(_) => DependencyCheck {
-                name: "postgresql",
+                name: "postgresql".to_owned(),
                 ok: true,
                 detail: None,
             },
             Err(error) => {
                 warn!(%error, elapsed_ms = start.elapsed().as_millis(), "postgres readiness failed");
                 DependencyCheck {
-                    name: "postgresql",
+                    name: "postgresql".to_owned(),
                     ok: false,
                     detail: Some(error.to_string()),
                 }
@@ -72,14 +72,14 @@ impl PgRedisReadiness {
     async fn check_redis(&self) -> DependencyCheck {
         match self.blacklist.health_check().await {
             Ok(()) => DependencyCheck {
-                name: "redis",
+                name: "redis".to_owned(),
                 ok: true,
                 detail: None,
             },
             Err(error) => {
                 warn!(%error, "redis readiness failed");
                 DependencyCheck {
-                    name: "redis",
+                    name: "redis".to_owned(),
                     ok: false,
                     detail: Some(error.to_string()),
                 }
@@ -92,12 +92,12 @@ impl PgRedisReadiness {
         let catalog = self.catalog.as_ref()?;
         Some(match catalog.catalog_state() {
             CatalogState::Ready { markets, synced_at } => DependencyCheck {
-                name: "catalog",
+                name: "catalog".to_owned(),
                 ok: true,
                 detail: Some(format!("{markets} markets, synced at {synced_at}")),
             },
             CatalogState::Warming => DependencyCheck {
-                name: "catalog",
+                name: "catalog".to_owned(),
                 ok: false,
                 detail: Some("warming — first Gamma catalog sync pending".to_owned()),
             },

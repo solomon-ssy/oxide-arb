@@ -1,4 +1,4 @@
-//! Procedural macros for the oxide-arb workspace.
+//! Procedural macros for the quant-pivot workspace.
 //!
 //! - [`StrId`]: Generates a type-safe string ID newtype backed by `Arc<str>`
 //!   (external identifiers that are not UUIDs).
@@ -8,7 +8,7 @@
 //!   strings in `SeaORM`.
 
 mod into_active_value;
-mod oxide_schema;
+mod quant_schema;
 mod str_id;
 mod uuid_id;
 
@@ -16,8 +16,8 @@ use proc_macro::TokenStream;
 
 /// Declare a schema iden enum and register its table metadata.
 #[proc_macro_attribute]
-pub fn oxide_schema(args: TokenStream, input: TokenStream) -> TokenStream {
-    oxide_schema::expand(args.into(), input.into())
+pub fn quant_schema(args: TokenStream, input: TokenStream) -> TokenStream {
+    quant_schema::expand(args.into(), input.into())
         .unwrap_or_else(|e| e.to_compile_error())
         .into()
 }

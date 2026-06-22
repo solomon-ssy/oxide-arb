@@ -6,7 +6,7 @@
 //! through [`StalenessClassifier::reload`].
 
 use arc_swap::ArcSwap;
-use oxide_arb_models::{enums::common::StalenessLevel, runtime_config::MarketDataRuntimeConfig};
+use quant_pivot_models::{enums::common::StalenessLevel, runtime_config::MarketDataRuntimeConfig};
 use std::sync::Arc;
 
 /// Maps an age (in milliseconds) to a `StalenessLevel` using config thresholds.

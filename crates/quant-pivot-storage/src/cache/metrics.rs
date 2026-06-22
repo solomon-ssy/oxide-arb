@@ -10,16 +10,16 @@ pub struct CacheMetrics {
 impl CacheMetrics {
     pub fn new() -> Self {
         let hits = IntCounterVec::new(
-            Opts::new("oxide_arb_cache_hits_total", "Total cache hits"),
+            Opts::new("quant_pivot_cache_hits_total", "Total cache hits"),
             &["level", "domain"],
         )
-        .expect("oxide_arb_cache_hits_total metric");
+        .expect("quant_pivot_cache_hits_total metric");
 
         let misses = IntCounterVec::new(
-            Opts::new("oxide_arb_cache_misses_total", "Total cache misses"),
+            Opts::new("quant_pivot_cache_misses_total", "Total cache misses"),
             &["domain"],
         )
-        .expect("oxide_arb_cache_misses_total metric");
+        .expect("quant_pivot_cache_misses_total metric");
 
         Self { hits, misses }
     }

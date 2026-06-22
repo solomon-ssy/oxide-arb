@@ -14,8 +14,8 @@
 use std::time::{Duration, Instant};
 
 use deadpool_redis::{Config, Pool, PoolConfig, Runtime, Timeouts};
-use oxide_arb_error::storage::StorageError;
-use oxide_arb_models::config::RedisConfig;
+use quant_pivot_error::storage::StorageError;
+use quant_pivot_models::config::RedisConfig;
 use tokio::time::sleep;
 
 /// Upper bound for establishing a single new pooled connection. Clamped to the
@@ -102,7 +102,7 @@ async fn wait_until_ready(pool: &Pool, budget: Duration) -> Result<(), StorageEr
 #[cfg(test)]
 mod tests {
     use super::{CREATE_TIMEOUT, create_timeout, deadpool_config};
-    use oxide_arb_models::config::RedisConfig;
+    use quant_pivot_models::config::RedisConfig;
     use std::time::Duration;
 
     #[test]

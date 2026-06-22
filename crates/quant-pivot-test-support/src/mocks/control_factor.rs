@@ -7,8 +7,8 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use oxide_arb_error::storage::StorageError;
-use oxide_arb_models::{
+use quant_pivot_error::storage::StorageError;
+use quant_pivot_models::{
     domain::{
         Paginated, ReplayPageQuery,
         control_factor::{
@@ -28,7 +28,7 @@ use oxide_arb_models::{
     },
     types::{AuditEventId, ControlFactorId, FactorPublicationId, MaterializationRunId},
 };
-use oxide_arb_repository::traits::ControlFactorRepository;
+use quant_pivot_repository::traits::ControlFactorRepository;
 
 /// Default `trigger_ref` used by [`crate::materialization::scheduled_materialization_run_info`].
 pub const EXECUTION_QUALITY_HOURLY_SCHEDULE_ID: &str = "execution-quality-hourly";

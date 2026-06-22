@@ -2,13 +2,13 @@
 
 use std::{sync::Arc, time::Duration};
 
-use oxide_arb_models::{config::JwtConfig, domain::UserInfo};
-use oxide_arb_web::jwt::JwtService;
+use quant_pivot_models::{config::JwtConfig, domain::UserInfo};
+use quant_pivot_web::jwt::JwtService;
 
 use crate::harness::{NoopBlacklist, TestEnv};
 
-const TEST_JWT_SECRET: &str = "oxide-arb-integration-test-secret-not-for-production";
-const TEST_ISSUER: &str = "oxide-arb-test";
+const TEST_JWT_SECRET: &str = "quant-pivot-integration-test-secret-not-for-production";
+const TEST_ISSUER: &str = "quant-pivot-test";
 
 /// Mint an already-expired access token signed with the harness key.
 pub fn expired_access_token(user: &UserInfo) -> String {

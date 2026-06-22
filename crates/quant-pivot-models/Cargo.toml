@@ -1,12 +1,12 @@
 [package]
-name = "oxide-arb-models"
+name = "quant-pivot-models"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-oxide-arb-error = { workspace = true, features = ["config"] }
-oxide-arb-macros = { workspace = true }
+quant-pivot-error = { workspace = true, features = ["config"] }
+quant-pivot-macros = { workspace = true }
 rust_decimal = { workspace = true }
 rust_decimal_macros = { workspace = true }
 regex = { workspace = true }

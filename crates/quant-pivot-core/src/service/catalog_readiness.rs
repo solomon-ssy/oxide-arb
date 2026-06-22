@@ -1,17 +1,15 @@
 //! Market-catalog readiness gate.
 //!
 //! The catalog starts `Warming` and flips to `Ready` after the first
-//! successful Gamma sync (see `queue_gamma_sync`). Consumers split by need:
+//! successful Gamma sync ([`GammaService::sync`]). Consumers split by need:
 //!
-//! - **Hot path** (scanner gating): [`CatalogReadiness::is_ready`] — a relaxed
-//!   atomic load, no locks.
 //! - **Control plane** (readiness report, `GET /system`): the full
 //!   [`CatalogState`] snapshot via the [`CatalogStatusPort`] trait.
 //! - **Reactive consumers**: [`CatalogReadiness::subscribe`] for a
 //!   `tokio::sync::watch` receiver that fires on state changes.
 
 use chrono::{DateTime, Utc};
-use oxide_arb_models::domain::{CatalogState, CatalogStatusPort};
+use quant_pivot_models::domain::{CatalogState, CatalogStatusPort};
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::watch;
 

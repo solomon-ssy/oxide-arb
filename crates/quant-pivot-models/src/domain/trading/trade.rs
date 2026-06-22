@@ -8,9 +8,9 @@ use crate::{
     domain::{ScoredOpportunitySnapshot, SettledPositionStats},
     enums::{
         common::{
-            ExecutionMode, MarketCategory, Side, TradeBusinessOutcome, TradeReconcileResolution,
-            TradeState,
+            MarketCategory, Side, TradeBusinessOutcome, TradeReconcileResolution, TradeState,
         },
+        legacy::LegacyExecutionMode,
         report::ReportSchemaVersion,
     },
     types::{
@@ -62,7 +62,7 @@ pub struct TradeInfo {
     pub post_trade_claim_owner: Option<String>,
     pub post_trade_claimed_at: Option<DateTime<Utc>>,
     pub post_trade_attempts: i32,
-    pub execution_mode: ExecutionMode,
+    pub execution_mode: LegacyExecutionMode,
     pub latency_ms: Option<i32>,
     pub error_message: Option<String>,
     pub submitted_at: Option<DateTime<Utc>>,
@@ -169,7 +169,7 @@ pub struct NewTrade {
     /// Frozen scored-opportunity snapshot, captured at dispatch.
     pub scored_snapshot: serde_json::Value,
     pub category: MarketCategory,
-    pub execution_mode: ExecutionMode,
+    pub execution_mode: LegacyExecutionMode,
 }
 
 /// Venue-result observation written when an order outcome becomes known.

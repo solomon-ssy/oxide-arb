@@ -1,14 +1,7 @@
-//! Per-connection WebSocket session loop.
-//!
-//! Owns the subscription set, drains the broadcaster's outbound queue into the
-//! socket, processes client commands (`subscribe` / `unsubscribe` / `sync` /
-//! `ping`), and enforces the heartbeat (server ping every 15s; disconnect after
-//! 30s without a pong). Registers in the [`SessionRegistry`] for the lifetime of
-//! the connection and deregisters on exit.
+//! Per-connection WebSocket session loop (Phase 0).
 
 use actix_web::web;
 use actix_ws::{Message, MessageStream, Session};
-use chrono::{Duration as ChronoDuration, Utc};
 use futures_util::StreamExt;
 use std::{
     collections::HashSet,
@@ -16,12 +9,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use oxide_arb_models::{
-    domain::{
-        ClientCommand, ControlFactorMaterializationRunView, LivePnlView, MarketFilter,
-        OpportunityView, PageRequest, PositionView, RiskEngineStateView, SubscriptionKey,
-        SyncSnapshot, TimeWindow, WsChannel, WsEnvelope,
-    },
+use quant_pivot_models::{
+    domain::{ClientCommand, SubscriptionKey, SyncSnapshot, WsChannel, WsEnvelope},
     enums::rbac::{Operation, ResourceType},
 };
 
@@ -30,28 +19,17 @@ use crate::{
     ws::{SessionHandle, SessionRegistry},
 };
 
-/// Server ping cadence.
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
-/// Disconnect threshold without a client pong.
 const CLIENT_TIMEOUT: Duration = Duration::from_secs(30);
-/// Per-session outbound queue capacity.
 const OUTBOUND_CAPACITY: usize = 256;
-/// Look-back for the `sync` recent-opportunities section.
-const SYNC_RECENT_OPPS_HOURS: i64 = 24;
-/// Maximum recent opportunities included in a `sync` snapshot.
-const SYNC_RECENT_OPPS_LIMIT: u64 = 50;
 
-/// Shared context handed to a session task.
 pub struct SessionContext {
     pub state: web::Data<AppState>,
     pub registry: SessionRegistry,
-    /// Authenticated subject (stable user id) used for per-channel authorization.
     pub user_id: String,
 }
 
 impl SessionContext {
-    /// Whether the session may read `resource` (Casbin `Read`), mirroring the
-    /// HTTP `resource_op` check so a WebSocket cannot bypass authorization.
     async fn can_read(&self, resource: ResourceType) -> bool {
         self.state
             .casbin
@@ -61,7 +39,6 @@ impl SessionContext {
     }
 }
 
-/// Run a single WebSocket session until it closes or times out.
 pub async fn run(mut session: Session, mut msg_stream: MessageStream, ctx: SessionContext) {
     let subscriptions = Arc::new(RwLock::new(HashSet::<SubscriptionKey>::new()));
     let (outbound_tx, outbound_rx) = flume::bounded::<String>(OUTBOUND_CAPACITY);
@@ -70,9 +47,8 @@ pub async fn run(mut session: Session, mut msg_stream: MessageStream, ctx: Sessi
         subscriptions: Arc::clone(&subscriptions),
     });
 
-    // Push the connection snapshot immediately after auth (authorized readers).
     if ctx.can_read(ResourceType::System).await {
-        let status = ctx.state.control.system_status().await;
+        let status = ctx.state.control.system_status();
         if let Ok(data) = serde_json::to_value(&status) {
             let _ = session
                 .text(WsEnvelope::channel(WsChannel::SystemStatus, data).to_text())
@@ -132,11 +108,6 @@ pub async fn run(mut session: Session, mut msg_stream: MessageStream, ctx: Sessi
     let _ = session.close(None).await;
 }
 
-/// Process one client command; returns an optional immediate reply.
-///
-/// A malformed command (bad JSON, unknown `action`, or unknown channel) is
-/// answered with a structured `error` frame rather than silently dropped, so
-/// strong typing of [`ClientCommand`] never costs client feedback.
 async fn handle_command(
     ctx: &SessionContext,
     subscriptions: &Arc<RwLock<HashSet<SubscriptionKey>>>,
@@ -155,8 +126,6 @@ async fn handle_command(
     };
     match command {
         ClientCommand::Subscribe { channel, market_id } => {
-            // Sensitive channels require the same read permission as their HTTP
-            // route, so a WebSocket subscription cannot bypass authorization.
             if !ctx.can_read(channel.resource()).await {
                 return Some(
                     WsEnvelope::error(
@@ -181,72 +150,10 @@ async fn handle_command(
     }
 }
 
-/// Build the full-state snapshot for a `sync` command, including only the
-/// sections the session is authorized to read. Every section is projected
-/// through the same outbound `*View` types as its HTTP counterpart, so a `sync`
-/// can never leak internal columns the REST routes strip.
 async fn sync_snapshot(ctx: &SessionContext) -> String {
     let mut snapshot = SyncSnapshot::default();
     if ctx.can_read(ResourceType::System).await {
-        snapshot.system_status = Some(ctx.state.control.system_status().await);
-    }
-    if ctx.can_read(ResourceType::Risk).await {
-        let open_positions: Vec<PositionView> = ctx
-            .state
-            .positions
-            .find_open(ctx.state.control.execution_mode())
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .map(PositionView::from)
-            .collect();
-        snapshot.risk = Some(RiskEngineStateView::from(ctx.state.control.risk_snapshot()));
-        snapshot.open_positions = Some(open_positions);
-    }
-    if ctx.can_read(ResourceType::Pnl).await {
-        snapshot.pnl = Some(LivePnlView::from(&ctx.state.control.risk_snapshot()));
-    }
-    if ctx.can_read(ResourceType::Opportunity).await {
-        let window = TimeWindow::new(
-            Utc::now() - ChronoDuration::hours(SYNC_RECENT_OPPS_HOURS),
-            Utc::now(),
-        );
-        let recent = ctx
-            .state
-            .evidence
-            .detections_page(
-                MarketFilter::default(),
-                window,
-                PageRequest::new(1, SYNC_RECENT_OPPS_LIMIT),
-            )
-            .await
-            .map(|page| {
-                page.items
-                    .iter()
-                    .map(OpportunityView::from)
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        snapshot.recent_opportunities = Some(recent);
-    }
-    if ctx.can_read(ResourceType::ControlFactor).await {
-        const SYNC_ACTIVE_RUNS_LIMIT: u64 = 20;
-        let active = ctx
-            .state
-            .control_factors
-            .list_active_materialization_runs(SYNC_ACTIVE_RUNS_LIMIT)
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .map(ControlFactorMaterializationRunView::from)
-            .collect();
-        snapshot.active_materialization_runs = Some(active);
-        snapshot.materialization_schedules = Some(
-            ctx.state
-                .materialization_schedule_statuses()
-                .await
-                .unwrap_or_default(),
-        );
+        snapshot.system_status = Some(ctx.state.control.system_status());
     }
     let data = serde_json::to_value(&snapshot).unwrap_or_else(|_| serde_json::json!({}));
     WsEnvelope::sync(data).to_text()

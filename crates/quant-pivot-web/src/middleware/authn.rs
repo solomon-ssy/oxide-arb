@@ -17,8 +17,8 @@ use actix_web::{
     middleware::Next,
     web,
 };
-use oxide_arb_error::auth::AuthError;
-use oxide_arb_models::types::UserId;
+use quant_pivot_error::auth::AuthError;
+use quant_pivot_models::types::UserId;
 
 use crate::{error::WebError, extractors::ActorRoles, jwt::TokenType, state::AppState};
 

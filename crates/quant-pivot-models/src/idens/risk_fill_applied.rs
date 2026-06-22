@@ -1,4 +1,4 @@
-use oxide_arb_macros::oxide_schema;
+use quant_pivot_macros::quant_schema;
 use sea_orm::{
     Iden,
     sea_query::{ColumnDef, ForeignKey, ForeignKeyAction, Table, TableCreateStatement},
@@ -13,7 +13,7 @@ use crate::{
 ///
 /// One row exists per `trade_id`. The marker is inserted atomically with the
 /// risk-state snapshot so relay replay re-applies a fill at most once.
-#[oxide_schema(lifecycle = "ledger")]
+#[quant_schema(lifecycle = "ledger")]
 pub enum RiskFillApplied {
     Table,
     TradeId,

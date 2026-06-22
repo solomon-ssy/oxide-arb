@@ -2,7 +2,7 @@
 //!
 //! Lives beside [`crate::domain::event::CoreEvent`] because the protocol and the
 //! event-to-wire projection are one cohesive real-time contract, shared by the
-//! `oxide-arb-web` session loop (server) and the `oxide-arb-core` book-update
+//! `quant-pivot-web` session loop (server) and the `quant-pivot-core` book-update
 //! coalescer (which keys fan-out off [`channel::SubscriptionKey`]).
 //!
 //! - [`channel`] — the [`channel::WsChannel`] taxonomy + [`channel::SubscriptionKey`];

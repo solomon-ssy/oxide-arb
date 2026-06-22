@@ -1,7 +1,7 @@
 //! Keystore unit tests.
 
-use oxide_arb_api::keystore::Keystore;
-use oxide_arb_models::config::{KeySource, KeysConfig};
+use quant_pivot_api::keystore::Keystore;
+use quant_pivot_models::config::{KeySource, KeysConfig};
 
 #[test]
 fn keystore_loads_valid_hex_key() {

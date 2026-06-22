@@ -4884,393 +4884,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "oxide-arb-algorithm"
-version = "0.1.0"
-dependencies = [
- "arc-swap",
- "async-trait",
- "chrono",
- "dashmap",
- "moka",
- "num-traits",
- "oxide-arb-error",
- "oxide-arb-models",
- "proptest",
- "rust_decimal",
- "rust_decimal_macros",
- "serde",
- "sha2",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "oxide-arb-api"
-version = "0.1.0"
-dependencies = [
- "ahash 0.8.12",
- "alloy",
- "arc-swap",
- "async-trait",
- "backoff",
- "chrono",
- "dashmap",
- "flume 0.12.0",
- "futures-util",
- "governor",
- "hex",
- "num-traits",
- "oxide-arb-core",
- "oxide-arb-error",
- "oxide-arb-models",
- "parking_lot",
- "polymarket_client_sdk_v2",
- "reqwest 0.13.3",
- "rust_decimal",
- "rust_decimal_macros",
- "secrecy",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tokio-util",
- "tracing",
- "url",
- "uuid",
- "wiremock",
- "zeroize",
-]
-
-[[package]]
-name = "oxide-arb-bench"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "criterion",
- "flume 0.12.0",
- "num-traits",
- "oxide-arb-algorithm",
- "oxide-arb-api",
- "oxide-arb-core",
- "oxide-arb-models",
- "oxide-arb-repository",
- "oxide-arb-risk",
- "oxide-arb-test-support",
- "polymarket_client_sdk_v2",
- "rust_decimal",
- "rust_decimal_macros",
- "tokio",
- "tokio-util",
-]
-
-[[package]]
-name = "oxide-arb-bin"
-version = "0.1.0"
-dependencies = [
- "clap",
- "oxide-arb-core",
- "oxide-arb-models",
- "rustls",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "oxide-arb-control"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "num-traits",
- "oxide-arb-algorithm",
- "oxide-arb-error",
- "oxide-arb-models",
- "oxide-arb-repository",
- "oxide-arb-test-support",
- "rust_decimal",
- "rust_decimal_macros",
- "serde",
- "serde_json",
- "tokio",
- "tokio-util",
- "tracing",
-]
-
-[[package]]
-name = "oxide-arb-core"
-version = "0.1.0"
-dependencies = [
- "ahash 0.8.12",
- "alloy",
- "arc-swap",
- "async-trait",
- "backoff",
- "chrono",
- "criterion",
- "dashmap",
- "flume 0.12.0",
- "futures-util",
- "governor",
- "hex",
- "moka",
- "num-traits",
- "oxide-arb-algorithm",
- "oxide-arb-api",
- "oxide-arb-control",
- "oxide-arb-error",
- "oxide-arb-models",
- "oxide-arb-repository",
- "oxide-arb-risk",
- "oxide-arb-storage",
- "oxide-arb-test-support",
- "oxide-arb-web",
- "parking_lot",
- "polymarket_client_sdk_v2",
- "prometheus",
- "proptest",
- "rand 0.10.1",
- "reqwest 0.13.3",
- "rust_decimal",
- "rust_decimal_macros",
- "sea-orm",
- "serde",
- "serde_json",
- "serde_repr",
- "sha2",
- "strum 0.28.0",
- "teloxide",
- "testcontainers",
- "testcontainers-modules",
- "thiserror 2.0.18",
- "tokio",
- "tokio-util",
- "tracing",
- "uuid",
- "wiremock",
-]
-
-[[package]]
-name = "oxide-arb-error"
-version = "0.1.0"
-dependencies = [
- "bitcode",
- "clickhouse",
- "config",
- "deadpool-redis",
- "redis",
- "rust_decimal",
- "rust_decimal_macros",
- "sea-orm",
- "serde_json",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "oxide-arb-macros"
-version = "0.1.0"
-dependencies = [
- "darling 0.23.0",
- "proc-macro2",
- "quote",
- "syn 2.0.117",
-]
-
-[[package]]
-name = "oxide-arb-models"
-version = "0.1.0"
-dependencies = [
- "argon2",
- "async-trait",
- "bitcode",
- "blake3",
- "chrono",
- "clickhouse",
- "config",
- "flume 0.12.0",
- "hex",
- "insta",
- "linkme",
- "num-traits",
- "oxide-arb-error",
- "oxide-arb-macros",
- "regex",
- "rust_decimal",
- "rust_decimal_macros",
- "schemars 1.2.1",
- "sea-orm",
- "serde",
- "serde_json",
- "serde_repr",
- "serde_with",
- "sha2",
- "strum 0.28.0",
- "thiserror 2.0.18",
- "toml",
- "tracing",
- "url",
- "uuid",
- "validator",
-]
-
-[[package]]
-name = "oxide-arb-repository"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "bitcode",
- "blake3",
- "casbin",
- "chrono",
- "clickhouse",
- "hex",
- "num-traits",
- "oxide-arb-error",
- "oxide-arb-models",
- "oxide-arb-storage",
- "rust_decimal",
- "rust_decimal_macros",
- "sea-orm",
- "serde",
- "serde_json",
- "testcontainers",
- "testcontainers-modules",
- "tokio",
- "tokio-util",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "oxide-arb-risk"
-version = "0.1.0"
-dependencies = [
- "arc-swap",
- "async-trait",
- "chrono",
- "dashmap",
- "num-traits",
- "oxide-arb-error",
- "oxide-arb-models",
- "parking_lot",
- "proptest",
- "rust_decimal",
- "rust_decimal_macros",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "oxide-arb-storage"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "backoff",
- "bitcode",
- "chrono",
- "clickhouse",
- "deadpool-redis",
- "moka",
- "num-traits",
- "oxide-arb-error",
- "oxide-arb-models",
- "prometheus",
- "redis",
- "rust_decimal",
- "rust_decimal_macros",
- "sea-orm",
- "sea-orm-migration",
- "serde",
- "serde_json",
- "testcontainers",
- "testcontainers-modules",
- "thiserror 2.0.18",
- "tokio",
- "tokio-util",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "oxide-arb-test-support"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "flume 0.12.0",
- "num-traits",
- "oxide-arb-algorithm",
- "oxide-arb-api",
- "oxide-arb-core",
- "oxide-arb-error",
- "oxide-arb-models",
- "oxide-arb-repository",
- "oxide-arb-risk",
- "rust_decimal",
- "rust_decimal_macros",
- "serde_json",
- "tokio",
- "tokio-util",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "oxide-arb-web"
-version = "0.1.0"
-dependencies = [
- "actix-cors",
- "actix-files",
- "actix-http",
- "actix-rt",
- "actix-test",
- "actix-web",
- "actix-ws",
- "async-trait",
- "casbin",
- "chrono",
- "dashmap",
- "deadpool-redis",
- "flume 0.12.0",
- "futures-util",
- "jsonwebtoken",
- "oxide-arb-control",
- "oxide-arb-core",
- "oxide-arb-error",
- "oxide-arb-models",
- "oxide-arb-repository",
- "oxide-arb-storage",
- "oxide-arb-test-support",
- "redis",
- "rust_decimal",
- "rust_decimal_macros",
- "sea-orm",
- "serde",
- "serde_json",
- "testcontainers",
- "testcontainers-modules",
- "thiserror 2.0.18",
- "tokio",
- "tokio-util",
- "tracing",
- "tracing-actix-web",
- "uuid",
- "validator",
-]
-
-[[package]]
-name = "oxide-arb-xtask"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
-]
-
-[[package]]
 name = "p256"
 version = "0.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5914,6 +5527,320 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 1.0.109",
+]
+
+[[package]]
+name = "quant-pivot-api"
+version = "0.1.0"
+dependencies = [
+ "ahash 0.8.12",
+ "alloy",
+ "arc-swap",
+ "async-trait",
+ "backoff",
+ "chrono",
+ "dashmap",
+ "flume 0.12.0",
+ "futures-util",
+ "governor",
+ "hex",
+ "num-traits",
+ "parking_lot",
+ "polymarket_client_sdk_v2",
+ "quant-pivot-core",
+ "quant-pivot-error",
+ "quant-pivot-models",
+ "reqwest 0.13.3",
+ "rust_decimal",
+ "rust_decimal_macros",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "url",
+ "uuid",
+ "wiremock",
+ "zeroize",
+]
+
+[[package]]
+name = "quant-pivot-bench"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "criterion",
+ "flume 0.12.0",
+ "num-traits",
+ "polymarket_client_sdk_v2",
+ "quant-pivot-api",
+ "quant-pivot-core",
+ "quant-pivot-models",
+ "quant-pivot-repository",
+ "quant-pivot-test-support",
+ "rust_decimal",
+ "rust_decimal_macros",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "quant-pivot-bin"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "quant-pivot-core",
+ "quant-pivot-models",
+ "rustls",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "quant-pivot-core"
+version = "0.1.0"
+dependencies = [
+ "ahash 0.8.12",
+ "alloy",
+ "arc-swap",
+ "async-trait",
+ "backoff",
+ "chrono",
+ "criterion",
+ "dashmap",
+ "flume 0.12.0",
+ "futures-util",
+ "governor",
+ "hex",
+ "moka",
+ "num-traits",
+ "parking_lot",
+ "polymarket_client_sdk_v2",
+ "prometheus",
+ "proptest",
+ "quant-pivot-api",
+ "quant-pivot-error",
+ "quant-pivot-models",
+ "quant-pivot-repository",
+ "quant-pivot-storage",
+ "quant-pivot-test-support",
+ "quant-pivot-web",
+ "rand 0.10.1",
+ "reqwest 0.13.3",
+ "rust_decimal",
+ "rust_decimal_macros",
+ "sea-orm",
+ "serde",
+ "serde_json",
+ "serde_repr",
+ "sha2",
+ "strum 0.28.0",
+ "teloxide",
+ "testcontainers",
+ "testcontainers-modules",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
+ "wiremock",
+]
+
+[[package]]
+name = "quant-pivot-error"
+version = "0.1.0"
+dependencies = [
+ "bitcode",
+ "clickhouse",
+ "config",
+ "deadpool-redis",
+ "redis",
+ "rust_decimal",
+ "rust_decimal_macros",
+ "sea-orm",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "quant-pivot-macros"
+version = "0.1.0"
+dependencies = [
+ "darling 0.23.0",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
+
+[[package]]
+name = "quant-pivot-models"
+version = "0.1.0"
+dependencies = [
+ "argon2",
+ "async-trait",
+ "bitcode",
+ "blake3",
+ "chrono",
+ "clickhouse",
+ "config",
+ "flume 0.12.0",
+ "hex",
+ "insta",
+ "linkme",
+ "num-traits",
+ "quant-pivot-error",
+ "quant-pivot-macros",
+ "regex",
+ "rust_decimal",
+ "rust_decimal_macros",
+ "schemars 1.2.1",
+ "sea-orm",
+ "serde",
+ "serde_json",
+ "serde_repr",
+ "serde_with",
+ "sha2",
+ "strum 0.28.0",
+ "thiserror 2.0.18",
+ "toml",
+ "tracing",
+ "url",
+ "uuid",
+ "validator",
+]
+
+[[package]]
+name = "quant-pivot-repository"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bitcode",
+ "blake3",
+ "casbin",
+ "chrono",
+ "clickhouse",
+ "hex",
+ "num-traits",
+ "quant-pivot-error",
+ "quant-pivot-models",
+ "quant-pivot-storage",
+ "rust_decimal",
+ "rust_decimal_macros",
+ "sea-orm",
+ "serde",
+ "serde_json",
+ "testcontainers",
+ "testcontainers-modules",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "quant-pivot-storage"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "backoff",
+ "bitcode",
+ "chrono",
+ "clickhouse",
+ "deadpool-redis",
+ "moka",
+ "num-traits",
+ "prometheus",
+ "quant-pivot-error",
+ "quant-pivot-models",
+ "redis",
+ "rust_decimal",
+ "rust_decimal_macros",
+ "sea-orm",
+ "sea-orm-migration",
+ "serde",
+ "serde_json",
+ "testcontainers",
+ "testcontainers-modules",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "quant-pivot-test-support"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "flume 0.12.0",
+ "num-traits",
+ "quant-pivot-api",
+ "quant-pivot-core",
+ "quant-pivot-error",
+ "quant-pivot-models",
+ "quant-pivot-repository",
+ "rust_decimal",
+ "rust_decimal_macros",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "quant-pivot-web"
+version = "0.1.0"
+dependencies = [
+ "actix-cors",
+ "actix-files",
+ "actix-http",
+ "actix-rt",
+ "actix-test",
+ "actix-web",
+ "actix-ws",
+ "async-trait",
+ "casbin",
+ "chrono",
+ "dashmap",
+ "deadpool-redis",
+ "flume 0.12.0",
+ "futures-util",
+ "jsonwebtoken",
+ "quant-pivot-core",
+ "quant-pivot-error",
+ "quant-pivot-models",
+ "quant-pivot-repository",
+ "quant-pivot-storage",
+ "quant-pivot-test-support",
+ "redis",
+ "rust_decimal",
+ "rust_decimal_macros",
+ "sea-orm",
+ "serde",
+ "serde_json",
+ "testcontainers",
+ "testcontainers-modules",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-actix-web",
+ "uuid",
+ "validator",
+]
+
+[[package]]
+name = "quant-pivot-xtask"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
 ]
 
 [[package]]

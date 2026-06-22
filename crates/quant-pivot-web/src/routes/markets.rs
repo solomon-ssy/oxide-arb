@@ -5,7 +5,7 @@
 //! port (see [`crate::routes::markets::book`]).
 
 use actix_web::{http::Method, web};
-use oxide_arb_models::{
+use quant_pivot_models::{
     domain::{
         MarketBookSideView, MarketBookSummaryView, MarketBookView, MarketDataPort, MarketInfo,
         MarketPageQuery, MarketView, Paginated,

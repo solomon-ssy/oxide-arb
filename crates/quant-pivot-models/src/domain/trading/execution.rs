@@ -254,7 +254,7 @@ impl ResolvedOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{enums::common::ExecutionMode, types::OrderId};
+    use crate::{enums::legacy::LegacyExecutionMode, types::OrderId};
     use rust_decimal_macros::dec;
 
     /// Planned entry price + frozen resolution probability used across resolve tests.
@@ -285,7 +285,7 @@ mod tests {
             avg_fill_price: Some(Price::new(dec!(0.93))),
             fee_paid: Usd::new(dec!(0.50)),
             tx_hash: None,
-            execution_mode: ExecutionMode::Paper,
+            execution_mode: LegacyExecutionMode::Paper,
             latency_ms: 42,
         });
         // cost = 80 * 0.93 = 74.40
@@ -303,7 +303,7 @@ mod tests {
             avg_fill_price: Some(Price::new(dec!(0.92))),
             fee_paid: Usd::new(dec!(0.40)),
             tx_hash: None,
-            execution_mode: ExecutionMode::Paper,
+            execution_mode: LegacyExecutionMode::Paper,
             latency_ms: 10,
         });
         // resolution_prob = 0.95 → fused_p = 0.95
@@ -317,7 +317,7 @@ mod tests {
     fn resolve_miss_zeros_cost_and_fee() {
         let resolved = resolve(&ExecutionOutcome::Miss {
             reason: "no fill".into(),
-            execution_mode: ExecutionMode::Paper,
+            execution_mode: LegacyExecutionMode::Paper,
         });
         assert_eq!(resolved.business_outcome, TradeBusinessOutcome::Miss);
         assert_eq!(resolved.observed_state(), TradeState::MissObserved);
@@ -331,7 +331,7 @@ mod tests {
     fn resolve_failed_zeros_cost_and_fee() {
         let resolved = resolve(&ExecutionOutcome::Failed {
             error: "timeout".into(),
-            execution_mode: ExecutionMode::Paper,
+            execution_mode: LegacyExecutionMode::Paper,
         });
         assert_eq!(resolved.business_outcome, TradeBusinessOutcome::Failed);
         assert_eq!(resolved.observed_state(), TradeState::FailObserved);
@@ -348,7 +348,7 @@ mod tests {
             avg_fill_price: Some(Price::new(dec!(0.5))),
             fee_paid: Usd::ZERO,
             tx_hash: None,
-            execution_mode: ExecutionMode::Paper,
+            execution_mode: LegacyExecutionMode::Paper,
             latency_ms: u64::MAX,
         });
         let observation = resolved.to_observation();

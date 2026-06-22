@@ -1,8 +1,8 @@
 use crate::traits::PositionRepository;
 use chrono::{DateTime, Utc};
 use num_traits::ToPrimitive;
-use oxide_arb_error::storage::StorageError;
-use oxide_arb_models::{
+use quant_pivot_error::storage::StorageError;
+use quant_pivot_models::{
     domain::{
         MarkRedeemedParams, NewPosition, NullablePatch, Paginated, Patch, PositionInfo,
         PositionPageQuery, PositionPatch, PositionRedeemSnapshot, SettlePositionParams,
@@ -13,10 +13,8 @@ use oxide_arb_models::{
         position::{Column, Entity, Relation},
     },
     enums::{
-        common::{
-            ExecutionMode, PositionStatus, RedeemStatus, SettlementAccountingStatus,
-            SettlementTrigger,
-        },
+        LegacyExecutionMode,
+        common::{PositionStatus, RedeemStatus, SettlementAccountingStatus, SettlementTrigger},
         market::MarketStatus,
     },
     types::{MarketId, PositionId, TokenId, TradeId, Usd},
@@ -33,7 +31,7 @@ use sea_orm::{
 
 async fn find_open_q(
     db: &impl ConnectionTrait,
-    mode: ExecutionMode,
+    mode: LegacyExecutionMode,
 ) -> Result<Vec<PositionInfo>, StorageError> {
     Entity::find()
         .filter(Column::Status.eq(PositionStatus::Open))
@@ -522,7 +520,10 @@ impl PgPositionRepository {
     ///
     /// Mode-scoped so simulated (dry-run/paper) settlements never leak into
     /// the Live internal ledger and vice versa.
-    pub async fn settlement_payout_total(&self, mode: ExecutionMode) -> Result<Usd, StorageError> {
+    pub async fn settlement_payout_total(
+        &self,
+        mode: LegacyExecutionMode,
+    ) -> Result<Usd, StorageError> {
         let row = Entity::find()
             .select_only()
             .column_as(Column::SettlementPayoutUsd.sum(), "total")
@@ -590,7 +591,10 @@ impl PositionRepository for PgPositionRepository {
         page_q(&self.db, query).await
     }
 
-    async fn find_open(&self, mode: ExecutionMode) -> Result<Vec<PositionInfo>, StorageError> {
+    async fn find_open(
+        &self,
+        mode: LegacyExecutionMode,
+    ) -> Result<Vec<PositionInfo>, StorageError> {
         find_open_q(&self.db, mode).await
     }
 
@@ -795,7 +799,10 @@ impl PositionRepository for PgPositionRepositoryTxn<'_> {
         page_q(self.txn, query).await
     }
 
-    async fn find_open(&self, mode: ExecutionMode) -> Result<Vec<PositionInfo>, StorageError> {
+    async fn find_open(
+        &self,
+        mode: LegacyExecutionMode,
+    ) -> Result<Vec<PositionInfo>, StorageError> {
         find_open_q(self.txn, mode).await
     }
 

@@ -17,7 +17,7 @@
 //! is ever driven directly, not to carry production mutations.
 
 use casbin::{Adapter, Filter, Model, error::AdapterError};
-use oxide_arb_models::{
+use quant_pivot_models::{
     entities::casbin_rule::{Column, Entity},
     enums::rbac::casbin::SECTIONS,
 };

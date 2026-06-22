@@ -6,7 +6,7 @@
 //! the repository transaction, so each is followed by an enforcer reload.
 
 use actix_web::{http::Method, web};
-use oxide_arb_models::{
+use quant_pivot_models::{
     domain::{
         AssignMenus, AssignMenusRequest, AssignPermissions, AssignPermissionsRequest,
         ChangeRoleStatusRequest, CreateRoleRequest, MenuInfo, NewRole, Permission, RoleInfo,

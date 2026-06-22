@@ -5,7 +5,7 @@
 //! permission picker.
 
 use actix_web::http::Method;
-use oxide_arb_models::{
+use quant_pivot_models::{
     domain::PermissionCatalogEntry,
     enums::rbac::{Operation, RESOURCE_OPERATIONS, ResourceType},
 };

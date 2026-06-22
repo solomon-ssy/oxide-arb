@@ -13,10 +13,9 @@
 
 use super::{RiskConfig, RuntimeConfig};
 use crate::{
-    domain::position::PositionInfo,
-    enums::common::{ExecutionMode, RedeemStatus},
+    domain::position::PositionInfo, enums::common::RedeemStatus, enums::legacy::LegacyExecutionMode,
 };
-use oxide_arb_error::config_validation::{
+use quant_pivot_error::config_validation::{
     ConfigValidationError, ConfigValidationReport, ConfigWarning,
 };
 use rust_decimal::Decimal;
@@ -30,7 +29,7 @@ use std::collections::HashSet;
 #[derive(Debug, Clone, Copy)]
 pub struct RuntimePreflightContext {
     /// Execution mode that will run under the candidate config.
-    pub mode: ExecutionMode,
+    pub mode: LegacyExecutionMode,
     /// Sum of all active capital reservations (USD).
     pub reserved_total_usd: Decimal,
     /// Largest single-market in-flight exposure (USD).
@@ -54,7 +53,7 @@ pub fn validate_runtime_config(config: &RuntimeConfig) -> ConfigValidationReport
 #[must_use]
 pub fn validate_runtime_for_mode(
     config: &RuntimeConfig,
-    mode: ExecutionMode,
+    mode: LegacyExecutionMode,
 ) -> ConfigValidationReport {
     let mut report = ConfigValidationReport::default();
     validate_settlement_mode(config, mode, &mut report);
@@ -878,10 +877,10 @@ fn validate_settlement(config: &RuntimeConfig, report: &mut ConfigValidationRepo
 
 fn validate_settlement_mode(
     config: &RuntimeConfig,
-    mode: ExecutionMode,
+    mode: LegacyExecutionMode,
     report: &mut ConfigValidationReport,
 ) {
-    if mode != ExecutionMode::Live {
+    if mode != LegacyExecutionMode::Live {
         return;
     }
     let redeem = &config.settlement.redeem;
@@ -901,7 +900,7 @@ fn validate_settlement_mode(
 
 fn validate_notification_mode(
     config: &RuntimeConfig,
-    mode: ExecutionMode,
+    mode: LegacyExecutionMode,
     report: &mut ConfigValidationReport,
 ) {
     let telegram = &config.notification.telegram;
@@ -910,7 +909,7 @@ fn validate_notification_mode(
     let webhook = &config.notification.webhook;
     let webhook_incomplete = webhook.enabled && webhook.url.trim().is_empty();
 
-    if mode == ExecutionMode::Live {
+    if mode == LegacyExecutionMode::Live {
         // Live trades real money: an enabled-but-unreachable alert channel
         // means breaker trips and settlement failures go unseen. Fail closed.
         if telegram_incomplete {
@@ -986,10 +985,10 @@ mod tests {
         let mut config = RuntimeConfig::default();
         config.settlement.redeem.standard = None;
         config.settlement.redeem.neg_risk = None;
-        let report = validate_runtime_for_mode(&config, ExecutionMode::Live);
+        let report = validate_runtime_for_mode(&config, LegacyExecutionMode::Live);
         assert!(report.has_errors(), "no class policy must fail Live");
         assert!(
-            !validate_runtime_for_mode(&RuntimeConfig::default(), ExecutionMode::DryRun)
+            !validate_runtime_for_mode(&RuntimeConfig::default(), LegacyExecutionMode::DryRun)
                 .has_errors(),
             "DryRun tolerates default dual-class policy"
         );
@@ -999,14 +998,14 @@ mod tests {
     fn live_rejects_enabled_telegram_without_token() {
         let mut config = RuntimeConfig::default();
         config.notification.telegram.enabled = true;
-        let report = validate_runtime_for_mode(&config, ExecutionMode::Live);
+        let report = validate_runtime_for_mode(&config, LegacyExecutionMode::Live);
         assert!(
             report
                 .errors
                 .iter()
                 .any(|e| e.to_string().contains("notification.telegram"))
         );
-        assert!(!validate_runtime_for_mode(&config, ExecutionMode::Paper).has_errors());
+        assert!(!validate_runtime_for_mode(&config, LegacyExecutionMode::Paper).has_errors());
     }
 
     #[test]
@@ -1014,7 +1013,7 @@ mod tests {
         let mut config = RuntimeConfig::default();
         config.risk.max_total_exposure_usd = dec!(100);
         let ctx = RuntimePreflightContext {
-            mode: ExecutionMode::Paper,
+            mode: LegacyExecutionMode::Paper,
             reserved_total_usd: dec!(250),
             max_market_reserved_usd: dec!(50),
         };
@@ -1026,7 +1025,7 @@ mod tests {
     fn preflight_accepts_limits_above_reserved() {
         let config = RuntimeConfig::default();
         let ctx = RuntimePreflightContext {
-            mode: ExecutionMode::Paper,
+            mode: LegacyExecutionMode::Paper,
             reserved_total_usd: dec!(250),
             max_market_reserved_usd: dec!(50),
         };

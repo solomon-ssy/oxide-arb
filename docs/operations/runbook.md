@@ -1,6 +1,8 @@
-# oxide-arb 运行与验证手册
+> **SUPERSEDED** — This document describes the legacy Endgame arbitrage system. Active architecture: [quant-pivot/README.md](../plans/quant-pivot/README.md). For deletion inventory only.
 
-> **目标读者**：准备把后端跑起来、验证「有没有机会 / 能不能成交 / 能赚多少」、并让 `oxide-arb-control` 沉淀可发布的 control factors 的运维与量化同学。
+# quant-pivot 运行与验证手册
+
+> **目标读者**：准备把后端跑起来、验证「有没有机会 / 能不能成交 / 能赚多少」、并让 `quant-pivot-control` 沉淀可发布的 control factors 的运维与量化同学。
 >
 > **相关文档**：[bankroll-and-risk-metrics.md](./bankroll-and-risk-metrics.md)（`bankroll_usd` 设计）、[schema-catalog.md](../persistence/schema-catalog.md)（表结构）、[replay-analytics-endgame-audit.md](../replay-analytics-endgame-audit.md)（控制面动机）。
 
@@ -35,7 +37,7 @@ Gamma 目录 + CLOB WebSocket 订单簿
   → BookStore → Scanner / Funnel → 算法（endgame、calibration、scoring）
   → ScoredOpportunity → 风控 → ExecutionPipeline → CLOB 订单（Live）
   → 成交 / 结算 / 对账 → Postgres + ClickHouse 证据链
-  → oxide-arb-control 离线物料化 → Draft 因子 → Shadow → Published → 反哺热路径
+  → quant-pivot-control 离线物料化 → Draft 因子 → Shadow → Published → 反哺热路径
 ```
 
 ### 1.2 推荐阶段
@@ -50,7 +52,7 @@ Gamma 目录 + CLOB WebSocket 订单簿
 
 ### 1.3 关键结论（先读）
 
-- **因子沉淀不强制 Live**；`oxide-arb-control` 不检查 `ExecutionMode`。
+- **因子沉淀不强制 Live**；`quant-pivot-control` 不检查 `ExecutionMode`。
 - **权威因子**需要：足够样本 + PIT 完整 + quality gate 通过 + 人工 **Shadow → Publish**。
 - **DryRun PnL 不可当真**；Paper 更可信；Live + 结算周期才是 ground truth。
 - **`bankroll_usd` 不是钱包余额** → 见 [bankroll-and-risk-metrics.md](./bankroll-and-risk-metrics.md)。
@@ -93,9 +95,9 @@ docker run -d --name oxide-redis -p 6379:6379 redis:7
 
 ### 2.4 Deploy 配置文件
 
-- 开发：`config/oxide-arb.toml`
-- 生产模板：`config/oxide-arb.production.example.toml`
-- 覆盖：`OXIDE_ARB__*` 环境变量（双下划线分隔路径）
+- 开发：`config/quant-pivot.toml`
+- 生产模板：`config/quant-pivot.production.example.toml`
+- 覆盖：`QUANT_PIVOT__*` 环境变量（双下划线分隔路径）
 
 **切勿**在 TOML 里写 `[detection]`、`[risk]` 等旧段 — 启动会 fatal。
 
@@ -106,7 +108,7 @@ docker run -d --name oxide-redis -p 6379:6379 redis:7
 本章回答：
 
 1. 怎么在 Rabby 里**单独建 bot 子账户**、只充策略 USDC？
-2. 怎么在 **oxide-arb 项目里配置**（不写钱包地址，只配 env + runtime）？
+2. 怎么在 **quant-pivot 项目里配置**（不写钱包地址，只配 env + runtime）？
 3. bot **私钥从哪里拿**？L2 凭证要不要单独配？（§3.1.4 + §3.2.1）
 
 ---
@@ -126,7 +128,7 @@ docker run -d --name oxide-redis -p 6379:6379 redis:7
 3. 点击 **「+ Add Address」/「添加地址」**。
 4. 选择 **「Create new address」/「创建新地址」**（从当前助记词派生新账户；推荐再设一个独立密码库备份助记词）。
    - 若希望 bot 与主账户**助记词也完全隔离**：用另一浏览器配置文件新建 Rabby，走 **Create a new seed phrase**，专门给 bot 用。
-5. 给账户起名，例如 **`oxide-arb-bot`**，便于辨认。
+5. 给账户起名，例如 **`quant-pivot-bot`**，便于辨认。
 6. 创建完成后，复制显示的 **新地址**（形如 `0x…`，**不是**你主账户的 `0xC795…`，除非你就打算用主账户——不推荐）。
 7. **记录地址到密码管理器**（地址可公开，但建议与 bot 实例对应关系写清楚）。
 
@@ -161,7 +163,7 @@ Bot 在 **Polygon 主网（chain 137）** 上需要两种资产：
 
 #### 3.1.3 Bot 地址与 Polymarket 网站的关系
 
-oxide-arb **程序化下单**用的是 **bot 子账户私钥** 对应的 EOA，**不需要**把地址写进 `oxide-arb.toml`。
+quant-pivot **程序化下单**用的是 **bot 子账户私钥** 对应的 EOA，**不需要**把地址写进 `quant-pivot.toml`。
 
 两种常见情况：
 
@@ -176,7 +178,7 @@ oxide-arb **程序化下单**用的是 **bot 子账户私钥** 对应的 EOA，*
 
 **只导出 bot 子账户，不要导出主账户。**
 
-1. Rabby 切换到 **`oxide-arb-bot`** 子账户。
+1. Rabby 切换到 **`quant-pivot-bot`** 子账户。
 2. **Settings → Manage Address**（或账户卡片 **⋮**）。
 3. **Export Private Key**，输入 Rabby 密码。
 4. 复制 hex（`0x` + 64 位），**仅**存入本机 secrets 文件（§3.2），勿提交 git、勿贴聊天。
@@ -184,7 +186,7 @@ oxide-arb **程序化下单**用的是 **bot 子账户私钥** 对应的 EOA，*
 可选验证（需 [Foundry cast](https://book.getfoundry.sh/)）：
 
 ```bash
-cast wallet address --private-key "$OXIDE_ARB__KEYS__PRIVATE_KEY"
+cast wallet address --private-key "$QUANT_PIVOT__KEYS__PRIVATE_KEY"
 # 应等于 bot 子账户地址，而非主账户 0xC795…
 ```
 
@@ -192,25 +194,25 @@ cast wallet address --private-key "$OXIDE_ARB__KEYS__PRIVATE_KEY"
 
 ### 3.2 在项目里怎么配置
 
-oxide-arb **不配置钱包地址**；只配置 **密钥（TOML 和/或环境变量）** + **Runtime Config（策略资金参数）**。
+quant-pivot **不配置钱包地址**；只配置 **密钥（TOML 和/或环境变量）** + **Runtime Config（策略资金参数）**。
 
 #### 3.2.1 密钥：只需 `private_key`
 
-oxide-arb **只配置 bot 钱包私钥**。Polymarket CLOB 的 L2 凭证（`api_key` / `secret` / `passphrase`）**不需要**写入配置——`ClobClient::connect` 会用私钥通过 SDK 在连接时自动 derive（已用真实网络验证）。
+quant-pivot **只配置 bot 钱包私钥**。Polymarket CLOB 的 L2 凭证（`api_key` / `secret` / `passphrase`）**不需要**写入配置——`ClobClient::connect` 会用私钥通过 SDK 在连接时自动 derive（已用真实网络验证）。
 
 | 环境变量 / TOML 字段 | 含义 | 从哪里获取 |
 |----------------------|------|------------|
-| `OXIDE_ARB__KEYS__PRIVATE_KEY` / `private_key` | bot 子账户私钥 | Rabby 导出（§3.1.4） |
+| `QUANT_PIVOT__KEYS__PRIVATE_KEY` / `private_key` | bot 子账户私钥 | Rabby 导出（§3.1.4） |
 
 配置优先级（高 → 低）：
 
 | 优先级 | 来源 |
 |--------|------|
-| 1 | `OXIDE_ARB__KEYS__PRIVATE_KEY` 环境变量 |
-| 2 | `config/oxide-arb.local.toml`（gitignored，本机推荐） |
-| 3 | `config/oxide-arb.toml` 中 `[keys].private_key` |
+| 1 | `QUANT_PIVOT__KEYS__PRIVATE_KEY` 环境变量 |
+| 2 | `config/quant-pivot.local.toml`（gitignored，本机推荐） |
+| 3 | `config/quant-pivot.toml` 中 `[keys].private_key` |
 
-**本地 TOML 示例**（`config/oxide-arb.local.toml`）：
+**本地 TOML 示例**（`config/quant-pivot.local.toml`）：
 
 ```toml
 [keys]
@@ -231,29 +233,29 @@ private_key = "0x你的bot私钥"
 
 ```bash
 # 创建并限制权限
-touch ~/.oxide-arb.env && chmod 600 ~/.oxide-arb.env
+touch ~/.quant-pivot.env && chmod 600 ~/.quant-pivot.env
 ```
 
-编辑 `~/.oxide-arb.env`（示例：Live 试运行 $300 策略）：
+编辑 `~/.quant-pivot.env`（示例：Live 试运行 $300 策略）：
 
 ```bash
-# ── Bot 钱包（Rabby 子账户 oxide-arb-bot 导出）──
-export OXIDE_ARB__KEYS__PRIVATE_KEY=0x........................................
+# ── Bot 钱包（Rabby 子账户 quant-pivot-bot 导出）──
+export QUANT_PIVOT__KEYS__PRIVATE_KEY=0x........................................
 
 # ── 基础设施（按你的环境）──
-export OXIDE_ARB__DB__POSTGRES__PASSWORD=...
-export OXIDE_ARB__DB__CLICKHOUSE__PASSWORD=...
-export OXIDE_ARB__POLYMARKET__ONCHAIN__RPC_URL=https://polygon-mainnet.g.alchemy.com/v2/你的KEY
+export QUANT_PIVOT__DB__POSTGRES__PASSWORD=...
+export QUANT_PIVOT__DB__CLICKHOUSE__PASSWORD=...
+export QUANT_PIVOT__POLYMARKET__ONCHAIN__RPC_URL=https://polygon-mainnet.g.alchemy.com/v2/你的KEY
 
 # ── Web（Live 必填强随机）──
-export OXIDE_ARB__WEB__JWT__SECRET=$(openssl rand -hex 32)
+export QUANT_PIVOT__WEB__JWT__SECRET=$(openssl rand -hex 32)
 ```
 
 启动前加载：
 
 ```bash
-set -a && source ~/.oxide-arb.env && set +a
-cargo run -p oxide-arb-bin -- --config-dir config
+set -a && source ~/.quant-pivot.env && set +a
+cargo run -p quant-pivot-bin -- --config-dir config
 ```
 
 #### 3.2.3 Runtime Config：让策略参数与 bot 余额一致
@@ -302,7 +304,7 @@ curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8080/api/system/deplo
 
 ### 3.3 钱包地址要不要写进项目？
 
-**不要。** 没有 `OXIDE_ARB__WALLET_ADDRESS` 配置项。
+**不要。** 没有 `QUANT_PIVOT__WALLET_ADDRESS` 配置项。
 
 启动时从 **bot 私钥** 自动推导 `holder_address`（`build.rs` → `Keystore::address_string()`），用于 CLOB 签名、对账、redeem。
 
@@ -324,7 +326,7 @@ curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8080/api/system/deplo
 |------|-------|------|
 | bot 地址需要 USDC | **否** | **是** |
 | 四个 key env | **必须** | **必须** |
-| `OXIDE_ARB__WEB__JWT__SECRET` | 建议 | **必须**（强随机） |
+| `QUANT_PIVOT__WEB__JWT__SECRET` | 建议 | **必须**（强随机） |
 | Polygon RPC | 建议 | **必须** |
 
 Paper 不花真 USDC，但 ClobClient 仍会读 bot 地址真实余额（对账 external）；`bankroll_usd` 仍管模拟 sizing。
@@ -349,7 +351,7 @@ Paper 不花真 USDC，但 ClobClient 仍会读 bot 地址真实余额（对账 
 
 ## 4. 配置：Deploy vs Runtime
 
-### 4.1 Deploy 配置（`oxide-arb.toml`，改完需重启）
+### 4.1 Deploy 配置（`quant-pivot.toml`，改完需重启）
 
 | 段 | 内容 |
 |----|------|
@@ -411,24 +413,24 @@ Content-Type: application/json
 ### 5.1 编译
 
 ```bash
-cd /path/to/oxide-arb
-cargo build --release -p oxide-arb-bin
+cd /path/to/quant-pivot
+cargo build --release -p quant-pivot-bin
 ```
 
-二进制名：**`oxide-arb`**（crate 名 `oxide-arb-bin`）。
+二进制名：**`quant-pivot`**（crate 名 `quant-pivot-bin`）。
 
 ### 5.2 启动
 
 ```bash
 # 可选：日志
-export RUST_LOG=info,oxide_arb_core=debug
+export RUST_LOG=info,quant_pivot_core=debug
 
-cargo run -p oxide-arb-bin -- --config-dir config
+cargo run -p quant-pivot-bin -- --config-dir config
 # 或
-./target/release/oxide-arb --config-dir config
+./target/release/quant-pivot --config-dir config
 ```
 
-CLI 仅一个参数：`--config-dir`（env：`OXIDE_ARB_CONFIG_DIR`，默认 `config`）。
+CLI 仅一个参数：`--config-dir`（env：`QUANT_PIVOT_CONFIG_DIR`，默认 `config`）。
 
 ### 5.3 首次登录
 
@@ -455,7 +457,7 @@ curl -s -X POST http://localhost:8080/api/auth/login \
 - [ ] Admin UI 顶栏读 **`operational_phase`**（`starting` / `running`），**不**应因启动期 infrastructure alert 长期显示「降级」
 - [ ] `GET /metrics` → Prometheus 有数据
 - [ ] 日志：Gamma sync、WS connected、markets registered；hotset 日志含 `tier1_tokens` / `tier2_tokens`（`candidates_excluded_past` 仅统计被筛掉的过期候选）
-- [ ] `oxide_arb_hotset_detection_window_coverage_ratio` 在 catalog 就绪后有合理值（配额不足时可能 < 1）
+- [ ] `quant_pivot_hotset_detection_window_coverage_ratio` 在 catalog 就绪后有合理值（配额不足时可能 < 1）
 - [ ] sync 后日志 `tier1_tokens + tier2_tokens > 0`（有 24h/72h 内未来市场时）
 - [ ] PG：`SELECT count(*) FROM market;` > 0
 - [ ] 运行 10 分钟后 CH：`SELECT count() FROM opportunity_detection` 可能仍为 0（取决于当时是否有 endgame 机会，正常）
@@ -494,7 +496,7 @@ curl -s -X POST http://localhost:8080/api/auth/login \
 
 ### 6.2 DryRun — 实现要点
 
-代码：`Dispatcher::dry_run`（`crates/oxide-arb-core/src/execution/dispatcher.rs`）
+代码：`Dispatcher::dry_run`（`crates/quant-pivot-core/src/execution/dispatcher.rs`）
 
 - 打日志 `[DRY RUN] Would place order`
 - **不检查订单簿深度**
@@ -614,7 +616,7 @@ miss_rate = misses / (fills + misses)
 ```text
 未实现：Σ(open position mark value - cost - fees)
 已实现：Σ(settled realized_pnl_usd)   -- PG position / CH audit stage=Settled
-日净利 ≈ GET /api/pnl/live 或 metrics oxide_arb_risk_daily_pnl_usd
+日净利 ≈ GET /api/pnl/live 或 metrics quant_pivot_risk_daily_pnl_usd
 ```
 
 **Endgame 现实约束：**
@@ -636,7 +638,7 @@ miss_rate = misses / (fills + misses)
 
 ## 8. 观测面速查（在哪看、拿什么结果）
 
-### 8.1 HTTP API（Base: `http://localhost:8088/api`，需 Bearer token；默认 `config/oxide-arb.toml` 的 `listen_port`）
+### 8.1 HTTP API（Base: `http://localhost:8088/api`，需 Bearer token；默认 `config/quant-pivot.toml` 的 `listen_port`）
 
 #### 系统与模式
 
@@ -758,22 +760,22 @@ GET /api/ws?token=<access_token>
 
 | 指标 | 含义 |
 |------|------|
-| `oxide_arb_detection_opportunities_total` | 检测到的机会数 |
-| `oxide_arb_execution_trades_filled_total` | 成交（含 simulated） |
-| `oxide_arb_execution_trades_missed_total` | Miss |
-| `oxide_arb_execution_fok_fills_total` | Live FOK fill |
-| `oxide_arb_execution_fok_misses_total` | Live FOK miss |
-| `oxide_arb_risk_daily_pnl_usd` | 日 PnL gauge |
-| `oxide_arb_risk_exposure_usd` | Exposure |
-| `oxide_arb_pipeline_ws_events_received_total` | WS 事件 |
-| `oxide_arb_control_factor_active_count` | 已加载因子数 |
-| `oxide_arb_control_factor_publication_active` | Live 时 published snapshot 是否有效（0/1） |
-| `oxide_arb_control_factor_shadow_decisions_total` | Shadow 决策计数 |
-| `oxide_arb_hotset_candidates_total{kind=...}` | 每次 sync **累加**的候选市场分桶（`past_deadline` / `future_detect` / `future_prewarm` / `no_end_date`） |
-| `oxide_arb_hotset_selected_total{kind=...}` | 每次 sync **累加**的选中**市场数**（`future_detect` = Tier1，`future_prewarm` = Tier2；非 token 数） |
-| `oxide_arb_hotset_detection_window_coverage_ratio` | **Gauge**：最近一次 sync 的 Tier1 选中市场占 24h 候选市场的比例 |
-| `oxide_arb_gamma_markets_paused_total{reason=...}` | Catalog sync 降为 Paused 计数（`past_deadline` / `stale_catalog` / `gamma_wire`） |
-| `oxide_arb_catalog_ready` | 1 = 首次 Gamma full sync 完成，检测解锁 |
+| `quant_pivot_detection_opportunities_total` | 检测到的机会数 |
+| `quant_pivot_execution_trades_filled_total` | 成交（含 simulated） |
+| `quant_pivot_execution_trades_missed_total` | Miss |
+| `quant_pivot_execution_fok_fills_total` | Live FOK fill |
+| `quant_pivot_execution_fok_misses_total` | Live FOK miss |
+| `quant_pivot_risk_daily_pnl_usd` | 日 PnL gauge |
+| `quant_pivot_risk_exposure_usd` | Exposure |
+| `quant_pivot_pipeline_ws_events_received_total` | WS 事件 |
+| `quant_pivot_control_factor_active_count` | 已加载因子数 |
+| `quant_pivot_control_factor_publication_active` | Live 时 published snapshot 是否有效（0/1） |
+| `quant_pivot_control_factor_shadow_decisions_total` | Shadow 决策计数 |
+| `quant_pivot_hotset_candidates_total{kind=...}` | 每次 sync **累加**的候选市场分桶（`past_deadline` / `future_detect` / `future_prewarm` / `no_end_date`） |
+| `quant_pivot_hotset_selected_total{kind=...}` | 每次 sync **累加**的选中**市场数**（`future_detect` = Tier1，`future_prewarm` = Tier2；非 token 数） |
+| `quant_pivot_hotset_detection_window_coverage_ratio` | **Gauge**：最近一次 sync 的 Tier1 选中市场占 24h 候选市场的比例 |
+| `quant_pivot_gamma_markets_paused_total{reason=...}` | Catalog sync 降为 Paused 计数（`past_deadline` / `stale_catalog` / `gamma_wire`） |
+| `quant_pivot_catalog_ready` | 1 = 首次 Gamma full sync 完成，检测解锁 |
 
 ### 8.3 PostgreSQL 快查
 
@@ -901,7 +903,7 @@ materialization 失败，也不会驱动 Web 顶栏降级。顶栏读 `system.st
 
 ### 9.4 Production Quality Gate 默认门槛
 
-（`QualityGatePolicy::default`，`oxide-arb-models`）
+（`QualityGatePolicy::default`，`quant-pivot-models`）
 
 | 因子 | min_opportunities | min_markets | min_settlements |
 |------|-------------------|-------------|-----------------|
@@ -995,7 +997,7 @@ Shadow 用于发布前验证；Published 用于 Live 真实生效。
 3. 确认 shadow 不会过度 reject 或 oversize
 4. **Published 发布**
 5. `FactorRefresher` 自动 reload（或等 60s poll）
-6. 验证 metrics `oxide_arb_control_factor_active_count` > 0
+6. 验证 metrics `quant_pivot_control_factor_active_count` > 0
 7. 切 Live（或已在 Live）观察 audit 中 `applied_factor_ids_json`
 8. 逐步放大 `bankroll_usd` / `daily_budget_usd`（通过 runtime config activate，**单独治理**）
 
@@ -1007,13 +1009,13 @@ Shadow 用于发布前验证；Published 用于 Live 真实生效。
 
 ### 11.1 每日巡检（Paper 阶段）
 
-- [ ] `oxide_arb_pipeline_ws_events_received_total` 持续增长
-- [ ] `oxide_arb_catalog_ready` == 1
+- [ ] `quant_pivot_pipeline_ws_events_received_total` 持续增长
+- [ ] `quant_pivot_catalog_ready` == 1
 - [ ] 最近一次 Gamma sync 日志：`tier1_tokens + tier2_tokens > 0`
-- [ ] `oxide_arb_hotset_detection_window_coverage_ratio` 合理（24h 候选 > 配额时可能 < 0.3，见 §13.4）
-- [ ] `oxide_arb_detection_opportunities_total` > 0
+- [ ] `quant_pivot_hotset_detection_window_coverage_ratio` 合理（24h 候选 > 配额时可能 < 0.3，见 §13.4）
+- [ ] `quant_pivot_detection_opportunities_total` > 0
 - [ ] `fills / (fills+misses)` 符合预期
-- [ ] `oxide_arb_risk_daily_pnl_usd` 无异常跳变
+- [ ] `quant_pivot_risk_daily_pnl_usd` 无异常跳变
 - [ ] CH audit stage 分布无异常堆积在 `ValidationRejected`
 - [ ] PG `control_factor_materialization_run` 最近 24h 有 Succeeded
 
@@ -1029,18 +1031,18 @@ Shadow 用于发布前验证；Published 用于 Live 真实生效。
 
 ## 12. Dev RBAC seed 重建（本地开发）
 
-RBAC bootstrap seeds（`crates/oxide-arb-models/src/seed/rbac/`）在 ledger 中已记录且目标表有行时，loader 使用 `ON CONFLICT DO NOTHING`，**不会**覆盖已存在的 menu / role_menu / casbin 行。修改 seed 定义（菜单树、内置角色权限矩阵）后，若 UI 或 `/api/menus/accessible` 仍显示旧数据，需要清空相关表或重建库后再启动。
+RBAC bootstrap seeds（`crates/quant-pivot-models/src/seed/rbac/`）在 ledger 中已记录且目标表有行时，loader 使用 `ON CONFLICT DO NOTHING`，**不会**覆盖已存在的 menu / role_menu / casbin 行。修改 seed 定义（菜单树、内置角色权限矩阵）后，若 UI 或 `/api/menus/accessible` 仍显示旧数据，需要清空相关表或重建库后再启动。
 
 **推荐做法（本地 dev）**：
 
-1. 停止 `oxide-arb-bin`。
+1. 停止 `quant-pivot-bin`。
 2. 清空 RBAC 相关表（顺序避免 FK 冲突）：
    ```sql
    TRUNCATE role_menu, user_role, casbin_rule, menu, role CASCADE;
    DELETE FROM seed_application WHERE seed_id LIKE 'rbac.%';
    ```
    或对整个 Postgres schema 做 `drop + migrate`（最干净）。
-3. 重新启动：`cargo run -p oxide-arb-bin -- --config-dir config` — migration lane 会按 DAG 重跑 RBAC seeds。
+3. 重新启动：`cargo run -p quant-pivot-bin -- --config-dir config` — migration lane 会按 DAG 重跑 RBAC seeds。
 
 **验收**：`GET /api/auth/me` 返回的菜单树与 `menus.rs` 中 `build_tree()` 一致；默认 admin 仍可 `admin` / `admin` 登录。
 
@@ -1054,7 +1056,7 @@ RBAC bootstrap seeds（`crates/oxide-arb-models/src/seed/rbac/`）在 ledger 中
 
 | 配置 | 层级 | 位置 | 作用 |
 |------|------|------|------|
-| `engine_endgame_window_hours`（默认 **72**） | Deploy，改 TOML 需重启 | `config/oxide-arb.toml` → `[market_data.websocket]` | WS **候选池上界**：仅 `now < end_date ≤ now+72h` 可订书 |
+| `engine_endgame_window_hours`（默认 **72**） | Deploy，改 TOML 需重启 | `config/quant-pivot.toml` → `[market_data.websocket]` | WS **候选池上界**：仅 `now < end_date ≤ now+72h` 可订书 |
 | `detection.endgame.settlement_window_hours`（默认 **24**） | Runtime，可热激活 | Postgres `runtime_config` / Admin API | 检测 **emit 门槛**：只 emit `0 < hours_to_end ≤ 24h` 的机会 |
 
 - **72h**：提前订书 + 收敛计时预热（Tier2）。
@@ -1093,7 +1095,7 @@ candidates_future_detect=3200 candidates_excluded_past=4477 detection_window_cov
 | 告警条件 | 严重度 |
 |----------|--------|
 | `catalog_ready=1` 且最近一次 sync 日志 `tier1_tokens + tier2_tokens == 0` | **Critical** |
-| `oxide_arb_hotset_detection_window_coverage_ratio < 0.3` 持续，且日志 `candidates_future_detect × 2` 明显大于 token 预算 | Warning |
+| `quant_pivot_hotset_detection_window_coverage_ratio < 0.3` 持续，且日志 `candidates_future_detect × 2` 明显大于 token 预算 | Warning |
 | `opportunities_detected_total` 2h 无增量且 `catalog_ready=1` | Warning（继续排查收敛/净利门槛，见 §15） |
 
 > **说明**：过期市场不会进入 `tier1_*` / `tier2_*`；`candidates_excluded_past > 0` 属正常（表示 registry 里仍有待 sync 降级的僵尸候选）。不要用 `hotset_selected_total{past_deadline}` 做告警——该 label 不存在，且 selected 指标只统计 `future_detect` / `future_prewarm`。
@@ -1152,7 +1154,7 @@ catalog_ready == 1 ?
 
 | 现象 | 可能原因 | 处理 |
 |------|----------|------|
-| 启动失败 PG/CH/Redis | 连接配置错误 | 查 `oxide-arb.toml` 与 env |
+| 启动失败 PG/CH/Redis | 连接配置错误 | 查 `quant-pivot.toml` 与 env |
 | 无 detection | hotset 被过期市场占满（历史 bug）/ universe 过窄 / 无 24h endgame | §15.1 排查树；查 hotset metrics |
 | `active_markets` KPI 虚高 | PG 仍 active 但已过期 | 等 Gamma sync；`gamma_markets_paused_total{past_deadline}` |
 | DryRun 有 Filled、Paper 全 Miss | 深度不足 | 降 `max_single_bet_usd`；看 CH miss reason |
@@ -1168,38 +1170,38 @@ catalog_ready == 1 ?
 
 ```bash
 # 配置目录
-export OXIDE_ARB_CONFIG_DIR=config
+export QUANT_PIVOT_CONFIG_DIR=config
 
 # 密钥（bot 私钥，Rabby §3.1.4；L2 凭证连接时自动 derive）
-export OXIDE_ARB__KEYS__PRIVATE_KEY=0x...
+export QUANT_PIVOT__KEYS__PRIVATE_KEY=0x...
 
 # 数据库
-export OXIDE_ARB__DB__POSTGRES__PASSWORD=...
-export OXIDE_ARB__DB__CLICKHOUSE__PASSWORD=...
+export QUANT_PIVOT__DB__POSTGRES__PASSWORD=...
+export QUANT_PIVOT__DB__CLICKHOUSE__PASSWORD=...
 
 # Redis（若启用密码）
-export OXIDE_ARB__CACHE__REDIS__PASSWORD=...
+export QUANT_PIVOT__CACHE__REDIS__PASSWORD=...
 
 # Web
-export OXIDE_ARB__WEB__JWT__SECRET=...
+export QUANT_PIVOT__WEB__JWT__SECRET=...
 
 # Polygon RPC
-export OXIDE_ARB__POLYMARKET__ONCHAIN__RPC_URL=...
+export QUANT_PIVOT__POLYMARKET__ONCHAIN__RPC_URL=...
 
 # 日志
-export RUST_LOG=info,oxide_arb_core=debug
+export RUST_LOG=info,quant_pivot_core=debug
 ```
 
 ## 附录 B：相关源码索引
 
 | 模块 | 路径 |
 |------|------|
-| 执行模式分发 | `crates/oxide-arb-core/src/execution/dispatcher.rs` |
-| Live FOK | `crates/oxide-arb-core/src/execution/fok_strategy.rs` |
-| 模式切换 | `crates/oxide-arb-core/src/control/mode_transition.rs` |
-| Trade integrity | `crates/oxide-arb-core/src/trade_integrity/` |
-| 物料化调度 | `crates/oxide-arb-core/src/app/mod.rs` |
-| 因子 refresher | `crates/oxide-arb-core/src/control/factor_refresher.rs` |
-| Quality gates | `crates/oxide-arb-control/src/gates/mod.rs` |
-| Web 路由 | `crates/oxide-arb-web/src/routes/` |
-| CH schema | `crates/oxide-arb-storage/src/clickhouse/sql/` |
+| 执行模式分发 | `crates/quant-pivot-core/src/execution/dispatcher.rs` |
+| Live FOK | `crates/quant-pivot-core/src/execution/fok_strategy.rs` |
+| 模式切换 | `crates/quant-pivot-core/src/control/mode_transition.rs` |
+| Trade integrity | `crates/quant-pivot-core/src/trade_integrity/` |
+| 物料化调度 | `crates/quant-pivot-core/src/app/mod.rs` |
+| 因子 refresher | `crates/quant-pivot-core/src/control/factor_refresher.rs` |
+| Quality gates | `crates/quant-pivot-control/src/gates/mod.rs` |
+| Web 路由 | `crates/quant-pivot-web/src/routes/` |
+| CH schema | `crates/quant-pivot-storage/src/clickhouse/sql/` |

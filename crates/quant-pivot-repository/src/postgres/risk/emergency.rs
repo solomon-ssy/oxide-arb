@@ -1,6 +1,6 @@
 use crate::traits::EmergencyRepository;
-use oxide_arb_error::storage::StorageError;
-use oxide_arb_models::{domain::NewEmergencySnapshot, entities::emergency_snapshot::Entity};
+use quant_pivot_error::storage::StorageError;
+use quant_pivot_models::{domain::NewEmergencySnapshot, entities::emergency_snapshot::Entity};
 use sea_orm::{DatabaseConnection, EntityTrait, IntoActiveModel};
 
 pub struct PgEmergencyRepository {

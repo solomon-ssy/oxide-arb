@@ -2,7 +2,7 @@
 
 use super::wire::{WireEvent, WireFeeSchedule, WireMarket};
 use chrono::{DateTime, Utc};
-use oxide_arb_models::enums::{
+use quant_pivot_models::enums::{
     common::{CategorySet, TickSize},
     market::{EventStatus, MarketStatus},
 };
@@ -293,7 +293,7 @@ fn parse_gamma_timestamp(raw: Option<&str>) -> Option<DateTime<Utc>> {
 mod tests {
     use super::{CatalogEvent, CatalogMarket, CatalogMarketReject};
     use crate::gamma::wire::{WireEvent, WireMarket};
-    use oxide_arb_models::enums::{
+    use quant_pivot_models::enums::{
         common::MarketCategory,
         market::{EventStatus, MarketStatus},
     };

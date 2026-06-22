@@ -6,12 +6,12 @@
 //! repository transaction is the single source of truth. Reloading the live
 //! enforcer is the service layer's responsibility (`CasbinService::reload`).
 //!
-//! Row layout is single-sourced in [`oxide_arb_models::enums::rbac::casbin`]:
+//! Row layout is single-sourced in [`quant_pivot_models::enums::rbac::casbin`]:
 //! - `g`: `v0 = user_id`, `v1 = role_code`
 //! - `p`: `v0 = role_code`, `v1 = resource`, `v2 = operation`, `v3 = "resource"`
 
-use oxide_arb_error::storage::StorageError;
-use oxide_arb_models::{
+use quant_pivot_error::storage::StorageError;
+use quant_pivot_models::{
     domain::Permission,
     entities::casbin_rule::{Column, Entity},
     enums::rbac::{

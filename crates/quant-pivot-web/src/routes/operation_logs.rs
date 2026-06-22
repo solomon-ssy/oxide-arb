@@ -7,7 +7,7 @@
 //! log carries no credentials, only redacted detail summaries.
 
 use actix_web::{http::Method, web};
-use oxide_arb_models::{
+use quant_pivot_models::{
     domain::{OperationLogInfo, OperationLogQuery, OperationLogView, Paginated},
     enums::rbac::{Operation, ResourceType},
 };

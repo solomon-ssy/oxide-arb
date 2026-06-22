@@ -2,9 +2,9 @@
 
 use std::{sync::Arc, time::Duration};
 
-use oxide_arb_models::config::ClickHouseConfig;
-use oxide_arb_repository::clickhouse::ChTimeseriesRepository;
-use oxide_arb_storage::clickhouse::{ChWriteManager, ClickHousePool};
+use quant_pivot_models::config::ClickHouseConfig;
+use quant_pivot_repository::clickhouse::ChTimeseriesRepository;
+use quant_pivot_storage::clickhouse::{ChWriteManager, ClickHousePool};
 use testcontainers::{
     ContainerAsync, GenericImage, ImageExt,
     core::{WaitFor, wait::HttpWaitStrategy},

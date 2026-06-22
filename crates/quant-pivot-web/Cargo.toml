@@ -1,15 +1,14 @@
 [package]
-name = "oxide-arb-web"
-description = "HTTP API + RBAC control-plane for oxide-arb (governance routes + dual-track audit)"
+name = "quant-pivot-web"
+description = "HTTP API + RBAC control-plane for quant-pivot (governance routes + dual-track audit)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-oxide-arb-error = { workspace = true, features = ["storage"] }
-oxide-arb-models = { workspace = true, features = ["repository"] }
-oxide-arb-repository = { workspace = true }
-oxide-arb-control = { workspace = true }
+quant-pivot-error = { workspace = true, features = ["storage"] }
+quant-pivot-models = { workspace = true, features = ["repository"] }
+quant-pivot-repository = { workspace = true }
 
 actix-web = { workspace = true }
 actix-cors = { workspace = true }
@@ -41,9 +40,9 @@ async-trait = { workspace = true }
 actix-http = { workspace = true }
 actix-rt = { workspace = true }
 actix-test = { workspace = true }
-oxide-arb-core = { workspace = true }
-oxide-arb-storage = { workspace = true, features = ["test-util"] }
-oxide-arb-test-support = { workspace = true }
+quant-pivot-core = { workspace = true }
+quant-pivot-storage = { workspace = true, features = ["test-util"] }
+quant-pivot-test-support = { workspace = true }
 rust_decimal = { workspace = true }
 rust_decimal_macros = { workspace = true }
 testcontainers = { workspace = true }

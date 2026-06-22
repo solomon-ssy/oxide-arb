@@ -1,12 +1,8 @@
-//! Graceful backpressure — coalesce, dedup, evict. Never halts trading.
-//!
-//! Post-trade durability is NOT a backpressure concern: the venue outcome is
-//! persisted on the `trade` row and replayed by the relay, so there is no
-//! bounded in-memory post-trade queue to overflow.
+//! Graceful backpressure for book ingest — coalesce and dedup under channel pressure.
 
 use crate::observability::metrics_hub::MetricsHub;
 use dashmap::DashMap;
-use oxide_arb_models::{domain::pipeline::PipelineEvent, types::TokenId};
+use quant_pivot_models::{domain::pipeline::PipelineEvent, types::TokenId};
 use std::{
     sync::Arc,
     time::{Duration, Instant},
@@ -104,12 +100,6 @@ impl BackpressurePolicy {
         BackpressureAction::Dropped
     }
 
-    /// Site 3 — execution shard backpressure: record eviction metric.
-    pub fn on_execution_shard_evict(&self) {
-        self.metrics.execution_shard_evicted_total.inc();
-        self.record_event("execution_shard", "evict");
-    }
-
     #[cold]
     fn record_book_drop(&self) {
         self.metrics.book_apply_dropped.inc();
@@ -133,7 +123,7 @@ impl BackpressurePolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use oxide_arb_models::{
+    use quant_pivot_models::{
         domain::pipeline::{IngressTrace, PipelineEvent, PriceDeltaCmd, PriceLevelDelta},
         enums::common::Side,
         types::{Price, Shares, TokenId},

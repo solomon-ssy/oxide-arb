@@ -5,7 +5,7 @@
 //! `(ptype, v0..v5)` is the DB-side guarantee of exact policy de-duplication
 //! (fixing ng-gateway's `ptype`-only de-dup defect).
 
-use oxide_arb_macros::oxide_schema;
+use quant_pivot_macros::quant_schema;
 use sea_orm::{
     Iden,
     sea_query::{ColumnDef, Index, Table, TableCreateStatement},
@@ -23,7 +23,7 @@ use crate::{
 
 /// Casbin policy rows. `ptype` is `p` (permission) or `g` (grouping); `v0..v5`
 /// hold the policy tuple fields.
-#[oxide_schema(lifecycle = "control")]
+#[quant_schema(lifecycle = "control")]
 pub enum CasbinRule {
     Table,
     Id,

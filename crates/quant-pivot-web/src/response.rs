@@ -10,7 +10,7 @@
 //! Errors share the identical envelope via [`crate::error::WebError`]'s
 //! `ResponseError` implementation (`data` is `null`), eliminating the dual
 //! success/error formats that plagued the ng-gateway response layer. Paginated
-//! collections wrap [`oxide_arb_models::domain::Paginated`] as their `data`
+//! collections wrap [`quant_pivot_models::domain::Paginated`] as their `data`
 //! payload, so `{code,message,data:{items,total,page,size,has_next}}` is just a
 //! `WebResponse<Paginated<T>>`.
 

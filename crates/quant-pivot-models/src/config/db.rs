@@ -22,7 +22,7 @@ pub struct PostgresConfig {
     pub port: u16,
     /// Role name. Default: `oxide`.
     pub user: String,
-    /// Role password. Set via `OXIDE_ARB__DB__POSTGRES__PASSWORD` in
+    /// Role password. Set via `QUANT_PIVOT__DB__POSTGRES__PASSWORD` in
     /// production — never in the TOML. Default: empty.
     pub password: String,
     /// Database name. Default: `oxide_arb`.
@@ -69,7 +69,7 @@ pub struct PostgresConfig {
     /// Prepared-statement cache capacity per connection. Default: `256`.
     pub statement_cache_capacity: u32,
 
-    /// Application name reported to `pg_stat_activity`. Default: `oxide-arb`.
+    /// Application name reported to `pg_stat_activity`. Default: `quant-pivot`.
     pub application_name: String,
 }
 
@@ -190,7 +190,7 @@ const fn default_statement_cache_capacity() -> u32 {
     256
 }
 fn default_application_name() -> String {
-    "oxide-arb".into()
+    "quant-pivot".into()
 }
 
 /// `ClickHouse` connection + batched-write tuning.
@@ -203,7 +203,7 @@ pub struct ClickHouseConfig {
     pub database: String,
     /// User name. Default: `default`.
     pub user: String,
-    /// Password. Set via `OXIDE_ARB__DB__CLICKHOUSE__PASSWORD` in production —
+    /// Password. Set via `QUANT_PIVOT__DB__CLICKHOUSE__PASSWORD` in production —
     /// never in the TOML. Default: empty.
     pub password: String,
     /// Max age (seconds) of a partial batch before it is flushed. Lower =

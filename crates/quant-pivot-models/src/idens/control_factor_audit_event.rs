@@ -1,4 +1,4 @@
-use oxide_arb_macros::oxide_schema;
+use quant_pivot_macros::quant_schema;
 use sea_orm::{
     Iden,
     sea_query::{ColumnDef, Index, IndexOrder, Table, TableCreateStatement},
@@ -20,7 +20,7 @@ use crate::schema::{
 /// cascade would mutate an audit row and break append-only + hash-chain
 /// invariants, so resources are referenced generically via
 /// `resource_type` + `resource_id`.
-#[oxide_schema(lifecycle = "audit")]
+#[quant_schema(lifecycle = "audit")]
 pub enum ControlFactorAuditEvent {
     Table,
     EventId,

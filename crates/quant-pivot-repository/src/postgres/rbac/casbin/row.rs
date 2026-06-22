@@ -3,13 +3,13 @@
 //! Every Casbin write/read path in this crate — the [`Adapter`] and the
 //! transactional [`sync`] helpers — funnels through these builders, so the
 //! `(ptype, v0..v5)` layout (defined once in
-//! [`oxide_arb_models::enums::rbac::casbin`]) has exactly one implementation and
+//! [`quant_pivot_models::enums::rbac::casbin`]) has exactly one implementation and
 //! cannot drift between writer, reader, and matcher.
 //!
 //! [`Adapter`]: super::adapter::PgCasbinAdapter
 //! [`sync`]: super::sync
 
-use oxide_arb_models::{
+use quant_pivot_models::{
     entities::casbin_rule::{ActiveModel, Column, Model},
     enums::rbac::{
         Operation, ResourceType,

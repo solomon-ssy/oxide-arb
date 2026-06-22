@@ -1,7 +1,7 @@
 //! Shared helpers for `PostgreSQL` repository integration tests.
 
-use oxide_arb_models::config::PostgresConfig;
-use oxide_arb_storage::postgres::{
+use quant_pivot_models::config::PostgresConfig;
+use quant_pivot_storage::postgres::{
     PostgresPool,
     migration::{Migrator, MigratorTrait},
 };
@@ -28,7 +28,7 @@ pub fn test_pg_config(port: u16) -> PostgresConfig {
         work_mem: "16MB".into(),
         verify_session_params: false,
         statement_cache_capacity: 100,
-        application_name: "oxide-arb-test".into(),
+        application_name: "quant-pivot-test".into(),
     }
 }
 

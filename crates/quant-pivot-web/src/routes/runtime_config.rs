@@ -6,29 +6,29 @@
 //! 1. `POST /runtime-config/versions` — typed-parse (`schema_version = 1`,
 //!    unknown fields rejected) + semantic validation, canonical JSON, content
 //!    hash, immutable row.
-//! 2. `POST .../activate` (or `.../rollback`) — re-parse + validate, live
-//!    money-state **preflight** (exposure ceilings vs in-flight reservations),
-//!    audited registry activation (hash chain), then
-//!    [`RuntimeConfigPort::apply`] propagates to every live subscriber (risk
-//!    engine first) so the activation takes effect immediately. If the live
-//!    apply fails after the durable write, a compensating rollback activation
-//!    is recorded so the active version never diverges from the live config.
+//! 2. `POST .../activate` (or `.../rollback`) — re-parse + validate, audited
+//!    registry activation (hash chain), then [`RuntimeConfigPort::apply`]
+//!    propagates to live subscribers. If the live apply fails after the durable
+//!    write, a compensating rollback activation is recorded so the active
+//!    version never diverges from the live config.
 //!
+//! Phase 0: preflight is a no-op; exposure/reservation checks return in Phase 1.
 //! Reads mask notification credentials (`bot_token`, `webhook.url`).
 
 use actix_web::{http::Method, web};
 use chrono::Utc;
-use oxide_arb_models::{
+use quant_pivot_models::{
     domain::{
         ActivateRuntimeConfigRequest, CoreEvent, CoreEventPublisher,
         CreateRuntimeConfigVersionRequest, NewRuntimeConfigActivation, NewRuntimeConfigVersion,
         RollbackRuntimeConfigRequest, RuntimeConfigActivationInfo, RuntimeConfigCurrentView,
         RuntimeConfigSchemaView, RuntimeConfigVersionListQuery, RuntimeConfigVersionView,
         RuntimeControlError,
-        control_factor::{AuditActor, AuditedOutcome},
+        control_factor::{AuditActor, AuditedOutcome, NewControlFactorAuditEvent},
         runtime_config_hash,
     },
     enums::{
+        control_factor::{AuditResourceType, ControlAuditEventType},
         operation_log::OperationCategory,
         rbac::{Operation, ResourceType},
         runtime_config::{RuntimeConfigActivationKind, RuntimeConfigVersionSource},
@@ -178,10 +178,28 @@ pub async fn create_version(
         created_by: actor.claims.username.clone(),
         reason: body.reason.clone(),
     };
-    let envelope = governance_envelope(&actor, acting_role, &request_id, body.reason);
+    let envelope = AuditActor {
+        actor: actor.claims.sub.clone(),
+        actor_role: acting_role.0.clone(),
+        request_id: request_id.0.clone(),
+        reason: body.reason.clone(),
+    };
+    envelope.validate().map_err(WebError::from)?;
+    let audit = NewControlFactorAuditEvent {
+        event_type: ControlAuditEventType::RuntimeConfigVersionCreated,
+        actor: envelope.actor.clone(),
+        actor_role: envelope.actor_role.clone(),
+        resource_type: AuditResourceType::RuntimeConfigVersion,
+        resource_id: version.runtime_config_version_id.to_string(),
+        request_id: envelope.request_id.clone(),
+        reason: envelope.reason.clone(),
+        before_hash: None,
+        after_hash: None,
+        diff: serde_json::json!({}),
+    };
     let outcome = state
-        .registry
-        .create_runtime_config_version(envelope, version)
+        .runtime_config
+        .create_version_governed(version, audit)
         .await?;
 
     op_ctx.set_action(
@@ -306,10 +324,31 @@ async fn transition_version(
         // The registry assigns this from the chained audit event it appends.
         audit_event_id: None,
     };
-    let envelope = governance_envelope(actor, acting_role.clone(), request_id, reason);
+    let envelope = AuditActor {
+        actor: actor.claims.sub.clone(),
+        actor_role: acting_role.0.clone(),
+        request_id: request_id.0.clone(),
+        reason: reason.clone(),
+    };
+    envelope.validate().map_err(WebError::from)?;
+    let audit = NewControlFactorAuditEvent {
+        event_type: match kind {
+            RuntimeConfigActivationKind::Rollback => ControlAuditEventType::RuntimeConfigRolledBack,
+            _ => ControlAuditEventType::RuntimeConfigActivated,
+        },
+        actor: envelope.actor.clone(),
+        actor_role: envelope.actor_role.clone(),
+        resource_type: AuditResourceType::RuntimeConfigVersion,
+        resource_id: activation.runtime_config_version_id.to_string(),
+        request_id: envelope.request_id.clone(),
+        reason: envelope.reason.clone(),
+        before_hash: None,
+        after_hash: None,
+        diff: serde_json::json!({}),
+    };
     let audited = state
-        .registry
-        .activate_runtime_config_version(envelope, activation)
+        .runtime_config
+        .activate_version_governed(activation, audit)
         .await?;
 
     // Propagate to the live system. The applicator re-preflights against the
@@ -375,10 +414,30 @@ async fn revert_unapplied_activation(
         rollback_target_version_id: Some(previous_id),
         audit_event_id: None,
     };
-    let envelope = governance_envelope(actor, acting_role, request_id, reason);
+    let envelope = AuditActor {
+        actor: actor.claims.sub.clone(),
+        actor_role: acting_role.0.clone(),
+        request_id: request_id.0.clone(),
+        reason,
+    };
+    if let Err(error) = envelope.validate() {
+        return WebError::from(error);
+    }
+    let audit = NewControlFactorAuditEvent {
+        event_type: ControlAuditEventType::RuntimeConfigRolledBack,
+        actor: envelope.actor.clone(),
+        actor_role: envelope.actor_role.clone(),
+        resource_type: AuditResourceType::RuntimeConfigVersion,
+        resource_id: activation.runtime_config_version_id.to_string(),
+        request_id: envelope.request_id.clone(),
+        reason: envelope.reason.clone(),
+        before_hash: None,
+        after_hash: None,
+        diff: serde_json::json!({}),
+    };
     match state
-        .registry
-        .activate_runtime_config_version(envelope, activation)
+        .runtime_config
+        .activate_version_governed(activation, audit)
         .await
     {
         Ok(_) => {
@@ -429,19 +488,4 @@ fn record_activation(
     events.publish(CoreEvent::ConfigActivated {
         version_id: activation.runtime_config_version_id.to_string(),
     });
-}
-
-/// Assemble the governance audit envelope from the request-scoped attributes.
-fn governance_envelope(
-    actor: &AuthedActor,
-    acting_role: ActingRole,
-    request_id: &RequestId,
-    reason: String,
-) -> AuditActor {
-    AuditActor {
-        actor: actor.claims.sub.clone(),
-        actor_role: acting_role.0,
-        request_id: request_id.0.clone(),
-        reason,
-    }
 }

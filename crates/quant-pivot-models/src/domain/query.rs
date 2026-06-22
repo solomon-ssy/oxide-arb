@@ -3,12 +3,12 @@
 //! These are the canonical read-query primitives shared by the API contract
 //! layer (`domain::api` `*WindowQuery::resolve()` produces them) and the
 //! repository read methods (evidence timeseries, analytics) that consume them.
-//! They live in `oxide-arb-models` — the lowest layer — so the API contract can
-//! resolve into them without depending on `oxide-arb-repository`.
+//! They live in `quant-pivot-models` — the lowest layer — so the API contract can
+//! resolve into them without depending on `quant-pivot-repository`.
 
 use crate::{
     enums::clickhouse::ChMarketCategory,
-    enums::common::ExecutionMode,
+    enums::legacy::LegacyExecutionMode,
     types::{EventId, MarketId, TokenId},
 };
 use chrono::{DateTime, Utc};
@@ -20,7 +20,7 @@ pub struct TradeAnalyticsFilter {
     /// Half-open UTC execution window `[from, to)`.
     pub window: TimeWindow,
     /// When `None`, all execution modes are included.
-    pub execution_mode: Option<ExecutionMode>,
+    pub execution_mode: Option<LegacyExecutionMode>,
 }
 
 /// A closed `[from, to]` time window for windowed reads.

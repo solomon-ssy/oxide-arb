@@ -1,15 +1,15 @@
 use clap::Parser;
-use oxide_arb_core::app::bootstrap;
-use oxide_arb_models::config::{DeployConfig, ObservabilityConfig};
+use quant_pivot_core::app::bootstrap;
+use quant_pivot_models::config::{DeployConfig, ObservabilityConfig};
 use rustls::crypto::aws_lc_rs;
 use std::{error::Error, sync::Arc};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
-#[command(name = "oxide-arb", about = "Endgame arbitrage engine")]
+#[command(name = "quant-pivot", about = "Endgame arbitrage engine")]
 struct Cli {
-    /// Directory containing oxide-arb.toml
-    #[arg(long, env = "OXIDE_ARB_CONFIG_DIR", default_value = "config")]
+    /// Directory containing quant-pivot.toml
+    #[arg(long, env = "QUANT_PIVOT_CONFIG_DIR", default_value = "config")]
     config_dir: String,
 }
 

@@ -26,7 +26,7 @@ use actix_web::{
     middleware::Next,
     web,
 };
-use oxide_arb_models::{
+use quant_pivot_models::{
     domain::NewOperationLog,
     enums::operation_log::{OperationCategory, OperationOutcome},
     types::{OperationLogId, UserId},

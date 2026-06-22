@@ -5,7 +5,7 @@
 //! settlement deadline has passed are downgraded to [`MarketStatus::Paused`].
 
 use chrono::{DateTime, Utc};
-use oxide_arb_models::{
+use quant_pivot_models::{
     domain::market::{MarketRegistryInfo, UpsertMarket},
     enums::market::MarketStatus,
     types::MarketId,
@@ -83,7 +83,7 @@ pub fn apply_past_deadline_to_sync_batch(
 mod tests {
     use super::*;
     use chrono::Duration;
-    use oxide_arb_models::{
+    use quant_pivot_models::{
         domain::market::TokenInfo,
         enums::common::{CategorySet, MarketCategory, TickSize},
         types::{EventId, TokenId, Usd},

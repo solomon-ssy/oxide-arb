@@ -4,7 +4,7 @@
 //! (Redis), and a domain label for metrics partitioning. L1 (Moka) TTL is
 //! derived as `ttl / 4` by the [`TieredCache`] layer.
 
-use oxide_arb_models::{
+use quant_pivot_models::{
     enums::{
         calibration::{DurationBucket, PriceZone},
         common::MarketCategory,

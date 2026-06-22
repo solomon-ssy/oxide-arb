@@ -6,32 +6,31 @@ use crate::{
         market_cache::MarketCache, market_registry::MarketRegistry,
         universe_filter::MarketUniverseFilter,
     },
-    runtime_config::RuntimeConfigStore,
     service::{
-        catalog_lifecycle::apply_past_deadline_to_sync_batch,
+        catalog_lifecycle::apply_past_deadline_to_sync_batch, catalog_readiness::CatalogReadiness,
         ws_subscription::WsSubscriptionCoordinator,
     },
 };
 use chrono::{DateTime, Utc};
 use num_traits::ToPrimitive;
-use oxide_arb_api::{
+use quant_pivot_api::{
     fees::FeeCalculator,
     gamma::{GammaClient, RejectedMarket},
     ws::TOKEN_INTERN,
 };
-use oxide_arb_error::{OxideError, market::MarketError};
-use oxide_arb_models::{
+use quant_pivot_error::{QuantError, market::MarketError};
+use quant_pivot_models::{
     domain::{
         market,
         market::{EventRegistryInfo, MarketRegistryInfo, UpsertEvent, UpsertMarket},
     },
     types::MarketId,
 };
-use oxide_arb_repository::{
+use quant_pivot_repository::{
     postgres::{PgEventRepository, PgMarketRepository},
     traits::{EventRepository, MarketRepository},
 };
-use oxide_arb_storage::cache::{CacheKey, CacheManager};
+use quant_pivot_storage::cache::{CacheKey, CacheManager};
 use std::{collections::HashSet, sync::Arc, time::Instant};
 
 const INCREMENTAL_FETCH_CONCURRENCY: usize = 10;
@@ -47,8 +46,10 @@ pub struct GammaServiceDeps {
     pub event_repo: Arc<PgEventRepository>,
     pub cache: Arc<CacheManager>,
     pub metrics: Arc<MetricsHub>,
-    pub runtime_config: Arc<RuntimeConfigStore>,
+    pub catalog: Arc<CatalogReadiness>,
     pub ws_subscription: Option<Arc<WsSubscriptionCoordinator>>,
+    /// WS subscription look-ahead window (hours) from deploy config.
+    pub subscription_window_hours: u64,
     /// Minimum seconds between full catalog refreshes (from `[market_data.gamma]`).
     pub full_sync_interval_secs: u64,
 }
@@ -63,8 +64,9 @@ pub struct GammaService {
     event_repo: Arc<PgEventRepository>,
     cache: Arc<CacheManager>,
     metrics: Arc<MetricsHub>,
-    runtime_config: Arc<RuntimeConfigStore>,
+    catalog: Arc<CatalogReadiness>,
     ws_subscription: Option<Arc<WsSubscriptionCoordinator>>,
+    subscription_window_hours: u64,
     full_sync_interval_secs: u64,
     last_sync_at: parking_lot::Mutex<Option<DateTime<Utc>>>,
 }
@@ -81,14 +83,15 @@ impl GammaService {
             event_repo: deps.event_repo,
             cache: deps.cache,
             metrics: deps.metrics,
-            runtime_config: deps.runtime_config,
+            catalog: deps.catalog,
             ws_subscription: deps.ws_subscription,
+            subscription_window_hours: deps.subscription_window_hours,
             full_sync_interval_secs: deps.full_sync_interval_secs.max(60),
             last_sync_at: parking_lot::Mutex::new(None),
         }
     }
 
-    pub async fn sync(&self) -> Result<(), OxideError> {
+    pub async fn sync(&self) -> Result<(), QuantError> {
         let timer = Instant::now();
         let result = self.sync_inner().await;
         let elapsed_ms = ToPrimitive::to_i64(&timer.elapsed().as_millis()).unwrap_or(i64::MAX);
@@ -98,10 +101,22 @@ impl GammaService {
             .gamma_last_sync_success
             .set(i64::from(result.is_ok()));
 
+        if result.is_ok() {
+            self.publish_catalog_ready();
+        }
+
         result
     }
 
-    async fn sync_inner(&self) -> Result<(), OxideError> {
+    fn publish_catalog_ready(&self) {
+        let synced_at = (*self.last_sync_at.lock()).unwrap_or_else(Utc::now);
+        let markets =
+            u64::try_from(self.market_registry.active_markets().len()).unwrap_or(u64::MAX);
+        self.catalog.mark_ready(markets, synced_at);
+        self.metrics.catalog_ready.set(1);
+    }
+
+    async fn sync_inner(&self) -> Result<(), QuantError> {
         let now = Utc::now();
         let last = *self.last_sync_at.lock();
         let needs_full = last.is_none_or(|t| {
@@ -120,12 +135,12 @@ impl GammaService {
         Ok(())
     }
 
-    async fn full_sync(&self) -> Result<(), OxideError> {
+    async fn full_sync(&self) -> Result<(), QuantError> {
         let mut batch = self
             .gamma_client
             .full_sync_with_fees()
             .await
-            .map_err(OxideError::from)?;
+            .map_err(QuantError::from)?;
 
         let event_count = batch.registry_events.len();
         let market_count = batch.registry_markets.len();
@@ -192,12 +207,12 @@ impl GammaService {
         Ok(())
     }
 
-    async fn incremental_sync(&self, since: DateTime<Utc>) -> Result<(), OxideError> {
+    async fn incremental_sync(&self, since: DateTime<Utc>) -> Result<(), QuantError> {
         let batch = self
             .gamma_client
             .incremental_sync_with_fees(since)
             .await
-            .map_err(OxideError::from)?;
+            .map_err(QuantError::from)?;
 
         if batch.registry_events.is_empty() {
             return Ok(());
@@ -297,16 +312,10 @@ impl GammaService {
         let Some(coordinator) = &self.ws_subscription else {
             return;
         };
-        let detection_window_hours = self
-            .runtime_config
-            .load()
-            .detection
-            .endgame
-            .settlement_window_hours;
         let stats = coordinator.sync_engine_hotset(
             &self.market_registry,
             &self.universe,
-            detection_window_hours,
+            self.subscription_window_hours,
             &self.metrics,
         );
         tracing::info!(
@@ -398,7 +407,7 @@ fn collect_missing_market_ids(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use oxide_arb_models::{enums::common::CategorySet, types::EventId};
+    use quant_pivot_models::{enums::common::CategorySet, types::EventId};
 
     #[test]
     fn collect_missing_dedupes_and_skips_embedded() {

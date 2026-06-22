@@ -1,7 +1,7 @@
 //! CLOB retry policy exercises `ApiError::RateLimited` end-to-end.
 
-use oxide_arb_api::infra::retry::{ErrorKind, RetryPolicy, retry_with_policy};
-use oxide_arb_error::api::ApiError;
+use quant_pivot_api::infra::retry::{ErrorKind, RetryPolicy, retry_with_policy};
+use quant_pivot_error::api::ApiError;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 #[tokio::test]

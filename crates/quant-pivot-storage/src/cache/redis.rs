@@ -8,7 +8,7 @@
 use crate::cache::{backend::CacheBackend, redis_connect};
 use async_trait::async_trait;
 use deadpool_redis::Pool;
-use oxide_arb_error::storage::StorageError;
+use quant_pivot_error::storage::StorageError;
 use redis::AsyncCommands;
 use std::time::Duration;
 

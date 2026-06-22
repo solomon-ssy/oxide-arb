@@ -10,7 +10,7 @@ use crate::{
     types::{ControlFactorId, EventId, MarketId},
 };
 use chrono::{DateTime, Utc};
-use oxide_arb_error::control::FactorValueError;
+use quant_pivot_error::control::FactorValueError;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
@@ -348,7 +348,7 @@ mod tests {
         types::{ControlFactorId, MaterializationRunId, StageReportId},
     };
     use chrono::Utc;
-    use oxide_arb_error::control::FactorValueError;
+    use quant_pivot_error::control::FactorValueError;
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
 

@@ -1,8 +1,8 @@
-//! Unified error types for the oxide-arb platform.
+//! Unified error types for the quant-pivot platform.
 //!
 //! Errors are organized into domain-specific sub-modules. The root
-//! [`OxideError`] enum composes them via `#[from]` so that any sub-error
-//! can propagate through `?` in functions returning [`OxideResult`].
+//! [`QuantError`] enum composes them via `#[from]` so that any sub-error
+//! can propagate through `?` in functions returning [`QuantResult`].
 //!
 //! # Architecture (ng-gateway pattern)
 //!
@@ -11,7 +11,7 @@
 //! ApiError ─────────┤
 //! WsError ──────────┤
 //! StorageError──────┤
-//! SigningError───────┼──► OxideError
+//! SigningError───────┼──► QuantError
 //! RpcError ─────────┤
 //! ConfigError───────┤
 //! MarketError────────┤
@@ -43,14 +43,14 @@ pub use config_validation::{ConfigValidationError, ConfigValidationReport, Confi
 use thiserror::Error;
 
 /// Convenience alias used throughout the workspace.
-pub type OxideResult<T> = Result<T, OxideError>;
+pub type QuantResult<T> = Result<T, QuantError>;
 
 /// Top-level error enum covering every known failure mode.
 ///
 /// Each variant wraps a domain-specific sub-error via `#[from]`,
 /// enabling ergonomic `?` propagation from any subsystem.
 #[derive(Debug, Error)]
-pub enum OxideError {
+pub enum QuantError {
     // ── Algorithm ─────────────────────────────────────────────────────────
     #[error(transparent)]
     Algorithm(#[from] algorithm::AlgoError),
@@ -126,9 +126,9 @@ pub enum OxideError {
     NotImplemented(String),
 }
 
-// ── Convenience constructors for the String-accepting variants of OxideError ─
+// ── Convenience constructors for the String-accepting variants of QuantError ─
 
-impl OxideError {
+impl QuantError {
     /// Shorthand config error from a string message (used by the deploy-config loader).
     pub fn config(msg: impl Into<String>) -> Self {
         Self::Config(
@@ -141,15 +141,15 @@ impl OxideError {
     }
 }
 
-// ── Bridge: sea_orm::TransactionError → OxideError ───────────────────────────
+// ── Bridge: sea_orm::TransactionError → QuantError ───────────────────────────
 
-impl From<sea_orm::DbErr> for OxideError {
+impl From<sea_orm::DbErr> for QuantError {
     fn from(e: sea_orm::DbErr) -> Self {
         Self::Storage(storage::StorageError::Database(e))
     }
 }
 
-impl From<sea_orm::TransactionError<Self>> for OxideError {
+impl From<sea_orm::TransactionError<Self>> for QuantError {
     fn from(e: sea_orm::TransactionError<Self>) -> Self {
         match e {
             sea_orm::TransactionError::Connection(db_err) => {
@@ -171,8 +171,8 @@ mod tests {
             operation: "get_book".into(),
             elapsed_ms: 5000,
         };
-        let oxide_err: OxideError = api_err.into();
-        assert!(matches!(oxide_err, OxideError::Api(_)));
+        let oxide_err: QuantError = api_err.into();
+        assert!(matches!(oxide_err, QuantError::Api(_)));
     }
 
     #[test]
@@ -181,15 +181,15 @@ mod tests {
             shard_id: 2,
             deadline_ms: 10000,
         };
-        let oxide_err: OxideError = ws_err.into();
-        assert!(matches!(oxide_err, OxideError::WebSocket(_)));
+        let oxide_err: QuantError = ws_err.into();
+        assert!(matches!(oxide_err, QuantError::WebSocket(_)));
     }
 
     #[test]
     fn storage_error_wraps_db_err() {
         let db_err = sea_orm::DbErr::Custom("test db error".into());
-        let oxide_err: OxideError = db_err.into();
-        assert!(matches!(oxide_err, OxideError::Storage(_)));
+        let oxide_err: QuantError = db_err.into();
+        assert!(matches!(oxide_err, QuantError::Storage(_)));
     }
 
     #[test]
@@ -197,8 +197,8 @@ mod tests {
         let cfg_err = config::ConfigError::from(ConfigValidationReport::single_error(
             ConfigValidationError::InvalidKellyFraction(dec!(1.5)),
         ));
-        let oxide_err: OxideError = cfg_err.into();
-        assert!(matches!(oxide_err, OxideError::Config(_)));
+        let oxide_err: QuantError = cfg_err.into();
+        assert!(matches!(oxide_err, QuantError::Config(_)));
     }
 
     #[test]
@@ -207,32 +207,32 @@ mod tests {
             level: 3,
             reason: "drawdown exceeded".into(),
         };
-        let oxide_err: OxideError = t_err.into();
-        assert!(matches!(oxide_err, OxideError::Trading(_)));
+        let oxide_err: QuantError = t_err.into();
+        assert!(matches!(oxide_err, QuantError::Trading(_)));
     }
 
     #[test]
     fn result_alias_works() {
-        let ok: OxideResult<i32> = Ok(42);
+        let ok: QuantResult<i32> = Ok(42);
         assert!(matches!(ok, Ok(42)));
 
-        let err: OxideResult<i32> = Err(OxideError::Internal("test".into()));
+        let err: QuantResult<i32> = Err(QuantError::Internal("test".into()));
         assert!(err.is_err());
     }
 
     #[test]
     fn error_is_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
-        assert_send_sync::<OxideError>();
+        assert_send_sync::<QuantError>();
     }
 
     #[test]
     fn transaction_error_connection_converts() {
-        let tx_err = sea_orm::TransactionError::<OxideError>::Connection(sea_orm::DbErr::Custom(
+        let tx_err = sea_orm::TransactionError::<QuantError>::Connection(sea_orm::DbErr::Custom(
             "conn failed".into(),
         ));
-        let oxide_err: OxideError = tx_err.into();
-        assert!(matches!(oxide_err, OxideError::Storage(_)));
+        let oxide_err: QuantError = tx_err.into();
+        assert!(matches!(oxide_err, QuantError::Storage(_)));
     }
 
     #[test]
@@ -240,8 +240,8 @@ mod tests {
         let market_err = market::MarketError::InvalidTokenPair {
             market_id: "0xabc".into(),
         };
-        let oxide_err: OxideError = market_err.into();
-        assert!(matches!(oxide_err, OxideError::Market(_)));
+        let oxide_err: QuantError = market_err.into();
+        assert!(matches!(oxide_err, QuantError::Market(_)));
     }
 
     #[test]
