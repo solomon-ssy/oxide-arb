@@ -14,16 +14,26 @@
 //! a `BTreeMap`) are already canonical by construction.
 
 use quant_pivot_error::QuantResult;
-use quant_pivot_models::{hashing::CanonicalDigest, types::ContentHash};
+use quant_pivot_models::{
+    hashing::CanonicalDigest,
+    types::{ContentHash, SchemaVersion},
+};
 use serde::Serialize;
 
 use crate::{
     factors::FactorSet,
-    features::{FeatureName, FeatureVector},
+    features::{FeatureName, FeatureSchema, FeatureVector},
     model::ModelArtifact,
     selection::ModelFeatureRequirements,
     training::TrainingDatasetArtifact,
 };
+
+/// Canonical JSON shape for [`ResearchHasher::feature_schema`].
+#[derive(serde::Serialize)]
+struct FeatureSchemaCanonical {
+    version: SchemaVersion,
+    features: Vec<FeatureName>,
+}
 
 /// Typed canonical hasher for research artifacts (`blake3:<hex>`).
 pub struct ResearchHasher;
@@ -58,6 +68,19 @@ impl ResearchHasher {
     /// Order-independent hash of feature names (selection requirements, schema arms).
     pub fn feature_names(names: &[FeatureName]) -> QuantResult<ContentHash> {
         Self::ordered(names)
+    }
+
+    /// Order-independent hash of a governed feature schema (`feature_schema_hash`).
+    ///
+    /// Feature names are sorted before serialization so registry insertion order
+    /// never perturbs the digest.
+    pub fn feature_schema(schema: &FeatureSchema) -> QuantResult<ContentHash> {
+        let mut features = schema.features.clone();
+        features.sort();
+        Self::canonical(&FeatureSchemaCanonical {
+            version: schema.version,
+            features,
+        })
     }
 
     /// Order-independent hash of model feature requirements for selector inputs.
@@ -104,10 +127,10 @@ mod tests {
             FactorDefinitionSpec, FactorFamily, FactorName, FactorOutputKind, FactorSet,
             NormalizationSpec,
         },
-        features::FeatureName,
+        features::{FeatureName, FeatureSchema},
         selection::ModelFeatureRequirements,
     };
-    use quant_pivot_models::enums::quant::FactorDirection;
+    use quant_pivot_models::{enums::quant::FactorDirection, types::SchemaVersion};
 
     fn sample_factor(name: &'static str) -> FactorDefinitionSpec {
         FactorDefinitionSpec {
@@ -153,6 +176,28 @@ mod tests {
         let forward_hash = ResearchHasher::model_feature_requirements(&forward).expect("hash");
         let shuffled_hash = ResearchHasher::model_feature_requirements(&shuffled).expect("hash");
         assert_eq!(forward_hash, shuffled_hash);
+    }
+
+    #[test]
+    fn feature_schema_is_order_independent() {
+        let forward = FeatureSchema {
+            version: SchemaVersion::new(1),
+            features: vec![
+                FeatureName::from_static("alpha"),
+                FeatureName::from_static("beta"),
+            ],
+        };
+        let shuffled = FeatureSchema {
+            version: SchemaVersion::new(1),
+            features: vec![
+                FeatureName::from_static("beta"),
+                FeatureName::from_static("alpha"),
+            ],
+        };
+        assert_eq!(
+            ResearchHasher::feature_schema(&forward).expect("hash"),
+            ResearchHasher::feature_schema(&shuffled).expect("hash"),
+        );
     }
 
     #[test]

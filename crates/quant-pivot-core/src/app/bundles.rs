@@ -18,10 +18,12 @@ use crate::{
     },
 };
 use quant_pivot_api::{gamma::GammaClient, ws::ClobWsManager};
+use quant_pivot_models::config::DeployConfig;
 use quant_pivot_repository::{
     postgres::PgOperationLogRepository,
     traits::{MarketRepository, QuantFactRepository},
 };
+use quant_pivot_research::artifact::{ArtifactStore, LocalArtifactStore};
 use quant_pivot_storage::{
     cache::{CacheManager, RedisPool},
     clickhouse::{ChWriteManager, ClickHousePool},
@@ -69,8 +71,23 @@ pub struct GovernanceBundle {
     pub runtime_mode: RuntimeModeHandle,
 }
 
-/// Research pipeline bundle (Phase 3+).
-pub struct ResearchBundle;
+/// Research plane: artifact store and compute contracts (Phase 3+).
+pub struct ResearchBundle {
+    /// Local (or future object-store) backend for dataset / model artifact bytes.
+    pub artifact_store: Arc<dyn ArtifactStore>,
+}
+
+impl ResearchBundle {
+    /// Build the research bundle from deploy config (`research.artifact_root`).
+    pub fn from_deploy(deploy: &DeployConfig) -> Self {
+        let store: Arc<dyn ArtifactStore> = Arc::new(LocalArtifactStore::new(
+            deploy.research.artifact_root.clone(),
+        ));
+        Self {
+            artifact_store: store,
+        }
+    }
+}
 
 /// Recommendation report bundle (Phase 4+).
 pub struct ReportBundle;
@@ -81,5 +98,5 @@ pub struct PortfolioBundle;
 /// Execution intent bundle (Phase 5+).
 pub struct ExecutionIntentBundle;
 
-/// Cross-bundle runtime channels (Phase 2+).
+/// TODO: Cross-bundle runtime channels (Phase 2+).
 pub struct RuntimeChannels;

@@ -44,6 +44,53 @@ pub mod selection;
 pub mod training;
 
 #[cfg(test)]
+mod acceptance_tests {
+    use std::path::Path;
+
+    /// Phase 3.0 §11: default build must not link polars / smartcore / argmin.
+    #[test]
+    fn research_default_build_excludes_heavy_deps() {
+        let output = std::process::Command::new("cargo")
+            .args(["tree", "-p", "quant-pivot-research", "--depth", "1"])
+            .output()
+            .expect("cargo tree must succeed");
+        assert!(
+            output.status.success(),
+            "cargo tree failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8(output.stdout).expect("utf-8 stdout");
+        for forbidden in ["polars", "smartcore", "argmin"] {
+            assert!(
+                !stdout.contains(forbidden),
+                "default build must not list `{forbidden}`:\n{stdout}"
+            );
+        }
+    }
+
+    /// Phase 3.0 §11: the models-domain `SignalCandidate` stub must stay deleted.
+    #[test]
+    fn signal_candidate_typed_replaces_stub() {
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let quant_mod = manifest_dir.join("../quant-pivot-models/src/domain/quant/mod.rs");
+        let signal_rs = manifest_dir.join("../quant-pivot-models/src/domain/quant/signal.rs");
+        assert!(
+            !signal_rs.exists(),
+            "domain/quant/signal.rs stub must remain deleted"
+        );
+        let mod_src = std::fs::read_to_string(&quant_mod).expect("read domain/quant/mod.rs");
+        assert!(
+            !mod_src.contains("mod signal"),
+            "domain/quant/mod.rs must not declare mod signal"
+        );
+        assert!(
+            !mod_src.contains("SignalCandidate"),
+            "domain/quant must not reference SignalCandidate"
+        );
+    }
+}
+
+#[cfg(test)]
 mod feature_guard_tests {
     /// The default build must never link the heavy ML stack: only the pure-Rust
     /// `stats` group is on by default. `cargo test --workspace` runs with default

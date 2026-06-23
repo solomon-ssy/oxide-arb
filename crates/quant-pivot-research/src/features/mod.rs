@@ -8,8 +8,10 @@
 //! builders, schema registry, and null-policy engine land in 3.2; 3.0 fixes the
 //! trait + value contract.
 
+mod schema;
 mod value;
 
+pub use schema::FeatureSchema;
 pub use value::{
     EvidenceSourceKind, EvidenceSourceRef, FeatureName, FeatureValue, FeatureVector, NullReason,
 };

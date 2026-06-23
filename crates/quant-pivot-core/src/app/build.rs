@@ -2,7 +2,7 @@
 
 use super::{
     AppContext,
-    bundles::{DataBundle, GovernanceBundle, InfraBundle},
+    bundles::{DataBundle, GovernanceBundle, InfraBundle, ResearchBundle},
 };
 use crate::{
     app::{task_id::TaskId, task_registry::PendingTaskQueue},
@@ -129,6 +129,7 @@ impl AppContext {
             Arc::clone(&health_checker),
             PgSystemRuntimeStateRepository::new(pg_pool.connection().clone()),
         ));
+        let research = ResearchBundle::from_deploy(&deploy);
 
         Ok(Self {
             config: deploy,
@@ -167,6 +168,7 @@ impl AppContext {
                 applicator,
                 runtime_mode,
             },
+            research,
             health_checker,
             runtime_control,
             catalog,

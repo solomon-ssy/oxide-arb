@@ -106,9 +106,7 @@ mod tests {
     };
     use rust_decimal::Decimal;
 
-    /// The strongly-typed candidate replaces the deleted models stub: it is
-    /// constructible entirely from typed ids / side / price / probability —
-    /// never `String` / `i8` / bare `Decimal`.
+    /// Constructs a strongly-typed candidate (replaces the deleted models stub).
     #[test]
     fn typed_signal_candidate_constructs_from_newtypes() {
         let candidate = SignalCandidate {

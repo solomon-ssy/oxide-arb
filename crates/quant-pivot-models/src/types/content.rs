@@ -17,7 +17,8 @@
 //!
 //! # `SeaORM` persistence
 //!
-//! [`SchemaVersion`] uses [`DeriveValueType`] (transparent `i32` wrapper).
+//! [`SchemaVersion`] uses read-time validation via custom [`TryGetable`] /
+//! [`ValueType`] (not [`DeriveValueType`], which would accept corrupt integers).
 //! [`ContentHash`] and [`ArtifactUri`] bind as `text` with **read-time validation**
 //! via [`validated_text_seaorm!`] — `DeriveValueType` on a `String` tuple struct
 //! would skip validation when loading corrupt rows from Postgres.
@@ -27,7 +28,7 @@ use std::{fmt, str::FromStr};
 use quant_pivot_error::hashing::CanonicalDigestError;
 use schemars::JsonSchema;
 use sea_orm::{
-    ActiveValue, ColIdx, DeriveValueType, IntoActiveValue, TryGetError, TryGetable,
+    ActiveValue, ColIdx, IntoActiveValue, TryGetError, TryGetable,
     sea_query::{ArrayType, ColumnType, Nullable, Value, ValueType, ValueTypeErr},
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -266,22 +267,9 @@ validated_text_seaorm!(ArtifactUri);
 ///
 /// Wrapping the version prevents accidentally mixing it with unrelated integers
 /// (counts, ids, ordinals) and makes "which schema generated this row" explicit
-/// in every signature. Versions are `>= 1` by convention; the on-the-wire and
-/// `SeaORM` representations are a transparent integer.
-#[derive(
-    Clone,
-    Copy,
-    Debug,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    Serialize,
-    Deserialize,
-    JsonSchema,
-    DeriveValueType,
-)]
+/// in every signature. Versions are `>= 1` by convention; untrusted wire and DB
+/// values are validated through [`SchemaVersion::try_new`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, JsonSchema)]
 #[serde(transparent)]
 #[schemars(transparent)]
 pub struct SchemaVersion(i32);
@@ -334,9 +322,65 @@ impl IntoActiveValue<Self> for SchemaVersion {
     }
 }
 
+impl<'de> Deserialize<'de> for SchemaVersion {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = i32::deserialize(deserializer)?;
+        Self::try_new(raw).map_err(serde::de::Error::custom)
+    }
+}
+
+impl From<SchemaVersion> for Value {
+    #[inline]
+    fn from(v: SchemaVersion) -> Self {
+        Self::Int(Some(v.get()))
+    }
+}
+
+impl From<&SchemaVersion> for Value {
+    #[inline]
+    fn from(v: &SchemaVersion) -> Self {
+        Self::Int(Some(v.get()))
+    }
+}
+
+impl TryGetable for SchemaVersion {
+    fn try_get_by<I: ColIdx>(res: &sea_orm::QueryResult, index: I) -> Result<Self, TryGetError> {
+        let raw: i32 = <i32 as TryGetable>::try_get_by(res, index)?;
+        Self::try_new(raw).map_err(|e| TryGetError::DbErr(sea_orm::DbErr::Type(e.to_string())))
+    }
+}
+
+impl ValueType for SchemaVersion {
+    fn try_from(v: Value) -> Result<Self, ValueTypeErr> {
+        match v {
+            Value::Int(Some(raw)) => Self::try_new(raw).map_err(|_| ValueTypeErr),
+            _ => Err(ValueTypeErr),
+        }
+    }
+
+    fn type_name() -> String {
+        stringify!(SchemaVersion).to_owned()
+    }
+
+    fn array_type() -> ArrayType {
+        ArrayType::Int
+    }
+
+    fn column_type() -> ColumnType {
+        ColumnType::Integer
+    }
+}
+
+impl Nullable for SchemaVersion {
+    fn null() -> Value {
+        Value::Int(None)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sea_orm::sea_query::{Value, ValueType};
 
     const VALID_HASH: &str =
         "blake3:0000000000000000000000000000000000000000000000000000000000000000";
@@ -365,6 +409,27 @@ mod tests {
     }
 
     #[test]
+    fn content_hash_seaorm_value_type_validates() {
+        let valid = Value::String(Some(Box::new(VALID_HASH.to_owned())));
+        let parsed = <ContentHash as ValueType>::try_from(valid).expect("valid db value");
+        assert_eq!(parsed.as_str(), VALID_HASH);
+
+        let sha = format!("sha256:{}", "a".repeat(BLAKE3_HEX_LEN));
+        let invalid = Value::String(Some(Box::new(sha)));
+        assert!(<ContentHash as ValueType>::try_from(invalid).is_err());
+
+        assert!(<ContentHash as ValueType>::try_from(Value::String(None)).is_err());
+    }
+
+    #[test]
+    fn content_hash_seaorm_roundtrip_value() {
+        let hash = ContentHash::parse(VALID_HASH).expect("valid");
+        let value: Value = hash.clone().into();
+        let back = <ContentHash as ValueType>::try_from(value).expect("roundtrip");
+        assert_eq!(back, hash);
+    }
+
+    #[test]
     fn artifact_uri_requires_scheme() {
         let uri = ArtifactUri::parse("file:///var/artifacts/x.parquet").expect("valid");
         assert_eq!(uri.scheme(), "file");
@@ -385,5 +450,34 @@ mod tests {
         assert_eq!(serde_json::to_string(&v).unwrap(), "3");
         let back: SchemaVersion = serde_json::from_str("3").unwrap();
         assert_eq!(back, v);
+    }
+
+    #[test]
+    fn schema_version_serde_rejects_non_positive() {
+        assert!(serde_json::from_str::<SchemaVersion>("0").is_err());
+        assert!(serde_json::from_str::<SchemaVersion>("-1").is_err());
+    }
+
+    #[test]
+    fn schema_version_seaorm_value_type_validates() {
+        let valid = Value::Int(Some(3));
+        assert_eq!(
+            <SchemaVersion as ValueType>::try_from(valid)
+                .expect("valid")
+                .get(),
+            3
+        );
+
+        assert!(<SchemaVersion as ValueType>::try_from(Value::Int(Some(0))).is_err());
+        assert!(<SchemaVersion as ValueType>::try_from(Value::Int(Some(-1))).is_err());
+        assert!(<SchemaVersion as ValueType>::try_from(Value::Int(None)).is_err());
+    }
+
+    #[test]
+    fn schema_version_seaorm_roundtrip_value() {
+        let version = SchemaVersion::new(7);
+        let value: Value = version.into();
+        let back = <SchemaVersion as ValueType>::try_from(value).expect("roundtrip");
+        assert_eq!(back, version);
     }
 }

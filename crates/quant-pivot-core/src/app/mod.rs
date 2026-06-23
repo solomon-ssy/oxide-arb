@@ -27,10 +27,11 @@ use quant_pivot_models::{
     config::DeployConfig,
     domain::{CoreEvent, CoreEventPublisher, PointInTimeDataSource, RuntimeControlPort},
 };
+use quant_pivot_research::artifact::ArtifactStore;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
-/// System composition root — Phase 0 bundles only.
+/// System composition root — Phase 0 bundles + Phase 3 research wiring.
 pub struct AppContext {
     pub config: Arc<DeployConfig>,
     pub shutdown: CancellationToken,
@@ -39,6 +40,8 @@ pub struct AppContext {
     pub infra: InfraBundle,
     pub data: DataBundle,
     pub governance: GovernanceBundle,
+    /// Research plane (artifact store; compute traits live in `quant-pivot-research`).
+    pub research: ResearchBundle,
     pub health_checker: Arc<HealthChecker>,
     pub runtime_control: Arc<dyn RuntimeControlPort>,
     pub catalog: Arc<CatalogReadiness>,
@@ -60,5 +63,10 @@ impl AppContext {
 
     pub fn runtime_mode(&self) -> RuntimeModeHandle {
         self.governance.runtime_mode.clone()
+    }
+
+    /// Content-addressed artifact store (`deploy.research.artifact_root`).
+    pub fn artifact_store(&self) -> Arc<dyn ArtifactStore> {
+        Arc::clone(&self.research.artifact_store)
     }
 }

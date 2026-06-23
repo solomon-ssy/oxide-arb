@@ -1094,16 +1094,16 @@ pub trait UnifiedModelRunner {
 
 | crate | 版本 | feature gate | native 依赖 | 许可证 | 结论 |
 |---|---|---|---|---|---|
-| `ndarray` | 0.16 | `stats`（默认） | 无（纯 Rust） | MIT/Apache-2.0 | 引入 |
-| `ndarray-stats` | 0.6 | `stats`（默认） | 无 | MIT/Apache-2.0 | 引入 |
+| `ndarray` | 0.17 | `stats`（默认） | 无（纯 Rust） | MIT/Apache-2.0 | 引入 |
+| `ndarray-stats` | 0.7 | `stats`（默认） | 无 | MIT/Apache-2.0 | 引入 |
 | `statrs` | 0.18 | `stats`（默认） | 无 | MIT | 引入 |
 | `rayon` | 1 | `stats`（默认） | 无 | MIT/Apache-2.0 | 引入 |
-| `polars` | 0.45（`lazy` + `parquet`） | `dataframe`（默认关） | 无 native runtime（纯 Rust + 编译期 SIMD） | MIT | 引入，仅离线 |
+| `polars` | 0.54.4（`lazy` + `parquet`，`default-features = false`） | `dataframe`（默认关） | 无 native runtime（纯 Rust + 编译期 SIMD） | MIT | 引入，仅离线 |
 | `arrow` | 59 | `dataframe`（默认关） | 无 | Apache-2.0 | 引入，仅离线（53 与 chrono 0.4.44 的 `quarter()` 冲突，升 59 |
 | `parquet` | 59 | `dataframe`（默认关） | 无 | Apache-2.0 | 引入，仅离线 |
-| `argmin` | 0.10 | `optimize`（默认关） | 无 | MIT/Apache-2.0 | 引入 |
-| `argmin-math` | 0.4 | `optimize`（默认关） | 无 | MIT/Apache-2.0 | 引入 |
-| `smartcore` | 0.4 | `ml-classical`（默认关） | 无 | Apache-2.0 | 引入；artifact serde 能力在 3.6 spike 验证 |
+| `argmin` | 0.11 | `optimize`（默认关） | 无 | MIT/Apache-2.0 | 引入 |
+| `argmin-math` | 0.5 | `optimize`（默认关） | 无 | MIT/Apache-2.0 | 引入 |
+| `smartcore` | 0.5 | `ml-classical`（默认关） | 无 | Apache-2.0 | 引入；artifact serde 能力在 3.6 spike 验证 |
 
 禁止本期引入（见 §2 / §30 父文档）：`good_lp`、`ort`、`burn`、`candle`、`tch-rs`。
 `smartcore` 的 model artifact 序列化能力（§15.2 风险）留 3.6 spike；本期仅声明依赖与

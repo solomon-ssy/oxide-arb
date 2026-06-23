@@ -7009,6 +7009,7 @@ dependencies = [
  "quant-pivot-error",
  "quant-pivot-models",
  "quant-pivot-repository",
+ "quant-pivot-research",
  "quant-pivot-storage",
  "quant-pivot-web",
  "rand 0.10.1",
