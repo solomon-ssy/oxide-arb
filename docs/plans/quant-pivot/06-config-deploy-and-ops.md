@@ -77,7 +77,7 @@ load_credentials_in_report_only = false
 ```text
 RuntimeConfig {
   schema_version: 3,
-  universe,
+  selection,
   data_quality,
   features,
   factors,
@@ -97,7 +97,7 @@ RuntimeConfig {
 - `settlement`
 - `redeem_routing`
 
-### 2.2 `universe`
+### 2.2 `selection`
 
 字段：
 
@@ -110,7 +110,7 @@ RuntimeConfig {
 - `allow_near_resolution`
 - `min_time_to_resolution_secs`
 - `max_time_to_resolution_secs`
-- `max_universe_size`
+- `max_selection_size`
 
 ### 2.3 `data_quality`
 
@@ -179,7 +179,7 @@ Schedule：
 - `schedule_id`
 - `interval_secs` 或 cron。
 - `top_n`
-- `universe_filter_ref`
+- `market_filter_ref`
 - `model_version_ref`
 - `source_delay_secs`
 - `enabled`
@@ -290,7 +290,7 @@ Schedule：
 
 新增 UI groups：
 
-- Universe。
+- Selection。
 - Data Quality。
 - Features。
 - Factors。
@@ -427,7 +427,7 @@ semi_auto / auto_execution 额外：
 - `recommendation_id`
 - `model_version_id`
 - `runtime_config_version_id`
-- `universe_snapshot_id`
+- `market_selection_id`
 - `order_intent_id`
 - `market_id`
 - `token_id`

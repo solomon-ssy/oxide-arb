@@ -1,8 +1,12 @@
 # 03 — 数据、特征、因子、模型管线
 
-> 状态：生产级目标设计
+> 状态：生产级目标设计（概念真理）
 >
 > 目标：替换 Endgame detection/calibration/scoring，建立 point-in-time 正确的量化研究与线上推理闭环。
+>
+> **实施拆分**：本文件是 Phase 03 的概念规格。可执行的子phase实施契约（3.0–3.7）见
+> [`phase-03/README.md`](phase-03/README.md)，按子phase推进；本文件保持"概念真理"，
+> 子phase文档保持"可执行契约"。
 
 ## 0. 核心原则
 
@@ -53,7 +57,7 @@
 - model training source delay：15 分钟。
 - settlement label source delay：24 小时或按市场 resolution 成熟度。
 
-## 2. Universe Selector
+## 2. Market Selector
 
 ### 2.1 输入
 
@@ -76,7 +80,7 @@
 
 ### 2.3 输出
 
-`UniverseSnapshot` 必须包含：
+`MarketSelectionSnapshot` 必须包含：
 
 - included members。
 - excluded members。
@@ -85,7 +89,7 @@
 - config version。
 - as_of。
 
-空 universe 不算系统异常，但报告必须输出 `empty_universe` 原因。
+空 market selection 不算系统异常，但报告必须输出 `empty_selection` 原因。
 
 ## 3. Feature Builder
 
@@ -303,7 +307,7 @@ SignalCandidate 还不是 recommendation。必须进入 portfolio planner。
 - factor values。
 - label refs。
 - source refs。
-- universe membership。
+- market selection membership。
 - data quality。
 - runtime config version。
 
@@ -364,7 +368,7 @@ PIT resolver 需要按 `as_of` 读取：
 - runtime config version。
 - model version。
 - factor definition version。
-- universe selector。
+- market selector。
 
 ### 7.2 回测输出
 
@@ -432,7 +436,7 @@ Shadow 模式生成报告但不影响 active report，记录：
 
 热更新可以改变：
 
-- universe filter。
+- market selection filter。
 - report schedules。
 - factor weights for unpublished/candidate model。
 - data quality thresholds。
@@ -452,7 +456,7 @@ Shadow 模式生成报告但不影响 active report，记录：
 
 ```text
 quant-pivot-research/
-├── universe/
+├── selection/
 ├── features/
 ├── factors/
 ├── model/
@@ -583,7 +587,7 @@ pub struct TrainingExample {
     pub token_id: TokenId,
     pub as_of: DateTime<Utc>,
     pub horizon: PredictionHorizon,
-    pub universe_snapshot_id: UniverseSnapshotId,
+    pub market_selection_id: MarketSelectionId,
     pub feature_vector: FeatureVector,
     pub factor_values: Vec<FactorValue>,
     pub labels: Vec<TrainingLabel>,
@@ -686,11 +690,11 @@ pub async fn build_training_dataset(
 
     for sample in plan.samples {
         let as_of = sample.as_of;
-        let universe = deps.universe_selector
-            .build_snapshot(sample.universe_request(as_of))
+        let selection = deps.market_selector
+            .build_snapshot(sample.market_selection_request(as_of))
             .await?;
 
-        for member in universe.members {
+        for member in selection.members {
             let feature_vector = deps.feature_builder
                 .build(FeatureBuildInput {
                     market: &member,
@@ -730,7 +734,7 @@ pub async fn build_training_dataset(
                 token_id: member.primary_token_id.clone(),
                 as_of,
                 horizon: sample.horizon,
-                universe_snapshot_id: universe.id.clone(),
+                market_selection_id: selection.id.clone(),
                 feature_vector,
                 factor_values: factors,
                 labels,
@@ -852,12 +856,12 @@ pub async fn run_backtest(
 
     for tick in request.schedule_ticks() {
         let config = deps.config_store.version_at(tick.as_of)?;
-        let universe = deps.universe_selector.build_snapshot(tick.universe_request(&config)).await?;
-        let features = deps.feature_pipeline.build_for_universe(&universe, tick.as_of, &config).await?;
+        let selection = deps.market_selector.build_snapshot(tick.market_selection_request(&config)).await?;
+        let features = deps.feature_pipeline.build_for_selection(&selection, tick.as_of, &config).await?;
         let factors = deps.factor_engine.compute_all_batch(&features, &config.factors)?;
         let candidates = deps.model_runner.infer_for_backtest(&request.model, features, factors).await?;
         let plan = deps.portfolio_planner.plan_backtest(candidates, &config.portfolio)?;
-        let simulated_report = deps.report_simulator.compose(tick, universe, plan)?;
+        let simulated_report = deps.report_simulator.compose(tick, selection, plan)?;
         let outcomes = deps.outcome_resolver.resolve(&simulated_report).await?;
 
         report_metrics.record(simulated_report, outcomes);
@@ -954,7 +958,7 @@ pub async fn publish_model_version(
 Report tick
  -> load published model
  -> load runtime config v3
- -> build universe
+ -> build market selection
  -> build features
  -> compute factors
  -> infer candidates
@@ -977,7 +981,7 @@ Report tick
 
 ```text
 quant-pivot-research/src/
-├── universe/
+├── selection/
 │   ├── selector.rs
 │   └── filters.rs
 ├── features/

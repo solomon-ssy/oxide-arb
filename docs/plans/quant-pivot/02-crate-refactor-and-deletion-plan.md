@@ -319,7 +319,7 @@ quant-pivot-risk/src/
 
 新增文件：
 
-- `runtime_config/universe.rs`
+- `runtime_config/selection.rs`
 - `runtime_config/data_quality.rs`
 - `runtime_config/features.rs`
 - `runtime_config/factors.rs`
@@ -391,7 +391,7 @@ quant-pivot-risk/src/
 - `quant_recommendations.rs`
 - `quant_models.rs`
 - `quant_factors.rs`
-- `quant_universe.rs`
+- `quant_market_selection.rs`
 - `quant_order_intents.rs`
 - `quant_attribution.rs`
 - `quant_research_runs.rs`
@@ -413,7 +413,7 @@ quant-pivot-risk/src/
 
 ```text
 traits/quant/
-├── universe.rs
+├── selection.rs
 ├── feature.rs
 ├── factor.rs
 ├── model.rs
@@ -505,7 +505,7 @@ ClickHouse：
 
 新增 sections：
 
-- `universe`
+- `selection`
 - `data_quality`
 - `features`
 - `factors`

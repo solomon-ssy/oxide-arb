@@ -30,7 +30,7 @@ Polymarket facts -> features -> factors/models -> portfolio plan
 1. [`00-quant-pivot-architecture.md`](00-quant-pivot-architecture.md)：目标产品、生产不变量、运行模式、完整业务闭环。
 2. [`01-domain-model-and-schema.md`](01-domain-model-and-schema.md)：新领域词汇、Postgres 表、ClickHouse facts、旧 schema 替换映射。
 3. [`02-crate-refactor-and-deletion-plan.md`](02-crate-refactor-and-deletion-plan.md)：crate、模块、配置、文档、脚本、测试的删除、合并、保留、重命名清单。
-4. [`03-data-factor-model-pipeline.md`](03-data-factor-model-pipeline.md)：数据、特征、因子、模型、训练、point-in-time 验证平面。
+4. [`03-data-factor-model-pipeline.md`](03-data-factor-model-pipeline.md)：数据、特征、因子、模型、训练、point-in-time 验证平面（概念规格）。可执行的子phase实施契约（3.0–3.7）见 [`phase-03/README.md`](phase-03/README.md)。
 5. [`04-topn-report-and-recommendation.md`](04-topn-report-and-recommendation.md)：TopN 报告 payload，明确买什么、什么时候买、买多少、什么时候卖、卖多少、入场触发、止盈、止损、出场节点。
 6. [`05-execution-risk-and-governance.md`](05-execution-risk-and-governance.md)：`report_only`、`semi_auto`、`auto_execution` 的语义、审批、OrderIntent、组合风险、审计规则。
 7. [`06-config-deploy-and-ops.md`](06-config-deploy-and-ops.md)：deploy-config、runtime-config v3、CI、benchmark、Docker、observability、runbook 调整。

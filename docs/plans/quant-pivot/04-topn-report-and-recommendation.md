@@ -59,7 +59,7 @@ flowchart TD
 | `runtime_mode` | `report_only`, `semi_auto`, `auto_execution` |
 | `runtime_config_version_id` | 配置版本 |
 | `model_version_id` | 模型版本 |
-| `universe_snapshot_id` | 输入 universe |
+| `market_selection_id` | 输入 market selection |
 | `portfolio_plan_id` | 组合规划 |
 | `top_n` | 报告目标数量 |
 | `actual_count` | 实际 recommendation 数量 |
@@ -73,7 +73,7 @@ flowchart TD
 
 `summary` 必须包含：
 
-- universe market count。
+- market selection market count。
 - candidates count。
 - rejected count。
 - published recommendation count。
@@ -90,7 +90,7 @@ flowchart TD
 
 空报告必须说明：
 
-- `empty_universe`
+- `empty_selection`
 - `insufficient_data_quality`
 - `model_quality_gate_failed`
 - `portfolio_budget_exhausted`
@@ -345,7 +345,7 @@ Sizing 不是展示值。执行模式启用时，`OrderIntent` 只能在 sizing 
 
 - `feature_vector_id`
 - `model_run_id`
-- `universe_snapshot_id`
+- `market_selection_id`
 - `book_snapshot_ref`
 - `runtime_config_version_id`
 - `model_version_id`
@@ -514,20 +514,20 @@ pub async fn build_report(
     let config = deps.runtime_config.load_version(request.runtime_config_version_id)?;
     let model = deps.model_registry.active_model(config.model.active_model_version_id).await?;
 
-    let universe = deps.universe_selector
-        .build_snapshot(UniverseBuildRequest {
+    let selection = deps.market_selector
+        .build_snapshot(MarketSelectionBuildRequest {
             as_of: request.as_of,
-            config: config.universe.clone(),
+            config: config.selection.clone(),
             model_requirements: model.requirements.clone(),
         })
         .await?;
 
-    if universe.members.is_empty() {
-        return deps.report_store.create_empty_report(request, universe, EmptyReason::UniverseEmpty).await;
+    if selection.members.is_empty() {
+        return deps.report_store.create_empty_report(request, selection, EmptyReason::SelectionEmpty).await;
     }
 
     let features = deps.feature_pipeline
-        .build_for_universe(&universe, request.as_of, &config)
+        .build_for_selection(&selection, request.as_of, &config)
         .await?;
 
     let factor_values = deps.factor_engine.compute_all(&features, &config.factors)?;
@@ -535,7 +535,7 @@ pub async fn build_report(
     let candidates = deps.model_runner
         .infer(ModelInferenceRequest {
             model,
-            universe: universe.clone(),
+            selection: selection.clone(),
             features,
             factor_values,
             as_of: request.as_of,
@@ -550,7 +550,7 @@ pub async fn build_report(
 
     let draft = deps.composer.compose(ComposeRecommendationInput {
         request,
-        universe,
+        selection,
         portfolio_plan: plan,
         mode: config.execution.runtime_mode,
     })?;
@@ -588,7 +588,7 @@ fn empty_report(reason: EmptyReason, context: EmptyReportContext) -> Recommendat
         status: RecommendationReportStatus::PublishedEmpty,
         summary: ReportSummary {
             empty_reason: Some(reason),
-            universe_count: context.universe_count,
+            market_selection_count: context.market_selection_count,
             rejected_summary: context.rejected_summary,
             warnings: context.warnings,
             ..ReportSummary::zero()

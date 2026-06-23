@@ -51,7 +51,7 @@
 ### 工作项
 
 - 新增 quant ID types。
-- 新增 `quant_universe_snapshot`、`quant_universe_member`。
+- 新增 `quant_market_selection`、`quant_market_selection_member`。
 - 新增 `quant_feature_vector`。
 - 新增 `quant_factor_definition`、`quant_factor_value`。
 - 新增 `quant_model_spec`、`quant_model_version`、`quant_model_run`。
@@ -91,8 +91,11 @@
 
 - 保留 Gamma catalog sync。
 - 保留 CLOB WS book ingest。
-- **重命名** endgame hotset policy → quant universe ingest policy（含
-  `hotset_*` Prometheus 系列 → `universe_ingest_*`，`WsSubscriptionCoordinator` 与 deploy 字段命名）。
+- **重命名** endgame hotset policy → 行情订阅 ingest policy（含
+  `hotset_*` Prometheus 系列 → `quant_pivot_subscription_candidates_total` /
+  `_selected_total` / `_window_coverage_ratio`，`WsSubscriptionCoordinator` 与 deploy
+  字段 `engine_subscription_window_hours` 命名）。注意：行情订阅（ingest）与研究
+  `market selection`（报告输入集）是两个不同概念，命名必须区分，沿用代码现状。
 - **删除** backpressure 中 coalescer site-2 / execution-shard 路径（Phase 0 已删 execution-shard metric）。
 - 保留 BookStore published snapshot。
 - 新增 fact writers（wire `ChWriteManager` + `book_fact_writer`）。
@@ -109,13 +112,16 @@
 
 ## Phase 3 — Feature、Factor、Model 平面
 
+> **拆分**：Phase 3 体量过大，已拆为 8 个子phase（3.0–3.7），详细实施契约见
+> [`phase-03/README.md`](phase-03/README.md)。下列工作项是子phase的汇总视图。
+
 ### 目标
 
 建立可回放、可训练、可发布的研究平面。
 
 ### 工作项
 
-- Universe selector。
+- Market selector。
 - Feature schema registry。
 - 通用 feature builders。
 - 通用 factor definitions。
@@ -129,7 +135,7 @@
 
 ### 验收
 
-- 能对一个 universe 生成 feature vectors。
+- 能对一个 market selection 生成 feature vectors。
 - 能生成 factor values。
 - 能跑 model run。
 - 能生成 signal candidates。
@@ -311,7 +317,7 @@
 - feature build per market。
 - factor compute per market。
 - model score per market。
-- universe scan 1k markets。
+- market selection scan 1k markets。
 - TopN select 1k candidates。
 - report build TopN 50。
 - admission decision。
@@ -436,10 +442,15 @@ run_ingest_loop -> normalize event -> apply BookStore -> enqueue facts -> update
 
 ## Phase 3 详细契约 — Research Plane
 
+> 子phase级别的逐项删除清单 / trait 签名 / 验收 / Blocker 见
+> [`phase-03/`](phase-03/README.md)（3.0 契约 → 3.1 selection → 3.2 features →
+> 3.3 factors → 3.4 model runtime → 3.5 historical PIT & dataset →
+> 3.6 trainer/classical/backtest → 3.7 gates & governance）。
+
 ### 必建模块
 
 ```text
-research/src/universe
+research/src/selection
 research/src/features
 research/src/factors
 research/src/model
@@ -452,7 +463,7 @@ research/src/governance
 ### 必实现 trait
 
 ```rust
-UniverseSelector
+MarketSelector
 FeatureBuilder
 FactorComputer
 ModelRunner
@@ -541,7 +552,7 @@ PortfolioPlanner
 ### 伪代码入口
 
 ```rust
-schedule_tick -> build universe -> features -> factors -> model -> portfolio -> report -> publish
+schedule_tick -> build market selection -> features -> factors -> model -> portfolio -> report -> publish
 ```
 
 ### 验收测试

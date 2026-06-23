@@ -1,0 +1,174 @@
+# Phase 03 — Research Plane 子phase索引
+
+> 状态：生产级破坏式实施拆分
+>
+> 父文档（概念规格）：[`../03-data-factor-model-pipeline.md`](../03-data-factor-model-pipeline.md)
+> 与 [`../08-third-party-crates-and-ml-stack.md`](../08-third-party-crates-and-ml-stack.md)
+>
+> 本目录把 Phase 03 拆成 8 个可独立推进、带验收契约的子phase。父文档保持
+> "概念真理"，本目录是"可执行实施契约"。任一子phase未满足其 Blocker / 验收，
+> 不允许进入下一子phase。
+
+## 0. 为什么拆分
+
+Phase 03 是整个 quant-pivot 的研究平面：市场选择、特征、因子、模型运行时、
+训练、回测、质量门禁、治理，外加 ML 技术栈与历史 point-in-time 解析层。它的
+体量远超单一可验证增量，因此拆成 3.0–3.7。
+
+**当前代码现实（拆分基线）**
+
+- Phase 1 完成：14 张 `quant_*` Postgres 表 / entity / iden、持久化 DTO、
+  [`enums/quant.rs`](../../../crates/quant-pivot-models/src/enums/quant.rs) 生命周期枚举、
+  typed IDs、ClickHouse quant fact 表 + row 类型、`QuantFactRepository` /
+  `ChQuantFactRepository`。
+- Phase 2 完成：`BookFactWriter`、`AsyncWriter` / `ChWriteManager`、
+  `FactLagTracker`、`BookDataQualityService`，以及 **live-only** 的
+  [`LiveBookDataSource`](../../../crates/quant-pivot-core/src/pipeline/point_in_time.rs)。
+  runtime-config v3 九段（`selection` / `data_quality` / `features` / `factors` /
+  `model` / `reports` / `portfolio` / `execution` / `notification`）齐全。
+- Phase 3 基本空白：[`quant-pivot-research`](../../../crates/quant-pivot-research)
+  仅 `crate_version()`；无 ML 依赖、无计算 trait、无历史 PIT；Postgres repo impl
+  仅 model registry / recommendation report / order intent；quant ClickHouse fact
+  无生产者；`FeatureVectorInfo.payload` 为不透明 JSON；`SignalCandidate` 是
+  `i8`/`Decimal`/无表的 stub。
+
+**Phase 1 遗留缺口（Phase 03 必补，逐篇标注）**
+
+- 无 `quant_training_dataset` 表（`ModelVersionInfo.training_dataset_id` 是裸 `Uuid`）。
+- 无 backtest-report、shadow-comparison 持久化。
+- 无 ClickHouse 读层（仅写）。
+
+## 1. 子phase索引
+
+| 子phase | 标题 | 闭环定位 | 文档 |
+|---|---|---|---|
+| 3.0 | Research Foundation & Contracts | 契约/脚手架 | [`03.0-research-foundation-and-contracts.md`](03.0-research-foundation-and-contracts.md) |
+| 3.1 | Market Selection | 在线输入 | [`03.1-market-selection.md`](03.1-market-selection.md) |
+| 3.2 | Feature Plane | 在线/离线特征 | [`03.2-feature-plane.md`](03.2-feature-plane.md) |
+| 3.3 | Factor Plane | 在线/离线因子 | [`03.3-factor-plane.md`](03.3-factor-plane.md) |
+| 3.4 | Model Runtime & Weighted Scorer | **在线推理闭环** | [`03.4-model-runtime-weighted-scorer.md`](03.4-model-runtime-weighted-scorer.md) |
+| 3.5 | Historical PIT & Training Dataset | 离线数据 | [`03.5-historical-pit-and-training-dataset.md`](03.5-historical-pit-and-training-dataset.md) |
+| 3.6 | Trainer, Classical ML & Backtest | 离线训练/回测 | [`03.6-trainer-classical-ml-backtest.md`](03.6-trainer-classical-ml-backtest.md) |
+| 3.7 | Quality Gates & Governance | **离线治理闭环** | [`03.7-quality-gates-and-governance.md`](03.7-quality-gates-and-governance.md) |
+
+## 2. 依赖图
+
+```mermaid
+flowchart TD
+    P30["3.0 Foundation & Contracts"] --> P31["3.1 Market Selection"]
+    P30 --> P32["3.2 Feature Plane"]
+    P31 --> P32
+    P32 --> P33["3.3 Factor Plane"]
+    P33 --> P34["3.4 Model Runtime & Weighted Scorer"]
+    P30 --> P35["3.5 Historical PIT & Training Dataset"]
+    P32 --> P35
+    P33 --> P35
+    P35 --> P36["3.6 Trainer, Classical ML & Backtest"]
+    P34 --> P36
+    P36 --> P37["3.7 Quality Gates & Governance"]
+    P34 --> P37
+```
+
+两条闭环：
+
+- **在线闭环**（3.1 → 3.2 → 3.3 → 3.4）：`MarketSelection → FeatureVector →
+  FactorValue → ModelRun → SignalCandidate`，持久化 ModelRun + ClickHouse 事实。
+- **离线闭环**（3.5 → 3.6 → 3.7）：`Historical PIT → TrainingDataset → Trainer →
+  Backtest → QualityGate → Shadow → Publish/Rollback`。
+
+## 3. 已拍板的设计基线（贯穿全部子phase）
+
+1. **Trait 归属**：所有计算 trait（`MarketSelector` / `FeatureBuilder` /
+   `FactorComputer` / `QuantModelRuntime` / `ModelTrainer` / `Backtester` /
+   `Labeler` / `ModelQualityGate` / `ArtifactStore` / 历史 `PointInTimeDataSource` /
+   `PitQueryEngine`）与其计算域值类型（强类型 `FeatureVector` / `FactorValue` /
+   `SignalCandidate` / `ModelArtifact` / runtime I/O）全部归属
+   `quant-pivot-research`。`quant-pivot-models` 只保留持久化 DTO（`*Info` /
+   `New*`）、`enums/quant.rs`、typed IDs；research 依赖 models 做持久化映射。
+2. **Artifact 后端**：本地 artifact 目录 + `ArtifactStore` trait + `file://` URI
+   （deploy 配置 root path），S3/MinIO 后续无缝替换；Postgres 只存 metadata /
+   hash / URI。
+3. **ML 范围**：weighted-factor 主路径 + smartcore classical ML（shadow 候选），
+   统一 `QuantModelRuntime` / `ModelRuntimeFactory` 隔离 concrete crate type。
+4. **Backtest 组合层**：Phase 03 用最小 deterministic greedy allocator 产出
+   portfolio 级指标；完整受治理 `PortfolioPlanner` 留 Phase 04 复用同一 trait。
+5. **零兼容、零 re-export**；`f64` 仅允许出现在训练矩阵边界，禁止泄漏到 money domain。
+6. **PIT 正确性是硬不变量**：任何特征 / 训练样本不得读取 `as_of` 之后的事实；
+   回测禁止访问 live `BookStore`。
+
+## 4. 跨子phase不变量
+
+- 每个 feature / factor / dataset / model artifact / backtest 都有
+  `blake3:` canonical hash（复用
+  [`models::hashing::CanonicalDigest`](../../../crates/quant-pivot-models/src/hashing.rs)）。
+- 所有计算域 trait 接受**冻结快照**（config version、selection snapshot、PIT
+  source），禁止读取 mutable runtime state。
+- research crate 禁止：直接下单、读 web state、在循环里查数据库、把第三方 ML
+  concrete type 暴露到业务层。
+- 货币 / 价格 / shares / probability 一律使用项目 newtype（`Usd` / `Price` /
+  `Shares` / `Probability`），绝不用 `f64`。
+- 失败语义统一走 `QuantResult` / 结构化错误，`src/` 内禁止 `unwrap()`。
+
+## 5. ML 依赖引入顺序（feature-gate）
+
+落在 `quant-pivot-research` 的 `[features]`：
+
+```toml
+[features]
+default = ["stats"]
+stats = ["dep:ndarray", "dep:ndarray-stats", "dep:statrs", "dep:rayon"]
+dataframe = ["dep:polars", "dep:arrow", "dep:parquet"]
+optimize = ["dep:argmin", "dep:argmin-math"]
+ml-classical = ["dep:smartcore"]
+```
+
+引入子phase对应：
+
+- 3.0：声明 workspace 依赖与 feature gate（不强制 default 链接重依赖）。
+- 3.2 / 3.5：`stats` + `dataframe`（polars/arrow/parquet 仅离线 materialization）。
+- 3.6：`optimize`（argmin）+ `ml-classical`（smartcore）。
+- 禁止本期引入：`good_lp` / `ort` / `burn` / `candle`（见父文档 §30）。
+
+`quant-pivot-core` / `quant-pivot-web` 的 report_only 启动路径不得强制链接
+`ml-classical` / `dataframe`；CI 分 job 测 heavy features。
+
+## 6. 延后项总表（缺口必须在对应子phase文档显式标注）
+
+| 延后能力 | 本期替代 | 落地 Phase | 标注于 |
+|---|---|---|---|
+| 完整受治理 `PortfolioPlanner` | 最小 greedy allocator（backtest 用） | Phase 04 | 3.6 |
+| TopN 报告生成 / report scheduler / 定时 `live_report_inference` | 按需 ModelRun + SignalCandidate | Phase 04 | 3.4 / 3.7 |
+| report-level shadow 完整比较（capital/would-execute/risk envelope delta） | signal-candidate / rank 层 shadow 比较 | Phase 04 | 3.7 |
+| 垂直领域特征 / 因子真实外部数据 | 仅接口 + schema 骨架 | Phase 2+ 外部源 | 3.2 / 3.3 |
+| `good_lp` 组合优化 | greedy allocator | Phase 05 | 3.6 |
+| `ort` ONNX 推理 | `QuantModelRuntime` 预留 `Onnx` arm | Phase 06 | 3.4 |
+| `burn` / `candle` 深度学习 | — | Phase 08 | 3.4 |
+| 对象存储（S3/MinIO）artifact | 本地目录 + `ArtifactStore` trait | 后续 | 3.0 |
+
+## 7. 文档契约模板
+
+每篇子phase文档必须包含以下小节（顺序固定）：
+
+1. **目标与闭环定位** —— 这一子phase交付什么、在两条闭环中的位置。
+2. **删除清单** —— 加替代代码前必须删除哪些 crate / 模块 / 类型 / 配置；
+   若无可删，显式写"无（本子phase为净新增）"。
+3. **新领域类型 / 表 / ClickHouse fact** —— research 计算类型、Postgres 表、CH fact。
+4. **deploy-config key 与 runtime-config v3 path** —— 消费哪些既有 config 段、
+   是否新增 deploy key。
+5. **必建模块与 trait** —— 模块树 + trait 签名（verbatim Rust）。
+6. **生产不变量与失败语义** —— PIT、降级、hash、错误处理硬规则。
+7. **第三方 crate 引入** —— 本子phase允许 / 禁止的 crate 与 feature gate。
+8. **验收测试** —— 必须新增的测试用例（含父文档 §23 对应项）。
+9. **Blocker** —— 触发即判定本子phase失败的条件。
+10. **延后 / 缺口** —— 本子phase明确不做、留给后续 Phase 的点。
+
+## 8. 质量门禁（每个子phase收尾必跑）
+
+```bash
+cargo fmt --all --
+cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy -p quant-pivot-research --features ml-classical,dataframe,optimize -- -D warnings
+bash scripts/lint-architecture.sh
+bash scripts/lint-quant-pivot-boundary.sh
+cargo test --workspace
+```

@@ -86,10 +86,10 @@
 
 ### 2.3 报告不变量
 
-- 每份报告必须有唯一 `report_id`、`as_of`、`horizon`、`universe_snapshot_id`。
+- 每份报告必须有唯一 `report_id`、`as_of`、`horizon`、`market_selection_id`。
 - TopN 排序必须稳定：score 相同按 risk-adjusted score、liquidity、market_id 排序。
 - 每条 recommendation 必须包含 entry、sizing、exit、risk、evidence 五块。
-- 报告可以为空，但空报告必须说明原因：universe empty、data stale、quality gate failed、risk budget exhausted 等。
+- 报告可以为空，但空报告必须说明原因：market selection empty、data stale、quality gate failed、risk budget exhausted 等。
 - 已发布报告不可变；修正必须生成新版本或撤销事件。
 
 ### 2.4 执行不变量
@@ -311,7 +311,7 @@ Selection 不是交易白名单，而是报告输入集合。执行侧还会有�
 ```text
 ReportScheduleTick
  -> resolve active runtime config v3
- -> build UniverseSnapshot
+ -> build MarketSelection
  -> build FeatureVectors
  -> run FactorEngine
  -> run ModelRunner
@@ -380,7 +380,7 @@ Recommendation
 | 风控 | pre-trade gate | portfolio risk envelope + execution admission |
 | 执行 | FOK buy then hold | entry/exit plan lifecycle |
 | 反馈 | settlement calibration | recommendation attribution + model training |
-| 配置 | detection/execution/risk/settlement | universe/data/factor/model/report/portfolio/execution/notification |
+| 配置 | detection/execution/risk/settlement | selection/data_quality/features/factors/model/reports/portfolio/execution/notification |
 | 质量门 | trade safety | data quality + model quality + report SLA + execution safety |
 
 ## 7. 非目标

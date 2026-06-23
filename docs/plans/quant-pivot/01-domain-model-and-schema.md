@@ -10,7 +10,7 @@
 
 | 术语 | 定义 | 替换旧概念 |
 |---|---|---|
-| `UniverseSnapshot` | 某次报告生成时参与评估的市场集合快照 | endgame hotset / `MarketCache` scan entries |
+| `MarketSelection` | 某次报告生成时参与评估的市场集合快照 | endgame hotset / `MarketCache` scan entries |
 | `FeatureVector` | 某个 market/token 在 `as_of` 时刻 point-in-time 可见的特征集合 | endgame book pair + calibration bucket |
 | `FactorDefinition` | 受治理的因子定义、输入 schema、输出解释 | control factor payload |
 | `FactorValue` | 某个因子在某个 entity 上的计算结果 | bucket risk / execution quality factor |
@@ -35,7 +35,7 @@
 | `MarketId` | `StrId` | 保留，Polymarket `condition_id` |
 | `TokenId` | `StrId` | 保留，CLOB outcome token id |
 | `EventId` | `StrId` | 保留，Polymarket event id |
-| `UniverseSnapshotId` | UUID v7 | 新增，报告输入 universe 快照 |
+| `MarketSelectionId` | UUID v7 | 新增，报告输入 market selection 快照 |
 | `FeatureVectorId` | UUID v7 | 新增，特征向量快照 |
 | `FactorDefinitionId` | UUID v7 | 新增，因子定义 |
 | `ModelSpecId` | UUID v7 | 新增，模型定义 |
@@ -58,15 +58,15 @@
 
 所有表必须通过 `quant_schema` iden、SeaORM entity、domain persistence DTO、repository trait、migration graph 增加。禁止手写裸 migration。
 
-### 2.1 Universe
+### 2.1 Market Selection
 
-#### `quant_universe_snapshot`
+#### `quant_market_selection`
 
 用途：记录一次报告或模型运行使用的市场集合。
 
 关键列：
 
-- `universe_snapshot_id uuid pk`
+- `market_selection_id uuid pk`
 - `as_of timestamptz not null`
 - `runtime_config_version_id uuid not null`
 - `selector_hash text not null`
@@ -82,13 +82,13 @@
 - `(runtime_config_version_id, as_of desc)`
 - `selector_hash`
 
-#### `quant_universe_member`
+#### `quant_market_selection_member`
 
-用途：可查询化的 universe 成员表，避免只依赖 JSONB。
+用途：可查询化的 market selection 成员表，避免只依赖 JSONB。
 
 关键列：
 
-- `universe_snapshot_id uuid not null`
+- `market_selection_id uuid not null`
 - `market_id varchar(66) not null`
 - `event_id text not null`
 - `category text not null`
@@ -101,7 +101,7 @@
 
 主键：
 
-- `(universe_snapshot_id, market_id)`
+- `(market_selection_id, market_id)`
 
 ### 2.2 Feature and Factor
 
@@ -230,7 +230,7 @@
 - `run_kind text not null`
 - `model_version_id uuid null`
 - `runtime_config_version_id uuid not null`
-- `universe_snapshot_id uuid null`
+- `market_selection_id uuid null`
 - `window_start timestamptz not null`
 - `window_end timestamptz not null`
 - `status text not null`
@@ -252,7 +252,7 @@
 
 - `portfolio_plan_id uuid pk`
 - `model_run_id uuid not null`
-- `universe_snapshot_id uuid not null`
+- `market_selection_id uuid not null`
 - `as_of timestamptz not null`
 - `budget_usd numeric(28,8) not null`
 - `allocated_usd numeric(28,8) not null`
@@ -274,7 +274,7 @@
 - `runtime_mode text not null`
 - `runtime_config_version_id uuid not null`
 - `model_version_id uuid not null`
-- `universe_snapshot_id uuid not null`
+- `market_selection_id uuid not null`
 - `portfolio_plan_id uuid not null`
 - `top_n int not null`
 - `status text not null`
@@ -557,7 +557,7 @@
 | `potential_loss_ledger` | 旧 reservation/potential loss | `quant_risk_envelope_audit` |
 | `reconciliation_report` | 旧 trade reconciliation | `quant_execution_reconciliation` 后续新建 |
 | `emergency_snapshot` | 旧 ExecutionFSM emergency | 新 kill switch state |
-| `blacklist_entry` | 旧 market/token blacklist | `quant_market_block` 或 universe exclusion |
+| `blacklist_entry` | 旧 market/token blacklist | `quant_market_block` 或 market selection exclusion |
 | `balance_snapshot` | 旧 trading balance | execution mode 下重建为 `quant_account_snapshot` |
 | `accounting_period` | 旧 daily/weekly trade accounting | `quant_recommendation_attribution` + analytics |
 
@@ -593,7 +593,7 @@ RBAC / admin 基础表保留：
 ```text
 crates/quant-pivot-models/src/domain/
 ├── quant/
-│   ├── universe.rs
+│   ├── selection.rs
 │   ├── feature.rs
 │   ├── factor.rs
 │   ├── model.rs
@@ -726,7 +726,7 @@ pub struct RecommendationReport {
     pub runtime_mode: QuantRuntimeMode,
     pub runtime_config_version_id: RuntimeConfigVersionId,
     pub model_version_id: ModelVersionId,
-    pub universe_snapshot_id: UniverseSnapshotId,
+    pub market_selection_id: MarketSelectionId,
     pub portfolio_plan_id: PortfolioPlanId,
     pub top_n: u32,
     pub status: RecommendationReportStatus,
