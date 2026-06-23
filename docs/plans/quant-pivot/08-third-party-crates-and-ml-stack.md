@@ -1084,3 +1084,27 @@ pub trait UnifiedModelRunner {
 - 每个训练 runtime 都写 dataset hash、feature schema hash、label schema hash。
 - 每个发布模型都有 quality gate report。
 - MSRV/native 依赖风险已在 CI 和 Docker 中验证。
+
+## 23. Phase 3.0 依赖引入登记
+
+> 状态：Phase 3.0 落地时登记。workspace MSRV = 1.85（`resolver = "2"`）。
+> 全部声明于 `[workspace.dependencies]`，由 `quant-pivot-research` 以 `optional`
+> 方式按 feature gate 引用；默认 build（`default = ["stats"]`）仅链接 `stats` 组，
+> 绝不链接 polars / smartcore / argmin。
+
+| crate | 版本 | feature gate | native 依赖 | 许可证 | 结论 |
+|---|---|---|---|---|---|
+| `ndarray` | 0.16 | `stats`（默认） | 无（纯 Rust） | MIT/Apache-2.0 | 引入 |
+| `ndarray-stats` | 0.6 | `stats`（默认） | 无 | MIT/Apache-2.0 | 引入 |
+| `statrs` | 0.18 | `stats`（默认） | 无 | MIT | 引入 |
+| `rayon` | 1 | `stats`（默认） | 无 | MIT/Apache-2.0 | 引入 |
+| `polars` | 0.45（`lazy` + `parquet`） | `dataframe`（默认关） | 无 native runtime（纯 Rust + 编译期 SIMD） | MIT | 引入，仅离线 |
+| `arrow` | 59 | `dataframe`（默认关） | 无 | Apache-2.0 | 引入，仅离线（53 与 chrono 0.4.44 的 `quarter()` 冲突，升 59 |
+| `parquet` | 59 | `dataframe`（默认关） | 无 | Apache-2.0 | 引入，仅离线 |
+| `argmin` | 0.10 | `optimize`（默认关） | 无 | MIT/Apache-2.0 | 引入 |
+| `argmin-math` | 0.4 | `optimize`（默认关） | 无 | MIT/Apache-2.0 | 引入 |
+| `smartcore` | 0.4 | `ml-classical`（默认关） | 无 | Apache-2.0 | 引入；artifact serde 能力在 3.6 spike 验证 |
+
+禁止本期引入（见 §2 / §30 父文档）：`good_lp`、`ort`、`burn`、`candle`、`tch-rs`。
+`smartcore` 的 model artifact 序列化能力（§15.2 风险）留 3.6 spike；本期仅声明依赖与
+`ModelArtifact::Classical` 外壳，不落实现。

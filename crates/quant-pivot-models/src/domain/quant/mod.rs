@@ -11,7 +11,6 @@ pub mod prelude;
 mod recommendation;
 #[allow(clippy::needless_update)] // NewMarketSelectionMember covers all ActiveModel columns
 mod selection;
-mod signal;
 
 pub use attribution::*;
 pub use execution::*;
@@ -21,4 +20,3 @@ pub use model::*;
 pub use portfolio::*;
 pub use recommendation::*;
 pub use selection::*;
-pub use signal::*;

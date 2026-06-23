@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 use crate::{
     domain::governance::{RuntimeConfigActivationInfo, RuntimeConfigVersionInfo},
     enums::runtime_config::RuntimeConfigVersionSource,
-    types::RuntimeConfigVersionId,
+    types::{ContentHash, RuntimeConfigVersionId, SchemaVersion},
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -144,8 +144,8 @@ pub struct RuntimeConfigVersionListQuery {
 #[derive(Debug, Clone, Serialize)]
 pub struct RuntimeConfigVersionView {
     pub runtime_config_version_id: RuntimeConfigVersionId,
-    pub config_hash: String,
-    pub schema_version: i32,
+    pub config_hash: ContentHash,
+    pub schema_version: SchemaVersion,
     /// Document JSON with `notification.telegram.bot_token` and
     /// `notification.webhook.url` masked.
     pub config_json: Value,

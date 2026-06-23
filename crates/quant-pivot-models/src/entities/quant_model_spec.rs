@@ -1,6 +1,9 @@
 //! `quant_model_spec` table entity.
 
-use crate::{enums::quant::ModelPublicationStatus, types::ModelSpecId};
+use crate::{
+    enums::quant::ModelPublicationStatus,
+    types::{ModelSpecId, SchemaVersion},
+};
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
@@ -14,8 +17,8 @@ pub struct Model {
     #[sea_orm(column_type = "Text")]
     pub model_family: String,
     pub prediction_horizon_secs: i64,
-    pub feature_schema_version: i32,
-    pub label_schema_version: i32,
+    pub feature_schema_version: SchemaVersion,
+    pub label_schema_version: SchemaVersion,
     #[sea_orm(column_type = "JsonBinary")]
     pub spec_json: Json,
     pub status: ModelPublicationStatus,

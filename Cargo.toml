@@ -45,7 +45,9 @@ future_not_send = "allow"
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["rt"] }
-futures-util = "0.3"
+# Pin to match polymarket_client_sdk_v2's `futures = "^0.3.32"` (futures-* crates
+# must share the same patch version).
+futures-util = "0.3.32"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -54,7 +56,7 @@ serde_json = "1"
 # coercion, rust::double_option for three-way-null PATCH fields, and the
 # SerializeDisplay / DeserializeFromStr derives) — never hand-roll these.
 serde_with = { version = "3", features = ["macros"] }
-sha2 = "0.10"
+sha2 = "0.11"
 
 # JSON Schema generation (runtime-config schema metadata; doc comments become
 # field descriptions — single source of truth for the UI form renderer)
@@ -63,7 +65,7 @@ schemars = "1"
 # Numeric trait conversions (ToPrimitive, FromPrimitive)
 num-traits = "0.2"
 ahash = "0.8"
-criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
+criterion = { version = "0.8", features = ["html_reports", "async_tokio"] }
 
 # Decimal arithmetic — never use f64 for money
 rust_decimal = { version = "1", features = ["serde-with-str", "maths"] }
@@ -192,6 +194,32 @@ teloxide = { version = "0.17", features = ["macros"] }
 # Test containers (integration tests with real DB)
 testcontainers = { version = "0.27", features = ["http_wait"] }
 testcontainers-modules = { version = "0.15", features = ["postgres", "redis"] }
+
+# ── Phase 3: Research / ML Stack (feature-gated in quant-pivot-research) ──────
+#
+# All heavy; none link into the default `report_only` build. Gated behind
+# `quant-pivot-research` cargo features: `stats` (default), `dataframe`,
+# `optimize`, `ml-classical`. MSRV 1.85, all pure-Rust (no native runtime).
+
+# stats: numeric matrices, summary statistics, distributions, CPU parallelism
+ndarray = "0.17"
+ndarray-stats = "0.7"
+statrs = "0.18"
+rayon = "1"
+
+# dataframe: offline feature/dataset materialization (lazy frames + parquet).
+# 0.54.4+ fixes chrono <=0.4.41 cap in 0.53 (conflicts with polymarket SDK).
+# default-features = false avoids broken `streaming` → polars-stream compile bug.
+polars = { version = "0.54.4", default-features = false, features = ["lazy", "parquet"] }
+arrow = "59"
+parquet = "59"
+
+# optimize: factor-weight / threshold optimization
+argmin = "0.11"
+argmin-math = "0.5"
+
+# ml-classical: tree/ensemble/linear models for shadow candidates
+smartcore = "0.5"
 
 # ── Phase 6: Web Layer + RBAC Dependencies ───────────────────────────────────
 

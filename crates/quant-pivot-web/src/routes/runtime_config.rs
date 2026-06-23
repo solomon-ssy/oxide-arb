@@ -23,13 +23,14 @@ use quant_pivot_models::{
         CreateRuntimeConfigVersionRequest, NewRuntimeConfigActivation, NewRuntimeConfigVersion,
         RollbackRuntimeConfigRequest, RuntimeConfigActivationInfo, RuntimeConfigCurrentView,
         RuntimeConfigSchemaView, RuntimeConfigVersionListQuery, RuntimeConfigVersionView,
-        RuntimeControlError, runtime_config_hash,
+        RuntimeControlError,
     },
     enums::{
         operation_log::OperationCategory,
         rbac::{Operation, ResourceType},
         runtime_config::{RuntimeConfigActivationKind, RuntimeConfigVersionSource},
     },
+    hashing::CanonicalDigest,
     runtime_config::{
         RuntimeConfig, apply_runtime_config_patch, build_preferences_schema, mask_config_json,
         unmask_with, validate_runtime_config,
@@ -165,7 +166,8 @@ pub async fn create_version(
     };
 
     let config_json = config.to_json();
-    let config_hash = runtime_config_hash(&config_json);
+    let config_hash = CanonicalDigest::content_hash_json(&config_json)
+        .map_err(|error| WebError::Internal(error.to_string()))?;
     let version = NewRuntimeConfigVersion {
         runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
         config_hash: config_hash.clone(),

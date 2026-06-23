@@ -26,6 +26,7 @@ pub mod fee;
 pub mod hashing;
 pub mod market;
 pub mod rbac;
+pub mod research;
 pub mod rpc;
 pub mod security;
 pub mod seed;
@@ -89,6 +90,14 @@ pub enum QuantError {
 
     #[error(transparent)]
     Seed(#[from] seed::SeedError),
+
+    // ── Research plane ──────────────────────────────────────────────────
+    #[error(transparent)]
+    Research(#[from] research::ResearchError),
+
+    // ── Canonical hashing / content addressing ──────────────────────────
+    #[error(transparent)]
+    Hashing(#[from] hashing::CanonicalDigestError),
 
     // ── General ─────────────────────────────────────────────────────────
     #[error("Internal error: {0}")]

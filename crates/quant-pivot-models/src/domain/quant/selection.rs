@@ -1,10 +1,11 @@
 //! Selection snapshot persistence DTOs.
 
 use crate::{
-    entities::quant_market_selection::{
-        SelectionExcludedMarketIds, SelectionExclusionSummary, SelectionIncludedMarketIds,
+    entities::quant_market_selection::{SelectionExcludedMarketIds, SelectionIncludedMarketIds},
+    types::{
+        ContentHash, EventId, MarketId, MarketSelectionId, RuntimeConfigVersionId,
+        SelectionExclusionSummary, TokenId, Usd,
     },
-    types::{EventId, MarketId, MarketSelectionId, RuntimeConfigVersionId, TokenId, Usd},
 };
 use chrono::{DateTime, Utc};
 use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
@@ -17,7 +18,7 @@ pub struct MarketSelectionInfo {
     pub market_selection_id: MarketSelectionId,
     pub as_of: DateTime<Utc>,
     pub runtime_config_version_id: RuntimeConfigVersionId,
-    pub selector_hash: String,
+    pub selector_hash: ContentHash,
     pub market_count: i32,
     pub included_market_ids: SelectionIncludedMarketIds,
     pub excluded_market_ids: SelectionExcludedMarketIds,
@@ -48,7 +49,7 @@ pub struct NewMarketSelection {
     pub market_selection_id: MarketSelectionId,
     pub as_of: DateTime<Utc>,
     pub runtime_config_version_id: RuntimeConfigVersionId,
-    pub selector_hash: String,
+    pub selector_hash: ContentHash,
     pub market_count: i32,
     pub included_market_ids: SelectionIncludedMarketIds,
     pub excluded_market_ids: SelectionExcludedMarketIds,

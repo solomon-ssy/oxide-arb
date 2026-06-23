@@ -3,7 +3,8 @@
 //! `ClickHouse` `Decimal*` values are serialized by the Rust client as scaled
 //! signed integers. These wrappers keep that storage detail out of domain code.
 
-use crate::types::{Bps, Price, Probability, Shares, Usd};
+use crate::types::{Bps, Price, Probability, SchemaVersion, Shares, Usd};
+use quant_pivot_error::hashing::CanonicalDigestError;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::fmt::{self, Display, Formatter};
@@ -43,6 +44,29 @@ pub struct ChDecimal64(i64);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ChSchemaVersion(pub u32);
+
+impl ChSchemaVersion {
+    /// Fallible conversion from a domain [`SchemaVersion`], rejecting non-positive
+    /// values and any `i32` that does not fit in `u32`.
+    pub fn try_from_schema_version(value: SchemaVersion) -> Result<Self, CanonicalDigestError> {
+        let raw = value.get();
+        if raw < 1 {
+            return Err(CanonicalDigestError::InvalidSchemaVersion { value: raw });
+        }
+        u32::try_from(raw)
+            .map(Self)
+            .map_err(|_| CanonicalDigestError::InvalidSchemaVersion { value: raw })
+    }
+}
+
+impl From<SchemaVersion> for ChSchemaVersion {
+    /// Infallible conversion for validated schema versions at the `ClickHouse` write boundary.
+    ///
+    /// Prefer [`Self::try_from_schema_version`] for untrusted input.
+    fn from(value: SchemaVersion) -> Self {
+        Self::try_from_schema_version(value).unwrap_or(Self(1))
+    }
+}
 
 impl ChPrice {
     #[must_use]
@@ -205,9 +229,32 @@ fn decimal_from_i128(value: i128, scale: u32) -> Decimal {
 
 #[cfg(test)]
 mod tests {
-    use super::{ChPrice, ChShares, ChUsd};
-    use crate::types::{Price, Shares, Usd};
+    use super::{ChPrice, ChSchemaVersion, ChShares, ChUsd};
+    use crate::types::{Price, SchemaVersion, Shares, Usd};
+    use quant_pivot_error::hashing::CanonicalDigestError;
     use rust_decimal_macros::dec;
+
+    #[test]
+    fn schema_version_roundtrips_positive_values() {
+        let version = SchemaVersion::new(3);
+        assert_eq!(ChSchemaVersion::from(version), ChSchemaVersion(3));
+        assert_eq!(
+            ChSchemaVersion::try_from_schema_version(version).expect("valid"),
+            ChSchemaVersion(3)
+        );
+    }
+
+    #[test]
+    fn schema_version_rejects_non_positive() {
+        let err =
+            ChSchemaVersion::try_from_schema_version(SchemaVersion::new(0)).expect_err("zero");
+        assert_eq!(err, CanonicalDigestError::InvalidSchemaVersion { value: 0 });
+    }
+
+    #[test]
+    fn schema_version_rejects_i32_min() {
+        assert!(ChSchemaVersion::try_from_schema_version(SchemaVersion::new(i32::MIN)).is_err());
+    }
 
     #[test]
     fn price_roundtrips_scaled_decimal64() {

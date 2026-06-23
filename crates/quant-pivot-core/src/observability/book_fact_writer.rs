@@ -15,7 +15,7 @@ use quant_pivot_models::{
     enums::common::{Side, TickSize},
     enums::system::ShardConnectionStatus,
     hashing::CanonicalDigest,
-    types::{MarketId, Price, TokenId, Usd},
+    types::{ContentHash, MarketId, Price, TokenId, Usd},
 };
 use quant_pivot_storage::write::AsyncWriter;
 use rust_decimal::Decimal;
@@ -618,7 +618,7 @@ fn mid_price(best_bid: Option<Price>, best_ask: Option<Price>) -> Option<Price> 
     Some(Price::new((bid.inner() + ask.inner()) / Decimal::from(2)))
 }
 
-fn snapshot_feed_event_hash(cmd: &BookSnapshotCmd) -> Option<String> {
+fn snapshot_feed_event_hash(cmd: &BookSnapshotCmd) -> Option<ContentHash> {
     let payload = SnapshotHashPayload {
         event_type: "book_snapshot",
         token_id: cmd.asset_id.to_string(),
@@ -626,10 +626,10 @@ fn snapshot_feed_event_hash(cmd: &BookSnapshotCmd) -> Option<String> {
         bids: hash_levels(&cmd.bids.levels),
         asks: hash_levels(&cmd.asks.levels),
     };
-    CanonicalDigest::blake3_json(&payload).ok()
+    CanonicalDigest::content_hash_json(&payload).ok()
 }
 
-fn delta_feed_event_hash(cmd: &PriceDeltaCmd) -> Option<String> {
+fn delta_feed_event_hash(cmd: &PriceDeltaCmd) -> Option<ContentHash> {
     let changes = cmd
         .changes
         .iter()
@@ -645,7 +645,7 @@ fn delta_feed_event_hash(cmd: &PriceDeltaCmd) -> Option<String> {
         event_time: cmd.timestamp_ms,
         changes,
     };
-    CanonicalDigest::blake3_json(&payload).ok()
+    CanonicalDigest::content_hash_json(&payload).ok()
 }
 
 fn hash_levels(levels: &[BookLevel]) -> Vec<HashLevel> {

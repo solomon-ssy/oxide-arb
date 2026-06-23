@@ -1,0 +1,80 @@
+//! Research-plane errors (feature/factor/model materialization, artifact store).
+//!
+//! The `quant-pivot-research` crate's computation traits and the artifact store
+//! surface their failures through [`ResearchError`], which folds into
+//! [`crate::QuantError`] via `#[from]` so `?` propagation works uniformly across
+//! the workspace. Keeping the enum here (next to every other domain sub-error)
+//! avoids a re-export shim and keeps `quant-pivot-research` free of a bespoke
+//! error root.
+
+use thiserror::Error;
+
+/// Failure modes of the research plane.
+///
+/// Covers artifact IO, schema/hash mismatches, and determinism violations.
+/// Money-adjacent invariants (hash mismatch, schema mismatch) are dedicated
+/// variants so callers can reject loads rather than silently degrade.
+#[derive(Debug, Error)]
+pub enum ResearchError {
+    /// An artifact-store IO operation failed.
+    #[error("artifact store IO failed for `{uri}`: {detail}")]
+    ArtifactIo {
+        /// The artifact location involved.
+        uri: String,
+        /// Underlying IO failure detail.
+        detail: String,
+    },
+
+    /// The requested artifact does not exist in the store.
+    #[error("artifact not found: `{uri}`")]
+    ArtifactNotFound {
+        /// The missing artifact location.
+        uri: String,
+    },
+
+    /// An artifact key could not be turned into a valid location.
+    #[error("invalid artifact key: {detail}")]
+    InvalidArtifactKey {
+        /// Why the key was rejected.
+        detail: String,
+    },
+
+    /// A model runtime's feature-schema hash did not match the active schema.
+    #[error("feature schema hash mismatch: expected `{expected}`, got `{actual}`")]
+    FeatureSchemaMismatch {
+        /// The hash the runtime/artifact was built against.
+        expected: String,
+        /// The currently active schema hash.
+        actual: String,
+    },
+
+    /// A stored artifact's content hash did not match its recorded hash.
+    #[error("artifact hash mismatch: expected `{expected}`, got `{actual}`")]
+    ArtifactHashMismatch {
+        /// The recorded canonical hash.
+        expected: String,
+        /// The recomputed canonical hash.
+        actual: String,
+    },
+
+    /// A factor/feature schema hash binding check failed.
+    #[error("schema hash mismatch: {detail}")]
+    SchemaHashMismatch {
+        /// Context describing which binding failed.
+        detail: String,
+    },
+
+    /// A canonical-hash input violated determinism rules (e.g. unsorted set).
+    #[error("determinism violation: {detail}")]
+    Determinism {
+        /// Context describing the violated invariant.
+        detail: String,
+    },
+
+    /// Artifact (de)serialization failed.
+    #[error("research artifact serialization failed: {detail}")]
+    Serialization {
+        /// Underlying serialization failure detail.
+        detail: String,
+    },
+}

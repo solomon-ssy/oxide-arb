@@ -10,12 +10,13 @@ use crate::{
         runtime_config::{RuntimeConfigActivationKind, RuntimeConfigVersionSource},
         system::ShutdownStage,
     },
-    types::{AuditEventId, RuntimeConfigActivationId, RuntimeConfigVersionId},
+    types::{
+        AuditEventId, ContentHash, RuntimeConfigActivationId, RuntimeConfigVersionId, SchemaVersion,
+    },
 };
 use chrono::{DateTime, Utc};
 use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 /// Execution kill-switch class exposed on operator dashboards.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -202,8 +203,8 @@ pub struct ShutdownProgress {
 #[sea_orm(entity = "crate::entities::runtime_config_version::Entity")]
 pub struct RuntimeConfigVersionInfo {
     pub runtime_config_version_id: RuntimeConfigVersionId,
-    pub config_hash: String,
-    pub schema_version: i32,
+    pub config_hash: ContentHash,
+    pub schema_version: SchemaVersion,
     pub config_json: serde_json::Value,
     pub source: RuntimeConfigVersionSource,
     pub created_by: String,
@@ -216,29 +217,13 @@ info_from_model!(RuntimeConfigVersionInfo, crate::entities::runtime_config_versi
     created_by, reason, created_at,
 });
 
-/// Canonical content hash of a runtime-config document's JSON, formatted
-/// `sha256:<hex>`.
-///
-/// The single source of truth for version identity and drift detection: the
-/// startup bootstrap activation and the governed `create_version` path must
-/// agree on this so re-submitting an identical config maps to the same version
-/// (dedupe via `load_by_hash`).
-#[must_use]
-pub fn runtime_config_hash(config_json: &serde_json::Value) -> String {
-    // `serde_json::Value` is always serializable; an empty string is an
-    // unreachable fallback that keeps this panic-free.
-    let canonical = serde_json::to_string(config_json).unwrap_or_default();
-    let digest = Sha256::digest(canonical.as_bytes());
-    format!("sha256:{digest:x}")
-}
-
 /// Insert payload for `runtime_config_version`.
 #[derive(Debug, Clone, DeriveIntoActiveModel)]
 #[sea_orm(active_model = "crate::entities::runtime_config_version::ActiveModel")]
 pub struct NewRuntimeConfigVersion {
     pub runtime_config_version_id: RuntimeConfigVersionId,
-    pub config_hash: String,
-    pub schema_version: i32,
+    pub config_hash: ContentHash,
+    pub schema_version: SchemaVersion,
     pub config_json: serde_json::Value,
     pub source: RuntimeConfigVersionSource,
     pub created_by: String,

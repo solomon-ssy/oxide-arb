@@ -21,10 +21,7 @@
 //! `PRECISION` associated constant, consumed by the schema column builders.
 
 use rust_decimal::Decimal;
-use sea_orm::{
-    ActiveValue, ColIdx, IntoActiveValue, TryGetError, TryGetable,
-    sea_query::{ArrayType, ColumnType, Nullable, Value, ValueType, ValueTypeErr},
-};
+use sea_orm::{ActiveValue, DeriveValueType, IntoActiveValue};
 use serde::{Deserialize, Serialize};
 use std::{
     fmt,
@@ -35,7 +32,19 @@ use std::{
 macro_rules! decimal_newtype {
     ($(#[$meta:meta])* $name:ident, precision = ($precision:expr, $scale:expr)) => {
         $(#[$meta])*
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+        #[derive(
+            Debug,
+            Clone,
+            Copy,
+            PartialEq,
+            Eq,
+            PartialOrd,
+            Ord,
+            Hash,
+            Serialize,
+            Deserialize,
+            DeriveValueType,
+        )]
         #[serde(transparent)]
         pub struct $name(Decimal);
 
@@ -148,50 +157,7 @@ macro_rules! decimal_newtype {
             }
         }
 
-        // ── SeaORM bindings (native NUMERIC column, lossless round-trip) ──
-
-        impl From<$name> for Value {
-            #[inline]
-            fn from(v: $name) -> Self {
-                Value::Decimal(Some(Box::new(v.0)))
-            }
-        }
-
-        impl From<&$name> for Value {
-            #[inline]
-            fn from(v: &$name) -> Self {
-                Value::Decimal(Some(Box::new(v.0)))
-            }
-        }
-
-        impl TryGetable for $name {
-            fn try_get_by<I: ColIdx>(
-                res: &sea_orm::QueryResult,
-                index: I,
-            ) -> Result<Self, TryGetError> {
-                let inner: Decimal = <Decimal as TryGetable>::try_get_by(res, index)?;
-                Ok(Self(inner))
-            }
-        }
-
-        impl ValueType for $name {
-            fn try_from(v: Value) -> Result<Self, ValueTypeErr> {
-                match v {
-                    Value::Decimal(Some(d)) => Ok(Self(*d)),
-                    _ => Err(ValueTypeErr),
-                }
-            }
-
-            fn type_name() -> String { stringify!($name).to_owned() }
-            fn array_type() -> ArrayType { ArrayType::Decimal }
-            fn column_type() -> ColumnType {
-                ColumnType::Decimal(Some(($name::PRECISION.0, $name::PRECISION.1)))
-            }
-        }
-
-        impl Nullable for $name {
-            fn null() -> Value { Value::Decimal(None) }
-        }
+        // ── SeaORM: DeriveValueType (NUMERIC column, lossless round-trip) ──
 
         impl IntoActiveValue<$name> for $name {
             #[inline]

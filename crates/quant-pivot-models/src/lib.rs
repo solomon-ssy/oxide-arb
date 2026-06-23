@@ -17,10 +17,15 @@ pub mod clickhouse;
 pub mod config;
 pub mod constants;
 pub mod domain;
+// SeaORM `Model` structs idiomatically repeat the table noun in their id
+// columns (`model_version_id`, `model_run_id`, …); `struct_field_names` is a
+// poor fit for this generated-style DB projection layer. Allowed only here.
 #[cfg(feature = "repository")]
+#[allow(clippy::struct_field_names)]
 pub mod entities;
 
 #[cfg(not(feature = "repository"))]
+#[allow(clippy::struct_field_names)]
 pub(crate) mod entities;
 
 pub mod enums;

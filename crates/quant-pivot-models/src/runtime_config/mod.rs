@@ -19,8 +19,10 @@ use schemars::{JsonSchema, SchemaGenerator, generate::SchemaSettings};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::types::SchemaVersion;
+
 /// The only supported runtime-config schema version.
-pub const RUNTIME_CONFIG_SCHEMA_VERSION: i32 = 3;
+pub const RUNTIME_CONFIG_SCHEMA_VERSION: SchemaVersion = SchemaVersion::new(3);
 
 /// Root of the quant-pivot hot-reloadable runtime configuration document.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -28,7 +30,7 @@ pub const RUNTIME_CONFIG_SCHEMA_VERSION: i32 = 3;
 pub struct RuntimeConfig {
     /// Document schema version; must equal [`RUNTIME_CONFIG_SCHEMA_VERSION`].
     #[schemars(extend("x-format" = "integer", "x-ui-visible" = false))]
-    pub schema_version: i32,
+    pub schema_version: SchemaVersion,
     /// Market selection selection policy for reports and model runs.
     pub selection: SelectionConfig,
     /// Data-quality gates used before feature/model/report generation.
@@ -76,7 +78,7 @@ pub enum RuntimeConfigError {
     #[error(
         "unsupported runtime config schema_version {found} (expected {RUNTIME_CONFIG_SCHEMA_VERSION})"
     )]
-    UnsupportedSchemaVersion { found: i32 },
+    UnsupportedSchemaVersion { found: SchemaVersion },
 }
 
 impl RuntimeConfig {
@@ -219,8 +221,8 @@ mod tests {
 
     #[test]
     fn schema_version_is_three() {
-        assert_eq!(RuntimeConfig::default().schema_version, 3);
-        assert_eq!(RUNTIME_CONFIG_SCHEMA_VERSION, 3);
+        assert_eq!(RuntimeConfig::default().schema_version.get(), 3);
+        assert_eq!(RUNTIME_CONFIG_SCHEMA_VERSION.get(), 3);
     }
 
     #[test]
@@ -230,7 +232,7 @@ mod tests {
         let error = RuntimeConfig::from_json(&document).expect_err("v2 must be rejected");
         assert!(matches!(
             error,
-            RuntimeConfigError::UnsupportedSchemaVersion { found: 2 }
+            RuntimeConfigError::UnsupportedSchemaVersion { found } if found.get() == 2
         ));
     }
 

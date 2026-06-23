@@ -2,7 +2,7 @@
 
 use crate::{
     jsonb_newtype,
-    types::{MarketSelectionId, RuntimeConfigVersionId},
+    types::{ContentHash, MarketSelectionId, RuntimeConfigVersionId, SelectionExclusionSummary},
 };
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
@@ -17,16 +17,6 @@ jsonb_newtype! {
     pub struct SelectionExcludedMarketIds(Vec<String>);
 }
 
-jsonb_newtype! {
-    /// Structured JSONB summary of exclusion reasons for a selection snapshot.
-    pub struct SelectionExclusionSummary {
-        stale_book_count: u32,
-        insufficient_liquidity_count: u32,
-        excluded_by_operator_count: u32,
-        other_count: u32,
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "quant_market_selection")]
 pub struct Model {
@@ -34,8 +24,7 @@ pub struct Model {
     pub market_selection_id: MarketSelectionId,
     pub as_of: DateTime<Utc>,
     pub runtime_config_version_id: RuntimeConfigVersionId,
-    #[sea_orm(column_type = "Text")]
-    pub selector_hash: String,
+    pub selector_hash: ContentHash,
     pub market_count: i32,
     #[sea_orm(column_type = "JsonBinary")]
     pub included_market_ids: SelectionIncludedMarketIds,

@@ -12,7 +12,7 @@ use quant_pivot_models::{
         NewRuntimeConfigActivation, NewRuntimeConfigVersion, RuntimeConfigActivationInfo,
         RuntimeConfigVersionInfo,
     },
-    types::RuntimeConfigVersionId,
+    types::{ContentHash, RuntimeConfigVersionId},
 };
 use quant_pivot_storage::cache::{CacheKey, CacheManager};
 use std::sync::Arc;
@@ -83,7 +83,7 @@ impl<R: RuntimeConfigVersionRepository> RuntimeConfigVersionRepository
 
     async fn load_by_hash(
         &self,
-        config_hash: &str,
+        config_hash: &ContentHash,
     ) -> Result<Option<RuntimeConfigVersionInfo>, StorageError> {
         self.inner.load_by_hash(config_hash).await
     }

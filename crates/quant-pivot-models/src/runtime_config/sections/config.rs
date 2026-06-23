@@ -9,6 +9,7 @@ use crate::{
         MissingFactorPolicy, ModelVersionRef, NotificationPolicies, ReconciliationPolicy,
         ReportDeliveryPolicy,
     },
+    types::SchemaVersion,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -98,7 +99,7 @@ impl Default for DataQualityConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct FeaturesConfig {
     /// Current feature schema version.
-    pub feature_schema_version: i32,
+    pub feature_schema_version: SchemaVersion,
     /// Enabled feature family names.
     pub enabled_feature_families: Vec<FeatureFamily>,
     /// Required feature names.
@@ -118,7 +119,7 @@ pub struct FeaturesConfig {
 impl Default for FeaturesConfig {
     fn default() -> Self {
         Self {
-            feature_schema_version: 1,
+            feature_schema_version: SchemaVersion::FIRST,
             enabled_feature_families: vec![FeatureFamily::Book, FeatureFamily::Liquidity],
             required_features: Vec::new(),
             domain_feature_policy: DomainFeaturePolicy::RejectMissingRequired,

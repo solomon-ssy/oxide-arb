@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     clickhouse::{ChPrice, ChSchemaVersion, ChShares},
     enums::clickhouse::{ChBookEventType, ChFactSource},
-    types::{MarketId, TokenId},
+    types::{ContentHash, MarketId, TokenId},
 };
 
 /// Short-retention L2 replay fact for recent exact book reconstruction.
@@ -23,6 +23,6 @@ pub struct BookL2ReplayRow {
     pub ingestion_time: i64,
     pub sequence: u64,
     pub source: ChFactSource,
-    pub feed_event_hash: Option<String>,
+    pub feed_event_hash: Option<ContentHash>,
     pub schema_version: ChSchemaVersion,
 }

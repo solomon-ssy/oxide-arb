@@ -2,7 +2,7 @@
 
 use crate::{
     enums::quant::DataQualityStatus,
-    types::{FeatureVectorId, MarketId, TokenId},
+    types::{ContentHash, FeatureVectorId, MarketId, SchemaVersion, TokenId},
 };
 use chrono::{DateTime, Utc};
 use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
@@ -16,8 +16,8 @@ pub struct FeatureVectorInfo {
     pub market_id: MarketId,
     pub token_id: Option<TokenId>,
     pub as_of: DateTime<Utc>,
-    pub feature_schema_version: i32,
-    pub feature_hash: String,
+    pub feature_schema_version: SchemaVersion,
+    pub feature_hash: ContentHash,
     pub data_quality: DataQualityStatus,
     pub staleness_ms: i64,
     pub payload: serde_json::Value,
@@ -38,8 +38,8 @@ pub struct NewFeatureVector {
     pub market_id: MarketId,
     pub token_id: Option<TokenId>,
     pub as_of: DateTime<Utc>,
-    pub feature_schema_version: i32,
-    pub feature_hash: String,
+    pub feature_schema_version: SchemaVersion,
+    pub feature_hash: ContentHash,
     pub data_quality: DataQualityStatus,
     pub staleness_ms: i64,
     pub payload: serde_json::Value,

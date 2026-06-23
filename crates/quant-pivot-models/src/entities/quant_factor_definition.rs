@@ -1,6 +1,9 @@
 //! `quant_factor_definition` table entity.
 
-use crate::{enums::quant::FactorDefinitionStatus, types::FactorDefinitionId};
+use crate::{
+    enums::quant::FactorDefinitionStatus,
+    types::{FactorDefinitionId, SchemaVersion},
+};
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 use uuid::Uuid;
@@ -16,8 +19,8 @@ pub struct Model {
     pub factor_family: String,
     #[sea_orm(column_type = "Text")]
     pub scope: String,
-    pub input_schema_version: i32,
-    pub output_schema_version: i32,
+    pub input_schema_version: SchemaVersion,
+    pub output_schema_version: SchemaVersion,
     #[sea_orm(column_type = "JsonBinary")]
     pub definition_json: Json,
     pub status: FactorDefinitionStatus,

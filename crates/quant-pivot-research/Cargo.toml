@@ -11,6 +11,36 @@ quant-pivot-error = { path = "../quant-pivot-error" }
 quant-pivot-models = { path = "../quant-pivot-models" }
 tokio = { workspace = true }
 tracing = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rust_decimal = { workspace = true }
+
+# ── Research / ML stack (feature-gated; see [features]) ───────────────────────
+ndarray = { workspace = true, optional = true }
+ndarray-stats = { workspace = true, optional = true }
+statrs = { workspace = true, optional = true }
+rayon = { workspace = true, optional = true }
+polars = { workspace = true, optional = true }
+arrow = { workspace = true, optional = true }
+parquet = { workspace = true, optional = true }
+argmin = { workspace = true, optional = true }
+argmin-math = { workspace = true, optional = true }
+smartcore = { workspace = true, optional = true }
+
+[features]
+# Default keeps the report_only build light: only the pure-Rust numeric stack,
+# never polars / smartcore / argmin.
+default = ["stats"]
+# Numeric matrices, summary statistics, distributions, CPU parallelism.
+stats = ["dep:ndarray", "dep:ndarray-stats", "dep:statrs", "dep:rayon"]
+# Offline feature / dataset materialization (lazy frames + parquet).
+dataframe = ["dep:polars", "dep:arrow", "dep:parquet"]
+# Factor-weight / threshold optimization.
+optimize = ["dep:argmin", "dep:argmin-math"]
+# Classical ML (tree / ensemble / linear) for shadow candidates.
+ml-classical = ["dep:smartcore"]
 
 [lints]
 workspace = true

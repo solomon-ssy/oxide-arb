@@ -8,6 +8,8 @@
 use quant_pivot_error::hashing::CanonicalDigestError;
 use serde::Serialize;
 
+use crate::types::ContentHash;
+
 /// Prefix applied to canonical digests so the algorithm is self-describing.
 pub const BLAKE3_PREFIX: &str = "blake3:";
 
@@ -42,6 +44,19 @@ impl CanonicalDigest {
         let bytes = serde_json::to_vec(value)
             .map_err(|error| CanonicalDigestError::Serialize(error.to_string()))?;
         Ok(Self::prefixed_bytes(&bytes))
+    }
+
+    /// Typed `blake3:<hex>` digest over the canonical JSON of `value`.
+    ///
+    /// Equivalent to [`Self::blake3_json`] but returns a validated
+    /// [`ContentHash`], the only sanctioned way to mint a content hash from a
+    /// serializable value. Determinism note: callers needing order-independent
+    /// digests must sort the relevant fields before serialization.
+    pub fn content_hash_json<T>(value: &T) -> Result<ContentHash, CanonicalDigestError>
+    where
+        T: Serialize + ?Sized,
+    {
+        ContentHash::parse(Self::blake3_json(value)?)
     }
 }
 

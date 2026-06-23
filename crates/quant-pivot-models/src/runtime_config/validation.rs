@@ -64,7 +64,7 @@ fn validate_data_quality(config: &RuntimeConfig, report: &mut ConfigValidationRe
 }
 
 fn validate_features(config: &RuntimeConfig, report: &mut ConfigValidationReport) {
-    if config.features.feature_schema_version <= 0 {
+    if config.features.feature_schema_version.get() <= 0 {
         report.errors.push(ConfigValidationError::InvalidValue {
             field: "features.feature_schema_version",
             detail: "must be positive".to_owned(),

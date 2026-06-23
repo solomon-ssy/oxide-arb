@@ -5,7 +5,7 @@ use quant_pivot_models::{
         NewRuntimeConfigActivation, NewRuntimeConfigVersion, RuntimeConfigActivationInfo,
         RuntimeConfigVersionInfo,
     },
-    types::RuntimeConfigVersionId,
+    types::{ContentHash, RuntimeConfigVersionId},
 };
 
 #[async_trait::async_trait]
@@ -31,7 +31,7 @@ pub trait RuntimeConfigVersionRepository: Send + Sync {
 
     async fn load_by_hash(
         &self,
-        config_hash: &str,
+        config_hash: &ContentHash,
     ) -> Result<Option<RuntimeConfigVersionInfo>, StorageError>;
 
     async fn load_current(&self) -> Result<Option<RuntimeConfigVersionInfo>, StorageError>;

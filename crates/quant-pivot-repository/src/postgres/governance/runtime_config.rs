@@ -10,7 +10,7 @@ use quant_pivot_models::{
         runtime_config_activation::{Column as ActivationColumn, Entity as ActivationEntity},
         runtime_config_version::{Column as VersionColumn, Entity as VersionEntity},
     },
-    types::RuntimeConfigVersionId,
+    types::{ContentHash, RuntimeConfigVersionId},
 };
 use sea_orm::{
     ColumnTrait, ConnectionTrait, DatabaseConnection, DatabaseTransaction, EntityTrait,
@@ -81,7 +81,7 @@ async fn do_load_version(
 
 async fn do_load_by_hash(
     db: &impl ConnectionTrait,
-    config_hash: &str,
+    config_hash: &ContentHash,
 ) -> Result<Option<RuntimeConfigVersionInfo>, StorageError> {
     VersionEntity::find()
         .filter(VersionColumn::ConfigHash.eq(config_hash))
@@ -178,7 +178,7 @@ impl RuntimeConfigVersionRepository for PgRuntimeConfigVersionRepository {
 
     async fn load_by_hash(
         &self,
-        config_hash: &str,
+        config_hash: &ContentHash,
     ) -> Result<Option<RuntimeConfigVersionInfo>, StorageError> {
         do_load_by_hash(&self.db, config_hash).await
     }
@@ -240,7 +240,7 @@ impl RuntimeConfigVersionRepository for PgRuntimeConfigVersionRepositoryTxn<'_> 
 
     async fn load_by_hash(
         &self,
-        config_hash: &str,
+        config_hash: &ContentHash,
     ) -> Result<Option<RuntimeConfigVersionInfo>, StorageError> {
         do_load_by_hash(self.txn, config_hash).await
     }

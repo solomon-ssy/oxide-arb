@@ -130,6 +130,14 @@ report_scheduler_tick_secs = 30
 # Default: false.
 load_credentials_in_report_only = false
 
+# ── Research Plane (Phase 3) ──────────────────────────────────────────────────
+
+[research]
+# Purpose: local filesystem root for the artifact store (training datasets,
+# serialized model artifacts), addressed as `file://<artifact_root>/...`.
+# Default: "./var/artifacts".
+artifact_root = "./var/artifacts"
+
 # ── Keys / Credentials ───────────────────────────────────────────────────────
 #
 # Only `private_key` is configured. Polymarket CLOB L2 credentials are derived

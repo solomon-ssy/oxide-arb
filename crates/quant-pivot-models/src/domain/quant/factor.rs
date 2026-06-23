@@ -2,7 +2,9 @@
 
 use crate::{
     enums::quant::{FactorDefinitionStatus, FactorDirection},
-    types::{FactorDefinitionId, FactorValueId, FeatureVectorId, MarketId, Probability},
+    types::{
+        FactorDefinitionId, FactorValueId, FeatureVectorId, MarketId, Probability, SchemaVersion,
+    },
 };
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
@@ -18,8 +20,8 @@ pub struct FactorDefinitionInfo {
     pub name: String,
     pub factor_family: String,
     pub scope: String,
-    pub input_schema_version: i32,
-    pub output_schema_version: i32,
+    pub input_schema_version: SchemaVersion,
+    pub output_schema_version: SchemaVersion,
     pub definition_json: serde_json::Value,
     pub status: FactorDefinitionStatus,
     pub created_by: Option<Uuid>,
@@ -53,8 +55,8 @@ pub struct NewFactorDefinition {
     pub name: String,
     pub factor_family: String,
     pub scope: String,
-    pub input_schema_version: i32,
-    pub output_schema_version: i32,
+    pub input_schema_version: SchemaVersion,
+    pub output_schema_version: SchemaVersion,
     pub definition_json: serde_json::Value,
     pub status: FactorDefinitionStatus,
     pub created_by: Option<Uuid>,

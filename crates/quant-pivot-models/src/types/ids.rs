@@ -98,6 +98,22 @@ pub struct ModelRunId(Arc<Uuid>);
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SignalCandidateId(Arc<Uuid>);
 
+/// Frozen, point-in-time training dataset artifact identifier.
+#[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TrainingDatasetId(Arc<Uuid>);
+
+/// Stored model artifact (serialized weights / model) identifier.
+#[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ModelArtifactId(Arc<Uuid>);
+
+/// Point-in-time backtest report identifier.
+#[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct BacktestReportId(Arc<Uuid>);
+
+/// Shadow comparison record identifier (shadow vs active model run).
+#[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ShadowComparisonId(Arc<Uuid>);
+
 /// Portfolio plan identifier used by a recommendation report.
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PortfolioPlanId(Arc<Uuid>);

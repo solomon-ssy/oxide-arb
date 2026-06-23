@@ -42,12 +42,13 @@ use quant_pivot_models::{
     config::DeployConfig,
     domain::{
         CoreEventPublisher, NewRuntimeConfigActivation, NewRuntimeConfigVersion,
-        PointInTimeDataSource, runtime_config_hash,
+        PointInTimeDataSource,
     },
     enums::{
         quant::QuantRuntimeMode,
         runtime_config::{RuntimeConfigActivationKind, RuntimeConfigVersionSource},
     },
+    hashing::CanonicalDigest,
     runtime_config::{RUNTIME_CONFIG_SCHEMA_VERSION, RuntimeConfig},
     types::{RuntimeConfigActivationId, RuntimeConfigVersionId},
 };
@@ -586,7 +587,7 @@ async fn ensure_runtime_config_activation(
 
     let config = RuntimeConfig::default();
     let config_json = config.to_json();
-    let config_hash = runtime_config_hash(&config_json);
+    let config_hash = CanonicalDigest::content_hash_json(&config_json)?;
     let version = match repo.load_by_hash(&config_hash).await? {
         Some(version) => version,
         None => {

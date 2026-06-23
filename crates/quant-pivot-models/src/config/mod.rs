@@ -28,6 +28,7 @@ mod market_data;
 mod observability;
 mod polymarket;
 mod quant;
+mod research;
 pub mod validation;
 mod web;
 
@@ -41,6 +42,7 @@ pub use market_data::*;
 pub use observability::*;
 pub use polymarket::*;
 pub use quant::*;
+pub use research::*;
 pub use web::*;
 
 use crate::{
@@ -75,6 +77,8 @@ pub struct DeployConfig {
     pub web: WebConfig,
     /// Quant pivot structural parameters (workers, credential load policy).
     pub quant: QuantDeployConfig,
+    /// Research plane settings (artifact-store root).
+    pub research: ResearchDeployConfig,
 }
 
 impl DeployConfig {

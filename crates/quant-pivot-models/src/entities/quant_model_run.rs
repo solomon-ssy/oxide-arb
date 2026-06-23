@@ -2,7 +2,7 @@
 
 use crate::{
     enums::quant::{ModelRunKind, ModelRunStatus},
-    types::{MarketSelectionId, ModelRunId, ModelVersionId, RuntimeConfigVersionId},
+    types::{ContentHash, MarketSelectionId, ModelRunId, ModelVersionId, RuntimeConfigVersionId},
 };
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
@@ -19,10 +19,8 @@ pub struct Model {
     pub window_start: DateTime<Utc>,
     pub window_end: DateTime<Utc>,
     pub status: ModelRunStatus,
-    #[sea_orm(column_type = "Text")]
-    pub input_hash: String,
-    #[sea_orm(column_type = "Text", nullable)]
-    pub output_hash: Option<String>,
+    pub input_hash: ContentHash,
+    pub output_hash: Option<ContentHash>,
     #[sea_orm(column_type = "JsonBinary")]
     pub metrics_json: Json,
     #[sea_orm(column_type = "Text", nullable)]

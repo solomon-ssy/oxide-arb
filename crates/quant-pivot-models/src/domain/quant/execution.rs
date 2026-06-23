@@ -5,8 +5,8 @@ use crate::{
         ApprovalStatus, ExecutionOrderState, OrderIntentStatus, QuantRuntimeMode, SignalSide,
     },
     types::{
-        ExecutionOrderId, MarketId, OrderId, OrderIntentId, Price, RecommendationId, Shares,
-        TokenId, Usd,
+        ContentHash, ExecutionOrderId, MarketId, OrderId, OrderIntentId, Price, RecommendationId,
+        Shares, TokenId, Usd,
     },
 };
 use chrono::{DateTime, Utc};
@@ -29,7 +29,7 @@ pub struct OrderIntentInfo {
     pub approved_at: Option<DateTime<Utc>>,
     pub entry_order_json: serde_json::Value,
     pub exit_policy_json: serde_json::Value,
-    pub risk_envelope_hash: String,
+    pub risk_envelope_hash: ContentHash,
     pub expires_at: DateTime<Utc>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -56,7 +56,7 @@ pub struct NewOrderIntent {
     pub approved_at: Option<DateTime<Utc>>,
     pub entry_order_json: serde_json::Value,
     pub exit_policy_json: serde_json::Value,
-    pub risk_envelope_hash: String,
+    pub risk_envelope_hash: ContentHash,
     pub expires_at: DateTime<Utc>,
 }
 

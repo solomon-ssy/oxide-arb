@@ -2,7 +2,10 @@
 
 use crate::{
     enums::quant::{ModelPublicationStatus, ModelRunKind, ModelRunStatus},
-    types::{MarketSelectionId, ModelRunId, ModelSpecId, ModelVersionId, RuntimeConfigVersionId},
+    types::{
+        ContentHash, MarketSelectionId, ModelRunId, ModelSpecId, ModelVersionId,
+        RuntimeConfigVersionId, SchemaVersion,
+    },
 };
 use chrono::{DateTime, Utc};
 use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
@@ -17,8 +20,8 @@ pub struct ModelSpecInfo {
     pub name: String,
     pub model_family: String,
     pub prediction_horizon_secs: i64,
-    pub feature_schema_version: i32,
-    pub label_schema_version: i32,
+    pub feature_schema_version: SchemaVersion,
+    pub label_schema_version: SchemaVersion,
     pub spec_json: serde_json::Value,
     pub status: ModelPublicationStatus,
     pub created_at: DateTime<Utc>,
@@ -38,8 +41,8 @@ pub struct NewModelSpec {
     pub name: String,
     pub model_family: String,
     pub prediction_horizon_secs: i64,
-    pub feature_schema_version: i32,
-    pub label_schema_version: i32,
+    pub feature_schema_version: SchemaVersion,
+    pub label_schema_version: SchemaVersion,
     pub spec_json: serde_json::Value,
     pub status: ModelPublicationStatus,
 }
@@ -51,7 +54,7 @@ pub struct ModelVersionInfo {
     pub model_version_id: ModelVersionId,
     pub model_spec_id: ModelSpecId,
     pub version: i32,
-    pub artifact_hash: String,
+    pub artifact_hash: ContentHash,
     pub training_dataset_id: Option<Uuid>,
     pub metrics_json: serde_json::Value,
     pub quality_gate_report: serde_json::Value,
@@ -86,7 +89,7 @@ pub struct NewModelVersion {
     pub model_version_id: ModelVersionId,
     pub model_spec_id: ModelSpecId,
     pub version: i32,
-    pub artifact_hash: String,
+    pub artifact_hash: ContentHash,
     pub training_dataset_id: Option<Uuid>,
     pub metrics_json: serde_json::Value,
     pub quality_gate_report: serde_json::Value,
@@ -107,8 +110,8 @@ pub struct ModelRunInfo {
     pub window_start: DateTime<Utc>,
     pub window_end: DateTime<Utc>,
     pub status: ModelRunStatus,
-    pub input_hash: String,
-    pub output_hash: Option<String>,
+    pub input_hash: ContentHash,
+    pub output_hash: Option<ContentHash>,
     pub metrics_json: serde_json::Value,
     pub error_code: Option<String>,
     pub error_message: Option<String>,
@@ -137,8 +140,8 @@ pub struct NewModelRun {
     pub window_start: DateTime<Utc>,
     pub window_end: DateTime<Utc>,
     pub status: ModelRunStatus,
-    pub input_hash: String,
-    pub output_hash: Option<String>,
+    pub input_hash: ContentHash,
+    pub output_hash: Option<ContentHash>,
     pub metrics_json: serde_json::Value,
     pub error_code: Option<String>,
     pub error_message: Option<String>,

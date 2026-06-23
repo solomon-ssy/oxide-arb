@@ -1,6 +1,9 @@
 //! `runtime_config_version` table entity.
 
-use crate::{enums::runtime_config::RuntimeConfigVersionSource, types::RuntimeConfigVersionId};
+use crate::{
+    enums::runtime_config::RuntimeConfigVersionSource,
+    types::{ContentHash, RuntimeConfigVersionId, SchemaVersion},
+};
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
@@ -9,9 +12,9 @@ use sea_orm::entity::prelude::*;
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub runtime_config_version_id: RuntimeConfigVersionId,
-    #[sea_orm(column_type = "Text", unique)]
-    pub config_hash: String,
-    pub schema_version: i32,
+    #[sea_orm(unique)]
+    pub config_hash: ContentHash,
+    pub schema_version: SchemaVersion,
     #[sea_orm(column_type = "JsonBinary")]
     pub config_json: Json,
     pub source: RuntimeConfigVersionSource,
