@@ -1,6 +1,7 @@
 //! Route registration and authorization manifest (Phase 0).
 
 pub mod auth;
+pub mod data_quality;
 pub mod health;
 pub mod markets;
 pub mod menus;
@@ -41,6 +42,7 @@ fn protected_route_specs() -> Vec<RouteSpec> {
     specs.extend(operation_logs::route_specs());
     specs.extend(system::route_specs());
     specs.extend(markets::route_specs());
+    specs.extend(data_quality::route_specs());
     specs
 }
 

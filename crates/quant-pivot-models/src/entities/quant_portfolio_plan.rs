@@ -1,6 +1,6 @@
 //! `quant_portfolio_plan` table entity.
 
-use crate::types::{ModelRunId, PortfolioPlanId, UniverseSnapshotId, Usd};
+use crate::types::{MarketSelectionId, ModelRunId, PortfolioPlanId, Usd};
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
@@ -10,7 +10,7 @@ pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub portfolio_plan_id: PortfolioPlanId,
     pub model_run_id: ModelRunId,
-    pub universe_snapshot_id: UniverseSnapshotId,
+    pub market_selection_id: MarketSelectionId,
     pub as_of: DateTime<Utc>,
     pub budget_usd: Usd,
     pub allocated_usd: Usd,
@@ -32,11 +32,11 @@ pub enum Relation {
     )]
     ModelRun,
     #[sea_orm(
-        belongs_to = "super::quant_universe_snapshot::Entity",
-        from = "Column::UniverseSnapshotId",
-        to = "super::quant_universe_snapshot::Column::UniverseSnapshotId"
+        belongs_to = "super::quant_market_selection::Entity",
+        from = "Column::MarketSelectionId",
+        to = "super::quant_market_selection::Column::MarketSelectionId"
     )]
-    UniverseSnapshot,
+    MarketSelection,
 }
 
 impl Related<super::quant_model_run::Entity> for Entity {
@@ -45,9 +45,9 @@ impl Related<super::quant_model_run::Entity> for Entity {
     }
 }
 
-impl Related<super::quant_universe_snapshot::Entity> for Entity {
+impl Related<super::quant_market_selection::Entity> for Entity {
     fn to() -> RelationDef {
-        Relation::UniverseSnapshot.def()
+        Relation::MarketSelection.def()
     }
 }
 

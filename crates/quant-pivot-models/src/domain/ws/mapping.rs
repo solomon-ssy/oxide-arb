@@ -1,7 +1,5 @@
 //! [`CoreEvent`] → wire-envelope projection (Phase 0).
 
-use serde_json::Value;
-
 use crate::{
     domain::{
         CoreEvent,
@@ -12,6 +10,7 @@ use crate::{
     },
     types::MarketId,
 };
+use serde_json::Value;
 
 /// Map a [`CoreEvent`] to its fan-out [`SubscriptionKey`] and [`WsEnvelope`].
 #[must_use]

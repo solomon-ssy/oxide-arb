@@ -2,7 +2,7 @@
 
 use crate::{
     enums::quant::{ModelPublicationStatus, ModelRunKind, ModelRunStatus},
-    types::{ModelRunId, ModelSpecId, ModelVersionId, RuntimeConfigVersionId, UniverseSnapshotId},
+    types::{MarketSelectionId, ModelRunId, ModelSpecId, ModelVersionId, RuntimeConfigVersionId},
 };
 use chrono::{DateTime, Utc};
 use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
@@ -103,7 +103,7 @@ pub struct ModelRunInfo {
     pub run_kind: ModelRunKind,
     pub model_version_id: Option<ModelVersionId>,
     pub runtime_config_version_id: RuntimeConfigVersionId,
-    pub universe_snapshot_id: Option<UniverseSnapshotId>,
+    pub market_selection_id: Option<MarketSelectionId>,
     pub window_start: DateTime<Utc>,
     pub window_end: DateTime<Utc>,
     pub status: ModelRunStatus,
@@ -118,7 +118,7 @@ pub struct ModelRunInfo {
 
 info_from_model!(ModelRunInfo, crate::entities::quant_model_run::Model, {
     model_run_id, run_kind, model_version_id, runtime_config_version_id,
-    universe_snapshot_id, window_start, window_end, status, input_hash, output_hash,
+    market_selection_id, window_start, window_end, status, input_hash, output_hash,
     metrics_json, error_code, error_message, started_at, finished_at,
 });
 
@@ -133,7 +133,7 @@ pub struct NewModelRun {
     pub run_kind: ModelRunKind,
     pub model_version_id: Option<ModelVersionId>,
     pub runtime_config_version_id: RuntimeConfigVersionId,
-    pub universe_snapshot_id: Option<UniverseSnapshotId>,
+    pub market_selection_id: Option<MarketSelectionId>,
     pub window_start: DateTime<Utc>,
     pub window_end: DateTime<Utc>,
     pub status: ModelRunStatus,

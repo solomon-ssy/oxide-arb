@@ -32,7 +32,7 @@ impl PauseReason {
 /// Downgrade wire-`Active` markets whose settlement deadline has passed.
 ///
 /// Idempotent: never mutates `Paused` (including `deactivate_stale`) or
-/// `Settled`. Markets without `end_date` are left unchanged (hotset excludes
+/// `Settled`. Markets without `end_date` are left unchanged (subscription excludes
 /// them via predicate filtering).
 #[must_use]
 pub fn apply_past_deadline_lifecycle(

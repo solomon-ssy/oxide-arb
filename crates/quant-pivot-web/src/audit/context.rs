@@ -37,7 +37,7 @@ use serde_json::Value;
 pub struct OperationEnrichment {
     /// Coarse grouping of the operation (auth / rbac / governance / …).
     pub category: Option<OperationCategory>,
-    /// Specific action verb, e.g. `control_factor.publish`.
+    /// Specific action verb, e.g. `runtime_config.activate`.
     pub action: Option<String>,
     /// The kind of resource the operation affected.
     pub resource_type: Option<ResourceType>,

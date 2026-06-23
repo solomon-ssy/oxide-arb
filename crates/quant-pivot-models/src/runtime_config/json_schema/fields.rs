@@ -3,8 +3,10 @@
 //! Walks the generated JSON Schema once and pairs each leaf with its compiled-in
 //! default from [`RuntimeConfig::default`].
 
-use crate::domain::{JsonValueType, SchemaFieldConstraints, SchemaFieldFormat};
-use crate::runtime_config::{MASKED_SECRET, RuntimeConfig, RuntimeConfigError};
+use crate::{
+    domain::{JsonValueType, SchemaFieldConstraints, SchemaFieldFormat},
+    runtime_config::{MASKED_SECRET, RuntimeConfig, RuntimeConfigError},
+};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashSet};
 

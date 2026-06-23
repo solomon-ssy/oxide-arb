@@ -1,6 +1,6 @@
 //! Portfolio plan persistence DTOs.
 
-use crate::types::{ModelRunId, PortfolioPlanId, UniverseSnapshotId, Usd};
+use crate::types::{MarketSelectionId, ModelRunId, PortfolioPlanId, Usd};
 use chrono::{DateTime, Utc};
 use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
 use serde::{Deserialize, Serialize};
@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 pub struct PortfolioPlanInfo {
     pub portfolio_plan_id: PortfolioPlanId,
     pub model_run_id: ModelRunId,
-    pub universe_snapshot_id: UniverseSnapshotId,
+    pub market_selection_id: MarketSelectionId,
     pub as_of: DateTime<Utc>,
     pub budget_usd: Usd,
     pub allocated_usd: Usd,
@@ -22,7 +22,7 @@ pub struct PortfolioPlanInfo {
 }
 
 info_from_model!(PortfolioPlanInfo, crate::entities::quant_portfolio_plan::Model, {
-    portfolio_plan_id, model_run_id, universe_snapshot_id, as_of, budget_usd,
+    portfolio_plan_id, model_run_id, market_selection_id, as_of, budget_usd,
     allocated_usd, risk_budget_json, constraints_json, rejected_summary, created_at,
 });
 
@@ -32,7 +32,7 @@ info_from_model!(PortfolioPlanInfo, crate::entities::quant_portfolio_plan::Model
 pub struct NewPortfolioPlan {
     pub portfolio_plan_id: PortfolioPlanId,
     pub model_run_id: ModelRunId,
-    pub universe_snapshot_id: UniverseSnapshotId,
+    pub market_selection_id: MarketSelectionId,
     pub as_of: DateTime<Utc>,
     pub budget_usd: Usd,
     pub allocated_usd: Usd,

@@ -42,14 +42,7 @@ pub enum TaskId {
     // ── Health ────────────────────────────────────────────────────────
     HealthChecker,
     RiskMetricsRefresh,
-
-    // ── Control factors (Phase 5.6 live consumption) ──────────────────
-    FactorRefresher,
-    ShadowDecisionWriter,
-
-    // ── Governance materialization (offline control plane) ────────────
-    ControlFactorScheduler,
-    MaterializationExecuteWorker,
+    DataQualityRefresh,
 
     // ── Operation log writer (web audit pipeline) ─────────────────────
     OperationLogWriter,
@@ -98,17 +91,15 @@ impl TaskId {
             | Self::BookUpdateCoalescer
             | Self::SystemStatusBroadcaster => TaskKind::ApiIngress,
             Self::DataPipeline => TaskKind::WsIngress,
-            Self::GammaSync
-            | Self::CalibrationUpdater
-            | Self::FactorRefresher
-            | Self::ControlFactorScheduler
-            | Self::MaterializationExecuteWorker => TaskKind::CatalogSync,
+            Self::GammaSync | Self::CalibrationUpdater => TaskKind::CatalogSync,
             Self::Coalescer => TaskKind::CacheWorker,
             Self::PotentialLossEscalation
             | Self::LedgerReconciliation
             | Self::MarketSettlement
             | Self::MarketSettlementRetry => TaskKind::LedgerReconciliation,
-            Self::HealthChecker | Self::RiskMetricsRefresh => TaskKind::HealthMonitor,
+            Self::HealthChecker | Self::RiskMetricsRefresh | Self::DataQualityRefresh => {
+                TaskKind::HealthMonitor
+            }
             Self::Scanner | Self::Funnel => TaskKind::Detection,
             Self::ExecutionRunner { .. } | Self::PostTradeRelay | Self::ReconciliationWorker => {
                 TaskKind::Execution
@@ -123,8 +114,7 @@ impl TaskId {
             | Self::BookSnapshotWriter
             | Self::BookDecisionContextWriter
             | Self::BookMicrostructure1sWriter
-            | Self::BookSnapshotPublisher
-            | Self::ShadowDecisionWriter => TaskKind::AnalyticsWriter,
+            | Self::BookSnapshotPublisher => TaskKind::AnalyticsWriter,
             Self::RiskStatePersist | Self::RiskStateDebouncer => TaskKind::PositionPersistence,
         }
     }

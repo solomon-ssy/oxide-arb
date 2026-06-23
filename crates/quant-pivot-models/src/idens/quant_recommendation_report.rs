@@ -8,8 +8,8 @@ use sea_orm::{
 
 use crate::{
     idens::{
-        quant_model_version::QuantModelVersion, quant_portfolio_plan::QuantPortfolioPlan,
-        quant_universe_snapshot::QuantUniverseSnapshot,
+        quant_market_selection::QuantMarketSelection, quant_model_version::QuantModelVersion,
+        quant_portfolio_plan::QuantPortfolioPlan,
     },
     schema::{
         column,
@@ -30,7 +30,7 @@ pub enum QuantRecommendationReport {
     RuntimeMode,
     RuntimeConfigVersionId,
     ModelVersionId,
-    UniverseSnapshotId,
+    MarketSelectionId,
     PortfolioPlanId,
     TopN,
     Status,
@@ -72,7 +72,7 @@ pub fn table() -> TableCreateStatement {
         ))
         .col(column::uuid_fk(QuantRecommendationReport::ModelVersionId))
         .col(column::uuid_fk(
-            QuantRecommendationReport::UniverseSnapshotId,
+            QuantRecommendationReport::MarketSelectionId,
         ))
         .col(column::uuid_fk(QuantRecommendationReport::PortfolioPlanId))
         .col(
@@ -115,14 +115,14 @@ pub fn table() -> TableCreateStatement {
         )
         .foreign_key(
             ForeignKey::create()
-                .name("fk_quant_recommendation_report_universe")
+                .name("fk_quant_recommendation_report_selection")
                 .from(
                     QuantRecommendationReport::Table,
-                    QuantRecommendationReport::UniverseSnapshotId,
+                    QuantRecommendationReport::MarketSelectionId,
                 )
                 .to(
-                    QuantUniverseSnapshot::Table,
-                    QuantUniverseSnapshot::UniverseSnapshotId,
+                    QuantMarketSelection::Table,
+                    QuantMarketSelection::MarketSelectionId,
                 )
                 .on_delete(ForeignKeyAction::Restrict),
         )
@@ -186,7 +186,7 @@ pub fn indexes() -> Vec<IndexSpec> {
 pub fn dependencies() -> Vec<TableDependency> {
     vec![
         TableDependency::foreign_key(quant_model_version_table_name),
-        TableDependency::foreign_key(quant_universe_snapshot_table_name),
+        TableDependency::foreign_key(quant_market_selection_table_name),
         TableDependency::foreign_key(quant_portfolio_plan_table_name),
     ]
 }
@@ -203,8 +203,8 @@ fn quant_model_version_table_name() -> String {
     QuantModelVersion::Table.to_string()
 }
 
-fn quant_universe_snapshot_table_name() -> String {
-    QuantUniverseSnapshot::Table.to_string()
+fn quant_market_selection_table_name() -> String {
+    QuantMarketSelection::Table.to_string()
 }
 
 fn quant_portfolio_plan_table_name() -> String {

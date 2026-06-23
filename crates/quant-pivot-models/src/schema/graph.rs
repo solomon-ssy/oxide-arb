@@ -111,8 +111,8 @@ mod tests {
         for required in [
             "runtime_config_version",
             "runtime_config_activation",
-            "quant_universe_snapshot",
-            "quant_universe_member",
+            "quant_market_selection",
+            "quant_market_selection_member",
             "quant_feature_vector",
             "quant_factor_definition",
             "quant_factor_value",

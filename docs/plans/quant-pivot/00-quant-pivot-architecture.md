@@ -116,11 +116,11 @@ flowchart TD
     Gamma["Gamma Market Metadata"] --> Catalog["Market Catalog"]
     ClobWs["CLOB WebSocket Books"] --> BookStore["BookStore Published Snapshots"]
     ClobRest["CLOB REST"] --> FactIngest["Fact Ingest"]
-    Catalog --> Universe["Universe Selector"]
+    Catalog --> Selection["Market Selection"]
     BookStore --> FeatureBuilder["Feature Builder"]
     FactIngest --> FactStore["ClickHouse Fact Store"]
     FactStore --> FeatureBuilder
-    Universe --> FeatureBuilder
+    Selection --> FeatureBuilder
     FeatureBuilder --> FeatureStore["Feature Store"]
     FeatureStore --> FactorEngine["Factor Engine"]
     FactorEngine --> ModelRunner["Model Runner"]
@@ -161,15 +161,15 @@ flowchart TD
 - `Coalescer` 作为 token update -> market scan -> execution 的触发器。
 - endgame-only hot subscription policy。
 
-### 3.2 Universe Plane
+### 3.2 Selection Plane
 
 职责：
 
 - 根据 runtime config v3 构造本次报告的候选市场集合。
 - 支持 category、event、liquidity、volume、expiry、market status、manual include/exclude。
-- 生成不可变 `UniverseSnapshot`。
+- 生成不可变 `MarketSelection` snapshot（`quant_market_selection` + members）。
 
-Universe 不是交易白名单，而是报告输入集合。执行侧还会有单独的 admission gate。
+Selection 不是交易白名单，而是报告输入集合。执行侧还会有单独的 admission gate。
 
 ### 3.3 Feature Plane
 
@@ -408,16 +408,16 @@ Phase 0 完成后必须满足：
 
 以下 trait 是目标架构的实现骨架。实际代码可按 crate 边界拆分，但语义不能改变。
 
-### 9.1 数据与 Universe
+### 9.1 数据与 Selection
 
 ```rust
-/// Reads Polymarket metadata and builds the report universe.
-pub trait UniverseSelector {
-    /// Build an immutable universe snapshot for one report/model run.
+/// Reads Polymarket metadata and builds the report market selection.
+pub trait MarketSelector {
+    /// Build an immutable selection snapshot for one report/model run.
     async fn build_snapshot(
         &self,
-        request: UniverseBuildRequest,
-    ) -> QuantResult<UniverseSnapshot>;
+        request: MarketSelectionBuildRequest,
+    ) -> QuantResult<MarketSelectionSnapshot>;
 }
 
 /// Reads point-in-time market data without leaking future facts.
@@ -446,7 +446,7 @@ pub trait FeatureBuilder {
     /// Stable schema version owned by this builder.
     fn schema_version(&self) -> FeatureSchemaVersion;
 
-    /// Build features for one universe member at one decision time.
+    /// Build features for one selection member at one decision time.
     async fn build(
         &self,
         input: FeatureBuildInput<'_>,

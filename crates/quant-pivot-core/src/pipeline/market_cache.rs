@@ -1,4 +1,4 @@
-use super::{market_registry::MarketRegistry, universe_filter::MarketUniverseFilter};
+use super::{market_filter::MarketFilter, market_registry::MarketRegistry};
 use arc_swap::ArcSwap;
 use chrono::{DateTime, Utc};
 use quant_pivot_models::{
@@ -10,14 +10,14 @@ use std::{collections::HashMap, sync::Arc};
 /// Pre-computed scan entry for hot-path iteration.
 ///
 /// Avoids repeated `DashMap` lookups and `MarketRegistryInfo` destructuring
-/// during the Scanner's periodic sweep.
+/// during catalog-driven market sweeps (selection / report builders).
 #[derive(Debug, Clone)]
 pub struct CachedMarketScanEntry {
     pub market_id: MarketId,
     pub event_id: EventId,
     pub token_yes: TokenId,
     pub token_no: TokenId,
-    /// Category memberships (universe-filter source of truth).
+    /// Category memberships (market-filter source of truth).
     pub categories: CategorySet,
     /// Pre-derived `categories.fee_category()` — cached at rebuild so the
     /// per-sweep scan never re-derives it.
@@ -27,32 +27,32 @@ pub struct CachedMarketScanEntry {
     pub settlement_deadline: Option<DateTime<Utc>>,
 }
 
-/// Lock-free cache of active markets for the Scanner hot path.
+/// Lock-free cache of active markets for ingest and selection hot paths.
 ///
 /// Backed by `ArcSwap` for wait-free reads. Rebuilt on Gamma sync
-/// (~every 5 minutes) and on runtime-config activation (universe filter
+/// (~every 5 minutes) and on runtime-config activation (market filter
 /// changes), so reads never block writes and vice versa.
 pub struct MarketCache {
     scan_entries: ArcSwap<Vec<Arc<CachedMarketScanEntry>>>,
     index: ArcSwap<HashMap<MarketId, Arc<CachedMarketScanEntry>>>,
     registry: Arc<MarketRegistry>,
-    universe: Arc<MarketUniverseFilter>,
+    market_filter: Arc<MarketFilter>,
 }
 
 impl MarketCache {
-    pub fn new(registry: Arc<MarketRegistry>, universe: Arc<MarketUniverseFilter>) -> Self {
+    pub fn new(registry: Arc<MarketRegistry>, market_filter: Arc<MarketFilter>) -> Self {
         let cache = Self {
             scan_entries: ArcSwap::from_pointee(Vec::new()),
             index: ArcSwap::from_pointee(HashMap::new()),
             registry,
-            universe,
+            market_filter,
         };
         cache.rebuild();
         cache
     }
 
     /// Reconstruct the cache from the current registry state, admitting only
-    /// markets that pass the universe filter.
+    /// markets that pass the market filter.
     pub fn rebuild(&self) {
         let active_ids = self.registry.active_markets();
         let mut entries = Vec::with_capacity(active_ids.len());
@@ -62,7 +62,7 @@ impl MarketCache {
             let Some(market) = self.registry.get_market(market_id) else {
                 continue;
             };
-            if !self.universe.is_enabled(market.categories) {
+            if !self.market_filter.is_enabled(market.categories) {
                 continue;
             }
             if market
@@ -164,8 +164,8 @@ mod tests {
         }
     }
 
-    fn admit_all() -> Arc<MarketUniverseFilter> {
-        Arc::new(MarketUniverseFilter::default())
+    fn admit_all() -> Arc<MarketFilter> {
+        Arc::new(MarketFilter::default())
     }
 
     #[test]
@@ -228,7 +228,7 @@ mod tests {
     }
 
     #[test]
-    fn universe_filter_bounds_rebuild() {
+    fn market_filter_bounds_rebuild() {
         let reg = Arc::new(MarketRegistry::new());
         reg.register_market(sample_entry(
             "m-sports",
@@ -239,14 +239,14 @@ mod tests {
             CategorySet::from(MarketCategory::Politics),
         ));
 
-        let universe = Arc::new(MarketUniverseFilter::new(&[MarketCategory::Politics]));
-        let cache = MarketCache::new(Arc::clone(&reg), Arc::clone(&universe));
+        let market_filter = Arc::new(MarketFilter::new(&[MarketCategory::Politics]));
+        let cache = MarketCache::new(Arc::clone(&reg), Arc::clone(&market_filter));
         assert_eq!(cache.entries().len(), 1);
         assert!(cache.get(&MarketId::new("m-politics")).is_some());
         assert!(cache.get(&MarketId::new("m-sports")).is_none());
 
-        // Hot reload widens the universe; rebuild re-admits the sports market.
-        universe.reload(&[]);
+        // Hot reload widens the market filter; rebuild re-admits the sports market.
+        market_filter.reload(&[]);
         cache.rebuild();
         assert_eq!(cache.entries().len(), 2);
     }

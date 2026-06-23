@@ -2,6 +2,7 @@
 
 pub mod bootstrap;
 pub mod build;
+pub mod fact_writer_tasks;
 pub mod lifecycle;
 pub mod periodic_services;
 pub mod runtime_tasks;
@@ -16,6 +17,7 @@ pub use bundles::*;
 use crate::{
     governance::RuntimeModeHandle,
     infra::health_checker::HealthChecker,
+    pipeline::data_quality::BookDataQualityService,
     runtime_config::{RuntimeConfigApplicator, RuntimeConfigStore},
     service::{catalog_readiness::CatalogReadiness, system_status_nudge::SystemStatusNudge},
 };
@@ -23,7 +25,7 @@ use flume::Receiver;
 use parking_lot::Mutex;
 use quant_pivot_models::{
     config::DeployConfig,
-    domain::{CoreEvent, CoreEventPublisher, RuntimeControlPort},
+    domain::{CoreEvent, CoreEventPublisher, PointInTimeDataSource, RuntimeControlPort},
 };
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -40,6 +42,10 @@ pub struct AppContext {
     pub health_checker: Arc<HealthChecker>,
     pub runtime_control: Arc<dyn RuntimeControlPort>,
     pub catalog: Arc<CatalogReadiness>,
+    pub data_quality: Arc<BookDataQualityService>,
+    /// Live point-in-time source for Phase 3 feature/report builders. The
+    /// historical (ClickHouse-backed) source lands in Phase 3.
+    pub pit_source: Arc<dyn PointInTimeDataSource>,
     pub status_nudge: SystemStatusNudge,
 }
 

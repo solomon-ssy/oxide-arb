@@ -36,7 +36,7 @@ pub struct WebSocketConfig {
     /// Maximum active engine tokens subscribed across all WS connections.
     /// Default: `2000`.
     pub engine_max_subscription_tokens: usize,
-    /// Look-ahead window (hours) for engine WS subscription hotset. Default: `72`.
+    /// Look-ahead window (hours) for engine WS subscription subscription. Default: `72`.
     pub engine_subscription_window_hours: u64,
 }
 

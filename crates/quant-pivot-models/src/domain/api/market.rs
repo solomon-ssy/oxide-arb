@@ -193,8 +193,10 @@ pub struct MarketBookView {
 #[cfg(test)]
 mod tests {
     use super::MarketBookSummaryView;
-    use crate::domain::market::book::{BookLevel, BookSnapshot};
-    use crate::types::{Price, Shares, Usd};
+    use crate::{
+        domain::market::book::{BookLevel, BookSnapshot},
+        types::{Price, Shares, Usd},
+    };
     use rust_decimal_macros::dec;
     use std::sync::Arc;
 

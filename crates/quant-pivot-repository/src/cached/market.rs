@@ -5,10 +5,9 @@
 //! failing the read.
 
 use crate::traits::MarketRepository;
-use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    domain::{MarketInfo, MarketPageQuery, MarketPitSnapshotInfo, Paginated, UpsertMarket},
+    domain::{MarketInfo, MarketPageQuery, Paginated, UpsertMarket},
     types::MarketId,
 };
 use quant_pivot_storage::cache::{CacheKey, CacheManager};
@@ -68,15 +67,6 @@ impl<R: MarketRepository> MarketRepository for CachedMarketRepository<R> {
     }
 
     #[inline]
-    async fn latest_pit_snapshots_before(
-        &self,
-        ids: &[MarketId],
-        as_of: DateTime<Utc>,
-    ) -> Result<Vec<MarketPitSnapshotInfo>, StorageError> {
-        self.inner.latest_pit_snapshots_before(ids, as_of).await
-    }
-
-    #[inline]
     async fn find_active(&self) -> Result<Arc<[MarketInfo]>, StorageError> {
         let key = CacheKey::ActiveMarkets;
         if let Some(cached) = self.cache.get_json::<Vec<MarketInfo>>(&key).await {
@@ -90,14 +80,6 @@ impl<R: MarketRepository> MarketRepository for CachedMarketRepository<R> {
     #[inline]
     async fn find_by_event(&self, event_id: &str) -> Result<Vec<Arc<MarketInfo>>, StorageError> {
         self.inner.find_by_event(event_id).await
-    }
-
-    #[inline]
-    async fn find_endgame_candidates(
-        &self,
-        before_deadline: DateTime<Utc>,
-    ) -> Result<Vec<Arc<MarketInfo>>, StorageError> {
-        self.inner.find_endgame_candidates(before_deadline).await
     }
 
     #[inline]

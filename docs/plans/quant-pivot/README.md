@@ -36,6 +36,7 @@ Polymarket facts -> features -> factors/models -> portfolio plan
 7. [`06-config-deploy-and-ops.md`](06-config-deploy-and-ops.md)：deploy-config、runtime-config v3、CI、benchmark、Docker、observability、runbook 调整。
 8. [`07-implementation-phases.md`](07-implementation-phases.md)：实施 Phase、退出标准、测试矩阵、迁移顺序。
 9. [`08-third-party-crates-and-ml-stack.md`](08-third-party-crates-and-ml-stack.md)：第三方 crate、模型训练、推理、优化、依赖引入顺序和 MSRV/native 风险。
+10. [`09-account-capital-position-reconciliation.md`](09-account-capital-position-reconciliation.md)：账户/资本/持仓/对账平面——`AccountSnapshot`、planner 资金感知签名、资金状态机、对账证据链、Polymarket 余额/持仓数据源（设计先行，实现分相位到 Phase 4/5/6）。
 
 ## 2. 硬边界
 

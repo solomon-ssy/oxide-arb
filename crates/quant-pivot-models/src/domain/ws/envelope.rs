@@ -7,11 +7,10 @@
 //! millisecond instant, so the wire format is fixed by the serializer rather
 //! than re-derived at every call site.
 
+use crate::domain::ws::channel::WsChannel;
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Serialize, Serializer};
 use serde_json::Value;
-
-use crate::domain::ws::channel::WsChannel;
 
 /// The `type` discriminator of a server message.
 ///

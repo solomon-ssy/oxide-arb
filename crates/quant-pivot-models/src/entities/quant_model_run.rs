@@ -2,7 +2,7 @@
 
 use crate::{
     enums::quant::{ModelRunKind, ModelRunStatus},
-    types::{ModelRunId, ModelVersionId, RuntimeConfigVersionId, UniverseSnapshotId},
+    types::{MarketSelectionId, ModelRunId, ModelVersionId, RuntimeConfigVersionId},
 };
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
@@ -15,7 +15,7 @@ pub struct Model {
     pub run_kind: ModelRunKind,
     pub model_version_id: Option<ModelVersionId>,
     pub runtime_config_version_id: RuntimeConfigVersionId,
-    pub universe_snapshot_id: Option<UniverseSnapshotId>,
+    pub market_selection_id: Option<MarketSelectionId>,
     pub window_start: DateTime<Utc>,
     pub window_end: DateTime<Utc>,
     pub status: ModelRunStatus,
@@ -42,11 +42,11 @@ pub enum Relation {
     )]
     ModelVersion,
     #[sea_orm(
-        belongs_to = "super::quant_universe_snapshot::Entity",
-        from = "Column::UniverseSnapshotId",
-        to = "super::quant_universe_snapshot::Column::UniverseSnapshotId"
+        belongs_to = "super::quant_market_selection::Entity",
+        from = "Column::MarketSelectionId",
+        to = "super::quant_market_selection::Column::MarketSelectionId"
     )]
-    UniverseSnapshot,
+    MarketSelection,
 }
 
 impl Related<super::quant_model_version::Entity> for Entity {
@@ -55,9 +55,9 @@ impl Related<super::quant_model_version::Entity> for Entity {
     }
 }
 
-impl Related<super::quant_universe_snapshot::Entity> for Entity {
+impl Related<super::quant_market_selection::Entity> for Entity {
     fn to() -> RelationDef {
-        Relation::UniverseSnapshot.def()
+        Relation::MarketSelection.def()
     }
 }
 

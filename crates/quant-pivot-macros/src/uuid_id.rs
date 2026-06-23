@@ -5,8 +5,8 @@
 //! `Deserialize`, and full `SeaORM` bindings backed by the native Postgres
 //! `uuid` column type. All generated ids are UUID v7 (time-ordered).
 //!
-//! Used for internal, system-generated identifiers (`TradeId`, `UserId`,
-//! `ControlFactorId`, …). Externally defined string identifiers that are not
+//! Used for internal, system-generated identifiers (`UserId`,
+//! `RecommendationId`, …). Externally defined string identifiers that are not
 //! UUIDs use [`crate::StrId`] instead.
 //!
 //! The inner value is `Arc<Uuid>` so cloning a typed id is a cheap atomic

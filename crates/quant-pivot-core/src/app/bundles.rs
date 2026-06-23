@@ -1,6 +1,7 @@
 //! Runtime subsystem bundles owned by [`super::AppContext`].
 
 use crate::{
+    app::task_registry::PendingTaskQueue,
     governance::RuntimeModeHandle,
     observability::{
         alert_dispatcher::AlertDispatcher, book_fact_writer::BookFactWriter,
@@ -8,7 +9,7 @@ use crate::{
     },
     pipeline::{
         book_store::BookStore, data_pipeline::DataPipeline, market_cache::MarketCache,
-        market_registry::MarketRegistry, universe_filter::MarketUniverseFilter,
+        market_filter::MarketFilter, market_registry::MarketRegistry,
     },
     runtime_config::{RuntimeConfigApplicator, RuntimeConfigStore},
     service::{
@@ -17,10 +18,13 @@ use crate::{
     },
 };
 use quant_pivot_api::{gamma::GammaClient, ws::ClobWsManager};
-use quant_pivot_repository::postgres::{PgMarketRepository, PgOperationLogRepository};
+use quant_pivot_repository::{
+    postgres::PgOperationLogRepository,
+    traits::{MarketRepository, QuantFactRepository},
+};
 use quant_pivot_storage::{
     cache::{CacheManager, RedisPool},
-    clickhouse::ClickHousePool,
+    clickhouse::{ChWriteManager, ClickHousePool},
     postgres::PostgresPool,
 };
 use quant_pivot_web::jwt::RedisTokenBlacklist;
@@ -30,6 +34,8 @@ use std::sync::Arc;
 pub struct InfraBundle {
     pub pg: Arc<PostgresPool>,
     pub ch: Arc<ClickHousePool>,
+    pub ch_write_manager: Arc<ChWriteManager>,
+    pub quant_fact_repo: Arc<dyn QuantFactRepository>,
     pub redis: RedisPool,
     pub cache: Arc<CacheManager>,
     pub jwt_blacklist: Arc<RedisTokenBlacklist>,
@@ -43,14 +49,16 @@ pub struct DataBundle {
     pub book_store: Arc<BookStore>,
     pub market_registry: Arc<MarketRegistry>,
     pub market_cache: Arc<MarketCache>,
-    pub universe: Arc<MarketUniverseFilter>,
+    pub market_filter: Arc<MarketFilter>,
     pub data_pipeline: Arc<DataPipeline>,
     pub gamma_service: Arc<GammaService>,
     pub ws_manager: Arc<ClobWsManager>,
     pub ws_subscription: Arc<WsSubscriptionCoordinator>,
-    pub book_fact_writer: Option<Arc<BookFactWriter>>,
+    pub book_fact_writer: Arc<BookFactWriter>,
+    /// Flush workers for each book fact stream, registered on the runner at boot.
+    pub(crate) fact_writer_queue: PendingTaskQueue,
     pub catalog: Arc<CatalogReadiness>,
-    pub market_repo: Arc<PgMarketRepository>,
+    pub market_repo: Arc<dyn MarketRepository>,
     pub gamma_client: Arc<GammaClient>,
 }
 

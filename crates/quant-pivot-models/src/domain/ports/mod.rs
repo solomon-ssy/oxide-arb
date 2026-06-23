@@ -1,5 +1,5 @@
 //! Web-facing dependency-inversion ports.
 
-pub mod control;
+pub mod runtime_control;
 
-pub use control::*;
+pub use runtime_control::*;

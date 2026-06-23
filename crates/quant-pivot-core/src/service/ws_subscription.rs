@@ -1,4 +1,4 @@
-//! Keeps CLOB websocket subscriptions aligned with the trading hotset.
+//! Keeps CLOB websocket subscriptions aligned with the trading subscription.
 //!
 //! The full Gamma catalog is too large to mirror blindly into Polymarket WS
 //! connections. The engine baseline is therefore selected by
@@ -8,7 +8,7 @@
 
 use crate::{
     observability::metrics_hub::MetricsHub,
-    pipeline::{market_registry::MarketRegistry, universe_filter::MarketUniverseFilter},
+    pipeline::{market_filter::MarketFilter, market_registry::MarketRegistry},
 };
 use chrono::{DateTime, Duration, Utc};
 use quant_pivot_api::ws::{ClobWsManager, SubscriptionSource};
@@ -20,16 +20,16 @@ use std::sync::Arc;
 /// Fraction of the token budget reserved for the detection-window tier (Tier1).
 const TIER1_TOKEN_BUDGET_PCT: usize = 80;
 
-/// Candidate bucket used for hotset metrics and tiered selection.
+/// Candidate bucket used for subscription metrics and tiered selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HotsetCandidateKind {
+pub enum SubscriptionCandidateKind {
     PastDeadline,
     FutureDetect,
     FuturePrewarm,
     NoEndDate,
 }
 
-impl HotsetCandidateKind {
+impl SubscriptionCandidateKind {
     const fn metric_label(self) -> &'static str {
         match self {
             Self::PastDeadline => "past_deadline",
@@ -40,9 +40,9 @@ impl HotsetCandidateKind {
     }
 }
 
-/// Outcome of a single hotset reconciliation pass.
+/// Outcome of a single subscription reconciliation pass.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct HotsetSelectionStats {
+pub struct SubscriptionSelectionStats {
     pub candidates_past_deadline: u64,
     pub candidates_future_detect: u64,
     pub candidates_future_prewarm: u64,
@@ -52,21 +52,21 @@ pub struct HotsetSelectionStats {
     pub selected_tokens: u64,
 }
 
-impl HotsetSelectionStats {
-    const fn record_candidate(&mut self, kind: HotsetCandidateKind) {
+impl SubscriptionSelectionStats {
+    const fn record_candidate(&mut self, kind: SubscriptionCandidateKind) {
         match kind {
-            HotsetCandidateKind::PastDeadline => self.candidates_past_deadline += 1,
-            HotsetCandidateKind::FutureDetect => self.candidates_future_detect += 1,
-            HotsetCandidateKind::FuturePrewarm => self.candidates_future_prewarm += 1,
-            HotsetCandidateKind::NoEndDate => self.candidates_no_end_date += 1,
+            SubscriptionCandidateKind::PastDeadline => self.candidates_past_deadline += 1,
+            SubscriptionCandidateKind::FutureDetect => self.candidates_future_detect += 1,
+            SubscriptionCandidateKind::FuturePrewarm => self.candidates_future_prewarm += 1,
+            SubscriptionCandidateKind::NoEndDate => self.candidates_no_end_date += 1,
         }
     }
 
-    const fn record_selected(&mut self, kind: HotsetCandidateKind, token_pairs: u64) {
+    const fn record_selected(&mut self, kind: SubscriptionCandidateKind, token_pairs: u64) {
         match kind {
-            HotsetCandidateKind::FutureDetect => self.selected_future_detect += token_pairs,
-            HotsetCandidateKind::FuturePrewarm => self.selected_future_prewarm += token_pairs,
-            HotsetCandidateKind::PastDeadline | HotsetCandidateKind::NoEndDate => {}
+            SubscriptionCandidateKind::FutureDetect => self.selected_future_detect += token_pairs,
+            SubscriptionCandidateKind::FuturePrewarm => self.selected_future_prewarm += token_pairs,
+            SubscriptionCandidateKind::PastDeadline | SubscriptionCandidateKind::NoEndDate => {}
         }
         self.selected_tokens += token_pairs.saturating_mul(2);
     }
@@ -110,40 +110,40 @@ impl HotsetSelectionStats {
 
     pub(crate) fn publish(&self, metrics: &MetricsHub) {
         metrics
-            .hotset_candidates_total
-            .with_label_values(&[HotsetCandidateKind::PastDeadline.metric_label()])
+            .subscription_candidates_total
+            .with_label_values(&[SubscriptionCandidateKind::PastDeadline.metric_label()])
             .inc_by(self.candidates_past_deadline);
         metrics
-            .hotset_candidates_total
-            .with_label_values(&[HotsetCandidateKind::FutureDetect.metric_label()])
+            .subscription_candidates_total
+            .with_label_values(&[SubscriptionCandidateKind::FutureDetect.metric_label()])
             .inc_by(self.candidates_future_detect);
         metrics
-            .hotset_candidates_total
-            .with_label_values(&[HotsetCandidateKind::FuturePrewarm.metric_label()])
+            .subscription_candidates_total
+            .with_label_values(&[SubscriptionCandidateKind::FuturePrewarm.metric_label()])
             .inc_by(self.candidates_future_prewarm);
         metrics
-            .hotset_candidates_total
-            .with_label_values(&[HotsetCandidateKind::NoEndDate.metric_label()])
+            .subscription_candidates_total
+            .with_label_values(&[SubscriptionCandidateKind::NoEndDate.metric_label()])
             .inc_by(self.candidates_no_end_date);
         metrics
-            .hotset_selected_total
-            .with_label_values(&[HotsetCandidateKind::FutureDetect.metric_label()])
+            .subscription_selected_total
+            .with_label_values(&[SubscriptionCandidateKind::FutureDetect.metric_label()])
             .inc_by(self.selected_future_detect);
         metrics
-            .hotset_selected_total
-            .with_label_values(&[HotsetCandidateKind::FuturePrewarm.metric_label()])
+            .subscription_selected_total
+            .with_label_values(&[SubscriptionCandidateKind::FuturePrewarm.metric_label()])
             .inc_by(self.selected_future_prewarm);
         metrics
-            .hotset_detection_window_coverage_ratio
+            .subscription_window_coverage_ratio
             .set(self.detection_window_coverage_ratio());
     }
 }
 
-/// Bounded selector for the trading engine's market-data hotset.
+/// Bounded selector for the trading engine's market-data subscription.
 #[derive(Debug, Clone, Copy)]
 pub struct MarketDataSubscriptionPolicy {
     max_subscription_tokens: usize,
-    universe_window_hours: u64,
+    subscription_window_hours: u64,
 }
 
 pub struct WsSubscriptionCoordinator {
@@ -161,17 +161,17 @@ impl WsSubscriptionCoordinator {
         Self { ws_manager, policy }
     }
 
-    /// Reconcile the engine baseline to the policy-selected universe ingest set.
-    pub fn sync_universe_ingest(
+    /// Reconcile the engine baseline to the policy-selected subscription ingest set.
+    pub fn sync_subscription(
         &self,
         registry: &MarketRegistry,
-        universe: &MarketUniverseFilter,
+        market_filter: &MarketFilter,
         detection_window_hours: u64,
         metrics: &MetricsHub,
-    ) -> HotsetSelectionStats {
+    ) -> SubscriptionSelectionStats {
         let (desired, stats) =
             self.policy
-                .select_tokens_with_stats(registry, universe, detection_window_hours);
+                .select_tokens_with_stats(registry, market_filter, detection_window_hours);
         self.ws_manager
             .sync_tokens(SubscriptionSource::Engine, &desired);
         stats.publish(metrics);
@@ -187,10 +187,10 @@ impl WsSubscriptionCoordinator {
 
 impl MarketDataSubscriptionPolicy {
     #[must_use]
-    pub const fn new(max_subscription_tokens: usize, universe_window_hours: u64) -> Self {
+    pub const fn new(max_subscription_tokens: usize, subscription_window_hours: u64) -> Self {
         Self {
             max_subscription_tokens,
-            universe_window_hours,
+            subscription_window_hours,
         }
     }
 
@@ -199,24 +199,24 @@ impl MarketDataSubscriptionPolicy {
     pub fn select_tokens(
         &self,
         registry: &MarketRegistry,
-        universe: &MarketUniverseFilter,
+        market_filter: &MarketFilter,
         detection_window_hours: u64,
     ) -> Vec<TokenId> {
-        self.select_tokens_with_stats(registry, universe, detection_window_hours)
+        self.select_tokens_with_stats(registry, market_filter, detection_window_hours)
             .0
     }
 
-    /// Select tokens and return hotset statistics for metrics/logging.
+    /// Select tokens and return subscription statistics for metrics/logging.
     #[must_use]
     pub fn select_tokens_with_stats(
         &self,
         registry: &MarketRegistry,
-        universe: &MarketUniverseFilter,
+        market_filter: &MarketFilter,
         detection_window_hours: u64,
-    ) -> (Vec<TokenId>, HotsetSelectionStats) {
+    ) -> (Vec<TokenId>, SubscriptionSelectionStats) {
         let now = Utc::now();
         let (tier1, tier2, mut stats) =
-            self.partition_candidates(registry, universe, now, detection_window_hours);
+            self.partition_candidates(registry, market_filter, now, detection_window_hours);
 
         let tier1_budget = self
             .max_subscription_tokens
@@ -228,7 +228,7 @@ impl MarketDataSubscriptionPolicy {
             &mut tokens,
             tier1,
             tier1_budget,
-            HotsetCandidateKind::FutureDetect,
+            SubscriptionCandidateKind::FutureDetect,
             &mut stats,
         );
         let remaining = self.max_subscription_tokens.saturating_sub(tokens.len());
@@ -236,7 +236,7 @@ impl MarketDataSubscriptionPolicy {
             &mut tokens,
             tier2,
             remaining,
-            HotsetCandidateKind::FuturePrewarm,
+            SubscriptionCandidateKind::FuturePrewarm,
             &mut stats,
         );
 
@@ -249,8 +249,8 @@ impl MarketDataSubscriptionPolicy {
         tokens: &mut Vec<TokenId>,
         mut candidates: Vec<Candidate>,
         token_budget: usize,
-        kind: HotsetCandidateKind,
-        stats: &mut HotsetSelectionStats,
+        kind: SubscriptionCandidateKind,
+        stats: &mut SubscriptionSelectionStats,
     ) {
         if token_budget == 0 {
             return;
@@ -277,14 +277,14 @@ impl MarketDataSubscriptionPolicy {
     fn partition_candidates(
         &self,
         registry: &MarketRegistry,
-        universe: &MarketUniverseFilter,
+        market_filter: &MarketFilter,
         now: DateTime<Utc>,
         detection_window_hours: u64,
-    ) -> (Vec<Candidate>, Vec<Candidate>, HotsetSelectionStats) {
-        let mut stats = HotsetSelectionStats::default();
+    ) -> (Vec<Candidate>, Vec<Candidate>, SubscriptionSelectionStats) {
+        let mut stats = SubscriptionSelectionStats::default();
         let mut tier1 = Vec::new();
         let mut tier2 = Vec::new();
-        let hours = i64::try_from(self.universe_window_hours).unwrap_or(i64::MAX);
+        let hours = i64::try_from(self.subscription_window_hours).unwrap_or(i64::MAX);
         let prewarm_cutoff = now + Duration::hours(hours);
         let detect_cutoff =
             now + Duration::hours(i64::try_from(detection_window_hours).unwrap_or(i64::MAX));
@@ -293,17 +293,18 @@ impl MarketDataSubscriptionPolicy {
             let Some(market) = registry.get_market(market_id) else {
                 continue;
             };
-            if market.status != MarketStatus::Active || !universe.is_enabled(market.categories) {
+            if market.status != MarketStatus::Active || !market_filter.is_enabled(market.categories)
+            {
                 continue;
             }
 
             let Some(end_date) = market.end_date else {
-                stats.record_candidate(HotsetCandidateKind::NoEndDate);
+                stats.record_candidate(SubscriptionCandidateKind::NoEndDate);
                 continue;
             };
 
             if end_date <= now {
-                stats.record_candidate(HotsetCandidateKind::PastDeadline);
+                stats.record_candidate(SubscriptionCandidateKind::PastDeadline);
                 continue;
             }
             if end_date > prewarm_cutoff {
@@ -312,10 +313,10 @@ impl MarketDataSubscriptionPolicy {
 
             let rank_ms = end_date.signed_duration_since(now).num_milliseconds();
             if end_date <= detect_cutoff {
-                stats.record_candidate(HotsetCandidateKind::FutureDetect);
+                stats.record_candidate(SubscriptionCandidateKind::FutureDetect);
                 tier1.push(Candidate { market, rank_ms });
             } else {
-                stats.record_candidate(HotsetCandidateKind::FuturePrewarm);
+                stats.record_candidate(SubscriptionCandidateKind::FuturePrewarm);
                 tier2.push(Candidate { market, rank_ms });
             }
         }
@@ -383,8 +384,8 @@ mod tests {
         reg.register_market(sample_market("later", Some(now + Duration::hours(10))));
 
         let policy = MarketDataSubscriptionPolicy::new(2000, 72);
-        let universe = MarketUniverseFilter::default();
-        let (tokens, stats) = policy.select_tokens_with_stats(&reg, &universe, 24);
+        let market_filter = MarketFilter::default();
+        let (tokens, stats) = policy.select_tokens_with_stats(&reg, &market_filter, 24);
 
         assert_eq!(stats.candidates_past_deadline, 1);
         assert_eq!(stats.candidates_future_detect, 2);
@@ -399,8 +400,7 @@ mod tests {
         reg.register_market(sample_market("no-date", None));
 
         let policy = MarketDataSubscriptionPolicy::new(2000, 72);
-        let (tokens, stats) =
-            policy.select_tokens_with_stats(&reg, &MarketUniverseFilter::default(), 24);
+        let (tokens, stats) = policy.select_tokens_with_stats(&reg, &MarketFilter::default(), 24);
 
         assert!(tokens.is_empty());
         assert_eq!(stats.candidates_no_end_date, 1);
@@ -418,8 +418,7 @@ mod tests {
         }
 
         let policy = MarketDataSubscriptionPolicy::new(5, 72);
-        let (tokens, _) =
-            policy.select_tokens_with_stats(&reg, &MarketUniverseFilter::default(), 24);
+        let (tokens, _) = policy.select_tokens_with_stats(&reg, &MarketFilter::default(), 24);
 
         // Tier1 budget is 80% of 5 → 4 tokens → two nearest markets.
         assert_eq!(tokens.len(), 4);

@@ -13,14 +13,12 @@
 //! single value stored in a session's subscription set and produced by the event
 //! fan-out, so there is no longer any `"channel:market"` string parsing anywhere.
 
+use crate::{enums::rbac::ResourceType, types::MarketId};
+use serde_with::DeserializeFromStr;
 use std::{
     fmt::{self, Display, Formatter},
     str::FromStr,
 };
-
-use serde_with::DeserializeFromStr;
-
-use crate::{enums::rbac::ResourceType, types::MarketId};
 
 /// Fan-out scope of a [`WsChannel`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -55,8 +53,6 @@ pub enum WsChannel {
     MarketResolved,
     /// Coalesced per-market order-book snapshots (market-scoped fan-out).
     MarketBookUpdate,
-    /// A control-factor publication became effective.
-    ControlPublished,
     /// A runtime-config version was activated.
     ConfigActivated,
     /// A new scored opportunity was detected.
@@ -73,14 +69,13 @@ pub enum WsChannel {
 
 impl WsChannel {
     /// Every channel, used by exhaustiveness tests and reverse lookup.
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 12] = [
         Self::SystemStatus,
         Self::SystemAlert,
         Self::RiskCircuitBreaker,
         Self::RiskPositionUpdate,
         Self::MarketResolved,
         Self::MarketBookUpdate,
-        Self::ControlPublished,
         Self::ConfigActivated,
         Self::OpportunityDetected,
         Self::TradeFilled,
@@ -99,7 +94,6 @@ impl WsChannel {
             Self::RiskPositionUpdate => "risk.position_update",
             Self::MarketResolved => "market.resolved",
             Self::MarketBookUpdate => "market.book_update",
-            Self::ControlPublished => "control.published",
             Self::ConfigActivated => "config.activated",
             Self::OpportunityDetected => "opportunity.detected",
             Self::TradeFilled => "trade.filled",
@@ -119,7 +113,7 @@ impl WsChannel {
             Self::SystemStatus | Self::SystemAlert => ResourceType::System,
             Self::RiskCircuitBreaker | Self::RiskPositionUpdate => ResourceType::Risk,
             Self::MarketResolved | Self::MarketBookUpdate => ResourceType::Market,
-            Self::ControlPublished | Self::MaterializationRunUpdate => ResourceType::Publication,
+            Self::MaterializationRunUpdate => ResourceType::Publication,
             Self::ConfigActivated => ResourceType::RuntimeConfig,
             Self::OpportunityDetected => ResourceType::Opportunity,
             Self::TradeFilled | Self::TradeSettled => ResourceType::Trade,

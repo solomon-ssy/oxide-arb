@@ -13,9 +13,9 @@ use crate::schema::{
 };
 
 #[quant_schema(lifecycle = "control")]
-pub enum QuantUniverseSnapshot {
+pub enum QuantMarketSelection {
     Table,
-    UniverseSnapshotId,
+    MarketSelectionId,
     AsOf,
     RuntimeConfigVersionId,
     SelectorHash,
@@ -28,44 +28,44 @@ pub enum QuantUniverseSnapshot {
 
 pub fn table() -> TableCreateStatement {
     Table::create()
-        .table(QuantUniverseSnapshot::Table)
+        .table(QuantMarketSelection::Table)
         .if_not_exists()
-        .col(column::uuid_pk(QuantUniverseSnapshot::UniverseSnapshotId))
+        .col(column::uuid_pk(QuantMarketSelection::MarketSelectionId))
         .col(
-            ColumnDef::new(QuantUniverseSnapshot::AsOf)
+            ColumnDef::new(QuantMarketSelection::AsOf)
                 .timestamp_with_time_zone()
                 .not_null(),
         )
         .col(column::uuid_fk(
-            QuantUniverseSnapshot::RuntimeConfigVersionId,
+            QuantMarketSelection::RuntimeConfigVersionId,
         ))
         .col(
-            ColumnDef::new(QuantUniverseSnapshot::SelectorHash)
+            ColumnDef::new(QuantMarketSelection::SelectorHash)
                 .text()
                 .not_null(),
         )
         .col(
-            ColumnDef::new(QuantUniverseSnapshot::MarketCount)
+            ColumnDef::new(QuantMarketSelection::MarketCount)
                 .integer()
                 .not_null(),
         )
         .col(
-            ColumnDef::new(QuantUniverseSnapshot::IncludedMarketIds)
+            ColumnDef::new(QuantMarketSelection::IncludedMarketIds)
                 .json_binary()
                 .not_null(),
         )
         .col(
-            ColumnDef::new(QuantUniverseSnapshot::ExcludedMarketIds)
+            ColumnDef::new(QuantMarketSelection::ExcludedMarketIds)
                 .json_binary()
                 .not_null(),
         )
         .col(
-            ColumnDef::new(QuantUniverseSnapshot::ExclusionSummary)
+            ColumnDef::new(QuantMarketSelection::ExclusionSummary)
                 .json_binary()
                 .not_null(),
         )
         .col(timestamp_with_write_default(
-            QuantUniverseSnapshot::CreatedAt,
+            QuantMarketSelection::CreatedAt,
         ))
         .to_owned()
 }
@@ -73,38 +73,38 @@ pub fn table() -> TableCreateStatement {
 pub fn indexes() -> Vec<IndexSpec> {
     vec![
         IndexSpec::sea_query(
-            "idx_quant_universe_snapshot_as_of",
-            quant_universe_snapshot_table_name,
+            "idx_quant_market_selection_as_of",
+            quant_market_selection_table_name,
             IndexBuildMode::Transactional,
             Index::create()
-                .name("idx_quant_universe_snapshot_as_of")
-                .table(QuantUniverseSnapshot::Table)
-                .col((QuantUniverseSnapshot::AsOf, IndexOrder::Desc))
+                .name("idx_quant_market_selection_as_of")
+                .table(QuantMarketSelection::Table)
+                .col((QuantMarketSelection::AsOf, IndexOrder::Desc))
                 .to_owned(),
-            "universe snapshots by recency",
+            "selection snapshots by recency",
         ),
         IndexSpec::sea_query(
-            "idx_quant_universe_snapshot_runtime_as_of",
-            quant_universe_snapshot_table_name,
+            "idx_quant_market_selection_runtime_as_of",
+            quant_market_selection_table_name,
             IndexBuildMode::Transactional,
             Index::create()
-                .name("idx_quant_universe_snapshot_runtime_as_of")
-                .table(QuantUniverseSnapshot::Table)
-                .col(QuantUniverseSnapshot::RuntimeConfigVersionId)
-                .col((QuantUniverseSnapshot::AsOf, IndexOrder::Desc))
+                .name("idx_quant_market_selection_runtime_as_of")
+                .table(QuantMarketSelection::Table)
+                .col(QuantMarketSelection::RuntimeConfigVersionId)
+                .col((QuantMarketSelection::AsOf, IndexOrder::Desc))
                 .to_owned(),
-            "universe snapshots by runtime config",
+            "selection snapshots by runtime config",
         ),
         IndexSpec::sea_query(
-            "idx_quant_universe_snapshot_selector_hash",
-            quant_universe_snapshot_table_name,
+            "idx_quant_market_selection_selector_hash",
+            quant_market_selection_table_name,
             IndexBuildMode::Transactional,
             Index::create()
-                .name("idx_quant_universe_snapshot_selector_hash")
-                .table(QuantUniverseSnapshot::Table)
-                .col(QuantUniverseSnapshot::SelectorHash)
+                .name("idx_quant_market_selection_selector_hash")
+                .table(QuantMarketSelection::Table)
+                .col(QuantMarketSelection::SelectorHash)
                 .to_owned(),
-            "universe snapshots by selector hash",
+            "selection snapshots by selector hash",
         ),
     ]
 }
@@ -117,6 +117,6 @@ pub const fn seed_units() -> Vec<SeedSpec> {
     Vec::new()
 }
 
-fn quant_universe_snapshot_table_name() -> String {
-    QuantUniverseSnapshot::Table.to_string()
+fn quant_market_selection_table_name() -> String {
+    QuantMarketSelection::Table.to_string()
 }

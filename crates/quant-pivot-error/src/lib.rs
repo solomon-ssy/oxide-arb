@@ -4,38 +4,33 @@
 //! [`QuantError`] enum composes them via `#[from]` so that any sub-error
 //! can propagate through `?` in functions returning [`QuantResult`].
 //!
-//! # Architecture (ng-gateway pattern)
+//! # Architecture
 //!
 //! ```text
-//! AlgoError ────────┐
-//! ApiError ─────────┤
+//! ApiError ─────────┐
 //! WsError ──────────┤
+//! RpcError ─────────┤
 //! StorageError──────┤
 //! SigningError───────┼──► QuantError
-//! RpcError ─────────┤
 //! ConfigError───────┤
 //! MarketError────────┤
-//! TradingError──────┤
-//! ReservationError──┘
+//! FeeQuoteError─────┤
+//! SeedError ────────┘
 //! ```
 
-pub mod algorithm;
 pub mod api;
 pub mod auth;
 pub mod config;
 pub mod config_validation;
-pub mod control;
 pub mod fee;
+pub mod hashing;
 pub mod market;
 pub mod rbac;
-pub mod redeem;
-pub mod reservation;
 pub mod rpc;
 pub mod security;
 pub mod seed;
 pub mod signing;
 pub mod storage;
-pub mod trading;
 pub mod ws;
 
 pub use config_validation::{ConfigValidationError, ConfigValidationReport, ConfigWarning};
@@ -51,10 +46,6 @@ pub type QuantResult<T> = Result<T, QuantError>;
 /// enabling ergonomic `?` propagation from any subsystem.
 #[derive(Debug, Error)]
 pub enum QuantError {
-    // ── Algorithm ─────────────────────────────────────────────────────────
-    #[error(transparent)]
-    Algorithm(#[from] algorithm::AlgoError),
-
     // ── API / Network ───────────────────────────────────────────────────
     #[error(transparent)]
     Api(#[from] api::ApiError),
@@ -88,30 +79,11 @@ pub enum QuantError {
     #[error(transparent)]
     Config(#[from] config::ConfigError),
 
-    #[error(transparent)]
-    Control(#[from] control::GovernanceError),
-
-    #[error(transparent)]
-    Materialization(#[from] control::MaterializationError),
-
-    #[error("control-factor snapshot build failed: {0}")]
-    SnapshotBuild(#[from] control::SnapshotBuildError),
-
     // ── Market catalog ──────────────────────────────────────────────────
     #[error(transparent)]
     Market(#[from] market::MarketError),
 
-    // ── Trading ─────────────────────────────────────────────────────────
-    #[error(transparent)]
-    Trading(#[from] trading::TradingError),
-
-    // ── Reservation ──────────────────────────────────────────────────────
-    #[error(transparent)]
-    Reservation(#[from] reservation::ReservationError),
-
-    #[error(transparent)]
-    Redeem(#[from] redeem::RedeemError),
-
+    // ── Polymarket fees ─────────────────────────────────────────────────
     #[error(transparent)]
     FeeQuote(#[from] fee::FeeQuoteError),
 
@@ -199,16 +171,6 @@ mod tests {
         ));
         let oxide_err: QuantError = cfg_err.into();
         assert!(matches!(oxide_err, QuantError::Config(_)));
-    }
-
-    #[test]
-    fn trading_error_propagates() {
-        let t_err = trading::TradingError::CircuitBreakerOpen {
-            level: 3,
-            reason: "drawdown exceeded".into(),
-        };
-        let oxide_err: QuantError = t_err.into();
-        assert!(matches!(oxide_err, QuantError::Trading(_)));
     }
 
     #[test]

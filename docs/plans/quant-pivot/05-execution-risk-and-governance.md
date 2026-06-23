@@ -174,6 +174,8 @@ Admission 不是旧 `RiskPipeline` 的兼容层，而是新执行前置门。
 
 ### 4.1 输入
 
+> `account snapshot` / `current exposure` / `filled positions` / `account balance` 的统一类型与 provider（report_only 配置预算 vs 执行模式真实余额/持仓）见 [09 — 账户、资本、持仓与对账设计](09-account-capital-position-reconciliation.md)。
+
 - `OrderIntent`
 - latest book snapshot。
 - account snapshot。
@@ -350,6 +352,8 @@ Kill switch 状态：
 
 ## 9. Capital Allocation
 
+> 资金状态机、`AccountSnapshot`、`quant_capital_allocation` / `quant_position` 表的完整设计见 [09 — 账户、资本、持仓与对账设计](09-account-capital-position-reconciliation.md)。
+
 旧 reservation system 删除。新系统使用：
 
 - report-level budget。
@@ -410,6 +414,8 @@ Kill switch 状态：
 - `operator`: mode switch / kill switch。
 
 ## 11. Reconciliation
+
+> `quant_reconciliation` 表、证据链与 `PolymarketAccountClient` 数据源见 [09 — 账户、资本、持仓与对账设计](09-account-capital-position-reconciliation.md)。
 
 新 reconciliation 只服务 execution order，不服务旧 trade。
 

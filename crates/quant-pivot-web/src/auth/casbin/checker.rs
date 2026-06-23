@@ -9,10 +9,6 @@
 //! manifest (see [`crate::routes`]), so every registered protected route is
 //! guaranteed to have a rule by construction.
 
-use std::collections::HashMap;
-
-use actix_web::http::Method;
-
 use crate::{
     auth::casbin::{
         rules::{AuthzOutcome, Rule},
@@ -22,6 +18,8 @@ use crate::{
     extractors::ActorRoles,
     jwt::Claims,
 };
+use actix_web::http::Method;
+use std::collections::HashMap;
 
 /// The role code whose holders bypass all route-level authorization.
 pub const SUPER_ADMIN_ROLE: &str = "super_admin";
@@ -170,13 +168,13 @@ mod tests {
         let mut checker = PermChecker::new();
         checker.register(
             Method::POST,
-            "/api/control-factors/{id}/publish",
-            Rule::ActingRoleGoverned(ResourceType::ControlFactor, Operation::Publish),
+            "/api/runtime-config/{id}/activate",
+            Rule::ActingRoleGoverned(ResourceType::RuntimeConfig, Operation::Activate),
         );
         let outcome = checker
             .check(
                 &Method::POST,
-                "/api/control-factors/{id}/publish",
+                "/api/runtime-config/{id}/activate",
                 &claims(),
                 &roles(&[
                     (SUPER_ADMIN_ROLE, RoleStatus::Enabled),
@@ -196,14 +194,14 @@ mod tests {
         let mut checker = PermChecker::new();
         checker.register(
             Method::POST,
-            "/api/control-factors/{id}/publish",
-            Rule::ActingRoleGoverned(ResourceType::ControlFactor, Operation::Publish),
+            "/api/runtime-config/{id}/activate",
+            Rule::ActingRoleGoverned(ResourceType::RuntimeConfig, Operation::Activate),
         );
         // No header at all → attributed to the literal super_admin.
         let bare = checker
             .check(
                 &Method::POST,
-                "/api/control-factors/{id}/publish",
+                "/api/runtime-config/{id}/activate",
                 &claims(),
                 &roles(&[(SUPER_ADMIN_ROLE, RoleStatus::Enabled)]),
                 &casbin,
@@ -216,7 +214,7 @@ mod tests {
         let unheld = checker
             .check(
                 &Method::POST,
-                "/api/control-factors/{id}/publish",
+                "/api/runtime-config/{id}/activate",
                 &claims(),
                 &roles(&[(SUPER_ADMIN_ROLE, RoleStatus::Enabled)]),
                 &casbin,

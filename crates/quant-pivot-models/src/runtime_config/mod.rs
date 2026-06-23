@@ -29,8 +29,8 @@ pub struct RuntimeConfig {
     /// Document schema version; must equal [`RUNTIME_CONFIG_SCHEMA_VERSION`].
     #[schemars(extend("x-format" = "integer", "x-ui-visible" = false))]
     pub schema_version: i32,
-    /// Market universe selection policy for reports and model runs.
-    pub universe: UniverseConfig,
+    /// Market selection selection policy for reports and model runs.
+    pub selection: SelectionConfig,
     /// Data-quality gates used before feature/model/report generation.
     pub data_quality: DataQualityConfig,
     /// Feature schema and enabled feature families.
@@ -53,7 +53,7 @@ impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
             schema_version: RUNTIME_CONFIG_SCHEMA_VERSION,
-            universe: UniverseConfig::default(),
+            selection: SelectionConfig::default(),
             data_quality: DataQualityConfig::default(),
             features: FeaturesConfig::default(),
             factors: FactorsConfig::default(),

@@ -1,11 +1,5 @@
 //! Binds the bootstrap admin user to the `super_admin` role.
 
-use std::{future::Future, pin::Pin};
-
-use sea_orm::{
-    ActiveValue::Set, ConnectionTrait, DbErr, EntityTrait, QueryTrait, sea_query::OnConflict,
-};
-
 use crate::{
     entities::user_role,
     idens::user_role::user_role_table_name,
@@ -16,6 +10,10 @@ use crate::{
     },
     types::UserId,
 };
+use sea_orm::{
+    ActiveValue::Set, ConnectionTrait, DbErr, EntityTrait, QueryTrait, sea_query::OnConflict,
+};
+use std::{future::Future, pin::Pin};
 
 const SEED_ID: &str = "rbac.user_role.bootstrap";
 

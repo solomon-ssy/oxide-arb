@@ -66,9 +66,9 @@ impl OrderId {
 
 // ── Internal UUID identifiers (Arc<Uuid>) ────────────────────────────────
 
-/// Market universe snapshot used by a report or model run.
+/// Market selection snapshot used by a report or model run.
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
-pub struct UniverseSnapshotId(Arc<Uuid>);
+pub struct MarketSelectionId(Arc<Uuid>);
 
 /// Point-in-time feature vector snapshot identifier.
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]

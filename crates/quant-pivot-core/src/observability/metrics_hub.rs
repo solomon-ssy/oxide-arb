@@ -1,11 +1,12 @@
-//! Phase 0 operational metrics — ingest plane, catalog sync, hotset, shutdown.
+//! Operational metrics for the quant-pivot runtime.
 //!
-//! Endgame detection / execution / risk / settlement / control-factor series
-//! were removed in Phase 0. Hotset metric names stay until Phase 2 renames them
-//! to quant universe ingest policy (see `07-implementation-phases.md`).
+//! Covers the ingest plane, catalog sync, subscription ingest, fact writers, and
+//! shutdown. Legacy Endgame detection / execution / risk / settlement /
+//! control-factor series do not exist here.
 
 use prometheus::{
-    Encoder, Gauge, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts, Registry, TextEncoder,
+    Encoder, Gauge, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec,
+    Opts, Registry, TextEncoder,
 };
 
 macro_rules! register_counter {
@@ -40,6 +41,18 @@ macro_rules! register_counter_vec {
     }};
 }
 
+macro_rules! register_histogram_vec {
+    ($registry:expr, $name:expr, $help:expr, $labels:expr, $buckets:expr) => {{
+        let histogram_vec = HistogramVec::new(
+            HistogramOpts::new($name, $help).buckets($buckets.to_vec()),
+            $labels,
+        )
+        .unwrap();
+        $registry.register(Box::new(histogram_vec.clone())).unwrap();
+        histogram_vec
+    }};
+}
+
 macro_rules! register_gauge_vec {
     ($registry:expr, $name:expr, $help:expr, $labels:expr) => {{
         let gauge_vec = IntGaugeVec::new(Opts::new($name, $help), $labels).unwrap();
@@ -47,6 +60,11 @@ macro_rules! register_gauge_vec {
         gauge_vec
     }};
 }
+
+/// Lag buckets in seconds for fact ingest histograms (1 ms … 60 s).
+const FACT_LAG_BUCKETS_SECS: &[f64] = &[
+    0.001, 0.005, 0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0,
+];
 
 /// Central Prometheus registry for Phase 0 live paths only.
 pub struct MetricsHub {
@@ -62,10 +80,9 @@ pub struct MetricsHub {
     pub ws_shard_connected: IntGaugeVec,
     pub book_store_token_count: IntGauge,
 
-    // ── Backpressure (book apply coalesce / coalescer dedup) ────────────
+    // ── Backpressure (book apply latest-wins coalesce) ──────────────────
     pub book_apply_dropped: IntCounter,
     pub book_apply_coalesced_total: IntCounter,
-    pub coalescer_dropped: IntCounter,
     pub backpressure_events: IntCounterVec,
 
     // ── Gamma catalog sync ──────────────────────────────────────────────
@@ -76,13 +93,20 @@ pub struct MetricsHub {
     pub gamma_markets_paused: IntCounterVec,
     pub catalog_ready: IntGauge,
 
-    // ── WS engine hotset (renamed in Phase 2) ───────────────────────────
-    pub hotset_candidates_total: IntCounterVec,
-    pub hotset_selected_total: IntCounterVec,
-    pub hotset_detection_window_coverage_ratio: Gauge,
+    // ── WS engine subscription ingest ────────────────────────────────────
+    pub subscription_candidates_total: IntCounterVec,
+    pub subscription_selected_total: IntCounterVec,
+    pub subscription_window_coverage_ratio: Gauge,
 
-    // ── Infra ───────────────────────────────────────────────────────────
+    // ── Data quality ──────────────────────────────────────────────────────
+    pub data_quality_tokens: IntGaugeVec,
+    pub fact_lag_worst_ms: IntGauge,
+    pub fact_lag_seconds: HistogramVec,
+
+    // ── Infra / async writers ─────────────────────────────────────────────
     pub async_writer_dropped: IntCounterVec,
+    pub async_writer_queue_depth: IntGaugeVec,
+    pub async_writer_flush_failed: IntCounterVec,
     pub shutdown_stage_progress_remaining: IntGaugeVec,
     pub shutdown_stage_timeouts: IntCounterVec,
 }
@@ -101,7 +125,6 @@ struct PipelineMetrics {
 struct BackpressureMetrics {
     book_apply_dropped: IntCounter,
     book_apply_coalesced_total: IntCounter,
-    coalescer_dropped: IntCounter,
     backpressure_events: IntCounterVec,
 }
 
@@ -114,7 +137,7 @@ struct GammaMetrics {
     catalog_ready: IntGauge,
 }
 
-struct HotsetMetrics {
+struct SubscriptionMetrics {
     candidates_total: IntCounterVec,
     selected_total: IntCounterVec,
     detection_window_coverage_ratio: Gauge,
@@ -122,6 +145,8 @@ struct HotsetMetrics {
 
 struct InfraMetrics {
     async_writer_dropped: IntCounterVec,
+    async_writer_queue_depth: IntGaugeVec,
+    async_writer_flush_failed: IntCounterVec,
     shutdown_stage_progress_remaining: IntGaugeVec,
     shutdown_stage_timeouts: IntCounterVec,
 }
@@ -184,11 +209,6 @@ fn register_backpressure_metrics(registry: &Registry) -> BackpressureMetrics {
             "quant_pivot_book_apply_coalesced_total",
             "Book apply events coalesced under backpressure"
         ),
-        coalescer_dropped: register_counter!(
-            registry,
-            "quant_pivot_backpressure_coalescer_dropped_total",
-            "Coalescer notify events dropped under backpressure"
-        ),
         backpressure_events: register_counter_vec!(
             registry,
             "quant_pivot_backpressure_events_total",
@@ -235,24 +255,24 @@ fn register_gamma_metrics(registry: &Registry) -> GammaMetrics {
     }
 }
 
-fn register_hotset_metrics(registry: &Registry) -> HotsetMetrics {
-    HotsetMetrics {
+fn register_subscription_metrics(registry: &Registry) -> SubscriptionMetrics {
+    SubscriptionMetrics {
         candidates_total: register_counter_vec!(
             registry,
-            "quant_pivot_hotset_candidates_total",
-            "Engine hotset candidate markets by kind (Phase 2: rename to universe ingest)",
+            "quant_pivot_subscription_candidates_total",
+            "WS subscription-ingest candidate markets by kind",
             &["kind"]
         ),
         selected_total: register_counter_vec!(
             registry,
-            "quant_pivot_hotset_selected_total",
-            "Engine hotset selected markets by kind (Phase 2: rename to universe ingest)",
+            "quant_pivot_subscription_selected_total",
+            "WS subscription-ingest selected markets by kind",
             &["kind"]
         ),
         detection_window_coverage_ratio: register_gauge_float!(
             registry,
-            "quant_pivot_hotset_detection_window_coverage_ratio",
-            "Share of eligible markets covered by the detection window (Phase 2 rename)"
+            "quant_pivot_subscription_window_coverage_ratio",
+            "Share of eligible markets covered by the subscription look-ahead window"
         ),
     }
 }
@@ -262,7 +282,19 @@ fn register_infra_metrics(registry: &Registry) -> InfraMetrics {
         async_writer_dropped: register_counter_vec!(
             registry,
             "quant_pivot_system_async_writer_dropped_total",
-            "Async writer batches dropped by writer name",
+            "Async writer items dropped by writer name",
+            &["writer"]
+        ),
+        async_writer_queue_depth: register_gauge_vec!(
+            registry,
+            "quant_pivot_system_async_writer_queue_depth",
+            "Pending items in the async writer channel",
+            &["writer"]
+        ),
+        async_writer_flush_failed: register_counter_vec!(
+            registry,
+            "quant_pivot_system_async_writer_flush_failed_total",
+            "Async writer batch flush failures by writer name",
             &["writer"]
         ),
         shutdown_stage_progress_remaining: register_gauge_vec!(
@@ -286,8 +318,26 @@ impl MetricsHub {
         let pipeline = register_pipeline_metrics(&registry);
         let backpressure = register_backpressure_metrics(&registry);
         let gamma = register_gamma_metrics(&registry);
-        let hotset = register_hotset_metrics(&registry);
+        let subscription = register_subscription_metrics(&registry);
         let infra = register_infra_metrics(&registry);
+        let data_quality_tokens = register_gauge_vec!(
+            &registry,
+            "quant_pivot_data_quality_tokens",
+            "Live book tokens by data-quality status",
+            &["status"]
+        );
+        let fact_lag_worst_ms = register_gauge_int!(
+            &registry,
+            "quant_pivot_fact_lag_worst_ms",
+            "Peak ingest-side fact lag in the last observation window (milliseconds)"
+        );
+        let fact_lag_seconds = register_histogram_vec!(
+            &registry,
+            "quant_pivot_fact_lag_seconds",
+            "Ingest-side fact lag (ingestion_time - event_time) by stream",
+            &["stream"],
+            FACT_LAG_BUCKETS_SECS
+        );
 
         Self {
             registry,
@@ -301,7 +351,6 @@ impl MetricsHub {
             book_store_token_count: pipeline.book_store_token_count,
             book_apply_dropped: backpressure.book_apply_dropped,
             book_apply_coalesced_total: backpressure.book_apply_coalesced_total,
-            coalescer_dropped: backpressure.coalescer_dropped,
             backpressure_events: backpressure.backpressure_events,
             gamma_sync_duration_ms: gamma.gamma_sync_duration_ms,
             gamma_markets_total: gamma.gamma_markets_total,
@@ -309,12 +358,46 @@ impl MetricsHub {
             gamma_markets_rejected: gamma.gamma_markets_rejected,
             gamma_markets_paused: gamma.gamma_markets_paused,
             catalog_ready: gamma.catalog_ready,
-            hotset_candidates_total: hotset.candidates_total,
-            hotset_selected_total: hotset.selected_total,
-            hotset_detection_window_coverage_ratio: hotset.detection_window_coverage_ratio,
+            subscription_candidates_total: subscription.candidates_total,
+            subscription_selected_total: subscription.selected_total,
+            subscription_window_coverage_ratio: subscription.detection_window_coverage_ratio,
+            data_quality_tokens,
+            fact_lag_worst_ms,
+            fact_lag_seconds,
             async_writer_dropped: infra.async_writer_dropped,
+            async_writer_queue_depth: infra.async_writer_queue_depth,
+            async_writer_flush_failed: infra.async_writer_flush_failed,
             shutdown_stage_progress_remaining: infra.shutdown_stage_progress_remaining,
             shutdown_stage_timeouts: infra.shutdown_stage_timeouts,
+        }
+    }
+
+    /// Observe one fact-lag sample for a named stream.
+    pub fn observe_fact_lag_ms(&self, stream: &str, lag_ms: u64) {
+        let whole_secs = lag_ms / 1_000;
+        let frac_ms = u32::try_from(lag_ms % 1_000).unwrap_or(u32::MAX);
+        let lag_secs =
+            f64::from(u32::try_from(whole_secs).unwrap_or(u32::MAX)) + f64::from(frac_ms) / 1_000.0;
+        self.fact_lag_seconds
+            .with_label_values(&[stream])
+            .observe(lag_secs);
+    }
+
+    /// Publish the peak fact lag for the elapsed observation window.
+    pub fn set_fact_lag_worst_ms(&self, lag_ms: u64) {
+        self.fact_lag_worst_ms
+            .set(i64::try_from(lag_ms).unwrap_or(i64::MAX));
+    }
+
+    /// Build observability handles for one named async writer.
+    #[must_use]
+    pub fn async_writer_observability(
+        &self,
+        writer: &'static str,
+    ) -> quant_pivot_storage::write::AsyncWriterObservability {
+        quant_pivot_storage::write::AsyncWriterObservability {
+            queue_depth: Some(self.async_writer_queue_depth.with_label_values(&[writer])),
+            flush_failed: Some(self.async_writer_flush_failed.with_label_values(&[writer])),
         }
     }
 
@@ -329,6 +412,13 @@ impl MetricsHub {
         self.shutdown_stage_progress_remaining
             .with_label_values(&[stage])
             .set(i64::try_from(remaining).unwrap_or(i64::MAX));
+    }
+
+    /// Publish per-status live-book counts for data-quality observability.
+    pub fn set_data_quality_tokens(&self, status: &str, count: u64) {
+        self.data_quality_tokens
+            .with_label_values(&[status])
+            .set(i64::try_from(count).unwrap_or(i64::MAX));
     }
 
     /// Gather all registered metrics in Prometheus text exposition format.

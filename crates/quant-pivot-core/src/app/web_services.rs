@@ -10,8 +10,8 @@ use quant_pivot_api::ws::SubscriptionSource;
 use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
     domain::{
-        BookSnapshot, CatalogStatusPort, MarketDataPort, MetricsScrapePort, RuntimeConfigPort,
-        RuntimeControlError,
+        BookSnapshot, CatalogStatusPort, DataQualityPort, MarketDataPort, MetricsScrapePort,
+        NewOperationLog, RuntimeConfigPort, RuntimeControlError,
     },
     types::TokenId,
 };
@@ -22,10 +22,14 @@ use quant_pivot_repository::{
         PgRolePermissionRepository, PgRoleRepository, PgRuntimeConfigVersionRepository,
         PgUserRepository, PgUserRoleRepository,
     },
+    traits::OperationLogRepository,
+};
+use quant_pivot_storage::write::{
+    AsyncWriter, AsyncWriterConfig, AsyncWriterObservability, AsyncWriterWorker,
 };
 use quant_pivot_web::{
     AppState,
-    audit::{OperationLogBuffer, spawn_operation_log_writer},
+    audit::OperationLogBuffer,
     auth::casbin::CasbinService,
     jwt::{JwtService, TokenBlacklist},
     readiness::PgRedisReadiness,
@@ -51,8 +55,7 @@ impl AppContext {
             &self.config.web.jwt,
             Arc::clone(&self.infra.jwt_blacklist) as Arc<dyn TokenBlacklist>,
         ));
-        let (operation_log, op_log_rx) = OperationLogBuffer::new(OPERATION_LOG_BUFFER_CAPACITY);
-        let operation_log_repo = Arc::clone(&self.infra.operation_log_repo);
+        let (operation_log, op_log_worker) = build_operation_log_writer(self);
 
         let event_rx = self
             .event_rx
@@ -86,6 +89,7 @@ impl AppContext {
                 ws_manager: Arc::clone(&self.data.ws_manager),
             }),
             catalog: Arc::clone(&self.catalog) as Arc<dyn CatalogStatusPort>,
+            data_quality: Arc::clone(&self.data_quality) as Arc<dyn DataQualityPort>,
             events: self.events.clone(),
             markets: pg_arc_repo!(pg, PgMarketRepository),
             ws_sessions,
@@ -112,20 +116,53 @@ impl AppContext {
             spawn_ws_broadcaster(event_rx, ws_registry, token).await;
         });
 
-        let op_repo = operation_log_repo;
-        runner.spawn(TaskId::OperationLogWriter, move |token| async move {
-            spawn_operation_log_writer(
-                op_log_rx,
-                op_repo,
-                OPERATION_LOG_BATCH_SIZE,
-                OPERATION_LOG_FLUSH_INTERVAL,
-                token,
-            )
-            .await;
+        runner.spawn(TaskId::OperationLogWriter, move |token| {
+            op_log_worker.run(token)
         });
 
         Ok(())
     }
+}
+
+/// Wire the best-effort Postgres operation-log `AsyncWriter`.
+fn build_operation_log_writer(
+    ctx: &AppContext,
+) -> (OperationLogBuffer, AsyncWriterWorker<NewOperationLog>) {
+    let op_log_repo = Arc::clone(&ctx.infra.operation_log_repo);
+    let op_log_drops = ctx
+        .infra
+        .metrics
+        .async_writer_dropped
+        .with_label_values(&["operation_log"]);
+    let (op_log_writer, op_log_worker) = AsyncWriter::new(
+        AsyncWriterConfig::new("operation_log")
+            .capacity(OPERATION_LOG_BUFFER_CAPACITY)
+            .batch_size(OPERATION_LOG_BATCH_SIZE)
+            .flush_interval(OPERATION_LOG_FLUSH_INTERVAL),
+        move |rows: Vec<NewOperationLog>| {
+            let repo = Arc::clone(&op_log_repo);
+            Box::pin(async move { repo.append_batch(rows).await })
+        },
+        op_log_drops,
+        AsyncWriterObservability {
+            queue_depth: Some(
+                ctx.infra
+                    .metrics
+                    .async_writer_queue_depth
+                    .with_label_values(&["operation_log"]),
+            ),
+            flush_failed: Some(
+                ctx.infra
+                    .metrics
+                    .async_writer_flush_failed
+                    .with_label_values(&["operation_log"]),
+            ),
+        },
+    );
+    (
+        OperationLogBuffer::new(Arc::new(op_log_writer)),
+        op_log_worker,
+    )
 }
 
 struct CoreMetricsScrape {

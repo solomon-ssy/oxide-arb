@@ -344,6 +344,15 @@ SignalCandidate 还不是 recommendation。必须进入 portfolio planner。
 
 ## 7. Point-in-Time Backtest
 
+> 实施状态（Phase 2 → Phase 3）：`PointInTimeDataSource` trait 已在 Phase 2 落地
+> （`quant-pivot-models` `domain::data_plane::point_in_time`），并提供 **live** 实现
+> `LiveBookDataSource`（`quant-pivot-core` `pipeline::point_in_time`）服务当前
+> `BookStore`/`MarketRegistry` 状态、由 `AppContext::pit_source` 注入。
+> **historical / ClickHouse-backed PIT resolver（严格按过去 `as_of` 读取、无 look-ahead）
+> 是 Phase 3 工作项**：实现同一 trait 的历史源，从 ClickHouse `book_l2_replay_hot` /
+> `book_snapshots` / `tick_events` + Postgres metadata 版本按 `as_of` 解析，供回测与训练
+> 数据集构建使用。
+
 ### 7.1 输入解析
 
 PIT resolver 需要按 `as_of` 读取：

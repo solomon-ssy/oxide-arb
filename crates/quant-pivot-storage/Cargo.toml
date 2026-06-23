@@ -32,6 +32,8 @@ chrono = { workspace = true }
 uuid = { workspace = true }
 rust_decimal = { workspace = true }
 backoff = { workspace = true }
+flume = { workspace = true }
+parking_lot = { workspace = true }
 testcontainers = { workspace = true, optional = true }
 testcontainers-modules = { workspace = true, optional = true }
 

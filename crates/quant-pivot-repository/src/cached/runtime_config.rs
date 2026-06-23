@@ -11,7 +11,6 @@ use quant_pivot_models::{
     domain::{
         NewRuntimeConfigActivation, NewRuntimeConfigVersion, RuntimeConfigActivationInfo,
         RuntimeConfigVersionInfo,
-        control_factor::{AuditedOutcome, NewControlFactorAuditEvent},
     },
     types::RuntimeConfigVersionId,
 };
@@ -57,32 +56,6 @@ impl<R: RuntimeConfigVersionRepository> RuntimeConfigVersionRepository
         let info = self.inner.activate_version(activation).await?;
         self.invalidate_active().await;
         Ok(info)
-    }
-
-    async fn create_version_governed(
-        &self,
-        version: NewRuntimeConfigVersion,
-        audit: NewControlFactorAuditEvent,
-    ) -> Result<AuditedOutcome<RuntimeConfigVersionInfo>, StorageError> {
-        let outcome = self.inner.create_version_governed(version, audit).await?;
-        let key = CacheKey::RuntimeConfigVersion {
-            version_id: outcome.value.runtime_config_version_id.clone(),
-        };
-        let _ = self.cache.set_json(&key, &outcome.value).await;
-        Ok(outcome)
-    }
-
-    async fn activate_version_governed(
-        &self,
-        activation: NewRuntimeConfigActivation,
-        audit: NewControlFactorAuditEvent,
-    ) -> Result<AuditedOutcome<RuntimeConfigActivationInfo>, StorageError> {
-        let outcome = self
-            .inner
-            .activate_version_governed(activation, audit)
-            .await?;
-        self.invalidate_active().await;
-        Ok(outcome)
     }
 
     async fn load_current_activation(

@@ -9,9 +9,9 @@ mod model;
 mod portfolio;
 pub mod prelude;
 mod recommendation;
+#[allow(clippy::needless_update)] // NewMarketSelectionMember covers all ActiveModel columns
+mod selection;
 mod signal;
-#[allow(clippy::needless_update)] // NewUniverseMember covers all ActiveModel columns
-mod universe;
 
 pub use attribution::*;
 pub use execution::*;
@@ -20,5 +20,5 @@ pub use feature::*;
 pub use model::*;
 pub use portfolio::*;
 pub use recommendation::*;
+pub use selection::*;
 pub use signal::*;
-pub use universe::*;

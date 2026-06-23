@@ -3,12 +3,7 @@
 use crate::observability::metrics_hub::MetricsHub;
 use dashmap::DashMap;
 use quant_pivot_models::{domain::pipeline::PipelineEvent, types::TokenId};
-use std::{
-    sync::Arc,
-    time::{Duration, Instant},
-};
-
-const COALESCER_DEDUP_WINDOW: Duration = Duration::from_micros(500);
+use std::sync::Arc;
 
 type BookCoalesceKey = TokenId;
 
@@ -17,18 +12,18 @@ type BookCoalesceKey = TokenId;
 pub enum BackpressureAction {
     /// Book event stored for latest-wins coalesce.
     Coalesced,
-    /// Coalescer notify deduplicated within the window.
-    Deduped,
-    /// Event/job truly dropped (non-coalescable or below eviction threshold).
+    /// Event truly dropped (non-coalescable or below eviction threshold).
     Dropped,
 }
 
-/// Central backpressure policy for the three hot-path coalesce/evict sites.
+/// Central backpressure policy for the book-apply hot-path coalesce site.
+///
+/// When a per-shard `book_apply` channel is full, the latest book event for a
+/// token replaces any pending one (latest-wins), so the worker never blocks the
+/// WS ingress and stale intermediate deltas are coalesced away.
 pub struct BackpressurePolicy {
     metrics: Arc<MetricsHub>,
     book_coalesce: Vec<DashMap<BookCoalesceKey, PipelineEvent>>,
-    coalescer_dedup: DashMap<TokenId, Instant>,
-    coalescer_dedup_window: Duration,
 }
 
 impl BackpressurePolicy {
@@ -37,20 +32,10 @@ impl BackpressurePolicy {
         Self {
             metrics,
             book_coalesce: (0..shard_count).map(|_| DashMap::new()).collect(),
-            coalescer_dedup: DashMap::new(),
-            coalescer_dedup_window: COALESCER_DEDUP_WINDOW,
         }
     }
 
-    /// Override the dedup window — tests only, for wall-clock determinism.
-    #[cfg(test)]
-    #[must_use]
-    const fn with_coalescer_dedup_window(mut self, window: Duration) -> Self {
-        self.coalescer_dedup_window = window;
-        self
-    }
-
-    /// Site 1 — `book_apply` channel full: latest-wins coalesce per (shard, token).
+    /// `book_apply` channel full: latest-wins coalesce per (shard, token).
     pub fn on_book_channel_full(&self, shard: usize, event: PipelineEvent) -> BackpressureAction {
         let Some(token) = event.asset_id().cloned() else {
             self.record_book_drop();
@@ -82,34 +67,10 @@ impl BackpressurePolicy {
         }
     }
 
-    /// Site 2 — coalescer notify succeeded: record dedup window anchor.
-    pub fn on_coalescer_notify_success(&self, token: &TokenId) {
-        self.coalescer_dedup.insert(token.clone(), Instant::now());
-    }
-
-    /// Site 2 — coalescer `token_tx` full: dedup within 500µs else count drop.
-    pub fn on_coalescer_channel_full(&self, token: &TokenId) -> BackpressureAction {
-        if let Some(last) = self.coalescer_dedup.get(token) {
-            if last.elapsed() < self.coalescer_dedup_window {
-                self.record_event("coalescer", "dedup");
-                return BackpressureAction::Deduped;
-            }
-        }
-
-        self.record_coalescer_drop();
-        BackpressureAction::Dropped
-    }
-
     #[cold]
     fn record_book_drop(&self) {
         self.metrics.book_apply_dropped.inc();
         self.record_event("book_apply", "drop");
-    }
-
-    #[cold]
-    fn record_coalescer_drop(&self) {
-        self.metrics.coalescer_dropped.inc();
-        self.record_event("coalescer", "drop");
     }
 
     fn record_event(&self, site: &'static str, action: &'static str) {
@@ -122,7 +83,8 @@ impl BackpressurePolicy {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{BackpressureAction, BackpressurePolicy};
+    use crate::observability::metrics_hub::MetricsHub;
     use quant_pivot_models::{
         domain::pipeline::{IngressTrace, PipelineEvent, PriceDeltaCmd, PriceLevelDelta},
         enums::common::Side,
@@ -152,22 +114,5 @@ mod tests {
             BackpressureAction::Coalesced
         );
         assert_eq!(metrics.book_apply_coalesced_total.get(), 1);
-    }
-
-    #[test]
-    fn coalescer_dedup_within_window() {
-        let metrics = Arc::new(MetricsHub::new());
-        // A generous window keeps the assertion deterministic under loaded
-        // parallel test runs (the production default is 500µs of wall clock).
-        let bp = BackpressurePolicy::new(Arc::clone(&metrics), 1)
-            .with_coalescer_dedup_window(Duration::from_secs(60));
-        let token = TokenId::new("t1");
-
-        bp.on_coalescer_notify_success(&token);
-        assert_eq!(
-            bp.on_coalescer_channel_full(&token),
-            BackpressureAction::Deduped
-        );
-        assert_eq!(metrics.coalescer_dropped.get(), 0);
     }
 }

@@ -18,6 +18,12 @@
 
 use std::{rc::Rc, str::FromStr, time::Instant};
 
+use crate::{
+    audit::OperationContext,
+    extractors::{ActingRole, RequestId},
+    jwt::Claims,
+    state::AppState,
+};
 use actix_web::{
     Error, HttpMessage,
     body::MessageBody,
@@ -30,13 +36,6 @@ use quant_pivot_models::{
     domain::NewOperationLog,
     enums::operation_log::{OperationCategory, OperationOutcome},
     types::{OperationLogId, UserId},
-};
-
-use crate::{
-    audit::OperationContext,
-    extractors::{ActingRole, RequestId},
-    jwt::Claims,
-    state::AppState,
 };
 
 /// Capture every mutating request / auth event into the operation log.

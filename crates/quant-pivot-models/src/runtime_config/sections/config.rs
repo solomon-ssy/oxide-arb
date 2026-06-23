@@ -1,21 +1,22 @@
 //! Runtime-config section structs grouped by document area.
 
-use crate::enums::{common::MarketCategory, quant::QuantRuntimeMode};
+use crate::{
+    enums::{common::MarketCategory, quant::QuantRuntimeMode},
+    runtime_config::wire::{
+        CapitalPolicy, ConfidenceSizeCurve, DecimalString, DomainFeaturePolicy,
+        DrawdownMultiplierPolicy, EntryOrderPolicy, ExecutionAdmissionPolicy, ExitOrderPolicy,
+        FactorWeights, FeatureFamily, FeatureStalenessPolicy, KillSwitchPolicy, MarketIdList,
+        MissingFactorPolicy, ModelVersionRef, NotificationPolicies, ReconciliationPolicy,
+        ReportDeliveryPolicy,
+    },
+};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::runtime_config::wire::{
-    CapitalPolicy, ConfidenceSizeCurve, DecimalString, DomainFeaturePolicy,
-    DrawdownMultiplierPolicy, EntryOrderPolicy, ExecutionAdmissionPolicy, ExitOrderPolicy,
-    FactorWeights, FeatureFamily, FeatureStalenessPolicy, KillSwitchPolicy, MarketIdList,
-    MissingFactorPolicy, ModelVersionRef, NotificationPolicies, ReconciliationPolicy,
-    ReportDeliveryPolicy,
-};
-
-/// Market universe selection policy.
+/// Market selection selection policy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
-pub struct UniverseConfig {
+pub struct SelectionConfig {
     /// Category slugs eligible for quant reports.
     pub enabled_categories: Vec<MarketCategory>,
     /// Explicitly excluded Polymarket condition ids.
@@ -28,17 +29,17 @@ pub struct UniverseConfig {
     pub min_volume_24h_usd: DecimalString,
     /// Maximum allowed top-of-book spread in basis points.
     pub max_spread_bps: u32,
-    /// Whether near-resolution markets may enter the universe.
+    /// Whether near-resolution markets may enter the selection.
     pub allow_near_resolution: bool,
     /// Minimum seconds until market resolution.
     pub min_time_to_resolution_secs: u64,
     /// Maximum seconds until market resolution.
     pub max_time_to_resolution_secs: u64,
     /// Hard cap on selected markets.
-    pub max_universe_size: u32,
+    pub max_selection_size: u32,
 }
 
-impl Default for UniverseConfig {
+impl Default for SelectionConfig {
     fn default() -> Self {
         Self {
             enabled_categories: Vec::new(),
@@ -50,7 +51,7 @@ impl Default for UniverseConfig {
             allow_near_resolution: false,
             min_time_to_resolution_secs: 3_600,
             max_time_to_resolution_secs: 31_536_000,
-            max_universe_size: 1_000,
+            max_selection_size: 1_000,
         }
     }
 }
@@ -241,8 +242,8 @@ pub struct ReportScheduleConfig {
     pub interval_secs: u64,
     /// `TopN` size for this schedule.
     pub top_n: u32,
-    /// Optional universe filter reference.
-    pub universe_filter_ref: Option<String>,
+    /// Optional selection filter reference.
+    pub market_filter_ref: Option<String>,
     /// Optional model version override.
     pub model_version_ref: Option<String>,
     /// Source delay in seconds.
@@ -257,7 +258,7 @@ impl Default for ReportScheduleConfig {
             schedule_id: "default_interval".to_owned(),
             interval_secs: 300,
             top_n: 20,
-            universe_filter_ref: None,
+            market_filter_ref: None,
             model_version_ref: None,
             source_delay_secs: 10,
             enabled: true,

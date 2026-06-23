@@ -3,7 +3,7 @@
 //! Enums that appear as `SeaORM` entity columns use [`active_string_enum!`] so they
 //! can be stored directly in the database without JSON serialization.
 
-use crate::enums::quant::QuantRuntimeMode;
+use crate::{enums::quant::QuantRuntimeMode, types::Usd};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use sea_orm::{ActiveValue, IntoActiveValue};
@@ -116,7 +116,7 @@ pub enum NetProfitKind {
 impl NetProfitKind {
     /// Derive the wire kind from the persisted optional EV column.
     #[must_use]
-    pub const fn for_net_profit(net_profit_usd: &Option<crate::types::Usd>) -> Self {
+    pub const fn for_net_profit(net_profit_usd: &Option<Usd>) -> Self {
         if net_profit_usd.is_some() {
             Self::FillEv
         } else {
@@ -407,7 +407,7 @@ impl MarketCategory {
 /// Bit set of [`MarketCategory`] memberships derived from Gamma event tags.
 ///
 /// One event frequently carries several category tags (e.g. politics +
-/// geopolitics + world). The set preserves every membership for universe
+/// geopolitics + world). The set preserves every membership for selection
 /// filtering, while [`Self::fee_category`] collapses to a deterministic
 /// single category for fee estimation.
 ///

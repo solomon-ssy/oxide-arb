@@ -683,8 +683,8 @@ async fn enforce_reflects_assignments_and_super_admin_bypass() {
         enforcer
             .enforce((
                 admin_subject.as_str(),
-                "control_factor",
-                "publish",
+                "runtime_config",
+                "activate",
                 "resource"
             ))
             .expect("admin enforce")

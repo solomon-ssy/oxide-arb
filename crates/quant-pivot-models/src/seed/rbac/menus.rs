@@ -1,12 +1,5 @@
 //! Seeds the full navigation menu tree (directories, pages, button permissions).
 
-use std::{future::Future, pin::Pin};
-
-use sea_orm::{
-    ActiveValue::Set, ConnectionTrait, DbErr, EntityTrait, QueryTrait, sea_query::OnConflict,
-};
-use uuid::Uuid;
-
 use crate::{
     entities::menu,
     enums::rbac::{MenuKind, Operation, ResourceType, RoleStatus},
@@ -18,6 +11,11 @@ use crate::{
     },
     types::MenuId,
 };
+use sea_orm::{
+    ActiveValue::Set, ConnectionTrait, DbErr, EntityTrait, QueryTrait, sea_query::OnConflict,
+};
+use std::{future::Future, pin::Pin};
+use uuid::Uuid;
 
 const SEED_ID: &str = "rbac.menus.bootstrap";
 
@@ -379,7 +377,7 @@ fn build_operations(t: &mut MenuTree) {
         title: "page.menu.publications",
         path: "/publications",
         component: "publications/index",
-        permission_code: Some(perm(ResourceType::ControlFactor, Operation::Read)),
+        permission_code: Some(perm(ResourceType::Publication, Operation::Read)),
         icon: "lucide:rocket",
     });
     t.button(
@@ -598,10 +596,9 @@ fn load_boxed<'a>(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
-
     use super::{build_tree, stable_menu_id};
     use crate::enums::rbac::MenuKind;
+    use std::collections::HashSet;
 
     #[test]
     fn menu_ids_are_stable_for_node_name() {

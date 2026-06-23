@@ -9,9 +9,8 @@
 //! [`WsChannel`]: crate::domain::ws::channel::WsChannel
 //! [`MarketId`]: crate::types::MarketId
 
-use serde::Deserialize;
-
 use crate::{domain::ws::channel::WsChannel, types::MarketId};
+use serde::Deserialize;
 
 /// A client-to-server command.
 #[derive(Debug, Clone, Deserialize)]

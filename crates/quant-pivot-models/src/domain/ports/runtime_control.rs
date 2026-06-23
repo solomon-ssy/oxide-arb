@@ -3,6 +3,7 @@
 use crate::{
     domain::{
         ReadinessReport,
+        data_plane::DataQualitySnapshot,
         governance::system::{HealthReport, SystemStatus},
         market::book::BookSnapshot,
     },
@@ -101,6 +102,12 @@ pub trait MarketDataPort: Send + Sync {
 
 pub trait MetricsScrapePort: Send + Sync {
     fn gather_prometheus(&self) -> String;
+}
+
+/// Read-only data-quality observability surface (dependency-inverted).
+pub trait DataQualityPort: Send + Sync {
+    /// Aggregate classification of the live book plane at call time.
+    fn snapshot(&self) -> DataQualitySnapshot;
 }
 
 #[async_trait]

@@ -10,7 +10,7 @@ mod model_registry;
 mod order_intent;
 mod recommendation;
 mod recommendation_report;
-mod universe;
+mod selection;
 
 pub use attribution::*;
 pub use execution_order::*;
@@ -22,4 +22,4 @@ pub use model_registry::*;
 pub use order_intent::*;
 pub use recommendation::*;
 pub use recommendation_report::*;
-pub use universe::*;
+pub use selection::*;

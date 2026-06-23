@@ -1,4 +1,4 @@
-//! Hot-reloadable category filter bounding the tradeable market universe.
+//! Hot-reloadable category filter bounding the tradeable market set.
 //!
 //! The full Gamma catalog is always ingested and persisted; this filter only
 //! bounds the *hot* set — WebSocket subscriptions and the scanner sweep — so
@@ -14,11 +14,11 @@ use std::sync::Arc;
 /// Matching is any-match against an entry's [`CategorySet`]: an event tagged
 /// politics + geopolitics passes when either category is enabled. The empty
 /// filter admits everything (the default).
-pub struct MarketUniverseFilter {
+pub struct MarketFilter {
     enabled: ArcSwap<CategorySet>,
 }
 
-impl MarketUniverseFilter {
+impl MarketFilter {
     /// Build from the configured category list (empty = admit all).
     #[must_use]
     pub fn new(enabled_categories: &[MarketCategory]) -> Self {
@@ -27,10 +27,10 @@ impl MarketUniverseFilter {
         }
     }
 
-    /// Whether a market with `categories` belongs to the tradeable universe.
+    /// Whether a market with `categories` belongs to the tradeable market set.
     ///
     /// Markets without any recognized category only match the empty
-    /// (admit-all) filter — operators narrowing the universe explicitly opt
+    /// (admit-all) filter — operators narrowing the market set explicitly opt
     /// out of uncategorized markets.
     #[must_use]
     #[inline]
@@ -52,7 +52,7 @@ impl MarketUniverseFilter {
     }
 }
 
-impl Default for MarketUniverseFilter {
+impl Default for MarketFilter {
     fn default() -> Self {
         Self::new(&[])
     }
@@ -64,14 +64,14 @@ mod tests {
 
     #[test]
     fn empty_filter_admits_everything() {
-        let filter = MarketUniverseFilter::default();
+        let filter = MarketFilter::default();
         assert!(filter.is_enabled(CategorySet::from(MarketCategory::Sports)));
         assert!(filter.is_enabled(CategorySet::EMPTY));
     }
 
     #[test]
     fn narrowed_filter_matches_any_membership() {
-        let filter = MarketUniverseFilter::new(&[MarketCategory::Geopolitics]);
+        let filter = MarketFilter::new(&[MarketCategory::Geopolitics]);
         let multi: CategorySet = [MarketCategory::Politics, MarketCategory::Geopolitics]
             .into_iter()
             .collect();
@@ -85,7 +85,7 @@ mod tests {
 
     #[test]
     fn reload_swaps_the_enabled_set() {
-        let filter = MarketUniverseFilter::new(&[MarketCategory::Sports]);
+        let filter = MarketFilter::new(&[MarketCategory::Sports]);
         assert!(filter.is_enabled(CategorySet::from(MarketCategory::Sports)));
         filter.reload(&[MarketCategory::Crypto]);
         assert!(!filter.is_enabled(CategorySet::from(MarketCategory::Sports)));

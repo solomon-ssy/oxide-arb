@@ -92,22 +92,24 @@ mod tests {
 
     #[test]
     fn classify_levels() {
+        // max_book_age_ms = 3_000 → ladder fresh<=1500, acceptable<=3000,
+        // stale<=6000, expired>6000 (from_config multipliers 0.5/1/2/4).
         let c = StalenessClassifier::new(&test_config());
         assert_eq!(c.classify(500), StalenessLevel::Fresh);
-        assert_eq!(c.classify(1000), StalenessLevel::Fresh);
+        assert_eq!(c.classify(1500), StalenessLevel::Fresh);
         assert_eq!(c.classify(2000), StalenessLevel::Acceptable);
         assert_eq!(c.classify(3000), StalenessLevel::Acceptable);
         assert_eq!(c.classify(4000), StalenessLevel::Stale);
-        assert_eq!(c.classify(5000), StalenessLevel::Stale);
-        assert_eq!(c.classify(5001), StalenessLevel::Expired);
+        assert_eq!(c.classify(6000), StalenessLevel::Stale);
+        assert_eq!(c.classify(6001), StalenessLevel::Expired);
         assert_eq!(c.classify(9000), StalenessLevel::Expired);
-        assert_eq!(c.classify(10001), StalenessLevel::Expired);
+        assert_eq!(c.classify(12001), StalenessLevel::Expired);
     }
 
     #[test]
     fn expired_threshold_accessor() {
         let c = StalenessClassifier::new(&test_config());
-        assert_eq!(c.expired_ms(), 10000);
+        assert_eq!(c.expired_ms(), 12000);
     }
 
     #[test]

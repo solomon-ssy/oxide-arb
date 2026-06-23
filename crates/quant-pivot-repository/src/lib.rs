@@ -7,6 +7,8 @@
 //! - **`Cached`** — tiered cache wrappers (L1 Moka + L2 Redis)
 
 pub mod batch;
+pub mod cached;
+pub mod clickhouse;
 pub mod postgres;
 pub mod traits;
 

@@ -5,7 +5,7 @@
 //! event, factor dimensions/payload, query fingerprint) delegates here so the
 //! serialization + BLAKE3 + encoding contract lives in exactly one place.
 
-use quant_pivot_error::control::CanonicalDigestError;
+use quant_pivot_error::hashing::CanonicalDigestError;
 use serde::Serialize;
 
 /// Prefix applied to canonical digests so the algorithm is self-describing.

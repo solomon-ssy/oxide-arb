@@ -3,8 +3,7 @@
 use crate::{
     observability::metrics_hub::MetricsHub,
     pipeline::{
-        market_cache::MarketCache, market_registry::MarketRegistry,
-        universe_filter::MarketUniverseFilter,
+        market_cache::MarketCache, market_filter::MarketFilter, market_registry::MarketRegistry,
     },
     service::{
         catalog_lifecycle::apply_past_deadline_to_sync_batch, catalog_readiness::CatalogReadiness,
@@ -26,10 +25,7 @@ use quant_pivot_models::{
     },
     types::MarketId,
 };
-use quant_pivot_repository::{
-    postgres::{PgEventRepository, PgMarketRepository},
-    traits::{EventRepository, MarketRepository},
-};
+use quant_pivot_repository::traits::{EventRepository, MarketRepository};
 use quant_pivot_storage::cache::{CacheKey, CacheManager};
 use std::{collections::HashSet, sync::Arc, time::Instant};
 
@@ -40,10 +36,10 @@ pub struct GammaServiceDeps {
     pub gamma_client: Arc<GammaClient>,
     pub market_registry: Arc<MarketRegistry>,
     pub market_cache: Arc<MarketCache>,
-    pub universe: Arc<MarketUniverseFilter>,
+    pub market_filter: Arc<MarketFilter>,
     pub fee_calculator: Arc<FeeCalculator>,
-    pub market_repo: Arc<PgMarketRepository>,
-    pub event_repo: Arc<PgEventRepository>,
+    pub market_repo: Arc<dyn MarketRepository>,
+    pub event_repo: Arc<dyn EventRepository>,
     pub cache: Arc<CacheManager>,
     pub metrics: Arc<MetricsHub>,
     pub catalog: Arc<CatalogReadiness>,
@@ -58,10 +54,10 @@ pub struct GammaService {
     gamma_client: Arc<GammaClient>,
     market_registry: Arc<MarketRegistry>,
     market_cache: Arc<MarketCache>,
-    universe: Arc<MarketUniverseFilter>,
+    market_filter: Arc<MarketFilter>,
     fee_calculator: Arc<FeeCalculator>,
-    market_repo: Arc<PgMarketRepository>,
-    event_repo: Arc<PgEventRepository>,
+    market_repo: Arc<dyn MarketRepository>,
+    event_repo: Arc<dyn EventRepository>,
     cache: Arc<CacheManager>,
     metrics: Arc<MetricsHub>,
     catalog: Arc<CatalogReadiness>,
@@ -77,7 +73,7 @@ impl GammaService {
             gamma_client: deps.gamma_client,
             market_registry: deps.market_registry,
             market_cache: deps.market_cache,
-            universe: deps.universe,
+            market_filter: deps.market_filter,
             fee_calculator: deps.fee_calculator,
             market_repo: deps.market_repo,
             event_repo: deps.event_repo,
@@ -312,9 +308,9 @@ impl GammaService {
         let Some(coordinator) = &self.ws_subscription else {
             return;
         };
-        let stats = coordinator.sync_universe_ingest(
+        let stats = coordinator.sync_subscription(
             &self.market_registry,
-            &self.universe,
+            &self.market_filter,
             self.subscription_window_hours,
             &self.metrics,
         );
@@ -329,7 +325,7 @@ impl GammaService {
             candidates_excluded_past = stats.candidates_past_deadline,
             detection_window_coverage = stats.detection_window_coverage_ratio(),
             subscribed = coordinator.subscribed_count(),
-            "CLOB websocket universe ingest synced after Gamma catalog update"
+            "CLOB websocket subscription ingest synced after Gamma catalog update"
         );
     }
 

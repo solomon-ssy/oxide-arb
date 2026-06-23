@@ -8,14 +8,13 @@
 //!
 //! [`PermChecker`]: super::checker::PermChecker
 
-use quant_pivot_models::enums::rbac::{Operation, ResourceType};
-
 use crate::{
     auth::casbin::{checker::SUPER_ADMIN_ROLE, service::CasbinService},
     error::WebError,
     extractors::ActorRoles,
     jwt::Claims,
 };
+use quant_pivot_models::enums::rbac::{Operation, ResourceType};
 
 /// The result of a successful authorization check.
 ///
@@ -211,7 +210,7 @@ mod tests {
     #[actix_web::test]
     async fn acting_role_missing_is_bad_request() {
         let casbin = CasbinService::in_memory().await;
-        let result = Rule::ActingRoleGoverned(ResourceType::ControlFactor, Operation::Publish)
+        let result = Rule::ActingRoleGoverned(ResourceType::RuntimeConfig, Operation::Activate)
             .evaluate(
                 &claims(),
                 &roles(&[("risk_owner", RoleStatus::Enabled)]),
@@ -226,9 +225,9 @@ mod tests {
     async fn acting_role_not_held_is_forbidden() {
         let casbin = CasbinService::in_memory().await;
         casbin
-            .add_test_policy("risk_owner", "control_factor", "publish")
+            .add_test_policy("risk_owner", "runtime_config", "activate")
             .await;
-        let result = Rule::ActingRoleGoverned(ResourceType::ControlFactor, Operation::Publish)
+        let result = Rule::ActingRoleGoverned(ResourceType::RuntimeConfig, Operation::Activate)
             .evaluate(
                 &claims(),
                 &roles(&[("viewer", RoleStatus::Enabled)]),
@@ -243,9 +242,9 @@ mod tests {
     async fn acting_role_held_but_disabled_is_forbidden() {
         let casbin = CasbinService::in_memory().await;
         casbin
-            .add_test_policy("risk_owner", "control_factor", "publish")
+            .add_test_policy("risk_owner", "runtime_config", "activate")
             .await;
-        let result = Rule::ActingRoleGoverned(ResourceType::ControlFactor, Operation::Publish)
+        let result = Rule::ActingRoleGoverned(ResourceType::RuntimeConfig, Operation::Activate)
             .evaluate(
                 &claims(),
                 &roles(&[("risk_owner", RoleStatus::Disabled)]),
@@ -259,7 +258,7 @@ mod tests {
     #[actix_web::test]
     async fn acting_role_held_without_policy_is_forbidden() {
         let casbin = CasbinService::in_memory().await;
-        let result = Rule::ActingRoleGoverned(ResourceType::ControlFactor, Operation::Publish)
+        let result = Rule::ActingRoleGoverned(ResourceType::RuntimeConfig, Operation::Activate)
             .evaluate(
                 &claims(),
                 &roles(&[("risk_owner", RoleStatus::Enabled)]),
@@ -274,9 +273,9 @@ mod tests {
     async fn acting_role_held_with_policy_is_allowed_and_returns_role() {
         let casbin = CasbinService::in_memory().await;
         casbin
-            .add_test_policy("risk_owner", "control_factor", "publish")
+            .add_test_policy("risk_owner", "runtime_config", "activate")
             .await;
-        let outcome = Rule::ActingRoleGoverned(ResourceType::ControlFactor, Operation::Publish)
+        let outcome = Rule::ActingRoleGoverned(ResourceType::RuntimeConfig, Operation::Activate)
             .evaluate(
                 &claims(),
                 &roles(&[("risk_owner", RoleStatus::Enabled)]),

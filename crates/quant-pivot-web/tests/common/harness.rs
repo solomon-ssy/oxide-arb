@@ -20,18 +20,21 @@ use quant_pivot_error::auth::AuthError;
 use quant_pivot_models::{
     config::{CacheConfig, DeployConfig, JwtConfig, RedisConfig},
     domain::{
-        CatalogState, CatalogStatusPort, CoreEventPublisher, HealthReport, MarketDataPort,
-        MetricsScrapePort, QuantModeTransitionReport, RuntimeConfigPort, RuntimeControlError,
-        RuntimeControlPort, SystemStatus,
+        CatalogState, CatalogStatusPort, CoreEventPublisher, DataQualityPort, DataQualitySnapshot,
+        HealthReport, MarketDataPort, MetricsScrapePort, QuantModeTransitionReport,
+        RuntimeConfigPort, RuntimeControlError, RuntimeControlPort, SystemStatus,
     },
     enums::quant::QuantRuntimeMode,
     runtime_config::RuntimeConfig,
     types::TokenId,
 };
-use quant_pivot_storage::cache::connect_pool;
+use quant_pivot_storage::{
+    cache::connect_pool,
+    write::{AsyncWriter, AsyncWriterConfig, AsyncWriterObservability},
+};
 use quant_pivot_web::{
     AppState,
-    audit::{OperationLogBuffer, spawn_operation_log_writer},
+    audit::OperationLogBuffer,
     auth::casbin::CasbinService,
     jwt::{JwtService, RedisTokenBlacklist, TokenBlacklist},
     middleware,
@@ -89,15 +92,23 @@ impl TestEnv {
         let perm_checker = Arc::new(routes::init_rbac_rules());
         let repos = WebHarnessRepos::from_connection(&db);
 
-        let (operation_log, operation_log_rx) = OperationLogBuffer::new(1024);
         let writer_shutdown = CancellationToken::new();
-        tokio::spawn(spawn_operation_log_writer(
-            operation_log_rx,
-            Arc::clone(&repos.operation_logs),
-            64,
-            Duration::from_millis(50),
-            writer_shutdown.clone(),
-        ));
+        let op_log_repo = Arc::clone(&repos.operation_logs);
+        let (op_log_writer, op_log_worker) = AsyncWriter::new(
+            AsyncWriterConfig::new("operation_log")
+                .capacity(1024)
+                .batch_size(64)
+                .flush_interval(Duration::from_millis(50)),
+            move |rows| {
+                let repo = Arc::clone(&op_log_repo);
+                Box::pin(async move { repo.append_batch(rows).await })
+            },
+            prometheus::IntCounter::new("test_operation_log_drops", "test drop counter")
+                .expect("counter"),
+            AsyncWriterObservability::default(),
+        );
+        let operation_log = OperationLogBuffer::new(Arc::new(op_log_writer));
+        tokio::spawn(op_log_worker.run(writer_shutdown.clone()));
 
         let (events, event_rx) = CoreEventPublisher::bounded(256);
         let ws_sessions = SessionRegistry::default();
@@ -110,6 +121,7 @@ impl TestEnv {
 
         let runtime_config_apply = Arc::new(MockRuntimeConfigApply::default());
         let catalog = Arc::new(MockCatalogStatus);
+        let data_quality = Arc::new(MockDataQuality);
         let state = AppState {
             deploy: Arc::new(test_deploy_config()),
             runtime_config_apply: Arc::clone(&runtime_config_apply) as Arc<dyn RuntimeConfigPort>,
@@ -129,6 +141,7 @@ impl TestEnv {
             control: Arc::new(MockRuntimeControl::default()),
             market_data: Arc::new(MockMarketData),
             catalog: Arc::clone(&catalog) as Arc<dyn CatalogStatusPort>,
+            data_quality: Arc::clone(&data_quality) as Arc<dyn DataQualityPort>,
             events,
             markets: Arc::clone(&repos.markets),
             ws_sessions,
@@ -244,6 +257,14 @@ impl CatalogStatusPort for MockCatalogStatus {
 
     fn is_ready(&self) -> bool {
         true
+    }
+}
+
+struct MockDataQuality;
+
+impl DataQualityPort for MockDataQuality {
+    fn snapshot(&self) -> DataQualitySnapshot {
+        DataQualitySnapshot::empty(chrono::Utc::now(), 5_000, 30_000)
     }
 }
 

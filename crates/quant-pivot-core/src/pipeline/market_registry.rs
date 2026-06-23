@@ -1,4 +1,4 @@
-use crate::pipeline::universe_filter::MarketUniverseFilter;
+use crate::pipeline::market_filter::MarketFilter;
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use quant_pivot_models::{
@@ -10,7 +10,7 @@ use std::{collections::HashSet, sync::Arc};
 
 /// Market metadata registry with bidirectional token ↔ market lookup.
 ///
-/// Populated by Gamma API sync; read by the Scanner/DataPipeline hot path.
+/// Populated by Gamma API sync; read by the data pipeline and selection paths.
 pub struct MarketRegistry {
     markets: DashMap<MarketId, Arc<MarketRegistryInfo>>,
     token_to_market: DashMap<TokenId, MarketId>,
@@ -185,12 +185,12 @@ impl MarketRegistry {
         self.active_markets.load_full()
     }
 
-    /// Active YES/NO catalog tokens bounded by the tradeable-universe filter.
+    /// Active YES/NO catalog tokens bounded by the tradeable market filter.
     ///
     /// This is a catalog helper, not the engine WS subscription policy. Trading
     /// subscriptions must go through `MarketDataSubscriptionPolicy`.
     #[must_use]
-    pub fn active_catalog_tokens(&self, universe: &MarketUniverseFilter) -> Vec<TokenId> {
+    pub fn active_catalog_tokens(&self, market_filter: &MarketFilter) -> Vec<TokenId> {
         let active = self.active_markets();
         let mut tokens = Vec::with_capacity(active.len() * 2);
         for market_id in active.iter() {
@@ -200,7 +200,7 @@ impl MarketRegistry {
             if market.status != MarketStatus::Active {
                 continue;
             }
-            if !universe.is_enabled(market.categories) {
+            if !market_filter.is_enabled(market.categories) {
                 continue;
             }
             tokens.push(market.token_yes.clone());

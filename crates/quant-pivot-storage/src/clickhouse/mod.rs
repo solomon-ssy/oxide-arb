@@ -1,11 +1,9 @@
-//! `ClickHouse` connection management, schema DDL, and batch inserter.
+//! `ClickHouse` connection management, schema DDL, and write manager.
 
 mod ensure;
-mod inserter;
 mod pool;
 mod schema;
 pub mod write_manager;
 
-pub use inserter::BatchInserter;
 pub use pool::ClickHousePool;
 pub use write_manager::{ChWriteManager, ChWriteMetrics, WritePermit};

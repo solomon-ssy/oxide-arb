@@ -6,10 +6,19 @@
 //! server is provided by the semaphore: batched inserts queue on permits
 //! instead of piling additional requests onto a slow `ClickHouse`.
 
+use clickhouse::{Client, RowOwned, RowWrite};
+use num_traits::ToPrimitive;
 use prometheus::{GaugeVec, IntCounterVec, IntGauge, Opts, Registry};
 use quant_pivot_error::storage::StorageError;
-use std::sync::Arc;
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tracing::{error, warn};
+
+/// Maximum insert attempts (initial + retries) before a batch is surfaced as an error.
+const MAX_INSERT_ATTEMPTS: u32 = 3;
 
 /// Metrics specific to `ClickHouse` write operations.
 pub struct ChWriteMetrics {
@@ -99,6 +108,74 @@ impl ChWriteManager {
 
     pub const fn metrics(&self) -> &Arc<ChWriteMetrics> {
         &self.metrics
+    }
+
+    /// Durable batch insert sink: acquire a permit, insert all rows, retry with
+    /// exponential backoff, and record metrics. Returns the last error after
+    /// [`MAX_INSERT_ATTEMPTS`] so the caller (e.g. an `AsyncWriter` flush) can
+    /// log and drop, while honoring server backpressure via the semaphore.
+    pub async fn write_batch<T>(
+        &self,
+        client: &Client,
+        table: &'static str,
+        rows: Vec<T>,
+    ) -> Result<(), StorageError>
+    where
+        T: RowOwned + RowWrite + Send + Sync,
+    {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let count = rows.len();
+        let mut last_error: Option<StorageError> = None;
+
+        for attempt in 0..MAX_INSERT_ATTEMPTS {
+            let start = Instant::now();
+            let permit = self.acquire_write_permit().await?;
+            let result = Self::insert_rows(client, table, &rows).await;
+            drop(permit);
+
+            match result {
+                Ok(()) => {
+                    self.metrics
+                        .rows_written
+                        .with_label_values(&[table])
+                        .inc_by(ToPrimitive::to_u64(&count).unwrap_or(u64::MAX));
+                    self.metrics
+                        .insert_duration_seconds
+                        .with_label_values(&[table])
+                        .set(start.elapsed().as_secs_f64());
+                    return Ok(());
+                }
+                Err(error) => {
+                    if attempt + 1 < MAX_INSERT_ATTEMPTS {
+                        let delay = Duration::from_millis(100 * 2u64.pow(attempt));
+                        warn!(table, attempt = attempt + 1, rows = count, %error, "ClickHouse insert failed; retrying in {delay:?}");
+                        tokio::time::sleep(delay).await;
+                    } else {
+                        error!(table, rows = count, %error, "ClickHouse insert failed after {MAX_INSERT_ATTEMPTS} attempts");
+                    }
+                    last_error = Some(error);
+                }
+            }
+        }
+
+        self.metrics.insert_errors.with_label_values(&[table]).inc();
+        Err(last_error.unwrap_or_else(|| {
+            StorageError::Connection("ClickHouse insert exhausted retries".into())
+        }))
+    }
+
+    async fn insert_rows<T>(client: &Client, table: &str, rows: &[T]) -> Result<(), StorageError>
+    where
+        T: RowOwned + RowWrite + Send + Sync,
+    {
+        let mut insert = client.insert::<T>(table).await?;
+        for row in rows {
+            insert.write(row).await?;
+        }
+        insert.end().await?;
+        Ok(())
     }
 }
 

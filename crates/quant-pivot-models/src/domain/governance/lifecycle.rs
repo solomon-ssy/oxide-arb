@@ -35,8 +35,6 @@ pub enum OperationalDegradeReason {
     MarketDataStale,
     MarketDataCoverageDegraded,
     SubsystemUnhealthy { name: String },
-    ControlFactorLiveWarn,
-    ControlFactorSnapshotExpired,
 }
 
 /// CLOB websocket connectivity snapshot for operator dashboards.

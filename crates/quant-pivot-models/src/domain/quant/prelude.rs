@@ -5,12 +5,12 @@
 
 pub use super::{
     ApproveOrderIntent, ExecutionOrderInfo, ExecutionOrderModel, FactorDefinitionInfo,
-    FactorValueInfo, FactorValueModel, FeatureVectorInfo, FeatureVectorModel, ModelRunInfo,
-    ModelSpecInfo, ModelVersionInfo, NewExecutionOrder, NewFactorDefinition, NewFactorValue,
-    NewFeatureVector, NewModelRun, NewModelSpec, NewModelVersion, NewOrderIntent, NewPortfolioPlan,
-    NewRecommendation, NewRecommendationAttribution, NewRecommendationReport, NewUniverseMember,
-    NewUniverseSnapshot, OrderIntentInfo, PortfolioPlanInfo, PortfolioPlanModel,
-    QuantModelRunModel, RecommendationAttributionInfo, RecommendationAttributionModel,
-    RecommendationInfo, RecommendationReportInfo, RecommendationReportModel, UniverseMemberInfo,
-    UniverseSnapshotInfo, UniverseSnapshotModel,
+    FactorValueInfo, FactorValueModel, FeatureVectorInfo, FeatureVectorModel, MarketSelectionInfo,
+    MarketSelectionMemberInfo, MarketSelectionModel, ModelRunInfo, ModelSpecInfo, ModelVersionInfo,
+    NewExecutionOrder, NewFactorDefinition, NewFactorValue, NewFeatureVector, NewMarketSelection,
+    NewMarketSelectionMember, NewModelRun, NewModelSpec, NewModelVersion, NewOrderIntent,
+    NewPortfolioPlan, NewRecommendation, NewRecommendationAttribution, NewRecommendationReport,
+    OrderIntentInfo, PortfolioPlanInfo, PortfolioPlanModel, QuantModelRunModel,
+    RecommendationAttributionInfo, RecommendationAttributionModel, RecommendationInfo,
+    RecommendationReportInfo, RecommendationReportModel,
 };

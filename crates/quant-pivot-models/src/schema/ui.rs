@@ -42,11 +42,11 @@ fn groups() -> &'static [RuntimeConfigSchemaGroupView] {
     GROUPS.get_or_init(|| {
         vec![
             group(
-                "universe",
+                "selection",
                 10,
-                "Universe",
+                "Selection",
                 "市场池",
-                "Market universe selection policy.",
+                "Market selection selection policy.",
             ),
             group(
                 "data_quality",
@@ -130,7 +130,7 @@ fn fields() -> &'static [FieldUiEntry] {
 
 fn build_fields() -> Vec<FieldUiEntry> {
     [
-        universe_fields(),
+        selection_fields(),
         data_quality_fields(),
         feature_fields(),
         factor_fields(),
@@ -145,10 +145,10 @@ fn build_fields() -> Vec<FieldUiEntry> {
     .collect()
 }
 
-fn universe_fields() -> Vec<FieldUiEntry> {
+fn selection_fields() -> Vec<FieldUiEntry> {
     vec![
         entry(
-            "universe.enabled_categories",
+            "selection.enabled_categories",
             "Enabled categories",
             "启用分类",
             10,
@@ -156,7 +156,7 @@ fn universe_fields() -> Vec<FieldUiEntry> {
             Some(FieldSemantics::EmptyMeansAll),
         ),
         entry(
-            "universe.excluded_market_ids",
+            "selection.excluded_market_ids",
             "Excluded market ids",
             "排除市场 ID",
             20,
@@ -164,7 +164,7 @@ fn universe_fields() -> Vec<FieldUiEntry> {
             None,
         ),
         entry(
-            "universe.included_market_ids",
+            "selection.included_market_ids",
             "Included market ids",
             "包含市场 ID",
             30,
@@ -172,44 +172,44 @@ fn universe_fields() -> Vec<FieldUiEntry> {
             None,
         ),
         money(
-            "universe.min_liquidity_usd",
+            "selection.min_liquidity_usd",
             "Minimum liquidity USD",
             "最低流动性",
             40,
         ),
         money(
-            "universe.min_volume_24h_usd",
+            "selection.min_volume_24h_usd",
             "Minimum 24h volume USD",
             "最低 24h 成交量",
             50,
         ),
         integer(
-            "universe.max_spread_bps",
+            "selection.max_spread_bps",
             "Maximum spread bps",
             "最大价差 bps",
             60,
         ),
         boolean(
-            "universe.allow_near_resolution",
+            "selection.allow_near_resolution",
             "Allow near resolution",
             "允许临近结算",
             70,
         ),
         integer(
-            "universe.min_time_to_resolution_secs",
+            "selection.min_time_to_resolution_secs",
             "Minimum time to resolution",
             "最短结算剩余秒数",
             80,
         ),
         integer(
-            "universe.max_time_to_resolution_secs",
+            "selection.max_time_to_resolution_secs",
             "Maximum time to resolution",
             "最长结算剩余秒数",
             90,
         ),
         integer(
-            "universe.max_universe_size",
-            "Maximum universe size",
+            "selection.max_selection_size",
+            "Maximum selection size",
             "最大市场池规模",
             100,
         ),

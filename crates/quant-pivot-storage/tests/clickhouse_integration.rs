@@ -1,13 +1,17 @@
 //! `ClickHouse` integration tests (requires Docker).
 
 use chrono::Utc;
+use prometheus::IntCounter;
 use quant_pivot_models::{
     clickhouse::{ChBps, ChPrice, ChSchemaVersion, ChUsd, TickEventRow},
     config::ClickHouseConfig,
     enums::clickhouse::{ChBookEventType, ChFactSource},
     types::{Price, TokenId, Usd},
 };
-use quant_pivot_storage::clickhouse::{BatchInserter, ChWriteManager, ClickHousePool};
+use quant_pivot_storage::{
+    clickhouse::{ChWriteManager, ClickHousePool},
+    write::{AsyncWriter, AsyncWriterConfig, AsyncWriterObservability},
+};
 use rust_decimal_macros::dec;
 use std::{sync::Arc, time::Duration};
 use testcontainers::{
@@ -243,32 +247,50 @@ async fn tick_events_direct_insert_roundtrip() {
     assert_eq!(count, 1);
 }
 
+/// Build a tick-event `AsyncWriter` whose flush sink is `ChWriteManager::write_batch`.
+fn tick_writer(
+    client: clickhouse::Client,
+    write_manager: Arc<ChWriteManager>,
+) -> (
+    AsyncWriter<TickEventRow>,
+    quant_pivot_storage::write::AsyncWriterWorker<TickEventRow>,
+) {
+    AsyncWriter::new(
+        AsyncWriterConfig::new("tick_events")
+            .capacity(10_000)
+            .batch_size(10_000)
+            .flush_interval(Duration::from_secs(3600)),
+        move |rows: Vec<TickEventRow>| {
+            let write_manager = Arc::clone(&write_manager);
+            let client = client.clone();
+            Box::pin(async move {
+                write_manager
+                    .write_batch(&client, "tick_events", rows)
+                    .await
+            })
+        },
+        IntCounter::new("test_async_writer_drops", "test drop counter").expect("counter"),
+        AsyncWriterObservability::default(),
+    )
+}
+
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn batch_inserter_shutdown_drains_buffer() {
+async fn async_writer_shutdown_drains_buffer() {
     let (_pool, client, _port, _container) = setup_clickhouse().await;
     let shutdown = CancellationToken::new();
     let write_manager = Arc::new(ChWriteManager::new(4));
 
-    let inserter = BatchInserter::new(
-        client.clone(),
-        "tick_events",
-        10_000,
-        Duration::from_secs(3600),
-        Arc::clone(&write_manager),
-        shutdown.clone(),
-    );
+    let (writer, worker) = tick_writer(client.clone(), write_manager);
+    let handle = tokio::spawn(worker.run(shutdown.clone()));
 
     let now = Utc::now().timestamp_millis();
     for i in 0..3 {
-        inserter
-            .insert(sample_tick(&format!("tok-drain-{i}"), now + i * 1000))
-            .await
-            .expect("enqueue");
+        assert!(writer.write(sample_tick(&format!("tok-drain-{i}"), now + i * 1000)));
     }
 
     shutdown.cancel();
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    let _ = handle.await;
 
     let count: u64 = client
         .query("SELECT count() FROM tick_events WHERE token_id LIKE 'tok-drain-%'")
@@ -280,32 +302,20 @@ async fn batch_inserter_shutdown_drains_buffer() {
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn batch_inserter_channel_close_drains_buffer() {
+async fn async_writer_channel_close_drains_buffer() {
     let (_pool, client, _port, _container) = setup_clickhouse().await;
-    let shutdown = CancellationToken::new();
     let write_manager = Arc::new(ChWriteManager::new(4));
 
-    let inserter = BatchInserter::new(
-        client.clone(),
-        "tick_events",
-        10_000,
-        Duration::from_secs(3600),
-        write_manager,
-        shutdown,
-    );
+    let (writer, worker) = tick_writer(client.clone(), write_manager);
+    // Shutdown never fires; dropping the writer must still drain the tail.
+    let handle = tokio::spawn(worker.run(CancellationToken::new()));
 
     let now = Utc::now().timestamp_millis();
-    inserter
-        .insert(sample_tick("tok-close-1", now))
-        .await
-        .unwrap();
-    inserter
-        .insert(sample_tick("tok-close-2", now + 1_000))
-        .await
-        .unwrap();
+    assert!(writer.write(sample_tick("tok-close-1", now)));
+    assert!(writer.write(sample_tick("tok-close-2", now + 1_000)));
 
-    inserter.shutdown();
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    drop(writer);
+    let _ = handle.await;
 
     let count: u64 = client
         .query("SELECT count() FROM tick_events WHERE token_id LIKE 'tok-close-%'")

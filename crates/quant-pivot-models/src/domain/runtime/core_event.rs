@@ -1,8 +1,7 @@
 //! In-process runtime event bus for control-plane notifications.
 
-use crate::domain::MarketBookView;
 use crate::{
-    domain::governance::system::SystemStatus,
+    domain::{MarketBookView, governance::system::SystemStatus},
     enums::common::{AlertCategory, AlertLevel, AlertSource},
     types::MarketId,
 };

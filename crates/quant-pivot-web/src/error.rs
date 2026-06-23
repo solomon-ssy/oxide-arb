@@ -14,18 +14,9 @@
 //!   failures → 503, everything else → 500 (details are logged, not leaked).
 //! - [`RbacError`] — `NotFound` → 404, `Duplicate` → 409, structural errors →
 //!   400.
-//! - [`GovernanceError`] / [`RegistryError`] — governance invariants map to
-//!   400 (malformed request), 403 (risk-expanding change without approval), 409
-//!   (state / concurrency / idempotency conflict), and 500 (hashing / audit-chain
-//!   integrity). `RegistryError` recurses into its inner governance/storage error.
 
 use actix_web::{HttpResponse, ResponseError, http::StatusCode};
-use quant_pivot_error::{
-    auth::AuthError,
-    control::{GovernanceError, RegistryError},
-    rbac::RbacError,
-    storage::StorageError,
-};
+use quant_pivot_error::{auth::AuthError, rbac::RbacError, storage::StorageError};
 use quant_pivot_models::domain::{RuntimeControlError, WindowQueryError};
 use thiserror::Error;
 
@@ -162,43 +153,6 @@ impl From<RbacError> for WebError {
             RbacError::UnknownPermission { .. } | RbacError::InvalidAssignment { .. } => {
                 Self::BadRequest(error.to_string())
             }
-        }
-    }
-}
-
-impl From<GovernanceError> for WebError {
-    fn from(error: GovernanceError) -> Self {
-        match error {
-            // 403 — a risk-expanding change requires explicit risk-owner approval.
-            GovernanceError::RiskExpansionNotApproved => Self::Forbidden,
-            // 400 — malformed or incomplete governance request.
-            GovernanceError::MissingReason
-            | GovernanceError::MissingField { .. }
-            | GovernanceError::InvalidPublicationWindow
-            | GovernanceError::FactorValue(_) => Self::BadRequest(error.to_string()),
-            // 409 — a governance invariant or optimistic-concurrency conflict.
-            GovernanceError::EmptyPublication
-            | GovernanceError::FactorSetMismatch
-            | GovernanceError::PublicationHashMismatch { .. }
-            | GovernanceError::FactorNotReadyForPublication { .. }
-            | GovernanceError::IdempotencyConflict { .. }
-            | GovernanceError::RollbackTargetMissing
-            | GovernanceError::PublicationLockConflict => Self::Conflict(error.to_string()),
-            // 500 — hashing / audit-chain integrity failure (logged, masked).
-            GovernanceError::CanonicalDigest(_) | GovernanceError::AuditChain(_) => {
-                Self::Internal(error.to_string())
-            }
-        }
-    }
-}
-
-impl From<RegistryError> for WebError {
-    fn from(error: RegistryError) -> Self {
-        match error {
-            RegistryError::Governance(inner) => inner.into(),
-            RegistryError::Storage(inner) => inner.into(),
-            // A canonical-digest failure is a server-side integrity fault.
-            RegistryError::CanonicalDigest(inner) => Self::Internal(inner.to_string()),
         }
     }
 }

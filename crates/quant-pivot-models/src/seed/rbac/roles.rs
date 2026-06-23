@@ -1,11 +1,5 @@
 //! Seeds the six built-in RBAC roles and publishes their IDs to the context.
 
-use std::{future::Future, pin::Pin};
-
-use sea_orm::{
-    ActiveValue::Set, ConnectionTrait, DbErr, EntityTrait, QueryTrait, sea_query::OnConflict,
-};
-
 use crate::{
     entities::role,
     enums::rbac::{RoleKind, RoleStatus},
@@ -20,6 +14,10 @@ use crate::{
     },
     types::RoleId,
 };
+use sea_orm::{
+    ActiveValue::Set, ConnectionTrait, DbErr, EntityTrait, QueryTrait, sea_query::OnConflict,
+};
+use std::{future::Future, pin::Pin};
 
 const SEED_ID: &str = "rbac.roles.bootstrap";
 

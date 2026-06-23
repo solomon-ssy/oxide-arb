@@ -34,9 +34,24 @@ if rg 'pipeline_event\.clone\(\)' crates/quant-pivot-core/src/pipeline/data_pipe
     ERRORS=$((ERRORS + 1))
 fi
 
-echo "=== Checking for legacy Endgame symbols in production code ==="
-if rg 'EndgameBook|EndgameDetector|ScoredOpportunity|sync_engine_hotset' crates/ --glob '!**/tests/**' 2>/dev/null; then
-    echo "ERROR: Legacy Endgame symbols found in production code"
+echo "=== Checking for legacy Endgame / execution-mode symbols in production code ==="
+if rg 'EndgameBook|EndgameDetector|ScoredOpportunity|OpportunityPipeline|ExecutionMode::(DryRun|Paper|Live)' crates/ --glob '!**/tests/**' 2>/dev/null; then
+    echo "ERROR: Legacy Endgame / execution-mode symbols found in production code"
+    ERRORS=$((ERRORS + 1))
+fi
+
+echo "=== Checking for retired 'Universe' / 'hotset' vocabulary ==="
+# The report market set is 'selection'; the WS subscription set is 'subscription'.
+if rg -i 'universe|hotset' crates/ --glob '*.rs' 2>/dev/null; then
+    echo "ERROR: retired 'universe'/'hotset' vocabulary found (use 'selection' / 'subscription')"
+    ERRORS=$((ERRORS + 1))
+fi
+
+echo "=== Checking for legacy Opportunity/Trade compatibility re-exports ==="
+# Word boundaries keep legitimate Polymarket SDK types (e.g. ClobTrade) allowed
+# while forbidding re-export shims for the deleted domain Opportunity/Trade types.
+if rg 'pub use .*\b(Opportunity|Trade)\b' crates/ --glob '!**/tests/**' 2>/dev/null; then
+    echo "ERROR: compatibility re-export of legacy Opportunity/Trade found"
     ERRORS=$((ERRORS + 1))
 fi
 

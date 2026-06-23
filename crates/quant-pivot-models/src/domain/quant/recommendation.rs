@@ -5,8 +5,8 @@ use crate::{
         QuantRuntimeMode, RecommendationReportStatus, RecommendationStatus, ReportKind, SignalSide,
     },
     types::{
-        EventId, MarketId, ModelVersionId, PortfolioPlanId, Probability, RecommendationId,
-        RecommendationReportId, RuntimeConfigVersionId, TokenId, UniverseSnapshotId,
+        EventId, MarketId, MarketSelectionId, ModelVersionId, PortfolioPlanId, Probability,
+        RecommendationId, RecommendationReportId, RuntimeConfigVersionId, TokenId,
     },
 };
 use chrono::{DateTime, Utc};
@@ -24,7 +24,7 @@ pub struct RecommendationReportInfo {
     pub runtime_mode: QuantRuntimeMode,
     pub runtime_config_version_id: RuntimeConfigVersionId,
     pub model_version_id: ModelVersionId,
-    pub universe_snapshot_id: UniverseSnapshotId,
+    pub market_selection_id: MarketSelectionId,
     pub portfolio_plan_id: PortfolioPlanId,
     pub top_n: i32,
     pub status: RecommendationReportStatus,
@@ -45,7 +45,7 @@ info_from_model!(
         runtime_mode,
         runtime_config_version_id,
         model_version_id,
-        universe_snapshot_id,
+        market_selection_id,
         portfolio_plan_id,
         top_n,
         status,
@@ -67,7 +67,7 @@ pub struct NewRecommendationReport {
     pub runtime_mode: QuantRuntimeMode,
     pub runtime_config_version_id: RuntimeConfigVersionId,
     pub model_version_id: ModelVersionId,
-    pub universe_snapshot_id: UniverseSnapshotId,
+    pub market_selection_id: MarketSelectionId,
     pub portfolio_plan_id: PortfolioPlanId,
     pub top_n: i32,
     pub status: RecommendationReportStatus,

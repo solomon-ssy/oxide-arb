@@ -4,7 +4,6 @@
 //! fixtures across `quant-pivot-core` integration tests and `quant-pivot-bench`
 //! benchmarks.
 
-pub mod async_writer;
 pub mod mocks;
 
 use uuid::Uuid;

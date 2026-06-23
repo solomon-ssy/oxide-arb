@@ -1,13 +1,13 @@
-//! `quant_universe_member` table entity.
+//! `quant_market_selection_member` table entity.
 
-use crate::types::{EventId, MarketId, TokenId, UniverseSnapshotId, Usd};
+use crate::types::{EventId, MarketId, MarketSelectionId, TokenId, Usd};
 use sea_orm::entity::prelude::*;
 
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
-#[sea_orm(table_name = "quant_universe_member")]
+#[sea_orm(table_name = "quant_market_selection_member")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
-    pub universe_snapshot_id: UniverseSnapshotId,
+    pub market_selection_id: MarketSelectionId,
     #[sea_orm(primary_key, auto_increment = false)]
     pub market_id: MarketId,
     pub event_id: EventId,
@@ -26,11 +26,11 @@ pub struct Model {
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {
     #[sea_orm(
-        belongs_to = "super::quant_universe_snapshot::Entity",
-        from = "Column::UniverseSnapshotId",
-        to = "super::quant_universe_snapshot::Column::UniverseSnapshotId"
+        belongs_to = "super::quant_market_selection::Entity",
+        from = "Column::MarketSelectionId",
+        to = "super::quant_market_selection::Column::MarketSelectionId"
     )]
-    UniverseSnapshot,
+    MarketSelection,
     #[sea_orm(
         belongs_to = "super::market::Entity",
         from = "Column::MarketId",
@@ -45,9 +45,9 @@ pub enum Relation {
     Event,
 }
 
-impl Related<super::quant_universe_snapshot::Entity> for Entity {
+impl Related<super::quant_market_selection::Entity> for Entity {
     fn to() -> RelationDef {
-        Relation::UniverseSnapshot.def()
+        Relation::MarketSelection.def()
     }
 }
 

@@ -3,7 +3,7 @@
 use crate::{
     domain::{
         lifecycle::{MarketDataConnectivity, OperationalPhase, WsShardConnectivity},
-        ports::control::CatalogState,
+        ports::runtime_control::CatalogState,
     },
     enums::{
         quant::QuantRuntimeMode,

@@ -12,7 +12,7 @@ use rust_decimal::Decimal;
 #[must_use]
 pub fn validate_runtime_config(config: &RuntimeConfig) -> ConfigValidationReport {
     let mut report = ConfigValidationReport::default();
-    validate_universe(config, &mut report);
+    validate_selection(config, &mut report);
     validate_data_quality(config, &mut report);
     validate_features(config, &mut report);
     validate_factors(config, &mut report);
@@ -24,26 +24,26 @@ pub fn validate_runtime_config(config: &RuntimeConfig) -> ConfigValidationReport
     report
 }
 
-fn validate_universe(config: &RuntimeConfig, report: &mut ConfigValidationReport) {
+fn validate_selection(config: &RuntimeConfig, report: &mut ConfigValidationReport) {
     decimal(
-        "universe.min_liquidity_usd",
-        &config.universe.min_liquidity_usd,
+        "selection.min_liquidity_usd",
+        &config.selection.min_liquidity_usd,
         report,
     );
     decimal(
-        "universe.min_volume_24h_usd",
-        &config.universe.min_volume_24h_usd,
+        "selection.min_volume_24h_usd",
+        &config.selection.min_volume_24h_usd,
         report,
     );
-    if config.universe.min_time_to_resolution_secs > config.universe.max_time_to_resolution_secs {
+    if config.selection.min_time_to_resolution_secs > config.selection.max_time_to_resolution_secs {
         report.errors.push(ConfigValidationError::InvalidValue {
-            field: "universe.min_time_to_resolution_secs",
-            detail: "must be <= universe.max_time_to_resolution_secs".to_owned(),
+            field: "selection.min_time_to_resolution_secs",
+            detail: "must be <= selection.max_time_to_resolution_secs".to_owned(),
         });
     }
-    if config.universe.max_universe_size == 0 {
+    if config.selection.max_selection_size == 0 {
         report.errors.push(ConfigValidationError::InvalidValue {
-            field: "universe.max_universe_size",
+            field: "selection.max_selection_size",
             detail: "must be greater than zero".to_owned(),
         });
     }

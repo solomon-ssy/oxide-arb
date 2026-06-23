@@ -3,8 +3,8 @@
 use crate::{
     observability::metrics_hub::MetricsHub,
     pipeline::{
-        market_cache::MarketCache, market_registry::MarketRegistry,
-        universe_filter::MarketUniverseFilter,
+        data_quality::BookDataQualityService, market_cache::MarketCache,
+        market_filter::MarketFilter, market_registry::MarketRegistry,
     },
     runtime_config::RuntimeConfigStore,
     service::ws_subscription::WsSubscriptionCoordinator,
@@ -17,10 +17,11 @@ use quant_pivot_models::{
 use std::sync::Arc;
 
 pub struct RuntimeConfigSubscribers {
-    pub universe: Arc<MarketUniverseFilter>,
+    pub market_filter: Arc<MarketFilter>,
     pub market_registry: Arc<MarketRegistry>,
     pub market_cache: Arc<MarketCache>,
     pub ws_subscription: Option<Arc<WsSubscriptionCoordinator>>,
+    pub data_quality: Arc<BookDataQualityService>,
     pub metrics: Arc<MetricsHub>,
     /// Deploy-time WS subscription look-ahead (hours); not yet runtime-config v3.
     pub subscription_window_hours: u64,
@@ -51,12 +52,14 @@ impl RuntimeConfigApplicator {
 
     fn propagate(&self, config: &Arc<RuntimeConfig>) {
         let subs = &self.subscribers;
-        subs.universe.reload(&config.universe.enabled_categories);
+        subs.market_filter
+            .reload(&config.selection.enabled_categories);
         subs.market_cache.rebuild();
+        subs.data_quality.reload(&config.data_quality);
         if let Some(ws) = &subs.ws_subscription {
-            let _ = ws.sync_universe_ingest(
+            let _ = ws.sync_subscription(
                 subs.market_registry.as_ref(),
-                subs.universe.as_ref(),
+                subs.market_filter.as_ref(),
                 subs.subscription_window_hours,
                 &subs.metrics,
             );

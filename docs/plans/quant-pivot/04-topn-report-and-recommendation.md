@@ -65,6 +65,9 @@ flowchart TD
 | `actual_count` | 实际 recommendation 数量 |
 | `status` | 报告状态 |
 | `summary` | 聚合摘要 |
+| `account_source` | 资本基数来源：`configured`（report_only 配置预算）/ `polymarket`（执行模式真实 equity），见 [09](09-account-capital-position-reconciliation.md) |
+| `capital_base_usd` | 本次 sizing 的资本基数（= `AccountSnapshot.equity_usd`） |
+| `account_snapshot_ref` | 指向 `quant_account_snapshot` 的决策时刻资金/持仓快照（可回放 sizing） |
 
 ## 3. Report Summary
 
@@ -241,6 +244,8 @@ Binding constraints：
 - `manual_cap`
 
 Sizing 不是展示值。执行模式启用时，`OrderIntent` 只能在 sizing plan 边界内创建。
+
+`*_exposure_after_usd` 与 `binding_constraint` 由 portfolio planner 结合 `AccountSnapshot`（资本基数 + 当前持仓/敞口净额）计算，统一抽象见 [09 — 账户、资本、持仓与对账设计](09-account-capital-position-reconciliation.md)。report_only 的资本基数取配置 `portfolio.budget`（免私钥），执行模式取真实 equity。
 
 ## 10. Exit Plan
 

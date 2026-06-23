@@ -1,6 +1,5 @@
 //! Fire-and-forget CH writer for token-level book facts.
 
-use crate::infra::async_writer::AsyncWriter;
 use chrono::Utc;
 use dashmap::{DashMap, mapref::entry::Entry};
 use quant_pivot_models::{
@@ -18,9 +17,12 @@ use quant_pivot_models::{
     hashing::CanonicalDigest,
     types::{MarketId, Price, TokenId, Usd},
 };
+use quant_pivot_storage::write::AsyncWriter;
 use rust_decimal::Decimal;
 use serde::Serialize;
 use std::{mem, sync::Arc};
+
+use super::{fact_lag::FactLagTracker, metrics_hub::MetricsHub};
 
 pub struct BookFactWriter {
     ticks: Arc<AsyncWriter<TickEventRow>>,
@@ -28,6 +30,8 @@ pub struct BookFactWriter {
     snapshots: Arc<AsyncWriter<BookSnapshotRow>>,
     microstructure_1s: Arc<AsyncWriter<BookMicrostructureRow>>,
     microstructure_pending: DashMap<TokenId, BookMicrostructureRow>,
+    fact_lag: Arc<FactLagTracker>,
+    metrics: Arc<MetricsHub>,
 }
 
 struct SnapshotLevels<'a> {
@@ -78,6 +82,8 @@ impl BookFactWriter {
         l2_writer: Arc<AsyncWriter<BookL2ReplayRow>>,
         snapshot_writer: Arc<AsyncWriter<BookSnapshotRow>>,
         microstructure_1s_writer: Arc<AsyncWriter<BookMicrostructureRow>>,
+        fact_lag: Arc<FactLagTracker>,
+        metrics: Arc<MetricsHub>,
     ) -> Self {
         Self {
             ticks: tick_writer,
@@ -85,7 +91,31 @@ impl BookFactWriter {
             snapshots: snapshot_writer,
             microstructure_1s: microstructure_1s_writer,
             microstructure_pending: DashMap::new(),
+            fact_lag,
+            metrics,
         }
+    }
+
+    /// Enqueue all open microstructure second-buckets before analytics writers drain.
+    pub fn flush_pending_microstructure(&self) {
+        let keys: Vec<TokenId> = self
+            .microstructure_pending
+            .iter()
+            .map(|entry| entry.key().clone())
+            .collect();
+        for key in keys {
+            if let Some((_, row)) = self.microstructure_pending.remove(&key) {
+                self.microstructure_1s.write(row);
+            }
+        }
+    }
+
+    fn record_fact_lag(&self, stream: &'static str, event_time_ms: i64, ingestion_time_ms: i64) {
+        let event_ms = u64::try_from(event_time_ms.max(0)).unwrap_or(0);
+        let ingestion_ms = u64::try_from(ingestion_time_ms.max(0)).unwrap_or(0);
+        let lag_ms = ingestion_ms.saturating_sub(event_ms);
+        self.fact_lag.record_ms(lag_ms);
+        self.metrics.observe_fact_lag_ms(stream, lag_ms);
     }
 
     pub fn write_snapshot(
@@ -135,6 +165,7 @@ impl BookFactWriter {
             feed_event_hash: snapshot_feed_event_hash(cmd),
             schema_version: ChSchemaVersion(2),
         };
+        self.record_fact_lag("book_l2_replay_hot", l2.event_time, ingestion_time);
         self.l2.write(l2);
         let snapshot = BookSnapshot::new(
             Arc::clone(&cmd.bids.levels),
@@ -205,6 +236,7 @@ impl BookFactWriter {
             feed_event_hash: delta_feed_event_hash(cmd),
             schema_version: ChSchemaVersion(2),
         };
+        self.record_fact_lag("book_l2_replay_hot", row.event_time, ingestion_time);
         self.l2.write(row);
         // Full-book microstructure must be generated from the published
         // snapshot after deltas are applied; callers pass it via
@@ -236,6 +268,11 @@ impl BookFactWriter {
         best_ask: Price,
         timestamp_ms: u64,
     ) {
+        self.record_fact_lag(
+            "tick_events",
+            i64::try_from(timestamp_ms).unwrap_or(i64::MAX),
+            Utc::now().timestamp_millis(),
+        );
         self.ticks.write(TickEventRow {
             token_id: token_id.clone(),
             market_id,
@@ -391,6 +428,7 @@ impl BookFactWriter {
         let best_bid = input.bids.first().map(|level| level.price_decimal());
         let best_ask = input.asks.first().map(|level| level.price_decimal());
         let levels_count = u16::try_from(input.bids.len() + input.asks.len()).unwrap_or(u16::MAX);
+        self.record_fact_lag("book_snapshots", input.event_time, input.ingestion_time);
         self.snapshots.write(BookSnapshotRow {
             token_id: input.token_id.clone(),
             market_id: input.market_id,
@@ -430,6 +468,11 @@ impl BookFactWriter {
             bucket_ms(now_ms, 1_000),
         );
         if event_type == ChBookEventType::Snapshot {
+            self.record_fact_lag(
+                "book_microstructure_1s",
+                second_observation.bucket_time,
+                now_ms,
+            );
             self.microstructure_1s.write(second_observation);
             return;
         }
@@ -448,6 +491,7 @@ impl BookFactWriter {
             }
         }
         if let Some(row) = stale_bucket {
+            self.record_fact_lag("book_microstructure_1s", row.bucket_time, now_ms);
             self.microstructure_1s.write(row);
         }
     }

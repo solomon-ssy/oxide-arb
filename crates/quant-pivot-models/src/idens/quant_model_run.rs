@@ -7,9 +7,7 @@ use sea_orm::{
 };
 
 use crate::{
-    idens::{
-        quant_model_version::QuantModelVersion, quant_universe_snapshot::QuantUniverseSnapshot,
-    },
+    idens::{quant_market_selection::QuantMarketSelection, quant_model_version::QuantModelVersion},
     schema::{
         column,
         dependency::TableDependency,
@@ -25,7 +23,7 @@ pub enum QuantModelRun {
     RunKind,
     ModelVersionId,
     RuntimeConfigVersionId,
-    UniverseSnapshotId,
+    MarketSelectionId,
     WindowStart,
     WindowEnd,
     Status,
@@ -46,7 +44,7 @@ pub fn table() -> TableCreateStatement {
         .col(ColumnDef::new(QuantModelRun::RunKind).text().not_null())
         .col(column::uuid_null(QuantModelRun::ModelVersionId))
         .col(column::uuid_fk(QuantModelRun::RuntimeConfigVersionId))
-        .col(column::uuid_null(QuantModelRun::UniverseSnapshotId))
+        .col(column::uuid_null(QuantModelRun::MarketSelectionId))
         .col(
             ColumnDef::new(QuantModelRun::WindowStart)
                 .timestamp_with_time_zone()
@@ -86,11 +84,11 @@ pub fn table() -> TableCreateStatement {
         )
         .foreign_key(
             ForeignKey::create()
-                .name("fk_quant_model_run_universe_snapshot")
-                .from(QuantModelRun::Table, QuantModelRun::UniverseSnapshotId)
+                .name("fk_quant_model_run_selection_snapshot")
+                .from(QuantModelRun::Table, QuantModelRun::MarketSelectionId)
                 .to(
-                    QuantUniverseSnapshot::Table,
-                    QuantUniverseSnapshot::UniverseSnapshotId,
+                    QuantMarketSelection::Table,
+                    QuantMarketSelection::MarketSelectionId,
                 )
                 .on_delete(ForeignKeyAction::Restrict),
         )
@@ -129,7 +127,7 @@ pub fn indexes() -> Vec<IndexSpec> {
 pub fn dependencies() -> Vec<TableDependency> {
     vec![
         TableDependency::foreign_key(quant_model_version_table_name),
-        TableDependency::foreign_key(quant_universe_snapshot_table_name),
+        TableDependency::foreign_key(quant_market_selection_table_name),
     ]
 }
 
@@ -145,6 +143,6 @@ fn quant_model_version_table_name() -> String {
     QuantModelVersion::Table.to_string()
 }
 
-fn quant_universe_snapshot_table_name() -> String {
-    QuantUniverseSnapshot::Table.to_string()
+fn quant_market_selection_table_name() -> String {
+    QuantMarketSelection::Table.to_string()
 }

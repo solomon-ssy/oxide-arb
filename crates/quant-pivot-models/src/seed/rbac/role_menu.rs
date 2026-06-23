@@ -1,15 +1,5 @@
 //! Grants built-in roles visibility of menu nodes aligned with Casbin policies.
 
-use std::{
-    collections::{HashMap, HashSet},
-    future::Future,
-    pin::Pin,
-};
-
-use sea_orm::{
-    ActiveValue::Set, ConnectionTrait, DbErr, EntityTrait, QueryTrait, sea_query::OnConflict,
-};
-
 use crate::{
     entities::role_menu,
     enums::rbac::MenuKind,
@@ -22,6 +12,14 @@ use crate::{
             casbin::builtin_role_policies, menus::MenuGrantSpec,
         },
     },
+};
+use sea_orm::{
+    ActiveValue::Set, ConnectionTrait, DbErr, EntityTrait, QueryTrait, sea_query::OnConflict,
+};
+use std::{
+    collections::{HashMap, HashSet},
+    future::Future,
+    pin::Pin,
 };
 
 const SEED_ID: &str = "rbac.role_menu.bootstrap";

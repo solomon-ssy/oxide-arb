@@ -38,7 +38,7 @@ pub struct DataPipelineDeps {
     pub market_registry: Arc<MarketRegistry>,
     pub metrics: Arc<MetricsHub>,
     pub backpressure: Arc<BackpressurePolicy>,
-    pub book_fact_writer: Option<Arc<BookFactWriter>>,
+    pub book_fact_writer: Arc<BookFactWriter>,
     pub book_shard_count: usize,
     pub book_channel_capacity: usize,
     pub shutdown: CancellationToken,
@@ -52,7 +52,7 @@ pub struct DataPipeline {
     market_registry: Arc<MarketRegistry>,
     metrics: Arc<MetricsHub>,
     backpressure: Arc<BackpressurePolicy>,
-    book_fact_writer: Option<Arc<BookFactWriter>>,
+    book_fact_writer: Arc<BookFactWriter>,
     book_shard_count: usize,
     book_channel_capacity: usize,
     shutdown: CancellationToken,
@@ -88,6 +88,7 @@ impl DataPipeline {
             book_receivers.push(rx);
         }
 
+        let book_fact_writer = Arc::clone(&self.book_fact_writer);
         let mut book_threads = Vec::with_capacity(shard_count);
         for (shard_id, rx) in book_receivers.into_iter().enumerate() {
             let worker = BookApplyWorker {
@@ -96,7 +97,7 @@ impl DataPipeline {
                 market_registry: Arc::clone(&self.market_registry),
                 metrics: Arc::clone(&self.metrics),
                 backpressure: Arc::clone(&self.backpressure),
-                book_fact_writer: self.book_fact_writer.as_ref().map(Arc::clone),
+                book_fact_writer: Arc::clone(&book_fact_writer),
             };
             book_threads.push(thread::spawn(move || worker.run(&rx)));
         }
@@ -131,6 +132,7 @@ impl DataPipeline {
                         for handle in book_threads {
                             handle.join().ok();
                         }
+                        self.book_fact_writer.flush_pending_microstructure();
                         return Err(QuantError::Internal(
                             "Pipeline event channel closed".into(),
                         ));
@@ -143,6 +145,9 @@ impl DataPipeline {
         for handle in book_threads {
             handle.join().ok();
         }
+        // Flush open microstructure buckets before analytics writers drain (WsIngress
+        // stage precedes Analytics in shutdown ordering).
+        self.book_fact_writer.flush_pending_microstructure();
         Ok(())
     }
 }
@@ -153,7 +158,7 @@ struct BookApplyWorker {
     market_registry: Arc<MarketRegistry>,
     metrics: Arc<MetricsHub>,
     backpressure: Arc<BackpressurePolicy>,
-    book_fact_writer: Option<Arc<BookFactWriter>>,
+    book_fact_writer: Arc<BookFactWriter>,
 }
 
 impl BookApplyWorker {
@@ -184,15 +189,13 @@ impl BookApplyWorker {
                 let known = self.market_registry.get_market(&market_id).is_some();
                 tracing::info!(%market_id, known, "Market resolved via WS (ingest only)");
                 self.metrics.markets_resolved_ws.inc();
-                if let Some(writer) = &self.book_fact_writer {
-                    writer.write_market_resolved(
-                        &market_id,
-                        &winning_token_id,
-                        &winning_outcome,
-                        &asset_ids,
-                        timestamp_ms,
-                    );
-                }
+                self.book_fact_writer.write_market_resolved(
+                    &market_id,
+                    &winning_token_id,
+                    &winning_outcome,
+                    &asset_ids,
+                    timestamp_ms,
+                );
             }
 
             PipelineEvent::TickSizeChange {
@@ -202,14 +205,12 @@ impl BookApplyWorker {
                 ..
             } => {
                 tracing::info!(%asset_id, %old_tick, %new_tick, "Tick size changed");
-                if let Some(writer) = &self.book_fact_writer {
-                    writer.write_tick_size_change(
-                        &asset_id,
-                        self.market_registry.market_for_token(&asset_id),
-                        old_tick,
-                        new_tick,
-                    );
-                }
+                self.book_fact_writer.write_tick_size_change(
+                    &asset_id,
+                    self.market_registry.market_for_token(&asset_id),
+                    old_tick,
+                    new_tick,
+                );
             }
 
             PipelineEvent::ShardStatus { shard_id, status } => {
@@ -223,15 +224,13 @@ impl BookApplyWorker {
                 timestamp_ms,
                 ..
             } => {
-                if let Some(writer) = &self.book_fact_writer {
-                    writer.write_bbo(
-                        &asset_id,
-                        self.market_registry.market_for_token(&asset_id),
-                        best_bid,
-                        best_ask,
-                        timestamp_ms,
-                    );
-                }
+                self.book_fact_writer.write_bbo(
+                    &asset_id,
+                    self.market_registry.market_for_token(&asset_id),
+                    best_bid,
+                    best_ask,
+                    timestamp_ms,
+                );
             }
 
             PipelineEvent::LastTradePrice {
@@ -240,14 +239,12 @@ impl BookApplyWorker {
                 timestamp_ms,
                 ..
             } => {
-                if let Some(writer) = &self.book_fact_writer {
-                    writer.write_last_trade(
-                        &asset_id,
-                        self.market_registry.market_for_token(&asset_id),
-                        price,
-                        timestamp_ms,
-                    );
-                }
+                self.book_fact_writer.write_last_trade(
+                    &asset_id,
+                    self.market_registry.market_for_token(&asset_id),
+                    price,
+                    timestamp_ms,
+                );
             }
         }
     }
@@ -260,13 +257,11 @@ impl BookApplyWorker {
             cmd.timestamp_ms,
             Some(LatencyTrace::from_ingress(cmd.trace.mono)),
         );
-        if let Some(writer) = &self.book_fact_writer {
-            writer.write_snapshot(
-                cmd,
-                self.market_registry.market_for_token(&cmd.asset_id),
-                version,
-            );
-        }
+        self.book_fact_writer.write_snapshot(
+            cmd,
+            self.market_registry.market_for_token(&cmd.asset_id),
+            version,
+        );
         self.metrics.book_snapshots_applied.inc();
     }
 
@@ -277,23 +272,22 @@ impl BookApplyWorker {
             cmd.timestamp_ms,
             Some(LatencyTrace::from_ingress(cmd.trace.mono)),
         );
-        if let Some(writer) = &self.book_fact_writer {
-            let market_id = self.market_registry.market_for_token(&cmd.asset_id);
-            writer.write_delta(cmd, market_id.clone(), version);
-            if let Some(snapshot) = self.book_store.load(&cmd.asset_id) {
-                let delete_count = cmd
-                    .changes
-                    .iter()
-                    .filter(|change| change.size <= Shares::ZERO)
-                    .count();
-                writer.write_microstructure_snapshot(
-                    &cmd.asset_id,
-                    market_id,
-                    &snapshot,
-                    ChBookEventType::Delta,
-                    u64::try_from(delete_count).unwrap_or(u64::MAX),
-                );
-            }
+        let market_id = self.market_registry.market_for_token(&cmd.asset_id);
+        self.book_fact_writer
+            .write_delta(cmd, market_id.clone(), version);
+        if let Some(snapshot) = self.book_store.load(&cmd.asset_id) {
+            let delete_count = cmd
+                .changes
+                .iter()
+                .filter(|change| change.size <= Shares::ZERO)
+                .count();
+            self.book_fact_writer.write_microstructure_snapshot(
+                &cmd.asset_id,
+                market_id,
+                &snapshot,
+                ChBookEventType::Delta,
+                u64::try_from(delete_count).unwrap_or(u64::MAX),
+            );
         }
         self.metrics.price_changes_applied.inc();
     }
@@ -308,18 +302,11 @@ impl BookApplyWorker {
             .ws_shard_connected
             .with_label_values(&[&shard_id.to_string()])
             .set(i64::from(connected));
-        if let Some(writer) = &self.book_fact_writer {
-            self.write_shard_status_facts(writer, shard_id, status);
-        }
+        self.write_shard_status_facts(shard_id, status);
     }
 
-    fn write_shard_status_facts(
-        &self,
-        writer: &BookFactWriter,
-        shard_id: usize,
-        status: ShardConnectionStatus,
-    ) {
-        writer.write_shard_status(shard_id, status);
+    fn write_shard_status_facts(&self, shard_id: usize, status: ShardConnectionStatus) {
+        self.book_fact_writer.write_shard_status(shard_id, status);
         let reason = match status {
             ShardConnectionStatus::Reconnecting { .. } => Some(ChSnapshotReason::Reconnect),
             ShardConnectionStatus::Disconnected => Some(ChSnapshotReason::Gap),
@@ -328,7 +315,7 @@ impl BookApplyWorker {
         if let Some(reason) = reason {
             for (token_id, snapshot) in self.book_store.published_snapshots() {
                 if snapshot.timestamp_ms > 0 {
-                    writer.write_published_snapshot(
+                    self.book_fact_writer.write_published_snapshot(
                         &token_id,
                         self.market_registry.market_for_token(&token_id),
                         reason,
