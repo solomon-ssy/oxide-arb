@@ -1,10 +1,12 @@
 //! Shared integration-test harnesses, fixtures, and mocks for `quant-pivot`.
 //!
 //! This crate is `publish = false` — it exists solely to share test-only
-//! fixtures across `quant-pivot-core` integration tests and `quant-pivot-bench`
-//! benchmarks.
+//! fixtures across `quant-pivot-core` / `quant-pivot-repository` integration
+//! tests and `quant-pivot-bench` benchmarks.
 
+pub mod catalog_fixtures;
 pub mod mocks;
+pub mod pg;
 
 use uuid::Uuid;
 

@@ -31,7 +31,7 @@ impl AppContext {
             .await;
         });
 
-        let data_quality = Arc::clone(&self.data_quality);
+        let data_quality = Arc::clone(&self.data.data_quality);
         let metrics = Arc::clone(&self.infra.metrics);
         runner.spawn(TaskId::DataQualityRefresh, move |token| async move {
             let _ = PeriodicTask::run(

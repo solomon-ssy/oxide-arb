@@ -184,6 +184,12 @@ pub struct WireMarket {
     pub order_min_size: Option<Decimal>,
     #[serde(default)]
     pub order_price_min_tick_size: Option<Decimal>,
+    /// Numeric liquidity (`liquidityNum`) in USD; absent on some payloads.
+    #[serde(default)]
+    pub liquidity_num: Option<Decimal>,
+    /// Trailing 24h traded volume (`volume24hr`) in USD; absent on some payloads.
+    #[serde(default)]
+    pub volume_24hr: Option<Decimal>,
     /// Parent events embedded by `GET /markets?condition_ids=` responses
     /// (absent in keyset payloads where the market is nested under its event).
     #[serde(default)]

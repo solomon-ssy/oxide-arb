@@ -2,9 +2,12 @@
 
 use super::wire::{WireEvent, WireFeeSchedule, WireMarket};
 use chrono::{DateTime, Utc};
-use quant_pivot_models::enums::{
-    common::{CategorySet, TickSize},
-    market::{EventStatus, MarketStatus},
+use quant_pivot_models::{
+    enums::{
+        common::{CategorySet, TickSize},
+        market::{EventStatus, MarketStatus},
+    },
+    types::Usd,
 };
 use rust_decimal::Decimal;
 use serde_json::Value;
@@ -49,6 +52,10 @@ pub struct CatalogMarket {
     pub fees_enabled: bool,
     pub fee_schedule: Option<WireFeeSchedule>,
     pub min_order_size: Decimal,
+    /// Gamma-reported liquidity in USD (`liquidityNum`), when published.
+    pub liquidity_usd: Option<Usd>,
+    /// Gamma-reported trailing 24h volume in USD (`volume24hr`); absent when upstream omits the field.
+    pub volume_24h_usd: Option<Usd>,
     pub tick_size: TickSize,
     pub created_at: Option<DateTime<Utc>>,
     pub updated_at: Option<DateTime<Utc>>,
@@ -211,6 +218,8 @@ impl TryFrom<WireMarket> for CatalogMarket {
             fees_enabled: wire.fees_enabled.unwrap_or(true),
             fee_schedule: wire.fee_schedule,
             min_order_size: wire.order_min_size.unwrap_or(Decimal::ONE),
+            liquidity_usd: wire.liquidity_num.map(Usd::new),
+            volume_24h_usd: wire.volume_24hr.map(Usd::new),
             tick_size,
             created_at: parse_gamma_timestamp(wire.created_at.as_deref()),
             updated_at: parse_gamma_timestamp(wire.updated_at.as_deref()),
@@ -296,9 +305,12 @@ fn parse_gamma_timestamp(raw: Option<&str>) -> Option<DateTime<Utc>> {
 mod tests {
     use super::{CatalogEvent, CatalogMarket, CatalogMarketReject};
     use crate::gamma::wire::{WireEvent, WireMarket};
-    use quant_pivot_models::enums::{
-        common::MarketCategory,
-        market::{EventStatus, MarketStatus},
+    use quant_pivot_models::{
+        enums::{
+            common::MarketCategory,
+            market::{EventStatus, MarketStatus},
+        },
+        types::Usd,
     };
 
     #[test]
@@ -467,6 +479,34 @@ mod tests {
                 .settlement
                 .is_none()
         );
+    }
+
+    #[test]
+    fn volume_24h_preserves_missing_vs_zero_semantics() {
+        let absent: WireMarket = serde_json::from_str(
+            r#"{
+                "conditionId": "0xabsent",
+                "question": "Q?",
+                "clobTokenIds": ["1", "2"],
+                "outcomes": ["Yes", "No"]
+            }"#,
+        )
+        .expect("wire market");
+        let absent_market = CatalogMarket::try_from(absent).expect("market");
+        assert!(absent_market.volume_24h_usd.is_none());
+
+        let zero: WireMarket = serde_json::from_str(
+            r#"{
+                "conditionId": "0xzero",
+                "question": "Q?",
+                "clobTokenIds": ["1", "2"],
+                "outcomes": ["Yes", "No"],
+                "volume24hr": 0
+            }"#,
+        )
+        .expect("wire market");
+        let zero_market = CatalogMarket::try_from(zero).expect("market");
+        assert_eq!(zero_market.volume_24h_usd, Some(Usd::ZERO));
     }
 
     #[test]

@@ -3,13 +3,33 @@
 //!
 //! Online closure entry (3.1): a deterministic, replayable, hashable
 //! [`MarketSelectionSnapshot`] of which markets enter a research/report round.
-//! The 7-filter pipeline and the Postgres repository land in 3.1; 3.0 fixes the
-//! trait + snapshot contract.
+//! The 7-filter pipeline ([`filters`]), the pure selector ([`selector`]), and
+//! the canonical [`hash`] live here; the Postgres repository lands in
+//! `quant-pivot-repository`.
+//!
+//! The selector is a **pure function** of two frozen inputs: a
+//! [`MarketSelectionBuildRequest`] (strategy intent: config + model
+//! requirements) and a `Vec<MarketCandidate>` (the decision-time freeze of every
+//! market fact, owned by `quant-pivot-models`). Given the same two inputs it
+//! always produces the same [`MarketSelectionSnapshot::selector_hash`].
+
+mod filters;
+mod hash;
+mod selector;
+
+pub use filters::{
+    CategoryFilter, DataQualityFilter, FilterChain, FilterOutcome, LiquidityFilter,
+    ManualBlockFilter, MarketCandidateCtx, MarketStatusFilter, ModelEligibilityFilter,
+    ResolutionAmbiguityFilter, SelectionFilter, SelectionThresholds, accumulate_exclusion,
+};
+pub use hash::SelectorHashInput;
+pub use selector::ConfiguredMarketSelector;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
+    domain::MarketCandidate,
     enums::common::MarketCategory,
     runtime_config::{DataQualityConfig, SelectionConfig},
     types::{
@@ -21,14 +41,19 @@ use serde::{Deserialize, Serialize};
 
 use crate::features::{EvidenceSourceRef, FeatureName};
 
-/// Builds a deterministic market selection snapshot from frozen config and
-/// data-quality inputs.
+/// Builds a deterministic market selection snapshot from frozen config and a
+/// frozen slice of market-candidate facts.
 #[async_trait]
 pub trait MarketSelector: Send + Sync {
     /// Build the snapshot for one research/report round.
+    ///
+    /// `request` carries strategy intent (config + model requirements);
+    /// `candidates` carries the frozen world facts. The result is a pure
+    /// function of both — no I/O, no clock, no mutable runtime state.
     async fn build_snapshot(
         &self,
         request: MarketSelectionBuildRequest,
+        candidates: Vec<MarketCandidate>,
     ) -> QuantResult<MarketSelectionSnapshot>;
 }
 
@@ -83,8 +108,8 @@ pub struct MarketSelectionSnapshot {
 pub struct SelectedMarket {
     /// Market id.
     pub market_id: MarketId,
-    /// Owning event, when known.
-    pub event_id: Option<EventId>,
+    /// Owning event (always present for Polymarket catalog-backed selections).
+    pub event_id: EventId,
     /// Market category.
     pub category: MarketCategory,
     /// Primary outcome token.
@@ -97,6 +122,21 @@ pub struct SelectedMarket {
     pub volume_24h_usd: Option<Usd>,
     /// Provenance of the selection evidence.
     pub source_refs: Vec<EvidenceSourceRef>,
+}
+
+impl From<&MarketCandidate> for SelectedMarket {
+    fn from(candidate: &MarketCandidate) -> Self {
+        Self {
+            market_id: candidate.market_id.clone(),
+            event_id: candidate.event_id.clone(),
+            category: candidate.category,
+            primary_token_id: candidate.primary_token_id.clone(),
+            secondary_token_id: candidate.secondary_token_id.clone(),
+            liquidity_usd: candidate.liquidity_usd,
+            volume_24h_usd: candidate.volume_24h_usd,
+            source_refs: Vec::new(),
+        }
+    }
 }
 
 /// A market that was filtered out, with the deciding reason.
@@ -128,6 +168,8 @@ pub enum ExclusionReason {
     ResolutionAmbiguous,
     /// Manually blocked by an operator.
     ManuallyBlocked,
+    /// Passed every filter but dropped by `max_selection_size` cap.
+    SelectionCapExceeded,
     /// The model requires features unavailable for this market.
     ModelFeatureUnavailable {
         /// The missing required features.

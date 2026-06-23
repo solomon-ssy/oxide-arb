@@ -3,6 +3,7 @@ pub mod data_pipeline;
 pub mod data_quality;
 pub mod event_source;
 pub mod market_cache;
+pub mod market_candidate_provider;
 pub mod market_filter;
 pub mod market_registry;
 pub mod order_book;

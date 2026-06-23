@@ -1,6 +1,7 @@
 //! Quant-pivot persistence DTOs for Phase 1 schema-first repositories.
 
 mod attribution;
+mod candidate;
 mod execution;
 mod factor;
 mod feature;
@@ -13,6 +14,7 @@ mod recommendation;
 mod selection;
 
 pub use attribution::*;
+pub use candidate::*;
 pub use execution::*;
 pub use factor::*;
 pub use feature::*;

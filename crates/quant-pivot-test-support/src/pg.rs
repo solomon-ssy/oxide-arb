@@ -1,4 +1,4 @@
-//! Shared helpers for `PostgreSQL` repository integration tests.
+//! Testcontainers Postgres pool + migration bootstrap for integration tests.
 
 use quant_pivot_models::config::PostgresConfig;
 use quant_pivot_storage::postgres::{
@@ -8,6 +8,8 @@ use quant_pivot_storage::postgres::{
 use testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner};
 use testcontainers_modules::postgres::Postgres;
 
+/// Build a [`PostgresConfig`] aimed at a local testcontainer port.
+#[must_use]
 pub fn test_pg_config(port: u16) -> PostgresConfig {
     PostgresConfig {
         host: "localhost".into(),
@@ -32,6 +34,10 @@ pub fn test_pg_config(port: u16) -> PostgresConfig {
     }
 }
 
+/// Start Postgres 16, run migrations, and return a pool plus the container handle.
+///
+/// Keep the returned container alive for the duration of the test so the pool
+/// stays connected.
 pub async fn setup_pg() -> (PostgresPool, ContainerAsync<Postgres>) {
     let container = Postgres::default()
         .with_db_name("test_oxide_arb")

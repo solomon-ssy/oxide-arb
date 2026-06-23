@@ -16,22 +16,19 @@ pub use bundles::*;
 
 use crate::{
     governance::RuntimeModeHandle,
-    infra::health_checker::HealthChecker,
-    pipeline::data_quality::BookDataQualityService,
     runtime_config::{RuntimeConfigApplicator, RuntimeConfigStore},
-    service::{catalog_readiness::CatalogReadiness, system_status_nudge::SystemStatusNudge},
 };
 use flume::Receiver;
 use parking_lot::Mutex;
 use quant_pivot_models::{
     config::DeployConfig,
-    domain::{CoreEvent, CoreEventPublisher, PointInTimeDataSource, RuntimeControlPort},
+    domain::{CoreEvent, CoreEventPublisher},
 };
 use quant_pivot_research::artifact::ArtifactStore;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
-/// System composition root — Phase 0 bundles + Phase 3 research wiring.
+/// System composition root — bundles are the sole subsystem containers.
 pub struct AppContext {
     pub config: Arc<DeployConfig>,
     pub shutdown: CancellationToken,
@@ -40,16 +37,7 @@ pub struct AppContext {
     pub infra: InfraBundle,
     pub data: DataBundle,
     pub governance: GovernanceBundle,
-    /// Research plane (artifact store; compute traits live in `quant-pivot-research`).
     pub research: ResearchBundle,
-    pub health_checker: Arc<HealthChecker>,
-    pub runtime_control: Arc<dyn RuntimeControlPort>,
-    pub catalog: Arc<CatalogReadiness>,
-    pub data_quality: Arc<BookDataQualityService>,
-    /// Live point-in-time source for Phase 3 feature/report builders. The
-    /// historical (ClickHouse-backed) source lands in Phase 3.
-    pub pit_source: Arc<dyn PointInTimeDataSource>,
-    pub status_nudge: SystemStatusNudge,
 }
 
 impl AppContext {

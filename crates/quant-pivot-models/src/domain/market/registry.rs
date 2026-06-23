@@ -142,7 +142,10 @@ pub struct MarketRegistryInfo {
     pub best_ask: Option<Decimal>,
     pub depth_usd: Option<Usd>,
     pub min_order_size: Decimal,
-    pub volume_24h: Usd,
+    /// Gamma-reported liquidity, when published by the upstream source.
+    pub liquidity_usd: Option<Usd>,
+    /// Gamma-reported trailing 24h volume when published by the upstream source.
+    pub volume_24h: Option<Usd>,
     pub fee_schedule: Option<MarketFeeSchedule>,
     pub end_date: Option<DateTime<Utc>>,
     pub resolved_at: Option<DateTime<Utc>>,

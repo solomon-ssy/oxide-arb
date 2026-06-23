@@ -1,0 +1,222 @@
+//! Infrastructure bundle: persistence, analytics write plane, metrics.
+
+use crate::{
+    app::{task_id::TaskId, task_registry::PendingTaskQueue},
+    observability::{
+        book_fact_writer::BookFactWriter, fact_lag::FactLagTracker, metrics_hub::MetricsHub,
+    },
+};
+use prometheus::IntCounter;
+use quant_pivot_error::{QuantError, QuantResult};
+use quant_pivot_models::{
+    clickhouse::{BookL2ReplayRow, BookMicrostructureRow, BookSnapshotRow, TickEventRow},
+    config::DeployConfig,
+};
+use quant_pivot_repository::{
+    clickhouse::{ChFactWriter, ChQuantFactRepository},
+    postgres::PgOperationLogRepository,
+    traits::{FactWriter, QuantFactRepository},
+};
+use quant_pivot_storage::{
+    cache::{CacheManager, MokaBackend, RedisBackend, RedisPool, TieredCache, connect_pool},
+    clickhouse::{ChWriteManager, ClickHousePool},
+    postgres::{
+        PostgresPool,
+        migration::{Migrator, MigratorTrait},
+    },
+    write::{AsyncWriter, AsyncWriterConfig, AsyncWriterObservability},
+};
+use quant_pivot_web::jwt::RedisTokenBlacklist;
+use std::{sync::Arc, time::Duration};
+
+/// Persistence connections, `ClickHouse` fact writers, and shared observability.
+pub struct InfraBundle {
+    pub pg: Arc<PostgresPool>,
+    pub ch: Arc<ClickHousePool>,
+    pub ch_write_manager: Arc<ChWriteManager>,
+    pub quant_fact_repo: Arc<dyn QuantFactRepository>,
+    pub redis: RedisPool,
+    pub cache: Arc<CacheManager>,
+    pub jwt_blacklist: Arc<RedisTokenBlacklist>,
+    pub metrics: Arc<MetricsHub>,
+    pub operation_log_repo: Arc<PgOperationLogRepository>,
+    /// Shared lag tracker for book facts and data-quality gates.
+    pub fact_lag_tracker: Arc<FactLagTracker>,
+    pub book_fact_writer: Arc<BookFactWriter>,
+    /// Flush workers for each book fact stream, registered on the runner at boot.
+    pub(crate) fact_writer_queue: PendingTaskQueue,
+}
+
+impl InfraBundle {
+    /// Connect storage backends and wire the `ClickHouse` book-fact write plane.
+    pub async fn assemble(deploy: &DeployConfig, metrics: Arc<MetricsHub>) -> QuantResult<Self> {
+        let pg = Arc::new(PostgresPool::connect(&deploy.db.postgres).await?);
+        Migrator::up(pg.connection(), None).await?;
+
+        let ch = Arc::new(ClickHousePool::connect(&deploy.db.clickhouse).await?);
+        ch.ensure_schema().await?;
+
+        let redis = connect_pool(&deploy.cache.redis).await?;
+        let cache = Arc::new(CacheManager::new(
+            TieredCache::new(
+                MokaBackend::new(deploy.cache.moka.max_capacity),
+                RedisBackend::new(redis.clone(), &deploy.cache.redis.key_prefix),
+            ),
+            &deploy.cache,
+        ));
+        cache.register_metrics(&metrics.registry).map_err(|error| {
+            QuantError::Internal(format!("cache metrics registration: {error}"))
+        })?;
+
+        let jwt_blacklist = Arc::new(RedisTokenBlacklist::new(
+            redis.clone(),
+            &deploy.cache.redis.key_prefix,
+        ));
+
+        let operation_log_repo = Arc::new(PgOperationLogRepository::new(pg.connection().clone()));
+
+        let fact_lag_tracker = Arc::new(FactLagTracker::new());
+        let ch_write_manager = Arc::new(ChWriteManager::new(
+            deploy.db.clickhouse.max_concurrent_inserts,
+        ));
+        ch_write_manager
+            .metrics()
+            .register(&metrics.registry)
+            .map_err(|error| {
+                QuantError::Internal(format!("clickhouse write metrics registration: {error}"))
+            })?;
+
+        let quant_fact_repo: Arc<dyn QuantFactRepository> = Arc::new(ChQuantFactRepository::new(
+            Arc::clone(&ch),
+            Arc::clone(&ch_write_manager),
+        ));
+
+        let (book_fact_writer, fact_writer_queue) =
+            build_book_fact_writer(&ch, &ch_write_manager, &fact_lag_tracker, &metrics, deploy);
+
+        Ok(Self {
+            pg,
+            ch,
+            ch_write_manager,
+            quant_fact_repo,
+            redis,
+            cache,
+            jwt_blacklist,
+            metrics,
+            operation_log_repo,
+            fact_lag_tracker,
+            book_fact_writer,
+            fact_writer_queue,
+        })
+    }
+}
+
+/// Assemble the book fact-writer plane: one `AsyncWriter` per `ClickHouse` fact
+/// table, each flushing through the shared `ChWriteManager` (permit + retry +
+/// metrics). Returns the producer-facing writer plus a queue of flush workers
+/// to register on the runner (shutdown stage `Analytics`).
+fn build_book_fact_writer(
+    ch_pool: &Arc<ClickHousePool>,
+    write_manager: &Arc<ChWriteManager>,
+    fact_lag: &Arc<FactLagTracker>,
+    metrics: &Arc<MetricsHub>,
+    deploy: &DeployConfig,
+) -> (Arc<BookFactWriter>, PendingTaskQueue) {
+    let ch = &deploy.db.clickhouse;
+
+    let queue = PendingTaskQueue::default();
+    let capacity = ch.batch_size.saturating_mul(4).max(8_192);
+    let flush_interval = Duration::from_secs(ch.flush_interval_secs.max(1));
+    let config = |name: &'static str| {
+        AsyncWriterConfig::new(name)
+            .capacity(capacity)
+            .batch_size(ch.batch_size)
+            .flush_interval(flush_interval)
+    };
+    let drops = |name: &'static str| metrics.async_writer_dropped.with_label_values(&[name]);
+
+    let ticks = spawn_fact_stream::<TickEventRow>(
+        &queue,
+        TaskId::TickEventsWriter,
+        Arc::new(ChFactWriter::new(
+            Arc::clone(ch_pool),
+            Arc::clone(write_manager),
+            "tick_events",
+        )),
+        drops("tick_events"),
+        metrics.async_writer_observability("tick_events"),
+        config("tick_events"),
+    );
+    let l2 = spawn_fact_stream::<BookL2ReplayRow>(
+        &queue,
+        TaskId::BookL2ReplayWriter,
+        Arc::new(ChFactWriter::new(
+            Arc::clone(ch_pool),
+            Arc::clone(write_manager),
+            "book_l2_replay_hot",
+        )),
+        drops("book_l2_replay_hot"),
+        metrics.async_writer_observability("book_l2_replay_hot"),
+        config("book_l2_replay_hot"),
+    );
+    let snapshots = spawn_fact_stream::<BookSnapshotRow>(
+        &queue,
+        TaskId::BookSnapshotWriter,
+        Arc::new(ChFactWriter::new(
+            Arc::clone(ch_pool),
+            Arc::clone(write_manager),
+            "book_snapshots",
+        )),
+        drops("book_snapshots"),
+        metrics.async_writer_observability("book_snapshots"),
+        config("book_snapshots"),
+    );
+    let microstructure = spawn_fact_stream::<BookMicrostructureRow>(
+        &queue,
+        TaskId::BookMicrostructure1sWriter,
+        Arc::new(ChFactWriter::new(
+            Arc::clone(ch_pool),
+            Arc::clone(write_manager),
+            "book_microstructure_1s",
+        )),
+        drops("book_microstructure_1s"),
+        metrics.async_writer_observability("book_microstructure_1s"),
+        config("book_microstructure_1s"),
+    );
+
+    let writer = Arc::new(BookFactWriter::new(
+        ticks,
+        l2,
+        snapshots,
+        microstructure,
+        Arc::clone(fact_lag),
+        Arc::clone(metrics),
+    ));
+    (writer, queue)
+}
+
+/// Build one fact stream: wire an `AsyncWriter` to a `ChFactWriter` sink and
+/// queue its flush worker. Returns the producer handle for the writer facade.
+fn spawn_fact_stream<T>(
+    queue: &PendingTaskQueue,
+    task: TaskId,
+    sink: Arc<dyn FactWriter<T>>,
+    drops: IntCounter,
+    observability: AsyncWriterObservability,
+    config: AsyncWriterConfig,
+) -> Arc<AsyncWriter<T>>
+where
+    T: Send + 'static,
+{
+    let (writer, worker) = AsyncWriter::new(
+        config,
+        move |rows| {
+            let sink = Arc::clone(&sink);
+            Box::pin(async move { sink.write_batch(rows).await })
+        },
+        drops,
+        observability,
+    );
+    queue.push(task, move |token| worker.run(token));
+    Arc::new(writer)
+}

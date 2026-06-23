@@ -1,4 +1,4 @@
-//! Market/event fixture builders for the catalog repository integration tests.
+//! Minimal event/market upsert fixtures for catalog integration tests.
 
 use chrono::{DateTime, Utc};
 use quant_pivot_models::{
@@ -10,6 +10,8 @@ use quant_pivot_models::{
     types::{EventId, MarketId, TokenId},
 };
 
+/// Build a minimal event upsert row.
+#[must_use]
 pub fn make_event(id: &str, title: &str, slug: &str, category: MarketCategory) -> UpsertEvent {
     UpsertEvent {
         event_id: EventId::new(id),
@@ -23,6 +25,8 @@ pub fn make_event(id: &str, title: &str, slug: &str, category: MarketCategory) -
     }
 }
 
+/// Build a minimal market upsert row with deterministic YES/NO token ids.
+#[must_use]
 pub fn make_market(
     market_id: &str,
     event_id: &str,

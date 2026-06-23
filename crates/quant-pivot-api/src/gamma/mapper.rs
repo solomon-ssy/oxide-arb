@@ -17,7 +17,7 @@ use quant_pivot_models::{
         },
     },
     enums::{common::CategorySet, fee::FeeSource, market::MarketStatus},
-    types::{EventId, MarketId, TokenId, Usd},
+    types::{EventId, MarketId, TokenId},
 };
 
 /// Complete output of a Gamma catalog sync — persistence DTOs and in-memory views.
@@ -198,7 +198,8 @@ impl TryFrom<CatalogMarketWithCtx> for (UpsertMarket, MarketRegistryInfo) {
             best_ask: None,
             depth_usd: None,
             min_order_size: market.min_order_size,
-            volume_24h: Usd::ZERO,
+            liquidity_usd: market.liquidity_usd,
+            volume_24h: market.volume_24h_usd,
             fee_schedule,
             end_date: market.end_date,
             resolved_at,

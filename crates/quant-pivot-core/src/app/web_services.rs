@@ -83,13 +83,13 @@ impl AppContext {
             runtime_config: pg_arc_repo!(pg, PgRuntimeConfigVersionRepository),
             operation_logs: pg_arc_repo!(pg, PgOperationLogRepository),
             operation_log,
-            control: Arc::clone(&self.runtime_control),
+            control: Arc::clone(&self.governance.runtime_control),
             market_data: Arc::new(CoreMarketData {
                 book_store: Arc::clone(&self.data.book_store),
                 ws_manager: Arc::clone(&self.data.ws_manager),
             }),
-            catalog: Arc::clone(&self.catalog) as Arc<dyn CatalogStatusPort>,
-            data_quality: Arc::clone(&self.data_quality) as Arc<dyn DataQualityPort>,
+            catalog: Arc::clone(&self.data.catalog) as Arc<dyn CatalogStatusPort>,
+            data_quality: Arc::clone(&self.data.data_quality) as Arc<dyn DataQualityPort>,
             events: self.events.clone(),
             markets: pg_arc_repo!(pg, PgMarketRepository),
             ws_sessions,
@@ -99,7 +99,7 @@ impl AppContext {
             readiness: Arc::new(PgRedisReadiness::new(
                 pg.clone(),
                 Arc::clone(&self.infra.jwt_blacklist) as Arc<dyn TokenBlacklist>,
-                Some(Arc::clone(&self.catalog) as Arc<dyn CatalogStatusPort>),
+                Some(Arc::clone(&self.data.catalog) as Arc<dyn CatalogStatusPort>),
             )),
         };
 

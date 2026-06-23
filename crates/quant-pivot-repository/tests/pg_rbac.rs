@@ -5,9 +5,6 @@
 //! `g(admin, super_admin)` + built-in `p` matrix), so tests that need isolation
 //! create their own users/roles/menus with unique keys.
 
-#[path = "common/pg.rs"]
-mod pg;
-
 use casbin::{Adapter, CoreApi, DefaultModel, Enforcer, Model};
 use quant_pivot_models::{
     domain::{
@@ -32,9 +29,8 @@ use quant_pivot_repository::{
         RoleRepository, UserRepository, UserRoleRepository,
     },
 };
+use quant_pivot_test_support::pg::setup_pg;
 use sea_orm::{ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, sea_query::Expr};
-
-use pg::setup_pg;
 
 /// Casbin model mirroring the production 4-tuple + `super_admin` bypass.
 const CASBIN_MODEL: &str = "\

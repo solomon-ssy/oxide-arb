@@ -25,6 +25,9 @@ pub enum QuantMarketSelectionMember {
     PrimaryTokenId,
     SecondaryTokenId,
     LiquidityUsd,
+    // `DeriveIden`'s snake_case keeps the digit attached (`volume24h_usd`); pin
+    // the canonical schema name so the column matches the entity / DTO field.
+    #[sea_orm(iden = "volume_24h_usd")]
     Volume24hUsd,
     Reason,
 }

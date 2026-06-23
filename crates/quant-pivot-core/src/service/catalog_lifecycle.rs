@@ -86,7 +86,7 @@ mod tests {
     use quant_pivot_models::{
         domain::market::TokenInfo,
         enums::common::{CategorySet, MarketCategory, TickSize},
-        types::{EventId, TokenId, Usd},
+        types::{EventId, TokenId},
     };
     use rust_decimal_macros::dec;
 
@@ -119,7 +119,8 @@ mod tests {
             best_ask: None,
             depth_usd: None,
             min_order_size: dec!(5),
-            volume_24h: Usd::ZERO,
+            liquidity_usd: None,
+            volume_24h: None,
             fee_schedule: None,
             end_date,
             resolved_at: None,

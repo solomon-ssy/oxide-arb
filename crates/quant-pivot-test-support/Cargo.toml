@@ -12,6 +12,7 @@ quant-pivot-core = { workspace = true }
 quant-pivot-error = { workspace = true }
 quant-pivot-models = { workspace = true }
 quant-pivot-repository = { workspace = true }
+quant-pivot-storage = { workspace = true }
 
 async-trait = { workspace = true }
 chrono = { workspace = true }
@@ -20,6 +21,8 @@ num-traits = { workspace = true }
 rust_decimal = { workspace = true }
 rust_decimal_macros = { workspace = true }
 serde_json = { workspace = true }
+testcontainers = { workspace = true }
+testcontainers-modules = { workspace = true, features = ["postgres"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 uuid = { workspace = true, features = ["v5"] }
 tokio-util = { workspace = true }
