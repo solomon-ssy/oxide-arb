@@ -16,6 +16,7 @@ mod domain;
 mod market;
 mod microstructure;
 mod null_policy;
+mod persistence;
 mod resolved;
 mod schema;
 mod stats;

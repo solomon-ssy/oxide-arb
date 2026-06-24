@@ -4,9 +4,10 @@
 //! Deleted pre-quant configuration paths are not accepted in Phase 1 clean-break
 //! runtime configuration.
 
-use super::{DecimalString, RuntimeConfig};
+use super::{DecimalString, RuntimeConfig, is_generic_factor_family_wire};
 use quant_pivot_error::config_validation::{ConfigValidationError, ConfigValidationReport};
 use rust_decimal::Decimal;
+use std::collections::HashSet;
 
 /// Mode-agnostic runtime-config v3 invariants.
 #[must_use]
@@ -93,6 +94,35 @@ fn validate_factors(config: &RuntimeConfig, report: &mut ConfigValidationReport)
         &config.factors.min_factor_confidence,
         report,
     );
+    if config.factors.enabled_factor_families.is_empty() {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "factors.enabled_factor_families",
+            detail: "must contain at least one generic factor family".to_owned(),
+        });
+    }
+    let mut seen = HashSet::new();
+    for family in &config.factors.enabled_factor_families {
+        let wire = family.trim();
+        if wire.is_empty() {
+            report.errors.push(ConfigValidationError::InvalidValue {
+                field: "factors.enabled_factor_families",
+                detail: "entries must not be empty".to_owned(),
+            });
+            continue;
+        }
+        if !is_generic_factor_family_wire(wire) {
+            report.errors.push(ConfigValidationError::InvalidValue {
+                field: "factors.enabled_factor_families",
+                detail: format!("unknown generic factor family `{wire}`"),
+            });
+        }
+        if !seen.insert(wire.to_owned()) {
+            report.errors.push(ConfigValidationError::InvalidValue {
+                field: "factors.enabled_factor_families",
+                detail: format!("duplicate family `{wire}`"),
+            });
+        }
+    }
     for (name, weight) in &config.factors.factor_weights.weights {
         if name.trim().is_empty() {
             report.errors.push(ConfigValidationError::InvalidValue {
@@ -288,5 +318,24 @@ mod tests {
             RuntimeConfig::default().schema_version,
             RUNTIME_CONFIG_SCHEMA_VERSION
         );
+    }
+
+    #[test]
+    fn unknown_factor_family_is_rejected() {
+        let mut config = RuntimeConfig::default();
+        config
+            .factors
+            .enabled_factor_families
+            .push("not_a_family".to_owned());
+        let report = validate_runtime_config(&config);
+        assert!(report.has_errors());
+    }
+
+    #[test]
+    fn empty_factor_families_is_rejected() {
+        let mut config = RuntimeConfig::default();
+        config.factors.enabled_factor_families.clear();
+        let report = validate_runtime_config(&config);
+        assert!(report.has_errors());
     }
 }

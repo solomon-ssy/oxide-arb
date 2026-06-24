@@ -1,4 +1,4 @@
-//! Research plane bundle (Phase 3+): artifacts, selection, feature pipeline.
+//! Research plane bundle (Phase 3+): artifacts, selection, feature + factor pipelines.
 
 use super::{DataBundle, InfraBundle};
 use crate::{
@@ -6,12 +6,12 @@ use crate::{
         feature_window_provider::FeatureWindowProvider,
         market_candidate_provider::MarketCandidateProvider,
     },
-    service::feature_pipeline::FeaturePipelineService,
+    service::{factor_pipeline::FactorPipelineService, feature_pipeline::FeaturePipelineService},
 };
 use quant_pivot_models::config::DeployConfig;
 use quant_pivot_repository::{
-    postgres::{PgFeatureRepository, PgMarketSelectionRepository},
-    traits::{FeatureRepository, MarketSelectionRepository},
+    postgres::{PgFactorRepository, PgFeatureRepository, PgMarketSelectionRepository},
+    traits::{FactorRepository, FeatureRepository, MarketSelectionRepository},
 };
 use quant_pivot_research::{
     artifact::{ArtifactStore, LocalArtifactStore},
@@ -29,7 +29,7 @@ pub struct ResearchBundleDeps<'a> {
     pub data: &'a DataBundle,
 }
 
-/// Research plane: selection, feature pipeline, and artifact store (Phase 3+).
+/// Research plane: selection, feature/factor pipelines, and artifact store (Phase 3+).
 pub struct ResearchBundle {
     /// Local (or future object-store) backend for dataset / model artifact bytes.
     pub artifact_store: Arc<dyn ArtifactStore>,
@@ -43,14 +43,18 @@ pub struct ResearchBundle {
     pub feature_repo: Arc<dyn FeatureRepository>,
     /// Online feature build loop: resolve → build → persist → emit (3.2).
     pub feature_pipeline: FeaturePipelineService,
+    /// Postgres persistence for factor definitions + values (3.3).
+    pub factor_repo: Arc<dyn FactorRepository>,
+    /// Online factor build loop: compute → partition → persist → emit (3.3).
+    pub factor_pipeline: FactorPipelineService,
 }
 
 impl ResearchBundle {
     /// Build the research bundle from deploy config plus wired infra/data handles.
     ///
     /// No report scheduler or trigger is wired here — periodic report generation
-    /// is a Phase 4 concern. The feature pipeline is ready for on-demand invocation
-    /// with a frozen runtime-config snapshot per round.
+    /// is a Phase 4 concern. The feature and factor pipelines are ready for
+    /// on-demand invocation with a frozen runtime-config snapshot per round.
     #[must_use]
     pub fn assemble(deps: &ResearchBundleDeps<'_>) -> Self {
         let artifact_store: Arc<dyn ArtifactStore> = Arc::new(LocalArtifactStore::new(
@@ -72,6 +76,12 @@ impl ResearchBundle {
             Arc::clone(&feature_repo),
             Arc::clone(&deps.infra.feature_event_writer),
         );
+        let factor_repo: Arc<dyn FactorRepository> =
+            Arc::new(PgFactorRepository::new(deps.infra.pg.connection().clone()));
+        let factor_pipeline = FactorPipelineService::new(
+            Arc::clone(&factor_repo),
+            Arc::clone(&deps.infra.factor_event_writer),
+        );
 
         Self {
             artifact_store,
@@ -80,6 +90,8 @@ impl ResearchBundle {
             candidate_provider,
             feature_repo,
             feature_pipeline,
+            factor_repo,
+            factor_pipeline,
         }
     }
 }

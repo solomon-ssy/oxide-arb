@@ -17,7 +17,7 @@ pub use bundles::*;
 use crate::{
     governance::RuntimeModeHandle,
     runtime_config::{RuntimeConfigApplicator, RuntimeConfigStore},
-    service::feature_pipeline::FeaturePipelineService,
+    service::{factor_pipeline::FactorPipelineService, feature_pipeline::FeaturePipelineService},
 };
 use flume::Receiver;
 use parking_lot::Mutex;
@@ -25,6 +25,7 @@ use quant_pivot_models::{
     config::DeployConfig,
     domain::{CoreEvent, CoreEventPublisher, PointInTimeDataSource},
 };
+use quant_pivot_repository::traits::FactorRepository;
 use quant_pivot_research::artifact::ArtifactStore;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -62,6 +63,16 @@ impl AppContext {
     /// Online feature pipeline (3.2): invoke per round with a frozen config snapshot.
     pub const fn feature_pipeline(&self) -> &FeaturePipelineService {
         &self.research.feature_pipeline
+    }
+
+    /// Online factor pipeline (3.3): invoke per round after feature vectors persist.
+    pub const fn factor_pipeline(&self) -> &FactorPipelineService {
+        &self.research.factor_pipeline
+    }
+
+    /// Postgres persistence for factor definitions and values (3.3).
+    pub fn factor_repo(&self) -> Arc<dyn FactorRepository> {
+        Arc::clone(&self.research.factor_repo)
     }
 
     /// Live point-in-time source for online feature / report builders.

@@ -16,6 +16,7 @@ chrono = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 rust_decimal = { workspace = true }
+uuid = { workspace = true, features = ["v5"] }
 
 # ── Research numeric stack ────────────────────────────────────────────────────
 # Pure-Rust, lightweight, and load-bearing for the online feature plane (rolling

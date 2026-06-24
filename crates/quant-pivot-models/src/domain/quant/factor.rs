@@ -3,7 +3,8 @@
 use crate::{
     enums::quant::{FactorDefinitionStatus, FactorDirection},
     types::{
-        FactorDefinitionId, FactorValueId, FeatureVectorId, MarketId, Probability, SchemaVersion,
+        FactorDefinitionId, FactorValueId, FeatureVectorId, MarketId, ModelRunId, Probability,
+        SchemaVersion,
     },
 };
 use chrono::{DateTime, Utc};
@@ -69,6 +70,7 @@ pub struct FactorValueInfo {
     pub factor_value_id: FactorValueId,
     pub factor_definition_id: FactorDefinitionId,
     pub feature_vector_id: FeatureVectorId,
+    pub model_run_id: ModelRunId,
     pub market_id: MarketId,
     pub as_of: DateTime<Utc>,
     pub raw_value: Option<Decimal>,
@@ -80,7 +82,7 @@ pub struct FactorValueInfo {
 }
 
 info_from_model!(FactorValueInfo, crate::entities::quant_factor_value::Model, {
-    factor_value_id, factor_definition_id, feature_vector_id, market_id, as_of,
+    factor_value_id, factor_definition_id, feature_vector_id, model_run_id, market_id, as_of,
     raw_value, normalized_score, direction, confidence, explanation, created_at,
 });
 
@@ -91,6 +93,7 @@ pub struct NewFactorValue {
     pub factor_value_id: FactorValueId,
     pub factor_definition_id: FactorDefinitionId,
     pub feature_vector_id: FeatureVectorId,
+    pub model_run_id: ModelRunId,
     pub market_id: MarketId,
     pub as_of: DateTime<Utc>,
     pub raw_value: Option<Decimal>,

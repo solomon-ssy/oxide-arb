@@ -860,9 +860,9 @@ if [ ! -f .env.production ]; then
 fi
 
 # ─── Build UI (if source changed) ───────────────────────
-if [ -d "oxide-arb-ui" ]; then
+if [ -d "ui" ]; then
   echo "Building UI..."
-  cd oxide-arb-ui
+  cd ui
   pnpm install --frozen-lockfile
   pnpm build
   cp -r dist/ ../static/ui/

@@ -188,6 +188,20 @@ active_string_enum! {
     }
 }
 
+impl FactorDirection {
+    /// The stable `i8` code persisted to the `quant_factor_event.direction`
+    /// `ClickHouse` column (`+1` / `-1` / `0`). Append-only contract: never
+    /// renumber an existing variant.
+    #[must_use]
+    pub const fn as_i8(self) -> i8 {
+        match self {
+            Self::Positive => 1,
+            Self::Negative => -1,
+            Self::Neutral => 0,
+        }
+    }
+}
+
 active_string_enum! {
     /// Model run purpose.
     @derive(Default)

@@ -7149,6 +7149,7 @@ dependencies = [
  "statrs",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

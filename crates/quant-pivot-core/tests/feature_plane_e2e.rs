@@ -16,10 +16,7 @@ use quant_pivot_core::{
         market_candidate_provider::MarketCandidateProvider, market_registry::MarketRegistry,
         point_in_time::LiveBookDataSource,
     },
-    service::{
-        feature_pipeline::{FeaturePipelineRequest, FeaturePipelineService},
-        features::map_feature_vector_to_new,
-    },
+    service::feature_pipeline::{FeaturePipelineRequest, FeaturePipelineService},
 };
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
@@ -361,6 +358,6 @@ async fn create_feature_vector_then_find() {
     assert_eq!(loaded.feature_hash, expected_hash);
     assert_eq!(loaded.market_id.as_str(), CATALOG.market_id);
 
-    let mapped = map_feature_vector_to_new(vector).expect("map");
+    let mapped = vector.try_to_new().expect("map");
     assert_eq!(mapped.feature_hash, expected_hash);
 }

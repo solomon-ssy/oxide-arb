@@ -142,7 +142,7 @@ views/menus/
 ### 4.1 构建与产物布局
 
 ```bash
-cd oxide-arb-ui && pnpm install && pnpm build:antdv-next   # turbo 过滤 @vben/web-antdv-next
+cd ui && pnpm install && pnpm build:antdv-next   # turbo 过滤 @vben/web-antdv-next
 # 产物 apps/web-antdv-next/dist/ → 同步到运行目录 static/ui/
 ```
 

@@ -32,6 +32,7 @@
 #![deny(unsafe_code)]
 
 mod naming;
+mod parallel;
 
 pub mod artifact;
 pub mod backtest;

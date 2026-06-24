@@ -26,6 +26,7 @@ pub enum QuantFactorValue {
     FactorValueId,
     FactorDefinitionId,
     FeatureVectorId,
+    ModelRunId,
     MarketId,
     AsOf,
     RawValue,
@@ -43,6 +44,10 @@ pub fn table() -> TableCreateStatement {
         .col(column::uuid_pk(QuantFactorValue::FactorValueId))
         .col(column::uuid_fk(QuantFactorValue::FactorDefinitionId))
         .col(column::uuid_fk(QuantFactorValue::FeatureVectorId))
+        // Owning online round. Not a DB foreign key this phase: the
+        // `quant_model_run` lifecycle (create / finalize) lands in 3.4, which adds
+        // the FK once it owns run creation ordering. Indexed for `list_values_for_run`.
+        .col(column::uuid_fk(QuantFactorValue::ModelRunId))
         .col(column::market_id(QuantFactorValue::MarketId))
         .col(
             ColumnDef::new(QuantFactorValue::AsOf)
@@ -125,6 +130,18 @@ pub fn indexes() -> Vec<IndexSpec> {
                 .col((QuantFactorValue::AsOf, IndexOrder::Desc))
                 .to_owned(),
             "factor values by market and PIT timestamp",
+        ),
+        IndexSpec::sea_query(
+            "idx_quant_factor_value_run",
+            quant_factor_value_table_name,
+            IndexBuildMode::Transactional,
+            Index::create()
+                .name("idx_quant_factor_value_run")
+                .table(QuantFactorValue::Table)
+                .col(QuantFactorValue::ModelRunId)
+                .col((QuantFactorValue::AsOf, IndexOrder::Desc))
+                .to_owned(),
+            "factor values by owning model run and PIT timestamp",
         ),
     ]
 }

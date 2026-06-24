@@ -4,14 +4,16 @@ use crate::{
     app::{task_id::TaskId, task_registry::PendingTaskQueue},
     observability::{
         book_fact_writer::BookFactWriter, fact_lag::FactLagTracker,
-        feature_fact_writer::FeatureEventWriter, metrics_hub::MetricsHub,
+        factor_fact_writer::FactorEventWriter, feature_fact_writer::FeatureEventWriter,
+        metrics_hub::MetricsHub,
     },
 };
 use prometheus::IntCounter;
 use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
     clickhouse::{
-        BookL2ReplayRow, BookMicrostructureRow, BookSnapshotRow, QuantFeatureEventRow, TickEventRow,
+        BookL2ReplayRow, BookMicrostructureRow, BookSnapshotRow, QuantFactorEventRow,
+        QuantFeatureEventRow, TickEventRow,
     },
     config::DeployConfig,
 };
@@ -47,6 +49,8 @@ pub struct InfraBundle {
     pub fact_lag_tracker: Arc<FactLagTracker>,
     pub book_fact_writer: Arc<BookFactWriter>,
     pub feature_event_writer: Arc<FeatureEventWriter>,
+    /// Long-format factor-event sink (`quant_factor_event`).
+    pub factor_event_writer: Arc<FactorEventWriter>,
     /// Point-in-time read port over quant `ClickHouse` facts (feature windows).
     pub quant_fact_read: Arc<dyn QuantFactReadRepository>,
     /// Flush workers for each book fact stream, registered on the runner at boot.
@@ -108,6 +112,8 @@ impl InfraBundle {
             deploy,
             &fact_writer_queue,
         );
+        let factor_event_writer =
+            build_factor_event_writer(&ch, &ch_write_manager, &metrics, deploy, &fact_writer_queue);
 
         Ok(Self {
             pg,
@@ -122,6 +128,7 @@ impl InfraBundle {
             fact_lag_tracker,
             book_fact_writer,
             feature_event_writer,
+            factor_event_writer,
             quant_fact_read,
             fact_writer_queue,
         })
@@ -243,6 +250,39 @@ fn build_feature_event_writer(
         config,
     );
     Arc::new(FeatureEventWriter::new(stream))
+}
+
+/// Wire the long-format factor-event async writer (`quant_factor_event`).
+fn build_factor_event_writer(
+    ch_pool: &Arc<ClickHousePool>,
+    write_manager: &Arc<ChWriteManager>,
+    metrics: &Arc<MetricsHub>,
+    deploy: &DeployConfig,
+    queue: &PendingTaskQueue,
+) -> Arc<FactorEventWriter> {
+    let ch = &deploy.db.clickhouse;
+    let capacity = ch.batch_size.saturating_mul(4).max(8_192);
+    let flush_interval = Duration::from_secs(ch.flush_interval_secs.max(1));
+    let config = AsyncWriterConfig::new("quant_factor_event")
+        .capacity(capacity)
+        .batch_size(ch.batch_size)
+        .flush_interval(flush_interval);
+    let drops = metrics
+        .async_writer_dropped
+        .with_label_values(&["quant_factor_event"]);
+    let stream = spawn_fact_stream::<QuantFactorEventRow>(
+        queue,
+        TaskId::FactorEventsWriter,
+        Arc::new(ChFactWriter::new(
+            Arc::clone(ch_pool),
+            Arc::clone(write_manager),
+            "quant_factor_event",
+        )),
+        drops,
+        metrics.async_writer_observability("quant_factor_event"),
+        config,
+    );
+    Arc::new(FactorEventWriter::new(stream))
 }
 
 /// Build one fact stream: wire an `AsyncWriter` to a `ChFactWriter` sink and

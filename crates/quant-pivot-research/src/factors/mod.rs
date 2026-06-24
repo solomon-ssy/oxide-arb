@@ -1,35 +1,38 @@
-//! Factor plane: the [`FactorComputer`] contract and its compute-domain value
-//! types.
+//! Factor plane: the [`FactorComputer`] contract, the [`FactorEngine`], the nine
+//! generic factors, normalization, and the domain skeleton.
 //!
-//! Each computer turns a [`FeatureVector`](crate::features::FeatureVector) into
-//! an explainable [`FactorValue`]. The registry, engine (single + batch for
-//! cross-sectional normalization), and the nine generic factors land in 3.3;
-//! 3.0 fixes the trait + value contract.
+//! A [`FactorComputer`] turns a [`FeatureVector`](crate::features::FeatureVector)
+//! into a per-market [`RawFactor`] (pure, no normalization, no cross-section).
+//! The [`FactorEngine`] owns the governed [`FactorRegistry`], applies the
+//! (possibly cross-sectional) [`NormalizationSpec`], and resolves the runtime
+//! confidence floor / `missing_factor_policy` into a [`MarketFactorOutcome`].
+//!
+//! A factor score is **not** a recommendation score — it is an explainable model
+//! input. Cross-sectional normalization (`ZScore` / `Rank`) is only valid through
+//! [`FactorEngine::compute_all_batch`]; the single-market path refuses to
+//! fabricate a pseudo cross-section.
 
+mod computer;
+mod domain;
+mod generic;
+mod normalize;
+mod persistence;
+mod registry;
 mod value;
+mod writer;
 
+#[cfg(test)]
+mod acceptance;
+
+pub use computer::{FactorComputer, FactorEngine};
+pub use domain::{DomainFactorComputer, DomainFactorRegistry};
+pub use generic::{factor_definition_id, generic_factors};
+pub use normalize::{Normalized, normalize_column, to_probability_clamped};
+pub use persistence::FactorValueInsertContext;
+pub use registry::FactorRegistry;
 pub use value::{
-    FactorDefinitionSpec, FactorDriver, FactorExplanation, FactorFamily, FactorName,
-    FactorOutputKind, FactorQualityGate, FactorSet, FactorValue, NormalizationSpec,
+    FactorDefinitionSpec, FactorDriver, FactorEligibility, FactorExplanation, FactorFamily,
+    FactorName, FactorOutputKind, FactorQualityGate, FactorSet, FactorValue, MarketFactorOutcome,
+    NormalizationClampAudit, NormalizationSpec, RawFactor, ScoredFactor,
 };
-
-use quant_pivot_error::QuantResult;
-use quant_pivot_models::types::FactorDefinitionId;
-
-use crate::features::FeatureVector;
-
-/// Computes one factor value from a feature vector.
-///
-/// `compute` is synchronous and side-effect free: factors are pure functions of
-/// their inputs. Cross-sectional factors (e.g. [`NormalizationSpec::Rank`]) are
-/// computed via the batch engine in 3.3, never faked per-market.
-pub trait FactorComputer: Send + Sync {
-    /// Governing factor-definition id.
-    fn definition_id(&self) -> FactorDefinitionId;
-
-    /// The governed specification this computer implements.
-    fn spec(&self) -> &FactorDefinitionSpec;
-
-    /// Compute the factor value for a single feature vector.
-    fn compute(&self, features: &FeatureVector) -> QuantResult<FactorValue>;
-}
+pub use writer::factor_events;

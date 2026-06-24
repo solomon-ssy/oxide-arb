@@ -2,7 +2,9 @@
 
 use crate::{
     enums::quant::FactorDirection,
-    types::{FactorDefinitionId, FactorValueId, FeatureVectorId, MarketId, Probability},
+    types::{
+        FactorDefinitionId, FactorValueId, FeatureVectorId, MarketId, ModelRunId, Probability,
+    },
 };
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
@@ -15,6 +17,7 @@ pub struct Model {
     pub factor_value_id: FactorValueId,
     pub factor_definition_id: FactorDefinitionId,
     pub feature_vector_id: FeatureVectorId,
+    pub model_run_id: ModelRunId,
     pub market_id: MarketId,
     pub as_of: DateTime<Utc>,
     pub raw_value: Option<Decimal>,

@@ -13,7 +13,6 @@
 use crate::{
     observability::feature_fact_writer::FeatureEventWriter,
     pipeline::feature_window_provider::FeatureWindowProvider,
-    service::features::map_feature_vector_to_new,
 };
 use chrono::{DateTime, Utc};
 use futures_util::future::try_join_all;
@@ -161,7 +160,7 @@ impl FeaturePipelineService {
         // round), then emit their present-only long-format facts to ClickHouse.
         let rows = accepted
             .iter()
-            .map(map_feature_vector_to_new)
+            .map(FeatureVector::try_to_new)
             .collect::<QuantResult<Vec<NewFeatureVector>>>()?;
         let persisted = self
             .feature_repo

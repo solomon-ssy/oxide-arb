@@ -29,6 +29,7 @@ Default mode: **`QuantRuntimeMode::ReportOnly`** — reports only, no orders, no
 ```
 quant-pivot/
 ├── config/quant-pivot.toml
+├── ui/                       # Admin SPA (git submodule)
 ├── crates/
 │   ├── quant-pivot-bin
 │   ├── quant-pivot-core      # AppContext, data ingest, governance
