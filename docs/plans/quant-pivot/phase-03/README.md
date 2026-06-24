@@ -54,7 +54,7 @@ Phase 03 是整个 quant-pivot 的研究平面：市场选择、特征、因子�
 
 **Companion（跨子phase）**：垂直领域 feature → factor → model → train **完整闭环**设计见
 [`03.x-vertical-domain-design.md`](03.x-vertical-domain-design.md)（Crypto 参考垂直）；各领域外部
-数据源调研清单见 [`03.8-domain-data-sources.md`](03.8-domain-data-sources.md)。
+数据源调研清单见 [`domain-data-sources.md`](../../operations/domain-data-sources.md)（运维文档）。
 
 ## 2. 依赖图
 
@@ -155,8 +155,8 @@ ml-classical = ["dep:smartcore"]
 | `ReturnModelSpec::Calibrated` 拟合 + `objective_report` | `Heuristic` + Calibrated 插值应用 | Phase 3.6 | 3.4 §10 / 3.6 §1.1 |
 | `classical` runtime（smartcore） | factory `RuntimeUnavailable` | Phase 3.6 | 3.4 §10 |
 | `ModelConfig.prediction_horizon_secs` 在线读取 | artifact `prediction_horizon_secs` | Phase 3.6 写入 artifact | 3.4 §4.2 |
-| 垂直领域完整闭环（Crypto：linkage + domain PIT + 两层向量 + 真实特征/因子 + ModelRouting + domain dataset + 垂直训练/回测） | skeleton + `DomainDataMissing` + 3.5 generic dataset | **Phase 3.6 §11** | 03.6 / 03.x / 03.8 |
-| 其余四垂直（Sports/Politics/Weather/Geopolitics）真实外部数据 | Crypto 范式加性扩展 | Post–3.6 Crypto | 03.6 §11.10 / 03.8 |
+| 垂直领域完整闭环（Crypto：linkage + domain PIT + 两层向量 + 真实特征/因子 + ModelRouting + domain dataset + 垂直训练/回测） | skeleton + `DomainDataMissing` + 3.5 generic dataset | **Phase 3.6 §11** | 03.6 / 03.x / [domain-data-sources](../../operations/domain-data-sources.md) |
+| 其余四垂直（Sports/Politics/Weather/Geopolitics）真实外部数据 | Crypto 范式加性扩展 | Post–3.6 Crypto | 03.6 §11.10 / [domain-data-sources](../../operations/domain-data-sources.md) |
 | `good_lp` 组合优化 | greedy allocator | Phase 05 | 3.6 |
 | `ort` ONNX 推理 | `QuantModelRuntime` 预留 arm | Phase 06 | 3.4 §10 |
 | auto-execution 门禁生效 | config 口径记录 | Phase 05/06 | 3.7 §10 |

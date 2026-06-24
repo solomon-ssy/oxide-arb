@@ -1,12 +1,13 @@
-# 03.8 — Domain Data Sources（垂直领域数据源调研清单）
+# Domain Data Sources（垂直领域数据源调研清单）
 
-> 父：[`README.md`](README.md) · 闭环设计：[`03.x-vertical-domain-design.md`](03.x-vertical-domain-design.md) ·
-> 技术栈：[`../08-third-party-crates-and-ml-stack.md`](../08-third-party-crates-and-ml-stack.md)
+> 相关：[`03.x-vertical-domain-design.md`](../plans/quant-pivot/phase-03/03.x-vertical-domain-design.md) ·
+> Phase 03：[`README.md`](../plans/quant-pivot/phase-03/README.md) ·
+> 技术栈：[`08-third-party-crates-and-ml-stack.md`](../plans/quant-pivot/08-third-party-crates-and-ml-stack.md)
 >
-> 闭环定位：**垂直领域外部数据源的选型真理**。为每个 `DomainFamily` 列出候选数据源，
+> 定位：**垂直领域外部数据源的选型真理**。为每个 `DomainFamily` 列出候选数据源，
 > 并按"和钱相关"的硬标准评估：PIT/历史可得性、限速、license、**是否对齐 Polymarket
-> 结算源**。本文档是 [`03.x`](03.x-vertical-domain-design.md) `DomainDataSource` 实现的
-> 选源依据；不引入代码，只锁定选型。
+> 结算源**。本文档是 [`03.x`](../plans/quant-pivot/phase-03/03.x-vertical-domain-design.md)
+> `DomainDataSource` 实现的选源依据；不引入代码，只锁定选型。
 
 ## 1. 选源硬标准（按重要性排序）
 
@@ -22,7 +23,7 @@
 | 6 | **稳定性** | API 活跃、schema 稳定、有官方文档 | 维护成本高，易腐 |
 
 > **首选原则**：优先选**与结算源同源**的数据源。若结算源本身不开放历史 API，则选与之
-> 高度一致的镜像源，并在 `DomainDataSource` 内做**一致性交叉核验**（见 [`03.x`](03.x-vertical-domain-design.md) D5）。
+> 高度一致的镜像源，并在 `DomainDataSource` 内做**一致性交叉核验**（见 [`03.x`](../plans/quant-pivot/phase-03/03.x-vertical-domain-design.md) D5）。
 
 ---
 
@@ -38,7 +39,7 @@ Polymarket crypto 市场是二元合约，标题/描述高度结构化，**结�
 > source is Binance BTC/USDT.*
 
 ⇒ 结算键 = `{asset=BTC, quote=USDT, venue=Binance, candle=1m, field=close, observation_at=12:00 ET, comparator=Above, strike=$66,000}`。
-这正是 [`03.x`](03.x-vertical-domain-design.md) `CryptoSubject` + `ResolutionSourceBinding` 的来源。
+这正是 [`03.x`](../plans/quant-pivot/phase-03/03.x-vertical-domain-design.md) `CryptoSubject` + `ResolutionSourceBinding` 的来源。
 
 ### 2.2 候选源对比
 
@@ -68,7 +69,7 @@ Polymarket crypto 市场是二元合约，标题/描述高度结构化，**结�
 **决策**：Sports 结算 = 赛果（Polymarket 用官方比分）。特征侧用 **API-Sports 赛果 + 赔率**（pre-match
 momentum / 赔率漂移）。赔率源与 Polymarket 庄口径不同属可接受 noise（赔率是特征不是 label）。
 PIT：以 odds snapshot 的 `publish_time` 截断。Sports 实体解析最复杂（队名/赛事/日期消歧），强依赖
-[`03.x`](03.x-vertical-domain-design.md) D1 的 LLM 离线链接 + curated 兜底。
+[`03.x`](../plans/quant-pivot/phase-03/03.x-vertical-domain-design.md) D1 的 LLM 离线链接 + curated 兜底。
 
 ---
 
@@ -107,7 +108,7 @@ NOAA/Open-Meteo 预报做 `forecast_revision` 特征。PIT：预报有明确 iss
 | 官方公告/裁决（事件特定） | ✅ 结算源 | 事件后才有 | — | — | settlement label |
 
 **决策**：Geopolitics 结算高度事件特定（官方公告/UMA 裁决）。特征侧用 **GDELT 新闻强度/语调的
-shock-decay**。GDELT 是特征不是 label。news shock 需 NLP/embedding（[`03.x`](03.x-vertical-domain-design.md)
+shock-decay**。GDELT 是特征不是 label。news shock 需 NLP/embedding（[`03.x`](../plans/quant-pivot/phase-03/03.x-vertical-domain-design.md)
 § ONNX 路径，Phase 06+）；本期可先用 GDELT 数值指标（事件计数/语调）做非文本特征。PIT：按文章
 `publish_time` 截断（GDELT 自带）。
 
@@ -127,8 +128,8 @@ shock-decay**。GDELT 是特征不是 label。news shock 需 NLP/embedding（[`0
 
 1. **只有 Crypto 做到特征源 = 结算源**（Binance），因此 basis risk 最低、PIT 最干净、最适合作参考垂直。
 2. 其余垂直的"特征"与"label"必然异源——这是设计常态，**特征是预测信号、label 必须来自结算真相**
-   （复用 035 `market_resolution_event`，见 [`03.x`](03.x-vertical-domain-design.md) D5）。
-3. **统一 `DomainDataSource` 抽象**（[`03.x`](03.x-vertical-domain-design.md) §3.2）让上述各源以
+   （复用 035 `market_resolution_event`，见 [`03.x`](../plans/quant-pivot/phase-03/03.x-vertical-domain-design.md) D5）。
+3. **统一 `DomainDataSource` 抽象**（[`03.x`](../plans/quant-pivot/phase-03/03.x-vertical-domain-design.md) §3.2）让上述各源以
    provider 无关方式接入；首个 concrete 实现为 `BinanceKlineSource`。
 4. 凡需 license/付费/凭证的源（The-Odds-API 历史、Pyth 2026-07-31 后、部分商用 weather），凭证经
    deploy `domain_sources` 段下发，**不入代码库**。
@@ -140,3 +141,4 @@ shock-decay**。GDELT 是特征不是 label。news shock 需 NLP/embedding（[`0
 | 日期 | 变更 |
 |------|------|
 | 2026-06 | 初版：五垂直数据源调研；Crypto=Binance 同源结算锁定为 P0 参考垂直；选源硬标准（对齐结算源优先） |
+| 2026-06 | 自 Phase 03 计划目录迁至 `docs/operations/`（运维/选型参考，非推进计划） |
