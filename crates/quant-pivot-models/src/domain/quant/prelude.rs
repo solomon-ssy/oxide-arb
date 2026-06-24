@@ -10,7 +10,7 @@ pub use super::{
     NewExecutionOrder, NewFactorDefinition, NewFactorValue, NewFeatureVector, NewMarketSelection,
     NewMarketSelectionMember, NewModelRun, NewModelSpec, NewModelVersion, NewOrderIntent,
     NewPortfolioPlan, NewRecommendation, NewRecommendationAttribution, NewRecommendationReport,
-    OrderIntentInfo, PortfolioPlanInfo, PortfolioPlanModel, QuantModelRunModel,
+    NewTrainingDataset, OrderIntentInfo, PortfolioPlanInfo, PortfolioPlanModel, QuantModelRunModel,
     RecommendationAttributionInfo, RecommendationAttributionModel, RecommendationInfo,
-    RecommendationReportInfo, RecommendationReportModel,
+    RecommendationReportInfo, RecommendationReportModel, TrainingDatasetInfo,
 };

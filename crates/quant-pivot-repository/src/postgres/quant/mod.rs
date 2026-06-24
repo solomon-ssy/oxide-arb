@@ -1,5 +1,6 @@
 //! Quant-pivot Postgres repository implementations.
 
+mod dataset;
 mod factor;
 mod feature;
 mod market_selection;
@@ -8,6 +9,7 @@ mod model_run;
 mod order_intent;
 mod recommendation_report;
 
+pub use dataset::PgTrainingDatasetRepository;
 pub use factor::PgFactorRepository;
 pub use feature::PgFeatureRepository;
 pub use market_selection::PgMarketSelectionRepository;

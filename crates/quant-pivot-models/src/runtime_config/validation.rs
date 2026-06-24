@@ -30,6 +30,7 @@ pub fn validate_runtime_config(config: &RuntimeConfig) -> ConfigValidationReport
     validate_features(config, &mut report);
     validate_factors(config, &mut report);
     validate_model(config, &mut report);
+    validate_training(config, &mut report);
     validate_reports(config, &mut report);
     validate_portfolio(config, &mut report);
     validate_execution(config, &mut report);
@@ -179,6 +180,20 @@ fn validate_model(config: &RuntimeConfig, report: &mut ConfigValidationReport) {
     if config.model.prediction_horizon_secs == 0 {
         report.errors.push(ConfigValidationError::InvalidValue {
             field: "model.prediction_horizon_secs",
+            detail: "must be greater than zero".to_owned(),
+        });
+    }
+}
+
+fn validate_training(config: &RuntimeConfig, report: &mut ConfigValidationReport) {
+    decimal(
+        "training.min_exit_depth_usd",
+        &config.training.min_exit_depth_usd,
+        report,
+    );
+    if config.training.max_book_staleness_ms == 0 {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "training.max_book_staleness_ms",
             detail: "must be greater than zero".to_owned(),
         });
     }

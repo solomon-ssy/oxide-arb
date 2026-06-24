@@ -20,7 +20,7 @@ use quant_pivot_core::{
 };
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    clickhouse::BookMicrostructureRow,
+    clickhouse::{BookMicrostructureRow, BookSnapshotRow, MarketResolutionRow},
     domain::{
         FeatureVectorInfo, NewFeatureVector,
         market::{MarketRegistryInfo, TokenInfo, book::BookLevel},
@@ -158,6 +158,40 @@ impl QuantFactReadRepository for EmptyFactRead {
         _from_ms: i64,
         _to_ms: i64,
     ) -> Result<Vec<BookMicrostructureRow>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn book_snapshot_at(
+        &self,
+        _token_id: &TokenId,
+        _as_of_ms: i64,
+    ) -> Result<Option<BookSnapshotRow>, StorageError> {
+        Ok(None)
+    }
+
+    async fn book_snapshots_between(
+        &self,
+        _token_ids: Vec<TokenId>,
+        _from_ms: i64,
+        _to_ms: i64,
+    ) -> Result<Vec<BookSnapshotRow>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn resolution_at(
+        &self,
+        _market_id: &MarketId,
+        _as_of_ms: i64,
+    ) -> Result<Option<MarketResolutionRow>, StorageError> {
+        Ok(None)
+    }
+
+    async fn resolutions_between(
+        &self,
+        _market_ids: Vec<MarketId>,
+        _from_ms: i64,
+        _to_ms: i64,
+    ) -> Result<Vec<MarketResolutionRow>, StorageError> {
         Ok(Vec::new())
     }
 }

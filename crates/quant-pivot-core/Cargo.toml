@@ -13,7 +13,7 @@ quant-pivot-models     = { workspace = true }
 quant-pivot-api        = { workspace = true }
 quant-pivot-storage    = { workspace = true }
 quant-pivot-repository = { workspace = true }
-quant-pivot-research   = { workspace = true }
+quant-pivot-research   = { workspace = true, features = ["dataframe"] }
 quant-pivot-web        = { workspace = true }
 
 # ── Async runtime ──────────────────────────────────────────────────

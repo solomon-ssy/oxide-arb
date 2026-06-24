@@ -473,10 +473,11 @@ lp-solver = ["dep:good_lp"]
 
 原则：
 
-- `quant-pivot-core` 默认不启用深度学习。
+- `quant-pivot-core` 启用 `quant-pivot-research/dataframe`（3.5 `DatasetParquetCodec`）——
+  **report_only 二进制因此链接 polars**；research crate `default = []` 不变。
 - `quant-pivot-bin` production profile 只启用需要的 features。
 - CI 分 job 测试 heavy features。
-- report_only 基础服务不应强制链接 ONNX/DL native runtime。
+- report_only 基础服务不应强制链接 ONNX/DL native runtime；Polars 仅 dataset/offline 路径。
 
 ## 11. 训练流程中的 crate 使用图
 

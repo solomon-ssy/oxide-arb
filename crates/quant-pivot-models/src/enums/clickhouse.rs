@@ -10,7 +10,8 @@ pub enum ChBookEventType {
     Bbo = 3,
     TickSizeChange = 4,
     LastTrade = 5,
-    MarketResolved = 6,
+    // 6 reserved (formerly `MarketResolved`): settlement now lives in its own
+    // typed `market_resolution_event` fact, not the book/tick event stream.
     ShardStatus = 7,
 }
 

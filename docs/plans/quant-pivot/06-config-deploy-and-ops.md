@@ -356,6 +356,22 @@ semi_auto / auto_execution 额外：
 - web。
 - ingest。
 - research。
+
+### 5.3.1 Offline research jobs（3.5+）
+
+Dataset plan/build 通过 Admin HTTP API（非 xtask CLI）：
+
+```bash
+# Dry plan (requires JWT + Accept-Api-Version: v1 + X-Acting-Role)
+curl -X POST .../api/research/training-datasets/plan -d '{ ... }'
+
+# Full build (PG + ClickHouse + deploy.research.artifact_root)
+curl -X POST .../api/research/training-datasets/build -d '{ ... }'
+```
+
+契约见 [`phase-03/03.5.1-training-dataset-admin-api.md`](plans/quant-pivot/phase-03/03.5.1-training-dataset-admin-api.md)。
+Phase 07 UI 对接同一组 endpoint。
+
 - report。
 - execution。
 

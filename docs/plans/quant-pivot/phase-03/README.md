@@ -48,11 +48,13 @@ Phase 03 是整个 quant-pivot 的研究平面：市场选择、特征、因子�
 | 3.3 | Factor Plane | 在线/离线因子 | [`03.3-factor-plane.md`](03.3-factor-plane.md) |
 | 3.4 | Model Runtime & Weighted Scorer | **在线推理闭环** | [`03.4-model-runtime-weighted-scorer.md`](03.4-model-runtime-weighted-scorer.md) |
 | 3.5 | Historical PIT & Training Dataset | 离线数据 | [`03.5-historical-pit-and-training-dataset.md`](03.5-historical-pit-and-training-dataset.md) |
-| 3.6 | Trainer, Classical ML & Backtest | 离线训练/回测 | [`03.6-trainer-classical-ml-backtest.md`](03.6-trainer-classical-ml-backtest.md) |
+| 3.5.1 | Training Dataset Admin API | UI/API 契约 | [`03.5.1-training-dataset-admin-api.md`](03.5.1-training-dataset-admin-api.md) |
+| 3.6 | Trainer, Classical ML, Backtest & Vertical Closed-Loop | **离线训练/回测 + 垂直完整闭环（Crypto）** | [`03.6-trainer-classical-ml-backtest.md`](03.6-trainer-classical-ml-backtest.md) |
 | 3.7 | Quality Gates & Governance | **离线治理闭环** | [`03.7-quality-gates-and-governance.md`](03.7-quality-gates-and-governance.md) |
 
-**Companion（跨子phase）**：垂直领域 feature → factor → model → train 增强设计见
-[`03.x-vertical-domain-design.md`](03.x-vertical-domain-design.md)。
+**Companion（跨子phase）**：垂直领域 feature → factor → model → train **完整闭环**设计见
+[`03.x-vertical-domain-design.md`](03.x-vertical-domain-design.md)（Crypto 参考垂直）；各领域外部
+数据源调研清单见 [`03.8-domain-data-sources.md`](03.8-domain-data-sources.md)。
 
 ## 2. 依赖图
 
@@ -78,6 +80,9 @@ flowchart TD
   FactorValue → ModelRun → SignalCandidate`，持久化 ModelRun + ClickHouse 事实。
 - **离线闭环**（3.5 → 3.6 → 3.7）：`Historical PIT → TrainingDataset → Trainer →
   Backtest → QualityGate → Shadow → Publish/Rollback`。
+- **垂直闭环**（companion 03.x，Crypto 参考垂直）：`MarketLinkage → DomainDataSource →
+  quant_domain_observation → domain slice 特征/因子 → ModelRouting`。**统一落地于 3.6 §11**
+  （3.5 已交付，垂直不回推 3.2/3.3/3.5）。
 
 ## 3. 已拍板的设计基线（贯穿全部子phase）
 
@@ -132,8 +137,9 @@ ml-classical = ["dep:smartcore"]
 - 3.6：`optimize`（argmin）+ `ml-classical`（smartcore）。
 - 禁止本期引入：`good_lp` / `ort` / `burn` / `candle`（见父文档 §30）。
 
-`quant-pivot-core` / `quant-pivot-web` 的 report_only 启动路径不得强制链接
-`ml-classical` / `dataframe`；CI 分 job 测 heavy features。
+`quant-pivot-core` 链接 `quant-pivot-research/dataframe`（3.5 数据集 Parquet）；
+`quant-pivot-research` 自身 `default = []`。report_only 二进制因此含 polars，但
+在线 hot path 不调用 Polars。CI 分 job 测 `ml-classical` / `optimize` heavy features。
 
 ## 6. 延后项总表（缺口必须在对应子phase文档显式标注）
 
@@ -149,9 +155,8 @@ ml-classical = ["dep:smartcore"]
 | `ReturnModelSpec::Calibrated` 拟合 + `objective_report` | `Heuristic` + Calibrated 插值应用 | Phase 3.6 | 3.4 §10 / 3.6 §1.1 |
 | `classical` runtime（smartcore） | factory `RuntimeUnavailable` | Phase 3.6 | 3.4 §10 |
 | `ModelConfig.prediction_horizon_secs` 在线读取 | artifact `prediction_horizon_secs` | Phase 3.6 写入 artifact | 3.4 §4.2 |
-| 垂直领域特征 / 因子真实外部数据 | skeleton + `DomainDataMissing` | Post–3.2 / 3.5 | 3.2 / 3.3 / 03.x |
-| Category-specific weighted / `ModelRouting` | generic `WeightedFactorRuntime` | Post–domain 源 | 03.x §5.1 |
-| polars 大规模离线 materialization | base numeric + PG/CH 在线路径 | Phase 3.5 | 03.x / 3.5 |
+| 垂直领域完整闭环（Crypto：linkage + domain PIT + 两层向量 + 真实特征/因子 + ModelRouting + domain dataset + 垂直训练/回测） | skeleton + `DomainDataMissing` + 3.5 generic dataset | **Phase 3.6 §11** | 03.6 / 03.x / 03.8 |
+| 其余四垂直（Sports/Politics/Weather/Geopolitics）真实外部数据 | Crypto 范式加性扩展 | Post–3.6 Crypto | 03.6 §11.10 / 03.8 |
 | `good_lp` 组合优化 | greedy allocator | Phase 05 | 3.6 |
 | `ort` ONNX 推理 | `QuantModelRuntime` 预留 arm | Phase 06 | 3.4 §10 |
 | auto-execution 门禁生效 | config 口径记录 | Phase 05/06 | 3.7 §10 |

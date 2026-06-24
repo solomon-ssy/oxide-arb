@@ -1,0 +1,113 @@
+//! Training-dataset admin HTTP contract (Phase 3.5).
+//!
+//! These types are the **UI integration surface** for offline dataset plan/build.
+//! The Admin SPA (Phase 07) should:
+//!
+//! 1. Let the operator pick a frozen [`RuntimeConfigVersionId`] and [`ModelSpecId`].
+//! 2. `POST /research/training-datasets/plan` — validate the window and show
+//!    `planned_samples` before committing to a long build.
+//! 3. `POST /research/training-datasets/build` — run plan + materialization
+//!    (synchronous today; Phase 03.7 may move to async job + WS progress).
+//! 4. Poll `GET /research/training-datasets/{id}` until `status` is terminal
+//!    (`built`, `insufficient_labels`, `failed`, `ready`, or `expired`).
+//!
+//! Terminal semantics mirror [`TrainingDatasetStatus`]: trainer/backtest gates in
+//! 03.6 consume only `ready` datasets; `insufficient_labels` still persists the
+//! Parquet artifact for inspection.
+
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use validator::Validate;
+
+use crate::{
+    domain::TrainingDatasetInfo,
+    types::{ContentHash, ModelSpecId, RuntimeConfigVersionId, SchemaVersion, TrainingDatasetId},
+};
+
+/// Inbound body for plan and build endpoints (same shape; build runs plan first).
+#[derive(Debug, Clone, Deserialize, Validate)]
+pub struct BuildTrainingDatasetRequest {
+    /// Target model specification (trainer binds artifacts to this spec).
+    pub model_spec_id: ModelSpecId,
+    /// Frozen runtime-config version governing feature/factor/label schemas.
+    pub runtime_config_version_id: RuntimeConfigVersionId,
+    /// Inclusive first sample `as_of`.
+    pub window_start: DateTime<Utc>,
+    /// Exclusive window end (samples are strictly before this instant).
+    pub window_end: DateTime<Utc>,
+    /// Deterministic sample grid step in seconds (`>= 1`).
+    #[validate(range(min = 1))]
+    pub sample_interval_secs: u64,
+    /// Forward label horizons in seconds (one label column per horizon).
+    #[validate(length(min = 1))]
+    pub horizons_secs: Vec<u64>,
+    /// Feature source visibility delay in seconds (PIT cutoff).
+    #[validate(range(min = 1))]
+    pub source_delay_secs: u64,
+    /// Feature schema version to materialize (defaults to v1).
+    #[serde(default = "default_feature_schema_version")]
+    pub feature_schema_version: SchemaVersion,
+    /// Operator reason recorded on the operation log (UI should require non-empty).
+    #[validate(length(min = 1, max = 512))]
+    pub reason: String,
+}
+
+const fn default_feature_schema_version() -> SchemaVersion {
+    SchemaVersion::FIRST
+}
+
+/// Dry-plan response — no ledger row is written.
+#[derive(Debug, Clone, Serialize)]
+pub struct TrainingDatasetPlanView {
+    /// Pre-assigned id that the subsequent build will use (stable across plan → build).
+    pub training_dataset_id: TrainingDatasetId,
+    pub model_spec_id: ModelSpecId,
+    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub window_start: DateTime<Utc>,
+    pub window_end: DateTime<Utc>,
+    /// Number of `(as_of, market)` samples the build would iterate.
+    pub planned_samples: u64,
+}
+
+/// Ledger projection returned to the UI after build and on poll.
+#[derive(Debug, Clone, Serialize)]
+pub struct TrainingDatasetView {
+    pub training_dataset_id: TrainingDatasetId,
+    pub model_spec_id: ModelSpecId,
+    pub window_start: DateTime<Utc>,
+    pub window_end: DateTime<Utc>,
+    /// Lifecycle state — UI should map to badges and gate trainer actions on `ready`.
+    pub status: String,
+    pub feature_schema_hash: ContentHash,
+    pub factor_schema_hash: ContentHash,
+    pub label_schema_hash: ContentHash,
+    pub dataset_hash: ContentHash,
+    pub parquet_uri: String,
+    pub sample_count: i64,
+    /// Build diagnostics: planned vs built examples, decode failures, label skips, etc.
+    pub coverage_json: Value,
+    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub created_at: DateTime<Utc>,
+}
+
+impl From<TrainingDatasetInfo> for TrainingDatasetView {
+    fn from(info: TrainingDatasetInfo) -> Self {
+        Self {
+            training_dataset_id: info.training_dataset_id,
+            model_spec_id: info.model_spec_id,
+            window_start: info.window_start,
+            window_end: info.window_end,
+            status: info.status.as_str().to_owned(),
+            feature_schema_hash: info.feature_schema_hash,
+            factor_schema_hash: info.factor_schema_hash,
+            label_schema_hash: info.label_schema_hash,
+            dataset_hash: info.dataset_hash,
+            parquet_uri: info.parquet_uri.to_string(),
+            sample_count: info.sample_count,
+            coverage_json: info.coverage_json,
+            runtime_config_version_id: info.runtime_config_version_id,
+            created_at: info.created_at,
+        }
+    }
+}

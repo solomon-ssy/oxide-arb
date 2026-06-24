@@ -5,10 +5,11 @@
 //! current `BookStore` / `MarketRegistry` state, where `as_of` is the report
 //! decision instant and the caller bounds staleness via the data-quality gate.
 //!
-//! TODO(phase-3): a historical, ClickHouse-backed implementation that resolves
-//! the book/market state strictly as of a past `as_of` (no look-ahead) for PIT
-//! backtests and training datasets — see
-//! `docs/plans/quant-pivot/03-data-factor-model-pipeline.md`.
+//! **Historical replay** uses [`PitQueryEngine`](quant_pivot_research::pit::PitQueryEngine)
+//! (`quant-pivot-research::pit`); the ClickHouse-backed streaming resolver is
+//! [`ChHistoricalPitSource`](quant_pivot_core::pipeline::historical_pit::ChHistoricalPitSource)
+//! in `quant-pivot-core::pipeline::historical_pit`. Offline dataset builds
+//! batch-prefetch facts and serve from [`MaterializedPitEngine`](quant_pivot_research::pit::MaterializedPitEngine).
 
 use std::sync::Arc;
 

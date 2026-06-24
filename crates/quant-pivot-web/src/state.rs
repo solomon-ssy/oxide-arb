@@ -6,7 +6,7 @@ use quant_pivot_models::{
     config::DeployConfig,
     domain::{
         CatalogStatusPort, CoreEventPublisher, DataQualityPort, MarketDataPort, MetricsScrapePort,
-        ReadinessPort, RuntimeConfigPort, RuntimeControlPort,
+        ReadinessPort, RuntimeConfigPort, RuntimeControlPort, TrainingDatasetPort,
     },
 };
 use quant_pivot_repository::traits::{
@@ -49,4 +49,6 @@ pub struct AppState {
     pub ws_sessions: SessionRegistry,
     pub metrics: Arc<dyn MetricsScrapePort>,
     pub readiness: Arc<dyn ReadinessPort>,
+    /// Offline training-dataset plan/build (Phase 3.5 Admin API).
+    pub training_datasets: Arc<dyn TrainingDatasetPort>,
 }

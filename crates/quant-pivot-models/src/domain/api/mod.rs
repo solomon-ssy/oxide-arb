@@ -12,6 +12,7 @@ mod quant_report;
 mod role;
 mod runtime_config;
 mod system;
+mod training_dataset;
 mod user;
 mod window;
 
@@ -27,5 +28,6 @@ pub use quant_report::*;
 pub use role::*;
 pub use runtime_config::*;
 pub use system::*;
+pub use training_dataset::*;
 pub use user::*;
 pub use window::*;

@@ -10,17 +10,25 @@ use crate::{
         factor_pipeline::FactorPipelineService,
         feature_pipeline::FeaturePipelineService,
         model_runner::{DispatcherAlertSink, ModelRunner},
+        training_dataset::{
+            TrainingDatasetBuildConfig, TrainingDatasetService, TrainingDatasetServiceDeps,
+            default_labelers,
+        },
     },
 };
-use quant_pivot_models::config::DeployConfig;
+use quant_pivot_models::{
+    config::DeployConfig,
+    runtime_config::{DataQualityConfig, FactorsConfig, FeaturesConfig, TrainingConfig},
+};
 use quant_pivot_repository::{
     postgres::{
         PgFactorRepository, PgFeatureRepository, PgMarketSelectionRepository,
-        PgModelRegistryRepository, PgModelRunRepository,
+        PgModelRegistryRepository, PgModelRunRepository, PgTrainingDatasetRepository,
     },
     traits::{
-        FactorRepository, FeatureRepository, MarketSelectionRepository, ModelRegistryRepository,
-        ModelRunRepository,
+        FactorRepository, FeatureRepository, MarketRepository, MarketSelectionRepository,
+        ModelRegistryRepository, ModelRunRepository, QuantFactReadRepository,
+        TrainingDatasetRepository,
     },
 };
 use quant_pivot_research::{
@@ -66,6 +74,12 @@ pub struct ResearchBundle {
     pub model_registry_repo: Arc<dyn ModelRegistryRepository>,
     /// Online inference orchestrator: selection/features/factors → candidates (3.4).
     pub model_runner: Arc<ModelRunner>,
+    /// Frozen training-dataset ledger persistence (3.5).
+    pub training_dataset_repo: Arc<dyn TrainingDatasetRepository>,
+    /// Historical fact read port (PIT book / microstructure / settlement) (3.5).
+    pub quant_fact_read: Arc<dyn QuantFactReadRepository>,
+    /// Market catalog read port for PIT metadata + sampling candidates (3.5).
+    pub market_repo: Arc<dyn MarketRepository>,
 }
 
 impl ResearchBundle {
@@ -121,6 +135,10 @@ impl ResearchBundle {
             ))),
         ));
 
+        let training_dataset_repo: Arc<dyn TrainingDatasetRepository> = Arc::new(
+            PgTrainingDatasetRepository::new(deps.infra.pg.connection().clone()),
+        );
+
         Self {
             artifact_store,
             market_selector,
@@ -133,6 +151,37 @@ impl ResearchBundle {
             model_run_repo,
             model_registry_repo,
             model_runner,
+            training_dataset_repo,
+            quant_fact_read: Arc::clone(&deps.infra.quant_fact_read),
+            market_repo: Arc::clone(&deps.data.market_repo),
         }
+    }
+
+    /// Construct an offline training-dataset service bound to a frozen
+    /// runtime-config snapshot. The service plans a deterministic sample grid,
+    /// batch-prefetches historical facts, materializes PIT features + forward
+    /// labels, and writes a content-hashed Parquet artifact + ledger row.
+    pub fn training_dataset_service(
+        &self,
+        features: FeaturesConfig,
+        factors: FactorsConfig,
+        data_quality: DataQualityConfig,
+        training: TrainingConfig,
+    ) -> quant_pivot_error::QuantResult<TrainingDatasetService> {
+        TrainingDatasetService::new(
+            TrainingDatasetServiceDeps {
+                fact_read: Arc::clone(&self.quant_fact_read),
+                market_repo: Arc::clone(&self.market_repo),
+                artifact_store: Arc::clone(&self.artifact_store),
+                dataset_repo: Arc::clone(&self.training_dataset_repo),
+            },
+            TrainingDatasetBuildConfig {
+                features,
+                factors,
+                data_quality,
+                training,
+                labelers: default_labelers(),
+            },
+        )
     }
 }

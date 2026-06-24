@@ -102,6 +102,10 @@ pub struct SignalCandidateId(Arc<Uuid>);
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TrainingDatasetId(Arc<Uuid>);
 
+/// One materialized training example (row) within a training dataset.
+#[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TrainingExampleId(Arc<Uuid>);
+
 /// Stored model artifact (serialized weights / model) identifier.
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ModelArtifactId(Arc<Uuid>);

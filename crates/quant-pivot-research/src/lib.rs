@@ -96,23 +96,22 @@ mod acceptance_tests {
 
 #[cfg(test)]
 mod feature_guard_tests {
-    /// The default build must never link the heavy ML stack: only the pure-Rust
-    /// `stats` group is on by default. `cargo test --workspace` runs with default
-    /// features, so this guards against an accidental `default = [...]` that
-    /// pulls polars / argmin / smartcore into the `report_only` build.
+    /// The optimizer (`argmin`) and classical-ML (`smartcore`) stacks stay gated
+    /// until Phase 3.6 and must never be linked by default.
+    ///
+    /// `dataframe` (polars/arrow/parquet) is **intentionally excluded** from this
+    /// guard: Phase 3.5 links it workspace-wide so `quant-pivot-core` can
+    /// materialize offline training datasets (the `always_compile` decision —
+    /// `quant-pivot-core` enables `quant-pivot-research/dataframe`). Under
+    /// `cargo test --workspace` feature unification therefore turns `dataframe`
+    /// on here, which is expected.
     #[test]
-    fn default_build_excludes_heavy_features() {
+    fn default_build_excludes_unlinked_heavy_features() {
         // `black_box` hides the cfg constants from the optimizer so this stays a
         // runtime assertion (not a compile-time one that would break the
         // heavy-feature clippy gate).
-        let heavy = std::hint::black_box(
-            cfg!(feature = "dataframe")
-                || cfg!(feature = "optimize")
-                || cfg!(feature = "ml-classical"),
-        );
-        assert!(
-            !heavy,
-            "default build must exclude polars / argmin / smartcore"
-        );
+        let heavy =
+            std::hint::black_box(cfg!(feature = "optimize") || cfg!(feature = "ml-classical"));
+        assert!(!heavy, "default build must exclude argmin / smartcore");
     }
 }

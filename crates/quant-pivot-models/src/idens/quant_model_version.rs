@@ -7,7 +7,7 @@ use sea_orm::{
 };
 
 use crate::{
-    idens::quant_model_spec::QuantModelSpec,
+    idens::{quant_model_spec::QuantModelSpec, quant_training_dataset::QuantTrainingDataset},
     schema::{
         column,
         dependency::TableDependency,
@@ -83,6 +83,19 @@ pub fn table() -> TableCreateStatement {
                 .to(QuantModelSpec::Table, QuantModelSpec::ModelSpecId)
                 .on_delete(ForeignKeyAction::Restrict),
         )
+        .foreign_key(
+            ForeignKey::create()
+                .name("fk_quant_model_version_training_dataset")
+                .from(
+                    QuantModelVersion::Table,
+                    QuantModelVersion::TrainingDatasetId,
+                )
+                .to(
+                    QuantTrainingDataset::Table,
+                    QuantTrainingDataset::TrainingDatasetId,
+                )
+                .on_delete(ForeignKeyAction::Restrict),
+        )
         .to_owned()
 }
 
@@ -128,7 +141,10 @@ pub fn indexes() -> Vec<IndexSpec> {
 }
 
 pub fn dependencies() -> Vec<TableDependency> {
-    vec![TableDependency::foreign_key(quant_model_spec_table_name)]
+    vec![
+        TableDependency::foreign_key(quant_model_spec_table_name),
+        TableDependency::foreign_key(quant_training_dataset_table_name),
+    ]
 }
 
 pub const fn seed_units() -> Vec<SeedSpec> {
@@ -141,4 +157,8 @@ fn quant_model_version_table_name() -> String {
 
 fn quant_model_spec_table_name() -> String {
     QuantModelSpec::Table.to_string()
+}
+
+fn quant_training_dataset_table_name() -> String {
+    QuantTrainingDataset::Table.to_string()
 }

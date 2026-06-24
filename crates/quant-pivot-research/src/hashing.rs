@@ -25,7 +25,7 @@ use crate::{
     features::{FeatureName, FeatureSchema, FeatureSpec, FeatureVector},
     model::ModelArtifact,
     selection::ModelFeatureRequirements,
-    training::TrainingDatasetArtifact,
+    training::LabelName,
 };
 
 /// Canonical JSON shape for [`ResearchHasher::feature_schema`].
@@ -114,9 +114,12 @@ impl ResearchHasher {
         Self::canonical(artifact)
     }
 
-    /// Canonical hash of a frozen training dataset artifact.
-    pub fn dataset(artifact: &TrainingDatasetArtifact) -> QuantResult<ContentHash> {
-        Self::canonical(artifact)
+    /// Order-independent hash of a dataset's label schema (`label_schema_hash`).
+    ///
+    /// The label-name set defines the supervised target columns; sorting makes
+    /// the digest independent of labeler registration order.
+    pub fn label_schema(names: &[LabelName]) -> QuantResult<ContentHash> {
+        Self::ordered(names)
     }
 }
 

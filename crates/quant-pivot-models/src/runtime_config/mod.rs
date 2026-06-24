@@ -41,6 +41,8 @@ pub struct RuntimeConfig {
     pub factors: FactorsConfig,
     /// Active and shadow model references.
     pub model: ModelConfig,
+    /// Offline training-dataset build parameters.
+    pub training: TrainingConfig,
     /// Report schedules and payload sizing.
     pub reports: ReportsConfig,
     /// Portfolio budget and exposure constraints.
@@ -60,6 +62,7 @@ impl Default for RuntimeConfig {
             features: FeaturesConfig::default(),
             factors: FactorsConfig::default(),
             model: ModelConfig::default(),
+            training: TrainingConfig::default(),
             reports: ReportsConfig::default(),
             portfolio: PortfolioConfig::default(),
             execution: ExecutionConfig::default(),

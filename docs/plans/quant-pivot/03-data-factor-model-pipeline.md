@@ -545,6 +545,8 @@ flowchart TD
 - `shadow` 未完成最小 shadow window 不能 publish。
 - `published` 不可变，修正必须创建新 version。
 - 任何训练输入变化都必须改变 dataset hash 或 model artifact hash。
+- `insufficient_labels` 数据集**可** persist artifact（audit/coverage），但**禁止**
+  train/publish（3.6 trainer 硬拒绝；3.7 永不可 `Ready`）。
 
 ## 13. 训练关键 Trait
 

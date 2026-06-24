@@ -8,6 +8,7 @@ pub mod periodic_services;
 pub mod runtime_tasks;
 pub mod task_id;
 pub mod task_registry;
+pub mod training_dataset;
 pub mod web_services;
 
 mod bundles;

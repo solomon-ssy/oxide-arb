@@ -202,6 +202,43 @@ impl Default for ModelConfig {
     }
 }
 
+/// Offline training-dataset build parameters (Phase 3.5+).
+///
+/// Distinct from online [`DataQualityConfig`]: historical PIT book lookup uses a
+/// much wider staleness window than live feature gates, and label thresholds are
+/// not the same as feature rejection thresholds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct TrainingConfig {
+    /// Maximum lookback for historical PIT book resolution during dataset build (ms).
+    ///
+    /// Snapshots older than `as_of - max_book_staleness_ms` are treated as missing.
+    pub max_book_staleness_ms: u64,
+    /// Minimum forward top-1 depth (USD) for the `liquidity_exit_possible` label.
+    pub min_exit_depth_usd: DecimalString,
+}
+
+impl Default for TrainingConfig {
+    fn default() -> Self {
+        Self {
+            max_book_staleness_ms: 300_000,
+            min_exit_depth_usd: DecimalString::new("100"),
+        }
+    }
+}
+
+impl TrainingConfig {
+    /// Resolve [`TrainingConfig::min_exit_depth_usd`] into a typed [`Usd`] value.
+    pub fn min_exit_depth_usd_typed(&self) -> Result<crate::types::Usd, String> {
+        use rust_decimal::Decimal;
+        self.min_exit_depth_usd
+            .value
+            .parse::<Decimal>()
+            .map(crate::types::Usd::new)
+            .map_err(|error| format!("training.min_exit_depth_usd is not a valid decimal: {error}"))
+    }
+}
+
 /// Report schedules and payload sizing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]

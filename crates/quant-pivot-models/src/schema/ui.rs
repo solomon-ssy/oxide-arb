@@ -77,6 +77,13 @@ fn groups() -> &'static [RuntimeConfigSchemaGroupView] {
                 "Active model and shadow model gates.",
             ),
             group(
+                "training",
+                55,
+                "Training",
+                "训练",
+                "Offline training-dataset build parameters.",
+            ),
+            group(
                 "reports",
                 60,
                 "Reports",
@@ -135,6 +142,7 @@ fn build_fields() -> Vec<FieldUiEntry> {
         feature_fields(),
         factor_fields(),
         model_fields(),
+        training_fields(),
         report_fields(),
         portfolio_fields(),
         execution_fields(),
@@ -428,6 +436,23 @@ fn model_fields() -> Vec<FieldUiEntry> {
             70,
             Some(FieldWidget::DecimalString),
             None,
+        ),
+    ]
+}
+
+fn training_fields() -> Vec<FieldUiEntry> {
+    vec![
+        duration(
+            "training.max_book_staleness_ms",
+            "Historical max book staleness",
+            "历史 PIT 最大订单簿陈旧度",
+            10,
+        ),
+        money(
+            "training.min_exit_depth_usd",
+            "Minimum exit depth USD",
+            "流动性退出标签最低深度",
+            20,
         ),
     ]
 }

@@ -2,6 +2,8 @@
 
 mod attribution;
 mod candidate;
+#[allow(clippy::needless_update)] // NewTrainingDataset omits DB-managed created_at
+mod dataset;
 mod execution;
 mod factor;
 mod feature;
@@ -15,6 +17,7 @@ mod selection;
 
 pub use attribution::*;
 pub use candidate::*;
+pub use dataset::*;
 pub use execution::*;
 pub use factor::*;
 pub use feature::*;

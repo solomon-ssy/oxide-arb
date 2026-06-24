@@ -119,6 +119,7 @@ mod tests {
             "quant_model_spec",
             "quant_model_version",
             "quant_model_run",
+            "quant_training_dataset",
             "quant_portfolio_plan",
             "quant_recommendation_report",
             "quant_recommendation",

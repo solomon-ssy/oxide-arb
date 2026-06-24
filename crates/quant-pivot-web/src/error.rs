@@ -16,7 +16,9 @@
 //!   400.
 
 use actix_web::{HttpResponse, ResponseError, http::StatusCode};
-use quant_pivot_error::{auth::AuthError, rbac::RbacError, storage::StorageError};
+use quant_pivot_error::{
+    QuantError, auth::AuthError, rbac::RbacError, research::ResearchError, storage::StorageError,
+};
 use quant_pivot_models::domain::{RuntimeControlError, WindowQueryError};
 use thiserror::Error;
 
@@ -169,6 +171,23 @@ impl From<RuntimeControlError> for WebError {
         match error {
             RuntimeControlError::Precondition(_) => Self::Conflict(error.to_string()),
             RuntimeControlError::Engine(_) => Self::Internal(error.to_string()),
+        }
+    }
+}
+
+impl From<QuantError> for WebError {
+    fn from(error: QuantError) -> Self {
+        match error {
+            QuantError::Storage(storage) => storage.into(),
+            QuantError::Rbac(rbac) => rbac.into(),
+            QuantError::Research(
+                ResearchError::DatasetPlan { detail }
+                | ResearchError::LeakageDetected { detail }
+                | ResearchError::LabelResolution { detail }
+                | ResearchError::DatasetBuild { detail },
+            ) => Self::BadRequest(detail),
+            QuantError::Config(_) => Self::BadRequest(error.to_string()),
+            other => Self::Internal(other.to_string()),
         }
     }
 }

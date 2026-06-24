@@ -50,6 +50,7 @@ const READ_RESOURCES: &[ResourceType] = &[
     ResourceType::Market,
     ResourceType::QuantReport,
     ResourceType::RuntimeConfig,
+    ResourceType::Materialization,
     ResourceType::Audit,
     ResourceType::OperationLog,
 ];
@@ -88,6 +89,7 @@ fn risk_owner_policies() -> Vec<(ResourceType, Operation)> {
         (ResourceType::RuntimeConfig, Operation::Create),
         (ResourceType::RuntimeConfig, Operation::Activate),
         (ResourceType::RuntimeConfig, Operation::Rollback),
+        (ResourceType::Materialization, Operation::Create),
     ]);
     policies
 }

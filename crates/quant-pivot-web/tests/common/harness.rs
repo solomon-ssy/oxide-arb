@@ -16,17 +16,20 @@ use actix_web::{
     test, web,
 };
 use async_trait::async_trait;
+use quant_pivot_error::QuantResult;
 use quant_pivot_error::auth::AuthError;
 use quant_pivot_models::{
     config::{CacheConfig, DeployConfig, JwtConfig, RedisConfig},
     domain::{
-        CatalogState, CatalogStatusPort, CoreEventPublisher, DataQualityPort, DataQualitySnapshot,
-        HealthReport, MarketDataPort, MetricsScrapePort, QuantModeTransitionReport,
-        RuntimeConfigPort, RuntimeControlError, RuntimeControlPort, SystemStatus,
+        BuildTrainingDatasetRequest, CatalogState, CatalogStatusPort, CoreEventPublisher,
+        DataQualityPort, DataQualitySnapshot, HealthReport, MarketDataPort, MetricsScrapePort,
+        QuantModeTransitionReport, RuntimeConfigPort, RuntimeControlError, RuntimeControlPort,
+        SystemStatus, TrainingDatasetInfo, TrainingDatasetPlanView, TrainingDatasetPort,
+        TrainingDatasetView,
     },
     enums::quant::QuantRuntimeMode,
     runtime_config::RuntimeConfig,
-    types::TokenId,
+    types::{TokenId, TrainingDatasetId},
 };
 use quant_pivot_storage::{
     cache::connect_pool,
@@ -151,6 +154,7 @@ impl TestEnv {
                 blacklist,
                 Some(Arc::clone(&catalog) as Arc<dyn CatalogStatusPort>),
             )),
+            training_datasets: Arc::new(MockTrainingDatasetPort),
         };
 
         Self {
@@ -358,6 +362,37 @@ impl TokenBlacklist for NoopBlacklist {
 #[derive(Default)]
 pub struct MockRuntimeControl {
     mode: Mutex<QuantRuntimeMode>,
+}
+
+/// No-op training-dataset port for web integration tests.
+pub struct MockTrainingDatasetPort;
+
+#[async_trait]
+impl TrainingDatasetPort for MockTrainingDatasetPort {
+    async fn find_by_id(
+        &self,
+        _training_dataset_id: &TrainingDatasetId,
+    ) -> QuantResult<Option<TrainingDatasetInfo>> {
+        Ok(None)
+    }
+
+    async fn plan(
+        &self,
+        _request: BuildTrainingDatasetRequest,
+    ) -> QuantResult<TrainingDatasetPlanView> {
+        Err(quant_pivot_error::QuantError::NotImplemented(
+            "training dataset plan".into(),
+        ))
+    }
+
+    async fn build(
+        &self,
+        _request: BuildTrainingDatasetRequest,
+    ) -> QuantResult<TrainingDatasetView> {
+        Err(quant_pivot_error::QuantError::NotImplemented(
+            "training dataset build".into(),
+        ))
+    }
 }
 
 #[async_trait]

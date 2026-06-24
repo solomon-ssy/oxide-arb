@@ -1,0 +1,708 @@
+//! End-to-end training-dataset build: PIT correctness, leakage gate, settlement
+//! maturity, and typed `training_dataset_id` FK wiring.
+
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
+
+use async_trait::async_trait;
+use chrono::{Duration as ChronoDuration, Utc};
+use quant_pivot_core::service::training_dataset::{
+    TrainingDatasetBuildConfig, TrainingDatasetService, TrainingDatasetServiceDeps,
+    default_labelers,
+};
+use quant_pivot_error::storage::StorageError;
+use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
+use quant_pivot_models::{
+    clickhouse::{
+        BookMicrostructureRow, BookSnapshotRow, ChPrice, ChSchemaVersion, ChUsd,
+        MarketResolutionRow,
+    },
+    domain::{
+        NewModelSpec, NewModelVersion, NewRuntimeConfigVersion, NewTrainingDataset,
+        market::book::BookLevel,
+    },
+    entities::market::{Column as MarketColumn, Entity as MarketEntity},
+    enums::{
+        clickhouse::{ChFactSource, ChSnapshotReason},
+        common::MarketCategory,
+        factor::FactorFamily,
+        market::MarketStatus,
+        quant::{ModelPublicationStatus, TrainingDatasetStatus},
+        runtime_config::RuntimeConfigVersionSource,
+    },
+    runtime_config::{
+        DataQualityConfig, FactorsConfig, FeatureFamily, FeaturesConfig, TrainingConfig,
+    },
+    types::{
+        ContentHash, MarketId, ModelSpecId, ModelVersionId, Price, RuntimeConfigVersionId,
+        SchemaVersion, Shares, TokenId, TrainingDatasetId,
+    },
+};
+use quant_pivot_repository::{
+    postgres::{
+        PgEventRepository, PgMarketRepository, PgModelRegistryRepository,
+        PgRuntimeConfigVersionRepository, PgTrainingDatasetRepository,
+    },
+    traits::{
+        EventRepository, MarketRepository, ModelRegistryRepository, QuantFactReadRepository,
+        RuntimeConfigVersionRepository, TrainingDatasetRepository,
+    },
+};
+use quant_pivot_research::{
+    artifact::{ArtifactStore, LocalArtifactStore},
+    pit::{BookSnapshotAt, MarketContextAt, PitQueryEngine},
+    training::{DatasetPlan, DatasetPlanRequest, TrainingDatasetBuilder, TrainingDatasetPlanner},
+};
+use quant_pivot_test_support::{
+    catalog_fixtures::{make_event, make_market},
+    pg::setup_pg,
+};
+use rust_decimal::Decimal;
+use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, sea_query::Expr};
+
+const EVENT_ID: &str = "evt-dataset-e2e";
+const MARKET_ID: &str = "0xdatasete2e";
+const YES_TOKEN: &str = "dataset-yes";
+const NO_TOKEN: &str = "dataset-no";
+
+const SETTLEMENT_LABEL: quant_pivot_research::training::LabelName =
+    quant_pivot_research::training::LabelName::from_static("settlement_outcome");
+
+fn runtime_config_id() -> RuntimeConfigVersionId {
+    RuntimeConfigVersionId::from_v7()
+}
+
+async fn seed_runtime_config(db: &DatabaseConnection) -> RuntimeConfigVersionId {
+    let id = runtime_config_id();
+    let hash = ContentHash::parse(format!("blake3:{}", "c".repeat(64))).expect("hash");
+    PgRuntimeConfigVersionRepository::new(db.clone())
+        .create_version(NewRuntimeConfigVersion {
+            runtime_config_version_id: id.clone(),
+            config_hash: hash,
+            schema_version: SchemaVersion::FIRST,
+            config_json: serde_json::json!({}),
+            source: RuntimeConfigVersionSource::Bootstrap,
+            created_by: "dataset-e2e".to_owned(),
+            reason: "dataset e2e".to_owned(),
+        })
+        .await
+        .expect("runtime config version");
+    id
+}
+
+fn dataset_window() -> (chrono::DateTime<Utc>, chrono::DateTime<Utc>) {
+    let start = Utc::now() - ChronoDuration::hours(2);
+    // One sample at `start` when `sample_interval_secs == 60`.
+    let end = start + ChronoDuration::seconds(60);
+    (start, end)
+}
+
+const fn sample_as_of(window_start: chrono::DateTime<Utc>) -> chrono::DateTime<Utc> {
+    window_start
+}
+
+#[derive(Default)]
+struct FactScenario {
+    books: HashMap<TokenId, Vec<BookSnapshotRow>>,
+    micro: HashMap<TokenId, Vec<BookMicrostructureRow>>,
+    resolutions: HashMap<MarketId, Vec<MarketResolutionRow>>,
+}
+
+struct ControllableFactRead {
+    scenario: Arc<Mutex<FactScenario>>,
+}
+
+impl ControllableFactRead {
+    const fn new(scenario: Arc<Mutex<FactScenario>>) -> Self {
+        Self { scenario }
+    }
+}
+
+#[async_trait]
+impl QuantFactReadRepository for ControllableFactRead {
+    async fn microstructure_window(
+        &self,
+        token_ids: Vec<TokenId>,
+        from_ms: i64,
+        to_ms: i64,
+    ) -> Result<Vec<BookMicrostructureRow>, StorageError> {
+        let scenario = self.scenario.lock().expect("lock");
+        let mut rows = Vec::new();
+        for token_id in token_ids {
+            if let Some(series) = scenario.micro.get(&token_id) {
+                for row in series {
+                    if row.bucket_time >= from_ms && row.bucket_time < to_ms {
+                        rows.push(row.clone());
+                    }
+                }
+            }
+        }
+        Ok(rows)
+    }
+
+    async fn book_snapshot_at(
+        &self,
+        token_id: &TokenId,
+        as_of_ms: i64,
+    ) -> Result<Option<BookSnapshotRow>, StorageError> {
+        let scenario = self.scenario.lock().expect("lock");
+        Ok(scenario.books.get(token_id).and_then(|rows| {
+            rows.iter()
+                .filter(|row| row.event_time <= as_of_ms)
+                .max_by_key(|row| (row.event_time, row.ingestion_time, row.sequence))
+                .cloned()
+        }))
+    }
+
+    async fn book_snapshots_between(
+        &self,
+        token_ids: Vec<TokenId>,
+        from_ms: i64,
+        to_ms: i64,
+    ) -> Result<Vec<BookSnapshotRow>, StorageError> {
+        let scenario = self.scenario.lock().expect("lock");
+        let mut rows = Vec::new();
+        for token_id in token_ids {
+            if let Some(series) = scenario.books.get(&token_id) {
+                for row in series {
+                    if row.event_time >= from_ms && row.event_time <= to_ms {
+                        rows.push(row.clone());
+                    }
+                }
+            }
+        }
+        Ok(rows)
+    }
+
+    async fn resolution_at(
+        &self,
+        market_id: &MarketId,
+        as_of_ms: i64,
+    ) -> Result<Option<MarketResolutionRow>, StorageError> {
+        let scenario = self.scenario.lock().expect("lock");
+        Ok(scenario.resolutions.get(market_id).and_then(|rows| {
+            rows.iter()
+                .filter(|row| row.resolved_at <= as_of_ms)
+                .max_by_key(|row| (row.resolved_at, row.observed_at, row.sequence))
+                .cloned()
+        }))
+    }
+
+    async fn resolutions_between(
+        &self,
+        market_ids: Vec<MarketId>,
+        from_ms: i64,
+        to_ms: i64,
+    ) -> Result<Vec<MarketResolutionRow>, StorageError> {
+        let scenario = self.scenario.lock().expect("lock");
+        let mut rows = Vec::new();
+        for market_id in market_ids {
+            if let Some(series) = scenario.resolutions.get(&market_id) {
+                for row in series {
+                    if row.resolved_at >= from_ms && row.resolved_at <= to_ms {
+                        rows.push(row.clone());
+                    }
+                }
+            }
+        }
+        Ok(rows)
+    }
+}
+
+/// PIT engine that deliberately returns a book observed after `as_of`.
+struct LeakyPitEngine {
+    token_id: TokenId,
+    market_id: MarketId,
+    leak_ms: i64,
+}
+
+#[async_trait]
+impl PitQueryEngine for LeakyPitEngine {
+    async fn book_at(
+        &self,
+        token_id: &TokenId,
+        as_of: chrono::DateTime<Utc>,
+    ) -> QuantResult<Option<BookSnapshotAt>> {
+        if token_id != &self.token_id {
+            return Ok(None);
+        }
+        let observed_ms = as_of.timestamp_millis().saturating_add(self.leak_ms);
+        let bid = BookLevel::from_decimal_unchecked(
+            Price::new(Decimal::new(48, 2)),
+            Shares::new(Decimal::from(100)),
+        );
+        let ask = BookLevel::from_decimal_unchecked(
+            Price::new(Decimal::new(52, 2)),
+            Shares::new(Decimal::from(100)),
+        );
+        Ok(Some(BookSnapshotAt {
+            token_id: token_id.clone(),
+            as_of,
+            bids: Arc::from([bid]),
+            asks: Arc::from([ask]),
+            timestamp_ms: u64::try_from(observed_ms).unwrap_or(0),
+            version: 1,
+        }))
+    }
+
+    async fn market_at(
+        &self,
+        market_id: &MarketId,
+        as_of: chrono::DateTime<Utc>,
+    ) -> QuantResult<Option<MarketContextAt>> {
+        if market_id != &self.market_id {
+            return Ok(None);
+        }
+        Ok(Some(MarketContextAt {
+            market_id: market_id.clone(),
+            as_of,
+            observed_at: as_of - ChronoDuration::days(1),
+            status: MarketStatus::Active,
+            neg_risk: false,
+            end_date: Some(as_of + ChronoDuration::days(7)),
+            created_at: as_of - ChronoDuration::days(2),
+            outcome_count: 2,
+        }))
+    }
+}
+
+fn book_row(token: &str, event_time_ms: i64) -> BookSnapshotRow {
+    BookSnapshotRow {
+        token_id: TokenId::new(token),
+        market_id: Some(MarketId::new(MARKET_ID)),
+        snapshot_reason: ChSnapshotReason::Startup,
+        top_n: 5,
+        bids_json: r#"[["0.48","100"]]"#.to_owned(),
+        asks_json: r#"[["0.52","100"]]"#.to_owned(),
+        bid_depth_usd: None,
+        ask_depth_usd: None,
+        mid_price: Some(ChPrice::from(Price::new(Decimal::new(50, 2)))),
+        spread_bps: None,
+        book_version: 1,
+        levels_count: 1,
+        event_time: event_time_ms,
+        ingestion_time: event_time_ms,
+        sequence: 1,
+        source: ChFactSource::WsSnapshot,
+        schema_version: ChSchemaVersion(2),
+    }
+}
+
+fn micro_row(token: &str, bucket_time_ms: i64, mid: Decimal) -> BookMicrostructureRow {
+    let price = Price::new(mid);
+    BookMicrostructureRow {
+        token_id: TokenId::new(token),
+        market_id: Some(MarketId::new(MARKET_ID)),
+        bucket_time: bucket_time_ms,
+        best_bid_open: None,
+        best_bid_high: Some(ChPrice::from(price)),
+        best_bid_low: Some(ChPrice::from(price)),
+        best_bid_close: Some(ChPrice::from(price)),
+        best_ask_open: None,
+        best_ask_high: None,
+        best_ask_low: None,
+        best_ask_close: None,
+        spread_bps_min: None,
+        spread_bps_avg: None,
+        spread_bps_max: None,
+        mid_price_open: Some(ChPrice::from(price)),
+        mid_price_close: Some(ChPrice::from(price)),
+        top1_depth_usd_avg: Some(ChUsd::from(Decimal::from(500))),
+        top5_depth_usd_avg: None,
+        top20_depth_usd_avg: None,
+        imbalance_avg: None,
+        update_count: 1,
+        snapshot_count: 1,
+        delta_count: 0,
+        delete_count: 0,
+        crossed_count: 0,
+        invalid_level_count: 0,
+        gap_count: 0,
+        last_trade_count: 0,
+        max_book_age_ms: 0,
+        schema_version: ChSchemaVersion(2),
+    }
+}
+
+fn pit_scenario(as_of_ms: i64) -> FactScenario {
+    let token = TokenId::new(YES_TOKEN);
+    // Book and micro evidence must precede `as_of - source_delay` (10s in tests).
+    let evidence_ms = as_of_ms - 15_000;
+    let mut books = HashMap::new();
+    books.insert(token.clone(), vec![book_row(YES_TOKEN, evidence_ms)]);
+
+    let mut micro = HashMap::new();
+    micro.insert(
+        token,
+        vec![
+            micro_row(YES_TOKEN, evidence_ms - 15_000, Decimal::new(49, 2)),
+            micro_row(YES_TOKEN, evidence_ms, Decimal::new(50, 2)),
+            micro_row(YES_TOKEN, as_of_ms + 30_000, Decimal::new(55, 2)),
+            micro_row(YES_TOKEN, as_of_ms + 60_000, Decimal::new(56, 2)),
+        ],
+    );
+
+    FactScenario {
+        books,
+        micro,
+        resolutions: HashMap::new(),
+    }
+}
+
+fn features_config() -> FeaturesConfig {
+    FeaturesConfig {
+        enabled_feature_families: vec![FeatureFamily::PriceBook, FeatureFamily::MarketMetadata],
+        ..FeaturesConfig::default()
+    }
+}
+
+fn factors_config() -> FactorsConfig {
+    FactorsConfig {
+        enabled_factor_families: vec![FactorFamily::DataQuality],
+        ..FactorsConfig::default()
+    }
+}
+
+async fn seed_catalog(db: &DatabaseConnection, window_start: chrono::DateTime<Utc>) {
+    PgEventRepository::new(db.clone())
+        .upsert(make_event(
+            EVENT_ID,
+            "Dataset E2E",
+            "dataset-e2e",
+            MarketCategory::Sports,
+        ))
+        .await
+        .expect("seed event");
+    let mut market = make_market(
+        MARKET_ID,
+        EVENT_ID,
+        "Dataset E2E?",
+        "dataset-e2e",
+        MarketCategory::Sports,
+        Some(window_start + ChronoDuration::days(7)),
+    );
+    market.yes_token_id = TokenId::new(YES_TOKEN);
+    market.no_token_id = TokenId::new(NO_TOKEN);
+    PgMarketRepository::new(db.clone())
+        .upsert(market)
+        .await
+        .expect("seed market");
+
+    let created_at = window_start - ChronoDuration::days(1);
+    MarketEntity::update_many()
+        .col_expr(MarketColumn::CreatedAt, Expr::value(created_at))
+        .filter(MarketColumn::MarketId.eq(MARKET_ID))
+        .exec(db)
+        .await
+        .expect("backdate market created_at");
+}
+
+async fn seed_model_spec(db: &DatabaseConnection) -> ModelSpecId {
+    let model_spec_id = ModelSpecId::from_v7();
+    PgModelRegistryRepository::new(db.clone())
+        .create_model_spec(NewModelSpec {
+            model_spec_id: model_spec_id.clone(),
+            name: "dataset-e2e".to_owned(),
+            model_family: "weighted_factor".to_owned(),
+            prediction_horizon_secs: 86_400,
+            feature_schema_version: SchemaVersion::FIRST,
+            label_schema_version: SchemaVersion::FIRST,
+            spec_json: serde_json::json!({}),
+            status: ModelPublicationStatus::Published,
+        })
+        .await
+        .expect("create spec");
+    model_spec_id
+}
+
+fn service(
+    db: &DatabaseConnection,
+    store: Arc<dyn ArtifactStore>,
+    fact_read: Arc<dyn QuantFactReadRepository>,
+) -> TrainingDatasetService {
+    TrainingDatasetService::new(
+        TrainingDatasetServiceDeps {
+            fact_read,
+            market_repo: Arc::new(PgMarketRepository::new(db.clone())),
+            artifact_store: store,
+            dataset_repo: Arc::new(PgTrainingDatasetRepository::new(db.clone())),
+        },
+        TrainingDatasetBuildConfig {
+            features: features_config(),
+            factors: factors_config(),
+            data_quality: DataQualityConfig {
+                // Default `max_book_age_ms` (5s) conflicts with `source_delay_secs`
+                // (10s): PIT evidence must be older than the delay but younger than
+                // the book-age bound.
+                max_book_age_ms: 60_000,
+                max_fact_lag_secs: 120,
+                ..DataQualityConfig::default()
+            },
+            training: TrainingConfig::default(),
+            labelers: default_labelers(),
+        },
+    )
+    .expect("training dataset service")
+}
+
+fn temp_artifact_store() -> Arc<dyn ArtifactStore> {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let dir = std::env::temp_dir().join(format!("quant-pivot-dataset-e2e-{nanos}"));
+    std::fs::create_dir_all(&dir).expect("artifact dir");
+    Arc::new(LocalArtifactStore::new(dir))
+}
+
+async fn plan_request(
+    service: &TrainingDatasetService,
+    model_spec_id: ModelSpecId,
+    runtime_config_version_id: RuntimeConfigVersionId,
+    window_start: chrono::DateTime<Utc>,
+    window_end: chrono::DateTime<Utc>,
+) -> DatasetPlan {
+    service
+        .plan(DatasetPlanRequest {
+            model_spec_id,
+            runtime_config_version_id,
+            window_start,
+            window_end,
+            sample_interval_secs: 60,
+            horizons_secs: vec![60],
+            source_delay_secs: 10,
+            feature_schema_version: SchemaVersion::FIRST,
+        })
+        .await
+        .expect("plan")
+}
+
+fn assert_no_feature_leakage(
+    artifact: &quant_pivot_research::training::TrainingDatasetArtifact,
+    source_delay_secs: u64,
+) {
+    let delay = ChronoDuration::seconds(i64::try_from(source_delay_secs).unwrap_or(i64::MAX));
+    for example in &artifact.examples {
+        let cutoff = example.as_of - delay;
+        for source in &example.source_refs {
+            assert!(
+                source.observed_at <= cutoff,
+                "future feature evidence: observed_at {} > cutoff {} (as_of {})",
+                source.observed_at,
+                cutoff,
+                example.as_of,
+            );
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn historical_pit_no_look_ahead_via_dataset_build() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let rc_id = seed_runtime_config(&db).await;
+    let (window_start, window_end) = dataset_window();
+    seed_catalog(&db, window_start).await;
+    let model_spec_id = seed_model_spec(&db).await;
+
+    let as_of = sample_as_of(window_start);
+    let as_of_ms = as_of.timestamp_millis();
+    let scenario = Arc::new(Mutex::new(pit_scenario(as_of_ms)));
+    let store = temp_artifact_store();
+    let svc = service(
+        &db,
+        Arc::clone(&store),
+        Arc::new(ControllableFactRead::new(Arc::clone(&scenario))),
+    );
+
+    let plan = plan_request(&svc, model_spec_id, rc_id, window_start, window_end).await;
+    let artifact = svc.build(plan).await.expect("build");
+    assert!(!artifact.examples.is_empty(), "expected built examples");
+    assert_no_feature_leakage(&artifact, 10);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dataset_builder_rejects_future_features() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let rc_id = seed_runtime_config(&db).await;
+    let (window_start, window_end) = dataset_window();
+    seed_catalog(&db, window_start).await;
+    let model_spec_id = seed_model_spec(&db).await;
+
+    let as_of = sample_as_of(window_start);
+    let as_of_ms = as_of.timestamp_millis();
+    let scenario = Arc::new(Mutex::new(pit_scenario(as_of_ms)));
+    let store = temp_artifact_store();
+    let svc = service(
+        &db,
+        Arc::clone(&store),
+        Arc::new(ControllableFactRead::new(Arc::clone(&scenario))),
+    );
+    let plan = plan_request(&svc, model_spec_id, rc_id, window_start, window_end).await;
+    let dataset_id = plan.training_dataset_id.clone();
+
+    let leaky = LeakyPitEngine {
+        token_id: TokenId::new(YES_TOKEN),
+        market_id: MarketId::new(MARKET_ID),
+        leak_ms: 5_000,
+    };
+    let err = svc
+        .build_with_pit_source(plan, &leaky)
+        .await
+        .expect_err("leaky pit must fail leakage gate");
+
+    assert!(
+        matches!(
+            err,
+            QuantError::Research(ResearchError::LeakageDetected { .. })
+        ),
+        "expected LeakageDetected, got {err:?}"
+    );
+
+    let repo = PgTrainingDatasetRepository::new(db.clone());
+    assert!(
+        repo.find_by_id(&dataset_id)
+            .await
+            .expect("lookup")
+            .is_none(),
+        "failed build must not persist ledger row"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn settlement_label_not_mature_before_resolution() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let rc_id = seed_runtime_config(&db).await;
+    let (window_start, window_end) = dataset_window();
+    seed_catalog(&db, window_start).await;
+    let model_spec_id = seed_model_spec(&db).await;
+
+    let as_of_ms = sample_as_of(window_start).timestamp_millis();
+    let scenario = Arc::new(Mutex::new(pit_scenario(as_of_ms)));
+    let store = temp_artifact_store();
+    let svc = service(
+        &db,
+        Arc::clone(&store),
+        Arc::new(ControllableFactRead::new(Arc::clone(&scenario))),
+    );
+
+    let plan = plan_request(&svc, model_spec_id, rc_id, window_start, window_end).await;
+    let artifact = svc.build(plan).await.expect("build");
+    assert!(artifact.coverage.labels_not_mature > 0);
+    for example in &artifact.examples {
+        assert!(
+            !example
+                .labels
+                .iter()
+                .any(|label| label.label_name == SETTLEMENT_LABEL),
+            "settlement label must not appear before resolution"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn settlement_label_available_after_resolution() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let rc_id = seed_runtime_config(&db).await;
+    let (window_start, window_end) = dataset_window();
+    seed_catalog(&db, window_start).await;
+    let model_spec_id = seed_model_spec(&db).await;
+
+    let as_of = sample_as_of(window_start);
+    let as_of_ms = as_of.timestamp_millis();
+    let mut fact = pit_scenario(as_of_ms);
+    fact.resolutions.insert(
+        MarketId::new(MARKET_ID),
+        vec![MarketResolutionRow {
+            market_id: MarketId::new(MARKET_ID),
+            winning_token_id: TokenId::new(YES_TOKEN),
+            winning_outcome: "Yes".to_owned(),
+            asset_token_ids: vec![TokenId::new(YES_TOKEN), TokenId::new(NO_TOKEN)],
+            resolved_at: as_of_ms + 30_000,
+            observed_at: as_of_ms + 30_000,
+            sequence: 1,
+            source: ChFactSource::WsMarketResolved,
+            schema_version: ChSchemaVersion(2),
+        }],
+    );
+    let scenario = Arc::new(Mutex::new(fact));
+    let store = temp_artifact_store();
+    let svc = service(
+        &db,
+        Arc::clone(&store),
+        Arc::new(ControllableFactRead::new(scenario)),
+    );
+
+    let plan = plan_request(&svc, model_spec_id, rc_id, window_start, window_end).await;
+    let artifact = svc.build(plan).await.expect("build");
+    assert!(
+        artifact.examples.iter().any(|example| {
+            example
+                .labels
+                .iter()
+                .any(|label| label.label_name == SETTLEMENT_LABEL)
+        }),
+        "expected settlement label after resolution is visible in forward window"
+    );
+}
+
+#[tokio::test]
+async fn model_version_training_dataset_id_is_typed() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let rc_id = seed_runtime_config(&db).await;
+    let model_spec_id = seed_model_spec(&db).await;
+    let dataset_id = TrainingDatasetId::from_v7();
+    let (window_start, window_end) = dataset_window();
+    let hash = ContentHash::parse(format!("blake3:{}", "b".repeat(64))).expect("hash");
+
+    PgTrainingDatasetRepository::new(db.clone())
+        .create(NewTrainingDataset {
+            training_dataset_id: dataset_id.clone(),
+            model_spec_id: model_spec_id.clone(),
+            window_start,
+            window_end,
+            status: TrainingDatasetStatus::Built,
+            feature_schema_hash: hash.clone(),
+            factor_schema_hash: hash.clone(),
+            label_schema_hash: hash.clone(),
+            dataset_hash: hash.clone(),
+            parquet_uri: quant_pivot_models::types::ArtifactUri::parse(
+                "file:///tmp/dataset.parquet",
+            )
+            .expect("uri"),
+            sample_count: 10,
+            coverage_json: serde_json::json!({}),
+            runtime_config_version_id: rc_id,
+        })
+        .await
+        .expect("create dataset");
+
+    let version_id = ModelVersionId::from_v7();
+    PgModelRegistryRepository::new(db.clone())
+        .create_model_version(NewModelVersion {
+            model_version_id: version_id.clone(),
+            model_spec_id,
+            version: 2,
+            artifact_hash: hash,
+            training_dataset_id: Some(dataset_id.clone()),
+            metrics_json: serde_json::json!({}),
+            quality_gate_report: serde_json::json!({}),
+            publication_status: ModelPublicationStatus::Candidate,
+            published_at: None,
+            retired_at: None,
+        })
+        .await
+        .expect("typed FK insert");
+
+    let loaded = PgModelRegistryRepository::new(db)
+        .find_model_version_by_id(&version_id)
+        .await
+        .expect("load")
+        .expect("version");
+    assert_eq!(loaded.training_dataset_id, Some(dataset_id));
+}

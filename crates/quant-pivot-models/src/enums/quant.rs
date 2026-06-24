@@ -219,6 +219,25 @@ impl FactorDirection {
 }
 
 active_string_enum! {
+    /// Frozen training-dataset lifecycle state (ledger).
+    ///
+    /// Transitions: `Planned → Building → {Built | InsufficientLabels | Failed}`;
+    /// a `Built` dataset is promoted to `Ready` once it passes validation, and may
+    /// later become `Expired`. `Failed` / `InsufficientLabels` are terminal.
+    @derive(Default)
+    pub enum TrainingDatasetStatus {
+        #[default]
+        Planned => "planned",
+        Building => "building",
+        Built => "built",
+        InsufficientLabels => "insufficient_labels",
+        Ready => "ready",
+        Expired => "expired",
+        Failed => "failed",
+    }
+}
+
+active_string_enum! {
     /// Model run purpose.
     @derive(Default)
     pub enum ModelRunKind {

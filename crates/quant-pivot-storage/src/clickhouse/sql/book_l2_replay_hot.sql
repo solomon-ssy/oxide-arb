@@ -1,7 +1,7 @@
 CREATE TABLE IF NOT EXISTS book_l2_replay_hot (
     token_id        String,
     market_id       Nullable(String),
-    event_type      Enum8('Snapshot' = 1, 'Delta' = 2, 'Bbo' = 3, 'TickSizeChange' = 4, 'LastTrade' = 5, 'MarketResolved' = 6, 'ShardStatus' = 7),
+    event_type      Enum8('Snapshot' = 1, 'Delta' = 2, 'Bbo' = 3, 'TickSizeChange' = 4, 'LastTrade' = 5, 'ShardStatus' = 7),
     bid_prices      Array(Decimal64(8)),
     bid_sizes       Array(Decimal128(18)),
     ask_prices      Array(Decimal64(8)),

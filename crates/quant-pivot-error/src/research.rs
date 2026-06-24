@@ -9,6 +9,8 @@
 
 use thiserror::Error;
 
+use crate::{QuantError, storage::StorageError};
+
 /// Failure modes of the research plane.
 ///
 /// Covers artifact IO, schema/hash mismatches, and determinism violations.
@@ -123,4 +125,86 @@ pub enum ResearchError {
         /// Context (which phase introduces it).
         detail: String,
     },
+
+    /// A historical point-in-time resolution failed (e.g. an undecodable book
+    /// snapshot payload, or an inconsistent historical fact).
+    #[error("point-in-time resolution failed: {detail}")]
+    PitResolution {
+        /// Context describing the failure.
+        detail: String,
+    },
+
+    /// A dataset plan could not be produced (e.g. an empty or inverted window,
+    /// a zero sampling interval).
+    #[error("dataset plan failed: {detail}")]
+    DatasetPlan {
+        /// Context describing the failure.
+        detail: String,
+    },
+
+    /// A dataset build step failed irrecoverably (not a per-sample skip, which is
+    /// accounted in coverage).
+    #[error("dataset build failed: {detail}")]
+    DatasetBuild {
+        /// Context describing the failure.
+        detail: String,
+    },
+
+    /// A forward label could not be resolved due to inconsistent forward data.
+    #[error("label resolution failed: {detail}")]
+    LabelResolution {
+        /// Context describing the failure.
+        detail: String,
+    },
+
+    /// A future-leakage invariant was violated: a feature read state newer than
+    /// `as_of - source_delay`, or a label read state at or before `as_of`. This
+    /// is a hard, money-critical failure — the dataset must never be persisted.
+    #[error("future leakage detected: {detail}")]
+    LeakageDetected {
+        /// Context describing which sample and bound was violated.
+        detail: String,
+    },
+
+    /// The training matrix could not be built (NaN/inf, a critical missing
+    /// feature, or an out-of-spec column).
+    #[error("training matrix build failed: {detail}")]
+    MatrixBuild {
+        /// Context describing the failure.
+        detail: String,
+    },
+
+    /// Parquet (de)serialization of a dataset failed.
+    #[error("parquet codec failed: {detail}")]
+    ParquetCodec {
+        /// Context describing the failure.
+        detail: String,
+    },
+}
+
+/// A storage failure surfaced during point-in-time resolution.
+///
+/// Wraps [`crate::storage::StorageError`] so PIT call sites can propagate via
+/// `?` into [`ResearchError::PitResolution`] without a bespoke mapper.
+#[derive(Debug)]
+pub struct PitResolutionStorageError(pub StorageError);
+
+impl From<StorageError> for PitResolutionStorageError {
+    fn from(error: StorageError) -> Self {
+        Self(error)
+    }
+}
+
+impl From<PitResolutionStorageError> for ResearchError {
+    fn from(error: PitResolutionStorageError) -> Self {
+        Self::PitResolution {
+            detail: error.0.to_string(),
+        }
+    }
+}
+
+impl From<PitResolutionStorageError> for QuantError {
+    fn from(error: PitResolutionStorageError) -> Self {
+        ResearchError::from(error).into()
+    }
 }

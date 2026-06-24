@@ -465,6 +465,9 @@ ClickHouse：
 - `test-execution-intent`
 - `bench-quant`
 
+Dataset plan/build 走 Admin API（见
+[`03.5.1`](phase-03/03.5.1-training-dataset-admin-api.md)），不在 xtask 暴露 research 子命令。
+
 ## 11. Config 删除清单
 
 ### 11.1 Deploy config

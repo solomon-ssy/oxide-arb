@@ -73,6 +73,7 @@ pub enum TaskId {
     BookSnapshotWriter,
     BookDecisionContextWriter,
     BookMicrostructure1sWriter,
+    MarketResolutionWriter,
     FeatureEventsWriter,
     FactorEventsWriter,
     SignalCandidateEventsWriter,
@@ -117,6 +118,7 @@ impl TaskId {
             | Self::BookSnapshotWriter
             | Self::BookDecisionContextWriter
             | Self::BookMicrostructure1sWriter
+            | Self::MarketResolutionWriter
             | Self::FeatureEventsWriter
             | Self::FactorEventsWriter
             | Self::SignalCandidateEventsWriter

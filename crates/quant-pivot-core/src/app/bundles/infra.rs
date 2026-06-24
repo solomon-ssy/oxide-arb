@@ -12,8 +12,8 @@ use prometheus::IntCounter;
 use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
     clickhouse::{
-        BookL2ReplayRow, BookMicrostructureRow, BookSnapshotRow, QuantFactorEventRow,
-        QuantFeatureEventRow, QuantSignalCandidateEventRow, TickEventRow,
+        BookL2ReplayRow, BookMicrostructureRow, BookSnapshotRow, MarketResolutionRow,
+        QuantFactorEventRow, QuantFeatureEventRow, QuantSignalCandidateEventRow, TickEventRow,
     },
     config::DeployConfig,
 };
@@ -217,12 +217,25 @@ fn build_book_fact_writer(
         metrics.async_writer_observability("book_microstructure_1s"),
         config("book_microstructure_1s"),
     );
+    let resolutions = spawn_fact_stream::<MarketResolutionRow>(
+        &queue,
+        TaskId::MarketResolutionWriter,
+        Arc::new(ChFactWriter::new(
+            Arc::clone(ch_pool),
+            Arc::clone(write_manager),
+            "market_resolution_event",
+        )),
+        drops("market_resolution_event"),
+        metrics.async_writer_observability("market_resolution_event"),
+        config("market_resolution_event"),
+    );
 
     let writer = Arc::new(BookFactWriter::new(
         ticks,
         l2,
         snapshots,
         microstructure,
+        resolutions,
         Arc::clone(fact_lag),
         Arc::clone(metrics),
     ));

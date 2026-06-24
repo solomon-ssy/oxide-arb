@@ -4,13 +4,12 @@ use crate::{
     enums::quant::{ModelPublicationStatus, ModelRunErrorCode, ModelRunKind, ModelRunStatus},
     types::{
         ContentHash, MarketSelectionId, ModelRunId, ModelSpecId, ModelVersionId,
-        RuntimeConfigVersionId, SchemaVersion,
+        RuntimeConfigVersionId, SchemaVersion, TrainingDatasetId,
     },
 };
 use chrono::{DateTime, Utc};
 use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 /// Governed model specification row.
 #[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]
@@ -55,7 +54,7 @@ pub struct ModelVersionInfo {
     pub model_spec_id: ModelSpecId,
     pub version: i32,
     pub artifact_hash: ContentHash,
-    pub training_dataset_id: Option<Uuid>,
+    pub training_dataset_id: Option<TrainingDatasetId>,
     pub metrics_json: serde_json::Value,
     pub quality_gate_report: serde_json::Value,
     pub publication_status: ModelPublicationStatus,
@@ -90,7 +89,7 @@ pub struct NewModelVersion {
     pub model_spec_id: ModelSpecId,
     pub version: i32,
     pub artifact_hash: ContentHash,
-    pub training_dataset_id: Option<Uuid>,
+    pub training_dataset_id: Option<TrainingDatasetId>,
     pub metrics_json: serde_json::Value,
     pub quality_gate_report: serde_json::Value,
     pub publication_status: ModelPublicationStatus,

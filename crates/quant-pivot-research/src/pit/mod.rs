@@ -4,8 +4,14 @@
 //! [`PointInTimeDataSource`](quant_pivot_models::domain::PointInTimeDataSource).
 //! PIT correctness is a hard invariant: an implementation must never return
 //! state newer than the requested `as_of`. The return types carry the full book
-//! / metadata payload so feature builders run identically over either source;
-//! the `ClickHouse`-backed implementation lands in 3.5.
+//! / metadata payload so feature builders run identically over either source.
+//! The `ClickHouse`-backed streaming source lives in `quant-pivot-core`; the
+//! in-memory [`MaterializedPitEngine`] serves a pre-fetched window so the offline
+//! dataset build loop never touches a database.
+
+mod materialized;
+
+pub use materialized::MaterializedPitEngine;
 
 use std::sync::Arc;
 

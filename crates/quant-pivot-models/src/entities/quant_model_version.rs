@@ -2,11 +2,10 @@
 
 use crate::{
     enums::quant::ModelPublicationStatus,
-    types::{ContentHash, ModelSpecId, ModelVersionId},
+    types::{ContentHash, ModelSpecId, ModelVersionId, TrainingDatasetId},
 };
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
-use uuid::Uuid;
 
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
 #[sea_orm(table_name = "quant_model_version")]
@@ -16,7 +15,7 @@ pub struct Model {
     pub model_spec_id: ModelSpecId,
     pub version: i32,
     pub artifact_hash: ContentHash,
-    pub training_dataset_id: Option<Uuid>,
+    pub training_dataset_id: Option<TrainingDatasetId>,
     #[sea_orm(column_type = "JsonBinary")]
     pub metrics_json: Json,
     #[sea_orm(column_type = "JsonBinary")]
@@ -35,6 +34,12 @@ pub enum Relation {
         to = "super::quant_model_spec::Column::ModelSpecId"
     )]
     ModelSpec,
+    #[sea_orm(
+        belongs_to = "super::quant_training_dataset::Entity",
+        from = "Column::TrainingDatasetId",
+        to = "super::quant_training_dataset::Column::TrainingDatasetId"
+    )]
+    TrainingDataset,
     #[sea_orm(has_many = "super::quant_model_run::Entity")]
     ModelRun,
 }
@@ -42,6 +47,12 @@ pub enum Relation {
 impl Related<super::quant_model_spec::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::ModelSpec.def()
+    }
+}
+
+impl Related<super::quant_training_dataset::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::TrainingDataset.def()
     }
 }
 

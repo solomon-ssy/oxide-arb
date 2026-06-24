@@ -19,6 +19,7 @@ pub mod quant_portfolio_plan;
 pub mod quant_recommendation;
 pub mod quant_recommendation_attribution;
 pub mod quant_recommendation_report;
+pub mod quant_training_dataset;
 pub mod role;
 pub mod role_menu;
 pub mod runtime_config_activation;

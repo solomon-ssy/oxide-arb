@@ -5,7 +5,7 @@ use dashmap::{DashMap, mapref::entry::Entry};
 use quant_pivot_models::{
     clickhouse::{
         BookL2ReplayRow, BookMicrostructureRow, BookSnapshotRow, ChBps, ChDecimal64, ChPrice,
-        ChSchemaVersion, ChShares, ChUsd, TickEventRow,
+        ChSchemaVersion, ChShares, ChUsd, MarketResolutionRow, TickEventRow,
     },
     domain::{
         book::{BookLevel, BookSnapshot},
@@ -29,6 +29,7 @@ pub struct BookFactWriter {
     l2: Arc<AsyncWriter<BookL2ReplayRow>>,
     snapshots: Arc<AsyncWriter<BookSnapshotRow>>,
     microstructure_1s: Arc<AsyncWriter<BookMicrostructureRow>>,
+    resolutions: Arc<AsyncWriter<MarketResolutionRow>>,
     microstructure_pending: DashMap<TokenId, BookMicrostructureRow>,
     fact_lag: Arc<FactLagTracker>,
     metrics: Arc<MetricsHub>,
@@ -82,6 +83,7 @@ impl BookFactWriter {
         l2_writer: Arc<AsyncWriter<BookL2ReplayRow>>,
         snapshot_writer: Arc<AsyncWriter<BookSnapshotRow>>,
         microstructure_1s_writer: Arc<AsyncWriter<BookMicrostructureRow>>,
+        resolution_writer: Arc<AsyncWriter<MarketResolutionRow>>,
         fact_lag: Arc<FactLagTracker>,
         metrics: Arc<MetricsHub>,
     ) -> Self {
@@ -90,6 +92,7 @@ impl BookFactWriter {
             l2: l2_writer,
             snapshots: snapshot_writer,
             microstructure_1s: microstructure_1s_writer,
+            resolutions: resolution_writer,
             microstructure_pending: DashMap::new(),
             fact_lag,
             metrics,
@@ -354,6 +357,11 @@ impl BookFactWriter {
         });
     }
 
+    /// Append the authoritative settlement event to the typed
+    /// `market_resolution_event` fact — the single point-in-time settlement truth
+    /// source consumed by training labels, backtest realized `PnL`, and historical
+    /// market-status resolution. The settlement key is `winning_token_id`
+    /// (label-agnostic); `winning_outcome` is informational only.
     pub fn write_market_resolved(
         &self,
         market_id: &MarketId,
@@ -362,34 +370,20 @@ impl BookFactWriter {
         asset_ids: &[TokenId],
         timestamp_ms: u64,
     ) {
-        let ingestion_time = Utc::now().timestamp_millis();
-        for token_id in asset_ids {
-            self.ticks.write(TickEventRow {
-                token_id: token_id.clone(),
-                market_id: Some(market_id.clone()),
-                event_type: ChBookEventType::MarketResolved,
-                best_bid: None,
-                best_ask: None,
-                last_trade_price: None,
-                bid_depth_usd: None,
-                ask_depth_usd: None,
-                spread_bps: None,
-                book_version: 0,
-                raw_payload_json: Some(
-                    serde_json::json!({
-                        "market_id": market_id,
-                        "winning_token_id": winning_token_id,
-                        "winning_outcome": winning_outcome,
-                    })
-                    .to_string(),
-                ),
-                event_time: i64::try_from(timestamp_ms).unwrap_or(i64::MAX),
-                ingestion_time,
-                sequence: timestamp_ms,
-                source: ChFactSource::WsMarketResolved,
-                schema_version: ChSchemaVersion(2),
-            });
-        }
+        let resolved_at = i64::try_from(timestamp_ms).unwrap_or(i64::MAX);
+        let observed_at = Utc::now().timestamp_millis();
+        self.resolutions.write(MarketResolutionRow {
+            market_id: market_id.clone(),
+            winning_token_id: winning_token_id.clone(),
+            winning_outcome: winning_outcome.to_owned(),
+            asset_token_ids: asset_ids.to_vec(),
+            resolved_at,
+            observed_at,
+            sequence: timestamp_ms,
+            source: ChFactSource::WsMarketResolved,
+            schema_version: ChSchemaVersion(2),
+        });
+        self.record_fact_lag("market_resolution_event", resolved_at, observed_at);
     }
 
     pub fn write_shard_status(&self, shard_id: usize, status: ShardConnectionStatus) {

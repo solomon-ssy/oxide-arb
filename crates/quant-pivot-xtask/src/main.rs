@@ -8,7 +8,8 @@ use std::{
 const DOCKER_SUITES: &[(&str, &str)] = &[
     ("quant-pivot-repository", "pg_repository"),
     ("quant-pivot-repository", "pg_rbac"),
-    ("quant-pivot-repository", "ch_timeseries"),
+    ("quant-pivot-repository", "pg_training_dataset"),
+    ("quant-pivot-repository", "ch_fact_read_pit"),
     ("quant-pivot-storage", "migration_pg"),
     ("quant-pivot-storage", "redis_integration"),
     ("quant-pivot-storage", "clickhouse_integration"),

@@ -1,7 +1,7 @@
 CREATE TABLE IF NOT EXISTS tick_events (
     token_id        String,
     market_id       Nullable(String),
-    event_type      Enum8('Snapshot' = 1, 'Delta' = 2, 'Bbo' = 3, 'TickSizeChange' = 4, 'LastTrade' = 5, 'MarketResolved' = 6, 'ShardStatus' = 7),
+    event_type      Enum8('Snapshot' = 1, 'Delta' = 2, 'Bbo' = 3, 'TickSizeChange' = 4, 'LastTrade' = 5, 'ShardStatus' = 7),
     best_bid        Nullable(Decimal64(8)),
     best_ask        Nullable(Decimal64(8)),
     last_trade_price Nullable(Decimal64(8)),

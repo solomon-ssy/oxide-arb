@@ -6,4 +6,5 @@ pub mod gamma;
 pub mod market_selection;
 pub mod model_runner;
 pub mod system_status_nudge;
+pub mod training_dataset;
 pub mod ws_subscription;

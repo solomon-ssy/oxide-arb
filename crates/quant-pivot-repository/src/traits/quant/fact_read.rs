@@ -1,23 +1,74 @@
 //! Point-in-time read port over quant `ClickHouse` facts.
 //!
 //! The feature plane pre-fetches windowed microstructure facts once per round
-//! (never a query inside the build loop). The **online** implementation reads
-//! recent facts bounded by the PIT cutoff; the **historical**, `as_of`-bounded
-//! implementation for backtests / training datasets lands in 3.5.
+//! (never a query inside the build loop). Online callers read recent facts
+//! bounded by the PIT cutoff; the historical, `as_of`-bounded reads
+//! (`book_snapshot_at`, `book_snapshots_between`, `resolution_at`,
+//! `resolutions_between`) materialize backtests / training datasets.
+//!
+//! Every query states explicit, stable SQL ordering: point-in-time reads order
+//! by event time plus the persisted `ingestion_time` / `sequence` tie-breakers,
+//! so replay is deterministic.
 
 use quant_pivot_error::storage::StorageError;
-use quant_pivot_models::{clickhouse::BookMicrostructureRow, types::TokenId};
+use quant_pivot_models::{
+    clickhouse::{BookMicrostructureRow, BookSnapshotRow, MarketResolutionRow},
+    types::{MarketId, TokenId},
+};
 
-/// Read port over persisted quant facts, used to materialize feature windows.
+/// Read port over persisted quant facts, used to materialize feature windows and
+/// point-in-time historical state.
 #[async_trait::async_trait]
 pub trait QuantFactReadRepository: Send + Sync {
     /// One-second microstructure buckets for `token_ids` whose `bucket_time`
     /// falls in `[from_ms, to_ms)` (epoch milliseconds), ordered by token then
-    /// time. `to_ms` is the caller's PIT cutoff, so no look-ahead is possible.
+    /// time. Used both for the online feature window (`to_ms` = PIT cutoff) and
+    /// for the offline forward-label window (callers filter precisely per sample).
     async fn microstructure_window(
         &self,
         token_ids: Vec<TokenId>,
         from_ms: i64,
         to_ms: i64,
     ) -> Result<Vec<BookMicrostructureRow>, StorageError>;
+
+    /// The freshest book snapshot for `token_id` published at or before
+    /// `as_of_ms` (epoch milliseconds), or `None` when none exists. Point-in-time
+    /// correct: `WHERE event_time <= as_of` with a stable
+    /// `event_time DESC, ingestion_time DESC, sequence DESC` tie-break.
+    async fn book_snapshot_at(
+        &self,
+        token_id: &TokenId,
+        as_of_ms: i64,
+    ) -> Result<Option<BookSnapshotRow>, StorageError>;
+
+    /// All book snapshots for `token_ids` with `event_time` in the inclusive
+    /// range `[from_ms, to_ms]`, ordered by token then event time (with
+    /// tie-breakers). A batch prefetch for offline dataset materialization; the
+    /// caller resolves the per-sample point-in-time snapshot in memory.
+    async fn book_snapshots_between(
+        &self,
+        token_ids: Vec<TokenId>,
+        from_ms: i64,
+        to_ms: i64,
+    ) -> Result<Vec<BookSnapshotRow>, StorageError>;
+
+    /// The resolution in effect for `market_id` as of `as_of_ms` (the latest
+    /// settlement event with `resolved_at <= as_of`), or `None` when the market
+    /// had not resolved by then. Stable `resolved_at DESC, observed_at DESC,
+    /// sequence DESC` tie-break.
+    async fn resolution_at(
+        &self,
+        market_id: &MarketId,
+        as_of_ms: i64,
+    ) -> Result<Option<MarketResolutionRow>, StorageError>;
+
+    /// All settlement events for `market_ids` with `resolved_at` in the inclusive
+    /// range `[from_ms, to_ms]`, ordered by market then resolution time (with
+    /// tie-breakers). A batch prefetch for offline settlement labeling.
+    async fn resolutions_between(
+        &self,
+        market_ids: Vec<MarketId>,
+        from_ms: i64,
+        to_ms: i64,
+    ) -> Result<Vec<MarketResolutionRow>, StorageError>;
 }

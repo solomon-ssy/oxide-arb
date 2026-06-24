@@ -1,92 +1,383 @@
-//! Training-data plane: dataset planning/building and labeling contracts.
+//! Training-data plane: dataset planning, labeling, leakage checks, matrix and
+//! parquet materialization.
 //!
-//! Offline closure (3.5). 3.0 fixes the trait surface + minimal I/O shells; the
-//! dataset/label bodies (polars materialization, PIT label resolution) are
-//! filled in 3.5.
+//! Offline closure (3.5). This module owns the **pure** compute contracts and
+//! algorithms; the impure orchestration (ClickHouse/Postgres reads, batch
+//! prefetch, persistence) lives in `quant-pivot-core`'s `TrainingDatasetService`.
+//! Every label and feature is point-in-time correct: features are bounded by
+//! `as_of - source_delay`, labels look strictly forward of `as_of`, and the
+//! whole dataset is content-hashed for reproducibility.
+
+mod labeler;
+mod leakage;
+mod matrix;
+#[cfg(feature = "dataframe")]
+mod parquet;
+mod planner;
+
+pub use labeler::{
+    LiquidityExitLabeler, MaxAdverseExcursionLabeler, MaxFavorableExcursionLabeler,
+    ReturnToHorizonLabeler, SettlementOutcomeLabeler, label_names,
+};
+pub use leakage::assert_no_future_leakage;
+pub use matrix::{
+    FeatureColumnSpec, FeatureMatrixSpec, MatrixScale, TrainingMatrix, build_training_matrix,
+};
+#[cfg(feature = "dataframe")]
+pub use parquet::DatasetParquetCodec;
+pub use planner::plan_samples;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::types::{
-    ArtifactUri, ContentHash, MarketId, SchemaVersion, TokenId, TrainingDatasetId,
+    ArtifactUri, ContentHash, MarketId, ModelSpecId, Price, RuntimeConfigVersionId, SchemaVersion,
+    TokenId, TrainingDatasetId, TrainingExampleId, Usd,
 };
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
-use crate::{naming::stable_name, pit::PitQueryEngine};
+use crate::{
+    factors::FactorValue,
+    features::{EvidenceSourceRef, FeatureVector},
+    naming::stable_name,
+};
 
 stable_name! {
-    /// Stable, compile-time-known label name (e.g. `"realized_return_1h"`).
+    /// Stable, compile-time-known label name (e.g. `"return_to_horizon"`).
     LabelName
 }
 
+// ── Plan ─────────────────────────────────────────────────────────────────
+
 /// Request to plan a training dataset over a historical window.
-///
-/// Extended in 3.5 with selection/feature/label specs and sampling policy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DatasetPlanRequest {
-    /// Decision time the plan was requested as of.
-    pub as_of: DateTime<Utc>,
-    /// Inclusive window start.
+    /// Model spec the dataset is built for.
+    pub model_spec_id: ModelSpecId,
+    /// Config version governing selection / feature / factor / label schemas.
+    pub runtime_config_version_id: RuntimeConfigVersionId,
+    /// Inclusive window start (first sample `as_of`).
     pub window_start: DateTime<Utc>,
-    /// Exclusive window end.
+    /// Exclusive window end (samples are strictly before this).
     pub window_end: DateTime<Utc>,
+    /// Deterministic sampling cadence within the window, in seconds (`>= 1`).
+    pub sample_interval_secs: u64,
+    /// Forward label horizons, in seconds (one label column per horizon).
+    pub horizons_secs: Vec<u64>,
+    /// Source visibility delay applied to features, in seconds.
+    pub source_delay_secs: u64,
     /// Feature schema version to materialize against.
     pub feature_schema_version: SchemaVersion,
 }
 
-/// A resolved plan: which markets/instants the dataset will materialize.
-///
-/// Extended in 3.5 with per-market sampling instants.
+/// A market eligible for sampling, with its lifecycle bounds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanMarket {
+    /// Market id.
+    pub market_id: MarketId,
+    /// Primary (YES) token id sampled for this market.
+    pub token_id: TokenId,
+    /// Catalog creation time; samples before this are skipped (market absent).
+    pub created_at: DateTime<Utc>,
+    /// Scheduled resolution time, when known; samples at/after this are skipped.
+    pub end_date: Option<DateTime<Utc>>,
+}
+
+/// One deterministic `(market, token, as_of)` sampling instant.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SamplePlan {
+    /// Market sampled.
+    pub market_id: MarketId,
+    /// Primary token sampled.
+    pub token_id: TokenId,
+    /// Decision time of the sample.
+    pub as_of: DateTime<Utc>,
+}
+
+/// A resolved plan: which instants the dataset will materialize.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DatasetPlan {
     /// The originating request.
     pub request: DatasetPlanRequest,
-    /// Markets included in the plan.
-    pub market_ids: Vec<MarketId>,
-}
-
-/// A frozen, content-addressed training dataset artifact.
-///
-/// Extended in 3.5 with column schema and row-group metadata.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TrainingDatasetArtifact {
-    /// Dataset id.
+    /// Dataset identity (assigned by the planner).
     pub training_dataset_id: TrainingDatasetId,
-    /// Feature-schema hash the dataset was built against.
-    pub feature_schema_hash: ContentHash,
-    /// Label-schema hash the dataset was built against.
-    pub label_schema_hash: ContentHash,
-    /// Location of the materialized parquet bytes.
-    pub parquet_uri: ArtifactUri,
-    /// Number of sample rows.
-    pub row_count: u64,
+    /// Deterministic sample instants, ordered by `(market_id, as_of)`.
+    pub samples: Vec<SamplePlan>,
+    /// Labels this dataset materializes (one logical name; horizons fan out).
+    pub label_names: Vec<LabelName>,
 }
 
-/// Inputs to building a single training label.
+// ── Labels ───────────────────────────────────────────────────────────────
+
+/// A resolved, forward-looking training label value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrainingLabel {
+    /// Logical label name.
+    pub label_name: LabelName,
+    /// Forward horizon, in seconds, the label looks ahead to (post-`as_of`).
+    pub horizon_secs: u64,
+    /// Resolved label value (units are label-specific; bps for excursions).
+    pub value: Decimal,
+    /// Whether the outcome was fully realized (vs. censored / settlement-final).
+    pub is_resolved: bool,
+}
+
+/// Why a mature label is not yet available.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LabelDelayReason {
+    /// The forward horizon has not elapsed within the available data.
+    HorizonNotElapsed,
+    /// A settlement-keyed label is pending market resolution.
+    SettlementPending,
+}
+
+/// Why a label can never be produced for this sample.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MissingLabelReason {
+    /// No entry (`as_of`) reference price was available.
+    NoEntryPrice,
+    /// No forward observations exist in the horizon window.
+    NoForwardData,
+    /// No forward price could be read at the horizon.
+    NoExitPrice,
+}
+
+/// The outcome of building one label for one sample.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LabelBuildOutput {
+    /// The label resolved to a usable value.
+    Available(TrainingLabel),
+    /// The label is valid but not yet mature; retry after `available_after`.
+    NotMature {
+        /// When the label is expected to become resolvable.
+        available_after: DateTime<Utc>,
+        /// Why it is not yet mature.
+        reason: LabelDelayReason,
+    },
+    /// The label can never be produced for this sample.
+    Unavailable {
+        /// Why the label is unavailable.
+        reason: MissingLabelReason,
+    },
+}
+
+/// One forward microstructure observation (decoded from `book_microstructure_1s`
+/// by the orchestrator), carrying the intra-bucket extremes excursion labels
+/// need. All prices are `[0, 1]` Polymarket prices.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForwardSample {
+    /// Bucket time (strictly `> as_of` within a [`ForwardWindow`]).
+    pub at: DateTime<Utc>,
+    /// Closing mid price in the bucket.
+    pub mid_close: Option<Price>,
+    /// Highest best-bid in the bucket (favorable exit ceiling for a long).
+    pub best_bid_high: Option<Price>,
+    /// Lowest best-bid in the bucket (adverse exit floor for a long).
+    pub best_bid_low: Option<Price>,
+    /// Top-1 visible depth in the bucket, USD.
+    pub top1_depth_usd: Option<Usd>,
+}
+
+/// Authoritative settlement for a market, resolved point-in-time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MarketResolution {
+    /// The winning outcome token (label-agnostic settlement key).
+    pub winning_token_id: TokenId,
+    /// Economic settlement time.
+    pub resolved_at: DateTime<Utc>,
+    /// When the resolution was observed (ingested).
+    pub observed_at: DateTime<Utc>,
+}
+
+/// A pre-fetched, strictly-forward window of observations for one sample.
+///
+/// Carries the market's settlement (if resolved). The orchestrator guarantees
+/// every [`ForwardSample::at`] is `> anchor`, so labelers read only post-decision
+/// state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForwardWindow {
+    /// The sample decision time the window is anchored at.
+    pub anchor: DateTime<Utc>,
+    /// Latest fact time available in the source (the maturity bound): a horizon
+    /// extending past this is `NotMature`, never silently truncated.
+    pub data_available_until: DateTime<Utc>,
+    /// Forward observations, ascending by time, all strictly `> anchor`.
+    pub samples: Vec<ForwardSample>,
+    /// Settlement, when the market has resolved at or before
+    /// `data_available_until`.
+    pub resolution: Option<MarketResolution>,
+}
+
+/// Inputs to building one training label, all pre-fetched (no DB in the loop).
 pub struct LabelBuildInput<'a> {
     /// Market the label is for.
     pub market_id: &'a MarketId,
     /// Outcome token the label is for.
     pub token_id: &'a TokenId,
+    /// The market's YES token (settlement keys on this).
+    pub yes_token_id: &'a TokenId,
     /// Decision time the label is anchored at.
     pub as_of: DateTime<Utc>,
-    /// Forward horizon, in seconds, the label looks ahead to (post-`as_of`).
+    /// Entry reference mid price at `as_of` (from the PIT book), if quoted.
+    pub entry_mid: Option<Price>,
+    /// Forward horizon, in seconds, the label looks ahead to.
     pub horizon_secs: u64,
-    /// Historical PIT engine used to resolve the realized outcome.
-    pub pit: &'a dyn PitQueryEngine,
+    /// Minimum USD depth required for a "liquidity exit possible" label.
+    pub min_exit_depth_usd: Usd,
+    /// Pre-fetched forward observations + settlement for this sample.
+    pub forward: &'a ForwardWindow,
 }
 
-/// The resolved value of a training label.
+// ── Example / artifact ─────────────────────────────────────────────────────
+
+/// One materialized training example (row).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LabelBuildOutput {
-    /// Label name.
-    pub label_name: LabelName,
-    /// Resolved label value.
-    pub value: Decimal,
-    /// Whether the outcome was fully resolved (vs. censored at window end).
-    pub is_resolved: bool,
+pub struct TrainingExample {
+    /// Surrogate row id (excluded from the dataset content hash).
+    pub example_id: TrainingExampleId,
+    /// Market the example describes.
+    pub market_id: MarketId,
+    /// Outcome token the example describes.
+    pub token_id: TokenId,
+    /// Decision time the example was computed as of.
+    pub as_of: DateTime<Utc>,
+    /// The point-in-time feature vector.
+    pub feature_vector: FeatureVector,
+    /// The factor values derived from the feature vector.
+    pub factor_values: Vec<FactorValue>,
+    /// Resolved forward labels (one per horizon × labeler that matured).
+    pub labels: Vec<TrainingLabel>,
+    /// Provenance of the inputs, for audit and replay.
+    pub source_refs: Vec<EvidenceSourceRef>,
 }
+
+/// Per-sample coverage accounting for a built dataset.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DatasetCoverage {
+    /// Sample instants the plan produced.
+    pub planned_samples: u64,
+    /// Examples actually materialized (passed feature build + leakage).
+    pub built_examples: u64,
+    /// Distinct markets represented.
+    pub markets: u64,
+    /// Labels resolved to a value.
+    pub labels_available: u64,
+    /// Labels deferred as not-yet-mature.
+    pub labels_not_mature: u64,
+    /// Labels that can never be produced.
+    pub labels_unavailable: u64,
+    /// Samples dropped because feature inputs were insufficient.
+    pub samples_dropped_insufficient: u64,
+    /// Book snapshot rows skipped due to malformed JSON or invalid level pairs.
+    pub book_decode_failures: u64,
+}
+
+/// A frozen, content-addressed training dataset artifact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrainingDatasetArtifact {
+    /// Dataset id.
+    pub training_dataset_id: TrainingDatasetId,
+    /// Model spec the dataset was built for.
+    pub model_spec_id: ModelSpecId,
+    /// Inclusive window start.
+    pub window_start: DateTime<Utc>,
+    /// Exclusive window end.
+    pub window_end: DateTime<Utc>,
+    /// Materialized examples, ordered by `(market_id, token_id, as_of)`.
+    pub examples: Vec<TrainingExample>,
+    /// Feature-schema hash the dataset was built against.
+    pub feature_schema_hash: ContentHash,
+    /// Factor-schema hash the dataset was built against.
+    pub factor_schema_hash: ContentHash,
+    /// Label-schema hash the dataset was built against.
+    pub label_schema_hash: ContentHash,
+    /// Content hash over schema hashes + canonical example content.
+    pub dataset_hash: ContentHash,
+    /// Location of the materialized parquet bytes.
+    pub parquet_uri: ArtifactUri,
+    /// Coverage accounting.
+    pub coverage: DatasetCoverage,
+}
+
+/// Canonical, surrogate-free projection used to compute `dataset_hash`.
+///
+/// Excludes the dataset id, parquet URI, and per-row surrogate ids so the hash
+/// is a pure function of the schema bindings + the materialized content. Any
+/// change to a feature value, factor value, or label flips the digest; a rename
+/// of a surrogate id does not.
+#[derive(Serialize)]
+struct DatasetHashInput<'a> {
+    model_spec_id: &'a ModelSpecId,
+    window_start: DateTime<Utc>,
+    window_end: DateTime<Utc>,
+    feature_schema_hash: &'a ContentHash,
+    factor_schema_hash: &'a ContentHash,
+    label_schema_hash: &'a ContentHash,
+    examples: Vec<CanonicalExample<'a>>,
+}
+
+/// Surrogate-free view of one example for hashing.
+#[derive(Serialize)]
+struct CanonicalExample<'a> {
+    market_id: &'a MarketId,
+    token_id: &'a TokenId,
+    as_of: DateTime<Utc>,
+    feature_vector: &'a FeatureVector,
+    factor_values: &'a [FactorValue],
+    labels: &'a [TrainingLabel],
+}
+
+impl TrainingDatasetArtifact {
+    /// Compute the content hash over schema bindings + canonical example content.
+    ///
+    /// Examples are sorted by `(market_id, token_id, as_of)` so build order never
+    /// perturbs the digest.
+    ///
+    /// # Errors
+    ///
+    /// Propagates canonical-serialization failures.
+    pub fn compute_dataset_hash(
+        model_spec_id: &ModelSpecId,
+        window_start: DateTime<Utc>,
+        window_end: DateTime<Utc>,
+        feature_schema_hash: &ContentHash,
+        factor_schema_hash: &ContentHash,
+        label_schema_hash: &ContentHash,
+        examples: &[TrainingExample],
+    ) -> QuantResult<ContentHash> {
+        let mut ordered: Vec<&TrainingExample> = examples.iter().collect();
+        ordered.sort_by(|a, b| {
+            (a.market_id.as_str(), a.token_id.as_str(), a.as_of).cmp(&(
+                b.market_id.as_str(),
+                b.token_id.as_str(),
+                b.as_of,
+            ))
+        });
+        let canonical = ordered
+            .into_iter()
+            .map(|e| CanonicalExample {
+                market_id: &e.market_id,
+                token_id: &e.token_id,
+                as_of: e.as_of,
+                feature_vector: &e.feature_vector,
+                factor_values: &e.factor_values,
+                labels: &e.labels,
+            })
+            .collect();
+        crate::hashing::ResearchHasher::canonical(&DatasetHashInput {
+            model_spec_id,
+            window_start,
+            window_end,
+            feature_schema_hash,
+            factor_schema_hash,
+            label_schema_hash,
+            examples: canonical,
+        })
+    }
+}
+
+// ── Traits ─────────────────────────────────────────────────────────────────
 
 /// Plans a training dataset (which markets / instants to materialize).
 #[async_trait]
@@ -103,11 +394,115 @@ pub trait TrainingDatasetBuilder: Send + Sync {
 }
 
 /// Builds a single forward-looking training label, point-in-time correct.
-#[async_trait]
+///
+/// Pure: all forward data is pre-fetched into [`LabelBuildInput::forward`], so a
+/// labeler never touches a database and is trivially testable.
 pub trait Labeler: Send + Sync {
     /// The label this labeler produces.
     fn label_name(&self) -> LabelName;
 
+    /// Whether the label is computed once per horizon (`true`, the default) or
+    /// once per sample irrespective of horizon (`false`, e.g. settlement).
+    fn is_horizon_dependent(&self) -> bool {
+        true
+    }
+
     /// Resolve the label for one sample.
-    async fn build_label(&self, input: LabelBuildInput<'_>) -> QuantResult<LabelBuildOutput>;
+    fn build_label(&self, input: &LabelBuildInput<'_>) -> LabelBuildOutput;
+}
+
+#[cfg(test)]
+pub(crate) mod fixtures {
+    use super::{LabelName, TrainingExample, TrainingLabel};
+    use crate::features::FeatureVector;
+    use chrono::{DateTime, TimeZone, Utc};
+    use quant_pivot_models::{
+        enums::quant::DataQualityStatus,
+        types::{MarketId, SchemaVersion, TokenId, TrainingExampleId},
+    };
+    use rust_decimal::Decimal;
+    use std::collections::BTreeMap;
+
+    /// A minimal example with one label of `label_value`, for hash / codec tests.
+    pub fn example(market: &str, label_value: i64) -> TrainingExample {
+        let as_of: DateTime<Utc> = Utc.timestamp_opt(1_000_000, 0).single().expect("ts");
+        TrainingExample {
+            example_id: TrainingExampleId::from_v7(),
+            market_id: MarketId::new(market),
+            token_id: TokenId::new(format!("{market}-yes")),
+            as_of,
+            feature_vector: FeatureVector {
+                market_id: MarketId::new(market),
+                token_id: Some(TokenId::new(format!("{market}-yes"))),
+                as_of,
+                schema_version: SchemaVersion::new(1),
+                values: BTreeMap::new(),
+                substitutions: Vec::new(),
+                data_quality: DataQualityStatus::Fresh,
+                staleness_ms: 0,
+                source_refs: Vec::new(),
+            },
+            factor_values: Vec::new(),
+            labels: vec![TrainingLabel {
+                label_name: LabelName::from_static("return_to_horizon"),
+                horizon_secs: 60,
+                value: Decimal::from(label_value),
+                is_resolved: true,
+            }],
+            source_refs: Vec::new(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TrainingDatasetArtifact, fixtures::example};
+    use chrono::{TimeZone, Utc};
+    use quant_pivot_models::{
+        hashing::CanonicalDigest,
+        types::{ContentHash, ModelSpecId},
+    };
+
+    fn hashes() -> (ContentHash, ContentHash, ContentHash) {
+        (
+            CanonicalDigest::content_hash_json("feature").expect("h"),
+            CanonicalDigest::content_hash_json("factor").expect("h"),
+            CanonicalDigest::content_hash_json("label").expect("h"),
+        )
+    }
+
+    fn dataset_hash(
+        model_spec_id: &ModelSpecId,
+        examples: &[super::TrainingExample],
+    ) -> ContentHash {
+        let (feature, factor, label) = hashes();
+        let start = Utc.timestamp_opt(1_000_000, 0).single().expect("ts");
+        TrainingDatasetArtifact::compute_dataset_hash(
+            model_spec_id,
+            start,
+            start,
+            &feature,
+            &factor,
+            &label,
+            examples,
+        )
+        .expect("dataset hash")
+    }
+
+    #[test]
+    fn dataset_hash_ignores_surrogate_ids_and_order() {
+        let spec = ModelSpecId::from_v7();
+        // Same content, different surrogate example ids + reversed order.
+        let a = vec![example("aaa", 100), example("bbb", 200)];
+        let b = vec![example("bbb", 200), example("aaa", 100)];
+        assert_eq!(dataset_hash(&spec, &a), dataset_hash(&spec, &b));
+    }
+
+    #[test]
+    fn dataset_hash_changes_on_any_input_change() {
+        let spec = ModelSpecId::from_v7();
+        let base = vec![example("aaa", 100)];
+        let changed = vec![example("aaa", 101)];
+        assert_ne!(dataset_hash(&spec, &base), dataset_hash(&spec, &changed));
+    }
 }
