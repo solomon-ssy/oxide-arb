@@ -10,7 +10,8 @@ use quant_pivot_error::{QuantResult, research::ResearchError};
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 
 use super::{LabelName, TrainingExample};
-use crate::features::{FeatureName, FeatureValue};
+use crate::features::{FeatureName, FeatureSchema, FeatureUnit, FeatureValue, FeatureValueKind};
+use serde::{Deserialize, Serialize};
 
 /// How a column's decimal value is scaled before the `f64` cast.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -172,6 +173,80 @@ pub fn build_training_matrix(
     })
 }
 
+/// Row counts from an optional [`build_training_matrix`] probe at build time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MatrixCoverageProbe {
+    /// Rows that would enter the dense matrix.
+    pub accepted_rows: u64,
+    /// Rows rejected (missing label, critical feature, or non-finite cell).
+    pub rejected_rows: u64,
+    /// Supervised label used for the probe.
+    pub label_name: LabelName,
+    /// Horizon of the probed label column.
+    pub label_horizon_secs: u64,
+    /// Number of numeric feature columns in the probe spec.
+    pub feature_columns: u64,
+}
+
+/// Build a diagnostic matrix spec from the governed feature schema (numeric
+/// columns only; categoricals excluded).
+#[must_use]
+pub fn matrix_spec_from_schema(
+    schema: &FeatureSchema,
+    label_name: LabelName,
+    label_horizon_secs: u64,
+) -> FeatureMatrixSpec {
+    let columns = schema
+        .specs()
+        .iter()
+        .filter(|spec| spec.value_kind != FeatureValueKind::Category)
+        .map(|spec| FeatureColumnSpec {
+            feature: spec.name.clone(),
+            scale: match spec.unit {
+                FeatureUnit::Bps => MatrixScale::BasisPoints,
+                _ => MatrixScale::Identity,
+            },
+            critical: spec.critical,
+            fill_missing: 0.0,
+        })
+        .collect();
+    FeatureMatrixSpec {
+        columns,
+        label_name,
+        label_horizon_secs,
+    }
+}
+
+/// Probe how many examples would survive [`build_training_matrix`] (diagnostic).
+///
+/// Does not gate dataset build; counts are stored in [`DatasetCoverage::matrix_probe`].
+pub fn probe_matrix_coverage(
+    examples: &[TrainingExample],
+    schema: &FeatureSchema,
+    label_name: LabelName,
+    label_horizon_secs: u64,
+) -> QuantResult<MatrixCoverageProbe> {
+    let spec = matrix_spec_from_schema(schema, label_name.clone(), label_horizon_secs);
+    let feature_columns = u64::try_from(spec.columns.len()).unwrap_or(u64::MAX);
+    if spec.columns.is_empty() || examples.is_empty() {
+        return Ok(MatrixCoverageProbe {
+            accepted_rows: 0,
+            rejected_rows: examples.len() as u64,
+            label_name,
+            label_horizon_secs,
+            feature_columns,
+        });
+    }
+    let matrix = build_training_matrix(examples, &spec)?;
+    Ok(MatrixCoverageProbe {
+        accepted_rows: matrix.features.nrows() as u64,
+        rejected_rows: matrix.rejected_rows as u64,
+        label_name,
+        label_horizon_secs,
+        feature_columns,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -184,6 +259,7 @@ mod tests {
         enums::quant::DataQualityStatus,
         types::{MarketId, SchemaVersion, TokenId, TrainingExampleId},
     };
+    use rust_decimal::prelude::FromPrimitive;
     use std::collections::BTreeMap;
 
     fn example(spread: Option<Decimal>, label: Option<Decimal>) -> TrainingExample {
@@ -278,5 +354,13 @@ mod tests {
         assert!(finite_f64(Decimal::ZERO).is_some());
         assert!(!f64::NAN.is_finite());
         assert!(!f64::INFINITY.is_finite());
+
+        let overflow_label = vec![example(
+            Some(Decimal::new(25, 2)),
+            Decimal::from_f64(f64::INFINITY),
+        )];
+        let matrix = build_training_matrix(&overflow_label, &spec(true)).expect("matrix");
+        assert_eq!(matrix.features.shape(), [0, 1]);
+        assert_eq!(matrix.rejected_rows, 1);
     }
 }

@@ -254,26 +254,29 @@ impl Labeler for SettlementOutcomeLabeler {
     }
 
     fn build_label(&self, input: &LabelBuildInput<'_>) -> LabelBuildOutput {
-        input.forward.resolution.as_ref().map_or(
-            LabelBuildOutput::NotMature {
+        let Some(resolution) = input.forward.resolution.as_ref() else {
+            return LabelBuildOutput::NotMature {
                 available_after: input.forward.data_available_until,
                 reason: LabelDelayReason::SettlementPending,
+            };
+        };
+        if resolution.resolved_at <= input.as_of {
+            return LabelBuildOutput::NotMature {
+                available_after: resolution.resolved_at,
+                reason: LabelDelayReason::SettlementPending,
+            };
+        }
+        let settled_yes = resolution.winning_token_id == *input.yes_token_id;
+        LabelBuildOutput::Available(TrainingLabel {
+            label_name: self.label_name(),
+            horizon_secs: 0,
+            value: if settled_yes {
+                Decimal::ONE
+            } else {
+                Decimal::ZERO
             },
-            |resolution| {
-                let settled_yes = resolution.winning_token_id == *input.yes_token_id;
-                LabelBuildOutput::Available(TrainingLabel {
-                    label_name: self.label_name(),
-                    // Horizon-independent: 0 signals "not horizon-scoped".
-                    horizon_secs: 0,
-                    value: if settled_yes {
-                        Decimal::ONE
-                    } else {
-                        Decimal::ZERO
-                    },
-                    is_resolved: true,
-                })
-            },
-        )
+            is_resolved: true,
+        })
     }
 }
 
@@ -419,17 +422,35 @@ mod tests {
         let yes = TokenId::new("yes");
         let resolved = forward(
             Vec::new(),
-            0,
+            120,
             Some(MarketResolution {
                 winning_token_id: yes.clone(),
-                resolved_at: at(-10),
-                observed_at: at(-5),
+                resolved_at: at(30),
+                observed_at: at(30),
             }),
         );
         let out = SettlementOutcomeLabeler.build_label(&input(&market, &yes, None, 60, &resolved));
         assert!(
             matches!(out, LabelBuildOutput::Available(l) if l.value == Decimal::ONE && l.horizon_secs == 0)
         );
+
+        let pre_as_of = forward(
+            Vec::new(),
+            120,
+            Some(MarketResolution {
+                winning_token_id: yes.clone(),
+                resolved_at: at(-10),
+                observed_at: at(-5),
+            }),
+        );
+        let out = SettlementOutcomeLabeler.build_label(&input(&market, &yes, None, 60, &pre_as_of));
+        assert!(matches!(
+            out,
+            LabelBuildOutput::NotMature {
+                reason: LabelDelayReason::SettlementPending,
+                ..
+            }
+        ));
 
         let pending = forward(Vec::new(), 0, None);
         let out = SettlementOutcomeLabeler.build_label(&input(&market, &yes, None, 60, &pending));
@@ -439,6 +460,48 @@ mod tests {
                 reason: LabelDelayReason::SettlementPending,
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn liquidity_exit_requires_depth_threshold() {
+        let market = MarketId::new("m");
+        let token = TokenId::new("t");
+        let shallow = ForwardSample {
+            at: at(30),
+            mid_close: Some(price("0.50")),
+            best_bid_high: Some(price("0.50")),
+            best_bid_low: Some(price("0.49")),
+            top1_depth_usd: Some(Usd::new(Decimal::from(50))),
+        };
+        let deep = ForwardSample {
+            top1_depth_usd: Some(Usd::new(Decimal::from(250))),
+            ..shallow
+        };
+        let window = forward(vec![shallow], 120, None);
+        let out = LiquidityExitLabeler.build_label(&input(
+            &market,
+            &token,
+            Some(price("0.50")),
+            60,
+            &window,
+        ));
+        assert!(matches!(
+            out,
+            LabelBuildOutput::Available(l) if l.value == Decimal::ZERO
+        ));
+
+        let window = forward(vec![deep], 120, None);
+        let out = LiquidityExitLabeler.build_label(&input(
+            &market,
+            &token,
+            Some(price("0.50")),
+            60,
+            &window,
+        ));
+        assert!(matches!(
+            out,
+            LabelBuildOutput::Available(l) if l.value == Decimal::ONE
         ));
     }
 }

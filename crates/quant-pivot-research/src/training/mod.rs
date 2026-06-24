@@ -21,7 +21,8 @@ pub use labeler::{
 };
 pub use leakage::assert_no_future_leakage;
 pub use matrix::{
-    FeatureColumnSpec, FeatureMatrixSpec, MatrixScale, TrainingMatrix, build_training_matrix,
+    FeatureColumnSpec, FeatureMatrixSpec, MatrixCoverageProbe, MatrixScale, TrainingMatrix,
+    build_training_matrix, probe_matrix_coverage,
 };
 #[cfg(feature = "dataframe")]
 pub use parquet::DatasetParquetCodec;
@@ -69,6 +70,9 @@ pub struct DatasetPlanRequest {
     pub source_delay_secs: u64,
     /// Feature schema version to materialize against.
     pub feature_schema_version: SchemaVersion,
+    /// Pre-assigned dataset id (build path); minted by the planner when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub training_dataset_id: Option<TrainingDatasetId>,
 }
 
 /// A market eligible for sampling, with its lifecycle bounds.
@@ -204,8 +208,8 @@ pub struct ForwardWindow {
     pub data_available_until: DateTime<Utc>,
     /// Forward observations, ascending by time, all strictly `> anchor`.
     pub samples: Vec<ForwardSample>,
-    /// Settlement, when the market has resolved at or before
-    /// `data_available_until`.
+    /// Settlement strictly after [`Self::anchor`] when the market has resolved
+    /// (independent of microstructure [`Self::data_available_until`]).
     pub resolution: Option<MarketResolution>,
 }
 
@@ -271,6 +275,9 @@ pub struct DatasetCoverage {
     pub samples_dropped_insufficient: u64,
     /// Book snapshot rows skipped due to malformed JSON or invalid level pairs.
     pub book_decode_failures: u64,
+    /// Optional training-matrix probe (diagnostic only; does not gate build).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matrix_probe: Option<MatrixCoverageProbe>,
 }
 
 /// A frozen, content-addressed training dataset artifact.

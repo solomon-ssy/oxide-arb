@@ -197,9 +197,10 @@ testcontainers-modules = { version = "0.15", features = ["postgres", "redis"] }
 
 # ── Phase 3: Research / ML Stack (feature-gated in quant-pivot-research) ──────
 #
-# All heavy; none link into the default `report_only` build. Gated behind
-# `quant-pivot-research` cargo features: `stats` (default), `dataframe`,
-# `optimize`, `ml-classical`. MSRV 1.85, all pure-Rust (no native runtime).
+# `stats` (ndarray/rayon/…) are base deps on `quant-pivot-research`. Polars/Arrow
+# are gated behind `dataframe` on that crate; `quant-pivot-core` enables
+# `dataframe` for dataset Parquet — report_only binary therefore links polars,
+# but the online hot path never calls it. ML crates: `optimize`, `ml-classical`.
 
 # stats: numeric matrices, summary statistics, distributions, CPU parallelism
 ndarray = "0.17"

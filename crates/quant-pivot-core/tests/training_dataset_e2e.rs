@@ -473,6 +473,7 @@ async fn plan_request(
             horizons_secs: vec![60],
             source_delay_secs: 10,
             feature_schema_version: SchemaVersion::FIRST,
+            training_dataset_id: None,
         })
         .await
         .expect("plan")
@@ -647,6 +648,210 @@ async fn settlement_label_available_after_resolution() {
                 .any(|label| label.label_name == SETTLEMENT_LABEL)
         }),
         "expected settlement label after resolution is visible in forward window"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn plan_build_reuses_training_dataset_id() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let rc_id = seed_runtime_config(&db).await;
+    let (window_start, window_end) = dataset_window();
+    seed_catalog(&db, window_start).await;
+    let model_spec_id = seed_model_spec(&db).await;
+
+    let as_of_ms = sample_as_of(window_start).timestamp_millis();
+    let scenario = Arc::new(Mutex::new(pit_scenario(as_of_ms)));
+    let store = temp_artifact_store();
+    let svc = service(
+        &db,
+        Arc::clone(&store),
+        Arc::new(ControllableFactRead::new(Arc::clone(&scenario))),
+    );
+
+    let plan_a = plan_request(
+        &svc,
+        model_spec_id.clone(),
+        rc_id.clone(),
+        window_start,
+        window_end,
+    )
+    .await;
+    let plan_b = plan_request(&svc, model_spec_id, rc_id, window_start, window_end).await;
+    assert_ne!(
+        plan_a.training_dataset_id, plan_b.training_dataset_id,
+        "each plan call mints a fresh id"
+    );
+
+    let mut build_request = plan_a.request.clone();
+    build_request.training_dataset_id = Some(plan_a.training_dataset_id.clone());
+    let artifact = svc
+        .build(DatasetPlan {
+            request: build_request,
+            training_dataset_id: plan_a.training_dataset_id.clone(),
+            samples: plan_a.samples.clone(),
+            label_names: plan_a.label_names.clone(),
+        })
+        .await
+        .expect("build");
+    assert_eq!(
+        artifact.training_dataset_id, plan_a.training_dataset_id,
+        "build must reuse the plan-assigned id"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn build_status_insufficient_labels_when_no_labels_mature() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let rc_id = seed_runtime_config(&db).await;
+    let (window_start, window_end) = dataset_window();
+    seed_catalog(&db, window_start).await;
+    let model_spec_id = seed_model_spec(&db).await;
+
+    let as_of_ms = sample_as_of(window_start).timestamp_millis();
+    let scenario = Arc::new(Mutex::new(pit_scenario(as_of_ms)));
+    let store = temp_artifact_store();
+    let svc = service(
+        &db,
+        Arc::clone(&store),
+        Arc::new(ControllableFactRead::new(Arc::clone(&scenario))),
+    );
+
+    let mut plan = plan_request(&svc, model_spec_id, rc_id, window_start, window_end).await;
+    plan.request.horizons_secs = vec![86_400];
+    let artifact = svc.build(plan).await.expect("build");
+    assert!(artifact.coverage.built_examples > 0);
+    assert_eq!(artifact.coverage.labels_available, 0);
+
+    let row = PgTrainingDatasetRepository::new(db)
+        .find_by_id(&artifact.training_dataset_id)
+        .await
+        .expect("lookup")
+        .expect("ledger row");
+    assert_eq!(row.status, TrainingDatasetStatus::InsufficientLabels);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn build_status_failed_when_zero_examples() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let rc_id = seed_runtime_config(&db).await;
+    let (window_start, window_end) = dataset_window();
+    seed_catalog(&db, window_start).await;
+    let model_spec_id = seed_model_spec(&db).await;
+
+    let as_of_ms = sample_as_of(window_start).timestamp_millis();
+    let scenario = Arc::new(Mutex::new(pit_scenario(as_of_ms)));
+    let store = temp_artifact_store();
+    let svc = service(
+        &db,
+        Arc::clone(&store),
+        Arc::new(ControllableFactRead::new(Arc::clone(&scenario))),
+    );
+
+    let mut plan = plan_request(&svc, model_spec_id, rc_id, window_start, window_end).await;
+    plan.samples.clear();
+    let artifact = svc.build(plan).await.expect("build");
+    assert_eq!(artifact.coverage.built_examples, 0);
+
+    let row = PgTrainingDatasetRepository::new(db)
+        .find_by_id(&artifact.training_dataset_id)
+        .await
+        .expect("lookup")
+        .expect("ledger row");
+    assert_eq!(row.status, TrainingDatasetStatus::Failed);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn build_records_book_decode_failures() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let rc_id = seed_runtime_config(&db).await;
+    let (window_start, window_end) = dataset_window();
+    seed_catalog(&db, window_start).await;
+    let model_spec_id = seed_model_spec(&db).await;
+
+    let as_of_ms = sample_as_of(window_start).timestamp_millis();
+    let mut fact = pit_scenario(as_of_ms);
+    let evidence_ms = as_of_ms - 15_000;
+    let mut bad = book_row(YES_TOKEN, evidence_ms);
+    bad.bids_json = "not-json".to_owned();
+    fact.books.insert(
+        TokenId::new(YES_TOKEN),
+        vec![bad, book_row(YES_TOKEN, evidence_ms + 1)],
+    );
+
+    let scenario = Arc::new(Mutex::new(fact));
+    let store = temp_artifact_store();
+    let svc = service(
+        &db,
+        Arc::clone(&store),
+        Arc::new(ControllableFactRead::new(scenario)),
+    );
+
+    let plan = plan_request(&svc, model_spec_id, rc_id, window_start, window_end).await;
+    let artifact = svc.build(plan).await.expect("build");
+    assert!(
+        artifact.coverage.book_decode_failures > 0,
+        "malformed book JSON must increment decode failures"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn settlement_label_visible_without_micro_past_resolution() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let rc_id = seed_runtime_config(&db).await;
+    let (window_start, window_end) = dataset_window();
+    seed_catalog(&db, window_start).await;
+    let model_spec_id = seed_model_spec(&db).await;
+
+    let as_of = sample_as_of(window_start);
+    let as_of_ms = as_of.timestamp_millis();
+    let evidence_ms = as_of_ms - 15_000;
+    let fact = FactScenario {
+        books: HashMap::from([(
+            TokenId::new(YES_TOKEN),
+            vec![book_row(YES_TOKEN, evidence_ms)],
+        )]),
+        micro: HashMap::from([(
+            TokenId::new(YES_TOKEN),
+            vec![micro_row(YES_TOKEN, evidence_ms, Decimal::new(50, 2))],
+        )]),
+        resolutions: HashMap::from([(
+            MarketId::new(MARKET_ID),
+            vec![MarketResolutionRow {
+                market_id: MarketId::new(MARKET_ID),
+                winning_token_id: TokenId::new(YES_TOKEN),
+                winning_outcome: "Yes".to_owned(),
+                asset_token_ids: vec![TokenId::new(YES_TOKEN), TokenId::new(NO_TOKEN)],
+                resolved_at: as_of_ms + 30_000,
+                observed_at: as_of_ms + 30_000,
+                sequence: 1,
+                source: ChFactSource::WsMarketResolved,
+                schema_version: ChSchemaVersion(2),
+            }],
+        )]),
+    };
+    let scenario = Arc::new(Mutex::new(fact));
+    let store = temp_artifact_store();
+    let svc = service(
+        &db,
+        Arc::clone(&store),
+        Arc::new(ControllableFactRead::new(scenario)),
+    );
+
+    let plan = plan_request(&svc, model_spec_id, rc_id, window_start, window_end).await;
+    let artifact = svc.build(plan).await.expect("build");
+    assert!(
+        artifact.examples.iter().any(|example| {
+            example
+                .labels
+                .iter()
+                .any(|label| label.label_name == SETTLEMENT_LABEL)
+        }),
+        "settlement must not depend on microstructure extending past resolution"
     );
 }
 

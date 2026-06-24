@@ -6,10 +6,13 @@
 //! 1. Let the operator pick a frozen [`RuntimeConfigVersionId`] and [`ModelSpecId`].
 //! 2. `POST /research/training-datasets/plan` — validate the window and show
 //!    `planned_samples` before committing to a long build.
-//! 3. `POST /research/training-datasets/build` — run plan + materialization
-//!    (synchronous today; Phase 03.7 may move to async job + WS progress).
+//! 3. `POST /research/training-datasets/build` — materialize using the same body
+//!    plus the `training_dataset_id` returned from step 2 (stable plan → build).
 //! 4. Poll `GET /research/training-datasets/{id}` until `status` is terminal
 //!    (`built`, `insufficient_labels`, `failed`, `ready`, or `expired`).
+//!
+//! Leakage violations abort the build with an HTTP error and **do not** write a
+//! ledger row (distinct from terminal `failed`, which persists diagnostics).
 //!
 //! Terminal semantics mirror [`TrainingDatasetStatus`]: trainer/backtest gates in
 //! 03.6 consume only `ready` datasets; `insufficient_labels` still persists the
@@ -25,7 +28,10 @@ use crate::{
     types::{ContentHash, ModelSpecId, RuntimeConfigVersionId, SchemaVersion, TrainingDatasetId},
 };
 
-/// Inbound body for plan and build endpoints (same shape; build runs plan first).
+/// Inbound body for plan and build endpoints (shared window/config fields).
+///
+/// **Plan** ignores [`Self::training_dataset_id`] (always mints a fresh id).
+/// **Build** should pass the id returned by plan so polling and artifacts align.
 #[derive(Debug, Clone, Deserialize, Validate)]
 pub struct BuildTrainingDatasetRequest {
     /// Target model specification (trainer binds artifacts to this spec).
@@ -51,6 +57,10 @@ pub struct BuildTrainingDatasetRequest {
     /// Operator reason recorded on the operation log (UI should require non-empty).
     #[validate(length(min = 1, max = 512))]
     pub reason: String,
+    /// Pre-assigned id from a prior **plan** response; omit on plan, required on build
+    /// for stable UI polling (build re-plans samples but reuses this id).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub training_dataset_id: Option<TrainingDatasetId>,
 }
 
 const fn default_feature_schema_version() -> SchemaVersion {

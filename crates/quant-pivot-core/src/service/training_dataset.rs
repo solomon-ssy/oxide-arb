@@ -54,7 +54,7 @@ use quant_pivot_research::{
         MaxFavorableExcursionLabeler, PlanMarket, ReturnToHorizonLabeler, SamplePlan,
         SettlementOutcomeLabeler, TrainingDatasetArtifact, TrainingDatasetBuilder,
         TrainingDatasetPlanner, TrainingExample, TrainingLabel, assert_no_future_leakage,
-        label_names, plan_samples,
+        label_names, plan_samples, probe_matrix_coverage,
     },
 };
 
@@ -169,9 +169,13 @@ impl TrainingDatasetPlanner for TrainingDatasetService {
             })
             .collect();
         let samples = plan_samples(&request, &plan_markets);
+        let training_dataset_id = request
+            .training_dataset_id
+            .clone()
+            .unwrap_or_else(TrainingDatasetId::from_v7);
         Ok(DatasetPlan {
             request,
-            training_dataset_id: TrainingDatasetId::from_v7(),
+            training_dataset_id,
             samples,
             label_names: label_names(),
         })
@@ -318,6 +322,16 @@ impl TrainingDatasetService {
         let feature_schema_hash = ResearchHasher::feature_schema(builder.schema())?;
         let factor_schema_hash = ResearchHasher::factor_schema(&engine.factor_set())?;
         let label_schema_hash = ResearchHasher::label_schema(&plan.label_names)?;
+        let mut coverage = coverage;
+        if !examples.is_empty() {
+            let horizon_secs = plan.request.horizons_secs.first().copied().unwrap_or(0);
+            coverage.matrix_probe = Some(probe_matrix_coverage(
+                &examples,
+                builder.schema(),
+                ReturnToHorizonLabeler.label_name(),
+                horizon_secs,
+            )?);
+        }
         let dataset_hash = TrainingDatasetArtifact::compute_dataset_hash(
             &plan.request.model_spec_id,
             plan.request.window_start,
@@ -853,9 +867,11 @@ fn forward_window(
             (at > as_of && at <= cap).then(|| forward_sample(row, at))
         })
         .collect();
+    // Settlement is independent of microstructure maturity: any resolution strictly
+    // after `as_of` is visible to the settlement labeler.
     let resolution = resolutions
         .iter()
-        .filter(|row| ms(row.resolved_at) <= data_available_until)
+        .filter(|row| ms(row.resolved_at) > as_of)
         .max_by_key(|row| (row.resolved_at, row.observed_at))
         .map(|row| ResearchMarketResolution {
             winning_token_id: row.winning_token_id.clone(),

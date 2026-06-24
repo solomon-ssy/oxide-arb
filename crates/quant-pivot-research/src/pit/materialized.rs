@@ -110,3 +110,118 @@ fn ms_le(timestamp_ms: u64, cutoff_ms: i64) -> bool {
 fn ms_ge(timestamp_ms: u64, min_ms: i64) -> bool {
     i64::try_from(timestamp_ms).map_or(true, |ms| ms >= min_ms)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::MaterializedPitEngine;
+    use crate::pit::{BookSnapshotAt, MarketContextAt, PitQueryEngine};
+    use chrono::{Duration, TimeZone, Utc};
+    use quant_pivot_models::{
+        domain::market::book::BookLevel,
+        enums::market::MarketStatus,
+        types::{MarketId, Price, Shares, TokenId},
+    };
+    use rust_decimal::Decimal;
+    use std::{collections::HashMap, sync::Arc};
+
+    fn level(price: &str) -> BookLevel {
+        BookLevel::from_decimal_unchecked(
+            Price::new(Decimal::from_str_exact(price).expect("decimal")),
+            Shares::new(Decimal::from(100)),
+        )
+    }
+
+    fn snapshot(token: &str, ts_ms: i64) -> BookSnapshotAt {
+        BookSnapshotAt {
+            token_id: TokenId::new(token),
+            as_of: Utc.timestamp_millis_opt(ts_ms).single().expect("ts"),
+            bids: Arc::from([level("0.48")]),
+            asks: Arc::from([level("0.52")]),
+            timestamp_ms: u64::try_from(ts_ms).unwrap_or(0),
+            version: 1,
+        }
+    }
+
+    #[tokio::test]
+    async fn book_at_rejects_look_ahead_and_stale_snapshots() {
+        let token = TokenId::new("t");
+        let as_of = Utc.timestamp_millis_opt(10_000).single().expect("ts");
+        let mut books = HashMap::new();
+        books.insert(
+            token.clone(),
+            vec![
+                snapshot("t", 5_000),
+                snapshot("t", 12_000),
+                snapshot("t", 9_000),
+            ],
+        );
+        let engine = MaterializedPitEngine::new(books, HashMap::new(), Duration::seconds(2));
+
+        let resolved = engine.book_at(&token, as_of).await.expect("book");
+        let book = resolved.expect("snapshot");
+        assert_eq!(book.timestamp_ms, 9_000);
+
+        let stale_only = MaterializedPitEngine::new(
+            HashMap::from([(token.clone(), vec![snapshot("t", 1_000)])]),
+            HashMap::new(),
+            Duration::seconds(2),
+        );
+        assert!(
+            stale_only
+                .book_at(&token, as_of)
+                .await
+                .expect("book")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn market_at_picks_latest_context_at_or_before_as_of() {
+        let market_id = MarketId::new("m");
+        let t0 = Utc.timestamp_millis_opt(1_000).single().expect("ts");
+        let t1 = Utc.timestamp_millis_opt(5_000).single().expect("ts");
+        let contexts = vec![
+            MarketContextAt {
+                market_id: market_id.clone(),
+                as_of: t0,
+                observed_at: t0,
+                status: MarketStatus::Active,
+                neg_risk: false,
+                end_date: None,
+                created_at: t0,
+                outcome_count: 2,
+            },
+            MarketContextAt {
+                market_id: market_id.clone(),
+                as_of: t1,
+                observed_at: t1,
+                status: MarketStatus::Settled,
+                neg_risk: false,
+                end_date: None,
+                created_at: t0,
+                outcome_count: 2,
+            },
+        ];
+        let engine = MaterializedPitEngine::new(
+            HashMap::new(),
+            HashMap::from([(market_id.clone(), contexts)]),
+            Duration::seconds(60),
+        );
+        let as_of = Utc.timestamp_millis_opt(6_000).single().expect("ts");
+        let ctx = engine
+            .market_at(&market_id, as_of)
+            .await
+            .expect("market")
+            .expect("context");
+        assert_eq!(ctx.status, MarketStatus::Settled);
+
+        let before_first = Utc.timestamp_millis_opt(500).single().expect("ts");
+        assert!(
+            engine
+                .market_at(&market_id, before_first)
+                .await
+                .expect("market")
+                .is_none()
+        );
+    }
+}

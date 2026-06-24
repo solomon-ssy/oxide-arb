@@ -95,6 +95,21 @@ impl CoreTrainingDatasetPort {
             horizons_secs: body.horizons_secs.clone(),
             source_delay_secs: body.source_delay_secs,
             feature_schema_version: body.feature_schema_version,
+            training_dataset_id: None,
+        }
+    }
+
+    fn build_plan_request(body: &BuildTrainingDatasetRequest) -> DatasetPlanRequest {
+        DatasetPlanRequest {
+            model_spec_id: body.model_spec_id.clone(),
+            runtime_config_version_id: body.runtime_config_version_id.clone(),
+            window_start: body.window_start,
+            window_end: body.window_end,
+            sample_interval_secs: body.sample_interval_secs,
+            horizons_secs: body.horizons_secs.clone(),
+            source_delay_secs: body.source_delay_secs,
+            feature_schema_version: body.feature_schema_version,
+            training_dataset_id: body.training_dataset_id.clone(),
         }
     }
 }
@@ -132,7 +147,7 @@ impl TrainingDatasetPort for CoreTrainingDatasetPort {
         request: BuildTrainingDatasetRequest,
     ) -> QuantResult<TrainingDatasetView> {
         let service = self.service_for(&request.runtime_config_version_id).await?;
-        let plan = service.plan(Self::plan_request(&request)).await?;
+        let plan = service.plan(Self::build_plan_request(&request)).await?;
         let training_dataset_id = plan.training_dataset_id.clone();
         service.build(plan).await?;
         let info = self

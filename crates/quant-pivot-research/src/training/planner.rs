@@ -59,6 +59,7 @@ mod tests {
             horizons_secs: vec![60],
             source_delay_secs: 10,
             feature_schema_version: SchemaVersion::new(1),
+            training_dataset_id: None,
         }
     }
 
