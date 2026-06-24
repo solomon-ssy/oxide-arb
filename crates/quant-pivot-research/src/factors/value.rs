@@ -12,27 +12,11 @@ use quant_pivot_models::{
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
-use crate::{features::FeatureName, naming::stable_name};
+use crate::{features::FeatureName, naming::stable_name, vertical::DomainFamily};
 
 stable_name! {
     /// Stable, compile-time-known factor name (e.g. `"liquidity_depth"`).
     FactorName
-}
-
-/// Vertical (domain) category for domain-specific factors.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DomainKind {
-    /// Sports markets.
-    Sports,
-    /// Political / election markets.
-    Politics,
-    /// Crypto-price markets.
-    Crypto,
-    /// Weather markets.
-    Weather,
-    /// Geopolitics markets.
-    Geopolitics,
 }
 
 /// Factor family grouping.
@@ -56,7 +40,7 @@ pub enum FactorFamily {
     /// Data-quality-derived factors.
     DataQuality,
     /// Vertical/domain-specific factors.
-    Domain(DomainKind),
+    Domain(DomainFamily),
 }
 
 /// How a factor's raw value is normalized into a `[0, 1]` score.

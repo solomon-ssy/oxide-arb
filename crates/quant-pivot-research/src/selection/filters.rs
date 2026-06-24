@@ -25,7 +25,10 @@ use quant_pivot_models::{
 };
 use rust_decimal::Decimal;
 
-use crate::selection::{ExclusionReason, ModelFeatureRequirements};
+use crate::{
+    features::{FeatureAvailabilityOracle, FeatureSchema},
+    selection::{ExclusionReason, ModelFeatureRequirements},
+};
 
 /// Once-per-round resolution of every config threshold the filters compare
 /// against, parsed out of the string/`DecimalString` config wire forms so the
@@ -105,6 +108,8 @@ pub struct MarketCandidateCtx<'a> {
     pub as_of: DateTime<Utc>,
     /// Feature availability the active model requires.
     pub model_requirements: &'a ModelFeatureRequirements,
+    /// Governed feature schema backing the availability oracle.
+    pub feature_schema: &'a FeatureSchema,
 }
 
 /// The verdict of a single filter for a single candidate.
@@ -299,9 +304,10 @@ impl SelectionFilter for ManualBlockFilter {
 
 /// Stage 7 — model feature-availability gate.
 ///
-/// With no required features the stage keeps every market (the pre-3.4 steady
-/// state). Once a model declares requirements, the absence of a per-market
-/// availability oracle (deferred to the feature plane) means we fail closed.
+/// With no required features the stage keeps every market. Otherwise the
+/// [`FeatureAvailabilityOracle`] checks each required feature's source against
+/// the candidate's facts; the market is excluded only for the features it
+/// genuinely cannot supply (no more blanket fail-closed).
 pub struct ModelEligibilityFilter;
 
 impl SelectionFilter for ModelEligibilityFilter {
@@ -312,11 +318,14 @@ impl SelectionFilter for ModelEligibilityFilter {
     fn evaluate(&self, ctx: &MarketCandidateCtx<'_>) -> FilterOutcome {
         let required = &ctx.model_requirements.required_features;
         if required.is_empty() {
+            return FilterOutcome::Keep;
+        }
+        let oracle = FeatureAvailabilityOracle::new(ctx.feature_schema);
+        let missing = oracle.missing_required(ctx.candidate, required);
+        if missing.is_empty() {
             FilterOutcome::Keep
         } else {
-            FilterOutcome::Exclude(ExclusionReason::ModelFeatureUnavailable {
-                missing: required.clone(),
-            })
+            FilterOutcome::Exclude(ExclusionReason::ModelFeatureUnavailable { missing })
         }
     }
 }

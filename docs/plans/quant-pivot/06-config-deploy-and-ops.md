@@ -174,15 +174,21 @@ RuntimeConfig {
 - `ad_hoc_report_enabled`
 - `delivery_policy`
 
-Schedule：
+Schedule（`ReportScheduleConfig`）：
 
 - `schedule_id`
-- `interval_secs` 或 cron。
+- `cadence` — **二选一**（Phase 4）：
+  - `interval_secs`（`> 0`）→ `ScheduleCadence::Interval`
+  - `cron` — `{ expr, timezone? }` → `ScheduleCadence::Cron`（6-field croner）
 - `top_n`
 - `market_filter_ref`
 - `model_version_ref`
 - `source_delay_secs`
 - `enabled`
+
+`deploy.quant.workers.report_scheduler_tick_secs`：可选 **健康扫描** cadence（metrics /
+补漏），**不是** report 主触发器；主触发由 `ReportScheduleRunner` /
+`tokio-cron-scheduler` 承担（见 [04 §23](04-topn-report-and-recommendation.md#23-report-schedule-runnerphase-4-调度层)）。
 
 ### 2.8 `portfolio`
 

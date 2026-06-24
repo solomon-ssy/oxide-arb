@@ -4,7 +4,7 @@ use super::{
     AppContext,
     bundles::{
         DataBundle, DataBundleDeps, GovernanceBundle, GovernanceBundleDeps, InfraBundle,
-        ResearchBundle, RuntimeSnapshot,
+        ResearchBundle, ResearchBundleDeps, RuntimeSnapshot,
     },
 };
 use crate::observability::metrics_hub::MetricsHub;
@@ -37,13 +37,11 @@ impl AppContext {
             data: &data,
             runtime,
         });
-        let research = ResearchBundle::assemble(
-            &deploy,
-            Arc::clone(&data.market_registry),
-            Arc::clone(&data.book_store),
-            Arc::clone(&infra.fact_lag_tracker),
-            &infra.pg,
-        );
+        let research = ResearchBundle::assemble(&ResearchBundleDeps {
+            deploy: &deploy,
+            infra: &infra,
+            data: &data,
+        });
         let (events, event_rx) = CoreEventPublisher::bounded(4096);
 
         Ok(Self {

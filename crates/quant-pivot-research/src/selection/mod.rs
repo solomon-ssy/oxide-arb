@@ -31,7 +31,7 @@ use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
     domain::MarketCandidate,
     enums::common::MarketCategory,
-    runtime_config::{DataQualityConfig, SelectionConfig},
+    runtime_config::{DataQualityConfig, FeaturesConfig, SelectionConfig},
     types::{
         ContentHash, EventId, MarketId, MarketSelectionId, RuntimeConfigVersionId,
         SelectionExclusionSummary, TokenId, Usd,
@@ -68,6 +68,8 @@ pub struct MarketSelectionBuildRequest {
     pub selection: SelectionConfig,
     /// Frozen data-quality snapshot.
     pub data_quality: DataQualityConfig,
+    /// Frozen feature snapshot (drives the availability oracle's schema).
+    pub features: FeaturesConfig,
     /// Feature availability the active model requires.
     pub model_requirements: ModelFeatureRequirements,
     /// Source visibility delay, in seconds.

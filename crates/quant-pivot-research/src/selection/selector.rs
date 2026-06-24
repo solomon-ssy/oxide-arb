@@ -14,6 +14,7 @@ use quant_pivot_models::{
 };
 
 use crate::{
+    features::FeatureSchema,
     hashing::ResearchHasher,
     selection::{
         ExcludedMarket, ExclusionReason, FilterChain, FilterOutcome, MarketCandidateCtx,
@@ -51,6 +52,7 @@ impl MarketSelector for ConfiguredMarketSelector {
         candidates: Vec<MarketCandidate>,
     ) -> QuantResult<MarketSelectionSnapshot> {
         let thresholds = SelectionThresholds::resolve(&request.selection, &request.data_quality)?;
+        let feature_schema = FeatureSchema::build(&request.features);
 
         let mut included = Vec::new();
         let mut excluded = Vec::new();
@@ -62,6 +64,7 @@ impl MarketSelector for ConfiguredMarketSelector {
                 thresholds: &thresholds,
                 as_of: request.as_of,
                 model_requirements: &request.model_requirements,
+                feature_schema: &feature_schema,
             };
             match self.chain.evaluate(&ctx) {
                 FilterOutcome::Keep => included.push(SelectedMarket::from(candidate)),
@@ -122,14 +125,15 @@ mod tests {
     use crate::{
         features::FeatureName,
         selection::{
-            ExclusionReason, MarketSelectionBuildRequest, MarketSelector, ModelFeatureRequirements,
+            ExclusionReason, MarketSelectionBuildRequest, MarketSelectionSnapshot, MarketSelector,
+            ModelFeatureRequirements,
         },
     };
     use chrono::{DateTime, TimeZone, Utc};
     use quant_pivot_models::{
         domain::MarketCandidate,
         enums::{common::MarketCategory, market::MarketStatus},
-        runtime_config::{DataQualityConfig, DecimalString, SelectionConfig},
+        runtime_config::{DataQualityConfig, DecimalString, FeaturesConfig, SelectionConfig},
         types::{EventId, MarketId, Price, RuntimeConfigVersionId, TokenId, Usd},
     };
     use rust_decimal::Decimal;
@@ -183,6 +187,7 @@ mod tests {
             runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
             selection,
             data_quality: DataQualityConfig::default(),
+            features: FeaturesConfig::default(),
             model_requirements,
             source_delay_secs: 10,
         }
@@ -191,7 +196,7 @@ mod tests {
     async fn build(
         request: MarketSelectionBuildRequest,
         candidates: Vec<MarketCandidate>,
-    ) -> crate::selection::MarketSelectionSnapshot {
+    ) -> MarketSelectionSnapshot {
         ConfiguredMarketSelector::new()
             .build_snapshot(request, candidates)
             .await
@@ -316,9 +321,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn model_eligibility_excludes_missing_required_feature() {
+    async fn model_eligibility_keeps_market_with_available_required_feature() {
+        // A healthy candidate has a two-sided book, so a book-derived feature is
+        // available — the market is kept (no blanket fail-closed).
         let model_requirements = ModelFeatureRequirements {
-            required_features: vec![FeatureName::from_static("spread_bps")],
+            required_features: vec![FeatureName::from_static("book.spread_bps")],
+        };
+        let snapshot = build(
+            request_with_model(selection_config(), model_requirements),
+            vec![healthy_candidate("0xok")],
+        )
+        .await;
+
+        assert_eq!(snapshot.included.len(), 1);
+        assert_eq!(snapshot.included[0].market_id.as_str(), "0xok");
+    }
+
+    #[tokio::test]
+    async fn model_eligibility_excludes_unavailable_domain_feature() {
+        // Domain features have no wired external source, so a model requiring one
+        // makes the market ineligible — and only that feature is reported missing.
+        let model_requirements = ModelFeatureRequirements {
+            required_features: vec![FeatureName::from_static("domain.sports.pre_match_move")],
         };
         let snapshot = build(
             request_with_model(selection_config(), model_requirements),
@@ -327,10 +351,13 @@ mod tests {
         .await;
 
         assert!(snapshot.included.is_empty());
-        assert!(matches!(
-            snapshot.excluded[0].reason,
-            ExclusionReason::ModelFeatureUnavailable { .. }
-        ));
+        match &snapshot.excluded[0].reason {
+            ExclusionReason::ModelFeatureUnavailable { missing } => {
+                assert_eq!(missing.len(), 1);
+                assert_eq!(missing[0].as_str(), "domain.sports.pre_match_move");
+            }
+            other => panic!("expected ModelFeatureUnavailable, got {other:?}"),
+        }
     }
 
     #[tokio::test]

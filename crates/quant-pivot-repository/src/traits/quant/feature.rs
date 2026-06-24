@@ -1,5 +1,8 @@
 use quant_pivot_error::storage::StorageError;
-use quant_pivot_models::domain::{FeatureVectorInfo, NewFeatureVector};
+use quant_pivot_models::{
+    domain::{FeatureVectorInfo, NewFeatureVector},
+    types::FeatureVectorId,
+};
 
 /// Feature vector persistence port.
 #[async_trait::async_trait]
@@ -10,4 +13,10 @@ pub trait FeatureRepository: Send + Sync {
         &self,
         vectors: Vec<NewFeatureVector>,
     ) -> Result<Vec<FeatureVectorInfo>, StorageError>;
+
+    /// Load a persisted vector by primary key.
+    async fn find_by_id(
+        &self,
+        id: &FeatureVectorId,
+    ) -> Result<Option<FeatureVectorInfo>, StorageError>;
 }

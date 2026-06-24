@@ -3,19 +3,22 @@
 use crate::{
     app::{task_id::TaskId, task_registry::PendingTaskQueue},
     observability::{
-        book_fact_writer::BookFactWriter, fact_lag::FactLagTracker, metrics_hub::MetricsHub,
+        book_fact_writer::BookFactWriter, fact_lag::FactLagTracker,
+        feature_fact_writer::FeatureEventWriter, metrics_hub::MetricsHub,
     },
 };
 use prometheus::IntCounter;
 use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
-    clickhouse::{BookL2ReplayRow, BookMicrostructureRow, BookSnapshotRow, TickEventRow},
+    clickhouse::{
+        BookL2ReplayRow, BookMicrostructureRow, BookSnapshotRow, QuantFeatureEventRow, TickEventRow,
+    },
     config::DeployConfig,
 };
 use quant_pivot_repository::{
-    clickhouse::{ChFactWriter, ChQuantFactRepository},
+    clickhouse::{ChFactWriter, ChQuantFactReadRepository, ChQuantFactRepository},
     postgres::PgOperationLogRepository,
-    traits::{FactWriter, QuantFactRepository},
+    traits::{FactWriter, QuantFactReadRepository, QuantFactRepository},
 };
 use quant_pivot_storage::{
     cache::{CacheManager, MokaBackend, RedisBackend, RedisPool, TieredCache, connect_pool},
@@ -43,6 +46,9 @@ pub struct InfraBundle {
     /// Shared lag tracker for book facts and data-quality gates.
     pub fact_lag_tracker: Arc<FactLagTracker>,
     pub book_fact_writer: Arc<BookFactWriter>,
+    pub feature_event_writer: Arc<FeatureEventWriter>,
+    /// Point-in-time read port over quant `ClickHouse` facts (feature windows).
+    pub quant_fact_read: Arc<dyn QuantFactReadRepository>,
     /// Flush workers for each book fact stream, registered on the runner at boot.
     pub(crate) fact_writer_queue: PendingTaskQueue,
 }
@@ -90,9 +96,18 @@ impl InfraBundle {
             Arc::clone(&ch),
             Arc::clone(&ch_write_manager),
         ));
+        let quant_fact_read: Arc<dyn QuantFactReadRepository> =
+            Arc::new(ChQuantFactReadRepository::new(Arc::clone(&ch)));
 
         let (book_fact_writer, fact_writer_queue) =
             build_book_fact_writer(&ch, &ch_write_manager, &fact_lag_tracker, &metrics, deploy);
+        let feature_event_writer = build_feature_event_writer(
+            &ch,
+            &ch_write_manager,
+            &metrics,
+            deploy,
+            &fact_writer_queue,
+        );
 
         Ok(Self {
             pg,
@@ -106,6 +121,8 @@ impl InfraBundle {
             operation_log_repo,
             fact_lag_tracker,
             book_fact_writer,
+            feature_event_writer,
+            quant_fact_read,
             fact_writer_queue,
         })
     }
@@ -193,6 +210,39 @@ fn build_book_fact_writer(
         Arc::clone(metrics),
     ));
     (writer, queue)
+}
+
+/// Wire the long-format feature-event async writer (`quant_feature_event`).
+fn build_feature_event_writer(
+    ch_pool: &Arc<ClickHousePool>,
+    write_manager: &Arc<ChWriteManager>,
+    metrics: &Arc<MetricsHub>,
+    deploy: &DeployConfig,
+    queue: &PendingTaskQueue,
+) -> Arc<FeatureEventWriter> {
+    let ch = &deploy.db.clickhouse;
+    let capacity = ch.batch_size.saturating_mul(4).max(8_192);
+    let flush_interval = Duration::from_secs(ch.flush_interval_secs.max(1));
+    let config = AsyncWriterConfig::new("quant_feature_event")
+        .capacity(capacity)
+        .batch_size(ch.batch_size)
+        .flush_interval(flush_interval);
+    let drops = metrics
+        .async_writer_dropped
+        .with_label_values(&["quant_feature_event"]);
+    let stream = spawn_fact_stream::<QuantFeatureEventRow>(
+        queue,
+        TaskId::FeatureEventsWriter,
+        Arc::new(ChFactWriter::new(
+            Arc::clone(ch_pool),
+            Arc::clone(write_manager),
+            "quant_feature_event",
+        )),
+        drops,
+        metrics.async_writer_observability("quant_feature_event"),
+        config,
+    );
+    Arc::new(FeatureEventWriter::new(stream))
 }
 
 /// Build one fact stream: wire an `AsyncWriter` to a `ChFactWriter` sink and

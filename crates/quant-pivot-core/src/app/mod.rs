@@ -17,12 +17,13 @@ pub use bundles::*;
 use crate::{
     governance::RuntimeModeHandle,
     runtime_config::{RuntimeConfigApplicator, RuntimeConfigStore},
+    service::feature_pipeline::FeaturePipelineService,
 };
 use flume::Receiver;
 use parking_lot::Mutex;
 use quant_pivot_models::{
     config::DeployConfig,
-    domain::{CoreEvent, CoreEventPublisher},
+    domain::{CoreEvent, CoreEventPublisher, PointInTimeDataSource},
 };
 use quant_pivot_research::artifact::ArtifactStore;
 use std::sync::Arc;
@@ -56,5 +57,15 @@ impl AppContext {
     /// Content-addressed artifact store (`deploy.research.artifact_root`).
     pub fn artifact_store(&self) -> Arc<dyn ArtifactStore> {
         Arc::clone(&self.research.artifact_store)
+    }
+
+    /// Online feature pipeline (3.2): invoke per round with a frozen config snapshot.
+    pub const fn feature_pipeline(&self) -> &FeaturePipelineService {
+        &self.research.feature_pipeline
+    }
+
+    /// Live point-in-time source for online feature / report builders.
+    pub fn live_pit(&self) -> &dyn PointInTimeDataSource {
+        self.data.pit_source.as_ref()
     }
 }

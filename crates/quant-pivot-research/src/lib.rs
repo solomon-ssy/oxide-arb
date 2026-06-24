@@ -22,10 +22,12 @@
 //!
 //! # Feature flags
 //!
-//! Heavy numeric / ML dependencies are feature-gated so the default
-//! `report_only` build stays light. `default = ["stats"]` links only the
-//! pure-Rust numeric stack; `dataframe` / `optimize` / `ml-classical` opt into
-//! polars / argmin / smartcore respectively and never appear in default builds.
+//! The base build links only the pure-Rust numeric stack (`ndarray` /
+//! `ndarray-stats` / `statrs` / `rayon`), which the online feature plane needs
+//! for rolling statistics and parallel batch build. The heavy / native-adjacent
+//! stacks are feature-gated and never appear in the default `report_only` build:
+//! `dataframe` (polars / arrow / parquet), `optimize` (argmin), `ml-classical`
+//! (smartcore).
 
 #![deny(unsafe_code)]
 
@@ -42,6 +44,7 @@ pub mod model;
 pub mod pit;
 pub mod selection;
 pub mod training;
+pub mod vertical;
 
 #[cfg(test)]
 mod acceptance_tests {

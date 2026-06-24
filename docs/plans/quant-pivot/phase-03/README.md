@@ -51,6 +51,9 @@ Phase 03 是整个 quant-pivot 的研究平面：市场选择、特征、因子�
 | 3.6 | Trainer, Classical ML & Backtest | 离线训练/回测 | [`03.6-trainer-classical-ml-backtest.md`](03.6-trainer-classical-ml-backtest.md) |
 | 3.7 | Quality Gates & Governance | **离线治理闭环** | [`03.7-quality-gates-and-governance.md`](03.7-quality-gates-and-governance.md) |
 
+**Companion（跨子phase）**：垂直领域 feature → factor → model → train 增强设计见
+[`03.x-vertical-domain-design.md`](03.x-vertical-domain-design.md)。
+
 ## 2. 依赖图
 
 ```mermaid
@@ -114,9 +117,9 @@ flowchart TD
 落在 `quant-pivot-research` 的 `[features]`：
 
 ```toml
+# ndarray / ndarray-stats / statrs / rayon 为 base deps（在线 feature plane 必需）
 [features]
-default = ["stats"]
-stats = ["dep:ndarray", "dep:ndarray-stats", "dep:statrs", "dep:rayon"]
+default = []
 dataframe = ["dep:polars", "dep:arrow", "dep:parquet"]
 optimize = ["dep:argmin", "dep:argmin-math"]
 ml-classical = ["dep:smartcore"]
@@ -124,8 +127,8 @@ ml-classical = ["dep:smartcore"]
 
 引入子phase对应：
 
-- 3.0：声明 workspace 依赖与 feature gate（不强制 default 链接重依赖）。
-- 3.2 / 3.5：`stats` + `dataframe`（polars/arrow/parquet 仅离线 materialization）。
+- 3.0：声明 workspace 依赖与 feature gate（numeric stack 为 base dep，`default = []`）。
+- 3.2 / 3.5：base numeric stack + `dataframe`（polars/arrow/parquet 仅离线 materialization）。
 - 3.6：`optimize`（argmin）+ `ml-classical`（smartcore）。
 - 禁止本期引入：`good_lp` / `ort` / `burn` / `candle`（见父文档 §30）。
 

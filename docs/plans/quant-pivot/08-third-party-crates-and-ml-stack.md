@@ -27,7 +27,7 @@
 | 权重优化 | `argmin` | grid search 自研 | Phase 3 | factor weight optimization |
 | 组合优化 | `good_lp` + solver | greedy 自研 | Phase 4/5 | LP/MILP 表达预算和约束 |
 | 并行特征 | `rayon` | tokio tasks | Phase 3 | CPU-bound 特征/回测 |
-| Cron 调度 | `tokio-cron-scheduler` | existing `PeriodicTask` | Phase 4 | cron/interval schedule |
+| Cron 调度 | `tokio-cron-scheduler`（经 `ReportScheduleRunner`） | existing `PeriodicTask` | Phase 4 **锁定** | multi-schedule cron/interval/ad-hoc |
 | ONNX 推理 | `ort` | `candle` | Phase 6+ | 外部训练模型线上推理 |
 | Rust-native DL 训练 | `burn` | `candle` | Phase 8+ | 深度学习后续选项 |
 | 轻量推理/transformers | `candle` | `ort` | Phase 8+ | Hugging Face/safetensors |
@@ -351,26 +351,43 @@ subject to:
 - health check。
 - report expiration。
 
-### 8.2 `tokio-cron-scheduler`
+### 8.2 `tokio-cron-scheduler`（Phase 4 锁定）
 
-用途：
+**权威契约**：[`04-topn-report-and-recommendation.md`](04-topn-report-and-recommendation.md) §23–§25。
 
-- cron-like report schedules。
-- ad-hoc one-shot jobs。
-- optional persisted jobs。
+用途（仅 report plane 调度层）：
 
-建议：
+- 多 `ReportScheduleConfig` 的 cron / interval fire。
+- `POST /api/quant/reports/run` ad-hoc one-shot job。
+- runtime-config activation 后 `sync_from_config` 动态 rebuild jobs。
 
-- Phase 4 引入或自研薄封装。
-- 不让业务代码直接依赖该 crate，封装为：
+**不用于**：Gamma sync、data quality、CH flush、`PeriodicTask` 已有 interval worker。
+
+市场对比（2025–2026，摘要）：
+
+| 方案 | 结论 |
+|---|---|
+| `tokio-cron-scheduler` v0.15.x | **Phase 4 默认** — 进程内、tokio-native、~4M crates.io 下载 |
+| `PeriodicTask` | **保留** — 简单 interval + shutdown/jitter |
+| `apalis` + `apalis-cron` | Phase 8+ 多副本 leader/worker 再评估 — Phase 4 过重 |
+| `croner` + 自研 loop | 不引入 — 重复 JobScheduler 轮子 |
+
+**明确不启用的 feature**：`postgres_storage`、`nats_storage`（schedule 真相源是
+runtime-config，见 04 §23.8）。
+
+封装（业务 crate 禁止直接依赖 crate）：
 
 ```rust
 pub trait ReportScheduleRunner {
-    async fn register(&self, schedule: ReportSchedule) -> QuantResult<()>;
-    async fn start(&self) -> QuantResult<()>;
-    async fn shutdown(&self) -> QuantResult<()>;
+    async fn upsert(&self, schedule: &ReportScheduleConfig) -> QuantResult<()>;
+    async fn remove(&self, schedule_id: &str) -> QuantResult<()>;
+    async fn sync_from_config(&self, reports: &ReportsConfig) -> QuantResult<()>;
+    async fn enqueue_ad_hoc(&self, request: AdHocReportRequest) -> QuantResult<()>;
+    async fn run(&self, shutdown: CancellationToken) -> QuantResult<()>;
 }
 ```
+
+实现：`TokioCronScheduleRunner` in `core/src/infra/schedule/runner.rs`。
 
 ## 9. 依赖引入顺序
 
@@ -419,7 +436,7 @@ smartcore
 
 可新增：
 
-- `tokio-cron-scheduler`，如果现有 `PeriodicTask` 不满足 cron。
+- `tokio-cron-scheduler`（`quant-pivot-core`，经 `ReportScheduleRunner`；见 04 §23）。
 
 ### Phase 5
 
@@ -1088,16 +1105,17 @@ pub trait UnifiedModelRunner {
 ## 23. Phase 3.0 依赖引入登记
 
 > 状态：Phase 3.0 落地时登记。workspace MSRV = 1.85（`resolver = "2"`）。
-> 全部声明于 `[workspace.dependencies]`，由 `quant-pivot-research` 以 `optional`
-> 方式按 feature gate 引用；默认 build（`default = ["stats"]`）仅链接 `stats` 组，
-> 绝不链接 polars / smartcore / argmin。
+> `ndarray` / `ndarray-stats` / `statrs` / `rayon` 为 **base deps**（03.2 在线
+> feature plane 必需）；`polars` / `smartcore` / `argmin` 仍按 feature gate optional
+> 引用；默认 build（`default = []`）链接 base numeric stack，绝不链接 polars /
+> smartcore / argmin。
 
-| crate | 版本 | feature gate | native 依赖 | 许可证 | 结论 |
+| crate | 版本 | 引入方式 | native 依赖 | 许可证 | 结论 |
 |---|---|---|---|---|---|
-| `ndarray` | 0.17 | `stats`（默认） | 无（纯 Rust） | MIT/Apache-2.0 | 引入 |
-| `ndarray-stats` | 0.7 | `stats`（默认） | 无 | MIT/Apache-2.0 | 引入 |
-| `statrs` | 0.18 | `stats`（默认） | 无 | MIT | 引入 |
-| `rayon` | 1 | `stats`（默认） | 无 | MIT/Apache-2.0 | 引入 |
+| `ndarray` | 0.17 | base dep | 无（纯 Rust） | MIT/Apache-2.0 | 引入 |
+| `ndarray-stats` | 0.7 | base dep | 无 | MIT/Apache-2.0 | 引入 |
+| `statrs` | 0.18 | base dep | 无 | MIT | 引入 |
+| `rayon` | 1 | base dep | 无 | MIT/Apache-2.0 | 引入 |
 | `polars` | 0.54.4（`lazy` + `parquet`，`default-features = false`） | `dataframe`（默认关） | 无 native runtime（纯 Rust + 编译期 SIMD） | MIT | 引入，仅离线 |
 | `arrow` | 59 | `dataframe`（默认关） | 无 | Apache-2.0 | 引入，仅离线（53 与 chrono 0.4.44 的 `quarter()` 冲突，升 59 |
 | `parquet` | 59 | `dataframe`（默认关） | 无 | Apache-2.0 | 引入，仅离线 |

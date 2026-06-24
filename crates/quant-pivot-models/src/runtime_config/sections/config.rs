@@ -120,7 +120,12 @@ impl Default for FeaturesConfig {
     fn default() -> Self {
         Self {
             feature_schema_version: SchemaVersion::FIRST,
-            enabled_feature_families: vec![FeatureFamily::Book, FeatureFamily::Liquidity],
+            enabled_feature_families: vec![
+                FeatureFamily::MarketMetadata,
+                FeatureFamily::PriceBook,
+                FeatureFamily::TimeSeries,
+                FeatureFamily::Microstructure,
+            ],
             required_features: Vec::new(),
             domain_feature_policy: DomainFeaturePolicy::RejectMissingRequired,
             bar_windows_secs: vec![60, 300, 900],

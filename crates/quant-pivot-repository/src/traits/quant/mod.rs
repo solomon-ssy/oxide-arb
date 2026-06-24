@@ -3,6 +3,7 @@
 mod attribution;
 mod execution_order;
 mod fact;
+mod fact_read;
 mod factor;
 mod feature;
 mod model;
@@ -15,6 +16,7 @@ mod selection;
 pub use attribution::*;
 pub use execution_order::*;
 pub use fact::*;
+pub use fact_read::*;
 pub use factor::*;
 pub use feature::*;
 pub use model::*;

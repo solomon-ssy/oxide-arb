@@ -517,11 +517,20 @@ build_dataset -> train_model -> run_backtest -> evaluate_gates -> create_candida
 
 ## Phase 4 详细契约 — Report Plane
 
+> 调度层权威设计：[`04-topn-report-and-recommendation.md`](04-topn-report-and-recommendation.md)
+> §23–§25（`ReportScheduleRunner` + `tokio-cron-scheduler` 封装）。
+
 ### 必建模块
 
 ```text
+core/src/infra/schedule/
+├── runner.rs           # ReportScheduleRunner + TokioCronScheduleRunner
+├── job_factory.rs
+├── overlap.rs
+└── config_sync.rs
+
 core/src/report/
-├── scheduler.rs
+├── scheduler.rs        # TaskId::ReportGenerator wiring
 ├── builder.rs
 ├── composer.rs
 ├── publisher.rs
@@ -532,6 +541,7 @@ core/src/report/
 ### 必实现 trait
 
 ```rust
+ReportScheduleRunner   // 调度：何时 fire；见 04 §23
 ReportBuilder
 RecommendationComposer
 ReportPublisher
@@ -541,18 +551,34 @@ PortfolioPlanner
 
 ### 第三方 crate 引入
 
-允许：
+**必须（Phase 4 锁定）**：
 
-- `tokio-cron-scheduler`，仅当现有 `PeriodicTask` 无法表达 cron/report schedule。
+- `tokio-cron-scheduler`（`quant-pivot-core` only，default features，**无**
+  `postgres_storage` / `nats_storage`）— 经 `ReportScheduleRunner` 封装；
+  详见 [04 §24](04-topn-report-and-recommendation.md#24-调度第三方选型调研20252026)。
+
+**保留（不替换）**：
+
+- 现有 `PeriodicTask` — Gamma sync、data quality、report TTL expire sweep。
 
 不允许：
 
 - ONNX/DL 依赖进入 report builder。
+- `apalis` / 独立 job worker 集群（Phase 8+ 再评估）。
+- 业务 crate 直接 `use tokio_cron_scheduler`。
 
 ### 伪代码入口
 
 ```rust
-schedule_tick -> build market selection -> features -> factors -> model -> portfolio -> report -> publish
+// 调度（04 §23.9）
+ReportScheduleRunner::sync_from_config → JobScheduler fire
+  → ReportLifecycleService::run_scheduled
+    → ReportBuilder::build (selection → features → factors → model → portfolio)
+      → ReportPublisher::publish
+
+// 非 scheduler 路径
+PeriodicTask → ReportLifecycleService::expire_due_reports
+POST /api/quant/reports/run → enqueue_ad_hoc
 ```
 
 ### 验收测试
@@ -562,6 +588,8 @@ schedule_tick -> build market selection -> features -> factors -> model -> portf
 - stable TopN sorting。
 - report revoke writes operation log。
 - latest report API returns published report。
+- **scheduler**：多 schedule 独立 fire；config hot-reload；overlap skip；ad-hoc one-shot；
+  graceful shutdown（04 §25 checklist）。
 
 ### Blocker
 

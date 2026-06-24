@@ -1,19 +1,707 @@
-//! Governed feature schema: version + stable feature-name set.
+//! Governed feature schema: the eight-element [`FeatureSpec`] and the versioned
+//! [`FeatureSchema`] registry built from runtime config.
 //!
-//! The registry and builder catalog land in 3.2; 3.0 fixes the schema shell so
-//! [`crate::hashing::ResearchHasher::feature_schema`] can mint a canonical
-//! `feature_schema_hash` without API churn later.
+//! The schema is the single declaration of every feature the plane can produce:
+//! its dimensional kind, unit, valid range, null policy, source requirement,
+//! point-in-time rule, and staleness policy. One static catalog drives both the
+//! online and offline executors; config selects the enabled families and the
+//! windowed expansions (bar / momentum / volatility windows, depth levels), so
+//! the same definition serves live and historical builds.
 
-use quant_pivot_models::types::SchemaVersion;
+use std::{collections::HashMap, ops::RangeInclusive};
+
+use quant_pivot_models::{
+    runtime_config::{FeatureFamily, FeaturesConfig},
+    types::SchemaVersion,
+};
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
-use super::FeatureName;
+use crate::{
+    features::{
+        FeatureName,
+        domain::DOMAIN_FEATURES,
+        value::{EvidenceSourceKind, FeatureValueKind},
+    },
+    vertical::DomainFamily,
+};
 
-/// A versioned, hashable feature schema (sorted feature names → canonical digest).
+/// The dimensional unit a feature is expressed in (documentation + UI only;
+/// arithmetic is governed by [`FeatureValueKind`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FeatureUnit {
+    /// Dimensionless.
+    None,
+    /// A ratio / fraction (e.g. return, imbalance).
+    Ratio,
+    /// Basis points.
+    Bps,
+    /// US dollars.
+    Usd,
+    /// Condition-token shares.
+    Shares,
+    /// A probability in `[0, 1]` (prediction-market prices live here).
+    Probability,
+    /// Whole seconds.
+    Seconds,
+    /// Whole milliseconds.
+    Milliseconds,
+    /// A plain count.
+    Count,
+    /// A per-second rate.
+    PerSecond,
+}
+
+/// The evidence a feature requires to be computable.
+///
+/// Drives the [`crate::features::availability::FeatureAvailabilityOracle`] (which
+/// translates a model's required-feature set into per-market eligibility) and the
+/// null-policy engine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "source")]
+pub enum SourceRequirement {
+    /// A published L2 order book for the market's token.
+    PublishedL2Book,
+    /// Gamma market / event metadata.
+    GammaMetadata,
+    /// A window of `book_microstructure_*` facts.
+    MicrostructureWindow,
+    /// An external vertical data source for a domain family.
+    DomainExternal {
+        /// The vertical the external source serves.
+        family: DomainFamily,
+    },
+}
+
+impl SourceRequirement {
+    /// The evidence origin this requirement resolves to.
+    ///
+    /// This is the schema-authoritative mapping consumed by the long-format fact
+    /// writer, so the persisted `source_kind` is derived from the governed spec
+    /// rather than reverse-engineered from the feature name.
+    #[must_use]
+    pub const fn evidence_kind(self) -> EvidenceSourceKind {
+        match self {
+            Self::PublishedL2Book => EvidenceSourceKind::Book,
+            Self::GammaMetadata => EvidenceSourceKind::GammaMetadata,
+            Self::MicrostructureWindow => EvidenceSourceKind::ClickHouseFact,
+            Self::DomainExternal { .. } => EvidenceSourceKind::DomainExternal,
+        }
+    }
+}
+
+/// The point-in-time visibility rule a feature's inputs must satisfy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PitRule {
+    /// The book version must be published at or before `as_of`.
+    BookVersionAtOrBeforeAsOf,
+    /// The fact must be published at or before `as_of - source_delay`.
+    FactBeforeAsOfMinusDelay,
+    /// Gamma metadata visible as of `as_of`.
+    MetadataAtAsOf,
+}
+
+/// The staleness bound applied to a feature's freshest input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StalenessRule {
+    /// No staleness bound (the feature is intrinsically point-in-time).
+    None,
+    /// Bounded by `data_quality.max_book_age_ms`.
+    MaxBookAge,
+    /// Bounded by `data_quality.max_fact_lag_secs`.
+    MaxFactLag,
+}
+
+/// How a feature behaves when its value is absent. The four-state policy is the
+/// only sanctioned way to handle missing data — silent zero is forbidden.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "policy", content = "value")]
+pub enum NullPolicy {
+    /// Missing ⇒ the market does not enter the candidate set.
+    RejectMarket,
+    /// Missing ⇒ substitute the given audited neutral value.
+    NeutralValue(Decimal),
+    /// Missing ⇒ keep missing but degrade data quality / confidence.
+    Penalize,
+    /// Missing ⇒ keep missing; the generic model proceeds (vertical data gap).
+    DomainMissing,
+}
+
+/// A fully-specified feature definition (the eight-element schema record).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FeatureSpec {
+    /// Stable feature name.
+    pub name: FeatureName,
+    /// Feature family (governs config gating + builder ownership).
+    pub family: FeatureFamily,
+    /// Dimensional kind of the produced value.
+    pub value_kind: FeatureValueKind,
+    /// Human/UI unit annotation.
+    pub unit: FeatureUnit,
+    /// Inclusive valid range; values outside it are rejected as out-of-range.
+    pub valid_range: Option<RangeInclusive<Decimal>>,
+    /// Null policy applied when the value is absent.
+    pub null_policy: NullPolicy,
+    /// Evidence the feature requires.
+    pub source_requirement: SourceRequirement,
+    /// Point-in-time visibility rule.
+    pub point_in_time_rule: PitRule,
+    /// Staleness bound on the freshest input.
+    pub staleness_policy: StalenessRule,
+    /// When true, a missing value rejects the market regardless of null policy.
+    pub critical: bool,
+}
+
+/// Fluent builder for a [`FeatureSpec`] with safe defaults.
+///
+/// Defaults: unit [`FeatureUnit::None`], no valid range, [`NullPolicy::Penalize`],
+/// non-critical. Source / PIT / staleness are required up front because they are
+/// the load-bearing correctness metadata.
+#[must_use]
+struct FeatureSpecBuilder {
+    spec: FeatureSpec,
+}
+
+impl FeatureSpecBuilder {
+    const fn new(
+        name: FeatureName,
+        family: FeatureFamily,
+        value_kind: FeatureValueKind,
+        source_requirement: SourceRequirement,
+        point_in_time_rule: PitRule,
+        staleness_policy: StalenessRule,
+    ) -> Self {
+        Self {
+            spec: FeatureSpec {
+                name,
+                family,
+                value_kind,
+                unit: FeatureUnit::None,
+                valid_range: None,
+                null_policy: NullPolicy::Penalize,
+                source_requirement,
+                point_in_time_rule,
+                staleness_policy,
+                critical: false,
+            },
+        }
+    }
+
+    /// Set the unit annotation.
+    const fn unit(mut self, unit: FeatureUnit) -> Self {
+        self.spec.unit = unit;
+        self
+    }
+
+    /// Set the inclusive valid range.
+    const fn range(mut self, lo: Decimal, hi: Decimal) -> Self {
+        self.spec.valid_range = Some(lo..=hi);
+        self
+    }
+
+    /// Set the null policy.
+    const fn null_policy(mut self, policy: NullPolicy) -> Self {
+        self.spec.null_policy = policy;
+        self
+    }
+
+    /// Mark the feature critical (missing ⇒ reject market).
+    const fn critical(mut self) -> Self {
+        self.spec.critical = true;
+        self
+    }
+
+    /// Finish building.
+    fn build(self) -> FeatureSpec {
+        self.spec
+    }
+}
+
+/// A versioned, hashable feature schema: the registry of governed specs.
+///
+/// `feature_schema_hash` (via [`crate::hashing::ResearchHasher::feature_schema`])
+/// is order-independent over the specs and folds in [`Self::version`], so a
+/// version bump or any spec change perturbs the digest.
+///
+/// The registry is immutable after construction and carries a `name → index`
+/// map so every lookup ([`Self::by_name`] / [`Self::contains`]) is `O(1)` on the
+/// per-value hot paths (long-format projection, availability oracle). The index
+/// is derived from `specs` and never serialized.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct FeatureSchema {
     /// Monotonic schema version (`>= 1`).
-    pub version: SchemaVersion,
-    /// Feature names governed by this schema (order-independent for hashing).
-    pub features: Vec<FeatureName>,
+    version: SchemaVersion,
+    /// Governed feature specs (registry; order-independent for hashing).
+    specs: Vec<FeatureSpec>,
+    /// `name → index into specs`, derived from `specs` (not serialized).
+    #[serde(skip)]
+    by_name: HashMap<FeatureName, usize>,
+}
+
+impl FeatureSchema {
+    /// Assemble a schema from a version and its specs, building the name index.
+    #[must_use]
+    pub fn new(version: SchemaVersion, specs: Vec<FeatureSpec>) -> Self {
+        let by_name = specs
+            .iter()
+            .enumerate()
+            .map(|(idx, spec)| (spec.name.clone(), idx))
+            .collect();
+        Self {
+            version,
+            specs,
+            by_name,
+        }
+    }
+
+    /// Build the active schema from frozen feature config.
+    ///
+    /// Enables only the configured families and expands windowed families using
+    /// the configured bar / momentum / volatility windows and depth levels. The
+    /// schema version is taken from `config.feature_schema_version`.
+    #[must_use]
+    pub fn build(config: &FeaturesConfig) -> Self {
+        let mut specs = Vec::new();
+        for family in &config.enabled_feature_families {
+            match family {
+                FeatureFamily::MarketMetadata => market_metadata_specs(&mut specs),
+                FeatureFamily::PriceBook => price_book_specs(config, &mut specs),
+                FeatureFamily::TimeSeries => time_series_specs(config, &mut specs),
+                FeatureFamily::Microstructure => microstructure_specs(&mut specs),
+                FeatureFamily::Domain => domain_specs(&mut specs),
+            }
+        }
+        Self::new(config.feature_schema_version, specs)
+    }
+
+    /// The schema version.
+    #[must_use]
+    pub const fn version(&self) -> SchemaVersion {
+        self.version
+    }
+
+    /// The governed specs (registry order).
+    #[must_use]
+    pub fn specs(&self) -> &[FeatureSpec] {
+        &self.specs
+    }
+
+    /// Look up a spec by name (`O(1)`).
+    #[must_use]
+    pub fn by_name(&self, name: &FeatureName) -> Option<&FeatureSpec> {
+        self.by_name.get(name).map(|&idx| &self.specs[idx])
+    }
+
+    /// All governed feature names (registry order).
+    #[must_use]
+    pub fn names(&self) -> Vec<FeatureName> {
+        self.specs.iter().map(|spec| spec.name.clone()).collect()
+    }
+
+    /// Whether the schema declares a feature with this name (`O(1)`).
+    #[must_use]
+    pub fn contains(&self, name: &FeatureName) -> bool {
+        self.by_name.contains_key(name)
+    }
+
+    /// Iterate specs in a given family.
+    pub fn by_family(&self, family: FeatureFamily) -> impl Iterator<Item = &FeatureSpec> {
+        self.specs.iter().filter(move |spec| spec.family == family)
+    }
+
+    /// Whether any governed spec needs a point-in-time resolved order book.
+    ///
+    /// Drives the builder's PIT gating: when no spec requires a book, the build
+    /// loop skips the book resolution entirely.
+    #[must_use]
+    pub fn needs_book(&self) -> bool {
+        self.specs
+            .iter()
+            .any(|spec| matches!(spec.source_requirement, SourceRequirement::PublishedL2Book))
+    }
+
+    /// Whether any governed spec needs point-in-time Gamma market metadata.
+    #[must_use]
+    pub fn needs_market_metadata(&self) -> bool {
+        self.specs
+            .iter()
+            .any(|spec| matches!(spec.source_requirement, SourceRequirement::GammaMetadata))
+    }
+
+    /// Whether any governed spec needs a pre-fetched microstructure window.
+    ///
+    /// Drives the orchestrator's window prefetch: a book/metadata-only schema
+    /// skips the `ClickHouse` window read entirely.
+    #[must_use]
+    pub fn needs_window(&self) -> bool {
+        self.specs.iter().any(|spec| {
+            matches!(
+                spec.source_requirement,
+                SourceRequirement::MicrostructureWindow
+            )
+        })
+    }
+}
+
+// ── Static catalog ─────────────────────────────────────────────────────────
+
+const fn spec(
+    name: FeatureName,
+    family: FeatureFamily,
+    value_kind: FeatureValueKind,
+    source: SourceRequirement,
+    pit: PitRule,
+    staleness: StalenessRule,
+) -> FeatureSpecBuilder {
+    FeatureSpecBuilder::new(name, family, value_kind, source, pit, staleness)
+}
+
+fn market_metadata_specs(out: &mut Vec<FeatureSpec>) {
+    use FeatureFamily::MarketMetadata as F;
+    use FeatureValueKind::{Bool, Category, Count};
+    use PitRule::MetadataAtAsOf as Pit;
+    use SourceRequirement::GammaMetadata as Src;
+    use StalenessRule::None as Fresh;
+
+    out.push(
+        spec(
+            FeatureName::from_static("market.category"),
+            F,
+            Category,
+            Src,
+            Pit,
+            Fresh,
+        )
+        .null_policy(NullPolicy::RejectMarket)
+        .build(),
+    );
+    out.push(
+        spec(
+            FeatureName::from_static("market.time_to_resolution_secs"),
+            F,
+            Count,
+            Src,
+            Pit,
+            Fresh,
+        )
+        .unit(FeatureUnit::Seconds)
+        .null_policy(NullPolicy::RejectMarket)
+        .build(),
+    );
+    out.push(
+        spec(
+            FeatureName::from_static("market.event_age_secs"),
+            F,
+            Count,
+            Src,
+            Pit,
+            Fresh,
+        )
+        .unit(FeatureUnit::Seconds)
+        .null_policy(NullPolicy::Penalize)
+        .build(),
+    );
+    out.push(
+        spec(
+            FeatureName::from_static("market.outcome_count"),
+            F,
+            Count,
+            Src,
+            Pit,
+            Fresh,
+        )
+        .unit(FeatureUnit::Count)
+        .null_policy(NullPolicy::RejectMarket)
+        .build(),
+    );
+    out.push(
+        spec(
+            FeatureName::from_static("market.neg_risk"),
+            F,
+            Bool,
+            Src,
+            Pit,
+            Fresh,
+        )
+        .null_policy(NullPolicy::NeutralValue(Decimal::ZERO))
+        .build(),
+    );
+    out.push(
+        spec(
+            FeatureName::from_static("market.is_active"),
+            F,
+            Bool,
+            Src,
+            Pit,
+            Fresh,
+        )
+        .null_policy(NullPolicy::RejectMarket)
+        .build(),
+    );
+}
+
+/// Shared (family, source, pit, staleness) for every price/book spec.
+const fn book_spec(name: FeatureName, kind: FeatureValueKind) -> FeatureSpecBuilder {
+    spec(
+        name,
+        FeatureFamily::PriceBook,
+        kind,
+        SourceRequirement::PublishedL2Book,
+        PitRule::BookVersionAtOrBeforeAsOf,
+        StalenessRule::MaxBookAge,
+    )
+}
+
+/// A critical `[0, 1]` price feature.
+fn price_spec(name: &'static str) -> FeatureSpec {
+    book_spec(
+        FeatureName::from_static(name),
+        FeatureValueKind::Probability,
+    )
+    .unit(FeatureUnit::Probability)
+    .range(Decimal::ZERO, Decimal::ONE)
+    .null_policy(NullPolicy::RejectMarket)
+    .critical()
+    .build()
+}
+
+fn price_book_specs(config: &FeaturesConfig, out: &mut Vec<FeatureSpec>) {
+    out.push(price_spec("book.best_bid"));
+    out.push(price_spec("book.best_ask"));
+    out.push(price_spec("book.mid"));
+    out.push(
+        book_spec(
+            FeatureName::from_static("book.spread_bps"),
+            FeatureValueKind::Bps,
+        )
+        .unit(FeatureUnit::Bps)
+        .null_policy(NullPolicy::RejectMarket)
+        .critical()
+        .build(),
+    );
+    out.push(
+        book_spec(
+            FeatureName::from_static("book.depth_imbalance"),
+            FeatureValueKind::Decimal,
+        )
+        .unit(FeatureUnit::Ratio)
+        .range(Decimal::NEGATIVE_ONE, Decimal::ONE)
+        .null_policy(NullPolicy::Penalize)
+        .build(),
+    );
+    out.push(
+        book_spec(
+            FeatureName::from_static("book.slope"),
+            FeatureValueKind::Decimal,
+        )
+        .unit(FeatureUnit::Ratio)
+        .null_policy(NullPolicy::Penalize)
+        .build(),
+    );
+    out.push(
+        book_spec(
+            FeatureName::from_static("book.visible_liquidity_usd"),
+            FeatureValueKind::Usd,
+        )
+        .unit(FeatureUnit::Usd)
+        .null_policy(NullPolicy::Penalize)
+        .build(),
+    );
+    out.push(
+        book_spec(
+            FeatureName::from_static("book.age_ms"),
+            FeatureValueKind::Count,
+        )
+        .unit(FeatureUnit::Milliseconds)
+        .null_policy(NullPolicy::RejectMarket)
+        .build(),
+    );
+    out.push(
+        book_spec(
+            FeatureName::from_static("book.crossed"),
+            FeatureValueKind::Bool,
+        )
+        .null_policy(NullPolicy::RejectMarket)
+        .build(),
+    );
+    out.push(
+        book_spec(
+            FeatureName::from_static("book.empty"),
+            FeatureValueKind::Bool,
+        )
+        .null_policy(NullPolicy::RejectMarket)
+        .build(),
+    );
+    for level in &config.depth_levels {
+        out.push(
+            book_spec(
+                FeatureName::new(format!("book.depth_top{level}_usd")),
+                FeatureValueKind::Usd,
+            )
+            .unit(FeatureUnit::Usd)
+            .null_policy(NullPolicy::Penalize)
+            .build(),
+        );
+    }
+}
+
+fn time_series_specs(config: &FeaturesConfig, out: &mut Vec<FeatureSpec>) {
+    use FeatureFamily::TimeSeries as F;
+    use FeatureValueKind::Decimal as Dec;
+    use PitRule::FactBeforeAsOfMinusDelay as Pit;
+    use SourceRequirement::MicrostructureWindow as Src;
+    use StalenessRule::MaxFactLag as Stale;
+
+    for window in &config.bar_windows_secs {
+        out.push(
+            spec(
+                FeatureName::new(format!("ts.return_{window}s")),
+                F,
+                Dec,
+                Src,
+                Pit,
+                Stale,
+            )
+            .unit(FeatureUnit::Ratio)
+            .null_policy(NullPolicy::Penalize)
+            .build(),
+        );
+        out.push(
+            spec(
+                FeatureName::new(format!("ts.spread_trend_{window}s")),
+                F,
+                Dec,
+                Src,
+                Pit,
+                Stale,
+            )
+            .unit(FeatureUnit::Ratio)
+            .null_policy(NullPolicy::Penalize)
+            .build(),
+        );
+        out.push(
+            spec(
+                FeatureName::new(format!("ts.depth_trend_{window}s")),
+                F,
+                Dec,
+                Src,
+                Pit,
+                Stale,
+            )
+            .unit(FeatureUnit::Ratio)
+            .null_policy(NullPolicy::Penalize)
+            .build(),
+        );
+    }
+    for window in &config.momentum_windows_secs {
+        out.push(
+            spec(
+                FeatureName::new(format!("ts.momentum_{window}s")),
+                F,
+                Dec,
+                Src,
+                Pit,
+                Stale,
+            )
+            .unit(FeatureUnit::Ratio)
+            .null_policy(NullPolicy::Penalize)
+            .build(),
+        );
+    }
+    for window in &config.volatility_windows_secs {
+        out.push(
+            spec(
+                FeatureName::new(format!("ts.realized_vol_{window}s")),
+                F,
+                Dec,
+                Src,
+                Pit,
+                Stale,
+            )
+            .unit(FeatureUnit::Ratio)
+            .range(Decimal::ZERO, Decimal::from(1_000_000))
+            .null_policy(NullPolicy::Penalize)
+            .build(),
+        );
+    }
+    out.push(
+        spec(
+            FeatureName::from_static("ts.price_reversal"),
+            F,
+            Dec,
+            Src,
+            Pit,
+            Stale,
+        )
+        .unit(FeatureUnit::Ratio)
+        .null_policy(NullPolicy::Penalize)
+        .build(),
+    );
+}
+
+fn microstructure_specs(out: &mut Vec<FeatureSpec>) {
+    use FeatureFamily::Microstructure as F;
+    use FeatureValueKind::{Decimal as Dec, Probability};
+    use PitRule::FactBeforeAsOfMinusDelay as Pit;
+    use SourceRequirement::MicrostructureWindow as Src;
+    use StalenessRule::MaxFactLag as Stale;
+
+    for (name, kind, unit) in [
+        ("micro.quote_update_rate", Dec, FeatureUnit::PerSecond),
+        ("micro.book_churn", Dec, FeatureUnit::Ratio),
+        ("micro.queue_depletion", Dec, FeatureUnit::Ratio),
+        ("micro.sudden_liquidity_withdrawal", Dec, FeatureUnit::Ratio),
+        ("micro.adverse_selection_proxy", Dec, FeatureUnit::Ratio),
+    ] {
+        out.push(
+            spec(FeatureName::from_static(name), F, kind, Src, Pit, Stale)
+                .unit(unit)
+                .null_policy(NullPolicy::Penalize)
+                .build(),
+        );
+    }
+    out.push(
+        spec(
+            FeatureName::from_static("micro.stale_quote_frequency"),
+            F,
+            Probability,
+            Src,
+            Pit,
+            Stale,
+        )
+        .unit(FeatureUnit::Probability)
+        .range(Decimal::ZERO, Decimal::ONE)
+        .null_policy(NullPolicy::Penalize)
+        .build(),
+    );
+}
+
+fn domain_specs(out: &mut Vec<FeatureSpec>) {
+    use FeatureFamily::Domain as F;
+    use FeatureValueKind::Decimal as Dec;
+    use PitRule::FactBeforeAsOfMinusDelay as Pit;
+    use StalenessRule::None as Fresh;
+
+    // One representative spec per vertical, names sourced from the shared catalog.
+    // External ingestion is deferred (03.2 §10): until a source is wired these
+    // always resolve to `NullReason::DomainDataMissing` under
+    // `NullPolicy::DomainMissing`.
+    for (family, name) in DOMAIN_FEATURES {
+        out.push(
+            spec(
+                FeatureName::from_static(name),
+                F,
+                Dec,
+                SourceRequirement::DomainExternal { family },
+                Pit,
+                Fresh,
+            )
+            .unit(FeatureUnit::Ratio)
+            .null_policy(NullPolicy::DomainMissing)
+            .build(),
+        );
+    }
 }

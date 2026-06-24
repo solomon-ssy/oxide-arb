@@ -13,4 +13,4 @@ pub use data::{DataBundle, DataBundleDeps};
 pub use future::{ExecutionIntentBundle, PortfolioBundle, ReportBundle, RuntimeChannels};
 pub use governance::{GovernanceBundle, GovernanceBundleDeps, RuntimeSnapshot};
 pub use infra::InfraBundle;
-pub use research::ResearchBundle;
+pub use research::{ResearchBundle, ResearchBundleDeps};

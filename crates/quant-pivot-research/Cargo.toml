@@ -17,11 +17,16 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 rust_decimal = { workspace = true }
 
-# ── Research / ML stack (feature-gated; see [features]) ───────────────────────
-ndarray = { workspace = true, optional = true }
-ndarray-stats = { workspace = true, optional = true }
-statrs = { workspace = true, optional = true }
-rayon = { workspace = true, optional = true }
+# ── Research numeric stack ────────────────────────────────────────────────────
+# Pure-Rust, lightweight, and load-bearing for the online feature plane (rolling
+# statistics, realized vol, CPU-parallel batch build), so these are base deps,
+# not gated. The heavy / native-adjacent stacks below stay feature-gated.
+ndarray = { workspace = true }
+ndarray-stats = { workspace = true }
+statrs = { workspace = true }
+rayon = { workspace = true }
+
+# ── Heavy / offline stack (feature-gated; see [features]) ─────────────────────
 polars = { workspace = true, optional = true }
 arrow = { workspace = true, optional = true }
 parquet = { workspace = true, optional = true }
@@ -30,11 +35,9 @@ argmin-math = { workspace = true, optional = true }
 smartcore = { workspace = true, optional = true }
 
 [features]
-# Default keeps the report_only build light: only the pure-Rust numeric stack,
-# never polars / smartcore / argmin.
-default = ["stats"]
-# Numeric matrices, summary statistics, distributions, CPU parallelism.
-stats = ["dep:ndarray", "dep:ndarray-stats", "dep:statrs", "dep:rayon"]
+# The report_only build links only the base numeric stack above — never polars /
+# smartcore / argmin.
+default = []
 # Offline feature / dataset materialization (lazy frames + parquet).
 dataframe = ["dep:polars", "dep:arrow", "dep:parquet"]
 # Factor-weight / threshold optimization.

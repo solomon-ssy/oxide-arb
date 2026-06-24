@@ -9,7 +9,7 @@
 mod value;
 
 pub use value::{
-    DomainKind, FactorDefinitionSpec, FactorDriver, FactorExplanation, FactorFamily, FactorName,
+    FactorDefinitionSpec, FactorDriver, FactorExplanation, FactorFamily, FactorName,
     FactorOutputKind, FactorQualityGate, FactorSet, FactorValue, NormalizationSpec,
 };
 

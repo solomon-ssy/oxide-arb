@@ -22,7 +22,7 @@ use serde::Serialize;
 
 use crate::{
     factors::FactorSet,
-    features::{FeatureName, FeatureSchema, FeatureVector},
+    features::{FeatureName, FeatureSchema, FeatureSpec, FeatureVector},
     model::ModelArtifact,
     selection::ModelFeatureRequirements,
     training::TrainingDatasetArtifact,
@@ -32,7 +32,7 @@ use crate::{
 #[derive(serde::Serialize)]
 struct FeatureSchemaCanonical {
     version: SchemaVersion,
-    features: Vec<FeatureName>,
+    specs: Vec<FeatureSpec>,
 }
 
 /// Typed canonical hasher for research artifacts (`blake3:<hex>`).
@@ -72,14 +72,15 @@ impl ResearchHasher {
 
     /// Order-independent hash of a governed feature schema (`feature_schema_hash`).
     ///
-    /// Feature names are sorted before serialization so registry insertion order
-    /// never perturbs the digest.
+    /// Specs are sorted by name before serialization so registry insertion order
+    /// never perturbs the digest; the schema version folds in, so a version bump
+    /// (or any spec change) changes the digest.
     pub fn feature_schema(schema: &FeatureSchema) -> QuantResult<ContentHash> {
-        let mut features = schema.features.clone();
-        features.sort();
+        let mut specs = schema.specs().to_vec();
+        specs.sort_by(|left, right| left.name.cmp(&right.name));
         Self::canonical(&FeatureSchemaCanonical {
-            version: schema.version,
-            features,
+            version: schema.version(),
+            specs,
         })
     }
 
@@ -127,10 +128,15 @@ mod tests {
             FactorDefinitionSpec, FactorFamily, FactorName, FactorOutputKind, FactorSet,
             NormalizationSpec,
         },
-        features::{FeatureName, FeatureSchema},
+        features::{
+            FeatureName, FeatureSchema, FeatureSpec, FeatureUnit, FeatureValueKind, NullPolicy,
+            PitRule, SourceRequirement, StalenessRule,
+        },
         selection::ModelFeatureRequirements,
     };
-    use quant_pivot_models::{enums::quant::FactorDirection, types::SchemaVersion};
+    use quant_pivot_models::{
+        enums::quant::FactorDirection, runtime_config::FeatureFamily, types::SchemaVersion,
+    };
 
     fn sample_factor(name: &'static str) -> FactorDefinitionSpec {
         FactorDefinitionSpec {
@@ -178,25 +184,44 @@ mod tests {
         assert_eq!(forward_hash, shuffled_hash);
     }
 
+    fn sample_spec(name: &'static str) -> FeatureSpec {
+        FeatureSpec {
+            name: FeatureName::from_static(name),
+            family: FeatureFamily::PriceBook,
+            value_kind: FeatureValueKind::Decimal,
+            unit: FeatureUnit::Ratio,
+            valid_range: None,
+            null_policy: NullPolicy::Penalize,
+            source_requirement: SourceRequirement::PublishedL2Book,
+            point_in_time_rule: PitRule::BookVersionAtOrBeforeAsOf,
+            staleness_policy: StalenessRule::MaxBookAge,
+            critical: false,
+        }
+    }
+
     #[test]
     fn feature_schema_is_order_independent() {
-        let forward = FeatureSchema {
-            version: SchemaVersion::new(1),
-            features: vec![
-                FeatureName::from_static("alpha"),
-                FeatureName::from_static("beta"),
-            ],
-        };
-        let shuffled = FeatureSchema {
-            version: SchemaVersion::new(1),
-            features: vec![
-                FeatureName::from_static("beta"),
-                FeatureName::from_static("alpha"),
-            ],
-        };
+        let forward = FeatureSchema::new(
+            SchemaVersion::new(1),
+            vec![sample_spec("alpha"), sample_spec("beta")],
+        );
+        let shuffled = FeatureSchema::new(
+            SchemaVersion::new(1),
+            vec![sample_spec("beta"), sample_spec("alpha")],
+        );
         assert_eq!(
             ResearchHasher::feature_schema(&forward).expect("hash"),
             ResearchHasher::feature_schema(&shuffled).expect("hash"),
+        );
+    }
+
+    #[test]
+    fn feature_schema_version_changes_hash() {
+        let v1 = FeatureSchema::new(SchemaVersion::new(1), vec![sample_spec("alpha")]);
+        let v2 = FeatureSchema::new(SchemaVersion::new(2), vec![sample_spec("alpha")]);
+        assert_ne!(
+            ResearchHasher::feature_schema(&v1).expect("hash"),
+            ResearchHasher::feature_schema(&v2).expect("hash"),
         );
     }
 

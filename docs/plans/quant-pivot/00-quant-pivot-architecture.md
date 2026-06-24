@@ -507,39 +507,40 @@ pub trait OrderIntentService {
 
 报告调度是新系统主循环，替代旧 `Coalescer -> Scanner -> Funnel -> ExecutionRunner`。
 
+**Phase 4 实现**：经 [`ReportScheduleRunner`](04-topn-report-and-recommendation.md#23-report-schedule-runnerphase-4-调度层)
+封装 `tokio-cron-scheduler`；下列逻辑在 job closure 内执行，**不是**裸
+`tokio::time::interval` loop（旧草案保留语义说明）。
+
 ```rust
-pub async fn run_report_schedule(
-    schedule: ReportSchedule,
-    deps: ReportSchedulerDeps,
-    shutdown: CancellationToken,
+pub async fn on_report_schedule_fire(
+    schedule_id: &ScheduleId,
+    deps: &ReportSchedulerDeps,
 ) -> QuantResult<()> {
-    let mut ticker = deps.clock.interval(schedule.interval);
+    // Skip-if-running: see 04 §23.6 overlap guard
+    let trigger_time = Utc::now();
+    let active_config = deps.runtime_config.current();
+    let schedule = active_config.reports.schedule_by_id(schedule_id)?;
+    let request = GenerateReportRequest {
+        schedule_id: schedule_id.clone(),
+        trigger_time,
+        as_of: trigger_time - Duration::from_secs(schedule.source_delay_secs),
+        runtime_config_version_id: active_config.version_id(),
+        mode: deps.mode.load(),
+    };
 
-    loop {
-        tokio::select! {
-            _ = shutdown.cancelled() => return Ok(()),
-            tick = ticker.tick() => {
-                let trigger_time = tick?;
-                let active_config = deps.runtime_config.load_active();
-                let request = GenerateReportRequest {
-                    schedule_id: schedule.id.clone(),
-                    trigger_time,
-                    as_of: trigger_time - active_config.reports.source_delay(),
-                    runtime_config_version_id: active_config.version_id(),
-                    mode: deps.mode.load(),
-                };
-
-                match deps.report_service.generate(request).await {
-                    Ok(report) => deps.publisher.publish(report).await?,
-                    Err(error) => {
-                        deps.metrics.report_failed(&schedule.id, &error);
-                        deps.alerts.report_generation_failed(&schedule.id, &error).await;
-                    }
-                }
-            }
+    match deps.lifecycle.run_scheduled(schedule_id).await {
+        Ok(report) => deps.publisher.publish(&report).await?,
+        Err(error) => {
+            deps.metrics.report_failed(schedule_id, &error);
+            deps.alerts.report_generation_failed(schedule_id, &error).await;
         }
     }
+    Ok(())
 }
+
+// AppRunner registers one TaskId::ReportGenerator:
+//   ReportScheduleRunner::sync_from_config → scheduler.start()
+//   shutdown.cancelled() → scheduler.shutdown()
 ```
 
 关键点：

@@ -97,13 +97,47 @@ pub enum DrawdownMultiplierPolicy {
 }
 
 /// Supported feature families for v3 feature generation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+///
+/// One family ≈ one feature-builder group. The set gates which groups the
+/// feature plane computes (`features.enabled_feature_families`) and tags each
+/// `FeatureSpec` in the research schema registry, so config and the compute
+/// schema share a single, precise taxonomy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum FeatureFamily {
-    Book,
-    Liquidity,
-    Momentum,
-    Volatility,
+    /// Gamma market/event metadata (category, resolution timing, neg-risk, …).
+    MarketMetadata,
+    /// Top-of-book price and depth structure.
+    PriceBook,
+    /// Windowed return / volatility / momentum / trend features.
+    TimeSeries,
+    /// Order-flow microstructure (quote rate, churn, queue depletion, …).
+    Microstructure,
+    /// Vertical/domain-specific features (sports/politics/crypto/weather/geo).
+    Domain,
+}
+
+impl FeatureFamily {
+    /// Every feature family in declaration order.
+    pub const ALL: [Self; 5] = [
+        Self::MarketMetadata,
+        Self::PriceBook,
+        Self::TimeSeries,
+        Self::Microstructure,
+        Self::Domain,
+    ];
+
+    /// The stable `snake_case` wire name (matches the serde representation).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::MarketMetadata => "market_metadata",
+            Self::PriceBook => "price_book",
+            Self::TimeSeries => "time_series",
+            Self::Microstructure => "microstructure",
+            Self::Domain => "domain",
+        }
+    }
 }
 
 /// Factor weights keyed by factor name.

@@ -17,7 +17,7 @@ use quant_pivot_models::{
         common::{CategorySet, MarketCategory, TickSize},
         market::MarketStatus,
     },
-    runtime_config::{DataQualityConfig, SelectionConfig},
+    runtime_config::{DataQualityConfig, FeaturesConfig, SelectionConfig},
     types::{EventId, MarketId, RuntimeConfigVersionId, Shares, TokenId, Usd},
 };
 use quant_pivot_repository::{
@@ -165,6 +165,7 @@ async fn provider_selector_mapper_persist_round_trip() {
             ..SelectionConfig::default()
         },
         data_quality: DataQualityConfig::default(),
+        features: FeaturesConfig::default(),
         model_requirements: ModelFeatureRequirements::default(),
         source_delay_secs: 0,
     };
