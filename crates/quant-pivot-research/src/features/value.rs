@@ -6,11 +6,12 @@
 //! [`FeatureVector::values`]); the compute path never reads the opaque payload
 //! back — this type is the single source of truth.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use chrono::{DateTime, Utc};
 use quant_pivot_models::{
     enums::{common::MarketCategory, quant::DataQualityStatus},
+    runtime_config::{FeatureNameRef, FeaturesConfig},
     types::{MarketId, Probability, SchemaVersion, TokenId, Usd},
 };
 use rust_decimal::Decimal;
@@ -21,6 +22,66 @@ use crate::naming::stable_name;
 stable_name! {
     /// Stable, compile-time-known feature name (e.g. `"spread_bps"`).
     FeatureName
+}
+
+impl FeatureName {
+    /// Bar-window return feature: `ts.return_{window_secs}s`.
+    #[must_use]
+    pub fn ts_return(window_secs: u64) -> Self {
+        Self::new(format!("ts.return_{window_secs}s"))
+    }
+
+    /// Bar-window spread-trend feature: `ts.spread_trend_{window_secs}s`.
+    #[must_use]
+    pub fn ts_spread_trend(window_secs: u64) -> Self {
+        Self::new(format!("ts.spread_trend_{window_secs}s"))
+    }
+
+    /// Bar-window depth-trend feature: `ts.depth_trend_{window_secs}s`.
+    #[must_use]
+    pub fn ts_depth_trend(window_secs: u64) -> Self {
+        Self::new(format!("ts.depth_trend_{window_secs}s"))
+    }
+
+    /// Momentum feature over a configured window: `ts.momentum_{window_secs}s`.
+    #[must_use]
+    pub fn ts_momentum(window_secs: u64) -> Self {
+        Self::new(format!("ts.momentum_{window_secs}s"))
+    }
+
+    /// Realized-volatility feature: `ts.realized_vol_{window_secs}s`.
+    #[must_use]
+    pub fn ts_realized_vol(window_secs: u64) -> Self {
+        Self::new(format!("ts.realized_vol_{window_secs}s"))
+    }
+
+    /// Top-of-book depth at a configured level: `book.depth_top{level}_usd`.
+    #[must_use]
+    pub fn book_depth_top(level: u32) -> Self {
+        Self::new(format!("book.depth_top{level}_usd"))
+    }
+}
+
+impl From<&FeatureNameRef> for FeatureName {
+    fn from(reference: &FeatureNameRef) -> Self {
+        Self::new(&reference.name)
+    }
+}
+
+/// Model-required features merged with config [`FeaturesConfig::required_features`].
+///
+/// Single merge point for the builder null-policy gate and the feature-plane
+/// rejection partition — both must use the same set.
+#[must_use]
+pub fn merged_required_features(
+    model_required: &[FeatureName],
+    config: &FeaturesConfig,
+) -> HashSet<FeatureName> {
+    let mut required: HashSet<FeatureName> = model_required.iter().cloned().collect();
+    for reference in &config.required_features {
+        required.insert(FeatureName::from(reference));
+    }
+    required
 }
 
 /// Why a feature value is absent. Missing values are **never** silently zero —

@@ -16,7 +16,10 @@ use std::sync::Arc;
 
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
-    enums::quant::{DataQualityStatus, FactorDirection},
+    enums::{
+        factor::FactorFamily,
+        quant::{DataQualityStatus, FactorDirection},
+    },
     runtime_config::FeaturesConfig,
     types::{FactorDefinitionId, Probability},
 };
@@ -26,20 +29,25 @@ use uuid::Uuid;
 use crate::{
     factors::{
         computer::FactorComputer,
+        names::{
+            BOOK_IMBALANCE, DATA_QUALITY, LIQUIDITY_DEPTH, MARKET_ACTIVITY, MEAN_REVERSION,
+            MOMENTUM, SPREAD_EFFICIENCY, TIME_TO_RESOLUTION, VOLATILITY_REGIME,
+        },
         value::{
-            FactorDefinitionSpec, FactorDriver, FactorFamily, FactorName, FactorOutputKind,
-            FactorQualityGate, NormalizationSpec, RawFactor,
+            FactorDefinitionSpec, FactorDriver, FactorName, FactorOutputKind, FactorQualityGate,
+            NormalizationSpec, RawFactor,
         },
     },
-    features::{FeatureName, FeatureValue, FeatureVector},
+    features::{
+        FeatureName, FeatureValue, FeatureVector,
+        names::{book, market, micro, ts},
+    },
+    precision::RESEARCH_DECIMAL_SCALE,
 };
 
 /// Stable namespace for deterministic factor-definition ids (UUID v5). Fixed
 /// forever: changing it would re-key every persisted factor definition.
 const FACTOR_NAMESPACE: Uuid = Uuid::from_u128(0x7c9e_6a55_3f1b_4d2a_8e0f_1c2d_3e4f_5a6b);
-
-/// Quantization scale for `Decimal`-derived raw values (matches normalization).
-const RAW_SCALE: u32 = 12;
 
 /// Deterministic factor-definition id from a stable factor name.
 #[must_use]
@@ -55,18 +63,18 @@ pub fn generic_factors(
 ) -> Vec<(FactorDefinitionSpec, Arc<dyn FactorComputer>)> {
     vec![
         feature_factor(
-            "liquidity_depth",
+            &LIQUIDITY_DEPTH,
             FactorFamily::Liquidity,
-            FeatureName::from_static("book.visible_liquidity_usd"),
+            book::VISIBLE_LIQUIDITY_USD,
             FactorDirection::Positive,
             NormalizationSpec::Rank,
             true,
             "visible liquidity",
         ),
         feature_factor(
-            "spread_efficiency",
+            &SPREAD_EFFICIENCY,
             FactorFamily::Liquidity,
-            FeatureName::from_static("book.spread_bps"),
+            book::SPREAD_BPS,
             FactorDirection::Negative,
             NormalizationSpec::Logistic {
                 k: Decimal::new(1, 2),
@@ -76,9 +84,9 @@ pub fn generic_factors(
             "top-of-book spread",
         ),
         feature_factor(
-            "book_imbalance",
+            &BOOK_IMBALANCE,
             FactorFamily::Microstructure,
-            FeatureName::from_static("book.depth_imbalance"),
+            book::DEPTH_IMBALANCE,
             FactorDirection::Positive,
             NormalizationSpec::MinMax {
                 lo: Decimal::NEGATIVE_ONE,
@@ -88,9 +96,9 @@ pub fn generic_factors(
             "depth imbalance",
         ),
         feature_factor(
-            "momentum",
+            &MOMENTUM,
             FactorFamily::Momentum,
-            windowed_name("ts.momentum_", &features.momentum_windows_secs, 300),
+            windowed_momentum(features),
             FactorDirection::Positive,
             NormalizationSpec::ZScore {
                 clamp_sigma: Decimal::from(3),
@@ -99,9 +107,9 @@ pub fn generic_factors(
             "momentum",
         ),
         feature_factor(
-            "mean_reversion",
+            &MEAN_REVERSION,
             FactorFamily::MeanReversion,
-            FeatureName::from_static("ts.price_reversal"),
+            ts::PRICE_REVERSAL,
             FactorDirection::Positive,
             NormalizationSpec::ZScore {
                 clamp_sigma: Decimal::from(3),
@@ -110,9 +118,9 @@ pub fn generic_factors(
             "price reversal",
         ),
         feature_factor(
-            "volatility_regime",
+            &VOLATILITY_REGIME,
             FactorFamily::Volatility,
-            windowed_name("ts.realized_vol_", &features.volatility_windows_secs, 900),
+            windowed_realized_vol(features),
             FactorDirection::Negative,
             NormalizationSpec::Logistic {
                 k: Decimal::from(50),
@@ -122,9 +130,9 @@ pub fn generic_factors(
             "realized volatility",
         ),
         feature_factor(
-            "market_activity",
+            &MARKET_ACTIVITY,
             FactorFamily::Activity,
-            FeatureName::from_static("micro.quote_update_rate"),
+            micro::QUOTE_UPDATE_RATE,
             FactorDirection::Positive,
             NormalizationSpec::Logistic {
                 k: Decimal::ONE,
@@ -134,9 +142,9 @@ pub fn generic_factors(
             "quote update rate",
         ),
         feature_factor(
-            "time_to_resolution",
+            &TIME_TO_RESOLUTION,
             FactorFamily::Resolution,
-            FeatureName::from_static("market.time_to_resolution_secs"),
+            market::TIME_TO_RESOLUTION_SECS,
             FactorDirection::Positive,
             NormalizationSpec::Logistic {
                 k: Decimal::new(1, 5),
@@ -151,7 +159,7 @@ pub fn generic_factors(
 
 /// Build a single-feature `(spec, computer)` pair.
 fn feature_factor(
-    name: &'static str,
+    name: &FactorName,
     family: FactorFamily,
     input: FeatureName,
     direction: FactorDirection,
@@ -159,17 +167,18 @@ fn feature_factor(
     required: bool,
     headline_label: &'static str,
 ) -> (FactorDefinitionSpec, Arc<dyn FactorComputer>) {
-    let definition_id = factor_definition_id(name);
+    let name_str = name.as_str();
+    let definition_id = factor_definition_id(name_str);
     let quality_gates = if required {
         vec![FactorQualityGate {
-            name: format!("{name}_present"),
+            name: format!("{name_str}_present"),
             min_confidence: Probability::new(Decimal::new(1, 1)),
         }]
     } else {
         Vec::new()
     };
     let spec = FactorDefinitionSpec {
-        name: FactorName::from_static(name),
+        name: name.clone(),
         family,
         input_features: vec![input.clone()],
         output_kind: FactorOutputKind::NormalizedScore,
@@ -189,9 +198,9 @@ fn feature_factor(
 
 /// Build the data-quality `(spec, computer)` pair.
 fn data_quality_factor() -> (FactorDefinitionSpec, Arc<dyn FactorComputer>) {
-    let definition_id = factor_definition_id("data_quality");
+    let definition_id = factor_definition_id(DATA_QUALITY.as_str());
     let spec = FactorDefinitionSpec {
-        name: FactorName::from_static("data_quality"),
+        name: DATA_QUALITY,
         family: FactorFamily::DataQuality,
         input_features: Vec::new(),
         output_kind: FactorOutputKind::NormalizedScore,
@@ -210,11 +219,24 @@ fn data_quality_factor() -> (FactorDefinitionSpec, Arc<dyn FactorComputer>) {
     (spec, computer)
 }
 
-/// Resolve a windowed feature name from the configured windows (first window, or
-/// `default` when none is configured — the feature is then simply absent).
-fn windowed_name(prefix: &str, windows: &[u64], default: u64) -> FeatureName {
-    let window = windows.first().copied().unwrap_or(default);
-    FeatureName::new(format!("{prefix}{window}s"))
+/// Resolve the momentum feature from configured windows (first window, or 300s).
+fn windowed_momentum(features: &FeaturesConfig) -> FeatureName {
+    let window = features
+        .momentum_windows_secs
+        .first()
+        .copied()
+        .unwrap_or(300);
+    FeatureName::ts_momentum(window)
+}
+
+/// Resolve the realized-volatility feature from configured windows (first, or 900s).
+fn windowed_realized_vol(features: &FeaturesConfig) -> FeatureName {
+    let window = features
+        .volatility_windows_secs
+        .first()
+        .copied()
+        .unwrap_or(900);
+    FeatureName::ts_realized_vol(window)
 }
 
 /// A factor backed by one numeric feature, extracted via the feature's canonical
@@ -299,11 +321,11 @@ impl FactorComputer for DataQualityFactor {
         } else {
             Decimal::from(missing) / Decimal::from(total)
         };
-        let missing_penalty = (missing_ratio * Decimal::new(5, 1)).round_dp(RAW_SCALE);
+        let missing_penalty = (missing_ratio * Decimal::new(5, 1)).round_dp(RESEARCH_DECIMAL_SCALE);
         let staleness_penalty = staleness_penalty(features.staleness_ms);
         let raw = (base - missing_penalty - staleness_penalty)
             .clamp(Decimal::ZERO, Decimal::ONE)
-            .round_dp(RAW_SCALE);
+            .round_dp(RESEARCH_DECIMAL_SCALE);
         let drivers = vec![
             FactorDriver {
                 feature_name: FeatureName::from_static("data_quality.base"),
@@ -360,6 +382,7 @@ fn data_quality_confidence(status: DataQualityStatus) -> Decimal {
 /// Staleness penalty in `[0, 0.5]`: linear in age, fully penalized at 60s.
 fn staleness_penalty(staleness_ms: u64) -> Decimal {
     let cap = Decimal::new(5, 1);
-    let penalty = (Decimal::from(staleness_ms) / Decimal::from(60_000u64)).round_dp(RAW_SCALE);
+    let penalty =
+        (Decimal::from(staleness_ms) / Decimal::from(60_000u64)).round_dp(RESEARCH_DECIMAL_SCALE);
     penalty.min(cap)
 }

@@ -19,7 +19,10 @@ use crate::{
         resolved::{MarketWindowSnapshot, ResolvedBook, ResolvedMarketContext},
         schema::{FeatureSchema, FeatureSpec, StalenessRule},
         timeseries::TimeSeriesFeatureBuilder,
-        value::{EvidenceSourceRef, FeatureName, FeatureValue, NullReason, SubstitutionAudit},
+        value::{
+            EvidenceSourceRef, FeatureName, FeatureValue, NullReason, SubstitutionAudit,
+            merged_required_features,
+        },
     },
     selection::SelectedMarket,
 };
@@ -226,7 +229,7 @@ impl ConfiguredFeatureBuilder {
             }
         }
 
-        let required = required_set(required_features, config);
+        let required = merged_required_features(required_features, config);
         let assembly = self.assemble(&raw, &required, data_quality, resolved.as_of);
 
         let book_age_ms = book_age_ms(resolved.as_of, resolved.book.as_ref());
@@ -305,7 +308,7 @@ impl ConfiguredFeatureBuilder {
     fn assemble(
         &self,
         raw: &BTreeMap<FeatureName, RawFeature>,
-        required: &HashSet<String>,
+        required: &HashSet<FeatureName>,
         data_quality: &DataQualityConfig,
         as_of: DateTime<Utc>,
     ) -> Assembly {
@@ -316,7 +319,7 @@ impl ConfiguredFeatureBuilder {
         let mut degraded = false;
 
         for spec in self.schema.specs() {
-            let is_required = required.contains(spec.name.as_str());
+            let is_required = required.contains(&spec.name);
             let raw_feature = raw.get(&spec.name);
             let resolved = resolve_value(raw_feature, spec, as_of, data_quality);
 
@@ -440,18 +443,6 @@ fn staleness_breach(
 /// Non-negative age in milliseconds of `observed_at` relative to `as_of`.
 fn age_ms(as_of: DateTime<Utc>, observed_at: DateTime<Utc>) -> u64 {
     u64::try_from((as_of - observed_at).num_milliseconds()).unwrap_or(0)
-}
-
-/// Merge per-feature required sets (typed model requirements + config strings).
-fn required_set(required: &[FeatureName], config: &FeaturesConfig) -> HashSet<String> {
-    let mut set: HashSet<String> = required
-        .iter()
-        .map(|name| name.as_str().to_owned())
-        .collect();
-    for name in &config.required_features {
-        set.insert(name.clone());
-    }
-    set
 }
 
 /// Append an evidence ref unless an identical one is already present.

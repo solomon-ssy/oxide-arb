@@ -1,20 +1,31 @@
 //! Research plane bundle (Phase 3+): artifacts, selection, feature + factor pipelines.
 
-use super::{DataBundle, InfraBundle};
+use super::{DataBundle, GovernanceBundle, InfraBundle};
 use crate::{
     pipeline::{
         feature_window_provider::FeatureWindowProvider,
         market_candidate_provider::MarketCandidateProvider,
     },
-    service::{factor_pipeline::FactorPipelineService, feature_pipeline::FeaturePipelineService},
+    service::{
+        factor_pipeline::FactorPipelineService,
+        feature_pipeline::FeaturePipelineService,
+        model_runner::{DispatcherAlertSink, ModelRunner},
+    },
 };
 use quant_pivot_models::config::DeployConfig;
 use quant_pivot_repository::{
-    postgres::{PgFactorRepository, PgFeatureRepository, PgMarketSelectionRepository},
-    traits::{FactorRepository, FeatureRepository, MarketSelectionRepository},
+    postgres::{
+        PgFactorRepository, PgFeatureRepository, PgMarketSelectionRepository,
+        PgModelRegistryRepository, PgModelRunRepository,
+    },
+    traits::{
+        FactorRepository, FeatureRepository, MarketSelectionRepository, ModelRegistryRepository,
+        ModelRunRepository,
+    },
 };
 use quant_pivot_research::{
     artifact::{ArtifactStore, LocalArtifactStore},
+    model::DefaultModelRuntimeFactoryBuilder,
     selection::{ConfiguredMarketSelector, MarketSelector},
 };
 use std::sync::Arc;
@@ -27,6 +38,8 @@ pub struct ResearchBundleDeps<'a> {
     pub infra: &'a InfraBundle,
     /// Live data plane (books, registry, PIT source for online feature builds).
     pub data: &'a DataBundle,
+    /// Governance plane (operator alert dispatcher for inference degradation).
+    pub governance: &'a GovernanceBundle,
 }
 
 /// Research plane: selection, feature/factor pipelines, and artifact store (Phase 3+).
@@ -46,7 +59,13 @@ pub struct ResearchBundle {
     /// Postgres persistence for factor definitions + values (3.3).
     pub factor_repo: Arc<dyn FactorRepository>,
     /// Online factor build loop: compute → partition → persist → emit (3.3).
-    pub factor_pipeline: FactorPipelineService,
+    pub factor_pipeline: Arc<FactorPipelineService>,
+    /// Model-run persistence (create / finalize live + shadow runs) (3.4).
+    pub model_run_repo: Arc<dyn ModelRunRepository>,
+    /// Model registry persistence (resolve active / shadow versions) (3.4).
+    pub model_registry_repo: Arc<dyn ModelRegistryRepository>,
+    /// Online inference orchestrator: selection/features/factors → candidates (3.4).
+    pub model_runner: Arc<ModelRunner>,
 }
 
 impl ResearchBundle {
@@ -78,10 +97,29 @@ impl ResearchBundle {
         );
         let factor_repo: Arc<dyn FactorRepository> =
             Arc::new(PgFactorRepository::new(deps.infra.pg.connection().clone()));
-        let factor_pipeline = FactorPipelineService::new(
+        let factor_pipeline = Arc::new(FactorPipelineService::new(
             Arc::clone(&factor_repo),
             Arc::clone(&deps.infra.factor_event_writer),
+        ));
+
+        let model_run_repo: Arc<dyn ModelRunRepository> = Arc::new(PgModelRunRepository::new(
+            deps.infra.pg.connection().clone(),
+        ));
+        let model_registry_repo: Arc<dyn ModelRegistryRepository> = Arc::new(
+            PgModelRegistryRepository::new(deps.infra.pg.connection().clone()),
         );
+        let model_runner = Arc::new(ModelRunner::new(
+            Arc::clone(&model_run_repo),
+            Arc::clone(&model_registry_repo),
+            Arc::new(DefaultModelRuntimeFactoryBuilder::new(Arc::clone(
+                &artifact_store,
+            ))),
+            Arc::clone(&factor_pipeline),
+            Arc::clone(&deps.infra.signal_candidate_event_writer),
+            Arc::new(DispatcherAlertSink::new(Arc::clone(
+                &deps.governance.alerts,
+            ))),
+        ));
 
         Self {
             artifact_store,
@@ -92,6 +130,9 @@ impl ResearchBundle {
             feature_pipeline,
             factor_repo,
             factor_pipeline,
+            model_run_repo,
+            model_registry_repo,
+            model_runner,
         }
     }
 }

@@ -7,18 +7,33 @@
 //! classical trainer/runtime.
 
 pub mod artifact;
+pub mod degrade;
+pub mod factory;
 pub mod runtime;
 pub mod signal;
 pub mod trainer;
+pub mod weighted;
 
 pub use artifact::{
-    ClassicalModelArtifact, FactorWeight, ModelArtifact, ModelArtifactHeader,
-    WeightedFactorModelArtifact,
+    CalibratedReturnModel, ClassicalModelArtifact, DataQualityMultipliers, FactorWeight,
+    HeuristicReturnModel, HorizonMultipliers, LiquidityMultipliers, LiquidityTier, ModelArtifact,
+    ModelArtifactHeader, ReturnCurvePoint, ReturnEstimate, ReturnModelSpec, ScoreMultiplierSpec,
+    SubstitutionConfidenceRules, TrainingObjectiveReport, WeightedFactorModelArtifact,
+};
+pub use degrade::{DegradeAction, InferenceStage, degrade_action};
+pub use factory::{
+    ActiveSchemaBinding, DefaultModelRuntimeFactory, DefaultModelRuntimeFactoryBuilder,
+    ModelRuntimeFactoryBuilder,
 };
 pub use runtime::{
     ClassicalKind, FactorInferenceRow, FactorInferenceTable, InferenceMatrix, InferenceMatrixRow,
-    ModelFamily, ModelRuntimeFactory, ModelRuntimeInput, ModelRuntimeMetrics, ModelRuntimeOutput,
-    ModelRuntimeWarning, ParseModelFamilyError, QuantModelRuntime,
+    MarketInferenceContext, ModelFamily, ModelRuntimeFactory, ModelRuntimeInput,
+    ModelRuntimeMetrics, ModelRuntimeOutput, ModelRuntimeWarning, ParseModelFamilyError,
+    QuantModelRuntime,
 };
-pub use signal::{FactorContribution, ModelExplanation, SignalCandidate, SignalWarning};
+pub use signal::{
+    FactorContribution, ModelExplanation, SignalCandidate, SignalWarning, signal_candidate_event,
+    signal_candidate_events,
+};
 pub use trainer::{ModelTrainer, TrainModelRequest, TrainedModelArtifact};
+pub use weighted::WeightedFactorRuntime;

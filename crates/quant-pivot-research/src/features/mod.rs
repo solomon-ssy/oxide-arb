@@ -15,6 +15,7 @@ mod builder;
 mod domain;
 mod market;
 mod microstructure;
+pub mod names;
 mod null_policy;
 mod persistence;
 mod resolved;
@@ -38,10 +39,11 @@ pub use resolved::{
 };
 pub use schema::{
     FeatureSchema, FeatureSpec, FeatureUnit, NullPolicy, PitRule, SourceRequirement, StalenessRule,
+    validate_required_features,
 };
 pub use value::{
     EvidenceSourceKind, EvidenceSourceRef, FeatureName, FeatureValue, FeatureValueKind,
-    FeatureVector, NullReason, SubstitutionAudit,
+    FeatureVector, NullReason, SubstitutionAudit, merged_required_features,
 };
 pub use writer::feature_events;
 

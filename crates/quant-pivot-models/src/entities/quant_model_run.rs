@@ -1,7 +1,7 @@
 //! `quant_model_run` table entity.
 
 use crate::{
-    enums::quant::{ModelRunKind, ModelRunStatus},
+    enums::quant::{ModelRunErrorCode, ModelRunKind, ModelRunStatus},
     types::{ContentHash, MarketSelectionId, ModelRunId, ModelVersionId, RuntimeConfigVersionId},
 };
 use chrono::{DateTime, Utc};
@@ -24,7 +24,7 @@ pub struct Model {
     #[sea_orm(column_type = "JsonBinary")]
     pub metrics_json: Json,
     #[sea_orm(column_type = "Text", nullable)]
-    pub error_code: Option<String>,
+    pub error_code: Option<ModelRunErrorCode>,
     #[sea_orm(column_type = "Text", nullable)]
     pub error_message: Option<String>,
     pub started_at: DateTime<Utc>,

@@ -96,4 +96,31 @@ pub enum ResearchError {
         /// Underlying serialization failure detail.
         detail: String,
     },
+
+    /// A model artifact violated a structural invariant (e.g. unnormalized
+    /// weights, an empty weight set, a non-monotone calibration curve).
+    #[error("invalid model artifact: {detail}")]
+    InvalidModelArtifact {
+        /// Context describing the violated invariant.
+        detail: String,
+    },
+
+    /// A loaded model runtime could not score the supplied input (e.g. a
+    /// factor-table runtime handed a feature-matrix input, or a market lacked
+    /// the executable price needed to reference an entry).
+    #[error("model inference failed: {detail}")]
+    Inference {
+        /// Context describing the failure.
+        detail: String,
+    },
+
+    /// A concrete model family is recognized but its runtime is not linked in
+    /// this build/phase (classical → 3.6, ONNX → Phase 06+).
+    #[error("model runtime not available for family `{family}`: {detail}")]
+    RuntimeUnavailable {
+        /// The model family whose runtime is not linked.
+        family: String,
+        /// Context (which phase introduces it).
+        detail: String,
+    },
 }

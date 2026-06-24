@@ -17,7 +17,10 @@ pub use bundles::*;
 use crate::{
     governance::RuntimeModeHandle,
     runtime_config::{RuntimeConfigApplicator, RuntimeConfigStore},
-    service::{factor_pipeline::FactorPipelineService, feature_pipeline::FeaturePipelineService},
+    service::{
+        factor_pipeline::FactorPipelineService, feature_pipeline::FeaturePipelineService,
+        model_runner::ModelRunner,
+    },
 };
 use flume::Receiver;
 use parking_lot::Mutex;
@@ -66,8 +69,13 @@ impl AppContext {
     }
 
     /// Online factor pipeline (3.3): invoke per round after feature vectors persist.
-    pub const fn factor_pipeline(&self) -> &FactorPipelineService {
-        &self.research.factor_pipeline
+    pub fn factor_pipeline(&self) -> &FactorPipelineService {
+        self.research.factor_pipeline.as_ref()
+    }
+
+    /// Online inference orchestrator (3.4): selection/features/factors → candidates.
+    pub fn model_runner(&self) -> Arc<ModelRunner> {
+        Arc::clone(&self.research.model_runner)
     }
 
     /// Postgres persistence for factor definitions and values (3.3).

@@ -5,7 +5,7 @@ use crate::{
     observability::{
         book_fact_writer::BookFactWriter, fact_lag::FactLagTracker,
         factor_fact_writer::FactorEventWriter, feature_fact_writer::FeatureEventWriter,
-        metrics_hub::MetricsHub,
+        metrics_hub::MetricsHub, signal_candidate_fact_writer::SignalCandidateEventWriter,
     },
 };
 use prometheus::IntCounter;
@@ -13,7 +13,7 @@ use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
     clickhouse::{
         BookL2ReplayRow, BookMicrostructureRow, BookSnapshotRow, QuantFactorEventRow,
-        QuantFeatureEventRow, TickEventRow,
+        QuantFeatureEventRow, QuantSignalCandidateEventRow, TickEventRow,
     },
     config::DeployConfig,
 };
@@ -51,6 +51,8 @@ pub struct InfraBundle {
     pub feature_event_writer: Arc<FeatureEventWriter>,
     /// Long-format factor-event sink (`quant_factor_event`).
     pub factor_event_writer: Arc<FactorEventWriter>,
+    /// Pre-portfolio signal-candidate sink (`quant_signal_candidate_event`).
+    pub signal_candidate_event_writer: Arc<SignalCandidateEventWriter>,
     /// Point-in-time read port over quant `ClickHouse` facts (feature windows).
     pub quant_fact_read: Arc<dyn QuantFactReadRepository>,
     /// Flush workers for each book fact stream, registered on the runner at boot.
@@ -114,6 +116,13 @@ impl InfraBundle {
         );
         let factor_event_writer =
             build_factor_event_writer(&ch, &ch_write_manager, &metrics, deploy, &fact_writer_queue);
+        let signal_candidate_event_writer = build_signal_candidate_event_writer(
+            &ch,
+            &ch_write_manager,
+            &metrics,
+            deploy,
+            &fact_writer_queue,
+        );
 
         Ok(Self {
             pg,
@@ -129,6 +138,7 @@ impl InfraBundle {
             book_fact_writer,
             feature_event_writer,
             factor_event_writer,
+            signal_candidate_event_writer,
             quant_fact_read,
             fact_writer_queue,
         })
@@ -283,6 +293,40 @@ fn build_factor_event_writer(
         config,
     );
     Arc::new(FactorEventWriter::new(stream))
+}
+
+/// Wire the pre-portfolio signal-candidate async writer
+/// (`quant_signal_candidate_event`).
+fn build_signal_candidate_event_writer(
+    ch_pool: &Arc<ClickHousePool>,
+    write_manager: &Arc<ChWriteManager>,
+    metrics: &Arc<MetricsHub>,
+    deploy: &DeployConfig,
+    queue: &PendingTaskQueue,
+) -> Arc<SignalCandidateEventWriter> {
+    let ch = &deploy.db.clickhouse;
+    let capacity = ch.batch_size.saturating_mul(4).max(8_192);
+    let flush_interval = Duration::from_secs(ch.flush_interval_secs.max(1));
+    let config = AsyncWriterConfig::new("quant_signal_candidate_event")
+        .capacity(capacity)
+        .batch_size(ch.batch_size)
+        .flush_interval(flush_interval);
+    let drops = metrics
+        .async_writer_dropped
+        .with_label_values(&["quant_signal_candidate_event"]);
+    let stream = spawn_fact_stream::<QuantSignalCandidateEventRow>(
+        queue,
+        TaskId::SignalCandidateEventsWriter,
+        Arc::new(ChFactWriter::new(
+            Arc::clone(ch_pool),
+            Arc::clone(write_manager),
+            "quant_signal_candidate_event",
+        )),
+        drops,
+        metrics.async_writer_observability("quant_signal_candidate_event"),
+        config,
+    );
+    Arc::new(SignalCandidateEventWriter::new(stream))
 }
 
 /// Build one fact stream: wire an `AsyncWriter` to a `ChFactWriter` sink and

@@ -27,7 +27,7 @@ use quant_pivot_repository::traits::FeatureRepository;
 use quant_pivot_research::{
     features::{
         ConfiguredFeatureBuilder, FeatureName, FeatureSchema, FeatureVector, MarketWindowSnapshot,
-        NullReason, PitView, feature_events,
+        NullReason, PitView, feature_events, merged_required_features,
     },
     selection::{ModelFeatureRequirements, SelectedMarket},
 };
@@ -66,7 +66,7 @@ pub struct RejectedMarket {
     /// The primary outcome token, when scoped.
     pub token_id: Option<TokenId>,
     /// Required / critical features that were missing, with their reasons.
-    pub missing_required: Vec<(String, NullReason)>,
+    pub missing_required: Vec<(FeatureName, NullReason)>,
 }
 
 /// Outcome of one feature-plane round.
@@ -144,7 +144,7 @@ impl FeaturePipelineService {
 
         // Partition: a vector whose quality is `Insufficient` is excluded — never
         // persisted, never emitted, never offered downstream.
-        let required_names = required_name_set(required, request.features);
+        let required_names = merged_required_features(required, request.features);
         let mut accepted = Vec::with_capacity(vectors.len());
         let mut rejected = Vec::new();
         let schema = builder.schema();
@@ -203,7 +203,7 @@ impl FeaturePipelineService {
 /// were missing, with their reasons.
 fn reject_market(
     vector: &FeatureVector,
-    required_names: &HashSet<String>,
+    required_names: &HashSet<FeatureName>,
     schema: &FeatureSchema,
 ) -> RejectedMarket {
     let missing_required = vector
@@ -212,8 +212,8 @@ fn reject_market(
         .filter_map(|(name, value)| {
             let reason = value.null_reason()?;
             let spec = schema.by_name(name)?;
-            let is_required = spec.critical || required_names.contains(name.as_str());
-            is_required.then(|| (name.as_str().to_owned(), reason))
+            let is_required = spec.critical || required_names.contains(name);
+            is_required.then_some((name.clone(), reason))
         })
         .collect();
     RejectedMarket {
@@ -221,17 +221,6 @@ fn reject_market(
         token_id: vector.token_id.clone(),
         missing_required,
     }
-}
-
-/// The merged required-feature name set: model requirements plus config
-/// `required_features` (mirrors the builder's own rejection criterion).
-fn required_name_set(required: &[FeatureName], config: &FeaturesConfig) -> HashSet<String> {
-    let mut set: HashSet<String> = required
-        .iter()
-        .map(|name| name.as_str().to_owned())
-        .collect();
-    set.extend(config.required_features.iter().cloned());
-    set
 }
 
 /// Empty (PIT-correct) windows for every market, used when the active schema

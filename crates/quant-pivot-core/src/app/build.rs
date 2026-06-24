@@ -41,6 +41,7 @@ impl AppContext {
             deploy: &deploy,
             infra: &infra,
             data: &data,
+            governance: &governance,
         });
         let (events, event_rx) = CoreEventPublisher::bounded(4096);
 

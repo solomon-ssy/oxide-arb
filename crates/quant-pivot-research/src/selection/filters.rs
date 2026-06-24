@@ -21,7 +21,7 @@ use quant_pivot_models::{
     domain::MarketCandidate,
     enums::{common::MarketCategory, market::MarketStatus},
     runtime_config::{DataQualityConfig, DecimalString, SelectionConfig},
-    types::{SelectionExclusionSummary, Usd},
+    types::{Bps, SelectionExclusionSummary, Usd},
 };
 use rust_decimal::Decimal;
 
@@ -203,7 +203,7 @@ impl SelectionFilter for LiquidityFilter {
     }
 }
 
-/// Top-of-book spread in basis points: `(ask - bid) / mid * 10_000`.
+/// Top-of-book spread in basis points: `(ask - bid) / mid × 10_000`.
 ///
 /// Returns `None` when the book is one-sided or the mid is non-positive, so the
 /// caller fails closed on an unquotable market.
@@ -211,10 +211,7 @@ fn spread_bps(candidate: &MarketCandidate) -> Option<Decimal> {
     let bid = candidate.best_bid?.inner();
     let ask = candidate.best_ask?.inner();
     let mid = (bid + ask) / Decimal::from(2);
-    if mid <= Decimal::ZERO {
-        return None;
-    }
-    Some((ask - bid) / mid * Decimal::from(10_000))
+    Bps::relative(ask - bid, mid).map(Bps::inner)
 }
 
 /// Stage 4 — data-quality gate over book freshness and fact lag.

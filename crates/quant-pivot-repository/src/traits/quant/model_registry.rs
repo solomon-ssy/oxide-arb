@@ -13,6 +13,13 @@ pub trait ModelRegistryRepository: Send + Sync {
         version: NewModelVersion,
     ) -> Result<ModelVersionInfo, StorageError>;
 
+    /// Look up a model version by id (used by the runtime factory to resolve the
+    /// active / shadow artifact for a round).
+    async fn find_model_version_by_id(
+        &self,
+        model_version_id: &ModelVersionId,
+    ) -> Result<Option<ModelVersionInfo>, StorageError>;
+
     async fn publish_model_version(
         &self,
         model_version_id: &ModelVersionId,

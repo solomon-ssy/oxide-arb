@@ -142,24 +142,28 @@ RuntimeConfig {
 
 字段：
 
-- `enabled_factor_families`
+- `enabled_factor_families` — `Vec<FactorFamily>`（仅 generic 家族；domain 因子由 category 路由）
 - `factor_weights`
 - `min_factor_confidence`
 - `missing_factor_policy`
-- `published_factor_set_id`
-- `shadow_factor_set_id`
+
+因子集合身份由 `enabled_factor_families` 推导，经 `factor_schema_hash` 绑定模型 artifact；无独立的 factor set id 字段。
 
 ### 2.6 `model`
 
-字段：
+字段（schema 全集；**在线消费 phase 见下表**）：
 
-- `active_model_version_id`
-- `shadow_model_version_id`
-- `min_model_confidence`
-- `min_quality_gate_age_secs`
-- `prediction_horizon_secs`
-- `candidate_score_floor`
-- `shadow_diff_threshold`
+| 字段 | 在线消费 phase | 说明 |
+|------|----------------|------|
+| `active_model_version_id` | **3.4** | active 已发布版本 |
+| `shadow_model_version_id` | **3.4** | 可选 shadow |
+| `min_model_confidence` | **3.4** | runner `accepted` 过滤 + CH `rejection_reason` |
+| `candidate_score_floor` | **3.4** | 同上 |
+| `shadow_diff_threshold` | **3.4** | shadow vs active diff（metrics）；3.7 持久化/告警 |
+| `min_quality_gate_age_secs` | **3.7** | quality gate 报告 freshness；3.4 **不读** |
+| `prediction_horizon_secs` | **3.6 写入 artifact** | 在线读 artifact，不读 config（3.4 §4.2） |
+
+完整 defer 索引：[`phase-03/README.md`](phase-03/README.md) §6。
 
 ### 2.7 `reports`
 

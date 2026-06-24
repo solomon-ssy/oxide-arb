@@ -7,27 +7,29 @@
 //! fabricating a default. The `(family, name)` catalog [`DOMAIN_FEATURES`] is the
 //! single source the schema registry and the skeleton both read from.
 
-use crate::{
-    features::{
-        builder::{FeatureComputeCtx, FeatureGroupBuilder, RawFeature},
-        value::{FeatureName, NullReason},
-    },
-    vertical::DomainFamily,
+use quant_pivot_models::{enums::domain::DomainFamily, runtime_config::FeatureFamily};
+
+use crate::features::{
+    builder::{FeatureComputeCtx, FeatureGroupBuilder, RawFeature},
+    names::domain as domain_names,
+    value::{FeatureName, NullReason},
 };
-use quant_pivot_models::runtime_config::FeatureFamily;
 
 /// The canonical domain feature catalog: one representative feature per vertical.
 ///
 /// Both [`crate::features::schema::FeatureSchema::build`] and
 /// [`DomainFeatureSkeleton`] read this so names never drift.
-pub const DOMAIN_FEATURES: [(DomainFamily, &str); 5] = [
-    (DomainFamily::Sports, "domain.sports.pre_match_move"),
-    (DomainFamily::Politics, "domain.politics.poll_momentum"),
-    (DomainFamily::Crypto, "domain.crypto.underlying_beta"),
-    (DomainFamily::Weather, "domain.weather.forecast_revision"),
+pub const DOMAIN_FEATURES: [(DomainFamily, FeatureName); 5] = [
+    (DomainFamily::Sports, domain_names::SPORTS_PRE_MATCH_MOVE),
+    (DomainFamily::Politics, domain_names::POLITICS_POLL_MOMENTUM),
+    (DomainFamily::Crypto, domain_names::CRYPTO_UNDERLYING_BETA),
+    (
+        DomainFamily::Weather,
+        domain_names::WEATHER_FORECAST_REVISION,
+    ),
     (
         DomainFamily::Geopolitics,
-        "domain.geopolitics.news_shock_decay",
+        domain_names::GEOPOLITICS_NEWS_SHOCK_DECAY,
     ),
 ];
 
@@ -55,12 +57,7 @@ impl FeatureGroupBuilder for DomainFeatureSkeleton {
     fn compute(&self, _ctx: &FeatureComputeCtx<'_>) -> Vec<RawFeature> {
         DOMAIN_FEATURES
             .into_iter()
-            .map(|(_, name)| {
-                RawFeature::missing(
-                    FeatureName::from_static(name),
-                    NullReason::DomainDataMissing,
-                )
-            })
+            .map(|(_, name)| RawFeature::missing(name, NullReason::DomainDataMissing))
             .collect()
     }
 }

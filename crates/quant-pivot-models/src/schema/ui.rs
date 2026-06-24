@@ -345,7 +345,7 @@ fn factor_fields() -> Vec<FieldUiEntry> {
             "Enabled factor families",
             "启用因子族",
             10,
-            Some(FieldWidget::StringList),
+            Some(FieldWidget::EnumSet),
             None,
         ),
         entry(
@@ -370,22 +370,6 @@ fn factor_fields() -> Vec<FieldUiEntry> {
             "缺失因子策略",
             40,
             Some(FieldWidget::EnumSelect),
-            None,
-        ),
-        entry(
-            "factors.published_factor_set_id",
-            "Published factor set",
-            "已发布因子集",
-            50,
-            Some(FieldWidget::PlainString),
-            None,
-        ),
-        entry(
-            "factors.shadow_factor_set_id",
-            "Shadow factor set",
-            "影子因子集",
-            60,
-            Some(FieldWidget::PlainString),
             None,
         ),
     ]

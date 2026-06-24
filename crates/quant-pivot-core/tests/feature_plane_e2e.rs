@@ -37,7 +37,7 @@ use quant_pivot_repository::{
     traits::{EventRepository, FeatureRepository, MarketRepository, QuantFactReadRepository},
 };
 use quant_pivot_research::{
-    features::{FeatureName, PitView},
+    features::{PitView, names},
     hashing::ResearchHasher,
     selection::{
         ConfiguredMarketSelector, MarketSelectionBuildRequest, MarketSelector,
@@ -294,7 +294,7 @@ async fn create_feature_vector_then_find() {
         data_quality: DataQualityConfig::default(),
         features: features.clone(),
         model_requirements: ModelFeatureRequirements {
-            required_features: vec![FeatureName::from_static("book.best_bid")],
+            required_features: vec![names::book::BEST_BID],
         },
         source_delay_secs: 0,
     };
@@ -340,11 +340,7 @@ async fn create_feature_vector_then_find() {
     assert_eq!(result.accepted.len(), 1);
     assert!(result.rejected.is_empty());
     let vector = &result.accepted[0];
-    assert!(
-        vector
-            .values
-            .contains_key(&FeatureName::from_static("book.best_bid"))
-    );
+    assert!(vector.values.contains_key(&names::book::BEST_BID));
 
     let expected_hash = ResearchHasher::feature_vector(vector).expect("hash");
     let persisted = &result.persisted[0];

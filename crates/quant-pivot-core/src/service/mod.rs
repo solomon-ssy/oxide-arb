@@ -4,5 +4,6 @@ pub mod factor_pipeline;
 pub mod feature_pipeline;
 pub mod gamma;
 pub mod market_selection;
+pub mod model_runner;
 pub mod system_status_nudge;
 pub mod ws_subscription;

@@ -9,7 +9,7 @@ use sea_orm::{
 use crate::{
     idens::{
         market::Market, quant_factor_definition::QuantFactorDefinition,
-        quant_feature_vector::QuantFeatureVector,
+        quant_feature_vector::QuantFeatureVector, quant_model_run::QuantModelRun,
     },
     schema::{
         column,
@@ -44,9 +44,9 @@ pub fn table() -> TableCreateStatement {
         .col(column::uuid_pk(QuantFactorValue::FactorValueId))
         .col(column::uuid_fk(QuantFactorValue::FactorDefinitionId))
         .col(column::uuid_fk(QuantFactorValue::FeatureVectorId))
-        // Owning online round. Not a DB foreign key this phase: the
-        // `quant_model_run` lifecycle (create / finalize) lands in 3.4, which adds
-        // the FK once it owns run creation ordering. Indexed for `list_values_for_run`.
+        // Owning online round. The 3.4 `ModelRunner` creates the `quant_model_run`
+        // row (status `Running`) before the factor plane persists any value, so the
+        // FK below always resolves. Indexed for `list_values_for_run`.
         .col(column::uuid_fk(QuantFactorValue::ModelRunId))
         .col(column::market_id(QuantFactorValue::MarketId))
         .col(
@@ -102,6 +102,13 @@ pub fn table() -> TableCreateStatement {
                 .to(Market::Table, Market::MarketId)
                 .on_delete(ForeignKeyAction::Restrict),
         )
+        .foreign_key(
+            ForeignKey::create()
+                .name("fk_quant_factor_value_model_run")
+                .from(QuantFactorValue::Table, QuantFactorValue::ModelRunId)
+                .to(QuantModelRun::Table, QuantModelRun::ModelRunId)
+                .on_delete(ForeignKeyAction::Restrict),
+        )
         .to_owned()
 }
 
@@ -151,6 +158,7 @@ pub fn dependencies() -> Vec<TableDependency> {
         TableDependency::foreign_key(quant_factor_definition_table_name),
         TableDependency::foreign_key(quant_feature_vector_table_name),
         TableDependency::foreign_key(market_table_name),
+        TableDependency::foreign_key(quant_model_run_table_name),
     ]
 }
 
@@ -172,4 +180,8 @@ fn quant_feature_vector_table_name() -> String {
 
 fn market_table_name() -> String {
     Market::Table.to_string()
+}
+
+fn quant_model_run_table_name() -> String {
+    QuantModelRun::Table.to_string()
 }

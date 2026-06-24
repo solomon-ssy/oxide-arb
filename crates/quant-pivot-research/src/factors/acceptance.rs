@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
 use quant_pivot_models::{
-    enums::quant::DataQualityStatus,
+    enums::{factor::FactorFamily, quant::DataQualityStatus},
     runtime_config::{DecimalString, FactorsConfig, FeaturesConfig, MissingFactorPolicy},
     types::{MarketId, Probability, SchemaVersion, TokenId, Usd},
 };
@@ -17,9 +17,13 @@ use crate::{
 
 // ── Fixtures ────────────────────────────────────────────────────────────────
 
-fn factors_config(families: &[&str], policy: MissingFactorPolicy, floor: &str) -> FactorsConfig {
+fn factors_config(
+    families: &[FactorFamily],
+    policy: MissingFactorPolicy,
+    floor: &str,
+) -> FactorsConfig {
     FactorsConfig {
-        enabled_factor_families: families.iter().map(|f| (*f).to_owned()).collect(),
+        enabled_factor_families: families.to_vec(),
         min_factor_confidence: DecimalString::new(floor),
         missing_factor_policy: policy,
         ..FactorsConfig::default()
@@ -80,7 +84,7 @@ fn in_unit(value: Probability) -> bool {
 
 /// Compute one named factor for the first of a two-market batch under one family.
 fn compute_one(
-    family: &str,
+    family: FactorFamily,
     factor: &str,
     market0: &[(&'static str, FeatureValue)],
     market1: &[(&'static str, FeatureValue)],
@@ -105,7 +109,11 @@ fn compute_one(
 fn factor_normalization_clamps_into_probability() {
     // `book.depth_imbalance` is bounded to [-1, 1] by MinMax; an out-of-range raw
     // is clamped to the bound *and* the clamp is recorded — never silently eaten.
-    let config = factors_config(&["microstructure"], MissingFactorPolicy::ZeroWeight, "0.10");
+    let config = factors_config(
+        &[FactorFamily::Microstructure],
+        MissingFactorPolicy::ZeroWeight,
+        "0.10",
+    );
     let features = FeaturesConfig::default();
     let engine = FactorEngine::new(&config, &features);
     let vector = make_vector(
@@ -128,7 +136,11 @@ fn factor_normalization_clamps_into_probability() {
 
 #[test]
 fn compute_all_batch_rejects_mixed_as_of() {
-    let config = factors_config(&["liquidity"], MissingFactorPolicy::ZeroWeight, "0.10");
+    let config = factors_config(
+        &[FactorFamily::Liquidity],
+        MissingFactorPolicy::ZeroWeight,
+        "0.10",
+    );
     let features = FeaturesConfig::default();
     let engine = FactorEngine::new(&config, &features);
     let as_of = Utc::now();
@@ -160,7 +172,11 @@ fn compute_all_batch_rejects_mixed_as_of() {
 fn cross_sectional_rank_requires_batch() {
     // `liquidity_depth` is Rank (cross-sectional); the single-market path must
     // refuse it rather than fabricate a pseudo cross-section.
-    let config = factors_config(&["liquidity"], MissingFactorPolicy::ZeroWeight, "0.10");
+    let config = factors_config(
+        &[FactorFamily::Liquidity],
+        MissingFactorPolicy::ZeroWeight,
+        "0.10",
+    );
     let features = FeaturesConfig::default();
     let engine = FactorEngine::new(&config, &features);
     let vector = make_vector(
@@ -184,7 +200,11 @@ fn cross_sectional_rank_requires_batch() {
 #[test]
 fn factor_explanation_lists_positive_and_negative_drivers() {
     // The data-quality factor blends a positive base with negative penalties.
-    let config = factors_config(&["data_quality"], MissingFactorPolicy::ZeroWeight, "0.10");
+    let config = factors_config(
+        &[FactorFamily::DataQuality],
+        MissingFactorPolicy::ZeroWeight,
+        "0.10",
+    );
     let features = FeaturesConfig::default();
     let engine = FactorEngine::new(&config, &features);
     let vector = make_vector(
@@ -221,7 +241,11 @@ fn factor_explanation_lists_positive_and_negative_drivers() {
 fn factor_confidence_floor_zero_weights_low_confidence() {
     // Stale data → confidence 0.40 < floor 0.50; under ZeroWeight the factor is
     // present but does not contribute, and the market still proceeds.
-    let config = factors_config(&["microstructure"], MissingFactorPolicy::ZeroWeight, "0.50");
+    let config = factors_config(
+        &[FactorFamily::Microstructure],
+        MissingFactorPolicy::ZeroWeight,
+        "0.50",
+    );
     let features = FeaturesConfig::default();
     let engine = FactorEngine::new(&config, &features);
     let vector = make_vector(
@@ -245,7 +269,11 @@ fn factor_confidence_floor_zero_weights_low_confidence() {
 fn factor_missing_reject_candidate_policy() {
     // `spread_efficiency` is required (quality-gated); a market missing it under
     // RejectCandidate is excluded, while a complete market proceeds.
-    let config = factors_config(&["liquidity"], MissingFactorPolicy::RejectCandidate, "0.50");
+    let config = factors_config(
+        &[FactorFamily::Liquidity],
+        MissingFactorPolicy::RejectCandidate,
+        "0.50",
+    );
     let features = FeaturesConfig::default();
     let engine = FactorEngine::new(&config, &features);
     let as_of = Utc::now();
@@ -288,12 +316,16 @@ fn factor_missing_reject_candidate_policy() {
 fn factor_set_change_changes_schema_hash() {
     let features = FeaturesConfig::default();
     let one = FactorEngine::new(
-        &factors_config(&["liquidity"], MissingFactorPolicy::ZeroWeight, "0.50"),
+        &factors_config(
+            &[FactorFamily::Liquidity],
+            MissingFactorPolicy::ZeroWeight,
+            "0.50",
+        ),
         &features,
     );
     let two = FactorEngine::new(
         &factors_config(
-            &["liquidity", "momentum"],
+            &[FactorFamily::Liquidity, FactorFamily::Momentum],
             MissingFactorPolicy::ZeroWeight,
             "0.50",
         ),
@@ -312,7 +344,7 @@ fn factor_schema_hash_is_order_independent_for_same_set() {
     let features = FeaturesConfig::default();
     let forward = FactorEngine::new(
         &factors_config(
-            &["liquidity", "momentum"],
+            &[FactorFamily::Liquidity, FactorFamily::Momentum],
             MissingFactorPolicy::ZeroWeight,
             "0.50",
         ),
@@ -320,7 +352,7 @@ fn factor_schema_hash_is_order_independent_for_same_set() {
     );
     let reversed = FactorEngine::new(
         &factors_config(
-            &["momentum", "liquidity"],
+            &[FactorFamily::Momentum, FactorFamily::Liquidity],
             MissingFactorPolicy::ZeroWeight,
             "0.50",
         ),
@@ -337,7 +369,7 @@ fn factor_schema_hash_is_order_independent_for_same_set() {
 #[test]
 fn liquidity_depth_factor_basic_compute() {
     let factor = compute_one(
-        "liquidity",
+        FactorFamily::Liquidity,
         "liquidity_depth",
         &[("book.visible_liquidity_usd", usd(25_000))],
         &[("book.visible_liquidity_usd", usd(5_000))],
@@ -349,7 +381,7 @@ fn liquidity_depth_factor_basic_compute() {
 #[test]
 fn spread_efficiency_factor_basic_compute() {
     let factor = compute_one(
-        "liquidity",
+        FactorFamily::Liquidity,
         "spread_efficiency",
         &[("book.spread_bps", bps(80))],
         &[("book.spread_bps", bps(400))],
@@ -361,7 +393,7 @@ fn spread_efficiency_factor_basic_compute() {
 #[test]
 fn book_imbalance_factor_basic_compute() {
     let factor = compute_one(
-        "microstructure",
+        FactorFamily::Microstructure,
         "book_imbalance",
         &[("book.depth_imbalance", dec(Decimal::new(3, 1)))],
         &[("book.depth_imbalance", dec(Decimal::new(-2, 1)))],
@@ -373,7 +405,7 @@ fn book_imbalance_factor_basic_compute() {
 #[test]
 fn momentum_factor_basic_compute() {
     let factor = compute_one(
-        "momentum",
+        FactorFamily::Momentum,
         "momentum",
         &[("ts.momentum_300s", dec(Decimal::new(5, 2)))],
         &[("ts.momentum_300s", dec(Decimal::new(-3, 2)))],
@@ -385,7 +417,7 @@ fn momentum_factor_basic_compute() {
 #[test]
 fn mean_reversion_factor_basic_compute() {
     let factor = compute_one(
-        "mean_reversion",
+        FactorFamily::MeanReversion,
         "mean_reversion",
         &[("ts.price_reversal", dec(Decimal::new(4, 2)))],
         &[("ts.price_reversal", dec(Decimal::new(-1, 2)))],
@@ -397,7 +429,7 @@ fn mean_reversion_factor_basic_compute() {
 #[test]
 fn volatility_regime_factor_basic_compute() {
     let factor = compute_one(
-        "volatility",
+        FactorFamily::Volatility,
         "volatility_regime",
         &[("ts.realized_vol_900s", dec(Decimal::new(8, 2)))],
         &[("ts.realized_vol_900s", dec(Decimal::new(2, 2)))],
@@ -409,7 +441,7 @@ fn volatility_regime_factor_basic_compute() {
 #[test]
 fn market_activity_factor_basic_compute() {
     let factor = compute_one(
-        "activity",
+        FactorFamily::Activity,
         "market_activity",
         &[("micro.quote_update_rate", dec(Decimal::from(3)))],
         &[("micro.quote_update_rate", dec(Decimal::new(5, 1)))],
@@ -421,7 +453,7 @@ fn market_activity_factor_basic_compute() {
 #[test]
 fn time_to_resolution_factor_basic_compute() {
     let factor = compute_one(
-        "resolution",
+        FactorFamily::Resolution,
         "time_to_resolution",
         &[("market.time_to_resolution_secs", count(172_800))],
         &[("market.time_to_resolution_secs", count(3_600))],
@@ -432,7 +464,7 @@ fn time_to_resolution_factor_basic_compute() {
 
 #[test]
 fn data_quality_factor_basic_compute() {
-    let factor = compute_one("data_quality", "data_quality", &[], &[]);
+    let factor = compute_one(FactorFamily::DataQuality, "data_quality", &[], &[]);
     assert!(factor.value.raw_value.is_some());
     assert!(in_unit(factor.value.normalized_score));
 }
@@ -466,7 +498,11 @@ fn varied_batch(count: usize) -> Vec<FeatureVector> {
 fn compute_all_batch_is_deterministic() {
     // The parallel path must produce a byte-identical result run to run: pure
     // computers + quantized normalization mean scheduling cannot perturb output.
-    let config = factors_config(&["liquidity"], MissingFactorPolicy::ZeroWeight, "0.10");
+    let config = factors_config(
+        &[FactorFamily::Liquidity],
+        MissingFactorPolicy::ZeroWeight,
+        "0.10",
+    );
     let features = FeaturesConfig::default();
     let engine = FactorEngine::new(&config, &features);
     let vectors = varied_batch(32);
@@ -486,7 +522,11 @@ fn compute_all_batch_is_deterministic() {
 fn compute_all_batch_preserves_input_order() {
     // `outcomes[i]` must describe `features[i]` so downstream id alignment (the
     // feature-vector foreign key) holds under parallel evaluation.
-    let config = factors_config(&["liquidity"], MissingFactorPolicy::ZeroWeight, "0.10");
+    let config = factors_config(
+        &[FactorFamily::Liquidity],
+        MissingFactorPolicy::ZeroWeight,
+        "0.10",
+    );
     let features = FeaturesConfig::default();
     let engine = FactorEngine::new(&config, &features);
     let vectors = varied_batch(20);
@@ -507,7 +547,7 @@ fn compute_all_batch_serial_and_parallel_agree() {
     // Same inputs, both code paths: the rayon path must be bit-identical to the
     // serial path, including the cross-sectional Rank / ZScore columns.
     let config = factors_config(
-        &["liquidity", "momentum"],
+        &[FactorFamily::Liquidity, FactorFamily::Momentum],
         MissingFactorPolicy::ZeroWeight,
         "0.10",
     );

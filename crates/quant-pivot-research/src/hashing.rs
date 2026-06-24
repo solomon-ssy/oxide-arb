@@ -125,8 +125,7 @@ mod tests {
     use super::ResearchHasher;
     use crate::{
         factors::{
-            FactorDefinitionSpec, FactorFamily, FactorName, FactorOutputKind, FactorSet,
-            NormalizationSpec,
+            FactorDefinitionSpec, FactorName, FactorOutputKind, FactorSet, NormalizationSpec,
         },
         features::{
             FeatureName, FeatureSchema, FeatureSpec, FeatureUnit, FeatureValueKind, NullPolicy,
@@ -135,7 +134,9 @@ mod tests {
         selection::ModelFeatureRequirements,
     };
     use quant_pivot_models::{
-        enums::quant::FactorDirection, runtime_config::FeatureFamily, types::SchemaVersion,
+        enums::{factor::FactorFamily, quant::FactorDirection},
+        runtime_config::FeatureFamily,
+        types::SchemaVersion,
     };
 
     fn sample_factor(name: &'static str) -> FactorDefinitionSpec {

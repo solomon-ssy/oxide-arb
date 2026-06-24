@@ -75,6 +75,7 @@ pub enum TaskId {
     BookMicrostructure1sWriter,
     FeatureEventsWriter,
     FactorEventsWriter,
+    SignalCandidateEventsWriter,
     BookSnapshotPublisher,
     RiskStatePersist,
     RiskStateDebouncer,
@@ -118,6 +119,7 @@ impl TaskId {
             | Self::BookMicrostructure1sWriter
             | Self::FeatureEventsWriter
             | Self::FactorEventsWriter
+            | Self::SignalCandidateEventsWriter
             | Self::BookSnapshotPublisher => TaskKind::AnalyticsWriter,
             Self::RiskStatePersist | Self::RiskStateDebouncer => TaskKind::PositionPersistence,
         }

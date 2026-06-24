@@ -6,8 +6,9 @@
 
 use chrono::{DateTime, Utc};
 use quant_pivot_models::{
+    clickhouse::{ChPrice, ChProbability, QuantSignalCandidateEventRow},
     enums::quant::{FactorDirection, SignalSide},
-    types::{MarketId, ModelRunId, Price, Probability, SignalCandidateId, TokenId},
+    types::{Bps, MarketId, ModelRunId, Price, Probability, SignalCandidateId, TokenId},
 };
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -97,9 +98,76 @@ pub struct SignalCandidate {
     pub as_of: DateTime<Utc>,
 }
 
+/// Apply a basis-point move to an entry price, clamped into `[0, 1]`.
+///
+/// `target` (`positive = true`) scales the entry up by `expected_return_bps`;
+/// `stop` (`positive = false`) scales it down by `downside_bps`.
+fn apply_bps(entry: Price, bps: Decimal, positive: bool) -> Price {
+    let fraction = Bps::new(bps).to_fraction();
+    let factor = if positive {
+        Decimal::ONE + fraction
+    } else {
+        Decimal::ONE - fraction
+    };
+    Price::new((entry.inner() * factor).clamp(Decimal::ZERO, Decimal::ONE))
+}
+
+/// Project one candidate into its `quant_signal_candidate_event` fact row.
+///
+/// `rejection_reason` is empty for an accepted candidate; the runner sets it
+/// (e.g. `score_below_floor` / `low_confidence`) when the candidate is recorded
+/// for audit but excluded from the report. `target_price` / `stop_price` are
+/// derived from the entry reference and the model's expected-return / downside
+/// basis points.
+#[must_use]
+pub fn signal_candidate_event(
+    candidate: &SignalCandidate,
+    rejection_reason: &str,
+    event_time: i64,
+) -> QuantSignalCandidateEventRow {
+    QuantSignalCandidateEventRow {
+        event_time,
+        signal_candidate_id: candidate.signal_candidate_id.to_string(),
+        model_run_id: candidate.model_run_id.clone(),
+        market_id: candidate.market_id.clone(),
+        token_id: candidate.token_id.clone(),
+        side: candidate.side.as_i8(),
+        score: ChProbability::from(candidate.composite_score),
+        confidence: ChProbability::from(candidate.confidence),
+        entry_price: ChPrice::from(candidate.entry_price_ref),
+        target_price: ChPrice::from(apply_bps(
+            candidate.entry_price_ref,
+            candidate.expected_return_bps,
+            true,
+        )),
+        stop_price: ChPrice::from(apply_bps(
+            candidate.entry_price_ref,
+            candidate.downside_bps,
+            false,
+        )),
+        rank_before_portfolio: candidate.rank_before_portfolio,
+        rejection_reason: rejection_reason.to_owned(),
+    }
+}
+
+/// Project a batch of accepted candidates into fact rows (empty rejection reason).
+#[must_use]
+pub fn signal_candidate_events(
+    candidates: &[SignalCandidate],
+    event_time: i64,
+) -> Vec<QuantSignalCandidateEventRow> {
+    candidates
+        .iter()
+        .map(|candidate| signal_candidate_event(candidate, "", event_time))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ModelExplanation, SignalCandidate, SignalSide};
+    use super::{
+        ModelExplanation, SignalCandidate, SignalSide, signal_candidate_event,
+        signal_candidate_events,
+    };
     use chrono::Utc;
     use quant_pivot_models::types::{
         MarketId, ModelRunId, Price, Probability, SignalCandidateId, TokenId,
@@ -138,5 +206,59 @@ mod tests {
         let json = serde_json::to_string(&candidate).expect("serialize");
         let back: SignalCandidate = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back, candidate);
+    }
+
+    fn sample_candidate() -> SignalCandidate {
+        SignalCandidate {
+            signal_candidate_id: SignalCandidateId::from_v7(),
+            model_run_id: ModelRunId::from_v7(),
+            market_id: MarketId::new("0xmarket"),
+            token_id: TokenId::new("123456"),
+            side: SignalSide::BuyNo,
+            composite_score: Probability::new(Decimal::new(72, 2)),
+            confidence: Probability::new(Decimal::new(60, 2)),
+            // +200 bps target, -500 bps stop on a 0.40 entry.
+            expected_return_bps: Decimal::from(200),
+            downside_bps: Decimal::from(500),
+            entry_price_ref: Price::new(Decimal::new(40, 2)),
+            suggested_horizon_secs: 3_600,
+            factor_breakdown: Vec::new(),
+            model_explanation: ModelExplanation {
+                headline: "test".to_owned(),
+                top_positive: Vec::new(),
+                top_negative: Vec::new(),
+            },
+            rejection_warnings: Vec::new(),
+            rank_before_portfolio: 3,
+            as_of: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn signal_candidate_maps_to_ch_row() {
+        let candidate = sample_candidate();
+        let row = signal_candidate_event(&candidate, "score_below_floor", 1_700_000_000_000);
+
+        assert_eq!(row.event_time, 1_700_000_000_000);
+        assert_eq!(
+            row.signal_candidate_id,
+            candidate.signal_candidate_id.to_string()
+        );
+        assert_eq!(row.model_run_id, candidate.model_run_id);
+        assert_eq!(row.market_id, candidate.market_id);
+        assert_eq!(row.token_id, candidate.token_id);
+        assert_eq!(row.side, SignalSide::BuyNo.as_i8());
+        assert_eq!(row.rank_before_portfolio, 3);
+        assert_eq!(row.rejection_reason, "score_below_floor");
+        // target = 0.40 × (1 + 0.02) = 0.408; stop = 0.40 × (1 − 0.05) = 0.38.
+        assert_eq!(
+            row.target_price.to_price(),
+            Price::new(Decimal::new(408, 3))
+        );
+        assert_eq!(row.stop_price.to_price(), Price::new(Decimal::new(380, 3)));
+
+        let batch = signal_candidate_events(std::slice::from_ref(&candidate), 1);
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch[0].rejection_reason, "");
     }
 }

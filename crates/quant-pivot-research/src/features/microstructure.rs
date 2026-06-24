@@ -10,6 +10,7 @@ use rust_decimal::Decimal;
 
 use crate::features::{
     builder::{FeatureComputeCtx, FeatureGroupBuilder, RawFeature},
+    names::micro,
     resolved::MicrostructureBucket,
     value::{EvidenceSourceKind, EvidenceSourceRef, FeatureName, FeatureValue, NullReason},
 };
@@ -40,19 +41,19 @@ impl FeatureGroupBuilder for MicrostructureFeatureBuilder {
 
         vec![
             decimal(
-                "micro.quote_update_rate",
+                micro::QUOTE_UPDATE_RATE,
                 quote_update_rate(buckets),
                 &evidence,
             ),
-            decimal("micro.book_churn", book_churn(buckets), &evidence),
-            decimal("micro.queue_depletion", queue_depletion(buckets), &evidence),
+            decimal(micro::BOOK_CHURN, book_churn(buckets), &evidence),
+            decimal(micro::QUEUE_DEPLETION, queue_depletion(buckets), &evidence),
             decimal(
-                "micro.sudden_liquidity_withdrawal",
+                micro::SUDDEN_LIQUIDITY_WITHDRAWAL,
                 sudden_withdrawal(buckets),
                 &evidence,
             ),
             decimal(
-                "micro.adverse_selection_proxy",
+                micro::ADVERSE_SELECTION_PROXY,
                 adverse_selection(buckets),
                 &evidence,
             ),
@@ -137,29 +138,33 @@ fn stale_quote_frequency(
     buckets: &[MicrostructureBucket],
     evidence: &EvidenceSourceRef,
 ) -> RawFeature {
-    let name = FeatureName::from_static("micro.stale_quote_frequency");
     let threshold = ctx.data_quality.max_book_age_ms;
     let stale = buckets
         .iter()
         .filter(|bucket| bucket.max_book_age_ms > threshold)
         .count();
     let Ok(total) = u64::try_from(buckets.len()) else {
-        return RawFeature::missing(name, NullReason::InsufficientHistory);
+        return RawFeature::missing(
+            micro::STALE_QUOTE_FREQUENCY,
+            NullReason::InsufficientHistory,
+        );
     };
     if total == 0 {
-        return RawFeature::missing(name, NullReason::InsufficientHistory);
+        return RawFeature::missing(
+            micro::STALE_QUOTE_FREQUENCY,
+            NullReason::InsufficientHistory,
+        );
     }
     let fraction = Decimal::from(u64::try_from(stale).unwrap_or(0)) / Decimal::from(total);
     RawFeature::present(
-        name,
+        micro::STALE_QUOTE_FREQUENCY,
         FeatureValue::Probability(Probability::new(fraction)),
         evidence.clone(),
     )
 }
 
 /// Wrap a computed value, or mark it missing for insufficient history.
-fn decimal(name: &'static str, value: Option<Decimal>, evidence: &EvidenceSourceRef) -> RawFeature {
-    let name = FeatureName::from_static(name);
+fn decimal(name: FeatureName, value: Option<Decimal>, evidence: &EvidenceSourceRef) -> RawFeature {
     match value {
         Some(decimal) => {
             RawFeature::present(name, FeatureValue::Decimal(decimal), evidence.clone())
@@ -171,19 +176,14 @@ fn decimal(name: &'static str, value: Option<Decimal>, evidence: &EvidenceSource
 /// Every microstructure feature marked missing for an empty window.
 fn missing_all() -> Vec<RawFeature> {
     [
-        "micro.quote_update_rate",
-        "micro.book_churn",
-        "micro.queue_depletion",
-        "micro.sudden_liquidity_withdrawal",
-        "micro.adverse_selection_proxy",
-        "micro.stale_quote_frequency",
+        micro::QUOTE_UPDATE_RATE,
+        micro::BOOK_CHURN,
+        micro::QUEUE_DEPLETION,
+        micro::SUDDEN_LIQUIDITY_WITHDRAWAL,
+        micro::ADVERSE_SELECTION_PROXY,
+        micro::STALE_QUOTE_FREQUENCY,
     ]
     .into_iter()
-    .map(|name| {
-        RawFeature::missing(
-            FeatureName::from_static(name),
-            NullReason::InsufficientHistory,
-        )
-    })
+    .map(|name| RawFeature::missing(name, NullReason::InsufficientHistory))
     .collect()
 }

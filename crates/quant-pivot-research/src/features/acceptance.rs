@@ -28,6 +28,7 @@ use crate::{
         availability::FeatureAvailabilityOracle,
         builder::ConfiguredFeatureBuilder,
         domain::DOMAIN_FEATURES,
+        names::{book, domain as domain_names, market},
         null_policy::{NullDecision, NullPolicyEngine},
         schema::FeatureSchema,
         value::{FeatureName, FeatureValue, FeatureVector, NullReason},
@@ -46,7 +47,7 @@ use crate::{
 #[test]
 fn feature_null_policy_rejects_required_missing() {
     let spec = FeatureSchema::build(&FeaturesConfig::default())
-        .by_name(&FeatureName::from_static("book.best_bid"))
+        .by_name(&book::BEST_BID)
         .expect("spec")
         .clone();
     let data_quality = DataQualityConfig::default();
@@ -62,7 +63,7 @@ fn feature_null_policy_rejects_required_missing() {
 #[test]
 fn feature_null_policy_no_silent_zero() {
     let spec = FeatureSchema::build(&FeaturesConfig::default())
-        .by_name(&FeatureName::from_static("book.depth_imbalance"))
+        .by_name(&book::DEPTH_IMBALANCE)
         .expect("spec")
         .clone();
     let data_quality = DataQualityConfig::default();
@@ -177,7 +178,7 @@ async fn feature_pit_visibility_excludes_future_book() {
 fn sample_vector() -> FeatureVector {
     let mut values = std::collections::BTreeMap::new();
     values.insert(
-        FeatureName::from_static("book.mid"),
+        book::MID,
         FeatureValue::Probability(Probability::new(Decimal::new(50, 2))),
     );
     FeatureVector {
@@ -283,12 +284,13 @@ async fn domain_feature_missing_emits_domain_missing_not_default() {
     for (_, name) in DOMAIN_FEATURES {
         let value = vector
             .values
-            .get(&FeatureName::from_static(name))
+            .get(&name)
             .expect("domain feature present in schema");
         assert_eq!(
             value.null_reason(),
             Some(NullReason::DomainDataMissing),
-            "{name} must carry DomainDataMissing, not a fabricated default"
+            "{} must carry DomainDataMissing, not a fabricated default",
+            name.as_str()
         );
     }
 }
@@ -386,7 +388,7 @@ fn feature_event_writer_batches_present_only() {
 
     let mut missing_only = sample_vector();
     missing_only.values.insert(
-        FeatureName::from_static("book.spread_bps"),
+        book::SPREAD_BPS,
         FeatureValue::Missing(NullReason::SourceUnavailable),
     );
     let rows = feature_events(&missing_only, &schema, 1_000);
@@ -423,14 +425,14 @@ fn model_eligibility_uses_real_availability_oracle() {
     let oracle = FeatureAvailabilityOracle::new(&schema);
     let candidate = candidate_with_book();
 
-    let book_required = vec![FeatureName::from_static("book.best_bid")];
+    let book_required = vec![book::BEST_BID];
     assert!(
         oracle
             .missing_required(&candidate, &book_required)
             .is_empty()
     );
 
-    let domain_required = vec![FeatureName::from_static("domain.sports.pre_match_move")];
+    let domain_required = vec![domain_names::SPORTS_PRE_MATCH_MOVE];
     let missing = oracle.missing_required(&candidate, &domain_required);
     assert_eq!(missing.len(), 1);
 
@@ -765,7 +767,7 @@ async fn feature_window_nonempty_yields_timeseries_and_is_not_stale() {
 
     let ret = vector
         .values
-        .get(&FeatureName::from_static("ts.return_60s"))
+        .get(&FeatureName::ts_return(60))
         .expect("return present");
     assert!(
         !ret.is_missing(),
@@ -823,7 +825,7 @@ async fn feature_stale_book_rejects_market() {
     assert_eq!(
         vector
             .values
-            .get(&FeatureName::from_static("book.best_bid"))
+            .get(&book::BEST_BID)
             .and_then(FeatureValue::null_reason),
         Some(NullReason::StaleBeyondPolicy),
     );
@@ -867,7 +869,7 @@ async fn allow_degraded_keeps_stale_required_fact_feature() {
     };
     let builder = ConfiguredFeatureBuilder::new(&config);
     let market = windowed_market(&token);
-    let required = vec![FeatureName::from_static("ts.return_60s")];
+    let required = vec![FeatureName::ts_return(60)];
 
     // Default policy rejects a stale *required* feature ⇒ Insufficient.
     let strict = builder
@@ -909,7 +911,7 @@ async fn allow_degraded_keeps_stale_required_fact_feature() {
     assert_eq!(
         degraded
             .values
-            .get(&FeatureName::from_static("ts.return_60s"))
+            .get(&FeatureName::ts_return(60))
             .and_then(FeatureValue::null_reason),
         Some(NullReason::StaleBeyondPolicy),
     );
@@ -954,7 +956,7 @@ async fn feature_out_of_valid_range_rejects() {
     assert_eq!(
         vector
             .values
-            .get(&FeatureName::from_static("book.best_bid"))
+            .get(&book::BEST_BID)
             .and_then(FeatureValue::null_reason),
         Some(NullReason::OutOfValidRange),
         "a value outside its valid range must not be clamped to a silent value"
@@ -967,7 +969,7 @@ fn category_feature_projects_table_index() {
     let schema = FeatureSchema::build(&FeaturesConfig::default());
     let mut values = std::collections::BTreeMap::new();
     values.insert(
-        FeatureName::from_static("market.category"),
+        market::CATEGORY,
         FeatureValue::Category(MarketCategory::Sports),
     );
     let vector = FeatureVector {
@@ -1095,8 +1097,7 @@ async fn online_offline_parity_full_families_with_window() {
         ResearchHasher::feature_vector(&historical).expect("hash"),
     );
     assert!(
-        live.values
-            .contains_key(&FeatureName::from_static("ts.return_60s")),
+        live.values.contains_key(&FeatureName::ts_return(60)),
         "the window-backed time-series family must participate in the parity proof"
     );
 }

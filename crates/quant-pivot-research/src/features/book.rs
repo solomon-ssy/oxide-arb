@@ -3,12 +3,13 @@
 
 use crate::features::{
     builder::{FeatureComputeCtx, FeatureGroupBuilder, RawFeature},
+    names::book,
     resolved::ResolvedBook,
     value::{EvidenceSourceKind, EvidenceSourceRef, FeatureName, FeatureValue, NullReason},
 };
 use quant_pivot_models::{
     runtime_config::FeatureFamily,
-    types::{Price, Probability},
+    types::{Bps, Price, Probability},
 };
 use rust_decimal::Decimal;
 
@@ -32,47 +33,39 @@ impl FeatureGroupBuilder for PriceBookFeatureBuilder {
         };
 
         let mut out = vec![
-            price_feature(
-                "book.best_bid",
-                book.best_bid().map(Price::inner),
-                &evidence,
-            ),
-            price_feature(
-                "book.best_ask",
-                book.best_ask().map(Price::inner),
-                &evidence,
-            ),
-            price_feature("book.mid", book.mid().map(Price::inner), &evidence),
+            price_feature(book::BEST_BID, book.best_bid().map(Price::inner), &evidence),
+            price_feature(book::BEST_ASK, book.best_ask().map(Price::inner), &evidence),
+            price_feature(book::MID, book.mid().map(Price::inner), &evidence),
             spread_bps(book, &evidence),
             decimal_feature(
-                "book.depth_imbalance",
+                book::DEPTH_IMBALANCE,
                 book.depth_imbalance(),
                 &evidence,
                 NullReason::InsufficientHistory,
             ),
             decimal_feature(
-                "book.slope",
+                book::SLOPE,
                 book.slope(),
                 &evidence,
                 NullReason::InsufficientHistory,
             ),
             RawFeature::present(
-                FeatureName::from_static("book.visible_liquidity_usd"),
+                book::VISIBLE_LIQUIDITY_USD,
                 FeatureValue::Usd(book.visible_liquidity_usd()),
                 evidence.clone(),
             ),
             RawFeature::present(
-                FeatureName::from_static("book.age_ms"),
+                book::AGE_MS,
                 FeatureValue::Count(book_age_ms(ctx, book)),
                 evidence.clone(),
             ),
             RawFeature::present(
-                FeatureName::from_static("book.crossed"),
+                book::CROSSED,
                 FeatureValue::Bool(book.is_crossed()),
                 evidence.clone(),
             ),
             RawFeature::present(
-                FeatureName::from_static("book.empty"),
+                book::EMPTY,
                 FeatureValue::Bool(book.is_empty()),
                 evidence.clone(),
             ),
@@ -80,7 +73,7 @@ impl FeatureGroupBuilder for PriceBookFeatureBuilder {
 
         for level in &ctx.config.depth_levels {
             out.push(RawFeature::present(
-                FeatureName::new(format!("book.depth_top{level}_usd")),
+                FeatureName::book_depth_top(*level),
                 FeatureValue::Usd(book.top_n_depth_usd(*level)),
                 evidence.clone(),
             ));
@@ -91,11 +84,10 @@ impl FeatureGroupBuilder for PriceBookFeatureBuilder {
 
 /// A price feature carried as a `[0, 1]` probability, or missing when unquoted.
 fn price_feature(
-    name: &'static str,
+    name: FeatureName,
     value: Option<Decimal>,
     evidence: &EvidenceSourceRef,
 ) -> RawFeature {
-    let name = FeatureName::from_static(name);
     match value {
         Some(decimal) => RawFeature::present(
             name,
@@ -108,12 +100,11 @@ fn price_feature(
 
 /// A dimensionless decimal feature, or missing with `reason` when undefined.
 fn decimal_feature(
-    name: &'static str,
+    name: FeatureName,
     value: Option<Decimal>,
     evidence: &EvidenceSourceRef,
     reason: NullReason,
 ) -> RawFeature {
-    let name = FeatureName::from_static(name);
     match value {
         Some(decimal) => {
             RawFeature::present(name, FeatureValue::Decimal(decimal), evidence.clone())
@@ -124,13 +115,13 @@ fn decimal_feature(
 
 /// Top-of-book spread in basis points, or missing when the book is one-sided.
 fn spread_bps(book: &ResolvedBook, evidence: &EvidenceSourceRef) -> RawFeature {
-    let name = FeatureName::from_static("book.spread_bps");
     match (book.best_bid(), book.best_ask(), book.mid()) {
         (Some(bid), Some(ask), Some(mid)) if mid.inner() > Decimal::ZERO => {
-            let bps = (ask.inner() - bid.inner()) / mid.inner() * Decimal::from(10_000);
-            RawFeature::present(name, FeatureValue::Bps(bps), evidence.clone())
+            let bps = Bps::relative(ask.inner() - bid.inner(), mid.inner())
+                .map_or(Decimal::ZERO, Bps::inner);
+            RawFeature::present(book::SPREAD_BPS, FeatureValue::Bps(bps), evidence.clone())
         }
-        _ => RawFeature::missing(name, NullReason::SourceUnavailable),
+        _ => RawFeature::missing(book::SPREAD_BPS, NullReason::SourceUnavailable),
     }
 }
 

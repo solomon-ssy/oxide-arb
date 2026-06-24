@@ -105,6 +105,27 @@ impl ArtifactStore for LocalArtifactStore {
             .await
             .map_err(|error| io_error(&path, &error).into())
     }
+
+    async fn get_by_key(&self, key: &ArtifactKey) -> QuantResult<Vec<u8>> {
+        let path = self.absolute_path(key)?;
+        match fs::read(&path).await {
+            Ok(bytes) => Ok(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                Err(ResearchError::ArtifactNotFound {
+                    uri: path.display().to_string(),
+                }
+                .into())
+            }
+            Err(error) => Err(io_error(&path, &error).into()),
+        }
+    }
+
+    async fn exists_by_key(&self, key: &ArtifactKey) -> QuantResult<bool> {
+        let path = self.absolute_path(key)?;
+        fs::try_exists(&path)
+            .await
+            .map_err(|error| io_error(&path, &error).into())
+    }
 }
 
 /// Make `path` absolute without requiring it to exist (no symlink resolution).

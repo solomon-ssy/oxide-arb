@@ -276,6 +276,17 @@ impl Bps {
         self.inner() / Decimal::from(10_000)
     }
 
+    /// Relative spread in basis points: `numerator / denominator × 10_000`.
+    ///
+    /// Returns `None` when `denominator` is zero.
+    #[must_use]
+    pub fn relative(numerator: Decimal, denominator: Decimal) -> Option<Self> {
+        if denominator.is_zero() {
+            return None;
+        }
+        Some(Self::new(numerator / denominator * Decimal::from(10_000)))
+    }
+
     /// Compute basis-point spread: `(actual - expected) / expected × 10000`.
     ///
     /// Returns `None` when `expected` is zero (division undefined).

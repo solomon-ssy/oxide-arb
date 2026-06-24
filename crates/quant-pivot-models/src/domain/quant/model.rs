@@ -1,7 +1,7 @@
 //! Model registry persistence DTOs.
 
 use crate::{
-    enums::quant::{ModelPublicationStatus, ModelRunKind, ModelRunStatus},
+    enums::quant::{ModelPublicationStatus, ModelRunErrorCode, ModelRunKind, ModelRunStatus},
     types::{
         ContentHash, MarketSelectionId, ModelRunId, ModelSpecId, ModelVersionId,
         RuntimeConfigVersionId, SchemaVersion,
@@ -113,7 +113,7 @@ pub struct ModelRunInfo {
     pub input_hash: ContentHash,
     pub output_hash: Option<ContentHash>,
     pub metrics_json: serde_json::Value,
-    pub error_code: Option<String>,
+    pub error_code: Option<ModelRunErrorCode>,
     pub error_message: Option<String>,
     pub started_at: DateTime<Utc>,
     pub finished_at: Option<DateTime<Utc>>,
@@ -143,7 +143,7 @@ pub struct NewModelRun {
     pub input_hash: ContentHash,
     pub output_hash: Option<ContentHash>,
     pub metrics_json: serde_json::Value,
-    pub error_code: Option<String>,
+    pub error_code: Option<ModelRunErrorCode>,
     pub error_message: Option<String>,
     pub started_at: DateTime<Utc>,
     pub finished_at: Option<DateTime<Utc>>,

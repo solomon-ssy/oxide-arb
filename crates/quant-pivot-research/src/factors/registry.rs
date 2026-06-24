@@ -9,7 +9,10 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use quant_pivot_models::runtime_config::{FactorsConfig, FeaturesConfig};
+use quant_pivot_models::{
+    enums::factor::FactorFamily,
+    runtime_config::{FactorsConfig, FeaturesConfig},
+};
 
 use crate::factors::{
     computer::FactorComputer,
@@ -31,18 +34,11 @@ impl FactorRegistry {
     /// only the generic plane; see [`crate::factors::domain`]).
     #[must_use]
     pub fn build(factors: &FactorsConfig, features: &FeaturesConfig) -> Self {
-        let enabled: HashSet<&str> = factors
-            .enabled_factor_families
-            .iter()
-            .map(String::as_str)
-            .collect();
+        let enabled: HashSet<FactorFamily> =
+            factors.enabled_factor_families.iter().copied().collect();
         let selected = generic_factors(features)
             .into_iter()
-            .filter(|(spec, _)| {
-                spec.family
-                    .generic_wire()
-                    .is_some_and(|wire| enabled.contains(wire))
-            })
+            .filter(|(spec, _)| enabled.contains(&spec.family))
             .collect();
         Self { factors: selected }
     }
@@ -75,30 +71,26 @@ impl FactorRegistry {
 }
 
 #[cfg(test)]
-mod wire_contract {
-    use quant_pivot_models::runtime_config::GENERIC_FACTOR_FAMILY_WIRES;
+mod tests {
+    use quant_pivot_models::{enums::factor::FactorFamily, runtime_config::FeaturesConfig};
 
-    use crate::factors::value::FactorFamily;
+    use crate::factors::generic::generic_factors;
 
-    /// Generic family wire labels must stay aligned with runtime-config validation.
+    /// Every generic factor spec must declare a generic-plane family.
     #[test]
-    fn generic_family_wires_match_runtime_config_contract() {
-        let mut wires: Vec<&str> = [
-            FactorFamily::Liquidity,
-            FactorFamily::Microstructure,
-            FactorFamily::Momentum,
-            FactorFamily::MeanReversion,
-            FactorFamily::Volatility,
-            FactorFamily::Activity,
-            FactorFamily::Resolution,
-            FactorFamily::DataQuality,
-        ]
-        .into_iter()
-        .map(|family| family.generic_wire().expect("generic wire"))
-        .collect();
-        wires.sort_unstable();
-        let mut expected = GENERIC_FACTOR_FAMILY_WIRES.to_vec();
-        expected.sort_unstable();
-        assert_eq!(wires, expected);
+    fn generic_factor_specs_use_generic_families() {
+        let features = FeaturesConfig::default();
+        for (spec, _) in generic_factors(&features) {
+            assert!(
+                spec.family.is_generic(),
+                "generic factor `{}` must not use domain family `{spec:?}`",
+                spec.name.as_str(),
+            );
+            assert!(
+                FactorFamily::ALL_GENERIC.contains(&spec.family),
+                "generic factor `{}` family `{spec:?}` is not in ALL_GENERIC",
+                spec.name.as_str(),
+            );
+        }
     }
 }

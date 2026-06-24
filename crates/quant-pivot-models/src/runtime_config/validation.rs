@@ -4,10 +4,22 @@
 //! Deleted pre-quant configuration paths are not accepted in Phase 1 clean-break
 //! runtime configuration.
 
-use super::{DecimalString, RuntimeConfig, is_generic_factor_family_wire};
+use super::{DecimalString, RuntimeConfig, sections::FeaturesConfig};
+use linkme::distributed_slice;
 use quant_pivot_error::config_validation::{ConfigValidationError, ConfigValidationReport};
 use rust_decimal::Decimal;
 use std::collections::HashSet;
+
+/// Extension hook for feature-config validation that requires research-plane schema knowledge.
+///
+/// Crates such as `quant-pivot-research` register validators here at link time so
+/// [`validate_features`] remains the single features entry point inside
+/// [`validate_runtime_config`].
+pub type FeaturesConfigValidator = fn(&FeaturesConfig, &mut ConfigValidationReport);
+
+#[allow(unsafe_code)]
+#[distributed_slice]
+pub static FEATURES_CONFIG_VALIDATORS: [FeaturesConfigValidator] = [..];
 
 /// Mode-agnostic runtime-config v3 invariants.
 #[must_use]
@@ -86,6 +98,26 @@ fn validate_features(config: &RuntimeConfig, report: &mut ConfigValidationReport
         &config.features.volatility_windows_secs,
         report,
     );
+    let mut seen = HashSet::new();
+    for feature_ref in &config.features.required_features {
+        let label = feature_ref.name.trim();
+        if label.is_empty() {
+            report.errors.push(ConfigValidationError::InvalidValue {
+                field: "features.required_features",
+                detail: "feature names must not be empty".to_owned(),
+            });
+            continue;
+        }
+        if !seen.insert(label.to_owned()) {
+            report.errors.push(ConfigValidationError::InvalidValue {
+                field: "features.required_features",
+                detail: format!("duplicate feature `{label}`"),
+            });
+        }
+    }
+    for validator in FEATURES_CONFIG_VALIDATORS {
+        validator(&config.features, report);
+    }
 }
 
 fn validate_factors(config: &RuntimeConfig, report: &mut ConfigValidationReport) {
@@ -102,24 +134,18 @@ fn validate_factors(config: &RuntimeConfig, report: &mut ConfigValidationReport)
     }
     let mut seen = HashSet::new();
     for family in &config.factors.enabled_factor_families {
-        let wire = family.trim();
-        if wire.is_empty() {
+        if !family.is_generic() {
             report.errors.push(ConfigValidationError::InvalidValue {
                 field: "factors.enabled_factor_families",
-                detail: "entries must not be empty".to_owned(),
-            });
-            continue;
-        }
-        if !is_generic_factor_family_wire(wire) {
-            report.errors.push(ConfigValidationError::InvalidValue {
-                field: "factors.enabled_factor_families",
-                detail: format!("unknown generic factor family `{wire}`"),
+                detail: format!(
+                    "domain factor family `{family}` must not appear in config; vertical factors are routed by market category"
+                ),
             });
         }
-        if !seen.insert(wire.to_owned()) {
+        if !seen.insert(*family) {
             report.errors.push(ConfigValidationError::InvalidValue {
                 field: "factors.enabled_factor_families",
-                detail: format!("duplicate family `{wire}`"),
+                detail: format!("duplicate family `{family}`"),
             });
         }
     }
@@ -285,8 +311,8 @@ fn non_empty_numbers(field: &'static str, values: &[u64], report: &mut ConfigVal
 mod tests {
     use super::{RuntimeConfig, validate_runtime_config};
     use crate::{
-        enums::quant::QuantRuntimeMode,
-        runtime_config::{DecimalString, RUNTIME_CONFIG_SCHEMA_VERSION},
+        enums::{factor::FactorFamily, quant::QuantRuntimeMode},
+        runtime_config::{DecimalString, FeatureNameRef, RUNTIME_CONFIG_SCHEMA_VERSION},
     };
 
     #[test]
@@ -321,12 +347,25 @@ mod tests {
     }
 
     #[test]
-    fn unknown_factor_family_is_rejected() {
+    fn domain_family_in_config_is_rejected() {
         let mut config = RuntimeConfig::default();
         config
             .factors
             .enabled_factor_families
-            .push("not_a_family".to_owned());
+            .push(FactorFamily::Domain(
+                crate::enums::domain::DomainFamily::Sports,
+            ));
+        let report = validate_runtime_config(&config);
+        assert!(report.has_errors());
+    }
+
+    #[test]
+    fn duplicate_factor_family_is_rejected() {
+        let mut config = RuntimeConfig::default();
+        config
+            .factors
+            .enabled_factor_families
+            .push(FactorFamily::Liquidity);
         let report = validate_runtime_config(&config);
         assert!(report.has_errors());
     }
@@ -335,6 +374,25 @@ mod tests {
     fn empty_factor_families_is_rejected() {
         let mut config = RuntimeConfig::default();
         config.factors.enabled_factor_families.clear();
+        let report = validate_runtime_config(&config);
+        assert!(report.has_errors());
+    }
+
+    #[test]
+    fn empty_required_feature_name_is_rejected() {
+        let mut config = RuntimeConfig::default();
+        config.features.required_features = vec![FeatureNameRef::new("   ")];
+        let report = validate_runtime_config(&config);
+        assert!(report.has_errors());
+    }
+
+    #[test]
+    fn duplicate_required_feature_is_rejected() {
+        let mut config = RuntimeConfig::default();
+        config.features.required_features = vec![
+            FeatureNameRef::new("book.spread_bps"),
+            FeatureNameRef::new("book.spread_bps"),
+        ];
         let report = validate_runtime_config(&config);
         assert!(report.has_errors());
     }

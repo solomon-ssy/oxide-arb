@@ -1,15 +1,21 @@
 //! Vertical (domain) taxonomy shared by the feature and factor planes.
 //!
 //! A single [`DomainFamily`] enumerates the verticals quant-pivot models. Both
-//! `features::domain` (domain feature builders) and `factors` (domain factor
-//! families) key off this one type, so the two planes never drift into parallel
-//! vertical enums.
+//! the feature plane (domain feature builders) and the factor plane (domain
+//! factor families) key off this type so the two planes never drift into
+//! parallel vertical enums.
 
-use quant_pivot_models::enums::common::MarketCategory;
+use std::fmt::{self, Display, Formatter};
+
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::enums::common::MarketCategory;
+
 /// A vertical/domain category whose markets share specialized signals.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum DomainFamily {
     /// Sports markets (pre-match moves, live score shocks).
@@ -64,5 +70,11 @@ impl DomainFamily {
             | MarketCategory::Economics
             | MarketCategory::Other => None,
         }
+    }
+}
+
+impl Display for DomainFamily {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
     }
 }

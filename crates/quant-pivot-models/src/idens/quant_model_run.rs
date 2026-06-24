@@ -16,7 +16,10 @@ use crate::{
     },
 };
 
-#[quant_schema(lifecycle = "audit")]
+// Operational run record with a `Running` → terminal (`Succeeded` / `Failed`)
+// transition: the 3.4 `ModelRunner` finalizes it with the output hash + metrics,
+// so it is `runtime` (mutable), not `audit` (append-only WORM).
+#[quant_schema(lifecycle = "runtime")]
 pub enum QuantModelRun {
     Table,
     ModelRunId,

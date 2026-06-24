@@ -15,6 +15,7 @@
 mod computer;
 mod domain;
 mod generic;
+pub mod names;
 mod normalize;
 mod persistence;
 mod registry;
@@ -31,8 +32,8 @@ pub use normalize::{Normalized, normalize_column, to_probability_clamped};
 pub use persistence::FactorValueInsertContext;
 pub use registry::FactorRegistry;
 pub use value::{
-    FactorDefinitionSpec, FactorDriver, FactorEligibility, FactorExplanation, FactorFamily,
-    FactorName, FactorOutputKind, FactorQualityGate, FactorSet, FactorValue, MarketFactorOutcome,
+    FactorDefinitionSpec, FactorDriver, FactorEligibility, FactorExplanation, FactorName,
+    FactorOutputKind, FactorQualityGate, FactorSet, FactorValue, MarketFactorOutcome,
     NormalizationClampAudit, NormalizationSpec, RawFactor, ScoredFactor,
 };
 pub use writer::factor_events;

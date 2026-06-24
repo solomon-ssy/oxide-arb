@@ -33,6 +33,7 @@
 
 mod naming;
 mod parallel;
+pub mod precision;
 
 pub mod artifact;
 pub mod backtest;
@@ -45,7 +46,6 @@ pub mod model;
 pub mod pit;
 pub mod selection;
 pub mod training;
-pub mod vertical;
 
 #[cfg(test)]
 mod acceptance_tests {

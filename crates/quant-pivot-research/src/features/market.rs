@@ -6,8 +6,9 @@ use quant_pivot_models::{enums::market::MarketStatus, runtime_config::FeatureFam
 
 use crate::features::{
     builder::{FeatureComputeCtx, FeatureGroupBuilder, RawFeature},
+    names::market,
     resolved::ResolvedMarketContext,
-    value::{EvidenceSourceKind, EvidenceSourceRef, FeatureName, FeatureValue, NullReason},
+    value::{EvidenceSourceKind, EvidenceSourceRef, FeatureValue, NullReason},
 };
 
 /// Builds the [`FeatureFamily::MarketMetadata`] features.
@@ -36,28 +37,28 @@ impl FeatureGroupBuilder for MarketMetadataFeatureBuilder {
             // parity-stable. Numeric encoding is a downstream normalization
             // concern (3.3) — never an ordinal value fed to a model.
             RawFeature::present(
-                FeatureName::from_static("market.category"),
+                market::CATEGORY,
                 FeatureValue::Category(ctx.category),
                 evidence.clone(),
             ),
             time_to_resolution(ctx, market, &evidence),
             RawFeature::present(
-                FeatureName::from_static("market.event_age_secs"),
+                market::EVENT_AGE_SECS,
                 FeatureValue::Count(secs_since(market.created_at, ctx)),
                 evidence.clone(),
             ),
             RawFeature::present(
-                FeatureName::from_static("market.outcome_count"),
+                market::OUTCOME_COUNT,
                 FeatureValue::Count(u64::from(market.outcome_count)),
                 evidence.clone(),
             ),
             RawFeature::present(
-                FeatureName::from_static("market.neg_risk"),
+                market::NEG_RISK,
                 FeatureValue::Bool(market.neg_risk),
                 evidence.clone(),
             ),
             RawFeature::present(
-                FeatureName::from_static("market.is_active"),
+                market::IS_ACTIVE,
                 FeatureValue::Bool(market.status == MarketStatus::Active),
                 evidence,
             ),
@@ -71,15 +72,19 @@ fn time_to_resolution(
     market: &ResolvedMarketContext,
     evidence: &EvidenceSourceRef,
 ) -> RawFeature {
-    let name = FeatureName::from_static("market.time_to_resolution_secs");
-    match market.end_date {
-        Some(end_date) => {
+    market.end_date.map_or_else(
+        || {
+            RawFeature::missing(
+                market::TIME_TO_RESOLUTION_SECS,
+                NullReason::SourceUnavailable,
+            )
+        },
+        |end_date| {
             let secs = (end_date - ctx.as_of).num_seconds();
             let value = FeatureValue::Count(u64::try_from(secs).unwrap_or(0));
-            RawFeature::present(name, value, evidence.clone())
-        }
-        None => RawFeature::missing(name, NullReason::SourceUnavailable),
-    }
+            RawFeature::present(market::TIME_TO_RESOLUTION_SECS, value, evidence.clone())
+        },
+    )
 }
 
 /// Whole seconds elapsed since `since` at the decision time (clamped at zero).

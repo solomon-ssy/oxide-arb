@@ -43,6 +43,17 @@ impl ModelRegistryRepository for PgModelRegistryRepository {
             .map(Into::into)
     }
 
+    async fn find_model_version_by_id(
+        &self,
+        model_version_id: &ModelVersionId,
+    ) -> Result<Option<ModelVersionInfo>, StorageError> {
+        quant_model_version::Entity::find_by_id(model_version_id.clone())
+            .one(&self.db)
+            .await
+            .map_err(StorageError::from)
+            .map(|row| row.map(Into::into))
+    }
+
     async fn publish_model_version(
         &self,
         model_version_id: &ModelVersionId,

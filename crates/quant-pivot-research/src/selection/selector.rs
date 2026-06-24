@@ -123,7 +123,7 @@ impl MarketSelector for ConfiguredMarketSelector {
 mod tests {
     use super::ConfiguredMarketSelector;
     use crate::{
-        features::FeatureName,
+        features::names,
         selection::{
             ExclusionReason, MarketSelectionBuildRequest, MarketSelectionSnapshot, MarketSelector,
             ModelFeatureRequirements,
@@ -325,7 +325,7 @@ mod tests {
         // A healthy candidate has a two-sided book, so a book-derived feature is
         // available — the market is kept (no blanket fail-closed).
         let model_requirements = ModelFeatureRequirements {
-            required_features: vec![FeatureName::from_static("book.spread_bps")],
+            required_features: vec![names::book::SPREAD_BPS],
         };
         let snapshot = build(
             request_with_model(selection_config(), model_requirements),
@@ -342,7 +342,7 @@ mod tests {
         // Domain features have no wired external source, so a model requiring one
         // makes the market ineligible — and only that feature is reported missing.
         let model_requirements = ModelFeatureRequirements {
-            required_features: vec![FeatureName::from_static("domain.sports.pre_match_move")],
+            required_features: vec![names::domain::SPORTS_PRE_MATCH_MOVE],
         };
         let snapshot = build(
             request_with_model(selection_config(), model_requirements),

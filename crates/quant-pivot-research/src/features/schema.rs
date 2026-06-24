@@ -10,20 +10,24 @@
 
 use std::{collections::HashMap, ops::RangeInclusive};
 
+use linkme::distributed_slice;
+use quant_pivot_error::config_validation::{ConfigValidationError, ConfigValidationReport};
 use quant_pivot_models::{
-    runtime_config::{FeatureFamily, FeaturesConfig},
+    enums::domain::DomainFamily,
+    runtime_config::{
+        FeatureFamily, FeaturesConfig,
+        validation::{FEATURES_CONFIG_VALIDATORS, FeaturesConfigValidator},
+    },
     types::SchemaVersion,
 };
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    features::{
-        FeatureName,
-        domain::DOMAIN_FEATURES,
-        value::{EvidenceSourceKind, FeatureValueKind},
-    },
-    vertical::DomainFamily,
+use crate::features::{
+    FeatureName,
+    domain::DOMAIN_FEATURES,
+    names::{book, market as market_names, micro, ts},
+    value::{EvidenceSourceKind, FeatureValueKind},
 };
 
 /// The dimensional unit a feature is expressed in (documentation + UI only;
@@ -367,20 +371,13 @@ fn market_metadata_specs(out: &mut Vec<FeatureSpec>) {
     use StalenessRule::None as Fresh;
 
     out.push(
-        spec(
-            FeatureName::from_static("market.category"),
-            F,
-            Category,
-            Src,
-            Pit,
-            Fresh,
-        )
-        .null_policy(NullPolicy::RejectMarket)
-        .build(),
+        spec(market_names::CATEGORY, F, Category, Src, Pit, Fresh)
+            .null_policy(NullPolicy::RejectMarket)
+            .build(),
     );
     out.push(
         spec(
-            FeatureName::from_static("market.time_to_resolution_secs"),
+            market_names::TIME_TO_RESOLUTION_SECS,
             F,
             Count,
             Src,
@@ -392,54 +389,26 @@ fn market_metadata_specs(out: &mut Vec<FeatureSpec>) {
         .build(),
     );
     out.push(
-        spec(
-            FeatureName::from_static("market.event_age_secs"),
-            F,
-            Count,
-            Src,
-            Pit,
-            Fresh,
-        )
-        .unit(FeatureUnit::Seconds)
-        .null_policy(NullPolicy::Penalize)
-        .build(),
+        spec(market_names::EVENT_AGE_SECS, F, Count, Src, Pit, Fresh)
+            .unit(FeatureUnit::Seconds)
+            .null_policy(NullPolicy::Penalize)
+            .build(),
     );
     out.push(
-        spec(
-            FeatureName::from_static("market.outcome_count"),
-            F,
-            Count,
-            Src,
-            Pit,
-            Fresh,
-        )
-        .unit(FeatureUnit::Count)
-        .null_policy(NullPolicy::RejectMarket)
-        .build(),
+        spec(market_names::OUTCOME_COUNT, F, Count, Src, Pit, Fresh)
+            .unit(FeatureUnit::Count)
+            .null_policy(NullPolicy::RejectMarket)
+            .build(),
     );
     out.push(
-        spec(
-            FeatureName::from_static("market.neg_risk"),
-            F,
-            Bool,
-            Src,
-            Pit,
-            Fresh,
-        )
-        .null_policy(NullPolicy::NeutralValue(Decimal::ZERO))
-        .build(),
+        spec(market_names::NEG_RISK, F, Bool, Src, Pit, Fresh)
+            .null_policy(NullPolicy::NeutralValue(Decimal::ZERO))
+            .build(),
     );
     out.push(
-        spec(
-            FeatureName::from_static("market.is_active"),
-            F,
-            Bool,
-            Src,
-            Pit,
-            Fresh,
-        )
-        .null_policy(NullPolicy::RejectMarket)
-        .build(),
+        spec(market_names::IS_ACTIVE, F, Bool, Src, Pit, Fresh)
+            .null_policy(NullPolicy::RejectMarket)
+            .build(),
     );
 }
 
@@ -456,94 +425,67 @@ const fn book_spec(name: FeatureName, kind: FeatureValueKind) -> FeatureSpecBuil
 }
 
 /// A critical `[0, 1]` price feature.
-fn price_spec(name: &'static str) -> FeatureSpec {
-    book_spec(
-        FeatureName::from_static(name),
-        FeatureValueKind::Probability,
-    )
-    .unit(FeatureUnit::Probability)
-    .range(Decimal::ZERO, Decimal::ONE)
-    .null_policy(NullPolicy::RejectMarket)
-    .critical()
-    .build()
+fn price_spec(name: FeatureName) -> FeatureSpec {
+    book_spec(name, FeatureValueKind::Probability)
+        .unit(FeatureUnit::Probability)
+        .range(Decimal::ZERO, Decimal::ONE)
+        .null_policy(NullPolicy::RejectMarket)
+        .critical()
+        .build()
 }
 
 fn price_book_specs(config: &FeaturesConfig, out: &mut Vec<FeatureSpec>) {
-    out.push(price_spec("book.best_bid"));
-    out.push(price_spec("book.best_ask"));
-    out.push(price_spec("book.mid"));
+    out.push(price_spec(book::BEST_BID));
+    out.push(price_spec(book::BEST_ASK));
+    out.push(price_spec(book::MID));
     out.push(
-        book_spec(
-            FeatureName::from_static("book.spread_bps"),
-            FeatureValueKind::Bps,
-        )
-        .unit(FeatureUnit::Bps)
-        .null_policy(NullPolicy::RejectMarket)
-        .critical()
-        .build(),
+        book_spec(book::SPREAD_BPS, FeatureValueKind::Bps)
+            .unit(FeatureUnit::Bps)
+            .null_policy(NullPolicy::RejectMarket)
+            .critical()
+            .build(),
     );
     out.push(
-        book_spec(
-            FeatureName::from_static("book.depth_imbalance"),
-            FeatureValueKind::Decimal,
-        )
-        .unit(FeatureUnit::Ratio)
-        .range(Decimal::NEGATIVE_ONE, Decimal::ONE)
-        .null_policy(NullPolicy::Penalize)
-        .build(),
+        book_spec(book::DEPTH_IMBALANCE, FeatureValueKind::Decimal)
+            .unit(FeatureUnit::Ratio)
+            .range(Decimal::NEGATIVE_ONE, Decimal::ONE)
+            .null_policy(NullPolicy::Penalize)
+            .build(),
     );
     out.push(
-        book_spec(
-            FeatureName::from_static("book.slope"),
-            FeatureValueKind::Decimal,
-        )
-        .unit(FeatureUnit::Ratio)
-        .null_policy(NullPolicy::Penalize)
-        .build(),
+        book_spec(book::SLOPE, FeatureValueKind::Decimal)
+            .unit(FeatureUnit::Ratio)
+            .null_policy(NullPolicy::Penalize)
+            .build(),
     );
     out.push(
-        book_spec(
-            FeatureName::from_static("book.visible_liquidity_usd"),
-            FeatureValueKind::Usd,
-        )
-        .unit(FeatureUnit::Usd)
-        .null_policy(NullPolicy::Penalize)
-        .build(),
-    );
-    out.push(
-        book_spec(
-            FeatureName::from_static("book.age_ms"),
-            FeatureValueKind::Count,
-        )
-        .unit(FeatureUnit::Milliseconds)
-        .null_policy(NullPolicy::RejectMarket)
-        .build(),
-    );
-    out.push(
-        book_spec(
-            FeatureName::from_static("book.crossed"),
-            FeatureValueKind::Bool,
-        )
-        .null_policy(NullPolicy::RejectMarket)
-        .build(),
-    );
-    out.push(
-        book_spec(
-            FeatureName::from_static("book.empty"),
-            FeatureValueKind::Bool,
-        )
-        .null_policy(NullPolicy::RejectMarket)
-        .build(),
-    );
-    for level in &config.depth_levels {
-        out.push(
-            book_spec(
-                FeatureName::new(format!("book.depth_top{level}_usd")),
-                FeatureValueKind::Usd,
-            )
+        book_spec(book::VISIBLE_LIQUIDITY_USD, FeatureValueKind::Usd)
             .unit(FeatureUnit::Usd)
             .null_policy(NullPolicy::Penalize)
             .build(),
+    );
+    out.push(
+        book_spec(book::AGE_MS, FeatureValueKind::Count)
+            .unit(FeatureUnit::Milliseconds)
+            .null_policy(NullPolicy::RejectMarket)
+            .build(),
+    );
+    out.push(
+        book_spec(book::CROSSED, FeatureValueKind::Bool)
+            .null_policy(NullPolicy::RejectMarket)
+            .build(),
+    );
+    out.push(
+        book_spec(book::EMPTY, FeatureValueKind::Bool)
+            .null_policy(NullPolicy::RejectMarket)
+            .build(),
+    );
+    for level in &config.depth_levels {
+        out.push(
+            book_spec(FeatureName::book_depth_top(*level), FeatureValueKind::Usd)
+                .unit(FeatureUnit::Usd)
+                .null_policy(NullPolicy::Penalize)
+                .build(),
         );
     }
 }
@@ -557,8 +499,14 @@ fn time_series_specs(config: &FeaturesConfig, out: &mut Vec<FeatureSpec>) {
 
     for window in &config.bar_windows_secs {
         out.push(
+            spec(FeatureName::ts_return(*window), F, Dec, Src, Pit, Stale)
+                .unit(FeatureUnit::Ratio)
+                .null_policy(NullPolicy::Penalize)
+                .build(),
+        );
+        out.push(
             spec(
-                FeatureName::new(format!("ts.return_{window}s")),
+                FeatureName::ts_spread_trend(*window),
                 F,
                 Dec,
                 Src,
@@ -571,20 +519,7 @@ fn time_series_specs(config: &FeaturesConfig, out: &mut Vec<FeatureSpec>) {
         );
         out.push(
             spec(
-                FeatureName::new(format!("ts.spread_trend_{window}s")),
-                F,
-                Dec,
-                Src,
-                Pit,
-                Stale,
-            )
-            .unit(FeatureUnit::Ratio)
-            .null_policy(NullPolicy::Penalize)
-            .build(),
-        );
-        out.push(
-            spec(
-                FeatureName::new(format!("ts.depth_trend_{window}s")),
+                FeatureName::ts_depth_trend(*window),
                 F,
                 Dec,
                 Src,
@@ -598,23 +533,16 @@ fn time_series_specs(config: &FeaturesConfig, out: &mut Vec<FeatureSpec>) {
     }
     for window in &config.momentum_windows_secs {
         out.push(
-            spec(
-                FeatureName::new(format!("ts.momentum_{window}s")),
-                F,
-                Dec,
-                Src,
-                Pit,
-                Stale,
-            )
-            .unit(FeatureUnit::Ratio)
-            .null_policy(NullPolicy::Penalize)
-            .build(),
+            spec(FeatureName::ts_momentum(*window), F, Dec, Src, Pit, Stale)
+                .unit(FeatureUnit::Ratio)
+                .null_policy(NullPolicy::Penalize)
+                .build(),
         );
     }
     for window in &config.volatility_windows_secs {
         out.push(
             spec(
-                FeatureName::new(format!("ts.realized_vol_{window}s")),
+                FeatureName::ts_realized_vol(*window),
                 F,
                 Dec,
                 Src,
@@ -628,17 +556,10 @@ fn time_series_specs(config: &FeaturesConfig, out: &mut Vec<FeatureSpec>) {
         );
     }
     out.push(
-        spec(
-            FeatureName::from_static("ts.price_reversal"),
-            F,
-            Dec,
-            Src,
-            Pit,
-            Stale,
-        )
-        .unit(FeatureUnit::Ratio)
-        .null_policy(NullPolicy::Penalize)
-        .build(),
+        spec(ts::PRICE_REVERSAL, F, Dec, Src, Pit, Stale)
+            .unit(FeatureUnit::Ratio)
+            .null_policy(NullPolicy::Penalize)
+            .build(),
     );
 }
 
@@ -650,14 +571,14 @@ fn microstructure_specs(out: &mut Vec<FeatureSpec>) {
     use StalenessRule::MaxFactLag as Stale;
 
     for (name, kind, unit) in [
-        ("micro.quote_update_rate", Dec, FeatureUnit::PerSecond),
-        ("micro.book_churn", Dec, FeatureUnit::Ratio),
-        ("micro.queue_depletion", Dec, FeatureUnit::Ratio),
-        ("micro.sudden_liquidity_withdrawal", Dec, FeatureUnit::Ratio),
-        ("micro.adverse_selection_proxy", Dec, FeatureUnit::Ratio),
+        (micro::QUOTE_UPDATE_RATE, Dec, FeatureUnit::PerSecond),
+        (micro::BOOK_CHURN, Dec, FeatureUnit::Ratio),
+        (micro::QUEUE_DEPLETION, Dec, FeatureUnit::Ratio),
+        (micro::SUDDEN_LIQUIDITY_WITHDRAWAL, Dec, FeatureUnit::Ratio),
+        (micro::ADVERSE_SELECTION_PROXY, Dec, FeatureUnit::Ratio),
     ] {
         out.push(
-            spec(FeatureName::from_static(name), F, kind, Src, Pit, Stale)
+            spec(name, F, kind, Src, Pit, Stale)
                 .unit(unit)
                 .null_policy(NullPolicy::Penalize)
                 .build(),
@@ -665,7 +586,7 @@ fn microstructure_specs(out: &mut Vec<FeatureSpec>) {
     }
     out.push(
         spec(
-            FeatureName::from_static("micro.stale_quote_frequency"),
+            micro::STALE_QUOTE_FREQUENCY,
             F,
             Probability,
             Src,
@@ -692,7 +613,7 @@ fn domain_specs(out: &mut Vec<FeatureSpec>) {
     for (family, name) in DOMAIN_FEATURES {
         out.push(
             spec(
-                FeatureName::from_static(name),
+                name,
                 F,
                 Dec,
                 SourceRequirement::DomainExternal { family },
@@ -703,5 +624,78 @@ fn domain_specs(out: &mut Vec<FeatureSpec>) {
             .null_policy(NullPolicy::DomainMissing)
             .build(),
         );
+    }
+}
+
+/// Validate `features.required_features` against the active [`FeatureSchema`].
+///
+/// Registered into models' [`FEATURES_CONFIG_VALIDATORS`] at link time so
+/// [`validate_runtime_config`](quant_pivot_models::runtime_config::validate_runtime_config)
+/// performs schema membership checks in the same pass as structural invariants.
+pub fn validate_required_features(features: &FeaturesConfig, report: &mut ConfigValidationReport) {
+    let schema = FeatureSchema::build(features);
+    for feature_ref in &features.required_features {
+        let label = feature_ref.name.trim();
+        if label.is_empty() {
+            continue;
+        }
+        let name = FeatureName::from(feature_ref);
+        if !schema.contains(&name) {
+            report.errors.push(ConfigValidationError::InvalidValue {
+                field: "features.required_features",
+                detail: format!("unknown feature `{label}` for the active schema"),
+            });
+        }
+    }
+}
+
+fn validate_required_features_hook(features: &FeaturesConfig, report: &mut ConfigValidationReport) {
+    validate_required_features(features, report);
+}
+
+#[allow(unsafe_code)]
+#[distributed_slice(FEATURES_CONFIG_VALIDATORS)]
+static REGISTER_REQUIRED_FEATURES: FeaturesConfigValidator = validate_required_features_hook;
+
+#[cfg(test)]
+mod validation_tests {
+    use super::validate_required_features;
+    use quant_pivot_error::config_validation::ConfigValidationReport;
+    use quant_pivot_models::runtime_config::{
+        FeatureNameRef, RuntimeConfig, validate_runtime_config,
+    };
+
+    #[test]
+    fn default_runtime_config_passes_full_validation() {
+        let report = validate_runtime_config(&RuntimeConfig::default());
+        assert!(!report.has_errors());
+    }
+
+    #[test]
+    fn unknown_required_feature_is_rejected() {
+        let mut config = RuntimeConfig::default();
+        config.features.required_features = vec![FeatureNameRef::new("book.not_a_feature")];
+        let report = validate_runtime_config(&config);
+        assert!(report.has_errors());
+    }
+
+    #[test]
+    fn known_required_feature_is_accepted() {
+        let mut config = RuntimeConfig::default();
+        config
+            .features
+            .required_features
+            .push(FeatureNameRef::new("book.spread_bps"));
+        let report = validate_runtime_config(&config);
+        assert!(!report.has_errors());
+    }
+
+    #[test]
+    fn validate_required_features_can_be_called_directly() {
+        let mut config = RuntimeConfig::default();
+        config.features.required_features = vec![FeatureNameRef::new("book.not_a_feature")];
+        let mut report = ConfigValidationReport::default();
+        validate_required_features(&config.features, &mut report);
+        assert!(report.has_errors());
     }
 }

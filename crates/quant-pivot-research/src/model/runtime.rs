@@ -16,13 +16,14 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
     domain::ModelVersionInfo,
-    types::{ContentHash, MarketId, ModelVersionId, TokenId},
+    enums::quant::DataQualityStatus,
+    types::{ContentHash, MarketId, ModelRunId, ModelVersionId, Price, TokenId, Usd},
 };
 use serde::{Deserialize, Serialize};
 
 use crate::{
     factors::{FactorName, FactorValue},
-    features::{FeatureName, FeatureValue},
+    features::{FeatureName, FeatureValue, SubstitutionAudit},
     model::signal::SignalCandidate,
 };
 
@@ -139,20 +140,50 @@ impl Display for ParseModelFamilyError {
 
 impl std::error::Error for ParseModelFamilyError {}
 
+/// Per-market context the scorer needs beyond the factor vector.
+///
+/// Carries executable prices (for the entry reference + side selection), liquidity
+/// and data-quality (for the governed multipliers), the resolution horizon, and
+/// the audited feature substitutions (for the governed confidence penalty).
+///
+/// Projected by the core `ModelRunner` from the selection snapshot and the
+/// market's feature vector — never re-derived inside the runtime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MarketInferenceContext {
+    /// The NO / secondary outcome token, when binary (targeted by `BuyNo`).
+    pub secondary_token_id: Option<TokenId>,
+    /// Executable reference price of the YES outcome token.
+    pub yes_price: Price,
+    /// Executable reference price of the NO outcome token, when binary.
+    pub no_price: Option<Price>,
+    /// Reported visible liquidity, when known (liquidity multiplier input).
+    pub liquidity_usd: Option<Usd>,
+    /// Aggregate data-quality classification (data-quality multiplier input).
+    pub data_quality: DataQualityStatus,
+    /// Seconds until market resolution, when known (horizon multiplier input).
+    pub time_to_resolution_secs: Option<u64>,
+    /// Audited feature substitutions (confidence-penalty input).
+    pub substitutions: Vec<SubstitutionAudit>,
+}
+
 /// One market's factor row for factor-table inference.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FactorInferenceRow {
     /// Market id.
     pub market_id: MarketId,
-    /// Outcome token id.
+    /// Outcome token id (the YES / primary token).
     pub token_id: TokenId,
     /// Computed factor values for the market.
     pub factors: Vec<FactorValue>,
+    /// Per-market scoring context (prices, liquidity, quality, horizon).
+    pub context: MarketInferenceContext,
 }
 
 /// A batch of per-market factor rows (weighted-factor scorer input).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FactorInferenceTable {
+    /// The owning model run; stamped onto every emitted candidate.
+    pub model_run_id: ModelRunId,
     /// Decision time the batch was assembled as of.
     pub as_of: DateTime<Utc>,
     /// Per-market factor rows.
@@ -247,6 +278,11 @@ pub trait QuantModelRuntime: Send + Sync {
     /// The feature-schema hash this runtime was built against; a mismatch with
     /// the active schema must abort inference.
     fn feature_schema_hash(&self) -> ContentHash;
+
+    /// Features this model requires; surfaced to the 03.1 selector so a market
+    /// missing any of them is filtered before it reaches inference. Empty means
+    /// the model imposes no extra selection requirement.
+    fn required_features(&self) -> Vec<FeatureName>;
 
     /// Score a batch, producing candidates.
     async fn infer_batch(&self, input: ModelRuntimeInput) -> QuantResult<ModelRuntimeOutput>;

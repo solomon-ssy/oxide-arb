@@ -1,13 +1,13 @@
 //! Runtime-config section structs grouped by document area.
 
 use crate::{
-    enums::{common::MarketCategory, quant::QuantRuntimeMode},
+    enums::{common::MarketCategory, factor::FactorFamily, quant::QuantRuntimeMode},
     runtime_config::wire::{
         CapitalPolicy, ConfidenceSizeCurve, DecimalString, DomainFeaturePolicy,
         DrawdownMultiplierPolicy, EntryOrderPolicy, ExecutionAdmissionPolicy, ExitOrderPolicy,
-        FactorWeights, FeatureFamily, FeatureStalenessPolicy, KillSwitchPolicy, MarketIdList,
-        MissingFactorPolicy, ModelVersionRef, NotificationPolicies, ReconciliationPolicy,
-        ReportDeliveryPolicy,
+        FactorWeights, FeatureFamily, FeatureNameRef, FeatureStalenessPolicy, KillSwitchPolicy,
+        MarketIdList, MissingFactorPolicy, ModelVersionRef, NotificationPolicies,
+        ReconciliationPolicy, ReportDeliveryPolicy,
     },
     types::SchemaVersion,
 };
@@ -102,8 +102,8 @@ pub struct FeaturesConfig {
     pub feature_schema_version: SchemaVersion,
     /// Enabled feature family names.
     pub enabled_feature_families: Vec<FeatureFamily>,
-    /// Required feature names.
-    pub required_features: Vec<String>,
+    /// Required feature names (each must exist in the active feature schema).
+    pub required_features: Vec<FeatureNameRef>,
     /// Domain feature missing/null policy.
     pub domain_feature_policy: DomainFeaturePolicy,
     /// Bar aggregation windows in seconds.
@@ -140,29 +140,26 @@ impl Default for FeaturesConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct FactorsConfig {
-    /// Enabled factor family names.
-    pub enabled_factor_families: Vec<String>,
+    /// Generic factor families enabled for online computation.
+    ///
+    /// Domain (`FactorFamily::Domain`) variants are routed by market category and
+    /// must not appear here.
+    pub enabled_factor_families: Vec<FactorFamily>,
     /// Factor weights keyed by factor name.
     pub factor_weights: FactorWeights,
     /// Minimum confidence for a factor to contribute to scoring.
     pub min_factor_confidence: DecimalString,
     /// Missing factor handling policy.
     pub missing_factor_policy: MissingFactorPolicy,
-    /// Published factor set id.
-    pub published_factor_set_id: Option<String>,
-    /// Shadow factor set id.
-    pub shadow_factor_set_id: Option<String>,
 }
 
 impl Default for FactorsConfig {
     fn default() -> Self {
         Self {
-            enabled_factor_families: vec!["liquidity".to_owned(), "momentum".to_owned()],
+            enabled_factor_families: vec![FactorFamily::Liquidity, FactorFamily::Momentum],
             factor_weights: FactorWeights::default(),
             min_factor_confidence: DecimalString::new("0.50"),
             missing_factor_policy: MissingFactorPolicy::ZeroWeight,
-            published_factor_set_id: None,
-            shadow_factor_set_id: None,
         }
     }
 }
@@ -177,9 +174,13 @@ pub struct ModelConfig {
     pub shadow_model_version_id: Option<ModelVersionRef>,
     /// Minimum model confidence.
     pub min_model_confidence: DecimalString,
-    /// Maximum age of quality gates before model use is denied.
+    /// Maximum age of a quality-gate report before model load is denied.
+    /// Consumed by Phase 3.7 governance (`ModelQualityGate` / load-time deny), not by
+    /// the 3.4 `ModelRunner` inference path.
     pub min_quality_gate_age_secs: u64,
-    /// Prediction horizon in seconds.
+    /// Prediction horizon used when authoring / training artifacts
+    /// (`WeightedFactorModelArtifact.prediction_horizon_secs`). Online inference reads
+    /// the frozen artifact field, not this config value (Phase 3.6 trainer writes it).
     pub prediction_horizon_secs: u64,
     /// Minimum candidate score to enter portfolio pruning.
     pub candidate_score_floor: DecimalString,

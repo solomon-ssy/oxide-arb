@@ -32,6 +32,23 @@ pub struct ModelVersionRef {
     pub id: String,
 }
 
+/// Runtime-config feature-name reference (wire label for a governed feature).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(transparent)]
+#[schemars(transparent)]
+pub struct FeatureNameRef {
+    /// Stable feature identifier (must exist in the active [`FeatureSchema`]).
+    pub name: String,
+}
+
+impl FeatureNameRef {
+    /// Build a feature-name reference from a wire label.
+    #[must_use]
+    pub fn new(name: impl Into<String>) -> Self {
+        Self { name: name.into() }
+    }
+}
+
 impl DecimalString {
     /// Build a decimal string value from a static default.
     #[must_use]

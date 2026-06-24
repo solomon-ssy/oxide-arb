@@ -1,13 +1,11 @@
 //! Versioned, hot-reloadable runtime configuration (`schema_version = 3`).
 
-pub mod factor_families;
 pub mod json_schema;
 pub mod preferences_schema;
 pub mod sections;
 pub mod validation;
 pub mod wire;
 
-pub use factor_families::{GENERIC_FACTOR_FAMILY_WIRES, is_generic_factor_family_wire};
 pub use json_schema::{
     RuntimeConfigPatchError, apply_runtime_config_patch, build_schema_fields, schema_leaf_paths,
     sensitive_leaf_paths,

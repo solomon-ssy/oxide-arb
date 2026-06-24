@@ -76,6 +76,22 @@ active_string_enum! {
     }
 }
 
+impl SignalSide {
+    /// The stable `i8` code persisted to `ClickHouse` `side` columns
+    /// (`quant_signal_candidate_event` / `quant_recommendation_event` /
+    /// `quant_execution_event`). Append-only contract: never renumber an existing
+    /// variant.
+    #[must_use]
+    pub const fn as_i8(self) -> i8 {
+        match self {
+            Self::BuyYes => 1,
+            Self::BuyNo => 2,
+            Self::SellYes => 3,
+            Self::SellNo => 4,
+        }
+    }
+}
+
 active_string_enum! {
     /// How an entry plan becomes executable.
     @derive(Default)
@@ -223,6 +239,21 @@ active_string_enum! {
         Succeeded => "succeeded",
         Failed => "failed",
         Cancelled => "cancelled",
+    }
+}
+
+active_string_enum! {
+    /// Stable, queryable failure taxonomy for a terminal [`ModelRunStatus::Failed`]
+    /// run. Append-only wire labels — never rename an existing value.
+    pub enum ModelRunErrorCode {
+        ActiveInferenceFailed => "active_inference_failed",
+        ShadowInferenceFailed => "shadow_inference_failed",
+        FeaturePlaneFailed => "feature_plane_failed",
+        FactorPlaneFailed => "factor_plane_failed",
+        SelectionFailed => "selection_failed",
+        ArtifactLoadFailed => "artifact_load_failed",
+        SchemaBindingFailed => "schema_binding_failed",
+        CancelledByOperator => "cancelled_by_operator",
     }
 }
 

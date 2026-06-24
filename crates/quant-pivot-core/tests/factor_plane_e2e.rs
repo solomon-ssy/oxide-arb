@@ -24,18 +24,29 @@ use quant_pivot_core::{
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     clickhouse::BookMicrostructureRow,
-    domain::market::{MarketRegistryInfo, TokenInfo, book::BookLevel},
+    domain::{
+        NewModelRun,
+        market::{MarketRegistryInfo, TokenInfo, book::BookLevel},
+    },
     enums::{
         common::{CategorySet, MarketCategory, TickSize},
+        factor::FactorFamily,
         market::MarketStatus,
+        quant::{ModelRunKind, ModelRunStatus},
     },
     runtime_config::{DataQualityConfig, FactorsConfig, FeaturesConfig},
-    types::{EventId, FeatureVectorId, MarketId, ModelRunId, Price, Shares, TokenId, Usd},
+    types::{
+        ContentHash, EventId, FeatureVectorId, MarketId, ModelRunId, Price, RuntimeConfigVersionId,
+        Shares, TokenId, Usd,
+    },
 };
 use quant_pivot_repository::{
-    postgres::{PgEventRepository, PgFactorRepository, PgFeatureRepository, PgMarketRepository},
+    postgres::{
+        PgEventRepository, PgFactorRepository, PgFeatureRepository, PgMarketRepository,
+        PgModelRunRepository,
+    },
     traits::{
-        EventRepository, FactorRepository, FeatureRepository, MarketRepository,
+        EventRepository, FactorRepository, FeatureRepository, MarketRepository, ModelRunRepository,
         QuantFactReadRepository,
     },
 };
@@ -176,10 +187,10 @@ fn noop_feature_writer() -> Arc<FeatureEventWriter> {
 fn factors_config() -> FactorsConfig {
     FactorsConfig {
         enabled_factor_families: vec![
-            "liquidity".to_owned(),
-            "microstructure".to_owned(),
-            "resolution".to_owned(),
-            "data_quality".to_owned(),
+            FactorFamily::Liquidity,
+            FactorFamily::Microstructure,
+            FactorFamily::Resolution,
+            FactorFamily::DataQuality,
         ],
         ..FactorsConfig::default()
     }
@@ -253,6 +264,31 @@ async fn create_definition_and_values_then_list_for_run() {
     let service = FactorPipelineService::new(Arc::clone(&factor_repo), event_writer);
 
     let model_run_id = ModelRunId::from_v7();
+    // The factor-value → model_run FK (added in 3.4) requires the owning run to
+    // exist before any factor value is persisted.
+    let model_run_repo = PgModelRunRepository::new(db.clone());
+    model_run_repo
+        .create(NewModelRun {
+            model_run_id: model_run_id.clone(),
+            run_kind: ModelRunKind::LiveInference,
+            model_version_id: None,
+            runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
+            market_selection_id: None,
+            window_start: Utc::now(),
+            window_end: Utc::now(),
+            status: ModelRunStatus::Running,
+            input_hash: ContentHash::parse(format!("blake3:{}", "0".repeat(64)))
+                .expect("zero hash"),
+            output_hash: None,
+            metrics_json: serde_json::json!({}),
+            error_code: None,
+            error_message: None,
+            started_at: Utc::now(),
+            finished_at: None,
+        })
+        .await
+        .expect("create owning model run");
+
     let factors = factors_config();
     let features = FeaturesConfig::default();
     let result = service
@@ -352,23 +388,23 @@ fn sample_vector(
     use std::collections::BTreeMap;
 
     use quant_pivot_models::{enums::quant::DataQualityStatus, types::SchemaVersion};
-    use quant_pivot_research::features::{FeatureName, FeatureValue};
+    use quant_pivot_research::features::{
+        FeatureName, FeatureValue,
+        names::{book, market},
+    };
 
     let mut values: BTreeMap<FeatureName, FeatureValue> = BTreeMap::new();
     values.insert(
-        FeatureName::from_static("book.visible_liquidity_usd"),
+        book::VISIBLE_LIQUIDITY_USD,
         FeatureValue::Usd(Usd::new(liquidity)),
     );
+    values.insert(book::SPREAD_BPS, FeatureValue::Bps(spread_bps));
     values.insert(
-        FeatureName::from_static("book.spread_bps"),
-        FeatureValue::Bps(spread_bps),
-    );
-    values.insert(
-        FeatureName::from_static("book.depth_imbalance"),
+        book::DEPTH_IMBALANCE,
         FeatureValue::Decimal(Decimal::new(2, 1)),
     );
     values.insert(
-        FeatureName::from_static("market.time_to_resolution_secs"),
+        market::TIME_TO_RESOLUTION_SECS,
         FeatureValue::Count(172_800),
     );
     FeatureVector {

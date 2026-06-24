@@ -10,9 +10,9 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use quant_pivot_models::enums::common::MarketCategory;
+use quant_pivot_models::enums::{common::MarketCategory, domain::DomainFamily};
 
-use crate::{factors::computer::FactorComputer, vertical::DomainFamily};
+use crate::factors::computer::FactorComputer;
 
 /// A vertical-specific factor computer.
 ///

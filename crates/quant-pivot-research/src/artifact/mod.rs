@@ -124,4 +124,12 @@ pub trait ArtifactStore: Send + Sync {
 
     /// Whether an artifact exists at `uri`.
     async fn exists(&self, uri: &ArtifactUri) -> QuantResult<bool>;
+
+    /// Read the bytes stored under a content-addressed `key`, without a recorded
+    /// URI. The key resolves to the same location [`Self::put`] would write, so a
+    /// content-addressed artifact is retrievable from its hash alone.
+    async fn get_by_key(&self, key: &ArtifactKey) -> QuantResult<Vec<u8>>;
+
+    /// Whether an artifact exists under a content-addressed `key`.
+    async fn exists_by_key(&self, key: &ArtifactKey) -> QuantResult<bool>;
 }

@@ -11,98 +11,17 @@
 
 use chrono::{DateTime, Utc};
 use quant_pivot_models::{
-    enums::quant::FactorDirection,
+    enums::{factor::FactorFamily, quant::FactorDirection},
     types::{FactorDefinitionId, MarketId, Probability},
 };
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
-use crate::{features::FeatureName, naming::stable_name, vertical::DomainFamily};
+use crate::{features::FeatureName, naming::stable_name};
 
 stable_name! {
     /// Stable, compile-time-known factor name (e.g. `"liquidity_depth"`).
     FactorName
-}
-
-/// Factor family grouping.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FactorFamily {
-    /// Order-book depth / available liquidity.
-    Liquidity,
-    /// Order-flow microstructure.
-    Microstructure,
-    /// Trend / momentum.
-    Momentum,
-    /// Mean reversion.
-    MeanReversion,
-    /// Realized / implied volatility regime.
-    Volatility,
-    /// Market activity (quote/trade rate).
-    Activity,
-    /// Resolution timing / ambiguity.
-    Resolution,
-    /// Data-quality-derived factors.
-    DataQuality,
-    /// Vertical/domain-specific factors.
-    Domain(DomainFamily),
-}
-
-impl FactorFamily {
-    /// The stable wire label persisted to `quant_factor_definition.factor_family`
-    /// and `quant_factor_event.factor_family`, and matched against
-    /// `factors.enabled_factor_families` config entries.
-    ///
-    /// This is an **append-only contract**: generic families use their flat
-    /// `snake_case` name; vertical families use `domain.<vertical>`. Never change
-    /// an existing label — it would silently rewrite persisted analytics and break
-    /// config gating.
-    #[must_use]
-    pub fn as_wire(self) -> String {
-        match self {
-            Self::Liquidity => "liquidity".to_owned(),
-            Self::Microstructure => "microstructure".to_owned(),
-            Self::Momentum => "momentum".to_owned(),
-            Self::MeanReversion => "mean_reversion".to_owned(),
-            Self::Volatility => "volatility".to_owned(),
-            Self::Activity => "activity".to_owned(),
-            Self::Resolution => "resolution".to_owned(),
-            Self::DataQuality => "data_quality".to_owned(),
-            Self::Domain(family) => format!("domain.{}", family.as_str()),
-        }
-    }
-
-    /// The flat wire label of a **generic** family (for config gating), or `None`
-    /// for [`FactorFamily::Domain`] (verticals are routed by category, not by the
-    /// `enabled_factor_families` list).
-    #[must_use]
-    pub const fn generic_wire(self) -> Option<&'static str> {
-        match self {
-            Self::Liquidity => Some("liquidity"),
-            Self::Microstructure => Some("microstructure"),
-            Self::Momentum => Some("momentum"),
-            Self::MeanReversion => Some("mean_reversion"),
-            Self::Volatility => Some("volatility"),
-            Self::Activity => Some("activity"),
-            Self::Resolution => Some("resolution"),
-            Self::DataQuality => Some("data_quality"),
-            Self::Domain(_) => None,
-        }
-    }
-
-    /// The stable wire label persisted to `quant_factor_definition.scope`.
-    ///
-    /// Generic-plane families map to `"generic"`; vertical families use
-    /// `domain:<vertical>`. This is an **append-only contract** — do not change
-    /// existing labels (distinct from [`Self::as_wire`], which targets the
-    /// `factor_family` column).
-    #[must_use]
-    pub fn definition_scope(self) -> String {
-        match self {
-            Self::Domain(family) => format!("domain:{}", family.as_str()),
-            _ => "generic".to_owned(),
-        }
-    }
 }
 
 /// How a factor's raw value is normalized into a `[0, 1]` score.

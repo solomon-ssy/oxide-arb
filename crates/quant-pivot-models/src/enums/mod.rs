@@ -63,6 +63,8 @@ macro_rules! active_string_enum {
 
 pub mod clickhouse;
 pub mod common;
+pub mod domain;
+pub mod factor;
 pub mod fee;
 pub mod market;
 pub mod operation_log;

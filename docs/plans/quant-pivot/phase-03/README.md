@@ -139,14 +139,27 @@ ml-classical = ["dep:smartcore"]
 
 | 延后能力 | 本期替代 | 落地 Phase | 标注于 |
 |---|---|---|---|
-| 完整受治理 `PortfolioPlanner` | 最小 greedy allocator（backtest 用） | Phase 04 | 3.6 |
-| TopN 报告生成 / report scheduler / 定时 `live_report_inference` | 按需 ModelRun + SignalCandidate | Phase 04 | 3.4 / 3.7 |
-| report-level shadow 完整比较（capital/would-execute/risk envelope delta） | signal-candidate / rank 层 shadow 比较 | Phase 04 | 3.7 |
-| 垂直领域特征 / 因子真实外部数据 | 仅接口 + schema 骨架 | Phase 2+ 外部源 | 3.2 / 3.3 |
+| 完整受治理 `PortfolioPlanner` | 最小 greedy allocator（backtest 用） | Phase 04 | 3.6 / 3.4 §10 |
+| TopN 报告生成 / report scheduler / 定时 `live_report_inference` | 按需 `ModelRunner` + SignalCandidate | Phase 04 | 3.4 §10 |
+| `required_features` → 03.1 selection 全链路编排 | `QuantModelRuntime::required_features()` trait | Phase 04 | 3.4 §10 / 03.x §5.1 |
+| report-level shadow 完整比较（capital/would-execute/risk envelope delta） | signal/rank 层 `shadow_diff` + metrics | Phase 04 | 3.7 §10 |
+| shadow `exceeds_threshold` operator alert + `quant_shadow_comparison` 表 | shadow run `metrics_json` | Phase 3.7 | 3.7 §4 / §10 |
+| `ModelConfig.min_quality_gate_age_secs` load-time deny | schema 字段 + validation | Phase 3.7 | 3.4 §4.2 / 3.7 §4 |
+| `FactorsConfig.factor_weights` 在线 overlay（非 Published） | artifact 内冻结权重 | Phase 3.7 | 3.4 §4.2 / 3.7 §3.6 |
+| `ReturnModelSpec::Calibrated` 拟合 + `objective_report` | `Heuristic` + Calibrated 插值应用 | Phase 3.6 | 3.4 §10 / 3.6 §1.1 |
+| `classical` runtime（smartcore） | factory `RuntimeUnavailable` | Phase 3.6 | 3.4 §10 |
+| `ModelConfig.prediction_horizon_secs` 在线读取 | artifact `prediction_horizon_secs` | Phase 3.6 写入 artifact | 3.4 §4.2 |
+| 垂直领域特征 / 因子真实外部数据 | skeleton + `DomainDataMissing` | Post–3.2 / 3.5 | 3.2 / 3.3 / 03.x |
+| Category-specific weighted / `ModelRouting` | generic `WeightedFactorRuntime` | Post–domain 源 | 03.x §5.1 |
+| polars 大规模离线 materialization | base numeric + PG/CH 在线路径 | Phase 3.5 | 03.x / 3.5 |
 | `good_lp` 组合优化 | greedy allocator | Phase 05 | 3.6 |
-| `ort` ONNX 推理 | `QuantModelRuntime` 预留 `Onnx` arm | Phase 06 | 3.4 |
-| `burn` / `candle` 深度学习 | — | Phase 08 | 3.4 |
-| 对象存储（S3/MinIO）artifact | 本地目录 + `ArtifactStore` trait | 后续 | 3.0 |
+| `ort` ONNX 推理 | `QuantModelRuntime` 预留 arm | Phase 06 | 3.4 §10 |
+| auto-execution 门禁生效 | config 口径记录 | Phase 05/06 | 3.7 §10 |
+| `burn` / `candle` 深度学习 | — | Phase 08 | 3.4 §10 |
+| 对象存储（S3/MinIO）artifact | 本地目录 + content-addressed key | 后续 | 3.0 / 3.4 §1.1 |
+| PG `SignalCandidate` 表 | CH `quant_signal_candidate_event` only | —（by design） | 3.4 §10 |
+| `SellYes` / `SellNo` 退出候选 | Buy 侧 scorer only | Phase 05 | 3.4 §5.2 |
+| `input_hash` 内容级 audit digest | id + schema + version 绑定 | Phase 04 编排 + 可选 3.7 | 3.4 §10.6 |
 
 ## 7. 文档契约模板
 
