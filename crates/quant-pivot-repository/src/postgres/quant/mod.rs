@@ -1,5 +1,7 @@
 //! Quant-pivot Postgres repository implementations.
 
+mod backtest_report;
+mod comparison_report;
 mod dataset;
 mod factor;
 mod feature;
@@ -9,6 +11,8 @@ mod model_run;
 mod order_intent;
 mod recommendation_report;
 
+pub use backtest_report::PgBacktestReportRepository;
+pub use comparison_report::PgModelComparisonReportRepository;
 pub use dataset::PgTrainingDatasetRepository;
 pub use factor::PgFactorRepository;
 pub use feature::PgFeatureRepository;

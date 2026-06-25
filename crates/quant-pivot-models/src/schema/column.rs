@@ -186,6 +186,18 @@ pub fn bps_null(column: impl IntoIden) -> ColumnDef {
     numeric_null(column, Bps::PRECISION)
 }
 
+/// Precision of a signed, unitless ratio / analytical metric column.
+///
+/// Used by backtest metrics (rank IC, drawdown, turnover, tail loss, coverage)
+/// that may be negative or exceed `1`, so neither [`probability`] nor [`bps_null`]
+/// applies.
+const RATIO_PRECISION: (u32, u32) = (28, 12);
+
+/// `NUMERIC(28, 12) NOT NULL` for a signed, unitless ratio / analytical metric.
+pub fn ratio(column: impl IntoIden) -> ColumnDef {
+    numeric(column, RATIO_PRECISION)
+}
+
 /// `NUMERIC(20, 18) NOT NULL` for a probability / model weight.
 pub fn probability(column: impl IntoIden) -> ColumnDef {
     numeric(column, Probability::PRECISION)

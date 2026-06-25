@@ -197,7 +197,7 @@ pub static RESOURCE_OPERATIONS: &[(ResourceType, &[Operation])] = &[
         ResourceType::Materialization,
         &[Operation::Read, Operation::Create],
     ),
-    (ResourceType::Replay, &[Operation::Read]),
+    (ResourceType::Replay, &[Operation::Read, Operation::Create]),
     (ResourceType::Analytics, &[Operation::Read]),
     (
         ResourceType::RuntimeConfig,

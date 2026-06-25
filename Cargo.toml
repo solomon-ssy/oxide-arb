@@ -221,6 +221,9 @@ argmin-math = "0.5"
 
 # ml-classical: tree/ensemble/linear models for shadow candidates
 smartcore = "0.5"
+# Compact, deterministic serialization of classical model estimators.
+# Pinned to the 1.x `serialize`/`deserialize` API that smartcore 0.5 uses.
+bincode = "1.3"
 
 # ── Phase 6: Web Layer + RBAC Dependencies ───────────────────────────────────
 

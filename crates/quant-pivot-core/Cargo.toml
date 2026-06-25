@@ -78,5 +78,11 @@ testcontainers-modules = { workspace = true, features = ["postgres", "redis"] }
 proptest = { workspace = true }
 criterion = { workspace = true }
 
+[features]
+# Offline optimizer (argmin) for the weighted trainer's refinement step.
+optimize = ["quant-pivot-research/optimize"]
+# Classical ML (smartcore) shadow candidates: trainer + runtime.
+ml-classical = ["quant-pivot-research/ml-classical"]
+
 [lints]
 workspace = true

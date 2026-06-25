@@ -16,7 +16,14 @@
 //! fabricated. Business callers depend only on this service and `dyn QuantModelRuntime`,
 //! never on a concrete runtime type.
 
-use std::{collections::HashMap, str::FromStr, sync::Arc};
+use std::{
+    collections::HashMap,
+    str::FromStr,
+    sync::{
+        Arc,
+        atomic::{AtomicU32, Ordering},
+    },
+};
 
 use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
@@ -30,35 +37,39 @@ use quant_pivot_models::{
     runtime_config::{DecimalString, FactorsConfig, FeaturesConfig, ModelConfig, ModelVersionRef},
     types::{
         ContentHash, FeatureVectorId, MarketId, MarketSelectionId, ModelRunId, ModelVersionId,
-        Price, Probability, RuntimeConfigVersionId, Usd,
+        Probability, RuntimeConfigVersionId,
     },
 };
 use quant_pivot_repository::traits::{ModelRegistryRepository, ModelRunRepository};
 use quant_pivot_research::{
     factors::{FactorEngine, MarketFactorOutcome},
-    features::{
-        FeatureName, FeatureSchema, FeatureValue, FeatureVector,
-        names::{book, market},
-    },
+    features::{FeatureSchema, FeatureVector},
     hashing::ResearchHasher,
     model::{
-        ActiveSchemaBinding, DegradeAction, FactorInferenceRow, FactorInferenceTable,
-        InferenceStage, MarketInferenceContext, ModelRuntimeFactoryBuilder, ModelRuntimeInput,
-        SignalCandidate, degrade_action, signal_candidate_event,
+        ActiveSchemaBinding, DegradeAction, InferenceStage, ModelFamily,
+        ModelRuntimeFactoryBuilder, SignalCandidate, degrade_action, signal_candidate_event,
     },
     selection::SelectedMarket,
 };
 use rust_decimal::Decimal;
 use serde::Serialize;
 
-use crate::observability::{
-    alert_dispatcher::{Alert, AlertDispatcher},
-    signal_candidate_fact_writer::SignalCandidateEventWriter,
+use crate::{
+    observability::{
+        alert_dispatcher::{Alert, AlertDispatcher},
+        signal_candidate_fact_writer::SignalCandidateEventWriter,
+    },
+    pipeline::inference_batch::build_runtime_input,
+    service::factor_pipeline::{FactorPipelineRequest, FactorPipelineService},
 };
-use crate::service::factor_pipeline::{FactorPipelineRequest, FactorPipelineService};
 
 /// Decimal places shadow-diff aggregates are rounded to.
 const DIFF_SCALE: u32 = 12;
+
+/// Consecutive classical-shadow inference failures before a critical alert is
+/// raised (a misconfigured / schema-incompatible classical shadow must not fail
+/// silently forever).
+const SHADOW_CLASSICAL_ALERT_THRESHOLD: u32 = 3;
 
 /// A sink for the critical alerts the active inference path raises on failure.
 ///
@@ -175,6 +186,8 @@ pub struct ModelRunner {
     factor_pipeline: Arc<FactorPipelineService>,
     signal_writer: Arc<SignalCandidateEventWriter>,
     alerts: Arc<dyn InferenceAlertSink>,
+    /// Consecutive classical-shadow inference failures (reset on any success).
+    shadow_classical_failures: AtomicU32,
 }
 
 impl ModelRunner {
@@ -195,6 +208,7 @@ impl ModelRunner {
             factor_pipeline,
             signal_writer,
             alerts,
+            shadow_classical_failures: AtomicU32::new(0),
         }
     }
 
@@ -252,6 +266,7 @@ impl ModelRunner {
                         active.output_hash.clone(),
                         active.metrics.clone(),
                         Utc::now(),
+                        active_version_id.clone(),
                     )
                     .await?;
                 let shadow = self
@@ -323,9 +338,17 @@ impl ModelRunner {
             .await
             .map_err(|error| (InferenceStage::ActiveLoad, error))?;
 
-        let table = build_table(model_run_id, request, &factor_result.outcomes);
+        let (markets, vectors, outcomes) = align_cross_section(request, &factor_result.outcomes);
+        let input = build_runtime_input(
+            runtime.as_ref(),
+            model_run_id,
+            request.as_of,
+            &markets,
+            &vectors,
+            &outcomes,
+        );
         let output = runtime
-            .infer_batch(ModelRuntimeInput::FactorTable(table))
+            .infer_batch(input)
             .await
             .map_err(|error| (InferenceStage::ActiveInference, error))?;
 
@@ -487,11 +510,39 @@ impl ModelRunner {
             .await
             .map_err(|error| (InferenceStage::ShadowLoad, error))?;
 
-        let table = build_table(model_run_id, request, &active.outcomes);
-        let output = runtime
-            .infer_batch(ModelRuntimeInput::FactorTable(table))
-            .await
-            .map_err(|error| (InferenceStage::ShadowInference, error))?;
+        let is_classical = matches!(runtime.model_family(), ModelFamily::Classical(_));
+        let (markets, vectors, outcomes) = align_cross_section(request, &active.outcomes);
+        let input = build_runtime_input(
+            runtime.as_ref(),
+            model_run_id,
+            request.as_of,
+            &markets,
+            &vectors,
+            &outcomes,
+        );
+        let output = match runtime.infer_batch(input).await {
+            Ok(output) => {
+                self.shadow_classical_failures.store(0, Ordering::Relaxed);
+                output
+            }
+            Err(error) => {
+                // A misconfigured / schema-incompatible classical shadow must not
+                // degrade silently forever: escalate after N consecutive failures.
+                if is_classical {
+                    let count = self
+                        .shadow_classical_failures
+                        .fetch_add(1, Ordering::Relaxed)
+                        + 1;
+                    if count >= SHADOW_CLASSICAL_ALERT_THRESHOLD {
+                        self.alerts.critical(
+                            format!("classical shadow inference failing ({count}x consecutive)"),
+                            error.to_string(),
+                        );
+                    }
+                }
+                return Err((InferenceStage::ShadowInference, error));
+            }
+        };
 
         let output_hash = ResearchHasher::canonical(&output.candidates)
             .map_err(|error| (InferenceStage::ShadowInference, error))?;
@@ -517,7 +568,13 @@ impl ModelRunner {
             "exceeds_threshold": diff.exceeds_threshold,
         });
         self.model_run_repo
-            .succeed(model_run_id, output_hash, metrics, Utc::now())
+            .succeed(
+                model_run_id,
+                output_hash,
+                metrics,
+                Utc::now(),
+                Some(shadow_version_id.clone()),
+            )
             .await
             .map_err(|error| (InferenceStage::ShadowInference, QuantError::from(error)))?;
         self.signal_writer.write_batch(rows);
@@ -658,12 +715,18 @@ fn rejection_reason(
     }
 }
 
-/// Assemble the factor inference table from eligible outcomes + per-market context.
-fn build_table(
-    model_run_id: &ModelRunId,
+/// Join the round's factor outcomes with their selection snapshot + feature
+/// vector into index-aligned cross-section slices, so the family-specific input
+/// builder ([`build_runtime_input`]) sees the same aligned `(market, vector,
+/// outcome)` triples the offline replay does.
+fn align_cross_section(
     request: &ModelRunRequest<'_>,
     outcomes: &[MarketFactorOutcome],
-) -> FactorInferenceTable {
+) -> (
+    Vec<SelectedMarket>,
+    Vec<FeatureVector>,
+    Vec<MarketFactorOutcome>,
+) {
     let vectors: HashMap<&MarketId, &FeatureVector> = request
         .feature_vectors
         .iter()
@@ -675,93 +738,21 @@ fn build_table(
         .map(|market| (&market.market_id, market))
         .collect();
 
-    let mut rows = Vec::new();
+    let mut markets = Vec::new();
+    let mut feature_vectors = Vec::new();
+    let mut aligned = Vec::new();
     for outcome in outcomes {
-        if !outcome.eligibility.is_eligible() {
-            continue;
-        }
         let (Some(selected), Some(vector)) = (
             selection.get(&outcome.market_id),
             vectors.get(&outcome.market_id),
         ) else {
             continue;
         };
-        let Some(context) = market_context(vector, selected) else {
-            continue;
-        };
-        let factors = outcome
-            .factors
-            .iter()
-            .map(|scored| scored.value.clone())
-            .collect();
-        rows.push(FactorInferenceRow {
-            market_id: outcome.market_id.clone(),
-            token_id: selected.primary_token_id.clone(),
-            factors,
-            context,
-        });
+        markets.push((*selected).clone());
+        feature_vectors.push((*vector).clone());
+        aligned.push(outcome.clone());
     }
-
-    FactorInferenceTable {
-        model_run_id: model_run_id.clone(),
-        as_of: request.as_of,
-        rows,
-    }
-}
-
-/// Project the per-market scoring context, or `None` when no entry price exists.
-fn market_context(
-    vector: &FeatureVector,
-    selected: &SelectedMarket,
-) -> Option<MarketInferenceContext> {
-    let yes_price = yes_price(vector)?;
-    Some(MarketInferenceContext {
-        secondary_token_id: selected.secondary_token_id.clone(),
-        yes_price,
-        no_price: None,
-        liquidity_usd: selected
-            .liquidity_usd
-            .or_else(|| usd_feature(vector, &book::VISIBLE_LIQUIDITY_USD)),
-        data_quality: vector.data_quality,
-        time_to_resolution_secs: count_feature(vector, &market::TIME_TO_RESOLUTION_SECS),
-        substitutions: vector.substitutions.clone(),
-    })
-}
-
-/// The YES executable reference price: the mid, else the bid/ask midpoint.
-fn yes_price(vector: &FeatureVector) -> Option<Price> {
-    if let Some(mid) = probability_feature(vector, &book::MID) {
-        return Some(Price::new(mid.inner()));
-    }
-    let bid = probability_feature(vector, &book::BEST_BID)?;
-    let ask = probability_feature(vector, &book::BEST_ASK)?;
-    Some(Price::new(
-        ((bid.inner() + ask.inner()) / Decimal::from(2)).clamp(Decimal::ZERO, Decimal::ONE),
-    ))
-}
-
-/// Read a `[0, 1]` probability-valued feature.
-fn probability_feature(vector: &FeatureVector, name: &FeatureName) -> Option<Probability> {
-    match vector.values.get(name) {
-        Some(FeatureValue::Probability(value)) => Some(*value),
-        _ => None,
-    }
-}
-
-/// Read a USD-valued feature.
-fn usd_feature(vector: &FeatureVector, name: &FeatureName) -> Option<Usd> {
-    match vector.values.get(name) {
-        Some(FeatureValue::Usd(value)) => Some(*value),
-        _ => None,
-    }
-}
-
-/// Read a count-valued feature.
-fn count_feature(vector: &FeatureVector, name: &FeatureName) -> Option<u64> {
-    match vector.values.get(name) {
-        Some(FeatureValue::Count(value)) => Some(*value),
-        _ => None,
-    }
+    (markets, feature_vectors, aligned)
 }
 
 /// Shadow vs active divergence over the markets both models scored.

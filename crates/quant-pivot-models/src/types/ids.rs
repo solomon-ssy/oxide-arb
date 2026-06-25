@@ -114,6 +114,10 @@ pub struct ModelArtifactId(Arc<Uuid>);
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct BacktestReportId(Arc<Uuid>);
 
+/// Pairwise model-comparison report identifier (baseline vs candidate replay).
+#[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ModelComparisonReportId(Arc<Uuid>);
+
 /// Shadow comparison record identifier (shadow vs active model run).
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ShadowComparisonId(Arc<Uuid>);

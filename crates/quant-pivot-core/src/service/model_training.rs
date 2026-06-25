@@ -1,0 +1,535 @@
+//! Offline model-training orchestration (Phase 3.6).
+//!
+//! Loads a frozen training dataset's Parquet, decodes its **schedule and label
+//! truth**, rematerializes every example's features and factors point-in-time
+//! through the shared [`materialize_cross_section`] kernel (same path as the
+//! backtest replay), trains with the pure research trainer, content-addresses
+//! the artifact into the [`ArtifactStore`], and registers a **Candidate**
+//! `quant_model_version` plus a `Training` `quant_model_run`. Parquet is never
+//! trusted for features or factors. The weighted-factor path is always available;
+//! the classical (smartcore) path is linked only under the `ml-classical`
+//! feature and otherwise fails closed with `RuntimeUnavailable`.
+
+use std::{collections::BTreeSet, sync::Arc, time::Duration};
+
+use chrono::Utc;
+use quant_pivot_error::{QuantResult, research::ResearchError, storage::StorageError};
+use quant_pivot_models::{
+    domain::{ModelVersionInfo, NewModelRun, NewModelVersion, TrainingDatasetInfo},
+    enums::quant::{
+        ModelPublicationStatus, ModelRunErrorCode, ModelRunKind, ModelRunStatus,
+        TrainingDatasetStatus,
+    },
+    runtime_config::sections::{FactorsConfig, ModelConfig},
+    types::{ModelRunId, ModelSpecId, ModelVersionId, RuntimeConfigVersionId, TrainingDatasetId},
+};
+#[cfg(feature = "ml-classical")]
+use quant_pivot_models::{
+    enums::quant::ModelSerializationFormat, hashing::CanonicalDigest, types::ModelArtifactId,
+};
+use quant_pivot_repository::traits::{
+    MarketRepository, ModelRegistryRepository, ModelRunRepository, QuantFactReadRepository,
+    TrainingDatasetRepository,
+};
+use quant_pivot_research::{
+    artifact::ArtifactStore,
+    factors::FactorName,
+    model::{
+        ClassicalKind, FactorWeight, LabelSelector, ModelArtifact, ModelArtifactHeader,
+        ModelFamily, ModelTrainer, Regularization, ReturnModelSpec, ScoreMultiplierSpec,
+        SubstitutionConfidenceRules, TrainModelRequest, TrainedModelArtifact, TrainingObjective,
+        ValidationSpec, WeightedFactorTrainer,
+    },
+    training::{DatasetParquetCodec, TrainingExample},
+};
+#[cfg(feature = "ml-classical")]
+use quant_pivot_research::{
+    artifact::{ArtifactKey, ArtifactNamespace},
+    features::{FeatureName, FeatureValue},
+    model::{
+        ClassicalAdapterRegistry, ClassicalTrainOutput, ValidationReport,
+        artifact::ClassicalModelArtifact,
+    },
+    training::{
+        FeatureColumnSpec, FeatureMatrixSpec, MatrixScale, TrainingMatrix, build_training_matrix,
+    },
+};
+use rust_decimal::Decimal;
+
+use crate::service::{
+    dataset_replay::rematerialize_training_examples, historical_replay::ReplayConfig,
+};
+
+/// Repository + store dependencies for the trainer service.
+pub struct ModelTrainerServiceDeps {
+    /// Frozen training-dataset ledger.
+    pub dataset_repo: Arc<dyn TrainingDatasetRepository>,
+    /// Content-addressed artifact store (model bytes).
+    pub artifact_store: Arc<dyn ArtifactStore>,
+    /// Model registry (spec/version lifecycle).
+    pub model_registry_repo: Arc<dyn ModelRegistryRepository>,
+    /// Model-run ledger.
+    pub model_run_repo: Arc<dyn ModelRunRepository>,
+    /// `ClickHouse` fact reader for point-in-time rematerialization.
+    pub fact_read: Arc<dyn QuantFactReadRepository>,
+    /// Postgres market catalog for the replay window.
+    pub market_repo: Arc<dyn MarketRepository>,
+}
+
+/// Frozen config governing training (from the runtime-config version).
+pub struct ModelTrainerConfig {
+    /// Factor config (the `factor_weights` training seed).
+    pub factors: FactorsConfig,
+    /// Model config (prediction horizon).
+    pub model: ModelConfig,
+}
+
+/// A training request resolved by the admin port.
+pub struct TrainModelInput {
+    /// Target model spec.
+    pub model_spec_id: ModelSpecId,
+    /// Frozen dataset to train on.
+    pub training_dataset_id: TrainingDatasetId,
+    /// Frozen runtime-config version (provenance on the run).
+    pub runtime_config_version_id: RuntimeConfigVersionId,
+    /// Family to train.
+    pub model_family: ModelFamily,
+    /// Supervised target label.
+    pub label: LabelSelector,
+    /// Rolling validation folds.
+    pub validation_folds: u32,
+}
+
+/// Offline trainer service.
+pub struct ModelTrainerService {
+    deps: ModelTrainerServiceDeps,
+    config: ModelTrainerConfig,
+    replay: ReplayConfig,
+    max_book_staleness: Duration,
+}
+
+impl ModelTrainerService {
+    /// Assemble the service from deps, frozen config, and replay parameters.
+    #[must_use]
+    pub const fn new(
+        deps: ModelTrainerServiceDeps,
+        config: ModelTrainerConfig,
+        replay: ReplayConfig,
+        max_book_staleness: Duration,
+    ) -> Self {
+        Self {
+            deps,
+            config,
+            replay,
+            max_book_staleness,
+        }
+    }
+
+    /// Train a model and register it as a Candidate version.
+    pub async fn train(&self, input: TrainModelInput) -> QuantResult<ModelVersionInfo> {
+        let dataset = self.load_ready_dataset(&input.training_dataset_id).await?;
+        let parquet_examples = self.decode_examples(&dataset).await?;
+        let examples = rematerialize_training_examples(
+            &dataset,
+            &parquet_examples,
+            Arc::clone(&self.deps.fact_read),
+            Arc::clone(&self.deps.market_repo),
+            &self.replay,
+            self.max_book_staleness,
+        )
+        .await?;
+
+        let model_version_id = ModelVersionId::from_v7();
+        let model_run_id = ModelRunId::from_v7();
+        self.create_run(&model_run_id, &input, &dataset).await?;
+
+        match self
+            .train_and_register(&model_version_id, &input, &dataset, &examples)
+            .await
+        {
+            Ok(version) => {
+                self.deps
+                    .model_run_repo
+                    .succeed(
+                        &model_run_id,
+                        version.artifact_hash.clone(),
+                        version.metrics_json.clone(),
+                        Utc::now(),
+                        Some(model_version_id.clone()),
+                    )
+                    .await?;
+                Ok(version)
+            }
+            Err(error) => {
+                let _ = self
+                    .deps
+                    .model_run_repo
+                    .fail(
+                        &model_run_id,
+                        ModelRunErrorCode::TrainingFailed,
+                        error.to_string(),
+                        Utc::now(),
+                    )
+                    .await;
+                Err(error)
+            }
+        }
+    }
+
+    /// Load the dataset, rejecting any status outside `{Built, Ready}` (§6.1).
+    async fn load_ready_dataset(
+        &self,
+        training_dataset_id: &TrainingDatasetId,
+    ) -> QuantResult<TrainingDatasetInfo> {
+        let dataset = self
+            .deps
+            .dataset_repo
+            .find_by_id(training_dataset_id)
+            .await?
+            .ok_or_else(|| StorageError::NotFound {
+                entity: "training_dataset",
+                id: training_dataset_id.to_string(),
+            })?;
+        if !matches!(
+            dataset.status,
+            TrainingDatasetStatus::Built | TrainingDatasetStatus::Ready
+        ) {
+            return Err(ResearchError::DatasetBuild {
+                detail: format!(
+                    "training requires a Built/Ready dataset, got {}",
+                    dataset.status.as_str()
+                ),
+            }
+            .into());
+        }
+        Ok(dataset)
+    }
+
+    /// Fetch + decode the dataset's Parquet examples.
+    async fn decode_examples(
+        &self,
+        dataset: &TrainingDatasetInfo,
+    ) -> QuantResult<Vec<TrainingExample>> {
+        let bytes = self.deps.artifact_store.get(&dataset.parquet_uri).await?;
+        DatasetParquetCodec::decode(&bytes)
+    }
+
+    /// Train + register, dispatching on family.
+    async fn train_and_register(
+        &self,
+        model_version_id: &ModelVersionId,
+        input: &TrainModelInput,
+        dataset: &TrainingDatasetInfo,
+        examples: &[TrainingExample],
+    ) -> QuantResult<ModelVersionInfo> {
+        let header = ModelArtifactHeader {
+            model_version_id: model_version_id.clone(),
+            model_family: input.model_family,
+            feature_schema_hash: dataset.feature_schema_hash.clone(),
+            factor_schema_hash: dataset.factor_schema_hash.clone(),
+        };
+
+        let (artifact, metrics_json) = match input.model_family {
+            ModelFamily::WeightedFactor => self.train_weighted(header, input, examples).await?,
+            ModelFamily::Classical(kind) => {
+                self.train_classical(header, input, dataset, examples, kind)
+                    .await?
+            }
+        };
+
+        let artifact_hash = artifact.content_hash()?;
+        let key = ModelArtifact::artifact_key(&artifact_hash)?;
+        self.deps
+            .artifact_store
+            .put(key, &artifact.to_bytes()?)
+            .await?;
+
+        let version = self
+            .deps
+            .model_registry_repo
+            .next_version_for_spec(&input.model_spec_id)
+            .await?;
+        let registered = self
+            .deps
+            .model_registry_repo
+            .create_model_version(NewModelVersion {
+                model_version_id: model_version_id.clone(),
+                model_spec_id: input.model_spec_id.clone(),
+                version,
+                artifact_hash,
+                training_dataset_id: Some(input.training_dataset_id.clone()),
+                metrics_json,
+                quality_gate_report: serde_json::json!({}),
+                publication_status: ModelPublicationStatus::Candidate,
+                published_at: None,
+                retired_at: None,
+            })
+            .await?;
+        Ok(registered)
+    }
+
+    /// Weighted-factor training path (always linked).
+    async fn train_weighted(
+        &self,
+        header: ModelArtifactHeader,
+        input: &TrainModelInput,
+        examples: &[TrainingExample],
+    ) -> QuantResult<(ModelArtifact, serde_json::Value)> {
+        let seed_weights = self.seed_weights(examples);
+        let request = TrainModelRequest {
+            examples: examples.to_vec(),
+            label: input.label.clone(),
+            seed_weights,
+            objective: TrainingObjective::RankIc,
+            regularization: Regularization::default(),
+            validation: ValidationSpec {
+                folds: input.validation_folds.max(2),
+            },
+            header,
+            prediction_horizon_secs: self.config.model.prediction_horizon_secs,
+            multipliers: ScoreMultiplierSpec::conservative(),
+            substitution_rules: SubstitutionConfidenceRules::conservative(),
+            return_model: ReturnModelSpec::heuristic_default(),
+            required_features: Vec::new(),
+        };
+        let trained: TrainedModelArtifact = WeightedFactorTrainer::new().train(request).await?;
+        let metrics_json = serde_json::json!({
+            "in_sample": {
+                "objective_value": trained.in_sample_metrics.objective_value,
+                "summary": trained.in_sample_metrics.summary,
+            },
+            "validation": {
+                "mean_objective": trained.validation_metrics.mean_objective,
+                "fold_objectives": trained.validation_metrics.fold_objectives,
+                "sample_count": trained.validation_metrics.sample_count,
+            },
+        });
+        Ok((trained.artifact, metrics_json))
+    }
+
+    /// Derive the candidate factor seed: configured `factor_weights` if present,
+    /// else a uniform seed over the factors observed in the examples.
+    fn seed_weights(&self, examples: &[TrainingExample]) -> Vec<FactorWeight> {
+        let configured: Vec<FactorWeight> = self
+            .config
+            .factors
+            .factor_weights
+            .weights
+            .iter()
+            .filter_map(|(name, value)| {
+                value
+                    .value
+                    .parse::<Decimal>()
+                    .ok()
+                    .map(|weight| FactorWeight {
+                        factor: FactorName::new(name.clone()),
+                        weight,
+                    })
+            })
+            .collect();
+        if !configured.is_empty() {
+            return configured;
+        }
+        // Uniform seed over the (sorted, de-duplicated) factors in the dataset.
+        let mut names: BTreeSet<String> = BTreeSet::new();
+        for example in examples {
+            for factor in &example.factor_values {
+                names.insert(factor.name.as_str().to_owned());
+            }
+        }
+        let count = names.len().max(1);
+        let weight = Decimal::ONE / Decimal::from(count as u64);
+        names
+            .into_iter()
+            .map(|name| FactorWeight {
+                factor: FactorName::new(name),
+                weight,
+            })
+            .collect()
+    }
+
+    /// Create the `Training` run record (status `Running`).
+    ///
+    /// The produced version does not exist yet (training is its output), so the
+    /// run starts without `model_version_id` (FK to `quant_model_version`).
+    /// [`ModelRunRepository::succeed`] backfills the version id after registration;
+    /// `output_hash` records the artifact hash for content-addressed linkage.
+    async fn create_run(
+        &self,
+        model_run_id: &ModelRunId,
+        input: &TrainModelInput,
+        dataset: &TrainingDatasetInfo,
+    ) -> QuantResult<()> {
+        self.deps
+            .model_run_repo
+            .create(NewModelRun {
+                model_run_id: model_run_id.clone(),
+                run_kind: ModelRunKind::Training,
+                model_version_id: None,
+                runtime_config_version_id: input.runtime_config_version_id.clone(),
+                market_selection_id: None,
+                window_start: dataset.window_start,
+                window_end: dataset.window_end,
+                status: ModelRunStatus::Running,
+                input_hash: dataset.dataset_hash.clone(),
+                output_hash: None,
+                metrics_json: serde_json::json!({}),
+                error_code: None,
+                error_message: None,
+                started_at: Utc::now(),
+                finished_at: None,
+            })
+            .await?;
+        Ok(())
+    }
+}
+
+/// Classical training path — only linked under `ml-classical`.
+#[cfg(feature = "ml-classical")]
+impl ModelTrainerService {
+    async fn train_classical(
+        &self,
+        header: ModelArtifactHeader,
+        input: &TrainModelInput,
+        dataset: &TrainingDatasetInfo,
+        examples: &[TrainingExample],
+        kind: ClassicalKind,
+    ) -> QuantResult<(ModelArtifact, serde_json::Value)> {
+        let matrix = build_classical_matrix(examples, &input.label)?;
+        let adapter = ClassicalAdapterRegistry::adapter_for(kind);
+        let output = adapter.train(&matrix)?;
+        let validation = adapter.validate(&matrix, input.validation_folds.max(2))?;
+
+        let model_key = ArtifactKey::new(
+            ArtifactNamespace::Model,
+            CanonicalDigest::raw_hex(&output.model_bytes),
+            "bin",
+        )?;
+        let serialized_model_uri = self
+            .deps
+            .artifact_store
+            .put(model_key, &output.model_bytes)
+            .await?;
+
+        let metrics_json = classical_metrics_json(kind, &output, &validation);
+        let artifact = ModelArtifact::Classical(Box::new(ClassicalModelArtifact {
+            header,
+            artifact_id: ModelArtifactId::from_v7(),
+            kind,
+            crate_name: output.crate_name.clone(),
+            crate_version: output.crate_version.clone(),
+            label_schema_hash: dataset.label_schema_hash.clone(),
+            training_dataset_hash: dataset.dataset_hash.clone(),
+            serialized_model_uri,
+            serialization_format: ModelSerializationFormat::Bincode,
+            preprocessing: output.preprocessing,
+            metrics: output.metrics,
+        }));
+        Ok((artifact, metrics_json))
+    }
+}
+
+/// Build the standardizable classical feature matrix from the dataset examples.
+///
+/// Examples are time-ordered (so the rolling-validation holdout splits on
+/// wall-clock time, never leaking) and reduced to their numeric feature columns.
+#[cfg(feature = "ml-classical")]
+fn build_classical_matrix(
+    examples: &[TrainingExample],
+    label: &LabelSelector,
+) -> QuantResult<TrainingMatrix> {
+    /// Numeric (non-categorical, present) feature columns enter the matrix.
+    const fn is_numeric(value: &FeatureValue) -> bool {
+        matches!(
+            value,
+            FeatureValue::Decimal(_)
+                | FeatureValue::Bps(_)
+                | FeatureValue::Probability(_)
+                | FeatureValue::Usd(_)
+                | FeatureValue::Count(_)
+                | FeatureValue::Bool(_)
+        )
+    }
+
+    let mut sorted: Vec<_> = examples.to_vec();
+    sorted.sort_by(|a, b| {
+        a.as_of
+            .cmp(&b.as_of)
+            .then_with(|| a.market_id.as_str().cmp(b.market_id.as_str()))
+            .then_with(|| a.token_id.as_str().cmp(b.token_id.as_str()))
+    });
+
+    let mut feature_names: BTreeSet<String> = BTreeSet::new();
+    for example in &sorted {
+        for (name, value) in &example.feature_vector.values {
+            if is_numeric(value) {
+                feature_names.insert(name.as_str().to_owned());
+            }
+        }
+    }
+    let columns: Vec<FeatureColumnSpec> = feature_names
+        .into_iter()
+        .map(|name| FeatureColumnSpec {
+            feature: FeatureName::new(name),
+            scale: MatrixScale::Identity,
+            critical: false,
+            fill_missing: 0.0,
+        })
+        .collect();
+    let spec = FeatureMatrixSpec {
+        columns,
+        label_name: label.name.clone(),
+        label_horizon_secs: label.horizon_secs,
+    };
+    build_training_matrix(&sorted, &spec)
+}
+
+/// Assemble the classical run's `metrics_json`: in-sample fit, the out-of-sample
+/// rolling validation, the kind, and the global feature importances.
+#[cfg(feature = "ml-classical")]
+fn classical_metrics_json(
+    kind: ClassicalKind,
+    output: &ClassicalTrainOutput,
+    validation: &ValidationReport,
+) -> serde_json::Value {
+    serde_json::json!({
+        "kind": kind.as_str(),
+        "in_sample": {
+            "validation_objective": output.metrics.validation_objective,
+            "train_samples": output.metrics.train_samples,
+            "feature_count": output.metrics.feature_count,
+        },
+        "validation": {
+            "mean_objective": validation.mean_objective,
+            "fold_objectives": validation.fold_objectives,
+            "sample_count": validation.sample_count,
+        },
+        "feature_importances": output.metrics.feature_importances
+            .iter()
+            .map(|fi| serde_json::json!({
+                "feature": fi.feature.as_str(),
+                "importance": fi.importance,
+            }))
+            .collect::<Vec<_>>(),
+    })
+}
+
+/// Classical training is not linked in this build.
+#[cfg(not(feature = "ml-classical"))]
+impl ModelTrainerService {
+    #[allow(clippy::unused_async)]
+    async fn train_classical(
+        &self,
+        _header: ModelArtifactHeader,
+        _input: &TrainModelInput,
+        _dataset: &TrainingDatasetInfo,
+        _examples: &[TrainingExample],
+        kind: ClassicalKind,
+    ) -> QuantResult<(ModelArtifact, serde_json::Value)> {
+        Err(ResearchError::RuntimeUnavailable {
+            family: kind.to_string(),
+            detail: "classical training requires the `ml-classical` build".to_owned(),
+        }
+        .into())
+    }
+}

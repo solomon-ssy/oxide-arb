@@ -272,7 +272,24 @@ active_string_enum! {
         SelectionFailed => "selection_failed",
         ArtifactLoadFailed => "artifact_load_failed",
         SchemaBindingFailed => "schema_binding_failed",
+        TrainingFailed => "training_failed",
         CancelledByOperator => "cancelled_by_operator",
+    }
+}
+
+active_string_enum! {
+    /// Serialization format of a stored model artifact's bytes.
+    ///
+    /// The weighted-factor body serializes to canonical JSON; a classical
+    /// (smartcore-backed) model serializes its trained estimator to `bincode`.
+    /// Loading must verify this matches the artifact header before deserializing.
+    @derive(Default)
+    pub enum ModelSerializationFormat {
+        /// Canonical JSON (weighted-factor body, deterministic).
+        #[default]
+        Json => "json",
+        /// `bincode`-encoded estimator (classical models).
+        Bincode => "bincode",
     }
 }
 

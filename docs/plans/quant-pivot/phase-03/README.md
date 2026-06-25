@@ -49,12 +49,13 @@ Phase 03 是整个 quant-pivot 的研究平面：市场选择、特征、因子�
 | 3.4 | Model Runtime & Weighted Scorer | **在线推理闭环** | [`03.4-model-runtime-weighted-scorer.md`](03.4-model-runtime-weighted-scorer.md) |
 | 3.5 | Historical PIT & Training Dataset | 离线数据 | [`03.5-historical-pit-and-training-dataset.md`](03.5-historical-pit-and-training-dataset.md) |
 | 3.5.1 | Training Dataset Admin API | UI/API 契约 | [`03.5.1-training-dataset-admin-api.md`](03.5.1-training-dataset-admin-api.md) |
-| 3.6 | Trainer, Classical ML, Backtest & Vertical Closed-Loop | **离线训练/回测 + 垂直完整闭环（Crypto）** | [`03.6-trainer-classical-ml-backtest.md`](03.6-trainer-classical-ml-backtest.md) |
+| 3.6 | Trainer, Classical ML & Backtest | **离线训练/回测闭环** | [`03.6-trainer-classical-ml-backtest.md`](03.6-trainer-classical-ml-backtest.md) |
 | 3.7 | Quality Gates & Governance | **离线治理闭环** | [`03.7-quality-gates-and-governance.md`](03.7-quality-gates-and-governance.md) |
+| 3.8 | Vertical Domain Closed-Loop（Crypto 参考垂直） | **垂直完整闭环** | [`03.8-vertical-domain-closed-loop.md`](03.8-vertical-domain-closed-loop.md) |
 
-**Companion（跨子phase）**：垂直领域 feature → factor → model → train **完整闭环**设计见
-[`03.x-vertical-domain-design.md`](03.x-vertical-domain-design.md)（Crypto 参考垂直）；各领域外部
-数据源调研清单见 [`domain-data-sources.md`](../../operations/domain-data-sources.md)（运维文档）。
+> 3.8 合并了垂直领域的**设计真理（D1–D7）+ 工作流（W1–W7）+ 外部数据源选型**为单一权威文档
+> （原 `03.x-vertical-domain-design.md`、原 `03.6 §11`、原 `docs/operations/domain-data-sources.md`）；
+> 3.5/3.6 已交付，垂直在其上加性扩展，**不回推** 3.2/3.3/3.5/3.6。
 
 ## 2. 依赖图
 
@@ -72,6 +73,9 @@ flowchart TD
     P34 --> P36
     P36 --> P37["3.7 Quality Gates & Governance"]
     P34 --> P37
+    P34 --> P38["3.8 Vertical Domain Closed-Loop"]
+    P35 --> P38
+    P36 --> P38
 ```
 
 两条闭环：
@@ -80,9 +84,9 @@ flowchart TD
   FactorValue → ModelRun → SignalCandidate`，持久化 ModelRun + ClickHouse 事实。
 - **离线闭环**（3.5 → 3.6 → 3.7）：`Historical PIT → TrainingDataset → Trainer →
   Backtest → QualityGate → Shadow → Publish/Rollback`。
-- **垂直闭环**（companion 03.x，Crypto 参考垂直）：`MarketLinkage → DomainDataSource →
-  quant_domain_observation → domain slice 特征/因子 → ModelRouting`。**统一落地于 3.6 §11**
-  （3.5 已交付，垂直不回推 3.2/3.3/3.5）。
+- **垂直闭环**（子phase 3.8，Crypto 参考垂直）：`MarketLinkage → DomainDataSource →
+  quant_domain_observation → domain slice 特征/因子 → ModelRouting`。**统一落地于 3.8**
+  （3.5/3.6 已交付，垂直在其上加性扩展，不回推 3.2/3.3/3.5/3.6）。
 
 ## 3. 已拍板的设计基线（贯穿全部子phase）
 
@@ -147,16 +151,17 @@ ml-classical = ["dep:smartcore"]
 |---|---|---|---|
 | 完整受治理 `PortfolioPlanner` | 最小 greedy allocator（backtest 用） | Phase 04 | 3.6 / 3.4 §10 |
 | TopN 报告生成 / report scheduler / 定时 `live_report_inference` | 按需 `ModelRunner` + SignalCandidate | Phase 04 | 3.4 §10 |
-| `required_features` → 03.1 selection 全链路编排 | `QuantModelRuntime::required_features()` trait | Phase 04 | 3.4 §10 / 03.x §5.1 |
+| `required_features` → 03.1 selection 全链路编排 | `QuantModelRuntime::required_features()` trait | Phase 04 | 3.4 §10 / 3.8 §6.5 |
 | report-level shadow 完整比较（capital/would-execute/risk envelope delta） | signal/rank 层 `shadow_diff` + metrics | Phase 04 | 3.7 §10 |
 | shadow `exceeds_threshold` operator alert + `quant_shadow_comparison` 表 | shadow run `metrics_json` | Phase 3.7 | 3.7 §4 / §10 |
 | `ModelConfig.min_quality_gate_age_secs` load-time deny | schema 字段 + validation | Phase 3.7 | 3.4 §4.2 / 3.7 §4 |
 | `FactorsConfig.factor_weights` 在线 overlay（非 Published） | artifact 内冻结权重 | Phase 3.7 | 3.4 §4.2 / 3.7 §3.6 |
-| `ReturnModelSpec::Calibrated` 拟合 + `objective_report` | `Heuristic` + Calibrated 插值应用 | Phase 3.6 | 3.4 §10 / 3.6 §1.1 |
-| `classical` runtime（smartcore） | factory `RuntimeUnavailable` | Phase 3.6 | 3.4 §10 |
-| `ModelConfig.prediction_horizon_secs` 在线读取 | artifact `prediction_horizon_secs` | Phase 3.6 写入 artifact | 3.4 §4.2 |
-| 垂直领域完整闭环（Crypto：linkage + domain PIT + 两层向量 + 真实特征/因子 + ModelRouting + domain dataset + 垂直训练/回测） | skeleton + `DomainDataMissing` + 3.5 generic dataset | **Phase 3.6 §11** | 03.6 / 03.x / [domain-data-sources](../../operations/domain-data-sources.md) |
-| 其余四垂直（Sports/Politics/Weather/Geopolitics）真实外部数据 | Crypto 范式加性扩展 | Post–3.6 Crypto | 03.6 §11.10 / [domain-data-sources](../../operations/domain-data-sources.md) |
+| `ReturnModelSpec::Calibrated` 拟合 + `objective_report` | `Heuristic` + Calibrated 插值应用 | **Phase 3.6 ✅ 已交付** | 3.4 §10 / 3.6 §1.1 |
+| `classical` runtime（smartcore） | factory `RuntimeUnavailable` | **Phase 3.6 ✅ 已交付**（`ml-classical`） | 3.4 §10 |
+| `argmin` 权重优化（grid 主干 + `optimize` 精修） | grid coordinate search | **Phase 3.6 ✅ 已交付**（`optimize`） | 3.6 §1 |
+| `ModelConfig.prediction_horizon_secs` 在线读取 | artifact `prediction_horizon_secs`（trainer 写入） | **Phase 3.6 ✅ 已交付**（写入 artifact） | 3.4 §4.2 |
+| 垂直领域完整闭环（Crypto：linkage + domain PIT + 两层向量 + 真实特征/因子 + ModelRouting + domain dataset + 垂直训练/回测） | skeleton + `DomainDataMissing` + 3.5 generic dataset | **Phase 3.8** | [`03.8`](03.8-vertical-domain-closed-loop.md) |
+| 其余四垂直（Sports/Politics/Weather/Geopolitics）真实外部数据 | Crypto 范式加性扩展 | Post–3.8 Crypto | [`03.8`](03.8-vertical-domain-closed-loop.md) §12 |
 | `good_lp` 组合优化 | greedy allocator | Phase 05 | 3.6 |
 | `ort` ONNX 推理 | `QuantModelRuntime` 预留 arm | Phase 06 | 3.4 §10 |
 | auto-execution 门禁生效 | config 口径记录 | Phase 05/06 | 3.7 §10 |

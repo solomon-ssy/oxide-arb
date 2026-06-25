@@ -1,6 +1,8 @@
 //! Quant-pivot repository traits.
 
 mod attribution;
+mod backtest_report;
+mod comparison_report;
 mod dataset;
 mod execution_order;
 mod fact;
@@ -15,6 +17,8 @@ mod recommendation_report;
 mod selection;
 
 pub use attribution::*;
+pub use backtest_report::*;
+pub use comparison_report::*;
 pub use dataset::*;
 pub use execution_order::*;
 pub use fact::*;

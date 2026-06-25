@@ -90,6 +90,9 @@ fn new_dataset(
         )
         .expect("uri"),
         sample_count: 42,
+        source_delay_secs: 10,
+        sample_interval_secs: 3600,
+        horizons_secs: serde_json::json!([3600]),
         coverage_json: serde_json::json!({ "planned_samples": 42 }),
         runtime_config_version_id,
     }

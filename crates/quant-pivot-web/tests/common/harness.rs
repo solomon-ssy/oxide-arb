@@ -8,6 +8,7 @@ use std::{
     time::Duration,
 };
 
+use actix_test::TestRequest;
 use actix_web::{
     App,
     body::to_bytes,
@@ -16,20 +17,24 @@ use actix_web::{
     test, web,
 };
 use async_trait::async_trait;
-use quant_pivot_error::QuantResult;
 use quant_pivot_error::auth::AuthError;
+use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
     config::{CacheConfig, DeployConfig, JwtConfig, RedisConfig},
     domain::{
+        BacktestPort, BacktestReportInfo, BacktestReportView, BookSnapshot,
         BuildTrainingDatasetRequest, CatalogState, CatalogStatusPort, CoreEventPublisher,
         DataQualityPort, DataQualitySnapshot, HealthReport, MarketDataPort, MetricsScrapePort,
-        QuantModeTransitionReport, RuntimeConfigPort, RuntimeControlError, RuntimeControlPort,
-        SystemStatus, TrainingDatasetInfo, TrainingDatasetPlanView, TrainingDatasetPort,
-        TrainingDatasetView,
+        ModelComparisonReportInfo, ModelTrainingPort, ModelVersionInfo, QuantModeTransitionReport,
+        RunBacktestRequest, RuntimeConfigPort, RuntimeControlError, RuntimeControlPort,
+        SystemStatus, TrainModelRequest, TrainedModelView, TrainingDatasetInfo,
+        TrainingDatasetPlanView, TrainingDatasetPort, TrainingDatasetView,
     },
     enums::quant::QuantRuntimeMode,
     runtime_config::RuntimeConfig,
-    types::{TokenId, TrainingDatasetId},
+    types::{
+        BacktestReportId, ModelComparisonReportId, ModelVersionId, TokenId, TrainingDatasetId,
+    },
 };
 use quant_pivot_storage::{
     cache::connect_pool,
@@ -155,6 +160,8 @@ impl TestEnv {
                 Some(Arc::clone(&catalog) as Arc<dyn CatalogStatusPort>),
             )),
             training_datasets: Arc::new(MockTrainingDatasetPort),
+            model_training: Arc::new(MockModelTrainingPort),
+            backtests: Arc::new(MockBacktestPort),
         };
 
         Self {
@@ -226,7 +233,7 @@ impl HttpResponse {
     }
 }
 
-pub async fn call(state: &AppState, request: actix_web::test::TestRequest) -> HttpResponse {
+pub async fn call(state: &AppState, request: TestRequest) -> HttpResponse {
     let app = test::init_service(
         App::new()
             .app_data(web::Data::new(state.clone()))
@@ -288,10 +295,7 @@ impl MarketDataPort for MockMarketData {
         &self,
         _yes: &TokenId,
         _no: &TokenId,
-    ) -> (
-        Option<Arc<quant_pivot_models::domain::book::BookSnapshot>>,
-        Option<Arc<quant_pivot_models::domain::book::BookSnapshot>>,
-    ) {
+    ) -> (Option<Arc<BookSnapshot>>, Option<Arc<BookSnapshot>>) {
         (None, None)
     }
 
@@ -364,6 +368,51 @@ pub struct MockRuntimeControl {
     mode: Mutex<QuantRuntimeMode>,
 }
 
+/// No-op model-training port for web integration tests.
+pub struct MockModelTrainingPort;
+
+#[async_trait]
+impl ModelTrainingPort for MockModelTrainingPort {
+    async fn train(&self, _request: TrainModelRequest) -> QuantResult<TrainedModelView> {
+        Err(QuantError::NotImplemented("model train".into()))
+    }
+
+    async fn find_version(
+        &self,
+        _model_version_id: &ModelVersionId,
+    ) -> QuantResult<Option<ModelVersionInfo>> {
+        Ok(None)
+    }
+}
+
+/// No-op backtest port for web integration tests.
+pub struct MockBacktestPort;
+
+#[async_trait]
+impl BacktestPort for MockBacktestPort {
+    async fn run(
+        &self,
+        _model_version_id: ModelVersionId,
+        _request: RunBacktestRequest,
+    ) -> QuantResult<BacktestReportView> {
+        Err(QuantError::NotImplemented("backtest run".into()))
+    }
+
+    async fn find_report(
+        &self,
+        _backtest_report_id: &BacktestReportId,
+    ) -> QuantResult<Option<BacktestReportInfo>> {
+        Ok(None)
+    }
+
+    async fn find_comparison_report(
+        &self,
+        _comparison_report_id: &ModelComparisonReportId,
+    ) -> QuantResult<Option<ModelComparisonReportInfo>> {
+        Ok(None)
+    }
+}
+
 /// No-op training-dataset port for web integration tests.
 pub struct MockTrainingDatasetPort;
 
@@ -380,18 +429,14 @@ impl TrainingDatasetPort for MockTrainingDatasetPort {
         &self,
         _request: BuildTrainingDatasetRequest,
     ) -> QuantResult<TrainingDatasetPlanView> {
-        Err(quant_pivot_error::QuantError::NotImplemented(
-            "training dataset plan".into(),
-        ))
+        Err(QuantError::NotImplemented("training dataset plan".into()))
     }
 
     async fn build(
         &self,
         _request: BuildTrainingDatasetRequest,
     ) -> QuantResult<TrainingDatasetView> {
-        Err(quant_pivot_error::QuantError::NotImplemented(
-            "training dataset build".into(),
-        ))
+        Err(QuantError::NotImplemented("training dataset build".into()))
     }
 }
 

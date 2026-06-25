@@ -49,6 +49,31 @@ jobs:
       - name: Run wiremock API tests
         run: cargo test-network
 
+  heavy-ml:
+    name: Heavy ML (classical + optimize)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Clippy (research, ml-classical + optimize + dataframe)
+        run: cargo clippy -p quant-pivot-research --features ml-classical,optimize,dataframe --all-targets -- -D warnings
+
+      - name: Clippy (core, ml-classical + optimize)
+        run: cargo clippy -p quant-pivot-core --features ml-classical,optimize --all-targets -- -D warnings
+
+      - name: Test (research, ml-classical + optimize + dataframe)
+        run: cargo test -p quant-pivot-research --features ml-classical,optimize,dataframe
+
+      - name: Test (core, ml-classical + optimize)
+        run: cargo test -p quant-pivot-core --features ml-classical,optimize
+
+      - name: Production binary links the classical ML stack
+        run: cargo build -p quant-pivot-bin --features ml-classical,optimize
+
   bench:
     name: Benchmarks
     runs-on: ubuntu-latest

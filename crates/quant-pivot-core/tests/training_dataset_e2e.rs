@@ -36,8 +36,8 @@ use quant_pivot_models::{
         DataQualityConfig, FactorsConfig, FeatureFamily, FeaturesConfig, TrainingConfig,
     },
     types::{
-        ContentHash, MarketId, ModelSpecId, ModelVersionId, Price, RuntimeConfigVersionId,
-        SchemaVersion, Shares, TokenId, TrainingDatasetId,
+        ArtifactUri, ContentHash, MarketId, ModelSpecId, ModelVersionId, Price,
+        RuntimeConfigVersionId, SchemaVersion, Shares, TokenId, TrainingDatasetId,
     },
 };
 use quant_pivot_repository::{
@@ -876,11 +876,11 @@ async fn model_version_training_dataset_id_is_typed() {
             factor_schema_hash: hash.clone(),
             label_schema_hash: hash.clone(),
             dataset_hash: hash.clone(),
-            parquet_uri: quant_pivot_models::types::ArtifactUri::parse(
-                "file:///tmp/dataset.parquet",
-            )
-            .expect("uri"),
+            parquet_uri: ArtifactUri::parse("file:///tmp/dataset.parquet").expect("uri"),
             sample_count: 10,
+            source_delay_secs: 10,
+            sample_interval_secs: 3600,
+            horizons_secs: serde_json::json!([3600]),
             coverage_json: serde_json::json!({}),
             runtime_config_version_id: rc_id,
         })

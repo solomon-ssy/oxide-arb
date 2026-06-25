@@ -1,7 +1,7 @@
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::{ModelSpecInfo, ModelVersionInfo, NewModelSpec, NewModelVersion},
-    types::ModelVersionId,
+    types::{ModelSpecId, ModelVersionId},
 };
 
 #[async_trait::async_trait]
@@ -12,6 +12,11 @@ pub trait ModelRegistryRepository: Send + Sync {
         &self,
         version: NewModelVersion,
     ) -> Result<ModelVersionInfo, StorageError>;
+
+    /// The next monotonic version number for a spec (`existing + 1`), honoring
+    /// the `(model_spec_id, version)` uniqueness invariant the trainer relies on.
+    async fn next_version_for_spec(&self, model_spec_id: &ModelSpecId)
+    -> Result<i32, StorageError>;
 
     /// Look up a model version by id (used by the runtime factory to resolve the
     /// active / shadow artifact for a round).

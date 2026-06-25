@@ -23,6 +23,13 @@ pub struct TrainingDatasetInfo {
     pub dataset_hash: ContentHash,
     pub parquet_uri: ArtifactUri,
     pub sample_count: i64,
+    /// Feature source visibility delay (PIT cutoff) the dataset was built with.
+    /// Persisted so a backtest can recompute features byte-identically.
+    pub source_delay_secs: i64,
+    /// Deterministic sampling cadence (seconds) the build grid used.
+    pub sample_interval_secs: i64,
+    /// Forward label horizons (seconds) the build materialized.
+    pub horizons_secs: serde_json::Value,
     pub coverage_json: serde_json::Value,
     pub runtime_config_version_id: RuntimeConfigVersionId,
     pub created_at: DateTime<Utc>,
@@ -43,6 +50,9 @@ info_from_model!(
         dataset_hash,
         parquet_uri,
         sample_count,
+        source_delay_secs,
+        sample_interval_secs,
+        horizons_secs,
         coverage_json,
         runtime_config_version_id,
         created_at,
@@ -66,6 +76,9 @@ pub struct NewTrainingDataset {
     pub dataset_hash: ContentHash,
     pub parquet_uri: ArtifactUri,
     pub sample_count: i64,
+    pub source_delay_secs: i64,
+    pub sample_interval_secs: i64,
+    pub horizons_secs: serde_json::Value,
     pub coverage_json: serde_json::Value,
     pub runtime_config_version_id: RuntimeConfigVersionId,
 }

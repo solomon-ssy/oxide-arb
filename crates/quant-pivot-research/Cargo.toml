@@ -34,7 +34,8 @@ arrow = { workspace = true, optional = true }
 parquet = { workspace = true, optional = true }
 argmin = { workspace = true, optional = true }
 argmin-math = { workspace = true, optional = true }
-smartcore = { workspace = true, optional = true }
+smartcore = { workspace = true, optional = true, features = ["serde"] }
+bincode = { workspace = true, optional = true }
 
 [dev-dependencies]
 rust_decimal_macros = { workspace = true }
@@ -48,7 +49,7 @@ dataframe = ["dep:polars", "dep:arrow", "dep:parquet"]
 # Factor-weight / threshold optimization.
 optimize = ["dep:argmin", "dep:argmin-math"]
 # Classical ML (tree / ensemble / linear) for shadow candidates.
-ml-classical = ["dep:smartcore"]
+ml-classical = ["dep:smartcore", "dep:bincode"]
 
 [lints]
 workspace = true

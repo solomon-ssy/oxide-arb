@@ -22,6 +22,10 @@ pub struct Model {
     pub dataset_hash: ContentHash,
     pub parquet_uri: ArtifactUri,
     pub sample_count: i64,
+    pub source_delay_secs: i64,
+    pub sample_interval_secs: i64,
+    #[sea_orm(column_type = "JsonBinary")]
+    pub horizons_secs: Json,
     #[sea_orm(column_type = "JsonBinary")]
     pub coverage_json: Json,
     pub runtime_config_version_id: RuntimeConfigVersionId,

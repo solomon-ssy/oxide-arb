@@ -35,12 +35,12 @@ const PRODUCES: &[SeedArtifact] = &[];
 
 pub const CASBIN_SEED: SeedSpec = SeedSpec {
     id: SEED_ID,
-    version: 3,
+    version: 4,
     target_table: casbin_rule_table_name,
     depends_on: DEPENDS_ON,
     produces: PRODUCES,
     conflict_policy: SeedConflictPolicy::GraphOrdered,
-    checksum: "rbac.casbin.bootstrap.v3",
+    checksum: "rbac.casbin.bootstrap.v4",
     loader: load_boxed,
 };
 
@@ -89,7 +89,11 @@ fn risk_owner_policies() -> Vec<(ResourceType, Operation)> {
         (ResourceType::RuntimeConfig, Operation::Create),
         (ResourceType::RuntimeConfig, Operation::Activate),
         (ResourceType::RuntimeConfig, Operation::Rollback),
+        // Offline research: train models (Materialization:Create) and run
+        // PIT backtests (Replay:Create); both read their own outputs.
         (ResourceType::Materialization, Operation::Create),
+        (ResourceType::Replay, Operation::Read),
+        (ResourceType::Replay, Operation::Create),
     ]);
     policies
 }

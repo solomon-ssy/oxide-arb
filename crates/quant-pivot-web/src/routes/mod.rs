@@ -9,6 +9,7 @@ pub mod metrics;
 pub mod operation_logs;
 pub mod permissions;
 pub mod registry;
+pub mod research_models;
 pub mod roles;
 pub mod runtime_config;
 pub mod system;
@@ -45,6 +46,7 @@ fn protected_route_specs() -> Vec<RouteSpec> {
     specs.extend(markets::route_specs());
     specs.extend(data_quality::route_specs());
     specs.extend(training_datasets::route_specs());
+    specs.extend(research_models::route_specs());
     specs
 }
 

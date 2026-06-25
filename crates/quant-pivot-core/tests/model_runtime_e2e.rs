@@ -591,6 +591,7 @@ async fn model_run_create_find_succeed_fail() {
             output.clone(),
             serde_json::json!({"ok": true}),
             Utc::now(),
+            None,
         )
         .await
         .expect("succeed");

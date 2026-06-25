@@ -19,8 +19,8 @@ use std::collections::BTreeMap;
 
 use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::{
-    enums::quant::DataQualityStatus,
-    types::{ContentHash, ModelArtifactId, ModelVersionId},
+    enums::quant::{DataQualityStatus, ModelSerializationFormat},
+    types::{ArtifactUri, ContentHash, ModelArtifactId, ModelVersionId},
 };
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -495,16 +495,71 @@ impl WeightedFactorModelArtifact {
     }
 }
 
-/// Classical-ML artifact (smartcore-backed). 3.6 fills the serialized-model URI,
-/// preprocessing, and metrics; the header + identity are fixed here.
+/// Per-feature standardization captured at training time, so inference applies
+/// the identical transform the model was fit on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreprocessingArtifact {
+    /// Feature columns, in matrix column order.
+    pub feature_names: Vec<FeatureName>,
+    /// Per-column training mean.
+    pub means: Vec<Decimal>,
+    /// Per-column training standard deviation (`0` columns are left unscaled).
+    pub stds: Vec<Decimal>,
+}
+
+/// One feature's global importance, as reported by the trained estimator.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FeatureImportance {
+    /// The feature.
+    pub feature: FeatureName,
+    /// Importance weight (non-negative; the explainability requirement).
+    pub importance: Decimal,
+}
+
+/// Classical-ML training metrics (explainability + provenance).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClassicalModelMetrics {
+    /// Number of training rows the estimator was fit on.
+    pub train_samples: u64,
+    /// Number of feature columns.
+    pub feature_count: u32,
+    /// Validation objective (rank IC of predictions vs. labels).
+    pub validation_objective: Decimal,
+    /// Global feature importances.
+    pub feature_importances: Vec<FeatureImportance>,
+}
+
+/// Classical-ML artifact (smartcore-backed).
+///
+/// The trained estimator's bytes live in the [`ArtifactStore`](crate::artifact::ArtifactStore)
+/// at [`Self::serialized_model_uri`] (content-addressed by their own digest);
+/// this JSON body — itself content-addressed as the `quant_model_version`
+/// `artifact_hash` — carries only the metadata needed to reload, version-check,
+/// and explain the model.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClassicalModelArtifact {
     /// Common provenance header.
     pub header: ModelArtifactHeader,
-    /// Stored-artifact id (bytes live in the artifact store).
+    /// Stored-artifact id for the serialized estimator bytes.
     pub artifact_id: ModelArtifactId,
     /// Concrete classical kind.
     pub kind: ClassicalKind,
+    /// ML crate that produced the estimator (`"smartcore"`).
+    pub crate_name: String,
+    /// Exact crate version (load-time mismatch ⇒ reject; §15.6).
+    pub crate_version: String,
+    /// Label-schema hash the model was trained against.
+    pub label_schema_hash: ContentHash,
+    /// Dataset hash the model was trained on.
+    pub training_dataset_hash: ContentHash,
+    /// Location of the serialized estimator bytes in the artifact store.
+    pub serialized_model_uri: ArtifactUri,
+    /// Serialization format of the estimator bytes.
+    pub serialization_format: ModelSerializationFormat,
+    /// Frozen preprocessing (standardization) applied before inference.
+    pub preprocessing: PreprocessingArtifact,
+    /// Training metrics + feature importances.
+    pub metrics: ClassicalModelMetrics,
 }
 
 /// A versioned, content-addressable model artifact.
@@ -514,7 +569,7 @@ pub enum ModelArtifact {
     /// Weighted-factor scorer.
     WeightedFactor(Box<WeightedFactorModelArtifact>),
     /// Classical ML model.
-    Classical(ClassicalModelArtifact),
+    Classical(Box<ClassicalModelArtifact>),
     // Onnx(OnnxArtifactRef) reserved — Phase 06.
 }
 

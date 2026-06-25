@@ -1,9 +1,12 @@
 //! HTTP API contract types — Phase 0 control plane subset.
 
 mod auth;
+mod backtest_report;
+mod comparison_report;
 mod health;
 mod market;
 mod menu;
+mod model_training;
 mod operation_log;
 mod permission;
 mod quant_execution;
@@ -17,9 +20,12 @@ mod user;
 mod window;
 
 pub use auth::*;
+pub use backtest_report::*;
+pub use comparison_report::*;
 pub use health::*;
 pub use market::*;
 pub use menu::*;
+pub use model_training::*;
 pub use operation_log::*;
 pub use permission::*;
 pub use quant_execution::*;

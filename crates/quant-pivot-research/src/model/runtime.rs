@@ -31,13 +31,11 @@ use crate::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ClassicalKind {
-    /// Random forest regressor/classifier.
+    /// Random forest regressor.
     RandomForest,
-    /// Extremely randomized trees.
+    /// Extremely randomized trees regressor.
     ExtraTrees,
-    /// Gradient-boosted trees.
-    GradientBoosting,
-    /// Logistic regression.
+    /// Logistic regression classifier (yes-probability output).
     LogisticRegression,
     /// Ridge (L2) linear regression.
     Ridge,
@@ -54,7 +52,6 @@ impl ClassicalKind {
         match self {
             Self::RandomForest => "random_forest",
             Self::ExtraTrees => "extra_trees",
-            Self::GradientBoosting => "gradient_boosting",
             Self::LogisticRegression => "logistic_regression",
             Self::Ridge => "ridge",
             Self::Lasso => "lasso",
@@ -76,7 +73,6 @@ impl FromStr for ClassicalKind {
         match s {
             "random_forest" => Ok(Self::RandomForest),
             "extra_trees" => Ok(Self::ExtraTrees),
-            "gradient_boosting" => Ok(Self::GradientBoosting),
             "logistic_regression" => Ok(Self::LogisticRegression),
             "ridge" => Ok(Self::Ridge),
             "lasso" => Ok(Self::Lasso),
@@ -199,6 +195,10 @@ pub struct InferenceMatrixRow {
     pub token_id: TokenId,
     /// Feature values, column-aligned with [`InferenceMatrix::feature_names`].
     pub features: Vec<FeatureValue>,
+    /// Per-market scoring context (prices, liquidity, quality, horizon) — the
+    /// classical runtime prices and sides its candidates from this, exactly like
+    /// the weighted factor-table path.
+    pub context: MarketInferenceContext,
 }
 
 /// A dense feature matrix (classical-ML input).
@@ -220,6 +220,36 @@ pub enum ModelRuntimeInput {
     /// Dense feature matrix (classical ML).
     FeatureMatrix(InferenceMatrix),
     // Onnx(..) / DomainText(..) reserved — Phase 06 / 08.
+}
+
+impl ModelRuntimeInput {
+    /// Decision time the batch was assembled as of.
+    #[must_use]
+    pub const fn as_of(&self) -> DateTime<Utc> {
+        match self {
+            Self::FactorTable(table) => table.as_of,
+            Self::FeatureMatrix(matrix) => matrix.as_of,
+        }
+    }
+
+    /// The per-market scoring context for every row, regardless of input shape —
+    /// so the backtester can attribute realized outcomes to the data-quality /
+    /// liquidity / horizon / substitution stratum each market was scored under.
+    #[must_use]
+    pub fn market_contexts(&self) -> Vec<(&MarketId, &MarketInferenceContext)> {
+        match self {
+            Self::FactorTable(table) => table
+                .rows
+                .iter()
+                .map(|row| (&row.market_id, &row.context))
+                .collect(),
+            Self::FeatureMatrix(matrix) => matrix
+                .rows
+                .iter()
+                .map(|row| (&row.market_id, &row.context))
+                .collect(),
+        }
+    }
 }
 
 /// Throughput / latency metrics for one inference batch.

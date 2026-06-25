@@ -19,6 +19,10 @@ use async_trait::async_trait;
 use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::{domain::ModelVersionInfo, types::ContentHash};
 
+#[cfg(not(feature = "ml-classical"))]
+use crate::model::artifact::ClassicalModelArtifact;
+#[cfg(feature = "ml-classical")]
+use crate::model::{artifact::ClassicalModelArtifact, classical_runtime::ClassicalRuntime};
 use crate::{
     artifact::ArtifactStore,
     model::{
@@ -148,12 +152,37 @@ impl ModelRuntimeFactory for DefaultModelRuntimeFactory {
             ModelArtifact::WeightedFactor(weighted) => {
                 Ok(Box::new(WeightedFactorRuntime::new(*weighted)?))
             }
-            ModelArtifact::Classical(classical) => Err(ResearchError::RuntimeUnavailable {
-                family: classical.kind.to_string(),
-                detail: "classical runtimes are implemented in Phase 3.6".to_owned(),
-            }
-            .into()),
+            ModelArtifact::Classical(classical) => self.load_classical(*classical).await,
         }
+    }
+}
+
+impl DefaultModelRuntimeFactory {
+    /// Load a classical runtime: fetch the serialized estimator bytes and build
+    /// the runtime (crate-version + format checked). Available only when the
+    /// `ml-classical` feature is linked; otherwise the family is unavailable.
+    #[cfg(feature = "ml-classical")]
+    async fn load_classical(
+        &self,
+        classical: ClassicalModelArtifact,
+    ) -> QuantResult<Box<dyn QuantModelRuntime>> {
+        let bytes = self.store.get(&classical.serialized_model_uri).await?;
+        let runtime = ClassicalRuntime::load(classical, &bytes)?;
+        Ok(Box::new(runtime))
+    }
+
+    /// Classical family is not linked in this build.
+    #[cfg(not(feature = "ml-classical"))]
+    #[allow(clippy::unused_async)]
+    async fn load_classical(
+        &self,
+        classical: ClassicalModelArtifact,
+    ) -> QuantResult<Box<dyn QuantModelRuntime>> {
+        Err(ResearchError::RuntimeUnavailable {
+            family: classical.kind.to_string(),
+            detail: "classical runtimes require the `ml-classical` build".to_owned(),
+        }
+        .into())
     }
 }
 

@@ -5,8 +5,9 @@ use std::sync::Arc;
 use quant_pivot_models::{
     config::DeployConfig,
     domain::{
-        CatalogStatusPort, CoreEventPublisher, DataQualityPort, MarketDataPort, MetricsScrapePort,
-        ReadinessPort, RuntimeConfigPort, RuntimeControlPort, TrainingDatasetPort,
+        BacktestPort, CatalogStatusPort, CoreEventPublisher, DataQualityPort, MarketDataPort,
+        MetricsScrapePort, ModelTrainingPort, ReadinessPort, RuntimeConfigPort, RuntimeControlPort,
+        TrainingDatasetPort,
     },
 };
 use quant_pivot_repository::traits::{
@@ -51,4 +52,8 @@ pub struct AppState {
     pub readiness: Arc<dyn ReadinessPort>,
     /// Offline training-dataset plan/build (Phase 3.5 Admin API).
     pub training_datasets: Arc<dyn TrainingDatasetPort>,
+    /// Offline model training (Phase 3.6 Admin API).
+    pub model_training: Arc<dyn ModelTrainingPort>,
+    /// Offline PIT backtests (Phase 3.6 Admin API).
+    pub backtests: Arc<dyn BacktestPort>,
 }

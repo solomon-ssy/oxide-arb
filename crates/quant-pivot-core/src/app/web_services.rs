@@ -2,7 +2,10 @@
 
 use super::AppContext;
 use crate::{
-    app::{task_id::TaskId, task_registry::AppRunner, training_dataset::CoreTrainingDatasetPort},
+    app::{
+        backtest::CoreBacktestPort, model_training::CoreModelTrainingPort, task_id::TaskId,
+        task_registry::AppRunner, training_dataset::CoreTrainingDatasetPort,
+    },
     pipeline::book_store::BookStore,
 };
 use async_trait::async_trait;
@@ -102,6 +105,14 @@ impl AppContext {
                 Some(Arc::clone(&self.data.catalog) as Arc<dyn CatalogStatusPort>),
             )),
             training_datasets: Arc::new(CoreTrainingDatasetPort::from_research(
+                &self.research,
+                pg_arc_repo!(pg, PgRuntimeConfigVersionRepository),
+            )),
+            model_training: Arc::new(CoreModelTrainingPort::from_research(
+                &self.research,
+                pg_arc_repo!(pg, PgRuntimeConfigVersionRepository),
+            )),
+            backtests: Arc::new(CoreBacktestPort::from_research(
                 &self.research,
                 pg_arc_repo!(pg, PgRuntimeConfigVersionRepository),
             )),

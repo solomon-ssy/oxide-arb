@@ -10,6 +10,15 @@ publish = false
 name = "quant-pivot"
 path = "src/main.rs"
 
+[features]
+# Production ML profile: links the classical (smartcore) trainer + runtime so a
+# deployed binary can train and load registered classical Candidate versions, and
+# the argmin weight-refinement step for the weighted trainer. Enabled by the
+# deploy/CI profile (kept off the default build so a `report_only` binary stays
+# free of the heavy native-adjacent ML stack).
+ml-classical = ["quant-pivot-core/ml-classical"]
+optimize = ["quant-pivot-core/optimize"]
+
 [dependencies]
 quant-pivot-core = { workspace = true }
 quant-pivot-models = { workspace = true }

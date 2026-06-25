@@ -16,24 +16,26 @@ use crate::{
         },
     },
 };
+use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
     config::DeployConfig,
     runtime_config::{DataQualityConfig, FactorsConfig, FeaturesConfig, TrainingConfig},
 };
 use quant_pivot_repository::{
     postgres::{
-        PgFactorRepository, PgFeatureRepository, PgMarketSelectionRepository,
-        PgModelRegistryRepository, PgModelRunRepository, PgTrainingDatasetRepository,
+        PgBacktestReportRepository, PgFactorRepository, PgFeatureRepository,
+        PgMarketSelectionRepository, PgModelComparisonReportRepository, PgModelRegistryRepository,
+        PgModelRunRepository, PgTrainingDatasetRepository,
     },
     traits::{
-        FactorRepository, FeatureRepository, MarketRepository, MarketSelectionRepository,
-        ModelRegistryRepository, ModelRunRepository, QuantFactReadRepository,
-        TrainingDatasetRepository,
+        BacktestReportRepository, FactorRepository, FeatureRepository, MarketRepository,
+        MarketSelectionRepository, ModelComparisonReportRepository, ModelRegistryRepository,
+        ModelRunRepository, QuantFactReadRepository, TrainingDatasetRepository,
     },
 };
 use quant_pivot_research::{
     artifact::{ArtifactStore, LocalArtifactStore},
-    model::DefaultModelRuntimeFactoryBuilder,
+    model::{DefaultModelRuntimeFactoryBuilder, ModelRuntimeFactoryBuilder},
     selection::{ConfiguredMarketSelector, MarketSelector},
 };
 use std::sync::Arc;
@@ -76,6 +78,12 @@ pub struct ResearchBundle {
     pub model_runner: Arc<ModelRunner>,
     /// Frozen training-dataset ledger persistence (3.5).
     pub training_dataset_repo: Arc<dyn TrainingDatasetRepository>,
+    /// Append-only backtest-report ledger persistence (3.6).
+    pub backtest_report_repo: Arc<dyn BacktestReportRepository>,
+    /// Append-only pairwise comparison-report ledger persistence (3.6 §5.6).
+    pub comparison_report_repo: Arc<dyn ModelComparisonReportRepository>,
+    /// Schema-bound runtime factory builder (loads model artifacts) (3.4/3.6).
+    pub model_runtime_factory_builder: Arc<dyn ModelRuntimeFactoryBuilder>,
     /// Historical fact read port (PIT book / microstructure / settlement) (3.5).
     pub quant_fact_read: Arc<dyn QuantFactReadRepository>,
     /// Market catalog read port for PIT metadata + sampling candidates (3.5).
@@ -122,12 +130,13 @@ impl ResearchBundle {
         let model_registry_repo: Arc<dyn ModelRegistryRepository> = Arc::new(
             PgModelRegistryRepository::new(deps.infra.pg.connection().clone()),
         );
+        let model_runtime_factory_builder: Arc<dyn ModelRuntimeFactoryBuilder> = Arc::new(
+            DefaultModelRuntimeFactoryBuilder::new(Arc::clone(&artifact_store)),
+        );
         let model_runner = Arc::new(ModelRunner::new(
             Arc::clone(&model_run_repo),
             Arc::clone(&model_registry_repo),
-            Arc::new(DefaultModelRuntimeFactoryBuilder::new(Arc::clone(
-                &artifact_store,
-            ))),
+            Arc::clone(&model_runtime_factory_builder),
             Arc::clone(&factor_pipeline),
             Arc::clone(&deps.infra.signal_candidate_event_writer),
             Arc::new(DispatcherAlertSink::new(Arc::clone(
@@ -137,6 +146,12 @@ impl ResearchBundle {
 
         let training_dataset_repo: Arc<dyn TrainingDatasetRepository> = Arc::new(
             PgTrainingDatasetRepository::new(deps.infra.pg.connection().clone()),
+        );
+        let backtest_report_repo: Arc<dyn BacktestReportRepository> = Arc::new(
+            PgBacktestReportRepository::new(deps.infra.pg.connection().clone()),
+        );
+        let comparison_report_repo: Arc<dyn ModelComparisonReportRepository> = Arc::new(
+            PgModelComparisonReportRepository::new(deps.infra.pg.connection().clone()),
         );
 
         Self {
@@ -152,6 +167,9 @@ impl ResearchBundle {
             model_registry_repo,
             model_runner,
             training_dataset_repo,
+            backtest_report_repo,
+            comparison_report_repo,
+            model_runtime_factory_builder,
             quant_fact_read: Arc::clone(&deps.infra.quant_fact_read),
             market_repo: Arc::clone(&deps.data.market_repo),
         }
@@ -167,7 +185,7 @@ impl ResearchBundle {
         factors: FactorsConfig,
         data_quality: DataQualityConfig,
         training: TrainingConfig,
-    ) -> quant_pivot_error::QuantResult<TrainingDatasetService> {
+    ) -> QuantResult<TrainingDatasetService> {
         TrainingDatasetService::new(
             TrainingDatasetServiceDeps {
                 fact_read: Arc::clone(&self.quant_fact_read),

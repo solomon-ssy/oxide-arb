@@ -9,10 +9,10 @@
 | [bankroll-and-risk-metrics.md](./bankroll-and-risk-metrics.md) | 研发、运维 | 为什么 `risk.bankroll_usd` 是配置而非权威钱包余额 |
 | [docker-integration.md](./docker-integration.md) | CI / 开发 | testcontainers 集成测试 |
 | [network-integration.md](./network-integration.md) | CI / 开发 | 需外网的 Polymarket / RPC 集成测试 |
-| [domain-data-sources.md](./domain-data-sources.md) | 研发、量化 | 垂直领域外部数据源选型清单（PIT / license / 结算源对齐） |
 
 相关设计文档（非逐步操作手册）：
 
+- [03.8-vertical-domain-closed-loop.md](../plans/quant-pivot/phase-03/03.8-vertical-domain-closed-loop.md) §7 — 垂直领域外部数据源选型（PIT / license / 结算源对齐）
 - [schema-catalog.md](../persistence/schema-catalog.md) — Postgres 表生命周期
 - [replay-analytics-endgame-audit.md](../replay-analytics-endgame-audit.md) — control-factor 控制面动机
 - [phase5.6-live-consumption.md](../plans/phase5.6-live-consumption.md) — 热路径因子快照接入

@@ -36,6 +36,9 @@ pub enum QuantTrainingDataset {
     DatasetHash,
     ParquetUri,
     SampleCount,
+    SourceDelaySecs,
+    SampleIntervalSecs,
+    HorizonsSecs,
     CoverageJson,
     RuntimeConfigVersionId,
     CreatedAt,
@@ -90,6 +93,21 @@ pub fn table() -> TableCreateStatement {
         .col(
             ColumnDef::new(QuantTrainingDataset::SampleCount)
                 .big_integer()
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(QuantTrainingDataset::SourceDelaySecs)
+                .big_integer()
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(QuantTrainingDataset::SampleIntervalSecs)
+                .big_integer()
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(QuantTrainingDataset::HorizonsSecs)
+                .json_binary()
                 .not_null(),
         )
         .col(

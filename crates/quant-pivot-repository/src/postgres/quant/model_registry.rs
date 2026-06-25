@@ -7,9 +7,12 @@ use quant_pivot_models::{
     domain::{ModelSpecInfo, ModelVersionInfo, NewModelSpec, NewModelVersion},
     entities::{quant_model_spec, quant_model_version},
     enums::quant::ModelPublicationStatus,
-    types::ModelVersionId,
+    types::{ModelSpecId, ModelVersionId},
 };
-use sea_orm::{ActiveModelTrait, ActiveValue, DatabaseConnection, EntityTrait, IntoActiveModel};
+use sea_orm::{
+    ActiveModelTrait, ActiveValue, ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel,
+    PaginatorTrait, QueryFilter,
+};
 
 /// Postgres-backed model registry repository.
 pub struct PgModelRegistryRepository {
@@ -41,6 +44,18 @@ impl ModelRegistryRepository for PgModelRegistryRepository {
             .await
             .map_err(StorageError::from)
             .map(Into::into)
+    }
+
+    async fn next_version_for_spec(
+        &self,
+        model_spec_id: &ModelSpecId,
+    ) -> Result<i32, StorageError> {
+        let count = quant_model_version::Entity::find()
+            .filter(quant_model_version::Column::ModelSpecId.eq(model_spec_id.clone()))
+            .count(&self.db)
+            .await
+            .map_err(StorageError::from)?;
+        Ok(i32::try_from(count).unwrap_or(i32::MAX).saturating_add(1))
     }
 
     async fn find_model_version_by_id(

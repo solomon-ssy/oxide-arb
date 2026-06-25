@@ -3,7 +3,7 @@ use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::{ModelRunInfo, NewModelRun},
     enums::quant::ModelRunErrorCode,
-    types::{ContentHash, ModelRunId},
+    types::{ContentHash, ModelRunId, ModelVersionId},
 };
 
 /// Model run persistence port (distinct from registry spec/version lifecycle).
@@ -25,12 +25,18 @@ pub trait ModelRunRepository: Send + Sync {
 
     /// Finalize a `Running` run as `Succeeded`, recording its output hash and
     /// metrics. Rejects the transition if the run is not currently `Running`.
+    ///
+    /// When `model_version_id` is `Some`, sets the FK on the run row (training
+    /// backfill after version registration, or explicit finalization for runs
+    /// that already carried the version at create time). When `None`, the column
+    /// is left unchanged.
     async fn succeed(
         &self,
         model_run_id: &ModelRunId,
         output_hash: ContentHash,
         metrics_json: serde_json::Value,
         finished_at: DateTime<Utc>,
+        model_version_id: Option<ModelVersionId>,
     ) -> Result<ModelRunInfo, StorageError>;
 
     /// Finalize a `Running` run as `Failed`, recording the error code + message.
