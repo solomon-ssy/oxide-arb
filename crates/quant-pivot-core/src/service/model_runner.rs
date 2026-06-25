@@ -29,25 +29,29 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
     clickhouse::QuantSignalCandidateEventRow,
-    domain::NewModelRun,
+    domain::{ModelVersionInfo, NewModelRun, NewShadowComparison},
     enums::{
         common::{AlertCategory, AlertLevel, AlertSource},
-        quant::{ModelRunErrorCode, ModelRunKind, ModelRunStatus, SignalSide},
+        quant::{ModelPublicationStatus, ModelRunKind, ModelRunStatus, SignalSide},
     },
-    runtime_config::{DecimalString, FactorsConfig, FeaturesConfig, ModelConfig, ModelVersionRef},
+    runtime_config::{DecimalString, FactorsConfig, FeaturesConfig, ModelConfig},
     types::{
         ContentHash, FeatureVectorId, MarketId, MarketSelectionId, ModelRunId, ModelVersionId,
         Probability, RuntimeConfigVersionId,
     },
 };
-use quant_pivot_repository::traits::{ModelRegistryRepository, ModelRunRepository};
+use quant_pivot_repository::traits::{
+    ModelRegistryRepository, ModelRunRepository, ShadowComparisonRepository,
+};
 use quant_pivot_research::{
     factors::{FactorEngine, MarketFactorOutcome},
     features::{FeatureSchema, FeatureVector},
+    governance::{ShadowComparison, compute_shadow_comparison},
     hashing::ResearchHasher,
     model::{
         ActiveSchemaBinding, DegradeAction, InferenceStage, ModelFamily,
-        ModelRuntimeFactoryBuilder, SignalCandidate, degrade_action, signal_candidate_event,
+        ModelRuntimeFactoryBuilder, ModelRuntimeInput, ModelRuntimeOutput, QuantModelRuntime,
+        SignalCandidate, WeightOverlay, degrade_action, signal_candidate_event,
     },
     selection::SelectedMarket,
 };
@@ -55,6 +59,7 @@ use rust_decimal::Decimal;
 use serde::Serialize;
 
 use crate::{
+    governance::{WeightOverlayApplicator, active_load_ok, shadow_load_ok},
     observability::{
         alert_dispatcher::{Alert, AlertDispatcher},
         signal_candidate_fact_writer::SignalCandidateEventWriter,
@@ -123,6 +128,8 @@ pub struct ModelRunRequest<'a> {
     pub factors: &'a FactorsConfig,
     /// Frozen model config (active / shadow refs, floors, horizon).
     pub model: &'a ModelConfig,
+    /// `TopN` bound for the shadow comparison overlap (from `reports.default_top_n`).
+    pub top_n: usize,
     /// Decision time.
     pub as_of: DateTime<Utc>,
 }
@@ -170,22 +177,49 @@ struct ActiveResult {
     metrics: serde_json::Value,
     accepted: Vec<SignalCandidate>,
     emitted: u32,
+    /// The active model version that produced this result (for the shadow record).
+    active_version_id: ModelVersionId,
     /// Per-market `(composite_score, side)` for the shadow diff.
     active_index: HashMap<MarketId, (Probability, SignalSide)>,
+    /// Full ranked active candidates for the signal-layer shadow comparison.
+    active_candidates: Vec<SignalCandidate>,
     /// Eligible factor outcomes reused (no recompute) for the shadow table.
     outcomes: Vec<MarketFactorOutcome>,
     /// Projected CH rows; written only after the active run succeeds in PG.
     ch_rows: Vec<QuantSignalCandidateEventRow>,
 }
 
+/// Boot-time dependencies for the [`ModelRunner`].
+pub struct ModelRunnerDeps {
+    /// Model-run ledger (create / finalize live + shadow runs).
+    pub model_run_repo: Arc<dyn ModelRunRepository>,
+    /// Model registry (resolve active / shadow versions).
+    pub model_registry_repo: Arc<dyn ModelRegistryRepository>,
+    /// Shadow-comparison ledger (signal-layer divergence persistence).
+    pub shadow_comparison_repo: Arc<dyn ShadowComparisonRepository>,
+    /// Schema-bound runtime factory builder (loads model artifacts).
+    pub factory_builder: Arc<dyn ModelRuntimeFactoryBuilder>,
+    /// Online factor build pipeline.
+    pub factor_pipeline: Arc<FactorPipelineService>,
+    /// `ClickHouse` signal-candidate fact writer.
+    pub signal_writer: Arc<SignalCandidateEventWriter>,
+    /// Operator alert sink for inference degradation.
+    pub alerts: Arc<dyn InferenceAlertSink>,
+    /// Hot-reloadable factor-weight overlay for non-published candidate / shadow.
+    pub weight_overlay: Arc<WeightOverlayApplicator>,
+}
+
 /// Online inference orchestrator (3.4 capstone).
 pub struct ModelRunner {
     model_run_repo: Arc<dyn ModelRunRepository>,
     model_registry_repo: Arc<dyn ModelRegistryRepository>,
+    shadow_comparison_repo: Arc<dyn ShadowComparisonRepository>,
     factory_builder: Arc<dyn ModelRuntimeFactoryBuilder>,
     factor_pipeline: Arc<FactorPipelineService>,
     signal_writer: Arc<SignalCandidateEventWriter>,
     alerts: Arc<dyn InferenceAlertSink>,
+    /// Hot-reloadable factor-weight overlay for non-published candidate / shadow.
+    weight_overlay: Arc<WeightOverlayApplicator>,
     /// Consecutive classical-shadow inference failures (reset on any success).
     shadow_classical_failures: AtomicU32,
 }
@@ -193,21 +227,16 @@ pub struct ModelRunner {
 impl ModelRunner {
     /// Wire the runner from boot-time dependencies.
     #[must_use]
-    pub fn new(
-        model_run_repo: Arc<dyn ModelRunRepository>,
-        model_registry_repo: Arc<dyn ModelRegistryRepository>,
-        factory_builder: Arc<dyn ModelRuntimeFactoryBuilder>,
-        factor_pipeline: Arc<FactorPipelineService>,
-        signal_writer: Arc<SignalCandidateEventWriter>,
-        alerts: Arc<dyn InferenceAlertSink>,
-    ) -> Self {
+    pub fn new(deps: ModelRunnerDeps) -> Self {
         Self {
-            model_run_repo,
-            model_registry_repo,
-            factory_builder,
-            factor_pipeline,
-            signal_writer,
-            alerts,
+            model_run_repo: deps.model_run_repo,
+            model_registry_repo: deps.model_registry_repo,
+            shadow_comparison_repo: deps.shadow_comparison_repo,
+            factory_builder: deps.factory_builder,
+            factor_pipeline: deps.factor_pipeline,
+            signal_writer: deps.signal_writer,
+            alerts: deps.alerts,
+            weight_overlay: deps.weight_overlay,
             shadow_classical_failures: AtomicU32::new(0),
         }
     }
@@ -230,7 +259,7 @@ impl ModelRunner {
         };
 
         let active_version_id = match request.model.active_model_version_id.as_ref() {
-            Some(reference) => Some(parse_version(reference)?),
+            Some(reference) => Some(ModelVersionId::try_from(reference)?),
             None => None,
         };
 
@@ -305,20 +334,7 @@ impl ModelRunner {
                 QuantError::config("model.active_model_version_id is not configured"),
             )
         })?;
-        let version = self
-            .model_registry_repo
-            .find_model_version_by_id(version_id)
-            .await
-            .map_err(QuantError::from)
-            .and_then(|row| {
-                row.ok_or_else(|| {
-                    ResearchError::InvalidModelArtifact {
-                        detail: format!("active model version {version_id} not found"),
-                    }
-                    .into()
-                })
-            })
-            .map_err(|error| (InferenceStage::ActiveLoad, error))?;
+        let version = self.resolve_active_version(version_id, request).await?;
 
         let factor_result = self
             .factor_pipeline
@@ -333,8 +349,9 @@ impl ModelRunner {
             .map_err(|error| (InferenceStage::ActiveInference, error))?;
 
         let factory = self.factory_builder.build(binding.clone());
+        let overlay = self.resolve_overlay(&version);
         let runtime = factory
-            .load(&version)
+            .load(&version, overlay)
             .await
             .map_err(|error| (InferenceStage::ActiveLoad, error))?;
 
@@ -376,20 +393,16 @@ impl ModelRunner {
         let event_time = Utc::now().timestamp_millis();
 
         let emitted = u32::try_from(output.candidates.len()).unwrap_or(u32::MAX);
-        let mut rows = Vec::with_capacity(output.candidates.len());
-        let mut accepted = Vec::new();
-        for candidate in output.candidates {
-            let reason = rejection_reason(&candidate, floor, min_confidence);
-            rows.push(signal_candidate_event(&candidate, reason, event_time));
-            if reason.is_empty() {
-                accepted.push(candidate);
-            }
-        }
+        // The full ranked candidate set feeds the signal-layer shadow comparison.
+        let active_candidates = output.candidates.clone();
+        let (rows, accepted) =
+            partition_candidates(output.candidates, floor, min_confidence, event_time);
         let metrics = serde_json::json!({
             "markets_scored": output.runtime_metrics.markets_scored,
             "candidates_emitted": output.runtime_metrics.candidates_emitted,
             "accepted": accepted.len(),
             "inference_duration_ms": output.runtime_metrics.inference_duration_ms,
+            "weight_source": runtime.weight_source().as_str(),
         });
 
         Ok(ActiveResult {
@@ -397,7 +410,9 @@ impl ModelRunner {
             metrics,
             accepted,
             emitted,
+            active_version_id: version_id.clone(),
             active_index,
+            active_candidates,
             outcomes: factor_result.outcomes,
             ch_rows: rows,
         })
@@ -412,7 +427,7 @@ impl ModelRunner {
         active: &ActiveResult,
     ) -> Option<ShadowRunOutcome> {
         let reference = request.model.shadow_model_version_id.as_ref()?;
-        let shadow_version_id = match parse_version(reference) {
+        let shadow_version_id = match ModelVersionId::try_from(reference) {
             Ok(id) => id,
             Err(error) => {
                 return Some(
@@ -504,9 +519,23 @@ impl ModelRunner {
             })
             .map_err(|error| (InferenceStage::ShadowLoad, error))?;
 
+        if let Err(reason) = shadow_load_ok(
+            &version,
+            request.model.min_quality_gate_age_secs,
+            request.as_of,
+        ) {
+            return Err((
+                InferenceStage::ShadowLoad,
+                QuantError::config(format!(
+                    "shadow model {shadow_version_id} load denied: {reason}"
+                )),
+            ));
+        }
+
         let factory = self.factory_builder.build(binding.clone());
+        let overlay = self.resolve_overlay(&version);
         let runtime = factory
-            .load(&version)
+            .load(&version, overlay)
             .await
             .map_err(|error| (InferenceStage::ShadowLoad, error))?;
 
@@ -520,29 +549,9 @@ impl ModelRunner {
             &vectors,
             &outcomes,
         );
-        let output = match runtime.infer_batch(input).await {
-            Ok(output) => {
-                self.shadow_classical_failures.store(0, Ordering::Relaxed);
-                output
-            }
-            Err(error) => {
-                // A misconfigured / schema-incompatible classical shadow must not
-                // degrade silently forever: escalate after N consecutive failures.
-                if is_classical {
-                    let count = self
-                        .shadow_classical_failures
-                        .fetch_add(1, Ordering::Relaxed)
-                        + 1;
-                    if count >= SHADOW_CLASSICAL_ALERT_THRESHOLD {
-                        self.alerts.critical(
-                            format!("classical shadow inference failing ({count}x consecutive)"),
-                            error.to_string(),
-                        );
-                    }
-                }
-                return Err((InferenceStage::ShadowInference, error));
-            }
-        };
+        let output = self
+            .score_shadow(runtime.as_ref(), input, is_classical)
+            .await?;
 
         let output_hash = ResearchHasher::canonical(&output.candidates)
             .map_err(|error| (InferenceStage::ShadowInference, error))?;
@@ -566,6 +575,7 @@ impl ModelRunner {
             "diff_mean_score": diff.mean_score_diff.to_string(),
             "side_disagreement_rate": diff.side_disagreement_rate.to_string(),
             "exceeds_threshold": diff.exceeds_threshold,
+            "weight_source": runtime.weight_source().as_str(),
         });
         self.model_run_repo
             .succeed(
@@ -579,12 +589,181 @@ impl ModelRunner {
             .map_err(|error| (InferenceStage::ShadowInference, QuantError::from(error)))?;
         self.signal_writer.write_batch(rows);
 
+        // Persist the richer signal-layer shadow comparison (TopN overlap + rank /
+        // score deltas) and raise a critical alert on a hard divergence. This is
+        // governance evidence and best-effort: a persistence hiccup must not fail
+        // the isolated shadow path.
+        self.persist_shadow_comparison(request, active, shadow_version_id, &output.candidates)
+            .await;
+        self.maybe_promote_shadow_status(shadow_version_id).await;
+
         Ok(ShadowRunOutcome {
             model_run_id: Some(model_run_id.clone()),
             emitted,
             diff: Some(diff),
             failure: None,
         })
+    }
+
+    /// Score the shadow runtime, tracking consecutive classical failures and
+    /// escalating to a critical alert past the threshold (a misconfigured
+    /// classical shadow must not degrade silently forever).
+    async fn score_shadow(
+        &self,
+        runtime: &dyn QuantModelRuntime,
+        input: ModelRuntimeInput,
+        is_classical: bool,
+    ) -> Result<ModelRuntimeOutput, (InferenceStage, QuantError)> {
+        match runtime.infer_batch(input).await {
+            Ok(output) => {
+                self.shadow_classical_failures.store(0, Ordering::Relaxed);
+                Ok(output)
+            }
+            Err(error) => {
+                if is_classical {
+                    let count = self
+                        .shadow_classical_failures
+                        .fetch_add(1, Ordering::Relaxed)
+                        + 1;
+                    if count >= SHADOW_CLASSICAL_ALERT_THRESHOLD {
+                        self.alerts.critical(
+                            format!("classical shadow inference failing ({count}x consecutive)"),
+                            error.to_string(),
+                        );
+                    }
+                }
+                Err((InferenceStage::ShadowInference, error))
+            }
+        }
+    }
+
+    /// Resolve + freshness-check the active model version: look up the registry
+    /// row and enforce the load-time quality-gate staleness deny (3.7).
+    async fn resolve_active_version(
+        &self,
+        version_id: &ModelVersionId,
+        request: &ModelRunRequest<'_>,
+    ) -> Result<ModelVersionInfo, (InferenceStage, QuantError)> {
+        let version = self
+            .model_registry_repo
+            .find_model_version_by_id(version_id)
+            .await
+            .map_err(QuantError::from)
+            .and_then(|row| {
+                row.ok_or_else(|| {
+                    ResearchError::InvalidModelArtifact {
+                        detail: format!("active model version {version_id} not found"),
+                    }
+                    .into()
+                })
+            })
+            .map_err(|error| (InferenceStage::ActiveLoad, error))?;
+        if let Err(reason) = active_load_ok(
+            &version,
+            request.model.min_quality_gate_age_secs,
+            request.as_of,
+        ) {
+            return Err((
+                InferenceStage::ActiveLoad,
+                QuantError::config(format!("active model {version_id} load denied: {reason}")),
+            ));
+        }
+        Ok(version)
+    }
+
+    /// Resolve the factor-weight overlay for a version: non-published candidate /
+    /// shadow versions may carry a config overlay; a `Published` version always
+    /// scores on its frozen artifact weights (overlay forbidden).
+    fn resolve_overlay(&self, version: &ModelVersionInfo) -> Option<WeightOverlay> {
+        if version.publication_status == ModelPublicationStatus::Published {
+            return None;
+        }
+        self.weight_overlay.overlay_for(&version.model_version_id)
+    }
+
+    /// Compute + persist the signal-layer [`ShadowComparison`], alerting on a hard
+    /// divergence.
+    async fn persist_shadow_comparison(
+        &self,
+        request: &ModelRunRequest<'_>,
+        active: &ActiveResult,
+        shadow_version_id: &ModelVersionId,
+        shadow_candidates: &[SignalCandidate],
+    ) {
+        let threshold = match parse_decimal(
+            &request.model.shadow_diff_threshold,
+            "shadow_diff_threshold",
+        ) {
+            Ok(threshold) => threshold,
+            Err(error) => {
+                tracing::warn!(%error, "skipping shadow comparison: invalid shadow_diff_threshold");
+                return;
+            }
+        };
+        let comparison = match compute_shadow_comparison(
+            active.active_version_id.clone(),
+            shadow_version_id.clone(),
+            request.as_of,
+            &active.active_candidates,
+            shadow_candidates,
+            request.top_n,
+            threshold,
+        ) {
+            Ok(comparison) => comparison,
+            Err(error) => {
+                tracing::warn!(%error, "skipping shadow comparison: computation failed");
+                return;
+            }
+        };
+
+        if comparison.hard_divergence {
+            self.alerts.critical(
+                format!(
+                    "shadow model {shadow_version_id} diverged from active {}",
+                    active.active_version_id
+                ),
+                format!(
+                    "mean_abs_score_delta={}, topn_overlap={}, side_disagreement_rate={}",
+                    comparison.score_delta.mean_abs_score_delta,
+                    comparison.topn_overlap.inner(),
+                    comparison.score_delta.side_disagreement_rate,
+                ),
+            );
+        }
+
+        if let Err(error) = self
+            .shadow_comparison_repo
+            .create(new_shadow_comparison(&comparison))
+            .await
+        {
+            tracing::warn!(%error, "failed to persist shadow comparison");
+        }
+    }
+
+    /// Promote a candidate to `Shadow` after the first successful shadow inference
+    /// round (best-effort; idempotent when already `Shadow`).
+    async fn maybe_promote_shadow_status(&self, shadow_version_id: &ModelVersionId) {
+        let Ok(Some(version)) = self
+            .model_registry_repo
+            .find_model_version_by_id(shadow_version_id)
+            .await
+        else {
+            return;
+        };
+        if version.publication_status != ModelPublicationStatus::Candidate {
+            return;
+        }
+        if let Err(error) = self
+            .model_registry_repo
+            .promote_model_to_shadow(shadow_version_id)
+            .await
+        {
+            tracing::warn!(
+                %error,
+                %shadow_version_id,
+                "failed to promote shadow model to Shadow status"
+            );
+        }
     }
 
     /// Insert a fresh `Running` run row.
@@ -622,29 +801,6 @@ impl ModelRunner {
     }
 }
 
-/// Map an active-path failure stage to a persisted [`ModelRunErrorCode`].
-const fn active_error_code(stage: InferenceStage) -> ModelRunErrorCode {
-    match stage {
-        InferenceStage::ActiveLoad => ModelRunErrorCode::ArtifactLoadFailed,
-        InferenceStage::ActiveInference => ModelRunErrorCode::ActiveInferenceFailed,
-        InferenceStage::ShadowLoad | InferenceStage::ShadowInference => {
-            ModelRunErrorCode::ActiveInferenceFailed
-        }
-    }
-}
-
-/// Map a shadow-path failure stage to a persisted [`ModelRunErrorCode`].
-const fn shadow_error_code(stage: InferenceStage) -> ModelRunErrorCode {
-    match stage {
-        InferenceStage::ShadowLoad => ModelRunErrorCode::ArtifactLoadFailed,
-        InferenceStage::ShadowInference => ModelRunErrorCode::ShadowInferenceFailed,
-        InferenceStage::ActiveLoad | InferenceStage::ActiveInference => {
-            ModelRunErrorCode::ShadowInferenceFailed
-        }
-    }
-}
-
-/// Finalize an active-path failure per [`degrade_action`]: fail the run + critical alert.
 async fn finalize_active_failure(
     model_run_repo: &Arc<dyn ModelRunRepository>,
     alerts: &Arc<dyn InferenceAlertSink>,
@@ -658,7 +814,7 @@ async fn finalize_active_failure(
     let _ = model_run_repo
         .fail(
             model_run_id,
-            active_error_code(stage),
+            stage.active_error_code(),
             error.to_string(),
             Utc::now(),
         )
@@ -684,7 +840,7 @@ async fn finalize_shadow_failure(
         let _ = model_run_repo
             .fail(
                 run_id,
-                shadow_error_code(stage),
+                stage.shadow_error_code(),
                 error.to_string(),
                 Utc::now(),
             )
@@ -697,6 +853,26 @@ async fn finalize_shadow_failure(
         diff: None,
         failure: Some(error.to_string()),
     }
+}
+
+/// Split emitted candidates into their fact rows and the accepted subset (score
+/// + confidence above the configured floors).
+fn partition_candidates(
+    candidates: Vec<SignalCandidate>,
+    floor: Decimal,
+    min_confidence: Decimal,
+    event_time: i64,
+) -> (Vec<QuantSignalCandidateEventRow>, Vec<SignalCandidate>) {
+    let mut rows = Vec::with_capacity(candidates.len());
+    let mut accepted = Vec::new();
+    for candidate in candidates {
+        let reason = rejection_reason(&candidate, floor, min_confidence);
+        rows.push(signal_candidate_event(&candidate, reason, event_time));
+        if reason.is_empty() {
+            accepted.push(candidate);
+        }
+    }
+    (rows, accepted)
 }
 
 /// The empty string for an accepted candidate, or the deterministic reason a
@@ -790,6 +966,25 @@ fn shadow_diff(
     }
 }
 
+/// Project a computed [`ShadowComparison`] into its persistence insert payload.
+fn new_shadow_comparison(comparison: &ShadowComparison) -> NewShadowComparison {
+    NewShadowComparison {
+        shadow_comparison_id: comparison.shadow_comparison_id.clone(),
+        active_model_version_id: comparison.active_model_version_id.clone(),
+        shadow_model_version_id: comparison.shadow_model_version_id.clone(),
+        as_of: comparison.as_of,
+        topn_overlap: comparison.topn_overlap,
+        rank_delta_json: serde_json::to_value(&comparison.rank_delta).unwrap_or_default(),
+        score_delta_json: serde_json::to_value(&comparison.score_delta).unwrap_or_default(),
+        matured_outcome_json: comparison
+            .matured_outcome_delta
+            .as_ref()
+            .map(|delta| serde_json::to_value(delta).unwrap_or_default()),
+        hard_divergence: comparison.hard_divergence,
+        comparison_hash: comparison.comparison_hash.clone(),
+    }
+}
+
 /// Canonical input hash for a run.
 fn input_hash(
     request: &ModelRunRequest<'_>,
@@ -816,18 +1011,103 @@ fn input_hash(
     })
 }
 
-/// Parse a config model-version reference into a typed id.
-fn parse_version(reference: &ModelVersionRef) -> QuantResult<ModelVersionId> {
-    ModelVersionId::from_str(reference.id.trim()).map_err(|error| {
-        QuantError::config(format!(
-            "invalid model_version_id `{}`: {error}",
-            reference.id
-        ))
-    })
-}
-
 /// Parse a governed decimal-string config value, failing closed.
 fn parse_decimal(value: &DecimalString, field: &str) -> QuantResult<Decimal> {
     Decimal::from_str(value.value.trim())
         .map_err(|error| QuantError::config(format!("invalid {field} `{}`: {error}", value.value)))
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::governance::quality_gate_staleness_ok;
+    use chrono::{Duration, Utc};
+    use quant_pivot_models::{
+        domain::ModelVersionInfo,
+        enums::quant::ModelPublicationStatus,
+        types::{ContentHash, ModelSpecId, ModelVersionId},
+    };
+
+    fn version(status: ModelPublicationStatus, report: serde_json::Value) -> ModelVersionInfo {
+        ModelVersionInfo {
+            model_version_id: ModelVersionId::from_v7(),
+            model_spec_id: ModelSpecId::from_v7(),
+            version: 1,
+            artifact_hash: ContentHash::parse(format!("blake3:{}", "0".repeat(64))).expect("hash"),
+            training_dataset_id: None,
+            metrics_json: serde_json::json!({}),
+            quality_gate_report: report,
+            publication_status: status,
+            published_at: None,
+            retired_at: None,
+            created_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn fresh_gate_report_is_accepted_for_candidate() {
+        let now = Utc::now();
+        let report = serde_json::json!({ "evaluated_at": now.to_rfc3339() });
+        assert!(
+            quality_gate_staleness_ok(
+                &version(ModelPublicationStatus::Candidate, report),
+                86_400,
+                now,
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn stale_quality_gate_report_is_denied_for_candidate() {
+        let now = Utc::now();
+        let stale = now - Duration::seconds(90_000);
+        let report = serde_json::json!({ "evaluated_at": stale.to_rfc3339() });
+        assert!(
+            quality_gate_staleness_ok(
+                &version(ModelPublicationStatus::Candidate, report),
+                86_400,
+                now,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn published_active_is_exempt_from_staleness_deny() {
+        let now = Utc::now();
+        let stale = now - Duration::seconds(90_000);
+        let report = serde_json::json!({ "evaluated_at": stale.to_rfc3339() });
+        assert!(
+            quality_gate_staleness_ok(
+                &version(ModelPublicationStatus::Published, report),
+                86_400,
+                now,
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn zero_budget_disables_the_check() {
+        let now = Utc::now();
+        let stale = now - Duration::days(365);
+        let report = serde_json::json!({ "evaluated_at": stale.to_rfc3339() });
+        assert!(
+            quality_gate_staleness_ok(&version(ModelPublicationStatus::Candidate, report), 0, now,)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn absent_report_is_not_subject_to_staleness() {
+        let now = Utc::now();
+        assert!(
+            quality_gate_staleness_ok(
+                &version(ModelPublicationStatus::Candidate, serde_json::json!({})),
+                86_400,
+                now,
+            )
+            .is_ok()
+        );
+    }
 }

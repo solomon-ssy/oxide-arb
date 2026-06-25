@@ -142,6 +142,7 @@ fn build_fields() -> Vec<FieldUiEntry> {
         feature_fields(),
         factor_fields(),
         model_fields(),
+        quality_gate_fields(),
         training_fields(),
         report_fields(),
         portfolio_fields(),
@@ -436,6 +437,79 @@ fn model_fields() -> Vec<FieldUiEntry> {
             70,
             Some(FieldWidget::DecimalString),
             None,
+        ),
+    ]
+}
+
+fn quality_gate_fields() -> Vec<FieldUiEntry> {
+    vec![
+        integer(
+            "quality_gate.min_sample_count",
+            "Minimum sample count",
+            "最小样本数",
+            10,
+        ),
+        entry(
+            "quality_gate.min_label_coverage",
+            "Minimum label coverage",
+            "最低标签覆盖率",
+            20,
+            Some(FieldWidget::DecimalString),
+            None,
+        ),
+        entry(
+            "quality_gate.min_critical_feature_coverage",
+            "Minimum critical-feature coverage",
+            "最低关键特征覆盖率",
+            30,
+            Some(FieldWidget::DecimalString),
+            None,
+        ),
+        entry(
+            "quality_gate.max_drawdown",
+            "Maximum drawdown",
+            "最大回撤",
+            40,
+            Some(FieldWidget::DecimalString),
+            None,
+        ),
+        entry(
+            "quality_gate.min_liquidity_exit_feasibility",
+            "Minimum liquidity-exit feasibility",
+            "最低流动性退出可行性",
+            50,
+            Some(FieldWidget::DecimalString),
+            None,
+        ),
+        entry(
+            "quality_gate.min_shadow_overlap_stability",
+            "Minimum shadow overlap stability",
+            "最低影子重叠稳定性",
+            60,
+            Some(FieldWidget::DecimalString),
+            None,
+        ),
+        entry(
+            "quality_gate.min_rank_ic",
+            "Minimum rank IC (soft)",
+            "最低排序 IC（软）",
+            70,
+            Some(FieldWidget::DecimalString),
+            None,
+        ),
+        entry(
+            "quality_gate.max_category_concentration",
+            "Maximum category concentration (soft)",
+            "最大类别集中度（软）",
+            80,
+            Some(FieldWidget::DecimalString),
+            None,
+        ),
+        integer(
+            "quality_gate.required_shadow_window_secs",
+            "Required shadow window",
+            "所需影子窗口秒数",
+            90,
         ),
     ]
 }

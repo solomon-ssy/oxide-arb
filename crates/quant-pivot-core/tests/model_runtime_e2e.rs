@@ -10,6 +10,7 @@ use std::sync::{
 use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, Utc};
 use quant_pivot_core::{
+    governance::WeightOverlayApplicator,
     observability::{
         factor_fact_writer::FactorEventWriter, feature_fact_writer::FeatureEventWriter,
         metrics_hub::MetricsHub, signal_candidate_fact_writer::SignalCandidateEventWriter,
@@ -21,7 +22,7 @@ use quant_pivot_core::{
     service::{
         factor_pipeline::FactorPipelineService,
         feature_pipeline::{FeaturePipelineRequest, FeaturePipelineService},
-        model_runner::{InferenceAlertSink, ModelRunRequest, ModelRunner},
+        model_runner::{InferenceAlertSink, ModelRunRequest, ModelRunner, ModelRunnerDeps},
     },
 };
 use quant_pivot_error::storage::StorageError;
@@ -38,8 +39,8 @@ use quant_pivot_models::{
         quant::{ModelPublicationStatus, ModelRunErrorCode, ModelRunKind, ModelRunStatus},
     },
     runtime_config::{
-        DataQualityConfig, DecimalString, FactorsConfig, FeaturesConfig, ModelConfig,
-        ModelVersionRef,
+        DataQualityConfig, DecimalString, FactorWeights, FactorsConfig, FeaturesConfig,
+        ModelConfig, ModelVersionRef,
     },
     types::{
         ContentHash, EventId, FeatureVectorId, MarketId, ModelRunId, ModelSpecId, ModelVersionId,
@@ -49,11 +50,12 @@ use quant_pivot_models::{
 use quant_pivot_repository::{
     postgres::{
         PgEventRepository, PgFactorRepository, PgFeatureRepository, PgMarketRepository,
-        PgModelRegistryRepository, PgModelRunRepository,
+        PgModelRegistryRepository, PgModelRunRepository, PgShadowComparisonRepository,
     },
     traits::{
         EventRepository, FactorRepository, FeatureRepository, MarketRepository,
         ModelRegistryRepository, ModelRunRepository, QuantFactReadRepository,
+        ShadowComparisonRepository,
     },
 };
 use quant_pivot_research::{
@@ -395,6 +397,90 @@ async fn publish_weighted_model(
     model_version_id
 }
 
+/// Register a sibling candidate with the same weights as `published`, but a
+/// distinct artifact header (content-addressed per version id).
+async fn register_candidate_sibling(
+    db: &DatabaseConnection,
+    store: &Arc<dyn ArtifactStore>,
+    published_id: &ModelVersionId,
+) -> ModelVersionId {
+    let registry = PgModelRegistryRepository::new(db.clone());
+    let published = registry
+        .find_model_version_by_id(published_id)
+        .await
+        .expect("find published")
+        .expect("published row");
+    let key = ModelArtifact::artifact_key(&published.artifact_hash).expect("artifact key");
+    let bytes = store
+        .get_by_key(&key)
+        .await
+        .expect("load published artifact bytes");
+    let mut artifact = ModelArtifact::from_bytes(&bytes).expect("decode artifact");
+    let candidate_id = ModelVersionId::from_v7();
+    match &mut artifact {
+        ModelArtifact::WeightedFactor(weighted) => {
+            weighted.header.model_version_id = candidate_id.clone();
+        }
+        ModelArtifact::Classical(classical) => {
+            classical.header.model_version_id = candidate_id.clone();
+        }
+    }
+    artifact.validate().expect("candidate artifact valid");
+    let artifact_hash = artifact.content_hash().expect("candidate hash");
+    let candidate_key = ModelArtifact::artifact_key(&artifact_hash).expect("candidate key");
+    store
+        .put(
+            candidate_key,
+            &artifact.to_bytes().expect("candidate bytes"),
+        )
+        .await
+        .expect("store candidate artifact");
+    registry
+        .create_model_version(NewModelVersion {
+            model_version_id: candidate_id.clone(),
+            model_spec_id: published.model_spec_id.clone(),
+            version: published.version + 1,
+            artifact_hash,
+            training_dataset_id: published.training_dataset_id.clone(),
+            metrics_json: serde_json::json!({}),
+            quality_gate_report: serde_json::json!({}),
+            publication_status: ModelPublicationStatus::Candidate,
+            published_at: None,
+            retired_at: None,
+        })
+        .await
+        .expect("create candidate sibling");
+    candidate_id
+}
+
+/// Build a normalized overlay skewed toward the factor at `lead_index`.
+fn factors_with_overlay_skew(
+    base: &FactorsConfig,
+    features: &FeaturesConfig,
+    lead_index: usize,
+) -> FactorsConfig {
+    let engine = FactorEngine::new(base, features);
+    let definitions = &engine.factor_set().definitions;
+    assert!(
+        definitions.len() >= 2,
+        "overlay test needs at least two factors"
+    );
+    let lead = Decimal::new(90, 2);
+    let tail = (Decimal::ONE - lead)
+        / Decimal::from(u64::try_from(definitions.len().saturating_sub(1)).expect("count"));
+    let mut weights = FactorWeights::default();
+    for (index, spec) in definitions.iter().enumerate() {
+        let value = if index == lead_index { lead } else { tail };
+        weights.weights.insert(
+            spec.name.as_str().to_owned(),
+            DecimalString::new(value.to_string()),
+        );
+    }
+    let mut config = base.clone();
+    config.factor_weights = weights;
+    config
+}
+
 fn model_config(active: &ModelVersionId, shadow: Option<&str>) -> ModelConfig {
     ModelConfig {
         active_model_version_id: Some(ModelVersionRef {
@@ -411,6 +497,7 @@ fn build_runner(
     db: &DatabaseConnection,
     store: Arc<dyn ArtifactStore>,
     critical: Arc<AtomicUsize>,
+    weight_overlay: Arc<WeightOverlayApplicator>,
 ) -> ModelRunner {
     let factor_repo = Arc::new(PgFactorRepository::new(db.clone())) as Arc<dyn FactorRepository>;
     let factor_pipeline = Arc::new(FactorPipelineService::new(
@@ -421,14 +508,18 @@ fn build_runner(
         Arc::new(PgModelRunRepository::new(db.clone())) as Arc<dyn ModelRunRepository>;
     let registry =
         Arc::new(PgModelRegistryRepository::new(db.clone())) as Arc<dyn ModelRegistryRepository>;
-    ModelRunner::new(
+    let shadow_comparison_repo = Arc::new(PgShadowComparisonRepository::new(db.clone()))
+        as Arc<dyn ShadowComparisonRepository>;
+    ModelRunner::new(ModelRunnerDeps {
         model_run_repo,
-        registry,
-        Arc::new(DefaultModelRuntimeFactoryBuilder::new(store)),
+        model_registry_repo: registry,
+        shadow_comparison_repo,
+        factory_builder: Arc::new(DefaultModelRuntimeFactoryBuilder::new(store)),
         factor_pipeline,
-        noop_signal_writer(),
-        Arc::new(CountingAlertSink { critical }),
-    )
+        signal_writer: noop_signal_writer(),
+        alerts: Arc::new(CountingAlertSink { critical }),
+        weight_overlay,
+    })
 }
 
 fn artifact_store() -> Arc<dyn ArtifactStore> {
@@ -454,7 +545,12 @@ async fn online_loop_selection_to_signal_candidates() {
     let active = publish_weighted_model(&db, &store, &factors, &features).await;
 
     let critical = Arc::new(AtomicUsize::new(0));
-    let runner = build_runner(&db, Arc::clone(&store), Arc::clone(&critical));
+    let runner = build_runner(
+        &db,
+        Arc::clone(&store),
+        Arc::clone(&critical),
+        Arc::new(WeightOverlayApplicator::new()),
+    );
 
     let selection = vec![selected_market()];
     let outcome = runner
@@ -467,6 +563,7 @@ async fn online_loop_selection_to_signal_candidates() {
             features: &features,
             factors: &factors,
             model: &model_config(&active, None),
+            top_n: 10,
             as_of: Utc::now(),
         })
         .await
@@ -519,7 +616,12 @@ async fn inference_degradation_shadow_failure_keeps_active() {
     let active = publish_weighted_model(&db, &store, &factors, &features).await;
 
     let critical = Arc::new(AtomicUsize::new(0));
-    let runner = build_runner(&db, Arc::clone(&store), Arc::clone(&critical));
+    let runner = build_runner(
+        &db,
+        Arc::clone(&store),
+        Arc::clone(&critical),
+        Arc::new(WeightOverlayApplicator::new()),
+    );
 
     // Shadow points at a version that does not exist: the shadow path degrades,
     // the active result is unaffected, and no critical alert fires.
@@ -535,6 +637,7 @@ async fn inference_degradation_shadow_failure_keeps_active() {
             features: &features,
             factors: &factors,
             model: &model_config(&active, Some(&missing_shadow)),
+            top_n: 10,
             as_of: Utc::now(),
         })
         .await
@@ -551,6 +654,167 @@ async fn inference_degradation_shadow_failure_keeps_active() {
         critical.load(Ordering::Relaxed),
         0,
         "a shadow failure must not raise a critical alert"
+    );
+}
+
+#[tokio::test]
+async fn hot_update_changes_candidate_weights_not_published_artifact() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    seed_catalog(&db).await;
+
+    let base_factors = factors_config();
+    let features = FeaturesConfig::default();
+    let (vectors, ids) = build_features(&db).await;
+
+    let store = artifact_store();
+    let published = publish_weighted_model(&db, &store, &base_factors, &features).await;
+    let candidate = register_candidate_sibling(&db, &store, &published).await;
+
+    let overlay = Arc::new(WeightOverlayApplicator::new());
+    let critical = Arc::new(AtomicUsize::new(0));
+    let runner = build_runner(
+        &db,
+        Arc::clone(&store),
+        Arc::clone(&critical),
+        Arc::clone(&overlay),
+    );
+
+    let model = model_config(&published, Some(&candidate.to_string()));
+    let selection = vec![selected_market()];
+    let as_of = Utc::now();
+
+    overlay.reload(
+        &factors_with_overlay_skew(&base_factors, &features, 0),
+        &model,
+    );
+    let first = runner
+        .run(ModelRunRequest {
+            runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
+            market_selection_id: None,
+            selection: &selection,
+            feature_vectors: &vectors,
+            feature_vector_ids: &ids,
+            features: &features,
+            factors: &base_factors,
+            model: &model,
+            top_n: 10,
+            as_of,
+        })
+        .await
+        .expect("first round");
+
+    overlay.reload(
+        &factors_with_overlay_skew(&base_factors, &features, 1),
+        &model,
+    );
+    let second = runner
+        .run(ModelRunRequest {
+            runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
+            market_selection_id: None,
+            selection: &selection,
+            feature_vectors: &vectors,
+            feature_vector_ids: &ids,
+            features: &features,
+            factors: &base_factors,
+            model: &model,
+            top_n: 10,
+            as_of,
+        })
+        .await
+        .expect("second round");
+
+    let active_first = first.accepted[0].composite_score.inner();
+    let active_second = second.accepted[0].composite_score.inner();
+    assert_eq!(
+        active_first, active_second,
+        "published active must ignore config overlay changes"
+    );
+
+    let shadow_first = first
+        .shadow
+        .as_ref()
+        .and_then(|outcome| outcome.diff.as_ref())
+        .expect("shadow diff on first round")
+        .mean_score_diff;
+    let shadow_second = second
+        .shadow
+        .as_ref()
+        .and_then(|outcome| outcome.diff.as_ref())
+        .expect("shadow diff on second round")
+        .mean_score_diff;
+    assert_ne!(
+        shadow_first, shadow_second,
+        "candidate shadow scores must shift when overlay weights change"
+    );
+
+    let shadow_run_id = second
+        .shadow
+        .as_ref()
+        .and_then(|outcome| outcome.model_run_id.clone())
+        .expect("shadow run row");
+    let shadow_run = PgModelRunRepository::new(db.clone())
+        .find_by_id(&shadow_run_id)
+        .await
+        .expect("find shadow run")
+        .expect("shadow run row");
+    assert_eq!(
+        shadow_run
+            .metrics_json
+            .get("weight_source")
+            .and_then(|v| v.as_str()),
+        Some("config_overlay"),
+        "shadow candidate must record overlay provenance"
+    );
+}
+
+#[tokio::test]
+async fn inference_rejects_retired_active_model() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    seed_catalog(&db).await;
+
+    let factors = factors_config();
+    let features = FeaturesConfig::default();
+    let (vectors, ids) = build_features(&db).await;
+
+    let store = artifact_store();
+    let active = publish_weighted_model(&db, &store, &factors, &features).await;
+    PgModelRegistryRepository::new(db.clone())
+        .retire_model_version(&active)
+        .await
+        .expect("retire published version");
+
+    let critical = Arc::new(AtomicUsize::new(0));
+    let runner = build_runner(
+        &db,
+        Arc::clone(&store),
+        Arc::clone(&critical),
+        Arc::new(WeightOverlayApplicator::new()),
+    );
+
+    let selection = [selected_market()];
+    let result = runner
+        .run(ModelRunRequest {
+            runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
+            market_selection_id: None,
+            selection: &selection,
+            feature_vectors: &vectors,
+            feature_vector_ids: &ids,
+            features: &features,
+            factors: &factors,
+            model: &model_config(&active, None),
+            top_n: 10,
+            as_of: Utc::now(),
+        })
+        .await;
+    assert!(result.is_err(), "retired active model must fail load");
+    let Err(err) = result else {
+        panic!("retired active model must fail load");
+    };
+    assert!(
+        err.to_string().contains("must be published"),
+        "failure must cite publication status: {err}"
     );
 }
 

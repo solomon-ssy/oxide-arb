@@ -16,8 +16,15 @@ async fn ready_returns_ok_when_postgres_and_redis_are_up() {
     let body = res.json();
     assert_eq!(body["data"]["status"], "ready");
     let checks = body["data"]["checks"].as_array().expect("checks");
-    assert_eq!(checks.len(), 2);
-    assert!(checks.iter().all(|check| check["ok"] == true));
+    assert_eq!(checks.len(), 3, "postgresql, redis, catalog");
+    let required = ["postgresql", "redis"];
+    for name in required {
+        let check = checks
+            .iter()
+            .find(|c| c["name"] == name)
+            .unwrap_or_else(|| panic!("missing {name} check"));
+        assert_eq!(check["ok"], true);
+    }
 }
 
 #[actix_web::test]

@@ -27,6 +27,7 @@ use crate::{
     artifact::ArtifactStore,
     model::{
         artifact::{ModelArtifact, ModelArtifactHeader},
+        overlay::WeightOverlay,
         runtime::{ModelRuntimeFactory, QuantModelRuntime},
         weighted::WeightedFactorRuntime,
     },
@@ -130,6 +131,7 @@ impl ModelRuntimeFactory for DefaultModelRuntimeFactory {
     async fn load(
         &self,
         model_version: &ModelVersionInfo,
+        overlay: Option<WeightOverlay>,
     ) -> QuantResult<Box<dyn QuantModelRuntime>> {
         let recorded = &model_version.artifact_hash;
         let key = ModelArtifact::artifact_key(recorded)?;
@@ -149,8 +151,11 @@ impl ModelRuntimeFactory for DefaultModelRuntimeFactory {
         self.verify_header(artifact.header(), model_version)?;
 
         match artifact {
+            // The overlay (a weighted factor-weight override) is honoured only by
+            // the weighted family; classical models score on a feature matrix and
+            // ignore it.
             ModelArtifact::WeightedFactor(weighted) => {
-                Ok(Box::new(WeightedFactorRuntime::new(*weighted)?))
+                Ok(Box::new(WeightedFactorRuntime::new(*weighted, overlay)?))
             }
             ModelArtifact::Classical(classical) => self.load_classical(*classical).await,
         }
@@ -292,7 +297,7 @@ mod tests {
         let factory =
             DefaultModelRuntimeFactory::new(Arc::clone(&store), binding(feature_hash.clone()));
         let runtime = factory
-            .load(&version_info(&version, digest))
+            .load(&version_info(&version, digest), None)
             .await
             .expect("load");
         assert_eq!(runtime.feature_schema_hash(), feature_hash);
@@ -324,7 +329,7 @@ mod tests {
             .expect("put");
 
         let factory = DefaultModelRuntimeFactory::new(Arc::clone(&store), binding(feature_hash));
-        let Err(err) = factory.load(&version_info(&version, wrong)).await else {
+        let Err(err) = factory.load(&version_info(&version, wrong), None).await else {
             panic!("hash mismatch must be rejected");
         };
         assert!(err.to_string().contains("artifact hash mismatch"));
@@ -345,7 +350,7 @@ mod tests {
         // Active schema differs from what the artifact was built against.
         let factory =
             DefaultModelRuntimeFactory::new(Arc::clone(&store), binding(hash("active_feat")));
-        let Err(err) = factory.load(&version_info(&version, digest)).await else {
+        let Err(err) = factory.load(&version_info(&version, digest), None).await else {
             panic!("schema mismatch must be rejected");
         };
         assert!(err.to_string().contains("feature schema hash mismatch"));

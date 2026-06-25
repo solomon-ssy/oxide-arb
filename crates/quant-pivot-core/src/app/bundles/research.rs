@@ -2,6 +2,7 @@
 
 use super::{DataBundle, GovernanceBundle, InfraBundle};
 use crate::{
+    governance::{ModelGovernanceDeps, ModelGovernanceService},
     pipeline::{
         feature_window_provider::FeatureWindowProvider,
         market_candidate_provider::MarketCandidateProvider,
@@ -9,7 +10,7 @@ use crate::{
     service::{
         factor_pipeline::FactorPipelineService,
         feature_pipeline::FeaturePipelineService,
-        model_runner::{DispatcherAlertSink, ModelRunner},
+        model_runner::{DispatcherAlertSink, ModelRunner, ModelRunnerDeps},
         training_dataset::{
             TrainingDatasetBuildConfig, TrainingDatasetService, TrainingDatasetServiceDeps,
             default_labelers,
@@ -17,22 +18,28 @@ use crate::{
     },
 };
 use quant_pivot_error::QuantResult;
+use quant_pivot_models::domain::ModelGovernancePort;
 use quant_pivot_models::{
     config::DeployConfig,
+    domain::RuntimeConfigPort,
     runtime_config::{DataQualityConfig, FactorsConfig, FeaturesConfig, TrainingConfig},
 };
 use quant_pivot_repository::{
     postgres::{
         PgBacktestReportRepository, PgFactorRepository, PgFeatureRepository,
-        PgMarketSelectionRepository, PgModelComparisonReportRepository, PgModelRegistryRepository,
-        PgModelRunRepository, PgTrainingDatasetRepository,
+        PgMarketSelectionRepository, PgModelComparisonReportRepository,
+        PgModelGovernanceAuditRepository, PgModelRegistryRepository, PgModelRunRepository,
+        PgRuntimeConfigVersionRepository, PgShadowComparisonRepository,
+        PgTrainingDatasetRepository,
     },
     traits::{
         BacktestReportRepository, FactorRepository, FeatureRepository, MarketRepository,
-        MarketSelectionRepository, ModelComparisonReportRepository, ModelRegistryRepository,
-        ModelRunRepository, QuantFactReadRepository, TrainingDatasetRepository,
+        MarketSelectionRepository, ModelComparisonReportRepository, ModelGovernanceAuditRepository,
+        ModelRegistryRepository, ModelRunRepository, QuantFactReadRepository,
+        RuntimeConfigVersionRepository, ShadowComparisonRepository, TrainingDatasetRepository,
     },
 };
+use quant_pivot_research::gates::{DefaultModelQualityGate, ModelQualityGate};
 use quant_pivot_research::{
     artifact::{ArtifactStore, LocalArtifactStore},
     model::{DefaultModelRuntimeFactoryBuilder, ModelRuntimeFactoryBuilder},
@@ -82,6 +89,12 @@ pub struct ResearchBundle {
     pub backtest_report_repo: Arc<dyn BacktestReportRepository>,
     /// Append-only pairwise comparison-report ledger persistence (3.6 §5.6).
     pub comparison_report_repo: Arc<dyn ModelComparisonReportRepository>,
+    /// Append-only shadow-comparison ledger persistence (3.7).
+    pub shadow_comparison_repo: Arc<dyn ShadowComparisonRepository>,
+    /// Append-only model-governance audit trail persistence (3.7).
+    pub governance_audit_repo: Arc<dyn ModelGovernanceAuditRepository>,
+    /// Offline governance orchestration: publish / rollback / dataset promotion (3.7).
+    pub model_governance: Arc<dyn ModelGovernancePort>,
     /// Schema-bound runtime factory builder (loads model artifacts) (3.4/3.6).
     pub model_runtime_factory_builder: Arc<dyn ModelRuntimeFactoryBuilder>,
     /// Historical fact read port (PIT book / microstructure / settlement) (3.5).
@@ -133,16 +146,24 @@ impl ResearchBundle {
         let model_runtime_factory_builder: Arc<dyn ModelRuntimeFactoryBuilder> = Arc::new(
             DefaultModelRuntimeFactoryBuilder::new(Arc::clone(&artifact_store)),
         );
-        let model_runner = Arc::new(ModelRunner::new(
-            Arc::clone(&model_run_repo),
-            Arc::clone(&model_registry_repo),
-            Arc::clone(&model_runtime_factory_builder),
-            Arc::clone(&factor_pipeline),
-            Arc::clone(&deps.infra.signal_candidate_event_writer),
-            Arc::new(DispatcherAlertSink::new(Arc::clone(
+        let shadow_comparison_repo: Arc<dyn ShadowComparisonRepository> = Arc::new(
+            PgShadowComparisonRepository::new(deps.infra.pg.connection().clone()),
+        );
+        let governance_audit_repo: Arc<dyn ModelGovernanceAuditRepository> = Arc::new(
+            PgModelGovernanceAuditRepository::new(deps.infra.pg.connection().clone()),
+        );
+        let model_runner = Arc::new(ModelRunner::new(ModelRunnerDeps {
+            model_run_repo: Arc::clone(&model_run_repo),
+            model_registry_repo: Arc::clone(&model_registry_repo),
+            shadow_comparison_repo: Arc::clone(&shadow_comparison_repo),
+            factory_builder: Arc::clone(&model_runtime_factory_builder),
+            factor_pipeline: Arc::clone(&factor_pipeline),
+            signal_writer: Arc::clone(&deps.infra.signal_candidate_event_writer),
+            alerts: Arc::new(DispatcherAlertSink::new(Arc::clone(
                 &deps.governance.alerts,
             ))),
-        ));
+            weight_overlay: Arc::clone(&deps.governance.weight_overlay),
+        }));
 
         let training_dataset_repo: Arc<dyn TrainingDatasetRepository> = Arc::new(
             PgTrainingDatasetRepository::new(deps.infra.pg.connection().clone()),
@@ -152,6 +173,15 @@ impl ResearchBundle {
         );
         let comparison_report_repo: Arc<dyn ModelComparisonReportRepository> = Arc::new(
             PgModelComparisonReportRepository::new(deps.infra.pg.connection().clone()),
+        );
+
+        let model_governance = Self::assemble_model_governance(
+            deps,
+            &model_registry_repo,
+            &backtest_report_repo,
+            &shadow_comparison_repo,
+            &governance_audit_repo,
+            &training_dataset_repo,
         );
 
         Self {
@@ -169,6 +199,9 @@ impl ResearchBundle {
             training_dataset_repo,
             backtest_report_repo,
             comparison_report_repo,
+            shadow_comparison_repo,
+            governance_audit_repo,
+            model_governance,
             model_runtime_factory_builder,
             quant_fact_read: Arc::clone(&deps.infra.quant_fact_read),
             market_repo: Arc::clone(&deps.data.market_repo),
@@ -201,5 +234,33 @@ impl ResearchBundle {
                 labelers: default_labelers(),
             },
         )
+    }
+
+    /// Wire offline publish / rollback / dataset-promotion governance (3.7).
+    fn assemble_model_governance(
+        deps: &ResearchBundleDeps<'_>,
+        model_registry_repo: &Arc<dyn ModelRegistryRepository>,
+        backtest_report_repo: &Arc<dyn BacktestReportRepository>,
+        shadow_comparison_repo: &Arc<dyn ShadowComparisonRepository>,
+        governance_audit_repo: &Arc<dyn ModelGovernanceAuditRepository>,
+        training_dataset_repo: &Arc<dyn TrainingDatasetRepository>,
+    ) -> Arc<dyn ModelGovernancePort> {
+        let gate: Arc<dyn ModelQualityGate> = Arc::new(DefaultModelQualityGate::new());
+        let runtime_config_repo: Arc<dyn RuntimeConfigVersionRepository> = Arc::new(
+            PgRuntimeConfigVersionRepository::new(deps.infra.pg.connection().clone()),
+        );
+        let runtime_config_apply: Arc<dyn RuntimeConfigPort> =
+            Arc::clone(&deps.governance.applicator) as Arc<dyn RuntimeConfigPort>;
+        Arc::new(ModelGovernanceService::new(ModelGovernanceDeps {
+            model_registry_repo: Arc::clone(model_registry_repo),
+            backtest_report_repo: Arc::clone(backtest_report_repo),
+            shadow_comparison_repo: Arc::clone(shadow_comparison_repo),
+            governance_audit_repo: Arc::clone(governance_audit_repo),
+            dataset_repo: Arc::clone(training_dataset_repo),
+            gate,
+            runtime_config: Arc::clone(&deps.governance.runtime_config),
+            runtime_config_apply,
+            runtime_config_repo,
+        }))
     }
 }

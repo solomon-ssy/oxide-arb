@@ -23,6 +23,7 @@ pub mod auth;
 pub mod config;
 pub mod config_validation;
 pub mod fee;
+pub mod governance;
 pub mod hashing;
 pub mod market;
 pub mod rbac;
@@ -94,6 +95,10 @@ pub enum QuantError {
     // ── Research plane ──────────────────────────────────────────────────
     #[error(transparent)]
     Research(#[from] research::ResearchError),
+
+    // ── Model governance (publish / rollback / dataset promotion) ───────
+    #[error(transparent)]
+    Governance(#[from] governance::GovernanceError),
 
     // ── Canonical hashing / content addressing ──────────────────────────
     #[error(transparent)]

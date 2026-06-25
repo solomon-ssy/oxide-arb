@@ -385,24 +385,27 @@ mod tests {
     }
 
     fn runtime() -> WeightedFactorRuntime {
-        WeightedFactorRuntime::new(WeightedFactorModelArtifact {
-            header: ModelArtifactHeader {
-                model_version_id: ModelVersionId::from_v7(),
-                model_family: ModelFamily::WeightedFactor,
-                feature_schema_hash: hash("aa"),
-                factor_schema_hash: hash("bb"),
+        WeightedFactorRuntime::new(
+            WeightedFactorModelArtifact {
+                header: ModelArtifactHeader {
+                    model_version_id: ModelVersionId::from_v7(),
+                    model_family: ModelFamily::WeightedFactor,
+                    feature_schema_hash: hash("aa"),
+                    factor_schema_hash: hash("bb"),
+                },
+                weights: vec![FactorWeight {
+                    factor: MOMENTUM,
+                    weight: dec!(1),
+                }],
+                prediction_horizon_secs: 86_400,
+                multipliers: ScoreMultiplierSpec::conservative(),
+                substitution_confidence_rules: SubstitutionConfidenceRules::conservative(),
+                return_model: ReturnModelSpec::heuristic_default(),
+                required_features: Vec::new(),
+                objective_report: None,
             },
-            weights: vec![FactorWeight {
-                factor: MOMENTUM,
-                weight: dec!(1),
-            }],
-            prediction_horizon_secs: 86_400,
-            multipliers: ScoreMultiplierSpec::conservative(),
-            substitution_confidence_rules: SubstitutionConfidenceRules::conservative(),
-            return_model: ReturnModelSpec::heuristic_default(),
-            required_features: Vec::new(),
-            objective_report: None,
-        })
+            None,
+        )
         .expect("runtime")
     }
 

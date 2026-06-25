@@ -37,6 +37,11 @@ impl RuntimeConfigStore {
         self.inner.load_full()
     }
 
+    /// Install a new active snapshot (used by [`RuntimeConfigPort`] implementations).
+    pub fn replace(&self, config: RuntimeConfig) {
+        self.inner.store(Arc::new(config));
+    }
+
     /// Swap the active snapshot. Crate-private: only the applicator writes.
     pub(crate) fn swap(&self, config: Arc<RuntimeConfig>) {
         self.inner.store(config);

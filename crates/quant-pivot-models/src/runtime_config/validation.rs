@@ -30,6 +30,7 @@ pub fn validate_runtime_config(config: &RuntimeConfig) -> ConfigValidationReport
     validate_features(config, &mut report);
     validate_factors(config, &mut report);
     validate_model(config, &mut report);
+    validate_quality_gate(config, &mut report);
     validate_training(config, &mut report);
     validate_reports(config, &mut report);
     validate_portfolio(config, &mut report);
@@ -185,6 +186,44 @@ fn validate_model(config: &RuntimeConfig, report: &mut ConfigValidationReport) {
     }
 }
 
+fn validate_quality_gate(config: &RuntimeConfig, report: &mut ConfigValidationReport) {
+    let gate = &config.quality_gate;
+    unit_ratio(
+        "quality_gate.min_label_coverage",
+        &gate.min_label_coverage,
+        report,
+    );
+    unit_ratio(
+        "quality_gate.min_critical_feature_coverage",
+        &gate.min_critical_feature_coverage,
+        report,
+    );
+    unit_ratio("quality_gate.max_drawdown", &gate.max_drawdown, report);
+    unit_ratio(
+        "quality_gate.min_liquidity_exit_feasibility",
+        &gate.min_liquidity_exit_feasibility,
+        report,
+    );
+    unit_ratio(
+        "quality_gate.min_shadow_overlap_stability",
+        &gate.min_shadow_overlap_stability,
+        report,
+    );
+    unit_ratio(
+        "quality_gate.max_category_concentration",
+        &gate.max_category_concentration,
+        report,
+    );
+    // rank IC is a correlation in [-1, 1]; only validate it parses.
+    decimal("quality_gate.min_rank_ic", &gate.min_rank_ic, report);
+    if gate.required_shadow_window_secs == 0 {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "quality_gate.required_shadow_window_secs",
+            detail: "must be greater than zero".to_owned(),
+        });
+    }
+}
+
 fn validate_training(config: &RuntimeConfig, report: &mut ConfigValidationReport) {
     decimal(
         "training.min_exit_depth_usd",
@@ -310,6 +349,21 @@ fn decimal(field: &'static str, value: &DecimalString, report: &mut ConfigValida
             field,
             detail: format!("`{}` is not a valid decimal string", value.value),
         });
+    }
+}
+
+/// Validate a `[0, 1]` ratio: parses as a decimal and lies within the unit range.
+fn unit_ratio(field: &'static str, value: &DecimalString, report: &mut ConfigValidationReport) {
+    match value.value.parse::<Decimal>() {
+        Ok(parsed) if (Decimal::ZERO..=Decimal::ONE).contains(&parsed) => {}
+        Ok(parsed) => report.errors.push(ConfigValidationError::InvalidValue {
+            field,
+            detail: format!("`{parsed}` must be within [0, 1]"),
+        }),
+        Err(_) => report.errors.push(ConfigValidationError::InvalidValue {
+            field,
+            detail: format!("`{}` is not a valid decimal string", value.value),
+        }),
     }
 }
 

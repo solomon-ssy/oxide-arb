@@ -24,7 +24,10 @@ use serde::{Deserialize, Serialize};
 use crate::{
     factors::{FactorName, FactorValue},
     features::{FeatureName, FeatureValue, SubstitutionAudit},
-    model::signal::SignalCandidate,
+    model::{
+        overlay::{WeightOverlay, WeightSource},
+        signal::SignalCandidate,
+    },
 };
 
 /// Concrete classical-ML model kind (smartcore-backed in 3.6).
@@ -314,18 +317,30 @@ pub trait QuantModelRuntime: Send + Sync {
     /// the model imposes no extra selection requirement.
     fn required_features(&self) -> Vec<FeatureName>;
 
+    /// Whether this runtime is scoring on its frozen artifact weights or on a
+    /// runtime-config weight overlay. Defaults to [`WeightSource::Artifact`];
+    /// only the weighted-factor runtime overrides it. Surfaced into the run
+    /// metrics for governance audit (3.7).
+    fn weight_source(&self) -> WeightSource {
+        WeightSource::Artifact
+    }
+
     /// Score a batch, producing candidates.
     async fn infer_batch(&self, input: ModelRuntimeInput) -> QuantResult<ModelRuntimeOutput>;
 }
 
-/// Loads a [`QuantModelRuntime`] from a published model version. The only place
-/// that reads artifact bytes and knows a concrete artifact type.
+/// Loads a [`QuantModelRuntime`] from a model version. The only place that reads
+/// artifact bytes and knows a concrete artifact type.
 #[async_trait]
 pub trait ModelRuntimeFactory: Send + Sync {
-    /// Load and validate the runtime for a model version (hash + schema checks).
+    /// Load and validate the runtime for a model version (hash + schema checks),
+    /// optionally applying a non-persisted [`WeightOverlay`] for a non-published
+    /// candidate / shadow version (3.7). `overlay` is honoured only by the
+    /// weighted-factor family; other families ignore it.
     async fn load(
         &self,
         model_version: &ModelVersionInfo,
+        overlay: Option<WeightOverlay>,
     ) -> QuantResult<Box<dyn QuantModelRuntime>>;
 }
 

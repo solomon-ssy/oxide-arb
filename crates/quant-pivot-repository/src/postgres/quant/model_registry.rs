@@ -11,7 +11,7 @@ use quant_pivot_models::{
 };
 use sea_orm::{
     ActiveModelTrait, ActiveValue, ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel,
-    PaginatorTrait, QueryFilter,
+    PaginatorTrait, QueryFilter, QueryOrder,
 };
 
 /// Postgres-backed model registry repository.
@@ -69,6 +69,23 @@ impl ModelRegistryRepository for PgModelRegistryRepository {
             .map(|row| row.map(Into::into))
     }
 
+    async fn list_published_for_spec(
+        &self,
+        model_spec_id: &ModelSpecId,
+    ) -> Result<Vec<ModelVersionInfo>, StorageError> {
+        quant_model_version::Entity::find()
+            .filter(quant_model_version::Column::ModelSpecId.eq(model_spec_id.clone()))
+            .filter(
+                quant_model_version::Column::PublicationStatus
+                    .eq(ModelPublicationStatus::Published),
+            )
+            .order_by_desc(quant_model_version::Column::PublishedAt)
+            .all(&self.db)
+            .await
+            .map_err(StorageError::from)
+            .map(|rows| rows.into_iter().map(Into::into).collect())
+    }
+
     async fn publish_model_version(
         &self,
         model_version_id: &ModelVersionId,
@@ -88,6 +105,49 @@ impl ModelRegistryRepository for PgModelRegistryRepository {
         update_model_version_status(&self.db, model_version_id, ModelPublicationStatus::Retired)
             .await
     }
+
+    async fn promote_model_to_shadow(
+        &self,
+        model_version_id: &ModelVersionId,
+    ) -> Result<ModelVersionInfo, StorageError> {
+        update_model_version_status(&self.db, model_version_id, ModelPublicationStatus::Shadow)
+            .await
+    }
+
+    async fn restore_model_version(
+        &self,
+        model_version_id: &ModelVersionId,
+    ) -> Result<ModelVersionInfo, StorageError> {
+        update_model_version_status(
+            &self.db,
+            model_version_id,
+            ModelPublicationStatus::Published,
+        )
+        .await
+    }
+
+    async fn set_quality_gate_report(
+        &self,
+        model_version_id: &ModelVersionId,
+        quality_gate_report: serde_json::Value,
+    ) -> Result<ModelVersionInfo, StorageError> {
+        let Some(row) = quant_model_version::Entity::find_by_id(model_version_id.clone())
+            .one(&self.db)
+            .await
+            .map_err(StorageError::from)?
+        else {
+            return Err(StorageError::Conflict(format!(
+                "model version not found: {model_version_id}"
+            )));
+        };
+        let mut active = row.into_active_model();
+        active.quality_gate_report = ActiveValue::Set(quality_gate_report);
+        active
+            .update(&self.db)
+            .await
+            .map_err(StorageError::from)
+            .map(Into::into)
+    }
 }
 
 async fn update_model_version_status(
@@ -104,28 +164,23 @@ async fn update_model_version_status(
             "model version not found: {model_version_id}"
         )));
     };
-    let valid = matches!(
-        (row.publication_status, next),
-        (
-            ModelPublicationStatus::Candidate | ModelPublicationStatus::Shadow,
-            ModelPublicationStatus::Published
-        ) | (
-            ModelPublicationStatus::Published,
-            ModelPublicationStatus::Retired
-        )
-    );
-    if !valid {
+    let from = row.publication_status;
+    if !from.allows_transition_to(next) {
         return Err(StorageError::Conflict(format!(
             "cannot transition model version {model_version_id} from {} to {}",
-            row.publication_status.as_str(),
+            from.as_str(),
             next.as_str()
         )));
+    }
+    if from == next {
+        return Ok(row.into());
     }
     let mut active = row.into_active_model();
     active.publication_status = ActiveValue::Set(next);
     match next {
         ModelPublicationStatus::Published => {
             active.published_at = ActiveValue::Set(Some(Utc::now()));
+            active.retired_at = ActiveValue::Set(None);
         }
         ModelPublicationStatus::Retired => {
             active.retired_at = ActiveValue::Set(Some(Utc::now()));

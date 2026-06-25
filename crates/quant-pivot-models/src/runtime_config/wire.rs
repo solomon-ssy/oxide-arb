@@ -1,5 +1,6 @@
 //! Shared wire types and nested policy documents for runtime config.
 
+use quant_pivot_error::QuantError;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -30,6 +31,21 @@ pub struct MarketIdList {
 #[schemars(transparent)]
 pub struct ModelVersionRef {
     pub id: String,
+}
+
+impl TryFrom<&ModelVersionRef> for crate::types::ModelVersionId {
+    type Error = QuantError;
+
+    fn try_from(reference: &ModelVersionRef) -> Result<Self, Self::Error> {
+        use std::str::FromStr;
+
+        Self::from_str(reference.id.trim()).map_err(|error| {
+            Self::Error::config(format!(
+                "invalid model_version_id `{}`: {error}",
+                reference.id
+            ))
+        })
+    }
 }
 
 /// Runtime-config feature-name reference (wire label for a governed feature).

@@ -19,7 +19,9 @@ pub use labeler::{
     LiquidityExitLabeler, MaxAdverseExcursionLabeler, MaxFavorableExcursionLabeler,
     ReturnToHorizonLabeler, SettlementOutcomeLabeler, label_names,
 };
-pub use leakage::assert_no_future_leakage;
+pub use leakage::{
+    LeakageFindings, LeakageViolation, assert_no_future_leakage, scan_future_leakage,
+};
 pub use matrix::{
     FeatureColumnSpec, FeatureMatrixSpec, MatrixCoverageProbe, MatrixScale, TrainingMatrix,
     build_training_matrix, probe_matrix_coverage,
@@ -278,6 +280,40 @@ pub struct DatasetCoverage {
     /// Optional training-matrix probe (diagnostic only; does not gate build).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub matrix_probe: Option<MatrixCoverageProbe>,
+}
+
+impl DatasetCoverage {
+    /// Fraction of label slots that resolved to a usable value, in `[0, 1]`.
+    ///
+    /// Denominator is every accounted label slot (`available + not_mature +
+    /// unavailable`); a dataset dominated by immature or unavailable labels has
+    /// low coverage and must not be promoted. Zero accounted labels ⇒ `0`
+    /// (fail-closed for the quality gate).
+    #[must_use]
+    pub fn label_coverage(&self) -> Decimal {
+        let total = self.labels_available + self.labels_not_mature + self.labels_unavailable;
+        if total == 0 {
+            return Decimal::ZERO;
+        }
+        (Decimal::from(self.labels_available) / Decimal::from(total))
+            .round_dp(crate::precision::RESEARCH_DECIMAL_SCALE)
+    }
+
+    /// Fraction of planned samples that materialized into examples, in `[0, 1]`.
+    ///
+    /// A proxy for critical-feature availability: a sample is dropped
+    /// (`samples_dropped_insufficient`) or never built (book decode failure)
+    /// when its critical feature inputs are missing, so a high build ratio means
+    /// the critical feature plane was present for almost every instant. Zero
+    /// planned samples ⇒ `0` (fail-closed).
+    #[must_use]
+    pub fn feature_build_coverage(&self) -> Decimal {
+        if self.planned_samples == 0 {
+            return Decimal::ZERO;
+        }
+        (Decimal::from(self.built_examples) / Decimal::from(self.planned_samples))
+            .round_dp(crate::precision::RESEARCH_DECIMAL_SCALE)
+    }
 }
 
 /// A frozen, content-addressed training dataset artifact.

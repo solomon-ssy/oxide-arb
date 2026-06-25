@@ -1,6 +1,7 @@
 //! Runtime-config activation applicator — Phase 0 minimal propagation.
 
 use crate::{
+    governance::WeightOverlayApplicator,
     observability::metrics_hub::MetricsHub,
     pipeline::{
         data_quality::BookDataQualityService, market_cache::MarketCache,
@@ -23,6 +24,8 @@ pub struct RuntimeConfigSubscribers {
     pub ws_subscription: Option<Arc<WsSubscriptionCoordinator>>,
     pub data_quality: Arc<BookDataQualityService>,
     pub metrics: Arc<MetricsHub>,
+    /// Candidate / shadow factor-weight overlay snapshot (3.7 hot-update).
+    pub weight_overlay: Arc<WeightOverlayApplicator>,
     /// Deploy-time WS subscription look-ahead (hours); not yet runtime-config v3.
     pub subscription_window_hours: u64,
 }
@@ -56,6 +59,7 @@ impl RuntimeConfigApplicator {
             .reload(&config.selection.enabled_categories);
         subs.market_cache.rebuild();
         subs.data_quality.reload(&config.data_quality);
+        subs.weight_overlay.reload(&config.factors, &config.model);
         if let Some(ws) = &subs.ws_subscription {
             let _ = ws.sync_subscription(
                 subs.market_registry.as_ref(),

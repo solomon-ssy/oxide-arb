@@ -2,7 +2,9 @@
 
 use super::{DataBundle, InfraBundle};
 use crate::{
-    governance::{RuntimeModeHandle, runtime_control::QuantRuntimeControl},
+    governance::{
+        RuntimeModeHandle, WeightOverlayApplicator, runtime_control::QuantRuntimeControl,
+    },
     infra::health_checker::{HealthChecker, HealthCheckerDeps},
     observability::{alert_dispatcher::AlertDispatcher, metrics_hub::MetricsHub},
     runtime_config::{RuntimeConfigApplicator, RuntimeConfigStore, RuntimeConfigSubscribers},
@@ -75,6 +77,8 @@ pub struct GovernanceBundle {
     pub alerts: Arc<AlertDispatcher>,
     pub health_checker: Arc<HealthChecker>,
     pub runtime_control: Arc<dyn RuntimeControlPort>,
+    /// Candidate / shadow factor-weight overlay snapshot, reloaded on activation.
+    pub weight_overlay: Arc<WeightOverlayApplicator>,
 }
 
 impl GovernanceBundle {
@@ -94,6 +98,14 @@ impl GovernanceBundle {
             alerts,
         } = runtime;
 
+        let weight_overlay = Arc::new(WeightOverlayApplicator::new());
+        // Seed the overlay from the active config so a non-published candidate /
+        // shadow runs under its configured weights before the first re-activation.
+        weight_overlay.reload(
+            &runtime_config.current().factors,
+            &runtime_config.current().model,
+        );
+
         let applicator = Arc::new(RuntimeConfigApplicator::new(
             Arc::clone(&runtime_config),
             RuntimeConfigSubscribers {
@@ -103,6 +115,7 @@ impl GovernanceBundle {
                 ws_subscription: Some(Arc::clone(&data.ws_subscription)),
                 data_quality: Arc::clone(&data.data_quality),
                 metrics: Arc::clone(metrics),
+                weight_overlay: Arc::clone(&weight_overlay),
                 subscription_window_hours: deploy
                     .market_data
                     .websocket
@@ -131,6 +144,7 @@ impl GovernanceBundle {
             alerts,
             health_checker,
             runtime_control,
+            weight_overlay,
         }
     }
 }

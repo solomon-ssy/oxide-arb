@@ -25,6 +25,14 @@ pub trait ModelRegistryRepository: Send + Sync {
         model_version_id: &ModelVersionId,
     ) -> Result<Option<ModelVersionInfo>, StorageError>;
 
+    /// All currently `Published` versions of a spec, most recent first. Used by
+    /// the governance layer to capture a rollback target when publishing and to
+    /// resolve the restored version on rollback.
+    async fn list_published_for_spec(
+        &self,
+        model_spec_id: &ModelSpecId,
+    ) -> Result<Vec<ModelVersionInfo>, StorageError>;
+
     async fn publish_model_version(
         &self,
         model_version_id: &ModelVersionId,
@@ -33,5 +41,31 @@ pub trait ModelRegistryRepository: Send + Sync {
     async fn retire_model_version(
         &self,
         model_version_id: &ModelVersionId,
+    ) -> Result<ModelVersionInfo, StorageError>;
+
+    /// Promote a backtested candidate into shadow evaluation (`Candidate → Shadow`).
+    ///
+    /// Idempotent when the version is already `Shadow` or `Published`.
+    async fn promote_model_to_shadow(
+        &self,
+        model_version_id: &ModelVersionId,
+    ) -> Result<ModelVersionInfo, StorageError>;
+
+    /// Restore a retired production version (`Retired → Published`) during rollback.
+    ///
+    /// Governance-only transition: re-publishes the rollback target without a new
+    /// artifact hash.
+    async fn restore_model_version(
+        &self,
+        model_version_id: &ModelVersionId,
+    ) -> Result<ModelVersionInfo, StorageError>;
+
+    /// Persist a model version's quality-gate report JSON (the governance layer
+    /// writes the gate decision into `quant_model_version.quality_gate_report`
+    /// before publishing). Does not change the publication status.
+    async fn set_quality_gate_report(
+        &self,
+        model_version_id: &ModelVersionId,
+        quality_gate_report: serde_json::Value,
     ) -> Result<ModelVersionInfo, StorageError>;
 }

@@ -34,14 +34,11 @@ use crate::{
     extractors::{AuthedActor, ValidatedJson},
     jwt::TokenType,
     response::WebResponse,
-    routes::{
-        registry::{RouteSpec, spec},
-        version::ApiV1Guard,
-    },
+    routes::registry::{RouteSpec, spec},
     state::AppState,
 };
 
-/// Protected auth routes (login/refresh are public and registered separately).
+/// Protected auth routes (login/refresh are public and registered in [`super::configure`]).
 pub(crate) fn route_specs() -> Vec<RouteSpec> {
     vec![
         spec(
@@ -194,11 +191,4 @@ fn dummy_hash() -> &'static str {
             .expect("argon2id hashing of a static string must not fail")
     })
     .as_str()
-}
-
-/// Register unauthenticated auth routes under the v1 scope.
-pub fn configure_public(cfg: &mut actix_web::web::ServiceConfig) {
-    use actix_web::web;
-    cfg.route("/auth/login", web::post().to(login).guard(ApiV1Guard))
-        .route("/auth/refresh", web::post().to(refresh).guard(ApiV1Guard));
 }

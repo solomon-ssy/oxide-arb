@@ -41,6 +41,7 @@ use crate::{
     features::FeatureName,
     model::{
         artifact::WeightedFactorModelArtifact,
+        overlay::{WeightOverlay, WeightSource},
         runtime::{
             FactorInferenceRow, FactorInferenceTable, MarketInferenceContext, ModelFamily,
             ModelRuntimeInput, ModelRuntimeMetrics, ModelRuntimeOutput, QuantModelRuntime,
@@ -60,23 +61,44 @@ pub struct WeightedFactorRuntime {
     artifact: WeightedFactorModelArtifact,
     weights: BTreeMap<FactorName, Decimal>,
     batch_layout: ScoringBatchLayout,
+    weight_source: WeightSource,
 }
 
 impl WeightedFactorRuntime {
-    /// Build a runtime from a validated weighted artifact.
+    /// Build a runtime from a validated weighted artifact, optionally applying a
+    /// non-persisted [`WeightOverlay`] over a non-published candidate / shadow
+    /// version.
+    ///
+    /// When `overlay` is `Some`, it **replaces** the artifact's weight table
+    /// (fail-closed: it must cover exactly the artifact's factor set) and the
+    /// runtime records [`WeightSource::ConfigOverlay`]. The overlay never alters
+    /// the artifact bytes or its content hash. When `None`, the frozen artifact
+    /// weights are used ([`WeightSource::Artifact`]).
     ///
     /// # Errors
     ///
     /// Propagates [`WeightedFactorModelArtifact::validate`] (unnormalized or
-    /// negative weights, empty weight set).
-    pub fn new(artifact: WeightedFactorModelArtifact) -> QuantResult<Self> {
+    /// negative weights, empty weight set) and overlay resolution (unknown or
+    /// missing factor).
+    pub fn new(
+        artifact: WeightedFactorModelArtifact,
+        overlay: Option<WeightOverlay>,
+    ) -> QuantResult<Self> {
         artifact.validate()?;
-        let weights = artifact.weight_index();
+        let artifact_weights = artifact.weight_index();
+        let (weights, weight_source) = match overlay {
+            Some(overlay) => (
+                overlay.resolve_against(&artifact_weights)?,
+                WeightSource::ConfigOverlay,
+            ),
+            None => (artifact_weights, WeightSource::Artifact),
+        };
         let batch_layout = ScoringBatchLayout::from_weights(&weights);
         Ok(Self {
             artifact,
             weights,
             batch_layout,
+            weight_source,
         })
     }
 
@@ -261,6 +283,10 @@ impl QuantModelRuntime for WeightedFactorRuntime {
 
     fn required_features(&self) -> Vec<FeatureName> {
         self.artifact.required_features.clone()
+    }
+
+    fn weight_source(&self) -> WeightSource {
+        self.weight_source
     }
 
     async fn infer_batch(&self, input: ModelRuntimeInput) -> QuantResult<ModelRuntimeOutput> {
@@ -491,7 +517,7 @@ mod tests {
 
     #[tokio::test]
     async fn weighted_runtime_scores_candidates_from_factor_table() {
-        let runtime = WeightedFactorRuntime::new(artifact()).expect("runtime");
+        let runtime = WeightedFactorRuntime::new(artifact(), None).expect("runtime");
         let table = FactorInferenceTable {
             model_run_id: ModelRunId::from_v7(),
             as_of: Utc::now(),
@@ -526,7 +552,7 @@ mod tests {
 
     #[tokio::test]
     async fn neutral_factors_emit_no_candidate() {
-        let runtime = WeightedFactorRuntime::new(artifact()).expect("runtime");
+        let runtime = WeightedFactorRuntime::new(artifact(), None).expect("runtime");
         let neutral_row = FactorInferenceRow {
             market_id: MarketId::new("0xflat"),
             token_id: TokenId::new("yes"),

@@ -16,6 +16,7 @@ pub mod degrade;
 pub mod factory;
 #[cfg(feature = "optimize")]
 pub mod optimize;
+pub mod overlay;
 pub mod runtime;
 pub mod signal;
 pub mod trainer;
@@ -45,6 +46,7 @@ pub use factory::{
     ActiveSchemaBinding, DefaultModelRuntimeFactory, DefaultModelRuntimeFactoryBuilder,
     ModelRuntimeFactoryBuilder,
 };
+pub use overlay::{WeightOverlay, WeightSource};
 pub use runtime::{
     ClassicalKind, FactorInferenceRow, FactorInferenceTable, InferenceMatrix, InferenceMatrixRow,
     MarketInferenceContext, ModelFamily, ModelRuntimeFactory, ModelRuntimeInput,

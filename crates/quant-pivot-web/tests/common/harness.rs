@@ -24,10 +24,11 @@ use quant_pivot_models::{
     domain::{
         BacktestPort, BacktestReportInfo, BacktestReportView, BookSnapshot,
         BuildTrainingDatasetRequest, CatalogState, CatalogStatusPort, CoreEventPublisher,
-        DataQualityPort, DataQualitySnapshot, HealthReport, MarketDataPort, MetricsScrapePort,
-        ModelComparisonReportInfo, ModelTrainingPort, ModelVersionInfo, QuantModeTransitionReport,
-        RunBacktestRequest, RuntimeConfigPort, RuntimeControlError, RuntimeControlPort,
-        SystemStatus, TrainModelRequest, TrainedModelView, TrainingDatasetInfo,
+        DataQualityPort, DataQualitySnapshot, GovernanceActor, HealthReport, MarketDataPort,
+        MetricsScrapePort, ModelComparisonReportInfo, ModelGovernancePort, ModelTrainingPort,
+        ModelVersionInfo, PromoteDatasetRequest, PublishModelCommand, QuantModeTransitionReport,
+        RollbackModelCommand, RunBacktestRequest, RuntimeConfigPort, RuntimeControlError,
+        RuntimeControlPort, SystemStatus, TrainModelRequest, TrainedModelView, TrainingDatasetInfo,
         TrainingDatasetPlanView, TrainingDatasetPort, TrainingDatasetView,
     },
     enums::quant::QuantRuntimeMode,
@@ -162,6 +163,7 @@ impl TestEnv {
             training_datasets: Arc::new(MockTrainingDatasetPort),
             model_training: Arc::new(MockModelTrainingPort),
             backtests: Arc::new(MockBacktestPort),
+            model_governance: Arc::new(MockModelGovernancePort),
         };
 
         Self {
@@ -237,20 +239,32 @@ pub async fn call(state: &AppState, request: TestRequest) -> HttpResponse {
     let app = test::init_service(
         App::new()
             .app_data(web::Data::new(state.clone()))
+            .wrap(from_fn(middleware::operation_audit))
             .wrap(from_fn(middleware::request_id))
             .configure(routes::configure),
     )
     .await;
 
-    let resp = test::call_service(&app, request.to_request()).await;
-    let status = resp.status();
-    let headers = resp.headers().clone();
-    let bytes = to_bytes(resp.into_body()).await.unwrap_or_default();
-    let body = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    let resp = match test::try_call_service(&app, request.to_request()).await {
+        Ok(resp) => {
+            let status = resp.status();
+            let headers = resp.headers().clone();
+            let bytes = to_bytes(resp.into_body()).await.unwrap_or_default();
+            (status, headers, bytes)
+        }
+        Err(err) => {
+            let resp = err.error_response();
+            let status = resp.status();
+            let headers = resp.headers().clone();
+            let bytes = to_bytes(resp.into_body()).await.unwrap_or_default();
+            (status, headers, bytes)
+        }
+    };
+    let body = serde_json::from_slice(&resp.2).unwrap_or(Value::Null);
     HttpResponse {
-        status,
-        headers,
-        raw_body: bytes.to_vec(),
+        status: resp.0,
+        headers: resp.1,
+        raw_body: resp.2.to_vec(),
         body,
     }
 }
@@ -410,6 +424,36 @@ impl BacktestPort for MockBacktestPort {
         _comparison_report_id: &ModelComparisonReportId,
     ) -> QuantResult<Option<ModelComparisonReportInfo>> {
         Ok(None)
+    }
+}
+
+/// No-op model-governance port for web integration tests.
+pub struct MockModelGovernancePort;
+
+#[async_trait]
+impl ModelGovernancePort for MockModelGovernancePort {
+    async fn publish(
+        &self,
+        _command: PublishModelCommand,
+        _actor: GovernanceActor,
+    ) -> QuantResult<ModelVersionInfo> {
+        Err(QuantError::NotImplemented("model publish".into()))
+    }
+
+    async fn rollback(
+        &self,
+        _command: RollbackModelCommand,
+        _actor: GovernanceActor,
+    ) -> QuantResult<ModelVersionInfo> {
+        Err(QuantError::NotImplemented("model rollback".into()))
+    }
+
+    async fn promote_dataset_ready(
+        &self,
+        _request: PromoteDatasetRequest,
+        _actor: GovernanceActor,
+    ) -> QuantResult<TrainingDatasetInfo> {
+        Err(QuantError::NotImplemented("dataset promote".into()))
     }
 }
 

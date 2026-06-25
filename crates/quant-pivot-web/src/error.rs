@@ -17,7 +17,8 @@
 
 use actix_web::{HttpResponse, ResponseError, http::StatusCode};
 use quant_pivot_error::{
-    QuantError, auth::AuthError, rbac::RbacError, research::ResearchError, storage::StorageError,
+    QuantError, auth::AuthError, governance::GovernanceError, rbac::RbacError,
+    research::ResearchError, storage::StorageError,
 };
 use quant_pivot_models::domain::{RuntimeControlError, WindowQueryError};
 use thiserror::Error;
@@ -187,7 +188,21 @@ impl From<QuantError> for WebError {
                 | ResearchError::DatasetBuild { detail },
             ) => Self::BadRequest(detail),
             QuantError::Config(_) => Self::BadRequest(error.to_string()),
+            QuantError::Governance(governance) => governance.into(),
             other => Self::Internal(other.to_string()),
+        }
+    }
+}
+
+impl From<GovernanceError> for WebError {
+    fn from(error: GovernanceError) -> Self {
+        match error {
+            GovernanceError::NotFound { entity, id } => {
+                Self::NotFound(format!("{entity} not found: {id}"))
+            }
+            GovernanceError::QualityGateFailed { .. }
+            | GovernanceError::ShadowNotStable { .. }
+            | GovernanceError::IllegalTransition { .. } => Self::Conflict(error.to_string()),
         }
     }
 }

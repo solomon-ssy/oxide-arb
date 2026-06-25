@@ -3,46 +3,129 @@
 //! A training feature must never observe state newer than `as_of - source_delay`.
 //! (Labels look strictly forward of `as_of` by design; their forward reads are
 //! validated by labeler maturity, not here — only feature provenance is checked.)
+//!
+//! Two surfaces over the same scan:
+//!
+//! - [`scan_future_leakage`] returns **structured** [`LeakageFindings`] (every
+//!   violation, with provenance), which the 3.7 quality gate consumes as a hard
+//!   gate input without aborting.
+//! - [`assert_no_future_leakage`] is the dataset-build / trainer hard guard: it
+//!   runs the same scan and turns any violation into
+//!   [`ResearchError::LeakageDetected`], so a leaking artifact is never persisted.
 
-use chrono::Duration;
+use chrono::{DateTime, Duration, Utc};
 use quant_pivot_error::{QuantResult, research::ResearchError};
+use quant_pivot_models::types::{MarketId, TokenId};
+use serde::{Deserialize, Serialize};
 
 use super::TrainingExample;
 
-/// Assert that no example's feature provenance leaks future state.
+/// One future-leakage violation: a feature evidence reference observed after the
+/// point-in-time cutoff `as_of - source_delay`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LeakageViolation {
+    /// Market the leaking example describes.
+    pub market_id: MarketId,
+    /// Outcome token the leaking example describes.
+    pub token_id: TokenId,
+    /// Decision time the example was computed as of.
+    pub as_of: DateTime<Utc>,
+    /// Point-in-time cutoff (`as_of - source_delay`) the evidence violated.
+    pub cutoff: DateTime<Utc>,
+    /// The offending evidence reference.
+    pub reference: String,
+    /// When the offending evidence was observed (strictly after `cutoff`).
+    pub observed_at: DateTime<Utc>,
+}
+
+/// Structured result of a future-leakage scan over a dataset's examples.
+///
+/// `Serialize` so the quality gate can fold it into the persisted
+/// `QualityGateReport`. A clean dataset has zero violations.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LeakageFindings {
+    /// Number of evidence references inspected.
+    pub scanned: u64,
+    /// Every violation found (empty ⇒ point-in-time clean).
+    pub violations: Vec<LeakageViolation>,
+}
+
+impl LeakageFindings {
+    /// Whether the scan found no future-dated feature evidence.
+    #[must_use]
+    pub fn is_clean(&self) -> bool {
+        self.violations.is_empty()
+    }
+
+    /// Number of violations found.
+    #[must_use]
+    pub fn violation_count(&self) -> u64 {
+        u64::try_from(self.violations.len()).unwrap_or(u64::MAX)
+    }
+}
+
+/// Scan every example's feature provenance for future leakage, collecting all
+/// violations (non-aborting).
 ///
 /// Each [`TrainingExample::source_refs`] entry (feature evidence) must have been
-/// observed at or before the PIT cutoff `as_of - source_delay`. The first
-/// violation aborts the whole dataset with [`ResearchError::LeakageDetected`];
-/// the artifact must never be persisted.
+/// observed at or before the PIT cutoff `as_of - source_delay`. Unlike
+/// [`assert_no_future_leakage`], this records every violation rather than
+/// aborting on the first, so the quality gate can report the full picture.
+#[must_use]
+pub fn scan_future_leakage(
+    examples: &[TrainingExample],
+    source_delay_secs: u64,
+) -> LeakageFindings {
+    let delay = Duration::seconds(i64::try_from(source_delay_secs).unwrap_or(i64::MAX));
+    let mut findings = LeakageFindings::default();
+    for example in examples {
+        let cutoff = example.as_of - delay;
+        for source in &example.source_refs {
+            findings.scanned = findings.scanned.saturating_add(1);
+            if source.observed_at > cutoff {
+                findings.violations.push(LeakageViolation {
+                    market_id: example.market_id.clone(),
+                    token_id: example.token_id.clone(),
+                    as_of: example.as_of,
+                    cutoff,
+                    reference: source.reference.clone(),
+                    observed_at: source.observed_at,
+                });
+            }
+        }
+    }
+    findings
+}
+
+/// Assert that no example's feature provenance leaks future state.
+///
+/// Runs [`scan_future_leakage`] and turns any violation into
+/// [`ResearchError::LeakageDetected`]; the dataset / trained artifact must never
+/// be persisted when this fails.
 ///
 /// # Errors
 ///
-/// Returns [`ResearchError::LeakageDetected`] on the first future-dated feature
-/// evidence.
+/// Returns [`ResearchError::LeakageDetected`] when any feature evidence is dated
+/// after its point-in-time cutoff.
 pub fn assert_no_future_leakage(
     examples: &[TrainingExample],
     source_delay_secs: u64,
 ) -> QuantResult<()> {
-    let delay = Duration::seconds(i64::try_from(source_delay_secs).unwrap_or(i64::MAX));
-    for example in examples {
-        let cutoff = example.as_of - delay;
-        for source in &example.source_refs {
-            if source.observed_at > cutoff {
-                return Err(ResearchError::LeakageDetected {
-                    detail: format!(
-                        "market {} token {} as_of {} source `{}` observed_at {} > cutoff {}",
-                        example.market_id,
-                        example.token_id,
-                        example.as_of,
-                        source.reference,
-                        source.observed_at,
-                        cutoff,
-                    ),
-                }
-                .into());
-            }
+    let findings = scan_future_leakage(examples, source_delay_secs);
+    if let Some(first) = findings.violations.first() {
+        return Err(ResearchError::LeakageDetected {
+            detail: format!(
+                "market {} token {} as_of {} source `{}` observed_at {} > cutoff {} ({} total violations)",
+                first.market_id,
+                first.token_id,
+                first.as_of,
+                first.reference,
+                first.observed_at,
+                first.cutoff,
+                findings.violations.len(),
+            ),
         }
+        .into());
     }
     Ok(())
 }
@@ -99,5 +182,22 @@ mod tests {
         // Evidence observed 5s after as_of with zero source delay → leakage.
         let examples = vec![example(5)];
         assert!(assert_no_future_leakage(&examples, 0).is_err());
+    }
+
+    #[test]
+    fn scan_collects_every_violation_without_aborting() {
+        let findings = scan_future_leakage(&[example(5), example(-5), example(10)], 0);
+        assert_eq!(findings.scanned, 3);
+        assert_eq!(findings.violation_count(), 2);
+        assert!(!findings.is_clean());
+        // Provenance is carried for the gate report.
+        assert!(findings.violations[0].observed_at > findings.violations[0].cutoff);
+    }
+
+    #[test]
+    fn scan_clean_dataset_has_no_violations() {
+        let findings = scan_future_leakage(&[example(-5), example(-1)], 0);
+        assert!(findings.is_clean());
+        assert_eq!(findings.scanned, 2);
     }
 }

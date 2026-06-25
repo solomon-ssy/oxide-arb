@@ -6,8 +6,8 @@ use quant_pivot_models::{
     config::DeployConfig,
     domain::{
         BacktestPort, CatalogStatusPort, CoreEventPublisher, DataQualityPort, MarketDataPort,
-        MetricsScrapePort, ModelTrainingPort, ReadinessPort, RuntimeConfigPort, RuntimeControlPort,
-        TrainingDatasetPort,
+        MetricsScrapePort, ModelGovernancePort, ModelTrainingPort, ReadinessPort,
+        RuntimeConfigPort, RuntimeControlPort, TrainingDatasetPort,
     },
 };
 use quant_pivot_repository::traits::{
@@ -56,4 +56,6 @@ pub struct AppState {
     pub model_training: Arc<dyn ModelTrainingPort>,
     /// Offline PIT backtests (Phase 3.6 Admin API).
     pub backtests: Arc<dyn BacktestPort>,
+    /// Model publish / rollback governance (Phase 3.7 Admin API).
+    pub model_governance: Arc<dyn ModelGovernancePort>,
 }

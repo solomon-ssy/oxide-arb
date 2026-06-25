@@ -41,6 +41,8 @@ pub struct RuntimeConfig {
     pub factors: FactorsConfig,
     /// Active and shadow model references.
     pub model: ModelConfig,
+    /// Governed quality-gate thresholds (model publication / dataset promotion).
+    pub quality_gate: QualityGateConfig,
     /// Offline training-dataset build parameters.
     pub training: TrainingConfig,
     /// Report schedules and payload sizing.
@@ -62,6 +64,7 @@ impl Default for RuntimeConfig {
             features: FeaturesConfig::default(),
             factors: FactorsConfig::default(),
             model: ModelConfig::default(),
+            quality_gate: QualityGateConfig::default(),
             training: TrainingConfig::default(),
             reports: ReportsConfig::default(),
             portfolio: PortfolioConfig::default(),

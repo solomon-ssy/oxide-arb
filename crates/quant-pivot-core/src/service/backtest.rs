@@ -278,7 +278,8 @@ impl BacktestService {
             factor_schema_hash: dataset.factor_schema_hash.clone(),
         };
         let factory = self.deps.factory_builder.build(binding);
-        let model = factory.load(version).await?;
+        // Backtests are deterministic and never apply a config weight overlay.
+        let model = factory.load(version, None).await?;
 
         let ticks = self
             .build_replay_ticks(model.as_ref(), model_run_id, dataset)

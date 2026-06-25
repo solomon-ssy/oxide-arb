@@ -192,7 +192,17 @@ pub static RESOURCE_OPERATIONS: &[(ResourceType, &[Operation])] = &[
     (ResourceType::Pnl, &[Operation::Read]),
     (ResourceType::Risk, &[Operation::Read]),
     (ResourceType::Blacklist, &[Operation::Read]),
-    (ResourceType::Publication, &[Operation::Read]),
+    (
+        ResourceType::Publication,
+        &[
+            Operation::Read,
+            Operation::Reject,
+            Operation::Shadow,
+            Operation::Publish,
+            Operation::Rollback,
+            Operation::Emergency,
+        ],
+    ),
     (
         ResourceType::Materialization,
         &[Operation::Read, Operation::Create],

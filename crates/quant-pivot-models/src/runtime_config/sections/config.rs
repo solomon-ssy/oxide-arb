@@ -202,6 +202,52 @@ impl Default for ModelConfig {
     }
 }
 
+/// Governed quality-gate thresholds (Phase 3.7).
+///
+/// Hot-reloadable knobs consumed by the model quality gate and the publish /
+/// rollback / dataset-promotion governance. Decimal-valued thresholds are
+/// stored as [`DecimalString`] (lossless), matching every other money /
+/// probability config field; the core governance layer parses them into the
+/// research `QualityGateThresholds`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct QualityGateConfig {
+    /// Minimum resolved sample count for a model / dataset to clear the gate.
+    pub min_sample_count: u64,
+    /// Minimum label coverage in `[0, 1]`.
+    pub min_label_coverage: DecimalString,
+    /// Minimum critical-feature (build) coverage in `[0, 1]`.
+    pub min_critical_feature_coverage: DecimalString,
+    /// Maximum tolerated backtest drawdown in `[0, 1]`.
+    pub max_drawdown: DecimalString,
+    /// Minimum liquidity-exit feasibility in `[0, 1]` (auto-execution gate).
+    pub min_liquidity_exit_feasibility: DecimalString,
+    /// Minimum shadow overlap stability in `[0, 1]` (publish gate).
+    pub min_shadow_overlap_stability: DecimalString,
+    /// Minimum (soft) rank IC; `<=` raises a soft warning.
+    pub min_rank_ic: DecimalString,
+    /// Maximum (soft) per-category sample concentration in `[0, 1]`.
+    pub max_category_concentration: DecimalString,
+    /// Minimum shadow comparison window (seconds) required before publish.
+    pub required_shadow_window_secs: u64,
+}
+
+impl Default for QualityGateConfig {
+    fn default() -> Self {
+        Self {
+            min_sample_count: 500,
+            min_label_coverage: DecimalString::new("0.70"),
+            min_critical_feature_coverage: DecimalString::new("0.95"),
+            max_drawdown: DecimalString::new("0.30"),
+            min_liquidity_exit_feasibility: DecimalString::new("0.90"),
+            min_shadow_overlap_stability: DecimalString::new("0.60"),
+            min_rank_ic: DecimalString::new("0.00"),
+            max_category_concentration: DecimalString::new("0.60"),
+            required_shadow_window_secs: 86_400,
+        }
+    }
+}
+
 /// Offline training-dataset build parameters (Phase 3.5+).
 ///
 /// Distinct from online [`DataQualityConfig`]: historical PIT book lookup uses a

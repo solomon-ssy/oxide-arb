@@ -1,6 +1,13 @@
 //! Phase 0 bootstrap tests.
 
-use quant_pivot_models::{domain::SystemStatus, enums::quant::QuantRuntimeMode};
+use quant_pivot_core::{observability::metrics_hub::MetricsHub, pipeline::book_store::BookStore};
+use quant_pivot_models::{
+    domain::{SystemStatus, market::book::BookLevel},
+    enums::quant::QuantRuntimeMode,
+    types::{Price, Shares, TokenId},
+};
+use rust_decimal_macros::dec;
+use std::sync::Arc;
 
 #[test]
 fn report_only_bootstrap_status_uses_quant_runtime_mode() {
@@ -16,16 +23,6 @@ fn quant_runtime_mode_blocks_orders_in_report_only() {
 
 #[test]
 fn book_store_apply_snapshot_updates_published() {
-    use quant_pivot_core::{
-        observability::metrics_hub::MetricsHub, pipeline::book_store::BookStore,
-    };
-    use quant_pivot_models::{
-        domain::market::book::BookLevel,
-        types::{Price, Shares, TokenId},
-    };
-    use rust_decimal_macros::dec;
-    use std::sync::Arc;
-
     let store = BookStore::new(Arc::new(MetricsHub::new()));
     let token = TokenId::new("42");
     let bids = Arc::from([BookLevel::from_decimal_unchecked(

@@ -122,6 +122,10 @@ pub struct ModelComparisonReportId(Arc<Uuid>);
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ShadowComparisonId(Arc<Uuid>);
 
+/// Model-governance audit row identifier (publish / retire / rollback / promote).
+#[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ModelGovernanceAuditId(Arc<Uuid>);
+
 /// Portfolio plan identifier used by a recommendation report.
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PortfolioPlanId(Arc<Uuid>);

@@ -116,6 +116,7 @@ impl AppContext {
                 &self.research,
                 pg_arc_repo!(pg, PgRuntimeConfigVersionRepository),
             )),
+            model_governance: Arc::clone(&self.research.model_governance),
         };
 
         let web_config = self.config.web.clone();

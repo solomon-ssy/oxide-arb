@@ -35,12 +35,12 @@ const PRODUCES: &[SeedArtifact] = &[];
 
 pub const CASBIN_SEED: SeedSpec = SeedSpec {
     id: SEED_ID,
-    version: 4,
+    version: 5,
     target_table: casbin_rule_table_name,
     depends_on: DEPENDS_ON,
     produces: PRODUCES,
     conflict_policy: SeedConflictPolicy::GraphOrdered,
-    checksum: "rbac.casbin.bootstrap.v4",
+    checksum: "rbac.casbin.bootstrap.v5",
     loader: load_boxed,
 };
 
@@ -94,6 +94,8 @@ fn risk_owner_policies() -> Vec<(ResourceType, Operation)> {
         (ResourceType::Materialization, Operation::Create),
         (ResourceType::Replay, Operation::Read),
         (ResourceType::Replay, Operation::Create),
+        (ResourceType::Publication, Operation::Publish),
+        (ResourceType::Publication, Operation::Rollback),
     ]);
     policies
 }

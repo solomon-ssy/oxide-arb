@@ -121,6 +121,8 @@ mod tests {
             "quant_model_run",
             "quant_training_dataset",
             "quant_backtest_report",
+            "quant_shadow_comparison",
+            "quant_model_governance_audit",
             "quant_portfolio_plan",
             "quant_recommendation_report",
             "quant_recommendation",

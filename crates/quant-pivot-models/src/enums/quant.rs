@@ -166,6 +166,37 @@ active_string_enum! {
     }
 }
 
+impl ModelPublicationStatus {
+    /// Returns whether transitioning from `self` to `next` is allowed by the
+    /// model publication state machine.
+    #[must_use]
+    pub const fn allows_transition_to(self, next: Self) -> bool {
+        match self {
+            Self::Candidate | Self::Shadow => {
+                matches!(next, Self::Shadow | Self::Published)
+            }
+            Self::Published => matches!(next, Self::Published | Self::Retired),
+            Self::Retired => matches!(next, Self::Published),
+            Self::Draft | Self::Rejected => false,
+        }
+    }
+}
+
+active_string_enum! {
+    /// Model-governance action recorded in the `quant_model_governance_audit`
+    /// trail. Append-only wire labels — never rename an existing value.
+    pub enum ModelGovernanceAction {
+        /// A candidate / shadow version was published (gated).
+        Publish => "publish",
+        /// A published version was retired.
+        Retire => "retire",
+        /// A published version was rolled back to its predecessor.
+        Rollback => "rollback",
+        /// A built training dataset was promoted to `Ready` (gated).
+        DatasetReady => "dataset_ready",
+    }
+}
+
 active_string_enum! {
     /// Factor definition lifecycle.
     @derive(Default)
