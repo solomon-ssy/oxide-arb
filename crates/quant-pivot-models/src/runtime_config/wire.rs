@@ -129,36 +129,43 @@ pub enum DrawdownMultiplierPolicy {
     Conservative,
 }
 
-/// Position-sizing model selection for the portfolio planner.
+/// Fractional-Kelly position-sizing parameters for the portfolio planner.
 ///
-/// Tagged on `model`. Fractional Kelly is the production default; the
-/// confidence curve is a deterministic baseline / shadow.
+/// Kelly is the **only** sizing model: it is the single edge-driven optimal-growth
+/// sizer, and an edge-free confidence-to-size curve has no place in a capital
+/// system (it would deploy capital regardless of expected value). `confidence`
+/// is an evidence-quality measure, **not** a calibrated win probability, so it
+/// never stands in for `q`; `q` is derived from the candidate's expected return,
+/// downside, and target reward multiple, while `confidence` enters only as an
+/// estimation-uncertainty shrinkage on the Kelly fraction (`confidence_weighting`)
+/// — the production-standard mitigation for Kelly's sensitivity to edge
+/// mis-estimation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "model", rename_all = "snake_case")]
-pub enum SizingModelConfig {
-    /// Fractional Kelly sizing.
-    Kelly {
-        /// Fraction of full Kelly to apply, in `(0, 1]` (half-Kelly ≈ `0.5`).
-        kelly_fraction: DecimalString,
-        /// Maximum single-position size as a fraction of equity.
-        max_position_pct: DecimalString,
-        /// Drawdown-driven scaling policy.
-        drawdown_scaling: DrawdownMultiplierPolicy,
-    },
-    /// Deterministic confidence-to-size curve.
-    ConfidenceCurve {
-        /// Named confidence-to-size curve.
-        curve: ConfidenceSizeCurve,
-        /// Drawdown multiplier policy.
-        drawdown_multiplier: DrawdownMultiplierPolicy,
-    },
+#[serde(default, deny_unknown_fields)]
+pub struct SizingModelConfig {
+    /// Fraction of full Kelly to apply, in `(0, 1]` (half-Kelly ≈ `0.5`).
+    pub kelly_fraction: DecimalString,
+    /// Maximum single-position size as a fraction of equity (`(0, 1]`).
+    pub max_position_pct: DecimalString,
+    /// Target reward-to-risk multiple `R` (`> 0`): the target gain is
+    /// `R × downside`, fixing the binary bet structure so the win probability
+    /// `q = (E[r] + l) / (g + l)` is recoverable from the candidate's expected
+    /// return `E[r]` and downside `l`.
+    pub target_reward_multiple: DecimalString,
+    /// Confidence-driven shrinkage of the Kelly fraction (estimation
+    /// uncertainty): `confidence` high → near fractional Kelly, low → compressed.
+    pub confidence_weighting: ConfidenceSizeCurve,
+    /// Drawdown-driven scaling policy.
+    pub drawdown_scaling: DrawdownMultiplierPolicy,
 }
 
 impl Default for SizingModelConfig {
     fn default() -> Self {
-        Self::Kelly {
+        Self {
             kelly_fraction: DecimalString::new("0.5"),
             max_position_pct: DecimalString::new("0.1"),
+            target_reward_multiple: DecimalString::new("2.0"),
+            confidence_weighting: ConfidenceSizeCurve::Linear,
             drawdown_scaling: DrawdownMultiplierPolicy::Fixed,
         }
     }

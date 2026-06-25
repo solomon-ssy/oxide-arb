@@ -231,10 +231,19 @@ Trigger 类型：
 - `category_exposure_after_usd`
 - `binding_constraint`
 - `sizing_reason`
+- `sizing_model`（`kelly` / `confidence_curve`）
+- `edge_bps`（Kelly provenance；曲线模型 `None`）
+- `kelly_fraction_applied`（实际施加的分数乘子 = `kelly_fraction · confidence_shrink · drawdown_scale`）
+
+Sizing 模型：默认 **fractional Kelly**（详见 [04.1 §5.2](phase-04/04.1-portfolio-planner-and-sizing.md)）。
+胜率 `q` 由期望均值 `E[r]`、止损 `l`、目标倍数 `R` 反解（`q=(E[r]+l)/(R·l+l)`），`confidence`
+作 Kelly 分数的**估计不确定性收缩**（非胜率）；`ConfidenceCurve` 为 edge-free 基线 / shadow。
 
 Binding constraints：
 
 - `portfolio_budget`
+- `available_cash`
+- `single_recommendation_cap`
 - `single_market_cap`
 - `event_cap`
 - `category_cap`
@@ -242,6 +251,8 @@ Binding constraints：
 - `drawdown_cap`
 - `confidence_cap`
 - `manual_cap`
+- `kelly_cap`
+- `none`
 
 Sizing 不是展示值。执行模式启用时，`OrderIntent` 只能在 sizing plan 边界内创建。
 

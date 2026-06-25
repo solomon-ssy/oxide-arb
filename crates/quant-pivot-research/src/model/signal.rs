@@ -78,9 +78,11 @@ pub struct SignalCandidate {
     pub composite_score: Probability,
     /// Model confidence in `[0, 1]`.
     pub confidence: Probability,
-    /// Expected return in basis points.
+    /// Expected (probability-weighted **mean**) return in basis points — `E[r]`,
+    /// not a conditional take-profit target. Kelly sizing recovers the win
+    /// probability from `E[r]`, the downside, and a configured reward multiple.
     pub expected_return_bps: Decimal,
-    /// Estimated downside in basis points.
+    /// Estimated downside (stop-loss magnitude) in basis points — `l`.
     pub downside_bps: Decimal,
     /// Reference entry price.
     pub entry_price_ref: Price,
@@ -100,8 +102,12 @@ pub struct SignalCandidate {
 
 /// Apply a basis-point move to an entry price, clamped into `[0, 1]`.
 ///
-/// `target` (`positive = true`) scales the entry up by `expected_return_bps`;
-/// `stop` (`positive = false`) scales it down by `downside_bps`.
+/// Used to project the CH-fact diagnostic prices: `positive = true` yields the
+/// **expected exit price** (`entry · (1 + E[r])`) and `positive = false` the
+/// **downside floor** (`entry · (1 − l)`). These are audit projections of the
+/// mean / downside estimates, not a tradeable take-profit / stop pair — Kelly
+/// sizing derives its own target from a configured reward multiple and never
+/// reuses these prices.
 fn apply_bps(entry: Price, bps: Decimal, positive: bool) -> Price {
     let fraction = Bps::new(bps).to_fraction();
     let factor = if positive {

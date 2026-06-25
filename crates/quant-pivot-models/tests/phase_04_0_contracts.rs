@@ -22,15 +22,17 @@ use quant_pivot_models::{
         },
     },
     runtime_config::{
-        DecimalString, RuntimeConfig, ScheduleCadence, SizingModelConfig, validate_runtime_config,
+        ConfidenceSizeCurve, DecimalString, DrawdownMultiplierPolicy, RuntimeConfig,
+        ScheduleCadence, SizingModelConfig, validate_runtime_config,
     },
     types::{
         AccountPositions, AccountSnapshotId, Bps, ConfidenceSummary, ContentHash,
         DataQualitySummary, EligibilitySummary, EntryPlan, EventId, EvidenceRefs,
         ExecutionEligibility, ExitPlan, ExposureBreakdown, FactorBreakdownEntry, FeatureVectorId,
-        MarketId, MarketSelectionId, ModelRunId, ModelVersionId, PartialExitNode, PositionSnapshot,
-        Price, Probability, RecommendationFactorBreakdown, RecommendationReportId, ReportSummary,
-        RiskEnvelope, RuntimeConfigVersionId, Shares, SizingPlan, TokenId, TrailingStop, Usd,
+        MarketId, MarketSelectionId, ModelRunId, ModelVersionId, PartialExitNode, PortfolioPlanId,
+        PositionSnapshot, Price, Probability, RecommendationFactorBreakdown,
+        RecommendationReportId, ReportSummary, RiskEnvelope, RuntimeConfigVersionId, Shares,
+        SizingPlan, TokenId, TrailingStop, Usd,
     },
 };
 
@@ -246,7 +248,7 @@ fn recommendation_report_header_has_account_columns() {
         runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
         model_version_id: ModelVersionId::from_v7(),
         market_selection_id: MarketSelectionId::from_v7(),
-        portfolio_plan_id: quant_pivot_models::types::PortfolioPlanId::from_v7(),
+        portfolio_plan_id: PortfolioPlanId::from_v7(),
         top_n: 20,
         status: RecommendationReportStatus::Published,
         account_source: AccountSource::Polymarket,
@@ -362,7 +364,9 @@ fn portfolio_config_v3_three_section_roundtrip() {
     assert!(json["portfolio"]["budget"].is_object());
     assert!(json["portfolio"]["constraints"].is_object());
     assert!(json["portfolio"]["sizing"].is_object());
-    assert_eq!(json["portfolio"]["sizing"]["model"], json!("kelly"));
+    // Kelly is the single sizing model: a flat parameter struct, not a tagged enum.
+    assert!(json["portfolio"]["sizing"]["kelly_fraction"].is_string());
+    assert!(json["portfolio"]["sizing"]["target_reward_multiple"].is_string());
 }
 
 #[test]
@@ -401,10 +405,23 @@ fn portfolio_config_validation_rejects_invalid() {
 
     // Invalid Kelly fraction (> 1).
     let mut config = RuntimeConfig::default();
-    config.portfolio.sizing = SizingModelConfig::Kelly {
+    config.portfolio.sizing = SizingModelConfig {
         kelly_fraction: DecimalString::new("1.5"),
         max_position_pct: DecimalString::new("0.1"),
-        drawdown_scaling: quant_pivot_models::runtime_config::DrawdownMultiplierPolicy::Fixed,
+        target_reward_multiple: DecimalString::new("2.0"),
+        confidence_weighting: ConfidenceSizeCurve::Linear,
+        drawdown_scaling: DrawdownMultiplierPolicy::Fixed,
+    };
+    assert!(validate_runtime_config(&config).has_errors());
+
+    // Invalid target reward multiple (<= 0).
+    let mut config = RuntimeConfig::default();
+    config.portfolio.sizing = SizingModelConfig {
+        kelly_fraction: DecimalString::new("0.5"),
+        max_position_pct: DecimalString::new("0.1"),
+        target_reward_multiple: DecimalString::new("0"),
+        confidence_weighting: ConfidenceSizeCurve::Linear,
+        drawdown_scaling: DrawdownMultiplierPolicy::Fixed,
     };
     assert!(validate_runtime_config(&config).has_errors());
 

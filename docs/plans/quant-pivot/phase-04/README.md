@@ -229,6 +229,27 @@ flowchart LR
 | 多副本 leader-elected report worker | 单 report scheduler 实例约束 | Phase 8+ | 04.3 §10 |
 | scheduler `postgres_storage` 持久化 | runtime-config 为 schedule 真相源 | 不做（by design） | 04.3 §10 |
 
+### 6.1 决策闭环完整性映射（买什么 → 卖多少，全链可回放）
+
+> 报告是**主产物**，必须在一次 `as_of` 内**完整回答**一笔交易的全部决策；执行（实际下单 /
+> 退出监控）在 Phase 5/6 **消费**这份契约。每个环节都有强类型字段（04.0 落 `report_payload`），
+> 无裸 `serde_json::Value`。
+
+| 决策问题 | 强类型载体（字段） | 计算/产出 | 执行/消费 |
+|---|---|---|---|
+| 买什么 | `Recommendation`（`market_id`/`token_id`/`side`）← `SignalCandidate` | Phase 3.4 ModelRunner | — |
+| 入场触发条件 | `EntryPlan.trigger_kind`/`trigger_price`/`limit_price`/`min_depth_usd`/`max_book_age_ms`/`confirmation_window_secs` | 04.2 composer（本期 `immediate`+`limit`；进阶触发 Phase 5） | 05 §5 Entry Order |
+| 什么时候买 | `EntryPlan.valid_from`/`valid_until`/`cancel_if_not_triggered` | 04.2 composer（`as_of` ~ `as_of+horizon`） | 05 §4 Admission（窗口校验） |
+| 买多少 | `SizingPlan`（`suggested_usd`/`shares`/`weight`/`binding_constraint`/`edge_bps`/`kelly_fraction_applied`） | **04.1 Kelly planner** | 05 §2 OrderIntent（边界内创建） |
+| 止盈止损价 | `ExitPlan.take_profit_price`/`stop_loss_price`(+`_pct`)（= entry·(1±) with `g=R·l`,`l`，与 Kelly 同结构） | 04.2 composer | 05 §6 Exit Monitor |
+| 什么时候卖 | `ExitPlan.time_exit_at`/`max_hold_secs`/`manual_review_at`/`signal_invalidation_rules`/`settlement_policy` | 04.2 composer | 05 §6 Exit Lifecycle |
+| 卖多少 | `ExitPlan.partial_exit_nodes[].sell_pct`/`trailing_stop` | 04.2 composer（本期单节点；多节点+`Sell*` sizing Phase 5） | 05 §6 Exit Actions |
+| 出场时间节点 | `PartialExitNode.valid_after`/`valid_until`/`trigger_kind`/`trigger_value` | 04.2 composer | 05 §6 Exit Monitor |
+| 能否执行/审批 | `ExecutionEligibility` + `RiskEnvelope`（admission 锚 `envelope_hash`） | 04.1 envelope + 04.2 eligibility | 05 §3/§4 审批+admission |
+
+**闭环判定**：Phase 4 结束时，报告对每条 published recommendation 给出上表全部字段（执行侧只需
+"读契约 → 下单/监控退出"，不再重新决策）。Phase 5/6 仅补"执行与退出**监控**"，不改变决策语义。
+
 ## 7. 文档契约模板（每篇子phase文档固定顺序）
 
 1. **目标与闭环定位** —— 交付什么、在报告主链中的位置。

@@ -13,7 +13,8 @@ use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
     enums::quant::DataQualityStatus,
     types::{
-        BacktestReportId, ContentHash, ModelVersionId, Probability, RuntimeConfigVersionId, Usd,
+        BacktestReportId, ContentHash, ExposureBreakdown, ModelVersionId, Probability,
+        RuntimeConfigVersionId, Usd,
     },
 };
 use rust_decimal::Decimal;
@@ -23,15 +24,13 @@ use crate::{
     backtest::{
         BacktestInputs, BacktestMarketMeta, BacktestReport, BacktestRunResult, BacktestTick,
         Backtester, CategoryMetric, EquityPoint, ExpectedVsRealized, MarketOutcome, PnlSimulation,
-        PortfolioCaps, SampleOutcome,
-        allocator::{
-            Allocation, AllocationInput, CandidateMeta, GreedyPortfolioAllocator,
-            PortfolioAllocator,
-        },
-        metrics, simulator,
+        PortfolioCaps, SampleOutcome, metrics, simulator,
     },
     hashing::ResearchHasher,
     model::runtime::{MarketInferenceContext, ModelRuntimeOutput, ModelRuntimeWarning},
+    portfolio::allocator::{
+        Allocation, AllocationInput, CandidateMeta, GreedyPortfolioAllocator, PortfolioAllocator,
+    },
     precision::RESEARCH_DECIMAL_SCALE,
 };
 
@@ -131,23 +130,14 @@ fn process_tick(
         .map(|(market_id, context)| (market_id.as_str(), context))
         .collect();
 
-    let candidate_metas: Vec<CandidateMeta<'_>> = output
-        .candidates
-        .iter()
-        .filter_map(|candidate| {
-            let market = meta.get(candidate.market_id.as_str())?;
-            Some(CandidateMeta {
-                candidate,
-                category: market.category,
-                event_id: market.event_id.clone(),
-                liquidity_usd: market.liquidity_usd,
-            })
-        })
-        .collect();
-
+    let candidate_metas = backtest_candidate_metas(output, &meta, caps);
+    // Per-tick independent allocation (no inventory carry): `initial_exposures`
+    // is always empty; cross-tick netting is the production planner's job.
     let allocation = allocator.allocate(&AllocationInput {
         candidates: candidate_metas,
         caps,
+        initial_exposures: &ExposureBreakdown::default(),
+        available_usd: caps.total_budget_usd,
     })?;
     let alloc_by_id: BTreeMap<String, &Allocation> = allocation
         .allocations
@@ -210,6 +200,30 @@ fn process_tick(
         equity_usd: acc.realized_pnl.round_dp(RESEARCH_DECIMAL_SCALE),
     });
     Ok(())
+}
+
+/// Build the allocator metas for one tick: every candidate desires the
+/// single-recommendation cap (flat sizing, preserving the original behavior).
+fn backtest_candidate_metas<'a>(
+    output: &'a ModelRuntimeOutput,
+    meta: &BTreeMap<&str, &'a BacktestMarketMeta>,
+    caps: &PortfolioCaps,
+) -> Vec<CandidateMeta<'a>> {
+    let desired = Usd::new(caps.max_single_recommendation_usd);
+    output
+        .candidates
+        .iter()
+        .filter_map(|candidate| {
+            let market = meta.get(candidate.market_id.as_str())?;
+            Some(CandidateMeta {
+                candidate,
+                desired_usd: desired,
+                category: market.category,
+                event_id: market.event_id.clone(),
+                liquidity_usd: market.liquidity_usd,
+            })
+        })
+        .collect()
 }
 
 /// Per-market allocation weights for one tick (normalized to the tick total).

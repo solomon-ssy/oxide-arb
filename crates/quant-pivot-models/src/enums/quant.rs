@@ -370,11 +370,9 @@ active_string_enum! {
     /// Position-sizing model that produced a recommendation's size.
     @derive(Default)
     pub enum SizingModelKind {
-        /// Fractional Kelly (default production model).
+        /// Fractional Kelly — the single production sizing model.
         #[default]
         Kelly => "kelly",
-        /// Deterministic confidence-to-size curve (baseline / shadow).
-        ConfidenceCurve => "confidence_curve",
     }
 }
 
@@ -387,6 +385,10 @@ active_string_enum! {
     pub enum BindingConstraint {
         /// Total deployable portfolio budget.
         PortfolioBudget => "portfolio_budget",
+        /// Available cash (collateral − reserved) exhausted.
+        AvailableCash => "available_cash",
+        /// Per-recommendation absolute size cap (`max_single_recommendation_usd`).
+        SingleRecommendationCap => "single_recommendation_cap",
         /// Per-market exposure cap.
         SingleMarketCap => "single_market_cap",
         /// Per-event exposure cap.
@@ -454,6 +456,38 @@ active_string_enum! {
         ShadowNotPassed => "shadow_not_passed",
         /// The execution budget is exhausted.
         BudgetExhausted => "budget_exhausted",
+    }
+}
+
+active_string_enum! {
+    /// Why a candidate was dropped during portfolio planning (not published).
+    ///
+    /// The planner records one reason per rejected candidate; the report rolls
+    /// these up into [`crate::types::RejectionReasonCount`].
+    @derive(Default)
+    pub enum RejectionReason {
+        /// No positive Kelly edge (`f* <= 0`); never funded.
+        #[default]
+        NoPositiveSignal => "no_positive_signal",
+        /// The candidate's edge inputs were invalid (non-positive downside, or a
+        /// degenerate win probability) — sizing refused to fabricate a bet.
+        InvalidEdgeInputs => "invalid_edge_inputs",
+        /// The allocated size fell below `min_recommendation_usd`.
+        BelowMinSize => "below_min_size",
+        /// The total deployable budget room was exhausted.
+        BudgetExhausted => "budget_exhausted",
+        /// The per-market exposure cap was exhausted.
+        MarketCapExhausted => "market_cap_exhausted",
+        /// The per-event exposure cap was exhausted.
+        EventCapExhausted => "event_cap_exhausted",
+        /// The per-category exposure cap was exhausted.
+        CategoryCapExhausted => "category_cap_exhausted",
+        /// The visible liquidity could not support the minimum useful size.
+        LiquidityInfeasible => "liquidity_infeasible",
+        /// Available cash (collateral − reserved) was exhausted.
+        AvailableCashExhausted => "available_cash_exhausted",
+        /// Fundable, but ranked beyond the report's `top_n` cut.
+        BeyondTopN => "beyond_top_n",
     }
 }
 

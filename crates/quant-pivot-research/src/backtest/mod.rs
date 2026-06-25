@@ -11,16 +11,11 @@
 //!
 //! Money / price / probability stay in project newtypes; `f64` never appears.
 
-mod allocator;
 mod comparison;
 mod metrics;
 mod runner;
 mod simulator;
 
-pub use allocator::{
-    Allocation, AllocationInput, AllocationOutput, CandidateMeta, GreedyPortfolioAllocator,
-    PortfolioAllocator,
-};
 pub use comparison::{CategoryRankIcDelta, ModelComparisonReport, compare_reports};
 pub use runner::GreedyBacktester;
 

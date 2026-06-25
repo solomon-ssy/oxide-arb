@@ -340,30 +340,29 @@ fn validate_portfolio(config: &RuntimeConfig, report: &mut ConfigValidationRepor
 
 /// Validate the sizing model parameters.
 fn validate_sizing(sizing: &SizingModelConfig, report: &mut ConfigValidationReport) {
-    match sizing {
-        SizingModelConfig::Kelly {
-            kelly_fraction,
-            max_position_pct,
-            ..
-        } => {
-            match kelly_fraction.value.parse::<Decimal>() {
-                Ok(parsed) if parsed > Decimal::ZERO && parsed <= Decimal::ONE => {}
-                Ok(parsed) => report.errors.push(ConfigValidationError::InvalidValue {
-                    field: "portfolio.sizing.kelly_fraction",
-                    detail: format!("`{parsed}` must be within (0, 1]"),
-                }),
-                Err(_) => report.errors.push(ConfigValidationError::InvalidValue {
-                    field: "portfolio.sizing.kelly_fraction",
-                    detail: format!("`{}` is not a valid decimal string", kelly_fraction.value),
-                }),
-            }
-            unit_ratio(
-                "portfolio.sizing.max_position_pct",
-                max_position_pct,
-                report,
-            );
-        }
-        SizingModelConfig::ConfidenceCurve { .. } => {}
+    half_open_unit(
+        "portfolio.sizing.kelly_fraction",
+        &sizing.kelly_fraction,
+        report,
+    );
+    half_open_unit(
+        "portfolio.sizing.max_position_pct",
+        &sizing.max_position_pct,
+        report,
+    );
+    match sizing.target_reward_multiple.value.parse::<Decimal>() {
+        Ok(parsed) if parsed > Decimal::ZERO => {}
+        Ok(parsed) => report.errors.push(ConfigValidationError::InvalidValue {
+            field: "portfolio.sizing.target_reward_multiple",
+            detail: format!("`{parsed}` must be > 0"),
+        }),
+        Err(_) => report.errors.push(ConfigValidationError::InvalidValue {
+            field: "portfolio.sizing.target_reward_multiple",
+            detail: format!(
+                "`{}` is not a valid decimal string",
+                sizing.target_reward_multiple.value
+            ),
+        }),
     }
 }
 
@@ -460,6 +459,22 @@ fn unit_ratio(field: &'static str, value: &DecimalString, report: &mut ConfigVal
         Ok(parsed) => report.errors.push(ConfigValidationError::InvalidValue {
             field,
             detail: format!("`{parsed}` must be within [0, 1]"),
+        }),
+        Err(_) => report.errors.push(ConfigValidationError::InvalidValue {
+            field,
+            detail: format!("`{}` is not a valid decimal string", value.value),
+        }),
+    }
+}
+
+/// Validate a half-open unit ratio in `(0, 1]` (the value must be strictly
+/// positive — a zero fraction would size nothing — and at most full).
+fn half_open_unit(field: &'static str, value: &DecimalString, report: &mut ConfigValidationReport) {
+    match value.value.parse::<Decimal>() {
+        Ok(parsed) if parsed > Decimal::ZERO && parsed <= Decimal::ONE => {}
+        Ok(parsed) => report.errors.push(ConfigValidationError::InvalidValue {
+            field,
+            detail: format!("`{parsed}` must be within (0, 1]"),
         }),
         Err(_) => report.errors.push(ConfigValidationError::InvalidValue {
             field,

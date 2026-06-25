@@ -206,18 +206,29 @@ Schedule（`ReportScheduleConfig`）：
 
 ### 2.8 `portfolio`
 
-字段：
+破坏式三段（政策 ≠ 状态；真实资金来自账户快照，`total_budget_usd` 仅为治理护栏，见 04.1）：
 
-- `total_budget_usd`
+`portfolio.budget`：
+
+- `total_budget_usd`（治理护栏 = 最大可部署上限；`equity = min(真实净清算, total_budget_usd)`，
+  planner 总部署 room 另受真实 `available_usd` 约束）
+- `min_recommendation_usd`
 - `max_single_recommendation_usd`
+
+`portfolio.constraints`：
+
 - `max_market_exposure_usd`
 - `max_event_exposure_usd`
 - `max_category_exposure_usd`
-- `max_correlated_exposure_usd`
-- `min_recommendation_usd`
+- `max_correlated_exposure_usd`（本期写入 plan 快照，真正生效 Phase 5）
 - `liquidity_usage_cap_pct`
-- `confidence_size_curve`
-- `drawdown_multiplier`
+
+`portfolio.sizing`（tagged enum `model`）：
+
+- `Kelly { kelly_fraction, max_position_pct, target_reward_multiple, confidence_weighting,
+  drawdown_scaling }`（默认；`confidence_weighting` 为置信度收缩曲线，`target_reward_multiple`
+  为目标/止损倍数 R，用于反解 Kelly 胜率）
+- `ConfidenceCurve { curve, drawdown_multiplier }`（edge-free 基线 / shadow）
 
 ### 2.9 `execution`
 
