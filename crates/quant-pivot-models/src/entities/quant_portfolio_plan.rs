@@ -1,6 +1,9 @@
 //! `quant_portfolio_plan` table entity.
 
-use crate::types::{MarketSelectionId, ModelRunId, PortfolioPlanId, Usd};
+use crate::types::{
+    MarketSelectionId, ModelRunId, PortfolioConstraintsSnapshot, PortfolioPlanId,
+    PortfolioRejectedSummary, PortfolioRiskBudget, Usd,
+};
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
@@ -15,11 +18,11 @@ pub struct Model {
     pub budget_usd: Usd,
     pub allocated_usd: Usd,
     #[sea_orm(column_type = "JsonBinary")]
-    pub risk_budget_json: Json,
+    pub risk_budget_json: PortfolioRiskBudget,
     #[sea_orm(column_type = "JsonBinary")]
-    pub constraints_json: Json,
+    pub constraints_json: PortfolioConstraintsSnapshot,
     #[sea_orm(column_type = "JsonBinary")]
-    pub rejected_summary: Json,
+    pub rejected_summary: PortfolioRejectedSummary,
     pub created_at: DateTime<Utc>,
 }
 

@@ -3,11 +3,11 @@
 use crate::{
     enums::{common::MarketCategory, factor::FactorFamily, quant::QuantRuntimeMode},
     runtime_config::wire::{
-        CapitalPolicy, ConfidenceSizeCurve, DecimalString, DomainFeaturePolicy,
-        DrawdownMultiplierPolicy, EntryOrderPolicy, ExecutionAdmissionPolicy, ExitOrderPolicy,
-        FactorWeights, FeatureFamily, FeatureNameRef, FeatureStalenessPolicy, KillSwitchPolicy,
-        MarketIdList, MissingFactorPolicy, ModelVersionRef, NotificationPolicies,
-        ReconciliationPolicy, ReportDeliveryPolicy,
+        CapitalPolicy, DecimalString, DomainFeaturePolicy, EntryOrderPolicy,
+        ExecutionAdmissionPolicy, ExitOrderPolicy, FactorWeights, FeatureFamily, FeatureNameRef,
+        FeatureStalenessPolicy, KillSwitchPolicy, MarketIdList, MissingFactorPolicy,
+        ModelVersionRef, NotificationPolicies, ReconciliationPolicy, ReportDeliveryPolicy,
+        ScheduleCadence, SizingModelConfig,
     },
     types::SchemaVersion,
 };
@@ -328,8 +328,8 @@ impl Default for ReportsConfig {
 pub struct ReportScheduleConfig {
     /// Stable schedule id.
     pub schedule_id: String,
-    /// Interval in seconds.
-    pub interval_secs: u64,
+    /// How often this schedule fires (fixed interval or cron).
+    pub cadence: ScheduleCadence,
     /// `TopN` size for this schedule.
     pub top_n: u32,
     /// Optional selection filter reference.
@@ -346,7 +346,7 @@ impl Default for ReportScheduleConfig {
     fn default() -> Self {
         Self {
             schedule_id: "default_interval".to_owned(),
-            interval_secs: 300,
+            cadence: ScheduleCadence::default(),
             top_n: 20,
             market_filter_ref: None,
             model_version_ref: None,
@@ -356,14 +356,50 @@ impl Default for ReportScheduleConfig {
     }
 }
 
-/// Portfolio budget and exposure constraints.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+/// Portfolio policy: budget governance, exposure constraints, and sizing model.
+///
+/// Policy (limits) only — never account state. Real equity / positions come
+/// from the account snapshot, never from here (see 04.0 §6).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct PortfolioConfig {
-    /// Total report budget in USD.
+    /// Capital budget governance caps.
+    pub budget: PortfolioBudget,
+    /// Exposure / liquidity constraints.
+    pub constraints: PortfolioConstraints,
+    /// Position-sizing model.
+    pub sizing: SizingModelConfig,
+}
+
+/// Capital budget governance caps.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct PortfolioBudget {
+    /// Maximum deployable capital (governance cap, all modes).
+    ///
+    /// `equity = min(real net-liquidation value, total_budget_usd)`; this value
+    /// **never** stands in for equity itself.
     pub total_budget_usd: DecimalString,
+    /// Minimum useful recommendation size in USD.
+    pub min_recommendation_usd: DecimalString,
     /// Maximum USD allocated to one recommendation.
     pub max_single_recommendation_usd: DecimalString,
+}
+
+impl Default for PortfolioBudget {
+    fn default() -> Self {
+        Self {
+            total_budget_usd: DecimalString::new("0"),
+            min_recommendation_usd: DecimalString::new("0"),
+            max_single_recommendation_usd: DecimalString::new("0"),
+        }
+    }
+}
+
+/// Exposure and liquidity constraints.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct PortfolioConstraints {
     /// Maximum USD exposure per market.
     pub max_market_exposure_usd: DecimalString,
     /// Maximum USD exposure per event.
@@ -372,29 +408,18 @@ pub struct PortfolioConfig {
     pub max_category_exposure_usd: DecimalString,
     /// Maximum correlated exposure in USD.
     pub max_correlated_exposure_usd: DecimalString,
-    /// Minimum useful recommendation size in USD.
-    pub min_recommendation_usd: DecimalString,
-    /// Maximum percentage of visible liquidity to consume.
+    /// Maximum fraction of visible liquidity an allocation may consume.
     pub liquidity_usage_cap_pct: DecimalString,
-    /// Named confidence-to-size curve.
-    pub confidence_size_curve: ConfidenceSizeCurve,
-    /// Drawdown multiplier policy.
-    pub drawdown_multiplier: DrawdownMultiplierPolicy,
 }
 
-impl Default for PortfolioConfig {
+impl Default for PortfolioConstraints {
     fn default() -> Self {
         Self {
-            total_budget_usd: DecimalString::new("0"),
-            max_single_recommendation_usd: DecimalString::new("0"),
             max_market_exposure_usd: DecimalString::new("0"),
             max_event_exposure_usd: DecimalString::new("0"),
             max_category_exposure_usd: DecimalString::new("0"),
             max_correlated_exposure_usd: DecimalString::new("0"),
-            min_recommendation_usd: DecimalString::new("0"),
             liquidity_usage_cap_pct: DecimalString::new("0.05"),
-            confidence_size_curve: ConfidenceSizeCurve::Linear,
-            drawdown_multiplier: DrawdownMultiplierPolicy::Fixed,
         }
     }
 }

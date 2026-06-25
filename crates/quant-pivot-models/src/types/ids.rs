@@ -23,11 +23,17 @@ use uuid::Uuid;
 // ── External string identifiers (Arc<str>) ───────────────────────────────
 
 /// Polymarket `condition_id` identifying a market.
-#[derive(StrId, Debug, Clone, PartialEq, Eq, Hash)]
+///
+/// `Ord` is derived (over the inner `Arc<str>`) so the id can key a
+/// deterministic `BTreeMap` for exposure / allocation aggregates.
+#[derive(StrId, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MarketId(Arc<str>);
 
 /// Polymarket event identifier.
-#[derive(StrId, Debug, Clone, PartialEq, Eq, Hash)]
+///
+/// `Ord` is derived (over the inner `Arc<str>`) so the id can key a
+/// deterministic `BTreeMap` for exposure / allocation aggregates.
+#[derive(StrId, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct EventId(Arc<str>);
 
 /// `ERC-1155` conditional token identifier (CLOB `token_id`).
@@ -125,6 +131,10 @@ pub struct ShadowComparisonId(Arc<Uuid>);
 /// Model-governance audit row identifier (publish / retire / rollback / promote).
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ModelGovernanceAuditId(Arc<Uuid>);
+
+/// Decision-time venue account / capital snapshot identifier.
+#[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct AccountSnapshotId(Arc<Uuid>);
 
 /// Portfolio plan identifier used by a recommendation report.
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]

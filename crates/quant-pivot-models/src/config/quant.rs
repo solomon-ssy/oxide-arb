@@ -8,8 +8,8 @@ use serde::Deserialize;
 pub struct QuantDeployConfig {
     /// Background worker topology.
     pub workers: QuantWorkersConfig,
-    /// Execution-adjacent deploy flags (not runtime mode).
-    pub execution: QuantExecutionDeployConfig,
+    /// Venue account read configuration.
+    pub account: QuantAccountDeployConfig,
 }
 
 /// Quant background worker structural parameters.
@@ -28,26 +28,20 @@ impl Default for QuantWorkersConfig {
     }
 }
 
-/// Quant execution deploy flags (distinct from [`QuantRuntimeMode`]).
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+/// Venue account read configuration (`[quant.account]`).
+///
+/// `report_only` is **not** dry-run: report sizing is built on the real venue
+/// account. The funder (Polymarket proxy address, distinct from the signer EOA)
+/// is required for keyless Data API position reads; reports fail closed without
+/// it. The private key (read credential) is configured under `[keys]`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct QuantExecutionDeployConfig {
-    /// When false, private keys are not loaded in `ReportOnly` mode.
-    pub load_credentials_in_report_only: bool,
-}
-
-impl Default for QuantExecutionDeployConfig {
-    fn default() -> Self {
-        Self {
-            load_credentials_in_report_only: default_load_credentials_in_report_only(),
-        }
-    }
+pub struct QuantAccountDeployConfig {
+    /// Polymarket proxy/funder address used as `user=<funder>` for Data API
+    /// position reads. Required to generate reports (all modes).
+    pub funder: Option<String>,
 }
 
 const fn default_report_scheduler_tick_secs() -> u64 {
     30
-}
-
-const fn default_load_credentials_in_report_only() -> bool {
-    false
 }

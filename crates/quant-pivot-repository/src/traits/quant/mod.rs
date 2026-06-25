@@ -1,5 +1,6 @@
 //! Quant-pivot repository traits.
 
+mod account_snapshot;
 mod attribution;
 mod backtest_report;
 mod comparison_report;
@@ -13,11 +14,14 @@ mod governance_audit;
 mod model;
 mod model_registry;
 mod order_intent;
+mod portfolio_plan;
 mod recommendation;
 mod recommendation_report;
+mod reserved_capital;
 mod selection;
 mod shadow_comparison;
 
+pub use account_snapshot::*;
 pub use attribution::*;
 pub use backtest_report::*;
 pub use comparison_report::*;
@@ -31,7 +35,9 @@ pub use governance_audit::*;
 pub use model::*;
 pub use model_registry::*;
 pub use order_intent::*;
+pub use portfolio_plan::*;
 pub use recommendation::*;
 pub use recommendation_report::*;
+pub use reserved_capital::*;
 pub use selection::*;
 pub use shadow_comparison::*;

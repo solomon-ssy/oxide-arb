@@ -46,7 +46,7 @@ use quant_pivot_models::{
     },
     runtime_config::{
         DataQualityConfig, FactorWeights, FactorsConfig, FeatureFamily, FeaturesConfig,
-        ModelConfig, PortfolioConfig, wire::DecimalString,
+        ModelConfig, PortfolioBudget, PortfolioConfig, PortfolioConstraints, wire::DecimalString,
     },
     types::{
         ContentHash, FactorDefinitionId, MarketId, ModelSpecId, Price, Probability,
@@ -518,10 +518,15 @@ fn trainer_config() -> ModelTrainerConfig {
 
 fn portfolio() -> PortfolioConfig {
     PortfolioConfig {
-        total_budget_usd: DecimalString::new("1000"),
-        max_single_recommendation_usd: DecimalString::new("200"),
-        min_recommendation_usd: DecimalString::new("10"),
-        liquidity_usage_cap_pct: DecimalString::new("0.5"),
+        budget: PortfolioBudget {
+            total_budget_usd: DecimalString::new("1000"),
+            min_recommendation_usd: DecimalString::new("10"),
+            max_single_recommendation_usd: DecimalString::new("200"),
+        },
+        constraints: PortfolioConstraints {
+            liquidity_usage_cap_pct: DecimalString::new("0.5"),
+            ..PortfolioConstraints::default()
+        },
         ..PortfolioConfig::default()
     }
 }

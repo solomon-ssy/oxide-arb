@@ -3,8 +3,8 @@
 use super::{
     AppContext,
     bundles::{
-        DataBundle, DataBundleDeps, GovernanceBundle, GovernanceBundleDeps, InfraBundle,
-        ResearchBundle, ResearchBundleDeps, RuntimeSnapshot,
+        AccountBundle, AccountBundleDeps, DataBundle, DataBundleDeps, GovernanceBundle,
+        GovernanceBundleDeps, InfraBundle, ResearchBundle, ResearchBundleDeps, RuntimeSnapshot,
     },
 };
 use crate::observability::metrics_hub::MetricsHub;
@@ -43,6 +43,15 @@ impl AppContext {
             data: &data,
             governance: &governance,
         });
+        // Credential-gated venue account subsystem. Fails closed at boot if the
+        // private key is missing or CLOB authentication fails — report_only is
+        // not dry-run, so the real account must be reachable.
+        let account = AccountBundle::assemble(AccountBundleDeps {
+            deploy: &deploy,
+            infra: &infra,
+            market_registry: Arc::clone(&data.market_registry),
+        })
+        .await?;
         let (events, event_rx) = CoreEventPublisher::bounded(4096);
 
         Ok(Self {
@@ -54,6 +63,7 @@ impl AppContext {
             data,
             governance,
             research,
+            account,
         })
     }
 }

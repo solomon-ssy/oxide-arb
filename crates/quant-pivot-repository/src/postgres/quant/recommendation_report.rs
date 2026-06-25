@@ -4,8 +4,11 @@ use crate::traits::RecommendationReportRepository;
 use chrono::Utc;
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    domain::{NewRecommendation, NewRecommendationReport, RecommendationReportInfo},
-    entities::{quant_recommendation, quant_recommendation_report},
+    domain::{NewReportTransaction, RecommendationReportInfo},
+    entities::{
+        quant_account_snapshot, quant_portfolio_plan, quant_recommendation,
+        quant_recommendation_report,
+    },
     enums::quant::{RecommendationReportStatus, ReportKind},
     types::RecommendationReportId,
 };
@@ -29,10 +32,26 @@ impl PgRecommendationReportRepository {
 impl RecommendationReportRepository for PgRecommendationReportRepository {
     async fn create_report(
         &self,
-        report: NewRecommendationReport,
-        recommendations: Vec<NewRecommendation>,
+        transaction: NewReportTransaction,
     ) -> Result<RecommendationReportInfo, StorageError> {
+        let NewReportTransaction {
+            account_snapshot,
+            portfolio_plan,
+            report,
+            recommendations,
+        } = transaction;
+
         let txn = self.db.begin().await.map_err(StorageError::from)?;
+
+        // Insert FK targets before the report header, then the report's children.
+        quant_account_snapshot::Entity::insert(account_snapshot.into_active_model())
+            .exec(&txn)
+            .await
+            .map_err(StorageError::from)?;
+        quant_portfolio_plan::Entity::insert(portfolio_plan.into_active_model())
+            .exec(&txn)
+            .await
+            .map_err(StorageError::from)?;
         let report_model = quant_recommendation_report::Entity::insert(report.into_active_model())
             .exec_with_returning(&txn)
             .await
@@ -47,6 +66,7 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
                 .await
                 .map_err(StorageError::from)?;
         }
+
         txn.commit().await.map_err(StorageError::from)?;
         Ok(report_model.into())
     }

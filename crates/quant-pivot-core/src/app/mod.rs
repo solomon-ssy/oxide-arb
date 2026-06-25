@@ -46,6 +46,7 @@ pub struct AppContext {
     pub data: DataBundle,
     pub governance: GovernanceBundle,
     pub research: ResearchBundle,
+    pub account: AccountBundle,
 }
 
 impl AppContext {

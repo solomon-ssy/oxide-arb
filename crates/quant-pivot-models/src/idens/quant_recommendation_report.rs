@@ -2,14 +2,15 @@ use quant_pivot_macros::quant_schema;
 use sea_orm::{
     Iden,
     sea_query::{
-        ColumnDef, ForeignKey, ForeignKeyAction, Index, IndexOrder, Table, TableCreateStatement,
+        ColumnDef, ForeignKey, ForeignKeyAction, ForeignKeyCreateStatement, Index, IndexOrder,
+        IntoIden, Table, TableCreateStatement,
     },
 };
 
 use crate::{
     idens::{
-        quant_market_selection::QuantMarketSelection, quant_model_version::QuantModelVersion,
-        quant_portfolio_plan::QuantPortfolioPlan,
+        quant_account_snapshot::QuantAccountSnapshot, quant_market_selection::QuantMarketSelection,
+        quant_model_version::QuantModelVersion, quant_portfolio_plan::QuantPortfolioPlan,
     },
     schema::{
         column,
@@ -34,6 +35,9 @@ pub enum QuantRecommendationReport {
     PortfolioPlanId,
     TopN,
     Status,
+    AccountSource,
+    CapitalBaseUsd,
+    AccountSnapshotRef,
     SummaryJson,
     PublishedAt,
     RevokedAt,
@@ -86,6 +90,15 @@ pub fn table() -> TableCreateStatement {
                 .not_null(),
         )
         .col(
+            ColumnDef::new(QuantRecommendationReport::AccountSource)
+                .text()
+                .not_null(),
+        )
+        .col(column::usd(QuantRecommendationReport::CapitalBaseUsd))
+        .col(column::uuid_fk(
+            QuantRecommendationReport::AccountSnapshotRef,
+        ))
+        .col(
             ColumnDef::new(QuantRecommendationReport::SummaryJson)
                 .json_binary()
                 .not_null(),
@@ -103,42 +116,45 @@ pub fn table() -> TableCreateStatement {
         .col(timestamp_with_write_default(
             QuantRecommendationReport::CreatedAt,
         ))
-        .foreign_key(
-            ForeignKey::create()
-                .name("fk_quant_recommendation_report_model_version")
-                .from(
-                    QuantRecommendationReport::Table,
-                    QuantRecommendationReport::ModelVersionId,
-                )
-                .to(QuantModelVersion::Table, QuantModelVersion::ModelVersionId)
-                .on_delete(ForeignKeyAction::Restrict),
-        )
-        .foreign_key(
-            ForeignKey::create()
-                .name("fk_quant_recommendation_report_selection")
-                .from(
-                    QuantRecommendationReport::Table,
-                    QuantRecommendationReport::MarketSelectionId,
-                )
-                .to(
-                    QuantMarketSelection::Table,
-                    QuantMarketSelection::MarketSelectionId,
-                )
-                .on_delete(ForeignKeyAction::Restrict),
-        )
-        .foreign_key(
-            ForeignKey::create()
-                .name("fk_quant_recommendation_report_portfolio")
-                .from(
-                    QuantRecommendationReport::Table,
-                    QuantRecommendationReport::PortfolioPlanId,
-                )
-                .to(
-                    QuantPortfolioPlan::Table,
-                    QuantPortfolioPlan::PortfolioPlanId,
-                )
-                .on_delete(ForeignKeyAction::Restrict),
-        )
+        .foreign_key(&mut fk_restrict(
+            "fk_quant_recommendation_report_model_version",
+            QuantRecommendationReport::ModelVersionId,
+            QuantModelVersion::Table,
+            QuantModelVersion::ModelVersionId,
+        ))
+        .foreign_key(&mut fk_restrict(
+            "fk_quant_recommendation_report_selection",
+            QuantRecommendationReport::MarketSelectionId,
+            QuantMarketSelection::Table,
+            QuantMarketSelection::MarketSelectionId,
+        ))
+        .foreign_key(&mut fk_restrict(
+            "fk_quant_recommendation_report_portfolio",
+            QuantRecommendationReport::PortfolioPlanId,
+            QuantPortfolioPlan::Table,
+            QuantPortfolioPlan::PortfolioPlanId,
+        ))
+        .foreign_key(&mut fk_restrict(
+            "fk_quant_recommendation_report_account_snapshot",
+            QuantRecommendationReport::AccountSnapshotRef,
+            QuantAccountSnapshot::Table,
+            QuantAccountSnapshot::AccountSnapshotId,
+        ))
+        .to_owned()
+}
+
+/// Build a `RESTRICT` foreign key from a report column to another table's key.
+fn fk_restrict(
+    name: &str,
+    from_col: QuantRecommendationReport,
+    to_table: impl IntoIden + 'static,
+    to_col: impl IntoIden + 'static,
+) -> ForeignKeyCreateStatement {
+    ForeignKey::create()
+        .name(name)
+        .from(QuantRecommendationReport::Table, from_col)
+        .to(to_table, to_col)
+        .on_delete(ForeignKeyAction::Restrict)
         .to_owned()
 }
 
@@ -188,6 +204,7 @@ pub fn dependencies() -> Vec<TableDependency> {
         TableDependency::foreign_key(quant_model_version_table_name),
         TableDependency::foreign_key(quant_market_selection_table_name),
         TableDependency::foreign_key(quant_portfolio_plan_table_name),
+        TableDependency::foreign_key(quant_account_snapshot_table_name),
     ]
 }
 
@@ -209,4 +226,8 @@ fn quant_market_selection_table_name() -> String {
 
 fn quant_portfolio_plan_table_name() -> String {
     QuantPortfolioPlan::Table.to_string()
+}
+
+fn quant_account_snapshot_table_name() -> String {
+    QuantAccountSnapshot::Table.to_string()
 }

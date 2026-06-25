@@ -1,3 +1,4 @@
+pub mod account;
 pub mod backtest;
 pub mod catalog_lifecycle;
 pub mod catalog_readiness;

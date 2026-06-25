@@ -18,6 +18,7 @@
 //! SeedError ────────┘
 //! ```
 
+pub mod account;
 pub mod api;
 pub mod auth;
 pub mod config;
@@ -48,6 +49,10 @@ pub type QuantResult<T> = Result<T, QuantError>;
 /// enabling ergonomic `?` propagation from any subsystem.
 #[derive(Debug, Error)]
 pub enum QuantError {
+    // ── Account capital (venue snapshot for report sizing) ───────────────
+    #[error(transparent)]
+    Account(#[from] account::AccountError),
+
     // ── API / Network ───────────────────────────────────────────────────
     #[error(transparent)]
     Api(#[from] api::ApiError),

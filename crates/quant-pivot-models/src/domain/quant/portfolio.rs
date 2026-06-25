@@ -1,6 +1,12 @@
 //! Portfolio plan persistence DTOs.
+//!
+//! The JSONB columns are strong-typed (`types::portfolio_plan`) — never a bare
+//! `serde_json::Value`.
 
-use crate::types::{MarketSelectionId, ModelRunId, PortfolioPlanId, Usd};
+use crate::types::{
+    MarketSelectionId, ModelRunId, PortfolioConstraintsSnapshot, PortfolioPlanId,
+    PortfolioRejectedSummary, PortfolioRiskBudget, Usd,
+};
 use chrono::{DateTime, Utc};
 use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
 use serde::{Deserialize, Serialize};
@@ -15,9 +21,9 @@ pub struct PortfolioPlanInfo {
     pub as_of: DateTime<Utc>,
     pub budget_usd: Usd,
     pub allocated_usd: Usd,
-    pub risk_budget_json: serde_json::Value,
-    pub constraints_json: serde_json::Value,
-    pub rejected_summary: serde_json::Value,
+    pub risk_budget_json: PortfolioRiskBudget,
+    pub constraints_json: PortfolioConstraintsSnapshot,
+    pub rejected_summary: PortfolioRejectedSummary,
     pub created_at: DateTime<Utc>,
 }
 
@@ -36,13 +42,7 @@ pub struct NewPortfolioPlan {
     pub as_of: DateTime<Utc>,
     pub budget_usd: Usd,
     pub allocated_usd: Usd,
-    pub risk_budget_json: serde_json::Value,
-    pub constraints_json: serde_json::Value,
-    pub rejected_summary: serde_json::Value,
-}
-
-/// Runtime portfolio plan before publication.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PortfolioPlanModel {
-    pub plan: NewPortfolioPlan,
+    pub risk_budget_json: PortfolioRiskBudget,
+    pub constraints_json: PortfolioConstraintsSnapshot,
+    pub rejected_summary: PortfolioRejectedSummary,
 }

@@ -351,3 +351,122 @@ active_string_enum! {
         Unknown => "unknown",
     }
 }
+
+active_string_enum! {
+    /// Capital-base provenance for a report's sizing.
+    ///
+    /// Single real source (the Polymarket venue account). The enum is retained
+    /// for evidence labelling and forward extension; there is **no** simulated or
+    /// configured-budget source — credentials are required and the report fails
+    /// closed without them.
+    @derive(Default)
+    pub enum AccountSource {
+        #[default]
+        Polymarket => "polymarket",
+    }
+}
+
+active_string_enum! {
+    /// Position-sizing model that produced a recommendation's size.
+    @derive(Default)
+    pub enum SizingModelKind {
+        /// Fractional Kelly (default production model).
+        #[default]
+        Kelly => "kelly",
+        /// Deterministic confidence-to-size curve (baseline / shadow).
+        ConfidenceCurve => "confidence_curve",
+    }
+}
+
+active_string_enum! {
+    /// The cap that bound a recommendation's final size.
+    ///
+    /// `None` means no hard cap bound the size (it was limited only by the
+    /// Kelly / curve suggestion itself).
+    @derive(Default)
+    pub enum BindingConstraint {
+        /// Total deployable portfolio budget.
+        PortfolioBudget => "portfolio_budget",
+        /// Per-market exposure cap.
+        SingleMarketCap => "single_market_cap",
+        /// Per-event exposure cap.
+        EventCap => "event_cap",
+        /// Per-category exposure cap.
+        CategoryCap => "category_cap",
+        /// Visible-liquidity usage cap.
+        LiquidityCap => "liquidity_cap",
+        /// Drawdown-scaling cap.
+        DrawdownCap => "drawdown_cap",
+        /// Confidence-floor cap.
+        ConfidenceCap => "confidence_cap",
+        /// Operator manual cap.
+        ManualCap => "manual_cap",
+        /// Fractional-Kelly upper bound.
+        KellyCap => "kelly_cap",
+        /// No hard cap bound the size.
+        #[default]
+        None => "none",
+    }
+}
+
+active_string_enum! {
+    /// Why a report could not publish any recommendation (empty report).
+    @derive(Default)
+    pub enum EmptyReason {
+        /// The market selection was empty.
+        #[default]
+        EmptySelection => "empty_selection",
+        /// Data quality was insufficient for inference.
+        InsufficientDataQuality => "insufficient_data_quality",
+        /// The active model failed its quality gate.
+        ModelQualityGateFailed => "model_quality_gate_failed",
+        /// The portfolio budget was already exhausted.
+        PortfolioBudgetExhausted => "portfolio_budget_exhausted",
+        /// No candidate carried a positive signal.
+        NoPositiveSignal => "no_positive_signal",
+        /// The runtime mode disabled report generation.
+        RuntimeModeDisabled => "runtime_mode_disabled",
+        /// The system was degraded below the generation threshold.
+        SystemDegraded => "system_degraded",
+        /// The venue account was unavailable (credentials / venue read failure).
+        AccountUnavailable => "account_unavailable",
+    }
+}
+
+active_string_enum! {
+    /// Why a recommendation is ineligible for execution in a given mode.
+    @derive(Default)
+    pub enum IneligibilityReason {
+        /// The runtime mode is report-only.
+        #[default]
+        ReportOnlyMode => "report_only_mode",
+        /// The risk envelope failed validation.
+        RiskEnvelopeInvalid => "risk_envelope_invalid",
+        /// The model is not published.
+        ModelNotPublished => "model_not_published",
+        /// Inputs were stale at decision time.
+        DataStale => "data_stale",
+        /// Confidence was below the execution floor.
+        LowConfidence => "low_confidence",
+        /// An operator manually blocked execution.
+        ManuallyBlocked => "manually_blocked",
+        /// The candidate has not passed shadow comparison.
+        ShadowNotPassed => "shadow_not_passed",
+        /// The execution budget is exhausted.
+        BudgetExhausted => "budget_exhausted",
+    }
+}
+
+active_string_enum! {
+    /// How an open position is intended to be settled at resolution.
+    @derive(Default)
+    pub enum SettlementPolicy {
+        /// Hold the position until the market resolves, then redeem.
+        #[default]
+        HoldToResolution => "hold_to_resolution",
+        /// Exit on the book before resolution per the exit plan.
+        ExitBeforeResolution => "exit_before_resolution",
+        /// Redeem winnings automatically once redeemable.
+        AutoRedeem => "auto_redeem",
+    }
+}

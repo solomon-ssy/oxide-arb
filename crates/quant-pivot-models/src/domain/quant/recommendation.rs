@@ -1,12 +1,18 @@
 //! Recommendation report persistence DTOs.
+//!
+//! Payload columns are strong-typed value objects (`types::report_payload`)
+//! serialized into the existing JSONB columns — never a bare `serde_json::Value`.
 
 use crate::{
     enums::quant::{
-        QuantRuntimeMode, RecommendationReportStatus, RecommendationStatus, ReportKind, SignalSide,
+        AccountSource, QuantRuntimeMode, RecommendationReportStatus, RecommendationStatus,
+        ReportKind, SignalSide,
     },
     types::{
-        EventId, MarketId, MarketSelectionId, ModelVersionId, PortfolioPlanId, Probability,
-        RecommendationId, RecommendationReportId, RuntimeConfigVersionId, TokenId,
+        AccountSnapshotId, EntryPlan, EventId, EvidenceRefs, ExecutionEligibility, ExitPlan,
+        MarketId, MarketSelectionId, ModelVersionId, PortfolioPlanId, Probability,
+        RecommendationFactorBreakdown, RecommendationId, RecommendationReportId, ReportSummary,
+        RiskEnvelope, RuntimeConfigVersionId, SizingPlan, TokenId, Usd,
     },
 };
 use chrono::{DateTime, Utc};
@@ -28,7 +34,10 @@ pub struct RecommendationReportInfo {
     pub portfolio_plan_id: PortfolioPlanId,
     pub top_n: i32,
     pub status: RecommendationReportStatus,
-    pub summary_json: serde_json::Value,
+    pub account_source: AccountSource,
+    pub capital_base_usd: Usd,
+    pub account_snapshot_ref: AccountSnapshotId,
+    pub summary_json: ReportSummary,
     pub published_at: Option<DateTime<Utc>>,
     pub revoked_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
@@ -49,6 +58,9 @@ info_from_model!(
         portfolio_plan_id,
         top_n,
         status,
+        account_source,
+        capital_base_usd,
+        account_snapshot_ref,
         summary_json,
         published_at,
         revoked_at,
@@ -71,7 +83,10 @@ pub struct NewRecommendationReport {
     pub portfolio_plan_id: PortfolioPlanId,
     pub top_n: i32,
     pub status: RecommendationReportStatus,
-    pub summary_json: serde_json::Value,
+    pub account_source: AccountSource,
+    pub capital_base_usd: Usd,
+    pub account_snapshot_ref: AccountSnapshotId,
+    pub summary_json: ReportSummary,
     pub published_at: Option<DateTime<Utc>>,
     pub revoked_at: Option<DateTime<Utc>>,
 }
@@ -90,12 +105,13 @@ pub struct RecommendationInfo {
     pub composite_score: Probability,
     pub risk_adjusted_score: Probability,
     pub confidence: Probability,
-    pub entry_plan: serde_json::Value,
-    pub sizing_plan: serde_json::Value,
-    pub exit_plan: serde_json::Value,
-    pub risk_envelope: serde_json::Value,
-    pub factor_breakdown: serde_json::Value,
-    pub evidence_refs: serde_json::Value,
+    pub entry_plan: EntryPlan,
+    pub sizing_plan: SizingPlan,
+    pub exit_plan: ExitPlan,
+    pub risk_envelope: RiskEnvelope,
+    pub factor_breakdown: RecommendationFactorBreakdown,
+    pub evidence_refs: EvidenceRefs,
+    pub execution_eligibility: ExecutionEligibility,
     pub valid_from: DateTime<Utc>,
     pub valid_until: DateTime<Utc>,
     pub status: RecommendationStatus,
@@ -105,8 +121,8 @@ pub struct RecommendationInfo {
 info_from_model!(RecommendationInfo, crate::entities::quant_recommendation::Model, {
     recommendation_id, recommendation_report_id, rank, market_id, event_id, token_id,
     side, composite_score, risk_adjusted_score, confidence, entry_plan, sizing_plan,
-    exit_plan, risk_envelope, factor_breakdown, evidence_refs, valid_from, valid_until,
-    status, created_at,
+    exit_plan, risk_envelope, factor_breakdown, evidence_refs, execution_eligibility,
+    valid_from, valid_until, status, created_at,
 });
 
 /// Insert payload for `quant_recommendation`.
@@ -123,20 +139,14 @@ pub struct NewRecommendation {
     pub composite_score: Probability,
     pub risk_adjusted_score: Probability,
     pub confidence: Probability,
-    pub entry_plan: serde_json::Value,
-    pub sizing_plan: serde_json::Value,
-    pub exit_plan: serde_json::Value,
-    pub risk_envelope: serde_json::Value,
-    pub factor_breakdown: serde_json::Value,
-    pub evidence_refs: serde_json::Value,
+    pub entry_plan: EntryPlan,
+    pub sizing_plan: SizingPlan,
+    pub exit_plan: ExitPlan,
+    pub risk_envelope: RiskEnvelope,
+    pub factor_breakdown: RecommendationFactorBreakdown,
+    pub evidence_refs: EvidenceRefs,
+    pub execution_eligibility: ExecutionEligibility,
     pub valid_from: DateTime<Utc>,
     pub valid_until: DateTime<Utc>,
     pub status: RecommendationStatus,
-}
-
-/// Runtime report aggregate before repository persistence.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RecommendationReportModel {
-    pub report: NewRecommendationReport,
-    pub recommendations: Vec<NewRecommendation>,
 }

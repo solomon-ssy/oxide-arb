@@ -58,9 +58,3 @@ pub struct NewRecommendationAttribution {
     pub label_available_at: Option<DateTime<Utc>>,
     pub attribution_json: serde_json::Value,
 }
-
-/// Runtime attribution result before persistence.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RecommendationAttributionModel {
-    pub attribution: NewRecommendationAttribution,
-}

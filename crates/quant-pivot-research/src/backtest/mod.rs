@@ -140,14 +140,16 @@ impl From<&PortfolioConfig> for PortfolioCaps {
     /// intentionally not part of the allocator's caps.
     fn from(config: &PortfolioConfig) -> Self {
         let decimal = |value: &str| value.parse::<Decimal>().unwrap_or(Decimal::ZERO);
+        let budget = &config.budget;
+        let constraints = &config.constraints;
         Self {
-            total_budget_usd: decimal(&config.total_budget_usd.value),
-            max_single_recommendation_usd: decimal(&config.max_single_recommendation_usd.value),
-            min_recommendation_usd: decimal(&config.min_recommendation_usd.value),
-            max_market_exposure_usd: decimal(&config.max_market_exposure_usd.value),
-            max_event_exposure_usd: decimal(&config.max_event_exposure_usd.value),
-            max_category_exposure_usd: decimal(&config.max_category_exposure_usd.value),
-            liquidity_usage_cap_pct: decimal(&config.liquidity_usage_cap_pct.value),
+            total_budget_usd: decimal(&budget.total_budget_usd.value),
+            max_single_recommendation_usd: decimal(&budget.max_single_recommendation_usd.value),
+            min_recommendation_usd: decimal(&budget.min_recommendation_usd.value),
+            max_market_exposure_usd: decimal(&constraints.max_market_exposure_usd.value),
+            max_event_exposure_usd: decimal(&constraints.max_event_exposure_usd.value),
+            max_category_exposure_usd: decimal(&constraints.max_category_exposure_usd.value),
+            liquidity_usage_cap_pct: decimal(&constraints.liquidity_usage_cap_pct.value),
         }
     }
 }

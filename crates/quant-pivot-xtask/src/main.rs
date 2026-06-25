@@ -23,7 +23,7 @@ const DOCKER_SUITES: &[(&str, &str)] = &[
 const NETWORK_SUITES: &[(&str, &str)] = &[
     ("quant-pivot-api", "http_gamma_wiremock"),
     ("quant-pivot-api", "http_clob_wiremock"),
-    ("quant-pivot-api", "clob_live_path_wiremock"),
+    ("quant-pivot-api", "http_data_api_wiremock"),
 ];
 
 #[derive(Parser)]

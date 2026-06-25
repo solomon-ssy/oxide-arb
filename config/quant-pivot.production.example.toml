@@ -109,13 +109,20 @@ full_sync_interval_secs = 300
 # Default: 100.
 page_size = 100
 
+[market_data.data_api]
+# Keyless venue positions (GET /positions?user=<funder>) for the report capital base.
+base_url = "https://data-api.polymarket.com"
+page_size = 500
+size_threshold = 1
+
 # ── Quant Pivot (Phase 0) ─────────────────────────────────────────────────────
 
 [quant.workers]
 report_scheduler_tick_secs = 30
 
-[quant.execution]
-load_credentials_in_report_only = false
+[quant.account]
+# Polymarket proxy/funder address for Data API position reads. Required (all modes).
+# funder = "0x...."
 
 # ── Keys / Credentials ───────────────────────────────────────────────────────
 #

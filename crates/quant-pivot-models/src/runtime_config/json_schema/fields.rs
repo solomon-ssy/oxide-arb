@@ -422,9 +422,9 @@ mod tests {
         let mut current = RuntimeConfig::default();
         current.notification.telegram.bot_token = "live-token".into();
         let mut patch = BTreeMap::new();
-        patch.insert("portfolio.total_budget_usd".into(), json!("175"));
+        patch.insert("portfolio.budget.total_budget_usd".into(), json!("175"));
         let merged = apply_runtime_config_patch(&current, &patch).expect("patch merge");
-        assert_eq!(merged.portfolio.total_budget_usd.value, "175");
+        assert_eq!(merged.portfolio.budget.total_budget_usd.value, "175");
         assert_eq!(merged.notification.telegram.bot_token, "live-token");
     }
 

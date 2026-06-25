@@ -3,12 +3,14 @@
 //! Each bundle exposes an `assemble` entry point; [`super::build`] only
 //! orchestrates bootstrap order and cross-bundle wiring.
 
+mod account;
 mod data;
 mod future;
 mod governance;
 mod infra;
 mod research;
 
+pub use account::{AccountBundle, AccountBundleDeps};
 pub use data::{DataBundle, DataBundleDeps};
 pub use future::{ExecutionIntentBundle, PortfolioBundle, ReportBundle, RuntimeChannels};
 pub use governance::{GovernanceBundle, GovernanceBundleDeps, RuntimeSnapshot};

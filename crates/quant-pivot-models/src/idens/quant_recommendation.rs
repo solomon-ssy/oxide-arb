@@ -34,6 +34,7 @@ pub enum QuantRecommendation {
     RiskEnvelope,
     FactorBreakdown,
     EvidenceRefs,
+    ExecutionEligibility,
     ValidFrom,
     ValidUntil,
     Status,
@@ -85,6 +86,11 @@ pub fn table() -> TableCreateStatement {
         )
         .col(
             ColumnDef::new(QuantRecommendation::EvidenceRefs)
+                .json_binary()
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(QuantRecommendation::ExecutionEligibility)
                 .json_binary()
                 .not_null(),
         )

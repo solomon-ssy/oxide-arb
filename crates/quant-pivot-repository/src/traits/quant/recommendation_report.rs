@@ -1,16 +1,17 @@
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    domain::{NewRecommendation, NewRecommendationReport, RecommendationReportInfo},
+    domain::{NewReportTransaction, RecommendationReportInfo},
     enums::quant::ReportKind,
     types::RecommendationReportId,
 };
 
 #[async_trait::async_trait]
 pub trait RecommendationReportRepository: Send + Sync {
+    /// Persist a report atomically: account snapshot → portfolio plan → report →
+    /// recommendations, in one transaction.
     async fn create_report(
         &self,
-        report: NewRecommendationReport,
-        recommendations: Vec<NewRecommendation>,
+        transaction: NewReportTransaction,
     ) -> Result<RecommendationReportInfo, StorageError>;
 
     async fn latest_published(

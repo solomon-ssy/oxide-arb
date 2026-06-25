@@ -129,6 +129,68 @@ pub enum DrawdownMultiplierPolicy {
     Conservative,
 }
 
+/// Position-sizing model selection for the portfolio planner.
+///
+/// Tagged on `model`. Fractional Kelly is the production default; the
+/// confidence curve is a deterministic baseline / shadow.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "model", rename_all = "snake_case")]
+pub enum SizingModelConfig {
+    /// Fractional Kelly sizing.
+    Kelly {
+        /// Fraction of full Kelly to apply, in `(0, 1]` (half-Kelly ≈ `0.5`).
+        kelly_fraction: DecimalString,
+        /// Maximum single-position size as a fraction of equity.
+        max_position_pct: DecimalString,
+        /// Drawdown-driven scaling policy.
+        drawdown_scaling: DrawdownMultiplierPolicy,
+    },
+    /// Deterministic confidence-to-size curve.
+    ConfidenceCurve {
+        /// Named confidence-to-size curve.
+        curve: ConfidenceSizeCurve,
+        /// Drawdown multiplier policy.
+        drawdown_multiplier: DrawdownMultiplierPolicy,
+    },
+}
+
+impl Default for SizingModelConfig {
+    fn default() -> Self {
+        Self::Kelly {
+            kelly_fraction: DecimalString::new("0.5"),
+            max_position_pct: DecimalString::new("0.1"),
+            drawdown_scaling: DrawdownMultiplierPolicy::Fixed,
+        }
+    }
+}
+
+/// How often a report schedule fires.
+///
+/// Tagged on `kind`. The cron variant is parsed/scheduled by the 04.3 runner;
+/// 04.0 validation only checks structural validity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ScheduleCadence {
+    /// Fixed interval in seconds (`> 0`).
+    Interval {
+        /// Interval between fires, in seconds.
+        interval_secs: u64,
+    },
+    /// 6-field cron expression with an optional IANA timezone.
+    Cron {
+        /// 6-field cron expression.
+        expr: String,
+        /// Optional IANA timezone (e.g. `America/New_York`).
+        timezone: Option<String>,
+    },
+}
+
+impl Default for ScheduleCadence {
+    fn default() -> Self {
+        Self::Interval { interval_secs: 300 }
+    }
+}
+
 /// Supported feature families for v3 feature generation.
 ///
 /// One family ≈ one feature-builder group. The set gates which groups the

@@ -1,7 +1,24 @@
 //! Declarative helpers for Postgres `JSONB` newtypes used in `SeaORM` entities.
 //!
-//! `FromJsonQueryResult` covers read/query binding; the macro also emits the
-//! trivial `IntoActiveValue` impl required for `ActiveModel` writes.
+//! [`jsonb_active!`] emits the trivial `IntoActiveValue` impl required for
+//! `ActiveModel` writes. [`jsonb_newtype!`] defines a JSONB-backed struct or
+//! tuple newtype with `FromJsonQueryResult` and delegates the active binding to
+//! [`jsonb_active!`].
+
+/// Emit the trivial `IntoActiveValue` impl required to `Set` a JSONB column type
+/// on an `ActiveModel` (read binding comes from `FromJsonQueryResult`).
+#[macro_export]
+macro_rules! jsonb_active {
+    ($($name:ty),+ $(,)?) => {
+        $(
+            impl sea_orm::IntoActiveValue<Self> for $name {
+                fn into_active_value(self) -> sea_orm::ActiveValue<Self> {
+                    sea_orm::ActiveValue::Set(self)
+                }
+            }
+        )+
+    };
+}
 
 /// Define a JSONB-backed newtype with `SeaORM` read/write bindings.
 #[macro_export]
@@ -22,11 +39,7 @@ macro_rules! jsonb_newtype {
         )]
         $vis struct $name(pub $inner);
 
-        impl sea_orm::IntoActiveValue<Self> for $name {
-            fn into_active_value(self) -> sea_orm::ActiveValue<Self> {
-                sea_orm::ActiveValue::Set(self)
-            }
-        }
+        $crate::jsonb_active!($name);
     };
 
     (
@@ -49,12 +62,9 @@ macro_rules! jsonb_newtype {
             $(pub $field: $ty,)*
         }
 
-        impl sea_orm::IntoActiveValue<Self> for $name {
-            fn into_active_value(self) -> sea_orm::ActiveValue<Self> {
-                sea_orm::ActiveValue::Set(self)
-            }
-        }
+        $crate::jsonb_active!($name);
     };
 }
 
+pub use jsonb_active;
 pub use jsonb_newtype;

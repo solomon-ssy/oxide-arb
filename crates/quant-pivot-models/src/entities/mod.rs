@@ -5,6 +5,7 @@ pub mod event;
 pub mod market;
 pub mod menu;
 pub mod operation_log;
+pub mod quant_account_snapshot;
 pub mod quant_backtest_report;
 pub mod quant_execution_order;
 pub mod quant_factor_definition;

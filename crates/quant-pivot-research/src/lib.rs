@@ -45,6 +45,7 @@ pub mod governance;
 pub mod hashing;
 pub mod model;
 pub mod pit;
+pub mod portfolio;
 pub mod selection;
 pub mod training;
 

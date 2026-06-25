@@ -4,7 +4,9 @@
 //! Deleted pre-quant configuration paths are not accepted in Phase 1 clean-break
 //! runtime configuration.
 
-use super::{DecimalString, RuntimeConfig, sections::FeaturesConfig};
+use super::{
+    DecimalString, RuntimeConfig, ScheduleCadence, SizingModelConfig, sections::FeaturesConfig,
+};
 use linkme::distributed_slice;
 use quant_pivot_error::config_validation::{ConfigValidationError, ConfigValidationReport};
 use rust_decimal::Decimal;
@@ -253,36 +255,116 @@ fn validate_reports(config: &RuntimeConfig, report: &mut ConfigValidationReport)
                 detail: "must not be empty".to_owned(),
             });
         }
-        if schedule.enabled && schedule.interval_secs == 0 {
+        if schedule.enabled {
+            validate_cadence(&schedule.cadence, report);
+        }
+        if schedule.top_n == 0 || schedule.top_n > config.reports.max_top_n {
             report.errors.push(ConfigValidationError::InvalidValue {
-                field: "reports.schedules.interval_secs",
-                detail: "enabled schedules must have a positive interval".to_owned(),
+                field: "reports.schedules.top_n",
+                detail: "must be in 1..=reports.max_top_n".to_owned(),
             });
         }
     }
 }
 
+/// Validate a schedule cadence. Cron expressions get a structural check only;
+/// full parsing happens in the 04.3 scheduler runner.
+fn validate_cadence(cadence: &ScheduleCadence, report: &mut ConfigValidationReport) {
+    match cadence {
+        ScheduleCadence::Interval { interval_secs } => {
+            if *interval_secs == 0 {
+                report.errors.push(ConfigValidationError::InvalidValue {
+                    field: "reports.schedules.cadence.interval_secs",
+                    detail: "enabled interval schedules must have a positive interval".to_owned(),
+                });
+            }
+        }
+        ScheduleCadence::Cron { expr, .. } => {
+            if expr.split_whitespace().count() != 6 {
+                report.errors.push(ConfigValidationError::InvalidValue {
+                    field: "reports.schedules.cadence.expr",
+                    detail: "cron expression must have 6 whitespace-separated fields".to_owned(),
+                });
+            }
+        }
+    }
+}
+
 fn validate_portfolio(config: &RuntimeConfig, report: &mut ConfigValidationReport) {
-    decimal(
-        "portfolio.total_budget_usd",
-        &config.portfolio.total_budget_usd,
+    let budget = &config.portfolio.budget;
+    non_negative_decimal(
+        "portfolio.budget.total_budget_usd",
+        &budget.total_budget_usd,
         report,
     );
-    decimal(
-        "portfolio.max_single_recommendation_usd",
-        &config.portfolio.max_single_recommendation_usd,
+    non_negative_decimal(
+        "portfolio.budget.min_recommendation_usd",
+        &budget.min_recommendation_usd,
         report,
     );
-    decimal(
-        "portfolio.max_market_exposure_usd",
-        &config.portfolio.max_market_exposure_usd,
+    non_negative_decimal(
+        "portfolio.budget.max_single_recommendation_usd",
+        &budget.max_single_recommendation_usd,
         report,
     );
-    decimal(
-        "portfolio.liquidity_usage_cap_pct",
-        &config.portfolio.liquidity_usage_cap_pct,
+
+    let constraints = &config.portfolio.constraints;
+    non_negative_decimal(
+        "portfolio.constraints.max_market_exposure_usd",
+        &constraints.max_market_exposure_usd,
         report,
     );
+    non_negative_decimal(
+        "portfolio.constraints.max_event_exposure_usd",
+        &constraints.max_event_exposure_usd,
+        report,
+    );
+    non_negative_decimal(
+        "portfolio.constraints.max_category_exposure_usd",
+        &constraints.max_category_exposure_usd,
+        report,
+    );
+    non_negative_decimal(
+        "portfolio.constraints.max_correlated_exposure_usd",
+        &constraints.max_correlated_exposure_usd,
+        report,
+    );
+    unit_ratio(
+        "portfolio.constraints.liquidity_usage_cap_pct",
+        &constraints.liquidity_usage_cap_pct,
+        report,
+    );
+
+    validate_sizing(&config.portfolio.sizing, report);
+}
+
+/// Validate the sizing model parameters.
+fn validate_sizing(sizing: &SizingModelConfig, report: &mut ConfigValidationReport) {
+    match sizing {
+        SizingModelConfig::Kelly {
+            kelly_fraction,
+            max_position_pct,
+            ..
+        } => {
+            match kelly_fraction.value.parse::<Decimal>() {
+                Ok(parsed) if parsed > Decimal::ZERO && parsed <= Decimal::ONE => {}
+                Ok(parsed) => report.errors.push(ConfigValidationError::InvalidValue {
+                    field: "portfolio.sizing.kelly_fraction",
+                    detail: format!("`{parsed}` must be within (0, 1]"),
+                }),
+                Err(_) => report.errors.push(ConfigValidationError::InvalidValue {
+                    field: "portfolio.sizing.kelly_fraction",
+                    detail: format!("`{}` is not a valid decimal string", kelly_fraction.value),
+                }),
+            }
+            unit_ratio(
+                "portfolio.sizing.max_position_pct",
+                max_position_pct,
+                report,
+            );
+        }
+        SizingModelConfig::ConfidenceCurve { .. } => {}
+    }
 }
 
 fn validate_execution(config: &RuntimeConfig, report: &mut ConfigValidationReport) {
@@ -352,6 +434,25 @@ fn decimal(field: &'static str, value: &DecimalString, report: &mut ConfigValida
     }
 }
 
+/// Validate a non-negative decimal (parses and is `>= 0`).
+fn non_negative_decimal(
+    field: &'static str,
+    value: &DecimalString,
+    report: &mut ConfigValidationReport,
+) {
+    match value.value.parse::<Decimal>() {
+        Ok(parsed) if parsed >= Decimal::ZERO => {}
+        Ok(parsed) => report.errors.push(ConfigValidationError::InvalidValue {
+            field,
+            detail: format!("`{parsed}` must be >= 0"),
+        }),
+        Err(_) => report.errors.push(ConfigValidationError::InvalidValue {
+            field,
+            detail: format!("`{}` is not a valid decimal string", value.value),
+        }),
+    }
+}
+
 /// Validate a `[0, 1]` ratio: parses as a decimal and lies within the unit range.
 fn unit_ratio(field: &'static str, value: &DecimalString, report: &mut ConfigValidationReport) {
     match value.value.parse::<Decimal>() {
@@ -393,7 +494,7 @@ mod tests {
     #[test]
     fn invalid_decimal_is_rejected() {
         let mut config = RuntimeConfig::default();
-        config.portfolio.total_budget_usd = DecimalString::new("not-a-decimal");
+        config.portfolio.budget.total_budget_usd = DecimalString::new("not-a-decimal");
         let report = validate_runtime_config(&config);
         assert!(report.has_errors());
     }
@@ -408,7 +509,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_version_remains_v3() {
+    fn schema_version_matches_constant() {
         assert_eq!(
             RuntimeConfig::default().schema_version,
             RUNTIME_CONFIG_SCHEMA_VERSION

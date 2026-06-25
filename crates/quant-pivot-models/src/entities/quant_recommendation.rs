@@ -2,7 +2,11 @@
 
 use crate::{
     enums::quant::{RecommendationStatus, SignalSide},
-    types::{EventId, MarketId, Probability, RecommendationId, RecommendationReportId, TokenId},
+    types::{
+        EntryPlan, EventId, EvidenceRefs, ExecutionEligibility, ExitPlan, MarketId, Probability,
+        RecommendationFactorBreakdown, RecommendationId, RecommendationReportId, RiskEnvelope,
+        SizingPlan, TokenId,
+    },
 };
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
@@ -22,17 +26,19 @@ pub struct Model {
     pub risk_adjusted_score: Probability,
     pub confidence: Probability,
     #[sea_orm(column_type = "JsonBinary")]
-    pub entry_plan: Json,
+    pub entry_plan: EntryPlan,
     #[sea_orm(column_type = "JsonBinary")]
-    pub sizing_plan: Json,
+    pub sizing_plan: SizingPlan,
     #[sea_orm(column_type = "JsonBinary")]
-    pub exit_plan: Json,
+    pub exit_plan: ExitPlan,
     #[sea_orm(column_type = "JsonBinary")]
-    pub risk_envelope: Json,
+    pub risk_envelope: RiskEnvelope,
     #[sea_orm(column_type = "JsonBinary")]
-    pub factor_breakdown: Json,
+    pub factor_breakdown: RecommendationFactorBreakdown,
     #[sea_orm(column_type = "JsonBinary")]
-    pub evidence_refs: Json,
+    pub evidence_refs: EvidenceRefs,
+    #[sea_orm(column_type = "JsonBinary")]
+    pub execution_eligibility: ExecutionEligibility,
     pub valid_from: DateTime<Utc>,
     pub valid_until: DateTime<Utc>,
     pub status: RecommendationStatus,

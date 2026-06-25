@@ -123,6 +123,7 @@ mod tests {
             "quant_backtest_report",
             "quant_shadow_comparison",
             "quant_model_governance_audit",
+            "quant_account_snapshot",
             "quant_portfolio_plan",
             "quant_recommendation_report",
             "quant_recommendation",
@@ -153,5 +154,17 @@ mod tests {
                 "legacy table `{deleted}` must not remain in active schema catalog"
             );
         }
+    }
+
+    #[test]
+    fn account_snapshot_table_in_catalog() {
+        let tables = catalog::tables()
+            .into_iter()
+            .map(|spec| (spec.table_name)())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(
+            tables.contains("quant_account_snapshot"),
+            "Phase 04.0 table `quant_account_snapshot` must be registered in the schema catalog"
+        );
     }
 }

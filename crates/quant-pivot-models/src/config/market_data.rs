@@ -6,7 +6,7 @@
 
 use serde::Deserialize;
 
-/// Market-data connections (CLOB WebSocket + Gamma catalog).
+/// Market-data connections (CLOB WebSocket + Gamma catalog + Data API).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct MarketDataDeployConfig {
@@ -14,6 +14,8 @@ pub struct MarketDataDeployConfig {
     pub websocket: WebSocketConfig,
     /// Polymarket Gamma API client.
     pub gamma: GammaConfig,
+    /// Polymarket Data API client (keyless positions reads).
+    pub data_api: DataApiConfig,
 }
 
 /// Polymarket CLOB WebSocket sharding and reconnect policy.
@@ -99,4 +101,40 @@ const fn default_gamma_full_sync_interval() -> u64 {
 }
 const fn default_gamma_page_size() -> u32 {
     100
+}
+
+/// Polymarket Data API configuration (keyless positions reads).
+///
+/// The Data API serves the venue position ledger (`GET /positions?user=<funder>`)
+/// used to mark the report capital base. No credentials are required — only the
+/// proxy/funder address (configured under `[quant.account]`).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct DataApiConfig {
+    /// Data API base URL. Default: `https://data-api.polymarket.com`.
+    pub base_url: String,
+    /// Page size for positions pagination (`1..=500`). Default: `500`.
+    pub page_size: u32,
+    /// Minimum token size to include (`sizeThreshold`). Default: `1`.
+    pub size_threshold: u32,
+}
+
+impl Default for DataApiConfig {
+    fn default() -> Self {
+        Self {
+            base_url: default_data_api_url(),
+            page_size: default_data_api_page_size(),
+            size_threshold: default_data_api_size_threshold(),
+        }
+    }
+}
+
+fn default_data_api_url() -> String {
+    "https://data-api.polymarket.com".into()
+}
+const fn default_data_api_page_size() -> u32 {
+    500
+}
+const fn default_data_api_size_threshold() -> u32 {
+    1
 }

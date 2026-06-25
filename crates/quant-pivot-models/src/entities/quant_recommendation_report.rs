@@ -1,10 +1,10 @@
 //! `quant_recommendation_report` table entity.
 
 use crate::{
-    enums::quant::{QuantRuntimeMode, RecommendationReportStatus, ReportKind},
+    enums::quant::{AccountSource, QuantRuntimeMode, RecommendationReportStatus, ReportKind},
     types::{
-        MarketSelectionId, ModelVersionId, PortfolioPlanId, RecommendationReportId,
-        RuntimeConfigVersionId,
+        AccountSnapshotId, MarketSelectionId, ModelVersionId, PortfolioPlanId,
+        RecommendationReportId, ReportSummary, RuntimeConfigVersionId, Usd,
     },
 };
 use chrono::{DateTime, Utc};
@@ -25,8 +25,11 @@ pub struct Model {
     pub portfolio_plan_id: PortfolioPlanId,
     pub top_n: i32,
     pub status: RecommendationReportStatus,
+    pub account_source: AccountSource,
+    pub capital_base_usd: Usd,
+    pub account_snapshot_ref: AccountSnapshotId,
     #[sea_orm(column_type = "JsonBinary")]
-    pub summary_json: Json,
+    pub summary_json: ReportSummary,
     pub published_at: Option<DateTime<Utc>>,
     pub revoked_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
@@ -52,6 +55,12 @@ pub enum Relation {
         to = "super::quant_portfolio_plan::Column::PortfolioPlanId"
     )]
     PortfolioPlan,
+    #[sea_orm(
+        belongs_to = "super::quant_account_snapshot::Entity",
+        from = "Column::AccountSnapshotRef",
+        to = "super::quant_account_snapshot::Column::AccountSnapshotId"
+    )]
+    AccountSnapshot,
     #[sea_orm(has_many = "super::quant_recommendation::Entity")]
     Recommendation,
 }
@@ -71,6 +80,12 @@ impl Related<super::quant_market_selection::Entity> for Entity {
 impl Related<super::quant_portfolio_plan::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::PortfolioPlan.def()
+    }
+}
+
+impl Related<super::quant_account_snapshot::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::AccountSnapshot.def()
     }
 }
 

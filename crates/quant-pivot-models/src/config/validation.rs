@@ -147,30 +147,36 @@ pub fn validate_deploy_for_quant_mode(
     report
 }
 
+/// Credential policy (all modes): `report_only` is **not** dry-run — report
+/// sizing is built on the real venue account, so the private key (CLOB
+/// collateral / L2 read credential) and the funder (Data API position reads) are
+/// required in every mode. Missing either fails closed. The private key is used
+/// only for reads here; signing/submission gating stays mode-aware elsewhere.
 fn validate_credentials_quant_mode(
     deploy: &DeployConfig,
     mode: QuantRuntimeMode,
     report: &mut ConfigValidationReport,
 ) {
-    if deploy.keys.private_key_present() {
-        return;
+    let mut missing = Vec::new();
+    if !deploy.keys.private_key_present() {
+        missing.push("private_key");
     }
-
-    let mode_label = mode.to_string();
-    match mode {
-        QuantRuntimeMode::ReportOnly if !deploy.quant.execution.load_credentials_in_report_only => {
-        }
-        QuantRuntimeMode::ReportOnly | QuantRuntimeMode::SemiAuto => {
-            report.warnings.push(ConfigWarning::NoCredentialsPaper);
-        }
-        QuantRuntimeMode::AutoExecution => {
-            report
-                .errors
-                .push(ConfigValidationError::MissingCredentials {
-                    mode: mode_label,
-                    missing: vec!["private_key"],
-                });
-        }
+    let funder_present = deploy
+        .quant
+        .account
+        .funder
+        .as_deref()
+        .is_some_and(|funder| !funder.trim().is_empty());
+    if !funder_present {
+        missing.push("quant.account.funder");
+    }
+    if !missing.is_empty() {
+        report
+            .errors
+            .push(ConfigValidationError::MissingCredentials {
+                mode: mode.to_string(),
+                missing,
+            });
     }
 }
 
@@ -223,10 +229,12 @@ mod tests {
     }
 
     #[test]
-    fn report_only_permits_empty_credentials() {
+    fn report_only_requires_credentials() {
+        // report_only is not dry-run: it needs a private key + funder to read
+        // the real venue account, so missing credentials fail closed.
         let deploy = DeployConfig::default();
         let report = validate_deploy_for_quant_mode(&deploy, QuantRuntimeMode::ReportOnly);
-        assert!(!report.has_errors());
+        assert!(report.has_errors());
     }
 
     #[test]
@@ -244,16 +252,19 @@ mod tests {
     fn auto_execution_accepts_strong_jwt_secret_and_credentials() {
         let mut deploy = DeployConfig::default();
         deploy.keys.private_key = Some("0xabc".into());
+        deploy.quant.account.funder = Some("0xfunder".into());
         deploy.web.jwt.secret = "a-strong-production-secret".to_owned();
         let report = validate_deploy_for_quant_mode(&deploy, QuantRuntimeMode::AutoExecution);
         assert!(!report.has_errors(), "errors: {:?}", report.errors);
     }
 
     #[test]
-    fn report_only_only_warns_on_weak_jwt_secret() {
-        let deploy = DeployConfig::default();
+    fn report_only_with_credentials_only_warns_on_weak_jwt_secret() {
+        let mut deploy = DeployConfig::default();
+        deploy.keys.private_key = Some("0xabc".into());
+        deploy.quant.account.funder = Some("0xfunder".into());
         let report = validate_deploy_for_quant_mode(&deploy, QuantRuntimeMode::ReportOnly);
-        assert!(!report.has_errors());
+        assert!(!report.has_errors(), "errors: {:?}", report.errors);
         assert!(!report.warnings.is_empty(), "weak secret should warn");
     }
 }

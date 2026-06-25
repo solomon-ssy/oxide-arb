@@ -179,13 +179,26 @@ mod tests {
     }
 
     #[test]
-    fn validate_for_quant_mode_report_only_permissive() {
+    fn report_only_requires_credentials() {
+        // report_only is not dry-run: it reads the real venue account, so a
+        // missing private key / funder fails closed in every mode.
         let deploy = DeployConfig::default();
         assert!(
-            !deploy
+            deploy
                 .validate_for_quant_mode(QuantRuntimeMode::ReportOnly)
                 .has_errors()
         );
+    }
+
+    #[test]
+    fn report_only_validates_with_credentials() {
+        let mut deploy = DeployConfig::default();
+        deploy.keys.private_key = Some("0xabc".into());
+        deploy.quant.account.funder = Some("0xfunder".into());
+        deploy.web.jwt.secret = "a-strong-production-secret".to_owned();
+        deploy
+            .ensure_valid_for_quant_mode(QuantRuntimeMode::ReportOnly)
+            .expect("report_only with credentials must validate");
     }
 
     #[test]

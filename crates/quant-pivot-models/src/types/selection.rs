@@ -1,7 +1,9 @@
 //! Market-selection shared value types used by persistence and the research plane.
 
-use sea_orm::{ActiveValue, FromJsonQueryResult, IntoActiveValue};
+use sea_orm::FromJsonQueryResult;
 use serde::{Deserialize, Serialize};
+
+use crate::jsonb_active;
 
 /// Aggregate counts of exclusion reasons for a market selection snapshot.
 ///
@@ -22,8 +24,4 @@ pub struct SelectionExclusionSummary {
     pub other_count: u32,
 }
 
-impl IntoActiveValue<Self> for SelectionExclusionSummary {
-    fn into_active_value(self) -> ActiveValue<Self> {
-        ActiveValue::Set(self)
-    }
-}
+jsonb_active!(SelectionExclusionSummary);

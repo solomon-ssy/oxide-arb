@@ -1,5 +1,6 @@
 //! Quant-pivot persistence DTOs for Phase 1 schema-first repositories.
 
+mod account;
 mod attribution;
 #[allow(clippy::needless_update)] // NewBacktestReport omits DB-managed created_at
 mod backtest;
@@ -18,11 +19,13 @@ mod model;
 mod portfolio;
 pub mod prelude;
 mod recommendation;
+mod report_txn;
 #[allow(clippy::needless_update)] // NewMarketSelectionMember covers all ActiveModel columns
 mod selection;
 #[allow(clippy::needless_update)] // NewShadowComparison omits DB-managed created_at
 mod shadow;
 
+pub use account::*;
 pub use attribution::*;
 pub use backtest::*;
 pub use candidate::*;
@@ -35,5 +38,6 @@ pub use governance_audit::*;
 pub use model::*;
 pub use portfolio::*;
 pub use recommendation::*;
+pub use report_txn::*;
 pub use selection::*;
 pub use shadow::*;

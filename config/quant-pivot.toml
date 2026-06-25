@@ -118,6 +118,16 @@ full_sync_interval_secs = 300
 # Default: 100.
 page_size = 100
 
+[market_data.data_api]
+# Purpose: Data API base URL for keyless venue position reads
+# (GET /positions?user=<funder>). Used to mark the report capital base.
+# Default: "https://data-api.polymarket.com".
+base_url = "https://data-api.polymarket.com"
+# Purpose: positions pagination page size (1..=500). Default: 500.
+page_size = 500
+# Purpose: minimum token size to include (sizeThreshold). Default: 1.
+size_threshold = 1
+
 # ── Quant Pivot (Phase 0) ─────────────────────────────────────────────────────
 
 [quant.workers]
@@ -125,10 +135,13 @@ page_size = 100
 # Default: 30.
 report_scheduler_tick_secs = 30
 
-[quant.execution]
-# Purpose: when false, private keys are not required in ReportOnly mode.
-# Default: false.
-load_credentials_in_report_only = false
+[quant.account]
+# Purpose: Polymarket proxy/funder address for keyless Data API position reads
+# (user=<funder>). Required to generate reports in ALL modes — report_only is not
+# dry-run, so sizing is built on the real venue account. Distinct from the signer
+# EOA derived from [keys].private_key.
+# Override: QUANT_PIVOT__QUANT__ACCOUNT__FUNDER
+# funder = "0x...."
 
 # ── Research Plane (Phase 3) ──────────────────────────────────────────────────
 
@@ -148,8 +161,9 @@ artifact_root = "./var/artifacts"
 #   B. config/quant-pivot.local.toml  (gitignored — recommended on dev laptops)
 #   C. Uncomment `private_key` below (not recommended)
 #
-# Paper / Live: private_key required. ReportOnly: optional unless
-# quant.execution.load_credentials_in_report_only = true.
+# All modes require private_key + quant.account.funder: report_only is not
+# dry-run — report sizing reads the real venue account. In report_only the key is
+# used only for reads; signing/submission applies in semi_auto / auto_execution.
 # Never commit real secrets. See docs/operations/runbook.md §3.2.
 
 [keys]
