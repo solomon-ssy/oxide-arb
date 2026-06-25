@@ -347,7 +347,7 @@ quant-pivot-risk/src/
 
 - `oracle/` 不能作为主路径；若保留，只作为 settlement label source。
 - `ctf/` 不能作为报告系统核心；只在 execution attribution 需要时使用。
-- `keystore/` 只在 `semi_auto` / `auto_execution` 启用时加载；`report_only` 不需要私钥。
+- `keystore/` 在**所有 mode** 加载（私钥用于读真实抵押余额 + 派生 L2 读凭证；report_only ≠ dry-run，报告强制建立在真实账户上）；私钥的**签名/下单**用途仅 `semi_auto` / `auto_execution`。
 
 ### 7.3 新 API 边界
 
@@ -436,8 +436,9 @@ ClickHouse：
 删除命令或语义：
 
 - `serve` 中自动 trading engine 启动。
-- mode preflight for DryRun/Paper/Live。
-- private key startup requirement in non-execution modes。
+- mode preflight for DryRun/Paper/Live（旧 ExecutionMode 体系整体删除）。
+- 旧「签名私钥才算就绪」的 mode-gated 凭证策略（纠偏：**所有 mode** 都需私钥 + funder
+  读真实账户用于报告 sizing；私钥的**签名**用途仍仅 semi_auto/auto）。
 
 新增命令：
 

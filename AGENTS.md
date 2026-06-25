@@ -12,7 +12,7 @@ Primary onboarding guide for AI agents and contributors. Active architecture liv
 4. Produces periodic **RecommendationReport** (TopN) as the primary artifact (Phase 4+).
 5. Optionally executes via **OrderIntent** under `semi_auto` or `auto_execution` (Phase 5+).
 
-Default mode: **`QuantRuntimeMode::ReportOnly`** — reports only, no orders, no private keys required.
+Default mode: **`QuantRuntimeMode::ReportOnly`** — the report is the final artifact (human places orders manually); the system never signs/submits orders. **`ReportOnly` is NOT dry-run**: report sizing is built on the **real venue account** (CLOB collateral + Data API positions), so a private key (for reads / L2 read credentials) and a `funder` address are required to generate reports. Private keys are used for **signing/submitting** orders only in `SemiAuto`/`AutoExecution`. Account truth is **credential-gated, not mode-gated**; missing credentials → report generation fails closed (no simulation/no configured-budget fallback).
 
 ## 2. Hard Boundaries
 

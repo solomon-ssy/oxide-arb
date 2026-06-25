@@ -174,7 +174,7 @@ Admission 不是旧 `RiskPipeline` 的兼容层，而是新执行前置门。
 
 ### 4.1 输入
 
-> `account snapshot` / `current exposure` / `filled positions` / `account balance` 的统一类型与 provider（report_only 配置预算 vs 执行模式真实余额/持仓）见 [09 — 账户、资本、持仓与对账设计](09-account-capital-position-reconciliation.md)。
+> `account snapshot` / `current exposure` / `filled positions` / `account balance` 的统一类型与唯一 `VenueAccountProvider`（credential-gated 真实账户，**所有 mode 一致**；`report_only` ≠ dry-run，同样读真实余额/持仓，凭证缺失则 fail closed）见 [09 — 账户、资本、持仓与对账设计](09-account-capital-position-reconciliation.md)。
 
 - `OrderIntent`
 - latest book snapshot。

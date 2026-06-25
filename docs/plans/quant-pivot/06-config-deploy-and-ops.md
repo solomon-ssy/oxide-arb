@@ -43,7 +43,7 @@
 | `[settlement.lifecycle]` | 旧 settlement worker channel |
 | `market_data.websocket.engine_endgame_window_hours` | Endgame-only hot subscription |
 | `market_data.websocket.engine_max_subscription_tokens` | 命名绑定 engine trading hotset，改为 quant ingestion cap |
-| `[keys]` mode-aware required policy | report_only 不需要私钥 |
+| `[keys]` mode-aware required policy / `load_credentials_in_report_only` | 纠偏：私钥不再 mode-gated——**所有 mode 都加载私钥用于读真实账户**（report_only ≠ dry-run）；仅签名/下单为 semi_auto/auto |
 
 ### 1.3 新增 deploy sections
 
@@ -65,10 +65,20 @@ fact_flush_interval_secs = 5
 order_worker_channel_capacity = 1024
 exit_monitor_channel_capacity = 1024
 reconciliation_channel_capacity = 256
-load_credentials_in_report_only = false
+
+[quant.account]
+# Polymarket proxy/funder 地址（持有 USDC.e + outcome token；独立于 signer EOA）。
+# Data API `GET /positions?user=<funder>` 用此地址读真实持仓（keyless）。
+funder = "0x..."
+
+[market_data.data_api]
+# Data API base URL（公开持仓读取，keyless）。
+base_url = "https://data-api.polymarket.com"
 ```
 
-私钥配置仍可存在，但只有 `semi_auto` 和 `auto_execution` preflight 才要求。
+**私钥所有 mode 都需要（用于读真实抵押余额 + 派生 L2 读凭证）**；私钥的**签名/下单**用途
+仅 `semi_auto` / `auto_execution` preflight 才要求。已删除 `load_credentials_in_report_only`
+（凭证不再 mode-gated）。
 
 ## 2. Runtime Config v3
 
@@ -268,8 +278,9 @@ Schedule（`ReportScheduleConfig`）：
 
 `report_only`：
 
-- 不要求 private key。
-- 不要求 CLOB order readiness。
+- **要求 private key + `quant.account.funder`**（读真实抵押 + 持仓；报告强制建立在真实账户上，
+  缺失则报告生成 fail closed）。
+- **不**要求 CLOB order **submission** readiness（签名/下单仅 semi_auto/auto）。
 - 要求 data ingest ready。
 - 要求 report schedule valid。
 
@@ -341,10 +352,12 @@ report_only 必需：
 - ClickHouse password。
 - Redis password if enabled。
 - JWT secret。
+- **Polymarket private key**（读真实抵押余额 + 派生 L2 读凭证；report_only ≠ dry-run）。
+- **`quant.account.funder`**（Data API 持仓读取）。
 
-semi_auto / auto_execution 额外：
+semi_auto / auto_execution 额外（**签名/下单**用途，非读取）：
 
-- Polymarket private key。
+- 同一 Polymarket private key 用于 EIP-712 订单签名 + L2 写凭证。
 - Polygon RPC if attribution requires on-chain evidence。
 
 禁止在 production example 写真实 secrets。
@@ -512,8 +525,8 @@ Warning：
 - `config/quant-pivot.toml` 不包含 old execution/settlement/endgame hotset。
 - `RuntimeConfig::schema_version == 3`。
 - runtime schema 不包含 `detection`、old `risk`、old `settlement`。
-- report_only 启动不需要 private key。
-- semi_auto/auto_execution preflight 覆盖 credentials/order client。
+- report_only 启动要求 private key + `quant.account.funder`（账户读取；报告强制真实账户）；缺失则报告生成 fail closed。
+- semi_auto/auto_execution preflight 额外覆盖签名/下单 credentials 与 order client readiness。
 - CI gate 能阻止旧 Endgame 符号回流。
 - benchmark 全部以 quant report path 为中心。
 

@@ -257,11 +257,14 @@ Selection 不是交易白名单，而是报告输入集合。执行侧还会有�
 
 默认模式。行为：
 
-- 生成报告。
+- 生成报告（报告是终产物，由人工据此手动下单）。
 - 推送报告。
 - 不创建 `OrderIntent`。
-- 不占用资本。
-- 不调用 CLOB order API。
+- 不通过执行占用/锁定资本。
+- 不调用 CLOB **下单**/撤单 API，不签名订单。
+- **仍读取真实账户**（CLOB 抵押余额 read-only + Data API 持仓）作为 sizing 资本基数——
+  `report_only` **不是 dry-run**（§3「即使 report_only，size 也必须是生产级 sizing」）。
+  因此需要 private key（用于读 / 派生 L2 读凭证）+ `funder`；缺失则报告 fail closed。
 - 可以写 shadow execution simulation。
 
 适用：
