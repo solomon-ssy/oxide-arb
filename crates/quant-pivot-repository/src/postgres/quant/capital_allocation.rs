@@ -3,15 +3,15 @@
 use crate::traits::{CapitalAllocationRepository, ReservedCapitalRepository};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    domain::{CapitalAllocationInfo, CapitalAllocationPatch, NewCapitalAllocation},
+    domain::CapitalAllocationInfo,
     entities::quant_capital_allocation,
     enums::execution::CapitalAllocationState,
-    types::{CapitalAllocationId, OrderIntentId, Usd},
+    types::{OrderIntentId, Usd},
 };
 use rust_decimal::Decimal;
 use sea_orm::{
-    ActiveModelTrait, ActiveValue, ColumnTrait, DatabaseConnection, EntityTrait, FromQueryResult,
-    IntoActiveModel, PaginatorTrait, QueryFilter, QuerySelect, sea_query::Expr,
+    ColumnTrait, DatabaseConnection, EntityTrait, FromQueryResult, PaginatorTrait, QueryFilter,
+    QuerySelect, sea_query::Expr,
 };
 
 /// Allocation rows included in the reserved-capital aggregate.
@@ -41,23 +41,6 @@ struct LockedCapitalSum {
 
 #[async_trait::async_trait]
 impl CapitalAllocationRepository for PgCapitalAllocationRepository {
-    async fn create(
-        &self,
-        allocation: NewCapitalAllocation,
-    ) -> Result<CapitalAllocationInfo, StorageError> {
-        validate_non_negative(
-            allocation.allocated_usd,
-            allocation.locked_usd,
-            allocation.spent_usd,
-            allocation.released_usd,
-        )?;
-        quant_capital_allocation::Entity::insert(allocation.into_active_model())
-            .exec_with_returning(&self.db)
-            .await
-            .map_err(StorageError::from)
-            .map(Into::into)
-    }
-
     async fn find_by_intent(
         &self,
         order_intent_id: &OrderIntentId,
@@ -68,58 +51,6 @@ impl CapitalAllocationRepository for PgCapitalAllocationRepository {
             .await
             .map_err(StorageError::from)
             .map(|row| row.map(Into::into))
-    }
-
-    async fn transition(
-        &self,
-        capital_allocation_id: &CapitalAllocationId,
-        patch: CapitalAllocationPatch,
-    ) -> Result<CapitalAllocationInfo, StorageError> {
-        validate_non_negative(
-            patch.allocated_usd,
-            patch.locked_usd,
-            patch.spent_usd,
-            patch.released_usd,
-        )?;
-
-        let Some(row) = quant_capital_allocation::Entity::find_by_id(capital_allocation_id.clone())
-            .one(&self.db)
-            .await
-            .map_err(StorageError::from)?
-        else {
-            return Err(StorageError::Conflict(format!(
-                "capital allocation not found: {capital_allocation_id}"
-            )));
-        };
-
-        let (state, reason) = if patch.state == CapitalAllocationState::Impaired
-            || capital_invariant_ok(
-                row.planned_usd,
-                patch.allocated_usd,
-                patch.locked_usd,
-                patch.spent_usd,
-                patch.released_usd,
-            ) {
-            (patch.state, patch.reason)
-        } else {
-            (
-                CapitalAllocationState::Impaired,
-                format!("impaired: {}", patch.reason),
-            )
-        };
-
-        let mut active = row.into_active_model();
-        active.state = ActiveValue::Set(state);
-        active.allocated_usd = ActiveValue::Set(patch.allocated_usd);
-        active.locked_usd = ActiveValue::Set(patch.locked_usd);
-        active.spent_usd = ActiveValue::Set(patch.spent_usd);
-        active.released_usd = ActiveValue::Set(patch.released_usd);
-        active.reason = ActiveValue::Set(reason);
-        active
-            .update(&self.db)
-            .await
-            .map_err(StorageError::from)
-            .map(Into::into)
     }
 
     async fn sum_reserved_usd(&self) -> Result<Usd, StorageError> {
@@ -174,7 +105,9 @@ pub async fn sum_reserved_usd(db: &DatabaseConnection) -> Result<Usd, StorageErr
     Ok(Usd::new(total))
 }
 
-fn validate_non_negative(
+/// Reject negative capital amounts before any write (shared with the
+/// order-intent composite transaction).
+pub fn validate_non_negative(
     allocated_usd: Usd,
     locked_usd: Usd,
     spent_usd: Usd,
@@ -192,7 +125,13 @@ fn validate_non_negative(
     Ok(())
 }
 
-fn capital_invariant_ok(
+/// Whether a capital row satisfies the FSM money invariant:
+/// `planned ≥ allocated ≥ locked` and `spent + released ≤ max(allocated, locked)`.
+///
+/// Shared with the order-intent composite transaction; a violation forces the
+/// row to `Impaired` rather than freeing budget for new entries.
+#[must_use]
+pub fn capital_invariant_ok(
     planned_usd: Usd,
     allocated_usd: Usd,
     locked_usd: Usd,

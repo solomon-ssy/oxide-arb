@@ -177,7 +177,6 @@ expression: non_empty_topn_report()
           "report_only_mode"
         ],
         "approval_required": true,
-        "approval_role": "trader",
         "auto_policy_id": null
       },
       "valid_from": "2023-11-14T22:13:20Z",
@@ -300,7 +299,6 @@ expression: non_empty_topn_report()
           "report_only_mode"
         ],
         "approval_required": true,
-        "approval_role": "trader",
         "auto_policy_id": null
       },
       "valid_from": "2023-11-14T22:13:20Z",

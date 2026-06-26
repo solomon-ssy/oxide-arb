@@ -1,9 +1,13 @@
 //! In-process runtime event bus for control-plane notifications.
 
 use crate::{
-    domain::{MarketBookView, RecommendationReportInfo, governance::system::SystemStatus},
+    domain::{
+        MarketBookView, OrderIntentInfo, RecommendationReportInfo, governance::system::SystemStatus,
+    },
     enums::common::{AlertCategory, AlertLevel, AlertSource},
-    enums::quant::{EmptyReason, QuantRuntimeMode, RecommendationReportStatus, ReportKind},
+    enums::quant::{
+        EmptyReason, OrderIntentStatus, QuantRuntimeMode, RecommendationReportStatus, ReportKind,
+    },
     types::MarketId,
 };
 use chrono::{DateTime, Utc};
@@ -203,6 +207,83 @@ impl ReportLifecycleEvent {
     }
 }
 
+/// Which lifecycle transition an [`IntentLifecycleEvent`] describes.
+///
+/// Every variant is backed by a committed `quant_order_intent` row (intents are
+/// only ever persisted, never ephemeral): `Created` for a freshly reserved
+/// intent, `Approved` after operator approval, and the terminal
+/// `Rejected` / `Cancelled` / `Expired` / `Invalidated` transitions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IntentEventKind {
+    /// An intent was created and its capital reserved.
+    Created,
+    /// A pending intent was approved by an operator.
+    Approved,
+    /// A pending intent was rejected; capital released.
+    Rejected,
+    /// A not-yet-submitted intent was cancelled; capital released.
+    Cancelled,
+    /// A pending intent passed its `expires_at`; capital released.
+    Expired,
+    /// A governed fact changed and the intent was invalidated; capital released.
+    Invalidated,
+}
+
+impl IntentEventKind {
+    /// Dotted observability wire name (`quant.intent.<event>`).
+    #[must_use]
+    pub const fn wire(self) -> &'static str {
+        match self {
+            Self::Created => "quant.intent.created",
+            Self::Approved => "quant.intent.approved",
+            Self::Rejected => "quant.intent.rejected",
+            Self::Cancelled => "quant.intent.cancelled",
+            Self::Expired => "quant.intent.expired",
+            Self::Invalidated => "quant.intent.invalidated",
+        }
+    }
+}
+
+/// Order-intent lifecycle event fanned out on the single `quant.intent` channel.
+///
+/// The discriminant is [`Self::event`]; the payload carries the correlation ids,
+/// the post-transition `status`, and the `reason` (status reason or approval
+/// reason) so dashboards can render the audit trail without a follow-up fetch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IntentLifecycleEvent {
+    pub event: IntentEventKind,
+    pub order_intent_id: String,
+    pub recommendation_id: String,
+    pub runtime_mode: QuantRuntimeMode,
+    pub status: OrderIntentStatus,
+    pub reason: Option<String>,
+    pub occurred_at: DateTime<Utc>,
+}
+
+impl IntentLifecycleEvent {
+    /// Build a lifecycle event from a committed intent row.
+    #[must_use]
+    pub fn from_intent(
+        info: &OrderIntentInfo,
+        event: IntentEventKind,
+        occurred_at: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            event,
+            order_intent_id: info.order_intent_id.to_string(),
+            recommendation_id: info.recommendation_id.to_string(),
+            runtime_mode: info.runtime_mode,
+            status: info.status,
+            reason: info
+                .status_reason
+                .clone()
+                .or_else(|| info.approval_reason.clone()),
+            occurred_at,
+        }
+    }
+}
+
 /// Cross-subsystem runtime events consumed by web and observability layers.
 #[derive(Debug, Clone)]
 pub enum CoreEvent {
@@ -219,6 +300,7 @@ pub enum CoreEvent {
         version_id: String,
     },
     Report(ReportLifecycleEvent),
+    Intent(IntentLifecycleEvent),
     Alert(SystemAlertEvent),
 }
 
@@ -231,6 +313,7 @@ impl CoreEvent {
             Self::MarketResolved { .. } => "market.resolved",
             Self::ConfigActivated { .. } => "config.activated",
             Self::Report(event) => event.event.wire(),
+            Self::Intent(event) => event.event.wire(),
             Self::Alert(_) => "system.alert",
         }
     }

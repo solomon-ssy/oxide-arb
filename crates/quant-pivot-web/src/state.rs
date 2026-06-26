@@ -6,8 +6,8 @@ use quant_pivot_models::{
     config::DeployConfig,
     domain::{
         BacktestPort, CatalogStatusPort, CoreEventPublisher, DataQualityPort, KillSwitchPort,
-        MarketDataPort, MetricsScrapePort, ModelGovernancePort, ModelTrainingPort, QuantReportPort,
-        ReadinessPort, RuntimeConfigPort, RuntimeControlPort, TrainingDatasetPort,
+        MarketDataPort, MetricsScrapePort, ModelGovernancePort, ModelTrainingPort, OrderIntentPort,
+        QuantReportPort, ReadinessPort, RuntimeConfigPort, RuntimeControlPort, TrainingDatasetPort,
     },
 };
 use quant_pivot_repository::traits::{
@@ -62,4 +62,6 @@ pub struct AppState {
     pub model_governance: Arc<dyn ModelGovernancePort>,
     /// Recommendation report read + governed mutation (Phase 04.4 API).
     pub quant_reports: Arc<dyn QuantReportPort>,
+    /// Order-intent read + governed mutation (Phase 05.2 API).
+    pub order_intents: Arc<dyn OrderIntentPort>,
 }

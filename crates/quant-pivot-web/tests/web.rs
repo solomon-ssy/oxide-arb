@@ -9,6 +9,8 @@ mod client;
 mod core_report_port;
 #[path = "common/harness.rs"]
 mod harness;
+#[path = "common/order_intent_port.rs"]
+mod order_intent_port;
 #[path = "common/pg.rs"]
 mod pg;
 #[path = "common/redis.rs"]
@@ -26,6 +28,8 @@ mod metrics;
 mod operation_log;
 #[path = "web/phase0.rs"]
 mod phase0;
+#[path = "web/quant_intents.rs"]
+mod quant_intents;
 #[path = "web/quant_reports.rs"]
 mod quant_reports;
 #[path = "web/readiness.rs"]

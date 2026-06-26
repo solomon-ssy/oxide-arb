@@ -291,8 +291,6 @@ pub struct ExecutionEligibility {
     pub ineligibility_reasons: Vec<IneligibilityReason>,
     /// Whether human approval is required.
     pub approval_required: bool,
-    /// Approval role required, when applicable.
-    pub approval_role: Option<String>,
     /// Auto-execution policy id, when applicable.
     pub auto_policy_id: Option<String>,
 }

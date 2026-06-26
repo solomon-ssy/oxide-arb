@@ -375,7 +375,9 @@ async fn revoke_forbidden_for_analyst() {
 
 #[actix_web::test]
 #[ignore = "requires Docker"]
-async fn create_intent_returns_501_phase5() {
+async fn legacy_create_intent_route_is_removed() {
+    // The 501 stub was deleted in Phase 05.2; intent creation now lives at
+    // `POST /api/quant/intents`. The old recommendation sub-route must 404.
     let env = TestEnv::start().await;
     let admin = login(&env, "admin", "admin").await;
     let report_id = RecommendationReportId::from_v7();
@@ -399,6 +401,5 @@ async fn create_intent_returns_501_phase5() {
         json!({}),
     )
     .await;
-    assert_eq!(res.status, StatusCode::NOT_IMPLEMENTED);
-    assert_eq!(res.json()["code"], json!(501));
+    assert_eq!(res.status, StatusCode::NOT_FOUND);
 }

@@ -1,51 +1,116 @@
 use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    domain::{ApproveOrderIntent, NewOrderIntent, OrderIntentInfo},
+    domain::{
+        ApproveOrderIntent, NewCapitalAllocation, NewOperationLog, NewOrderIntent, OrderIntentInfo,
+        OrderIntentListQuery, Paginated,
+    },
     enums::execution::ApprovalInvalidation,
     enums::quant::OrderIntentStatus,
-    types::OrderIntentId,
+    types::{EntryOrderSpec, OrderIntentId, RecommendationReportId, Usd},
 };
 
+/// Governed order-intent persistence port.
+///
+/// Every money-moving mutation is **atomic over the intent FSM and the capital
+/// allocation FSM in one Postgres transaction** — an intent never exists without
+/// its reservation and vice versa. Background-origin terminal transitions
+/// (`expire` / `invalidate`) additionally write their operation-log row inside
+/// the same transaction (HTTP-origin mutations are audited by the web
+/// middleware, so they take no log row).
 #[async_trait::async_trait]
 pub trait OrderIntentRepository: Send + Sync {
-    async fn create_pending(&self, intent: NewOrderIntent)
-    -> Result<OrderIntentInfo, StorageError>;
-
-    async fn create_policy_approved(
+    /// Create an intent (`PendingApproval` or `ApprovedByPolicy`) and reserve its
+    /// capital (`Allocated`) atomically.
+    async fn create_with_allocation(
         &self,
         intent: NewOrderIntent,
+        allocation: NewCapitalAllocation,
     ) -> Result<OrderIntentInfo, StorageError>;
 
+    /// Approve a `PendingApproval` intent. When `entry_override` /
+    /// `allocated_override` are present the entry is narrowed and the reserved
+    /// capital shrunk to match, in the same transaction.
     async fn approve(
         &self,
         intent_id: &OrderIntentId,
         approval: ApproveOrderIntent,
+        entry_override: Option<EntryOrderSpec>,
+        allocated_override: Option<Usd>,
     ) -> Result<OrderIntentInfo, StorageError>;
 
+    /// Reject a `PendingApproval` intent and release its capital atomically.
+    async fn reject(
+        &self,
+        intent_id: &OrderIntentId,
+        reason: String,
+    ) -> Result<OrderIntentInfo, StorageError>;
+
+    /// Cancel a not-yet-submitted intent and release its capital atomically.
+    async fn cancel(
+        &self,
+        intent_id: &OrderIntentId,
+        reason: String,
+    ) -> Result<OrderIntentInfo, StorageError>;
+
+    /// Expire a due intent: release its capital and write the operation log in
+    /// the same transaction (background origin).
+    async fn expire(
+        &self,
+        intent_id: &OrderIntentId,
+        operation_log: NewOperationLog,
+    ) -> Result<OrderIntentInfo, StorageError>;
+
+    /// Invalidate an intent for a changed governed fact: release its capital and
+    /// write the operation log in the same transaction (background origin).
+    async fn invalidate(
+        &self,
+        intent_id: &OrderIntentId,
+        reason: ApprovalInvalidation,
+        operation_log: NewOperationLog,
+    ) -> Result<OrderIntentInfo, StorageError>;
+
+    /// Load one intent by id.
+    async fn find_by_id(
+        &self,
+        intent_id: &OrderIntentId,
+    ) -> Result<Option<OrderIntentInfo>, StorageError>;
+
+    /// Page intents filtered by status / mode / recommendation / `created_at`.
+    async fn page(
+        &self,
+        query: OrderIntentListQuery,
+    ) -> Result<Paginated<OrderIntentInfo>, StorageError>;
+
+    /// Intents past `expires_at` still in an expirable status (sweep input).
+    async fn find_expired(&self, now: DateTime<Utc>) -> Result<Vec<OrderIntentInfo>, StorageError>;
+
+    /// Active (pre-submission) intents for a report — report-termination cascade.
+    async fn find_active_by_report(
+        &self,
+        report_id: &RecommendationReportId,
+    ) -> Result<Vec<OrderIntentInfo>, StorageError>;
+
+    // ── Reserved for 05.4 (submission path) ──────────────────────────────
+
+    /// Row-lock an intent for the submission transaction (`SELECT … FOR UPDATE`).
+    async fn get_for_update(
+        &self,
+        intent_id: &OrderIntentId,
+    ) -> Result<Option<OrderIntentInfo>, StorageError>;
+
+    /// Drive a validated intent transition (e.g. `Approved → AdmissionPending`).
     async fn transition(
         &self,
         intent_id: &OrderIntentId,
         next: OrderIntentStatus,
     ) -> Result<OrderIntentInfo, StorageError>;
 
-    async fn get_for_update(
-        &self,
-        intent_id: &OrderIntentId,
-    ) -> Result<Option<OrderIntentInfo>, StorageError>;
-
+    /// Mark an intent admission-rejected with a trace reference.
     async fn mark_admission_rejected(
         &self,
         intent_id: &OrderIntentId,
         status_reason: String,
         admission_trace_ref: Option<String>,
     ) -> Result<OrderIntentInfo, StorageError>;
-
-    async fn invalidate(
-        &self,
-        intent_id: &OrderIntentId,
-        reason: ApprovalInvalidation,
-    ) -> Result<OrderIntentInfo, StorageError>;
-
-    async fn find_expired(&self, now: DateTime<Utc>) -> Result<Vec<OrderIntentInfo>, StorageError>;
 }

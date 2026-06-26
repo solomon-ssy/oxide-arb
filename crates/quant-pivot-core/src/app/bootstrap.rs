@@ -15,7 +15,9 @@ pub async fn run(deploy: Arc<DeployConfig>) -> QuantResult<()> {
     ctx.register_periodic_services(&mut runner);
     ctx.register_report_scheduler(&mut runner);
     ctx.register_report_expire_sweep(&mut runner);
-    ctx.register_web_services(&mut runner).await?;
+    let order_intents = ctx.register_execution_services(&mut runner);
+    ctx.register_web_services(&mut runner, order_intents)
+        .await?;
     ctx.register_fact_writer_tasks(&mut runner);
 
     tracing::info!(

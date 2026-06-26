@@ -1,62 +1,852 @@
-//! Order-intent service contract.
+//! Governed order-intent service.
+//!
+//! The create / approve / reject / cancel / expire / report-cascade closure that
+//! turns a published recommendation into a capital-reserving `OrderIntent` and
+//! drives its approval lifecycle.
+//!
+//! Money invariant: every state transition is atomic over the intent FSM and the
+//! capital FSM in one repository transaction (see [`OrderIntentRepository`]).
+//! HTTP-origin mutations are audited by the web middleware; background-origin
+//! transitions (`expire`, `invalidate`) carry their own operation-log row inside
+//! the transaction. Non-authoritative WebSocket lifecycle events are published
+//! only after the transaction commits.
+
+use std::sync::Arc;
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
-use quant_pivot_error::QuantResult;
+use chrono::{DateTime, Duration, Utc};
+use quant_pivot_error::{QuantResult, execution::ExecutionError, storage::StorageError};
 use quant_pivot_models::{
-    domain::{ApproveOrderIntent, OrderIntentInfo},
-    enums::execution::ApprovalInvalidation,
-    types::{OrderIntentId, RecommendationId},
+    domain::{
+        ApproveIntentCommand, ApproveOrderIntent, CancelIntentCommand, CoreEvent,
+        CoreEventPublisher, CreateIntentCommand, IntentEventKind, IntentLifecycleEvent,
+        NewCapitalAllocation, NewOperationLog, NewOrderIntent, OrderIntentInfo,
+        OrderIntentListQuery, OrderIntentPort, Paginated, RecommendationInfo,
+        RecommendationReportInfo, RejectIntentCommand,
+    },
+    enums::{
+        common::{OrderType, Side},
+        execution::{ApprovalInvalidation, CapitalAllocationState, OrderIntentKind},
+        operation_log::{OperationCategory, OperationOutcome},
+        quant::{ApprovalStatus, OrderIntentStatus, RecommendationReportStatus},
+        rbac::ResourceType,
+    },
+    runtime_config::EntryOrderPolicy,
+    types::{
+        CapitalAllocationId, ContentHash, EntryOrderSpec, ExitPolicySpec, OperationLogId,
+        OrderIntentId, RecommendationId, RecommendationReportId, RuntimeConfigVersionId, Usd,
+    },
 };
-use uuid::Uuid;
+use quant_pivot_repository::traits::{
+    OrderIntentRepository, RecommendationReportRepository, RecommendationRepository,
+    RuntimeConfigVersionRepository,
+};
+use rust_decimal::Decimal;
 
-/// Request to create an order intent from a recommendation.
-#[derive(Debug, Clone)]
-pub struct CreateOrderIntentRequest {
-    pub recommendation_id: RecommendationId,
-    pub requested_by: Option<Uuid>,
-    pub requested_at: DateTime<Utc>,
-    pub reason: String,
-}
+use crate::{
+    execution::mode_gate::{IntentPolicyDecision, RuntimeModeGate},
+    governance::{KillSwitchHandle, RuntimeModeHandle},
+    runtime_config::RuntimeConfigStore,
+};
 
-/// Request to cancel an order intent before venue submission.
-#[derive(Debug, Clone)]
-pub struct CancelOrderIntentRequest {
-    pub order_intent_id: OrderIntentId,
-    pub cancelled_by: Uuid,
-    pub cancelled_at: DateTime<Utc>,
-    pub reason: String,
-}
-
-/// Request to invalidate an order intent because a governed fact changed.
-#[derive(Debug, Clone)]
-pub struct InvalidateOrderIntentRequest {
-    pub order_intent_id: OrderIntentId,
-    pub reason: ApprovalInvalidation,
-    pub invalidated_at: DateTime<Utc>,
-}
-
-/// Governed order-intent service boundary.
+/// Notify the intent plane that a report's recommendations are no longer valid.
+///
+/// The active intents derived from the report are invalidated and their capital
+/// released. Implemented by [`CoreOrderIntentService`]; consumed by the report
+/// lifecycle on revoke / expire (dependency inversion — the report plane does
+/// not depend on execution types).
 #[async_trait]
-pub trait OrderIntentService: Send + Sync {
-    async fn create_intent(
+pub trait IntentInvalidationHook: Send + Sync {
+    /// Invalidate every active (pre-submission) intent derived from `report_id`,
+    /// releasing reserved capital. Returns the number invalidated. Best-effort:
+    /// the caller logs and continues on error (approval re-check + sweep backstop).
+    async fn invalidate_for_report(
         &self,
-        request: CreateOrderIntentRequest,
-    ) -> QuantResult<OrderIntentInfo>;
+        report_id: &RecommendationReportId,
+        reason: ApprovalInvalidation,
+        now: DateTime<Utc>,
+    ) -> QuantResult<u32>;
+}
 
-    async fn approve_intent(
-        &self,
-        order_intent_id: OrderIntentId,
-        approval: ApproveOrderIntent,
-    ) -> QuantResult<OrderIntentInfo>;
+/// Dependencies for [`CoreOrderIntentService`].
+pub struct OrderIntentServiceDeps {
+    pub mode_gate: Arc<dyn RuntimeModeGate>,
+    pub runtime_mode: RuntimeModeHandle,
+    pub kill_switch: KillSwitchHandle,
+    pub recommendations: Arc<dyn RecommendationRepository>,
+    pub reports: Arc<dyn RecommendationReportRepository>,
+    pub intents: Arc<dyn OrderIntentRepository>,
+    pub config: Arc<RuntimeConfigStore>,
+    pub config_versions: Arc<dyn RuntimeConfigVersionRepository>,
+    pub events: CoreEventPublisher,
+}
 
-    async fn cancel_intent(
-        &self,
-        request: CancelOrderIntentRequest,
-    ) -> QuantResult<OrderIntentInfo>;
+/// Governed order-intent service (implements the web [`OrderIntentPort`], the
+/// report-cascade [`IntentInvalidationHook`], and the sweep `expire_due`).
+pub struct CoreOrderIntentService {
+    mode_gate: Arc<dyn RuntimeModeGate>,
+    runtime_mode: RuntimeModeHandle,
+    kill_switch: KillSwitchHandle,
+    recommendations: Arc<dyn RecommendationRepository>,
+    reports: Arc<dyn RecommendationReportRepository>,
+    intents: Arc<dyn OrderIntentRepository>,
+    config: Arc<RuntimeConfigStore>,
+    config_versions: Arc<dyn RuntimeConfigVersionRepository>,
+    events: CoreEventPublisher,
+}
 
-    async fn invalidate_intent(
+impl CoreOrderIntentService {
+    /// Assemble the service from its dependencies.
+    #[must_use]
+    pub fn new(deps: OrderIntentServiceDeps) -> Self {
+        Self {
+            mode_gate: deps.mode_gate,
+            runtime_mode: deps.runtime_mode,
+            kill_switch: deps.kill_switch,
+            recommendations: deps.recommendations,
+            reports: deps.reports,
+            intents: deps.intents,
+            config: deps.config,
+            config_versions: deps.config_versions,
+            events: deps.events,
+        }
+    }
+
+    /// Create an intent from a recommendation at `now` (mode-gated, atomic with
+    /// the capital reservation).
+    pub async fn create_at(
         &self,
-        request: InvalidateOrderIntentRequest,
-    ) -> QuantResult<OrderIntentInfo>;
+        command: CreateIntentCommand,
+        now: DateTime<Utc>,
+    ) -> QuantResult<OrderIntentInfo> {
+        let rec = self.load_recommendation(&command.recommendation_id).await?;
+        if rec.valid_until < now {
+            return Err(ExecutionError::RecommendationExpired {
+                reason: format!("recommendation {} expired", rec.recommendation_id),
+            }
+            .into());
+        }
+        let report = self.load_report(&rec.recommendation_report_id).await?;
+        if report.status != RecommendationReportStatus::Published {
+            return Err(ExecutionError::IntentDenied {
+                reason: format!(
+                    "source report {} is {}",
+                    report.recommendation_report_id,
+                    report.status.as_str()
+                ),
+            }
+            .into());
+        }
+
+        let mode = self.runtime_mode.current();
+        if !self.kill_switch.allows_new_entry() {
+            return Err(ExecutionError::KillSwitchBlocks {
+                state: self.kill_switch.current().as_str().to_owned(),
+                operation: "intent creation".to_owned(),
+            }
+            .into());
+        }
+
+        let policy = self.mode_gate.evaluate_intent_policy(mode, &rec).await?;
+        let config = self.config.current();
+        let entry = project_entry_order_spec(&rec, &config.execution.entry_order_policy)?;
+        let exit = project_exit_policy_spec(&rec);
+        let intent_id = OrderIntentId::from_v7();
+        let planned_usd = rec.sizing_plan.suggested_usd;
+        let resolved = resolve_policy(policy, now, entry.valid_until)?;
+
+        let new_intent = NewOrderIntent {
+            order_intent_id: intent_id.clone(),
+            recommendation_id: rec.recommendation_id.clone(),
+            runtime_mode: mode,
+            runtime_config_version_id: report.runtime_config_version_id.clone(),
+            model_version_id: report.model_version_id.clone(),
+            intent_kind: OrderIntentKind::Buy,
+            status: resolved.status,
+            approval_status: resolved.approval_status,
+            approved_by: None,
+            approval_reason: resolved.approval_reason,
+            approved_at: resolved.approved_at,
+            policy_id: resolved.policy_id,
+            policy_hash: resolved.policy_hash,
+            status_reason: None,
+            admission_trace_ref: None,
+            entry_order_json: entry,
+            exit_policy_json: exit,
+            risk_envelope_hash: rec.risk_envelope.envelope_hash.clone(),
+            expires_at: resolved.expires_at,
+        };
+        let allocation = NewCapitalAllocation {
+            capital_allocation_id: CapitalAllocationId::from_v7(),
+            order_intent_id: intent_id,
+            recommendation_id: rec.recommendation_id.clone(),
+            state: CapitalAllocationState::Allocated,
+            planned_usd,
+            allocated_usd: planned_usd,
+            locked_usd: Usd::ZERO,
+            spent_usd: Usd::ZERO,
+            released_usd: Usd::ZERO,
+            reason: "intent created".to_owned(),
+        };
+
+        let intent = self
+            .intents
+            .create_with_allocation(new_intent, allocation)
+            .await?;
+        self.publish(&intent, IntentEventKind::Created, now);
+        Ok(intent)
+    }
+
+    /// Approve a pending intent at `now`: re-check invalidation (fail closed),
+    /// apply any operator downscale, transition to `Approved`.
+    pub async fn approve_at(
+        &self,
+        command: ApproveIntentCommand,
+        now: DateTime<Utc>,
+    ) -> QuantResult<OrderIntentInfo> {
+        let intent = self.load_intent(&command.order_intent_id).await?;
+        if intent.status != OrderIntentStatus::PendingApproval {
+            return Err(ExecutionError::IntentDenied {
+                reason: format!(
+                    "intent {} is {} (only pending_approval can be approved)",
+                    intent.order_intent_id,
+                    intent.status.as_str()
+                ),
+            }
+            .into());
+        }
+
+        // Fail-closed re-check: any governed fact changed → invalidate + reject.
+        let rec = self.load_recommendation(&intent.recommendation_id).await?;
+        let report = self.load_report(&rec.recommendation_report_id).await?;
+        let active_version = self.config_versions.load_current().await?.ok_or_else(|| {
+            ExecutionError::ApprovalInvalidated {
+                reason: "no active runtime config version".to_owned(),
+            }
+        })?;
+        if let Some(reason) = evaluate_invalidation(
+            &rec,
+            &report,
+            self.kill_switch.allows_new_entry(),
+            &active_version.runtime_config_version_id,
+            &intent.runtime_config_version_id,
+            &intent.risk_envelope_hash,
+            now,
+        ) {
+            let log = intent_operation_log("quant.intent.invalidate", &intent, reason.as_str());
+            let invalidated = self
+                .intents
+                .invalidate(&intent.order_intent_id, reason, log)
+                .await?;
+            self.publish(&invalidated, IntentEventKind::Invalidated, now);
+            return Err(ExecutionError::ApprovalInvalidated {
+                reason: reason.as_str().to_owned(),
+            }
+            .into());
+        }
+
+        let allow_downscale = self
+            .config
+            .current()
+            .execution
+            .semi_auto
+            .allow_size_reduction;
+        let (entry_override, allocated_override) =
+            resolve_downscale(&command, &intent.entry_order_json, allow_downscale)?;
+        let approval = ApproveOrderIntent {
+            approved_by: command.operator_id,
+            approval_reason: approval_reason(&command),
+            approved_at: now,
+        };
+        let approved = self
+            .intents
+            .approve(
+                &intent.order_intent_id,
+                approval,
+                entry_override,
+                allocated_override,
+            )
+            .await?;
+        self.publish(&approved, IntentEventKind::Approved, now);
+        Ok(approved)
+    }
+
+    /// Reject a pending intent at `now`, releasing its capital.
+    pub async fn reject_at(
+        &self,
+        command: RejectIntentCommand,
+        now: DateTime<Utc>,
+    ) -> QuantResult<OrderIntentInfo> {
+        let rejected = self
+            .intents
+            .reject(&command.order_intent_id, command.reason)
+            .await?;
+        self.publish(&rejected, IntentEventKind::Rejected, now);
+        Ok(rejected)
+    }
+
+    /// Cancel a not-yet-submitted intent at `now`, releasing its capital.
+    pub async fn cancel_at(
+        &self,
+        command: CancelIntentCommand,
+        now: DateTime<Utc>,
+    ) -> QuantResult<OrderIntentInfo> {
+        let cancelled = self
+            .intents
+            .cancel(&command.order_intent_id, command.reason)
+            .await?;
+        self.publish(&cancelled, IntentEventKind::Cancelled, now);
+        Ok(cancelled)
+    }
+
+    /// Expire every intent past its `expires_at`, releasing capital. Each expiry
+    /// is its own committed transaction; a conflict is logged and skipped.
+    /// Returns the number expired.
+    pub async fn expire_due(&self, now: DateTime<Utc>, limit: usize) -> QuantResult<u32> {
+        let due = self.intents.find_expired(now).await?;
+        let mut expired = 0_u32;
+        for intent in due.into_iter().take(limit) {
+            let log = intent_operation_log("quant.intent.expire", &intent, "ttl_expired");
+            match self.intents.expire(&intent.order_intent_id, log).await {
+                Ok(updated) => {
+                    self.publish(&updated, IntentEventKind::Expired, now);
+                    expired = expired.saturating_add(1);
+                }
+                Err(error) => {
+                    tracing::warn!(intent_id = %intent.order_intent_id, %error, "intent expiry skipped");
+                }
+            }
+        }
+        Ok(expired)
+    }
+
+    async fn load_recommendation(
+        &self,
+        recommendation_id: &RecommendationId,
+    ) -> QuantResult<RecommendationInfo> {
+        self.recommendations
+            .find_by_id(recommendation_id)
+            .await?
+            .ok_or_else(|| {
+                StorageError::NotFound {
+                    entity: "recommendation",
+                    id: recommendation_id.to_string(),
+                }
+                .into()
+            })
+    }
+
+    async fn load_report(
+        &self,
+        report_id: &RecommendationReportId,
+    ) -> QuantResult<RecommendationReportInfo> {
+        self.reports.find_by_id(report_id).await?.ok_or_else(|| {
+            StorageError::NotFound {
+                entity: "recommendation_report",
+                id: report_id.to_string(),
+            }
+            .into()
+        })
+    }
+
+    async fn load_intent(&self, intent_id: &OrderIntentId) -> QuantResult<OrderIntentInfo> {
+        self.intents.find_by_id(intent_id).await?.ok_or_else(|| {
+            StorageError::NotFound {
+                entity: "order_intent",
+                id: intent_id.to_string(),
+            }
+            .into()
+        })
+    }
+
+    fn publish(&self, intent: &OrderIntentInfo, event: IntentEventKind, now: DateTime<Utc>) {
+        self.events
+            .publish(CoreEvent::Intent(IntentLifecycleEvent::from_intent(
+                intent, event, now,
+            )));
+    }
+}
+
+#[async_trait]
+impl OrderIntentPort for CoreOrderIntentService {
+    async fn create(&self, command: CreateIntentCommand) -> QuantResult<OrderIntentInfo> {
+        self.create_at(command, Utc::now()).await
+    }
+
+    async fn approve(&self, command: ApproveIntentCommand) -> QuantResult<OrderIntentInfo> {
+        self.approve_at(command, Utc::now()).await
+    }
+
+    async fn reject(&self, command: RejectIntentCommand) -> QuantResult<OrderIntentInfo> {
+        self.reject_at(command, Utc::now()).await
+    }
+
+    async fn cancel(&self, command: CancelIntentCommand) -> QuantResult<OrderIntentInfo> {
+        self.cancel_at(command, Utc::now()).await
+    }
+
+    async fn list(&self, query: OrderIntentListQuery) -> QuantResult<Paginated<OrderIntentInfo>> {
+        Ok(self.intents.page(query.normalized()).await?)
+    }
+
+    async fn find(&self, id: &OrderIntentId) -> QuantResult<Option<OrderIntentInfo>> {
+        Ok(self.intents.find_by_id(id).await?)
+    }
+}
+
+#[async_trait]
+impl IntentInvalidationHook for CoreOrderIntentService {
+    async fn invalidate_for_report(
+        &self,
+        report_id: &RecommendationReportId,
+        reason: ApprovalInvalidation,
+        now: DateTime<Utc>,
+    ) -> QuantResult<u32> {
+        let active = self.intents.find_active_by_report(report_id).await?;
+        let mut count = 0_u32;
+        for intent in active {
+            let log = intent_operation_log("quant.intent.invalidate", &intent, reason.as_str());
+            match self
+                .intents
+                .invalidate(&intent.order_intent_id, reason, log)
+                .await
+            {
+                Ok(updated) => {
+                    self.publish(&updated, IntentEventKind::Invalidated, now);
+                    count = count.saturating_add(1);
+                }
+                Err(error) => {
+                    tracing::warn!(intent_id = %intent.order_intent_id, %error, "intent invalidation skipped");
+                }
+            }
+        }
+        Ok(count)
+    }
+}
+
+/// Resolved per-mode intent fields produced by the mode gate decision.
+struct ResolvedPolicy {
+    status: OrderIntentStatus,
+    approval_status: ApprovalStatus,
+    approval_reason: Option<String>,
+    approved_at: Option<DateTime<Utc>>,
+    policy_id: Option<String>,
+    policy_hash: Option<ContentHash>,
+    expires_at: DateTime<Utc>,
+}
+
+/// Map a mode-gate decision to the frozen intent fields, or the closing error.
+///
+/// `report_only` and `denied` never produce an intent; `semi_auto` expires at
+/// `now + ttl`; a policy-approved intent expires at the entry's `valid_until`.
+fn resolve_policy(
+    policy: IntentPolicyDecision,
+    now: DateTime<Utc>,
+    entry_valid_until: DateTime<Utc>,
+) -> Result<ResolvedPolicy, ExecutionError> {
+    match policy {
+        IntentPolicyDecision::ReportOnly => Err(ExecutionError::ReportOnlyMode),
+        IntentPolicyDecision::Denied { reason } => Err(ExecutionError::IntentDenied {
+            reason: reason.as_str().to_owned(),
+        }),
+        IntentPolicyDecision::RequiresApproval { approval_ttl, .. } => Ok(ResolvedPolicy {
+            status: OrderIntentStatus::PendingApproval,
+            approval_status: ApprovalStatus::Pending,
+            approval_reason: None,
+            approved_at: None,
+            policy_id: None,
+            policy_hash: None,
+            expires_at: now + Duration::seconds(i64::try_from(approval_ttl.as_secs()).unwrap_or(0)),
+        }),
+        IntentPolicyDecision::ApprovedByPolicy {
+            policy_id,
+            policy_hash,
+            reason,
+        } => Ok(ResolvedPolicy {
+            status: OrderIntentStatus::ApprovedByPolicy,
+            approval_status: ApprovalStatus::NotRequired,
+            approval_reason: Some(reason),
+            approved_at: Some(now),
+            policy_id: Some(policy_id),
+            policy_hash,
+            expires_at: entry_valid_until,
+        }),
+    }
+}
+
+/// Project a recommendation's `EntryPlan` + `SizingPlan` into the executable
+/// [`EntryOrderSpec`] frozen on the intent.
+fn project_entry_order_spec(
+    rec: &RecommendationInfo,
+    policy: &EntryOrderPolicy,
+) -> Result<EntryOrderSpec, ExecutionError> {
+    let limit_price = rec
+        .entry_plan
+        .limit_price
+        .or(rec.entry_plan.trigger_price)
+        .ok_or_else(|| ExecutionError::IntentDenied {
+            reason: format!(
+                "recommendation {} has no entry limit price",
+                rec.recommendation_id
+            ),
+        })?;
+    let order_type = if policy.allow_market_orders {
+        OrderType::Fok
+    } else {
+        OrderType::Gtd {
+            expiration: u64::try_from(rec.entry_plan.valid_until.timestamp()).unwrap_or(0),
+        }
+    };
+    Ok(EntryOrderSpec {
+        token_id: rec.token_id.clone(),
+        side: Side::Buy,
+        order_type,
+        limit_price,
+        shares: rec.sizing_plan.suggested_shares,
+        max_slippage_bps: rec.entry_plan.max_slippage_bps,
+        valid_until: rec.entry_plan.valid_until,
+    })
+}
+
+/// Project a recommendation's `ExitPlan` into the [`ExitPolicySpec`] frozen on
+/// the intent. Only genuine scaled exits (`sell_pct < 1`) ride in
+/// `partial_exit_nodes`; the canonical full exit stays in the scalar fields.
+fn project_exit_policy_spec(rec: &RecommendationInfo) -> ExitPolicySpec {
+    let exit = &rec.exit_plan;
+    ExitPolicySpec {
+        take_profit_price: exit.take_profit_price,
+        stop_loss_price: exit.stop_loss_price,
+        time_exit_at: exit.time_exit_at,
+        partial_exit_nodes: exit
+            .partial_exit_nodes
+            .iter()
+            .filter(|node| node.sell_pct < Decimal::ONE)
+            .cloned()
+            .collect(),
+        settlement_policy: exit.settlement_policy,
+    }
+}
+
+/// Cheap, deterministic approval-time invalidation re-check (05.2 set). Model
+/// retirement, data-quality thresholds, and envelope-hash recomputation are the
+/// 05.3 admission engine's responsibility.
+fn evaluate_invalidation(
+    rec: &RecommendationInfo,
+    report: &RecommendationReportInfo,
+    kill_switch_allows_entry: bool,
+    active_config_version_id: &RuntimeConfigVersionId,
+    intent_config_version_id: &RuntimeConfigVersionId,
+    intent_risk_envelope_hash: &ContentHash,
+    now: DateTime<Utc>,
+) -> Option<ApprovalInvalidation> {
+    if rec.valid_until < now {
+        return Some(ApprovalInvalidation::RecommendationExpired);
+    }
+    if report.status != RecommendationReportStatus::Published {
+        return Some(ApprovalInvalidation::ReportRevoked);
+    }
+    if !kill_switch_allows_entry {
+        return Some(ApprovalInvalidation::KillSwitchOpened);
+    }
+    if intent_config_version_id != active_config_version_id {
+        return Some(ApprovalInvalidation::RuntimeConfigChanged);
+    }
+    if *intent_risk_envelope_hash != rec.risk_envelope.envelope_hash {
+        return Some(ApprovalInvalidation::RiskEnvelopeMismatch);
+    }
+    None
+}
+
+/// Validate an operator downscale against the frozen entry. Returns the narrowed
+/// `(entry_override, allocated_override)`, or `(None, None)` for a pure approval.
+/// Widening size, raising the limit, or downscaling when disabled are rejected.
+fn resolve_downscale(
+    command: &ApproveIntentCommand,
+    frozen: &EntryOrderSpec,
+    allow_downscale: bool,
+) -> Result<(Option<EntryOrderSpec>, Option<Usd>), ExecutionError> {
+    if command.override_shares.is_none()
+        && command.override_limit_price.is_none()
+        && command.max_allowed_usd.is_none()
+    {
+        return Ok((None, None));
+    }
+    if !allow_downscale {
+        return Err(ExecutionError::IntentDenied {
+            reason: "size reduction is disabled by config".to_owned(),
+        });
+    }
+
+    let new_shares = command.override_shares.unwrap_or(frozen.shares);
+    let new_limit = command.override_limit_price.unwrap_or(frozen.limit_price);
+
+    if new_shares > frozen.shares {
+        return Err(ExecutionError::IntentDenied {
+            reason: "approval cannot increase order size".to_owned(),
+        });
+    }
+    if new_limit > frozen.limit_price {
+        return Err(ExecutionError::IntentDenied {
+            reason: "approval cannot raise the limit price above the recommendation".to_owned(),
+        });
+    }
+
+    let new_notional = new_shares * new_limit;
+    if let Some(cap) = command.max_allowed_usd
+        && new_notional > cap
+    {
+        return Err(ExecutionError::IntentDenied {
+            reason: format!("approved notional {new_notional} exceeds max_allowed_usd {cap}"),
+        });
+    }
+
+    let mut entry = frozen.clone();
+    entry.shares = new_shares;
+    entry.limit_price = new_limit;
+    Ok((Some(entry), Some(new_notional)))
+}
+
+/// Combine the approval reason with the optional operator override note.
+fn approval_reason(command: &ApproveIntentCommand) -> String {
+    command.override_note.as_ref().map_or_else(
+        || command.reason.clone(),
+        |note| format!("{}; note: {note}", command.reason),
+    )
+}
+
+/// Build the WORM operation-log row written inside a background-origin intent
+/// transition transaction (sweep expiry / report-cascade invalidation).
+fn intent_operation_log(action: &str, intent: &OrderIntentInfo, reason: &str) -> NewOperationLog {
+    NewOperationLog {
+        id: OperationLogId::from_v7(),
+        request_id: format!("quant-intent:{action}:{}", intent.order_intent_id),
+        actor_user_id: None,
+        actor_username: Some("system".to_owned()),
+        acting_role: Some("intent_lifecycle".to_owned()),
+        category: OperationCategory::Governance,
+        action: action.to_owned(),
+        resource_type: Some(ResourceType::OrderIntent),
+        resource_id: Some(intent.order_intent_id.to_string()),
+        http_method: "SYSTEM".to_owned(),
+        http_path: format!("/system/quant/intent/{}/{action}", intent.order_intent_id),
+        http_status: 200,
+        outcome: OperationOutcome::Success,
+        client_ip: None,
+        user_agent: None,
+        latency_ms: 0,
+        detail: serde_json::json!({ "reason": reason }),
+        governance_audit_event_id: None,
+        governance_audit_sequence: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        evaluate_invalidation, project_entry_order_spec, project_exit_policy_spec,
+        resolve_downscale,
+    };
+    use chrono::{Duration, Utc};
+    use quant_pivot_models::{
+        domain::ApproveIntentCommand,
+        enums::{
+            common::{OrderType, Side},
+            execution::ApprovalInvalidation,
+            quant::{OutcomeSide, RecommendationReportStatus, ReportKind},
+        },
+        runtime_config::EntryOrderPolicy,
+        types::{
+            Bps, ContentHash, EntryOrderSpec, OrderIntentId, Price, RecommendationId,
+            RecommendationReportId, RuntimeConfigVersionId, Shares, TokenId, Usd,
+        },
+    };
+    use quant_pivot_test_support::report_fixtures;
+    use rust_decimal_macros::dec;
+    use uuid::Uuid;
+
+    fn rec() -> quant_pivot_models::domain::RecommendationInfo {
+        report_fixtures::recommendation(
+            RecommendationReportId::from_v7(),
+            RecommendationId::from_v7(),
+            1,
+            "0xmkt",
+            OutcomeSide::Yes,
+            Usd::new(dec!(250)),
+        )
+    }
+
+    fn frozen_entry() -> EntryOrderSpec {
+        EntryOrderSpec {
+            token_id: TokenId::new("token-1"),
+            side: Side::Buy,
+            order_type: OrderType::Gtc,
+            limit_price: Price::new(dec!(0.60)),
+            shares: Shares::new(dec!(100)),
+            max_slippage_bps: Bps::new(dec!(50)),
+            valid_until: Utc::now(),
+        }
+    }
+
+    fn approve_command() -> ApproveIntentCommand {
+        ApproveIntentCommand {
+            order_intent_id: OrderIntentId::from_v7(),
+            operator_id: Uuid::nil(),
+            acting_role: "operator".to_owned(),
+            reason: "ok".to_owned(),
+            override_shares: None,
+            override_limit_price: None,
+            max_allowed_usd: None,
+            override_note: None,
+        }
+    }
+
+    #[test]
+    fn entry_projection_is_gtd_for_resting_limit() {
+        let rec = rec();
+        let policy = EntryOrderPolicy {
+            allow_market_orders: false,
+            ..EntryOrderPolicy::default()
+        };
+        let spec = project_entry_order_spec(&rec, &policy).expect("projection");
+        assert_eq!(spec.token_id, rec.token_id);
+        assert_eq!(spec.side, Side::Buy);
+        assert_eq!(spec.shares, rec.sizing_plan.suggested_shares);
+        assert!(matches!(spec.order_type, OrderType::Gtd { .. }));
+    }
+
+    #[test]
+    fn entry_projection_is_fok_when_market_orders_allowed() {
+        let policy = EntryOrderPolicy {
+            allow_market_orders: true,
+            ..EntryOrderPolicy::default()
+        };
+        let spec = project_entry_order_spec(&rec(), &policy).expect("projection");
+        assert_eq!(spec.order_type, OrderType::Fok);
+    }
+
+    #[test]
+    fn exit_projection_drops_full_exit_nodes() {
+        let exit = project_exit_policy_spec(&rec());
+        assert_eq!(exit.take_profit_price, rec().exit_plan.take_profit_price);
+        // Fixture has no partial nodes; full-exit nodes (sell_pct == 1) are never carried.
+        assert!(exit.partial_exit_nodes.iter().all(|n| n.sell_pct < dec!(1)));
+    }
+
+    #[test]
+    fn downscale_noop_without_overrides() {
+        let (entry, alloc) =
+            resolve_downscale(&approve_command(), &frozen_entry(), true).expect("noop");
+        assert!(entry.is_none());
+        assert!(alloc.is_none());
+    }
+
+    #[test]
+    fn downscale_reduces_shares_and_notional() {
+        let mut cmd = approve_command();
+        cmd.override_shares = Some(Shares::new(dec!(50)));
+        let (entry, alloc) = resolve_downscale(&cmd, &frozen_entry(), true).expect("downscale");
+        let entry = entry.expect("entry override");
+        assert_eq!(entry.shares, Shares::new(dec!(50)));
+        assert_eq!(alloc, Some(Usd::new(dec!(30)))); // 50 * 0.60
+    }
+
+    #[test]
+    fn downscale_rejects_widening_size() {
+        let mut cmd = approve_command();
+        cmd.override_shares = Some(Shares::new(dec!(200)));
+        assert!(resolve_downscale(&cmd, &frozen_entry(), true).is_err());
+    }
+
+    #[test]
+    fn downscale_rejects_raising_limit() {
+        let mut cmd = approve_command();
+        cmd.override_limit_price = Some(Price::new(dec!(0.70)));
+        assert!(resolve_downscale(&cmd, &frozen_entry(), true).is_err());
+    }
+
+    #[test]
+    fn downscale_rejected_when_disabled() {
+        let mut cmd = approve_command();
+        cmd.override_shares = Some(Shares::new(dec!(50)));
+        assert!(resolve_downscale(&cmd, &frozen_entry(), false).is_err());
+    }
+
+    #[test]
+    fn downscale_rejects_exceeding_max_allowed() {
+        let mut cmd = approve_command();
+        cmd.override_shares = Some(Shares::new(dec!(50)));
+        cmd.max_allowed_usd = Some(Usd::new(dec!(10))); // 50 * 0.60 = 30 > 10
+        assert!(resolve_downscale(&cmd, &frozen_entry(), true).is_err());
+    }
+
+    #[test]
+    fn invalidation_passes_for_fresh_published_intent() {
+        let mut rec = rec();
+        rec.valid_until = Utc::now() + Duration::hours(1);
+        let report = report_fixtures::report(
+            rec.recommendation_report_id.clone(),
+            ReportKind::TopN,
+            RecommendationReportStatus::Published,
+        );
+        let version = RuntimeConfigVersionId::from_v7();
+        let hash = rec.risk_envelope.envelope_hash.clone();
+        assert!(
+            evaluate_invalidation(&rec, &report, true, &version, &version, &hash, Utc::now())
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn invalidation_trips_each_condition() {
+        let now = Utc::now();
+        let mut rec = rec();
+        rec.valid_until = now + Duration::hours(1);
+        let report = report_fixtures::report(
+            rec.recommendation_report_id.clone(),
+            ReportKind::TopN,
+            RecommendationReportStatus::Published,
+        );
+        let version = RuntimeConfigVersionId::from_v7();
+        let hash = rec.risk_envelope.envelope_hash.clone();
+
+        // recommendation expired
+        let mut expired = rec.clone();
+        expired.valid_until = now - Duration::hours(1);
+        assert_eq!(
+            evaluate_invalidation(&expired, &report, true, &version, &version, &hash, now),
+            Some(ApprovalInvalidation::RecommendationExpired)
+        );
+
+        // report no longer published
+        let revoked = report_fixtures::report(
+            rec.recommendation_report_id.clone(),
+            ReportKind::TopN,
+            RecommendationReportStatus::Revoked,
+        );
+        assert_eq!(
+            evaluate_invalidation(&rec, &revoked, true, &version, &version, &hash, now),
+            Some(ApprovalInvalidation::ReportRevoked)
+        );
+
+        // kill switch opened
+        assert_eq!(
+            evaluate_invalidation(&rec, &report, false, &version, &version, &hash, now),
+            Some(ApprovalInvalidation::KillSwitchOpened)
+        );
+
+        // runtime config version changed
+        let other_version = RuntimeConfigVersionId::from_v7();
+        assert_eq!(
+            evaluate_invalidation(&rec, &report, true, &other_version, &version, &hash, now),
+            Some(ApprovalInvalidation::RuntimeConfigChanged)
+        );
+
+        // risk envelope hash mismatch: a stored hash differing from the rec's.
+        let stored_hash = ContentHash::parse(format!("blake3:{}", "1".repeat(64))).expect("hash");
+        assert_ne!(stored_hash, rec.risk_envelope.envelope_hash);
+        assert_eq!(
+            evaluate_invalidation(&rec, &report, true, &version, &version, &stored_hash, now),
+            Some(ApprovalInvalidation::RiskEnvelopeMismatch)
+        );
+    }
 }

@@ -473,8 +473,6 @@ impl Default for ExecutionConfig {
 pub struct SemiAutoConfig {
     /// Approval time-to-live in seconds.
     pub approval_ttl_secs: u64,
-    /// Required role name for approval.
-    pub required_role: String,
     /// Whether approvers may reduce order size.
     pub allow_size_reduction: bool,
 }
@@ -483,7 +481,6 @@ impl Default for SemiAutoConfig {
     fn default() -> Self {
         Self {
             approval_ttl_secs: 900,
-            required_role: "quant_operator".to_owned(),
             allow_size_reduction: true,
         }
     }

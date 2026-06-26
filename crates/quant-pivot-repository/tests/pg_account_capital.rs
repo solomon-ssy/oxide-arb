@@ -337,64 +337,77 @@ async fn assert_reserved_capital_tracks_pending_intent(
         Usd::ZERO
     );
 
-    let intent = PgOrderIntentRepository::new(db.clone())
-        .create_pending(NewOrderIntent {
-            order_intent_id: OrderIntentId::from_v7(),
-            recommendation_id: recommendation_id.clone(),
-            runtime_mode: QuantRuntimeMode::SemiAuto,
-            runtime_config_version_id: runtime_config_version_id.clone(),
-            model_version_id: model_version_id.clone(),
-            intent_kind: OrderIntentKind::Buy,
-            status: OrderIntentStatus::PendingApproval,
-            approval_status: ApprovalStatus::Pending,
-            approved_by: None,
-            approval_reason: None,
-            approved_at: None,
-            policy_id: None,
-            policy_hash: None,
-            status_reason: None,
-            admission_trace_ref: None,
-            entry_order_json: EntryOrderSpec {
-                token_id: TokenId::new("token-1"),
-                side: Side::Buy,
-                order_type: OrderType::Gtc,
-                limit_price: Price::new(dec!(0.6)),
-                shares: Shares::new(dec!(416.66)),
-                max_slippage_bps: Bps::new(dec!(50)),
-                valid_until: Utc::now(),
+    let intent_repo = PgOrderIntentRepository::new(db.clone());
+    let order_intent_id = OrderIntentId::from_v7();
+    intent_repo
+        .create_with_allocation(
+            NewOrderIntent {
+                order_intent_id: order_intent_id.clone(),
+                recommendation_id: recommendation_id.clone(),
+                runtime_mode: QuantRuntimeMode::SemiAuto,
+                runtime_config_version_id: runtime_config_version_id.clone(),
+                model_version_id: model_version_id.clone(),
+                intent_kind: OrderIntentKind::Buy,
+                status: OrderIntentStatus::PendingApproval,
+                approval_status: ApprovalStatus::Pending,
+                approved_by: None,
+                approval_reason: None,
+                approved_at: None,
+                policy_id: None,
+                policy_hash: None,
+                status_reason: None,
+                admission_trace_ref: None,
+                entry_order_json: EntryOrderSpec {
+                    token_id: TokenId::new("token-1"),
+                    side: Side::Buy,
+                    order_type: OrderType::Gtc,
+                    limit_price: Price::new(dec!(0.6)),
+                    shares: Shares::new(dec!(416.66)),
+                    max_slippage_bps: Bps::new(dec!(50)),
+                    valid_until: Utc::now(),
+                },
+                exit_policy_json: ExitPolicySpec {
+                    take_profit_price: Some(Price::new(dec!(0.8))),
+                    stop_loss_price: Some(Price::new(dec!(0.5))),
+                    time_exit_at: Some(Utc::now()),
+                    partial_exit_nodes: Vec::new(),
+                    settlement_policy: SettlementPolicy::ExitBeforeResolution,
+                },
+                risk_envelope_hash: content_hash('e'),
+                expires_at: Utc::now(),
             },
-            exit_policy_json: ExitPolicySpec {
-                take_profit_price: Some(Price::new(dec!(0.8))),
-                stop_loss_price: Some(Price::new(dec!(0.5))),
-                time_exit_at: Some(Utc::now()),
-                partial_exit_nodes: Vec::new(),
-                settlement_policy: SettlementPolicy::ExitBeforeResolution,
+            NewCapitalAllocation {
+                capital_allocation_id: CapitalAllocationId::from_v7(),
+                order_intent_id: order_intent_id.clone(),
+                recommendation_id: recommendation_id.clone(),
+                state: CapitalAllocationState::Allocated,
+                planned_usd: Usd::new(dec!(250)),
+                allocated_usd: Usd::new(dec!(250)),
+                locked_usd: Usd::ZERO,
+                spent_usd: Usd::ZERO,
+                released_usd: Usd::ZERO,
+                reason: "intent created".to_owned(),
             },
-            risk_envelope_hash: content_hash('e'),
-            expires_at: Utc::now(),
-        })
+        )
         .await
-        .expect("create intent");
+        .expect("create intent with allocation");
 
-    PgCapitalAllocationRepository::new(db.clone())
-        .create(NewCapitalAllocation {
-            capital_allocation_id: CapitalAllocationId::from_v7(),
-            order_intent_id: intent.order_intent_id,
-            recommendation_id: recommendation_id.clone(),
-            state: CapitalAllocationState::Allocated,
-            planned_usd: Usd::new(dec!(250)),
-            allocated_usd: Usd::new(dec!(250)),
-            locked_usd: Usd::ZERO,
-            spent_usd: Usd::ZERO,
-            released_usd: Usd::ZERO,
-            reason: "intent pending approval".to_owned(),
-        })
-        .await
-        .expect("create allocation");
-
+    // Allocated capital is reserved …
     assert_eq!(
         reserved_repo.sum_reserved_usd().await.expect("sum"),
         Usd::new(dec!(250))
+    );
+
+    // … and a reject releases it in the same transaction as the intent move.
+    let rejected = intent_repo
+        .reject(&order_intent_id, "operator veto".to_owned())
+        .await
+        .expect("reject intent");
+    assert_eq!(rejected.status, OrderIntentStatus::Rejected);
+    assert_eq!(
+        reserved_repo.sum_reserved_usd().await.expect("sum"),
+        Usd::ZERO,
+        "rejected intent must release its reservation"
     );
 }
 
@@ -539,53 +552,22 @@ async fn capital_kill_switch_and_attribution_repositories_round_trip() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let ids = seed_report_fixture(&db).await;
-    let order_intent_id = create_pending_intent(&db, &ids).await;
+    // Creating an intent reserves its capital atomically (planned = allocated).
+    let _order_intent_id = create_pending_intent(&db, &ids).await;
 
     let capital_repo = PgCapitalAllocationRepository::new(db.clone());
-    let capital_allocation_id = CapitalAllocationId::from_v7();
-    capital_repo
-        .create(NewCapitalAllocation {
-            capital_allocation_id: capital_allocation_id.clone(),
-            order_intent_id,
-            recommendation_id: ids.recommendation.clone(),
-            state: CapitalAllocationState::Allocated,
-            planned_usd: Usd::new(dec!(100)),
-            allocated_usd: Usd::new(dec!(100)),
-            locked_usd: Usd::ZERO,
-            spent_usd: Usd::ZERO,
-            released_usd: Usd::ZERO,
-            reason: "allocated".to_owned(),
-        })
-        .await
-        .expect("create capital allocation");
-
-    let impaired = capital_repo
-        .transition(
-            &capital_allocation_id,
-            quant_pivot_models::domain::CapitalAllocationPatch {
-                state: CapitalAllocationState::Locked,
-                allocated_usd: Usd::new(dec!(100)),
-                locked_usd: Usd::new(dec!(120)),
-                spent_usd: Usd::ZERO,
-                released_usd: Usd::ZERO,
-                reason: "bad venue recovery".to_owned(),
-            },
-        )
-        .await
-        .expect("transition capital allocation");
-    assert_eq!(impaired.state, CapitalAllocationState::Impaired);
     assert_eq!(
         CapitalAllocationRepository::sum_reserved_usd(&capital_repo)
             .await
             .expect("sum reserved"),
-        Usd::new(dec!(120))
+        Usd::new(dec!(250))
     );
     assert!(
-        capital_repo
+        !capital_repo
             .has_impaired()
             .await
             .expect("has_impaired query"),
-        "impaired allocation must be detected by the mode preflight"
+        "a freshly allocated intent must not be impaired"
     );
 
     let kill_switch_repo = PgKillSwitchStateRepository::new(db.clone());
@@ -666,44 +648,59 @@ async fn seed_report_fixture(db: &sea_orm::DatabaseConnection) -> TxnIds {
 }
 
 async fn create_pending_intent(db: &sea_orm::DatabaseConnection, ids: &TxnIds) -> OrderIntentId {
+    let order_intent_id = OrderIntentId::from_v7();
     PgOrderIntentRepository::new(db.clone())
-        .create_pending(NewOrderIntent {
-            order_intent_id: OrderIntentId::from_v7(),
-            recommendation_id: ids.recommendation.clone(),
-            runtime_mode: QuantRuntimeMode::SemiAuto,
-            runtime_config_version_id: ids.runtime_config_version.clone(),
-            model_version_id: ids.model_version.clone(),
-            intent_kind: OrderIntentKind::Buy,
-            status: OrderIntentStatus::PendingApproval,
-            approval_status: ApprovalStatus::Pending,
-            approved_by: None,
-            approval_reason: None,
-            approved_at: None,
-            policy_id: None,
-            policy_hash: None,
-            status_reason: None,
-            admission_trace_ref: None,
-            entry_order_json: EntryOrderSpec {
-                token_id: TokenId::new("token-1"),
-                side: Side::Buy,
-                order_type: OrderType::Gtc,
-                limit_price: Price::new(dec!(0.6)),
-                shares: Shares::new(dec!(416.66)),
-                max_slippage_bps: Bps::new(dec!(50)),
-                valid_until: Utc::now(),
+        .create_with_allocation(
+            NewOrderIntent {
+                order_intent_id: order_intent_id.clone(),
+                recommendation_id: ids.recommendation.clone(),
+                runtime_mode: QuantRuntimeMode::SemiAuto,
+                runtime_config_version_id: ids.runtime_config_version.clone(),
+                model_version_id: ids.model_version.clone(),
+                intent_kind: OrderIntentKind::Buy,
+                status: OrderIntentStatus::PendingApproval,
+                approval_status: ApprovalStatus::Pending,
+                approved_by: None,
+                approval_reason: None,
+                approved_at: None,
+                policy_id: None,
+                policy_hash: None,
+                status_reason: None,
+                admission_trace_ref: None,
+                entry_order_json: EntryOrderSpec {
+                    token_id: TokenId::new("token-1"),
+                    side: Side::Buy,
+                    order_type: OrderType::Gtc,
+                    limit_price: Price::new(dec!(0.6)),
+                    shares: Shares::new(dec!(416.66)),
+                    max_slippage_bps: Bps::new(dec!(50)),
+                    valid_until: Utc::now(),
+                },
+                exit_policy_json: ExitPolicySpec {
+                    take_profit_price: Some(Price::new(dec!(0.8))),
+                    stop_loss_price: Some(Price::new(dec!(0.5))),
+                    time_exit_at: Some(Utc::now()),
+                    partial_exit_nodes: Vec::new(),
+                    settlement_policy: SettlementPolicy::ExitBeforeResolution,
+                },
+                risk_envelope_hash: content_hash('e'),
+                expires_at: Utc::now(),
             },
-            exit_policy_json: ExitPolicySpec {
-                take_profit_price: Some(Price::new(dec!(0.8))),
-                stop_loss_price: Some(Price::new(dec!(0.5))),
-                time_exit_at: Some(Utc::now()),
-                partial_exit_nodes: Vec::new(),
-                settlement_policy: SettlementPolicy::ExitBeforeResolution,
+            NewCapitalAllocation {
+                capital_allocation_id: CapitalAllocationId::from_v7(),
+                order_intent_id: order_intent_id.clone(),
+                recommendation_id: ids.recommendation.clone(),
+                state: CapitalAllocationState::Allocated,
+                planned_usd: Usd::new(dec!(250)),
+                allocated_usd: Usd::new(dec!(250)),
+                locked_usd: Usd::ZERO,
+                spent_usd: Usd::ZERO,
+                released_usd: Usd::ZERO,
+                reason: "intent created".to_owned(),
             },
-            risk_envelope_hash: content_hash('e'),
-            expires_at: Utc::now(),
-        })
+        )
         .await
-        .expect("create intent")
+        .expect("create intent with allocation")
         .order_intent_id
 }
 
@@ -1075,7 +1072,6 @@ fn execution_eligibility() -> ExecutionEligibility {
         eligible_modes: vec![QuantRuntimeMode::ReportOnly],
         ineligibility_reasons: Vec::new(),
         approval_required: false,
-        approval_role: None,
         auto_policy_id: None,
     }
 }

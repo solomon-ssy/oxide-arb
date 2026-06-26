@@ -250,7 +250,6 @@ Kelly 是唯一 production sizing model；`confidence_weighting` 只作为 Kelly
 `semi_auto`：
 
 - `approval_ttl_secs`
-- `required_role`
 - `allow_size_reduction`
 
 `auto_execution`：

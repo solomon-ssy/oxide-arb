@@ -383,7 +383,6 @@ Sizing 不是展示值。执行模式启用时，`OrderIntent` 只能在 sizing 
 - `eligible_in_auto_execution`
 - `ineligibility_reasons`
 - `approval_required`
-- `approval_role`
 - `auto_policy_id`
 
 示例：

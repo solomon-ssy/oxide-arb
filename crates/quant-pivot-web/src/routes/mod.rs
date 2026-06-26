@@ -36,6 +36,7 @@ pub mod metrics;
 pub mod model_governance;
 pub mod operation_logs;
 pub mod permissions;
+pub mod quant_intents;
 pub mod quant_recommendations;
 pub mod quant_reports;
 pub mod registry;
@@ -82,6 +83,7 @@ fn protected_route_specs() -> Vec<RouteSpec> {
     specs.extend(model_governance::route_specs());
     specs.extend(quant_reports::route_specs());
     specs.extend(quant_recommendations::route_specs());
+    specs.extend(quant_intents::route_specs());
     specs
 }
 

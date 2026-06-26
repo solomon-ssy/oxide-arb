@@ -216,9 +216,9 @@ flowchart LR
    `changed_at`）+ `KillSwitchHandle`（ArcSwap 热读）+ `GET/POST /api/system/kill-switch`。
    **破坏式删除** runtime-config 布尔 `KillSwitchPolicy.enabled`；operational state 为权威，
    config 仅留 emergency policy 默认。行为表见父文档 §8 / 05.1 §5。
-3. **审批角色复用 `operator`**（已拍板）：semi_auto intent `approve/reject/cancel` 与
-   mode/kill-switch 同归 `operator` 治理；**不新增** `trader`/`risk_manager`。父文档 §10.3
-   的 trader/risk_manager 提法在本目录定为 `operator`（risk_owner 仍可 reject，见 05.2 §6）。
+3. **审批 RBAC 在 API 层**（已拍板）：semi_auto intent `approve/reject/cancel` 由 Casbin
+   `order_intent:*` 权限门控（`operator` 可批/拒/取消；`risk_owner` 可拒不可批，见 05.2 §6）。
+   **不**在 runtime-config 或 `ExecutionEligibility` 中携带审批角色名。
 4. **资金真相分层**（09 §0/§4）：PG 为 source of truth，先持久化业务状态（await 成功）→ 再
    enqueue CH 镜像 fact（fire-and-forget）。资金状态机
    `planned → allocated → locked → spent → released | impaired` 全程可恢复；恢复失败则执行
@@ -285,8 +285,9 @@ flowchart LR
 |---|---|---|
 | [`05`](../05-execution-risk-and-governance.md) §8 | kill-switch 落为持久化 5 态 operational 单例 `system_kill_switch`（非 runtime-config 布尔） | 05.0/05.1 |
 | [`05`](../05-execution-risk-and-governance.md) §1.3 | mode 切换 preflight 接入 `switch_quant_mode`（转换矩阵 + 检查清单） | 05.1 |
-| [`05`](../05-execution-risk-and-governance.md) §10.3 | 审批角色定为 `operator`（删除 trader/risk_manager 提法，对齐现有内置角色） | 05.2 |
+| [`05`](../05-execution-risk-and-governance.md) §10.3 | 审批 RBAC 在 API 层（Casbin `order_intent:approve` 等）；删除 `SemiAutoConfig::required_role` 与 `ExecutionEligibility::approval_role` | 05.2 |
 | [`05`](../05-execution-risk-and-governance.md) §13 | `create-intent` 改为 `POST /api/quant/intents`（删除 501 stub） | 05.2 |
+| [`05`](../05-execution-risk-and-governance.md) §16.3 | **as-built 审计事务边界**：intent+capital 始终同一 PG 事务；op-log 仅在**后台发起**（expire sweep / report-termination 级联 invalidate）写入该事务，HTTP 发起的 create/approve/reject/cancel 由 `operation_audit` 中间件审计（与全站受治理路由一致）。报告级联钩子覆盖 revoke + expire 两条终态 | 05.2 |
 | [`09`](../09-account-capital-position-reconciliation.md) §6 | `quant_position` / `quant_capital_allocation` / `quant_reconciliation` + 完整资金 FSM + 对账 worker 正式落 Phase 5 各子phase | 05.0/05.2/05.4/05.5 |
 | [`06`](../06-config-deploy-and-ops.md) | runtime-config 删除 `execution.kill_switch.enabled` 布尔；新增 kill-switch operational 单例语义 + 执行 metrics 清单 | 05.0/05.1 |
 | [`06`](../06-config-deploy-and-ops.md) | `portfolio` 段新增 `optimizer`（greedy/lp）+ `constraints.correlation`；`execution.equity_snapshot_secs` | 05.8/05.9 |

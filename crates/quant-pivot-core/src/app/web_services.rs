@@ -15,7 +15,7 @@ use quant_pivot_error::{QuantResult, control::ControlError, infra::InfraError};
 use quant_pivot_models::{
     domain::{
         BookSnapshot, CatalogStatusPort, DataQualityPort, MarketDataPort, MetricsScrapePort,
-        NewOperationLog, RuntimeConfigPort,
+        NewOperationLog, OrderIntentPort, RuntimeConfigPort,
     },
     types::TokenId,
 };
@@ -48,7 +48,11 @@ const OPERATION_LOG_FLUSH_INTERVAL: Duration = Duration::from_millis(250);
 const OPERATION_LOG_BUFFER_CAPACITY: usize = 4096;
 
 impl AppContext {
-    pub async fn register_web_services(&self, runner: &mut AppRunner) -> QuantResult<()> {
+    pub async fn register_web_services(
+        &self,
+        runner: &mut AppRunner,
+        order_intents: Arc<dyn OrderIntentPort>,
+    ) -> QuantResult<()> {
         let pg = self.infra.pg.connection();
         let perm_checker = Arc::new(routes::init_rbac_rules());
         let casbin = Arc::new(CasbinService::new(pg.clone()).await.map_err(|error| {
@@ -130,6 +134,7 @@ impl AppContext {
                 Arc::clone(&self.report.lifecycle),
                 Arc::clone(&self.report.scheduler),
             )),
+            order_intents,
         };
 
         let web_config = self.config.web.clone();

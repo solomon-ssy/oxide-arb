@@ -57,7 +57,12 @@ use testcontainers::ContainerAsync;
 use testcontainers_modules::{postgres::Postgres, redis::Redis};
 use tokio_util::sync::CancellationToken;
 
-use crate::{core_report_port::CoreReportTestHandle, pg, redis, repos::WebHarnessRepos};
+use quant_pivot_models::domain::OrderIntentPort;
+
+use crate::{
+    core_report_port::CoreReportTestHandle, order_intent_port::build_order_intent_service, pg,
+    redis, repos::WebHarnessRepos,
+};
 
 pub const API_VERSION: (&str, &str) = ("Accept-Api-Version", "v1");
 
@@ -127,6 +132,7 @@ impl TestEnv {
         let core_report =
             crate::core_report_port::build_core_report_stack(&db, events.clone()).await;
         let ad_hoc_enqueued = Arc::clone(&core_report.enqueued);
+        let order_intents = build_order_intent_service(&db, events.clone());
         let state = AppState {
             deploy: Arc::new(test_deploy_config()),
             runtime_config_apply: Arc::clone(&runtime_config_apply) as Arc<dyn RuntimeConfigPort>,
@@ -162,6 +168,7 @@ impl TestEnv {
             backtests: Arc::new(MockBacktestPort),
             model_governance: Arc::new(MockModelGovernancePort),
             quant_reports: core_report.port.clone(),
+            order_intents: order_intents as Arc<dyn OrderIntentPort>,
         };
 
         Self {

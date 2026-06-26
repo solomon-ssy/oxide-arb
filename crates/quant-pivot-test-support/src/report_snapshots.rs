@@ -192,7 +192,6 @@ fn not_auto_eligible() -> ExecutionEligibility {
         eligible_modes: vec![QuantRuntimeMode::ReportOnly, QuantRuntimeMode::SemiAuto],
         ineligibility_reasons: vec![IneligibilityReason::LowConfidence],
         approval_required: true,
-        approval_role: Some("trader".to_owned()),
         auto_policy_id: None,
     }
 }

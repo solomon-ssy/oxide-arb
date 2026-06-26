@@ -55,19 +55,23 @@ pub enum WsChannel {
     /// empty / failed / revoked / expired), discriminated by the payload's
     /// `event` field.
     QuantReport,
+    /// Order-intent lifecycle events (created / approved / rejected / cancelled
+    /// / expired / invalidated), discriminated by the payload's `event` field.
+    QuantIntent,
     /// Materialization / replay run lifecycle update for dashboard clients.
     MaterializationRunUpdate,
 }
 
 impl WsChannel {
     /// Every channel, used by exhaustiveness tests and reverse lookup.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::SystemStatus,
         Self::SystemAlert,
         Self::MarketResolved,
         Self::MarketBookUpdate,
         Self::ConfigActivated,
         Self::QuantReport,
+        Self::QuantIntent,
         Self::MaterializationRunUpdate,
     ];
 
@@ -81,6 +85,7 @@ impl WsChannel {
             Self::MarketBookUpdate => "market.book_update",
             Self::ConfigActivated => "config.activated",
             Self::QuantReport => "quant.report",
+            Self::QuantIntent => "quant.intent",
             Self::MaterializationRunUpdate => "materialization.run_update",
         }
     }
@@ -95,6 +100,7 @@ impl WsChannel {
             Self::SystemStatus | Self::SystemAlert => ResourceType::System,
             Self::MarketResolved | Self::MarketBookUpdate => ResourceType::Market,
             Self::QuantReport => ResourceType::QuantReport,
+            Self::QuantIntent => ResourceType::OrderIntent,
             Self::MaterializationRunUpdate => ResourceType::Publication,
             Self::ConfigActivated => ResourceType::RuntimeConfig,
         }

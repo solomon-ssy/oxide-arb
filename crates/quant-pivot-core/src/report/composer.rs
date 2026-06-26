@@ -322,7 +322,7 @@ fn compose_recommendation(
             factor_definition_versions: factor_definition_versions(candidate),
             data_quality_snapshot_ref: data_quality_snapshot_ref.clone(),
         }),
-        execution_eligibility: execution_eligibility(&auto_gate, input.runtime_config),
+        execution_eligibility: execution_eligibility(&auto_gate),
         valid_from: input.as_of,
         valid_until,
         status: RecommendationStatus::Published,
@@ -433,7 +433,7 @@ struct AutoExecutionGate {
     reasons: Vec<IneligibilityReason>,
 }
 
-fn execution_eligibility(gate: &AutoExecutionGate, config: &RuntimeConfig) -> ExecutionEligibility {
+fn execution_eligibility(gate: &AutoExecutionGate) -> ExecutionEligibility {
     let mut eligible_modes = vec![QuantRuntimeMode::ReportOnly, QuantRuntimeMode::SemiAuto];
     if gate.allowed {
         eligible_modes.push(QuantRuntimeMode::AutoExecution);
@@ -446,7 +446,6 @@ fn execution_eligibility(gate: &AutoExecutionGate, config: &RuntimeConfig) -> Ex
             gate.reasons.clone()
         },
         approval_required: !gate.allowed,
-        approval_role: (!gate.allowed).then(|| config.execution.semi_auto.required_role.clone()),
         auto_policy_id: gate
             .allowed
             .then(|| "runtime_config.execution.auto_execution".to_owned()),
@@ -925,7 +924,7 @@ mod tests {
         assert!(!gate.allowed);
         assert_eq!(gate.reasons, vec![IneligibilityReason::LowConfidence]);
 
-        let eligibility = execution_eligibility(&gate, &config);
+        let eligibility = execution_eligibility(&gate);
         assert!(eligibility.is_eligible(QuantRuntimeMode::ReportOnly));
         assert!(eligibility.is_eligible(QuantRuntimeMode::SemiAuto));
         assert!(!eligibility.is_eligible(QuantRuntimeMode::AutoExecution));
@@ -954,7 +953,7 @@ mod tests {
         assert!(gate.allowed);
         assert!(gate.reasons.is_empty());
 
-        let eligibility = execution_eligibility(&gate, &config);
+        let eligibility = execution_eligibility(&gate);
         assert!(eligibility.is_eligible(QuantRuntimeMode::AutoExecution));
     }
 

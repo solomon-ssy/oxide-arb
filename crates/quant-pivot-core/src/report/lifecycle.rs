@@ -1,12 +1,13 @@
 //! Report lifecycle service.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use chrono::{DateTime, Duration, Utc};
 use quant_pivot_error::{QuantError, QuantResult, report::ReportError};
 use quant_pivot_models::{
     domain::{NewOperationLog, RecommendationReportInfo, ReportLifecycleEvent},
     enums::{
+        execution::ApprovalInvalidation,
         operation_log::{OperationCategory, OperationOutcome},
         quant::{EmptyReason, QuantRuntimeMode, RecommendationReportStatus, ReportKind},
         rbac::ResourceType,
@@ -18,7 +19,10 @@ use quant_pivot_repository::traits::{
     RecommendationReportRepository, RuntimeConfigVersionRepository,
 };
 
-use crate::{governance::RuntimeModeHandle, observability::metrics_hub::MetricsHub};
+use crate::{
+    execution::IntentInvalidationHook, governance::RuntimeModeHandle,
+    observability::metrics_hub::MetricsHub,
+};
 
 use super::{
     builder::{ReportBuilder, report_as_of},
@@ -60,6 +64,10 @@ pub struct ReportLifecycleService {
     publisher: Arc<ReportPublisher>,
     runtime_mode: RuntimeModeHandle,
     metrics: Arc<MetricsHub>,
+    /// Cascade hook: on revoke / expire, the active order intents derived from
+    /// the report are invalidated and their capital released. Set once at boot
+    /// (absent in report-only builds without the execution plane).
+    intent_invalidation: OnceLock<Arc<dyn IntentInvalidationHook>>,
 }
 
 impl ReportLifecycleService {
@@ -73,6 +81,36 @@ impl ReportLifecycleService {
             publisher: deps.publisher,
             runtime_mode: deps.runtime_mode,
             metrics: deps.metrics,
+            intent_invalidation: OnceLock::new(),
+        }
+    }
+
+    /// Install the order-intent cascade hook (idempotent; first set wins).
+    pub fn set_intent_invalidation_hook(&self, hook: Arc<dyn IntentInvalidationHook>) {
+        let _ = self.intent_invalidation.set(hook);
+    }
+
+    /// Cascade-invalidate the active intents derived from a terminated report.
+    ///
+    /// Best-effort: a failure is logged, not propagated — the approval-time
+    /// re-check and the expiry sweep are the fail-closed backstops.
+    async fn cascade_intent_invalidation(
+        &self,
+        report_id: &RecommendationReportId,
+        reason: ApprovalInvalidation,
+        now: DateTime<Utc>,
+    ) {
+        let Some(hook) = self.intent_invalidation.get() else {
+            return;
+        };
+        match hook.invalidate_for_report(report_id, reason, now).await {
+            Ok(count) if count > 0 => {
+                tracing::info!(%report_id, count, reason = reason.as_str(), "cascaded intent invalidation");
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(%report_id, %error, "intent cascade invalidation failed");
+            }
         }
     }
 
@@ -128,6 +166,12 @@ impl ReportLifecycleService {
             )
             .await?;
         self.publisher.publish_revoked(&report);
+        self.cascade_intent_invalidation(
+            report_id,
+            ApprovalInvalidation::ReportRevoked,
+            revoked_at,
+        )
+        .await;
         Ok(report)
     }
 
@@ -149,6 +193,12 @@ impl ReportLifecycleService {
             )
             .await?;
         self.publisher.publish_expired(&report);
+        self.cascade_intent_invalidation(
+            report_id,
+            ApprovalInvalidation::RecommendationExpired,
+            expired_at,
+        )
+        .await;
         Ok(report)
     }
 

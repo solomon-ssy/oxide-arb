@@ -80,6 +80,8 @@ pub enum TaskId {
     // ── Ops ───────────────────────────────────────────────────────────
     ReportGenerator,
     ReportExpireSweep,
+    /// Expires order intents past their `expires_at` and releases their capital.
+    IntentExpireSweep,
 }
 
 impl TaskId {
@@ -103,9 +105,11 @@ impl TaskId {
             }
             Self::ExecutionRunner { .. } | Self::ReconciliationWorker => TaskKind::Execution,
             Self::ExecutionHeartbeat => TaskKind::ExecutionHeartbeat,
-            Self::RiskTick | Self::ExposureGc | Self::ReportGenerator | Self::ReportExpireSweep => {
-                TaskKind::ReportScheduler
-            }
+            Self::RiskTick
+            | Self::ExposureGc
+            | Self::ReportGenerator
+            | Self::ReportExpireSweep
+            | Self::IntentExpireSweep => TaskKind::ReportScheduler,
             Self::RiskAuditBatch | Self::OperationLogWriter => TaskKind::Audit,
             Self::ExecutionAuditWriter
             | Self::DetectionWriter

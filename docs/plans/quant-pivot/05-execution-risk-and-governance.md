@@ -404,14 +404,15 @@ Kill switch 状态：
 
 ### 10.3 RBAC
 
-角色建议：
+审批权限由 HTTP API 层 Casbin RBAC 强制执行（`ResourceType::OrderIntent` × `Operation`），
+不在 runtime-config 或 report payload 中携带角色名。内置角色（seed）：
 
-- `viewer`: 只读报告。
+- `viewer`: 只读报告 / intents。
 - `analyst`: 触发 ad-hoc report / backtest。
-- `risk_manager`: 调整 risk envelope / reject intents。
-- `trader`: approve semi-auto intents。
+- `risk_owner`: 调整 runtime config / 发布模型 / revoke 报告 / reject intents（不可 approve）。
+- `operator`: mode switch / kill switch / create / approve / cancel intents。
 - `admin`: manage users/config。
-- `operator`: mode switch / kill switch。
+- `emergency_operator`: halt / emergency。
 
 ## 11. Reconciliation
 
@@ -516,7 +517,7 @@ pub trait RuntimeModeGate {
 
 pub enum IntentPolicyDecision {
     ReportOnly,
-    RequiresApproval { required_role: RoleId, ttl: Duration },
+    RequiresApproval { approval_ttl: Duration },
     ApprovedByPolicy { policy_id: PolicyId, reason: String },
     Denied { reason: ModeDenialReason },
 }
@@ -570,11 +571,10 @@ pub async fn create_intent_from_recommendation(
     match policy {
         IntentPolicyDecision::ReportOnly => Err(QuantError::ReportOnlyMode),
         IntentPolicyDecision::Denied { reason } => Err(QuantError::IntentDenied(reason)),
-        IntentPolicyDecision::RequiresApproval { required_role, ttl } => {
+        IntentPolicyDecision::RequiresApproval { approval_ttl } => {
             deps.intent_repo.create_pending(NewOrderIntent::pending(
                 recommendation,
-                required_role,
-                deps.clock.now() + ttl,
+                deps.clock.now() + approval_ttl,
             )).await
         }
         IntentPolicyDecision::ApprovedByPolicy { policy_id, reason } => {

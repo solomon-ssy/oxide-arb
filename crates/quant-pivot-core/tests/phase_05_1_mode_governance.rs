@@ -14,12 +14,11 @@ use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     config::DeployConfig,
     domain::{
-        AppendReconciliationEvidence, CapitalAllocationInfo, CapitalAllocationPatch,
-        CoreEventPublisher, DataQualityPort, DataQualitySnapshot, KillSwitchPort,
-        KillSwitchStateInfo, KillSwitchView, ModelSpecInfo, ModelVersionInfo, NewCapitalAllocation,
-        NewModelSpec, NewModelVersion, NewReconciliation, NewShadowComparison, ReconciliationInfo,
-        ReconciliationPatch, SetKillSwitchCommand, ShadowComparisonInfo, ShadowStabilitySummary,
-        UpsertKillSwitchState,
+        AppendReconciliationEvidence, CapitalAllocationInfo, CoreEventPublisher, DataQualityPort,
+        DataQualitySnapshot, KillSwitchPort, KillSwitchStateInfo, KillSwitchView, ModelSpecInfo,
+        ModelVersionInfo, NewModelSpec, NewModelVersion, NewReconciliation, NewShadowComparison,
+        ReconciliationInfo, ReconciliationPatch, SetKillSwitchCommand, ShadowComparisonInfo,
+        ShadowStabilitySummary, UpsertKillSwitchState,
     },
     enums::{
         execution::KillSwitchState,
@@ -27,8 +26,8 @@ use quant_pivot_models::{
     },
     runtime_config::{ModelVersionRef, RuntimeConfig},
     types::{
-        CapitalAllocationId, ContentHash, ExecutionOrderId, ModelSpecId, ModelVersionId,
-        OrderIntentId, Probability, ReconciliationId, Usd,
+        ContentHash, ExecutionOrderId, ModelSpecId, ModelVersionId, OrderIntentId, Probability,
+        ReconciliationId, Usd,
     },
 };
 use quant_pivot_repository::traits::{
@@ -172,23 +171,10 @@ struct MockCapital {
 
 #[async_trait]
 impl CapitalAllocationRepository for MockCapital {
-    async fn create(
-        &self,
-        _allocation: NewCapitalAllocation,
-    ) -> Result<CapitalAllocationInfo, StorageError> {
-        unimplemented!()
-    }
     async fn find_by_intent(
         &self,
         _order_intent_id: &OrderIntentId,
     ) -> Result<Option<CapitalAllocationInfo>, StorageError> {
-        unimplemented!()
-    }
-    async fn transition(
-        &self,
-        _capital_allocation_id: &CapitalAllocationId,
-        _patch: CapitalAllocationPatch,
-    ) -> Result<CapitalAllocationInfo, StorageError> {
         unimplemented!()
     }
     async fn sum_reserved_usd(&self) -> Result<Usd, StorageError> {

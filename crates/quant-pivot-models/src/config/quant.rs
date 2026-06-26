@@ -23,12 +23,19 @@ pub struct QuantWorkersConfig {
     /// `tokio-cron-scheduler` via `ReportScheduleRunner` (cadence comes from
     /// `runtime_config.reports.schedules[]`).
     pub report_expire_sweep_secs: u64,
+    /// Order-intent expiry sweep cadence (seconds).
+    ///
+    /// Drives `CoreOrderIntentService::expire_due`, which expires
+    /// `PendingApproval` (and other expirable) intents past their `expires_at`
+    /// and releases their reserved capital in one transaction.
+    pub intent_expire_sweep_secs: u64,
 }
 
 impl Default for QuantWorkersConfig {
     fn default() -> Self {
         Self {
             report_expire_sweep_secs: default_report_expire_sweep_secs(),
+            intent_expire_sweep_secs: default_intent_expire_sweep_secs(),
         }
     }
 }
@@ -49,4 +56,8 @@ pub struct QuantAccountDeployConfig {
 
 const fn default_report_expire_sweep_secs() -> u64 {
     300
+}
+
+const fn default_intent_expire_sweep_secs() -> u64 {
+    60
 }

@@ -171,7 +171,6 @@ fn execution_eligibility() -> ExecutionEligibility {
         eligible_modes: vec![QuantRuntimeMode::ReportOnly],
         ineligibility_reasons: vec![IneligibilityReason::ReportOnlyMode],
         approval_required: true,
-        approval_role: Some("trader".to_owned()),
         auto_policy_id: None,
     }
 }

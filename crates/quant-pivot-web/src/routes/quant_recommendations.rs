@@ -6,11 +6,10 @@
 //! |--------|------|------------|---------|
 //! | GET  | `/quant/recommendations/{id}` | `quant_report:read` | One recommendation |
 //! | GET  | `/quant/recommendations/{id}/evidence` | `quant_report:read` | Replay handles |
-//! | POST | `/quant/recommendations/{id}/create-intent` | `quant_report:read` | **501** — execution lands in Phase 5 |
 //!
-//! `create-intent` is forward-declared so a client is never misled by a silent
-//! `404` or a fake success: it returns `501 Not Implemented` with an explicit
-//! message. Execution (intent creation / admission / submit) lands in Phase 5.
+//! Creating an order intent from a recommendation is `POST /api/quant/intents`
+//! (see [`super::quant_intents`]), the governed execution surface added in
+//! Phase 05.2.
 
 use actix_web::{http::Method, web};
 use quant_pivot_models::{
@@ -42,12 +41,6 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
             Rule::ResourceOp(ResourceType::QuantReport, Operation::Read),
             evidence,
         ),
-        spec(
-            Method::POST,
-            "/quant/recommendations/{id}/create-intent",
-            Rule::ResourceOp(ResourceType::QuantReport, Operation::Read),
-            create_intent,
-        ),
     ]
 }
 
@@ -75,17 +68,4 @@ pub async fn evidence(
         .await?
         .ok_or_else(|| WebError::NotFound(format!("recommendation not found: {id}")))?;
     Ok(WebResponse::ok(QuantEvidenceView::from(info)))
-}
-
-/// `POST /api/quant/recommendations/{id}/create-intent` — Phase 5 placeholder.
-///
-/// Returns `501` so execution is never silently dropped or faked; the intent /
-/// admission / submit flow lands in Phase 5.
-pub async fn create_intent(
-    _state: web::Data<AppState>,
-    _id: web::Path<RecommendationId>,
-) -> Result<WebResponse<()>, WebError> {
-    Err(WebError::NotImplemented(
-        "order execution is available in Phase 5".to_owned(),
-    ))
 }

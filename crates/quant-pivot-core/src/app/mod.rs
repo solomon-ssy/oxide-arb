@@ -4,6 +4,7 @@ pub mod backtest;
 pub mod bootstrap;
 pub mod build;
 pub mod fact_writer_tasks;
+pub mod intent_service;
 pub mod lifecycle;
 pub mod model_training;
 pub mod periodic_services;

@@ -697,19 +697,11 @@ fn execution_semi_auto_fields() -> Vec<FieldUiEntry> {
             "审批 TTL 秒数",
             20,
         ),
-        entry(
-            "execution.semi_auto.required_role",
-            "Required role",
-            "审批角色",
-            30,
-            Some(FieldWidget::PlainString),
-            None,
-        ),
         boolean(
             "execution.semi_auto.allow_size_reduction",
             "Allow size reduction",
             "允许减少下单规模",
-            40,
+            30,
         ),
     ]
 }

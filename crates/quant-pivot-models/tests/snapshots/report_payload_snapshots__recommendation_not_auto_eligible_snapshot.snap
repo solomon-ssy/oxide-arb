@@ -118,7 +118,6 @@ expression: recommendation_not_auto_eligible()
       "low_confidence"
     ],
     "approval_required": true,
-    "approval_role": "trader",
     "auto_policy_id": null
   },
   "valid_from": "2023-11-14T22:13:20Z",
