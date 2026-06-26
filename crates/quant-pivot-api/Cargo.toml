@@ -73,8 +73,5 @@ uuid = { workspace = true }
 alloy = { workspace = true }
 quant-pivot-core = { workspace = true }
 
-[features]
-integration = []
-
 [lints]
 workspace = true

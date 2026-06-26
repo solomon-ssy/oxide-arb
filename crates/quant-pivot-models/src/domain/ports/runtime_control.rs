@@ -4,16 +4,20 @@ use crate::{
     domain::{
         ReadinessReport,
         data_plane::DataQualitySnapshot,
-        governance::system::{HealthReport, SystemStatus},
+        governance::{
+            kill_switch::KillSwitchView,
+            mode::PreflightReport,
+            system::{HealthReport, SystemStatus},
+        },
         market::book::BookSnapshot,
     },
-    enums::quant::QuantRuntimeMode,
+    enums::{execution::KillSwitchState, quant::QuantRuntimeMode},
     runtime_config::RuntimeConfig,
     types::TokenId,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use quant_pivot_error::control::ControlError;
+use quant_pivot_error::{QuantResult, control::ControlError};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashSet, sync::Arc};
 
@@ -42,25 +46,64 @@ pub trait CatalogStatusPort: Send + Sync {
 }
 
 /// Outcome of a successful governed quant runtime mode transition.
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct QuantModeTransitionReport {
     pub from: QuantRuntimeMode,
     pub to: QuantRuntimeMode,
+    /// Preflight evidence for an upgrade transition; `None` for no-ops and
+    /// downgrades (which skip business preflight).
+    pub preflight: Option<PreflightReport>,
 }
 
 #[async_trait]
 pub trait RuntimeControlPort: Send + Sync {
     fn quant_runtime_mode(&self) -> QuantRuntimeMode;
 
+    /// Run the transition gate + (upgrade-only) preflight and persist the new
+    /// mode fail-closed. Forbidden edges / failed preflight return a typed
+    /// [`ExecutionError`](quant_pivot_error::execution::ExecutionError) and do
+    /// **not** mutate state.
     async fn switch_quant_mode(
         &self,
         target: QuantRuntimeMode,
+        actor: &str,
         reason: &str,
-    ) -> Result<QuantModeTransitionReport, ControlError>;
+    ) -> QuantResult<QuantModeTransitionReport>;
 
     fn system_status(&self) -> SystemStatus;
 
     async fn health(&self) -> HealthReport;
+}
+
+/// Governed request to transition the operational kill-switch.
+#[derive(Debug, Clone)]
+pub struct SetKillSwitchCommand {
+    /// Target FSM state.
+    pub target: KillSwitchState,
+    /// Acting operator identity (audit `changed_by`).
+    pub actor: String,
+    /// Mandatory operator justification.
+    pub reason: String,
+    /// Operator acknowledgement, required to clear `emergency_halted`.
+    pub ack: bool,
+}
+
+/// Operational kill-switch control boundary consumed by the web layer.
+///
+/// The hot-path query methods (`allows_new_entry` etc.) live on
+/// [`KillSwitchState`](crate::enums::execution::KillSwitchState) and the
+/// in-process handle; this port exposes only the governed read/write surface
+/// needed by the HTTP control plane.
+#[async_trait]
+pub trait KillSwitchPort: Send + Sync {
+    /// Current operational state (lock-free read).
+    fn current(&self) -> KillSwitchState;
+
+    /// Full operator projection of the current singleton.
+    fn view(&self) -> KillSwitchView;
+
+    /// Persist, hot-swap, audit, and meter a governed state transition.
+    async fn set(&self, command: SetKillSwitchCommand) -> QuantResult<KillSwitchView>;
 }
 
 #[async_trait]

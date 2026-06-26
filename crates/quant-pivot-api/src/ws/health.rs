@@ -140,6 +140,11 @@ impl Display for ShardHealthSummary {
     }
 }
 
+/// Read-only shard connectivity projection for health and system-status assembly.
+pub trait WsShardHealthPort: Send + Sync {
+    fn shard_health(&self) -> ShardHealthSummary;
+}
+
 fn connected_ratio_bps(total: usize, disconnected: usize) -> u32 {
     if total == 0 {
         return 10_000;

@@ -24,6 +24,27 @@ impl QuantRuntimeMode {
     pub const fn allows_auto_execution(self) -> bool {
         matches!(self, Self::AutoExecution)
     }
+
+    /// Monotonic capability rank used to classify a transition as an upgrade
+    /// (more capability) or a downgrade (`ReportOnly` < `SemiAuto` < `AutoExecution`).
+    #[must_use]
+    pub const fn rank(self) -> u8 {
+        match self {
+            Self::ReportOnly => 0,
+            Self::SemiAuto => 1,
+            Self::AutoExecution => 2,
+        }
+    }
+
+    /// Whether transitioning from this mode to `target` increases capability
+    /// (an upgrade requiring preflight).
+    ///
+    /// `self == target` is not an upgrade (handled as a no-op upstream).
+    /// Upgrades must pass mode preflight; downgrades (tightening) skip it.
+    #[must_use]
+    pub const fn is_upgrade_to(self, target: Self) -> bool {
+        target.rank() > self.rank()
+    }
 }
 
 crate::pg_enum! {

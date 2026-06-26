@@ -11,7 +11,7 @@ use quant_pivot_models::{
 use rust_decimal::Decimal;
 use sea_orm::{
     ActiveModelTrait, ActiveValue, ColumnTrait, DatabaseConnection, EntityTrait, FromQueryResult,
-    IntoActiveModel, QueryFilter, QuerySelect, sea_query::Expr,
+    IntoActiveModel, PaginatorTrait, QueryFilter, QuerySelect, sea_query::Expr,
 };
 
 /// Allocation rows included in the reserved-capital aggregate.
@@ -124,6 +124,15 @@ impl CapitalAllocationRepository for PgCapitalAllocationRepository {
 
     async fn sum_reserved_usd(&self) -> Result<Usd, StorageError> {
         sum_reserved_usd(&self.db).await
+    }
+
+    async fn has_impaired(&self) -> Result<bool, StorageError> {
+        quant_capital_allocation::Entity::find()
+            .filter(quant_capital_allocation::Column::State.eq(CapitalAllocationState::Impaired))
+            .count(&self.db)
+            .await
+            .map_err(StorageError::from)
+            .map(|count| count > 0)
     }
 }
 

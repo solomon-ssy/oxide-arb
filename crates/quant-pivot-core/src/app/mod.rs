@@ -20,7 +20,7 @@ mod bundles;
 pub use bundles::*;
 
 use crate::{
-    governance::RuntimeModeHandle,
+    governance::{KillSwitchHandle, RuntimeModeHandle},
     infra::schedule::ReportScheduleRunner,
     report::ReportLifecycleService,
     runtime_config::{RuntimeConfigApplicator, RuntimeConfigStore},
@@ -65,6 +65,11 @@ impl AppContext {
 
     pub fn runtime_mode(&self) -> RuntimeModeHandle {
         self.governance.runtime_mode.clone()
+    }
+
+    /// Lock-free operational kill-switch state for admission / exit hot paths.
+    pub fn kill_switch_handle(&self) -> KillSwitchHandle {
+        self.governance.kill_switch_handle.clone()
     }
 
     /// Content-addressed artifact store (`deploy.research.artifact_root`).

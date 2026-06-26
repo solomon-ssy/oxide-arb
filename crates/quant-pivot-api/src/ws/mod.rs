@@ -15,7 +15,7 @@ mod shard;
 mod token_intern;
 
 pub use drop_hook::WsEventDropHook;
-pub use health::{ShardHealthBoard, ShardHealthSummary, TokenFreshnessBoard};
+pub use health::{ShardHealthBoard, ShardHealthSummary, TokenFreshnessBoard, WsShardHealthPort};
 pub use ingest_hooks::BookLevelRejectHook;
 pub use reconnect::ReconnectPolicy;
 pub use token_intern::{TOKEN_INTERN, TokenInternPool, intern_str, intern_u256};
@@ -311,26 +311,11 @@ impl ClobWsManager {
     pub fn token_message_age_ms(&self, token_id: &TokenId) -> Option<u64> {
         self.token_freshness.token_age_ms(token_id)
     }
+}
 
-    /// Mark WS as connected for integration tests (no live socket required).
-    #[doc(hidden)]
-    pub fn seed_test_connectivity(&self) {
-        *self.last_message_at.lock() = Some(Instant::now());
-    }
-
-    /// Mark a token as fresh for market-aware connectivity tests.
-    #[doc(hidden)]
-    pub fn seed_test_token_connectivity(&self, token_id: &TokenId) {
-        self.token_freshness.mark_token(token_id, Instant::now());
-    }
-
-    /// Mark WS as stale for lifecycle tests (`last_message_age_ms >= age_ms`).
-    #[doc(hidden)]
-    pub fn seed_test_stale_connectivity(&self, age_ms: u64) {
-        let stale_at = Instant::now()
-            .checked_sub(Duration::from_millis(age_ms))
-            .unwrap_or_else(Instant::now);
-        *self.last_message_at.lock() = Some(stale_at);
+impl WsShardHealthPort for ClobWsManager {
+    fn shard_health(&self) -> ShardHealthSummary {
+        self.health.summary()
     }
 }
 

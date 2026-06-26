@@ -1,7 +1,6 @@
 //! Live-network integration tests (ignored by default).
 //!
-//! Run: `cargo test -p quant-pivot-api --features integration -- --ignored`
-#![cfg(feature = "integration")]
+//! Run: `cargo test -p quant-pivot-api -- --ignored --test-threads=1`
 
 #[path = "integration/clob_auth.rs"]
 mod clob_auth;

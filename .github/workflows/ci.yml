@@ -171,4 +171,4 @@ jobs:
   #           echo "Skipping: set POLYGON_RPC_URL and RESOLVED_CONDITION_ID repo secrets to enable."
   #           exit 0
   #         fi
-  #         cargo test -p quant-pivot-api --features integration -- --ignored --test-threads=1
+  #         cargo test -p quant-pivot-api -- --ignored --test-threads=1

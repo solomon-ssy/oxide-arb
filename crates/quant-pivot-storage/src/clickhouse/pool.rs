@@ -14,23 +14,28 @@ impl ClickHousePool {
     /// Connect to the configured database, creating it on first boot when absent.
     pub async fn connect(config: &ClickHouseConfig) -> Result<Self, StorageError> {
         ensure::ensure_database(config).await?;
-
-        let client = clickhouse::Client::default()
-            .with_url(&config.url)
-            .with_database(&config.database)
-            .with_user(&config.user)
-            .with_password(&config.password);
-
         info!(
             url = %config.url,
             database = %config.database,
             "ClickHouse client initialized"
         );
+        Ok(Self::from_config(config))
+    }
 
-        Ok(Self {
-            client,
+    /// Build a pool from config without opening a connection or ensuring the database.
+    ///
+    /// Used by [`Self::connect`] after bootstrap checks. Callers that only need
+    /// the handle (and never invoke [`Self::health_check`]) may construct directly.
+    #[must_use]
+    pub fn from_config(config: &ClickHouseConfig) -> Self {
+        Self {
+            client: clickhouse::Client::default()
+                .with_url(&config.url)
+                .with_database(&config.database)
+                .with_user(&config.user)
+                .with_password(&config.password),
             database: config.database.clone(),
-        })
+        }
     }
 
     pub const fn client(&self) -> &clickhouse::Client {

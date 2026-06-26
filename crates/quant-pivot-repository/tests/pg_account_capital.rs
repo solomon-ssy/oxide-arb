@@ -580,6 +580,13 @@ async fn capital_kill_switch_and_attribution_repositories_round_trip() {
             .expect("sum reserved"),
         Usd::new(dec!(120))
     );
+    assert!(
+        capital_repo
+            .has_impaired()
+            .await
+            .expect("has_impaired query"),
+        "impaired allocation must be detected by the mode preflight"
+    );
 
     let kill_switch_repo = PgKillSwitchStateRepository::new(db.clone());
     let now = Utc::now();

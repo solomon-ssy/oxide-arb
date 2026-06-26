@@ -10,8 +10,8 @@ use rust_decimal_macros::dec;
 use std::sync::Arc;
 
 #[test]
-fn report_only_bootstrap_status_uses_quant_runtime_mode() {
-    let status = SystemStatus::report_only_bootstrap(QuantRuntimeMode::ReportOnly);
+fn bootstrap_status_uses_quant_runtime_mode() {
+    let status = SystemStatus::bootstrap(QuantRuntimeMode::ReportOnly);
     assert_eq!(status.quant_runtime_mode, QuantRuntimeMode::ReportOnly);
 }
 

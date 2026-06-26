@@ -2,7 +2,7 @@
 
 use crate::{governance::RuntimeModeHandle, service::catalog_readiness::CatalogReadiness};
 use chrono::Utc;
-use quant_pivot_api::ws::ClobWsManager;
+use quant_pivot_api::ws::{ShardHealthSummary, WsShardHealthPort};
 use quant_pivot_models::domain::{HealthReport, SubsystemHealth};
 use quant_pivot_storage::{clickhouse::ClickHousePool, postgres::PostgresPool};
 use std::sync::Arc;
@@ -11,7 +11,7 @@ use std::sync::Arc;
 pub struct HealthCheckerDeps {
     pub pg_pool: Arc<PostgresPool>,
     pub ch_pool: Arc<ClickHousePool>,
-    pub ws_manager: Arc<ClobWsManager>,
+    pub ws_health: Arc<dyn WsShardHealthPort>,
     pub catalog: Arc<CatalogReadiness>,
     pub runtime_mode: RuntimeModeHandle,
 }
@@ -19,7 +19,7 @@ pub struct HealthCheckerDeps {
 pub struct HealthChecker {
     pg_pool: Arc<PostgresPool>,
     ch_pool: Arc<ClickHousePool>,
-    ws_manager: Arc<ClobWsManager>,
+    ws_health: Arc<dyn WsShardHealthPort>,
     catalog: Arc<CatalogReadiness>,
     runtime_mode: RuntimeModeHandle,
 }
@@ -29,7 +29,7 @@ impl HealthChecker {
         Self {
             pg_pool: deps.pg_pool,
             ch_pool: deps.ch_pool,
-            ws_manager: deps.ws_manager,
+            ws_health: deps.ws_health,
             catalog: deps.catalog,
             runtime_mode: deps.runtime_mode,
         }
@@ -73,7 +73,7 @@ impl HealthChecker {
     }
 
     fn check_ws(&self) -> SubsystemHealth {
-        let shards = self.ws_manager.shard_health();
+        let shards = self.ws_health.shard_health();
         if shards.disconnected > 0 {
             SubsystemHealth::unhealthy("websocket", None, shards.to_string())
         } else {
@@ -84,6 +84,12 @@ impl HealthChecker {
     #[must_use]
     pub fn catalog(&self) -> Arc<CatalogReadiness> {
         Arc::clone(&self.catalog)
+    }
+
+    /// Current CLOB websocket shard connectivity snapshot (for system status).
+    #[must_use]
+    pub fn ws_shard_health(&self) -> ShardHealthSummary {
+        self.ws_health.shard_health()
     }
 
     #[must_use]

@@ -80,6 +80,41 @@ crate::pg_enum! {
     }
 }
 
+impl KillSwitchState {
+    /// Whether new entry orders may be opened in this state.
+    ///
+    /// Only [`Closed`](Self::Closed) admits new entries; every tightened state
+    /// blocks new exposure (fail-closed safety valve).
+    #[must_use]
+    pub const fn allows_new_entry(self) -> bool {
+        matches!(self, Self::Closed)
+    }
+
+    /// Whether the exit monitor may submit *normal* (TP/SL/time/signal) exits.
+    ///
+    /// [`EmergencyHalted`](Self::EmergencyHalted) deliberately returns `false`
+    /// here: emergency liquidation does **not** flow through the normal auto-exit
+    /// path but through [`Self::requires_emergency_exit`] governed by
+    /// `KillSwitchPolicy.emergency_exit` (05.6). [`ExecutionHalted`](Self::ExecutionHalted)
+    /// freezes all automated action (manual handling only).
+    #[must_use]
+    pub const fn allows_auto_exit(self) -> bool {
+        matches!(self, Self::Closed | Self::ReportOnlyForced | Self::ExitOnly)
+    }
+
+    /// Whether this state mandates the emergency-exit path over open positions.
+    #[must_use]
+    pub const fn requires_emergency_exit(self) -> bool {
+        matches!(self, Self::EmergencyHalted)
+    }
+
+    /// Whether this is the emergency-halt state (clearing it requires operator ack).
+    #[must_use]
+    pub const fn is_emergency(self) -> bool {
+        matches!(self, Self::EmergencyHalted)
+    }
+}
+
 crate::pg_enum! {
     type_name = "qp_exit_state",
     pub enum ExitState {
@@ -175,5 +210,56 @@ crate::wire_enum! {
         KillSwitchOpened => "kill_switch_opened",
         IntentExpired => "intent_expired",
         OperatorCancelled => "operator_cancelled",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::KillSwitchState;
+
+    /// Behavior table (父文档 §8 / 05.1 §6) encoded as a single source of truth.
+    /// Columns: state, new-entry, auto-exit, emergency-exit.
+    const BEHAVIOR_TABLE: &[(KillSwitchState, bool, bool, bool)] = &[
+        (KillSwitchState::Closed, true, true, false),
+        (KillSwitchState::ReportOnlyForced, false, true, false),
+        (KillSwitchState::ExecutionHalted, false, false, false),
+        (KillSwitchState::ExitOnly, false, true, false),
+        (KillSwitchState::EmergencyHalted, false, false, true),
+    ];
+
+    #[test]
+    fn kill_switch_behavior_table_matches_spec() {
+        for &(state, new_entry, auto_exit, emergency) in BEHAVIOR_TABLE {
+            assert_eq!(
+                state.allows_new_entry(),
+                new_entry,
+                "allows_new_entry for {state:?}"
+            );
+            assert_eq!(
+                state.allows_auto_exit(),
+                auto_exit,
+                "allows_auto_exit for {state:?}"
+            );
+            assert_eq!(
+                state.requires_emergency_exit(),
+                emergency,
+                "requires_emergency_exit for {state:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_closed_admits_new_entries() {
+        assert!(KillSwitchState::Closed.allows_new_entry());
+        for &(state, ..) in &BEHAVIOR_TABLE[1..] {
+            assert!(!state.allows_new_entry(), "{state:?} must block new entry");
+        }
+    }
+
+    #[test]
+    fn only_emergency_is_emergency() {
+        assert!(KillSwitchState::EmergencyHalted.is_emergency());
+        assert!(!KillSwitchState::Closed.is_emergency());
+        assert!(!KillSwitchState::ExecutionHalted.is_emergency());
     }
 }

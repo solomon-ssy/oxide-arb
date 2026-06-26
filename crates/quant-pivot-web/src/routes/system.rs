@@ -4,8 +4,8 @@ use actix_web::{http::Method, web};
 use quant_pivot_models::{
     config::DeployConfig,
     domain::{
-        HealthReport, QuantModeTransitionReport, QuantModeView, SwitchQuantModeRequest,
-        SystemStatus,
+        HealthReport, KillSwitchView, QuantModeTransitionReport, QuantModeView,
+        SetKillSwitchCommand, SetKillSwitchRequest, SwitchQuantModeRequest, SystemStatus,
     },
     enums::{
         operation_log::OperationCategory,
@@ -48,6 +48,18 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
             "/system/quant-mode",
             Rule::ActingRoleGoverned(ResourceType::System, Operation::SwitchMode),
             switch_quant_mode,
+        ),
+        spec(
+            Method::GET,
+            "/system/kill-switch",
+            Rule::ResourceOp(ResourceType::System, Operation::Read),
+            kill_switch_status,
+        ),
+        spec(
+            Method::POST,
+            "/system/kill-switch",
+            Rule::ActingRoleGoverned(ResourceType::System, Operation::Halt),
+            set_kill_switch,
         ),
         spec(
             Method::GET,
@@ -194,7 +206,7 @@ pub async fn quant_mode(
 
 pub async fn switch_quant_mode(
     state: web::Data<AppState>,
-    _actor: AuthedActor,
+    actor: AuthedActor,
     _acting_role: ActingRole,
     op_ctx: OperationCtx,
     body: ValidatedJson<SwitchQuantModeRequest>,
@@ -207,7 +219,39 @@ pub async fn switch_quant_mode(
     }));
     let report = state
         .control
-        .switch_quant_mode(body.mode, &body.reason)
+        .switch_quant_mode(body.mode, &actor.claims.username, &body.reason)
         .await?;
     Ok(WebResponse::ok(report))
+}
+
+pub async fn kill_switch_status(
+    state: web::Data<AppState>,
+) -> Result<WebResponse<KillSwitchView>, WebError> {
+    Ok(WebResponse::ok(state.kill_switch.view()))
+}
+
+pub async fn set_kill_switch(
+    state: web::Data<AppState>,
+    actor: AuthedActor,
+    _acting_role: ActingRole,
+    op_ctx: OperationCtx,
+    body: ValidatedJson<SetKillSwitchRequest>,
+) -> Result<WebResponse<KillSwitchView>, WebError> {
+    let body = body.into_inner();
+    op_ctx.set_action(OperationCategory::System, "system.set_kill_switch");
+    op_ctx.set_detail(serde_json::json!({
+        "target_state": body.state.as_str(),
+        "reason": body.reason,
+        "ack": body.ack,
+    }));
+    let view = state
+        .kill_switch
+        .set(SetKillSwitchCommand {
+            target: body.state,
+            actor: actor.claims.username.clone(),
+            reason: body.reason,
+            ack: body.ack,
+        })
+        .await?;
+    Ok(WebResponse::ok(view))
 }

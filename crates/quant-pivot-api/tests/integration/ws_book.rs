@@ -2,7 +2,7 @@
 //!
 //! Run (requires outbound network):
 //! ```bash
-//! cargo test -p quant-pivot-api --features integration -- --ignored ws_book
+//! cargo test -p quant-pivot-api -- --ignored ws_book
 //! ```
 //!
 //! Optional env:

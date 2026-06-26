@@ -1,6 +1,6 @@
-//! System control-plane API contract (Phase 0).
+//! System control-plane API contract.
 
-use crate::enums::quant::QuantRuntimeMode;
+use crate::enums::{execution::KillSwitchState, quant::QuantRuntimeMode};
 use serde::{Deserialize, Serialize};
 use validator::Validate;
 
@@ -16,4 +16,15 @@ pub struct SwitchQuantModeRequest {
 #[derive(Debug, Serialize)]
 pub struct QuantModeView {
     pub mode: QuantRuntimeMode,
+}
+
+/// Governed operational kill-switch transition request.
+#[derive(Debug, Deserialize, Validate)]
+pub struct SetKillSwitchRequest {
+    pub state: KillSwitchState,
+    #[validate(length(min = 1, max = 1024))]
+    pub reason: String,
+    /// Operator acknowledgement, required to clear `emergency_halted`.
+    #[serde(default)]
+    pub ack: bool,
 }

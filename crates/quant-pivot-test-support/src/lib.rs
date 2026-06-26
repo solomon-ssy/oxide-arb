@@ -5,11 +5,14 @@
 //! tests and `quant-pivot-bench` benchmarks.
 
 pub mod catalog_fixtures;
+pub mod governance;
 pub mod mocks;
 pub mod pg;
 pub mod report_fixtures;
 pub mod report_pipeline_harness;
 pub mod report_snapshots;
+pub mod storage;
+pub mod ws;
 
 use uuid::Uuid;
 

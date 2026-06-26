@@ -24,6 +24,7 @@ impl AppContext {
         let metrics = Arc::new(MetricsHub::new());
         let infra = InfraBundle::assemble(&deploy, Arc::clone(&metrics)).await?;
         let runtime = RuntimeSnapshot::bootstrap(&infra.pg).await?;
+        let (events, event_rx) = CoreEventPublisher::bounded(4096);
         let data = DataBundle::assemble(&DataBundleDeps {
             deploy: &deploy,
             shutdown: &shutdown,
@@ -37,6 +38,7 @@ impl AppContext {
             infra: &infra,
             data: &data,
             runtime,
+            events: events.clone(),
         });
         let research = ResearchBundle::assemble(&ResearchBundleDeps {
             deploy: &deploy,
@@ -53,7 +55,6 @@ impl AppContext {
             market_registry: Arc::clone(&data.market_registry),
         })
         .await?;
-        let (events, event_rx) = CoreEventPublisher::bounded(4096);
         governance.alerts.attach_event_publisher(events.clone());
         let report = ReportBundle::assemble(ReportBundleDeps {
             infra: &infra,

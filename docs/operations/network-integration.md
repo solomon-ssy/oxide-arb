@@ -8,7 +8,7 @@ Live tests for `quant-pivot-api` require outbound HTTPS/WSS to Polymarket and (o
 export QUANT_PIVOT__POLYMARKET__ONCHAIN__RPC_URL="https://polygon-mainnet.g.alchemy.com/v2/YOUR_KEY"
 export QUANT_PIVOT_TEST_RESOLVED_CONDITION_ID="0x..."   # see CTF section below
 
-cargo test -p quant-pivot-api --features integration -- --ignored --test-threads=1
+cargo test -p quant-pivot-api -- --ignored --test-threads=1
 ```
 
 Optional overrides:

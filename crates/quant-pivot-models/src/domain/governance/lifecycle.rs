@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::enums::execution::KillSwitchState;
+
 /// Milliseconds without a CLOB websocket message before market data is stale.
 pub const WS_MARKET_DATA_STALE_THRESHOLD_MS: u64 = 30_000;
 
@@ -34,7 +36,14 @@ pub enum OperationalDegradeReason {
     BreakerHalfOpen,
     MarketDataStale,
     MarketDataCoverageDegraded,
-    SubsystemUnhealthy { name: String },
+    SubsystemUnhealthy {
+        name: String,
+    },
+    /// Kill-switch tightened (`report_only_forced` / `exit_only`); reports may
+    /// continue but new entries are blocked (05.1 §6).
+    KillSwitchTightened {
+        state: KillSwitchState,
+    },
 }
 
 /// CLOB websocket connectivity snapshot for operator dashboards.
@@ -56,6 +65,14 @@ pub struct WsShardConnectivity {
     pub connected_ratio_bps: u32,
 }
 
+impl OperationalDegradeReason {
+    /// Whether this degrade reason alone still permits report generation.
+    #[must_use]
+    pub const fn allows_report_generation(&self) -> bool {
+        matches!(self, Self::KillSwitchTightened { .. })
+    }
+}
+
 impl OperationalPhase {
     /// Whether order submission is permitted by the current lifecycle phase.
     #[must_use]
@@ -63,10 +80,20 @@ impl OperationalPhase {
         matches!(self, Self::Operational)
     }
 
-    /// Whether report generation may run (catalog + market data).
+    /// Whether report generation may run (catalog + market data ready, and any
+    /// degrade reasons are kill-switch tightening only — not infra outage).
     #[must_use]
-    pub const fn allows_report_generation(&self) -> bool {
-        matches!(self, Self::Operational)
+    pub fn allows_report_generation(&self) -> bool {
+        match self {
+            Self::Operational => true,
+            Self::Degraded { reasons } => {
+                !reasons.is_empty()
+                    && reasons
+                        .iter()
+                        .all(OperationalDegradeReason::allows_report_generation)
+            }
+            Self::CatalogWarming | Self::MarketDataConnecting | Self::Halted => false,
+        }
     }
 }
 
@@ -88,6 +115,8 @@ impl MarketDataConnectivity {
 
 #[cfg(test)]
 mod tests {
+    use crate::domain::OperationalDegradeReason;
+
     use super::{
         MarketDataConnectivity, OperationalPhase, WS_MARKET_DATA_STALE_THRESHOLD_MS,
         WsShardConnectivity,
@@ -136,6 +165,17 @@ mod tests {
             },
         );
         assert!(!stale.ready);
+    }
+
+    #[test]
+    fn kill_switch_tightened_degraded_still_allows_reports() {
+        let phase = OperationalPhase::Degraded {
+            reasons: vec![OperationalDegradeReason::KillSwitchTightened {
+                state: crate::enums::execution::KillSwitchState::ReportOnlyForced,
+            }],
+        };
+        assert!(phase.allows_report_generation());
+        assert!(!phase.allows_order_submission());
     }
 
     #[test]

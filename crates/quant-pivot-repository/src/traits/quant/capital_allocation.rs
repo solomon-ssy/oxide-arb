@@ -25,4 +25,10 @@ pub trait CapitalAllocationRepository: Send + Sync {
 
     /// Net reserved capital across in-flight allocations (see [`ReservedCapitalRepository`]).
     async fn sum_reserved_usd(&self) -> Result<Usd, StorageError>;
+
+    /// Whether any allocation is in the `Impaired` recovery state.
+    ///
+    /// A blocking recovery condition: mode upgrades fail closed while impaired
+    /// capital exists (corrupted invariants must be resolved before trading).
+    async fn has_impaired(&self) -> Result<bool, StorageError>;
 }

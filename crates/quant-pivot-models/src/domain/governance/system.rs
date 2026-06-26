@@ -2,10 +2,12 @@
 
 use crate::{
     domain::{
+        governance::kill_switch::KillSwitchView,
         lifecycle::{MarketDataConnectivity, OperationalPhase, WsShardConnectivity},
         ports::runtime_control::CatalogState,
     },
     enums::{
+        execution::KillSwitchState,
         quant::QuantRuntimeMode,
         runtime_config::{RuntimeConfigActivationKind, RuntimeConfigVersionSource},
         system::ShutdownStage,
@@ -17,37 +19,6 @@ use crate::{
 use chrono::{DateTime, Utc};
 use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
 use serde::{Deserialize, Serialize};
-
-/// Execution kill-switch class exposed on operator dashboards.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ExecutionEmergencyClassView {
-    VenueFault,
-    ReservationFault,
-    PersistenceFault,
-}
-
-/// Execution kill-switch snapshot for operator dashboards and WS `system.status`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ExecutionEmergencyView {
-    pub active: bool,
-    pub class: ExecutionEmergencyClassView,
-    pub requires_operator_ack: bool,
-    pub last_reason: Option<String>,
-}
-
-impl ExecutionEmergencyView {
-    /// Idle snapshot when the execution FSM is not in emergency halt.
-    #[must_use]
-    pub const fn idle() -> Self {
-        Self {
-            active: false,
-            class: ExecutionEmergencyClassView::VenueFault,
-            requires_operator_ack: false,
-            last_reason: None,
-        }
-    }
-}
 
 /// Overall system status reported by the health endpoint.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,8 +32,8 @@ pub struct SystemStatus {
     pub operational_phase: OperationalPhase,
     /// CLOB websocket market-data readiness snapshot.
     pub market_data: MarketDataConnectivity,
-    /// Global execution kill-switch snapshot.
-    pub execution_emergency: ExecutionEmergencyView,
+    /// Operational kill-switch projection (real `system_kill_switch` state).
+    pub kill_switch: KillSwitchView,
     pub checked_at: DateTime<Utc>,
 }
 
@@ -143,9 +114,12 @@ impl SubsystemHealth {
 }
 
 impl SystemStatus {
-    /// Minimal Phase 0 bootstrap status projection.
+    /// Initial "warming" snapshot used for the very first WebSocket publish and
+    /// in tests. The authoritative live projection (real mode + kill-switch +
+    /// catalog + market-data + uptime) is built by
+    /// [`RuntimeControlPort::system_status`](crate::domain::ports::RuntimeControlPort::system_status).
     #[must_use]
-    pub fn report_only_bootstrap(quant_runtime_mode: QuantRuntimeMode) -> Self {
+    pub fn bootstrap(quant_runtime_mode: QuantRuntimeMode) -> Self {
         Self {
             quant_runtime_mode,
             uptime_secs: 0,
@@ -162,7 +136,13 @@ impl SystemStatus {
                     connected_ratio_bps: 0,
                 },
             },
-            execution_emergency: ExecutionEmergencyView::idle(),
+            kill_switch: KillSwitchView {
+                state: KillSwitchState::Closed,
+                requires_operator_ack: false,
+                last_reason: "bootstrap".to_owned(),
+                changed_by: "system".to_owned(),
+                changed_at: Utc::now(),
+            },
             checked_at: Utc::now(),
         }
     }

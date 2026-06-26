@@ -130,6 +130,11 @@ pub struct MetricsHub {
     pub report_schedule_run_duration_seconds: HistogramVec,
     pub report_schedule_active_jobs: IntGauge,
     pub report_expire_swept_total: IntCounter,
+
+    // ── Execution governance (05.1) ───────────────────────────────────────
+    /// `1` when the operational kill-switch blocks new auto entries (any
+    /// non-`closed` state), `0` when `closed`.
+    pub auto_execution_halted: IntGauge,
 }
 
 struct PipelineMetrics {
@@ -429,6 +434,11 @@ impl MetricsHub {
             &["stream"],
             FACT_LAG_BUCKETS_SECS
         );
+        let auto_execution_halted = register_gauge_int!(
+            &registry,
+            "quant_auto_execution_halted",
+            "1 when the operational kill-switch blocks new auto entries, 0 otherwise"
+        );
 
         Self {
             registry,
@@ -469,7 +479,13 @@ impl MetricsHub {
             report_schedule_run_duration_seconds: report.schedule_run_duration,
             report_schedule_active_jobs: report.schedule_active_jobs,
             report_expire_swept_total: report.expire_swept,
+            auto_execution_halted,
         }
+    }
+
+    /// Publish whether the kill-switch currently blocks new auto entries.
+    pub fn set_auto_execution_halted(&self, halted: bool) {
+        self.auto_execution_halted.set(i64::from(halted));
     }
 
     /// Observe one fact-lag sample for a named stream.

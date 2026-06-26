@@ -24,14 +24,15 @@ use quant_pivot_models::{
     domain::{
         BacktestPort, BacktestReportInfo, BacktestReportView, BookSnapshot,
         BuildTrainingDatasetRequest, CatalogState, CatalogStatusPort, CoreEventPublisher,
-        DataQualityPort, DataQualitySnapshot, GovernanceActor, HealthReport, MarketDataPort,
-        MetricsScrapePort, ModelComparisonReportInfo, ModelGovernancePort, ModelTrainingPort,
-        ModelVersionInfo, PromoteDatasetRequest, PublishModelCommand, QuantModeTransitionReport,
-        RollbackModelCommand, RunBacktestRequest, RuntimeConfigPort, RuntimeControlPort,
-        SystemStatus, TrainModelRequest, TrainedModelView, TrainingDatasetInfo,
-        TrainingDatasetPlanView, TrainingDatasetPort, TrainingDatasetView,
+        DataQualityPort, DataQualitySnapshot, GovernanceActor, HealthReport, KillSwitchPort,
+        KillSwitchView, MarketDataPort, MetricsScrapePort, ModelComparisonReportInfo,
+        ModelGovernancePort, ModelTrainingPort, ModelVersionInfo, PromoteDatasetRequest,
+        PublishModelCommand, QuantModeTransitionReport, RollbackModelCommand, RunBacktestRequest,
+        RuntimeConfigPort, RuntimeControlPort, SetKillSwitchCommand, SystemStatus,
+        TrainModelRequest, TrainedModelView, TrainingDatasetInfo, TrainingDatasetPlanView,
+        TrainingDatasetPort, TrainingDatasetView,
     },
-    enums::quant::QuantRuntimeMode,
+    enums::{execution::KillSwitchState, quant::QuantRuntimeMode},
     runtime_config::RuntimeConfig,
     types::{
         BacktestReportId, ModelComparisonReportId, ModelVersionId, TokenId, TrainingDatasetId,
@@ -143,6 +144,7 @@ impl TestEnv {
             operation_logs: Arc::clone(&repos.operation_logs),
             operation_log,
             control: Arc::new(MockRuntimeControl::default()),
+            kill_switch: Arc::new(MockKillSwitch::default()),
             market_data: Arc::new(MockMarketData),
             catalog: Arc::clone(&catalog) as Arc<dyn CatalogStatusPort>,
             data_quality: Arc::clone(&data_quality) as Arc<dyn DataQualityPort>,
@@ -385,6 +387,48 @@ pub struct MockRuntimeControl {
     mode: Mutex<QuantRuntimeMode>,
 }
 
+/// In-memory kill-switch port for web integration tests.
+pub struct MockKillSwitch {
+    view: Mutex<KillSwitchView>,
+}
+
+impl Default for MockKillSwitch {
+    fn default() -> Self {
+        Self {
+            view: Mutex::new(KillSwitchView {
+                state: KillSwitchState::Closed,
+                requires_operator_ack: false,
+                last_reason: "test bootstrap".to_owned(),
+                changed_by: "test".to_owned(),
+                changed_at: chrono::Utc::now(),
+            }),
+        }
+    }
+}
+
+#[async_trait]
+impl KillSwitchPort for MockKillSwitch {
+    fn current(&self) -> KillSwitchState {
+        self.view.lock().unwrap().state
+    }
+
+    fn view(&self) -> KillSwitchView {
+        self.view.lock().unwrap().clone()
+    }
+
+    async fn set(&self, command: SetKillSwitchCommand) -> QuantResult<KillSwitchView> {
+        let mut guard = self.view.lock().unwrap();
+        *guard = KillSwitchView {
+            state: command.target,
+            requires_operator_ack: command.target.is_emergency(),
+            last_reason: command.reason,
+            changed_by: command.actor,
+            changed_at: chrono::Utc::now(),
+        };
+        Ok(guard.clone())
+    }
+}
+
 /// No-op model-training port for web integration tests.
 pub struct MockModelTrainingPort;
 
@@ -496,15 +540,20 @@ impl RuntimeControlPort for MockRuntimeControl {
     async fn switch_quant_mode(
         &self,
         target: QuantRuntimeMode,
+        _actor: &str,
         _reason: &str,
-    ) -> Result<QuantModeTransitionReport, ControlError> {
+    ) -> QuantResult<QuantModeTransitionReport> {
         let from = self.quant_runtime_mode();
         *self.mode.lock().unwrap() = target;
-        Ok(QuantModeTransitionReport { from, to: target })
+        Ok(QuantModeTransitionReport {
+            from,
+            to: target,
+            preflight: None,
+        })
     }
 
     fn system_status(&self) -> SystemStatus {
-        SystemStatus::report_only_bootstrap(self.quant_runtime_mode())
+        SystemStatus::bootstrap(self.quant_runtime_mode())
     }
 
     async fn health(&self) -> HealthReport {

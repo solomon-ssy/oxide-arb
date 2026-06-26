@@ -77,4 +77,4 @@ Usually Redis testcontainer cold-start or pool pressure under parallel runs. The
 |------|---------|----------|
 | Unit (default) | `cargo test --workspace` | nothing |
 | Docker | `cargo test-docker` | Docker daemon |
-| Network / live | `cargo test -p quant-pivot-api --features integration -- --ignored --test-threads=1` | outbound network + secrets |
+| Network / live | `cargo test -p quant-pivot-api -- --ignored --test-threads=1` | outbound network + secrets |

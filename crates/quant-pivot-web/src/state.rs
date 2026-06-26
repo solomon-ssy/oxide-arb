@@ -5,9 +5,9 @@ use std::sync::Arc;
 use quant_pivot_models::{
     config::DeployConfig,
     domain::{
-        BacktestPort, CatalogStatusPort, CoreEventPublisher, DataQualityPort, MarketDataPort,
-        MetricsScrapePort, ModelGovernancePort, ModelTrainingPort, QuantReportPort, ReadinessPort,
-        RuntimeConfigPort, RuntimeControlPort, TrainingDatasetPort,
+        BacktestPort, CatalogStatusPort, CoreEventPublisher, DataQualityPort, KillSwitchPort,
+        MarketDataPort, MetricsScrapePort, ModelGovernancePort, ModelTrainingPort, QuantReportPort,
+        ReadinessPort, RuntimeConfigPort, RuntimeControlPort, TrainingDatasetPort,
     },
 };
 use quant_pivot_repository::traits::{
@@ -42,6 +42,8 @@ pub struct AppState {
     pub operation_logs: Arc<dyn OperationLogRepository>,
     pub operation_log: OperationLogBuffer,
     pub control: Arc<dyn RuntimeControlPort>,
+    /// Operational kill-switch governed read/write surface (05.1).
+    pub kill_switch: Arc<dyn KillSwitchPort>,
     pub market_data: Arc<dyn MarketDataPort>,
     pub catalog: Arc<dyn CatalogStatusPort>,
     pub data_quality: Arc<dyn DataQualityPort>,

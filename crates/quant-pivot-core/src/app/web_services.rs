@@ -91,6 +91,7 @@ impl AppContext {
             operation_logs: pg_arc_repo!(pg, PgOperationLogRepository),
             operation_log,
             control: Arc::clone(&self.governance.runtime_control),
+            kill_switch: Arc::clone(&self.governance.kill_switch),
             market_data: Arc::new(CoreMarketData {
                 book_store: Arc::clone(&self.data.book_store),
                 ws_manager: Arc::clone(&self.data.ws_manager),

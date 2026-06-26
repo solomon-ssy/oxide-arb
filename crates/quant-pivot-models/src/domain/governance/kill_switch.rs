@@ -52,3 +52,28 @@ pub struct KillSwitchStatePatch {
     pub reason: String,
     pub requires_operator_ack: bool,
 }
+
+/// Operator-facing projection of the operational kill-switch singleton.
+///
+/// Surfaced by `GET /api/system/kill-switch`, embedded in `SystemStatus`, and
+/// published on the `system.status` WebSocket channel.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KillSwitchView {
+    pub state: KillSwitchState,
+    pub requires_operator_ack: bool,
+    pub last_reason: String,
+    pub changed_by: String,
+    pub changed_at: DateTime<Utc>,
+}
+
+impl From<KillSwitchStateInfo> for KillSwitchView {
+    fn from(info: KillSwitchStateInfo) -> Self {
+        Self {
+            state: info.state,
+            requires_operator_ack: info.requires_operator_ack,
+            last_reason: info.reason,
+            changed_by: info.changed_by,
+            changed_at: info.changed_at,
+        }
+    }
+}

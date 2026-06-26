@@ -83,9 +83,8 @@ mod tests {
 
     #[test]
     fn system_status_maps_to_global_key() {
-        let event = CoreEvent::SystemStatusChanged(SystemStatus::report_only_bootstrap(
-            QuantRuntimeMode::ReportOnly,
-        ));
+        let event =
+            CoreEvent::SystemStatusChanged(SystemStatus::bootstrap(QuantRuntimeMode::ReportOnly));
         let (key, envelope) = event_envelope(&event).expect("status maps");
         assert_eq!(key, SubscriptionKey::global(WsChannel::SystemStatus));
         assert_eq!(envelope.kind.as_str(), "system.status");
