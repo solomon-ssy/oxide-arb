@@ -332,7 +332,7 @@ mod tests {
     use chrono::Duration;
     use quant_pivot_models::{
         domain::market::{MarketRegistryInfo, TokenInfo},
-        enums::common::MarketCategory,
+        enums::common::{MarketCategory, TickSize},
         types::{EventId, MarketId},
     };
     use rust_decimal_macros::dec;
@@ -349,7 +349,7 @@ mod tests {
             status: MarketStatus::Active,
             outcome: None,
             neg_risk: false,
-            tick_size: quant_pivot_models::enums::common::TickSize::Hundredth,
+            tick_size: TickSize::Hundredth,
             tokens: vec![
                 TokenInfo {
                     token_id: TokenId::new(format!("{id}-yes")),

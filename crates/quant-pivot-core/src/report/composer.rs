@@ -1,0 +1,962 @@
+//! Report payload composition.
+
+use std::collections::{BTreeMap, HashMap};
+
+use chrono::{DateTime, Duration, Utc};
+use quant_pivot_error::{QuantError, QuantResult};
+use quant_pivot_models::{
+    clickhouse::{ChProbability, ChUsd, QuantRecommendationEventRow},
+    domain::{
+        FeatureVectorInfo, NewAccountSnapshot, NewOperationLog, NewPortfolioPlan,
+        NewRecommendation, NewRecommendationReport, NewReportTransaction,
+    },
+    enums::{
+        common::MarketCategory,
+        operation_log::{OperationCategory, OperationOutcome},
+        quant::{
+            DataQualityStatus, EmptyReason, EntryTriggerKind, ExitTriggerKind, IneligibilityReason,
+            QuantRuntimeMode, RecommendationReportStatus, RecommendationStatus, ReportKind,
+            SettlementPolicy,
+        },
+        rbac::ResourceType,
+    },
+    runtime_config::RuntimeConfig,
+    types::{
+        AccountPositions, AccountSnapshotId, Bps, ConfidenceSummary, DataQualitySummary,
+        EligibilitySummary, EntryPlan, EventId, EvidenceRefs, ExecutionEligibility, ExitPlan,
+        FactorBreakdownEntry, FactorDefinitionId, FeatureVectorId, MarketId, MarketSelectionId,
+        ModelRunId, ModelVersionId, OperationLogId, PartialExitNode, PortfolioConstraintsSnapshot,
+        PortfolioPlanId, PortfolioRejectedSummary, PortfolioRiskBudget, Price, Probability,
+        RecommendationFactorBreakdown, RecommendationId, RecommendationReportId,
+        RejectionReasonCount, ReportSummary, RuntimeConfigVersionId, SizingPlan, Usd,
+    },
+};
+use quant_pivot_research::{
+    model::SignalCandidate,
+    portfolio::{AccountSnapshot, PlannedRecommendation, RejectedCandidate},
+    selection::SelectedMarket,
+};
+use rust_decimal::Decimal;
+
+use super::types::{ComposedReport, EmptyReportContext, ReportNotificationPayload, ReportTrigger};
+
+/// Inputs required to compose one report artifact.
+pub struct ComposeReportInput<'a> {
+    pub trigger: &'a ReportTrigger,
+    pub trigger_key: String,
+    pub trigger_time: DateTime<Utc>,
+    pub source_delay_secs: u64,
+    pub as_of: DateTime<Utc>,
+    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub runtime_config: &'a RuntimeConfig,
+    pub runtime_mode: QuantRuntimeMode,
+    pub model_version_id: ModelVersionId,
+    pub market_selection_id: MarketSelectionId,
+    pub account: &'a AccountSnapshot,
+    pub portfolio_plan: NewPortfolioPlan,
+    pub planned: &'a [PlannedRecommendation],
+    pub planner_rejected: &'a [RejectedCandidate],
+    pub selected: &'a [SelectedMarket],
+    pub feature_infos: &'a [FeatureVectorInfo],
+    pub model_run_id: Option<ModelRunId>,
+    pub candidate_count: u32,
+    pub feature_rejected_count: u32,
+    pub empty: Option<EmptyReportContext>,
+    pub top_n: u32,
+}
+
+/// Converts builder/planner output into persistence rows and post-commit events.
+pub trait RecommendationComposer: Send + Sync {
+    /// Compose the complete report transaction and post-commit side-effect rows.
+    fn compose(&self, input: ComposeReportInput<'_>) -> QuantResult<ComposedReport>;
+}
+
+/// Production recommendation composer.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DefaultRecommendationComposer;
+
+impl DefaultRecommendationComposer {
+    /// Build the composer.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self
+    }
+}
+
+impl RecommendationComposer for DefaultRecommendationComposer {
+    fn compose(&self, input: ComposeReportInput<'_>) -> QuantResult<ComposedReport> {
+        let report_id = RecommendationReportId::from_v7();
+        let horizon_secs = input.runtime_config.reports.report_horizon_secs;
+        let valid_until = input.as_of
+            + Duration::seconds(i64::try_from(horizon_secs).map_err(|error| {
+                QuantError::config(format!("reports.report_horizon_secs too large: {error}"))
+            })?);
+        let selected_by_market = selected_by_market(input.selected);
+        let feature_by_market = feature_by_market(input.feature_infos);
+
+        let recommendations = input
+            .planned
+            .iter()
+            .map(|planned| {
+                compose_recommendation(
+                    &report_id,
+                    planned,
+                    &input,
+                    valid_until,
+                    &selected_by_market,
+                    &feature_by_market,
+                )
+            })
+            .collect::<QuantResult<Vec<_>>>()?;
+
+        let status = if recommendations.is_empty() {
+            RecommendationReportStatus::PublishedEmpty
+        } else {
+            RecommendationReportStatus::Published
+        };
+        let summary = report_summary(&input, &recommendations, &selected_by_market);
+
+        let account_snapshot_id = AccountSnapshotId::from_v7();
+        let account_snapshot = NewAccountSnapshot {
+            account_snapshot_id: account_snapshot_id.clone(),
+            as_of: input.account.as_of,
+            source: input.account.source,
+            equity_usd: input.account.equity_usd,
+            available_usd: input.account.available_usd,
+            reserved_usd: input.account.reserved_usd,
+            positions_json: AccountPositions(input.account.positions.clone()),
+            exposures_json: input.account.exposures.clone(),
+        };
+        let report = NewRecommendationReport {
+            recommendation_report_id: report_id.clone(),
+            report_kind: ReportKind::TopN,
+            trigger_kind: input.trigger.kind(),
+            trigger_key: input.trigger_key.clone(),
+            trigger_time: input.trigger_time,
+            source_delay_secs: i64::try_from(input.source_delay_secs).map_err(|error| {
+                QuantError::config(format!("source_delay_secs too large: {error}"))
+            })?,
+            as_of: input.as_of,
+            horizon_secs: i64::try_from(horizon_secs).map_err(|error| {
+                QuantError::config(format!("reports.report_horizon_secs too large: {error}"))
+            })?,
+            runtime_mode: input.runtime_mode,
+            runtime_config_version_id: input.runtime_config_version_id.clone(),
+            model_version_id: input.model_version_id.clone(),
+            market_selection_id: input.market_selection_id.clone(),
+            portfolio_plan_id: input.portfolio_plan.portfolio_plan_id.clone(),
+            top_n: i32::try_from(input.top_n).map_err(|error| {
+                QuantError::config(format!("reports top_n exceeds i32::MAX: {error}"))
+            })?,
+            status,
+            account_source: input.account.source,
+            capital_base_usd: input.account.equity_usd,
+            account_snapshot_ref: account_snapshot_id,
+            summary_json: summary,
+            published_at: Some(input.trigger_time),
+            revoked_at: None,
+            expired_at: None,
+            status_reason: input
+                .empty
+                .as_ref()
+                .map(|empty| empty.reason.as_str().to_owned()),
+        };
+        let operation_log = operation_log(&report_id, &input, status);
+        let ch_rows = recommendation_events(&report_id, &recommendations, input.trigger_time);
+        let published_count = u32::try_from(recommendations.len()).unwrap_or(u32::MAX);
+
+        Ok(ComposedReport {
+            transaction: NewReportTransaction {
+                account_snapshot,
+                portfolio_plan: input.portfolio_plan,
+                report,
+                recommendations,
+                operation_log,
+            },
+            ch_rows,
+            notification: ReportNotificationPayload {
+                report_id,
+                kind: ReportKind::TopN,
+                status: status.as_str().to_owned(),
+                published_count,
+                empty_reason: input.empty.as_ref().map(|empty| empty.reason),
+            },
+            delivery_policy: input.runtime_config.reports.delivery_policy,
+            notify_operators: input.runtime_config.notification.policies.report_published,
+        })
+    }
+}
+
+fn compose_recommendation(
+    report_id: &RecommendationReportId,
+    planned: &PlannedRecommendation,
+    input: &ComposeReportInput<'_>,
+    valid_until: DateTime<Utc>,
+    selected_by_market: &HashMap<MarketId, &SelectedMarket>,
+    feature_by_market: &HashMap<MarketId, FeatureVectorId>,
+) -> QuantResult<NewRecommendation> {
+    let candidate = &planned.candidate;
+    let selected = selected_by_market
+        .get(&candidate.market_id)
+        .ok_or_else(|| {
+            QuantError::Internal(format!(
+                "missing selected market metadata for recommendation market {}",
+                candidate.market_id
+            ))
+        })?;
+    let feature_vector_id = feature_by_market
+        .get(&candidate.market_id)
+        .cloned()
+        .ok_or_else(|| {
+            QuantError::Internal(format!(
+                "missing persisted feature vector for recommendation market {}",
+                candidate.market_id
+            ))
+        })?;
+    let model_run_id = input.model_run_id.clone().ok_or_else(|| {
+        QuantError::Internal("non-empty recommendation missing model_run_id".to_owned())
+    })?;
+
+    let mut risk_envelope = planned.risk_envelope.clone();
+    let auto_gate = auto_execution_gate(
+        candidate,
+        planned.rank,
+        &planned.sizing,
+        input.runtime_config,
+    )?;
+    risk_envelope.auto_execution_allowed = auto_gate.allowed;
+    risk_envelope.requires_approval = !auto_gate.allowed;
+    if !candidate.rejection_warnings.is_empty() {
+        risk_envelope.risk_notes.extend(
+            candidate
+                .rejection_warnings
+                .iter()
+                .map(|warning| format!("{warning:?}")),
+        );
+    }
+
+    Ok(NewRecommendation {
+        recommendation_id: RecommendationId::from_v7(),
+        recommendation_report_id: report_id.clone(),
+        rank: i32::try_from(planned.rank).map_err(|error| {
+            QuantError::Internal(format!("recommendation rank exceeds i32::MAX: {error}"))
+        })?,
+        market_id: candidate.market_id.clone(),
+        event_id: selected.event_id.clone(),
+        token_id: candidate.token_id.clone(),
+        side: candidate.side,
+        composite_score: candidate.composite_score,
+        risk_adjusted_score: planned.risk_adjusted_score,
+        confidence: candidate.confidence,
+        entry_plan: entry_plan(candidate, input.as_of, valid_until, input.runtime_config),
+        sizing_plan: planned.sizing.clone(),
+        exit_plan: exit_plan(candidate, input.as_of, input.runtime_config)?,
+        risk_envelope,
+        factor_breakdown: factor_breakdown(candidate),
+        evidence_refs: EvidenceRefs {
+            feature_vector_id,
+            model_run_id,
+            market_selection_id: input.market_selection_id.clone(),
+            book_snapshot_ref: None,
+            runtime_config_version_id: input.runtime_config_version_id.clone(),
+            model_version_id: input.model_version_id.clone(),
+            factor_definition_versions: factor_definition_versions(candidate),
+            data_quality_report_ref: None,
+        },
+        execution_eligibility: execution_eligibility(&auto_gate, input.runtime_config),
+        valid_from: input.as_of,
+        valid_until,
+        status: RecommendationStatus::Published,
+    })
+}
+
+fn entry_plan(
+    candidate: &SignalCandidate,
+    as_of: DateTime<Utc>,
+    valid_until: DateTime<Utc>,
+    config: &RuntimeConfig,
+) -> EntryPlan {
+    EntryPlan {
+        trigger_kind: EntryTriggerKind::Immediate,
+        trigger_price: None,
+        limit_price: Some(candidate.entry_price_ref),
+        max_slippage_bps: Bps::new(Decimal::from(
+            config.execution.entry_order_policy.max_slippage_bps,
+        )),
+        valid_from: as_of,
+        valid_until,
+        min_depth_usd: Usd::new(parse_decimal_lossless(
+            &config.portfolio.budget.min_recommendation_usd.value,
+        )),
+        max_book_age_ms: config.data_quality.source_delay_secs.saturating_mul(1_000),
+        confirmation_window_secs: 0,
+        cancel_if_not_triggered: true,
+        entry_reason: candidate.model_explanation.headline.clone(),
+    }
+}
+
+fn exit_plan(
+    candidate: &SignalCandidate,
+    as_of: DateTime<Utc>,
+    config: &RuntimeConfig,
+) -> QuantResult<ExitPlan> {
+    let loss = Bps::new(candidate.downside_bps)
+        .to_fraction()
+        .max(Decimal::ZERO);
+    let reward_multiple = parse_decimal(
+        "portfolio.sizing.target_reward_multiple",
+        &config.portfolio.sizing.target_reward_multiple.value,
+    )?;
+    let gain = reward_multiple * loss;
+    let take_profit_price = Price::new(
+        (candidate.entry_price_ref.inner() * (Decimal::ONE + gain))
+            .clamp(Decimal::ZERO, Decimal::ONE),
+    );
+    let stop_loss_price = Price::new(
+        (candidate.entry_price_ref.inner() * (Decimal::ONE - loss))
+            .clamp(Decimal::ZERO, Decimal::ONE),
+    );
+    let horizon_secs = config.reports.report_horizon_secs;
+    let time_exit_at = as_of
+        + Duration::seconds(i64::try_from(horizon_secs).map_err(|error| {
+            QuantError::config(format!("reports.report_horizon_secs too large: {error}"))
+        })?);
+
+    Ok(ExitPlan {
+        take_profit_price: Some(take_profit_price),
+        take_profit_pct: Some(gain),
+        stop_loss_price: Some(stop_loss_price),
+        stop_loss_pct: Some(loss),
+        time_exit_at: Some(time_exit_at),
+        max_hold_secs: Some(horizon_secs),
+        partial_exit_nodes: vec![
+            PartialExitNode {
+                node_id: "tp_full".to_owned(),
+                trigger_kind: ExitTriggerKind::TakeProfit,
+                trigger_value: take_profit_price.inner(),
+                sell_pct: Decimal::ONE,
+                min_price: Some(take_profit_price),
+                valid_after: Some(as_of),
+                valid_until: Some(time_exit_at),
+                reason: "Full exit at the Kelly reward target.".to_owned(),
+            },
+            PartialExitNode {
+                node_id: "sl_full".to_owned(),
+                trigger_kind: ExitTriggerKind::StopLoss,
+                trigger_value: stop_loss_price.inner(),
+                sell_pct: Decimal::ONE,
+                min_price: Some(stop_loss_price),
+                valid_after: Some(as_of),
+                valid_until: Some(time_exit_at),
+                reason: "Full exit at the Kelly downside bound.".to_owned(),
+            },
+            PartialExitNode {
+                node_id: "time_exit".to_owned(),
+                trigger_kind: ExitTriggerKind::TimeExit,
+                trigger_value: Decimal::from(horizon_secs),
+                sell_pct: Decimal::ONE,
+                min_price: None,
+                valid_after: Some(time_exit_at),
+                valid_until: Some(time_exit_at),
+                reason: "Full exit at the report horizon.".to_owned(),
+            },
+        ],
+        trailing_stop: None,
+        signal_invalidation_rules: Vec::new(),
+        settlement_policy: SettlementPolicy::HoldToResolution,
+        manual_review_at: None,
+        exit_reason: format!(
+            "Kelly bet structure: downside={} bps, target_reward_multiple={}, target_gain={}%; model headline: {}",
+            candidate.downside_bps,
+            reward_multiple,
+            (gain * Decimal::from(100)).round_dp(4),
+            candidate.model_explanation.headline
+        ),
+    })
+}
+
+fn factor_breakdown(candidate: &SignalCandidate) -> RecommendationFactorBreakdown {
+    RecommendationFactorBreakdown(
+        candidate
+            .factor_breakdown
+            .iter()
+            .map(|factor| FactorBreakdownEntry {
+                factor_name: factor.name.to_string(),
+                family: factor.family,
+                raw_value: factor.raw_value,
+                normalized_score: factor.normalized_score,
+                weight: factor.weight,
+                contribution: factor.contribution,
+                confidence: factor.confidence,
+                direction: factor.direction,
+                explanation: factor.explanation.clone(),
+                source_refs: factor.source_refs.clone(),
+            })
+            .collect(),
+    )
+}
+
+fn factor_definition_versions(candidate: &SignalCandidate) -> Vec<FactorDefinitionId> {
+    let mut ids = Vec::new();
+    for factor in &candidate.factor_breakdown {
+        if !ids.contains(&factor.definition_id) {
+            ids.push(factor.definition_id.clone());
+        }
+    }
+    ids
+}
+
+/// Outcome of the auto-execution policy gate for one recommendation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AutoExecutionGate {
+    allowed: bool,
+    reasons: Vec<IneligibilityReason>,
+}
+
+fn execution_eligibility(gate: &AutoExecutionGate, config: &RuntimeConfig) -> ExecutionEligibility {
+    let mut eligible_modes = vec![QuantRuntimeMode::ReportOnly, QuantRuntimeMode::SemiAuto];
+    if gate.allowed {
+        eligible_modes.push(QuantRuntimeMode::AutoExecution);
+    }
+    ExecutionEligibility {
+        eligible_modes,
+        ineligibility_reasons: if gate.allowed {
+            Vec::new()
+        } else {
+            gate.reasons.clone()
+        },
+        approval_required: !gate.allowed,
+        approval_role: (!gate.allowed).then(|| config.execution.semi_auto.required_role.clone()),
+        auto_policy_id: gate
+            .allowed
+            .then(|| "runtime_config.execution.auto_execution".to_owned()),
+    }
+}
+
+fn auto_execution_gate(
+    candidate: &SignalCandidate,
+    rank: u32,
+    sizing: &SizingPlan,
+    config: &RuntimeConfig,
+) -> QuantResult<AutoExecutionGate> {
+    let policy = &config.execution.auto_execution;
+    if !policy.enabled {
+        return Ok(AutoExecutionGate {
+            allowed: false,
+            reasons: Vec::new(),
+        });
+    }
+
+    let min_score = parse_decimal(
+        "execution.auto_execution.min_score",
+        &policy.min_score.value,
+    )?;
+    let min_confidence = parse_decimal(
+        "execution.auto_execution.min_confidence",
+        &policy.min_confidence.value,
+    )?;
+    let max_total = parse_decimal(
+        "execution.auto_execution.max_total_usd_per_report",
+        &policy.max_total_usd_per_report.value,
+    )?;
+
+    let mut reasons = Vec::new();
+    if candidate.composite_score.inner() < min_score {
+        reasons.push(IneligibilityReason::LowConfidence);
+    }
+    if candidate.confidence.inner() < min_confidence
+        && !reasons.contains(&IneligibilityReason::LowConfidence)
+    {
+        reasons.push(IneligibilityReason::LowConfidence);
+    }
+
+    let allowed = rank <= policy.max_orders_per_report
+        && candidate.composite_score.inner() >= min_score
+        && candidate.confidence.inner() >= min_confidence
+        && sizing.suggested_usd.inner() <= max_total
+        && reasons.is_empty();
+
+    Ok(AutoExecutionGate { allowed, reasons })
+}
+
+fn report_summary(
+    input: &ComposeReportInput<'_>,
+    recommendations: &[NewRecommendation],
+    selected_by_market: &HashMap<MarketId, &SelectedMarket>,
+) -> ReportSummary {
+    let mut category_allocation: BTreeMap<MarketCategory, Usd> = BTreeMap::new();
+    let mut event_allocation: BTreeMap<EventId, Usd> = BTreeMap::new();
+    for rec in recommendations {
+        if let Some(selected) = selected_by_market.get(&rec.market_id) {
+            *category_allocation.entry(selected.category).or_default() +=
+                rec.sizing_plan.suggested_usd;
+            *event_allocation
+                .entry(selected.event_id.clone())
+                .or_default() += rec.sizing_plan.suggested_usd;
+        }
+    }
+    let total_suggested_usd = recommendations
+        .iter()
+        .map(|rec| rec.sizing_plan.suggested_usd)
+        .sum();
+    let max_single_recommendation_usd = recommendations
+        .iter()
+        .map(|rec| rec.sizing_plan.suggested_usd)
+        .max()
+        .unwrap_or(Usd::ZERO);
+    let average_score = average_probability(
+        recommendations
+            .iter()
+            .map(|rec| rec.composite_score.inner()),
+    );
+    let min_score = recommendations
+        .iter()
+        .map(|rec| rec.composite_score)
+        .min()
+        .unwrap_or_default();
+
+    let empty_rejected_count = input.empty.as_ref().map_or(0, |empty| {
+        if empty.reason == EmptyReason::InsufficientDataQuality {
+            0
+        } else {
+            empty.rejected_count
+        }
+    });
+
+    ReportSummary {
+        market_selection_count: u32::try_from(input.selected.len()).unwrap_or(u32::MAX),
+        candidate_count: input.candidate_count,
+        rejected_count: input
+            .feature_rejected_count
+            .saturating_add(u32::try_from(input.planner_rejected.len()).unwrap_or(u32::MAX))
+            .saturating_add(empty_rejected_count),
+        published_recommendation_count: u32::try_from(recommendations.len()).unwrap_or(u32::MAX),
+        total_suggested_usd,
+        max_single_recommendation_usd,
+        category_allocation,
+        event_allocation,
+        average_score,
+        min_score,
+        model_confidence_summary: confidence_summary(recommendations),
+        data_quality_summary: data_quality_summary(input),
+        top_rejection_reasons: rejection_summary(input),
+        execution_eligibility_summary: eligibility_summary(recommendations),
+        empty_reason: input.empty.as_ref().map(|empty| empty.reason),
+        warnings: input
+            .empty
+            .as_ref()
+            .map_or_else(Vec::new, |empty| empty.warnings.clone()),
+    }
+}
+
+fn confidence_summary(recommendations: &[NewRecommendation]) -> ConfidenceSummary {
+    if recommendations.is_empty() {
+        return ConfidenceSummary::default();
+    }
+    let mean_confidence =
+        average_probability(recommendations.iter().map(|rec| rec.confidence.inner()));
+    ConfidenceSummary {
+        mean_confidence,
+        min_confidence: recommendations
+            .iter()
+            .map(|rec| rec.confidence)
+            .min()
+            .unwrap_or_default(),
+        max_confidence: recommendations
+            .iter()
+            .map(|rec| rec.confidence)
+            .max()
+            .unwrap_or_default(),
+    }
+}
+
+fn data_quality_summary(input: &ComposeReportInput<'_>) -> DataQualitySummary {
+    let mut summary = DataQualitySummary {
+        insufficient_count: input.feature_rejected_count,
+        ..DataQualitySummary::default()
+    };
+    for info in input.feature_infos {
+        match info.data_quality {
+            DataQualityStatus::Fresh => summary.fresh_count += 1,
+            DataQualityStatus::Acceptable => {
+                summary.acceptable_count += 1;
+            }
+            DataQualityStatus::Degraded => {
+                summary.degraded_count += 1;
+            }
+            DataQualityStatus::Stale => summary.stale_count += 1,
+            DataQualityStatus::Insufficient => {
+                summary.insufficient_count += 1;
+            }
+        }
+    }
+    summary
+}
+
+fn rejection_summary(input: &ComposeReportInput<'_>) -> Vec<RejectionReasonCount> {
+    let mut counts: BTreeMap<String, u32> = BTreeMap::new();
+    if let Some(empty) = &input.empty {
+        if empty.reason != EmptyReason::InsufficientDataQuality && empty.rejected_count > 0 {
+            counts.insert(empty.reason.as_str().to_owned(), empty.rejected_count);
+        }
+    }
+    if input.feature_rejected_count > 0 {
+        *counts
+            .entry(EmptyReason::InsufficientDataQuality.as_str().to_owned())
+            .or_default() += input.feature_rejected_count;
+    }
+    for rejected in input.planner_rejected {
+        *counts
+            .entry(rejected.reason.as_str().to_owned())
+            .or_default() += 1;
+    }
+    counts
+        .into_iter()
+        .map(|(reason, count)| RejectionReasonCount { reason, count })
+        .collect()
+}
+
+fn eligibility_summary(recommendations: &[NewRecommendation]) -> EligibilitySummary {
+    let mut summary = EligibilitySummary::default();
+    for rec in recommendations {
+        if rec
+            .execution_eligibility
+            .is_eligible(QuantRuntimeMode::ReportOnly)
+        {
+            summary.eligible_report_only += 1;
+        }
+        if rec
+            .execution_eligibility
+            .is_eligible(QuantRuntimeMode::SemiAuto)
+        {
+            summary.eligible_semi_auto += 1;
+        }
+        if rec
+            .execution_eligibility
+            .is_eligible(QuantRuntimeMode::AutoExecution)
+        {
+            summary.eligible_auto_execution += 1;
+        }
+    }
+    summary
+}
+
+fn recommendation_events(
+    report_id: &RecommendationReportId,
+    recommendations: &[NewRecommendation],
+    event_time: DateTime<Utc>,
+) -> Vec<QuantRecommendationEventRow> {
+    recommendations
+        .iter()
+        .map(|rec| QuantRecommendationEventRow {
+            event_time: event_time.timestamp_millis(),
+            recommendation_report_id: report_id.clone(),
+            recommendation_id: rec.recommendation_id.clone(),
+            rank: u32::try_from(rec.rank).unwrap_or(0),
+            market_id: rec.market_id.clone(),
+            token_id: rec.token_id.clone(),
+            side: rec.side.as_i8(),
+            score: ChProbability::from(rec.composite_score),
+            risk_adjusted_score: ChProbability::from(rec.risk_adjusted_score),
+            suggested_usd: ChUsd::from(rec.sizing_plan.suggested_usd),
+            valid_until: rec.valid_until.timestamp_millis(),
+            status: rec.status.as_str().to_owned(),
+        })
+        .collect()
+}
+
+fn operation_log(
+    report_id: &RecommendationReportId,
+    input: &ComposeReportInput<'_>,
+    status: RecommendationReportStatus,
+) -> NewOperationLog {
+    NewOperationLog {
+        id: OperationLogId::from_v7(),
+        request_id: input.trigger_key.clone(),
+        actor_user_id: None,
+        actor_username: Some("system".to_owned()),
+        acting_role: Some("report_lifecycle".to_owned()),
+        category: OperationCategory::QuantReport,
+        action: "publish".to_owned(),
+        resource_type: Some(ResourceType::QuantReport),
+        resource_id: Some(report_id.to_string()),
+        http_method: "SYSTEM".to_owned(),
+        http_path: "/system/quant/report".to_owned(),
+        http_status: 201,
+        outcome: OperationOutcome::Success,
+        client_ip: None,
+        user_agent: None,
+        latency_ms: 0,
+        detail: serde_json::json!({
+            "trigger_key": input.trigger_key,
+            "trigger_kind": input.trigger.kind().as_str(),
+            "status": status.as_str(),
+            "as_of": input.as_of.to_rfc3339(),
+            "candidate_count": input.candidate_count,
+            "published_count": input.planned.len(),
+            "empty_reason": input.empty.as_ref().map(|empty| empty.reason.as_str()),
+        }),
+        governance_audit_event_id: None,
+        governance_audit_sequence: None,
+    }
+}
+
+fn selected_by_market(selected: &[SelectedMarket]) -> HashMap<MarketId, &SelectedMarket> {
+    selected
+        .iter()
+        .map(|market| (market.market_id.clone(), market))
+        .collect()
+}
+
+fn feature_by_market(infos: &[FeatureVectorInfo]) -> HashMap<MarketId, FeatureVectorId> {
+    infos
+        .iter()
+        .map(|info| (info.market_id.clone(), info.feature_vector_id.clone()))
+        .collect()
+}
+
+fn empty_portfolio_plan(
+    portfolio_plan_id: PortfolioPlanId,
+    model_run_id: Option<ModelRunId>,
+    market_selection_id: MarketSelectionId,
+    as_of: DateTime<Utc>,
+    account: &AccountSnapshot,
+    config: &RuntimeConfig,
+    rejected_summary: PortfolioRejectedSummary,
+) -> NewPortfolioPlan {
+    let total_budget = Usd::new(parse_decimal_lossless(
+        &config.portfolio.budget.total_budget_usd.value,
+    ));
+    let constraints = PortfolioConstraintsSnapshot {
+        max_market_exposure_usd: Usd::new(parse_decimal_lossless(
+            &config.portfolio.constraints.max_market_exposure_usd.value,
+        )),
+        max_event_exposure_usd: Usd::new(parse_decimal_lossless(
+            &config.portfolio.constraints.max_event_exposure_usd.value,
+        )),
+        max_category_exposure_usd: Usd::new(parse_decimal_lossless(
+            &config.portfolio.constraints.max_category_exposure_usd.value,
+        )),
+        max_correlated_exposure_usd: Usd::new(parse_decimal_lossless(
+            &config
+                .portfolio
+                .constraints
+                .max_correlated_exposure_usd
+                .value,
+        )),
+        max_single_recommendation_usd: Usd::new(parse_decimal_lossless(
+            &config.portfolio.budget.max_single_recommendation_usd.value,
+        )),
+        min_recommendation_usd: Usd::new(parse_decimal_lossless(
+            &config.portfolio.budget.min_recommendation_usd.value,
+        )),
+        liquidity_usage_cap_pct: parse_decimal_lossless(
+            &config.portfolio.constraints.liquidity_usage_cap_pct.value,
+        ),
+    };
+    NewPortfolioPlan {
+        portfolio_plan_id,
+        model_run_id,
+        market_selection_id,
+        as_of,
+        budget_usd: total_budget,
+        allocated_usd: Usd::ZERO,
+        risk_budget_json: PortfolioRiskBudget {
+            total_budget_usd: total_budget,
+            capital_base_usd: account.equity_usd,
+            reserved_usd: account.reserved_usd,
+            allocated_usd: Usd::ZERO,
+            remaining_usd: total_budget,
+        },
+        constraints_json: constraints,
+        rejected_summary,
+    }
+}
+
+pub(super) fn empty_plan_for_report(
+    model_run_id: Option<ModelRunId>,
+    market_selection_id: MarketSelectionId,
+    as_of: DateTime<Utc>,
+    account: &AccountSnapshot,
+    config: &RuntimeConfig,
+    reason: EmptyReason,
+    rejected_count: u32,
+) -> NewPortfolioPlan {
+    empty_portfolio_plan(
+        PortfolioPlanId::from_v7(),
+        model_run_id,
+        market_selection_id,
+        as_of,
+        account,
+        config,
+        PortfolioRejectedSummary {
+            rejected_count,
+            reasons: vec![RejectionReasonCount {
+                reason: reason.as_str().to_owned(),
+                count: rejected_count,
+            }],
+        },
+    )
+}
+
+fn average_probability(values: impl IntoIterator<Item = Decimal>) -> Probability {
+    let (sum, count) = values
+        .into_iter()
+        .fold((Decimal::ZERO, 0_u64), |(sum, count), value| {
+            (sum + value, count + 1)
+        });
+    if count == 0 {
+        return Probability::default();
+    }
+    Probability::new(sum / Decimal::from(count))
+}
+
+fn parse_decimal(field: &str, value: &str) -> QuantResult<Decimal> {
+    value
+        .trim()
+        .parse::<Decimal>()
+        .map_err(|error| QuantError::config(format!("{field} is not a valid decimal: {error}")))
+}
+
+fn parse_decimal_lossless(value: &str) -> Decimal {
+    value.trim().parse::<Decimal>().unwrap_or(Decimal::ZERO)
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::{TimeZone, Utc};
+    use quant_pivot_models::{
+        enums::quant::{
+            BindingConstraint, IneligibilityReason, QuantRuntimeMode, SignalSide, SizingModelKind,
+        },
+        runtime_config::RuntimeConfig,
+        types::{
+            Bps, MarketId, ModelRunId, Price, Probability, Shares, SignalCandidateId, SizingPlan,
+            TokenId, Usd,
+        },
+    };
+    use quant_pivot_research::model::{ModelExplanation, SignalCandidate};
+    use rust_decimal_macros::dec;
+
+    use super::{auto_execution_gate, execution_eligibility, exit_plan};
+
+    fn candidate() -> SignalCandidate {
+        SignalCandidate {
+            signal_candidate_id: SignalCandidateId::from_v7(),
+            model_run_id: ModelRunId::from_v7(),
+            market_id: MarketId::new("0xmarket"),
+            token_id: TokenId::new("token-1"),
+            side: SignalSide::BuyYes,
+            composite_score: Probability::new(dec!(0.75)),
+            confidence: Probability::new(dec!(0.80)),
+            expected_return_bps: dec!(5000),
+            downside_bps: dec!(1000),
+            entry_price_ref: Price::new(dec!(0.50)),
+            suggested_horizon_secs: 3_600,
+            factor_breakdown: Vec::new(),
+            model_explanation: ModelExplanation {
+                headline: "headline".to_owned(),
+                top_positive: Vec::new(),
+                top_negative: Vec::new(),
+            },
+            rejection_warnings: Vec::new(),
+            rank_before_portfolio: 1,
+            as_of: Utc
+                .with_ymd_and_hms(2026, 6, 1, 0, 0, 0)
+                .single()
+                .expect("valid time"),
+        }
+    }
+
+    #[test]
+    fn exit_plan_uses_reward_multiple_not_expected_return_for_take_profit() {
+        let as_of = Utc
+            .with_ymd_and_hms(2026, 6, 1, 0, 0, 0)
+            .single()
+            .expect("valid time");
+        let mut config = RuntimeConfig::default();
+        config.reports.report_horizon_secs = 3_600;
+        config.portfolio.sizing.target_reward_multiple.value = "2.0".to_owned();
+
+        let plan = exit_plan(&candidate(), as_of, &config).expect("exit plan");
+
+        assert_eq!(plan.stop_loss_pct, Some(dec!(0.1)));
+        assert_eq!(plan.take_profit_pct, Some(dec!(0.20)));
+        assert_eq!(
+            plan.stop_loss_price.expect("stop loss price").inner(),
+            dec!(0.45)
+        );
+        assert_eq!(
+            plan.take_profit_price.expect("take profit price").inner(),
+            dec!(0.600)
+        );
+        assert_eq!(plan.partial_exit_nodes.len(), 3);
+        assert_eq!(plan.partial_exit_nodes[0].node_id, "tp_full");
+        assert_eq!(plan.partial_exit_nodes[1].node_id, "sl_full");
+        assert_eq!(plan.partial_exit_nodes[2].node_id, "time_exit");
+    }
+
+    fn sizing_plan(suggested_usd: Usd) -> SizingPlan {
+        SizingPlan {
+            suggested_usd,
+            suggested_shares: Shares::new(dec!(100)),
+            max_usd: Usd::new(dec!(500)),
+            min_usd: Usd::new(dec!(10)),
+            portfolio_weight_pct: dec!(0.05),
+            market_exposure_after_usd: suggested_usd,
+            event_exposure_after_usd: suggested_usd,
+            category_exposure_after_usd: suggested_usd,
+            binding_constraint: BindingConstraint::KellyCap,
+            sizing_reason: "test".to_owned(),
+            sizing_model: SizingModelKind::Kelly,
+            edge_bps: Some(Bps::new(dec!(120))),
+            kelly_fraction_applied: Some(dec!(0.5)),
+        }
+    }
+
+    #[test]
+    fn execution_eligibility_keeps_semi_auto_when_auto_denied_for_low_confidence() {
+        let mut config = RuntimeConfig::default();
+        config.execution.auto_execution.enabled = true;
+        config.execution.auto_execution.max_orders_per_report = 5;
+        config.execution.auto_execution.min_score.value = "0.90".to_owned();
+        config.execution.auto_execution.min_confidence.value = "0.90".to_owned();
+
+        let gate = auto_execution_gate(&candidate(), 1, &sizing_plan(Usd::new(dec!(100))), &config)
+            .expect("gate");
+        assert!(!gate.allowed);
+        assert_eq!(gate.reasons, vec![IneligibilityReason::LowConfidence]);
+
+        let eligibility = execution_eligibility(&gate, &config);
+        assert!(eligibility.is_eligible(QuantRuntimeMode::ReportOnly));
+        assert!(eligibility.is_eligible(QuantRuntimeMode::SemiAuto));
+        assert!(!eligibility.is_eligible(QuantRuntimeMode::AutoExecution));
+        assert!(
+            !eligibility
+                .ineligibility_reasons
+                .contains(&IneligibilityReason::BudgetExhausted)
+        );
+    }
+
+    #[test]
+    fn execution_eligibility_allows_auto_when_policy_passes() {
+        let mut config = RuntimeConfig::default();
+        config.execution.auto_execution.enabled = true;
+        config.execution.auto_execution.max_orders_per_report = 5;
+        config.execution.auto_execution.min_score.value = "0.50".to_owned();
+        config.execution.auto_execution.min_confidence.value = "0.50".to_owned();
+        config
+            .execution
+            .auto_execution
+            .max_total_usd_per_report
+            .value = "1000".to_owned();
+
+        let gate = auto_execution_gate(&candidate(), 1, &sizing_plan(Usd::new(dec!(100))), &config)
+            .expect("gate");
+        assert!(gate.allowed);
+        assert!(gate.reasons.is_empty());
+
+        let eligibility = execution_eligibility(&gate, &config);
+        assert!(eligibility.is_eligible(QuantRuntimeMode::AutoExecution));
+    }
+}

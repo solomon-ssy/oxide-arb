@@ -11,41 +11,45 @@ use chrono::Utc;
 use quant_pivot_models::{
     domain::{
         NewAccountSnapshot, NewMarketSelection, NewModelRun, NewModelSpec, NewModelVersion,
-        NewOrderIntent, NewPortfolioPlan, NewRecommendation, NewRecommendationReport,
-        NewReportTransaction, NewRuntimeConfigVersion,
+        NewOperationLog, NewOrderIntent, NewPortfolioPlan, NewRecommendation,
+        NewRecommendationReport, NewReportTransaction, NewRuntimeConfigVersion, OperationLogQuery,
     },
     entities::quant_market_selection::{SelectionExcludedMarketIds, SelectionIncludedMarketIds},
     enums::{
         common::MarketCategory,
+        factor::FactorFamily,
+        operation_log::{OperationCategory, OperationOutcome},
         quant::{
             AccountSource, ApprovalStatus, BindingConstraint, EntryTriggerKind, FactorDirection,
             ModelPublicationStatus, ModelRunKind, ModelRunStatus, OrderIntentStatus,
             QuantRuntimeMode, RecommendationReportStatus, RecommendationStatus, ReportKind,
-            SettlementPolicy, SignalSide, SizingModelKind,
+            ReportTriggerKind, SettlementPolicy, SignalSide, SizingModelKind,
         },
+        rbac::ResourceType,
         runtime_config::RuntimeConfigVersionSource,
     },
     types::{
         AccountPositions, AccountSnapshotId, Bps, ConfidenceSummary, ContentHash,
         DataQualitySummary, EligibilitySummary, EntryPlan, EventId, EvidenceRefs,
         ExecutionEligibility, ExitPlan, ExposureBreakdown, FactorBreakdownEntry, FeatureVectorId,
-        MarketId, MarketSelectionId, ModelRunId, ModelSpecId, ModelVersionId,
-        PortfolioConstraintsSnapshot, PortfolioPlanId, PortfolioRejectedSummary,
-        PortfolioRiskBudget, Price, Probability, RecommendationFactorBreakdown, RecommendationId,
-        RecommendationReportId, ReportSummary, RiskEnvelope, RuntimeConfigVersionId,
-        SelectionExclusionSummary, Shares, SizingPlan, TokenId, Usd,
+        MarketId, MarketSelectionId, ModelRunId, ModelSpecId, ModelVersionId, OperationLogId,
+        OrderIntentId, PortfolioConstraintsSnapshot, PortfolioPlanId, PortfolioRejectedSummary,
+        PortfolioRiskBudget, PositionSnapshot, Price, Probability, RecommendationFactorBreakdown,
+        RecommendationId, RecommendationReportId, ReportSummary, RiskEnvelope,
+        RuntimeConfigVersionId, SchemaVersion, SelectionExclusionSummary, Shares, SizingPlan,
+        TokenId, Usd,
     },
 };
 use quant_pivot_repository::{
     postgres::{
         PgAccountSnapshotRepository, PgEventRepository, PgMarketRepository,
         PgMarketSelectionRepository, PgModelRegistryRepository, PgModelRunRepository,
-        PgOrderIntentRepository, PgRecommendationReportRepository, PgRecommendationRepository,
-        PgReservedCapitalRepository, PgRuntimeConfigVersionRepository,
+        PgOperationLogRepository, PgOrderIntentRepository, PgRecommendationReportRepository,
+        PgRecommendationRepository, PgReservedCapitalRepository, PgRuntimeConfigVersionRepository,
     },
     traits::{
         AccountSnapshotRepository, EventRepository, MarketRepository, MarketSelectionRepository,
-        ModelRegistryRepository, ModelRunRepository, OrderIntentRepository,
+        ModelRegistryRepository, ModelRunRepository, OperationLogRepository, OrderIntentRepository,
         RecommendationReportRepository, RecommendationRepository, ReservedCapitalRepository,
         RuntimeConfigVersionRepository,
     },
@@ -61,7 +65,7 @@ fn content_hash(seed: char) -> ContentHash {
 }
 
 fn new_account_snapshot() -> NewAccountSnapshot {
-    let positions = vec![quant_pivot_models::types::PositionSnapshot {
+    let positions = vec![PositionSnapshot {
         token_id: TokenId::new("token-1"),
         market_id: MarketId::new("0xmarket"),
         event_id: Some(EventId::new("evt-1")),
@@ -133,12 +137,31 @@ async fn report_transaction_persists_chain_and_reserved_capital_sums_pending_int
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
 
-    // ── Seed upstream foreign keys ──────────────────────────────────────────
     let rc_id = seed_runtime_config(&db).await;
     let (model_version_id, model_run_id) = seed_model_version(&db, &rc_id).await;
-
     let event_id = "evt-1";
     let market_id = "0xmarket";
+    seed_market_catalog(&db, event_id, market_id).await;
+    let market_selection_id = seed_market_selection(&db, &rc_id, market_id, event_id).await;
+
+    let ids = TxnIds {
+        account_snapshot: AccountSnapshotId::from_v7(),
+        portfolio_plan: PortfolioPlanId::from_v7(),
+        report: RecommendationReportId::from_v7(),
+        recommendation: RecommendationId::from_v7(),
+        model_version: model_version_id.clone(),
+        model_run: model_run_id.clone(),
+        market_selection: market_selection_id.clone(),
+        runtime_config_version: rc_id.clone(),
+        market: market_id.to_owned(),
+        event: event_id.to_owned(),
+    };
+    create_and_assert_report_transaction(&db, &ids).await;
+    assert_recommendation_roundtrip(&db, &ids.report).await;
+    assert_reserved_capital_tracks_pending_intent(&db, &ids.recommendation).await;
+}
+
+async fn seed_market_catalog(db: &sea_orm::DatabaseConnection, event_id: &str, market_id: &str) {
     PgEventRepository::new(db.clone())
         .upsert(make_event(
             event_id,
@@ -159,56 +182,66 @@ async fn report_transaction_persists_chain_and_reserved_capital_sums_pending_int
         ))
         .await
         .expect("seed market");
-    let market_selection_id = seed_market_selection(&db, &rc_id, market_id, event_id).await;
+}
 
-    // ── Write the full report transaction (FK-ordered) ──────────────────────
-    let ids = TxnIds {
-        account_snapshot: AccountSnapshotId::from_v7(),
-        portfolio_plan: PortfolioPlanId::from_v7(),
-        report: RecommendationReportId::from_v7(),
-        recommendation: RecommendationId::from_v7(),
-        model_version: model_version_id.clone(),
-        model_run: model_run_id.clone(),
-        market_selection: market_selection_id.clone(),
-        runtime_config_version: rc_id.clone(),
-        market: market_id.to_owned(),
-        event: event_id.to_owned(),
-    };
-    let account_snapshot_id = ids.account_snapshot.clone();
-    let report_id = ids.report.clone();
-    let recommendation_id = ids.recommendation.clone();
-    let transaction = build_report_transaction(&ids);
-
+async fn create_and_assert_report_transaction(db: &sea_orm::DatabaseConnection, ids: &TxnIds) {
+    let trigger_key = report_trigger_key(ids);
     let report_repo = PgRecommendationReportRepository::new(db.clone());
     let created = report_repo
-        .create_report(transaction)
+        .create_report(build_report_transaction(ids))
         .await
         .expect("create report transaction");
-    assert_eq!(created.recommendation_report_id, report_id);
+    assert_eq!(created.recommendation_report_id, ids.report);
     assert_eq!(created.capital_base_usd, Usd::new(dec!(10000)));
-    assert_eq!(created.account_snapshot_ref, account_snapshot_id);
+    assert_eq!(created.account_snapshot_ref, ids.account_snapshot);
 
-    // Strong-typed recommendation read-back.
+    let found_by_trigger = report_repo
+        .find_by_trigger_key(&trigger_key)
+        .await
+        .expect("find by trigger key")
+        .expect("trigger key row");
+    assert_eq!(found_by_trigger.recommendation_report_id, ids.report);
+
+    let op_logs = PgOperationLogRepository::new(db.clone())
+        .page(OperationLogQuery {
+            request_id: Some(trigger_key),
+            ..OperationLogQuery::default()
+        })
+        .await
+        .expect("operation log page");
+    assert_eq!(op_logs.total, 1);
+    assert_eq!(
+        op_logs.items[0].resource_id.as_deref(),
+        Some(ids.report.to_string().as_str())
+    );
+}
+
+async fn assert_recommendation_roundtrip(
+    db: &sea_orm::DatabaseConnection,
+    report_id: &RecommendationReportId,
+) {
     let recs = PgRecommendationRepository::new(db.clone())
-        .find_by_report(&report_id)
+        .find_by_report(report_id)
         .await
         .expect("find recommendations");
     assert_eq!(recs.len(), 1);
     assert_eq!(recs[0].sizing_plan.suggested_usd, Usd::new(dec!(250)));
     assert_eq!(recs[0].sizing_plan.sizing_model, SizingModelKind::Kelly);
+}
 
-    // No locked intents yet → zero reserved.
+async fn assert_reserved_capital_tracks_pending_intent(
+    db: &sea_orm::DatabaseConnection,
+    recommendation_id: &RecommendationId,
+) {
     let reserved_repo = PgReservedCapitalRepository::new(db.clone());
     assert_eq!(
         reserved_repo.sum_locked_usd().await.expect("sum"),
         Usd::ZERO
     );
 
-    // Create a pending-approval intent and assert the reserved sum picks up the
-    // recommendation's suggested size.
     PgOrderIntentRepository::new(db.clone())
         .create_pending(NewOrderIntent {
-            order_intent_id: quant_pivot_models::types::OrderIntentId::from_v7(),
+            order_intent_id: OrderIntentId::from_v7(),
             recommendation_id: recommendation_id.clone(),
             runtime_mode: QuantRuntimeMode::SemiAuto,
             intent_kind: "buy".to_owned(),
@@ -239,7 +272,7 @@ async fn seed_runtime_config(db: &sea_orm::DatabaseConnection) -> RuntimeConfigV
         .create_version(NewRuntimeConfigVersion {
             runtime_config_version_id: id.clone(),
             config_hash: content_hash('c'),
-            schema_version: quant_pivot_models::types::SchemaVersion::FIRST,
+            schema_version: SchemaVersion::FIRST,
             config_json: serde_json::json!({}),
             source: RuntimeConfigVersionSource::Bootstrap,
             created_by: "pg-account-it".to_owned(),
@@ -262,8 +295,8 @@ async fn seed_model_version(
             name: "pg-account-it".to_owned(),
             model_family: "weighted_factor".to_owned(),
             prediction_horizon_secs: 86_400,
-            feature_schema_version: quant_pivot_models::types::SchemaVersion::FIRST,
-            label_schema_version: quant_pivot_models::types::SchemaVersion::FIRST,
+            feature_schema_version: SchemaVersion::FIRST,
+            label_schema_version: SchemaVersion::FIRST,
             spec_json: serde_json::json!({}),
             status: ModelPublicationStatus::Published,
         })
@@ -361,7 +394,7 @@ fn build_report_transaction(ids: &TxnIds) -> NewReportTransaction {
         },
         portfolio_plan: NewPortfolioPlan {
             portfolio_plan_id: ids.portfolio_plan.clone(),
-            model_run_id: ids.model_run.clone(),
+            model_run_id: Some(ids.model_run.clone()),
             market_selection_id: ids.market_selection.clone(),
             as_of: Utc::now(),
             budget_usd: Usd::new(dec!(10000)),
@@ -373,6 +406,10 @@ fn build_report_transaction(ids: &TxnIds) -> NewReportTransaction {
         report: NewRecommendationReport {
             recommendation_report_id: ids.report.clone(),
             report_kind: ReportKind::TopN,
+            trigger_kind: ReportTriggerKind::Scheduled,
+            trigger_key: report_trigger_key(ids),
+            trigger_time: Utc::now(),
+            source_delay_secs: 10,
             as_of: Utc::now(),
             horizon_secs: 86_400,
             runtime_mode: QuantRuntimeMode::ReportOnly,
@@ -388,6 +425,8 @@ fn build_report_transaction(ids: &TxnIds) -> NewReportTransaction {
             summary_json: report_summary(),
             published_at: Some(Utc::now()),
             revoked_at: None,
+            expired_at: None,
+            status_reason: None,
         },
         recommendations: vec![NewRecommendation {
             recommendation_id: ids.recommendation.clone(),
@@ -411,7 +450,36 @@ fn build_report_transaction(ids: &TxnIds) -> NewReportTransaction {
             valid_until: Utc::now(),
             status: RecommendationStatus::Published,
         }],
+        operation_log: report_operation_log(ids),
     }
+}
+
+fn report_operation_log(ids: &TxnIds) -> NewOperationLog {
+    NewOperationLog {
+        id: OperationLogId::from_v7(),
+        request_id: report_trigger_key(ids),
+        actor_user_id: None,
+        actor_username: Some("system".to_owned()),
+        acting_role: Some("test".to_owned()),
+        category: OperationCategory::QuantReport,
+        action: "publish".to_owned(),
+        resource_type: Some(ResourceType::QuantReport),
+        resource_id: Some(ids.report.to_string()),
+        http_method: "SYSTEM".to_owned(),
+        http_path: "/test/quant/report".to_owned(),
+        http_status: 201,
+        outcome: OperationOutcome::Success,
+        client_ip: None,
+        user_agent: None,
+        latency_ms: 0,
+        detail: serde_json::json!({ "test": true }),
+        governance_audit_event_id: None,
+        governance_audit_sequence: None,
+    }
+}
+
+fn report_trigger_key(ids: &TxnIds) -> String {
+    format!("scheduled:test:{}", ids.report)
 }
 
 // ── Payload builders ──────────────────────────────────────────────────────────
@@ -485,7 +553,7 @@ fn risk_envelope() -> RiskEnvelope {
 fn factor_breakdown() -> RecommendationFactorBreakdown {
     RecommendationFactorBreakdown(vec![FactorBreakdownEntry {
         factor_name: "liquidity_depth".to_owned(),
-        family: quant_pivot_models::enums::factor::FactorFamily::Liquidity,
+        family: FactorFamily::Liquidity,
         raw_value: Some(dec!(1234.5)),
         normalized_score: Probability::new(dec!(0.8)),
         weight: dec!(0.4),

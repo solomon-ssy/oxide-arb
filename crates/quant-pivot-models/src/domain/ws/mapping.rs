@@ -41,6 +41,13 @@ pub fn event_envelope(event: &CoreEvent) -> Option<(SubscriptionKey, WsEnvelope)
             None,
             serde_json::json!({ "version_id": version_id }),
         ),
+        CoreEvent::ReportPublished(payload)
+        | CoreEvent::ReportRevoked(payload)
+        | CoreEvent::ReportExpired(payload) => (
+            WsChannel::QuantReportUpdate,
+            None,
+            serde_json::to_value(payload).ok()?,
+        ),
     };
 
     let key = SubscriptionKey::new(channel, market);

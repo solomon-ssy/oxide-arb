@@ -228,7 +228,8 @@ Schedule（`ReportScheduleConfig`）：
 - `Kelly { kelly_fraction, max_position_pct, target_reward_multiple, confidence_weighting,
   drawdown_scaling }`（默认；`confidence_weighting` 为置信度收缩曲线，`target_reward_multiple`
   为目标/止损倍数 R，用于反解 Kelly 胜率）
-- `ConfidenceCurve { curve, drawdown_multiplier }`（edge-free 基线 / shadow）
+
+Kelly 是唯一 production sizing model；`confidence_weighting` 只作为 Kelly 分数的估计不确定性收缩输入。
 
 ### 2.9 `execution`
 

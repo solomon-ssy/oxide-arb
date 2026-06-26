@@ -30,7 +30,9 @@ use quant_pivot_models::{
         market::MarketStatus,
     },
     runtime_config::{DataQualityConfig, FeaturesConfig, SelectionConfig},
-    types::{EventId, FeatureVectorId, MarketId, RuntimeConfigVersionId, Shares, TokenId, Usd},
+    types::{
+        EventId, FeatureVectorId, MarketId, Price, RuntimeConfigVersionId, Shares, TokenId, Usd,
+    },
 };
 use quant_pivot_repository::{
     postgres::{PgEventRepository, PgFeatureRepository, PgMarketRepository},
@@ -136,11 +138,11 @@ fn wire_live_book(registry: &MarketRegistry, book_store: &BookStore, catalog: &E
     book_store.apply_snapshot(
         &yes,
         Arc::from([BookLevel::from_decimal_unchecked(
-            quant_pivot_models::types::Price::new(Decimal::new(47, 2)),
+            Price::new(Decimal::new(47, 2)),
             Shares::new(Decimal::from(120)),
         )]),
         Arc::from([BookLevel::from_decimal_unchecked(
-            quant_pivot_models::types::Price::new(Decimal::new(53, 2)),
+            Price::new(Decimal::new(53, 2)),
             Shares::new(Decimal::from(120)),
         )]),
         u64::try_from(Utc::now().timestamp_millis()).unwrap_or(0),

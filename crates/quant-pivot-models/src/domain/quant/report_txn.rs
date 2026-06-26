@@ -6,6 +6,7 @@
 //! foreign keys are satisfied within the same transaction.
 
 use super::{NewAccountSnapshot, NewPortfolioPlan, NewRecommendation, NewRecommendationReport};
+use crate::domain::governance::NewOperationLog;
 
 /// All rows written atomically when a recommendation report is created.
 #[derive(Debug, Clone)]
@@ -18,4 +19,6 @@ pub struct NewReportTransaction {
     pub report: NewRecommendationReport,
     /// The published recommendations.
     pub recommendations: Vec<NewRecommendation>,
+    /// Operator/audit trail row committed with the authoritative report rows.
+    pub operation_log: NewOperationLog,
 }

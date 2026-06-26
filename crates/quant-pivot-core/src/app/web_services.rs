@@ -9,7 +9,7 @@ use crate::{
     pipeline::book_store::BookStore,
 };
 use async_trait::async_trait;
-use quant_pivot_api::ws::SubscriptionSource;
+use quant_pivot_api::ws::{ClobWsManager, SubscriptionSource};
 use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
     domain::{
@@ -198,7 +198,7 @@ impl MetricsScrapePort for CoreMetricsScrape {
 
 struct CoreMarketData {
     book_store: Arc<BookStore>,
-    ws_manager: Arc<quant_pivot_api::ws::ClobWsManager>,
+    ws_manager: Arc<ClobWsManager>,
 }
 
 #[async_trait]

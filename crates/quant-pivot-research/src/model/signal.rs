@@ -7,8 +7,14 @@
 use chrono::{DateTime, Utc};
 use quant_pivot_models::{
     clickhouse::{ChPrice, ChProbability, QuantSignalCandidateEventRow},
-    enums::quant::{FactorDirection, SignalSide},
-    types::{Bps, MarketId, ModelRunId, Price, Probability, SignalCandidateId, TokenId},
+    enums::{
+        factor::FactorFamily,
+        quant::{FactorDirection, SignalSide},
+    },
+    types::{
+        Bps, FactorDefinitionId, MarketId, ModelRunId, Price, Probability, SignalCandidateId,
+        TokenId,
+    },
 };
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -18,16 +24,28 @@ use crate::factors::FactorName;
 /// One factor's signed contribution to a candidate's composite score.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FactorContribution {
+    /// Governing factor definition id.
+    pub definition_id: FactorDefinitionId,
     /// The contributing factor.
     pub name: FactorName,
+    /// Factor family.
+    pub family: FactorFamily,
+    /// Raw factor value before normalization.
+    pub raw_value: Option<Decimal>,
     /// Normalized factor score in `[0, 1]`.
     pub normalized_score: Probability,
     /// Weight applied to the factor by the model.
     pub weight: Decimal,
     /// Signed contribution (`weight × score × confidence`).
     pub contribution: Decimal,
+    /// Confidence attached to this factor.
+    pub confidence: Probability,
     /// Direction the factor pushed the score.
     pub direction: FactorDirection,
+    /// Human-readable explanation from the factor plane.
+    pub explanation: String,
+    /// Feature/fact refs behind this contribution.
+    pub source_refs: Vec<String>,
 }
 
 /// Model-level explanation: headline plus the strongest positive and negative

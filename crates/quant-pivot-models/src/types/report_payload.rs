@@ -272,10 +272,18 @@ pub struct ExecutionEligibility {
 }
 
 impl ExecutionEligibility {
-    /// Whether the recommendation is eligible for execution in `mode`.
+    /// Whether the recommendation supports order execution in `mode`.
+    ///
+    /// [`QuantRuntimeMode::ReportOnly`] and [`QuantRuntimeMode::SemiAuto`] are
+    /// eligible when listed in [`Self::eligible_modes`]. Auto-execution additionally
+    /// requires an empty [`Self::ineligibility_reasons`] (reasons document score /
+    /// confidence denials when auto mode is withheld).
     #[must_use]
     pub fn is_eligible(&self, mode: QuantRuntimeMode) -> bool {
-        self.eligible_modes.contains(&mode)
+        if !self.eligible_modes.contains(&mode) {
+            return false;
+        }
+        mode != QuantRuntimeMode::AutoExecution || self.ineligibility_reasons.is_empty()
     }
 }
 

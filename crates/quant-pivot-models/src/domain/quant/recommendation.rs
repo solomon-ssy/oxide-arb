@@ -6,7 +6,7 @@
 use crate::{
     enums::quant::{
         AccountSource, QuantRuntimeMode, RecommendationReportStatus, RecommendationStatus,
-        ReportKind, SignalSide,
+        ReportKind, ReportTriggerKind, SignalSide,
     },
     types::{
         AccountSnapshotId, EntryPlan, EventId, EvidenceRefs, ExecutionEligibility, ExitPlan,
@@ -25,6 +25,10 @@ use serde::{Deserialize, Serialize};
 pub struct RecommendationReportInfo {
     pub recommendation_report_id: RecommendationReportId,
     pub report_kind: ReportKind,
+    pub trigger_kind: ReportTriggerKind,
+    pub trigger_key: String,
+    pub trigger_time: DateTime<Utc>,
+    pub source_delay_secs: i64,
     pub as_of: DateTime<Utc>,
     pub horizon_secs: i64,
     pub runtime_mode: QuantRuntimeMode,
@@ -40,6 +44,8 @@ pub struct RecommendationReportInfo {
     pub summary_json: ReportSummary,
     pub published_at: Option<DateTime<Utc>>,
     pub revoked_at: Option<DateTime<Utc>>,
+    pub expired_at: Option<DateTime<Utc>>,
+    pub status_reason: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -49,6 +55,10 @@ info_from_model!(
     {
         recommendation_report_id,
         report_kind,
+        trigger_kind,
+        trigger_key,
+        trigger_time,
+        source_delay_secs,
         as_of,
         horizon_secs,
         runtime_mode,
@@ -64,6 +74,8 @@ info_from_model!(
         summary_json,
         published_at,
         revoked_at,
+        expired_at,
+        status_reason,
         created_at,
     }
 );
@@ -74,6 +86,10 @@ info_from_model!(
 pub struct NewRecommendationReport {
     pub recommendation_report_id: RecommendationReportId,
     pub report_kind: ReportKind,
+    pub trigger_kind: ReportTriggerKind,
+    pub trigger_key: String,
+    pub trigger_time: DateTime<Utc>,
+    pub source_delay_secs: i64,
     pub as_of: DateTime<Utc>,
     pub horizon_secs: i64,
     pub runtime_mode: QuantRuntimeMode,
@@ -89,6 +105,8 @@ pub struct NewRecommendationReport {
     pub summary_json: ReportSummary,
     pub published_at: Option<DateTime<Utc>>,
     pub revoked_at: Option<DateTime<Utc>>,
+    pub expired_at: Option<DateTime<Utc>>,
+    pub status_reason: Option<String>,
 }
 
 /// Single actionable recommendation row.

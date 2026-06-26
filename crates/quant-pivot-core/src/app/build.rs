@@ -4,7 +4,8 @@ use super::{
     AppContext,
     bundles::{
         AccountBundle, AccountBundleDeps, DataBundle, DataBundleDeps, GovernanceBundle,
-        GovernanceBundleDeps, InfraBundle, ResearchBundle, ResearchBundleDeps, RuntimeSnapshot,
+        GovernanceBundleDeps, InfraBundle, ReportBundle, ReportBundleDeps, ResearchBundle,
+        ResearchBundleDeps, RuntimeSnapshot,
     },
 };
 use crate::observability::metrics_hub::MetricsHub;
@@ -53,6 +54,15 @@ impl AppContext {
         })
         .await?;
         let (events, event_rx) = CoreEventPublisher::bounded(4096);
+        governance.alerts.attach_event_publisher(events.clone());
+        let report = ReportBundle::assemble(ReportBundleDeps {
+            infra: &infra,
+            data: &data,
+            governance: &governance,
+            research: &research,
+            account: &account,
+            events: events.clone(),
+        });
 
         Ok(Self {
             config: deploy,
@@ -64,6 +74,7 @@ impl AppContext {
             governance,
             research,
             account,
+            report,
         })
     }
 }

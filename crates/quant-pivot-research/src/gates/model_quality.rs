@@ -465,7 +465,8 @@ mod tests {
     };
     use chrono::Utc;
     use quant_pivot_models::types::{
-        BacktestReportId, ContentHash, ModelVersionId, Probability, RuntimeConfigVersionId,
+        BacktestReportId, ContentHash, MarketId, ModelVersionId, Probability,
+        RuntimeConfigVersionId, TokenId, TrainingDatasetId,
     };
     use rust_decimal_macros::dec;
 
@@ -598,8 +599,8 @@ mod tests {
         input.leakage = LeakageFindings {
             scanned: 100,
             violations: vec![LeakageViolation {
-                market_id: quant_pivot_models::types::MarketId::new("m"),
-                token_id: quant_pivot_models::types::TokenId::new("t"),
+                market_id: MarketId::new("m"),
+                token_id: TokenId::new("t"),
                 as_of: Utc::now(),
                 cutoff: Utc::now(),
                 reference: "future_book".to_owned(),
@@ -686,9 +687,7 @@ mod tests {
     fn dataset_ready_gate_needs_no_backtest() {
         let decision = DefaultModelQualityGate::new()
             .evaluate(QualityGateInput {
-                subject: GateSubject::TrainingDataset(
-                    quant_pivot_models::types::TrainingDatasetId::from_v7(),
-                ),
+                subject: GateSubject::TrainingDataset(TrainingDatasetId::from_v7()),
                 intent: GateIntent::DatasetReady,
                 backtest: None,
                 ..passing_input(GateIntent::DatasetReady)

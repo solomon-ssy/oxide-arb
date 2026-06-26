@@ -327,6 +327,21 @@ fn f64_to_decimal(value: f64) -> Decimal {
 #[cfg(test)]
 mod tests {
     use super::ClassicalRuntime;
+    use crate::{
+        features::{FeatureName, FeatureValue},
+        model::{
+            artifact::{ClassicalModelArtifact, ModelArtifactHeader},
+            classical::{
+                CLASSICAL_CRATE_NAME, CLASSICAL_CRATE_VERSION, ClassicalAdapterRegistry,
+                ClassicalTrainOutput,
+            },
+            runtime::{
+                ClassicalKind, InferenceMatrix, InferenceMatrixRow, MarketInferenceContext,
+                ModelFamily, ModelRuntimeInput, QuantModelRuntime,
+            },
+        },
+        training::TrainingMatrix,
+    };
     use chrono::Utc;
     use ndarray::{Array1, Array2};
     use quant_pivot_models::{
@@ -337,19 +352,6 @@ mod tests {
     };
     use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
-
-    use crate::{
-        features::{FeatureName, FeatureValue},
-        model::{
-            artifact::{ClassicalModelArtifact, ModelArtifactHeader},
-            classical::{CLASSICAL_CRATE_NAME, CLASSICAL_CRATE_VERSION, ClassicalAdapterRegistry},
-            runtime::{
-                ClassicalKind, InferenceMatrix, InferenceMatrixRow, MarketInferenceContext,
-                ModelFamily, ModelRuntimeInput, QuantModelRuntime,
-            },
-        },
-        training::TrainingMatrix,
-    };
 
     fn hash(seed: &str) -> ContentHash {
         use std::fmt::Write;
@@ -380,7 +382,7 @@ mod tests {
         }
     }
 
-    fn artifact(output: &crate::model::classical::ClassicalTrainOutput) -> ClassicalModelArtifact {
+    fn artifact(output: &ClassicalTrainOutput) -> ClassicalModelArtifact {
         ClassicalModelArtifact {
             header: ModelArtifactHeader {
                 model_version_id: ModelVersionId::from_v7(),

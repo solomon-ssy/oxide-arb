@@ -10,7 +10,7 @@ use quant_pivot_models::{
 };
 use quant_pivot_storage::{
     clickhouse::{ChWriteManager, ClickHousePool},
-    write::{AsyncWriter, AsyncWriterConfig, AsyncWriterObservability},
+    write::{AsyncWriter, AsyncWriterConfig, AsyncWriterObservability, AsyncWriterWorker},
 };
 use rust_decimal_macros::dec;
 use std::{sync::Arc, time::Duration};
@@ -251,10 +251,7 @@ async fn tick_events_direct_insert_roundtrip() {
 fn tick_writer(
     client: clickhouse::Client,
     write_manager: Arc<ChWriteManager>,
-) -> (
-    AsyncWriter<TickEventRow>,
-    quant_pivot_storage::write::AsyncWriterWorker<TickEventRow>,
-) {
+) -> (AsyncWriter<TickEventRow>, AsyncWriterWorker<TickEventRow>) {
     AsyncWriter::new(
         AsyncWriterConfig::new("tick_events")
             .capacity(10_000)

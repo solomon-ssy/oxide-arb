@@ -22,7 +22,9 @@ use quant_pivot_models::{
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
-use crate::{hashing::ResearchHasher, model::SignalCandidate, precision::RESEARCH_DECIMAL_SCALE};
+use crate::{
+    hashing::ResearchHasher, model::SignalCandidate, precision::RESEARCH_DECIMAL_SCALE, stats,
+};
 
 /// Per-market ranking divergence between active and shadow over common markets.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -164,7 +166,7 @@ pub fn compute_shadow_comparison(
     let mean_abs_rank_delta = ratio(rank_delta_sum, common_decimal);
     let mean_abs_score_delta = ratio(score_delta_sum, common_decimal);
     let side_disagreement_rate = ratio(Decimal::from(side_disagreements), common_decimal);
-    let spearman = crate::stats::spearman(&active_ranks, &shadow_ranks);
+    let spearman = stats::spearman(&active_ranks, &shadow_ranks);
 
     let topn_overlap = topn_overlap(active, shadow, top_n);
     let hard_divergence = mean_abs_score_delta > score_divergence_threshold;

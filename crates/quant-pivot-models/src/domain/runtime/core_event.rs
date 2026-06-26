@@ -3,8 +3,10 @@
 use crate::{
     domain::{MarketBookView, governance::system::SystemStatus},
     enums::common::{AlertCategory, AlertLevel, AlertSource},
+    enums::quant::{EmptyReason, RecommendationReportStatus, ReportKind},
     types::MarketId,
 };
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::sync::{
     Arc,
@@ -25,6 +27,20 @@ pub struct SystemAlertEvent {
     pub dedupe_secs: u64,
 }
 
+/// Report lifecycle event payload fanned out after the authoritative PG
+/// transaction has committed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReportLifecycleEvent {
+    pub recommendation_report_id: String,
+    pub report_kind: ReportKind,
+    pub status: RecommendationReportStatus,
+    pub as_of: DateTime<Utc>,
+    pub published_at: Option<DateTime<Utc>>,
+    pub recommendation_count: u32,
+    pub empty_reason: Option<EmptyReason>,
+    pub status_reason: Option<String>,
+}
+
 /// Cross-subsystem runtime events consumed by web and observability layers.
 #[derive(Debug, Clone)]
 pub enum CoreEvent {
@@ -40,6 +56,9 @@ pub enum CoreEvent {
     ConfigActivated {
         version_id: String,
     },
+    ReportPublished(ReportLifecycleEvent),
+    ReportRevoked(ReportLifecycleEvent),
+    ReportExpired(ReportLifecycleEvent),
     Alert(SystemAlertEvent),
 }
 
@@ -51,6 +70,9 @@ impl CoreEvent {
             Self::MarketBookUpdate { .. } => "market.book_update",
             Self::MarketResolved { .. } => "market.resolved",
             Self::ConfigActivated { .. } => "config.activated",
+            Self::ReportPublished(_) => "quant.report.published",
+            Self::ReportRevoked(_) => "quant.report.revoked",
+            Self::ReportExpired(_) => "quant.report.expired",
             Self::Alert(_) => "system.alert",
         }
     }

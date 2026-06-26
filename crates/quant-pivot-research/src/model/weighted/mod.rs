@@ -128,11 +128,21 @@ impl WeightedFactorRuntime {
                 confidence_weighted += *weight * confidence;
             }
             contributions.push(FactorContribution {
+                definition_id: factor.definition_id.clone(),
                 name: factor.name.clone(),
+                family: factor.family,
+                raw_value: factor.raw_value,
                 normalized_score: factor.normalized_score,
                 weight: *weight,
                 contribution,
+                confidence: factor.confidence,
                 direction: factor.direction,
+                explanation: factor.explanation.headline.clone(),
+                source_refs: factor
+                    .input_feature_refs
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect(),
             });
         }
 

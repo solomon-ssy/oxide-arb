@@ -55,6 +55,8 @@ pub enum WsChannel {
     MarketBookUpdate,
     /// A runtime-config version was activated.
     ConfigActivated,
+    /// A quant recommendation report was published or transitioned.
+    QuantReportUpdate,
     /// A new scored opportunity was detected.
     OpportunityDetected,
     /// A trade was filled.
@@ -69,7 +71,7 @@ pub enum WsChannel {
 
 impl WsChannel {
     /// Every channel, used by exhaustiveness tests and reverse lookup.
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::SystemStatus,
         Self::SystemAlert,
         Self::RiskCircuitBreaker,
@@ -77,6 +79,7 @@ impl WsChannel {
         Self::MarketResolved,
         Self::MarketBookUpdate,
         Self::ConfigActivated,
+        Self::QuantReportUpdate,
         Self::OpportunityDetected,
         Self::TradeFilled,
         Self::TradeSettled,
@@ -95,6 +98,7 @@ impl WsChannel {
             Self::MarketResolved => "market.resolved",
             Self::MarketBookUpdate => "market.book_update",
             Self::ConfigActivated => "config.activated",
+            Self::QuantReportUpdate => "quant.report_update",
             Self::OpportunityDetected => "opportunity.detected",
             Self::TradeFilled => "trade.filled",
             Self::TradeSettled => "trade.settled",
@@ -113,6 +117,7 @@ impl WsChannel {
             Self::SystemStatus | Self::SystemAlert => ResourceType::System,
             Self::RiskCircuitBreaker | Self::RiskPositionUpdate => ResourceType::Risk,
             Self::MarketResolved | Self::MarketBookUpdate => ResourceType::Market,
+            Self::QuantReportUpdate => ResourceType::QuantReport,
             Self::MaterializationRunUpdate => ResourceType::Publication,
             Self::ConfigActivated => ResourceType::RuntimeConfig,
             Self::OpportunityDetected => ResourceType::Opportunity,

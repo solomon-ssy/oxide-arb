@@ -37,7 +37,7 @@ pub fn table() -> TableCreateStatement {
         .table(QuantPortfolioPlan::Table)
         .if_not_exists()
         .col(column::uuid_pk(QuantPortfolioPlan::PortfolioPlanId))
-        .col(column::uuid_fk(QuantPortfolioPlan::ModelRunId))
+        .col(column::uuid_null(QuantPortfolioPlan::ModelRunId))
         .col(column::uuid_fk(QuantPortfolioPlan::MarketSelectionId))
         .col(
             ColumnDef::new(QuantPortfolioPlan::AsOf)

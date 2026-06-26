@@ -1,6 +1,6 @@
 //! `quant_shadow_comparison` table entity.
 
-use crate::types::{ContentHash, ModelVersionId, ShadowComparisonId};
+use crate::types::{ContentHash, ModelVersionId, Probability, ShadowComparisonId};
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
 
@@ -12,7 +12,7 @@ pub struct Model {
     pub active_model_version_id: ModelVersionId,
     pub shadow_model_version_id: ModelVersionId,
     pub as_of: DateTime<Utc>,
-    pub topn_overlap: crate::types::Probability,
+    pub topn_overlap: Probability,
     #[sea_orm(column_type = "JsonBinary")]
     pub rank_delta_json: Json,
     #[sea_orm(column_type = "JsonBinary")]

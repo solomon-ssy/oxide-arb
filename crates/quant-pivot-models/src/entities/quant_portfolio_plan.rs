@@ -12,7 +12,7 @@ use sea_orm::entity::prelude::*;
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub portfolio_plan_id: PortfolioPlanId,
-    pub model_run_id: ModelRunId,
+    pub model_run_id: Option<ModelRunId>,
     pub market_selection_id: MarketSelectionId,
     pub as_of: DateTime<Utc>,
     pub budget_usd: Usd,

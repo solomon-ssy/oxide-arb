@@ -72,7 +72,7 @@ pub struct ResearchBundle {
     /// Postgres persistence for feature vectors (3.2).
     pub feature_repo: Arc<dyn FeatureRepository>,
     /// Online feature build loop: resolve → build → persist → emit (3.2).
-    pub feature_pipeline: FeaturePipelineService,
+    pub feature_pipeline: Arc<FeaturePipelineService>,
     /// Postgres persistence for factor definitions + values (3.3).
     pub factor_repo: Arc<dyn FactorRepository>,
     /// Online factor build loop: compute → partition → persist → emit (3.3).
@@ -125,11 +125,11 @@ impl ResearchBundle {
         ));
         let feature_repo: Arc<dyn FeatureRepository> =
             Arc::new(PgFeatureRepository::new(deps.infra.pg.connection().clone()));
-        let feature_pipeline = FeaturePipelineService::new(
+        let feature_pipeline = Arc::new(FeaturePipelineService::new(
             FeatureWindowProvider::new(Arc::clone(&deps.infra.quant_fact_read)),
             Arc::clone(&feature_repo),
             Arc::clone(&deps.infra.feature_event_writer),
-        );
+        ));
         let factor_repo: Arc<dyn FactorRepository> =
             Arc::new(PgFactorRepository::new(deps.infra.pg.connection().clone()));
         let factor_pipeline = Arc::new(FactorPipelineService::new(

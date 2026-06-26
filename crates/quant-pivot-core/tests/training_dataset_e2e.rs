@@ -53,7 +53,10 @@ use quant_pivot_repository::{
 use quant_pivot_research::{
     artifact::{ArtifactStore, LocalArtifactStore},
     pit::{BookSnapshotAt, MarketContextAt, PitQueryEngine},
-    training::{DatasetPlan, DatasetPlanRequest, TrainingDatasetBuilder, TrainingDatasetPlanner},
+    training::{
+        DatasetPlan, DatasetPlanRequest, LabelName, TrainingDatasetArtifact,
+        TrainingDatasetBuilder, TrainingDatasetPlanner,
+    },
 };
 use quant_pivot_test_support::{
     catalog_fixtures::{make_event, make_market},
@@ -67,8 +70,7 @@ const MARKET_ID: &str = "0xdatasete2e";
 const YES_TOKEN: &str = "dataset-yes";
 const NO_TOKEN: &str = "dataset-no";
 
-const SETTLEMENT_LABEL: quant_pivot_research::training::LabelName =
-    quant_pivot_research::training::LabelName::from_static("settlement_outcome");
+const SETTLEMENT_LABEL: LabelName = LabelName::from_static("settlement_outcome");
 
 fn runtime_config_id() -> RuntimeConfigVersionId {
     RuntimeConfigVersionId::from_v7()
@@ -479,10 +481,7 @@ async fn plan_request(
         .expect("plan")
 }
 
-fn assert_no_feature_leakage(
-    artifact: &quant_pivot_research::training::TrainingDatasetArtifact,
-    source_delay_secs: u64,
-) {
+fn assert_no_feature_leakage(artifact: &TrainingDatasetArtifact, source_delay_secs: u64) {
     let delay = ChronoDuration::seconds(i64::try_from(source_delay_secs).unwrap_or(i64::MAX));
     for example in &artifact.examples {
         let cutoff = example.as_of - delay;

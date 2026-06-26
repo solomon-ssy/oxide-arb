@@ -5,6 +5,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+use crate::types::ModelVersionId;
+
 /// Placeholder substituted for sensitive values on read surfaces.
 pub const MASKED_SECRET: &str = "***";
 
@@ -33,7 +35,7 @@ pub struct ModelVersionRef {
     pub id: String,
 }
 
-impl TryFrom<&ModelVersionRef> for crate::types::ModelVersionId {
+impl TryFrom<&ModelVersionRef> for ModelVersionId {
     type Error = QuantError;
 
     fn try_from(reference: &ModelVersionRef) -> Result<Self, Self::Error> {

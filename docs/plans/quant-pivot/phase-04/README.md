@@ -141,10 +141,10 @@ flowchart LR
 
 ## 5. 已拍板的设计基线（贯穿全部子phase）
 
-1. **Sizing = fractional Kelly（默认）**：新增 `SizingModel` trait + `KellySizingModel`；
-   保留 `ConfidenceCurveSizingModel` 作确定性基线 / shadow。Kelly 由
-   `expected_return_bps` / `downside_bps` / `confidence` / `entry_price_ref` 推 edge →
-   fractional Kelly → 受 caps / liquidity / drawdown 收敛。详见 04.1。
+1. **Sizing = fractional Kelly（唯一 production sizing model）**：`SizingModel` trait +
+   `KellySizingModel` 已落地。Kelly 由 `expected_return_bps` / `downside_bps` /
+   `confidence` / `entry_price_ref` 推 edge → fractional Kelly → 受 caps / liquidity /
+   drawdown 收敛。04.2 不依赖 `ConfidenceCurveSizingModel`。
 2. **`PortfolioConfig` 破坏式三段**（政策 ≠ 状态）：
    - `budget: PortfolioBudget` — `total_budget_usd`（**纯治理护栏 = 最大可部署上限**，
      所有 mode；`equity = min(真实净清算价值, total_budget_usd)`，**永不**充当 equity）、
@@ -152,13 +152,12 @@ flowchart LR
    - `constraints: PortfolioConstraints` — `max_market_exposure_usd` /
      `max_event_exposure_usd` / `max_category_exposure_usd` /
      `max_correlated_exposure_usd` / `liquidity_usage_cap_pct`。
-   - `sizing: SizingModelConfig`（tagged enum）— `Kelly { kelly_fraction,
-     max_position_pct, drawdown_scaling }`（默认）/ `ConfidenceCurve { curve,
-     drawdown_multiplier }`（基线）。
+   - `sizing: SizingModelConfig` — Kelly 参数：`kelly_fraction`、`max_position_pct`、
+     `target_reward_multiple`、`confidence_weighting`、`drawdown_scaling`。
    > **设计依据**：`AccountSnapshot` 是**状态/事实**（现有多少钱、当前持仓/敞口）；
    > `PortfolioConfig` 是**政策/限额**（被允许冒多少险）。planner = 限额(config) ∩
-   > 事实(snapshot) ∩ 模型edge(candidate)。两者正交，caps 一个都不能删；唯一被 Kelly
-   > 吸收的 `confidence_size_curve` 下沉进 `sizing`。
+   > 事实(snapshot) ∩ 模型edge(candidate)。两者正交，caps 一个都不能删；`confidence`
+   > 仅作为 Kelly fraction 的估计不确定性收缩，不作为独立 sizing model。
 3. **账户资本抽象 Phase 04 即落地（credential-gated 真实账户，纠偏 09 原 mode-gated 划线）**：
    - 新建 `quant_account_snapshot` 表 + `AccountSnapshot`/`PositionSnapshot`/
      `ExposureBreakdown` 值类型 + `AccountProvider` trait。

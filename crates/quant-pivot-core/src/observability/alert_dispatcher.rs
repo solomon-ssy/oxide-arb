@@ -252,6 +252,40 @@ impl AlertDispatcher {
         }
     }
 
+    /// Dispatch an operator notification to all configured external channels,
+    /// regardless of alert severity. This is for business lifecycle notices
+    /// such as report publication, not trading-safety escalation.
+    pub async fn dispatch_operator_notification(&self, alert: Alert) {
+        let channels = self.channels.load_full();
+        let event = alert.event(channels.cooldown_duration.as_secs());
+        let cooldown_key = event.idempotency_key.clone();
+        let cooldown_duration = Duration::from_secs(event.dedupe_secs);
+        if let Some(last) = self.cooldown.get(&cooldown_key) {
+            if last.elapsed() < cooldown_duration {
+                tracing::debug!(alert_key = %event.idempotency_key, title = %event.title, "operator notification suppressed by cooldown");
+                return;
+            }
+        }
+        self.cooldown.insert(cooldown_key, Instant::now());
+
+        if let Some(events) = self.events.load_full() {
+            events.publish(CoreEvent::Alert(event.clone()));
+        }
+
+        if let Some(recordings) = &self.recordings {
+            if let Ok(mut guard) = recordings.lock() {
+                guard.push(alert.clone());
+            }
+        }
+
+        let text = format!(
+            "[{}] {}\n{}\n{}",
+            event.level, event.title, event.message, alert.timestamp
+        );
+        send_telegram(&channels, &text).await;
+        send_webhook(&channels, &alert).await;
+    }
+
     pub fn dispatch_background(self: &Arc<Self>, alert: Alert) {
         let dispatcher = Arc::clone(self);
         match tokio::runtime::Handle::try_current() {

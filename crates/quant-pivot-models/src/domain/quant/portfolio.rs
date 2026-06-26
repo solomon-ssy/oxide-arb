@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 #[sea_orm(entity = "crate::entities::quant_portfolio_plan::Entity")]
 pub struct PortfolioPlanInfo {
     pub portfolio_plan_id: PortfolioPlanId,
-    pub model_run_id: ModelRunId,
+    pub model_run_id: Option<ModelRunId>,
     pub market_selection_id: MarketSelectionId,
     pub as_of: DateTime<Utc>,
     pub budget_usd: Usd,
@@ -37,7 +37,7 @@ info_from_model!(PortfolioPlanInfo, crate::entities::quant_portfolio_plan::Model
 #[sea_orm(active_model = "crate::entities::quant_portfolio_plan::ActiveModel")]
 pub struct NewPortfolioPlan {
     pub portfolio_plan_id: PortfolioPlanId,
-    pub model_run_id: ModelRunId,
+    pub model_run_id: Option<ModelRunId>,
     pub market_selection_id: MarketSelectionId,
     pub as_of: DateTime<Utc>,
     pub budget_usd: Usd,

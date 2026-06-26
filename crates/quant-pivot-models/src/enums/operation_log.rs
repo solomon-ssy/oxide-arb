@@ -12,6 +12,7 @@ active_string_enum! {
         RuntimeConfig => "runtime_config",
         System => "system",
         Risk => "risk",
+        QuantReport => "quant_report",
         Market => "market",
         Replay => "replay",
         Other => "other",

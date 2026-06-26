@@ -1,7 +1,9 @@
 //! `quant_recommendation_report` table entity.
 
 use crate::{
-    enums::quant::{AccountSource, QuantRuntimeMode, RecommendationReportStatus, ReportKind},
+    enums::quant::{
+        AccountSource, QuantRuntimeMode, RecommendationReportStatus, ReportKind, ReportTriggerKind,
+    },
     types::{
         AccountSnapshotId, MarketSelectionId, ModelVersionId, PortfolioPlanId,
         RecommendationReportId, ReportSummary, RuntimeConfigVersionId, Usd,
@@ -16,6 +18,10 @@ pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub recommendation_report_id: RecommendationReportId,
     pub report_kind: ReportKind,
+    pub trigger_kind: ReportTriggerKind,
+    pub trigger_key: String,
+    pub trigger_time: DateTime<Utc>,
+    pub source_delay_secs: i64,
     pub as_of: DateTime<Utc>,
     pub horizon_secs: i64,
     pub runtime_mode: QuantRuntimeMode,
@@ -32,6 +38,8 @@ pub struct Model {
     pub summary_json: ReportSummary,
     pub published_at: Option<DateTime<Utc>>,
     pub revoked_at: Option<DateTime<Utc>>,
+    pub expired_at: Option<DateTime<Utc>>,
+    pub status_reason: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 

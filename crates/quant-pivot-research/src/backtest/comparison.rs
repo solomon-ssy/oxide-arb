@@ -228,7 +228,10 @@ mod tests {
     use super::compare_reports;
     use chrono::{TimeZone, Utc};
     use quant_pivot_models::{
-        enums::{common::MarketCategory, quant::SignalSide},
+        enums::{
+            common::MarketCategory,
+            quant::{DataQualityStatus, SignalSide},
+        },
         types::{
             BacktestReportId, ContentHash, MarketId, ModelVersionId, Probability,
             RuntimeConfigVersionId, TokenId, Usd,
@@ -259,7 +262,7 @@ mod tests {
             realized_return_bps: realized,
             allocated_usd: Usd::new(dec!(100)),
             liquidity_feasible: true,
-            data_quality: quant_pivot_models::enums::quant::DataQualityStatus::Fresh,
+            data_quality: DataQualityStatus::Fresh,
             liquidity_usd: None,
             time_to_resolution_secs: None,
             prediction_horizon_secs: 0,

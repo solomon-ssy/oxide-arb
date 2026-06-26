@@ -43,7 +43,9 @@ use serde::{Deserialize, Serialize};
 use crate::{
     factors::FactorValue,
     features::{EvidenceSourceRef, FeatureVector},
+    hashing::ResearchHasher,
     naming::stable_name,
+    precision::RESEARCH_DECIMAL_SCALE,
 };
 
 stable_name! {
@@ -296,7 +298,7 @@ impl DatasetCoverage {
             return Decimal::ZERO;
         }
         (Decimal::from(self.labels_available) / Decimal::from(total))
-            .round_dp(crate::precision::RESEARCH_DECIMAL_SCALE)
+            .round_dp(RESEARCH_DECIMAL_SCALE)
     }
 
     /// Fraction of planned samples that materialized into examples, in `[0, 1]`.
@@ -312,7 +314,7 @@ impl DatasetCoverage {
             return Decimal::ZERO;
         }
         (Decimal::from(self.built_examples) / Decimal::from(self.planned_samples))
-            .round_dp(crate::precision::RESEARCH_DECIMAL_SCALE)
+            .round_dp(RESEARCH_DECIMAL_SCALE)
     }
 }
 
@@ -408,7 +410,7 @@ impl TrainingDatasetArtifact {
                 labels: &e.labels,
             })
             .collect();
-        crate::hashing::ResearchHasher::canonical(&DatasetHashInput {
+        ResearchHasher::canonical(&DatasetHashInput {
             model_spec_id,
             window_start,
             window_end,
@@ -499,7 +501,7 @@ pub(crate) mod fixtures {
 
 #[cfg(test)]
 mod tests {
-    use super::{TrainingDatasetArtifact, fixtures::example};
+    use super::{TrainingDatasetArtifact, TrainingExample, fixtures::example};
     use chrono::{TimeZone, Utc};
     use quant_pivot_models::{
         hashing::CanonicalDigest,
@@ -514,10 +516,7 @@ mod tests {
         )
     }
 
-    fn dataset_hash(
-        model_spec_id: &ModelSpecId,
-        examples: &[super::TrainingExample],
-    ) -> ContentHash {
+    fn dataset_hash(model_spec_id: &ModelSpecId, examples: &[TrainingExample]) -> ContentHash {
         let (feature, factor, label) = hashes();
         let start = Utc.timestamp_opt(1_000_000, 0).single().expect("ts");
         TrainingDatasetArtifact::compute_dataset_hash(

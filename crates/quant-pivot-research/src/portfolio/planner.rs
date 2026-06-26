@@ -506,7 +506,7 @@ fn build_plan_row(
 
     NewPortfolioPlan {
         portfolio_plan_id: input.portfolio_plan_id.clone(),
-        model_run_id: input.model_run_id.clone(),
+        model_run_id: Some(input.model_run_id.clone()),
         market_selection_id: input.market_selection_id.clone(),
         as_of: input.as_of,
         budget_usd: total_budget,

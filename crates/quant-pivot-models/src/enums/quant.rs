@@ -37,6 +37,16 @@ active_string_enum! {
 }
 
 active_string_enum! {
+    /// Stable report-generation trigger source.
+    @derive(Default)
+    pub enum ReportTriggerKind {
+        #[default]
+        Scheduled => "scheduled",
+        AdHoc => "ad_hoc",
+    }
+}
+
+active_string_enum! {
     /// Publication lifecycle state for a recommendation report.
     @derive(Default)
     pub enum RecommendationReportStatus {

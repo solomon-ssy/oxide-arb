@@ -8,5 +8,6 @@ pub mod governance;
 pub mod infra;
 pub mod observability;
 pub mod pipeline;
+pub mod report;
 pub mod runtime_config;
 pub mod service;

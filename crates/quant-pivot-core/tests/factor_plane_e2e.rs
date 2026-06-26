@@ -23,7 +23,9 @@ use quant_pivot_core::{
 };
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    clickhouse::{BookMicrostructureRow, BookSnapshotRow, MarketResolutionRow},
+    clickhouse::{
+        BookMicrostructureRow, BookSnapshotRow, MarketResolutionRow, QuantFactorEventRow,
+    },
     domain::{
         NewModelRun,
         market::{MarketRegistryInfo, TokenInfo, book::BookLevel},
@@ -392,7 +394,7 @@ async fn factor_event_writer_batches() {
     let sink = Arc::clone(&flushed);
     let (writer, worker) = AsyncWriter::new(
         AsyncWriterConfig::new("factor-e2e-batch").capacity(512),
-        move |batch: Vec<quant_pivot_models::clickhouse::QuantFactorEventRow>| {
+        move |batch: Vec<QuantFactorEventRow>| {
             let sink = Arc::clone(&sink);
             Box::pin(async move {
                 sink.fetch_add(batch.len(), Ordering::Relaxed);

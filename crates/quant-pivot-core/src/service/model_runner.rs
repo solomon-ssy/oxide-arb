@@ -53,7 +53,7 @@ use quant_pivot_research::{
         ModelRuntimeFactoryBuilder, ModelRuntimeInput, ModelRuntimeOutput, QuantModelRuntime,
         SignalCandidate, WeightOverlay, degrade_action, signal_candidate_event,
     },
-    selection::SelectedMarket,
+    selection::{ModelFeatureRequirements, SelectedMarket},
 };
 use rust_decimal::Decimal;
 use serde::Serialize;
@@ -132,6 +132,30 @@ pub struct ModelRunRequest<'a> {
     pub top_n: usize,
     /// Decision time.
     pub as_of: DateTime<Utc>,
+}
+
+/// Frozen inputs required to resolve active model feature requirements before
+/// market selection.
+pub struct ActiveModelRequirementsRequest<'a> {
+    /// Frozen feature config.
+    pub features: &'a FeaturesConfig,
+    /// Frozen factor config.
+    pub factors: &'a FactorsConfig,
+    /// Frozen model config.
+    pub model: &'a ModelConfig,
+    /// Decision time used by load-time governance checks.
+    pub as_of: DateTime<Utc>,
+}
+
+/// Active model metadata and selector-facing feature requirements.
+#[derive(Debug, Clone)]
+pub struct ActiveModelRequirements {
+    /// Active production model version.
+    pub model_version_id: ModelVersionId,
+    /// Registry row loaded and quality-gate checked.
+    pub version: ModelVersionInfo,
+    /// Feature availability required before a market enters selection.
+    pub model_requirements: ModelFeatureRequirements,
 }
 
 /// Shadow vs active divergence over the markets both models scored.
@@ -318,6 +342,62 @@ impl ModelRunner {
             )
             .await),
         }
+    }
+
+    /// Resolve, governance-check, and load the active runtime only far enough to
+    /// expose its required features before market selection.
+    ///
+    /// This does not create a model-run row and does not emit facts; it is a
+    /// deterministic precondition for the 04.2 report builder's selection step.
+    pub async fn active_requirements(
+        &self,
+        request: ActiveModelRequirementsRequest<'_>,
+    ) -> QuantResult<ActiveModelRequirements> {
+        let version_id = request
+            .model
+            .active_model_version_id
+            .as_ref()
+            .ok_or_else(|| QuantError::config("model.active_model_version_id is not configured"))
+            .and_then(ModelVersionId::try_from)?;
+        let version = self
+            .model_registry_repo
+            .find_model_version_by_id(&version_id)
+            .await
+            .map_err(QuantError::from)?
+            .ok_or_else(|| {
+                QuantError::from(ResearchError::InvalidModelArtifact {
+                    detail: format!("active model version {version_id} not found"),
+                })
+            })?;
+        if let Err(reason) = active_load_ok(
+            &version,
+            request.model.min_quality_gate_age_secs,
+            request.as_of,
+        ) {
+            return Err(QuantError::config(format!(
+                "active model {version_id} load denied: {reason}"
+            )));
+        }
+
+        let binding = ActiveSchemaBinding {
+            feature_schema_hash: ResearchHasher::feature_schema(&FeatureSchema::build(
+                request.features,
+            ))?,
+            factor_schema_hash: FactorEngine::new(request.factors, request.features)
+                .factor_schema_hash()?,
+        };
+        let factory = self.factory_builder.build(binding);
+        let runtime = factory
+            .load(&version, self.resolve_overlay(&version))
+            .await?;
+
+        Ok(ActiveModelRequirements {
+            model_version_id: version_id,
+            version,
+            model_requirements: ModelFeatureRequirements {
+                required_features: runtime.required_features(),
+            },
+        })
     }
 
     /// The active path: factor plane → load → infer → emit.

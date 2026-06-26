@@ -19,6 +19,7 @@ pub use bundles::*;
 
 use crate::{
     governance::RuntimeModeHandle,
+    report::ReportLifecycleService,
     runtime_config::{RuntimeConfigApplicator, RuntimeConfigStore},
     service::{
         factor_pipeline::FactorPipelineService, feature_pipeline::FeaturePipelineService,
@@ -47,6 +48,7 @@ pub struct AppContext {
     pub governance: GovernanceBundle,
     pub research: ResearchBundle,
     pub account: AccountBundle,
+    pub report: ReportBundle,
 }
 
 impl AppContext {
@@ -68,8 +70,8 @@ impl AppContext {
     }
 
     /// Online feature pipeline (3.2): invoke per round with a frozen config snapshot.
-    pub const fn feature_pipeline(&self) -> &FeaturePipelineService {
-        &self.research.feature_pipeline
+    pub fn feature_pipeline(&self) -> &FeaturePipelineService {
+        self.research.feature_pipeline.as_ref()
     }
 
     /// Online factor pipeline (3.3): invoke per round after feature vectors persist.
@@ -80,6 +82,11 @@ impl AppContext {
     /// Online inference orchestrator (3.4): selection/features/factors → candidates.
     pub fn model_runner(&self) -> Arc<ModelRunner> {
         Arc::clone(&self.research.model_runner)
+    }
+
+    /// Report lifecycle service (04.2): trigger → build → transaction → publish.
+    pub fn report_lifecycle(&self) -> Arc<ReportLifecycleService> {
+        Arc::clone(&self.report.lifecycle)
     }
 
     /// Postgres persistence for factor definitions and values (3.3).

@@ -67,7 +67,7 @@ use quant_pivot_repository::{
 use quant_pivot_research::{
     artifact::{ArtifactKey, ArtifactNamespace, ArtifactStore, LocalArtifactStore},
     factors::{FactorExplanation, FactorValue, names::LIQUIDITY_DEPTH},
-    features::{FeatureValue, FeatureVector, names},
+    features::{FeatureName, FeatureValue, FeatureVector, names},
     model::{
         DefaultModelRuntimeFactoryBuilder, LabelSelector, ModelArtifact, ModelFamily,
         ModelRuntimeFactoryBuilder,
@@ -85,7 +85,7 @@ use std::collections::BTreeMap;
 use uuid::Uuid;
 
 // Type alias to keep the BTreeMap key readable.
-type FeatureName2 = quant_pivot_research::features::FeatureName;
+type FeatureName2 = FeatureName;
 
 const EVENT_ID: &str = "evt-train-backtest-e2e";
 const TICKS: i64 = 3;

@@ -18,7 +18,7 @@ use quant_pivot_models::{
         quant::{
             AccountSource, BindingConstraint, EntryTriggerKind, ExitTriggerKind, FactorDirection,
             IneligibilityReason, QuantRuntimeMode, RecommendationReportStatus, ReportKind,
-            SettlementPolicy, SizingModelKind,
+            ReportTriggerKind, SettlementPolicy, SizingModelKind,
         },
     },
     runtime_config::{
@@ -242,7 +242,11 @@ fn recommendation_report_header_has_account_columns() {
     let report = NewRecommendationReport {
         recommendation_report_id: RecommendationReportId::from_v7(),
         report_kind: ReportKind::TopN,
-        as_of: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
+        trigger_kind: ReportTriggerKind::Scheduled,
+        trigger_key: "scheduled:daily-topn:2023-11-14T22:13:20Z".to_owned(),
+        trigger_time: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
+        source_delay_secs: 120,
+        as_of: Utc.timestamp_opt(1_699_999_880, 0).unwrap(),
         horizon_secs: 86_400,
         runtime_mode: QuantRuntimeMode::ReportOnly,
         runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
@@ -257,8 +261,14 @@ fn recommendation_report_header_has_account_columns() {
         summary_json: report_summary(),
         published_at: None,
         revoked_at: None,
+        expired_at: None,
+        status_reason: None,
     };
     let json = serde_json::to_value(&report).expect("serialize");
+    assert_eq!(
+        json["trigger_key"],
+        json!("scheduled:daily-topn:2023-11-14T22:13:20Z")
+    );
     assert_eq!(json["account_source"], json!("polymarket"));
     assert_eq!(json["capital_base_usd"], json!("10000"));
     assert!(json["account_snapshot_ref"].is_string());

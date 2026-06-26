@@ -22,9 +22,9 @@ use serde::Serialize;
 
 use crate::{
     backtest::{
-        BacktestInputs, BacktestMarketMeta, BacktestReport, BacktestRunResult, BacktestTick,
-        Backtester, CategoryMetric, EquityPoint, ExpectedVsRealized, MarketOutcome, PnlSimulation,
-        PortfolioCaps, SampleOutcome, metrics, simulator,
+        BacktestInputs, BacktestMarketMeta, BacktestReport, BacktestRequest, BacktestRunResult,
+        BacktestTick, Backtester, CategoryMetric, EquityPoint, ExpectedVsRealized, MarketOutcome,
+        PnlSimulation, PortfolioCaps, SampleOutcome, metrics, simulator,
     },
     hashing::ResearchHasher,
     model::runtime::{MarketInferenceContext, ModelRuntimeOutput, ModelRuntimeWarning},
@@ -256,10 +256,7 @@ struct BuildMetrics<'a> {
 }
 
 /// Assemble the metrics + canonical report hash.
-fn build_report(
-    request: &crate::backtest::BacktestRequest,
-    m: &BuildMetrics<'_>,
-) -> QuantResult<BacktestReport> {
+fn build_report(request: &BacktestRequest, m: &BuildMetrics<'_>) -> QuantResult<BacktestReport> {
     let sample_count = m.samples.len() as u64;
     let coverage = if m.total_emitted > 0 {
         (Decimal::from(sample_count) / Decimal::from(m.total_emitted))
