@@ -15,7 +15,7 @@ use quant_pivot_repository::traits::{
 };
 use quant_pivot_research::{
     artifact::ArtifactStore,
-    model::{LabelSelector, ParseModelFamilyError},
+    model::{LabelSelector, ModelFamilyParseError},
     training::LabelName,
 };
 
@@ -108,7 +108,7 @@ impl ModelTrainingPort for CoreModelTrainingPort {
         let model_family = request
             .model_family
             .parse()
-            .map_err(|error: ParseModelFamilyError| QuantError::config(error.to_string()))?;
+            .map_err(|error: ModelFamilyParseError| QuantError::config(error.to_string()))?;
         let service = self.service_for(&request.runtime_config_version_id).await?;
         let version = service
             .train(TrainModelInput {

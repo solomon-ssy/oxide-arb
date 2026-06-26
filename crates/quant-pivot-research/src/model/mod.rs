@@ -52,8 +52,8 @@ pub use overlay::{WeightOverlay, WeightSource};
 pub use rank_scores::{RankScores, attach as attach_rank_scores};
 pub use runtime::{
     ClassicalKind, FactorInferenceRow, FactorInferenceTable, InferenceMatrix, InferenceMatrixRow,
-    MarketInferenceContext, ModelFamily, ModelRuntimeFactory, ModelRuntimeInput,
-    ModelRuntimeMetrics, ModelRuntimeOutput, ModelRuntimeWarning, ParseModelFamilyError,
+    MarketInferenceContext, ModelFamily, ModelFamilyParseError, ModelRuntimeFactory,
+    ModelRuntimeInput, ModelRuntimeMetrics, ModelRuntimeOutput, ModelRuntimeWarning,
     QuantModelRuntime,
 };
 pub use score_percentile::annotate;

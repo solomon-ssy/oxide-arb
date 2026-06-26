@@ -14,7 +14,7 @@ use quant_pivot_models::{
 };
 use serde::{Deserialize, Serialize};
 
-pub use quant_pivot_models::enums::model::{ClassicalKind, ModelFamily, ParseModelFamilyError};
+pub use quant_pivot_models::enums::model::{ClassicalKind, ModelFamily, ModelFamilyParseError};
 
 use crate::{
     factors::{FactorName, FactorValue},

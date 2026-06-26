@@ -1,27 +1,7 @@
 //! Factor family taxonomy: generic planes plus vertical domain families.
 
-use std::{
-    fmt::{Display, Formatter, Result as FmtResult},
-    str::FromStr,
-};
-
 use super::domain::DomainFamily;
 use schemars::JsonSchema;
-use sea_orm::Iterable;
-
-/// Parse failure for a persisted factor-family label.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ParseFactorFamilyError {
-    pub label: String,
-}
-
-impl Display for ParseFactorFamilyError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        write!(f, "unknown factor family `{label}`", label = self.label)
-    }
-}
-
-impl std::error::Error for ParseFactorFamilyError {}
 
 crate::pg_enum! {
     type_name = "qp_factor_family",
@@ -114,35 +94,6 @@ impl FactorFamily {
             DomainFamily::Crypto => Self::DomainCrypto,
             DomainFamily::Weather => Self::DomainWeather,
             DomainFamily::Geopolitics => Self::DomainGeopolitics,
-        }
-    }
-}
-
-impl FromStr for FactorFamily {
-    type Err = ParseFactorFamilyError;
-
-    fn from_str(label: &str) -> Result<Self, Self::Err> {
-        Self::iter()
-            .find(|variant| variant.as_str() == label)
-            .ok_or_else(|| ParseFactorFamilyError {
-                label: label.to_owned(),
-            })
-    }
-}
-
-impl FromStr for DomainFamily {
-    type Err = ParseFactorFamilyError;
-
-    fn from_str(label: &str) -> Result<Self, Self::Err> {
-        match label {
-            "sports" => Ok(Self::Sports),
-            "politics" => Ok(Self::Politics),
-            "crypto" => Ok(Self::Crypto),
-            "weather" => Ok(Self::Weather),
-            "geopolitics" => Ok(Self::Geopolitics),
-            _ => Err(ParseFactorFamilyError {
-                label: label.to_owned(),
-            }),
         }
     }
 }

@@ -2,12 +2,13 @@
 
 use quant_pivot_models::{
     enums::{
-        common::{MarketCategory, Side, TickSize},
+        common::{MarketCategory, Side, StalenessLevel, TickSize},
+        domain::DomainFamily,
         execution::{ExecutionOrderPhase, OrderIntentKind, OrderTypeKind, VenueOrderStatus},
         factor::{FactorDefinitionScope, FactorFamily},
         fee::FeeSource,
         market::{EventStatus, MarketStatus},
-        model::ModelFamily,
+        model::{ClassicalKind, ModelFamily},
         operation_log::{OperationCategory, OperationOutcome},
         quant::{
             AccountSource, ApprovalStatus, DataQualityStatus, ExecutionOrderState, FactorDirection,
@@ -42,7 +43,31 @@ macro_rules! assert_pg_enum {
             let round_trip = <$ty as ActiveEnum>::try_from_value(&variant.to_value())
                 .expect("SeaORM round-trip");
             assert_eq!(round_trip.as_str(), wire);
+            let parsed: $ty = wire.parse().expect("FromStr round-trip");
+            assert_eq!(parsed, variant);
         }
+
+        assert!(
+            "__invalid_enum_label__".parse::<$ty>().is_err(),
+            "FromStr must reject unknown labels for `{}`",
+            stringify!($ty)
+        );
+    }};
+}
+
+macro_rules! assert_wire_enum_from_str {
+    ($ty:ty, $variants:expr) => {{
+        for variant in $variants {
+            let wire = variant.as_str();
+            assert_eq!(variant.to_string(), wire);
+            let parsed: $ty = wire.parse().expect("FromStr round-trip");
+            assert_eq!(parsed, variant);
+        }
+        assert!(
+            "__invalid_enum_label__".parse::<$ty>().is_err(),
+            "FromStr must reject unknown labels for `{}`",
+            stringify!($ty)
+        );
     }};
 }
 
@@ -356,4 +381,40 @@ fn sea_orm_type_names_match_pg_enum_specs() {
         "qp_operation_outcome"
     );
     assert_eq!(active_enum_type_name::<RoleKind>(), "qp_role_kind");
+}
+
+#[test]
+fn wire_enums_from_str_round_trip() {
+    use quant_pivot_models::enums::common::Side;
+
+    assert_wire_enum_from_str!(Side, [Side::Buy, Side::Sell]);
+    assert_wire_enum_from_str!(
+        StalenessLevel,
+        [
+            StalenessLevel::Fresh,
+            StalenessLevel::Acceptable,
+            StalenessLevel::Stale,
+            StalenessLevel::Expired,
+        ]
+    );
+    assert_wire_enum_from_str!(DomainFamily, DomainFamily::ALL);
+    assert_wire_enum_from_str!(
+        ClassicalKind,
+        [
+            ClassicalKind::RandomForest,
+            ClassicalKind::ExtraTrees,
+            ClassicalKind::LogisticRegression,
+            ClassicalKind::Ridge,
+            ClassicalKind::Lasso,
+            ClassicalKind::ElasticNet,
+        ]
+    );
+}
+
+#[test]
+fn tick_size_from_str_trims_whitespace() {
+    assert_eq!(
+        " 0.01 ".parse::<TickSize>().expect("trimmed tick size"),
+        TickSize::Hundredth
+    );
 }

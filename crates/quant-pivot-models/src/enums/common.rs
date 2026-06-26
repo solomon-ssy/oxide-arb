@@ -164,6 +164,7 @@ crate::pg_enum! {
     type_name = "qp_market_category",
     /// Polymarket event category for fee-rate lookup and opportunity scoring.
     @derive(PartialOrd, Ord, schemars::JsonSchema)
+    @no_from_str
     pub enum MarketCategory {
         Geopolitics => "geopolitics",
         Sports => "sports",
@@ -401,8 +402,15 @@ impl FromStr for MarketCategory {
     }
 }
 
+/// Invalid tick size string from Gamma / CLOB wire format.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("invalid tick size: {0}")]
+pub struct TickSizeParseError(pub String);
+
 crate::pg_enum! {
     type_name = "qp_tick_size",
+    @from_str(trim)
+    @from_str(err = TickSizeParseError)
     pub enum TickSize {
         Tenth => "0.1",
         Hundredth => "0.01",
@@ -410,11 +418,6 @@ crate::pg_enum! {
         TenThousandth => "0.0001",
     }
 }
-
-/// Invalid tick size string from Gamma / CLOB wire format.
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
-#[error("invalid tick size: {0}")]
-pub struct TickSizeParseError(pub String);
 
 impl TickSize {
     #[must_use]
@@ -425,20 +428,6 @@ impl TickSize {
             Self::Hundredth => dec!(0.01),
             Self::Thousandth => dec!(0.001),
             Self::TenThousandth => dec!(0.0001),
-        }
-    }
-}
-
-impl FromStr for TickSize {
-    type Err = TickSizeParseError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.trim() {
-            "0.1" => Ok(Self::Tenth),
-            "0.01" => Ok(Self::Hundredth),
-            "0.001" => Ok(Self::Thousandth),
-            "0.0001" => Ok(Self::TenThousandth),
-            other => Err(TickSizeParseError(other.to_owned())),
         }
     }
 }

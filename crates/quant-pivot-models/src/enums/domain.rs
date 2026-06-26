@@ -5,29 +5,23 @@
 //! factor families) key off this type so the two planes never drift into
 //! parallel vertical enums.
 
-use std::fmt::{self, Display, Formatter};
-
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
-
 use crate::enums::common::MarketCategory;
 
-/// A vertical/domain category whose markets share specialized signals.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
-)]
-#[serde(rename_all = "snake_case")]
-pub enum DomainFamily {
-    /// Sports markets (pre-match moves, live score shocks).
-    Sports,
-    /// Political / election markets (poll momentum, event deadlines).
-    Politics,
-    /// Crypto-price markets (underlying beta, risk-on proxies).
-    Crypto,
-    /// Weather markets (forecast revisions).
-    Weather,
-    /// Geopolitics markets (news-shock decay).
-    Geopolitics,
+crate::wire_enum! {
+    /// A vertical/domain category whose markets share specialized signals.
+    @derive(PartialOrd, Ord, schemars::JsonSchema)
+    pub enum DomainFamily {
+        /// Sports markets (pre-match moves, live score shocks).
+        Sports => "sports",
+        /// Political / election markets (poll momentum, event deadlines).
+        Politics => "politics",
+        /// Crypto-price markets (underlying beta, risk-on proxies).
+        Crypto => "crypto",
+        /// Weather markets (forecast revisions).
+        Weather => "weather",
+        /// Geopolitics markets (news-shock decay).
+        Geopolitics => "geopolitics",
+    }
 }
 
 impl DomainFamily {
@@ -39,18 +33,6 @@ impl DomainFamily {
         Self::Weather,
         Self::Geopolitics,
     ];
-
-    /// The stable `snake_case` identifier (matches the serde representation).
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Sports => "sports",
-            Self::Politics => "politics",
-            Self::Crypto => "crypto",
-            Self::Weather => "weather",
-            Self::Geopolitics => "geopolitics",
-        }
-    }
 
     /// The vertical a market category maps to, when one is modeled.
     ///
@@ -70,11 +52,5 @@ impl DomainFamily {
             | MarketCategory::Economics
             | MarketCategory::Other => None,
         }
-    }
-}
-
-impl Display for DomainFamily {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
     }
 }

@@ -81,6 +81,7 @@ crate::pg_enum! {
 
 crate::pg_enum! {
     type_name = "qp_resource_type",
+    @no_from_str
     pub enum ResourceType {
         System => "system",
         Market => "market",
