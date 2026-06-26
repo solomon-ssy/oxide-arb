@@ -1,5 +1,7 @@
 pub mod account;
+pub mod attribution_payload;
 pub mod content;
+pub mod execution_payload;
 pub mod ids;
 pub mod jsonb;
 pub mod micro;
@@ -9,7 +11,9 @@ pub mod report_payload;
 pub mod selection;
 
 pub use account::*;
+pub use attribution_payload::*;
 pub use content::*;
+pub use execution_payload::*;
 pub use ids::*;
 pub use jsonb::*;
 pub use micro::*;

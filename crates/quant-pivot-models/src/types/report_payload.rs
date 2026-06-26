@@ -31,7 +31,8 @@ use crate::{
     jsonb_active,
     types::{
         Bps, ContentHash, EventId, FactorDefinitionId, FeatureVectorId, MarketSelectionId,
-        ModelRunId, ModelVersionId, Price, Probability, RuntimeConfigVersionId, Shares, Usd,
+        ModelRunId, ModelVersionId, Price, Probability, RuntimeConfigVersionId, Shares,
+        SignalCandidateId, Usd,
     },
 };
 
@@ -232,6 +233,9 @@ pub struct RecommendationFactorBreakdown(pub Vec<FactorBreakdownEntry>);
 /// Replay handles for one recommendation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
 pub struct EvidenceRefs {
+    /// Signal candidate this recommendation was promoted from (replay handle into
+    /// the `quant_signal_candidate_event` fact).
+    pub signal_candidate_id: SignalCandidateId,
     /// Feature vector that fed inference.
     pub feature_vector_id: FeatureVectorId,
     /// Model run that emitted the candidate.

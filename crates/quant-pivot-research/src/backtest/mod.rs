@@ -25,7 +25,7 @@ use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
     enums::{
         common::MarketCategory,
-        quant::{DataQualityStatus, SignalSide},
+        quant::{DataQualityStatus, OutcomeSide},
     },
     runtime_config::PortfolioConfig,
     types::{
@@ -267,8 +267,8 @@ pub struct SampleOutcome {
     pub token_id: TokenId,
     /// Market category.
     pub category: MarketCategory,
-    /// Directional action.
-    pub side: SignalSide,
+    /// Outcome side opened (always buy-to-open; `Yes`/`No`).
+    pub outcome_side: OutcomeSide,
     /// Composite ranking score.
     pub composite_score: Probability,
     /// Model confidence.

@@ -1,11 +1,11 @@
 //! `quant_recommendation` table entity.
 
 use crate::{
-    enums::quant::{RecommendationStatus, SignalSide},
+    enums::quant::{OutcomeSide, RecommendationStatus},
     types::{
-        EntryPlan, EventId, EvidenceRefs, ExecutionEligibility, ExitPlan, MarketId, Probability,
-        RecommendationFactorBreakdown, RecommendationId, RecommendationReportId, RiskEnvelope,
-        SizingPlan, TokenId,
+        Bps, EntryPlan, EventId, EvidenceRefs, ExecutionEligibility, ExitPlan, MarketId,
+        Probability, RecommendationFactorBreakdown, RecommendationId, RecommendationReportId,
+        RiskEnvelope, SizingPlan, TokenId,
     },
 };
 use chrono::{DateTime, Utc};
@@ -21,10 +21,12 @@ pub struct Model {
     pub market_id: MarketId,
     pub event_id: EventId,
     pub token_id: TokenId,
-    pub side: SignalSide,
+    pub outcome_side: OutcomeSide,
     pub composite_score: Probability,
     pub risk_adjusted_score: Probability,
     pub confidence: Probability,
+    pub expected_return_bps: Bps,
+    pub downside_bps: Bps,
     #[sea_orm(column_type = "JsonBinary")]
     pub entry_plan: EntryPlan,
     #[sea_orm(column_type = "JsonBinary")]

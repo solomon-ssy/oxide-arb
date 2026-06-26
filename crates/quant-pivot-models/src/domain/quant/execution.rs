@@ -1,12 +1,13 @@
 //! Execution-intent persistence DTOs.
 
 use crate::{
-    enums::quant::{
-        ApprovalStatus, ExecutionOrderState, OrderIntentStatus, QuantRuntimeMode, SignalSide,
+    enums::{
+        common::Side,
+        quant::{ApprovalStatus, ExecutionOrderState, OrderIntentStatus, QuantRuntimeMode},
     },
     types::{
-        ContentHash, ExecutionOrderId, MarketId, OrderId, OrderIntentId, Price, RecommendationId,
-        Shares, TokenId, Usd,
+        ContentHash, EntryOrderSpec, ExecutionOrderId, ExitPolicySpec, MarketId, OrderId,
+        OrderIntentId, Price, RecommendationId, Shares, TokenId, Usd,
     },
 };
 use chrono::{DateTime, Utc};
@@ -27,8 +28,8 @@ pub struct OrderIntentInfo {
     pub approved_by: Option<Uuid>,
     pub approval_reason: Option<String>,
     pub approved_at: Option<DateTime<Utc>>,
-    pub entry_order_json: serde_json::Value,
-    pub exit_policy_json: serde_json::Value,
+    pub entry_order_json: EntryOrderSpec,
+    pub exit_policy_json: ExitPolicySpec,
     pub risk_envelope_hash: ContentHash,
     pub expires_at: DateTime<Utc>,
     pub created_at: DateTime<Utc>,
@@ -54,8 +55,8 @@ pub struct NewOrderIntent {
     pub approved_by: Option<Uuid>,
     pub approval_reason: Option<String>,
     pub approved_at: Option<DateTime<Utc>>,
-    pub entry_order_json: serde_json::Value,
-    pub exit_policy_json: serde_json::Value,
+    pub entry_order_json: EntryOrderSpec,
+    pub exit_policy_json: ExitPolicySpec,
     pub risk_envelope_hash: ContentHash,
     pub expires_at: DateTime<Utc>,
 }
@@ -77,7 +78,7 @@ pub struct ExecutionOrderInfo {
     pub order_phase: String,
     pub market_id: MarketId,
     pub token_id: TokenId,
-    pub side: SignalSide,
+    pub side: Side,
     pub order_type: String,
     pub price: Price,
     pub shares: Shares,
@@ -108,7 +109,7 @@ pub struct NewExecutionOrder {
     pub order_phase: String,
     pub market_id: MarketId,
     pub token_id: TokenId,
-    pub side: SignalSide,
+    pub side: Side,
     pub order_type: String,
     pub price: Price,
     pub shares: Shares,

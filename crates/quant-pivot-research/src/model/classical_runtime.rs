@@ -14,7 +14,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::{
-    enums::quant::{ModelSerializationFormat, SignalSide},
+    enums::quant::{ModelSerializationFormat, OutcomeSide},
     types::{
         ContentHash, ModelRunId, ModelVersionId, Price, Probability, SignalCandidateId, TokenId,
     },
@@ -141,12 +141,12 @@ impl ClassicalRuntime {
         if net.abs() < f64::EPSILON {
             return None;
         }
-        let side = if net >= 0.0 {
-            SignalSide::BuyYes
+        let outcome_side = if net >= 0.0 {
+            OutcomeSide::Yes
         } else {
-            SignalSide::BuyNo
+            OutcomeSide::No
         };
-        let (token_id, entry_price_ref) = resolve_entry(row, side)?;
+        let (token_id, entry_price_ref) = resolve_entry(row, outcome_side)?;
         let conviction = (net.abs() * 2.0).clamp(0.0, 1.0);
         let conviction_dp = f64_to_decimal(conviction);
         let composite_score = Probability::new(conviction_dp);
@@ -161,7 +161,7 @@ impl ClassicalRuntime {
             model_run_id: model_run_id.clone(),
             market_id: row.market_id.clone(),
             token_id,
-            side,
+            outcome_side,
             composite_score,
             confidence,
             expected_return_bps,
@@ -170,7 +170,7 @@ impl ClassicalRuntime {
             suggested_horizon_secs: 0,
             factor_breakdown: Vec::new(),
             model_explanation: ModelExplanation {
-                headline: format!("classical {side}: yes_prob {p_hat:.4}"),
+                headline: format!("classical buy {outcome_side}: yes_prob {p_hat:.4}"),
                 top_positive: Vec::new(),
                 top_negative: Vec::new(),
             },
@@ -266,19 +266,18 @@ fn synthetic_run_id(_matrix: &InferenceMatrix) -> ModelRunId {
     ModelRunId::from_v7()
 }
 
-/// Resolve the target token + entry price for the chosen side.
-fn resolve_entry(row: &InferenceMatrixRow, side: SignalSide) -> Option<(TokenId, Price)> {
+/// Resolve the target token + entry price for the chosen outcome.
+fn resolve_entry(row: &InferenceMatrixRow, outcome_side: OutcomeSide) -> Option<(TokenId, Price)> {
     let context: &MarketInferenceContext = &row.context;
-    match side {
-        SignalSide::BuyYes => Some((row.token_id.clone(), context.yes_price)),
-        SignalSide::BuyNo => {
+    match outcome_side {
+        OutcomeSide::Yes => Some((row.token_id.clone(), context.yes_price)),
+        OutcomeSide::No => {
             let token = context.secondary_token_id.clone()?;
             let price = context
                 .no_price
                 .unwrap_or_else(|| complement(context.yes_price));
             Some((token, price))
         }
-        SignalSide::SellYes | SignalSide::SellNo => None,
     }
 }
 
@@ -345,7 +344,7 @@ mod tests {
     use chrono::Utc;
     use ndarray::{Array1, Array2};
     use quant_pivot_models::{
-        enums::quant::{DataQualityStatus, SignalSide},
+        enums::quant::{DataQualityStatus, OutcomeSide},
         types::{
             ArtifactUri, ContentHash, MarketId, ModelArtifactId, ModelVersionId, Price, TokenId,
         },
@@ -447,9 +446,12 @@ mod tests {
             .infer_batch(ModelRuntimeInput::FeatureMatrix(matrix))
             .await
             .expect("infer");
-        // The high-feature row should resolve to a BuyYes candidate.
-        let bull = out.candidates.iter().find(|c| c.side == SignalSide::BuyYes);
-        assert!(bull.is_some(), "high feature ⇒ BuyYes candidate");
+        // The high-feature row should resolve to a buy-Yes candidate.
+        let bull = out
+            .candidates
+            .iter()
+            .find(|c| c.outcome_side == OutcomeSide::Yes);
+        assert!(bull.is_some(), "high feature ⇒ buy-Yes candidate");
     }
 
     #[tokio::test]

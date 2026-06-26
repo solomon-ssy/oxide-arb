@@ -8,7 +8,7 @@
 //! ```text
 //! signedᵢ        = dir_signᵢ · normalizedᵢ · confidenceᵢ        (∈ [-1, 1])
 //! net            = Σ weightᵢ · signedᵢ                          (∈ [-1, 1])
-//! side           = sign(net)  → BuyYes (>0) / BuyNo (<0)        (0 ⇒ no candidate)
+//! outcome_side   = sign(net)  → Yes (>0) / No (<0)             (0 ⇒ no candidate)
 //! conviction     = |net|
 //! composite      = clamp₀₁(conviction · dq_mult · liq_mult · horizon_mult)
 //! confidence     = clamp₀₁(weighted_mean(confidenceᵢ) · Π substitution_penalty)
@@ -28,7 +28,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::{
-    enums::quant::{DataQualityStatus, SignalSide},
+    enums::quant::{DataQualityStatus, OutcomeSide},
     types::{
         ContentHash, ModelRunId, ModelVersionId, Price, Probability, SignalCandidateId, TokenId,
         Usd,
@@ -162,12 +162,12 @@ impl WeightedFactorRuntime {
             return None;
         }
 
-        let side = if net.is_sign_positive() {
-            SignalSide::BuyYes
+        let outcome_side = if net.is_sign_positive() {
+            OutcomeSide::Yes
         } else {
-            SignalSide::BuyNo
+            OutcomeSide::No
         };
-        let (token_id, entry_price_ref) = Self::resolve_entry(row, side)?;
+        let (token_id, entry_price_ref) = Self::resolve_entry(row, outcome_side)?;
 
         let (confidence_mass, confidence_weighted, contributions) =
             Self::row_contributions(row, &self.weights);
@@ -188,7 +188,7 @@ impl WeightedFactorRuntime {
             "heuristic"
         };
         let headline = format!(
-            "{side}: composite {composite_score}, confidence {confidence} ({provenance} return)"
+            "buy {outcome_side}: composite {composite_score}, confidence {confidence} ({provenance} return)"
         );
 
         Some(SignalCandidate {
@@ -196,7 +196,7 @@ impl WeightedFactorRuntime {
             model_run_id: model_run_id.clone(),
             market_id: row.market_id.clone(),
             token_id,
-            side,
+            outcome_side,
             composite_score,
             confidence,
             expected_return_bps: estimate.expected_return_bps,
@@ -215,13 +215,16 @@ impl WeightedFactorRuntime {
         })
     }
 
-    /// Resolve the target token + executable entry price for the chosen side.
-    /// `BuyNo` requires a NO token; its price falls back to the binary complement
-    /// of the YES price when an explicit NO price is absent.
-    fn resolve_entry(row: &FactorInferenceRow, side: SignalSide) -> Option<(TokenId, Price)> {
-        match side {
-            SignalSide::BuyYes => Some((row.token_id.clone(), row.context.yes_price)),
-            SignalSide::BuyNo => {
+    /// Resolve the target token + executable entry price for the chosen outcome.
+    /// `OutcomeSide::No` requires a NO token; its price falls back to the binary
+    /// complement of the YES price when an explicit NO price is absent.
+    fn resolve_entry(
+        row: &FactorInferenceRow,
+        outcome_side: OutcomeSide,
+    ) -> Option<(TokenId, Price)> {
+        match outcome_side {
+            OutcomeSide::Yes => Some((row.token_id.clone(), row.context.yes_price)),
+            OutcomeSide::No => {
                 let token = row.context.secondary_token_id.clone()?;
                 let price = row
                     .context
@@ -229,7 +232,6 @@ impl WeightedFactorRuntime {
                     .unwrap_or_else(|| complement(row.context.yes_price));
                 Some((token, price))
             }
-            SignalSide::SellYes | SignalSide::SellNo => None,
         }
     }
 
@@ -414,7 +416,7 @@ mod tests {
     use super::WeightedFactorRuntime;
     use chrono::Utc;
     use quant_pivot_models::{
-        enums::quant::{DataQualityStatus, FactorDirection, SignalSide},
+        enums::quant::{DataQualityStatus, FactorDirection, OutcomeSide},
         types::{
             ContentHash, FactorDefinitionId, MarketId, ModelRunId, ModelVersionId, Price,
             Probability, TokenId, Usd,
@@ -549,8 +551,8 @@ mod tests {
             .iter()
             .find(|c| c.market_id.as_str() == "0xbear")
             .expect("bear candidate");
-        assert_eq!(bull.side, SignalSide::BuyYes);
-        assert_eq!(bear.side, SignalSide::BuyNo);
+        assert_eq!(bull.outcome_side, OutcomeSide::Yes);
+        assert_eq!(bear.outcome_side, OutcomeSide::No);
         assert_eq!(bear.token_id.as_str(), "no");
         for candidate in &output.candidates {
             assert!(candidate.composite_score.inner() >= dec!(0));

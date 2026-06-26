@@ -9,7 +9,7 @@ use quant_pivot_models::{
     clickhouse::{ChPrice, ChProbability, QuantSignalCandidateEventRow},
     enums::{
         factor::FactorFamily,
-        quant::{FactorDirection, SignalSide},
+        quant::{FactorDirection, OutcomeSide},
     },
     types::{
         Bps, FactorDefinitionId, MarketId, ModelRunId, Price, Probability, SignalCandidateId,
@@ -90,8 +90,8 @@ pub struct SignalCandidate {
     pub market_id: MarketId,
     /// Outcome token the candidate targets.
     pub token_id: TokenId,
-    /// Directional action.
-    pub side: SignalSide,
+    /// Outcome side this candidate opens (always buy-to-open; `Yes`/`No` only).
+    pub outcome_side: OutcomeSide,
     /// Composite score in `[0, 1]`.
     pub composite_score: Probability,
     /// Model confidence in `[0, 1]`.
@@ -155,7 +155,7 @@ pub fn signal_candidate_event(
         model_run_id: candidate.model_run_id.clone(),
         market_id: candidate.market_id.clone(),
         token_id: candidate.token_id.clone(),
-        side: candidate.side.as_i8(),
+        side: candidate.outcome_side.as_i8(),
         score: ChProbability::from(candidate.composite_score),
         confidence: ChProbability::from(candidate.confidence),
         entry_price: ChPrice::from(candidate.entry_price_ref),
@@ -189,7 +189,7 @@ pub fn signal_candidate_events(
 #[cfg(test)]
 mod tests {
     use super::{
-        ModelExplanation, SignalCandidate, SignalSide, signal_candidate_event,
+        ModelExplanation, OutcomeSide, SignalCandidate, signal_candidate_event,
         signal_candidate_events,
     };
     use chrono::Utc;
@@ -206,7 +206,7 @@ mod tests {
             model_run_id: ModelRunId::from_v7(),
             market_id: MarketId::new("0xmarket"),
             token_id: TokenId::new("123456"),
-            side: SignalSide::BuyYes,
+            outcome_side: OutcomeSide::Yes,
             composite_score: Probability::new(Decimal::new(72, 2)),
             confidence: Probability::new(Decimal::new(60, 2)),
             expected_return_bps: Decimal::new(150, 0),
@@ -224,7 +224,7 @@ mod tests {
             as_of: Utc::now(),
         };
 
-        assert_eq!(candidate.side, SignalSide::BuyYes);
+        assert_eq!(candidate.outcome_side, OutcomeSide::Yes);
         assert_eq!(candidate.entry_price_ref, Price::new(Decimal::new(65, 2)));
         // Round-trips through serde (artifact / fact serialization boundary).
         let json = serde_json::to_string(&candidate).expect("serialize");
@@ -238,7 +238,7 @@ mod tests {
             model_run_id: ModelRunId::from_v7(),
             market_id: MarketId::new("0xmarket"),
             token_id: TokenId::new("123456"),
-            side: SignalSide::BuyNo,
+            outcome_side: OutcomeSide::No,
             composite_score: Probability::new(Decimal::new(72, 2)),
             confidence: Probability::new(Decimal::new(60, 2)),
             // +200 bps target, -500 bps stop on a 0.40 entry.
@@ -271,7 +271,7 @@ mod tests {
         assert_eq!(row.model_run_id, candidate.model_run_id);
         assert_eq!(row.market_id, candidate.market_id);
         assert_eq!(row.token_id, candidate.token_id);
-        assert_eq!(row.side, SignalSide::BuyNo.as_i8());
+        assert_eq!(row.side, OutcomeSide::No.as_i8());
         assert_eq!(row.rank_before_portfolio, 3);
         assert_eq!(row.rejection_reason, "score_below_floor");
         // target = 0.40 × (1 + 0.02) = 0.408; stop = 0.40 × (1 − 0.05) = 0.38.

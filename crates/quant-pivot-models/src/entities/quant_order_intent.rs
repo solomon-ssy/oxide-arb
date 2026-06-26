@@ -2,7 +2,7 @@
 
 use crate::{
     enums::quant::{ApprovalStatus, OrderIntentStatus, QuantRuntimeMode},
-    types::{ContentHash, OrderIntentId, RecommendationId},
+    types::{ContentHash, EntryOrderSpec, ExitPolicySpec, OrderIntentId, RecommendationId},
 };
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
@@ -24,9 +24,9 @@ pub struct Model {
     pub approval_reason: Option<String>,
     pub approved_at: Option<DateTime<Utc>>,
     #[sea_orm(column_type = "JsonBinary")]
-    pub entry_order_json: Json,
+    pub entry_order_json: EntryOrderSpec,
     #[sea_orm(column_type = "JsonBinary")]
-    pub exit_policy_json: Json,
+    pub exit_policy_json: ExitPolicySpec,
     pub risk_envelope_hash: ContentHash,
     pub expires_at: DateTime<Utc>,
     pub created_at: DateTime<Utc>,

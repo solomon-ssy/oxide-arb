@@ -32,7 +32,7 @@ use quant_pivot_models::{
         MarketId, MarketSelectionId, ModelRunId, ModelVersionId, PartialExitNode, PortfolioPlanId,
         PositionSnapshot, Price, Probability, RecommendationFactorBreakdown,
         RecommendationReportId, ReportSummary, RiskEnvelope, RuntimeConfigVersionId, Shares,
-        SizingPlan, TokenId, TrailingStop, Usd,
+        SignalCandidateId, SizingPlan, TokenId, TrailingStop, Usd,
     },
 };
 
@@ -145,6 +145,7 @@ fn factor_breakdown() -> RecommendationFactorBreakdown {
 
 fn evidence_refs() -> EvidenceRefs {
     EvidenceRefs {
+        signal_candidate_id: SignalCandidateId::from_v7(),
         feature_vector_id: FeatureVectorId::from_v7(),
         model_run_id: ModelRunId::from_v7(),
         market_selection_id: MarketSelectionId::from_v7(),

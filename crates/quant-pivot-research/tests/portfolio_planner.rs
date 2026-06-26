@@ -8,7 +8,7 @@ use chrono::{TimeZone, Utc};
 use quant_pivot_models::{
     enums::{
         common::MarketCategory,
-        quant::{AccountSource, BindingConstraint, RejectionReason, SignalSide},
+        quant::{AccountSource, BindingConstraint, OutcomeSide, RejectionReason},
     },
     runtime_config::{ConfidenceSizeCurve, DrawdownMultiplierPolicy},
     types::{
@@ -39,7 +39,7 @@ fn candidate(
         model_run_id: ModelRunId::from_v7(),
         market_id: MarketId::new(market),
         token_id: TokenId::new("yes"),
-        side: SignalSide::BuyYes,
+        outcome_side: OutcomeSide::Yes,
         composite_score: Probability::new(composite),
         confidence: Probability::new(confidence),
         expected_return_bps: expected_bps,

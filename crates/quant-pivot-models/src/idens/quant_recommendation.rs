@@ -24,10 +24,12 @@ pub enum QuantRecommendation {
     MarketId,
     EventId,
     TokenId,
-    Side,
+    OutcomeSide,
     CompositeScore,
     RiskAdjustedScore,
     Confidence,
+    ExpectedReturnBps,
+    DownsideBps,
     EntryPlan,
     SizingPlan,
     ExitPlan,
@@ -55,10 +57,12 @@ pub fn table() -> TableCreateStatement {
         .col(column::market_id(QuantRecommendation::MarketId))
         .col(column::text_id(QuantRecommendation::EventId))
         .col(column::token_id(QuantRecommendation::TokenId))
-        .col(ColumnDef::new(QuantRecommendation::Side).text().not_null())
+        .col(column::enum_text(QuantRecommendation::OutcomeSide))
         .col(column::probability(QuantRecommendation::CompositeScore))
         .col(column::probability(QuantRecommendation::RiskAdjustedScore))
         .col(column::probability(QuantRecommendation::Confidence))
+        .col(column::bps(QuantRecommendation::ExpectedReturnBps))
+        .col(column::bps(QuantRecommendation::DownsideBps))
         .col(
             ColumnDef::new(QuantRecommendation::EntryPlan)
                 .json_binary()
@@ -104,11 +108,7 @@ pub fn table() -> TableCreateStatement {
                 .timestamp_with_time_zone()
                 .not_null(),
         )
-        .col(
-            ColumnDef::new(QuantRecommendation::Status)
-                .text()
-                .not_null(),
-        )
+        .col(column::enum_text(QuantRecommendation::Status))
         .col(timestamp_with_write_default(QuantRecommendation::CreatedAt))
         .foreign_key(
             ForeignKey::create()

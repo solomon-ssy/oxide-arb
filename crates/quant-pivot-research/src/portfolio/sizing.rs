@@ -277,7 +277,7 @@ mod tests {
     };
     use chrono::Utc;
     use quant_pivot_models::{
-        enums::quant::{RejectionReason, SignalSide, SizingModelKind},
+        enums::quant::{OutcomeSide, RejectionReason, SizingModelKind},
         types::{MarketId, ModelRunId, Price, Probability, SignalCandidateId, TokenId, Usd},
     };
     use rust_decimal::Decimal;
@@ -295,7 +295,7 @@ mod tests {
             model_run_id: ModelRunId::from_v7(),
             market_id: MarketId::new("0xmarket"),
             token_id: TokenId::new("yes"),
-            side: SignalSide::BuyYes,
+            outcome_side: OutcomeSide::Yes,
             composite_score: Probability::new(dec!(0.8)),
             confidence: Probability::new(confidence),
             expected_return_bps: expected_bps,

@@ -181,6 +181,18 @@ pub fn shares(column: impl IntoIden) -> ColumnDef {
     numeric(column, Shares::PRECISION)
 }
 
+/// `NUMERIC(10, 4) NOT NULL` for a basis-point value.
+pub fn bps(column: impl IntoIden) -> ColumnDef {
+    numeric(column, Bps::PRECISION)
+}
+
+/// `TEXT NOT NULL` for a string-backed enum column (`active_string_enum!`).
+pub fn enum_text(column: impl IntoIden) -> ColumnDef {
+    let mut col = ColumnDef::new(column);
+    col.text().not_null();
+    col
+}
+
 /// Nullable `NUMERIC(10, 4)` for an optional basis-point value.
 pub fn bps_null(column: impl IntoIden) -> ColumnDef {
     numeric_null(column, Bps::PRECISION)

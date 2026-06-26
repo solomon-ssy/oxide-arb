@@ -31,6 +31,18 @@ impl Side {
             Self::Sell => Self::Buy,
         }
     }
+
+    /// The stable `i8` code persisted to the `ClickHouse` `side` column of the
+    /// execution fact (`quant_execution_event`). Append-only contract: never
+    /// renumber an existing variant.
+    #[must_use]
+    #[inline]
+    pub const fn as_i8(self) -> i8 {
+        match self {
+            Self::Buy => 1,
+            Self::Sell => 2,
+        }
+    }
 }
 
 /// Polymarket CLOB order time-in-force types.

@@ -383,7 +383,7 @@ mod tests {
     use quant_pivot_models::{
         enums::{
             common::MarketCategory,
-            quant::{BindingConstraint, SignalSide},
+            quant::{BindingConstraint, OutcomeSide},
         },
         types::{
             ExposureBreakdown, MarketId, ModelRunId, Price, Probability, SignalCandidateId,
@@ -399,7 +399,7 @@ mod tests {
             model_run_id: ModelRunId::from_v7(),
             market_id: MarketId::new(market),
             token_id: TokenId::new("yes"),
-            side: SignalSide::BuyYes,
+            outcome_side: OutcomeSide::Yes,
             composite_score: Probability::new(score),
             confidence: Probability::new(dec!(1)),
             expected_return_bps: dec!(100),

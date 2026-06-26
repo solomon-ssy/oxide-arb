@@ -14,7 +14,7 @@ use quant_pivot_models::{
         common::MarketCategory,
         operation_log::{OperationCategory, OperationOutcome},
         quant::{
-            DataQualityStatus, EmptyReason, EntryTriggerKind, ExitTriggerKind, IneligibilityReason,
+            DataQualityStatus, EmptyReason, EntryTriggerKind, IneligibilityReason,
             QuantRuntimeMode, RecommendationReportStatus, RecommendationStatus, ReportKind,
             SettlementPolicy,
         },
@@ -25,8 +25,8 @@ use quant_pivot_models::{
         AccountPositions, AccountSnapshotId, Bps, ConfidenceSummary, DataQualitySummary,
         EligibilitySummary, EntryPlan, EventId, EvidenceRefs, ExecutionEligibility, ExitPlan,
         FactorBreakdownEntry, FactorDefinitionId, FeatureVectorId, MarketId, MarketSelectionId,
-        ModelRunId, ModelVersionId, OperationLogId, PartialExitNode, PortfolioConstraintsSnapshot,
-        PortfolioPlanId, PortfolioRejectedSummary, PortfolioRiskBudget, Price, Probability,
+        ModelRunId, ModelVersionId, OperationLogId, PortfolioConstraintsSnapshot, PortfolioPlanId,
+        PortfolioRejectedSummary, PortfolioRiskBudget, Price, Probability,
         RecommendationFactorBreakdown, RecommendationId, RecommendationReportId,
         RejectionReasonCount, ReportSummary, RuntimeConfigVersionId, SizingPlan, Usd,
     },
@@ -244,16 +244,19 @@ fn compose_recommendation(
         market_id: candidate.market_id.clone(),
         event_id: selected.event_id.clone(),
         token_id: candidate.token_id.clone(),
-        side: candidate.side,
+        outcome_side: candidate.outcome_side,
         composite_score: candidate.composite_score,
         risk_adjusted_score: planned.risk_adjusted_score,
         confidence: candidate.confidence,
+        expected_return_bps: Bps::new(candidate.expected_return_bps),
+        downside_bps: Bps::new(candidate.downside_bps),
         entry_plan: entry_plan(candidate, input.as_of, valid_until, input.runtime_config),
         sizing_plan: planned.sizing.clone(),
         exit_plan: exit_plan(candidate, input.as_of, input.runtime_config)?,
         risk_envelope,
         factor_breakdown: factor_breakdown(candidate),
         evidence_refs: EvidenceRefs {
+            signal_candidate_id: candidate.signal_candidate_id.clone(),
             feature_vector_id,
             model_run_id,
             market_selection_id: input.market_selection_id.clone(),
@@ -285,12 +288,17 @@ fn entry_plan(
         )),
         valid_from: as_of,
         valid_until,
+        // Minimum *visible book depth* required at entry (admission gate), not the
+        // minimum order size — those are distinct governed knobs.
         min_depth_usd: Usd::new(parse_decimal_lossless(
-            &config.portfolio.budget.min_recommendation_usd.value,
+            &config.data_quality.min_book_depth_usd.value,
         )),
-        max_book_age_ms: config.data_quality.source_delay_secs.saturating_mul(1_000),
+        // Maximum tolerated book staleness at entry (not the CH fact lag budget).
+        max_book_age_ms: config.data_quality.max_book_age_ms,
         confirmation_window_secs: 0,
-        cancel_if_not_triggered: true,
+        // An `Immediate` entry has no trigger to wait for, so the
+        // "cancel if it never triggers" guard is inapplicable.
+        cancel_if_not_triggered: false,
         entry_reason: candidate.model_explanation.headline.clone(),
     }
 }
@@ -322,48 +330,34 @@ fn exit_plan(
             QuantError::config(format!("reports.report_horizon_secs too large: {error}"))
         })?);
 
+    // The take-profit / stop-loss / time-exit scalars are the single source of
+    // truth for the (full) exit. `partial_exit_nodes` is reserved for genuine
+    // *scaled* exits (`sell_pct < 1`); the Kelly bet structure exits in full at
+    // whichever scalar trigger fires first, so it carries no partial nodes.
+    let take_profit_price = Some(take_profit_price);
+    let stop_loss_price = Some(stop_loss_price);
+    let time_exit_at = Some(time_exit_at);
+
+    // Derive the settlement intent from the configured exits rather than hard-
+    // coding it: any active on-book exit means we leave before resolution.
+    let settlement_policy =
+        if take_profit_price.is_some() || stop_loss_price.is_some() || time_exit_at.is_some() {
+            SettlementPolicy::ExitBeforeResolution
+        } else {
+            SettlementPolicy::HoldToResolution
+        };
+
     Ok(ExitPlan {
-        take_profit_price: Some(take_profit_price),
+        take_profit_price,
         take_profit_pct: Some(gain),
-        stop_loss_price: Some(stop_loss_price),
+        stop_loss_price,
         stop_loss_pct: Some(loss),
-        time_exit_at: Some(time_exit_at),
+        time_exit_at,
         max_hold_secs: Some(horizon_secs),
-        partial_exit_nodes: vec![
-            PartialExitNode {
-                node_id: "tp_full".to_owned(),
-                trigger_kind: ExitTriggerKind::TakeProfit,
-                trigger_value: take_profit_price.inner(),
-                sell_pct: Decimal::ONE,
-                min_price: Some(take_profit_price),
-                valid_after: Some(as_of),
-                valid_until: Some(time_exit_at),
-                reason: "Full exit at the Kelly reward target.".to_owned(),
-            },
-            PartialExitNode {
-                node_id: "sl_full".to_owned(),
-                trigger_kind: ExitTriggerKind::StopLoss,
-                trigger_value: stop_loss_price.inner(),
-                sell_pct: Decimal::ONE,
-                min_price: Some(stop_loss_price),
-                valid_after: Some(as_of),
-                valid_until: Some(time_exit_at),
-                reason: "Full exit at the Kelly downside bound.".to_owned(),
-            },
-            PartialExitNode {
-                node_id: "time_exit".to_owned(),
-                trigger_kind: ExitTriggerKind::TimeExit,
-                trigger_value: Decimal::from(horizon_secs),
-                sell_pct: Decimal::ONE,
-                min_price: None,
-                valid_after: Some(time_exit_at),
-                valid_until: Some(time_exit_at),
-                reason: "Full exit at the report horizon.".to_owned(),
-            },
-        ],
+        partial_exit_nodes: Vec::new(),
         trailing_stop: None,
         signal_invalidation_rules: Vec::new(),
-        settlement_policy: SettlementPolicy::HoldToResolution,
+        settlement_policy,
         manual_review_at: None,
         exit_reason: format!(
             "Kelly bet structure: downside={} bps, target_reward_multiple={}, target_gain={}%; model headline: {}",
@@ -655,7 +649,7 @@ fn recommendation_events(
             rank: u32::try_from(rec.rank).unwrap_or(0),
             market_id: rec.market_id.clone(),
             token_id: rec.token_id.clone(),
-            side: rec.side.as_i8(),
+            side: rec.outcome_side.as_i8(),
             score: ChProbability::from(rec.composite_score),
             risk_adjusted_score: ChProbability::from(rec.risk_adjusted_score),
             suggested_usd: ChUsd::from(rec.sizing_plan.suggested_usd),
@@ -824,10 +818,11 @@ fn parse_decimal_lossless(value: &str) -> Decimal {
 
 #[cfg(test)]
 mod tests {
-    use chrono::{TimeZone, Utc};
+    use chrono::{Duration, TimeZone, Utc};
     use quant_pivot_models::{
         enums::quant::{
-            BindingConstraint, IneligibilityReason, QuantRuntimeMode, SignalSide, SizingModelKind,
+            BindingConstraint, IneligibilityReason, OutcomeSide, QuantRuntimeMode,
+            SettlementPolicy, SizingModelKind,
         },
         runtime_config::RuntimeConfig,
         types::{
@@ -846,7 +841,7 @@ mod tests {
             model_run_id: ModelRunId::from_v7(),
             market_id: MarketId::new("0xmarket"),
             token_id: TokenId::new("token-1"),
-            side: SignalSide::BuyYes,
+            outcome_side: OutcomeSide::Yes,
             composite_score: Probability::new(dec!(0.75)),
             confidence: Probability::new(dec!(0.80)),
             expected_return_bps: dec!(5000),
@@ -890,10 +885,14 @@ mod tests {
             plan.take_profit_price.expect("take profit price").inner(),
             dec!(0.600)
         );
-        assert_eq!(plan.partial_exit_nodes.len(), 3);
-        assert_eq!(plan.partial_exit_nodes[0].node_id, "tp_full");
-        assert_eq!(plan.partial_exit_nodes[1].node_id, "sl_full");
-        assert_eq!(plan.partial_exit_nodes[2].node_id, "time_exit");
+        // The scalar TP/SL/time-exit fields are the single source of truth; the
+        // full Kelly exit carries no (scaled) partial nodes.
+        assert!(plan.partial_exit_nodes.is_empty());
+        assert_eq!(plan.time_exit_at, Some(as_of + Duration::seconds(3_600)));
+        assert_eq!(
+            plan.settlement_policy,
+            SettlementPolicy::ExitBeforeResolution
+        );
     }
 
     fn sizing_plan(suggested_usd: Usd) -> SizingPlan {

@@ -16,7 +16,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use chrono::{DateTime, Utc};
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
-    enums::quant::SignalSide,
+    enums::quant::OutcomeSide,
     types::{ContentHash, ModelVersionId, Probability, ShadowComparisonId},
 };
 use rust_decimal::Decimal;
@@ -104,7 +104,7 @@ struct ComparisonHashInput<'a> {
 struct Ranked {
     rank: u32,
     score: Decimal,
-    side: SignalSide,
+    outcome_side: OutcomeSide,
 }
 
 /// Compute the active-vs-shadow comparison at the signal/rank layer.
@@ -156,7 +156,7 @@ pub fn compute_shadow_comparison(
         score_delta_sum += score_diff;
         max_score_delta = max_score_delta.max(score_diff);
 
-        if a.side != s.side {
+        if a.outcome_side != s.outcome_side {
             side_disagreements += 1;
         }
     }
@@ -217,7 +217,7 @@ fn index_by_market(candidates: &[SignalCandidate]) -> BTreeMap<String, Ranked> {
                 Ranked {
                     rank: candidate.rank_before_portfolio,
                     score: candidate.composite_score.inner(),
-                    side: candidate.side,
+                    outcome_side: candidate.outcome_side,
                 },
             )
         })
@@ -274,7 +274,7 @@ mod tests {
     use super::compute_shadow_comparison;
     use chrono::Utc;
     use quant_pivot_models::{
-        enums::quant::SignalSide,
+        enums::quant::OutcomeSide,
         types::{
             MarketId, ModelRunId, ModelVersionId, Price, Probability, SignalCandidateId, TokenId,
         },
@@ -284,13 +284,18 @@ mod tests {
 
     use crate::model::{ModelExplanation, SignalCandidate};
 
-    fn candidate(market: &str, rank: u32, score: Decimal, side: SignalSide) -> SignalCandidate {
+    fn candidate(
+        market: &str,
+        rank: u32,
+        score: Decimal,
+        outcome_side: OutcomeSide,
+    ) -> SignalCandidate {
         SignalCandidate {
             signal_candidate_id: SignalCandidateId::from_v7(),
             model_run_id: ModelRunId::from_v7(),
             market_id: MarketId::new(market),
             token_id: TokenId::new("t"),
-            side,
+            outcome_side,
             composite_score: Probability::new(score),
             confidence: Probability::new(dec!(0.8)),
             expected_return_bps: dec!(100),
@@ -312,8 +317,8 @@ mod tests {
     #[test]
     fn identical_rankings_have_full_overlap_and_no_divergence() {
         let active = vec![
-            candidate("a", 1, dec!(0.9), SignalSide::BuyYes),
-            candidate("b", 2, dec!(0.7), SignalSide::BuyYes),
+            candidate("a", 1, dec!(0.9), OutcomeSide::Yes),
+            candidate("b", 2, dec!(0.7), OutcomeSide::Yes),
         ];
         let shadow = active
             .iter()
@@ -322,7 +327,7 @@ mod tests {
                     c.market_id.as_str(),
                     c.rank_before_portfolio,
                     c.composite_score.inner(),
-                    c.side,
+                    c.outcome_side,
                 )
             })
             .collect::<Vec<_>>();
@@ -344,8 +349,8 @@ mod tests {
 
     #[test]
     fn large_score_gap_flags_hard_divergence() {
-        let active = vec![candidate("a", 1, dec!(0.90), SignalSide::BuyYes)];
-        let shadow = vec![candidate("a", 1, dec!(0.40), SignalSide::BuyNo)];
+        let active = vec![candidate("a", 1, dec!(0.90), OutcomeSide::Yes)];
+        let shadow = vec![candidate("a", 1, dec!(0.40), OutcomeSide::No)];
         let comparison = compute_shadow_comparison(
             ModelVersionId::from_v7(),
             ModelVersionId::from_v7(),
@@ -365,14 +370,14 @@ mod tests {
     fn shadow_comparison_records_topn_delta() {
         // Active ranks a > b; shadow flips them → rank delta + partial overlap.
         let active = vec![
-            candidate("a", 1, dec!(0.90), SignalSide::BuyYes),
-            candidate("b", 2, dec!(0.70), SignalSide::BuyYes),
-            candidate("c", 3, dec!(0.50), SignalSide::BuyYes),
+            candidate("a", 1, dec!(0.90), OutcomeSide::Yes),
+            candidate("b", 2, dec!(0.70), OutcomeSide::Yes),
+            candidate("c", 3, dec!(0.50), OutcomeSide::Yes),
         ];
         let shadow = vec![
-            candidate("b", 1, dec!(0.88), SignalSide::BuyYes),
-            candidate("a", 2, dec!(0.72), SignalSide::BuyYes),
-            candidate("d", 3, dec!(0.40), SignalSide::BuyYes),
+            candidate("b", 1, dec!(0.88), OutcomeSide::Yes),
+            candidate("a", 2, dec!(0.72), OutcomeSide::Yes),
+            candidate("d", 3, dec!(0.40), OutcomeSide::Yes),
         ];
         let comparison = compute_shadow_comparison(
             ModelVersionId::from_v7(),
@@ -396,8 +401,8 @@ mod tests {
 
     #[test]
     fn disjoint_topn_has_zero_overlap() {
-        let active = vec![candidate("a", 1, dec!(0.9), SignalSide::BuyYes)];
-        let shadow = vec![candidate("b", 1, dec!(0.9), SignalSide::BuyYes)];
+        let active = vec![candidate("a", 1, dec!(0.9), OutcomeSide::Yes)];
+        let shadow = vec![candidate("b", 1, dec!(0.9), OutcomeSide::Yes)];
         let comparison = compute_shadow_comparison(
             ModelVersionId::from_v7(),
             ModelVersionId::from_v7(),

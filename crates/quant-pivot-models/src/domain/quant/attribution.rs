@@ -2,7 +2,7 @@
 
 use crate::{
     enums::quant::RecommendationOutcome,
-    types::{RecommendationId, Usd},
+    types::{AttributionDetail, EntryOutcome, ExitOutcome, RecommendationId, Usd},
 };
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
@@ -15,13 +15,13 @@ use serde::{Deserialize, Serialize};
 pub struct RecommendationAttributionInfo {
     pub recommendation_id: RecommendationId,
     pub outcome: RecommendationOutcome,
-    pub entry_outcome_json: serde_json::Value,
-    pub exit_outcome_json: serde_json::Value,
+    pub entry_outcome_json: EntryOutcome,
+    pub exit_outcome_json: ExitOutcome,
     pub realized_pnl_usd: Option<Usd>,
     pub max_adverse_excursion_bps: Option<Decimal>,
     pub max_favorable_excursion_bps: Option<Decimal>,
     pub label_available_at: Option<DateTime<Utc>>,
-    pub attribution_json: serde_json::Value,
+    pub attribution_json: AttributionDetail,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -50,11 +50,11 @@ info_from_model!(
 pub struct NewRecommendationAttribution {
     pub recommendation_id: RecommendationId,
     pub outcome: RecommendationOutcome,
-    pub entry_outcome_json: serde_json::Value,
-    pub exit_outcome_json: serde_json::Value,
+    pub entry_outcome_json: EntryOutcome,
+    pub exit_outcome_json: ExitOutcome,
     pub realized_pnl_usd: Option<Usd>,
     pub max_adverse_excursion_bps: Option<Decimal>,
     pub max_favorable_excursion_bps: Option<Decimal>,
     pub label_available_at: Option<DateTime<Utc>>,
-    pub attribution_json: serde_json::Value,
+    pub attribution_json: AttributionDetail,
 }

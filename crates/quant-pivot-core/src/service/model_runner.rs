@@ -32,7 +32,7 @@ use quant_pivot_models::{
     domain::{ModelVersionInfo, NewModelRun, NewShadowComparison},
     enums::{
         common::{AlertCategory, AlertLevel, AlertSource},
-        quant::{ModelPublicationStatus, ModelRunKind, ModelRunStatus, SignalSide},
+        quant::{ModelPublicationStatus, ModelRunKind, ModelRunStatus, OutcomeSide},
     },
     runtime_config::{DecimalString, FactorsConfig, FeaturesConfig, ModelConfig},
     types::{
@@ -203,8 +203,8 @@ struct ActiveResult {
     emitted: u32,
     /// The active model version that produced this result (for the shadow record).
     active_version_id: ModelVersionId,
-    /// Per-market `(composite_score, side)` for the shadow diff.
-    active_index: HashMap<MarketId, (Probability, SignalSide)>,
+    /// Per-market `(composite_score, outcome_side)` for the shadow diff.
+    active_index: HashMap<MarketId, (Probability, OutcomeSide)>,
     /// Full ranked active candidates for the signal-layer shadow comparison.
     active_candidates: Vec<SignalCandidate>,
     /// Eligible factor outcomes reused (no recompute) for the shadow table.
@@ -451,13 +451,13 @@ impl ModelRunner {
 
         let output_hash = ResearchHasher::canonical(&output.candidates)
             .map_err(|error| (InferenceStage::ActiveInference, error))?;
-        let active_index: HashMap<MarketId, (Probability, SignalSide)> = output
+        let active_index: HashMap<MarketId, (Probability, OutcomeSide)> = output
             .candidates
             .iter()
             .map(|candidate| {
                 (
                     candidate.market_id.clone(),
-                    (candidate.composite_score, candidate.side),
+                    (candidate.composite_score, candidate.outcome_side),
                 )
             })
             .collect();
@@ -1013,7 +1013,7 @@ fn align_cross_section(
 
 /// Shadow vs active divergence over the markets both models scored.
 fn shadow_diff(
-    active_index: &HashMap<MarketId, (Probability, SignalSide)>,
+    active_index: &HashMap<MarketId, (Probability, OutcomeSide)>,
     shadow: &[SignalCandidate],
     threshold: Decimal,
 ) -> ShadowDiff {
@@ -1021,10 +1021,10 @@ fn shadow_diff(
     let mut score_sum = Decimal::ZERO;
     let mut disagreements: i64 = 0;
     for candidate in shadow {
-        if let Some((score, side)) = active_index.get(&candidate.market_id) {
+        if let Some((score, outcome_side)) = active_index.get(&candidate.market_id) {
             count += 1;
             score_sum += (candidate.composite_score.inner() - score.inner()).abs();
-            if candidate.side != *side {
+            if candidate.outcome_side != *outcome_side {
                 disagreements += 1;
             }
         }

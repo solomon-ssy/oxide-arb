@@ -301,10 +301,12 @@
 - `market_id varchar(66) not null`
 - `event_id text not null`
 - `token_id text not null`
-- `side text not null`
+- `outcome_side text not null`（`OutcomeSide`：`yes` / `no`；买卖方向属执行层）
 - `composite_score numeric(20,18) not null`
 - `risk_adjusted_score numeric(20,18) not null`
 - `confidence numeric(20,18) not null`
+- `expected_return_bps numeric(10,4) not null`（模型原始 `E[r]`，可审计/可训练）
+- `downside_bps numeric(10,4) not null`（模型原始止损幅度 `l`）
 - `entry_plan jsonb not null`
 - `sizing_plan jsonb not null`
 - `exit_plan jsonb not null`
@@ -677,7 +679,8 @@ crates/quant-pivot-models/src/domain/
 - `QuantRuntimeMode`: `ReportOnly`, `SemiAuto`, `AutoExecution`
 - `ReportKind`: `TopN`, `ShadowTopN`, `PostRunAudit`
 - `RecommendationStatus`: `Published`, `Revoked`, `Expired`, `IntentCreated`, `Executed`, `Attributed`
-- `SignalSide`: `BuyYes`, `BuyNo`, `SellYes`, `SellNo`
+- `OutcomeSide`（recommendation/candidate 结果方向）: `Yes`, `No`
+- `Side`（执行层买卖动作，`enums::common`）: `Buy`, `Sell`
 - `EntryTriggerKind`: `Immediate`, `LimitPrice`, `Breakout`, `Pullback`, `TimeWindow`, `DataEvent`
 - `ExitTriggerKind`: `TakeProfit`, `StopLoss`, `TimeExit`, `TrailingStop`, `SignalInvalidation`, `Manual`
 - `OrderIntentStatus`: `Draft`, `PendingApproval`, `Approved`, `Rejected`, `Expired`, `Submitted`, `Filled`, `Cancelled`, `Failed`
@@ -745,7 +748,7 @@ pub struct Recommendation {
     pub market_id: MarketId,
     pub event_id: EventId,
     pub token_id: TokenId,
-    pub side: SignalSide,
+    pub outcome_side: OutcomeSide,
     pub score: RecommendationScore,
     pub entry_plan: EntryPlan,
     pub sizing_plan: SizingPlan,

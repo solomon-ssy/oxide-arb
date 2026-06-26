@@ -75,29 +75,30 @@ active_string_enum! {
 }
 
 active_string_enum! {
-    /// Directional action expressed by a model signal or recommendation.
-    @derive(Default)
-    pub enum SignalSide {
-        #[default]
-        BuyYes => "buy_yes",
-        BuyNo => "buy_no",
-        SellYes => "sell_yes",
-        SellNo => "sell_no",
+    /// Which binary-market outcome token a recommendation opens a position in.
+    ///
+    /// A recommendation is always an *opening* position (buy-to-open) in one
+    /// outcome token, so the only directional choice it expresses is the outcome
+    /// (`Yes`/`No`) — the token itself is identified by `token_id`. Buy/sell
+    /// direction is an execution-layer concern (see [`crate::enums::common::Side`]),
+    /// and the sell/exit plan is expressed entirely by `ExitPlan`; this enum never
+    /// encodes a sell.
+    pub enum OutcomeSide {
+        Yes => "yes",
+        No => "no",
     }
 }
 
-impl SignalSide {
-    /// The stable `i8` code persisted to `ClickHouse` `side` columns
-    /// (`quant_signal_candidate_event` / `quant_recommendation_event` /
-    /// `quant_execution_event`). Append-only contract: never renumber an existing
-    /// variant.
+impl OutcomeSide {
+    /// The stable `i8` code persisted to the `ClickHouse` `side` columns of the
+    /// candidate / recommendation facts (`quant_signal_candidate_event` /
+    /// `quant_recommendation_event`). Append-only contract: never renumber an
+    /// existing variant.
     #[must_use]
     pub const fn as_i8(self) -> i8 {
         match self {
-            Self::BuyYes => 1,
-            Self::BuyNo => 2,
-            Self::SellYes => 3,
-            Self::SellNo => 4,
+            Self::Yes => 1,
+            Self::No => 2,
         }
     }
 }

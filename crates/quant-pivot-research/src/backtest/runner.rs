@@ -159,7 +159,7 @@ fn process_tick(
             continue;
         }
         let realized = simulator::realized_return_bps(
-            candidate.side,
+            candidate.outcome_side,
             candidate.entry_price_ref,
             outcome.settled_yes,
         );
@@ -168,7 +168,7 @@ fn process_tick(
         let liquidity_feasible = allocation.is_none_or(|a| a.liquidity_feasible);
         tick_pnl += simulator::realized_pnl_usd(
             allocated_usd.inner(),
-            candidate.side,
+            candidate.outcome_side,
             candidate.entry_price_ref,
             outcome.settled_yes,
         );
@@ -179,7 +179,7 @@ fn process_tick(
             market_id: candidate.market_id.clone(),
             token_id: candidate.token_id.clone(),
             category: market.category,
-            side: candidate.side,
+            outcome_side: candidate.outcome_side,
             composite_score: candidate.composite_score,
             confidence: candidate.confidence,
             expected_return_bps: candidate.expected_return_bps,

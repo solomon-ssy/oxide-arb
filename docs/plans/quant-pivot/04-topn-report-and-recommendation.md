@@ -127,19 +127,20 @@ Recommendation
 - `market_id`
 - `event_id`
 - `token_id`
-- `side`
+- `outcome_side`
 - `category`
 - `question`
 - `outcome_name`
 
-`side` 使用新枚举：
+`outcome_side` 使用 `OutcomeSide` 枚举（仅结果方向，不含买卖动作）：
 
-- `buy_yes`
-- `buy_no`
-- `sell_yes`
-- `sell_no`
+- `yes`
+- `no`
 
-第一版主路径可以只允许 buy，但 schema 必须支持 exit/sell，因为报告需要回答卖出计划。
+语义铁律：一条 recommendation 永远是**开仓**（buy-to-open）一个 outcome token，方向只在
+"买 YES 还是买 NO"——具体 token 已由 `token_id` 唯一确定，`outcome_side` 只是其可读/可审计
+标签。买卖动作（`Buy`/`Sell`）是**执行层**概念（`quant_execution_order.side: common::Side`，
+入场 = Buy、出场 = Sell）；**卖出计划完全由 `exit_plan` 表达**，绝不用 `outcome_side` 编码 sell。
 
 ## 6. Rank and Score
 
@@ -276,6 +277,14 @@ Sizing 不是展示值。执行模式启用时，`OrderIntent` 只能在 sizing 
 - `settlement_policy`
 - `manual_review_at`
 - `exit_reason`
+
+语义铁律（单一真相源、无重复）：
+
+- `take_profit_*` / `stop_loss_*` / `time_exit_at` / `max_hold_secs` 标量字段是（全量）出场的
+  **唯一真相源**。`partial_exit_nodes` 只承载**真正的分批出场**（`sell_pct < 1`）；当出场是
+  "命中任一标量触发即全平"时，`partial_exit_nodes` 必须为空，绝不复制标量为 `sell_pct = 1` 的节点。
+- `settlement_policy` 由出场配置**推导**，不硬编码：配置了任一主动 on-book 出场（TP/SL/time）⇒
+  `exit_before_resolution`；无主动出场 ⇒ `hold_to_resolution`。
 
 ### 10.1 Partial Exit Node
 

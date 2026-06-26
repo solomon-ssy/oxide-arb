@@ -139,7 +139,7 @@ fn joined_divergence(
         common += 1;
         baseline_scores.push(base.composite_score.inner());
         candidate_scores.push(sample.composite_score.inner());
-        if base.side != sample.side {
+        if base.outcome_side != sample.outcome_side {
             disagreements += 1;
         }
     }
@@ -230,7 +230,7 @@ mod tests {
     use quant_pivot_models::{
         enums::{
             common::MarketCategory,
-            quant::{DataQualityStatus, SignalSide},
+            quant::{DataQualityStatus, OutcomeSide},
         },
         types::{
             BacktestReportId, ContentHash, MarketId, ModelVersionId, Probability,
@@ -249,13 +249,18 @@ mod tests {
         ContentHash::parse(format!("blake3:{seed:0>64}")).expect("hash")
     }
 
-    fn sample(idx: i64, score: Decimal, realized: Decimal, side: SignalSide) -> SampleOutcome {
+    fn sample(
+        idx: i64,
+        score: Decimal,
+        realized: Decimal,
+        outcome_side: OutcomeSide,
+    ) -> SampleOutcome {
         SampleOutcome {
             as_of: Utc.timestamp_opt(1_700_000_000 + idx, 0).unwrap(),
             market_id: MarketId::new(format!("0x{idx}")),
             token_id: TokenId::new("yes"),
             category: MarketCategory::Crypto,
-            side,
+            outcome_side,
             composite_score: Probability::new(score),
             confidence: Probability::new(dec!(1)),
             expected_return_bps: dec!(100),
@@ -328,8 +333,8 @@ mod tests {
             dec!(0.10),
             dec!(100),
             vec![
-                sample(0, dec!(0.8), dec!(50), SignalSide::BuyYes),
-                sample(1, dec!(0.2), dec!(-20), SignalSide::BuyYes),
+                sample(0, dec!(0.8), dec!(50), OutcomeSide::Yes),
+                sample(1, dec!(0.2), dec!(-20), OutcomeSide::Yes),
             ],
         );
         // Candidate scores correlate but flips the side on market 1.
@@ -338,8 +343,8 @@ mod tests {
             dec!(0.25),
             dec!(180),
             vec![
-                sample(0, dec!(0.85), dec!(50), SignalSide::BuyYes),
-                sample(1, dec!(0.25), dec!(-20), SignalSide::BuyNo),
+                sample(0, dec!(0.85), dec!(50), OutcomeSide::Yes),
+                sample(1, dec!(0.25), dec!(-20), OutcomeSide::No),
             ],
         );
 

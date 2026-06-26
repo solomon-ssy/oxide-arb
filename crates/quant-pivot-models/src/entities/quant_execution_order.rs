@@ -1,7 +1,7 @@
 //! `quant_execution_order` table entity.
 
 use crate::{
-    enums::quant::{ExecutionOrderState, SignalSide},
+    enums::{common::Side, quant::ExecutionOrderState},
     types::{ExecutionOrderId, MarketId, OrderId, OrderIntentId, Price, Shares, TokenId, Usd},
 };
 use chrono::{DateTime, Utc};
@@ -17,7 +17,7 @@ pub struct Model {
     pub order_phase: String,
     pub market_id: MarketId,
     pub token_id: TokenId,
-    pub side: SignalSide,
+    pub side: Side,
     #[sea_orm(column_type = "Text")]
     pub order_type: String,
     pub price: Price,

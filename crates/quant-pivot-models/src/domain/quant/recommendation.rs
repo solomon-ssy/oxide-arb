@@ -5,11 +5,11 @@
 
 use crate::{
     enums::quant::{
-        AccountSource, QuantRuntimeMode, RecommendationReportStatus, RecommendationStatus,
-        ReportKind, ReportTriggerKind, SignalSide,
+        AccountSource, OutcomeSide, QuantRuntimeMode, RecommendationReportStatus,
+        RecommendationStatus, ReportKind, ReportTriggerKind,
     },
     types::{
-        AccountSnapshotId, EntryPlan, EventId, EvidenceRefs, ExecutionEligibility, ExitPlan,
+        AccountSnapshotId, Bps, EntryPlan, EventId, EvidenceRefs, ExecutionEligibility, ExitPlan,
         MarketId, MarketSelectionId, ModelVersionId, PortfolioPlanId, Probability,
         RecommendationFactorBreakdown, RecommendationId, RecommendationReportId, ReportSummary,
         RiskEnvelope, RuntimeConfigVersionId, SizingPlan, TokenId, Usd,
@@ -119,10 +119,12 @@ pub struct RecommendationInfo {
     pub market_id: MarketId,
     pub event_id: EventId,
     pub token_id: TokenId,
-    pub side: SignalSide,
+    pub outcome_side: OutcomeSide,
     pub composite_score: Probability,
     pub risk_adjusted_score: Probability,
     pub confidence: Probability,
+    pub expected_return_bps: Bps,
+    pub downside_bps: Bps,
     pub entry_plan: EntryPlan,
     pub sizing_plan: SizingPlan,
     pub exit_plan: ExitPlan,
@@ -138,9 +140,9 @@ pub struct RecommendationInfo {
 
 info_from_model!(RecommendationInfo, crate::entities::quant_recommendation::Model, {
     recommendation_id, recommendation_report_id, rank, market_id, event_id, token_id,
-    side, composite_score, risk_adjusted_score, confidence, entry_plan, sizing_plan,
-    exit_plan, risk_envelope, factor_breakdown, evidence_refs, execution_eligibility,
-    valid_from, valid_until, status, created_at,
+    outcome_side, composite_score, risk_adjusted_score, confidence, expected_return_bps,
+    downside_bps, entry_plan, sizing_plan, exit_plan, risk_envelope, factor_breakdown,
+    evidence_refs, execution_eligibility, valid_from, valid_until, status, created_at,
 });
 
 /// Insert payload for `quant_recommendation`.
@@ -153,10 +155,12 @@ pub struct NewRecommendation {
     pub market_id: MarketId,
     pub event_id: EventId,
     pub token_id: TokenId,
-    pub side: SignalSide,
+    pub outcome_side: OutcomeSide,
     pub composite_score: Probability,
     pub risk_adjusted_score: Probability,
     pub confidence: Probability,
+    pub expected_return_bps: Bps,
+    pub downside_bps: Bps,
     pub entry_plan: EntryPlan,
     pub sizing_plan: SizingPlan,
     pub exit_plan: ExitPlan,
