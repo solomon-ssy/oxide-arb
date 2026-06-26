@@ -17,8 +17,7 @@ use actix_web::{
     test, web,
 };
 use async_trait::async_trait;
-use quant_pivot_error::auth::AuthError;
-use quant_pivot_error::{QuantError, QuantResult};
+use quant_pivot_error::{QuantError, QuantResult, auth::AuthError, control::ControlError};
 use quant_pivot_models::{
     config::{CacheConfig, DeployConfig, JwtConfig, RedisConfig},
     domain::{
@@ -27,8 +26,8 @@ use quant_pivot_models::{
         DataQualityPort, DataQualitySnapshot, GovernanceActor, HealthReport, MarketDataPort,
         MetricsScrapePort, ModelComparisonReportInfo, ModelGovernancePort, ModelTrainingPort,
         ModelVersionInfo, PromoteDatasetRequest, PublishModelCommand, QuantModeTransitionReport,
-        RollbackModelCommand, RunBacktestRequest, RuntimeConfigPort, RuntimeControlError,
-        RuntimeControlPort, SystemStatus, TrainModelRequest, TrainedModelView, TrainingDatasetInfo,
+        RollbackModelCommand, RunBacktestRequest, RuntimeConfigPort, RuntimeControlPort,
+        SystemStatus, TrainModelRequest, TrainedModelView, TrainingDatasetInfo,
         TrainingDatasetPlanView, TrainingDatasetPort, TrainingDatasetView,
     },
     enums::quant::QuantRuntimeMode,
@@ -317,11 +316,11 @@ impl MarketDataPort for MockMarketData {
         HashSet::new()
     }
 
-    async fn subscribe(&self, _token_ids: Vec<TokenId>) -> Result<(), RuntimeControlError> {
+    async fn subscribe(&self, _token_ids: Vec<TokenId>) -> Result<(), ControlError> {
         Ok(())
     }
 
-    async fn unsubscribe(&self, _token_ids: Vec<TokenId>) -> Result<(), RuntimeControlError> {
+    async fn unsubscribe(&self, _token_ids: Vec<TokenId>) -> Result<(), ControlError> {
         Ok(())
     }
 }
@@ -346,13 +345,13 @@ impl RuntimeConfigPort for MockRuntimeConfigApply {
         Arc::clone(&self.current.lock().unwrap())
     }
 
-    fn preflight(&self, _candidate: &RuntimeConfig) -> Result<(), RuntimeControlError> {
+    fn preflight(&self, _candidate: &RuntimeConfig) -> Result<(), ControlError> {
         Ok(())
     }
 
-    async fn apply(&self, config: RuntimeConfig) -> Result<(), RuntimeControlError> {
+    async fn apply(&self, config: RuntimeConfig) -> Result<(), ControlError> {
         if self.fail_next_apply.swap(false, Ordering::SeqCst) {
-            return Err(RuntimeControlError::Engine("injected apply failure".into()));
+            return Err(ControlError::Engine("injected apply failure".into()));
         }
         *self.current.lock().unwrap() = Arc::new(config);
         Ok(())
@@ -494,7 +493,7 @@ impl RuntimeControlPort for MockRuntimeControl {
         &self,
         target: QuantRuntimeMode,
         _reason: &str,
-    ) -> Result<QuantModeTransitionReport, RuntimeControlError> {
+    ) -> Result<QuantModeTransitionReport, ControlError> {
         let from = self.quant_runtime_mode();
         *self.mode.lock().unwrap() = target;
         Ok(QuantModeTransitionReport { from, to: target })

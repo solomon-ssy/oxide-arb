@@ -21,7 +21,7 @@ use crate::{
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use quant_pivot_error::{QuantError, QuantResult};
+use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
     domain::NewTrainingDataset,
     enums::quant::TrainingDatasetStatus,
@@ -421,9 +421,10 @@ impl TrainingDatasetService {
         } else {
             TrainingDatasetStatus::Built
         };
-        let coverage_json = serde_json::to_value(&coverage).map_err(|error| {
-            QuantError::Internal(format!("dataset coverage serialization failed: {error}"))
-        })?;
+        let coverage_json =
+            serde_json::to_value(&coverage).map_err(|error| ResearchError::Serialization {
+                detail: format!("dataset coverage serialization failed: {error}"),
+            })?;
         self.dataset_repo
             .create(NewTrainingDataset {
                 training_dataset_id: plan.training_dataset_id.clone(),

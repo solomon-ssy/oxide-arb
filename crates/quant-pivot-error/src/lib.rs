@@ -11,9 +11,15 @@
 //! WsError ──────────┤
 //! RpcError ─────────┤
 //! StorageError──────┤
-//! SigningError───────┼──► QuantError
+//! SigningError──────┼──► QuantError
 //! ConfigError───────┤
-//! MarketError────────┤
+//! MarketError───────┤
+//! SchedulerError────┤
+//! ReportError───────┤
+//! InfraError────────┤
+//! ControlError──────┤
+//! ResearchError─────┤
+//! GovernanceError───┤
 //! FeeQuoteError─────┤
 //! SeedError ────────┘
 //! ```
@@ -23,13 +29,18 @@ pub mod api;
 pub mod auth;
 pub mod config;
 pub mod config_validation;
+pub mod control;
 pub mod fee;
 pub mod governance;
 pub mod hashing;
+pub mod infra;
 pub mod market;
+pub mod query;
 pub mod rbac;
+pub mod report;
 pub mod research;
 pub mod rpc;
+pub mod scheduler;
 pub mod security;
 pub mod seed;
 pub mod signing;
@@ -108,6 +119,22 @@ pub enum QuantError {
     // ── Canonical hashing / content addressing ──────────────────────────
     #[error(transparent)]
     Hashing(#[from] hashing::CanonicalDigestError),
+
+    // ── Report schedule plane ───────────────────────────────────────────
+    #[error(transparent)]
+    Scheduler(#[from] scheduler::SchedulerError),
+
+    // ── Report generation pipeline ──────────────────────────────────────
+    #[error(transparent)]
+    Report(#[from] report::ReportError),
+
+    // ── Process bootstrap / observability ─────────────────────────────────
+    #[error(transparent)]
+    Infra(#[from] infra::InfraError),
+
+    // ── Runtime control plane ───────────────────────────────────────────
+    #[error(transparent)]
+    Control(#[from] control::ControlError),
 
     // ── General ─────────────────────────────────────────────────────────
     #[error("Internal error: {0}")]
@@ -220,9 +247,45 @@ mod tests {
     fn market_error_propagates() {
         let market_err = market::MarketError::InvalidTokenPair {
             market_id: "0xabc".into(),
+            reason: "missing NO leg".into(),
         };
         let oxide_err: QuantError = market_err.into();
         assert!(matches!(oxide_err, QuantError::Market(_)));
+    }
+
+    #[test]
+    fn scheduler_error_propagates() {
+        let err = scheduler::SchedulerError::Backend {
+            detail: "add failed".into(),
+        };
+        let oxide_err: QuantError = err.into();
+        assert!(matches!(oxide_err, QuantError::Scheduler(_)));
+    }
+
+    #[test]
+    fn report_error_propagates() {
+        let err = report::ReportError::InvariantViolation {
+            stage: "compose",
+            detail: "missing feature vector".into(),
+        };
+        let oxide_err: QuantError = err.into();
+        assert!(matches!(oxide_err, QuantError::Report(_)));
+    }
+
+    #[test]
+    fn infra_error_propagates() {
+        let err = infra::InfraError::ChannelClosed {
+            name: "pipeline_events",
+        };
+        let oxide_err: QuantError = err.into();
+        assert!(matches!(oxide_err, QuantError::Infra(_)));
+    }
+
+    #[test]
+    fn control_error_propagates() {
+        let err = control::ControlError::Precondition("catalog not ready".into());
+        let oxide_err: QuantError = err.into();
+        assert!(matches!(oxide_err, QuantError::Control(_)));
     }
 
     #[test]

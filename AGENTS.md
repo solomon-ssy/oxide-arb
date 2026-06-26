@@ -79,8 +79,28 @@ cargo fmt --all --
 cargo clippy --workspace --all-targets -- -D warnings
 bash scripts/lint-architecture.sh
 bash scripts/lint-quant-pivot-boundary.sh
+bash scripts/lint-quant-pivot-errors.sh
 cargo test --workspace
 ```
+
+## 7.1 Error layering
+
+Platform failures live in **`quant-pivot-error`** as typed sub-errors composed into
+[`QuantError`](crates/quant-pivot-error/src/lib.rs) via `#[from]`. Third-party errors
+(`JobSchedulerError`, SDK, Polars) convert through **facade newtypes** in the owning
+crate (e.g. inline in `core/src/infra/schedule/runner.rs`), never inside `quant-pivot-error`.
+HTTP status mapping stays in **`quant-pivot-web/src/error.rs`**.
+
+| Sub-error | Domain |
+|-----------|--------|
+| `SchedulerError` | Report schedule plane (`tokio-cron-scheduler` facade) |
+| `ReportError` | Report pipeline invariants / contract violations |
+| `InfraError` | Bootstrap, metrics, channels, web server runtime |
+| `ControlError` | Runtime mode / config apply / book subscriptions |
+| `QueryError` | Inbound API time-window validation |
+
+Production `src/` must not call `QuantError::Internal(` directly — use typed variants
+(enforced by `scripts/lint-quant-pivot-errors.sh`).
 
 ## 8. Forbidden Patterns
 
@@ -90,6 +110,8 @@ cargo test --workspace
 | `ExecutionMode::DryRun/Paper/Live` | `QuantRuntimeMode` |
 | `pub use` compatibility re-exports | explicit module paths |
 | `unwrap()` in `src/` | `?` / structured errors |
+| `QuantError::Internal(` in production `src/` | typed `quant-pivot-error` sub-variant |
+| `fn *_error(` manual mappers | `From` + `?` |
 | `f64` for money | `Usd` / `Price` / `Shares` |
 | I/O inside hot-path risk checks | pre-fetch into context |
 

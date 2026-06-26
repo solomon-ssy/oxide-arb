@@ -118,7 +118,7 @@ size_threshold = 1
 # ── Quant Pivot (Phase 0) ─────────────────────────────────────────────────────
 
 [quant.workers]
-report_scheduler_tick_secs = 30
+report_expire_sweep_secs = 300
 
 [quant.account]
 # Polymarket proxy/funder address for Data API position reads. Required (all modes).

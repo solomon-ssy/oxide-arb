@@ -4,6 +4,7 @@ mod builder;
 mod composer;
 mod lifecycle;
 mod publisher;
+mod scheduler;
 mod types;
 
 pub use builder::{DefaultReportBuilder, ReportBuilder, ReportBuilderDeps};
@@ -12,6 +13,7 @@ pub use lifecycle::{
     AdHocReportRequest, ReportLifecycleDeps, ReportLifecycleService, ScheduledReportRequest,
 };
 pub use publisher::{ReportPublisher, ReportPublisherDeps};
+pub use scheduler::build_report_scheduler;
 pub use types::{
     BuildReportRequest, ComposedReport, EmptyReportContext, ReportNotificationPayload,
     ReportTrigger,

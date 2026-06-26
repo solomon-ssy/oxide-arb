@@ -73,6 +73,13 @@ rust_decimal_macros = "1"
 
 # Time
 chrono = { version = "0.4", features = ["serde"] }
+# IANA timezone database for wall-clock cron report schedules (pure Rust).
+chrono-tz = "0.10"
+
+# Report-plane cron/interval/one-shot scheduler (Phase 4). In-process,
+# tokio-native; postgres_storage / nats_storage / signal features stay OFF —
+# schedule truth source is runtime-config, shutdown is AppRunner-driven.
+tokio-cron-scheduler = "0.15"
 
 # Error handling
 thiserror = "2"

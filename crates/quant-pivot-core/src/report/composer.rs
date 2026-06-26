@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use chrono::{DateTime, Duration, Utc};
-use quant_pivot_error::{QuantError, QuantResult};
+use quant_pivot_error::{QuantError, QuantResult, report::ReportError};
 use quant_pivot_models::{
     clickhouse::{ChProbability, ChUsd, QuantRecommendationEventRow},
     domain::{
@@ -198,24 +198,31 @@ fn compose_recommendation(
     let candidate = &planned.candidate;
     let selected = selected_by_market
         .get(&candidate.market_id)
-        .ok_or_else(|| {
-            QuantError::Internal(format!(
+        .ok_or_else(|| ReportError::InvariantViolation {
+            stage: "compose",
+            detail: format!(
                 "missing selected market metadata for recommendation market {}",
                 candidate.market_id
-            ))
+            ),
         })?;
     let feature_vector_id = feature_by_market
         .get(&candidate.market_id)
         .cloned()
-        .ok_or_else(|| {
-            QuantError::Internal(format!(
+        .ok_or_else(|| ReportError::InvariantViolation {
+            stage: "compose",
+            detail: format!(
                 "missing persisted feature vector for recommendation market {}",
                 candidate.market_id
-            ))
+            ),
         })?;
-    let model_run_id = input.model_run_id.clone().ok_or_else(|| {
-        QuantError::Internal("non-empty recommendation missing model_run_id".to_owned())
-    })?;
+    let model_run_id =
+        input
+            .model_run_id
+            .clone()
+            .ok_or_else(|| ReportError::InvariantViolation {
+                stage: "compose",
+                detail: "non-empty recommendation missing model_run_id".into(),
+            })?;
 
     let mut risk_envelope = planned.risk_envelope.clone();
     let auto_gate = auto_execution_gate(
@@ -238,8 +245,9 @@ fn compose_recommendation(
     Ok(NewRecommendation {
         recommendation_id: RecommendationId::from_v7(),
         recommendation_report_id: report_id.clone(),
-        rank: i32::try_from(planned.rank).map_err(|error| {
-            QuantError::Internal(format!("recommendation rank exceeds i32::MAX: {error}"))
+        rank: i32::try_from(planned.rank).map_err(|error| ReportError::NumericOverflow {
+            field: "recommendation.rank",
+            detail: error.to_string(),
         })?,
         market_id: candidate.market_id.clone(),
         event_id: selected.event_id.clone(),

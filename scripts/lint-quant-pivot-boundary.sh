@@ -21,4 +21,20 @@ if rg -n 'pub use .*::Opportunity;|pub use .*ScoredOpportunity;' \
   exit 1
 fi
 
+# tokio-cron-scheduler is the report-plane scheduling backend and MUST stay
+# behind the ReportScheduleRunner facade in core/src/infra/schedule/. Code paths
+# (underscore form) must not appear outside that module; the crate dependency
+# (hyphen form) is allowed only in quant-pivot-core's manifest.
+if rg -n 'tokio_cron_scheduler' crates/ \
+  --glob '!crates/quant-pivot-core/src/infra/schedule/**' 2>/dev/null; then
+  echo "ERROR: tokio-cron-scheduler must stay behind core/src/infra/schedule/ (ReportScheduleRunner facade)"
+  exit 1
+fi
+if rg -n 'tokio-cron-scheduler' crates/ \
+  --glob '**/Cargo.toml' \
+  --glob '!crates/quant-pivot-core/Cargo.toml' 2>/dev/null; then
+  echo "ERROR: only quant-pivot-core may declare the tokio-cron-scheduler dependency"
+  exit 1
+fi
+
 echo "Quant pivot boundary checks passed."

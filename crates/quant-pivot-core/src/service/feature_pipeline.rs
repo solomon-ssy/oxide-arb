@@ -16,7 +16,7 @@ use crate::{
 };
 use chrono::{DateTime, Utc};
 use futures_util::future::try_join_all;
-use quant_pivot_error::{QuantError, QuantResult};
+use quant_pivot_error::{QuantError, QuantResult, report::ReportError};
 use quant_pivot_models::{
     domain::{FeatureVectorInfo, NewFeatureVector},
     enums::quant::DataQualityStatus,
@@ -128,10 +128,13 @@ impl FeaturePipelineService {
             .iter()
             .map(|market| {
                 let window = windows.get(&market.primary_token_id).ok_or_else(|| {
-                    QuantError::Internal(format!(
-                        "missing prefetched window for token {}",
-                        market.primary_token_id.as_str()
-                    ))
+                    ReportError::InvariantViolation {
+                        stage: "feature_pipeline",
+                        detail: format!(
+                            "missing prefetched window for token {}",
+                            market.primary_token_id.as_str()
+                        ),
+                    }
                 })?;
                 Ok(builder.resolve_inputs(market, request.as_of, request.pit, window))
             })

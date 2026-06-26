@@ -27,7 +27,7 @@ pub mod ws;
 
 use actix_cors::Cors;
 use actix_web::{App, HttpServer, middleware::from_fn, web};
-use quant_pivot_error::{QuantError, QuantResult};
+use quant_pivot_error::{QuantResult, infra::InfraError};
 use quant_pivot_models::config::WebConfig;
 use tokio_util::sync::CancellationToken;
 use tracing_actix_web::TracingLogger;
@@ -82,7 +82,9 @@ pub async fn spawn_web_server(
             .configure(move |cfg| static_files::configure_static(cfg, &static_config))
     })
     .bind(bind_addr)
-    .map_err(|error| QuantError::Internal(format!("web server bind failed: {error}")))?
+    .map_err(|error| InfraError::ServerBind {
+        detail: error.to_string(),
+    })?
     .run();
 
     let handle = server.handle();
@@ -96,7 +98,12 @@ pub async fn spawn_web_server(
             Ok(())
         }
         result = server => {
-            result.map_err(|error| QuantError::Internal(format!("web server error: {error}")))
+            result.map_err(|error| {
+                InfraError::ServerRuntime {
+                    detail: error.to_string(),
+                }
+                .into()
+            })
         }
     }
 }

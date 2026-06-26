@@ -17,13 +17,13 @@
 
 use actix_web::{http::Method, web};
 use chrono::Utc;
+use quant_pivot_error::control::ControlError;
 use quant_pivot_models::{
     domain::{
         ActivateRuntimeConfigRequest, CoreEvent, CoreEventPublisher,
         CreateRuntimeConfigVersionRequest, NewRuntimeConfigActivation, NewRuntimeConfigVersion,
         RollbackRuntimeConfigRequest, RuntimeConfigActivationInfo, RuntimeConfigCurrentView,
         RuntimeConfigSchemaView, RuntimeConfigVersionListQuery, RuntimeConfigVersionView,
-        RuntimeControlError,
     },
     enums::{
         operation_log::OperationCategory,
@@ -340,7 +340,7 @@ async fn revert_unapplied_activation(
     request_id: &RequestId,
     failed: &RuntimeConfigActivationInfo,
     previous: Option<RuntimeConfigVersionId>,
-    apply_error: &RuntimeControlError,
+    apply_error: &ControlError,
 ) -> WebError {
     let failed_version = failed.runtime_config_version_id.clone();
     let Some(previous_id) = previous else {

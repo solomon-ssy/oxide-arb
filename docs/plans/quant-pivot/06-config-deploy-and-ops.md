@@ -49,7 +49,7 @@
 
 ```toml
 [quant.workers]
-report_scheduler_tick_secs = 30
+report_expire_sweep_secs = 300
 materialization_worker_count = 2
 model_run_worker_count = 1
 order_intent_worker_count = 1
@@ -200,9 +200,9 @@ Schedule（`ReportScheduleConfig`）：
 - `source_delay_secs`
 - `enabled`
 
-`deploy.quant.workers.report_scheduler_tick_secs`：可选 **健康扫描** cadence（metrics /
-补漏），**不是** report 主触发器；主触发由 `ReportScheduleRunner` /
-`tokio-cron-scheduler` 承担（见 [04 §23](04-topn-report-and-recommendation.md#23-report-schedule-runnerphase-4-调度层)）。
+`deploy.quant.workers.report_expire_sweep_secs`（取代已删除的 `report_scheduler_tick_secs`）：
+report TTL **expire sweep** cadence（默认 300），**不是** report 主触发器；主触发由
+`ReportScheduleRunner` / `tokio-cron-scheduler` 承担（见 [04 §23](04-topn-report-and-recommendation.md#23-report-schedule-runnerphase-4-调度层)）。
 
 ### 2.8 `portfolio`
 

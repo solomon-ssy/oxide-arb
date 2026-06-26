@@ -4,6 +4,8 @@
 //! shutdown. Legacy Endgame detection / execution / risk / settlement /
 //! control-factor series do not exist here.
 
+use std::time::Duration;
+
 use prometheus::{
     Encoder, Gauge, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec,
     Opts, Registry, TextEncoder,
@@ -67,6 +69,11 @@ const FACT_LAG_BUCKETS_SECS: &[f64] = &[
     0.001, 0.005, 0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0,
 ];
 
+/// Report-pipeline wall-clock buckets in seconds (0.1 s … 10 min).
+const REPORT_RUN_BUCKETS_SECS: &[f64] = &[
+    0.1, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0,
+];
+
 /// Central Prometheus registry for Phase 0 live paths only.
 pub struct MetricsHub {
     pub registry: Registry,
@@ -115,6 +122,13 @@ pub struct MetricsHub {
     pub report_generated_total: IntCounterVec,
     pub report_recommendations_total: IntCounterVec,
     pub report_publish_failures_total: IntCounterVec,
+
+    // ── Report scheduler (04.3) ───────────────────────────────────────────
+    pub report_schedule_fires_total: IntCounterVec,
+    pub report_schedule_skipped_overlap_total: IntCounterVec,
+    pub report_schedule_run_duration_seconds: HistogramVec,
+    pub report_schedule_active_jobs: IntGauge,
+    pub report_expire_swept_total: IntCounter,
 }
 
 struct PipelineMetrics {
@@ -161,6 +175,11 @@ struct ReportMetrics {
     generated: IntCounterVec,
     recommendations: IntCounterVec,
     publish_failures: IntCounterVec,
+    schedule_fires: IntCounterVec,
+    schedule_skipped_overlap: IntCounterVec,
+    schedule_run_duration: HistogramVec,
+    schedule_active_jobs: IntGauge,
+    expire_swept: IntCounter,
 }
 
 fn register_pipeline_metrics(registry: &Registry) -> PipelineMetrics {
@@ -344,6 +363,35 @@ fn register_report_metrics(registry: &Registry) -> ReportMetrics {
             "Report post-commit publish failures by stage",
             &["stage"]
         ),
+        schedule_fires: register_counter_vec!(
+            registry,
+            "quant_pivot_report_schedule_fires_total",
+            "Report schedule fires by schedule id and outcome (published/empty/error)",
+            &["schedule_id", "outcome"]
+        ),
+        schedule_skipped_overlap: register_counter_vec!(
+            registry,
+            "quant_pivot_report_schedule_skipped_overlap_total",
+            "Report schedule fires skipped because the prior run was still in flight",
+            &["schedule_id"]
+        ),
+        schedule_run_duration: register_histogram_vec!(
+            registry,
+            "quant_pivot_report_schedule_run_duration_seconds",
+            "Report pipeline wall-clock duration per scheduled fire",
+            &["schedule_id"],
+            REPORT_RUN_BUCKETS_SECS
+        ),
+        schedule_active_jobs: register_gauge_int!(
+            registry,
+            "quant_pivot_report_schedule_active_jobs",
+            "Report schedules currently registered with the scheduler"
+        ),
+        expire_swept: register_counter!(
+            registry,
+            "quant_pivot_report_expire_swept_total",
+            "Reports transitioned to expired by the TTL sweep"
+        ),
     }
 }
 
@@ -408,6 +456,11 @@ impl MetricsHub {
             report_generated_total: report.generated,
             report_recommendations_total: report.recommendations,
             report_publish_failures_total: report.publish_failures,
+            report_schedule_fires_total: report.schedule_fires,
+            report_schedule_skipped_overlap_total: report.schedule_skipped_overlap,
+            report_schedule_run_duration_seconds: report.schedule_run_duration,
+            report_schedule_active_jobs: report.schedule_active_jobs,
+            report_expire_swept_total: report.expire_swept,
         }
     }
 
@@ -448,6 +501,36 @@ impl MetricsHub {
         self.shutdown_stage_progress_remaining
             .with_label_values(&[stage])
             .set(i64::try_from(remaining).unwrap_or(i64::MAX));
+    }
+
+    /// Record one scheduled report fire: increments the per-outcome counter and
+    /// observes the pipeline wall-clock duration (also for failures, capturing
+    /// time-to-failure).
+    pub fn record_report_schedule_fire(&self, schedule_id: &str, outcome: &str, elapsed: Duration) {
+        self.report_schedule_fires_total
+            .with_label_values(&[schedule_id, outcome])
+            .inc();
+        self.report_schedule_run_duration_seconds
+            .with_label_values(&[schedule_id])
+            .observe(elapsed.as_secs_f64());
+    }
+
+    /// Increment the skip-if-running counter for an overlapping fire.
+    pub fn inc_report_schedule_skipped_overlap(&self, schedule_id: &str) {
+        self.report_schedule_skipped_overlap_total
+            .with_label_values(&[schedule_id])
+            .inc();
+    }
+
+    /// Publish the number of report schedules currently registered.
+    pub fn set_report_schedule_active_jobs(&self, count: usize) {
+        self.report_schedule_active_jobs
+            .set(i64::try_from(count).unwrap_or(i64::MAX));
+    }
+
+    /// Count reports expired by the TTL sweep in one pass.
+    pub fn inc_report_expire_swept(&self, swept: u64) {
+        self.report_expire_swept_total.inc_by(swept);
     }
 
     /// Publish per-status live-book counts for data-quality observability.

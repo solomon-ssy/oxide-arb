@@ -98,8 +98,7 @@ impl CoreModelTrainingPort {
                 entity: "runtime_config_version",
                 id: runtime_config_version_id.to_string(),
             })?;
-        RuntimeConfig::from_json(&version.config_json)
-            .map_err(|error| QuantError::config(error.to_string()))
+        RuntimeConfig::from_json(&version.config_json).map_err(Into::into)
     }
 }
 

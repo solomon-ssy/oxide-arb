@@ -16,7 +16,7 @@
 
 use crate::observability::factor_fact_writer::FactorEventWriter;
 use chrono::Utc;
-use quant_pivot_error::{QuantError, QuantResult};
+use quant_pivot_error::{QuantError, QuantResult, infra::InfraError, report::ReportError};
 use quant_pivot_models::{
     domain::{FactorValueInfo, NewFactorValue},
     runtime_config::{FactorsConfig, FeaturesConfig},
@@ -97,11 +97,14 @@ impl FactorPipelineService {
         request: FactorPipelineRequest<'_>,
     ) -> QuantResult<FactorPipelineResult> {
         if request.vectors.len() != request.feature_vector_ids.len() {
-            return Err(QuantError::Internal(format!(
-                "factor pipeline: {} vectors but {} feature-vector ids",
-                request.vectors.len(),
-                request.feature_vector_ids.len()
-            )));
+            return Err(ReportError::ContractViolation {
+                detail: format!(
+                    "factor pipeline: {} vectors but {} feature-vector ids",
+                    request.vectors.len(),
+                    request.feature_vector_ids.len()
+                ),
+            }
+            .into());
         }
 
         let engine = FactorEngine::new(request.factors, request.features);
@@ -123,7 +126,9 @@ impl FactorPipelineService {
             (engine, outcomes)
         })
         .await
-        .map_err(|err| QuantError::Internal(format!("factor compute task panicked: {err}")))?;
+        .map_err(|err| InfraError::BlockingTaskJoin {
+            detail: err.to_string(),
+        })?;
         let outcomes = outcomes?;
 
         // Persist the governed factor definitions first (idempotent on their

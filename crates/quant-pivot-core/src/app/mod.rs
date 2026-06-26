@@ -7,6 +7,7 @@ pub mod fact_writer_tasks;
 pub mod lifecycle;
 pub mod model_training;
 pub mod periodic_services;
+pub mod report_scheduler;
 pub mod runtime_tasks;
 pub mod task_id;
 pub mod task_registry;
@@ -19,6 +20,7 @@ pub use bundles::*;
 
 use crate::{
     governance::RuntimeModeHandle,
+    infra::schedule::ReportScheduleRunner,
     report::ReportLifecycleService,
     runtime_config::{RuntimeConfigApplicator, RuntimeConfigStore},
     service::{
@@ -87,6 +89,11 @@ impl AppContext {
     /// Report lifecycle service (04.2): trigger → build → transaction → publish.
     pub fn report_lifecycle(&self) -> Arc<ReportLifecycleService> {
         Arc::clone(&self.report.lifecycle)
+    }
+
+    /// Report schedule runner (04.3): cron/interval fire + ad-hoc enqueue.
+    pub fn report_scheduler(&self) -> Arc<dyn ReportScheduleRunner> {
+        Arc::clone(&self.report.scheduler)
     }
 
     /// Postgres persistence for factor definitions and values (3.3).

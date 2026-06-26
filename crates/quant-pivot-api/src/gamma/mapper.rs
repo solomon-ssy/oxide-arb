@@ -7,9 +7,9 @@
 
 use super::catalog::{CatalogEvent, CatalogMarket, RejectedMarket};
 use chrono::{DateTime, Utc};
+use quant_pivot_error::market::MarketError;
 use quant_pivot_models::{
     domain::{
-        MarketRegistryError,
         fee::{MarketFeeColumns, MarketFeeSchedule},
         market::{
             EventRegistryInfo, MarketRegistryInfo, TokenInfo, UpsertEvent, UpsertMarket,
@@ -136,7 +136,7 @@ pub struct CatalogMarketWithCtx {
 }
 
 impl TryFrom<CatalogMarketWithCtx> for (UpsertMarket, MarketRegistryInfo) {
-    type Error = MarketRegistryError;
+    type Error = MarketError;
 
     fn try_from(value: CatalogMarketWithCtx) -> Result<Self, Self::Error> {
         let CatalogMarketWithCtx { market, ctx } = value;

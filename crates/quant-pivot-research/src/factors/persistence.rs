@@ -1,7 +1,7 @@
 //! Factor compute types → Postgres insert DTO projection.
 
 use chrono::{DateTime, Utc};
-use quant_pivot_error::{QuantError, QuantResult};
+use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::{
     domain::{NewFactorDefinition, NewFactorValue},
     enums::quant::FactorDefinitionStatus,
@@ -30,8 +30,11 @@ impl FactorValue {
     ///
     /// Returns an error when the explanation cannot be serialized to JSON.
     pub fn try_to_new(&self, ctx: &FactorValueInsertContext<'_>) -> QuantResult<NewFactorValue> {
-        let explanation = serde_json::to_value(&self.explanation)
-            .map_err(|err| QuantError::Internal(format!("serialize factor explanation: {err}")))?;
+        let explanation = serde_json::to_value(&self.explanation).map_err(|err| {
+            ResearchError::Serialization {
+                detail: format!("serialize factor explanation: {err}"),
+            }
+        })?;
         Ok(NewFactorValue {
             factor_value_id: FactorValueId::from_v7(),
             factor_definition_id: self.definition_id.clone(),
@@ -63,8 +66,10 @@ impl FactorDefinitionSpec {
         &self,
         input_schema_version: SchemaVersion,
     ) -> QuantResult<NewFactorDefinition> {
-        let definition_json = serde_json::to_value(self)
-            .map_err(|err| QuantError::Internal(format!("serialize factor definition: {err}")))?;
+        let definition_json =
+            serde_json::to_value(self).map_err(|err| ResearchError::Serialization {
+                detail: format!("serialize factor definition: {err}"),
+            })?;
         Ok(NewFactorDefinition {
             factor_definition_id: factor_definition_id(self.name.as_str()),
             name: self.name.as_str().to_owned(),

@@ -722,6 +722,14 @@ pub trait ReportScheduleRunner: Send + Sync {
 `ReportLifecycleService::run_scheduled` 由 runner 的 job closure 调用；closure 内
 **不**再嵌套 `PeriodicTask` loop。
 
+> **04.3 实现说明**：runner 经 `ScheduledReportExecutor` 端口调用报告管线
+> （`ReportLifecycleService` 实现），并**提供 `trigger_time = Utc::now()`**——即
+> `run_scheduled(ScheduledReportRequest { schedule_id, trigger_time })`（scheduler owns
+> clock；`as_of`/version freeze 在 builder 内统一完成）。ad-hoc 经 `enqueue_ad_hoc` →
+> `executor.run_ad_hoc(AdHocReportRequest)`（与 scheduled 共用 lifecycle 内部 `run()`，
+> 幂等键 `ad_hoc:{request_id}`）。in-flight build spawn 到 runner 自持的 `TaskTracker`
+> 以支撑 shutdown graceful drain。
+
 ### 23.4 Schedule cadence 配置
 
 `ReportScheduleConfig` 扩展为 **二选一** cadence（与 `06-config-deploy-and-ops.md`
@@ -821,9 +829,9 @@ impl ReportScheduleRunner for TokioCronScheduleRunner {
     }
 
     async fn run(&self, shutdown: CancellationToken) -> QuantResult<()> {
-        self.scheduler.start().await.map_err(QuantError::from)?;
+        self.scheduler.start().await.map_err(scheduler_backend)?;
         shutdown.cancelled().await;
-        self.scheduler.shutdown().await.map_err(QuantError::from)?;
+        let _ = self.scheduler.shutdown().await.map_err(scheduler_backend)?;
         Ok(())
     }
 }

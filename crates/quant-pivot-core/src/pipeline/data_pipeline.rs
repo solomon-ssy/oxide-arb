@@ -9,7 +9,7 @@ use crate::{
     service::system_status_nudge::SystemStatusNudge,
 };
 use flume::Receiver;
-use quant_pivot_error::QuantError;
+use quant_pivot_error::{QuantError, infra::InfraError};
 use quant_pivot_models::{
     domain::{BookSnapshotCmd, PriceDeltaCmd, latency::LatencyTrace, pipeline::PipelineEvent},
     enums::{
@@ -133,9 +133,10 @@ impl DataPipeline {
                             handle.join().ok();
                         }
                         self.book_fact_writer.flush_pending_microstructure();
-                        return Err(QuantError::Internal(
-                            "Pipeline event channel closed".into(),
-                        ));
+                        return Err(InfraError::ChannelClosed {
+                            name: "pipeline_events",
+                        }
+                        .into());
                     }
                 }
             }

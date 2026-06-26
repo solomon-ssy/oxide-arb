@@ -125,9 +125,12 @@ impl FactorEngine {
             .into());
         }
         let mut outcomes = self.compute_all_batch(std::slice::from_ref(features), config)?;
-        outcomes
-            .pop()
-            .ok_or_else(|| QuantError::Internal("factor engine produced no outcome".to_owned()))
+        outcomes.pop().ok_or_else(|| {
+            ResearchError::FactorComputation {
+                detail: "factor engine produced no outcome".into(),
+            }
+            .into()
+        })
     }
 
     /// Compute every enabled factor for a batch of markets at one decision time.

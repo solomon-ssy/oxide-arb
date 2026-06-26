@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use quant_pivot_error::{QuantError, QuantResult};
+use quant_pivot_error::{QuantResult, report::ReportError};
 use quant_pivot_models::{
     domain::{MarketCandidate, MarketSelectionModel, NewMarketSelection, NewMarketSelectionMember},
     entities::quant_market_selection::{SelectionExcludedMarketIds, SelectionIncludedMarketIds},
@@ -50,10 +50,13 @@ pub fn map_snapshot_to_model(
         runtime_config_version_id: snapshot.runtime_config_version_id.clone(),
         selector_hash: snapshot.selector_hash.clone(),
         market_count: i32::try_from(snapshot.included.len()).map_err(|err| {
-            QuantError::Internal(format!(
-                "included market count {} exceeds i32::MAX: {err}",
-                snapshot.included.len()
-            ))
+            ReportError::NumericOverflow {
+                field: "market_selection.market_count",
+                detail: format!(
+                    "included market count {} exceeds i32::MAX: {err}",
+                    snapshot.included.len()
+                ),
+            }
         })?,
         included_market_ids,
         excluded_market_ids,
@@ -67,11 +70,12 @@ pub fn map_snapshot_to_model(
             let status = status_by_market
                 .get(&selected.market_id)
                 .copied()
-                .ok_or_else(|| {
-                    QuantError::Internal(format!(
+                .ok_or_else(|| ReportError::InvariantViolation {
+                    stage: "market_selection",
+                    detail: format!(
                         "missing candidate status for included market {}",
                         selected.market_id
-                    ))
+                    ),
                 })?;
             Ok(NewMarketSelectionMember {
                 market_selection_id: snapshot.market_selection_id.clone(),

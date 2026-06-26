@@ -14,7 +14,7 @@ use quant_pivot_models::{
 };
 use sea_orm::{
     ActiveModelTrait, ActiveValue, ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel,
-    QueryFilter, QueryOrder, TransactionTrait, sea_query::Expr,
+    QueryFilter, QueryOrder, QuerySelect, TransactionTrait, sea_query::Expr,
 };
 
 /// Postgres-backed recommendation report repository.
@@ -103,6 +103,29 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
             .await
             .map_err(StorageError::from)
             .map(|row| row.map(Into::into))
+    }
+
+    async fn find_expirable(
+        &self,
+        published_before: DateTime<Utc>,
+        limit: u64,
+    ) -> Result<Vec<RecommendationReportId>, StorageError> {
+        quant_recommendation_report::Entity::find()
+            .filter(quant_recommendation_report::Column::Status.is_in([
+                RecommendationReportStatus::Published,
+                RecommendationReportStatus::PublishedEmpty,
+            ]))
+            .filter(quant_recommendation_report::Column::PublishedAt.lte(published_before))
+            .order_by_asc(quant_recommendation_report::Column::PublishedAt)
+            .limit(limit)
+            .all(&self.db)
+            .await
+            .map_err(StorageError::from)
+            .map(|rows| {
+                rows.into_iter()
+                    .map(|row| row.recommendation_report_id)
+                    .collect()
+            })
     }
 
     async fn revoke(

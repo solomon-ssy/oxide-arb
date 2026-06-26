@@ -45,9 +45,9 @@ pub fn validate_deploy_common(deploy: &DeployConfig) -> ConfigValidationReport {
         });
     }
 
-    if deploy.quant.workers.report_scheduler_tick_secs == 0 {
+    if deploy.quant.workers.report_expire_sweep_secs == 0 {
         report.errors.push(ConfigValidationError::InvalidValue {
-            field: "quant.workers.report_scheduler_tick_secs",
+            field: "quant.workers.report_expire_sweep_secs",
             detail: "must be > 0".into(),
         });
     }

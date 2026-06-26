@@ -10,7 +10,7 @@ use crate::{
     },
 };
 use prometheus::IntCounter;
-use quant_pivot_error::{QuantError, QuantResult};
+use quant_pivot_error::{QuantResult, infra::InfraError};
 use quant_pivot_models::{
     clickhouse::{
         BookL2ReplayRow, BookMicrostructureRow, BookSnapshotRow, MarketResolutionRow,
@@ -81,7 +81,10 @@ impl InfraBundle {
             &deploy.cache,
         ));
         cache.register_metrics(&metrics.registry).map_err(|error| {
-            QuantError::Internal(format!("cache metrics registration: {error}"))
+            InfraError::MetricsRegistration {
+                subsystem: "cache",
+                detail: error.to_string(),
+            }
         })?;
 
         let jwt_blacklist = Arc::new(RedisTokenBlacklist::new(
@@ -98,8 +101,9 @@ impl InfraBundle {
         ch_write_manager
             .metrics()
             .register(&metrics.registry)
-            .map_err(|error| {
-                QuantError::Internal(format!("clickhouse write metrics registration: {error}"))
+            .map_err(|error| InfraError::MetricsRegistration {
+                subsystem: "clickhouse_write",
+                detail: error.to_string(),
             })?;
 
         let quant_fact_repo: Arc<dyn QuantFactRepository> = Arc::new(ChQuantFactRepository::new(

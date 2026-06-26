@@ -13,6 +13,8 @@ pub async fn run(deploy: Arc<DeployConfig>) -> QuantResult<()> {
     let mut runner = AppRunner::for_quant_mode(shutdown.clone(), ctx.runtime_mode().current());
     ctx.register_runtime_tasks(&mut runner);
     ctx.register_periodic_services(&mut runner);
+    ctx.register_report_scheduler(&mut runner);
+    ctx.register_report_expire_sweep(&mut runner);
     ctx.register_web_services(&mut runner).await?;
     ctx.register_fact_writer_tasks(&mut runner);
 

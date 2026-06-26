@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use quant_pivot_error::QuantResult;
 use quant_pivot_models::domain::CoreEventPublisher;
 use quant_pivot_repository::{
     postgres::{PgRecommendationReportRepository, PgRuntimeConfigVersionRepository},
@@ -9,9 +10,13 @@ use quant_pivot_repository::{
 };
 
 use super::{AccountBundle, DataBundle, GovernanceBundle, InfraBundle, ResearchBundle};
-use crate::report::{
-    DefaultRecommendationComposer, DefaultReportBuilder, ReportBuilderDeps, ReportLifecycleDeps,
-    ReportLifecycleService, ReportPublisher, ReportPublisherDeps,
+use crate::{
+    infra::schedule::ReportScheduleRunner,
+    report::{
+        DefaultRecommendationComposer, DefaultReportBuilder, ReportBuilderDeps,
+        ReportLifecycleDeps, ReportLifecycleService, ReportPublisher, ReportPublisherDeps,
+        build_report_scheduler,
+    },
 };
 
 /// Dependencies for the recommendation report bundle.
@@ -27,12 +32,12 @@ pub struct ReportBundleDeps<'a> {
 /// Recommendation report bundle (Phase 4+).
 pub struct ReportBundle {
     pub lifecycle: Arc<ReportLifecycleService>,
+    pub scheduler: Arc<dyn ReportScheduleRunner>,
 }
 
 impl ReportBundle {
-    /// Assemble report builder/composer/publisher/lifecycle.
-    #[must_use]
-    pub fn assemble(deps: ReportBundleDeps<'_>) -> Self {
+    /// Assemble report builder/composer/publisher/lifecycle + schedule runner.
+    pub async fn assemble(deps: ReportBundleDeps<'_>) -> QuantResult<Self> {
         let report_repo: Arc<dyn RecommendationReportRepository> = Arc::new(
             PgRecommendationReportRepository::new(deps.infra.pg.connection().clone()),
         );
@@ -60,13 +65,21 @@ impl ReportBundle {
             alerts: Arc::clone(&deps.governance.alerts),
             metrics: Arc::clone(&deps.infra.metrics),
         }));
-        Self {
-            lifecycle: Arc::new(ReportLifecycleService::new(ReportLifecycleDeps {
-                report_repo,
-                builder,
-                publisher,
-            })),
-        }
+        let lifecycle = Arc::new(ReportLifecycleService::new(ReportLifecycleDeps {
+            report_repo,
+            builder,
+            publisher,
+        }));
+        let scheduler = build_report_scheduler(
+            Arc::clone(&lifecycle),
+            Arc::clone(&deps.infra.metrics),
+            Arc::clone(&deps.governance.alerts),
+        )
+        .await?;
+        Ok(Self {
+            lifecycle,
+            scheduler,
+        })
     }
 }
 

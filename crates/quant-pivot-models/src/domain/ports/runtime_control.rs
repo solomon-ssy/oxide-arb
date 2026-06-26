@@ -13,10 +13,9 @@ use crate::{
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use quant_pivot_error::QuantError;
+use quant_pivot_error::control::ControlError;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashSet, sync::Arc};
-use thiserror::Error;
 
 /// Gamma catalog warmup state for operator dashboards.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -49,20 +48,6 @@ pub struct QuantModeTransitionReport {
     pub to: QuantRuntimeMode,
 }
 
-#[derive(Debug, Error)]
-pub enum RuntimeControlError {
-    #[error("precondition failed: {0}")]
-    Precondition(String),
-    #[error("control operation failed: {0}")]
-    Engine(String),
-}
-
-impl From<QuantError> for RuntimeControlError {
-    fn from(error: QuantError) -> Self {
-        Self::Engine(error.to_string())
-    }
-}
-
 #[async_trait]
 pub trait RuntimeControlPort: Send + Sync {
     fn quant_runtime_mode(&self) -> QuantRuntimeMode;
@@ -71,7 +56,7 @@ pub trait RuntimeControlPort: Send + Sync {
         &self,
         target: QuantRuntimeMode,
         reason: &str,
-    ) -> Result<QuantModeTransitionReport, RuntimeControlError>;
+    ) -> Result<QuantModeTransitionReport, ControlError>;
 
     fn system_status(&self) -> SystemStatus;
 
@@ -81,8 +66,8 @@ pub trait RuntimeControlPort: Send + Sync {
 #[async_trait]
 pub trait RuntimeConfigPort: Send + Sync {
     fn current(&self) -> Arc<RuntimeConfig>;
-    fn preflight(&self, candidate: &RuntimeConfig) -> Result<(), RuntimeControlError>;
-    async fn apply(&self, config: RuntimeConfig) -> Result<(), RuntimeControlError>;
+    fn preflight(&self, candidate: &RuntimeConfig) -> Result<(), ControlError>;
+    async fn apply(&self, config: RuntimeConfig) -> Result<(), ControlError>;
 }
 
 #[async_trait]
@@ -95,9 +80,9 @@ pub trait MarketDataPort: Send + Sync {
 
     fn subscribed_tokens(&self, token_ids: &[TokenId]) -> HashSet<TokenId>;
 
-    async fn subscribe(&self, token_ids: Vec<TokenId>) -> Result<(), RuntimeControlError>;
+    async fn subscribe(&self, token_ids: Vec<TokenId>) -> Result<(), ControlError>;
 
-    async fn unsubscribe(&self, token_ids: Vec<TokenId>) -> Result<(), RuntimeControlError>;
+    async fn unsubscribe(&self, token_ids: Vec<TokenId>) -> Result<(), ControlError>;
 }
 
 pub trait MetricsScrapePort: Send + Sync {

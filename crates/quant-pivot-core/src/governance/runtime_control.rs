@@ -2,11 +2,9 @@
 
 use crate::{governance::RuntimeModeHandle, infra::health_checker::HealthChecker};
 use async_trait::async_trait;
+use quant_pivot_error::control::ControlError;
 use quant_pivot_models::{
-    domain::{
-        HealthReport, QuantModeTransitionReport, RuntimeControlError, RuntimeControlPort,
-        SystemStatus,
-    },
+    domain::{HealthReport, QuantModeTransitionReport, RuntimeControlPort, SystemStatus},
     enums::quant::QuantRuntimeMode,
 };
 use quant_pivot_repository::{
@@ -45,7 +43,7 @@ impl RuntimeControlPort for QuantRuntimeControl {
         &self,
         target: QuantRuntimeMode,
         reason: &str,
-    ) -> Result<QuantModeTransitionReport, RuntimeControlError> {
+    ) -> Result<QuantModeTransitionReport, ControlError> {
         let from = self.runtime_mode.current();
         if from == target {
             return Ok(QuantModeTransitionReport { from, to: target });
@@ -53,7 +51,7 @@ impl RuntimeControlPort for QuantRuntimeControl {
         self.runtime_state_repo
             .upsert_quant_runtime_mode(target, "operator", reason)
             .await
-            .map_err(|error| RuntimeControlError::Engine(error.to_string()))?;
+            .map_err(|error| ControlError::Engine(error.to_string()))?;
         self.runtime_mode.store(target);
         Ok(QuantModeTransitionReport { from, to: target })
     }

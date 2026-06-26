@@ -25,6 +25,15 @@ pub trait RecommendationReportRepository: Send + Sync {
         trigger_key: &str,
     ) -> Result<Option<RecommendationReportInfo>, StorageError>;
 
+    /// Ids of reports eligible for TTL expiry: `published` / `published_empty`
+    /// whose `published_at` is at or before `published_before`, oldest first,
+    /// capped at `limit`.
+    async fn find_expirable(
+        &self,
+        published_before: DateTime<Utc>,
+        limit: u64,
+    ) -> Result<Vec<RecommendationReportId>, StorageError>;
+
     async fn revoke(
         &self,
         report_id: &RecommendationReportId,

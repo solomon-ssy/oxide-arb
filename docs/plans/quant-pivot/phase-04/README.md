@@ -118,7 +118,7 @@ flowchart LR
 | `RecommendationReportModel`（[`domain/quant/recommendation.rs`](../../../crates/quant-pivot-models/src/domain/quant/recommendation.rs) §138） | 仅 prelude re-export，零构造点 | **删除**，由 04.2 `ComposedReport` 草稿类型取代 | 04.2 |
 | `PortfolioPlanModel`（[`domain/quant/portfolio.rs`](../../../crates/quant-pivot-models/src/domain/quant/portfolio.rs)） | 仅 prelude re-export，零构造点 | **删除**（planner 直接产 `NewPortfolioPlan`） | 04.1 |
 | `RecommendationAttributionModel`（[`domain/quant/attribution.rs`](../../../crates/quant-pivot-models/src/domain/quant/attribution.rs)） | 仅 prelude re-export，零构造点 | **删除**（attribution 属 Phase 5） | Phase 5（04.0 标注） |
-| `QuantWorkersConfig.report_scheduler_tick_secs`（[`config/quant.rs`](../../../crates/quant-pivot-models/src/config/quant.rs)） | 全仓零读取；父文档 §23.4 降级为"可选健康扫描" | **删除或降级**为可选 sweep cadence（不做主触发器） | 04.3 |
+| `QuantWorkersConfig.report_scheduler_tick_secs`（[`config/quant.rs`](../../../crates/quant-pivot-models/src/config/quant.rs)） | 全仓零读取；父文档 §23.4 降级为"可选健康扫描" | **已删除**，由 `report_expire_sweep_secs`（仅 expire sweep cadence，非主触发器）取代 | 04.3 ✅ |
 
 ### 4.2 合并 / 收敛（重复或重叠语义）
 

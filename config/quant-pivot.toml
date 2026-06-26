@@ -131,9 +131,11 @@ size_threshold = 1
 # ── Quant Pivot (Phase 0) ─────────────────────────────────────────────────────
 
 [quant.workers]
-# Purpose: report scheduler tick interval (seconds). Phase 4 consumes this knob.
-# Default: 30.
-report_scheduler_tick_secs = 30
+# Purpose: report TTL expire-sweep cadence (seconds). Drives only the decoupled
+# expire_due_reports sweep — NOT report fire scheduling (cadence comes from
+# runtime-config reports.schedules[] via tokio-cron-scheduler).
+# Default: 300.
+report_expire_sweep_secs = 300
 
 [quant.account]
 # Purpose: Polymarket proxy/funder address for keyless Data API position reads

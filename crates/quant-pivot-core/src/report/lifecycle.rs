@@ -2,8 +2,8 @@
 
 use std::sync::Arc;
 
-use chrono::{DateTime, Utc};
-use quant_pivot_error::QuantResult;
+use chrono::{DateTime, Duration, Utc};
+use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
     domain::{NewOperationLog, RecommendationReportInfo},
     enums::{
@@ -135,6 +135,37 @@ impl ReportLifecycleService {
             .await?;
         self.publisher.publish_expired(&report);
         Ok(report)
+    }
+
+    /// Expire all reports whose TTL has elapsed (`published_at + ttl <= now`),
+    /// oldest first, up to `limit` per pass. Each expiry is one committed
+    /// transaction (status + operation log) followed by a lifecycle event, so a
+    /// single conflict (e.g. a concurrent revoke) is logged and skipped without
+    /// aborting the sweep. Returns the number of reports expired.
+    pub async fn expire_due_reports(
+        &self,
+        now: DateTime<Utc>,
+        ttl_secs: u64,
+        limit: u64,
+    ) -> QuantResult<u32> {
+        let ttl = i64::try_from(ttl_secs)
+            .map_err(|error| QuantError::config(format!("report_ttl_secs too large: {error}")))?;
+        let published_before = now - Duration::seconds(ttl);
+        let due = self
+            .report_repo
+            .find_expirable(published_before, limit)
+            .await?;
+
+        let mut expired = 0_u32;
+        for report_id in due {
+            match self.expire(&report_id, "ttl_expired", now).await {
+                Ok(_) => expired = expired.saturating_add(1),
+                Err(error) => {
+                    tracing::warn!(%report_id, %error, "report ttl expiry skipped");
+                }
+            }
+        }
+        Ok(expired)
     }
 
     async fn run(&self, request: BuildReportRequest) -> QuantResult<RecommendationReportInfo> {

@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 
-use chrono::Utc;
+use chrono::{Duration, Utc};
 use quant_pivot_models::{
     domain::{
         NewAccountSnapshot, NewMarketSelection, NewModelRun, NewModelSpec, NewModelVersion,
@@ -159,6 +159,75 @@ async fn report_transaction_persists_chain_and_reserved_capital_sums_pending_int
     create_and_assert_report_transaction(&db, &ids).await;
     assert_recommendation_roundtrip(&db, &ids.report).await;
     assert_reserved_capital_tracks_pending_intent(&db, &ids.recommendation).await;
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn find_expirable_returns_published_reports_before_cutoff_only() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+
+    let rc_id = seed_runtime_config(&db).await;
+    let (model_version_id, model_run_id) = seed_model_version(&db, &rc_id).await;
+    let event_id = "evt-1";
+    let market_id = "0xmarket";
+    seed_market_catalog(&db, event_id, market_id).await;
+    let market_selection_id = seed_market_selection(&db, &rc_id, market_id, event_id).await;
+
+    let ids = TxnIds {
+        account_snapshot: AccountSnapshotId::from_v7(),
+        portfolio_plan: PortfolioPlanId::from_v7(),
+        report: RecommendationReportId::from_v7(),
+        recommendation: RecommendationId::from_v7(),
+        model_version: model_version_id,
+        model_run: model_run_id,
+        market_selection: market_selection_id,
+        runtime_config_version: rc_id,
+        market: market_id.to_owned(),
+        event: event_id.to_owned(),
+    };
+
+    let report_repo = PgRecommendationReportRepository::new(db.clone());
+    report_repo
+        .create_report(build_report_transaction(&ids))
+        .await
+        .expect("create report");
+
+    // Not yet due: a cutoff earlier than `published_at` excludes the report.
+    let not_due = report_repo
+        .find_expirable(Utc::now() - Duration::minutes(1), 100)
+        .await
+        .expect("find before cutoff");
+    assert!(
+        not_due.is_empty(),
+        "a report published ~now must not be expirable at an earlier cutoff"
+    );
+
+    // Due: a cutoff after `published_at` includes the published report.
+    let due = report_repo
+        .find_expirable(Utc::now() + Duration::minutes(1), 100)
+        .await
+        .expect("find due");
+    assert_eq!(due, vec![ids.report.clone()]);
+
+    // Once expired, the status filter removes it from the expirable set.
+    report_repo
+        .expire(
+            &ids.report,
+            "ttl_expired",
+            Utc::now(),
+            report_operation_log(&ids),
+        )
+        .await
+        .expect("expire report");
+    let after_expiry = report_repo
+        .find_expirable(Utc::now() + Duration::minutes(1), 100)
+        .await
+        .expect("find after expiry");
+    assert!(
+        after_expiry.is_empty(),
+        "expired reports must not be returned by find_expirable"
+    );
 }
 
 async fn seed_market_catalog(db: &sea_orm::DatabaseConnection, event_id: &str, market_id: &str) {

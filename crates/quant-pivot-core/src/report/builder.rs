@@ -386,8 +386,7 @@ impl DefaultReportBuilder {
             .load_active_at(request.trigger_time)
             .await?
             .ok_or_else(|| QuantError::config("no active runtime config version"))?;
-        let config = RuntimeConfig::from_json(&version.config_json)
-            .map_err(|error| QuantError::config(error.to_string()))?;
+        let config = RuntimeConfig::from_json(&version.config_json)?;
         Ok((version, config))
     }
 

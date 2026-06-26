@@ -10,11 +10,11 @@ use crate::{
 };
 use async_trait::async_trait;
 use quant_pivot_api::ws::{ClobWsManager, SubscriptionSource};
-use quant_pivot_error::{QuantError, QuantResult};
+use quant_pivot_error::{QuantResult, control::ControlError, infra::InfraError};
 use quant_pivot_models::{
     domain::{
         BookSnapshot, CatalogStatusPort, DataQualityPort, MarketDataPort, MetricsScrapePort,
-        NewOperationLog, RuntimeConfigPort, RuntimeControlError,
+        NewOperationLog, RuntimeConfigPort,
     },
     types::TokenId,
 };
@@ -49,11 +49,11 @@ impl AppContext {
     pub async fn register_web_services(&self, runner: &mut AppRunner) -> QuantResult<()> {
         let pg = self.infra.pg.connection();
         let perm_checker = Arc::new(routes::init_rbac_rules());
-        let casbin = Arc::new(
-            CasbinService::new(pg.clone())
-                .await
-                .map_err(|error| QuantError::Internal(error.to_string()))?,
-        );
+        let casbin = Arc::new(CasbinService::new(pg.clone()).await.map_err(|error| {
+            InfraError::Misconfigured {
+                detail: error.to_string(),
+            }
+        })?);
         let jwt = Arc::new(JwtService::new(
             &self.config.web.jwt,
             Arc::clone(&self.infra.jwt_blacklist) as Arc<dyn TokenBlacklist>,
@@ -64,7 +64,9 @@ impl AppContext {
             .event_rx
             .lock()
             .take()
-            .ok_or_else(|| QuantError::Internal("event_rx already taken".into()))?;
+            .ok_or_else(|| InfraError::Misconfigured {
+                detail: "event_rx already taken".into(),
+            })?;
 
         let ws_sessions = SessionRegistry::default();
         let ws_registry = ws_sessions.clone();
@@ -218,13 +220,13 @@ impl MarketDataPort for CoreMarketData {
         self.ws_manager.subscribed_tokens(token_ids)
     }
 
-    async fn subscribe(&self, token_ids: Vec<TokenId>) -> Result<(), RuntimeControlError> {
+    async fn subscribe(&self, token_ids: Vec<TokenId>) -> Result<(), ControlError> {
         self.ws_manager
             .subscribe_tokens(SubscriptionSource::Web, &token_ids);
         Ok(())
     }
 
-    async fn unsubscribe(&self, token_ids: Vec<TokenId>) -> Result<(), RuntimeControlError> {
+    async fn unsubscribe(&self, token_ids: Vec<TokenId>) -> Result<(), ControlError> {
         self.ws_manager
             .unsubscribe_tokens(SubscriptionSource::Web, &token_ids);
         Ok(())

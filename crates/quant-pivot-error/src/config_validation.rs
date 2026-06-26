@@ -1,5 +1,7 @@
 //! Strongly-typed startup configuration validation diagnostics.
 
+use std::fmt::Display;
+
 use rust_decimal::Decimal;
 use thiserror::Error;
 
@@ -50,6 +52,21 @@ pub enum ConfigValidationError {
     },
     #[error("{field}: {detail}")]
     InvalidValue { field: &'static str, detail: String },
+}
+
+impl ConfigValidationError {
+    #[must_use]
+    pub fn invalid_value(field: &'static str, detail: impl Into<String>) -> Self {
+        Self::InvalidValue {
+            field,
+            detail: detail.into(),
+        }
+    }
+
+    #[must_use]
+    pub fn invalid_decimal(field: &'static str, raw: &str, source: impl Display) -> Self {
+        Self::invalid_value(field, format!("`{raw}` is not a valid decimal: {source}"))
+    }
 }
 
 /// Non-fatal configuration concern.

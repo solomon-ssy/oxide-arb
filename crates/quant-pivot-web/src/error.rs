@@ -17,10 +17,9 @@
 
 use actix_web::{HttpResponse, ResponseError, http::StatusCode};
 use quant_pivot_error::{
-    QuantError, auth::AuthError, governance::GovernanceError, rbac::RbacError,
-    research::ResearchError, storage::StorageError,
+    QuantError, auth::AuthError, control::ControlError, governance::GovernanceError,
+    query::QueryError, rbac::RbacError, research::ResearchError, storage::StorageError,
 };
-use quant_pivot_models::domain::{RuntimeControlError, WindowQueryError};
 use thiserror::Error;
 
 use crate::response::WebResponse;
@@ -160,18 +159,18 @@ impl From<RbacError> for WebError {
     }
 }
 
-impl From<WindowQueryError> for WebError {
-    fn from(error: WindowQueryError) -> Self {
+impl From<QueryError> for WebError {
+    fn from(error: QueryError) -> Self {
         // Both variants are caller-supplied window misuse → 400.
         Self::BadRequest(error.to_string())
     }
 }
 
-impl From<RuntimeControlError> for WebError {
-    fn from(error: RuntimeControlError) -> Self {
+impl From<ControlError> for WebError {
+    fn from(error: ControlError) -> Self {
         match error {
-            RuntimeControlError::Precondition(_) => Self::Conflict(error.to_string()),
-            RuntimeControlError::Engine(_) => Self::Internal(error.to_string()),
+            ControlError::Precondition(_) => Self::Conflict(error.to_string()),
+            ControlError::Engine(_) => Self::Internal(error.to_string()),
         }
     }
 }
@@ -189,6 +188,23 @@ impl From<QuantError> for WebError {
             ) => Self::BadRequest(detail),
             QuantError::Config(_) => Self::BadRequest(error.to_string()),
             QuantError::Governance(governance) => governance.into(),
+            QuantError::Scheduler(_) => {
+                Self::ServiceUnavailable("scheduler temporarily unavailable".to_owned())
+            }
+            QuantError::Report(_) => Self::Internal(error.to_string()),
+            QuantError::Infra(ref infra) => match infra {
+                quant_pivot_error::infra::InfraError::MetricsRegistration { .. }
+                | quant_pivot_error::infra::InfraError::ChannelClosed { .. } => {
+                    Self::ServiceUnavailable("service temporarily unavailable".to_owned())
+                }
+                quant_pivot_error::infra::InfraError::ServerBind { .. }
+                | quant_pivot_error::infra::InfraError::ServerRuntime { .. }
+                | quant_pivot_error::infra::InfraError::Misconfigured { .. }
+                | quant_pivot_error::infra::InfraError::BlockingTaskJoin { .. } => {
+                    Self::Internal(error.to_string())
+                }
+            },
+            QuantError::Control(control) => control.into(),
             other => Self::Internal(other.to_string()),
         }
     }

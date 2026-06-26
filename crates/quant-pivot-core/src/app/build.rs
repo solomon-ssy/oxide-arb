@@ -62,7 +62,14 @@ impl AppContext {
             research: &research,
             account: &account,
             events: events.clone(),
-        });
+        })
+        .await?;
+        // Late-bind the report scheduler so runtime-config activation rebuilds
+        // report jobs without a restart (the runner depends on the report
+        // lifecycle, which is built after governance).
+        governance
+            .applicator
+            .attach_report_scheduler(Arc::clone(&report.scheduler));
 
         Ok(Self {
             config: deploy,

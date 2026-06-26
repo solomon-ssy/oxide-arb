@@ -12,12 +12,13 @@ use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, Utc};
 use quant_pivot_core::governance::{ModelGovernanceDeps, ModelGovernanceService};
 use quant_pivot_core::runtime_config::RuntimeConfigStore;
+use quant_pivot_error::control::ControlError;
 use quant_pivot_models::{
     domain::{
         GovernanceActor, ModelGovernancePort, NewBacktestReport, NewModelRun, NewModelSpec,
         NewModelVersion, NewRuntimeConfigActivation, NewRuntimeConfigVersion, NewShadowComparison,
         NewTrainingDataset, PromoteDatasetRequest, PublishModelCommand, RollbackModelCommand,
-        RuntimeConfigPort, RuntimeControlError,
+        RuntimeConfigPort,
     },
     enums::{
         quant::{ModelPublicationStatus, ModelRunKind, ModelRunStatus, TrainingDatasetStatus},
@@ -69,11 +70,11 @@ impl RuntimeConfigPort for TestRuntimeConfigApply {
         self.store.current()
     }
 
-    fn preflight(&self, _candidate: &RuntimeConfig) -> Result<(), RuntimeControlError> {
+    fn preflight(&self, _candidate: &RuntimeConfig) -> Result<(), ControlError> {
         Ok(())
     }
 
-    async fn apply(&self, config: RuntimeConfig) -> Result<(), RuntimeControlError> {
+    async fn apply(&self, config: RuntimeConfig) -> Result<(), ControlError> {
         self.store.replace(config);
         Ok(())
     }

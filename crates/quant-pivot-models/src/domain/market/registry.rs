@@ -9,21 +9,10 @@ use crate::{
     types::{EventId, MarketId, TokenId, Usd},
 };
 use chrono::{DateTime, Utc};
+use quant_pivot_error::market::MarketError;
 use rust_decimal::Decimal;
 use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
 use serde::{Deserialize, Serialize};
-use thiserror::Error;
-
-/// Market registry conversion errors.
-#[derive(Debug, Clone, Error, PartialEq, Eq)]
-pub enum MarketRegistryError {
-    #[error("YES and NO token ids must differ for market {market_id}")]
-    DuplicateTokenPair { market_id: MarketId },
-    #[error("market {market_id} has no tokens")]
-    EmptyTokenSet { market_id: MarketId },
-    #[error("market {market_id} is missing a NO token")]
-    MissingNoToken { market_id: MarketId },
-}
 
 /// DB row projection matching `entities::market::Model` columns exactly.
 #[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]
@@ -161,10 +150,10 @@ impl MarketRegistryInfo {
     }
 
     /// Resolve the YES/NO token pair represented by this registry row.
-    pub fn resolve_token_pair(&self) -> Result<(TokenId, TokenId), MarketRegistryError> {
+    pub fn resolve_token_pair(&self) -> Result<(TokenId, TokenId), MarketError> {
         if self.token_yes == self.token_no {
-            return Err(MarketRegistryError::DuplicateTokenPair {
-                market_id: self.market_id.clone(),
+            return Err(MarketError::DuplicateTokenPair {
+                market_id: self.market_id.to_string(),
             });
         }
         Ok((self.token_yes.clone(), self.token_no.clone()))
@@ -172,7 +161,7 @@ impl MarketRegistryInfo {
 }
 
 impl TryFrom<&MarketRegistryInfo> for UpsertMarket {
-    type Error = MarketRegistryError;
+    type Error = MarketError;
 
     fn try_from(value: &MarketRegistryInfo) -> Result<Self, Self::Error> {
         Self::from_registry(value)
@@ -181,7 +170,7 @@ impl TryFrom<&MarketRegistryInfo> for UpsertMarket {
 
 impl UpsertMarket {
     /// Build a persistable upsert DTO from an in-memory Gamma registry row.
-    pub fn from_registry(value: &MarketRegistryInfo) -> Result<Self, MarketRegistryError> {
+    pub fn from_registry(value: &MarketRegistryInfo) -> Result<Self, MarketError> {
         value.resolve_token_pair()?;
         let fee_columns = value.fee_schedule.as_ref().map_or_else(
             MarketFeeColumns::disabled,
@@ -216,11 +205,13 @@ impl UpsertMarket {
 pub fn resolve_binary_pair_exact(
     market_id: &MarketId,
     tokens: &[TokenInfo],
-) -> Result<(TokenId, TokenId), MarketRegistryError> {
+) -> Result<(TokenId, TokenId), MarketError> {
+    let market_id = market_id.to_string();
+    let empty_tokens = || MarketError::EmptyTokenSet {
+        market_id: market_id.clone(),
+    };
     if tokens.is_empty() {
-        return Err(MarketRegistryError::EmptyTokenSet {
-            market_id: market_id.clone(),
-        });
+        return Err(empty_tokens());
     }
     let Some(yes) = tokens
         .iter()
@@ -228,9 +219,7 @@ pub fn resolve_binary_pair_exact(
         .or_else(|| tokens.first())
         .map(|token| token.token_id.clone())
     else {
-        return Err(MarketRegistryError::EmptyTokenSet {
-            market_id: market_id.clone(),
-        });
+        return Err(empty_tokens());
     };
     let Some(no) = tokens
         .iter()
@@ -238,14 +227,12 @@ pub fn resolve_binary_pair_exact(
         .or_else(|| tokens.get(1))
         .map(|token| token.token_id.clone())
     else {
-        return Err(MarketRegistryError::MissingNoToken {
+        return Err(MarketError::MissingNoToken {
             market_id: market_id.clone(),
         });
     };
     if yes == no {
-        return Err(MarketRegistryError::DuplicateTokenPair {
-            market_id: market_id.clone(),
-        });
+        return Err(MarketError::DuplicateTokenPair { market_id });
     }
     Ok((yes, no))
 }

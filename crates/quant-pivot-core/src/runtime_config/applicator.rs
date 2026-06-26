@@ -2,6 +2,7 @@
 
 use crate::{
     governance::WeightOverlayApplicator,
+    infra::schedule::ReportScheduleRunner,
     observability::metrics_hub::MetricsHub,
     pipeline::{
         data_quality::BookDataQualityService, market_cache::MarketCache,
@@ -11,8 +12,10 @@ use crate::{
     service::ws_subscription::WsSubscriptionCoordinator,
 };
 use async_trait::async_trait;
+use parking_lot::Mutex;
+use quant_pivot_error::control::ControlError;
 use quant_pivot_models::{
-    domain::{RuntimeConfigPort, RuntimeControlError},
+    domain::RuntimeConfigPort,
     runtime_config::{RUNTIME_CONFIG_SCHEMA_VERSION, RuntimeConfig},
 };
 use std::sync::Arc;
@@ -33,20 +36,30 @@ pub struct RuntimeConfigSubscribers {
 pub struct RuntimeConfigApplicator {
     store: Arc<RuntimeConfigStore>,
     subscribers: RuntimeConfigSubscribers,
+    /// Report schedule runner, late-bound after the report bundle is assembled
+    /// (the runner depends on the report lifecycle, which is built after
+    /// governance). `None` until [`Self::attach_report_scheduler`] is called.
+    report_scheduler: Mutex<Option<Arc<dyn ReportScheduleRunner>>>,
 }
 
 impl RuntimeConfigApplicator {
     #[must_use]
-    pub const fn new(
-        store: Arc<RuntimeConfigStore>,
-        subscribers: RuntimeConfigSubscribers,
-    ) -> Self {
-        Self { store, subscribers }
+    pub fn new(store: Arc<RuntimeConfigStore>, subscribers: RuntimeConfigSubscribers) -> Self {
+        Self {
+            store,
+            subscribers,
+            report_scheduler: Mutex::new(None),
+        }
     }
 
-    fn preflight_internal(candidate: &RuntimeConfig) -> Result<(), RuntimeControlError> {
+    /// Bind the report schedule runner so activations rebuild report jobs.
+    pub fn attach_report_scheduler(&self, runner: Arc<dyn ReportScheduleRunner>) {
+        *self.report_scheduler.lock() = Some(runner);
+    }
+
+    fn preflight_internal(candidate: &RuntimeConfig) -> Result<(), ControlError> {
         if candidate.schema_version != RUNTIME_CONFIG_SCHEMA_VERSION {
-            return Err(RuntimeControlError::Precondition(
+            return Err(ControlError::Precondition(
                 "unsupported runtime config schema version".to_owned(),
             ));
         }
@@ -77,15 +90,30 @@ impl RuntimeConfigPort for RuntimeConfigApplicator {
         self.store.current()
     }
 
-    fn preflight(&self, candidate: &RuntimeConfig) -> Result<(), RuntimeControlError> {
+    fn preflight(&self, candidate: &RuntimeConfig) -> Result<(), ControlError> {
         Self::preflight_internal(candidate)
     }
 
-    async fn apply(&self, config: RuntimeConfig) -> Result<(), RuntimeControlError> {
+    async fn apply(&self, config: RuntimeConfig) -> Result<(), ControlError> {
         Self::preflight_internal(&config)?;
         let arc = Arc::new(config);
         self.propagate(&arc);
-        self.store.swap(arc);
+        let scheduler = self.report_scheduler.lock().clone();
+        self.store.swap(Arc::clone(&arc));
+
+        // Rebuild report jobs from the just-activated snapshot. Best-effort:
+        // runtime-config is the schedule truth source, so a transient rebuild
+        // failure is logged and retried on the next activation / restart rather
+        // than rolling back an already-validated, already-stored activation.
+        if let Some(scheduler) = scheduler {
+            if let Err(error) = scheduler.sync_from_config(&arc.reports).await {
+                tracing::warn!(
+                    %error,
+                    "report schedule rebuild after activation failed; \
+                     will retry on next activation or restart"
+                );
+            }
+        }
         Ok(())
     }
 }

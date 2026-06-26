@@ -16,14 +16,19 @@ pub struct QuantDeployConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct QuantWorkersConfig {
-    /// Report scheduler tick interval (seconds). Phase 4 consumes this knob.
-    pub report_scheduler_tick_secs: u64,
+    /// Report TTL expire-sweep cadence (seconds).
+    ///
+    /// Drives only the decoupled `ReportLifecycleService::expire_due_reports`
+    /// sweep — **not** report fire scheduling, which is owned by
+    /// `tokio-cron-scheduler` via `ReportScheduleRunner` (cadence comes from
+    /// `runtime_config.reports.schedules[]`).
+    pub report_expire_sweep_secs: u64,
 }
 
 impl Default for QuantWorkersConfig {
     fn default() -> Self {
         Self {
-            report_scheduler_tick_secs: default_report_scheduler_tick_secs(),
+            report_expire_sweep_secs: default_report_expire_sweep_secs(),
         }
     }
 }
@@ -42,6 +47,6 @@ pub struct QuantAccountDeployConfig {
     pub funder: Option<String>,
 }
 
-const fn default_report_scheduler_tick_secs() -> u64 {
-    30
+const fn default_report_expire_sweep_secs() -> u64 {
+    300
 }

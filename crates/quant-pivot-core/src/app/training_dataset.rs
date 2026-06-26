@@ -66,8 +66,7 @@ impl CoreTrainingDatasetPort {
                 entity: "runtime_config_version",
                 id: runtime_config_version_id.to_string(),
             })?;
-        let runtime = RuntimeConfig::from_json(&version.config_json)
-            .map_err(|error| QuantError::config(error.to_string()))?;
+        let runtime = RuntimeConfig::from_json(&version.config_json)?;
         TrainingDatasetService::new(
             TrainingDatasetServiceDeps {
                 fact_read: Arc::clone(&self.fact_read),

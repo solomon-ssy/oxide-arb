@@ -19,6 +19,10 @@ use schemars::{JsonSchema, SchemaGenerator, generate::SchemaSettings};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use quant_pivot_error::{
+    ConfigValidationError, ConfigValidationReport, QuantError, config::ConfigError,
+};
+
 use crate::types::SchemaVersion;
 
 /// The only supported runtime-config schema version.
@@ -85,6 +89,34 @@ pub enum RuntimeConfigError {
         "unsupported runtime config schema_version {found} (expected {RUNTIME_CONFIG_SCHEMA_VERSION})"
     )]
     UnsupportedSchemaVersion { found: SchemaVersion },
+}
+
+impl From<RuntimeConfigError> for ConfigError {
+    fn from(error: RuntimeConfigError) -> Self {
+        match error {
+            RuntimeConfigError::Parse(err) => ConfigValidationReport::single_error(
+                ConfigValidationError::invalid_value("runtime_config", err.to_string()),
+            )
+            .into(),
+            RuntimeConfigError::UnsupportedSchemaVersion { found } => {
+                ConfigValidationReport::single_error(ConfigValidationError::invalid_value(
+                    "schema_version",
+                    format!(
+                        "unsupported runtime config schema_version {} (expected {})",
+                        found.get(),
+                        RUNTIME_CONFIG_SCHEMA_VERSION.get()
+                    ),
+                ))
+                .into()
+            }
+        }
+    }
+}
+
+impl From<RuntimeConfigError> for QuantError {
+    fn from(error: RuntimeConfigError) -> Self {
+        ConfigError::from(error).into()
+    }
 }
 
 impl RuntimeConfig {

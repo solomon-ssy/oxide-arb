@@ -634,12 +634,25 @@ fn thresholds_from_config(config: &QualityGateConfig) -> QuantResult<QualityGate
 
 /// Reconstruct a research [`BacktestReport`] from its persisted ledger row.
 fn backtest_report_from_info(info: BacktestReportInfo) -> QuantResult<BacktestReport> {
-    let expected_vs_realized = serde_json::from_value(info.expected_vs_realized)
-        .map_err(|error| decode_error("expected_vs_realized", &error))?;
-    let category_breakdown = serde_json::from_value(info.category_breakdown)
-        .map_err(|error| decode_error("category_breakdown", &error))?;
-    let report_pnl_simulation = serde_json::from_value(info.report_pnl_simulation)
-        .map_err(|error| decode_error("report_pnl_simulation", &error))?;
+    let expected_vs_realized =
+        serde_json::from_value(info.expected_vs_realized).map_err(|error| {
+            GovernanceError::IllegalTransition {
+                detail: format!("backtest report `expected_vs_realized` is not decodable: {error}"),
+            }
+        })?;
+    let category_breakdown = serde_json::from_value(info.category_breakdown).map_err(|error| {
+        GovernanceError::IllegalTransition {
+            detail: format!("backtest report `category_breakdown` is not decodable: {error}"),
+        }
+    })?;
+    let report_pnl_simulation =
+        serde_json::from_value(info.report_pnl_simulation).map_err(|error| {
+            GovernanceError::IllegalTransition {
+                detail: format!(
+                    "backtest report `report_pnl_simulation` is not decodable: {error}"
+                ),
+            }
+        })?;
     Ok(BacktestReport {
         backtest_report_id: info.backtest_report_id,
         model_version_id: info.model_version_id,
@@ -660,12 +673,4 @@ fn backtest_report_from_info(info: BacktestReportInfo) -> QuantResult<BacktestRe
         report_pnl_simulation,
         report_hash: info.report_hash,
     })
-}
-
-/// Build a governance error for an undecodable persisted backtest sub-structure.
-fn decode_error(field: &str, error: &serde_json::Error) -> QuantError {
-    GovernanceError::IllegalTransition {
-        detail: format!("backtest report `{field}` is not decodable: {error}"),
-    }
-    .into()
 }

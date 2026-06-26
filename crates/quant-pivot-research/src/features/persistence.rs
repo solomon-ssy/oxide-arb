@@ -1,6 +1,6 @@
 //! Feature compute types → Postgres insert DTO projection.
 
-use quant_pivot_error::{QuantError, QuantResult};
+use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::{domain::NewFeatureVector, types::FeatureVectorId};
 use serde_json::json;
 
@@ -20,8 +20,11 @@ impl FeatureVector {
             "values": self.values,
             "substitutions": self.substitutions,
         });
-        let source_refs = serde_json::to_value(&self.source_refs)
-            .map_err(|err| QuantError::Internal(format!("serialize feature source_refs: {err}")))?;
+        let source_refs = serde_json::to_value(&self.source_refs).map_err(|err| {
+            ResearchError::Serialization {
+                detail: format!("serialize feature source_refs: {err}"),
+            }
+        })?;
 
         Ok(NewFeatureVector {
             feature_vector_id: FeatureVectorId::from_v7(),
