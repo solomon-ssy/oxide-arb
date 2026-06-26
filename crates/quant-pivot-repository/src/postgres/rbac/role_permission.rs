@@ -68,14 +68,11 @@ async fn do_set_permissions(
 }
 
 async fn do_list_permissions(
-    db: &DatabaseConnection,
+    db: &impl ConnectionTrait,
     role_id: &RoleId,
 ) -> Result<Vec<Permission>, StorageError> {
-    let txn = db.begin().await.map_err(StorageError::from)?;
-    let role_code = role_code_of(&txn, role_id).await?;
-    let permissions = sync::do_list_role_policies(&txn, &role_code).await?;
-    txn.commit().await.map_err(StorageError::from)?;
-    Ok(permissions)
+    let role_code = role_code_of(db, role_id).await?;
+    sync::do_list_role_policies(db, &role_code).await
 }
 
 #[async_trait::async_trait]

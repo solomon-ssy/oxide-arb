@@ -10,7 +10,8 @@ use quant_pivot_models::{
 };
 use rust_decimal::Decimal;
 use sea_orm::{
-    ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder,
+    ColumnTrait, DatabaseConnection, EntityTrait, FromQueryResult, IntoActiveModel, QueryFilter,
+    QuerySelect, sea_query::Expr,
 };
 
 /// Postgres-backed shadow-comparison ledger repository.
@@ -22,6 +23,15 @@ impl PgShadowComparisonRepository {
     pub const fn new(db: DatabaseConnection) -> Self {
         Self { db }
     }
+}
+
+#[derive(Debug, FromQueryResult)]
+struct ShadowSummaryRow {
+    sample_count: i64,
+    window_start: Option<DateTime<Utc>>,
+    window_end: Option<DateTime<Utc>>,
+    mean_topn_overlap: Option<Decimal>,
+    any_hard_divergence: Option<bool>,
 }
 
 #[async_trait::async_trait]
@@ -42,35 +52,45 @@ impl ShadowComparisonRepository for PgShadowComparisonRepository {
         shadow_model_version_id: &ModelVersionId,
         since: DateTime<Utc>,
     ) -> Result<ShadowStabilitySummary, StorageError> {
-        let rows = quant_shadow_comparison::Entity::find()
+        let row = quant_shadow_comparison::Entity::find()
             .filter(
                 quant_shadow_comparison::Column::ShadowModelVersionId
                     .eq(shadow_model_version_id.clone()),
             )
             .filter(quant_shadow_comparison::Column::AsOf.gte(since))
-            .order_by_asc(quant_shadow_comparison::Column::AsOf)
-            .all(&self.db)
+            .select_only()
+            .column_as(Expr::cust("COUNT(*)"), "sample_count")
+            .column_as(Expr::cust("MIN(as_of)"), "window_start")
+            .column_as(Expr::cust("MAX(as_of)"), "window_end")
+            .column_as(Expr::cust("AVG(topn_overlap)"), "mean_topn_overlap")
+            .column_as(
+                Expr::cust("BOOL_OR(hard_divergence)"),
+                "any_hard_divergence",
+            )
+            .into_model::<ShadowSummaryRow>()
+            .one(&self.db)
             .await
             .map_err(StorageError::from)?;
 
-        let sample_count = u64::try_from(rows.len()).unwrap_or(u64::MAX);
-        let window_start = rows.first().map(|row| row.as_of);
-        let window_end = rows.last().map(|row| row.as_of);
-        let any_hard_divergence = rows.iter().any(|row| row.hard_divergence);
-        let mean_topn_overlap = if rows.is_empty() {
-            Probability::new(Decimal::ZERO)
-        } else {
-            let sum: Decimal = rows.iter().map(|row| row.topn_overlap.inner()).sum();
-            Probability::new(sum / Decimal::from(rows.len() as u64))
+        let Some(row) = row else {
+            return Ok(ShadowStabilitySummary {
+                shadow_model_version_id: shadow_model_version_id.clone(),
+                sample_count: 0,
+                window_start: None,
+                window_end: None,
+                mean_topn_overlap: Probability::new(Decimal::ZERO),
+                any_hard_divergence: false,
+            });
         };
 
+        let sample_count = u64::try_from(row.sample_count.max(0)).unwrap_or(u64::MAX);
         Ok(ShadowStabilitySummary {
             shadow_model_version_id: shadow_model_version_id.clone(),
             sample_count,
-            window_start,
-            window_end,
-            mean_topn_overlap,
-            any_hard_divergence,
+            window_start: row.window_start,
+            window_end: row.window_end,
+            mean_topn_overlap: Probability::new(row.mean_topn_overlap.unwrap_or(Decimal::ZERO)),
+            any_hard_divergence: row.any_hard_divergence.unwrap_or(false),
         })
     }
 }

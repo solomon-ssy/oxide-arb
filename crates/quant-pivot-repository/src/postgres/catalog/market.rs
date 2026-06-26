@@ -1,8 +1,12 @@
 use crate::{
-    postgres::bind_limit::{IN_LIST_CHUNK, max_rows_per_insert},
+    postgres::{
+        catalog::ingest::{
+            find_existing_str_id_chunks, find_models_by_str_id_chunks, upsert_many_chunked,
+        },
+        query::paginate_mapped,
+    },
     traits::MarketRepository,
 };
-use num_traits::ToPrimitive;
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::{MarketInfo, MarketPageQuery, Paginated, UpsertMarket},
@@ -14,8 +18,7 @@ use quant_pivot_models::{
 };
 use sea_orm::{
     ActiveValue, ColumnTrait, ConnectionTrait, DatabaseConnection, DatabaseTransaction,
-    EntityTrait, IntoActiveModel, Iterable, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect,
-    sea_query::OnConflict,
+    EntityTrait, IntoActiveModel, QueryFilter, QueryOrder, QueryTrait, sea_query::OnConflict,
 };
 use std::{collections::HashSet, sync::Arc};
 
@@ -52,16 +55,18 @@ async fn do_find_by_ids(
     db: &impl ConnectionTrait,
     ids: &[MarketId],
 ) -> Result<Vec<Arc<MarketInfo>>, StorageError> {
-    let mut markets = Vec::with_capacity(ids.len());
-    for chunk in ids.chunks(IN_LIST_CHUNK) {
-        let rows = MarketEntity::find()
-            .filter(MarketColumn::MarketId.is_in(chunk.iter().map(MarketId::as_str)))
-            .all(db)
-            .await
-            .map_err(StorageError::from)?;
-        markets.extend(rows.into_iter().map(|model| Arc::new(model.into())));
-    }
-    Ok(markets)
+    find_models_by_str_id_chunks::<MarketEntity, _, _, _>(
+        db,
+        ids,
+        MarketColumn::MarketId,
+        MarketId::as_str,
+    )
+    .await
+    .map(|rows| {
+        rows.into_iter()
+            .map(|model| Arc::new(model.into()))
+            .collect()
+    })
 }
 
 async fn do_find_active(db: &impl ConnectionTrait) -> Result<Arc<[MarketInfo]>, StorageError> {
@@ -93,19 +98,13 @@ async fn do_find_existing_ids(
     db: &impl ConnectionTrait,
     ids: &[MarketId],
 ) -> Result<HashSet<String>, StorageError> {
-    let mut existing = HashSet::with_capacity(ids.len());
-    for chunk in ids.chunks(IN_LIST_CHUNK) {
-        let rows = MarketEntity::find()
-            .filter(MarketColumn::MarketId.is_in(chunk.iter().map(MarketId::as_str)))
-            .select_only()
-            .column(MarketColumn::MarketId)
-            .into_tuple::<String>()
-            .all(db)
-            .await
-            .map_err(StorageError::from)?;
-        existing.extend(rows);
-    }
-    Ok(existing)
+    find_existing_str_id_chunks::<MarketEntity, _, _, _>(
+        db,
+        ids,
+        MarketColumn::MarketId,
+        MarketId::as_str,
+    )
+    .await
 }
 
 fn market_upsert_on_conflict() -> OnConflict {
@@ -150,23 +149,7 @@ async fn do_upsert_batch(
     db: &impl ConnectionTrait,
     dtos: Vec<UpsertMarket>,
 ) -> Result<u64, StorageError> {
-    if dtos.is_empty() {
-        return Ok(0);
-    }
-    let count = ToPrimitive::to_u64(&dtos.len()).unwrap_or(u64::MAX);
-    let models: Vec<MarketActiveModel> = dtos
-        .into_iter()
-        .map(IntoActiveModel::into_active_model)
-        .collect();
-    let rows_per_insert = max_rows_per_insert(MarketColumn::iter().count());
-    for chunk in models.chunks(rows_per_insert) {
-        MarketEntity::insert_many(chunk.to_vec())
-            .on_conflict(market_upsert_on_conflict())
-            .exec(db)
-            .await
-            .map_err(StorageError::from)?;
-    }
-    Ok(count)
+    upsert_many_chunked::<MarketEntity, UpsertMarket>(db, dtos, market_upsert_on_conflict()).await
 }
 
 async fn do_update_status(
@@ -207,32 +190,20 @@ async fn do_page(
     query: MarketPageQuery,
 ) -> Result<Paginated<MarketInfo>, StorageError> {
     let normalized = query.normalized();
-    let mut select = MarketEntity::find();
-    if let Some(status) = normalized.status {
-        select = select.filter(MarketColumn::Status.eq(status));
-    }
-    if let Some(search) = normalized.keyword.as_deref() {
-        let pattern = format!("%{}%", search.replace('%', "\\%").replace('_', "\\_"));
-        select = select.filter(
-            MarketColumn::Question
-                .contains(&pattern)
-                .or(MarketColumn::Slug.contains(&pattern)),
-        );
-    }
-    let paginator = select
-        .order_by_desc(MarketColumn::UpdatedAt)
-        .paginate(db, normalized.page.size);
-    let total = paginator.num_items().await.map_err(StorageError::from)?;
-    let rows = paginator
-        .fetch_page(normalized.page.page.saturating_sub(1))
-        .await
-        .map_err(StorageError::from)?;
-    Ok(Paginated::new(
-        rows.into_iter().map(Into::into).collect(),
-        normalized.page.page,
-        normalized.page.size,
-        total,
-    ))
+    let select = MarketEntity::find()
+        .apply_if(normalized.status, |query, status| {
+            query.filter(MarketColumn::Status.eq(status))
+        })
+        .apply_if(normalized.keyword.as_deref(), |query, search| {
+            let pattern = format!("%{}%", search.replace('%', "\\%").replace('_', "\\_"));
+            query.filter(
+                MarketColumn::Question
+                    .contains(&pattern)
+                    .or(MarketColumn::Slug.contains(&pattern)),
+            )
+        })
+        .order_by_desc(MarketColumn::UpdatedAt);
+    paginate_mapped(select, db, &normalized.page, Into::into).await
 }
 
 #[async_trait::async_trait]

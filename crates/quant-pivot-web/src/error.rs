@@ -55,6 +55,12 @@ pub enum WebError {
     /// A dependency (DB / Redis) is unavailable (HTTP 503).
     #[error("service unavailable: {0}")]
     ServiceUnavailable(String),
+
+    /// The endpoint is recognized but deliberately not yet implemented (HTTP
+    /// 501). Used for forward-declared routes (e.g. execution lands in Phase 5)
+    /// so a client is never misled by a silent 404 or a fake success.
+    #[error("not implemented: {0}")]
+    NotImplemented(String),
 }
 
 impl WebError {
@@ -68,6 +74,7 @@ impl WebError {
             Self::Conflict(_) => StatusCode::CONFLICT,
             Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::ServiceUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
+            Self::NotImplemented(_) => StatusCode::NOT_IMPLEMENTED,
         }
     }
 
@@ -79,7 +86,8 @@ impl WebError {
             | Self::NotFound(msg)
             | Self::BadRequest(msg)
             | Self::Conflict(msg)
-            | Self::ServiceUnavailable(msg) => msg.clone(),
+            | Self::ServiceUnavailable(msg)
+            | Self::NotImplemented(msg) => msg.clone(),
             Self::Forbidden => "forbidden".to_owned(),
             Self::Internal(_) => "internal error".to_owned(),
         }
@@ -192,6 +200,7 @@ impl From<QuantError> for WebError {
                 Self::ServiceUnavailable("scheduler temporarily unavailable".to_owned())
             }
             QuantError::Report(_) => Self::Internal(error.to_string()),
+            QuantError::NotImplemented(detail) => Self::NotImplemented(detail),
             QuantError::Infra(ref infra) => match infra {
                 quant_pivot_error::infra::InfraError::MetricsRegistration { .. }
                 | quant_pivot_error::infra::InfraError::ChannelClosed { .. } => {

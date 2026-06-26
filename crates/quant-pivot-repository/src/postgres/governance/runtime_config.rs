@@ -7,14 +7,16 @@ use quant_pivot_models::{
         RuntimeConfigVersionInfo,
     },
     entities::{
-        runtime_config_activation::{Column as ActivationColumn, Entity as ActivationEntity},
+        runtime_config_activation::{
+            Column as ActivationColumn, Entity as ActivationEntity, Relation as ActivationRelation,
+        },
         runtime_config_version::{Column as VersionColumn, Entity as VersionEntity},
     },
     types::{ContentHash, RuntimeConfigVersionId},
 };
 use sea_orm::{
     ColumnTrait, ConnectionTrait, DatabaseConnection, DatabaseTransaction, EntityTrait,
-    IntoActiveModel, QueryFilter, QueryOrder, QuerySelect,
+    IntoActiveModel, JoinType, QueryFilter, QueryOrder, QuerySelect, RelationTrait,
 };
 
 pub struct PgRuntimeConfigVersionRepository {
@@ -94,31 +96,27 @@ async fn do_load_by_hash(
 async fn do_load_current(
     db: &impl ConnectionTrait,
 ) -> Result<Option<RuntimeConfigVersionInfo>, StorageError> {
-    let Some(activation) = ActivationEntity::find()
+    VersionEntity::find()
+        .join_rev(JoinType::InnerJoin, ActivationRelation::Version.def())
         .order_by_desc(ActivationColumn::ActivatedAt)
         .one(db)
         .await
-        .map_err(StorageError::from)?
-    else {
-        return Ok(None);
-    };
-    do_load_version(db, &activation.runtime_config_version_id).await
+        .map_err(StorageError::from)
+        .map(|row| row.map(Into::into))
 }
 
 async fn do_load_active_at(
     db: &impl ConnectionTrait,
     at: DateTime<Utc>,
 ) -> Result<Option<RuntimeConfigVersionInfo>, StorageError> {
-    let Some(activation) = ActivationEntity::find()
+    VersionEntity::find()
+        .join_rev(JoinType::InnerJoin, ActivationRelation::Version.def())
         .filter(ActivationColumn::ActivatedAt.lte(at))
         .order_by_desc(ActivationColumn::ActivatedAt)
         .one(db)
         .await
-        .map_err(StorageError::from)?
-    else {
-        return Ok(None);
-    };
-    do_load_version(db, &activation.runtime_config_version_id).await
+        .map_err(StorageError::from)
+        .map(|row| row.map(Into::into))
 }
 
 async fn do_list_versions(

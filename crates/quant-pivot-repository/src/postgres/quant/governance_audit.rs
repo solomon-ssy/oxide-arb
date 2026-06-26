@@ -7,9 +7,9 @@ use quant_pivot_models::{
     entities::quant_model_governance_audit,
     types::ModelVersionId,
 };
-use sea_orm::{
-    ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder,
-};
+use sea_orm::{DatabaseConnection, EntityTrait, IntoActiveModel};
+
+use crate::postgres::query::list_by_fk_ordered_desc;
 
 /// Postgres-backed model-governance audit ledger repository.
 pub struct PgModelGovernanceAuditRepository {
@@ -39,14 +39,13 @@ impl ModelGovernanceAuditRepository for PgModelGovernanceAuditRepository {
         &self,
         model_version_id: &ModelVersionId,
     ) -> Result<Vec<ModelGovernanceAuditInfo>, StorageError> {
-        quant_model_governance_audit::Entity::find()
-            .filter(
-                quant_model_governance_audit::Column::ModelVersionId.eq(model_version_id.clone()),
-            )
-            .order_by_desc(quant_model_governance_audit::Column::CreatedAt)
-            .all(&self.db)
-            .await
-            .map_err(StorageError::from)
-            .map(|rows| rows.into_iter().map(Into::into).collect())
+        list_by_fk_ordered_desc::<quant_model_governance_audit::Entity, _, _, _>(
+            &self.db,
+            quant_model_governance_audit::Column::ModelVersionId,
+            model_version_id.clone(),
+            quant_model_governance_audit::Column::CreatedAt,
+            Into::into,
+        )
+        .await
     }
 }

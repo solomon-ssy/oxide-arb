@@ -15,6 +15,6 @@ pub use lifecycle::{
 pub use publisher::{ReportPublisher, ReportPublisherDeps};
 pub use scheduler::build_report_scheduler;
 pub use types::{
-    BuildReportRequest, ComposedReport, EmptyReportContext, ReportNotificationPayload,
-    ReportTrigger,
+    BuildReportRequest, ComposedReport, EmptyReportContext, NotificationRecommendation,
+    ReportNotificationPayload, ReportTrigger,
 };

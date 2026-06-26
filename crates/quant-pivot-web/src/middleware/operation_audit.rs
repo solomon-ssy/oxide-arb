@@ -164,8 +164,8 @@ fn fallback_category(path: &str) -> OperationCategory {
         OperationCategory::RuntimeConfig
     } else if path.starts_with("/system") {
         OperationCategory::System
-    } else if path.starts_with("/risk") || path.starts_with("/blacklist") {
-        OperationCategory::Risk
+    } else if path.starts_with("/quant/reports") || path.starts_with("/quant/recommendations") {
+        OperationCategory::QuantReport
     } else if path.starts_with("/markets") {
         OperationCategory::Market
     } else if path.starts_with("/replay") {

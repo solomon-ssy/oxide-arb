@@ -16,7 +16,7 @@ use sea_orm::{
 };
 
 use crate::{
-    postgres::rbac::{casbin::sync, util},
+    postgres::rbac::{casbin::sync, junction, util},
     traits::rbac::UserRoleRepository,
 };
 
@@ -84,8 +84,7 @@ async fn do_set_roles(
         .map(|row| row.role_id)
         .collect();
 
-    let added: Vec<RoleId> = target.difference(&current).cloned().collect();
-    let removed: Vec<RoleId> = current.difference(&target).cloned().collect();
+    let (added, removed) = junction::replace_set_diff(&target, &current);
 
     // Codes for removed roles (their ids are guaranteed to exist via FK).
     let removed_codes = if removed.is_empty() {
@@ -107,15 +106,14 @@ async fn do_set_roles(
             role_id: Set(role_id.clone()),
             ..Default::default()
         });
-        user_role::Entity::insert_many(rows)
-            .on_conflict(
-                OnConflict::columns([user_role::Column::UserId, user_role::Column::RoleId])
-                    .do_nothing()
-                    .to_owned(),
-            )
-            .exec_without_returning(&txn)
-            .await
-            .map_err(StorageError::from)?;
+        junction::insert_junction_rows::<user_role::Entity>(
+            &txn,
+            rows,
+            OnConflict::columns([user_role::Column::UserId, user_role::Column::RoleId])
+                .do_nothing()
+                .to_owned(),
+        )
+        .await?;
         for role_id in &added {
             if let Some(code) = enabled_code_of.get(role_id) {
                 sync::do_grant_role(&txn, &user_id, code).await?;

@@ -6,7 +6,7 @@ use quant_pivot_models::{
     config::DeployConfig,
     domain::{
         BacktestPort, CatalogStatusPort, CoreEventPublisher, DataQualityPort, MarketDataPort,
-        MetricsScrapePort, ModelGovernancePort, ModelTrainingPort, ReadinessPort,
+        MetricsScrapePort, ModelGovernancePort, ModelTrainingPort, QuantReportPort, ReadinessPort,
         RuntimeConfigPort, RuntimeControlPort, TrainingDatasetPort,
     },
 };
@@ -58,4 +58,6 @@ pub struct AppState {
     pub backtests: Arc<dyn BacktestPort>,
     /// Model publish / rollback governance (Phase 3.7 Admin API).
     pub model_governance: Arc<dyn ModelGovernancePort>,
+    /// Recommendation report read + governed mutation (Phase 04.4 API).
+    pub quant_reports: Arc<dyn QuantReportPort>,
 }

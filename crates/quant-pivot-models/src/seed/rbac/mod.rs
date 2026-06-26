@@ -36,6 +36,8 @@ pub const ROLE_SUPER_ADMIN: &str = "super_admin";
 pub const ROLE_ADMIN: &str = "admin";
 /// Built-in role code: governance / money-risk approval authority.
 pub const ROLE_RISK_OWNER: &str = "risk_owner";
+/// Built-in role code: quant analyst — read-only plus ad-hoc report generation.
+pub const ROLE_ANALYST: &str = "analyst";
 /// Built-in role code: day-to-day operational controls.
 pub const ROLE_OPERATOR: &str = "operator";
 /// Built-in role code: read-only access.

@@ -3,8 +3,9 @@
 use super::AppContext;
 use crate::{
     app::{
-        backtest::CoreBacktestPort, model_training::CoreModelTrainingPort, task_id::TaskId,
-        task_registry::AppRunner, training_dataset::CoreTrainingDatasetPort,
+        backtest::CoreBacktestPort, model_training::CoreModelTrainingPort,
+        quant_report::CoreQuantReportPort, task_id::TaskId, task_registry::AppRunner,
+        training_dataset::CoreTrainingDatasetPort,
     },
     pipeline::book_store::BookStore,
 };
@@ -21,11 +22,12 @@ use quant_pivot_models::{
 use quant_pivot_repository::{
     pg_arc_repo,
     postgres::{
-        PgMarketRepository, PgMenuRepository, PgOperationLogRepository, PgRoleMenuRepository,
+        PgMarketRepository, PgMenuRepository, PgOperationLogRepository,
+        PgRecommendationReportRepository, PgRecommendationRepository, PgRoleMenuRepository,
         PgRolePermissionRepository, PgRoleRepository, PgRuntimeConfigVersionRepository,
         PgUserRepository, PgUserRoleRepository,
     },
-    traits::OperationLogRepository,
+    traits::{OperationLogRepository, RecommendationReportRepository, RecommendationRepository},
 };
 use quant_pivot_storage::write::{
     AsyncWriter, AsyncWriterConfig, AsyncWriterObservability, AsyncWriterWorker,
@@ -119,6 +121,14 @@ impl AppContext {
                 pg_arc_repo!(pg, PgRuntimeConfigVersionRepository),
             )),
             model_governance: Arc::clone(&self.research.model_governance),
+            quant_reports: Arc::new(CoreQuantReportPort::new(
+                Arc::new(PgRecommendationReportRepository::new(pg.clone()))
+                    as Arc<dyn RecommendationReportRepository>,
+                Arc::new(PgRecommendationRepository::new(pg.clone()))
+                    as Arc<dyn RecommendationRepository>,
+                Arc::clone(&self.report.lifecycle),
+                Arc::clone(&self.report.scheduler),
+            )),
         };
 
         let web_config = self.config.web.clone();

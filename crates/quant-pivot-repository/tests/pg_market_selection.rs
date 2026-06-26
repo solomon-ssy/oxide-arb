@@ -26,6 +26,7 @@ use quant_pivot_test_support::{
 use rust_decimal::Decimal;
 
 #[tokio::test]
+#[ignore = "requires Docker"]
 async fn create_snapshot_then_find_and_list_members() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();

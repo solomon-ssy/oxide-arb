@@ -147,6 +147,39 @@ pub enum QuantError {
 // ── Convenience constructors for the String-accepting variants of QuantError ─
 
 impl QuantError {
+    /// Stable, queryable failure taxonomy code (the sub-error family name).
+    ///
+    /// Used for observability surfaces that need a coarse, append-only label —
+    /// e.g. the `quant.report.failed` WebSocket event — without leaking the
+    /// human-readable message.
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::Account(_) => "account",
+            Self::Api(_) => "api",
+            Self::WebSocket(_) => "websocket",
+            Self::Rpc(_) => "rpc",
+            Self::Storage(_) => "storage",
+            Self::Signing(_) => "signing",
+            Self::Password(_) => "password",
+            Self::Rbac(_) => "rbac",
+            Self::Auth(_) => "auth",
+            Self::Config(_) => "config",
+            Self::Market(_) => "market",
+            Self::FeeQuote(_) => "fee_quote",
+            Self::Seed(_) => "seed",
+            Self::Research(_) => "research",
+            Self::Governance(_) => "governance",
+            Self::Hashing(_) => "hashing",
+            Self::Scheduler(_) => "scheduler",
+            Self::Report(_) => "report",
+            Self::Infra(_) => "infra",
+            Self::Control(_) => "control",
+            Self::Internal(_) => "internal",
+            Self::NotImplemented(_) => "not_implemented",
+        }
+    }
+
     /// Shorthand config error from a string message (used by the deploy-config loader).
     pub fn config(msg: impl Into<String>) -> Self {
         Self::Config(

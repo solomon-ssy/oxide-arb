@@ -11,7 +11,7 @@ use quant_pivot_models::{
 };
 use sea_orm::{
     ActiveModelTrait, ActiveValue, ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel,
-    PaginatorTrait, QueryFilter, QueryOrder,
+    QueryFilter, QueryOrder, QuerySelect,
 };
 
 /// Postgres-backed model registry repository.
@@ -50,12 +50,15 @@ impl ModelRegistryRepository for PgModelRegistryRepository {
         &self,
         model_spec_id: &ModelSpecId,
     ) -> Result<i32, StorageError> {
-        let count = quant_model_version::Entity::find()
+        let max_version = quant_model_version::Entity::find()
             .filter(quant_model_version::Column::ModelSpecId.eq(model_spec_id.clone()))
-            .count(&self.db)
+            .select_only()
+            .column_as(quant_model_version::Column::Version.max(), "max_version")
+            .into_tuple::<Option<i32>>()
+            .one(&self.db)
             .await
             .map_err(StorageError::from)?;
-        Ok(i32::try_from(count).unwrap_or(i32::MAX).saturating_add(1))
+        Ok(max_version.flatten().unwrap_or(0).saturating_add(1))
     }
 
     async fn find_model_version_by_id(

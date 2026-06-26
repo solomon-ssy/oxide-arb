@@ -69,6 +69,7 @@ impl ReportBundle {
             report_repo,
             builder,
             publisher,
+            runtime_mode: deps.governance.runtime_mode.clone(),
         }));
         let scheduler = build_report_scheduler(
             Arc::clone(&lifecycle),

@@ -1,7 +1,7 @@
 //! RBAC + operation-log repository and Casbin adapter integration tests.
 //!
 //! Requires Docker (testcontainers Postgres). The migrated database already
-//! carries the seeded RBAC graph (`admin` user, six built-in roles, and the
+//! carries the seeded RBAC graph (`admin` user, the built-in roles, and the
 //! `g(admin, super_admin)` + built-in `p` matrix), so tests that need isolation
 //! create their own users/roles/menus with unique keys.
 
@@ -474,13 +474,13 @@ async fn assign_permissions_validates_and_round_trips() {
     perms
         .set_permissions_for_role(AssignPermissions {
             role_id: role.id.clone(),
-            permissions: vec![Permission::new(ResourceType::Risk, Operation::Read)],
+            permissions: vec![Permission::new(ResourceType::Audit, Operation::Read)],
         })
         .await
         .expect("replace permissions");
     assert_eq!(
         perms.list_permissions(&role.id).await.expect("list again"),
-        vec![Permission::new(ResourceType::Risk, Operation::Read)]
+        vec![Permission::new(ResourceType::Audit, Operation::Read)]
     );
 
     // Invalid resource×operation pair is rejected.
@@ -489,7 +489,7 @@ async fn assign_permissions_validates_and_round_trips() {
             .set_permissions_for_role(AssignPermissions {
                 role_id: role.id.clone(),
                 permissions: vec![Permission::new(
-                    ResourceType::Opportunity,
+                    ResourceType::QuantReport,
                     Operation::Delete
                 )],
             })

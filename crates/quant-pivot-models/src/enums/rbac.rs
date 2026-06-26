@@ -84,11 +84,6 @@ crate::pg_enum! {
     pub enum ResourceType {
         System => "system",
         Market => "market",
-        Opportunity => "opportunity",
-        Trade => "trade",
-        Pnl => "pnl",
-        Risk => "risk",
-        Blacklist => "blacklist",
         RuntimeConfig => "runtime_config",
         Publication => "publication",
         Materialization => "materialization",
@@ -125,6 +120,7 @@ pub enum Operation {
     Rollback,
     Activate,
     Enqueue,
+    Revoke,
     Emergency,
 }
 
@@ -147,6 +143,7 @@ impl Operation {
             Self::Rollback => "rollback",
             Self::Activate => "activate",
             Self::Enqueue => "enqueue",
+            Self::Revoke => "revoke",
             Self::Emergency => "emergency",
         }
     }
@@ -221,12 +218,10 @@ pub static RESOURCE_OPERATIONS: &[(ResourceType, &[Operation])] = &[
         ],
     ),
     (ResourceType::Market, &[Operation::Read, Operation::Update]),
-    (ResourceType::QuantReport, &[Operation::Read]),
-    (ResourceType::Opportunity, &[Operation::Read]),
-    (ResourceType::Trade, &[Operation::Read]),
-    (ResourceType::Pnl, &[Operation::Read]),
-    (ResourceType::Risk, &[Operation::Read]),
-    (ResourceType::Blacklist, &[Operation::Read]),
+    (
+        ResourceType::QuantReport,
+        &[Operation::Read, Operation::Enqueue, Operation::Revoke],
+    ),
     (
         ResourceType::Publication,
         &[

@@ -1,7 +1,10 @@
 use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    domain::{NewOperationLog, NewReportTransaction, RecommendationReportInfo},
+    domain::{
+        NewOperationLog, NewReportTransaction, Paginated, QuantReportListQuery,
+        RecommendationReportInfo,
+    },
     enums::quant::ReportKind,
     types::RecommendationReportId,
 };
@@ -14,6 +17,19 @@ pub trait RecommendationReportRepository: Send + Sync {
         &self,
         transaction: NewReportTransaction,
     ) -> Result<RecommendationReportInfo, StorageError>;
+
+    /// Load a single report by id.
+    async fn find_by_id(
+        &self,
+        report_id: &RecommendationReportId,
+    ) -> Result<Option<RecommendationReportInfo>, StorageError>;
+
+    /// Paginated, filtered listing ordered by `published_at` then `created_at`
+    /// (most recent first).
+    async fn page(
+        &self,
+        query: QuantReportListQuery,
+    ) -> Result<Paginated<RecommendationReportInfo>, StorageError>;
 
     async fn latest_published(
         &self,

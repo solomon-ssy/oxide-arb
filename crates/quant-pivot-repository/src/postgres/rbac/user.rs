@@ -12,13 +12,16 @@ use quant_pivot_models::{
 use sea_orm::{
     ActiveModelTrait,
     ActiveValue::Set,
-    ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait, IntoActiveModel, PaginatorTrait,
-    QueryFilter, QueryOrder, QuerySelect, TransactionTrait,
+    ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait, IntoActiveModel, QueryFilter,
+    QueryOrder, TransactionTrait,
     sea_query::{Condition, Expr, extension::postgres::PgExpr},
 };
 
 use crate::{
-    postgres::rbac::{casbin::sync, util},
+    postgres::{
+        query::{non_empty, paginate_mapped},
+        rbac::{casbin::sync, util},
+    },
     traits::rbac::UserRepository,
 };
 
@@ -139,17 +142,10 @@ async fn do_delete(db: &DatabaseConnection, id: &UserId) -> Result<(), StorageEr
     Ok(())
 }
 
-async fn do_page(
-    db: &impl ConnectionTrait,
-    query: UserPageQuery,
-) -> Result<Paginated<UserInfo>, StorageError> {
-    let window = query.page.normalized();
-
-    let mut condition = Condition::all();
-    if let Some(status) = query.status {
-        condition = condition.add(user::Column::Status.eq(status));
-    }
-    if let Some(keyword) = query.keyword.as_deref().filter(|kw| !kw.is_empty()) {
+fn page_condition(query: &UserPageQuery) -> Condition {
+    let mut condition =
+        Condition::all().add_option(query.status.map(|status| user::Column::Status.eq(status)));
+    if let Some(keyword) = non_empty(query.keyword.as_deref()) {
         let pattern = format!("%{keyword}%");
         condition = condition.add(
             Condition::any()
@@ -157,27 +153,22 @@ async fn do_page(
                 .add(Expr::col(user::Column::Nickname).ilike(pattern)),
         );
     }
+    condition
+}
 
-    let total = user::Entity::find()
-        .filter(condition.clone())
-        .count(db)
-        .await
-        .map_err(StorageError::from)?;
-
-    if total == 0 {
-        return Ok(Paginated::from_request(Vec::new(), total, &window));
-    }
-
-    let models = user::Entity::find()
-        .filter(condition)
-        .order_by_desc(user::Column::CreatedAt)
-        .offset(window.offset())
-        .limit(window.limit())
-        .all(db)
-        .await
-        .map_err(StorageError::from)?;
-    let items = models.into_iter().map(Into::into).collect();
-    Ok(Paginated::from_request(items, total, &window))
+async fn do_page(
+    db: &impl ConnectionTrait,
+    query: UserPageQuery,
+) -> Result<Paginated<UserInfo>, StorageError> {
+    paginate_mapped(
+        user::Entity::find()
+            .filter(page_condition(&query))
+            .order_by_desc(user::Column::CreatedAt),
+        db,
+        &query.page,
+        Into::into,
+    )
+    .await
 }
 
 #[async_trait::async_trait]

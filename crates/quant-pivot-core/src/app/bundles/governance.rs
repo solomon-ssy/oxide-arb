@@ -115,6 +115,7 @@ impl GovernanceBundle {
                 ws_subscription: Some(Arc::clone(&data.ws_subscription)),
                 data_quality: Arc::clone(&data.data_quality),
                 metrics: Arc::clone(metrics),
+                alerts: Arc::clone(&alerts),
                 weight_overlay: Arc::clone(&weight_overlay),
                 subscription_window_hours: deploy
                     .market_data

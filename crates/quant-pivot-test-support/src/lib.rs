@@ -7,6 +7,7 @@
 pub mod catalog_fixtures;
 pub mod mocks;
 pub mod pg;
+pub mod report_fixtures;
 
 use uuid::Uuid;
 

@@ -11,6 +11,12 @@ pub const MAX_BIND_VARIABLES: usize = 65_535;
 /// Maximum elements in an `IN (...)` clause (each element = 1 bind variable).
 pub const MAX_IN_LIST_LEN: usize = MAX_BIND_VARIABLES;
 
+/// Chunk size for large `IN (...)` id lists.
+///
+/// Leaves headroom for the handful of extra binds (timestamps, status
+/// filters, pagination) the surrounding query may add.
+pub const IN_LIST_CHUNK: usize = MAX_IN_LIST_LEN - 64;
+
 /// Compute the maximum number of rows insertable in one statement
 /// given the number of columns each row occupies.
 ///

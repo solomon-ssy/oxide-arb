@@ -38,7 +38,10 @@ use quant_pivot_research::{
 };
 use rust_decimal::Decimal;
 
-use super::types::{ComposedReport, EmptyReportContext, ReportNotificationPayload, ReportTrigger};
+use super::types::{
+    ComposedReport, EmptyReportContext, NotificationRecommendation, ReportNotificationPayload,
+    ReportTrigger,
+};
 
 /// Inputs required to compose one report artifact.
 pub struct ComposeReportInput<'a> {
@@ -115,6 +118,9 @@ impl RecommendationComposer for DefaultRecommendationComposer {
             RecommendationReportStatus::Published
         };
         let summary = report_summary(&input, &recommendations, &selected_by_market);
+        // Build the notification before `summary` / `recommendations` move below.
+        let notification =
+            report_notification(&report_id, status, &input, &summary, &recommendations);
 
         let account_snapshot_id = AccountSnapshotId::from_v7();
         let account_snapshot = NewAccountSnapshot {
@@ -163,7 +169,6 @@ impl RecommendationComposer for DefaultRecommendationComposer {
         };
         let operation_log = operation_log(&report_id, &input, status);
         let ch_rows = recommendation_events(&report_id, &recommendations, input.trigger_time);
-        let published_count = u32::try_from(recommendations.len()).unwrap_or(u32::MAX);
 
         Ok(ComposedReport {
             transaction: NewReportTransaction {
@@ -174,16 +179,40 @@ impl RecommendationComposer for DefaultRecommendationComposer {
                 operation_log,
             },
             ch_rows,
-            notification: ReportNotificationPayload {
-                report_id,
-                kind: ReportKind::TopN,
-                status: status.as_str().to_owned(),
-                published_count,
-                empty_reason: input.empty.as_ref().map(|empty| empty.reason),
-            },
+            notification,
             delivery_policy: input.runtime_config.reports.delivery_policy,
             notify_operators: input.runtime_config.notification.policies.report_published,
         })
+    }
+}
+
+/// Build the operator-notification payload from the composed report parts.
+fn report_notification(
+    report_id: &RecommendationReportId,
+    status: RecommendationReportStatus,
+    input: &ComposeReportInput<'_>,
+    summary: &ReportSummary,
+    recommendations: &[NewRecommendation],
+) -> ReportNotificationPayload {
+    ReportNotificationPayload {
+        report_id: report_id.clone(),
+        kind: ReportKind::TopN,
+        status: status.as_str().to_owned(),
+        runtime_mode: input.runtime_mode,
+        published_count: u32::try_from(recommendations.len()).unwrap_or(u32::MAX),
+        total_suggested_usd: summary.total_suggested_usd,
+        top3: recommendations
+            .iter()
+            .take(3)
+            .map(|rec| NotificationRecommendation {
+                market_id: rec.market_id.to_string(),
+                outcome_side: rec.outcome_side,
+                score: rec.composite_score,
+                suggested_usd: rec.sizing_plan.suggested_usd,
+            })
+            .collect(),
+        warnings: summary.warnings.clone(),
+        empty_reason: input.empty.as_ref().map(|empty| empty.reason),
     }
 }
 

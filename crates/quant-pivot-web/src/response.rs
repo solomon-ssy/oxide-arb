@@ -18,9 +18,13 @@ use actix_web::{HttpRequest, HttpResponse, Responder, body::BoxBody, http::Statu
 use serde::Serialize;
 
 /// Canonical success envelope wrapping an arbitrary serializable payload.
+///
+/// `code` mirrors the HTTP status the [`Responder`] emits, so a `202 Accepted`
+/// body carries `code: 202` and the response status is `202` — the two never
+/// drift.
 #[derive(Debug, Clone, Serialize)]
 pub struct WebResponse<T> {
-    /// Mirror of the HTTP status code (always `200` for success envelopes).
+    /// Mirror of the HTTP status code the response is sent with.
     pub code: u16,
     /// Human-readable status message (`"ok"` for the default success case).
     pub message: String,
@@ -34,6 +38,15 @@ impl<T> WebResponse<T> {
         Self {
             code: StatusCode::OK.as_u16(),
             message: "ok".to_owned(),
+            data: Some(data),
+        }
+    }
+
+    /// Wrap `data` in a `202 / "accepted"` envelope for async-enqueue endpoints.
+    pub fn accepted(data: T) -> Self {
+        Self {
+            code: StatusCode::ACCEPTED.as_u16(),
+            message: "accepted".to_owned(),
             data: Some(data),
         }
     }
@@ -52,6 +65,7 @@ impl<T: Serialize> Responder for WebResponse<T> {
     type Body = BoxBody;
 
     fn respond_to(self, _req: &HttpRequest) -> HttpResponse<Self::Body> {
-        HttpResponse::Ok().json(self)
+        let status = StatusCode::from_u16(self.code).unwrap_or(StatusCode::OK);
+        HttpResponse::build(status).json(self)
     }
 }

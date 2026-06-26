@@ -1,4 +1,4 @@
-//! Seeds the six built-in RBAC roles and publishes their IDs to the context.
+//! Seeds the built-in RBAC roles and publishes their IDs to the context.
 
 use crate::{
     entities::role,
@@ -8,8 +8,8 @@ use crate::{
     seed::{
         SeedConflictPolicy, SeedContext,
         rbac::{
-            ROLE_ADMIN, ROLE_EMERGENCY_OPERATOR, ROLE_OPERATOR, ROLE_RISK_OWNER, ROLE_SUPER_ADMIN,
-            ROLE_VIEWER, ROLES_ARTIFACT, RoleIdMap,
+            ROLE_ADMIN, ROLE_ANALYST, ROLE_EMERGENCY_OPERATOR, ROLE_OPERATOR, ROLE_RISK_OWNER,
+            ROLE_SUPER_ADMIN, ROLE_VIEWER, ROLES_ARTIFACT, RoleIdMap,
         },
     },
     types::RoleId,
@@ -43,6 +43,12 @@ const BUILTIN_ROLES: &[(&str, &str, &str, i32)] = &[
         "Risk Owner",
         "Governance and money-risk approval authority.",
         20,
+    ),
+    (
+        ROLE_ANALYST,
+        "Analyst",
+        "Read-only access plus ad-hoc recommendation report generation.",
+        25,
     ),
     (
         ROLE_OPERATOR,

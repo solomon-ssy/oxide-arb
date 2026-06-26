@@ -18,7 +18,7 @@ use crate::{
     seed::{
         SeedConflictPolicy, SeedContext,
         rbac::{
-            ADMIN_USER_ARTIFACT, ROLE_ADMIN, ROLE_EMERGENCY_OPERATOR, ROLE_OPERATOR,
+            ADMIN_USER_ARTIFACT, ROLE_ADMIN, ROLE_ANALYST, ROLE_EMERGENCY_OPERATOR, ROLE_OPERATOR,
             ROLE_RISK_OWNER, ROLE_SUPER_ADMIN, ROLE_VIEWER, ROLES_ARTIFACT,
         },
     },
@@ -35,12 +35,12 @@ const PRODUCES: &[SeedArtifact] = &[];
 
 pub const CASBIN_SEED: SeedSpec = SeedSpec {
     id: SEED_ID,
-    version: 5,
+    version: 6,
     target_table: casbin_rule_table_name,
     depends_on: DEPENDS_ON,
     produces: PRODUCES,
     conflict_policy: SeedConflictPolicy::GraphOrdered,
-    checksum: "rbac.casbin.bootstrap.v5",
+    checksum: "rbac.casbin.bootstrap.v6",
     loader: load_boxed,
 };
 
@@ -58,6 +58,7 @@ const READ_RESOURCES: &[ResourceType] = &[
 pub fn builtin_role_policies() -> Vec<(&'static str, Vec<(ResourceType, Operation)>)> {
     vec![
         (ROLE_VIEWER, read_only()),
+        (ROLE_ANALYST, analyst_policies()),
         (ROLE_OPERATOR, operator_policies()),
         (ROLE_RISK_OWNER, risk_owner_policies()),
         (ROLE_ADMIN, admin_policies()),
@@ -72,6 +73,13 @@ fn read_only() -> Vec<(ResourceType, Operation)> {
         .collect()
 }
 
+fn analyst_policies() -> Vec<(ResourceType, Operation)> {
+    let mut policies = read_only();
+    // Analysts may trigger ad-hoc report generation, but never revoke.
+    policies.push((ResourceType::QuantReport, Operation::Enqueue));
+    policies
+}
+
 fn operator_policies() -> Vec<(ResourceType, Operation)> {
     let mut policies = read_only();
     policies.extend([
@@ -79,6 +87,9 @@ fn operator_policies() -> Vec<(ResourceType, Operation)> {
         (ResourceType::System, Operation::Resume),
         (ResourceType::System, Operation::SwitchMode),
         (ResourceType::Market, Operation::Update),
+        // Operators run and revoke recommendation reports.
+        (ResourceType::QuantReport, Operation::Enqueue),
+        (ResourceType::QuantReport, Operation::Revoke),
     ]);
     policies
 }
@@ -96,6 +107,8 @@ fn risk_owner_policies() -> Vec<(ResourceType, Operation)> {
         (ResourceType::Replay, Operation::Create),
         (ResourceType::Publication, Operation::Publish),
         (ResourceType::Publication, Operation::Rollback),
+        // Risk owners revoke published reports (money-risk authority).
+        (ResourceType::QuantReport, Operation::Revoke),
     ]);
     policies
 }

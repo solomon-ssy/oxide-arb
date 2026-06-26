@@ -1,18 +1,19 @@
 use crate::{
-    postgres::bind_limit::{IN_LIST_CHUNK, max_rows_per_insert},
+    postgres::catalog::ingest::{
+        find_existing_str_id_chunks, find_models_by_str_id_chunks, upsert_many_chunked,
+    },
     traits::EventRepository,
 };
-use num_traits::ToPrimitive;
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::{EventInfo, UpsertEvent},
-    entities::event::{ActiveModel, Column, Entity},
+    entities::event::{Column, Entity},
     enums::market::EventStatus,
     types::EventId,
 };
 use sea_orm::{
     ColumnTrait, ConnectionTrait, DatabaseConnection, DatabaseTransaction, EntityTrait,
-    IntoActiveModel, Iterable, QueryFilter, QuerySelect, sea_query::OnConflict,
+    IntoActiveModel, QueryFilter, sea_query::OnConflict,
 };
 use std::collections::HashSet;
 
@@ -58,36 +59,16 @@ async fn do_find_by_ids(
     db: &impl ConnectionTrait,
     ids: &[EventId],
 ) -> Result<Vec<EventInfo>, StorageError> {
-    let mut events = Vec::with_capacity(ids.len());
-    // Chunk the IN list to stay under the Postgres bind-parameter limit.
-    for chunk in ids.chunks(IN_LIST_CHUNK) {
-        let rows = Entity::find()
-            .filter(Column::EventId.is_in(chunk.iter().map(EventId::as_str)))
-            .all(db)
-            .await
-            .map_err(StorageError::from)?;
-        events.extend(rows.into_iter().map(Into::into));
-    }
-    Ok(events)
+    find_models_by_str_id_chunks::<Entity, _, _, _>(db, ids, Column::EventId, EventId::as_str)
+        .await
+        .map(|rows| rows.into_iter().map(Into::into).collect())
 }
 
 async fn do_find_existing_ids(
     db: &impl ConnectionTrait,
     ids: &[EventId],
 ) -> Result<HashSet<String>, StorageError> {
-    let mut existing = HashSet::with_capacity(ids.len());
-    // Chunk the IN list to stay under the Postgres bind-parameter limit.
-    for chunk in ids.chunks(IN_LIST_CHUNK) {
-        let rows = Entity::find()
-            .filter(Column::EventId.is_in(chunk.iter().map(EventId::as_str)))
-            .select_only()
-            .column(Column::EventId)
-            .into_tuple::<String>()
-            .all(db)
-            .await?;
-        existing.extend(rows);
-    }
-    Ok(existing)
+    find_existing_str_id_chunks::<Entity, _, _, _>(db, ids, Column::EventId, EventId::as_str).await
 }
 
 /// `ON CONFLICT (event_id) DO UPDATE` clause shared by single and batch upserts.
@@ -118,26 +99,7 @@ async fn do_upsert_batch(
     db: &impl ConnectionTrait,
     dtos: Vec<UpsertEvent>,
 ) -> Result<u64, StorageError> {
-    if dtos.is_empty() {
-        return Ok(0);
-    }
-    let count = ToPrimitive::to_u64(&dtos.len()).unwrap_or(u64::MAX);
-    let models: Vec<ActiveModel> = dtos
-        .into_iter()
-        .map(IntoActiveModel::into_active_model)
-        .collect();
-    // A full Gamma sync upserts thousands of events; one multi-row INSERT
-    // would exceed the Postgres bind-parameter limit, so split into bounded
-    // statements.
-    let rows_per_insert = max_rows_per_insert(Column::iter().count());
-    for chunk in models.chunks(rows_per_insert) {
-        Entity::insert_many(chunk.to_vec())
-            .on_conflict(event_upsert_on_conflict())
-            .exec(db)
-            .await
-            .map_err(StorageError::from)?;
-    }
-    Ok(count)
+    upsert_many_chunked::<Entity, UpsertEvent>(db, dtos, event_upsert_on_conflict()).await
 }
 
 #[async_trait::async_trait]

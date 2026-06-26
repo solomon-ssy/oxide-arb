@@ -5,19 +5,17 @@
 
 // Crate-internal helpers.
 pub mod arc_repo;
-pub(crate) mod bind_limit;
+pub(crate) mod query;
 
 pub use arc_repo::arc_repo;
 
+pub mod catalog;
 pub mod governance;
 pub mod quant;
 pub mod rbac;
 
-// Single-repository contexts kept flat.
-pub mod market;
-
 // Flattened facade.
+pub use catalog::*;
 pub use governance::*;
-pub use market::*;
 pub use quant::*;
 pub use rbac::*;

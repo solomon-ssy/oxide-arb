@@ -61,11 +61,11 @@ mod tests {
     #[test]
     fn subscribe_without_market_defaults_to_none() {
         let cmd: ClientCommand =
-            serde_json::from_str(r#"{ "action": "subscribe", "channel": "pnl.update" }"#)
+            serde_json::from_str(r#"{ "action": "subscribe", "channel": "quant.report" }"#)
                 .expect("valid subscribe");
         match cmd {
             ClientCommand::Subscribe { channel, market_id } => {
-                assert_eq!(channel, WsChannel::PnlUpdate);
+                assert_eq!(channel, WsChannel::QuantReport);
                 assert_eq!(market_id, None);
             }
             _ => panic!("expected subscribe"),

@@ -4,9 +4,9 @@ use chrono::{DateTime, Utc};
 use quant_pivot_models::{
     clickhouse::QuantRecommendationEventRow,
     domain::NewReportTransaction,
-    enums::quant::{EmptyReason, ReportKind, ReportTriggerKind},
+    enums::quant::{EmptyReason, OutcomeSide, QuantRuntimeMode, ReportKind, ReportTriggerKind},
     runtime_config::ReportDeliveryPolicy,
-    types::RecommendationReportId,
+    types::{Probability, RecommendationReportId, Usd},
 };
 
 /// Source that triggered one report build.
@@ -58,13 +58,26 @@ pub struct EmptyReportContext {
     pub warnings: Vec<String>,
 }
 
+/// One recommendation summarized for an operator notification (`TopN` preview).
+#[derive(Debug, Clone)]
+pub struct NotificationRecommendation {
+    pub market_id: String,
+    pub outcome_side: OutcomeSide,
+    pub score: Probability,
+    pub suggested_usd: Usd,
+}
+
 /// Operator-facing notification payload for a committed report.
 #[derive(Debug, Clone)]
 pub struct ReportNotificationPayload {
     pub report_id: RecommendationReportId,
     pub kind: ReportKind,
     pub status: String,
+    pub runtime_mode: QuantRuntimeMode,
     pub published_count: u32,
+    pub total_suggested_usd: Usd,
+    pub top3: Vec<NotificationRecommendation>,
+    pub warnings: Vec<String>,
     pub empty_reason: Option<EmptyReason>,
 }
 

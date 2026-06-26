@@ -273,6 +273,7 @@ flowchart LR
 | [`06`](../06-config-deploy-and-ops.md) §2.8 | `portfolio` 段重构为 `budget` / `constraints` / `sizing` | 04.0 |
 | [`09`](../09-account-capital-position-reconciliation.md) §1/§1.1/§6/§7 | 语义纠偏：`report_only` ≠ dry-run；credential-gated 唯一 `VenueAccountProvider`（非 mode-gated 双 provider）；equity = 真实净清算价值 min budget 护栏；凭证缺失 fail closed（无模拟/无绿场）。`quant_account_snapshot` + `PolymarketAccountClient` + `ReservedCapitalReader` + 快照读路径 → **Phase 4**；`quant_position`/完整FSM/对账 → Phase 5 | 04.0 |
 | [`05`](../05-execution-risk-and-governance.md) §0/§13 | `execution_eligibility` 在 Phase 4 计算；create-intent / admission 留 Phase 5 | 04.4 |
+| [`04.4`](04.4-report-api-ws-notifications.md) §5 | 实现期定稿：`reports/run` 异步 enqueue → 202 `{request_id, trigger_key}`（非 report_id）；WS 收敛为单频道 `quant.report` + `event` 判别（started/failed 为 ephemeral 无 report_id）；新增 `Operation::Revoke`，`QuantReport=[Read,Enqueue,Revoke]`；新增内置 `analyst` 角色，`risk_manager`↦`risk_owner`；删除 endgame `ResourceType`（opportunity/trade/pnl/risk/blacklist）与对应 WS 频道；修复 `AlertDispatcher::reload` 激活漏接 | 04.4 |
 
 ## 9. 质量门禁（每个子phase收尾必跑）
 

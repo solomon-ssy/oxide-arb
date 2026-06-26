@@ -7302,6 +7302,7 @@ dependencies = [
  "quant-pivot-models",
  "quant-pivot-repository",
  "quant-pivot-storage",
+ "quant-pivot-test-support",
  "redis",
  "rust_decimal",
  "rust_decimal_macros",

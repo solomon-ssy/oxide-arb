@@ -179,7 +179,7 @@ mod tests {
         ]));
         registry.register(handle_with(vec![
             book("0xaaa"),
-            SubscriptionKey::global(WsChannel::PnlUpdate),
+            SubscriptionKey::global(WsChannel::QuantReport),
         ]));
 
         let markets = registry.subscribed_markets();
@@ -197,7 +197,7 @@ mod tests {
         let registry = SessionRegistry::default();
         registry.register(handle_with(vec![
             SubscriptionKey::global(WsChannel::SystemStatus),
-            SubscriptionKey::global(WsChannel::PnlUpdate),
+            SubscriptionKey::global(WsChannel::QuantReport),
         ]));
         assert!(registry.subscribed_markets().is_empty());
     }

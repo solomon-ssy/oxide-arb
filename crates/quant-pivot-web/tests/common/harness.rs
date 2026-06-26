@@ -17,23 +17,29 @@ use actix_web::{
     test, web,
 };
 use async_trait::async_trait;
-use quant_pivot_error::{QuantError, QuantResult, auth::AuthError, control::ControlError};
+use quant_pivot_error::{
+    QuantError, QuantResult, auth::AuthError, control::ControlError, storage::StorageError,
+};
 use quant_pivot_models::{
     config::{CacheConfig, DeployConfig, JwtConfig, RedisConfig},
     domain::{
-        BacktestPort, BacktestReportInfo, BacktestReportView, BookSnapshot,
-        BuildTrainingDatasetRequest, CatalogState, CatalogStatusPort, CoreEventPublisher,
-        DataQualityPort, DataQualitySnapshot, GovernanceActor, HealthReport, MarketDataPort,
-        MetricsScrapePort, ModelComparisonReportInfo, ModelGovernancePort, ModelTrainingPort,
-        ModelVersionInfo, PromoteDatasetRequest, PublishModelCommand, QuantModeTransitionReport,
-        RollbackModelCommand, RunBacktestRequest, RuntimeConfigPort, RuntimeControlPort,
-        SystemStatus, TrainModelRequest, TrainedModelView, TrainingDatasetInfo,
-        TrainingDatasetPlanView, TrainingDatasetPort, TrainingDatasetView,
+        AdHocReportCommand, AdHocReportEnqueued, BacktestPort, BacktestReportInfo,
+        BacktestReportView, BookSnapshot, BuildTrainingDatasetRequest, CatalogState,
+        CatalogStatusPort, CoreEvent, CoreEventPublisher, DataQualityPort, DataQualitySnapshot,
+        GovernanceActor, HealthReport, MarketDataPort, MetricsScrapePort,
+        ModelComparisonReportInfo, ModelGovernancePort, ModelTrainingPort, ModelVersionInfo,
+        Paginated, PromoteDatasetRequest, PublishModelCommand, QuantModeTransitionReport,
+        QuantReportListQuery, QuantReportPort, RecommendationInfo, RecommendationReportInfo,
+        ReportDiff, ReportLifecycleEvent, RollbackModelCommand, RunBacktestRequest,
+        RuntimeConfigPort, RuntimeControlPort, SystemStatus, TrainModelRequest, TrainedModelView,
+        TrainingDatasetInfo, TrainingDatasetPlanView, TrainingDatasetPort, TrainingDatasetView,
+        compute_report_diff,
     },
-    enums::quant::QuantRuntimeMode,
+    enums::quant::{QuantRuntimeMode, RecommendationReportStatus, ReportKind},
     runtime_config::RuntimeConfig,
     types::{
-        BacktestReportId, ModelComparisonReportId, ModelVersionId, TokenId, TrainingDatasetId,
+        BacktestReportId, ModelComparisonReportId, ModelVersionId, RecommendationId,
+        RecommendationReportId, TokenId, TrainingDatasetId,
     },
 };
 use quant_pivot_storage::cache::connect_pool;
@@ -62,6 +68,8 @@ const TEST_ISSUER: &str = "quant-pivot-test";
 
 pub struct TestEnv {
     pub state: AppState,
+    /// In-memory report port; seed it to drive the report API in tests.
+    pub quant_reports: MockQuantReportPort,
     pg_container: ContainerAsync<Postgres>,
     redis: Option<ContainerAsync<Redis>>,
     ws_shutdown: CancellationToken,
@@ -110,6 +118,7 @@ impl TestEnv {
         let runtime_config_apply = Arc::new(MockRuntimeConfigApply::default());
         let catalog = Arc::new(MockCatalogStatus);
         let data_quality = Arc::new(MockDataQuality);
+        let quant_reports = MockQuantReportPort::new(events.clone());
         let state = AppState {
             deploy: Arc::new(test_deploy_config()),
             runtime_config_apply: Arc::clone(&runtime_config_apply) as Arc<dyn RuntimeConfigPort>,
@@ -143,10 +152,12 @@ impl TestEnv {
             model_training: Arc::new(MockModelTrainingPort),
             backtests: Arc::new(MockBacktestPort),
             model_governance: Arc::new(MockModelGovernancePort),
+            quant_reports: Arc::new(quant_reports.clone()),
         };
 
         Self {
             state,
+            quant_reports,
             pg_container,
             redis: Some(redis_container),
             ws_shutdown,
@@ -458,6 +469,185 @@ impl TrainingDatasetPort for MockTrainingDatasetPort {
         _request: BuildTrainingDatasetRequest,
     ) -> QuantResult<TrainingDatasetView> {
         Err(QuantError::NotImplemented("training dataset build".into()))
+    }
+}
+
+/// In-memory [`QuantReportPort`] for web integration tests.
+///
+/// Cloning shares the backing state (all fields are `Arc`), so the copy held by
+/// [`TestEnv`] seeds the same store the routed handlers read. `revoke` mutates
+/// the stored report and publishes a `quant.report` lifecycle event through the
+/// shared event bus, exercising the real WS fan-out.
+#[derive(Clone)]
+pub struct MockQuantReportPort {
+    pub reports: Arc<Mutex<Vec<RecommendationReportInfo>>>,
+    pub recommendations: Arc<Mutex<Vec<RecommendationInfo>>>,
+    pub enqueued: Arc<Mutex<Vec<AdHocReportCommand>>>,
+    events: CoreEventPublisher,
+}
+
+impl MockQuantReportPort {
+    #[must_use]
+    pub fn new(events: CoreEventPublisher) -> Self {
+        Self {
+            reports: Arc::new(Mutex::new(Vec::new())),
+            recommendations: Arc::new(Mutex::new(Vec::new())),
+            enqueued: Arc::new(Mutex::new(Vec::new())),
+            events,
+        }
+    }
+
+    pub fn seed_report(&self, report: RecommendationReportInfo) {
+        self.reports.lock().unwrap().push(report);
+    }
+
+    pub fn seed_recommendation(&self, rec: RecommendationInfo) {
+        self.recommendations.lock().unwrap().push(rec);
+    }
+}
+
+#[async_trait]
+impl QuantReportPort for MockQuantReportPort {
+    async fn list_reports(
+        &self,
+        query: QuantReportListQuery,
+    ) -> QuantResult<Paginated<RecommendationReportInfo>> {
+        let window = query.page.normalized();
+        let filtered: Vec<RecommendationReportInfo> = self
+            .reports
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| query.kind.is_none_or(|k| r.report_kind == k))
+            .filter(|r| query.status.is_none_or(|s| r.status == s))
+            .filter(|r| query.trigger_kind.is_none_or(|t| r.trigger_kind == t))
+            .cloned()
+            .collect();
+        let total = filtered.len() as u64;
+        let offset = usize::try_from(window.offset()).unwrap_or(usize::MAX);
+        let limit = usize::try_from(window.limit()).unwrap_or(usize::MAX);
+        let items = filtered.into_iter().skip(offset).take(limit).collect();
+        Ok(Paginated::from_request(items, total, &window))
+    }
+
+    async fn find_report(
+        &self,
+        report_id: &RecommendationReportId,
+    ) -> QuantResult<Option<RecommendationReportInfo>> {
+        Ok(self
+            .reports
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|r| &r.recommendation_report_id == report_id)
+            .cloned())
+    }
+
+    async fn latest_report(
+        &self,
+        kind: ReportKind,
+    ) -> QuantResult<Option<RecommendationReportInfo>> {
+        Ok(self
+            .reports
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| r.report_kind == kind)
+            .filter(|r| {
+                matches!(
+                    r.status,
+                    RecommendationReportStatus::Published
+                        | RecommendationReportStatus::PublishedEmpty
+                )
+            })
+            .max_by_key(|r| r.published_at)
+            .cloned())
+    }
+
+    async fn find_recommendations(
+        &self,
+        report_id: &RecommendationReportId,
+    ) -> QuantResult<Vec<RecommendationInfo>> {
+        Ok(self
+            .recommendations
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| &r.recommendation_report_id == report_id)
+            .cloned()
+            .collect())
+    }
+
+    async fn find_recommendation(
+        &self,
+        recommendation_id: &RecommendationId,
+    ) -> QuantResult<Option<RecommendationInfo>> {
+        Ok(self
+            .recommendations
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|r| &r.recommendation_id == recommendation_id)
+            .cloned())
+    }
+
+    async fn diff_reports(
+        &self,
+        base_report_id: &RecommendationReportId,
+        compare_report_id: &RecommendationReportId,
+    ) -> QuantResult<Option<ReportDiff>> {
+        let (Some(base), Some(compare)) = (
+            self.find_report(base_report_id).await?,
+            self.find_report(compare_report_id).await?,
+        ) else {
+            return Ok(None);
+        };
+        let base_recs = self.find_recommendations(base_report_id).await?;
+        let compare_recs = self.find_recommendations(compare_report_id).await?;
+        Ok(Some(compute_report_diff(
+            &base,
+            &base_recs,
+            &compare,
+            &compare_recs,
+        )))
+    }
+
+    async fn enqueue_ad_hoc(
+        &self,
+        command: AdHocReportCommand,
+    ) -> QuantResult<AdHocReportEnqueued> {
+        let trigger_key = format!("ad_hoc:{}", command.request_id);
+        let request_id = command.request_id.clone();
+        self.enqueued.lock().unwrap().push(command);
+        Ok(AdHocReportEnqueued {
+            request_id,
+            trigger_key,
+        })
+    }
+
+    async fn revoke(
+        &self,
+        report_id: &RecommendationReportId,
+        reason: &str,
+    ) -> QuantResult<RecommendationReportInfo> {
+        let mut reports = self.reports.lock().unwrap();
+        let report = reports
+            .iter_mut()
+            .find(|r| &r.recommendation_report_id == report_id)
+            .ok_or_else(|| {
+                QuantError::Storage(StorageError::NotFound {
+                    entity: "recommendation_report",
+                    id: report_id.to_string(),
+                })
+            })?;
+        report.status = RecommendationReportStatus::Revoked;
+        report.revoked_at = Some(chrono::Utc::now());
+        report.status_reason = Some(reason.to_owned());
+        let snapshot = report.clone();
+        drop(reports);
+        self.events
+            .publish(CoreEvent::Report(ReportLifecycleEvent::revoked(&snapshot)));
+        Ok(snapshot)
     }
 }
 

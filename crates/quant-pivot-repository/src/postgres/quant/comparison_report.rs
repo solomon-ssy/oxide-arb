@@ -7,9 +7,9 @@ use quant_pivot_models::{
     entities::quant_model_comparison_report,
     types::{ModelComparisonReportId, ModelVersionId},
 };
-use sea_orm::{
-    ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder,
-};
+use sea_orm::{DatabaseConnection, EntityTrait, IntoActiveModel};
+
+use crate::postgres::query::list_by_fk_ordered_desc;
 
 /// Postgres-backed comparison-report ledger repository.
 pub struct PgModelComparisonReportRepository {
@@ -50,15 +50,13 @@ impl ModelComparisonReportRepository for PgModelComparisonReportRepository {
         &self,
         candidate_model_version_id: &ModelVersionId,
     ) -> Result<Vec<ModelComparisonReportInfo>, StorageError> {
-        quant_model_comparison_report::Entity::find()
-            .filter(
-                quant_model_comparison_report::Column::CandidateModelVersionId
-                    .eq(candidate_model_version_id.clone()),
-            )
-            .order_by_desc(quant_model_comparison_report::Column::CreatedAt)
-            .all(&self.db)
-            .await
-            .map_err(StorageError::from)
-            .map(|rows| rows.into_iter().map(Into::into).collect())
+        list_by_fk_ordered_desc::<quant_model_comparison_report::Entity, _, _, _>(
+            &self.db,
+            quant_model_comparison_report::Column::CandidateModelVersionId,
+            candidate_model_version_id.clone(),
+            quant_model_comparison_report::Column::CreatedAt,
+            Into::into,
+        )
+        .await
     }
 }

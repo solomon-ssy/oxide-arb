@@ -24,6 +24,8 @@ mod metrics;
 mod operation_log;
 #[path = "web/phase0.rs"]
 mod phase0;
+#[path = "web/quant_reports.rs"]
+mod quant_reports;
 #[path = "web/readiness.rs"]
 mod readiness;
 #[path = "web/ws.rs"]

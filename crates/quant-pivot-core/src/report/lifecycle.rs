@@ -5,14 +5,17 @@ use std::sync::Arc;
 use chrono::{DateTime, Duration, Utc};
 use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
-    domain::{NewOperationLog, RecommendationReportInfo},
+    domain::{NewOperationLog, RecommendationReportInfo, ReportLifecycleEvent},
     enums::{
         operation_log::{OperationCategory, OperationOutcome},
+        quant::{QuantRuntimeMode, ReportKind},
         rbac::ResourceType,
     },
     types::{OperationLogId, RecommendationReportId},
 };
 use quant_pivot_repository::traits::RecommendationReportRepository;
+
+use crate::governance::RuntimeModeHandle;
 
 use super::{
     builder::ReportBuilder,
@@ -41,6 +44,7 @@ pub struct ReportLifecycleDeps {
     pub report_repo: Arc<dyn RecommendationReportRepository>,
     pub builder: Arc<dyn ReportBuilder>,
     pub publisher: Arc<ReportPublisher>,
+    pub runtime_mode: RuntimeModeHandle,
 }
 
 /// End-to-end report lifecycle entry point.
@@ -48,6 +52,7 @@ pub struct ReportLifecycleService {
     report_repo: Arc<dyn RecommendationReportRepository>,
     builder: Arc<dyn ReportBuilder>,
     publisher: Arc<ReportPublisher>,
+    runtime_mode: RuntimeModeHandle,
 }
 
 impl ReportLifecycleService {
@@ -58,6 +63,7 @@ impl ReportLifecycleService {
             report_repo: deps.report_repo,
             builder: deps.builder,
             publisher: deps.publisher,
+            runtime_mode: deps.runtime_mode,
         }
     }
 
@@ -174,7 +180,24 @@ impl ReportLifecycleService {
             return Ok(existing);
         }
 
-        let composed = self.builder.build(request).await?;
+        // Ephemeral start/fail signals correlate by `trigger_key` (no row yet).
+        let runtime_mode = self.runtime_mode.current();
+        let as_of = request.trigger_time;
+        self.publisher
+            .publish_ephemeral(ReportLifecycleEvent::started(
+                trigger_key.clone(),
+                ReportKind::TopN,
+                runtime_mode,
+                as_of,
+            ));
+
+        let composed = match self.builder.build(request).await {
+            Ok(composed) => composed,
+            Err(error) => {
+                self.publish_failed(&trigger_key, runtime_mode, as_of, &error);
+                return Err(error);
+            }
+        };
         match self
             .report_repo
             .create_report(composed.transaction.clone())
@@ -188,9 +211,29 @@ impl ReportLifecycleService {
                 if let Some(existing) = self.report_repo.find_by_trigger_key(&trigger_key).await? {
                     return Ok(existing);
                 }
-                Err(error.into())
+                let error: QuantError = error.into();
+                self.publish_failed(&trigger_key, runtime_mode, as_of, &error);
+                Err(error)
             }
         }
+    }
+
+    fn publish_failed(
+        &self,
+        trigger_key: &str,
+        runtime_mode: QuantRuntimeMode,
+        as_of: DateTime<Utc>,
+        error: &QuantError,
+    ) {
+        self.publisher
+            .publish_ephemeral(ReportLifecycleEvent::failed(
+                trigger_key.to_owned(),
+                ReportKind::TopN,
+                runtime_mode,
+                as_of,
+                error.code().to_owned(),
+                error.to_string(),
+            ));
     }
 }
 

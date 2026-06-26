@@ -4,7 +4,10 @@ use crate::traits::RecommendationReportRepository;
 use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    domain::{NewOperationLog, NewReportTransaction, RecommendationReportInfo},
+    domain::{
+        NewOperationLog, NewReportTransaction, Paginated, QuantReportListQuery,
+        RecommendationReportInfo,
+    },
     entities::{
         operation_log, quant_account_snapshot, quant_portfolio_plan, quant_recommendation,
         quant_recommendation_report,
@@ -14,9 +17,11 @@ use quant_pivot_models::{
     types::RecommendationReportId,
 };
 use sea_orm::{
-    ActiveModelTrait, ActiveValue, ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel,
-    QueryFilter, QueryOrder, QuerySelect, TransactionTrait,
+    ActiveModelTrait, ActiveValue, ColumnTrait, Condition, DatabaseConnection, EntityTrait,
+    IntoActiveModel, QueryFilter, QueryOrder, QuerySelect, TransactionTrait,
 };
+
+use crate::postgres::query::paginate_mapped;
 
 /// Postgres-backed recommendation report repository.
 pub struct PgRecommendationReportRepository {
@@ -75,6 +80,33 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
 
         txn.commit().await.map_err(StorageError::from)?;
         Ok(report_model.into())
+    }
+
+    async fn find_by_id(
+        &self,
+        report_id: &RecommendationReportId,
+    ) -> Result<Option<RecommendationReportInfo>, StorageError> {
+        quant_recommendation_report::Entity::find_by_id(report_id.clone())
+            .one(&self.db)
+            .await
+            .map_err(StorageError::from)
+            .map(|row| row.map(Into::into))
+    }
+
+    async fn page(
+        &self,
+        query: QuantReportListQuery,
+    ) -> Result<Paginated<RecommendationReportInfo>, StorageError> {
+        paginate_mapped(
+            quant_recommendation_report::Entity::find()
+                .filter(page_condition(&query))
+                .order_by_desc(quant_recommendation_report::Column::PublishedAt)
+                .order_by_desc(quant_recommendation_report::Column::CreatedAt),
+            &self.db,
+            &query.page,
+            Into::into,
+        )
+        .await
     }
 
     async fn latest_published(
@@ -168,6 +200,35 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
     }
 }
 
+fn page_condition(query: &QuantReportListQuery) -> Condition {
+    Condition::all()
+        .add_option(
+            query
+                .kind
+                .map(|kind| quant_recommendation_report::Column::ReportKind.eq(kind)),
+        )
+        .add_option(
+            query
+                .status
+                .map(|status| quant_recommendation_report::Column::Status.eq(status)),
+        )
+        .add_option(
+            query.trigger_kind.map(|trigger_kind| {
+                quant_recommendation_report::Column::TriggerKind.eq(trigger_kind)
+            }),
+        )
+        .add_option(
+            query
+                .from
+                .map(|from| quant_recommendation_report::Column::CreatedAt.gte(from)),
+        )
+        .add_option(
+            query
+                .to
+                .map(|to| quant_recommendation_report::Column::CreatedAt.lt(to)),
+        )
+}
+
 async fn transition_report_status(
     db: &DatabaseConnection,
     report_id: &RecommendationReportId,
@@ -230,4 +291,36 @@ async fn transition_report_status(
 
     txn.commit().await.map_err(StorageError::from)?;
     Ok(report_model.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::page_condition;
+    use quant_pivot_models::entities::quant_recommendation_report;
+    use quant_pivot_models::{
+        domain::{QuantReportListQuery, pagination::PageRequest},
+        enums::quant::{RecommendationReportStatus, ReportKind, ReportTriggerKind},
+    };
+    use sea_orm::{DbBackend, EntityTrait, QueryFilter, QueryTrait};
+
+    #[test]
+    fn page_condition_adds_optional_filters_to_sql() {
+        let query = QuantReportListQuery {
+            kind: Some(ReportKind::TopN),
+            status: Some(RecommendationReportStatus::Published),
+            trigger_kind: Some(ReportTriggerKind::Scheduled),
+            from: None,
+            to: None,
+            page: PageRequest::default(),
+        };
+
+        let sql = quant_recommendation_report::Entity::find()
+            .filter(page_condition(&query))
+            .build(DbBackend::Postgres)
+            .to_string();
+
+        assert!(sql.contains(r#""quant_recommendation_report"."report_kind" ="#));
+        assert!(sql.contains(r#""quant_recommendation_report"."status" ="#));
+        assert!(sql.contains(r#""quant_recommendation_report"."trigger_kind" ="#));
+    }
 }

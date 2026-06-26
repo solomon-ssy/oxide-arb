@@ -27,12 +27,12 @@ const PRODUCES: &[SeedArtifact] = &[
 
 pub const MENUS_SEED: SeedSpec = SeedSpec {
     id: SEED_ID,
-    version: 5,
+    version: 6,
     target_table: menu_table_name,
     depends_on: DEPENDS_ON,
     produces: PRODUCES,
     conflict_policy: SeedConflictPolicy::GraphOrdered,
-    checksum: "rbac.menus.bootstrap.v5",
+    checksum: "rbac.menus.bootstrap.v6",
     loader: load_boxed,
 };
 
@@ -198,7 +198,6 @@ fn build_tree() -> MenuTree {
     let mut t = MenuTree::new();
     build_dashboard(&mut t);
     build_trading(&mut t);
-    build_risk(&mut t);
     build_operations(&mut t);
     build_access_control(&mut t);
     t
@@ -265,7 +264,7 @@ fn build_trading(t: &mut MenuTree) {
         "Subscribe / Unsubscribe",
         perm(ResourceType::Market, Operation::Update),
     );
-    t.page(PageSpec {
+    let quant_reports = t.page(PageSpec {
         parent: &trading,
         name: "quant-reports",
         title: "page.menu.quantReports",
@@ -274,60 +273,17 @@ fn build_trading(t: &mut MenuTree) {
         permission_code: Some(perm(ResourceType::QuantReport, Operation::Read)),
         icon: "lucide:bar-chart-3",
     });
-    let trades_page = t.page(PageSpec {
-        parent: &trading,
-        name: "trades",
-        title: "page.menu.trades",
-        path: "/trades",
-        component: "trades/index",
-        permission_code: Some(perm(ResourceType::Trade, Operation::Read)),
-        icon: "lucide:receipt",
-    });
     t.button(
-        &trades_page,
-        "trade:reconcile",
-        "page.menu.tradeReconcile",
-        perm(ResourceType::Trade, Operation::Update),
-    );
-}
-
-fn build_risk(t: &mut MenuTree) {
-    let risk = t.dir("risk", "page.menu.group.risk", "lucide:shield");
-    let risk_overview = t.page(PageSpec {
-        parent: &risk,
-        name: "risk-overview",
-        title: "page.menu.risk",
-        path: "/risk",
-        component: "risk/index",
-        permission_code: Some(perm(ResourceType::Risk, Operation::Read)),
-        icon: "lucide:shield-alert",
-    });
-    t.button(
-        &risk_overview,
-        "risk:reset",
-        "Reset Circuit Breaker",
-        perm(ResourceType::Risk, Operation::Reset),
-    );
-    let blacklist = t.page(PageSpec {
-        parent: &risk,
-        name: "blacklist",
-        title: "page.menu.blacklist",
-        path: "/blacklist",
-        component: "blacklist/index",
-        permission_code: Some(perm(ResourceType::Blacklist, Operation::Read)),
-        icon: "lucide:ban",
-    });
-    t.button(
-        &blacklist,
-        "blacklist:create",
-        "Add Entry",
-        perm(ResourceType::Blacklist, Operation::Create),
+        &quant_reports,
+        "quant_report:run",
+        "Run Ad-hoc Report",
+        perm(ResourceType::QuantReport, Operation::Enqueue),
     );
     t.button(
-        &blacklist,
-        "blacklist:delete",
-        "Remove Entry",
-        perm(ResourceType::Blacklist, Operation::Delete),
+        &quant_reports,
+        "quant_report:revoke",
+        "Revoke Report",
+        perm(ResourceType::QuantReport, Operation::Revoke),
     );
 }
 
@@ -626,6 +582,11 @@ mod tests {
         assert!(!names.contains("system-control"));
         assert!(!names.contains("permissions"));
         assert!(!names.contains("analytics-root"));
+        // Endgame leftovers removed in Phase 04.4.
+        assert!(!names.contains("trades"));
+        assert!(!names.contains("risk"));
+        assert!(!names.contains("risk-overview"));
+        assert!(!names.contains("blacklist"));
     }
 
     #[test]

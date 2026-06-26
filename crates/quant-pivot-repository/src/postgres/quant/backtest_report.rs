@@ -7,9 +7,9 @@ use quant_pivot_models::{
     entities::quant_backtest_report,
     types::{BacktestReportId, ModelVersionId},
 };
-use sea_orm::{
-    ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder,
-};
+use sea_orm::{DatabaseConnection, EntityTrait, IntoActiveModel};
+
+use crate::postgres::query::list_by_fk_ordered_desc;
 
 /// Postgres-backed backtest-report ledger repository.
 pub struct PgBacktestReportRepository {
@@ -47,12 +47,13 @@ impl BacktestReportRepository for PgBacktestReportRepository {
         &self,
         model_version_id: &ModelVersionId,
     ) -> Result<Vec<BacktestReportInfo>, StorageError> {
-        quant_backtest_report::Entity::find()
-            .filter(quant_backtest_report::Column::ModelVersionId.eq(model_version_id.clone()))
-            .order_by_desc(quant_backtest_report::Column::CreatedAt)
-            .all(&self.db)
-            .await
-            .map_err(StorageError::from)
-            .map(|rows| rows.into_iter().map(Into::into).collect())
+        list_by_fk_ordered_desc::<quant_backtest_report::Entity, _, _, _>(
+            &self.db,
+            quant_backtest_report::Column::ModelVersionId,
+            model_version_id.clone(),
+            quant_backtest_report::Column::CreatedAt,
+            Into::into,
+        )
+        .await
     }
 }

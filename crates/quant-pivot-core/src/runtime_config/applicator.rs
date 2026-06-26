@@ -3,7 +3,7 @@
 use crate::{
     governance::WeightOverlayApplicator,
     infra::schedule::ReportScheduleRunner,
-    observability::metrics_hub::MetricsHub,
+    observability::{alert_dispatcher::AlertDispatcher, metrics_hub::MetricsHub},
     pipeline::{
         data_quality::BookDataQualityService, market_cache::MarketCache,
         market_filter::MarketFilter, market_registry::MarketRegistry,
@@ -27,6 +27,9 @@ pub struct RuntimeConfigSubscribers {
     pub ws_subscription: Option<Arc<WsSubscriptionCoordinator>>,
     pub data_quality: Arc<BookDataQualityService>,
     pub metrics: Arc<MetricsHub>,
+    /// Operator alert dispatcher; its notification channels are hot-swapped on
+    /// activation so a new Telegram/webhook config takes effect without restart.
+    pub alerts: Arc<AlertDispatcher>,
     /// Candidate / shadow factor-weight overlay snapshot (3.7 hot-update).
     pub weight_overlay: Arc<WeightOverlayApplicator>,
     /// Deploy-time WS subscription look-ahead (hours); not yet runtime-config v3.
@@ -72,6 +75,7 @@ impl RuntimeConfigApplicator {
             .reload(&config.selection.enabled_categories);
         subs.market_cache.rebuild();
         subs.data_quality.reload(&config.data_quality);
+        subs.alerts.reload(&config.notification);
         subs.weight_overlay.reload(&config.factors, &config.model);
         if let Some(ws) = &subs.ws_subscription {
             let _ = ws.sync_subscription(

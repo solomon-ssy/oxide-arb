@@ -45,45 +45,29 @@ pub enum WsChannel {
     SystemStatus,
     /// Operator-facing alerts (level + message).
     SystemAlert,
-    /// Circuit-breaker trip notifications.
-    RiskCircuitBreaker,
-    /// Open-position changes.
-    RiskPositionUpdate,
     /// Market resolution (the `market_id` rides in the payload, not the key).
     MarketResolved,
     /// Coalesced per-market order-book snapshots (market-scoped fan-out).
     MarketBookUpdate,
     /// A runtime-config version was activated.
     ConfigActivated,
-    /// A quant recommendation report was published or transitioned.
-    QuantReportUpdate,
-    /// A new scored opportunity was detected.
-    OpportunityDetected,
-    /// A trade was filled.
-    TradeFilled,
-    /// A trade settled (with business outcome + realized `PnL`).
-    TradeSettled,
-    /// Live `PnL` update (daily / total).
-    PnlUpdate,
+    /// Quant recommendation report lifecycle events (started / published /
+    /// empty / failed / revoked / expired), discriminated by the payload's
+    /// `event` field.
+    QuantReport,
     /// Materialization / replay run lifecycle update for dashboard clients.
     MaterializationRunUpdate,
 }
 
 impl WsChannel {
     /// Every channel, used by exhaustiveness tests and reverse lookup.
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 7] = [
         Self::SystemStatus,
         Self::SystemAlert,
-        Self::RiskCircuitBreaker,
-        Self::RiskPositionUpdate,
         Self::MarketResolved,
         Self::MarketBookUpdate,
         Self::ConfigActivated,
-        Self::QuantReportUpdate,
-        Self::OpportunityDetected,
-        Self::TradeFilled,
-        Self::TradeSettled,
-        Self::PnlUpdate,
+        Self::QuantReport,
         Self::MaterializationRunUpdate,
     ];
 
@@ -93,16 +77,10 @@ impl WsChannel {
         match self {
             Self::SystemStatus => "system.status",
             Self::SystemAlert => "system.alert",
-            Self::RiskCircuitBreaker => "risk.circuit_breaker",
-            Self::RiskPositionUpdate => "risk.position_update",
             Self::MarketResolved => "market.resolved",
             Self::MarketBookUpdate => "market.book_update",
             Self::ConfigActivated => "config.activated",
-            Self::QuantReportUpdate => "quant.report_update",
-            Self::OpportunityDetected => "opportunity.detected",
-            Self::TradeFilled => "trade.filled",
-            Self::TradeSettled => "trade.settled",
-            Self::PnlUpdate => "pnl.update",
+            Self::QuantReport => "quant.report",
             Self::MaterializationRunUpdate => "materialization.run_update",
         }
     }
@@ -115,14 +93,10 @@ impl WsChannel {
     pub const fn resource(self) -> ResourceType {
         match self {
             Self::SystemStatus | Self::SystemAlert => ResourceType::System,
-            Self::RiskCircuitBreaker | Self::RiskPositionUpdate => ResourceType::Risk,
             Self::MarketResolved | Self::MarketBookUpdate => ResourceType::Market,
-            Self::QuantReportUpdate => ResourceType::QuantReport,
+            Self::QuantReport => ResourceType::QuantReport,
             Self::MaterializationRunUpdate => ResourceType::Publication,
             Self::ConfigActivated => ResourceType::RuntimeConfig,
-            Self::OpportunityDetected => ResourceType::Opportunity,
-            Self::TradeFilled | Self::TradeSettled => ResourceType::Trade,
-            Self::PnlUpdate => ResourceType::Pnl,
         }
     }
 
@@ -266,8 +240,8 @@ mod tests {
     #[test]
     fn display_matches_wire_key_format() {
         assert_eq!(
-            SubscriptionKey::global(WsChannel::PnlUpdate).to_string(),
-            "pnl.update"
+            SubscriptionKey::global(WsChannel::QuantReport).to_string(),
+            "quant.report"
         );
         assert_eq!(
             SubscriptionKey::scoped(WsChannel::MarketBookUpdate, MarketId::new("0xabc"))

@@ -13,7 +13,10 @@ use sea_orm::{
     PaginatorTrait, QueryFilter, QueryOrder, TransactionTrait, sea_query::OnConflict,
 };
 
-use crate::{postgres::rbac::util, traits::rbac::RoleMenuRepository};
+use crate::{
+    postgres::rbac::{junction, util},
+    traits::rbac::RoleMenuRepository,
+};
 
 /// Role→menu assignment repository backed by Postgres.
 pub struct PgRoleMenuRepository {
@@ -67,8 +70,7 @@ async fn do_set_menus(
         .map(|row| row.menu_id)
         .collect();
 
-    let added: Vec<MenuId> = target.difference(&current).cloned().collect();
-    let removed: Vec<MenuId> = current.difference(&target).cloned().collect();
+    let (added, removed) = junction::replace_set_diff(&target, &current);
 
     if !added.is_empty() {
         let rows = added.iter().map(|menu_id| role_menu::ActiveModel {
@@ -76,15 +78,14 @@ async fn do_set_menus(
             menu_id: Set(menu_id.clone()),
             ..Default::default()
         });
-        role_menu::Entity::insert_many(rows)
-            .on_conflict(
-                OnConflict::columns([role_menu::Column::RoleId, role_menu::Column::MenuId])
-                    .do_nothing()
-                    .to_owned(),
-            )
-            .exec_without_returning(&txn)
-            .await
-            .map_err(StorageError::from)?;
+        junction::insert_junction_rows::<role_menu::Entity>(
+            &txn,
+            rows,
+            OnConflict::columns([role_menu::Column::RoleId, role_menu::Column::MenuId])
+                .do_nothing()
+                .to_owned(),
+        )
+        .await?;
     }
 
     if !removed.is_empty() {

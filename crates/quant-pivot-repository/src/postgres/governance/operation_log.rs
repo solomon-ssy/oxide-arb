@@ -10,11 +10,15 @@ use quant_pivot_models::{
     entities::operation_log::{ActiveModel, Column, Entity},
 };
 use sea_orm::{
-    ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait, IntoActiveModel, PaginatorTrait,
-    QueryFilter, QueryOrder, QuerySelect, TransactionTrait, sea_query::Condition,
+    ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait, IntoActiveModel, QueryFilter,
+    QueryOrder, TransactionTrait, sea_query::Condition,
 };
 
-use crate::{batch, traits::OperationLogRepository};
+use crate::{
+    batch,
+    postgres::query::{non_empty, paginate_mapped},
+    traits::OperationLogRepository,
+};
 
 /// Number of columns in the `operation_log` table, for bind-variable budgeting.
 const OPERATION_LOG_COLUMNS: usize = 19;
@@ -72,61 +76,47 @@ async fn do_append_batch(
 }
 
 fn page_condition(query: &OperationLogQuery) -> Condition {
-    let mut condition = Condition::all();
-    if let Some(actor) = &query.actor_user_id {
-        condition = condition.add(Column::ActorUserId.eq(actor.clone()));
-    }
-    if let Some(category) = query.category {
-        condition = condition.add(Column::Category.eq(category));
-    }
-    if let Some(resource) = query.resource_type {
-        condition = condition.add(Column::ResourceType.eq(resource));
-    }
-    if let Some(outcome) = query.outcome {
-        condition = condition.add(Column::Outcome.eq(outcome));
-    }
-    if let Some(request_id) = query.request_id.as_deref().filter(|id| !id.is_empty()) {
-        condition = condition.add(Column::RequestId.eq(request_id));
-    }
-    if let Some(event_id) = &query.governance_audit_event_id {
-        condition = condition.add(Column::GovernanceAuditEventId.eq(event_id.clone()));
-    }
-    if let Some(from) = query.from {
-        condition = condition.add(Column::OccurredAt.gte(from));
-    }
-    if let Some(to) = query.to {
-        condition = condition.add(Column::OccurredAt.lt(to));
-    }
-    condition
+    Condition::all()
+        .add_option(
+            query
+                .actor_user_id
+                .as_ref()
+                .map(|id| Column::ActorUserId.eq(id.clone())),
+        )
+        .add_option(query.category.map(|category| Column::Category.eq(category)))
+        .add_option(
+            query
+                .resource_type
+                .map(|resource| Column::ResourceType.eq(resource)),
+        )
+        .add_option(query.outcome.map(|outcome| Column::Outcome.eq(outcome)))
+        .add_option(
+            non_empty(query.request_id.as_deref())
+                .map(|request_id| Column::RequestId.eq(request_id)),
+        )
+        .add_option(
+            query
+                .governance_audit_event_id
+                .as_ref()
+                .map(|event_id| Column::GovernanceAuditEventId.eq(event_id.clone())),
+        )
+        .add_option(query.from.map(|from| Column::OccurredAt.gte(from)))
+        .add_option(query.to.map(|to| Column::OccurredAt.lt(to)))
 }
 
 async fn do_page(
     db: &impl ConnectionTrait,
     query: OperationLogQuery,
 ) -> Result<Paginated<OperationLogInfo>, StorageError> {
-    let window = query.page.normalized();
-    let condition = page_condition(&query);
-
-    let total = Entity::find()
-        .filter(condition.clone())
-        .count(db)
-        .await
-        .map_err(StorageError::from)?;
-
-    if total == 0 {
-        return Ok(Paginated::from_request(Vec::new(), total, &window));
-    }
-
-    let models = Entity::find()
-        .filter(condition)
-        .order_by_desc(Column::OccurredAt)
-        .offset(window.offset())
-        .limit(window.limit())
-        .all(db)
-        .await
-        .map_err(StorageError::from)?;
-    let items = models.into_iter().map(Into::into).collect();
-    Ok(Paginated::from_request(items, total, &window))
+    paginate_mapped(
+        Entity::find()
+            .filter(page_condition(&query))
+            .order_by_desc(Column::OccurredAt),
+        db,
+        &query.page,
+        Into::into,
+    )
+    .await
 }
 
 #[async_trait::async_trait]
@@ -144,5 +134,56 @@ impl OperationLogRepository for PgOperationLogRepository {
         query: OperationLogQuery,
     ) -> Result<Paginated<OperationLogInfo>, StorageError> {
         do_page(&self.db, query).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::page_condition;
+    use quant_pivot_models::{
+        domain::{OperationLogQuery, pagination::PageRequest},
+        enums::{
+            operation_log::{OperationCategory, OperationOutcome},
+            rbac::ResourceType,
+        },
+        types::UserId,
+    };
+    use sea_orm::{DbBackend, EntityTrait, QueryFilter, QueryTrait};
+
+    #[test]
+    fn page_condition_adds_optional_filters_to_sql() {
+        let query = OperationLogQuery {
+            actor_user_id: Some(UserId::from_v7()),
+            category: Some(OperationCategory::Auth),
+            resource_type: Some(ResourceType::User),
+            outcome: Some(OperationOutcome::Success),
+            request_id: Some(String::new()),
+            governance_audit_event_id: None,
+            from: None,
+            to: None,
+            page: PageRequest::default(),
+        };
+
+        let sql = super::Entity::find()
+            .filter(page_condition(&query))
+            .build(DbBackend::Postgres)
+            .to_string();
+
+        assert!(sql.contains(r#""operation_log"."actor_user_id" ="#));
+        assert!(sql.contains(r#""operation_log"."category" ="#));
+        assert!(sql.contains(r#""operation_log"."resource_type" ="#));
+        assert!(sql.contains(r#""operation_log"."outcome" ="#));
+        assert!(!sql.contains(r#""operation_log"."request_id" ="#));
+    }
+
+    #[test]
+    fn page_condition_empty_matches_all_rows() {
+        let query = OperationLogQuery::default();
+        let sql = super::Entity::find()
+            .filter(page_condition(&query))
+            .build(DbBackend::Postgres)
+            .to_string();
+        assert!(!sql.contains(r#""operation_log"."actor_user_id" ="#));
+        assert!(!sql.contains(r#""operation_log"."category" ="#));
     }
 }

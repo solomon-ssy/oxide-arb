@@ -6,6 +6,7 @@
 //! to the service layer.
 
 pub mod casbin;
+pub mod junction;
 pub mod menu;
 pub mod role;
 pub mod role_menu;
