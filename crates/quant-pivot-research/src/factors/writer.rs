@@ -39,7 +39,7 @@ pub fn factor_events(
                 as_of: as_of_ms,
                 market_id: outcome.market_id.clone(),
                 factor_name: scored.value.name.as_str().to_owned(),
-                factor_family: scored.value.family.as_wire(),
+                factor_family: scored.value.family.as_str().to_owned(),
                 raw_value: ChDecimal64::from(raw),
                 normalized_score: ChProbability::from(scored.value.normalized_score),
                 confidence: ChProbability::from(scored.value.confidence),

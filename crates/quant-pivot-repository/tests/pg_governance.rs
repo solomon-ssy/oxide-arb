@@ -4,7 +4,10 @@
 use chrono::{Duration as ChronoDuration, Utc};
 use quant_pivot_models::{
     domain::{NewModelGovernanceAudit, NewModelSpec, NewModelVersion, NewShadowComparison},
-    enums::quant::{ModelGovernanceAction, ModelPublicationStatus},
+    enums::{
+        model::ModelFamily,
+        quant::{ModelGovernanceAction, PublicationStatus},
+    },
     types::{
         AuditEventId, ContentHash, ModelGovernanceAuditId, ModelSpecId, ModelVersionId,
         Probability, SchemaVersion, ShadowComparisonId,
@@ -32,12 +35,12 @@ async fn seed_two_versions(db: &sea_orm::DatabaseConnection) -> (ModelVersionId,
         .create_model_spec(NewModelSpec {
             model_spec_id: model_spec_id.clone(),
             name: "pg-governance-it".to_owned(),
-            model_family: "weighted_factor".to_owned(),
+            model_family: ModelFamily::WeightedFactor,
             prediction_horizon_secs: 86_400,
             feature_schema_version: SchemaVersion::FIRST,
             label_schema_version: SchemaVersion::FIRST,
             spec_json: serde_json::json!({}),
-            status: ModelPublicationStatus::Published,
+            status: PublicationStatus::Published,
         })
         .await
         .expect("model spec");
@@ -54,7 +57,7 @@ async fn seed_two_versions(db: &sea_orm::DatabaseConnection) -> (ModelVersionId,
                 training_dataset_id: None,
                 metrics_json: serde_json::json!({}),
                 quality_gate_report: serde_json::json!({}),
-                publication_status: ModelPublicationStatus::Candidate,
+                publication_status: PublicationStatus::Candidate,
                 published_at: None,
                 retired_at: None,
             })
@@ -123,8 +126,8 @@ async fn quant_model_governance_audit_migration_and_crud() {
             actor_username: "operator".to_owned(),
             actor_role: Some("risk_manager".to_owned()),
             reason: "publish after gate pass".to_owned(),
-            before_status: ModelPublicationStatus::Candidate,
-            after_status: ModelPublicationStatus::Published,
+            before_status: PublicationStatus::Candidate,
+            after_status: PublicationStatus::Published,
             before_hash: Some(content_hash('b').as_str().to_owned()),
             after_hash: Some(content_hash('a').as_str().to_owned()),
             quality_gate_passed: true,

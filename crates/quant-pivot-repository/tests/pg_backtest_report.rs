@@ -6,7 +6,8 @@ use quant_pivot_models::{
         NewBacktestReport, NewModelRun, NewModelSpec, NewModelVersion, NewRuntimeConfigVersion,
     },
     enums::{
-        quant::{ModelPublicationStatus, ModelRunKind, ModelRunStatus},
+        model::ModelFamily,
+        quant::{ModelRunKind, ModelRunStatus, PublicationStatus},
         runtime_config::RuntimeConfigVersionSource,
     },
     types::{
@@ -58,12 +59,12 @@ async fn seed_model_version(
         .create_model_spec(NewModelSpec {
             model_spec_id: model_spec_id.clone(),
             name: "pg-backtest-it".to_owned(),
-            model_family: "weighted_factor".to_owned(),
+            model_family: ModelFamily::WeightedFactor,
             prediction_horizon_secs: 86_400,
             feature_schema_version: SchemaVersion::FIRST,
             label_schema_version: SchemaVersion::FIRST,
             spec_json: serde_json::json!({}),
-            status: ModelPublicationStatus::Published,
+            status: PublicationStatus::Published,
         })
         .await
         .expect("model spec");
@@ -78,7 +79,7 @@ async fn seed_model_version(
             training_dataset_id: None,
             metrics_json: serde_json::json!({}),
             quality_gate_report: serde_json::json!({}),
-            publication_status: ModelPublicationStatus::Candidate,
+            publication_status: PublicationStatus::Candidate,
             published_at: None,
             retired_at: None,
         })

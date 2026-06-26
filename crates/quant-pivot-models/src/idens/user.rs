@@ -52,12 +52,10 @@ pub fn table() -> TableCreateStatement {
         .col(ColumnDef::new(User::Avatar).text().null())
         .col(ColumnDef::new(User::Email).text().null())
         .col(ColumnDef::new(User::Phone).text().null())
-        .col(
-            ColumnDef::new(User::Status)
-                .text()
-                .not_null()
-                .default(UserStatus::Active),
-        )
+        .col(column::pg_enum_default::<UserStatus>(
+            User::Status,
+            &UserStatus::Active,
+        ))
         .col(timestamp_with_write_default(User::CreatedAt))
         .col(timestamp_with_write_default(User::UpdatedAt))
         .to_owned()

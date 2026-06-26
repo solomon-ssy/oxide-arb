@@ -1,9 +1,7 @@
 //! Common enums used across the quant-pivot platform.
 //!
-//! Enums that appear as `SeaORM` entity columns use [`active_string_enum!`] so they
-//! can be stored directly in the database without JSON serialization.
+//! Postgres column enums use [`pg_enum!`]; wire-only enums use [`wire_enum!`].
 
-use crate::{enums::quant::QuantRuntimeMode, types::Usd};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use sea_orm::{ActiveValue, IntoActiveValue};
@@ -14,8 +12,8 @@ use std::{
 };
 use thiserror::Error;
 
-active_string_enum! {
-    /// Trade direction.
+crate::pg_enum! {
+    type_name = "qp_side",
     pub enum Side {
         Buy => "BUY",
         Sell => "SELL",
@@ -57,7 +55,7 @@ pub enum OrderType {
     Gtd { expiration: u64 },
 }
 
-active_string_enum! {
+crate::wire_enum! {
     /// Staleness classification for market-data snapshots.
     ///
     /// Variants are ordered from freshest to most stale. The derived `Ord`
@@ -80,162 +78,6 @@ impl StalenessLevel {
         } else {
             other
         }
-    }
-}
-
-active_string_enum! {
-    /// Success/miss/failed bucket derived from [`TradeState`].
-    ///
-    /// This is not the trade's stored state: the `trade` row has exactly one state
-    /// field, while this bucket is surfaced as a read-only PG generated column for
-    /// risk accounting, reporting, and audit.
-    pub enum TradeBusinessOutcome {
-        /// Order filled, position opened.
-        Success => "success",
-        /// FOK not filled (book moved or insufficient depth).
-        Miss => "miss",
-        /// Order definitely failed/errored.
-        Failed => "failed",
-    }
-}
-
-active_string_enum! {
-    /// Operator/worker conclusion for a trade that entered the reconciliation queue.
-    ///
-    /// This is intentionally separate from [`TradeBusinessOutcome`]: pending
-    /// reconciliation is not a business outcome, and an unresolved ambiguity must
-    /// never be counted as a failed trade.
-    pub enum TradeReconcileResolution {
-        /// External evidence proves the venue filled the order.
-        Filled => "filled",
-        /// External evidence proves the venue did not fill the order.
-        Miss => "miss",
-        /// External evidence could not resolve the order safely.
-        Unresolvable => "unresolvable",
-    }
-}
-
-/// Semantic kind of a trade row's `net_profit_usd` on the API wire.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum NetProfitKind {
-    /// No fill-time EV is recorded.
-    None,
-    /// Fill-time expected value — not realized settlement `PnL`.
-    FillEv,
-}
-
-impl NetProfitKind {
-    /// Derive the wire kind from the persisted optional EV column.
-    #[must_use]
-    pub const fn for_net_profit(net_profit_usd: &Option<Usd>) -> Self {
-        if net_profit_usd.is_some() {
-            Self::FillEv
-        } else {
-            Self::None
-        }
-    }
-}
-
-active_string_enum! {
-    /// Durable trade lifecycle state machine — single source of truth on the `trade` row.
-    ///
-    /// Replaces the former `phase × outcome` two-column model: one field makes illegal
-    /// states unrepresentable (e.g. "processed but no outcome" cannot occur). The
-    /// business-outcome classification (success/miss/failed) is derived via
-    /// [`TradeState::business_outcome`] in Rust and a PG generated column for reporting.
-    ///
-    /// Transitions:
-    /// `Intent` → `Submitted` → (`FillObserved` | `MissObserved` | `FailObserved`)
-    ///   → (`FillProcessing` | `MissProcessing` | `FailProcessing`)
-    ///   → (`Settled` | `Missed` | `Failed`); stale `Submitted` → `Orphaned`.
-    /// `Orphaned` means "unknown venue outcome, needs reconciliation"; it is
-    /// deliberately not a failed trade until an explicit reconciliation terminal
-    /// resolution says so.
-    /// The `*Observed` states are unclaimed durable work. The `*Processing` states
-    /// are lease-backed claims and may be reclaimed after lease expiry.
-    pub enum TradeState {
-        /// Row inserted, order not yet submitted to the venue.
-        Intent => "intent",
-        /// Order signed and sent, venue outcome not yet observed (crash-orphan window).
-        Submitted => "submitted",
-        /// Fill observed; position + risk Fill accounting not yet applied (relay queue).
-        FillObserved => "fill_observed",
-        /// FOK miss observed; finalization not yet applied (relay queue).
-        MissObserved => "miss_observed",
-        /// Venue error/timeout observed; finalization not yet applied (relay queue).
-        FailObserved => "fail_observed",
-        /// Fill relay side-effects are currently claimed by a worker.
-        FillProcessing => "fill_processing",
-        /// Miss relay finalization is currently claimed by a worker.
-        MissProcessing => "miss_processing",
-        /// Failure relay finalization is currently claimed by a worker.
-        FailProcessing => "fail_processing",
-        /// Fill fully processed (position created, risk Fill accounted). Terminal.
-        Settled => "settled",
-        /// Miss fully processed. Terminal.
-        Missed => "missed",
-        /// Failure fully processed. Terminal.
-        Failed => "failed",
-        /// Submitted but never confirmed past the timeout — needs reconciliation.
-        Orphaned => "orphaned",
-    }
-}
-
-impl TradeState {
-    /// States awaiting relay processing (outcome observed, side-effects not applied).
-    #[must_use]
-    pub const fn is_unprocessed(self) -> bool {
-        matches!(
-            self,
-            Self::FillObserved | Self::MissObserved | Self::FailObserved
-        )
-    }
-
-    /// States held by a relay worker lease.
-    #[must_use]
-    pub const fn is_processing(self) -> bool {
-        matches!(
-            self,
-            Self::FillProcessing | Self::MissProcessing | Self::FailProcessing
-        )
-    }
-
-    /// Terminal state reached once the relay processes the matching observed state.
-    #[must_use]
-    pub const fn processed_terminal(self) -> Option<Self> {
-        match self {
-            Self::FillObserved | Self::FillProcessing => Some(Self::Settled),
-            Self::MissObserved | Self::MissProcessing => Some(Self::Missed),
-            Self::FailObserved | Self::FailProcessing => Some(Self::Failed),
-            _ => None,
-        }
-    }
-
-    /// Business-outcome classification, or `None` while still in-flight.
-    #[must_use]
-    pub const fn business_outcome(self) -> Option<TradeBusinessOutcome> {
-        match self {
-            Self::FillObserved | Self::FillProcessing | Self::Settled => {
-                Some(TradeBusinessOutcome::Success)
-            }
-            Self::MissObserved | Self::MissProcessing | Self::Missed => {
-                Some(TradeBusinessOutcome::Miss)
-            }
-            Self::FailObserved | Self::FailProcessing | Self::Failed => {
-                Some(TradeBusinessOutcome::Failed)
-            }
-            Self::Intent | Self::Submitted | Self::Orphaned => None,
-        }
-    }
-
-    /// True once a fill has been observed (whether or not post-trade is applied).
-    #[must_use]
-    pub const fn is_success(self) -> bool {
-        matches!(
-            self,
-            Self::FillObserved | Self::FillProcessing | Self::Settled
-        )
     }
 }
 
@@ -318,7 +160,8 @@ impl Display for AlertLevel {
     }
 }
 
-active_string_enum! {
+crate::pg_enum! {
+    type_name = "qp_market_category",
     /// Polymarket event category for fee-rate lookup and opportunity scoring.
     @derive(PartialOrd, Ord, schemars::JsonSchema)
     pub enum MarketCategory {
@@ -558,8 +401,8 @@ impl FromStr for MarketCategory {
     }
 }
 
-active_string_enum! {
-    /// Minimum price increment supported by a Polymarket CLOB market.
+crate::pg_enum! {
+    type_name = "qp_tick_size",
     pub enum TickSize {
         Tenth => "0.1",
         Hundredth => "0.01",
@@ -605,206 +448,6 @@ impl TryFrom<Decimal> for TickSize {
 
     fn try_from(d: Decimal) -> Result<Self, TickSizeParseError> {
         Self::from_str(&d.normalize().to_string())
-    }
-}
-
-active_string_enum! {
-    /// Lifecycle status of a position.
-    pub enum PositionStatus {
-        Open => "open",
-        Closed => "closed",
-        Settled => "settled",
-    }
-}
-
-active_string_enum! {
-    /// Lifecycle status of on-chain CTF redemption for a position.
-    pub enum RedeemStatus {
-        NotRequired => "not_required",
-        Pending => "pending",
-        Completed => "completed",
-        Failed => "failed",
-    }
-}
-
-impl RedeemStatus {
-    #[must_use]
-    pub const fn initial_for_mode(mode: QuantRuntimeMode) -> Self {
-        match mode {
-            QuantRuntimeMode::ReportOnly => Self::NotRequired,
-            QuantRuntimeMode::SemiAuto | QuantRuntimeMode::AutoExecution => Self::Pending,
-        }
-    }
-
-    #[must_use]
-    pub const fn settled_for_mode(mode: QuantRuntimeMode) -> Self {
-        match mode {
-            QuantRuntimeMode::ReportOnly => Self::NotRequired,
-            QuantRuntimeMode::SemiAuto | QuantRuntimeMode::AutoExecution => Self::Completed,
-        }
-    }
-}
-
-/// On-chain redemption route for standard (non-neg-risk) markets.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum StandardRedeemRoute {
-    #[default]
-    StandardCtf,
-    CtfCollateralAdapter,
-}
-
-impl StandardRedeemRoute {
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::StandardCtf => "standard_ctf",
-            Self::CtfCollateralAdapter => "ctf_collateral_adapter",
-        }
-    }
-}
-
-impl Display for StandardRedeemRoute {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-/// On-chain redemption route for neg-risk markets.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum NegRiskRedeemRoute {
-    #[default]
-    NegRiskLegacyAdapter,
-    NegRiskCollateralAdapter,
-}
-
-impl NegRiskRedeemRoute {
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::NegRiskLegacyAdapter => "neg_risk_legacy_adapter",
-            Self::NegRiskCollateralAdapter => "neg_risk_collateral_adapter",
-        }
-    }
-}
-
-impl Display for NegRiskRedeemRoute {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-/// Resolved on-chain redemption route (all four live redeem paths).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ResolvedRedeemRoute {
-    StandardCtf,
-    CtfCollateralAdapter,
-    NegRiskLegacyAdapter,
-    NegRiskCollateralAdapter,
-}
-
-impl ResolvedRedeemRoute {
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::StandardCtf => "standard_ctf",
-            Self::CtfCollateralAdapter => "ctf_collateral_adapter",
-            Self::NegRiskLegacyAdapter => "neg_risk_legacy_adapter",
-            Self::NegRiskCollateralAdapter => "neg_risk_collateral_adapter",
-        }
-    }
-
-    #[must_use]
-    pub const fn expects_neg_risk(self) -> bool {
-        matches!(
-            self,
-            Self::NegRiskLegacyAdapter | Self::NegRiskCollateralAdapter
-        )
-    }
-}
-
-impl From<StandardRedeemRoute> for ResolvedRedeemRoute {
-    fn from(route: StandardRedeemRoute) -> Self {
-        match route {
-            StandardRedeemRoute::StandardCtf => Self::StandardCtf,
-            StandardRedeemRoute::CtfCollateralAdapter => Self::CtfCollateralAdapter,
-        }
-    }
-}
-
-impl From<NegRiskRedeemRoute> for ResolvedRedeemRoute {
-    fn from(route: NegRiskRedeemRoute) -> Self {
-        match route {
-            NegRiskRedeemRoute::NegRiskLegacyAdapter => Self::NegRiskLegacyAdapter,
-            NegRiskRedeemRoute::NegRiskCollateralAdapter => Self::NegRiskCollateralAdapter,
-        }
-    }
-}
-
-impl FromStr for ResolvedRedeemRoute {
-    type Err = ();
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value {
-            "standard_ctf" => Ok(Self::StandardCtf),
-            "ctf_collateral_adapter" => Ok(Self::CtfCollateralAdapter),
-            "neg_risk_legacy_adapter" => Ok(Self::NegRiskLegacyAdapter),
-            "neg_risk_collateral_adapter" => Ok(Self::NegRiskCollateralAdapter),
-            _ => Err(()),
-        }
-    }
-}
-
-impl Display for ResolvedRedeemRoute {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-active_string_enum! {
-    /// How a position's redeem route was resolved at fill time.
-    pub enum RedeemResolutionSource {
-        Override => "override",
-        ClassStandard => "class_standard",
-        ClassNegRisk => "class_neg_risk",
-    }
-}
-
-active_string_enum! {
-    /// Lifecycle status for post-redeem accounting persistence.
-    pub enum SettlementAccountingStatus {
-        Pending => "pending",
-        Redeemed => "redeemed",
-        Accounted => "accounted",
-        Failed => "failed",
-    }
-}
-
-active_string_enum! {
-    /// Source that triggered market settlement processing.
-    pub enum SettlementTrigger {
-        Ws => "ws",
-        PeriodicRetry => "periodic_retry",
-        Manual => "manual",
-    }
-}
-
-active_string_enum! {
-    /// Lifecycle status of a potential-loss ledger entry.
-    pub enum LedgerStatus {
-        Active => "active",
-        Resolved => "resolved",
-        Expired => "expired",
-    }
-}
-
-active_string_enum! {
-    /// Type of report snapshot.
-    pub enum ReportType {
-        Daily => "daily",
-        Weekly => "weekly",
     }
 }
 

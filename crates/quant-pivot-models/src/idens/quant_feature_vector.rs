@@ -7,6 +7,7 @@ use sea_orm::{
 };
 
 use crate::{
+    enums::quant::DataQualityStatus,
     idens::market::Market,
     schema::{
         column,
@@ -55,11 +56,9 @@ pub fn table() -> TableCreateStatement {
                 .text()
                 .not_null(),
         )
-        .col(
-            ColumnDef::new(QuantFeatureVector::DataQuality)
-                .text()
-                .not_null(),
-        )
+        .col(column::pg_enum::<DataQualityStatus>(
+            QuantFeatureVector::DataQuality,
+        ))
         .col(
             ColumnDef::new(QuantFeatureVector::StalenessMs)
                 .big_integer()

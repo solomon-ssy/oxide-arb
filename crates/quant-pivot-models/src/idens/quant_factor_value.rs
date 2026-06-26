@@ -7,6 +7,7 @@ use sea_orm::{
 };
 
 use crate::{
+    enums::quant::FactorDirection,
     idens::{
         market::Market, quant_factor_definition::QuantFactorDefinition,
         quant_feature_vector::QuantFeatureVector, quant_model_run::QuantModelRun,
@@ -60,11 +61,9 @@ pub fn table() -> TableCreateStatement {
                 .null(),
         )
         .col(column::probability(QuantFactorValue::NormalizedScore))
-        .col(
-            ColumnDef::new(QuantFactorValue::Direction)
-                .text()
-                .not_null(),
-        )
+        .col(column::pg_enum::<FactorDirection>(
+            QuantFactorValue::Direction,
+        ))
         .col(column::probability(QuantFactorValue::Confidence))
         .col(
             ColumnDef::new(QuantFactorValue::Explanation)

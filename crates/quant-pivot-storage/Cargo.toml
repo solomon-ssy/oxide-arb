@@ -41,6 +41,7 @@ testcontainers-modules = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["test-util"] }
 rust_decimal = { workspace = true }
 rust_decimal_macros = { workspace = true }
+quant-pivot-test-support = { workspace = true }
 testcontainers = { workspace = true }
 testcontainers-modules = { workspace = true }
 

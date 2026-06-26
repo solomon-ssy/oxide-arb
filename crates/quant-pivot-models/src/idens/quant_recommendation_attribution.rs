@@ -5,6 +5,7 @@ use sea_orm::{
 };
 
 use crate::{
+    enums::quant::RecommendationOutcome,
     idens::quant_recommendation::QuantRecommendation,
     schema::{
         column, dependency::TableDependency, index::IndexSpec, seed::SeedSpec,
@@ -35,11 +36,9 @@ pub fn table() -> TableCreateStatement {
         .col(column::uuid_pk(
             QuantRecommendationAttribution::RecommendationId,
         ))
-        .col(
-            ColumnDef::new(QuantRecommendationAttribution::Outcome)
-                .text()
-                .not_null(),
-        )
+        .col(column::pg_enum::<RecommendationOutcome>(
+            QuantRecommendationAttribution::Outcome,
+        ))
         .col(
             ColumnDef::new(QuantRecommendationAttribution::EntryOutcomeJson)
                 .json_binary()

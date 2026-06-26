@@ -7,6 +7,7 @@ use sea_orm::{
 };
 
 use crate::{
+    enums::quant::{ModelGovernanceAction, PublicationStatus},
     idens::{quant_model_version::QuantModelVersion, quant_training_dataset::QuantTrainingDataset},
     schema::{
         column,
@@ -56,11 +57,9 @@ pub fn table() -> TableCreateStatement {
         .col(column::uuid_null(
             QuantModelGovernanceAudit::TrainingDatasetId,
         ))
-        .col(
-            ColumnDef::new(QuantModelGovernanceAudit::Action)
-                .text()
-                .not_null(),
-        )
+        .col(column::pg_enum::<ModelGovernanceAction>(
+            QuantModelGovernanceAudit::Action,
+        ))
         .col(
             ColumnDef::new(QuantModelGovernanceAudit::ActorUsername)
                 .text()
@@ -76,16 +75,12 @@ pub fn table() -> TableCreateStatement {
                 .text()
                 .not_null(),
         )
-        .col(
-            ColumnDef::new(QuantModelGovernanceAudit::BeforeStatus)
-                .text()
-                .not_null(),
-        )
-        .col(
-            ColumnDef::new(QuantModelGovernanceAudit::AfterStatus)
-                .text()
-                .not_null(),
-        )
+        .col(column::pg_enum::<PublicationStatus>(
+            QuantModelGovernanceAudit::BeforeStatus,
+        ))
+        .col(column::pg_enum::<PublicationStatus>(
+            QuantModelGovernanceAudit::AfterStatus,
+        ))
         .col(
             ColumnDef::new(QuantModelGovernanceAudit::BeforeHash)
                 .text()

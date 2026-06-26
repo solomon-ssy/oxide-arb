@@ -1,7 +1,7 @@
 //! Runtime configuration versioning enums.
 
-active_string_enum! {
-    /// Source that created an immutable runtime config version.
+crate::pg_enum! {
+    type_name = "qp_runtime_config_source",
     pub enum RuntimeConfigVersionSource {
         Bootstrap => "bootstrap",
         Operator => "operator",
@@ -9,8 +9,8 @@ active_string_enum! {
     }
 }
 
-active_string_enum! {
-    /// Activation reason type for runtime config lineage.
+crate::pg_enum! {
+    type_name = "qp_runtime_config_activation_kind",
     pub enum RuntimeConfigActivationKind {
         Initial => "initial",
         Promote => "promote",

@@ -30,7 +30,13 @@ async fn mutating_request_is_recorded_with_envelope() {
     .await;
     assert_eq!(res.status, StatusCode::OK);
 
-    let rows = client::wait_for_oplog(&env, &admin, "oplog-create-user").await;
+    let rows = client::wait_for_oplog(
+        &env,
+        &admin,
+        res.header("x-request-id")
+            .expect("response echoes x-request-id"),
+    )
+    .await;
     assert_eq!(rows.len(), 1, "exactly one row for the create request");
     let row = &rows[0];
     assert_eq!(row["action"], "user.create");

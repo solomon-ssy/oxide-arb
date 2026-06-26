@@ -5,6 +5,7 @@ pub mod column;
 pub mod dependency;
 pub mod graph;
 pub mod index;
+pub mod pg_enum;
 pub mod seed;
 pub mod table;
 pub mod trigger;

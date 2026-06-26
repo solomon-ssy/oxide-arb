@@ -29,12 +29,10 @@ pub fn table() -> TableCreateStatement {
         .table(SystemRuntimeState::Table)
         .if_not_exists()
         .col(column::singleton_pk(SystemRuntimeState::Id))
-        .col(
-            ColumnDef::new(SystemRuntimeState::QuantRuntimeMode)
-                .text()
-                .not_null()
-                .default(QuantRuntimeMode::ReportOnly),
-        )
+        .col(column::pg_enum_default::<QuantRuntimeMode>(
+            SystemRuntimeState::QuantRuntimeMode,
+            &QuantRuntimeMode::ReportOnly,
+        ))
         .col(
             ColumnDef::new(SystemRuntimeState::ChangedBy)
                 .text()

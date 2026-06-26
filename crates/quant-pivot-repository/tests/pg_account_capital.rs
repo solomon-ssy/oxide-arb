@@ -17,11 +17,13 @@ use quant_pivot_models::{
     entities::quant_market_selection::{SelectionExcludedMarketIds, SelectionIncludedMarketIds},
     enums::{
         common::{MarketCategory, OrderType, Side},
+        execution::OrderIntentKind,
         factor::FactorFamily,
+        model::ModelFamily,
         operation_log::{OperationCategory, OperationOutcome},
         quant::{
             AccountSource, ApprovalStatus, BindingConstraint, EntryTriggerKind, FactorDirection,
-            ModelPublicationStatus, ModelRunKind, ModelRunStatus, OrderIntentStatus, OutcomeSide,
+            ModelRunKind, ModelRunStatus, OrderIntentStatus, OutcomeSide, PublicationStatus,
             QuantRuntimeMode, RecommendationReportStatus, RecommendationStatus, ReportKind,
             ReportTriggerKind, SettlementPolicy, SizingModelKind,
         },
@@ -313,7 +315,7 @@ async fn assert_reserved_capital_tracks_pending_intent(
             order_intent_id: OrderIntentId::from_v7(),
             recommendation_id: recommendation_id.clone(),
             runtime_mode: QuantRuntimeMode::SemiAuto,
-            intent_kind: "buy".to_owned(),
+            intent_kind: OrderIntentKind::Buy,
             status: OrderIntentStatus::PendingApproval,
             approval_status: ApprovalStatus::Pending,
             approved_by: None,
@@ -376,12 +378,12 @@ async fn seed_model_version(
         .create_model_spec(NewModelSpec {
             model_spec_id: model_spec_id.clone(),
             name: "pg-account-it".to_owned(),
-            model_family: "weighted_factor".to_owned(),
+            model_family: ModelFamily::WeightedFactor,
             prediction_horizon_secs: 86_400,
             feature_schema_version: SchemaVersion::FIRST,
             label_schema_version: SchemaVersion::FIRST,
             spec_json: serde_json::json!({}),
-            status: ModelPublicationStatus::Published,
+            status: PublicationStatus::Published,
         })
         .await
         .expect("model spec");
@@ -396,7 +398,7 @@ async fn seed_model_version(
             training_dataset_id: None,
             metrics_json: serde_json::json!({}),
             quality_gate_report: serde_json::json!({}),
-            publication_status: ModelPublicationStatus::Published,
+            publication_status: PublicationStatus::Published,
             published_at: Some(Utc::now()),
             retired_at: None,
         })

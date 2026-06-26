@@ -7,7 +7,7 @@ use sea_orm::{
 };
 
 use crate::{
-    enums::rbac::RoleStatus,
+    enums::rbac::{MenuKind, RoleStatus},
     schema::{
         column,
         dependency::TableDependency,
@@ -51,7 +51,7 @@ pub fn table() -> TableCreateStatement {
         .col(column::uuid_pk(Menu::Id))
         .col(column::uuid_null(Menu::ParentId))
         .col(ColumnDef::new(Menu::Name).text().not_null())
-        .col(ColumnDef::new(Menu::Kind).text().not_null())
+        .col(column::pg_enum::<MenuKind>(Menu::Kind))
         .col(ColumnDef::new(Menu::Path).text().null())
         .col(ColumnDef::new(Menu::Component).text().null())
         .col(ColumnDef::new(Menu::Title).text().not_null())
@@ -76,12 +76,10 @@ pub fn table() -> TableCreateStatement {
                 .not_null()
                 .default(false),
         )
-        .col(
-            ColumnDef::new(Menu::Status)
-                .text()
-                .not_null()
-                .default(RoleStatus::Enabled),
-        )
+        .col(column::pg_enum_default::<RoleStatus>(
+            Menu::Status,
+            &RoleStatus::Enabled,
+        ))
         .col(timestamp_with_write_default(Menu::CreatedAt))
         .col(timestamp_with_write_default(Menu::UpdatedAt))
         .to_owned()

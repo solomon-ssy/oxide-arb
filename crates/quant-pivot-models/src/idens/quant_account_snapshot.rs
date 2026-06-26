@@ -4,12 +4,15 @@ use sea_orm::{
     sea_query::{ColumnDef, Index, IndexOrder, Table, TableCreateStatement},
 };
 
-use crate::schema::{
-    column,
-    dependency::TableDependency,
-    index::{IndexBuildMode, IndexSpec},
-    seed::SeedSpec,
-    timestamp_with_write_default,
+use crate::{
+    enums::quant::AccountSource,
+    schema::{
+        column,
+        dependency::TableDependency,
+        index::{IndexBuildMode, IndexSpec},
+        seed::SeedSpec,
+        timestamp_with_write_default,
+    },
 };
 
 #[quant_schema(lifecycle = "report")]
@@ -36,11 +39,9 @@ pub fn table() -> TableCreateStatement {
                 .timestamp_with_time_zone()
                 .not_null(),
         )
-        .col(
-            ColumnDef::new(QuantAccountSnapshot::Source)
-                .text()
-                .not_null(),
-        )
+        .col(column::pg_enum::<AccountSource>(
+            QuantAccountSnapshot::Source,
+        ))
         .col(column::usd(QuantAccountSnapshot::EquityUsd))
         .col(column::usd(QuantAccountSnapshot::AvailableUsd))
         .col(column::usd(QuantAccountSnapshot::ReservedUsd))

@@ -4,6 +4,7 @@ use crate::{
     domain::{MarketFeeColumns, MarketFeeSchedule},
     enums::{
         common::{CategorySet, MarketCategory, TickSize},
+        fee::FeeSource,
         market::MarketStatus,
     },
     types::{EventId, MarketId, TokenId, Usd},
@@ -37,7 +38,7 @@ pub struct MarketInfo {
     pub fee_exponent: Option<Decimal>,
     pub fee_taker_only: Option<bool>,
     pub fee_rebate_rate: Option<Decimal>,
-    pub fee_source: Option<String>,
+    pub fee_source: Option<FeeSource>,
     pub fee_observed_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -86,7 +87,7 @@ pub struct UpsertMarket {
     pub fee_exponent: Option<Decimal>,
     pub fee_taker_only: Option<bool>,
     pub fee_rebate_rate: Option<Decimal>,
-    pub fee_source: Option<String>,
+    pub fee_source: Option<FeeSource>,
     pub fee_observed_at: Option<DateTime<Utc>>,
 }
 

@@ -20,21 +20,26 @@ Tests run **serially** (`--test-threads=1`) to avoid port and resource contentio
 ## Run a single suite
 
 ```bash
-cargo test -p quant-pivot-core --test gamma_service_sync -- --ignored --test-threads=1
+cargo test -p quant-pivot-core --test market_selection_e2e -- --ignored --test-threads=1
 ```
 
 ## What each suite covers
 
 | Crate | Test binary | Services |
 |-------|-------------|----------|
-| `quant-pivot-repository` | `pg_repository` | Postgres |
+| `quant-pivot-storage` | `migration_pg` | Postgres (native `qp_*` enum lane) |
+| `quant-pivot-repository` | `pg_account_capital` | Postgres |
+| `quant-pivot-repository` | `pg_market_selection` | Postgres |
+| `quant-pivot-repository` | `pg_governance` | Postgres |
 | `quant-pivot-repository` | `pg_rbac` | Postgres |
-| `quant-pivot-repository` | `ch_timeseries` | ClickHouse |
-| `quant-pivot-storage` | `migration_pg` | Postgres |
+| `quant-pivot-repository` | `pg_training_dataset` | Postgres |
+| `quant-pivot-repository` | `pg_backtest_report` | Postgres |
+| `quant-pivot-repository` | `pg_comparison_report` | Postgres |
+| `quant-pivot-repository` | `ch_fact_read_pit` | ClickHouse |
 | `quant-pivot-storage` | `redis_integration` | Redis |
 | `quant-pivot-storage` | `clickhouse_integration` | ClickHouse |
 | `quant-pivot-storage` | `cache_tiered_integration` | Redis |
-| `quant-pivot-core` | `gamma_service_sync` | Postgres + Redis (wiremock Gamma) |
+| `quant-pivot-core` | `market_selection_e2e` | Postgres (typed selection member enums) |
 | `quant-pivot-web` | `web` | Postgres + Redis (full HTTP/RBAC/WS E2E) |
 
 Implementation lives in `crates/quant-pivot-xtask` (`cargo xtask test-docker`).

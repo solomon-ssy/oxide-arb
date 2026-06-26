@@ -12,7 +12,7 @@
 //!   to a `Published` row and shadow ids resolve to `Candidate` / `Shadow`.
 
 use chrono::{DateTime, Utc};
-use quant_pivot_models::{domain::ModelVersionInfo, enums::quant::ModelPublicationStatus};
+use quant_pivot_models::{domain::ModelVersionInfo, enums::quant::PublicationStatus};
 
 /// Whether the persisted gate report is fresh enough for a non-published load.
 ///
@@ -24,7 +24,7 @@ pub fn quality_gate_staleness_ok(
     min_age_secs: u64,
     now: DateTime<Utc>,
 ) -> Result<(), String> {
-    if version.publication_status == ModelPublicationStatus::Published || min_age_secs == 0 {
+    if version.publication_status == PublicationStatus::Published || min_age_secs == 0 {
         return Ok(());
     }
     let Some(timestamp) = version
@@ -61,7 +61,7 @@ pub fn quality_gate_passed_ok(version: &ModelVersionInfo) -> Result<(), String> 
 
 /// Whether the config active pointer resolves to a production-published version.
 pub fn active_publication_status_ok(version: &ModelVersionInfo) -> Result<(), String> {
-    if version.publication_status == ModelPublicationStatus::Published {
+    if version.publication_status == PublicationStatus::Published {
         return Ok(());
     }
     Err(format!(
@@ -74,7 +74,7 @@ pub fn active_publication_status_ok(version: &ModelVersionInfo) -> Result<(), St
 /// Whether the config shadow pointer resolves to an experimental candidate version.
 pub fn shadow_publication_status_ok(version: &ModelVersionInfo) -> Result<(), String> {
     match version.publication_status {
-        ModelPublicationStatus::Candidate | ModelPublicationStatus::Shadow => Ok(()),
+        PublicationStatus::Candidate | PublicationStatus::Shadow => Ok(()),
         status => Err(format!(
             "shadow model {} must be candidate or shadow (status {})",
             version.model_version_id,
@@ -113,11 +113,11 @@ mod tests {
     use chrono::{Duration, Utc};
     use quant_pivot_models::{
         domain::ModelVersionInfo,
-        enums::quant::ModelPublicationStatus,
+        enums::quant::PublicationStatus,
         types::{ContentHash, ModelSpecId, ModelVersionId},
     };
 
-    fn version(status: ModelPublicationStatus, report: serde_json::Value) -> ModelVersionInfo {
+    fn version(status: PublicationStatus, report: serde_json::Value) -> ModelVersionInfo {
         ModelVersionInfo {
             model_version_id: ModelVersionId::from_v7(),
             model_spec_id: ModelSpecId::from_v7(),
@@ -139,12 +139,8 @@ mod tests {
         let stale = now - Duration::seconds(90_000);
         let report = serde_json::json!({ "evaluated_at": stale.to_rfc3339() });
         assert!(
-            quality_gate_staleness_ok(
-                &version(ModelPublicationStatus::Published, report),
-                86_400,
-                now,
-            )
-            .is_ok()
+            quality_gate_staleness_ok(&version(PublicationStatus::Published, report), 86_400, now,)
+                .is_ok()
         );
     }
 
@@ -154,35 +150,29 @@ mod tests {
         let stale = now - Duration::seconds(90_000);
         let report = serde_json::json!({ "evaluated_at": stale.to_rfc3339() });
         assert!(
-            quality_gate_staleness_ok(
-                &version(ModelPublicationStatus::Candidate, report),
-                86_400,
-                now,
-            )
-            .is_err()
+            quality_gate_staleness_ok(&version(PublicationStatus::Candidate, report), 86_400, now,)
+                .is_err()
         );
     }
 
     #[test]
     fn shadow_rejects_failed_gate_report() {
         let report = serde_json::json!({ "passed": false });
-        assert!(
-            quality_gate_passed_ok(&version(ModelPublicationStatus::Candidate, report,),).is_err()
-        );
+        assert!(quality_gate_passed_ok(&version(PublicationStatus::Candidate, report,),).is_err());
     }
 
     #[test]
     fn active_must_be_published() {
         assert!(
             active_publication_status_ok(&version(
-                ModelPublicationStatus::Retired,
+                PublicationStatus::Retired,
                 serde_json::json!({}),
             ),)
             .is_err()
         );
         assert!(
             active_publication_status_ok(&version(
-                ModelPublicationStatus::Published,
+                PublicationStatus::Published,
                 serde_json::json!({}),
             ),)
             .is_ok()
@@ -193,14 +183,14 @@ mod tests {
     fn shadow_must_be_candidate_or_shadow() {
         assert!(
             shadow_publication_status_ok(&version(
-                ModelPublicationStatus::Published,
+                PublicationStatus::Published,
                 serde_json::json!({}),
             ),)
             .is_err()
         );
         assert!(
             shadow_publication_status_ok(&version(
-                ModelPublicationStatus::Candidate,
+                PublicationStatus::Candidate,
                 serde_json::json!({}),
             ),)
             .is_ok()

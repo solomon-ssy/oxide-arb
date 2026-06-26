@@ -32,7 +32,7 @@ use quant_pivot_models::{
     domain::{ModelVersionInfo, NewModelRun, NewShadowComparison},
     enums::{
         common::{AlertCategory, AlertLevel, AlertSource},
-        quant::{ModelPublicationStatus, ModelRunKind, ModelRunStatus, OutcomeSide},
+        quant::{ModelRunKind, ModelRunStatus, OutcomeSide, PublicationStatus},
     },
     runtime_config::{DecimalString, FactorsConfig, FeaturesConfig, ModelConfig},
     types::{
@@ -49,9 +49,9 @@ use quant_pivot_research::{
     governance::{ShadowComparison, compute_shadow_comparison},
     hashing::ResearchHasher,
     model::{
-        ActiveSchemaBinding, DegradeAction, InferenceStage, ModelFamily,
-        ModelRuntimeFactoryBuilder, ModelRuntimeInput, ModelRuntimeOutput, QuantModelRuntime,
-        SignalCandidate, WeightOverlay, degrade_action, signal_candidate_event,
+        ActiveSchemaBinding, DegradeAction, InferenceStage, ModelRuntimeFactoryBuilder,
+        ModelRuntimeInput, ModelRuntimeOutput, QuantModelRuntime, SignalCandidate, WeightOverlay,
+        degrade_action, signal_candidate_event,
     },
     selection::{ModelFeatureRequirements, SelectedMarket},
 };
@@ -619,7 +619,7 @@ impl ModelRunner {
             .await
             .map_err(|error| (InferenceStage::ShadowLoad, error))?;
 
-        let is_classical = matches!(runtime.model_family(), ModelFamily::Classical(_));
+        let is_classical = runtime.model_family().is_classical();
         let (markets, vectors, outcomes) = align_cross_section(request, &active.outcomes);
         let input = build_runtime_input(
             runtime.as_ref(),
@@ -755,7 +755,7 @@ impl ModelRunner {
     /// shadow versions may carry a config overlay; a `Published` version always
     /// scores on its frozen artifact weights (overlay forbidden).
     fn resolve_overlay(&self, version: &ModelVersionInfo) -> Option<WeightOverlay> {
-        if version.publication_status == ModelPublicationStatus::Published {
+        if version.publication_status == PublicationStatus::Published {
             return None;
         }
         self.weight_overlay.overlay_for(&version.model_version_id)
@@ -830,7 +830,7 @@ impl ModelRunner {
         else {
             return;
         };
-        if version.publication_status != ModelPublicationStatus::Candidate {
+        if version.publication_status != PublicationStatus::Candidate {
             return;
         }
         if let Err(error) = self
@@ -1103,11 +1103,11 @@ mod tests {
     use chrono::{Duration, Utc};
     use quant_pivot_models::{
         domain::ModelVersionInfo,
-        enums::quant::ModelPublicationStatus,
+        enums::quant::PublicationStatus,
         types::{ContentHash, ModelSpecId, ModelVersionId},
     };
 
-    fn version(status: ModelPublicationStatus, report: serde_json::Value) -> ModelVersionInfo {
+    fn version(status: PublicationStatus, report: serde_json::Value) -> ModelVersionInfo {
         ModelVersionInfo {
             model_version_id: ModelVersionId::from_v7(),
             model_spec_id: ModelSpecId::from_v7(),
@@ -1128,12 +1128,8 @@ mod tests {
         let now = Utc::now();
         let report = serde_json::json!({ "evaluated_at": now.to_rfc3339() });
         assert!(
-            quality_gate_staleness_ok(
-                &version(ModelPublicationStatus::Candidate, report),
-                86_400,
-                now,
-            )
-            .is_ok()
+            quality_gate_staleness_ok(&version(PublicationStatus::Candidate, report), 86_400, now,)
+                .is_ok()
         );
     }
 
@@ -1143,12 +1139,8 @@ mod tests {
         let stale = now - Duration::seconds(90_000);
         let report = serde_json::json!({ "evaluated_at": stale.to_rfc3339() });
         assert!(
-            quality_gate_staleness_ok(
-                &version(ModelPublicationStatus::Candidate, report),
-                86_400,
-                now,
-            )
-            .is_err()
+            quality_gate_staleness_ok(&version(PublicationStatus::Candidate, report), 86_400, now,)
+                .is_err()
         );
     }
 
@@ -1158,12 +1150,8 @@ mod tests {
         let stale = now - Duration::seconds(90_000);
         let report = serde_json::json!({ "evaluated_at": stale.to_rfc3339() });
         assert!(
-            quality_gate_staleness_ok(
-                &version(ModelPublicationStatus::Published, report),
-                86_400,
-                now,
-            )
-            .is_ok()
+            quality_gate_staleness_ok(&version(PublicationStatus::Published, report), 86_400, now,)
+                .is_ok()
         );
     }
 
@@ -1173,7 +1161,7 @@ mod tests {
         let stale = now - Duration::days(365);
         let report = serde_json::json!({ "evaluated_at": stale.to_rfc3339() });
         assert!(
-            quality_gate_staleness_ok(&version(ModelPublicationStatus::Candidate, report), 0, now,)
+            quality_gate_staleness_ok(&version(PublicationStatus::Candidate, report), 0, now,)
                 .is_ok()
         );
     }
@@ -1183,7 +1171,7 @@ mod tests {
         let now = Utc::now();
         assert!(
             quality_gate_staleness_ok(
-                &version(ModelPublicationStatus::Candidate, serde_json::json!({})),
+                &version(PublicationStatus::Candidate, serde_json::json!({})),
                 86_400,
                 now,
             )

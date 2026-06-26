@@ -1,6 +1,9 @@
 //! `quant_market_selection_member` table entity.
 
-use crate::types::{EventId, MarketId, MarketSelectionId, TokenId, Usd};
+use crate::{
+    enums::{common::MarketCategory, market::MarketStatus},
+    types::{EventId, MarketId, MarketSelectionId, TokenId, Usd},
+};
 use sea_orm::entity::prelude::*;
 
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
@@ -11,16 +14,12 @@ pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub market_id: MarketId,
     pub event_id: EventId,
-    #[sea_orm(column_type = "Text")]
-    pub category: String,
-    #[sea_orm(column_type = "Text")]
-    pub status: String,
+    pub category: MarketCategory,
+    pub status: MarketStatus,
     pub primary_token_id: TokenId,
     pub secondary_token_id: Option<TokenId>,
     pub liquidity_usd: Option<Usd>,
     pub volume_24h_usd: Option<Usd>,
-    #[sea_orm(column_type = "Text")]
-    pub reason: String,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

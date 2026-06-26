@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::{
     domain::{NewFactorDefinition, NewFactorValue},
-    enums::quant::FactorDefinitionStatus,
+    enums::quant::PublicationStatus,
     types::{FactorValueId, FeatureVectorId, MarketId, ModelRunId, SchemaVersion},
 };
 
@@ -73,12 +73,12 @@ impl FactorDefinitionSpec {
         Ok(NewFactorDefinition {
             factor_definition_id: factor_definition_id(self.name.as_str()),
             name: self.name.as_str().to_owned(),
-            factor_family: self.family.as_wire(),
+            factor_family: self.family,
             scope: self.family.definition_scope(),
             input_schema_version,
             output_schema_version: SchemaVersion::FIRST,
             definition_json,
-            status: FactorDefinitionStatus::Published,
+            status: PublicationStatus::Published,
             created_by: None,
         })
     }

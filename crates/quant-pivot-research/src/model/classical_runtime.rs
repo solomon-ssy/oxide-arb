@@ -188,7 +188,7 @@ impl QuantModelRuntime for ClassicalRuntime {
     }
 
     fn model_family(&self) -> ModelFamily {
-        ModelFamily::Classical(self.artifact.kind)
+        ModelFamily::from_classical(self.artifact.kind)
     }
 
     fn feature_schema_hash(&self) -> ContentHash {
@@ -385,7 +385,7 @@ mod tests {
         ClassicalModelArtifact {
             header: ModelArtifactHeader {
                 model_version_id: ModelVersionId::from_v7(),
-                model_family: ModelFamily::Classical(ClassicalKind::RandomForest),
+                model_family: ModelFamily::from_classical(ClassicalKind::RandomForest),
                 feature_schema_hash: hash("feat"),
                 factor_schema_hash: hash("fac"),
             },
@@ -434,7 +434,7 @@ mod tests {
         let runtime = ClassicalRuntime::load(artifact(&output), &output.model_bytes).expect("load");
         assert_eq!(
             runtime.model_family(),
-            ModelFamily::Classical(ClassicalKind::RandomForest)
+            ModelFamily::from_classical(ClassicalKind::RandomForest)
         );
 
         let matrix = InferenceMatrix {

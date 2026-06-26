@@ -33,7 +33,7 @@ use quant_pivot_models::{
         NewModelGovernanceAudit, PromoteDatasetRequest, PublishModelCommand, RollbackModelCommand,
         RuntimeConfigPort, ShadowStabilitySummary, TrainingDatasetInfo,
     },
-    enums::quant::{ModelGovernanceAction, ModelPublicationStatus, TrainingDatasetStatus},
+    enums::quant::{ModelGovernanceAction, PublicationStatus, TrainingDatasetStatus},
     runtime_config::QualityGateConfig,
     types::{AuditEventId, ModelGovernanceAuditId, ModelSpecId, ModelVersionId, Probability},
 };
@@ -187,7 +187,7 @@ impl ModelGovernancePort for ModelGovernanceService {
         let version = self.find_version(&command.model_version_id).await?;
         if !matches!(
             version.publication_status,
-            ModelPublicationStatus::Candidate | ModelPublicationStatus::Shadow
+            PublicationStatus::Candidate | PublicationStatus::Shadow
         ) {
             return Err(GovernanceError::IllegalTransition {
                 detail: format!(
@@ -302,7 +302,7 @@ impl ModelGovernancePort for ModelGovernanceService {
         actor: GovernanceActor,
     ) -> QuantResult<ModelVersionInfo> {
         let version = self.find_version(&command.model_version_id).await?;
-        if version.publication_status != ModelPublicationStatus::Published {
+        if version.publication_status != PublicationStatus::Published {
             return Err(GovernanceError::IllegalTransition {
                 detail: format!(
                     "cannot roll back version {} in status {}",
@@ -324,13 +324,13 @@ impl ModelGovernancePort for ModelGovernanceService {
             .await?;
 
         let restored = match target_status {
-            ModelPublicationStatus::Retired => {
+            PublicationStatus::Retired => {
                 self.deps
                     .model_registry_repo
                     .restore_model_version(&target.model_version_id)
                     .await?
             }
-            ModelPublicationStatus::Published => target,
+            PublicationStatus::Published => target,
             status => {
                 return Err(GovernanceError::IllegalTransition {
                     detail: format!(
@@ -439,8 +439,8 @@ impl ModelGovernancePort for ModelGovernanceService {
             actor_username: actor.username,
             actor_role: actor.role,
             reason: request.reason,
-            before_status: ModelPublicationStatus::default(),
-            after_status: ModelPublicationStatus::default(),
+            before_status: PublicationStatus::default(),
+            after_status: PublicationStatus::default(),
             before_hash: None,
             after_hash: Some(promoted.dataset_hash.as_str().to_owned()),
             quality_gate_passed: true,

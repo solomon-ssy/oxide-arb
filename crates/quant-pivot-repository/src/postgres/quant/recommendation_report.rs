@@ -10,11 +10,12 @@ use quant_pivot_models::{
         quant_recommendation_report,
     },
     enums::quant::{RecommendationReportStatus, RecommendationStatus, ReportKind},
+    schema::column,
     types::RecommendationReportId,
 };
 use sea_orm::{
     ActiveModelTrait, ActiveValue, ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel,
-    QueryFilter, QueryOrder, QuerySelect, TransactionTrait, sea_query::Expr,
+    QueryFilter, QueryOrder, QuerySelect, TransactionTrait,
 };
 
 /// Postgres-backed recommendation report repository.
@@ -216,7 +217,7 @@ async fn transition_report_status(
         .filter(quant_recommendation::Column::RecommendationReportId.eq(report_id.clone()))
         .col_expr(
             quant_recommendation::Column::Status,
-            Expr::value(recommendation_status),
+            column::pg_enum_value(&recommendation_status),
         )
         .exec(&txn)
         .await

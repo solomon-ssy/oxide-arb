@@ -1,7 +1,10 @@
 //! Model registry persistence DTOs.
 
 use crate::{
-    enums::quant::{ModelPublicationStatus, ModelRunErrorCode, ModelRunKind, ModelRunStatus},
+    enums::{
+        model::ModelFamily,
+        quant::{ModelRunErrorCode, ModelRunKind, ModelRunStatus, PublicationStatus},
+    },
     types::{
         ContentHash, MarketSelectionId, ModelRunId, ModelSpecId, ModelVersionId,
         RuntimeConfigVersionId, SchemaVersion, TrainingDatasetId,
@@ -17,12 +20,12 @@ use serde::{Deserialize, Serialize};
 pub struct ModelSpecInfo {
     pub model_spec_id: ModelSpecId,
     pub name: String,
-    pub model_family: String,
+    pub model_family: ModelFamily,
     pub prediction_horizon_secs: i64,
     pub feature_schema_version: SchemaVersion,
     pub label_schema_version: SchemaVersion,
     pub spec_json: serde_json::Value,
-    pub status: ModelPublicationStatus,
+    pub status: PublicationStatus,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -38,12 +41,12 @@ info_from_model!(ModelSpecInfo, crate::entities::quant_model_spec::Model, {
 pub struct NewModelSpec {
     pub model_spec_id: ModelSpecId,
     pub name: String,
-    pub model_family: String,
+    pub model_family: ModelFamily,
     pub prediction_horizon_secs: i64,
     pub feature_schema_version: SchemaVersion,
     pub label_schema_version: SchemaVersion,
     pub spec_json: serde_json::Value,
-    pub status: ModelPublicationStatus,
+    pub status: PublicationStatus,
 }
 
 /// Published or candidate model version row.
@@ -57,7 +60,7 @@ pub struct ModelVersionInfo {
     pub training_dataset_id: Option<TrainingDatasetId>,
     pub metrics_json: serde_json::Value,
     pub quality_gate_report: serde_json::Value,
-    pub publication_status: ModelPublicationStatus,
+    pub publication_status: PublicationStatus,
     pub published_at: Option<DateTime<Utc>>,
     pub retired_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
@@ -92,7 +95,7 @@ pub struct NewModelVersion {
     pub training_dataset_id: Option<TrainingDatasetId>,
     pub metrics_json: serde_json::Value,
     pub quality_gate_report: serde_json::Value,
-    pub publication_status: ModelPublicationStatus,
+    pub publication_status: PublicationStatus,
     pub published_at: Option<DateTime<Utc>>,
     pub retired_at: Option<DateTime<Utc>>,
 }

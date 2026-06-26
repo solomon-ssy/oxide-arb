@@ -43,7 +43,7 @@ use quant_pivot_models::{
     },
     enums::{
         common::{OrderType, Side},
-        order::OrderStatus,
+        execution::VenueOrderStatus,
     },
     types::{MarketId, OrderId, Price, Shares, TokenId, Usd},
 };
@@ -112,7 +112,7 @@ fn map_post_order_response(
         Side::Sell => (Shares::new(resp.making_amount), resp.taking_amount),
     };
     let status = if !resp.success || filled_shares.inner() <= Decimal::ZERO {
-        OrderStatus::Rejected
+        VenueOrderStatus::Rejected
     } else if order_type == OrderType::Fok {
         if order_amount
             .as_shares()
@@ -121,9 +121,9 @@ fn map_post_order_response(
                 .as_usd()
                 .is_some_and(|usd| cash_amount >= usd.inner())
         {
-            OrderStatus::Filled
+            VenueOrderStatus::Filled
         } else {
-            OrderStatus::PartiallyFilled
+            VenueOrderStatus::PartiallyFilled
         }
     } else if order_amount
         .as_shares()
@@ -132,9 +132,9 @@ fn map_post_order_response(
             .as_usd()
             .is_some_and(|usd| cash_amount >= usd.inner())
     {
-        OrderStatus::Filled
+        VenueOrderStatus::Filled
     } else {
-        OrderStatus::PartiallyFilled
+        VenueOrderStatus::PartiallyFilled
     };
 
     let avg_fill_price = if filled_shares.inner() > Decimal::ZERO {

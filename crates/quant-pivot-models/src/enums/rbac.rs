@@ -13,7 +13,10 @@
 //! Casbin `casbin_rule` table (which stores raw strings) can be reverse-mapped
 //! back into typed values.
 
-use std::str::FromStr;
+use std::{
+    fmt::{Display, Formatter, Result as FmtResult},
+    str::FromStr,
+};
 
 use quant_pivot_error::rbac::RbacError;
 use sea_orm::Iterable;
@@ -43,32 +46,32 @@ pub mod casbin {
     pub const SECTIONS: [&str; 2] = [PTYPE_POLICY, PTYPE_GROUPING];
 }
 
-active_string_enum! {
-    /// Lifecycle state of a user account.
+crate::pg_enum! {
+    type_name = "qp_user_status",
     pub enum UserStatus {
         Active => "active",
         Disabled => "disabled",
     }
 }
 
-active_string_enum! {
-    /// Whether a role is system-provisioned or operator-created.
+crate::pg_enum! {
+    type_name = "qp_role_kind",
     pub enum RoleKind {
         Builtin => "builtin",
         Custom => "custom",
     }
 }
 
-active_string_enum! {
-    /// Enabled/disabled flag shared by roles and menus.
+crate::pg_enum! {
+    type_name = "qp_role_status",
     pub enum RoleStatus {
         Enabled => "enabled",
         Disabled => "disabled",
     }
 }
 
-active_string_enum! {
-    /// Structural kind of a menu node in the navigation tree.
+crate::pg_enum! {
+    type_name = "qp_menu_kind",
     pub enum MenuKind {
         Directory => "directory",
         Menu => "menu",
@@ -76,8 +79,8 @@ active_string_enum! {
     }
 }
 
-active_string_enum! {
-    /// Resource categories addressable by Casbin `p` policies.
+crate::pg_enum! {
+    type_name = "qp_resource_type",
     pub enum ResourceType {
         System => "system",
         Market => "market",
@@ -101,25 +104,57 @@ active_string_enum! {
     }
 }
 
-active_string_enum! {
-    /// Operation verbs in Casbin `p` policies.
-    pub enum Operation {
-        Read => "read",
-        Create => "create",
-        Update => "update",
-        Delete => "delete",
-        Assign => "assign",
-        Halt => "halt",
-        Resume => "resume",
-        SwitchMode => "switch_mode",
-        Reset => "reset",
-        Reject => "reject",
-        Shadow => "shadow",
-        Publish => "publish",
-        Rollback => "rollback",
-        Activate => "activate",
-        Enqueue => "enqueue",
-        Emergency => "emergency",
+/// Operation verbs in Casbin `p` policies (stored as raw strings in `casbin_rule`).
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, sea_orm::EnumIter,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum Operation {
+    Read,
+    Create,
+    Update,
+    Delete,
+    Assign,
+    Halt,
+    Resume,
+    SwitchMode,
+    Reset,
+    Reject,
+    Shadow,
+    Publish,
+    Rollback,
+    Activate,
+    Enqueue,
+    Emergency,
+}
+
+impl Operation {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Create => "create",
+            Self::Update => "update",
+            Self::Delete => "delete",
+            Self::Assign => "assign",
+            Self::Halt => "halt",
+            Self::Resume => "resume",
+            Self::SwitchMode => "switch_mode",
+            Self::Reset => "reset",
+            Self::Reject => "reject",
+            Self::Shadow => "shadow",
+            Self::Publish => "publish",
+            Self::Rollback => "rollback",
+            Self::Activate => "activate",
+            Self::Enqueue => "enqueue",
+            Self::Emergency => "emergency",
+        }
+    }
+}
+
+impl Display for Operation {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        f.write_str(self.as_str())
     }
 }
 

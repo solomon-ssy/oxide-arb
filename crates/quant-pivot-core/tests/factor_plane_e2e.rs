@@ -32,7 +32,7 @@ use quant_pivot_models::{
     },
     enums::{
         common::{CategorySet, MarketCategory, TickSize},
-        factor::FactorFamily,
+        factor::{FactorDefinitionScope, FactorFamily},
         market::MarketStatus,
         quant::{ModelRunKind, ModelRunStatus},
     },
@@ -364,7 +364,7 @@ async fn create_definition_and_values_then_list_for_run() {
         .expect("find definition")
         .expect("definition row");
     assert_eq!(definition.name, "data_quality");
-    assert_eq!(definition.scope, "generic");
+    assert_eq!(definition.scope, FactorDefinitionScope::Generic);
 }
 
 #[tokio::test]

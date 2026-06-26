@@ -1,7 +1,10 @@
 //! Factor registry and factor value persistence DTOs.
 
 use crate::{
-    enums::quant::{FactorDefinitionStatus, FactorDirection},
+    enums::{
+        factor::{FactorDefinitionScope, FactorFamily},
+        quant::{FactorDirection, PublicationStatus},
+    },
     types::{
         FactorDefinitionId, FactorValueId, FeatureVectorId, MarketId, ModelRunId, Probability,
         SchemaVersion,
@@ -19,12 +22,12 @@ use uuid::Uuid;
 pub struct FactorDefinitionInfo {
     pub factor_definition_id: FactorDefinitionId,
     pub name: String,
-    pub factor_family: String,
-    pub scope: String,
+    pub factor_family: FactorFamily,
+    pub scope: FactorDefinitionScope,
     pub input_schema_version: SchemaVersion,
     pub output_schema_version: SchemaVersion,
     pub definition_json: serde_json::Value,
-    pub status: FactorDefinitionStatus,
+    pub status: PublicationStatus,
     pub created_by: Option<Uuid>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -54,12 +57,12 @@ info_from_model!(
 pub struct NewFactorDefinition {
     pub factor_definition_id: FactorDefinitionId,
     pub name: String,
-    pub factor_family: String,
-    pub scope: String,
+    pub factor_family: FactorFamily,
+    pub scope: FactorDefinitionScope,
     pub input_schema_version: SchemaVersion,
     pub output_schema_version: SchemaVersion,
     pub definition_json: serde_json::Value,
-    pub status: FactorDefinitionStatus,
+    pub status: PublicationStatus,
     pub created_by: Option<Uuid>,
 }
 

@@ -537,9 +537,7 @@ mod tests {
         config
             .factors
             .enabled_factor_families
-            .push(FactorFamily::Domain(
-                crate::enums::domain::DomainFamily::Sports,
-            ));
+            .push(FactorFamily::DomainSports);
         let report = validate_runtime_config(&config);
         assert!(report.has_errors());
     }

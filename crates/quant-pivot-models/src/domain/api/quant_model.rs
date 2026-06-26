@@ -17,7 +17,7 @@ impl From<ModelSpecInfo> for QuantModelSpecView {
         Self {
             model_spec_id: info.model_spec_id.to_string(),
             name: info.name,
-            model_family: info.model_family,
+            model_family: info.model_family.as_str().to_owned(),
             status: info.status.as_str().to_owned(),
         }
     }

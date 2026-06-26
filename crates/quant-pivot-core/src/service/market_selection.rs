@@ -1,8 +1,7 @@
 //! Market selection orchestration wiring: research snapshot → persistence DTOs.
 //!
 //! The research plane owns [`MarketSelectionSnapshot`]; Postgres owns
-//! [`MarketSelectionModel`]. This module is the core-side adapter between them
-//! and is the only place that knows how to stringify enum columns for member rows.
+//! [`MarketSelectionModel`]. This module is the core-side adapter between them.
 
 use std::collections::HashMap;
 
@@ -81,13 +80,12 @@ pub fn map_snapshot_to_model(
                 market_selection_id: snapshot.market_selection_id.clone(),
                 market_id: selected.market_id.clone(),
                 event_id: selected.event_id.clone(),
-                category: selected.category.as_str().to_owned(),
-                status: status.as_str().to_owned(),
+                category: selected.category,
+                status,
                 primary_token_id: selected.primary_token_id.clone(),
                 secondary_token_id: selected.secondary_token_id.clone(),
                 liquidity_usd: selected.liquidity_usd,
                 volume_24h_usd: selected.volume_24h_usd,
-                reason: "selected".to_owned(),
             })
         })
         .collect::<QuantResult<Vec<_>>>()?;
@@ -184,8 +182,7 @@ mod tests {
         );
         assert_eq!(model.members.len(), 1);
         assert_eq!(model.members[0].market_id.as_str(), "0xok");
-        assert_eq!(model.members[0].reason, "selected");
-        assert_eq!(model.members[0].status, "active");
-        assert_eq!(model.members[0].category, "sports");
+        assert_eq!(model.members[0].status, MarketStatus::Active);
+        assert_eq!(model.members[0].category, MarketCategory::Sports);
     }
 }

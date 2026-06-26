@@ -35,7 +35,7 @@ pub struct MarketFeeColumns {
     pub fee_exponent: Option<Decimal>,
     pub fee_taker_only: Option<bool>,
     pub fee_rebate_rate: Option<Decimal>,
-    pub fee_source: Option<String>,
+    pub fee_source: Option<FeeSource>,
     pub fee_observed_at: Option<DateTime<Utc>>,
 }
 
@@ -58,14 +58,14 @@ impl MarketFeeColumns {
 impl MarketFeeSchedule {
     /// Project a fee schedule into `market` table fee columns.
     #[must_use]
-    pub fn to_market_fee_columns(&self) -> MarketFeeColumns {
+    pub const fn to_market_fee_columns(&self) -> MarketFeeColumns {
         MarketFeeColumns {
             fees_enabled: self.fees_enabled,
             fee_rate: Some(self.fee_rate),
             fee_exponent: Some(self.exponent),
             fee_taker_only: Some(self.taker_only),
             fee_rebate_rate: self.rebate_rate,
-            fee_source: Some(self.source.as_str().to_owned()),
+            fee_source: Some(self.source),
             fee_observed_at: Some(self.observed_at),
         }
     }

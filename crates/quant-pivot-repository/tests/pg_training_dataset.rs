@@ -5,7 +5,8 @@ use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::{NewModelSpec, NewModelVersion, NewRuntimeConfigVersion, NewTrainingDataset},
     enums::{
-        quant::{ModelPublicationStatus, TrainingDatasetStatus},
+        model::ModelFamily,
+        quant::{PublicationStatus, TrainingDatasetStatus},
         runtime_config::RuntimeConfigVersionSource,
     },
     types::{
@@ -48,12 +49,12 @@ async fn seed_model_spec(db: &sea_orm::DatabaseConnection) -> ModelSpecId {
         .create_model_spec(NewModelSpec {
             model_spec_id: model_spec_id.clone(),
             name: "pg-dataset-it".to_owned(),
-            model_family: "weighted_factor".to_owned(),
+            model_family: ModelFamily::WeightedFactor,
             prediction_horizon_secs: 86_400,
             feature_schema_version: SchemaVersion::FIRST,
             label_schema_version: SchemaVersion::FIRST,
             spec_json: serde_json::json!({}),
-            status: ModelPublicationStatus::Published,
+            status: PublicationStatus::Published,
         })
         .await
         .expect("model spec");
@@ -208,7 +209,7 @@ async fn model_version_training_dataset_foreign_key() {
             training_dataset_id: Some(dataset_id.clone()),
             metrics_json: serde_json::json!({}),
             quality_gate_report: serde_json::json!({}),
-            publication_status: ModelPublicationStatus::Candidate,
+            publication_status: PublicationStatus::Candidate,
             published_at: None,
             retired_at: None,
         })
@@ -225,7 +226,7 @@ async fn model_version_training_dataset_foreign_key() {
             training_dataset_id: Some(missing_dataset),
             metrics_json: serde_json::json!({}),
             quality_gate_report: serde_json::json!({}),
-            publication_status: ModelPublicationStatus::Candidate,
+            publication_status: PublicationStatus::Candidate,
             published_at: None,
             retired_at: None,
         })

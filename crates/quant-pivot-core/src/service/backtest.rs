@@ -23,8 +23,7 @@ use quant_pivot_models::{
         NewModelComparisonReport, NewModelRun, NewModelVersion, TrainingDatasetInfo,
     },
     enums::quant::{
-        ModelPublicationStatus, ModelRunErrorCode, ModelRunKind, ModelRunStatus,
-        TrainingDatasetStatus,
+        ModelRunErrorCode, ModelRunKind, ModelRunStatus, PublicationStatus, TrainingDatasetStatus,
     },
     runtime_config::PortfolioConfig,
     types::{
@@ -478,7 +477,7 @@ impl BacktestService {
                     "calibration": serde_json::to_value(&result.report).unwrap_or_default(),
                 }),
                 quality_gate_report: serde_json::json!({}),
-                publication_status: ModelPublicationStatus::Candidate,
+                publication_status: PublicationStatus::Candidate,
                 published_at: None,
                 retired_at: None,
             })

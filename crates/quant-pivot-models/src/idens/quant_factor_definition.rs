@@ -4,12 +4,18 @@ use sea_orm::{
     sea_query::{ColumnDef, Index, Table, TableCreateStatement},
 };
 
-use crate::schema::{
-    column,
-    dependency::TableDependency,
-    index::{IndexBuildMode, IndexSpec},
-    seed::SeedSpec,
-    timestamp_with_write_default,
+use crate::{
+    enums::{
+        factor::{FactorDefinitionScope, FactorFamily},
+        quant::PublicationStatus,
+    },
+    schema::{
+        column,
+        dependency::TableDependency,
+        index::{IndexBuildMode, IndexSpec},
+        seed::SeedSpec,
+        timestamp_with_write_default,
+    },
 };
 
 #[quant_schema(lifecycle = "control")]
@@ -39,16 +45,12 @@ pub fn table() -> TableCreateStatement {
                 .not_null()
                 .unique_key(),
         )
-        .col(
-            ColumnDef::new(QuantFactorDefinition::FactorFamily)
-                .text()
-                .not_null(),
-        )
-        .col(
-            ColumnDef::new(QuantFactorDefinition::Scope)
-                .text()
-                .not_null(),
-        )
+        .col(column::pg_enum::<FactorFamily>(
+            QuantFactorDefinition::FactorFamily,
+        ))
+        .col(column::pg_enum::<FactorDefinitionScope>(
+            QuantFactorDefinition::Scope,
+        ))
         .col(
             ColumnDef::new(QuantFactorDefinition::InputSchemaVersion)
                 .integer()
@@ -64,11 +66,9 @@ pub fn table() -> TableCreateStatement {
                 .json_binary()
                 .not_null(),
         )
-        .col(
-            ColumnDef::new(QuantFactorDefinition::Status)
-                .text()
-                .not_null(),
-        )
+        .col(column::pg_enum::<PublicationStatus>(
+            QuantFactorDefinition::Status,
+        ))
         .col(column::uuid_null(QuantFactorDefinition::CreatedBy))
         .col(timestamp_with_write_default(
             QuantFactorDefinition::CreatedAt,

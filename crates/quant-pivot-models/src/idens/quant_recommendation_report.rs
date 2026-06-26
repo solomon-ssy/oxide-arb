@@ -8,6 +8,9 @@ use sea_orm::{
 };
 
 use crate::{
+    enums::quant::{
+        AccountSource, QuantRuntimeMode, RecommendationReportStatus, ReportKind, ReportTriggerKind,
+    },
     idens::{
         quant_account_snapshot::QuantAccountSnapshot, quant_market_selection::QuantMarketSelection,
         quant_model_version::QuantModelVersion, quant_portfolio_plan::QuantPortfolioPlan,
@@ -70,16 +73,12 @@ fn add_identity_columns(table: &mut TableCreateStatement) {
         .col(column::uuid_pk(
             QuantRecommendationReport::RecommendationReportId,
         ))
-        .col(
-            ColumnDef::new(QuantRecommendationReport::ReportKind)
-                .text()
-                .not_null(),
-        )
-        .col(
-            ColumnDef::new(QuantRecommendationReport::TriggerKind)
-                .text()
-                .not_null(),
-        )
+        .col(column::pg_enum::<ReportKind>(
+            QuantRecommendationReport::ReportKind,
+        ))
+        .col(column::pg_enum::<ReportTriggerKind>(
+            QuantRecommendationReport::TriggerKind,
+        ))
         .col(
             ColumnDef::new(QuantRecommendationReport::TriggerKey)
                 .text()
@@ -112,11 +111,9 @@ fn add_runtime_columns(table: &mut TableCreateStatement) {
                 .big_integer()
                 .not_null(),
         )
-        .col(
-            ColumnDef::new(QuantRecommendationReport::RuntimeMode)
-                .text()
-                .not_null(),
-        )
+        .col(column::pg_enum::<QuantRuntimeMode>(
+            QuantRecommendationReport::RuntimeMode,
+        ))
         .col(column::uuid_fk(
             QuantRecommendationReport::RuntimeConfigVersionId,
         ))
@@ -134,16 +131,12 @@ fn add_payload_columns(table: &mut TableCreateStatement) {
                 .integer()
                 .not_null(),
         )
-        .col(
-            ColumnDef::new(QuantRecommendationReport::Status)
-                .text()
-                .not_null(),
-        )
-        .col(
-            ColumnDef::new(QuantRecommendationReport::AccountSource)
-                .text()
-                .not_null(),
-        )
+        .col(column::pg_enum::<RecommendationReportStatus>(
+            QuantRecommendationReport::Status,
+        ))
+        .col(column::pg_enum::<AccountSource>(
+            QuantRecommendationReport::AccountSource,
+        ))
         .col(column::usd(QuantRecommendationReport::CapitalBaseUsd))
         .col(column::uuid_fk(
             QuantRecommendationReport::AccountSnapshotRef,

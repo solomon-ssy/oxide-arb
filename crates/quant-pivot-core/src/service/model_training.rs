@@ -17,8 +17,7 @@ use quant_pivot_error::{QuantResult, research::ResearchError, storage::StorageEr
 use quant_pivot_models::{
     domain::{ModelVersionInfo, NewModelRun, NewModelVersion, TrainingDatasetInfo},
     enums::quant::{
-        ModelPublicationStatus, ModelRunErrorCode, ModelRunKind, ModelRunStatus,
-        TrainingDatasetStatus,
+        ModelRunErrorCode, ModelRunKind, ModelRunStatus, PublicationStatus, TrainingDatasetStatus,
     },
     runtime_config::sections::{FactorsConfig, ModelConfig},
     types::{ModelRunId, ModelSpecId, ModelVersionId, RuntimeConfigVersionId, TrainingDatasetId},
@@ -229,9 +228,9 @@ impl ModelTrainerService {
             factor_schema_hash: dataset.factor_schema_hash.clone(),
         };
 
-        let (artifact, metrics_json) = match input.model_family {
-            ModelFamily::WeightedFactor => self.train_weighted(header, input, examples).await?,
-            ModelFamily::Classical(kind) => {
+        let (artifact, metrics_json) = match input.model_family.classical_kind() {
+            None => self.train_weighted(header, input, examples).await?,
+            Some(kind) => {
                 self.train_classical(header, input, dataset, examples, kind)
                     .await?
             }
@@ -260,7 +259,7 @@ impl ModelTrainerService {
                 training_dataset_id: Some(input.training_dataset_id.clone()),
                 metrics_json,
                 quality_gate_report: serde_json::json!({}),
-                publication_status: ModelPublicationStatus::Candidate,
+                publication_status: PublicationStatus::Candidate,
                 published_at: None,
                 retired_at: None,
             })

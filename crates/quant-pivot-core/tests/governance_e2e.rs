@@ -21,7 +21,8 @@ use quant_pivot_models::{
         RuntimeConfigPort,
     },
     enums::{
-        quant::{ModelPublicationStatus, ModelRunKind, ModelRunStatus, TrainingDatasetStatus},
+        model::ModelFamily,
+        quant::{ModelRunKind, ModelRunStatus, PublicationStatus, TrainingDatasetStatus},
         runtime_config::{RuntimeConfigActivationKind, RuntimeConfigVersionSource},
     },
     hashing::CanonicalDigest,
@@ -175,12 +176,12 @@ async fn seed_spec(db: &DatabaseConnection) -> ModelSpecId {
         .create_model_spec(NewModelSpec {
             model_spec_id: id.clone(),
             name: "governance-it".to_owned(),
-            model_family: "weighted_factor".to_owned(),
+            model_family: ModelFamily::WeightedFactor,
             prediction_horizon_secs: 86_400,
             feature_schema_version: SchemaVersion::FIRST,
             label_schema_version: SchemaVersion::FIRST,
             spec_json: serde_json::json!({}),
-            status: ModelPublicationStatus::Published,
+            status: PublicationStatus::Published,
         })
         .await
         .expect("model spec");
@@ -254,7 +255,7 @@ async fn seed_version(
             training_dataset_id: dataset,
             metrics_json: serde_json::json!({}),
             quality_gate_report: serde_json::json!({}),
-            publication_status: ModelPublicationStatus::Candidate,
+            publication_status: PublicationStatus::Candidate,
             published_at: None,
             retired_at: None,
         })
@@ -393,7 +394,7 @@ async fn publish_requires_quality_gate_pass() {
         .expect("row");
     assert_eq!(
         row.publication_status,
-        ModelPublicationStatus::Candidate,
+        PublicationStatus::Candidate,
         "a blocked publish leaves the version a candidate"
     );
     // The gate evaluation is persisted as durable evidence even on failure.
@@ -511,10 +512,7 @@ async fn publish_succeeds_then_published_version_is_immutable() {
         )
         .await
         .expect("publish should pass every gate");
-    assert_eq!(
-        published.publication_status,
-        ModelPublicationStatus::Published
-    );
+    assert_eq!(published.publication_status, PublicationStatus::Published);
 
     // An audit row was written.
     let audits = PgModelGovernanceAuditRepository::new(db.clone())
@@ -614,7 +612,7 @@ async fn assert_single_active_published(
         .expect("row");
     assert_eq!(
         retired_row.publication_status,
-        ModelPublicationStatus::Retired,
+        PublicationStatus::Retired,
         "publish must retire the predecessor"
     );
     assert_eq!(
@@ -716,7 +714,7 @@ async fn rollback_retains_previous_and_writes_reason() {
         .await
         .expect("find")
         .expect("row");
-    assert_eq!(v2_row.publication_status, ModelPublicationStatus::Retired);
+    assert_eq!(v2_row.publication_status, PublicationStatus::Retired);
     let v1_row = registry
         .find_model_version_by_id(&v1)
         .await
@@ -724,7 +722,7 @@ async fn rollback_retains_previous_and_writes_reason() {
         .expect("row");
     assert_eq!(
         v1_row.publication_status,
-        ModelPublicationStatus::Published,
+        PublicationStatus::Published,
         "rollback must re-publish the retired predecessor"
     );
     assert_eq!(

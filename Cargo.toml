@@ -127,6 +127,7 @@ quote = "1"
 proc-macro2 = "1"
 darling = "0.23"
 linkme = "0.3"
+paste = "1"
 
 # ── Phase 1: Data Access Layer Dependencies ──────────────────────────────────
 

@@ -14,7 +14,7 @@ use quant_pivot_error::{QuantError, QuantResult, governance::GovernanceError};
 use quant_pivot_models::{
     domain::{NewRuntimeConfigActivation, NewRuntimeConfigVersion, RuntimeConfigPort},
     enums::{
-        quant::ModelPublicationStatus,
+        quant::PublicationStatus,
         runtime_config::{RuntimeConfigActivationKind, RuntimeConfigVersionSource},
     },
     hashing::CanonicalDigest,
@@ -82,7 +82,7 @@ async fn ensure_shadow_armable(
             id: shadow.to_string(),
         })?;
     match version.publication_status {
-        ModelPublicationStatus::Candidate | ModelPublicationStatus::Shadow => Ok(()),
+        PublicationStatus::Candidate | PublicationStatus::Shadow => Ok(()),
         status => Err(GovernanceError::IllegalTransition {
             detail: format!(
                 "shadow model {} must be candidate or shadow (status {})",

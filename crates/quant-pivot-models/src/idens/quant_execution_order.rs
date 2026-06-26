@@ -7,6 +7,11 @@ use sea_orm::{
 };
 
 use crate::{
+    enums::{
+        common::Side,
+        execution::{ExecutionOrderPhase, OrderTypeKind, VenueOrderStatus},
+        quant::ExecutionOrderState,
+    },
     idens::{market::Market, quant_order_intent::QuantOrderIntent},
     schema::{
         column,
@@ -36,6 +41,7 @@ pub enum QuantExecutionOrder {
     SubmittedAt,
     FilledAt,
     CancelledAt,
+    GtdExpirationAt,
     ErrorMessage,
     CreatedAt,
     UpdatedAt,
@@ -47,29 +53,25 @@ pub fn table() -> TableCreateStatement {
         .if_not_exists()
         .col(column::uuid_pk(QuantExecutionOrder::ExecutionOrderId))
         .col(column::uuid_fk(QuantExecutionOrder::OrderIntentId))
-        .col(
-            ColumnDef::new(QuantExecutionOrder::OrderPhase)
-                .text()
-                .not_null(),
-        )
+        .col(column::pg_enum::<ExecutionOrderPhase>(
+            QuantExecutionOrder::OrderPhase,
+        ))
         .col(column::market_id(QuantExecutionOrder::MarketId))
         .col(column::token_id(QuantExecutionOrder::TokenId))
-        .col(ColumnDef::new(QuantExecutionOrder::Side).text().not_null())
-        .col(
-            ColumnDef::new(QuantExecutionOrder::OrderType)
-                .text()
-                .not_null(),
-        )
+        .col(column::pg_enum::<Side>(QuantExecutionOrder::Side))
+        .col(column::pg_enum::<OrderTypeKind>(
+            QuantExecutionOrder::OrderType,
+        ))
         .col(column::price(QuantExecutionOrder::Price))
         .col(column::shares(QuantExecutionOrder::Shares))
         .col(column::usd(QuantExecutionOrder::CostUsd))
         .col(column::text_id_null(QuantExecutionOrder::VenueOrderId))
-        .col(
-            ColumnDef::new(QuantExecutionOrder::VenueStatus)
-                .text()
-                .null(),
-        )
-        .col(ColumnDef::new(QuantExecutionOrder::State).text().not_null())
+        .col(column::pg_enum_null::<VenueOrderStatus>(
+            QuantExecutionOrder::VenueStatus,
+        ))
+        .col(column::pg_enum::<ExecutionOrderState>(
+            QuantExecutionOrder::State,
+        ))
         .col(
             ColumnDef::new(QuantExecutionOrder::SubmittedAt)
                 .timestamp_with_time_zone()
@@ -82,6 +84,11 @@ pub fn table() -> TableCreateStatement {
         )
         .col(
             ColumnDef::new(QuantExecutionOrder::CancelledAt)
+                .timestamp_with_time_zone()
+                .null(),
+        )
+        .col(
+            ColumnDef::new(QuantExecutionOrder::GtdExpirationAt)
                 .timestamp_with_time_zone()
                 .null(),
         )

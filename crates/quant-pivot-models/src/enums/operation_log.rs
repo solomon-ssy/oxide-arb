@@ -1,10 +1,7 @@
 //! Enums for the append-only general operation log (`operation_log`).
-//!
-//! This log is the operational activity trail (distinct from the governance
-//! hash chain): it captures every mutating/auth HTTP operation for forensics.
 
-active_string_enum! {
-    /// Coarse grouping of an audited HTTP operation.
+crate::pg_enum! {
+    type_name = "qp_operation_category",
     pub enum OperationCategory {
         Auth => "auth",
         Rbac => "rbac",
@@ -19,8 +16,8 @@ active_string_enum! {
     }
 }
 
-active_string_enum! {
-    /// Terminal outcome of an audited operation.
+crate::pg_enum! {
+    type_name = "qp_operation_outcome",
     pub enum OperationOutcome {
         Success => "success",
         Failure => "failure",

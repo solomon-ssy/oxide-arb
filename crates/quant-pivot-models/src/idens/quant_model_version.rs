@@ -7,6 +7,7 @@ use sea_orm::{
 };
 
 use crate::{
+    enums::quant::PublicationStatus,
     idens::{quant_model_spec::QuantModelSpec, quant_training_dataset::QuantTrainingDataset},
     schema::{
         column,
@@ -60,11 +61,9 @@ pub fn table() -> TableCreateStatement {
                 .json_binary()
                 .not_null(),
         )
-        .col(
-            ColumnDef::new(QuantModelVersion::PublicationStatus)
-                .text()
-                .not_null(),
-        )
+        .col(column::pg_enum::<PublicationStatus>(
+            QuantModelVersion::PublicationStatus,
+        ))
         .col(
             ColumnDef::new(QuantModelVersion::PublishedAt)
                 .timestamp_with_time_zone()

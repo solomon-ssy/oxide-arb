@@ -38,9 +38,10 @@ use quant_pivot_models::{
         clickhouse::{ChFactSource, ChSnapshotReason},
         common::MarketCategory,
         factor::FactorFamily,
+        model::ModelFamily,
         quant::{
-            DataQualityStatus, FactorDirection, ModelPublicationStatus, ModelRunKind,
-            ModelRunStatus, TrainingDatasetStatus,
+            DataQualityStatus, FactorDirection, ModelRunKind, ModelRunStatus, PublicationStatus,
+            TrainingDatasetStatus,
         },
         runtime_config::RuntimeConfigVersionSource,
     },
@@ -69,8 +70,7 @@ use quant_pivot_research::{
     factors::{FactorExplanation, FactorValue, names::LIQUIDITY_DEPTH},
     features::{FeatureName, FeatureValue, FeatureVector, names},
     model::{
-        DefaultModelRuntimeFactoryBuilder, LabelSelector, ModelArtifact, ModelFamily,
-        ModelRuntimeFactoryBuilder,
+        DefaultModelRuntimeFactoryBuilder, LabelSelector, ModelArtifact, ModelRuntimeFactoryBuilder,
     },
     training::{DatasetParquetCodec, LabelName, TrainingExample, TrainingLabel},
 };
@@ -414,12 +414,12 @@ async fn seed_model_spec(db: &DatabaseConnection) -> ModelSpecId {
         .create_model_spec(NewModelSpec {
             model_spec_id: id.clone(),
             name: "train-backtest-e2e".to_owned(),
-            model_family: "weighted_factor".to_owned(),
+            model_family: ModelFamily::WeightedFactor,
             prediction_horizon_secs: 86_400,
             feature_schema_version: SchemaVersion::FIRST,
             label_schema_version: SchemaVersion::FIRST,
             spec_json: serde_json::json!({}),
-            status: ModelPublicationStatus::Published,
+            status: PublicationStatus::Published,
         })
         .await
         .expect("model spec");
@@ -630,10 +630,7 @@ async fn train_then_backtest_then_calibrate_e2e() {
         })
         .await
         .expect("train");
-    assert_eq!(
-        version.publication_status,
-        ModelPublicationStatus::Candidate
-    );
+    assert_eq!(version.publication_status, PublicationStatus::Candidate);
     assert_eq!(version.training_dataset_id.as_ref(), Some(&dataset_id));
 
     // Publish-boundary invariant: the artifact's weights are frozen + content

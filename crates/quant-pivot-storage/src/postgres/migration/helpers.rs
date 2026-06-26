@@ -6,6 +6,7 @@ use quant_pivot_models::{
         catalog,
         graph::{create_order, drop_order},
         index::IndexStatement,
+        pg_enum,
         seed::{SeedDependency, SeedSpec},
         trigger::TriggerKind,
     },
@@ -30,6 +31,16 @@ impl<'a> SchemaRunner<'a> {
     }
 
     pub async fn create_schema(&self) -> Result<(), DbErr> {
+        for spec in pg_enum::specs() {
+            let sql = (spec.create_stmt)().to_string(PostgresQueryBuilder);
+            execute_sql(self.manager, [sql]).await.map_err(|error| {
+                DbErr::Custom(format!(
+                    "create enum type `{}` failed: {error}",
+                    spec.type_name
+                ))
+            })?;
+        }
+
         for spec in create_order() {
             create_postgres_table(self.manager, (spec.table)(), &(spec.table_name)()).await?;
         }
@@ -109,6 +120,17 @@ impl<'a> SchemaRunner<'a> {
                         .to_owned(),
                 )
                 .await?;
+        }
+
+        for spec in pg_enum::drop_order() {
+            execute_sql(
+                self.manager,
+                [format!(
+                    "DROP TYPE IF EXISTS \"{}\" CASCADE",
+                    spec.type_name
+                )],
+            )
+            .await?;
         }
 
         Ok(())

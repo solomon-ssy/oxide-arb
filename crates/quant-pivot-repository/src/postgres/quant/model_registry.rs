@@ -6,7 +6,7 @@ use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::{ModelSpecInfo, ModelVersionInfo, NewModelSpec, NewModelVersion},
     entities::{quant_model_spec, quant_model_version},
-    enums::quant::ModelPublicationStatus,
+    enums::quant::PublicationStatus,
     types::{ModelSpecId, ModelVersionId},
 };
 use sea_orm::{
@@ -75,10 +75,7 @@ impl ModelRegistryRepository for PgModelRegistryRepository {
     ) -> Result<Vec<ModelVersionInfo>, StorageError> {
         quant_model_version::Entity::find()
             .filter(quant_model_version::Column::ModelSpecId.eq(model_spec_id.clone()))
-            .filter(
-                quant_model_version::Column::PublicationStatus
-                    .eq(ModelPublicationStatus::Published),
-            )
+            .filter(quant_model_version::Column::PublicationStatus.eq(PublicationStatus::Published))
             .order_by_desc(quant_model_version::Column::PublishedAt)
             .all(&self.db)
             .await
@@ -90,40 +87,28 @@ impl ModelRegistryRepository for PgModelRegistryRepository {
         &self,
         model_version_id: &ModelVersionId,
     ) -> Result<ModelVersionInfo, StorageError> {
-        update_model_version_status(
-            &self.db,
-            model_version_id,
-            ModelPublicationStatus::Published,
-        )
-        .await
+        update_model_version_status(&self.db, model_version_id, PublicationStatus::Published).await
     }
 
     async fn retire_model_version(
         &self,
         model_version_id: &ModelVersionId,
     ) -> Result<ModelVersionInfo, StorageError> {
-        update_model_version_status(&self.db, model_version_id, ModelPublicationStatus::Retired)
-            .await
+        update_model_version_status(&self.db, model_version_id, PublicationStatus::Retired).await
     }
 
     async fn promote_model_to_shadow(
         &self,
         model_version_id: &ModelVersionId,
     ) -> Result<ModelVersionInfo, StorageError> {
-        update_model_version_status(&self.db, model_version_id, ModelPublicationStatus::Shadow)
-            .await
+        update_model_version_status(&self.db, model_version_id, PublicationStatus::Shadow).await
     }
 
     async fn restore_model_version(
         &self,
         model_version_id: &ModelVersionId,
     ) -> Result<ModelVersionInfo, StorageError> {
-        update_model_version_status(
-            &self.db,
-            model_version_id,
-            ModelPublicationStatus::Published,
-        )
-        .await
+        update_model_version_status(&self.db, model_version_id, PublicationStatus::Published).await
     }
 
     async fn set_quality_gate_report(
@@ -153,7 +138,7 @@ impl ModelRegistryRepository for PgModelRegistryRepository {
 async fn update_model_version_status(
     db: &DatabaseConnection,
     model_version_id: &ModelVersionId,
-    next: ModelPublicationStatus,
+    next: PublicationStatus,
 ) -> Result<ModelVersionInfo, StorageError> {
     let Some(row) = quant_model_version::Entity::find_by_id(model_version_id.clone())
         .one(db)
@@ -178,11 +163,11 @@ async fn update_model_version_status(
     let mut active = row.into_active_model();
     active.publication_status = ActiveValue::Set(next);
     match next {
-        ModelPublicationStatus::Published => {
+        PublicationStatus::Published => {
             active.published_at = ActiveValue::Set(Some(Utc::now()));
             active.retired_at = ActiveValue::Set(None);
         }
-        ModelPublicationStatus::Retired => {
+        PublicationStatus::Retired => {
             active.retired_at = ActiveValue::Set(Some(Utc::now()));
         }
         _ => {}

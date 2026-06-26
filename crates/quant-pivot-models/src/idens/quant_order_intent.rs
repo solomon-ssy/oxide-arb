@@ -7,6 +7,10 @@ use sea_orm::{
 };
 
 use crate::{
+    enums::{
+        execution::OrderIntentKind,
+        quant::{ApprovalStatus, OrderIntentStatus, QuantRuntimeMode},
+    },
     idens::quant_recommendation::QuantRecommendation,
     schema::{
         column,
@@ -43,22 +47,18 @@ pub fn table() -> TableCreateStatement {
         .if_not_exists()
         .col(column::uuid_pk(QuantOrderIntent::OrderIntentId))
         .col(column::uuid_fk(QuantOrderIntent::RecommendationId))
-        .col(
-            ColumnDef::new(QuantOrderIntent::RuntimeMode)
-                .text()
-                .not_null(),
-        )
-        .col(
-            ColumnDef::new(QuantOrderIntent::IntentKind)
-                .text()
-                .not_null(),
-        )
-        .col(ColumnDef::new(QuantOrderIntent::Status).text().not_null())
-        .col(
-            ColumnDef::new(QuantOrderIntent::ApprovalStatus)
-                .text()
-                .not_null(),
-        )
+        .col(column::pg_enum::<QuantRuntimeMode>(
+            QuantOrderIntent::RuntimeMode,
+        ))
+        .col(column::pg_enum::<OrderIntentKind>(
+            QuantOrderIntent::IntentKind,
+        ))
+        .col(column::pg_enum::<OrderIntentStatus>(
+            QuantOrderIntent::Status,
+        ))
+        .col(column::pg_enum::<ApprovalStatus>(
+            QuantOrderIntent::ApprovalStatus,
+        ))
         .col(column::uuid_null(QuantOrderIntent::ApprovedBy))
         .col(
             ColumnDef::new(QuantOrderIntent::ApprovalReason)

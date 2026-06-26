@@ -4,12 +4,15 @@ use sea_orm::{
     sea_query::{ColumnDef, Index, IndexOrder, Table, TableCreateStatement},
 };
 
-use crate::schema::{
-    column,
-    dependency::TableDependency,
-    index::{IndexBuildMode, IndexSpec},
-    seed::SeedSpec,
-    timestamp_with_write_default,
+use crate::{
+    enums::runtime_config::RuntimeConfigVersionSource,
+    schema::{
+        column,
+        dependency::TableDependency,
+        index::{IndexBuildMode, IndexSpec},
+        seed::SeedSpec,
+        timestamp_with_write_default,
+    },
 };
 
 #[quant_schema(lifecycle = "control")]
@@ -48,11 +51,9 @@ pub fn table() -> TableCreateStatement {
                 .json_binary()
                 .not_null(),
         )
-        .col(
-            ColumnDef::new(RuntimeConfigVersion::Source)
-                .text()
-                .not_null(),
-        )
+        .col(column::pg_enum::<RuntimeConfigVersionSource>(
+            RuntimeConfigVersion::Source,
+        ))
         .col(
             ColumnDef::new(RuntimeConfigVersion::CreatedBy)
                 .text()

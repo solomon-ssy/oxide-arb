@@ -97,12 +97,13 @@ pub fn build_runtime_input(
             vectors,
             outcomes,
         )),
-        ModelFamily::Classical(_) => ModelRuntimeInput::FeatureMatrix(build_feature_matrix(
+        family if family.is_classical() => ModelRuntimeInput::FeatureMatrix(build_feature_matrix(
             &model.required_features(),
             as_of,
             markets,
             vectors,
         )),
+        _ => unreachable!("exhaustive model family routing"),
     }
 }
 

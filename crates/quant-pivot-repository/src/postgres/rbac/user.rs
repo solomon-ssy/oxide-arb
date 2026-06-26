@@ -6,6 +6,7 @@ use quant_pivot_models::{
     domain::{ChangeUserPassword, NewUser, Paginated, UserInfo, UserPageQuery, UserPatch},
     entities::{user, user_role},
     enums::rbac::UserStatus,
+    schema::column,
     types::UserId,
 };
 use sea_orm::{
@@ -84,7 +85,7 @@ async fn do_change_status(
     status: UserStatus,
 ) -> Result<(), StorageError> {
     let result = user::Entity::update_many()
-        .col_expr(user::Column::Status, Expr::value(status))
+        .col_expr(user::Column::Status, column::pg_enum_value(&status))
         .filter(user::Column::Id.eq(id.clone()))
         .exec(db)
         .await

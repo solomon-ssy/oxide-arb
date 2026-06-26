@@ -1,7 +1,7 @@
 //! `quant_model_version` table entity.
 
 use crate::{
-    enums::quant::ModelPublicationStatus,
+    enums::quant::PublicationStatus,
     types::{ContentHash, ModelSpecId, ModelVersionId, TrainingDatasetId},
 };
 use chrono::{DateTime, Utc};
@@ -20,7 +20,7 @@ pub struct Model {
     pub metrics_json: Json,
     #[sea_orm(column_type = "JsonBinary")]
     pub quality_gate_report: Json,
-    pub publication_status: ModelPublicationStatus,
+    pub publication_status: PublicationStatus,
     pub published_at: Option<DateTime<Utc>>,
     pub retired_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,

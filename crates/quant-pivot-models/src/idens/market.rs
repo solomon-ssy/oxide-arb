@@ -1,14 +1,15 @@
 use quant_pivot_macros::quant_schema;
 use sea_orm::{
     Iden,
-    sea_query::{
-        ColumnDef, ColumnType, Expr, ForeignKey, ForeignKeyAction, Index, Table,
-        TableCreateStatement,
-    },
+    sea_query::{ColumnDef, ForeignKey, ForeignKeyAction, Index, Table, TableCreateStatement},
 };
 
 use crate::{
-    enums::{common::TickSize, market::MarketStatus},
+    enums::{
+        common::{MarketCategory, TickSize},
+        fee::FeeSource,
+        market::MarketStatus,
+    },
     idens::event::Event,
     schema::{
         column,
@@ -54,27 +55,18 @@ pub fn table() -> TableCreateStatement {
         .col(column::text_id(Market::EventId))
         .col(ColumnDef::new(Market::Question).text().not_null())
         .col(ColumnDef::new(Market::Slug).text().not_null())
-        .col(
-            ColumnDef::new(Market::Categories)
-                .array(ColumnType::Text)
-                .not_null()
-                .default(Expr::cust("'{}'::text[]")),
-        )
-        .col(
-            ColumnDef::new(Market::Status)
-                .text()
-                .not_null()
-                .default(MarketStatus::Active),
-        )
+        .col(column::pg_enum_array::<MarketCategory>(Market::Categories))
+        .col(column::pg_enum_default::<MarketStatus>(
+            Market::Status,
+            &MarketStatus::Active,
+        ))
         .col(ColumnDef::new(Market::Outcome).text().null())
         .col(column::token_id(Market::YesTokenId))
         .col(column::token_id(Market::NoTokenId))
-        .col(
-            ColumnDef::new(Market::TickSize)
-                .text()
-                .not_null()
-                .default(TickSize::Hundredth),
-        )
+        .col(column::pg_enum_default::<TickSize>(
+            Market::TickSize,
+            &TickSize::Hundredth,
+        ))
         .col(
             ColumnDef::new(Market::NegRisk)
                 .boolean()
@@ -109,7 +101,7 @@ pub fn table() -> TableCreateStatement {
                 .decimal_len(20, 18)
                 .null(),
         )
-        .col(ColumnDef::new(Market::FeeSource).text().null())
+        .col(column::pg_enum_null::<FeeSource>(Market::FeeSource))
         .col(
             ColumnDef::new(Market::FeeObservedAt)
                 .timestamp_with_time_zone()
@@ -170,7 +162,7 @@ pub fn indexes() -> Vec<IndexSpec> {
         IndexBuildMode::Transactional,
         "CREATE INDEX IF NOT EXISTS idx_markets_active_endgame \
          ON market (end_date) \
-         WHERE status = 'active' AND end_date IS NOT NULL",
+         WHERE status = 'active'::qp_market_status AND end_date IS NOT NULL",
         "scanner hot path for active endgame candidates",
     ));
 
@@ -180,7 +172,7 @@ pub fn indexes() -> Vec<IndexSpec> {
         IndexBuildMode::Transactional,
         "CREATE INDEX IF NOT EXISTS idx_markets_categories \
          ON market USING GIN (categories)",
-        "category membership filters on the text[] column",
+        "category membership filters on the qp_market_category[] column",
     ));
 
     indexes

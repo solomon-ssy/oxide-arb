@@ -5,6 +5,7 @@ use sea_orm::{
 };
 
 use crate::{
+    enums::quant::{OutcomeSide, RecommendationStatus},
     idens::{event::Event, market::Market, quant_recommendation_report::QuantRecommendationReport},
     schema::{
         column,
@@ -57,7 +58,9 @@ pub fn table() -> TableCreateStatement {
         .col(column::market_id(QuantRecommendation::MarketId))
         .col(column::text_id(QuantRecommendation::EventId))
         .col(column::token_id(QuantRecommendation::TokenId))
-        .col(column::enum_text(QuantRecommendation::OutcomeSide))
+        .col(column::pg_enum::<OutcomeSide>(
+            QuantRecommendation::OutcomeSide,
+        ))
         .col(column::probability(QuantRecommendation::CompositeScore))
         .col(column::probability(QuantRecommendation::RiskAdjustedScore))
         .col(column::probability(QuantRecommendation::Confidence))
@@ -108,7 +111,9 @@ pub fn table() -> TableCreateStatement {
                 .timestamp_with_time_zone()
                 .not_null(),
         )
-        .col(column::enum_text(QuantRecommendation::Status))
+        .col(column::pg_enum::<RecommendationStatus>(
+            QuantRecommendation::Status,
+        ))
         .col(timestamp_with_write_default(QuantRecommendation::CreatedAt))
         .foreign_key(
             ForeignKey::create()

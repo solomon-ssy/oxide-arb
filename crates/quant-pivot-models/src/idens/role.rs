@@ -7,7 +7,7 @@ use sea_orm::{
 };
 
 use crate::{
-    enums::rbac::RoleStatus,
+    enums::rbac::{RoleKind, RoleStatus},
     schema::{
         column,
         dependency::TableDependency,
@@ -48,13 +48,11 @@ pub fn table() -> TableCreateStatement {
         )
         .col(ColumnDef::new(Role::Name).text().not_null())
         .col(ColumnDef::new(Role::Description).text().null())
-        .col(ColumnDef::new(Role::Kind).text().not_null())
-        .col(
-            ColumnDef::new(Role::Status)
-                .text()
-                .not_null()
-                .default(RoleStatus::Enabled),
-        )
+        .col(column::pg_enum::<RoleKind>(Role::Kind))
+        .col(column::pg_enum_default::<RoleStatus>(
+            Role::Status,
+            &RoleStatus::Enabled,
+        ))
         .col(ColumnDef::new(Role::Sort).integer().not_null().default(0))
         .col(timestamp_with_write_default(Role::CreatedAt))
         .col(timestamp_with_write_default(Role::UpdatedAt))

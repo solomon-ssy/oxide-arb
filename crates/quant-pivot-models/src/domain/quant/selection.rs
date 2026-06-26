@@ -2,6 +2,7 @@
 
 use crate::{
     entities::quant_market_selection::{SelectionExcludedMarketIds, SelectionIncludedMarketIds},
+    enums::{common::MarketCategory, market::MarketStatus},
     types::{
         ContentHash, EventId, MarketId, MarketSelectionId, RuntimeConfigVersionId,
         SelectionExclusionSummary, TokenId, Usd,
@@ -63,18 +64,17 @@ pub struct MarketSelectionMemberInfo {
     pub market_selection_id: MarketSelectionId,
     pub market_id: MarketId,
     pub event_id: EventId,
-    pub category: String,
-    pub status: String,
+    pub category: MarketCategory,
+    pub status: MarketStatus,
     pub primary_token_id: TokenId,
     pub secondary_token_id: Option<TokenId>,
     pub liquidity_usd: Option<Usd>,
     pub volume_24h_usd: Option<Usd>,
-    pub reason: String,
 }
 
 info_from_model!(MarketSelectionMemberInfo, crate::entities::quant_market_selection_member::Model, {
     market_selection_id, market_id, event_id, category, status, primary_token_id,
-    secondary_token_id, liquidity_usd, volume_24h_usd, reason,
+    secondary_token_id, liquidity_usd, volume_24h_usd,
 });
 
 /// Insert payload for `quant_market_selection_member`.
@@ -87,13 +87,12 @@ pub struct NewMarketSelectionMember {
     pub market_selection_id: MarketSelectionId,
     pub market_id: MarketId,
     pub event_id: EventId,
-    pub category: String,
-    pub status: String,
+    pub category: MarketCategory,
+    pub status: MarketStatus,
     pub primary_token_id: TokenId,
     pub secondary_token_id: Option<TokenId>,
     pub liquidity_usd: Option<Usd>,
     pub volume_24h_usd: Option<Usd>,
-    pub reason: String,
 }
 
 /// Runtime aggregate for a selected market selection.

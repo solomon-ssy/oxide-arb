@@ -91,13 +91,12 @@
 - `market_selection_id uuid not null`
 - `market_id varchar(66) not null`
 - `event_id text not null`
-- `category text not null`
-- `status text not null`
+- `category qp_market_category not null`
+- `status qp_market_status not null`
 - `primary_token_id text not null`
 - `secondary_token_id text null`
 - `liquidity_usd numeric(28,8) null`
 - `volume_24h_usd numeric(28,8) null`
-- `reason text not null`
 
 主键：
 
@@ -117,7 +116,7 @@
 - `as_of timestamptz not null`
 - `feature_schema_version int not null`
 - `feature_hash text not null`
-- `data_quality text not null`
+- `data_quality qp_data_quality_status not null`
 - `staleness_ms bigint not null`
 - `payload jsonb not null`
 - `source_refs jsonb not null`
@@ -137,12 +136,12 @@
 
 - `factor_definition_id uuid pk`
 - `name text not null unique`
-- `factor_family text not null`
-- `scope text not null`
+- `factor_family qp_factor_family not null`
+- `scope qp_factor_definition_scope not null`
 - `input_schema_version int not null`
 - `output_schema_version int not null`
 - `definition_json jsonb not null`
-- `status text not null`
+- `status qp_publication_status not null`
 - `created_by uuid null`
 - `created_at timestamptz not null`
 - `updated_at timestamptz not null`
@@ -169,7 +168,7 @@
 - `as_of timestamptz not null`
 - `raw_value numeric(28,12) null`
 - `normalized_score numeric(20,18) not null`
-- `direction text not null`
+- `direction qp_factor_direction not null`
 - `confidence numeric(20,18) not null`
 - `explanation jsonb not null`
 - `created_at timestamptz not null`
@@ -189,12 +188,12 @@
 
 - `model_spec_id uuid pk`
 - `name text not null unique`
-- `model_family text not null`
+- `model_family qp_model_family not null`
 - `prediction_horizon_secs bigint not null`
 - `feature_schema_version int not null`
 - `label_schema_version int not null`
 - `spec_json jsonb not null`
-- `status text not null`
+- `status qp_publication_status not null`
 - `created_at timestamptz not null`
 - `updated_at timestamptz not null`
 
@@ -211,7 +210,7 @@
 - `training_dataset_id uuid null`
 - `metrics_json jsonb not null`
 - `quality_gate_report jsonb not null`
-- `publication_status text not null`
+- `publication_status qp_publication_status not null`
 - `published_at timestamptz null`
 - `retired_at timestamptz null`
 - `created_at timestamptz not null`
@@ -227,13 +226,13 @@
 关键列：
 
 - `model_run_id uuid pk`
-- `run_kind text not null`
+- `run_kind qp_model_run_kind not null`
 - `model_version_id uuid null`
 - `runtime_config_version_id uuid not null`
 - `market_selection_id uuid null`
 - `window_start timestamptz not null`
 - `window_end timestamptz not null`
-- `status text not null`
+- `status qp_publication_status not null`
 - `input_hash text not null`
 - `output_hash text null`
 - `metrics_json jsonb not null`
@@ -268,16 +267,16 @@
 关键列：
 
 - `recommendation_report_id uuid pk`
-- `report_kind text not null`
+- `report_kind qp_report_kind not null`
 - `as_of timestamptz not null`
 - `horizon_secs bigint not null`
-- `runtime_mode text not null`
+- `runtime_mode qp_quant_runtime_mode not null`
 - `runtime_config_version_id uuid not null`
 - `model_version_id uuid not null`
 - `market_selection_id uuid not null`
 - `portfolio_plan_id uuid not null`
 - `top_n int not null`
-- `status text not null`
+- `status qp_publication_status not null`
 - `summary_json jsonb not null`
 - `published_at timestamptz null`
 - `revoked_at timestamptz null`
@@ -301,7 +300,7 @@
 - `market_id varchar(66) not null`
 - `event_id text not null`
 - `token_id text not null`
-- `outcome_side text not null`（`OutcomeSide`：`yes` / `no`；买卖方向属执行层）
+- `outcome_side qp_outcome_side not null`（`OutcomeSide`：`yes` / `no`；买卖方向属执行层）
 - `composite_score numeric(20,18) not null`
 - `risk_adjusted_score numeric(20,18) not null`
 - `confidence numeric(20,18) not null`
@@ -315,7 +314,7 @@
 - `evidence_refs jsonb not null`
 - `valid_from timestamptz not null`
 - `valid_until timestamptz not null`
-- `status text not null`
+- `status qp_publication_status not null`
 - `created_at timestamptz not null`
 
 唯一约束：
@@ -333,10 +332,10 @@
 
 - `order_intent_id uuid pk`
 - `recommendation_id uuid not null`
-- `runtime_mode text not null`
-- `intent_kind text not null`
-- `status text not null`
-- `approval_status text not null`
+- `runtime_mode qp_quant_runtime_mode not null`
+- `intent_kind qp_order_intent_kind not null`
+- `status qp_publication_status not null`
+- `approval_status qp_approval_status not null`
 - `approved_by uuid null`
 - `approval_reason text null`
 - `approved_at timestamptz null`
@@ -368,17 +367,18 @@
 
 - `execution_order_id uuid pk`
 - `order_intent_id uuid not null`
-- `order_phase text not null`
+- `order_phase qp_execution_order_phase not null`
 - `market_id varchar(66) not null`
 - `token_id text not null`
-- `side text not null`
-- `order_type text not null`
+- `side qp_side not null`
+- `order_type qp_order_type_kind not null`
+- `gtd_expiration_at timestamptz null`
 - `price numeric(20,18) not null`
 - `shares numeric(38,18) not null`
 - `cost_usd numeric(28,8) not null`
 - `venue_order_id text null`
 - `venue_status text null`
-- `state text not null`
+- `state qp_execution_order_state not null`
 - `submitted_at timestamptz null`
 - `filled_at timestamptz null`
 - `cancelled_at timestamptz null`

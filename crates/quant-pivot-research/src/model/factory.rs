@@ -197,7 +197,7 @@ mod tests {
     use chrono::Utc;
     use quant_pivot_models::{
         domain::ModelVersionInfo,
-        enums::quant::ModelPublicationStatus,
+        enums::quant::PublicationStatus,
         types::{ContentHash, ModelSpecId, ModelVersionId},
     };
     use rust_decimal_macros::dec;
@@ -258,7 +258,7 @@ mod tests {
             training_dataset_id: None,
             metrics_json: serde_json::json!({}),
             quality_gate_report: serde_json::json!({}),
-            publication_status: ModelPublicationStatus::Published,
+            publication_status: PublicationStatus::Published,
             published_at: Some(Utc::now()),
             retired_at: None,
             created_at: Utc::now(),

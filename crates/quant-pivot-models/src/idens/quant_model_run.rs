@@ -7,6 +7,7 @@ use sea_orm::{
 };
 
 use crate::{
+    enums::quant::{ModelRunErrorCode, ModelRunKind, ModelRunStatus},
     idens::{quant_market_selection::QuantMarketSelection, quant_model_version::QuantModelVersion},
     schema::{
         column,
@@ -44,7 +45,7 @@ pub fn table() -> TableCreateStatement {
         .table(QuantModelRun::Table)
         .if_not_exists()
         .col(column::uuid_pk(QuantModelRun::ModelRunId))
-        .col(ColumnDef::new(QuantModelRun::RunKind).text().not_null())
+        .col(column::pg_enum::<ModelRunKind>(QuantModelRun::RunKind))
         .col(column::uuid_null(QuantModelRun::ModelVersionId))
         .col(column::uuid_fk(QuantModelRun::RuntimeConfigVersionId))
         .col(column::uuid_null(QuantModelRun::MarketSelectionId))
@@ -58,7 +59,7 @@ pub fn table() -> TableCreateStatement {
                 .timestamp_with_time_zone()
                 .not_null(),
         )
-        .col(ColumnDef::new(QuantModelRun::Status).text().not_null())
+        .col(column::pg_enum::<ModelRunStatus>(QuantModelRun::Status))
         .col(ColumnDef::new(QuantModelRun::InputHash).text().not_null())
         .col(ColumnDef::new(QuantModelRun::OutputHash).text().null())
         .col(
@@ -66,7 +67,9 @@ pub fn table() -> TableCreateStatement {
                 .json_binary()
                 .not_null(),
         )
-        .col(ColumnDef::new(QuantModelRun::ErrorCode).text().null())
+        .col(column::pg_enum_null::<ModelRunErrorCode>(
+            QuantModelRun::ErrorCode,
+        ))
         .col(ColumnDef::new(QuantModelRun::ErrorMessage).text().null())
         .col(
             ColumnDef::new(QuantModelRun::StartedAt)

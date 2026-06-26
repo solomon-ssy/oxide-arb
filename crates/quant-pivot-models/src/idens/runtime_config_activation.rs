@@ -8,6 +8,7 @@ use sea_orm::{
 };
 
 use crate::{
+    enums::runtime_config::RuntimeConfigActivationKind,
     idens::runtime_config_version::RuntimeConfigVersion,
     schema::{
         column,
@@ -58,11 +59,9 @@ pub fn table() -> TableCreateStatement {
                 .text()
                 .not_null(),
         )
-        .col(
-            ColumnDef::new(RuntimeConfigActivation::ActivationKind)
-                .text()
-                .not_null(),
-        )
+        .col(column::pg_enum::<RuntimeConfigActivationKind>(
+            RuntimeConfigActivation::ActivationKind,
+        ))
         .col(column::uuid_null(
             RuntimeConfigActivation::PreviousRuntimeConfigVersionId,
         ))

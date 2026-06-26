@@ -1,7 +1,7 @@
 //! `quant_model_governance_audit` table entity.
 
 use crate::{
-    enums::quant::{ModelGovernanceAction, ModelPublicationStatus},
+    enums::quant::{ModelGovernanceAction, PublicationStatus},
     types::{AuditEventId, ModelGovernanceAuditId, ModelVersionId, TrainingDatasetId},
 };
 use chrono::{DateTime, Utc};
@@ -18,8 +18,8 @@ pub struct Model {
     pub actor_username: String,
     pub actor_role: Option<String>,
     pub reason: String,
-    pub before_status: ModelPublicationStatus,
-    pub after_status: ModelPublicationStatus,
+    pub before_status: PublicationStatus,
+    pub after_status: PublicationStatus,
     pub before_hash: Option<String>,
     pub after_hash: Option<String>,
     pub quality_gate_passed: bool,

@@ -6,7 +6,7 @@ use quant_pivot_models::{
     domain::order::{OrderAmount, OrderRequest},
     enums::{
         common::{OrderType, Side},
-        order::OrderStatus,
+        execution::VenueOrderStatus,
     },
     types::{MarketId, Price, TokenId, Usd},
 };
@@ -51,7 +51,9 @@ async fn fok_order_sign_and_submit() {
             assert!(
                 matches!(
                     r.status,
-                    OrderStatus::Filled | OrderStatus::Rejected | OrderStatus::Cancelled
+                    VenueOrderStatus::Filled
+                        | VenueOrderStatus::Rejected
+                        | VenueOrderStatus::Cancelled
                 ),
                 "unexpected status: {:?}",
                 r.status

@@ -9,7 +9,7 @@ use chrono::Utc;
 use quant_pivot_models::{
     domain::{NewMarketSelection, NewMarketSelectionMember},
     entities::quant_market_selection::{SelectionExcludedMarketIds, SelectionIncludedMarketIds},
-    enums::common::MarketCategory,
+    enums::{common::MarketCategory, market::MarketStatus},
     types::{
         ContentHash, EventId, MarketId, MarketSelectionId, RuntimeConfigVersionId,
         SelectionExclusionSummary, TokenId, Usd,
@@ -79,13 +79,12 @@ async fn create_snapshot_then_find_and_list_members() {
         market_selection_id: selection_id.clone(),
         market_id: MarketId::new(market_id),
         event_id: EventId::new(event_id),
-        category: MarketCategory::Sports.as_str().to_owned(),
-        status: "active".to_owned(),
+        category: MarketCategory::Sports,
+        status: MarketStatus::Active,
         primary_token_id: TokenId::new("12345"),
         secondary_token_id: Some(TokenId::new("67890")),
         liquidity_usd: Some(Usd::new(Decimal::from(10_000))),
         volume_24h_usd: Some(Usd::new(Decimal::from(5_000))),
-        reason: "selected".to_owned(),
     };
 
     let info = selection_repo
@@ -111,8 +110,7 @@ async fn create_snapshot_then_find_and_list_members() {
         .expect("list members");
     assert_eq!(members.len(), 1);
     assert_eq!(members[0].market_id.as_str(), market_id);
-    assert_eq!(members[0].reason, "selected");
-    assert_eq!(members[0].category, "sports");
+    assert_eq!(members[0].category, MarketCategory::Sports);
     assert_eq!(
         members[0].secondary_token_id.as_ref().map(TokenId::as_str),
         Some("67890")

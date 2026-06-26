@@ -1,7 +1,11 @@
 //! `quant_execution_order` table entity.
 
 use crate::{
-    enums::{common::Side, quant::ExecutionOrderState},
+    enums::{
+        common::Side,
+        execution::{ExecutionOrderPhase, OrderTypeKind, VenueOrderStatus},
+        quant::ExecutionOrderState,
+    },
     types::{ExecutionOrderId, MarketId, OrderId, OrderIntentId, Price, Shares, TokenId, Usd},
 };
 use chrono::{DateTime, Utc};
@@ -13,23 +17,21 @@ pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub execution_order_id: ExecutionOrderId,
     pub order_intent_id: OrderIntentId,
-    #[sea_orm(column_type = "Text")]
-    pub order_phase: String,
+    pub order_phase: ExecutionOrderPhase,
     pub market_id: MarketId,
     pub token_id: TokenId,
     pub side: Side,
-    #[sea_orm(column_type = "Text")]
-    pub order_type: String,
+    pub order_type: OrderTypeKind,
     pub price: Price,
     pub shares: Shares,
     pub cost_usd: Usd,
     pub venue_order_id: Option<OrderId>,
-    #[sea_orm(column_type = "Text", nullable)]
-    pub venue_status: Option<String>,
+    pub venue_status: Option<VenueOrderStatus>,
     pub state: ExecutionOrderState,
     pub submitted_at: Option<DateTime<Utc>>,
     pub filled_at: Option<DateTime<Utc>>,
     pub cancelled_at: Option<DateTime<Utc>>,
+    pub gtd_expiration_at: Option<DateTime<Utc>>,
     #[sea_orm(column_type = "Text", nullable)]
     pub error_message: Option<String>,
     pub created_at: DateTime<Utc>,

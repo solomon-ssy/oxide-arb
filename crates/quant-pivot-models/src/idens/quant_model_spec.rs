@@ -4,12 +4,15 @@ use sea_orm::{
     sea_query::{ColumnDef, Index, Table, TableCreateStatement},
 };
 
-use crate::schema::{
-    column,
-    dependency::TableDependency,
-    index::{IndexBuildMode, IndexSpec},
-    seed::SeedSpec,
-    timestamp_with_write_default,
+use crate::{
+    enums::{model::ModelFamily, quant::PublicationStatus},
+    schema::{
+        column,
+        dependency::TableDependency,
+        index::{IndexBuildMode, IndexSpec},
+        seed::SeedSpec,
+        timestamp_with_write_default,
+    },
 };
 
 #[quant_schema(lifecycle = "control")]
@@ -38,11 +41,7 @@ pub fn table() -> TableCreateStatement {
                 .not_null()
                 .unique_key(),
         )
-        .col(
-            ColumnDef::new(QuantModelSpec::ModelFamily)
-                .text()
-                .not_null(),
-        )
+        .col(column::pg_enum::<ModelFamily>(QuantModelSpec::ModelFamily))
         .col(
             ColumnDef::new(QuantModelSpec::PredictionHorizonSecs)
                 .big_integer()
@@ -63,7 +62,7 @@ pub fn table() -> TableCreateStatement {
                 .json_binary()
                 .not_null(),
         )
-        .col(ColumnDef::new(QuantModelSpec::Status).text().not_null())
+        .col(column::pg_enum::<PublicationStatus>(QuantModelSpec::Status))
         .col(timestamp_with_write_default(QuantModelSpec::CreatedAt))
         .col(timestamp_with_write_default(QuantModelSpec::UpdatedAt))
         .to_owned()

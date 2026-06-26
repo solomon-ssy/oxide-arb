@@ -36,10 +36,7 @@ use quant_pivot_models::{
         BacktestReportId, ModelComparisonReportId, ModelVersionId, TokenId, TrainingDatasetId,
     },
 };
-use quant_pivot_storage::{
-    cache::connect_pool,
-    write::{AsyncWriter, AsyncWriterConfig, AsyncWriterObservability},
-};
+use quant_pivot_storage::cache::connect_pool;
 use quant_pivot_web::{
     AppState,
     audit::OperationLogBuffer,
@@ -67,7 +64,6 @@ pub struct TestEnv {
     pub state: AppState,
     pg_container: ContainerAsync<Postgres>,
     redis: Option<ContainerAsync<Redis>>,
-    writer_shutdown: CancellationToken,
     ws_shutdown: CancellationToken,
 }
 
@@ -100,23 +96,7 @@ impl TestEnv {
         let perm_checker = Arc::new(routes::init_rbac_rules());
         let repos = WebHarnessRepos::from_connection(&db);
 
-        let writer_shutdown = CancellationToken::new();
-        let op_log_repo = Arc::clone(&repos.operation_logs);
-        let (op_log_writer, op_log_worker) = AsyncWriter::new(
-            AsyncWriterConfig::new("operation_log")
-                .capacity(1024)
-                .batch_size(64)
-                .flush_interval(Duration::from_millis(50)),
-            move |rows| {
-                let repo = Arc::clone(&op_log_repo);
-                Box::pin(async move { repo.append_batch(rows).await })
-            },
-            prometheus::IntCounter::new("test_operation_log_drops", "test drop counter")
-                .expect("counter"),
-            AsyncWriterObservability::default(),
-        );
-        let operation_log = OperationLogBuffer::new(Arc::new(op_log_writer));
-        tokio::spawn(op_log_worker.run(writer_shutdown.clone()));
+        let operation_log = OperationLogBuffer::direct(Arc::clone(&repos.operation_logs));
 
         let (events, event_rx) = CoreEventPublisher::bounded(256);
         let ws_sessions = SessionRegistry::default();
@@ -169,7 +149,6 @@ impl TestEnv {
             state,
             pg_container,
             redis: Some(redis_container),
-            writer_shutdown,
             ws_shutdown,
         }
     }
@@ -182,7 +161,6 @@ impl TestEnv {
 impl Drop for TestEnv {
     fn drop(&mut self) {
         std::hint::black_box(&self.pg_container);
-        self.writer_shutdown.cancel();
         self.ws_shutdown.cancel();
     }
 }

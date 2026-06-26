@@ -1,7 +1,10 @@
 //! `quant_order_intent` table entity.
 
 use crate::{
-    enums::quant::{ApprovalStatus, OrderIntentStatus, QuantRuntimeMode},
+    enums::{
+        execution::OrderIntentKind,
+        quant::{ApprovalStatus, OrderIntentStatus, QuantRuntimeMode},
+    },
     types::{ContentHash, EntryOrderSpec, ExitPolicySpec, OrderIntentId, RecommendationId},
 };
 use chrono::{DateTime, Utc};
@@ -15,8 +18,7 @@ pub struct Model {
     pub order_intent_id: OrderIntentId,
     pub recommendation_id: RecommendationId,
     pub runtime_mode: QuantRuntimeMode,
-    #[sea_orm(column_type = "Text")]
-    pub intent_kind: String,
+    pub intent_kind: OrderIntentKind,
     pub status: OrderIntentStatus,
     pub approval_status: ApprovalStatus,
     pub approved_by: Option<Uuid>,

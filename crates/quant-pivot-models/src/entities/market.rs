@@ -3,6 +3,7 @@
 use crate::{
     enums::{
         common::{MarketCategory, TickSize},
+        fee::FeeSource,
         market::MarketStatus,
     },
     types::{EventId, MarketId, TokenId},
@@ -38,8 +39,7 @@ pub struct Model {
     pub fee_exponent: Option<Decimal>,
     pub fee_taker_only: Option<bool>,
     pub fee_rebate_rate: Option<Decimal>,
-    #[sea_orm(column_type = "Text", nullable)]
-    pub fee_source: Option<String>,
+    pub fee_source: Option<FeeSource>,
     pub fee_observed_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,

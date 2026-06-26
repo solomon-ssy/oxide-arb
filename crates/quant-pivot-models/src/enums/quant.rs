@@ -1,6 +1,7 @@
 //! Quant-pivot runtime and report domain enums.
 
-active_string_enum! {
+crate::pg_enum! {
+    type_name = "qp_quant_runtime_mode",
     /// Governed runtime mode for report generation and optional execution.
     @derive(Default, schemars::JsonSchema)
     pub enum QuantRuntimeMode {
@@ -25,7 +26,8 @@ impl QuantRuntimeMode {
     }
 }
 
-active_string_enum! {
+crate::pg_enum! {
+    type_name = "qp_report_kind",
     /// Recommendation report category.
     @derive(Default)
     pub enum ReportKind {
@@ -36,7 +38,8 @@ active_string_enum! {
     }
 }
 
-active_string_enum! {
+crate::pg_enum! {
+    type_name = "qp_report_trigger_kind",
     /// Stable report-generation trigger source.
     @derive(Default)
     pub enum ReportTriggerKind {
@@ -46,7 +49,8 @@ active_string_enum! {
     }
 }
 
-active_string_enum! {
+crate::pg_enum! {
+    type_name = "qp_recommendation_report_status",
     /// Publication lifecycle state for a recommendation report.
     @derive(Default)
     pub enum RecommendationReportStatus {
@@ -60,7 +64,8 @@ active_string_enum! {
     }
 }
 
-active_string_enum! {
+crate::pg_enum! {
+    type_name = "qp_recommendation_status",
     /// Lifecycle state for a single recommendation.
     @derive(Default)
     pub enum RecommendationStatus {
@@ -74,7 +79,8 @@ active_string_enum! {
     }
 }
 
-active_string_enum! {
+crate::pg_enum! {
+    type_name = "qp_outcome_side",
     /// Which binary-market outcome token a recommendation opens a position in.
     ///
     /// A recommendation is always an *opening* position (buy-to-open) in one
@@ -103,7 +109,7 @@ impl OutcomeSide {
     }
 }
 
-active_string_enum! {
+crate::wire_enum! {
     /// How an entry plan becomes executable.
     @derive(Default)
     pub enum EntryTriggerKind {
@@ -117,7 +123,7 @@ active_string_enum! {
     }
 }
 
-active_string_enum! {
+crate::wire_enum! {
     /// How an exit plan leaves a recommendation.
     @derive(Default)
     pub enum ExitTriggerKind {
@@ -131,7 +137,8 @@ active_string_enum! {
     }
 }
 
-active_string_enum! {
+crate::pg_enum! {
+    type_name = "qp_order_intent_status",
     /// Governed execution-intent lifecycle state.
     @derive(Default)
     pub enum OrderIntentStatus {
@@ -150,7 +157,8 @@ active_string_enum! {
     }
 }
 
-active_string_enum! {
+crate::pg_enum! {
+    type_name = "qp_approval_status",
     /// Human or policy approval state attached to an order intent.
     @derive(Default)
     pub enum ApprovalStatus {
@@ -163,10 +171,11 @@ active_string_enum! {
     }
 }
 
-active_string_enum! {
-    /// Model publication lifecycle.
+crate::pg_enum! {
+    type_name = "qp_publication_status",
+    /// Publication lifecycle for model specs, model versions, and factor definitions.
     @derive(Default)
-    pub enum ModelPublicationStatus {
+    pub enum PublicationStatus {
         #[default]
         Draft => "draft",
         Candidate => "candidate",
@@ -177,7 +186,7 @@ active_string_enum! {
     }
 }
 
-impl ModelPublicationStatus {
+impl PublicationStatus {
     /// Returns whether transitioning from `self` to `next` is allowed by the
     /// model publication state machine.
     #[must_use]
@@ -193,7 +202,8 @@ impl ModelPublicationStatus {
     }
 }
 
-active_string_enum! {
+crate::pg_enum! {
+    type_name = "qp_model_governance_action",
     /// Model-governance action recorded in the `quant_model_governance_audit`
     /// trail. Append-only wire labels — never rename an existing value.
     pub enum ModelGovernanceAction {
@@ -208,21 +218,8 @@ active_string_enum! {
     }
 }
 
-active_string_enum! {
-    /// Factor definition lifecycle.
-    @derive(Default)
-    pub enum FactorDefinitionStatus {
-        #[default]
-        Draft => "draft",
-        Candidate => "candidate",
-        Shadow => "shadow",
-        Published => "published",
-        Retired => "retired",
-        Rejected => "rejected",
-    }
-}
-
-active_string_enum! {
+crate::pg_enum! {
+    type_name = "qp_data_quality_status",
     /// Point-in-time data quality classification.
     @derive(Default)
     pub enum DataQualityStatus {
@@ -235,7 +232,8 @@ active_string_enum! {
     }
 }
 
-active_string_enum! {
+crate::pg_enum! {
+    type_name = "qp_factor_direction",
     /// Factor contribution direction.
     @derive(Default)
     pub enum FactorDirection {
@@ -260,7 +258,8 @@ impl FactorDirection {
     }
 }
 
-active_string_enum! {
+crate::pg_enum! {
+    type_name = "qp_training_dataset_status",
     /// Frozen training-dataset lifecycle state (ledger).
     ///
     /// Transitions: `Planned → Building → {Built | InsufficientLabels | Failed}`;
@@ -279,7 +278,8 @@ active_string_enum! {
     }
 }
 
-active_string_enum! {
+crate::pg_enum! {
+    type_name = "qp_model_run_kind",
     /// Model run purpose.
     @derive(Default)
     pub enum ModelRunKind {
@@ -291,7 +291,8 @@ active_string_enum! {
     }
 }
 
-active_string_enum! {
+crate::pg_enum! {
+    type_name = "qp_model_run_status",
     /// Model run terminal or in-flight status.
     @derive(Default)
     pub enum ModelRunStatus {
@@ -303,7 +304,8 @@ active_string_enum! {
     }
 }
 
-active_string_enum! {
+crate::pg_enum! {
+    type_name = "qp_model_run_error_code",
     /// Stable, queryable failure taxonomy for a terminal [`ModelRunStatus::Failed`]
     /// run. Append-only wire labels — never rename an existing value.
     pub enum ModelRunErrorCode {
@@ -319,7 +321,7 @@ active_string_enum! {
     }
 }
 
-active_string_enum! {
+crate::wire_enum! {
     /// Serialization format of a stored model artifact's bytes.
     ///
     /// The weighted-factor body serializes to canonical JSON; a classical
@@ -335,7 +337,8 @@ active_string_enum! {
     }
 }
 
-active_string_enum! {
+crate::pg_enum! {
+    type_name = "qp_execution_order_state",
     /// Internal execution order state.
     @derive(Default)
     pub enum ExecutionOrderState {
@@ -349,7 +352,8 @@ active_string_enum! {
     }
 }
 
-active_string_enum! {
+crate::pg_enum! {
+    type_name = "qp_recommendation_outcome",
     /// Recommendation attribution outcome.
     @derive(Default)
     pub enum RecommendationOutcome {
@@ -363,7 +367,8 @@ active_string_enum! {
     }
 }
 
-active_string_enum! {
+crate::pg_enum! {
+    type_name = "qp_account_source",
     /// Capital-base provenance for a report's sizing.
     ///
     /// Single real source (the Polymarket venue account). The enum is retained
@@ -377,7 +382,7 @@ active_string_enum! {
     }
 }
 
-active_string_enum! {
+crate::wire_enum! {
     /// Position-sizing model that produced a recommendation's size.
     @derive(Default)
     pub enum SizingModelKind {
@@ -387,7 +392,7 @@ active_string_enum! {
     }
 }
 
-active_string_enum! {
+crate::wire_enum! {
     /// The cap that bound a recommendation's final size.
     ///
     /// `None` means no hard cap bound the size (it was limited only by the
@@ -422,7 +427,7 @@ active_string_enum! {
     }
 }
 
-active_string_enum! {
+crate::wire_enum! {
     /// Why a report could not publish any recommendation (empty report).
     @derive(Default)
     pub enum EmptyReason {
@@ -446,7 +451,7 @@ active_string_enum! {
     }
 }
 
-active_string_enum! {
+crate::wire_enum! {
     /// Why a recommendation is ineligible for execution in a given mode.
     @derive(Default)
     pub enum IneligibilityReason {
@@ -470,7 +475,7 @@ active_string_enum! {
     }
 }
 
-active_string_enum! {
+crate::wire_enum! {
     /// Why a candidate was dropped during portfolio planning (not published).
     ///
     /// The planner records one reason per rejected candidate; the report rolls
@@ -502,7 +507,7 @@ active_string_enum! {
     }
 }
 
-active_string_enum! {
+crate::wire_enum! {
     /// How an open position is intended to be settled at resolution.
     @derive(Default)
     pub enum SettlementPolicy {

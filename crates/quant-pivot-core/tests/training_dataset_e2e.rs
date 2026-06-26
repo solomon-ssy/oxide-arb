@@ -29,7 +29,8 @@ use quant_pivot_models::{
         common::MarketCategory,
         factor::FactorFamily,
         market::MarketStatus,
-        quant::{ModelPublicationStatus, TrainingDatasetStatus},
+        model::ModelFamily,
+        quant::{PublicationStatus, TrainingDatasetStatus},
         runtime_config::RuntimeConfigVersionSource,
     },
     runtime_config::{
@@ -407,12 +408,12 @@ async fn seed_model_spec(db: &DatabaseConnection) -> ModelSpecId {
         .create_model_spec(NewModelSpec {
             model_spec_id: model_spec_id.clone(),
             name: "dataset-e2e".to_owned(),
-            model_family: "weighted_factor".to_owned(),
+            model_family: ModelFamily::WeightedFactor,
             prediction_horizon_secs: 86_400,
             feature_schema_version: SchemaVersion::FIRST,
             label_schema_version: SchemaVersion::FIRST,
             spec_json: serde_json::json!({}),
-            status: ModelPublicationStatus::Published,
+            status: PublicationStatus::Published,
         })
         .await
         .expect("create spec");
@@ -896,7 +897,7 @@ async fn model_version_training_dataset_id_is_typed() {
             training_dataset_id: Some(dataset_id.clone()),
             metrics_json: serde_json::json!({}),
             quality_gate_report: serde_json::json!({}),
-            publication_status: ModelPublicationStatus::Candidate,
+            publication_status: PublicationStatus::Candidate,
             published_at: None,
             retired_at: None,
         })

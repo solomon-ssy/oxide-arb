@@ -3,6 +3,7 @@
 use crate::{
     enums::{
         common::Side,
+        execution::{ExecutionOrderPhase, OrderIntentKind, OrderTypeKind, VenueOrderStatus},
         quant::{ApprovalStatus, ExecutionOrderState, OrderIntentStatus, QuantRuntimeMode},
     },
     types::{
@@ -22,7 +23,7 @@ pub struct OrderIntentInfo {
     pub order_intent_id: OrderIntentId,
     pub recommendation_id: RecommendationId,
     pub runtime_mode: QuantRuntimeMode,
-    pub intent_kind: String,
+    pub intent_kind: OrderIntentKind,
     pub status: OrderIntentStatus,
     pub approval_status: ApprovalStatus,
     pub approved_by: Option<Uuid>,
@@ -49,7 +50,7 @@ pub struct NewOrderIntent {
     pub order_intent_id: OrderIntentId,
     pub recommendation_id: RecommendationId,
     pub runtime_mode: QuantRuntimeMode,
-    pub intent_kind: String,
+    pub intent_kind: OrderIntentKind,
     pub status: OrderIntentStatus,
     pub approval_status: ApprovalStatus,
     pub approved_by: Option<Uuid>,
@@ -75,20 +76,21 @@ pub struct ApproveOrderIntent {
 pub struct ExecutionOrderInfo {
     pub execution_order_id: ExecutionOrderId,
     pub order_intent_id: OrderIntentId,
-    pub order_phase: String,
+    pub order_phase: ExecutionOrderPhase,
     pub market_id: MarketId,
     pub token_id: TokenId,
     pub side: Side,
-    pub order_type: String,
+    pub order_type: OrderTypeKind,
     pub price: Price,
     pub shares: Shares,
     pub cost_usd: Usd,
     pub venue_order_id: Option<OrderId>,
-    pub venue_status: Option<String>,
+    pub venue_status: Option<VenueOrderStatus>,
     pub state: ExecutionOrderState,
     pub submitted_at: Option<DateTime<Utc>>,
     pub filled_at: Option<DateTime<Utc>>,
     pub cancelled_at: Option<DateTime<Utc>>,
+    pub gtd_expiration_at: Option<DateTime<Utc>>,
     pub error_message: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -97,7 +99,7 @@ pub struct ExecutionOrderInfo {
 info_from_model!(ExecutionOrderInfo, crate::entities::quant_execution_order::Model, {
     execution_order_id, order_intent_id, order_phase, market_id, token_id, side,
     order_type, price, shares, cost_usd, venue_order_id, venue_status, state,
-    submitted_at, filled_at, cancelled_at, error_message, created_at, updated_at,
+    submitted_at, filled_at, cancelled_at, gtd_expiration_at, error_message, created_at, updated_at,
 });
 
 /// Insert payload for `quant_execution_order`.
@@ -106,20 +108,21 @@ info_from_model!(ExecutionOrderInfo, crate::entities::quant_execution_order::Mod
 pub struct NewExecutionOrder {
     pub execution_order_id: ExecutionOrderId,
     pub order_intent_id: OrderIntentId,
-    pub order_phase: String,
+    pub order_phase: ExecutionOrderPhase,
     pub market_id: MarketId,
     pub token_id: TokenId,
     pub side: Side,
-    pub order_type: String,
+    pub order_type: OrderTypeKind,
     pub price: Price,
     pub shares: Shares,
     pub cost_usd: Usd,
     pub venue_order_id: Option<OrderId>,
-    pub venue_status: Option<String>,
+    pub venue_status: Option<VenueOrderStatus>,
     pub state: ExecutionOrderState,
     pub submitted_at: Option<DateTime<Utc>>,
     pub filled_at: Option<DateTime<Utc>>,
     pub cancelled_at: Option<DateTime<Utc>>,
+    pub gtd_expiration_at: Option<DateTime<Utc>>,
     pub error_message: Option<String>,
 }
 

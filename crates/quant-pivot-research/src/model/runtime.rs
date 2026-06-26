@@ -1,15 +1,8 @@
-//! Model runtime contract: [`QuantModelRuntime`], [`ModelRuntimeFactory`], the
-//! runtime I/O types, and the strongly-typed [`ModelFamily`].
+//! Model runtime contract: [`QuantModelRuntime`], [`ModelRuntimeFactory`], and the
+//! runtime I/O types.
 //!
-//! Business code (runner, Phase 04 report builder) depends only on
-//! `dyn QuantModelRuntime`; the factory is the single place that reads artifact
-//! bytes and knows a concrete model type. 3.4 implements the weighted-factor
-//! runtime; classical/ONNX runtimes follow in 3.6 / Phase 06.
-
-use std::{
-    fmt::{self, Display, Formatter},
-    str::FromStr,
-};
+//! [`ModelFamily`] / [`ClassicalKind`] are re-exported from `quant_pivot_models`
+//! (flat Postgres `qp_model_family` labels).
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -21,6 +14,8 @@ use quant_pivot_models::{
 };
 use serde::{Deserialize, Serialize};
 
+pub use quant_pivot_models::enums::model::{ClassicalKind, ModelFamily, ParseModelFamilyError};
+
 use crate::{
     factors::{FactorName, FactorValue},
     features::{FeatureName, FeatureValue, SubstitutionAudit},
@@ -29,115 +24,6 @@ use crate::{
         signal::SignalCandidate,
     },
 };
-
-/// Concrete classical-ML model kind (smartcore-backed in 3.6).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ClassicalKind {
-    /// Random forest regressor.
-    RandomForest,
-    /// Extremely randomized trees regressor.
-    ExtraTrees,
-    /// Logistic regression classifier (yes-probability output).
-    LogisticRegression,
-    /// Ridge (L2) linear regression.
-    Ridge,
-    /// Lasso (L1) linear regression.
-    Lasso,
-    /// Elastic-net linear regression.
-    ElasticNet,
-}
-
-impl ClassicalKind {
-    /// Stable wire string.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::RandomForest => "random_forest",
-            Self::ExtraTrees => "extra_trees",
-            Self::LogisticRegression => "logistic_regression",
-            Self::Ridge => "ridge",
-            Self::Lasso => "lasso",
-            Self::ElasticNet => "elastic_net",
-        }
-    }
-}
-
-impl Display for ClassicalKind {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-impl FromStr for ClassicalKind {
-    type Err = ParseModelFamilyError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "random_forest" => Ok(Self::RandomForest),
-            "extra_trees" => Ok(Self::ExtraTrees),
-            "logistic_regression" => Ok(Self::LogisticRegression),
-            "ridge" => Ok(Self::Ridge),
-            "lasso" => Ok(Self::Lasso),
-            "elastic_net" => Ok(Self::ElasticNet),
-            other => Err(ParseModelFamilyError {
-                value: other.to_owned(),
-            }),
-        }
-    }
-}
-
-/// The strongly-typed model family, round-tripped to the `quant_model_spec`
-/// `model_family` text column via [`Display`] / [`FromStr`] (DB column type
-/// unchanged).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ModelFamily {
-    /// First-class, fully-explainable weighted factor scorer (3.4).
-    WeightedFactor,
-    /// Classical ML model of a given kind (3.6 shadow candidates).
-    Classical(ClassicalKind),
-}
-
-impl Display for ModelFamily {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::WeightedFactor => f.write_str("weighted_factor"),
-            Self::Classical(kind) => write!(f, "classical:{kind}"),
-        }
-    }
-}
-
-impl FromStr for ModelFamily {
-    type Err = ParseModelFamilyError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s == "weighted_factor" {
-            return Ok(Self::WeightedFactor);
-        }
-        if let Some(kind) = s.strip_prefix("classical:") {
-            return Ok(Self::Classical(kind.parse()?));
-        }
-        Err(ParseModelFamilyError {
-            value: s.to_owned(),
-        })
-    }
-}
-
-/// Error parsing a [`ModelFamily`] / [`ClassicalKind`] from its wire string.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ParseModelFamilyError {
-    /// The unrecognized value.
-    pub value: String,
-}
-
-impl Display for ParseModelFamilyError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "unrecognized model family: {:?}", self.value)
-    }
-}
-
-impl std::error::Error for ParseModelFamilyError {}
 
 /// Per-market context the scorer needs beyond the factor vector.
 ///
@@ -346,24 +232,26 @@ pub trait ModelRuntimeFactory: Send + Sync {
 
 #[cfg(test)]
 mod tests {
+    use std::str::FromStr;
+
     use super::{ClassicalKind, ModelFamily};
 
     #[test]
     fn model_family_string_roundtrip() {
         for family in [
             ModelFamily::WeightedFactor,
-            ModelFamily::Classical(ClassicalKind::RandomForest),
-            ModelFamily::Classical(ClassicalKind::ElasticNet),
+            ModelFamily::from_classical(ClassicalKind::RandomForest),
+            ModelFamily::from_classical(ClassicalKind::ElasticNet),
         ] {
             let text = family.to_string();
-            let parsed: ModelFamily = text.parse().expect("round-trip");
+            let parsed = ModelFamily::from_str(&text).expect("round-trip");
             assert_eq!(parsed, family);
         }
     }
 
     #[test]
     fn unknown_family_is_rejected() {
-        assert!("mystery".parse::<ModelFamily>().is_err());
-        assert!("classical:transformer".parse::<ModelFamily>().is_err());
+        assert!(ModelFamily::from_str("mystery").is_err());
+        assert!(ModelFamily::from_str("classical:transformer").is_err());
     }
 }

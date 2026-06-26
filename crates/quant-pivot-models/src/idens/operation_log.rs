@@ -12,12 +12,18 @@ use sea_orm::{
     sea_query::{ColumnDef, Expr, Index, IndexOrder, Table, TableCreateStatement},
 };
 
-use crate::schema::{
-    column,
-    dependency::TableDependency,
-    index::{IndexBuildMode, IndexSpec},
-    seed::SeedSpec,
-    timestamp_with_write_default,
+use crate::{
+    enums::{
+        operation_log::{OperationCategory, OperationOutcome},
+        rbac::ResourceType,
+    },
+    schema::{
+        column,
+        dependency::TableDependency,
+        index::{IndexBuildMode, IndexSpec},
+        seed::SeedSpec,
+        timestamp_with_write_default,
+    },
 };
 
 /// Append-only operation log row.
@@ -56,9 +62,11 @@ pub fn table() -> TableCreateStatement {
         .col(column::uuid_null(OperationLog::ActorUserId))
         .col(ColumnDef::new(OperationLog::ActorUsername).text().null())
         .col(ColumnDef::new(OperationLog::ActingRole).text().null())
-        .col(ColumnDef::new(OperationLog::Category).text().not_null())
+        .col(column::pg_enum::<OperationCategory>(OperationLog::Category))
         .col(ColumnDef::new(OperationLog::Action).text().not_null())
-        .col(ColumnDef::new(OperationLog::ResourceType).text().null())
+        .col(column::pg_enum_null::<ResourceType>(
+            OperationLog::ResourceType,
+        ))
         .col(ColumnDef::new(OperationLog::ResourceId).text().null())
         .col(ColumnDef::new(OperationLog::HttpMethod).text().not_null())
         .col(ColumnDef::new(OperationLog::HttpPath).text().not_null())
@@ -67,7 +75,7 @@ pub fn table() -> TableCreateStatement {
                 .small_integer()
                 .not_null(),
         )
-        .col(ColumnDef::new(OperationLog::Outcome).text().not_null())
+        .col(column::pg_enum::<OperationOutcome>(OperationLog::Outcome))
         .col(ColumnDef::new(OperationLog::ClientIp).text().null())
         .col(ColumnDef::new(OperationLog::UserAgent).text().null())
         .col(ColumnDef::new(OperationLog::LatencyMs).integer().not_null())

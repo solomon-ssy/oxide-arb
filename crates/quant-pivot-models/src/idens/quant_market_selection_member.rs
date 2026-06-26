@@ -1,10 +1,11 @@
 use quant_pivot_macros::quant_schema;
 use sea_orm::{
     Iden,
-    sea_query::{ColumnDef, ForeignKey, ForeignKeyAction, Index, Table, TableCreateStatement},
+    sea_query::{ForeignKey, ForeignKeyAction, Index, Table, TableCreateStatement},
 };
 
 use crate::{
+    enums::{common::MarketCategory, market::MarketStatus},
     idens::{event::Event, market::Market, quant_market_selection::QuantMarketSelection},
     schema::{
         column,
@@ -29,7 +30,6 @@ pub enum QuantMarketSelectionMember {
     // the canonical schema name so the column matches the entity / DTO field.
     #[sea_orm(iden = "volume_24h_usd")]
     Volume24hUsd,
-    Reason,
 }
 
 pub fn table() -> TableCreateStatement {
@@ -41,27 +41,18 @@ pub fn table() -> TableCreateStatement {
         ))
         .col(column::market_id(QuantMarketSelectionMember::MarketId))
         .col(column::text_id(QuantMarketSelectionMember::EventId))
-        .col(
-            ColumnDef::new(QuantMarketSelectionMember::Category)
-                .text()
-                .not_null(),
-        )
-        .col(
-            ColumnDef::new(QuantMarketSelectionMember::Status)
-                .text()
-                .not_null(),
-        )
+        .col(column::pg_enum::<MarketCategory>(
+            QuantMarketSelectionMember::Category,
+        ))
+        .col(column::pg_enum::<MarketStatus>(
+            QuantMarketSelectionMember::Status,
+        ))
         .col(column::token_id(QuantMarketSelectionMember::PrimaryTokenId))
         .col(column::token_id_null(
             QuantMarketSelectionMember::SecondaryTokenId,
         ))
         .col(column::usd_null(QuantMarketSelectionMember::LiquidityUsd))
         .col(column::usd_null(QuantMarketSelectionMember::Volume24hUsd))
-        .col(
-            ColumnDef::new(QuantMarketSelectionMember::Reason)
-                .text()
-                .not_null(),
-        )
         .primary_key(
             Index::create()
                 .col(QuantMarketSelectionMember::MarketSelectionId)

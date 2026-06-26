@@ -36,7 +36,8 @@ use quant_pivot_models::{
         common::{CategorySet, MarketCategory, TickSize},
         factor::FactorFamily,
         market::MarketStatus,
-        quant::{ModelPublicationStatus, ModelRunErrorCode, ModelRunKind, ModelRunStatus},
+        model::ModelFamily,
+        quant::{ModelRunErrorCode, ModelRunKind, ModelRunStatus, PublicationStatus},
     },
     runtime_config::{
         DataQualityConfig, DecimalString, FactorWeights, FactorsConfig, FeaturesConfig,
@@ -65,7 +66,7 @@ use quant_pivot_research::{
     hashing::ResearchHasher,
     model::{
         DefaultModelRuntimeFactoryBuilder, FactorWeight, ModelArtifact, ModelArtifactHeader,
-        ModelFamily, ReturnModelSpec, ScoreMultiplierSpec, SubstitutionConfidenceRules,
+        ReturnModelSpec, ScoreMultiplierSpec, SubstitutionConfidenceRules,
         WeightedFactorModelArtifact,
     },
     selection::{ModelFeatureRequirements, SelectedMarket},
@@ -369,12 +370,12 @@ async fn publish_weighted_model(
         .create_model_spec(NewModelSpec {
             model_spec_id: model_spec_id.clone(),
             name: "weighted-e2e".to_owned(),
-            model_family: "weighted_factor".to_owned(),
+            model_family: ModelFamily::WeightedFactor,
             prediction_horizon_secs: 86_400,
             feature_schema_version: SchemaVersion::FIRST,
             label_schema_version: SchemaVersion::FIRST,
             spec_json: serde_json::json!({}),
-            status: ModelPublicationStatus::Published,
+            status: PublicationStatus::Published,
         })
         .await
         .expect("create spec");
@@ -387,7 +388,7 @@ async fn publish_weighted_model(
             training_dataset_id: None,
             metrics_json: serde_json::json!({}),
             quality_gate_report: serde_json::json!({}),
-            publication_status: ModelPublicationStatus::Published,
+            publication_status: PublicationStatus::Published,
             published_at: Some(Utc::now()),
             retired_at: None,
         })
@@ -444,7 +445,7 @@ async fn register_candidate_sibling(
             training_dataset_id: published.training_dataset_id.clone(),
             metrics_json: serde_json::json!({}),
             quality_gate_report: serde_json::json!({}),
-            publication_status: ModelPublicationStatus::Candidate,
+            publication_status: PublicationStatus::Candidate,
             published_at: None,
             retired_at: None,
         })

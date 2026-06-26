@@ -1,21 +1,9 @@
 //! Canonical column-definition builders for schema iden modules.
-//!
-//! These builders are the single source of truth for how each semantic column
-//! family is declared in Postgres DDL. Iden modules must use them instead of
-//! hand-writing `.text()` / `.decimal()` columns so that identifier and money
-//! column types stay consistent across the whole catalog.
-//!
-//! Three identifier families are modelled (see `docs/persistence/schema-catalog.md`):
-//!
-//! - Internal, system-generated ids → native `uuid` ([`uuid_pk`], [`uuid_fk`]).
-//! - External string ids that are not UUIDs → `text` / `varchar`
-//!   ([`market_id_pk`], [`market_id`], [`token_id`]).
-//! - Surrogate counters → plain `bigint`/`integer` (declared inline in idens).
-//!
-//! Money columns bind as native `NUMERIC(precision, scale)` with the precision
-//! taken from each newtype's `PRECISION` constant.
 
-use sea_orm::sea_query::{ColumnDef, IntoIden};
+use sea_orm::{
+    entity::ActiveEnum,
+    sea_query::{Alias, ColumnDef, ColumnType, Expr, IntoIden, SimpleExpr},
+};
 
 use crate::types::{Bps, Price, Probability, Shares, Usd};
 
@@ -186,11 +174,41 @@ pub fn bps(column: impl IntoIden) -> ColumnDef {
     numeric(column, Bps::PRECISION)
 }
 
-/// `TEXT NOT NULL` for a string-backed enum column (`active_string_enum!`).
-pub fn enum_text(column: impl IntoIden) -> ColumnDef {
+/// `qp_* NOT NULL` for a Postgres native enum column ([`pg_enum!`]).
+pub fn pg_enum<E: ActiveEnum>(column: impl IntoIden) -> ColumnDef {
     let mut col = ColumnDef::new(column);
-    col.text().not_null();
+    col.custom(E::name()).not_null();
     col
+}
+
+/// Nullable Postgres native enum column.
+pub fn pg_enum_null<E: ActiveEnum>(column: impl IntoIden) -> ColumnDef {
+    let mut col = ColumnDef::new(column);
+    col.custom(E::name()).null();
+    col
+}
+
+/// Postgres native enum with a typed default.
+pub fn pg_enum_default<E: ActiveEnum>(column: impl IntoIden, default: &E) -> ColumnDef {
+    let mut col = ColumnDef::new(column);
+    col.custom(E::name()).not_null().default(default.to_value());
+    col
+}
+
+/// Postgres native enum array (`qp_*[]`) with empty-array default.
+pub fn pg_enum_array<E: ActiveEnum>(column: impl IntoIden) -> ColumnDef {
+    let type_name = E::name().to_string();
+    let mut col = ColumnDef::new(column);
+    col.array(ColumnType::Custom(E::name().into_iden()))
+        .not_null()
+        .default(Expr::cust(format!("'{{}}'::{type_name}[]")));
+    col
+}
+
+/// Cast a Rust pg enum for [`SeaORM`] bulk `UPDATE` expressions.
+pub fn pg_enum_value<E: ActiveEnum>(value: &E) -> SimpleExpr {
+    let type_name = E::name().to_string();
+    Expr::value(value.to_value()).cast_as(Alias::new(type_name))
 }
 
 /// Nullable `NUMERIC(10, 4)` for an optional basis-point value.

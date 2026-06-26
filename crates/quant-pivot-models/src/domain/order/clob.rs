@@ -3,7 +3,7 @@
 use crate::{
     enums::{
         common::{OrderType, Side},
-        order::OrderStatus,
+        execution::VenueOrderStatus,
     },
     types::{MarketId, OrderId, Price, Shares, TokenId, Usd},
 };
@@ -52,7 +52,7 @@ pub struct OrderRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrderResponse {
     pub order_id: OrderId,
-    pub status: OrderStatus,
+    pub status: VenueOrderStatus,
     pub tx_hash: Option<String>,
     pub filled_shares: Shares,
     pub avg_fill_price: Option<Price>,
