@@ -16,6 +16,7 @@
 //! MarketError───────┤
 //! SchedulerError────┤
 //! ReportError───────┤
+//! ExecutionError────┤
 //! InfraError────────┤
 //! ControlError──────┤
 //! ResearchError─────┤
@@ -30,6 +31,7 @@ pub mod auth;
 pub mod config;
 pub mod config_validation;
 pub mod control;
+pub mod execution;
 pub mod fee;
 pub mod governance;
 pub mod hashing;
@@ -128,6 +130,10 @@ pub enum QuantError {
     #[error(transparent)]
     Report(#[from] report::ReportError),
 
+    // ── Execution plane ─────────────────────────────────────────────────
+    #[error(transparent)]
+    Execution(#[from] execution::ExecutionError),
+
     // ── Process bootstrap / observability ─────────────────────────────────
     #[error(transparent)]
     Infra(#[from] infra::InfraError),
@@ -173,6 +179,7 @@ impl QuantError {
             Self::Hashing(_) => "hashing",
             Self::Scheduler(_) => "scheduler",
             Self::Report(_) => "report",
+            Self::Execution(_) => "execution",
             Self::Infra(_) => "infra",
             Self::Control(_) => "control",
             Self::Internal(_) => "internal",
@@ -303,6 +310,14 @@ mod tests {
         };
         let oxide_err: QuantError = err.into();
         assert!(matches!(oxide_err, QuantError::Report(_)));
+    }
+
+    #[test]
+    fn execution_error_propagates_with_stable_code() {
+        let err = execution::ExecutionError::ReportOnlyMode;
+        let oxide_err: QuantError = err.into();
+        assert!(matches!(oxide_err, QuantError::Execution(_)));
+        assert_eq!(oxide_err.code(), "execution");
     }
 
     #[test]

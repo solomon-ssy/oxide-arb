@@ -160,6 +160,14 @@ pub struct OrderIntentId(Arc<Uuid>);
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ExecutionOrderId(Arc<Uuid>);
 
+/// Intent-level capital allocation ledger identifier.
+#[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CapitalAllocationId(Arc<Uuid>);
+
+/// Execution-order reconciliation record identifier.
+#[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ReconciliationId(Arc<Uuid>);
+
 /// Runtime-config version identifier used by governed config activation.
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RuntimeConfigVersionId(Arc<Uuid>);

@@ -33,6 +33,6 @@ impl RepoReservedCapitalReader {
 #[async_trait]
 impl ReservedCapitalReader for RepoReservedCapitalReader {
     async fn sum_locked(&self) -> QuantResult<Usd> {
-        Ok(self.repo.sum_locked_usd().await?)
+        Ok(self.repo.sum_reserved_usd().await?)
     }
 }

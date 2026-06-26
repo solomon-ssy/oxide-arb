@@ -3,7 +3,7 @@
 //! Runtime configuration changes only through immutable, audited versions —
 //! there is no bare in-place mutation. The full activation pipeline:
 //!
-//! 1. `POST /runtime-config/versions` — typed-parse (`schema_version = 3`,
+//! 1. `POST /runtime-config/versions` — typed-parse (`schema_version = 5`,
 //!    unknown fields rejected) + semantic validation, canonical JSON, content
 //!    hash, immutable row.
 //! 2. `POST .../activate` (or `.../rollback`) — re-parse + validate, audited

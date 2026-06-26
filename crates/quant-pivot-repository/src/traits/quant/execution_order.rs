@@ -1,5 +1,7 @@
 use quant_pivot_error::storage::StorageError;
-use quant_pivot_models::domain::{ExecutionOrderInfo, NewExecutionOrder};
+use quant_pivot_models::domain::{
+    ExecutionOrderInfo, ExecutionOrderPatch, ExecutionOrderSubmissionResult, NewExecutionOrder,
+};
 use quant_pivot_models::types::{ExecutionOrderId, OrderIntentId};
 
 /// Execution order persistence port.
@@ -16,4 +18,20 @@ pub trait ExecutionOrderRepository: Send + Sync {
         &self,
         execution_order_id: &ExecutionOrderId,
     ) -> Result<Option<ExecutionOrderInfo>, StorageError>;
+
+    async fn transition(
+        &self,
+        execution_order_id: &ExecutionOrderId,
+        patch: ExecutionOrderPatch,
+    ) -> Result<ExecutionOrderInfo, StorageError>;
+
+    /// Persist venue submission outcome onto the execution-order row.
+    ///
+    /// Phase 05.4 implements state/capital/position side effects; the signature is fixed here
+    /// so dispatch and repository boundaries stay stable.
+    async fn record_submission_result(
+        &self,
+        execution_order_id: &ExecutionOrderId,
+        result: ExecutionOrderSubmissionResult,
+    ) -> Result<ExecutionOrderInfo, StorageError>;
 }

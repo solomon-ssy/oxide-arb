@@ -164,9 +164,19 @@ pub fn price(column: impl IntoIden) -> ColumnDef {
     numeric(column, Price::PRECISION)
 }
 
+/// Nullable `NUMERIC(20, 18)` for an optional price in `[0, 1]`.
+pub fn price_null(column: impl IntoIden) -> ColumnDef {
+    numeric_null(column, Price::PRECISION)
+}
+
 /// `NUMERIC(38, 18) NOT NULL` for a share quantity.
 pub fn shares(column: impl IntoIden) -> ColumnDef {
     numeric(column, Shares::PRECISION)
+}
+
+/// Nullable `NUMERIC(38, 18)` for an optional share quantity.
+pub fn shares_null(column: impl IntoIden) -> ColumnDef {
+    numeric_null(column, Shares::PRECISION)
 }
 
 /// `NUMERIC(10, 4) NOT NULL` for a basis-point value.

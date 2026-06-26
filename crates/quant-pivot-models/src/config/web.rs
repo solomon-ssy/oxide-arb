@@ -2,13 +2,13 @@
 //!
 //! Mounted at [`DeployConfig::web`](crate::config::DeployConfig). The JWT
 //! secret must be provided via environment (`QUANT_PIVOT__WEB__JWT__SECRET`) in
-//! production; an empty or placeholder secret is fatal in `Live` mode (see
+//! production; an empty or placeholder secret is fatal in order-submitting modes (see
 //! `config::validation`).
 
 use serde::Deserialize;
 
-/// Known-insecure placeholder secret shipped in the example TOML. Live mode
-/// rejects this value so a real secret must be supplied via env.
+/// Known-insecure placeholder secret shipped in the example TOML. Order-submitting modes
+/// reject this value so a real secret must be supplied via env.
 pub const JWT_SECRET_PLACEHOLDER: &str = "change-me-in-production";
 
 /// HTTP/WebSocket server configuration.

@@ -1,9 +1,12 @@
 //! Quant-pivot Postgres repository implementations.
 
 mod account_snapshot;
+mod attribution;
 mod backtest_report;
+mod capital_allocation;
 mod comparison_report;
 mod dataset;
+mod execution_order;
 mod factor;
 mod feature;
 mod governance_audit;
@@ -12,15 +15,20 @@ mod model_registry;
 mod model_run;
 mod order_intent;
 mod portfolio_plan;
+mod position;
 mod recommendation;
 mod recommendation_report;
+mod reconciliation;
 mod reserved_capital;
 mod shadow_comparison;
 
 pub use account_snapshot::PgAccountSnapshotRepository;
+pub use attribution::PgAttributionRepository;
 pub use backtest_report::PgBacktestReportRepository;
+pub use capital_allocation::PgCapitalAllocationRepository;
 pub use comparison_report::PgModelComparisonReportRepository;
 pub use dataset::PgTrainingDatasetRepository;
+pub use execution_order::PgExecutionOrderRepository;
 pub use factor::PgFactorRepository;
 pub use feature::PgFeatureRepository;
 pub use governance_audit::PgModelGovernanceAuditRepository;
@@ -29,7 +37,9 @@ pub use model_registry::PgModelRegistryRepository;
 pub use model_run::PgModelRunRepository;
 pub use order_intent::PgOrderIntentRepository;
 pub use portfolio_plan::PgPortfolioPlanRepository;
+pub use position::PgPositionRepository;
 pub use recommendation::PgRecommendationRepository;
 pub use recommendation_report::PgRecommendationReportRepository;
+pub use reconciliation::PgReconciliationRepository;
 pub use reserved_capital::PgReservedCapitalRepository;
 pub use shadow_comparison::PgShadowComparisonRepository;

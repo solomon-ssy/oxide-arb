@@ -1,7 +1,7 @@
 //! Phase 04.0 data-contract acceptance tests.
 //!
 //! Covers the strong-typed report/account payloads (serde round-trip ↔ JSON
-//! columns), the report header account columns, runtime-config v3 (three-section
+//! columns), the report header account columns, runtime-config v5 (three-section
 //! portfolio + schedule cadence), config validation, and exposure aggregation.
 
 use std::collections::BTreeMap;

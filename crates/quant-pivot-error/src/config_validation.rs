@@ -74,8 +74,8 @@ impl ConfigValidationError {
 pub enum ConfigWarning {
     #[error("kelly_fraction={0} is aggressive (>0.5); consider reducing")]
     LargeKellyFraction(Decimal),
-    #[error("Paper mode without private_key; user-trade stream disabled")]
-    NoCredentialsPaper,
-    #[error("web.jwt.secret is empty or a known placeholder; set a strong secret before Live")]
+    #[error(
+        "web.jwt.secret is empty or a known placeholder; set a strong secret before order-submitting modes"
+    )]
     WeakJwtSecret,
 }

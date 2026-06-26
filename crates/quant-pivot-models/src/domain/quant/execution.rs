@@ -1,14 +1,16 @@
 //! Execution-intent persistence DTOs.
 
 use crate::{
+    domain::patch::{NullablePatch, Patch},
     enums::{
         common::Side,
         execution::{ExecutionOrderPhase, OrderIntentKind, OrderTypeKind, VenueOrderStatus},
         quant::{ApprovalStatus, ExecutionOrderState, OrderIntentStatus, QuantRuntimeMode},
     },
     types::{
-        ContentHash, EntryOrderSpec, ExecutionOrderId, ExitPolicySpec, MarketId, OrderId,
-        OrderIntentId, Price, RecommendationId, Shares, TokenId, Usd,
+        ContentHash, EntryOrderSpec, ExecutionOrderId, ExitPolicySpec, MarketId, ModelVersionId,
+        OrderId, OrderIntentId, Price, RecommendationId, RuntimeConfigVersionId, Shares, TokenId,
+        Usd,
     },
 };
 use chrono::{DateTime, Utc};
@@ -23,12 +25,18 @@ pub struct OrderIntentInfo {
     pub order_intent_id: OrderIntentId,
     pub recommendation_id: RecommendationId,
     pub runtime_mode: QuantRuntimeMode,
+    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub model_version_id: ModelVersionId,
     pub intent_kind: OrderIntentKind,
     pub status: OrderIntentStatus,
     pub approval_status: ApprovalStatus,
     pub approved_by: Option<Uuid>,
     pub approval_reason: Option<String>,
     pub approved_at: Option<DateTime<Utc>>,
+    pub policy_id: Option<String>,
+    pub policy_hash: Option<ContentHash>,
+    pub status_reason: Option<String>,
+    pub admission_trace_ref: Option<String>,
     pub entry_order_json: EntryOrderSpec,
     pub exit_policy_json: ExitPolicySpec,
     pub risk_envelope_hash: ContentHash,
@@ -38,9 +46,11 @@ pub struct OrderIntentInfo {
 }
 
 info_from_model!(OrderIntentInfo, crate::entities::quant_order_intent::Model, {
-    order_intent_id, recommendation_id, runtime_mode, intent_kind, status,
-    approval_status, approved_by, approval_reason, approved_at, entry_order_json,
-    exit_policy_json, risk_envelope_hash, expires_at, created_at, updated_at,
+    order_intent_id, recommendation_id, runtime_mode, runtime_config_version_id,
+    model_version_id, intent_kind, status, approval_status, approved_by,
+    approval_reason, approved_at, policy_id, policy_hash, status_reason,
+    admission_trace_ref, entry_order_json, exit_policy_json, risk_envelope_hash,
+    expires_at, created_at, updated_at,
 });
 
 /// Insert payload for `quant_order_intent`.
@@ -50,12 +60,18 @@ pub struct NewOrderIntent {
     pub order_intent_id: OrderIntentId,
     pub recommendation_id: RecommendationId,
     pub runtime_mode: QuantRuntimeMode,
+    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub model_version_id: ModelVersionId,
     pub intent_kind: OrderIntentKind,
     pub status: OrderIntentStatus,
     pub approval_status: ApprovalStatus,
     pub approved_by: Option<Uuid>,
     pub approval_reason: Option<String>,
     pub approved_at: Option<DateTime<Utc>>,
+    pub policy_id: Option<String>,
+    pub policy_hash: Option<ContentHash>,
+    pub status_reason: Option<String>,
+    pub admission_trace_ref: Option<String>,
     pub entry_order_json: EntryOrderSpec,
     pub exit_policy_json: ExitPolicySpec,
     pub risk_envelope_hash: ContentHash,
@@ -126,8 +142,27 @@ pub struct NewExecutionOrder {
     pub error_message: Option<String>,
 }
 
-/// Runtime execution plan emitted from an approved intent.
+/// Controlled partial update for an execution-order lifecycle row.
+#[derive(Debug, Clone, Default)]
+pub struct ExecutionOrderPatch {
+    pub state: Patch<ExecutionOrderState>,
+    pub venue_order_id: NullablePatch<OrderId>,
+    pub venue_status: NullablePatch<VenueOrderStatus>,
+    pub submitted_at: NullablePatch<DateTime<Utc>>,
+    pub filled_at: NullablePatch<DateTime<Utc>>,
+    pub cancelled_at: NullablePatch<DateTime<Utc>>,
+    pub gtd_expiration_at: NullablePatch<DateTime<Utc>>,
+    pub error_message: NullablePatch<String>,
+}
+
+/// Venue submission outcome applied to an execution-order row (Phase 05.4 write path).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExecutionOrderModel {
-    pub order: NewExecutionOrder,
+pub struct ExecutionOrderSubmissionResult {
+    pub state: ExecutionOrderState,
+    pub venue_order_id: Option<OrderId>,
+    pub venue_status: Option<VenueOrderStatus>,
+    pub submitted_at: DateTime<Utc>,
+    pub filled_at: Option<DateTime<Utc>>,
+    pub cancelled_at: Option<DateTime<Utc>>,
+    pub error_message: Option<String>,
 }

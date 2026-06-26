@@ -17,8 +17,9 @@
 
 use actix_web::{HttpResponse, ResponseError, http::StatusCode};
 use quant_pivot_error::{
-    QuantError, auth::AuthError, control::ControlError, governance::GovernanceError,
-    query::QueryError, rbac::RbacError, research::ResearchError, storage::StorageError,
+    QuantError, auth::AuthError, control::ControlError, execution::ExecutionError,
+    governance::GovernanceError, query::QueryError, rbac::RbacError, research::ResearchError,
+    storage::StorageError,
 };
 use thiserror::Error;
 
@@ -183,6 +184,26 @@ impl From<ControlError> for WebError {
     }
 }
 
+impl From<ExecutionError> for WebError {
+    fn from(error: ExecutionError) -> Self {
+        match error {
+            ExecutionError::CapitalRecoveryFailed { .. } => {
+                Self::ServiceUnavailable(error.to_string())
+            }
+            ExecutionError::ReportOnlyMode
+            | ExecutionError::ModePreflightDenied { .. }
+            | ExecutionError::KillSwitchBlocks { .. }
+            | ExecutionError::RecommendationExpired { .. }
+            | ExecutionError::NotSubmittable { .. }
+            | ExecutionError::IntentDenied { .. }
+            | ExecutionError::AdmissionDenied { .. }
+            | ExecutionError::ApprovalInvalidated { .. }
+            | ExecutionError::ReconciliationUnresolvable { .. }
+            | ExecutionError::ModeTransitionForbidden { .. } => Self::Conflict(error.to_string()),
+        }
+    }
+}
+
 impl From<QuantError> for WebError {
     fn from(error: QuantError) -> Self {
         match error {
@@ -200,6 +221,7 @@ impl From<QuantError> for WebError {
                 Self::ServiceUnavailable("scheduler temporarily unavailable".to_owned())
             }
             QuantError::Report(_) => Self::Internal(error.to_string()),
+            QuantError::Execution(execution) => execution.into(),
             QuantError::NotImplemented(detail) => Self::NotImplemented(detail),
             QuantError::Infra(ref infra) => match infra {
                 quant_pivot_error::infra::InfraError::MetricsRegistration { .. }
@@ -229,5 +251,28 @@ impl From<GovernanceError> for WebError {
             | GovernanceError::ShadowNotStable { .. }
             | GovernanceError::IllegalTransition { .. } => Self::Conflict(error.to_string()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::WebError;
+    use actix_web::http::StatusCode;
+    use quant_pivot_error::{QuantError, execution::ExecutionError};
+
+    #[test]
+    fn execution_conflict_maps_to_409() {
+        let web = WebError::from(QuantError::from(ExecutionError::AdmissionDenied {
+            reason: "spread too wide".to_owned(),
+        }));
+        assert_eq!(web.status(), StatusCode::CONFLICT);
+    }
+
+    #[test]
+    fn capital_recovery_maps_to_503() {
+        let web = WebError::from(QuantError::from(ExecutionError::CapitalRecoveryFailed {
+            reason: "allocation invariant broken".to_owned(),
+        }));
+        assert_eq!(web.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 }

@@ -47,16 +47,11 @@ pub enum TaskId {
     // ── Operation log writer (web audit pipeline) ─────────────────────
     OperationLogWriter,
 
-    // ── Detection ─────────────────────────────────────────────────────
-    Scanner,
-    Funnel,
-
     // ── Execution ─────────────────────────────────────────────────────
     #[strum(disabled)]
     ExecutionRunner {
         shard: u8,
     },
-    PostTradeRelay,
     ReconciliationWorker,
     ExecutionHeartbeat,
 
@@ -106,10 +101,7 @@ impl TaskId {
             Self::HealthChecker | Self::RiskMetricsRefresh | Self::DataQualityRefresh => {
                 TaskKind::HealthMonitor
             }
-            Self::Scanner | Self::Funnel => TaskKind::Detection,
-            Self::ExecutionRunner { .. } | Self::PostTradeRelay | Self::ReconciliationWorker => {
-                TaskKind::Execution
-            }
+            Self::ExecutionRunner { .. } | Self::ReconciliationWorker => TaskKind::Execution,
             Self::ExecutionHeartbeat => TaskKind::ExecutionHeartbeat,
             Self::RiskTick | Self::ExposureGc | Self::ReportGenerator | Self::ReportExpireSweep => {
                 TaskKind::ReportScheduler

@@ -35,12 +35,12 @@ const PRODUCES: &[SeedArtifact] = &[];
 
 pub const CASBIN_SEED: SeedSpec = SeedSpec {
     id: SEED_ID,
-    version: 6,
+    version: 7,
     target_table: casbin_rule_table_name,
     depends_on: DEPENDS_ON,
     produces: PRODUCES,
     conflict_policy: SeedConflictPolicy::GraphOrdered,
-    checksum: "rbac.casbin.bootstrap.v6",
+    checksum: "rbac.casbin.bootstrap.v7",
     loader: load_boxed,
 };
 
@@ -49,6 +49,9 @@ const READ_RESOURCES: &[ResourceType] = &[
     ResourceType::System,
     ResourceType::Market,
     ResourceType::QuantReport,
+    ResourceType::OrderIntent,
+    ResourceType::ExecutionOrder,
+    ResourceType::Position,
     ResourceType::RuntimeConfig,
     ResourceType::Materialization,
     ResourceType::Audit,
@@ -86,10 +89,16 @@ fn operator_policies() -> Vec<(ResourceType, Operation)> {
         (ResourceType::System, Operation::Halt),
         (ResourceType::System, Operation::Resume),
         (ResourceType::System, Operation::SwitchMode),
+        (ResourceType::System, Operation::Emergency),
         (ResourceType::Market, Operation::Update),
         // Operators run and revoke recommendation reports.
         (ResourceType::QuantReport, Operation::Enqueue),
         (ResourceType::QuantReport, Operation::Revoke),
+        (ResourceType::OrderIntent, Operation::Create),
+        (ResourceType::OrderIntent, Operation::Approve),
+        (ResourceType::OrderIntent, Operation::Reject),
+        (ResourceType::OrderIntent, Operation::Cancel),
+        (ResourceType::OrderIntent, Operation::Submit),
     ]);
     policies
 }
@@ -109,6 +118,8 @@ fn risk_owner_policies() -> Vec<(ResourceType, Operation)> {
         (ResourceType::Publication, Operation::Rollback),
         // Risk owners revoke published reports (money-risk authority).
         (ResourceType::QuantReport, Operation::Revoke),
+        (ResourceType::OrderIntent, Operation::Reject),
+        (ResourceType::OrderIntent, Operation::Cancel),
     ]);
     policies
 }
@@ -133,13 +144,17 @@ fn admin_policies() -> Vec<(ResourceType, Operation)> {
         (ResourceType::System, Operation::Halt),
         (ResourceType::System, Operation::Resume),
         (ResourceType::System, Operation::SwitchMode),
+        (ResourceType::System, Operation::Emergency),
     ]);
     policies
 }
 
 fn emergency_operator_policies() -> Vec<(ResourceType, Operation)> {
     let mut policies = read_only();
-    policies.extend([(ResourceType::System, Operation::Halt)]);
+    policies.extend([
+        (ResourceType::System, Operation::Halt),
+        (ResourceType::System, Operation::Emergency),
+    ]);
     policies
 }
 

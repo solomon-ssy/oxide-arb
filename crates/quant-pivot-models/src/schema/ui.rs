@@ -1,4 +1,4 @@
-//! Runtime-config v3 UI metadata used by the preferences schema projection.
+//! Runtime-config v5 UI metadata used by the preferences schema projection.
 
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
@@ -813,19 +813,19 @@ fn execution_policy_fields() -> Vec<FieldUiEntry> {
             "要求新鲜特征",
             170,
         ),
-        boolean(
-            "execution.kill_switch.enabled",
-            "Kill switch",
-            "执行熔断",
-            180,
-        ),
         entry(
-            "execution.kill_switch.reason",
-            "Kill switch reason",
-            "熔断原因",
+            "execution.kill_switch.emergency_exit.kind",
+            "Emergency exit",
+            "紧急退出策略",
             190,
-            Some(FieldWidget::PlainString),
+            Some(FieldWidget::EnumSelect),
             None,
+        ),
+        integer(
+            "execution.kill_switch.emergency_exit.max_slippage_bps",
+            "Emergency exit max slippage",
+            "紧急退出最大滑点",
+            195,
         ),
         money(
             "execution.capital.max_reserved_usd",

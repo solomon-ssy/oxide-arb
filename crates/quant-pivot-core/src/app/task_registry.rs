@@ -139,8 +139,10 @@ impl ShutdownBudget {
     #[must_use]
     pub const fn for_quant_mode(mode: QuantRuntimeMode) -> Self {
         match mode {
-            QuantRuntimeMode::ReportOnly => Self::dry_run(),
-            QuantRuntimeMode::SemiAuto | QuantRuntimeMode::AutoExecution => Self::live(),
+            QuantRuntimeMode::ReportOnly => Self::report_only(),
+            QuantRuntimeMode::SemiAuto | QuantRuntimeMode::AutoExecution => {
+                Self::order_submitting()
+            }
         }
     }
 
@@ -155,23 +157,18 @@ impl ShutdownBudget {
     }
 
     #[must_use]
-    pub const fn dry_run() -> Self {
+    pub const fn report_only() -> Self {
         Self::from_secs([3, 4, 3, 2, 3, 8, 3, 4, 3, 1])
     }
 
     #[must_use]
-    pub const fn paper() -> Self {
-        Self::from_secs([3, 6, 3, 2, 3, 15, 5, 5, 5, 3])
-    }
-
-    #[must_use]
-    pub const fn live() -> Self {
+    pub const fn order_submitting() -> Self {
         Self::from_secs([5, 10, 5, 2, 5, 20, 5, 5, 5, 3])
     }
 
     #[must_use]
-    pub const fn default_dry_run() -> Self {
-        Self::dry_run()
+    pub const fn default_report_only() -> Self {
+        Self::report_only()
     }
 
     #[must_use]
@@ -188,7 +185,7 @@ impl ShutdownBudget {
 
 impl Default for ShutdownBudget {
     fn default() -> Self {
-        Self::dry_run()
+        Self::report_only()
     }
 }
 

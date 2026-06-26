@@ -32,7 +32,7 @@ pub struct RuntimeConfigSubscribers {
     pub alerts: Arc<AlertDispatcher>,
     /// Candidate / shadow factor-weight overlay snapshot (3.7 hot-update).
     pub weight_overlay: Arc<WeightOverlayApplicator>,
-    /// Deploy-time WS subscription look-ahead (hours); not yet runtime-config v3.
+    /// Deploy-time WS subscription look-ahead (hours); not yet runtime-config v5.
     pub subscription_window_hours: u64,
 }
 

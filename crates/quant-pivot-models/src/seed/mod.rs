@@ -3,6 +3,7 @@
 pub mod context;
 pub mod policy;
 pub mod rbac;
+pub mod system_kill_switch;
 pub mod system_runtime_state;
 
 pub use context::SeedContext;

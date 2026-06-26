@@ -442,6 +442,21 @@ mod tests {
             RuntimeConfigPatchError::MaskedSensitive { .. }
         ));
     }
+
+    #[test]
+    fn v5_kill_switch_policy_paths_replace_boolean_switch() {
+        let paths = schema_leaf_paths();
+        assert!(!paths.contains("execution.kill_switch.enabled"));
+        assert!(!paths.contains("execution.kill_switch.reason"));
+        assert!(paths.contains("execution.kill_switch.emergency_exit.kind"));
+        assert!(paths.contains("execution.kill_switch.emergency_exit.max_slippage_bps"));
+
+        let current = RuntimeConfig::default();
+        let mut patch = BTreeMap::new();
+        patch.insert("execution.kill_switch.enabled".into(), json!(true));
+        let error = apply_runtime_config_patch(&current, &patch).expect_err("old path rejected");
+        assert!(matches!(error, RuntimeConfigPatchError::UnknownPath(_)));
+    }
 }
 
 #[cfg(test)]

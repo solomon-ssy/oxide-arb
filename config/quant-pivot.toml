@@ -9,7 +9,7 @@
 #
 # Operator tunables (detection, risk, execution operations, settlement
 # operations, market-data staleness, notification channels) are NOT here.
-# They live in the versioned runtime configuration (schema_version = 1),
+# They live in the versioned runtime configuration (schema_version = 5),
 # stored in Postgres and managed exclusively through the governed API:
 #
 #   GET  /api/runtime-config              — active config (secrets masked)
@@ -46,7 +46,7 @@ clob_ws_url = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 # Default: 137.
 chain_id = 137
 
-# CTF oracle / on-chain reads + Live redeem transactions.
+# CTF oracle / on-chain reads + governed redeem transactions.
 [polymarket.onchain]
 # Purpose: Polygon JSON-RPC endpoint. Impact: CTF resolution oracle and
 # on-chain redemption. Caution: public RPCs rate-limit — use a dedicated
@@ -170,7 +170,7 @@ artifact_root = "./var/artifacts"
 
 [keys]
 # Purpose: credential source. "env" = inline private_key; "keystore" = encrypted
-# file at keystore_path (reserved). Impact: Live/Paper trading identity.
+# file at keystore_path (reserved). Impact: order-submitting identity.
 # Default: "env".
 source = "env"
 
@@ -330,7 +330,7 @@ static_ui_dir = "static/ui"
 [web.jwt]
 # Purpose: HMAC signing secret. SECURITY: never commit a real secret; provide
 # it via env in production: QUANT_PIVOT__WEB__JWT__SECRET=<strong-random-secret>.
-# Caution: an empty/placeholder secret is fatal in Live mode and a warning
+# Caution: an empty/placeholder secret is fatal in order-submitting modes and a warning
 # otherwise. Default: "".
 secret = ""
 # Purpose: token issuer claim. Default: "quant-pivot".

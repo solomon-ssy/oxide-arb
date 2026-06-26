@@ -130,7 +130,11 @@ mod tests {
             "quant_recommendation",
             "quant_order_intent",
             "quant_execution_order",
+            "quant_capital_allocation",
+            "quant_position",
+            "quant_reconciliation",
             "quant_recommendation_attribution",
+            "system_kill_switch",
         ] {
             assert!(
                 tables.contains(required),
@@ -166,6 +170,51 @@ mod tests {
         assert!(
             tables.contains("quant_account_snapshot"),
             "Phase 04.0 table `quant_account_snapshot` must be registered in the schema catalog"
+        );
+    }
+
+    #[test]
+    fn phase05_execution_foundation_tables_are_cataloged() {
+        let tables = catalog::tables()
+            .into_iter()
+            .map(|spec| ((spec.table_name)(), spec))
+            .collect::<std::collections::BTreeMap<_, _>>();
+
+        for required in [
+            "quant_capital_allocation",
+            "quant_position",
+            "quant_reconciliation",
+            "system_kill_switch",
+        ] {
+            assert!(
+                tables.contains_key(required),
+                "Phase 05.0 table `{required}` must be registered in the schema catalog"
+            );
+        }
+
+        let reconciliation = tables
+            .get("quant_reconciliation")
+            .expect("quant_reconciliation registered");
+        assert_eq!(
+            reconciliation.lifecycle,
+            crate::schema::table::TableLifecycle::Ledger
+        );
+        assert!(
+            (reconciliation.triggers)()
+                .iter()
+                .all(|trigger| trigger.kind != crate::schema::trigger::TriggerKind::AppendOnly),
+            "quant_reconciliation is a mutable ledger summary and must not be WORM"
+        );
+
+        let kill_switch = tables
+            .get("system_kill_switch")
+            .expect("system_kill_switch registered");
+        let seeds = (kill_switch.seed_units)();
+        assert!(
+            seeds
+                .iter()
+                .any(|seed| seed.id == crate::seed::system_kill_switch::SYSTEM_KILL_SWITCH_SEED.id),
+            "system_kill_switch must register the Closed bootstrap seed"
         );
     }
 }

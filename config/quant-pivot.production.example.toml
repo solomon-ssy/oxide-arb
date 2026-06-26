@@ -44,7 +44,7 @@ clob_ws_url = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 # Default: 137.
 chain_id = 137
 
-# CTF oracle / on-chain reads + Live redeem transactions.
+# CTF oracle / on-chain reads + governed redeem transactions.
 [polymarket.onchain]
 # Purpose: Polygon JSON-RPC endpoint. Impact: CTF resolution oracle and
 # on-chain redemption. Caution: public RPCs rate-limit — use a dedicated
@@ -127,11 +127,12 @@ report_expire_sweep_secs = 300
 # ── Keys / Credentials ───────────────────────────────────────────────────────
 #
 # Prefer quant-pivot.local.toml or env for private_key (runbook §3.1.4 / §3.2).
-# Paper / Live: private_key required. L2 credentials are SDK-derived at connect.
+# All modes require private_key + funder for real account reads; signing/submission
+# applies only in semi_auto / auto_execution. L2 credentials are SDK-derived at connect.
 
 [keys]
 # Purpose: credential source. "env" = inline private_key; "keystore" = encrypted file
-# at keystore_path (reserved). Impact: Live/Paper trading identity. Default: "env".
+# at keystore_path (reserved). Impact: order-submitting identity. Default: "env".
 source = "env"
 
 # private_key = "0xREPLACE_WITH_BOT_PRIVATE_KEY"
@@ -290,7 +291,7 @@ static_ui_dir = "static/ui"
 [web.jwt]
 # Purpose: HMAC signing secret. SECURITY: never commit a real secret; provide
 # it via env in production: QUANT_PIVOT__WEB__JWT__SECRET=<strong-random-secret>.
-# Caution: an empty/placeholder secret is fatal in Live mode. Default: "".
+# Caution: an empty/placeholder secret is fatal in order-submitting modes. Default: "".
 secret = ""
 # Purpose: token issuer claim. Caution: must match across restarts or all
 # sessions invalidate. Default: "quant-pivot".

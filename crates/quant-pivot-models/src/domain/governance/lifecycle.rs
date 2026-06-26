@@ -1,4 +1,4 @@
-//! Operator-facing runtime lifecycle — authoritative for header UI and Live gate.
+//! Operator-facing runtime lifecycle — authoritative for header UI and order-submission gates.
 
 use serde::{Deserialize, Serialize};
 
@@ -57,15 +57,15 @@ pub struct WsShardConnectivity {
 }
 
 impl OperationalPhase {
-    /// Whether live order submission is permitted (strict Live preflight gate).
+    /// Whether order submission is permitted by the current lifecycle phase.
     #[must_use]
-    pub const fn allows_live_trading(&self) -> bool {
+    pub const fn allows_order_submission(&self) -> bool {
         matches!(self, Self::Operational)
     }
 
-    /// Whether endgame detection may emit opportunities (catalog + market data).
+    /// Whether report generation may run (catalog + market data).
     #[must_use]
-    pub const fn allows_detection(&self) -> bool {
+    pub const fn allows_report_generation(&self) -> bool {
         matches!(self, Self::Operational)
     }
 }
@@ -94,12 +94,12 @@ mod tests {
     };
 
     #[test]
-    fn operational_phase_allows_live_only_when_operational() {
-        assert!(!OperationalPhase::CatalogWarming.allows_live_trading());
-        assert!(!OperationalPhase::MarketDataConnecting.allows_live_trading());
-        assert!(OperationalPhase::Operational.allows_live_trading());
-        assert!(!OperationalPhase::Degraded { reasons: vec![] }.allows_live_trading());
-        assert!(!OperationalPhase::Halted.allows_live_trading());
+    fn operational_phase_allows_submission_only_when_operational() {
+        assert!(!OperationalPhase::CatalogWarming.allows_order_submission());
+        assert!(!OperationalPhase::MarketDataConnecting.allows_order_submission());
+        assert!(OperationalPhase::Operational.allows_order_submission());
+        assert!(!OperationalPhase::Degraded { reasons: vec![] }.allows_order_submission());
+        assert!(!OperationalPhase::Halted.allows_order_submission());
     }
 
     #[test]

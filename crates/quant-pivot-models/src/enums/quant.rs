@@ -147,13 +147,16 @@ crate::pg_enum! {
         PendingApproval => "pending_approval",
         Approved => "approved",
         ApprovedByPolicy => "approved_by_policy",
-        Rejected => "rejected",
-        Expired => "expired",
+        AdmissionPending => "admission_pending",
+        AdmissionRejected => "admission_rejected",
         Submitted => "submitted",
         PartiallyFilled => "partially_filled",
         Filled => "filled",
+        Rejected => "rejected",
         Cancelled => "cancelled",
         Failed => "failed",
+        Expired => "expired",
+        Invalidated => "invalidated",
     }
 }
 
@@ -343,12 +346,15 @@ crate::pg_enum! {
     @derive(Default)
     pub enum ExecutionOrderState {
         #[default]
-        Draft => "draft",
+        Planned => "planned",
+        Accepted => "accepted",
         Submitted => "submitted",
         PartiallyFilled => "partially_filled",
         Filled => "filled",
+        CancelRequested => "cancel_requested",
         Cancelled => "cancelled",
         Failed => "failed",
+        Ambiguous => "ambiguous",
     }
 }
 

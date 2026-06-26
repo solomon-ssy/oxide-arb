@@ -11,7 +11,10 @@ use crate::{
         execution::OrderIntentKind,
         quant::{ApprovalStatus, OrderIntentStatus, QuantRuntimeMode},
     },
-    idens::quant_recommendation::QuantRecommendation,
+    idens::{
+        quant_model_version::QuantModelVersion, quant_recommendation::QuantRecommendation,
+        runtime_config_version::RuntimeConfigVersion,
+    },
     schema::{
         column,
         dependency::TableDependency,
@@ -27,12 +30,18 @@ pub enum QuantOrderIntent {
     OrderIntentId,
     RecommendationId,
     RuntimeMode,
+    RuntimeConfigVersionId,
+    ModelVersionId,
     IntentKind,
     Status,
     ApprovalStatus,
     ApprovedBy,
     ApprovalReason,
     ApprovedAt,
+    PolicyId,
+    PolicyHash,
+    StatusReason,
+    AdmissionTraceRef,
     EntryOrderJson,
     ExitPolicyJson,
     RiskEnvelopeHash,
@@ -50,6 +59,8 @@ pub fn table() -> TableCreateStatement {
         .col(column::pg_enum::<QuantRuntimeMode>(
             QuantOrderIntent::RuntimeMode,
         ))
+        .col(column::uuid_fk(QuantOrderIntent::RuntimeConfigVersionId))
+        .col(column::uuid_fk(QuantOrderIntent::ModelVersionId))
         .col(column::pg_enum::<OrderIntentKind>(
             QuantOrderIntent::IntentKind,
         ))
@@ -68,6 +79,14 @@ pub fn table() -> TableCreateStatement {
         .col(
             ColumnDef::new(QuantOrderIntent::ApprovedAt)
                 .timestamp_with_time_zone()
+                .null(),
+        )
+        .col(ColumnDef::new(QuantOrderIntent::PolicyId).text().null())
+        .col(ColumnDef::new(QuantOrderIntent::PolicyHash).text().null())
+        .col(ColumnDef::new(QuantOrderIntent::StatusReason).text().null())
+        .col(
+            ColumnDef::new(QuantOrderIntent::AdmissionTraceRef)
+                .text()
                 .null(),
         )
         .col(
@@ -102,6 +121,26 @@ pub fn table() -> TableCreateStatement {
                 )
                 .on_delete(ForeignKeyAction::Restrict),
         )
+        .foreign_key(
+            ForeignKey::create()
+                .name("fk_quant_order_intent_runtime_config_version")
+                .from(
+                    QuantOrderIntent::Table,
+                    QuantOrderIntent::RuntimeConfigVersionId,
+                )
+                .to(
+                    RuntimeConfigVersion::Table,
+                    RuntimeConfigVersion::RuntimeConfigVersionId,
+                )
+                .on_delete(ForeignKeyAction::Restrict),
+        )
+        .foreign_key(
+            ForeignKey::create()
+                .name("fk_quant_order_intent_model_version")
+                .from(QuantOrderIntent::Table, QuantOrderIntent::ModelVersionId)
+                .to(QuantModelVersion::Table, QuantModelVersion::ModelVersionId)
+                .on_delete(ForeignKeyAction::Restrict),
+        )
         .to_owned()
 }
 
@@ -134,9 +173,11 @@ pub fn indexes() -> Vec<IndexSpec> {
 }
 
 pub fn dependencies() -> Vec<TableDependency> {
-    vec![TableDependency::foreign_key(
-        quant_recommendation_table_name,
-    )]
+    vec![
+        TableDependency::foreign_key(quant_recommendation_table_name),
+        TableDependency::foreign_key(runtime_config_version_table_name),
+        TableDependency::foreign_key(quant_model_version_table_name),
+    ]
 }
 
 pub const fn seed_units() -> Vec<SeedSpec> {
@@ -149,4 +190,12 @@ fn quant_order_intent_table_name() -> String {
 
 fn quant_recommendation_table_name() -> String {
     QuantRecommendation::Table.to_string()
+}
+
+fn runtime_config_version_table_name() -> String {
+    RuntimeConfigVersion::Table.to_string()
+}
+
+fn quant_model_version_table_name() -> String {
+    QuantModelVersion::Table.to_string()
 }

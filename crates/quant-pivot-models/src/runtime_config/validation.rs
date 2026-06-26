@@ -1,6 +1,6 @@
-//! Runtime-config v3 semantic validation.
+//! Runtime-config v5 semantic validation.
 //!
-//! This module validates only the quant-pivot v3 document. Legacy Endgame
+//! This module validates only the quant-pivot v5 document. Legacy Endgame
 //! Deleted pre-quant configuration paths are not accepted in Phase 1 clean-break
 //! runtime configuration.
 
@@ -23,7 +23,7 @@ pub type FeaturesConfigValidator = fn(&FeaturesConfig, &mut ConfigValidationRepo
 #[distributed_slice]
 pub static FEATURES_CONFIG_VALIDATORS: [FeaturesConfigValidator] = [..];
 
-/// Mode-agnostic runtime-config v3 invariants.
+/// Mode-agnostic runtime-config v5 invariants.
 #[must_use]
 pub fn validate_runtime_config(config: &RuntimeConfig) -> ConfigValidationReport {
     let mut report = ConfigValidationReport::default();
@@ -405,6 +405,12 @@ fn validate_execution(config: &RuntimeConfig, report: &mut ConfigValidationRepor
         &config.execution.capital.max_reserved_usd,
         report,
     );
+    if config.execution.kill_switch.emergency_exit.max_slippage_bps == 0 {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "execution.kill_switch.emergency_exit.max_slippage_bps",
+            detail: "must be greater than zero".to_owned(),
+        });
+    }
 }
 
 fn validate_notification(config: &RuntimeConfig, report: &mut ConfigValidationReport) {
@@ -519,6 +525,14 @@ mod tests {
         let mut config = RuntimeConfig::default();
         config.execution.runtime_mode = QuantRuntimeMode::AutoExecution;
         config.execution.auto_execution.enabled = false;
+        let report = validate_runtime_config(&config);
+        assert!(report.has_errors());
+    }
+
+    #[test]
+    fn kill_switch_emergency_exit_slippage_must_be_positive() {
+        let mut config = RuntimeConfig::default();
+        config.execution.kill_switch.emergency_exit.max_slippage_bps = 0;
         let report = validate_runtime_config(&config);
         assert!(report.has_errors());
     }

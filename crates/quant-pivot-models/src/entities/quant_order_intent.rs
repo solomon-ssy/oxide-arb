@@ -5,7 +5,10 @@ use crate::{
         execution::OrderIntentKind,
         quant::{ApprovalStatus, OrderIntentStatus, QuantRuntimeMode},
     },
-    types::{ContentHash, EntryOrderSpec, ExitPolicySpec, OrderIntentId, RecommendationId},
+    types::{
+        ContentHash, EntryOrderSpec, ExitPolicySpec, ModelVersionId, OrderIntentId,
+        RecommendationId, RuntimeConfigVersionId,
+    },
 };
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
@@ -18,6 +21,8 @@ pub struct Model {
     pub order_intent_id: OrderIntentId,
     pub recommendation_id: RecommendationId,
     pub runtime_mode: QuantRuntimeMode,
+    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub model_version_id: ModelVersionId,
     pub intent_kind: OrderIntentKind,
     pub status: OrderIntentStatus,
     pub approval_status: ApprovalStatus,
@@ -25,6 +30,13 @@ pub struct Model {
     #[sea_orm(column_type = "Text", nullable)]
     pub approval_reason: Option<String>,
     pub approved_at: Option<DateTime<Utc>>,
+    #[sea_orm(column_type = "Text", nullable)]
+    pub policy_id: Option<String>,
+    pub policy_hash: Option<ContentHash>,
+    #[sea_orm(column_type = "Text", nullable)]
+    pub status_reason: Option<String>,
+    #[sea_orm(column_type = "Text", nullable)]
+    pub admission_trace_ref: Option<String>,
     #[sea_orm(column_type = "JsonBinary")]
     pub entry_order_json: EntryOrderSpec,
     #[sea_orm(column_type = "JsonBinary")]
@@ -45,6 +57,8 @@ pub enum Relation {
     Recommendation,
     #[sea_orm(has_many = "super::quant_execution_order::Entity")]
     ExecutionOrder,
+    #[sea_orm(has_one = "super::quant_capital_allocation::Entity")]
+    CapitalAllocation,
 }
 
 impl Related<super::quant_recommendation::Entity> for Entity {
@@ -56,6 +70,12 @@ impl Related<super::quant_recommendation::Entity> for Entity {
 impl Related<super::quant_execution_order::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::ExecutionOrder.def()
+    }
+}
+
+impl Related<super::quant_capital_allocation::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::CapitalAllocation.def()
     }
 }
 

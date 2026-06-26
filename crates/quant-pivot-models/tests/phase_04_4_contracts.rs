@@ -463,6 +463,21 @@ fn rbac_exposes_no_opportunity_or_trade_semantics() {
     assert!(ops.contains(&Operation::Enqueue));
     assert!(ops.contains(&Operation::Revoke));
     assert!(!ops.contains(&Operation::Delete));
+
+    let intent_ops = ResourceType::OrderIntent.operations();
+    assert!(intent_ops.contains(&Operation::Read));
+    assert!(intent_ops.contains(&Operation::Create));
+    assert!(intent_ops.contains(&Operation::Approve));
+    assert!(intent_ops.contains(&Operation::Reject));
+    assert!(intent_ops.contains(&Operation::Cancel));
+    assert!(intent_ops.contains(&Operation::Submit));
+    assert!(!intent_ops.contains(&Operation::Delete));
+
+    assert_eq!(Operation::from_str("approve").unwrap(), Operation::Approve);
+    assert_eq!(Operation::from_str("cancel").unwrap(), Operation::Cancel);
+    assert_eq!(Operation::from_str("submit").unwrap(), Operation::Submit);
+    assert!(ResourceType::ExecutionOrder.allows(Operation::Read));
+    assert!(ResourceType::Position.allows(Operation::Read));
 }
 
 #[test]

@@ -121,10 +121,13 @@ flowchart LR
   `ExitPlan` / `RiskEnvelope`（含 `envelope_hash`）/ `ExecutionEligibility`（含 `eligible_modes`）。
 - credential-gated `AccountProvider` / `VenueAccountProvider` / `AccountSnapshot` /
   `ExposureBreakdown`（[`core/src/service/account/`](../../../crates/quant-pivot-core/src/service/account/)）、
-  `ReservedCapitalReader`（只读聚合 pending intent）。
+  `ReservedCapitalReader`（05.0 起从 `quant_capital_allocation` 聚合未释放/未花费资金）。
 - `PgOrderIntentRepository`（含 `validate_intent_transition` FSM）
   （[`repository/src/postgres/quant/order_intent.rs`](../../../crates/quant-pivot-repository/src/postgres/quant/order_intent.rs) §100–124）——
-  **仅 PG 集成测试消费，无 core service 调用**。
+  已扩展 policy-approved / admission rejected / invalidated / row lock primitive；**仍无 core service 调用**。
+- 05.0 已落 execution foundation：`quant_capital_allocation` / `quant_position` /
+  `quant_reconciliation` / `system_kill_switch` 四表、执行资源 RBAC、`ExecutionError`、
+  repository PG impl、`core/src/execution/` trait 骨架。
 - `quant_order_intent.intent_kind` 已是枚举 `OrderIntentKind`（非 `String`，04.0 标注的重构已落）。
 - 强类型 JSONB：`EntryOrderSpec` / `ExitPolicySpec`
   （[`models/src/types/execution_payload.rs`](../../../crates/quant-pivot-models/src/types/execution_payload.rs)）、
@@ -156,17 +159,16 @@ flowchart LR
 
 **仍属 Phase 05（缺口）**
 
-- `quant_capital_allocation` / `quant_position` / `quant_reconciliation` 三表（实体/迁移/枚举全缺）。
-- kill switch 运行态 FSM（仅布尔 `KillSwitchPolicy { enabled, reason }`
-  在 [`models/src/runtime_config/wire.rs`](../../../crates/quant-pivot-models/src/runtime_config/wire.rs) §318–326）。
+- kill switch 运行态服务/handle/API/状态投影（05.0 已有 `system_kill_switch` 表与 repository；
+  runtime-config 布尔已删除，仅保留 emergency policy）。
 - 模式转换矩阵 + preflight 引擎（§1.2 / §1.3）。
 - OrderIntent **service** 层（mode gate / 创建 / 审批 / 审批失效）。
 - 20 检查 admission engine。
 - core `PolymarketOrderClient` façade + `ExecutionDispatcher` 真实下单。
-- exit monitor / reconciliation worker / capital FSM 写入 / position 账本写入。
+- exit monitor / reconciliation worker / capital FSM 业务写入 / position 账本业务写入。
 - attribution 写路径。
-- 执行类 API（`/api/quant/intents`、`execution-orders`、`positions`、`/api/system/kill-switch`）+
-  RBAC 资源/操作；`create-intent` 现返回 501
+- 执行类 API（`/api/quant/intents`、`execution-orders`、`positions`、`/api/system/kill-switch`）；
+  RBAC 资源/操作已在 05.0 建目录，handler 尚未接；`create-intent` 现返回 501
   （[`web/src/routes/quant_recommendations.rs`](../../../crates/quant-pivot-web/src/routes/quant_recommendations.rs) §80–90）。
 - 执行 metrics（父文档 §14）。
 
@@ -180,7 +182,7 @@ flowchart LR
 |---|---|---|---|
 | `ExecutionIntentBundle` 空壳 | [`core/src/app/bundles/future.rs`](../../../crates/quant-pivot-core/src/app/bundles/future.rs) §98–99 空 struct | **删除**，由 05.4 真实 `ExecutionBundle` 取代 | 05.4 |
 | `ExecutionOrderModel` wrapper | [`models/src/domain/quant/execution.rs`](../../../crates/quant-pivot-models/src/domain/quant/execution.rs) §131–133 仅 `{ order: NewExecutionOrder }` 包装 | **删除**（planner/dispatcher 直接产 `NewExecutionOrder`） | 05.0 |
-| `NoCredentialsPaper` 错误变体 | [`error/src/config_validation.rs`](../../../crates/quant-pivot-error/src/config_validation.rs) §77–78；无 Paper mode 路径 | **删除** | 05.0 |
+| `NoCredentialsPaper` 错误变体 | 已无 Paper mode 路径 | **已删除** | 05.0 |
 | `TaskId` 中 endgame 死变体（`Scanner`/`Funnel`/`PostTradeRelay` 等未 spawn） | [`core/src/app/task_id.rs`](../../../crates/quant-pivot-core/src/app/task_id.rs) §50–61 | **删除死变体**，新增 05.x 实际 worker 变体（`ExecutionDispatcher`/`ReconciliationWorker`/`ExitMonitor`/`IntentExpirySweep`） | 05.2/05.4/05.5/05.6 |
 | `create-intent` 501 stub | [`web/src/routes/quant_recommendations.rs`](../../../crates/quant-pivot-web/src/routes/quant_recommendations.rs) §80–90 | **删除**，由 05.2 `POST /api/quant/intents` 取代 | 05.2 |
 
@@ -188,7 +190,7 @@ flowchart LR
 
 | 目标 | 问题 | 动作 | 子phase |
 |---|---|---|---|
-| 布尔 `KillSwitchPolicy { enabled, reason }`（[`wire.rs`](../../../crates/quant-pivot-models/src/runtime_config/wire.rs) §318–326） | 仅二态，无 5 态语义；与运行态 FSM 重叠 | **破坏式**收敛：operational `system_kill_switch` 单例为权威；runtime-config 仅保留 `KillSwitchPolicy { emergency_exit: EmergencyExitPolicy, … }` 默认策略，**删除 `enabled` 布尔** | 05.0/05.1 |
+| 布尔 `KillSwitchPolicy { enabled, reason }` | 仅二态，无 5 态语义；与运行态 FSM 重叠 | **已破坏式删除**；operational `system_kill_switch` 单例为权威，runtime-config 仅保留 `KillSwitchPolicy { emergency_exit }` 默认策略 | 05.0/05.1 |
 | `ExecutionEmergencyView` / `ExecutionEmergencyClassView`（[`models/src/domain/governance/system.rs`](../../../crates/quant-pivot-models/src/domain/governance/system.rs) §21–48） | 占位 dashboard 视图，恒 `idle()` | **重构**为真实 kill-switch 状态投影（05.1 接入 `system_status`） | 05.1 |
 | `ReservedCapitalReader::sum_locked`（只读聚合 intent） | Phase 4 用 intent 状态求和；Phase 5 有 `quant_capital_allocation` 账本 | **重构**数据源为 `quant_capital_allocation`（locked 状态求和），保持 trait 不变（实现切换） | 05.2 |
 
@@ -269,7 +271,7 @@ flowchart LR
 2. **删除 / 合并 / 重构清单** —— 加替代代码前必须删/合/重构的 crate / 模块 / 类型 / 配置；
    引用 `file:line`；若无可删，显式写"无（本子phase为净新增）"。
 3. **新领域类型 / 表 / ClickHouse fact** —— 强类型块、Postgres 表/列、CH fact。
-4. **deploy-config key 与 runtime-config v3 path** —— 消费哪些 config 段、是否新增 deploy key。
+4. **deploy-config key 与 runtime-config v5 path** —— 消费哪些 config 段、是否新增 deploy key。
 5. **必建模块与 trait** —— 模块树 + trait 签名（verbatim Rust）。
 6. **生产不变量与失败语义** —— 事务边界、fail-closed、hash、恢复、错误分层硬规则。
 7. **第三方 crate 引入** —— 本子phase允许 / 禁止的 crate 与 feature gate。

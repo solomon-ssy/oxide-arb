@@ -52,6 +52,8 @@ pub enum Relation {
         to = "super::market::Column::MarketId"
     )]
     Market,
+    #[sea_orm(has_one = "super::quant_reconciliation::Entity")]
+    Reconciliation,
 }
 
 impl Related<super::quant_order_intent::Entity> for Entity {
@@ -63,6 +65,12 @@ impl Related<super::quant_order_intent::Entity> for Entity {
 impl Related<super::market::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::Market.def()
+    }
+}
+
+impl Related<super::quant_reconciliation::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::Reconciliation.def()
     }
 }
 

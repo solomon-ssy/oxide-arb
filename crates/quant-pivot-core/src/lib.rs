@@ -4,6 +4,7 @@
 //! planes arrive in later phases.
 
 pub mod app;
+pub mod execution;
 pub mod governance;
 pub mod infra;
 pub mod observability;

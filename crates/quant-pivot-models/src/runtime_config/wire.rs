@@ -293,6 +293,36 @@ impl Default for ExitOrderPolicy {
     }
 }
 
+/// Emergency-exit action used when operational kill-switch handling escalates
+/// to emergency state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum EmergencyExitKind {
+    /// Submit reduce-only liquidation exits within the configured slippage cap.
+    LiquidateAll,
+    /// Route exits to manual operator handling only.
+    ManualOnly,
+}
+
+/// Default emergency-exit policy consumed by the operational kill-switch plane.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct EmergencyExitPolicy {
+    /// Emergency-exit behavior.
+    pub kind: EmergencyExitKind,
+    /// Maximum slippage for automated emergency liquidation, in basis points.
+    pub max_slippage_bps: u32,
+}
+
+impl Default for EmergencyExitPolicy {
+    fn default() -> Self {
+        Self {
+            kind: EmergencyExitKind::ManualOnly,
+            max_slippage_bps: 100,
+        }
+    }
+}
+
 /// Admission gates for creating order intents from recommendations.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
@@ -315,14 +345,15 @@ impl Default for ExecutionAdmissionPolicy {
     }
 }
 
-/// Execution kill-switch policy.
+/// Execution kill-switch default policy.
+///
+/// Operational state lives in the `system_kill_switch` singleton. Runtime
+/// config only carries the policy to apply when that state escalates.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(default, deny_unknown_fields)]
 pub struct KillSwitchPolicy {
-    /// Whether execution is globally disabled by policy.
-    pub enabled: bool,
-    /// Operator-visible reason for the kill switch.
-    pub reason: Option<String>,
+    /// Emergency-exit behavior for kill-switch escalation.
+    pub emergency_exit: EmergencyExitPolicy,
 }
 
 /// Capital policy for execution admission.

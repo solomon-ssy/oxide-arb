@@ -45,10 +45,10 @@ impl FeeCalculator {
         }
     }
 
-    /// Calculate the fee for a trade (simulated modes only).
+    /// Calculate the fee for a non-submitting estimate.
     ///
-    /// Live paths must use [`Self::quote_for_mode`] with fail-closed schedule
-    /// resolution.
+    /// Order-submitting paths must use [`Self::quote_for_mode`] with fail-closed
+    /// schedule resolution.
     pub fn calculate(
         &self,
         shares: Shares,
@@ -107,7 +107,7 @@ impl FeeCalculator {
         })
     }
 
-    /// Mode-aware fee quote: Live forces `allow_category_fallback = false`.
+    /// Mode-aware fee quote: order-submitting modes force `allow_category_fallback = false`.
     pub fn quote_for_mode(
         &self,
         mode: QuantRuntimeMode,
