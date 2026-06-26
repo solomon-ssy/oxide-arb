@@ -12,6 +12,7 @@
 mod availability;
 mod book;
 mod builder;
+mod decision_capture;
 mod domain;
 mod market;
 mod microstructure;
@@ -32,6 +33,9 @@ pub use availability::FeatureAvailabilityOracle;
 pub use builder::{
     ConfiguredFeatureBuilder, FeatureComputeCtx, FeatureGroupBuilder, RawFeature, ResolvedInputs,
 };
+pub use decision_capture::{
+    MarketDecisionCapture, RejectedMarketDraft, ResolvedMarketBundle, draft_data_quality_snapshot,
+};
 pub use domain::{DomainFeatureBuilder, DomainFeatureSkeleton};
 pub use null_policy::{NullDecision, NullPolicyEngine};
 pub use resolved::{
@@ -50,10 +54,13 @@ pub use writer::feature_events;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use std::sync::Arc;
+
 use chrono::{DateTime, Utc};
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
     domain::PointInTimeDataSource,
+    domain::market::registry::MarketRegistryInfo,
     runtime_config::{DataQualityConfig, FeaturesConfig},
     types::{MarketId, SchemaVersion, TokenId},
 };
@@ -145,6 +152,22 @@ impl PitView<'_> {
                 .market_at(market_id, as_of)
                 .await?
                 .map(ResolvedMarketContext::from)),
+        }
+    }
+
+    /// Resolve full registry metadata for identity / fee fields at `as_of`.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the historical engine's query errors.
+    pub fn resolve_registry(
+        &self,
+        market_id: &MarketId,
+        as_of: DateTime<Utc>,
+    ) -> QuantResult<Option<Arc<MarketRegistryInfo>>> {
+        match self {
+            Self::Live(source) => Ok(source.market_context(market_id, as_of)),
+            Self::Historical(_) => Ok(None),
         }
     }
 }

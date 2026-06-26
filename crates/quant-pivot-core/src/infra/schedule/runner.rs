@@ -25,7 +25,7 @@ use std::{
 use async_trait::async_trait;
 use chrono::Utc;
 use dashmap::DashMap;
-use quant_pivot_error::{QuantError, QuantResult, scheduler::SchedulerError};
+use quant_pivot_error::{QuantError, QuantResult, report::ReportError, scheduler::SchedulerError};
 use quant_pivot_models::{
     domain::RecommendationReportInfo,
     enums::{
@@ -259,6 +259,13 @@ async fn execute_scheduled_fire(schedule_id: &str, deps: &ReportSchedulerDeps) {
                 started.elapsed(),
             );
         }
+        Err(error) if empty_report_suppressed(&error) => {
+            deps.metrics.record_report_schedule_fire(
+                schedule_id,
+                "skipped_empty",
+                started.elapsed(),
+            );
+        }
         Err(error) => report_fire_failed(schedule_id, deps, &error, started.elapsed()),
     }
 }
@@ -279,6 +286,13 @@ async fn execute_ad_hoc_fire(request: AdHocReportRequest, deps: &ReportScheduler
             deps.metrics.record_report_schedule_fire(
                 AD_HOC_LABEL,
                 fire_outcome(&report),
+                started.elapsed(),
+            );
+        }
+        Err(error) if empty_report_suppressed(&error) => {
+            deps.metrics.record_report_schedule_fire(
+                AD_HOC_LABEL,
+                "skipped_empty",
                 started.elapsed(),
             );
         }
@@ -306,6 +320,13 @@ const fn fire_outcome(report: &RecommendationReportInfo) -> &'static str {
         RecommendationReportStatus::Published => "published",
         other => other.as_str(),
     }
+}
+
+const fn empty_report_suppressed(error: &QuantError) -> bool {
+    matches!(
+        error,
+        QuantError::Report(ReportError::EmptyReportSuppressed { .. })
+    )
 }
 
 fn report_generation_failed_alert(schedule_id: &str, error: &QuantError) -> Alert {

@@ -122,6 +122,7 @@ pub struct MetricsHub {
     pub report_generated_total: IntCounterVec,
     pub report_recommendations_total: IntCounterVec,
     pub report_publish_failures_total: IntCounterVec,
+    pub report_skipped_empty_total: IntCounter,
 
     // ── Report scheduler (04.3) ───────────────────────────────────────────
     pub report_schedule_fires_total: IntCounterVec,
@@ -180,6 +181,7 @@ struct ReportMetrics {
     schedule_run_duration: HistogramVec,
     schedule_active_jobs: IntGauge,
     expire_swept: IntCounter,
+    skipped_empty: IntCounter,
 }
 
 fn register_pipeline_metrics(registry: &Registry) -> PipelineMetrics {
@@ -392,6 +394,11 @@ fn register_report_metrics(registry: &Registry) -> ReportMetrics {
             "quant_pivot_report_expire_swept_total",
             "Reports transitioned to expired by the TTL sweep"
         ),
+        skipped_empty: register_counter!(
+            registry,
+            "quant_pivot_report_skipped_empty_total",
+            "Empty reports suppressed by publish_empty_reports=false"
+        ),
     }
 }
 
@@ -456,6 +463,7 @@ impl MetricsHub {
             report_generated_total: report.generated,
             report_recommendations_total: report.recommendations,
             report_publish_failures_total: report.publish_failures,
+            report_skipped_empty_total: report.skipped_empty,
             report_schedule_fires_total: report.schedule_fires,
             report_schedule_skipped_overlap_total: report.schedule_skipped_overlap,
             report_schedule_run_duration_seconds: report.schedule_run_duration,

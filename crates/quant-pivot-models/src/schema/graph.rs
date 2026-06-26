@@ -124,6 +124,7 @@ mod tests {
             "quant_shadow_comparison",
             "quant_model_governance_audit",
             "quant_account_snapshot",
+            "quant_report_data_quality_snapshot",
             "quant_portfolio_plan",
             "quant_recommendation_report",
             "quant_recommendation",

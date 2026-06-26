@@ -16,4 +16,8 @@ pub enum ReportError {
     /// Caller-supplied inputs violate a batch contract (e.g. length mismatch).
     #[error("report pipeline contract violation: {detail}")]
     ContractViolation { detail: String },
+
+    /// An empty report was built but suppressed by `publish_empty_reports=false`.
+    #[error("empty report suppressed: {reason}")]
+    EmptyReportSuppressed { reason: String },
 }

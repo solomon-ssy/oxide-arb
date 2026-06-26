@@ -20,7 +20,7 @@ use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
     enums::quant::DataQualityStatus,
     runtime_config::{DataQualityConfig, FactorsConfig, FeaturesConfig},
-    types::Price,
+    types::{Price, Usd},
 };
 use quant_pivot_research::{
     factors::{FactorEngine, MarketFactorOutcome},
@@ -113,25 +113,23 @@ pub async fn materialize_cross_section(
     let resolve_futures = selected
         .iter()
         .zip(windows.iter())
-        .map(|(market, snapshot)| builder.resolve_inputs(market, as_of, pit_view, snapshot));
-    let resolved = try_join_all(resolve_futures).await?;
+        .map(|(market, snapshot)| {
+            builder.resolve_inputs(market, as_of, pit_view, snapshot, Usd::ZERO)
+        });
+    let bundles = try_join_all(resolve_futures).await?;
 
-    let vectors = builder.build_batch(&resolved, &[], &config.features, &config.data_quality);
+    let vectors = builder.build_batch(&bundles, &[], &config.features, &config.data_quality);
 
     let mut kept_vectors = Vec::with_capacity(vectors.len());
     let mut kept_markets = Vec::with_capacity(vectors.len());
     let mut kept_entry_mids = Vec::with_capacity(vectors.len());
     let mut dropped_insufficient = 0_u64;
-    for ((vector, input), market) in vectors
-        .into_iter()
-        .zip(resolved.iter())
-        .zip(selected.iter())
-    {
+    for ((vector, bundle), market) in vectors.into_iter().zip(bundles.iter()).zip(selected.iter()) {
         if vector.data_quality == DataQualityStatus::Insufficient {
             dropped_insufficient += 1;
             continue;
         }
-        kept_entry_mids.push(input.book.as_ref().and_then(ResolvedBook::mid));
+        kept_entry_mids.push(bundle.inputs.book.as_ref().and_then(ResolvedBook::mid));
         kept_markets.push(market.clone());
         kept_vectors.push(vector);
     }

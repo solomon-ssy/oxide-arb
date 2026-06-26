@@ -3,6 +3,7 @@
 
 use crate::features::{
     builder::{FeatureComputeCtx, FeatureGroupBuilder, RawFeature},
+    decision_capture::book_evidence_ref,
     names::book,
     resolved::ResolvedBook,
     value::{EvidenceSourceKind, EvidenceSourceRef, FeatureName, FeatureValue, NullReason},
@@ -26,11 +27,14 @@ impl FeatureGroupBuilder for PriceBookFeatureBuilder {
         let Some(book) = ctx.book else {
             return Vec::new();
         };
-        let evidence = EvidenceSourceRef {
-            source_kind: EvidenceSourceKind::Book,
-            reference: book.token_id.as_str().to_owned(),
-            observed_at: book.observed_at,
-        };
+        let evidence = ctx.book_snapshot_ref.map_or_else(
+            || EvidenceSourceRef {
+                source_kind: EvidenceSourceKind::Book,
+                reference: book.token_id.as_str().to_owned(),
+                observed_at: book.observed_at,
+            },
+            |book_ref| book_evidence_ref(book_ref, book.observed_at),
+        );
 
         let mut out = vec![
             price_feature(book::BEST_BID, book.best_bid().map(Price::inner), &evidence),

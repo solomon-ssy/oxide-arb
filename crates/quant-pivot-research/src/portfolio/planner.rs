@@ -74,6 +74,8 @@ pub struct PlanCandidate<'a> {
     pub event_id: Option<EventId>,
     /// Visible liquidity (liquidity-usage cap), when known.
     pub liquidity_usd: Option<Usd>,
+    /// Normalized visible liquidity score in `[0, 1]` from decision capture.
+    pub liquidity_score: Probability,
 }
 
 /// All inputs to one portfolio plan.
@@ -164,6 +166,7 @@ struct Scored<'a> {
     suggestion: SizingSuggestion,
     allocation: Allocation,
     risk_adjusted: Probability,
+    liquidity_score: Probability,
 }
 
 impl PortfolioPlanner for DefaultPortfolioPlanner {
@@ -293,13 +296,14 @@ fn classify_allocations<'a>(
                 ..alloc
             },
             risk_adjusted,
+            liquidity_score: plan_candidate.liquidity_score,
         });
     }
     scored
 }
 
 /// Stable ranking order (parent §21.5): risk-adjusted desc → composite desc →
-/// liquidity feasible first → market id asc → token id asc.
+/// liquidity score desc → market id asc → token id asc.
 fn rank_order(a: &Scored<'_>, b: &Scored<'_>) -> Ordering {
     b.risk_adjusted
         .cmp(&a.risk_adjusted)
@@ -308,11 +312,7 @@ fn rank_order(a: &Scored<'_>, b: &Scored<'_>) -> Ordering {
                 .composite_score
                 .cmp(&a.candidate.composite_score)
         })
-        .then_with(|| {
-            b.allocation
-                .liquidity_feasible
-                .cmp(&a.allocation.liquidity_feasible)
-        })
+        .then_with(|| b.liquidity_score.cmp(&a.liquidity_score))
         .then_with(|| {
             a.candidate
                 .market_id

@@ -136,6 +136,10 @@ pub struct ModelGovernanceAuditId(Arc<Uuid>);
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AccountSnapshotId(Arc<Uuid>);
 
+/// Report-level data-quality snapshot identifier (one row per report fire).
+#[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ReportDataQualitySnapshotId(Arc<Uuid>);
+
 /// Portfolio plan identifier used by a recommendation report.
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PortfolioPlanId(Arc<Uuid>);

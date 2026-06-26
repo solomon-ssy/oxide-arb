@@ -30,9 +30,9 @@ use crate::{
     },
     jsonb_active,
     types::{
-        Bps, ContentHash, EventId, FactorDefinitionId, FeatureVectorId, MarketSelectionId,
-        ModelRunId, ModelVersionId, Price, Probability, RuntimeConfigVersionId, Shares,
-        SignalCandidateId, Usd,
+        BookSnapshotRef, Bps, ContentHash, EventId, FactorDefinitionId, FeatureVectorId,
+        MarketSelectionId, ModelRunId, ModelVersionId, Price, Probability,
+        ReportDataQualitySnapshotId, RuntimeConfigVersionId, Shares, SignalCandidateId, Usd,
     },
 };
 
@@ -233,25 +233,47 @@ pub struct RecommendationFactorBreakdown(pub Vec<FactorBreakdownEntry>);
 /// Replay handles for one recommendation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
 pub struct EvidenceRefs {
-    /// Signal candidate this recommendation was promoted from (replay handle into
-    /// the `quant_signal_candidate_event` fact).
     pub signal_candidate_id: SignalCandidateId,
-    /// Feature vector that fed inference.
     pub feature_vector_id: FeatureVectorId,
-    /// Model run that emitted the candidate.
     pub model_run_id: ModelRunId,
-    /// Market selection snapshot.
     pub market_selection_id: MarketSelectionId,
-    /// Optional book-snapshot reference.
-    pub book_snapshot_ref: Option<String>,
-    /// Runtime-config version frozen for the run.
+    pub book_snapshot_ref: BookSnapshotRef,
     pub runtime_config_version_id: RuntimeConfigVersionId,
-    /// Model version used.
     pub model_version_id: ModelVersionId,
-    /// Factor definition versions used.
     pub factor_definition_versions: Vec<FactorDefinitionId>,
-    /// Optional data-quality report reference.
-    pub data_quality_report_ref: Option<String>,
+    pub data_quality_snapshot_ref: ReportDataQualitySnapshotId,
+}
+
+/// Inputs required to build [`EvidenceRefs`] from a frozen decision capture.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EvidenceRefsInput {
+    pub signal_candidate_id: SignalCandidateId,
+    pub feature_vector_id: FeatureVectorId,
+    pub model_run_id: ModelRunId,
+    pub market_selection_id: MarketSelectionId,
+    pub book_snapshot_ref: BookSnapshotRef,
+    pub runtime_config_version_id: RuntimeConfigVersionId,
+    pub model_version_id: ModelVersionId,
+    pub factor_definition_versions: Vec<FactorDefinitionId>,
+    pub data_quality_snapshot_ref: ReportDataQualitySnapshotId,
+}
+
+impl EvidenceRefs {
+    /// Project capture + report ids into the persisted evidence block.
+    #[must_use]
+    pub fn from_input(input: EvidenceRefsInput) -> Self {
+        Self {
+            signal_candidate_id: input.signal_candidate_id,
+            feature_vector_id: input.feature_vector_id,
+            model_run_id: input.model_run_id,
+            market_selection_id: input.market_selection_id,
+            book_snapshot_ref: input.book_snapshot_ref,
+            runtime_config_version_id: input.runtime_config_version_id,
+            model_version_id: input.model_version_id,
+            factor_definition_versions: input.factor_definition_versions,
+            data_quality_snapshot_ref: input.data_quality_snapshot_ref,
+        }
+    }
 }
 
 // ── Execution eligibility (parent §14 — computed, mode-orthogonal) ────────────

@@ -176,6 +176,9 @@ impl ClassicalRuntime {
             },
             rejection_warnings: Vec::new(),
             rank_before_portfolio: 0,
+            liquidity_score: Probability::ZERO,
+            data_quality_score: Probability::ZERO,
+            model_score_percentile: Probability::ZERO,
             as_of,
         })
     }

@@ -7,40 +7,43 @@ use quant_pivot_error::{QuantError, QuantResult, report::ReportError};
 use quant_pivot_models::{
     clickhouse::{ChProbability, ChUsd, QuantRecommendationEventRow},
     domain::{
-        FeatureVectorInfo, NewAccountSnapshot, NewOperationLog, NewPortfolioPlan,
-        NewRecommendation, NewRecommendationReport, NewReportTransaction,
+        NewAccountSnapshot, NewOperationLog, NewPortfolioPlan, NewRecommendation,
+        NewRecommendationReport, NewReportDataQualitySnapshot, NewReportTransaction,
     },
     enums::{
         common::MarketCategory,
         operation_log::{OperationCategory, OperationOutcome},
         quant::{
-            DataQualityStatus, EmptyReason, EntryTriggerKind, IneligibilityReason,
-            QuantRuntimeMode, RecommendationReportStatus, RecommendationStatus, ReportKind,
-            SettlementPolicy,
+            EmptyReason, IneligibilityReason, QuantRuntimeMode, RecommendationReportStatus,
+            RecommendationStatus, ReportKind, SettlementPolicy,
         },
         rbac::ResourceType,
     },
     runtime_config::RuntimeConfig,
     types::{
-        AccountPositions, AccountSnapshotId, Bps, ConfidenceSummary, DataQualitySummary,
-        EligibilitySummary, EntryPlan, EventId, EvidenceRefs, ExecutionEligibility, ExitPlan,
-        FactorBreakdownEntry, FactorDefinitionId, FeatureVectorId, MarketId, MarketSelectionId,
-        ModelRunId, ModelVersionId, OperationLogId, PortfolioConstraintsSnapshot, PortfolioPlanId,
+        AccountPositions, AccountSnapshotId, Bps, ConfidenceSummary, EligibilitySummary, EventId,
+        EvidenceRefs, EvidenceRefsInput, ExecutionEligibility, ExitPlan, FactorBreakdownEntry,
+        FactorDefinitionId, FeatureVectorId, MarketId, MarketSelectionId, ModelRunId,
+        ModelVersionId, OperationLogId, PortfolioConstraintsSnapshot, PortfolioPlanId,
         PortfolioRejectedSummary, PortfolioRiskBudget, Price, Probability,
         RecommendationFactorBreakdown, RecommendationId, RecommendationReportId,
-        RejectionReasonCount, ReportSummary, RuntimeConfigVersionId, SizingPlan, Usd,
+        RejectionReasonCount, ReportDataQualitySnapshotId, ReportSummary, RuntimeConfigVersionId,
+        SizingPlan, Usd,
     },
 };
 use quant_pivot_research::{
+    features::MarketDecisionCapture,
     model::SignalCandidate,
     portfolio::{AccountSnapshot, PlannedRecommendation, RejectedCandidate},
-    selection::SelectedMarket,
 };
 use rust_decimal::Decimal;
 
-use super::types::{
-    ComposedReport, EmptyReportContext, NotificationRecommendation, ReportNotificationPayload,
-    ReportTrigger,
+use super::{
+    entry_plan::derive_entry_plan,
+    types::{
+        ComposedReport, EmptyReportContext, NotificationRecommendation, ReportNotificationPayload,
+        ReportTrigger,
+    },
 };
 
 /// Inputs required to compose one report artifact.
@@ -59,11 +62,13 @@ pub struct ComposeReportInput<'a> {
     pub portfolio_plan: NewPortfolioPlan,
     pub planned: &'a [PlannedRecommendation],
     pub planner_rejected: &'a [RejectedCandidate],
-    pub selected: &'a [SelectedMarket],
-    pub feature_infos: &'a [FeatureVectorInfo],
+    pub captures: HashMap<MarketId, MarketDecisionCapture>,
+    pub feature_vector_by_market: HashMap<MarketId, FeatureVectorId>,
+    pub data_quality_snapshot: NewReportDataQualitySnapshot,
     pub model_run_id: Option<ModelRunId>,
     pub candidate_count: u32,
     pub feature_rejected_count: u32,
+    pub market_selection_count: u32,
     pub empty: Option<EmptyReportContext>,
     pub top_n: u32,
 }
@@ -94,8 +99,10 @@ impl RecommendationComposer for DefaultRecommendationComposer {
             + Duration::seconds(i64::try_from(horizon_secs).map_err(|error| {
                 QuantError::config(format!("reports.report_horizon_secs too large: {error}"))
             })?);
-        let selected_by_market = selected_by_market(input.selected);
-        let feature_by_market = feature_by_market(input.feature_infos);
+        let data_quality_snapshot_ref = input
+            .data_quality_snapshot
+            .report_data_quality_snapshot_id
+            .clone();
 
         let recommendations = input
             .planned
@@ -106,8 +113,7 @@ impl RecommendationComposer for DefaultRecommendationComposer {
                     planned,
                     &input,
                     valid_until,
-                    &selected_by_market,
-                    &feature_by_market,
+                    &data_quality_snapshot_ref,
                 )
             })
             .collect::<QuantResult<Vec<_>>>()?;
@@ -117,7 +123,7 @@ impl RecommendationComposer for DefaultRecommendationComposer {
         } else {
             RecommendationReportStatus::Published
         };
-        let summary = report_summary(&input, &recommendations, &selected_by_market);
+        let summary = report_summary(&input, &recommendations);
         // Build the notification before `summary` / `recommendations` move below.
         let notification =
             report_notification(&report_id, status, &input, &summary, &recommendations);
@@ -158,6 +164,7 @@ impl RecommendationComposer for DefaultRecommendationComposer {
             account_source: input.account.source,
             capital_base_usd: input.account.equity_usd,
             account_snapshot_ref: account_snapshot_id,
+            data_quality_snapshot_ref,
             summary_json: summary,
             published_at: Some(input.trigger_time),
             revoked_at: None,
@@ -173,6 +180,7 @@ impl RecommendationComposer for DefaultRecommendationComposer {
         Ok(ComposedReport {
             transaction: NewReportTransaction {
                 account_snapshot,
+                data_quality_snapshot: input.data_quality_snapshot,
                 portfolio_plan: input.portfolio_plan,
                 report,
                 recommendations,
@@ -221,20 +229,20 @@ fn compose_recommendation(
     planned: &PlannedRecommendation,
     input: &ComposeReportInput<'_>,
     valid_until: DateTime<Utc>,
-    selected_by_market: &HashMap<MarketId, &SelectedMarket>,
-    feature_by_market: &HashMap<MarketId, FeatureVectorId>,
+    data_quality_snapshot_ref: &ReportDataQualitySnapshotId,
 ) -> QuantResult<NewRecommendation> {
     let candidate = &planned.candidate;
-    let selected = selected_by_market
-        .get(&candidate.market_id)
-        .ok_or_else(|| ReportError::InvariantViolation {
+    let capture = input.captures.get(&candidate.market_id).ok_or_else(|| {
+        ReportError::InvariantViolation {
             stage: "compose",
             detail: format!(
-                "missing selected market metadata for recommendation market {}",
+                "missing decision capture for recommendation market {}",
                 candidate.market_id
             ),
-        })?;
-    let feature_vector_id = feature_by_market
+        }
+    })?;
+    let feature_vector_id = input
+        .feature_vector_by_market
         .get(&candidate.market_id)
         .cloned()
         .ok_or_else(|| ReportError::InvariantViolation {
@@ -279,7 +287,7 @@ fn compose_recommendation(
             detail: error.to_string(),
         })?,
         market_id: candidate.market_id.clone(),
-        event_id: selected.event_id.clone(),
+        event_id: capture.event_id.clone(),
         token_id: candidate.token_id.clone(),
         outcome_side: candidate.outcome_side,
         composite_score: candidate.composite_score,
@@ -287,57 +295,38 @@ fn compose_recommendation(
         confidence: candidate.confidence,
         expected_return_bps: Bps::new(candidate.expected_return_bps),
         downside_bps: Bps::new(candidate.downside_bps),
-        entry_plan: entry_plan(candidate, input.as_of, valid_until, input.runtime_config),
+        identity: capture.identity.clone(),
+        market_context: capture.market_context.clone(),
+        rank_before_portfolio: i32::try_from(candidate.rank_before_portfolio).map_err(|error| {
+            ReportError::NumericOverflow {
+                field: "recommendation.rank_before_portfolio",
+                detail: error.to_string(),
+            }
+        })?,
+        liquidity_score: candidate.liquidity_score,
+        data_quality_score: candidate.data_quality_score,
+        model_score_percentile: candidate.model_score_percentile,
+        entry_plan: derive_entry_plan(candidate, input.as_of, valid_until, input.runtime_config),
         sizing_plan: planned.sizing.clone(),
         exit_plan: exit_plan(candidate, input.as_of, input.runtime_config)?,
         risk_envelope,
         factor_breakdown: factor_breakdown(candidate),
-        evidence_refs: EvidenceRefs {
+        evidence_refs: EvidenceRefs::from_input(EvidenceRefsInput {
             signal_candidate_id: candidate.signal_candidate_id.clone(),
             feature_vector_id,
             model_run_id,
             market_selection_id: input.market_selection_id.clone(),
-            book_snapshot_ref: None,
+            book_snapshot_ref: capture.book_snapshot_ref.clone(),
             runtime_config_version_id: input.runtime_config_version_id.clone(),
             model_version_id: input.model_version_id.clone(),
             factor_definition_versions: factor_definition_versions(candidate),
-            data_quality_report_ref: None,
-        },
+            data_quality_snapshot_ref: data_quality_snapshot_ref.clone(),
+        }),
         execution_eligibility: execution_eligibility(&auto_gate, input.runtime_config),
         valid_from: input.as_of,
         valid_until,
         status: RecommendationStatus::Published,
     })
-}
-
-fn entry_plan(
-    candidate: &SignalCandidate,
-    as_of: DateTime<Utc>,
-    valid_until: DateTime<Utc>,
-    config: &RuntimeConfig,
-) -> EntryPlan {
-    EntryPlan {
-        trigger_kind: EntryTriggerKind::Immediate,
-        trigger_price: None,
-        limit_price: Some(candidate.entry_price_ref),
-        max_slippage_bps: Bps::new(Decimal::from(
-            config.execution.entry_order_policy.max_slippage_bps,
-        )),
-        valid_from: as_of,
-        valid_until,
-        // Minimum *visible book depth* required at entry (admission gate), not the
-        // minimum order size — those are distinct governed knobs.
-        min_depth_usd: Usd::new(parse_decimal_lossless(
-            &config.data_quality.min_book_depth_usd.value,
-        )),
-        // Maximum tolerated book staleness at entry (not the CH fact lag budget).
-        max_book_age_ms: config.data_quality.max_book_age_ms,
-        confirmation_window_secs: 0,
-        // An `Immediate` entry has no trigger to wait for, so the
-        // "cancel if it never triggers" guard is inapplicable.
-        cancel_if_not_triggered: false,
-        entry_reason: candidate.model_explanation.headline.clone(),
-    }
 }
 
 fn exit_plan(
@@ -513,18 +502,14 @@ fn auto_execution_gate(
 fn report_summary(
     input: &ComposeReportInput<'_>,
     recommendations: &[NewRecommendation],
-    selected_by_market: &HashMap<MarketId, &SelectedMarket>,
 ) -> ReportSummary {
     let mut category_allocation: BTreeMap<MarketCategory, Usd> = BTreeMap::new();
     let mut event_allocation: BTreeMap<EventId, Usd> = BTreeMap::new();
     for rec in recommendations {
-        if let Some(selected) = selected_by_market.get(&rec.market_id) {
-            *category_allocation.entry(selected.category).or_default() +=
-                rec.sizing_plan.suggested_usd;
-            *event_allocation
-                .entry(selected.event_id.clone())
-                .or_default() += rec.sizing_plan.suggested_usd;
-        }
+        *category_allocation
+            .entry(rec.identity.category)
+            .or_default() += rec.sizing_plan.suggested_usd;
+        *event_allocation.entry(rec.event_id.clone()).or_default() += rec.sizing_plan.suggested_usd;
     }
     let total_suggested_usd = recommendations
         .iter()
@@ -555,7 +540,7 @@ fn report_summary(
     });
 
     ReportSummary {
-        market_selection_count: u32::try_from(input.selected.len()).unwrap_or(u32::MAX),
+        market_selection_count: input.market_selection_count,
         candidate_count: input.candidate_count,
         rejected_count: input
             .feature_rejected_count
@@ -569,7 +554,7 @@ fn report_summary(
         average_score,
         min_score,
         model_confidence_summary: confidence_summary(recommendations),
-        data_quality_summary: data_quality_summary(input),
+        data_quality_summary: input.data_quality_snapshot.tokens_json.summary(),
         top_rejection_reasons: rejection_summary(input),
         execution_eligibility_summary: eligibility_summary(recommendations),
         empty_reason: input.empty.as_ref().map(|empty| empty.reason),
@@ -599,29 +584,6 @@ fn confidence_summary(recommendations: &[NewRecommendation]) -> ConfidenceSummar
             .max()
             .unwrap_or_default(),
     }
-}
-
-fn data_quality_summary(input: &ComposeReportInput<'_>) -> DataQualitySummary {
-    let mut summary = DataQualitySummary {
-        insufficient_count: input.feature_rejected_count,
-        ..DataQualitySummary::default()
-    };
-    for info in input.feature_infos {
-        match info.data_quality {
-            DataQualityStatus::Fresh => summary.fresh_count += 1,
-            DataQualityStatus::Acceptable => {
-                summary.acceptable_count += 1;
-            }
-            DataQualityStatus::Degraded => {
-                summary.degraded_count += 1;
-            }
-            DataQualityStatus::Stale => summary.stale_count += 1,
-            DataQualityStatus::Insufficient => {
-                summary.insufficient_count += 1;
-            }
-        }
-    }
-    summary
 }
 
 fn rejection_summary(input: &ComposeReportInput<'_>) -> Vec<RejectionReasonCount> {
@@ -730,20 +692,6 @@ fn operation_log(
         governance_audit_event_id: None,
         governance_audit_sequence: None,
     }
-}
-
-fn selected_by_market(selected: &[SelectedMarket]) -> HashMap<MarketId, &SelectedMarket> {
-    selected
-        .iter()
-        .map(|market| (market.market_id.clone(), market))
-        .collect()
-}
-
-fn feature_by_market(infos: &[FeatureVectorInfo]) -> HashMap<MarketId, FeatureVectorId> {
-    infos
-        .iter()
-        .map(|info| (info.market_id.clone(), info.feature_vector_id.clone()))
-        .collect()
 }
 
 fn empty_portfolio_plan(
@@ -856,21 +804,32 @@ fn parse_decimal_lossless(value: &str) -> Decimal {
 #[cfg(test)]
 mod tests {
     use chrono::{Duration, TimeZone, Utc};
+    use quant_pivot_error::{QuantError, report::ReportError};
     use quant_pivot_models::{
+        domain::quant::NewReportDataQualitySnapshot,
         enums::quant::{
-            BindingConstraint, IneligibilityReason, OutcomeSide, QuantRuntimeMode,
+            BindingConstraint, EmptyReason, IneligibilityReason, OutcomeSide, QuantRuntimeMode,
             SettlementPolicy, SizingModelKind,
         },
         runtime_config::RuntimeConfig,
         types::{
-            Bps, MarketId, ModelRunId, Price, Probability, Shares, SignalCandidateId, SizingPlan,
-            TokenId, Usd,
+            Bps, ContentHash, MarketId, MarketSelectionId, ModelRunId, ModelVersionId, Price,
+            Probability, ReportDataQualitySnapshotId, ReportDataQualityTokens, RiskEnvelope,
+            Shares, SignalCandidateId, SizingPlan, TokenId, Usd,
         },
     };
-    use quant_pivot_research::model::{ModelExplanation, SignalCandidate};
+    use quant_pivot_research::{
+        model::{ModelExplanation, SignalCandidate},
+        portfolio::{AccountSnapshot, PlannedRecommendation},
+    };
     use rust_decimal_macros::dec;
+    use std::collections::HashMap;
 
-    use super::{auto_execution_gate, execution_eligibility, exit_plan};
+    use super::{
+        ComposeReportInput, DefaultRecommendationComposer, RecommendationComposer,
+        auto_execution_gate, empty_plan_for_report, execution_eligibility, exit_plan,
+    };
+    use crate::report::types::ReportTrigger;
 
     fn candidate() -> SignalCandidate {
         SignalCandidate {
@@ -893,6 +852,9 @@ mod tests {
             },
             rejection_warnings: Vec::new(),
             rank_before_portfolio: 1,
+            liquidity_score: Probability::ZERO,
+            data_quality_score: Probability::ZERO,
+            model_score_percentile: Probability::ZERO,
             as_of: Utc
                 .with_ymd_and_hms(2026, 6, 1, 0, 0, 0)
                 .single()
@@ -994,5 +956,113 @@ mod tests {
 
         let eligibility = execution_eligibility(&gate, &config);
         assert!(eligibility.is_eligible(QuantRuntimeMode::AutoExecution));
+    }
+
+    fn planned_recommendation(candidate: SignalCandidate) -> PlannedRecommendation {
+        PlannedRecommendation {
+            candidate,
+            sizing: SizingPlan {
+                suggested_usd: Usd::new(dec!(100)),
+                suggested_shares: Shares::new(dec!(100)),
+                max_usd: Usd::new(dec!(500)),
+                min_usd: Usd::new(dec!(10)),
+                portfolio_weight_pct: dec!(0.05),
+                market_exposure_after_usd: Usd::new(dec!(100)),
+                event_exposure_after_usd: Usd::new(dec!(100)),
+                category_exposure_after_usd: Usd::new(dec!(100)),
+                binding_constraint: BindingConstraint::KellyCap,
+                sizing_reason: "test".to_owned(),
+                sizing_model: SizingModelKind::Kelly,
+                edge_bps: Some(Bps::new(dec!(120))),
+                kelly_fraction_applied: Some(dec!(0.5)),
+            },
+            risk_envelope: RiskEnvelope {
+                max_loss_usd: Usd::new(dec!(120)),
+                max_slippage_bps: Bps::new(dec!(50)),
+                max_position_usd: Usd::new(dec!(500)),
+                max_market_exposure_usd: Usd::new(dec!(500)),
+                max_event_exposure_usd: Usd::new(dec!(750)),
+                max_category_exposure_usd: Usd::new(dec!(1500)),
+                requires_approval: true,
+                auto_execution_allowed: false,
+                risk_notes: Vec::new(),
+                envelope_hash: ContentHash::parse(format!("blake3:{}", "0".repeat(64)))
+                    .expect("hash"),
+            },
+            risk_adjusted_score: Probability::new(dec!(0.7)),
+            rank: 1,
+        }
+    }
+
+    #[test]
+    fn compose_rejects_missing_decision_capture() {
+        let as_of = Utc
+            .with_ymd_and_hms(2026, 6, 1, 0, 0, 0)
+            .single()
+            .expect("valid time");
+        let trigger_time = as_of + Duration::seconds(120);
+        let config = RuntimeConfig::default();
+        let account = AccountSnapshot::new(
+            as_of,
+            quant_pivot_models::enums::quant::AccountSource::Polymarket,
+            Usd::new(dec!(10_000)),
+            Usd::new(dec!(10_000)),
+            Usd::ZERO,
+            Vec::new(),
+        );
+        let market_selection_id = MarketSelectionId::from_v7();
+        let model_run_id = ModelRunId::from_v7();
+        let planned = vec![planned_recommendation(candidate())];
+        let portfolio_plan = empty_plan_for_report(
+            Some(model_run_id.clone()),
+            market_selection_id.clone(),
+            as_of,
+            &account,
+            &config,
+            EmptyReason::NoPositiveSignal,
+            0,
+        );
+        let data_quality_snapshot = NewReportDataQualitySnapshot {
+            report_data_quality_snapshot_id: ReportDataQualitySnapshotId::from_v7(),
+            as_of,
+            runtime_config_version_id: quant_pivot_models::types::RuntimeConfigVersionId::from_v7(),
+            tokens_json: ReportDataQualityTokens(Vec::new()),
+        };
+
+        let result = DefaultRecommendationComposer.compose(ComposeReportInput {
+            trigger: &ReportTrigger::AdHoc {
+                request_id: "compose-test".to_owned(),
+            },
+            trigger_key: "ad_hoc:compose-test".to_owned(),
+            trigger_time,
+            source_delay_secs: 0,
+            as_of,
+            runtime_config_version_id: quant_pivot_models::types::RuntimeConfigVersionId::from_v7(),
+            runtime_config: &config,
+            runtime_mode: QuantRuntimeMode::ReportOnly,
+            model_version_id: ModelVersionId::from_v7(),
+            market_selection_id,
+            account: &account,
+            portfolio_plan,
+            planned: &planned,
+            planner_rejected: &[],
+            captures: HashMap::new(),
+            feature_vector_by_market: HashMap::new(),
+            data_quality_snapshot,
+            model_run_id: Some(model_run_id),
+            candidate_count: 1,
+            feature_rejected_count: 0,
+            market_selection_count: 1,
+            empty: None,
+            top_n: 5,
+        });
+
+        assert!(matches!(
+            result,
+            Err(QuantError::Report(ReportError::InvariantViolation {
+                stage: "compose",
+                ..
+            }))
+        ));
     }
 }

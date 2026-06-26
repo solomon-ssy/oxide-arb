@@ -3,24 +3,27 @@
 use std::sync::Arc;
 
 use chrono::{DateTime, Duration, Utc};
-use quant_pivot_error::{QuantError, QuantResult};
+use quant_pivot_error::{QuantError, QuantResult, report::ReportError};
 use quant_pivot_models::{
     domain::{NewOperationLog, RecommendationReportInfo, ReportLifecycleEvent},
     enums::{
         operation_log::{OperationCategory, OperationOutcome},
-        quant::{QuantRuntimeMode, ReportKind},
+        quant::{EmptyReason, QuantRuntimeMode, RecommendationReportStatus, ReportKind},
         rbac::ResourceType,
     },
+    runtime_config::RuntimeConfig,
     types::{OperationLogId, RecommendationReportId},
 };
-use quant_pivot_repository::traits::RecommendationReportRepository;
+use quant_pivot_repository::traits::{
+    RecommendationReportRepository, RuntimeConfigVersionRepository,
+};
 
-use crate::governance::RuntimeModeHandle;
+use crate::{governance::RuntimeModeHandle, observability::metrics_hub::MetricsHub};
 
 use super::{
-    builder::ReportBuilder,
+    builder::{ReportBuilder, report_as_of},
     publisher::ReportPublisher,
-    types::{BuildReportRequest, ReportTrigger},
+    types::{BuildReportRequest, ComposedReport, ReportTrigger},
 };
 
 /// Scheduled report trigger request.
@@ -42,17 +45,21 @@ pub struct AdHocReportRequest {
 /// Dependencies for [`ReportLifecycleService`].
 pub struct ReportLifecycleDeps {
     pub report_repo: Arc<dyn RecommendationReportRepository>,
+    pub runtime_config_repo: Arc<dyn RuntimeConfigVersionRepository>,
     pub builder: Arc<dyn ReportBuilder>,
     pub publisher: Arc<ReportPublisher>,
     pub runtime_mode: RuntimeModeHandle,
+    pub metrics: Arc<MetricsHub>,
 }
 
 /// End-to-end report lifecycle entry point.
 pub struct ReportLifecycleService {
     report_repo: Arc<dyn RecommendationReportRepository>,
+    runtime_config_repo: Arc<dyn RuntimeConfigVersionRepository>,
     builder: Arc<dyn ReportBuilder>,
     publisher: Arc<ReportPublisher>,
     runtime_mode: RuntimeModeHandle,
+    metrics: Arc<MetricsHub>,
 }
 
 impl ReportLifecycleService {
@@ -61,9 +68,11 @@ impl ReportLifecycleService {
     pub fn new(deps: ReportLifecycleDeps) -> Self {
         Self {
             report_repo: deps.report_repo,
+            runtime_config_repo: deps.runtime_config_repo,
             builder: deps.builder,
             publisher: deps.publisher,
             runtime_mode: deps.runtime_mode,
+            metrics: deps.metrics,
         }
     }
 
@@ -175,6 +184,7 @@ impl ReportLifecycleService {
     }
 
     async fn run(&self, request: BuildReportRequest) -> QuantResult<RecommendationReportInfo> {
+        let trigger_time = request.trigger_time;
         let trigger_key = request.trigger.key(request.trigger_time);
         if let Some(existing) = self.report_repo.find_by_trigger_key(&trigger_key).await? {
             return Ok(existing);
@@ -182,7 +192,8 @@ impl ReportLifecycleService {
 
         // Ephemeral start/fail signals correlate by `trigger_key` (no row yet).
         let runtime_mode = self.runtime_mode.current();
-        let as_of = request.trigger_time;
+        let as_of = report_as_of(self.runtime_config_repo.as_ref(), &request).await?;
+
         self.publisher
             .publish_ephemeral(ReportLifecycleEvent::started(
                 trigger_key.clone(),
@@ -198,6 +209,23 @@ impl ReportLifecycleService {
                 return Err(error);
             }
         };
+        let config = active_runtime_config(self.runtime_config_repo.as_ref(), trigger_time).await?;
+        if should_suppress_empty_report(&composed, &config) {
+            let empty_reason = empty_reason_from_composed(&composed);
+            self.publisher
+                .publish_ephemeral(ReportLifecycleEvent::ephemeral_empty(
+                    trigger_key.clone(),
+                    ReportKind::TopN,
+                    runtime_mode,
+                    as_of,
+                    empty_reason,
+                ));
+            self.metrics.report_skipped_empty_total.inc();
+            return Err(ReportError::EmptyReportSuppressed {
+                reason: empty_reason.as_str().to_owned(),
+            }
+            .into());
+        }
         match self
             .report_repo
             .create_report(composed.transaction.clone())
@@ -235,6 +263,30 @@ impl ReportLifecycleService {
                 error.to_string(),
             ));
     }
+}
+
+async fn active_runtime_config(
+    runtime_config_repo: &dyn RuntimeConfigVersionRepository,
+    trigger_time: DateTime<Utc>,
+) -> QuantResult<RuntimeConfig> {
+    let version = runtime_config_repo
+        .load_active_at(trigger_time)
+        .await?
+        .ok_or_else(|| QuantError::config("no active runtime config version"))?;
+    RuntimeConfig::from_json(&version.config_json).map_err(QuantError::from)
+}
+
+fn should_suppress_empty_report(composed: &ComposedReport, config: &RuntimeConfig) -> bool {
+    !config.reports.publish_empty_reports
+        && composed.transaction.recommendations.is_empty()
+        && composed.transaction.report.status == RecommendationReportStatus::PublishedEmpty
+}
+
+fn empty_reason_from_composed(composed: &ComposedReport) -> EmptyReason {
+    composed
+        .notification
+        .empty_reason
+        .unwrap_or(EmptyReason::EmptySelection)
 }
 
 fn lifecycle_operation_log(

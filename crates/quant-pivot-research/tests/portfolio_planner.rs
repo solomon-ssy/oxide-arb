@@ -54,6 +54,9 @@ fn candidate(
         },
         rejection_warnings: Vec::new(),
         rank_before_portfolio: 0,
+        liquidity_score: Probability::ZERO,
+        data_quality_score: Probability::ZERO,
+        model_score_percentile: Probability::ZERO,
         as_of: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
     }
 }
@@ -106,6 +109,7 @@ const fn plan_candidate(
         category,
         event_id: None,
         liquidity_usd: liquidity,
+        liquidity_score: Probability::ZERO,
     }
 }
 

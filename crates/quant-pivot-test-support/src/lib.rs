@@ -8,6 +8,8 @@ pub mod catalog_fixtures;
 pub mod mocks;
 pub mod pg;
 pub mod report_fixtures;
+pub mod report_pipeline_harness;
+pub mod report_snapshots;
 
 use uuid::Uuid;
 

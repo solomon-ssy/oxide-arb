@@ -13,9 +13,9 @@ use super::{AccountBundle, DataBundle, GovernanceBundle, InfraBundle, ResearchBu
 use crate::{
     infra::schedule::ReportScheduleRunner,
     report::{
-        DefaultRecommendationComposer, DefaultReportBuilder, ReportBuilderDeps,
-        ReportLifecycleDeps, ReportLifecycleService, ReportPublisher, ReportPublisherDeps,
-        build_report_scheduler,
+        DefaultRecommendationComposer, DefaultReportBuilder, DefaultReportReadinessGate,
+        ReportBuilderDeps, ReportLifecycleDeps, ReportLifecycleService, ReportPublisher,
+        ReportPublisherDeps, build_report_scheduler,
     },
 };
 
@@ -58,6 +58,10 @@ impl ReportBundle {
             composer,
             pit_source: Arc::clone(&deps.data.pit_source),
             runtime_mode: deps.governance.runtime_mode.clone(),
+            readiness_gate: Arc::new(DefaultReportReadinessGate::new(
+                Arc::clone(&deps.data.catalog),
+                Arc::clone(&deps.data.ws_manager),
+            )),
         }));
         let publisher = Arc::new(ReportPublisher::new(ReportPublisherDeps {
             events: deps.events,
@@ -67,9 +71,13 @@ impl ReportBundle {
         }));
         let lifecycle = Arc::new(ReportLifecycleService::new(ReportLifecycleDeps {
             report_repo,
+            runtime_config_repo: Arc::new(PgRuntimeConfigVersionRepository::new(
+                deps.infra.pg.connection().clone(),
+            )),
             builder,
             publisher,
             runtime_mode: deps.governance.runtime_mode.clone(),
+            metrics: Arc::clone(&deps.infra.metrics),
         }));
         let scheduler = build_report_scheduler(
             Arc::clone(&lifecycle),

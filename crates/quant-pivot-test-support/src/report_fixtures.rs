@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 use chrono::{TimeZone, Utc};
 use rust_decimal_macros::dec;
 
+use quant_pivot_models::enums::market::MarketStatus;
 use quant_pivot_models::{
     domain::{RecommendationInfo, RecommendationReportInfo},
     enums::{
@@ -22,14 +23,16 @@ use quant_pivot_models::{
         },
     },
     types::{
-        AccountSnapshotId, Bps, ConfidenceSummary, ContentHash, DataQualitySummary,
-        EligibilitySummary, EntryPlan, EventId, EvidenceRefs, ExecutionEligibility, ExitPlan,
-        FactorBreakdownEntry, FeatureVectorId, MarketId, MarketSelectionId, ModelRunId,
-        ModelVersionId, PortfolioPlanId, Price, Probability, RecommendationFactorBreakdown,
-        RecommendationId, RecommendationReportId, ReportSummary, RiskEnvelope,
+        AccountSnapshotId, BookSnapshotRef, Bps, ConfidenceSummary, ContentHash,
+        DataQualitySummary, EligibilitySummary, EntryPlan, EventId, EvidenceRefs,
+        ExecutionEligibility, ExitPlan, FactorBreakdownEntry, FeatureVectorId, MarketContext,
+        MarketId, MarketSelectionId, ModelRunId, ModelVersionId, PortfolioPlanId, Price,
+        Probability, RecommendationFactorBreakdown, RecommendationId, RecommendationIdentity,
+        RecommendationReportId, ReportDataQualitySnapshotId, ReportSummary, RiskEnvelope,
         RuntimeConfigVersionId, Shares, SignalCandidateId, SizingPlan, TokenId, Usd,
     },
 };
+use std::str::FromStr;
 
 fn content_hash() -> ContentHash {
     ContentHash::parse(format!("blake3:{}", "0".repeat(64))).expect("valid hash")
@@ -61,6 +64,7 @@ pub fn report(
         account_source: AccountSource::Polymarket,
         capital_base_usd: Usd::new(dec!(10000)),
         account_snapshot_ref: AccountSnapshotId::from_v7(),
+        data_quality_snapshot_ref: ReportDataQualitySnapshotId::from_v7(),
         summary_json: report_summary(),
         published_at: Some(Utc.timestamp_opt(1_700_000_000, 0).unwrap()),
         revoked_at: None,
@@ -134,6 +138,12 @@ pub fn recommendation(
         confidence: Probability::new(dec!(0.72)),
         expected_return_bps: Bps::new(dec!(150)),
         downside_bps: Bps::new(dec!(80)),
+        identity: recommendation_identity(),
+        market_context: market_context(),
+        rank_before_portfolio: rank,
+        liquidity_score: Probability::new(dec!(0.8)),
+        data_quality_score: Probability::new(dec!(0.9)),
+        model_score_percentile: Probability::new(dec!(0.75)),
         entry_plan: entry_plan(),
         sizing_plan: sizing_plan(suggested_usd),
         exit_plan: exit_plan(),
@@ -229,17 +239,49 @@ fn factor_breakdown() -> RecommendationFactorBreakdown {
     }])
 }
 
+fn recommendation_identity() -> RecommendationIdentity {
+    RecommendationIdentity {
+        category: MarketCategory::Politics,
+        question: "Will the event resolve Yes?".to_owned(),
+        outcome_name: "Yes".to_owned(),
+    }
+}
+
+const fn market_context() -> MarketContext {
+    MarketContext {
+        best_bid: Some(Price::new(dec!(0.41))),
+        best_ask: Some(Price::new(dec!(0.43))),
+        mid_price: Some(Price::new(dec!(0.42))),
+        spread_bps: Some(Bps::new(dec!(50))),
+        depth_usd: Usd::new(dec!(5000)),
+        volume_24h_usd: Some(Usd::new(dec!(10000))),
+        book_age_ms: 500,
+        time_to_resolution_secs: Some(86_400),
+        market_status: MarketStatus::Active,
+        neg_risk: false,
+        fee_rate: None,
+    }
+}
+
+fn book_snapshot_ref() -> BookSnapshotRef {
+    BookSnapshotRef::from_str(&format!(
+        "book:live:token-abc:1:1700000000@blake3:{}",
+        "0".repeat(64)
+    ))
+    .expect("valid book snapshot ref")
+}
+
 fn evidence_refs() -> EvidenceRefs {
     EvidenceRefs {
         signal_candidate_id: SignalCandidateId::from_v7(),
         feature_vector_id: FeatureVectorId::from_v7(),
         model_run_id: ModelRunId::from_v7(),
         market_selection_id: MarketSelectionId::from_v7(),
-        book_snapshot_ref: Some("book:abc".to_owned()),
+        book_snapshot_ref: book_snapshot_ref(),
         runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
         model_version_id: ModelVersionId::from_v7(),
         factor_definition_versions: Vec::new(),
-        data_quality_report_ref: None,
+        data_quality_snapshot_ref: ReportDataQualitySnapshotId::from_v7(),
     }
 }
 

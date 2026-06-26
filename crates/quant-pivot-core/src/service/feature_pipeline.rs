@@ -15,19 +15,20 @@ use crate::{
     pipeline::feature_window_provider::FeatureWindowProvider,
 };
 use chrono::{DateTime, Utc};
-use futures_util::future::try_join_all;
+use futures_util::future::join_all;
 use quant_pivot_error::{QuantError, QuantResult, report::ReportError};
 use quant_pivot_models::{
-    domain::{FeatureVectorInfo, NewFeatureVector},
+    domain::{FeatureVectorInfo, NewFeatureVector, quant::NewReportDataQualitySnapshot},
     enums::quant::DataQualityStatus,
     runtime_config::{DataQualityConfig, FeaturesConfig},
-    types::{MarketId, TokenId},
+    types::{MarketId, RuntimeConfigVersionId, TokenId, Usd},
 };
 use quant_pivot_repository::traits::FeatureRepository;
 use quant_pivot_research::{
     features::{
-        ConfiguredFeatureBuilder, FeatureName, FeatureSchema, FeatureVector, MarketWindowSnapshot,
-        NullReason, PitView, feature_events, merged_required_features,
+        ConfiguredFeatureBuilder, FeatureName, FeatureSchema, FeatureVector, MarketDecisionCapture,
+        MarketWindowSnapshot, NullReason, PitView, RejectedMarketDraft, ResolvedMarketBundle,
+        draft_data_quality_snapshot, feature_events, merged_required_features,
     },
     selection::{ModelFeatureRequirements, SelectedMarket},
 };
@@ -53,6 +54,10 @@ pub struct FeaturePipelineRequest<'a> {
     pub source_delay_secs: u64,
     /// Point-in-time data view (live or historical).
     pub pit: PitView<'a>,
+    /// Config version governing this round (DQ snapshot header).
+    pub runtime_config_version_id: RuntimeConfigVersionId,
+    /// Liquidity cap used to normalize capture liquidity scores.
+    pub liquidity_cap_usd: Usd,
 }
 
 /// A market whose feature vector failed the data-quality bar and was excluded.
@@ -77,6 +82,10 @@ pub struct FeaturePipelineResult {
     pub rejected: Vec<RejectedMarket>,
     /// Postgres persistence rows, aligned with `accepted`.
     pub persisted: Vec<FeatureVectorInfo>,
+    /// Decision captures keyed by market id (accepted + rejected).
+    pub captures: HashMap<MarketId, MarketDecisionCapture>,
+    /// Draft report-level DQ snapshot for the transaction composer.
+    pub data_quality_snapshot: NewReportDataQualitySnapshot,
 }
 
 /// Orchestrates the online feature build loop for a selection snapshot.
@@ -120,47 +129,78 @@ impl FeaturePipelineService {
         let source_delay = Duration::from_secs(request.source_delay_secs);
         let windows = self.load_windows(&builder, &request, source_delay).await?;
 
-        // Resolve PIT inputs for every market concurrently (the only async step),
-        // then build every vector in parallel from those frozen inputs.
-        // `try_join_all` preserves input order so vectors align with selection.
-        let resolve_futures = request
+        let max_concurrent = usize::try_from(request.features.max_concurrent_market_resolves)
+            .unwrap_or(usize::MAX)
+            .max(1);
+        let resolve_jobs = request
             .included
             .iter()
-            .map(|market| {
+            .enumerate()
+            .map(|(index, market)| {
                 let window = windows.get(&market.primary_token_id).ok_or_else(|| {
-                    ReportError::InvariantViolation {
+                    QuantError::from(ReportError::InvariantViolation {
                         stage: "feature_pipeline",
                         detail: format!(
                             "missing prefetched window for token {}",
                             market.primary_token_id.as_str()
                         ),
-                    }
+                    })
                 })?;
-                Ok(builder.resolve_inputs(market, request.as_of, request.pit, window))
+                Ok((index, market, window))
             })
             .collect::<QuantResult<Vec<_>>>()?;
-        let resolved = try_join_all(resolve_futures).await?;
+
+        let mut bundles = Vec::with_capacity(resolve_jobs.len());
+        for chunk in resolve_jobs.chunks(max_concurrent) {
+            let chunk_results = join_all(chunk.iter().map(|(_, market, window)| {
+                builder.resolve_inputs(
+                    market,
+                    request.as_of,
+                    request.pit,
+                    window,
+                    request.liquidity_cap_usd,
+                )
+            }))
+            .await;
+            for ((index, _, _), bundle) in chunk.iter().zip(chunk_results) {
+                bundles.push((*index, bundle?));
+            }
+        }
+        bundles.sort_by_key(|(index, _)| *index);
+        let bundles: Vec<ResolvedMarketBundle<'_>> =
+            bundles.into_iter().map(|(_, bundle)| bundle).collect();
 
         let required = &request.model_requirements.required_features;
         let vectors =
-            builder.build_batch(&resolved, required, request.features, request.data_quality);
+            builder.build_batch(&bundles, required, request.features, request.data_quality);
 
-        // Partition: a vector whose quality is `Insufficient` is excluded — never
-        // persisted, never emitted, never offered downstream.
         let required_names = merged_required_features(required, request.features);
+        let schema = builder.schema();
         let mut accepted = Vec::with_capacity(vectors.len());
         let mut rejected = Vec::new();
-        let schema = builder.schema();
-        for vector in vectors {
+        let mut rejected_drafts = Vec::new();
+        for (_bundle, vector) in bundles.iter().zip(&vectors) {
             if vector.data_quality == DataQualityStatus::Insufficient {
-                rejected.push(reject_market(&vector, &required_names, schema));
+                let rejected_market = reject_market(vector, &required_names, schema);
+                rejected_drafts.push(RejectedMarketDraft {
+                    market_id: rejected_market.market_id.clone(),
+                    missing_required: rejected_market.missing_required.clone(),
+                });
+                rejected.push(rejected_market);
             } else {
-                accepted.push(vector);
+                accepted.push(vector.clone());
             }
         }
 
-        // Persist the accepted vectors in one transactional batch (atomic per
-        // round), then emit their present-only long-format facts to ClickHouse.
+        let captures = finalize_captures(&bundles, &vectors);
+        let data_quality_snapshot = draft_data_quality_snapshot(
+            request.as_of,
+            request.runtime_config_version_id.clone(),
+            &bundles,
+            &vectors,
+            &rejected_drafts,
+        );
+
         let rows = accepted
             .iter()
             .map(FeatureVector::try_to_new)
@@ -172,15 +212,18 @@ impl FeaturePipelineService {
             .map_err(QuantError::from)?;
 
         let ingestion_time = Utc::now().timestamp_millis();
-        for vector in &accepted {
-            self.event_writer
-                .write_batch(feature_events(vector, schema, ingestion_time));
-        }
+        let ch_rows = accepted
+            .iter()
+            .flat_map(|vector| feature_events(vector, schema, ingestion_time))
+            .collect::<Vec<_>>();
+        self.event_writer.write_batch(ch_rows);
 
         Ok(FeaturePipelineResult {
             accepted,
             rejected,
             persisted,
+            captures,
+            data_quality_snapshot,
         })
     }
 
@@ -200,6 +243,22 @@ impl FeaturePipelineService {
             .load_windows(request.included, request.as_of, lookback, source_delay)
             .await
     }
+}
+
+/// Merge post-build data quality into frozen captures for every market.
+fn finalize_captures(
+    bundles: &[ResolvedMarketBundle<'_>],
+    vectors: &[FeatureVector],
+) -> HashMap<MarketId, MarketDecisionCapture> {
+    bundles
+        .iter()
+        .zip(vectors)
+        .map(|(bundle, vector)| {
+            let mut capture = bundle.capture.clone();
+            capture.data_quality = vector.data_quality;
+            (capture.market_id.clone(), capture)
+        })
+        .collect()
 }
 
 /// Summarize why a market was rejected: the required / critical features that

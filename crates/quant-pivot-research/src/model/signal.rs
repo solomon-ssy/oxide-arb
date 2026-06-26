@@ -114,6 +114,12 @@ pub struct SignalCandidate {
     pub rejection_warnings: Vec<SignalWarning>,
     /// Rank among candidates before portfolio pruning.
     pub rank_before_portfolio: u32,
+    /// Normalized liquidity depth factor score in `[0, 1]`.
+    pub liquidity_score: Probability,
+    /// Aggregate data-quality factor score in `[0, 1]`.
+    pub data_quality_score: Probability,
+    /// Within-batch composite-score percentile in `(0, 1]`.
+    pub model_score_percentile: Probability,
     /// Decision time.
     pub as_of: DateTime<Utc>,
 }
@@ -221,6 +227,9 @@ mod tests {
             },
             rejection_warnings: Vec::new(),
             rank_before_portfolio: 1,
+            liquidity_score: Probability::ZERO,
+            data_quality_score: Probability::ZERO,
+            model_score_percentile: Probability::ZERO,
             as_of: Utc::now(),
         };
 
@@ -254,6 +263,9 @@ mod tests {
             },
             rejection_warnings: Vec::new(),
             rank_before_portfolio: 3,
+            liquidity_score: Probability::ZERO,
+            data_quality_score: Probability::ZERO,
+            model_score_percentile: Probability::ZERO,
             as_of: Utc::now(),
         }
     }

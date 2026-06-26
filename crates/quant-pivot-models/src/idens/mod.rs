@@ -23,6 +23,7 @@ pub mod quant_portfolio_plan;
 pub mod quant_recommendation;
 pub mod quant_recommendation_attribution;
 pub mod quant_recommendation_report;
+pub mod quant_report_data_quality_snapshot;
 pub mod quant_shadow_comparison;
 pub mod quant_training_dataset;
 pub mod role;

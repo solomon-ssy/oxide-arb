@@ -295,7 +295,7 @@ async fn domain_feature_missing_emits_domain_missing_not_default() {
     }
 }
 
-// ── Family gating (PIT lookups skipped for disabled families) ───────────────
+// ── Family gating (feature inputs vs decision capture) ─────────────────────
 
 /// A PIT source that counts how many book / market lookups the builder issues.
 struct CountingPit {
@@ -324,8 +324,9 @@ impl PointInTimeDataSource for CountingPit {
 }
 
 #[tokio::test]
-async fn builder_skips_pit_lookups_for_disabled_families() {
-    // Only time-series + microstructure: neither needs a book or Gamma metadata.
+async fn builder_resolves_capture_inputs_even_when_feature_families_skip_book() {
+    // Only time-series + microstructure: no book- or metadata-sourced features, but
+    // decision capture still resolves book + market context for evidence refs.
     let config = FeaturesConfig {
         enabled_feature_families: vec![FeatureFamily::TimeSeries, FeatureFamily::Microstructure],
         ..FeaturesConfig::default()
@@ -363,13 +364,13 @@ async fn builder_skips_pit_lookups_for_disabled_families() {
 
     assert_eq!(
         source.book_calls.load(Ordering::Relaxed),
-        0,
-        "no book-sourced feature is enabled, so the builder must not resolve a book"
+        1,
+        "decision capture resolves book once even when feature compute skips book"
     );
     assert_eq!(
         source.market_calls.load(Ordering::Relaxed),
-        0,
-        "no metadata-sourced feature is enabled, so the builder must not resolve market context"
+        2,
+        "decision capture resolves market context plus registry metadata"
     );
 }
 

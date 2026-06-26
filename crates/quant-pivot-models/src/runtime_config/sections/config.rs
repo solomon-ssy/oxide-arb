@@ -114,6 +114,8 @@ pub struct FeaturesConfig {
     pub volatility_windows_secs: Vec<u64>,
     /// Order-book depth levels to inspect.
     pub depth_levels: Vec<u32>,
+    /// Maximum concurrent per-market PIT resolves in the feature pipeline.
+    pub max_concurrent_market_resolves: u32,
 }
 
 impl Default for FeaturesConfig {
@@ -132,6 +134,7 @@ impl Default for FeaturesConfig {
             momentum_windows_secs: vec![300, 900, 3_600],
             volatility_windows_secs: vec![900, 3_600],
             depth_levels: vec![1, 3, 5],
+            max_concurrent_market_resolves: 32,
         }
     }
 }

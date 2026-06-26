@@ -26,15 +26,16 @@ use quant_pivot_models::{
         ScheduleCadence, SizingModelConfig, validate_runtime_config,
     },
     types::{
-        AccountPositions, AccountSnapshotId, Bps, ConfidenceSummary, ContentHash,
+        AccountPositions, AccountSnapshotId, BookSnapshotRef, Bps, ConfidenceSummary, ContentHash,
         DataQualitySummary, EligibilitySummary, EntryPlan, EventId, EvidenceRefs,
         ExecutionEligibility, ExitPlan, ExposureBreakdown, FactorBreakdownEntry, FeatureVectorId,
         MarketId, MarketSelectionId, ModelRunId, ModelVersionId, PartialExitNode, PortfolioPlanId,
         PositionSnapshot, Price, Probability, RecommendationFactorBreakdown,
-        RecommendationReportId, ReportSummary, RiskEnvelope, RuntimeConfigVersionId, Shares,
-        SignalCandidateId, SizingPlan, TokenId, TrailingStop, Usd,
+        RecommendationReportId, ReportDataQualitySnapshotId, ReportSummary, RiskEnvelope,
+        RuntimeConfigVersionId, Shares, SignalCandidateId, SizingPlan, TokenId, TrailingStop, Usd,
     },
 };
+use std::str::FromStr;
 
 fn content_hash() -> ContentHash {
     ContentHash::parse(format!("blake3:{}", "0".repeat(64))).expect("valid hash")
@@ -143,17 +144,25 @@ fn factor_breakdown() -> RecommendationFactorBreakdown {
     }])
 }
 
+fn book_snapshot_ref() -> BookSnapshotRef {
+    BookSnapshotRef::from_str(&format!(
+        "book:live:token-abc:1:1700000000@blake3:{}",
+        "0".repeat(64)
+    ))
+    .expect("valid book snapshot ref")
+}
+
 fn evidence_refs() -> EvidenceRefs {
     EvidenceRefs {
         signal_candidate_id: SignalCandidateId::from_v7(),
         feature_vector_id: FeatureVectorId::from_v7(),
         model_run_id: ModelRunId::from_v7(),
         market_selection_id: MarketSelectionId::from_v7(),
-        book_snapshot_ref: Some("book:abc".to_owned()),
+        book_snapshot_ref: book_snapshot_ref(),
         runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
         model_version_id: ModelVersionId::from_v7(),
         factor_definition_versions: Vec::new(),
-        data_quality_report_ref: None,
+        data_quality_snapshot_ref: ReportDataQualitySnapshotId::from_v7(),
     }
 }
 
@@ -259,6 +268,7 @@ fn recommendation_report_header_has_account_columns() {
         account_source: AccountSource::Polymarket,
         capital_base_usd: Usd::new(dec!(10000)),
         account_snapshot_ref: AccountSnapshotId::from_v7(),
+        data_quality_snapshot_ref: ReportDataQualitySnapshotId::from_v7(),
         summary_json: report_summary(),
         published_at: None,
         revoked_at: None,

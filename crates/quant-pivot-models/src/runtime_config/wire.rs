@@ -260,6 +260,8 @@ pub struct EntryOrderPolicy {
     pub max_slippage_bps: u32,
     /// Whether entry orders may use marketable order types.
     pub allow_market_orders: bool,
+    /// Seconds a limit trigger must hold before entry fires.
+    pub confirmation_window_secs: u64,
 }
 
 impl Default for EntryOrderPolicy {
@@ -267,6 +269,7 @@ impl Default for EntryOrderPolicy {
         Self {
             max_slippage_bps: 50,
             allow_market_orders: false,
+            confirmation_window_secs: 0,
         }
     }
 }

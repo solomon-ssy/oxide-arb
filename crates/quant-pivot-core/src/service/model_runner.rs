@@ -51,7 +51,7 @@ use quant_pivot_research::{
     model::{
         ActiveSchemaBinding, DegradeAction, InferenceStage, ModelRuntimeFactoryBuilder,
         ModelRuntimeInput, ModelRuntimeOutput, QuantModelRuntime, SignalCandidate, WeightOverlay,
-        degrade_action, signal_candidate_event,
+        annotate, attach_rank_scores, degrade_action, signal_candidate_event,
     },
     selection::{ModelFeatureRequirements, SelectedMarket},
 };
@@ -475,8 +475,12 @@ impl ModelRunner {
         let emitted = u32::try_from(output.candidates.len()).unwrap_or(u32::MAX);
         // The full ranked candidate set feeds the signal-layer shadow comparison.
         let active_candidates = output.candidates.clone();
-        let (rows, accepted) =
+        let (rows, mut accepted) =
             partition_candidates(output.candidates, floor, min_confidence, event_time);
+        annotate(&mut accepted);
+        for candidate in &mut accepted {
+            attach_rank_scores(candidate);
+        }
         let metrics = serde_json::json!({
             "markets_scored": output.runtime_metrics.markets_scored,
             "candidates_emitted": output.runtime_metrics.candidates_emitted,

@@ -12,9 +12,11 @@ use quant_pivot_models::{
     domain::{
         NewAccountSnapshot, NewMarketSelection, NewModelRun, NewModelSpec, NewModelVersion,
         NewOperationLog, NewOrderIntent, NewPortfolioPlan, NewRecommendation,
-        NewRecommendationReport, NewReportTransaction, NewRuntimeConfigVersion, OperationLogQuery,
+        NewRecommendationReport, NewReportDataQualitySnapshot, NewReportTransaction,
+        NewRuntimeConfigVersion, OperationLogQuery,
     },
     entities::quant_market_selection::{SelectionExcludedMarketIds, SelectionIncludedMarketIds},
+    enums::market::MarketStatus,
     enums::{
         common::{MarketCategory, OrderType, Side},
         execution::OrderIntentKind,
@@ -31,15 +33,16 @@ use quant_pivot_models::{
         runtime_config::RuntimeConfigVersionSource,
     },
     types::{
-        AccountPositions, AccountSnapshotId, Bps, ConfidenceSummary, ContentHash,
+        AccountPositions, AccountSnapshotId, BookSnapshotRef, Bps, ConfidenceSummary, ContentHash,
         DataQualitySummary, EligibilitySummary, EntryOrderSpec, EntryPlan, EventId, EvidenceRefs,
         ExecutionEligibility, ExitPlan, ExitPolicySpec, ExposureBreakdown, FactorBreakdownEntry,
-        FeatureVectorId, MarketId, MarketSelectionId, ModelRunId, ModelSpecId, ModelVersionId,
-        OperationLogId, OrderIntentId, PortfolioConstraintsSnapshot, PortfolioPlanId,
-        PortfolioRejectedSummary, PortfolioRiskBudget, PositionSnapshot, Price, Probability,
-        RecommendationFactorBreakdown, RecommendationId, RecommendationReportId, ReportSummary,
-        RiskEnvelope, RuntimeConfigVersionId, SchemaVersion, SelectionExclusionSummary, Shares,
-        SignalCandidateId, SizingPlan, TokenId, Usd,
+        FeatureVectorId, MarketContext, MarketId, MarketSelectionId, ModelRunId, ModelSpecId,
+        ModelVersionId, OperationLogId, OrderIntentId, PortfolioConstraintsSnapshot,
+        PortfolioPlanId, PortfolioRejectedSummary, PortfolioRiskBudget, PositionSnapshot, Price,
+        Probability, RecommendationFactorBreakdown, RecommendationId, RecommendationIdentity,
+        RecommendationReportId, ReportDataQualitySnapshotId, ReportDataQualityTokens,
+        ReportSummary, RiskEnvelope, RuntimeConfigVersionId, SchemaVersion,
+        SelectionExclusionSummary, Shares, SignalCandidateId, SizingPlan, TokenId, Usd,
     },
 };
 use quant_pivot_repository::{
@@ -61,6 +64,7 @@ use quant_pivot_test_support::{
     pg::setup_pg,
 };
 use rust_decimal_macros::dec;
+use std::str::FromStr;
 
 fn content_hash(seed: char) -> ContentHash {
     ContentHash::parse(format!("blake3:{}", seed.to_string().repeat(64))).expect("hash")
@@ -148,6 +152,7 @@ async fn report_transaction_persists_chain_and_reserved_capital_sums_pending_int
 
     let ids = TxnIds {
         account_snapshot: AccountSnapshotId::from_v7(),
+        data_quality_snapshot: ReportDataQualitySnapshotId::from_v7(),
         portfolio_plan: PortfolioPlanId::from_v7(),
         report: RecommendationReportId::from_v7(),
         recommendation: RecommendationId::from_v7(),
@@ -178,6 +183,7 @@ async fn find_expirable_returns_published_reports_before_cutoff_only() {
 
     let ids = TxnIds {
         account_snapshot: AccountSnapshotId::from_v7(),
+        data_quality_snapshot: ReportDataQualitySnapshotId::from_v7(),
         portfolio_plan: PortfolioPlanId::from_v7(),
         report: RecommendationReportId::from_v7(),
         recommendation: RecommendationId::from_v7(),
@@ -460,6 +466,7 @@ async fn seed_market_selection(
 
 struct TxnIds {
     account_snapshot: AccountSnapshotId,
+    data_quality_snapshot: ReportDataQualitySnapshotId,
     portfolio_plan: PortfolioPlanId,
     report: RecommendationReportId,
     recommendation: RecommendationId,
@@ -476,6 +483,12 @@ fn build_report_transaction(ids: &TxnIds) -> NewReportTransaction {
         account_snapshot: NewAccountSnapshot {
             account_snapshot_id: ids.account_snapshot.clone(),
             ..new_account_snapshot()
+        },
+        data_quality_snapshot: NewReportDataQualitySnapshot {
+            report_data_quality_snapshot_id: ids.data_quality_snapshot.clone(),
+            as_of: Utc::now(),
+            runtime_config_version_id: ids.runtime_config_version.clone(),
+            tokens_json: ReportDataQualityTokens(Vec::new()),
         },
         portfolio_plan: NewPortfolioPlan {
             portfolio_plan_id: ids.portfolio_plan.clone(),
@@ -507,6 +520,7 @@ fn build_report_transaction(ids: &TxnIds) -> NewReportTransaction {
             account_source: AccountSource::Polymarket,
             capital_base_usd: Usd::new(dec!(10000)),
             account_snapshot_ref: ids.account_snapshot.clone(),
+            data_quality_snapshot_ref: ids.data_quality_snapshot.clone(),
             summary_json: report_summary(),
             published_at: Some(Utc::now()),
             revoked_at: None,
@@ -526,6 +540,12 @@ fn build_report_transaction(ids: &TxnIds) -> NewReportTransaction {
             confidence: Probability::new(dec!(0.72)),
             expected_return_bps: Bps::new(dec!(150)),
             downside_bps: Bps::new(dec!(80)),
+            identity: recommendation_identity(),
+            market_context: market_context(),
+            rank_before_portfolio: 1,
+            liquidity_score: Probability::new(dec!(0.8)),
+            data_quality_score: Probability::new(dec!(0.9)),
+            model_score_percentile: Probability::new(dec!(0.75)),
             entry_plan: entry_plan(),
             sizing_plan: sizing_plan(Usd::new(dec!(250))),
             exit_plan: exit_plan(),
@@ -652,17 +672,49 @@ fn factor_breakdown() -> RecommendationFactorBreakdown {
     }])
 }
 
+fn recommendation_identity() -> RecommendationIdentity {
+    RecommendationIdentity {
+        category: MarketCategory::Politics,
+        question: "Will the event resolve Yes?".to_owned(),
+        outcome_name: "Yes".to_owned(),
+    }
+}
+
+const fn market_context() -> MarketContext {
+    MarketContext {
+        best_bid: Some(Price::new(dec!(0.41))),
+        best_ask: Some(Price::new(dec!(0.43))),
+        mid_price: Some(Price::new(dec!(0.42))),
+        spread_bps: Some(Bps::new(dec!(50))),
+        depth_usd: Usd::new(dec!(5000)),
+        volume_24h_usd: Some(Usd::new(dec!(10000))),
+        book_age_ms: 500,
+        time_to_resolution_secs: Some(86_400),
+        market_status: MarketStatus::Active,
+        neg_risk: false,
+        fee_rate: None,
+    }
+}
+
+fn book_snapshot_ref() -> BookSnapshotRef {
+    BookSnapshotRef::from_str(&format!(
+        "book:live:token-1:1:1700000000@blake3:{}",
+        "0".repeat(64)
+    ))
+    .expect("valid book snapshot ref")
+}
+
 fn evidence_refs() -> EvidenceRefs {
     EvidenceRefs {
         signal_candidate_id: SignalCandidateId::from_v7(),
         feature_vector_id: FeatureVectorId::from_v7(),
         model_run_id: ModelRunId::from_v7(),
         market_selection_id: MarketSelectionId::from_v7(),
-        book_snapshot_ref: None,
+        book_snapshot_ref: book_snapshot_ref(),
         runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
         model_version_id: ModelVersionId::from_v7(),
         factor_definition_versions: Vec::new(),
-        data_quality_report_ref: None,
+        data_quality_snapshot_ref: ReportDataQualitySnapshotId::from_v7(),
     }
 }
 

@@ -344,6 +344,12 @@ fn feature_fields() -> Vec<FieldUiEntry> {
             Some(FieldWidget::JsonTree),
             None,
         ),
+        integer(
+            "features.max_concurrent_market_resolves",
+            "Max concurrent market resolves",
+            "特征 resolve 最大并发",
+            90,
+        ),
     ]
 }
 
@@ -766,6 +772,12 @@ fn execution_policy_fields() -> Vec<FieldUiEntry> {
             "Allow market orders",
             "允许市价单",
             120,
+        ),
+        integer(
+            "execution.entry_order_policy.confirmation_window_secs",
+            "Entry confirmation window",
+            "限价确认窗口秒数",
+            125,
         ),
         boolean(
             "execution.exit_order_policy.allow_reduce_only",

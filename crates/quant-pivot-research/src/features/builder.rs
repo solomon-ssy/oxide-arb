@@ -12,6 +12,10 @@ use crate::{
     features::{
         FeatureBuildInput, FeatureBuilder, FeatureVector, PitView,
         book::PriceBookFeatureBuilder,
+        decision_capture::{
+            ResolvedMarketBundle, empty_book, market_decision_capture_from_resolved,
+            stub_market_context,
+        },
         domain::DomainFeatureSkeleton,
         market::MarketMetadataFeatureBuilder,
         microstructure::MicrostructureFeatureBuilder,
@@ -29,6 +33,7 @@ use crate::{
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use quant_pivot_error::QuantResult;
+use quant_pivot_models::types::{BookSnapshotRef, Usd};
 use quant_pivot_models::{
     enums::{common::MarketCategory, quant::DataQualityStatus},
     runtime_config::{DataQualityConfig, FeatureFamily, FeaturesConfig},
@@ -89,6 +94,8 @@ pub struct FeatureComputeCtx<'a> {
     pub config: &'a FeaturesConfig,
     /// Frozen data-quality config.
     pub data_quality: &'a DataQualityConfig,
+    /// Book replay handle frozen at resolve (when a book was captured).
+    pub book_snapshot_ref: Option<&'a BookSnapshotRef>,
 }
 
 /// A pure feature-group computation (no I/O, no clock, no mutable state).
@@ -170,8 +177,9 @@ impl ConfiguredFeatureBuilder {
 
     /// Resolve the PIT inputs for one market (the only async / I/O step).
     ///
-    /// Book / metadata lookups are gated on the schema's source requirements, so
-    /// no query is issued for a source no enabled feature consumes.
+    /// Decision capture always resolves book + market context for evidence refs.
+    /// Feature compute inputs (`ResolvedInputs::book` / `market_ctx`) remain gated
+    /// on the schema's source requirements.
     ///
     /// # Errors
     ///
@@ -182,23 +190,46 @@ impl ConfiguredFeatureBuilder {
         as_of: DateTime<Utc>,
         pit: PitView<'a>,
         window: &'a MarketWindowSnapshot,
-    ) -> QuantResult<ResolvedInputs<'a>> {
+        liquidity_cap_usd: Usd,
+    ) -> QuantResult<ResolvedMarketBundle<'a>> {
+        let capture_book = pit
+            .resolve_book(&market.primary_token_id, as_of)
+            .await?
+            .unwrap_or_else(|| empty_book(market.primary_token_id.clone(), as_of));
+        let capture_market = pit
+            .resolve_market(&market.market_id, as_of)
+            .await?
+            .unwrap_or_else(|| {
+                stub_market_context(market.market_id.clone(), as_of, market.category)
+            });
+        let registry = pit.resolve_registry(&market.market_id, as_of)?;
+        let capture = market_decision_capture_from_resolved(
+            as_of,
+            market,
+            capture_book,
+            capture_market,
+            registry.as_deref(),
+            liquidity_cap_usd,
+        )?;
         let book = if self.needs_book {
-            pit.resolve_book(&market.primary_token_id, as_of).await?
+            Some(capture.book.clone())
         } else {
             None
         };
         let market_ctx = if self.needs_market {
-            pit.resolve_market(&market.market_id, as_of).await?
+            Some(capture.market.clone())
         } else {
             None
         };
-        Ok(ResolvedInputs {
-            market,
-            as_of,
-            book,
-            market_ctx,
-            window,
+        Ok(ResolvedMarketBundle {
+            inputs: ResolvedInputs {
+                market,
+                as_of,
+                book,
+                market_ctx,
+                window,
+            },
+            capture,
         })
     }
 
@@ -206,11 +237,12 @@ impl ConfiguredFeatureBuilder {
     #[must_use]
     pub fn compute_vector(
         &self,
-        resolved: &ResolvedInputs<'_>,
+        bundle: &ResolvedMarketBundle<'_>,
         required_features: &[FeatureName],
         config: &FeaturesConfig,
         data_quality: &DataQualityConfig,
     ) -> FeatureVector {
+        let resolved = &bundle.inputs;
         let ctx = FeatureComputeCtx {
             as_of: resolved.as_of,
             category: resolved.market.category,
@@ -219,6 +251,7 @@ impl ConfiguredFeatureBuilder {
             window: resolved.window,
             config,
             data_quality,
+            book_snapshot_ref: Some(&bundle.capture.book_snapshot_ref),
         };
 
         // Collect every group's raw features into a name-keyed map.
@@ -263,14 +296,14 @@ impl ConfiguredFeatureBuilder {
     #[must_use]
     pub fn build_batch(
         &self,
-        inputs: &[ResolvedInputs<'_>],
+        bundles: &[ResolvedMarketBundle<'_>],
         required_features: &[FeatureName],
         config: &FeaturesConfig,
         data_quality: &DataQualityConfig,
     ) -> Vec<FeatureVector> {
-        inputs
+        bundles
             .par_iter()
-            .map(|resolved| self.compute_vector(resolved, required_features, config, data_quality))
+            .map(|bundle| self.compute_vector(bundle, required_features, config, data_quality))
             .collect()
     }
 }
@@ -291,11 +324,17 @@ impl FeatureBuilder for ConfiguredFeatureBuilder {
     }
 
     async fn build(&self, input: FeatureBuildInput<'_>) -> QuantResult<FeatureVector> {
-        let resolved = self
-            .resolve_inputs(input.market, input.as_of, input.pit, input.window)
+        let bundle = self
+            .resolve_inputs(
+                input.market,
+                input.as_of,
+                input.pit,
+                input.window,
+                Usd::ZERO,
+            )
             .await?;
         Ok(self.compute_vector(
-            &resolved,
+            &bundle,
             input.required_features,
             input.config,
             input.data_quality,

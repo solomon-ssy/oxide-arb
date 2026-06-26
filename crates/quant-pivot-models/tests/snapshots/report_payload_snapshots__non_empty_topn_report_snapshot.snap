@@ -1,0 +1,312 @@
+---
+source: crates/quant-pivot-models/tests/report_payload_snapshots.rs
+expression: non_empty_topn_report()
+---
+{
+  "report": {
+    "recommendation_report_id": "f7a59e75-1560-57c2-abc0-972ac075aef0",
+    "report_kind": "top_n",
+    "trigger_kind": "scheduled",
+    "trigger_key": "scheduled:daily-topn:2023-11-14T22:13:20Z",
+    "trigger_time": "2023-11-14T22:13:20Z",
+    "source_delay_secs": 120,
+    "as_of": "2023-11-14T22:11:20Z",
+    "horizon_secs": 86400,
+    "runtime_mode": "report_only",
+    "top_n": 20,
+    "status": "published",
+    "account_source": "polymarket",
+    "capital_base_usd": "10000",
+    "account_snapshot_ref": "6412901d-5f81-5835-8ada-63231d3ffc4f",
+    "runtime_config_version_id": "731ac405-b5b5-5dee-96b2-67c8d184c177",
+    "model_version_id": "45641765-a964-5c43-b586-8330968f4c8c",
+    "market_selection_id": "5c8ad0ca-ddea-5da4-9b57-8bd80bd64365",
+    "summary": {
+      "market_selection_count": 12,
+      "candidate_count": 8,
+      "rejected_count": 3,
+      "published_recommendation_count": 2,
+      "total_suggested_usd": "500",
+      "max_single_recommendation_usd": "300",
+      "category_allocation": {},
+      "event_allocation": {},
+      "average_score": "0.7",
+      "min_score": "0.55",
+      "model_confidence_summary": {
+        "mean_confidence": "0.72",
+        "min_confidence": "0.6",
+        "max_confidence": "0.9"
+      },
+      "data_quality_summary": {
+        "fresh_count": 5,
+        "acceptable_count": 2,
+        "degraded_count": 1,
+        "stale_count": 0,
+        "insufficient_count": 0
+      },
+      "top_rejection_reasons": [],
+      "execution_eligibility_summary": {
+        "eligible_report_only": 2,
+        "eligible_semi_auto": 0,
+        "eligible_auto_execution": 0
+      },
+      "empty_reason": null,
+      "warnings": [
+        "thin book on 1 market"
+      ]
+    },
+    "published_at": "2023-11-14T22:13:20Z",
+    "revoked_at": null,
+    "expired_at": null,
+    "status_reason": null,
+    "created_at": "2023-11-14T22:13:20Z"
+  },
+  "recommendations": [
+    {
+      "recommendation_id": "f007513a-f95b-580a-ae17-8c85e32c9fdb",
+      "recommendation_report_id": "f7a59e75-1560-57c2-abc0-972ac075aef0",
+      "rank": 1,
+      "market_id": "0xmarketA",
+      "event_id": "evt-1",
+      "token_id": "token-0xmarketA",
+      "outcome_side": "yes",
+      "composite_score": "0.71",
+      "risk_adjusted_score": "0.66",
+      "confidence": "0.72",
+      "expected_return_bps": "150",
+      "downside_bps": "80",
+      "identity": {
+        "category": "politics",
+        "question": "Will the event resolve Yes?",
+        "outcome_name": "Yes"
+      },
+      "market_context": {
+        "best_bid": "0.41",
+        "best_ask": "0.43",
+        "mid_price": "0.42",
+        "spread_bps": "50",
+        "depth_usd": "5000",
+        "volume_24h_usd": "10000",
+        "book_age_ms": 500,
+        "time_to_resolution_secs": 86400,
+        "market_status": "active",
+        "neg_risk": false,
+        "fee_rate": null
+      },
+      "rank_before_portfolio": 1,
+      "liquidity_score": "0.8",
+      "data_quality_score": "0.9",
+      "model_score_percentile": "0.75",
+      "entry_plan": {
+        "trigger_kind": "limit_price",
+        "trigger_price": "0.42",
+        "limit_price": "0.43",
+        "max_slippage_bps": "50",
+        "valid_from": "2023-11-14T22:13:20Z",
+        "valid_until": "2023-11-14T23:13:20Z",
+        "min_depth_usd": "100",
+        "max_book_age_ms": 2000,
+        "confirmation_window_secs": 30,
+        "cancel_if_not_triggered": true,
+        "entry_reason": "limit entry at edge"
+      },
+      "sizing_plan": {
+        "suggested_usd": "300",
+        "suggested_shares": "500",
+        "max_usd": "500",
+        "min_usd": "10",
+        "portfolio_weight_pct": "0.05",
+        "market_exposure_after_usd": "300",
+        "event_exposure_after_usd": "300",
+        "category_exposure_after_usd": "300",
+        "binding_constraint": "kelly_cap",
+        "sizing_reason": "half-kelly capped",
+        "sizing_model": "kelly",
+        "edge_bps": "120",
+        "kelly_fraction_applied": "0.5"
+      },
+      "exit_plan": {
+        "take_profit_price": "0.7",
+        "take_profit_pct": "0.6",
+        "stop_loss_price": "0.3",
+        "stop_loss_pct": "0.3",
+        "time_exit_at": null,
+        "max_hold_secs": 86400,
+        "partial_exit_nodes": [],
+        "trailing_stop": null,
+        "signal_invalidation_rules": [],
+        "settlement_policy": "hold_to_resolution",
+        "manual_review_at": null,
+        "exit_reason": "tp/sl"
+      },
+      "risk_envelope": {
+        "max_loss_usd": "120",
+        "max_slippage_bps": "50",
+        "max_position_usd": "500",
+        "max_market_exposure_usd": "500",
+        "max_event_exposure_usd": "750",
+        "max_category_exposure_usd": "1500",
+        "requires_approval": true,
+        "auto_execution_allowed": false,
+        "risk_notes": [
+          "thin book"
+        ],
+        "envelope_hash": "blake3:0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "factor_breakdown": [
+        {
+          "factor_name": "liquidity_depth",
+          "family": "liquidity",
+          "raw_value": "1234.5",
+          "normalized_score": "0.8",
+          "weight": "0.4",
+          "contribution": "0.32",
+          "confidence": "0.75",
+          "direction": "positive",
+          "explanation": "deep book",
+          "source_refs": [
+            "feature:liquidity_depth"
+          ]
+        }
+      ],
+      "execution_eligibility": {
+        "eligible_modes": [
+          "report_only"
+        ],
+        "ineligibility_reasons": [
+          "report_only_mode"
+        ],
+        "approval_required": true,
+        "approval_role": "trader",
+        "auto_policy_id": null
+      },
+      "valid_from": "2023-11-14T22:13:20Z",
+      "valid_until": "2023-11-15T22:13:20Z",
+      "status": "published",
+      "created_at": "2023-11-14T22:13:20Z"
+    },
+    {
+      "recommendation_id": "a1ce9884-a3e7-5c5f-bef0-a07ce3923c65",
+      "recommendation_report_id": "f7a59e75-1560-57c2-abc0-972ac075aef0",
+      "rank": 2,
+      "market_id": "0xmarketB",
+      "event_id": "evt-1",
+      "token_id": "token-0xmarketB",
+      "outcome_side": "no",
+      "composite_score": "0.71",
+      "risk_adjusted_score": "0.66",
+      "confidence": "0.72",
+      "expected_return_bps": "150",
+      "downside_bps": "80",
+      "identity": {
+        "category": "politics",
+        "question": "Will the event resolve Yes?",
+        "outcome_name": "Yes"
+      },
+      "market_context": {
+        "best_bid": "0.41",
+        "best_ask": "0.43",
+        "mid_price": "0.42",
+        "spread_bps": "50",
+        "depth_usd": "5000",
+        "volume_24h_usd": "10000",
+        "book_age_ms": 500,
+        "time_to_resolution_secs": 86400,
+        "market_status": "active",
+        "neg_risk": false,
+        "fee_rate": null
+      },
+      "rank_before_portfolio": 2,
+      "liquidity_score": "0.8",
+      "data_quality_score": "0.9",
+      "model_score_percentile": "0.75",
+      "entry_plan": {
+        "trigger_kind": "limit_price",
+        "trigger_price": "0.42",
+        "limit_price": "0.43",
+        "max_slippage_bps": "50",
+        "valid_from": "2023-11-14T22:13:20Z",
+        "valid_until": "2023-11-14T23:13:20Z",
+        "min_depth_usd": "100",
+        "max_book_age_ms": 2000,
+        "confirmation_window_secs": 30,
+        "cancel_if_not_triggered": true,
+        "entry_reason": "limit entry at edge"
+      },
+      "sizing_plan": {
+        "suggested_usd": "200",
+        "suggested_shares": "500",
+        "max_usd": "500",
+        "min_usd": "10",
+        "portfolio_weight_pct": "0.05",
+        "market_exposure_after_usd": "200",
+        "event_exposure_after_usd": "200",
+        "category_exposure_after_usd": "200",
+        "binding_constraint": "kelly_cap",
+        "sizing_reason": "half-kelly capped",
+        "sizing_model": "kelly",
+        "edge_bps": "120",
+        "kelly_fraction_applied": "0.5"
+      },
+      "exit_plan": {
+        "take_profit_price": "0.7",
+        "take_profit_pct": "0.6",
+        "stop_loss_price": "0.3",
+        "stop_loss_pct": "0.3",
+        "time_exit_at": null,
+        "max_hold_secs": 86400,
+        "partial_exit_nodes": [],
+        "trailing_stop": null,
+        "signal_invalidation_rules": [],
+        "settlement_policy": "hold_to_resolution",
+        "manual_review_at": null,
+        "exit_reason": "tp/sl"
+      },
+      "risk_envelope": {
+        "max_loss_usd": "120",
+        "max_slippage_bps": "50",
+        "max_position_usd": "500",
+        "max_market_exposure_usd": "500",
+        "max_event_exposure_usd": "750",
+        "max_category_exposure_usd": "1500",
+        "requires_approval": true,
+        "auto_execution_allowed": false,
+        "risk_notes": [
+          "thin book"
+        ],
+        "envelope_hash": "blake3:0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "factor_breakdown": [
+        {
+          "factor_name": "liquidity_depth",
+          "family": "liquidity",
+          "raw_value": "1234.5",
+          "normalized_score": "0.8",
+          "weight": "0.4",
+          "contribution": "0.32",
+          "confidence": "0.75",
+          "direction": "positive",
+          "explanation": "deep book",
+          "source_refs": [
+            "feature:liquidity_depth"
+          ]
+        }
+      ],
+      "execution_eligibility": {
+        "eligible_modes": [
+          "report_only"
+        ],
+        "ineligibility_reasons": [
+          "report_only_mode"
+        ],
+        "approval_required": true,
+        "approval_role": "trader",
+        "auto_policy_id": null
+      },
+      "valid_from": "2023-11-14T22:13:20Z",
+      "valid_until": "2023-11-15T22:13:20Z",
+      "status": "published",
+      "created_at": "2023-11-14T22:13:20Z"
+    }
+  ]
+}

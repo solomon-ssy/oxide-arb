@@ -17,7 +17,9 @@ pub mod factory;
 #[cfg(feature = "optimize")]
 pub mod optimize;
 pub mod overlay;
+pub mod rank_scores;
 pub mod runtime;
+pub mod score_percentile;
 pub mod signal;
 pub mod trainer;
 pub mod weighted;
@@ -47,12 +49,14 @@ pub use factory::{
     ModelRuntimeFactoryBuilder,
 };
 pub use overlay::{WeightOverlay, WeightSource};
+pub use rank_scores::{RankScores, attach as attach_rank_scores};
 pub use runtime::{
     ClassicalKind, FactorInferenceRow, FactorInferenceTable, InferenceMatrix, InferenceMatrixRow,
     MarketInferenceContext, ModelFamily, ModelRuntimeFactory, ModelRuntimeInput,
     ModelRuntimeMetrics, ModelRuntimeOutput, ModelRuntimeWarning, ParseModelFamilyError,
     QuantModelRuntime,
 };
+pub use score_percentile::annotate;
 pub use signal::{
     FactorContribution, ModelExplanation, SignalCandidate, SignalWarning, signal_candidate_event,
     signal_candidate_events,

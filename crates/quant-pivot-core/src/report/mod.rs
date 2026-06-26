@@ -2,8 +2,10 @@
 
 mod builder;
 mod composer;
+mod entry_plan;
 mod lifecycle;
 mod publisher;
+mod readiness;
 mod scheduler;
 mod types;
 
@@ -13,6 +15,7 @@ pub use lifecycle::{
     AdHocReportRequest, ReportLifecycleDeps, ReportLifecycleService, ScheduledReportRequest,
 };
 pub use publisher::{ReportPublisher, ReportPublisherDeps};
+pub use readiness::{DefaultReportReadinessGate, ReportReadinessGate};
 pub use scheduler::build_report_scheduler;
 pub use types::{
     BuildReportRequest, ComposedReport, EmptyReportContext, NotificationRecommendation,

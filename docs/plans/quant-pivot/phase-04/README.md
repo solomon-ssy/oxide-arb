@@ -93,16 +93,19 @@ flowchart LR
   `quality_gate` / `training` / `reports` / `portfolio` / `execution` / `notification`
   齐全；`RuntimeConfigStore`（热快照）+ `RuntimeConfigVersionRepository`（`load_version`）。
 
-**Phase 04 基本空白（本目录补齐）**
+**Phase 04 已交付（2026-06 闭环）**
 
-- 无受治理 `PortfolioPlanner`、无 sizing 模型、无 `AccountSnapshot`/`AccountProvider`。
-- 无 `ReportBuilder`/`Composer`/`Publisher`/`LifecycleService`、无调度层
-  （`infra/schedule/` 目录不存在）。
-- 报告 payload 仍是裸 `serde_json::Value`（无强类型块）。
-- 报告/组合/intent 三个 repository **均未接入任何 bundle/service**
-  （`quant-pivot-core` 全仓零引用）。
-- `quant-pivot-web` **零 quant 报告/recommendation/intent 路由**。
-- `quant_account_snapshot` 表**完全不存在**。
+- 受治理 `PortfolioPlanner` + Kelly sizing + `AccountSnapshot`/`AccountProvider`（credential-gated）。
+- `ReportBuilder` / `RecommendationComposer` / `ReportPublisher` / `ReportLifecycleService` + `infra/schedule/` 调度层。
+- 强类型 report payload（entry / sizing / exit / risk envelope / factor / evidence refs）。
+- `quant_account_snapshot` + `quant_report_data_quality_snapshot` 进单 PG 事务。
+- `liquidity_score` / `data_quality_score` / `model_score_percentile` 列；rank 列来自 **factor breakdown**（`liquidity_depth` / `data_quality`）。
+- `report_pipeline_e2e` + Web 集成默认 `CoreQuantReportPort`；insta 快照（§19 七场景 + view rank 列）。
+- 治理开关：`schedules[].enabled` / `ad_hoc_report_enabled` / `publish_empty_reports`（无 `generation_enabled` master switch）。
+
+**仍属 Phase 05+**
+
+- `quant_order_intent` 执行、`create-intent` API、attribution 账本、Composer 真实 partial exit 执行节点。
 
 ## 4. 全局删除 / 合并 / 重构清单（贯穿子phase）
 

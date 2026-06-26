@@ -446,8 +446,6 @@ crate::wire_enum! {
         RuntimeModeDisabled => "runtime_mode_disabled",
         /// The system was degraded below the generation threshold.
         SystemDegraded => "system_degraded",
-        /// The venue account was unavailable (credentials / venue read failure).
-        AccountUnavailable => "account_unavailable",
     }
 }
 

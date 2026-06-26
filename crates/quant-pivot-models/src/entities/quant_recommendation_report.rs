@@ -6,7 +6,8 @@ use crate::{
     },
     types::{
         AccountSnapshotId, MarketSelectionId, ModelVersionId, PortfolioPlanId,
-        RecommendationReportId, ReportSummary, RuntimeConfigVersionId, Usd,
+        RecommendationReportId, ReportDataQualitySnapshotId, ReportSummary, RuntimeConfigVersionId,
+        Usd,
     },
 };
 use chrono::{DateTime, Utc};
@@ -34,6 +35,7 @@ pub struct Model {
     pub account_source: AccountSource,
     pub capital_base_usd: Usd,
     pub account_snapshot_ref: AccountSnapshotId,
+    pub data_quality_snapshot_ref: ReportDataQualitySnapshotId,
     #[sea_orm(column_type = "JsonBinary")]
     pub summary_json: ReportSummary,
     pub published_at: Option<DateTime<Utc>>,
@@ -69,6 +71,12 @@ pub enum Relation {
         to = "super::quant_account_snapshot::Column::AccountSnapshotId"
     )]
     AccountSnapshot,
+    #[sea_orm(
+        belongs_to = "super::quant_report_data_quality_snapshot::Entity",
+        from = "Column::DataQualitySnapshotRef",
+        to = "super::quant_report_data_quality_snapshot::Column::ReportDataQualitySnapshotId"
+    )]
+    DataQualitySnapshot,
     #[sea_orm(has_many = "super::quant_recommendation::Entity")]
     Recommendation,
 }
@@ -94,6 +102,12 @@ impl Related<super::quant_portfolio_plan::Entity> for Entity {
 impl Related<super::quant_account_snapshot::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::AccountSnapshot.def()
+    }
+}
+
+impl Related<super::quant_report_data_quality_snapshot::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::DataQualitySnapshot.def()
     }
 }
 

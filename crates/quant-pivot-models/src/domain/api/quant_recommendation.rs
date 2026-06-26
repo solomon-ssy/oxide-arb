@@ -14,9 +14,9 @@ use crate::{
     domain::RecommendationInfo,
     enums::quant::{OutcomeSide, RecommendationStatus},
     types::{
-        Bps, EntryPlan, EventId, EvidenceRefs, ExecutionEligibility, ExitPlan, MarketId,
-        Probability, RecommendationFactorBreakdown, RecommendationId, RecommendationReportId,
-        RiskEnvelope, SizingPlan, TokenId,
+        Bps, EntryPlan, EventId, EvidenceRefs, ExecutionEligibility, ExitPlan, MarketContext,
+        MarketId, Probability, RecommendationFactorBreakdown, RecommendationId,
+        RecommendationIdentity, RecommendationReportId, RiskEnvelope, SizingPlan, TokenId,
     },
 };
 use chrono::{DateTime, Utc};
@@ -37,6 +37,12 @@ pub struct QuantRecommendationView {
     pub confidence: Probability,
     pub expected_return_bps: Bps,
     pub downside_bps: Bps,
+    pub identity: RecommendationIdentity,
+    pub market_context: MarketContext,
+    pub rank_before_portfolio: i32,
+    pub liquidity_score: Probability,
+    pub data_quality_score: Probability,
+    pub model_score_percentile: Probability,
     pub entry_plan: EntryPlan,
     pub sizing_plan: SizingPlan,
     pub exit_plan: ExitPlan,
@@ -64,6 +70,12 @@ impl From<RecommendationInfo> for QuantRecommendationView {
             confidence: info.confidence,
             expected_return_bps: info.expected_return_bps,
             downside_bps: info.downside_bps,
+            identity: info.identity,
+            market_context: info.market_context,
+            rank_before_portfolio: info.rank_before_portfolio,
+            liquidity_score: info.liquidity_score,
+            data_quality_score: info.data_quality_score,
+            model_score_percentile: info.model_score_percentile,
             entry_plan: info.entry_plan,
             sizing_plan: info.sizing_plan,
             exit_plan: info.exit_plan,
@@ -90,11 +102,11 @@ pub struct QuantEvidenceView {
     pub feature_vector_id: String,
     pub model_run_id: String,
     pub market_selection_id: String,
-    pub book_snapshot_ref: Option<String>,
+    pub book_snapshot_ref: String,
     pub runtime_config_version_id: String,
     pub model_version_id: String,
     pub factor_definition_versions: Vec<String>,
-    pub data_quality_report_ref: Option<String>,
+    pub data_quality_snapshot_ref: String,
 }
 
 impl QuantEvidenceView {
@@ -107,7 +119,7 @@ impl QuantEvidenceView {
             feature_vector_id: evidence.feature_vector_id.to_string(),
             model_run_id: evidence.model_run_id.to_string(),
             market_selection_id: evidence.market_selection_id.to_string(),
-            book_snapshot_ref: evidence.book_snapshot_ref,
+            book_snapshot_ref: evidence.book_snapshot_ref.canonical_string(),
             runtime_config_version_id: evidence.runtime_config_version_id.to_string(),
             model_version_id: evidence.model_version_id.to_string(),
             factor_definition_versions: evidence
@@ -115,7 +127,7 @@ impl QuantEvidenceView {
                 .into_iter()
                 .map(|id| id.to_string())
                 .collect(),
-            data_quality_report_ref: evidence.data_quality_report_ref,
+            data_quality_snapshot_ref: evidence.data_quality_snapshot_ref.to_string(),
         }
     }
 }

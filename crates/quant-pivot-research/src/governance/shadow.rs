@@ -310,6 +310,9 @@ mod tests {
             },
             rejection_warnings: Vec::new(),
             rank_before_portfolio: rank,
+            liquidity_score: Probability::ZERO,
+            data_quality_score: Probability::ZERO,
+            model_score_percentile: Probability::ZERO,
             as_of: Utc::now(),
         }
     }

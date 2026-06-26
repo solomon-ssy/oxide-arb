@@ -14,6 +14,7 @@ use crate::{
     idens::{
         quant_account_snapshot::QuantAccountSnapshot, quant_market_selection::QuantMarketSelection,
         quant_model_version::QuantModelVersion, quant_portfolio_plan::QuantPortfolioPlan,
+        quant_report_data_quality_snapshot::QuantReportDataQualitySnapshot,
     },
     schema::{
         column,
@@ -45,6 +46,7 @@ pub enum QuantRecommendationReport {
     AccountSource,
     CapitalBaseUsd,
     AccountSnapshotRef,
+    DataQualitySnapshotRef,
     SummaryJson,
     PublishedAt,
     RevokedAt,
@@ -141,6 +143,9 @@ fn add_payload_columns(table: &mut TableCreateStatement) {
         .col(column::uuid_fk(
             QuantRecommendationReport::AccountSnapshotRef,
         ))
+        .col(column::uuid_fk(
+            QuantRecommendationReport::DataQualitySnapshotRef,
+        ))
         .col(
             ColumnDef::new(QuantRecommendationReport::SummaryJson)
                 .json_binary()
@@ -197,6 +202,12 @@ fn add_foreign_keys(table: &mut TableCreateStatement) {
             QuantRecommendationReport::AccountSnapshotRef,
             QuantAccountSnapshot::Table,
             QuantAccountSnapshot::AccountSnapshotId,
+        ))
+        .foreign_key(&mut fk_restrict(
+            "fk_quant_recommendation_report_dq_snapshot",
+            QuantRecommendationReport::DataQualitySnapshotRef,
+            QuantReportDataQualitySnapshot::Table,
+            QuantReportDataQualitySnapshot::ReportDataQualitySnapshotId,
         ));
 }
 
@@ -286,7 +297,12 @@ pub fn dependencies() -> Vec<TableDependency> {
         TableDependency::foreign_key(quant_market_selection_table_name),
         TableDependency::foreign_key(quant_portfolio_plan_table_name),
         TableDependency::foreign_key(quant_account_snapshot_table_name),
+        TableDependency::foreign_key(quant_report_data_quality_snapshot_table_name),
     ]
+}
+
+fn quant_report_data_quality_snapshot_table_name() -> String {
+    QuantReportDataQualitySnapshot::Table.to_string()
 }
 
 pub const fn seed_units() -> Vec<SeedSpec> {

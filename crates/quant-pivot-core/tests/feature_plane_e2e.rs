@@ -277,6 +277,8 @@ async fn insufficient_vectors_are_partitioned_and_not_persisted() {
             model_requirements: &ModelFeatureRequirements::default(),
             source_delay_secs: 0,
             pit: PitView::Live(&live_pit),
+            runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
+            liquidity_cap_usd: Usd::new(rust_decimal::Decimal::from(10_000)),
         })
         .await
         .expect("pipeline");
@@ -369,6 +371,8 @@ async fn create_feature_vector_then_find() {
             model_requirements: &ModelFeatureRequirements::default(),
             source_delay_secs: 0,
             pit: PitView::Live(&live_pit),
+            runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
+            liquidity_cap_usd: Usd::new(rust_decimal::Decimal::from(10_000)),
         })
         .await
         .expect("pipeline");

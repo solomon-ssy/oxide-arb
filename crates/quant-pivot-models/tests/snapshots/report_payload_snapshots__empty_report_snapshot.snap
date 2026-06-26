@@ -1,0 +1,62 @@
+---
+source: crates/quant-pivot-models/tests/report_payload_snapshots.rs
+expression: empty_report()
+---
+{
+  "recommendation_report_id": "75e4373b-661a-59d3-94a9-3739d1217a10",
+  "report_kind": "top_n",
+  "trigger_kind": "scheduled",
+  "trigger_key": "scheduled:daily-topn:2023-11-14T22:13:20Z",
+  "trigger_time": "2023-11-14T22:13:20Z",
+  "source_delay_secs": 120,
+  "as_of": "2023-11-14T22:11:20Z",
+  "horizon_secs": 86400,
+  "runtime_mode": "report_only",
+  "top_n": 20,
+  "status": "published_empty",
+  "account_source": "polymarket",
+  "capital_base_usd": "10000",
+  "account_snapshot_ref": "6412901d-5f81-5835-8ada-63231d3ffc4f",
+  "runtime_config_version_id": "731ac405-b5b5-5dee-96b2-67c8d184c177",
+  "model_version_id": "45641765-a964-5c43-b586-8330968f4c8c",
+  "market_selection_id": "5c8ad0ca-ddea-5da4-9b57-8bd80bd64365",
+  "summary": {
+    "market_selection_count": 12,
+    "candidate_count": 8,
+    "rejected_count": 3,
+    "published_recommendation_count": 0,
+    "total_suggested_usd": "0",
+    "max_single_recommendation_usd": "0",
+    "category_allocation": {},
+    "event_allocation": {},
+    "average_score": "0.7",
+    "min_score": "0.55",
+    "model_confidence_summary": {
+      "mean_confidence": "0.72",
+      "min_confidence": "0.6",
+      "max_confidence": "0.9"
+    },
+    "data_quality_summary": {
+      "fresh_count": 5,
+      "acceptable_count": 2,
+      "degraded_count": 1,
+      "stale_count": 0,
+      "insufficient_count": 0
+    },
+    "top_rejection_reasons": [],
+    "execution_eligibility_summary": {
+      "eligible_report_only": 0,
+      "eligible_semi_auto": 0,
+      "eligible_auto_execution": 0
+    },
+    "empty_reason": "no_positive_signal",
+    "warnings": [
+      "no candidates passed score floor"
+    ]
+  },
+  "published_at": "2023-11-14T22:13:20Z",
+  "revoked_at": null,
+  "expired_at": null,
+  "status_reason": null,
+  "created_at": "2023-11-14T22:13:20Z"
+}

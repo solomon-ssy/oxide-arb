@@ -1,19 +1,24 @@
 //! Report builder orchestration.
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use chrono::{Duration, Utc};
 use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
-    domain::{FeatureVectorInfo, PointInTimeDataSource, RuntimeConfigVersionInfo},
+    domain::{
+        PointInTimeDataSource, RuntimeConfigVersionInfo, quant::NewReportDataQualitySnapshot,
+    },
     enums::quant::{EmptyReason, RejectionReason},
     runtime_config::RuntimeConfig,
-    types::{Bps, MarketSelectionId, ModelRunId, PortfolioPlanId, Usd},
+    types::{
+        Bps, FeatureVectorId, MarketId, MarketSelectionId, ModelRunId, PortfolioPlanId,
+        ReportDataQualitySnapshotId, ReportDataQualityTokens, Usd,
+    },
 };
 use quant_pivot_repository::traits::{MarketSelectionRepository, RuntimeConfigVersionRepository};
 use quant_pivot_research::{
     backtest::PortfolioCaps,
-    features::PitView,
+    features::{MarketDecisionCapture, PitView},
     model::SignalCandidate,
     portfolio::{
         AccountSnapshot, PlanCandidate, PortfolioPlanInput, PortfolioPlanOutput, PortfolioPlanner,
@@ -41,6 +46,7 @@ use crate::{
 
 use super::{
     composer::{ComposeReportInput, RecommendationComposer, empty_plan_for_report},
+    readiness::ReportReadinessGate,
     types::{BuildReportRequest, ComposedReport, EmptyReportContext, ReportTrigger},
 };
 
@@ -64,6 +70,7 @@ pub struct ReportBuilderDeps {
     pub composer: Arc<dyn RecommendationComposer>,
     pub pit_source: Arc<dyn PointInTimeDataSource>,
     pub runtime_mode: RuntimeModeHandle,
+    pub readiness_gate: Arc<dyn ReportReadinessGate>,
 }
 
 /// Production report builder.
@@ -87,8 +94,10 @@ struct EmptyComposeInput<'a> {
     account: &'a AccountSnapshot,
     empty: EmptyReportContext,
     model_run_id: Option<ModelRunId>,
-    selected: &'a [SelectedMarket],
-    feature_infos: &'a [FeatureVectorInfo],
+    market_selection_count: u32,
+    captures: HashMap<MarketId, MarketDecisionCapture>,
+    feature_vector_by_market: HashMap<MarketId, FeatureVectorId>,
+    data_quality_snapshot: NewReportDataQualitySnapshot,
 }
 
 struct PublishedComposeInput<'a> {
@@ -99,6 +108,20 @@ struct PublishedComposeInput<'a> {
     features: &'a FeaturePipelineResult,
     model_outcome: ModelRunOutcome,
     plan: PortfolioPlanOutput,
+}
+
+struct FeatureStageRefs<'a> {
+    request: &'a BuildReportRequest,
+    context: &'a BuildContext,
+    selection: &'a MarketSelectionSnapshot,
+    account: &'a AccountSnapshot,
+    features: &'a FeaturePipelineResult,
+}
+
+#[derive(Clone)]
+struct FeatureStageArtifacts {
+    captures: HashMap<MarketId, MarketDecisionCapture>,
+    data_quality_snapshot: NewReportDataQualitySnapshot,
 }
 
 impl DefaultReportBuilder {
@@ -112,86 +135,60 @@ impl DefaultReportBuilder {
 #[async_trait::async_trait]
 impl ReportBuilder for DefaultReportBuilder {
     async fn build(&self, request: BuildReportRequest) -> QuantResult<ComposedReport> {
+        self.build_report(request).await
+    }
+}
+
+impl DefaultReportBuilder {
+    async fn build_report(&self, request: BuildReportRequest) -> QuantResult<ComposedReport> {
         let context = self.prepare_context(&request).await?;
+        self.deps
+            .readiness_gate
+            .ensure_degraded_empty_allowed(&context.config)?;
         let selection = self.build_selection(&context).await?;
         let account = self
             .account_snapshot(context.as_of, &context.config)
             .await?;
 
-        if selection.included.is_empty() {
-            return self.compose_empty(EmptyComposeInput {
-                request: &request,
-                context: &context,
-                market_selection_id: selection.market_selection_id.clone(),
-                account: &account,
-                empty: EmptyReportContext {
-                    reason: EmptyReason::EmptySelection,
-                    candidate_count: 0,
-                    rejected_count: u32::try_from(selection.excluded.len()).unwrap_or(u32::MAX),
-                    warnings: Vec::new(),
-                },
-                model_run_id: None,
-                selected: &selection.included,
-                feature_infos: &[],
-            });
+        if let Some(report) =
+            self.compose_if_system_degraded(&request, &context, &selection, &account)?
+        {
+            return Ok(report);
+        }
+        if let Some(report) =
+            self.compose_if_empty_selection(&request, &context, &selection, &account)?
+        {
+            return Ok(report);
         }
 
         let features = self.build_features(&context, &selection).await?;
-        if features.accepted.is_empty() {
-            return self.compose_empty(EmptyComposeInput {
-                request: &request,
-                context: &context,
-                market_selection_id: selection.market_selection_id.clone(),
-                account: &account,
-                empty: EmptyReportContext {
-                    reason: EmptyReason::InsufficientDataQuality,
-                    candidate_count: 0,
-                    rejected_count: u32::try_from(features.rejected.len()).unwrap_or(u32::MAX),
-                    warnings: vec!["feature pipeline accepted zero markets".to_owned()],
-                },
-                model_run_id: None,
-                selected: &selection.included,
-                feature_infos: &features.persisted,
-            });
+        let stage = FeatureStageRefs {
+            request: &request,
+            context: &context,
+            selection: &selection,
+            account: &account,
+            features: &features,
+        };
+        if let Some(report) = self.compose_if_no_accepted_features(&stage)? {
+            return Ok(report);
         }
 
         let model_outcome = self.run_model(&context, &selection, &features).await?;
-        if model_outcome.accepted.is_empty() {
-            return self.compose_empty(EmptyComposeInput {
-                request: &request,
-                context: &context,
-                market_selection_id: selection.market_selection_id.clone(),
-                account: &account,
-                empty: EmptyReportContext {
-                    reason: EmptyReason::NoPositiveSignal,
-                    candidate_count: model_outcome.emitted,
-                    rejected_count: 0,
-                    warnings: vec!["active model emitted no positive candidate".to_owned()],
-                },
-                model_run_id: Some(model_outcome.model_run_id),
-                selected: &selection.included,
-                feature_infos: &features.persisted,
-            });
+        let artifacts = FeatureStageArtifacts {
+            captures: features.captures.clone(),
+            data_quality_snapshot: features.data_quality_snapshot.clone(),
+        };
+        if let Some(report) =
+            self.compose_if_no_model_signals(&stage, &model_outcome, artifacts.clone())?
+        {
+            return Ok(report);
         }
 
         let plan = self.plan_portfolio(&context, &selection, &model_outcome, &account)?;
-
-        if plan.planned.is_empty() {
-            return self.compose_empty(EmptyComposeInput {
-                request: &request,
-                context: &context,
-                market_selection_id: selection.market_selection_id.clone(),
-                account: &account,
-                empty: EmptyReportContext {
-                    reason: empty_reason_from_planner_rejections(&plan.rejected),
-                    candidate_count: model_outcome.emitted,
-                    rejected_count: u32::try_from(plan.rejected.len()).unwrap_or(u32::MAX),
-                    warnings: Vec::new(),
-                },
-                model_run_id: Some(model_outcome.model_run_id),
-                selected: &selection.included,
-                feature_infos: &features.persisted,
-            });
+        if let Some(report) =
+            self.compose_if_empty_plan(&stage, &model_outcome, &plan, artifacts)?
+        {
+            return Ok(report);
         }
 
         self.compose_published(PublishedComposeInput {
@@ -203,6 +200,152 @@ impl ReportBuilder for DefaultReportBuilder {
             model_outcome,
             plan,
         })
+    }
+
+    fn compose_if_system_degraded(
+        &self,
+        request: &BuildReportRequest,
+        context: &BuildContext,
+        selection: &MarketSelectionSnapshot,
+        account: &AccountSnapshot,
+    ) -> QuantResult<Option<ComposedReport>> {
+        if !self.deps.readiness_gate.is_system_degraded() {
+            return Ok(None);
+        }
+        self.compose_empty(EmptyComposeInput {
+            request,
+            context,
+            market_selection_id: selection.market_selection_id.clone(),
+            account,
+            empty: EmptyReportContext {
+                reason: EmptyReason::SystemDegraded,
+                candidate_count: 0,
+                rejected_count: 0,
+                warnings: vec!["operational phase is not Operational".to_owned()],
+            },
+            model_run_id: None,
+            market_selection_count: market_selection_count(&selection.included),
+            captures: HashMap::new(),
+            feature_vector_by_market: HashMap::new(),
+            data_quality_snapshot: empty_data_quality_snapshot(context, context.as_of),
+        })
+        .map(Some)
+    }
+
+    fn compose_if_empty_selection(
+        &self,
+        request: &BuildReportRequest,
+        context: &BuildContext,
+        selection: &MarketSelectionSnapshot,
+        account: &AccountSnapshot,
+    ) -> QuantResult<Option<ComposedReport>> {
+        if !selection.included.is_empty() {
+            return Ok(None);
+        }
+        self.compose_empty(EmptyComposeInput {
+            request,
+            context,
+            market_selection_id: selection.market_selection_id.clone(),
+            account,
+            empty: EmptyReportContext {
+                reason: EmptyReason::EmptySelection,
+                candidate_count: 0,
+                rejected_count: u32::try_from(selection.excluded.len()).unwrap_or(u32::MAX),
+                warnings: Vec::new(),
+            },
+            model_run_id: None,
+            market_selection_count: market_selection_count(&selection.included),
+            captures: HashMap::new(),
+            feature_vector_by_market: HashMap::new(),
+            data_quality_snapshot: empty_data_quality_snapshot(context, context.as_of),
+        })
+        .map(Some)
+    }
+
+    fn compose_if_no_accepted_features(
+        &self,
+        stage: &FeatureStageRefs<'_>,
+    ) -> QuantResult<Option<ComposedReport>> {
+        if !stage.features.accepted.is_empty() {
+            return Ok(None);
+        }
+        self.compose_empty(EmptyComposeInput {
+            request: stage.request,
+            context: stage.context,
+            market_selection_id: stage.selection.market_selection_id.clone(),
+            account: stage.account,
+            empty: EmptyReportContext {
+                reason: EmptyReason::InsufficientDataQuality,
+                candidate_count: 0,
+                rejected_count: u32::try_from(stage.features.rejected.len()).unwrap_or(u32::MAX),
+                warnings: vec!["feature pipeline accepted zero markets".to_owned()],
+            },
+            model_run_id: None,
+            market_selection_count: market_selection_count(&stage.selection.included),
+            captures: stage.features.captures.clone(),
+            feature_vector_by_market: feature_vector_by_market(stage.features),
+            data_quality_snapshot: stage.features.data_quality_snapshot.clone(),
+        })
+        .map(Some)
+    }
+
+    fn compose_if_no_model_signals(
+        &self,
+        stage: &FeatureStageRefs<'_>,
+        model_outcome: &ModelRunOutcome,
+        artifacts: FeatureStageArtifacts,
+    ) -> QuantResult<Option<ComposedReport>> {
+        if !model_outcome.accepted.is_empty() {
+            return Ok(None);
+        }
+        self.compose_empty(EmptyComposeInput {
+            request: stage.request,
+            context: stage.context,
+            market_selection_id: stage.selection.market_selection_id.clone(),
+            account: stage.account,
+            empty: EmptyReportContext {
+                reason: EmptyReason::NoPositiveSignal,
+                candidate_count: model_outcome.emitted,
+                rejected_count: 0,
+                warnings: vec!["active model emitted no positive candidate".to_owned()],
+            },
+            model_run_id: Some(model_outcome.model_run_id.clone()),
+            market_selection_count: market_selection_count(&stage.selection.included),
+            captures: artifacts.captures,
+            feature_vector_by_market: feature_vector_by_market(stage.features),
+            data_quality_snapshot: artifacts.data_quality_snapshot,
+        })
+        .map(Some)
+    }
+
+    fn compose_if_empty_plan(
+        &self,
+        stage: &FeatureStageRefs<'_>,
+        model_outcome: &ModelRunOutcome,
+        plan: &PortfolioPlanOutput,
+        artifacts: FeatureStageArtifacts,
+    ) -> QuantResult<Option<ComposedReport>> {
+        if !plan.planned.is_empty() {
+            return Ok(None);
+        }
+        self.compose_empty(EmptyComposeInput {
+            request: stage.request,
+            context: stage.context,
+            market_selection_id: stage.selection.market_selection_id.clone(),
+            account: stage.account,
+            empty: EmptyReportContext {
+                reason: empty_reason_from_planner_rejections(&plan.rejected),
+                candidate_count: model_outcome.emitted,
+                rejected_count: u32::try_from(plan.rejected.len()).unwrap_or(u32::MAX),
+                warnings: Vec::new(),
+            },
+            model_run_id: Some(model_outcome.model_run_id.clone()),
+            market_selection_count: market_selection_count(&stage.selection.included),
+            captures: artifacts.captures,
+            feature_vector_by_market: feature_vector_by_market(stage.features),
+            data_quality_snapshot: artifacts.data_quality_snapshot,
+        })
+        .map(Some)
     }
 }
 
@@ -272,11 +415,13 @@ impl DefaultReportBuilder {
             .run(FeaturePipelineRequest {
                 included: &selection.included,
                 as_of: context.as_of,
+                runtime_config_version_id: context.version.runtime_config_version_id.clone(),
                 features: &context.config.features,
                 data_quality: &context.config.data_quality,
                 model_requirements: &context.active.model_requirements,
                 source_delay_secs: context.source_delay_secs,
                 pit: PitView::Live(self.deps.pit_source.as_ref()),
+                liquidity_cap_usd: liquidity_score_cap(&context.config)?,
             })
             .await
     }
@@ -365,12 +510,14 @@ impl DefaultReportBuilder {
             portfolio_plan: plan_row,
             planned: &planned,
             planner_rejected: &rejected,
-            selected: &input.selection.included,
-            feature_infos: &input.features.persisted,
+            captures: input.features.captures.clone(),
+            feature_vector_by_market: feature_vector_by_market(input.features),
+            data_quality_snapshot: input.features.data_quality_snapshot.clone(),
             model_run_id: Some(input.model_outcome.model_run_id),
             candidate_count: input.model_outcome.emitted,
             feature_rejected_count: u32::try_from(input.features.rejected.len())
                 .unwrap_or(u32::MAX),
+            market_selection_count: market_selection_count(&input.selection.included),
             empty: None,
             top_n: input.context.top_n,
         })
@@ -428,8 +575,9 @@ impl DefaultReportBuilder {
             portfolio_plan,
             planned: &[],
             planner_rejected: &[],
-            selected: input.selected,
-            feature_infos: input.feature_infos,
+            captures: input.captures,
+            feature_vector_by_market: input.feature_vector_by_market,
+            data_quality_snapshot: input.data_quality_snapshot,
             model_run_id: input.model_run_id,
             candidate_count: input.empty.candidate_count,
             feature_rejected_count: if input.empty.reason == EmptyReason::InsufficientDataQuality {
@@ -437,6 +585,7 @@ impl DefaultReportBuilder {
             } else {
                 0
             },
+            market_selection_count: input.market_selection_count,
             empty: Some(input.empty),
             top_n: input.context.top_n,
         })
@@ -508,6 +657,19 @@ fn resolve_source_delay(request: &BuildReportRequest, config: &RuntimeConfig) ->
     }
 }
 
+pub(super) async fn report_as_of(
+    runtime_config_repo: &dyn RuntimeConfigVersionRepository,
+    request: &BuildReportRequest,
+) -> QuantResult<chrono::DateTime<Utc>> {
+    let version = runtime_config_repo
+        .load_active_at(request.trigger_time)
+        .await?
+        .ok_or_else(|| QuantError::config("no active runtime config version"))?;
+    let config = RuntimeConfig::from_json(&version.config_json)?;
+    let source_delay_secs = resolve_source_delay(request, &config)?;
+    Ok(request.trigger_time - checked_source_delay(source_delay_secs)?)
+}
+
 fn plan_candidates<'a>(
     candidates: &'a [SignalCandidate],
     selected: &'a [SelectedMarket],
@@ -523,8 +685,36 @@ fn plan_candidates<'a>(
                     category: market.category,
                     event_id: Some(market.event_id.clone()),
                     liquidity_usd: market.liquidity_usd,
+                    liquidity_score: candidate.liquidity_score,
                 })
         })
+        .collect()
+}
+
+fn market_selection_count(selected: &[SelectedMarket]) -> u32 {
+    u32::try_from(selected.len()).unwrap_or(u32::MAX)
+}
+
+fn empty_data_quality_snapshot(
+    context: &BuildContext,
+    as_of: chrono::DateTime<Utc>,
+) -> NewReportDataQualitySnapshot {
+    NewReportDataQualitySnapshot {
+        report_data_quality_snapshot_id: ReportDataQualitySnapshotId::from_v7(),
+        as_of,
+        runtime_config_version_id: context.version.runtime_config_version_id.clone(),
+        tokens_json: ReportDataQualityTokens(Vec::new()),
+    }
+}
+
+fn feature_vector_by_market(
+    features: &FeaturePipelineResult,
+) -> HashMap<MarketId, FeatureVectorId> {
+    features
+        .persisted
+        .iter()
+        .zip(features.accepted.iter())
+        .map(|(info, vector)| (vector.market_id.clone(), info.feature_vector_id.clone()))
         .collect()
 }
 
@@ -566,6 +756,18 @@ fn parse_decimal(field: &str, value: &str) -> QuantResult<Decimal> {
         .trim()
         .parse::<Decimal>()
         .map_err(|error| QuantError::config(format!("{field} is not a valid decimal: {error}")))
+}
+
+fn liquidity_score_cap(config: &RuntimeConfig) -> QuantResult<Usd> {
+    let caps = portfolio_caps(config)?;
+    if caps.liquidity_usage_cap_pct > Decimal::ZERO
+        && caps.max_single_recommendation_usd > Decimal::ZERO
+    {
+        return Ok(Usd::new(
+            caps.max_single_recommendation_usd / caps.liquidity_usage_cap_pct,
+        ));
+    }
+    Ok(Usd::new(Decimal::from(10_000)))
 }
 
 /// Map planner rejections to the report-level empty reason (04.2 §4 step 8).

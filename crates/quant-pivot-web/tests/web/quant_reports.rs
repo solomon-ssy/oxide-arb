@@ -1,8 +1,9 @@
 //! Phase 04.4 report API integration tests (real Postgres + Redis via Docker).
 //!
-//! The report data is served by the in-memory `MockQuantReportPort` seeded on
-//! `TestEnv`; Postgres backs the RBAC graph (roles, casbin, users) so the
-//! analyst / operator / viewer authorization paths are exercised end-to-end.
+//! Report rows are seeded into Postgres via [`seed_fixture_published_report`];
+//! the HTTP surface reads through real [`CoreQuantReportPort`]. Postgres also
+//! backs the RBAC graph so analyst / operator / viewer authorization paths are
+//! exercised end-to-end.
 
 use actix_web::{
     http::{StatusCode, header::AUTHORIZATION},
@@ -11,12 +12,10 @@ use actix_web::{
 use serde_json::{Value, json};
 
 use quant_pivot_models::{
-    enums::quant::{OutcomeSide, RecommendationReportStatus, ReportKind},
     runtime_config::{ReportsConfig, RuntimeConfig},
-    types::{RecommendationId, RecommendationReportId, Usd},
+    types::RecommendationReportId,
 };
-use quant_pivot_test_support::report_fixtures;
-use rust_decimal_macros::dec;
+use quant_pivot_test_support::report_pipeline_harness::seed_fixture_published_report;
 
 use crate::{
     client,
@@ -136,40 +135,17 @@ async fn enable_ad_hoc(env: &TestEnv) {
         .expect("apply runtime config");
 }
 
-fn seed_two_recommendation_report(env: &TestEnv) -> RecommendationReportId {
-    let id = RecommendationReportId::from_v7();
-    env.quant_reports.seed_report(report_fixtures::report(
-        id.clone(),
-        ReportKind::TopN,
-        RecommendationReportStatus::Published,
-    ));
-    env.quant_reports
-        .seed_recommendation(report_fixtures::recommendation(
-            id.clone(),
-            RecommendationId::from_v7(),
-            1,
-            "0xmarketA",
-            OutcomeSide::Yes,
-            Usd::new(dec!(300)),
-        ));
-    env.quant_reports
-        .seed_recommendation(report_fixtures::recommendation(
-            id.clone(),
-            RecommendationId::from_v7(),
-            2,
-            "0xmarketB",
-            OutcomeSide::No,
-            Usd::new(dec!(200)),
-        ));
-    id
-}
-
 #[actix_web::test]
 #[ignore = "requires Docker"]
 async fn reports_list_paginated_view() {
     let env = TestEnv::start().await;
     let admin = login(&env, "admin", "admin").await;
-    seed_two_recommendation_report(&env);
+    seed_fixture_published_report(
+        &env.db,
+        RecommendationReportId::from_v7(),
+        &env.fixture_report_ctx(),
+    )
+    .await;
 
     let res = get(&env, "/api/quant/reports?page=1&size=10", &admin).await;
     assert_eq!(res.status, StatusCode::OK);
@@ -188,12 +164,19 @@ async fn reports_list_paginated_view() {
 async fn report_detail_recommendations_and_evidence_views() {
     let env = TestEnv::start().await;
     let admin = login(&env, "admin", "admin").await;
-    let report_id = seed_two_recommendation_report(&env);
+    let report_id = RecommendationReportId::from_v7();
+    seed_fixture_published_report(&env.db, report_id.clone(), &env.fixture_report_ctx()).await;
 
     let detail = get(&env, &format!("/api/quant/reports/{report_id}"), &admin).await;
     assert_eq!(detail.status, StatusCode::OK);
     assert_eq!(detail.json()["data"]["account_source"], json!("polymarket"));
-    assert_eq!(detail.json()["data"]["capital_base_usd"], json!("10000"));
+    assert!(
+        detail.json()["data"]["capital_base_usd"]
+            .as_str()
+            .is_some_and(|value| value.starts_with("10000")),
+        "capital_base_usd: {:?}",
+        detail.json()["data"]["capital_base_usd"]
+    );
     assert!(detail.json()["data"]["summary"].is_object());
 
     let recs = get(
@@ -241,7 +224,8 @@ async fn report_detail_recommendations_and_evidence_views() {
 async fn latest_returns_most_recent_published() {
     let env = TestEnv::start().await;
     let admin = login(&env, "admin", "admin").await;
-    let report_id = seed_two_recommendation_report(&env);
+    let report_id = RecommendationReportId::from_v7();
+    seed_fixture_published_report(&env.db, report_id.clone(), &env.fixture_report_ctx()).await;
 
     let res = get(&env, "/api/quant/reports/latest", &admin).await;
     assert_eq!(res.status, StatusCode::OK);
@@ -256,8 +240,10 @@ async fn latest_returns_most_recent_published() {
 async fn report_diff_view_shape() {
     let env = TestEnv::start().await;
     let admin = login(&env, "admin", "admin").await;
-    let base = seed_two_recommendation_report(&env);
-    let compare = seed_two_recommendation_report(&env);
+    let base = RecommendationReportId::from_v7();
+    seed_fixture_published_report(&env.db, base.clone(), &env.fixture_report_ctx()).await;
+    let compare = RecommendationReportId::from_v7();
+    seed_fixture_published_report(&env.db, compare.clone(), &env.fixture_report_ctx()).await;
 
     let res = get(
         &env,
@@ -310,7 +296,12 @@ async fn run_report_gated_by_ad_hoc_enabled_and_rbac() {
         accepted.json()["data"]["trigger_key"],
         json!("ad_hoc:adhoc-2")
     );
-    assert_eq!(env.quant_reports.enqueued.lock().unwrap().len(), 1);
+    {
+        let enqueued = env.ad_hoc_enqueued.lock().unwrap();
+        assert_eq!(enqueued.len(), 1);
+        assert_eq!(enqueued[0].request_id, "adhoc-2");
+        drop(enqueued);
+    }
 
     // viewer may not enqueue → 403.
     let viewer = user_with_role(&env, &admin, "viewer1", "viewer").await;
@@ -330,7 +321,8 @@ async fn run_report_gated_by_ad_hoc_enabled_and_rbac() {
 async fn revoke_writes_oplog_and_returns_detail() {
     let env = TestEnv::start().await;
     let admin = login(&env, "admin", "admin").await;
-    let report_id = seed_two_recommendation_report(&env);
+    let report_id = RecommendationReportId::from_v7();
+    seed_fixture_published_report(&env.db, report_id.clone(), &env.fixture_report_ctx()).await;
 
     let res = post(
         &env,
@@ -346,6 +338,9 @@ async fn revoke_writes_oplog_and_returns_detail() {
     assert_eq!(res.status, StatusCode::OK);
     assert_eq!(res.json()["data"]["status"], json!("revoked"));
 
+    let detail = get(&env, &format!("/api/quant/reports/{report_id}"), &admin).await;
+    assert_eq!(detail.json()["data"]["status"], json!("revoked"));
+
     let logs = client::wait_for_oplog(&env, &admin, "req-revoke-1").await;
     assert!(
         logs.iter()
@@ -360,7 +355,8 @@ async fn revoke_writes_oplog_and_returns_detail() {
 async fn revoke_forbidden_for_analyst() {
     let env = TestEnv::start().await;
     let admin = login(&env, "admin", "admin").await;
-    let report_id = seed_two_recommendation_report(&env);
+    let report_id = RecommendationReportId::from_v7();
+    seed_fixture_published_report(&env.db, report_id.clone(), &env.fixture_report_ctx()).await;
     let analyst = user_with_role(&env, &admin, "analyst2", "analyst").await;
 
     let res = post(
@@ -382,7 +378,8 @@ async fn revoke_forbidden_for_analyst() {
 async fn create_intent_returns_501_phase5() {
     let env = TestEnv::start().await;
     let admin = login(&env, "admin", "admin").await;
-    let report_id = seed_two_recommendation_report(&env);
+    let report_id = RecommendationReportId::from_v7();
+    seed_fixture_published_report(&env.db, report_id.clone(), &env.fixture_report_ctx()).await;
     let recs = get(
         &env,
         &format!("/api/quant/reports/{report_id}/recommendations"),

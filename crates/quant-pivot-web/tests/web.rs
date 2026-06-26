@@ -5,6 +5,8 @@
 mod auth_helpers;
 #[path = "common/client.rs"]
 mod client;
+#[path = "common/core_report_port.rs"]
+mod core_report_port;
 #[path = "common/harness.rs"]
 mod harness;
 #[path = "common/pg.rs"]

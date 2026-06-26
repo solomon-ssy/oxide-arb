@@ -1,7 +1,10 @@
 use quant_pivot_macros::quant_schema;
 use sea_orm::{
     Iden,
-    sea_query::{ColumnDef, ForeignKey, ForeignKeyAction, Index, Table, TableCreateStatement},
+    sea_query::{
+        ColumnDef, ForeignKey, ForeignKeyAction, ForeignKeyCreateStatement, Index, IntoIden, Table,
+        TableCreateStatement,
+    },
 };
 
 use crate::{
@@ -31,6 +34,12 @@ pub enum QuantRecommendation {
     Confidence,
     ExpectedReturnBps,
     DownsideBps,
+    Identity,
+    MarketContext,
+    RankBeforePortfolio,
+    LiquidityScore,
+    DataQualityScore,
+    ModelScorePercentile,
     EntryPlan,
     SizingPlan,
     ExitPlan,
@@ -45,9 +54,21 @@ pub enum QuantRecommendation {
 }
 
 pub fn table() -> TableCreateStatement {
-    Table::create()
-        .table(QuantRecommendation::Table)
-        .if_not_exists()
+    let mut table = Table::create();
+
+    table.table(QuantRecommendation::Table).if_not_exists();
+    add_identity_columns(&mut table);
+    add_score_columns(&mut table);
+    add_context_columns(&mut table);
+    add_plan_columns(&mut table);
+    add_lifecycle_columns(&mut table);
+    add_foreign_keys(&mut table);
+
+    table
+}
+
+fn add_identity_columns(table: &mut TableCreateStatement) {
+    table
         .col(column::uuid_pk(QuantRecommendation::RecommendationId))
         .col(column::uuid_fk(QuantRecommendation::RecommendationReportId))
         .col(
@@ -60,12 +81,44 @@ pub fn table() -> TableCreateStatement {
         .col(column::token_id(QuantRecommendation::TokenId))
         .col(column::pg_enum::<OutcomeSide>(
             QuantRecommendation::OutcomeSide,
-        ))
+        ));
+}
+
+fn add_score_columns(table: &mut TableCreateStatement) {
+    table
         .col(column::probability(QuantRecommendation::CompositeScore))
         .col(column::probability(QuantRecommendation::RiskAdjustedScore))
         .col(column::probability(QuantRecommendation::Confidence))
         .col(column::bps(QuantRecommendation::ExpectedReturnBps))
-        .col(column::bps(QuantRecommendation::DownsideBps))
+        .col(column::bps(QuantRecommendation::DownsideBps));
+}
+
+fn add_context_columns(table: &mut TableCreateStatement) {
+    table
+        .col(
+            ColumnDef::new(QuantRecommendation::Identity)
+                .json_binary()
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(QuantRecommendation::MarketContext)
+                .json_binary()
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(QuantRecommendation::RankBeforePortfolio)
+                .integer()
+                .not_null(),
+        )
+        .col(column::probability(QuantRecommendation::LiquidityScore))
+        .col(column::probability(QuantRecommendation::DataQualityScore))
+        .col(column::probability(
+            QuantRecommendation::ModelScorePercentile,
+        ));
+}
+
+fn add_plan_columns(table: &mut TableCreateStatement) {
+    table
         .col(
             ColumnDef::new(QuantRecommendation::EntryPlan)
                 .json_binary()
@@ -100,7 +153,11 @@ pub fn table() -> TableCreateStatement {
             ColumnDef::new(QuantRecommendation::ExecutionEligibility)
                 .json_binary()
                 .not_null(),
-        )
+        );
+}
+
+fn add_lifecycle_columns(table: &mut TableCreateStatement) {
+    table
         .col(
             ColumnDef::new(QuantRecommendation::ValidFrom)
                 .timestamp_with_time_zone()
@@ -114,34 +171,56 @@ pub fn table() -> TableCreateStatement {
         .col(column::pg_enum::<RecommendationStatus>(
             QuantRecommendation::Status,
         ))
-        .col(timestamp_with_write_default(QuantRecommendation::CreatedAt))
-        .foreign_key(
-            ForeignKey::create()
-                .name("fk_quant_recommendation_report")
-                .from(
-                    QuantRecommendation::Table,
-                    QuantRecommendation::RecommendationReportId,
-                )
-                .to(
-                    QuantRecommendationReport::Table,
-                    QuantRecommendationReport::RecommendationReportId,
-                )
-                .on_delete(ForeignKeyAction::Cascade),
-        )
-        .foreign_key(
-            ForeignKey::create()
-                .name("fk_quant_recommendation_market")
-                .from(QuantRecommendation::Table, QuantRecommendation::MarketId)
-                .to(Market::Table, Market::MarketId)
-                .on_delete(ForeignKeyAction::Restrict),
-        )
-        .foreign_key(
-            ForeignKey::create()
-                .name("fk_quant_recommendation_event")
-                .from(QuantRecommendation::Table, QuantRecommendation::EventId)
-                .to(Event::Table, Event::EventId)
-                .on_delete(ForeignKeyAction::Restrict),
-        )
+        .col(timestamp_with_write_default(QuantRecommendation::CreatedAt));
+}
+
+fn add_foreign_keys(table: &mut TableCreateStatement) {
+    table
+        .foreign_key(&mut fk_cascade(
+            "fk_quant_recommendation_report",
+            QuantRecommendation::RecommendationReportId,
+            QuantRecommendationReport::Table,
+            QuantRecommendationReport::RecommendationReportId,
+        ))
+        .foreign_key(&mut fk_restrict(
+            "fk_quant_recommendation_market",
+            QuantRecommendation::MarketId,
+            Market::Table,
+            Market::MarketId,
+        ))
+        .foreign_key(&mut fk_restrict(
+            "fk_quant_recommendation_event",
+            QuantRecommendation::EventId,
+            Event::Table,
+            Event::EventId,
+        ));
+}
+
+fn fk_cascade(
+    name: &str,
+    from_col: QuantRecommendation,
+    to_table: impl IntoIden + 'static,
+    to_col: impl IntoIden + 'static,
+) -> ForeignKeyCreateStatement {
+    ForeignKey::create()
+        .name(name)
+        .from(QuantRecommendation::Table, from_col)
+        .to(to_table, to_col)
+        .on_delete(ForeignKeyAction::Cascade)
+        .to_owned()
+}
+
+fn fk_restrict(
+    name: &str,
+    from_col: QuantRecommendation,
+    to_table: impl IntoIden + 'static,
+    to_col: impl IntoIden + 'static,
+) -> ForeignKeyCreateStatement {
+    ForeignKey::create()
+        .name(name)
+        .from(QuantRecommendation::Table, from_col)
+        .to(to_table, to_col)
+        .on_delete(ForeignKeyAction::Restrict)
         .to_owned()
 }
 

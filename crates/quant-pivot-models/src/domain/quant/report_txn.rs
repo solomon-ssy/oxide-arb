@@ -1,11 +1,12 @@
 //! Atomic report-creation transaction input.
 //!
 //! Produced by the 04.2 composer and written as one Postgres transaction:
-//! `account_snapshot → portfolio_plan → report → recommendations`. Grouping the
-//! rows guarantees the report's `account_snapshot_ref` / `portfolio_plan_id`
-//! foreign keys are satisfied within the same transaction.
+//! `account_snapshot → data_quality_snapshot → portfolio_plan → report → recommendations`.
 
-use super::{NewAccountSnapshot, NewPortfolioPlan, NewRecommendation, NewRecommendationReport};
+use super::{
+    NewAccountSnapshot, NewPortfolioPlan, NewRecommendation, NewRecommendationReport,
+    NewReportDataQualitySnapshot,
+};
 use crate::domain::governance::NewOperationLog;
 
 /// All rows written atomically when a recommendation report is created.
@@ -13,6 +14,8 @@ use crate::domain::governance::NewOperationLog;
 pub struct NewReportTransaction {
     /// Decision-time capital snapshot (FK target for the report header).
     pub account_snapshot: NewAccountSnapshot,
+    /// Per-fire data-quality snapshot (FK target for the report header).
+    pub data_quality_snapshot: NewReportDataQualitySnapshot,
     /// Portfolio plan (FK target for the report header).
     pub portfolio_plan: NewPortfolioPlan,
     /// The report header.

@@ -19,6 +19,7 @@ mod model;
 mod portfolio;
 pub mod prelude;
 mod recommendation;
+mod report_data_quality;
 mod report_diff;
 mod report_txn;
 #[allow(clippy::needless_update)] // NewMarketSelectionMember covers all ActiveModel columns
@@ -39,6 +40,7 @@ pub use governance_audit::*;
 pub use model::*;
 pub use portfolio::*;
 pub use recommendation::*;
+pub use report_data_quality::*;
 pub use report_diff::*;
 pub use report_txn::*;
 pub use selection::*;

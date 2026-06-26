@@ -160,6 +160,31 @@ impl ReportLifecycleEvent {
         Self::from_report(report, ReportEventKind::Expired)
     }
 
+    /// Ephemeral `empty` signal when `publish_empty_reports=false` suppresses PG persistence.
+    #[must_use]
+    pub fn ephemeral_empty(
+        trigger_key: String,
+        report_kind: ReportKind,
+        runtime_mode: QuantRuntimeMode,
+        as_of: DateTime<Utc>,
+        empty_reason: EmptyReason,
+    ) -> Self {
+        Self {
+            event: ReportEventKind::Empty,
+            trigger_key,
+            recommendation_report_id: None,
+            report_kind,
+            runtime_mode,
+            status: RecommendationReportStatus::PublishedEmpty,
+            as_of,
+            published_at: None,
+            recommendation_count: 0,
+            empty_reason: Some(empty_reason),
+            error_code: None,
+            status_reason: Some(empty_reason.as_str().to_owned()),
+        }
+    }
+
     fn from_report(report: &RecommendationReportInfo, event: ReportEventKind) -> Self {
         Self {
             event,

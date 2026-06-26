@@ -10,7 +10,7 @@ use quant_pivot_models::{
     },
     entities::{
         operation_log, quant_account_snapshot, quant_portfolio_plan, quant_recommendation,
-        quant_recommendation_report,
+        quant_recommendation_report, quant_report_data_quality_snapshot,
     },
     enums::quant::{RecommendationReportStatus, RecommendationStatus, ReportKind},
     schema::column,
@@ -42,6 +42,7 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
     ) -> Result<RecommendationReportInfo, StorageError> {
         let NewReportTransaction {
             account_snapshot,
+            data_quality_snapshot,
             portfolio_plan,
             report,
             recommendations,
@@ -55,6 +56,12 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
             .exec(&txn)
             .await
             .map_err(StorageError::from)?;
+        quant_report_data_quality_snapshot::Entity::insert(
+            data_quality_snapshot.into_active_model(),
+        )
+        .exec(&txn)
+        .await
+        .map_err(StorageError::from)?;
         quant_portfolio_plan::Entity::insert(portfolio_plan.into_active_model())
             .exec(&txn)
             .await

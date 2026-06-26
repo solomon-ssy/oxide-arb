@@ -268,6 +268,8 @@ async fn build_features(db: &DatabaseConnection) -> (Vec<FeatureVector>, Vec<Fea
             model_requirements: &ModelFeatureRequirements::default(),
             source_delay_secs: 0,
             pit: PitView::Live(&live_pit),
+            runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
+            liquidity_cap_usd: Usd::new(Decimal::from(10_000)),
         })
         .await
         .expect("feature pipeline");

@@ -19,6 +19,7 @@ const DOCKER_SUITES: &[(&str, &str)] = &[
     ("quant-pivot-storage", "clickhouse_integration"),
     ("quant-pivot-storage", "cache_tiered_integration"),
     ("quant-pivot-core", "market_selection_e2e"),
+    ("quant-pivot-core", "report_pipeline_e2e"),
     ("quant-pivot-web", "web"),
 ];
 
