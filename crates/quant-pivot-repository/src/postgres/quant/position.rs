@@ -10,8 +10,8 @@ use quant_pivot_models::{
 };
 use rust_decimal::Decimal;
 use sea_orm::{
-    ActiveModelTrait, ActiveValue, ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel,
-    QueryFilter,
+    ActiveModelTrait, ActiveValue, ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait,
+    IntoActiveModel, QueryFilter,
 };
 
 /// Postgres-backed current-position ledger repository.
@@ -28,65 +28,7 @@ impl PgPositionRepository {
 #[async_trait::async_trait]
 impl PositionRepository for PgPositionRepository {
     async fn apply_fill(&self, fill: PositionFill) -> Result<PositionInfo, StorageError> {
-        if !fill.shares.is_positive() || fill.cost_usd.is_negative() {
-            return Err(StorageError::Conflict(
-                "position fill must have positive shares and non-negative cost".to_owned(),
-            ));
-        }
-
-        let existing = quant_position::Entity::find_by_id(fill.token_id.clone())
-            .one(&self.db)
-            .await
-            .map_err(StorageError::from)?;
-
-        let Some(row) = existing else {
-            return quant_position::Entity::insert(
-                NewPosition {
-                    token_id: fill.token_id,
-                    market_id: fill.market_id,
-                    event_id: fill.event_id,
-                    category: fill.category,
-                    side: fill.side,
-                    state: PositionLedgerState::Open,
-                    shares: fill.shares,
-                    avg_price: fill.price,
-                    cost_usd: fill.cost_usd,
-                    realized_pnl_usd: Usd::ZERO,
-                    source: fill.source,
-                    opened_at: fill.filled_at,
-                    closed_at: None,
-                }
-                .into_active_model(),
-            )
-            .exec_with_returning(&self.db)
-            .await
-            .map_err(StorageError::from)
-            .map(Into::into);
-        };
-
-        if row.state == PositionLedgerState::Closed || row.state == PositionLedgerState::Settled {
-            return Err(StorageError::Conflict(format!(
-                "cannot apply fill to closed position: {}",
-                row.token_id
-            )));
-        }
-
-        let shares = row.shares + fill.shares;
-        let cost_usd = row.cost_usd + fill.cost_usd;
-        let avg_price = price_from_cost_and_shares(cost_usd, shares)?;
-        let mut active = row.into_active_model();
-        active.state = ActiveValue::Set(PositionLedgerState::Open);
-        active.shares = ActiveValue::Set(shares);
-        active.avg_price = ActiveValue::Set(avg_price);
-        active.cost_usd = ActiveValue::Set(cost_usd);
-        active.source = ActiveValue::Set(fill.source);
-        active.updated_at = ActiveValue::Set(fill.filled_at);
-        active.closed_at = ActiveValue::Set(None);
-        active
-            .update(&self.db)
-            .await
-            .map_err(StorageError::from)
-            .map(Into::into)
+        apply_fill(&self.db, fill).await
     }
 
     async fn apply_exit(
@@ -173,6 +115,74 @@ impl PositionRepository for PgPositionRepository {
             .map_err(StorageError::from)
             .map(|rows| rows.into_iter().map(Into::into).collect())
     }
+}
+
+/// Upsert a position from a fill (weighted-average cost), on the caller's
+/// connection — usable inside the execution-submission transaction so the
+/// position ledger and capital settlement commit atomically.
+pub async fn apply_fill(
+    db: &impl ConnectionTrait,
+    fill: PositionFill,
+) -> Result<PositionInfo, StorageError> {
+    if !fill.shares.is_positive() || fill.cost_usd.is_negative() {
+        return Err(StorageError::Conflict(
+            "position fill must have positive shares and non-negative cost".to_owned(),
+        ));
+    }
+
+    let existing = quant_position::Entity::find_by_id(fill.token_id.clone())
+        .one(db)
+        .await
+        .map_err(StorageError::from)?;
+
+    let Some(row) = existing else {
+        return quant_position::Entity::insert(
+            NewPosition {
+                token_id: fill.token_id,
+                market_id: fill.market_id,
+                event_id: fill.event_id,
+                category: fill.category,
+                side: fill.side,
+                state: PositionLedgerState::Open,
+                shares: fill.shares,
+                avg_price: fill.price,
+                cost_usd: fill.cost_usd,
+                realized_pnl_usd: Usd::ZERO,
+                source: fill.source,
+                opened_at: fill.filled_at,
+                closed_at: None,
+            }
+            .into_active_model(),
+        )
+        .exec_with_returning(db)
+        .await
+        .map_err(StorageError::from)
+        .map(Into::into);
+    };
+
+    if row.state == PositionLedgerState::Closed || row.state == PositionLedgerState::Settled {
+        return Err(StorageError::Conflict(format!(
+            "cannot apply fill to closed position: {}",
+            row.token_id
+        )));
+    }
+
+    let shares = row.shares + fill.shares;
+    let cost_usd = row.cost_usd + fill.cost_usd;
+    let avg_price = price_from_cost_and_shares(cost_usd, shares)?;
+    let mut active = row.into_active_model();
+    active.state = ActiveValue::Set(PositionLedgerState::Open);
+    active.shares = ActiveValue::Set(shares);
+    active.avg_price = ActiveValue::Set(avg_price);
+    active.cost_usd = ActiveValue::Set(cost_usd);
+    active.source = ActiveValue::Set(fill.source);
+    active.updated_at = ActiveValue::Set(fill.filled_at);
+    active.closed_at = ActiveValue::Set(None);
+    active
+        .update(db)
+        .await
+        .map_err(StorageError::from)
+        .map(Into::into)
 }
 
 fn price_from_cost_and_shares(cost_usd: Usd, shares: Shares) -> Result<Price, StorageError> {

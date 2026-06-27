@@ -12,7 +12,7 @@ use quant_pivot_core::{
     execution::{
         AdmissionDecision, AdmissionInput, AdmissionInputBuilder, AdmissionInputBuilderDeps,
         AdmissionSeams, DefaultAdmissionEngine, ExecutionAdmissionEngine, StateVersion,
-        VenueHealth,
+        VenueHealth, VenueHealthHandle,
     },
     governance::{KillSwitchHandle, RuntimeModeHandle},
     observability::metrics_hub::MetricsHub,
@@ -24,11 +24,12 @@ use quant_pivot_error::{QuantError, account::AccountError, storage::StorageError
 use quant_pivot_models::{
     domain::{
         AppendReconciliationEvidence, BookLevel, BookSnapshot, CapitalAllocationInfo,
-        DataQualityPort, DataQualitySnapshot, ModelSpecInfo, ModelVersionInfo, NewModelSpec,
-        NewModelVersion, NewOperationLog, NewReconciliation, NewReportTransaction,
-        NewRuntimeConfigActivation, NewRuntimeConfigVersion, OrderIntentInfo, Paginated,
-        QuantReportListQuery, RecommendationInfo, RecommendationReportInfo, ReconciliationInfo,
-        ReconciliationPatch, RuntimeConfigActivationInfo, RuntimeConfigVersionInfo,
+        DataQualityPort, DataQualitySnapshot, ExecutionOrderInfo, ExecutionOrderPatch,
+        ModelSpecInfo, ModelVersionInfo, NewExecutionOrder, NewModelSpec, NewModelVersion,
+        NewOperationLog, NewReconciliation, NewReportTransaction, NewRuntimeConfigActivation,
+        NewRuntimeConfigVersion, OrderIntentInfo, Paginated, QuantReportListQuery,
+        RecommendationInfo, RecommendationReportInfo, ReconciliationInfo, ReconciliationPatch,
+        RuntimeConfigActivationInfo, RuntimeConfigVersionInfo,
     },
     enums::{
         common::{OrderType, Side},
@@ -51,8 +52,9 @@ use quant_pivot_models::{
     },
 };
 use quant_pivot_repository::traits::{
-    CapitalAllocationRepository, ModelRegistryRepository, RecommendationReportRepository,
-    RecommendationRepository, ReconciliationRepository, RuntimeConfigVersionRepository,
+    CapitalAllocationRepository, ExecutionOrderRepository, ModelRegistryRepository,
+    RecommendationReportRepository, RecommendationRepository, ReconciliationRepository,
+    RuntimeConfigVersionRepository,
 };
 use quant_pivot_research::portfolio::AccountSnapshot;
 use quant_pivot_test_support::report_fixtures;
@@ -204,7 +206,7 @@ fn passing() -> AdmissionInput {
         model_published: true,
         data_quality: green_data_quality(),
         max_stale_book_ratio_bps: 2_000,
-        has_unresolvable_recon: false,
+        has_blocking_inflight: false,
         manual_block: false,
         seams: AdmissionSeams {
             venue_health: VenueHealth::Healthy,
@@ -332,7 +334,7 @@ async fn admission_denies_when_unresolvable_recon_for_auto() {
     let mut input = passing();
     input.mode = QuantRuntimeMode::AutoExecution;
     input.intent.status = OrderIntentStatus::ApprovedByPolicy;
-    input.has_unresolvable_recon = true;
+    input.has_blocking_inflight = true;
     let decision = full(input).await;
     assert_eq!(decision.outcome, AdmissionOutcome::Deny);
     assert!(denied_checks(&decision).contains(&AdmissionCheckId::KillSwitch));
@@ -567,6 +569,7 @@ async fn admission_fail_closed_when_account_unavailable() {
         reports: Arc::new(StubReports(report)),
         model_registry: Arc::new(StubModelRegistry),
         reconciliation: Arc::new(StubReconciliation),
+        execution_orders: Arc::new(StubExecutionOrders),
         capital: Arc::new(StubCapital),
         config_versions: Arc::new(StubConfigVersions),
         account_factory: Arc::new(AccountProviderFactory::new(
@@ -580,6 +583,7 @@ async fn admission_fail_closed_when_account_unavailable() {
         config: Arc::new(RuntimeConfigStore::new(RuntimeConfig::default())),
         runtime_mode: RuntimeModeHandle::new(QuantRuntimeMode::SemiAuto),
         kill_switch: KillSwitchHandle::new(KillSwitchState::Closed),
+        venue_health: VenueHealthHandle::default(),
     };
     let builder = AdmissionInputBuilder::new(deps);
     let result = builder.build(&intent, now()).await;
@@ -612,6 +616,30 @@ impl RecommendationRepository for StubRecommendations {
         _recommendation_id: &RecommendationId,
     ) -> Result<Option<RecommendationInfo>, StorageError> {
         Ok(Some(self.0.clone()))
+    }
+
+    async fn find_expirable(
+        &self,
+        _now: DateTime<Utc>,
+        _limit: u64,
+    ) -> Result<Vec<RecommendationId>, StorageError> {
+        unimplemented!()
+    }
+
+    async fn upcoming_expirations(
+        &self,
+        _before: DateTime<Utc>,
+        _limit: u64,
+    ) -> Result<Vec<(RecommendationId, DateTime<Utc>)>, StorageError> {
+        unimplemented!()
+    }
+
+    async fn expire(
+        &self,
+        _recommendation_id: &RecommendationId,
+        _operation_log: NewOperationLog,
+    ) -> Result<RecommendationInfo, StorageError> {
+        unimplemented!()
     }
 }
 
@@ -656,9 +684,18 @@ impl RecommendationReportRepository for StubReports {
 
     async fn find_expirable(
         &self,
-        _published_before: DateTime<Utc>,
+        _now: DateTime<Utc>,
         _limit: u64,
     ) -> Result<Vec<RecommendationReportId>, StorageError> {
+        unimplemented!()
+    }
+
+    async fn roll_up_to_expired(
+        &self,
+        _report_id: &RecommendationReportId,
+        _expired_at: DateTime<Utc>,
+        _operation_log: NewOperationLog,
+    ) -> Result<Option<RecommendationReportInfo>, StorageError> {
         unimplemented!()
     }
 
@@ -667,16 +704,6 @@ impl RecommendationReportRepository for StubReports {
         _report_id: &RecommendationReportId,
         _reason: &str,
         _revoked_at: DateTime<Utc>,
-        _operation_log: NewOperationLog,
-    ) -> Result<RecommendationReportInfo, StorageError> {
-        unimplemented!()
-    }
-
-    async fn expire(
-        &self,
-        _report_id: &RecommendationReportId,
-        _reason: &str,
-        _expired_at: DateTime<Utc>,
         _operation_log: NewOperationLog,
     ) -> Result<RecommendationReportInfo, StorageError> {
         unimplemented!()
@@ -796,6 +823,41 @@ impl ReconciliationRepository for StubReconciliation {
 
     async fn has_unresolvable(&self) -> Result<bool, StorageError> {
         Ok(false)
+    }
+}
+
+struct StubExecutionOrders;
+
+#[async_trait]
+impl ExecutionOrderRepository for StubExecutionOrders {
+    async fn create(&self, _order: NewExecutionOrder) -> Result<ExecutionOrderInfo, StorageError> {
+        unimplemented!()
+    }
+
+    async fn find_by_intent(
+        &self,
+        _order_intent_id: &OrderIntentId,
+    ) -> Result<Vec<ExecutionOrderInfo>, StorageError> {
+        unimplemented!()
+    }
+
+    async fn find_by_id(
+        &self,
+        _execution_order_id: &ExecutionOrderId,
+    ) -> Result<Option<ExecutionOrderInfo>, StorageError> {
+        unimplemented!()
+    }
+
+    async fn has_ambiguous_inflight(&self) -> Result<bool, StorageError> {
+        Ok(false)
+    }
+
+    async fn transition(
+        &self,
+        _execution_order_id: &ExecutionOrderId,
+        _patch: ExecutionOrderPatch,
+    ) -> Result<ExecutionOrderInfo, StorageError> {
+        unimplemented!()
     }
 }
 

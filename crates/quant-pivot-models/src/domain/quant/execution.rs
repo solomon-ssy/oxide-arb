@@ -2,7 +2,7 @@
 
 use crate::{
     domain::{
-        RecommendationInfo, RecommendationReportInfo,
+        NewReconciliation, PositionFill, RecommendationInfo, RecommendationReportInfo,
         patch::{NullablePatch, Patch},
     },
     enums::{
@@ -206,14 +206,55 @@ pub fn evaluate_intent_approval_invalidation(
     None
 }
 
-/// Venue submission outcome applied to an execution-order row (Phase 05.4 write path).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExecutionOrderSubmissionResult {
+/// How a submission outcome settles the intent's capital allocation (Phase 05.4).
+///
+/// The capital row carries explicit amounts (`locked`/`spent`/`released`); the
+/// state enum is a coarse lifecycle marker. The reserved aggregate is
+/// `max(allocated, locked) - spent - released`, so a partial fill can keep the
+/// row `Locked` while increasing `spent` and still report the correct remaining
+/// exposure.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum CapitalSettlement {
+    /// Full settle: `Locked -> Spent`. `spent_usd` is the realized fill cost; any
+    /// unspent locked remainder (filled below the limit) is released.
+    SettleFull { spent_usd: Usd },
+    /// Partial fill with a resting remainder: increase `spent_usd`, keep the row
+    /// `Locked` (remaining exposure stays reserved until recon / exit).
+    SettlePartial { spent_usd: Usd },
+    /// Nothing filled: release all locked capital (`Locked -> Released`).
+    ReleaseAll,
+    /// Leave locked capital untouched — `Ambiguous` (may have filled) or a
+    /// resting `Open` order with no fill yet. Fail-closed: never free capital
+    /// that might already be spent on the venue.
+    Hold,
+}
+
+/// Complete ledger write applied by `record_submission_result` in one txn.
+///
+/// Built by the dispatcher from the venue [`VenueSubmitResult`] and applied
+/// atomically across execution order + capital + position + intent + recon.
+#[derive(Debug, Clone)]
+pub struct SubmissionLedgerWrite {
+    /// Target execution-order state (from the venue outcome).
     pub state: ExecutionOrderState,
+    /// Target order-intent status (kept consistent with `state`).
+    pub intent_status: OrderIntentStatus,
+    /// Venue-assigned order id, when the venue acknowledged one.
     pub venue_order_id: Option<OrderId>,
+    /// Raw venue order status, when parseable.
     pub venue_status: Option<VenueOrderStatus>,
+    /// When the order was sent to the venue.
     pub submitted_at: DateTime<Utc>,
+    /// When the order (partially) filled, when known.
     pub filled_at: Option<DateTime<Utc>>,
+    /// When the order was cancelled/expired, when known.
     pub cancelled_at: Option<DateTime<Utc>>,
+    /// Failure / ambiguity detail recorded on the order row.
     pub error_message: Option<String>,
+    /// How to settle the capital allocation.
+    pub capital: CapitalSettlement,
+    /// Position upsert (present only on a fill).
+    pub fill: Option<PositionFill>,
+    /// Reconciliation row to enqueue (`None` only for a resting `Open` order).
+    pub reconciliation: Option<NewReconciliation>,
 }

@@ -1,0 +1,246 @@
+//! Entry-execution worker wiring (Phase 05.4): the `auto_execution` dispatcher
+//! poll loop, the execution-breaker self-heal tick, and crash recovery.
+//!
+//! Correctness note: the per-intent `SELECT … FOR UPDATE` claim inside
+//! [`ExecutionSubmissionRepository::claim_for_submission`] is the authoritative
+//! double-submit guard and holds **across processes**. The worker is a single
+//! spawned task; multi-replica leader election is Phase 8+ (the row lock keeps it
+//! safe regardless of replica count).
+
+use std::{sync::Arc, time::Duration};
+
+use chrono::Utc;
+use quant_pivot_error::QuantResult;
+use quant_pivot_models::{
+    domain::{
+        ExecutionOrderInfo, ExecutionSubmitPort, NewReconciliation, OrderIntentListQuery,
+        PageRequest,
+    },
+    enums::{
+        execution::{ReconciliationEvidenceKind, ReconciliationResult},
+        quant::{OrderIntentStatus, QuantRuntimeMode},
+    },
+    types::{ReconciliationEvidence, ReconciliationEvidenceChain, ReconciliationId},
+};
+use quant_pivot_repository::{
+    postgres::{PgOrderIntentRepository, PgReconciliationRepository},
+    traits::{ExecutionSubmissionRepository, OrderIntentRepository, ReconciliationRepository},
+};
+
+use super::AppContext;
+use crate::{
+    app::{task_id::TaskId, task_registry::AppRunner},
+    governance::{KillSwitchHandle, RuntimeModeHandle},
+    infra::periodic_task::PeriodicTask,
+};
+
+/// Max `ApprovedByPolicy` intents pulled per auto-dispatch pass.
+const AUTO_DISPATCH_BATCH: u64 = 64;
+/// Max dangling orders handed to reconciliation per boot recovery pass.
+const RECOVER_DANGLING_LIMIT: u64 = 1_024;
+/// Backoff between boot-recovery retries (recovery is fail-closed: the submit
+/// loop does not start until it succeeds).
+const RECOVERY_RETRY_BACKOFF: Duration = Duration::from_secs(5);
+
+impl AppContext {
+    /// Register the `auto_execution` dispatch worker and the breaker self-heal
+    /// tick. Both run regardless of mode and gate internally (mode is hot-swappable).
+    pub fn register_execution_dispatcher(&self, runner: &mut AppRunner) {
+        self.register_execution_breaker_tick(runner);
+        self.register_auto_dispatch_worker(runner);
+    }
+
+    fn register_execution_breaker_tick(&self, runner: &mut AppRunner) {
+        let breaker = Arc::clone(&self.execution.breaker);
+        let tick_secs = self.config.quant.workers.execution_breaker_tick_secs;
+        runner.spawn(TaskId::ExecutionBreakerTick, move |token| async move {
+            let _ = PeriodicTask::run(
+                "execution-breaker-tick",
+                move || Duration::from_secs(tick_secs),
+                0.0,
+                true,
+                token,
+                move || {
+                    let breaker = Arc::clone(&breaker);
+                    async move {
+                        breaker.tick();
+                        Ok(())
+                    }
+                },
+            )
+            .await;
+        });
+    }
+
+    fn register_auto_dispatch_worker(&self, runner: &mut AppRunner) {
+        let dispatcher = self.execution_dispatcher();
+        let intents: Arc<dyn OrderIntentRepository> = Arc::new(PgOrderIntentRepository::new(
+            self.infra.pg.connection().clone(),
+        ));
+        let submission = Arc::clone(&self.execution.submission);
+        let reconciliation: Arc<dyn ReconciliationRepository> = Arc::new(
+            PgReconciliationRepository::new(self.infra.pg.connection().clone()),
+        );
+        let runtime_mode = self.runtime_mode();
+        let kill_switch = self.kill_switch_handle();
+        let wake = self.execution_wake();
+        let poll = Duration::from_secs(self.config.quant.workers.execution_dispatch_secs);
+        runner.spawn(TaskId::ExecutionDispatcher, move |token| async move {
+            // Crash recovery is the dispatcher's first action — it must complete
+            // before any new submission. In-flight (`Submitted`/`Ambiguous`)
+            // orders are handed to reconciliation so a crash mid-submit is
+            // reconciled (05.5) rather than re-submitted or lost. Fail-closed:
+            // retry with backoff until it succeeds; the submit loop is not
+            // entered (so nothing is auto-submitted) until recovery is durably
+            // done. The report plane runs independently and is unaffected.
+            loop {
+                match recover_dangling_orders(&submission, &reconciliation, RECOVER_DANGLING_LIMIT)
+                    .await
+                {
+                    Ok(recovered) => {
+                        if recovered > 0 {
+                            tracing::warn!(
+                                recovered,
+                                "boot recovery enqueued in-flight execution orders",
+                            );
+                        }
+                        break;
+                    }
+                    Err(error) => {
+                        tracing::error!(
+                            %error,
+                            "boot recovery failed; auto-execution paused, retrying",
+                        );
+                        tokio::select! {
+                            biased;
+                            () = token.cancelled() => return,
+                            () = tokio::time::sleep(RECOVERY_RETRY_BACKOFF) => {}
+                        }
+                    }
+                }
+            }
+
+            loop {
+                // Low-latency wake on a fresh `ApprovedByPolicy` approval, or the
+                // poll backstop (catches missed wakes, retried admission defers,
+                // and crash-recovery work). The Postgres row lock — not this
+                // signal — is the authoritative durable queue. Cancellation wins.
+                tokio::select! {
+                    biased;
+                    () = token.cancelled() => break,
+                    () = wake.wait() => {}
+                    () = tokio::time::sleep(poll) => {}
+                }
+                if let Err(error) =
+                    auto_dispatch_pass(&dispatcher, &intents, &runtime_mode, &kill_switch).await
+                {
+                    tracing::warn!(%error, "auto-execution dispatch pass failed");
+                }
+            }
+        });
+    }
+}
+
+/// Boot recovery: scan in-flight (`Submitted`/`Ambiguous`) orders with no
+/// reconciliation row and enqueue a `Pending` one, so a crash mid-submit is
+/// reconciled (05.5) rather than silently lost. Returns the count enqueued.
+///
+/// Deferred to 05.5: the reconciliation **worker** that consumes these `Pending`
+/// rows, resolves venue truth for `Ambiguous` orders, and clears the fail-closed
+/// admission block (`#17`, keyed off `Ambiguous` order state). Until then a
+/// crash leaves truth-unknown exposure that pauses auto-execution and is handled
+/// by an operator.
+async fn recover_dangling_orders(
+    submission: &Arc<dyn ExecutionSubmissionRepository>,
+    reconciliation: &Arc<dyn ReconciliationRepository>,
+    limit: u64,
+) -> QuantResult<u32> {
+    let dangling = submission.recover_dangling(limit).await?;
+    let mut enqueued = 0;
+    for order in &dangling {
+        if reconciliation
+            .find_by_execution_order(&order.execution_order_id)
+            .await?
+            .is_none()
+        {
+            reconciliation
+                .create(boot_recovery_reconciliation(order))
+                .await?;
+            enqueued += 1;
+        }
+    }
+    if !dangling.is_empty() {
+        tracing::warn!(
+            dangling = dangling.len(),
+            enqueued,
+            "boot recovery handed in-flight execution orders to reconciliation",
+        );
+    }
+    Ok(enqueued)
+}
+
+/// One auto-dispatch pass: worker-level early-exit unless mode is
+/// `auto_execution` and the kill-switch admits new entries, then pull a bounded
+/// batch of `ApprovedByPolicy` intents and submit each. Each submit is
+/// independently row-locked + admitted; a per-intent failure never aborts the
+/// batch.
+async fn auto_dispatch_pass(
+    dispatcher: &Arc<dyn ExecutionSubmitPort>,
+    intents: &Arc<dyn OrderIntentRepository>,
+    runtime_mode: &RuntimeModeHandle,
+    kill_switch: &KillSwitchHandle,
+) -> QuantResult<()> {
+    if runtime_mode.current() != QuantRuntimeMode::AutoExecution || !kill_switch.allows_new_entry()
+    {
+        return Ok(());
+    }
+    let query = OrderIntentListQuery {
+        status: Some(OrderIntentStatus::ApprovedByPolicy),
+        page: PageRequest::new(PageRequest::DEFAULT_PAGE, AUTO_DISPATCH_BATCH),
+        ..Default::default()
+    }
+    .normalized();
+    let page = intents.page(query).await?;
+    for intent in page.items {
+        if let Err(error) = dispatcher.submit_if_admitted(&intent.order_intent_id).await {
+            tracing::warn!(
+                %error,
+                intent_id = %intent.order_intent_id,
+                "auto-execution dispatch failed for intent",
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Pending reconciliation row for an order found in-flight at boot.
+fn boot_recovery_reconciliation(order: &ExecutionOrderInfo) -> NewReconciliation {
+    let evidence = ReconciliationEvidenceChain(vec![ReconciliationEvidence {
+        kind: ReconciliationEvidenceKind::OperatorNote,
+        observed_at: Utc::now(),
+        detail: format!(
+            "boot recovery: execution order {} found in-flight state {}",
+            order.execution_order_id,
+            order.state.as_str()
+        ),
+        venue_ref: order.venue_order_id.as_ref().map(ToString::to_string),
+        shares: None,
+        price: None,
+    }]);
+    NewReconciliation {
+        reconciliation_id: ReconciliationId::from_v7(),
+        execution_order_id: order.execution_order_id.clone(),
+        order_intent_id: order.order_intent_id.clone(),
+        // Truth is not yet known at boot — this is `Pending` (awaiting the 05.5
+        // recon worker), never `Unresolvable` (that is the worker's terminal
+        // verdict). The fail-closed block on truly truth-unknown exposure keys
+        // off the order's `Ambiguous` state, not this row's result.
+        result: ReconciliationResult::Pending,
+        evidence_json: evidence,
+        venue_filled_shares: None,
+        venue_avg_price: None,
+        discrepancy_usd: None,
+        resolved_by: None,
+        resolved_at: None,
+    }
+}

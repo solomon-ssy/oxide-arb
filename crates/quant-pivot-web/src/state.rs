@@ -5,9 +5,10 @@ use std::sync::Arc;
 use quant_pivot_models::{
     config::DeployConfig,
     domain::{
-        BacktestPort, CatalogStatusPort, CoreEventPublisher, DataQualityPort, KillSwitchPort,
-        MarketDataPort, MetricsScrapePort, ModelGovernancePort, ModelTrainingPort, OrderIntentPort,
-        QuantReportPort, ReadinessPort, RuntimeConfigPort, RuntimeControlPort, TrainingDatasetPort,
+        BacktestPort, CatalogStatusPort, CoreEventPublisher, DataQualityPort, ExecutionSubmitPort,
+        KillSwitchPort, MarketDataPort, MetricsScrapePort, ModelGovernancePort, ModelTrainingPort,
+        OrderIntentPort, QuantReportPort, ReadinessPort, RuntimeConfigPort, RuntimeControlPort,
+        TrainingDatasetPort,
     },
 };
 use quant_pivot_repository::traits::{
@@ -64,4 +65,6 @@ pub struct AppState {
     pub quant_reports: Arc<dyn QuantReportPort>,
     /// Order-intent read + governed mutation (Phase 05.2 API).
     pub order_intents: Arc<dyn OrderIntentPort>,
+    /// Entry-execution submission bridge (Phase 05.4 API): claim → admit → submit.
+    pub execution_submit: Arc<dyn ExecutionSubmitPort>,
 }

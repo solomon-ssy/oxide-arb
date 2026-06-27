@@ -277,6 +277,12 @@ fn data_quality_fields() -> Vec<FieldUiEntry> {
             Some(FieldWidget::EnumSelect),
             None,
         ),
+        integer(
+            "data_quality.max_stale_book_ratio_bps",
+            "Max stale-book ratio (bps)",
+            "最大陈旧订单簿比例（bps）",
+            90,
+        ),
     ]
 }
 
@@ -550,9 +556,9 @@ fn report_fields() -> Vec<FieldUiEntry> {
         integer("reports.default_top_n", "Default TopN", "默认 TopN", 20),
         integer("reports.max_top_n", "Maximum TopN", "最大 TopN", 30),
         integer(
-            "reports.report_horizon_secs",
-            "Report horizon",
-            "报告周期秒数",
+            "reports.fallback_horizon_secs",
+            "Fallback horizon",
+            "回退预测周期秒数",
             40,
         ),
         boolean(
@@ -561,7 +567,14 @@ fn report_fields() -> Vec<FieldUiEntry> {
             "发布空报告",
             50,
         ),
-        integer("reports.report_ttl_secs", "Report TTL", "报告 TTL 秒数", 60),
+        entry(
+            "reports.entry_window_ratio",
+            "Entry window ratio",
+            "进场窗口比例",
+            60,
+            Some(FieldWidget::DecimalString),
+            None,
+        ),
         boolean(
             "reports.ad_hoc_report_enabled",
             "Ad-hoc reports",
@@ -842,6 +855,50 @@ fn execution_policy_fields() -> Vec<FieldUiEntry> {
             "Reconciliation interval",
             "对账间隔秒数",
             230,
+        ),
+    ]
+    .into_iter()
+    .chain(execution_breaker_fields())
+    .collect()
+}
+
+fn execution_breaker_fields() -> Vec<FieldUiEntry> {
+    vec![
+        integer(
+            "execution.breaker.venue_consecutive_failures_to_degrade",
+            "Breaker degrade threshold (consecutive)",
+            "熔断器降级阈值（连续失败）",
+            240,
+        ),
+        integer(
+            "execution.breaker.venue_consecutive_failures_to_halt",
+            "Breaker halt threshold (consecutive)",
+            "熔断器熔断阈值（连续失败）",
+            250,
+        ),
+        integer(
+            "execution.breaker.venue_error_rate_bps_to_halt",
+            "Breaker halt error rate (bps)",
+            "熔断器熔断错误率（bps）",
+            260,
+        ),
+        integer(
+            "execution.breaker.venue_min_window_samples",
+            "Breaker min window samples",
+            "熔断器窗口最小样本数",
+            270,
+        ),
+        integer(
+            "execution.breaker.venue_window_secs",
+            "Breaker window seconds",
+            "熔断器滚动窗口秒数",
+            280,
+        ),
+        integer(
+            "execution.breaker.cooldown_secs",
+            "Breaker cooldown seconds",
+            "熔断器冷却秒数",
+            290,
         ),
     ]
 }

@@ -266,6 +266,7 @@ fn execution_foundation_pg_enums_match_wire_labels() {
     assert_pg_enum!(
         ReconciliationResult,
         &[
+            "pending",
             "filled",
             "not_filled",
             "partially_filled",

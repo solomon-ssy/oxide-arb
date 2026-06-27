@@ -71,8 +71,8 @@ use quant_pivot_repository::{
     },
     traits::{
         EventRepository, FactorRepository, MarketRepository, ModelRegistryRepository,
-        QuantFactReadRepository, RecommendationReportRepository, ReservedCapitalRepository,
-        RuntimeConfigVersionRepository,
+        QuantFactReadRepository, RecommendationReportRepository, RecommendationRepository,
+        ReservedCapitalRepository, RuntimeConfigVersionRepository,
     },
 };
 use quant_pivot_research::{
@@ -577,6 +577,7 @@ fn fixture_new_report(
         data_quality_snapshot_ref: report.data_quality_snapshot_ref.clone(),
         summary_json: report.summary_json.clone(),
         published_at: report.published_at,
+        valid_until: report.valid_until,
         revoked_at: report.revoked_at,
         expired_at: report.expired_at,
         status_reason: report.status_reason.clone(),
@@ -724,6 +725,8 @@ fn build_lifecycle_service(
     let report_repo = Arc::new(PgRecommendationReportRepository::new(db.clone()));
     ReportLifecycleService::new(ReportLifecycleDeps {
         report_repo: Arc::clone(&report_repo) as Arc<dyn RecommendationReportRepository>,
+        recommendation_repo: Arc::new(PgRecommendationRepository::new(db.clone()))
+            as Arc<dyn RecommendationRepository>,
         runtime_config_repo,
         builder,
         publisher: Arc::new(ReportPublisher::new(ReportPublisherDeps {

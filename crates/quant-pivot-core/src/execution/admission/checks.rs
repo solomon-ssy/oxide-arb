@@ -569,10 +569,10 @@ impl AdmissionCheck for KillSwitchCheck {
                 ),
             );
         }
-        if input.mode == QuantRuntimeMode::AutoExecution && input.has_unresolvable_recon {
+        if input.mode == QuantRuntimeMode::AutoExecution && input.has_blocking_inflight {
             return AdmissionCheckTrace::deny(
                 self.id(),
-                "unresolvable reconciliation blocks auto execution",
+                "blocking in-flight exposure (ambiguous/unresolvable) blocks auto execution",
             );
         }
         AdmissionCheckTrace::pass(self.id(), "kill switch allows new entry")
@@ -580,7 +580,8 @@ impl AdmissionCheck for KillSwitchCheck {
 }
 
 // 18 ─────────────────────────────────────────────────────────────────────────
-/// Venue health permits submission (05.3 placeholder; 05.4 breaker drives this).
+/// Venue health permits submission. The 05.4 breaker drives this with at most a
+/// transient `Degraded` (defer); a sustained halt is authoritative via `#17`.
 pub(super) struct VenueGuardCheck;
 
 impl AdmissionCheck for VenueGuardCheck {
@@ -589,13 +590,13 @@ impl AdmissionCheck for VenueGuardCheck {
     }
 
     fn run(&self, input: &AdmissionInput) -> AdmissionCheckTrace {
+        // The breaker is a transient accumulator: at most `Degraded` (defer). A
+        // sustained-failure halt is authoritative via `#17` (kill-switch), not a
+        // venue-health deny here — keeping the latch single-sourced.
         match &input.seams.venue_health {
             VenueHealth::Healthy => AdmissionCheckTrace::pass(self.id(), "venue healthy"),
             VenueHealth::Degraded { reason } => {
                 AdmissionCheckTrace::defer(self.id(), format!("venue degraded: {reason}"))
-            }
-            VenueHealth::Halted { reason } => {
-                AdmissionCheckTrace::deny(self.id(), format!("venue halted: {reason}"))
             }
         }
     }

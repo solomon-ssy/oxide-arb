@@ -123,6 +123,9 @@ fn map_post_order_response(
         {
             VenueOrderStatus::Filled
         } else {
+            // FOK is all-or-nothing; success with under-fill is a contract violation.
+            // Tag the raw response fill ratio only — `ClobOrderClient` reinterprets
+            // this as [`VenueOutcome::Ambiguous`] (Hold + recon), not GTC partial.
             VenueOrderStatus::PartiallyFilled
         }
     } else if order_amount

@@ -8,14 +8,16 @@
 //! struct is never serialized directly.
 
 use crate::{
-    domain::{OrderIntentInfo, pagination::PageRequest},
+    domain::{ExecutionOrderInfo, OrderIntentInfo, pagination::PageRequest},
     enums::{
-        execution::OrderIntentKind,
-        quant::{ApprovalStatus, OrderIntentStatus, QuantRuntimeMode},
+        common::Side,
+        execution::{ExecutionOrderPhase, OrderIntentKind, OrderTypeKind, VenueOrderStatus},
+        quant::{ApprovalStatus, ExecutionOrderState, OrderIntentStatus, QuantRuntimeMode},
     },
     types::{
-        ContentHash, EntryOrderSpec, ExitPolicySpec, ModelVersionId, OrderIntentId, Price,
-        RecommendationId, RuntimeConfigVersionId, Shares, Usd,
+        ContentHash, EntryOrderSpec, ExecutionOrderId, ExitPolicySpec, MarketId, ModelVersionId,
+        OrderId, OrderIntentId, Price, RecommendationId, RuntimeConfigVersionId, Shares, TokenId,
+        Usd,
     },
 };
 use chrono::{DateTime, Utc};
@@ -75,6 +77,65 @@ impl From<OrderIntentInfo> for OrderIntentView {
             updated_at: info.updated_at,
         }
     }
+}
+
+/// Outbound projection of an execution order (the result of a submission).
+#[derive(Debug, Clone, Serialize)]
+pub struct ExecutionOrderView {
+    pub execution_order_id: ExecutionOrderId,
+    pub order_intent_id: OrderIntentId,
+    pub order_phase: ExecutionOrderPhase,
+    pub market_id: MarketId,
+    pub token_id: TokenId,
+    pub side: Side,
+    pub order_type: OrderTypeKind,
+    pub price: Price,
+    pub shares: Shares,
+    pub cost_usd: Usd,
+    pub venue_order_id: Option<OrderId>,
+    pub venue_status: Option<VenueOrderStatus>,
+    pub state: ExecutionOrderState,
+    pub submitted_at: Option<DateTime<Utc>>,
+    pub filled_at: Option<DateTime<Utc>>,
+    pub cancelled_at: Option<DateTime<Utc>>,
+    pub gtd_expiration_at: Option<DateTime<Utc>>,
+    pub error_message: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl From<ExecutionOrderInfo> for ExecutionOrderView {
+    fn from(info: ExecutionOrderInfo) -> Self {
+        Self {
+            execution_order_id: info.execution_order_id,
+            order_intent_id: info.order_intent_id,
+            order_phase: info.order_phase,
+            market_id: info.market_id,
+            token_id: info.token_id,
+            side: info.side,
+            order_type: info.order_type,
+            price: info.price,
+            shares: info.shares,
+            cost_usd: info.cost_usd,
+            venue_order_id: info.venue_order_id,
+            venue_status: info.venue_status,
+            state: info.state,
+            submitted_at: info.submitted_at,
+            filled_at: info.filled_at,
+            cancelled_at: info.cancelled_at,
+            gtd_expiration_at: info.gtd_expiration_at,
+            error_message: info.error_message,
+            created_at: info.created_at,
+            updated_at: info.updated_at,
+        }
+    }
+}
+
+/// Inbound body for `POST /quant/intents/{id}/submit` (operator-triggered).
+#[derive(Debug, Clone, Deserialize, Validate)]
+pub struct SubmitIntentRequest {
+    #[validate(length(min = 1, max = 512))]
+    pub reason: String,
 }
 
 /// Paginated filter for listing order intents.

@@ -18,7 +18,7 @@ quant-pivot-web        = { workspace = true }
 
 # ── Async runtime ──────────────────────────────────────────────────
 tokio      = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "time", "sync"] }
-tokio-util = { workspace = true, features = ["rt"] }
+tokio-util = { workspace = true, features = ["rt", "time"] }
 futures-util = { workspace = true }
 async-trait  = { workspace = true }
 num-traits   = { workspace = true }

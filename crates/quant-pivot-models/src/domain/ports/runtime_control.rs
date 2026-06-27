@@ -84,8 +84,13 @@ pub struct SetKillSwitchCommand {
     pub actor: String,
     /// Mandatory operator justification.
     pub reason: String,
-    /// Operator acknowledgement, required to clear `emergency_halted`.
+    /// Operator acknowledgement, required to loosen a latched state.
     pub ack: bool,
+    /// Latch this transition: clearing/loosening it later requires operator ack.
+    ///
+    /// Set by automated escalation (e.g. the execution breaker tripping
+    /// `execution_halted`). `emergency_halted` always latches regardless.
+    pub latch: bool,
 }
 
 /// Operational kill-switch control boundary consumed by the web layer.

@@ -67,6 +67,7 @@ pub fn report(
         data_quality_snapshot_ref: ReportDataQualitySnapshotId::from_v7(),
         summary_json: report_summary(),
         published_at: Some(Utc.timestamp_opt(1_700_000_000, 0).unwrap()),
+        valid_until: Some(Utc.timestamp_opt(1_700_003_600, 0).unwrap()),
         revoked_at: None,
         expired_at: None,
         status_reason: None,

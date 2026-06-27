@@ -46,10 +46,11 @@ use quant_pivot_research::portfolio::AccountSnapshot;
 
 /// Venue-health seam read by `VenueGuardCheck` (#18).
 ///
-/// Phase 05.3 always supplies [`VenueHealth::Healthy`]; the 05.4 execution
-/// breaker (consecutive venue-failure window / error rate) supplies `Degraded`
-/// (defer) / `Halted` (deny) and escalates the kill-switch. See the 05.4 phase
-/// doc for the breaker design.
+/// The 05.4 execution breaker is a *transient* accumulator: it publishes
+/// `Healthy` / `Degraded` (defer) only. Sustained failure does **not** surface
+/// here as a third "halted" variant — it trips the kill-switch, and the
+/// authoritative deny of new entries comes from `#17` (`KillSwitchCheck`). This
+/// keeps the latch single-sourced in the kill-switch. See the 05.4 phase doc.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum VenueHealth {
     /// Venue is accepting orders normally.
@@ -57,8 +58,6 @@ pub enum VenueHealth {
     Healthy,
     /// Transient degradation — retryable (defer).
     Degraded { reason: String },
-    /// Breaker tripped / sustained failure — not executable (deny).
-    Halted { reason: String },
 }
 
 /// Deferred readiness seams (placeholders in 05.3; real signals land later).
@@ -122,8 +121,10 @@ pub struct AdmissionInput {
     /// Plane-wide stale-book ratio cap (`data_quality.max_stale_book_ratio_bps`),
     /// distilled from the active config at build time.
     pub max_stale_book_ratio_bps: u64,
-    /// Whether any reconciliation is `Unresolvable` (blocks auto, parent §11).
-    pub has_unresolvable_recon: bool,
+    /// Whether truth-unknown in-flight exposure exists — an `Ambiguous` order
+    /// (capital held, venue truth unknown) or a terminal `Unresolvable` recon
+    /// verdict (05.5). Blocks new auto entries (fail-closed, parent §11).
+    pub has_blocking_inflight: bool,
     /// Whether the intent's market is on the operator block list.
     pub manual_block: bool,
     /// Deferred readiness seams (`#18`/`#19`/`#20`).

@@ -1,34 +1,467 @@
-//! Execution dispatcher contract.
+//! Execution dispatcher — the single bridge from an admitted intent to a real
+//! venue order (Phase 05.4).
+//!
+//! `submit_if_admitted` is the only path that signs and submits money. It is
+//! **claim-first**: a short row-locked transaction moves the intent
+//! `Approved`/`ApprovedByPolicy -> AdmissionPending` (the double-submit guard),
+//! then admission is evaluated against the *pre-claim* approval snapshot, then —
+//! on `Allow` — the order is write-ahead persisted (`Submitted`) with capital
+//! locked, the venue is called **outside any DB lock**, and the result is
+//! settled in one transaction. Unconfirmed venue responses become `Ambiguous`
+//! (capital held, reconciled) — never silently failed.
+
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use quant_pivot_error::QuantResult;
+use quant_pivot_error::{
+    QuantError, QuantResult, execution::ExecutionError, storage::StorageError,
+};
 use quant_pivot_models::{
-    domain::{ExecutionOrderInfo, OrderIntentInfo},
-    enums::quant::ExecutionOrderState,
-    types::OrderIntentId,
+    domain::{
+        CapitalSettlement, ExecutionOrderInfo, ExecutionSubmitPort, NewExecutionOrder,
+        NewReconciliation, OrderIntentInfo, PositionFill, RecommendationInfo,
+        SubmissionLedgerWrite,
+    },
+    enums::{
+        common::OrderType,
+        execution::{
+            AdmissionOutcome, ExecutionOrderPhase, OrderTypeKind, ReconciliationEvidenceKind,
+        },
+        quant::{AccountSource, ExecutionOrderState, OrderIntentStatus},
+    },
+    types::{
+        EntryOrderSpec, ExecutionOrderId, OrderIntentId, Price, ReconciliationEvidence,
+        ReconciliationEvidenceChain, ReconciliationId,
+    },
+};
+use quant_pivot_repository::traits::{ExecutionSubmissionRepository, OrderIntentRepository};
+
+use crate::{
+    execution::{
+        admission::{AdmissionDecision, AdmissionInputBuilder, ExecutionAdmissionEngine},
+        breaker::ExecutionBreaker,
+        order_client::{PolymarketOrderClient, VenueOrder, VenueOutcome, VenueSubmitResult},
+    },
+    observability::metrics_hub::MetricsHub,
 };
 
-/// Dispatch request for a previously admitted order intent.
-#[derive(Debug, Clone)]
-pub struct DispatchOrderIntentRequest {
-    pub order_intent_id: OrderIntentId,
-    pub dispatched_at: DateTime<Utc>,
+/// Collaborators for the core execution dispatcher.
+pub struct ExecutionDispatcherDeps {
+    pub intents: Arc<dyn OrderIntentRepository>,
+    pub submission: Arc<dyn ExecutionSubmissionRepository>,
+    pub admission_builder: Arc<AdmissionInputBuilder>,
+    pub admission: Arc<dyn ExecutionAdmissionEngine>,
+    pub order_client: Arc<dyn PolymarketOrderClient>,
+    pub breaker: Arc<ExecutionBreaker>,
+    pub metrics: Arc<MetricsHub>,
 }
 
-/// Dispatch result after local order rows and venue state have been reconciled.
-#[derive(Debug, Clone)]
-pub struct DispatchOrderIntentResult {
-    pub order_intent: OrderIntentInfo,
-    pub execution_orders: Vec<ExecutionOrderInfo>,
-    pub terminal_state: Option<ExecutionOrderState>,
+/// Production [`ExecutionSubmitPort`]: the single bridge from an admitted intent
+/// to a signed venue order.
+pub struct CoreExecutionDispatcher {
+    deps: ExecutionDispatcherDeps,
 }
 
-/// Dispatch boundary for entry/exit execution.
+impl CoreExecutionDispatcher {
+    #[must_use]
+    pub const fn new(deps: ExecutionDispatcherDeps) -> Self {
+        Self { deps }
+    }
+}
+
 #[async_trait]
-pub trait ExecutionDispatcher: Send + Sync {
-    async fn dispatch(
+impl ExecutionSubmitPort for CoreExecutionDispatcher {
+    async fn submit_if_admitted(
         &self,
-        request: DispatchOrderIntentRequest,
-    ) -> QuantResult<DispatchOrderIntentResult>;
+        intent_id: &OrderIntentId,
+    ) -> QuantResult<ExecutionOrderInfo> {
+        let now = Utc::now();
+
+        // 1. Pre-check: friendly, non-mutating submittability gate.
+        let intent = self
+            .deps
+            .intents
+            .find_by_id(intent_id)
+            .await?
+            .ok_or_else(|| ExecutionError::NotSubmittable {
+                intent_id: intent_id.to_string(),
+                state: "not_found".to_owned(),
+            })?;
+        ensure_submittable(&intent, now)?;
+
+        // 2. Claim (atomic double-submit guard): Approved -> AdmissionPending. A
+        //    lost race / state change surfaces as a non-submittable conflict.
+        if let Err(error) = self
+            .deps
+            .submission
+            .claim_for_submission(intent_id, now)
+            .await
+        {
+            return Err(match error {
+                StorageError::Conflict(reason) => ExecutionError::NotSubmittable {
+                    intent_id: intent_id.to_string(),
+                    state: reason,
+                }
+                .into(),
+                StorageError::NotFound { id, .. } => ExecutionError::NotSubmittable {
+                    intent_id: id,
+                    state: "not_found".to_owned(),
+                }
+                .into(),
+                other => other.into(),
+            });
+        }
+
+        // 3. Build the admission input from the *pre-claim* approval snapshot
+        //    (`intent`), so the approval-state checks see Approved/ApprovedByPolicy.
+        let input = match self.deps.admission_builder.build(&intent, now).await {
+            Ok(input) => input,
+            Err(error) => return Err(self.revert_and(intent_id, error).await),
+        };
+        let recommendation = input.recommendation.clone();
+        let decision = match self.deps.admission.evaluate(input).await {
+            Ok(decision) => decision,
+            Err(error) => return Err(self.revert_and(intent_id, error).await),
+        };
+
+        match decision.outcome {
+            AdmissionOutcome::Allow => {}
+            AdmissionOutcome::Deny => {
+                let reason = decision
+                    .denial_reason
+                    .clone()
+                    .unwrap_or_else(|| "admission denied".to_owned());
+                self.deps
+                    .submission
+                    .reject_admission(intent_id, reason.clone(), denial_trace_ref(&decision))
+                    .await?;
+                return Err(ExecutionError::AdmissionDenied { reason }.into());
+            }
+            AdmissionOutcome::Defer => {
+                self.deps.submission.revert_claim(intent_id).await?;
+                return Err(ExecutionError::AdmissionDeferred {
+                    reason: defer_reason(&decision),
+                }
+                .into());
+            }
+        }
+
+        // 4. Write-ahead: create the execution order (Submitted) + lock capital +
+        //    advance intent (AdmissionPending -> Submitted) + recommendation.
+        let spec = intent.entry_order_json.clone();
+        let new_order = build_new_execution_order(&intent, &recommendation, &spec);
+        let execution_order = match self
+            .deps
+            .submission
+            .create_entry_order_and_lock_capital(new_order)
+            .await
+        {
+            Ok(order) => order,
+            Err(error) => return Err(self.revert_and(intent_id, error.into()).await),
+        };
+        self.deps.metrics.inc_execution_order_submitted();
+
+        // 5. Venue submission — NO DB lock held across this network call.
+        let result = self
+            .deps
+            .order_client
+            .submit(build_venue_order(&recommendation, &spec))
+            .await
+            .with_order_type_semantics(&spec.order_type);
+
+        // 6. Feed venue health (unconfirmed == failure for breaker purposes).
+        let venue_ok = result.outcome != VenueOutcome::Ambiguous;
+        self.deps
+            .breaker
+            .observe_venue(venue_ok, result.detail.as_deref().unwrap_or("venue submit"))
+            .await;
+
+        // 7. Settle the ledger in one transaction. After the write-ahead commit
+        //    we never revert: a failure here leaves a `Submitted`/`Ambiguous`
+        //    row that boot recovery hands to reconciliation (capital stays held).
+        if matches!(
+            result.outcome,
+            VenueOutcome::Filled | VenueOutcome::PartiallyFilled
+        ) {
+            self.deps.metrics.inc_execution_fill();
+        }
+        let write = build_ledger_write(&result, &recommendation, &spec, &execution_order);
+        let recorded = self
+            .deps
+            .submission
+            .record_submission_result(&execution_order.execution_order_id, write)
+            .await?;
+        Ok(recorded)
+    }
+}
+
+impl CoreExecutionDispatcher {
+    /// Best-effort release the claim (`AdmissionPending -> Approved`) before
+    /// propagating a pre-submission error, so the intent stays retryable.
+    async fn revert_and(&self, intent_id: &OrderIntentId, error: QuantError) -> QuantError {
+        if let Err(revert_error) = self.deps.submission.revert_claim(intent_id).await {
+            tracing::error!(%revert_error, %intent_id, "failed to revert admission claim");
+        }
+        error
+    }
+}
+
+fn ensure_submittable(intent: &OrderIntentInfo, now: DateTime<Utc>) -> Result<(), ExecutionError> {
+    if !matches!(
+        intent.status,
+        OrderIntentStatus::Approved | OrderIntentStatus::ApprovedByPolicy
+    ) {
+        return Err(ExecutionError::NotSubmittable {
+            intent_id: intent.order_intent_id.to_string(),
+            state: intent.status.as_str().to_owned(),
+        });
+    }
+    if intent.expires_at <= now {
+        return Err(ExecutionError::NotSubmittable {
+            intent_id: intent.order_intent_id.to_string(),
+            state: "expired".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+/// Compact, audit-friendly reference of the non-passing admission checks.
+fn denial_trace_ref(decision: &AdmissionDecision) -> Option<String> {
+    let parts: Vec<String> = decision
+        .trace
+        .iter()
+        .filter(|trace| trace.outcome != AdmissionOutcome::Allow)
+        .map(|trace| format!("{:?}:{}", trace.check, trace.detail))
+        .collect();
+    (!parts.is_empty()).then(|| parts.join("; "))
+}
+
+fn defer_reason(decision: &AdmissionDecision) -> String {
+    decision
+        .trace
+        .iter()
+        .rev()
+        .find(|trace| trace.outcome == AdmissionOutcome::Defer)
+        .map_or_else(
+            || "admission deferred".to_owned(),
+            |trace| trace.detail.clone(),
+        )
+}
+
+const fn order_type_kind(order_type: &OrderType) -> OrderTypeKind {
+    match order_type {
+        OrderType::Fok => OrderTypeKind::Fok,
+        OrderType::Gtc => OrderTypeKind::Gtc,
+        OrderType::Gtd { .. } => OrderTypeKind::Gtd,
+    }
+}
+
+fn gtd_expiration_at(order_type: &OrderType) -> Option<DateTime<Utc>> {
+    match order_type {
+        OrderType::Gtd { expiration } => {
+            DateTime::from_timestamp(i64::try_from(*expiration).unwrap_or(i64::MAX), 0)
+        }
+        OrderType::Fok | OrderType::Gtc => None,
+    }
+}
+
+/// Build the write-ahead execution-order row (`state = Submitted`).
+fn build_new_execution_order(
+    intent: &OrderIntentInfo,
+    recommendation: &RecommendationInfo,
+    spec: &EntryOrderSpec,
+) -> NewExecutionOrder {
+    NewExecutionOrder {
+        execution_order_id: ExecutionOrderId::from_v7(),
+        order_intent_id: intent.order_intent_id.clone(),
+        order_phase: ExecutionOrderPhase::Entry,
+        market_id: recommendation.market_id.clone(),
+        token_id: spec.token_id.clone(),
+        side: spec.side,
+        order_type: order_type_kind(&spec.order_type),
+        price: spec.limit_price,
+        shares: spec.shares,
+        cost_usd: spec.shares * spec.limit_price,
+        venue_order_id: None,
+        venue_status: None,
+        state: ExecutionOrderState::Submitted,
+        submitted_at: None,
+        filled_at: None,
+        cancelled_at: None,
+        gtd_expiration_at: gtd_expiration_at(&spec.order_type),
+        error_message: None,
+    }
+}
+
+fn build_venue_order(recommendation: &RecommendationInfo, spec: &EntryOrderSpec) -> VenueOrder {
+    VenueOrder {
+        market_id: recommendation.market_id.clone(),
+        token_id: spec.token_id.clone(),
+        side: spec.side,
+        price: spec.limit_price,
+        shares: spec.shares,
+        order_type: spec.order_type,
+        neg_risk: recommendation.market_context.neg_risk,
+        category: recommendation.identity.category,
+    }
+}
+
+fn fill_avg_price(result: &VenueSubmitResult, spec: &EntryOrderSpec) -> Price {
+    result.avg_fill_price.unwrap_or(spec.limit_price)
+}
+
+fn position_fill(
+    result: &VenueSubmitResult,
+    recommendation: &RecommendationInfo,
+    spec: &EntryOrderSpec,
+) -> PositionFill {
+    let price = fill_avg_price(result, spec);
+    let fill_cost = result.filled_shares * price;
+    PositionFill {
+        token_id: spec.token_id.clone(),
+        market_id: recommendation.market_id.clone(),
+        event_id: Some(recommendation.event_id.clone()),
+        category: recommendation.identity.category,
+        side: recommendation.outcome_side,
+        shares: result.filled_shares,
+        price,
+        cost_usd: fill_cost + result.fee_paid,
+        filled_at: result.responded_at,
+        source: AccountSource::Polymarket,
+    }
+}
+
+fn reconciliation_row(
+    result: &VenueSubmitResult,
+    execution_order: &ExecutionOrderInfo,
+    outcome: VenueOutcome,
+) -> NewReconciliation {
+    let detail = format!(
+        "venue outcome {outcome:?}; order_id={:?}; filled={}",
+        result.venue_order_id, result.filled_shares
+    );
+    let evidence = ReconciliationEvidenceChain(vec![ReconciliationEvidence {
+        kind: ReconciliationEvidenceKind::ClobOrderStatus,
+        observed_at: result.responded_at,
+        detail,
+        venue_ref: result.venue_order_id.as_ref().map(ToString::to_string),
+        shares: Some(result.filled_shares),
+        price: result.avg_fill_price,
+    }]);
+    NewReconciliation {
+        reconciliation_id: ReconciliationId::from_v7(),
+        execution_order_id: execution_order.execution_order_id.clone(),
+        order_intent_id: execution_order.order_intent_id.clone(),
+        result: outcome.reconciliation_result(),
+        evidence_json: evidence,
+        venue_filled_shares: Some(result.filled_shares),
+        venue_avg_price: result.avg_fill_price,
+        discrepancy_usd: None,
+        resolved_by: None,
+        resolved_at: None,
+    }
+}
+
+/// Translate a venue outcome into the atomic ledger write applied in
+/// `record_submission_result` (entry state + capital + position + intent + recon).
+fn build_ledger_write(
+    result: &VenueSubmitResult,
+    recommendation: &RecommendationInfo,
+    spec: &EntryOrderSpec,
+    execution_order: &ExecutionOrderInfo,
+) -> SubmissionLedgerWrite {
+    let outcome = result.outcome;
+    let fill_cost = result.filled_shares * fill_avg_price(result, spec);
+    let total_spent = fill_cost + result.fee_paid;
+    let common_venue_status = outcome.venue_order_status();
+
+    match outcome {
+        VenueOutcome::Filled => SubmissionLedgerWrite {
+            state: ExecutionOrderState::Filled,
+            intent_status: OrderIntentStatus::Filled,
+            venue_order_id: result.venue_order_id.clone(),
+            venue_status: common_venue_status,
+            submitted_at: result.submitted_at,
+            filled_at: Some(result.responded_at),
+            cancelled_at: None,
+            error_message: None,
+            capital: CapitalSettlement::SettleFull {
+                spent_usd: total_spent,
+            },
+            fill: Some(position_fill(result, recommendation, spec)),
+            reconciliation: Some(reconciliation_row(result, execution_order, outcome)),
+        },
+        VenueOutcome::PartiallyFilled => SubmissionLedgerWrite {
+            state: ExecutionOrderState::PartiallyFilled,
+            intent_status: OrderIntentStatus::PartiallyFilled,
+            venue_order_id: result.venue_order_id.clone(),
+            venue_status: common_venue_status,
+            submitted_at: result.submitted_at,
+            filled_at: Some(result.responded_at),
+            cancelled_at: None,
+            error_message: None,
+            capital: CapitalSettlement::SettlePartial {
+                spent_usd: total_spent,
+            },
+            fill: Some(position_fill(result, recommendation, spec)),
+            reconciliation: Some(reconciliation_row(result, execution_order, outcome)),
+        },
+        VenueOutcome::Open => SubmissionLedgerWrite {
+            // Resting limit order: stays `Submitted`, capital stays locked, no
+            // recon (05.5 polls open orders). Only venue metadata is recorded.
+            state: ExecutionOrderState::Submitted,
+            intent_status: OrderIntentStatus::Submitted,
+            venue_order_id: result.venue_order_id.clone(),
+            venue_status: common_venue_status,
+            submitted_at: result.submitted_at,
+            filled_at: None,
+            cancelled_at: None,
+            error_message: None,
+            capital: CapitalSettlement::Hold,
+            fill: None,
+            reconciliation: None,
+        },
+        VenueOutcome::Rejected => SubmissionLedgerWrite {
+            state: ExecutionOrderState::Failed,
+            intent_status: OrderIntentStatus::Failed,
+            venue_order_id: result.venue_order_id.clone(),
+            venue_status: common_venue_status,
+            submitted_at: result.submitted_at,
+            filled_at: None,
+            cancelled_at: None,
+            error_message: result.detail.clone(),
+            capital: CapitalSettlement::ReleaseAll,
+            fill: None,
+            reconciliation: Some(reconciliation_row(result, execution_order, outcome)),
+        },
+        VenueOutcome::Cancelled | VenueOutcome::Expired => SubmissionLedgerWrite {
+            state: ExecutionOrderState::Cancelled,
+            intent_status: OrderIntentStatus::Cancelled,
+            venue_order_id: result.venue_order_id.clone(),
+            venue_status: common_venue_status,
+            submitted_at: result.submitted_at,
+            filled_at: None,
+            cancelled_at: Some(result.responded_at),
+            error_message: result.detail.clone(),
+            capital: CapitalSettlement::ReleaseAll,
+            fill: None,
+            reconciliation: Some(reconciliation_row(result, execution_order, outcome)),
+        },
+        VenueOutcome::Ambiguous => SubmissionLedgerWrite {
+            // Most dangerous state: unconfirmed. Hold capital, do not fill, must
+            // reconcile. Intent stays `Submitted` until venue truth is known.
+            state: ExecutionOrderState::Ambiguous,
+            intent_status: OrderIntentStatus::Submitted,
+            venue_order_id: result.venue_order_id.clone(),
+            venue_status: None,
+            submitted_at: result.submitted_at,
+            filled_at: None,
+            cancelled_at: None,
+            error_message: result.detail.clone(),
+            capital: CapitalSettlement::Hold,
+            fill: None,
+            reconciliation: Some(reconciliation_row(result, execution_order, outcome)),
+        },
+    }
 }

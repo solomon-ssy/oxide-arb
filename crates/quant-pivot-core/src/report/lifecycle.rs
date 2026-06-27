@@ -2,7 +2,7 @@
 
 use std::sync::{Arc, OnceLock};
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantError, QuantResult, report::ReportError};
 use quant_pivot_models::{
     domain::{NewOperationLog, RecommendationReportInfo, ReportLifecycleEvent},
@@ -13,10 +13,10 @@ use quant_pivot_models::{
         rbac::ResourceType,
     },
     runtime_config::RuntimeConfig,
-    types::{OperationLogId, RecommendationReportId},
+    types::{OperationLogId, RecommendationId, RecommendationReportId},
 };
 use quant_pivot_repository::traits::{
-    RecommendationReportRepository, RuntimeConfigVersionRepository,
+    RecommendationReportRepository, RecommendationRepository, RuntimeConfigVersionRepository,
 };
 
 use crate::{
@@ -49,6 +49,7 @@ pub struct AdHocReportRequest {
 /// Dependencies for [`ReportLifecycleService`].
 pub struct ReportLifecycleDeps {
     pub report_repo: Arc<dyn RecommendationReportRepository>,
+    pub recommendation_repo: Arc<dyn RecommendationRepository>,
     pub runtime_config_repo: Arc<dyn RuntimeConfigVersionRepository>,
     pub builder: Arc<dyn ReportBuilder>,
     pub publisher: Arc<ReportPublisher>,
@@ -59,6 +60,7 @@ pub struct ReportLifecycleDeps {
 /// End-to-end report lifecycle entry point.
 pub struct ReportLifecycleService {
     report_repo: Arc<dyn RecommendationReportRepository>,
+    recommendation_repo: Arc<dyn RecommendationRepository>,
     runtime_config_repo: Arc<dyn RuntimeConfigVersionRepository>,
     builder: Arc<dyn ReportBuilder>,
     publisher: Arc<ReportPublisher>,
@@ -76,6 +78,7 @@ impl ReportLifecycleService {
     pub fn new(deps: ReportLifecycleDeps) -> Self {
         Self {
             report_repo: deps.report_repo,
+            recommendation_repo: deps.recommendation_repo,
             runtime_config_repo: deps.runtime_config_repo,
             builder: deps.builder,
             publisher: deps.publisher,
@@ -110,6 +113,32 @@ impl ReportLifecycleService {
             Ok(_) => {}
             Err(error) => {
                 tracing::warn!(%report_id, %error, "intent cascade invalidation failed");
+            }
+        }
+    }
+
+    /// Cascade-invalidate the active intents derived from one expired
+    /// recommendation. Best-effort (the intent's own `expires_at` sweep is the
+    /// fail-closed backstop, since `intent.expires_at <= recommendation.valid_until`).
+    async fn cascade_recommendation_invalidation(
+        &self,
+        recommendation_id: &RecommendationId,
+        reason: ApprovalInvalidation,
+        now: DateTime<Utc>,
+    ) {
+        let Some(hook) = self.intent_invalidation.get() else {
+            return;
+        };
+        match hook
+            .invalidate_for_recommendation(recommendation_id, reason, now)
+            .await
+        {
+            Ok(count) if count > 0 => {
+                tracing::info!(%recommendation_id, count, reason = reason.as_str(), "cascaded recommendation intent invalidation");
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(%recommendation_id, %error, "recommendation intent cascade failed");
             }
         }
     }
@@ -175,62 +204,91 @@ impl ReportLifecycleService {
         Ok(report)
     }
 
-    /// Expire a committed report in one repository transaction, then publish the
-    /// lifecycle event after commit.
-    pub async fn expire(
-        &self,
-        report_id: &RecommendationReportId,
-        reason: &str,
-        expired_at: DateTime<Utc>,
-    ) -> QuantResult<RecommendationReportInfo> {
-        let report = self
-            .report_repo
-            .expire(
-                report_id,
-                reason,
-                expired_at,
-                lifecycle_operation_log("expire", report_id, reason),
-            )
-            .await?;
-        self.publisher.publish_expired(&report);
-        self.cascade_intent_invalidation(
-            report_id,
-            ApprovalInvalidation::RecommendationExpired,
-            expired_at,
-        )
-        .await;
-        Ok(report)
-    }
-
-    /// Expire all reports whose TTL has elapsed (`published_at + ttl <= now`),
-    /// oldest first, up to `limit` per pass. Each expiry is one committed
-    /// transaction (status + operation log) followed by a lifecycle event, so a
-    /// single conflict (e.g. a concurrent revoke) is logged and skipped without
-    /// aborting the sweep. Returns the number of reports expired.
-    pub async fn expire_due_reports(
+    /// Expire every recommendation whose data-driven `valid_until` has elapsed
+    /// (`Published` / `IntentCreated -> Expired`), oldest deadline first, up to
+    /// `limit` per pass. Each expiry: its own committed transaction, then a
+    /// best-effort cascade releasing that recommendation's reserved capital, then
+    /// a best-effort report roll-up. A single conflict is logged and skipped.
+    /// Returns the number of recommendations expired.
+    pub async fn expire_due_recommendations(
         &self,
         now: DateTime<Utc>,
-        ttl_secs: u64,
         limit: u64,
     ) -> QuantResult<u32> {
-        let ttl = i64::try_from(ttl_secs)
-            .map_err(|error| QuantError::config(format!("report_ttl_secs too large: {error}")))?;
-        let published_before = now - Duration::seconds(ttl);
-        let due = self
-            .report_repo
-            .find_expirable(published_before, limit)
-            .await?;
+        let due = self.recommendation_repo.find_expirable(now, limit).await?;
 
         let mut expired = 0_u32;
-        for report_id in due {
-            match self.expire(&report_id, "ttl_expired", now).await {
-                Ok(_) => expired = expired.saturating_add(1),
+        for recommendation_id in due {
+            let log = recommendation_operation_log(&recommendation_id, "ttl_expired");
+            match self
+                .recommendation_repo
+                .expire(&recommendation_id, log)
+                .await
+            {
+                Ok(recommendation) => {
+                    expired = expired.saturating_add(1);
+                    self.cascade_recommendation_invalidation(
+                        &recommendation_id,
+                        ApprovalInvalidation::RecommendationExpired,
+                        now,
+                    )
+                    .await;
+                    self.try_roll_up_report(&recommendation.recommendation_report_id, now)
+                        .await;
+                }
                 Err(error) => {
-                    tracing::warn!(%report_id, %error, "report ttl expiry skipped");
+                    tracing::warn!(%recommendation_id, %error, "recommendation ttl expiry skipped");
                 }
             }
         }
         Ok(expired)
+    }
+
+    /// Roll reports up to `Expired` once all their recommendations are terminal,
+    /// oldest roll-up deadline first, up to `limit`. This is the durable backstop
+    /// for the per-recommendation deadline scheduler (it also finalizes empty
+    /// reports, which carry no recommendations to drive the roll-up). Returns the
+    /// number of reports rolled up.
+    pub async fn expire_due_reports(&self, now: DateTime<Utc>, limit: u64) -> QuantResult<u32> {
+        let due = self.report_repo.find_expirable(now, limit).await?;
+
+        let mut rolled = 0_u32;
+        for report_id in due {
+            if self.try_roll_up_report(&report_id, now).await {
+                rolled = rolled.saturating_add(1);
+            }
+        }
+        Ok(rolled)
+    }
+
+    /// Roll a report up to `Expired` iff every recommendation is terminal, then
+    /// publish the lifecycle event. Best-effort; returns whether it rolled up.
+    /// No intent cascade here — each recommendation already released its own
+    /// intents on expiry, and empty reports carry no intents.
+    async fn try_roll_up_report(
+        &self,
+        report_id: &RecommendationReportId,
+        now: DateTime<Utc>,
+    ) -> bool {
+        match self
+            .report_repo
+            .roll_up_to_expired(
+                report_id,
+                now,
+                lifecycle_operation_log("expire", report_id, "ttl_expired"),
+            )
+            .await
+        {
+            Ok(Some(report)) => {
+                self.publisher.publish_expired(&report);
+                true
+            }
+            Ok(None) => false,
+            Err(error) => {
+                tracing::warn!(%report_id, %error, "report roll-up to expired skipped");
+                false
+            }
+        }
     }
 
     async fn run(&self, request: BuildReportRequest) -> QuantResult<RecommendationReportInfo> {
@@ -337,6 +395,33 @@ fn empty_reason_from_composed(composed: &ComposedReport) -> EmptyReason {
         .notification
         .empty_reason
         .unwrap_or(EmptyReason::EmptySelection)
+}
+
+fn recommendation_operation_log(
+    recommendation_id: &RecommendationId,
+    reason: &str,
+) -> NewOperationLog {
+    NewOperationLog {
+        id: OperationLogId::from_v7(),
+        request_id: format!("quant-recommendation:expire:{recommendation_id}"),
+        actor_user_id: None,
+        actor_username: Some("system".to_owned()),
+        acting_role: Some("report_lifecycle".to_owned()),
+        category: OperationCategory::QuantReport,
+        action: "recommendation.expire".to_owned(),
+        resource_type: Some(ResourceType::QuantReport),
+        resource_id: Some(recommendation_id.to_string()),
+        http_method: "SYSTEM".to_owned(),
+        http_path: format!("/system/quant/recommendation/{recommendation_id}/expire"),
+        http_status: 200,
+        outcome: OperationOutcome::Success,
+        client_ip: None,
+        user_agent: None,
+        latency_ms: 0,
+        detail: serde_json::json!({ "reason": reason }),
+        governance_audit_event_id: None,
+        governance_audit_sequence: None,
+    }
 }
 
 fn lifecycle_operation_log(

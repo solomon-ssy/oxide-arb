@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use quant_pivot_api::{clob::ClobClient, data_api::DataApiClient, keystore::Keystore};
+use quant_pivot_api::{clob::ClobClient, data_api::DataApiClient};
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::config::DeployConfig;
 use quant_pivot_repository::{
@@ -39,17 +39,17 @@ pub struct AccountBundleDeps<'a> {
     pub infra: &'a InfraBundle,
     /// Market registry for position → market/event/category mapping.
     pub market_registry: Arc<MarketRegistry>,
+    /// Shared authenticated CLOB client (single L1+L2 identity, also used by
+    /// the execution bundle for order writes).
+    pub clob: Arc<ClobClient>,
 }
 
 impl AccountBundle {
-    /// Assemble the account subsystem, failing closed on missing credentials.
-    pub async fn assemble(deps: AccountBundleDeps<'_>) -> QuantResult<Self> {
-        let keystore = Keystore::from_config(&deps.deploy.keys)?;
-        let clob =
-            Arc::new(ClobClient::connect(keystore.signer_arc(), &deps.deploy.polymarket).await?);
+    /// Assemble the account subsystem from the shared authenticated CLOB client.
+    pub fn assemble(deps: AccountBundleDeps<'_>) -> QuantResult<Self> {
         let data_api = Arc::new(DataApiClient::new(deps.deploy.market_data.data_api.clone()));
         let client: Arc<dyn PolymarketAccountClient> =
-            Arc::new(VenuePolymarketAccountClient::new(clob, data_api));
+            Arc::new(VenuePolymarketAccountClient::new(deps.clob, data_api));
 
         let reserved_repo: Arc<dyn ReservedCapitalRepository> = Arc::new(
             PgReservedCapitalRepository::new(deps.infra.pg.connection().clone()),

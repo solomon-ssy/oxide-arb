@@ -61,6 +61,12 @@ crate::pg_enum! {
 crate::pg_enum! {
     type_name = "qp_reconciliation_result",
     pub enum ReconciliationResult {
+        /// Enqueued, not yet reconciled (truth not yet observed). The honest
+        /// initial state for an in-flight order handed to reconciliation — boot
+        /// recovery and `Ambiguous` venue outcomes land here. Distinct from
+        /// `Unresolvable`, which is the recon worker's terminal "ran, could not
+        /// resolve" verdict (05.5).
+        Pending => "pending",
         Filled => "filled",
         NotFilled => "not_filled",
         PartiallyFilled => "partially_filled",
@@ -112,6 +118,21 @@ impl KillSwitchState {
     #[must_use]
     pub const fn is_emergency(self) -> bool {
         matches!(self, Self::EmergencyHalted)
+    }
+
+    /// Monotone restriction strength: higher blocks strictly more execution.
+    ///
+    /// Used by the governed control plane to detect *loosening* transitions
+    /// (target rank below the current rank), which require operator
+    /// acknowledgement when the current state is latched.
+    #[must_use]
+    pub const fn restriction_rank(self) -> u8 {
+        match self {
+            Self::Closed => 0,
+            Self::ReportOnlyForced | Self::ExitOnly => 1,
+            Self::ExecutionHalted => 2,
+            Self::EmergencyHalted => 3,
+        }
     }
 }
 

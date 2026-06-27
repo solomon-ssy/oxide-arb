@@ -39,6 +39,12 @@ pub struct Model {
     #[sea_orm(column_type = "JsonBinary")]
     pub summary_json: ReportSummary,
     pub published_at: Option<DateTime<Utc>>,
+    /// Data-driven validity deadline = `max(recommendation.valid_until)` over the
+    /// report's recommendations, frozen at publish (`None` for a report with no
+    /// recommendations only when no fallback applies). This is the report's
+    /// roll-up "actionable until" instant — distinct from `expired_at` (the event
+    /// timestamp of when it was actually transitioned to `Expired`).
+    pub valid_until: Option<DateTime<Utc>>,
     pub revoked_at: Option<DateTime<Utc>>,
     pub expired_at: Option<DateTime<Utc>>,
     pub status_reason: Option<String>,

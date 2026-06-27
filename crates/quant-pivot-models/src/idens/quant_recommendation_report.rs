@@ -49,6 +49,7 @@ pub enum QuantRecommendationReport {
     DataQualitySnapshotRef,
     SummaryJson,
     PublishedAt,
+    ValidUntil,
     RevokedAt,
     ExpiredAt,
     StatusReason,
@@ -157,6 +158,11 @@ fn add_lifecycle_columns(table: &mut TableCreateStatement) {
     table
         .col(
             ColumnDef::new(QuantRecommendationReport::PublishedAt)
+                .timestamp_with_time_zone()
+                .null(),
+        )
+        .col(
+            ColumnDef::new(QuantRecommendationReport::ValidUntil)
                 .timestamp_with_time_zone()
                 .null(),
         )
@@ -287,6 +293,18 @@ pub fn indexes() -> Vec<IndexSpec> {
                 .col((QuantRecommendationReport::AsOf, IndexOrder::Desc))
                 .to_owned(),
             "reports by model version",
+        ),
+        IndexSpec::sea_query(
+            "idx_quant_recommendation_report_valid_until",
+            quant_recommendation_report_table_name,
+            IndexBuildMode::Transactional,
+            Index::create()
+                .name("idx_quant_recommendation_report_valid_until")
+                .table(QuantRecommendationReport::Table)
+                .col(QuantRecommendationReport::Status)
+                .col(QuantRecommendationReport::ValidUntil)
+                .to_owned(),
+            "report roll-up expiry backstop sweep",
         ),
     ]
 }

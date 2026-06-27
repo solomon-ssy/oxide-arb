@@ -135,6 +135,7 @@ impl AppContext {
                 Arc::clone(&self.report.scheduler),
             )),
             order_intents,
+            execution_submit: self.execution_dispatcher(),
         };
 
         let web_config = self.config.web.clone();

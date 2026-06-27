@@ -95,6 +95,7 @@ fn report(
         data_quality_snapshot_ref: ReportDataQualitySnapshotId::from_v7(),
         summary_json: report_summary(Usd::new(dec!(500)), 2),
         published_at: Some(at(1_700_000_000)),
+        valid_until: Some(at(1_700_003_600)),
         revoked_at: None,
         expired_at: None,
         status_reason: None,

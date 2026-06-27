@@ -5,8 +5,11 @@ use std::sync::Arc;
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::domain::CoreEventPublisher;
 use quant_pivot_repository::{
-    postgres::{PgRecommendationReportRepository, PgRuntimeConfigVersionRepository},
-    traits::RecommendationReportRepository,
+    postgres::{
+        PgRecommendationReportRepository, PgRecommendationRepository,
+        PgRuntimeConfigVersionRepository,
+    },
+    traits::{RecommendationReportRepository, RecommendationRepository},
 };
 
 use super::{AccountBundle, DataBundle, GovernanceBundle, InfraBundle, ResearchBundle};
@@ -41,6 +44,9 @@ impl ReportBundle {
         let report_repo: Arc<dyn RecommendationReportRepository> = Arc::new(
             PgRecommendationReportRepository::new(deps.infra.pg.connection().clone()),
         );
+        let recommendation_repo: Arc<dyn RecommendationRepository> = Arc::new(
+            PgRecommendationRepository::new(deps.infra.pg.connection().clone()),
+        );
         let composer = Arc::new(DefaultRecommendationComposer::new());
         let builder = Arc::new(DefaultReportBuilder::new(ReportBuilderDeps {
             runtime_config_repo: Arc::new(PgRuntimeConfigVersionRepository::new(
@@ -71,6 +77,7 @@ impl ReportBundle {
         }));
         let lifecycle = Arc::new(ReportLifecycleService::new(ReportLifecycleDeps {
             report_repo,
+            recommendation_repo,
             runtime_config_repo: Arc::new(PgRuntimeConfigVersionRepository::new(
                 deps.infra.pg.connection().clone(),
             )),
@@ -94,9 +101,6 @@ impl ReportBundle {
 
 /// Portfolio planning bundle (Phase 4+).
 pub struct PortfolioBundle;
-
-/// Execution intent bundle (Phase 5+).
-pub struct ExecutionIntentBundle;
 
 /// Cross-bundle runtime channels (Phase 2+).
 pub struct RuntimeChannels;

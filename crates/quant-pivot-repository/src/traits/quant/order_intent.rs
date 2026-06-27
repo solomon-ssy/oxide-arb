@@ -6,7 +6,6 @@ use quant_pivot_models::{
         NewOrderIntent, OrderIntentInfo, OrderIntentListQuery, Paginated,
     },
     enums::execution::ApprovalInvalidation,
-    enums::quant::OrderIntentStatus,
     types::{EntryOrderSpec, OrderIntentId, RecommendationId, RecommendationReportId, Usd},
 };
 
@@ -89,38 +88,31 @@ pub trait OrderIntentRepository: Send + Sync {
     /// Intents past `expires_at` still in an expirable status (sweep input).
     async fn find_expired(&self, now: DateTime<Utc>) -> Result<Vec<OrderIntentInfo>, StorageError>;
 
-    /// Active (pre-submission) intent for a recommendation, if any (create dedup).
+    /// Ids + `expires_at` deadlines of expirable intents due at or before
+    /// `before`, earliest deadline first, capped at `limit`. Feeds the deadline
+    /// scheduler's bounded look-ahead horizon (the DB stays the source of truth).
+    async fn upcoming_expirations(
+        &self,
+        before: DateTime<Utc>,
+        limit: u64,
+    ) -> Result<Vec<(OrderIntentId, DateTime<Utc>)>, StorageError>;
+
+    /// Blocking intent for a recommendation, if any (create dedup — includes in-flight submission).
     async fn find_active_by_recommendation(
         &self,
         recommendation_id: &RecommendationId,
     ) -> Result<Option<OrderIntentInfo>, StorageError>;
+
+    /// All active (pre-submission) intents for a recommendation — the
+    /// per-recommendation expiry cascade (release reserved capital).
+    async fn find_active_intents_by_recommendation(
+        &self,
+        recommendation_id: &RecommendationId,
+    ) -> Result<Vec<OrderIntentInfo>, StorageError>;
 
     /// Active (pre-submission) intents for a report — report-termination cascade.
     async fn find_active_by_report(
         &self,
         report_id: &RecommendationReportId,
     ) -> Result<Vec<OrderIntentInfo>, StorageError>;
-
-    // ── Reserved for 05.4 (submission path) ──────────────────────────────
-
-    /// Row-lock an intent for the submission transaction (`SELECT … FOR UPDATE`).
-    async fn get_for_update(
-        &self,
-        intent_id: &OrderIntentId,
-    ) -> Result<Option<OrderIntentInfo>, StorageError>;
-
-    /// Drive a validated intent transition (e.g. `Approved → AdmissionPending`).
-    async fn transition(
-        &self,
-        intent_id: &OrderIntentId,
-        next: OrderIntentStatus,
-    ) -> Result<OrderIntentInfo, StorageError>;
-
-    /// Mark an intent admission-rejected with a trace reference.
-    async fn mark_admission_rejected(
-        &self,
-        intent_id: &OrderIntentId,
-        status_reason: String,
-        admission_trace_ref: Option<String>,
-    ) -> Result<OrderIntentInfo, StorageError>;
 }

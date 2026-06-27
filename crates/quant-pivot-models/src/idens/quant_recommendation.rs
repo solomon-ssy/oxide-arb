@@ -265,6 +265,18 @@ pub fn indexes() -> Vec<IndexSpec> {
                 .to_owned(),
             "recommendations by market and lifecycle status",
         ),
+        IndexSpec::sea_query(
+            "idx_quant_recommendation_status_valid_until",
+            quant_recommendation_table_name,
+            IndexBuildMode::Transactional,
+            Index::create()
+                .name("idx_quant_recommendation_status_valid_until")
+                .table(QuantRecommendation::Table)
+                .col(QuantRecommendation::Status)
+                .col(QuantRecommendation::ValidUntil)
+                .to_owned(),
+            "per-recommendation TTL expiry sweep / deadline scheduler",
+        ),
     ]
 }
 

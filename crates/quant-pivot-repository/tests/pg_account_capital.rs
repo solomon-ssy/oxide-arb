@@ -220,40 +220,55 @@ async fn find_expirable_returns_published_reports_before_cutoff_only() {
         .await
         .expect("create report");
 
-    // Not yet due: a cutoff earlier than `published_at` excludes the report.
+    // Not yet due: the report's roll-up `valid_until` is in the future (now + 1h).
     let not_due = report_repo
-        .find_expirable(Utc::now() - Duration::minutes(1), 100)
+        .find_expirable(Utc::now(), 100)
         .await
         .expect("find before cutoff");
     assert!(
         not_due.is_empty(),
-        "a report published ~now must not be expirable at an earlier cutoff"
+        "a report whose valid_until is in the future must not be expirable"
     );
 
-    // Due: a cutoff after `published_at` includes the published report.
+    // Due: a cutoff past `valid_until` includes the report.
     let due = report_repo
-        .find_expirable(Utc::now() + Duration::minutes(1), 100)
+        .find_expirable(Utc::now() + Duration::hours(2), 100)
         .await
         .expect("find due");
     assert_eq!(due, vec![ids.report.clone()]);
 
-    // Once expired, the status filter removes it from the expirable set.
-    report_repo
-        .expire(
-            &ids.report,
-            "ttl_expired",
-            Utc::now(),
-            report_operation_log(&ids),
-        )
+    // Roll-up is gated on every recommendation being terminal; the report's
+    // recommendation is still `Published`, so the roll-up is a no-op.
+    let blocked = report_repo
+        .roll_up_to_expired(&ids.report, Utc::now(), report_operation_log(&ids))
         .await
-        .expect("expire report");
+        .expect("roll up attempt");
+    assert!(
+        blocked.is_none(),
+        "a report with an actionable recommendation must not roll up"
+    );
+
+    // Expire the recommendation, then the report rolls up to Expired.
+    let recommendation_repo = PgRecommendationRepository::new(db.clone());
+    recommendation_repo
+        .expire(&ids.recommendation, report_operation_log(&ids))
+        .await
+        .expect("expire recommendation");
+    let rolled = report_repo
+        .roll_up_to_expired(&ids.report, Utc::now(), report_operation_log(&ids))
+        .await
+        .expect("roll up");
+    assert!(
+        rolled.is_some(),
+        "all recommendations terminal -> report rolls up to Expired"
+    );
     let after_expiry = report_repo
-        .find_expirable(Utc::now() + Duration::minutes(1), 100)
+        .find_expirable(Utc::now() + Duration::hours(2), 100)
         .await
         .expect("find after expiry");
     assert!(
         after_expiry.is_empty(),
-        "expired reports must not be returned by find_expirable"
+        "rolled-up reports must not be returned by find_expirable"
     );
 }
 
@@ -872,6 +887,7 @@ fn build_report_transaction(ids: &TxnIds) -> NewReportTransaction {
             data_quality_snapshot_ref: ids.data_quality_snapshot.clone(),
             summary_json: report_summary(),
             published_at: Some(Utc::now()),
+            valid_until: Some(Utc::now() + chrono::Duration::hours(1)),
             revoked_at: None,
             expired_at: None,
             status_reason: None,

@@ -129,11 +129,16 @@ impl KillSwitchPort for KillSwitchControl {
 
     async fn set(&self, command: SetKillSwitchCommand) -> QuantResult<KillSwitchView> {
         let current = self.handle.current();
-        // Safety valve: clearing emergency halt requires explicit operator ack.
-        if current.is_emergency() && !command.target.is_emergency() && !command.ack {
+        // Safety valve: a latched state (emergency, or one escalated with
+        // `latch`) can only be loosened with an explicit operator ack. The
+        // current state is latched when it is emergency or its persisted view
+        // carries `requires_operator_ack`.
+        let current_latched = current.is_emergency() || self.view.load().requires_operator_ack;
+        let loosening = command.target.restriction_rank() < current.restriction_rank();
+        if current_latched && loosening && !command.ack {
             return Err(ExecutionError::KillSwitchBlocks {
                 state: current.as_str().to_owned(),
-                operation: "clear_emergency_requires_ack".to_owned(),
+                operation: "loosen_latched_requires_ack".to_owned(),
             }
             .into());
         }
@@ -145,7 +150,7 @@ impl KillSwitchPort for KillSwitchControl {
                 state: command.target,
                 changed_by: command.actor,
                 reason: command.reason,
-                requires_operator_ack: command.target.is_emergency(),
+                requires_operator_ack: command.target.is_emergency() || command.latch,
                 changed_at: Utc::now(),
             })
             .await?;

@@ -28,7 +28,7 @@ use quant_pivot_models::{
         common::{OrderType, Side},
         execution::{ApprovalInvalidation, CapitalAllocationState, OrderIntentKind},
         operation_log::{OperationCategory, OperationOutcome},
-        quant::{ApprovalStatus, OrderIntentStatus, RecommendationReportStatus},
+        quant::{ApprovalStatus, OrderIntentStatus, QuantRuntimeMode, RecommendationReportStatus},
         rbac::ResourceType,
     },
     runtime_config::EntryOrderPolicy,
@@ -43,7 +43,10 @@ use quant_pivot_repository::traits::{
 use rust_decimal::Decimal;
 
 use crate::{
-    execution::mode_gate::{IntentPolicyDecision, RuntimeModeGate},
+    execution::{
+        dispatch_wake::DispatchWake,
+        mode_gate::{IntentPolicyDecision, RuntimeModeGate},
+    },
     governance::{KillSwitchHandle, RuntimeModeHandle},
     runtime_config::RuntimeConfigStore,
 };
@@ -65,6 +68,16 @@ pub trait IntentInvalidationHook: Send + Sync {
         reason: ApprovalInvalidation,
         now: DateTime<Utc>,
     ) -> QuantResult<u32>;
+
+    /// Invalidate every active (pre-submission) intent derived from a single
+    /// `recommendation_id`, releasing reserved capital — the per-recommendation
+    /// expiry cascade. Returns the number invalidated. Best-effort.
+    async fn invalidate_for_recommendation(
+        &self,
+        recommendation_id: &RecommendationId,
+        reason: ApprovalInvalidation,
+        now: DateTime<Utc>,
+    ) -> QuantResult<u32>;
 }
 
 /// Dependencies for [`CoreOrderIntentService`].
@@ -77,6 +90,8 @@ pub struct OrderIntentServiceDeps {
     pub intents: Arc<dyn OrderIntentRepository>,
     pub config: Arc<RuntimeConfigStore>,
     pub events: CoreEventPublisher,
+    /// Wake the dispatcher when an `ApprovedByPolicy` intent is created (auto).
+    pub dispatch_wake: DispatchWake,
 }
 
 /// Governed order-intent service (implements the web [`OrderIntentPort`], the
@@ -90,6 +105,7 @@ pub struct CoreOrderIntentService {
     intents: Arc<dyn OrderIntentRepository>,
     config: Arc<RuntimeConfigStore>,
     events: CoreEventPublisher,
+    dispatch_wake: DispatchWake,
 }
 
 impl CoreOrderIntentService {
@@ -105,6 +121,7 @@ impl CoreOrderIntentService {
             intents: deps.intents,
             config: deps.config,
             events: deps.events,
+            dispatch_wake: deps.dispatch_wake,
         }
     }
 
@@ -116,13 +133,51 @@ impl CoreOrderIntentService {
         now: DateTime<Utc>,
     ) -> QuantResult<OrderIntentInfo> {
         let rec = self.load_recommendation(&command.recommendation_id).await?;
+        let report = self.load_report(&rec.recommendation_report_id).await?;
+        self.ensure_create_allowed(&rec, &report, now).await?;
+
+        let mode = self.runtime_mode.current();
+        let policy = self.mode_gate.evaluate_intent_policy(mode, &rec).await?;
+        let config = self.config.current();
+        let entry = project_entry_order_spec(&rec, &config.execution.entry_order_policy)?;
+        let exit = project_exit_policy_spec(&rec);
+        let resolved = resolve_policy(policy, now, rec.valid_until, entry.valid_until)?;
+        let (new_intent, allocation) =
+            compose_create_rows(&rec, &report, mode, resolved, entry, exit);
+
+        let intent = self
+            .intents
+            .create_with_allocation(new_intent, allocation)
+            .await?;
+        self.publish(&intent, IntentEventKind::Created, now);
+        if intent.status == OrderIntentStatus::ApprovedByPolicy {
+            self.dispatch_wake.wake();
+        }
+        Ok(intent)
+    }
+
+    async fn ensure_create_allowed(
+        &self,
+        rec: &RecommendationInfo,
+        report: &RecommendationReportInfo,
+        now: DateTime<Utc>,
+    ) -> QuantResult<()> {
         if rec.valid_until < now {
             return Err(ExecutionError::RecommendationExpired {
                 reason: format!("recommendation {} expired", rec.recommendation_id),
             }
             .into());
         }
-        let report = self.load_report(&rec.recommendation_report_id).await?;
+        if !rec.status.is_actionable_for_intent() {
+            return Err(ExecutionError::IntentDenied {
+                reason: format!(
+                    "recommendation {} is {} (not actionable for intent creation)",
+                    rec.recommendation_id,
+                    rec.status.as_str()
+                ),
+            }
+            .into());
+        }
         if report.status != RecommendationReportStatus::Published {
             return Err(ExecutionError::IntentDenied {
                 reason: format!(
@@ -133,8 +188,6 @@ impl CoreOrderIntentService {
             }
             .into());
         }
-
-        let mode = self.runtime_mode.current();
         if !self.kill_switch.allows_new_entry() {
             return Err(ExecutionError::KillSwitchBlocks {
                 state: self.kill_switch.current().as_str().to_owned(),
@@ -142,15 +195,6 @@ impl CoreOrderIntentService {
             }
             .into());
         }
-
-        let policy = self.mode_gate.evaluate_intent_policy(mode, &rec).await?;
-        let config = self.config.current();
-        let entry = project_entry_order_spec(&rec, &config.execution.entry_order_policy)?;
-        let exit = project_exit_policy_spec(&rec);
-        let intent_id = OrderIntentId::from_v7();
-        let planned_usd = rec.sizing_plan.suggested_usd;
-        let resolved = resolve_policy(policy, now, rec.valid_until, entry.valid_until)?;
-
         if self
             .intents
             .find_active_by_recommendation(&rec.recommendation_id)
@@ -159,53 +203,13 @@ impl CoreOrderIntentService {
         {
             return Err(ExecutionError::IntentDenied {
                 reason: format!(
-                    "active order intent already exists for recommendation {}",
+                    "blocking order intent already exists for recommendation {}",
                     rec.recommendation_id
                 ),
             }
             .into());
         }
-
-        let new_intent = NewOrderIntent {
-            order_intent_id: intent_id.clone(),
-            recommendation_id: rec.recommendation_id.clone(),
-            runtime_mode: mode,
-            runtime_config_version_id: report.runtime_config_version_id.clone(),
-            model_version_id: report.model_version_id.clone(),
-            intent_kind: OrderIntentKind::Buy,
-            status: resolved.status,
-            approval_status: resolved.approval_status,
-            approved_by: None,
-            approval_reason: resolved.approval_reason,
-            approved_at: resolved.approved_at,
-            policy_id: resolved.policy_id,
-            policy_hash: resolved.policy_hash,
-            status_reason: None,
-            admission_trace_ref: None,
-            entry_order_json: entry,
-            exit_policy_json: exit,
-            risk_envelope_hash: rec.risk_envelope.envelope_hash.clone(),
-            expires_at: resolved.expires_at,
-        };
-        let allocation = NewCapitalAllocation {
-            capital_allocation_id: CapitalAllocationId::from_v7(),
-            order_intent_id: intent_id,
-            recommendation_id: rec.recommendation_id.clone(),
-            state: CapitalAllocationState::Allocated,
-            planned_usd,
-            allocated_usd: planned_usd,
-            locked_usd: Usd::ZERO,
-            spent_usd: Usd::ZERO,
-            released_usd: Usd::ZERO,
-            reason: "intent created".to_owned(),
-        };
-
-        let intent = self
-            .intents
-            .create_with_allocation(new_intent, allocation)
-            .await?;
-        self.publish(&intent, IntentEventKind::Created, now);
-        Ok(intent)
+        Ok(())
     }
 
     /// Approve a pending intent at `now`: in-transaction invalidation re-check
@@ -416,6 +420,36 @@ impl IntentInvalidationHook for CoreOrderIntentService {
         }
         Ok(count)
     }
+
+    async fn invalidate_for_recommendation(
+        &self,
+        recommendation_id: &RecommendationId,
+        reason: ApprovalInvalidation,
+        now: DateTime<Utc>,
+    ) -> QuantResult<u32> {
+        let active = self
+            .intents
+            .find_active_intents_by_recommendation(recommendation_id)
+            .await?;
+        let mut count = 0_u32;
+        for intent in active {
+            let log = intent_operation_log("quant.intent.invalidate", &intent, reason.as_str());
+            match self
+                .intents
+                .invalidate(&intent.order_intent_id, reason, log)
+                .await
+            {
+                Ok(updated) => {
+                    self.publish(&updated, IntentEventKind::Invalidated, now);
+                    count = count.saturating_add(1);
+                }
+                Err(error) => {
+                    tracing::warn!(intent_id = %intent.order_intent_id, %error, "intent invalidation skipped");
+                }
+            }
+        }
+        Ok(count)
+    }
 }
 
 /// Resolved per-mode intent fields produced by the mode gate decision.
@@ -427,6 +461,52 @@ struct ResolvedPolicy {
     policy_id: Option<String>,
     policy_hash: Option<ContentHash>,
     expires_at: DateTime<Utc>,
+}
+
+fn compose_create_rows(
+    rec: &RecommendationInfo,
+    report: &RecommendationReportInfo,
+    mode: QuantRuntimeMode,
+    resolved: ResolvedPolicy,
+    entry: EntryOrderSpec,
+    exit: ExitPolicySpec,
+) -> (NewOrderIntent, NewCapitalAllocation) {
+    let intent_id = OrderIntentId::from_v7();
+    let planned_usd = rec.sizing_plan.suggested_usd;
+    let intent = NewOrderIntent {
+        order_intent_id: intent_id.clone(),
+        recommendation_id: rec.recommendation_id.clone(),
+        runtime_mode: mode,
+        runtime_config_version_id: report.runtime_config_version_id.clone(),
+        model_version_id: report.model_version_id.clone(),
+        intent_kind: OrderIntentKind::Buy,
+        status: resolved.status,
+        approval_status: resolved.approval_status,
+        approved_by: None,
+        approval_reason: resolved.approval_reason,
+        approved_at: resolved.approved_at,
+        policy_id: resolved.policy_id,
+        policy_hash: resolved.policy_hash,
+        status_reason: None,
+        admission_trace_ref: None,
+        entry_order_json: entry,
+        exit_policy_json: exit,
+        risk_envelope_hash: rec.risk_envelope.envelope_hash.clone(),
+        expires_at: resolved.expires_at,
+    };
+    let allocation = NewCapitalAllocation {
+        capital_allocation_id: CapitalAllocationId::from_v7(),
+        order_intent_id: intent_id,
+        recommendation_id: rec.recommendation_id.clone(),
+        state: CapitalAllocationState::Allocated,
+        planned_usd,
+        allocated_usd: planned_usd,
+        locked_usd: Usd::ZERO,
+        spent_usd: Usd::ZERO,
+        released_usd: Usd::ZERO,
+        reason: "intent created".to_owned(),
+    };
+    (intent, allocation)
 }
 
 /// Map a mode-gate decision to the frozen intent fields, or the closing error.

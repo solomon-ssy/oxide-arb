@@ -482,6 +482,7 @@ async fn kill_switch_set_persists_and_meters() {
             actor: "operator".to_owned(),
             reason: "manual halt".to_owned(),
             ack: false,
+            latch: false,
         })
         .await
         .expect("set succeeds");
@@ -500,6 +501,7 @@ async fn kill_switch_emergency_requires_ack_to_clear() {
             actor: "operator".to_owned(),
             reason: "clear".to_owned(),
             ack: false,
+            latch: false,
         })
         .await;
     assert!(denied.is_err(), "clearing emergency without ack must fail");
@@ -511,6 +513,7 @@ async fn kill_switch_emergency_requires_ack_to_clear() {
             actor: "operator".to_owned(),
             reason: "clear".to_owned(),
             ack: true,
+            latch: false,
         })
         .await
         .expect("ack clears emergency");
@@ -790,6 +793,7 @@ mod pg {
                 actor: "operator".to_owned(),
                 reason: "halt".to_owned(),
                 ack: false,
+                latch: false,
             })
             .await
             .expect("set kill switch");

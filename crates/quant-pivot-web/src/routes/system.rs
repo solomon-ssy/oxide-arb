@@ -251,6 +251,9 @@ pub async fn set_kill_switch(
             actor: actor.claims.username.clone(),
             reason: body.reason,
             ack: body.ack,
+            // Operator-initiated sets are self-clearable; only automated
+            // breaker escalation latches (`emergency_halted` latches regardless).
+            latch: false,
         })
         .await?;
     Ok(WebResponse::ok(view))

@@ -4,10 +4,10 @@ use crate::{
     enums::{common::MarketCategory, factor::FactorFamily, quant::QuantRuntimeMode},
     runtime_config::wire::{
         CapitalPolicy, DecimalString, DomainFeaturePolicy, EntryOrderPolicy,
-        ExecutionAdmissionPolicy, ExitOrderPolicy, FactorWeights, FeatureFamily, FeatureNameRef,
-        FeatureStalenessPolicy, KillSwitchPolicy, MarketIdList, MissingFactorPolicy,
-        ModelVersionRef, NotificationPolicies, ReconciliationPolicy, ReportDeliveryPolicy,
-        ScheduleCadence, SizingModelConfig,
+        ExecutionAdmissionPolicy, ExecutionBreakerConfig, ExitOrderPolicy, FactorWeights,
+        FeatureFamily, FeatureNameRef, FeatureStalenessPolicy, KillSwitchPolicy, MarketIdList,
+        MissingFactorPolicy, ModelVersionRef, NotificationPolicies, ReconciliationPolicy,
+        ReportDeliveryPolicy, ScheduleCadence, SizingModelConfig,
     },
     types::SchemaVersion,
 };
@@ -305,12 +305,19 @@ pub struct ReportsConfig {
     pub default_top_n: u32,
     /// Maximum `TopN` size.
     pub max_top_n: u32,
-    /// Report horizon in seconds.
-    pub report_horizon_secs: u64,
+    /// Fallback prediction horizon (seconds), used **only** when the model
+    /// provides no per-candidate `suggested_horizon_secs` (classical / non-ML
+    /// runs). The per-recommendation validity is otherwise data-driven from the
+    /// model's frozen horizon capped by the market's time-to-resolution; this is
+    /// never a flat TTL applied uniformly.
+    pub fallback_horizon_secs: u64,
     /// Whether empty reports are published with reason summaries.
     pub publish_empty_reports: bool,
-    /// Report TTL in seconds.
-    pub report_ttl_secs: u64,
+    /// Entry-window ratio in `(0, 1]`: a recommendation's entry-by deadline is
+    /// `as_of + effective_horizon * entry_window_ratio`. `0.5` enters only while
+    /// at least half the signal's edge remains (the half-life point); the
+    /// time-stop / exit still uses the full effective horizon.
+    pub entry_window_ratio: DecimalString,
     /// Whether ad-hoc report generation is enabled.
     pub ad_hoc_report_enabled: bool,
     /// Delivery policy name.
@@ -323,9 +330,9 @@ impl Default for ReportsConfig {
             schedules: vec![ReportScheduleConfig::default()],
             default_top_n: 20,
             max_top_n: 100,
-            report_horizon_secs: 86_400,
+            fallback_horizon_secs: 86_400,
             publish_empty_reports: true,
-            report_ttl_secs: 3_600,
+            entry_window_ratio: DecimalString::new("0.5"),
             ad_hoc_report_enabled: false,
             delivery_policy: ReportDeliveryPolicy::StoreAndNotify,
         }
@@ -456,6 +463,8 @@ pub struct ExecutionConfig {
     pub capital: CapitalPolicy,
     /// Reconciliation policy document.
     pub reconciliation: ReconciliationPolicy,
+    /// Execution-breaker thresholds (venue health + auto kill-switch trip).
+    pub breaker: ExecutionBreakerConfig,
 }
 
 impl Default for ExecutionConfig {
@@ -470,6 +479,7 @@ impl Default for ExecutionConfig {
             kill_switch: KillSwitchPolicy::default(),
             capital: CapitalPolicy::default(),
             reconciliation: ReconciliationPolicy::default(),
+            breaker: ExecutionBreakerConfig::default(),
         }
     }
 }

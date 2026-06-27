@@ -4,7 +4,8 @@ use std::sync::Arc;
 
 use quant_pivot_core::{
     execution::{
-        CoreOrderIntentService, DefaultRuntimeModeGate, OrderIntentServiceDeps, RuntimeModeGate,
+        CoreOrderIntentService, DefaultRuntimeModeGate, DispatchWake, OrderIntentServiceDeps,
+        RuntimeModeGate,
     },
     governance::{KillSwitchHandle, RuntimeModeHandle},
     runtime_config::RuntimeConfigStore,
@@ -48,5 +49,6 @@ pub fn build_order_intent_service(
             as Arc<dyn OrderIntentRepository>,
         config,
         events,
+        dispatch_wake: DispatchWake::new(),
     }))
 }

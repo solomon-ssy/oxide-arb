@@ -19,7 +19,7 @@ use crate::{
         CoreOrderIntentService, DefaultRuntimeModeGate, IntentInvalidationHook,
         OrderIntentServiceDeps, RuntimeModeGate,
     },
-    infra::periodic_task::PeriodicTask,
+    infra::{deadline_scheduler, periodic_task::PeriodicTask},
 };
 
 /// Max intents expired per sweep pass (bounds one transaction burst).
@@ -46,6 +46,7 @@ impl AppContext {
                 as Arc<dyn OrderIntentRepository>,
             config: self.runtime_config(),
             events: self.events.clone(),
+            dispatch_wake: self.execution_wake(),
         }))
     }
 
@@ -57,7 +58,48 @@ impl AppContext {
         self.report_lifecycle()
             .set_intent_invalidation_hook(Arc::clone(&service) as Arc<dyn IntentInvalidationHook>);
         self.register_intent_expire_sweep(runner, Arc::clone(&service));
+        self.register_intent_deadline_scheduler(runner, Arc::clone(&service));
         service as Arc<dyn OrderIntentPort>
+    }
+
+    /// Register the precise per-intent TTL deadline scheduler
+    /// (`TaskId::IntentDeadlineScheduler`). It fires capital-releasing expiry
+    /// exactly at each intent's `expires_at`; `IntentExpireSweep` is the durable
+    /// backstop and the DB is the source of truth (every fire re-checks it).
+    fn register_intent_deadline_scheduler(
+        &self,
+        runner: &mut AppRunner,
+        service: Arc<CoreOrderIntentService>,
+    ) {
+        let intents: Arc<dyn OrderIntentRepository> = Arc::new(PgOrderIntentRepository::new(
+            self.infra.pg.connection().clone(),
+        ));
+        let reconcile = Duration::from_secs(self.config.quant.workers.intent_expire_sweep_secs);
+        runner.spawn(TaskId::IntentDeadlineScheduler, move |token| async move {
+            deadline_scheduler::run(
+                "intent-deadline-scheduler",
+                reconcile,
+                token,
+                move |horizon| {
+                    let intents = Arc::clone(&intents);
+                    async move {
+                        intents
+                            .upcoming_expirations(horizon, INTENT_EXPIRE_SWEEP_BATCH as u64)
+                            .await
+                            .map_err(Into::into)
+                    }
+                },
+                move || {
+                    let service = Arc::clone(&service);
+                    async move {
+                        service
+                            .expire_due(Utc::now(), INTENT_EXPIRE_SWEEP_BATCH)
+                            .await
+                    }
+                },
+            )
+            .await;
+        });
     }
 
     /// Register the intent TTL expiry sweep (`TaskId::IntentExpireSweep`).

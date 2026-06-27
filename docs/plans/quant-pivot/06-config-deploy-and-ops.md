@@ -183,9 +183,9 @@ RuntimeConfig {
 - `schedules`
 - `default_top_n`
 - `max_top_n`
-- `report_horizon_secs`
+- `fallback_horizon_secs`（仅当模型未给 `suggested_horizon_secs` 时回退；有效期主路径数据驱动）
 - `publish_empty_reports`
-- `report_ttl_secs`
+- `entry_window_ratio`（`(0,1]`，进场截止 = `as_of + effective_horizon * entry_window_ratio`）
 - `ad_hoc_report_enabled`
 - `delivery_policy`
 

@@ -3,13 +3,14 @@
 use super::{
     AppContext,
     bundles::{
-        AccountBundle, AccountBundleDeps, DataBundle, DataBundleDeps, GovernanceBundle,
-        GovernanceBundleDeps, InfraBundle, ReportBundle, ReportBundleDeps, ResearchBundle,
-        ResearchBundleDeps, RuntimeSnapshot,
+        AccountBundle, AccountBundleDeps, DataBundle, DataBundleDeps, ExecutionBundle,
+        ExecutionBundleDeps, GovernanceBundle, GovernanceBundleDeps, InfraBundle, ReportBundle,
+        ReportBundleDeps, ResearchBundle, ResearchBundleDeps, RuntimeSnapshot,
     },
 };
 use crate::observability::metrics_hub::MetricsHub;
 use parking_lot::Mutex;
+use quant_pivot_api::{clob::ClobClient, keystore::Keystore};
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::{config::DeployConfig, domain::CoreEventPublisher};
 use std::sync::Arc;
@@ -46,15 +47,25 @@ impl AppContext {
             data: &data,
             governance: &governance,
         });
-        // Credential-gated venue account subsystem. Fails closed at boot if the
-        // private key is missing or CLOB authentication fails — report_only is
-        // not dry-run, so the real account must be reachable.
+        // One authenticated CLOB client (single L1+L2 identity) shared by the
+        // account (collateral reads) and execution (order writes) bundles. Fails
+        // closed at boot if the private key is missing or auth fails — report_only
+        // is not dry-run, so the real venue must be reachable.
+        let keystore = Keystore::from_config(&deploy.keys)?;
+        let clob = Arc::new(ClobClient::connect(keystore.signer_arc(), &deploy.polymarket).await?);
         let account = AccountBundle::assemble(AccountBundleDeps {
             deploy: &deploy,
             infra: &infra,
             market_registry: Arc::clone(&data.market_registry),
-        })
-        .await?;
+            clob: Arc::clone(&clob),
+        })?;
+        let execution = ExecutionBundle::assemble(ExecutionBundleDeps {
+            infra: &infra,
+            data: &data,
+            governance: &governance,
+            account: &account,
+            clob,
+        });
         governance.alerts.attach_event_publisher(events.clone());
         let report = ReportBundle::assemble(ReportBundleDeps {
             infra: &infra,
@@ -83,6 +94,7 @@ impl AppContext {
             research,
             account,
             report,
+            execution,
         })
     }
 }

@@ -394,6 +394,43 @@ impl Default for ReconciliationPolicy {
     }
 }
 
+/// Venue-dimension execution-breaker thresholds (Phase 05.4 §6.5).
+///
+/// Drives the stateful [`ExecutionBreaker`] that watches venue submit/cancel
+/// outcomes and publishes a `VenueHealth` seam for admission `#18` while
+/// auto-tripping the operational kill-switch on sustained failure. Transient
+/// degradation defers (admission retries); sustained failure halts and latches
+/// the kill-switch (`execution_halted`, operator ack required to clear).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct ExecutionBreakerConfig {
+    /// Consecutive venue failures that move the breaker to `Degraded` (admission defers).
+    pub venue_consecutive_failures_to_degrade: u32,
+    /// Consecutive venue failures that move the breaker to `Halted` and trip the kill-switch.
+    pub venue_consecutive_failures_to_halt: u32,
+    /// Rolling-window venue error rate (basis points) that trips `Halted`.
+    pub venue_error_rate_bps_to_halt: u32,
+    /// Minimum window samples before the error-rate gate is evaluated (avoids small-N trips).
+    pub venue_min_window_samples: u32,
+    /// Rolling observation window length in seconds.
+    pub venue_window_secs: u64,
+    /// Seconds of failure-free operation before `Degraded` self-recovers to `Healthy`.
+    pub cooldown_secs: u64,
+}
+
+impl Default for ExecutionBreakerConfig {
+    fn default() -> Self {
+        Self {
+            venue_consecutive_failures_to_degrade: 3,
+            venue_consecutive_failures_to_halt: 6,
+            venue_error_rate_bps_to_halt: 5_000,
+            venue_min_window_samples: 10,
+            venue_window_secs: 60,
+            cooldown_secs: 30,
+        }
+    }
+}
+
 /// Notification routing policy flags.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]

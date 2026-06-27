@@ -24,18 +24,19 @@ use quant_pivot_models::{
     domain::{
         BacktestPort, BacktestReportInfo, BacktestReportView, BookSnapshot,
         BuildTrainingDatasetRequest, CatalogState, CatalogStatusPort, CoreEventPublisher,
-        DataQualityPort, DataQualitySnapshot, GovernanceActor, HealthReport, KillSwitchPort,
-        KillSwitchView, MarketDataPort, MetricsScrapePort, ModelComparisonReportInfo,
-        ModelGovernancePort, ModelTrainingPort, ModelVersionInfo, PromoteDatasetRequest,
-        PublishModelCommand, QuantModeTransitionReport, RollbackModelCommand, RunBacktestRequest,
-        RuntimeConfigPort, RuntimeControlPort, SetKillSwitchCommand, SystemStatus,
-        TrainModelRequest, TrainedModelView, TrainingDatasetInfo, TrainingDatasetPlanView,
-        TrainingDatasetPort, TrainingDatasetView,
+        DataQualityPort, DataQualitySnapshot, ExecutionOrderInfo, ExecutionSubmitPort,
+        GovernanceActor, HealthReport, KillSwitchPort, KillSwitchView, MarketDataPort,
+        MetricsScrapePort, ModelComparisonReportInfo, ModelGovernancePort, ModelTrainingPort,
+        ModelVersionInfo, PromoteDatasetRequest, PublishModelCommand, QuantModeTransitionReport,
+        RollbackModelCommand, RunBacktestRequest, RuntimeConfigPort, RuntimeControlPort,
+        SetKillSwitchCommand, SystemStatus, TrainModelRequest, TrainedModelView,
+        TrainingDatasetInfo, TrainingDatasetPlanView, TrainingDatasetPort, TrainingDatasetView,
     },
     enums::{execution::KillSwitchState, quant::QuantRuntimeMode},
     runtime_config::RuntimeConfig,
     types::{
-        BacktestReportId, ModelComparisonReportId, ModelVersionId, TokenId, TrainingDatasetId,
+        BacktestReportId, ModelComparisonReportId, ModelVersionId, OrderIntentId, TokenId,
+        TrainingDatasetId,
     },
 };
 use quant_pivot_storage::cache::connect_pool;
@@ -169,6 +170,7 @@ impl TestEnv {
             model_governance: Arc::new(MockModelGovernancePort),
             quant_reports: core_report.port.clone(),
             order_intents: order_intents as Arc<dyn OrderIntentPort>,
+            execution_submit: Arc::new(MockExecutionSubmit) as Arc<dyn ExecutionSubmitPort>,
         };
 
         Self {
@@ -392,6 +394,27 @@ impl TokenBlacklist for NoopBlacklist {
 #[derive(Default)]
 pub struct MockRuntimeControl {
     mode: Mutex<QuantRuntimeMode>,
+}
+
+/// Execution-submit port stub for web integration tests. Submission requires
+/// real venue + admission wiring (covered by core integration tests), so the
+/// web harness only exercises routing / RBAC and fails closed here.
+pub struct MockExecutionSubmit;
+
+#[async_trait]
+impl ExecutionSubmitPort for MockExecutionSubmit {
+    async fn submit_if_admitted(
+        &self,
+        intent_id: &OrderIntentId,
+    ) -> QuantResult<ExecutionOrderInfo> {
+        Err(
+            quant_pivot_error::execution::ExecutionError::NotSubmittable {
+                intent_id: intent_id.to_string(),
+                state: "mock".to_owned(),
+            }
+            .into(),
+        )
+    }
 }
 
 /// In-memory kill-switch port for web integration tests.

@@ -254,6 +254,17 @@ fn validate_reports(config: &RuntimeConfig, report: &mut ConfigValidationReport)
             detail: "must be in 1..=reports.max_top_n".to_owned(),
         });
     }
+    if config.reports.fallback_horizon_secs == 0 {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "reports.fallback_horizon_secs",
+            detail: "must be greater than zero".to_owned(),
+        });
+    }
+    half_open_unit(
+        "reports.entry_window_ratio",
+        &config.reports.entry_window_ratio,
+        report,
+    );
     for schedule in &config.reports.schedules {
         if schedule.schedule_id.trim().is_empty() {
             report.errors.push(ConfigValidationError::InvalidValue {

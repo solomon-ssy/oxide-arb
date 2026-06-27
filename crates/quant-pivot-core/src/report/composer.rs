@@ -36,7 +36,7 @@ use quant_pivot_research::{
     model::SignalCandidate,
     portfolio::{AccountSnapshot, PlannedRecommendation, RejectedCandidate},
 };
-use rust_decimal::Decimal;
+use rust_decimal::{Decimal, prelude::ToPrimitive};
 
 use super::{
     entry_plan::derive_entry_plan,
@@ -94,11 +94,11 @@ impl DefaultRecommendationComposer {
 impl RecommendationComposer for DefaultRecommendationComposer {
     fn compose(&self, input: ComposeReportInput<'_>) -> QuantResult<ComposedReport> {
         let report_id = RecommendationReportId::from_v7();
-        let horizon_secs = input.runtime_config.reports.report_horizon_secs;
-        let valid_until = input.as_of
-            + Duration::seconds(i64::try_from(horizon_secs).map_err(|error| {
-                QuantError::config(format!("reports.report_horizon_secs too large: {error}"))
-            })?);
+        let fallback_horizon_secs = input.runtime_config.reports.fallback_horizon_secs;
+        let entry_window_ratio = parse_decimal(
+            "reports.entry_window_ratio",
+            &input.runtime_config.reports.entry_window_ratio.value,
+        )?;
         let data_quality_snapshot_ref = input
             .data_quality_snapshot
             .report_data_quality_snapshot_id
@@ -112,11 +112,20 @@ impl RecommendationComposer for DefaultRecommendationComposer {
                     &report_id,
                     planned,
                     &input,
-                    valid_until,
+                    entry_window_ratio,
+                    fallback_horizon_secs,
                     &data_quality_snapshot_ref,
                 )
             })
             .collect::<QuantResult<Vec<_>>>()?;
+
+        // Report validity is the data-driven roll-up of its recommendations'
+        // validity (latest entry-by); an empty report falls back to the governed
+        // horizon so it still ages out.
+        let report_valid_until = match recommendations.iter().map(|rec| rec.valid_until).max() {
+            Some(max) => max,
+            None => as_of_plus_secs(input.as_of, fallback_horizon_secs)?,
+        };
 
         let status = if recommendations.is_empty() {
             RecommendationReportStatus::PublishedEmpty
@@ -149,8 +158,10 @@ impl RecommendationComposer for DefaultRecommendationComposer {
                 QuantError::config(format!("source_delay_secs too large: {error}"))
             })?,
             as_of: input.as_of,
-            horizon_secs: i64::try_from(horizon_secs).map_err(|error| {
-                QuantError::config(format!("reports.report_horizon_secs too large: {error}"))
+            // Informational nominal horizon: the governed fallback (per-rec
+            // horizons are data-driven and live on each recommendation).
+            horizon_secs: i64::try_from(fallback_horizon_secs).map_err(|error| {
+                QuantError::config(format!("reports.fallback_horizon_secs too large: {error}"))
             })?,
             runtime_mode: input.runtime_mode,
             runtime_config_version_id: input.runtime_config_version_id.clone(),
@@ -167,6 +178,8 @@ impl RecommendationComposer for DefaultRecommendationComposer {
             data_quality_snapshot_ref,
             summary_json: summary,
             published_at: Some(input.trigger_time),
+            // Roll-up of recommendation validity (data-driven), frozen at publish.
+            valid_until: Some(report_valid_until),
             revoked_at: None,
             expired_at: None,
             status_reason: input
@@ -192,6 +205,57 @@ impl RecommendationComposer for DefaultRecommendationComposer {
             notify_operators: input.runtime_config.notification.policies.report_published,
         })
     }
+}
+
+/// `as_of + secs`, failing closed on overflow.
+fn as_of_plus_secs(as_of: DateTime<Utc>, secs: u64) -> QuantResult<DateTime<Utc>> {
+    let secs = i64::try_from(secs)
+        .map_err(|error| QuantError::config(format!("horizon seconds too large: {error}")))?;
+    Ok(as_of + Duration::seconds(secs))
+}
+
+/// Per-recommendation effective horizon (seconds): the model's frozen prediction
+/// horizon (`suggested_horizon_secs`), falling back to the governed default when
+/// the model supplies none (classical / non-ML runs), capped by the market's
+/// time-to-resolution hard wall. Never zero.
+const fn effective_horizon_secs(
+    candidate: &SignalCandidate,
+    capture: &MarketDecisionCapture,
+    fallback_horizon_secs: u64,
+) -> u64 {
+    effective_horizon_from(
+        candidate.suggested_horizon_secs,
+        capture.market_context.time_to_resolution_secs,
+        fallback_horizon_secs,
+    )
+}
+
+/// Pure core of [`effective_horizon_secs`]: the model horizon (or the governed
+/// fallback when absent) capped by the market's time-to-resolution, floored at 1s.
+const fn effective_horizon_from(
+    suggested_horizon_secs: u64,
+    time_to_resolution_secs: Option<u64>,
+    fallback_horizon_secs: u64,
+) -> u64 {
+    let base = if suggested_horizon_secs > 0 {
+        suggested_horizon_secs
+    } else {
+        fallback_horizon_secs
+    };
+    let capped = match time_to_resolution_secs {
+        Some(ttr) if ttr < base => ttr,
+        _ => base,
+    };
+    if capped == 0 { 1 } else { capped }
+}
+
+/// Entry-window length (seconds) = `effective_horizon * entry_window_ratio`,
+/// rounded, floored at 1s — the recommendation accepts new entries only while at
+/// least `ratio` of the signal's edge horizon remains (the half-life point at
+/// `ratio = 0.5`). The exit / time-stop still uses the full effective horizon.
+fn entry_window_secs(effective_horizon_secs: u64, entry_window_ratio: Decimal) -> u64 {
+    let secs = (Decimal::from(effective_horizon_secs) * entry_window_ratio).round();
+    secs.to_u64().unwrap_or(effective_horizon_secs).max(1)
 }
 
 /// Build the operator-notification payload from the composed report parts.
@@ -228,7 +292,8 @@ fn compose_recommendation(
     report_id: &RecommendationReportId,
     planned: &PlannedRecommendation,
     input: &ComposeReportInput<'_>,
-    valid_until: DateTime<Utc>,
+    entry_window_ratio: Decimal,
+    fallback_horizon_secs: u64,
     data_quality_snapshot_ref: &ReportDataQualitySnapshotId,
 ) -> QuantResult<NewRecommendation> {
     let candidate = &planned.candidate;
@@ -241,6 +306,15 @@ fn compose_recommendation(
             ),
         }
     })?;
+
+    // Per-recommendation, data-driven validity: the model's effective horizon
+    // (capped by time-to-resolution) drives the exit/time-stop; the entry-by
+    // deadline is the early `entry_window_ratio` slice of it (enter while fresh).
+    let horizon_secs = effective_horizon_secs(candidate, capture, fallback_horizon_secs);
+    let valid_until = as_of_plus_secs(
+        input.as_of,
+        entry_window_secs(horizon_secs, entry_window_ratio),
+    )?;
     let feature_vector_id = input
         .feature_vector_by_market
         .get(&candidate.market_id)
@@ -308,7 +382,7 @@ fn compose_recommendation(
         model_score_percentile: candidate.model_score_percentile,
         entry_plan: derive_entry_plan(candidate, input.as_of, valid_until, input.runtime_config),
         sizing_plan: planned.sizing.clone(),
-        exit_plan: exit_plan(candidate, input.as_of, input.runtime_config)?,
+        exit_plan: exit_plan(candidate, input.as_of, input.runtime_config, horizon_secs)?,
         risk_envelope,
         factor_breakdown: factor_breakdown(candidate),
         evidence_refs: EvidenceRefs::from_input(EvidenceRefsInput {
@@ -333,6 +407,7 @@ fn exit_plan(
     candidate: &SignalCandidate,
     as_of: DateTime<Utc>,
     config: &RuntimeConfig,
+    horizon_secs: u64,
 ) -> QuantResult<ExitPlan> {
     let loss = Bps::new(candidate.downside_bps)
         .to_fraction()
@@ -350,11 +425,7 @@ fn exit_plan(
         (candidate.entry_price_ref.inner() * (Decimal::ONE - loss))
             .clamp(Decimal::ZERO, Decimal::ONE),
     );
-    let horizon_secs = config.reports.report_horizon_secs;
-    let time_exit_at = as_of
-        + Duration::seconds(i64::try_from(horizon_secs).map_err(|error| {
-            QuantError::config(format!("reports.report_horizon_secs too large: {error}"))
-        })?);
+    let time_exit_at = as_of_plus_secs(as_of, horizon_secs)?;
 
     // The take-profit / stop-loss / time-exit scalars are the single source of
     // truth for the (full) exit. `partial_exit_nodes` is reserved for genuine
@@ -826,9 +897,39 @@ mod tests {
 
     use super::{
         ComposeReportInput, DefaultRecommendationComposer, RecommendationComposer,
-        auto_execution_gate, empty_plan_for_report, execution_eligibility, exit_plan,
+        auto_execution_gate, effective_horizon_from, empty_plan_for_report, entry_window_secs,
+        execution_eligibility, exit_plan,
     };
     use crate::report::types::ReportTrigger;
+
+    #[test]
+    fn effective_horizon_uses_model_horizon_capped_by_resolution() {
+        // Model horizon below resolution: use the model horizon.
+        assert_eq!(effective_horizon_from(3_600, Some(86_400), 7_200), 3_600);
+        // Resolution closer than the model horizon: cap at resolution.
+        assert_eq!(effective_horizon_from(86_400, Some(1_800), 7_200), 1_800);
+        // No resolution wall: use the (uncapped) model horizon.
+        assert_eq!(effective_horizon_from(3_600, None, 7_200), 3_600);
+    }
+
+    #[test]
+    fn effective_horizon_falls_back_when_model_horizon_absent() {
+        // suggested == 0 (classical run) -> governed fallback, still capped.
+        assert_eq!(effective_horizon_from(0, Some(86_400), 7_200), 7_200);
+        assert_eq!(effective_horizon_from(0, Some(900), 7_200), 900);
+        // Never zero (a market at/after resolution still yields a 1s floor).
+        assert_eq!(effective_horizon_from(0, Some(0), 7_200), 1);
+    }
+
+    #[test]
+    fn entry_window_is_the_ratio_slice_of_the_horizon() {
+        // Default 0.5 ratio -> enter within the first half (the half-life point).
+        assert_eq!(entry_window_secs(3_600, dec!(0.5)), 1_800);
+        // Full ratio -> entry valid across the whole horizon.
+        assert_eq!(entry_window_secs(3_600, dec!(1.0)), 3_600);
+        // Rounds and floors at 1s.
+        assert_eq!(entry_window_secs(1, dec!(0.5)), 1);
+    }
 
     fn candidate() -> SignalCandidate {
         SignalCandidate {
@@ -868,10 +969,9 @@ mod tests {
             .single()
             .expect("valid time");
         let mut config = RuntimeConfig::default();
-        config.reports.report_horizon_secs = 3_600;
         config.portfolio.sizing.target_reward_multiple.value = "2.0".to_owned();
 
-        let plan = exit_plan(&candidate(), as_of, &config).expect("exit plan");
+        let plan = exit_plan(&candidate(), as_of, &config, 3_600).expect("exit plan");
 
         assert_eq!(plan.stop_loss_pct, Some(dec!(0.1)));
         assert_eq!(plan.take_profit_pct, Some(dec!(0.20)));

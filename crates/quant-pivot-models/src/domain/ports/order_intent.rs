@@ -14,7 +14,7 @@
 use async_trait::async_trait;
 
 use crate::{
-    domain::{OrderIntentInfo, OrderIntentListQuery, Paginated},
+    domain::{ExecutionOrderInfo, OrderIntentInfo, OrderIntentListQuery, Paginated},
     types::{OrderIntentId, Price, RecommendationId, Shares, Usd},
 };
 use quant_pivot_error::QuantResult;
@@ -99,4 +99,22 @@ pub trait OrderIntentPort: Send + Sync {
 
     /// Load one intent by id.
     async fn find(&self, id: &OrderIntentId) -> QuantResult<Option<OrderIntentInfo>>;
+}
+
+/// Web-facing port for the real-money entry-submission bridge (Phase 05.4).
+///
+/// Dependency-inversion boundary between the HTTP handler / auto worker and the
+/// core `CoreExecutionDispatcher`. Submission claims the intent (row-locked),
+/// runs the 20-check admission engine, and — on `allow` — signs and posts the
+/// order to the venue, settling capital + position in one transaction.
+#[async_trait]
+pub trait ExecutionSubmitPort: Send + Sync {
+    /// Claim, admit, submit, and settle one intent; returns the resulting
+    /// execution order (possibly `ambiguous` when the venue response is
+    /// unconfirmed). Terminal admission denial / non-submittable intents return a
+    /// typed `ExecutionError`; transient defers return `AdmissionDeferred`.
+    async fn submit_if_admitted(
+        &self,
+        intent_id: &OrderIntentId,
+    ) -> QuantResult<ExecutionOrderInfo>;
 }

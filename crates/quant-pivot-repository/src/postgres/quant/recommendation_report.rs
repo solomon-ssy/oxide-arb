@@ -18,7 +18,7 @@ use quant_pivot_models::{
 };
 use sea_orm::{
     ActiveModelTrait, ActiveValue, ColumnTrait, Condition, DatabaseConnection, EntityTrait,
-    IntoActiveModel, QueryFilter, QueryOrder, QuerySelect, TransactionTrait,
+    IntoActiveModel, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, TransactionTrait,
 };
 
 use crate::postgres::query::paginate_mapped;
@@ -147,7 +147,7 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
 
     async fn find_expirable(
         &self,
-        published_before: DateTime<Utc>,
+        now: DateTime<Utc>,
         limit: u64,
     ) -> Result<Vec<RecommendationReportId>, StorageError> {
         quant_recommendation_report::Entity::find()
@@ -155,8 +155,8 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
                 RecommendationReportStatus::Published,
                 RecommendationReportStatus::PublishedEmpty,
             ]))
-            .filter(quant_recommendation_report::Column::PublishedAt.lte(published_before))
-            .order_by_asc(quant_recommendation_report::Column::PublishedAt)
+            .filter(quant_recommendation_report::Column::ValidUntil.lte(now))
+            .order_by_asc(quant_recommendation_report::Column::ValidUntil)
             .limit(limit)
             .all(&self.db)
             .await
@@ -166,6 +166,62 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
                     .map(|row| row.recommendation_report_id)
                     .collect()
             })
+    }
+
+    async fn roll_up_to_expired(
+        &self,
+        report_id: &RecommendationReportId,
+        expired_at: DateTime<Utc>,
+        operation_log: NewOperationLog,
+    ) -> Result<Option<RecommendationReportInfo>, StorageError> {
+        let txn = self.db.begin().await.map_err(StorageError::from)?;
+
+        let Some(report) = quant_recommendation_report::Entity::find_by_id(report_id.clone())
+            .lock_exclusive()
+            .one(&txn)
+            .await
+            .map_err(StorageError::from)?
+        else {
+            return Err(StorageError::Conflict(format!(
+                "recommendation report not found: {report_id}"
+            )));
+        };
+        if !matches!(
+            report.status,
+            RecommendationReportStatus::Published | RecommendationReportStatus::PublishedEmpty
+        ) {
+            txn.commit().await.map_err(StorageError::from)?;
+            return Ok(None);
+        }
+
+        // Roll up only when no recommendation is still actionable.
+        let actionable = quant_recommendation::Entity::find()
+            .filter(quant_recommendation::Column::RecommendationReportId.eq(report_id.clone()))
+            .filter(quant_recommendation::Column::Status.is_in([
+                RecommendationStatus::Published,
+                RecommendationStatus::IntentCreated,
+            ]))
+            .count(&txn)
+            .await
+            .map_err(StorageError::from)?;
+        if actionable > 0 {
+            txn.commit().await.map_err(StorageError::from)?;
+            return Ok(None);
+        }
+
+        let mut active = report.into_active_model();
+        active.status = ActiveValue::Set(RecommendationReportStatus::Expired);
+        active.status_reason = ActiveValue::Set(Some("ttl_expired".to_owned()));
+        active.expired_at = ActiveValue::Set(Some(expired_at));
+        let model = active.update(&txn).await.map_err(StorageError::from)?;
+
+        operation_log::Entity::insert(operation_log.into_active_model())
+            .exec(&txn)
+            .await
+            .map_err(StorageError::from)?;
+
+        txn.commit().await.map_err(StorageError::from)?;
+        Ok(Some(model.into()))
     }
 
     async fn revoke(
@@ -182,25 +238,6 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
             RecommendationStatus::Revoked,
             reason,
             revoked_at,
-            operation_log,
-        )
-        .await
-    }
-
-    async fn expire(
-        &self,
-        report_id: &RecommendationReportId,
-        reason: &str,
-        expired_at: DateTime<Utc>,
-        operation_log: NewOperationLog,
-    ) -> Result<RecommendationReportInfo, StorageError> {
-        transition_report_status(
-            &self.db,
-            report_id,
-            RecommendationReportStatus::Expired,
-            RecommendationStatus::Expired,
-            reason,
-            expired_at,
             operation_log,
         )
         .await
@@ -281,8 +318,14 @@ async fn transition_report_status(
     }
     let report_model = active.update(&txn).await.map_err(StorageError::from)?;
 
+    // Only transition still-actionable recommendations; terminal ones
+    // (`Executed` / `Attributed` / `Expired` / `Revoked`) are left intact.
     quant_recommendation::Entity::update_many()
         .filter(quant_recommendation::Column::RecommendationReportId.eq(report_id.clone()))
+        .filter(quant_recommendation::Column::Status.is_in([
+            RecommendationStatus::Published,
+            RecommendationStatus::IntentCreated,
+        ]))
         .col_expr(
             quant_recommendation::Column::Status,
             column::pg_enum_value(&recommendation_status),

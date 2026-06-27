@@ -10,6 +10,13 @@
 //! | POST | `/quant/intents/{id}/approve` | `order_intent:approve` (governed) | Approve a pending intent |
 //! | POST | `/quant/intents/{id}/reject` | `order_intent:reject` (governed) | Reject a pending intent |
 //! | POST | `/quant/intents/{id}/cancel` | `order_intent:cancel` (governed) | Cancel a not-yet-submitted intent |
+//! | POST | `/quant/intents/{id}/submit` | `order_intent:submit` (governed) | Submit an approved intent to the venue |
+//!
+//! Submit is the real-money path (Phase 05.4): it claims the intent, runs the
+//! 20-check admission engine, and on `allow` signs + posts the order to the CLOB,
+//! settling capital + position. Admission deny / non-submittable → 409; transient
+//! defer → 503 (intent stays submittable). An unconfirmed venue response settles
+//! as `ambiguous` (capital held, reconciled) and still returns `200`.
 //!
 //! Create is mode-gated: `report_only` is rejected (409), `semi_auto` yields a
 //! `PendingApproval` intent, `auto_execution` yields `ApprovedByPolicy`. Approve
@@ -20,11 +27,15 @@
 use actix_web::{http::Method, web};
 use quant_pivot_models::{
     domain::{
-        ApproveIntentCommand, CancelIntentCommand, CreateIntentCommand, OrderIntentListQuery,
-        OrderIntentView, Paginated, RejectIntentCommand,
+        ApproveIntentCommand, CancelIntentCommand, CreateIntentCommand, ExecutionOrderView,
+        OrderIntentListQuery, OrderIntentView, Paginated, RejectIntentCommand,
     },
-    domain::{ApproveIntentRequest, CancelIntentRequest, CreateIntentRequest, RejectIntentRequest},
+    domain::{
+        ApproveIntentRequest, CancelIntentRequest, CreateIntentRequest, RejectIntentRequest,
+        SubmitIntentRequest,
+    },
     enums::{
+        execution::VenueOrderStatus,
         operation_log::OperationCategory,
         rbac::{Operation, ResourceType},
     },
@@ -80,6 +91,12 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
             "/quant/intents/{id}/cancel",
             Rule::ActingRoleGoverned(ResourceType::OrderIntent, Operation::Cancel),
             cancel,
+        ),
+        spec(
+            Method::POST,
+            "/quant/intents/{id}/submit",
+            Rule::ActingRoleGoverned(ResourceType::OrderIntent, Operation::Submit),
+            submit,
         ),
     ]
 }
@@ -253,6 +270,35 @@ pub async fn cancel(
         "reason": request.reason,
     }));
     Ok(WebResponse::ok(OrderIntentView::from(intent)))
+}
+
+/// `POST /api/quant/intents/{id}/submit` — submit an approved intent to the venue.
+pub async fn submit(
+    state: web::Data<AppState>,
+    id: web::Path<OrderIntentId>,
+    acting_role: ActingRole,
+    request_id: RequestId,
+    op_ctx: OperationCtx,
+    body: ValidatedJson<SubmitIntentRequest>,
+) -> Result<WebResponse<ExecutionOrderView>, WebError> {
+    let intent_id = id.into_inner();
+    let request = body.into_inner();
+    let order = state
+        .execution_submit
+        .submit_if_admitted(&intent_id)
+        .await?;
+    op_ctx.set_action(OperationCategory::Governance, "quant.intent.submit");
+    op_ctx.set_resource(ResourceType::OrderIntent, intent_id.to_string());
+    op_ctx.set_detail(serde_json::json!({
+        "order_intent_id": intent_id.to_string(),
+        "execution_order_id": order.execution_order_id.to_string(),
+        "state": order.state.as_str(),
+        "venue_status": order.venue_status.map(VenueOrderStatus::as_str),
+        "acting_role": acting_role.0,
+        "request_id": request_id.0,
+        "reason": request.reason,
+    }));
+    Ok(WebResponse::ok(ExecutionOrderView::from(order)))
 }
 
 /// Parse the authenticated actor's stable user id into a UUID for `approved_by`.

@@ -139,6 +139,14 @@ pub struct MetricsHub {
     // ── Execution admission (05.3) ────────────────────────────────────────
     /// Admission denials by the check id that determined the `Deny` outcome.
     pub admission_denied: IntCounterVec,
+
+    // ── Entry execution (05.4) ────────────────────────────────────────────
+    /// Entry orders successfully submitted to the venue (write-ahead committed).
+    pub execution_orders_submitted: IntCounter,
+    /// Venue fills observed on submission (full or partial).
+    pub execution_fills: IntCounter,
+    /// Execution-breaker kill-switch trips by triggering dimension.
+    pub execution_breaker_trips: IntCounterVec,
 }
 
 struct PipelineMetrics {
@@ -449,6 +457,22 @@ impl MetricsHub {
             "Execution admission denials by the check id that determined the deny",
             &["check_id"]
         );
+        let execution_orders_submitted = register_counter!(
+            &registry,
+            "quant_execution_orders_submitted_total",
+            "Entry orders submitted to the venue (write-ahead committed)"
+        );
+        let execution_fills = register_counter!(
+            &registry,
+            "quant_execution_fills_total",
+            "Venue fills observed on submission (full or partial)"
+        );
+        let execution_breaker_trips = register_counter_vec!(
+            &registry,
+            "quant_execution_breaker_trips_total",
+            "Execution-breaker kill-switch trips by triggering dimension",
+            &["dimension"]
+        );
 
         Self {
             registry,
@@ -491,7 +515,27 @@ impl MetricsHub {
             report_expire_swept_total: report.expire_swept,
             auto_execution_halted,
             admission_denied,
+            execution_orders_submitted,
+            execution_fills,
+            execution_breaker_trips,
         }
+    }
+
+    /// Count one entry order submitted to the venue.
+    pub fn inc_execution_order_submitted(&self) {
+        self.execution_orders_submitted.inc();
+    }
+
+    /// Count one venue fill observed on submission.
+    pub fn inc_execution_fill(&self) {
+        self.execution_fills.inc();
+    }
+
+    /// Count one execution-breaker kill-switch trip for a dimension.
+    pub fn inc_execution_breaker_trip(&self, dimension: &str) {
+        self.execution_breaker_trips
+            .with_label_values(&[dimension])
+            .inc();
     }
 
     /// Publish whether the kill-switch currently blocks new auto entries.

@@ -52,6 +52,10 @@ pub enum TaskId {
     ExecutionRunner {
         shard: u8,
     },
+    /// Auto-execution worker: pulls `ApprovedByPolicy` intents and submits them.
+    ExecutionDispatcher,
+    /// Self-heals the execution breaker (`Degraded → Healthy` after cooldown).
+    ExecutionBreakerTick,
     ReconciliationWorker,
     ExecutionHeartbeat,
 
@@ -79,9 +83,18 @@ pub enum TaskId {
 
     // ── Ops ───────────────────────────────────────────────────────────
     ReportGenerator,
+    /// Rolls reports up to `Expired` once all their recommendations are terminal.
     ReportExpireSweep,
+    /// Expires recommendations past their data-driven `valid_until` and cascades
+    /// their reserved capital.
+    RecommendationExpireSweep,
+    /// Precise per-recommendation TTL wake (`DelayQueue`); `RecommendationExpireSweep`
+    /// is its backstop.
+    RecommendationDeadlineScheduler,
     /// Expires order intents past their `expires_at` and releases their capital.
     IntentExpireSweep,
+    /// Precise per-intent TTL wake (`DelayQueue`); `IntentExpireSweep` is its backstop.
+    IntentDeadlineScheduler,
 }
 
 impl TaskId {
@@ -103,13 +116,19 @@ impl TaskId {
             Self::HealthChecker | Self::RiskMetricsRefresh | Self::DataQualityRefresh => {
                 TaskKind::HealthMonitor
             }
-            Self::ExecutionRunner { .. } | Self::ReconciliationWorker => TaskKind::Execution,
+            Self::ExecutionRunner { .. }
+            | Self::ExecutionDispatcher
+            | Self::ExecutionBreakerTick
+            | Self::ReconciliationWorker => TaskKind::Execution,
             Self::ExecutionHeartbeat => TaskKind::ExecutionHeartbeat,
             Self::RiskTick
             | Self::ExposureGc
             | Self::ReportGenerator
             | Self::ReportExpireSweep
-            | Self::IntentExpireSweep => TaskKind::ReportScheduler,
+            | Self::RecommendationExpireSweep
+            | Self::RecommendationDeadlineScheduler
+            | Self::IntentExpireSweep
+            | Self::IntentDeadlineScheduler => TaskKind::ReportScheduler,
             Self::RiskAuditBatch | Self::OperationLogWriter => TaskKind::Audit,
             Self::ExecutionAuditWriter
             | Self::DetectionWriter

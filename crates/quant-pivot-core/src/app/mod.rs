@@ -1,9 +1,9 @@
 //! Application context — system composition root and lifecycle manager.
 
-pub mod admission_engine;
 pub mod backtest;
 pub mod bootstrap;
 pub mod build;
+pub mod execution_dispatcher;
 pub mod fact_writer_tasks;
 pub mod intent_service;
 pub mod lifecycle;
@@ -22,6 +22,7 @@ mod bundles;
 pub use bundles::*;
 
 use crate::{
+    execution::DispatchWake,
     governance::{KillSwitchHandle, RuntimeModeHandle},
     infra::schedule::ReportScheduleRunner,
     report::ReportLifecycleService,
@@ -35,7 +36,7 @@ use flume::Receiver;
 use parking_lot::Mutex;
 use quant_pivot_models::{
     config::DeployConfig,
-    domain::{CoreEvent, CoreEventPublisher, PointInTimeDataSource},
+    domain::{CoreEvent, CoreEventPublisher, ExecutionSubmitPort, PointInTimeDataSource},
 };
 use quant_pivot_repository::traits::FactorRepository;
 use quant_pivot_research::artifact::ArtifactStore;
@@ -54,6 +55,7 @@ pub struct AppContext {
     pub research: ResearchBundle,
     pub account: AccountBundle,
     pub report: ReportBundle,
+    pub execution: ExecutionBundle,
 }
 
 impl AppContext {
@@ -112,5 +114,16 @@ impl AppContext {
     /// Live point-in-time source for online feature / report builders.
     pub fn live_pit(&self) -> &dyn PointInTimeDataSource {
         self.data.pit_source.as_ref()
+    }
+
+    /// Entry-execution dispatcher (05.4): the single intent → venue submit bridge.
+    pub fn execution_dispatcher(&self) -> Arc<dyn ExecutionSubmitPort> {
+        Arc::clone(&self.execution.dispatcher)
+    }
+
+    /// Approve→submit wake signal shared by the intent service (producer) and the
+    /// `auto_execution` dispatcher worker (consumer).
+    pub fn execution_wake(&self) -> DispatchWake {
+        self.execution.dispatch_wake.clone()
     }
 }

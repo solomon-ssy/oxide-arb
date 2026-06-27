@@ -3,16 +3,14 @@
 use crate::traits::ExecutionOrderRepository;
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    domain::{
-        ExecutionOrderInfo, ExecutionOrderPatch, ExecutionOrderSubmissionResult, NewExecutionOrder,
-    },
+    domain::{ExecutionOrderInfo, ExecutionOrderPatch, NewExecutionOrder},
     entities::quant_execution_order,
     enums::quant::ExecutionOrderState,
     types::{ExecutionOrderId, OrderIntentId},
 };
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel,
-    IntoActiveValue, QueryFilter,
+    IntoActiveValue, PaginatorTrait, QueryFilter,
 };
 
 /// Postgres-backed execution-order repository.
@@ -59,6 +57,15 @@ impl ExecutionOrderRepository for PgExecutionOrderRepository {
             .map(|row| row.map(Into::into))
     }
 
+    async fn has_ambiguous_inflight(&self) -> Result<bool, StorageError> {
+        quant_execution_order::Entity::find()
+            .filter(quant_execution_order::Column::State.eq(ExecutionOrderState::Ambiguous))
+            .count(&self.db)
+            .await
+            .map_err(StorageError::from)
+            .map(|count| count > 0)
+    }
+
     async fn transition(
         &self,
         execution_order_id: &ExecutionOrderId,
@@ -93,20 +100,9 @@ impl ExecutionOrderRepository for PgExecutionOrderRepository {
             .map_err(StorageError::from)
             .map(Into::into)
     }
-
-    async fn record_submission_result(
-        &self,
-        execution_order_id: &ExecutionOrderId,
-        result: ExecutionOrderSubmissionResult,
-    ) -> Result<ExecutionOrderInfo, StorageError> {
-        let _ = (execution_order_id, result);
-        Err(StorageError::Conflict(
-            "record_submission_result is implemented in Phase 05.4".to_owned(),
-        ))
-    }
 }
 
-fn validate_execution_order_transition(
+pub fn validate_execution_order_transition(
     current: ExecutionOrderState,
     next: ExecutionOrderState,
     execution_order_id: &ExecutionOrderId,

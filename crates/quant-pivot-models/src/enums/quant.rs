@@ -100,6 +100,29 @@ crate::pg_enum! {
     }
 }
 
+impl RecommendationStatus {
+    /// Whether this is a terminal recommendation state — no further entry action
+    /// is possible. A report rolls up to `Expired` only once every one of its
+    /// recommendations is terminal. `Published` / `IntentCreated` are non-terminal
+    /// (the recommendation is still actionable / in flight).
+    #[must_use]
+    pub const fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Revoked | Self::Expired | Self::Executed | Self::Attributed
+        )
+    }
+
+    /// Whether a new [`OrderIntent`] may still be created from this recommendation.
+    #[must_use]
+    pub const fn is_actionable_for_intent(self) -> bool {
+        matches!(self, Self::Published | Self::IntentCreated)
+    }
+
+    /// Statuses still eligible for intent creation (SQL `IN` filters).
+    pub const ACTIONABLE_FOR_INTENT: [Self; 2] = [Self::Published, Self::IntentCreated];
+}
+
 crate::pg_enum! {
     type_name = "qp_outcome_side",
     /// Which binary-market outcome token a recommendation opens a position in.
@@ -179,6 +202,52 @@ crate::pg_enum! {
         Expired => "expired",
         Invalidated => "invalidated",
     }
+}
+
+impl OrderIntentStatus {
+    /// Statuses that still participate in pre-submission invalidation cascades.
+    #[must_use]
+    pub const fn is_pre_submission_active(self) -> bool {
+        matches!(
+            self,
+            Self::PendingApproval
+                | Self::Approved
+                | Self::ApprovedByPolicy
+                | Self::AdmissionPending
+        )
+    }
+
+    /// Whether another intent on the same recommendation must be rejected at create time.
+    #[must_use]
+    pub const fn blocks_sibling_intent_creation(self) -> bool {
+        matches!(
+            self,
+            Self::PendingApproval
+                | Self::Approved
+                | Self::ApprovedByPolicy
+                | Self::AdmissionPending
+                | Self::Submitted
+                | Self::PartiallyFilled
+        )
+    }
+
+    /// Pre-submission statuses for invalidation cascades (SQL `IN` filters).
+    pub const PRE_SUBMISSION_ACTIVE: [Self; 4] = [
+        Self::PendingApproval,
+        Self::Approved,
+        Self::ApprovedByPolicy,
+        Self::AdmissionPending,
+    ];
+
+    /// Statuses that block sibling intent creation (SQL `IN` filters).
+    pub const SIBLING_INTENT_BLOCKING: [Self; 6] = [
+        Self::PendingApproval,
+        Self::Approved,
+        Self::ApprovedByPolicy,
+        Self::AdmissionPending,
+        Self::Submitted,
+        Self::PartiallyFilled,
+    ];
 }
 
 crate::pg_enum! {
@@ -543,5 +612,84 @@ crate::wire_enum! {
         ExitBeforeResolution => "exit_before_resolution",
         /// Redeem winnings automatically once redeemable.
         AutoRedeem => "auto_redeem",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{OrderIntentStatus, RecommendationStatus};
+
+    #[test]
+    fn recommendation_terminal_states_drive_report_roll_up() {
+        // Terminal: a report rolls up to Expired once every recommendation is one of these.
+        for status in [
+            RecommendationStatus::Revoked,
+            RecommendationStatus::Expired,
+            RecommendationStatus::Executed,
+            RecommendationStatus::Attributed,
+        ] {
+            assert!(status.is_terminal(), "{status:?} must be terminal");
+        }
+        // Non-terminal: still actionable / in flight (report stays active).
+        for status in [
+            RecommendationStatus::Published,
+            RecommendationStatus::IntentCreated,
+        ] {
+            assert!(!status.is_terminal(), "{status:?} must be non-terminal");
+            assert!(
+                status.is_actionable_for_intent(),
+                "{status:?} must accept intent creation"
+            );
+            assert!(
+                RecommendationStatus::ACTIONABLE_FOR_INTENT.contains(&status),
+                "{status:?} must be in ACTIONABLE_FOR_INTENT"
+            );
+        }
+        for status in [
+            RecommendationStatus::Revoked,
+            RecommendationStatus::Expired,
+            RecommendationStatus::Executed,
+            RecommendationStatus::Attributed,
+        ] {
+            assert!(
+                !status.is_actionable_for_intent(),
+                "{status:?} must not accept intent creation"
+            );
+            assert!(
+                !RecommendationStatus::ACTIONABLE_FOR_INTENT.contains(&status),
+                "{status:?} must not be in ACTIONABLE_FOR_INTENT"
+            );
+        }
+    }
+
+    #[test]
+    fn order_intent_status_predicates_match_sql_arrays() {
+        for status in [
+            OrderIntentStatus::Draft,
+            OrderIntentStatus::PendingApproval,
+            OrderIntentStatus::Approved,
+            OrderIntentStatus::ApprovedByPolicy,
+            OrderIntentStatus::AdmissionPending,
+            OrderIntentStatus::AdmissionRejected,
+            OrderIntentStatus::Submitted,
+            OrderIntentStatus::PartiallyFilled,
+            OrderIntentStatus::Filled,
+            OrderIntentStatus::Rejected,
+            OrderIntentStatus::Cancelled,
+            OrderIntentStatus::Failed,
+            OrderIntentStatus::Expired,
+            OrderIntentStatus::Invalidated,
+        ] {
+            assert_eq!(
+                status.is_pre_submission_active(),
+                OrderIntentStatus::PRE_SUBMISSION_ACTIVE.contains(&status),
+                "{status:?} is_pre_submission_active"
+            );
+            assert_eq!(
+                status.blocks_sibling_intent_creation(),
+                OrderIntentStatus::SIBLING_INTENT_BLOCKING.contains(&status),
+                "{status:?} blocks_sibling_intent_creation"
+            );
+        }
     }
 }

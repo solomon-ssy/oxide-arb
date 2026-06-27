@@ -5,6 +5,7 @@
 
 mod account;
 mod data;
+mod execution;
 mod future;
 mod governance;
 mod infra;
@@ -12,9 +13,8 @@ mod research;
 
 pub use account::{AccountBundle, AccountBundleDeps};
 pub use data::{DataBundle, DataBundleDeps};
-pub use future::{
-    ExecutionIntentBundle, PortfolioBundle, ReportBundle, ReportBundleDeps, RuntimeChannels,
-};
+pub use execution::{ExecutionBundle, ExecutionBundleDeps};
+pub use future::{PortfolioBundle, ReportBundle, ReportBundleDeps, RuntimeChannels};
 pub use governance::{GovernanceBundle, GovernanceBundleDeps, RuntimeSnapshot};
 pub use infra::InfraBundle;
 pub use research::{ResearchBundle, ResearchBundleDeps};

@@ -17,13 +17,15 @@ use quant_pivot_models::{
     types::Usd,
 };
 use quant_pivot_repository::traits::{
-    CapitalAllocationRepository, ModelRegistryRepository, RecommendationReportRepository,
-    RecommendationRepository, ReconciliationRepository, RuntimeConfigVersionRepository,
+    CapitalAllocationRepository, ExecutionOrderRepository, ModelRegistryRepository,
+    RecommendationReportRepository, RecommendationRepository, ReconciliationRepository,
+    RuntimeConfigVersionRepository,
 };
 use rust_decimal::Decimal;
 
-use super::{AdmissionInput, AdmissionSeams, StateVersion, VenueHealth};
+use super::{AdmissionInput, AdmissionSeams, StateVersion};
 use crate::{
+    execution::breaker::VenueHealthHandle,
     governance::{KillSwitchHandle, RuntimeModeHandle},
     pipeline::book_store::BookStore,
     runtime_config::RuntimeConfigStore,
@@ -36,6 +38,7 @@ pub struct AdmissionInputBuilderDeps {
     pub reports: Arc<dyn RecommendationReportRepository>,
     pub model_registry: Arc<dyn ModelRegistryRepository>,
     pub reconciliation: Arc<dyn ReconciliationRepository>,
+    pub execution_orders: Arc<dyn ExecutionOrderRepository>,
     pub capital: Arc<dyn CapitalAllocationRepository>,
     pub config_versions: Arc<dyn RuntimeConfigVersionRepository>,
     pub account_factory: Arc<AccountProviderFactory>,
@@ -44,6 +47,8 @@ pub struct AdmissionInputBuilderDeps {
     pub config: Arc<RuntimeConfigStore>,
     pub runtime_mode: RuntimeModeHandle,
     pub kill_switch: KillSwitchHandle,
+    /// Venue-health hot read published by the 05.4 execution breaker (seam #18).
+    pub venue_health: VenueHealthHandle,
 }
 
 /// Builds the frozen [`AdmissionInput`] for an intent at decision time.
@@ -98,6 +103,7 @@ impl AdmissionInputBuilder {
             report_result,
             model_version_result,
             unresolvable_result,
+            ambiguous_inflight_result,
             allocation_result,
             active_version_result,
             account_result,
@@ -106,6 +112,7 @@ impl AdmissionInputBuilder {
             deps.model_registry
                 .find_model_version_by_id(&model_version_id),
             deps.reconciliation.has_unresolvable(),
+            deps.execution_orders.has_ambiguous_inflight(),
             deps.capital.find_by_intent(&order_intent_id),
             deps.config_versions.load_current(),
             async move {
@@ -120,7 +127,11 @@ impl AdmissionInputBuilder {
             .ok_or_else(|| not_found("recommendation_report", report_id.to_string()))?;
         let model_published = model_version_result?
             .is_some_and(|version| version.publication_status == PublicationStatus::Published);
-        let has_unresolvable_recon = unresolvable_result?;
+        // Truth-unknown in-flight exposure blocks new auto entries (fail-closed):
+        // an `Ambiguous` order (capital held, venue truth unknown) or a recon
+        // worker's terminal `Unresolvable` verdict (05.5). Resting open orders and
+        // `Pending` (not-yet-reconciled) rows do not block.
+        let has_blocking_inflight = unresolvable_result? || ambiguous_inflight_result?;
         let allocation = allocation_result?;
         let account = account_result?;
         let active_version = active_version_result?
@@ -152,13 +163,13 @@ impl AdmissionInputBuilder {
             model_published,
             data_quality,
             max_stale_book_ratio_bps,
-            has_unresolvable_recon,
+            has_blocking_inflight,
             manual_block,
             // 05.3 seams: the 05.4 execution breaker supplies real venue health;
             // exit-monitor readiness becomes real in 05.6. Credentials are real
             // (the same keystore signs and reads).
             seams: AdmissionSeams {
-                venue_health: VenueHealth::Healthy,
+                venue_health: deps.venue_health.current(),
                 credentials_ready: deps.account_factory.credentials_ready(),
                 exit_monitor_ready: true,
             },

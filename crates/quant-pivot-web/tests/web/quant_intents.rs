@@ -197,3 +197,37 @@ async fn intents_list_is_readable_by_viewer() {
     assert_eq!(res.status, StatusCode::OK);
     assert_eq!(res.json()["data"]["total"], json!(0));
 }
+
+#[actix_web::test]
+#[ignore = "requires Docker"]
+async fn submit_intent_requires_operator_and_maps_not_submittable_to_conflict() {
+    let env = TestEnv::start().await;
+    let admin = login(&env, "admin", "admin").await;
+    let operator = user_with_role(&env, &admin, "op_submit", "operator").await;
+    let viewer = user_with_role(&env, &admin, "vw_submit", "viewer").await;
+    let intent_id = OrderIntentId::from_v7();
+
+    let allowed = post(
+        &env,
+        &format!("/api/quant/intents/{intent_id}/submit"),
+        &operator,
+        &[("X-Acting-Role", "operator"), ("X-Request-Id", "sub-1")],
+        json!({ "reason": "go live" }),
+    )
+    .await;
+    assert_eq!(
+        allowed.status,
+        StatusCode::CONFLICT,
+        "mock submit port fails closed with NotSubmittable → 409"
+    );
+
+    let denied = post(
+        &env,
+        &format!("/api/quant/intents/{intent_id}/submit"),
+        &viewer,
+        &[("X-Acting-Role", "viewer"), ("X-Request-Id", "sub-2")],
+        json!({ "reason": "nope" }),
+    )
+    .await;
+    assert_eq!(denied.status, StatusCode::FORBIDDEN);
+}

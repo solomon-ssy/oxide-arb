@@ -270,6 +270,7 @@ fn recommendation_report_header_has_account_columns() {
         data_quality_snapshot_ref: ReportDataQualitySnapshotId::from_v7(),
         summary_json: report_summary(),
         published_at: None,
+        valid_until: None,
         revoked_at: None,
         expired_at: None,
         status_reason: None,

@@ -66,6 +66,8 @@ pub struct DataBundle {
     pub pit_source: Arc<dyn PointInTimeDataSource>,
     /// Best-effort nudge when pipeline status changes (web readiness).
     pub status_nudge: SystemStatusNudge,
+    /// Polymarket taker fee calculator (category schedules from Gamma sync).
+    pub fee_calculator: Arc<FeeCalculator>,
 }
 
 impl DataBundle {
@@ -169,6 +171,7 @@ impl DataBundle {
             data_quality,
             pit_source,
             status_nudge,
+            fee_calculator,
         }
     }
 }

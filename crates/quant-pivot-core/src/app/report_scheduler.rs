@@ -1,22 +1,29 @@
 //! Report scheduler task registration (04.3).
 //!
-//! Registers two Execution-stage tasks:
+//! Registers the Execution-stage report-lifecycle tasks:
 //! - `ReportGenerator`: rebuilds jobs from the active config, then runs the
 //!   cron/interval/ad-hoc scheduler until shutdown (graceful in-flight drain).
-//! - `ReportExpireSweep`: a decoupled `PeriodicTask` that expires reports past
-//!   their TTL, independent of the fire schedule.
+//! - `RecommendationDeadlineScheduler`: precise per-recommendation TTL wakes
+//!   (`DelayQueue` on the data-driven `valid_until`) that expire recommendations
+//!   and cascade their reserved capital.
+//! - `RecommendationExpireSweep`: the durable poll backstop for the above.
+//! - `ReportExpireSweep`: rolls reports up to `Expired` once all their
+//!   recommendations are terminal (and finalizes empty reports).
 
 use std::{sync::Arc, time::Duration};
 
 use chrono::Utc;
+use quant_pivot_repository::{
+    postgres::PgRecommendationRepository, traits::RecommendationRepository,
+};
 
 use super::AppContext;
 use crate::{
     app::{task_id::TaskId, task_registry::AppRunner},
-    infra::periodic_task::PeriodicTask,
+    infra::{deadline_scheduler, periodic_task::PeriodicTask},
 };
 
-/// Max reports expired per sweep pass (bounds one transaction burst).
+/// Max rows expired per sweep pass (bounds one transaction burst).
 const EXPIRE_SWEEP_BATCH: u64 = 256;
 
 impl AppContext {
@@ -38,10 +45,12 @@ impl AppContext {
         });
     }
 
-    /// Register the report TTL expire sweep (`TaskId::ReportExpireSweep`).
+    /// Register the report roll-up backstop (`TaskId::ReportExpireSweep`): rolls
+    /// reports up to `Expired` once all their recommendations are terminal, and
+    /// finalizes empty reports past their roll-up `valid_until`. The per-record
+    /// truth is the recommendation expiry; this is the durable poll backstop.
     pub fn register_report_expire_sweep(&self, runner: &mut AppRunner) {
         let lifecycle = self.report_lifecycle();
-        let runtime_config = self.runtime_config();
         let metrics = Arc::clone(&self.infra.metrics);
         let sweep_secs = self.config.quant.workers.report_expire_sweep_secs;
         runner.spawn(TaskId::ReportExpireSweep, move |token| async move {
@@ -53,20 +62,80 @@ impl AppContext {
                 token,
                 move || {
                     let lifecycle = Arc::clone(&lifecycle);
-                    let runtime_config = Arc::clone(&runtime_config);
                     let metrics = Arc::clone(&metrics);
                     async move {
-                        let ttl_secs = runtime_config.current().reports.report_ttl_secs;
-                        // ttl_secs == 0 disables TTL expiry (never anchor at now).
-                        if ttl_secs == 0 {
-                            return Ok(());
-                        }
-                        let swept = lifecycle
-                            .expire_due_reports(Utc::now(), ttl_secs, EXPIRE_SWEEP_BATCH)
+                        let rolled = lifecycle
+                            .expire_due_reports(Utc::now(), EXPIRE_SWEEP_BATCH)
                             .await?;
-                        if swept > 0 {
-                            metrics.inc_report_expire_swept(u64::from(swept));
+                        if rolled > 0 {
+                            metrics.inc_report_expire_swept(u64::from(rolled));
                         }
+                        Ok(())
+                    }
+                },
+            )
+            .await;
+        });
+    }
+
+    /// Register the precise per-recommendation TTL deadline scheduler
+    /// (`TaskId::RecommendationDeadlineScheduler`). Fires expiry exactly at each
+    /// recommendation's data-driven `valid_until`; the DB is the source of truth
+    /// (every fire re-checks it) and `RecommendationExpireSweep` is the backstop.
+    pub fn register_recommendation_deadline_scheduler(&self, runner: &mut AppRunner) {
+        let lifecycle = self.report_lifecycle();
+        let recommendations: Arc<dyn RecommendationRepository> = Arc::new(
+            PgRecommendationRepository::new(self.infra.pg.connection().clone()),
+        );
+        let reconcile = Duration::from_secs(self.config.quant.workers.report_expire_sweep_secs);
+        runner.spawn(
+            TaskId::RecommendationDeadlineScheduler,
+            move |token| async move {
+                deadline_scheduler::run(
+                    "recommendation-deadline-scheduler",
+                    reconcile,
+                    token,
+                    move |horizon| {
+                        let recommendations = Arc::clone(&recommendations);
+                        async move {
+                            recommendations
+                                .upcoming_expirations(horizon, EXPIRE_SWEEP_BATCH)
+                                .await
+                                .map_err(Into::into)
+                        }
+                    },
+                    move || {
+                        let lifecycle = Arc::clone(&lifecycle);
+                        async move {
+                            lifecycle
+                                .expire_due_recommendations(Utc::now(), EXPIRE_SWEEP_BATCH)
+                                .await
+                        }
+                    },
+                )
+                .await;
+            },
+        );
+    }
+
+    /// Register the per-recommendation TTL expiry poll backstop
+    /// (`TaskId::RecommendationExpireSweep`).
+    pub fn register_recommendation_expire_sweep(&self, runner: &mut AppRunner) {
+        let lifecycle = self.report_lifecycle();
+        let sweep_secs = self.config.quant.workers.report_expire_sweep_secs;
+        runner.spawn(TaskId::RecommendationExpireSweep, move |token| async move {
+            let _ = PeriodicTask::run(
+                "recommendation-expire-sweep",
+                move || Duration::from_secs(sweep_secs),
+                0.0,
+                true,
+                token,
+                move || {
+                    let lifecycle = Arc::clone(&lifecycle);
+                    async move {
+                        lifecycle
+                            .expire_due_recommendations(Utc::now(), EXPIRE_SWEEP_BATCH)
+                            .await?;
                         Ok(())
                     }
                 },

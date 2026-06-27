@@ -3,15 +3,15 @@
 use crate::traits::{CapitalAllocationRepository, ReservedCapitalRepository};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    domain::CapitalAllocationInfo,
+    domain::{CapitalAllocationInfo, CapitalSettlement},
     entities::quant_capital_allocation,
     enums::execution::CapitalAllocationState,
     types::{OrderIntentId, Usd},
 };
 use rust_decimal::Decimal;
 use sea_orm::{
-    ColumnTrait, DatabaseConnection, EntityTrait, FromQueryResult, PaginatorTrait, QueryFilter,
-    QuerySelect, sea_query::Expr,
+    ActiveModelTrait, ActiveValue, ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait,
+    FromQueryResult, IntoActiveModel, PaginatorTrait, QueryFilter, QuerySelect, sea_query::Expr,
 };
 
 /// Allocation rows included in the reserved-capital aggregate.
@@ -142,4 +142,172 @@ pub fn capital_invariant_ok(
     planned_usd >= allocated_usd
         && allocated_usd >= locked_usd
         && spent_usd + released_usd <= reserve_basis
+}
+
+/// Load the (single) capital allocation row for an intent, failing if absent.
+///
+/// Shared by every money-moving composite transaction (order-intent +
+/// execution-submission), always called against the transaction connection.
+pub async fn load_capital(
+    db: &impl ConnectionTrait,
+    intent_id: &OrderIntentId,
+) -> Result<quant_capital_allocation::Model, StorageError> {
+    quant_capital_allocation::Entity::find()
+        .filter(quant_capital_allocation::Column::OrderIntentId.eq(intent_id.clone()))
+        .one(db)
+        .await
+        .map_err(StorageError::from)?
+        .ok_or_else(|| {
+            StorageError::Conflict(format!(
+                "capital allocation not found for intent: {intent_id}"
+            ))
+        })
+}
+
+/// Release an intent's still-reserved capital in full (`Allocated`/`Locked` →
+/// `Released`). A broken invariant forces `Impaired` (fail-closed: never free
+/// corrupted budget). Used by reject / cancel / expire / invalidate / admission
+/// deny paths.
+pub async fn release_capital(
+    db: &impl ConnectionTrait,
+    intent_id: &OrderIntentId,
+    reason: String,
+) -> Result<(), StorageError> {
+    let cap = load_capital(db, intent_id).await?;
+    let released_usd = cap.allocated_usd.max(cap.locked_usd);
+    validate_non_negative(
+        cap.allocated_usd,
+        cap.locked_usd,
+        cap.spent_usd,
+        released_usd,
+    )?;
+    let (state, reason) = if capital_invariant_ok(
+        cap.planned_usd,
+        cap.allocated_usd,
+        cap.locked_usd,
+        cap.spent_usd,
+        released_usd,
+    ) {
+        (CapitalAllocationState::Released, reason)
+    } else {
+        (
+            CapitalAllocationState::Impaired,
+            format!("impaired: {reason}"),
+        )
+    };
+    let mut active = cap.into_active_model();
+    active.state = ActiveValue::Set(state);
+    active.released_usd = ActiveValue::Set(released_usd);
+    active.reason = ActiveValue::Set(reason);
+    active.update(db).await.map_err(StorageError::from)?;
+    Ok(())
+}
+
+/// Lock an intent's reserved capital for submission (`Allocated` → `Locked`,
+/// `locked_usd = allocated_usd`). Fail-closed to `Impaired` on a broken
+/// invariant. Called inside the entry-order write-ahead transaction.
+pub async fn lock_capital(
+    db: &impl ConnectionTrait,
+    intent_id: &OrderIntentId,
+    reason: String,
+) -> Result<(), StorageError> {
+    let cap = load_capital(db, intent_id).await?;
+    if cap.state != CapitalAllocationState::Allocated {
+        return Err(StorageError::Conflict(format!(
+            "capital must be allocated to lock for intent {intent_id}, got {}",
+            cap.state.as_str()
+        )));
+    }
+    let locked_usd = cap.allocated_usd;
+    let ok = validate_non_negative(
+        cap.allocated_usd,
+        locked_usd,
+        cap.spent_usd,
+        cap.released_usd,
+    )
+    .is_ok()
+        && capital_invariant_ok(
+            cap.planned_usd,
+            cap.allocated_usd,
+            locked_usd,
+            cap.spent_usd,
+            cap.released_usd,
+        );
+    let mut active = cap.into_active_model();
+    if ok {
+        active.state = ActiveValue::Set(CapitalAllocationState::Locked);
+        active.locked_usd = ActiveValue::Set(locked_usd);
+        active.reason = ActiveValue::Set(reason);
+    } else {
+        active.state = ActiveValue::Set(CapitalAllocationState::Impaired);
+        active.reason = ActiveValue::Set(format!("impaired: {reason}"));
+    }
+    active.update(db).await.map_err(StorageError::from)?;
+    Ok(())
+}
+
+/// Settle locked capital against a venue outcome ([`CapitalSettlement`]).
+///
+/// - `SettleFull` → `Spent`, unspent locked remainder released.
+/// - `SettlePartial` → stays `Locked`, `spent` increased (remaining exposure
+///   still reserved).
+/// - `ReleaseAll` → `Released`.
+/// - `Hold` → untouched (Ambiguous / resting `Open`; never frees capital that
+///   may already be spent on the venue).
+///
+/// Any computed write that would violate the money invariant forces `Impaired`
+/// with amounts left intact (fail-closed: never free corrupted budget).
+pub async fn settle_capital(
+    db: &impl ConnectionTrait,
+    intent_id: &OrderIntentId,
+    settlement: &CapitalSettlement,
+    reason: String,
+) -> Result<(), StorageError> {
+    if matches!(settlement, CapitalSettlement::Hold) {
+        return Ok(());
+    }
+    let cap = load_capital(db, intent_id).await?;
+    let basis = cap.allocated_usd.max(cap.locked_usd);
+    let (state, locked_usd, spent_usd, released_usd) = match settlement {
+        CapitalSettlement::Hold => return Ok(()),
+        CapitalSettlement::ReleaseAll => (
+            CapitalAllocationState::Released,
+            cap.locked_usd,
+            cap.spent_usd,
+            basis - cap.spent_usd,
+        ),
+        CapitalSettlement::SettleFull { spent_usd } => (
+            CapitalAllocationState::Spent,
+            cap.locked_usd,
+            *spent_usd,
+            basis - *spent_usd,
+        ),
+        CapitalSettlement::SettlePartial { spent_usd } => (
+            CapitalAllocationState::Locked,
+            cap.locked_usd,
+            *spent_usd,
+            cap.released_usd,
+        ),
+    };
+    let ok = validate_non_negative(cap.allocated_usd, locked_usd, spent_usd, released_usd).is_ok()
+        && capital_invariant_ok(
+            cap.planned_usd,
+            cap.allocated_usd,
+            locked_usd,
+            spent_usd,
+            released_usd,
+        );
+    let mut active = cap.into_active_model();
+    if ok {
+        active.state = ActiveValue::Set(state);
+        active.locked_usd = ActiveValue::Set(locked_usd);
+        active.spent_usd = ActiveValue::Set(spent_usd);
+        active.released_usd = ActiveValue::Set(released_usd);
+        active.reason = ActiveValue::Set(reason);
+    } else {
+        active.state = ActiveValue::Set(CapitalAllocationState::Impaired);
+        active.reason = ActiveValue::Set(format!("impaired: {reason}"));
+    }
+    active.update(db).await.map_err(StorageError::from)?;
+    Ok(())
 }

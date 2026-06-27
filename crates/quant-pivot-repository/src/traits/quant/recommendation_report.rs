@@ -41,28 +41,36 @@ pub trait RecommendationReportRepository: Send + Sync {
         trigger_key: &str,
     ) -> Result<Option<RecommendationReportInfo>, StorageError>;
 
-    /// Ids of reports eligible for TTL expiry: `published` / `published_empty`
-    /// whose `published_at` is at or before `published_before`, oldest first,
-    /// capped at `limit`.
+    /// Ids of `published` / `published_empty` reports whose roll-up
+    /// `valid_until` deadline (`max(recommendation.valid_until)`) is at or before
+    /// `now`, oldest first, capped — the report roll-up backstop sweep input.
     async fn find_expirable(
         &self,
-        published_before: DateTime<Utc>,
+        now: DateTime<Utc>,
         limit: u64,
     ) -> Result<Vec<RecommendationReportId>, StorageError>;
 
+    /// Roll a report up to `Expired` **iff** it is still `published` /
+    /// `published_empty` and every one of its recommendations is terminal
+    /// (`is_terminal`). Sets `expired_at` and writes the operation log in one
+    /// transaction; does **not** touch recommendation rows (each already reached
+    /// its own terminal state). Returns `None` when the report is not eligible
+    /// (already terminal, or a recommendation is still actionable).
+    async fn roll_up_to_expired(
+        &self,
+        report_id: &RecommendationReportId,
+        expired_at: DateTime<Utc>,
+        operation_log: NewOperationLog,
+    ) -> Result<Option<RecommendationReportInfo>, StorageError>;
+
+    /// Operator revoke of a whole report: report -> `Revoked` and every
+    /// **non-terminal** recommendation -> `Revoked` (terminal recommendations are
+    /// left intact), in one transaction.
     async fn revoke(
         &self,
         report_id: &RecommendationReportId,
         reason: &str,
         revoked_at: DateTime<Utc>,
-        operation_log: NewOperationLog,
-    ) -> Result<RecommendationReportInfo, StorageError>;
-
-    async fn expire(
-        &self,
-        report_id: &RecommendationReportId,
-        reason: &str,
-        expired_at: DateTime<Utc>,
         operation_log: NewOperationLog,
     ) -> Result<RecommendationReportInfo, StorageError>;
 }
