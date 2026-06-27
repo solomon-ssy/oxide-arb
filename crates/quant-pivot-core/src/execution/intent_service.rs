@@ -153,7 +153,7 @@ impl CoreOrderIntentService {
         let exit = project_exit_policy_spec(&rec);
         let intent_id = OrderIntentId::from_v7();
         let planned_usd = rec.sizing_plan.suggested_usd;
-        let resolved = resolve_policy(policy, now, entry.valid_until)?;
+        let resolved = resolve_policy(policy, now, rec.valid_until, entry.valid_until)?;
 
         let new_intent = NewOrderIntent {
             order_intent_id: intent_id.clone(),
@@ -437,40 +437,66 @@ struct ResolvedPolicy {
 
 /// Map a mode-gate decision to the frozen intent fields, or the closing error.
 ///
-/// `report_only` and `denied` never produce an intent; `semi_auto` expires at
-/// `now + ttl`; a policy-approved intent expires at the entry's `valid_until`.
+/// `report_only` and `denied` never produce an intent. `semi_auto` expires at
+/// `min(now + approval_ttl, recommendation.valid_until, entry.valid_until)` so
+/// capital is not reserved past the recommendation or entry window. Auto policy
+/// intents expire at `min(entry.valid_until, recommendation.valid_until)`.
 fn resolve_policy(
     policy: IntentPolicyDecision,
     now: DateTime<Utc>,
+    recommendation_valid_until: DateTime<Utc>,
     entry_valid_until: DateTime<Utc>,
 ) -> Result<ResolvedPolicy, ExecutionError> {
+    let ensure_future_expiry =
+        |expires_at: DateTime<Utc>| -> Result<DateTime<Utc>, ExecutionError> {
+            if expires_at <= now {
+                return Err(ExecutionError::RecommendationExpired {
+                    reason: "recommendation or entry window already elapsed".to_owned(),
+                });
+            }
+            Ok(expires_at)
+        };
+
     match policy {
         IntentPolicyDecision::ReportOnly => Err(ExecutionError::ReportOnlyMode),
         IntentPolicyDecision::Denied { reason } => Err(ExecutionError::IntentDenied {
             reason: reason.as_str().to_owned(),
         }),
-        IntentPolicyDecision::RequiresApproval { approval_ttl, .. } => Ok(ResolvedPolicy {
-            status: OrderIntentStatus::PendingApproval,
-            approval_status: ApprovalStatus::Pending,
-            approval_reason: None,
-            approved_at: None,
-            policy_id: None,
-            policy_hash: None,
-            expires_at: now + Duration::seconds(i64::try_from(approval_ttl.as_secs()).unwrap_or(0)),
-        }),
+        IntentPolicyDecision::RequiresApproval { approval_ttl, .. } => {
+            let approval_deadline =
+                now + Duration::seconds(i64::try_from(approval_ttl.as_secs()).unwrap_or(0));
+            let expires_at = ensure_future_expiry(
+                approval_deadline
+                    .min(recommendation_valid_until)
+                    .min(entry_valid_until),
+            )?;
+            Ok(ResolvedPolicy {
+                status: OrderIntentStatus::PendingApproval,
+                approval_status: ApprovalStatus::Pending,
+                approval_reason: None,
+                approved_at: None,
+                policy_id: None,
+                policy_hash: None,
+                expires_at,
+            })
+        }
         IntentPolicyDecision::ApprovedByPolicy {
             policy_id,
             policy_hash,
             reason,
-        } => Ok(ResolvedPolicy {
-            status: OrderIntentStatus::ApprovedByPolicy,
-            approval_status: ApprovalStatus::NotRequired,
-            approval_reason: Some(reason),
-            approved_at: Some(now),
-            policy_id: Some(policy_id),
-            policy_hash,
-            expires_at: entry_valid_until,
-        }),
+        } => {
+            let expires_at =
+                ensure_future_expiry(entry_valid_until.min(recommendation_valid_until))?;
+            Ok(ResolvedPolicy {
+                status: OrderIntentStatus::ApprovedByPolicy,
+                approval_status: ApprovalStatus::NotRequired,
+                approval_reason: Some(reason),
+                approved_at: Some(now),
+                policy_id: Some(policy_id),
+                policy_hash,
+                expires_at,
+            })
+        }
     }
 }
 
@@ -644,15 +670,20 @@ fn intent_operation_log(action: &str, intent: &OrderIntentInfo, reason: &str) ->
 mod tests {
     use super::{
         evaluate_invalidation, project_entry_order_spec, project_exit_policy_spec,
-        resolve_downscale,
+        resolve_downscale, resolve_policy,
     };
-    use chrono::{Duration, Utc};
+    use crate::execution::mode_gate::IntentPolicyDecision;
+    use chrono::{Duration, TimeZone, Utc};
+    use quant_pivot_error::execution::ExecutionError;
     use quant_pivot_models::{
         domain::ApproveIntentCommand,
         enums::{
             common::{OrderType, Side},
             execution::ApprovalInvalidation,
-            quant::{OutcomeSide, RecommendationReportStatus, ReportKind},
+            quant::{
+                ApprovalStatus, OrderIntentStatus, OutcomeSide, RecommendationReportStatus,
+                ReportKind,
+            },
         },
         runtime_config::EntryOrderPolicy,
         types::{
@@ -662,6 +693,7 @@ mod tests {
     };
     use quant_pivot_test_support::report_fixtures;
     use rust_decimal_macros::dec;
+    use std::time::Duration as StdDuration;
     use uuid::Uuid;
 
     fn rec() -> quant_pivot_models::domain::RecommendationInfo {
@@ -794,6 +826,95 @@ mod tests {
             evaluate_invalidation(&rec, &report, true, &version, &version, &hash, Utc::now())
                 .is_none()
         );
+    }
+
+    #[test]
+    fn semi_auto_expires_at_is_capped_by_recommendation_valid_until() {
+        let now = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+        let rec_valid_until = now + Duration::hours(1);
+        let entry_valid_until = now + Duration::hours(2);
+        let resolved = resolve_policy(
+            IntentPolicyDecision::RequiresApproval {
+                approval_ttl: StdDuration::from_secs(86_400),
+            },
+            now,
+            rec_valid_until,
+            entry_valid_until,
+        )
+        .expect("policy");
+        assert_eq!(resolved.status, OrderIntentStatus::PendingApproval);
+        assert_eq!(resolved.expires_at, rec_valid_until);
+    }
+
+    #[test]
+    fn semi_auto_expires_at_uses_approval_ttl_when_shorter_than_recommendation() {
+        let now = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+        let rec_valid_until = now + Duration::hours(24);
+        let entry_valid_until = now + Duration::hours(24);
+        let resolved = resolve_policy(
+            IntentPolicyDecision::RequiresApproval {
+                approval_ttl: StdDuration::from_secs(900),
+            },
+            now,
+            rec_valid_until,
+            entry_valid_until,
+        )
+        .expect("policy");
+        assert_eq!(resolved.expires_at, now + Duration::seconds(900));
+    }
+
+    #[test]
+    fn semi_auto_expires_at_is_capped_by_entry_valid_until() {
+        let now = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+        let rec_valid_until = now + Duration::hours(24);
+        let entry_valid_until = now + Duration::minutes(30);
+        let resolved = resolve_policy(
+            IntentPolicyDecision::RequiresApproval {
+                approval_ttl: StdDuration::from_secs(86_400),
+            },
+            now,
+            rec_valid_until,
+            entry_valid_until,
+        )
+        .expect("policy");
+        assert_eq!(resolved.expires_at, entry_valid_until);
+    }
+
+    #[test]
+    fn resolve_policy_rejects_when_all_deadlines_elapsed() {
+        let now = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+        assert!(matches!(
+            resolve_policy(
+                IntentPolicyDecision::RequiresApproval {
+                    approval_ttl: StdDuration::from_secs(900),
+                },
+                now,
+                now - Duration::minutes(1),
+                now - Duration::minutes(2),
+            ),
+            Err(ExecutionError::RecommendationExpired { .. })
+        ));
+    }
+
+    #[test]
+    fn auto_policy_expires_at_is_capped_by_recommendation_valid_until() {
+        let now = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+        let rec_valid_until = now + Duration::hours(1);
+        let entry_valid_until = now + Duration::hours(2);
+        let resolved = resolve_policy(
+            IntentPolicyDecision::ApprovedByPolicy {
+                policy_id: "policy-1".to_owned(),
+                policy_hash: None,
+                reason: "ok".to_owned(),
+            },
+            now,
+            rec_valid_until,
+            entry_valid_until,
+        )
+        .expect("policy");
+        assert_eq!(resolved.status, OrderIntentStatus::ApprovedByPolicy);
+        assert_eq!(resolved.approval_status, ApprovalStatus::NotRequired);
+        assert_eq!(resolved.expires_at, rec_valid_until);
     }
 
     #[test]
