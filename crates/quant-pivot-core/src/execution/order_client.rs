@@ -124,15 +124,15 @@ impl VenueOutcome {
 ///
 /// Only errors that prove the order never reached the matching engine map to
 /// [`VenueOutcome::Rejected`] (safe to release capital): client validation
-/// (`4xx`), rate-limit throttling (`429`), and non-retryable CLOB validation.
-/// Everything else (timeout, `5xx`, unparseable, SDK) is
-/// [`VenueOutcome::Ambiguous`] — the order may have executed.
+/// (`4xx` except `429`) and non-retryable CLOB validation. Rate limiting
+/// (`429` / [`ApiError::RateLimited`]) is [`VenueOutcome::Ambiguous`]: the
+/// request may have been accepted before the throttle response. Everything else
+/// (timeout, `5xx`, unparseable, SDK) is also [`VenueOutcome::Ambiguous`].
 impl From<&ApiError> for VenueOutcome {
     fn from(error: &ApiError) -> Self {
         match error {
-            ApiError::Http { status, .. } if *status < 500 => Self::Rejected,
-            ApiError::RateLimited { .. }
-            | ApiError::Clob {
+            ApiError::Http { status, .. } if *status < 500 && *status != 429 => Self::Rejected,
+            ApiError::Clob {
                 retryable: false, ..
             } => Self::Rejected,
             _ => Self::Ambiguous,

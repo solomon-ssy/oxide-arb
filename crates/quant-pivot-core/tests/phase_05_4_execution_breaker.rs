@@ -315,7 +315,18 @@ fn venue_errors_classify_unconfirmed_as_ambiguous() {
             retry_after_ms: 100,
             bucket: "order".to_owned(),
         }),
-        VenueOutcome::Rejected,
+        VenueOutcome::Ambiguous,
+        "429 after place_order may have executed — hold capital",
+    );
+    assert_eq!(
+        VenueOutcome::from(&ApiError::Http {
+            method: "POST",
+            url: "https://clob/order".to_owned(),
+            status: 429,
+            body: "rate limited".to_owned(),
+            retryable: true,
+        }),
+        VenueOutcome::Ambiguous,
     );
     assert_eq!(
         VenueOutcome::from(&ApiError::Clob {
