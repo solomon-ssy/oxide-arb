@@ -78,6 +78,12 @@ fn validate_data_quality(config: &RuntimeConfig, report: &mut ConfigValidationRe
             detail: "must be greater than zero".to_owned(),
         });
     }
+    if config.data_quality.max_stale_book_ratio_bps > 10_000 {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "data_quality.max_stale_book_ratio_bps",
+            detail: "must be <= 10000 (100%)".to_owned(),
+        });
+    }
 }
 
 fn validate_features(config: &RuntimeConfig, report: &mut ConfigValidationReport) {

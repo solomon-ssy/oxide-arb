@@ -1,5 +1,6 @@
 //! Application context — system composition root and lifecycle manager.
 
+pub mod admission_engine;
 pub mod backtest;
 pub mod bootstrap;
 pub mod build;

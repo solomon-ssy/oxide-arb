@@ -1,0 +1,910 @@
+//! Phase 05.3 — execution admission engine + check integration tests.
+//!
+//! The fixture passes all 20 checks; each test mutates exactly one input field
+//! to drive the matching deny/defer outcome. Checks are pure, so the engine is
+//! exercised entirely in-memory with no DB / venue.
+
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use chrono::{DateTime, Duration, TimeZone, Utc};
+use quant_pivot_core::{
+    execution::{
+        AdmissionDecision, AdmissionInput, AdmissionInputBuilder, AdmissionInputBuilderDeps,
+        AdmissionSeams, DefaultAdmissionEngine, ExecutionAdmissionEngine, StateVersion,
+        VenueHealth,
+    },
+    governance::{KillSwitchHandle, RuntimeModeHandle},
+    observability::metrics_hub::MetricsHub,
+    pipeline::{book_store::BookStore, market_registry::MarketRegistry},
+    runtime_config::RuntimeConfigStore,
+    service::account::{AccountProviderFactory, ReservedCapitalReader},
+};
+use quant_pivot_error::{QuantError, account::AccountError, storage::StorageError};
+use quant_pivot_models::{
+    domain::{
+        AppendReconciliationEvidence, BookLevel, BookSnapshot, CapitalAllocationInfo,
+        DataQualityPort, DataQualitySnapshot, ModelSpecInfo, ModelVersionInfo, NewModelSpec,
+        NewModelVersion, NewOperationLog, NewReconciliation, NewReportTransaction,
+        NewRuntimeConfigActivation, NewRuntimeConfigVersion, OrderIntentInfo, Paginated,
+        QuantReportListQuery, RecommendationInfo, RecommendationReportInfo, ReconciliationInfo,
+        ReconciliationPatch, RuntimeConfigActivationInfo, RuntimeConfigVersionInfo,
+    },
+    enums::{
+        common::{OrderType, Side},
+        execution::{
+            AdmissionCheckId, AdmissionOutcome, CapitalAllocationState, KillSwitchState,
+            OrderIntentKind,
+        },
+        quant::{
+            AccountSource, ApprovalStatus, EntryTriggerKind, OrderIntentStatus, OutcomeSide,
+            QuantRuntimeMode, RecommendationReportStatus, ReportKind,
+        },
+        runtime_config::RuntimeConfigVersionSource,
+    },
+    runtime_config::RuntimeConfig,
+    types::{
+        Bps, CapitalAllocationId, ContentHash, EntryOrderSpec, ExecutionOrderId, ExitPolicySpec,
+        ModelSpecId, ModelVersionId, OrderIntentId, Price, RecommendationId,
+        RecommendationReportId, ReconciliationId, RuntimeConfigVersionId, SchemaVersion, Shares,
+        Usd,
+    },
+};
+use quant_pivot_repository::traits::{
+    CapitalAllocationRepository, ModelRegistryRepository, RecommendationReportRepository,
+    RecommendationRepository, ReconciliationRepository, RuntimeConfigVersionRepository,
+};
+use quant_pivot_research::portfolio::AccountSnapshot;
+use quant_pivot_test_support::report_fixtures;
+use rust_decimal_macros::dec;
+
+const NOW_SECS: i64 = 1_700_001_000;
+const NOW_MS: u64 = 1_700_001_000_000;
+
+fn now() -> DateTime<Utc> {
+    Utc.timestamp_opt(NOW_SECS, 0).unwrap()
+}
+
+fn other_hash() -> ContentHash {
+    ContentHash::parse(format!("blake3:{}", "1".repeat(64))).expect("hash")
+}
+
+fn recommendation() -> RecommendationInfo {
+    report_fixtures::recommendation(
+        RecommendationReportId::from_v7(),
+        RecommendationId::from_v7(),
+        1,
+        "0xmkt",
+        OutcomeSide::Yes,
+        Usd::new(dec!(250)),
+    )
+}
+
+fn report(rec: &RecommendationInfo) -> RecommendationReportInfo {
+    report_fixtures::report(
+        rec.recommendation_report_id.clone(),
+        ReportKind::TopN,
+        RecommendationReportStatus::Published,
+    )
+}
+
+fn intent(rec: &RecommendationInfo) -> OrderIntentInfo {
+    OrderIntentInfo {
+        order_intent_id: OrderIntentId::from_v7(),
+        recommendation_id: rec.recommendation_id.clone(),
+        runtime_mode: QuantRuntimeMode::SemiAuto,
+        runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
+        model_version_id: ModelVersionId::from_v7(),
+        intent_kind: OrderIntentKind::Buy,
+        status: OrderIntentStatus::Approved,
+        approval_status: ApprovalStatus::Approved,
+        approved_by: None,
+        approval_reason: None,
+        approved_at: Some(now()),
+        policy_id: None,
+        policy_hash: None,
+        status_reason: None,
+        admission_trace_ref: None,
+        entry_order_json: EntryOrderSpec {
+            token_id: rec.token_id.clone(),
+            side: Side::Buy,
+            order_type: OrderType::Gtc,
+            limit_price: Price::new(dec!(0.43)),
+            shares: Shares::new(dec!(500)),
+            max_slippage_bps: Bps::new(dec!(50)),
+            valid_until: rec.entry_plan.valid_until,
+        },
+        exit_policy_json: ExitPolicySpec {
+            take_profit_price: rec.exit_plan.take_profit_price,
+            stop_loss_price: rec.exit_plan.stop_loss_price,
+            time_exit_at: None,
+            partial_exit_nodes: Vec::new(),
+            settlement_policy: rec.exit_plan.settlement_policy,
+        },
+        risk_envelope_hash: rec.risk_envelope.canonical_hash().expect("hash"),
+        expires_at: Utc.timestamp_opt(1_700_003_600, 0).unwrap(),
+        created_at: now(),
+        updated_at: now(),
+    }
+}
+
+fn allocation(intent: &OrderIntentInfo, rec: &RecommendationInfo) -> CapitalAllocationInfo {
+    CapitalAllocationInfo {
+        capital_allocation_id: CapitalAllocationId::from_v7(),
+        order_intent_id: intent.order_intent_id.clone(),
+        recommendation_id: rec.recommendation_id.clone(),
+        state: CapitalAllocationState::Allocated,
+        planned_usd: Usd::new(dec!(250)),
+        allocated_usd: Usd::new(dec!(250)),
+        locked_usd: Usd::ZERO,
+        spent_usd: Usd::ZERO,
+        released_usd: Usd::ZERO,
+        reason: "test".to_owned(),
+        created_at: now(),
+        updated_at: now(),
+    }
+}
+
+fn book(asks: Vec<BookLevel>, timestamp_ms: u64) -> Arc<BookSnapshot> {
+    Arc::new(BookSnapshot::new(
+        Arc::from(Vec::<BookLevel>::new()),
+        Arc::from(asks),
+        timestamp_ms,
+        1,
+    ))
+}
+
+fn level(price: &str, shares: &str) -> BookLevel {
+    BookLevel::from_decimal(
+        Price::new(price.parse().expect("price")),
+        Shares::new(shares.parse().expect("shares")),
+    )
+    .expect("level")
+}
+
+fn green_data_quality() -> DataQualitySnapshot {
+    DataQualitySnapshot {
+        as_of: now(),
+        total_tokens: 10,
+        fresh: 10,
+        acceptable: 0,
+        degraded: 0,
+        stale: 0,
+        insufficient: 0,
+        max_book_age_ms: 5_000,
+        max_fact_lag_ms: 30_000,
+        worst_fact_lag_ms: 0,
+        fact_lag_exceeded: false,
+    }
+}
+
+fn passing() -> AdmissionInput {
+    let rec = recommendation();
+    let report = report(&rec);
+    let intent = intent(&rec);
+    let allocation = allocation(&intent, &rec);
+    let account = AccountSnapshot::new(
+        now(),
+        AccountSource::Polymarket,
+        Usd::new(dec!(10000)),
+        Usd::new(dec!(10000)),
+        Usd::new(dec!(250)),
+        Vec::new(),
+    );
+    AdmissionInput {
+        intent,
+        recommendation: rec,
+        report,
+        mode: QuantRuntimeMode::SemiAuto,
+        kill_switch: KillSwitchState::Closed,
+        account,
+        allocation: Some(allocation),
+        book: Some(book(vec![level("0.42", "600")], NOW_MS - 500)),
+        budget_total_usd: Usd::new(dec!(10000)),
+        model_published: true,
+        data_quality: green_data_quality(),
+        max_stale_book_ratio_bps: 2_000,
+        has_unresolvable_recon: false,
+        manual_block: false,
+        seams: AdmissionSeams {
+            venue_health: VenueHealth::Healthy,
+            credentials_ready: true,
+            exit_monitor_ready: true,
+        },
+        now: now(),
+        now_ms: NOW_MS,
+        state_version: StateVersion {
+            config_version_id: RuntimeConfigVersionId::from_v7(),
+            account_as_of: now(),
+            book_version: Some(1),
+            book_as_of_ms: Some(NOW_MS - 500),
+            kill_switch_state: KillSwitchState::Closed,
+        },
+    }
+}
+
+fn engine() -> DefaultAdmissionEngine {
+    DefaultAdmissionEngine::new(Arc::new(MetricsHub::new()))
+}
+
+async fn full(input: AdmissionInput) -> AdmissionDecision {
+    engine().evaluate_full(input).await.expect("evaluate")
+}
+
+fn denied_checks(decision: &AdmissionDecision) -> Vec<AdmissionCheckId> {
+    decision
+        .trace
+        .iter()
+        .filter(|trace| trace.outcome == AdmissionOutcome::Deny)
+        .map(|trace| trace.check)
+        .collect()
+}
+
+const CANONICAL_ORDER: [AdmissionCheckId; 20] = [
+    AdmissionCheckId::IntentState,
+    AdmissionCheckId::RecommendationFreshness,
+    AdmissionCheckId::ReportStatus,
+    AdmissionCheckId::RuntimeMode,
+    AdmissionCheckId::ModelPublication,
+    AdmissionCheckId::DataQuality,
+    AdmissionCheckId::BookFreshness,
+    AdmissionCheckId::EntryTrigger,
+    AdmissionCheckId::RiskEnvelopeHash,
+    AdmissionCheckId::CapitalBudget,
+    AdmissionCheckId::MarketExposure,
+    AdmissionCheckId::EventExposure,
+    AdmissionCheckId::CategoryExposure,
+    AdmissionCheckId::LiquidityDepth,
+    AdmissionCheckId::Slippage,
+    AdmissionCheckId::ManualBlock,
+    AdmissionCheckId::KillSwitch,
+    AdmissionCheckId::VenueGuard,
+    AdmissionCheckId::CredentialReadiness,
+    AdmissionCheckId::ExitMonitorReadiness,
+];
+
+#[tokio::test]
+async fn admission_allows_when_all_checks_pass() {
+    let decision = engine().evaluate(passing()).await.expect("evaluate");
+    assert_eq!(
+        decision.outcome,
+        AdmissionOutcome::Allow,
+        "trace: {:?}",
+        decision.trace
+    );
+    assert!(decision.denial_reason.is_none());
+    assert_eq!(decision.trace.len(), 20);
+}
+
+#[tokio::test]
+async fn admission_runs_twenty_checks_in_fixed_order() {
+    let decision = full(passing()).await;
+    let order: Vec<AdmissionCheckId> = decision.trace.iter().map(|trace| trace.check).collect();
+    assert_eq!(order, CANONICAL_ORDER.to_vec());
+}
+
+#[tokio::test]
+async fn admission_decision_is_deterministic_for_same_input() {
+    let engine = engine();
+    let first = engine.evaluate(passing()).await.expect("first");
+    let second = engine.evaluate(passing()).await.expect("second");
+    assert_eq!(first.outcome, second.outcome);
+    let project = |decision: &AdmissionDecision| -> Vec<(AdmissionCheckId, AdmissionOutcome)> {
+        decision
+            .trace
+            .iter()
+            .map(|trace| (trace.check, trace.outcome))
+            .collect()
+    };
+    assert_eq!(project(&first), project(&second));
+    assert_eq!(first.denial_reason, second.denial_reason);
+}
+
+#[tokio::test]
+async fn admission_denies_on_risk_envelope_hash_mismatch() {
+    let mut input = passing();
+    input.intent.risk_envelope_hash = other_hash();
+    let decision = full(input).await;
+    assert_eq!(decision.outcome, AdmissionOutcome::Deny);
+    assert!(denied_checks(&decision).contains(&AdmissionCheckId::RiskEnvelopeHash));
+}
+
+#[tokio::test]
+async fn admission_denies_when_recommendation_expired() {
+    let mut input = passing();
+    input.recommendation.valid_until = input.now - Duration::seconds(1);
+    let decision = full(input).await;
+    assert_eq!(decision.outcome, AdmissionOutcome::Deny);
+    assert!(denied_checks(&decision).contains(&AdmissionCheckId::RecommendationFreshness));
+}
+
+#[tokio::test]
+async fn admission_denies_when_kill_switch_blocks_entry() {
+    let mut input = passing();
+    input.kill_switch = KillSwitchState::ExecutionHalted;
+    let decision = full(input).await;
+    assert_eq!(decision.outcome, AdmissionOutcome::Deny);
+    assert!(denied_checks(&decision).contains(&AdmissionCheckId::KillSwitch));
+}
+
+#[tokio::test]
+async fn admission_denies_when_unresolvable_recon_for_auto() {
+    let mut input = passing();
+    input.mode = QuantRuntimeMode::AutoExecution;
+    input.intent.status = OrderIntentStatus::ApprovedByPolicy;
+    input.has_unresolvable_recon = true;
+    let decision = full(input).await;
+    assert_eq!(decision.outcome, AdmissionOutcome::Deny);
+    assert!(denied_checks(&decision).contains(&AdmissionCheckId::KillSwitch));
+}
+
+#[tokio::test]
+async fn admission_defers_when_book_stale() {
+    let mut input = passing();
+    input.book = Some(book(vec![level("0.42", "600")], NOW_MS - 10_000));
+    let decision = full(input).await;
+    assert_eq!(decision.outcome, AdmissionOutcome::Defer);
+    assert!(decision.denial_reason.is_none());
+}
+
+#[tokio::test]
+async fn admission_denies_when_book_missing() {
+    let mut input = passing();
+    input.book = None;
+    let decision = full(input).await;
+    assert_eq!(decision.outcome, AdmissionOutcome::Deny);
+    assert!(denied_checks(&decision).contains(&AdmissionCheckId::BookFreshness));
+}
+
+#[tokio::test]
+async fn admission_defers_when_limit_trigger_unmet() {
+    let mut input = passing();
+    // Best ask above the trigger price → not yet triggered.
+    input.book = Some(book(vec![level("0.50", "600")], NOW_MS - 500));
+    let decision = full(input).await;
+    assert_eq!(decision.outcome, AdmissionOutcome::Defer);
+}
+
+#[tokio::test]
+async fn admission_denies_on_market_exposure_breach() {
+    let mut input = passing();
+    let market = input.recommendation.market_id.clone();
+    input
+        .account
+        .exposures
+        .per_market
+        .insert(market, Usd::new(dec!(400)));
+    let decision = full(input).await;
+    assert_eq!(decision.outcome, AdmissionOutcome::Deny);
+    assert!(denied_checks(&decision).contains(&AdmissionCheckId::MarketExposure));
+}
+
+#[tokio::test]
+async fn admission_denies_on_event_exposure_breach() {
+    let mut input = passing();
+    let event = input.recommendation.event_id.clone();
+    input
+        .account
+        .exposures
+        .per_event
+        .insert(event, Usd::new(dec!(600)));
+    let decision = full(input).await;
+    assert_eq!(decision.outcome, AdmissionOutcome::Deny);
+    assert!(denied_checks(&decision).contains(&AdmissionCheckId::EventExposure));
+}
+
+#[tokio::test]
+async fn admission_denies_on_category_exposure_breach() {
+    let mut input = passing();
+    let category = input.recommendation.identity.category;
+    input
+        .account
+        .exposures
+        .per_category
+        .insert(category, Usd::new(dec!(1400)));
+    let decision = full(input).await;
+    assert_eq!(decision.outcome, AdmissionOutcome::Deny);
+    assert!(denied_checks(&decision).contains(&AdmissionCheckId::CategoryExposure));
+}
+
+#[tokio::test]
+async fn admission_denies_on_slippage_breach() {
+    let mut input = passing();
+    // Raise the limit so the deep level is fillable, then walk a costly book.
+    input.intent.entry_order_json.limit_price = Price::new(dec!(0.99));
+    input.book = Some(book(
+        vec![level("0.42", "100"), level("0.60", "500")],
+        NOW_MS - 500,
+    ));
+    let decision = full(input).await;
+    assert_eq!(decision.outcome, AdmissionOutcome::Deny);
+    assert!(denied_checks(&decision).contains(&AdmissionCheckId::Slippage));
+}
+
+#[tokio::test]
+async fn admission_defers_when_liquidity_insufficient() {
+    let mut input = passing();
+    // Only 100 shares fillable at/below the 0.43 limit — order needs 500.
+    input.book = Some(book(vec![level("0.42", "100")], NOW_MS - 500));
+    let decision = full(input).await;
+    assert_eq!(decision.outcome, AdmissionOutcome::Defer);
+}
+
+#[tokio::test]
+async fn admission_denies_on_manual_block() {
+    let mut input = passing();
+    input.manual_block = true;
+    let decision = full(input).await;
+    assert_eq!(decision.outcome, AdmissionOutcome::Deny);
+    assert!(denied_checks(&decision).contains(&AdmissionCheckId::ManualBlock));
+}
+
+#[tokio::test]
+async fn admission_denies_when_model_retired() {
+    let mut input = passing();
+    input.model_published = false;
+    let decision = full(input).await;
+    assert_eq!(decision.outcome, AdmissionOutcome::Deny);
+    assert!(denied_checks(&decision).contains(&AdmissionCheckId::ModelPublication));
+}
+
+#[tokio::test]
+async fn admission_denies_when_report_not_published() {
+    let mut input = passing();
+    input.report.status = RecommendationReportStatus::Revoked;
+    let decision = full(input).await;
+    assert_eq!(decision.outcome, AdmissionOutcome::Deny);
+    assert!(denied_checks(&decision).contains(&AdmissionCheckId::ReportStatus));
+}
+
+#[tokio::test]
+async fn admission_denies_in_report_only_mode() {
+    let mut input = passing();
+    input.mode = QuantRuntimeMode::ReportOnly;
+    let decision = full(input).await;
+    assert_eq!(decision.outcome, AdmissionOutcome::Deny);
+    assert!(denied_checks(&decision).contains(&AdmissionCheckId::RuntimeMode));
+}
+
+#[tokio::test]
+async fn admission_denies_when_credentials_not_ready() {
+    let mut input = passing();
+    input.seams.credentials_ready = false;
+    let decision = full(input).await;
+    assert_eq!(decision.outcome, AdmissionOutcome::Deny);
+    assert!(denied_checks(&decision).contains(&AdmissionCheckId::CredentialReadiness));
+}
+
+#[tokio::test]
+async fn admission_denies_when_exit_monitor_not_ready() {
+    let mut input = passing();
+    input.seams.exit_monitor_ready = false;
+    let decision = full(input).await;
+    assert_eq!(decision.outcome, AdmissionOutcome::Deny);
+    assert!(denied_checks(&decision).contains(&AdmissionCheckId::ExitMonitorReadiness));
+}
+
+#[tokio::test]
+async fn admission_denies_when_data_quality_degraded() {
+    let mut input = passing();
+    input.data_quality.stale = 9;
+    input.data_quality.fresh = 1;
+    let decision = full(input).await;
+    assert_eq!(decision.outcome, AdmissionOutcome::Deny);
+    assert!(denied_checks(&decision).contains(&AdmissionCheckId::DataQuality));
+}
+
+#[tokio::test]
+async fn admission_respects_configured_stale_book_ratio_cap() {
+    let mut input = passing();
+    input.data_quality.stale = 1;
+    input.data_quality.fresh = 9;
+    input.max_stale_book_ratio_bps = 2_000;
+    let allowed = full(input.clone()).await;
+    assert_eq!(allowed.outcome, AdmissionOutcome::Allow);
+
+    input.max_stale_book_ratio_bps = 500;
+    let denied = full(input).await;
+    assert_eq!(denied.outcome, AdmissionOutcome::Deny);
+    assert!(denied_checks(&denied).contains(&AdmissionCheckId::DataQuality));
+}
+
+#[tokio::test]
+async fn admission_denies_on_unsupported_entry_trigger_kind() {
+    let mut input = passing();
+    input.recommendation.entry_plan.trigger_kind = EntryTriggerKind::Breakout;
+    let decision = full(input).await;
+    assert_eq!(decision.outcome, AdmissionOutcome::Deny);
+    assert!(denied_checks(&decision).contains(&AdmissionCheckId::EntryTrigger));
+}
+
+#[tokio::test]
+async fn admission_short_circuit_matches_full_evaluation_outcome() {
+    let mut input = passing();
+    input.intent.risk_envelope_hash = other_hash();
+    let engine = engine();
+    let short = engine.evaluate(input.clone()).await.expect("short");
+    let full = engine.evaluate_full(input).await.expect("full");
+    assert_eq!(short.outcome, full.outcome);
+    assert_eq!(short.denial_reason, full.denial_reason);
+    assert!(short.trace.len() <= full.trace.len());
+    // Short-circuit stops at the first hard deny (#9).
+    assert_eq!(short.trace.len(), 9);
+}
+
+#[tokio::test]
+async fn quant_admission_denied_total_increments_by_check_id() {
+    let metrics = Arc::new(MetricsHub::new());
+    let engine = DefaultAdmissionEngine::new(Arc::clone(&metrics));
+    let mut input = passing();
+    input.intent.risk_envelope_hash = other_hash();
+    let _ = engine.evaluate(input).await.expect("evaluate");
+    assert_eq!(
+        metrics
+            .admission_denied
+            .with_label_values(&["risk_envelope_hash"])
+            .get(),
+        1
+    );
+    assert_eq!(
+        metrics
+            .admission_denied
+            .with_label_values(&["intent_state"])
+            .get(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn admission_fail_closed_when_account_unavailable() {
+    let rec = recommendation();
+    let report = report(&rec);
+    let intent = intent(&rec);
+    // The account factory has no signing client, so the snapshot read fails
+    // closed; the builder must surface that as an error, not a partial input.
+    let deps = AdmissionInputBuilderDeps {
+        recommendations: Arc::new(StubRecommendations(rec.clone())),
+        reports: Arc::new(StubReports(report)),
+        model_registry: Arc::new(StubModelRegistry),
+        reconciliation: Arc::new(StubReconciliation),
+        capital: Arc::new(StubCapital),
+        config_versions: Arc::new(StubConfigVersions),
+        account_factory: Arc::new(AccountProviderFactory::new(
+            None,
+            Arc::new(MarketRegistry::new()),
+            Arc::new(StubReserved),
+            Some("0xfunder".to_owned()),
+        )),
+        book_store: Arc::new(BookStore::new(Arc::new(MetricsHub::new()))),
+        data_quality: Arc::new(StubDataQuality),
+        config: Arc::new(RuntimeConfigStore::new(RuntimeConfig::default())),
+        runtime_mode: RuntimeModeHandle::new(QuantRuntimeMode::SemiAuto),
+        kill_switch: KillSwitchHandle::new(KillSwitchState::Closed),
+    };
+    let builder = AdmissionInputBuilder::new(deps);
+    let result = builder.build(&intent, now()).await;
+    assert!(
+        matches!(
+            result,
+            Err(QuantError::Account(AccountError::CredentialsMissing))
+        ),
+        "expected fail-closed credentials error"
+    );
+}
+
+// ── Stub repositories for the builder fail-closed test ───────────────────────
+// Only the methods the build path reaches before the account read return canned
+// values; everything else is unreachable in this test.
+
+struct StubRecommendations(RecommendationInfo);
+
+#[async_trait]
+impl RecommendationRepository for StubRecommendations {
+    async fn find_by_report(
+        &self,
+        _report_id: &RecommendationReportId,
+    ) -> Result<Vec<RecommendationInfo>, StorageError> {
+        unimplemented!()
+    }
+
+    async fn find_by_id(
+        &self,
+        _recommendation_id: &RecommendationId,
+    ) -> Result<Option<RecommendationInfo>, StorageError> {
+        Ok(Some(self.0.clone()))
+    }
+}
+
+struct StubReports(RecommendationReportInfo);
+
+#[async_trait]
+impl RecommendationReportRepository for StubReports {
+    async fn create_report(
+        &self,
+        _transaction: NewReportTransaction,
+    ) -> Result<RecommendationReportInfo, StorageError> {
+        unimplemented!()
+    }
+
+    async fn find_by_id(
+        &self,
+        _report_id: &RecommendationReportId,
+    ) -> Result<Option<RecommendationReportInfo>, StorageError> {
+        Ok(Some(self.0.clone()))
+    }
+
+    async fn page(
+        &self,
+        _query: QuantReportListQuery,
+    ) -> Result<Paginated<RecommendationReportInfo>, StorageError> {
+        unimplemented!()
+    }
+
+    async fn latest_published(
+        &self,
+        _kind: ReportKind,
+    ) -> Result<Option<RecommendationReportInfo>, StorageError> {
+        unimplemented!()
+    }
+
+    async fn find_by_trigger_key(
+        &self,
+        _trigger_key: &str,
+    ) -> Result<Option<RecommendationReportInfo>, StorageError> {
+        unimplemented!()
+    }
+
+    async fn find_expirable(
+        &self,
+        _published_before: DateTime<Utc>,
+        _limit: u64,
+    ) -> Result<Vec<RecommendationReportId>, StorageError> {
+        unimplemented!()
+    }
+
+    async fn revoke(
+        &self,
+        _report_id: &RecommendationReportId,
+        _reason: &str,
+        _revoked_at: DateTime<Utc>,
+        _operation_log: NewOperationLog,
+    ) -> Result<RecommendationReportInfo, StorageError> {
+        unimplemented!()
+    }
+
+    async fn expire(
+        &self,
+        _report_id: &RecommendationReportId,
+        _reason: &str,
+        _expired_at: DateTime<Utc>,
+        _operation_log: NewOperationLog,
+    ) -> Result<RecommendationReportInfo, StorageError> {
+        unimplemented!()
+    }
+}
+
+struct StubModelRegistry;
+
+#[async_trait]
+impl ModelRegistryRepository for StubModelRegistry {
+    async fn create_model_spec(&self, _spec: NewModelSpec) -> Result<ModelSpecInfo, StorageError> {
+        unimplemented!()
+    }
+
+    async fn create_model_version(
+        &self,
+        _version: NewModelVersion,
+    ) -> Result<ModelVersionInfo, StorageError> {
+        unimplemented!()
+    }
+
+    async fn next_version_for_spec(
+        &self,
+        _model_spec_id: &ModelSpecId,
+    ) -> Result<i32, StorageError> {
+        unimplemented!()
+    }
+
+    async fn find_model_version_by_id(
+        &self,
+        _model_version_id: &ModelVersionId,
+    ) -> Result<Option<ModelVersionInfo>, StorageError> {
+        Ok(None)
+    }
+
+    async fn list_published_for_spec(
+        &self,
+        _model_spec_id: &ModelSpecId,
+    ) -> Result<Vec<ModelVersionInfo>, StorageError> {
+        unimplemented!()
+    }
+
+    async fn publish_model_version(
+        &self,
+        _model_version_id: &ModelVersionId,
+    ) -> Result<ModelVersionInfo, StorageError> {
+        unimplemented!()
+    }
+
+    async fn retire_model_version(
+        &self,
+        _model_version_id: &ModelVersionId,
+    ) -> Result<ModelVersionInfo, StorageError> {
+        unimplemented!()
+    }
+
+    async fn promote_model_to_shadow(
+        &self,
+        _model_version_id: &ModelVersionId,
+    ) -> Result<ModelVersionInfo, StorageError> {
+        unimplemented!()
+    }
+
+    async fn restore_model_version(
+        &self,
+        _model_version_id: &ModelVersionId,
+    ) -> Result<ModelVersionInfo, StorageError> {
+        unimplemented!()
+    }
+
+    async fn set_quality_gate_report(
+        &self,
+        _model_version_id: &ModelVersionId,
+        _quality_gate_report: serde_json::Value,
+    ) -> Result<ModelVersionInfo, StorageError> {
+        unimplemented!()
+    }
+}
+
+struct StubReconciliation;
+
+#[async_trait]
+impl ReconciliationRepository for StubReconciliation {
+    async fn create(
+        &self,
+        _reconciliation: NewReconciliation,
+    ) -> Result<ReconciliationInfo, StorageError> {
+        unimplemented!()
+    }
+
+    async fn append_evidence(
+        &self,
+        _reconciliation_id: &ReconciliationId,
+        _evidence: AppendReconciliationEvidence,
+    ) -> Result<ReconciliationInfo, StorageError> {
+        unimplemented!()
+    }
+
+    async fn resolve(
+        &self,
+        _reconciliation_id: &ReconciliationId,
+        _patch: ReconciliationPatch,
+    ) -> Result<ReconciliationInfo, StorageError> {
+        unimplemented!()
+    }
+
+    async fn find_by_execution_order(
+        &self,
+        _execution_order_id: &ExecutionOrderId,
+    ) -> Result<Option<ReconciliationInfo>, StorageError> {
+        unimplemented!()
+    }
+
+    async fn find_unresolved(&self) -> Result<Vec<ReconciliationInfo>, StorageError> {
+        unimplemented!()
+    }
+
+    async fn has_unresolvable(&self) -> Result<bool, StorageError> {
+        Ok(false)
+    }
+}
+
+struct StubCapital;
+
+#[async_trait]
+impl CapitalAllocationRepository for StubCapital {
+    async fn find_by_intent(
+        &self,
+        _order_intent_id: &OrderIntentId,
+    ) -> Result<Option<CapitalAllocationInfo>, StorageError> {
+        Ok(None)
+    }
+
+    async fn sum_reserved_usd(&self) -> Result<Usd, StorageError> {
+        unimplemented!()
+    }
+
+    async fn has_impaired(&self) -> Result<bool, StorageError> {
+        unimplemented!()
+    }
+}
+
+struct StubConfigVersions;
+
+#[async_trait]
+impl RuntimeConfigVersionRepository for StubConfigVersions {
+    async fn create_version(
+        &self,
+        _version: NewRuntimeConfigVersion,
+    ) -> Result<RuntimeConfigVersionInfo, StorageError> {
+        unimplemented!()
+    }
+
+    async fn activate_version(
+        &self,
+        _activation: NewRuntimeConfigActivation,
+    ) -> Result<RuntimeConfigActivationInfo, StorageError> {
+        unimplemented!()
+    }
+
+    async fn load_current_activation(
+        &self,
+    ) -> Result<Option<RuntimeConfigActivationInfo>, StorageError> {
+        unimplemented!()
+    }
+
+    async fn load_version(
+        &self,
+        _version_id: &RuntimeConfigVersionId,
+    ) -> Result<Option<RuntimeConfigVersionInfo>, StorageError> {
+        unimplemented!()
+    }
+
+    async fn load_by_hash(
+        &self,
+        _config_hash: &ContentHash,
+    ) -> Result<Option<RuntimeConfigVersionInfo>, StorageError> {
+        unimplemented!()
+    }
+
+    async fn load_current(&self) -> Result<Option<RuntimeConfigVersionInfo>, StorageError> {
+        Ok(Some(RuntimeConfigVersionInfo {
+            runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
+            config_hash: ContentHash::parse(format!("blake3:{}", "c".repeat(64))).expect("hash"),
+            schema_version: SchemaVersion::FIRST,
+            config_json: serde_json::json!({}),
+            source: RuntimeConfigVersionSource::Operator,
+            created_by: "stub".to_owned(),
+            reason: "stub".to_owned(),
+            created_at: now(),
+        }))
+    }
+
+    async fn load_active_at(
+        &self,
+        _at: DateTime<Utc>,
+    ) -> Result<Option<RuntimeConfigVersionInfo>, StorageError> {
+        unimplemented!()
+    }
+
+    async fn list_versions(
+        &self,
+        _limit: u64,
+    ) -> Result<Vec<RuntimeConfigVersionInfo>, StorageError> {
+        unimplemented!()
+    }
+
+    async fn list_activations(
+        &self,
+        _limit: u64,
+    ) -> Result<Vec<RuntimeConfigActivationInfo>, StorageError> {
+        unimplemented!()
+    }
+}
+
+struct StubDataQuality;
+
+impl DataQualityPort for StubDataQuality {
+    fn snapshot(&self) -> DataQualitySnapshot {
+        unimplemented!()
+    }
+}
+
+struct StubReserved;
+
+#[async_trait]
+impl ReservedCapitalReader for StubReserved {
+    async fn sum_locked(&self) -> quant_pivot_error::QuantResult<Usd> {
+        unimplemented!()
+    }
+}

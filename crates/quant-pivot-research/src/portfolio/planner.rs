@@ -25,19 +25,18 @@ use quant_pivot_models::{
         common::MarketCategory,
         quant::{BindingConstraint, RejectionReason, SizingModelKind},
     },
+    hashing::CanonicalDigest,
     types::{
         Bps, ContentHash, EventId, MarketId, MarketSelectionId, ModelRunId,
         PortfolioConstraintsSnapshot, PortfolioPlanId, PortfolioRejectedSummary,
-        PortfolioRiskBudget, Probability, RejectionReasonCount, RiskEnvelope, Shares,
-        SignalCandidateId, SizingPlan, Usd,
+        PortfolioRiskBudget, Probability, RejectionReasonCount, RiskEnvelope,
+        RiskEnvelopeHashInput, Shares, SignalCandidateId, SizingPlan, Usd,
     },
 };
 use rust_decimal::Decimal;
-use serde::Serialize;
 
 use crate::{
     backtest::PortfolioCaps,
-    hashing::ResearchHasher,
     model::signal::SignalCandidate,
     portfolio::{
         account::AccountSnapshot,
@@ -428,22 +427,12 @@ fn build_sizing_plan(
     }
 }
 
-/// Canonical numeric subset hashed into [`RiskEnvelope::envelope_hash`].
-///
-/// The composer-set flags (`requires_approval` / `auto_execution_allowed`) and
-/// free-form notes are intentionally excluded so flipping them never changes the
-/// admission anchor.
-#[derive(Serialize)]
-struct EnvelopeHashInput {
-    loss_usd: Usd,
-    slippage_bps: Bps,
-    position_usd: Usd,
-    market_exposure_usd: Usd,
-    event_exposure_usd: Usd,
-    category_exposure_usd: Usd,
-}
-
 /// Build the risk envelope skeleton; the composer finalizes the flags.
+///
+/// The canonical anchor hash is minted via
+/// [`canonical_risk_envelope_hash`](quant_pivot_models::types::canonical_risk_envelope_hash)
+/// — the single source of truth that execution admission recomputes to verify
+/// the report-layer ↔ execution-layer anchor.
 fn build_risk_envelope(
     item: &Scored<'_>,
     input: &PortfolioPlanInput<'_>,
@@ -456,7 +445,7 @@ fn build_risk_envelope(
     let max_event_exposure_usd = Usd::new(input.caps.max_event_exposure_usd);
     let max_category_exposure_usd = Usd::new(input.caps.max_category_exposure_usd);
 
-    let envelope_hash: ContentHash = ResearchHasher::canonical(&EnvelopeHashInput {
+    let envelope_hash: ContentHash = CanonicalDigest::content_hash_json(&RiskEnvelopeHashInput {
         loss_usd: max_loss_usd,
         slippage_bps: input.entry_max_slippage_bps,
         position_usd: max_position_usd,

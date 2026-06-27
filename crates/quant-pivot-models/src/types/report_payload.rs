@@ -15,6 +15,7 @@
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
+use quant_pivot_error::hashing::CanonicalDigestError;
 use rust_decimal::Decimal;
 use sea_orm::FromJsonQueryResult;
 use serde::{Deserialize, Serialize};
@@ -28,6 +29,7 @@ use crate::{
             IneligibilityReason, QuantRuntimeMode, SettlementPolicy, SizingModelKind,
         },
     },
+    hashing::CanonicalDigest,
     jsonb_active,
     types::{
         BookSnapshotRef, Bps, ContentHash, EventId, FactorDefinitionId, FeatureVectorId,
@@ -195,6 +197,38 @@ pub struct RiskEnvelope {
     pub risk_notes: Vec<String>,
     /// Canonical hash of the envelope (admission verification).
     pub envelope_hash: ContentHash,
+}
+
+/// Canonical numeric subset hashed into [`RiskEnvelope::envelope_hash`].
+///
+/// The composer-set flags (`requires_approval` / `auto_execution_allowed`) and
+/// free-form notes are intentionally excluded so flipping them never changes the
+/// admission anchor. Field order and names are part of the hash contract.
+#[derive(Serialize)]
+pub struct RiskEnvelopeHashInput {
+    pub loss_usd: Usd,
+    pub slippage_bps: Bps,
+    pub position_usd: Usd,
+    pub market_exposure_usd: Usd,
+    pub event_exposure_usd: Usd,
+    pub category_exposure_usd: Usd,
+}
+
+impl RiskEnvelope {
+    /// Recompute the canonical anchor hash from this envelope's numeric bounds.
+    ///
+    /// Equal to [`Self::envelope_hash`] for an untampered envelope; admission
+    /// compares the recomputation against the hash frozen on the order intent.
+    pub fn canonical_hash(&self) -> Result<ContentHash, CanonicalDigestError> {
+        CanonicalDigest::content_hash_json(&RiskEnvelopeHashInput {
+            loss_usd: self.max_loss_usd,
+            slippage_bps: self.max_slippage_bps,
+            position_usd: self.max_position_usd,
+            market_exposure_usd: self.max_market_exposure_usd,
+            event_exposure_usd: self.max_event_exposure_usd,
+            category_exposure_usd: self.max_category_exposure_usd,
+        })
+    }
 }
 
 // ── Factor breakdown (parent §12) ────────────────────────────────────────────

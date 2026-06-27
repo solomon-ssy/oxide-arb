@@ -187,7 +187,8 @@ impl From<ControlError> for WebError {
 impl From<ExecutionError> for WebError {
     fn from(error: ExecutionError) -> Self {
         match error {
-            ExecutionError::CapitalRecoveryFailed { .. } => {
+            ExecutionError::CapitalRecoveryFailed { .. }
+            | ExecutionError::AdmissionDeferred { .. } => {
                 Self::ServiceUnavailable(error.to_string())
             }
             ExecutionError::ReportOnlyMode
@@ -272,6 +273,14 @@ mod tests {
     fn capital_recovery_maps_to_503() {
         let web = WebError::from(QuantError::from(ExecutionError::CapitalRecoveryFailed {
             reason: "allocation invariant broken".to_owned(),
+        }));
+        assert_eq!(web.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[test]
+    fn admission_deferred_maps_to_503() {
+        let web = WebError::from(QuantError::from(ExecutionError::AdmissionDeferred {
+            reason: "book snapshot stale".to_owned(),
         }));
         assert_eq!(web.status(), StatusCode::SERVICE_UNAVAILABLE);
     }

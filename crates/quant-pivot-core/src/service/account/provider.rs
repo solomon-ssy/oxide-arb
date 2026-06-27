@@ -48,6 +48,18 @@ impl AccountProviderFactory {
         }
     }
 
+    /// Whether both the signing client (private key) and a non-blank funder are
+    /// present, i.e. [`Self::create`] would succeed. Consumed by the admission
+    /// `CredentialReadinessCheck` without minting a provider.
+    #[must_use]
+    pub fn credentials_ready(&self) -> bool {
+        self.client.is_some()
+            && self
+                .funder
+                .as_ref()
+                .is_some_and(|funder| !funder.trim().is_empty())
+    }
+
     /// Build a provider for the given budget governance cap, or fail closed.
     ///
     /// # Errors

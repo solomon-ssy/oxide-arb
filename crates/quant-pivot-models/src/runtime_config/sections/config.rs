@@ -77,6 +77,12 @@ pub struct DataQualityConfig {
     pub source_delay_secs: u64,
     /// Named policy for stale feature handling.
     pub feature_staleness_policy: FeatureStalenessPolicy,
+    /// Maximum tolerated stale-book ratio across the live book plane (basis points).
+    ///
+    /// Consumed by execution admission `DataQualityCheck` (#6): deny when
+    /// `stale_tokens / total_tokens * 10_000` exceeds this cap. Distilled into
+    /// frozen admission input at build time so checks never read config directly.
+    pub max_stale_book_ratio_bps: u64,
 }
 
 impl Default for DataQualityConfig {
@@ -90,6 +96,7 @@ impl Default for DataQualityConfig {
             reject_empty_books: true,
             source_delay_secs: 10,
             feature_staleness_policy: FeatureStalenessPolicy::RejectStaleRequired,
+            max_stale_book_ratio_bps: 2_000,
         }
     }
 }

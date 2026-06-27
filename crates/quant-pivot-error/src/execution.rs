@@ -30,9 +30,13 @@ pub enum ExecutionError {
     #[error("intent denied by policy: {reason}")]
     IntentDenied { reason: String },
 
-    /// Admission engine denied the intent.
+    /// Admission engine denied the intent (terminal — do not retry without human action).
     #[error("admission denied: {reason}")]
     AdmissionDenied { reason: String },
+
+    /// Admission deferred the intent (transient — retry later; intent stays submittable).
+    #[error("admission deferred: {reason}")]
+    AdmissionDeferred { reason: String },
 
     /// Approval has been invalidated by a newer state/config/market fact.
     #[error("approval invalidated: {reason}")]

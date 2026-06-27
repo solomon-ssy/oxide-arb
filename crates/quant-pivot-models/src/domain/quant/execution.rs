@@ -1,11 +1,20 @@
 //! Execution-intent persistence DTOs.
 
 use crate::{
-    domain::patch::{NullablePatch, Patch},
+    domain::{
+        RecommendationInfo, RecommendationReportInfo,
+        patch::{NullablePatch, Patch},
+    },
     enums::{
         common::Side,
-        execution::{ExecutionOrderPhase, OrderIntentKind, OrderTypeKind, VenueOrderStatus},
-        quant::{ApprovalStatus, ExecutionOrderState, OrderIntentStatus, QuantRuntimeMode},
+        execution::{
+            ApprovalInvalidation, ExecutionOrderPhase, OrderIntentKind, OrderTypeKind,
+            VenueOrderStatus,
+        },
+        quant::{
+            ApprovalStatus, ExecutionOrderState, OrderIntentStatus, QuantRuntimeMode,
+            RecommendationReportStatus,
+        },
     },
     types::{
         ContentHash, EntryOrderSpec, ExecutionOrderId, ExitPolicySpec, MarketId, ModelVersionId,
@@ -153,6 +162,48 @@ pub struct ExecutionOrderPatch {
     pub cancelled_at: NullablePatch<DateTime<Utc>>,
     pub gtd_expiration_at: NullablePatch<DateTime<Utc>>,
     pub error_message: NullablePatch<String>,
+}
+
+/// Result of an approval attempt after the in-transaction invalidation re-check.
+#[derive(Debug, Clone)]
+pub enum ApproveOrderIntentOutcome {
+    /// Intent transitioned to `Approved` (capital unchanged or downscaled).
+    Approved(OrderIntentInfo),
+    /// A governed fact changed inside the approval transaction; intent invalidated
+    /// and capital released (HTTP origin — no operation-log row in this txn).
+    Invalidated(OrderIntentInfo, ApprovalInvalidation),
+}
+
+/// Cheap, deterministic approval-time invalidation re-check (Phase 05.2 set).
+///
+/// Model retirement, data-quality thresholds, and envelope-hash recomputation
+/// are the admission engine's responsibility (Phase 05.3).
+#[must_use]
+pub fn evaluate_intent_approval_invalidation(
+    rec: &RecommendationInfo,
+    report: &RecommendationReportInfo,
+    kill_switch_allows_entry: bool,
+    active_config_version_id: &RuntimeConfigVersionId,
+    intent_config_version_id: &RuntimeConfigVersionId,
+    intent_risk_envelope_hash: &ContentHash,
+    now: DateTime<Utc>,
+) -> Option<ApprovalInvalidation> {
+    if rec.valid_until < now {
+        return Some(ApprovalInvalidation::RecommendationExpired);
+    }
+    if report.status != RecommendationReportStatus::Published {
+        return Some(ApprovalInvalidation::ReportRevoked);
+    }
+    if !kill_switch_allows_entry {
+        return Some(ApprovalInvalidation::KillSwitchOpened);
+    }
+    if intent_config_version_id != active_config_version_id {
+        return Some(ApprovalInvalidation::RuntimeConfigChanged);
+    }
+    if *intent_risk_envelope_hash != rec.risk_envelope.envelope_hash {
+        return Some(ApprovalInvalidation::RiskEnvelopeMismatch);
+    }
+    None
 }
 
 /// Venue submission outcome applied to an execution-order row (Phase 05.4 write path).

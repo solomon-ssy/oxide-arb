@@ -460,3 +460,10 @@ fn portfolio_config_validation_rejects_invalid() {
     config.reports.schedules[0].enabled = true;
     assert!(validate_runtime_config(&config).has_errors());
 }
+
+#[test]
+fn data_quality_config_validation_rejects_invalid_stale_ratio() {
+    let mut config = RuntimeConfig::default();
+    config.data_quality.max_stale_book_ratio_bps = 10_001;
+    assert!(validate_runtime_config(&config).has_errors());
+}

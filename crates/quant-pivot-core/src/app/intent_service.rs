@@ -8,12 +8,8 @@ use quant_pivot_models::domain::OrderIntentPort;
 use quant_pivot_repository::{
     postgres::{
         PgOrderIntentRepository, PgRecommendationReportRepository, PgRecommendationRepository,
-        PgRuntimeConfigVersionRepository,
     },
-    traits::{
-        OrderIntentRepository, RecommendationReportRepository, RecommendationRepository,
-        RuntimeConfigVersionRepository,
-    },
+    traits::{OrderIntentRepository, RecommendationReportRepository, RecommendationRepository},
 };
 
 use super::AppContext;
@@ -49,8 +45,6 @@ impl AppContext {
             intents: Arc::new(PgOrderIntentRepository::new(pg.clone()))
                 as Arc<dyn OrderIntentRepository>,
             config: self.runtime_config(),
-            config_versions: Arc::new(PgRuntimeConfigVersionRepository::new(pg.clone()))
-                as Arc<dyn RuntimeConfigVersionRepository>,
             events: self.events.clone(),
         }))
     }

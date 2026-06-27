@@ -17,12 +17,8 @@ use quant_pivot_models::{
 use quant_pivot_repository::{
     postgres::{
         PgOrderIntentRepository, PgRecommendationReportRepository, PgRecommendationRepository,
-        PgRuntimeConfigVersionRepository,
     },
-    traits::{
-        OrderIntentRepository, RecommendationReportRepository, RecommendationRepository,
-        RuntimeConfigVersionRepository,
-    },
+    traits::{OrderIntentRepository, RecommendationReportRepository, RecommendationRepository},
 };
 use sea_orm::DatabaseConnection;
 
@@ -51,8 +47,6 @@ pub fn build_order_intent_service(
         intents: Arc::new(PgOrderIntentRepository::new(db.clone()))
             as Arc<dyn OrderIntentRepository>,
         config,
-        config_versions: Arc::new(PgRuntimeConfigVersionRepository::new(db.clone()))
-            as Arc<dyn RuntimeConfigVersionRepository>,
         events,
     }))
 }

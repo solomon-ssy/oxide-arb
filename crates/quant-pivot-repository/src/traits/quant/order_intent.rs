@@ -2,12 +2,12 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::{
-        ApproveOrderIntent, NewCapitalAllocation, NewOperationLog, NewOrderIntent, OrderIntentInfo,
-        OrderIntentListQuery, Paginated,
+        ApproveOrderIntent, ApproveOrderIntentOutcome, NewCapitalAllocation, NewOperationLog,
+        NewOrderIntent, OrderIntentInfo, OrderIntentListQuery, Paginated,
     },
     enums::execution::ApprovalInvalidation,
     enums::quant::OrderIntentStatus,
-    types::{EntryOrderSpec, OrderIntentId, RecommendationReportId, Usd},
+    types::{EntryOrderSpec, OrderIntentId, RecommendationId, RecommendationReportId, Usd},
 };
 
 /// Governed order-intent persistence port.
@@ -28,16 +28,20 @@ pub trait OrderIntentRepository: Send + Sync {
         allocation: NewCapitalAllocation,
     ) -> Result<OrderIntentInfo, StorageError>;
 
-    /// Approve a `PendingApproval` intent. When `entry_override` /
+    /// Approve a `PendingApproval` intent. Re-reads recommendation, report,
+    /// runtime config, and kill-switch state **inside the same transaction**
+    /// (after row lock) before transitioning. When `entry_override` /
     /// `allocated_override` are present the entry is narrowed and the reserved
-    /// capital shrunk to match, in the same transaction.
+    /// capital shrunk to match. Returns [`ApproveOrderIntentOutcome::Invalidated`]
+    /// when a governed fact changed (capital released, no operation-log row).
     async fn approve(
         &self,
         intent_id: &OrderIntentId,
         approval: ApproveOrderIntent,
         entry_override: Option<EntryOrderSpec>,
         allocated_override: Option<Usd>,
-    ) -> Result<OrderIntentInfo, StorageError>;
+        now: DateTime<Utc>,
+    ) -> Result<ApproveOrderIntentOutcome, StorageError>;
 
     /// Reject a `PendingApproval` intent and release its capital atomically.
     async fn reject(
@@ -84,6 +88,12 @@ pub trait OrderIntentRepository: Send + Sync {
 
     /// Intents past `expires_at` still in an expirable status (sweep input).
     async fn find_expired(&self, now: DateTime<Utc>) -> Result<Vec<OrderIntentInfo>, StorageError>;
+
+    /// Active (pre-submission) intent for a recommendation, if any (create dedup).
+    async fn find_active_by_recommendation(
+        &self,
+        recommendation_id: &RecommendationId,
+    ) -> Result<Option<OrderIntentInfo>, StorageError>;
 
     /// Active (pre-submission) intents for a report — report-termination cascade.
     async fn find_active_by_report(

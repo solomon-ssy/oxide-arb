@@ -92,7 +92,8 @@ flowchart LR
     Lock --> Build["AdmissionInputBuilder.build (account + book + risk state)"]
     Build --> Admit["AdmissionEngine.evaluate (20 ordered checks)"]
     Admit -->|"allow"| Order["create quant_execution_order (Draft)"]
-    Admit -->|"deny/defer"| Rej["mark_admission_rejected + trace"]
+    Admit -->|"deny"| Rej["mark_admission_rejected + trace"]
+    Admit -->|"defer"| Retry["return AdmissionDeferred; intent stays submittable"]
     Order --> Capital["capital FSM: allocated -> locked"]
     Capital --> Submit["PolymarketOrderClient.submit (CLOB sign + post)"]
     Submit --> Record["record_submission_result + position ledger + recon enqueue"]
@@ -235,6 +236,13 @@ flowchart LR
    denial 是**类型化结果**（`AdmissionDecision`）而非 error；第三方 venue 错误经
    `quant-pivot-api::ApiError` façade 转入，**绝不**在 `quant-pivot-error` 内依赖 SDK。生产 `src/`
    禁止 `QuantError::Internal(`。
+9. **Admission 无状态 + ExecutionBreaker 有状态，职责分离**（已拍板）：05.3 admission engine 是
+   **无状态、纯函数、确定性**的 20 检查门（只 allow/deny/defer，不持久化、不改报告、同输入同决策）；
+   跨决策的**累计安全态**由独立的 `ExecutionBreaker`（05.4 §6.5）承载——它观测 venue 失败 / 对账
+   unresolvable / 日内已实现亏损，瞬态退化驱动 admission `#18` defer，持续/硬触发**自动 trip
+   kill-switch**（`execution_halted`，latch，需 operator ack）。**不移植** main 分支的有状态
+   `RiskEngine`/32-check pipeline（那是热路径 FOK 架构）；breaker 仅作 kill-switch 的自动触发器，
+   kill-switch 仍是唯一权威运营态。维度按相位接入：venue→05.4、recon→05.5、日内亏损→05.6。
 
 ## 6. 延后项总表
 

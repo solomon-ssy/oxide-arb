@@ -18,8 +18,8 @@ use chrono::{DateTime, Duration, Utc};
 use quant_pivot_error::{QuantResult, execution::ExecutionError, storage::StorageError};
 use quant_pivot_models::{
     domain::{
-        ApproveIntentCommand, ApproveOrderIntent, CancelIntentCommand, CoreEvent,
-        CoreEventPublisher, CreateIntentCommand, IntentEventKind, IntentLifecycleEvent,
+        ApproveIntentCommand, ApproveOrderIntent, ApproveOrderIntentOutcome, CancelIntentCommand,
+        CoreEvent, CoreEventPublisher, CreateIntentCommand, IntentEventKind, IntentLifecycleEvent,
         NewCapitalAllocation, NewOperationLog, NewOrderIntent, OrderIntentInfo,
         OrderIntentListQuery, OrderIntentPort, Paginated, RecommendationInfo,
         RecommendationReportInfo, RejectIntentCommand,
@@ -34,12 +34,11 @@ use quant_pivot_models::{
     runtime_config::EntryOrderPolicy,
     types::{
         CapitalAllocationId, ContentHash, EntryOrderSpec, ExitPolicySpec, OperationLogId,
-        OrderIntentId, RecommendationId, RecommendationReportId, RuntimeConfigVersionId, Usd,
+        OrderIntentId, RecommendationId, RecommendationReportId, Usd,
     },
 };
 use quant_pivot_repository::traits::{
     OrderIntentRepository, RecommendationReportRepository, RecommendationRepository,
-    RuntimeConfigVersionRepository,
 };
 use rust_decimal::Decimal;
 
@@ -77,7 +76,6 @@ pub struct OrderIntentServiceDeps {
     pub reports: Arc<dyn RecommendationReportRepository>,
     pub intents: Arc<dyn OrderIntentRepository>,
     pub config: Arc<RuntimeConfigStore>,
-    pub config_versions: Arc<dyn RuntimeConfigVersionRepository>,
     pub events: CoreEventPublisher,
 }
 
@@ -91,7 +89,6 @@ pub struct CoreOrderIntentService {
     reports: Arc<dyn RecommendationReportRepository>,
     intents: Arc<dyn OrderIntentRepository>,
     config: Arc<RuntimeConfigStore>,
-    config_versions: Arc<dyn RuntimeConfigVersionRepository>,
     events: CoreEventPublisher,
 }
 
@@ -107,7 +104,6 @@ impl CoreOrderIntentService {
             reports: deps.reports,
             intents: deps.intents,
             config: deps.config,
-            config_versions: deps.config_versions,
             events: deps.events,
         }
     }
@@ -155,6 +151,21 @@ impl CoreOrderIntentService {
         let planned_usd = rec.sizing_plan.suggested_usd;
         let resolved = resolve_policy(policy, now, rec.valid_until, entry.valid_until)?;
 
+        if self
+            .intents
+            .find_active_by_recommendation(&rec.recommendation_id)
+            .await?
+            .is_some()
+        {
+            return Err(ExecutionError::IntentDenied {
+                reason: format!(
+                    "active order intent already exists for recommendation {}",
+                    rec.recommendation_id
+                ),
+            }
+            .into());
+        }
+
         let new_intent = NewOrderIntent {
             order_intent_id: intent_id.clone(),
             recommendation_id: rec.recommendation_id.clone(),
@@ -197,8 +208,8 @@ impl CoreOrderIntentService {
         Ok(intent)
     }
 
-    /// Approve a pending intent at `now`: re-check invalidation (fail closed),
-    /// apply any operator downscale, transition to `Approved`.
+    /// Approve a pending intent at `now`: in-transaction invalidation re-check
+    /// (fail closed), apply any operator downscale, transition to `Approved`.
     pub async fn approve_at(
         &self,
         command: ApproveIntentCommand,
@@ -216,35 +227,6 @@ impl CoreOrderIntentService {
             .into());
         }
 
-        // Fail-closed re-check: any governed fact changed → invalidate + reject.
-        let rec = self.load_recommendation(&intent.recommendation_id).await?;
-        let report = self.load_report(&rec.recommendation_report_id).await?;
-        let active_version = self.config_versions.load_current().await?.ok_or_else(|| {
-            ExecutionError::ApprovalInvalidated {
-                reason: "no active runtime config version".to_owned(),
-            }
-        })?;
-        if let Some(reason) = evaluate_invalidation(
-            &rec,
-            &report,
-            self.kill_switch.allows_new_entry(),
-            &active_version.runtime_config_version_id,
-            &intent.runtime_config_version_id,
-            &intent.risk_envelope_hash,
-            now,
-        ) {
-            let log = intent_operation_log("quant.intent.invalidate", &intent, reason.as_str());
-            let invalidated = self
-                .intents
-                .invalidate(&intent.order_intent_id, reason, log)
-                .await?;
-            self.publish(&invalidated, IntentEventKind::Invalidated, now);
-            return Err(ExecutionError::ApprovalInvalidated {
-                reason: reason.as_str().to_owned(),
-            }
-            .into());
-        }
-
         let allow_downscale = self
             .config
             .current()
@@ -258,17 +240,29 @@ impl CoreOrderIntentService {
             approval_reason: approval_reason(&command),
             approved_at: now,
         };
-        let approved = self
+        match self
             .intents
             .approve(
                 &intent.order_intent_id,
                 approval,
                 entry_override,
                 allocated_override,
+                now,
             )
-            .await?;
-        self.publish(&approved, IntentEventKind::Approved, now);
-        Ok(approved)
+            .await?
+        {
+            ApproveOrderIntentOutcome::Approved(approved) => {
+                self.publish(&approved, IntentEventKind::Approved, now);
+                Ok(approved)
+            }
+            ApproveOrderIntentOutcome::Invalidated(invalidated, reason) => {
+                self.publish(&invalidated, IntentEventKind::Invalidated, now);
+                Err(ExecutionError::ApprovalInvalidated {
+                    reason: reason.as_str().to_owned(),
+                }
+                .into())
+            }
+        }
     }
 
     /// Reject a pending intent at `now`, releasing its capital.
@@ -553,36 +547,6 @@ fn project_exit_policy_spec(rec: &RecommendationInfo) -> ExitPolicySpec {
     }
 }
 
-/// Cheap, deterministic approval-time invalidation re-check (05.2 set). Model
-/// retirement, data-quality thresholds, and envelope-hash recomputation are the
-/// 05.3 admission engine's responsibility.
-fn evaluate_invalidation(
-    rec: &RecommendationInfo,
-    report: &RecommendationReportInfo,
-    kill_switch_allows_entry: bool,
-    active_config_version_id: &RuntimeConfigVersionId,
-    intent_config_version_id: &RuntimeConfigVersionId,
-    intent_risk_envelope_hash: &ContentHash,
-    now: DateTime<Utc>,
-) -> Option<ApprovalInvalidation> {
-    if rec.valid_until < now {
-        return Some(ApprovalInvalidation::RecommendationExpired);
-    }
-    if report.status != RecommendationReportStatus::Published {
-        return Some(ApprovalInvalidation::ReportRevoked);
-    }
-    if !kill_switch_allows_entry {
-        return Some(ApprovalInvalidation::KillSwitchOpened);
-    }
-    if intent_config_version_id != active_config_version_id {
-        return Some(ApprovalInvalidation::RuntimeConfigChanged);
-    }
-    if *intent_risk_envelope_hash != rec.risk_envelope.envelope_hash {
-        return Some(ApprovalInvalidation::RiskEnvelopeMismatch);
-    }
-    None
-}
-
 /// Validate an operator downscale against the frozen entry. Returns the narrowed
 /// `(entry_override, allocated_override)`, or `(None, None)` for a pure approval.
 /// Widening size, raising the limit, or downscaling when disabled are rejected.
@@ -669,14 +633,13 @@ fn intent_operation_log(action: &str, intent: &OrderIntentInfo, reason: &str) ->
 #[cfg(test)]
 mod tests {
     use super::{
-        evaluate_invalidation, project_entry_order_spec, project_exit_policy_spec,
-        resolve_downscale, resolve_policy,
+        project_entry_order_spec, project_exit_policy_spec, resolve_downscale, resolve_policy,
     };
     use crate::execution::mode_gate::IntentPolicyDecision;
     use chrono::{Duration, TimeZone, Utc};
     use quant_pivot_error::execution::ExecutionError;
     use quant_pivot_models::{
-        domain::ApproveIntentCommand,
+        domain::{ApproveIntentCommand, evaluate_intent_approval_invalidation},
         enums::{
             common::{OrderType, Side},
             execution::ApprovalInvalidation,
@@ -823,8 +786,16 @@ mod tests {
         let version = RuntimeConfigVersionId::from_v7();
         let hash = rec.risk_envelope.envelope_hash.clone();
         assert!(
-            evaluate_invalidation(&rec, &report, true, &version, &version, &hash, Utc::now())
-                .is_none()
+            evaluate_intent_approval_invalidation(
+                &rec,
+                &report,
+                true,
+                &version,
+                &version,
+                &hash,
+                Utc::now()
+            )
+            .is_none()
         );
     }
 
@@ -934,7 +905,9 @@ mod tests {
         let mut expired = rec.clone();
         expired.valid_until = now - Duration::hours(1);
         assert_eq!(
-            evaluate_invalidation(&expired, &report, true, &version, &version, &hash, now),
+            evaluate_intent_approval_invalidation(
+                &expired, &report, true, &version, &version, &hash, now
+            ),
             Some(ApprovalInvalidation::RecommendationExpired)
         );
 
@@ -945,20 +918,32 @@ mod tests {
             RecommendationReportStatus::Revoked,
         );
         assert_eq!(
-            evaluate_invalidation(&rec, &revoked, true, &version, &version, &hash, now),
+            evaluate_intent_approval_invalidation(
+                &rec, &revoked, true, &version, &version, &hash, now
+            ),
             Some(ApprovalInvalidation::ReportRevoked)
         );
 
         // kill switch opened
         assert_eq!(
-            evaluate_invalidation(&rec, &report, false, &version, &version, &hash, now),
+            evaluate_intent_approval_invalidation(
+                &rec, &report, false, &version, &version, &hash, now
+            ),
             Some(ApprovalInvalidation::KillSwitchOpened)
         );
 
         // runtime config version changed
         let other_version = RuntimeConfigVersionId::from_v7();
         assert_eq!(
-            evaluate_invalidation(&rec, &report, true, &other_version, &version, &hash, now),
+            evaluate_intent_approval_invalidation(
+                &rec,
+                &report,
+                true,
+                &other_version,
+                &version,
+                &hash,
+                now
+            ),
             Some(ApprovalInvalidation::RuntimeConfigChanged)
         );
 
@@ -966,7 +951,15 @@ mod tests {
         let stored_hash = ContentHash::parse(format!("blake3:{}", "1".repeat(64))).expect("hash");
         assert_ne!(stored_hash, rec.risk_envelope.envelope_hash);
         assert_eq!(
-            evaluate_invalidation(&rec, &report, true, &version, &version, &stored_hash, now),
+            evaluate_intent_approval_invalidation(
+                &rec,
+                &report,
+                true,
+                &version,
+                &version,
+                &stored_hash,
+                now
+            ),
             Some(ApprovalInvalidation::RiskEnvelopeMismatch)
         );
     }

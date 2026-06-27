@@ -135,6 +135,10 @@ pub struct MetricsHub {
     /// `1` when the operational kill-switch blocks new auto entries (any
     /// non-`closed` state), `0` when `closed`.
     pub auto_execution_halted: IntGauge,
+
+    // ── Execution admission (05.3) ────────────────────────────────────────
+    /// Admission denials by the check id that determined the `Deny` outcome.
+    pub admission_denied: IntCounterVec,
 }
 
 struct PipelineMetrics {
@@ -439,6 +443,12 @@ impl MetricsHub {
             "quant_auto_execution_halted",
             "1 when the operational kill-switch blocks new auto entries, 0 otherwise"
         );
+        let admission_denied = register_counter_vec!(
+            &registry,
+            "quant_admission_denied_total",
+            "Execution admission denials by the check id that determined the deny",
+            &["check_id"]
+        );
 
         Self {
             registry,
@@ -480,6 +490,7 @@ impl MetricsHub {
             report_schedule_active_jobs: report.schedule_active_jobs,
             report_expire_swept_total: report.expire_swept,
             auto_execution_halted,
+            admission_denied,
         }
     }
 

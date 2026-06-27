@@ -134,6 +134,7 @@ RuntimeConfig {
 - `reject_empty_books`
 - `source_delay_secs`
 - `feature_staleness_policy`
+- `max_stale_book_ratio_bps` — plane-wide stale ratio cap for execution admission (#6)
 
 ### 2.4 `features`
 
@@ -246,11 +247,24 @@ Kelly 是唯一 production sizing model；`confidence_weighting` 只作为 Kelly
 - `kill_switch`
 - `capital`
 - `reconciliation`
+- `breaker`（执行熔断器，自动 trip kill-switch；设计见 [phase-05/05.4 §6.5](phase-05/05.4-entry-execution-and-venue-submission.md)）
 
 `semi_auto`：
 
 - `approval_ttl_secs`
 - `allow_size_reduction`
+
+`breaker`（`ExecutionBreaker`，05.4 落 venue 维度，05.5/05.6 接入 recon/日内亏损维度）：
+
+- `venue_failure_window_secs` — 连续失败 / error-rate 滚动窗口。
+- `venue_consecutive_failures_to_degrade` — 退化阈值（→ admission `#18` defer，瞬态，可自愈）。
+- `venue_consecutive_failures_to_halt` — 熔断阈值（→ kill-switch `execution_halted` latch）。
+- `venue_error_rate_bps_to_halt` — 窗口 error-rate 熔断阈值（基点）。
+- `cooldown_secs` — 退化态自愈所需的无失败冷却时长。
+- `daily_realized_loss_cap_usd` — 日内已实现亏损硬上限（≥ cap → 熔断；≥ 80% → 退化）。
+
+> latch 语义：breaker 升级的 `execution_halted` 须 operator 经 `POST /api/system/kill-switch`（ack）
+> 解除；breaker 不自动解除已升级的 kill-switch（钱相关 fail-closed）。瞬态退化按 `cooldown_secs` 自愈。
 
 `auto_execution`：
 

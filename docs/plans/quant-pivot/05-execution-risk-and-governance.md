@@ -350,6 +350,24 @@ Kill switch 状态：
 | `exit_only` | 允许 | 禁止 | 允许 |
 | `emergency_halted` | 可降级 | 禁止 | 按 emergency policy |
 
+### 8.1 自动触发（ExecutionBreaker）
+
+kill-switch 除人工切换外，由**执行熔断器** `ExecutionBreaker`（设计见
+[phase-05/05.4 §6.5](phase-05/05.4-entry-execution-and-venue-submission.md)）在运行时安全信号恶化时
+**自动收紧**。kill-switch 仍是唯一权威运营态；breaker 是其自动触发器，所有升级经 `KillSwitchControl`
+落库 + op-log + status/WS 广播（`actor = "system:execution_breaker"`）。自动 trip 维度：
+
+| 维度 | 升级动作 | feed 落地 |
+|---|---|---|
+| venue 连续失败 / error-rate 击穿 | `execution_halted`（latch，需 operator ack） | 05.4 |
+| 对账 `unresolvable` | `execution_halted`（latch） | 05.5 |
+| 日内已实现亏损 ≥ cap | `execution_halted`（latch） | 05.6 |
+
+- 瞬态退化（未达硬阈值）只置 `VenueHealth::Degraded` 让 admission `#18` defer，按 cooldown 自动恢复，
+  **不**动 kill-switch；只有持续/硬触发才 latch 升级。
+- 已被 breaker 升级的 kill-switch **不自动解除**，须 operator 经 `POST /api/system/kill-switch`
+  （ack）确认（钱相关 fail-closed）。
+
 ## 9. Capital Allocation
 
 > 资金状态机、`AccountSnapshot`、`quant_capital_allocation` / `quant_position` 表的完整设计见 [09 — 账户、资本、持仓与对账设计](09-account-capital-position-reconciliation.md)。
@@ -619,9 +637,16 @@ pub async fn submit_if_admitted(
     let input = deps.admission_input_builder.build(&intent).await?;
     let decision = deps.admission.evaluate(input).await?;
 
-    if !decision.outcome.is_allow() {
-        deps.intent_repo.mark_admission_rejected(intent.id(), decision.trace).await?;
-        return Err(QuantError::AdmissionDenied);
+    match decision.outcome {
+        AdmissionOutcome::Allow => {}
+        AdmissionOutcome::Deny => {
+            deps.intent_repo.mark_admission_rejected(intent.id(), decision.trace).await?;
+            return Err(QuantError::AdmissionDenied);
+        }
+        AdmissionOutcome::Defer => {
+            // Transient — retry later; intent stays submittable (never terminal-reject).
+            return Err(ExecutionError::AdmissionDeferred { reason: ... }.into());
+        }
     }
 
     let order = deps.execution_order_repo.create_entry_order(&intent).await?;
