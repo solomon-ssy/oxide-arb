@@ -14,6 +14,7 @@ const DOCKER_SUITES: &[(&str, &str)] = &[
     ("quant-pivot-repository", "pg_training_dataset"),
     ("quant-pivot-repository", "pg_backtest_report"),
     ("quant-pivot-repository", "pg_comparison_report"),
+    ("quant-pivot-repository", "pg_execution_submission"),
     ("quant-pivot-repository", "ch_fact_read_pit"),
     ("quant-pivot-storage", "redis_integration"),
     ("quant-pivot-storage", "clickhouse_integration"),

@@ -79,12 +79,14 @@ impl KillSwitchPort for RecordingKillSwitch {
 #[derive(Default)]
 struct RecordingOpLog {
     appended: Mutex<u32>,
+    last: Mutex<Option<NewOperationLog>>,
 }
 
 #[async_trait]
 impl OperationLogRepository for RecordingOpLog {
-    async fn append(&self, _log: NewOperationLog) -> Result<(), StorageError> {
+    async fn append(&self, log: NewOperationLog) -> Result<(), StorageError> {
         *self.appended.lock().unwrap() += 1;
+        *self.last.lock().unwrap() = Some(log);
         Ok(())
     }
 
@@ -244,6 +246,23 @@ async fn unresolvable_recon_trips_execution_breaker_to_halt() {
             .with_label_values(&["recon"])
             .get(),
         1,
+    );
+    let dimension = op_log
+        .last
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|audit| {
+            audit
+                .detail
+                .get("dimension")
+                .and_then(|value| value.as_str())
+                .map(str::to_owned)
+        });
+    assert_eq!(
+        dimension.as_deref(),
+        Some("recon"),
+        "audit detail must record the trip dimension",
     );
 }
 

@@ -337,7 +337,7 @@ impl ExecutionBreaker {
             client_ip: None,
             user_agent: None,
             latency_ms: 0,
-            detail: serde_json::json!({ "dimension": DIMENSION_VENUE, "reason": reason }),
+            detail: serde_json::json!({ "dimension": dimension, "reason": reason }),
             governance_audit_event_id: None,
             governance_audit_sequence: None,
         };

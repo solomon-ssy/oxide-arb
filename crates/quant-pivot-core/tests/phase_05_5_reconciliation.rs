@@ -1,7 +1,8 @@
 //! Phase 05.5 — reconciliation evidence collection + decision (in-memory).
 //!
 //! Exercises the read-side pipeline (`VenueEvidenceCollector` → `decide`) with a
-//! stub `VenueReconciliationReader`, no DB or venue. The write-side correction
+//! stub `VenueReconciliationReader`, no DB or venue. Service orchestration tests
+//! live in `phase_05_5_reconciliation_service.rs`; write-side correction
 //! (`apply_reconciliation`: capital/position/WORM/idempotency) is covered by the
 //! repository integration tests in `pg_execution_submission.rs`.
 

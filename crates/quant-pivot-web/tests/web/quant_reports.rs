@@ -377,7 +377,7 @@ async fn revoke_forbidden_for_analyst() {
 #[ignore = "requires Docker"]
 async fn legacy_create_intent_route_is_removed() {
     // The 501 stub was deleted in Phase 05.2; intent creation now lives at
-    // `POST /api/quant/intents`. The old recommendation sub-route must 404.
+    // `POST /api/quant/intents`. The old sub-route is unregistered → fail-closed 403.
     let env = TestEnv::start().await;
     let admin = login(&env, "admin", "admin").await;
     let report_id = RecommendationReportId::from_v7();
@@ -401,5 +401,5 @@ async fn legacy_create_intent_route_is_removed() {
         json!({}),
     )
     .await;
-    assert_eq!(res.status, StatusCode::NOT_FOUND);
+    assert_eq!(res.status, StatusCode::FORBIDDEN);
 }

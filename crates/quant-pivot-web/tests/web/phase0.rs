@@ -48,16 +48,19 @@ async fn kill_switch_status_route_is_available() {
 async fn set_kill_switch_requires_acting_role() {
     let env = TestEnv::start().await;
     let admin = client::login(&env, "admin", "admin").await;
-    // Governed (ActingRoleGoverned) write without `X-Acting-Role` is rejected.
+    // `admin` user is super_admin and bypasses acting-role enforcement; use a
+    // non-super-admin role that still carries `system:halt`.
+    let halter =
+        client::user_with_role(&env, &admin, "halt_no_header", "emergency_operator").await;
     let res = client::post_with(
         &env,
         "/api/system/kill-switch",
-        &admin,
+        &halter,
         &[],
         json!({ "state": "execution_halted", "reason": "manual halt", "ack": false }),
     )
     .await;
-    assert_eq!(res.status, StatusCode::FORBIDDEN);
+    assert_eq!(res.status, StatusCode::BAD_REQUEST);
 }
 
 #[actix_web::test]

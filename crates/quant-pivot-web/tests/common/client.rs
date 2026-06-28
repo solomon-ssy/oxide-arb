@@ -42,6 +42,65 @@ pub async fn get(env: &TestEnv, uri: &str, token: &str) -> Resp {
     harness::call(&env.state, req).await
 }
 
+/// Authenticated `POST`.
+pub async fn post(env: &TestEnv, uri: &str, token: &str, body: Value) -> Resp {
+    post_with(env, uri, token, &[], body).await
+}
+
+/// Authenticated `PUT`.
+pub async fn put(env: &TestEnv, uri: &str, token: &str, body: Value) -> Resp {
+    let req = TestRequest::put()
+        .uri(uri)
+        .insert_header(API_VERSION)
+        .insert_header(bearer(token))
+        .set_json(body);
+    harness::call(&env.state, req).await
+}
+
+/// Look up a seeded role id by code.
+pub async fn role_id(env: &TestEnv, admin: &str, code: &str) -> String {
+    let res = get(env, "/api/roles", admin).await;
+    assert_eq!(res.status, StatusCode::OK, "list roles");
+    res.json()["data"]
+        .as_array()
+        .expect("roles array")
+        .iter()
+        .find(|role| role["code"] == json!(code))
+        .unwrap_or_else(|| panic!("seeded role {code} not found"))["id"]
+        .as_str()
+        .expect("role id")
+        .to_owned()
+}
+
+/// Create a user with a single built-in role and return their access token.
+pub async fn user_with_role(env: &TestEnv, admin: &str, username: &str, code: &str) -> String {
+    let res = post(
+        env,
+        "/api/users",
+        admin,
+        json!({ "username": username, "password": "password123", "nickname": username }),
+    )
+    .await;
+    assert_eq!(res.status, StatusCode::OK, "create user {username}");
+    let user_id = res.json()["data"]["id"]
+        .as_str()
+        .expect("user id")
+        .to_owned();
+    let rid = role_id(env, admin, code).await;
+    assert_eq!(
+        put(
+            env,
+            &format!("/api/users/{user_id}/roles"),
+            admin,
+            json!({ "role_ids": [rid] }),
+        )
+        .await
+        .status,
+        StatusCode::OK
+    );
+    login(env, username, "password123").await
+}
+
 /// Authenticated `POST` with extra headers (e.g. `X-Acting-Role`, `X-Request-Id`).
 pub async fn post_with(
     env: &TestEnv,

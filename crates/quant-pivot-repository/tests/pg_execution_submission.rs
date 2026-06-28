@@ -79,6 +79,8 @@ use sea_orm::{ActiveModelTrait, ActiveValue, EntityTrait, IntoActiveModel};
 
 /// shares (100) * `limit_price` (0.6).
 const NOTIONAL: Decimal = dec!(60);
+const PARTIAL_SHARES: Decimal = dec!(40);
+const PARTIAL_SPENT: Decimal = dec!(24);
 
 // ── Tests ────────────────────────────────────────────────────────────────────
 
@@ -317,8 +319,13 @@ async fn position_upsert_weighted_average_cost() {
     assert_eq!(position.shares, Shares::new(dec!(150)));
     // (60 + 40) / 150 = 0.666...
     assert_eq!(position.cost_usd, Usd::new(dec!(100)));
-    let expected_avg = dec!(100) / dec!(150);
-    assert_eq!(position.avg_price, Price::new(expected_avg));
+    // avg_price is cost / shares; Postgres NUMERIC round-trip can widen precision.
+    let implied_cost = position.avg_price.inner() * position.shares.inner();
+    let drift = (implied_cost - position.cost_usd.inner()).abs();
+    assert!(
+        drift <= dec!(0.00000001),
+        "avg_price * shares should reconcile to cost_usd (drift={drift})",
+    );
 }
 
 #[tokio::test]
@@ -899,6 +906,75 @@ async fn reconcile_unresolvable_impairs_capital_and_leaves_order_ambiguous() {
             .expect("has_unresolvable"),
         "an unresolvable verdict must block auto execution",
     );
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn reconcile_partial_fill_splits_capital_and_writes_position() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let ids = seed_report_fixture(&db).await;
+    let submission = PgExecutionSubmissionRepository::new(db.clone());
+    let (intent_id, order_id) = ambiguous_order(&db, &submission, &ids).await;
+
+    let mut write = ReconciliationLedgerWrite {
+        order_state: ExecutionOrderState::PartiallyFilled,
+        intent_status: OrderIntentStatus::PartiallyFilled,
+        venue_status: Some(VenueOrderStatus::PartiallyFilled),
+        venue_order_id: Some(OrderId::new("venue-amb")),
+        filled_at: Some(Utc::now()),
+        cancelled_at: None,
+        error_message: None,
+        capital: CapitalReconcileSettlement::Settle {
+            spent_usd: Usd::new(PARTIAL_SPENT),
+        },
+        fill: None,
+        result: ReconciliationResult::PartiallyFilled,
+        evidence: ReconciliationEvidenceChain(vec![recon_evidence("recon: partial fill")]),
+        venue_filled_shares: Some(Shares::new(PARTIAL_SHARES)),
+        venue_avg_price: Some(Price::new(dec!(0.6))),
+        discrepancy_usd: Some(Usd::new(PARTIAL_SPENT - PARTIAL_SHARES * dec!(0.6))),
+        resolved_by: Some("system:reconciliation_worker".to_owned()),
+        resolved_at: Some(Utc::now()),
+    };
+    write.fill = Some(PositionFill {
+        token_id: TokenId::new("token-1"),
+        market_id: MarketId::new(&ids.market),
+        event_id: Some(EventId::new(&ids.event)),
+        category: MarketCategory::Politics,
+        side: OutcomeSide::Yes,
+        shares: Shares::new(PARTIAL_SHARES),
+        price: Price::new(dec!(0.6)),
+        cost_usd: Usd::new(PARTIAL_SPENT),
+        filled_at: Utc::now(),
+        source: AccountSource::Polymarket,
+    });
+
+    let recorded = submission
+        .apply_reconciliation(&order_id, write)
+        .await
+        .expect("apply partial reconciliation");
+    assert_eq!(recorded.state, ExecutionOrderState::PartiallyFilled);
+
+    let capital = PgCapitalAllocationRepository::new(db.clone())
+        .find_by_intent(&intent_id)
+        .await
+        .expect("capital")
+        .expect("row");
+    assert_eq!(capital.state, CapitalAllocationState::Spent);
+    assert_eq!(capital.spent_usd, Usd::new(PARTIAL_SPENT));
+    assert_eq!(
+        capital.released_usd,
+        Usd::new(NOTIONAL - PARTIAL_SPENT),
+        "unfilled remainder must be released on partial reconciliation",
+    );
+
+    let position = PgPositionRepository::new(db.clone())
+        .find_by_token(&TokenId::new("token-1"))
+        .await
+        .expect("position")
+        .expect("position row");
+    assert_eq!(position.shares, Shares::new(PARTIAL_SHARES));
 }
 
 #[tokio::test]
