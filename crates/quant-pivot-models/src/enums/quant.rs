@@ -448,6 +448,18 @@ crate::pg_enum! {
     }
 }
 
+impl ExecutionOrderState {
+    /// Whether capital and position are already settled — reconciliation must
+    /// leave terminal orders untouched (idempotency).
+    #[must_use]
+    pub const fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Filled | Self::PartiallyFilled | Self::Cancelled | Self::Failed
+        )
+    }
+}
+
 crate::pg_enum! {
     type_name = "qp_recommendation_outcome",
     /// Recommendation attribution outcome.

@@ -1,7 +1,10 @@
 use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    domain::{ExecutionOrderInfo, NewExecutionOrder, OrderIntentInfo, SubmissionLedgerWrite},
+    domain::{
+        ExecutionOrderInfo, NewExecutionOrder, OrderIntentInfo, ReconciliationLedgerWrite,
+        SubmissionLedgerWrite,
+    },
     types::{ExecutionOrderId, OrderIntentId},
 };
 
@@ -69,4 +72,18 @@ pub trait ExecutionSubmissionRepository: Send + Sync {
     /// Boot recovery: in-flight orders (`Submitted` / `Ambiguous`) with no
     /// terminal resolution, handed to reconciliation after a process crash.
     async fn recover_dangling(&self, limit: u64) -> Result<Vec<ExecutionOrderInfo>, StorageError>;
+
+    /// Apply a reconciliation verdict in one txn (Phase 05.5): advance the entry
+    /// order to its terminal state, correct the capital (state-guarded and
+    /// idempotent), upsert the position on a confirmed fill (applied exactly
+    /// once as the order leaves a non-filled state), advance the intent, and
+    /// upsert the reconciliation summary row (appending the freshly-collected
+    /// evidence — append-only / WORM). An order already in a terminal state is
+    /// returned unchanged (idempotent no-op), so repeated reconciliation can
+    /// never double-count capital or shares.
+    async fn apply_reconciliation(
+        &self,
+        execution_order_id: &ExecutionOrderId,
+        write: ReconciliationLedgerWrite,
+    ) -> Result<ExecutionOrderInfo, StorageError>;
 }

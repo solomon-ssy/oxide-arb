@@ -471,6 +471,14 @@ impl ExecutionSubmissionRepository for MemorySubmissionRepo {
     async fn recover_dangling(&self, _: u64) -> Result<Vec<ExecutionOrderInfo>, StorageError> {
         Ok(Vec::new())
     }
+
+    async fn apply_reconciliation(
+        &self,
+        _execution_order_id: &ExecutionOrderId,
+        _write: quant_pivot_models::domain::ReconciliationLedgerWrite,
+    ) -> Result<ExecutionOrderInfo, StorageError> {
+        unimplemented!("reconciliation is exercised in phase_05_5 tests")
+    }
 }
 
 struct RecordingOrderClient {
@@ -861,6 +869,13 @@ impl ExecutionOrderRepository for StubExecutionOrders {
 
     async fn has_ambiguous_inflight(&self) -> Result<bool, StorageError> {
         Ok(false)
+    }
+
+    async fn find_reconcilable(
+        &self,
+        _limit: u64,
+    ) -> Result<Vec<ExecutionOrderInfo>, StorageError> {
+        Ok(Vec::new())
     }
 
     async fn transition(

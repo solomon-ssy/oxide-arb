@@ -381,8 +381,13 @@ impl Default for CapitalPolicy {
 pub struct ReconciliationPolicy {
     /// Whether execution reconciliation is enabled.
     pub enabled: bool,
-    /// Reconciliation interval in seconds.
+    /// Reconciliation sweep interval in seconds.
     pub interval_secs: u64,
+    /// Seconds an order may remain unreconciled (resting open, or unreadable at
+    /// the venue) before the worker forces a terminal resolution: a stale
+    /// resting order is actively cancelled, an unreadable order is escalated to
+    /// `Unresolvable`. Bounds how long capital can stay in-flight.
+    pub stale_open_secs: u64,
 }
 
 impl Default for ReconciliationPolicy {
@@ -390,6 +395,7 @@ impl Default for ReconciliationPolicy {
         Self {
             enabled: true,
             interval_secs: 60,
+            stale_open_secs: 300,
         }
     }
 }

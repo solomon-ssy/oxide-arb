@@ -147,6 +147,11 @@ pub struct MetricsHub {
     pub execution_fills: IntCounter,
     /// Execution-breaker kill-switch trips by triggering dimension.
     pub execution_breaker_trips: IntCounterVec,
+
+    // ── Reconciliation (05.5) ─────────────────────────────────────────────
+    /// Reconciliations that resolved to a terminal `Unresolvable` verdict
+    /// (capital impaired, kill-switch latched until an operator resolves).
+    pub reconciliation_unresolvable: IntCounter,
 }
 
 struct PipelineMetrics {
@@ -199,6 +204,16 @@ struct ReportMetrics {
     schedule_active_jobs: IntGauge,
     expire_swept: IntCounter,
     skipped_empty: IntCounter,
+}
+
+/// Execution / risk / governance counters (Phase 05.1–05.5).
+struct ExecutionMetrics {
+    auto_execution_halted: IntGauge,
+    admission_denied: IntCounterVec,
+    execution_orders_submitted: IntCounter,
+    execution_fills: IntCounter,
+    execution_breaker_trips: IntCounterVec,
+    reconciliation_unresolvable: IntCounter,
 }
 
 fn register_pipeline_metrics(registry: &Registry) -> PipelineMetrics {
@@ -419,6 +434,43 @@ fn register_report_metrics(registry: &Registry) -> ReportMetrics {
     }
 }
 
+fn register_execution_metrics(registry: &Registry) -> ExecutionMetrics {
+    ExecutionMetrics {
+        auto_execution_halted: register_gauge_int!(
+            registry,
+            "quant_auto_execution_halted",
+            "1 when the operational kill-switch blocks new auto entries, 0 otherwise"
+        ),
+        admission_denied: register_counter_vec!(
+            registry,
+            "quant_admission_denied_total",
+            "Execution admission denials by the check id that determined the deny",
+            &["check_id"]
+        ),
+        execution_orders_submitted: register_counter!(
+            registry,
+            "quant_execution_orders_submitted_total",
+            "Entry orders submitted to the venue (write-ahead committed)"
+        ),
+        execution_fills: register_counter!(
+            registry,
+            "quant_execution_fills_total",
+            "Venue fills observed on submission (full or partial)"
+        ),
+        execution_breaker_trips: register_counter_vec!(
+            registry,
+            "quant_execution_breaker_trips_total",
+            "Execution-breaker kill-switch trips by triggering dimension",
+            &["dimension"]
+        ),
+        reconciliation_unresolvable: register_counter!(
+            registry,
+            "quant_reconciliation_unresolvable_total",
+            "Reconciliations resolved to a terminal unresolvable verdict"
+        ),
+    }
+}
+
 impl MetricsHub {
     pub fn new() -> Self {
         let registry = Registry::new();
@@ -446,33 +498,7 @@ impl MetricsHub {
             &["stream"],
             FACT_LAG_BUCKETS_SECS
         );
-        let auto_execution_halted = register_gauge_int!(
-            &registry,
-            "quant_auto_execution_halted",
-            "1 when the operational kill-switch blocks new auto entries, 0 otherwise"
-        );
-        let admission_denied = register_counter_vec!(
-            &registry,
-            "quant_admission_denied_total",
-            "Execution admission denials by the check id that determined the deny",
-            &["check_id"]
-        );
-        let execution_orders_submitted = register_counter!(
-            &registry,
-            "quant_execution_orders_submitted_total",
-            "Entry orders submitted to the venue (write-ahead committed)"
-        );
-        let execution_fills = register_counter!(
-            &registry,
-            "quant_execution_fills_total",
-            "Venue fills observed on submission (full or partial)"
-        );
-        let execution_breaker_trips = register_counter_vec!(
-            &registry,
-            "quant_execution_breaker_trips_total",
-            "Execution-breaker kill-switch trips by triggering dimension",
-            &["dimension"]
-        );
+        let execution = register_execution_metrics(&registry);
 
         Self {
             registry,
@@ -513,11 +539,12 @@ impl MetricsHub {
             report_schedule_run_duration_seconds: report.schedule_run_duration,
             report_schedule_active_jobs: report.schedule_active_jobs,
             report_expire_swept_total: report.expire_swept,
-            auto_execution_halted,
-            admission_denied,
-            execution_orders_submitted,
-            execution_fills,
-            execution_breaker_trips,
+            auto_execution_halted: execution.auto_execution_halted,
+            admission_denied: execution.admission_denied,
+            execution_orders_submitted: execution.execution_orders_submitted,
+            execution_fills: execution.execution_fills,
+            execution_breaker_trips: execution.execution_breaker_trips,
+            reconciliation_unresolvable: execution.reconciliation_unresolvable,
         }
     }
 
@@ -536,6 +563,11 @@ impl MetricsHub {
         self.execution_breaker_trips
             .with_label_values(&[dimension])
             .inc();
+    }
+
+    /// Count one reconciliation that resolved to `Unresolvable`.
+    pub fn inc_reconciliation_unresolvable(&self) {
+        self.reconciliation_unresolvable.inc();
     }
 
     /// Publish whether the kill-switch currently blocks new auto entries.

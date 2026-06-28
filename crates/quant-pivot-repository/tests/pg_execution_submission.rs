@@ -10,11 +10,12 @@ use std::{collections::BTreeMap, str::FromStr};
 use chrono::Utc;
 use quant_pivot_models::{
     domain::{
-        CapitalSettlement, NewAccountSnapshot, NewCapitalAllocation, NewExecutionOrder,
-        NewMarketSelection, NewModelRun, NewModelSpec, NewModelVersion, NewOperationLog,
-        NewOrderIntent, NewPortfolioPlan, NewRecommendation, NewRecommendationReport,
-        NewReconciliation, NewReportDataQualitySnapshot, NewReportTransaction,
-        NewRuntimeConfigVersion, PositionFill, SubmissionLedgerWrite,
+        CapitalReconcileSettlement, CapitalSettlement, NewAccountSnapshot, NewCapitalAllocation,
+        NewExecutionOrder, NewMarketSelection, NewModelRun, NewModelSpec, NewModelVersion,
+        NewOperationLog, NewOrderIntent, NewPortfolioPlan, NewRecommendation,
+        NewRecommendationReport, NewReconciliation, NewReportDataQualitySnapshot,
+        NewReportTransaction, NewRuntimeConfigVersion, PositionFill, ReconciliationLedgerWrite,
+        SubmissionLedgerWrite,
     },
     entities::quant_market_selection::{SelectionExcludedMarketIds, SelectionIncludedMarketIds},
     entities::{quant_order_intent, quant_recommendation},
@@ -660,6 +661,369 @@ fn new_allocation_for(ids: &TxnIds, order_intent_id: OrderIntentId) -> NewCapita
 }
 
 // ── Submission payloads ──────────────────────────────────────────────────────
+
+// ── Phase 05.5 — reconciliation correction (apply_reconciliation) ─────────────
+
+/// Drive an intent to an `Ambiguous` order with locked capital and a submit-time
+/// `Pending` reconciliation row — the worker's primary correction input.
+async fn ambiguous_order(
+    db: &sea_orm::DatabaseConnection,
+    submission: &PgExecutionSubmissionRepository,
+    ids: &TxnIds,
+) -> (OrderIntentId, ExecutionOrderId) {
+    let intent_id = seed_approved_intent(db, ids).await;
+    submission
+        .claim_for_submission(&intent_id, Utc::now())
+        .await
+        .expect("claim");
+    let order = submission
+        .create_entry_order_and_lock_capital(new_execution_order(&intent_id, ids))
+        .await
+        .expect("create");
+    submission
+        .record_submission_result(
+            &order.execution_order_id,
+            SubmissionLedgerWrite {
+                state: ExecutionOrderState::Ambiguous,
+                intent_status: OrderIntentStatus::Submitted,
+                venue_order_id: Some(OrderId::new("venue-amb")),
+                venue_status: None,
+                submitted_at: Utc::now(),
+                filled_at: None,
+                cancelled_at: None,
+                error_message: Some("venue timeout".to_owned()),
+                capital: CapitalSettlement::Hold,
+                fill: None,
+                reconciliation: Some(pending_recon_row(&order.execution_order_id, &intent_id)),
+            },
+        )
+        .await
+        .expect("record ambiguous");
+    (intent_id, order.execution_order_id)
+}
+
+fn pending_recon_row(eo: &ExecutionOrderId, intent: &OrderIntentId) -> NewReconciliation {
+    NewReconciliation {
+        reconciliation_id: ReconciliationId::from_v7(),
+        execution_order_id: eo.clone(),
+        order_intent_id: intent.clone(),
+        result: ReconciliationResult::Pending,
+        evidence_json: ReconciliationEvidenceChain(vec![recon_evidence("submit: ambiguous")]),
+        venue_filled_shares: None,
+        venue_avg_price: None,
+        discrepancy_usd: None,
+        resolved_by: None,
+        resolved_at: None,
+    }
+}
+
+fn recon_evidence(detail: &str) -> ReconciliationEvidence {
+    ReconciliationEvidence {
+        kind: ReconciliationEvidenceKind::ClobOrderStatus,
+        observed_at: Utc::now(),
+        detail: detail.to_owned(),
+        venue_ref: None,
+        shares: None,
+        price: None,
+    }
+}
+
+fn filled_write() -> ReconciliationLedgerWrite {
+    ReconciliationLedgerWrite {
+        order_state: ExecutionOrderState::Filled,
+        intent_status: OrderIntentStatus::Filled,
+        venue_status: Some(VenueOrderStatus::Filled),
+        venue_order_id: Some(OrderId::new("venue-amb")),
+        filled_at: Some(Utc::now()),
+        cancelled_at: None,
+        error_message: None,
+        capital: CapitalReconcileSettlement::Settle {
+            spent_usd: Usd::new(NOTIONAL),
+        },
+        fill: None,
+        result: ReconciliationResult::Filled,
+        evidence: ReconciliationEvidenceChain(vec![recon_evidence("recon: filled")]),
+        venue_filled_shares: Some(Shares::new(dec!(100))),
+        venue_avg_price: Some(Price::new(dec!(0.6))),
+        discrepancy_usd: None,
+        resolved_by: Some("system:reconciliation_worker".to_owned()),
+        resolved_at: Some(Utc::now()),
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn reconcile_ambiguous_to_filled_spends_capital_and_writes_position() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let ids = seed_report_fixture(&db).await;
+    let submission = PgExecutionSubmissionRepository::new(db.clone());
+    let (intent_id, order_id) = ambiguous_order(&db, &submission, &ids).await;
+
+    let mut write = filled_write();
+    write.fill = Some(position_fill(&ids));
+    let recorded = submission
+        .apply_reconciliation(&order_id, write)
+        .await
+        .expect("apply reconciliation");
+    assert_eq!(recorded.state, ExecutionOrderState::Filled);
+
+    let capital = PgCapitalAllocationRepository::new(db.clone())
+        .find_by_intent(&intent_id)
+        .await
+        .expect("capital")
+        .expect("row");
+    assert_eq!(capital.state, CapitalAllocationState::Spent);
+    assert_eq!(capital.spent_usd, Usd::new(NOTIONAL));
+
+    let position = PgPositionRepository::new(db.clone())
+        .find_by_token(&TokenId::new("token-1"))
+        .await
+        .expect("position")
+        .expect("position row");
+    assert_eq!(position.shares, Shares::new(dec!(100)));
+
+    let recon = PgReconciliationRepository::new(db.clone())
+        .find_by_execution_order(&order_id)
+        .await
+        .expect("recon")
+        .expect("recon row");
+    assert_eq!(recon.result, ReconciliationResult::Filled);
+    assert!(recon.resolved_at.is_some());
+    // WORM: the submit-time evidence is preserved and the recon evidence appended.
+    assert_eq!(recon.evidence_json.0.len(), 2);
+    assert_eq!(recon.evidence_json.0[0].detail, "submit: ambiguous");
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn reconcile_ambiguous_to_not_filled_releases_capital() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let ids = seed_report_fixture(&db).await;
+    let submission = PgExecutionSubmissionRepository::new(db.clone());
+    let (intent_id, order_id) = ambiguous_order(&db, &submission, &ids).await;
+
+    let write = ReconciliationLedgerWrite {
+        order_state: ExecutionOrderState::Failed,
+        intent_status: OrderIntentStatus::Failed,
+        venue_status: Some(VenueOrderStatus::Expired),
+        venue_order_id: Some(OrderId::new("venue-amb")),
+        filled_at: None,
+        cancelled_at: Some(Utc::now()),
+        error_message: None,
+        capital: CapitalReconcileSettlement::Release,
+        fill: None,
+        result: ReconciliationResult::NotFilled,
+        evidence: ReconciliationEvidenceChain(vec![recon_evidence("recon: not filled")]),
+        venue_filled_shares: Some(Shares::ZERO),
+        venue_avg_price: None,
+        discrepancy_usd: None,
+        resolved_by: Some("system:reconciliation_worker".to_owned()),
+        resolved_at: Some(Utc::now()),
+    };
+    let recorded = submission
+        .apply_reconciliation(&order_id, write)
+        .await
+        .expect("apply");
+    assert_eq!(recorded.state, ExecutionOrderState::Failed);
+
+    let capital = PgCapitalAllocationRepository::new(db.clone())
+        .find_by_intent(&intent_id)
+        .await
+        .expect("capital")
+        .expect("row");
+    assert_eq!(capital.state, CapitalAllocationState::Released);
+    assert_eq!(capital.released_usd, Usd::new(NOTIONAL));
+    assert!(
+        PgPositionRepository::new(db.clone())
+            .find_by_token(&TokenId::new("token-1"))
+            .await
+            .expect("position")
+            .is_none()
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn reconcile_unresolvable_impairs_capital_and_leaves_order_ambiguous() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let ids = seed_report_fixture(&db).await;
+    let submission = PgExecutionSubmissionRepository::new(db.clone());
+    let (intent_id, order_id) = ambiguous_order(&db, &submission, &ids).await;
+
+    let write = ReconciliationLedgerWrite {
+        order_state: ExecutionOrderState::Ambiguous,
+        intent_status: OrderIntentStatus::Submitted,
+        venue_status: None,
+        venue_order_id: Some(OrderId::new("venue-amb")),
+        filled_at: None,
+        cancelled_at: None,
+        error_message: Some("conflicting evidence".to_owned()),
+        capital: CapitalReconcileSettlement::Impair,
+        fill: None,
+        result: ReconciliationResult::Unresolvable,
+        evidence: ReconciliationEvidenceChain(vec![recon_evidence("recon: unresolvable")]),
+        venue_filled_shares: None,
+        venue_avg_price: None,
+        discrepancy_usd: None,
+        resolved_by: None,
+        resolved_at: None,
+    };
+    let recorded = submission
+        .apply_reconciliation(&order_id, write)
+        .await
+        .expect("apply");
+    assert_eq!(recorded.state, ExecutionOrderState::Ambiguous);
+
+    let capital = PgCapitalAllocationRepository::new(db.clone())
+        .find_by_intent(&intent_id)
+        .await
+        .expect("capital")
+        .expect("row");
+    assert_eq!(capital.state, CapitalAllocationState::Impaired);
+
+    let recon_repo = PgReconciliationRepository::new(db.clone());
+    let recon = recon_repo
+        .find_by_execution_order(&order_id)
+        .await
+        .expect("recon")
+        .expect("row");
+    assert_eq!(recon.result, ReconciliationResult::Unresolvable);
+    assert!(recon.resolved_at.is_none());
+    assert!(
+        recon_repo
+            .has_unresolvable()
+            .await
+            .expect("has_unresolvable"),
+        "an unresolvable verdict must block auto execution",
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn reconcile_correction_is_idempotent() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let ids = seed_report_fixture(&db).await;
+    let submission = PgExecutionSubmissionRepository::new(db.clone());
+    let (intent_id, order_id) = ambiguous_order(&db, &submission, &ids).await;
+
+    let mut first = filled_write();
+    first.fill = Some(position_fill(&ids));
+    submission
+        .apply_reconciliation(&order_id, first)
+        .await
+        .expect("first apply");
+
+    // Second identical correction must be a no-op (order is already terminal):
+    // capital is not double-spent and the position is not double-written.
+    let mut second = filled_write();
+    second.fill = Some(position_fill(&ids));
+    submission
+        .apply_reconciliation(&order_id, second)
+        .await
+        .expect("second apply");
+
+    let capital = PgCapitalAllocationRepository::new(db.clone())
+        .find_by_intent(&intent_id)
+        .await
+        .expect("capital")
+        .expect("row");
+    assert_eq!(capital.spent_usd, Usd::new(NOTIONAL));
+
+    let position = PgPositionRepository::new(db.clone())
+        .find_by_token(&TokenId::new("token-1"))
+        .await
+        .expect("position")
+        .expect("row");
+    assert_eq!(
+        position.shares,
+        Shares::new(dec!(100)),
+        "idempotent reconciliation must not double the position",
+    );
+
+    let recon = PgReconciliationRepository::new(db.clone())
+        .find_by_execution_order(&order_id)
+        .await
+        .expect("recon")
+        .expect("row");
+    assert_eq!(
+        recon.evidence_json.0.len(),
+        2,
+        "the second no-op correction must not append more evidence",
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn operator_resolve_impaired_to_filled_spends_capital() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let ids = seed_report_fixture(&db).await;
+    let submission = PgExecutionSubmissionRepository::new(db.clone());
+    let (intent_id, order_id) = ambiguous_order(&db, &submission, &ids).await;
+
+    // Machine escalates to unresolvable (capital impaired)...
+    submission
+        .apply_reconciliation(
+            &order_id,
+            ReconciliationLedgerWrite {
+                order_state: ExecutionOrderState::Ambiguous,
+                intent_status: OrderIntentStatus::Submitted,
+                venue_status: None,
+                venue_order_id: Some(OrderId::new("venue-amb")),
+                filled_at: None,
+                cancelled_at: None,
+                error_message: Some("unresolvable".to_owned()),
+                capital: CapitalReconcileSettlement::Impair,
+                fill: None,
+                result: ReconciliationResult::Unresolvable,
+                evidence: ReconciliationEvidenceChain(vec![recon_evidence("unresolvable")]),
+                venue_filled_shares: None,
+                venue_avg_price: None,
+                discrepancy_usd: None,
+                resolved_by: None,
+                resolved_at: None,
+            },
+        )
+        .await
+        .expect("impair");
+
+    // ...then an operator resolves it to filled (Impaired -> Spent).
+    let mut resolve = filled_write();
+    resolve.fill = Some(position_fill(&ids));
+    resolve.resolved_by = Some("operator:alice".to_owned());
+    let recorded = submission
+        .apply_reconciliation(&order_id, resolve)
+        .await
+        .expect("operator resolve");
+    assert_eq!(recorded.state, ExecutionOrderState::Filled);
+
+    let capital = PgCapitalAllocationRepository::new(db.clone())
+        .find_by_intent(&intent_id)
+        .await
+        .expect("capital")
+        .expect("row");
+    assert_eq!(capital.state, CapitalAllocationState::Spent);
+    assert_eq!(capital.spent_usd, Usd::new(NOTIONAL));
+
+    let recon_repo = PgReconciliationRepository::new(db.clone());
+    assert!(
+        !recon_repo
+            .has_unresolvable()
+            .await
+            .expect("has_unresolvable"),
+        "operator resolve clears the unresolvable block",
+    );
+    let recon = recon_repo
+        .find_by_execution_order(&order_id)
+        .await
+        .expect("recon")
+        .expect("row");
+    assert_eq!(recon.resolved_by.as_deref(), Some("operator:alice"));
+}
 
 fn new_execution_order(intent_id: &OrderIntentId, ids: &TxnIds) -> NewExecutionOrder {
     NewExecutionOrder {

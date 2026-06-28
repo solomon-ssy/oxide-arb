@@ -26,9 +26,10 @@ use quant_pivot_repository::{
 
 use super::{AccountBundle, DataBundle, GovernanceBundle, InfraBundle};
 use crate::execution::{
-    AdmissionInputBuilder, AdmissionInputBuilderDeps, ClobOrderClient, CoreExecutionDispatcher,
-    DefaultAdmissionEngine, DispatchWake, ExecutionBreaker, ExecutionDispatcherDeps,
-    PolymarketOrderClient,
+    AdmissionInputBuilder, AdmissionInputBuilderDeps, ClobOrderClient, ClobReconciliationReader,
+    CoreExecutionDispatcher, DefaultAdmissionEngine, DispatchWake, EvidenceCollector,
+    ExecutionBreaker, ExecutionDispatcherDeps, PolymarketOrderClient, ReconciliationService,
+    ReconciliationServiceDeps, VenueEvidenceCollector, VenueReconciliationReader,
 };
 
 /// Dependencies for [`ExecutionBundle::assemble`].
@@ -48,6 +49,8 @@ pub struct ExecutionBundle {
     pub breaker: Arc<ExecutionBreaker>,
     /// Cross-table submission transactions (also drives boot recovery).
     pub submission: Arc<dyn ExecutionSubmissionRepository>,
+    /// Reconciliation engine (05.5): resolves in-flight orders to venue truth.
+    pub reconciliation: Arc<ReconciliationService>,
     /// Approve→submit wake signal (shared by the intent service and the
     /// dispatcher worker); the durable queue stays in Postgres.
     pub dispatch_wake: DispatchWake,
@@ -104,8 +107,9 @@ impl ExecutionBundle {
         }));
         let admission = Arc::new(DefaultAdmissionEngine::new(Arc::clone(&infra.metrics)));
 
+        let clob = deps.clob;
         let order_client: Arc<dyn PolymarketOrderClient> = Arc::new(ClobOrderClient::new(
-            deps.clob,
+            Arc::clone(&clob),
             Arc::clone(&deps.data.fee_calculator),
         ));
 
@@ -125,11 +129,38 @@ impl ExecutionBundle {
                 metrics: Arc::clone(&infra.metrics),
             }));
 
+        // Reconciliation engine (05.5): venue reader + fixed-order evidence
+        // collector + the service that resolves in-flight orders to venue truth.
+        let reader: Arc<dyn VenueReconciliationReader> =
+            Arc::new(ClobReconciliationReader::new(Arc::clone(&clob)));
+        let collector: Arc<dyn EvidenceCollector> = Arc::new(VenueEvidenceCollector::new(
+            reader,
+            Arc::clone(&deps.data.book_store),
+        ));
+        let reconciliation = Arc::new(ReconciliationService::new(ReconciliationServiceDeps {
+            collector,
+            order_client: Arc::clone(&order_client),
+            execution_orders: Arc::new(PgExecutionOrderRepository::new(pg.clone()))
+                as Arc<dyn ExecutionOrderRepository>,
+            intents: Arc::new(PgOrderIntentRepository::new(pg.clone()))
+                as Arc<dyn OrderIntentRepository>,
+            recommendations: Arc::new(PgRecommendationRepository::new(pg.clone()))
+                as Arc<dyn RecommendationRepository>,
+            reconciliation: Arc::new(PgReconciliationRepository::new(pg.clone()))
+                as Arc<dyn ReconciliationRepository>,
+            submission: Arc::clone(&submission),
+            fees: Arc::clone(&deps.data.fee_calculator),
+            breaker: Arc::clone(&breaker),
+            metrics: Arc::clone(&infra.metrics),
+            config: Arc::clone(&deps.governance.runtime_config),
+        }));
+
         Self {
             order_client,
             dispatcher,
             breaker,
             submission,
+            reconciliation,
             dispatch_wake: DispatchWake::new(),
         }
     }

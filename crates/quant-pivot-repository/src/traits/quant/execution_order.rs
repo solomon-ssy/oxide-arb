@@ -29,6 +29,15 @@ pub trait ExecutionOrderRepository: Send + Sync {
     /// orders are *not* blocking.
     async fn has_ambiguous_inflight(&self) -> Result<bool, StorageError>;
 
+    /// Orders whose venue truth is still unknown and whose capital is held —
+    /// `Submitted` (resting open) and `Ambiguous` (unconfirmed). These are the
+    /// inputs the reconciliation worker (05.5) resolves to a terminal verdict;
+    /// already-terminal orders (`Filled`/`Cancelled`/`Failed`) and synchronous
+    /// `PartiallyFilled` (capital + position already applied at submit) are
+    /// excluded so reconciliation never double-applies a fill. Ordered oldest
+    /// first, bounded by `limit`.
+    async fn find_reconcilable(&self, limit: u64) -> Result<Vec<ExecutionOrderInfo>, StorageError>;
+
     async fn transition(
         &self,
         execution_order_id: &ExecutionOrderId,

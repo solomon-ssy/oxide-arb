@@ -9,7 +9,7 @@
 
 use crate::{
     postgres::quant::{
-        capital_allocation::{lock_capital, release_capital, settle_capital},
+        capital_allocation::{lock_capital, reconcile_capital, release_capital, settle_capital},
         execution_order::validate_execution_order_transition,
         order_intent::{load_intent_for_update, validate_intent_transition},
         position,
@@ -19,12 +19,15 @@ use crate::{
 use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    domain::{ExecutionOrderInfo, NewExecutionOrder, OrderIntentInfo, SubmissionLedgerWrite},
+    domain::{
+        ExecutionOrderInfo, NewExecutionOrder, NewReconciliation, OrderIntentInfo,
+        ReconciliationLedgerWrite, SubmissionLedgerWrite,
+    },
     entities::{
         quant_execution_order, quant_order_intent, quant_recommendation, quant_reconciliation,
     },
     enums::quant::{ExecutionOrderState, OrderIntentStatus, RecommendationStatus},
-    types::{ExecutionOrderId, OrderIntentId, RecommendationId},
+    types::{ExecutionOrderId, OrderIntentId, RecommendationId, ReconciliationId},
 };
 use sea_orm::{
     ActiveModelTrait, ActiveValue, ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait,
@@ -242,6 +245,135 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
             .map_err(StorageError::from)
             .map(|rows| rows.into_iter().map(Into::into).collect())
     }
+
+    async fn apply_reconciliation(
+        &self,
+        execution_order_id: &ExecutionOrderId,
+        mut write: ReconciliationLedgerWrite,
+    ) -> Result<ExecutionOrderInfo, StorageError> {
+        let txn = self.db.begin().await.map_err(StorageError::from)?;
+
+        let order = quant_execution_order::Entity::find_by_id(execution_order_id.clone())
+            .lock_exclusive()
+            .one(&txn)
+            .await
+            .map_err(StorageError::from)?
+            .ok_or_else(|| {
+                StorageError::Conflict(format!("execution order not found: {execution_order_id}"))
+            })?;
+
+        // Idempotency guard: a terminal order has already had its capital and
+        // position settled (at submit or by a prior reconciliation). Never
+        // re-apply — return it unchanged.
+        if order.state.is_terminal() {
+            txn.commit().await.map_err(StorageError::from)?;
+            return Ok(order.into());
+        }
+
+        validate_execution_order_transition(order.state, write.order_state, execution_order_id)?;
+        let intent_id = order.order_intent_id.clone();
+        let order_intent_id_for_recon = intent_id.clone();
+        let existing_venue_order_id = order.venue_order_id.clone();
+
+        // Lock the intent so its status advances atomically with the ledger.
+        let intent = load_intent_for_update(&txn, &intent_id).await?;
+
+        let mut order_active = order.into_active_model();
+        order_active.state = ActiveValue::Set(write.order_state);
+        order_active.venue_order_id =
+            ActiveValue::Set(write.venue_order_id.clone().or(existing_venue_order_id));
+        order_active.venue_status = ActiveValue::Set(write.venue_status);
+        order_active.filled_at = ActiveValue::Set(write.filled_at);
+        order_active.cancelled_at = ActiveValue::Set(write.cancelled_at);
+        order_active.error_message = ActiveValue::Set(write.error_message.clone());
+        let execution_order = order_active
+            .update(&txn)
+            .await
+            .map_err(StorageError::from)?;
+
+        reconcile_capital(
+            &txn,
+            &intent_id,
+            &write.capital,
+            "reconciliation".to_owned(),
+        )
+        .await?;
+
+        if let Some(fill) = write.fill.take() {
+            position::apply_fill(&txn, fill).await?;
+        }
+
+        if write.intent_status != intent.status {
+            validate_intent_transition(intent.status, write.intent_status, &intent_id)?;
+            let mut intent_active = intent.into_active_model();
+            intent_active.status = ActiveValue::Set(write.intent_status);
+            intent_active
+                .update(&txn)
+                .await
+                .map_err(StorageError::from)?;
+        }
+
+        upsert_reconciliation_summary(&txn, execution_order_id, &order_intent_id_for_recon, write)
+            .await?;
+
+        txn.commit().await.map_err(StorageError::from)?;
+        Ok(execution_order.into())
+    }
+}
+
+/// Upsert the single reconciliation summary row for an execution order.
+///
+/// Updates the existing row in place (e.g. an `Ambiguous` order's submit-time
+/// `Pending` row), appending the freshly-collected evidence to the chain so the
+/// row stays append-only (WORM). Inserts a fresh row for an order that never
+/// had one (a resting `Open` order). The unique index on `execution_order_id`
+/// guarantees at most one summary per order.
+async fn upsert_reconciliation_summary(
+    db: &impl ConnectionTrait,
+    execution_order_id: &ExecutionOrderId,
+    order_intent_id: &OrderIntentId,
+    write: ReconciliationLedgerWrite,
+) -> Result<(), StorageError> {
+    let existing = quant_reconciliation::Entity::find()
+        .filter(quant_reconciliation::Column::ExecutionOrderId.eq(execution_order_id.clone()))
+        .one(db)
+        .await
+        .map_err(StorageError::from)?;
+
+    if let Some(row) = existing {
+        let mut chain = row.evidence_json.clone();
+        for evidence in write.evidence.into_inner() {
+            chain.push(evidence);
+        }
+        let mut active = row.into_active_model();
+        active.result = ActiveValue::Set(write.result);
+        active.evidence_json = ActiveValue::Set(chain);
+        active.venue_filled_shares = ActiveValue::Set(write.venue_filled_shares);
+        active.venue_avg_price = ActiveValue::Set(write.venue_avg_price);
+        active.discrepancy_usd = ActiveValue::Set(write.discrepancy_usd);
+        active.resolved_by = ActiveValue::Set(write.resolved_by);
+        active.resolved_at = ActiveValue::Set(write.resolved_at);
+        active.update(db).await.map_err(StorageError::from)?;
+        return Ok(());
+    }
+
+    let new = NewReconciliation {
+        reconciliation_id: ReconciliationId::from_v7(),
+        execution_order_id: execution_order_id.clone(),
+        order_intent_id: order_intent_id.clone(),
+        result: write.result,
+        evidence_json: write.evidence,
+        venue_filled_shares: write.venue_filled_shares,
+        venue_avg_price: write.venue_avg_price,
+        discrepancy_usd: write.discrepancy_usd,
+        resolved_by: write.resolved_by,
+        resolved_at: write.resolved_at,
+    };
+    quant_reconciliation::Entity::insert(new.into_active_model())
+        .exec(db)
+        .await
+        .map_err(StorageError::from)?;
+    Ok(())
 }
 
 /// Restore the pre-claim approval status after a transient admission defer.

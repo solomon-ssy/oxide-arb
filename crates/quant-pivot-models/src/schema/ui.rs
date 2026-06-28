@@ -844,6 +844,15 @@ fn execution_policy_fields() -> Vec<FieldUiEntry> {
             "最大打开意图",
             210,
         ),
+    ]
+    .into_iter()
+    .chain(execution_reconciliation_fields())
+    .chain(execution_breaker_fields())
+    .collect()
+}
+
+fn execution_reconciliation_fields() -> Vec<FieldUiEntry> {
+    vec![
         boolean(
             "execution.reconciliation.enabled",
             "Reconciliation enabled",
@@ -856,10 +865,13 @@ fn execution_policy_fields() -> Vec<FieldUiEntry> {
             "对账间隔秒数",
             230,
         ),
+        integer(
+            "execution.reconciliation.stale_open_secs",
+            "Reconciliation stale-open deadline",
+            "对账强制终态秒数",
+            235,
+        ),
     ]
-    .into_iter()
-    .chain(execution_breaker_fields())
-    .collect()
 }
 
 fn execution_breaker_fields() -> Vec<FieldUiEntry> {

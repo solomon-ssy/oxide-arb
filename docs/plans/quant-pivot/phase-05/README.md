@@ -297,6 +297,8 @@ flowchart LR
 | [`05`](../05-execution-risk-and-governance.md) §13 | `create-intent` 改为 `POST /api/quant/intents`（删除 501 stub） | 05.2 |
 | [`05`](../05-execution-risk-and-governance.md) §16.3 | **as-built 审计事务边界**：intent+capital 始终同一 PG 事务；op-log 仅在**后台发起**（expire sweep / report-termination 级联 invalidate）写入该事务，HTTP 发起的 create/approve/reject/cancel 由 `operation_audit` 中间件审计（与全站受治理路由一致）。报告级联钩子覆盖 revoke + expire 两条终态 | 05.2 |
 | [`09`](../09-account-capital-position-reconciliation.md) §6 | `quant_position` / `quant_capital_allocation` / `quant_reconciliation` + 完整资金 FSM + 对账 worker 正式落 Phase 5 各子phase | 05.0/05.2/05.4/05.5 |
+| [`05`](../05-execution-risk-and-governance.md) §11 | 对账落地：`ReconciliationWorker`（`find_reconcilable` sweep + 主动撤单 + 终态一次性守卫幂等校正）；证据 #3/#4 改"当前绝对余额旁证"（05.4 未捕获基线）；cadence/阈值用 `execution.reconciliation.interval_secs`/新增 `stale_open_secs` | 05.5 |
+| [`05`](../05-execution-risk-and-governance.md) §6.5 | `ExecutionBreaker` 接入 recon 维度：`observe_unresolvable_recon` 硬触发 kill-switch `execution_halted` latch（dimension `recon`） | 05.5 |
 | [`06`](../06-config-deploy-and-ops.md) | runtime-config 删除 `execution.kill_switch.enabled` 布尔；新增 kill-switch operational 单例语义 + 执行 metrics 清单 | 05.0/05.1 |
 | [`06`](../06-config-deploy-and-ops.md) | `portfolio` 段新增 `optimizer`（greedy/lp）+ `constraints.correlation`；`execution.equity_snapshot_secs` | 05.8/05.9 |
 | [`08`](../08-third-party-crates-and-ml-stack.md) §9/§16 | `good_lp` 由"Phase 5 若 greedy 不够"明确为 **Phase 5 已实现的可选升级**（greedy 默认 + fallback，pure-Rust microlp 默认层 + 可选 native HiGHS） | 05.8 |

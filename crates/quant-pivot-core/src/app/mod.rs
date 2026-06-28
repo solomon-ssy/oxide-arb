@@ -10,6 +10,7 @@ pub mod lifecycle;
 pub mod model_training;
 pub mod periodic_services;
 pub mod quant_report;
+pub mod reconciliation_worker;
 pub mod report_scheduler;
 pub mod runtime_tasks;
 pub mod task_id;

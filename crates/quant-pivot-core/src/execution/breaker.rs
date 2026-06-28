@@ -49,7 +49,7 @@ use crate::{execution::admission::VenueHealth, observability::metrics_hub::Metri
 
 /// Audit actor recorded for breaker-initiated kill-switch escalations.
 const BREAKER_ACTOR: &str = "system:execution_breaker";
-/// Breaker dimension label for metrics / op-log (only `venue` lands in 05.4).
+/// Breaker dimension label for metrics / op-log (venue health, 05.4).
 const DIMENSION_VENUE: &str = "venue";
 
 /// Lock-free venue-health hot read shared with admission `#18`.
@@ -243,7 +243,7 @@ impl ExecutionBreaker {
         };
         self.health.store(outcome.health);
         if outcome.tripped {
-            self.trip_kill_switch(detail).await;
+            self.trip_kill_switch(DIMENSION_VENUE, detail).await;
         }
     }
 
@@ -297,8 +297,8 @@ impl ExecutionBreaker {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    async fn trip_kill_switch(&self, detail: &str) {
-        let reason = format!("execution breaker tripped (venue): {detail}");
+    pub async fn trip_kill_switch(&self, dimension: &str, detail: &str) {
+        let reason = format!("execution breaker tripped ({dimension}): {detail}");
         let command = SetKillSwitchCommand {
             target: KillSwitchState::ExecutionHalted,
             actor: BREAKER_ACTOR.to_owned(),
@@ -308,8 +308,8 @@ impl ExecutionBreaker {
         };
         match self.kill_switch.set(command).await {
             Ok(_) => {
-                self.metrics.inc_execution_breaker_trip(DIMENSION_VENUE);
-                self.write_audit(&reason).await;
+                self.metrics.inc_execution_breaker_trip(dimension);
+                self.write_audit(dimension, &reason).await;
             }
             Err(error) => {
                 tracing::error!(%error, "execution breaker failed to trip kill-switch");
@@ -319,10 +319,10 @@ impl ExecutionBreaker {
 
     /// Best-effort WORM audit for the system-initiated escalation (the operation
     /// audit middleware only covers HTTP-origin kill-switch changes).
-    async fn write_audit(&self, reason: &str) {
+    async fn write_audit(&self, dimension: &str, reason: &str) {
         let log = NewOperationLog {
             id: OperationLogId::from_v7(),
-            request_id: format!("execution-breaker:{DIMENSION_VENUE}"),
+            request_id: format!("execution-breaker:{dimension}"),
             actor_user_id: None,
             actor_username: Some(BREAKER_ACTOR.to_owned()),
             acting_role: Some("execution_breaker".to_owned()),

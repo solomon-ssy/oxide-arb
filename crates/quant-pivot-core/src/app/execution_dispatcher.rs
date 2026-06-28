@@ -131,8 +131,14 @@ impl AppContext {
                     () = wake.wait() => {}
                     () = tokio::time::sleep(poll) => {}
                 }
-                if let Err(error) =
-                    auto_dispatch_pass(&dispatcher, &intents, &runtime_mode, &kill_switch).await
+                if let Err(error) = auto_dispatch_pass(
+                    &dispatcher,
+                    &intents,
+                    &reconciliation,
+                    &runtime_mode,
+                    &kill_switch,
+                )
+                .await
                 {
                     tracing::warn!(%error, "auto-execution dispatch pass failed");
                 }
@@ -145,11 +151,11 @@ impl AppContext {
 /// reconciliation row and enqueue a `Pending` one, so a crash mid-submit is
 /// reconciled (05.5) rather than silently lost. Returns the count enqueued.
 ///
-/// Deferred to 05.5: the reconciliation **worker** that consumes these `Pending`
-/// rows, resolves venue truth for `Ambiguous` orders, and clears the fail-closed
-/// admission block (`#17`, keyed off `Ambiguous` order state). Until then a
-/// crash leaves truth-unknown exposure that pauses auto-execution and is handled
-/// by an operator.
+/// The 05.5 `ReconciliationWorker` consumes these `Pending` rows (and every
+/// `find_reconcilable` order), resolves venue truth for `Ambiguous`/resting
+/// orders, and either drives them to a terminal verdict (clearing the
+/// `Ambiguous` admission block `#17`) or escalates to `Unresolvable` (latching
+/// the kill-switch for an operator).
 async fn recover_dangling_orders(
     submission: &Arc<dyn ExecutionSubmissionRepository>,
     reconciliation: &Arc<dyn ReconciliationRepository>,
@@ -180,18 +186,24 @@ async fn recover_dangling_orders(
 }
 
 /// One auto-dispatch pass: worker-level early-exit unless mode is
-/// `auto_execution` and the kill-switch admits new entries, then pull a bounded
-/// batch of `ApprovedByPolicy` intents and submit each. Each submit is
-/// independently row-locked + admitted; a per-intent failure never aborts the
-/// batch.
+/// `auto_execution`, the kill-switch admits new entries, and no unresolvable
+/// reconciliation is outstanding; then pull a bounded batch of
+/// `ApprovedByPolicy` intents and submit each. Each submit is independently
+/// row-locked + admitted; a per-intent failure never aborts the batch. The
+/// `has_unresolvable` early-exit is a cheap batch-level backstop in addition to
+/// admission `#17`, which denies the same condition per intent (05.5).
 async fn auto_dispatch_pass(
     dispatcher: &Arc<dyn ExecutionSubmitPort>,
     intents: &Arc<dyn OrderIntentRepository>,
+    reconciliation: &Arc<dyn ReconciliationRepository>,
     runtime_mode: &RuntimeModeHandle,
     kill_switch: &KillSwitchHandle,
 ) -> QuantResult<()> {
     if runtime_mode.current() != QuantRuntimeMode::AutoExecution || !kill_switch.allows_new_entry()
     {
+        return Ok(());
+    }
+    if reconciliation.has_unresolvable().await? {
         return Ok(());
     }
     let query = OrderIntentListQuery {

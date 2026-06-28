@@ -3,7 +3,7 @@
 use crate::traits::{CapitalAllocationRepository, ReservedCapitalRepository};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    domain::{CapitalAllocationInfo, CapitalSettlement},
+    domain::{CapitalAllocationInfo, CapitalReconcileSettlement, CapitalSettlement},
     entities::quant_capital_allocation,
     enums::execution::CapitalAllocationState,
     types::{OrderIntentId, Usd},
@@ -307,6 +307,82 @@ pub async fn settle_capital(
     } else {
         active.state = ActiveValue::Set(CapitalAllocationState::Impaired);
         active.reason = ActiveValue::Set(format!("impaired: {reason}"));
+    }
+    active.update(db).await.map_err(StorageError::from)?;
+    Ok(())
+}
+
+/// Apply a reconciliation verdict to an intent's capital allocation
+/// ([`CapitalReconcileSettlement`], Phase 05.5).
+///
+/// State-guarded and **idempotent**: only a row still `Locked` (or `Impaired`,
+/// for an operator override of an unresolvable) is moved; a row already
+/// `Spent`/`Released` is left untouched, so re-running reconciliation never
+/// double-counts capital. Fail-closed: a verdict that contradicts terminal
+/// capital (e.g. a "filled" verdict on a `Released` row) forces `Impaired`
+/// rather than rewriting settled money, and any computed write breaking the
+/// money invariant likewise forces `Impaired` with amounts intact.
+pub async fn reconcile_capital(
+    db: &impl ConnectionTrait,
+    intent_id: &OrderIntentId,
+    settlement: &CapitalReconcileSettlement,
+    reason: String,
+) -> Result<(), StorageError> {
+    use CapitalAllocationState as State;
+    use CapitalReconcileSettlement as Recon;
+
+    if matches!(settlement, Recon::Hold) {
+        return Ok(());
+    }
+    let cap = load_capital(db, intent_id).await?;
+    let basis = cap.allocated_usd.max(cap.locked_usd);
+
+    // (target_state, spent, released, contradiction). `contradiction` forces
+    // `Impaired` while preserving the persisted amounts.
+    let (state, spent_usd, released_usd, contradiction) = match settlement {
+        Recon::Hold => return Ok(()),
+        Recon::Settle { spent_usd } => match cap.state {
+            State::Spent => return Ok(()),
+            State::Locked | State::Impaired => {
+                (State::Spent, *spent_usd, basis - *spent_usd, false)
+            }
+            _ => (State::Impaired, cap.spent_usd, cap.released_usd, true),
+        },
+        Recon::Release => match cap.state {
+            State::Released => return Ok(()),
+            State::Locked | State::Impaired => {
+                (State::Released, cap.spent_usd, basis - cap.spent_usd, false)
+            }
+            _ => (State::Impaired, cap.spent_usd, cap.released_usd, true),
+        },
+        Recon::Impair => match cap.state {
+            State::Locked => (State::Impaired, cap.spent_usd, cap.released_usd, false),
+            // Already impaired, or terminal (Spent/Released): never un-settle.
+            _ => return Ok(()),
+        },
+    };
+
+    let locked_usd = cap.locked_usd;
+    let invariant_ok =
+        validate_non_negative(cap.allocated_usd, locked_usd, spent_usd, released_usd).is_ok()
+            && capital_invariant_ok(
+                cap.planned_usd,
+                cap.allocated_usd,
+                locked_usd,
+                spent_usd,
+                released_usd,
+            );
+
+    let mut active = cap.into_active_model();
+    if contradiction || !invariant_ok {
+        active.state = ActiveValue::Set(CapitalAllocationState::Impaired);
+        active.reason = ActiveValue::Set(format!("impaired (reconcile): {reason}"));
+    } else {
+        active.state = ActiveValue::Set(state);
+        active.locked_usd = ActiveValue::Set(locked_usd);
+        active.spent_usd = ActiveValue::Set(spent_usd);
+        active.released_usd = ActiveValue::Set(released_usd);
+        active.reason = ActiveValue::Set(reason);
     }
     active.update(db).await.map_err(StorageError::from)?;
     Ok(())

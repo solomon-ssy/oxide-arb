@@ -451,6 +451,37 @@ impl ClobClient {
         .await
     }
 
+    /// Query the current conditional-token (ERC-1155 outcome share) balance.
+    ///
+    /// Uses the CLOB `balance-allowance` endpoint with `AssetType::Conditional`
+    /// scoped to `token_id`. Returns the raw on-exchange share balance — the
+    /// reconciliation evidence for whether outcome shares were actually received.
+    #[tracing::instrument(skip(self), fields(token_id = ?token_id))]
+    pub async fn token_balance(&self, token_id: &TokenId) -> Result<Shares, ApiError> {
+        self.rate_limiter.acquire("GET /balance-allowance").await;
+
+        let sdk = Arc::clone(&self.sdk);
+        let asset_id = WireTokenId::try_from(token_id)?.0;
+
+        retry::retry_with_policy(&RetryPolicy::clob_default(), || {
+            let sdk = Arc::clone(&sdk);
+            async move {
+                let mut request = BalanceAllowanceRequest::builder()
+                    .asset_type(AssetType::Conditional)
+                    .build();
+                request.token_id = Some(asset_id);
+
+                let resp = sdk
+                    .balance_allowance(request)
+                    .await
+                    .map_err(|e| ApiError::from(SdkClobError(&e)))?;
+
+                Ok(Shares::new(resp.balance))
+            }
+        })
+        .await
+    }
+
     /// List authenticated account trades, optionally filtered by market, token,
     /// and unix-second lower bound.
     #[tracing::instrument(skip(self), fields(market_id = ?market_id, token_id = ?token_id))]

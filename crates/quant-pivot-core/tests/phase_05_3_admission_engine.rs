@@ -852,6 +852,13 @@ impl ExecutionOrderRepository for StubExecutionOrders {
         Ok(false)
     }
 
+    async fn find_reconcilable(
+        &self,
+        _limit: u64,
+    ) -> Result<Vec<ExecutionOrderInfo>, StorageError> {
+        Ok(Vec::new())
+    }
+
     async fn transition(
         &self,
         _execution_order_id: &ExecutionOrderId,

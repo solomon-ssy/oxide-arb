@@ -10,7 +10,7 @@ use quant_pivot_models::{
 };
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel,
-    IntoActiveValue, PaginatorTrait, QueryFilter,
+    IntoActiveValue, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect,
 };
 
 /// Postgres-backed execution-order repository.
@@ -64,6 +64,20 @@ impl ExecutionOrderRepository for PgExecutionOrderRepository {
             .await
             .map_err(StorageError::from)
             .map(|count| count > 0)
+    }
+
+    async fn find_reconcilable(&self, limit: u64) -> Result<Vec<ExecutionOrderInfo>, StorageError> {
+        quant_execution_order::Entity::find()
+            .filter(quant_execution_order::Column::State.is_in([
+                ExecutionOrderState::Submitted,
+                ExecutionOrderState::Ambiguous,
+            ]))
+            .order_by_asc(quant_execution_order::Column::SubmittedAt)
+            .limit(limit)
+            .all(&self.db)
+            .await
+            .map_err(StorageError::from)
+            .map(|rows| rows.into_iter().map(Into::into).collect())
     }
 
     async fn transition(

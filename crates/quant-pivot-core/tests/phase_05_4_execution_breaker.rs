@@ -210,6 +210,44 @@ async fn sustained_failure_trips_latched_kill_switch_breaker_stays_degraded() {
 }
 
 #[tokio::test]
+async fn unresolvable_recon_trips_execution_breaker_to_halt() {
+    // Recon is a hard trigger: a single unresolvable verdict latches the
+    // kill-switch immediately (no failure window), under the `recon` dimension.
+    let (breaker, kill_switch, op_log, metrics) = breaker(config(99, 99, 0));
+
+    breaker
+        .trip_kill_switch("recon", "execution order abc unresolvable")
+        .await;
+
+    let sets = kill_switch.sets.lock().unwrap();
+    assert_eq!(
+        sets.len(),
+        1,
+        "one immediate trip on the unresolvable verdict"
+    );
+    assert_eq!(sets[0].target, KillSwitchState::ExecutionHalted);
+    assert!(
+        sets[0].latch,
+        "recon trip must latch (operator ack to clear)"
+    );
+    assert!(!sets[0].ack);
+    assert_eq!(sets[0].actor, "system:execution_breaker");
+    drop(sets);
+    assert_eq!(
+        *op_log.appended.lock().unwrap(),
+        1,
+        "trip writes one audit row"
+    );
+    assert_eq!(
+        metrics
+            .execution_breaker_trips
+            .with_label_values(&["recon"])
+            .get(),
+        1,
+    );
+}
+
+#[tokio::test]
 async fn trip_does_not_re_fire_kill_switch_while_latched() {
     let (breaker, kill_switch, _op, _m) = breaker(config(2, 3, 0));
     for tag in ["e1", "e2", "e3", "e4", "e5"] {
