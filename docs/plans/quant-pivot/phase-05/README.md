@@ -56,6 +56,7 @@ published recommendation
 | 05.7 | Attribution / API / Governance Closeout | **归因 + 可观测 + 治理收尾** | [`05.7-attribution-api-governance-closeout.md`](05.7-attribution-api-governance-closeout.md) |
 | 05.8 | Portfolio Optimization (good_lp) & Correlation Cap | **组合优化升级 + 相关性约束生效** | [`05.8-portfolio-optimization-good-lp.md`](05.8-portfolio-optimization-good-lp.md) |
 | 05.9 | Equity History & Drawdown-Aware Sizing | **回撤感知 sizing 闭环** | [`05.9-equity-history-and-drawdown-aware-sizing.md`](05.9-equity-history-and-drawdown-aware-sizing.md) |
+| 05.10 | AutoRedeem Settlement (CTF On-Chain) | **HoldToResolution 链上赎回尾项** | [`05.10-auto-redeem-settlement.md`](05.10-auto-redeem-settlement.md) |
 
 ## 2. 依赖图
 
@@ -74,6 +75,7 @@ flowchart TD
     P54 --> P57["05.7 Attribution / API / Governance Closeout"]
     P55 --> P57
     P56 --> P57
+    P56 --> P510["05.10 AutoRedeem Settlement"]
     P50 --> P58["05.8 Portfolio Optimization (good_lp) & Correlation Cap"]
     P56 --> P59["05.9 Equity History & Drawdown-Aware Sizing"]
     P54 --> P59
@@ -264,11 +266,13 @@ flowchart LR
 
 | 延后能力 | 详细设计位置 | 为何不在 Phase 5 | 目标相位 |
 |---|---|---|---|
-| `ort` / ONNX 线上推理 | 父 [`08`](../08-third-party-crates-and-ml-stack.md) §17（artifact 契约/load/推理/风险/引入门槛）、§20（多模型编排） | ① 属 **ML 模型族扩展**，非执行/风险/治理；② **MSRV 硬阻塞**：`ort 2.x` 需 MSRV 1.88，workspace 当前 1.85（08 §7.1），须先做 MSRV 决策 + Docker/native spike（08 §12.5）；③ weighted scorer 已满足执行闭环 | **Phase 6（ML 扩展相位）**：Phase 5 落地后按 08 §17 开 `phase-06/` 目录 |
-| classical model（smartcore/linfa）主路径 **publish** | 父 [`08`](../08-third-party-crates-and-ml-stack.md) §15（artifact 契约/解释性/guardrails）、§5 | 同上：ML 模型族扩展；model registry 已支持 artifact 类型，**执行不依赖**具体模型族 | **Phase 6（ML 扩展相位）** |
-| 研究侧 `Sell` 排序模型（机会性平仓信号） | 父 [`08`](../08-third-party-crates-and-ml-stack.md) §20、[`03`](../03-data-factor-model-pipeline.md) | 执行侧平仓已由 05.6 exit plan 覆盖；**机会性 Sell scorer 是 ML/研究扩展**，非执行闭环必需 | **Phase 6（ML 扩展相位）** |
-| `SettlementPolicy::AutoRedeem` 链上赎回 | 05.6 §11（CTF `redeemPositions` via alloy 合约绑定，市场 resolution 后触发） | 需**新增 on-chain CTF 合约调用能力**（当前 api 仅 CLOB REST + 签名，无 CTF redeem 绑定），是一块独立 venue 集成 | **Phase 5 收尾即时项**：05.6 已给出具体设计；若 venue 集成工作量独立，紧随 05.6 实现 |
-| 多副本 leader-elected execution/exit/recon worker | 父 [`08`](../08-third-party-crates-and-ml-stack.md) §8（`apalis` + leader/worker） | 属**水平扩展/部署架构**，非业务闭环；单实例 + advisory lock 在单副本下正确且安全 | **Phase 8+** |
+| `ort` / ONNX 线上推理 | 父 [`08`](../08-third-party-crates-and-ml-stack.md) §17；[`phase-06/README.md`](../phase-06/README.md)（06.3 待开） | ① **ML 模型族扩展**；② **MSRV 硬阻塞**（08 §7.1/§12.5）；③ weighted scorer 已满足执行闭环 | **Phase 6** |
+| classical model（smartcore/linfa）主路径 **publish** | 父 [`08`](../08-third-party-crates-and-ml-stack.md) §15；[`phase-06/README.md`](../phase-06/README.md)（06.4 待开） | ML 模型族扩展；registry 已支持 artifact 类型 | **Phase 6** |
+| 研究侧 `Sell` 排序模型（机会性平仓信号） | **[`phase-06/06.1-opportunistic-sell-exit-signal.md`](../phase-06/06.1-opportunistic-sell-exit-signal.md)**（闭合 05.6 `ExitSignalEvaluator` seam） | 执行侧平仓已由 05.6 覆盖；机会性 scorer 填 seam impl | **Phase 6** |
+| 跨账户周期 reconciliation report | **[`phase-06/06.2-cross-account-reconciliation-report.md`](../phase-06/06.2-cross-account-reconciliation-report.md)**（登记于 05.5 §11） | 05.5 逐单对账已闭环；跨账户聚合属增强 | **Phase 6** |
+| `SettlementPolicy::AutoRedeem` 链上赎回 | **[`05.10-auto-redeem-settlement.md`](05.10-auto-redeem-settlement.md)** | 独立 on-chain CTF 集成（api 无 redeem 绑定） | **Phase 5 收尾**：05.6 后、05.7 前或并行 |
+| 多副本 leader-elected execution/exit/recon worker | **[`phase-08/README.md`](../phase-08/README.md)** §2 | 水平扩展；单实例 advisory lock 首版正确 | **Phase 8+** |
+| Trailing stop 高频 peak 跟踪 | **[`phase-08/README.md`](../phase-08/README.md)** §3 | 05.6 `monitor_secs` 首版足够 | **Phase 8+** |
 
 > 判定标准：6.2 每条都满足「**有详细设计**（指向 08/05.6 的具体章节）+ **有明确目标相位** + **有不在
 > Phase 5 的硬理由**（范畴外 / MSRV 阻塞 / 独立 venue 集成 / 部署架构）」。不存在「无计划的模糊延后」。
@@ -299,7 +303,11 @@ flowchart LR
 | [`09`](../09-account-capital-position-reconciliation.md) §6 | `quant_position` / `quant_capital_allocation` / `quant_reconciliation` + 完整资金 FSM + 对账 worker 正式落 Phase 5 各子phase | 05.0/05.2/05.4/05.5 |
 | [`05`](../05-execution-risk-and-governance.md) §11 | 对账落地：`ReconciliationWorker`（`find_reconcilable` sweep + 主动撤单 + 终态一次性守卫幂等校正）；证据 #3/#4 改"当前绝对余额旁证"（05.4 未捕获基线）；cadence/阈值用 `execution.reconciliation.interval_secs`/新增 `stale_open_secs` | 05.5 |
 | [`05`](../05-execution-risk-and-governance.md) §6.5 | `ExecutionBreaker` 接入 recon 维度：`observe_unresolvable_recon` 硬触发 kill-switch `execution_halted` latch（dimension `recon`） | 05.5 |
+| [`05`](../05-execution-risk-and-governance.md) §6 / §16.5 | **退出闭环 as-built（R3）**：`quant_position` 改 per-lot（`PositionId`+`order_intent_id`，realized PnL 精确）；exit FSM 落 `quant_order_intent`（`exit_state`/`exit_reason`/`next_check_at`/`peak_mark_price`/`last_signal_recheck_at`）；`ExitPolicySpec` 全量冻结 `ExitPlan`；`HoldToResolution` 抑制获利/超时档仅保留保护档；trailing 折叠进 stop-loss；退出提交单事务 `create_exit_order_and_mark_closing`+`record_exit_result`（capital `Spent→Released`）；对账相位感知（Exit 单走 `apply_exit`） | 05.6 |
+| [`05`](../05-execution-risk-and-governance.md) §6.5 | `ExecutionBreaker` 第三维度日内已实现亏损：`observe_realized_pnl`（UTC 日界清零）≥80%→Degraded(#18)、≥cap→`execution_halted` latch；config `execution.breaker.daily_realized_loss_cap_usd` | 05.6 |
+| [`05`](../05-execution-risk-and-governance.md) §4.2 #20 / §1.3 | admission `#20` `ExitMonitorReadiness` 真实化（`ExitMonitorHealthHandle` worker 心跳）；mode preflight `exit_monitor_healthy` 由 soft 改 hard | 05.6 |
 | [`06`](../06-config-deploy-and-ops.md) | runtime-config 删除 `execution.kill_switch.enabled` 布尔；新增 kill-switch operational 单例语义 + 执行 metrics 清单 | 05.0/05.1 |
+| [`06`](../06-config-deploy-and-ops.md) | `execution` 段新增 `exit_monitor.{enabled,monitor_secs,signal_recheck_secs,signal_invalidation_ratio}` + `breaker.daily_realized_loss_cap_usd`；metric `quant_exit_triggers_total{reason}` | 05.6 |
 | [`06`](../06-config-deploy-and-ops.md) | `portfolio` 段新增 `optimizer`（greedy/lp）+ `constraints.correlation`；`execution.equity_snapshot_secs` | 05.8/05.9 |
 | [`08`](../08-third-party-crates-and-ml-stack.md) §9/§16 | `good_lp` 由"Phase 5 若 greedy 不够"明确为 **Phase 5 已实现的可选升级**（greedy 默认 + fallback，pure-Rust microlp 默认层 + 可选 native HiGHS） | 05.8 |
 | [`04`](../04-topn-report-and-recommendation.md) §9 | sizing `drawdown_scaling` 在 Phase 5 由 `quant_equity_snapshot` 提供真实回撤（不再恒 neutral） | 05.9 |

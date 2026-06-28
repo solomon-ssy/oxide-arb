@@ -194,13 +194,18 @@ crate::wire_enum! {
     }
 }
 
-crate::wire_enum! {
+crate::pg_enum! {
+    type_name = "qp_exit_reason",
+    /// Why a position lot exited (persisted on `quant_order_intent.exit_reason`).
     pub enum ExitReason {
         TakeProfit => "take_profit",
         StopLoss => "stop_loss",
         TimeExit => "time_exit",
         PartialExit => "partial_exit",
         SignalInvalidated => "signal_invalidated",
+        /// Opportunistic model-driven Sell (Phase 6 Sell scorer); contract +
+        /// metric label land now so the exit loop is wired for it.
+        Opportunistic => "opportunistic",
         Manual => "manual",
         SettlementHold => "settlement_hold",
         KillSwitchEmergency => "kill_switch_emergency",

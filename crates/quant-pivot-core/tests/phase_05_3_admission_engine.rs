@@ -11,8 +11,8 @@ use chrono::{DateTime, Duration, TimeZone, Utc};
 use quant_pivot_core::{
     execution::{
         AdmissionDecision, AdmissionInput, AdmissionInputBuilder, AdmissionInputBuilderDeps,
-        AdmissionSeams, DefaultAdmissionEngine, ExecutionAdmissionEngine, StateVersion,
-        VenueHealth, VenueHealthHandle,
+        AdmissionSeams, DefaultAdmissionEngine, ExecutionAdmissionEngine, ExitMonitorHealthHandle,
+        StateVersion, VenueHealth, VenueHealthHandle,
     },
     governance::{KillSwitchHandle, RuntimeModeHandle},
     observability::metrics_hub::MetricsHub,
@@ -34,7 +34,7 @@ use quant_pivot_models::{
     enums::{
         common::{OrderType, Side},
         execution::{
-            AdmissionCheckId, AdmissionOutcome, CapitalAllocationState, KillSwitchState,
+            AdmissionCheckId, AdmissionOutcome, CapitalAllocationState, ExitState, KillSwitchState,
             OrderIntentKind,
         },
         quant::{
@@ -45,10 +45,10 @@ use quant_pivot_models::{
     },
     runtime_config::RuntimeConfig,
     types::{
-        Bps, CapitalAllocationId, ContentHash, EntryOrderSpec, ExecutionOrderId, ExitPolicySpec,
-        ModelSpecId, ModelVersionId, OrderIntentId, Price, RecommendationId,
-        RecommendationReportId, ReconciliationId, RuntimeConfigVersionId, SchemaVersion, Shares,
-        Usd,
+        Bps, CapitalAllocationId, ContentHash, EntryOrderSpec, ExecutedPartialExitNodes,
+        ExecutionOrderId, ExitPolicySpec, ModelSpecId, ModelVersionId, OrderIntentId, Price,
+        RecommendationId, RecommendationReportId, ReconciliationId, RuntimeConfigVersionId,
+        SchemaVersion, Shares, Usd,
     },
 };
 use quant_pivot_repository::traits::{
@@ -118,13 +118,28 @@ fn intent(rec: &RecommendationInfo) -> OrderIntentInfo {
         },
         exit_policy_json: ExitPolicySpec {
             take_profit_price: rec.exit_plan.take_profit_price,
+            take_profit_pct: rec.exit_plan.take_profit_pct,
             stop_loss_price: rec.exit_plan.stop_loss_price,
+            stop_loss_pct: rec.exit_plan.stop_loss_pct,
             time_exit_at: None,
+            max_hold_secs: rec.exit_plan.max_hold_secs,
+            trailing_stop: rec.exit_plan.trailing_stop.clone(),
+            signal_invalidation_rules: rec.exit_plan.signal_invalidation_rules.clone(),
             partial_exit_nodes: Vec::new(),
             settlement_policy: rec.exit_plan.settlement_policy,
+            manual_review_at: rec.exit_plan.manual_review_at,
+            entry_reference_price: rec.entry_plan.limit_price.unwrap_or(Price::ZERO),
+            entry_composite_score: rec.composite_score,
         },
         risk_envelope_hash: rec.risk_envelope.canonical_hash().expect("hash"),
         expires_at: Utc.timestamp_opt(1_700_003_600, 0).unwrap(),
+        exit_state: ExitState::NotStarted,
+        exit_reason: None,
+        next_check_at: None,
+        peak_mark_price: None,
+        last_signal_recheck_at: None,
+        executed_partial_exit_node_ids: ExecutedPartialExitNodes::default(),
+        pending_partial_exit_node_id: None,
         created_at: now(),
         updated_at: now(),
     }
@@ -584,6 +599,11 @@ async fn admission_fail_closed_when_account_unavailable() {
         runtime_mode: RuntimeModeHandle::new(QuantRuntimeMode::SemiAuto),
         kill_switch: KillSwitchHandle::new(KillSwitchState::Closed),
         venue_health: VenueHealthHandle::default(),
+        exit_monitor_health: {
+            let health = ExitMonitorHealthHandle::new();
+            health.publish(now(), 3_600);
+            health
+        },
     };
     let builder = AdmissionInputBuilder::new(deps);
     let result = builder.build(&intent, now()).await;

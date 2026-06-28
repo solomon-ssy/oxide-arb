@@ -13,23 +13,35 @@ use quant_pivot_models::domain::{DataQualityPort, ExecutionSubmitPort};
 use quant_pivot_repository::{
     postgres::{
         PgCapitalAllocationRepository, PgExecutionOrderRepository, PgExecutionSubmissionRepository,
-        PgModelRegistryRepository, PgOrderIntentRepository, PgRecommendationReportRepository,
-        PgRecommendationRepository, PgReconciliationRepository, PgRuntimeConfigVersionRepository,
+        PgModelRegistryRepository, PgOrderIntentRepository, PgPositionRepository,
+        PgRecommendationReportRepository, PgRecommendationRepository, PgReconciliationRepository,
+        PgRuntimeConfigVersionRepository,
     },
     traits::{
         CapitalAllocationRepository, ExecutionOrderRepository, ExecutionSubmissionRepository,
-        ModelRegistryRepository, OperationLogRepository, OrderIntentRepository,
+        ModelRegistryRepository, OperationLogRepository, OrderIntentRepository, PositionRepository,
         RecommendationReportRepository, RecommendationRepository, ReconciliationRepository,
         RuntimeConfigVersionRepository,
     },
 };
 
-use super::{AccountBundle, DataBundle, GovernanceBundle, InfraBundle};
-use crate::execution::{
-    AdmissionInputBuilder, AdmissionInputBuilderDeps, ClobOrderClient, ClobReconciliationReader,
-    CoreExecutionDispatcher, DefaultAdmissionEngine, DispatchWake, EvidenceCollector,
-    ExecutionBreaker, ExecutionDispatcherDeps, PolymarketOrderClient, ReconciliationService,
-    ReconciliationServiceDeps, VenueEvidenceCollector, VenueReconciliationReader,
+use super::{AccountBundle, DataBundle, GovernanceBundle, InfraBundle, ResearchBundle};
+use crate::{
+    execution::{
+        AdmissionInputBuilder, AdmissionInputBuilderDeps, ClobOrderClient,
+        ClobReconciliationReader, CoreExecutionDispatcher, CoreExitDispatcher,
+        DefaultAdmissionEngine, DispatchWake, EvidenceCollector, ExecutionBreaker,
+        ExecutionDispatcherDeps, ExitDispatcherDeps, ExitMonitorHealthHandle, ExitMonitorService,
+        ExitMonitorServiceDeps, ExitSignalEvaluator, PolymarketOrderClient, ReconciliationService,
+        ReconciliationServiceDeps, VenueEvidenceCollector, VenueReconciliationReader,
+    },
+    pipeline::feature_window_provider::FeatureWindowProvider,
+    service::{
+        model_backed_reinferer::{
+            ModelBackedExitSignalReinferer, ModelBackedExitSignalReinfererDeps,
+        },
+        signal_reinference::{ReinferenceSignalEvaluator, ReinferenceSignalEvaluatorDeps},
+    },
 };
 
 /// Dependencies for [`ExecutionBundle::assemble`].
@@ -37,6 +49,7 @@ pub struct ExecutionBundleDeps<'a> {
     pub infra: &'a InfraBundle,
     pub data: &'a DataBundle,
     pub governance: &'a GovernanceBundle,
+    pub research: &'a ResearchBundle,
     pub account: &'a AccountBundle,
     /// Shared authenticated CLOB client (same identity as the account bundle).
     pub clob: Arc<ClobClient>,
@@ -51,6 +64,10 @@ pub struct ExecutionBundle {
     pub submission: Arc<dyn ExecutionSubmissionRepository>,
     /// Reconciliation engine (05.5): resolves in-flight orders to venue truth.
     pub reconciliation: Arc<ReconciliationService>,
+    /// Exit-monitor engine (05.6): scans open lots and drives the exit ladder.
+    pub exit_monitor: Arc<ExitMonitorService>,
+    /// Exit-monitor health hot read consumed by admission `#20`.
+    pub exit_monitor_health: ExitMonitorHealthHandle,
     /// Approve→submit wake signal (shared by the intent service and the
     /// dispatcher worker); the durable queue stays in Postgres.
     pub dispatch_wake: DispatchWake,
@@ -80,31 +97,15 @@ impl ExecutionBundle {
             Arc::clone(&infra.metrics),
         ));
 
-        // Stateless admission: input builder (with the breaker venue-health seam)
-        // + the 20-check engine.
-        let admission_builder = Arc::new(AdmissionInputBuilder::new(AdmissionInputBuilderDeps {
-            recommendations: Arc::new(PgRecommendationRepository::new(pg.clone()))
-                as Arc<dyn RecommendationRepository>,
-            reports: Arc::new(PgRecommendationReportRepository::new(pg.clone()))
-                as Arc<dyn RecommendationReportRepository>,
-            model_registry: Arc::new(PgModelRegistryRepository::new(pg.clone()))
-                as Arc<dyn ModelRegistryRepository>,
-            reconciliation: Arc::new(PgReconciliationRepository::new(pg.clone()))
-                as Arc<dyn ReconciliationRepository>,
-            execution_orders: Arc::new(PgExecutionOrderRepository::new(pg.clone()))
-                as Arc<dyn ExecutionOrderRepository>,
-            capital: Arc::new(PgCapitalAllocationRepository::new(pg.clone()))
-                as Arc<dyn CapitalAllocationRepository>,
-            config_versions: Arc::new(PgRuntimeConfigVersionRepository::new(pg.clone()))
-                as Arc<dyn RuntimeConfigVersionRepository>,
-            account_factory: Arc::clone(&deps.account.provider_factory),
-            book_store: Arc::clone(&deps.data.book_store),
-            data_quality: Arc::clone(&deps.data.data_quality) as Arc<dyn DataQualityPort>,
-            config: Arc::clone(&deps.governance.runtime_config),
-            runtime_mode: deps.governance.runtime_mode.clone(),
-            kill_switch: deps.governance.kill_switch_handle.clone(),
-            venue_health: breaker.venue_health(),
-        }));
+        // Exit-monitor health seam (05.6): owned by the governance bundle so it
+        // is shared with the mode preflight; published by the worker, read by
+        // admission `#20`. Starts not-ready (fail-closed) until the first scan.
+        let exit_monitor_health = deps.governance.exit_monitor_health.clone();
+
+        // Stateless admission: input builder (breaker venue-health + exit-monitor
+        // seams) + the 20-check engine.
+        let admission_builder =
+            build_admission_builder(&deps, &breaker, exit_monitor_health.clone());
         let admission = Arc::new(DefaultAdmissionEngine::new(Arc::clone(&infra.metrics)));
 
         let clob = deps.clob;
@@ -146,6 +147,8 @@ impl ExecutionBundle {
                 as Arc<dyn OrderIntentRepository>,
             recommendations: Arc::new(PgRecommendationRepository::new(pg.clone()))
                 as Arc<dyn RecommendationRepository>,
+            positions: Arc::new(PgPositionRepository::new(pg.clone()))
+                as Arc<dyn PositionRepository>,
             reconciliation: Arc::new(PgReconciliationRepository::new(pg.clone()))
                 as Arc<dyn ReconciliationRepository>,
             submission: Arc::clone(&submission),
@@ -155,13 +158,126 @@ impl ExecutionBundle {
             config: Arc::clone(&deps.governance.runtime_config),
         }));
 
+        // Exit-monitor engine (05.6): model-driven signal seam + exit dispatcher
+        // + per-lot sweep service.
+        let exit_monitor = build_exit_monitor(
+            ExitMonitorWiring {
+                infra,
+                data: deps.data,
+                governance: deps.governance,
+                research: deps.research,
+            },
+            &submission,
+            &order_client,
+            &breaker,
+            exit_monitor_health.clone(),
+        );
+
         Self {
             order_client,
             dispatcher,
             breaker,
             submission,
             reconciliation,
+            exit_monitor,
+            exit_monitor_health,
             dispatch_wake: DispatchWake::new(),
         }
     }
+}
+
+/// Assemble the stateless admission input builder (real venue-health seam from
+/// the breaker and real exit-monitor readiness seam from the worker).
+fn build_admission_builder(
+    deps: &ExecutionBundleDeps<'_>,
+    breaker: &Arc<ExecutionBreaker>,
+    exit_monitor_health: ExitMonitorHealthHandle,
+) -> Arc<AdmissionInputBuilder> {
+    let pg = deps.infra.pg.connection();
+    Arc::new(AdmissionInputBuilder::new(AdmissionInputBuilderDeps {
+        recommendations: Arc::new(PgRecommendationRepository::new(pg.clone()))
+            as Arc<dyn RecommendationRepository>,
+        reports: Arc::new(PgRecommendationReportRepository::new(pg.clone()))
+            as Arc<dyn RecommendationReportRepository>,
+        model_registry: Arc::new(PgModelRegistryRepository::new(pg.clone()))
+            as Arc<dyn ModelRegistryRepository>,
+        reconciliation: Arc::new(PgReconciliationRepository::new(pg.clone()))
+            as Arc<dyn ReconciliationRepository>,
+        execution_orders: Arc::new(PgExecutionOrderRepository::new(pg.clone()))
+            as Arc<dyn ExecutionOrderRepository>,
+        capital: Arc::new(PgCapitalAllocationRepository::new(pg.clone()))
+            as Arc<dyn CapitalAllocationRepository>,
+        config_versions: Arc::new(PgRuntimeConfigVersionRepository::new(pg.clone()))
+            as Arc<dyn RuntimeConfigVersionRepository>,
+        account_factory: Arc::clone(&deps.account.provider_factory),
+        book_store: Arc::clone(&deps.data.book_store),
+        data_quality: Arc::clone(&deps.data.data_quality) as Arc<dyn DataQualityPort>,
+        config: Arc::clone(&deps.governance.runtime_config),
+        runtime_mode: deps.governance.runtime_mode.clone(),
+        kill_switch: deps.governance.kill_switch_handle.clone(),
+        venue_health: breaker.venue_health(),
+        exit_monitor_health,
+    }))
+}
+
+/// Borrowed planes the exit-monitor engine is assembled from (avoids touching
+/// the partially-moved [`ExecutionBundleDeps`]).
+#[derive(Clone, Copy)]
+struct ExitMonitorWiring<'a> {
+    infra: &'a InfraBundle,
+    data: &'a DataBundle,
+    governance: &'a GovernanceBundle,
+    research: &'a ResearchBundle,
+}
+
+/// Assemble the 05.6 exit-monitor engine: model-backed signal re-inference (06.0)
+/// behind the score-degradation evaluator, the exit dispatcher, and the per-lot sweep.
+fn build_exit_monitor(
+    wiring: ExitMonitorWiring<'_>,
+    submission: &Arc<dyn ExecutionSubmissionRepository>,
+    order_client: &Arc<dyn PolymarketOrderClient>,
+    breaker: &Arc<ExecutionBreaker>,
+    health: ExitMonitorHealthHandle,
+) -> Arc<ExitMonitorService> {
+    let pg = wiring.infra.pg.connection();
+    let metrics = Arc::clone(&wiring.infra.metrics);
+    let reinferer = ModelBackedExitSignalReinferer::new(ModelBackedExitSignalReinfererDeps {
+        model_registry: Arc::clone(&wiring.research.model_registry_repo),
+        factory_builder: Arc::clone(&wiring.research.model_runtime_factory_builder),
+        weight_overlay: Arc::clone(&wiring.governance.weight_overlay),
+        config_versions: Arc::new(PgRuntimeConfigVersionRepository::new(pg.clone()))
+            as Arc<dyn RuntimeConfigVersionRepository>,
+        live_config: Arc::clone(&wiring.governance.runtime_config),
+        pit_source: Arc::clone(&wiring.data.pit_source),
+        market_registry: Arc::clone(&wiring.data.market_registry),
+        window_provider: FeatureWindowProvider::new(Arc::clone(&wiring.infra.quant_fact_read)),
+    });
+    let exit_signal: Arc<dyn ExitSignalEvaluator> = Arc::new(ReinferenceSignalEvaluator::new(
+        ReinferenceSignalEvaluatorDeps {
+            reinferer,
+            config: Arc::clone(&wiring.governance.runtime_config),
+            metrics: Arc::clone(&metrics),
+        },
+    ));
+    let exit_dispatcher = Arc::new(CoreExitDispatcher::new(ExitDispatcherDeps {
+        submission: Arc::clone(submission),
+        order_client: Arc::clone(order_client),
+        breaker: Arc::clone(breaker),
+        metrics: Arc::clone(&metrics),
+    }));
+    Arc::new(ExitMonitorService::new(ExitMonitorServiceDeps {
+        positions: Arc::new(PgPositionRepository::new(pg.clone())) as Arc<dyn PositionRepository>,
+        intents: Arc::new(PgOrderIntentRepository::new(pg.clone()))
+            as Arc<dyn OrderIntentRepository>,
+        recommendations: Arc::new(PgRecommendationRepository::new(pg.clone()))
+            as Arc<dyn RecommendationRepository>,
+        submission: Arc::clone(submission),
+        book_store: Arc::clone(&wiring.data.book_store),
+        kill_switch: wiring.governance.kill_switch_handle.clone(),
+        config: Arc::clone(&wiring.governance.runtime_config),
+        signal: exit_signal,
+        dispatcher: exit_dispatcher,
+        health,
+        metrics: Arc::clone(&metrics),
+    }))
 }

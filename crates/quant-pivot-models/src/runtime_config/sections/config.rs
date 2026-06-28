@@ -4,10 +4,10 @@ use crate::{
     enums::{common::MarketCategory, factor::FactorFamily, quant::QuantRuntimeMode},
     runtime_config::wire::{
         CapitalPolicy, DecimalString, DomainFeaturePolicy, EntryOrderPolicy,
-        ExecutionAdmissionPolicy, ExecutionBreakerConfig, ExitOrderPolicy, FactorWeights,
-        FeatureFamily, FeatureNameRef, FeatureStalenessPolicy, KillSwitchPolicy, MarketIdList,
-        MissingFactorPolicy, ModelVersionRef, NotificationPolicies, ReconciliationPolicy,
-        ReportDeliveryPolicy, ScheduleCadence, SizingModelConfig,
+        ExecutionAdmissionPolicy, ExecutionBreakerConfig, ExitMonitorPolicy, ExitOrderPolicy,
+        FactorWeights, FeatureFamily, FeatureNameRef, FeatureStalenessPolicy, KillSwitchPolicy,
+        MarketIdList, MissingFactorPolicy, ModelVersionRef, NotificationPolicies,
+        ReconciliationPolicy, ReportDeliveryPolicy, ScheduleCadence, SizingModelConfig,
     },
     types::SchemaVersion,
 };
@@ -455,6 +455,8 @@ pub struct ExecutionConfig {
     pub entry_order_policy: EntryOrderPolicy,
     /// Exit order policy document.
     pub exit_order_policy: ExitOrderPolicy,
+    /// Exit-monitor cadence + signal-degradation policy.
+    pub exit_monitor: ExitMonitorPolicy,
     /// Admission policy document.
     pub admission: ExecutionAdmissionPolicy,
     /// Kill-switch policy document.
@@ -475,6 +477,7 @@ impl Default for ExecutionConfig {
             auto_execution: AutoExecutionConfig::default(),
             entry_order_policy: EntryOrderPolicy::default(),
             exit_order_policy: ExitOrderPolicy::default(),
+            exit_monitor: ExitMonitorPolicy::default(),
             admission: ExecutionAdmissionPolicy::default(),
             kill_switch: KillSwitchPolicy::default(),
             capital: CapitalPolicy::default(),

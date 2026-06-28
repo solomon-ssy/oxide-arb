@@ -38,6 +38,14 @@ Polymarket facts -> features -> factors/models -> portfolio plan
 9. [`08-third-party-crates-and-ml-stack.md`](08-third-party-crates-and-ml-stack.md)：第三方 crate、模型训练、推理、优化、依赖引入顺序和 MSRV/native 风险。
 10. [`09-account-capital-position-reconciliation.md`](09-account-capital-position-reconciliation.md)：账户/资本/持仓/对账平面——`AccountSnapshot`、planner 资金感知签名、资金状态机、对账证据链、Polymarket 余额/持仓数据源（设计先行，实现分相位到 Phase 4/5/6）。
 
+**子phase实施目录（按 Phase 推进时读）：**
+
+- [`phase-03/README.md`](phase-03/README.md) — 研究平面 3.0–3.8
+- [`phase-04/README.md`](phase-04/README.md) — TopN 报告 4.0–4.4
+- [`phase-05/README.md`](phase-05/README.md) — 执行/风险/治理 05.0–05.10
+- [`phase-06/README.md`](phase-06/README.md) — ML 扩展（Opportunistic Sell、跨账户对账 report；**闭合 05.6 延后 seam**）
+- [`phase-08/README.md`](phase-08/README.md) — 部署架构（多副本 leader election、高频 trailing）
+
 ## 2. 硬边界
 
 - 平台仍然只做 Polymarket。禁止引入通用 exchange、venue routing、多平台抽象。

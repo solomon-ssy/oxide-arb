@@ -6,7 +6,7 @@ use crate::{
         execution::PositionLedgerState,
         quant::{AccountSource, OutcomeSide},
     },
-    types::{EventId, MarketId, Price, Shares, TokenId, Usd},
+    types::{EventId, MarketId, OrderIntentId, PositionId, Price, Shares, TokenId, Usd},
 };
 use chrono::{DateTime, Utc};
 use sea_orm::entity::prelude::*;
@@ -15,6 +15,8 @@ use sea_orm::entity::prelude::*;
 #[sea_orm(table_name = "quant_position")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
+    pub position_id: PositionId,
+    pub order_intent_id: OrderIntentId,
     pub token_id: TokenId,
     pub market_id: MarketId,
     pub event_id: Option<EventId>,
@@ -34,6 +36,12 @@ pub struct Model {
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
 pub enum Relation {
     #[sea_orm(
+        belongs_to = "super::quant_order_intent::Entity",
+        from = "Column::OrderIntentId",
+        to = "super::quant_order_intent::Column::OrderIntentId"
+    )]
+    OrderIntent,
+    #[sea_orm(
         belongs_to = "super::market::Entity",
         from = "Column::MarketId",
         to = "super::market::Column::MarketId"
@@ -45,6 +53,12 @@ pub enum Relation {
         to = "super::event::Column::EventId"
     )]
     Event,
+}
+
+impl Related<super::quant_order_intent::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::OrderIntent.def()
+    }
 }
 
 impl Related<super::market::Entity> for Entity {

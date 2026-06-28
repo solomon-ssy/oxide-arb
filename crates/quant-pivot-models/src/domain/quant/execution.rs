@@ -2,14 +2,15 @@
 
 use crate::{
     domain::{
-        NewReconciliation, PositionFill, RecommendationInfo, RecommendationReportInfo,
+        NewReconciliation, PositionExit, PositionFill, RecommendationInfo,
+        RecommendationReportInfo,
         patch::{NullablePatch, Patch},
     },
     enums::{
         common::Side,
         execution::{
-            ApprovalInvalidation, ExecutionOrderPhase, OrderIntentKind, OrderTypeKind,
-            VenueOrderStatus,
+            ApprovalInvalidation, ExecutionOrderPhase, ExitReason, ExitState, OrderIntentKind,
+            OrderTypeKind, VenueOrderStatus,
         },
         quant::{
             ApprovalStatus, ExecutionOrderState, OrderIntentStatus, QuantRuntimeMode,
@@ -17,9 +18,9 @@ use crate::{
         },
     },
     types::{
-        ContentHash, EntryOrderSpec, ExecutionOrderId, ExitPolicySpec, MarketId, ModelVersionId,
-        OrderId, OrderIntentId, Price, RecommendationId, RuntimeConfigVersionId, Shares, TokenId,
-        Usd,
+        ContentHash, EntryOrderSpec, ExecutedPartialExitNodes, ExecutionOrderId, ExitPolicySpec,
+        MarketId, ModelVersionId, OrderId, OrderIntentId, Price, RecommendationId,
+        RuntimeConfigVersionId, Shares, TokenId, Usd,
     },
 };
 use chrono::{DateTime, Utc};
@@ -50,6 +51,13 @@ pub struct OrderIntentInfo {
     pub exit_policy_json: ExitPolicySpec,
     pub risk_envelope_hash: ContentHash,
     pub expires_at: DateTime<Utc>,
+    pub exit_state: ExitState,
+    pub exit_reason: Option<ExitReason>,
+    pub next_check_at: Option<DateTime<Utc>>,
+    pub peak_mark_price: Option<Price>,
+    pub last_signal_recheck_at: Option<DateTime<Utc>>,
+    pub executed_partial_exit_node_ids: ExecutedPartialExitNodes,
+    pub pending_partial_exit_node_id: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -59,7 +67,9 @@ info_from_model!(OrderIntentInfo, crate::entities::quant_order_intent::Model, {
     model_version_id, intent_kind, status, approval_status, approved_by,
     approval_reason, approved_at, policy_id, policy_hash, status_reason,
     admission_trace_ref, entry_order_json, exit_policy_json, risk_envelope_hash,
-    expires_at, created_at, updated_at,
+    expires_at, exit_state, exit_reason, next_check_at, peak_mark_price,
+    last_signal_recheck_at, executed_partial_exit_node_ids, pending_partial_exit_node_id,
+    created_at, updated_at,
 });
 
 /// Insert payload for `quant_order_intent`.
@@ -256,5 +266,41 @@ pub struct SubmissionLedgerWrite {
     /// Position upsert (present only on a fill).
     pub fill: Option<PositionFill>,
     /// Reconciliation row to enqueue (`None` only for a resting `Open` order).
+    pub reconciliation: Option<NewReconciliation>,
+}
+
+/// Complete ledger write applied by `record_exit_result` in one txn (Phase 05.6).
+///
+/// Built by the exit dispatcher from the venue [`VenueSubmitResult`] of a Sell
+/// exit order and applied atomically across the exit execution order, the
+/// per-intent position lot, the capital allocation (`Spent -> Released` on full
+/// exit), the intent's exit FSM, and reconciliation.
+#[derive(Debug, Clone)]
+pub struct ExitLedgerWrite {
+    /// Target exit-order state (from the venue outcome).
+    pub order_state: ExecutionOrderState,
+    /// Venue-assigned order id, when acknowledged.
+    pub venue_order_id: Option<OrderId>,
+    /// Raw venue order status, when parseable.
+    pub venue_status: Option<VenueOrderStatus>,
+    /// When the exit (partially) filled, when known.
+    pub filled_at: Option<DateTime<Utc>>,
+    /// When the exit order was cancelled/expired, when known.
+    pub cancelled_at: Option<DateTime<Utc>>,
+    /// Failure / ambiguity detail recorded on the order row.
+    pub error_message: Option<String>,
+    /// Exit-FSM state to set on the intent.
+    pub exit_state: ExitState,
+    /// Why the exit fired (recorded on the intent).
+    pub exit_reason: ExitReason,
+    /// Position-lot exit fill (present only on a (partial) fill).
+    pub position_exit: Option<PositionExit>,
+    /// Whether the lot is now fully exited (capital `Spent -> Released`). A
+    /// partial keeps the capital `Spent` and the lot `Closing`.
+    pub fully_exited: bool,
+    /// Revert the lot `Closing -> Open` (a failed/cancelled exit attempt that
+    /// must be re-monitored).
+    pub revert_to_open: bool,
+    /// Reconciliation row to enqueue (`None` for a resting `Open` exit order).
     pub reconciliation: Option<NewReconciliation>,
 }

@@ -152,6 +152,10 @@ pub struct MetricsHub {
     /// Reconciliations that resolved to a terminal `Unresolvable` verdict
     /// (capital impaired, kill-switch latched until an operator resolves).
     pub reconciliation_unresolvable: IntCounter,
+    /// Exit-monitor triggers by exit reason (05.6).
+    pub exit_triggers: IntCounterVec,
+    /// Exit signal re-inference outcomes (06.0).
+    pub exit_signal_reinference: IntCounterVec,
 }
 
 struct PipelineMetrics {
@@ -214,6 +218,8 @@ struct ExecutionMetrics {
     execution_fills: IntCounter,
     execution_breaker_trips: IntCounterVec,
     reconciliation_unresolvable: IntCounter,
+    exit_triggers: IntCounterVec,
+    exit_signal_reinference: IntCounterVec,
 }
 
 fn register_pipeline_metrics(registry: &Registry) -> PipelineMetrics {
@@ -468,6 +474,18 @@ fn register_execution_metrics(registry: &Registry) -> ExecutionMetrics {
             "quant_reconciliation_unresolvable_total",
             "Reconciliations resolved to a terminal unresolvable verdict"
         ),
+        exit_triggers: register_counter_vec!(
+            registry,
+            "quant_exit_triggers_total",
+            "Exit-monitor triggers by exit reason",
+            &["reason"]
+        ),
+        exit_signal_reinference: register_counter_vec!(
+            registry,
+            "quant_exit_signal_reinference_total",
+            "Exit signal re-inference outcomes",
+            &["outcome"]
+        ),
     }
 }
 
@@ -545,6 +563,8 @@ impl MetricsHub {
             execution_fills: execution.execution_fills,
             execution_breaker_trips: execution.execution_breaker_trips,
             reconciliation_unresolvable: execution.reconciliation_unresolvable,
+            exit_triggers: execution.exit_triggers,
+            exit_signal_reinference: execution.exit_signal_reinference,
         }
     }
 
@@ -568,6 +588,19 @@ impl MetricsHub {
     /// Count one reconciliation that resolved to `Unresolvable`.
     pub fn inc_reconciliation_unresolvable(&self) {
         self.reconciliation_unresolvable.inc();
+    }
+
+    /// Count one exit-monitor trigger for an exit reason (05.6).
+    pub fn inc_exit_trigger(&self, reason: &str) {
+        self.exit_triggers.with_label_values(&[reason]).inc();
+    }
+
+    /// Count one exit signal re-inference outcome (`fresh`, `unavailable`, `error`,
+    /// `disabled`, `shadow_would_invalidate`, `shadow_hold`).
+    pub fn inc_exit_signal_reinference(&self, outcome: &str) {
+        self.exit_signal_reinference
+            .with_label_values(&[outcome])
+            .inc();
     }
 
     /// Publish whether the kill-switch currently blocks new auto entries.

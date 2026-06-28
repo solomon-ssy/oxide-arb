@@ -168,7 +168,7 @@ ml-classical = ["dep:smartcore"]
 | `burn` / `candle` 深度学习 | — | Phase 08 | 3.4 §10 |
 | 对象存储（S3/MinIO）artifact | 本地目录 + content-addressed key | 后续 | 3.0 / 3.4 §1.1 |
 | PG `SignalCandidate` 表 | CH `quant_signal_candidate_event` only | —（by design） | 3.4 §10 |
-| `SellYes` / `SellNo` 退出候选 | Buy 侧 scorer only | Phase 05 | 3.4 §5.2 |
+| `SellYes` / `SellNo` 退出候选（机会性 Sell scorer） | Buy 侧 scorer only；05.6 执行侧 Sell 已覆盖 | **Phase 06** | [`phase-06/06.1`](../phase-06/06.1-opportunistic-sell-exit-signal.md) |
 | `input_hash` 内容级 audit digest | id + schema + version 绑定 | Phase 04 编排 + 可选 3.7 | 3.4 §10.6 |
 
 ## 7. 文档契约模板

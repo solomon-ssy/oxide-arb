@@ -7,6 +7,7 @@
 //! this engine entirely (tightening is always permitted).
 
 use crate::{
+    execution::ExitMonitorHealthHandle,
     governance::{
         kill_switch::KillSwitchHandle,
         quality_gate_load::{active_load_ok, active_publication_status_ok, shadow_load_ok},
@@ -54,6 +55,8 @@ pub struct ModePreflightDeps {
     pub reconciliation: Arc<dyn ReconciliationRepository>,
     pub capital: Arc<dyn CapitalAllocationRepository>,
     pub kill_switch: KillSwitchHandle,
+    /// Exit-monitor health (05.6): `auto_execution` requires a live worker.
+    pub exit_monitor_health: ExitMonitorHealthHandle,
 }
 
 /// Spec preflight engine.
@@ -90,7 +93,7 @@ impl ModePreflight for DefaultModePreflight {
             checks.push(Self::check_admission_policy(&config));
             checks.push(self.check_kill_switch_closed());
             checks.push(Self::check_capital_budget(&config));
-            checks.push(Self::check_exit_monitor());
+            checks.push(self.check_exit_monitor(now));
         }
 
         Ok(PreflightReport::new(target, checks))
@@ -357,11 +360,11 @@ impl DefaultModePreflight {
         )
     }
 
-    fn check_exit_monitor() -> PreflightCheck {
-        PreflightCheck::soft(
+    fn check_exit_monitor(&self, now: DateTime<Utc>) -> PreflightCheck {
+        PreflightCheck::hard(
             "exit_monitor_healthy",
-            true,
-            "deferred: exit monitor worker health lands with 05.6",
+            self.deps.exit_monitor_health.is_ready(now),
+            "exit monitor worker must be healthy (recent successful scan) for auto_execution",
         )
     }
 

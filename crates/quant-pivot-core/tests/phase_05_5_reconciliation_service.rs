@@ -28,18 +28,18 @@ use quant_pivot_error::{QuantError, QuantResult, api::ApiError, storage::Storage
 use quant_pivot_models::{
     domain::{
         AppendReconciliationEvidence, ApproveOrderIntent, ApproveOrderIntentOutcome,
-        CapitalReconcileSettlement, ExecutionOrderInfo, ExecutionOrderPatch, KillSwitchPort,
-        KillSwitchView, NewCapitalAllocation, NewExecutionOrder, NewOperationLog, NewOrderIntent,
-        NewReconciliation, OperationLogInfo, OperationLogQuery, OrderIntentInfo,
-        OrderIntentListQuery, Paginated, RecommendationInfo, ReconciliationInfo,
-        ReconciliationLedgerWrite, ReconciliationPatch, SetKillSwitchCommand,
-        SubmissionLedgerWrite,
+        CapitalReconcileSettlement, ExecutionOrderInfo, ExecutionOrderPatch, ExitLedgerWrite,
+        KillSwitchPort, KillSwitchView, NewCapitalAllocation, NewExecutionOrder, NewOperationLog,
+        NewOrderIntent, NewReconciliation, OperationLogInfo, OperationLogQuery, OrderIntentInfo,
+        OrderIntentListQuery, Paginated, PositionExit, PositionFill, PositionInfo,
+        RecommendationInfo, ReconciliationInfo, ReconciliationLedgerWrite, ReconciliationPatch,
+        SetKillSwitchCommand, SubmissionLedgerWrite,
     },
     enums::{
         common::{OrderType, Side},
         execution::{
-            ApprovalInvalidation, ExecutionOrderPhase, KillSwitchState, OrderIntentKind,
-            OrderTypeKind, ReconciliationResult, VenueOrderStatus,
+            ApprovalInvalidation, ExecutionOrderPhase, ExitReason, ExitState, KillSwitchState,
+            OrderIntentKind, OrderTypeKind, ReconciliationResult, VenueOrderStatus,
         },
         quant::{
             ApprovalStatus, ExecutionOrderState, OrderIntentStatus, OutcomeSide, QuantRuntimeMode,
@@ -47,14 +47,14 @@ use quant_pivot_models::{
     },
     runtime_config::{ReconciliationPolicy, RuntimeConfig},
     types::{
-        Bps, EntryOrderSpec, ExecutionOrderId, ExitPolicySpec, MarketId, ModelVersionId, OrderId,
-        OrderIntentId, Price, RecommendationId, RecommendationReportId, ReconciliationId,
-        RuntimeConfigVersionId, Shares, TokenId, Usd,
+        Bps, EntryOrderSpec, ExecutedPartialExitNodes, ExecutionOrderId, ExitPolicySpec, MarketId,
+        ModelVersionId, OrderId, OrderIntentId, Price, RecommendationId, RecommendationReportId,
+        ReconciliationId, RuntimeConfigVersionId, Shares, TokenId, Usd,
     },
 };
 use quant_pivot_repository::traits::{
     ExecutionOrderRepository, ExecutionSubmissionRepository, OperationLogRepository,
-    OrderIntentRepository, RecommendationRepository, ReconciliationRepository,
+    OrderIntentRepository, PositionRepository, RecommendationRepository, ReconciliationRepository,
 };
 use quant_pivot_test_support::report_fixtures;
 use rust_decimal_macros::dec;
@@ -106,13 +106,28 @@ fn intent(rec: &RecommendationInfo) -> OrderIntentInfo {
         },
         exit_policy_json: ExitPolicySpec {
             take_profit_price: rec.exit_plan.take_profit_price,
+            take_profit_pct: rec.exit_plan.take_profit_pct,
             stop_loss_price: rec.exit_plan.stop_loss_price,
+            stop_loss_pct: rec.exit_plan.stop_loss_pct,
             time_exit_at: None,
+            max_hold_secs: rec.exit_plan.max_hold_secs,
+            trailing_stop: rec.exit_plan.trailing_stop.clone(),
+            signal_invalidation_rules: rec.exit_plan.signal_invalidation_rules.clone(),
             partial_exit_nodes: Vec::new(),
             settlement_policy: rec.exit_plan.settlement_policy,
+            manual_review_at: rec.exit_plan.manual_review_at,
+            entry_reference_price: rec.entry_plan.limit_price.unwrap_or(Price::ZERO),
+            entry_composite_score: rec.composite_score,
         },
         risk_envelope_hash: rec.risk_envelope.canonical_hash().expect("hash"),
         expires_at: now() + Duration::hours(1),
+        exit_state: ExitState::NotStarted,
+        exit_reason: None,
+        next_check_at: None,
+        peak_mark_price: None,
+        last_signal_recheck_at: None,
+        executed_partial_exit_node_ids: ExecutedPartialExitNodes::default(),
+        pending_partial_exit_node_id: None,
         created_at: now(),
         updated_at: now(),
     }
@@ -479,6 +494,41 @@ impl ExecutionSubmissionRepository for RecordingSubmissionRepo {
         unimplemented!()
     }
 
+    async fn mark_exit_manual(
+        &self,
+        _intent_id: &OrderIntentId,
+        _reason: ExitReason,
+    ) -> Result<(), StorageError> {
+        unimplemented!()
+    }
+
+    async fn touch_exit_monitor(
+        &self,
+        _intent_id: &OrderIntentId,
+        _next_check_at: chrono::DateTime<Utc>,
+        _peak_mark_price: Option<Price>,
+        _last_signal_recheck_at: Option<chrono::DateTime<Utc>>,
+    ) -> Result<(), StorageError> {
+        unimplemented!()
+    }
+
+    async fn create_exit_order_and_mark_closing(
+        &self,
+        _order: NewExecutionOrder,
+        _exit_reason: ExitReason,
+        _partial_exit_node_id: Option<String>,
+    ) -> Result<ExecutionOrderInfo, StorageError> {
+        unimplemented!()
+    }
+
+    async fn record_exit_result(
+        &self,
+        _execution_order_id: &ExecutionOrderId,
+        _write: ExitLedgerWrite,
+    ) -> Result<ExecutionOrderInfo, StorageError> {
+        unimplemented!()
+    }
+
     async fn recover_dangling(&self, _limit: u64) -> Result<Vec<ExecutionOrderInfo>, StorageError> {
         Ok(Vec::new())
     }
@@ -511,6 +561,50 @@ impl ExecutionSubmissionRepository for RecordingSubmissionRepo {
             created_at: now(),
             updated_at: now(),
         })
+    }
+}
+
+/// Entry-only recon tests never read positions (the lot is fetched for exit
+/// orders only); reads return empty.
+struct StubPositions;
+
+#[async_trait]
+impl PositionRepository for StubPositions {
+    async fn apply_fill(&self, _fill: PositionFill) -> Result<PositionInfo, StorageError> {
+        unimplemented!()
+    }
+
+    async fn apply_exit(
+        &self,
+        _order_intent_id: &OrderIntentId,
+        _exit: PositionExit,
+    ) -> Result<PositionInfo, StorageError> {
+        unimplemented!()
+    }
+
+    async fn find_by_intent(
+        &self,
+        _order_intent_id: &OrderIntentId,
+    ) -> Result<Option<PositionInfo>, StorageError> {
+        Ok(None)
+    }
+
+    async fn find_open_lots(&self) -> Result<Vec<PositionInfo>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn find_lots_by_token(
+        &self,
+        _token_id: &TokenId,
+    ) -> Result<Vec<PositionInfo>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn find_open_by_market(
+        &self,
+        _market_id: &MarketId,
+    ) -> Result<Vec<PositionInfo>, StorageError> {
+        Ok(Vec::new())
     }
 }
 
@@ -662,6 +756,7 @@ fn service_harness(
             intent: row_intent.clone(),
         }),
         recommendations: Arc::new(StubRecommendations(rec.clone())),
+        positions: Arc::new(StubPositions),
         reconciliation: Arc::new(MemoryReconciliation),
         submission: Arc::clone(&submission) as Arc<dyn ExecutionSubmissionRepository>,
         fees: Arc::new(FeeCalculator::new()),

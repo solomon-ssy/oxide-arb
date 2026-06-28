@@ -33,6 +33,7 @@ use std::{
 };
 
 use arc_swap::ArcSwap;
+use chrono::{DateTime, NaiveDate, Utc};
 use quant_pivot_models::{
     domain::{KillSwitchPort, NewOperationLog, SetKillSwitchCommand},
     enums::{
@@ -41,9 +42,10 @@ use quant_pivot_models::{
         rbac::ResourceType,
     },
     runtime_config::ExecutionBreakerConfig,
-    types::OperationLogId,
+    types::{OperationLogId, Usd},
 };
 use quant_pivot_repository::traits::OperationLogRepository;
+use rust_decimal::Decimal;
 
 use crate::{execution::admission::VenueHealth, observability::metrics_hub::MetricsHub};
 
@@ -51,6 +53,11 @@ use crate::{execution::admission::VenueHealth, observability::metrics_hub::Metri
 const BREAKER_ACTOR: &str = "system:execution_breaker";
 /// Breaker dimension label for metrics / op-log (venue health, 05.4).
 const DIMENSION_VENUE: &str = "venue";
+/// Breaker dimension label for the daily realized-loss escalation (05.6).
+const DIMENSION_DAILY_LOSS: &str = "daily_loss";
+/// Fraction of the daily realized-loss cap that degrades venue health (defers
+/// admission `#18`) before the hard cap trips the kill-switch.
+const DAILY_LOSS_DEGRADE_FRACTION: (i64, i64) = (8, 10);
 
 /// Lock-free venue-health hot read shared with admission `#18`.
 #[derive(Debug, Clone)]
@@ -101,23 +108,48 @@ struct BreakerInner {
     /// exactly once on the rising edge), not the venue-health state. Cleared by
     /// [`BreakerInner::reset`] when the operator clears the kill-switch.
     tripped: bool,
+    /// UTC day the realized-loss accumulator is scoped to (rolls over at the day
+    /// boundary, same口径 as the 05.9 equity snapshot).
+    day: Option<NaiveDate>,
+    /// Signed cumulative realized `PnL` for `day` (USD); the loss is `max(0, -·)`.
+    realized_pnl_today: Decimal,
+    /// Whether the daily realized-loss cap has already tripped the kill-switch
+    /// for `day` (rising-edge latch; cleared on day rollover).
+    daily_tripped: bool,
 }
 
 /// Outcome of folding one observation into the accumulator.
 struct RecordOutcome {
-    health: VenueHealth,
     /// `true` only on the rising edge into sustained failure (trip the kill-switch).
     tripped: bool,
 }
 
 impl BreakerInner {
-    /// Clear the transient failure window back to a clean `Healthy` slate.
+    /// Clear the transient venue failure window back to a clean `Healthy` slate.
+    /// The daily realized-loss accumulator is intentionally left intact.
     fn reset(&mut self) {
         self.samples.clear();
         self.consecutive_failures = 0;
         self.last_failure_at = None;
         self.tripped = false;
         self.health = VenueHealth::Healthy;
+    }
+
+    /// Reset the daily realized-loss accumulator when the UTC day rolls over.
+    /// A latched daily kill-switch trip is cleared here only as a *counter*
+    /// reset — the operational kill-switch itself stays latched until operator
+    /// ack (fail-closed).
+    fn roll_day(&mut self, today: NaiveDate) {
+        if self.day != Some(today) {
+            self.day = Some(today);
+            self.realized_pnl_today = Decimal::ZERO;
+            self.daily_tripped = false;
+        }
+    }
+
+    /// Cumulative same-day realized loss (`max(0, -ΣPnL)`).
+    fn daily_loss(&self) -> Decimal {
+        (-self.realized_pnl_today).max(Decimal::ZERO)
     }
 
     fn record(
@@ -190,16 +222,16 @@ impl BreakerInner {
         if sustained_failure {
             self.tripped = true;
         }
-        RecordOutcome {
-            health: self.health.clone(),
-            tripped,
-        }
+        RecordOutcome { tripped }
     }
 }
 
-/// Stateful venue-health breaker that auto-trips the operational kill-switch.
+/// Stateful venue-health + daily-loss breaker that auto-trips the operational
+/// kill-switch.
 pub struct ExecutionBreaker {
     config: ExecutionBreakerConfig,
+    /// Parsed daily realized-loss cap (USD). `0` disables the dimension.
+    daily_loss_cap: Decimal,
     inner: Mutex<BreakerInner>,
     health: VenueHealthHandle,
     kill_switch: Arc<dyn KillSwitchPort>,
@@ -215,8 +247,15 @@ impl ExecutionBreaker {
         operation_log: Arc<dyn OperationLogRepository>,
         metrics: Arc<MetricsHub>,
     ) -> Self {
+        let daily_loss_cap = config
+            .daily_realized_loss_cap_usd
+            .value
+            .parse::<Decimal>()
+            .unwrap_or(Decimal::ZERO)
+            .max(Decimal::ZERO);
         Self {
             config,
+            daily_loss_cap,
             inner: Mutex::new(BreakerInner::default()),
             health: VenueHealthHandle::default(),
             kill_switch,
@@ -237,13 +276,74 @@ impl ExecutionBreaker {
     /// unparseable); a clean venue rejection is a successful round-trip. On the
     /// escalation edge this trips the kill-switch (latched) outside the lock.
     pub async fn observe_venue(&self, success: bool, detail: &str) {
-        let outcome = {
+        let (tripped, venue_health, daily_loss) = {
             let mut inner = self.lock();
-            inner.record(Instant::now(), success, &self.config)
+            let tripped = inner.record(Instant::now(), success, &self.config).tripped;
+            (tripped, inner.health.clone(), inner.daily_loss())
         };
-        self.health.store(outcome.health);
-        if outcome.tripped {
+        self.health
+            .store(self.combined_health(&venue_health, daily_loss));
+        if tripped {
             self.trip_kill_switch(DIMENSION_VENUE, detail).await;
+        }
+    }
+
+    /// Fold one **realized** exit `PnL` into the daily accumulator (05.6 §6.5).
+    ///
+    /// Cumulative same-day realized **loss** (`max(0, -ΣPnL)`) drives the third
+    /// breaker dimension: `≥ 80%` of the cap degrades venue health (admission
+    /// `#18` defers, slowing new entries); `≥` the cap trips the kill-switch to
+    /// `execution_halted` (latched, operator ack required). The accumulator
+    /// resets at the UTC day boundary (a latched kill-switch is **not** cleared
+    /// by the rollover — fail-closed). `0` cap disables the dimension.
+    pub async fn observe_realized_pnl(&self, pnl: Usd, now: DateTime<Utc>) {
+        if self.daily_loss_cap <= Decimal::ZERO {
+            return;
+        }
+        let (tripped, venue_health, loss) = {
+            let mut inner = self.lock();
+            inner.roll_day(now.date_naive());
+            inner.realized_pnl_today += pnl.inner();
+            let loss = inner.daily_loss();
+            let tripped = loss >= self.daily_loss_cap && !inner.daily_tripped;
+            if tripped {
+                inner.daily_tripped = true;
+            }
+            (tripped, inner.health.clone(), loss)
+        };
+        self.health.store(self.combined_health(&venue_health, loss));
+        if tripped {
+            let detail = format!(
+                "daily realized loss {loss} reached cap {}",
+                self.daily_loss_cap
+            );
+            self.trip_kill_switch(DIMENSION_DAILY_LOSS, &detail).await;
+        }
+    }
+
+    /// Combine the venue dimension with the daily-loss dimension into the single
+    /// published [`VenueHealth`] admission reads. Takes plain values so the
+    /// caller can drop the accumulator lock before computing.
+    fn combined_health(&self, venue_health: &VenueHealth, daily_loss: Decimal) -> VenueHealth {
+        let venue_reason = match venue_health {
+            VenueHealth::Degraded { reason } => Some(reason.clone()),
+            VenueHealth::Healthy => None,
+        };
+        let degrade_at = self.daily_loss_cap * Decimal::from(DAILY_LOSS_DEGRADE_FRACTION.0)
+            / Decimal::from(DAILY_LOSS_DEGRADE_FRACTION.1);
+        let daily_reason =
+            (self.daily_loss_cap > Decimal::ZERO && daily_loss >= degrade_at).then(|| {
+                format!(
+                    "daily realized loss {daily_loss} ≥ 80% of cap {}",
+                    self.daily_loss_cap
+                )
+            });
+        match (venue_reason, daily_reason) {
+            (None, None) => VenueHealth::Healthy,
+            (Some(v), Some(d)) => VenueHealth::Degraded {
+                reason: format!("{v}; {d}"),
+            },
+            (Some(reason), None) | (None, Some(reason)) => VenueHealth::Degraded { reason },
         }
     }
 
@@ -257,8 +357,11 @@ impl ExecutionBreaker {
     /// 2. **Transient degradation (no trip).** `Degraded → Healthy` after
     ///    `cooldown_secs` of no failures.
     pub fn tick(&self) {
-        let health = {
+        let (venue_health, daily_loss) = {
             let mut inner = self.lock();
+            // Roll the daily realized-loss accumulator at the UTC day boundary so
+            // a stale 80%-degrade does not persist into a fresh day.
+            inner.roll_day(Utc::now().date_naive());
             if inner.tripped {
                 if self.kill_switch.current().allows_new_entry() {
                     inner.reset();
@@ -276,9 +379,10 @@ impl ExecutionBreaker {
                     inner.health = VenueHealth::Healthy;
                 }
             }
-            inner.health.clone()
+            (inner.health.clone(), inner.daily_loss())
         };
-        self.health.store(health);
+        self.health
+            .store(self.combined_health(&venue_health, daily_loss));
     }
 
     /// Clear the transient failure window back to a clean `Healthy` slate.
@@ -287,8 +391,13 @@ impl ExecutionBreaker {
     /// operator has cleared the kill-switch; this is the explicit form for tests
     /// and any future synchronous clear path.
     pub fn reset(&self) {
-        self.lock().reset();
-        self.health.store(VenueHealth::Healthy);
+        let (venue_health, daily_loss) = {
+            let mut inner = self.lock();
+            inner.reset();
+            (inner.health.clone(), inner.daily_loss())
+        };
+        self.health
+            .store(self.combined_health(&venue_health, daily_loss));
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, BreakerInner> {

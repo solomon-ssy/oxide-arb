@@ -22,6 +22,7 @@ pub async fn run(deploy: Arc<DeployConfig>) -> QuantResult<()> {
     ctx.register_recommendation_expire_sweep(&mut runner);
     ctx.register_execution_dispatcher(&mut runner);
     ctx.register_reconciliation_worker(&mut runner);
+    ctx.register_exit_monitor_worker(&mut runner);
     let order_intents = ctx.register_execution_services(&mut runner);
     ctx.register_web_services(&mut runner, order_intents)
         .await?;

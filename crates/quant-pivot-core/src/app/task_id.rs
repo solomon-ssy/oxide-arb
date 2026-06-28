@@ -57,6 +57,8 @@ pub enum TaskId {
     /// Self-heals the execution breaker (`Degraded → Healthy` after cooldown).
     ExecutionBreakerTick,
     ReconciliationWorker,
+    /// Scans open position lots and evaluates the exit priority ladder (05.6).
+    ExitMonitor,
     ExecutionHeartbeat,
 
     // ── Risk / periodic ───────────────────────────────────────────────
@@ -119,7 +121,8 @@ impl TaskId {
             Self::ExecutionRunner { .. }
             | Self::ExecutionDispatcher
             | Self::ExecutionBreakerTick
-            | Self::ReconciliationWorker => TaskKind::Execution,
+            | Self::ReconciliationWorker
+            | Self::ExitMonitor => TaskKind::Execution,
             Self::ExecutionHeartbeat => TaskKind::ExecutionHeartbeat,
             Self::RiskTick
             | Self::ExposureGc

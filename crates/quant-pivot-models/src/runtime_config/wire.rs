@@ -293,6 +293,68 @@ impl Default for ExitOrderPolicy {
     }
 }
 
+/// Exit-monitor cadence and signal-degradation policy (Phase 05.6).
+///
+/// The monitor scans open position lots every `monitor_secs` for the price /
+/// time / trailing / partial ladder; the heavier signal re-inference runs at
+/// Model-backed thesis-invalidation re-inference policy (Phase 06.0).
+///
+/// When `enabled`, the exit monitor re-scores each lot's market via the
+/// intent-frozen model and compares the fresh composite score against the entry
+/// baseline. `shadow_mode` runs the full pipeline but suppresses
+/// `ThesisInvalidated` exits (metrics + logs only) until operators disable it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct ExitSignalReinferencePolicy {
+    /// Whether model-backed signal re-inference is active.
+    pub enabled: bool,
+    /// When true, re-inference runs and is audited, but thesis-invalidation
+    /// exits are suppressed (fail-safe hold; SL/time/trailing still apply).
+    pub shadow_mode: bool,
+}
+
+impl Default for ExitSignalReinferencePolicy {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            shadow_mode: true,
+        }
+    }
+}
+
+/// Exit-monitor cadence, signal-degradation threshold, and re-inference policy.
+///
+/// Price/time/trailing tiers run every `monitor_secs`; model re-inference runs
+/// at most every `signal_recheck_secs` per lot. A fresh composite score below
+/// `entry_composite_score × signal_invalidation_ratio` invalidates the thesis.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct ExitMonitorPolicy {
+    /// Whether the exit-monitor worker actively evaluates open lots.
+    pub enabled: bool,
+    /// Seconds between exit-monitor scans (price / time / trailing cadence).
+    pub monitor_secs: u64,
+    /// Minimum seconds between signal re-inference checks for one lot.
+    pub signal_recheck_secs: u64,
+    /// Fresh composite-score fraction of the entry score below which the thesis
+    /// is treated as invalidated (signal-degradation re-inference).
+    pub signal_invalidation_ratio: DecimalString,
+    /// Model-backed thesis-invalidation re-inference (Phase 06.0).
+    pub signal_reinference: ExitSignalReinferencePolicy,
+}
+
+impl Default for ExitMonitorPolicy {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            monitor_secs: 10,
+            signal_recheck_secs: 60,
+            signal_invalidation_ratio: DecimalString::new("0.6"),
+            signal_reinference: ExitSignalReinferencePolicy::default(),
+        }
+    }
+}
+
 /// Emergency-exit action used when operational kill-switch handling escalates
 /// to emergency state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -422,6 +484,11 @@ pub struct ExecutionBreakerConfig {
     pub venue_window_secs: u64,
     /// Seconds of failure-free operation before `Degraded` self-recovers to `Healthy`.
     pub cooldown_secs: u64,
+    /// Daily realized-loss cap in USD (UTC day). Cumulative same-day realized
+    /// loss `≥ 80%` of the cap degrades venue health (admission `#18` defers);
+    /// `≥` the cap trips the kill-switch (`execution_halted`, latched). `0`
+    /// disables the daily-realized-loss dimension.
+    pub daily_realized_loss_cap_usd: DecimalString,
 }
 
 impl Default for ExecutionBreakerConfig {
@@ -433,6 +500,7 @@ impl Default for ExecutionBreakerConfig {
             venue_min_window_samples: 10,
             venue_window_secs: 60,
             cooldown_secs: 30,
+            daily_realized_loss_cap_usd: DecimalString::new("0"),
         }
     }
 }

@@ -1022,6 +1022,26 @@ pub trait UnifiedModelRunner {
 - feature schema mismatch 一律拒绝。
 - 推理失败可以 fallback，但 fallback 必须写入 report summary。
 
+### 20.1 退出侧模型编排（Opportunistic Sell — Phase 6）
+
+Report 路径的 `UnifiedModelRunner`（上文）服务 **Buy 侧** TopN 候选。退出侧的 thesis-invalidation
+与机会性 Sell 走 **独立 seam**（05.6 已落地）：
+
+| 路径 | Trait | 05.6 seam | 06.0 impl | 后续 impl |
+|---|---|---|---|---|
+| Thesis 破 / 分数退化 | `ExitSignalEvaluator` → `ThesisInvalidated` | `ReinferenceSignalEvaluator` + `ExitSignalReinferer` | **06.0** `ModelBackedExitSignalReinferer` | — |
+| 机会性平仓（thesis 仍成立） | `ExitSignalEvaluator` → `OpportunisticSell` | seam + metric 占位 | — | **Phase 6.1** |
+
+**权威实施契约**：thesis invalidation → [`phase-06/06.0-exit-signal-reinference.md`](phase-06/06.0-exit-signal-reinference.md)；
+opportunistic Sell → [`phase-06/06.1-opportunistic-sell-exit-signal.md`](phase-06/06.1-opportunistic-sell-exit-signal.md)
+（`CompositeExitSignalEvaluator`、`SellScorerArtifact`、shadow 期、与 05.6 优先级阶梯第 9 档集成）。
+
+规则（与 §20 一致）：
+
+- Exit monitor **不**直接依赖具体模型族；只依赖 `ExitSignalEvaluator` trait。
+- Sell scorer artifact 经 model registry 发布；feature schema mismatch → `Indeterminate`（fail-safe hold）。
+- Opportunistic 为 **advisory**；ONNX/classical 选型遵循 §17/§15 引入门槛。
+
 ## 21. 生产推荐路线
 
 ### Stage A：可解释生产最小闭环

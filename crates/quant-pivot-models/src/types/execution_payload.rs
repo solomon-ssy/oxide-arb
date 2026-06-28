@@ -10,6 +10,7 @@
 //! the strong-typed contract so the dormant table never carries a bare `Value`.
 
 use chrono::{DateTime, Utc};
+use rust_decimal::Decimal;
 use sea_orm::FromJsonQueryResult;
 use serde::{Deserialize, Serialize};
 
@@ -19,7 +20,10 @@ use crate::{
         quant::SettlementPolicy,
     },
     jsonb_active,
-    types::{Bps, PartialExitNode, Price, Shares, TokenId},
+    types::{
+        Bps, PartialExitNode, Price, Probability, Shares, SignalInvalidationRule, TokenId,
+        TrailingStop,
+    },
 };
 
 /// The concrete entry order an approved intent will submit to the venue.
@@ -45,23 +49,69 @@ pub struct EntryOrderSpec {
     pub valid_until: DateTime<Utc>,
 }
 
-/// The exit policy an approved intent enforces after the entry fills.
+/// The exit policy an approved intent freezes after the entry fills.
 ///
-/// Projected from the recommendation's `ExitPlan`: the take-profit / stop-loss /
-/// time-exit scalars are the canonical (full) exit; `partial_exit_nodes` carries
-/// only genuine scaled exits (`sell_pct < 1`).
+/// A **faithful, complete** projection of the recommendation's `ExitPlan` — the
+/// exit monitor evaluates every trigger deterministically from this frozen
+/// contract and never re-reads the (possibly expired/revoked) recommendation
+/// for the price/time/trailing/partial ladder. `entry_reference_price` and
+/// `entry_composite_score` are the frozen entry-thesis baselines used for
+/// percentage-based stops/targets and signal-degradation re-inference.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
 pub struct ExitPolicySpec {
     /// Take-profit price target.
     pub take_profit_price: Option<Price>,
+    /// Take-profit as a percentage move from the entry reference price.
+    pub take_profit_pct: Option<Decimal>,
     /// Stop-loss price target.
     pub stop_loss_price: Option<Price>,
+    /// Stop-loss as a percentage move from the entry reference price.
+    pub stop_loss_pct: Option<Decimal>,
     /// Absolute time-based exit.
     pub time_exit_at: Option<DateTime<Utc>>,
+    /// Maximum holding period in seconds (relative to the lot's open time).
+    pub max_hold_secs: Option<u64>,
+    /// Optional trailing-stop policy (folded into the effective stop-loss).
+    pub trailing_stop: Option<TrailingStop>,
+    /// Conditions that invalidate the thesis (audit context for re-inference).
+    pub signal_invalidation_rules: Vec<SignalInvalidationRule>,
     /// Scaled partial-exit nodes (empty for a single full exit).
     pub partial_exit_nodes: Vec<PartialExitNode>,
     /// How the position settles at resolution.
     pub settlement_policy: SettlementPolicy,
+    /// Optional manual-review checkpoint time.
+    pub manual_review_at: Option<DateTime<Utc>>,
+    /// Frozen entry reference price (recommendation `entry_price_ref` / limit),
+    /// the basis for percentage-based take-profit / stop-loss / trailing math.
+    pub entry_reference_price: Price,
+    /// Frozen entry composite score — the baseline the signal-degradation
+    /// re-inference compares the fresh score against.
+    pub entry_composite_score: Probability,
 }
 
-jsonb_active!(EntryOrderSpec, ExitPolicySpec);
+/// Partial-exit node ids whose tranches have **settled** on this intent lot.
+///
+/// Each `PartialExitNode::node_id` fires at most once; pending in-flight exits
+/// are tracked separately on the intent row (`pending_partial_exit_node_id`).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
+pub struct ExecutedPartialExitNodes {
+    /// Stable node ids already reduced on the lot (append-only, deduped).
+    pub node_ids: Vec<String>,
+}
+
+impl ExecutedPartialExitNodes {
+    /// Whether `node_id` has already settled.
+    #[must_use]
+    pub fn contains(&self, node_id: &str) -> bool {
+        self.node_ids.iter().any(|id| id == node_id)
+    }
+
+    /// Record a settled node id (no-op when already present).
+    pub fn record(&mut self, node_id: &str) {
+        if !self.contains(node_id) {
+            self.node_ids.push(node_id.to_owned());
+        }
+    }
+}
+
+jsonb_active!(EntryOrderSpec, ExitPolicySpec, ExecutedPartialExitNodes);

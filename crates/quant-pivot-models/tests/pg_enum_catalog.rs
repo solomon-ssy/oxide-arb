@@ -85,8 +85,8 @@ fn pg_enum_specs_are_unique_and_prefixed() {
     let specs = pg_enum::specs();
     assert_eq!(
         specs.len(),
-        46,
-        "expected exactly 46 Postgres enum types, got {}",
+        47,
+        "expected exactly 47 Postgres enum types, got {}",
         specs.len()
     );
 
@@ -110,6 +110,7 @@ fn expected_pg_enum_types_are_registered() {
         "qp_capital_allocation_state",
         "qp_data_quality_status",
         "qp_event_status",
+        "qp_exit_reason",
         "qp_exit_state",
         "qp_execution_order_phase",
         "qp_execution_order_state",
@@ -295,6 +296,23 @@ fn execution_foundation_pg_enums_match_wire_labels() {
             "exited",
             "failed",
             "manual_required",
+        ]
+    );
+    assert_pg_enum!(
+        ExitReason,
+        &[
+            "take_profit",
+            "stop_loss",
+            "time_exit",
+            "partial_exit",
+            "signal_invalidated",
+            "opportunistic",
+            "manual",
+            "settlement_hold",
+            "kill_switch_emergency",
+            "risk_envelope_breached",
+            "market_abnormal",
+            "data_stale",
         ]
     );
 }
@@ -594,22 +612,6 @@ fn execution_wire_enums_from_str_round_trip() {
             ReconciliationEvidenceKind::AccountBalanceDelta,
             ReconciliationEvidenceKind::BookContext,
             ReconciliationEvidenceKind::OperatorNote,
-        ]
-    );
-    assert_wire_enum_from_str!(
-        ExitReason,
-        [
-            ExitReason::TakeProfit,
-            ExitReason::StopLoss,
-            ExitReason::TimeExit,
-            ExitReason::PartialExit,
-            ExitReason::SignalInvalidated,
-            ExitReason::Manual,
-            ExitReason::SettlementHold,
-            ExitReason::KillSwitchEmergency,
-            ExitReason::RiskEnvelopeBreached,
-            ExitReason::MarketAbnormal,
-            ExitReason::DataStale,
         ]
     );
     assert_wire_enum_from_str!(

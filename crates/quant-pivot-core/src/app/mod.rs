@@ -4,6 +4,7 @@ pub mod backtest;
 pub mod bootstrap;
 pub mod build;
 pub mod execution_dispatcher;
+pub mod exit_monitor_worker;
 pub mod fact_writer_tasks;
 pub mod intent_service;
 pub mod lifecycle;

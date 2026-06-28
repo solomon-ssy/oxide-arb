@@ -10,20 +10,20 @@ use std::{collections::BTreeMap, str::FromStr};
 use chrono::Utc;
 use quant_pivot_models::{
     domain::{
-        CapitalReconcileSettlement, CapitalSettlement, NewAccountSnapshot, NewCapitalAllocation,
-        NewExecutionOrder, NewMarketSelection, NewModelRun, NewModelSpec, NewModelVersion,
-        NewOperationLog, NewOrderIntent, NewPortfolioPlan, NewRecommendation,
+        CapitalReconcileSettlement, CapitalSettlement, ExitLedgerWrite, NewAccountSnapshot,
+        NewCapitalAllocation, NewExecutionOrder, NewMarketSelection, NewModelRun, NewModelSpec,
+        NewModelVersion, NewOperationLog, NewOrderIntent, NewPortfolioPlan, NewRecommendation,
         NewRecommendationReport, NewReconciliation, NewReportDataQualitySnapshot,
-        NewReportTransaction, NewRuntimeConfigVersion, PositionFill, ReconciliationLedgerWrite,
-        SubmissionLedgerWrite,
+        NewReportTransaction, NewRuntimeConfigVersion, PositionExit, PositionFill,
+        ReconciliationLedgerWrite, SubmissionLedgerWrite,
     },
     entities::quant_market_selection::{SelectionExcludedMarketIds, SelectionIncludedMarketIds},
     entities::{quant_order_intent, quant_recommendation},
     enums::{
         common::{MarketCategory, OrderType, Side},
         execution::{
-            CapitalAllocationState, ExecutionOrderPhase, OrderIntentKind, OrderTypeKind,
-            PositionLedgerState, ReconciliationEvidenceKind, ReconciliationResult,
+            CapitalAllocationState, ExecutionOrderPhase, ExitReason, ExitState, OrderIntentKind,
+            OrderTypeKind, PositionLedgerState, ReconciliationEvidenceKind, ReconciliationResult,
             VenueOrderStatus,
         },
         factor::FactorFamily,
@@ -261,6 +261,7 @@ async fn partial_fill_splits_capital_while_locked() {
                     spent_usd: partial_cost,
                 },
                 fill: Some(PositionFill {
+                    order_intent_id: intent_id.clone(),
                     token_id: TokenId::new("token-1"),
                     market_id: MarketId::new(&ids.market),
                     event_id: Some(EventId::new(&ids.event)),
@@ -295,9 +296,11 @@ async fn position_upsert_weighted_average_cost() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
     let ids = seed_report_fixture(&db).await;
+    let intent_id = seed_approved_intent(&db, &ids).await;
     let position_repo = PgPositionRepository::new(db.clone());
 
-    let first = position_fill(&ids);
+    // Two fills of the *same* entry intent merge into one lot (weighted average).
+    let first = position_fill(&ids, &intent_id);
     position_repo
         .apply_fill(first.clone())
         .await
@@ -312,7 +315,7 @@ async fn position_upsert_weighted_average_cost() {
     position_repo.apply_fill(second).await.expect("second fill");
 
     let position = position_repo
-        .find_by_token(&TokenId::new("token-1"))
+        .find_by_intent(&intent_id)
         .await
         .expect("position")
         .expect("row");
@@ -361,7 +364,7 @@ async fn full_fill_spends_capital_and_writes_position() {
                 capital: CapitalSettlement::SettleFull {
                     spent_usd: Usd::new(NOTIONAL),
                 },
-                fill: Some(position_fill(&ids)),
+                fill: Some(position_fill(&ids, &intent_id)),
                 reconciliation: Some(reconciliation_row(&order.execution_order_id, &intent_id)),
             },
         )
@@ -379,7 +382,7 @@ async fn full_fill_spends_capital_and_writes_position() {
     assert_eq!(capital.released_usd, Usd::ZERO);
 
     let position = PgPositionRepository::new(db.clone())
-        .find_by_token(&TokenId::new("token-1"))
+        .find_by_intent(&intent_id)
         .await
         .expect("position")
         .expect("position row");
@@ -440,7 +443,7 @@ async fn ambiguous_holds_capital_and_enqueues_reconciliation() {
     // No position is written on an unconfirmed submission.
     assert!(
         PgPositionRepository::new(db.clone())
-            .find_by_token(&TokenId::new("token-1"))
+            .find_by_intent(&intent_id)
             .await
             .expect("position")
             .is_none()
@@ -642,10 +645,18 @@ fn new_pending_intent_with_id(ids: &TxnIds, order_intent_id: OrderIntentId) -> N
         },
         exit_policy_json: ExitPolicySpec {
             take_profit_price: Some(Price::new(dec!(0.8))),
+            take_profit_pct: None,
             stop_loss_price: Some(Price::new(dec!(0.5))),
+            stop_loss_pct: None,
             time_exit_at: None,
+            max_hold_secs: None,
+            trailing_stop: None,
+            signal_invalidation_rules: Vec::new(),
             partial_exit_nodes: Vec::new(),
             settlement_policy: SettlementPolicy::ExitBeforeResolution,
+            manual_review_at: None,
+            entry_reference_price: Price::new(dec!(0.6)),
+            entry_composite_score: Probability::new(dec!(0.8)),
         },
         risk_envelope_hash: content_hash('e'),
         expires_at: Utc::now() + chrono::Duration::hours(1),
@@ -748,6 +759,10 @@ fn filled_write() -> ReconciliationLedgerWrite {
             spent_usd: Usd::new(NOTIONAL),
         },
         fill: None,
+        exit: None,
+        exit_fully: false,
+        exit_state: None,
+        revert_lot: false,
         result: ReconciliationResult::Filled,
         evidence: ReconciliationEvidenceChain(vec![recon_evidence("recon: filled")]),
         venue_filled_shares: Some(Shares::new(dec!(100))),
@@ -768,7 +783,7 @@ async fn reconcile_ambiguous_to_filled_spends_capital_and_writes_position() {
     let (intent_id, order_id) = ambiguous_order(&db, &submission, &ids).await;
 
     let mut write = filled_write();
-    write.fill = Some(position_fill(&ids));
+    write.fill = Some(position_fill(&ids, &intent_id));
     let recorded = submission
         .apply_reconciliation(&order_id, write)
         .await
@@ -784,7 +799,7 @@ async fn reconcile_ambiguous_to_filled_spends_capital_and_writes_position() {
     assert_eq!(capital.spent_usd, Usd::new(NOTIONAL));
 
     let position = PgPositionRepository::new(db.clone())
-        .find_by_token(&TokenId::new("token-1"))
+        .find_by_intent(&intent_id)
         .await
         .expect("position")
         .expect("position row");
@@ -821,6 +836,10 @@ async fn reconcile_ambiguous_to_not_filled_releases_capital() {
         error_message: None,
         capital: CapitalReconcileSettlement::Release,
         fill: None,
+        exit: None,
+        exit_fully: false,
+        exit_state: None,
+        revert_lot: false,
         result: ReconciliationResult::NotFilled,
         evidence: ReconciliationEvidenceChain(vec![recon_evidence("recon: not filled")]),
         venue_filled_shares: Some(Shares::ZERO),
@@ -844,7 +863,7 @@ async fn reconcile_ambiguous_to_not_filled_releases_capital() {
     assert_eq!(capital.released_usd, Usd::new(NOTIONAL));
     assert!(
         PgPositionRepository::new(db.clone())
-            .find_by_token(&TokenId::new("token-1"))
+            .find_by_intent(&intent_id)
             .await
             .expect("position")
             .is_none()
@@ -870,6 +889,10 @@ async fn reconcile_unresolvable_impairs_capital_and_leaves_order_ambiguous() {
         error_message: Some("conflicting evidence".to_owned()),
         capital: CapitalReconcileSettlement::Impair,
         fill: None,
+        exit: None,
+        exit_fully: false,
+        exit_state: None,
+        revert_lot: false,
         result: ReconciliationResult::Unresolvable,
         evidence: ReconciliationEvidenceChain(vec![recon_evidence("recon: unresolvable")]),
         venue_filled_shares: None,
@@ -929,6 +952,10 @@ async fn reconcile_partial_fill_splits_capital_and_writes_position() {
             spent_usd: Usd::new(PARTIAL_SPENT),
         },
         fill: None,
+        exit: None,
+        exit_fully: false,
+        exit_state: None,
+        revert_lot: false,
         result: ReconciliationResult::PartiallyFilled,
         evidence: ReconciliationEvidenceChain(vec![recon_evidence("recon: partial fill")]),
         venue_filled_shares: Some(Shares::new(PARTIAL_SHARES)),
@@ -938,6 +965,7 @@ async fn reconcile_partial_fill_splits_capital_and_writes_position() {
         resolved_at: Some(Utc::now()),
     };
     write.fill = Some(PositionFill {
+        order_intent_id: intent_id.clone(),
         token_id: TokenId::new("token-1"),
         market_id: MarketId::new(&ids.market),
         event_id: Some(EventId::new(&ids.event)),
@@ -970,7 +998,7 @@ async fn reconcile_partial_fill_splits_capital_and_writes_position() {
     );
 
     let position = PgPositionRepository::new(db.clone())
-        .find_by_token(&TokenId::new("token-1"))
+        .find_by_intent(&intent_id)
         .await
         .expect("position")
         .expect("position row");
@@ -987,7 +1015,7 @@ async fn reconcile_correction_is_idempotent() {
     let (intent_id, order_id) = ambiguous_order(&db, &submission, &ids).await;
 
     let mut first = filled_write();
-    first.fill = Some(position_fill(&ids));
+    first.fill = Some(position_fill(&ids, &intent_id));
     submission
         .apply_reconciliation(&order_id, first)
         .await
@@ -996,7 +1024,7 @@ async fn reconcile_correction_is_idempotent() {
     // Second identical correction must be a no-op (order is already terminal):
     // capital is not double-spent and the position is not double-written.
     let mut second = filled_write();
-    second.fill = Some(position_fill(&ids));
+    second.fill = Some(position_fill(&ids, &intent_id));
     submission
         .apply_reconciliation(&order_id, second)
         .await
@@ -1010,7 +1038,7 @@ async fn reconcile_correction_is_idempotent() {
     assert_eq!(capital.spent_usd, Usd::new(NOTIONAL));
 
     let position = PgPositionRepository::new(db.clone())
-        .find_by_token(&TokenId::new("token-1"))
+        .find_by_intent(&intent_id)
         .await
         .expect("position")
         .expect("row");
@@ -1055,6 +1083,10 @@ async fn operator_resolve_impaired_to_filled_spends_capital() {
                 error_message: Some("unresolvable".to_owned()),
                 capital: CapitalReconcileSettlement::Impair,
                 fill: None,
+                exit: None,
+                exit_fully: false,
+                exit_state: None,
+                revert_lot: false,
                 result: ReconciliationResult::Unresolvable,
                 evidence: ReconciliationEvidenceChain(vec![recon_evidence("unresolvable")]),
                 venue_filled_shares: None,
@@ -1069,7 +1101,7 @@ async fn operator_resolve_impaired_to_filled_spends_capital() {
 
     // ...then an operator resolves it to filled (Impaired -> Spent).
     let mut resolve = filled_write();
-    resolve.fill = Some(position_fill(&ids));
+    resolve.fill = Some(position_fill(&ids, &intent_id));
     resolve.resolved_by = Some("operator:alice".to_owned());
     let recorded = submission
         .apply_reconciliation(&order_id, resolve)
@@ -1124,8 +1156,9 @@ fn new_execution_order(intent_id: &OrderIntentId, ids: &TxnIds) -> NewExecutionO
     }
 }
 
-fn position_fill(ids: &TxnIds) -> PositionFill {
+fn position_fill(ids: &TxnIds, intent_id: &OrderIntentId) -> PositionFill {
     PositionFill {
+        order_intent_id: intent_id.clone(),
         token_id: TokenId::new("token-1"),
         market_id: MarketId::new(&ids.market),
         event_id: Some(EventId::new(&ids.event)),
@@ -1197,10 +1230,18 @@ async fn seed_approved_intent(db: &sea_orm::DatabaseConnection, ids: &TxnIds) ->
                 },
                 exit_policy_json: ExitPolicySpec {
                     take_profit_price: Some(Price::new(dec!(0.8))),
+                    take_profit_pct: None,
                     stop_loss_price: Some(Price::new(dec!(0.5))),
+                    stop_loss_pct: None,
                     time_exit_at: None,
+                    max_hold_secs: None,
+                    trailing_stop: None,
+                    signal_invalidation_rules: Vec::new(),
                     partial_exit_nodes: Vec::new(),
                     settlement_policy: SettlementPolicy::ExitBeforeResolution,
+                    manual_review_at: None,
+                    entry_reference_price: Price::new(dec!(0.6)),
+                    entry_composite_score: Probability::new(dec!(0.8)),
                 },
                 risk_envelope_hash: content_hash('e'),
                 expires_at: Utc::now() + chrono::Duration::hours(1),
@@ -1680,4 +1721,252 @@ fn report_summary() -> ReportSummary {
         empty_reason: None,
         warnings: Vec::new(),
     }
+}
+
+// ── Phase 05.6: exit submission (per-lot capital + position settlement) ───────
+
+/// Drive an approved intent's entry to a confirmed full fill: capital `Spent`,
+/// one open lot (100 @ 0.60), intent `Filled`.
+async fn fill_entry_lot(
+    db: &sea_orm::DatabaseConnection,
+    submission: &PgExecutionSubmissionRepository,
+    ids: &TxnIds,
+    intent_id: &OrderIntentId,
+) {
+    submission
+        .claim_for_submission(intent_id, Utc::now())
+        .await
+        .expect("claim");
+    let order = submission
+        .create_entry_order_and_lock_capital(new_execution_order(intent_id, ids))
+        .await
+        .expect("create entry order");
+    submission
+        .record_submission_result(
+            &order.execution_order_id,
+            SubmissionLedgerWrite {
+                state: ExecutionOrderState::Filled,
+                intent_status: OrderIntentStatus::Filled,
+                venue_order_id: Some(OrderId::new("venue-entry")),
+                venue_status: Some(VenueOrderStatus::Filled),
+                submitted_at: Utc::now(),
+                filled_at: Some(Utc::now()),
+                cancelled_at: None,
+                error_message: None,
+                capital: CapitalSettlement::SettleFull {
+                    spent_usd: Usd::new(NOTIONAL),
+                },
+                fill: Some(position_fill(ids, intent_id)),
+                reconciliation: Some(reconciliation_row(&order.execution_order_id, intent_id)),
+            },
+        )
+        .await
+        .expect("record entry fill");
+    let _ = db;
+}
+
+fn exit_order(
+    intent_id: &OrderIntentId,
+    ids: &TxnIds,
+    shares: Decimal,
+    price: Decimal,
+) -> NewExecutionOrder {
+    NewExecutionOrder {
+        execution_order_id: ExecutionOrderId::from_v7(),
+        order_intent_id: intent_id.clone(),
+        order_phase: ExecutionOrderPhase::Exit,
+        market_id: MarketId::new(&ids.market),
+        token_id: TokenId::new("token-1"),
+        side: Side::Sell,
+        order_type: OrderTypeKind::Gtc,
+        price: Price::new(price),
+        shares: Shares::new(shares),
+        cost_usd: Shares::new(shares) * Price::new(price),
+        venue_order_id: None,
+        venue_status: None,
+        state: ExecutionOrderState::Submitted,
+        submitted_at: None,
+        filled_at: None,
+        cancelled_at: None,
+        gtd_expiration_at: None,
+        error_message: None,
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn exit_full_releases_capital_with_realized_pnl() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let ids = seed_report_fixture(&db).await;
+    let intent_id = seed_approved_intent(&db, &ids).await;
+    let submission = PgExecutionSubmissionRepository::new(db.clone());
+    fill_entry_lot(&db, &submission, &ids, &intent_id).await;
+
+    // Write-ahead the exit: lot Open -> Closing.
+    let exit = submission
+        .create_exit_order_and_mark_closing(
+            exit_order(&intent_id, &ids, dec!(100), dec!(0.55)),
+            ExitReason::StopLoss,
+            None,
+        )
+        .await
+        .expect("exit order");
+    let position = PgPositionRepository::new(db.clone())
+        .find_by_intent(&intent_id)
+        .await
+        .expect("position")
+        .expect("row");
+    assert_eq!(position.state, PositionLedgerState::Closing);
+
+    // Settle a full exit fill at 0.55 (entry cost 0.60 → realized -5).
+    submission
+        .record_exit_result(
+            &exit.execution_order_id,
+            ExitLedgerWrite {
+                order_state: ExecutionOrderState::Filled,
+                venue_order_id: Some(OrderId::new("venue-exit")),
+                venue_status: Some(VenueOrderStatus::Filled),
+                filled_at: Some(Utc::now()),
+                cancelled_at: None,
+                error_message: None,
+                exit_state: ExitState::Exited,
+                exit_reason: ExitReason::StopLoss,
+                position_exit: Some(PositionExit {
+                    shares: Shares::new(dec!(100)),
+                    avg_price: Price::new(dec!(0.55)),
+                    proceeds_usd: Usd::new(dec!(55)),
+                    realized_pnl_usd: Usd::new(dec!(-5)),
+                    exited_at: Utc::now(),
+                    reason: ExitReason::StopLoss,
+                }),
+                fully_exited: true,
+                revert_to_open: false,
+                reconciliation: None,
+            },
+        )
+        .await
+        .expect("record exit");
+
+    let capital = PgCapitalAllocationRepository::new(db.clone())
+        .find_by_intent(&intent_id)
+        .await
+        .expect("capital")
+        .expect("row");
+    assert_eq!(capital.state, CapitalAllocationState::Released);
+
+    let position = PgPositionRepository::new(db.clone())
+        .find_by_intent(&intent_id)
+        .await
+        .expect("position")
+        .expect("row");
+    assert_eq!(position.state, PositionLedgerState::Closed);
+    assert_eq!(position.shares, Shares::ZERO);
+    assert_eq!(position.realized_pnl_usd, Usd::new(dec!(-5)));
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn exit_partial_keeps_capital_spent_and_reduces_lot() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let ids = seed_report_fixture(&db).await;
+    let intent_id = seed_approved_intent(&db, &ids).await;
+    let submission = PgExecutionSubmissionRepository::new(db.clone());
+    fill_entry_lot(&db, &submission, &ids, &intent_id).await;
+
+    let exit = submission
+        .create_exit_order_and_mark_closing(
+            exit_order(&intent_id, &ids, dec!(40), dec!(0.70)),
+            ExitReason::PartialExit,
+            Some("tp1".to_owned()),
+        )
+        .await
+        .expect("exit order");
+
+    // Sell 40 @ 0.70 (entry 0.60 → realized +4); lot keeps 60, capital stays Spent.
+    submission
+        .record_exit_result(
+            &exit.execution_order_id,
+            ExitLedgerWrite {
+                order_state: ExecutionOrderState::Filled,
+                venue_order_id: Some(OrderId::new("venue-exit-partial")),
+                venue_status: Some(VenueOrderStatus::Filled),
+                filled_at: Some(Utc::now()),
+                cancelled_at: None,
+                error_message: None,
+                exit_state: ExitState::PartiallyExited,
+                exit_reason: ExitReason::PartialExit,
+                position_exit: Some(PositionExit {
+                    shares: Shares::new(dec!(40)),
+                    avg_price: Price::new(dec!(0.70)),
+                    proceeds_usd: Usd::new(dec!(28)),
+                    realized_pnl_usd: Usd::new(dec!(4)),
+                    exited_at: Utc::now(),
+                    reason: ExitReason::PartialExit,
+                }),
+                fully_exited: false,
+                revert_to_open: false,
+                reconciliation: None,
+            },
+        )
+        .await
+        .expect("record partial exit");
+
+    let capital = PgCapitalAllocationRepository::new(db.clone())
+        .find_by_intent(&intent_id)
+        .await
+        .expect("capital")
+        .expect("row");
+    assert_eq!(capital.state, CapitalAllocationState::Spent);
+
+    let position = PgPositionRepository::new(db.clone())
+        .find_by_intent(&intent_id)
+        .await
+        .expect("position")
+        .expect("row");
+    assert_eq!(position.state, PositionLedgerState::Closing);
+    assert_eq!(position.shares, Shares::new(dec!(60)));
+    assert_eq!(position.realized_pnl_usd, Usd::new(dec!(4)));
+
+    let intent = PgOrderIntentRepository::new(db.clone())
+        .find_by_id(&intent_id)
+        .await
+        .expect("intent")
+        .expect("row");
+    assert!(intent.executed_partial_exit_node_ids.contains("tp1"));
+    assert!(intent.pending_partial_exit_node_id.is_none());
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn exit_rejects_second_in_flight_order() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let ids = seed_report_fixture(&db).await;
+    let intent_id = seed_approved_intent(&db, &ids).await;
+    let submission = PgExecutionSubmissionRepository::new(db.clone());
+    fill_entry_lot(&db, &submission, &ids, &intent_id).await;
+
+    submission
+        .create_exit_order_and_mark_closing(
+            exit_order(&intent_id, &ids, dec!(100), dec!(0.55)),
+            ExitReason::StopLoss,
+            None,
+        )
+        .await
+        .expect("first exit order");
+
+    let err = submission
+        .create_exit_order_and_mark_closing(
+            exit_order(&intent_id, &ids, dec!(100), dec!(0.54)),
+            ExitReason::StopLoss,
+            None,
+        )
+        .await
+        .expect_err("second in-flight exit must be rejected");
+    assert!(
+        err.to_string().contains("in-flight exit order"),
+        "unexpected error: {err}"
+    );
 }

@@ -34,7 +34,7 @@ use quant_pivot_models::{
     runtime_config::EntryOrderPolicy,
     types::{
         CapitalAllocationId, ContentHash, EntryOrderSpec, ExitPolicySpec, OperationLogId,
-        OrderIntentId, RecommendationId, RecommendationReportId, Usd,
+        OrderIntentId, Price, RecommendationId, RecommendationReportId, Usd,
     },
 };
 use quant_pivot_repository::traits::{
@@ -609,14 +609,30 @@ fn project_entry_order_spec(
 }
 
 /// Project a recommendation's `ExitPlan` into the [`ExitPolicySpec`] frozen on
-/// the intent. Only genuine scaled exits (`sell_pct < 1`) ride in
-/// `partial_exit_nodes`; the canonical full exit stays in the scalar fields.
+/// the intent — a **faithful, complete** projection so the exit monitor never
+/// re-reads the (possibly expired/revoked) recommendation for the price / time /
+/// trailing / partial ladder. Only genuine scaled exits (`sell_pct < 1`) ride in
+/// `partial_exit_nodes`; the canonical full exit stays in the scalar fields. The
+/// entry reference price and composite score are frozen as the baselines for
+/// percentage-based stops and signal-degradation re-inference.
 fn project_exit_policy_spec(rec: &RecommendationInfo) -> ExitPolicySpec {
     let exit = &rec.exit_plan;
+    let entry_reference_price = rec
+        .entry_plan
+        .limit_price
+        .or(rec.entry_plan.trigger_price)
+        .or(rec.market_context.mid_price)
+        .or(rec.market_context.best_ask)
+        .unwrap_or(Price::ZERO);
     ExitPolicySpec {
         take_profit_price: exit.take_profit_price,
+        take_profit_pct: exit.take_profit_pct,
         stop_loss_price: exit.stop_loss_price,
+        stop_loss_pct: exit.stop_loss_pct,
         time_exit_at: exit.time_exit_at,
+        max_hold_secs: exit.max_hold_secs,
+        trailing_stop: exit.trailing_stop.clone(),
+        signal_invalidation_rules: exit.signal_invalidation_rules.clone(),
         partial_exit_nodes: exit
             .partial_exit_nodes
             .iter()
@@ -624,6 +640,9 @@ fn project_exit_policy_spec(rec: &RecommendationInfo) -> ExitPolicySpec {
             .cloned()
             .collect(),
         settlement_policy: exit.settlement_policy,
+        manual_review_at: exit.manual_review_at,
+        entry_reference_price,
+        entry_composite_score: rec.composite_score,
     }
 }
 

@@ -249,7 +249,7 @@ fn defer_reason(decision: &AdmissionDecision) -> String {
         )
 }
 
-const fn order_type_kind(order_type: &OrderType) -> OrderTypeKind {
+pub(crate) const fn order_type_kind(order_type: &OrderType) -> OrderTypeKind {
     match order_type {
         OrderType::Fok => OrderTypeKind::Fok,
         OrderType::Gtc => OrderTypeKind::Gtc,
@@ -257,7 +257,7 @@ const fn order_type_kind(order_type: &OrderType) -> OrderTypeKind {
     }
 }
 
-fn gtd_expiration_at(order_type: &OrderType) -> Option<DateTime<Utc>> {
+pub(crate) fn gtd_expiration_at(order_type: &OrderType) -> Option<DateTime<Utc>> {
     match order_type {
         OrderType::Gtd { expiration } => {
             DateTime::from_timestamp(i64::try_from(*expiration).unwrap_or(i64::MAX), 0)
@@ -315,10 +315,12 @@ fn position_fill(
     result: &VenueSubmitResult,
     recommendation: &RecommendationInfo,
     spec: &EntryOrderSpec,
+    order_intent_id: &OrderIntentId,
 ) -> PositionFill {
     let price = fill_avg_price(result, spec);
     let fill_cost = result.filled_shares * price;
     PositionFill {
+        order_intent_id: order_intent_id.clone(),
         token_id: spec.token_id.clone(),
         market_id: recommendation.market_id.clone(),
         event_id: Some(recommendation.event_id.clone()),
@@ -389,7 +391,12 @@ fn build_ledger_write(
             capital: CapitalSettlement::SettleFull {
                 spent_usd: total_spent,
             },
-            fill: Some(position_fill(result, recommendation, spec)),
+            fill: Some(position_fill(
+                result,
+                recommendation,
+                spec,
+                &execution_order.order_intent_id,
+            )),
             reconciliation: Some(reconciliation_row(result, execution_order, outcome)),
         },
         VenueOutcome::PartiallyFilled => SubmissionLedgerWrite {
@@ -404,7 +411,12 @@ fn build_ledger_write(
             capital: CapitalSettlement::SettlePartial {
                 spent_usd: total_spent,
             },
-            fill: Some(position_fill(result, recommendation, spec)),
+            fill: Some(position_fill(
+                result,
+                recommendation,
+                spec,
+                &execution_order.order_intent_id,
+            )),
             reconciliation: Some(reconciliation_row(result, execution_order, outcome)),
         },
         VenueOutcome::Open => SubmissionLedgerWrite {

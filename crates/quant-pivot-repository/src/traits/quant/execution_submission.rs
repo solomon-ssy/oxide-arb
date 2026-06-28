@@ -2,10 +2,11 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::{
-        ExecutionOrderInfo, NewExecutionOrder, OrderIntentInfo, ReconciliationLedgerWrite,
-        SubmissionLedgerWrite,
+        ExecutionOrderInfo, ExitLedgerWrite, NewExecutionOrder, OrderIntentInfo,
+        ReconciliationLedgerWrite, SubmissionLedgerWrite,
     },
-    types::{ExecutionOrderId, OrderIntentId},
+    enums::execution::ExitReason,
+    types::{ExecutionOrderId, OrderIntentId, Price},
 };
 
 /// Cross-table execution-submission transactions (Phase 05.4 — real money).
@@ -67,6 +68,52 @@ pub trait ExecutionSubmissionRepository: Send + Sync {
         &self,
         execution_order_id: &ExecutionOrderId,
         write: SubmissionLedgerWrite,
+    ) -> Result<ExecutionOrderInfo, StorageError>;
+
+    /// Write-ahead an exit (Sell) order in one txn (Phase 05.6): insert the exit
+    /// execution order (`order_phase = Exit`, `state = Submitted`), mark the
+    /// per-intent position lot `Open -> Closing`, and advance the intent's exit
+    /// FSM to `OrderSubmitted` recording `exit_reason`. No capital change — the
+    /// lot's capital is already `Spent` from entry.
+    async fn create_exit_order_and_mark_closing(
+        &self,
+        order: NewExecutionOrder,
+        exit_reason: ExitReason,
+        partial_exit_node_id: Option<String>,
+    ) -> Result<ExecutionOrderInfo, StorageError>;
+
+    /// Route a lot to manual exit handling (`exit_state = ManualRequired`,
+    /// recording `exit_reason`). Fail-closed path for data-stale / market-abnormal
+    /// / emergency-manual / auto-exit-frozen decisions.
+    async fn mark_exit_manual(
+        &self,
+        intent_id: &OrderIntentId,
+        reason: ExitReason,
+    ) -> Result<(), StorageError>;
+
+    /// Persist a `Hold` tick's monitoring bookkeeping: advance `next_check_at`,
+    /// the trailing `peak_mark_price` (when present), and `last_signal_recheck_at`
+    /// (when a re-inference ran). Promotes `NotStarted -> Monitoring` on first
+    /// scan; never downgrades an in-flight / partially-exited state.
+    async fn touch_exit_monitor(
+        &self,
+        intent_id: &OrderIntentId,
+        next_check_at: DateTime<Utc>,
+        peak_mark_price: Option<Price>,
+        last_signal_recheck_at: Option<DateTime<Utc>>,
+    ) -> Result<(), StorageError>;
+
+    /// Apply the exit venue outcome in one txn (Phase 05.6): advance the exit
+    /// order state, reduce/close the position lot on a (partial) fill (exact
+    /// average-cost realized `PnL`), complete the capital (`Spent -> Released`) on
+    /// full exit, advance the intent's exit FSM, revert `Closing -> Open` on a
+    /// failed/cancelled attempt, and enqueue reconciliation. `Ambiguous` exits
+    /// hold the position and enqueue recon (fail-closed). Idempotent: a terminal
+    /// exit order is returned unchanged.
+    async fn record_exit_result(
+        &self,
+        execution_order_id: &ExecutionOrderId,
+        write: ExitLedgerWrite,
     ) -> Result<ExecutionOrderInfo, StorageError>;
 
     /// Boot recovery: in-flight orders (`Submitted` / `Ambiguous`) with no

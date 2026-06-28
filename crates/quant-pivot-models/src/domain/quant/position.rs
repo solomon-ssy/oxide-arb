@@ -6,16 +6,18 @@ use crate::{
         execution::{ExitReason, PositionLedgerState},
         quant::{AccountSource, OutcomeSide},
     },
-    types::{EventId, MarketId, Price, Shares, TokenId, Usd},
+    types::{EventId, MarketId, OrderIntentId, PositionId, Price, Shares, TokenId, Usd},
 };
 use chrono::{DateTime, Utc};
 use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
 use serde::{Deserialize, Serialize};
 
-/// Persisted current-position ledger row.
+/// Persisted current-position ledger row (one lot per filled entry intent).
 #[derive(Debug, Clone, Serialize, Deserialize, DerivePartialModel, FromQueryResult)]
 #[sea_orm(entity = "crate::entities::quant_position::Entity")]
 pub struct PositionInfo {
+    pub position_id: PositionId,
+    pub order_intent_id: OrderIntentId,
     pub token_id: TokenId,
     pub market_id: MarketId,
     pub event_id: Option<EventId>,
@@ -33,14 +35,17 @@ pub struct PositionInfo {
 }
 
 info_from_model!(PositionInfo, crate::entities::quant_position::Model, {
-    token_id, market_id, event_id, category, side, state, shares, avg_price,
-    cost_usd, realized_pnl_usd, source, opened_at, updated_at, closed_at,
+    position_id, order_intent_id, token_id, market_id, event_id, category, side,
+    state, shares, avg_price, cost_usd, realized_pnl_usd, source, opened_at,
+    updated_at, closed_at,
 });
 
 /// Insert payload for `quant_position`.
 #[derive(Debug, Clone, Serialize, Deserialize, DeriveIntoActiveModel)]
 #[sea_orm(active_model = "crate::entities::quant_position::ActiveModel")]
 pub struct NewPosition {
+    pub position_id: PositionId,
+    pub order_intent_id: OrderIntentId,
     pub token_id: TokenId,
     pub market_id: MarketId,
     pub event_id: Option<EventId>,
@@ -56,9 +61,10 @@ pub struct NewPosition {
     pub closed_at: Option<DateTime<Utc>>,
 }
 
-/// Fill fact used to upsert/open a position.
+/// Fill fact used to upsert/open a per-intent position lot.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PositionFill {
+    pub order_intent_id: OrderIntentId,
     pub token_id: TokenId,
     pub market_id: MarketId,
     pub event_id: Option<EventId>,

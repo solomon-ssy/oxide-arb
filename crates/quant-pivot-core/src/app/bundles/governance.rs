@@ -2,6 +2,7 @@
 
 use super::{DataBundle, InfraBundle};
 use crate::{
+    execution::ExitMonitorHealthHandle,
     governance::{
         DefaultModePreflight, DefaultModeTransitionGate, KillSwitchControl, KillSwitchHandle,
         ModePreflightDeps, RuntimeModeHandle, SystemStatusPublisher, WeightOverlayApplicator,
@@ -108,6 +109,9 @@ pub struct GovernanceBundle {
     pub kill_switch: Arc<dyn KillSwitchPort>,
     /// Candidate / shadow factor-weight overlay snapshot, reloaded on activation.
     pub weight_overlay: Arc<WeightOverlayApplicator>,
+    /// Exit-monitor health (05.6): shared with the execution bundle's worker and
+    /// read by admission `#20` + the auto-execution mode preflight.
+    pub exit_monitor_health: ExitMonitorHealthHandle,
 }
 
 impl GovernanceBundle {
@@ -178,6 +182,10 @@ impl GovernanceBundle {
         ));
         let kill_switch: Arc<dyn KillSwitchPort> = kill_switch_control;
 
+        // Exit-monitor health seam (05.6): owned here so it is shared by the
+        // execution bundle's worker, admission `#20`, and this preflight.
+        let exit_monitor_health = ExitMonitorHealthHandle::new();
+
         // Mode-transition matrix + read-only upgrade preflight.
         let transition_gate = Arc::new(DefaultModeTransitionGate::new());
         let preflight = Arc::new(DefaultModePreflight::new(ModePreflightDeps {
@@ -189,6 +197,7 @@ impl GovernanceBundle {
             reconciliation: Arc::new(PgReconciliationRepository::new(conn.clone())),
             capital: Arc::new(PgCapitalAllocationRepository::new(conn.clone())),
             kill_switch: kill_switch_handle.clone(),
+            exit_monitor_health: exit_monitor_health.clone(),
         }));
 
         let runtime_control = Arc::new(QuantRuntimeControl::new(QuantRuntimeControlDeps {
@@ -213,6 +222,7 @@ impl GovernanceBundle {
             runtime_control,
             kill_switch,
             weight_overlay,
+            exit_monitor_health,
         }
     }
 }

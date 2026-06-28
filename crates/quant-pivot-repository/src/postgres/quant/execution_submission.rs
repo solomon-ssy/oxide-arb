@@ -9,7 +9,9 @@
 
 use crate::{
     postgres::quant::{
-        capital_allocation::{lock_capital, reconcile_capital, release_capital, settle_capital},
+        capital_allocation::{
+            complete_exit_capital, lock_capital, reconcile_capital, release_capital, settle_capital,
+        },
         execution_order::validate_execution_order_transition,
         order_intent::{load_intent_for_update, validate_intent_transition},
         position,
@@ -20,14 +22,20 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::{
-        ExecutionOrderInfo, NewExecutionOrder, NewReconciliation, OrderIntentInfo,
+        ExecutionOrderInfo, ExitLedgerWrite, NewExecutionOrder, NewReconciliation, OrderIntentInfo,
         ReconciliationLedgerWrite, SubmissionLedgerWrite,
     },
     entities::{
         quant_execution_order, quant_order_intent, quant_recommendation, quant_reconciliation,
     },
-    enums::quant::{ExecutionOrderState, OrderIntentStatus, RecommendationStatus},
-    types::{ExecutionOrderId, OrderIntentId, RecommendationId, ReconciliationId},
+    enums::{
+        execution::{ExecutionOrderPhase, ExitReason, ExitState},
+        quant::{ExecutionOrderState, OrderIntentStatus, RecommendationStatus},
+    },
+    types::{
+        ExecutedPartialExitNodes, ExecutionOrderId, OrderIntentId, Price, RecommendationId,
+        ReconciliationId,
+    },
 };
 use sea_orm::{
     ActiveModelTrait, ActiveValue, ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait,
@@ -36,6 +44,12 @@ use sea_orm::{
 
 /// In-flight execution-order states scanned by boot recovery.
 const DANGLING_STATES: [ExecutionOrderState; 2] = [
+    ExecutionOrderState::Submitted,
+    ExecutionOrderState::Ambiguous,
+];
+
+/// Exit-order states that must not overlap on the same intent (double-exit guard).
+const IN_FLIGHT_EXIT_STATES: [ExecutionOrderState; 2] = [
     ExecutionOrderState::Submitted,
     ExecutionOrderState::Ambiguous,
 ];
@@ -235,6 +249,179 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
         Ok(execution_order.into())
     }
 
+    async fn mark_exit_manual(
+        &self,
+        intent_id: &OrderIntentId,
+        reason: ExitReason,
+    ) -> Result<(), StorageError> {
+        let txn = self.db.begin().await.map_err(StorageError::from)?;
+        let intent = load_intent_for_update(&txn, intent_id).await?;
+        let mut active = intent.into_active_model();
+        active.exit_state = ActiveValue::Set(ExitState::ManualRequired);
+        active.exit_reason = ActiveValue::Set(Some(reason));
+        active.update(&txn).await.map_err(StorageError::from)?;
+        txn.commit().await.map_err(StorageError::from)?;
+        Ok(())
+    }
+
+    async fn touch_exit_monitor(
+        &self,
+        intent_id: &OrderIntentId,
+        next_check_at: DateTime<Utc>,
+        peak_mark_price: Option<Price>,
+        last_signal_recheck_at: Option<DateTime<Utc>>,
+    ) -> Result<(), StorageError> {
+        let txn = self.db.begin().await.map_err(StorageError::from)?;
+        let intent = load_intent_for_update(&txn, intent_id).await?;
+        let promote = intent.exit_state == ExitState::NotStarted;
+        let mut active = intent.into_active_model();
+        if promote {
+            active.exit_state = ActiveValue::Set(ExitState::Monitoring);
+        }
+        active.next_check_at = ActiveValue::Set(Some(next_check_at));
+        if let Some(peak) = peak_mark_price {
+            active.peak_mark_price = ActiveValue::Set(Some(peak));
+        }
+        if let Some(recheck) = last_signal_recheck_at {
+            active.last_signal_recheck_at = ActiveValue::Set(Some(recheck));
+        }
+        active.update(&txn).await.map_err(StorageError::from)?;
+        txn.commit().await.map_err(StorageError::from)?;
+        Ok(())
+    }
+
+    async fn create_exit_order_and_mark_closing(
+        &self,
+        order: NewExecutionOrder,
+        exit_reason: ExitReason,
+        partial_exit_node_id: Option<String>,
+    ) -> Result<ExecutionOrderInfo, StorageError> {
+        if partial_exit_node_id.is_some() && exit_reason != ExitReason::PartialExit {
+            return Err(StorageError::Conflict(format!(
+                "partial_exit_node_id requires PartialExit reason, got {}",
+                exit_reason.as_str()
+            )));
+        }
+        let intent_id = order.order_intent_id.clone();
+        let txn = self.db.begin().await.map_err(StorageError::from)?;
+
+        // At most one in-flight exit order per intent — prevents oversell when a
+        // partial exit is re-triggered while a resting GTC/Ambiguous order exists.
+        let inflight = quant_execution_order::Entity::find()
+            .filter(quant_execution_order::Column::OrderIntentId.eq(intent_id.clone()))
+            .filter(quant_execution_order::Column::OrderPhase.eq(ExecutionOrderPhase::Exit))
+            .filter(quant_execution_order::Column::State.is_in(IN_FLIGHT_EXIT_STATES))
+            .one(&txn)
+            .await
+            .map_err(StorageError::from)?;
+        if inflight.is_some() {
+            return Err(StorageError::Conflict(format!(
+                "intent {intent_id} already has an in-flight exit order (Submitted/Ambiguous)"
+            )));
+        }
+
+        // Write-ahead the venue exit intent: the Exit order row exists in
+        // `Submitted` before any network call (crash-recoverable via recon).
+        let execution_order = quant_execution_order::Entity::insert(order.into_active_model())
+            .exec_with_returning(&txn)
+            .await
+            .map_err(StorageError::from)?;
+
+        // Mark the lot `Open -> Closing` and advance the intent exit FSM.
+        position::mark_closing(&txn, &intent_id).await?;
+        let intent = load_intent_for_update(&txn, &intent_id).await?;
+        let mut intent_active = intent.into_active_model();
+        intent_active.exit_state = ActiveValue::Set(ExitState::OrderSubmitted);
+        intent_active.exit_reason = ActiveValue::Set(Some(exit_reason));
+        intent_active.pending_partial_exit_node_id = ActiveValue::Set(partial_exit_node_id);
+        intent_active
+            .update(&txn)
+            .await
+            .map_err(StorageError::from)?;
+
+        txn.commit().await.map_err(StorageError::from)?;
+        Ok(execution_order.into())
+    }
+
+    async fn record_exit_result(
+        &self,
+        execution_order_id: &ExecutionOrderId,
+        write: ExitLedgerWrite,
+    ) -> Result<ExecutionOrderInfo, StorageError> {
+        let txn = self.db.begin().await.map_err(StorageError::from)?;
+
+        let order = quant_execution_order::Entity::find_by_id(execution_order_id.clone())
+            .lock_exclusive()
+            .one(&txn)
+            .await
+            .map_err(StorageError::from)?
+            .ok_or_else(|| {
+                StorageError::Conflict(format!("execution order not found: {execution_order_id}"))
+            })?;
+
+        // Idempotency guard: a terminal exit order already settled its position +
+        // capital. Never re-apply.
+        if order.state.is_terminal() {
+            txn.commit().await.map_err(StorageError::from)?;
+            return Ok(order.into());
+        }
+
+        validate_execution_order_transition(order.state, write.order_state, execution_order_id)?;
+        let intent_id = order.order_intent_id.clone();
+        let existing_venue_order_id = order.venue_order_id.clone();
+
+        let mut order_active = order.into_active_model();
+        order_active.state = ActiveValue::Set(write.order_state);
+        order_active.venue_order_id =
+            ActiveValue::Set(write.venue_order_id.clone().or(existing_venue_order_id));
+        order_active.venue_status = ActiveValue::Set(write.venue_status);
+        order_active.filled_at = ActiveValue::Set(write.filled_at);
+        order_active.cancelled_at = ActiveValue::Set(write.cancelled_at);
+        order_active.error_message = ActiveValue::Set(write.error_message.clone());
+        let execution_order = order_active
+            .update(&txn)
+            .await
+            .map_err(StorageError::from)?;
+
+        // Reduce/close the lot on a (partial) fill; complete capital on full exit.
+        let exit_filled = write.position_exit.is_some();
+        if let Some(exit) = write.position_exit {
+            position::apply_exit(&txn, &intent_id, exit).await?;
+            if write.fully_exited {
+                complete_exit_capital(&txn, &intent_id, "exit settled".to_owned()).await?;
+            }
+        }
+
+        // Revert a failed/cancelled exit attempt so the lot is re-monitored.
+        if write.revert_to_open {
+            position::revert_lot_to_open(&txn, &intent_id).await?;
+        }
+
+        // Advance the intent's exit FSM (status is unchanged — entry already filled).
+        let intent = load_intent_for_update(&txn, &intent_id).await?;
+        let (executed_nodes, pending_node) =
+            partial_exit_nodes_after_exit_settlement(&intent, write.revert_to_open, exit_filled);
+        let mut intent_active = intent.into_active_model();
+        intent_active.exit_state = ActiveValue::Set(write.exit_state);
+        intent_active.exit_reason = ActiveValue::Set(Some(write.exit_reason));
+        intent_active.executed_partial_exit_node_ids = ActiveValue::Set(executed_nodes);
+        intent_active.pending_partial_exit_node_id = ActiveValue::Set(pending_node);
+        intent_active
+            .update(&txn)
+            .await
+            .map_err(StorageError::from)?;
+
+        if let Some(reconciliation) = write.reconciliation {
+            quant_reconciliation::Entity::insert(reconciliation.into_active_model())
+                .exec(&txn)
+                .await
+                .map_err(StorageError::from)?;
+        }
+
+        txn.commit().await.map_err(StorageError::from)?;
+        Ok(execution_order.into())
+    }
+
     async fn recover_dangling(&self, limit: u64) -> Result<Vec<ExecutionOrderInfo>, StorageError> {
         quant_execution_order::Entity::find()
             .filter(quant_execution_order::Column::State.is_in(DANGLING_STATES))
@@ -274,6 +461,7 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
         let intent_id = order.order_intent_id.clone();
         let order_intent_id_for_recon = intent_id.clone();
         let existing_venue_order_id = order.venue_order_id.clone();
+        let is_exit = order.order_phase == ExecutionOrderPhase::Exit;
 
         // Lock the intent so its status advances atomically with the ledger.
         let intent = load_intent_for_update(&txn, &intent_id).await?;
@@ -291,26 +479,56 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
             .await
             .map_err(StorageError::from)?;
 
-        reconcile_capital(
-            &txn,
-            &intent_id,
-            &write.capital,
-            "reconciliation".to_owned(),
-        )
-        .await?;
-
-        if let Some(fill) = write.fill.take() {
-            position::apply_fill(&txn, fill).await?;
-        }
-
-        if write.intent_status != intent.status {
-            validate_intent_transition(intent.status, write.intent_status, &intent_id)?;
+        if is_exit {
+            // Exit-order reconciliation: the entry intent stays terminal; correct
+            // the lot via `apply_exit` (never `apply_fill`) and complete the
+            // capital `Spent -> Released` on a full exit.
+            let exit_filled = write.exit.is_some();
+            let revert_lot = write.revert_lot;
+            if let Some(exit) = write.exit.take() {
+                position::apply_exit(&txn, &intent_id, exit).await?;
+                if write.exit_fully {
+                    complete_exit_capital(&txn, &intent_id, "exit reconciliation".to_owned())
+                        .await?;
+                }
+            }
+            if revert_lot {
+                position::revert_lot_to_open(&txn, &intent_id).await?;
+            }
+            let (executed_nodes, pending_node) =
+                partial_exit_nodes_after_exit_settlement(&intent, revert_lot, exit_filled);
             let mut intent_active = intent.into_active_model();
-            intent_active.status = ActiveValue::Set(write.intent_status);
+            if let Some(exit_state) = write.exit_state {
+                intent_active.exit_state = ActiveValue::Set(exit_state);
+            }
+            intent_active.executed_partial_exit_node_ids = ActiveValue::Set(executed_nodes);
+            intent_active.pending_partial_exit_node_id = ActiveValue::Set(pending_node);
             intent_active
                 .update(&txn)
                 .await
                 .map_err(StorageError::from)?;
+        } else {
+            reconcile_capital(
+                &txn,
+                &intent_id,
+                &write.capital,
+                "reconciliation".to_owned(),
+            )
+            .await?;
+
+            if let Some(fill) = write.fill.take() {
+                position::apply_fill(&txn, fill).await?;
+            }
+
+            if write.intent_status != intent.status {
+                validate_intent_transition(intent.status, write.intent_status, &intent_id)?;
+                let mut intent_active = intent.into_active_model();
+                intent_active.status = ActiveValue::Set(write.intent_status);
+                intent_active
+                    .update(&txn)
+                    .await
+                    .map_err(StorageError::from)?;
+            }
         }
 
         upsert_reconciliation_summary(&txn, execution_order_id, &order_intent_id_for_recon, write)
@@ -408,4 +626,30 @@ async fn advance_recommendation_executed(
         active.update(db).await.map_err(StorageError::from)?;
     }
     Ok(())
+}
+
+/// After exit settlement or reconciliation, compute the next partial-node ledger.
+fn partial_exit_nodes_after_exit_settlement(
+    intent: &quant_order_intent::Model,
+    revert: bool,
+    filled: bool,
+) -> (ExecutedPartialExitNodes, Option<String>) {
+    if revert {
+        return (intent.executed_partial_exit_node_ids.clone(), None);
+    }
+    if !filled {
+        return (
+            intent.executed_partial_exit_node_ids.clone(),
+            intent.pending_partial_exit_node_id.clone(),
+        );
+    }
+    let Some(pending) = intent.pending_partial_exit_node_id.clone() else {
+        return (
+            intent.executed_partial_exit_node_ids.clone(),
+            intent.pending_partial_exit_node_id.clone(),
+        );
+    };
+    let mut executed = intent.executed_partial_exit_node_ids.clone();
+    executed.record(&pending);
+    (executed, None)
 }

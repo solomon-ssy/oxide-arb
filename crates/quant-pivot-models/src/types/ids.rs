@@ -164,6 +164,14 @@ pub struct ExecutionOrderId(Arc<Uuid>);
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CapitalAllocationId(Arc<Uuid>);
 
+/// Position-lot ledger identifier.
+///
+/// One lot per filled entry intent (`order_intent_id` is its natural unique
+/// key); the surrogate id keeps the entity addressable independent of the
+/// originating intent and lets the per-token aggregate stay a query view.
+#[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PositionId(Arc<Uuid>);
+
 /// Execution-order reconciliation record identifier.
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ReconciliationId(Arc<Uuid>);

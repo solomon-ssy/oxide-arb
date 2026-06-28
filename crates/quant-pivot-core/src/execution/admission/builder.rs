@@ -25,7 +25,7 @@ use rust_decimal::Decimal;
 
 use super::{AdmissionInput, AdmissionSeams, StateVersion};
 use crate::{
-    execution::breaker::VenueHealthHandle,
+    execution::{breaker::VenueHealthHandle, exit_monitor::ExitMonitorHealthHandle},
     governance::{KillSwitchHandle, RuntimeModeHandle},
     pipeline::book_store::BookStore,
     runtime_config::RuntimeConfigStore,
@@ -49,6 +49,8 @@ pub struct AdmissionInputBuilderDeps {
     pub kill_switch: KillSwitchHandle,
     /// Venue-health hot read published by the 05.4 execution breaker (seam #18).
     pub venue_health: VenueHealthHandle,
+    /// Exit-monitor health hot read published by the 05.6 worker (seam #20).
+    pub exit_monitor_health: ExitMonitorHealthHandle,
 }
 
 /// Builds the frozen [`AdmissionInput`] for an intent at decision time.
@@ -165,13 +167,13 @@ impl AdmissionInputBuilder {
             max_stale_book_ratio_bps,
             has_blocking_inflight,
             manual_block,
-            // 05.3 seams: the 05.4 execution breaker supplies real venue health;
-            // exit-monitor readiness becomes real in 05.6. Credentials are real
-            // (the same keystore signs and reads).
+            // Real readiness seams: the 05.4 breaker supplies venue health, the
+            // 05.6 exit-monitor worker supplies its heartbeat, and credentials are
+            // real (the same keystore signs and reads).
             seams: AdmissionSeams {
                 venue_health: deps.venue_health.current(),
                 credentials_ready: deps.account_factory.credentials_ready(),
-                exit_monitor_ready: true,
+                exit_monitor_ready: deps.exit_monitor_health.is_ready(now),
             },
             now,
             now_ms: u64::try_from(now.timestamp_millis()).unwrap_or(0),

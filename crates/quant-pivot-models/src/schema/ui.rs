@@ -846,9 +846,53 @@ fn execution_policy_fields() -> Vec<FieldUiEntry> {
         ),
     ]
     .into_iter()
+    .chain(execution_exit_monitor_fields())
     .chain(execution_reconciliation_fields())
     .chain(execution_breaker_fields())
     .collect()
+}
+
+fn execution_exit_monitor_fields() -> Vec<FieldUiEntry> {
+    vec![
+        boolean(
+            "execution.exit_monitor.enabled",
+            "Exit monitor enabled",
+            "启用退出监控",
+            142,
+        ),
+        integer(
+            "execution.exit_monitor.monitor_secs",
+            "Exit monitor interval",
+            "退出监控间隔秒数",
+            144,
+        ),
+        integer(
+            "execution.exit_monitor.signal_recheck_secs",
+            "Exit signal re-check interval",
+            "信号重算间隔秒数",
+            146,
+        ),
+        entry(
+            "execution.exit_monitor.signal_invalidation_ratio",
+            "Signal invalidation ratio",
+            "信号失效比率",
+            148,
+            Some(FieldWidget::DecimalString),
+            None,
+        ),
+        boolean(
+            "execution.exit_monitor.signal_reinference.enabled",
+            "Signal re-inference enabled",
+            "启用信号再推理",
+            150,
+        ),
+        boolean(
+            "execution.exit_monitor.signal_reinference.shadow_mode",
+            "Signal re-inference shadow mode",
+            "信号再推理影子模式（只审计不触发）",
+            152,
+        ),
+    ]
 }
 
 fn execution_reconciliation_fields() -> Vec<FieldUiEntry> {
@@ -911,6 +955,12 @@ fn execution_breaker_fields() -> Vec<FieldUiEntry> {
             "Breaker cooldown seconds",
             "熔断器冷却秒数",
             290,
+        ),
+        money(
+            "execution.breaker.daily_realized_loss_cap_usd",
+            "Breaker daily realized-loss cap (USD)",
+            "熔断器日内已实现亏损上限（USD）",
+            295,
         ),
     ]
 }

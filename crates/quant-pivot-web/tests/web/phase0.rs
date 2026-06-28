@@ -50,8 +50,7 @@ async fn set_kill_switch_requires_acting_role() {
     let admin = client::login(&env, "admin", "admin").await;
     // `admin` user is super_admin and bypasses acting-role enforcement; use a
     // non-super-admin role that still carries `system:halt`.
-    let halter =
-        client::user_with_role(&env, &admin, "halt_no_header", "emergency_operator").await;
+    let halter = client::user_with_role(&env, &admin, "halt_no_header", "emergency_operator").await;
     let res = client::post_with(
         &env,
         "/api/system/kill-switch",

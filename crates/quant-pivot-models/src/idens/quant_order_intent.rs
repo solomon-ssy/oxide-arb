@@ -2,13 +2,14 @@ use quant_pivot_macros::quant_schema;
 use sea_orm::{
     Iden,
     sea_query::{
-        ColumnDef, ForeignKey, ForeignKeyAction, Index, IndexOrder, Table, TableCreateStatement,
+        ColumnDef, Expr, ForeignKey, ForeignKeyAction, Index, IndexOrder, Table,
+        TableCreateStatement,
     },
 };
 
 use crate::{
     enums::{
-        execution::OrderIntentKind,
+        execution::{ExitReason, ExitState, OrderIntentKind},
         quant::{ApprovalStatus, OrderIntentStatus, QuantRuntimeMode},
     },
     idens::{
@@ -46,13 +47,20 @@ pub enum QuantOrderIntent {
     ExitPolicyJson,
     RiskEnvelopeHash,
     ExpiresAt,
+    ExitState,
+    ExitReason,
+    NextCheckAt,
+    PeakMarkPrice,
+    LastSignalRecheckAt,
+    ExecutedPartialExitNodeIds,
+    PendingPartialExitNodeId,
     CreatedAt,
     UpdatedAt,
 }
 
 pub fn table() -> TableCreateStatement {
-    Table::create()
-        .table(QuantOrderIntent::Table)
+    let mut stmt = Table::create();
+    stmt.table(QuantOrderIntent::Table)
         .if_not_exists()
         .col(column::uuid_pk(QuantOrderIntent::OrderIntentId))
         .col(column::uuid_fk(QuantOrderIntent::RecommendationId))
@@ -109,39 +117,74 @@ pub fn table() -> TableCreateStatement {
                 .timestamp_with_time_zone()
                 .not_null(),
         )
+        .col(column::pg_enum_default::<ExitState>(
+            QuantOrderIntent::ExitState,
+            &ExitState::NotStarted,
+        ))
+        .col(column::pg_enum_null::<ExitReason>(
+            QuantOrderIntent::ExitReason,
+        ))
+        .col(
+            ColumnDef::new(QuantOrderIntent::NextCheckAt)
+                .timestamp_with_time_zone()
+                .null(),
+        )
+        .col(column::price_null(QuantOrderIntent::PeakMarkPrice))
+        .col(
+            ColumnDef::new(QuantOrderIntent::LastSignalRecheckAt)
+                .timestamp_with_time_zone()
+                .null(),
+        )
+        .col(
+            ColumnDef::new(QuantOrderIntent::ExecutedPartialExitNodeIds)
+                .json_binary()
+                .not_null()
+                .default(Expr::cust("'[]'::jsonb")),
+        )
+        .col(
+            ColumnDef::new(QuantOrderIntent::PendingPartialExitNodeId)
+                .text()
+                .null(),
+        )
         .col(timestamp_with_write_default(QuantOrderIntent::CreatedAt))
-        .col(timestamp_with_write_default(QuantOrderIntent::UpdatedAt))
-        .foreign_key(
-            ForeignKey::create()
-                .name("fk_quant_order_intent_recommendation")
-                .from(QuantOrderIntent::Table, QuantOrderIntent::RecommendationId)
-                .to(
-                    QuantRecommendation::Table,
-                    QuantRecommendation::RecommendationId,
-                )
-                .on_delete(ForeignKeyAction::Restrict),
-        )
-        .foreign_key(
-            ForeignKey::create()
-                .name("fk_quant_order_intent_runtime_config_version")
-                .from(
-                    QuantOrderIntent::Table,
-                    QuantOrderIntent::RuntimeConfigVersionId,
-                )
-                .to(
-                    RuntimeConfigVersion::Table,
-                    RuntimeConfigVersion::RuntimeConfigVersionId,
-                )
-                .on_delete(ForeignKeyAction::Restrict),
-        )
-        .foreign_key(
-            ForeignKey::create()
-                .name("fk_quant_order_intent_model_version")
-                .from(QuantOrderIntent::Table, QuantOrderIntent::ModelVersionId)
-                .to(QuantModelVersion::Table, QuantModelVersion::ModelVersionId)
-                .on_delete(ForeignKeyAction::Restrict),
-        )
-        .to_owned()
+        .col(timestamp_with_write_default(QuantOrderIntent::UpdatedAt));
+    add_foreign_keys(&mut stmt);
+    stmt
+}
+
+/// The three governed references an order intent freezes (recommendation,
+/// config version, model version), all `ON DELETE RESTRICT`.
+fn add_foreign_keys(stmt: &mut TableCreateStatement) {
+    stmt.foreign_key(
+        ForeignKey::create()
+            .name("fk_quant_order_intent_recommendation")
+            .from(QuantOrderIntent::Table, QuantOrderIntent::RecommendationId)
+            .to(
+                QuantRecommendation::Table,
+                QuantRecommendation::RecommendationId,
+            )
+            .on_delete(ForeignKeyAction::Restrict),
+    )
+    .foreign_key(
+        ForeignKey::create()
+            .name("fk_quant_order_intent_runtime_config_version")
+            .from(
+                QuantOrderIntent::Table,
+                QuantOrderIntent::RuntimeConfigVersionId,
+            )
+            .to(
+                RuntimeConfigVersion::Table,
+                RuntimeConfigVersion::RuntimeConfigVersionId,
+            )
+            .on_delete(ForeignKeyAction::Restrict),
+    )
+    .foreign_key(
+        ForeignKey::create()
+            .name("fk_quant_order_intent_model_version")
+            .from(QuantOrderIntent::Table, QuantOrderIntent::ModelVersionId)
+            .to(QuantModelVersion::Table, QuantModelVersion::ModelVersionId)
+            .on_delete(ForeignKeyAction::Restrict),
+    );
 }
 
 pub fn indexes() -> Vec<IndexSpec> {

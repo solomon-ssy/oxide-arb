@@ -63,6 +63,7 @@ impl AppContext {
             infra: &infra,
             data: &data,
             governance: &governance,
+            research: &research,
             account: &account,
             clob,
         });

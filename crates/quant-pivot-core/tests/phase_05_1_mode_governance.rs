@@ -3,6 +3,7 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use quant_pivot_core::{
+    execution::ExitMonitorHealthHandle,
     governance::{
         DefaultModePreflight, DefaultModeTransitionGate, KillSwitchControl, KillSwitchHandle,
         ModePreflight, ModePreflightDeps, ModeTransitionGate, SystemStatusPublisher,
@@ -324,6 +325,13 @@ impl PreflightFixture {
                 impaired: self.impaired,
             }),
             kill_switch: KillSwitchHandle::new(self.kill_switch),
+            exit_monitor_health: {
+                // Default to a healthy exit monitor so auto_execution preflight
+                // passes on the other checks under test.
+                let health = ExitMonitorHealthHandle::new();
+                health.publish(chrono::Utc::now(), 3_600);
+                health
+            },
         })
     }
 }

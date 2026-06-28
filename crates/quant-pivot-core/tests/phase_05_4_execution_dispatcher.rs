@@ -15,8 +15,8 @@ use quant_pivot_core::{
     execution::{
         AdmissionCheckTrace, AdmissionDecision, AdmissionInput, AdmissionInputBuilder,
         AdmissionInputBuilderDeps, AdmissionSeams, DefaultAdmissionEngine,
-        ExecutionAdmissionEngine, ExecutionDispatcherDeps, StateVersion, VenueHealth,
-        VenueHealthHandle,
+        ExecutionAdmissionEngine, ExecutionDispatcherDeps, ExitMonitorHealthHandle, StateVersion,
+        VenueHealth, VenueHealthHandle,
         breaker::ExecutionBreaker,
         dispatcher::CoreExecutionDispatcher,
         order_client::{
@@ -35,9 +35,9 @@ use quant_pivot_models::{
         AppendReconciliationEvidence, ApproveOrderIntent, ApproveOrderIntentOutcome, BookLevel,
         BookSnapshot, CapitalAllocationInfo, CapitalSettlement, DataQualityPort,
         DataQualitySnapshot, ExecutionOrderInfo, ExecutionOrderPatch, ExecutionSubmitPort,
-        KillSwitchPort, KillSwitchView, ModelSpecInfo, ModelVersionInfo, NewCapitalAllocation,
-        NewExecutionOrder, NewModelSpec, NewModelVersion, NewOperationLog, NewOrderIntent,
-        NewReconciliation, NewReportTransaction, NewRuntimeConfigActivation,
+        ExitLedgerWrite, KillSwitchPort, KillSwitchView, ModelSpecInfo, ModelVersionInfo,
+        NewCapitalAllocation, NewExecutionOrder, NewModelSpec, NewModelVersion, NewOperationLog,
+        NewOrderIntent, NewReconciliation, NewReportTransaction, NewRuntimeConfigActivation,
         NewRuntimeConfigVersion, OrderIntentInfo, Paginated, QuantReportListQuery,
         RecommendationInfo, RecommendationReportInfo, ReconciliationInfo, ReconciliationPatch,
         RuntimeConfigActivationInfo, RuntimeConfigVersionInfo, SetKillSwitchCommand,
@@ -47,7 +47,7 @@ use quant_pivot_models::{
         common::{OrderType, Side},
         execution::{
             AdmissionCheckId, AdmissionOutcome, ApprovalInvalidation, CapitalAllocationState,
-            KillSwitchState, OrderIntentKind,
+            ExitReason, ExitState, KillSwitchState, OrderIntentKind,
         },
         quant::{
             AccountSource, ApprovalStatus, ExecutionOrderState, OrderIntentStatus, OutcomeSide,
@@ -55,12 +55,12 @@ use quant_pivot_models::{
         },
         runtime_config::RuntimeConfigVersionSource,
     },
-    runtime_config::{ExecutionBreakerConfig, RuntimeConfig},
+    runtime_config::{DecimalString, ExecutionBreakerConfig, RuntimeConfig},
     types::{
-        Bps, CapitalAllocationId, ContentHash, EntryOrderSpec, ExecutionOrderId, ExitPolicySpec,
-        ModelSpecId, ModelVersionId, OrderId, OrderIntentId, Price, RecommendationId,
-        RecommendationReportId, ReconciliationId, RuntimeConfigVersionId, SchemaVersion, Shares,
-        Usd,
+        Bps, CapitalAllocationId, ContentHash, EntryOrderSpec, ExecutedPartialExitNodes,
+        ExecutionOrderId, ExitPolicySpec, ModelSpecId, ModelVersionId, OrderId, OrderIntentId,
+        Price, RecommendationId, RecommendationReportId, ReconciliationId, RuntimeConfigVersionId,
+        SchemaVersion, Shares, Usd,
     },
 };
 use quant_pivot_repository::traits::{
@@ -131,13 +131,28 @@ fn intent(
         },
         exit_policy_json: ExitPolicySpec {
             take_profit_price: rec.exit_plan.take_profit_price,
+            take_profit_pct: rec.exit_plan.take_profit_pct,
             stop_loss_price: rec.exit_plan.stop_loss_price,
+            stop_loss_pct: rec.exit_plan.stop_loss_pct,
             time_exit_at: None,
+            max_hold_secs: rec.exit_plan.max_hold_secs,
+            trailing_stop: rec.exit_plan.trailing_stop.clone(),
+            signal_invalidation_rules: rec.exit_plan.signal_invalidation_rules.clone(),
             partial_exit_nodes: Vec::new(),
             settlement_policy: rec.exit_plan.settlement_policy,
+            manual_review_at: rec.exit_plan.manual_review_at,
+            entry_reference_price: rec.entry_plan.limit_price.unwrap_or(Price::ZERO),
+            entry_composite_score: rec.composite_score,
         },
         risk_envelope_hash: rec.risk_envelope.canonical_hash().expect("hash"),
         expires_at: Utc::now() + Duration::hours(1),
+        exit_state: ExitState::NotStarted,
+        exit_reason: None,
+        next_check_at: None,
+        peak_mark_price: None,
+        last_signal_recheck_at: None,
+        executed_partial_exit_node_ids: ExecutedPartialExitNodes::default(),
+        pending_partial_exit_node_id: None,
         created_at: now(),
         updated_at: now(),
     }
@@ -466,6 +481,41 @@ impl ExecutionSubmissionRepository for MemorySubmissionRepo {
         };
         self.in_txn.store(false, Ordering::SeqCst);
         Ok(recorded)
+    }
+
+    async fn mark_exit_manual(
+        &self,
+        _intent_id: &OrderIntentId,
+        _reason: ExitReason,
+    ) -> Result<(), StorageError> {
+        Ok(())
+    }
+
+    async fn touch_exit_monitor(
+        &self,
+        _intent_id: &OrderIntentId,
+        _next_check_at: DateTime<Utc>,
+        _peak_mark_price: Option<Price>,
+        _last_signal_recheck_at: Option<DateTime<Utc>>,
+    ) -> Result<(), StorageError> {
+        Ok(())
+    }
+
+    async fn create_exit_order_and_mark_closing(
+        &self,
+        _order: NewExecutionOrder,
+        _exit_reason: ExitReason,
+        _partial_exit_node_id: Option<String>,
+    ) -> Result<ExecutionOrderInfo, StorageError> {
+        unimplemented!("exit submission not exercised by entry-dispatcher tests")
+    }
+
+    async fn record_exit_result(
+        &self,
+        _execution_order_id: &ExecutionOrderId,
+        _write: ExitLedgerWrite,
+    ) -> Result<ExecutionOrderInfo, StorageError> {
+        unimplemented!("exit submission not exercised by entry-dispatcher tests")
     }
 
     async fn recover_dangling(&self, _: u64) -> Result<Vec<ExecutionOrderInfo>, StorageError> {
@@ -1065,6 +1115,7 @@ fn build_harness_with_result(
         runtime_mode: RuntimeModeHandle::new(submission.intent.lock().unwrap().runtime_mode),
         kill_switch: KillSwitchHandle::new(KillSwitchState::Closed),
         venue_health: VenueHealthHandle::default(),
+        exit_monitor_health: ExitMonitorHealthHandle::new(),
     }));
     let admission: Arc<dyn ExecutionAdmissionEngine> = Arc::new(ConfigurableAdmission {
         outcome: admission_outcome,
@@ -1082,6 +1133,7 @@ fn build_harness_with_result(
             venue_min_window_samples: u32::MAX,
             venue_window_secs: 60,
             cooldown_secs: 0,
+            daily_realized_loss_cap_usd: DecimalString::new("0"),
         },
         Arc::new(StubKillSwitch),
         Arc::new(StubOpLog),

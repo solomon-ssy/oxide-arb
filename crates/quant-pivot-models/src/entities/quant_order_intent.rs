@@ -2,12 +2,12 @@
 
 use crate::{
     enums::{
-        execution::OrderIntentKind,
+        execution::{ExitReason, ExitState, OrderIntentKind},
         quant::{ApprovalStatus, OrderIntentStatus, QuantRuntimeMode},
     },
     types::{
-        ContentHash, EntryOrderSpec, ExitPolicySpec, ModelVersionId, OrderIntentId,
-        RecommendationId, RuntimeConfigVersionId,
+        ContentHash, EntryOrderSpec, ExecutedPartialExitNodes, ExitPolicySpec, ModelVersionId,
+        OrderIntentId, Price, RecommendationId, RuntimeConfigVersionId,
     },
 };
 use chrono::{DateTime, Utc};
@@ -43,6 +43,15 @@ pub struct Model {
     pub exit_policy_json: ExitPolicySpec,
     pub risk_envelope_hash: ContentHash,
     pub expires_at: DateTime<Utc>,
+    pub exit_state: ExitState,
+    pub exit_reason: Option<ExitReason>,
+    pub next_check_at: Option<DateTime<Utc>>,
+    pub peak_mark_price: Option<Price>,
+    pub last_signal_recheck_at: Option<DateTime<Utc>>,
+    #[sea_orm(column_type = "JsonBinary")]
+    pub executed_partial_exit_node_ids: ExecutedPartialExitNodes,
+    #[sea_orm(column_type = "Text", nullable)]
+    pub pending_partial_exit_node_id: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

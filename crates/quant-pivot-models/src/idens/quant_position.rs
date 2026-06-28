@@ -10,7 +10,7 @@ use crate::{
         execution::PositionLedgerState,
         quant::{AccountSource, OutcomeSide},
     },
-    idens::{event::Event, market::Market},
+    idens::{event::Event, market::Market, quant_order_intent::QuantOrderIntent},
     schema::{
         column,
         dependency::TableDependency,
@@ -23,6 +23,8 @@ use crate::{
 #[quant_schema(lifecycle = "ledger")]
 pub enum QuantPosition {
     Table,
+    PositionId,
+    OrderIntentId,
     TokenId,
     MarketId,
     EventId,
@@ -43,7 +45,9 @@ pub fn table() -> TableCreateStatement {
     Table::create()
         .table(QuantPosition::Table)
         .if_not_exists()
-        .col(column::text_id_pk(QuantPosition::TokenId))
+        .col(column::uuid_pk(QuantPosition::PositionId))
+        .col(column::uuid_fk(QuantPosition::OrderIntentId))
+        .col(column::token_id(QuantPosition::TokenId))
         .col(column::market_id(QuantPosition::MarketId))
         .col(column::text_id_null(QuantPosition::EventId))
         .col(column::pg_enum::<MarketCategory>(QuantPosition::Category))
@@ -60,6 +64,13 @@ pub fn table() -> TableCreateStatement {
             ColumnDef::new(QuantPosition::ClosedAt)
                 .timestamp_with_time_zone()
                 .null(),
+        )
+        .foreign_key(
+            ForeignKey::create()
+                .name("fk_quant_position_intent")
+                .from(QuantPosition::Table, QuantPosition::OrderIntentId)
+                .to(QuantOrderIntent::Table, QuantOrderIntent::OrderIntentId)
+                .on_delete(ForeignKeyAction::Restrict),
         )
         .foreign_key(
             ForeignKey::create()
@@ -80,6 +91,29 @@ pub fn table() -> TableCreateStatement {
 
 pub fn indexes() -> Vec<IndexSpec> {
     vec![
+        IndexSpec::sea_query(
+            "uq_quant_position_intent",
+            quant_position_table_name,
+            IndexBuildMode::Transactional,
+            Index::create()
+                .name("uq_quant_position_intent")
+                .table(QuantPosition::Table)
+                .col(QuantPosition::OrderIntentId)
+                .unique()
+                .to_owned(),
+            "one position lot per entry intent",
+        ),
+        IndexSpec::sea_query(
+            "idx_quant_position_token",
+            quant_position_table_name,
+            IndexBuildMode::Transactional,
+            Index::create()
+                .name("idx_quant_position_token")
+                .table(QuantPosition::Table)
+                .col(QuantPosition::TokenId)
+                .to_owned(),
+            "position lots by token (aggregate view)",
+        ),
         IndexSpec::sea_query(
             "idx_quant_position_market",
             quant_position_table_name,
@@ -107,6 +141,7 @@ pub fn indexes() -> Vec<IndexSpec> {
 
 pub fn dependencies() -> Vec<TableDependency> {
     vec![
+        TableDependency::foreign_key(quant_order_intent_table_name),
         TableDependency::foreign_key(market_table_name),
         TableDependency::foreign_key(event_table_name),
     ]
@@ -118,6 +153,10 @@ pub const fn seed_units() -> Vec<SeedSpec> {
 
 fn quant_position_table_name() -> String {
     QuantPosition::Table.to_string()
+}
+
+fn quant_order_intent_table_name() -> String {
+    QuantOrderIntent::Table.to_string()
 }
 
 fn market_table_name() -> String {

@@ -312,6 +312,38 @@ pub async fn settle_capital(
     Ok(())
 }
 
+/// Complete a fully-exited lot's capital lifecycle (`Spent -> Released`,
+/// Phase 05.6).
+///
+/// Called only when the position lot is fully exited. The persisted amounts are
+/// left intact (`spent_usd` stays the realized entry cost; `released_usd` keeps
+/// the entry-time unspent remainder) — flipping the state to `Released` is the
+/// lifecycle/audit completion. A `Spent` lot already does not count toward the
+/// reserved aggregate, so this never changes new-entry budget. Idempotent: a row
+/// already `Released` is a no-op; any other state is a fail-closed conflict
+/// (never un-settle money).
+pub async fn complete_exit_capital(
+    db: &impl ConnectionTrait,
+    intent_id: &OrderIntentId,
+    reason: String,
+) -> Result<(), StorageError> {
+    let cap = load_capital(db, intent_id).await?;
+    match cap.state {
+        CapitalAllocationState::Released => Ok(()),
+        CapitalAllocationState::Spent => {
+            let mut active = cap.into_active_model();
+            active.state = ActiveValue::Set(CapitalAllocationState::Released);
+            active.reason = ActiveValue::Set(reason);
+            active.update(db).await.map_err(StorageError::from)?;
+            Ok(())
+        }
+        other => Err(StorageError::Conflict(format!(
+            "cannot complete exit capital for intent {intent_id} from {}",
+            other.as_str()
+        ))),
+    }
+}
+
 /// Apply a reconciliation verdict to an intent's capital allocation
 /// ([`CapitalReconcileSettlement`], Phase 05.5).
 ///

@@ -7,6 +7,7 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use chrono::{Duration, Utc};
 use quant_pivot_core::{
     execution::{ExecutionBreaker, VenueHealth, VenueOutcome},
     observability::metrics_hub::MetricsHub,
@@ -18,9 +19,11 @@ use quant_pivot_models::{
         Paginated, SetKillSwitchCommand,
     },
     enums::execution::KillSwitchState,
-    runtime_config::ExecutionBreakerConfig,
+    runtime_config::{DecimalString, ExecutionBreakerConfig},
+    types::Usd,
 };
 use quant_pivot_repository::traits::OperationLogRepository;
+use rust_decimal_macros::dec;
 
 /// Records every governed kill-switch transition and mirrors the current state
 /// (so `current()` reflects a breaker trip, as the real control plane does).
@@ -103,7 +106,7 @@ impl OperationLogRepository for RecordingOpLog {
     }
 }
 
-const fn config(degrade: u32, halt: u32, cooldown_secs: u64) -> ExecutionBreakerConfig {
+fn config(degrade: u32, halt: u32, cooldown_secs: u64) -> ExecutionBreakerConfig {
     ExecutionBreakerConfig {
         venue_consecutive_failures_to_degrade: degrade,
         venue_consecutive_failures_to_halt: halt,
@@ -112,6 +115,8 @@ const fn config(degrade: u32, halt: u32, cooldown_secs: u64) -> ExecutionBreaker
         venue_min_window_samples: u32::MAX,
         venue_window_secs: 60,
         cooldown_secs,
+        // Daily-loss dimension disabled for the venue-dimension tests.
+        daily_realized_loss_cap_usd: DecimalString::new("0"),
     }
 }
 
@@ -247,18 +252,13 @@ async fn unresolvable_recon_trips_execution_breaker_to_halt() {
             .get(),
         1,
     );
-    let dimension = op_log
-        .last
-        .lock()
-        .unwrap()
-        .as_ref()
-        .and_then(|audit| {
-            audit
-                .detail
-                .get("dimension")
-                .and_then(|value| value.as_str())
-                .map(str::to_owned)
-        });
+    let dimension = op_log.last.lock().unwrap().as_ref().and_then(|audit| {
+        audit
+            .detail
+            .get("dimension")
+            .and_then(|value| value.as_str())
+            .map(str::to_owned)
+    });
     assert_eq!(
         dimension.as_deref(),
         Some("recon"),
@@ -332,6 +332,7 @@ async fn halts_on_error_rate_bps_after_min_window_samples() {
         venue_min_window_samples: 4,
         venue_window_secs: 60,
         cooldown_secs: 0,
+        daily_realized_loss_cap_usd: DecimalString::new("0"),
     });
 
     breaker.observe_venue(false, "e1").await;
@@ -441,4 +442,94 @@ fn restriction_rank_orders_loosening() {
         KillSwitchState::ExitOnly.restriction_rank()
             < KillSwitchState::ExecutionHalted.restriction_rank()
     );
+}
+
+// ── Phase 05.6: daily realized-loss dimension ────────────────────────────────
+
+/// A breaker config with the venue gates disabled and a daily-loss cap set.
+fn daily_loss_config(cap: &str) -> ExecutionBreakerConfig {
+    ExecutionBreakerConfig {
+        venue_consecutive_failures_to_degrade: u32::MAX,
+        venue_consecutive_failures_to_halt: u32::MAX,
+        venue_error_rate_bps_to_halt: u32::MAX,
+        venue_min_window_samples: u32::MAX,
+        venue_window_secs: 60,
+        cooldown_secs: 0,
+        daily_realized_loss_cap_usd: DecimalString::new(cap),
+    }
+}
+
+#[tokio::test]
+async fn daily_loss_below_80pct_stays_healthy() {
+    let (breaker, kill_switch, _op, _metrics) = breaker(daily_loss_config("100"));
+    breaker
+        .observe_realized_pnl(Usd::new(dec!(-50)), Utc::now())
+        .await;
+    assert_eq!(breaker.venue_health().current(), VenueHealth::Healthy);
+    assert_eq!(kill_switch.current(), KillSwitchState::Closed);
+}
+
+#[tokio::test]
+async fn daily_loss_at_80pct_degrades_but_does_not_trip() {
+    let (breaker, kill_switch, _op, _metrics) = breaker(daily_loss_config("100"));
+    breaker
+        .observe_realized_pnl(Usd::new(dec!(-80)), Utc::now())
+        .await;
+    assert!(matches!(
+        breaker.venue_health().current(),
+        VenueHealth::Degraded { .. }
+    ));
+    assert_eq!(kill_switch.current(), KillSwitchState::Closed);
+}
+
+#[tokio::test]
+async fn daily_loss_at_cap_trips_kill_switch_latched() {
+    let (breaker, kill_switch, op, _metrics) = breaker(daily_loss_config("100"));
+    breaker
+        .observe_realized_pnl(Usd::new(dec!(-100)), Utc::now())
+        .await;
+    assert_eq!(kill_switch.current(), KillSwitchState::ExecutionHalted);
+    assert_eq!(*op.appended.lock().unwrap(), 1, "trip is audited once");
+}
+
+#[tokio::test]
+async fn realized_gain_offsets_prior_loss() {
+    let (breaker, _kill_switch, _op, _metrics) = breaker(daily_loss_config("100"));
+    breaker
+        .observe_realized_pnl(Usd::new(dec!(-90)), Utc::now())
+        .await;
+    // A subsequent gain nets the same-day loss back below the degrade threshold.
+    breaker
+        .observe_realized_pnl(Usd::new(dec!(60)), Utc::now())
+        .await;
+    assert_eq!(breaker.venue_health().current(), VenueHealth::Healthy);
+}
+
+#[tokio::test]
+async fn day_rollover_resets_accumulator() {
+    let (breaker, _kill_switch, _op, _metrics) = breaker(daily_loss_config("100"));
+    let day1 = Utc::now();
+    breaker
+        .observe_realized_pnl(Usd::new(dec!(-90)), day1)
+        .await;
+    assert!(matches!(
+        breaker.venue_health().current(),
+        VenueHealth::Degraded { .. }
+    ));
+    // A small loss on the next UTC day starts a fresh accumulator → healthy.
+    let day2 = day1 + Duration::days(1);
+    breaker
+        .observe_realized_pnl(Usd::new(dec!(-10)), day2)
+        .await;
+    assert_eq!(breaker.venue_health().current(), VenueHealth::Healthy);
+}
+
+#[tokio::test]
+async fn daily_loss_cap_zero_disables_dimension() {
+    let (breaker, kill_switch, _op, _metrics) = breaker(daily_loss_config("0"));
+    breaker
+        .observe_realized_pnl(Usd::new(dec!(-1000)), Utc::now())
+        .await;
+    assert_eq!(breaker.venue_health().current(), VenueHealth::Healthy);
+    assert_eq!(kill_switch.current(), KillSwitchState::Closed);
 }

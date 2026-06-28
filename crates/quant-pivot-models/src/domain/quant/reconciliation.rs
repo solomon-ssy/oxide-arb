@@ -2,11 +2,11 @@
 
 use crate::{
     domain::{
-        PositionFill,
+        PositionExit, PositionFill,
         patch::{NullablePatch, Patch},
     },
     enums::{
-        execution::{ReconciliationResult, VenueOrderStatus},
+        execution::{ExitState, ReconciliationResult, VenueOrderStatus},
         quant::{ExecutionOrderState, OrderIntentStatus},
     },
     types::{
@@ -133,9 +133,21 @@ pub struct ReconciliationLedgerWrite {
     pub error_message: Option<String>,
     /// State-guarded capital correction.
     pub capital: CapitalReconcileSettlement,
-    /// Position upsert (present only when correcting into a confirmed fill,
-    /// applied exactly once as the order leaves a non-filled state).
+    /// Position upsert (present only when correcting an **entry** order into a
+    /// confirmed fill, applied exactly once as the order leaves a non-filled
+    /// state).
     pub fill: Option<PositionFill>,
+    /// Position-lot exit (present only when correcting an **exit** order into a
+    /// confirmed (partial) fill). When set, the repo applies `apply_exit` (not
+    /// `apply_fill`); on `exit_fully` it completes the capital `Spent ->
+    /// Released`, and the entry intent's `status` is left unchanged.
+    pub exit: Option<PositionExit>,
+    /// Whether the reconciled exit fully closes the lot (`Spent -> Released`).
+    pub exit_fully: bool,
+    /// Exit-FSM state to set on the intent for an exit-order reconciliation.
+    pub exit_state: Option<ExitState>,
+    /// Revert the lot `Closing -> Open` (a reconciled exit non-fill / cancel).
+    pub revert_lot: bool,
     /// Reconciliation verdict to persist on the summary row.
     pub result: ReconciliationResult,
     /// Full evidence chain collected this pass (replaces the row's chain;

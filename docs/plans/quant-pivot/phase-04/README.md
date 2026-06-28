@@ -224,11 +224,11 @@ flowchart LR
 | 真实 `create-intent` / 审批 / admission gate / submit | `execution_eligibility` 仅计算/落库 | Phase 5 | 04.4 §10 |
 | `OrderIntentKind` 枚举（替换 `intent_kind: String`） | 现有自由 `String` 列保持不动 | Phase 5 | 04.0 §10 |
 | `quant_recommendation_attribution` 写入 + outcome 归因 | 表+DTO 已在，但无写路径 | Phase 5/6 | 04.0 §10 |
-| Exit monitor / 实际 exit 执行 | `ExitPlan` 仅作为报告/审计契约 | Phase 5/6 | 04.2 §10 |
+| Exit monitor / 实际 exit 执行 | `ExitPlan` 仅作为报告/审计契约 | Phase 5（05.6） | 04.2 §10 |
 | `good_lp` LP/MILP 组合优化 | `GreedyPortfolioAllocator`（复用） | Phase 5 | 04.1 §10 |
-| `Sell*` 退出侧 candidate | Buy 侧 scorer（Phase 3.4 已定） | Phase 5 | 04.1 §10 |
+| `Sell*` 退出侧 candidate（机会性 Sell scorer） | Buy 侧 scorer（Phase 3.4 已定）；执行侧 Sell 由 05.6 | **Phase 6**（[`06.1`](../phase-06/06.1-opportunistic-sell-exit-signal.md)） | 04.1 §10 |
 | report-level shadow 完整比较（capital / would-execute delta） | signal/rank 层 shadow（Phase 3.4/3.7 已在） | Phase 5+ | 04.2 §10 |
-| 多副本 leader-elected report worker | 单 report scheduler 实例约束 | Phase 8+ | 04.3 §10 |
+| 多副本 leader-elected report worker | 单 report scheduler 实例约束 | Phase 8+（[`phase-08`](../phase-08/README.md) §2） | 04.3 §10 |
 | scheduler `postgres_storage` 持久化 | runtime-config 为 schedule 真相源 | 不做（by design） | 04.3 §10 |
 
 ### 6.1 决策闭环完整性映射（买什么 → 卖多少，全链可回放）
