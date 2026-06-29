@@ -29,8 +29,10 @@ use quant_pivot_models::{
         quant::ReportKind,
         rbac::{Operation, ResourceType},
     },
+    hashing::CanonicalDigest,
     types::RecommendationReportId,
 };
+use serde::Serialize;
 
 use crate::{
     audit::OperationCtx,
@@ -211,15 +213,23 @@ pub async fn revoke(
 ) -> Result<WebResponse<QuantReportDetailView>, WebError> {
     let request = body.into_inner();
     let report_id = id.into_inner();
+    let before = state
+        .quant_reports
+        .find_report(&report_id)
+        .await?
+        .ok_or_else(|| WebError::NotFound(format!("report not found: {report_id}")))?;
+    let before_hash = canonical_state_hash(&before)?;
     let report = state
         .quant_reports
         .revoke(&report_id, &request.reason)
         .await?;
+    let after_hash = canonical_state_hash(&report)?;
     op_ctx.set_action(OperationCategory::QuantReport, "quant.report.revoke");
     op_ctx.set_resource(
         ResourceType::QuantReport,
         report.recommendation_report_id.to_string(),
     );
+    op_ctx.set_state_hashes(Some(before_hash), Some(after_hash));
     op_ctx.set_detail(serde_json::json!({
         "report_id": report.recommendation_report_id.to_string(),
         "acting_role": acting_role.0,
@@ -227,4 +237,10 @@ pub async fn revoke(
         "reason": request.reason,
     }));
     Ok(WebResponse::ok(QuantReportDetailView::from(report)))
+}
+
+fn canonical_state_hash<T: Serialize>(state: &T) -> Result<String, WebError> {
+    CanonicalDigest::content_hash_json(state)
+        .map(|hash| hash.as_str().to_owned())
+        .map_err(|error| WebError::Internal(format!("canonical state hash failed: {error}")))
 }

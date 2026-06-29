@@ -164,22 +164,6 @@ fn selection_fields() -> Vec<FieldUiEntry> {
             Some(FieldWidget::EnumSet),
             Some(FieldSemantics::EmptyMeansAll),
         ),
-        entry(
-            "selection.excluded_market_ids",
-            "Excluded market ids",
-            "排除市场 ID",
-            20,
-            Some(FieldWidget::StringList),
-            None,
-        ),
-        entry(
-            "selection.included_market_ids",
-            "Included market ids",
-            "包含市场 ID",
-            30,
-            Some(FieldWidget::StringList),
-            None,
-        ),
         money(
             "selection.min_liquidity_usd",
             "Minimum liquidity USD",
@@ -848,6 +832,7 @@ fn execution_policy_fields() -> Vec<FieldUiEntry> {
     .into_iter()
     .chain(execution_exit_monitor_fields())
     .chain(execution_reconciliation_fields())
+    .chain(execution_attribution_fields())
     .chain(execution_breaker_fields())
     .collect()
 }
@@ -914,6 +899,29 @@ fn execution_reconciliation_fields() -> Vec<FieldUiEntry> {
             "Reconciliation stale-open deadline",
             "对账强制终态秒数",
             235,
+        ),
+    ]
+}
+
+fn execution_attribution_fields() -> Vec<FieldUiEntry> {
+    vec![
+        boolean(
+            "execution.attribution.enabled",
+            "Attribution worker enabled",
+            "启用归因 worker",
+            236,
+        ),
+        integer(
+            "execution.attribution.sweep_secs",
+            "Attribution sweep interval",
+            "归因扫描间隔秒数",
+            237,
+        ),
+        integer(
+            "execution.attribution.batch_size",
+            "Attribution batch size",
+            "归因批量大小",
+            238,
         ),
     ]
 }

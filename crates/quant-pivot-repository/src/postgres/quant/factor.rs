@@ -1,15 +1,16 @@
 //! Postgres-backed factor definition + value repository.
 
-use crate::traits::FactorRepository;
-use quant_pivot_error::storage::StorageError;
+use crate::{postgres::error, traits::FactorRepository};
+use quant_pivot_error::storage::{StorageError, entity};
 use quant_pivot_models::{
     domain::{FactorDefinitionInfo, FactorValueInfo, NewFactorDefinition, NewFactorValue},
     entities::{quant_factor_definition, quant_factor_value},
+    enums::quant::PublicationStatus,
     types::{FactorDefinitionId, ModelRunId},
 };
 use sea_orm::{
-    ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder,
-    sea_query::OnConflict,
+    ActiveModelTrait, ActiveValue, ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel,
+    QueryFilter, QueryOrder, sea_query::OnConflict,
 };
 
 /// Postgres-backed factor repository: governed definitions (idempotent on the
@@ -33,7 +34,8 @@ impl FactorRepository for PgFactorRepository {
         definition: NewFactorDefinition,
     ) -> Result<FactorDefinitionInfo, StorageError> {
         // Definition ids are deterministic (UUID v5 of the factor name), so a
-        // re-registration is a no-op upsert that refreshes the governed metadata.
+        // re-registration is a no-op upsert that refreshes governed metadata but
+        // preserves publication status (Draft / Published / Retired).
         quant_factor_definition::Entity::insert(definition.into_active_model())
             .on_conflict(
                 OnConflict::column(quant_factor_definition::Column::FactorDefinitionId)
@@ -44,7 +46,6 @@ impl FactorRepository for PgFactorRepository {
                         quant_factor_definition::Column::InputSchemaVersion,
                         quant_factor_definition::Column::OutputSchemaVersion,
                         quant_factor_definition::Column::DefinitionJson,
-                        quant_factor_definition::Column::Status,
                         quant_factor_definition::Column::CreatedBy,
                     ])
                     .to_owned(),
@@ -62,9 +63,6 @@ impl FactorRepository for PgFactorRepository {
         if values.is_empty() {
             return Ok(Vec::new());
         }
-        // One `INSERT ... RETURNING` statement — atomic and a single round-trip.
-        // Postgres returns rows in insertion order, so the result aligns with the
-        // input.
         let models = quant_factor_value::Entity::insert_many(
             values.into_iter().map(IntoActiveModel::into_active_model),
         )
@@ -85,6 +83,38 @@ impl FactorRepository for PgFactorRepository {
             .map(|row| row.map(Into::into))
     }
 
+    async fn find_definitions_by_ids(
+        &self,
+        factor_definition_ids: &[FactorDefinitionId],
+    ) -> Result<Vec<FactorDefinitionInfo>, StorageError> {
+        if factor_definition_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        quant_factor_definition::Entity::find()
+            .filter(
+                quant_factor_definition::Column::FactorDefinitionId
+                    .is_in(factor_definition_ids.iter().cloned()),
+            )
+            .all(&self.db)
+            .await
+            .map_err(StorageError::from)
+            .map(|rows| rows.into_iter().map(Into::into).collect())
+    }
+
+    async fn publish_definition(
+        &self,
+        factor_definition_id: &FactorDefinitionId,
+    ) -> Result<FactorDefinitionInfo, StorageError> {
+        update_definition_status(&self.db, factor_definition_id, PublicationStatus::Published).await
+    }
+
+    async fn retire_definition(
+        &self,
+        factor_definition_id: &FactorDefinitionId,
+    ) -> Result<FactorDefinitionInfo, StorageError> {
+        update_definition_status(&self.db, factor_definition_id, PublicationStatus::Retired).await
+    }
+
     async fn list_values_for_run(
         &self,
         model_run_id: &ModelRunId,
@@ -97,4 +127,34 @@ impl FactorRepository for PgFactorRepository {
             .map_err(StorageError::from)
             .map(|rows| rows.into_iter().map(Into::into).collect())
     }
+}
+
+async fn update_definition_status(
+    db: &DatabaseConnection,
+    factor_definition_id: &FactorDefinitionId,
+    next: PublicationStatus,
+) -> Result<FactorDefinitionInfo, StorageError> {
+    let Some(row) = quant_factor_definition::Entity::find_by_id(factor_definition_id.clone())
+        .one(db)
+        .await
+        .map_err(StorageError::from)?
+    else {
+        return Err(error::not_found(entity::QUANT_FACTOR, factor_definition_id));
+    };
+    let from = row.status;
+    if !from.allows_transition_to(next) {
+        return Err(error::illegal_transition(
+            entity::QUANT_FACTOR,
+            Some(factor_definition_id),
+            from,
+            next,
+        ));
+    }
+    let mut active = row.into_active_model();
+    active.status = ActiveValue::Set(next);
+    active
+        .update(db)
+        .await
+        .map_err(StorageError::from)
+        .map(Into::into)
 }

@@ -207,6 +207,15 @@ async fn sustained_failure_trips_latched_kill_switch_breaker_stays_degraded() {
         1,
         "trip writes one audit row"
     );
+    let audit = op_log.last.lock().unwrap().clone().expect("trip audit row");
+    assert!(
+        audit.before_hash.is_some(),
+        "trip audit must record kill-switch before hash"
+    );
+    assert!(
+        audit.after_hash.is_some(),
+        "trip audit must record kill-switch after hash"
+    );
     assert_eq!(
         metrics
             .execution_breaker_trips

@@ -51,6 +51,15 @@ pub struct RollbackModelCommand {
     pub reason: String,
 }
 
+/// Service input to retire a published model version without restoring a predecessor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetireModelCommand {
+    /// The published version to retire.
+    pub model_version_id: ModelVersionId,
+    /// Operator reason (audited).
+    pub reason: String,
+}
+
 /// Request to promote a `Built` training dataset to `Ready`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PromoteDatasetRequest {
@@ -79,6 +88,14 @@ pub trait ModelGovernancePort: Send + Sync {
     async fn rollback(
         &self,
         command: RollbackModelCommand,
+        actor: GovernanceActor,
+    ) -> QuantResult<ModelVersionInfo>;
+
+    /// Retire a published version without restoring a predecessor. Clears runtime
+    /// config pointers when they reference the retired version.
+    async fn retire(
+        &self,
+        command: RetireModelCommand,
         actor: GovernanceActor,
     ) -> QuantResult<ModelVersionInfo>;
 

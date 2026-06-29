@@ -20,7 +20,9 @@ enum + metric + config 字段），Phase 6 必须按本目录契约**填 impl**�
 |---|---|---|
 | `ExitSignalReinferer` + `ReinferenceSignalEvaluator`（thesis invalidation 占位） | **`ModelBackedExitSignalReinferer`** + shadow 激活 | [`06.0`](06.0-exit-signal-reinference.md) |
 | `ExitSignalEvaluator` + `ExitReason::Opportunistic` + `quant_exit_triggers_total{reason=opportunistic}` | 机会性 Sell 排序模型 + `CompositeExitSignalEvaluator` | [`06.1`](06.1-opportunistic-sell-exit-signal.md) |
-| `UnifiedModelRunner` + model registry artifact 类型 | ONNX / classical publish 主路径（08 §17/§15） | 06.3+（待开） |
+| `UnifiedModelRunner` + model registry artifact 类型 | ONNX / classical publish 主路径（08 §17/§15） | [`06.3`](06.3-onnx-runtime-integration.md) / [`06.4`](06.4-classical-model-publish-path.md) |
+| 05.7 attribution + training sample source | attribution feedback、自动再训练、CH/outbox 覆盖率强化 | [`06.5`](06.5-attribution-feedback-and-auto-retraining.md) |
+| recommendation frozen factor breakdown | 反事实 factor attribution / missed-return 精细估计 | [`06.6`](06.6-counterfactual-factor-attribution.md) |
 | 逐订单对账引擎（05.5） | 跨账户周期 reconciliation report | [`06.2`](06.2-cross-account-reconciliation-report.md) |
 
 **硬依赖（Phase 6 开工前必须满足）：**
@@ -36,8 +38,10 @@ enum + metric + config 字段），Phase 6 必须按本目录契约**填 impl**�
 | 06.0 | Exit Signal Re-inference | **激活 05.6 thesis-invalidation 信号退出** | [`06.0-exit-signal-reinference.md`](06.0-exit-signal-reinference.md) | 05.6 |
 | 06.1 | Opportunistic Sell Exit Signal | **闭合 05.6 退出信号 seam（机会性平仓）** | [`06.1-opportunistic-sell-exit-signal.md`](06.1-opportunistic-sell-exit-signal.md) | 05.6 / **06.0** |
 | 06.2 | Cross-Account Reconciliation Report | **05.5 对账平面跨账户增强** | [`06.2-cross-account-reconciliation-report.md`](06.2-cross-account-reconciliation-report.md) | 05.5/05.7 |
-| 06.3 | ONNX Runtime Integration | ONNX 线上推理（08 §17） | *待开* | 3.4/3.6/08 §12.5 |
-| 06.4 | Classical Model Publish Path | smartcore/linfa 主路径 publish（08 §15） | *待开* | 3.6/3.7 |
+| 06.3 | ONNX Runtime Integration | ONNX 线上推理（08 §17） | [`06.3-onnx-runtime-integration.md`](06.3-onnx-runtime-integration.md) | 3.4/3.6/08 §12.5 |
+| 06.4 | Classical Model Publish Path | smartcore/linfa 主路径 publish（08 §15） | [`06.4-classical-model-publish-path.md`](06.4-classical-model-publish-path.md) | 3.6/3.7/06.3 |
+| 06.5 | Attribution Feedback & Auto Retraining | attribution → dataset → retrain governance 闭环 | [`06.5-attribution-feedback-and-auto-retraining.md`](06.5-attribution-feedback-and-auto-retraining.md) | 05.7/06.4 |
+| 06.6 | Counterfactual Factor Attribution | 反事实 factor attribution + missed return 精细估计 | [`06.6-counterfactual-factor-attribution.md`](06.6-counterfactual-factor-attribution.md) | 05.7/06.5 |
 
 ## 2. 依赖图
 
@@ -50,12 +54,20 @@ flowchart TD
     P61["06.1 Opportunistic Sell"]
     P62["06.2 Cross-Account Recon Report"]
     P63["06.3 ONNX Runtime"]
+    P64["06.4 Classical Publish Path"]
+    P65["06.5 Attribution Feedback + Auto Retraining"]
+    P66["06.6 Counterfactual Factor Attribution"]
     P56 --> P60
     P56 --> P61
     P57 --> P61
     P60 --> P61
     P55 --> P62
     P63 --> P61
+    P63 --> P64
+    P57 --> P65
+    P64 --> P65
+    P57 --> P66
+    P65 --> P66
 ```
 
 ## 3. 与 Phase 5 延后项总表的对照
@@ -66,8 +78,10 @@ flowchart TD
 |---|---|
 | 研究侧 thesis-invalidation 再推理（信号失效退出） | **06.0** |
 | 研究侧 `Sell` 排序模型（机会性平仓信号） | **06.1**（非 08 §20 alone — §20 仅通用多模型编排） |
-| `ort` / ONNX 线上推理 | 08 §17 + **06.3**（待开） |
-| classical model 主路径 publish | 08 §15 + **06.4**（待开） |
+| `ort` / ONNX 线上推理 | 08 §17 + **06.3** |
+| classical model 主路径 publish | 08 §15 + **06.4** |
+| attribution feedback、自动再训练、CH/outbox 覆盖率强化 | **06.5** |
+| 深度反事实 factor attribution / missed-return 精细估计 | **06.6** |
 | 跨账户全量对账 / 周期 reconciliation report | **06.2**（登记于 05.5 §11） |
 
 **不在 Phase 6、而在 Phase 5 收尾的项**见 [`05.10-auto-redeem-settlement.md`](../phase-05/05.10-auto-redeem-settlement.md)（`AutoRedeem` 链上赎回）。

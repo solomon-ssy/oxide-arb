@@ -1,5 +1,7 @@
 use quant_pivot_error::storage::StorageError;
-use quant_pivot_models::domain::{ExecutionOrderInfo, ExecutionOrderPatch, NewExecutionOrder};
+use quant_pivot_models::domain::{
+    ExecutionOrderInfo, ExecutionOrderListQuery, ExecutionOrderPatch, NewExecutionOrder, Paginated,
+};
 use quant_pivot_models::types::{ExecutionOrderId, OrderIntentId};
 
 /// Execution order persistence port.
@@ -21,6 +23,14 @@ pub trait ExecutionOrderRepository: Send + Sync {
         &self,
         execution_order_id: &ExecutionOrderId,
     ) -> Result<Option<ExecutionOrderInfo>, StorageError>;
+
+    async fn page(
+        &self,
+        query: ExecutionOrderListQuery,
+    ) -> Result<Paginated<ExecutionOrderInfo>, StorageError> {
+        let query = query.normalized();
+        Ok(Paginated::from_request(Vec::new(), 0, &query.page))
+    }
 
     /// Whether any execution order is in the `Ambiguous` state (submitted but
     /// unconfirmed — capital held, venue truth unknown). This is the fail-closed

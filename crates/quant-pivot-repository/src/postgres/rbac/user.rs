@@ -1,7 +1,7 @@
 //! Postgres implementation of [`UserRepository`].
 
 use chrono::Utc;
-use quant_pivot_error::storage::StorageError;
+use quant_pivot_error::storage::{StorageError, entity};
 use quant_pivot_models::{
     domain::{ChangeUserPassword, NewUser, Paginated, UserInfo, UserPageQuery, UserPatch},
     entities::{user, user_role},
@@ -19,8 +19,9 @@ use sea_orm::{
 
 use crate::{
     postgres::{
+        error,
         query::{non_empty, paginate_mapped},
-        rbac::{casbin::sync, util},
+        rbac::casbin::sync,
     },
     traits::rbac::UserRepository,
 };
@@ -55,7 +56,7 @@ async fn do_find_by_id(db: &impl ConnectionTrait, id: &UserId) -> Result<UserInf
         .await
         .map_err(StorageError::from)?
         .map(Into::into)
-        .ok_or_else(|| util::not_found("user", id))
+        .ok_or_else(|| error::not_found(entity::USER, id))
 }
 
 async fn do_create(db: &impl ConnectionTrait, new: NewUser) -> Result<UserInfo, StorageError> {
@@ -63,7 +64,7 @@ async fn do_create(db: &impl ConnectionTrait, new: NewUser) -> Result<UserInfo, 
     let model = user::Entity::insert(new.into_active_model())
         .exec_with_returning(db)
         .await
-        .map_err(|error| util::map_unique(error, "user", &username))?;
+        .map_err(|error| error::map_unique(error, entity::USER, &username))?;
     Ok(model.into())
 }
 
@@ -77,7 +78,7 @@ async fn do_update(
     active.updated_at = Set(Utc::now());
     match active.update(db).await {
         Ok(model) => Ok(model.into()),
-        Err(sea_orm::DbErr::RecordNotUpdated) => Err(util::not_found("user", id)),
+        Err(sea_orm::DbErr::RecordNotUpdated) => Err(error::not_found(entity::USER, id)),
         Err(error) => Err(StorageError::from(error)),
     }
 }
@@ -94,7 +95,7 @@ async fn do_change_status(
         .await
         .map_err(StorageError::from)?;
     if result.rows_affected == 0 {
-        return Err(util::not_found("user", id));
+        return Err(error::not_found(entity::USER, id));
     }
     Ok(())
 }
@@ -114,7 +115,7 @@ async fn do_change_password(
         .await
         .map_err(StorageError::from)?;
     if result.rows_affected == 0 {
-        return Err(util::not_found("user", id));
+        return Err(error::not_found(entity::USER, id));
     }
     Ok(())
 }
@@ -135,7 +136,7 @@ async fn do_delete(db: &DatabaseConnection, id: &UserId) -> Result<(), StorageEr
         .map_err(StorageError::from)?;
     if result.rows_affected == 0 {
         txn.rollback().await.map_err(StorageError::from)?;
-        return Err(util::not_found("user", id));
+        return Err(error::not_found(entity::USER, id));
     }
 
     txn.commit().await.map_err(StorageError::from)?;

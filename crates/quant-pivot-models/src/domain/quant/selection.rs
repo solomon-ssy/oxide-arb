@@ -1,7 +1,6 @@
 //! Selection snapshot persistence DTOs.
 
 use crate::{
-    entities::quant_market_selection::{SelectionExcludedMarketIds, SelectionIncludedMarketIds},
     enums::{common::MarketCategory, market::MarketStatus},
     types::{
         ContentHash, EventId, MarketId, MarketSelectionId, RuntimeConfigVersionId,
@@ -21,8 +20,6 @@ pub struct MarketSelectionInfo {
     pub runtime_config_version_id: RuntimeConfigVersionId,
     pub selector_hash: ContentHash,
     pub market_count: i32,
-    pub included_market_ids: SelectionIncludedMarketIds,
-    pub excluded_market_ids: SelectionExcludedMarketIds,
     pub exclusion_summary: SelectionExclusionSummary,
     pub created_at: DateTime<Utc>,
 }
@@ -36,8 +33,6 @@ info_from_model!(
         runtime_config_version_id,
         selector_hash,
         market_count,
-        included_market_ids,
-        excluded_market_ids,
         exclusion_summary,
         created_at,
     }
@@ -52,8 +47,6 @@ pub struct NewMarketSelection {
     pub runtime_config_version_id: RuntimeConfigVersionId,
     pub selector_hash: ContentHash,
     pub market_count: i32,
-    pub included_market_ids: SelectionIncludedMarketIds,
-    pub excluded_market_ids: SelectionExcludedMarketIds,
     pub exclusion_summary: SelectionExclusionSummary,
 }
 

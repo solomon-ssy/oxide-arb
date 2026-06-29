@@ -10,10 +10,10 @@
 //! - [`AuthError`] — every variant maps to `401` except a token-store outage,
 //!   which is `503`. The client-facing message is deliberately generic so it
 //!   cannot be used as an authentication oracle.
-//! - [`StorageError`] — `NotFound` → 404, `Conflict` → 409, transport/timeout
-//!   failures → 503, everything else → 500 (details are logged, not leaked).
-//! - [`RbacError`] — `NotFound` → 404, `Duplicate` → 409, structural errors →
-//!   400.
+//! - [`StorageError`] — `NotFound` → 404, duplicate/state/transition → 409,
+//!   `InvariantViolation` → 400, transport/timeout failures → 503, everything
+//!   else → 500 (details are logged, not leaked).
+//! - [`RbacError`] — structural assignment / permission parsing → 400.
 
 use actix_web::{HttpResponse, ResponseError, http::StatusCode};
 use quant_pivot_error::{
@@ -140,7 +140,25 @@ impl From<StorageError> for WebError {
             StorageError::NotFound { entity, id } => {
                 Self::NotFound(format!("{entity} not found: {id}"))
             }
-            StorageError::Conflict(detail) => Self::Conflict(detail),
+            StorageError::Duplicate { entity, key } => {
+                Self::Conflict(format!("{entity} already exists: {key}"))
+            }
+            StorageError::IllegalTransition {
+                entity,
+                id,
+                from,
+                to,
+            } => Self::Conflict(format!(
+                "illegal transition for {entity}{}: {from} -> {to}",
+                id.as_ref()
+                    .map_or(String::new(), |value| format!(" `{value}`"))
+            )),
+            StorageError::StateConflict { entity, id, detail } => Self::Conflict(format!(
+                "state conflict for {entity}{}: {detail}",
+                id.as_ref()
+                    .map_or(String::new(), |value| format!(" `{value}`"))
+            )),
+            StorageError::InvariantViolation { detail, .. } => Self::BadRequest(detail),
             StorageError::Connection(_)
             | StorageError::Redis(_)
             | StorageError::RedisPool(_)
@@ -155,12 +173,6 @@ impl From<StorageError> for WebError {
 impl From<RbacError> for WebError {
     fn from(error: RbacError) -> Self {
         match error {
-            RbacError::NotFound { entity, id } => {
-                Self::NotFound(format!("{entity} not found: {id}"))
-            }
-            RbacError::Duplicate { entity, key } => {
-                Self::Conflict(format!("{entity} already exists: {key}"))
-            }
             RbacError::UnknownPermission { .. } | RbacError::InvalidAssignment { .. } => {
                 Self::BadRequest(error.to_string())
             }
@@ -259,7 +271,24 @@ impl From<GovernanceError> for WebError {
 mod tests {
     use super::WebError;
     use actix_web::http::StatusCode;
-    use quant_pivot_error::{QuantError, execution::ExecutionError};
+    use quant_pivot_error::{
+        QuantError, execution::ExecutionError, storage::StorageError, storage::entity,
+    };
+
+    #[test]
+    fn storage_duplicate_maps_to_409() {
+        let web = WebError::from(StorageError::duplicate(entity::USER, "alice"));
+        assert_eq!(web.status(), StatusCode::CONFLICT);
+    }
+
+    #[test]
+    fn storage_invariant_violation_maps_to_400() {
+        let web = WebError::from(StorageError::invariant_violation(
+            Some(entity::QUANT_ORDER_INTENT),
+            "invalid create payload",
+        ));
+        assert_eq!(web.status(), StatusCode::BAD_REQUEST);
+    }
 
     #[test]
     fn execution_conflict_maps_to_409() {

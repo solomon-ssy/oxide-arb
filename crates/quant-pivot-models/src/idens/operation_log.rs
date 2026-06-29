@@ -48,6 +48,8 @@ pub enum OperationLog {
     UserAgent,
     LatencyMs,
     Detail,
+    BeforeHash,
+    AfterHash,
     GovernanceAuditEventId,
     GovernanceAuditSequence,
 }
@@ -85,6 +87,8 @@ pub fn table() -> TableCreateStatement {
                 .not_null()
                 .default(Expr::cust("'{}'::jsonb")),
         )
+        .col(ColumnDef::new(OperationLog::BeforeHash).text().null())
+        .col(ColumnDef::new(OperationLog::AfterHash).text().null())
         .col(column::uuid_null(OperationLog::GovernanceAuditEventId))
         .col(
             ColumnDef::new(OperationLog::GovernanceAuditSequence)

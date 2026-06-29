@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 
-use quant_pivot_error::storage::StorageError;
+use quant_pivot_error::storage::{StorageError, entity};
 use quant_pivot_models::{
     domain::{AssignMenus, MenuInfo},
     entities::{menu, role, role_menu},
@@ -14,7 +14,7 @@ use sea_orm::{
 };
 
 use crate::{
-    postgres::rbac::{junction, util},
+    postgres::{error, rbac::junction},
     traits::rbac::RoleMenuRepository,
 };
 
@@ -46,7 +46,7 @@ async fn do_set_menus(
         .is_none()
     {
         txn.rollback().await.map_err(StorageError::from)?;
-        return Err(util::not_found("role", &role_id));
+        return Err(error::not_found(entity::ROLE, &role_id));
     }
 
     if !target.is_empty() {
@@ -57,7 +57,7 @@ async fn do_set_menus(
             .map_err(StorageError::from)?;
         if present != target.len() as u64 {
             txn.rollback().await.map_err(StorageError::from)?;
-            return Err(util::not_found("menu", "<one or more menu ids>"));
+            return Err(error::not_found(entity::MENU, "<one or more menu ids>"));
         }
     }
 

@@ -17,8 +17,8 @@ use quant_pivot_models::{
     domain::{
         GovernanceActor, ModelGovernancePort, NewBacktestReport, NewModelRun, NewModelSpec,
         NewModelVersion, NewRuntimeConfigActivation, NewRuntimeConfigVersion, NewShadowComparison,
-        NewTrainingDataset, PromoteDatasetRequest, PublishModelCommand, RollbackModelCommand,
-        RuntimeConfigPort,
+        NewTrainingDataset, PromoteDatasetRequest, PublishModelCommand, RetireModelCommand,
+        RollbackModelCommand, RuntimeConfigPort,
     },
     enums::{
         model::ModelFamily,
@@ -199,6 +199,8 @@ fn healthy_coverage() -> serde_json::Value {
         labels_unavailable: 50,
         samples_dropped_insufficient: 10,
         book_decode_failures: 0,
+        live_attribution_candidates: 0,
+        live_attribution_dropped_missing_evidence: 0,
         matrix_probe: None,
     })
     .expect("coverage json")
@@ -744,6 +746,69 @@ async fn rollback_retains_previous_and_writes_reason() {
     assert!(
         audits.iter().any(|audit| audit.reason == "v2 regressed"),
         "the rollback reason is audited"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn retire_published_version_clears_runtime_pointer_and_audits() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let rc_id = seed_runtime_config(&db).await;
+    let spec = seed_spec(&db).await;
+    let harness = harness(&db).await;
+
+    let dataset = seed_dataset(
+        &db,
+        &spec,
+        &rc_id,
+        TrainingDatasetStatus::Ready,
+        healthy_coverage(),
+        '1',
+    )
+    .await;
+    let version = seed_version(&db, &spec, 'a', 1, Some(dataset)).await;
+    publish_ready_version(PublishReadyParams {
+        governance: &harness.service,
+        db: &db,
+        rc_id: &rc_id,
+        version: &version,
+        active_for_shadow: &version,
+        backtest_seed: '1',
+        shadow_seed: 'a',
+        reason: "publish for retire",
+    })
+    .await;
+
+    let retired = harness
+        .service
+        .retire(
+            RetireModelCommand {
+                model_version_id: version.clone(),
+                reason: "decommission".to_owned(),
+            },
+            GovernanceActor::system(),
+        )
+        .await
+        .expect("retire");
+    assert_eq!(retired.publication_status, PublicationStatus::Retired);
+    assert!(
+        harness
+            .store
+            .current()
+            .model
+            .active_model_version_id
+            .is_none(),
+        "retire must clear the active runtime pointer"
+    );
+
+    let audits = PgModelGovernanceAuditRepository::new(db.clone())
+        .list_by_version(&version)
+        .await
+        .expect("audits");
+    assert!(
+        audits.iter().any(|audit| audit.reason == "decommission"),
+        "the retire reason is audited"
     );
 }
 

@@ -20,8 +20,6 @@ pub enum QuantMarketSelection {
     RuntimeConfigVersionId,
     SelectorHash,
     MarketCount,
-    IncludedMarketIds,
-    ExcludedMarketIds,
     ExclusionSummary,
     CreatedAt,
 }
@@ -47,16 +45,6 @@ pub fn table() -> TableCreateStatement {
         .col(
             ColumnDef::new(QuantMarketSelection::MarketCount)
                 .integer()
-                .not_null(),
-        )
-        .col(
-            ColumnDef::new(QuantMarketSelection::IncludedMarketIds)
-                .json_binary()
-                .not_null(),
-        )
-        .col(
-            ColumnDef::new(QuantMarketSelection::ExcludedMarketIds)
-                .json_binary()
                 .not_null(),
         )
         .col(

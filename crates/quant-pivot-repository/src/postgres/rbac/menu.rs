@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 
 use chrono::Utc;
-use quant_pivot_error::storage::StorageError;
+use quant_pivot_error::storage::{StorageError, entity};
 use quant_pivot_models::{
     domain::{MenuInfo, MenuPatch, MenuTreeNode, NewMenu},
     entities::{menu, role_menu},
@@ -14,7 +14,7 @@ use sea_orm::{
     EntityTrait, IntoActiveModel, PaginatorTrait, QueryFilter, QueryOrder, TransactionTrait,
 };
 
-use crate::{postgres::rbac::util, traits::rbac::MenuRepository};
+use crate::{postgres::error, traits::rbac::MenuRepository};
 
 /// Menu repository backed by Postgres.
 pub struct PgMenuRepository {
@@ -121,7 +121,7 @@ async fn do_find_by_id(db: &impl ConnectionTrait, id: &MenuId) -> Result<MenuInf
         .await
         .map_err(StorageError::from)?
         .map(Into::into)
-        .ok_or_else(|| util::not_found("menu", id))
+        .ok_or_else(|| error::not_found(entity::MENU, id))
 }
 
 async fn do_create(db: &impl ConnectionTrait, new: NewMenu) -> Result<MenuInfo, StorageError> {
@@ -142,7 +142,7 @@ async fn do_update(
     active.updated_at = Set(Utc::now());
     match active.update(db).await {
         Ok(model) => Ok(model.into()),
-        Err(sea_orm::DbErr::RecordNotUpdated) => Err(util::not_found("menu", id)),
+        Err(sea_orm::DbErr::RecordNotUpdated) => Err(error::not_found(entity::MENU, id)),
         Err(error) => Err(StorageError::from(error)),
     }
 }
@@ -157,9 +157,11 @@ async fn do_delete(db: &DatabaseConnection, id: &MenuId) -> Result<(), StorageEr
         .map_err(StorageError::from)?;
     if child_count > 0 {
         txn.rollback().await.map_err(StorageError::from)?;
-        return Err(StorageError::Conflict(format!(
-            "menu has {child_count} child node(s) and cannot be deleted: {id}"
-        )));
+        return Err(error::state_conflict(
+            entity::MENU,
+            Some(id),
+            format!("menu has {child_count} child node(s) and cannot be deleted"),
+        ));
     }
 
     role_menu::Entity::delete_many()
@@ -173,7 +175,7 @@ async fn do_delete(db: &DatabaseConnection, id: &MenuId) -> Result<(), StorageEr
         .map_err(StorageError::from)?;
     if result.rows_affected == 0 {
         txn.rollback().await.map_err(StorageError::from)?;
-        return Err(util::not_found("menu", id));
+        return Err(error::not_found(entity::MENU, id));
     }
 
     txn.commit().await.map_err(StorageError::from)?;

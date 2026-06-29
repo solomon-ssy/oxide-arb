@@ -1,4 +1,4 @@
-//! Recommendation + evidence HTTP endpoints (Phase 04.4).
+//! Recommendation + evidence + attribution HTTP endpoints (Phase 04.4 / 05.7).
 //!
 //! # UI integration contract
 //!
@@ -6,6 +6,7 @@
 //! |--------|------|------------|---------|
 //! | GET  | `/quant/recommendations/{id}` | `quant_report:read` | One recommendation |
 //! | GET  | `/quant/recommendations/{id}/evidence` | `quant_report:read` | Replay handles |
+//! | GET  | `/quant/recommendations/{id}/attribution` | `recommendation_attribution:read` | Final WORM attribution |
 //!
 //! Creating an order intent from a recommendation is `POST /api/quant/intents`
 //! (see [`super::quant_intents`]), the governed execution surface added in
@@ -13,7 +14,7 @@
 
 use actix_web::{http::Method, web};
 use quant_pivot_models::{
-    domain::{QuantEvidenceView, QuantRecommendationView},
+    domain::{QuantEvidenceView, QuantRecommendationView, RecommendationAttributionView},
     enums::rbac::{Operation, ResourceType},
     types::RecommendationId,
 };
@@ -40,6 +41,12 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
             "/quant/recommendations/{id}/evidence",
             Rule::ResourceOp(ResourceType::QuantReport, Operation::Read),
             evidence,
+        ),
+        spec(
+            Method::GET,
+            "/quant/recommendations/{id}/attribution",
+            Rule::ResourceOp(ResourceType::RecommendationAttribution, Operation::Read),
+            attribution,
         ),
     ]
 }
@@ -68,4 +75,17 @@ pub async fn evidence(
         .await?
         .ok_or_else(|| WebError::NotFound(format!("recommendation not found: {id}")))?;
     Ok(WebResponse::ok(QuantEvidenceView::from(info)))
+}
+
+/// `GET /api/quant/recommendations/{id}/attribution` — final WORM attribution.
+pub async fn attribution(
+    state: web::Data<AppState>,
+    id: web::Path<RecommendationId>,
+) -> Result<WebResponse<RecommendationAttributionView>, WebError> {
+    let info = state
+        .execution_read
+        .get_recommendation_attribution(&id)
+        .await?
+        .ok_or_else(|| WebError::NotFound(format!("recommendation attribution not found: {id}")))?;
+    Ok(WebResponse::ok(RecommendationAttributionView::from(info)))
 }

@@ -195,6 +195,7 @@ score = Σ normalized_factor_i * weight_i * confidence_i
 - Phase 3 先作为离线 candidate model。
 - Phase 4 shadow report 对比 weighted scorer。
 - 通过 model registry 管理 artifact。
+- 生产主路径 publish 细化为 [`phase-06/06.4-classical-model-publish-path.md`](phase-06/06.4-classical-model-publish-path.md)。
 
 适合：
 
@@ -312,6 +313,7 @@ subject to:
 - Phase 6 以后引入。
 - 不作为第一版 weighted/classical model 的依赖。
 - 封装为 `OnnxInferenceEngine` trait。
+- 生产集成计划见 [`phase-06/06.3-onnx-runtime-integration.md`](phase-06/06.3-onnx-runtime-integration.md)。
 
 ### 7.2 `candle`
 
@@ -448,7 +450,10 @@ smartcore
 
 可新增：
 
-- `ort`，前提是解决 MSRV。
+- `ort`，前提是解决 MSRV；详见 [`phase-06/06.3`](phase-06/06.3-onnx-runtime-integration.md)。
+- classical model 主路径 publish；详见 [`phase-06/06.4`](phase-06/06.4-classical-model-publish-path.md)。
+- attribution feedback / auto retraining；详见 [`phase-06/06.5`](phase-06/06.5-attribution-feedback-and-auto-retraining.md)。
+- counterfactual factor attribution；详见 [`phase-06/06.6`](phase-06/06.6-counterfactual-factor-attribution.md)。
 
 ### Phase 8+
 

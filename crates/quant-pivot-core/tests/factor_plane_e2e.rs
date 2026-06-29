@@ -60,6 +60,7 @@ use quant_pivot_research::{
 use quant_pivot_storage::write::{AsyncWriter, AsyncWriterConfig, AsyncWriterObservability};
 use quant_pivot_test_support::{
     catalog_fixtures::{make_event, make_market},
+    factor_governance::publish_all_factor_definitions,
     pg::setup_pg,
 };
 use rust_decimal::Decimal;
@@ -329,6 +330,10 @@ async fn create_definition_and_values_then_list_for_run() {
 
     let factors = factors_config();
     let features = FeaturesConfig::default();
+    publish_all_factor_definitions(factor_repo.as_ref(), &factors, &features)
+        .await
+        .expect("publish factor definitions");
+
     let result = service
         .run(FactorPipelineRequest {
             model_run_id: &model_run_id,
@@ -367,6 +372,68 @@ async fn create_definition_and_values_then_list_for_run() {
         .expect("definition row");
     assert_eq!(definition.name, "data_quality");
     assert_eq!(definition.scope, FactorDefinitionScope::Generic);
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn unpublished_factor_definitions_block_pipeline() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    seed_catalog(&db, &CATALOG).await;
+
+    let (vectors, feature_vector_ids) = build_features(&db).await;
+    let factor_repo = Arc::new(PgFactorRepository::new(db.clone())) as Arc<dyn FactorRepository>;
+    let (writer, _worker) = AsyncWriter::new(
+        AsyncWriterConfig::new("factor-e2e-unpublished").capacity(256),
+        |_| Box::pin(async { Ok(()) }),
+        prometheus::IntCounter::new("factor_e2e_unpub_drops", "drops").expect("counter"),
+        AsyncWriterObservability::default(),
+    );
+    let service = FactorPipelineService::new(
+        Arc::clone(&factor_repo),
+        Arc::new(FactorEventWriter::new(Arc::new(writer))),
+    );
+
+    let model_run_id = ModelRunId::from_v7();
+    PgModelRunRepository::new(db.clone())
+        .create(NewModelRun {
+            model_run_id: model_run_id.clone(),
+            run_kind: ModelRunKind::LiveInference,
+            model_version_id: None,
+            runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
+            market_selection_id: None,
+            window_start: Utc::now(),
+            window_end: Utc::now(),
+            status: ModelRunStatus::Running,
+            input_hash: ContentHash::parse(format!("blake3:{}", "1".repeat(64))).expect("hash"),
+            output_hash: None,
+            metrics_json: serde_json::json!({}),
+            error_code: None,
+            error_message: None,
+            started_at: Utc::now(),
+            finished_at: None,
+        })
+        .await
+        .expect("create model run");
+
+    let factors = factors_config();
+    let features = FeaturesConfig::default();
+    let error = service
+        .run(FactorPipelineRequest {
+            model_run_id: &model_run_id,
+            vectors: &vectors,
+            feature_vector_ids: &feature_vector_ids,
+            factors: &factors,
+            features: &features,
+        })
+        .await;
+    let Err(error) = error else {
+        panic!("draft definitions must block the factor plane");
+    };
+    assert!(
+        error.to_string().contains("must be Published"),
+        "unexpected error: {error}"
+    );
 }
 
 #[tokio::test]

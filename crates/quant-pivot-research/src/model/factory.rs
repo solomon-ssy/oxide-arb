@@ -19,8 +19,6 @@ use async_trait::async_trait;
 use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::{domain::ModelVersionInfo, types::ContentHash};
 
-#[cfg(not(feature = "ml-classical"))]
-use crate::model::artifact::ClassicalModelArtifact;
 #[cfg(feature = "ml-classical")]
 use crate::model::{artifact::ClassicalModelArtifact, classical_runtime::ClassicalRuntime};
 use crate::{
@@ -157,7 +155,20 @@ impl ModelRuntimeFactory for DefaultModelRuntimeFactory {
             ModelArtifact::WeightedFactor(weighted) => {
                 Ok(Box::new(WeightedFactorRuntime::new(*weighted, overlay)?))
             }
-            ModelArtifact::Classical(classical) => self.load_classical(*classical).await,
+            ModelArtifact::Classical(classical) => {
+                #[cfg(feature = "ml-classical")]
+                {
+                    self.load_classical(*classical).await
+                }
+                #[cfg(not(feature = "ml-classical"))]
+                {
+                    Err(ResearchError::RuntimeUnavailable {
+                        family: classical.kind.to_string(),
+                        detail: "classical runtimes require the `ml-classical` build".to_owned(),
+                    }
+                    .into())
+                }
+            }
         }
     }
 }
@@ -174,20 +185,6 @@ impl DefaultModelRuntimeFactory {
         let bytes = self.store.get(&classical.serialized_model_uri).await?;
         let runtime = ClassicalRuntime::load(classical, &bytes)?;
         Ok(Box::new(runtime))
-    }
-
-    /// Classical family is not linked in this build.
-    #[cfg(not(feature = "ml-classical"))]
-    #[allow(clippy::unused_async)]
-    async fn load_classical(
-        &self,
-        classical: ClassicalModelArtifact,
-    ) -> QuantResult<Box<dyn QuantModelRuntime>> {
-        Err(ResearchError::RuntimeUnavailable {
-            family: classical.kind.to_string(),
-            detail: "classical runtimes require the `ml-classical` build".to_owned(),
-        }
-        .into())
     }
 }
 

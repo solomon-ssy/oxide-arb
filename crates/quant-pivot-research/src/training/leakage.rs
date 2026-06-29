@@ -137,7 +137,7 @@ mod tests {
     use chrono::{Duration, TimeZone, Utc};
     use quant_pivot_models::{
         enums::quant::DataQualityStatus,
-        types::{MarketId, SchemaVersion, TokenId, TrainingExampleId},
+        types::{MarketId, SchemaVersion, TokenId, TrainingExampleId, TrainingSampleSource},
     };
     use std::collections::BTreeMap;
 
@@ -159,6 +159,7 @@ mod tests {
             market_id: MarketId::new("m"),
             token_id: TokenId::new("t"),
             as_of,
+            sample_source: TrainingSampleSource::HistoricalPit,
             feature_vector: vector,
             factor_values: Vec::new(),
             labels: Vec::new(),

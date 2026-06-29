@@ -27,8 +27,11 @@
 //! established before authorization, and an unregistered protected route is
 //! denied (fail-closed).
 
+pub mod account;
 pub mod auth;
 pub mod data_quality;
+pub mod execution_orders;
+pub mod factor_governance;
 pub mod health;
 pub mod markets;
 pub mod menus;
@@ -36,6 +39,7 @@ pub mod metrics;
 pub mod model_governance;
 pub mod operation_logs;
 pub mod permissions;
+pub mod positions;
 pub mod quant_intents;
 pub mod quant_recommendations;
 pub mod quant_reports;
@@ -81,8 +85,12 @@ fn protected_route_specs() -> Vec<RouteSpec> {
     specs.extend(training_datasets::route_specs());
     specs.extend(research_models::route_specs());
     specs.extend(model_governance::route_specs());
+    specs.extend(factor_governance::route_specs());
     specs.extend(quant_reports::route_specs());
     specs.extend(quant_recommendations::route_specs());
+    specs.extend(account::route_specs());
+    specs.extend(positions::route_specs());
+    specs.extend(execution_orders::route_specs());
     specs.extend(quant_intents::route_specs());
     specs
 }

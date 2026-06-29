@@ -102,6 +102,19 @@ HTTP status mapping stays in **`quant-pivot-web/src/error.rs`**.
 Production `src/` must not call `QuantError::Internal(` directly — use typed variants
 (enforced by `scripts/lint-quant-pivot-errors.sh`).
 
+`StorageError` persistence variants (no string bucket — `Conflict(String)` removed):
+
+| Variant | Semantics | Typical HTTP |
+|---------|-----------|--------------|
+| `NotFound { entity, id }` | Row absent | 404 |
+| `Duplicate { entity, key }` | Unique/PK violation | 409 |
+| `IllegalTransition { entity, id, from, to }` | FSM rejected | 409 |
+| `StateConflict { entity, id, detail }` | Wrong lifecycle state | 409 |
+| `InvariantViolation { entity, detail }` | Caller payload invalid | 400 |
+
+Idempotent writes (e.g. attribution final insert) return repository **outcome enums**
+(`InsertFinalOutcome`) rather than treating duplicate as `Err`.
+
 ## 8. Forbidden Patterns
 
 | Forbidden | Instead |

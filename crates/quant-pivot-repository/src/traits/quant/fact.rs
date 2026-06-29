@@ -1,7 +1,8 @@
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::clickhouse::{
-    QuantExecutionEventRow, QuantFactorEventRow, QuantFeatureEventRow, QuantRecommendationEventRow,
-    QuantSignalCandidateEventRow,
+    QuantCapitalAllocationEventRow, QuantExecutionEventRow, QuantFactorEventRow,
+    QuantFeatureEventRow, QuantPositionEventRow, QuantRecommendationAttributionEventRow,
+    QuantRecommendationEventRow, QuantSignalCandidateEventRow,
 };
 
 /// Generic batch sink for one `ClickHouse` fact stream.
@@ -41,5 +42,20 @@ pub trait QuantFactRepository: Send + Sync {
     async fn insert_execution_events(
         &self,
         rows: Vec<QuantExecutionEventRow>,
+    ) -> Result<(), StorageError>;
+
+    async fn insert_capital_allocation_events(
+        &self,
+        rows: Vec<QuantCapitalAllocationEventRow>,
+    ) -> Result<(), StorageError>;
+
+    async fn insert_position_events(
+        &self,
+        rows: Vec<QuantPositionEventRow>,
+    ) -> Result<(), StorageError>;
+
+    async fn insert_recommendation_attribution_events(
+        &self,
+        rows: Vec<QuantRecommendationAttributionEventRow>,
     ) -> Result<(), StorageError>;
 }

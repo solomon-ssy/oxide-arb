@@ -43,7 +43,7 @@ Polymarket facts -> features -> factors/models -> portfolio plan
 - [`phase-03/README.md`](phase-03/README.md) — 研究平面 3.0–3.8
 - [`phase-04/README.md`](phase-04/README.md) — TopN 报告 4.0–4.4
 - [`phase-05/README.md`](phase-05/README.md) — 执行/风险/治理 05.0–05.10
-- [`phase-06/README.md`](phase-06/README.md) — ML 扩展（Opportunistic Sell、跨账户对账 report；**闭合 05.6 延后 seam**）
+- [`phase-06/README.md`](phase-06/README.md) — ML 扩展（退出信号、跨账户对账、ONNX/classical publish、attribution feedback、反事实归因；**闭合 Phase 5 延后 seam**）
 - [`phase-08/README.md`](phase-08/README.md) — 部署架构（多副本 leader election、高频 trailing）
 
 ## 2. 硬边界

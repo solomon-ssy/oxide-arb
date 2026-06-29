@@ -19,6 +19,7 @@ use quant_pivot_models::{
         },
         rbac::ResourceType,
     },
+    hashing::canonical_state_hash,
     runtime_config::RuntimeConfig,
     types::{
         AccountPositions, AccountSnapshotId, Bps, ConfidenceSummary, EligibilitySummary, EventId,
@@ -187,7 +188,7 @@ impl RecommendationComposer for DefaultRecommendationComposer {
                 .as_ref()
                 .map(|empty| empty.reason.as_str().to_owned()),
         };
-        let operation_log = operation_log(&report_id, &input, status);
+        let operation_log = operation_log(&report_id, &input, status, &report)?;
         let ch_rows = recommendation_events(&report_id, &recommendations, input.trigger_time);
 
         Ok(ComposedReport {
@@ -732,8 +733,9 @@ fn operation_log(
     report_id: &RecommendationReportId,
     input: &ComposeReportInput<'_>,
     status: RecommendationReportStatus,
-) -> NewOperationLog {
-    NewOperationLog {
+    report: &NewRecommendationReport,
+) -> QuantResult<NewOperationLog> {
+    Ok(NewOperationLog {
         id: OperationLogId::from_v7(),
         request_id: input.trigger_key.clone(),
         actor_user_id: None,
@@ -759,9 +761,13 @@ fn operation_log(
             "published_count": input.planned.len(),
             "empty_reason": input.empty.as_ref().map(|empty| empty.reason.as_str()),
         }),
+        before_hash: None,
+        after_hash: Some(canonical_state_hash(report).map_err(|error| {
+            QuantError::config(format!("canonical state hash failed: {error}"))
+        })?),
         governance_audit_event_id: None,
         governance_audit_sequence: None,
-    }
+    })
 }
 
 fn empty_portfolio_plan(

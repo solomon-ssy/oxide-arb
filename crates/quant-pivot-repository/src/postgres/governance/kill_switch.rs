@@ -1,7 +1,7 @@
 //! Postgres-backed operational kill-switch repository.
 
-use crate::traits::KillSwitchStateRepository;
-use quant_pivot_error::storage::StorageError;
+use crate::{postgres::error, traits::KillSwitchStateRepository};
+use quant_pivot_error::storage::{StorageError, entity};
 use quant_pivot_models::{
     domain::{KillSwitchStateInfo, UpsertKillSwitchState},
     entities::system_kill_switch,
@@ -37,10 +37,13 @@ impl KillSwitchStateRepository for PgKillSwitchStateRepository {
         state: UpsertKillSwitchState,
     ) -> Result<KillSwitchStateInfo, StorageError> {
         if state.id != SYSTEM_KILL_SWITCH_ID {
-            return Err(StorageError::Conflict(format!(
-                "system_kill_switch id must be {SYSTEM_KILL_SWITCH_ID}, got {}",
-                state.id
-            )));
+            return Err(error::invariant_violation(
+                Some(entity::QUANT_KILL_SWITCH),
+                format!(
+                    "system_kill_switch id must be {SYSTEM_KILL_SWITCH_ID}, got {}",
+                    state.id
+                ),
+            ));
         }
 
         let existing = system_kill_switch::Entity::find_by_id(SYSTEM_KILL_SWITCH_ID)

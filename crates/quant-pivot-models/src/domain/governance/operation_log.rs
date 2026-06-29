@@ -36,6 +36,8 @@ pub struct NewOperationLog {
     pub user_agent: Option<String>,
     pub latency_ms: i32,
     pub detail: serde_json::Value,
+    pub before_hash: Option<String>,
+    pub after_hash: Option<String>,
     pub governance_audit_event_id: Option<AuditEventId>,
     pub governance_audit_sequence: Option<i64>,
 }
@@ -60,6 +62,8 @@ pub struct OperationLogInfo {
     pub user_agent: Option<String>,
     pub latency_ms: i32,
     pub detail: serde_json::Value,
+    pub before_hash: Option<String>,
+    pub after_hash: Option<String>,
     pub governance_audit_event_id: Option<AuditEventId>,
     pub governance_audit_sequence: Option<i64>,
 }
@@ -68,5 +72,5 @@ info_from_model!(OperationLogInfo, crate::entities::operation_log::Model, {
     id, occurred_at, request_id, actor_user_id, actor_username, acting_role,
     category, action, resource_type, resource_id, http_method, http_path,
     http_status, outcome, client_ip, user_agent, latency_ms, detail,
-    governance_audit_event_id, governance_audit_sequence,
+    before_hash, after_hash, governance_audit_event_id, governance_audit_sequence,
 });

@@ -21,6 +21,11 @@ if rg -n "$FORBIDDEN_TYPES" crates/ 2>/dev/null; then
   fail=1
 fi
 
+if rg -n 'StorageError::Conflict|is_duplicate_entity' crates/*/src --glob '!**/tests/**' 2>/dev/null; then
+  echo "ERROR: StorageError::Conflict and is_duplicate_entity are removed — use typed storage variants"
+  fail=1
+fi
+
 if [[ "$fail" -ne 0 ]]; then
   exit 1
 fi

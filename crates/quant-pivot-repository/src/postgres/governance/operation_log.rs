@@ -20,8 +20,8 @@ use crate::{
     traits::OperationLogRepository,
 };
 
-/// Number of columns in the `operation_log` table, for bind-variable budgeting.
-const OPERATION_LOG_COLUMNS: usize = 19;
+/// Number of insert columns in `NewOperationLog` (excludes DB-default `occurred_at`).
+const OPERATION_LOG_COLUMNS: usize = 21;
 
 /// Operation-log repository backed by Postgres.
 pub struct PgOperationLogRepository {

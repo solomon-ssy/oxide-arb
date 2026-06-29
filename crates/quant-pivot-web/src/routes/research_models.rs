@@ -90,7 +90,7 @@ pub async fn train(
     let request = body.into_inner();
     let reason = request.reason.clone();
     let view = state.model_training.train(request).await?;
-    op_ctx.set_action(OperationCategory::Other, "research.model.train");
+    op_ctx.set_action(OperationCategory::Other, "model.train");
     op_ctx.set_resource(
         ResourceType::Materialization,
         view.model_version_id.to_string(),
@@ -132,7 +132,7 @@ pub async fn backtest(
     let reason = request.reason.clone();
     let model_version_id = id.into_inner();
     let view = state.backtests.run(model_version_id, request).await?;
-    op_ctx.set_action(OperationCategory::Other, "research.model.backtest");
+    op_ctx.set_action(OperationCategory::Other, "model.backtest");
     op_ctx.set_resource(ResourceType::Replay, view.backtest_report_id.to_string());
     op_ctx.set_detail(serde_json::json!({
         "backtest_report_id": view.backtest_report_id.to_string(),

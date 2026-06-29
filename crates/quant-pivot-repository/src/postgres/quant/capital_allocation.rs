@@ -1,7 +1,10 @@
 //! Postgres-backed capital-allocation repository.
 
-use crate::traits::{CapitalAllocationRepository, ReservedCapitalRepository};
-use quant_pivot_error::storage::StorageError;
+use crate::{
+    postgres::error,
+    traits::{CapitalAllocationRepository, ReservedCapitalRepository},
+};
+use quant_pivot_error::storage::{StorageError, entity};
 use quant_pivot_models::{
     domain::{CapitalAllocationInfo, CapitalReconcileSettlement, CapitalSettlement},
     entities::quant_capital_allocation,
@@ -118,8 +121,9 @@ pub fn validate_non_negative(
         || spent_usd.is_negative()
         || released_usd.is_negative()
     {
-        return Err(StorageError::Conflict(
-            "capital allocation amounts must be non-negative".to_owned(),
+        return Err(error::invariant_violation(
+            Some(entity::QUANT_CAPITAL_ALLOCATION),
+            "capital allocation amounts must be non-negative",
         ));
     }
     Ok(())
@@ -157,11 +161,7 @@ pub async fn load_capital(
         .one(db)
         .await
         .map_err(StorageError::from)?
-        .ok_or_else(|| {
-            StorageError::Conflict(format!(
-                "capital allocation not found for intent: {intent_id}"
-            ))
-        })
+        .ok_or_else(|| error::not_found(entity::QUANT_CAPITAL_ALLOCATION, intent_id))
 }
 
 /// Release an intent's still-reserved capital in full (`Allocated`/`Locked` →
@@ -213,10 +213,14 @@ pub async fn lock_capital(
 ) -> Result<(), StorageError> {
     let cap = load_capital(db, intent_id).await?;
     if cap.state != CapitalAllocationState::Allocated {
-        return Err(StorageError::Conflict(format!(
-            "capital must be allocated to lock for intent {intent_id}, got {}",
-            cap.state.as_str()
-        )));
+        return Err(error::state_conflict(
+            entity::QUANT_CAPITAL_ALLOCATION,
+            Some(intent_id),
+            format!(
+                "capital must be allocated to lock, got {}",
+                cap.state.as_str()
+            ),
+        ));
     }
     let locked_usd = cap.allocated_usd;
     let ok = validate_non_negative(
@@ -337,10 +341,11 @@ pub async fn complete_exit_capital(
             active.update(db).await.map_err(StorageError::from)?;
             Ok(())
         }
-        other => Err(StorageError::Conflict(format!(
-            "cannot complete exit capital for intent {intent_id} from {}",
-            other.as_str()
-        ))),
+        other => Err(error::state_conflict(
+            entity::QUANT_CAPITAL_ALLOCATION,
+            Some(intent_id),
+            format!("cannot complete exit capital from {}", other.as_str()),
+        )),
     }
 }
 

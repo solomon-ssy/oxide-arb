@@ -5,7 +5,7 @@ use quant_pivot_models::{
         ApproveOrderIntent, ApproveOrderIntentOutcome, NewCapitalAllocation, NewOperationLog,
         NewOrderIntent, OrderIntentInfo, OrderIntentListQuery, Paginated,
     },
-    enums::execution::ApprovalInvalidation,
+    enums::{execution::ApprovalInvalidation, quant::OrderIntentStatus},
     types::{EntryOrderSpec, OrderIntentId, RecommendationId, RecommendationReportId, Usd},
 };
 
@@ -115,4 +115,16 @@ pub trait OrderIntentRepository: Send + Sync {
         &self,
         report_id: &RecommendationReportId,
     ) -> Result<Vec<OrderIntentInfo>, StorageError>;
+
+    /// Terminal / near-terminal intents whose parent recommendation has not yet
+    /// received a final attribution row. Used by the attribution worker; the
+    /// builder still re-checks execution / position state before writing WORM.
+    async fn find_attribution_candidates(
+        &self,
+        statuses: Vec<OrderIntentStatus>,
+        limit: u64,
+    ) -> Result<Vec<OrderIntentInfo>, StorageError> {
+        let _ = (statuses, limit);
+        Ok(Vec::new())
+    }
 }

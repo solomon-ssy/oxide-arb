@@ -187,6 +187,7 @@ pub async fn create_version(
         ResourceType::RuntimeConfig,
         version.runtime_config_version_id.to_string(),
     );
+    op_ctx.set_state_hashes(None, Some(config_hash.as_str().to_owned()));
     op_ctx.set_detail(serde_json::json!({
         "config_hash": config_hash,
         "acting_role": acting_role.0,
@@ -209,9 +210,25 @@ pub async fn activate_version(
     op_ctx: OperationCtx,
     body: ValidatedJson<ActivateRuntimeConfigRequest>,
 ) -> Result<WebResponse<RuntimeConfigActivationInfo>, WebError> {
+    let version_id = id.into_inner();
+    let before_hash = state
+        .runtime_config
+        .load_current()
+        .await?
+        .map(|version| version.config_hash.as_str().to_owned());
+    let after_hash = state
+        .runtime_config
+        .load_version(&version_id)
+        .await?
+        .ok_or_else(|| {
+            WebError::NotFound(format!("runtime config version not found: {version_id}"))
+        })?
+        .config_hash
+        .as_str()
+        .to_owned();
     let audited = transition_version(
         &state,
-        id.into_inner(),
+        version_id,
         &actor,
         acting_role.clone(),
         &request_id,
@@ -220,6 +237,7 @@ pub async fn activate_version(
     )
     .await?;
     op_ctx.set_action(OperationCategory::RuntimeConfig, "runtime_config.activate");
+    op_ctx.set_state_hashes(before_hash, Some(after_hash));
     record_activation(&op_ctx, &state.events, &audited, &acting_role, &request_id);
     Ok(WebResponse::ok(audited))
 }
@@ -235,9 +253,25 @@ pub async fn rollback_version(
     op_ctx: OperationCtx,
     body: ValidatedJson<RollbackRuntimeConfigRequest>,
 ) -> Result<WebResponse<RuntimeConfigActivationInfo>, WebError> {
+    let version_id = id.into_inner();
+    let before_hash = state
+        .runtime_config
+        .load_current()
+        .await?
+        .map(|version| version.config_hash.as_str().to_owned());
+    let after_hash = state
+        .runtime_config
+        .load_version(&version_id)
+        .await?
+        .ok_or_else(|| {
+            WebError::NotFound(format!("runtime config version not found: {version_id}"))
+        })?
+        .config_hash
+        .as_str()
+        .to_owned();
     let audited = transition_version(
         &state,
-        id.into_inner(),
+        version_id,
         &actor,
         acting_role.clone(),
         &request_id,
@@ -246,6 +280,7 @@ pub async fn rollback_version(
     )
     .await?;
     op_ctx.set_action(OperationCategory::RuntimeConfig, "runtime_config.rollback");
+    op_ctx.set_state_hashes(before_hash, Some(after_hash));
     record_activation(&op_ctx, &state.events, &audited, &acting_role, &request_id);
     Ok(WebResponse::ok(audited))
 }

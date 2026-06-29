@@ -1,7 +1,7 @@
 //! Training-dataset ledger integration tests (Postgres + testcontainers).
 
 use chrono::{Duration as ChronoDuration, Utc};
-use quant_pivot_error::storage::StorageError;
+use quant_pivot_error::storage::{StorageError, entity};
 use quant_pivot_models::{
     domain::{NewModelSpec, NewModelVersion, NewRuntimeConfigVersion, NewTrainingDataset},
     enums::{
@@ -174,8 +174,14 @@ async fn training_dataset_status_transitions_enforce_state_machine() {
         .await
         .expect_err("insufficient -> ready must conflict");
     assert!(
-        matches!(err, StorageError::Conflict(_)),
-        "expected conflict, got {err:?}"
+        matches!(
+            err,
+            StorageError::IllegalTransition {
+                entity: entity::QUANT_TRAINING_DATASET,
+                ..
+            }
+        ),
+        "expected illegal transition, got {err:?}"
     );
 }
 

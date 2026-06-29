@@ -224,10 +224,10 @@ impl ReconciliationService {
             .find_by_id(&resolution.execution_order_id)
             .await?
             .ok_or_else(|| {
-                StorageError::Conflict(format!(
-                    "execution order {} not found for resolve",
-                    resolution.execution_order_id
-                ))
+                StorageError::not_found(
+                    quant_pivot_error::storage::entity::QUANT_EXECUTION_ORDER,
+                    &resolution.execution_order_id,
+                )
             })?;
         let intent = self
             .deps
@@ -235,7 +235,10 @@ impl ReconciliationService {
             .find_by_id(&order.order_intent_id)
             .await?
             .ok_or_else(|| {
-                StorageError::Conflict(format!("intent {} not found", order.order_intent_id))
+                StorageError::not_found(
+                    quant_pivot_error::storage::entity::QUANT_ORDER_INTENT,
+                    &order.order_intent_id,
+                )
             })?;
         let recommendation = self
             .deps
@@ -243,10 +246,10 @@ impl ReconciliationService {
             .find_by_id(&intent.recommendation_id)
             .await?
             .ok_or_else(|| {
-                StorageError::Conflict(format!(
-                    "recommendation {} not found",
-                    intent.recommendation_id
-                ))
+                StorageError::not_found(
+                    quant_pivot_error::storage::entity::QUANT_RECOMMENDATION,
+                    &intent.recommendation_id,
+                )
             })?;
 
         let note = system_note(
@@ -318,10 +321,10 @@ impl ReconciliationService {
             .find_by_id(&order.order_intent_id)
             .await?
             .ok_or_else(|| {
-                StorageError::Conflict(format!(
-                    "intent {} not found for reconcilable order {}",
-                    order.order_intent_id, order.execution_order_id
-                ))
+                StorageError::not_found(
+                    quant_pivot_error::storage::entity::QUANT_ORDER_INTENT,
+                    &order.order_intent_id,
+                )
             })?;
         let recommendation = self
             .deps
@@ -329,10 +332,10 @@ impl ReconciliationService {
             .find_by_id(&intent.recommendation_id)
             .await?
             .ok_or_else(|| {
-                StorageError::Conflict(format!(
-                    "recommendation {} not found for reconcilable order {}",
-                    intent.recommendation_id, order.execution_order_id
-                ))
+                StorageError::not_found(
+                    quant_pivot_error::storage::entity::QUANT_RECOMMENDATION,
+                    &intent.recommendation_id,
+                )
             })?;
         Ok((intent, recommendation))
     }

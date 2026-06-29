@@ -8,16 +8,25 @@
 //! struct is never serialized directly.
 
 use crate::{
-    domain::{ExecutionOrderInfo, OrderIntentInfo, pagination::PageRequest},
+    domain::{
+        ExecutionOrderInfo, OrderIntentInfo, PositionInfo, RecommendationAttributionInfo,
+        pagination::PageRequest,
+    },
     enums::{
         common::Side,
-        execution::{ExecutionOrderPhase, OrderIntentKind, OrderTypeKind, VenueOrderStatus},
-        quant::{ApprovalStatus, ExecutionOrderState, OrderIntentStatus, QuantRuntimeMode},
+        execution::{
+            ExecutionOrderPhase, OrderIntentKind, OrderTypeKind, PositionLedgerState,
+            VenueOrderStatus,
+        },
+        quant::{
+            ApprovalStatus, ExecutionOrderState, OrderIntentStatus, QuantRuntimeMode,
+            RecommendationAttributionOutcome,
+        },
     },
     types::{
-        ContentHash, EntryOrderSpec, ExecutionOrderId, ExitPolicySpec, MarketId, ModelVersionId,
-        OrderId, OrderIntentId, Price, RecommendationId, RuntimeConfigVersionId, Shares, TokenId,
-        Usd,
+        AttributionDetail, ContentHash, EntryOrderSpec, EntryOutcome, ExecutionOrderId,
+        ExitOutcome, ExitPolicySpec, MarketId, ModelVersionId, OrderId, OrderIntentId, PositionId,
+        Price, RecommendationId, RuntimeConfigVersionId, Shares, TokenId, Usd,
     },
 };
 use chrono::{DateTime, Utc};
@@ -131,6 +140,77 @@ impl From<ExecutionOrderInfo> for ExecutionOrderView {
     }
 }
 
+/// Outbound projection of one per-intent position lot.
+#[derive(Debug, Clone, Serialize)]
+pub struct PositionView {
+    /// Distinguishes system lot ledger from venue account positions (`/quant/account/*`).
+    pub position_plane: &'static str,
+    pub position_id: PositionId,
+    pub order_intent_id: OrderIntentId,
+    pub token_id: TokenId,
+    pub market_id: MarketId,
+    pub state: PositionLedgerState,
+    pub shares: Shares,
+    pub avg_price: Price,
+    pub cost_usd: Usd,
+    pub realized_pnl_usd: Usd,
+    pub opened_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub closed_at: Option<DateTime<Utc>>,
+}
+
+impl From<PositionInfo> for PositionView {
+    fn from(info: PositionInfo) -> Self {
+        Self {
+            position_plane: "system_lot",
+            position_id: info.position_id,
+            order_intent_id: info.order_intent_id,
+            token_id: info.token_id,
+            market_id: info.market_id,
+            state: info.state,
+            shares: info.shares,
+            avg_price: info.avg_price,
+            cost_usd: info.cost_usd,
+            realized_pnl_usd: info.realized_pnl_usd,
+            opened_at: info.opened_at,
+            updated_at: info.updated_at,
+            closed_at: info.closed_at,
+        }
+    }
+}
+
+/// Outbound projection of the final WORM recommendation attribution.
+#[derive(Debug, Clone, Serialize)]
+pub struct RecommendationAttributionView {
+    pub recommendation_id: RecommendationId,
+    pub outcome: RecommendationAttributionOutcome,
+    pub realized_pnl_usd: Option<Usd>,
+    pub max_adverse_excursion_bps: Option<rust_decimal::Decimal>,
+    pub max_favorable_excursion_bps: Option<rust_decimal::Decimal>,
+    pub label_available_at: Option<DateTime<Utc>>,
+    pub entry_outcome: EntryOutcome,
+    pub exit_outcome: ExitOutcome,
+    pub attribution: AttributionDetail,
+    pub created_at: DateTime<Utc>,
+}
+
+impl From<RecommendationAttributionInfo> for RecommendationAttributionView {
+    fn from(info: RecommendationAttributionInfo) -> Self {
+        Self {
+            recommendation_id: info.recommendation_id,
+            outcome: info.outcome,
+            realized_pnl_usd: info.realized_pnl_usd,
+            max_adverse_excursion_bps: info.max_adverse_excursion_bps,
+            max_favorable_excursion_bps: info.max_favorable_excursion_bps,
+            label_available_at: info.label_available_at,
+            entry_outcome: info.entry_outcome_json,
+            exit_outcome: info.exit_outcome_json,
+            attribution: info.attribution_json,
+            created_at: info.created_at,
+        }
+    }
+}
+
 /// Inbound body for `POST /quant/intents/{id}/submit` (operator-triggered).
 #[derive(Debug, Clone, Deserialize, Validate)]
 pub struct SubmitIntentRequest {
@@ -155,6 +235,53 @@ pub struct OrderIntentListQuery {
 
 impl OrderIntentListQuery {
     /// Return a copy with the embedded pagination window normalized.
+    #[must_use]
+    pub fn normalized(self) -> Self {
+        Self {
+            page: self.page.normalized(),
+            ..self
+        }
+    }
+}
+
+/// Paginated filter for listing execution orders.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ExecutionOrderListQuery {
+    pub state: Option<ExecutionOrderState>,
+    pub order_phase: Option<ExecutionOrderPhase>,
+    pub order_intent_id: Option<OrderIntentId>,
+    pub market_id: Option<MarketId>,
+    pub token_id: Option<TokenId>,
+    pub from: Option<DateTime<Utc>>,
+    pub to: Option<DateTime<Utc>>,
+    #[serde(flatten)]
+    pub page: PageRequest,
+}
+
+impl ExecutionOrderListQuery {
+    #[must_use]
+    pub fn normalized(self) -> Self {
+        Self {
+            page: self.page.normalized(),
+            ..self
+        }
+    }
+}
+
+/// Paginated filter for listing position lots.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct PositionListQuery {
+    pub state: Option<PositionLedgerState>,
+    pub order_intent_id: Option<OrderIntentId>,
+    pub market_id: Option<MarketId>,
+    pub token_id: Option<TokenId>,
+    pub from: Option<DateTime<Utc>>,
+    pub to: Option<DateTime<Utc>>,
+    #[serde(flatten)]
+    pub page: PageRequest,
+}
+
+impl PositionListQuery {
     #[must_use]
     pub fn normalized(self) -> Self {
         Self {

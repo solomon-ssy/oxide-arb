@@ -75,7 +75,7 @@
 3. `LiquidityFilter`：最小 depth、volume、spread。
 4. `DataQualityFilter`：book age、WS health、fact lag。
 5. `ResolutionAmbiguityFilter`：过度模糊或规则不清市场可降权或排除。
-6. `ManualBlockFilter`：操作员 block。
+6. `MarketStatusFilter` 同时处理 `MarketStatus::ManuallyBlocked`：操作员 block。
 7. `ModelEligibilityFilter`：模型需要的 feature 可用性。
 
 ### 2.3 输出

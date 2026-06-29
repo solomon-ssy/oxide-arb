@@ -5,6 +5,7 @@
 //! in later Phase 05 slices.
 
 pub mod admission;
+pub mod attribution;
 pub mod breaker;
 pub mod dispatch_wake;
 pub mod dispatcher;
@@ -17,6 +18,7 @@ pub mod order_client;
 pub mod reconciliation;
 
 pub use admission::*;
+pub use attribution::*;
 pub use breaker::*;
 pub use dispatch_wake::*;
 pub use dispatcher::*;

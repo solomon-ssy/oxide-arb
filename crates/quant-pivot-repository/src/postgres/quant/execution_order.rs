@@ -1,15 +1,21 @@
 //! Postgres-backed execution-order repository.
 
-use crate::traits::ExecutionOrderRepository;
-use quant_pivot_error::storage::StorageError;
+use crate::{
+    postgres::{error, query::paginate_mapped},
+    traits::ExecutionOrderRepository,
+};
+use quant_pivot_error::storage::{StorageError, entity};
 use quant_pivot_models::{
-    domain::{ExecutionOrderInfo, ExecutionOrderPatch, NewExecutionOrder},
+    domain::{
+        ExecutionOrderInfo, ExecutionOrderListQuery, ExecutionOrderPatch, NewExecutionOrder,
+        Paginated,
+    },
     entities::quant_execution_order,
     enums::quant::ExecutionOrderState,
     types::{ExecutionOrderId, OrderIntentId},
 };
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel,
+    ActiveModelTrait, ColumnTrait, Condition, DatabaseConnection, EntityTrait, IntoActiveModel,
     IntoActiveValue, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect,
 };
 
@@ -57,6 +63,22 @@ impl ExecutionOrderRepository for PgExecutionOrderRepository {
             .map(|row| row.map(Into::into))
     }
 
+    async fn page(
+        &self,
+        query: ExecutionOrderListQuery,
+    ) -> Result<Paginated<ExecutionOrderInfo>, StorageError> {
+        let query = query.normalized();
+        paginate_mapped(
+            quant_execution_order::Entity::find()
+                .filter(page_condition(&query))
+                .order_by_desc(quant_execution_order::Column::CreatedAt),
+            &self.db,
+            &query.page,
+            Into::into,
+        )
+        .await
+    }
+
     async fn has_ambiguous_inflight(&self) -> Result<bool, StorageError> {
         quant_execution_order::Entity::find()
             .filter(quant_execution_order::Column::State.eq(ExecutionOrderState::Ambiguous))
@@ -90,9 +112,10 @@ impl ExecutionOrderRepository for PgExecutionOrderRepository {
             .await
             .map_err(StorageError::from)?
         else {
-            return Err(StorageError::Conflict(format!(
-                "execution order not found: {execution_order_id}"
-            )));
+            return Err(error::not_found(
+                entity::QUANT_EXECUTION_ORDER,
+                execution_order_id,
+            ));
         };
 
         if let Some(next) = patch.state.into_option() {
@@ -170,9 +193,49 @@ pub fn validate_execution_order_transition(
     if valid {
         return Ok(());
     }
-    Err(StorageError::Conflict(format!(
-        "invalid execution order transition for {execution_order_id}: {} -> {}",
-        current.as_str(),
-        next.as_str()
-    )))
+    Err(error::illegal_transition(
+        entity::QUANT_EXECUTION_ORDER,
+        Some(execution_order_id),
+        current,
+        next,
+    ))
+}
+
+fn page_condition(query: &ExecutionOrderListQuery) -> Condition {
+    Condition::all()
+        .add_option(
+            query
+                .state
+                .map(|state| quant_execution_order::Column::State.eq(state)),
+        )
+        .add_option(
+            query
+                .order_phase
+                .map(|order_phase| quant_execution_order::Column::OrderPhase.eq(order_phase)),
+        )
+        .add_option(query.order_intent_id.clone().map(|order_intent_id| {
+            quant_execution_order::Column::OrderIntentId.eq(order_intent_id)
+        }))
+        .add_option(
+            query
+                .market_id
+                .clone()
+                .map(|market_id| quant_execution_order::Column::MarketId.eq(market_id)),
+        )
+        .add_option(
+            query
+                .token_id
+                .clone()
+                .map(|token_id| quant_execution_order::Column::TokenId.eq(token_id)),
+        )
+        .add_option(
+            query
+                .from
+                .map(|from| quant_execution_order::Column::CreatedAt.gte(from)),
+        )
+        .add_option(
+            query
+                .to
+                .map(|to| quant_execution_order::Column::CreatedAt.lt(to)),
+        )
 }

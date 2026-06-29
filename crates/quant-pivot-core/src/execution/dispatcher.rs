@@ -98,19 +98,7 @@ impl ExecutionSubmitPort for CoreExecutionDispatcher {
             .claim_for_submission(intent_id, now)
             .await
         {
-            return Err(match error {
-                StorageError::Conflict(reason) => ExecutionError::NotSubmittable {
-                    intent_id: intent_id.to_string(),
-                    state: reason,
-                }
-                .into(),
-                StorageError::NotFound { id, .. } => ExecutionError::NotSubmittable {
-                    intent_id: id,
-                    state: "not_found".to_owned(),
-                }
-                .into(),
-                other => other.into(),
-            });
+            return Err(submission_storage_failure(intent_id, error));
         }
 
         // 3. Build the admission input from the *pre-claim* approval snapshot
@@ -475,5 +463,31 @@ fn build_ledger_write(
             fill: None,
             reconciliation: Some(reconciliation_row(result, execution_order, outcome)),
         },
+    }
+}
+
+fn submission_storage_failure(intent_id: &OrderIntentId, error: StorageError) -> QuantError {
+    let intent_id = intent_id.to_string();
+    let not_submittable = |state: String| {
+        ExecutionError::NotSubmittable {
+            intent_id: intent_id.clone(),
+            state,
+        }
+        .into()
+    };
+
+    match error {
+        StorageError::NotFound { id, .. } => not_submittable(id),
+        StorageError::IllegalTransition {
+            entity, from, to, ..
+        } => not_submittable(format!("illegal transition on {entity}: {from} -> {to}")),
+        StorageError::StateConflict { entity, detail, .. } => {
+            not_submittable(format!("{entity}: {detail}"))
+        }
+        StorageError::InvariantViolation { detail, .. } => not_submittable(detail),
+        StorageError::Duplicate { entity, key } => {
+            not_submittable(format!("{entity} already exists: {key}"))
+        }
+        other => other.into(),
     }
 }

@@ -14,6 +14,7 @@ pub mod reconciliation_payload;
 pub mod report_data_quality;
 pub mod report_payload;
 pub mod selection;
+pub mod training;
 
 pub use account::*;
 pub use attribution_payload::*;
@@ -31,3 +32,4 @@ pub use reconciliation_payload::*;
 pub use report_data_quality::*;
 pub use report_payload::*;
 pub use selection::*;
+pub use training::*;

@@ -18,6 +18,8 @@ mod redis;
 #[path = "common/repos.rs"]
 mod repos;
 
+#[path = "web/account.rs"]
+mod account;
 #[path = "web/auth.rs"]
 mod auth;
 #[path = "web/authz.rs"]

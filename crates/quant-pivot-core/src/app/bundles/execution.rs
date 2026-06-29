@@ -12,14 +12,15 @@ use quant_pivot_api::clob::ClobClient;
 use quant_pivot_models::domain::{DataQualityPort, ExecutionSubmitPort};
 use quant_pivot_repository::{
     postgres::{
-        PgCapitalAllocationRepository, PgExecutionOrderRepository, PgExecutionSubmissionRepository,
-        PgModelRegistryRepository, PgOrderIntentRepository, PgPositionRepository,
-        PgRecommendationReportRepository, PgRecommendationRepository, PgReconciliationRepository,
-        PgRuntimeConfigVersionRepository,
+        PgAttributionRepository, PgCapitalAllocationRepository, PgExecutionOrderRepository,
+        PgExecutionSubmissionRepository, PgMarketRepository, PgModelRegistryRepository,
+        PgOrderIntentRepository, PgPositionRepository, PgRecommendationReportRepository,
+        PgRecommendationRepository, PgReconciliationRepository, PgRuntimeConfigVersionRepository,
     },
     traits::{
-        CapitalAllocationRepository, ExecutionOrderRepository, ExecutionSubmissionRepository,
-        ModelRegistryRepository, OperationLogRepository, OrderIntentRepository, PositionRepository,
+        AttributionRepository, CapitalAllocationRepository, ExecutionOrderRepository,
+        ExecutionSubmissionRepository, MarketRepository, ModelRegistryRepository,
+        OperationLogRepository, OrderIntentRepository, PositionRepository,
         RecommendationReportRepository, RecommendationRepository, ReconciliationRepository,
         RuntimeConfigVersionRepository,
     },
@@ -28,12 +29,13 @@ use quant_pivot_repository::{
 use super::{AccountBundle, DataBundle, GovernanceBundle, InfraBundle, ResearchBundle};
 use crate::{
     execution::{
-        AdmissionInputBuilder, AdmissionInputBuilderDeps, ClobOrderClient,
-        ClobReconciliationReader, CoreExecutionDispatcher, CoreExitDispatcher,
-        DefaultAdmissionEngine, DispatchWake, EvidenceCollector, ExecutionBreaker,
-        ExecutionDispatcherDeps, ExitDispatcherDeps, ExitMonitorHealthHandle, ExitMonitorService,
-        ExitMonitorServiceDeps, ExitSignalEvaluator, PolymarketOrderClient, ReconciliationService,
-        ReconciliationServiceDeps, VenueEvidenceCollector, VenueReconciliationReader,
+        AdmissionInputBuilder, AdmissionInputBuilderDeps, AttributionService,
+        AttributionServiceDeps, ClobOrderClient, ClobReconciliationReader, CoreExecutionDispatcher,
+        CoreExitDispatcher, DefaultAdmissionEngine, DispatchWake, EvidenceCollector,
+        ExecutionBreaker, ExecutionDispatcherDeps, ExitDispatcherDeps, ExitMonitorHealthHandle,
+        ExitMonitorService, ExitMonitorServiceDeps, ExitSignalEvaluator, PolymarketOrderClient,
+        ReconciliationService, ReconciliationServiceDeps, VenueEvidenceCollector,
+        VenueReconciliationReader,
     },
     pipeline::feature_window_provider::FeatureWindowProvider,
     service::{
@@ -66,6 +68,8 @@ pub struct ExecutionBundle {
     pub reconciliation: Arc<ReconciliationService>,
     /// Exit-monitor engine (05.6): scans open lots and drives the exit ladder.
     pub exit_monitor: Arc<ExitMonitorService>,
+    /// Final WORM recommendation-attribution builder (05.7).
+    pub attribution: Arc<AttributionService>,
     /// Exit-monitor health hot read consumed by admission `#20`.
     pub exit_monitor_health: ExitMonitorHealthHandle,
     /// Approve→submit wake signal (shared by the intent service and the
@@ -172,6 +176,7 @@ impl ExecutionBundle {
             &breaker,
             exit_monitor_health.clone(),
         );
+        let attribution = build_attribution_service(infra);
 
         Self {
             order_client,
@@ -180,10 +185,29 @@ impl ExecutionBundle {
             submission,
             reconciliation,
             exit_monitor,
+            attribution,
             exit_monitor_health,
             dispatch_wake: DispatchWake::new(),
         }
     }
+}
+
+fn build_attribution_service(infra: &InfraBundle) -> Arc<AttributionService> {
+    let pg = infra.pg.connection();
+    Arc::new(AttributionService::new(AttributionServiceDeps {
+        attribution: Arc::new(PgAttributionRepository::new(pg.clone()))
+            as Arc<dyn AttributionRepository>,
+        intents: Arc::new(PgOrderIntentRepository::new(pg.clone()))
+            as Arc<dyn OrderIntentRepository>,
+        recommendations: Arc::new(PgRecommendationRepository::new(pg.clone()))
+            as Arc<dyn RecommendationRepository>,
+        execution_orders: Arc::new(PgExecutionOrderRepository::new(pg.clone()))
+            as Arc<dyn ExecutionOrderRepository>,
+        positions: Arc::new(PgPositionRepository::new(pg.clone())) as Arc<dyn PositionRepository>,
+        reconciliation: Arc::new(PgReconciliationRepository::new(pg.clone()))
+            as Arc<dyn ReconciliationRepository>,
+        attribution_events: Arc::clone(&infra.attribution_event_writer),
+    }))
 }
 
 /// Assemble the stateless admission input builder (real venue-health seam from
@@ -207,6 +231,7 @@ fn build_admission_builder(
             as Arc<dyn ExecutionOrderRepository>,
         capital: Arc::new(PgCapitalAllocationRepository::new(pg.clone()))
             as Arc<dyn CapitalAllocationRepository>,
+        markets: Arc::new(PgMarketRepository::new(pg.clone())) as Arc<dyn MarketRepository>,
         config_versions: Arc::new(PgRuntimeConfigVersionRepository::new(pg.clone()))
             as Arc<dyn RuntimeConfigVersionRepository>,
         account_factory: Arc::clone(&deps.account.provider_factory),

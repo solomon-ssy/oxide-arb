@@ -92,9 +92,12 @@ crate::pg_enum! {
         Analytics => "analytics",
         Audit => "audit",
         QuantReport => "quant_report",
+        AccountSnapshot => "account_snapshot",
         OrderIntent => "order_intent",
         ExecutionOrder => "execution_order",
         Position => "position",
+        RecommendationAttribution => "recommendation_attribution",
+        FactorDefinition => "factor_definition",
         OperationLog => "operation_log",
         User => "user",
         Role => "role",
@@ -128,6 +131,7 @@ pub enum Operation {
     Activate,
     Enqueue,
     Revoke,
+    Retire,
     Emergency,
 }
 
@@ -154,6 +158,7 @@ impl Operation {
             Self::Activate => "activate",
             Self::Enqueue => "enqueue",
             Self::Revoke => "revoke",
+            Self::Retire => "retire",
             Self::Emergency => "emergency",
         }
     }
@@ -233,6 +238,7 @@ pub static RESOURCE_OPERATIONS: &[(ResourceType, &[Operation])] = &[
         ResourceType::QuantReport,
         &[Operation::Read, Operation::Enqueue, Operation::Revoke],
     ),
+    (ResourceType::AccountSnapshot, &[Operation::Read]),
     (
         ResourceType::OrderIntent,
         &[
@@ -246,6 +252,7 @@ pub static RESOURCE_OPERATIONS: &[(ResourceType, &[Operation])] = &[
     ),
     (ResourceType::ExecutionOrder, &[Operation::Read]),
     (ResourceType::Position, &[Operation::Read]),
+    (ResourceType::RecommendationAttribution, &[Operation::Read]),
     (
         ResourceType::Publication,
         &[
@@ -254,8 +261,13 @@ pub static RESOURCE_OPERATIONS: &[(ResourceType, &[Operation])] = &[
             Operation::Shadow,
             Operation::Publish,
             Operation::Rollback,
+            Operation::Retire,
             Operation::Emergency,
         ],
+    ),
+    (
+        ResourceType::FactorDefinition,
+        &[Operation::Read, Operation::Publish, Operation::Retire],
     ),
     (
         ResourceType::Materialization,

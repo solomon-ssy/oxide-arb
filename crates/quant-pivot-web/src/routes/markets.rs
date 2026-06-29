@@ -7,21 +7,25 @@
 use actix_web::{http::Method, web};
 use quant_pivot_models::{
     domain::{
-        MarketBookSideView, MarketBookSummaryView, MarketBookView, MarketDataPort, MarketInfo,
-        MarketPageQuery, MarketView, Paginated,
+        BlockMarketRequest, MarketBookSideView, MarketBookSummaryView, MarketBookView,
+        MarketDataPort, MarketInfo, MarketPageQuery, MarketView, Paginated, UnblockMarketRequest,
     },
     enums::{
+        market::MarketStatus,
         operation_log::OperationCategory,
         rbac::{Operation, ResourceType},
     },
+    hashing::CanonicalDigest,
     types::{MarketId, TokenId},
 };
+use serde::Serialize;
 use std::collections::HashSet;
 
 use crate::{
     audit::OperationCtx,
     auth::casbin::Rule,
     error::WebError,
+    extractors::ValidatedJson,
     response::WebResponse,
     routes::registry::{RouteSpec, spec},
     state::AppState,
@@ -53,6 +57,18 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
             "/markets/{market_id}/unsubscribe",
             Rule::ResourceOp(ResourceType::Market, Operation::Update),
             unsubscribe,
+        ),
+        spec(
+            Method::POST,
+            "/markets/{market_id}/block",
+            Rule::ActingRoleGoverned(ResourceType::Market, Operation::Update),
+            block,
+        ),
+        spec(
+            Method::POST,
+            "/markets/{market_id}/unblock",
+            Rule::ActingRoleGoverned(ResourceType::Market, Operation::Update),
+            unblock,
         ),
         spec(
             Method::GET,
@@ -189,4 +205,108 @@ pub async fn unsubscribe(
         ])
         .await?;
     Ok(WebResponse::ok(()))
+}
+
+/// `POST /api/markets/{market_id}/block` — operator-governed manual block.
+pub async fn block(
+    state: web::Data<AppState>,
+    market_id: web::Path<MarketId>,
+    op_ctx: OperationCtx,
+    body: ValidatedJson<BlockMarketRequest>,
+) -> Result<WebResponse<MarketView>, WebError> {
+    let market_id = market_id.into_inner();
+    let request = body.into_inner();
+    op_ctx.set_action(OperationCategory::Governance, "market.block");
+    op_ctx.set_resource(ResourceType::Market, market_id.to_string());
+    op_ctx.set_detail(serde_json::json!({ "reason": request.reason }));
+    let before = state
+        .markets
+        .find_by_id(&market_id)
+        .await?
+        .ok_or_else(|| WebError::NotFound(format!("market not found: {market_id}")))?;
+    state
+        .markets
+        .update_status(
+            &market_id,
+            MarketStatus::ManuallyBlocked.as_str(),
+            before.outcome.as_deref(),
+        )
+        .await?;
+    let updated =
+        state.markets.find_by_id(&market_id).await?.ok_or_else(|| {
+            WebError::NotFound(format!("market not found after block: {market_id}"))
+        })?;
+    op_ctx.set_state_hashes(
+        Some(canonical_state_hash(before.as_ref())?),
+        Some(canonical_state_hash(updated.as_ref())?),
+    );
+    let market = (*updated).clone();
+    let subscribed_union = state
+        .market_data
+        .subscribed_tokens(&[market.yes_token_id.clone(), market.no_token_id.clone()]);
+    Ok(WebResponse::ok(project_market(
+        state.market_data.as_ref(),
+        &subscribed_union,
+        market,
+    )))
+}
+
+/// `POST /api/markets/{market_id}/unblock` — restore to an explicit safe state.
+pub async fn unblock(
+    state: web::Data<AppState>,
+    market_id: web::Path<MarketId>,
+    op_ctx: OperationCtx,
+    body: ValidatedJson<UnblockMarketRequest>,
+) -> Result<WebResponse<MarketView>, WebError> {
+    let market_id = market_id.into_inner();
+    let request = body.into_inner();
+    if !matches!(
+        request.restore_status,
+        MarketStatus::Active | MarketStatus::Paused | MarketStatus::Filtered
+    ) {
+        return Err(WebError::BadRequest(
+            "restore_status must be active, paused, or filtered".to_owned(),
+        ));
+    }
+    op_ctx.set_action(OperationCategory::Governance, "market.unblock");
+    op_ctx.set_resource(ResourceType::Market, market_id.to_string());
+    op_ctx.set_detail(serde_json::json!({
+        "reason": request.reason,
+        "restore_status": request.restore_status.as_str(),
+    }));
+    let before = state
+        .markets
+        .find_by_id(&market_id)
+        .await?
+        .ok_or_else(|| WebError::NotFound(format!("market not found: {market_id}")))?;
+    state
+        .markets
+        .update_status(
+            &market_id,
+            request.restore_status.as_str(),
+            before.outcome.as_deref(),
+        )
+        .await?;
+    let updated = state.markets.find_by_id(&market_id).await?.ok_or_else(|| {
+        WebError::NotFound(format!("market not found after unblock: {market_id}"))
+    })?;
+    op_ctx.set_state_hashes(
+        Some(canonical_state_hash(before.as_ref())?),
+        Some(canonical_state_hash(updated.as_ref())?),
+    );
+    let market = (*updated).clone();
+    let subscribed_union = state
+        .market_data
+        .subscribed_tokens(&[market.yes_token_id.clone(), market.no_token_id.clone()]);
+    Ok(WebResponse::ok(project_market(
+        state.market_data.as_ref(),
+        &subscribed_union,
+        market,
+    )))
+}
+
+fn canonical_state_hash<T: Serialize>(state: &T) -> Result<String, WebError> {
+    CanonicalDigest::content_hash_json(state)
+        .map(|hash| hash.as_str().to_owned())
+        .map_err(|error| WebError::Internal(format!("canonical state hash failed: {error}")))
 }

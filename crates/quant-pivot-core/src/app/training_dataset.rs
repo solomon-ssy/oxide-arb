@@ -13,8 +13,8 @@ use quant_pivot_models::{
     types::{RuntimeConfigVersionId, TrainingDatasetId},
 };
 use quant_pivot_repository::traits::{
-    MarketRepository, QuantFactReadRepository, RuntimeConfigVersionRepository,
-    TrainingDatasetRepository,
+    AttributionRepository, FeatureRepository, MarketRepository, QuantFactReadRepository,
+    RecommendationRepository, RuntimeConfigVersionRepository, TrainingDatasetRepository,
 };
 use quant_pivot_research::{
     artifact::ArtifactStore,
@@ -35,6 +35,9 @@ pub struct CoreTrainingDatasetPort {
     market_repo: Arc<dyn MarketRepository>,
     artifact_store: Arc<dyn ArtifactStore>,
     dataset_repo: Arc<dyn TrainingDatasetRepository>,
+    attribution_repo: Arc<dyn AttributionRepository>,
+    recommendation_repo: Arc<dyn RecommendationRepository>,
+    feature_repo: Arc<dyn FeatureRepository>,
     runtime_config: Arc<dyn RuntimeConfigVersionRepository>,
 }
 
@@ -50,6 +53,9 @@ impl CoreTrainingDatasetPort {
             market_repo: Arc::clone(&research.market_repo),
             artifact_store: Arc::clone(&research.artifact_store),
             dataset_repo: Arc::clone(&research.training_dataset_repo),
+            attribution_repo: Arc::clone(&research.attribution_repo),
+            recommendation_repo: Arc::clone(&research.recommendation_repo),
+            feature_repo: Arc::clone(&research.feature_repo),
             runtime_config,
         }
     }
@@ -73,6 +79,9 @@ impl CoreTrainingDatasetPort {
                 market_repo: Arc::clone(&self.market_repo),
                 artifact_store: Arc::clone(&self.artifact_store),
                 dataset_repo: Arc::clone(&self.dataset_repo),
+                attribution_repo: Arc::clone(&self.attribution_repo),
+                recommendation_repo: Arc::clone(&self.recommendation_repo),
+                feature_repo: Arc::clone(&self.feature_repo),
             },
             TrainingDatasetBuildConfig {
                 features: runtime.features,
@@ -94,6 +103,7 @@ impl CoreTrainingDatasetPort {
             horizons_secs: body.horizons_secs.clone(),
             source_delay_secs: body.source_delay_secs,
             feature_schema_version: body.feature_schema_version,
+            sample_sources: body.sample_sources.clone(),
             training_dataset_id: None,
         }
     }
@@ -108,6 +118,7 @@ impl CoreTrainingDatasetPort {
             horizons_secs: body.horizons_secs.clone(),
             source_delay_secs: body.source_delay_secs,
             feature_schema_version: body.feature_schema_version,
+            sample_sources: body.sample_sources.clone(),
             training_dataset_id: body.training_dataset_id.clone(),
         }
     }
@@ -131,13 +142,14 @@ impl TrainingDatasetPort for CoreTrainingDatasetPort {
     ) -> QuantResult<TrainingDatasetPlanView> {
         let service = self.service_for(&request.runtime_config_version_id).await?;
         let plan = service.plan(Self::plan_request(&request)).await?;
+        let planned_samples = service.count_planned_samples(&plan).await?;
         Ok(TrainingDatasetPlanView {
             training_dataset_id: plan.training_dataset_id,
             model_spec_id: request.model_spec_id,
             runtime_config_version_id: request.runtime_config_version_id,
             window_start: request.window_start,
             window_end: request.window_end,
-            planned_samples: plan.samples.len() as u64,
+            planned_samples,
         })
     }
 

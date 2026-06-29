@@ -1,7 +1,7 @@
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    domain::{PositionExit, PositionFill, PositionInfo},
-    types::{MarketId, OrderIntentId, TokenId},
+    domain::{Paginated, PositionExit, PositionFill, PositionInfo, PositionListQuery},
+    types::{MarketId, OrderIntentId, PositionId, TokenId},
 };
 
 /// Current-position ledger persistence port (one lot per filled entry intent).
@@ -23,6 +23,22 @@ pub trait PositionRepository: Send + Sync {
         &self,
         order_intent_id: &OrderIntentId,
     ) -> Result<Option<PositionInfo>, StorageError>;
+
+    async fn find_by_id(
+        &self,
+        position_id: &PositionId,
+    ) -> Result<Option<PositionInfo>, StorageError> {
+        let _ = position_id;
+        Ok(None)
+    }
+
+    async fn page(
+        &self,
+        query: PositionListQuery,
+    ) -> Result<Paginated<PositionInfo>, StorageError> {
+        let query = query.normalized();
+        Ok(Paginated::from_request(Vec::new(), 0, &query.page))
+    }
 
     /// All open (`Open`/`Closing`) lots — the exit monitor's scan source.
     async fn find_open_lots(&self) -> Result<Vec<PositionInfo>, StorageError>;

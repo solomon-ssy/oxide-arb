@@ -8,6 +8,7 @@ use quant_pivot_core::{
         RuntimeModeGate,
     },
     governance::{KillSwitchHandle, RuntimeModeHandle},
+    observability::metrics_hub::MetricsHub,
     runtime_config::RuntimeConfigStore,
 };
 use quant_pivot_models::{
@@ -50,5 +51,6 @@ pub fn build_order_intent_service(
         config,
         events,
         dispatch_wake: DispatchWake::new(),
+        metrics: Arc::new(MetricsHub::new()),
     }))
 }

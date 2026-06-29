@@ -1,31 +1,14 @@
 //! Role-based access-control (RBAC) domain errors.
 //!
-//! These cover the user / role / menu / permission management surface and the
-//! Casbin policy reverse-lookup path (`ResourceType` / `Operation` parsing).
+//! Persistence failures (`NotFound`, `Duplicate`, …) surface as
+//! [`crate::storage::StorageError`] via repository ports. This enum covers
+//! Casbin policy parsing and structural assignment validation only.
 
 use thiserror::Error;
 
-/// Errors raised by RBAC management and permission resolution.
+/// Errors raised by RBAC permission resolution and assignment validation.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum RbacError {
-    /// A referenced RBAC entity does not exist.
-    #[error("{entity} not found: {id}")]
-    NotFound {
-        /// Logical entity name (e.g. `user`, `role`, `menu`).
-        entity: &'static str,
-        /// The identifier or natural key that was looked up.
-        id: String,
-    },
-
-    /// A unique constraint would be violated (e.g. duplicate username/role code).
-    #[error("{entity} already exists: {key}")]
-    Duplicate {
-        /// Logical entity name.
-        entity: &'static str,
-        /// The conflicting natural key.
-        key: String,
-    },
-
     /// A Casbin policy string could not be mapped back to a known
     /// `ResourceType` / `Operation` pair.
     #[error("unknown permission: {resource}:{operation}")]

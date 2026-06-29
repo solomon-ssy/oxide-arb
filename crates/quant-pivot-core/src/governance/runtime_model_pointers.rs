@@ -51,6 +51,38 @@ pub async fn sync_production_active(
     persist_and_apply(deps, config, reason, activated_by).await
 }
 
+/// Clear runtime-config model pointers that reference a retired version.
+pub async fn sync_after_model_retire(
+    deps: &RuntimeModelPointerSync,
+    retired: &ModelVersionId,
+    reason: &str,
+    activated_by: &str,
+) -> QuantResult<()> {
+    let current = deps.runtime_config_apply.current();
+    let retired_ref = model_version_ref(retired);
+    let active_matches = current
+        .model
+        .active_model_version_id
+        .as_ref()
+        .is_some_and(|reference| reference.id == retired_ref.id);
+    let shadow_matches = current
+        .model
+        .shadow_model_version_id
+        .as_ref()
+        .is_some_and(|reference| reference.id == retired_ref.id);
+    if !active_matches && !shadow_matches {
+        return Ok(());
+    }
+    let mut config = (*current).clone();
+    if active_matches {
+        config.model.active_model_version_id = None;
+    }
+    if shadow_matches {
+        config.model.shadow_model_version_id = None;
+    }
+    persist_and_apply(deps, config, reason, activated_by).await
+}
+
 /// Arm a candidate as the shadow model pointer and promote it to `Shadow` status.
 pub async fn sync_shadow_candidate(
     deps: &RuntimeModelPointerSync,

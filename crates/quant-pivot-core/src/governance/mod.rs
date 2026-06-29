@@ -1,5 +1,6 @@
 //! Runtime mode handle and quant governance primitives.
 
+pub mod factor_governance;
 pub mod kill_switch;
 pub mod mode_preflight;
 pub mod mode_transition;
@@ -12,6 +13,7 @@ pub mod runtime_model_pointers;
 pub mod system_status;
 pub mod weight_overlay;
 
+pub use factor_governance::{FactorGovernanceDeps, FactorGovernanceService};
 pub use kill_switch::{KillSwitchControl, KillSwitchHandle};
 pub use mode_preflight::{DefaultModePreflight, ModePreflight, ModePreflightDeps};
 pub use mode_transition::{DefaultModeTransitionGate, ModeTransitionGate};

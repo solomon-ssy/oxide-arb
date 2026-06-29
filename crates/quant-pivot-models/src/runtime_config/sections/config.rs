@@ -3,13 +3,13 @@
 use crate::{
     enums::{common::MarketCategory, factor::FactorFamily, quant::QuantRuntimeMode},
     runtime_config::wire::{
-        CapitalPolicy, DecimalString, DomainFeaturePolicy, EntryOrderPolicy,
+        AttributionPolicy, CapitalPolicy, DecimalString, DomainFeaturePolicy, EntryOrderPolicy,
         ExecutionAdmissionPolicy, ExecutionBreakerConfig, ExitMonitorPolicy, ExitOrderPolicy,
         FactorWeights, FeatureFamily, FeatureNameRef, FeatureStalenessPolicy, KillSwitchPolicy,
-        MarketIdList, MissingFactorPolicy, ModelVersionRef, NotificationPolicies,
-        ReconciliationPolicy, ReportDeliveryPolicy, ScheduleCadence, SizingModelConfig,
+        MissingFactorPolicy, ModelVersionRef, NotificationPolicies, ReconciliationPolicy,
+        ReportDeliveryPolicy, ScheduleCadence, SizingModelConfig,
     },
-    types::SchemaVersion,
+    types::{SchemaVersion, Usd},
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -20,10 +20,6 @@ use serde::{Deserialize, Serialize};
 pub struct SelectionConfig {
     /// Category slugs eligible for quant reports.
     pub enabled_categories: Vec<MarketCategory>,
-    /// Explicitly excluded Polymarket condition ids.
-    pub excluded_market_ids: MarketIdList,
-    /// Explicitly included Polymarket condition ids.
-    pub included_market_ids: MarketIdList,
     /// Minimum displayed liquidity in USD.
     pub min_liquidity_usd: DecimalString,
     /// Minimum 24h volume in USD.
@@ -44,8 +40,6 @@ impl Default for SelectionConfig {
     fn default() -> Self {
         Self {
             enabled_categories: Vec::new(),
-            excluded_market_ids: MarketIdList::default(),
-            included_market_ids: MarketIdList::default(),
             min_liquidity_usd: DecimalString::new("0"),
             min_volume_24h_usd: DecimalString::new("0"),
             max_spread_bps: 2_500,
@@ -285,12 +279,12 @@ impl Default for TrainingConfig {
 
 impl TrainingConfig {
     /// Resolve [`TrainingConfig::min_exit_depth_usd`] into a typed [`Usd`] value.
-    pub fn min_exit_depth_usd_typed(&self) -> Result<crate::types::Usd, String> {
+    pub fn min_exit_depth_usd_typed(&self) -> Result<Usd, String> {
         use rust_decimal::Decimal;
         self.min_exit_depth_usd
             .value
             .parse::<Decimal>()
-            .map(crate::types::Usd::new)
+            .map(Usd::new)
             .map_err(|error| format!("training.min_exit_depth_usd is not a valid decimal: {error}"))
     }
 }
@@ -465,6 +459,8 @@ pub struct ExecutionConfig {
     pub capital: CapitalPolicy,
     /// Reconciliation policy document.
     pub reconciliation: ReconciliationPolicy,
+    /// Recommendation attribution worker policy.
+    pub attribution: AttributionPolicy,
     /// Execution-breaker thresholds (venue health + auto kill-switch trip).
     pub breaker: ExecutionBreakerConfig,
 }
@@ -482,6 +478,7 @@ impl Default for ExecutionConfig {
             kill_switch: KillSwitchPolicy::default(),
             capital: CapitalPolicy::default(),
             reconciliation: ReconciliationPolicy::default(),
+            attribution: AttributionPolicy::default(),
             breaker: ExecutionBreakerConfig::default(),
         }
     }

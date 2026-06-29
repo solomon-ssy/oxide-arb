@@ -3,7 +3,8 @@
 use crate::{
     clickhouse::{ChDecimal64, ChPrice, ChProbability, ChShares, ChUsd},
     types::{
-        MarketId, ModelRunId, OrderIntentId, RecommendationId, RecommendationReportId, TokenId,
+        CapitalAllocationId, MarketId, ModelRunId, OrderIntentId, PositionId, RecommendationId,
+        RecommendationReportId, TokenId,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -90,5 +91,53 @@ pub struct QuantExecutionEventRow {
     pub shares: ChShares,
     pub cost_usd: ChUsd,
     pub venue_order_id: String,
+    pub ingestion_time: i64,
+}
+
+/// Capital allocation ledger fact.
+#[derive(Debug, Clone, clickhouse::Row, Serialize, Deserialize)]
+pub struct QuantCapitalAllocationEventRow {
+    pub event_time: i64,
+    pub capital_allocation_id: CapitalAllocationId,
+    pub order_intent_id: OrderIntentId,
+    pub recommendation_id: RecommendationId,
+    pub event_kind: String,
+    pub state: String,
+    pub allocated_usd: ChUsd,
+    pub locked_usd: ChUsd,
+    pub spent_usd: ChUsd,
+    pub released_usd: ChUsd,
+    pub ingestion_time: i64,
+}
+
+/// Position lot ledger fact.
+#[derive(Debug, Clone, clickhouse::Row, Serialize, Deserialize)]
+pub struct QuantPositionEventRow {
+    pub event_time: i64,
+    pub position_id: PositionId,
+    pub order_intent_id: OrderIntentId,
+    pub market_id: MarketId,
+    pub token_id: TokenId,
+    pub event_kind: String,
+    pub state: String,
+    pub side: String,
+    pub shares: ChShares,
+    pub avg_price: ChPrice,
+    pub cost_usd: ChUsd,
+    pub realized_pnl_usd: ChUsd,
+    pub ingestion_time: i64,
+}
+
+/// Final recommendation attribution fact.
+#[derive(Debug, Clone, clickhouse::Row, Serialize, Deserialize)]
+pub struct QuantRecommendationAttributionEventRow {
+    pub event_time: i64,
+    pub recommendation_id: RecommendationId,
+    pub outcome: String,
+    pub realized_pnl_usd: ChUsd,
+    /// `None` when PG stores `NULL` (filled-path MAE deferred to 06.6 book replay).
+    pub max_adverse_excursion_bps: Option<ChDecimal64>,
+    pub max_favorable_excursion_bps: ChDecimal64,
+    pub label_available_at: i64,
     pub ingestion_time: i64,
 }

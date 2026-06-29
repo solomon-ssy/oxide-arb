@@ -17,30 +17,38 @@ use actix_web::{
     test, web,
 };
 use async_trait::async_trait;
-use quant_pivot_core::report::AdHocReportRequest;
+use quant_pivot_core::{app::execution_read::CoreExecutionReadPort, report::AdHocReportRequest};
 use quant_pivot_error::{QuantError, QuantResult, auth::AuthError, control::ControlError};
 use quant_pivot_models::{
     config::{CacheConfig, DeployConfig, JwtConfig, RedisConfig},
     domain::{
         BacktestPort, BacktestReportInfo, BacktestReportView, BookSnapshot,
         BuildTrainingDatasetRequest, CatalogState, CatalogStatusPort, CoreEventPublisher,
-        DataQualityPort, DataQualitySnapshot, ExecutionOrderInfo, ExecutionSubmitPort,
-        GovernanceActor, HealthReport, KillSwitchPort, KillSwitchView, MarketDataPort,
-        MetricsScrapePort, ModelComparisonReportInfo, ModelGovernancePort, ModelTrainingPort,
-        ModelVersionInfo, PromoteDatasetRequest, PublishModelCommand, QuantModeTransitionReport,
-        RollbackModelCommand, RunBacktestRequest, RuntimeConfigPort, RuntimeControlPort,
-        SetKillSwitchCommand, SystemStatus, TrainModelRequest, TrainedModelView,
-        TrainingDatasetInfo, TrainingDatasetPlanView, TrainingDatasetPort, TrainingDatasetView,
+        DataQualityPort, DataQualitySnapshot, ExecutionOrderInfo, ExecutionReadPort,
+        ExecutionSubmitPort, FactorGovernancePort, GovernanceActor, HealthReport, KillSwitchPort,
+        KillSwitchView, MarketDataPort, MetricsScrapePort, ModelComparisonReportInfo,
+        ModelGovernancePort, ModelTrainingPort, ModelVersionInfo, PromoteDatasetRequest,
+        PublishFactorCommand, PublishModelCommand, QuantModeTransitionReport, RetireFactorCommand,
+        RetireModelCommand, RollbackModelCommand, RunBacktestRequest, RuntimeConfigPort,
+        RuntimeControlPort, SetKillSwitchCommand, SystemStatus, TrainModelRequest,
+        TrainedModelView, TrainingDatasetInfo, TrainingDatasetPlanView, TrainingDatasetPort,
+        TrainingDatasetView,
     },
     enums::{execution::KillSwitchState, quant::QuantRuntimeMode},
     runtime_config::RuntimeConfig,
     types::{
-        BacktestReportId, ModelComparisonReportId, ModelVersionId, OrderIntentId, TokenId,
-        TrainingDatasetId,
+        BacktestReportId, FactorDefinitionId, ModelComparisonReportId, ModelVersionId,
+        OrderIntentId, TokenId, TrainingDatasetId,
     },
 };
+use quant_pivot_repository::{
+    postgres::{PgAttributionRepository, PgExecutionOrderRepository, PgPositionRepository},
+    traits::{AttributionRepository, ExecutionOrderRepository, PositionRepository},
+};
 use quant_pivot_storage::cache::connect_pool;
-use quant_pivot_test_support::report_pipeline_harness::FixtureReportSeedContext;
+use quant_pivot_test_support::{
+    account::core_account_read_port, report_pipeline_harness::FixtureReportSeedContext,
+};
 use quant_pivot_web::{
     AppState,
     audit::OperationLogBuffer,
@@ -168,8 +176,20 @@ impl TestEnv {
             model_training: Arc::new(MockModelTrainingPort),
             backtests: Arc::new(MockBacktestPort),
             model_governance: Arc::new(MockModelGovernancePort),
+            factor_governance: Arc::new(MockFactorGovernancePort),
             quant_reports: core_report.port.clone(),
+            account_read: core_account_read_port(
+                &db,
+                Arc::clone(&runtime_config_apply) as Arc<dyn RuntimeConfigPort>,
+            ),
             order_intents: order_intents as Arc<dyn OrderIntentPort>,
+            execution_read: Arc::new(CoreExecutionReadPort::new(
+                Arc::new(PgExecutionOrderRepository::new(db.clone()))
+                    as Arc<dyn ExecutionOrderRepository>,
+                Arc::new(PgPositionRepository::new(db.clone())) as Arc<dyn PositionRepository>,
+                Arc::new(PgAttributionRepository::new(db.clone()))
+                    as Arc<dyn AttributionRepository>,
+            )) as Arc<dyn ExecutionReadPort>,
             execution_submit: Arc::new(MockExecutionSubmit) as Arc<dyn ExecutionSubmitPort>,
         };
 
@@ -525,12 +545,49 @@ impl ModelGovernancePort for MockModelGovernancePort {
         Err(QuantError::NotImplemented("model rollback".into()))
     }
 
+    async fn retire(
+        &self,
+        _command: RetireModelCommand,
+        _actor: GovernanceActor,
+    ) -> QuantResult<ModelVersionInfo> {
+        Err(QuantError::NotImplemented("model retire".into()))
+    }
+
     async fn promote_dataset_ready(
         &self,
         _request: PromoteDatasetRequest,
         _actor: GovernanceActor,
     ) -> QuantResult<TrainingDatasetInfo> {
         Err(QuantError::NotImplemented("dataset promote".into()))
+    }
+}
+
+/// No-op factor-governance port for web integration tests.
+pub struct MockFactorGovernancePort;
+
+#[async_trait]
+impl FactorGovernancePort for MockFactorGovernancePort {
+    async fn find_definition(
+        &self,
+        _factor_definition_id: &FactorDefinitionId,
+    ) -> QuantResult<Option<quant_pivot_models::domain::FactorDefinitionInfo>> {
+        Ok(None)
+    }
+
+    async fn publish(
+        &self,
+        _command: PublishFactorCommand,
+        _actor: GovernanceActor,
+    ) -> QuantResult<quant_pivot_models::domain::FactorDefinitionInfo> {
+        Err(QuantError::NotImplemented("factor publish".into()))
+    }
+
+    async fn retire(
+        &self,
+        _command: RetireFactorCommand,
+        _actor: GovernanceActor,
+    ) -> QuantResult<quant_pivot_models::domain::FactorDefinitionInfo> {
+        Err(QuantError::NotImplemented("factor retire".into()))
     }
 }
 

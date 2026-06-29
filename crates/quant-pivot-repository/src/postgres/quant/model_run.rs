@@ -1,8 +1,8 @@
 //! Postgres-backed model-run repository.
 
-use crate::traits::ModelRunRepository;
+use crate::{postgres::error, traits::ModelRunRepository};
 use chrono::{DateTime, Utc};
-use quant_pivot_error::storage::StorageError;
+use quant_pivot_error::storage::{StorageError, entity};
 use quant_pivot_models::{
     domain::{ModelRunInfo, NewModelRun},
     entities::quant_model_run,
@@ -36,15 +36,17 @@ impl PgModelRunRepository {
             .await
             .map_err(StorageError::from)?
         else {
-            return Err(StorageError::Conflict(format!(
-                "model run not found: {model_run_id}"
-            )));
+            return Err(error::not_found(entity::QUANT_MODEL_RUN, model_run_id));
         };
         if row.status != ModelRunStatus::Running {
-            return Err(StorageError::Conflict(format!(
-                "cannot finalize model run {model_run_id} from non-running status {}",
-                row.status.as_str()
-            )));
+            return Err(error::state_conflict(
+                entity::QUANT_MODEL_RUN,
+                Some(model_run_id),
+                format!(
+                    "cannot finalize from non-running status {}",
+                    row.status.as_str()
+                ),
+            ));
         }
         Ok(row)
     }

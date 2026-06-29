@@ -4,7 +4,7 @@
 //! to drive the matching deny/defer outcome. Checks are pure, so the engine is
 //! exercised entirely in-memory with no DB / venue.
 
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, TimeZone, Utc};
@@ -24,19 +24,20 @@ use quant_pivot_error::{QuantError, account::AccountError, storage::StorageError
 use quant_pivot_models::{
     domain::{
         AppendReconciliationEvidence, BookLevel, BookSnapshot, CapitalAllocationInfo,
-        DataQualityPort, DataQualitySnapshot, ExecutionOrderInfo, ExecutionOrderPatch,
-        ModelSpecInfo, ModelVersionInfo, NewExecutionOrder, NewModelSpec, NewModelVersion,
-        NewOperationLog, NewReconciliation, NewReportTransaction, NewRuntimeConfigActivation,
-        NewRuntimeConfigVersion, OrderIntentInfo, Paginated, QuantReportListQuery,
-        RecommendationInfo, RecommendationReportInfo, ReconciliationInfo, ReconciliationPatch,
-        RuntimeConfigActivationInfo, RuntimeConfigVersionInfo,
+        DataQualityPort, DataQualitySnapshot, ExecutionOrderInfo, ExecutionOrderPatch, MarketInfo,
+        MarketPageQuery, ModelSpecInfo, ModelVersionInfo, NewExecutionOrder, NewModelSpec,
+        NewModelVersion, NewOperationLog, NewReconciliation, NewReportTransaction,
+        NewRuntimeConfigActivation, NewRuntimeConfigVersion, OrderIntentInfo, Paginated,
+        QuantReportListQuery, RecommendationInfo, RecommendationReportInfo, ReconciliationInfo,
+        ReconciliationPatch, RuntimeConfigActivationInfo, RuntimeConfigVersionInfo, UpsertMarket,
     },
     enums::{
-        common::{OrderType, Side},
+        common::{MarketCategory, OrderType, Side, TickSize},
         execution::{
             AdmissionCheckId, AdmissionOutcome, CapitalAllocationState, ExitState, KillSwitchState,
             OrderIntentKind,
         },
+        market::MarketStatus,
         quant::{
             AccountSource, ApprovalStatus, EntryTriggerKind, OrderIntentStatus, OutcomeSide,
             QuantRuntimeMode, RecommendationReportStatus, ReportKind,
@@ -45,16 +46,16 @@ use quant_pivot_models::{
     },
     runtime_config::RuntimeConfig,
     types::{
-        Bps, CapitalAllocationId, ContentHash, EntryOrderSpec, ExecutedPartialExitNodes,
-        ExecutionOrderId, ExitPolicySpec, ModelSpecId, ModelVersionId, OrderIntentId, Price,
-        RecommendationId, RecommendationReportId, ReconciliationId, RuntimeConfigVersionId,
-        SchemaVersion, Shares, Usd,
+        Bps, CapitalAllocationId, ContentHash, EntryOrderSpec, EventId, ExecutedPartialExitNodes,
+        ExecutionOrderId, ExitPolicySpec, MarketId, ModelSpecId, ModelVersionId, OrderIntentId,
+        Price, RecommendationId, RecommendationReportId, ReconciliationId, RuntimeConfigVersionId,
+        SchemaVersion, Shares, TokenId, Usd,
     },
 };
 use quant_pivot_repository::traits::{
-    CapitalAllocationRepository, ExecutionOrderRepository, ModelRegistryRepository,
-    RecommendationReportRepository, RecommendationRepository, ReconciliationRepository,
-    RuntimeConfigVersionRepository,
+    CapitalAllocationRepository, ExecutionOrderRepository, MarketRepository,
+    ModelRegistryRepository, RecommendationReportRepository, RecommendationRepository,
+    ReconciliationRepository, RuntimeConfigVersionRepository,
 };
 use quant_pivot_research::portfolio::AccountSnapshot;
 use quant_pivot_test_support::report_fixtures;
@@ -586,6 +587,7 @@ async fn admission_fail_closed_when_account_unavailable() {
         reconciliation: Arc::new(StubReconciliation),
         execution_orders: Arc::new(StubExecutionOrders),
         capital: Arc::new(StubCapital),
+        markets: Arc::new(StubMarkets),
         config_versions: Arc::new(StubConfigVersions),
         account_factory: Arc::new(AccountProviderFactory::new(
             None,
@@ -661,6 +663,20 @@ impl RecommendationRepository for StubRecommendations {
     ) -> Result<RecommendationInfo, StorageError> {
         unimplemented!()
     }
+
+    async fn find_expired_attribution_candidates(
+        &self,
+        _limit: u64,
+    ) -> Result<Vec<RecommendationInfo>, StorageError> {
+        unimplemented!()
+    }
+
+    async fn recommendation_blocks_final_attribution(
+        &self,
+        _recommendation_id: &RecommendationId,
+    ) -> Result<bool, StorageError> {
+        unimplemented!()
+    }
 }
 
 struct StubReports(RecommendationReportInfo);
@@ -727,6 +743,84 @@ impl RecommendationReportRepository for StubReports {
         _operation_log: NewOperationLog,
     ) -> Result<RecommendationReportInfo, StorageError> {
         unimplemented!()
+    }
+}
+
+struct StubMarkets;
+
+#[async_trait]
+impl MarketRepository for StubMarkets {
+    async fn find_by_id(&self, id: &MarketId) -> Result<Option<Arc<MarketInfo>>, StorageError> {
+        Ok(Some(Arc::new(active_market(id.clone()))))
+    }
+
+    async fn find_by_ids(&self, ids: &[MarketId]) -> Result<Vec<Arc<MarketInfo>>, StorageError> {
+        Ok(ids
+            .iter()
+            .cloned()
+            .map(active_market)
+            .map(Arc::new)
+            .collect())
+    }
+
+    async fn page(&self, _query: MarketPageQuery) -> Result<Paginated<MarketInfo>, StorageError> {
+        unimplemented!()
+    }
+
+    async fn find_active(&self) -> Result<Arc<[MarketInfo]>, StorageError> {
+        unimplemented!()
+    }
+
+    async fn find_by_event(&self, _event_id: &str) -> Result<Vec<Arc<MarketInfo>>, StorageError> {
+        unimplemented!()
+    }
+
+    async fn find_existing_ids(&self, _ids: &[MarketId]) -> Result<HashSet<String>, StorageError> {
+        unimplemented!()
+    }
+
+    async fn upsert(&self, _market: UpsertMarket) -> Result<Arc<MarketInfo>, StorageError> {
+        unimplemented!()
+    }
+
+    async fn upsert_batch(&self, _markets: Vec<UpsertMarket>) -> Result<u64, StorageError> {
+        unimplemented!()
+    }
+
+    async fn update_status(
+        &self,
+        _id: &MarketId,
+        _status: &str,
+        _outcome: Option<&str>,
+    ) -> Result<(), StorageError> {
+        unimplemented!()
+    }
+}
+
+fn active_market(market_id: MarketId) -> MarketInfo {
+    MarketInfo {
+        market_id,
+        event_id: EventId::new("evt-test"),
+        question: "Will the test market resolve yes?".to_owned(),
+        slug: "test-market".to_owned(),
+        categories: vec![MarketCategory::Politics],
+        status: MarketStatus::Active,
+        outcome: None,
+        yes_token_id: TokenId::new("yes-token"),
+        no_token_id: TokenId::new("no-token"),
+        tick_size: TickSize::Hundredth,
+        neg_risk: false,
+        end_date: None,
+        resolved_at: None,
+        fees_enabled: true,
+        fee_rate: None,
+        fee_exponent: None,
+        fee_taker_only: None,
+        fee_rebate_rate: None,
+        fee_source: None,
+        fee_observed_at: None,
+        created_at: now(),
+        updated_at: now(),
     }
 }
 

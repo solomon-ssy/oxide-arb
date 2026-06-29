@@ -5,10 +5,10 @@ use std::sync::Arc;
 use quant_pivot_models::{
     config::DeployConfig,
     domain::{
-        BacktestPort, CatalogStatusPort, CoreEventPublisher, DataQualityPort, ExecutionSubmitPort,
-        KillSwitchPort, MarketDataPort, MetricsScrapePort, ModelGovernancePort, ModelTrainingPort,
-        OrderIntentPort, QuantReportPort, ReadinessPort, RuntimeConfigPort, RuntimeControlPort,
-        TrainingDatasetPort,
+        AccountReadPort, BacktestPort, CatalogStatusPort, CoreEventPublisher, DataQualityPort,
+        ExecutionReadPort, ExecutionSubmitPort, FactorGovernancePort, KillSwitchPort,
+        MarketDataPort, MetricsScrapePort, ModelGovernancePort, ModelTrainingPort, OrderIntentPort,
+        QuantReportPort, ReadinessPort, RuntimeConfigPort, RuntimeControlPort, TrainingDatasetPort,
     },
 };
 use quant_pivot_repository::traits::{
@@ -61,10 +61,16 @@ pub struct AppState {
     pub backtests: Arc<dyn BacktestPort>,
     /// Model publish / rollback governance (Phase 3.7 Admin API).
     pub model_governance: Arc<dyn ModelGovernancePort>,
+    /// Factor-definition publish / retire governance (Phase 05.7 Admin API).
+    pub factor_governance: Arc<dyn FactorGovernancePort>,
     /// Recommendation report read + governed mutation (Phase 04.4 API).
     pub quant_reports: Arc<dyn QuantReportPort>,
+    /// Venue account live + snapshot read surface.
+    pub account_read: Arc<dyn AccountReadPort>,
     /// Order-intent read + governed mutation (Phase 05.2 API).
     pub order_intents: Arc<dyn OrderIntentPort>,
+    /// Execution order, position, and attribution read surface (Phase 05.7 API).
+    pub execution_read: Arc<dyn ExecutionReadPort>,
     /// Entry-execution submission bridge (Phase 05.4 API): claim → admit → submit.
     pub execution_submit: Arc<dyn ExecutionSubmitPort>,
 }

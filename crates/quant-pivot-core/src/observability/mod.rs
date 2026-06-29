@@ -1,4 +1,5 @@
 pub mod alert_dispatcher;
+pub mod attribution_fact_writer;
 pub mod backpressure;
 pub mod book_fact_writer;
 pub mod fact_lag;

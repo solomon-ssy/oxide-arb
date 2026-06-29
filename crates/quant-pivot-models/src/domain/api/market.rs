@@ -11,6 +11,7 @@ use crate::{
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use validator::Validate;
 
 /// Filter + pagination query for the markets list endpoint.
 ///
@@ -36,6 +37,21 @@ impl MarketPageQuery {
             ..self
         }
     }
+}
+
+/// Governed request to manually block a market.
+#[derive(Debug, Clone, Deserialize, Validate)]
+pub struct BlockMarketRequest {
+    #[validate(length(min = 1, max = 512))]
+    pub reason: String,
+}
+
+/// Governed request to unblock a market into an explicit operator-selected state.
+#[derive(Debug, Clone, Deserialize, Validate)]
+pub struct UnblockMarketRequest {
+    #[validate(length(min = 1, max = 512))]
+    pub reason: String,
+    pub restore_status: MarketStatus,
 }
 
 /// Live order-book digest attached to a [`MarketView`].

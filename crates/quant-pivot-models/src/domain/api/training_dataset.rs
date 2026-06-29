@@ -25,7 +25,10 @@ use validator::Validate;
 
 use crate::{
     domain::TrainingDatasetInfo,
-    types::{ContentHash, ModelSpecId, RuntimeConfigVersionId, SchemaVersion, TrainingDatasetId},
+    types::{
+        ContentHash, ModelSpecId, RuntimeConfigVersionId, SchemaVersion, TrainingDatasetId,
+        TrainingSampleSource, default_sample_sources,
+    },
 };
 
 /// Inbound body for plan and build endpoints (shared window/config fields).
@@ -54,6 +57,9 @@ pub struct BuildTrainingDatasetRequest {
     /// Feature schema version to materialize (defaults to v1).
     #[serde(default = "default_feature_schema_version")]
     pub feature_schema_version: SchemaVersion,
+    /// Sample sources to materialize. Defaults to historical PIT + live attribution.
+    #[serde(default = "default_sample_sources")]
+    pub sample_sources: Vec<TrainingSampleSource>,
     /// Operator reason recorded on the operation log (UI should require non-empty).
     #[validate(length(min = 1, max = 512))]
     pub reason: String,

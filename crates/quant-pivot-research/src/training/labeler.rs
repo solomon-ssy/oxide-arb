@@ -12,7 +12,7 @@ use rust_decimal::Decimal;
 
 use super::{
     LabelBuildInput, LabelBuildOutput, LabelDelayReason, LabelName, Labeler, MissingLabelReason,
-    TrainingLabel,
+    TrainingLabel, TrainingSampleSource,
 };
 
 /// `return_to_horizon`: signed mid-price return from entry to the horizon, bps.
@@ -27,6 +27,12 @@ pub const MAX_ADVERSE_EXCURSION_BPS: LabelName =
 pub const LIQUIDITY_EXIT_POSSIBLE: LabelName = LabelName::from_static("liquidity_exit_possible");
 /// `settlement_outcome`: terminal `settled_yes` (1.0) / `settled_no` (0.0).
 pub const SETTLEMENT_OUTCOME: LabelName = LabelName::from_static("settlement_outcome");
+pub const REALIZED_RETURN_BPS: LabelName = LabelName::from_static("realized_return_bps");
+pub const REALIZED_PNL_USD: LabelName = LabelName::from_static("realized_pnl_usd");
+pub const ENTRY_FILLED: LabelName = LabelName::from_static("entry_filled");
+pub const ENTRY_SLIPPAGE_BPS: LabelName = LabelName::from_static("entry_slippage_bps");
+pub const MISSED_RETURN_BPS: LabelName = LabelName::from_static("missed_return_bps");
+pub const RECOMMENDATION_OUTCOME: LabelName = LabelName::from_static("recommendation_outcome");
 
 /// All label names this plane produces, in a stable order (for schema hashing).
 #[must_use]
@@ -38,6 +44,29 @@ pub fn label_names() -> Vec<LabelName> {
         LIQUIDITY_EXIT_POSSIBLE,
         SETTLEMENT_OUTCOME,
     ]
+}
+
+/// Stable label schema for selected sample sources.
+#[must_use]
+pub fn label_names_for_sources(sources: &[TrainingSampleSource]) -> Vec<LabelName> {
+    let mut labels = Vec::new();
+    if sources.contains(&TrainingSampleSource::HistoricalPit) {
+        labels.extend(label_names());
+    }
+    if sources.contains(&TrainingSampleSource::LiveAttribution) {
+        labels.extend([
+            REALIZED_RETURN_BPS,
+            REALIZED_PNL_USD,
+            ENTRY_FILLED,
+            ENTRY_SLIPPAGE_BPS,
+            MAX_FAVORABLE_EXCURSION_BPS,
+            MAX_ADVERSE_EXCURSION_BPS,
+            MISSED_RETURN_BPS,
+            RECOMMENDATION_OUTCOME,
+        ]);
+    }
+    labels.dedup();
+    labels
 }
 
 /// Basis-point denominator (`1 = 10_000 bps`).

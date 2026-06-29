@@ -121,6 +121,13 @@ impl RecommendationStatus {
 
     /// Statuses still eligible for intent creation (SQL `IN` filters).
     pub const ACTIONABLE_FOR_INTENT: [Self; 2] = [Self::Published, Self::IntentCreated];
+
+    /// Operator-revoked recommendations must never receive final attribution or
+    /// advance to `Attributed` (05.7 governance guard).
+    #[must_use]
+    pub const fn excluded_from_attribution(self) -> bool {
+        matches!(self, Self::Revoked)
+    }
 }
 
 crate::pg_enum! {
@@ -248,6 +255,31 @@ impl OrderIntentStatus {
         Self::Submitted,
         Self::PartiallyFilled,
     ];
+
+    /// Terminal statuses with no fill (attribution / sweep eligibility).
+    pub const UNFILLED_TERMINAL: [Self; 6] = [
+        Self::AdmissionRejected,
+        Self::Rejected,
+        Self::Cancelled,
+        Self::Failed,
+        Self::Expired,
+        Self::Invalidated,
+    ];
+
+    /// Terminal statuses with at least partial fill.
+    pub const FILLED_TERMINAL: [Self; 2] = [Self::Filled, Self::PartiallyFilled];
+
+    /// Intent statuses eligible for final attribution sweeps.
+    pub const ATTRIBUTION_ELIGIBLE: [Self; 8] = [
+        Self::Filled,
+        Self::PartiallyFilled,
+        Self::Cancelled,
+        Self::Failed,
+        Self::Expired,
+        Self::Rejected,
+        Self::AdmissionRejected,
+        Self::Invalidated,
+    ];
 }
 
 crate::pg_enum! {
@@ -290,7 +322,8 @@ impl PublicationStatus {
             }
             Self::Published => matches!(next, Self::Published | Self::Retired),
             Self::Retired => matches!(next, Self::Published),
-            Self::Draft | Self::Rejected => false,
+            Self::Draft => matches!(next, Self::Candidate | Self::Published),
+            Self::Rejected => false,
         }
     }
 }
@@ -458,6 +491,16 @@ impl ExecutionOrderState {
             Self::Filled | Self::PartiallyFilled | Self::Cancelled | Self::Failed
         )
     }
+
+    /// Whether venue truth for this order is still unsettled — attribution must
+    /// defer until reconciliation or a terminal order state (05.7).
+    #[must_use]
+    pub const fn blocks_attribution(self) -> bool {
+        matches!(
+            self,
+            Self::Submitted | Self::CancelRequested | Self::Ambiguous
+        )
+    }
 }
 
 crate::pg_enum! {
@@ -472,6 +515,20 @@ crate::pg_enum! {
         ExpiredUnfilled => "expired_unfilled",
         Cancelled => "cancelled",
         Unknown => "unknown",
+    }
+}
+
+crate::pg_enum! {
+    type_name = "qp_recommendation_attribution_outcome",
+    /// Terminal, WORM attribution outcome for a recommendation.
+    @derive(Default)
+    pub enum RecommendationAttributionOutcome {
+        #[default]
+        FilledExited => "filled_exited",
+        FilledSettled => "filled_settled",
+        ExpiredUnfilled => "expired_unfilled",
+        CancelledUnfilled => "cancelled_unfilled",
+        FailedUnfilled => "failed_unfilled",
     }
 }
 

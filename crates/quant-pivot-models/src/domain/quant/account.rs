@@ -7,7 +7,7 @@
 
 use crate::{
     enums::quant::AccountSource,
-    types::{AccountPositions, AccountSnapshotId, ExposureBreakdown, Usd},
+    types::{AccountPositions, AccountSnapshotId, ExposureBreakdown, PositionSnapshot, Usd},
 };
 use chrono::{DateTime, Utc};
 use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
@@ -43,6 +43,40 @@ info_from_model!(
         created_at,
     }
 );
+
+/// Live venue account facts at decision time (models-owned contract).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LiveAccountSnapshot {
+    pub as_of: DateTime<Utc>,
+    pub source: AccountSource,
+    pub equity_usd: Usd,
+    pub available_usd: Usd,
+    pub reserved_usd: Usd,
+    pub positions: Vec<PositionSnapshot>,
+    pub exposures: ExposureBreakdown,
+}
+
+impl LiveAccountSnapshot {
+    #[must_use]
+    pub fn new(
+        as_of: DateTime<Utc>,
+        source: AccountSource,
+        equity_usd: Usd,
+        available_usd: Usd,
+        reserved_usd: Usd,
+        positions: Vec<PositionSnapshot>,
+    ) -> Self {
+        Self {
+            as_of,
+            source,
+            equity_usd,
+            available_usd,
+            reserved_usd,
+            exposures: ExposureBreakdown::from_positions(&positions),
+            positions,
+        }
+    }
+}
 
 /// Insert payload for `quant_account_snapshot`.
 #[derive(Debug, Clone, Serialize, Deserialize, DeriveIntoActiveModel)]

@@ -19,8 +19,8 @@ mod selector;
 
 pub use filters::{
     CategoryFilter, DataQualityFilter, FilterChain, FilterOutcome, LiquidityFilter,
-    ManualBlockFilter, MarketCandidateCtx, MarketStatusFilter, ModelEligibilityFilter,
-    ResolutionAmbiguityFilter, SelectionFilter, SelectionThresholds, accumulate_exclusion,
+    MarketCandidateCtx, MarketStatusFilter, ModelEligibilityFilter, ResolutionAmbiguityFilter,
+    SelectionFilter, SelectionThresholds, accumulate_exclusion,
 };
 pub use hash::SelectorHashInput;
 pub use selector::ConfiguredMarketSelector;

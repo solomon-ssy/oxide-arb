@@ -38,6 +38,10 @@ pub struct OperationLogView {
     pub latency_ms: i32,
     /// Redacted detail summary / diff stamped by the handler (never raw bodies).
     pub detail: serde_json::Value,
+    /// Canonical hash of the governed resource before a successful mutation.
+    pub before_hash: Option<String>,
+    /// Canonical hash of the governed resource after a successful mutation.
+    pub after_hash: Option<String>,
     /// Hard link to the governance hash-chain event, when this row mirrors one.
     pub governance_audit_event_id: Option<AuditEventId>,
     /// Monotonic sequence of the linked governance audit event.
@@ -65,6 +69,8 @@ impl From<OperationLogInfo> for OperationLogView {
             user_agent: info.user_agent,
             latency_ms: info.latency_ms,
             detail: info.detail,
+            before_hash: info.before_hash,
+            after_hash: info.after_hash,
             governance_audit_event_id: info.governance_audit_event_id,
             governance_audit_sequence: info.governance_audit_sequence,
         }

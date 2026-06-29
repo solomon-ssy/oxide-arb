@@ -74,6 +74,7 @@ use quant_pivot_research::{
 use quant_pivot_storage::write::{AsyncWriter, AsyncWriterConfig, AsyncWriterObservability};
 use quant_pivot_test_support::{
     catalog_fixtures::{make_event, make_market},
+    factor_governance::publish_all_factor_definitions,
     pg::setup_pg,
 };
 use rust_decimal::Decimal;
@@ -525,6 +526,17 @@ fn build_runner(
     })
 }
 
+async fn publish_enabled_factors(
+    db: &DatabaseConnection,
+    factors: &FactorsConfig,
+    features: &FeaturesConfig,
+) {
+    let repo = PgFactorRepository::new(db.clone());
+    publish_all_factor_definitions(&repo, factors, features)
+        .await
+        .expect("publish factor definitions");
+}
+
 fn artifact_store() -> Arc<dyn ArtifactStore> {
     let root = std::env::temp_dir().join(format!(
         "qp_model_e2e_{}_{}",
@@ -546,6 +558,7 @@ async fn online_loop_selection_to_signal_candidates() {
 
     let store = artifact_store();
     let active = publish_weighted_model(&db, &store, &factors, &features).await;
+    publish_enabled_factors(&db, &factors, &features).await;
 
     let critical = Arc::new(AtomicUsize::new(0));
     let runner = build_runner(
@@ -617,6 +630,7 @@ async fn inference_degradation_shadow_failure_keeps_active() {
 
     let store = artifact_store();
     let active = publish_weighted_model(&db, &store, &factors, &features).await;
+    publish_enabled_factors(&db, &factors, &features).await;
 
     let critical = Arc::new(AtomicUsize::new(0));
     let runner = build_runner(
@@ -672,6 +686,7 @@ async fn hot_update_changes_candidate_weights_not_published_artifact() {
 
     let store = artifact_store();
     let published = publish_weighted_model(&db, &store, &base_factors, &features).await;
+    publish_enabled_factors(&db, &base_factors, &features).await;
     let candidate = register_candidate_sibling(&db, &store, &published).await;
 
     let overlay = Arc::new(WeightOverlayApplicator::new());
@@ -783,6 +798,7 @@ async fn inference_rejects_retired_active_model() {
 
     let store = artifact_store();
     let active = publish_weighted_model(&db, &store, &factors, &features).await;
+    publish_enabled_factors(&db, &factors, &features).await;
     PgModelRegistryRepository::new(db.clone())
         .retire_model_version(&active)
         .await

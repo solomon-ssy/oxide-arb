@@ -220,18 +220,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn category_filter_respects_enabled_and_overrides() {
+    async fn category_filter_respects_enabled_categories() {
         let mut politics = healthy_candidate("0xpolitics");
         politics.category = MarketCategory::Politics;
-        let mut forced = healthy_candidate("0xforced");
-        forced.category = MarketCategory::Politics;
-
-        let mut selection = selection_config();
-        selection.included_market_ids.ids = vec!["0xforced".to_owned()];
 
         let snapshot = build(
-            request_with(selection),
-            vec![healthy_candidate("0xsports"), politics, forced],
+            request_with(selection_config()),
+            vec![healthy_candidate("0xsports"), politics],
         )
         .await;
 
@@ -241,10 +236,6 @@ mod tests {
             .map(|market| market.market_id.as_str().to_owned())
             .collect::<Vec<_>>();
         assert!(kept.contains(&"0xsports".to_owned()));
-        assert!(
-            kept.contains(&"0xforced".to_owned()),
-            "inclusion override wins"
-        );
         assert!(!kept.contains(&"0xpolitics".to_owned()));
         assert_eq!(
             snapshot.excluded[0].reason,
@@ -301,13 +292,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn manual_block_excludes_listed_market() {
-        let mut selection = selection_config();
-        selection.excluded_market_ids.ids = vec!["0xblocked".to_owned()];
-
+    async fn manually_blocked_status_excludes_market() {
+        let mut blocked = healthy_candidate("0xblocked");
+        blocked.status = MarketStatus::ManuallyBlocked;
         let snapshot = build(
-            request_with(selection),
-            vec![healthy_candidate("0xok"), healthy_candidate("0xblocked")],
+            request_with(selection_config()),
+            vec![healthy_candidate("0xok"), blocked],
         )
         .await;
 
@@ -382,6 +372,28 @@ mod tests {
             first.market_selection_id, second.market_selection_id,
             "snapshot id is fresh per build"
         );
+    }
+
+    #[tokio::test]
+    async fn selector_hash_changes_when_data_quality_changes() {
+        let candidates = vec![healthy_candidate("0xa"), healthy_candidate("0xb")];
+        let mut request_a = request_with(selection_config());
+        request_a.data_quality.max_book_age_ms = 1_000;
+        let mut request_b = request_with(selection_config());
+        request_b.data_quality.max_book_age_ms = 2_000;
+
+        let hash_a = ConfiguredMarketSelector::new()
+            .build_snapshot(request_a, candidates.clone())
+            .await
+            .expect("snapshot")
+            .selector_hash;
+        let hash_b = ConfiguredMarketSelector::new()
+            .build_snapshot(request_b, candidates)
+            .await
+            .expect("snapshot")
+            .selector_hash;
+
+        assert_ne!(hash_a, hash_b);
     }
 
     #[tokio::test]

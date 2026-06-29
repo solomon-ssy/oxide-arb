@@ -39,12 +39,14 @@ use quant_pivot_models::{
     types::{
         ArtifactUri, ContentHash, MarketId, ModelSpecId, ModelVersionId, Price,
         RuntimeConfigVersionId, SchemaVersion, Shares, TokenId, TrainingDatasetId,
+        TrainingSampleSource, default_sample_sources,
     },
 };
 use quant_pivot_repository::{
     postgres::{
-        PgEventRepository, PgMarketRepository, PgModelRegistryRepository,
-        PgRuntimeConfigVersionRepository, PgTrainingDatasetRepository,
+        PgAttributionRepository, PgEventRepository, PgFeatureRepository, PgMarketRepository,
+        PgModelRegistryRepository, PgRecommendationRepository, PgRuntimeConfigVersionRepository,
+        PgTrainingDatasetRepository,
     },
     traits::{
         EventRepository, MarketRepository, ModelRegistryRepository, QuantFactReadRepository,
@@ -431,6 +433,9 @@ fn service(
             market_repo: Arc::new(PgMarketRepository::new(db.clone())),
             artifact_store: store,
             dataset_repo: Arc::new(PgTrainingDatasetRepository::new(db.clone())),
+            attribution_repo: Arc::new(PgAttributionRepository::new(db.clone())),
+            recommendation_repo: Arc::new(PgRecommendationRepository::new(db.clone())),
+            feature_repo: Arc::new(PgFeatureRepository::new(db.clone())),
         },
         TrainingDatasetBuildConfig {
             features: features_config(),
@@ -476,6 +481,7 @@ async fn plan_request(
             horizons_secs: vec![60],
             source_delay_secs: 10,
             feature_schema_version: SchemaVersion::FIRST,
+            sample_sources: default_sample_sources(),
             training_dataset_id: None,
         })
         .await
@@ -910,4 +916,67 @@ async fn model_version_training_dataset_id_is_typed() {
         .expect("load")
         .expect("version");
     assert_eq!(loaded.training_dataset_id, Some(dataset_id));
+}
+
+#[tokio::test]
+async fn plan_count_respects_sample_sources() {
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+    let rc_id = seed_runtime_config(&db).await;
+    let (window_start, window_end) = dataset_window();
+    seed_catalog(&db, window_start).await;
+    let model_spec_id = seed_model_spec(&db).await;
+
+    let as_of = sample_as_of(window_start);
+    let scenario = Arc::new(Mutex::new(pit_scenario(as_of.timestamp_millis())));
+    let store = temp_artifact_store();
+    let svc = service(
+        &db,
+        Arc::clone(&store),
+        Arc::new(ControllableFactRead::new(scenario)),
+    );
+
+    let default_plan = plan_request(
+        &svc,
+        model_spec_id.clone(),
+        rc_id.clone(),
+        window_start,
+        window_end,
+    )
+    .await;
+    let historical_only_plan = svc
+        .plan(DatasetPlanRequest {
+            model_spec_id,
+            runtime_config_version_id: rc_id,
+            window_start,
+            window_end,
+            sample_interval_secs: 60,
+            horizons_secs: vec![60],
+            source_delay_secs: 10,
+            feature_schema_version: SchemaVersion::FIRST,
+            sample_sources: vec![TrainingSampleSource::HistoricalPit],
+            training_dataset_id: None,
+        })
+        .await
+        .expect("historical-only plan");
+
+    let default_count = svc
+        .count_planned_samples(&default_plan)
+        .await
+        .expect("default count");
+    let historical_count = svc
+        .count_planned_samples(&historical_only_plan)
+        .await
+        .expect("historical count");
+
+    assert_eq!(
+        historical_count,
+        historical_only_plan.samples.len() as u64,
+        "historical-only plan count must match the sample grid"
+    );
+    assert!(historical_count >= 1);
+    assert_eq!(
+        default_count, historical_count,
+        "without live attribution rows both sources collapse to historical count"
+    );
 }

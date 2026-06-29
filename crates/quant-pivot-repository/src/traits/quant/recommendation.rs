@@ -47,4 +47,19 @@ pub trait RecommendationRepository: Send + Sync {
         recommendation_id: &RecommendationId,
         operation_log: NewOperationLog,
     ) -> Result<RecommendationInfo, StorageError>;
+
+    /// Expired recommendations with no final attribution row. This covers the
+    /// report-only / never-intended path where the recommendation simply aged out
+    /// without an execution intent.
+    async fn find_expired_attribution_candidates(
+        &self,
+        limit: u64,
+    ) -> Result<Vec<RecommendationInfo>, StorageError>;
+
+    /// Returns `true` when execution ledger truth is still ambiguous and final
+    /// attribution must defer (05.7).
+    async fn recommendation_blocks_final_attribution(
+        &self,
+        recommendation_id: &RecommendationId,
+    ) -> Result<bool, StorageError>;
 }

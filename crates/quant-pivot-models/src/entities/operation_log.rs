@@ -43,6 +43,10 @@ pub struct Model {
     pub latency_ms: i32,
     #[sea_orm(column_type = "JsonBinary")]
     pub detail: Json,
+    #[sea_orm(column_type = "Text", nullable)]
+    pub before_hash: Option<String>,
+    #[sea_orm(column_type = "Text", nullable)]
+    pub after_hash: Option<String>,
     pub governance_audit_event_id: Option<AuditEventId>,
     pub governance_audit_sequence: Option<i64>,
 }

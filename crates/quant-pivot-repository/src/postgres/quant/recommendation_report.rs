@@ -1,8 +1,11 @@
 //! Postgres-backed recommendation report repository.
 
-use crate::traits::RecommendationReportRepository;
+use crate::{
+    postgres::{error, state_hash},
+    traits::RecommendationReportRepository,
+};
 use chrono::{DateTime, Utc};
-use quant_pivot_error::storage::StorageError;
+use quant_pivot_error::storage::{StorageError, entity};
 use quant_pivot_models::{
     domain::{
         NewOperationLog, NewReportTransaction, Paginated, QuantReportListQuery,
@@ -182,9 +185,10 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
             .await
             .map_err(StorageError::from)?
         else {
-            return Err(StorageError::Conflict(format!(
-                "recommendation report not found: {report_id}"
-            )));
+            return Err(error::not_found(
+                entity::QUANT_RECOMMENDATION_REPORT,
+                report_id,
+            ));
         };
         if !matches!(
             report.status,
@@ -289,21 +293,24 @@ async fn transition_report_status(
         .await
         .map_err(StorageError::from)?
     else {
-        return Err(StorageError::Conflict(format!(
-            "recommendation report not found: {report_id}"
-        )));
+        return Err(error::not_found(
+            entity::QUANT_RECOMMENDATION_REPORT,
+            report_id,
+        ));
     };
     if !matches!(
         row.status,
         RecommendationReportStatus::Published | RecommendationReportStatus::PublishedEmpty
     ) {
-        return Err(StorageError::Conflict(format!(
-            "cannot transition report {report_id} from status {} to {}",
-            row.status.as_str(),
-            report_status.as_str()
-        )));
+        return Err(error::illegal_transition(
+            entity::QUANT_RECOMMENDATION_REPORT,
+            Some(report_id),
+            row.status,
+            report_status,
+        ));
     }
 
+    let before_info: RecommendationReportInfo = row.clone().into();
     let mut active = row.into_active_model();
     active.status = ActiveValue::Set(report_status);
     active.status_reason = ActiveValue::Set(Some(reason.to_owned()));
@@ -317,6 +324,7 @@ async fn transition_report_status(
         _ => {}
     }
     let report_model = active.update(&txn).await.map_err(StorageError::from)?;
+    let after_info: RecommendationReportInfo = report_model.clone().into();
 
     // Only transition still-actionable recommendations; terminal ones
     // (`Executed` / `Attributed` / `Expired` / `Revoked`) are left intact.
@@ -334,6 +342,8 @@ async fn transition_report_status(
         .await
         .map_err(StorageError::from)?;
 
+    let operation_log =
+        state_hash::apply_transition_hashes(operation_log, &before_info, &after_info)?;
     operation_log::Entity::insert(operation_log.into_active_model())
         .exec(&txn)
         .await

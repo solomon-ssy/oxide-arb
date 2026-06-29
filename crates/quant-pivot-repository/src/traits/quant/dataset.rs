@@ -23,7 +23,7 @@ pub trait TrainingDatasetRepository: Send + Sync {
     ) -> Result<Option<TrainingDatasetInfo>, StorageError>;
 
     /// Transition a training dataset to `next`, enforcing the lifecycle state
-    /// machine. Returns a [`StorageError::Conflict`] on an illegal transition or
+    /// machine. Returns [`StorageError::IllegalTransition`] on an illegal transition or
     /// a missing row.
     async fn mark_status(
         &self,

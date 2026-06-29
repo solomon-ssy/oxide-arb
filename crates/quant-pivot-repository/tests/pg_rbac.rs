@@ -141,11 +141,14 @@ async fn user_crud_paging_and_delete() {
         "alice"
     );
 
-    // Duplicate username is a Conflict, not a raw DB error.
+    // Duplicate username is a Duplicate, not a raw DB error.
     let dup = repo.create(new_user("alice")).await;
     assert!(matches!(
         dup,
-        Err(quant_pivot_error::storage::StorageError::Conflict(_))
+        Err(quant_pivot_error::storage::StorageError::Duplicate {
+            entity: quant_pivot_error::storage::entity::USER,
+            ..
+        })
     ));
 
     // Partial update + status + password.
@@ -220,7 +223,10 @@ async fn role_crud_and_builtin_protection() {
         .expect("create role");
     assert!(matches!(
         repo.create(new_role("custom_role_a")).await,
-        Err(quant_pivot_error::storage::StorageError::Conflict(_))
+        Err(quant_pivot_error::storage::StorageError::Duplicate {
+            entity: quant_pivot_error::storage::entity::ROLE,
+            ..
+        })
     ));
 
     let by_code = repo
@@ -256,7 +262,10 @@ async fn role_crud_and_builtin_protection() {
         .expect("seeded");
     assert!(matches!(
         repo.delete(&builtin.id).await,
-        Err(quant_pivot_error::storage::StorageError::Conflict(_))
+        Err(quant_pivot_error::storage::StorageError::StateConflict {
+            entity: quant_pivot_error::storage::entity::ROLE,
+            ..
+        })
     ));
     repo.delete(&created.id).await.expect("delete custom role");
     assert!(
@@ -300,7 +309,10 @@ async fn menu_tree_accessibility_and_delete_guard() {
     // Parent with children cannot be deleted.
     assert!(matches!(
         menus.delete(&root.id).await,
-        Err(quant_pivot_error::storage::StorageError::Conflict(_))
+        Err(quant_pivot_error::storage::StorageError::StateConflict {
+            entity: quant_pivot_error::storage::entity::MENU,
+            ..
+        })
     ));
 
     // Accessibility: a role granted only the child still yields the full chain.
@@ -494,7 +506,7 @@ async fn assign_permissions_validates_and_round_trips() {
                 )],
             })
             .await,
-        Err(quant_pivot_error::storage::StorageError::Conflict(_))
+        Err(quant_pivot_error::storage::StorageError::InvariantViolation { .. })
     ));
 }
 
@@ -830,6 +842,8 @@ async fn operation_log_appends_and_pages_and_is_worm() {
         user_agent: None,
         latency_ms: 5,
         detail: serde_json::json!({"k": "v"}),
+        before_hash: Some("blake3:before".to_owned()),
+        after_hash: Some("blake3:after".to_owned()),
         governance_audit_event_id: None,
         governance_audit_sequence: None,
     };

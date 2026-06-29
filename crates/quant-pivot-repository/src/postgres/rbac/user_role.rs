@@ -3,7 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use quant_pivot_error::storage::StorageError;
+use quant_pivot_error::storage::{StorageError, entity};
 use quant_pivot_models::{
     domain::{AssignRoles, RoleInfo},
     entities::{role, user, user_role},
@@ -16,7 +16,10 @@ use sea_orm::{
 };
 
 use crate::{
-    postgres::rbac::{casbin::sync, junction, util},
+    postgres::{
+        error,
+        rbac::{casbin::sync, junction},
+    },
     traits::rbac::UserRoleRepository,
 };
 
@@ -48,7 +51,7 @@ async fn do_set_roles(
         .is_none()
     {
         txn.rollback().await.map_err(StorageError::from)?;
-        return Err(util::not_found("user", &user_id));
+        return Err(error::not_found(entity::USER, &user_id));
     }
 
     // Resolve every target role to its code, rejecting unknown ids.
@@ -64,7 +67,7 @@ async fn do_set_roles(
             .find(|id| !found.contains(id))
             .map_or_else(|| "<unknown>".to_owned(), ToString::to_string);
         txn.rollback().await.map_err(StorageError::from)?;
-        return Err(util::not_found("role", missing));
+        return Err(error::not_found(entity::ROLE, missing));
     }
     // Only *enabled* roles project a Casbin grouping (`g`): a disabled role keeps
     // its relational `user_role` membership but grants nothing until re-enabled,

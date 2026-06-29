@@ -24,7 +24,11 @@ use quant_pivot_core::{
     pipeline::book_store::BookStore,
     runtime_config::RuntimeConfigStore,
 };
-use quant_pivot_error::{QuantError, QuantResult, api::ApiError, storage::StorageError};
+use quant_pivot_error::{
+    QuantError, QuantResult,
+    api::ApiError,
+    storage::{StorageError, entity},
+};
 use quant_pivot_models::{
     domain::{
         AppendReconciliationEvidence, ApproveOrderIntent, ApproveOrderIntentOutcome,
@@ -259,7 +263,11 @@ impl OrderIntentRepository for MemoryIntents {
         _: NewOrderIntent,
         _: NewCapitalAllocation,
     ) -> Result<OrderIntentInfo, StorageError> {
-        Err(StorageError::Conflict("stub".to_owned()))
+        Err(StorageError::state_conflict(
+            entity::QUANT_ORDER_INTENT,
+            None::<&str>,
+            "stub",
+        ))
     }
 
     async fn approve(
@@ -270,15 +278,27 @@ impl OrderIntentRepository for MemoryIntents {
         _: Option<Usd>,
         _: chrono::DateTime<Utc>,
     ) -> Result<ApproveOrderIntentOutcome, StorageError> {
-        Err(StorageError::Conflict("stub".to_owned()))
+        Err(StorageError::state_conflict(
+            entity::QUANT_ORDER_INTENT,
+            None::<&str>,
+            "stub",
+        ))
     }
 
     async fn reject(&self, _: &OrderIntentId, _: String) -> Result<OrderIntentInfo, StorageError> {
-        Err(StorageError::Conflict("stub".to_owned()))
+        Err(StorageError::state_conflict(
+            entity::QUANT_ORDER_INTENT,
+            None::<&str>,
+            "stub",
+        ))
     }
 
     async fn cancel(&self, _: &OrderIntentId, _: String) -> Result<OrderIntentInfo, StorageError> {
-        Err(StorageError::Conflict("stub".to_owned()))
+        Err(StorageError::state_conflict(
+            entity::QUANT_ORDER_INTENT,
+            None::<&str>,
+            "stub",
+        ))
     }
 
     async fn expire(
@@ -286,7 +306,11 @@ impl OrderIntentRepository for MemoryIntents {
         _: &OrderIntentId,
         _: NewOperationLog,
     ) -> Result<OrderIntentInfo, StorageError> {
-        Err(StorageError::Conflict("stub".to_owned()))
+        Err(StorageError::state_conflict(
+            entity::QUANT_ORDER_INTENT,
+            None::<&str>,
+            "stub",
+        ))
     }
 
     async fn invalidate(
@@ -295,7 +319,11 @@ impl OrderIntentRepository for MemoryIntents {
         _: ApprovalInvalidation,
         _: NewOperationLog,
     ) -> Result<OrderIntentInfo, StorageError> {
-        Err(StorageError::Conflict("stub".to_owned()))
+        Err(StorageError::state_conflict(
+            entity::QUANT_ORDER_INTENT,
+            None::<&str>,
+            "stub",
+        ))
     }
 
     async fn find_by_id(
@@ -388,7 +416,25 @@ impl RecommendationRepository for StubRecommendations {
         _: &RecommendationId,
         _: NewOperationLog,
     ) -> Result<RecommendationInfo, StorageError> {
-        Err(StorageError::Conflict("stub".to_owned()))
+        Err(StorageError::state_conflict(
+            entity::QUANT_RECOMMENDATION,
+            None::<&str>,
+            "stub",
+        ))
+    }
+
+    async fn find_expired_attribution_candidates(
+        &self,
+        _: u64,
+    ) -> Result<Vec<RecommendationInfo>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn recommendation_blocks_final_attribution(
+        &self,
+        _: &RecommendationId,
+    ) -> Result<bool, StorageError> {
+        Ok(false)
     }
 }
 

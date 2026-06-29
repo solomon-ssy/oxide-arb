@@ -23,18 +23,24 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantError, QuantResult, research::ResearchError};
 use quant_pivot_models::{
-    domain::NewTrainingDataset,
-    enums::quant::TrainingDatasetStatus,
+    domain::{
+        FeatureVectorInfo, NewTrainingDataset, RecommendationAttributionInfo, RecommendationInfo,
+    },
+    enums::quant::{RecommendationAttributionOutcome, TrainingDatasetStatus},
     runtime_config::{DataQualityConfig, FactorsConfig, FeaturesConfig, TrainingConfig},
-    types::{MarketId, Price, TrainingDatasetId, TrainingExampleId, Usd},
+    types::{MarketId, Price, TrainingDatasetId, TrainingExampleId, TrainingSampleSource, Usd},
 };
 use quant_pivot_repository::traits::{
-    MarketRepository, QuantFactReadRepository, TrainingDatasetRepository,
+    AttributionRepository, FeatureRepository, MarketRepository, QuantFactReadRepository,
+    RecommendationRepository, TrainingDatasetRepository,
 };
 use quant_pivot_research::{
     artifact::{ArtifactKey, ArtifactNamespace, ArtifactStore},
-    factors::{FactorEligibility, FactorEngine},
-    features::ConfiguredFeatureBuilder,
+    factors::{FactorEligibility, FactorEngine, FactorExplanation, FactorName, FactorValue},
+    features::{
+        ConfiguredFeatureBuilder, EvidenceSourceRef, FeatureName, FeatureValue, FeatureVector,
+        SubstitutionAudit,
+    },
     hashing::ResearchHasher,
     pit::PitQueryEngine,
     selection::SelectedMarket,
@@ -44,14 +50,17 @@ use quant_pivot_research::{
         MaxAdverseExcursionLabeler, MaxFavorableExcursionLabeler, PlanMarket,
         ReturnToHorizonLabeler, SamplePlan, SettlementOutcomeLabeler, TrainingDatasetArtifact,
         TrainingDatasetBuilder, TrainingDatasetPlanner, TrainingExample, TrainingLabel,
-        assert_no_future_leakage, label_names, plan_samples, probe_matrix_coverage,
+        assert_no_future_leakage, label_names_for_sources, plan_samples, probe_matrix_coverage,
     },
 };
+use rust_decimal::Decimal;
 use std::{
     collections::{BTreeMap, HashSet},
     sync::Arc,
     time::Duration,
 };
+
+const LIVE_ATTRIBUTION_SAMPLE_LIMIT: u64 = 10_000;
 
 /// The default labeler set materialized by a dataset build.
 #[must_use]
@@ -75,6 +84,12 @@ pub struct TrainingDatasetServiceDeps {
     pub artifact_store: Arc<dyn ArtifactStore>,
     /// Training-dataset ledger repository.
     pub dataset_repo: Arc<dyn TrainingDatasetRepository>,
+    /// Final attribution rows used as live supervised samples.
+    pub attribution_repo: Arc<dyn AttributionRepository>,
+    /// Recommendation ledger for frozen evidence refs and factor breakdown.
+    pub recommendation_repo: Arc<dyn RecommendationRepository>,
+    /// Frozen feature-vector ledger referenced by recommendations.
+    pub feature_repo: Arc<dyn FeatureRepository>,
 }
 
 /// Frozen runtime-config snapshot bound to one dataset build.
@@ -97,6 +112,9 @@ pub struct TrainingDatasetService {
     market_repo: Arc<dyn MarketRepository>,
     artifact_store: Arc<dyn ArtifactStore>,
     dataset_repo: Arc<dyn TrainingDatasetRepository>,
+    attribution_repo: Arc<dyn AttributionRepository>,
+    recommendation_repo: Arc<dyn RecommendationRepository>,
+    feature_repo: Arc<dyn FeatureRepository>,
     features: FeaturesConfig,
     factors: FactorsConfig,
     data_quality: DataQualityConfig,
@@ -121,6 +139,9 @@ impl TrainingDatasetService {
             market_repo: deps.market_repo,
             artifact_store: deps.artifact_store,
             dataset_repo: deps.dataset_repo,
+            attribution_repo: deps.attribution_repo,
+            recommendation_repo: deps.recommendation_repo,
+            feature_repo: deps.feature_repo,
             features: config.features,
             factors: config.factors,
             data_quality: config.data_quality,
@@ -166,12 +187,33 @@ impl TrainingDatasetPlanner for TrainingDatasetService {
             .training_dataset_id
             .clone()
             .unwrap_or_else(TrainingDatasetId::from_v7);
+        let label_names = label_names_for_sources(&request.sample_sources);
         Ok(DatasetPlan {
             request,
             training_dataset_id,
             samples,
-            label_names: label_names(),
+            label_names,
         })
+    }
+}
+
+impl TrainingDatasetService {
+    /// Dry-run sample count aligned with [`TrainingDatasetBuilder::build`] coverage.
+    pub async fn count_planned_samples(&self, plan: &DatasetPlan) -> QuantResult<u64> {
+        let mut total = planned_historical_samples(plan);
+        if wants_sample_source(&plan.request, TrainingSampleSource::LiveAttribution) {
+            let attributions = self
+                .attribution_repo
+                .find_label_available_between(
+                    plan.request.window_start,
+                    plan.request.window_end,
+                    LIVE_ATTRIBUTION_SAMPLE_LIMIT,
+                )
+                .await
+                .map_err(QuantError::from)?;
+            total += attributions.len() as u64;
+        }
+        Ok(total)
     }
 }
 
@@ -183,7 +225,7 @@ impl TrainingDatasetBuilder for TrainingDatasetService {
         let loader = self.window_loader();
         let window = loader.load(&context.window_spec(&plan)).await?;
         let mut coverage = DatasetCoverage {
-            planned_samples: plan.samples.len() as u64,
+            planned_samples: planned_historical_samples(&plan),
             book_decode_failures: window.book_decode_failures,
             ..DatasetCoverage::default()
         };
@@ -214,7 +256,7 @@ impl TrainingDatasetService {
         let loader = self.window_loader();
         let prefetched = loader.prefetch(&context.window_spec(&plan)).await?;
         let mut coverage = DatasetCoverage {
-            planned_samples: plan.samples.len() as u64,
+            planned_samples: planned_historical_samples(&plan),
             ..DatasetCoverage::default()
         };
         self.build_from_prefetched(plan, pit, &prefetched, &context, &mut coverage)
@@ -267,41 +309,52 @@ impl TrainingDatasetService {
         let mut examples: Vec<TrainingExample> = Vec::new();
         let mut market_set: HashSet<MarketId> = HashSet::new();
 
-        for (as_of, group) in group_samples(&plan.samples) {
-            let replay_group: Vec<ReplaySample> = group
-                .iter()
-                .map(|sample| ReplaySample {
-                    market_id: sample.market_id.clone(),
-                    token_id: sample.token_id.clone(),
-                })
-                .collect();
-            let Some(cross_section) = materialize_cross_section(
-                &builder,
-                &engine,
-                &replay_config,
-                &CrossSectionRequest {
-                    pit,
-                    prefetched,
-                    as_of,
-                    group: &replay_group,
-                    source_delay: context.source_delay,
-                    lookback: context.lookback,
-                },
-            )
-            .await?
-            else {
-                continue;
-            };
-            coverage.samples_dropped_insufficient += cross_section.dropped_insufficient;
-            self.append_examples(
-                &cross_section,
-                prefetched,
-                &plan.request,
-                context.max_horizon_secs,
-                coverage,
-                &mut examples,
-                &mut market_set,
-            );
+        if wants_sample_source(&plan.request, TrainingSampleSource::HistoricalPit) {
+            for (as_of, group) in group_samples(&plan.samples) {
+                let replay_group: Vec<ReplaySample> = group
+                    .iter()
+                    .map(|sample| ReplaySample {
+                        market_id: sample.market_id.clone(),
+                        token_id: sample.token_id.clone(),
+                    })
+                    .collect();
+                let Some(cross_section) = materialize_cross_section(
+                    &builder,
+                    &engine,
+                    &replay_config,
+                    &CrossSectionRequest {
+                        pit,
+                        prefetched,
+                        as_of,
+                        group: &replay_group,
+                        source_delay: context.source_delay,
+                        lookback: context.lookback,
+                    },
+                )
+                .await?
+                else {
+                    continue;
+                };
+                coverage.samples_dropped_insufficient += cross_section.dropped_insufficient;
+                self.append_examples(
+                    &CrossSectionAppendInput {
+                        cross_section: &cross_section,
+                        prefetched,
+                        request: &plan.request,
+                        max_horizon_secs: context.max_horizon_secs,
+                    },
+                    &mut ExampleBuildSink {
+                        coverage,
+                        examples: &mut examples,
+                        market_set: &mut market_set,
+                    },
+                );
+            }
+        }
+
+        if wants_sample_source(&plan.request, TrainingSampleSource::LiveAttribution) {
+            self.append_live_attribution_examples(&plan, coverage, &mut examples, &mut market_set)
+                .await?;
         }
 
         coverage.built_examples = examples.len() as u64;
@@ -313,21 +366,15 @@ impl TrainingDatasetService {
 
     /// Append training examples (factors + forward labels) for one PIT-resolved
     /// cross-section.
-    #[allow(clippy::too_many_arguments)]
     fn append_examples(
         &self,
-        cross_section: &ReplayCrossSection,
-        prefetched: &Prefetched,
-        request: &DatasetPlanRequest,
-        max_horizon_secs: u64,
-        coverage: &mut DatasetCoverage,
-        examples: &mut Vec<TrainingExample>,
-        market_set: &mut HashSet<MarketId>,
+        input: &CrossSectionAppendInput<'_>,
+        sink: &mut ExampleBuildSink<'_>,
     ) {
-        for (index, vector) in cross_section.vectors.iter().enumerate() {
-            let market = &cross_section.markets[index];
-            let entry_mid = cross_section.entry_mids[index];
-            let outcome = &cross_section.outcomes[index];
+        for (index, vector) in input.cross_section.vectors.iter().enumerate() {
+            let market = &input.cross_section.markets[index];
+            let entry_mid = input.cross_section.entry_mids[index];
+            let outcome = &input.cross_section.outcomes[index];
             let factor_values = match &outcome.eligibility {
                 FactorEligibility::Eligible => outcome
                     .factors
@@ -337,37 +384,138 @@ impl TrainingDatasetService {
                 FactorEligibility::RejectCandidate { .. } => Vec::new(),
             };
             let forward = forward_window(
-                cross_section.as_of,
-                max_horizon_secs,
-                prefetched
+                input.cross_section.as_of,
+                input.max_horizon_secs,
+                input
+                    .prefetched
                     .micro
                     .get(&market.primary_token_id)
                     .map_or(&[][..], Vec::as_slice),
-                prefetched
+                input
+                    .prefetched
                     .resolutions
                     .get(&market.market_id)
                     .map_or(&[][..], Vec::as_slice),
             );
             let labels = self.build_labels(
                 market,
-                cross_section.as_of,
+                input.cross_section.as_of,
                 entry_mid,
-                request,
+                input.request,
                 &forward,
-                coverage,
+                sink.coverage,
             );
-            market_set.insert(market.market_id.clone());
-            examples.push(TrainingExample {
+            sink.market_set.insert(market.market_id.clone());
+            sink.examples.push(TrainingExample {
                 example_id: TrainingExampleId::from_v7(),
                 market_id: market.market_id.clone(),
                 token_id: market.primary_token_id.clone(),
-                as_of: cross_section.as_of,
+                as_of: input.cross_section.as_of,
+                sample_source: TrainingSampleSource::HistoricalPit,
                 feature_vector: vector.clone(),
                 factor_values,
                 labels,
                 source_refs: vector.source_refs.clone(),
             });
         }
+    }
+
+    async fn append_live_attribution_examples(
+        &self,
+        plan: &DatasetPlan,
+        coverage: &mut DatasetCoverage,
+        examples: &mut Vec<TrainingExample>,
+        market_set: &mut HashSet<MarketId>,
+    ) -> QuantResult<()> {
+        let attributions = self
+            .attribution_repo
+            .find_label_available_between(
+                plan.request.window_start,
+                plan.request.window_end,
+                LIVE_ATTRIBUTION_SAMPLE_LIMIT,
+            )
+            .await?;
+        coverage.live_attribution_candidates += attributions.len() as u64;
+        coverage.planned_samples += attributions.len() as u64;
+
+        for attribution in attributions {
+            match self
+                .materialize_live_attribution_example(&attribution)
+                .await?
+            {
+                Some(example) => {
+                    market_set.insert(example.market_id.clone());
+                    coverage.labels_available += example.labels.len() as u64;
+                    examples.push(example);
+                }
+                None => coverage.live_attribution_dropped_missing_evidence += 1,
+            }
+        }
+        Ok(())
+    }
+
+    async fn materialize_live_attribution_example(
+        &self,
+        attribution: &RecommendationAttributionInfo,
+    ) -> QuantResult<Option<TrainingExample>> {
+        let Some(recommendation) = self
+            .recommendation_repo
+            .find_by_id(&attribution.recommendation_id)
+            .await?
+        else {
+            tracing::warn!(
+                recommendation_id = %attribution.recommendation_id,
+                "live attribution sample dropped: recommendation not found",
+            );
+            return Ok(None);
+        };
+        if recommendation.status.excluded_from_attribution() {
+            tracing::warn!(
+                recommendation_id = %attribution.recommendation_id,
+                "live attribution sample dropped: recommendation revoked",
+            );
+            return Ok(None);
+        }
+        let Some(feature_info) = self
+            .feature_repo
+            .find_by_id(&recommendation.evidence_refs.feature_vector_id)
+            .await?
+        else {
+            tracing::warn!(
+                recommendation_id = %attribution.recommendation_id,
+                feature_vector_id = %recommendation.evidence_refs.feature_vector_id,
+                "live attribution sample dropped: frozen feature vector not found",
+            );
+            return Ok(None);
+        };
+        let Some(feature_vector) = frozen_feature_vector(&feature_info) else {
+            tracing::warn!(
+                recommendation_id = %attribution.recommendation_id,
+                feature_vector_id = %recommendation.evidence_refs.feature_vector_id,
+                "live attribution sample dropped: frozen feature vector payload is invalid",
+            );
+            return Ok(None);
+        };
+        let Some(factor_values) = frozen_factor_values(&recommendation) else {
+            tracing::warn!(
+                recommendation_id = %attribution.recommendation_id,
+                "live attribution sample dropped: frozen factor definitions are incomplete",
+            );
+            return Ok(None);
+        };
+
+        let labels = attribution_labels(attribution, &recommendation);
+        Ok(Some(TrainingExample {
+            example_id: TrainingExampleId::from_v7(),
+            market_id: recommendation.market_id.clone(),
+            token_id: recommendation.token_id.clone(),
+            as_of: feature_vector.as_of,
+            sample_source: TrainingSampleSource::LiveAttribution,
+            source_refs: feature_vector.source_refs.clone(),
+            feature_vector,
+            factor_values,
+            labels,
+        }))
     }
 
     /// Assert leakage-freedom, hash the schemas + content, write the Parquet
@@ -507,6 +655,136 @@ impl TrainingDatasetService {
     }
 }
 
+fn frozen_feature_vector(info: &FeatureVectorInfo) -> Option<FeatureVector> {
+    let values = info.payload.get("values")?.clone();
+    let substitutions = info
+        .payload
+        .get("substitutions")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!([]));
+    Some(FeatureVector {
+        market_id: info.market_id.clone(),
+        token_id: info.token_id.clone(),
+        as_of: info.as_of,
+        schema_version: info.feature_schema_version,
+        values: serde_json::from_value::<BTreeMap<FeatureName, FeatureValue>>(values).ok()?,
+        substitutions: serde_json::from_value::<Vec<SubstitutionAudit>>(substitutions).ok()?,
+        data_quality: info.data_quality,
+        staleness_ms: u64::try_from(info.staleness_ms.max(0)).ok()?,
+        source_refs: serde_json::from_value::<Vec<EvidenceSourceRef>>(info.source_refs.clone())
+            .ok()?,
+    })
+}
+
+fn frozen_factor_values(recommendation: &RecommendationInfo) -> Option<Vec<FactorValue>> {
+    let mut values = Vec::with_capacity(recommendation.factor_breakdown.0.len());
+    for (index, entry) in recommendation.factor_breakdown.0.iter().enumerate() {
+        let definition_id = recommendation
+            .evidence_refs
+            .factor_definition_versions
+            .get(index)?
+            .clone();
+        values.push(FactorValue {
+            definition_id,
+            name: FactorName::new(entry.factor_name.clone()),
+            family: entry.family,
+            raw_value: entry.raw_value,
+            normalized_score: entry.normalized_score,
+            direction: entry.direction,
+            confidence: entry.confidence,
+            explanation: FactorExplanation {
+                headline: entry.explanation.clone(),
+                drivers: Vec::new(),
+                clamp: None,
+            },
+            input_feature_refs: Vec::new(),
+        });
+    }
+    Some(values)
+}
+
+fn attribution_labels(
+    attribution: &RecommendationAttributionInfo,
+    recommendation: &RecommendationInfo,
+) -> Vec<TrainingLabel> {
+    let mut labels = Vec::new();
+    if let Some(realized_pnl) = attribution.realized_pnl_usd {
+        push_label(&mut labels, "realized_pnl_usd", realized_pnl.inner());
+        if !recommendation.sizing_plan.suggested_usd.is_zero() {
+            push_label(
+                &mut labels,
+                "realized_return_bps",
+                realized_pnl.inner() / recommendation.sizing_plan.suggested_usd.inner()
+                    * Decimal::from(10_000),
+            );
+        }
+    }
+    push_label(
+        &mut labels,
+        "entry_filled",
+        if attribution.entry_outcome_json.entry_filled {
+            Decimal::ONE
+        } else {
+            Decimal::ZERO
+        },
+    );
+    if let Some(slippage) = attribution.entry_outcome_json.entry_slippage_bps {
+        push_label(&mut labels, "entry_slippage_bps", slippage.inner());
+    }
+    if let Some(mfe) = attribution.max_favorable_excursion_bps {
+        push_label(&mut labels, "max_favorable_excursion_bps", mfe);
+    }
+    if let Some(mae) = attribution.max_adverse_excursion_bps {
+        push_label(&mut labels, "max_adverse_excursion_bps", mae);
+    }
+    push_label(
+        &mut labels,
+        "missed_return_bps",
+        if attribution.entry_outcome_json.entry_filled {
+            Decimal::ZERO
+        } else {
+            recommendation.expected_return_bps.inner()
+        },
+    );
+    push_label(
+        &mut labels,
+        "recommendation_outcome",
+        recommendation_outcome_code(attribution.outcome),
+    );
+    labels
+}
+
+fn push_label(labels: &mut Vec<TrainingLabel>, name: &'static str, value: Decimal) {
+    labels.push(TrainingLabel {
+        label_name: quant_pivot_research::training::LabelName::from_static(name),
+        horizon_secs: 0,
+        value,
+        is_resolved: true,
+    });
+}
+
+fn recommendation_outcome_code(outcome: RecommendationAttributionOutcome) -> Decimal {
+    match outcome {
+        RecommendationAttributionOutcome::FilledExited => Decimal::ONE,
+        RecommendationAttributionOutcome::FilledSettled => Decimal::from(2),
+        RecommendationAttributionOutcome::ExpiredUnfilled => Decimal::NEGATIVE_ONE,
+        RecommendationAttributionOutcome::CancelledUnfilled => Decimal::from(-2),
+        RecommendationAttributionOutcome::FailedUnfilled => Decimal::from(-3),
+    }
+}
+
+fn wants_sample_source(request: &DatasetPlanRequest, source: TrainingSampleSource) -> bool {
+    request.sample_sources.contains(&source)
+}
+
+fn planned_historical_samples(plan: &DatasetPlan) -> u64 {
+    if wants_sample_source(&plan.request, TrainingSampleSource::HistoricalPit) {
+        plan.samples.len() as u64
+    } else {
+        0
+    }
+}
+
 /// Group sample instants by `as_of` (ascending) so each cross-section is scored
 /// together (cross-sectional factor normalization needs the full same-`as_of`
 /// set).
@@ -516,6 +794,19 @@ fn group_samples(samples: &[SamplePlan]) -> BTreeMap<DateTime<Utc>, Vec<&SampleP
         groups.entry(sample.as_of).or_default().push(sample);
     }
     groups
+}
+
+struct CrossSectionAppendInput<'a> {
+    cross_section: &'a ReplayCrossSection,
+    prefetched: &'a Prefetched,
+    request: &'a DatasetPlanRequest,
+    max_horizon_secs: u64,
+}
+
+struct ExampleBuildSink<'a> {
+    coverage: &'a mut DatasetCoverage,
+    examples: &'a mut Vec<TrainingExample>,
+    market_set: &'a mut HashSet<MarketId>,
 }
 
 /// Derived replay parameters for one dataset build (shared across cross-sections).

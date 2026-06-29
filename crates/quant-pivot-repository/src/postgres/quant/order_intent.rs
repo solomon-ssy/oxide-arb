@@ -9,15 +9,17 @@
 
 use crate::{
     postgres::{
+        error,
         quant::capital_allocation::{
             capital_invariant_ok, load_capital, release_capital, validate_non_negative,
         },
         query::paginate_mapped,
+        state_hash,
     },
     traits::OrderIntentRepository,
 };
 use chrono::{DateTime, Utc};
-use quant_pivot_error::storage::StorageError;
+use quant_pivot_error::storage::{StorageError, entity};
 use quant_pivot_models::{
     domain::{
         ApproveOrderIntent, ApproveOrderIntentOutcome, NewCapitalAllocation, NewOperationLog,
@@ -33,7 +35,10 @@ use quant_pivot_models::{
         execution::{ApprovalInvalidation, CapitalAllocationState},
         quant::{ApprovalStatus, OrderIntentStatus, RecommendationStatus},
     },
-    types::{EntryOrderSpec, OrderIntentId, RecommendationId, RecommendationReportId, Usd},
+    types::{
+        EntryOrderSpec, ExecutedPartialExitNodes, OrderIntentId, RecommendationId,
+        RecommendationReportId, Usd,
+    },
 };
 use sea_orm::{
     ActiveModelTrait, ActiveValue, ColumnTrait, Condition, ConnectionTrait, DatabaseConnection,
@@ -75,21 +80,28 @@ impl OrderIntentRepository for PgOrderIntentRepository {
             intent.status,
             OrderIntentStatus::PendingApproval | OrderIntentStatus::ApprovedByPolicy
         ) {
-            return Err(StorageError::Conflict(format!(
-                "order intent must be created as pending_approval or approved_by_policy, got {}",
-                intent.status.as_str()
-            )));
+            return Err(error::invariant_violation(
+                Some(entity::QUANT_ORDER_INTENT),
+                format!(
+                    "order intent must be created as pending_approval or approved_by_policy, got {}",
+                    intent.status.as_str()
+                ),
+            ));
         }
         if allocation.order_intent_id != intent.order_intent_id {
-            return Err(StorageError::Conflict(
-                "capital allocation must reference its own order intent".to_owned(),
+            return Err(error::invariant_violation(
+                Some(entity::QUANT_CAPITAL_ALLOCATION),
+                "capital allocation must reference its own order intent",
             ));
         }
         if allocation.state != CapitalAllocationState::Allocated {
-            return Err(StorageError::Conflict(format!(
-                "new capital allocation must start as allocated, got {}",
-                allocation.state.as_str()
-            )));
+            return Err(error::invariant_violation(
+                Some(entity::QUANT_CAPITAL_ALLOCATION),
+                format!(
+                    "new capital allocation must start as allocated, got {}",
+                    allocation.state.as_str()
+                ),
+            ));
         }
         validate_non_negative(
             allocation.allocated_usd,
@@ -104,8 +116,9 @@ impl OrderIntentRepository for PgOrderIntentRepository {
             allocation.spent_usd,
             allocation.released_usd,
         ) {
-            return Err(StorageError::Conflict(
-                "capital allocation violates the reserve invariant on create".to_owned(),
+            return Err(error::invariant_violation(
+                Some(entity::QUANT_CAPITAL_ALLOCATION),
+                "capital allocation violates the reserve invariant on create",
             ));
         }
 
@@ -115,32 +128,37 @@ impl OrderIntentRepository for PgOrderIntentRepository {
             .one(&txn)
             .await
             .map_err(StorageError::from)?
-            .ok_or_else(|| StorageError::NotFound {
-                entity: "recommendation",
-                id: intent.recommendation_id.to_string(),
+            .ok_or_else(|| {
+                error::not_found(entity::QUANT_RECOMMENDATION, &intent.recommendation_id)
             })?;
         if !rec_row.status.is_actionable_for_intent() {
-            return Err(StorageError::Conflict(format!(
-                "recommendation {} is {} (not actionable for intent creation)",
-                intent.recommendation_id,
-                rec_row.status.as_str()
-            )));
+            return Err(error::state_conflict(
+                entity::QUANT_RECOMMENDATION,
+                Some(&intent.recommendation_id),
+                format!(
+                    "recommendation is {} (not actionable for intent creation)",
+                    rec_row.status.as_str()
+                ),
+            ));
         }
         if find_blocking_intent_for_recommendation(&txn, &intent.recommendation_id)
             .await?
             .is_some()
         {
-            return Err(StorageError::Conflict(format!(
-                "blocking order intent already exists for recommendation {}",
-                intent.recommendation_id
-            )));
+            return Err(error::duplicate(
+                entity::QUANT_ORDER_INTENT,
+                intent.recommendation_id,
+            ));
         }
         if rec_row.status == RecommendationStatus::Published {
             let mut rec_active = rec_row.into_active_model();
             rec_active.status = ActiveValue::Set(RecommendationStatus::IntentCreated);
             rec_active.update(&txn).await.map_err(StorageError::from)?;
         }
-        let intent_model = quant_order_intent::Entity::insert(intent.into_active_model())
+        let mut intent_active = intent.into_active_model();
+        intent_active.executed_partial_exit_node_ids =
+            ActiveValue::Set(ExecutedPartialExitNodes::default());
+        let intent_model = quant_order_intent::Entity::insert(intent_active)
             .exec_with_returning(&txn)
             .await
             .map_err(StorageError::from)?;
@@ -163,10 +181,11 @@ impl OrderIntentRepository for PgOrderIntentRepository {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
         let row = load_intent_for_update(&txn, intent_id).await?;
         if row.status != OrderIntentStatus::PendingApproval {
-            return Err(StorageError::Conflict(format!(
-                "cannot approve intent {intent_id} from status {}",
-                row.status.as_str()
-            )));
+            return Err(error::state_conflict(
+                entity::QUANT_ORDER_INTENT,
+                Some(intent_id),
+                format!("cannot approve intent from status {}", row.status.as_str()),
+            ));
         }
 
         let rec = load_recommendation(&txn, &row.recommendation_id).await?;
@@ -252,11 +271,15 @@ impl OrderIntentRepository for PgOrderIntentRepository {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
         let row = load_intent(&txn, intent_id).await?;
         validate_intent_transition(row.status, OrderIntentStatus::Expired, intent_id)?;
+        let before_info: OrderIntentInfo = row.clone().into();
         let mut active = row.into_active_model();
         active.status = ActiveValue::Set(OrderIntentStatus::Expired);
         active.status_reason = ActiveValue::Set(Some("intent expired".to_owned()));
         let intent_model = active.update(&txn).await.map_err(StorageError::from)?;
         release_capital(&txn, intent_id, "expired".to_owned()).await?;
+        let after_info: OrderIntentInfo = intent_model.clone().into();
+        let operation_log =
+            state_hash::apply_transition_hashes(operation_log, &before_info, &after_info)?;
         operation_log::Entity::insert(operation_log.into_active_model())
             .exec(&txn)
             .await
@@ -273,7 +296,11 @@ impl OrderIntentRepository for PgOrderIntentRepository {
     ) -> Result<OrderIntentInfo, StorageError> {
         let txn = self.db.begin().await.map_err(StorageError::from)?;
         let row = load_intent(&txn, intent_id).await?;
+        let before_info: OrderIntentInfo = row.clone().into();
         let intent_model = transition_invalidated(&txn, intent_id, row, reason, true).await?;
+        let after_info: OrderIntentInfo = intent_model.clone().into();
+        let operation_log =
+            state_hash::apply_transition_hashes(operation_log, &before_info, &after_info)?;
         operation_log::Entity::insert(operation_log.into_active_model())
             .exec(&txn)
             .await
@@ -376,6 +403,36 @@ impl OrderIntentRepository for PgOrderIntentRepository {
                 quant_order_intent::Relation::Recommendation.def(),
             )
             .filter(quant_recommendation::Column::RecommendationReportId.eq(report_id.clone()))
+            .all(&self.db)
+            .await
+            .map_err(StorageError::from)
+            .map(|rows| rows.into_iter().map(Into::into).collect())
+    }
+
+    async fn find_attribution_candidates(
+        &self,
+        statuses: Vec<OrderIntentStatus>,
+        limit: u64,
+    ) -> Result<Vec<OrderIntentInfo>, StorageError> {
+        if statuses.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+        let eligible_state = Condition::any()
+            .add(quant_order_intent::Column::Status.is_in(OrderIntentStatus::UNFILLED_TERMINAL))
+            .add(quant_order_intent::Column::Status.is_in(OrderIntentStatus::FILLED_TERMINAL));
+        quant_order_intent::Entity::find()
+            .join(
+                JoinType::InnerJoin,
+                quant_order_intent::Relation::Recommendation.def(),
+            )
+            .join(
+                JoinType::LeftJoin,
+                quant_order_intent::Relation::Position.def(),
+            )
+            .filter(quant_order_intent::Column::Status.is_in(statuses))
+            .filter(eligible_state)
+            .order_by_asc(quant_order_intent::Column::UpdatedAt)
+            .limit(limit)
             .all(&self.db)
             .await
             .map_err(StorageError::from)
@@ -519,9 +576,10 @@ async fn apply_approval(
     if let Some(new_allocated) = allocated_override {
         let cap = load_capital(db, intent_id).await?;
         if new_allocated > cap.allocated_usd {
-            return Err(StorageError::Conflict(format!(
-                "approval cannot increase reserved capital for intent {intent_id}"
-            )));
+            return Err(error::invariant_violation(
+                Some(entity::QUANT_CAPITAL_ALLOCATION),
+                format!("approval cannot increase reserved capital for intent {intent_id}"),
+            ));
         }
         validate_non_negative(
             new_allocated,
@@ -536,9 +594,12 @@ async fn apply_approval(
             cap.spent_usd,
             cap.released_usd,
         ) {
-            return Err(StorageError::Conflict(format!(
-                "downscaled allocation violates the reserve invariant for intent {intent_id}"
-            )));
+            return Err(error::invariant_violation(
+                Some(entity::QUANT_CAPITAL_ALLOCATION),
+                format!(
+                    "downscaled allocation violates the reserve invariant for intent {intent_id}"
+                ),
+            ));
         }
         let mut cap_active = cap.into_active_model();
         cap_active.allocated_usd = ActiveValue::Set(new_allocated);
@@ -578,10 +639,7 @@ pub async fn load_intent(
         .one(db)
         .await
         .map_err(StorageError::from)?
-        .ok_or_else(|| StorageError::NotFound {
-            entity: "order_intent",
-            id: intent_id.to_string(),
-        })
+        .ok_or_else(|| error::not_found(entity::QUANT_ORDER_INTENT, intent_id))
 }
 
 pub fn validate_intent_transition(
@@ -631,9 +689,10 @@ pub fn validate_intent_transition(
     if valid {
         return Ok(());
     }
-    Err(StorageError::Conflict(format!(
-        "invalid order intent transition for {intent_id}: {} -> {}",
-        current.as_str(),
-        next.as_str()
-    )))
+    Err(error::illegal_transition(
+        entity::QUANT_ORDER_INTENT,
+        Some(intent_id),
+        current,
+        next,
+    ))
 }

@@ -37,10 +37,6 @@ use crate::{
 pub struct SelectionThresholds {
     /// Categories eligible for selection.
     pub enabled_categories: HashSet<MarketCategory>,
-    /// Operator-forced inclusions (override category disablement).
-    pub included_market_ids: HashSet<String>,
-    /// Operator-forced exclusions (always blocked).
-    pub excluded_market_ids: HashSet<String>,
     /// Minimum Gamma liquidity in USD.
     pub min_liquidity_usd: Usd,
     /// Minimum trailing 24h volume in USD.
@@ -74,8 +70,6 @@ impl SelectionThresholds {
     ) -> QuantResult<Self> {
         Ok(Self {
             enabled_categories: selection.enabled_categories.iter().copied().collect(),
-            included_market_ids: selection.included_market_ids.ids.iter().cloned().collect(),
-            excluded_market_ids: selection.excluded_market_ids.ids.iter().cloned().collect(),
             min_liquidity_usd: parse_usd(&selection.min_liquidity_usd)?,
             min_volume_24h_usd: parse_usd(&selection.min_volume_24h_usd)?,
             max_spread_bps: Decimal::from(selection.max_spread_bps),
@@ -138,15 +132,21 @@ impl SelectionFilter for MarketStatusFilter {
     }
 
     fn evaluate(&self, ctx: &MarketCandidateCtx<'_>) -> FilterOutcome {
-        if ctx.candidate.status == MarketStatus::Active {
-            FilterOutcome::Keep
-        } else {
-            FilterOutcome::Exclude(ExclusionReason::NotOpen)
+        match ctx.candidate.status {
+            MarketStatus::Active => FilterOutcome::Keep,
+            MarketStatus::ManuallyBlocked => {
+                FilterOutcome::Exclude(ExclusionReason::ManuallyBlocked)
+            }
+            MarketStatus::Discovered
+            | MarketStatus::Filtered
+            | MarketStatus::Paused
+            | MarketStatus::Settled
+            | MarketStatus::Delisted => FilterOutcome::Exclude(ExclusionReason::NotOpen),
         }
     }
 }
 
-/// Stage 2 — category gate, with operator inclusion override.
+/// Stage 2 — category gate.
 pub struct CategoryFilter;
 
 impl SelectionFilter for CategoryFilter {
@@ -155,10 +155,6 @@ impl SelectionFilter for CategoryFilter {
     }
 
     fn evaluate(&self, ctx: &MarketCandidateCtx<'_>) -> FilterOutcome {
-        let market_id = ctx.candidate.market_id.as_str();
-        if ctx.thresholds.included_market_ids.contains(market_id) {
-            return FilterOutcome::Keep;
-        }
         if ctx
             .thresholds
             .enabled_categories
@@ -277,29 +273,7 @@ impl SelectionFilter for ResolutionAmbiguityFilter {
     }
 }
 
-/// Stage 6 — operator block list. Always rejects, beating the inclusion
-/// override applied in [`CategoryFilter`].
-pub struct ManualBlockFilter;
-
-impl SelectionFilter for ManualBlockFilter {
-    fn name(&self) -> &'static str {
-        "manual_block"
-    }
-
-    fn evaluate(&self, ctx: &MarketCandidateCtx<'_>) -> FilterOutcome {
-        if ctx
-            .thresholds
-            .excluded_market_ids
-            .contains(ctx.candidate.market_id.as_str())
-        {
-            FilterOutcome::Exclude(ExclusionReason::ManuallyBlocked)
-        } else {
-            FilterOutcome::Keep
-        }
-    }
-}
-
-/// Stage 7 — model feature-availability gate.
+/// Stage 6 — model feature-availability gate.
 ///
 /// With no required features the stage keeps every market. Otherwise the
 /// [`FeatureAvailabilityOracle`] checks each required feature's source against
@@ -333,7 +307,7 @@ pub struct FilterChain {
 }
 
 impl FilterChain {
-    /// The canonical 7-stage pipeline in evaluation order.
+    /// The canonical 6-stage pipeline in evaluation order.
     #[must_use]
     pub fn standard() -> Self {
         Self {
@@ -343,7 +317,6 @@ impl FilterChain {
                 Box::new(LiquidityFilter),
                 Box::new(DataQualityFilter),
                 Box::new(ResolutionAmbiguityFilter),
-                Box::new(ManualBlockFilter),
                 Box::new(ModelEligibilityFilter),
             ],
         }

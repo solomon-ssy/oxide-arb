@@ -139,6 +139,12 @@ pub struct MetricsHub {
     // ── Execution admission (05.3) ────────────────────────────────────────
     /// Admission denials by the check id that determined the `Deny` outcome.
     pub admission_denied: IntCounterVec,
+    /// Order intents created by runtime mode and intent kind.
+    pub order_intents_created: IntCounterVec,
+    /// Order intents approved by runtime mode and intent kind.
+    pub order_intents_approved: IntCounterVec,
+    /// Order intents rejected by runtime mode and intent kind.
+    pub order_intents_rejected: IntCounterVec,
 
     // ── Entry execution (05.4) ────────────────────────────────────────────
     /// Entry orders successfully submitted to the venue (write-ahead committed).
@@ -214,6 +220,9 @@ struct ReportMetrics {
 struct ExecutionMetrics {
     auto_execution_halted: IntGauge,
     admission_denied: IntCounterVec,
+    order_intents_created: IntCounterVec,
+    order_intents_approved: IntCounterVec,
+    order_intents_rejected: IntCounterVec,
     execution_orders_submitted: IntCounter,
     execution_fills: IntCounter,
     execution_breaker_trips: IntCounterVec,
@@ -453,6 +462,24 @@ fn register_execution_metrics(registry: &Registry) -> ExecutionMetrics {
             "Execution admission denials by the check id that determined the deny",
             &["check_id"]
         ),
+        order_intents_created: register_counter_vec!(
+            registry,
+            "quant_order_intents_created_total",
+            "Order intents created by runtime mode and intent kind",
+            &["mode", "kind"]
+        ),
+        order_intents_approved: register_counter_vec!(
+            registry,
+            "quant_order_intents_approved_total",
+            "Order intents approved by runtime mode and intent kind",
+            &["mode", "kind"]
+        ),
+        order_intents_rejected: register_counter_vec!(
+            registry,
+            "quant_order_intents_rejected_total",
+            "Order intents rejected by runtime mode and intent kind",
+            &["mode", "kind"]
+        ),
         execution_orders_submitted: register_counter!(
             registry,
             "quant_execution_orders_submitted_total",
@@ -559,6 +586,9 @@ impl MetricsHub {
             report_expire_swept_total: report.expire_swept,
             auto_execution_halted: execution.auto_execution_halted,
             admission_denied: execution.admission_denied,
+            order_intents_created: execution.order_intents_created,
+            order_intents_approved: execution.order_intents_approved,
+            order_intents_rejected: execution.order_intents_rejected,
             execution_orders_submitted: execution.execution_orders_submitted,
             execution_fills: execution.execution_fills,
             execution_breaker_trips: execution.execution_breaker_trips,
@@ -571,6 +601,24 @@ impl MetricsHub {
     /// Count one entry order submitted to the venue.
     pub fn inc_execution_order_submitted(&self) {
         self.execution_orders_submitted.inc();
+    }
+
+    pub fn inc_order_intent_created(&self, mode: &str, kind: &str) {
+        self.order_intents_created
+            .with_label_values(&[mode, kind])
+            .inc();
+    }
+
+    pub fn inc_order_intent_approved(&self, mode: &str, kind: &str) {
+        self.order_intents_approved
+            .with_label_values(&[mode, kind])
+            .inc();
+    }
+
+    pub fn inc_order_intent_rejected(&self, mode: &str, kind: &str) {
+        self.order_intents_rejected
+            .with_label_values(&[mode, kind])
+            .inc();
     }
 
     /// Count one venue fill observed on submission.
@@ -699,5 +747,22 @@ impl MetricsHub {
 impl Default for MetricsHub {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MetricsHub;
+
+    #[test]
+    fn order_intent_created_and_approved_counters_increase() {
+        let hub = MetricsHub::new();
+        hub.inc_order_intent_created("auto_execution", "buy");
+        hub.inc_order_intent_approved("auto_execution", "buy");
+        let (_, text) = hub.gather_prometheus_text().expect("gather");
+        let body = String::from_utf8(text).expect("utf8");
+        assert!(body.contains("quant_order_intents_created_total"));
+        assert!(body.contains("quant_order_intents_approved_total"));
+        assert!(body.contains(r#"mode="auto_execution""#));
     }
 }

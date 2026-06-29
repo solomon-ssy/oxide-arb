@@ -4,7 +4,9 @@ use chrono::Utc;
 use quant_pivot_core::report::AdHocReportRequest;
 use quant_pivot_error::{QuantError, account::AccountError};
 use quant_pivot_models::enums::quant::{EmptyReason, RecommendationReportStatus};
-use quant_pivot_repository::traits::{RecommendationReportRepository, RecommendationRepository};
+use quant_pivot_repository::traits::{
+    OperationLogRepository, RecommendationReportRepository, RecommendationRepository,
+};
 use quant_pivot_test_support::{
     pg::setup_pg,
     report_pipeline_harness::{HarnessOptions, MARKET_ID, ReportPipelineHarness},
@@ -32,6 +34,19 @@ async fn ad_hoc_publishes_report_with_recommendations() {
 
     assert_eq!(report.status, RecommendationReportStatus::Published);
     assert!(report.summary_json.published_recommendation_count >= 1);
+
+    let publish_logs = quant_pivot_repository::postgres::PgOperationLogRepository::new(db.clone())
+        .page(quant_pivot_models::domain::OperationLogQuery {
+            request_id: Some(format!("ad_hoc:{request_id}")),
+            ..quant_pivot_models::domain::OperationLogQuery::default()
+        })
+        .await
+        .expect("publish operation log");
+    assert_eq!(publish_logs.total, 1);
+    assert!(
+        publish_logs.items[0].after_hash.is_some(),
+        "publish must record after_hash"
+    );
 
     let recs = harness
         .recommendation_repo
@@ -192,6 +207,26 @@ async fn revoke_after_publish() {
         recs.iter().all(
             |rec| rec.status == quant_pivot_models::enums::quant::RecommendationStatus::Revoked
         )
+    );
+
+    let op_logs = quant_pivot_repository::postgres::PgOperationLogRepository::new(db.clone())
+        .page(quant_pivot_models::domain::OperationLogQuery {
+            request_id: Some(format!(
+                "quant-report:revoke:{}",
+                report.recommendation_report_id
+            )),
+            ..quant_pivot_models::domain::OperationLogQuery::default()
+        })
+        .await
+        .expect("revoke operation log");
+    assert_eq!(op_logs.total, 1);
+    assert!(
+        op_logs.items[0].before_hash.is_some(),
+        "system revoke must record before_hash"
+    );
+    assert!(
+        op_logs.items[0].after_hash.is_some(),
+        "system revoke must record after_hash"
     );
 }
 

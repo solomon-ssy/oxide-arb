@@ -58,6 +58,11 @@ crate::pg_enum! {
     }
 }
 
+impl PositionLedgerState {
+    /// Position states that allow filled-intent attribution to finalize.
+    pub const ATTRIBUTION_READY: [Self; 2] = [Self::Closed, Self::Settled];
+}
+
 crate::pg_enum! {
     type_name = "qp_reconciliation_result",
     pub enum ReconciliationResult {
@@ -72,6 +77,18 @@ crate::pg_enum! {
         PartiallyFilled => "partially_filled",
         Cancelled => "cancelled",
         Unresolvable => "unresolvable",
+    }
+}
+
+impl ReconciliationResult {
+    /// Whether this reconciliation verdict blocks final attribution (05.7).
+    ///
+    /// Terminal filled/settled facts require reconciled truth; `Pending` and
+    /// `Unresolvable` mean the ledger is still ambiguous and attribution must
+    /// wait for a later sweep.
+    #[must_use]
+    pub const fn blocks_final_attribution(self) -> bool {
+        matches!(self, Self::Pending | Self::Unresolvable)
     }
 }
 
@@ -241,7 +258,7 @@ crate::wire_enum! {
 
 #[cfg(test)]
 mod tests {
-    use super::KillSwitchState;
+    use super::{KillSwitchState, ReconciliationResult};
 
     /// Behavior table (父文档 §8 / 05.1 §6) encoded as a single source of truth.
     /// Columns: state, new-entry, auto-exit, emergency-exit.
@@ -287,5 +304,15 @@ mod tests {
         assert!(KillSwitchState::EmergencyHalted.is_emergency());
         assert!(!KillSwitchState::Closed.is_emergency());
         assert!(!KillSwitchState::ExecutionHalted.is_emergency());
+    }
+
+    #[test]
+    fn reconciliation_blocks_final_attribution() {
+        assert!(ReconciliationResult::Pending.blocks_final_attribution());
+        assert!(ReconciliationResult::Unresolvable.blocks_final_attribution());
+        assert!(!ReconciliationResult::Filled.blocks_final_attribution());
+        assert!(!ReconciliationResult::NotFilled.blocks_final_attribution());
+        assert!(!ReconciliationResult::PartiallyFilled.blocks_final_attribution());
+        assert!(!ReconciliationResult::Cancelled.blocks_final_attribution());
     }
 }

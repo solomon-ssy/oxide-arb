@@ -35,12 +35,13 @@ use std::{
 use arc_swap::ArcSwap;
 use chrono::{DateTime, NaiveDate, Utc};
 use quant_pivot_models::{
-    domain::{KillSwitchPort, NewOperationLog, SetKillSwitchCommand},
+    domain::{KillSwitchPort, KillSwitchView, NewOperationLog, SetKillSwitchCommand},
     enums::{
         execution::KillSwitchState,
         operation_log::{OperationCategory, OperationOutcome},
         rbac::ResourceType,
     },
+    hashing,
     runtime_config::ExecutionBreakerConfig,
     types::{OperationLogId, Usd},
 };
@@ -408,6 +409,7 @@ impl ExecutionBreaker {
 
     pub async fn trip_kill_switch(&self, dimension: &str, detail: &str) {
         let reason = format!("execution breaker tripped ({dimension}): {detail}");
+        let before = self.kill_switch.view();
         let command = SetKillSwitchCommand {
             target: KillSwitchState::ExecutionHalted,
             actor: BREAKER_ACTOR.to_owned(),
@@ -416,9 +418,9 @@ impl ExecutionBreaker {
             latch: true,
         };
         match self.kill_switch.set(command).await {
-            Ok(_) => {
+            Ok(after) => {
                 self.metrics.inc_execution_breaker_trip(dimension);
-                self.write_audit(dimension, &reason).await;
+                self.write_audit(dimension, &reason, &before, &after).await;
             }
             Err(error) => {
                 tracing::error!(%error, "execution breaker failed to trip kill-switch");
@@ -428,7 +430,27 @@ impl ExecutionBreaker {
 
     /// Best-effort WORM audit for the system-initiated escalation (the operation
     /// audit middleware only covers HTTP-origin kill-switch changes).
-    async fn write_audit(&self, dimension: &str, reason: &str) {
+    async fn write_audit(
+        &self,
+        dimension: &str,
+        reason: &str,
+        before: &KillSwitchView,
+        after: &KillSwitchView,
+    ) {
+        let before_hash = match hashing::canonical_state_hash(before) {
+            Ok(hash) => Some(hash),
+            Err(error) => {
+                tracing::error!(%error, "execution breaker failed to hash kill-switch before state");
+                None
+            }
+        };
+        let after_hash = match hashing::canonical_state_hash(after) {
+            Ok(hash) => Some(hash),
+            Err(error) => {
+                tracing::error!(%error, "execution breaker failed to hash kill-switch after state");
+                None
+            }
+        };
         let log = NewOperationLog {
             id: OperationLogId::from_v7(),
             request_id: format!("execution-breaker:{dimension}"),
@@ -447,6 +469,8 @@ impl ExecutionBreaker {
             user_agent: None,
             latency_ms: 0,
             detail: serde_json::json!({ "dimension": dimension, "reason": reason }),
+            before_hash,
+            after_hash,
             governance_audit_event_id: None,
             governance_audit_sequence: None,
         };

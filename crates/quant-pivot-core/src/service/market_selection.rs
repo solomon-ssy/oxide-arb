@@ -8,7 +8,6 @@ use std::collections::HashMap;
 use quant_pivot_error::{QuantResult, report::ReportError};
 use quant_pivot_models::{
     domain::{MarketCandidate, MarketSelectionModel, NewMarketSelection, NewMarketSelectionMember},
-    entities::quant_market_selection::{SelectionExcludedMarketIds, SelectionIncludedMarketIds},
     enums::market::MarketStatus,
     types::MarketId,
 };
@@ -28,21 +27,6 @@ pub fn map_snapshot_to_model(
         .map(|candidate| (candidate.market_id.clone(), candidate.status))
         .collect::<HashMap<MarketId, MarketStatus>>();
 
-    let included_market_ids = SelectionIncludedMarketIds(
-        snapshot
-            .included
-            .iter()
-            .map(|market| market.market_id.as_str().to_owned())
-            .collect(),
-    );
-    let excluded_market_ids = SelectionExcludedMarketIds(
-        snapshot
-            .excluded
-            .iter()
-            .map(|market| market.market_id.as_str().to_owned())
-            .collect(),
-    );
-
     let snapshot_row = NewMarketSelection {
         market_selection_id: snapshot.market_selection_id.clone(),
         as_of: snapshot.as_of,
@@ -57,8 +41,6 @@ pub fn map_snapshot_to_model(
                 ),
             }
         })?,
-        included_market_ids,
-        excluded_market_ids,
         exclusion_summary: snapshot.exclusion_summary,
     };
 
@@ -140,7 +122,7 @@ mod tests {
     }
 
     #[test]
-    fn map_snapshot_to_model_projects_members_and_exclusion_lists() {
+    fn map_snapshot_to_model_projects_members_and_summary() {
         let snapshot = MarketSelectionSnapshot {
             market_selection_id: MarketSelectionId::from_v7(),
             as_of: as_of(),
@@ -172,14 +154,6 @@ mod tests {
             snapshot.market_selection_id
         );
         assert_eq!(model.snapshot.market_count, 1);
-        assert_eq!(
-            model.snapshot.included_market_ids.0,
-            vec!["0xok".to_owned()]
-        );
-        assert_eq!(
-            model.snapshot.excluded_market_ids.0,
-            vec!["0xblocked".to_owned()]
-        );
         assert_eq!(model.members.len(), 1);
         assert_eq!(model.members[0].market_id.as_str(), "0xok");
         assert_eq!(model.members[0].status, MarketStatus::Active);

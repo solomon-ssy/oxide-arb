@@ -3,9 +3,12 @@
 //! In-memory stubs exercise `CoreExecutionDispatcher::submit_if_admitted` without
 //! Postgres or a live venue.
 
-use std::sync::{
-    Arc, Mutex,
-    atomic::{AtomicBool, Ordering},
+use std::{
+    collections::HashSet,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use async_trait::async_trait;
@@ -29,26 +32,30 @@ use quant_pivot_core::{
     runtime_config::RuntimeConfigStore,
     service::account::{AccountProviderFactory, PolymarketAccountClient, ReservedCapitalReader},
 };
-use quant_pivot_error::{QuantError, QuantResult, storage::StorageError};
+use quant_pivot_error::{
+    QuantError, QuantResult,
+    storage::{StorageError, entity},
+};
 use quant_pivot_models::{
     domain::{
         AppendReconciliationEvidence, ApproveOrderIntent, ApproveOrderIntentOutcome, BookLevel,
         BookSnapshot, CapitalAllocationInfo, CapitalSettlement, DataQualityPort,
         DataQualitySnapshot, ExecutionOrderInfo, ExecutionOrderPatch, ExecutionSubmitPort,
-        ExitLedgerWrite, KillSwitchPort, KillSwitchView, ModelSpecInfo, ModelVersionInfo,
-        NewCapitalAllocation, NewExecutionOrder, NewModelSpec, NewModelVersion, NewOperationLog,
-        NewOrderIntent, NewReconciliation, NewReportTransaction, NewRuntimeConfigActivation,
-        NewRuntimeConfigVersion, OrderIntentInfo, Paginated, QuantReportListQuery,
-        RecommendationInfo, RecommendationReportInfo, ReconciliationInfo, ReconciliationPatch,
-        RuntimeConfigActivationInfo, RuntimeConfigVersionInfo, SetKillSwitchCommand,
-        SubmissionLedgerWrite,
+        ExitLedgerWrite, KillSwitchPort, KillSwitchView, MarketInfo, MarketPageQuery,
+        ModelSpecInfo, ModelVersionInfo, NewCapitalAllocation, NewExecutionOrder, NewModelSpec,
+        NewModelVersion, NewOperationLog, NewOrderIntent, NewReconciliation, NewReportTransaction,
+        NewRuntimeConfigActivation, NewRuntimeConfigVersion, OrderIntentInfo, Paginated,
+        QuantReportListQuery, RecommendationInfo, RecommendationReportInfo, ReconciliationInfo,
+        ReconciliationPatch, RuntimeConfigActivationInfo, RuntimeConfigVersionInfo,
+        SetKillSwitchCommand, SubmissionLedgerWrite, UpsertMarket,
     },
     enums::{
-        common::{OrderType, Side},
+        common::{MarketCategory, OrderType, Side, TickSize},
         execution::{
             AdmissionCheckId, AdmissionOutcome, ApprovalInvalidation, CapitalAllocationState,
             ExitReason, ExitState, KillSwitchState, OrderIntentKind,
         },
+        market::MarketStatus,
         quant::{
             AccountSource, ApprovalStatus, ExecutionOrderState, OrderIntentStatus, OutcomeSide,
             PublicationStatus, QuantRuntimeMode, RecommendationReportStatus, ReportKind,
@@ -57,15 +64,15 @@ use quant_pivot_models::{
     },
     runtime_config::{DecimalString, ExecutionBreakerConfig, RuntimeConfig},
     types::{
-        Bps, CapitalAllocationId, ContentHash, EntryOrderSpec, ExecutedPartialExitNodes,
-        ExecutionOrderId, ExitPolicySpec, ModelSpecId, ModelVersionId, OrderId, OrderIntentId,
-        Price, RecommendationId, RecommendationReportId, ReconciliationId, RuntimeConfigVersionId,
-        SchemaVersion, Shares, Usd,
+        Bps, CapitalAllocationId, ContentHash, EntryOrderSpec, EventId, ExecutedPartialExitNodes,
+        ExecutionOrderId, ExitPolicySpec, MarketId, ModelSpecId, ModelVersionId, OrderId,
+        OrderIntentId, Price, RecommendationId, RecommendationReportId, ReconciliationId,
+        RuntimeConfigVersionId, SchemaVersion, Shares, TokenId, Usd,
     },
 };
 use quant_pivot_repository::traits::{
     CapitalAllocationRepository, ExecutionOrderRepository, ExecutionSubmissionRepository,
-    ModelRegistryRepository, OperationLogRepository, OrderIntentRepository,
+    MarketRepository, ModelRegistryRepository, OperationLogRepository, OrderIntentRepository,
     RecommendationReportRepository, RecommendationRepository, ReconciliationRepository,
     RuntimeConfigVersionRepository,
 };
@@ -229,7 +236,11 @@ impl OrderIntentRepository for MemoryIntentRepo {
         _: NewOrderIntent,
         _: NewCapitalAllocation,
     ) -> Result<OrderIntentInfo, StorageError> {
-        Err(StorageError::Conflict("stub".to_owned()))
+        Err(StorageError::state_conflict(
+            entity::QUANT_ORDER_INTENT,
+            None::<&str>,
+            "stub",
+        ))
     }
 
     async fn approve(
@@ -240,15 +251,27 @@ impl OrderIntentRepository for MemoryIntentRepo {
         _: Option<Usd>,
         _: DateTime<Utc>,
     ) -> Result<ApproveOrderIntentOutcome, StorageError> {
-        Err(StorageError::Conflict("stub".to_owned()))
+        Err(StorageError::state_conflict(
+            entity::QUANT_ORDER_INTENT,
+            None::<&str>,
+            "stub",
+        ))
     }
 
     async fn reject(&self, _: &OrderIntentId, _: String) -> Result<OrderIntentInfo, StorageError> {
-        Err(StorageError::Conflict("stub".to_owned()))
+        Err(StorageError::state_conflict(
+            entity::QUANT_ORDER_INTENT,
+            None::<&str>,
+            "stub",
+        ))
     }
 
     async fn cancel(&self, _: &OrderIntentId, _: String) -> Result<OrderIntentInfo, StorageError> {
-        Err(StorageError::Conflict("stub".to_owned()))
+        Err(StorageError::state_conflict(
+            entity::QUANT_ORDER_INTENT,
+            None::<&str>,
+            "stub",
+        ))
     }
 
     async fn expire(
@@ -256,7 +279,11 @@ impl OrderIntentRepository for MemoryIntentRepo {
         _: &OrderIntentId,
         _: NewOperationLog,
     ) -> Result<OrderIntentInfo, StorageError> {
-        Err(StorageError::Conflict("stub".to_owned()))
+        Err(StorageError::state_conflict(
+            entity::QUANT_ORDER_INTENT,
+            None::<&str>,
+            "stub",
+        ))
     }
 
     async fn invalidate(
@@ -265,7 +292,11 @@ impl OrderIntentRepository for MemoryIntentRepo {
         _: ApprovalInvalidation,
         _: NewOperationLog,
     ) -> Result<OrderIntentInfo, StorageError> {
-        Err(StorageError::Conflict("stub".to_owned()))
+        Err(StorageError::state_conflict(
+            entity::QUANT_ORDER_INTENT,
+            None::<&str>,
+            "stub",
+        ))
     }
 
     async fn find_by_id(
@@ -367,13 +398,18 @@ impl ExecutionSubmissionRepository for MemorySubmissionRepo {
             row.status,
             OrderIntentStatus::Approved | OrderIntentStatus::ApprovedByPolicy
         ) {
-            return Err(StorageError::Conflict(format!(
-                "not submittable from {}",
-                row.status.as_str()
-            )));
+            return Err(StorageError::state_conflict(
+                entity::QUANT_ORDER_INTENT,
+                Some(intent_id),
+                format!("not submittable from {}", row.status.as_str()),
+            ));
         }
         if row.expires_at <= now {
-            return Err(StorageError::Conflict("expired".to_owned()));
+            return Err(StorageError::state_conflict(
+                entity::QUANT_ORDER_INTENT,
+                Some(intent_id),
+                "intent has expired and cannot be submitted",
+            ));
         }
         row.status = OrderIntentStatus::AdmissionPending;
         Ok(row.clone())
@@ -465,7 +501,9 @@ impl ExecutionSubmissionRepository for MemorySubmissionRepo {
             let order = orders
                 .iter_mut()
                 .find(|o| o.execution_order_id == *execution_order_id)
-                .ok_or_else(|| StorageError::Conflict("order not found".to_owned()))?;
+                .ok_or_else(|| {
+                    StorageError::not_found(entity::QUANT_EXECUTION_ORDER, execution_order_id)
+                })?;
             order.state = write.state;
             order.venue_order_id = write.venue_order_id;
             order.venue_status = write.venue_status;
@@ -704,6 +742,20 @@ impl RecommendationRepository for StubRecommendations {
     ) -> Result<RecommendationInfo, StorageError> {
         unimplemented!()
     }
+
+    async fn find_expired_attribution_candidates(
+        &self,
+        _: u64,
+    ) -> Result<Vec<RecommendationInfo>, StorageError> {
+        unimplemented!()
+    }
+
+    async fn recommendation_blocks_final_attribution(
+        &self,
+        _: &RecommendationId,
+    ) -> Result<bool, StorageError> {
+        unimplemented!()
+    }
 }
 
 struct StubReports(RecommendationReportInfo);
@@ -770,6 +822,84 @@ impl RecommendationReportRepository for StubReports {
         _: NewOperationLog,
     ) -> Result<RecommendationReportInfo, StorageError> {
         unimplemented!()
+    }
+}
+
+struct StubMarkets;
+
+#[async_trait]
+impl MarketRepository for StubMarkets {
+    async fn find_by_id(&self, id: &MarketId) -> Result<Option<Arc<MarketInfo>>, StorageError> {
+        Ok(Some(Arc::new(active_market(id.clone()))))
+    }
+
+    async fn find_by_ids(&self, ids: &[MarketId]) -> Result<Vec<Arc<MarketInfo>>, StorageError> {
+        Ok(ids
+            .iter()
+            .cloned()
+            .map(active_market)
+            .map(Arc::new)
+            .collect())
+    }
+
+    async fn page(&self, _query: MarketPageQuery) -> Result<Paginated<MarketInfo>, StorageError> {
+        unimplemented!()
+    }
+
+    async fn find_active(&self) -> Result<Arc<[MarketInfo]>, StorageError> {
+        unimplemented!()
+    }
+
+    async fn find_by_event(&self, _event_id: &str) -> Result<Vec<Arc<MarketInfo>>, StorageError> {
+        unimplemented!()
+    }
+
+    async fn find_existing_ids(&self, _ids: &[MarketId]) -> Result<HashSet<String>, StorageError> {
+        unimplemented!()
+    }
+
+    async fn upsert(&self, _market: UpsertMarket) -> Result<Arc<MarketInfo>, StorageError> {
+        unimplemented!()
+    }
+
+    async fn upsert_batch(&self, _markets: Vec<UpsertMarket>) -> Result<u64, StorageError> {
+        unimplemented!()
+    }
+
+    async fn update_status(
+        &self,
+        _id: &MarketId,
+        _status: &str,
+        _outcome: Option<&str>,
+    ) -> Result<(), StorageError> {
+        unimplemented!()
+    }
+}
+
+fn active_market(market_id: MarketId) -> MarketInfo {
+    MarketInfo {
+        market_id,
+        event_id: EventId::new("evt-test"),
+        question: "Will the test market resolve yes?".to_owned(),
+        slug: "test-market".to_owned(),
+        categories: vec![MarketCategory::Politics],
+        status: MarketStatus::Active,
+        outcome: None,
+        yes_token_id: TokenId::new("yes-token"),
+        no_token_id: TokenId::new("no-token"),
+        tick_size: TickSize::Hundredth,
+        neg_risk: false,
+        end_date: None,
+        resolved_at: None,
+        fees_enabled: true,
+        fee_rate: None,
+        fee_exponent: None,
+        fee_taker_only: None,
+        fee_rebate_rate: None,
+        fee_source: None,
+        fee_observed_at: None,
+        created_at: now(),
+        updated_at: now(),
     }
 }
 
@@ -1102,6 +1232,7 @@ fn build_harness_with_result(
         reconciliation: Arc::new(StubReconciliation),
         execution_orders: Arc::new(StubExecutionOrders),
         capital: Arc::new(StubCapital(alloc)),
+        markets: Arc::new(StubMarkets),
         config_versions: Arc::new(StubConfigVersions),
         account_factory: Arc::new(AccountProviderFactory::new(
             Some(Arc::new(StubAccountClient)),

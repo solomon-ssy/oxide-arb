@@ -1,8 +1,8 @@
 use quant_pivot_error::storage::StorageError;
-use quant_pivot_models::domain::{
-    FactorDefinitionInfo, FactorValueInfo, NewFactorDefinition, NewFactorValue,
+use quant_pivot_models::{
+    domain::{FactorDefinitionInfo, FactorValueInfo, NewFactorDefinition, NewFactorValue},
+    types::{FactorDefinitionId, ModelRunId},
 };
-use quant_pivot_models::types::{FactorDefinitionId, ModelRunId};
 
 /// Factor definition and value persistence port.
 #[async_trait::async_trait]
@@ -21,6 +21,21 @@ pub trait FactorRepository: Send + Sync {
         &self,
         factor_definition_id: &FactorDefinitionId,
     ) -> Result<Option<FactorDefinitionInfo>, StorageError>;
+
+    async fn find_definitions_by_ids(
+        &self,
+        factor_definition_ids: &[FactorDefinitionId],
+    ) -> Result<Vec<FactorDefinitionInfo>, StorageError>;
+
+    async fn publish_definition(
+        &self,
+        factor_definition_id: &FactorDefinitionId,
+    ) -> Result<FactorDefinitionInfo, StorageError>;
+
+    async fn retire_definition(
+        &self,
+        factor_definition_id: &FactorDefinitionId,
+    ) -> Result<FactorDefinitionInfo, StorageError>;
 
     async fn list_values_for_run(
         &self,

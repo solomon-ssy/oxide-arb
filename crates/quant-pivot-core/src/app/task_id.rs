@@ -59,6 +59,10 @@ pub enum TaskId {
     ReconciliationWorker,
     /// Scans open position lots and evaluates the exit priority ladder (05.6).
     ExitMonitor,
+    /// Writes final recommendation-attribution rows after execution reaches truth.
+    AttributionWorker,
+    /// Best-effort analytics mirror for final attribution events (05.7).
+    AttributionEventsWriter,
     ExecutionHeartbeat,
 
     // ── Risk / periodic ───────────────────────────────────────────────
@@ -122,7 +126,8 @@ impl TaskId {
             | Self::ExecutionDispatcher
             | Self::ExecutionBreakerTick
             | Self::ReconciliationWorker
-            | Self::ExitMonitor => TaskKind::Execution,
+            | Self::ExitMonitor
+            | Self::AttributionWorker => TaskKind::Execution,
             Self::ExecutionHeartbeat => TaskKind::ExecutionHeartbeat,
             Self::RiskTick
             | Self::ExposureGc
@@ -145,6 +150,7 @@ impl TaskId {
             | Self::FactorEventsWriter
             | Self::SignalCandidateEventsWriter
             | Self::RecommendationEventsWriter
+            | Self::AttributionEventsWriter
             | Self::BookSnapshotPublisher => TaskKind::AnalyticsWriter,
             Self::RiskStatePersist | Self::RiskStateDebouncer => TaskKind::PositionPersistence,
         }

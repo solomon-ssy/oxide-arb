@@ -5,7 +5,7 @@ use sea_orm::{
 };
 
 use crate::{
-    enums::quant::RecommendationOutcome,
+    enums::quant::RecommendationAttributionOutcome,
     idens::quant_recommendation::QuantRecommendation,
     schema::{
         column, dependency::TableDependency, index::IndexSpec, seed::SeedSpec,
@@ -26,7 +26,6 @@ pub enum QuantRecommendationAttribution {
     LabelAvailableAt,
     AttributionJson,
     CreatedAt,
-    UpdatedAt,
 }
 
 pub fn table() -> TableCreateStatement {
@@ -36,7 +35,7 @@ pub fn table() -> TableCreateStatement {
         .col(column::uuid_pk(
             QuantRecommendationAttribution::RecommendationId,
         ))
-        .col(column::pg_enum::<RecommendationOutcome>(
+        .col(column::pg_enum::<RecommendationAttributionOutcome>(
             QuantRecommendationAttribution::Outcome,
         ))
         .col(
@@ -74,9 +73,6 @@ pub fn table() -> TableCreateStatement {
         )
         .col(timestamp_with_write_default(
             QuantRecommendationAttribution::CreatedAt,
-        ))
-        .col(timestamp_with_write_default(
-            QuantRecommendationAttribution::UpdatedAt,
         ))
         .foreign_key(
             ForeignKey::create()

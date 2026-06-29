@@ -419,6 +419,8 @@ fn recommendation_operation_log(
         user_agent: None,
         latency_ms: 0,
         detail: serde_json::json!({ "reason": reason }),
+        before_hash: None,
+        after_hash: None,
         governance_audit_event_id: None,
         governance_audit_sequence: None,
     }
@@ -447,6 +449,8 @@ fn lifecycle_operation_log(
         user_agent: None,
         latency_ms: 0,
         detail: serde_json::json!({ "reason": reason }),
+        before_hash: None,
+        after_hash: None,
         governance_audit_event_id: None,
         governance_audit_sequence: None,
     }

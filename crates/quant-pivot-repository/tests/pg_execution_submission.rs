@@ -17,7 +17,6 @@ use quant_pivot_models::{
         NewReportTransaction, NewRuntimeConfigVersion, PositionExit, PositionFill,
         ReconciliationLedgerWrite, SubmissionLedgerWrite,
     },
-    entities::quant_market_selection::{SelectionExcludedMarketIds, SelectionIncludedMarketIds},
     entities::{quant_order_intent, quant_recommendation},
     enums::{
         common::{MarketCategory, OrderType, Side},
@@ -578,7 +577,10 @@ async fn create_rejects_when_recommendation_executed() {
         .expect_err("executed rec must block create");
     assert!(matches!(
         err,
-        quant_pivot_error::storage::StorageError::Conflict(_)
+        quant_pivot_error::storage::StorageError::StateConflict {
+            entity: quant_pivot_error::storage::entity::QUANT_RECOMMENDATION,
+            ..
+        }
     ));
 }
 
@@ -609,7 +611,10 @@ async fn create_rejects_when_submitted_intent_blocks() {
         .expect_err("submitted intent must block create");
     assert!(matches!(
         err,
-        quant_pivot_error::storage::StorageError::Conflict(_)
+        quant_pivot_error::storage::StorageError::Duplicate {
+            entity: quant_pivot_error::storage::entity::QUANT_ORDER_INTENT,
+            ..
+        }
     ));
 }
 
@@ -1393,7 +1398,7 @@ async fn seed_model_version(
 async fn seed_market_selection(
     db: &sea_orm::DatabaseConnection,
     rc_id: &RuntimeConfigVersionId,
-    market_id: &str,
+    _market_id: &str,
 ) -> MarketSelectionId {
     let id = MarketSelectionId::from_v7();
     PgMarketSelectionRepository::new(db.clone())
@@ -1404,8 +1409,6 @@ async fn seed_market_selection(
                 runtime_config_version_id: rc_id.clone(),
                 selector_hash: content_hash('b'),
                 market_count: 1,
-                included_market_ids: SelectionIncludedMarketIds(vec![market_id.to_owned()]),
-                excluded_market_ids: SelectionExcludedMarketIds(Vec::new()),
                 exclusion_summary: SelectionExclusionSummary::default(),
             },
             Vec::new(),
@@ -1532,6 +1535,8 @@ fn report_operation_log(ids: &TxnIds) -> NewOperationLog {
         user_agent: None,
         latency_ms: 0,
         detail: serde_json::json!({ "test": true }),
+        before_hash: None,
+        after_hash: None,
         governance_audit_event_id: None,
         governance_audit_sequence: None,
     }

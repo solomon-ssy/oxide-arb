@@ -78,7 +78,7 @@ impl FactorDefinitionSpec {
             input_schema_version,
             output_schema_version: SchemaVersion::FIRST,
             definition_json,
-            status: PublicationStatus::Published,
+            status: PublicationStatus::Draft,
             created_by: None,
         })
     }

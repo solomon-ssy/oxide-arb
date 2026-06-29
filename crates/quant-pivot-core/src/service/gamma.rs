@@ -23,6 +23,7 @@ use quant_pivot_models::{
         market,
         market::{EventRegistryInfo, MarketRegistryInfo, UpsertEvent, UpsertMarket},
     },
+    enums::market::MarketStatus,
     types::MarketId,
 };
 use quant_pivot_repository::traits::{EventRepository, MarketRepository};
@@ -162,6 +163,8 @@ impl GammaService {
                 .with_label_values(&["past_deadline"])
                 .inc_by(past_deadline_paused);
         }
+        self.preserve_manual_blocks(&mut batch.registry_markets, &mut batch.markets)
+            .await;
 
         self.market_registry.register_events(batch.registry_events);
         prewarm_token_intern(&batch.registry_markets);
@@ -182,6 +185,8 @@ impl GammaService {
 
         let mut persist_batch = batch.markets;
         persist_batch.extend(deactivated_upserts);
+        self.preserve_manual_blocks(&mut [], &mut persist_batch)
+            .await;
 
         self.persist_events(&batch.events).await;
         self.persist_markets(&persist_batch).await;
@@ -270,6 +275,8 @@ impl GammaService {
                 .with_label_values(&["past_deadline"])
                 .inc_by(past_deadline_paused);
         }
+        self.preserve_manual_blocks(&mut all_registry, &mut persist_upserts)
+            .await;
 
         prewarm_token_intern(&all_registry);
         let registered = all_registry.len();
@@ -336,6 +343,48 @@ impl GammaService {
         match self.market_repo.upsert_batch(markets.to_vec()).await {
             Ok(n) => tracing::debug!(count = n, "persisted markets"),
             Err(e) => tracing::warn!(error = %e, "failed to persist markets"),
+        }
+    }
+
+    async fn preserve_manual_blocks(
+        &self,
+        registry_markets: &mut [MarketRegistryInfo],
+        upsert_markets: &mut [UpsertMarket],
+    ) {
+        let ids = registry_markets
+            .iter()
+            .map(|market| market.market_id.clone())
+            .chain(upsert_markets.iter().map(|market| market.market_id.clone()))
+            .collect::<Vec<_>>();
+        if ids.is_empty() {
+            return;
+        }
+        let blocked = match self.market_repo.find_by_ids(&ids).await {
+            Ok(markets) => markets
+                .into_iter()
+                .filter(|market| market.status == MarketStatus::ManuallyBlocked)
+                .map(|market| market.market_id.as_str().to_owned())
+                .collect::<HashSet<_>>(),
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "failed to load current market statuses while preserving manual blocks"
+                );
+                return;
+            }
+        };
+        if blocked.is_empty() {
+            return;
+        }
+        for market in registry_markets {
+            if blocked.contains(market.market_id.as_str()) {
+                market.status = MarketStatus::ManuallyBlocked;
+            }
+        }
+        for market in upsert_markets {
+            if blocked.contains(market.market_id.as_str()) {
+                market.status = MarketStatus::ManuallyBlocked;
+            }
         }
     }
 

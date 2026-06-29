@@ -1,6 +1,9 @@
 //! Web-facing dependency-inversion ports.
 
+pub mod account_read;
 pub mod backtest;
+pub mod execution_read;
+pub mod factor_governance;
 pub mod model_governance;
 pub mod model_training;
 pub mod order_intent;
@@ -8,7 +11,10 @@ pub mod quant_report;
 pub mod runtime_control;
 pub mod training_dataset;
 
+pub use account_read::*;
 pub use backtest::*;
+pub use execution_read::*;
+pub use factor_governance::*;
 pub use model_governance::*;
 pub use model_training::*;
 pub use order_intent::*;

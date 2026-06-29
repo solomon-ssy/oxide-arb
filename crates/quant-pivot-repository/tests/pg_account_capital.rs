@@ -10,14 +10,13 @@ use std::collections::BTreeMap;
 use chrono::{Duration, Utc};
 use quant_pivot_models::{
     domain::{
-        AppendReconciliationEvidence, ExecutionOrderPatch, NewAccountSnapshot,
+        AppendReconciliationEvidence, ExecutionOrderPatch, InsertFinalOutcome, NewAccountSnapshot,
         NewCapitalAllocation, NewExecutionOrder, NewMarketSelection, NewModelRun, NewModelSpec,
         NewModelVersion, NewOperationLog, NewOrderIntent, NewPortfolioPlan, NewRecommendation,
         NewRecommendationAttribution, NewRecommendationReport, NewReconciliation,
         NewReportDataQualitySnapshot, NewReportTransaction, NewRuntimeConfigVersion, NullablePatch,
         OperationLogQuery, Patch, ReconciliationPatch, UpsertKillSwitchState,
     },
-    entities::quant_market_selection::{SelectionExcludedMarketIds, SelectionIncludedMarketIds},
     enums::market::MarketStatus,
     enums::{
         common::{MarketCategory, OrderType, Side},
@@ -31,7 +30,7 @@ use quant_pivot_models::{
         quant::{
             AccountSource, ApprovalStatus, BindingConstraint, EntryTriggerKind,
             ExecutionOrderState, FactorDirection, ModelRunKind, ModelRunStatus, OrderIntentStatus,
-            OutcomeSide, PublicationStatus, QuantRuntimeMode, RecommendationOutcome,
+            OutcomeSide, PublicationStatus, QuantRuntimeMode, RecommendationAttributionOutcome,
             RecommendationReportStatus, RecommendationStatus, ReportKind, ReportTriggerKind,
             SettlementPolicy, SizingModelKind,
         },
@@ -269,6 +268,23 @@ async fn find_expirable_returns_published_reports_before_cutoff_only() {
     assert!(
         after_expiry.is_empty(),
         "rolled-up reports must not be returned by find_expirable"
+    );
+
+    let op_logs = PgOperationLogRepository::new(db.clone())
+        .page(OperationLogQuery {
+            resource_type: Some(ResourceType::QuantReport),
+            ..OperationLogQuery::default()
+        })
+        .await
+        .expect("operation logs");
+    let hashed_transitions = op_logs
+        .items
+        .iter()
+        .filter(|log| log.before_hash.is_some() && log.after_hash.is_some())
+        .count();
+    assert!(
+        hashed_transitions >= 2,
+        "recommendation expire and report roll-up must write before/after hashes"
     );
 }
 
@@ -618,10 +634,10 @@ async fn capital_kill_switch_and_attribution_repositories_round_trip() {
     );
 
     let attribution_repo = PgAttributionRepository::new(db.clone());
-    attribution_repo
-        .create(NewRecommendationAttribution {
+    let outcome = attribution_repo
+        .insert_final_and_mark_attributed(NewRecommendationAttribution {
             recommendation_id: ids.recommendation.clone(),
-            outcome: RecommendationOutcome::Unknown,
+            outcome: RecommendationAttributionOutcome::FailedUnfilled,
             entry_outcome_json: EntryOutcome::default(),
             exit_outcome_json: ExitOutcome::default(),
             realized_pnl_usd: Some(Usd::ZERO),
@@ -634,13 +650,24 @@ async fn capital_kill_switch_and_attribution_repositories_round_trip() {
             },
         })
         .await
-        .expect("create attribution");
+        .expect("insert final attribution");
+    assert!(matches!(outcome, InsertFinalOutcome::Written(_)));
     let attribution = attribution_repo
         .find_by_recommendation(&ids.recommendation)
         .await
         .expect("find attribution");
-    assert_eq!(attribution.len(), 1);
-    assert_eq!(attribution[0].outcome, RecommendationOutcome::Unknown);
+    let attribution = attribution.expect("attribution present");
+    assert_eq!(
+        attribution.outcome,
+        RecommendationAttributionOutcome::FailedUnfilled
+    );
+
+    let recommendation = PgRecommendationRepository::new(db)
+        .find_by_id(&ids.recommendation)
+        .await
+        .expect("load recommendation")
+        .expect("recommendation row");
+    assert_eq!(recommendation.status, RecommendationStatus::Attributed);
 }
 
 async fn seed_report_fixture(db: &sea_orm::DatabaseConnection) -> TxnIds {
@@ -819,7 +846,7 @@ async fn seed_model_version(
 async fn seed_market_selection(
     db: &sea_orm::DatabaseConnection,
     rc_id: &RuntimeConfigVersionId,
-    market_id: &str,
+    _market_id: &str,
     _event_id: &str,
 ) -> MarketSelectionId {
     let id = MarketSelectionId::from_v7();
@@ -831,8 +858,6 @@ async fn seed_market_selection(
                 runtime_config_version_id: rc_id.clone(),
                 selector_hash: content_hash('b'),
                 market_count: 1,
-                included_market_ids: SelectionIncludedMarketIds(vec![market_id.to_owned()]),
-                excluded_market_ids: SelectionExcludedMarketIds(Vec::new()),
                 exclusion_summary: SelectionExclusionSummary::default(),
             },
             Vec::new(),
@@ -961,6 +986,8 @@ fn report_operation_log(ids: &TxnIds) -> NewOperationLog {
         user_agent: None,
         latency_ms: 0,
         detail: serde_json::json!({ "test": true }),
+        before_hash: None,
+        after_hash: None,
         governance_audit_event_id: None,
         governance_audit_sequence: None,
     }

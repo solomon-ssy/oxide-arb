@@ -30,8 +30,8 @@ use quant_pivot_error::{QuantError, QuantResult, governance::GovernanceError};
 use quant_pivot_models::{
     domain::{
         BacktestReportInfo, GovernanceActor, ModelGovernancePort, ModelVersionInfo,
-        NewModelGovernanceAudit, PromoteDatasetRequest, PublishModelCommand, RollbackModelCommand,
-        RuntimeConfigPort, ShadowStabilitySummary, TrainingDatasetInfo,
+        NewModelGovernanceAudit, PromoteDatasetRequest, PublishModelCommand, RetireModelCommand,
+        RollbackModelCommand, RuntimeConfigPort, ShadowStabilitySummary, TrainingDatasetInfo,
     },
     enums::quant::{ModelGovernanceAction, PublicationStatus, TrainingDatasetStatus},
     runtime_config::QualityGateConfig,
@@ -52,7 +52,9 @@ use quant_pivot_research::{
 use rust_decimal::Decimal;
 
 use crate::{
-    governance::runtime_model_pointers::{RuntimeModelPointerSync, sync_production_active},
+    governance::runtime_model_pointers::{
+        RuntimeModelPointerSync, sync_after_model_retire, sync_production_active,
+    },
     runtime_config::RuntimeConfigStore,
 };
 
@@ -380,6 +382,63 @@ impl ModelGovernancePort for ModelGovernanceService {
         .await?;
 
         Ok(restored)
+    }
+
+    async fn retire(
+        &self,
+        command: RetireModelCommand,
+        actor: GovernanceActor,
+    ) -> QuantResult<ModelVersionInfo> {
+        let version = self.find_version(&command.model_version_id).await?;
+        if version.publication_status != PublicationStatus::Published {
+            return Err(GovernanceError::IllegalTransition {
+                detail: format!(
+                    "cannot retire version {} in status {}",
+                    version.model_version_id,
+                    version.publication_status.as_str()
+                ),
+            }
+            .into());
+        }
+
+        let before_status = version.publication_status;
+        let retired = self
+            .deps
+            .model_registry_repo
+            .retire_model_version(&version.model_version_id)
+            .await?;
+
+        sync_after_model_retire(
+            &self.pointer_sync(),
+            &retired.model_version_id,
+            &format!("retire model version {}", retired.model_version_id),
+            &actor.username,
+        )
+        .await?;
+
+        self.write_audit(NewModelGovernanceAudit {
+            audit_id: ModelGovernanceAuditId::from_v7(),
+            model_version_id: Some(retired.model_version_id.clone()),
+            training_dataset_id: None,
+            action: ModelGovernanceAction::Retire,
+            actor_username: actor.username,
+            actor_role: actor.role,
+            reason: command.reason,
+            before_status,
+            after_status: retired.publication_status,
+            before_hash: Some(version.artifact_hash.as_str().to_owned()),
+            after_hash: Some(retired.artifact_hash.as_str().to_owned()),
+            quality_gate_passed: false,
+            rollback_target_version_id: None,
+            shadow_window_secs: None,
+            detail_json: serde_json::json!({
+                "retired_version": retired.model_version_id.to_string(),
+            }),
+            audit_event_id: Some(AuditEventId::from_v7()),
+        })
+        .await?;
+
+        Ok(retired)
     }
 
     async fn promote_dataset_ready(

@@ -51,7 +51,8 @@ use quant_pivot_models::{
     },
     types::{
         ContentHash, FactorDefinitionId, MarketId, ModelSpecId, Price, Probability,
-        RuntimeConfigVersionId, SchemaVersion, TokenId, TrainingDatasetId, TrainingExampleId, Usd,
+        RuntimeConfigVersionId, SchemaVersion, TokenId, TrainingDatasetId, TrainingExampleId,
+        TrainingSampleSource, Usd,
     },
 };
 use quant_pivot_repository::{
@@ -175,6 +176,7 @@ fn examples() -> Vec<TrainingExample> {
                 market_id: market,
                 token_id: token,
                 as_of,
+                sample_source: TrainingSampleSource::HistoricalPit,
                 feature_vector,
                 factor_values: vec![liquidity],
                 labels: vec![TrainingLabel {

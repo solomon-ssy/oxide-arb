@@ -48,6 +48,7 @@ use crate::{
         mode_gate::{IntentPolicyDecision, RuntimeModeGate},
     },
     governance::{KillSwitchHandle, RuntimeModeHandle},
+    observability::metrics_hub::MetricsHub,
     runtime_config::RuntimeConfigStore,
 };
 
@@ -89,6 +90,7 @@ pub struct OrderIntentServiceDeps {
     pub reports: Arc<dyn RecommendationReportRepository>,
     pub intents: Arc<dyn OrderIntentRepository>,
     pub config: Arc<RuntimeConfigStore>,
+    pub metrics: Arc<MetricsHub>,
     pub events: CoreEventPublisher,
     /// Wake the dispatcher when an `ApprovedByPolicy` intent is created (auto).
     pub dispatch_wake: DispatchWake,
@@ -104,6 +106,7 @@ pub struct CoreOrderIntentService {
     reports: Arc<dyn RecommendationReportRepository>,
     intents: Arc<dyn OrderIntentRepository>,
     config: Arc<RuntimeConfigStore>,
+    metrics: Arc<MetricsHub>,
     events: CoreEventPublisher,
     dispatch_wake: DispatchWake,
 }
@@ -120,6 +123,7 @@ impl CoreOrderIntentService {
             reports: deps.reports,
             intents: deps.intents,
             config: deps.config,
+            metrics: deps.metrics,
             events: deps.events,
             dispatch_wake: deps.dispatch_wake,
         }
@@ -149,8 +153,14 @@ impl CoreOrderIntentService {
             .intents
             .create_with_allocation(new_intent, allocation)
             .await?;
+        self.metrics
+            .inc_order_intent_created(intent.runtime_mode.as_str(), intent.intent_kind.as_str());
         self.publish(&intent, IntentEventKind::Created, now);
         if intent.status == OrderIntentStatus::ApprovedByPolicy {
+            self.metrics.inc_order_intent_approved(
+                intent.runtime_mode.as_str(),
+                intent.intent_kind.as_str(),
+            );
             self.dispatch_wake.wake();
         }
         Ok(intent)
@@ -256,6 +266,10 @@ impl CoreOrderIntentService {
             .await?
         {
             ApproveOrderIntentOutcome::Approved(approved) => {
+                self.metrics.inc_order_intent_approved(
+                    approved.runtime_mode.as_str(),
+                    approved.intent_kind.as_str(),
+                );
                 self.publish(&approved, IntentEventKind::Approved, now);
                 Ok(approved)
             }
@@ -279,6 +293,10 @@ impl CoreOrderIntentService {
             .intents
             .reject(&command.order_intent_id, command.reason)
             .await?;
+        self.metrics.inc_order_intent_rejected(
+            rejected.runtime_mode.as_str(),
+            rejected.intent_kind.as_str(),
+        );
         self.publish(&rejected, IntentEventKind::Rejected, now);
         Ok(rejected)
     }
@@ -724,6 +742,8 @@ fn intent_operation_log(action: &str, intent: &OrderIntentInfo, reason: &str) ->
         user_agent: None,
         latency_ms: 0,
         detail: serde_json::json!({ "reason": reason }),
+        before_hash: None,
+        after_hash: None,
         governance_audit_event_id: None,
         governance_audit_sequence: None,
     }

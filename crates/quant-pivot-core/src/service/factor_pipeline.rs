@@ -19,6 +19,7 @@ use chrono::Utc;
 use quant_pivot_error::{QuantError, QuantResult, infra::InfraError, report::ReportError};
 use quant_pivot_models::{
     domain::{FactorValueInfo, NewFactorValue},
+    enums::quant::PublicationStatus,
     runtime_config::{FactorsConfig, FeaturesConfig},
     types::{FeatureVectorId, MarketId, ModelRunId},
 };
@@ -26,7 +27,7 @@ use quant_pivot_repository::traits::FactorRepository;
 use quant_pivot_research::{
     factors::{
         FactorEligibility, FactorEngine, FactorValueInsertContext, MarketFactorOutcome,
-        factor_events,
+        factor_definition_id, factor_events,
     },
     features::FeatureVector,
 };
@@ -116,12 +117,17 @@ impl FactorPipelineService {
 
         FactorEngine::validate_batch_invariants(request.vectors)?;
 
+        // Register governed definitions first (idempotent upsert). Publication
+        // status is preserved on conflict; new rows start as Draft (05.7).
+        self.persist_definitions(&engine, request.features).await?;
+        self.require_published_definitions(&engine).await?;
+
         // Factor compute is pure CPU work; run it on the blocking pool so a large
         // cross-sectional batch never stalls the async runtime. The engine moves
         // in and back out so its registry is reused for definition persistence.
         let config = request.factors.clone();
         let vectors = request.vectors.to_vec();
-        let (engine, outcomes) = tokio::task::spawn_blocking(move || {
+        let (_engine, outcomes) = tokio::task::spawn_blocking(move || {
             let outcomes = engine.compute_all_batch(&vectors, &config);
             (engine, outcomes)
         })
@@ -130,10 +136,6 @@ impl FactorPipelineService {
             detail: err.to_string(),
         })?;
         let outcomes = outcomes?;
-
-        // Persist the governed factor definitions first (idempotent on their
-        // deterministic ids), satisfying the factor-value → definition FK.
-        self.persist_definitions(&engine, request.features).await?;
 
         // Build rows for eligible markets, tagging each factor with its source
         // feature-vector id (aligned by index), and collect rejections.
@@ -197,5 +199,37 @@ impl FactorPipelineService {
                 .map_err(QuantError::from)?;
         }
         Ok(())
+    }
+
+    /// Fail closed when any enabled definition is not `Published`.
+    async fn require_published_definitions(&self, engine: &FactorEngine) -> QuantResult<()> {
+        let ids: Vec<_> = engine
+            .factor_set()
+            .definitions
+            .iter()
+            .map(|spec| factor_definition_id(spec.name.as_str()))
+            .collect();
+        let rows = self
+            .factor_repo
+            .find_definitions_by_ids(&ids)
+            .await
+            .map_err(QuantError::from)?;
+        let mut violations = Vec::new();
+        for row in rows {
+            if row.status != PublicationStatus::Published {
+                violations.push(format!("{}={}", row.name, row.status.as_str()));
+            }
+        }
+        if violations.is_empty() {
+            return Ok(());
+        }
+        Err(ReportError::ContractViolation {
+            detail: format!(
+                "factor pipeline blocked: enabled definitions must be Published before compute \
+                 ({})",
+                violations.join(", ")
+            ),
+        }
+        .into())
     }
 }

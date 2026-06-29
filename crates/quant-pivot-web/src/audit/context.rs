@@ -45,6 +45,10 @@ pub struct OperationEnrichment {
     pub resource_id: Option<String>,
     /// Redacted detail summary / diff (never raw request bodies or secrets).
     pub detail: Option<Value>,
+    /// Canonical hash of the governed resource before a successful mutation.
+    pub before_hash: Option<String>,
+    /// Canonical hash of the governed resource after a successful mutation.
+    pub after_hash: Option<String>,
     /// Linked governance hash-chain event (dual-track hard link).
     pub governance_audit_event_id: Option<AuditEventId>,
     /// Monotonic sequence of the linked governance audit event.
@@ -85,6 +89,13 @@ impl OperationContext {
     /// ensuring no credentials, tokens, or PII are present.
     pub fn set_detail(&self, detail: Value) {
         self.inner.borrow_mut().detail = Some(detail);
+    }
+
+    /// Record canonical before/after state hashes for a governed mutation.
+    pub fn set_state_hashes(&self, before_hash: Option<String>, after_hash: Option<String>) {
+        let mut inner = self.inner.borrow_mut();
+        inner.before_hash = before_hash;
+        inner.after_hash = after_hash;
     }
 
     /// Hard-link this operation to its governance hash-chain event, enabling a

@@ -39,8 +39,10 @@ use quant_pivot_models::{
         operation_log::OperationCategory,
         rbac::{Operation, ResourceType},
     },
+    hashing::CanonicalDigest,
     types::OrderIntentId,
 };
+use serde::Serialize;
 use uuid::Uuid;
 
 use crate::{
@@ -146,11 +148,13 @@ pub async fn create(
             reason: request.reason.clone(),
         })
         .await?;
+    let after_hash = canonical_state_hash(&intent)?;
     op_ctx.set_action(OperationCategory::Governance, "quant.intent.create");
     op_ctx.set_resource(
         ResourceType::OrderIntent,
         intent.order_intent_id.to_string(),
     );
+    op_ctx.set_state_hashes(None, Some(after_hash));
     op_ctx.set_detail(serde_json::json!({
         "order_intent_id": intent.order_intent_id.to_string(),
         "recommendation_id": request.recommendation_id.to_string(),
@@ -174,10 +178,16 @@ pub async fn approve(
 ) -> Result<WebResponse<OrderIntentView>, WebError> {
     let operator_id = actor_uuid(&actor)?;
     let request = body.into_inner();
+    let intent_id = id.into_inner();
+    let before = state
+        .order_intents
+        .find(&intent_id)
+        .await?
+        .ok_or_else(|| WebError::NotFound(format!("order intent not found: {intent_id}")))?;
     let intent = state
         .order_intents
         .approve(ApproveIntentCommand {
-            order_intent_id: id.into_inner(),
+            order_intent_id: intent_id,
             operator_id,
             acting_role: acting_role.0.clone(),
             reason: request.reason.clone(),
@@ -187,11 +197,14 @@ pub async fn approve(
             override_note: request.override_note.clone(),
         })
         .await?;
+    let before_hash = canonical_state_hash(&before)?;
+    let after_hash = canonical_state_hash(&intent)?;
     op_ctx.set_action(OperationCategory::Governance, "quant.intent.approve");
     op_ctx.set_resource(
         ResourceType::OrderIntent,
         intent.order_intent_id.to_string(),
     );
+    op_ctx.set_state_hashes(Some(before_hash), Some(after_hash));
     op_ctx.set_detail(serde_json::json!({
         "order_intent_id": intent.order_intent_id.to_string(),
         "acting_role": acting_role.0,
@@ -214,20 +227,29 @@ pub async fn reject(
 ) -> Result<WebResponse<OrderIntentView>, WebError> {
     let operator_id = actor_uuid(&actor)?;
     let request = body.into_inner();
+    let intent_id = id.into_inner();
+    let before = state
+        .order_intents
+        .find(&intent_id)
+        .await?
+        .ok_or_else(|| WebError::NotFound(format!("order intent not found: {intent_id}")))?;
     let intent = state
         .order_intents
         .reject(RejectIntentCommand {
-            order_intent_id: id.into_inner(),
+            order_intent_id: intent_id,
             operator_id,
             acting_role: acting_role.0.clone(),
             reason: request.reason.clone(),
         })
         .await?;
+    let before_hash = canonical_state_hash(&before)?;
+    let after_hash = canonical_state_hash(&intent)?;
     op_ctx.set_action(OperationCategory::Governance, "quant.intent.reject");
     op_ctx.set_resource(
         ResourceType::OrderIntent,
         intent.order_intent_id.to_string(),
     );
+    op_ctx.set_state_hashes(Some(before_hash), Some(after_hash));
     op_ctx.set_detail(serde_json::json!({
         "order_intent_id": intent.order_intent_id.to_string(),
         "acting_role": acting_role.0,
@@ -249,20 +271,29 @@ pub async fn cancel(
 ) -> Result<WebResponse<OrderIntentView>, WebError> {
     let operator_id = actor_uuid(&actor)?;
     let request = body.into_inner();
+    let intent_id = id.into_inner();
+    let before = state
+        .order_intents
+        .find(&intent_id)
+        .await?
+        .ok_or_else(|| WebError::NotFound(format!("order intent not found: {intent_id}")))?;
     let intent = state
         .order_intents
         .cancel(CancelIntentCommand {
-            order_intent_id: id.into_inner(),
+            order_intent_id: intent_id,
             operator_id,
             acting_role: acting_role.0.clone(),
             reason: request.reason.clone(),
         })
         .await?;
+    let before_hash = canonical_state_hash(&before)?;
+    let after_hash = canonical_state_hash(&intent)?;
     op_ctx.set_action(OperationCategory::Governance, "quant.intent.cancel");
     op_ctx.set_resource(
         ResourceType::OrderIntent,
         intent.order_intent_id.to_string(),
     );
+    op_ctx.set_state_hashes(Some(before_hash), Some(after_hash));
     op_ctx.set_detail(serde_json::json!({
         "order_intent_id": intent.order_intent_id.to_string(),
         "acting_role": acting_role.0,
@@ -283,12 +314,23 @@ pub async fn submit(
 ) -> Result<WebResponse<ExecutionOrderView>, WebError> {
     let intent_id = id.into_inner();
     let request = body.into_inner();
+    let before = state
+        .order_intents
+        .find(&intent_id)
+        .await?
+        .ok_or_else(|| WebError::NotFound(format!("order intent not found: {intent_id}")))?;
     let order = state
         .execution_submit
         .submit_if_admitted(&intent_id)
         .await?;
+    let after = state.order_intents.find(&intent_id).await?.ok_or_else(|| {
+        WebError::NotFound(format!("order intent not found after submit: {intent_id}"))
+    })?;
+    let before_hash = canonical_state_hash(&before)?;
+    let after_hash = canonical_state_hash(&after)?;
     op_ctx.set_action(OperationCategory::Governance, "quant.intent.submit");
     op_ctx.set_resource(ResourceType::OrderIntent, intent_id.to_string());
+    op_ctx.set_state_hashes(Some(before_hash), Some(after_hash));
     op_ctx.set_detail(serde_json::json!({
         "order_intent_id": intent_id.to_string(),
         "execution_order_id": order.execution_order_id.to_string(),
@@ -305,4 +347,10 @@ pub async fn submit(
 fn actor_uuid(actor: &AuthedActor) -> Result<Uuid, WebError> {
     Uuid::parse_str(&actor.claims.sub)
         .map_err(|_| WebError::Unauthorized("invalid actor id".to_owned()))
+}
+
+fn canonical_state_hash<T: Serialize>(state: &T) -> Result<String, WebError> {
+    CanonicalDigest::content_hash_json(state)
+        .map(|hash| hash.as_str().to_owned())
+        .map_err(|error| WebError::Internal(format!("canonical state hash failed: {error}")))
 }

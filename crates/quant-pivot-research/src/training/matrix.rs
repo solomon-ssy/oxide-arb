@@ -257,7 +257,7 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use quant_pivot_models::{
         enums::quant::DataQualityStatus,
-        types::{MarketId, SchemaVersion, TokenId, TrainingExampleId},
+        types::{MarketId, SchemaVersion, TokenId, TrainingExampleId, TrainingSampleSource},
     };
     use rust_decimal::prelude::FromPrimitive;
     use std::collections::BTreeMap;
@@ -286,6 +286,7 @@ mod tests {
             market_id: MarketId::new("m"),
             token_id: TokenId::new("t"),
             as_of,
+            sample_source: TrainingSampleSource::HistoricalPit,
             feature_vector: FeatureVector {
                 market_id: MarketId::new("m"),
                 token_id: Some(TokenId::new("t")),

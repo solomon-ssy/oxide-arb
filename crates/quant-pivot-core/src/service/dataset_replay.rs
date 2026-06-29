@@ -17,7 +17,7 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantResult, research::ResearchError};
 use quant_pivot_models::{
     domain::TrainingDatasetInfo,
-    types::{MarketId, TokenId, TrainingExampleId},
+    types::{MarketId, TokenId, TrainingExampleId, TrainingSampleSource},
 };
 use quant_pivot_repository::traits::{MarketRepository, QuantFactReadRepository};
 use quant_pivot_research::{
@@ -161,6 +161,7 @@ pub async fn rematerialize_training_examples(
                 market_id: market.market_id.clone(),
                 token_id: market.primary_token_id.clone(),
                 as_of: cross.as_of,
+                sample_source: TrainingSampleSource::HistoricalPit,
                 feature_vector: vector.clone(),
                 factor_values,
                 labels: meta.labels.clone(),

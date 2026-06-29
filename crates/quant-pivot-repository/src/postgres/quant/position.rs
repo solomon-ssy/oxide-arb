@@ -6,18 +6,21 @@
 //! blended across intents. The per-token aggregate is a query view
 //! (`find_lots_by_token`), not a single row.
 
-use crate::traits::PositionRepository;
-use quant_pivot_error::storage::StorageError;
+use crate::{
+    postgres::{error, query::paginate_mapped},
+    traits::PositionRepository,
+};
+use quant_pivot_error::storage::{StorageError, entity};
 use quant_pivot_models::{
-    domain::{NewPosition, PositionExit, PositionFill, PositionInfo},
+    domain::{NewPosition, Paginated, PositionExit, PositionFill, PositionInfo, PositionListQuery},
     entities::quant_position,
     enums::execution::PositionLedgerState,
     types::{MarketId, OrderIntentId, PositionId, Price, Shares, TokenId, Usd},
 };
 use rust_decimal::Decimal;
 use sea_orm::{
-    ActiveModelTrait, ActiveValue, ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait,
-    IntoActiveModel, QueryFilter,
+    ActiveModelTrait, ActiveValue, ColumnTrait, Condition, ConnectionTrait, DatabaseConnection,
+    EntityTrait, IntoActiveModel, QueryFilter, QueryOrder,
 };
 
 /// Position-lot states still considered "open" (subject to exit monitoring).
@@ -59,6 +62,33 @@ impl PositionRepository for PgPositionRepository {
             .await
             .map_err(StorageError::from)
             .map(|row| row.map(Into::into))
+    }
+
+    async fn find_by_id(
+        &self,
+        position_id: &PositionId,
+    ) -> Result<Option<PositionInfo>, StorageError> {
+        quant_position::Entity::find_by_id(position_id.clone())
+            .one(&self.db)
+            .await
+            .map_err(StorageError::from)
+            .map(|row| row.map(Into::into))
+    }
+
+    async fn page(
+        &self,
+        query: PositionListQuery,
+    ) -> Result<Paginated<PositionInfo>, StorageError> {
+        let query = query.normalized();
+        paginate_mapped(
+            quant_position::Entity::find()
+                .filter(page_condition(&query))
+                .order_by_desc(quant_position::Column::OpenedAt),
+            &self.db,
+            &query.page,
+            Into::into,
+        )
+        .await
     }
 
     async fn find_open_lots(&self) -> Result<Vec<PositionInfo>, StorageError> {
@@ -105,8 +135,9 @@ pub async fn apply_fill(
     fill: PositionFill,
 ) -> Result<PositionInfo, StorageError> {
     if !fill.shares.is_positive() || fill.cost_usd.is_negative() {
-        return Err(StorageError::Conflict(
-            "position fill must have positive shares and non-negative cost".to_owned(),
+        return Err(error::invariant_violation(
+            Some(entity::QUANT_POSITION),
+            "position fill must have positive shares and non-negative cost",
         ));
     }
 
@@ -144,10 +175,11 @@ pub async fn apply_fill(
     };
 
     if row.state == PositionLedgerState::Closed || row.state == PositionLedgerState::Settled {
-        return Err(StorageError::Conflict(format!(
-            "cannot apply fill to closed position lot for intent {}",
-            row.order_intent_id
-        )));
+        return Err(error::state_conflict(
+            entity::QUANT_POSITION,
+            Some(&row.order_intent_id),
+            "cannot apply fill to closed position lot",
+        ));
     }
 
     let shares = row.shares + fill.shares;
@@ -178,8 +210,9 @@ pub async fn apply_exit(
     exit: PositionExit,
 ) -> Result<PositionInfo, StorageError> {
     if !exit.shares.is_positive() {
-        return Err(StorageError::Conflict(
-            "position exit must have positive shares".to_owned(),
+        return Err(error::invariant_violation(
+            Some(entity::QUANT_POSITION),
+            "position exit must have positive shares",
         ));
     }
 
@@ -189,16 +222,17 @@ pub async fn apply_exit(
         .await
         .map_err(StorageError::from)?
     else {
-        return Err(StorageError::Conflict(format!(
-            "position lot not found for intent: {order_intent_id}"
-        )));
+        return Err(error::not_found(entity::QUANT_POSITION, order_intent_id));
     };
 
     if exit.shares > row.shares {
-        return Err(StorageError::Conflict(format!(
-            "exit shares exceed position shares for intent {order_intent_id}: {} > {}",
-            exit.shares, row.shares
-        )));
+        return Err(error::invariant_violation(
+            Some(entity::QUANT_POSITION),
+            format!(
+                "exit shares exceed position shares for intent {order_intent_id}: {} > {}",
+                exit.shares, row.shares
+            ),
+        ));
     }
 
     let cost_reduction = row.avg_price * exit.shares;
@@ -243,9 +277,7 @@ pub async fn mark_closing(
         .await
         .map_err(StorageError::from)?
     else {
-        return Err(StorageError::Conflict(format!(
-            "position lot not found for intent: {order_intent_id}"
-        )));
+        return Err(error::not_found(entity::QUANT_POSITION, order_intent_id));
     };
     match row.state {
         PositionLedgerState::Closing => Ok(()),
@@ -255,10 +287,11 @@ pub async fn mark_closing(
             active.update(db).await.map_err(StorageError::from)?;
             Ok(())
         }
-        other => Err(StorageError::Conflict(format!(
-            "cannot mark exit-closing for intent {order_intent_id} from {}",
-            other.as_str()
-        ))),
+        other => Err(error::state_conflict(
+            entity::QUANT_POSITION,
+            Some(order_intent_id),
+            format!("cannot mark exit-closing from {}", other.as_str()),
+        )),
     }
 }
 
@@ -286,15 +319,50 @@ pub async fn revert_lot_to_open(
 
 fn price_from_cost_and_shares(cost_usd: Usd, shares: Shares) -> Result<Price, StorageError> {
     if shares.is_zero() {
-        return Err(StorageError::Conflict(
-            "cannot compute average price from zero shares".to_owned(),
+        return Err(error::invariant_violation(
+            Some(entity::QUANT_POSITION),
+            "cannot compute average price from zero shares",
         ));
     }
     let price = cost_usd.inner() / shares.inner();
     if price < Decimal::ZERO {
-        return Err(StorageError::Conflict(
-            "computed average price is negative".to_owned(),
+        return Err(error::invariant_violation(
+            Some(entity::QUANT_POSITION),
+            "computed average price is negative",
         ));
     }
     Ok(Price::new(price))
+}
+
+fn page_condition(query: &PositionListQuery) -> Condition {
+    Condition::all()
+        .add_option(
+            query
+                .state
+                .map(|state| quant_position::Column::State.eq(state)),
+        )
+        .add_option(
+            query
+                .order_intent_id
+                .clone()
+                .map(|order_intent_id| quant_position::Column::OrderIntentId.eq(order_intent_id)),
+        )
+        .add_option(
+            query
+                .market_id
+                .clone()
+                .map(|market_id| quant_position::Column::MarketId.eq(market_id)),
+        )
+        .add_option(
+            query
+                .token_id
+                .clone()
+                .map(|token_id| quant_position::Column::TokenId.eq(token_id)),
+        )
+        .add_option(
+            query
+                .from
+                .map(|from| quant_position::Column::OpenedAt.gte(from)),
+        )
+        .add_option(query.to.map(|to| quant_position::Column::OpenedAt.lt(to)))
 }

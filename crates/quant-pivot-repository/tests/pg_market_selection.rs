@@ -8,7 +8,6 @@
 use chrono::Utc;
 use quant_pivot_models::{
     domain::{NewMarketSelection, NewMarketSelectionMember},
-    entities::quant_market_selection::{SelectionExcludedMarketIds, SelectionIncludedMarketIds},
     enums::{common::MarketCategory, market::MarketStatus},
     types::{
         ContentHash, EventId, MarketId, MarketSelectionId, RuntimeConfigVersionId,
@@ -67,8 +66,6 @@ async fn create_snapshot_then_find_and_list_members() {
         selector_hash: ContentHash::parse(format!("blake3:{}", "a".repeat(64)))
             .expect("valid content hash"),
         market_count: 1,
-        included_market_ids: SelectionIncludedMarketIds(vec![market_id.to_owned()]),
-        excluded_market_ids: SelectionExcludedMarketIds(vec!["0xexcluded".to_owned()]),
         exclusion_summary: SelectionExclusionSummary {
             stale_book_count: 1,
             insufficient_liquidity_count: 0,
@@ -94,7 +91,6 @@ async fn create_snapshot_then_find_and_list_members() {
         .expect("create snapshot");
     assert_eq!(info.market_selection_id, selection_id);
     assert_eq!(info.market_count, 1);
-    assert_eq!(info.included_market_ids.0, vec![market_id.to_owned()]);
     assert_eq!(info.exclusion_summary.stale_book_count, 1);
 
     let found = selection_repo

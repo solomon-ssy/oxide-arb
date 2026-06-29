@@ -580,7 +580,7 @@ mod tests {
         },
         types::{
             ContentHash, FactorDefinitionId, MarketId, ModelVersionId, Probability, SchemaVersion,
-            TokenId, TrainingExampleId,
+            TokenId, TrainingExampleId, TrainingSampleSource,
         },
     };
     use rust_decimal::Decimal;
@@ -649,6 +649,7 @@ mod tests {
             market_id: MarketId::new(format!("0x{idx}")),
             token_id: TokenId::new("yes"),
             as_of: Utc.timestamp_opt(1_700_000_000 + idx, 0).unwrap(),
+            sample_source: TrainingSampleSource::HistoricalPit,
             feature_vector: fv,
             factor_values: vec![mk(LIQUIDITY_DEPTH, liq), mk(MOMENTUM, mom)],
             labels: vec![TrainingLabel {

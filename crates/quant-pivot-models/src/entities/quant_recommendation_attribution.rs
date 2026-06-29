@@ -1,7 +1,7 @@
 //! `quant_recommendation_attribution` table entity.
 
 use crate::{
-    enums::quant::RecommendationOutcome,
+    enums::quant::RecommendationAttributionOutcome,
     types::{AttributionDetail, EntryOutcome, ExitOutcome, RecommendationId, Usd},
 };
 use chrono::{DateTime, Utc};
@@ -13,7 +13,7 @@ use sea_orm::entity::prelude::*;
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub recommendation_id: RecommendationId,
-    pub outcome: RecommendationOutcome,
+    pub outcome: RecommendationAttributionOutcome,
     #[sea_orm(column_type = "JsonBinary")]
     pub entry_outcome_json: EntryOutcome,
     #[sea_orm(column_type = "JsonBinary")]
@@ -25,7 +25,6 @@ pub struct Model {
     #[sea_orm(column_type = "JsonBinary")]
     pub attribution_json: AttributionDetail,
     pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

@@ -14,8 +14,6 @@ pub mod role_permission;
 pub mod user;
 pub mod user_role;
 
-pub(crate) mod util;
-
 pub use casbin::PgCasbinAdapter;
 pub use menu::PgMenuRepository;
 pub use role::PgRoleRepository;

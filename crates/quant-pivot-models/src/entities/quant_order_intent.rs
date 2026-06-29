@@ -68,6 +68,8 @@ pub enum Relation {
     ExecutionOrder,
     #[sea_orm(has_one = "super::quant_capital_allocation::Entity")]
     CapitalAllocation,
+    #[sea_orm(has_one = "super::quant_position::Entity")]
+    Position,
 }
 
 impl Related<super::quant_recommendation::Entity> for Entity {
@@ -85,6 +87,12 @@ impl Related<super::quant_execution_order::Entity> for Entity {
 impl Related<super::quant_capital_allocation::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::CapitalAllocation.def()
+    }
+}
+
+impl Related<super::quant_position::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::Position.def()
     }
 }
 

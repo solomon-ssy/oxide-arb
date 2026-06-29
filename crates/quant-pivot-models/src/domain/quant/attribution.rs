@@ -1,7 +1,7 @@
 //! Recommendation attribution persistence DTOs.
 
 use crate::{
-    enums::quant::RecommendationOutcome,
+    enums::quant::RecommendationAttributionOutcome,
     types::{AttributionDetail, EntryOutcome, ExitOutcome, RecommendationId, Usd},
 };
 use chrono::{DateTime, Utc};
@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 #[sea_orm(entity = "crate::entities::quant_recommendation_attribution::Entity")]
 pub struct RecommendationAttributionInfo {
     pub recommendation_id: RecommendationId,
-    pub outcome: RecommendationOutcome,
+    pub outcome: RecommendationAttributionOutcome,
     pub entry_outcome_json: EntryOutcome,
     pub exit_outcome_json: ExitOutcome,
     pub realized_pnl_usd: Option<Usd>,
@@ -23,7 +23,6 @@ pub struct RecommendationAttributionInfo {
     pub label_available_at: Option<DateTime<Utc>>,
     pub attribution_json: AttributionDetail,
     pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
 }
 
 info_from_model!(
@@ -40,7 +39,6 @@ info_from_model!(
         label_available_at,
         attribution_json,
         created_at,
-        updated_at,
     }
 );
 
@@ -49,7 +47,7 @@ info_from_model!(
 #[sea_orm(active_model = "crate::entities::quant_recommendation_attribution::ActiveModel")]
 pub struct NewRecommendationAttribution {
     pub recommendation_id: RecommendationId,
-    pub outcome: RecommendationOutcome,
+    pub outcome: RecommendationAttributionOutcome,
     pub entry_outcome_json: EntryOutcome,
     pub exit_outcome_json: ExitOutcome,
     pub realized_pnl_usd: Option<Usd>,
@@ -57,4 +55,13 @@ pub struct NewRecommendationAttribution {
     pub max_favorable_excursion_bps: Option<Decimal>,
     pub label_available_at: Option<DateTime<Utc>>,
     pub attribution_json: AttributionDetail,
+}
+
+/// Result of an idempotent final attribution write.
+#[derive(Debug, Clone)]
+pub enum InsertFinalOutcome {
+    /// A new WORM attribution row was inserted and the recommendation advanced.
+    Written(Box<RecommendationAttributionInfo>),
+    /// Another writer already persisted the final row for this recommendation.
+    AlreadyExists,
 }

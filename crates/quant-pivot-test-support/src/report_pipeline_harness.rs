@@ -94,6 +94,7 @@ use rust_decimal_macros::dec;
 use sea_orm::DatabaseConnection;
 
 use crate::catalog_fixtures::{make_event, make_market};
+use crate::factor_governance::publish_all_factor_definitions;
 
 /// Seeded catalog ids shared across report pipeline E2E tests.
 pub const EVENT_ID: &str = "evt-report-pipeline-e2e";
@@ -251,6 +252,11 @@ impl ReportPipelineHarness {
         let factors = factors_config();
         let features = FeaturesConfig::default();
         let store = artifact_store();
+        let factor_repo =
+            Arc::new(PgFactorRepository::new(db.clone())) as Arc<dyn FactorRepository>;
+        publish_all_factor_definitions(factor_repo.as_ref(), &factors, &features)
+            .await
+            .expect("publish factor definitions");
         let model_version_id = publish_weighted_model(db, &store, &factors, &features).await;
 
         let runtime_config = runtime_config_for_pipeline(
@@ -449,9 +455,6 @@ async fn seed_minimal_market_selection(
 ) -> MarketSelectionId {
     use quant_pivot_models::{
         domain::NewMarketSelection,
-        entities::quant_market_selection::{
-            SelectionExcludedMarketIds, SelectionIncludedMarketIds,
-        },
         types::{ContentHash, SelectionExclusionSummary},
     };
     use quant_pivot_repository::{
@@ -468,11 +471,6 @@ async fn seed_minimal_market_selection(
                 selector_hash: ContentHash::parse(format!("blake3:{}", "b".repeat(64)))
                     .expect("selector hash"),
                 market_count: 2,
-                included_market_ids: SelectionIncludedMarketIds(vec![
-                    FIXTURE_MARKET_A.to_owned(),
-                    FIXTURE_MARKET_B.to_owned(),
-                ]),
-                excluded_market_ids: SelectionExcludedMarketIds(Vec::new()),
                 exclusion_summary: SelectionExclusionSummary::default(),
             },
             Vec::new(),
@@ -648,6 +646,8 @@ fn fixture_publish_operation_log(
         user_agent: None,
         latency_ms: 0,
         detail: serde_json::json!({ "fixture": true }),
+        before_hash: None,
+        after_hash: None,
         governance_audit_event_id: None,
         governance_audit_sequence: None,
     }

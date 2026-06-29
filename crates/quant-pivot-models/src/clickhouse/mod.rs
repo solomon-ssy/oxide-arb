@@ -15,8 +15,9 @@ pub use book_microstructure::BookMicrostructureRow;
 pub use book_snapshot::BookSnapshotRow;
 pub use market_resolution::MarketResolutionRow;
 pub use quant_facts::{
-    QuantExecutionEventRow, QuantFactorEventRow, QuantFeatureEventRow, QuantRecommendationEventRow,
-    QuantSignalCandidateEventRow,
+    QuantCapitalAllocationEventRow, QuantExecutionEventRow, QuantFactorEventRow,
+    QuantFeatureEventRow, QuantPositionEventRow, QuantRecommendationAttributionEventRow,
+    QuantRecommendationEventRow, QuantSignalCandidateEventRow,
 };
 pub use tick_event::TickEventRow;
 pub use types::{

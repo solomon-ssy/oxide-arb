@@ -139,7 +139,7 @@ pub fn table() -> TableCreateStatement {
             ColumnDef::new(QuantOrderIntent::ExecutedPartialExitNodeIds)
                 .json_binary()
                 .not_null()
-                .default(Expr::cust("'[]'::jsonb")),
+                .default(Expr::cust("'{\"node_ids\": []}'::jsonb")),
         )
         .col(
             ColumnDef::new(QuantOrderIntent::PendingPartialExitNodeId)

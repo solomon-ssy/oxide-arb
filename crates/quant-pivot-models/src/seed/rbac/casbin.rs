@@ -35,12 +35,12 @@ const PRODUCES: &[SeedArtifact] = &[];
 
 pub const CASBIN_SEED: SeedSpec = SeedSpec {
     id: SEED_ID,
-    version: 7,
+    version: 9,
     target_table: casbin_rule_table_name,
     depends_on: DEPENDS_ON,
     produces: PRODUCES,
     conflict_policy: SeedConflictPolicy::GraphOrdered,
-    checksum: "rbac.casbin.bootstrap.v7",
+    checksum: "rbac.casbin.bootstrap.v9",
     loader: load_boxed,
 };
 
@@ -49,9 +49,12 @@ const READ_RESOURCES: &[ResourceType] = &[
     ResourceType::System,
     ResourceType::Market,
     ResourceType::QuantReport,
+    ResourceType::AccountSnapshot,
     ResourceType::OrderIntent,
     ResourceType::ExecutionOrder,
     ResourceType::Position,
+    ResourceType::RecommendationAttribution,
+    ResourceType::FactorDefinition,
     ResourceType::RuntimeConfig,
     ResourceType::Materialization,
     ResourceType::Audit,
@@ -99,6 +102,8 @@ fn operator_policies() -> Vec<(ResourceType, Operation)> {
         (ResourceType::OrderIntent, Operation::Reject),
         (ResourceType::OrderIntent, Operation::Cancel),
         (ResourceType::OrderIntent, Operation::Submit),
+        (ResourceType::FactorDefinition, Operation::Publish),
+        (ResourceType::FactorDefinition, Operation::Retire),
     ]);
     policies
 }
@@ -116,6 +121,9 @@ fn risk_owner_policies() -> Vec<(ResourceType, Operation)> {
         (ResourceType::Replay, Operation::Create),
         (ResourceType::Publication, Operation::Publish),
         (ResourceType::Publication, Operation::Rollback),
+        (ResourceType::Publication, Operation::Retire),
+        (ResourceType::FactorDefinition, Operation::Publish),
+        (ResourceType::FactorDefinition, Operation::Retire),
         // Risk owners revoke published reports (money-risk authority).
         (ResourceType::QuantReport, Operation::Revoke),
         (ResourceType::OrderIntent, Operation::Reject),

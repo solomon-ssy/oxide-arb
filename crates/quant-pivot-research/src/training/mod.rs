@@ -17,7 +17,7 @@ mod planner;
 
 pub use labeler::{
     LiquidityExitLabeler, MaxAdverseExcursionLabeler, MaxFavorableExcursionLabeler,
-    ReturnToHorizonLabeler, SettlementOutcomeLabeler, label_names,
+    ReturnToHorizonLabeler, SettlementOutcomeLabeler, label_names, label_names_for_sources,
 };
 pub use leakage::{
     LeakageFindings, LeakageViolation, assert_no_future_leakage, scan_future_leakage,
@@ -35,7 +35,8 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::types::{
     ArtifactUri, ContentHash, MarketId, ModelSpecId, Price, RuntimeConfigVersionId, SchemaVersion,
-    TokenId, TrainingDatasetId, TrainingExampleId, Usd,
+    TokenId, TrainingDatasetId, TrainingExampleId, TrainingSampleSource, Usd,
+    default_sample_sources,
 };
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -74,6 +75,9 @@ pub struct DatasetPlanRequest {
     pub source_delay_secs: u64,
     /// Feature schema version to materialize against.
     pub feature_schema_version: SchemaVersion,
+    /// Which sample sources to materialize.
+    #[serde(default = "default_sample_sources")]
+    pub sample_sources: Vec<TrainingSampleSource>,
     /// Pre-assigned dataset id (build path); minted by the planner when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub training_dataset_id: Option<TrainingDatasetId>,
@@ -250,6 +254,8 @@ pub struct TrainingExample {
     pub token_id: TokenId,
     /// Decision time the example was computed as of.
     pub as_of: DateTime<Utc>,
+    /// Source pipeline that produced this row.
+    pub sample_source: TrainingSampleSource,
     /// The point-in-time feature vector.
     pub feature_vector: FeatureVector,
     /// The factor values derived from the feature vector.
@@ -277,6 +283,12 @@ pub struct DatasetCoverage {
     pub labels_unavailable: u64,
     /// Samples dropped because feature inputs were insufficient.
     pub samples_dropped_insufficient: u64,
+    /// Live attribution rows considered for dataset materialization.
+    #[serde(default)]
+    pub live_attribution_candidates: u64,
+    /// Live attribution rows dropped because frozen recommendation evidence was incomplete.
+    #[serde(default)]
+    pub live_attribution_dropped_missing_evidence: u64,
     /// Book snapshot rows skipped due to malformed JSON or invalid level pairs.
     pub book_decode_failures: u64,
     /// Optional training-matrix probe (diagnostic only; does not gate build).
@@ -368,6 +380,7 @@ struct CanonicalExample<'a> {
     market_id: &'a MarketId,
     token_id: &'a TokenId,
     as_of: DateTime<Utc>,
+    sample_source: TrainingSampleSource,
     feature_vector: &'a FeatureVector,
     factor_values: &'a [FactorValue],
     labels: &'a [TrainingLabel],
@@ -405,6 +418,7 @@ impl TrainingDatasetArtifact {
                 market_id: &e.market_id,
                 token_id: &e.token_id,
                 as_of: e.as_of,
+                sample_source: e.sample_source,
                 feature_vector: &e.feature_vector,
                 factor_values: &e.factor_values,
                 labels: &e.labels,
@@ -463,7 +477,7 @@ pub(crate) mod fixtures {
     use chrono::{DateTime, TimeZone, Utc};
     use quant_pivot_models::{
         enums::quant::DataQualityStatus,
-        types::{MarketId, SchemaVersion, TokenId, TrainingExampleId},
+        types::{MarketId, SchemaVersion, TokenId, TrainingExampleId, TrainingSampleSource},
     };
     use rust_decimal::Decimal;
     use std::collections::BTreeMap;
@@ -476,6 +490,7 @@ pub(crate) mod fixtures {
             market_id: MarketId::new(market),
             token_id: TokenId::new(format!("{market}-yes")),
             as_of,
+            sample_source: TrainingSampleSource::HistoricalPit,
             feature_vector: FeatureVector {
                 market_id: MarketId::new(market),
                 token_id: Some(TokenId::new(format!("{market}-yes"))),

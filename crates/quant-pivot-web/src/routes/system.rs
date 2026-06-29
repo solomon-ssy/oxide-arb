@@ -11,7 +11,9 @@ use quant_pivot_models::{
         operation_log::OperationCategory,
         rbac::{Operation, ResourceType},
     },
+    hashing::CanonicalDigest,
 };
+use serde::Serialize;
 
 use crate::{
     audit::OperationCtx,
@@ -212,6 +214,9 @@ pub async fn switch_quant_mode(
     body: ValidatedJson<SwitchQuantModeRequest>,
 ) -> Result<WebResponse<QuantModeTransitionReport>, WebError> {
     let body = body.into_inner();
+    let before_hash = canonical_state_hash(&QuantModeView {
+        mode: state.control.quant_runtime_mode(),
+    })?;
     op_ctx.set_action(OperationCategory::System, "system.switch_quant_mode");
     op_ctx.set_detail(serde_json::json!({
         "target_mode": body.mode.as_str(),
@@ -221,6 +226,10 @@ pub async fn switch_quant_mode(
         .control
         .switch_quant_mode(body.mode, &actor.claims.username, &body.reason)
         .await?;
+    let after_hash = canonical_state_hash(&QuantModeView {
+        mode: state.control.quant_runtime_mode(),
+    })?;
+    op_ctx.set_state_hashes(Some(before_hash), Some(after_hash));
     Ok(WebResponse::ok(report))
 }
 
@@ -238,6 +247,7 @@ pub async fn set_kill_switch(
     body: ValidatedJson<SetKillSwitchRequest>,
 ) -> Result<WebResponse<KillSwitchView>, WebError> {
     let body = body.into_inner();
+    let before_hash = canonical_state_hash(&state.kill_switch.view())?;
     op_ctx.set_action(OperationCategory::System, "system.set_kill_switch");
     op_ctx.set_detail(serde_json::json!({
         "target_state": body.state.as_str(),
@@ -256,5 +266,13 @@ pub async fn set_kill_switch(
             latch: false,
         })
         .await?;
+    let after_hash = canonical_state_hash(&view)?;
+    op_ctx.set_state_hashes(Some(before_hash), Some(after_hash));
     Ok(WebResponse::ok(view))
+}
+
+fn canonical_state_hash<T: Serialize>(state: &T) -> Result<String, WebError> {
+    CanonicalDigest::content_hash_json(state)
+        .map(|hash| hash.as_str().to_owned())
+        .map_err(|error| WebError::Internal(format!("canonical state hash failed: {error}")))
 }

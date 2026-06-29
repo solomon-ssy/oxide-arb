@@ -8,18 +8,22 @@
 //! [`record_submission_result`] — never inside a transaction.
 
 use crate::{
-    postgres::quant::{
-        capital_allocation::{
-            complete_exit_capital, lock_capital, reconcile_capital, release_capital, settle_capital,
+    postgres::{
+        error,
+        quant::{
+            capital_allocation::{
+                complete_exit_capital, lock_capital, reconcile_capital, release_capital,
+                settle_capital,
+            },
+            execution_order::validate_execution_order_transition,
+            order_intent::{load_intent_for_update, validate_intent_transition},
+            position,
         },
-        execution_order::validate_execution_order_transition,
-        order_intent::{load_intent_for_update, validate_intent_transition},
-        position,
     },
     traits::ExecutionSubmissionRepository,
 };
 use chrono::{DateTime, Utc};
-use quant_pivot_error::storage::StorageError;
+use quant_pivot_error::storage::{StorageError, entity};
 use quant_pivot_models::{
     domain::{
         ExecutionOrderInfo, ExitLedgerWrite, NewExecutionOrder, NewReconciliation, OrderIntentInfo,
@@ -78,15 +82,18 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
             row.status,
             OrderIntentStatus::Approved | OrderIntentStatus::ApprovedByPolicy
         ) {
-            return Err(StorageError::Conflict(format!(
-                "intent {intent_id} is not submittable from {}",
-                row.status.as_str()
-            )));
+            return Err(error::state_conflict(
+                entity::QUANT_ORDER_INTENT,
+                Some(intent_id),
+                format!("intent is not submittable from {}", row.status.as_str()),
+            ));
         }
         if row.expires_at <= now {
-            return Err(StorageError::Conflict(format!(
-                "intent {intent_id} has expired and cannot be submitted"
-            )));
+            return Err(error::state_conflict(
+                entity::QUANT_ORDER_INTENT,
+                Some(intent_id),
+                "intent has expired and cannot be submitted",
+            ));
         }
         validate_intent_transition(row.status, OrderIntentStatus::AdmissionPending, intent_id)?;
         let mut active = row.into_active_model();
@@ -150,10 +157,14 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
         // Re-lock the intent and re-verify the claim is still held (double-submit guard).
         let intent = load_intent_for_update(&txn, &intent_id).await?;
         if intent.status != OrderIntentStatus::AdmissionPending {
-            return Err(StorageError::Conflict(format!(
-                "intent {intent_id} must be admission_pending to create an entry order, got {}",
-                intent.status.as_str()
-            )));
+            return Err(error::state_conflict(
+                entity::QUANT_ORDER_INTENT,
+                Some(&intent_id),
+                format!(
+                    "intent must be admission_pending to create an entry order, got {}",
+                    intent.status.as_str()
+                ),
+            ));
         }
         let recommendation_id = intent.recommendation_id.clone();
 
@@ -192,9 +203,7 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
             .one(&txn)
             .await
             .map_err(StorageError::from)?
-            .ok_or_else(|| {
-                StorageError::Conflict(format!("execution order not found: {execution_order_id}"))
-            })?;
+            .ok_or_else(|| error::not_found(entity::QUANT_EXECUTION_ORDER, execution_order_id))?;
         validate_execution_order_transition(order.state, write.state, execution_order_id)?;
         let intent_id = order.order_intent_id.clone();
 
@@ -297,10 +306,13 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
         partial_exit_node_id: Option<String>,
     ) -> Result<ExecutionOrderInfo, StorageError> {
         if partial_exit_node_id.is_some() && exit_reason != ExitReason::PartialExit {
-            return Err(StorageError::Conflict(format!(
-                "partial_exit_node_id requires PartialExit reason, got {}",
-                exit_reason.as_str()
-            )));
+            return Err(error::invariant_violation(
+                Some(entity::QUANT_ORDER_INTENT),
+                format!(
+                    "partial_exit_node_id requires PartialExit reason, got {}",
+                    exit_reason.as_str()
+                ),
+            ));
         }
         let intent_id = order.order_intent_id.clone();
         let txn = self.db.begin().await.map_err(StorageError::from)?;
@@ -315,9 +327,11 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
             .await
             .map_err(StorageError::from)?;
         if inflight.is_some() {
-            return Err(StorageError::Conflict(format!(
-                "intent {intent_id} already has an in-flight exit order (Submitted/Ambiguous)"
-            )));
+            return Err(error::state_conflict(
+                entity::QUANT_ORDER_INTENT,
+                Some(&intent_id),
+                "intent already has an in-flight exit order (Submitted/Ambiguous)",
+            ));
         }
 
         // Write-ahead the venue exit intent: the Exit order row exists in
@@ -355,9 +369,7 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
             .one(&txn)
             .await
             .map_err(StorageError::from)?
-            .ok_or_else(|| {
-                StorageError::Conflict(format!("execution order not found: {execution_order_id}"))
-            })?;
+            .ok_or_else(|| error::not_found(entity::QUANT_EXECUTION_ORDER, execution_order_id))?;
 
         // Idempotency guard: a terminal exit order already settled its position +
         // capital. Never re-apply.
@@ -445,9 +457,7 @@ impl ExecutionSubmissionRepository for PgExecutionSubmissionRepository {
             .one(&txn)
             .await
             .map_err(StorageError::from)?
-            .ok_or_else(|| {
-                StorageError::Conflict(format!("execution order not found: {execution_order_id}"))
-            })?;
+            .ok_or_else(|| error::not_found(entity::QUANT_EXECUTION_ORDER, execution_order_id))?;
 
         // Idempotency guard: a terminal order has already had its capital and
         // position settled (at submit or by a prior reconciliation). Never

@@ -1,8 +1,8 @@
 //! Postgres-backed model registry repository.
 
-use crate::traits::ModelRegistryRepository;
+use crate::{postgres::error, traits::ModelRegistryRepository};
 use chrono::Utc;
-use quant_pivot_error::storage::StorageError;
+use quant_pivot_error::storage::{StorageError, entity};
 use quant_pivot_models::{
     domain::{ModelSpecInfo, ModelVersionInfo, NewModelSpec, NewModelVersion},
     entities::{quant_model_spec, quant_model_version},
@@ -124,9 +124,10 @@ impl ModelRegistryRepository for PgModelRegistryRepository {
             .await
             .map_err(StorageError::from)?
         else {
-            return Err(StorageError::Conflict(format!(
-                "model version not found: {model_version_id}"
-            )));
+            return Err(error::not_found(
+                entity::QUANT_MODEL_REGISTRY,
+                model_version_id,
+            ));
         };
         let mut active = row.into_active_model();
         active.quality_gate_report = ActiveValue::Set(quality_gate_report);
@@ -148,17 +149,19 @@ async fn update_model_version_status(
         .await
         .map_err(StorageError::from)?
     else {
-        return Err(StorageError::Conflict(format!(
-            "model version not found: {model_version_id}"
-        )));
+        return Err(error::not_found(
+            entity::QUANT_MODEL_REGISTRY,
+            model_version_id,
+        ));
     };
     let from = row.publication_status;
     if !from.allows_transition_to(next) {
-        return Err(StorageError::Conflict(format!(
-            "cannot transition model version {model_version_id} from {} to {}",
-            from.as_str(),
-            next.as_str()
-        )));
+        return Err(error::illegal_transition(
+            entity::QUANT_MODEL_REGISTRY,
+            Some(model_version_id),
+            from,
+            next,
+        ));
     }
     if from == next {
         return Ok(row.into());

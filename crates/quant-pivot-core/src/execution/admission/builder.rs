@@ -13,13 +13,13 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::{QuantError, QuantResult, storage::StorageError};
 use quant_pivot_models::{
     domain::{DataQualityPort, OrderIntentInfo},
-    enums::quant::PublicationStatus,
+    enums::{market::MarketStatus, quant::PublicationStatus},
     types::Usd,
 };
 use quant_pivot_repository::traits::{
-    CapitalAllocationRepository, ExecutionOrderRepository, ModelRegistryRepository,
-    RecommendationReportRepository, RecommendationRepository, ReconciliationRepository,
-    RuntimeConfigVersionRepository,
+    CapitalAllocationRepository, ExecutionOrderRepository, MarketRepository,
+    ModelRegistryRepository, RecommendationReportRepository, RecommendationRepository,
+    ReconciliationRepository, RuntimeConfigVersionRepository,
 };
 use rust_decimal::Decimal;
 
@@ -40,6 +40,7 @@ pub struct AdmissionInputBuilderDeps {
     pub reconciliation: Arc<dyn ReconciliationRepository>,
     pub execution_orders: Arc<dyn ExecutionOrderRepository>,
     pub capital: Arc<dyn CapitalAllocationRepository>,
+    pub markets: Arc<dyn MarketRepository>,
     pub config_versions: Arc<dyn RuntimeConfigVersionRepository>,
     pub account_factory: Arc<AccountProviderFactory>,
     pub book_store: Arc<BookStore>,
@@ -89,14 +90,9 @@ impl AdmissionInputBuilder {
         let config = deps.config.current();
         let budget_total_usd = parse_budget_usd(&config.portfolio.budget.total_budget_usd.value)?;
         let max_stale_book_ratio_bps = config.data_quality.max_stale_book_ratio_bps;
-        let manual_block = config
-            .selection
-            .excluded_market_ids
-            .ids
-            .iter()
-            .any(|id| id == recommendation.market_id.as_str());
 
         let report_id = recommendation.recommendation_report_id.clone();
+        let market_id = recommendation.market_id.clone();
         let order_intent_id = intent.order_intent_id.clone();
         let model_version_id = intent.model_version_id.clone();
         let account_factory = Arc::clone(&deps.account_factory);
@@ -109,6 +105,7 @@ impl AdmissionInputBuilder {
             allocation_result,
             active_version_result,
             account_result,
+            market_result,
         ) = tokio::join!(
             deps.reports.find_by_id(&report_id),
             deps.model_registry
@@ -122,7 +119,8 @@ impl AdmissionInputBuilder {
                     .create(budget_total_usd)?
                     .snapshot(now)
                     .await
-            }
+            },
+            deps.markets.find_by_id(&market_id)
         );
 
         let report = report_result?
@@ -136,6 +134,10 @@ impl AdmissionInputBuilder {
         let has_blocking_inflight = unresolvable_result? || ambiguous_inflight_result?;
         let allocation = allocation_result?;
         let account = account_result?;
+        let manual_block = market_result?
+            .ok_or_else(|| not_found("market", recommendation.market_id.to_string()))?
+            .status
+            == MarketStatus::ManuallyBlocked;
         let active_version = active_version_result?
             .ok_or_else(|| not_found("runtime_config_version", "current".to_owned()))?;
 

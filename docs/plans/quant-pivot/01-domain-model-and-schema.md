@@ -71,8 +71,6 @@
 - `runtime_config_version_id uuid not null`
 - `selector_hash text not null`
 - `market_count int not null`
-- `included_market_ids jsonb not null`
-- `excluded_market_ids jsonb not null`
 - `exclusion_summary jsonb not null`
 - `created_at timestamptz not null`
 

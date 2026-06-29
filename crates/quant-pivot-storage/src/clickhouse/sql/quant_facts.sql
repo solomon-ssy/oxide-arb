@@ -87,3 +87,53 @@ CREATE TABLE IF NOT EXISTS quant_execution_event
 )
 ENGINE = MergeTree
 ORDER BY (order_intent_id, event_time, ingestion_time);
+
+CREATE TABLE IF NOT EXISTS quant_capital_allocation_event
+(
+    event_time DateTime64(3, 'UTC'),
+    capital_allocation_id String,
+    order_intent_id String,
+    recommendation_id String,
+    event_kind LowCardinality(String),
+    state LowCardinality(String),
+    allocated_usd Decimal128(18),
+    locked_usd Decimal128(18),
+    spent_usd Decimal128(18),
+    released_usd Decimal128(18),
+    ingestion_time DateTime64(3, 'UTC')
+)
+ENGINE = MergeTree
+ORDER BY (order_intent_id, event_time, ingestion_time);
+
+CREATE TABLE IF NOT EXISTS quant_position_event
+(
+    event_time DateTime64(3, 'UTC'),
+    position_id String,
+    order_intent_id String,
+    market_id String,
+    token_id String,
+    event_kind LowCardinality(String),
+    state LowCardinality(String),
+    side LowCardinality(String),
+    shares Decimal128(18),
+    avg_price Decimal64(8),
+    cost_usd Decimal128(18),
+    realized_pnl_usd Decimal128(18),
+    ingestion_time DateTime64(3, 'UTC')
+)
+ENGINE = MergeTree
+ORDER BY (market_id, token_id, event_time, ingestion_time);
+
+CREATE TABLE IF NOT EXISTS quant_recommendation_attribution_event
+(
+    event_time DateTime64(3, 'UTC'),
+    recommendation_id String,
+    outcome LowCardinality(String),
+    realized_pnl_usd Decimal128(18),
+    max_adverse_excursion_bps Nullable(Decimal64(8)),
+    max_favorable_excursion_bps Decimal64(8),
+    label_available_at DateTime64(3, 'UTC'),
+    ingestion_time DateTime64(3, 'UTC')
+)
+ENGINE = MergeTree
+ORDER BY (recommendation_id, event_time, ingestion_time);

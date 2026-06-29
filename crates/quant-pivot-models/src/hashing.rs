@@ -60,6 +60,11 @@ impl CanonicalDigest {
     }
 }
 
+/// Canonical governance state hash (prefixed BLAKE3 JSON digest).
+pub fn canonical_state_hash<T: Serialize>(value: &T) -> Result<String, CanonicalDigestError> {
+    CanonicalDigest::blake3_json(value)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{BLAKE3_PREFIX, CanonicalDigest};
@@ -87,6 +92,15 @@ mod tests {
         let left = CanonicalDigest::blake3_json(&Sample { a: 1, b: "x" }).expect("left");
         let right = CanonicalDigest::blake3_json(&Sample { a: 2, b: "x" }).expect("right");
         assert_ne!(left, right);
+    }
+
+    #[test]
+    fn canonical_state_hash_matches_blake3_json() {
+        let value = Sample { a: 1, b: "x" };
+        assert_eq!(
+            super::canonical_state_hash(&value).expect("hash"),
+            CanonicalDigest::blake3_json(&value).expect("digest")
+        );
     }
 
     #[test]

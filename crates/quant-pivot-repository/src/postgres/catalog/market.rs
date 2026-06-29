@@ -3,11 +3,12 @@ use crate::{
         catalog::ingest::{
             find_existing_str_id_chunks, find_models_by_str_id_chunks, upsert_many_chunked,
         },
+        error,
         query::paginate_mapped,
     },
     traits::MarketRepository,
 };
-use quant_pivot_error::storage::StorageError;
+use quant_pivot_error::storage::{StorageError, entity};
 use quant_pivot_models::{
     domain::{MarketInfo, MarketPageQuery, Paginated, UpsertMarket},
     entities::market::{
@@ -163,12 +164,14 @@ async fn do_update_status(
         "active" => MarketStatus::Active,
         "filtered" => MarketStatus::Filtered,
         "paused" => MarketStatus::Paused,
+        "manually_blocked" => MarketStatus::ManuallyBlocked,
         "settled" => MarketStatus::Settled,
         "delisted" => MarketStatus::Delisted,
         other => {
-            return Err(StorageError::Conflict(format!(
-                "invalid market status `{other}`"
-            )));
+            return Err(error::invariant_violation(
+                Some(entity::MARKET),
+                format!("invalid market status `{other}`"),
+            ));
         }
     };
     let mut model = MarketActiveModel {

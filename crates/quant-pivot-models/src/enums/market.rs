@@ -7,6 +7,7 @@ crate::pg_enum! {
         Active => "active",
         Filtered => "filtered",
         Paused => "paused",
+        ManuallyBlocked => "manually_blocked",
         Settled => "settled",
         Delisted => "delisted",
     }

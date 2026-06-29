@@ -45,6 +45,7 @@ impl AppContext {
             intents: Arc::new(PgOrderIntentRepository::new(pg.clone()))
                 as Arc<dyn OrderIntentRepository>,
             config: self.runtime_config(),
+            metrics: Arc::clone(&self.infra.metrics),
             events: self.events.clone(),
             dispatch_wake: self.execution_wake(),
         }))

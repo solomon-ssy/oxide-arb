@@ -1,7 +1,7 @@
 //! Postgres-backed execution-order reconciliation repository.
 
-use crate::traits::ReconciliationRepository;
-use quant_pivot_error::storage::StorageError;
+use crate::{postgres::error, traits::ReconciliationRepository};
+use quant_pivot_error::storage::{StorageError, entity};
 use quant_pivot_models::{
     domain::{
         AppendReconciliationEvidence, NewReconciliation, ReconciliationInfo, ReconciliationPatch,
@@ -49,9 +49,10 @@ impl ReconciliationRepository for PgReconciliationRepository {
             .await
             .map_err(StorageError::from)?
         else {
-            return Err(StorageError::Conflict(format!(
-                "reconciliation not found: {reconciliation_id}"
-            )));
+            return Err(error::not_found(
+                entity::QUANT_RECONCILIATION,
+                reconciliation_id,
+            ));
         };
 
         let mut chain = row.evidence_json.clone();
@@ -75,9 +76,10 @@ impl ReconciliationRepository for PgReconciliationRepository {
             .await
             .map_err(StorageError::from)?
         else {
-            return Err(StorageError::Conflict(format!(
-                "reconciliation not found: {reconciliation_id}"
-            )));
+            return Err(error::not_found(
+                entity::QUANT_RECONCILIATION,
+                reconciliation_id,
+            ));
         };
 
         let mut active = row.into_active_model();

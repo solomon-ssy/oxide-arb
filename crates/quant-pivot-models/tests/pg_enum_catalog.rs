@@ -19,8 +19,8 @@ use quant_pivot_models::{
             AccountSource, ApprovalStatus, DataQualityStatus, ExecutionOrderState, FactorDirection,
             ModelGovernanceAction, ModelRunErrorCode, ModelRunKind, ModelRunStatus,
             OrderIntentStatus, OutcomeSide, PublicationStatus, QuantRuntimeMode,
-            RecommendationOutcome, RecommendationReportStatus, RecommendationStatus, ReportKind,
-            ReportTriggerKind, TrainingDatasetStatus,
+            RecommendationAttributionOutcome, RecommendationOutcome, RecommendationReportStatus,
+            RecommendationStatus, ReportKind, ReportTriggerKind, TrainingDatasetStatus,
         },
         rbac::{MenuKind, ResourceType, RoleKind, RoleStatus, UserStatus},
         runtime_config::{RuntimeConfigActivationKind, RuntimeConfigVersionSource},
@@ -85,8 +85,8 @@ fn pg_enum_specs_are_unique_and_prefixed() {
     let specs = pg_enum::specs();
     assert_eq!(
         specs.len(),
-        47,
-        "expected exactly 47 Postgres enum types, got {}",
+        48,
+        "expected exactly 48 Postgres enum types, got {}",
         specs.len()
     );
 
@@ -137,6 +137,7 @@ fn expected_pg_enum_types_are_registered() {
         "qp_publication_status",
         "qp_quant_runtime_mode",
         "qp_reconciliation_result",
+        "qp_recommendation_attribution_outcome",
         "qp_recommendation_outcome",
         "qp_recommendation_report_status",
         "qp_recommendation_status",
@@ -195,6 +196,7 @@ fn core_quant_enums_match_wire_labels() {
             "active",
             "filtered",
             "paused",
+            "manually_blocked",
             "settled",
             "delisted",
         ]
@@ -392,9 +394,12 @@ fn rbac_and_runtime_enums_are_cataloged() {
             "analytics",
             "audit",
             "quant_report",
+            "account_snapshot",
             "order_intent",
             "execution_order",
             "position",
+            "recommendation_attribution",
+            "factor_definition",
             "operation_log",
             "user",
             "role",
@@ -509,6 +514,10 @@ fn sea_orm_reporting_governance_and_execution_type_names_match_pg_enum_specs() {
     assert_eq!(
         active_enum_type_name::<RecommendationOutcome>(),
         "qp_recommendation_outcome"
+    );
+    assert_eq!(
+        active_enum_type_name::<RecommendationAttributionOutcome>(),
+        "qp_recommendation_attribution_outcome"
     );
     assert_eq!(active_enum_type_name::<MenuKind>(), "qp_menu_kind");
     assert_eq!(active_enum_type_name::<ResourceType>(), "qp_resource_type");

@@ -112,8 +112,6 @@ RuntimeConfig {
 字段：
 
 - `enabled_categories`
-- `excluded_market_ids`
-- `included_market_ids`
 - `min_liquidity_usd`
 - `min_volume_24h_usd`
 - `max_spread_bps`
@@ -121,6 +119,9 @@ RuntimeConfig {
 - `min_time_to_resolution_secs`
 - `max_time_to_resolution_secs`
 - `max_selection_size`
+
+人工禁用不属于 runtime-config。唯一权威是 catalog `MarketStatus::ManuallyBlocked`，
+通过 governed market block/unblock API 修改，并由 selection/admission fail closed 消费。
 
 ### 2.3 `data_quality`
 

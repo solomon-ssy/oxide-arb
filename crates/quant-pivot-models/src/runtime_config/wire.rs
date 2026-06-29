@@ -19,14 +19,6 @@ pub struct DecimalString {
     pub value: String,
 }
 
-/// Runtime-config market-id list wrapper.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
-#[serde(transparent)]
-#[schemars(transparent)]
-pub struct MarketIdList {
-    pub ids: Vec<String>,
-}
-
 /// Runtime-config model-version id reference.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(transparent)]
@@ -450,6 +442,27 @@ pub struct ReconciliationPolicy {
     /// resting order is actively cancelled, an unreadable order is escalated to
     /// `Unresolvable`. Bounds how long capital can stay in-flight.
     pub stale_open_secs: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct AttributionPolicy {
+    /// Whether the final recommendation-attribution worker is enabled.
+    pub enabled: bool,
+    /// Attribution sweep interval in seconds.
+    pub sweep_secs: u64,
+    /// Maximum terminal recommendation/intent candidates processed per sweep.
+    pub batch_size: u64,
+}
+
+impl Default for AttributionPolicy {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            sweep_secs: 60,
+            batch_size: 256,
+        }
+    }
 }
 
 impl Default for ReconciliationPolicy {

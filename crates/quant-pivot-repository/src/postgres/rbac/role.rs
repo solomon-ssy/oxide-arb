@@ -1,7 +1,7 @@
 //! Postgres implementation of [`RoleRepository`].
 
 use chrono::Utc;
-use quant_pivot_error::storage::StorageError;
+use quant_pivot_error::storage::{StorageError, entity};
 use quant_pivot_models::{
     domain::{NewRole, RoleInfo, RolePatch},
     entities::{role, role_menu, user_role},
@@ -15,7 +15,7 @@ use sea_orm::{
 };
 
 use crate::{
-    postgres::rbac::{casbin::sync, util},
+    postgres::{error, rbac::casbin::sync},
     traits::rbac::RoleRepository,
 };
 
@@ -47,7 +47,7 @@ async fn do_find_by_id(db: &impl ConnectionTrait, id: &RoleId) -> Result<RoleInf
         .await
         .map_err(StorageError::from)?
         .map(Into::into)
-        .ok_or_else(|| util::not_found("role", id))
+        .ok_or_else(|| error::not_found(entity::ROLE, id))
 }
 
 async fn do_find_by_code(
@@ -67,7 +67,7 @@ async fn do_create(db: &impl ConnectionTrait, new: NewRole) -> Result<RoleInfo, 
     let model = role::Entity::insert(new.into_active_model())
         .exec_with_returning(db)
         .await
-        .map_err(|error| util::map_unique(error, "role", &code))?;
+        .map_err(|error| error::map_unique(error, entity::ROLE, &code))?;
     Ok(model.into())
 }
 
@@ -81,7 +81,7 @@ async fn do_update(
     active.updated_at = Set(Utc::now());
     match active.update(db).await {
         Ok(model) => Ok(model.into()),
-        Err(sea_orm::DbErr::RecordNotUpdated) => Err(util::not_found("role", id)),
+        Err(sea_orm::DbErr::RecordNotUpdated) => Err(error::not_found(entity::ROLE, id)),
         Err(error) => Err(StorageError::from(error)),
     }
 }
@@ -108,7 +108,7 @@ async fn do_change_status(
         .map_err(StorageError::from)?
     else {
         txn.rollback().await.map_err(StorageError::from)?;
-        return Err(util::not_found("role", id));
+        return Err(error::not_found(entity::ROLE, id));
     };
 
     // No-op transitions skip the policy churn entirely.
@@ -152,14 +152,15 @@ async fn do_delete(db: &DatabaseConnection, id: &RoleId) -> Result<(), StorageEr
         .map_err(StorageError::from)?;
     let Some(role) = role else {
         txn.rollback().await.map_err(StorageError::from)?;
-        return Err(util::not_found("role", id));
+        return Err(error::not_found(entity::ROLE, id));
     };
     if matches!(role.kind, RoleKind::Builtin) {
         txn.rollback().await.map_err(StorageError::from)?;
-        return Err(StorageError::Conflict(format!(
-            "built-in role cannot be deleted: {}",
-            role.code
-        )));
+        return Err(error::state_conflict(
+            entity::ROLE,
+            Some(id),
+            format!("built-in role cannot be deleted: {}", role.code),
+        ));
     }
 
     role_menu::Entity::delete_many()

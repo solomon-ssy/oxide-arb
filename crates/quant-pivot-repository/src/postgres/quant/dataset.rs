@@ -1,7 +1,7 @@
 //! Postgres-backed training-dataset ledger repository.
 
-use crate::traits::TrainingDatasetRepository;
-use quant_pivot_error::storage::StorageError;
+use crate::{postgres::error, traits::TrainingDatasetRepository};
+use quant_pivot_error::storage::{StorageError, entity};
 use quant_pivot_models::{
     domain::{NewTrainingDataset, TrainingDatasetInfo},
     entities::quant_training_dataset,
@@ -55,16 +55,18 @@ impl TrainingDatasetRepository for PgTrainingDatasetRepository {
             .await
             .map_err(StorageError::from)?
         else {
-            return Err(StorageError::Conflict(format!(
-                "training dataset not found: {training_dataset_id}"
-            )));
+            return Err(error::not_found(
+                entity::QUANT_TRAINING_DATASET,
+                training_dataset_id,
+            ));
         };
         if !is_valid_transition(row.status, next) {
-            return Err(StorageError::Conflict(format!(
-                "cannot transition training dataset {training_dataset_id} from {} to {}",
-                row.status.as_str(),
-                next.as_str()
-            )));
+            return Err(error::illegal_transition(
+                entity::QUANT_TRAINING_DATASET,
+                Some(training_dataset_id),
+                row.status,
+                next,
+            ));
         }
         let mut active = row.into_active_model();
         active.status = ActiveValue::Set(next);

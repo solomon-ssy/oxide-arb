@@ -4,7 +4,10 @@
 //! fixtures across `quant-pivot-core` / `quant-pivot-repository` integration
 //! tests and `quant-pivot-bench` benchmarks.
 
+pub mod account;
 pub mod catalog_fixtures;
+pub mod execution_pg_seed;
+pub mod factor_governance;
 pub mod governance;
 pub mod mocks;
 pub mod pg;

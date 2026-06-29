@@ -5,7 +5,9 @@
 
 // Crate-internal helpers.
 pub mod arc_repo;
+pub(crate) mod error;
 pub(crate) mod query;
+pub(crate) mod state_hash;
 
 pub use arc_repo::arc_repo;
 
