@@ -577,6 +577,12 @@ fn report_fields() -> Vec<FieldUiEntry> {
 }
 
 fn portfolio_fields() -> Vec<FieldUiEntry> {
+    let mut fields = portfolio_budget_sizing_fields();
+    fields.extend(portfolio_optimizer_fields());
+    fields
+}
+
+fn portfolio_budget_sizing_fields() -> Vec<FieldUiEntry> {
     vec![
         money(
             "portfolio.budget.total_budget_usd",
@@ -666,6 +672,59 @@ fn portfolio_fields() -> Vec<FieldUiEntry> {
             "回撤缩放策略",
             130,
             Some(FieldWidget::EnumSelect),
+            None,
+        ),
+    ]
+}
+
+fn portfolio_optimizer_fields() -> Vec<FieldUiEntry> {
+    vec![
+        entry(
+            "portfolio.optimizer.solver",
+            "LP solver backend",
+            "LP 求解器后端",
+            140,
+            Some(FieldWidget::EnumSelect),
+            None,
+        ),
+        boolean(
+            "portfolio.optimizer.integer_inclusion",
+            "Exact MILP inclusion",
+            "精确 MILP 选择",
+            150,
+        ),
+        entry(
+            "portfolio.optimizer.objective_return_weight",
+            "Expected-return weight (λ)",
+            "预期收益权重 (λ)",
+            170,
+            Some(FieldWidget::DecimalString),
+            None,
+        ),
+        boolean(
+            "portfolio.constraints.correlation.enabled",
+            "Correlation cap enabled",
+            "启用相关性敞口约束",
+            180,
+        ),
+        integer(
+            "portfolio.constraints.correlation.lookback_days",
+            "Correlation lookback (days)",
+            "相关性回看天数",
+            190,
+        ),
+        integer(
+            "portfolio.constraints.correlation.min_observations",
+            "Correlation min observations",
+            "相关性最小观测数",
+            200,
+        ),
+        entry(
+            "portfolio.constraints.correlation.cluster_threshold",
+            "Correlation cluster threshold",
+            "相关性聚类阈值",
+            210,
+            Some(FieldWidget::DecimalString),
             None,
         ),
     ]

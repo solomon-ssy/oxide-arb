@@ -40,9 +40,9 @@ use quant_pivot_models::{
         EntryPlan, EventId, EvidenceRefs, ExecutionEligibility, ExecutionOrderId, ExitPlan,
         ExitPolicySpec, ExposureBreakdown, FactorBreakdownEntry, FeatureVectorId, MarketContext,
         MarketId, MarketSelectionId, ModelRunId, ModelSpecId, ModelVersionId, OperationLogId,
-        OrderId, OrderIntentId, PortfolioConstraintsSnapshot, PortfolioPlanId,
-        PortfolioRejectedSummary, PortfolioRiskBudget, PositionSnapshot, Price, Probability,
-        RecommendationFactorBreakdown, RecommendationId, RecommendationIdentity,
+        OrderId, OrderIntentId, PortfolioConstraintsSnapshot, PortfolioOptimizerMeta,
+        PortfolioPlanId, PortfolioRejectedSummary, PortfolioRiskBudget, PositionSnapshot, Price,
+        Probability, RecommendationFactorBreakdown, RecommendationId, RecommendationIdentity,
         RecommendationReportId, ReconciliationEvidence, ReconciliationEvidenceChain,
         ReconciliationId, ReportDataQualitySnapshotId, ReportDataQualityTokens, ReportSummary,
         RiskEnvelope, RuntimeConfigVersionId, SchemaVersion, SelectionExclusionSummary, Shares,
@@ -181,7 +181,6 @@ pub async fn seed_approved_intent(db: &DatabaseConnection, ids: &ExecutionTxnIds
 /// Drive an approved intent's entry to a confirmed full fill: capital `Spent`,
 /// one open lot (100 @ 0.60), intent `Filled`.
 pub async fn fill_entry_lot(
-    db: &DatabaseConnection,
     submission: &PgExecutionSubmissionRepository,
     ids: &ExecutionTxnIds,
     intent_id: &OrderIntentId,
@@ -215,28 +214,17 @@ pub async fn fill_entry_lot(
         )
         .await
         .expect("record entry fill");
-    let _ = db;
 }
 
 /// Full exit flow: entry fill then exit fill at 0.55 (realized -5), position `Closed`.
+/// When `peak_mark_price` is set, seeds it on the exit monitor after entry fill.
 pub async fn close_position_full(
-    db: &DatabaseConnection,
-    submission: &PgExecutionSubmissionRepository,
-    ids: &ExecutionTxnIds,
-    intent_id: &OrderIntentId,
-) {
-    close_position_full_with_peak(db, submission, ids, intent_id, None).await;
-}
-
-/// Like [`close_position_full`], optionally seeding `peak_mark_price` after entry fill.
-pub async fn close_position_full_with_peak(
-    db: &DatabaseConnection,
     submission: &PgExecutionSubmissionRepository,
     ids: &ExecutionTxnIds,
     intent_id: &OrderIntentId,
     peak_mark_price: Option<Price>,
 ) {
-    fill_entry_lot(db, submission, ids, intent_id).await;
+    fill_entry_lot(submission, ids, intent_id).await;
 
     if let Some(peak) = peak_mark_price {
         submission
@@ -547,6 +535,7 @@ fn build_report_transaction(ids: &ExecutionTxnIds) -> NewReportTransaction {
             risk_budget_json: PortfolioRiskBudget::default(),
             constraints_json: PortfolioConstraintsSnapshot::default(),
             rejected_summary: PortfolioRejectedSummary::default(),
+            optimizer_meta_json: PortfolioOptimizerMeta::default(),
         },
         report: NewRecommendationReport {
             recommendation_report_id: ids.report.clone(),

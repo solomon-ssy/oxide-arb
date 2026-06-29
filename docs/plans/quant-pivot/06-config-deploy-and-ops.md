@@ -222,8 +222,12 @@ report TTL **expire sweep** cadence（默认 300），**不是** report 主触�
 - `max_market_exposure_usd`
 - `max_event_exposure_usd`
 - `max_category_exposure_usd`
-- `max_correlated_exposure_usd`（本期写入 plan 快照，真正生效 Phase 5）
+- `max_correlated_exposure_usd`（**Phase 05.8 起真正生效**：经 `portfolio.constraints.correlation`
+  估计相关簇后由 LP/MILP 精确约束）
 - `liquidity_usage_cap_pct`
+- `correlation`（Phase 05.8 新增）：`{ enabled, lookback_days, min_observations, cluster_threshold }`
+  —— 历史中价共动 Pearson 聚类（观测不足回退 event/category proxy），`enabled=false` 时相关簇为空
+  （等价 Phase 4 行为，相关性 cap 不约束）。
 
 `portfolio.sizing`（tagged enum `model`）：
 
@@ -232,6 +236,22 @@ report TTL **expire sweep** cadence（默认 300），**不是** report 主触�
   为目标/止损倍数 R，用于反解 Kelly 胜率）
 
 Kelly 是唯一 production sizing model；`confidence_weighting` 只作为 Kelly 分数的估计不确定性收缩输入。
+
+`portfolio.optimizer`（Phase 05.8 新增；组合分配的唯一路径，greedy 已删除）：
+
+- `{ solver, integer_inclusion, objective_return_weight }`
+- `solver`：`microlp`（纯 Rust 默认，零 native，进 report_only build）/ `highs`（可选 native，
+  仅 `lp-solver-highs` feature 启用时链接；未启用则运行期降级 microlp）。
+- `integer_inclusion`：`true`=精确 binary-inclusion MILP（生产主路径）；`false`=连续 relaxation +
+  确定性取整（也是 MILP 失败的兜底模式与回测模式）。
+- `objective_return_weight`：目标函数 `wᵢ=scoreᵢ·(1+λ·ret_normᵢ)` 的 λ（≥0；默认 0=纯 conviction）。
+
+> **刻意未纳入 `time_limit_ms`**：wall-clock 超时与「同输入同 plan」的确定性重放矛盾（回测
+> `report_hash`、生产 replay 均要求 byte-stable）。求解失败统一走 **MILP → relaxation → 空 plan**
+> 阶梯（`OptimizerSolverStatus::FellBackRelaxation` / `SolverUnavailable`），不引入非确定性超时降级。
+
+> runtime-config schema 随 Phase 05.8 升级为 **v6**（新增 `portfolio.optimizer` 与
+> `portfolio.constraints.correlation`）。
 
 ### 2.9 `execution`
 

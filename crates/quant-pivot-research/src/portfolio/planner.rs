@@ -16,6 +16,7 @@
 
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use quant_pivot_error::QuantResult;
@@ -28,9 +29,9 @@ use quant_pivot_models::{
     hashing::CanonicalDigest,
     types::{
         Bps, ContentHash, EventId, MarketId, MarketSelectionId, ModelRunId,
-        PortfolioConstraintsSnapshot, PortfolioPlanId, PortfolioRejectedSummary,
-        PortfolioRiskBudget, Probability, RejectionReasonCount, RiskEnvelope,
-        RiskEnvelopeHashInput, Shares, SignalCandidateId, SizingPlan, Usd,
+        PortfolioConstraintsSnapshot, PortfolioOptimizerMeta, PortfolioPlanId,
+        PortfolioRejectedSummary, PortfolioRiskBudget, Probability, RejectionReasonCount,
+        RiskEnvelope, RiskEnvelopeHashInput, Shares, SignalCandidateId, SizingPlan, Usd,
     },
 };
 use rust_decimal::Decimal;
@@ -41,9 +42,10 @@ use crate::{
     portfolio::{
         account::AccountSnapshot,
         allocator::{
-            Allocation, AllocationInput, AllocationOutput, CandidateMeta, GreedyPortfolioAllocator,
-            PortfolioAllocator,
+            Allocation, AllocationInput, AllocationOutput, CandidateMeta, PortfolioAllocator,
         },
+        correlation::CorrelationConstraint,
+        optimizer::OptimizerOutcome,
         sizing::{DrawdownState, SizingInput, SizingModel, SizingOutcome, SizingSuggestion},
     },
     precision::RESEARCH_DECIMAL_SCALE,
@@ -93,8 +95,11 @@ pub struct PortfolioPlanInput<'a> {
     pub account: &'a AccountSnapshot,
     /// Governed budget / exposure / liquidity caps (parsed).
     pub caps: &'a PortfolioCaps,
-    /// Maximum correlated exposure (carried into the plan snapshot only).
+    /// Configured correlated-exposure cap (recorded in the plan snapshot).
     pub max_correlated_exposure_usd: Usd,
+    /// Correlated-cluster constraint that actually binds the optimizer, when
+    /// correlation is enabled. `None` ⇒ the correlation cap does not bind.
+    pub correlation: Option<&'a CorrelationConstraint>,
     /// The active sizing model.
     pub sizing: &'a dyn SizingModel,
     /// Entry-order slippage budget recorded on each risk envelope.
@@ -147,15 +152,18 @@ pub trait PortfolioPlanner: Send + Sync {
     fn plan(&self, input: PortfolioPlanInput<'_>) -> QuantResult<PortfolioPlanOutput>;
 }
 
-/// The default greedy planner.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct DefaultPortfolioPlanner;
+/// The governed portfolio planner over an injected LP/MILP allocator.
+#[derive(Clone)]
+pub struct DefaultPortfolioPlanner {
+    allocator: Arc<dyn PortfolioAllocator>,
+}
 
 impl DefaultPortfolioPlanner {
-    /// Construct the planner.
+    /// Construct the planner over a portfolio allocator (built from config via
+    /// [`crate::portfolio::optimizer::optimizer_from_config`]).
     #[must_use]
-    pub const fn new() -> Self {
-        Self
+    pub fn new(allocator: Arc<dyn PortfolioAllocator>) -> Self {
+        Self { allocator }
     }
 }
 
@@ -178,26 +186,28 @@ impl PortfolioPlanner for DefaultPortfolioPlanner {
         let (metas, mut sized) =
             size_candidates(&input.candidates, input.sizing, equity, &mut rejected)?;
 
-        // 2. Allocate over the account's current exposure net + available cash.
-        let allocation = GreedyPortfolioAllocator::new().allocate(&AllocationInput {
+        // 2. Allocate over the account's current exposure net + available cash
+        //    via the injected LP/MILP optimizer (global TopN + capital choice).
+        let allocation = self.allocator.allocate(&AllocationInput {
             candidates: metas,
             caps: input.caps,
             initial_exposures: &input.account.exposures,
             available_usd: input.account.available_usd.inner(),
+            correlation: input.correlation,
+            top_n: input.top_n,
         })?;
+        let optimizer_outcome = allocation.outcome.clone();
 
         // 3. Classify allocations: ranked survivors vs min-size / cap rejections.
         let mut scored = classify_allocations(allocation, &mut sized, input.caps, &mut rejected);
 
-        // 4. Stable rank (parent §21.5), then truncate to top_n.
+        // 4. Stable rank (parent §21.5). TopN inclusion is enforced by the LP
+        //    allocator (MILP cardinality or relaxation recover), so every funded
+        //    survivor is published — no second truncation pass.
         scored.sort_by(rank_order);
         let mut planned: Vec<PlannedRecommendation> = Vec::new();
         let mut allocated_total = Usd::ZERO;
         for (index, item) in scored.into_iter().enumerate() {
-            if index >= input.top_n {
-                rejected.push(beyond_top_n(&item, index, input.top_n));
-                continue;
-            }
             allocated_total += item.allocation.allocated_usd;
             planned.push(PlannedRecommendation {
                 rank: u32::try_from(index + 1).unwrap_or(u32::MAX),
@@ -208,7 +218,7 @@ impl PortfolioPlanner for DefaultPortfolioPlanner {
             });
         }
 
-        let plan_row = build_plan_row(&input, allocated_total, &rejected);
+        let plan_row = build_plan_row(&input, allocated_total, &rejected, &optimizer_outcome);
         Ok(PortfolioPlanOutput {
             planned,
             rejected,
@@ -277,10 +287,19 @@ fn classify_allocations<'a>(
         };
         let candidate = plan_candidate.candidate;
         if alloc.allocated_usd.inner() < min_rec || alloc.allocated_usd.is_zero() {
+            let reason = if suggestion.desired_usd.inner() < min_rec {
+                // The Kelly-desired size itself was below the minimum useful ticket.
+                RejectionReason::BelowMinSize
+            } else if alloc.binding_constraint == BindingConstraint::None {
+                // Feasible room existed but the global TopN selection excluded it.
+                RejectionReason::BeyondTopN
+            } else {
+                rejection_for_binding(alloc.binding_constraint)
+            };
             rejected.push(RejectedCandidate {
                 signal_candidate_id: candidate.signal_candidate_id.clone(),
                 market_id: candidate.market_id.clone(),
-                reason: rejection_for_binding(alloc.binding_constraint),
+                reason,
                 detail: format!("allocated {} below minimum {min_rec}", alloc.allocated_usd),
             });
             continue;
@@ -326,16 +345,6 @@ fn rank_order(a: &Scored<'_>, b: &Scored<'_>) -> Ordering {
         })
 }
 
-/// A candidate that sized fine but ranked beyond the report's `top_n` cut.
-fn beyond_top_n(item: &Scored<'_>, index: usize, top_n: usize) -> RejectedCandidate {
-    RejectedCandidate {
-        signal_candidate_id: item.candidate.signal_candidate_id.clone(),
-        market_id: item.candidate.market_id.clone(),
-        reason: RejectionReason::BeyondTopN,
-        detail: format!("ranked {} beyond top_n {top_n}", index + 1),
-    }
-}
-
 /// Map an allocator binding to a rejection reason for a dropped candidate.
 const fn rejection_for_binding(binding: BindingConstraint) -> RejectionReason {
     match binding {
@@ -345,7 +354,22 @@ const fn rejection_for_binding(binding: BindingConstraint) -> RejectionReason {
         BindingConstraint::EventCap => RejectionReason::EventCapExhausted,
         BindingConstraint::CategoryCap => RejectionReason::CategoryCapExhausted,
         BindingConstraint::LiquidityCap => RejectionReason::LiquidityInfeasible,
+        BindingConstraint::CorrelationCap => RejectionReason::CorrelationCapExhausted,
         _ => RejectionReason::BelowMinSize,
+    }
+}
+
+/// Project the allocator's solve provenance into the persisted plan metadata.
+fn optimizer_meta(outcome: &OptimizerOutcome) -> PortfolioOptimizerMeta {
+    PortfolioOptimizerMeta {
+        solver: outcome.solver,
+        solve_mode: outcome.solve_mode,
+        status: outcome.status,
+        fell_back_to_relaxation: outcome.fell_back_to_relaxation,
+        objective_value: outcome.objective_value,
+        elapsed_ms: outcome.elapsed_ms,
+        correlation_source: outcome.correlation_source,
+        constraint_conflicts: outcome.constraint_conflicts.clone(),
     }
 }
 
@@ -473,6 +497,7 @@ fn build_plan_row(
     input: &PortfolioPlanInput<'_>,
     allocated_total: Usd,
     rejected: &[RejectedCandidate],
+    optimizer_outcome: &OptimizerOutcome,
 ) -> NewPortfolioPlan {
     let total_budget = Usd::new(input.caps.total_budget_usd.max(Decimal::ZERO));
     let remaining = (total_budget - allocated_total).max(Usd::ZERO);
@@ -503,6 +528,7 @@ fn build_plan_row(
         risk_budget_json: risk_budget,
         constraints_json: constraints,
         rejected_summary: rejected_summary(rejected),
+        optimizer_meta_json: optimizer_meta(optimizer_outcome),
     }
 }
 

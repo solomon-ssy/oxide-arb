@@ -6,7 +6,8 @@ use chrono::{Duration, Utc};
 use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
     domain::{
-        PointInTimeDataSource, RuntimeConfigVersionInfo, quant::NewReportDataQualitySnapshot,
+        PointInTimeDataSource, RuntimeConfigVersionInfo,
+        quant::{NewPortfolioPlan, NewReportDataQualitySnapshot},
     },
     enums::quant::{EmptyReason, RejectionReason},
     runtime_config::RuntimeConfig,
@@ -15,14 +16,18 @@ use quant_pivot_models::{
         ReportDataQualitySnapshotId, ReportDataQualityTokens, Usd,
     },
 };
-use quant_pivot_repository::traits::{MarketSelectionRepository, RuntimeConfigVersionRepository};
+use quant_pivot_repository::traits::{
+    MarketSelectionRepository, QuantFactReadRepository, RuntimeConfigVersionRepository,
+};
 use quant_pivot_research::{
     backtest::PortfolioCaps,
     features::{MarketDecisionCapture, PitView},
     model::SignalCandidate,
     portfolio::{
-        AccountSnapshot, PlanCandidate, PortfolioPlanInput, PortfolioPlanOutput, PortfolioPlanner,
-        RejectedCandidate, sizing_model_from_config,
+        AccountSnapshot, CorrelationConstraint, CorrelationEstimator, CorrelationInput,
+        CorrelationMarket, DefaultPortfolioPlanner, PlanCandidate, PortfolioPlanInput,
+        PortfolioPlanOutput, PortfolioPlanner, RejectedCandidate, optimizer_from_config,
+        sizing_model_from_config,
     },
     selection::{
         MarketSelectionBuildRequest, MarketSelectionSnapshot, MarketSelector, SelectedMarket,
@@ -66,9 +71,10 @@ pub struct ReportBuilderDeps {
     pub feature_pipeline: Arc<FeaturePipelineService>,
     pub model_runner: Arc<ModelRunner>,
     pub account_provider_factory: Arc<AccountProviderFactory>,
-    pub portfolio_planner: Arc<dyn PortfolioPlanner>,
     pub composer: Arc<dyn RecommendationComposer>,
     pub pit_source: Arc<dyn PointInTimeDataSource>,
+    pub quant_fact_read_repo: Arc<dyn QuantFactReadRepository>,
+    pub correlation_estimator: Arc<dyn CorrelationEstimator>,
     pub runtime_mode: RuntimeModeHandle,
     pub readiness_gate: Arc<dyn ReportReadinessGate>,
 }
@@ -98,6 +104,10 @@ struct EmptyComposeInput<'a> {
     captures: HashMap<MarketId, MarketDecisionCapture>,
     feature_vector_by_market: HashMap<MarketId, FeatureVectorId>,
     data_quality_snapshot: NewReportDataQualitySnapshot,
+    /// When the planner ran but published nothing, carry its plan row (solver
+    /// provenance + rejected summary) instead of synthesizing a default plan.
+    portfolio_plan: Option<NewPortfolioPlan>,
+    planner_rejected: &'a [RejectedCandidate],
 }
 
 struct PublishedComposeInput<'a> {
@@ -184,7 +194,14 @@ impl DefaultReportBuilder {
             return Ok(report);
         }
 
-        let plan = self.plan_portfolio(&context, &selection, &model_outcome, &account)?;
+        let correlation = self.build_correlation(&context, &selection).await?;
+        let plan = Self::plan_portfolio(
+            &context,
+            &selection,
+            &model_outcome,
+            &account,
+            correlation.as_ref(),
+        )?;
         if let Some(report) =
             self.compose_if_empty_plan(&stage, &model_outcome, &plan, artifacts)?
         {
@@ -228,6 +245,8 @@ impl DefaultReportBuilder {
             captures: HashMap::new(),
             feature_vector_by_market: HashMap::new(),
             data_quality_snapshot: empty_data_quality_snapshot(context, context.as_of),
+            portfolio_plan: None,
+            planner_rejected: &[],
         })
         .map(Some)
     }
@@ -258,6 +277,8 @@ impl DefaultReportBuilder {
             captures: HashMap::new(),
             feature_vector_by_market: HashMap::new(),
             data_quality_snapshot: empty_data_quality_snapshot(context, context.as_of),
+            portfolio_plan: None,
+            planner_rejected: &[],
         })
         .map(Some)
     }
@@ -285,6 +306,8 @@ impl DefaultReportBuilder {
             captures: stage.features.captures.clone(),
             feature_vector_by_market: feature_vector_by_market(stage.features),
             data_quality_snapshot: stage.features.data_quality_snapshot.clone(),
+            portfolio_plan: None,
+            planner_rejected: &[],
         })
         .map(Some)
     }
@@ -314,6 +337,8 @@ impl DefaultReportBuilder {
             captures: artifacts.captures,
             feature_vector_by_market: feature_vector_by_market(stage.features),
             data_quality_snapshot: artifacts.data_quality_snapshot,
+            portfolio_plan: None,
+            planner_rejected: &[],
         })
         .map(Some)
     }
@@ -344,6 +369,8 @@ impl DefaultReportBuilder {
             captures: artifacts.captures,
             feature_vector_by_market: feature_vector_by_market(stage.features),
             data_quality_snapshot: artifacts.data_quality_snapshot,
+            portfolio_plan: Some(plan.plan_row.clone()),
+            planner_rejected: &plan.rejected,
         })
         .map(Some)
     }
@@ -455,16 +482,20 @@ impl DefaultReportBuilder {
     }
 
     fn plan_portfolio(
-        &self,
         context: &BuildContext,
         selection: &MarketSelectionSnapshot,
         model_outcome: &ModelRunOutcome,
         account: &AccountSnapshot,
+        correlation: Option<&CorrelationConstraint>,
     ) -> QuantResult<PortfolioPlanOutput> {
         let caps = portfolio_caps(&context.config)?;
         let sizing = sizing_model_from_config(&context.config.portfolio.sizing)?;
+        // The optimizer is built per report from the active (hot-reloadable)
+        // runtime config, so a config change takes effect on the next run.
+        let allocator = optimizer_from_config(&context.config.portfolio.optimizer)?;
+        let planner = DefaultPortfolioPlanner::new(allocator);
         let plan_candidates = plan_candidates(&model_outcome.accepted, &selection.included);
-        self.deps.portfolio_planner.plan(PortfolioPlanInput {
+        planner.plan(PortfolioPlanInput {
             portfolio_plan_id: PortfolioPlanId::from_v7(),
             model_run_id: model_outcome.model_run_id.clone(),
             market_selection_id: selection.market_selection_id.clone(),
@@ -481,12 +512,90 @@ impl DefaultReportBuilder {
                     .max_correlated_exposure_usd
                     .value,
             )?),
+            correlation,
             sizing: sizing.as_ref(),
             entry_max_slippage_bps: Bps::new(Decimal::from(
                 context.config.execution.entry_order_policy.max_slippage_bps,
             )),
             top_n: bounded_usize(context.top_n),
         })
+    }
+
+    /// Pre-fetch historical mid-price series and estimate correlated clusters,
+    /// when the correlation cap is enabled and configured. Returns `None` (the
+    /// cap does not bind) when disabled or the cap is unset — the Phase 4 path.
+    async fn build_correlation(
+        &self,
+        context: &BuildContext,
+        selection: &MarketSelectionSnapshot,
+    ) -> QuantResult<Option<CorrelationConstraint>> {
+        let constraints = &context.config.portfolio.constraints;
+        let correlation = &constraints.correlation;
+        if !correlation.enabled {
+            return Ok(None);
+        }
+        let cap = parse_decimal(
+            "portfolio.constraints.max_correlated_exposure_usd",
+            &constraints.max_correlated_exposure_usd.value,
+        )?;
+        if cap <= Decimal::ZERO {
+            return Ok(None);
+        }
+        let cluster_threshold = parse_decimal(
+            "portfolio.constraints.correlation.cluster_threshold",
+            &correlation.cluster_threshold.value,
+        )?;
+
+        let lookback_secs = i64::from(correlation.lookback_days)
+            .checked_mul(86_400)
+            .ok_or_else(|| QuantError::config("correlation.lookback_days too large"))?;
+        let from_ms = (context.as_of - Duration::seconds(lookback_secs)).timestamp_millis();
+        let to_ms = context.as_of.timestamp_millis();
+        let token_ids = selection
+            .included
+            .iter()
+            .map(|market| market.primary_token_id.clone())
+            .collect::<Vec<_>>();
+        let rows = self
+            .deps
+            .quant_fact_read_repo
+            .mid_price_series(token_ids, from_ms, to_ms, CORRELATION_BUCKET_SECS)
+            .await?;
+
+        let mut by_token: HashMap<String, std::collections::BTreeMap<i64, Decimal>> =
+            HashMap::new();
+        let mut grid: std::collections::BTreeSet<i64> = std::collections::BTreeSet::new();
+        for row in rows {
+            if let Some(price) = row.mid_price {
+                by_token
+                    .entry(row.token_id.as_str().to_owned())
+                    .or_default()
+                    .insert(row.bucket_ms, price.to_price().inner());
+                grid.insert(row.bucket_ms);
+            }
+        }
+        let grid: Vec<i64> = grid.into_iter().collect();
+
+        let markets = selection
+            .included
+            .iter()
+            .map(|market| CorrelationMarket {
+                market_id: market.market_id.clone(),
+                event_id: Some(market.event_id.clone()),
+                category: market.category,
+                mid_series: aligned_series(by_token.get(market.primary_token_id.as_str()), &grid),
+            })
+            .collect::<Vec<_>>();
+
+        let groups = self
+            .deps
+            .correlation_estimator
+            .estimate(&CorrelationInput {
+                markets: &markets,
+                min_observations: correlation.min_observations,
+                cluster_threshold,
+            })?;
+        Ok(Some(groups.into_constraint(Usd::new(cap))))
     }
 
     fn compose_published(&self, input: PublishedComposeInput<'_>) -> QuantResult<ComposedReport> {
@@ -551,15 +660,17 @@ impl DefaultReportBuilder {
     }
 
     fn compose_empty(&self, input: EmptyComposeInput<'_>) -> QuantResult<ComposedReport> {
-        let portfolio_plan = empty_plan_for_report(
-            input.model_run_id.clone(),
-            input.market_selection_id.clone(),
-            input.context.as_of,
-            input.account,
-            &input.context.config,
-            input.empty.reason,
-            input.empty.rejected_count,
-        );
+        let portfolio_plan = input.portfolio_plan.unwrap_or_else(|| {
+            empty_plan_for_report(
+                input.model_run_id.clone(),
+                input.market_selection_id.clone(),
+                input.context.as_of,
+                input.account,
+                &input.context.config,
+                input.empty.reason,
+                input.empty.rejected_count,
+            )
+        });
         self.deps.composer.compose(ComposeReportInput {
             trigger: &input.request.trigger,
             trigger_key: input.request.trigger.key(input.request.trigger_time),
@@ -574,7 +685,7 @@ impl DefaultReportBuilder {
             account: input.account,
             portfolio_plan,
             planned: &[],
-            planner_rejected: &[],
+            planner_rejected: input.planner_rejected,
             captures: input.captures,
             feature_vector_by_market: input.feature_vector_by_market,
             data_quality_snapshot: input.data_quality_snapshot,
@@ -590,6 +701,34 @@ impl DefaultReportBuilder {
             top_n: input.context.top_n,
         })
     }
+}
+
+/// Hourly aggregation bucket for the correlation mid-price lookback.
+const CORRELATION_BUCKET_SECS: u32 = 3_600;
+
+/// Align a token's sparse `bucket → mid` map onto the shared grid, carrying the
+/// last observation forward (and back-filling leading gaps with the first
+/// observation). An absent / empty series yields an empty vector, which the
+/// estimator treats as insufficient history (proxy fallback).
+fn aligned_series(
+    series: Option<&std::collections::BTreeMap<i64, Decimal>>,
+    grid: &[i64],
+) -> Vec<Decimal> {
+    let Some(series) = series.filter(|series| !series.is_empty()) else {
+        return Vec::new();
+    };
+    let mut last = *series
+        .values()
+        .next()
+        .expect("non-empty series has a first value");
+    let mut out = Vec::with_capacity(grid.len());
+    for bucket in grid {
+        if let Some(value) = series.get(bucket) {
+            last = *value;
+        }
+        out.push(last);
+    }
+    out
 }
 
 fn resolve_top_n(request: &BuildReportRequest, config: &RuntimeConfig) -> QuantResult<u32> {

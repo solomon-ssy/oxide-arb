@@ -11,7 +11,7 @@ mod types;
 
 pub use book_decision_context::BookDecisionContextRow;
 pub use book_l2_replay::BookL2ReplayRow;
-pub use book_microstructure::BookMicrostructureRow;
+pub use book_microstructure::{BookMicrostructureRow, MidPriceBucketRow};
 pub use book_snapshot::BookSnapshotRow;
 pub use market_resolution::MarketResolutionRow;
 pub use quant_facts::{

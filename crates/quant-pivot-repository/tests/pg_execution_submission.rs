@@ -8,6 +8,10 @@
 use std::{collections::BTreeMap, str::FromStr};
 
 use chrono::Utc;
+use quant_pivot_error::storage::{
+    StorageError,
+    entity::{QUANT_ORDER_INTENT, QUANT_RECOMMENDATION},
+};
 use quant_pivot_models::{
     domain::{
         CapitalReconcileSettlement, CapitalSettlement, ExitLedgerWrite, NewAccountSnapshot,
@@ -44,13 +48,13 @@ use quant_pivot_models::{
         EvidenceRefs, ExecutionEligibility, ExecutionOrderId, ExitPlan, ExitPolicySpec,
         ExposureBreakdown, FactorBreakdownEntry, FeatureVectorId, MarketContext, MarketId,
         MarketSelectionId, ModelRunId, ModelSpecId, ModelVersionId, OperationLogId, OrderId,
-        OrderIntentId, PortfolioConstraintsSnapshot, PortfolioPlanId, PortfolioRejectedSummary,
-        PortfolioRiskBudget, PositionSnapshot, Price, Probability, RecommendationFactorBreakdown,
-        RecommendationId, RecommendationIdentity, RecommendationReportId, ReconciliationEvidence,
-        ReconciliationEvidenceChain, ReconciliationId, ReportDataQualitySnapshotId,
-        ReportDataQualityTokens, ReportSummary, RiskEnvelope, RuntimeConfigVersionId,
-        SchemaVersion, SelectionExclusionSummary, Shares, SignalCandidateId, SizingPlan, TokenId,
-        Usd,
+        OrderIntentId, PortfolioConstraintsSnapshot, PortfolioOptimizerMeta, PortfolioPlanId,
+        PortfolioRejectedSummary, PortfolioRiskBudget, PositionSnapshot, Price, Probability,
+        RecommendationFactorBreakdown, RecommendationId, RecommendationIdentity,
+        RecommendationReportId, ReconciliationEvidence, ReconciliationEvidenceChain,
+        ReconciliationId, ReportDataQualitySnapshotId, ReportDataQualityTokens, ReportSummary,
+        RiskEnvelope, RuntimeConfigVersionId, SchemaVersion, SelectionExclusionSummary, Shares,
+        SignalCandidateId, SizingPlan, TokenId, Usd,
     },
 };
 use quant_pivot_repository::{
@@ -568,17 +572,18 @@ async fn create_rejects_when_recommendation_executed() {
     active.status = ActiveValue::Set(RecommendationStatus::Executed);
     active.update(&db).await.expect("mark executed");
 
+    let intent_id = OrderIntentId::from_v7();
     let err = PgOrderIntentRepository::new(db.clone())
         .create_with_allocation(
-            new_pending_intent(&ids),
-            new_allocation_for(&ids, OrderIntentId::from_v7()),
+            new_pending_intent_with_id(&ids, intent_id.clone()),
+            new_allocation_for(&ids, intent_id),
         )
         .await
         .expect_err("executed rec must block create");
     assert!(matches!(
         err,
-        quant_pivot_error::storage::StorageError::StateConflict {
-            entity: quant_pivot_error::storage::entity::QUANT_RECOMMENDATION,
+        StorageError::StateConflict {
+            entity: QUANT_RECOMMENDATION,
             ..
         }
     ));
@@ -611,15 +616,11 @@ async fn create_rejects_when_submitted_intent_blocks() {
         .expect_err("submitted intent must block create");
     assert!(matches!(
         err,
-        quant_pivot_error::storage::StorageError::Duplicate {
-            entity: quant_pivot_error::storage::entity::QUANT_ORDER_INTENT,
+        StorageError::Duplicate {
+            entity: QUANT_ORDER_INTENT,
             ..
         }
     ));
-}
-
-fn new_pending_intent(ids: &TxnIds) -> NewOrderIntent {
-    new_pending_intent_with_id(ids, OrderIntentId::from_v7())
 }
 
 fn new_pending_intent_with_id(ids: &TxnIds, order_intent_id: OrderIntentId) -> NewOrderIntent {
@@ -1454,6 +1455,7 @@ fn build_report_transaction(ids: &TxnIds) -> NewReportTransaction {
             risk_budget_json: PortfolioRiskBudget::default(),
             constraints_json: PortfolioConstraintsSnapshot::default(),
             rejected_summary: PortfolioRejectedSummary::default(),
+            optimizer_meta_json: PortfolioOptimizerMeta::default(),
         },
         report: NewRecommendationReport {
             recommendation_report_id: ids.report.clone(),
@@ -1733,7 +1735,6 @@ fn report_summary() -> ReportSummary {
 /// Drive an approved intent's entry to a confirmed full fill: capital `Spent`,
 /// one open lot (100 @ 0.60), intent `Filled`.
 async fn fill_entry_lot(
-    db: &sea_orm::DatabaseConnection,
     submission: &PgExecutionSubmissionRepository,
     ids: &TxnIds,
     intent_id: &OrderIntentId,
@@ -1767,7 +1768,6 @@ async fn fill_entry_lot(
         )
         .await
         .expect("record entry fill");
-    let _ = db;
 }
 
 fn exit_order(
@@ -1806,7 +1806,7 @@ async fn exit_full_releases_capital_with_realized_pnl() {
     let ids = seed_report_fixture(&db).await;
     let intent_id = seed_approved_intent(&db, &ids).await;
     let submission = PgExecutionSubmissionRepository::new(db.clone());
-    fill_entry_lot(&db, &submission, &ids, &intent_id).await;
+    fill_entry_lot(&submission, &ids, &intent_id).await;
 
     // Write-ahead the exit: lot Open -> Closing.
     let exit = submission
@@ -1878,7 +1878,7 @@ async fn exit_partial_keeps_capital_spent_and_reduces_lot() {
     let ids = seed_report_fixture(&db).await;
     let intent_id = seed_approved_intent(&db, &ids).await;
     let submission = PgExecutionSubmissionRepository::new(db.clone());
-    fill_entry_lot(&db, &submission, &ids, &intent_id).await;
+    fill_entry_lot(&submission, &ids, &intent_id).await;
 
     let exit = submission
         .create_exit_order_and_mark_closing(
@@ -1951,7 +1951,7 @@ async fn exit_rejects_second_in_flight_order() {
     let ids = seed_report_fixture(&db).await;
     let intent_id = seed_approved_intent(&db, &ids).await;
     let submission = PgExecutionSubmissionRepository::new(db.clone());
-    fill_entry_lot(&db, &submission, &ids, &intent_id).await;
+    fill_entry_lot(&submission, &ids, &intent_id).await;
 
     submission
         .create_exit_order_and_mark_closing(

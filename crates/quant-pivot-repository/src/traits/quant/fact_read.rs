@@ -12,7 +12,7 @@
 
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    clickhouse::{BookMicrostructureRow, BookSnapshotRow, MarketResolutionRow},
+    clickhouse::{BookMicrostructureRow, BookSnapshotRow, MarketResolutionRow, MidPriceBucketRow},
     types::{MarketId, TokenId},
 };
 
@@ -30,6 +30,19 @@ pub trait QuantFactReadRepository: Send + Sync {
         from_ms: i64,
         to_ms: i64,
     ) -> Result<Vec<BookMicrostructureRow>, StorageError>;
+
+    /// Coarse mid-price series per token for correlation estimation: the last
+    /// `mid_price_close` within each `bucket_secs` interval over
+    /// `[from_ms, to_ms)` (epoch milliseconds), ordered by token then bucket.
+    /// Aggregated server-side so a multi-day lookback stays bounded. Used only by
+    /// the portfolio correlation estimator (off by default).
+    async fn mid_price_series(
+        &self,
+        token_ids: Vec<TokenId>,
+        from_ms: i64,
+        to_ms: i64,
+        bucket_secs: u32,
+    ) -> Result<Vec<MidPriceBucketRow>, StorageError>;
 
     /// The freshest book snapshot for `token_id` published at or before
     /// `as_of_ms` (epoch milliseconds), or `None` when none exists. Point-in-time

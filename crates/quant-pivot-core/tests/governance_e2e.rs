@@ -369,11 +369,10 @@ async fn seed_shadow_window(
 async fn publish_requires_quality_gate_pass() {
     let (pool, _container) = setup_pg().await;
     let db = pool.connection().clone();
-    let rc_id = seed_runtime_config(&db).await;
+    let _rc_id = seed_runtime_config(&db).await;
     let spec = seed_spec(&db).await;
     // No dataset, no backtest → coverage + sample gates fail.
     let candidate = seed_version(&db, &spec, 'a', 1, None).await;
-    let _ = rc_id;
 
     let result = harness(&db)
         .await

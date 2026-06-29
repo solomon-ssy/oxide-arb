@@ -1,11 +1,15 @@
-//! [`GreedyBacktester`]: the deterministic PIT replay loop.
+//! [`PortfolioReplayBacktester`]: the deterministic PIT replay loop.
 //!
-//! Per tick: model inference (over the PIT-resolved factor table) → greedy
+//! Per tick: model inference (over the PIT-resolved factor table) → LP/MILP
 //! allocation → outcome resolution against settled truth → metric accumulation.
 //! The engine never touches a live `BookStore`; its only inputs are the
-//! in-memory ticks and the model runtime.
+//! in-memory ticks and the model runtime. It pins the deterministic continuous
+//! relaxation mode on the pure-Rust microlp backend
+//! ([`backtest_optimizer`](crate::portfolio::backtest_optimizer)) so the report
+//! hash is reproducible and build-independent.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -28,8 +32,9 @@ use crate::{
     },
     hashing::ResearchHasher,
     model::runtime::{MarketInferenceContext, ModelRuntimeOutput, ModelRuntimeWarning},
-    portfolio::allocator::{
-        Allocation, AllocationInput, CandidateMeta, GreedyPortfolioAllocator, PortfolioAllocator,
+    portfolio::{
+        allocator::{Allocation, AllocationInput, CandidateMeta, PortfolioAllocator},
+        optimizer::backtest_optimizer,
     },
     precision::RESEARCH_DECIMAL_SCALE,
 };
@@ -39,15 +44,25 @@ fn tail_quantile() -> Decimal {
     Decimal::new(10, 2) // 0.10
 }
 
-/// Deterministic greedy backtester.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct GreedyBacktester;
+/// Deterministic PIT-replay backtester over the LP/MILP portfolio allocator.
+#[derive(Clone)]
+pub struct PortfolioReplayBacktester {
+    allocator: Arc<dyn PortfolioAllocator>,
+}
 
-impl GreedyBacktester {
-    /// Construct the backtester.
+impl PortfolioReplayBacktester {
+    /// Construct the backtester with the pinned deterministic relaxation allocator.
     #[must_use]
-    pub const fn new() -> Self {
-        Self
+    pub fn new() -> Self {
+        Self {
+            allocator: backtest_optimizer(),
+        }
+    }
+}
+
+impl Default for PortfolioReplayBacktester {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -64,16 +79,21 @@ struct RunAccumulator {
 }
 
 #[async_trait]
-impl Backtester for GreedyBacktester {
+impl Backtester for PortfolioReplayBacktester {
     async fn run(&self, inputs: BacktestInputs<'_>) -> QuantResult<BacktestRunResult> {
-        let allocator = GreedyPortfolioAllocator::new();
         let mut ticks = inputs.ticks;
         ticks.sort_by_key(|tick| tick.as_of);
 
         let mut acc = RunAccumulator::default();
         for tick in &ticks {
             let output = inputs.model.infer_batch(tick.model_input.clone()).await?;
-            process_tick(tick, &output, allocator, &inputs.caps, &mut acc)?;
+            process_tick(
+                tick,
+                &output,
+                self.allocator.as_ref(),
+                &inputs.caps,
+                &mut acc,
+            )?;
         }
 
         let metrics = BuildMetrics {
@@ -99,7 +119,7 @@ impl Backtester for GreedyBacktester {
 fn process_tick(
     tick: &BacktestTick,
     output: &ModelRuntimeOutput,
-    allocator: GreedyPortfolioAllocator,
+    allocator: &dyn PortfolioAllocator,
     caps: &PortfolioCaps,
     acc: &mut RunAccumulator,
 ) -> QuantResult<()> {
@@ -132,12 +152,17 @@ fn process_tick(
 
     let candidate_metas = backtest_candidate_metas(output, &meta, caps);
     // Per-tick independent allocation (no inventory carry): `initial_exposures`
-    // is always empty; cross-tick netting is the production planner's job.
+    // is always empty, correlation clustering is off (deterministic per-tick
+    // replay), and every candidate is eligible (no TopN truncation in backtest);
+    // cross-tick netting is the production planner's job.
+    let top_n = candidate_metas.len();
     let allocation = allocator.allocate(&AllocationInput {
         candidates: candidate_metas,
         caps,
         initial_exposures: &ExposureBreakdown::default(),
         available_usd: caps.total_budget_usd,
+        correlation: None,
+        top_n,
     })?;
     let alloc_by_id: BTreeMap<String, &Allocation> = allocation
         .allocations
@@ -356,7 +381,7 @@ fn hash_report(input: &ReportHashInput<'_>) -> QuantResult<ContentHash> {
 
 #[cfg(test)]
 mod tests {
-    use super::GreedyBacktester;
+    use super::PortfolioReplayBacktester;
     use chrono::{TimeZone, Utc};
     use quant_pivot_models::{
         enums::{
@@ -523,7 +548,7 @@ mod tests {
         let model = runtime();
         let run_id = ModelRunId::from_v7();
         let ticks = vec![tick(0, &run_id), tick(1, &run_id)];
-        let result = GreedyBacktester::new()
+        let result = PortfolioReplayBacktester::new()
             .run(BacktestInputs {
                 request: request(),
                 model: &model,
@@ -566,7 +591,7 @@ mod tests {
         let req = request();
         let ticks_a = vec![tick(0, &run_id), tick(1, &run_id)];
         let ticks_b = vec![tick(0, &run_id), tick(1, &run_id)];
-        let a = GreedyBacktester::new()
+        let a = PortfolioReplayBacktester::new()
             .run(BacktestInputs {
                 request: req.clone(),
                 model: &model,
@@ -575,7 +600,7 @@ mod tests {
             })
             .await
             .expect("a");
-        let b = GreedyBacktester::new()
+        let b = PortfolioReplayBacktester::new()
             .run(BacktestInputs {
                 request: req,
                 model: &model,

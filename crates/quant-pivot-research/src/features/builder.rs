@@ -199,9 +199,7 @@ impl ConfiguredFeatureBuilder {
         let capture_market = pit
             .resolve_market(&market.market_id, as_of)
             .await?
-            .unwrap_or_else(|| {
-                stub_market_context(market.market_id.clone(), as_of, market.category)
-            });
+            .unwrap_or_else(|| stub_market_context(market.market_id.clone(), as_of));
         let registry = pit.resolve_registry(&market.market_id, as_of)?;
         let capture = market_decision_capture_from_resolved(
             as_of,

@@ -578,6 +578,8 @@ crate::wire_enum! {
         CategoryCap => "category_cap",
         /// Visible-liquidity usage cap.
         LiquidityCap => "liquidity_cap",
+        /// Correlated-cluster exposure cap (`max_correlated_exposure_usd`).
+        CorrelationCap => "correlation_cap",
         /// Drawdown-scaling cap.
         DrawdownCap => "drawdown_cap",
         /// Confidence-floor cap.
@@ -663,6 +665,8 @@ crate::wire_enum! {
         CategoryCapExhausted => "category_cap_exhausted",
         /// The visible liquidity could not support the minimum useful size.
         LiquidityInfeasible => "liquidity_infeasible",
+        /// The correlated-cluster exposure cap was exhausted.
+        CorrelationCapExhausted => "correlation_cap_exhausted",
         /// Available cash (collateral − reserved) was exhausted.
         AvailableCashExhausted => "available_cash_exhausted",
         /// Fundable, but ranked beyond the report's `top_n` cut.
@@ -681,6 +685,65 @@ crate::wire_enum! {
         ExitBeforeResolution => "exit_before_resolution",
         /// Redeem winnings automatically once redeemable.
         AutoRedeem => "auto_redeem",
+    }
+}
+
+crate::wire_enum! {
+    /// LP solver backend that produced a portfolio plan's allocation.
+    @derive(Default, schemars::JsonSchema)
+    pub enum PortfolioSolverKind {
+        /// Pure-Rust `microlp` (default; no native dependency, ships in any build).
+        #[default]
+        Microlp => "microlp",
+        /// Native `HiGHS` (optional performance backend; `lp-solver-highs` feature).
+        Highs => "highs",
+    }
+}
+
+crate::wire_enum! {
+    /// Which LP solve mode produced the allocation.
+    @derive(Default)
+    pub enum PortfolioSolveMode {
+        /// Exact MILP with binary `TopN` inclusion (the production primary path).
+        #[default]
+        MilpExact => "milp_exact",
+        /// Continuous LP relaxation with deterministic integer recovery (the
+        /// fail-closed fallback and the deterministic backtest mode).
+        ContinuousRelaxation => "continuous_relaxation",
+    }
+}
+
+crate::wire_enum! {
+    /// Terminal status of the portfolio optimizer for one plan (observability of
+    /// which solve path actually produced the allocation).
+    @derive(Default)
+    pub enum OptimizerSolverStatus {
+        /// Solved to proven optimality.
+        #[default]
+        Optimal => "optimal",
+        /// A feasible (not proven-optimal) solution was returned.
+        Feasible => "feasible",
+        /// The model was infeasible (only contradictory constraints can cause this,
+        /// as the empty allocation is always feasible).
+        Infeasible => "infeasible",
+        /// The MILP path failed and the continuous relaxation produced the plan.
+        FellBackRelaxation => "fell_back_relaxation",
+        /// No solver could produce a plan; an empty (all-zero) allocation was emitted.
+        SolverUnavailable => "solver_unavailable",
+    }
+}
+
+crate::wire_enum! {
+    /// Provenance of the correlation clusters used for the correlation-exposure cap.
+    @derive(Default)
+    pub enum CorrelationSource {
+        /// Estimated from historical mid-price co-movement (Pearson on log returns).
+        Historical => "historical",
+        /// Event/category proxy clusters (insufficient history for estimation).
+        Proxy => "proxy",
+        /// Correlation constraint disabled (no clustering; equivalent to Phase 4).
+        #[default]
+        Disabled => "disabled",
     }
 }
 

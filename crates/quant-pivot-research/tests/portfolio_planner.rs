@@ -4,28 +4,58 @@
 //! netting against the real account snapshot, stable ranking, min-size drops,
 //! deterministic replay, and a stable risk-envelope hash.
 
+use std::sync::Arc;
+
 use chrono::{TimeZone, Utc};
 use quant_pivot_models::{
     enums::{
         common::MarketCategory,
-        quant::{AccountSource, BindingConstraint, OutcomeSide, RejectionReason},
+        quant::{
+            AccountSource, BindingConstraint, OptimizerSolverStatus, OutcomeSide,
+            PortfolioSolveMode, PortfolioSolverKind, RejectionReason,
+        },
     },
     runtime_config::{ConfidenceSizeCurve, DrawdownMultiplierPolicy},
     types::{
-        Bps, MarketId, MarketSelectionId, ModelRunId, PortfolioPlanId, PositionSnapshot, Price,
-        Probability, Shares, SignalCandidateId, TokenId, Usd,
+        Bps, MarketId, MarketSelectionId, ModelRunId, PortfolioOptimizerMeta, PortfolioPlanId,
+        PositionSnapshot, Price, Probability, Shares, SignalCandidateId, TokenId, Usd,
     },
 };
 use quant_pivot_research::{
     backtest::PortfolioCaps,
     model::signal::{ModelExplanation, SignalCandidate},
     portfolio::{
-        AccountSnapshot, DefaultPortfolioPlanner, KellySizingModel, PlanCandidate,
-        PortfolioPlanInput, PortfolioPlanner, SizingModel,
+        AccountSnapshot, DefaultPortfolioPlanner, KellySizingModel,
+        LinearProgrammingPortfolioAllocator, OptimizerConfig, PlanCandidate, PortfolioPlanInput,
+        PortfolioPlanner, SizingModel,
     },
 };
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
+
+/// The exact-MILP planner over the pure-Rust microlp backend used by the
+/// Phase 04.1 acceptance tests (no expected-return tilt: `λ = 0`).
+fn planner() -> DefaultPortfolioPlanner {
+    let config = OptimizerConfig {
+        solver: PortfolioSolverKind::Microlp,
+        integer_inclusion: true,
+        lambda: Decimal::ZERO,
+    };
+    DefaultPortfolioPlanner::new(Arc::new(LinearProgrammingPortfolioAllocator::new(config)))
+}
+
+/// Optimizer meta fields that must be identical across deterministic replays.
+/// `elapsed_ms` is wall-clock observability and is excluded (same contract as
+/// backtest `report_hash` omitting optimizer provenance).
+fn assert_optimizer_meta_replay_equal(a: &PortfolioOptimizerMeta, b: &PortfolioOptimizerMeta) {
+    assert_eq!(a.solver, b.solver);
+    assert_eq!(a.solve_mode, b.solve_mode);
+    assert_eq!(a.status, b.status);
+    assert_eq!(a.fell_back_to_relaxation, b.fell_back_to_relaxation);
+    assert_eq!(a.objective_value, b.objective_value);
+    assert_eq!(a.correlation_source, b.correlation_source);
+    assert_eq!(a.constraint_conflicts, b.constraint_conflicts);
+}
 
 fn candidate(
     market: &str,
@@ -129,6 +159,7 @@ fn input<'a>(
         account,
         caps,
         max_correlated_exposure_usd: Usd::ZERO,
+        correlation: None,
         sizing,
         entry_max_slippage_bps: Bps::new(dec!(50)),
         top_n,
@@ -158,7 +189,7 @@ fn planner_total_room_is_min_budget_available() {
     let c1 = candidate("0xa", dec!(0.9), dec!(1), dec!(200), dec!(100));
     let c2 = candidate("0xb", dec!(0.8), dec!(1), dec!(200), dec!(100));
     let model = kelly();
-    let out = DefaultPortfolioPlanner::new()
+    let out = planner()
         .plan(input(
             vec![
                 plan_candidate(&c1, MarketCategory::Crypto, None),
@@ -189,7 +220,7 @@ fn planner_respects_available_usd_after_reserved() {
     let c1 = candidate("0xa", dec!(0.9), dec!(1), dec!(500), dec!(100));
     let c2 = candidate("0xb", dec!(0.8), dec!(1), dec!(500), dec!(100));
     let model = kelly();
-    let out = DefaultPortfolioPlanner::new()
+    let out = planner()
         .plan(input(
             vec![
                 plan_candidate(&c1, MarketCategory::Crypto, None),
@@ -227,7 +258,7 @@ fn exposure_after_includes_account_snapshot_positions() {
     );
     let c1 = candidate("0xa", dec!(0.9), dec!(1), dec!(500), dec!(100));
     let model = kelly();
-    let out = DefaultPortfolioPlanner::new()
+    let out = planner()
         .plan(input(
             vec![plan_candidate(&c1, MarketCategory::Crypto, None)],
             &acct,
@@ -254,7 +285,7 @@ fn planner_with_real_account_holding_no_positions_is_deterministic() {
     let c1 = candidate("0xa", dec!(0.9), dec!(1), dec!(200), dec!(100));
     let model = kelly();
     let run = || {
-        DefaultPortfolioPlanner::new()
+        planner()
             .plan(input(
                 vec![plan_candidate(&c1, MarketCategory::Crypto, None)],
                 &acct,
@@ -278,7 +309,7 @@ fn min_size_dropped_as_rejected() {
     let acct = account(dec!(100), dec!(100), Usd::ZERO.inner(), Vec::new());
     let c1 = candidate("0xa", dec!(0.9), dec!(1), dec!(200), dec!(100));
     let model = kelly();
-    let out = DefaultPortfolioPlanner::new()
+    let out = planner()
         .plan(input(
             vec![plan_candidate(&c1, MarketCategory::Crypto, None)],
             &acct,
@@ -301,7 +332,7 @@ fn planner_stable_sort_matches_spec() {
     let c_a = candidate("0xa", dec!(0.8), dec!(1), dec!(200), dec!(100));
     let c_hi = candidate("0xc", dec!(0.95), dec!(1), dec!(200), dec!(100));
     let model = kelly();
-    let out = DefaultPortfolioPlanner::new()
+    let out = planner()
         .plan(input(
             vec![
                 plan_candidate(&c_b, MarketCategory::Crypto, None),
@@ -332,7 +363,7 @@ fn risk_envelope_hash_stable() {
     let c1 = candidate("0xa", dec!(0.9), dec!(1), dec!(200), dec!(100));
     let model = kelly();
     let plan = || {
-        DefaultPortfolioPlanner::new()
+        planner()
             .plan(input(
                 vec![plan_candidate(&c1, MarketCategory::Crypto, None)],
                 &acct,
@@ -372,7 +403,7 @@ fn planner_deterministic_replay() {
     let c2 = candidate("0xb", dec!(0.7), dec!(0.9), dec!(150), dec!(80));
     let model = kelly();
     let run = || {
-        DefaultPortfolioPlanner::new()
+        planner()
             .plan(input(
                 vec![
                     plan_candidate(&c1, MarketCategory::Crypto, Some(Usd::new(dec!(100000)))),
@@ -390,16 +421,50 @@ fn planner_deterministic_replay() {
     assert_eq!(a.planned, b.planned);
     assert_eq!(a.plan_row.allocated_usd, b.plan_row.allocated_usd);
     assert_eq!(a.plan_row.rejected_summary, b.plan_row.rejected_summary);
+    assert_optimizer_meta_replay_equal(
+        &a.plan_row.optimizer_meta_json,
+        &b.plan_row.optimizer_meta_json,
+    );
 }
 
 #[test]
-fn beyond_top_n_is_rejected() {
+fn optimizer_meta_recorded_on_plan_row() {
+    let caps = caps();
+    let acct = account(dec!(100000), dec!(100000), Usd::ZERO.inner(), Vec::new());
+    let c1 = candidate("0xa", dec!(0.95), dec!(1), dec!(200), dec!(100));
+    let model = kelly();
+    let out = planner()
+        .plan(input(
+            vec![plan_candidate(&c1, MarketCategory::Crypto, None)],
+            &acct,
+            &caps,
+            &model,
+            10,
+        ))
+        .expect("plan");
+    assert_eq!(
+        out.plan_row.optimizer_meta_json.solver,
+        PortfolioSolverKind::Microlp
+    );
+    assert_eq!(
+        out.plan_row.optimizer_meta_json.solve_mode,
+        PortfolioSolveMode::MilpExact
+    );
+    assert_eq!(
+        out.plan_row.optimizer_meta_json.status,
+        OptimizerSolverStatus::Optimal
+    );
+    assert!(!out.plan_row.optimizer_meta_json.fell_back_to_relaxation);
+}
+
+#[test]
+fn lp_top_n_exclusion_is_rejected() {
     let caps = caps();
     let acct = account(dec!(100000), dec!(100000), Usd::ZERO.inner(), Vec::new());
     let c1 = candidate("0xa", dec!(0.95), dec!(1), dec!(200), dec!(100));
     let c2 = candidate("0xb", dec!(0.85), dec!(1), dec!(200), dec!(100));
     let model = kelly();
-    let out = DefaultPortfolioPlanner::new()
+    let out = planner()
         .plan(input(
             vec![
                 plan_candidate(&c1, MarketCategory::Crypto, None),

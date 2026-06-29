@@ -9,6 +9,9 @@ use sea_orm::FromJsonQueryResult;
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    enums::quant::{
+        CorrelationSource, OptimizerSolverStatus, PortfolioSolveMode, PortfolioSolverKind,
+    },
     jsonb_active,
     types::{RejectionReasonCount, Usd},
 };
@@ -56,8 +59,37 @@ pub struct PortfolioRejectedSummary {
     pub reasons: Vec<RejectionReasonCount>,
 }
 
+/// Solver provenance for one portfolio plan's allocation.
+///
+/// Records exactly which optimizer path produced the plan so degradation is
+/// observable end-to-end: the configured solver backend, the solve mode that
+/// actually ran, the terminal status, whether the MILP fell back to the
+/// continuous relaxation, the achieved objective value, wall-clock cost, the
+/// correlation-cluster provenance, and any human-readable conflicting
+/// constraints when the model was infeasible.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, FromJsonQueryResult)]
+pub struct PortfolioOptimizerMeta {
+    /// Configured solver backend.
+    pub solver: PortfolioSolverKind,
+    /// The solve mode that produced this allocation.
+    pub solve_mode: PortfolioSolveMode,
+    /// Terminal solver status.
+    pub status: OptimizerSolverStatus,
+    /// Whether the MILP path failed and the continuous relaxation produced the plan.
+    pub fell_back_to_relaxation: bool,
+    /// Achieved objective value (`Σ wᵢ·uᵢ`), when a solve produced one.
+    pub objective_value: Option<Decimal>,
+    /// Wall-clock solve duration in milliseconds.
+    pub elapsed_ms: u64,
+    /// Provenance of the correlation clusters applied to the correlation cap.
+    pub correlation_source: CorrelationSource,
+    /// Human-readable conflicting constraints when the model was infeasible.
+    pub constraint_conflicts: Vec<String>,
+}
+
 jsonb_active!(
     PortfolioRiskBudget,
     PortfolioConstraintsSnapshot,
     PortfolioRejectedSummary,
+    PortfolioOptimizerMeta,
 );

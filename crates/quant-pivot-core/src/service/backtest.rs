@@ -40,8 +40,8 @@ use quant_pivot_research::{
     artifact::ArtifactStore,
     backtest::{
         BacktestInputs, BacktestMarketMeta, BacktestReport, BacktestRequest, BacktestRunResult,
-        BacktestTick, Backtester, GreedyBacktester, MarketOutcome, ModelComparisonReport,
-        PortfolioCaps, SampleOutcome, compare_reports,
+        BacktestTick, Backtester, MarketOutcome, ModelComparisonReport, PortfolioCaps,
+        PortfolioReplayBacktester, SampleOutcome, compare_reports,
     },
     factors::FactorEngine,
     features::ConfiguredFeatureBuilder,
@@ -291,7 +291,7 @@ impl BacktestService {
             window_start: dataset.window_start,
             window_end: dataset.window_end,
         };
-        let result = GreedyBacktester::new()
+        let result = PortfolioReplayBacktester::new()
             .run(BacktestInputs {
                 request,
                 model: model.as_ref(),

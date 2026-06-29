@@ -1,4 +1,4 @@
-//! Versioned, hot-reloadable runtime configuration (`schema_version = 5`).
+//! Versioned, hot-reloadable runtime configuration (`schema_version = 6`).
 
 pub mod json_schema;
 pub mod preferences_schema;
@@ -26,7 +26,7 @@ use quant_pivot_error::{
 use crate::types::SchemaVersion;
 
 /// The only supported runtime-config schema version.
-pub const RUNTIME_CONFIG_SCHEMA_VERSION: SchemaVersion = SchemaVersion::new(5);
+pub const RUNTIME_CONFIG_SCHEMA_VERSION: SchemaVersion = SchemaVersion::new(6);
 
 /// Root of the quant-pivot hot-reloadable runtime configuration document.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -258,19 +258,19 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn schema_version_is_five() {
-        assert_eq!(RuntimeConfig::default().schema_version.get(), 5);
-        assert_eq!(RUNTIME_CONFIG_SCHEMA_VERSION.get(), 5);
+    fn schema_version_is_six() {
+        assert_eq!(RuntimeConfig::default().schema_version.get(), 6);
+        assert_eq!(RUNTIME_CONFIG_SCHEMA_VERSION.get(), 6);
     }
 
     #[test]
-    fn rejects_v4_documents() {
+    fn rejects_v5_documents() {
         let mut document = RuntimeConfig::default().to_json();
-        document["schema_version"] = json!(4);
-        let error = RuntimeConfig::from_json(&document).expect_err("v4 must be rejected");
+        document["schema_version"] = json!(5);
+        let error = RuntimeConfig::from_json(&document).expect_err("v5 must be rejected");
         assert!(matches!(
             error,
-            RuntimeConfigError::UnsupportedSchemaVersion { found } if found.get() == 4
+            RuntimeConfigError::UnsupportedSchemaVersion { found } if found.get() == 5
         ));
     }
 

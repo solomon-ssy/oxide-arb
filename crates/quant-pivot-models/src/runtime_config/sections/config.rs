@@ -3,11 +3,12 @@
 use crate::{
     enums::{common::MarketCategory, factor::FactorFamily, quant::QuantRuntimeMode},
     runtime_config::wire::{
-        AttributionPolicy, CapitalPolicy, DecimalString, DomainFeaturePolicy, EntryOrderPolicy,
-        ExecutionAdmissionPolicy, ExecutionBreakerConfig, ExitMonitorPolicy, ExitOrderPolicy,
-        FactorWeights, FeatureFamily, FeatureNameRef, FeatureStalenessPolicy, KillSwitchPolicy,
-        MissingFactorPolicy, ModelVersionRef, NotificationPolicies, ReconciliationPolicy,
-        ReportDeliveryPolicy, ScheduleCadence, SizingModelConfig,
+        AttributionPolicy, CapitalPolicy, CorrelationConfig, DecimalString, DomainFeaturePolicy,
+        EntryOrderPolicy, ExecutionAdmissionPolicy, ExecutionBreakerConfig, ExitMonitorPolicy,
+        ExitOrderPolicy, FactorWeights, FeatureFamily, FeatureNameRef, FeatureStalenessPolicy,
+        KillSwitchPolicy, MissingFactorPolicy, ModelVersionRef, NotificationPolicies,
+        PortfolioOptimizerConfig, ReconciliationPolicy, ReportDeliveryPolicy, ScheduleCadence,
+        SizingModelConfig,
     },
     types::{SchemaVersion, Usd},
 };
@@ -380,6 +381,8 @@ pub struct PortfolioConfig {
     pub constraints: PortfolioConstraints,
     /// Position-sizing model.
     pub sizing: SizingModelConfig,
+    /// Portfolio optimizer (`good_lp` LP/MILP) policy.
+    pub optimizer: PortfolioOptimizerConfig,
 }
 
 /// Capital budget governance caps.
@@ -421,6 +424,8 @@ pub struct PortfolioConstraints {
     pub max_correlated_exposure_usd: DecimalString,
     /// Maximum fraction of visible liquidity an allocation may consume.
     pub liquidity_usage_cap_pct: DecimalString,
+    /// Correlation-cluster estimation policy gating `max_correlated_exposure_usd`.
+    pub correlation: CorrelationConfig,
 }
 
 impl Default for PortfolioConstraints {
@@ -431,6 +436,7 @@ impl Default for PortfolioConstraints {
             max_category_exposure_usd: DecimalString::new("0"),
             max_correlated_exposure_usd: DecimalString::new("0"),
             liquidity_usage_cap_pct: DecimalString::new("0.05"),
+            correlation: CorrelationConfig::default(),
         }
     }
 }

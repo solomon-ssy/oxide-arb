@@ -49,9 +49,9 @@ use quant_pivot_research::{
     governance::{ShadowComparison, compute_shadow_comparison},
     hashing::ResearchHasher,
     model::{
-        ActiveSchemaBinding, DegradeAction, InferenceStage, ModelRuntimeFactoryBuilder,
-        ModelRuntimeInput, ModelRuntimeOutput, QuantModelRuntime, SignalCandidate, WeightOverlay,
-        annotate, attach_rank_scores, degrade_action, signal_candidate_event,
+        ActiveSchemaBinding, InferenceStage, ModelRuntimeFactoryBuilder, ModelRuntimeInput,
+        ModelRuntimeOutput, QuantModelRuntime, SignalCandidate, WeightOverlay, annotate,
+        attach_rank_scores, signal_candidate_event,
     },
     selection::{ModelFeatureRequirements, SelectedMarket},
 };
@@ -892,9 +892,6 @@ async fn finalize_active_failure(
     stage: InferenceStage,
     error: QuantError,
 ) -> QuantError {
-    let action = degrade_action(stage);
-    debug_assert_eq!(action, DegradeAction::FailRunCritical);
-    let _ = action;
     let _ = model_run_repo
         .fail(
             model_run_id,
@@ -917,9 +914,6 @@ async fn finalize_shadow_failure(
     stage: InferenceStage,
     error: QuantError,
 ) -> ShadowRunOutcome {
-    let action = degrade_action(stage);
-    debug_assert_eq!(action, DegradeAction::KeepActiveRecordShadow);
-    let _ = action;
     if let Some(run_id) = model_run_id {
         let _ = model_run_repo
             .fail(

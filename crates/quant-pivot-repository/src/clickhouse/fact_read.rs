@@ -6,7 +6,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    clickhouse::{BookMicrostructureRow, BookSnapshotRow, MarketResolutionRow},
+    clickhouse::{BookMicrostructureRow, BookSnapshotRow, MarketResolutionRow, MidPriceBucketRow},
     types::{MarketId, TokenId},
 };
 use quant_pivot_storage::clickhouse::ClickHousePool;
@@ -51,6 +51,40 @@ impl QuantFactReadRepository for ChQuantFactReadRepository {
             .bind(from_ms)
             .bind(to_ms)
             .fetch_all::<BookMicrostructureRow>()
+            .await?;
+        Ok(rows)
+    }
+
+    async fn mid_price_series(
+        &self,
+        token_ids: Vec<TokenId>,
+        from_ms: i64,
+        to_ms: i64,
+        bucket_secs: u32,
+    ) -> Result<Vec<MidPriceBucketRow>, StorageError> {
+        if token_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let rows = self
+            .pool
+            .client()
+            .query(
+                "SELECT token_id, \
+                 toUnixTimestamp64Milli(toStartOfInterval(bucket_time, toIntervalSecond(?))) \
+                 AS bucket_ms, \
+                 argMax(mid_price_close, bucket_time) AS mid_price \
+                 FROM book_microstructure_1s \
+                 WHERE token_id IN ? \
+                 AND bucket_time >= fromUnixTimestamp64Milli(?) \
+                 AND bucket_time < fromUnixTimestamp64Milli(?) \
+                 GROUP BY token_id, bucket_ms \
+                 ORDER BY token_id, bucket_ms",
+            )
+            .bind(bucket_secs)
+            .bind(token_ids)
+            .bind(from_ms)
+            .bind(to_ms)
+            .fetch_all::<MidPriceBucketRow>()
             .await?;
         Ok(rows)
     }

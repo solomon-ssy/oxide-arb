@@ -123,8 +123,5 @@ pub trait OrderIntentRepository: Send + Sync {
         &self,
         statuses: Vec<OrderIntentStatus>,
         limit: u64,
-    ) -> Result<Vec<OrderIntentInfo>, StorageError> {
-        let _ = (statuses, limit);
-        Ok(Vec::new())
-    }
+    ) -> Result<Vec<OrderIntentInfo>, StorageError>;
 }

@@ -1,18 +1,19 @@
-//! Deterministic greedy portfolio allocator (shared by backtest + planner).
+//! Portfolio allocation contract shared by the planner and the backtest plane.
 //!
-//! Sorts candidates by risk-adjusted score and fills each up to its model-desired
-//! size, converging on the total-budget / available-cash / per-bucket exposure /
-//! liquidity caps. It is **explicitly not** globally optimal; Phase 5 may replace
-//! the greedy core with an LP/MILP solver behind the same [`PortfolioAllocator`]
-//! trait.
+//! Capital allocation is a single LP/MILP code path
+//! ([`crate::portfolio::lp::LinearProgrammingPortfolioAllocator`]) — there is no
+//! greedy allocator. This module owns the allocation IO contract
+//! ([`AllocationInput`] / [`AllocationOutput`] / [`Allocation`]) plus the
+//! deterministic *binding-constraint attribution* helper ([`decide_ceiling`]),
+//! which the optimizer reuses after solving to label each funded candidate with
+//! the single [`BindingConstraint`] that limited its size — keeping report
+//! fields identical regardless of the solve path.
 //!
 //! Cap room starts from the account's *current* exposure
-//! ([`AllocationInput::initial_exposures`]) so a candidate's room is
-//! `cap − already-held − this-round-allocated`, and the reported
+//! ([`AllocationInput::initial_exposures`]); a candidate's room is therefore
+//! `cap − already-held − others-allocated`, and the reported
 //! `*_exposure_after_usd` is the projected post-allocation net (existing + new).
-//! Every allocation records the single [`BindingConstraint`] that limited it.
 
-use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
 use quant_pivot_error::QuantResult;
@@ -23,7 +24,8 @@ use quant_pivot_models::{
 use rust_decimal::Decimal;
 
 use crate::{
-    backtest::PortfolioCaps, model::signal::SignalCandidate, precision::RESEARCH_DECIMAL_SCALE,
+    backtest::PortfolioCaps, model::signal::SignalCandidate,
+    portfolio::correlation::CorrelationConstraint, portfolio::optimizer::OptimizerOutcome,
 };
 
 /// A candidate paired with the allocation metadata the caps need.
@@ -76,35 +78,31 @@ pub struct AllocationInput<'a> {
     /// `min(caps.total_budget_usd, available_usd)`; the binding is attributed to
     /// [`BindingConstraint::AvailableCash`] when cash is the tighter limit.
     pub available_usd: Decimal,
+    /// Correlated-cluster exposure constraint, when correlation is enabled.
+    /// `None` ⇒ the correlation cap does not bind (Phase 4 behavior).
+    pub correlation: Option<&'a CorrelationConstraint>,
+    /// Maximum published recommendations (`TopN` inclusion cardinality).
+    pub top_n: usize,
 }
 
-/// Allocation result.
+/// Allocation result: one entry per input candidate plus solver provenance.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AllocationOutput {
     /// One entry per input candidate (including zero-funded ones).
     pub allocations: Vec<Allocation>,
+    /// Which solve path produced this allocation (observability).
+    pub outcome: OptimizerOutcome,
 }
 
-/// Portfolio allocation strategy. Phase 04's governed planner reuses this trait.
+/// Portfolio allocation strategy. The governed planner and the backtest plane
+/// both consume this single contract.
 pub trait PortfolioAllocator: Send + Sync {
     /// Allocate capital across the candidates subject to the caps.
     fn allocate(&self, input: &AllocationInput<'_>) -> QuantResult<AllocationOutput>;
 }
 
-/// The deterministic greedy allocator.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct GreedyPortfolioAllocator;
-
-impl GreedyPortfolioAllocator {
-    /// Construct the allocator.
-    #[must_use]
-    pub const fn new() -> Self {
-        Self
-    }
-}
-
 /// Treat a non-positive per-bucket cap as unlimited.
-fn bucket_cap(value: Decimal) -> Decimal {
+pub(crate) fn bucket_cap(value: Decimal) -> Decimal {
     if value <= Decimal::ZERO {
         Decimal::MAX
     } else {
@@ -120,13 +118,13 @@ struct Ceiling {
 
 /// Resolved total-deploy room: the tighter of budget vs available cash, with the
 /// binding attributed to whichever was the limiter.
-struct BudgetRoom {
-    effective: Decimal,
-    constraint: BindingConstraint,
+pub(crate) struct BudgetRoom {
+    pub(crate) effective: Decimal,
+    pub(crate) constraint: BindingConstraint,
 }
 
 impl BudgetRoom {
-    fn resolve(total_budget_usd: Decimal, available_usd: Decimal) -> Self {
+    pub(crate) fn resolve(total_budget_usd: Decimal, available_usd: Decimal) -> Self {
         let total_budget = total_budget_usd.max(Decimal::ZERO);
         let available = available_usd.max(Decimal::ZERO);
         Self {
@@ -140,134 +138,40 @@ impl BudgetRoom {
     }
 }
 
-/// Running per-bucket spend, seeded from the account's current exposure net.
-struct SpendState {
-    total: Decimal,
-    market: BTreeMap<String, Decimal>,
-    event: BTreeMap<String, Decimal>,
-    category: BTreeMap<MarketCategory, Decimal>,
-}
-
-impl SpendState {
-    fn seed(exposures: &ExposureBreakdown) -> Self {
-        Self {
-            total: Decimal::ZERO,
-            market: exposures
-                .per_market
-                .iter()
-                .map(|(id, usd)| (id.as_str().to_owned(), usd.inner()))
-                .collect(),
-            event: exposures
-                .per_event
-                .iter()
-                .map(|(id, usd)| (id.as_str().to_owned(), usd.inner()))
-                .collect(),
-            category: exposures
-                .per_category
-                .iter()
-                .map(|(category, usd)| (*category, usd.inner()))
-                .collect(),
-        }
-    }
-
-    /// Allocate one candidate, mutating the running spend and returning the
-    /// decision with full binding attribution and projected exposure-after.
-    fn allocate_one(
-        &mut self,
-        meta: &CandidateMeta<'_>,
-        caps: &PortfolioCaps,
-        budget: &BudgetRoom,
-    ) -> Allocation {
-        let candidate = meta.candidate;
-        let market_key = candidate.market_id.as_str().to_owned();
-        let event_key = meta
-            .event_id
-            .as_ref()
-            .map_or_else(|| market_key.clone(), |id| id.as_str().to_owned());
-
-        let market_held = self
-            .market
-            .get(&market_key)
-            .copied()
-            .unwrap_or(Decimal::ZERO);
-        let event_held = self.event.get(&event_key).copied().unwrap_or(Decimal::ZERO);
-        let category_held = self
-            .category
-            .get(&meta.category)
-            .copied()
-            .unwrap_or(Decimal::ZERO);
-
-        let decision = decide_ceiling(
-            meta,
-            caps,
-            budget,
-            self.total,
-            market_held,
-            event_held,
-            category_held,
-        );
-
-        // Below the minimum useful size: drop (do not reserve budget); keep the
-        // binding so the planner can name the rejection cause.
-        let min_rec = caps.min_recommendation_usd.max(Decimal::ZERO);
-        let alloc = if decision.alloc_pre >= min_rec && decision.alloc_pre > Decimal::ZERO {
-            decision.alloc_pre.round_dp(RESEARCH_DECIMAL_SCALE)
-        } else {
-            Decimal::ZERO
-        };
-
-        if alloc > Decimal::ZERO {
-            self.total += alloc;
-            *self
-                .market
-                .entry(market_key.clone())
-                .or_insert(Decimal::ZERO) += alloc;
-            *self.event.entry(event_key.clone()).or_insert(Decimal::ZERO) += alloc;
-            *self.category.entry(meta.category).or_insert(Decimal::ZERO) += alloc;
-        }
-
-        Allocation {
-            signal_candidate_id: candidate.signal_candidate_id.clone(),
-            market_id: candidate.market_id.clone(),
-            allocated_usd: Usd::new(alloc),
-            binding_constraint: decision.binding,
-            market_exposure_after_usd: Usd::new(
-                self.market.get(&market_key).copied().unwrap_or(market_held),
-            ),
-            event_exposure_after_usd: Usd::new(
-                self.event.get(&event_key).copied().unwrap_or(event_held),
-            ),
-            category_exposure_after_usd: Usd::new(
-                self.category
-                    .get(&meta.category)
-                    .copied()
-                    .unwrap_or(category_held),
-            ),
-            liquidity_feasible: decision.liquidity_feasible,
-        }
-    }
+/// The per-candidate cap-room context for binding attribution, evaluated at the
+/// solved allocation (each `*_held` already folds in the other candidates'
+/// allocated USD, so the ceilings are "how much more could this candidate have
+/// received").
+pub(crate) struct CeilingInputs<'a> {
+    pub(crate) meta: &'a CandidateMeta<'a>,
+    pub(crate) caps: &'a PortfolioCaps,
+    pub(crate) budget: &'a BudgetRoom,
+    pub(crate) spent_total: Decimal,
+    pub(crate) market_held: Decimal,
+    pub(crate) event_held: Decimal,
+    pub(crate) category_held: Decimal,
+    /// Held + others-in-cluster, when the candidate is in a multi-market cluster.
+    pub(crate) cluster_held: Option<Decimal>,
+    /// Correlated-cluster cap (only meaningful when `cluster_held` is `Some`).
+    pub(crate) correlated_cap: Decimal,
 }
 
 /// The chosen pre-min size, its binding cap, and liquidity feasibility.
-struct SizeDecision {
-    alloc_pre: Decimal,
-    binding: BindingConstraint,
-    liquidity_feasible: bool,
+pub(crate) struct SizeDecision {
+    pub(crate) alloc_pre: Decimal,
+    pub(crate) binding: BindingConstraint,
+    pub(crate) liquidity_feasible: bool,
 }
 
 /// Pick the binding ceiling for one candidate given the room left in each cap.
 ///
 /// The model's own desired size is considered first so that on ties an external
-/// cap is named the limiter; it only "wins" when strictly smallest.
-fn decide_ceiling(
-    meta: &CandidateMeta<'_>,
-    caps: &PortfolioCaps,
-    budget: &BudgetRoom,
-    spent_total: Decimal,
-    market_held: Decimal,
-    event_held: Decimal,
-    category_held: Decimal,
-) -> SizeDecision {
+/// cap is named the limiter; it only "wins" when strictly smallest. Reused by
+/// the optimizer to attribute a deterministic [`BindingConstraint`] to each
+/// funded candidate after solving.
+pub(crate) fn decide_ceiling(input: &CeilingInputs<'_>) -> SizeDecision {
+    let meta = input.meta;
+    let caps = input.caps;
     let (liquidity_room, liquidity_known) =
         meta.liquidity_usd.map_or((Decimal::MAX, false), |liq| {
             (
@@ -288,19 +192,21 @@ fn decide_ceiling(
             constraint: BindingConstraint::SingleRecommendationCap,
         },
         Ceiling {
-            value: (budget.effective - spent_total).max(Decimal::ZERO),
-            constraint: budget.constraint,
+            value: (input.budget.effective - input.spent_total).max(Decimal::ZERO),
+            constraint: input.budget.constraint,
         },
         Ceiling {
-            value: (bucket_cap(caps.max_market_exposure_usd) - market_held).max(Decimal::ZERO),
+            value: (bucket_cap(caps.max_market_exposure_usd) - input.market_held)
+                .max(Decimal::ZERO),
             constraint: BindingConstraint::SingleMarketCap,
         },
         Ceiling {
-            value: (bucket_cap(caps.max_event_exposure_usd) - event_held).max(Decimal::ZERO),
+            value: (bucket_cap(caps.max_event_exposure_usd) - input.event_held).max(Decimal::ZERO),
             constraint: BindingConstraint::EventCap,
         },
         Ceiling {
-            value: (bucket_cap(caps.max_category_exposure_usd) - category_held).max(Decimal::ZERO),
+            value: (bucket_cap(caps.max_category_exposure_usd) - input.category_held)
+                .max(Decimal::ZERO),
             constraint: BindingConstraint::CategoryCap,
         },
     ];
@@ -308,6 +214,12 @@ fn decide_ceiling(
         ceilings.push(Ceiling {
             value: liquidity_room,
             constraint: BindingConstraint::LiquidityCap,
+        });
+    }
+    if let Some(cluster_held) = input.cluster_held {
+        ceilings.push(Ceiling {
+            value: (bucket_cap(input.correlated_cap) - cluster_held).max(Decimal::ZERO),
+            constraint: BindingConstraint::CorrelationCap,
         });
     }
 
@@ -329,209 +241,81 @@ fn decide_ceiling(
     }
 }
 
-/// Deterministic greedy fill order: risk-adjusted score desc, then market/token id.
-fn greedy_order(a: &CandidateMeta<'_>, b: &CandidateMeta<'_>) -> Ordering {
-    risk_adjusted(b.candidate)
-        .cmp(&risk_adjusted(a.candidate))
-        .then_with(|| {
-            a.candidate
-                .market_id
-                .as_str()
-                .cmp(b.candidate.market_id.as_str())
-        })
-        .then_with(|| {
-            a.candidate
-                .token_id
-                .as_str()
-                .cmp(b.candidate.token_id.as_str())
-        })
+/// Running per-bucket exposure net, seeded from the account's current exposure
+/// and indexed by cluster for the correlation cap. Built once from a solved
+/// allocation set, then queried per candidate for binding attribution.
+pub(crate) struct ExposureLedger {
+    pub(crate) total: Decimal,
+    pub(crate) market: BTreeMap<String, Decimal>,
+    pub(crate) event: BTreeMap<String, Decimal>,
+    pub(crate) category: BTreeMap<MarketCategory, Decimal>,
+    pub(crate) cluster: BTreeMap<usize, Decimal>,
 }
 
-impl PortfolioAllocator for GreedyPortfolioAllocator {
-    fn allocate(&self, input: &AllocationInput<'_>) -> QuantResult<AllocationOutput> {
-        let budget = BudgetRoom::resolve(input.caps.total_budget_usd, input.available_usd);
-
-        let mut order: Vec<&CandidateMeta<'_>> = input.candidates.iter().collect();
-        order.sort_by(|a, b| greedy_order(a, b));
-
-        let mut spend = SpendState::seed(input.initial_exposures);
-        let mut allocations: BTreeMap<String, Allocation> = BTreeMap::new();
-        for meta in order {
-            let allocation = spend.allocate_one(meta, input.caps, &budget);
-            allocations.insert(meta.candidate.signal_candidate_id.to_string(), allocation);
-        }
-
-        Ok(AllocationOutput {
-            allocations: allocations.into_values().collect(),
-        })
-    }
-}
-
-/// Risk-adjusted greedy fill key: `composite_score · confidence`.
-fn risk_adjusted(candidate: &SignalCandidate) -> Decimal {
-    candidate.composite_score.inner() * candidate.confidence.inner()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{AllocationInput, CandidateMeta, GreedyPortfolioAllocator, PortfolioAllocator};
-    use crate::{
-        backtest::PortfolioCaps,
-        model::signal::{ModelExplanation, SignalCandidate},
-    };
-    use chrono::Utc;
-    use quant_pivot_models::{
-        enums::{
-            common::MarketCategory,
-            quant::{BindingConstraint, OutcomeSide},
-        },
-        types::{
-            ExposureBreakdown, MarketId, ModelRunId, Price, Probability, SignalCandidateId,
-            TokenId, Usd,
-        },
-    };
-    use rust_decimal::Decimal;
-    use rust_decimal_macros::dec;
-
-    fn candidate(market: &str, score: Decimal) -> SignalCandidate {
-        SignalCandidate {
-            signal_candidate_id: SignalCandidateId::from_v7(),
-            model_run_id: ModelRunId::from_v7(),
-            market_id: MarketId::new(market),
-            token_id: TokenId::new("yes"),
-            outcome_side: OutcomeSide::Yes,
-            composite_score: Probability::new(score),
-            confidence: Probability::new(dec!(1)),
-            expected_return_bps: dec!(100),
-            downside_bps: dec!(50),
-            entry_price_ref: Price::new(dec!(0.5)),
-            suggested_horizon_secs: 3_600,
-            factor_breakdown: Vec::new(),
-            model_explanation: ModelExplanation {
-                headline: "t".to_owned(),
-                top_positive: Vec::new(),
-                top_negative: Vec::new(),
-            },
-            rejection_warnings: Vec::new(),
-            rank_before_portfolio: 0,
-            liquidity_score: Probability::ZERO,
-            data_quality_score: Probability::ZERO,
-            model_score_percentile: Probability::ZERO,
-            as_of: Utc::now(),
+impl ExposureLedger {
+    /// Seed from the account's current net exposure (zero round spend).
+    pub(crate) fn seed(exposures: &ExposureBreakdown) -> Self {
+        Self {
+            total: Decimal::ZERO,
+            market: exposures
+                .per_market
+                .iter()
+                .map(|(id, usd)| (id.as_str().to_owned(), usd.inner()))
+                .collect(),
+            event: exposures
+                .per_event
+                .iter()
+                .map(|(id, usd)| (id.as_str().to_owned(), usd.inner()))
+                .collect(),
+            category: exposures
+                .per_category
+                .iter()
+                .map(|(category, usd)| (*category, usd.inner()))
+                .collect(),
+            cluster: BTreeMap::new(),
         }
     }
 
-    fn caps() -> PortfolioCaps {
-        PortfolioCaps {
-            total_budget_usd: dec!(1000),
-            max_single_recommendation_usd: dec!(300),
-            min_recommendation_usd: dec!(10),
-            max_market_exposure_usd: dec!(300),
-            max_event_exposure_usd: dec!(0),
-            max_category_exposure_usd: dec!(400),
-            liquidity_usage_cap_pct: dec!(0.1),
-        }
+    pub(crate) fn market_held(&self, key: &str) -> Decimal {
+        self.market.get(key).copied().unwrap_or(Decimal::ZERO)
     }
 
-    fn meta(
-        candidate: &SignalCandidate,
+    pub(crate) fn event_held(&self, key: &str) -> Decimal {
+        self.event.get(key).copied().unwrap_or(Decimal::ZERO)
+    }
+
+    pub(crate) fn category_held(&self, category: MarketCategory) -> Decimal {
+        self.category
+            .get(&category)
+            .copied()
+            .unwrap_or(Decimal::ZERO)
+    }
+
+    pub(crate) fn cluster_held(&self, cluster: usize) -> Decimal {
+        self.cluster.get(&cluster).copied().unwrap_or(Decimal::ZERO)
+    }
+
+    /// Fold one funded allocation into every bucket it touches.
+    pub(crate) fn add(
+        &mut self,
+        market_key: &str,
+        event_key: &str,
         category: MarketCategory,
-        liquidity: Option<Usd>,
-    ) -> CandidateMeta<'_> {
-        CandidateMeta {
-            candidate,
-            desired_usd: Usd::new(dec!(300)),
-            category,
-            event_id: None,
-            liquidity_usd: liquidity,
+        cluster: Option<usize>,
+        amount: Decimal,
+    ) {
+        self.total += amount;
+        *self
+            .market
+            .entry(market_key.to_owned())
+            .or_insert(Decimal::ZERO) += amount;
+        *self
+            .event
+            .entry(event_key.to_owned())
+            .or_insert(Decimal::ZERO) += amount;
+        *self.category.entry(category).or_insert(Decimal::ZERO) += amount;
+        if let Some(cluster) = cluster {
+            *self.cluster.entry(cluster).or_insert(Decimal::ZERO) += amount;
         }
-    }
-
-    #[test]
-    fn greedy_allocator_respects_budget_and_caps() {
-        let c1 = candidate("0xa", dec!(0.9));
-        let c2 = candidate("0xb", dec!(0.8));
-        let c3 = candidate("0xc", dec!(0.7));
-        let metas = vec![
-            meta(&c1, MarketCategory::Crypto, Some(Usd::new(dec!(100000)))),
-            meta(&c2, MarketCategory::Sports, Some(Usd::new(dec!(1000)))), // liquidity cap = 100
-            meta(&c3, MarketCategory::Crypto, Some(Usd::new(dec!(100000)))),
-        ];
-        let caps = caps();
-        let empty = ExposureBreakdown::default();
-        let out = GreedyPortfolioAllocator::new()
-            .allocate(&AllocationInput {
-                candidates: metas,
-                caps: &caps,
-                initial_exposures: &empty,
-                available_usd: caps.total_budget_usd,
-            })
-            .expect("allocate");
-
-        let total: Decimal = out
-            .allocations
-            .iter()
-            .map(|a| a.allocated_usd.inner())
-            .sum();
-        assert!(total <= caps.total_budget_usd, "respects total budget");
-        let crypto: Decimal = out
-            .allocations
-            .iter()
-            .filter(|a| matches!(a.market_id.as_str(), "0xa" | "0xc"))
-            .map(|a| a.allocated_usd.inner())
-            .sum();
-        assert!(crypto <= dec!(400), "respects category cap, got {crypto}");
-        let thin = out
-            .allocations
-            .iter()
-            .find(|a| a.market_id.as_str() == "0xb")
-            .expect("c2 allocation");
-        assert!(!thin.liquidity_feasible, "thin liquidity flagged");
-        assert_eq!(thin.binding_constraint, BindingConstraint::LiquidityCap);
-        assert!(thin.allocated_usd.inner() <= dec!(100));
-    }
-
-    #[test]
-    fn exposure_after_includes_account_snapshot_positions() {
-        let c1 = candidate("0xa", dec!(0.9));
-        let mut initial = ExposureBreakdown::default();
-        initial
-            .per_market
-            .insert(MarketId::new("0xa"), Usd::new(dec!(250)));
-        initial
-            .per_category
-            .insert(MarketCategory::Crypto, Usd::new(dec!(250)));
-        let caps = caps();
-        let out = GreedyPortfolioAllocator::new()
-            .allocate(&AllocationInput {
-                candidates: vec![meta(&c1, MarketCategory::Crypto, None)],
-                caps: &caps,
-                initial_exposures: &initial,
-                available_usd: caps.total_budget_usd,
-            })
-            .expect("allocate");
-        let a = &out.allocations[0];
-        // Market cap 300, already holding 250 → only 50 room left.
-        assert_eq!(a.allocated_usd, Usd::new(dec!(50)));
-        assert_eq!(a.market_exposure_after_usd, Usd::new(dec!(300)));
-        assert_eq!(a.binding_constraint, BindingConstraint::SingleMarketCap);
-    }
-
-    #[test]
-    fn available_cash_binds_below_budget() {
-        let c1 = candidate("0xa", dec!(0.9));
-        let caps = caps();
-        let empty = ExposureBreakdown::default();
-        let out = GreedyPortfolioAllocator::new()
-            .allocate(&AllocationInput {
-                candidates: vec![meta(&c1, MarketCategory::Crypto, None)],
-                caps: &caps,
-                initial_exposures: &empty,
-                available_usd: dec!(120), // cash < desired 300 and < budget 1000
-            })
-            .expect("allocate");
-        let a = &out.allocations[0];
-        assert_eq!(a.allocated_usd, Usd::new(dec!(120)));
-        assert_eq!(a.binding_constraint, BindingConstraint::AvailableCash);
     }
 }

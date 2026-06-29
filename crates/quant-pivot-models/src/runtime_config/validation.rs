@@ -351,8 +351,24 @@ fn validate_portfolio(config: &RuntimeConfig, report: &mut ConfigValidationRepor
         &constraints.liquidity_usage_cap_pct,
         report,
     );
+    unit_ratio(
+        "portfolio.constraints.correlation.cluster_threshold",
+        &constraints.correlation.cluster_threshold,
+        report,
+    );
 
     validate_sizing(&config.portfolio.sizing, report);
+    validate_optimizer(config, report);
+}
+
+/// Validate the portfolio optimizer (`good_lp`) parameters.
+fn validate_optimizer(config: &RuntimeConfig, report: &mut ConfigValidationReport) {
+    let optimizer = &config.portfolio.optimizer;
+    non_negative_decimal(
+        "portfolio.optimizer.objective_return_weight",
+        &optimizer.objective_return_weight,
+        report,
+    );
 }
 
 /// Validate the sizing model parameters.

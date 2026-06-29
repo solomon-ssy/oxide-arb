@@ -271,10 +271,6 @@ async fn gamma_full_sync_follows_keyset_cursor() {
 async fn gamma_incremental_sync_uses_updated_since_query() {
     let server = MockServer::start().await;
     let since = Utc::now() - Duration::hours(2);
-    let since_str = since.to_rfc3339();
-
-    // `updated_since` is RFC3339 (may be URL-encoded); match path + active only.
-    let _ = since_str;
     Mock::given(method("GET"))
         .and(path("/events"))
         .and(query_param("active", "true"))

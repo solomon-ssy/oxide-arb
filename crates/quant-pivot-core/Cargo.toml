@@ -13,7 +13,7 @@ quant-pivot-models     = { workspace = true }
 quant-pivot-api        = { workspace = true }
 quant-pivot-storage    = { workspace = true }
 quant-pivot-repository = { workspace = true }
-quant-pivot-research   = { workspace = true, features = ["dataframe"] }
+quant-pivot-research   = { workspace = true, features = ["dataframe", "lp-solver"] }
 quant-pivot-web        = { workspace = true }
 
 # ── Async runtime ──────────────────────────────────────────────────
@@ -87,6 +87,9 @@ criterion = { workspace = true }
 optimize = ["quant-pivot-research/optimize"]
 # Classical ML (smartcore) shadow candidates: trainer + runtime.
 ml-classical = ["quant-pivot-research/ml-classical"]
+# Portfolio LP/MILP allocator (pure-Rust microlp; required for report generation).
+lp-solver = ["quant-pivot-research/lp-solver"]
+default = ["lp-solver"]
 
 [lints]
 workspace = true

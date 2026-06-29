@@ -695,9 +695,20 @@ TrainingDatasetArtifact
 
 `good_lp` 不是模型训练框架，它是 portfolio planner 的优化建模层。它解决“选哪些 recommendation、每个分配多少资本、如何满足约束”。
 
+> **As-built（Phase 05.8）**：greedy allocator 已**彻底删除**，组合分配统一为单一 `good_lp` LP/MILP
+> 代码路径（`LinearProgrammingPortfolioAllocator`，生产与回测共用）。关键修正：`good_lp` 的纯 Rust
+> 后端 `microlp` **原生支持 integer/binary（完整 MILP）**——并非旧文本所述“microlp 仅连续 LP、MILP
+> 必须 HiGHS”。因此 `lp-solver`(microlp) 是 research 的**默认 feature**，零 native 依赖、可进
+> report_only build。失败阶梯（报告永不崩）：MILP（microlp 默认 / 可选 native HiGHS）→ 连续 LP
+> relaxation + 确定性取整（纯 microlp）→ 空 plan。目标函数定稿为
+> `maximize Σ wᵢ·uᵢ，wᵢ = scoreᵢ·(1+λ·ret_normᵢ)`，`uᵢ ≤ desired_usdᵢ·xᵢ`（Kelly 风险锚），
+> `Σ xᵢ ≤ top_n`（binary 基数，预算只被发布名消耗）。求解 provenance 落
+> `quant_portfolio_plan.optimizer_meta_json`（`PortfolioOptimizerMeta`）。详见
+> [`phase-05/05.8-portfolio-optimization-good-lp.md`](phase-05/05.8-portfolio-optimization-good-lp.md)。
+
 ### 16.1 何时引入
 
-第一版先使用 deterministic greedy planner：
+历史背景（已被上方 As-built 取代）：第一版曾使用 deterministic greedy planner：
 
 ```text
 sort by risk_adjusted_score
@@ -706,7 +717,7 @@ sort by risk_adjusted_score
  -> accept/reject
 ```
 
-只有当以下需求出现时引入 `good_lp`：
+`good_lp` 在 Phase 05.8 落地，因为：
 
 - TopN inclusion 需要全局最优。
 - category/event constraints 互相冲突。

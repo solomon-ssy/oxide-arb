@@ -39,3 +39,12 @@ pub struct BookMicrostructureRow {
     pub max_book_age_ms: u64,
     pub schema_version: ChSchemaVersion,
 }
+
+/// Coarse mid-price bucket for correlation estimation: the last
+/// `mid_price_close` within one aggregation interval for a token.
+#[derive(Debug, Clone, clickhouse::Row, Serialize, Deserialize)]
+pub struct MidPriceBucketRow {
+    pub token_id: TokenId,
+    pub bucket_ms: i64,
+    pub mid_price: Option<ChPrice>,
+}

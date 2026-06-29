@@ -44,13 +44,13 @@ use quant_pivot_models::{
         ExecutionEligibility, ExecutionOrderId, ExitOutcome, ExitPlan, ExitPolicySpec,
         ExposureBreakdown, FactorBreakdownEntry, FeatureVectorId, MarketContext, MarketId,
         MarketSelectionId, ModelRunId, ModelSpecId, ModelVersionId, OperationLogId, OrderId,
-        OrderIntentId, PortfolioConstraintsSnapshot, PortfolioPlanId, PortfolioRejectedSummary,
-        PortfolioRiskBudget, PositionSnapshot, Price, Probability, RecommendationFactorBreakdown,
-        RecommendationId, RecommendationIdentity, RecommendationReportId, ReconciliationEvidence,
-        ReconciliationEvidenceChain, ReconciliationId, ReportDataQualitySnapshotId,
-        ReportDataQualityTokens, ReportSummary, RiskEnvelope, RuntimeConfigVersionId,
-        SchemaVersion, SelectionExclusionSummary, Shares, SignalCandidateId, SizingPlan, TokenId,
-        Usd,
+        OrderIntentId, PortfolioConstraintsSnapshot, PortfolioOptimizerMeta, PortfolioPlanId,
+        PortfolioRejectedSummary, PortfolioRiskBudget, PositionSnapshot, Price, Probability,
+        RecommendationFactorBreakdown, RecommendationId, RecommendationIdentity,
+        RecommendationReportId, ReconciliationEvidence, ReconciliationEvidenceChain,
+        ReconciliationId, ReportDataQualitySnapshotId, ReportDataQualityTokens, ReportSummary,
+        RiskEnvelope, RuntimeConfigVersionId, SchemaVersion, SelectionExclusionSummary, Shares,
+        SignalCandidateId, SizingPlan, TokenId, Usd,
     },
 };
 use quant_pivot_repository::{
@@ -905,6 +905,7 @@ fn build_report_transaction(ids: &TxnIds) -> NewReportTransaction {
             risk_budget_json: PortfolioRiskBudget::default(),
             constraints_json: PortfolioConstraintsSnapshot::default(),
             rejected_summary: PortfolioRejectedSummary::default(),
+            optimizer_meta_json: PortfolioOptimizerMeta::default(),
         },
         report: NewRecommendationReport {
             recommendation_report_id: ids.report.clone(),

@@ -5,7 +5,7 @@
 //! materializes each tick's model input from a **historical PIT source**
 //! (`MaterializedPitEngine` over prefetched `ClickHouse` facts — never the live
 //! `BookStore`) plus the realized settlement outcomes, and this pure engine runs
-//! model inference → greedy allocation → outcome resolution → metrics. Because
+//! model inference → LP/MILP allocation → outcome resolution → metrics. Because
 //! the engine has no access to a `BookStore` or any live source, "no live
 //! `BookStore` in a backtest" is structurally guaranteed.
 //!
@@ -17,7 +17,7 @@ mod runner;
 mod simulator;
 
 pub use comparison::{CategoryRankIcDelta, ModelComparisonReport, compare_reports};
-pub use runner::GreedyBacktester;
+pub use runner::PortfolioReplayBacktester;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};

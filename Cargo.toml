@@ -233,6 +233,12 @@ smartcore = "0.5"
 # Pinned to the 1.x `serialize`/`deserialize` API that smartcore 0.5 uses.
 bincode = "1.3"
 
+# lp-solver: portfolio LP/MILP optimization (good_lp modeling layer).
+# `microlp` is the pure-Rust default backend (no native dependency, ships in
+# every build); the optional `highs` backend (native) is enabled separately via
+# the `lp-solver-highs` feature on quant-pivot-research.
+good_lp = { version = "1.15", default-features = false }
+
 # ── Phase 6: Web Layer + RBAC Dependencies ───────────────────────────────────
 
 # HTTP server stack (actix-web 4) — wired in later sub-phases

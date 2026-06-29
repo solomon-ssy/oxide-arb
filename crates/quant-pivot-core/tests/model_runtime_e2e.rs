@@ -27,7 +27,7 @@ use quant_pivot_core::{
 };
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    clickhouse::{BookMicrostructureRow, BookSnapshotRow, MarketResolutionRow},
+    clickhouse::{BookMicrostructureRow, BookSnapshotRow, MarketResolutionRow, MidPriceBucketRow},
     domain::{
         NewModelRun, NewModelSpec, NewModelVersion,
         market::{MarketRegistryInfo, TokenInfo, book::BookLevel},
@@ -106,6 +106,16 @@ impl QuantFactReadRepository for EmptyFactRead {
         _from_ms: i64,
         _to_ms: i64,
     ) -> Result<Vec<BookMicrostructureRow>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn mid_price_series(
+        &self,
+        _token_ids: Vec<TokenId>,
+        _from_ms: i64,
+        _to_ms: i64,
+        _bucket_secs: u32,
+    ) -> Result<Vec<MidPriceBucketRow>, StorageError> {
         Ok(Vec::new())
     }
 

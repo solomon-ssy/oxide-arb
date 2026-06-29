@@ -4,8 +4,8 @@
 //! `serde_json::Value`.
 
 use crate::types::{
-    MarketSelectionId, ModelRunId, PortfolioConstraintsSnapshot, PortfolioPlanId,
-    PortfolioRejectedSummary, PortfolioRiskBudget, Usd,
+    MarketSelectionId, ModelRunId, PortfolioConstraintsSnapshot, PortfolioOptimizerMeta,
+    PortfolioPlanId, PortfolioRejectedSummary, PortfolioRiskBudget, Usd,
 };
 use chrono::{DateTime, Utc};
 use sea_orm::{DeriveIntoActiveModel, DerivePartialModel, FromQueryResult};
@@ -24,12 +24,14 @@ pub struct PortfolioPlanInfo {
     pub risk_budget_json: PortfolioRiskBudget,
     pub constraints_json: PortfolioConstraintsSnapshot,
     pub rejected_summary: PortfolioRejectedSummary,
+    pub optimizer_meta_json: PortfolioOptimizerMeta,
     pub created_at: DateTime<Utc>,
 }
 
 info_from_model!(PortfolioPlanInfo, crate::entities::quant_portfolio_plan::Model, {
     portfolio_plan_id, model_run_id, market_selection_id, as_of, budget_usd,
-    allocated_usd, risk_budget_json, constraints_json, rejected_summary, created_at,
+    allocated_usd, risk_budget_json, constraints_json, rejected_summary,
+    optimizer_meta_json, created_at,
 });
 
 /// Insert payload for `quant_portfolio_plan`.
@@ -45,4 +47,5 @@ pub struct NewPortfolioPlan {
     pub risk_budget_json: PortfolioRiskBudget,
     pub constraints_json: PortfolioConstraintsSnapshot,
     pub rejected_summary: PortfolioRejectedSummary,
+    pub optimizer_meta_json: PortfolioOptimizerMeta,
 }

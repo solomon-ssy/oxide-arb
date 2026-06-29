@@ -13,7 +13,7 @@ use quant_pivot_models::{
         market::{book::BookLevel, registry::MarketRegistryInfo},
         quant::NewReportDataQualitySnapshot,
     },
-    enums::{common::MarketCategory, market::MarketStatus, quant::DataQualityStatus},
+    enums::{market::MarketStatus, quant::DataQualityStatus},
     hashing::CanonicalDigest,
     types::{
         BookSnapshotRef, BookSnapshotSource, Bps, ContentHash, EventId, MarketContext, MarketId,
@@ -278,9 +278,7 @@ pub fn empty_book(token_id: TokenId, as_of: DateTime<Utc>) -> ResolvedBook {
 pub const fn stub_market_context(
     market_id: MarketId,
     as_of: DateTime<Utc>,
-    category: MarketCategory,
 ) -> ResolvedMarketContext {
-    let _ = category;
     ResolvedMarketContext {
         market_id,
         observed_at: as_of,

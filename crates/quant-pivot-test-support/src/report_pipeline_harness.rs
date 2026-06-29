@@ -35,7 +35,7 @@ use quant_pivot_core::{
 };
 use quant_pivot_error::{QuantResult, storage::StorageError};
 use quant_pivot_models::{
-    clickhouse::{BookMicrostructureRow, BookSnapshotRow, MarketResolutionRow},
+    clickhouse::{BookMicrostructureRow, BookSnapshotRow, MarketResolutionRow, MidPriceBucketRow},
     domain::{
         NewModelSpec, NewModelVersion, NewReportTransaction, NewRuntimeConfigActivation,
         NewRuntimeConfigVersion, RecommendationInfo, RecommendationReportInfo,
@@ -85,7 +85,7 @@ use quant_pivot_research::{
         ReturnModelSpec, ScoreMultiplierSpec, SubstitutionConfidenceRules,
         WeightedFactorModelArtifact,
     },
-    portfolio::DefaultPortfolioPlanner,
+    portfolio::HistoricalCorrelationEstimator,
     selection::ConfiguredMarketSelector,
 };
 use quant_pivot_storage::write::{AsyncWriter, AsyncWriterConfig, AsyncWriterObservability};
@@ -202,6 +202,16 @@ impl QuantFactReadRepository for EmptyFactRead {
         _from_ms: i64,
         _to_ms: i64,
     ) -> Result<Vec<BookMicrostructureRow>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn mid_price_series(
+        &self,
+        _token_ids: Vec<TokenId>,
+        _from_ms: i64,
+        _to_ms: i64,
+        _bucket_secs: u32,
+    ) -> Result<Vec<MidPriceBucketRow>, StorageError> {
         Ok(Vec::new())
     }
 
@@ -534,7 +544,8 @@ fn fixture_portfolio_plan(
     _recommendations: &[RecommendationInfo],
 ) -> quant_pivot_models::domain::NewPortfolioPlan {
     use quant_pivot_models::types::{
-        PortfolioConstraintsSnapshot, PortfolioRejectedSummary, PortfolioRiskBudget,
+        PortfolioConstraintsSnapshot, PortfolioOptimizerMeta, PortfolioRejectedSummary,
+        PortfolioRiskBudget,
     };
 
     quant_pivot_models::domain::NewPortfolioPlan {
@@ -547,6 +558,7 @@ fn fixture_portfolio_plan(
         risk_budget_json: PortfolioRiskBudget::default(),
         constraints_json: PortfolioConstraintsSnapshot::default(),
         rejected_summary: PortfolioRejectedSummary::default(),
+        optimizer_meta_json: PortfolioOptimizerMeta::default(),
     }
 }
 
@@ -707,9 +719,10 @@ fn build_report_builder(
         )),
         model_runner,
         account_provider_factory: account_factory,
-        portfolio_planner: Arc::new(DefaultPortfolioPlanner::new()),
         composer: Arc::new(DefaultRecommendationComposer::new()),
         pit_source,
+        quant_fact_read_repo: Arc::new(EmptyFactRead),
+        correlation_estimator: Arc::new(HistoricalCorrelationEstimator::new()),
         runtime_mode: RuntimeModeHandle::default(),
         readiness_gate: Arc::new(AlwaysOperationalGate),
     }))

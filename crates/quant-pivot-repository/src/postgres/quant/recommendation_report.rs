@@ -213,12 +213,16 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
             return Ok(None);
         }
 
+        let before_info: RecommendationReportInfo = report.clone().into();
         let mut active = report.into_active_model();
         active.status = ActiveValue::Set(RecommendationReportStatus::Expired);
         active.status_reason = ActiveValue::Set(Some("ttl_expired".to_owned()));
         active.expired_at = ActiveValue::Set(Some(expired_at));
         let model = active.update(&txn).await.map_err(StorageError::from)?;
+        let after_info: RecommendationReportInfo = model.clone().into();
 
+        let operation_log =
+            state_hash::apply_transition_hashes(operation_log, &before_info, &after_info)?;
         operation_log::Entity::insert(operation_log.into_active_model())
             .exec(&txn)
             .await

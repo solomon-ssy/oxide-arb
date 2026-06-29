@@ -346,6 +346,14 @@ impl OrderIntentRepository for MemoryIntentRepo {
     ) -> Result<Vec<OrderIntentInfo>, StorageError> {
         Ok(Vec::new())
     }
+
+    async fn find_attribution_candidates(
+        &self,
+        _: Vec<OrderIntentStatus>,
+        _: u64,
+    ) -> Result<Vec<OrderIntentInfo>, StorageError> {
+        Ok(Vec::new())
+    }
 }
 
 struct MemorySubmissionRepo {

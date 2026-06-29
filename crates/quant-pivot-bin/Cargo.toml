@@ -16,11 +16,14 @@ path = "src/main.rs"
 # the argmin weight-refinement step for the weighted trainer. Enabled by the
 # deploy/CI profile (kept off the default build so a `report_only` binary stays
 # free of the heavy native-adjacent ML stack).
+default = ["lp-solver"]
 ml-classical = ["quant-pivot-core/ml-classical"]
 optimize = ["quant-pivot-core/optimize"]
+# Portfolio LP/MILP allocator (pure-Rust microlp; required for report generation).
+lp-solver = ["quant-pivot-core/lp-solver"]
 
 [dependencies]
-quant-pivot-core = { workspace = true }
+quant-pivot-core = { workspace = true, features = ["lp-solver"] }
 quant-pivot-models = { workspace = true }
 rustls = { workspace = true }
 tokio = { workspace = true }

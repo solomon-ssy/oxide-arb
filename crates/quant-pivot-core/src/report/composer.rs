@@ -25,8 +25,8 @@ use quant_pivot_models::{
         AccountPositions, AccountSnapshotId, Bps, ConfidenceSummary, EligibilitySummary, EventId,
         EvidenceRefs, EvidenceRefsInput, ExecutionEligibility, ExitPlan, FactorBreakdownEntry,
         FactorDefinitionId, FeatureVectorId, MarketId, MarketSelectionId, ModelRunId,
-        ModelVersionId, OperationLogId, PortfolioConstraintsSnapshot, PortfolioPlanId,
-        PortfolioRejectedSummary, PortfolioRiskBudget, Price, Probability,
+        ModelVersionId, OperationLogId, PortfolioConstraintsSnapshot, PortfolioOptimizerMeta,
+        PortfolioPlanId, PortfolioRejectedSummary, PortfolioRiskBudget, Price, Probability,
         RecommendationFactorBreakdown, RecommendationId, RecommendationReportId,
         RejectionReasonCount, ReportDataQualitySnapshotId, ReportSummary, RuntimeConfigVersionId,
         SizingPlan, Usd,
@@ -825,6 +825,7 @@ fn empty_portfolio_plan(
         },
         constraints_json: constraints,
         rejected_summary,
+        optimizer_meta_json: PortfolioOptimizerMeta::default(),
     }
 }
 

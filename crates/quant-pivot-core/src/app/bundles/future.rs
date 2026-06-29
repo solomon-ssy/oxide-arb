@@ -2,16 +2,6 @@
 
 use std::sync::Arc;
 
-use quant_pivot_error::QuantResult;
-use quant_pivot_models::domain::CoreEventPublisher;
-use quant_pivot_repository::{
-    postgres::{
-        PgRecommendationReportRepository, PgRecommendationRepository,
-        PgRuntimeConfigVersionRepository,
-    },
-    traits::{RecommendationReportRepository, RecommendationRepository},
-};
-
 use super::{AccountBundle, DataBundle, GovernanceBundle, InfraBundle, ResearchBundle};
 use crate::{
     infra::schedule::ReportScheduleRunner,
@@ -21,6 +11,16 @@ use crate::{
         ReportPublisherDeps, build_report_scheduler,
     },
 };
+use quant_pivot_error::QuantResult;
+use quant_pivot_models::domain::CoreEventPublisher;
+use quant_pivot_repository::{
+    postgres::{
+        PgRecommendationReportRepository, PgRecommendationRepository,
+        PgRuntimeConfigVersionRepository,
+    },
+    traits::{RecommendationReportRepository, RecommendationRepository},
+};
+use quant_pivot_research::portfolio::HistoricalCorrelationEstimator;
 
 /// Dependencies for the recommendation report bundle.
 pub struct ReportBundleDeps<'a> {
@@ -58,11 +58,10 @@ impl ReportBundle {
             feature_pipeline: Arc::clone(&deps.research.feature_pipeline),
             model_runner: Arc::clone(&deps.research.model_runner),
             account_provider_factory: Arc::clone(&deps.account.provider_factory),
-            portfolio_planner: Arc::new(
-                quant_pivot_research::portfolio::DefaultPortfolioPlanner::new(),
-            ),
             composer,
             pit_source: Arc::clone(&deps.data.pit_source),
+            quant_fact_read_repo: Arc::clone(&deps.infra.quant_fact_read),
+            correlation_estimator: Arc::new(HistoricalCorrelationEstimator::new()),
             runtime_mode: deps.governance.runtime_mode.clone(),
             readiness_gate: Arc::new(DefaultReportReadinessGate::new(
                 Arc::clone(&deps.data.catalog),

@@ -27,18 +27,10 @@ pub trait PositionRepository: Send + Sync {
     async fn find_by_id(
         &self,
         position_id: &PositionId,
-    ) -> Result<Option<PositionInfo>, StorageError> {
-        let _ = position_id;
-        Ok(None)
-    }
+    ) -> Result<Option<PositionInfo>, StorageError>;
 
-    async fn page(
-        &self,
-        query: PositionListQuery,
-    ) -> Result<Paginated<PositionInfo>, StorageError> {
-        let query = query.normalized();
-        Ok(Paginated::from_request(Vec::new(), 0, &query.page))
-    }
+    async fn page(&self, query: PositionListQuery)
+    -> Result<Paginated<PositionInfo>, StorageError>;
 
     /// All open (`Open`/`Closing`) lots — the exit monitor's scan source.
     async fn find_open_lots(&self) -> Result<Vec<PositionInfo>, StorageError>;

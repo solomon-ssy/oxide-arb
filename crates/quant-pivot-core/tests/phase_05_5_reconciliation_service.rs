@@ -36,8 +36,8 @@ use quant_pivot_models::{
         KillSwitchPort, KillSwitchView, NewCapitalAllocation, NewExecutionOrder, NewOperationLog,
         NewOrderIntent, NewReconciliation, OperationLogInfo, OperationLogQuery, OrderIntentInfo,
         OrderIntentListQuery, Paginated, PositionExit, PositionFill, PositionInfo,
-        RecommendationInfo, ReconciliationInfo, ReconciliationLedgerWrite, ReconciliationPatch,
-        SetKillSwitchCommand, SubmissionLedgerWrite,
+        PositionListQuery, RecommendationInfo, ReconciliationInfo, ReconciliationLedgerWrite,
+        ReconciliationPatch, SetKillSwitchCommand, SubmissionLedgerWrite,
     },
     enums::{
         common::{OrderType, Side},
@@ -52,8 +52,8 @@ use quant_pivot_models::{
     runtime_config::{ReconciliationPolicy, RuntimeConfig},
     types::{
         Bps, EntryOrderSpec, ExecutedPartialExitNodes, ExecutionOrderId, ExitPolicySpec, MarketId,
-        ModelVersionId, OrderId, OrderIntentId, Price, RecommendationId, RecommendationReportId,
-        ReconciliationId, RuntimeConfigVersionId, Shares, TokenId, Usd,
+        ModelVersionId, OrderId, OrderIntentId, PositionId, Price, RecommendationId,
+        RecommendationReportId, ReconciliationId, RuntimeConfigVersionId, Shares, TokenId, Usd,
     },
 };
 use quant_pivot_repository::traits::{
@@ -375,6 +375,14 @@ impl OrderIntentRepository for MemoryIntents {
     ) -> Result<Vec<OrderIntentInfo>, StorageError> {
         Ok(Vec::new())
     }
+
+    async fn find_attribution_candidates(
+        &self,
+        _: Vec<OrderIntentStatus>,
+        _: u64,
+    ) -> Result<Vec<OrderIntentInfo>, StorageError> {
+        Ok(Vec::new())
+    }
 }
 
 struct StubRecommendations(RecommendationInfo);
@@ -633,6 +641,21 @@ impl PositionRepository for StubPositions {
         _order_intent_id: &OrderIntentId,
     ) -> Result<Option<PositionInfo>, StorageError> {
         Ok(None)
+    }
+
+    async fn find_by_id(
+        &self,
+        _position_id: &PositionId,
+    ) -> Result<Option<PositionInfo>, StorageError> {
+        Ok(None)
+    }
+
+    async fn page(
+        &self,
+        query: PositionListQuery,
+    ) -> Result<Paginated<PositionInfo>, StorageError> {
+        let query = query.normalized();
+        Ok(Paginated::from_request(Vec::new(), 0, &query.page))
     }
 
     async fn find_open_lots(&self) -> Result<Vec<PositionInfo>, StorageError> {

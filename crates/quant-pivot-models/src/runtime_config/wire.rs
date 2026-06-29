@@ -5,7 +5,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-use crate::types::ModelVersionId;
+use crate::{enums::quant::PortfolioSolverKind, types::ModelVersionId};
 
 /// Placeholder substituted for sensitive values on read surfaces.
 pub const MASKED_SECRET: &str = "***";
@@ -161,6 +161,71 @@ impl Default for SizingModelConfig {
             target_reward_multiple: DecimalString::new("2.0"),
             confidence_weighting: ConfidenceSizeCurve::Linear,
             drawdown_scaling: DrawdownMultiplierPolicy::Fixed,
+        }
+    }
+}
+
+/// Portfolio optimizer (`good_lp` LP/MILP) configuration.
+///
+/// The optimizer is the **single** allocation path (greedy has been removed):
+/// the production primary is an exact binary-inclusion MILP, and on any solver
+/// failure it falls back to the continuous LP relaxation with deterministic
+/// integer recovery, then ultimately to an empty plan — so a report is always
+/// produced. `microlp` (pure Rust) is the default backend and ships in every
+/// build; `HiGHS` is an optional native performance backend gated behind the
+/// `lp-solver-highs` feature.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct PortfolioOptimizerConfig {
+    /// LP solver backend. `highs` requires the `lp-solver-highs` build feature;
+    /// when that feature is absent the planner transparently downgrades to
+    /// `microlp` (recorded in the plan's optimizer metadata).
+    pub solver: PortfolioSolverKind,
+    /// `true` ⇒ solve the exact binary-inclusion MILP (production primary);
+    /// `false` ⇒ solve the continuous LP relaxation with deterministic integer
+    /// recovery (cheaper, fully deterministic — also the fallback / backtest mode).
+    pub integer_inclusion: bool,
+    /// `λ ≥ 0`: weight on normalized expected return in the per-dollar objective
+    /// weight `wᵢ = scoreᵢ · (1 + λ · ret_normᵢ)`. `0` ⇒ pure conviction weighting
+    /// (semantically equivalent to the former greedy fill order).
+    pub objective_return_weight: DecimalString,
+}
+
+impl Default for PortfolioOptimizerConfig {
+    fn default() -> Self {
+        Self {
+            solver: PortfolioSolverKind::Microlp,
+            integer_inclusion: true,
+            objective_return_weight: DecimalString::new("0"),
+        }
+    }
+}
+
+/// Correlation-cluster estimation configuration for the correlated-exposure cap.
+///
+/// Drives whether `portfolio.constraints.max_correlated_exposure_usd` actually
+/// binds. When disabled, the cap is snapshot-only (Phase 4 behavior).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct CorrelationConfig {
+    /// Whether the correlated-exposure cap is enforced. `false` ⇒ no clustering.
+    pub enabled: bool,
+    /// Historical mid-price lookback window for co-movement estimation, in days.
+    pub lookback_days: u32,
+    /// Minimum paired observations before historical estimation is trusted;
+    /// below this the estimator falls back to event/category proxy clusters.
+    pub min_observations: u32,
+    /// Absolute Pearson correlation at or above which two markets are clustered.
+    pub cluster_threshold: DecimalString,
+}
+
+impl Default for CorrelationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            lookback_days: 30,
+            min_observations: 20,
+            cluster_threshold: DecimalString::new("0.7"),
         }
     }
 }

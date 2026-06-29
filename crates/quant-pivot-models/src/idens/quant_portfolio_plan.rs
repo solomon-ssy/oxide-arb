@@ -29,6 +29,7 @@ pub enum QuantPortfolioPlan {
     RiskBudgetJson,
     ConstraintsJson,
     RejectedSummary,
+    OptimizerMetaJson,
     CreatedAt,
 }
 
@@ -58,6 +59,11 @@ pub fn table() -> TableCreateStatement {
         )
         .col(
             ColumnDef::new(QuantPortfolioPlan::RejectedSummary)
+                .json_binary()
+                .not_null(),
+        )
+        .col(
+            ColumnDef::new(QuantPortfolioPlan::OptimizerMetaJson)
                 .json_binary()
                 .not_null(),
         )

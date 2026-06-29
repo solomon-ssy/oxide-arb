@@ -34,8 +34,7 @@ use quant_pivot_repository::{
 use quant_pivot_storage::write::{AsyncWriter, AsyncWriterConfig, AsyncWriterObservability};
 use quant_pivot_test_support::{
     execution_pg_seed::{
-        close_position_full, close_position_full_with_peak, fill_entry_lot, seed_approved_intent,
-        seed_report_fixture,
+        close_position_full, fill_entry_lot, seed_approved_intent, seed_report_fixture,
     },
     pg::setup_pg,
 };
@@ -142,14 +141,7 @@ async fn run_pass_filled_exited_marks_attributed() {
     let ids = seed_report_fixture(&db).await;
     let intent_id = seed_approved_intent(&db, &ids).await;
     let submission = PgExecutionSubmissionRepository::new(db.clone());
-    close_position_full_with_peak(
-        &db,
-        &submission,
-        &ids,
-        &intent_id,
-        Some(Price::new(dec!(0.8))),
-    )
-    .await;
+    close_position_full(&submission, &ids, &intent_id, Some(Price::new(dec!(0.8)))).await;
     resolve_reconciliations_filled(&db, &intent_id).await;
 
     let service = attribution_service(&db);
@@ -304,7 +296,7 @@ async fn run_pass_expired_deferred_with_open_position() {
     let ids = seed_report_fixture(&db).await;
     let intent_id = seed_approved_intent(&db, &ids).await;
     let submission = PgExecutionSubmissionRepository::new(db.clone());
-    fill_entry_lot(&db, &submission, &ids, &intent_id).await;
+    fill_entry_lot(&submission, &ids, &intent_id).await;
 
     let rec = quant_recommendation::Entity::find_by_id(ids.recommendation.clone())
         .one(&db)
@@ -340,7 +332,7 @@ async fn run_pass_skips_open_position() {
     let ids = seed_report_fixture(&db).await;
     let intent_id = seed_approved_intent(&db, &ids).await;
     let submission = PgExecutionSubmissionRepository::new(db.clone());
-    fill_entry_lot(&db, &submission, &ids, &intent_id).await;
+    fill_entry_lot(&submission, &ids, &intent_id).await;
 
     let service = attribution_service(&db);
     let summary = service.run_pass(Utc::now(), 10).await.expect("run pass");
@@ -364,7 +356,7 @@ async fn run_pass_skips_unresolvable_reconciliation() {
     let ids = seed_report_fixture(&db).await;
     let intent_id = seed_approved_intent(&db, &ids).await;
     let submission = PgExecutionSubmissionRepository::new(db.clone());
-    close_position_full(&db, &submission, &ids, &intent_id).await;
+    close_position_full(&submission, &ids, &intent_id, None).await;
 
     let service = attribution_service(&db);
     let summary = service.run_pass(Utc::now(), 10).await.expect("run pass");
@@ -388,7 +380,7 @@ async fn run_pass_duplicate_is_idempotent() {
     let ids = seed_report_fixture(&db).await;
     let intent_id = seed_approved_intent(&db, &ids).await;
     let submission = PgExecutionSubmissionRepository::new(db.clone());
-    close_position_full(&db, &submission, &ids, &intent_id).await;
+    close_position_full(&submission, &ids, &intent_id, None).await;
     resolve_reconciliations_filled(&db, &intent_id).await;
 
     let service = attribution_service(&db);
@@ -418,7 +410,7 @@ async fn run_pass_filled_settled() {
     let ids = seed_report_fixture(&db).await;
     let intent_id = seed_approved_intent(&db, &ids).await;
     let submission = PgExecutionSubmissionRepository::new(db.clone());
-    fill_entry_lot(&db, &submission, &ids, &intent_id).await;
+    fill_entry_lot(&submission, &ids, &intent_id).await;
     resolve_reconciliations_filled(&db, &intent_id).await;
 
     let position = quant_position::Entity::find()
