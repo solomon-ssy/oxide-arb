@@ -4,20 +4,24 @@ use crate::{
     postgres::{
         error,
         quant::{capital_allocation::complete_exit_capital, position},
+        query::paginate_mapped,
     },
     traits::SettlementRedeemRepository,
 };
 use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::{StorageError, entity};
 use quant_pivot_models::{
-    domain::{ConfirmSettlementRedeem, NewSettlementRedeem, SettlementRedeemInfo},
+    domain::{
+        ConfirmSettlementRedeem, NewSettlementRedeem, Paginated, SettlementRedeemInfo,
+        SettlementRedeemListQuery, SettlementRedeemLotInfo,
+    },
     entities::{quant_order_intent, quant_settlement_redeem, quant_settlement_redeem_lot},
     enums::execution::{ExitReason, ExitState, SettlementRedeemState},
     types::{MarketId, SettlementRedeemId},
 };
 use sea_orm::{
-    ActiveModelTrait, ActiveValue, ColumnTrait, DatabaseConnection, EntityTrait, IntoActiveModel,
-    QueryFilter, QuerySelect, TransactionTrait,
+    ActiveModelTrait, ActiveValue, ColumnTrait, Condition, DatabaseConnection, EntityTrait,
+    IntoActiveModel, QueryFilter, QueryOrder, QuerySelect, TransactionTrait,
 };
 
 pub struct PgSettlementRedeemRepository {
@@ -32,6 +36,49 @@ impl PgSettlementRedeemRepository {
 
 #[async_trait::async_trait]
 impl SettlementRedeemRepository for PgSettlementRedeemRepository {
+    async fn find_by_id(
+        &self,
+        settlement_redeem_id: &SettlementRedeemId,
+    ) -> Result<Option<SettlementRedeemInfo>, StorageError> {
+        quant_settlement_redeem::Entity::find_by_id(settlement_redeem_id.clone())
+            .one(&self.db)
+            .await
+            .map_err(StorageError::from)
+            .map(|row| row.map(Into::into))
+    }
+
+    async fn page(
+        &self,
+        query: SettlementRedeemListQuery,
+    ) -> Result<Paginated<SettlementRedeemInfo>, StorageError> {
+        let query = query.normalized();
+        paginate_mapped(
+            quant_settlement_redeem::Entity::find()
+                .filter(page_condition(&query))
+                .order_by_desc(quant_settlement_redeem::Column::CreatedAt),
+            &self.db,
+            &query.page,
+            Into::into,
+        )
+        .await
+    }
+
+    async fn list_lots_by_redeem(
+        &self,
+        settlement_redeem_id: &SettlementRedeemId,
+    ) -> Result<Vec<SettlementRedeemLotInfo>, StorageError> {
+        quant_settlement_redeem_lot::Entity::find()
+            .filter(
+                quant_settlement_redeem_lot::Column::SettlementRedeemId
+                    .eq(settlement_redeem_id.clone()),
+            )
+            .order_by_asc(quant_settlement_redeem_lot::Column::CreatedAt)
+            .all(&self.db)
+            .await
+            .map_err(StorageError::from)
+            .map(|rows| rows.into_iter().map(Into::into).collect())
+    }
+
     async fn find_by_market_funder(
         &self,
         market_id: &MarketId,
@@ -234,4 +281,29 @@ async fn mark_intent_redeemed(
         .await
         .map_err(StorageError::from)
         .map(|_| ())
+}
+
+fn page_condition(query: &SettlementRedeemListQuery) -> Condition {
+    Condition::all()
+        .add_option(
+            query
+                .state
+                .map(|state| quant_settlement_redeem::Column::State.eq(state)),
+        )
+        .add_option(
+            query
+                .market_id
+                .clone()
+                .map(|market_id| quant_settlement_redeem::Column::MarketId.eq(market_id)),
+        )
+        .add_option(
+            query
+                .from
+                .map(|from| quant_settlement_redeem::Column::CreatedAt.gte(from)),
+        )
+        .add_option(
+            query
+                .to
+                .map(|to| quant_settlement_redeem::Column::CreatedAt.lte(to)),
+        )
 }

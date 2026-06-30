@@ -567,7 +567,7 @@ async fn append_and_resolve_reconciliation(
     assert_eq!(appended.evidence_json.0.len(), 1);
 
     let resolved = reconciliation_repo
-        .resolve(
+        .patch(
             &reconciliation_id,
             ReconciliationPatch {
                 result: Patch::set(ReconciliationResult::PartiallyFilled),

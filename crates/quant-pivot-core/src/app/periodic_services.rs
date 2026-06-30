@@ -9,10 +9,7 @@ use crate::{
 };
 use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{domain::RuntimeConfigPort, types::Usd};
-use quant_pivot_repository::{
-    postgres::{PgEquitySnapshotRepository, PgPositionRepository},
-    traits::{EquitySnapshotRepository, PositionRepository},
-};
+use quant_pivot_repository::traits::{EquitySnapshotRepository, PositionRepository};
 use rust_decimal::Decimal;
 use std::str::FromStr;
 use std::{sync::Arc, time::Duration};
@@ -71,12 +68,8 @@ impl AppContext {
         let account_factory = Arc::clone(&self.account.provider_factory);
         let runtime_config = Arc::clone(&self.governance.applicator);
         let equity_service = Arc::new(EquitySnapshotService::new(
-            Arc::new(PgEquitySnapshotRepository::new(
-                self.infra.pg.connection().clone(),
-            )) as Arc<dyn EquitySnapshotRepository>,
-            Arc::new(PgPositionRepository::new(
-                self.infra.pg.connection().clone(),
-            )) as Arc<dyn PositionRepository>,
+            Arc::clone(&self.infra.repos.equity_snapshot) as Arc<dyn EquitySnapshotRepository>,
+            Arc::clone(&self.infra.repos.position) as Arc<dyn PositionRepository>,
         ));
         let interval_secs = self.config.quant.workers.equity_snapshot_secs;
         runner.spawn(TaskId::EquitySnapshotWorker, move |token| async move {

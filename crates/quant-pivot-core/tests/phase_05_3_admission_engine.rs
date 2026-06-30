@@ -29,7 +29,8 @@ use quant_pivot_models::{
         NewModelVersion, NewOperationLog, NewReconciliation, NewReportTransaction,
         NewRuntimeConfigActivation, NewRuntimeConfigVersion, OrderIntentInfo, Paginated,
         QuantReportListQuery, RecommendationInfo, RecommendationReportInfo, ReconciliationInfo,
-        ReconciliationPatch, RuntimeConfigActivationInfo, RuntimeConfigVersionInfo, UpsertMarket,
+        ReconciliationListQuery, ReconciliationPatch, RuntimeConfigActivationInfo,
+        RuntimeConfigVersionInfo, UpsertMarket,
     },
     enums::{
         common::{MarketCategory, OrderType, Side, TickSize},
@@ -918,12 +919,26 @@ impl ReconciliationRepository for StubReconciliation {
         unimplemented!()
     }
 
-    async fn resolve(
+    async fn patch(
         &self,
         _reconciliation_id: &ReconciliationId,
         _patch: ReconciliationPatch,
     ) -> Result<ReconciliationInfo, StorageError> {
         unimplemented!()
+    }
+
+    async fn find_by_id(
+        &self,
+        _reconciliation_id: &ReconciliationId,
+    ) -> Result<Option<ReconciliationInfo>, StorageError> {
+        Ok(None)
+    }
+
+    async fn page(
+        &self,
+        _query: ReconciliationListQuery,
+    ) -> Result<Paginated<ReconciliationInfo>, StorageError> {
+        Ok(Paginated::empty(1, 10))
     }
 
     async fn find_by_execution_order(
@@ -939,6 +954,10 @@ impl ReconciliationRepository for StubReconciliation {
 
     async fn has_unresolvable(&self) -> Result<bool, StorageError> {
         Ok(false)
+    }
+
+    async fn count_blocking_unresolvable(&self) -> Result<u64, StorageError> {
+        Ok(0)
     }
 }
 

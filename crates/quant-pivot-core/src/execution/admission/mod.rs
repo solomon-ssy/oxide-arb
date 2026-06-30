@@ -60,18 +60,18 @@ pub enum VenueHealth {
     Degraded { reason: String },
 }
 
-/// Deferred readiness seams (placeholders in 05.3; real signals land later).
+/// Readiness seams wired into admission input (05.3–05.6).
 ///
 /// `venue_health` is driven by the 05.4 execution breaker; `credentials_ready`
-/// gains a dedicated signer probe in 05.4; `exit_monitor_ready` becomes the real
-/// worker health in 05.6. Grouped so the checks read one cohesive seam surface.
+/// reflects boot-time signer/CLOB connectivity; `exit_monitor_ready` is the
+/// shared exit-monitor health handle (05.6) read by check `#20`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdmissionSeams {
-    /// Venue health (`#18`): 05.3 supplies `Healthy`.
+    /// Venue health (`#18`): execution breaker hot read.
     pub venue_health: VenueHealth,
     /// Whether signing credentials are ready (`#19`).
     pub credentials_ready: bool,
-    /// Whether the exit monitor can register (`#20`): placeholder `true`.
+    /// Whether the exit monitor worker has completed its first scan (`#20`).
     pub exit_monitor_ready: bool,
 }
 

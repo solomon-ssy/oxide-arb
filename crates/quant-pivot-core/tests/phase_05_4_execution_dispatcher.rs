@@ -27,7 +27,7 @@ use quant_pivot_core::{
         },
     },
     governance::{KillSwitchHandle, RuntimeModeHandle},
-    observability::metrics_hub::MetricsHub,
+    observability::{execution_fact_writer::ExecutionEventWriter, metrics_hub::MetricsHub},
     pipeline::{book_store::BookStore, market_registry::MarketRegistry},
     runtime_config::RuntimeConfigStore,
     service::account::{AccountProviderFactory, PolymarketAccountClient, ReservedCapitalReader},
@@ -48,8 +48,8 @@ use quant_pivot_models::{
         NewRuntimeConfigActivation, NewRuntimeConfigVersion, OperationLogInfo, OperationLogQuery,
         OrderIntentInfo, OrderIntentListQuery, Paginated, QuantReportListQuery, RecommendationInfo,
         RecommendationReportInfo, ReconciliationInfo, ReconciliationLedgerWrite,
-        ReconciliationPatch, RuntimeConfigActivationInfo, RuntimeConfigVersionInfo,
-        SetKillSwitchCommand, SubmissionLedgerWrite, UpsertMarket,
+        ReconciliationListQuery, ReconciliationPatch, RuntimeConfigActivationInfo,
+        RuntimeConfigVersionInfo, SetKillSwitchCommand, SubmissionLedgerWrite, UpsertMarket,
     },
     enums::{
         common::{MarketCategory, OrderType, Side, TickSize},
@@ -79,6 +79,7 @@ use quant_pivot_repository::traits::{
     RuntimeConfigVersionRepository,
 };
 use quant_pivot_research::portfolio::AccountSnapshot;
+use quant_pivot_storage::write::{AsyncWriter, AsyncWriterConfig, AsyncWriterObservability};
 use quant_pivot_test_support::report_fixtures;
 use rust_decimal_macros::dec;
 
@@ -1012,12 +1013,26 @@ impl ReconciliationRepository for StubReconciliation {
         unimplemented!()
     }
 
-    async fn resolve(
+    async fn patch(
         &self,
         _: &ReconciliationId,
         _: ReconciliationPatch,
     ) -> Result<ReconciliationInfo, StorageError> {
         unimplemented!()
+    }
+
+    async fn find_by_id(
+        &self,
+        _: &ReconciliationId,
+    ) -> Result<Option<ReconciliationInfo>, StorageError> {
+        Ok(None)
+    }
+
+    async fn page(
+        &self,
+        _: ReconciliationListQuery,
+    ) -> Result<Paginated<ReconciliationInfo>, StorageError> {
+        Ok(Paginated::empty(1, 10))
     }
 
     async fn find_by_execution_order(
@@ -1033,6 +1048,10 @@ impl ReconciliationRepository for StubReconciliation {
 
     async fn has_unresolvable(&self) -> Result<bool, StorageError> {
         Ok(false)
+    }
+
+    async fn count_blocking_unresolvable(&self) -> Result<u64, StorageError> {
+        Ok(0)
     }
 }
 
@@ -1289,6 +1308,7 @@ fn build_harness_with_result(
         order_client: Arc::clone(&order_client) as Arc<dyn PolymarketOrderClient>,
         breaker,
         metrics: Arc::clone(&metrics),
+        execution_events: noop_execution_writer(),
     });
     Harness {
         dispatcher,
@@ -1299,6 +1319,16 @@ fn build_harness_with_result(
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
+
+fn noop_execution_writer() -> Arc<ExecutionEventWriter> {
+    let (writer, _worker) = AsyncWriter::new(
+        AsyncWriterConfig::new("test_execution_events"),
+        |_| Box::pin(async move { Ok(()) }),
+        prometheus::IntCounter::new("test_execution_events_dropped", "test").unwrap(),
+        AsyncWriterObservability::default(),
+    );
+    Arc::new(ExecutionEventWriter::new(Arc::new(writer)))
+}
 
 #[tokio::test]
 async fn semi_auto_unapproved_cannot_submit() {

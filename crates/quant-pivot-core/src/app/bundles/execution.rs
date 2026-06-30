@@ -17,21 +17,12 @@ use quant_pivot_models::{
     config::DeployConfig,
     domain::{DataQualityPort, ExecutionSubmitPort},
 };
-use quant_pivot_repository::{
-    postgres::{
-        PgAttributionRepository, PgCapitalAllocationRepository, PgExecutionOrderRepository,
-        PgExecutionSubmissionRepository, PgMarketRepository, PgModelRegistryRepository,
-        PgOrderIntentRepository, PgPositionRepository, PgRecommendationReportRepository,
-        PgRecommendationRepository, PgReconciliationRepository, PgRuntimeConfigVersionRepository,
-        PgSettlementRedeemRepository,
-    },
-    traits::{
-        AttributionRepository, CapitalAllocationRepository, ExecutionOrderRepository,
-        ExecutionSubmissionRepository, MarketRepository, ModelRegistryRepository,
-        OperationLogRepository, OrderIntentRepository, PositionRepository,
-        RecommendationReportRepository, RecommendationRepository, ReconciliationRepository,
-        RuntimeConfigVersionRepository, SettlementRedeemRepository,
-    },
+use quant_pivot_repository::traits::{
+    AttributionRepository, CapitalAllocationRepository, ExecutionOrderRepository,
+    ExecutionSubmissionRepository, MarketRepository, ModelRegistryRepository,
+    OperationLogRepository, OrderIntentRepository, PositionRepository,
+    RecommendationReportRepository, RecommendationRepository, ReconciliationRepository,
+    RuntimeConfigVersionRepository, SettlementRedeemRepository,
 };
 
 use super::{AccountBundle, DataBundle, GovernanceBundle, InfraBundle, ResearchBundle};
@@ -97,7 +88,7 @@ impl ExecutionBundle {
     /// Assemble the execution subsystem from the shared planes.
     pub fn assemble(deps: &ExecutionBundleDeps<'_>) -> QuantResult<Self> {
         let infra = deps.infra;
-        let pg = infra.pg.connection();
+        let repos = &infra.repos;
 
         // Stateful venue-health breaker — auto-trips the kill-switch (latched).
         let breaker_config = deps
@@ -108,7 +99,7 @@ impl ExecutionBundle {
             .breaker
             .clone();
         let operation_log: Arc<dyn OperationLogRepository> =
-            Arc::clone(&infra.operation_log_repo) as Arc<dyn OperationLogRepository>;
+            Arc::clone(&repos.operation_log) as Arc<dyn OperationLogRepository>;
         let breaker = Arc::new(ExecutionBreaker::new(
             breaker_config,
             Arc::clone(&deps.governance.kill_switch),
@@ -134,9 +125,9 @@ impl ExecutionBundle {
         ));
 
         let submission: Arc<dyn ExecutionSubmissionRepository> =
-            Arc::new(PgExecutionSubmissionRepository::new(pg.clone()));
+            Arc::clone(&repos.execution_submission) as Arc<dyn ExecutionSubmissionRepository>;
         let intents: Arc<dyn OrderIntentRepository> =
-            Arc::new(PgOrderIntentRepository::new(pg.clone()));
+            Arc::clone(&repos.order_intent) as Arc<dyn OrderIntentRepository>;
 
         let dispatcher: Arc<dyn ExecutionSubmitPort> =
             Arc::new(CoreExecutionDispatcher::new(ExecutionDispatcherDeps {
@@ -147,6 +138,7 @@ impl ExecutionBundle {
                 order_client: Arc::clone(&order_client),
                 breaker: Arc::clone(&breaker),
                 metrics: Arc::clone(&infra.metrics),
+                execution_events: Arc::clone(&infra.execution_event_writer),
             }));
 
         // Reconciliation engine (05.5): venue reader + fixed-order evidence
@@ -160,21 +152,21 @@ impl ExecutionBundle {
         let reconciliation = Arc::new(ReconciliationService::new(ReconciliationServiceDeps {
             collector,
             order_client: Arc::clone(&order_client),
-            execution_orders: Arc::new(PgExecutionOrderRepository::new(pg.clone()))
+            execution_orders: Arc::clone(&repos.execution_order)
                 as Arc<dyn ExecutionOrderRepository>,
-            intents: Arc::new(PgOrderIntentRepository::new(pg.clone()))
-                as Arc<dyn OrderIntentRepository>,
-            recommendations: Arc::new(PgRecommendationRepository::new(pg.clone()))
-                as Arc<dyn RecommendationRepository>,
-            positions: Arc::new(PgPositionRepository::new(pg.clone()))
-                as Arc<dyn PositionRepository>,
-            reconciliation: Arc::new(PgReconciliationRepository::new(pg.clone()))
-                as Arc<dyn ReconciliationRepository>,
+            intents: Arc::clone(&repos.order_intent) as Arc<dyn OrderIntentRepository>,
+            recommendations: Arc::clone(&repos.recommendation) as Arc<dyn RecommendationRepository>,
+            positions: Arc::clone(&repos.position) as Arc<dyn PositionRepository>,
+            reconciliation: Arc::clone(&repos.reconciliation) as Arc<dyn ReconciliationRepository>,
             submission: Arc::clone(&submission),
             fees: Arc::clone(&deps.data.fee_calculator),
             breaker: Arc::clone(&breaker),
             metrics: Arc::clone(&infra.metrics),
             config: Arc::clone(&deps.governance.runtime_config),
+            capital: Arc::clone(&repos.capital_allocation) as Arc<dyn CapitalAllocationRepository>,
+            execution_events: Arc::clone(&infra.execution_event_writer),
+            capital_events: Arc::clone(&infra.capital_allocation_event_writer),
+            position_events: Arc::clone(&infra.position_event_writer),
         }));
 
         // Exit-monitor engine (05.6): model-driven signal seam + exit dispatcher
@@ -212,7 +204,7 @@ impl ExecutionBundle {
 fn build_settlement_redeem_service(
     deps: &ExecutionBundleDeps<'_>,
 ) -> QuantResult<Arc<SettlementRedeemService>> {
-    let pg = deps.infra.pg.connection();
+    let repos = &deps.infra.repos;
     let funder_address = deps.deploy.quant.account.funder.clone().ok_or_else(|| {
         QuantError::config("quant.account.funder is required for settlement redeem")
     })?;
@@ -223,19 +215,20 @@ fn build_settlement_redeem_service(
 
     Ok(Arc::new(SettlementRedeemService::new(
         SettlementRedeemServiceDeps {
-            positions: Arc::new(PgPositionRepository::new(pg.clone()))
-                as Arc<dyn PositionRepository>,
-            intents: Arc::new(PgOrderIntentRepository::new(pg.clone()))
-                as Arc<dyn OrderIntentRepository>,
-            markets: Arc::new(PgMarketRepository::new(pg.clone())) as Arc<dyn MarketRepository>,
-            settlement_redeems: Arc::new(PgSettlementRedeemRepository::new(pg.clone()))
+            positions: Arc::clone(&repos.position) as Arc<dyn PositionRepository>,
+            intents: Arc::clone(&repos.order_intent) as Arc<dyn OrderIntentRepository>,
+            markets: Arc::clone(&repos.market) as Arc<dyn MarketRepository>,
+            settlement_redeems: Arc::clone(&repos.settlement_redeem)
                 as Arc<dyn SettlementRedeemRepository>,
+            capital: Arc::clone(&repos.capital_allocation) as Arc<dyn CapitalAllocationRepository>,
             ctf,
             runtime_mode: deps.governance.runtime_mode.clone(),
             kill_switch: deps.governance.kill_switch_handle.clone(),
             config: Arc::clone(&deps.governance.runtime_config),
             funder_address,
             wallet_kind: deps.deploy.quant.account.wallet_kind,
+            capital_events: Arc::clone(&deps.infra.capital_allocation_event_writer),
+            position_events: Arc::clone(&deps.infra.position_event_writer),
         },
     )))
 }
@@ -268,19 +261,14 @@ fn build_settlement_ctf_client(
 }
 
 fn build_attribution_service(infra: &InfraBundle) -> Arc<AttributionService> {
-    let pg = infra.pg.connection();
+    let repos = &infra.repos;
     Arc::new(AttributionService::new(AttributionServiceDeps {
-        attribution: Arc::new(PgAttributionRepository::new(pg.clone()))
-            as Arc<dyn AttributionRepository>,
-        intents: Arc::new(PgOrderIntentRepository::new(pg.clone()))
-            as Arc<dyn OrderIntentRepository>,
-        recommendations: Arc::new(PgRecommendationRepository::new(pg.clone()))
-            as Arc<dyn RecommendationRepository>,
-        execution_orders: Arc::new(PgExecutionOrderRepository::new(pg.clone()))
-            as Arc<dyn ExecutionOrderRepository>,
-        positions: Arc::new(PgPositionRepository::new(pg.clone())) as Arc<dyn PositionRepository>,
-        reconciliation: Arc::new(PgReconciliationRepository::new(pg.clone()))
-            as Arc<dyn ReconciliationRepository>,
+        attribution: Arc::clone(&repos.attribution) as Arc<dyn AttributionRepository>,
+        intents: Arc::clone(&repos.order_intent) as Arc<dyn OrderIntentRepository>,
+        recommendations: Arc::clone(&repos.recommendation) as Arc<dyn RecommendationRepository>,
+        execution_orders: Arc::clone(&repos.execution_order) as Arc<dyn ExecutionOrderRepository>,
+        positions: Arc::clone(&repos.position) as Arc<dyn PositionRepository>,
+        reconciliation: Arc::clone(&repos.reconciliation) as Arc<dyn ReconciliationRepository>,
         attribution_events: Arc::clone(&infra.attribution_event_writer),
     }))
 }
@@ -292,22 +280,17 @@ fn build_admission_builder(
     breaker: &Arc<ExecutionBreaker>,
     exit_monitor_health: ExitMonitorHealthHandle,
 ) -> Arc<AdmissionInputBuilder> {
-    let pg = deps.infra.pg.connection();
+    let repos = &deps.infra.repos;
     Arc::new(AdmissionInputBuilder::new(AdmissionInputBuilderDeps {
-        recommendations: Arc::new(PgRecommendationRepository::new(pg.clone()))
-            as Arc<dyn RecommendationRepository>,
-        reports: Arc::new(PgRecommendationReportRepository::new(pg.clone()))
+        recommendations: Arc::clone(&repos.recommendation) as Arc<dyn RecommendationRepository>,
+        reports: Arc::clone(&repos.recommendation_report)
             as Arc<dyn RecommendationReportRepository>,
-        model_registry: Arc::new(PgModelRegistryRepository::new(pg.clone()))
-            as Arc<dyn ModelRegistryRepository>,
-        reconciliation: Arc::new(PgReconciliationRepository::new(pg.clone()))
-            as Arc<dyn ReconciliationRepository>,
-        execution_orders: Arc::new(PgExecutionOrderRepository::new(pg.clone()))
-            as Arc<dyn ExecutionOrderRepository>,
-        capital: Arc::new(PgCapitalAllocationRepository::new(pg.clone()))
-            as Arc<dyn CapitalAllocationRepository>,
-        markets: Arc::new(PgMarketRepository::new(pg.clone())) as Arc<dyn MarketRepository>,
-        config_versions: Arc::new(PgRuntimeConfigVersionRepository::new(pg.clone()))
+        model_registry: Arc::clone(&repos.model_registry) as Arc<dyn ModelRegistryRepository>,
+        reconciliation: Arc::clone(&repos.reconciliation) as Arc<dyn ReconciliationRepository>,
+        execution_orders: Arc::clone(&repos.execution_order) as Arc<dyn ExecutionOrderRepository>,
+        capital: Arc::clone(&repos.capital_allocation) as Arc<dyn CapitalAllocationRepository>,
+        markets: Arc::clone(&deps.data.market_repo),
+        config_versions: Arc::clone(&repos.runtime_config)
             as Arc<dyn RuntimeConfigVersionRepository>,
         account_factory: Arc::clone(&deps.account.provider_factory),
         book_store: Arc::clone(&deps.data.book_store),
@@ -339,13 +322,13 @@ fn build_exit_monitor(
     breaker: &Arc<ExecutionBreaker>,
     health: ExitMonitorHealthHandle,
 ) -> Arc<ExitMonitorService> {
-    let pg = wiring.infra.pg.connection();
+    let repos = &wiring.infra.repos;
     let metrics = Arc::clone(&wiring.infra.metrics);
     let reinferer = ModelBackedExitSignalReinferer::new(ModelBackedExitSignalReinfererDeps {
         model_registry: Arc::clone(&wiring.research.model_registry_repo),
         factory_builder: Arc::clone(&wiring.research.model_runtime_factory_builder),
         weight_overlay: Arc::clone(&wiring.governance.weight_overlay),
-        config_versions: Arc::new(PgRuntimeConfigVersionRepository::new(pg.clone()))
+        config_versions: Arc::clone(&repos.runtime_config)
             as Arc<dyn RuntimeConfigVersionRepository>,
         live_config: Arc::clone(&wiring.governance.runtime_config),
         pit_source: Arc::clone(&wiring.data.pit_source),
@@ -364,13 +347,13 @@ fn build_exit_monitor(
         order_client: Arc::clone(order_client),
         breaker: Arc::clone(breaker),
         metrics: Arc::clone(&metrics),
+        execution_events: Arc::clone(&wiring.infra.execution_event_writer),
+        intents: Arc::clone(&repos.order_intent) as Arc<dyn OrderIntentRepository>,
     }));
     Arc::new(ExitMonitorService::new(ExitMonitorServiceDeps {
-        positions: Arc::new(PgPositionRepository::new(pg.clone())) as Arc<dyn PositionRepository>,
-        intents: Arc::new(PgOrderIntentRepository::new(pg.clone()))
-            as Arc<dyn OrderIntentRepository>,
-        recommendations: Arc::new(PgRecommendationRepository::new(pg.clone()))
-            as Arc<dyn RecommendationRepository>,
+        positions: Arc::clone(&repos.position) as Arc<dyn PositionRepository>,
+        intents: Arc::clone(&repos.order_intent) as Arc<dyn OrderIntentRepository>,
+        recommendations: Arc::clone(&repos.recommendation) as Arc<dyn RecommendationRepository>,
         submission: Arc::clone(submission),
         book_store: Arc::clone(&wiring.data.book_store),
         kill_switch: wiring.governance.kill_switch_handle.clone(),

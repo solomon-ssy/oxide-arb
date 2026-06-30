@@ -26,21 +26,12 @@ use quant_pivot_models::{
     domain::RuntimeConfigPort,
     runtime_config::{DataQualityConfig, FactorsConfig, FeaturesConfig, TrainingConfig},
 };
-use quant_pivot_repository::{
-    postgres::{
-        PgAttributionRepository, PgBacktestReportRepository, PgFactorRepository,
-        PgFeatureRepository, PgMarketSelectionRepository, PgModelComparisonReportRepository,
-        PgModelGovernanceAuditRepository, PgModelRegistryRepository, PgModelRunRepository,
-        PgRecommendationRepository, PgRuntimeConfigVersionRepository, PgShadowComparisonRepository,
-        PgTrainingDatasetRepository,
-    },
-    traits::{
-        AttributionRepository, BacktestReportRepository, FactorRepository, FeatureRepository,
-        MarketRepository, MarketSelectionRepository, ModelComparisonReportRepository,
-        ModelGovernanceAuditRepository, ModelRegistryRepository, ModelRunRepository,
-        QuantFactReadRepository, RecommendationRepository, RuntimeConfigVersionRepository,
-        ShadowComparisonRepository, TrainingDatasetRepository,
-    },
+use quant_pivot_repository::traits::{
+    AttributionRepository, BacktestReportRepository, FactorRepository, FeatureRepository,
+    MarketRepository, MarketSelectionRepository, ModelComparisonReportRepository,
+    ModelGovernanceAuditRepository, ModelRegistryRepository, ModelRunRepository,
+    QuantFactReadRepository, RecommendationRepository, RuntimeConfigVersionRepository,
+    ShadowComparisonRepository, TrainingDatasetRepository,
 };
 use quant_pivot_research::gates::{DefaultModelQualityGate, ModelQualityGate};
 use quant_pivot_research::{
@@ -129,44 +120,41 @@ impl ResearchBundle {
     /// on-demand invocation with a frozen runtime-config snapshot per round.
     #[must_use]
     pub fn assemble(deps: &ResearchBundleDeps<'_>) -> Self {
+        let repos = &deps.infra.repos;
         let artifact_store: Arc<dyn ArtifactStore> = Arc::new(LocalArtifactStore::new(
             deps.deploy.research.artifact_root.clone(),
         ));
         let market_selector: Arc<dyn MarketSelector> = Arc::new(ConfiguredMarketSelector::new());
-        let market_selection_repo: Arc<dyn MarketSelectionRepository> = Arc::new(
-            PgMarketSelectionRepository::new(deps.infra.pg.connection().clone()),
-        );
+        let market_selection_repo: Arc<dyn MarketSelectionRepository> =
+            Arc::clone(&repos.market_selection) as Arc<dyn MarketSelectionRepository>;
         let candidate_provider = Arc::new(MarketCandidateProvider::new(
             Arc::clone(&deps.data.market_registry),
             Arc::clone(&deps.data.book_store),
             Arc::clone(&deps.infra.fact_lag_tracker),
         ));
         let feature_repo: Arc<dyn FeatureRepository> =
-            Arc::new(PgFeatureRepository::new(deps.infra.pg.connection().clone()));
+            Arc::clone(&repos.feature) as Arc<dyn FeatureRepository>;
         let feature_pipeline = Arc::new(FeaturePipelineService::new(
             FeatureWindowProvider::new(Arc::clone(&deps.infra.quant_fact_read)),
             Arc::clone(&feature_repo),
             Arc::clone(&deps.infra.feature_event_writer),
         ));
         let factor_repo: Arc<dyn FactorRepository> =
-            Arc::new(PgFactorRepository::new(deps.infra.pg.connection().clone()));
+            Arc::clone(&repos.factor) as Arc<dyn FactorRepository>;
         let factor_pipeline = Arc::new(FactorPipelineService::new(
             Arc::clone(&factor_repo),
             Arc::clone(&deps.infra.factor_event_writer),
         ));
 
-        let model_run_repo: Arc<dyn ModelRunRepository> = Arc::new(PgModelRunRepository::new(
-            deps.infra.pg.connection().clone(),
-        ));
-        let model_registry_repo: Arc<dyn ModelRegistryRepository> = Arc::new(
-            PgModelRegistryRepository::new(deps.infra.pg.connection().clone()),
-        );
+        let model_run_repo: Arc<dyn ModelRunRepository> =
+            Arc::clone(&repos.model_run) as Arc<dyn ModelRunRepository>;
+        let model_registry_repo: Arc<dyn ModelRegistryRepository> =
+            Arc::clone(&repos.model_registry) as Arc<dyn ModelRegistryRepository>;
         let model_runtime_factory_builder: Arc<dyn ModelRuntimeFactoryBuilder> = Arc::new(
             DefaultModelRuntimeFactoryBuilder::new(Arc::clone(&artifact_store)),
         );
-        let shadow_comparison_repo: Arc<dyn ShadowComparisonRepository> = Arc::new(
-            PgShadowComparisonRepository::new(deps.infra.pg.connection().clone()),
-        );
+        let shadow_comparison_repo: Arc<dyn ShadowComparisonRepository> =
+            Arc::clone(&repos.shadow_comparison) as Arc<dyn ShadowComparisonRepository>;
         let model_runner = Self::assemble_model_runner(
             deps,
             &model_run_repo,
@@ -270,14 +258,18 @@ impl ResearchBundle {
     }
 
     fn assemble_offline_repositories(deps: &ResearchBundleDeps<'_>) -> OfflineResearchRepos {
-        let db = deps.infra.pg.connection().clone();
+        let repos = &deps.infra.repos;
         OfflineResearchRepos {
-            training_dataset: Arc::new(PgTrainingDatasetRepository::new(db.clone())),
-            attribution: Arc::new(PgAttributionRepository::new(db.clone())),
-            recommendation: Arc::new(PgRecommendationRepository::new(db.clone())),
-            backtest_report: Arc::new(PgBacktestReportRepository::new(db.clone())),
-            comparison_report: Arc::new(PgModelComparisonReportRepository::new(db.clone())),
-            governance_audit: Arc::new(PgModelGovernanceAuditRepository::new(db)),
+            training_dataset: Arc::clone(&repos.training_dataset)
+                as Arc<dyn TrainingDatasetRepository>,
+            attribution: Arc::clone(&repos.attribution) as Arc<dyn AttributionRepository>,
+            recommendation: Arc::clone(&repos.recommendation) as Arc<dyn RecommendationRepository>,
+            backtest_report: Arc::clone(&repos.backtest_report)
+                as Arc<dyn BacktestReportRepository>,
+            comparison_report: Arc::clone(&repos.comparison_report)
+                as Arc<dyn ModelComparisonReportRepository>,
+            governance_audit: Arc::clone(&repos.governance_audit)
+                as Arc<dyn ModelGovernanceAuditRepository>,
         }
     }
 
@@ -291,9 +283,8 @@ impl ResearchBundle {
         training_dataset_repo: &Arc<dyn TrainingDatasetRepository>,
     ) -> Arc<dyn ModelGovernancePort> {
         let gate: Arc<dyn ModelQualityGate> = Arc::new(DefaultModelQualityGate::new());
-        let runtime_config_repo: Arc<dyn RuntimeConfigVersionRepository> = Arc::new(
-            PgRuntimeConfigVersionRepository::new(deps.infra.pg.connection().clone()),
-        );
+        let runtime_config_repo: Arc<dyn RuntimeConfigVersionRepository> =
+            Arc::clone(&deps.infra.repos.runtime_config) as Arc<dyn RuntimeConfigVersionRepository>;
         let runtime_config_apply: Arc<dyn RuntimeConfigPort> =
             Arc::clone(&deps.governance.applicator) as Arc<dyn RuntimeConfigPort>;
         Arc::new(ModelGovernanceService::new(ModelGovernanceDeps {

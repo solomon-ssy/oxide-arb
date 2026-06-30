@@ -89,7 +89,6 @@ pub enum TaskKind {
     HealthMonitor,
     Detection,
     Execution,
-    ExecutionHeartbeat,
     Audit,
     AnalyticsWriter,
     PositionPersistence,
@@ -105,9 +104,7 @@ impl TaskKind {
             Self::BookReconciliation | Self::LedgerReconciliation => ShutdownStage::Reconciliation,
             Self::HealthMonitor => ShutdownStage::HealthMonitor,
             Self::Detection => ShutdownStage::Detection,
-            Self::Execution | Self::ExecutionHeartbeat | Self::ReportScheduler => {
-                ShutdownStage::Execution
-            }
+            Self::Execution | Self::ReportScheduler => ShutdownStage::Execution,
             Self::Audit => ShutdownStage::Audit,
             Self::AnalyticsWriter => ShutdownStage::Analytics,
             Self::PositionPersistence => ShutdownStage::Persistence,
@@ -630,8 +627,8 @@ mod tests {
         assert_eq!(TaskId::RiskAuditBatch.kind(), TaskKind::Audit);
         assert_eq!(TaskId::RiskAuditBatch.static_name(), "risk-audit-batch");
         assert_eq!(
-            TaskId::ExecutionRunner { shard: 2 }.display_name(),
-            "execution-runner-2"
+            TaskId::ExecutionDispatcher.display_name(),
+            "execution-dispatcher"
         );
     }
 

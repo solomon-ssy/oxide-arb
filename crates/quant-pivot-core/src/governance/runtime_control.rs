@@ -3,6 +3,7 @@
 use crate::{
     governance::{
         ModePreflight, ModeTransitionGate, RuntimeModeHandle,
+        execution_recovery::ExecutionRecoveryHandle,
         operational_phase::operational_phase_from_readiness, system_status::SystemStatusPublisher,
     },
     infra::health_checker::HealthChecker,
@@ -17,9 +18,7 @@ use quant_pivot_models::{
     },
     enums::quant::QuantRuntimeMode,
 };
-use quant_pivot_repository::{
-    postgres::PgSystemRuntimeStateRepository, traits::SystemRuntimeStateRepository,
-};
+use quant_pivot_repository::traits::SystemRuntimeStateRepository;
 use std::{sync::Arc, time::Instant};
 
 /// Governed quant runtime control: mode reads/transitions, kill-switch projection,
@@ -27,11 +26,12 @@ use std::{sync::Arc, time::Instant};
 pub struct QuantRuntimeControl {
     runtime_mode: RuntimeModeHandle,
     health_checker: Arc<HealthChecker>,
-    runtime_state_repo: PgSystemRuntimeStateRepository,
+    runtime_state_repo: Arc<dyn SystemRuntimeStateRepository>,
     transition_gate: Arc<dyn ModeTransitionGate>,
     preflight: Arc<dyn ModePreflight>,
     kill_switch: Arc<dyn KillSwitchPort>,
     status_publisher: Arc<SystemStatusPublisher>,
+    execution_recovery: ExecutionRecoveryHandle,
     started_at: Instant,
 }
 
@@ -39,11 +39,12 @@ pub struct QuantRuntimeControl {
 pub struct QuantRuntimeControlDeps {
     pub runtime_mode: RuntimeModeHandle,
     pub health_checker: Arc<HealthChecker>,
-    pub runtime_state_repo: PgSystemRuntimeStateRepository,
+    pub runtime_state_repo: Arc<dyn SystemRuntimeStateRepository>,
     pub transition_gate: Arc<dyn ModeTransitionGate>,
     pub preflight: Arc<dyn ModePreflight>,
     pub kill_switch: Arc<dyn KillSwitchPort>,
     pub status_publisher: Arc<SystemStatusPublisher>,
+    pub execution_recovery: ExecutionRecoveryHandle,
 }
 
 impl QuantRuntimeControl {
@@ -57,6 +58,7 @@ impl QuantRuntimeControl {
             preflight: deps.preflight,
             kill_switch: deps.kill_switch,
             status_publisher: deps.status_publisher,
+            execution_recovery: deps.execution_recovery,
             started_at: Instant::now(),
         }
     }
@@ -144,6 +146,7 @@ impl RuntimeControlPort for QuantRuntimeControl {
                 ws_shards,
             },
             kill_switch,
+            execution_recovery: self.execution_recovery.current(),
             checked_at: Utc::now(),
         }
     }

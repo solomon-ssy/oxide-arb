@@ -44,6 +44,10 @@ use crate::{
         order_client::{PolymarketOrderClient, VenueOrder, VenueOutcome, VenueSubmitResult},
     },
     observability::metrics_hub::MetricsHub,
+    observability::{
+        execution_fact_writer::ExecutionEventWriter,
+        ledger_fact_projection::project_execution_event,
+    },
 };
 
 /// Collaborators for the core execution dispatcher.
@@ -55,6 +59,7 @@ pub struct ExecutionDispatcherDeps {
     pub order_client: Arc<dyn PolymarketOrderClient>,
     pub breaker: Arc<ExecutionBreaker>,
     pub metrics: Arc<MetricsHub>,
+    pub execution_events: Arc<ExecutionEventWriter>,
 }
 
 /// Production [`ExecutionSubmitPort`]: the single bridge from an admitted intent
@@ -149,6 +154,12 @@ impl ExecutionSubmitPort for CoreExecutionDispatcher {
             Err(error) => return Err(self.revert_and(intent_id, error.into()).await),
         };
         self.deps.metrics.inc_execution_order_submitted();
+        self.deps.execution_events.write(project_execution_event(
+            &execution_order,
+            recommendation.recommendation_id.clone(),
+            "submitted",
+            now,
+        ));
 
         // 5. Venue submission — NO DB lock held across this network call.
         let result = self
@@ -180,6 +191,12 @@ impl ExecutionSubmitPort for CoreExecutionDispatcher {
             .submission
             .record_submission_result(&execution_order.execution_order_id, write)
             .await?;
+        self.deps.execution_events.write(project_execution_event(
+            &recorded,
+            recommendation.recommendation_id.clone(),
+            "submission_result",
+            now,
+        ));
         Ok(recorded)
     }
 }

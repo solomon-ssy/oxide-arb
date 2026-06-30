@@ -4,8 +4,9 @@ use actix_web::{http::Method, web};
 use quant_pivot_models::{
     config::DeployConfig,
     domain::{
-        HealthReport, KillSwitchView, QuantModeTransitionReport, QuantModeView,
-        SetKillSwitchCommand, SetKillSwitchRequest, SwitchQuantModeRequest, SystemStatus,
+        ExecutionRecoveryView, HealthReport, KillSwitchView, QuantModeTransitionReport,
+        QuantModeView, SetKillSwitchCommand, SetKillSwitchRequest, SwitchQuantModeRequest,
+        SystemStatus,
     },
     enums::{
         operation_log::OperationCategory,
@@ -62,6 +63,12 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
             "/system/kill-switch",
             Rule::ActingRoleGoverned(ResourceType::System, Operation::Halt),
             set_kill_switch,
+        ),
+        spec(
+            Method::GET,
+            "/system/execution-recovery",
+            Rule::ResourceOp(ResourceType::System, Operation::Read),
+            execution_recovery,
         ),
         spec(
             Method::GET,
@@ -196,6 +203,12 @@ pub async fn status(state: web::Data<AppState>) -> Result<WebResponse<SystemStat
 
 pub async fn health(state: web::Data<AppState>) -> Result<WebResponse<HealthReport>, WebError> {
     Ok(WebResponse::ok(state.control.health().await))
+}
+
+pub async fn execution_recovery(
+    state: web::Data<AppState>,
+) -> Result<WebResponse<ExecutionRecoveryView>, WebError> {
+    Ok(WebResponse::ok(state.execution_recovery.view().await?))
 }
 
 pub async fn quant_mode(

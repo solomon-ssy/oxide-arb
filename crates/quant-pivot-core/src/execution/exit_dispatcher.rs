@@ -12,7 +12,11 @@
 
 use std::sync::Arc;
 
-use quant_pivot_error::QuantResult;
+use chrono::Utc;
+use quant_pivot_error::{
+    QuantResult,
+    storage::{StorageError, entity},
+};
 use quant_pivot_models::{
     domain::{
         ExecutionOrderInfo, ExitLedgerWrite, NewExecutionOrder, NewReconciliation, PositionExit,
@@ -24,11 +28,11 @@ use quant_pivot_models::{
         quant::ExecutionOrderState,
     },
     types::{
-        ExecutionOrderId, Price, ReconciliationEvidence, ReconciliationEvidenceChain,
-        ReconciliationId, Usd,
+        ExecutionOrderId, OrderIntentId, Price, RecommendationId, ReconciliationEvidence,
+        ReconciliationEvidenceChain, ReconciliationId, Usd,
     },
 };
-use quant_pivot_repository::traits::ExecutionSubmissionRepository;
+use quant_pivot_repository::traits::{ExecutionSubmissionRepository, OrderIntentRepository};
 
 use crate::{
     execution::{
@@ -37,7 +41,10 @@ use crate::{
         exit_monitor::ExitOrderSpec,
         order_client::{PolymarketOrderClient, VenueOrder, VenueOutcome, VenueSubmitResult},
     },
-    observability::metrics_hub::MetricsHub,
+    observability::{
+        execution_fact_writer::ExecutionEventWriter,
+        ledger_fact_projection::project_execution_event, metrics_hub::MetricsHub,
+    },
 };
 
 /// A triggered exit to submit for one open position lot.
@@ -60,6 +67,8 @@ pub struct ExitDispatcherDeps {
     pub order_client: Arc<dyn PolymarketOrderClient>,
     pub breaker: Arc<ExecutionBreaker>,
     pub metrics: Arc<MetricsHub>,
+    pub execution_events: Arc<ExecutionEventWriter>,
+    pub intents: Arc<dyn OrderIntentRepository>,
 }
 
 /// Submits exit (Sell) orders and settles their venue outcome atomically.
@@ -92,6 +101,15 @@ impl CoreExitDispatcher {
             .submission
             .create_exit_order_and_mark_closing(new_order, reason, partial_exit_node_id)
             .await?;
+        let recommendation_id = self
+            .recommendation_id_for_intent(&lot.order_intent_id)
+            .await?;
+        self.deps.execution_events.write(project_execution_event(
+            &execution_order,
+            recommendation_id.clone(),
+            "exit_submitted",
+            Utc::now(),
+        ));
 
         // 2. Venue submission — NO DB lock held across this network call.
         let venue_order = VenueOrder {
@@ -136,8 +154,27 @@ impl CoreExitDispatcher {
             .submission
             .record_exit_result(&execution_order.execution_order_id, write)
             .await?;
+        self.deps.execution_events.write(project_execution_event(
+            &recorded,
+            recommendation_id,
+            "exit_submission_result",
+            Utc::now(),
+        ));
         self.deps.metrics.inc_exit_trigger(reason.as_str());
         Ok(recorded)
+    }
+
+    async fn recommendation_id_for_intent(
+        &self,
+        intent_id: &OrderIntentId,
+    ) -> QuantResult<RecommendationId> {
+        let intent = self
+            .deps
+            .intents
+            .find_by_id(intent_id)
+            .await?
+            .ok_or_else(|| StorageError::not_found(entity::QUANT_ORDER_INTENT, intent_id))?;
+        Ok(intent.recommendation_id)
     }
 }
 

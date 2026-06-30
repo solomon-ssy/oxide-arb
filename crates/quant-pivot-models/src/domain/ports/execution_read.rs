@@ -6,9 +6,10 @@ use quant_pivot_error::QuantResult;
 use crate::{
     domain::{
         ExecutionOrderInfo, ExecutionOrderListQuery, Paginated, PositionInfo, PositionListQuery,
-        RecommendationAttributionInfo,
+        RecommendationAttributionInfo, ReconciliationInfo, ReconciliationListQuery,
+        SettlementRedeemDetail, SettlementRedeemInfo, SettlementRedeemListQuery,
     },
-    types::{ExecutionOrderId, PositionId, RecommendationId},
+    types::{ExecutionOrderId, PositionId, RecommendationId, ReconciliationId, SettlementRedeemId},
 };
 
 #[async_trait]
@@ -34,4 +35,24 @@ pub trait ExecutionReadPort: Send + Sync {
         &self,
         id: &RecommendationId,
     ) -> QuantResult<Option<RecommendationAttributionInfo>>;
+
+    async fn list_reconciliations(
+        &self,
+        query: ReconciliationListQuery,
+    ) -> QuantResult<Paginated<ReconciliationInfo>>;
+
+    async fn get_reconciliation(
+        &self,
+        id: &ReconciliationId,
+    ) -> QuantResult<Option<ReconciliationInfo>>;
+
+    async fn list_settlement_redeems(
+        &self,
+        query: SettlementRedeemListQuery,
+    ) -> QuantResult<Paginated<SettlementRedeemInfo>>;
+
+    async fn get_settlement_redeem(
+        &self,
+        id: &SettlementRedeemId,
+    ) -> QuantResult<Option<SettlementRedeemDetail>>;
 }

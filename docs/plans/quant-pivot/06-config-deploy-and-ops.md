@@ -565,7 +565,12 @@ Warning：
 - 标准二元 CTF auto-redeem：EOA-only signer/funder 校验、`Submitted` 恢复、`ManualRequired` 处置。
 - 发布模型。
 - 运行 ad-hoc report。
-- 切换 semi_auto。
+- 切换 auto_execution。
+- **Auto-execution 恢复**（unresolvable / latched kill-switch）：
+  1. `GET /api/system/execution-recovery` — 查看 `next_steps` 与 blocking reconciliations。
+  2. 对每个 blocking row：`POST /api/quant/reconciliations/{id}/resolve`（定终态 + 校正 ledger）。
+  3. 若 `kill_switch_requires_ack`：`POST /api/system/kill-switch`（`ack: true`）。
+  4. `POST /api/system/quant-mode` 或确认 `SystemStatus` preflight 通过后再恢复 auto dispatch。
 - 审批 OrderIntent。
 - 切换 auto_execution。
 - kill switch。

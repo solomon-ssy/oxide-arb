@@ -1,5 +1,6 @@
 //! Runtime mode handle and quant governance primitives.
 
+pub mod execution_recovery;
 pub mod factor_governance;
 pub mod kill_switch;
 pub mod mode_preflight;

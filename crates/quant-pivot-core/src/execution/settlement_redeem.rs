@@ -26,12 +26,18 @@ use quant_pivot_models::{
     },
 };
 use quant_pivot_repository::traits::{
-    MarketRepository, OrderIntentRepository, PositionRepository, SettlementRedeemRepository,
+    CapitalAllocationRepository, MarketRepository, OrderIntentRepository, PositionRepository,
+    SettlementRedeemRepository,
 };
 use rust_decimal::Decimal;
 
 use crate::{
     governance::{KillSwitchHandle, RuntimeModeHandle},
+    observability::{
+        capital_allocation_fact_writer::CapitalAllocationEventWriter,
+        ledger_fact_projection::{project_capital_event, project_position_event},
+        position_fact_writer::PositionEventWriter,
+    },
     runtime_config::RuntimeConfigStore,
 };
 
@@ -358,12 +364,15 @@ pub struct SettlementRedeemServiceDeps {
     pub intents: Arc<dyn OrderIntentRepository>,
     pub markets: Arc<dyn MarketRepository>,
     pub settlement_redeems: Arc<dyn SettlementRedeemRepository>,
+    pub capital: Arc<dyn CapitalAllocationRepository>,
     pub ctf: Arc<dyn SettlementCtfClient>,
     pub runtime_mode: RuntimeModeHandle,
     pub kill_switch: KillSwitchHandle,
     pub config: Arc<RuntimeConfigStore>,
     pub funder_address: String,
     pub wallet_kind: ExecutionWalletKind,
+    pub capital_events: Arc<CapitalAllocationEventWriter>,
+    pub position_events: Arc<PositionEventWriter>,
 }
 
 /// One settlement redeem sweep summary.
@@ -831,9 +840,10 @@ impl SettlementRedeemService {
                 payout_usd,
                 gas_fee_pol: Some(gas_fee_pol),
                 confirmed_at: now,
-                lots: allocation,
+                lots: allocation.clone(),
             })
             .await?;
+        self.mirror_settlement_confirm(&allocation, now).await?;
         tracing::info!(
             market_id = %market.market_id,
             tx_hash = receipt.tx_hash,
@@ -841,6 +851,31 @@ impl SettlementRedeemService {
             "confirmed standard binary settlement redeem"
         );
         Ok(MarketRedeemOutcome::Confirmed)
+    }
+
+    async fn mirror_settlement_confirm(
+        &self,
+        allocation: &[SettlementRedeemLotWrite],
+        now: DateTime<Utc>,
+    ) -> QuantResult<()> {
+        for write in allocation {
+            let intent_id = &write.lot.order_intent_id;
+            if let Some(capital) = self.deps.capital.find_by_intent(intent_id).await? {
+                self.deps.capital_events.write(project_capital_event(
+                    &capital,
+                    "settlement_redeem_confirmed",
+                    now,
+                ));
+            }
+            if let Some(position) = self.deps.positions.find_by_intent(intent_id).await? {
+                self.deps.position_events.write(project_position_event(
+                    &position,
+                    "settlement_redeem_confirmed",
+                    now,
+                ));
+            }
+        }
+        Ok(())
     }
 
     async fn mark_failed(
@@ -920,7 +955,7 @@ struct NewRedeemRecordParams<'a> {
     payout_usd: Option<Usd>,
 }
 
-fn is_auto_redeem_candidate(intent: &OrderIntentInfo) -> bool {
+pub(crate) fn is_auto_redeem_candidate(intent: &OrderIntentInfo) -> bool {
     intent.exit_policy_json.settlement_mode == ExitSettlementMode::HoldToResolution
         && intent.exit_policy_json.redeem_policy == RedeemPolicy::Auto
         && !matches!(

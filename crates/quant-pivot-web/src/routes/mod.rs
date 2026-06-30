@@ -43,10 +43,12 @@ pub mod positions;
 pub mod quant_intents;
 pub mod quant_recommendations;
 pub mod quant_reports;
+pub mod reconciliations;
 pub mod registry;
 pub mod research_models;
 pub mod roles;
 pub mod runtime_config;
+pub mod settlement_redeems;
 pub mod system;
 pub mod training_datasets;
 pub mod users;
@@ -91,6 +93,8 @@ fn protected_route_specs() -> Vec<RouteSpec> {
     specs.extend(account::route_specs());
     specs.extend(positions::route_specs());
     specs.extend(execution_orders::route_specs());
+    specs.extend(reconciliations::route_specs());
+    specs.extend(settlement_redeems::route_specs());
     specs.extend(quant_intents::route_specs());
     specs
 }

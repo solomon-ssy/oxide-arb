@@ -13,9 +13,7 @@
 use std::{sync::Arc, time::Duration};
 
 use chrono::Utc;
-use quant_pivot_repository::{
-    postgres::PgRecommendationRepository, traits::RecommendationRepository,
-};
+use quant_pivot_repository::traits::RecommendationRepository;
 
 use super::AppContext;
 use crate::{
@@ -84,9 +82,8 @@ impl AppContext {
     /// (every fire re-checks it) and `RecommendationExpireSweep` is the backstop.
     pub fn register_recommendation_deadline_scheduler(&self, runner: &mut AppRunner) {
         let lifecycle = self.report_lifecycle();
-        let recommendations: Arc<dyn RecommendationRepository> = Arc::new(
-            PgRecommendationRepository::new(self.infra.pg.connection().clone()),
-        );
+        let recommendations: Arc<dyn RecommendationRepository> =
+            Arc::clone(&self.infra.repos.recommendation) as Arc<dyn RecommendationRepository>;
         let reconcile = Duration::from_secs(self.config.quant.workers.report_expire_sweep_secs);
         runner.spawn(
             TaskId::RecommendationDeadlineScheduler,

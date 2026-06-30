@@ -28,7 +28,7 @@ impl AppContext {
     ) -> QuantResult<Self> {
         let metrics = Arc::new(MetricsHub::new());
         let infra = InfraBundle::assemble(&deploy, Arc::clone(&metrics)).await?;
-        let runtime = RuntimeSnapshot::bootstrap(&infra.pg).await?;
+        let runtime = RuntimeSnapshot::bootstrap(&infra.repos).await?;
         let (events, event_rx) = CoreEventPublisher::bounded(4096);
         let data = DataBundle::assemble(&DataBundleDeps {
             deploy: &deploy,
@@ -93,6 +93,7 @@ impl AppContext {
         governance
             .applicator
             .attach_report_scheduler(Arc::clone(&report.scheduler));
+        governance.bootstrap_execution_recovery().await?;
 
         Ok(Self {
             config: deploy,

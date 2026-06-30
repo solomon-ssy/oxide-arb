@@ -1,11 +1,12 @@
 //! Governance bundle: runtime config, mode control, health, notifications.
 
-use super::{DataBundle, InfraBundle};
+use super::{DataBundle, InfraBundle, PgRepositories};
 use crate::{
     execution::ExitMonitorHealthHandle,
     governance::{
         DefaultModePreflight, DefaultModeTransitionGate, KillSwitchControl, KillSwitchHandle,
         ModePreflightDeps, RuntimeModeHandle, SystemStatusPublisher, WeightOverlayApplicator,
+        execution_recovery::{ExecutionRecoveryCoordinator, ExecutionRecoveryHandle},
         runtime_control::{QuantRuntimeControl, QuantRuntimeControlDeps},
     },
     infra::health_checker::{HealthChecker, HealthCheckerDeps},
@@ -19,7 +20,7 @@ use quant_pivot_models::{
     config::DeployConfig,
     domain::{
         CoreEventPublisher, DataQualityPort, KillSwitchPort, KillSwitchStateInfo, KillSwitchView,
-        NewRuntimeConfigActivation, NewRuntimeConfigVersion, RuntimeControlPort,
+        NewRuntimeConfigActivation, NewRuntimeConfigVersion, RuntimeControlPort, SystemStatus,
         UpsertKillSwitchState,
     },
     enums::{
@@ -33,15 +34,14 @@ use quant_pivot_models::{
 };
 use quant_pivot_repository::{
     postgres::{
-        PgCapitalAllocationRepository, PgKillSwitchStateRepository, PgModelRegistryRepository,
-        PgReconciliationRepository, PgRuntimeConfigVersionRepository, PgShadowComparisonRepository,
-        PgSystemRuntimeStateRepository, SYSTEM_KILL_SWITCH_ID,
+        PgKillSwitchStateRepository, PgSystemRuntimeStateRepository, SYSTEM_KILL_SWITCH_ID,
     },
     traits::{
-        KillSwitchStateRepository, RuntimeConfigVersionRepository, SystemRuntimeStateRepository,
+        CapitalAllocationRepository, KillSwitchStateRepository, ModelRegistryRepository,
+        ReconciliationRepository, RuntimeConfigVersionRepository, ShadowComparisonRepository,
+        SystemRuntimeStateRepository,
     },
 };
-use quant_pivot_storage::postgres::PostgresPool;
 use std::sync::Arc;
 
 /// Active runtime config, mode, kill-switch, and notification wiring loaded from Postgres.
@@ -57,21 +57,14 @@ pub struct RuntimeSnapshot {
 impl RuntimeSnapshot {
     /// Bootstrap or restore the active runtime config, quant runtime mode, and
     /// operational kill-switch (both operational singletons fail closed if missing).
-    pub async fn bootstrap(pg: &PostgresPool) -> QuantResult<Self> {
-        let runtime_config_repo = Arc::new(PgRuntimeConfigVersionRepository::new(
-            pg.connection().clone(),
-        ));
-        let config = ensure_runtime_config_activation(runtime_config_repo.as_ref()).await?;
+    pub async fn bootstrap(repos: &PgRepositories) -> QuantResult<Self> {
+        let config = ensure_runtime_config_activation(repos.runtime_config.as_ref()).await?;
         let alerts = Arc::new(AlertDispatcher::new(&config.notification));
         let store = Arc::new(RuntimeConfigStore::new(config.clone()));
         let mode = RuntimeModeHandle::new(
-            restore_quant_runtime_mode(&PgSystemRuntimeStateRepository::new(
-                pg.connection().clone(),
-            ))
-            .await?,
+            restore_quant_runtime_mode(repos.system_runtime_state.as_ref()).await?,
         );
-        let kill_switch_info =
-            restore_kill_switch(&PgKillSwitchStateRepository::new(pg.connection().clone())).await?;
+        let kill_switch_info = restore_kill_switch(repos.kill_switch_state.as_ref()).await?;
         let kill_switch_handle = KillSwitchHandle::new(kill_switch_info.state);
         let kill_switch_view = KillSwitchView::from(kill_switch_info);
         Ok(Self {
@@ -112,6 +105,8 @@ pub struct GovernanceBundle {
     /// Exit-monitor health (05.6): shared with the execution bundle's worker and
     /// read by admission `#20` + the auto-execution mode preflight.
     pub exit_monitor_health: ExitMonitorHealthHandle,
+    /// Lock-free execution recovery summary embedded in [`SystemStatus`].
+    pub execution_recovery: Arc<ExecutionRecoveryCoordinator>,
 }
 
 impl GovernanceBundle {
@@ -135,82 +130,37 @@ impl GovernanceBundle {
         } = runtime;
 
         let status_publisher = SystemStatusPublisher::new(events);
-
-        let weight_overlay = Arc::new(WeightOverlayApplicator::new());
-        // Seed the overlay from the active config so a non-published candidate /
-        // shadow runs under its configured weights before the first re-activation.
-        weight_overlay.reload(
-            &runtime_config.current().factors,
-            &runtime_config.current().model,
+        let weight_overlay = seed_weight_overlay(&runtime_config);
+        let applicator = build_runtime_config_applicator(
+            deploy,
+            metrics,
+            &runtime_config,
+            &alerts,
+            &weight_overlay,
+            data,
         );
+        let health_checker = build_health_checker(infra, data, &runtime_mode);
+        let reconciliation_repo: Arc<dyn ReconciliationRepository> =
+            Arc::clone(&infra.repos.reconciliation) as Arc<dyn ReconciliationRepository>;
 
-        let applicator = Arc::new(RuntimeConfigApplicator::new(
-            Arc::clone(&runtime_config),
-            RuntimeConfigSubscribers {
-                market_filter: Arc::clone(&data.market_filter),
-                market_registry: Arc::clone(&data.market_registry),
-                market_cache: Arc::clone(&data.market_cache),
-                ws_subscription: Some(Arc::clone(&data.ws_subscription)),
-                data_quality: Arc::clone(&data.data_quality),
-                metrics: Arc::clone(metrics),
-                alerts: Arc::clone(&alerts),
-                weight_overlay: Arc::clone(&weight_overlay),
-                subscription_window_hours: deploy
-                    .market_data
-                    .websocket
-                    .engine_subscription_window_hours,
-            },
-        ));
-
-        let health_checker = Arc::new(HealthChecker::new(HealthCheckerDeps {
-            pg_pool: Arc::clone(&infra.pg),
-            ch_pool: Arc::clone(&infra.ch),
-            ws_health: Arc::clone(&data.ws_manager) as Arc<dyn WsShardHealthPort>,
-            catalog: Arc::clone(&data.catalog),
-            runtime_mode: runtime_mode.clone(),
-        }));
-
-        let conn = infra.pg.connection().clone();
-
-        // Operational kill-switch control (persist + hot-swap + metric + WS fan-out).
-        let kill_switch_control = Arc::new(KillSwitchControl::new(
-            kill_switch_handle.clone(),
+        let OperationalControls {
+            kill_switch,
+            execution_recovery,
+            exit_monitor_health,
+            runtime_control,
+        } = wire_operational_controls(OperationalControlsDeps {
+            deploy,
+            metrics,
+            data,
+            infra,
+            runtime_config: &runtime_config,
+            runtime_mode: &runtime_mode,
+            kill_switch_handle: kill_switch_handle.clone(),
             kill_switch_view,
-            Arc::new(PgKillSwitchStateRepository::new(conn.clone())),
-            Arc::clone(metrics),
-            Arc::clone(&status_publisher),
-        ));
-        let kill_switch: Arc<dyn KillSwitchPort> = kill_switch_control;
-
-        // Exit-monitor health seam (05.6): owned here so it is shared by the
-        // execution bundle's worker, admission `#20`, and this preflight.
-        let exit_monitor_health = ExitMonitorHealthHandle::new();
-
-        // Mode-transition matrix + read-only upgrade preflight.
-        let transition_gate = Arc::new(DefaultModeTransitionGate::new());
-        let preflight = Arc::new(DefaultModePreflight::new(ModePreflightDeps {
-            deploy: Arc::clone(deploy),
-            config_store: Arc::clone(&runtime_config),
-            data_quality: Arc::clone(&data.data_quality) as Arc<dyn DataQualityPort>,
-            model_registry: Arc::new(PgModelRegistryRepository::new(conn.clone())),
-            shadow_comparison: Arc::new(PgShadowComparisonRepository::new(conn.clone())),
-            reconciliation: Arc::new(PgReconciliationRepository::new(conn.clone())),
-            capital: Arc::new(PgCapitalAllocationRepository::new(conn.clone())),
-            kill_switch: kill_switch_handle.clone(),
-            exit_monitor_health: exit_monitor_health.clone(),
-        }));
-
-        let runtime_control = Arc::new(QuantRuntimeControl::new(QuantRuntimeControlDeps {
-            runtime_mode: runtime_mode.clone(),
-            health_checker: Arc::clone(&health_checker),
-            runtime_state_repo: PgSystemRuntimeStateRepository::new(conn),
-            transition_gate,
-            preflight,
-            kill_switch: Arc::clone(&kill_switch),
-            status_publisher: Arc::clone(&status_publisher),
-        }));
-        status_publisher.register(Arc::clone(&runtime_control));
-        let runtime_control: Arc<dyn RuntimeControlPort> = runtime_control;
+            status_publisher: &status_publisher,
+            health_checker: &health_checker,
+            reconciliation_repo: &reconciliation_repo,
+        });
 
         Self {
             runtime_config,
@@ -223,7 +173,154 @@ impl GovernanceBundle {
             kill_switch,
             weight_overlay,
             exit_monitor_health,
+            execution_recovery,
         }
+    }
+
+    /// Bootstrap the execution recovery summary from live reconciliation state.
+    pub async fn bootstrap_execution_recovery(&self) -> QuantResult<()> {
+        self.execution_recovery.refresh().await
+    }
+}
+
+fn seed_weight_overlay(runtime_config: &Arc<RuntimeConfigStore>) -> Arc<WeightOverlayApplicator> {
+    let weight_overlay = Arc::new(WeightOverlayApplicator::new());
+    // Seed the overlay from the active config so a non-published candidate /
+    // shadow runs under its configured weights before the first re-activation.
+    weight_overlay.reload(
+        &runtime_config.current().factors,
+        &runtime_config.current().model,
+    );
+    weight_overlay
+}
+
+fn build_runtime_config_applicator(
+    deploy: &Arc<DeployConfig>,
+    metrics: &Arc<MetricsHub>,
+    runtime_config: &Arc<RuntimeConfigStore>,
+    alerts: &Arc<AlertDispatcher>,
+    weight_overlay: &Arc<WeightOverlayApplicator>,
+    data: &DataBundle,
+) -> Arc<RuntimeConfigApplicator> {
+    Arc::new(RuntimeConfigApplicator::new(
+        Arc::clone(runtime_config),
+        RuntimeConfigSubscribers {
+            market_filter: Arc::clone(&data.market_filter),
+            market_registry: Arc::clone(&data.market_registry),
+            market_cache: Arc::clone(&data.market_cache),
+            ws_subscription: Some(Arc::clone(&data.ws_subscription)),
+            data_quality: Arc::clone(&data.data_quality),
+            metrics: Arc::clone(metrics),
+            alerts: Arc::clone(alerts),
+            weight_overlay: Arc::clone(weight_overlay),
+            subscription_window_hours: deploy
+                .market_data
+                .websocket
+                .engine_subscription_window_hours,
+        },
+    ))
+}
+
+fn build_health_checker(
+    infra: &InfraBundle,
+    data: &DataBundle,
+    runtime_mode: &RuntimeModeHandle,
+) -> Arc<HealthChecker> {
+    Arc::new(HealthChecker::new(HealthCheckerDeps {
+        pg_pool: Arc::clone(&infra.pg),
+        ch_pool: Arc::clone(&infra.ch),
+        ws_health: Arc::clone(&data.ws_manager) as Arc<dyn WsShardHealthPort>,
+        catalog: Arc::clone(&data.catalog),
+        runtime_mode: runtime_mode.clone(),
+    }))
+}
+
+struct OperationalControls {
+    kill_switch: Arc<dyn KillSwitchPort>,
+    execution_recovery: Arc<ExecutionRecoveryCoordinator>,
+    exit_monitor_health: ExitMonitorHealthHandle,
+    runtime_control: Arc<dyn RuntimeControlPort>,
+}
+
+struct OperationalControlsDeps<'a> {
+    deploy: &'a Arc<DeployConfig>,
+    metrics: &'a Arc<MetricsHub>,
+    data: &'a DataBundle,
+    infra: &'a InfraBundle,
+    runtime_config: &'a Arc<RuntimeConfigStore>,
+    runtime_mode: &'a RuntimeModeHandle,
+    kill_switch_handle: KillSwitchHandle,
+    kill_switch_view: KillSwitchView,
+    status_publisher: &'a Arc<SystemStatusPublisher>,
+    health_checker: &'a Arc<HealthChecker>,
+    reconciliation_repo: &'a Arc<dyn ReconciliationRepository>,
+}
+
+fn wire_operational_controls(deps: OperationalControlsDeps<'_>) -> OperationalControls {
+    let OperationalControlsDeps {
+        deploy,
+        metrics,
+        data,
+        infra,
+        runtime_config,
+        runtime_mode,
+        kill_switch_handle,
+        kill_switch_view,
+        status_publisher,
+        health_checker,
+        reconciliation_repo,
+    } = deps;
+    let repos = &infra.repos;
+    let recovery_slot = Arc::new(std::sync::OnceLock::new());
+    let kill_switch: Arc<dyn KillSwitchPort> = Arc::new(KillSwitchControl::new(
+        kill_switch_handle.clone(),
+        kill_switch_view,
+        Arc::clone(&repos.kill_switch_state) as Arc<dyn KillSwitchStateRepository>,
+        Arc::clone(metrics),
+        Arc::clone(status_publisher),
+        Arc::clone(&recovery_slot),
+    ));
+    let execution_recovery = Arc::new(ExecutionRecoveryCoordinator::new(
+        ExecutionRecoveryHandle::new(
+            SystemStatus::bootstrap(runtime_mode.current()).execution_recovery,
+        ),
+        Arc::clone(reconciliation_repo),
+        Arc::clone(&kill_switch),
+        runtime_mode.clone(),
+    ));
+    let _ = recovery_slot.set(Arc::clone(&execution_recovery));
+    let exit_monitor_health = ExitMonitorHealthHandle::new();
+    let transition_gate = Arc::new(DefaultModeTransitionGate::new());
+    let preflight = Arc::new(DefaultModePreflight::new(ModePreflightDeps {
+        deploy: Arc::clone(deploy),
+        config_store: Arc::clone(runtime_config),
+        data_quality: Arc::clone(&data.data_quality) as Arc<dyn DataQualityPort>,
+        model_registry: Arc::clone(&repos.model_registry) as Arc<dyn ModelRegistryRepository>,
+        shadow_comparison: Arc::clone(&repos.shadow_comparison)
+            as Arc<dyn ShadowComparisonRepository>,
+        reconciliation: Arc::clone(reconciliation_repo),
+        capital: Arc::clone(&repos.capital_allocation) as Arc<dyn CapitalAllocationRepository>,
+        kill_switch: kill_switch_handle,
+        exit_monitor_health: exit_monitor_health.clone(),
+    }));
+    let runtime_control = Arc::new(QuantRuntimeControl::new(QuantRuntimeControlDeps {
+        runtime_mode: runtime_mode.clone(),
+        health_checker: Arc::clone(health_checker),
+        runtime_state_repo: Arc::clone(&repos.system_runtime_state)
+            as Arc<dyn SystemRuntimeStateRepository>,
+        transition_gate,
+        preflight,
+        kill_switch: Arc::clone(&kill_switch),
+        status_publisher: Arc::clone(status_publisher),
+        execution_recovery: execution_recovery.handle(),
+    }));
+    status_publisher.register(Arc::clone(&runtime_control));
+
+    OperationalControls {
+        kill_switch,
+        execution_recovery,
+        exit_monitor_health,
+        runtime_control: runtime_control as Arc<dyn RuntimeControlPort>,
     }
 }
 

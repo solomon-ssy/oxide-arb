@@ -22,9 +22,8 @@ use quant_pivot_models::{
     },
     types::{ReconciliationEvidence, ReconciliationEvidenceChain, ReconciliationId},
 };
-use quant_pivot_repository::{
-    postgres::{PgOrderIntentRepository, PgReconciliationRepository},
-    traits::{ExecutionSubmissionRepository, OrderIntentRepository, ReconciliationRepository},
+use quant_pivot_repository::traits::{
+    ExecutionSubmissionRepository, OrderIntentRepository, ReconciliationRepository,
 };
 
 use super::AppContext;
@@ -74,13 +73,11 @@ impl AppContext {
 
     fn register_auto_dispatch_worker(&self, runner: &mut AppRunner) {
         let dispatcher = self.execution_dispatcher();
-        let intents: Arc<dyn OrderIntentRepository> = Arc::new(PgOrderIntentRepository::new(
-            self.infra.pg.connection().clone(),
-        ));
+        let intents: Arc<dyn OrderIntentRepository> =
+            Arc::clone(&self.infra.repos.order_intent) as Arc<dyn OrderIntentRepository>;
         let submission = Arc::clone(&self.execution.submission);
-        let reconciliation: Arc<dyn ReconciliationRepository> = Arc::new(
-            PgReconciliationRepository::new(self.infra.pg.connection().clone()),
-        );
+        let reconciliation: Arc<dyn ReconciliationRepository> =
+            Arc::clone(&self.infra.repos.reconciliation) as Arc<dyn ReconciliationRepository>;
         let runtime_mode = self.runtime_mode();
         let kill_switch = self.kill_switch_handle();
         let wake = self.execution_wake();

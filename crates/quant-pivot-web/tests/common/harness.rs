@@ -27,14 +27,15 @@ use quant_pivot_models::{
         BacktestPort, BacktestReportInfo, BacktestReportView, BookSnapshot,
         BuildTrainingDatasetRequest, CatalogState, CatalogStatusPort, CoreEventPublisher,
         DataQualityPort, DataQualitySnapshot, ExecutionOrderInfo, ExecutionReadPort,
-        ExecutionSubmitPort, FactorGovernancePort, GovernanceActor, HealthReport, KillSwitchPort,
-        KillSwitchView, MarketDataPort, MetricsScrapePort, ModelComparisonReportInfo,
-        ModelGovernancePort, ModelTrainingPort, ModelVersionInfo, PromoteDatasetRequest,
-        PublishFactorCommand, PublishModelCommand, QuantModeTransitionReport, RetireFactorCommand,
-        RetireModelCommand, RollbackModelCommand, RunBacktestRequest, RuntimeConfigPort,
-        RuntimeControlPort, SetKillSwitchCommand, SystemStatus, TrainModelRequest,
-        TrainedModelView, TrainingDatasetInfo, TrainingDatasetPlanView, TrainingDatasetPort,
-        TrainingDatasetView,
+        ExecutionRecoveryPort, ExecutionRecoveryView, ExecutionSubmitPort, FactorGovernancePort,
+        GovernanceActor, HealthReport, KillSwitchPort, KillSwitchView, MarketDataPort,
+        MetricsScrapePort, ModelComparisonReportInfo, ModelGovernancePort, ModelTrainingPort,
+        ModelVersionInfo, PromoteDatasetRequest, PublishFactorCommand, PublishModelCommand,
+        QuantModeTransitionReport, ReconciliationPort, ResolveReconciliationCommand,
+        ResolveReconciliationOutcome, RetireFactorCommand, RetireModelCommand,
+        RollbackModelCommand, RunBacktestRequest, RuntimeConfigPort, RuntimeControlPort,
+        SetKillSwitchCommand, SystemStatus, TrainModelRequest, TrainedModelView,
+        TrainingDatasetInfo, TrainingDatasetPlanView, TrainingDatasetPort, TrainingDatasetView,
     },
     enums::{execution::KillSwitchState, quant::QuantRuntimeMode},
     runtime_config::RuntimeConfig,
@@ -44,8 +45,14 @@ use quant_pivot_models::{
     },
 };
 use quant_pivot_repository::{
-    postgres::{PgAttributionRepository, PgExecutionOrderRepository, PgPositionRepository},
-    traits::{AttributionRepository, ExecutionOrderRepository, PositionRepository},
+    postgres::{
+        PgAttributionRepository, PgExecutionOrderRepository, PgPositionRepository,
+        PgReconciliationRepository, PgSettlementRedeemRepository,
+    },
+    traits::{
+        AttributionRepository, ExecutionOrderRepository, PositionRepository,
+        ReconciliationRepository, SettlementRedeemRepository,
+    },
 };
 use quant_pivot_storage::cache::connect_pool;
 use quant_pivot_test_support::{
@@ -191,8 +198,15 @@ impl TestEnv {
                 Arc::new(PgPositionRepository::new(db.clone())) as Arc<dyn PositionRepository>,
                 Arc::new(PgAttributionRepository::new(db.clone()))
                     as Arc<dyn AttributionRepository>,
+                Arc::new(PgReconciliationRepository::new(db.clone()))
+                    as Arc<dyn ReconciliationRepository>,
+                Arc::new(PgSettlementRedeemRepository::new(db.clone()))
+                    as Arc<dyn SettlementRedeemRepository>,
             )) as Arc<dyn ExecutionReadPort>,
             execution_submit: Arc::new(MockExecutionSubmit) as Arc<dyn ExecutionSubmitPort>,
+            reconciliation: Arc::new(MockReconciliationPort) as Arc<dyn ReconciliationPort>,
+            execution_recovery: Arc::new(MockExecutionRecoveryPort)
+                as Arc<dyn ExecutionRecoveryPort>,
         };
 
         Self {
@@ -422,6 +436,43 @@ pub struct MockRuntimeControl {
 /// real venue + admission wiring (covered by core integration tests), so the
 /// web harness only exercises routing / RBAC and fails closed here.
 pub struct MockExecutionSubmit;
+
+#[derive(Default)]
+pub struct MockReconciliationPort;
+
+#[async_trait]
+impl ReconciliationPort for MockReconciliationPort {
+    async fn resolve_operator(
+        &self,
+        _: ResolveReconciliationCommand,
+    ) -> QuantResult<ResolveReconciliationOutcome> {
+        Err(ExecutionError::ReconciliationNotResolvable {
+            reconciliation_id: "mock".into(),
+            result: "mock".into(),
+        }
+        .into())
+    }
+}
+
+#[derive(Default)]
+pub struct MockExecutionRecoveryPort;
+
+#[async_trait]
+impl ExecutionRecoveryPort for MockExecutionRecoveryPort {
+    async fn view(&self) -> QuantResult<ExecutionRecoveryView> {
+        Ok(ExecutionRecoveryView {
+            summary: SystemStatus::bootstrap(QuantRuntimeMode::ReportOnly).execution_recovery,
+            blocking_reconciliations: Vec::new(),
+            kill_switch: KillSwitchView {
+                state: KillSwitchState::Closed,
+                requires_operator_ack: false,
+                last_reason: "mock".into(),
+                changed_by: "mock".into(),
+                changed_at: chrono::Utc::now(),
+            },
+        })
+    }
+}
 
 #[async_trait]
 impl ExecutionSubmitPort for MockExecutionSubmit {

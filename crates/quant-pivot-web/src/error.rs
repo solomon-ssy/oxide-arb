@@ -212,7 +212,11 @@ impl From<ExecutionError> for WebError {
             | ExecutionError::AdmissionDenied { .. }
             | ExecutionError::ApprovalInvalidated { .. }
             | ExecutionError::ReconciliationUnresolvable { .. }
+            | ExecutionError::ReconciliationNotResolvable { .. }
             | ExecutionError::ModeTransitionForbidden { .. } => Self::Conflict(error.to_string()),
+            ExecutionError::ReconciliationResolveInvalid { .. } => {
+                Self::BadRequest(error.to_string())
+            }
             ExecutionError::SettlementRedeemInvariant { .. } => Self::Internal(error.to_string()),
         }
     }

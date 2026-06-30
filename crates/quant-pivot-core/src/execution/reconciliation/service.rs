@@ -16,6 +16,7 @@ use quant_pivot_error::{
     QuantResult,
     storage::{StorageError, entity},
 };
+use quant_pivot_models::types::RecommendationId;
 use quant_pivot_models::{
     domain::{
         CapitalReconcileSettlement, ExecutionOrderInfo, OrderIntentInfo, PositionExit,
@@ -33,14 +34,22 @@ use quant_pivot_models::{
     },
 };
 use quant_pivot_repository::traits::{
-    ExecutionOrderRepository, ExecutionSubmissionRepository, OrderIntentRepository,
-    PositionRepository, RecommendationRepository, ReconciliationRepository,
+    CapitalAllocationRepository, ExecutionOrderRepository, ExecutionSubmissionRepository,
+    OrderIntentRepository, PositionRepository, RecommendationRepository, ReconciliationRepository,
 };
 
 use super::{CollectedReconciliation, EvidenceCollector, VenuePresence, decide};
 use crate::{
     execution::{ExecutionBreaker, PolymarketOrderClient},
-    observability::metrics_hub::MetricsHub,
+    observability::{
+        capital_allocation_fact_writer::CapitalAllocationEventWriter,
+        execution_fact_writer::ExecutionEventWriter,
+        ledger_fact_projection::{
+            project_capital_event, project_execution_event, project_position_event,
+        },
+        metrics_hub::MetricsHub,
+        position_fact_writer::PositionEventWriter,
+    },
     runtime_config::RuntimeConfigStore,
 };
 
@@ -57,12 +66,16 @@ pub struct ReconciliationServiceDeps {
     pub intents: Arc<dyn OrderIntentRepository>,
     pub recommendations: Arc<dyn RecommendationRepository>,
     pub positions: Arc<dyn PositionRepository>,
+    pub capital: Arc<dyn CapitalAllocationRepository>,
     pub reconciliation: Arc<dyn ReconciliationRepository>,
     pub submission: Arc<dyn ExecutionSubmissionRepository>,
     pub fees: Arc<FeeCalculator>,
     pub breaker: Arc<ExecutionBreaker>,
     pub metrics: Arc<MetricsHub>,
     pub config: Arc<RuntimeConfigStore>,
+    pub execution_events: Arc<ExecutionEventWriter>,
+    pub capital_events: Arc<CapitalAllocationEventWriter>,
+    pub position_events: Arc<PositionEventWriter>,
 }
 
 /// An operator's manual resolution of an unresolvable reconciliation.
@@ -204,6 +217,13 @@ impl ReconciliationService {
             .submission
             .apply_reconciliation(&order.execution_order_id, write)
             .await?;
+        self.mirror_ledger_events(
+            order,
+            recommendation.recommendation_id.clone(),
+            "reconciled",
+            now,
+        )
+        .await?;
         if let Some(pnl) = exit_realized_pnl {
             self.deps.breaker.observe_realized_pnl(pnl, now).await;
         }
@@ -287,6 +307,13 @@ impl ReconciliationService {
             .submission
             .apply_reconciliation(&order.execution_order_id, write)
             .await?;
+        self.mirror_ledger_events(
+            &recorded,
+            recommendation.recommendation_id.clone(),
+            "operator_resolved",
+            now,
+        )
+        .await?;
         if let Some(pnl) = exit_realized_pnl {
             self.deps.breaker.observe_realized_pnl(pnl, now).await;
         }
@@ -331,6 +358,42 @@ impl ReconciliationService {
         Ok((intent, recommendation))
     }
 
+    async fn mirror_ledger_events(
+        &self,
+        order: &ExecutionOrderInfo,
+        recommendation_id: RecommendationId,
+        event_kind: &str,
+        event_time: DateTime<Utc>,
+    ) -> QuantResult<()> {
+        self.deps.execution_events.write(project_execution_event(
+            order,
+            recommendation_id,
+            event_kind,
+            event_time,
+        ));
+        if let Some(capital) = self
+            .deps
+            .capital
+            .find_by_intent(&order.order_intent_id)
+            .await?
+        {
+            self.deps
+                .capital_events
+                .write(project_capital_event(&capital, event_kind, event_time));
+        }
+        if let Some(position) = self
+            .deps
+            .positions
+            .find_by_intent(&order.order_intent_id)
+            .await?
+        {
+            self.deps
+                .position_events
+                .write(project_position_event(&position, event_kind, event_time));
+        }
+        Ok(())
+    }
+
     /// Persist an `Unresolvable` verdict, then latch the kill-switch + bump the
     /// metric. The order/intent are left in place (non-terminal); capital is
     /// impaired (frozen).
@@ -340,6 +403,7 @@ impl ReconciliationService {
         intent_status: OrderIntentStatus,
         evidence: Vec<ReconciliationEvidence>,
     ) -> QuantResult<()> {
+        let (_, recommendation) = self.load_reconcile_context(order).await?;
         let detail = format!(
             "unresolvable reconciliation for execution order {}",
             order.execution_order_id
@@ -370,6 +434,14 @@ impl ReconciliationService {
             .submission
             .apply_reconciliation(&order.execution_order_id, write)
             .await?;
+
+        self.mirror_ledger_events(
+            order,
+            recommendation.recommendation_id.clone(),
+            "unresolvable",
+            Utc::now(),
+        )
+        .await?;
 
         self.deps.breaker.trip_kill_switch("recon", &detail).await;
         self.deps.metrics.inc_reconciliation_unresolvable();

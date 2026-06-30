@@ -57,4 +57,15 @@ pub enum ExecutionError {
     /// Runtime-mode transition is not allowed.
     #[error("mode transition forbidden: {reason}")]
     ModeTransitionForbidden { reason: String },
+
+    /// Operator resolve targeted a reconciliation row that is not blocking.
+    #[error("reconciliation `{reconciliation_id}` is not operator-resolvable (result={result})")]
+    ReconciliationNotResolvable {
+        reconciliation_id: String,
+        result: String,
+    },
+
+    /// Operator resolve payload is invalid for the chosen terminal result.
+    #[error("reconciliation resolve invalid: {detail}")]
+    ReconciliationResolveInvalid { detail: String },
 }

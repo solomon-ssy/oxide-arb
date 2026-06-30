@@ -9,6 +9,7 @@ mod execution;
 mod future;
 mod governance;
 mod infra;
+mod pg_repos;
 mod research;
 
 pub use account::{AccountBundle, AccountBundleDeps};
@@ -17,4 +18,5 @@ pub use execution::{ExecutionBundle, ExecutionBundleDeps};
 pub use future::{PortfolioBundle, ReportBundle, ReportBundleDeps, RuntimeChannels};
 pub use governance::{GovernanceBundle, GovernanceBundleDeps, RuntimeSnapshot};
 pub use infra::InfraBundle;
+pub use pg_repos::PgRepositories;
 pub use research::{ResearchBundle, ResearchBundleDeps};

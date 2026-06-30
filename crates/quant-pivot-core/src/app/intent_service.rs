@@ -5,11 +5,8 @@ use std::{sync::Arc, time::Duration};
 
 use chrono::Utc;
 use quant_pivot_models::domain::OrderIntentPort;
-use quant_pivot_repository::{
-    postgres::{
-        PgOrderIntentRepository, PgRecommendationReportRepository, PgRecommendationRepository,
-    },
-    traits::{OrderIntentRepository, RecommendationReportRepository, RecommendationRepository},
+use quant_pivot_repository::traits::{
+    OrderIntentRepository, RecommendationReportRepository, RecommendationRepository,
 };
 
 use super::AppContext;
@@ -31,19 +28,17 @@ impl AppContext {
     /// cascade `IntentInvalidationHook`, and the expiry sweep.
     #[must_use]
     pub fn build_order_intent_service(&self) -> Arc<CoreOrderIntentService> {
-        let pg = self.infra.pg.connection();
+        let repos = &self.infra.repos;
         let mode_gate: Arc<dyn RuntimeModeGate> =
             Arc::new(DefaultRuntimeModeGate::new(self.runtime_config()));
         Arc::new(CoreOrderIntentService::new(OrderIntentServiceDeps {
             mode_gate,
             runtime_mode: self.runtime_mode(),
             kill_switch: self.kill_switch_handle(),
-            recommendations: Arc::new(PgRecommendationRepository::new(pg.clone()))
-                as Arc<dyn RecommendationRepository>,
-            reports: Arc::new(PgRecommendationReportRepository::new(pg.clone()))
+            recommendations: Arc::clone(&repos.recommendation) as Arc<dyn RecommendationRepository>,
+            reports: Arc::clone(&repos.recommendation_report)
                 as Arc<dyn RecommendationReportRepository>,
-            intents: Arc::new(PgOrderIntentRepository::new(pg.clone()))
-                as Arc<dyn OrderIntentRepository>,
+            intents: Arc::clone(&repos.order_intent) as Arc<dyn OrderIntentRepository>,
             config: self.runtime_config(),
             metrics: Arc::clone(&self.infra.metrics),
             events: self.events.clone(),
@@ -72,9 +67,8 @@ impl AppContext {
         runner: &mut AppRunner,
         service: Arc<CoreOrderIntentService>,
     ) {
-        let intents: Arc<dyn OrderIntentRepository> = Arc::new(PgOrderIntentRepository::new(
-            self.infra.pg.connection().clone(),
-        ));
+        let intents: Arc<dyn OrderIntentRepository> =
+            Arc::clone(&self.infra.repos.order_intent) as Arc<dyn OrderIntentRepository>;
         let reconcile = Duration::from_secs(self.config.quant.workers.intent_expire_sweep_secs);
         runner.spawn(TaskId::IntentDeadlineScheduler, move |token| async move {
             deadline_scheduler::run(

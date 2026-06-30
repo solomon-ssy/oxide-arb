@@ -19,8 +19,13 @@ use quant_pivot_core::{
         CollectedReconciliation, EvidenceCollector, ExecutionBreaker, PolymarketOrderClient,
         ReconciliationService, ReconciliationServiceDeps, VenueCancelResult,
         VenueEvidenceCollector, VenueOrder, VenueReconciliationReader, VenueSubmitResult,
+        reconciliation::OperatorReconcileResolution,
     },
-    observability::metrics_hub::MetricsHub,
+    observability::{
+        capital_allocation_fact_writer::CapitalAllocationEventWriter,
+        execution_fact_writer::ExecutionEventWriter, metrics_hub::MetricsHub,
+        position_fact_writer::PositionEventWriter,
+    },
     pipeline::book_store::BookStore,
     runtime_config::RuntimeConfigStore,
 };
@@ -37,13 +42,14 @@ use quant_pivot_models::{
         NewOrderIntent, NewReconciliation, OperationLogInfo, OperationLogQuery, OrderIntentInfo,
         OrderIntentListQuery, Paginated, PositionExit, PositionFill, PositionInfo,
         PositionListQuery, RecommendationInfo, ReconciliationInfo, ReconciliationLedgerWrite,
-        ReconciliationPatch, SetKillSwitchCommand, SubmissionLedgerWrite,
+        ReconciliationListQuery, ReconciliationPatch, SetKillSwitchCommand, SubmissionLedgerWrite,
     },
     enums::{
         common::{OrderType, Side},
         execution::{
             ApprovalInvalidation, ExecutionOrderPhase, ExitReason, ExitState, KillSwitchState,
-            OrderIntentKind, OrderTypeKind, ReconciliationResult, VenueOrderStatus,
+            OrderIntentKind, OrderTypeKind, ReconciliationEvidenceKind, ReconciliationResult,
+            VenueOrderStatus,
         },
         quant::{
             ApprovalStatus, ExecutionOrderState, OrderIntentStatus, OutcomeSide, QuantRuntimeMode,
@@ -56,10 +62,12 @@ use quant_pivot_models::{
         RecommendationReportId, ReconciliationId, RuntimeConfigVersionId, Shares, TokenId, Usd,
     },
 };
+use quant_pivot_repository::traits::CapitalAllocationRepository;
 use quant_pivot_repository::traits::{
     ExecutionOrderRepository, ExecutionSubmissionRepository, OperationLogRepository,
     OrderIntentRepository, PositionRepository, RecommendationRepository, ReconciliationRepository,
 };
+use quant_pivot_storage::write::{AsyncWriter, AsyncWriterConfig, AsyncWriterObservability};
 use quant_pivot_test_support::report_fixtures;
 use rust_decimal_macros::dec;
 
@@ -226,9 +234,13 @@ impl ExecutionOrderRepository for MemoryExecutionOrders {
 
     async fn find_by_id(
         &self,
-        _execution_order_id: &ExecutionOrderId,
+        execution_order_id: &ExecutionOrderId,
     ) -> Result<Option<ExecutionOrderInfo>, StorageError> {
-        Ok(None)
+        let orders = self.orders.lock().unwrap();
+        Ok(orders
+            .iter()
+            .find(|order| order.execution_order_id == *execution_order_id)
+            .cloned())
     }
 
     async fn has_ambiguous_inflight(&self) -> Result<bool, StorageError> {
@@ -466,12 +478,26 @@ impl ReconciliationRepository for MemoryReconciliation {
         unimplemented!()
     }
 
-    async fn resolve(
+    async fn patch(
         &self,
         _reconciliation_id: &ReconciliationId,
         _patch: ReconciliationPatch,
     ) -> Result<ReconciliationInfo, StorageError> {
         unimplemented!()
+    }
+
+    async fn find_by_id(
+        &self,
+        _reconciliation_id: &ReconciliationId,
+    ) -> Result<Option<ReconciliationInfo>, StorageError> {
+        Ok(None)
+    }
+
+    async fn page(
+        &self,
+        _query: ReconciliationListQuery,
+    ) -> Result<Paginated<ReconciliationInfo>, StorageError> {
+        Ok(Paginated::empty(1, 10))
     }
 
     async fn find_by_execution_order(
@@ -487,6 +513,10 @@ impl ReconciliationRepository for MemoryReconciliation {
 
     async fn has_unresolvable(&self) -> Result<bool, StorageError> {
         Ok(false)
+    }
+
+    async fn count_blocking_unresolvable(&self) -> Result<u64, StorageError> {
+        Ok(0)
     }
 }
 
@@ -616,6 +646,26 @@ impl ExecutionSubmissionRepository for RecordingSubmissionRepo {
             created_at: now(),
             updated_at: now(),
         })
+    }
+}
+
+struct StubCapital;
+
+#[async_trait]
+impl CapitalAllocationRepository for StubCapital {
+    async fn find_by_intent(
+        &self,
+        _: &OrderIntentId,
+    ) -> Result<Option<quant_pivot_models::domain::CapitalAllocationInfo>, StorageError> {
+        Ok(None)
+    }
+
+    async fn sum_reserved_usd(&self) -> Result<Usd, StorageError> {
+        Ok(Usd::ZERO)
+    }
+
+    async fn has_impaired(&self) -> Result<bool, StorageError> {
+        Ok(false)
     }
 }
 
@@ -825,12 +875,16 @@ fn service_harness(
         }),
         recommendations: Arc::new(StubRecommendations(rec.clone())),
         positions: Arc::new(StubPositions),
+        capital: Arc::new(StubCapital),
         reconciliation: Arc::new(MemoryReconciliation),
         submission: Arc::clone(&submission) as Arc<dyn ExecutionSubmissionRepository>,
         fees: Arc::new(FeeCalculator::new()),
         breaker,
         metrics: Arc::clone(&metrics),
         config: Arc::new(RuntimeConfigStore::new(config)),
+        execution_events: noop_execution_writer(),
+        capital_events: noop_capital_writer(),
+        position_events: noop_position_writer(),
     });
     ServiceHarness {
         service,
@@ -839,6 +893,36 @@ fn service_harness(
         kill_switch,
         metrics,
     }
+}
+
+fn noop_execution_writer() -> Arc<ExecutionEventWriter> {
+    let (writer, _worker) = AsyncWriter::new(
+        AsyncWriterConfig::new("test_execution_events"),
+        |_| Box::pin(async move { Ok(()) }),
+        prometheus::IntCounter::new("test_execution_events_dropped", "test").unwrap(),
+        AsyncWriterObservability::default(),
+    );
+    Arc::new(ExecutionEventWriter::new(Arc::new(writer)))
+}
+
+fn noop_capital_writer() -> Arc<CapitalAllocationEventWriter> {
+    let (writer, _worker) = AsyncWriter::new(
+        AsyncWriterConfig::new("test_capital_events"),
+        |_| Box::pin(async move { Ok(()) }),
+        prometheus::IntCounter::new("test_capital_events_dropped", "test").unwrap(),
+        AsyncWriterObservability::default(),
+    );
+    Arc::new(CapitalAllocationEventWriter::new(Arc::new(writer)))
+}
+
+fn noop_position_writer() -> Arc<PositionEventWriter> {
+    let (writer, _worker) = AsyncWriter::new(
+        AsyncWriterConfig::new("test_position_events"),
+        |_| Box::pin(async move { Ok(()) }),
+        prometheus::IntCounter::new("test_position_events_dropped", "test").unwrap(),
+        AsyncWriterObservability::default(),
+    );
+    Arc::new(PositionEventWriter::new(Arc::new(writer)))
 }
 
 #[tokio::test]
@@ -918,4 +1002,46 @@ async fn recon_service_stale_resting_order_cancel_then_releases_capital() {
     assert_eq!(writes[0].capital, CapitalReconcileSettlement::Release);
     assert_eq!(writes[0].order_state, ExecutionOrderState::Cancelled);
     assert_eq!(writes[0].venue_status, Some(VenueOrderStatus::Cancelled));
+}
+
+#[tokio::test]
+async fn operator_resolve_appends_note_and_clears_block() {
+    let rec = recommendation();
+    let row_intent = intent(&rec);
+    let order_id = ExecutionOrderId::from_v7();
+    let mut order = execution_order(&row_intent.order_intent_id, &rec.token_id, now());
+    order.execution_order_id = order_id.clone();
+    order.state = ExecutionOrderState::Ambiguous;
+
+    let harness = service_harness(Arc::new(FailingCollector), vec![order], &rec, &row_intent);
+
+    harness
+        .service
+        .resolve(
+            OperatorReconcileResolution {
+                execution_order_id: order_id,
+                result: ReconciliationResult::NotFilled,
+                filled_shares: None,
+                avg_price: None,
+                operator: "operator-1".to_owned(),
+                note: "confirmed cancelled on venue".to_owned(),
+            },
+            now(),
+        )
+        .await
+        .expect("operator resolve");
+
+    let writes = harness.submission.applied_writes();
+    assert_eq!(writes.len(), 1);
+    let write = &writes[0];
+    assert_eq!(write.result, ReconciliationResult::NotFilled);
+    assert_eq!(write.resolved_by.as_deref(), Some("operator-1"));
+    assert!(write.resolved_at.is_some());
+    assert!(
+        write.evidence.0.iter().any(|evidence| {
+            evidence.kind == ReconciliationEvidenceKind::OperatorNote
+                && evidence.detail.contains("confirmed cancelled on venue")
+        }),
+        "operator note must be appended to evidence chain"
+    );
 }

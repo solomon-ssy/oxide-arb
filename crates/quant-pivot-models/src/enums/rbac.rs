@@ -98,6 +98,8 @@ crate::pg_enum! {
         ExecutionOrder => "execution_order",
         Position => "position",
         RecommendationAttribution => "recommendation_attribution",
+        Reconciliation => "reconciliation",
+        SettlementRedeem => "settlement_redeem",
         FactorDefinition => "factor_definition",
         OperationLog => "operation_log",
         User => "user",
@@ -134,6 +136,7 @@ pub enum Operation {
     Revoke,
     Retire,
     Emergency,
+    Resolve,
 }
 
 impl Operation {
@@ -161,6 +164,7 @@ impl Operation {
             Self::Revoke => "revoke",
             Self::Retire => "retire",
             Self::Emergency => "emergency",
+            Self::Resolve => "resolve",
         }
     }
 }
@@ -255,6 +259,11 @@ pub static RESOURCE_OPERATIONS: &[(ResourceType, &[Operation])] = &[
     (ResourceType::ExecutionOrder, &[Operation::Read]),
     (ResourceType::Position, &[Operation::Read]),
     (ResourceType::RecommendationAttribution, &[Operation::Read]),
+    (
+        ResourceType::Reconciliation,
+        &[Operation::Read, Operation::Resolve],
+    ),
+    (ResourceType::SettlementRedeem, &[Operation::Read]),
     (
         ResourceType::Publication,
         &[

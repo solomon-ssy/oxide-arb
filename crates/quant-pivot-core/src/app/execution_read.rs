@@ -7,31 +7,40 @@ use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
     domain::{
         ExecutionOrderInfo, ExecutionOrderListQuery, ExecutionReadPort, Paginated, PositionInfo,
-        PositionListQuery, RecommendationAttributionInfo,
+        PositionListQuery, RecommendationAttributionInfo, ReconciliationInfo,
+        ReconciliationListQuery, SettlementRedeemDetail, SettlementRedeemInfo,
+        SettlementRedeemListQuery,
     },
-    types::{ExecutionOrderId, PositionId, RecommendationId},
+    types::{ExecutionOrderId, PositionId, RecommendationId, ReconciliationId, SettlementRedeemId},
 };
 use quant_pivot_repository::traits::{
-    AttributionRepository, ExecutionOrderRepository, PositionRepository,
+    AttributionRepository, ExecutionOrderRepository, PositionRepository, ReconciliationRepository,
+    SettlementRedeemRepository,
 };
 
 pub struct CoreExecutionReadPort {
     execution_orders: Arc<dyn ExecutionOrderRepository>,
     positions: Arc<dyn PositionRepository>,
     attribution: Arc<dyn AttributionRepository>,
+    reconciliation: Arc<dyn ReconciliationRepository>,
+    settlement_redeem: Arc<dyn SettlementRedeemRepository>,
 }
 
 impl CoreExecutionReadPort {
     #[must_use]
-    pub const fn new(
+    pub fn new(
         execution_orders: Arc<dyn ExecutionOrderRepository>,
         positions: Arc<dyn PositionRepository>,
         attribution: Arc<dyn AttributionRepository>,
+        reconciliation: Arc<dyn ReconciliationRepository>,
+        settlement_redeem: Arc<dyn SettlementRedeemRepository>,
     ) -> Self {
         Self {
             execution_orders,
             positions,
             attribution,
+            reconciliation,
+            settlement_redeem,
         }
     }
 }
@@ -74,5 +83,37 @@ impl ExecutionReadPort for CoreExecutionReadPort {
             .find_by_recommendation(id)
             .await
             .map_err(Into::into)
+    }
+
+    async fn list_reconciliations(
+        &self,
+        query: ReconciliationListQuery,
+    ) -> QuantResult<Paginated<ReconciliationInfo>> {
+        self.reconciliation.page(query).await.map_err(Into::into)
+    }
+
+    async fn get_reconciliation(
+        &self,
+        id: &ReconciliationId,
+    ) -> QuantResult<Option<ReconciliationInfo>> {
+        self.reconciliation.find_by_id(id).await.map_err(Into::into)
+    }
+
+    async fn list_settlement_redeems(
+        &self,
+        query: SettlementRedeemListQuery,
+    ) -> QuantResult<Paginated<SettlementRedeemInfo>> {
+        self.settlement_redeem.page(query).await.map_err(Into::into)
+    }
+
+    async fn get_settlement_redeem(
+        &self,
+        id: &SettlementRedeemId,
+    ) -> QuantResult<Option<SettlementRedeemDetail>> {
+        let Some(redeem) = self.settlement_redeem.find_by_id(id).await? else {
+            return Ok(None);
+        };
+        let lots = self.settlement_redeem.list_lots_by_redeem(id).await?;
+        Ok(Some(SettlementRedeemDetail { redeem, lots }))
     }
 }

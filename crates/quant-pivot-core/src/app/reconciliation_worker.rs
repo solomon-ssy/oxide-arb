@@ -21,6 +21,7 @@ impl AppContext {
     /// Register the reconciliation sweep (`TaskId::ReconciliationWorker`).
     pub fn register_reconciliation_worker(&self, runner: &mut AppRunner) {
         let service = Arc::clone(&self.execution.reconciliation);
+        let recovery = Arc::clone(&self.governance.execution_recovery);
         let config = self.runtime_config();
         runner.spawn(TaskId::ReconciliationWorker, move |token| async move {
             let _ = PeriodicTask::run(
@@ -39,8 +40,10 @@ impl AppContext {
                 token,
                 move || {
                     let service = Arc::clone(&service);
+                    let recovery = Arc::clone(&recovery);
                     async move {
                         service.reconcile_pass(Utc::now()).await?;
+                        let _ = recovery.refresh().await;
                         Ok(())
                     }
                 },

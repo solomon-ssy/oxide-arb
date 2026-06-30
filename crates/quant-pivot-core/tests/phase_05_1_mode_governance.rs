@@ -18,8 +18,9 @@ use quant_pivot_models::{
         AppendReconciliationEvidence, CapitalAllocationInfo, CoreEventPublisher, DataQualityPort,
         DataQualitySnapshot, KillSwitchPort, KillSwitchStateInfo, KillSwitchView, ModelSpecInfo,
         ModelVersionInfo, NewModelSpec, NewModelVersion, NewReconciliation, NewShadowComparison,
-        PreflightReport, ReconciliationInfo, ReconciliationPatch, SetKillSwitchCommand,
-        ShadowComparisonInfo, ShadowStabilitySummary, UpsertKillSwitchState,
+        Paginated, PreflightReport, ReconciliationInfo, ReconciliationListQuery,
+        ReconciliationPatch, SetKillSwitchCommand, ShadowComparisonInfo, ShadowStabilitySummary,
+        UpsertKillSwitchState,
     },
     enums::{
         execution::KillSwitchState,
@@ -35,7 +36,7 @@ use quant_pivot_repository::traits::{
     CapitalAllocationRepository, KillSwitchStateRepository, ModelRegistryRepository,
     ReconciliationRepository, ShadowComparisonRepository,
 };
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 // ── Mocks ───────────────────────────────────────────────────────────────────
 
@@ -145,12 +146,24 @@ impl ReconciliationRepository for MockRecon {
     ) -> Result<ReconciliationInfo, StorageError> {
         unimplemented!()
     }
-    async fn resolve(
+    async fn patch(
         &self,
         _reconciliation_id: &ReconciliationId,
         _patch: ReconciliationPatch,
     ) -> Result<ReconciliationInfo, StorageError> {
         unimplemented!()
+    }
+    async fn find_by_id(
+        &self,
+        _reconciliation_id: &ReconciliationId,
+    ) -> Result<Option<ReconciliationInfo>, StorageError> {
+        Ok(None)
+    }
+    async fn page(
+        &self,
+        _query: ReconciliationListQuery,
+    ) -> Result<Paginated<ReconciliationInfo>, StorageError> {
+        Ok(Paginated::empty(1, 10))
     }
     async fn find_by_execution_order(
         &self,
@@ -163,6 +176,9 @@ impl ReconciliationRepository for MockRecon {
     }
     async fn has_unresolvable(&self) -> Result<bool, StorageError> {
         Ok(self.unresolvable)
+    }
+    async fn count_blocking_unresolvable(&self) -> Result<u64, StorageError> {
+        Ok(u64::from(self.unresolvable))
     }
 }
 
@@ -466,6 +482,7 @@ fn kill_switch_control(initial: KillSwitchState) -> (Arc<KillSwitchControl>, Arc
     let metrics = Arc::new(MetricsHub::new());
     let (events, _rx) = CoreEventPublisher::bounded(8);
     let status_publisher = SystemStatusPublisher::new(events);
+    let recovery_slot = Arc::new(OnceLock::new());
     let control = Arc::new(KillSwitchControl::new(
         KillSwitchHandle::new(initial),
         closed_view(),
@@ -473,7 +490,8 @@ fn kill_switch_control(initial: KillSwitchState) -> (Arc<KillSwitchControl>, Arc
             row: Mutex::new(None),
         }),
         Arc::clone(&metrics),
-        status_publisher,
+        Arc::clone(&status_publisher),
+        Arc::clone(&recovery_slot),
     ));
     (control, metrics)
 }
@@ -533,21 +551,21 @@ async fn kill_switch_emergency_requires_ack_to_clear() {
 mod pg {
     use async_trait::async_trait;
     use quant_pivot_core::{
-        app::RuntimeSnapshot,
+        app::{PgRepositories, RuntimeSnapshot},
         governance::{
             DefaultModeTransitionGate, KillSwitchControl, KillSwitchHandle, ModePreflight,
             QuantRuntimeControl, RuntimeModeHandle, SystemStatusPublisher,
-            runtime_control::QuantRuntimeControlDeps,
+            execution_recovery::ExecutionRecoveryHandle, runtime_control::QuantRuntimeControlDeps,
         },
         observability::metrics_hub::MetricsHub,
     };
     use quant_pivot_error::QuantResult;
     use quant_pivot_models::{
         config::DeployConfig,
-        domain::governance::lifecycle::OperationalPhase,
         domain::{
             CoreEvent, CoreEventPublisher, KillSwitchPort, KillSwitchView, PreflightCheck,
-            PreflightReport, RuntimeControlPort, SetKillSwitchCommand,
+            PreflightReport, RuntimeControlPort, SetKillSwitchCommand, SystemStatus,
+            governance::lifecycle::OperationalPhase,
         },
         entities::system_kill_switch,
         enums::{execution::KillSwitchState, quant::QuantRuntimeMode},
@@ -562,7 +580,7 @@ mod pg {
     use quant_pivot_test_support::{governance::operational_health_checker, pg::setup_pg};
     use sea_orm::{DatabaseConnection, EntityTrait};
     use std::sync::{
-        Arc,
+        Arc, OnceLock,
         atomic::{AtomicUsize, Ordering},
     };
 
@@ -641,13 +659,17 @@ mod pg {
         let control = Arc::new(QuantRuntimeControl::new(QuantRuntimeControlDeps {
             runtime_mode: runtime_mode.clone(),
             health_checker: operational_health_checker(Arc::clone(&pg), runtime_mode, &deploy),
-            runtime_state_repo: PgSystemRuntimeStateRepository::new(db.clone()),
+            runtime_state_repo: Arc::new(PgSystemRuntimeStateRepository::new(db.clone()))
+                as Arc<dyn SystemRuntimeStateRepository>,
             transition_gate: Arc::new(DefaultModeTransitionGate::new()),
             preflight: Arc::clone(&preflight) as Arc<dyn ModePreflight>,
             kill_switch: Arc::new(MockKillSwitchPort {
                 handle: KillSwitchHandle::default(),
             }),
             status_publisher: Arc::clone(&status_publisher),
+            execution_recovery: ExecutionRecoveryHandle::new(
+                SystemStatus::bootstrap(QuantRuntimeMode::ReportOnly).execution_recovery,
+            ),
         }));
         status_publisher.register(Arc::clone(&control));
 
@@ -665,7 +687,8 @@ mod pg {
             .await
             .expect("clear kill-switch row");
 
-        let snapshot = RuntimeSnapshot::bootstrap(&pool)
+        let repos = PgRepositories::wire(&pool);
+        let snapshot = RuntimeSnapshot::bootstrap(&repos)
             .await
             .expect("bootstrap governance snapshot");
         assert_eq!(
@@ -766,24 +789,28 @@ mod pg {
         let db = pool.connection().clone();
         let pg = Arc::new(pool);
         let deploy = DeployConfig::default();
-        let snapshot = RuntimeSnapshot::bootstrap(&pg).await.expect("bootstrap");
+        let repos = PgRepositories::wire(pg.as_ref());
+        let snapshot = RuntimeSnapshot::bootstrap(&repos).await.expect("bootstrap");
         let metrics = Arc::new(MetricsHub::new());
         let (events, events_rx) = CoreEventPublisher::bounded(8);
         let status_publisher = SystemStatusPublisher::new(events);
         let runtime_mode = snapshot.mode;
+        let recovery_slot = Arc::new(OnceLock::new());
         let kill_switch_control = Arc::new(KillSwitchControl::new(
             snapshot.kill_switch_handle.clone(),
             snapshot.kill_switch_view,
             Arc::new(PgKillSwitchStateRepository::new(db.clone())),
             metrics,
             Arc::clone(&status_publisher),
+            Arc::clone(&recovery_slot),
         ));
         let kill_switch: Arc<dyn KillSwitchPort> =
             Arc::clone(&kill_switch_control) as Arc<dyn KillSwitchPort>;
         let control = Arc::new(QuantRuntimeControl::new(QuantRuntimeControlDeps {
             runtime_mode: runtime_mode.clone(),
             health_checker: operational_health_checker(pg, runtime_mode, &deploy),
-            runtime_state_repo: PgSystemRuntimeStateRepository::new(db),
+            runtime_state_repo: Arc::new(PgSystemRuntimeStateRepository::new(db))
+                as Arc<dyn SystemRuntimeStateRepository>,
             transition_gate: Arc::new(DefaultModeTransitionGate::new()),
             preflight: Arc::new(CountingPreflight {
                 runs: AtomicUsize::new(0),
@@ -791,6 +818,9 @@ mod pg {
             }) as Arc<dyn ModePreflight>,
             kill_switch,
             status_publisher: Arc::clone(&status_publisher),
+            execution_recovery: ExecutionRecoveryHandle::new(
+                SystemStatus::bootstrap(QuantRuntimeMode::ReportOnly).execution_recovery,
+            ),
         }));
         status_publisher.register(Arc::clone(&control));
 
@@ -825,6 +855,7 @@ mod pg {
         let runtime_mode = RuntimeModeHandle::new(QuantRuntimeMode::ReportOnly);
         let (events, _rx) = CoreEventPublisher::bounded(1);
         let status_publisher = SystemStatusPublisher::new(events);
+        let recovery_slot = Arc::new(OnceLock::new());
         let kill_switch_control = Arc::new(KillSwitchControl::new(
             KillSwitchHandle::new(KillSwitchState::ReportOnlyForced),
             KillSwitchView {
@@ -837,11 +868,13 @@ mod pg {
             Arc::new(PgKillSwitchStateRepository::new(db.clone())),
             Arc::new(MetricsHub::new()),
             Arc::clone(&status_publisher),
+            Arc::clone(&recovery_slot),
         ));
         let control = Arc::new(QuantRuntimeControl::new(QuantRuntimeControlDeps {
             runtime_mode: runtime_mode.clone(),
             health_checker: operational_health_checker(pg, runtime_mode, &deploy),
-            runtime_state_repo: PgSystemRuntimeStateRepository::new(db),
+            runtime_state_repo: Arc::new(PgSystemRuntimeStateRepository::new(db))
+                as Arc<dyn SystemRuntimeStateRepository>,
             transition_gate: Arc::new(DefaultModeTransitionGate::new()),
             preflight: Arc::new(CountingPreflight {
                 runs: AtomicUsize::new(0),
@@ -849,6 +882,9 @@ mod pg {
             }) as Arc<dyn ModePreflight>,
             kill_switch: kill_switch_control as Arc<dyn KillSwitchPort>,
             status_publisher,
+            execution_recovery: ExecutionRecoveryHandle::new(
+                SystemStatus::bootstrap(QuantRuntimeMode::ReportOnly).execution_recovery,
+            ),
         }));
 
         let status = control.system_status();

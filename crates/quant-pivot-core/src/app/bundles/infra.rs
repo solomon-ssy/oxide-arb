@@ -4,8 +4,10 @@ use crate::{
     app::{task_id::TaskId, task_registry::PendingTaskQueue},
     observability::{
         attribution_fact_writer::AttributionEventWriter, book_fact_writer::BookFactWriter,
-        fact_lag::FactLagTracker, factor_fact_writer::FactorEventWriter,
-        feature_fact_writer::FeatureEventWriter, metrics_hub::MetricsHub,
+        capital_allocation_fact_writer::CapitalAllocationEventWriter,
+        execution_fact_writer::ExecutionEventWriter, fact_lag::FactLagTracker,
+        factor_fact_writer::FactorEventWriter, feature_fact_writer::FeatureEventWriter,
+        metrics_hub::MetricsHub, position_fact_writer::PositionEventWriter,
         recommendation_fact_writer::RecommendationEventWriter,
         signal_candidate_fact_writer::SignalCandidateEventWriter,
     },
@@ -15,16 +17,18 @@ use quant_pivot_error::{QuantResult, infra::InfraError};
 use quant_pivot_models::{
     clickhouse::{
         BookL2ReplayRow, BookMicrostructureRow, BookSnapshotRow, MarketResolutionRow,
-        QuantFactorEventRow, QuantFeatureEventRow, QuantRecommendationAttributionEventRow,
+        QuantCapitalAllocationEventRow, QuantExecutionEventRow, QuantFactorEventRow,
+        QuantFeatureEventRow, QuantPositionEventRow, QuantRecommendationAttributionEventRow,
         QuantRecommendationEventRow, QuantSignalCandidateEventRow, TickEventRow,
     },
     config::DeployConfig,
 };
 use quant_pivot_repository::{
-    clickhouse::{ChFactWriter, ChQuantFactReadRepository, ChQuantFactRepository},
-    postgres::PgOperationLogRepository,
-    traits::{FactWriter, QuantFactReadRepository, QuantFactRepository},
+    clickhouse::{ChFactWriter, ChQuantFactReadRepository},
+    traits::{FactWriter, QuantFactReadRepository},
 };
+
+use super::pg_repos::PgRepositories;
 use quant_pivot_storage::{
     cache::{CacheManager, MokaBackend, RedisBackend, RedisPool, TieredCache, connect_pool},
     clickhouse::{ChWriteManager, ClickHousePool},
@@ -40,14 +44,14 @@ use std::{sync::Arc, time::Duration};
 /// Persistence connections, `ClickHouse` fact writers, and shared observability.
 pub struct InfraBundle {
     pub pg: Arc<PostgresPool>,
+    /// Shared Postgres repositories (wired once at boot).
+    pub repos: PgRepositories,
     pub ch: Arc<ClickHousePool>,
     pub ch_write_manager: Arc<ChWriteManager>,
-    pub quant_fact_repo: Arc<dyn QuantFactRepository>,
     pub redis: RedisPool,
     pub cache: Arc<CacheManager>,
     pub jwt_blacklist: Arc<RedisTokenBlacklist>,
     pub metrics: Arc<MetricsHub>,
-    pub operation_log_repo: Arc<PgOperationLogRepository>,
     /// Shared lag tracker for book facts and data-quality gates.
     pub fact_lag_tracker: Arc<FactLagTracker>,
     pub book_fact_writer: Arc<BookFactWriter>,
@@ -60,6 +64,12 @@ pub struct InfraBundle {
     pub recommendation_event_writer: Arc<RecommendationEventWriter>,
     /// Final attribution sink (`quant_recommendation_attribution_event`).
     pub attribution_event_writer: Arc<AttributionEventWriter>,
+    /// Execution-order lifecycle sink (`quant_execution_event`).
+    pub execution_event_writer: Arc<ExecutionEventWriter>,
+    /// Capital-allocation ledger sink (`quant_capital_allocation_event`).
+    pub capital_allocation_event_writer: Arc<CapitalAllocationEventWriter>,
+    /// Position-lot ledger sink (`quant_position_event`).
+    pub position_event_writer: Arc<PositionEventWriter>,
     /// Point-in-time read port over quant `ClickHouse` facts (feature windows).
     pub quant_fact_read: Arc<dyn QuantFactReadRepository>,
     /// Flush workers for each book fact stream, registered on the runner at boot.
@@ -69,106 +79,168 @@ pub struct InfraBundle {
 impl InfraBundle {
     /// Connect storage backends and wire the `ClickHouse` book-fact write plane.
     pub async fn assemble(deploy: &DeployConfig, metrics: Arc<MetricsHub>) -> QuantResult<Self> {
-        let pg = Arc::new(PostgresPool::connect(&deploy.db.postgres).await?);
-        Migrator::up(pg.connection(), None).await?;
-
-        let ch = Arc::new(ClickHousePool::connect(&deploy.db.clickhouse).await?);
-        ch.ensure_schema().await?;
-
-        let redis = connect_pool(&deploy.cache.redis).await?;
-        let cache = Arc::new(CacheManager::new(
-            TieredCache::new(
-                MokaBackend::new(deploy.cache.moka.max_capacity),
-                RedisBackend::new(redis.clone(), &deploy.cache.redis.key_prefix),
-            ),
-            &deploy.cache,
-        ));
-        cache.register_metrics(&metrics.registry).map_err(|error| {
-            InfraError::MetricsRegistration {
-                subsystem: "cache",
-                detail: error.to_string(),
-            }
-        })?;
-
-        let jwt_blacklist = Arc::new(RedisTokenBlacklist::new(
-            redis.clone(),
-            &deploy.cache.redis.key_prefix,
-        ));
-
-        let operation_log_repo = Arc::new(PgOperationLogRepository::new(pg.connection().clone()));
-
-        let fact_lag_tracker = Arc::new(FactLagTracker::new());
-        let ch_write_manager = Arc::new(ChWriteManager::new(
-            deploy.db.clickhouse.max_concurrent_inserts,
-        ));
-        ch_write_manager
-            .metrics()
-            .register(&metrics.registry)
-            .map_err(|error| InfraError::MetricsRegistration {
-                subsystem: "clickhouse_write",
-                detail: error.to_string(),
-            })?;
-
-        let quant_fact_repo: Arc<dyn QuantFactRepository> = Arc::new(ChQuantFactRepository::new(
-            Arc::clone(&ch),
-            Arc::clone(&ch_write_manager),
-        ));
-        let quant_fact_read: Arc<dyn QuantFactReadRepository> =
-            Arc::new(ChQuantFactReadRepository::new(Arc::clone(&ch)));
-
-        let (book_fact_writer, fact_writer_queue) =
-            build_book_fact_writer(&ch, &ch_write_manager, &fact_lag_tracker, &metrics, deploy);
-        let feature_event_writer = build_feature_event_writer(
-            &ch,
-            &ch_write_manager,
+        let persistence = connect_persistence(deploy, &metrics).await?;
+        let analytics = build_analytics_writers(
+            &persistence.ch,
+            &persistence.ch_write_manager,
+            &persistence.fact_lag_tracker,
             &metrics,
             deploy,
-            &fact_writer_queue,
-        );
-        let factor_event_writer =
-            build_factor_event_writer(&ch, &ch_write_manager, &metrics, deploy, &fact_writer_queue);
-        let signal_candidate_event_writer = build_signal_candidate_event_writer(
-            &ch,
-            &ch_write_manager,
-            &metrics,
-            deploy,
-            &fact_writer_queue,
-        );
-        let recommendation_event_writer = build_recommendation_event_writer(
-            &ch,
-            &ch_write_manager,
-            &metrics,
-            deploy,
-            &fact_writer_queue,
-        );
-        let attribution_event_writer = build_attribution_event_writer(
-            &ch,
-            &ch_write_manager,
-            &metrics,
-            deploy,
-            &fact_writer_queue,
         );
 
         Ok(Self {
-            pg,
-            ch,
-            ch_write_manager,
-            quant_fact_repo,
-            redis,
-            cache,
-            jwt_blacklist,
+            pg: persistence.pg,
+            repos: persistence.repos,
+            ch: persistence.ch,
+            ch_write_manager: persistence.ch_write_manager,
+            redis: persistence.redis,
+            cache: persistence.cache,
+            jwt_blacklist: persistence.jwt_blacklist,
             metrics,
-            operation_log_repo,
-            fact_lag_tracker,
-            book_fact_writer,
-            feature_event_writer,
-            factor_event_writer,
-            signal_candidate_event_writer,
-            recommendation_event_writer,
-            attribution_event_writer,
-            quant_fact_read,
-            fact_writer_queue,
+            fact_lag_tracker: persistence.fact_lag_tracker,
+            quant_fact_read: persistence.quant_fact_read,
+            book_fact_writer: analytics.book_fact_writer,
+            feature_event_writer: analytics.feature_event_writer,
+            factor_event_writer: analytics.factor_event_writer,
+            signal_candidate_event_writer: analytics.signal_candidate_event_writer,
+            recommendation_event_writer: analytics.recommendation_event_writer,
+            attribution_event_writer: analytics.attribution_event_writer,
+            execution_event_writer: analytics.execution_event_writer,
+            capital_allocation_event_writer: analytics.capital_allocation_event_writer,
+            position_event_writer: analytics.position_event_writer,
+            fact_writer_queue: analytics.fact_writer_queue,
         })
+    }
+}
+
+struct PersistenceConnections {
+    pg: Arc<PostgresPool>,
+    repos: PgRepositories,
+    ch: Arc<ClickHousePool>,
+    redis: RedisPool,
+    cache: Arc<CacheManager>,
+    jwt_blacklist: Arc<RedisTokenBlacklist>,
+    fact_lag_tracker: Arc<FactLagTracker>,
+    ch_write_manager: Arc<ChWriteManager>,
+    quant_fact_read: Arc<dyn QuantFactReadRepository>,
+}
+
+async fn connect_persistence(
+    deploy: &DeployConfig,
+    metrics: &MetricsHub,
+) -> QuantResult<PersistenceConnections> {
+    let pg = Arc::new(PostgresPool::connect(&deploy.db.postgres).await?);
+    Migrator::up(pg.connection(), None).await?;
+
+    let ch = Arc::new(ClickHousePool::connect(&deploy.db.clickhouse).await?);
+    ch.ensure_schema().await?;
+
+    let redis = connect_pool(&deploy.cache.redis).await?;
+    let cache = Arc::new(CacheManager::new(
+        TieredCache::new(
+            MokaBackend::new(deploy.cache.moka.max_capacity),
+            RedisBackend::new(redis.clone(), &deploy.cache.redis.key_prefix),
+        ),
+        &deploy.cache,
+    ));
+    cache
+        .register_metrics(&metrics.registry)
+        .map_err(|error| InfraError::MetricsRegistration {
+            subsystem: "cache",
+            detail: error.to_string(),
+        })?;
+
+    let jwt_blacklist = Arc::new(RedisTokenBlacklist::new(
+        redis.clone(),
+        &deploy.cache.redis.key_prefix,
+    ));
+    let repos = PgRepositories::wire(&pg);
+    let fact_lag_tracker = Arc::new(FactLagTracker::new());
+    let ch_write_manager = Arc::new(ChWriteManager::new(
+        deploy.db.clickhouse.max_concurrent_inserts,
+    ));
+    ch_write_manager
+        .metrics()
+        .register(&metrics.registry)
+        .map_err(|error| InfraError::MetricsRegistration {
+            subsystem: "clickhouse_write",
+            detail: error.to_string(),
+        })?;
+    let quant_fact_read: Arc<dyn QuantFactReadRepository> =
+        Arc::new(ChQuantFactReadRepository::new(Arc::clone(&ch)));
+
+    Ok(PersistenceConnections {
+        pg,
+        repos,
+        ch,
+        redis,
+        cache,
+        jwt_blacklist,
+        fact_lag_tracker,
+        ch_write_manager,
+        quant_fact_read,
+    })
+}
+
+struct AnalyticsWriters {
+    book_fact_writer: Arc<BookFactWriter>,
+    feature_event_writer: Arc<FeatureEventWriter>,
+    factor_event_writer: Arc<FactorEventWriter>,
+    signal_candidate_event_writer: Arc<SignalCandidateEventWriter>,
+    recommendation_event_writer: Arc<RecommendationEventWriter>,
+    attribution_event_writer: Arc<AttributionEventWriter>,
+    execution_event_writer: Arc<ExecutionEventWriter>,
+    capital_allocation_event_writer: Arc<CapitalAllocationEventWriter>,
+    position_event_writer: Arc<PositionEventWriter>,
+    fact_writer_queue: PendingTaskQueue,
+}
+
+fn build_analytics_writers(
+    ch: &Arc<ClickHousePool>,
+    ch_write_manager: &Arc<ChWriteManager>,
+    fact_lag_tracker: &Arc<FactLagTracker>,
+    metrics: &Arc<MetricsHub>,
+    deploy: &DeployConfig,
+) -> AnalyticsWriters {
+    let (book_fact_writer, fact_writer_queue) =
+        build_book_fact_writer(ch, ch_write_manager, fact_lag_tracker, metrics, deploy);
+    let feature_event_writer =
+        build_feature_event_writer(ch, ch_write_manager, metrics, deploy, &fact_writer_queue);
+    let factor_event_writer =
+        build_factor_event_writer(ch, ch_write_manager, metrics, deploy, &fact_writer_queue);
+    let signal_candidate_event_writer = build_signal_candidate_event_writer(
+        ch,
+        ch_write_manager,
+        metrics,
+        deploy,
+        &fact_writer_queue,
+    );
+    let recommendation_event_writer = build_recommendation_event_writer(
+        ch,
+        ch_write_manager,
+        metrics,
+        deploy,
+        &fact_writer_queue,
+    );
+    let attribution_event_writer =
+        build_attribution_event_writer(ch, ch_write_manager, metrics, deploy, &fact_writer_queue);
+    let LedgerEventWriters {
+        execution: execution_event_writer,
+        capital: capital_allocation_event_writer,
+        position: position_event_writer,
+    } = build_ledger_event_writers(ch, ch_write_manager, metrics, deploy, &fact_writer_queue);
+
+    AnalyticsWriters {
+        book_fact_writer,
+        feature_event_writer,
+        factor_event_writer,
+        signal_candidate_event_writer,
+        recommendation_event_writer,
+        attribution_event_writer,
+        execution_event_writer,
+        capital_allocation_event_writer,
+        position_event_writer,
+        fact_writer_queue,
     }
 }
 
@@ -433,6 +505,128 @@ fn build_attribution_event_writer(
         config,
     );
     Arc::new(AttributionEventWriter::new(stream))
+}
+
+struct LedgerEventWriters {
+    execution: Arc<ExecutionEventWriter>,
+    capital: Arc<CapitalAllocationEventWriter>,
+    position: Arc<PositionEventWriter>,
+}
+
+fn build_ledger_event_writers(
+    ch_pool: &Arc<ClickHousePool>,
+    write_manager: &Arc<ChWriteManager>,
+    metrics: &Arc<MetricsHub>,
+    deploy: &DeployConfig,
+    queue: &PendingTaskQueue,
+) -> LedgerEventWriters {
+    LedgerEventWriters {
+        execution: build_execution_event_writer(ch_pool, write_manager, metrics, deploy, queue),
+        capital: build_capital_allocation_event_writer(
+            ch_pool,
+            write_manager,
+            metrics,
+            deploy,
+            queue,
+        ),
+        position: build_position_event_writer(ch_pool, write_manager, metrics, deploy, queue),
+    }
+}
+
+fn build_execution_event_writer(
+    ch_pool: &Arc<ClickHousePool>,
+    write_manager: &Arc<ChWriteManager>,
+    metrics: &Arc<MetricsHub>,
+    deploy: &DeployConfig,
+    queue: &PendingTaskQueue,
+) -> Arc<ExecutionEventWriter> {
+    let ch = &deploy.db.clickhouse;
+    let capacity = ch.batch_size.saturating_mul(4).max(8_192);
+    let flush_interval = Duration::from_secs(ch.flush_interval_secs.max(1));
+    let config = AsyncWriterConfig::new("quant_execution_event")
+        .capacity(capacity)
+        .batch_size(ch.batch_size)
+        .flush_interval(flush_interval);
+    let drops = metrics
+        .async_writer_dropped
+        .with_label_values(&["quant_execution_event"]);
+    let stream = spawn_fact_stream::<QuantExecutionEventRow>(
+        queue,
+        TaskId::ExecutionEventsWriter,
+        Arc::new(ChFactWriter::new(
+            Arc::clone(ch_pool),
+            Arc::clone(write_manager),
+            "quant_execution_event",
+        )),
+        drops,
+        metrics.async_writer_observability("quant_execution_event"),
+        config,
+    );
+    Arc::new(ExecutionEventWriter::new(stream))
+}
+
+fn build_capital_allocation_event_writer(
+    ch_pool: &Arc<ClickHousePool>,
+    write_manager: &Arc<ChWriteManager>,
+    metrics: &Arc<MetricsHub>,
+    deploy: &DeployConfig,
+    queue: &PendingTaskQueue,
+) -> Arc<CapitalAllocationEventWriter> {
+    let ch = &deploy.db.clickhouse;
+    let capacity = ch.batch_size.saturating_mul(4).max(8_192);
+    let flush_interval = Duration::from_secs(ch.flush_interval_secs.max(1));
+    let config = AsyncWriterConfig::new("quant_capital_allocation_event")
+        .capacity(capacity)
+        .batch_size(ch.batch_size)
+        .flush_interval(flush_interval);
+    let drops = metrics
+        .async_writer_dropped
+        .with_label_values(&["quant_capital_allocation_event"]);
+    let stream = spawn_fact_stream::<QuantCapitalAllocationEventRow>(
+        queue,
+        TaskId::CapitalAllocationEventsWriter,
+        Arc::new(ChFactWriter::new(
+            Arc::clone(ch_pool),
+            Arc::clone(write_manager),
+            "quant_capital_allocation_event",
+        )),
+        drops,
+        metrics.async_writer_observability("quant_capital_allocation_event"),
+        config,
+    );
+    Arc::new(CapitalAllocationEventWriter::new(stream))
+}
+
+fn build_position_event_writer(
+    ch_pool: &Arc<ClickHousePool>,
+    write_manager: &Arc<ChWriteManager>,
+    metrics: &Arc<MetricsHub>,
+    deploy: &DeployConfig,
+    queue: &PendingTaskQueue,
+) -> Arc<PositionEventWriter> {
+    let ch = &deploy.db.clickhouse;
+    let capacity = ch.batch_size.saturating_mul(4).max(8_192);
+    let flush_interval = Duration::from_secs(ch.flush_interval_secs.max(1));
+    let config = AsyncWriterConfig::new("quant_position_event")
+        .capacity(capacity)
+        .batch_size(ch.batch_size)
+        .flush_interval(flush_interval);
+    let drops = metrics
+        .async_writer_dropped
+        .with_label_values(&["quant_position_event"]);
+    let stream = spawn_fact_stream::<QuantPositionEventRow>(
+        queue,
+        TaskId::PositionEventsWriter,
+        Arc::new(ChFactWriter::new(
+            Arc::clone(ch_pool),
+            Arc::clone(write_manager),
+            "quant_position_event",
+        )),
+        drops,
+        metrics.async_writer_observability("quant_position_event"),
+        config,
+    );
+    Arc::new(PositionEventWriter::new(stream))
 }
 
 /// Build one fact stream: wire an `AsyncWriter` to a `ChFactWriter` sink and

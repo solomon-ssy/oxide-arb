@@ -1,7 +1,8 @@
 //! Phase 05.10 — settlement redeem service integration tests (Postgres + mock CTF).
 //!
-//! Requires Docker. Exercises the hold-to-resolution auto-redeem sweep against real
-//! ledger writes while stubbing on-chain CTF/relayer I/O.
+//! **Integration tier** — requires Docker (`#[ignore]`). No-Docker pure logic and
+//! candidate-selection invariants: `execution::settlement_redeem::tests` and
+//! `phase_05_10_settlement_redeem_unit.rs`.
 
 use std::{
     collections::HashMap,
@@ -17,6 +18,10 @@ use quant_pivot_core::{
         SettlementRedeemServiceDeps, SettlementRedeemTx,
     },
     governance::{KillSwitchHandle, RuntimeModeHandle},
+    observability::{
+        capital_allocation_fact_writer::CapitalAllocationEventWriter,
+        position_fact_writer::PositionEventWriter,
+    },
     runtime_config::RuntimeConfigStore,
 };
 use quant_pivot_error::rpc::RpcError;
@@ -47,6 +52,7 @@ use quant_pivot_repository::{
         SettlementRedeemRepository,
     },
 };
+use quant_pivot_storage::write::{AsyncWriter, AsyncWriterConfig, AsyncWriterObservability};
 use quant_pivot_test_support::{
     execution_pg_seed::{
         ExecutionTxnIds, fill_entry_lot, seed_approved_intent, seed_report_fixture,
@@ -253,6 +259,26 @@ fn settlement_config() -> RuntimeConfig {
     config
 }
 
+fn noop_capital_writer() -> Arc<CapitalAllocationEventWriter> {
+    let (writer, _worker) = AsyncWriter::new(
+        AsyncWriterConfig::new("test_capital_events"),
+        |_| Box::pin(async move { Ok(()) }),
+        prometheus::IntCounter::new("test_capital_events_dropped", "test").unwrap(),
+        AsyncWriterObservability::default(),
+    );
+    Arc::new(CapitalAllocationEventWriter::new(Arc::new(writer)))
+}
+
+fn noop_position_writer() -> Arc<PositionEventWriter> {
+    let (writer, _worker) = AsyncWriter::new(
+        AsyncWriterConfig::new("test_position_events"),
+        |_| Box::pin(async move { Ok(()) }),
+        prometheus::IntCounter::new("test_position_events_dropped", "test").unwrap(),
+        AsyncWriterObservability::default(),
+    );
+    Arc::new(PositionEventWriter::new(Arc::new(writer)))
+}
+
 fn settlement_service(
     db: &sea_orm::DatabaseConnection,
     ctf: Arc<dyn SettlementCtfClient>,
@@ -265,14 +291,18 @@ fn settlement_service(
         intents: Arc::new(PgOrderIntentRepository::new(db.clone()))
             as Arc<dyn OrderIntentRepository>,
         markets: Arc::new(PgMarketRepository::new(db.clone())) as Arc<dyn MarketRepository>,
-        settlement_redeems: Arc::new(PgSettlementRedeemRepository::new(db))
+        settlement_redeems: Arc::new(PgSettlementRedeemRepository::new(db.clone()))
             as Arc<dyn SettlementRedeemRepository>,
+        capital: Arc::new(PgCapitalAllocationRepository::new(db))
+            as Arc<dyn CapitalAllocationRepository>,
         ctf,
         runtime_mode: RuntimeModeHandle::new(runtime_mode),
         kill_switch: KillSwitchHandle::default(),
         config: Arc::new(RuntimeConfigStore::new(config)),
         funder_address: FUNDER.to_owned(),
         wallet_kind: ExecutionWalletKind::Eoa,
+        capital_events: noop_capital_writer(),
+        position_events: noop_position_writer(),
     })
 }
 

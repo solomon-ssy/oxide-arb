@@ -1,17 +1,35 @@
 use chrono::{DateTime, Utc};
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
-    domain::{ConfirmSettlementRedeem, NewSettlementRedeem, SettlementRedeemInfo},
+    domain::{
+        ConfirmSettlementRedeem, NewSettlementRedeem, Paginated, SettlementRedeemInfo,
+        SettlementRedeemListQuery, SettlementRedeemLotInfo,
+    },
     types::{MarketId, SettlementRedeemId},
 };
 
 #[async_trait::async_trait]
 pub trait SettlementRedeemRepository: Send + Sync {
+    async fn find_by_id(
+        &self,
+        settlement_redeem_id: &SettlementRedeemId,
+    ) -> Result<Option<SettlementRedeemInfo>, StorageError>;
+
     async fn find_by_market_funder(
         &self,
         market_id: &MarketId,
         funder_address: &str,
     ) -> Result<Option<SettlementRedeemInfo>, StorageError>;
+
+    async fn page(
+        &self,
+        query: SettlementRedeemListQuery,
+    ) -> Result<Paginated<SettlementRedeemInfo>, StorageError>;
+
+    async fn list_lots_by_redeem(
+        &self,
+        settlement_redeem_id: &SettlementRedeemId,
+    ) -> Result<Vec<SettlementRedeemLotInfo>, StorageError>;
 
     async fn upsert_pending(
         &self,

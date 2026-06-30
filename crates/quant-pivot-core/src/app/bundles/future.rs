@@ -14,15 +14,9 @@ use crate::{
 };
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::domain::CoreEventPublisher;
-use quant_pivot_repository::{
-    postgres::{
-        PgEquitySnapshotRepository, PgPositionRepository, PgRecommendationReportRepository,
-        PgRecommendationRepository, PgRuntimeConfigVersionRepository,
-    },
-    traits::{
-        EquitySnapshotRepository, PositionRepository, RecommendationReportRepository,
-        RecommendationRepository,
-    },
+use quant_pivot_repository::traits::{
+    EquitySnapshotRepository, PositionRepository, RecommendationReportRepository,
+    RecommendationRepository, RuntimeConfigVersionRepository,
 };
 use quant_pivot_research::portfolio::HistoricalCorrelationEstimator;
 
@@ -45,30 +39,30 @@ pub struct ReportBundle {
 impl ReportBundle {
     /// Assemble report builder/composer/publisher/lifecycle + schedule runner.
     pub async fn assemble(deps: ReportBundleDeps<'_>) -> QuantResult<Self> {
-        let report_repo: Arc<dyn RecommendationReportRepository> = Arc::new(
-            PgRecommendationReportRepository::new(deps.infra.pg.connection().clone()),
-        );
-        let recommendation_repo: Arc<dyn RecommendationRepository> = Arc::new(
-            PgRecommendationRepository::new(deps.infra.pg.connection().clone()),
-        );
-        let equity_repo: Arc<dyn EquitySnapshotRepository> = Arc::new(
-            PgEquitySnapshotRepository::new(deps.infra.pg.connection().clone()),
-        );
-        let position_repo: Arc<dyn PositionRepository> = Arc::new(PgPositionRepository::new(
-            deps.infra.pg.connection().clone(),
-        ));
+        let repos = &deps.infra.repos;
+        let report_repo: Arc<dyn RecommendationReportRepository> =
+            Arc::clone(&repos.recommendation_report) as Arc<dyn RecommendationReportRepository>;
+        let recommendation_repo: Arc<dyn RecommendationRepository> =
+            Arc::clone(&repos.recommendation) as Arc<dyn RecommendationRepository>;
+        let equity_repo: Arc<dyn EquitySnapshotRepository> =
+            Arc::clone(&repos.equity_snapshot) as Arc<dyn EquitySnapshotRepository>;
+        let position_repo: Arc<dyn PositionRepository> =
+            Arc::clone(&repos.position) as Arc<dyn PositionRepository>;
+        let runtime_config_repo: Arc<dyn RuntimeConfigVersionRepository> =
+            Arc::clone(&repos.runtime_config) as Arc<dyn RuntimeConfigVersionRepository>;
         let composer = Arc::new(DefaultRecommendationComposer::new());
         let builder = Arc::new(DefaultReportBuilder::new(ReportBuilderDeps {
-            runtime_config_repo: Arc::new(PgRuntimeConfigVersionRepository::new(
-                deps.infra.pg.connection().clone(),
-            )),
+            runtime_config_repo: Arc::clone(&runtime_config_repo),
             market_selector: Arc::clone(&deps.research.market_selector),
             market_selection_repo: Arc::clone(&deps.research.market_selection_repo),
             candidate_provider: Arc::clone(&deps.research.candidate_provider),
             feature_pipeline: Arc::clone(&deps.research.feature_pipeline),
             model_runner: Arc::clone(&deps.research.model_runner),
             account_provider_factory: Arc::clone(&deps.account.provider_factory),
-            drawdown_provider: Arc::new(EquitySnapshotService::new(equity_repo, position_repo)),
+            drawdown_provider: Arc::new(EquitySnapshotService::new(
+                Arc::clone(&equity_repo),
+                Arc::clone(&position_repo),
+            )),
             composer,
             pit_source: Arc::clone(&deps.data.pit_source),
             quant_fact_read_repo: Arc::clone(&deps.infra.quant_fact_read),
@@ -88,9 +82,7 @@ impl ReportBundle {
         let lifecycle = Arc::new(ReportLifecycleService::new(ReportLifecycleDeps {
             report_repo,
             recommendation_repo,
-            runtime_config_repo: Arc::new(PgRuntimeConfigVersionRepository::new(
-                deps.infra.pg.connection().clone(),
-            )),
+            runtime_config_repo,
             builder,
             publisher,
             runtime_mode: deps.governance.runtime_mode.clone(),

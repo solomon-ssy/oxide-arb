@@ -4,8 +4,9 @@ use super::AppContext;
 use crate::{
     app::{
         account_read::CoreAccountReadPort, backtest::CoreBacktestPort,
-        execution_read::CoreExecutionReadPort, model_training::CoreModelTrainingPort,
-        quant_report::CoreQuantReportPort, task_id::TaskId, task_registry::AppRunner,
+        execution_read::CoreExecutionReadPort, execution_recovery_port::CoreExecutionRecoveryPort,
+        model_training::CoreModelTrainingPort, quant_report::CoreQuantReportPort,
+        reconciliation_port::CoreReconciliationPort, task_id::TaskId, task_registry::AppRunner,
         training_dataset::CoreTrainingDatasetPort,
     },
     pipeline::book_store::BookStore,
@@ -15,25 +16,18 @@ use quant_pivot_api::ws::{ClobWsManager, SubscriptionSource};
 use quant_pivot_error::{QuantResult, control::ControlError, infra::InfraError};
 use quant_pivot_models::{
     domain::{
-        BookSnapshot, CatalogStatusPort, DataQualityPort, MarketDataPort, MetricsScrapePort,
-        NewOperationLog, OrderIntentPort, RuntimeConfigPort,
+        BookSnapshot, CatalogStatusPort, DataQualityPort, ExecutionReadPort, ExecutionRecoveryPort,
+        MarketDataPort, MetricsScrapePort, NewOperationLog, OrderIntentPort, ReconciliationPort,
+        RuntimeConfigPort,
     },
     types::TokenId,
 };
-use quant_pivot_repository::{
-    pg_arc_repo,
-    postgres::{
-        PgAccountSnapshotRepository, PgAttributionRepository, PgEquitySnapshotRepository,
-        PgExecutionOrderRepository, PgMarketRepository, PgMenuRepository, PgOperationLogRepository,
-        PgPositionRepository, PgRecommendationReportRepository, PgRecommendationRepository,
-        PgRoleMenuRepository, PgRolePermissionRepository, PgRoleRepository,
-        PgRuntimeConfigVersionRepository, PgUserRepository, PgUserRoleRepository,
-    },
-    traits::{
-        AccountSnapshotRepository, AttributionRepository, EquitySnapshotRepository,
-        ExecutionOrderRepository, OperationLogRepository, PositionRepository,
-        RecommendationReportRepository, RecommendationRepository,
-    },
+use quant_pivot_repository::traits::{
+    AccountSnapshotRepository, AttributionRepository, EquitySnapshotRepository,
+    ExecutionOrderRepository, MenuRepository, OperationLogRepository, PositionRepository,
+    RecommendationReportRepository, RecommendationRepository, ReconciliationRepository,
+    RoleMenuRepository, RolePermissionRepository, RoleRepository, RuntimeConfigVersionRepository,
+    SettlementRedeemRepository, UserRepository, UserRoleRepository,
 };
 use quant_pivot_storage::write::{
     AsyncWriter, AsyncWriterConfig, AsyncWriterObservability, AsyncWriterWorker,
@@ -97,33 +91,26 @@ async fn build_app_state(
     order_intents: Arc<dyn OrderIntentPort>,
     operation_log: OperationLogBuffer,
 ) -> QuantResult<AppState> {
-    let pg = ctx.infra.pg.connection();
-    let perm_checker = Arc::new(routes::init_rbac_rules());
-    let casbin = Arc::new(CasbinService::new(pg.clone()).await.map_err(|error| {
-        InfraError::Misconfigured {
-            detail: error.to_string(),
-        }
-    })?);
-    let jwt = Arc::new(JwtService::new(
-        &ctx.config.web.jwt,
-        Arc::clone(&ctx.infra.jwt_blacklist) as Arc<dyn TokenBlacklist>,
-    ));
+    let repos = &ctx.infra.repos;
+    let auth = build_web_auth(ctx).await?;
+    let execution = build_web_execution_ports(ctx);
 
     Ok(AppState {
         deploy: Arc::clone(&ctx.config),
         runtime_config_apply: Arc::clone(&ctx.governance.applicator) as Arc<dyn RuntimeConfigPort>,
-        jwt,
+        jwt: auth.jwt,
         jwt_blacklist: Arc::clone(&ctx.infra.jwt_blacklist),
-        users: pg_arc_repo!(pg, PgUserRepository),
-        roles: pg_arc_repo!(pg, PgRoleRepository),
-        menus: pg_arc_repo!(pg, PgMenuRepository),
-        user_roles: pg_arc_repo!(pg, PgUserRoleRepository),
-        role_menus: pg_arc_repo!(pg, PgRoleMenuRepository),
-        role_permissions: pg_arc_repo!(pg, PgRolePermissionRepository),
-        casbin,
-        perm_checker,
-        runtime_config: pg_arc_repo!(pg, PgRuntimeConfigVersionRepository),
-        operation_logs: pg_arc_repo!(pg, PgOperationLogRepository),
+        users: Arc::clone(&repos.user) as Arc<dyn UserRepository>,
+        roles: Arc::clone(&repos.role) as Arc<dyn RoleRepository>,
+        menus: Arc::clone(&repos.menu) as Arc<dyn MenuRepository>,
+        user_roles: Arc::clone(&repos.user_role) as Arc<dyn UserRoleRepository>,
+        role_menus: Arc::clone(&repos.role_menu) as Arc<dyn RoleMenuRepository>,
+        role_permissions: Arc::clone(&repos.role_permission) as Arc<dyn RolePermissionRepository>,
+        casbin: auth.casbin,
+        perm_checker: auth.perm_checker,
+        runtime_config: Arc::clone(&repos.runtime_config)
+            as Arc<dyn RuntimeConfigVersionRepository>,
+        operation_logs: Arc::clone(&repos.operation_log) as Arc<dyn OperationLogRepository>,
         operation_log,
         control: Arc::clone(&ctx.governance.runtime_control),
         kill_switch: Arc::clone(&ctx.governance.kill_switch),
@@ -134,62 +121,114 @@ async fn build_app_state(
         catalog: Arc::clone(&ctx.data.catalog) as Arc<dyn CatalogStatusPort>,
         data_quality: Arc::clone(&ctx.data.data_quality) as Arc<dyn DataQualityPort>,
         events: ctx.events.clone(),
-        markets: pg_arc_repo!(pg, PgMarketRepository),
+        markets: Arc::clone(&ctx.data.market_repo),
         ws_sessions: SessionRegistry::default(),
         metrics: Arc::new(CoreMetricsScrape {
             registry: ctx.infra.metrics.registry.clone(),
         }),
         readiness: Arc::new(PgRedisReadiness::new(
-            pg.clone(),
+            ctx.infra.pg.connection().clone(),
             Arc::clone(&ctx.infra.jwt_blacklist) as Arc<dyn TokenBlacklist>,
             Some(Arc::clone(&ctx.data.catalog) as Arc<dyn CatalogStatusPort>),
         )),
         training_datasets: Arc::new(CoreTrainingDatasetPort::from_research(
             &ctx.research,
-            pg_arc_repo!(pg, PgRuntimeConfigVersionRepository),
+            Arc::clone(&repos.runtime_config) as Arc<dyn RuntimeConfigVersionRepository>,
         )),
         model_training: Arc::new(CoreModelTrainingPort::from_research(
             &ctx.research,
-            pg_arc_repo!(pg, PgRuntimeConfigVersionRepository),
+            Arc::clone(&repos.runtime_config) as Arc<dyn RuntimeConfigVersionRepository>,
         )),
         backtests: Arc::new(CoreBacktestPort::from_research(
             &ctx.research,
-            pg_arc_repo!(pg, PgRuntimeConfigVersionRepository),
+            Arc::clone(&repos.runtime_config) as Arc<dyn RuntimeConfigVersionRepository>,
         )),
         model_governance: Arc::clone(&ctx.research.model_governance),
         factor_governance: Arc::clone(&ctx.research.factor_governance),
         quant_reports: Arc::new(CoreQuantReportPort::new(
-            Arc::new(PgRecommendationReportRepository::new(pg.clone()))
-                as Arc<dyn RecommendationReportRepository>,
-            Arc::new(PgRecommendationRepository::new(pg.clone()))
-                as Arc<dyn RecommendationRepository>,
+            Arc::clone(&repos.recommendation_report) as Arc<dyn RecommendationReportRepository>,
+            Arc::clone(&repos.recommendation) as Arc<dyn RecommendationRepository>,
             Arc::clone(&ctx.report.lifecycle),
             Arc::clone(&ctx.report.scheduler),
         )),
         order_intents,
         account_read: Arc::new(CoreAccountReadPort::new(
-            Arc::new(PgAccountSnapshotRepository::new(pg.clone()))
-                as Arc<dyn AccountSnapshotRepository>,
-            Arc::new(PgEquitySnapshotRepository::new(pg.clone()))
-                as Arc<dyn EquitySnapshotRepository>,
+            Arc::clone(&repos.account_snapshot) as Arc<dyn AccountSnapshotRepository>,
+            Arc::clone(&repos.equity_snapshot) as Arc<dyn EquitySnapshotRepository>,
             Arc::clone(&ctx.account.provider_factory),
             Arc::clone(&ctx.governance.applicator) as Arc<dyn RuntimeConfigPort>,
         )),
-        execution_read: Arc::new(CoreExecutionReadPort::new(
-            Arc::new(PgExecutionOrderRepository::new(pg.clone()))
-                as Arc<dyn ExecutionOrderRepository>,
-            Arc::new(PgPositionRepository::new(pg.clone())) as Arc<dyn PositionRepository>,
-            Arc::new(PgAttributionRepository::new(pg.clone())) as Arc<dyn AttributionRepository>,
-        )),
+        execution_read: execution.execution_read,
         execution_submit: ctx.execution_dispatcher(),
+        reconciliation: execution.reconciliation,
+        execution_recovery: execution.execution_recovery,
     })
+}
+
+struct WebAuthServices {
+    casbin: Arc<CasbinService>,
+    jwt: Arc<JwtService>,
+    perm_checker: Arc<quant_pivot_web::auth::casbin::PermChecker>,
+}
+
+async fn build_web_auth(ctx: &AppContext) -> QuantResult<WebAuthServices> {
+    let perm_checker = Arc::new(routes::init_rbac_rules());
+    let casbin = Arc::new(
+        CasbinService::new(ctx.infra.pg.connection().clone())
+            .await
+            .map_err(|error| InfraError::Misconfigured {
+                detail: error.to_string(),
+            })?,
+    );
+    let jwt = Arc::new(JwtService::new(
+        &ctx.config.web.jwt,
+        Arc::clone(&ctx.infra.jwt_blacklist) as Arc<dyn TokenBlacklist>,
+    ));
+    Ok(WebAuthServices {
+        casbin,
+        jwt,
+        perm_checker,
+    })
+}
+
+struct WebExecutionPorts {
+    execution_read: Arc<dyn ExecutionReadPort>,
+    reconciliation: Arc<dyn ReconciliationPort>,
+    execution_recovery: Arc<dyn ExecutionRecoveryPort>,
+}
+
+fn build_web_execution_ports(ctx: &AppContext) -> WebExecutionPorts {
+    let repos = &ctx.infra.repos;
+    let execution_read = Arc::new(CoreExecutionReadPort::new(
+        Arc::clone(&repos.execution_order) as Arc<dyn ExecutionOrderRepository>,
+        Arc::clone(&repos.position) as Arc<dyn PositionRepository>,
+        Arc::clone(&repos.attribution) as Arc<dyn AttributionRepository>,
+        Arc::clone(&repos.reconciliation) as Arc<dyn ReconciliationRepository>,
+        Arc::clone(&repos.settlement_redeem) as Arc<dyn SettlementRedeemRepository>,
+    ));
+    let reconciliation = Arc::new(CoreReconciliationPort::new(
+        Arc::clone(&ctx.execution.reconciliation),
+        Arc::clone(&repos.reconciliation) as Arc<dyn ReconciliationRepository>,
+        Arc::clone(&ctx.governance.execution_recovery),
+    )) as Arc<dyn ReconciliationPort>;
+    let execution_recovery = Arc::new(CoreExecutionRecoveryPort::new(
+        Arc::clone(&repos.reconciliation) as Arc<dyn ReconciliationRepository>,
+        Arc::clone(&ctx.governance.kill_switch),
+        ctx.governance.runtime_mode.clone(),
+    )) as Arc<dyn ExecutionRecoveryPort>;
+
+    WebExecutionPorts {
+        execution_read: execution_read as Arc<dyn ExecutionReadPort>,
+        reconciliation,
+        execution_recovery,
+    }
 }
 
 /// Wire the best-effort Postgres operation-log `AsyncWriter`.
 fn build_operation_log_writer(
     ctx: &AppContext,
 ) -> (OperationLogBuffer, AsyncWriterWorker<NewOperationLog>) {
-    let op_log_repo = Arc::clone(&ctx.infra.operation_log_repo);
+    let op_log_repo = Arc::clone(&ctx.infra.repos.operation_log) as Arc<dyn OperationLogRepository>;
     let op_log_drops = ctx
         .infra
         .metrics

@@ -36,5 +36,7 @@ mod quant_intents;
 mod quant_reports;
 #[path = "web/readiness.rs"]
 mod readiness;
+#[path = "web/reconciliations.rs"]
+mod reconciliations;
 #[path = "web/ws.rs"]
 mod ws;

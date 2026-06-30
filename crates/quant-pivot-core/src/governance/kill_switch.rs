@@ -11,7 +11,10 @@
 //! transition to any other (it is a safety valve), but clearing `emergency_halted`
 //! requires an explicit operator acknowledgement.
 
-use crate::observability::metrics_hub::MetricsHub;
+use crate::{
+    governance::execution_recovery::ExecutionRecoveryCoordinator,
+    observability::metrics_hub::MetricsHub,
+};
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use chrono::Utc;
@@ -21,7 +24,7 @@ use quant_pivot_models::{
     enums::execution::KillSwitchState,
 };
 use quant_pivot_repository::{postgres::SYSTEM_KILL_SWITCH_ID, traits::KillSwitchStateRepository};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use super::system_status::SystemStatusPublisher;
 
@@ -87,6 +90,7 @@ pub struct KillSwitchControl {
     metrics: Arc<MetricsHub>,
     view: Arc<ArcSwap<KillSwitchView>>,
     status_publisher: Arc<SystemStatusPublisher>,
+    execution_recovery: Arc<OnceLock<Arc<ExecutionRecoveryCoordinator>>>,
 }
 
 impl KillSwitchControl {
@@ -99,6 +103,7 @@ impl KillSwitchControl {
         repo: Arc<dyn KillSwitchStateRepository>,
         metrics: Arc<MetricsHub>,
         status_publisher: Arc<SystemStatusPublisher>,
+        execution_recovery: Arc<OnceLock<Arc<ExecutionRecoveryCoordinator>>>,
     ) -> Self {
         metrics.set_auto_execution_halted(!handle.current().allows_new_entry());
         Self {
@@ -107,6 +112,7 @@ impl KillSwitchControl {
             metrics,
             view: Arc::new(ArcSwap::from_pointee(initial_view)),
             status_publisher,
+            execution_recovery,
         }
     }
 
@@ -161,6 +167,9 @@ impl KillSwitchPort for KillSwitchControl {
         let view = KillSwitchView::from(info);
         self.view.store(Arc::new(view.clone()));
         self.status_publisher.publish();
+        if let Some(recovery) = self.execution_recovery.get() {
+            let _ = recovery.refresh().await;
+        }
         Ok(view)
     }
 }

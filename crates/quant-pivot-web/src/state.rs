@@ -4,11 +4,13 @@ use std::sync::Arc;
 
 use quant_pivot_models::{
     config::DeployConfig,
+    domain::ExecutionRecoveryPort,
     domain::{
         AccountReadPort, BacktestPort, CatalogStatusPort, CoreEventPublisher, DataQualityPort,
         ExecutionReadPort, ExecutionSubmitPort, FactorGovernancePort, KillSwitchPort,
         MarketDataPort, MetricsScrapePort, ModelGovernancePort, ModelTrainingPort, OrderIntentPort,
-        QuantReportPort, ReadinessPort, RuntimeConfigPort, RuntimeControlPort, TrainingDatasetPort,
+        QuantReportPort, ReadinessPort, ReconciliationPort, RuntimeConfigPort, RuntimeControlPort,
+        TrainingDatasetPort,
     },
 };
 use quant_pivot_repository::traits::{
@@ -73,4 +75,8 @@ pub struct AppState {
     pub execution_read: Arc<dyn ExecutionReadPort>,
     /// Entry-execution submission bridge (Phase 05.4 API): claim → admit → submit.
     pub execution_submit: Arc<dyn ExecutionSubmitPort>,
+    /// Operator reconciliation resolve (Phase 05.5 closeout).
+    pub reconciliation: Arc<dyn ReconciliationPort>,
+    /// Execution recovery playbook detail (Phase 05.5 closeout).
+    pub execution_recovery: Arc<dyn ExecutionRecoveryPort>,
 }

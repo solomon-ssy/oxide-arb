@@ -11,9 +11,7 @@ use std::sync::Arc;
 use quant_pivot_api::{clob::ClobClient, data_api::DataApiClient};
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::config::DeployConfig;
-use quant_pivot_repository::{
-    postgres::PgReservedCapitalRepository, traits::ReservedCapitalRepository,
-};
+use quant_pivot_repository::traits::ReservedCapitalRepository;
 
 use super::InfraBundle;
 use crate::{
@@ -51,9 +49,8 @@ impl AccountBundle {
         let client: Arc<dyn PolymarketAccountClient> =
             Arc::new(VenuePolymarketAccountClient::new(deps.clob, data_api));
 
-        let reserved_repo: Arc<dyn ReservedCapitalRepository> = Arc::new(
-            PgReservedCapitalRepository::new(deps.infra.pg.connection().clone()),
-        );
+        let reserved_repo: Arc<dyn ReservedCapitalRepository> =
+            Arc::clone(&deps.infra.repos.reserved_capital) as Arc<dyn ReservedCapitalRepository>;
         let reserved_reader: Arc<dyn ReservedCapitalReader> =
             Arc::new(RepoReservedCapitalReader::new(reserved_repo));
 

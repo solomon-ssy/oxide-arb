@@ -35,12 +35,12 @@ const PRODUCES: &[SeedArtifact] = &[];
 
 pub const CASBIN_SEED: SeedSpec = SeedSpec {
     id: SEED_ID,
-    version: 10,
+    version: 11,
     target_table: casbin_rule_table_name,
     depends_on: DEPENDS_ON,
     produces: PRODUCES,
     conflict_policy: SeedConflictPolicy::GraphOrdered,
-    checksum: "rbac.casbin.bootstrap.v10",
+    checksum: "rbac.casbin.bootstrap.v11",
     loader: load_boxed,
 };
 
@@ -55,6 +55,8 @@ const READ_RESOURCES: &[ResourceType] = &[
     ResourceType::ExecutionOrder,
     ResourceType::Position,
     ResourceType::RecommendationAttribution,
+    ResourceType::Reconciliation,
+    ResourceType::SettlementRedeem,
     ResourceType::FactorDefinition,
     ResourceType::RuntimeConfig,
     ResourceType::Materialization,
@@ -103,6 +105,7 @@ fn operator_policies() -> Vec<(ResourceType, Operation)> {
         (ResourceType::OrderIntent, Operation::Reject),
         (ResourceType::OrderIntent, Operation::Cancel),
         (ResourceType::OrderIntent, Operation::Submit),
+        (ResourceType::Reconciliation, Operation::Resolve),
         (ResourceType::FactorDefinition, Operation::Publish),
         (ResourceType::FactorDefinition, Operation::Retire),
     ]);
@@ -129,6 +132,7 @@ fn risk_owner_policies() -> Vec<(ResourceType, Operation)> {
         (ResourceType::QuantReport, Operation::Revoke),
         (ResourceType::OrderIntent, Operation::Reject),
         (ResourceType::OrderIntent, Operation::Cancel),
+        (ResourceType::Reconciliation, Operation::Resolve),
     ]);
     policies
 }
@@ -154,6 +158,7 @@ fn admin_policies() -> Vec<(ResourceType, Operation)> {
         (ResourceType::System, Operation::Resume),
         (ResourceType::System, Operation::SwitchMode),
         (ResourceType::System, Operation::Emergency),
+        (ResourceType::Reconciliation, Operation::Resolve),
     ]);
     policies
 }
@@ -163,6 +168,7 @@ fn emergency_operator_policies() -> Vec<(ResourceType, Operation)> {
     policies.extend([
         (ResourceType::System, Operation::Halt),
         (ResourceType::System, Operation::Emergency),
+        (ResourceType::Reconciliation, Operation::Resolve),
     ]);
     policies
 }

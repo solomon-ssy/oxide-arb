@@ -2,6 +2,7 @@
 
 use crate::{
     domain::{
+        ExecutionRecoverySummary,
         governance::kill_switch::KillSwitchView,
         lifecycle::{MarketDataConnectivity, OperationalPhase, WsShardConnectivity},
         ports::runtime_control::CatalogState,
@@ -34,6 +35,8 @@ pub struct SystemStatus {
     pub market_data: MarketDataConnectivity,
     /// Operational kill-switch projection (real `system_kill_switch` state).
     pub kill_switch: KillSwitchView,
+    /// Lightweight auto-execution recovery playbook summary.
+    pub execution_recovery: ExecutionRecoverySummary,
     pub checked_at: DateTime<Utc>,
 }
 
@@ -142,6 +145,15 @@ impl SystemStatus {
                 last_reason: "bootstrap".to_owned(),
                 changed_by: "system".to_owned(),
                 changed_at: Utc::now(),
+            },
+            execution_recovery: ExecutionRecoverySummary {
+                has_unresolvable_reconciliation: false,
+                unresolvable_count: 0,
+                kill_switch_requires_ack: false,
+                kill_switch_state: KillSwitchState::Closed,
+                quant_runtime_mode,
+                auto_execution_blocked: false,
+                next_steps: Vec::new(),
             },
             checked_at: Utc::now(),
         }

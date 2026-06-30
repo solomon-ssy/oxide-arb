@@ -48,10 +48,6 @@ pub enum TaskId {
     OperationLogWriter,
 
     // ── Execution ─────────────────────────────────────────────────────
-    #[strum(disabled)]
-    ExecutionRunner {
-        shard: u8,
-    },
     /// Auto-execution worker: pulls `ApprovedByPolicy` intents and submits them.
     ExecutionDispatcher,
     /// Self-heals the execution breaker (`Degraded → Healthy` after cooldown).
@@ -65,7 +61,12 @@ pub enum TaskId {
     AttributionWorker,
     /// Best-effort analytics mirror for final attribution events (05.7).
     AttributionEventsWriter,
-    ExecutionHeartbeat,
+    /// Best-effort analytics mirror for execution-order lifecycle events.
+    ExecutionEventsWriter,
+    /// Best-effort analytics mirror for capital-allocation ledger events.
+    CapitalAllocationEventsWriter,
+    /// Best-effort analytics mirror for position-lot ledger events.
+    PositionEventsWriter,
 
     // ── Risk / periodic ───────────────────────────────────────────────
     RiskTick,
@@ -73,7 +74,6 @@ pub enum TaskId {
 
     // ── Audit / analytics / persistence writers ───────────────────────
     RiskAuditBatch,
-    ExecutionAuditWriter,
     DetectionWriter,
     TickEventsWriter,
     BookL2ReplayWriter,
@@ -126,14 +126,12 @@ impl TaskId {
             Self::HealthChecker | Self::RiskMetricsRefresh | Self::DataQualityRefresh => {
                 TaskKind::HealthMonitor
             }
-            Self::ExecutionRunner { .. }
-            | Self::ExecutionDispatcher
+            Self::ExecutionDispatcher
             | Self::ExecutionBreakerTick
             | Self::ReconciliationWorker
             | Self::ExitMonitor
             | Self::SettlementRedeemWorker
             | Self::AttributionWorker => TaskKind::Execution,
-            Self::ExecutionHeartbeat => TaskKind::ExecutionHeartbeat,
             Self::RiskTick
             | Self::ExposureGc
             | Self::ReportGenerator
@@ -144,8 +142,7 @@ impl TaskId {
             | Self::IntentExpireSweep
             | Self::IntentDeadlineScheduler => TaskKind::ReportScheduler,
             Self::RiskAuditBatch | Self::OperationLogWriter => TaskKind::Audit,
-            Self::ExecutionAuditWriter
-            | Self::DetectionWriter
+            Self::DetectionWriter
             | Self::TickEventsWriter
             | Self::BookL2ReplayWriter
             | Self::BookSnapshotWriter
@@ -157,6 +154,9 @@ impl TaskId {
             | Self::SignalCandidateEventsWriter
             | Self::RecommendationEventsWriter
             | Self::AttributionEventsWriter
+            | Self::ExecutionEventsWriter
+            | Self::CapitalAllocationEventsWriter
+            | Self::PositionEventsWriter
             | Self::BookSnapshotPublisher => TaskKind::AnalyticsWriter,
             Self::RiskStatePersist | Self::RiskStateDebouncer => TaskKind::PositionPersistence,
         }
@@ -165,18 +165,12 @@ impl TaskId {
     /// Human-readable kebab-case name for structured logs.
     #[must_use]
     pub fn display_name(self) -> String {
-        match self {
-            Self::ExecutionRunner { shard } => format!("execution-runner-{shard}"),
-            other => other.static_name().to_owned(),
-        }
+        self.static_name().to_owned()
     }
 
     /// Static name for singleton tasks (no shard suffix).
     #[must_use]
     pub fn static_name(self) -> &'static str {
-        match self {
-            Self::ExecutionRunner { .. } => "execution-runner",
-            other => other.into(),
-        }
+        self.into()
     }
 }
