@@ -9,8 +9,8 @@ use chrono::Utc;
 use quant_pivot_models::{
     domain::{
         CapitalSettlement, ExitLedgerWrite, NewAccountSnapshot, NewCapitalAllocation,
-        NewExecutionOrder, NewMarketSelection, NewModelRun, NewModelSpec, NewModelVersion,
-        NewOperationLog, NewOrderIntent, NewPortfolioPlan, NewRecommendation,
+        NewEquitySnapshot, NewExecutionOrder, NewMarketSelection, NewModelRun, NewModelSpec,
+        NewModelVersion, NewOperationLog, NewOrderIntent, NewPortfolioPlan, NewRecommendation,
         NewRecommendationReport, NewReconciliation, NewReportDataQualitySnapshot,
         NewReportTransaction, NewRuntimeConfigVersion, PositionExit, PositionFill,
         SubmissionLedgerWrite,
@@ -37,16 +37,17 @@ use quant_pivot_models::{
     types::{
         AccountPositions, AccountSnapshotId, BookSnapshotRef, Bps, CapitalAllocationId,
         ConfidenceSummary, ContentHash, DataQualitySummary, EligibilitySummary, EntryOrderSpec,
-        EntryPlan, EventId, EvidenceRefs, ExecutionEligibility, ExecutionOrderId, ExitPlan,
-        ExitPolicySpec, ExposureBreakdown, FactorBreakdownEntry, FeatureVectorId, MarketContext,
-        MarketId, MarketSelectionId, ModelRunId, ModelSpecId, ModelVersionId, OperationLogId,
-        OrderId, OrderIntentId, PortfolioConstraintsSnapshot, PortfolioOptimizerMeta,
-        PortfolioPlanId, PortfolioRejectedSummary, PortfolioRiskBudget, PositionSnapshot, Price,
-        Probability, RecommendationFactorBreakdown, RecommendationId, RecommendationIdentity,
-        RecommendationReportId, ReconciliationEvidence, ReconciliationEvidenceChain,
-        ReconciliationId, ReportDataQualitySnapshotId, ReportDataQualityTokens, ReportSummary,
-        RiskEnvelope, RuntimeConfigVersionId, SchemaVersion, SelectionExclusionSummary, Shares,
-        SignalCandidateId, SizingPlan, TokenId, Usd,
+        EntryPlan, EquitySnapshotId, EventId, EvidenceRefs, ExecutionEligibility, ExecutionOrderId,
+        ExitPlan, ExitPolicySpec, ExposureBreakdown, FactorBreakdownEntry, FeatureVectorId,
+        MarketContext, MarketId, MarketSelectionId, ModelRunId, ModelSpecId, ModelVersionId,
+        OperationLogId, OrderId, OrderIntentId, PortfolioConstraintsSnapshot,
+        PortfolioOptimizerMeta, PortfolioPlanId, PortfolioRejectedSummary, PortfolioRiskBudget,
+        PositionSnapshot, Price, Probability, RecommendationFactorBreakdown, RecommendationId,
+        RecommendationIdentity, RecommendationReportId, ReconciliationEvidence,
+        ReconciliationEvidenceChain, ReconciliationId, ReportDataQualitySnapshotId,
+        ReportDataQualityTokens, ReportSummary, RiskEnvelope, RuntimeConfigVersionId,
+        SchemaVersion, SelectionExclusionSummary, Shares, SignalCandidateId, SizingPlan, TokenId,
+        Usd,
     },
 };
 use quant_pivot_repository::{
@@ -514,10 +515,25 @@ async fn seed_market_selection(
 }
 
 fn build_report_transaction(ids: &ExecutionTxnIds) -> NewReportTransaction {
+    let equity_snapshot_id = EquitySnapshotId::from_v7();
     NewReportTransaction {
         account_snapshot: NewAccountSnapshot {
             account_snapshot_id: ids.account_snapshot.clone(),
             ..new_account_snapshot()
+        },
+        equity_snapshot: NewEquitySnapshot {
+            equity_snapshot_id: equity_snapshot_id.clone(),
+            as_of: Utc::now(),
+            source: AccountSource::Polymarket,
+            venue_net_liquidation_usd: Usd::new(dec!(10000)),
+            capital_base_usd: Usd::new(dec!(10000)),
+            available_usd: Usd::new(dec!(9000)),
+            reserved_usd: Usd::ZERO,
+            realized_pnl_cumulative_usd: Usd::ZERO,
+            unrealized_pnl_usd: Usd::ZERO,
+            high_water_mark_usd: Usd::new(dec!(10000)),
+            drawdown_pct: Decimal::ZERO,
+            account_snapshot_ref: Some(ids.account_snapshot.clone()),
         },
         data_quality_snapshot: NewReportDataQualitySnapshot {
             report_data_quality_snapshot_id: ids.data_quality_snapshot.clone(),
@@ -556,6 +572,7 @@ fn build_report_transaction(ids: &ExecutionTxnIds) -> NewReportTransaction {
             account_source: AccountSource::Polymarket,
             capital_base_usd: Usd::new(dec!(10000)),
             account_snapshot_ref: ids.account_snapshot.clone(),
+            equity_snapshot_ref: equity_snapshot_id,
             data_quality_snapshot_ref: ids.data_quality_snapshot.clone(),
             summary_json: report_summary(),
             published_at: Some(Utc::now()),
@@ -619,7 +636,8 @@ fn new_account_snapshot() -> NewAccountSnapshot {
         account_snapshot_id: AccountSnapshotId::from_v7(),
         as_of: Utc::now(),
         source: AccountSource::Polymarket,
-        equity_usd: Usd::new(dec!(10000)),
+        venue_net_liquidation_usd: Usd::new(dec!(10000)),
+        capital_base_usd: Usd::new(dec!(10000)),
         available_usd: Usd::new(dec!(9000)),
         reserved_usd: Usd::new(dec!(0)),
         positions_json: AccountPositions(positions.clone()),

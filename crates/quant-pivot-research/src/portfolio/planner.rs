@@ -93,6 +93,8 @@ pub struct PortfolioPlanInput<'a> {
     pub candidates: Vec<PlanCandidate<'a>>,
     /// Real account capital base + current exposure net.
     pub account: &'a AccountSnapshot,
+    /// Decision-time drawdown state derived from the equity history ledger.
+    pub drawdown_state: DrawdownState,
     /// Governed budget / exposure / liquidity caps (parsed).
     pub caps: &'a PortfolioCaps,
     /// Configured correlated-exposure cap (recorded in the plan snapshot).
@@ -178,13 +180,18 @@ struct Scored<'a> {
 
 impl PortfolioPlanner for DefaultPortfolioPlanner {
     fn plan(&self, input: PortfolioPlanInput<'_>) -> QuantResult<PortfolioPlanOutput> {
-        let equity = input.account.equity_usd;
+        let capital_base = input.account.capital_base_usd;
         let sizing_kind = input.sizing.kind();
         let mut rejected: Vec<RejectedCandidate> = Vec::new();
 
         // 1. Size every candidate; fundable ones proceed to allocation.
-        let (metas, mut sized) =
-            size_candidates(&input.candidates, input.sizing, equity, &mut rejected)?;
+        let (metas, mut sized) = size_candidates(
+            &input.candidates,
+            input.sizing,
+            capital_base,
+            input.drawdown_state,
+            &mut rejected,
+        )?;
 
         // 2. Allocate over the account's current exposure net + available cash
         //    via the injected LP/MILP optimizer (global TopN + capital choice).
@@ -211,7 +218,7 @@ impl PortfolioPlanner for DefaultPortfolioPlanner {
             allocated_total += item.allocation.allocated_usd;
             planned.push(PlannedRecommendation {
                 rank: u32::try_from(index + 1).unwrap_or(u32::MAX),
-                sizing: build_sizing_plan(&item, equity, input.caps, sizing_kind),
+                sizing: build_sizing_plan(&item, capital_base, input.caps, sizing_kind),
                 risk_envelope: build_risk_envelope(&item, &input)?,
                 risk_adjusted_score: item.risk_adjusted,
                 candidate: item.candidate.clone(),
@@ -234,7 +241,8 @@ type SizedLookup<'a> = BTreeMap<String, (SizingSuggestion, &'a PlanCandidate<'a>
 fn size_candidates<'a>(
     candidates: &'a [PlanCandidate<'a>],
     sizing: &dyn SizingModel,
-    equity: Usd,
+    capital_base: Usd,
+    drawdown_state: DrawdownState,
     rejected: &mut Vec<RejectedCandidate>,
 ) -> QuantResult<(Vec<CandidateMeta<'a>>, SizedLookup<'a>)> {
     let mut metas: Vec<CandidateMeta<'a>> = Vec::new();
@@ -242,8 +250,8 @@ fn size_candidates<'a>(
     for plan_candidate in candidates {
         let outcome = sizing.suggest(&SizingInput {
             candidate: plan_candidate.candidate,
-            equity_usd: equity,
-            drawdown_state: DrawdownState::neutral(),
+            capital_base_usd: capital_base,
+            drawdown_state,
         })?;
         match outcome {
             SizingOutcome::Rejected(reason) => rejected.push(RejectedCandidate {
@@ -503,7 +511,7 @@ fn build_plan_row(
     let remaining = (total_budget - allocated_total).max(Usd::ZERO);
     let risk_budget = PortfolioRiskBudget {
         total_budget_usd: total_budget,
-        capital_base_usd: input.account.equity_usd,
+        capital_base_usd: input.account.capital_base_usd,
         reserved_usd: input.account.reserved_usd,
         allocated_usd: allocated_total,
         remaining_usd: remaining,

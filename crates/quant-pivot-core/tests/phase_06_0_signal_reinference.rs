@@ -18,7 +18,10 @@ use quant_pivot_models::{
     enums::{
         common::{MarketCategory, OrderType, Side},
         execution::{ExitState, OrderIntentKind, PositionLedgerState},
-        quant::{AccountSource, ApprovalStatus, OrderIntentStatus, OutcomeSide, QuantRuntimeMode},
+        quant::{
+            AccountSource, ApprovalStatus, OrderIntentStatus, OutcomeSide, QuantRuntimeMode,
+            SettlementPolicy,
+        },
     },
     runtime_config::RuntimeConfig,
     types::{
@@ -81,8 +84,7 @@ fn sample_intent(entry_score: &str) -> OrderIntentInfo {
             trailing_stop: None,
             signal_invalidation_rules: Vec::new(),
             partial_exit_nodes: Vec::new(),
-            settlement_policy:
-                quant_pivot_models::enums::quant::SettlementPolicy::ExitBeforeResolution,
+            settlement_policy: SettlementPolicy::ExitBeforeResolution,
             manual_review_at: None,
             entry_reference_price: Price::new(dec!(0.5)),
             entry_composite_score: Probability::new(entry_score.parse().unwrap()),

@@ -93,6 +93,7 @@ crate::pg_enum! {
         Audit => "audit",
         QuantReport => "quant_report",
         AccountSnapshot => "account_snapshot",
+        EquitySnapshot => "equity_snapshot",
         OrderIntent => "order_intent",
         ExecutionOrder => "execution_order",
         Position => "position",
@@ -239,6 +240,7 @@ pub static RESOURCE_OPERATIONS: &[(ResourceType, &[Operation])] = &[
         &[Operation::Read, Operation::Enqueue, Operation::Revoke],
     ),
     (ResourceType::AccountSnapshot, &[Operation::Read]),
+    (ResourceType::EquitySnapshot, &[Operation::Read]),
     (
         ResourceType::OrderIntent,
         &[

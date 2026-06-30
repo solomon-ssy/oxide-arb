@@ -1,4 +1,4 @@
-//! Decision-time account capital snapshot (the sizing capital base).
+//! Decision-time account capital snapshot.
 //!
 //! `AccountSnapshot` is a compute-domain value type, parallel to
 //! [`crate::model::SignalCandidate`]: it is produced by the core
@@ -17,7 +17,8 @@ use quant_pivot_models::{
 
 /// Real venue account state frozen at a report's `as_of`.
 ///
-/// `equity_usd` is the sizing anchor: `min(net liquidation value, budget cap)`.
+/// `venue_net_liquidation_usd` is the uncapped venue truth. `capital_base_usd`
+/// is the governed sizing anchor: `min(venue_net_liquidation_usd, budget cap)`.
 /// `exposures` is derived from `positions` and is the planner's starting point
 /// for per-market / per-event / per-category cap-room checks.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -26,8 +27,10 @@ pub struct AccountSnapshot {
     pub as_of: DateTime<Utc>,
     /// Capital-base provenance (always the real Polymarket venue).
     pub source: AccountSource,
-    /// Net-liquidation capital base after the budget governance cap.
-    pub equity_usd: Usd,
+    /// Uncapped venue net liquidation value.
+    pub venue_net_liquidation_usd: Usd,
+    /// Governed strategy capital base used for sizing and drawdown.
+    pub capital_base_usd: Usd,
     /// Available cash (collateral − reserved).
     pub available_usd: Usd,
     /// Capital reserved by pending intents at decision time.
@@ -44,7 +47,8 @@ impl AccountSnapshot {
     pub fn new(
         as_of: DateTime<Utc>,
         source: AccountSource,
-        equity_usd: Usd,
+        venue_net_liquidation_usd: Usd,
+        capital_base_usd: Usd,
         available_usd: Usd,
         reserved_usd: Usd,
         positions: Vec<PositionSnapshot>,
@@ -53,7 +57,8 @@ impl AccountSnapshot {
         Self {
             as_of,
             source,
-            equity_usd,
+            venue_net_liquidation_usd,
+            capital_base_usd,
             available_usd,
             reserved_usd,
             positions,

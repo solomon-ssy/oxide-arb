@@ -18,14 +18,14 @@ use quant_pivot_models::{
         AppendReconciliationEvidence, CapitalAllocationInfo, CoreEventPublisher, DataQualityPort,
         DataQualitySnapshot, KillSwitchPort, KillSwitchStateInfo, KillSwitchView, ModelSpecInfo,
         ModelVersionInfo, NewModelSpec, NewModelVersion, NewReconciliation, NewShadowComparison,
-        ReconciliationInfo, ReconciliationPatch, SetKillSwitchCommand, ShadowComparisonInfo,
-        ShadowStabilitySummary, UpsertKillSwitchState,
+        PreflightReport, ReconciliationInfo, ReconciliationPatch, SetKillSwitchCommand,
+        ShadowComparisonInfo, ShadowStabilitySummary, UpsertKillSwitchState,
     },
     enums::{
         execution::KillSwitchState,
         quant::{PublicationStatus, QuantRuntimeMode},
     },
-    runtime_config::{ModelVersionRef, RuntimeConfig},
+    runtime_config::{DecimalString, ModelVersionRef, RuntimeConfig},
     types::{
         ContentHash, ExecutionOrderId, ModelSpecId, ModelVersionId, OrderIntentId, Probability,
         ReconciliationId, Usd,
@@ -284,8 +284,7 @@ impl PreflightFixture {
         config.model.active_model_version_id = Some(ModelVersionRef {
             id: model_id.to_string(),
         });
-        config.portfolio.budget.total_budget_usd =
-            quant_pivot_models::runtime_config::DecimalString::new("1000");
+        config.portfolio.budget.total_budget_usd = DecimalString::new("1000");
         Self {
             deploy: ready_deploy(),
             config,
@@ -336,7 +335,7 @@ impl PreflightFixture {
     }
 }
 
-fn failed(report: &quant_pivot_models::domain::PreflightReport, name: &str) -> bool {
+fn failed(report: &PreflightReport, name: &str) -> bool {
     report
         .checks
         .iter()

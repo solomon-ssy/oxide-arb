@@ -27,7 +27,7 @@ use serde::Serialize;
 use crate::{
     backtest::{
         BacktestInputs, BacktestMarketMeta, BacktestReport, BacktestRequest, BacktestRunResult,
-        BacktestTick, Backtester, CategoryMetric, EquityPoint, ExpectedVsRealized, MarketOutcome,
+        BacktestTick, Backtester, CategoryMetric, ExpectedVsRealized, MarketOutcome, PnlCurvePoint,
         PnlSimulation, PortfolioCaps, SampleOutcome, metrics, simulator,
     },
     hashing::ResearchHasher,
@@ -70,7 +70,7 @@ impl Default for PortfolioReplayBacktester {
 #[derive(Default)]
 struct RunAccumulator {
     samples: Vec<SampleOutcome>,
-    equity: Vec<EquityPoint>,
+    pnl_curve: Vec<PnlCurvePoint>,
     tick_weights: Vec<BTreeMap<String, Decimal>>,
     missing_feature_count: u64,
     total_emitted: u64,
@@ -98,7 +98,7 @@ impl Backtester for PortfolioReplayBacktester {
 
         let metrics = BuildMetrics {
             samples: &acc.samples,
-            equity: &acc.equity,
+            pnl_curve: &acc.pnl_curve,
             tick_weights: &acc.tick_weights,
             missing_feature_count: acc.missing_feature_count,
             total_emitted: acc.total_emitted,
@@ -220,9 +220,9 @@ fn process_tick(
         });
     }
     acc.realized_pnl += tick_pnl;
-    acc.equity.push(EquityPoint {
+    acc.pnl_curve.push(PnlCurvePoint {
         as_of: tick.as_of,
-        equity_usd: acc.realized_pnl.round_dp(RESEARCH_DECIMAL_SCALE),
+        cumulative_realized_pnl_usd: acc.realized_pnl.round_dp(RESEARCH_DECIMAL_SCALE),
     });
     Ok(())
 }
@@ -271,7 +271,7 @@ fn weights_for_tick(allocations: &[Allocation]) -> BTreeMap<String, Decimal> {
 /// Aggregated inputs for report assembly.
 struct BuildMetrics<'a> {
     samples: &'a [SampleOutcome],
-    equity: &'a [EquityPoint],
+    pnl_curve: &'a [PnlCurvePoint],
     tick_weights: &'a [BTreeMap<String, Decimal>],
     missing_feature_count: u64,
     total_emitted: u64,
@@ -292,7 +292,7 @@ fn build_report(request: &BacktestRequest, m: &BuildMetrics<'_>) -> QuantResult<
     let rank_ic = metrics::rank_ic(m.samples);
     let hit_rate = metrics::hit_rate(m.samples);
     let expected_vs_realized = metrics::expected_vs_realized(m.samples);
-    let max_drawdown = metrics::max_drawdown(m.equity, m.budget);
+    let max_drawdown = metrics::max_drawdown(m.pnl_curve, m.budget);
     let turnover = metrics::turnover(m.tick_weights);
     let liquidity_feasibility = metrics::liquidity_feasibility(m.samples);
     let category_breakdown = metrics::category_breakdown(m.samples);
@@ -307,7 +307,7 @@ fn build_report(request: &BacktestRequest, m: &BuildMetrics<'_>) -> QuantResult<
         total_allocated_usd: m.total_allocated.round_dp(RESEARCH_DECIMAL_SCALE),
         realized_pnl_usd: m.realized_pnl.round_dp(RESEARCH_DECIMAL_SCALE),
         gross_return,
-        equity_curve: m.equity.to_vec(),
+        pnl_curve: m.pnl_curve.to_vec(),
     };
 
     let report_hash = hash_report(&ReportHashInput {
@@ -573,8 +573,8 @@ mod tests {
             "capital allocated"
         );
         assert!(
-            !report.report_pnl_simulation.equity_curve.is_empty(),
-            "equity curve filled"
+            !report.report_pnl_simulation.pnl_curve.is_empty(),
+            "PnL curve filled"
         );
         assert!(
             report.report_hash.as_str().starts_with("blake3:"),

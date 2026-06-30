@@ -8,9 +8,9 @@ use quant_pivot_api::data_api::VenuePosition;
 use quant_pivot_core::{
     governance::{RuntimeModeHandle, WeightOverlayApplicator},
     observability::{
-        alert_dispatcher::AlertDispatcher, factor_fact_writer::FactorEventWriter,
-        feature_fact_writer::FeatureEventWriter, metrics_hub::MetricsHub,
-        recommendation_fact_writer::RecommendationEventWriter,
+        alert_dispatcher::AlertDispatcher, fact_lag::FactLagTracker,
+        factor_fact_writer::FactorEventWriter, feature_fact_writer::FeatureEventWriter,
+        metrics_hub::MetricsHub, recommendation_fact_writer::RecommendationEventWriter,
         signal_candidate_fact_writer::SignalCandidateEventWriter,
     },
     pipeline::{
@@ -28,6 +28,7 @@ use quant_pivot_core::{
             AccountProviderFactory, PolymarketAccountClient, RepoReservedCapitalReader,
             ReservedCapitalReader,
         },
+        equity::EquitySnapshotService,
         factor_pipeline::FactorPipelineService,
         feature_pipeline::FeaturePipelineService,
         model_runner::{DispatcherAlertSink, ModelRunner, ModelRunnerDeps},
@@ -37,8 +38,11 @@ use quant_pivot_error::{QuantResult, storage::StorageError};
 use quant_pivot_models::{
     clickhouse::{BookMicrostructureRow, BookSnapshotRow, MarketResolutionRow, MidPriceBucketRow},
     domain::{
-        NewModelSpec, NewModelVersion, NewReportTransaction, NewRuntimeConfigActivation,
-        NewRuntimeConfigVersion, RecommendationInfo, RecommendationReportInfo,
+        CoreEventPublisher, NewAccountSnapshot, NewEquitySnapshot, NewMarketSelection,
+        NewModelSpec, NewModelVersion, NewOperationLog, NewPortfolioPlan, NewRecommendation,
+        NewRecommendationReport, NewReportDataQualitySnapshot, NewReportTransaction,
+        NewRuntimeConfigActivation, NewRuntimeConfigVersion, PointInTimeDataSource,
+        RecommendationInfo, RecommendationReportInfo,
         governance::lifecycle::OperationalPhase,
         market::{MarketRegistryInfo, TokenInfo, book::BookLevel},
     },
@@ -47,8 +51,10 @@ use quant_pivot_models::{
         factor::FactorFamily,
         market::MarketStatus,
         model::ModelFamily,
-        quant::PublicationStatus,
-        runtime_config::RuntimeConfigActivationKind,
+        operation_log::{OperationCategory, OperationOutcome},
+        quant::{OutcomeSide, PublicationStatus, RecommendationReportStatus, ReportKind},
+        rbac::ResourceType,
+        runtime_config::{RuntimeConfigActivationKind, RuntimeConfigVersionSource},
     },
     hashing::CanonicalDigest,
     runtime_config::{
@@ -57,20 +63,25 @@ use quant_pivot_models::{
         ReportsConfig, RuntimeConfig, SelectionConfig,
     },
     types::{
-        EventId, MarketId, MarketSelectionId, ModelSpecId, ModelVersionId, Price, RecommendationId,
-        RecommendationReportId, RuntimeConfigActivationId, RuntimeConfigVersionId, SchemaVersion,
-        Shares, TokenId, Usd,
+        AccountPositions, ContentHash, EventId, ExposureBreakdown, MarketId, MarketSelectionId,
+        ModelSpecId, ModelVersionId, OperationLogId, PortfolioConstraintsSnapshot,
+        PortfolioOptimizerMeta, PortfolioRejectedSummary, PortfolioRiskBudget, Price,
+        RecommendationId, RecommendationReportId, ReportDataQualityTokens,
+        RuntimeConfigActivationId, RuntimeConfigVersionId, SchemaVersion,
+        SelectionExclusionSummary, Shares, TokenId, Usd,
     },
 };
 use quant_pivot_repository::{
     postgres::{
-        PgFactorRepository, PgFeatureRepository, PgMarketRepository, PgModelRegistryRepository,
-        PgModelRunRepository, PgRecommendationReportRepository, PgRecommendationRepository,
-        PgReservedCapitalRepository, PgRuntimeConfigVersionRepository,
+        PgEquitySnapshotRepository, PgEventRepository, PgFactorRepository, PgFeatureRepository,
+        PgMarketRepository, PgMarketSelectionRepository, PgModelRegistryRepository,
+        PgModelRunRepository, PgPositionRepository, PgRecommendationReportRepository,
+        PgRecommendationRepository, PgReservedCapitalRepository, PgRuntimeConfigVersionRepository,
         PgShadowComparisonRepository,
     },
     traits::{
-        EventRepository, FactorRepository, MarketRepository, ModelRegistryRepository,
+        EquitySnapshotRepository, EventRepository, FactorRepository, MarketRepository,
+        MarketSelectionRepository, ModelRegistryRepository, PositionRepository,
         QuantFactReadRepository, RecommendationReportRepository, RecommendationRepository,
         ReservedCapitalRepository, RuntimeConfigVersionRepository,
     },
@@ -93,8 +104,11 @@ use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use sea_orm::DatabaseConnection;
 
-use crate::catalog_fixtures::{make_event, make_market};
 use crate::factor_governance::publish_all_factor_definitions;
+use crate::{
+    catalog_fixtures::{make_event, make_market},
+    report_fixtures,
+};
 
 /// Seeded catalog ids shared across report pipeline E2E tests.
 pub const EVENT_ID: &str = "evt-report-pipeline-e2e";
@@ -329,8 +343,7 @@ pub async fn bootstrap_runtime_config_activation(
             config_hash,
             schema_version: RUNTIME_CONFIG_SCHEMA_VERSION,
             config_json,
-            source:
-                quant_pivot_models::enums::runtime_config::RuntimeConfigVersionSource::Bootstrap,
+            source: RuntimeConfigVersionSource::Bootstrap,
             created_by: "report-pipeline-it".to_owned(),
             reason: "report pipeline integration test bootstrap".to_owned(),
         })
@@ -379,9 +392,6 @@ pub async fn seed_fixture_published_report(
     report_id: RecommendationReportId,
     ctx: &FixtureReportSeedContext,
 ) -> RecommendationReportInfo {
-    use crate::report_fixtures;
-    use quant_pivot_models::enums::quant::{OutcomeSide, RecommendationReportStatus, ReportKind};
-
     seed_fixture_market_catalog(db).await;
     let market_selection_id =
         seed_minimal_market_selection(db, &ctx.runtime_config_version_id).await;
@@ -426,12 +436,6 @@ pub async fn seed_fixture_published_report(
 }
 
 async fn seed_fixture_market_catalog(db: &DatabaseConnection) {
-    use quant_pivot_models::enums::common::MarketCategory;
-    use quant_pivot_repository::{
-        postgres::{PgEventRepository, PgMarketRepository},
-        traits::{EventRepository, MarketRepository},
-    };
-
     PgEventRepository::new(db.clone())
         .upsert(make_event(
             FIXTURE_EVENT,
@@ -463,14 +467,6 @@ async fn seed_minimal_market_selection(
     db: &DatabaseConnection,
     runtime_config_version_id: &RuntimeConfigVersionId,
 ) -> MarketSelectionId {
-    use quant_pivot_models::{
-        domain::NewMarketSelection,
-        types::{ContentHash, SelectionExclusionSummary},
-    };
-    use quant_pivot_repository::{
-        postgres::PgMarketSelectionRepository, traits::MarketSelectionRepository,
-    };
-
     let market_selection_id = MarketSelectionId::from_v7();
     PgMarketSelectionRepository::new(db.clone())
         .create_snapshot(
@@ -494,10 +490,9 @@ fn fixture_report_transaction(
     report: &RecommendationReportInfo,
     recommendations: Vec<RecommendationInfo>,
 ) -> NewReportTransaction {
-    use quant_pivot_models::domain::NewReportTransaction;
-
     NewReportTransaction {
         account_snapshot: fixture_account_snapshot(report),
+        equity_snapshot: fixture_equity_snapshot(report),
         data_quality_snapshot: fixture_data_quality_snapshot(report),
         portfolio_plan: fixture_portfolio_plan(report, &recommendations),
         report: fixture_new_report(report),
@@ -509,16 +504,13 @@ fn fixture_report_transaction(
     }
 }
 
-fn fixture_account_snapshot(
-    report: &RecommendationReportInfo,
-) -> quant_pivot_models::domain::NewAccountSnapshot {
-    use quant_pivot_models::types::{AccountPositions, ExposureBreakdown};
-
-    quant_pivot_models::domain::NewAccountSnapshot {
+fn fixture_account_snapshot(report: &RecommendationReportInfo) -> NewAccountSnapshot {
+    NewAccountSnapshot {
         account_snapshot_id: report.account_snapshot_ref.clone(),
         as_of: report.as_of,
         source: report.account_source,
-        equity_usd: report.capital_base_usd,
+        venue_net_liquidation_usd: report.capital_base_usd,
+        capital_base_usd: report.capital_base_usd,
         available_usd: report.capital_base_usd,
         reserved_usd: Usd::ZERO,
         positions_json: AccountPositions(Vec::new()),
@@ -526,12 +518,27 @@ fn fixture_account_snapshot(
     }
 }
 
+fn fixture_equity_snapshot(report: &RecommendationReportInfo) -> NewEquitySnapshot {
+    NewEquitySnapshot {
+        equity_snapshot_id: report.equity_snapshot_ref.clone(),
+        as_of: report.as_of,
+        source: report.account_source,
+        venue_net_liquidation_usd: report.capital_base_usd,
+        capital_base_usd: report.capital_base_usd,
+        available_usd: report.capital_base_usd,
+        reserved_usd: Usd::ZERO,
+        realized_pnl_cumulative_usd: Usd::ZERO,
+        unrealized_pnl_usd: Usd::ZERO,
+        high_water_mark_usd: report.capital_base_usd,
+        drawdown_pct: rust_decimal::Decimal::ZERO,
+        account_snapshot_ref: Some(report.account_snapshot_ref.clone()),
+    }
+}
+
 fn fixture_data_quality_snapshot(
     report: &RecommendationReportInfo,
-) -> quant_pivot_models::domain::NewReportDataQualitySnapshot {
-    use quant_pivot_models::types::ReportDataQualityTokens;
-
-    quant_pivot_models::domain::NewReportDataQualitySnapshot {
+) -> NewReportDataQualitySnapshot {
+    NewReportDataQualitySnapshot {
         report_data_quality_snapshot_id: report.data_quality_snapshot_ref.clone(),
         as_of: report.as_of,
         runtime_config_version_id: report.runtime_config_version_id.clone(),
@@ -542,13 +549,8 @@ fn fixture_data_quality_snapshot(
 fn fixture_portfolio_plan(
     report: &RecommendationReportInfo,
     _recommendations: &[RecommendationInfo],
-) -> quant_pivot_models::domain::NewPortfolioPlan {
-    use quant_pivot_models::types::{
-        PortfolioConstraintsSnapshot, PortfolioOptimizerMeta, PortfolioRejectedSummary,
-        PortfolioRiskBudget,
-    };
-
-    quant_pivot_models::domain::NewPortfolioPlan {
+) -> NewPortfolioPlan {
+    NewPortfolioPlan {
         portfolio_plan_id: report.portfolio_plan_id.clone(),
         model_run_id: None,
         market_selection_id: report.market_selection_id.clone(),
@@ -562,10 +564,8 @@ fn fixture_portfolio_plan(
     }
 }
 
-fn fixture_new_report(
-    report: &RecommendationReportInfo,
-) -> quant_pivot_models::domain::NewRecommendationReport {
-    quant_pivot_models::domain::NewRecommendationReport {
+fn fixture_new_report(report: &RecommendationReportInfo) -> NewRecommendationReport {
+    NewRecommendationReport {
         recommendation_report_id: report.recommendation_report_id.clone(),
         report_kind: report.report_kind,
         trigger_kind: report.trigger_kind,
@@ -584,6 +584,7 @@ fn fixture_new_report(
         account_source: report.account_source,
         capital_base_usd: report.capital_base_usd,
         account_snapshot_ref: report.account_snapshot_ref.clone(),
+        equity_snapshot_ref: report.equity_snapshot_ref.clone(),
         data_quality_snapshot_ref: report.data_quality_snapshot_ref.clone(),
         summary_json: report.summary_json.clone(),
         published_at: report.published_at,
@@ -594,10 +595,8 @@ fn fixture_new_report(
     }
 }
 
-fn fixture_new_recommendation(
-    rec: RecommendationInfo,
-) -> quant_pivot_models::domain::NewRecommendation {
-    quant_pivot_models::domain::NewRecommendation {
+fn fixture_new_recommendation(rec: RecommendationInfo) -> NewRecommendation {
+    NewRecommendation {
         recommendation_id: rec.recommendation_id,
         recommendation_report_id: rec.recommendation_report_id,
         rank: rec.rank,
@@ -629,18 +628,8 @@ fn fixture_new_recommendation(
     }
 }
 
-fn fixture_publish_operation_log(
-    report: &RecommendationReportInfo,
-) -> quant_pivot_models::domain::NewOperationLog {
-    use quant_pivot_models::{
-        enums::{
-            operation_log::{OperationCategory, OperationOutcome},
-            rbac::ResourceType,
-        },
-        types::OperationLogId,
-    };
-
-    quant_pivot_models::domain::NewOperationLog {
+fn fixture_publish_operation_log(report: &RecommendationReportInfo) -> NewOperationLog {
+    NewOperationLog {
         id: OperationLogId::from_v7(),
         request_id: report.trigger_key.clone(),
         actor_user_id: None,
@@ -700,17 +689,15 @@ fn build_report_builder(
     let pit_source = Arc::new(LiveBookDataSource::new(
         Arc::clone(book_store),
         Arc::clone(registry),
-    )) as Arc<dyn quant_pivot_models::domain::PointInTimeDataSource>;
+    )) as Arc<dyn PointInTimeDataSource>;
     Arc::new(DefaultReportBuilder::new(ReportBuilderDeps {
         runtime_config_repo,
         market_selector: Arc::new(ConfiguredMarketSelector::new()),
-        market_selection_repo: Arc::new(
-            quant_pivot_repository::postgres::PgMarketSelectionRepository::new(db.clone()),
-        ),
+        market_selection_repo: Arc::new(PgMarketSelectionRepository::new(db.clone())),
         candidate_provider: Arc::new(MarketCandidateProvider::new(
             Arc::clone(registry),
             Arc::clone(book_store),
-            Arc::new(quant_pivot_core::observability::fact_lag::FactLagTracker::new()),
+            Arc::new(FactLagTracker::new()),
         )),
         feature_pipeline: Arc::new(FeaturePipelineService::new(
             FeatureWindowProvider::new(Arc::new(EmptyFactRead)),
@@ -719,6 +706,11 @@ fn build_report_builder(
         )),
         model_runner,
         account_provider_factory: account_factory,
+        drawdown_provider: Arc::new(EquitySnapshotService::new(
+            Arc::new(PgEquitySnapshotRepository::new(db.clone()))
+                as Arc<dyn EquitySnapshotRepository>,
+            Arc::new(PgPositionRepository::new(db.clone())) as Arc<dyn PositionRepository>,
+        )),
         composer: Arc::new(DefaultRecommendationComposer::new()),
         pit_source,
         quant_fact_read_repo: Arc::new(EmptyFactRead),
@@ -734,7 +726,7 @@ fn build_lifecycle_service(
     builder: Arc<DefaultReportBuilder>,
 ) -> ReportLifecycleService {
     let metrics = Arc::new(MetricsHub::new());
-    let (events, _rx) = quant_pivot_models::domain::CoreEventPublisher::bounded(64);
+    let (events, _rx) = CoreEventPublisher::bounded(64);
     let report_repo = Arc::new(PgRecommendationReportRepository::new(db.clone()));
     ReportLifecycleService::new(ReportLifecycleDeps {
         report_repo: Arc::clone(&report_repo) as Arc<dyn RecommendationReportRepository>,
@@ -793,7 +785,7 @@ fn registry_market() -> MarketRegistryInfo {
 }
 
 async fn seed_catalog(db: &DatabaseConnection) {
-    quant_pivot_repository::postgres::PgEventRepository::new(db.clone())
+    PgEventRepository::new(db.clone())
         .upsert(make_event(
             EVENT_ID,
             "Report Pipeline E2E",

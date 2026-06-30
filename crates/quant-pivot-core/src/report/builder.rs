@@ -40,6 +40,7 @@ use crate::{
     pipeline::market_candidate_provider::MarketCandidateProvider,
     service::{
         account::AccountProviderFactory,
+        equity::{DrawdownProvider, ReportEquitySnapshot},
         feature_pipeline::{FeaturePipelineRequest, FeaturePipelineResult, FeaturePipelineService},
         market_selection::map_snapshot_to_model,
         model_runner::{
@@ -71,6 +72,7 @@ pub struct ReportBuilderDeps {
     pub feature_pipeline: Arc<FeaturePipelineService>,
     pub model_runner: Arc<ModelRunner>,
     pub account_provider_factory: Arc<AccountProviderFactory>,
+    pub drawdown_provider: Arc<dyn DrawdownProvider>,
     pub composer: Arc<dyn RecommendationComposer>,
     pub pit_source: Arc<dyn PointInTimeDataSource>,
     pub quant_fact_read_repo: Arc<dyn QuantFactReadRepository>,
@@ -98,6 +100,7 @@ struct EmptyComposeInput<'a> {
     context: &'a BuildContext,
     market_selection_id: MarketSelectionId,
     account: &'a AccountSnapshot,
+    equity: &'a ReportEquitySnapshot,
     empty: EmptyReportContext,
     model_run_id: Option<ModelRunId>,
     market_selection_count: u32,
@@ -115,6 +118,7 @@ struct PublishedComposeInput<'a> {
     context: &'a BuildContext,
     selection: &'a MarketSelectionSnapshot,
     account: &'a AccountSnapshot,
+    equity: &'a ReportEquitySnapshot,
     features: &'a FeaturePipelineResult,
     model_outcome: ModelRunOutcome,
     plan: PortfolioPlanOutput,
@@ -125,6 +129,7 @@ struct FeatureStageRefs<'a> {
     context: &'a BuildContext,
     selection: &'a MarketSelectionSnapshot,
     account: &'a AccountSnapshot,
+    equity: &'a ReportEquitySnapshot,
     features: &'a FeaturePipelineResult,
 }
 
@@ -159,60 +164,97 @@ impl DefaultReportBuilder {
         let account = self
             .account_snapshot(context.as_of, &context.config)
             .await?;
+        let mut equity = self
+            .deps
+            .drawdown_provider
+            .snapshot_for_report(&account)
+            .await?;
 
         if let Some(report) =
-            self.compose_if_system_degraded(&request, &context, &selection, &account)?
+            self.compose_if_system_degraded(&request, &context, &selection, &account, &equity)?
         {
             return Ok(report);
         }
         if let Some(report) =
-            self.compose_if_empty_selection(&request, &context, &selection, &account)?
+            self.compose_if_empty_selection(&request, &context, &selection, &account, &equity)?
         {
             return Ok(report);
         }
 
         let features = self.build_features(&context, &selection).await?;
-        let stage = FeatureStageRefs {
-            request: &request,
-            context: &context,
-            selection: &selection,
-            account: &account,
-            features: &features,
-        };
-        if let Some(report) = self.compose_if_no_accepted_features(&stage)? {
-            return Ok(report);
-        }
+        let model_outcome = {
+            let stage = FeatureStageRefs {
+                request: &request,
+                context: &context,
+                selection: &selection,
+                account: &account,
+                equity: &equity,
+                features: &features,
+            };
+            if let Some(report) = self.compose_if_no_accepted_features(&stage)? {
+                return Ok(report);
+            }
 
-        let model_outcome = self.run_model(&context, &selection, &features).await?;
+            let model_outcome = self.run_model(&context, &selection, &features).await?;
+            let artifacts = FeatureStageArtifacts {
+                captures: features.captures.clone(),
+                data_quality_snapshot: features.data_quality_snapshot.clone(),
+            };
+            if let Some(report) =
+                self.compose_if_no_model_signals(&stage, &model_outcome, artifacts)?
+            {
+                return Ok(report);
+            }
+            model_outcome
+        };
         let artifacts = FeatureStageArtifacts {
             captures: features.captures.clone(),
             data_quality_snapshot: features.data_quality_snapshot.clone(),
         };
-        if let Some(report) =
-            self.compose_if_no_model_signals(&stage, &model_outcome, artifacts.clone())?
-        {
-            return Ok(report);
-        }
 
         let correlation = self.build_correlation(&context, &selection).await?;
+        self.finalize_equity_for_sizing(&account, &mut equity)
+            .await?;
         let plan = Self::plan_portfolio(
             &context,
             &selection,
             &model_outcome,
             &account,
+            equity.drawdown_state,
             correlation.as_ref(),
         )?;
-        if let Some(report) =
-            self.compose_if_empty_plan(&stage, &model_outcome, &plan, artifacts)?
-        {
-            return Ok(report);
+        if plan.planned.is_empty() {
+            return self.compose_empty(EmptyComposeInput {
+                request: &request,
+                context: &context,
+                market_selection_id: selection.market_selection_id.clone(),
+                account: &account,
+                equity: &equity,
+                empty: EmptyReportContext {
+                    reason: empty_reason_from_planner_rejections(&plan.rejected),
+                    candidate_count: model_outcome.emitted,
+                    rejected_count: u32::try_from(plan.rejected.len()).unwrap_or(u32::MAX),
+                    warnings: Vec::new(),
+                },
+                model_run_id: Some(model_outcome.model_run_id.clone()),
+                market_selection_count: market_selection_count(&selection.included),
+                captures: artifacts.captures,
+                feature_vector_by_market: feature_vector_by_market(&features),
+                data_quality_snapshot: artifacts.data_quality_snapshot,
+                portfolio_plan: Some(plan.plan_row),
+                planner_rejected: &plan.rejected,
+            });
         }
+
+        self.finalize_equity_for_sizing(&account, &mut equity)
+            .await?;
 
         self.compose_published(PublishedComposeInput {
             request: &request,
             context: &context,
             selection: &selection,
             account: &account,
+            equity: &equity,
             features: &features,
             model_outcome,
             plan,
@@ -225,6 +267,7 @@ impl DefaultReportBuilder {
         context: &BuildContext,
         selection: &MarketSelectionSnapshot,
         account: &AccountSnapshot,
+        equity: &ReportEquitySnapshot,
     ) -> QuantResult<Option<ComposedReport>> {
         if !self.deps.readiness_gate.is_system_degraded() {
             return Ok(None);
@@ -234,6 +277,7 @@ impl DefaultReportBuilder {
             context,
             market_selection_id: selection.market_selection_id.clone(),
             account,
+            equity,
             empty: EmptyReportContext {
                 reason: EmptyReason::SystemDegraded,
                 candidate_count: 0,
@@ -257,6 +301,7 @@ impl DefaultReportBuilder {
         context: &BuildContext,
         selection: &MarketSelectionSnapshot,
         account: &AccountSnapshot,
+        equity: &ReportEquitySnapshot,
     ) -> QuantResult<Option<ComposedReport>> {
         if !selection.included.is_empty() {
             return Ok(None);
@@ -266,6 +311,7 @@ impl DefaultReportBuilder {
             context,
             market_selection_id: selection.market_selection_id.clone(),
             account,
+            equity,
             empty: EmptyReportContext {
                 reason: EmptyReason::EmptySelection,
                 candidate_count: 0,
@@ -295,6 +341,7 @@ impl DefaultReportBuilder {
             context: stage.context,
             market_selection_id: stage.selection.market_selection_id.clone(),
             account: stage.account,
+            equity: stage.equity,
             empty: EmptyReportContext {
                 reason: EmptyReason::InsufficientDataQuality,
                 candidate_count: 0,
@@ -326,6 +373,7 @@ impl DefaultReportBuilder {
             context: stage.context,
             market_selection_id: stage.selection.market_selection_id.clone(),
             account: stage.account,
+            equity: stage.equity,
             empty: EmptyReportContext {
                 reason: EmptyReason::NoPositiveSignal,
                 candidate_count: model_outcome.emitted,
@@ -342,41 +390,25 @@ impl DefaultReportBuilder {
         })
         .map(Some)
     }
-
-    fn compose_if_empty_plan(
-        &self,
-        stage: &FeatureStageRefs<'_>,
-        model_outcome: &ModelRunOutcome,
-        plan: &PortfolioPlanOutput,
-        artifacts: FeatureStageArtifacts,
-    ) -> QuantResult<Option<ComposedReport>> {
-        if !plan.planned.is_empty() {
-            return Ok(None);
-        }
-        self.compose_empty(EmptyComposeInput {
-            request: stage.request,
-            context: stage.context,
-            market_selection_id: stage.selection.market_selection_id.clone(),
-            account: stage.account,
-            empty: EmptyReportContext {
-                reason: empty_reason_from_planner_rejections(&plan.rejected),
-                candidate_count: model_outcome.emitted,
-                rejected_count: u32::try_from(plan.rejected.len()).unwrap_or(u32::MAX),
-                warnings: Vec::new(),
-            },
-            model_run_id: Some(model_outcome.model_run_id.clone()),
-            market_selection_count: market_selection_count(&stage.selection.included),
-            captures: artifacts.captures,
-            feature_vector_by_market: feature_vector_by_market(stage.features),
-            data_quality_snapshot: artifacts.data_quality_snapshot,
-            portfolio_plan: Some(plan.plan_row.clone()),
-            planner_rejected: &plan.rejected,
-        })
-        .map(Some)
-    }
 }
 
 impl DefaultReportBuilder {
+    async fn finalize_equity_for_sizing(
+        &self,
+        account: &AccountSnapshot,
+        equity: &mut ReportEquitySnapshot,
+    ) -> QuantResult<()> {
+        let resolution = self
+            .deps
+            .drawdown_provider
+            .resolve_drawdown_for_sizing(account, equity.drawdown_state)
+            .await?;
+        equity.drawdown_state = resolution.drawdown_state;
+        equity.equity_snapshot.high_water_mark_usd = resolution.high_water_mark_usd;
+        equity.equity_snapshot.drawdown_pct = resolution.drawdown_state.current_drawdown;
+        Ok(())
+    }
+
     async fn prepare_context(&self, request: &BuildReportRequest) -> QuantResult<BuildContext> {
         let (version, config) = self.load_config(request).await?;
         let source_delay_secs = resolve_source_delay(request, &config)?;
@@ -486,6 +518,7 @@ impl DefaultReportBuilder {
         selection: &MarketSelectionSnapshot,
         model_outcome: &ModelRunOutcome,
         account: &AccountSnapshot,
+        drawdown_state: quant_pivot_research::portfolio::DrawdownState,
         correlation: Option<&CorrelationConstraint>,
     ) -> QuantResult<PortfolioPlanOutput> {
         let caps = portfolio_caps(&context.config)?;
@@ -502,6 +535,7 @@ impl DefaultReportBuilder {
             as_of: context.as_of,
             candidates: plan_candidates,
             account,
+            drawdown_state,
             caps: &caps,
             max_correlated_exposure_usd: Usd::new(parse_decimal(
                 "portfolio.constraints.max_correlated_exposure_usd",
@@ -616,6 +650,8 @@ impl DefaultReportBuilder {
             model_version_id: input.context.active.model_version_id.clone(),
             market_selection_id: input.selection.market_selection_id.clone(),
             account: input.account,
+            account_snapshot: input.equity.account_snapshot.clone(),
+            equity_snapshot: input.equity.equity_snapshot.clone(),
             portfolio_plan: plan_row,
             planned: &planned,
             planner_rejected: &rejected,
@@ -683,6 +719,8 @@ impl DefaultReportBuilder {
             model_version_id: input.context.active.model_version_id.clone(),
             market_selection_id: input.market_selection_id,
             account: input.account,
+            account_snapshot: input.equity.account_snapshot.clone(),
+            equity_snapshot: input.equity.equity_snapshot.clone(),
             portfolio_plan,
             planned: &[],
             planner_rejected: input.planner_rejected,

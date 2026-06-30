@@ -1,6 +1,6 @@
 //! Factor-definition governance helpers for integration tests.
 
-use quant_pivot_error::QuantResult;
+use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{
     enums::quant::PublicationStatus,
     runtime_config::{FactorsConfig, FeaturesConfig},
@@ -26,12 +26,12 @@ pub async fn publish_all_factor_definitions(
         let row = factor_repo
             .create_definition(definition)
             .await
-            .map_err(quant_pivot_error::QuantError::from)?;
+            .map_err(QuantError::from)?;
         if row.status != PublicationStatus::Published {
             factor_repo
                 .publish_definition(&row.factor_definition_id)
                 .await
-                .map_err(quant_pivot_error::QuantError::from)?;
+                .map_err(QuantError::from)?;
         }
     }
     Ok(())

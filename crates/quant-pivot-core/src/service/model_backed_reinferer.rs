@@ -14,7 +14,7 @@ use quant_pivot_models::{
     domain::{ModelVersionInfo, OrderIntentInfo, PointInTimeDataSource, PositionInfo},
     enums::quant::{DataQualityStatus, OutcomeSide, PublicationStatus},
     runtime_config::{DataQualityConfig, FactorsConfig, FeaturesConfig, RuntimeConfig},
-    types::{Bps, ModelRunId, RuntimeConfigVersionId, Usd},
+    types::{Bps, ModelRunId, ModelVersionId, Price, RuntimeConfigVersionId, Usd},
 };
 use quant_pivot_repository::traits::{ModelRegistryRepository, RuntimeConfigVersionRepository};
 use quant_pivot_research::{
@@ -65,7 +65,7 @@ impl ModelBackedExitSignalReinferer {
 
     async fn load_model_version(
         &self,
-        model_version_id: &quant_pivot_models::types::ModelVersionId,
+        model_version_id: &ModelVersionId,
     ) -> QuantResult<Option<ModelVersionInfo>> {
         let Some(version) = self
             .deps
@@ -119,7 +119,7 @@ impl ExitSignalReinferer for ModelBackedExitSignalReinferer {
         &self,
         intent: &OrderIntentInfo,
         lot: &PositionInfo,
-        _mark_price: Option<quant_pivot_models::types::Price>,
+        _mark_price: Option<Price>,
         now: DateTime<Utc>,
     ) -> QuantResult<Option<FreshSignal>> {
         let config = resolve_frozen_config(

@@ -17,8 +17,8 @@ use quant_pivot_api::fees::FeeCalculator;
 use quant_pivot_core::{
     execution::{
         CollectedReconciliation, EvidenceCollector, ExecutionBreaker, PolymarketOrderClient,
-        ReconciliationService, ReconciliationServiceDeps, VenueEvidenceCollector,
-        VenueReconciliationReader,
+        ReconciliationService, ReconciliationServiceDeps, VenueCancelResult,
+        VenueEvidenceCollector, VenueOrder, VenueReconciliationReader, VenueSubmitResult,
     },
     observability::metrics_hub::MetricsHub,
     pipeline::book_store::BookStore,
@@ -675,6 +675,10 @@ impl PositionRepository for StubPositions {
     ) -> Result<Vec<PositionInfo>, StorageError> {
         Ok(Vec::new())
     }
+
+    async fn realized_pnl_cumulative_usd(&self) -> Result<Usd, StorageError> {
+        Ok(Usd::ZERO)
+    }
 }
 
 struct FailingCollector;
@@ -740,19 +744,13 @@ struct RecordingCancelClient {
 
 #[async_trait]
 impl PolymarketOrderClient for RecordingCancelClient {
-    async fn submit(
-        &self,
-        _order: quant_pivot_core::execution::VenueOrder,
-    ) -> quant_pivot_core::execution::VenueSubmitResult {
+    async fn submit(&self, _order: VenueOrder) -> VenueSubmitResult {
         unimplemented!()
     }
 
-    async fn cancel(
-        &self,
-        venue_order_id: &OrderId,
-    ) -> quant_pivot_core::execution::VenueCancelResult {
+    async fn cancel(&self, venue_order_id: &OrderId) -> VenueCancelResult {
         self.cancel_count.fetch_add(1, Ordering::SeqCst);
-        quant_pivot_core::execution::VenueCancelResult {
+        VenueCancelResult {
             venue_order_id: venue_order_id.clone(),
             cancelled: true,
             detail: Some("cancelled in test".to_owned()),

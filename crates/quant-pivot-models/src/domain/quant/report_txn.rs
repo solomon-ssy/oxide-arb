@@ -1,11 +1,11 @@
 //! Atomic report-creation transaction input.
 //!
 //! Produced by the 04.2 composer and written as one Postgres transaction:
-//! `account_snapshot → data_quality_snapshot → portfolio_plan → report → recommendations`.
+//! `account_snapshot → equity_snapshot → data_quality_snapshot → portfolio_plan → report → recommendations`.
 
 use super::{
-    NewAccountSnapshot, NewPortfolioPlan, NewRecommendation, NewRecommendationReport,
-    NewReportDataQualitySnapshot,
+    NewAccountSnapshot, NewEquitySnapshot, NewPortfolioPlan, NewRecommendation,
+    NewRecommendationReport, NewReportDataQualitySnapshot,
 };
 use crate::domain::governance::NewOperationLog;
 
@@ -14,6 +14,8 @@ use crate::domain::governance::NewOperationLog;
 pub struct NewReportTransaction {
     /// Decision-time capital snapshot (FK target for the report header).
     pub account_snapshot: NewAccountSnapshot,
+    /// Strategy-capital equity curve snapshot used for drawdown-aware sizing.
+    pub equity_snapshot: NewEquitySnapshot,
     /// Per-fire data-quality snapshot (FK target for the report header).
     pub data_quality_snapshot: NewReportDataQualitySnapshot,
     /// Portfolio plan (FK target for the report header).

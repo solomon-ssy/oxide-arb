@@ -25,7 +25,7 @@ use quant_pivot_research::{
     backtest::PortfolioCaps,
     model::signal::{ModelExplanation, SignalCandidate},
     portfolio::{
-        AccountSnapshot, DefaultPortfolioPlanner, KellySizingModel,
+        AccountSnapshot, DefaultPortfolioPlanner, DrawdownState, KellySizingModel,
         LinearProgrammingPortfolioAllocator, OptimizerConfig, PlanCandidate, PortfolioPlanInput,
         PortfolioPlanner, SizingModel,
     },
@@ -113,6 +113,7 @@ fn account(
         Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
         AccountSource::Polymarket,
         Usd::new(equity),
+        Usd::new(equity),
         Usd::new(available),
         Usd::new(reserved),
         positions,
@@ -160,6 +161,7 @@ fn input<'a>(
         caps,
         max_correlated_exposure_usd: Usd::ZERO,
         correlation: None,
+        drawdown_state: DrawdownState::neutral(),
         sizing,
         entry_max_slippage_bps: Bps::new(dec!(50)),
         top_n,
@@ -482,5 +484,114 @@ fn lp_top_n_exclusion_is_rejected() {
         out.rejected
             .iter()
             .any(|r| r.reason == RejectionReason::BeyondTopN && r.market_id.as_str() == "0xb")
+    );
+}
+
+#[test]
+fn planner_consumes_real_drawdown_state() {
+    let caps = caps();
+    let acct = account(dec!(10000), dec!(10000), Usd::ZERO.inner(), Vec::new());
+    let candidate = candidate("0xa", dec!(0.9), dec!(1), dec!(200), dec!(100));
+    let conservative = KellySizingModel::new(
+        dec!(0.5),
+        dec!(0.9),
+        dec!(2),
+        ConfidenceSizeCurve::Linear,
+        DrawdownMultiplierPolicy::Conservative,
+    );
+    let mut neutral = input(
+        vec![plan_candidate(
+            &candidate,
+            MarketCategory::Crypto,
+            Some(Usd::new(dec!(50000))),
+        )],
+        &acct,
+        &caps,
+        &conservative,
+        1,
+    );
+    neutral.drawdown_state = DrawdownState::neutral();
+    let neutral_out = planner().plan(neutral).expect("neutral plan");
+
+    let mut in_drawdown = input(
+        vec![plan_candidate(
+            &candidate,
+            MarketCategory::Crypto,
+            Some(Usd::new(dec!(50000))),
+        )],
+        &acct,
+        &caps,
+        &conservative,
+        1,
+    );
+    in_drawdown.drawdown_state = DrawdownState {
+        current_drawdown: dec!(0.2),
+    };
+    let drawdown_out = planner().plan(in_drawdown).expect("drawdown plan");
+
+    assert_eq!(neutral_out.planned.len(), 1);
+    assert_eq!(drawdown_out.planned.len(), 1);
+    let neutral_kelly = neutral_out.planned[0]
+        .sizing
+        .kelly_fraction_applied
+        .expect("kelly fraction");
+    let drawdown_kelly = drawdown_out.planned[0]
+        .sizing
+        .kelly_fraction_applied
+        .expect("kelly fraction");
+    assert_eq!(drawdown_kelly, neutral_kelly * dec!(0.8));
+}
+
+#[test]
+fn planner_deterministic_with_frozen_drawdown() {
+    let caps = caps();
+    let acct = account(dec!(10000), dec!(10000), Usd::ZERO.inner(), Vec::new());
+    let candidate = candidate("0xa", dec!(0.85), dec!(1), dec!(200), dec!(100));
+    let conservative = KellySizingModel::new(
+        dec!(0.5),
+        dec!(0.9),
+        dec!(2),
+        ConfidenceSizeCurve::Linear,
+        DrawdownMultiplierPolicy::Conservative,
+    );
+    let mut plan_input = input(
+        vec![plan_candidate(
+            &candidate,
+            MarketCategory::Crypto,
+            Some(Usd::new(dec!(50000))),
+        )],
+        &acct,
+        &caps,
+        &conservative,
+        1,
+    );
+    plan_input.drawdown_state = DrawdownState {
+        current_drawdown: dec!(0.15),
+    };
+
+    let first = planner().plan(plan_input).expect("first plan");
+    let mut replay_input = input(
+        vec![plan_candidate(
+            &candidate,
+            MarketCategory::Crypto,
+            Some(Usd::new(dec!(50000))),
+        )],
+        &acct,
+        &caps,
+        &conservative,
+        1,
+    );
+    replay_input.drawdown_state = DrawdownState {
+        current_drawdown: dec!(0.15),
+    };
+    let second = planner().plan(replay_input).expect("second plan");
+    assert_eq!(first.planned.len(), second.planned.len());
+    assert_eq!(
+        first.planned[0].sizing.suggested_usd,
+        second.planned[0].sizing.suggested_usd
+    );
+    assert_optimizer_meta_replay_equal(
+        &first.plan_row.optimizer_meta_json,
+        &second.plan_row.optimizer_meta_json,
     );
 }

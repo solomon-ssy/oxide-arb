@@ -21,9 +21,9 @@ use quant_pivot_models::{
         RecommendationReportStatus, ReportKind, SettlementPolicy,
     },
     types::{
-        BookSnapshotRef, Bps, EligibilitySummary, EntryPlan, EvidenceRefs, ExecutionEligibility,
-        ExitPlan, PartialExitNode, Price, RecommendationId, RecommendationReportId, ReportSummary,
-        TrailingStop, Usd,
+        BookSnapshotRef, Bps, EligibilitySummary, EntryPlan, EquitySnapshotId, EvidenceRefs,
+        ExecutionEligibility, ExitPlan, PartialExitNode, Price, RecommendationId,
+        RecommendationReportId, ReportSummary, TrailingStop, Usd,
     },
 };
 
@@ -86,6 +86,7 @@ fn base_report(
     info.market_selection_id = ref_id("snapshot-market-selection");
     info.portfolio_plan_id = ref_id("snapshot-portfolio-plan");
     info.account_snapshot_ref = ref_id("snapshot-account");
+    info.equity_snapshot_ref = EquitySnapshotId::new(seeded_uuid("snapshot-equity"));
     info.data_quality_snapshot_ref = ref_id("snapshot-data-quality");
     info.summary_json = summary;
     info.published_at = Some(at(1_700_000_000));

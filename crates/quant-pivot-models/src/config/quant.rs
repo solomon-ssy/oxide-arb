@@ -46,6 +46,12 @@ pub struct QuantWorkersConfig {
     /// Drives `ExecutionBreaker::tick`, which recovers `Degraded -> Healthy`
     /// after the configured cooldown. `Halted` is latched and never auto-heals.
     pub execution_breaker_tick_secs: u64,
+    /// Best-effort equity-history snapshot cadence (seconds).
+    ///
+    /// Report generation computes and persists its own authoritative equity
+    /// snapshot synchronously. This worker only adds heartbeat/history points
+    /// between reports.
+    pub equity_snapshot_secs: u64,
 }
 
 impl Default for QuantWorkersConfig {
@@ -55,6 +61,7 @@ impl Default for QuantWorkersConfig {
             intent_expire_sweep_secs: default_intent_expire_sweep_secs(),
             execution_dispatch_secs: default_execution_dispatch_secs(),
             execution_breaker_tick_secs: default_execution_breaker_tick_secs(),
+            equity_snapshot_secs: default_equity_snapshot_secs(),
         }
     }
 }
@@ -87,4 +94,8 @@ const fn default_execution_dispatch_secs() -> u64 {
 
 const fn default_execution_breaker_tick_secs() -> u64 {
     5
+}
+
+const fn default_equity_snapshot_secs() -> u64 {
+    300
 }

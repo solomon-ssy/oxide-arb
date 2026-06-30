@@ -18,8 +18,8 @@
 use actix_web::{HttpResponse, ResponseError, http::StatusCode};
 use quant_pivot_error::{
     QuantError, auth::AuthError, control::ControlError, execution::ExecutionError,
-    governance::GovernanceError, query::QueryError, rbac::RbacError, research::ResearchError,
-    storage::StorageError,
+    governance::GovernanceError, infra::InfraError, query::QueryError, rbac::RbacError,
+    research::ResearchError, storage::StorageError,
 };
 use thiserror::Error;
 
@@ -237,16 +237,13 @@ impl From<QuantError> for WebError {
             QuantError::Execution(execution) => execution.into(),
             QuantError::NotImplemented(detail) => Self::NotImplemented(detail),
             QuantError::Infra(ref infra) => match infra {
-                quant_pivot_error::infra::InfraError::MetricsRegistration { .. }
-                | quant_pivot_error::infra::InfraError::ChannelClosed { .. } => {
+                InfraError::MetricsRegistration { .. } | InfraError::ChannelClosed { .. } => {
                     Self::ServiceUnavailable("service temporarily unavailable".to_owned())
                 }
-                quant_pivot_error::infra::InfraError::ServerBind { .. }
-                | quant_pivot_error::infra::InfraError::ServerRuntime { .. }
-                | quant_pivot_error::infra::InfraError::Misconfigured { .. }
-                | quant_pivot_error::infra::InfraError::BlockingTaskJoin { .. } => {
-                    Self::Internal(error.to_string())
-                }
+                InfraError::ServerBind { .. }
+                | InfraError::ServerRuntime { .. }
+                | InfraError::Misconfigured { .. }
+                | InfraError::BlockingTaskJoin { .. } => Self::Internal(error.to_string()),
             },
             QuantError::Control(control) => control.into(),
             other => Self::Internal(other.to_string()),

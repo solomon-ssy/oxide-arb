@@ -30,7 +30,7 @@ use quant_pivot_models::{
     },
     types::{
         AccountSnapshotId, BookSnapshotRef, Bps, ConfidenceSummary, ContentHash,
-        DataQualitySummary, EligibilitySummary, EntryPlan, EventId, EvidenceRefs,
+        DataQualitySummary, EligibilitySummary, EntryPlan, EquitySnapshotId, EventId, EvidenceRefs,
         ExecutionEligibility, ExitPlan, FactorBreakdownEntry, FeatureVectorId, MarketContext,
         MarketId, MarketSelectionId, ModelRunId, ModelVersionId, PortfolioPlanId, Price,
         Probability, RecommendationFactorBreakdown, RecommendationId, RecommendationIdentity,
@@ -92,6 +92,7 @@ fn report(
         account_source: AccountSource::Polymarket,
         capital_base_usd: Usd::new(dec!(10000)),
         account_snapshot_ref: AccountSnapshotId::from_v7(),
+        equity_snapshot_ref: EquitySnapshotId::from_v7(),
         data_quality_snapshot_ref: ReportDataQualitySnapshotId::from_v7(),
         summary_json: report_summary(Usd::new(dec!(500)), 2),
         published_at: Some(at(1_700_000_000)),

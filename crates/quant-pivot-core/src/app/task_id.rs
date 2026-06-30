@@ -91,6 +91,8 @@ pub enum TaskId {
     ReportGenerator,
     /// Rolls reports up to `Expired` once all their recommendations are terminal.
     ReportExpireSweep,
+    /// Best-effort strategy-capital equity history snapshots between reports.
+    EquitySnapshotWorker,
     /// Expires recommendations past their data-driven `valid_until` and cascades
     /// their reserved capital.
     RecommendationExpireSweep,
@@ -133,6 +135,7 @@ impl TaskId {
             | Self::ExposureGc
             | Self::ReportGenerator
             | Self::ReportExpireSweep
+            | Self::EquitySnapshotWorker
             | Self::RecommendationExpireSweep
             | Self::RecommendationDeadlineScheduler
             | Self::IntentExpireSweep

@@ -20,7 +20,8 @@ use quant_pivot_models::{
 use rust_decimal::Decimal;
 use sea_orm::{
     ActiveModelTrait, ActiveValue, ColumnTrait, Condition, ConnectionTrait, DatabaseConnection,
-    EntityTrait, IntoActiveModel, QueryFilter, QueryOrder,
+    EntityTrait, FromQueryResult, IntoActiveModel, QueryFilter, QueryOrder, QuerySelect,
+    sea_query::Expr,
 };
 
 /// Position-lot states still considered "open" (subject to exit monitoring).
@@ -36,6 +37,11 @@ impl PgPositionRepository {
     pub const fn new(db: DatabaseConnection) -> Self {
         Self { db }
     }
+}
+
+#[derive(Debug, FromQueryResult)]
+struct RealizedPnlSum {
+    total: Option<Decimal>,
 }
 
 #[async_trait::async_trait]
@@ -123,6 +129,19 @@ impl PositionRepository for PgPositionRepository {
             .await
             .map_err(StorageError::from)
             .map(|rows| rows.into_iter().map(Into::into).collect())
+    }
+
+    async fn realized_pnl_cumulative_usd(&self) -> Result<Usd, StorageError> {
+        let row = quant_position::Entity::find()
+            .select_only()
+            .column_as(Expr::cust("SUM(realized_pnl_usd)"), "total")
+            .into_model::<RealizedPnlSum>()
+            .one(&self.db)
+            .await
+            .map_err(StorageError::from)?;
+        Ok(Usd::new(
+            row.and_then(|row| row.total).unwrap_or(Decimal::ZERO),
+        ))
     }
 }
 

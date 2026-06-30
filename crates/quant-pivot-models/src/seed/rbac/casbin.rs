@@ -35,12 +35,12 @@ const PRODUCES: &[SeedArtifact] = &[];
 
 pub const CASBIN_SEED: SeedSpec = SeedSpec {
     id: SEED_ID,
-    version: 9,
+    version: 10,
     target_table: casbin_rule_table_name,
     depends_on: DEPENDS_ON,
     produces: PRODUCES,
     conflict_policy: SeedConflictPolicy::GraphOrdered,
-    checksum: "rbac.casbin.bootstrap.v9",
+    checksum: "rbac.casbin.bootstrap.v10",
     loader: load_boxed,
 };
 
@@ -50,6 +50,7 @@ const READ_RESOURCES: &[ResourceType] = &[
     ResourceType::Market,
     ResourceType::QuantReport,
     ResourceType::AccountSnapshot,
+    ResourceType::EquitySnapshot,
     ResourceType::OrderIntent,
     ResourceType::ExecutionOrder,
     ResourceType::Position,

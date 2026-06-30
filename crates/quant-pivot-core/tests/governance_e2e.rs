@@ -306,7 +306,7 @@ async fn seed_backtest(
         total_allocated_usd: dec!(10000),
         realized_pnl_usd: dec!(500),
         gross_return: dec!(0.05),
-        equity_curve: Vec::new(),
+        pnl_curve: Vec::new(),
     })
     .expect("pnl");
 

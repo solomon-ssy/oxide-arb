@@ -12,7 +12,10 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Duration, Utc};
 use quant_pivot_api::fees::FeeCalculator;
-use quant_pivot_error::{QuantResult, storage::StorageError};
+use quant_pivot_error::{
+    QuantResult,
+    storage::{StorageError, entity},
+};
 use quant_pivot_models::{
     domain::{
         CapitalReconcileSettlement, ExecutionOrderInfo, OrderIntentInfo, PositionExit,
@@ -225,7 +228,7 @@ impl ReconciliationService {
             .await?
             .ok_or_else(|| {
                 StorageError::not_found(
-                    quant_pivot_error::storage::entity::QUANT_EXECUTION_ORDER,
+                    entity::QUANT_EXECUTION_ORDER,
                     &resolution.execution_order_id,
                 )
             })?;
@@ -235,10 +238,7 @@ impl ReconciliationService {
             .find_by_id(&order.order_intent_id)
             .await?
             .ok_or_else(|| {
-                StorageError::not_found(
-                    quant_pivot_error::storage::entity::QUANT_ORDER_INTENT,
-                    &order.order_intent_id,
-                )
+                StorageError::not_found(entity::QUANT_ORDER_INTENT, &order.order_intent_id)
             })?;
         let recommendation = self
             .deps
@@ -246,10 +246,7 @@ impl ReconciliationService {
             .find_by_id(&intent.recommendation_id)
             .await?
             .ok_or_else(|| {
-                StorageError::not_found(
-                    quant_pivot_error::storage::entity::QUANT_RECOMMENDATION,
-                    &intent.recommendation_id,
-                )
+                StorageError::not_found(entity::QUANT_RECOMMENDATION, &intent.recommendation_id)
             })?;
 
         let note = system_note(
@@ -321,10 +318,7 @@ impl ReconciliationService {
             .find_by_id(&order.order_intent_id)
             .await?
             .ok_or_else(|| {
-                StorageError::not_found(
-                    quant_pivot_error::storage::entity::QUANT_ORDER_INTENT,
-                    &order.order_intent_id,
-                )
+                StorageError::not_found(entity::QUANT_ORDER_INTENT, &order.order_intent_id)
             })?;
         let recommendation = self
             .deps
@@ -332,10 +326,7 @@ impl ReconciliationService {
             .find_by_id(&intent.recommendation_id)
             .await?
             .ok_or_else(|| {
-                StorageError::not_found(
-                    quant_pivot_error::storage::entity::QUANT_RECOMMENDATION,
-                    &intent.recommendation_id,
-                )
+                StorageError::not_found(entity::QUANT_RECOMMENDATION, &intent.recommendation_id)
             })?;
         Ok((intent, recommendation))
     }

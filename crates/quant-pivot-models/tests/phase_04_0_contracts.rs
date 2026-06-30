@@ -27,7 +27,7 @@ use quant_pivot_models::{
     },
     types::{
         AccountPositions, AccountSnapshotId, BookSnapshotRef, Bps, ConfidenceSummary, ContentHash,
-        DataQualitySummary, EligibilitySummary, EntryPlan, EventId, EvidenceRefs,
+        DataQualitySummary, EligibilitySummary, EntryPlan, EquitySnapshotId, EventId, EvidenceRefs,
         ExecutionEligibility, ExitPlan, ExposureBreakdown, FactorBreakdownEntry, FeatureVectorId,
         MarketId, MarketSelectionId, ModelRunId, ModelVersionId, PartialExitNode, PortfolioPlanId,
         PositionSnapshot, Price, Probability, RecommendationFactorBreakdown,
@@ -267,6 +267,7 @@ fn recommendation_report_header_has_account_columns() {
         account_source: AccountSource::Polymarket,
         capital_base_usd: Usd::new(dec!(10000)),
         account_snapshot_ref: AccountSnapshotId::from_v7(),
+        equity_snapshot_ref: EquitySnapshotId::from_v7(),
         data_quality_snapshot_ref: ReportDataQualitySnapshotId::from_v7(),
         summary_json: report_summary(),
         published_at: None,
@@ -283,6 +284,7 @@ fn recommendation_report_header_has_account_columns() {
     assert_eq!(json["account_source"], json!("polymarket"));
     assert_eq!(json["capital_base_usd"], json!("10000"));
     assert!(json["account_snapshot_ref"].is_string());
+    assert!(json["equity_snapshot_ref"].is_string());
 }
 
 #[test]
@@ -357,7 +359,8 @@ fn account_snapshot_persists_positions_json_for_replay() {
         account_snapshot_id: AccountSnapshotId::from_v7(),
         as_of: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
         source: AccountSource::Polymarket,
-        equity_usd: Usd::new(dec!(10000)),
+        venue_net_liquidation_usd: Usd::new(dec!(10000)),
+        capital_base_usd: Usd::new(dec!(10000)),
         available_usd: Usd::new(dec!(9000)),
         reserved_usd: Usd::new(dec!(0)),
         positions_json: AccountPositions(positions.clone()),

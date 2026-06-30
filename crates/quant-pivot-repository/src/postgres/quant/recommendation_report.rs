@@ -1,5 +1,6 @@
 //! Postgres-backed recommendation report repository.
 
+use super::equity_snapshot::insert_equity_snapshot_monotonic;
 use crate::{
     postgres::{error, state_hash},
     traits::RecommendationReportRepository,
@@ -45,6 +46,7 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
     ) -> Result<RecommendationReportInfo, StorageError> {
         let NewReportTransaction {
             account_snapshot,
+            equity_snapshot,
             data_quality_snapshot,
             portfolio_plan,
             report,
@@ -59,6 +61,7 @@ impl RecommendationReportRepository for PgRecommendationReportRepository {
             .exec(&txn)
             .await
             .map_err(StorageError::from)?;
+        insert_equity_snapshot_monotonic(&txn, equity_snapshot).await?;
         quant_report_data_quality_snapshot::Entity::insert(
             data_quality_snapshot.into_active_model(),
         )

@@ -1,7 +1,7 @@
 use quant_pivot_error::storage::StorageError;
 use quant_pivot_models::{
     domain::{Paginated, PositionExit, PositionFill, PositionInfo, PositionListQuery},
-    types::{MarketId, OrderIntentId, PositionId, TokenId},
+    types::{MarketId, OrderIntentId, PositionId, TokenId, Usd},
 };
 
 /// Current-position ledger persistence port (one lot per filled entry intent).
@@ -45,4 +45,7 @@ pub trait PositionRepository: Send + Sync {
         &self,
         market_id: &MarketId,
     ) -> Result<Vec<PositionInfo>, StorageError>;
+
+    /// Cumulative realized `PnL` over all strategy position lots.
+    async fn realized_pnl_cumulative_usd(&self) -> Result<Usd, StorageError>;
 }

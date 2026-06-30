@@ -21,7 +21,8 @@ pub enum QuantAccountSnapshot {
     AccountSnapshotId,
     AsOf,
     Source,
-    EquityUsd,
+    VenueNetLiquidationUsd,
+    CapitalBaseUsd,
     AvailableUsd,
     ReservedUsd,
     PositionsJson,
@@ -42,7 +43,8 @@ pub fn table() -> TableCreateStatement {
         .col(column::pg_enum::<AccountSource>(
             QuantAccountSnapshot::Source,
         ))
-        .col(column::usd(QuantAccountSnapshot::EquityUsd))
+        .col(column::usd(QuantAccountSnapshot::VenueNetLiquidationUsd))
+        .col(column::usd(QuantAccountSnapshot::CapitalBaseUsd))
         .col(column::usd(QuantAccountSnapshot::AvailableUsd))
         .col(column::usd(QuantAccountSnapshot::ReservedUsd))
         .col(

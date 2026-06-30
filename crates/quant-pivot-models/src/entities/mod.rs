@@ -8,6 +8,7 @@ pub mod operation_log;
 pub mod quant_account_snapshot;
 pub mod quant_backtest_report;
 pub mod quant_capital_allocation;
+pub mod quant_equity_snapshot;
 pub mod quant_execution_order;
 pub mod quant_factor_definition;
 pub mod quant_factor_value;

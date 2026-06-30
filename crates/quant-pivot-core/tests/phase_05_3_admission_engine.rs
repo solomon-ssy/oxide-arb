@@ -20,7 +20,7 @@ use quant_pivot_core::{
     runtime_config::RuntimeConfigStore,
     service::account::{AccountProviderFactory, ReservedCapitalReader},
 };
-use quant_pivot_error::{QuantError, account::AccountError, storage::StorageError};
+use quant_pivot_error::{QuantError, QuantResult, account::AccountError, storage::StorageError};
 use quant_pivot_models::{
     domain::{
         AppendReconciliationEvidence, BookLevel, BookSnapshot, CapitalAllocationInfo,
@@ -204,6 +204,7 @@ fn passing() -> AdmissionInput {
     let account = AccountSnapshot::new(
         now(),
         AccountSource::Polymarket,
+        Usd::new(dec!(10000)),
         Usd::new(dec!(10000)),
         Usd::new(dec!(10000)),
         Usd::new(dec!(250)),
@@ -1087,7 +1088,7 @@ struct StubReserved;
 
 #[async_trait]
 impl ReservedCapitalReader for StubReserved {
-    async fn sum_locked(&self) -> quant_pivot_error::QuantResult<Usd> {
+    async fn sum_locked(&self) -> QuantResult<Usd> {
         unimplemented!()
     }
 }

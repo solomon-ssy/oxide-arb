@@ -15,7 +15,8 @@ use quant_pivot_models::{
     types::Usd,
 };
 use quant_pivot_repository::{
-    postgres::PgAccountSnapshotRepository, traits::AccountSnapshotRepository,
+    postgres::{PgAccountSnapshotRepository, PgEquitySnapshotRepository},
+    traits::{AccountSnapshotRepository, EquitySnapshotRepository},
 };
 use sea_orm::DatabaseConnection;
 
@@ -64,6 +65,7 @@ pub fn core_account_read_port(
     Arc::new(CoreAccountReadPort::new(
         Arc::new(PgAccountSnapshotRepository::new(db.clone()))
             as Arc<dyn AccountSnapshotRepository>,
+        Arc::new(PgEquitySnapshotRepository::new(db.clone())) as Arc<dyn EquitySnapshotRepository>,
         stub_account_provider_factory(),
         runtime_config,
     ))

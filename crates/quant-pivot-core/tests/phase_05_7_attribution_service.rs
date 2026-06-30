@@ -12,12 +12,15 @@ use quant_pivot_core::{
 };
 use quant_pivot_models::{
     clickhouse::QuantRecommendationAttributionEventRow,
-    entities::{quant_order_intent, quant_position, quant_recommendation},
+    entities::{
+        quant_order_intent, quant_position, quant_recommendation, quant_recommendation_attribution,
+        quant_reconciliation,
+    },
     enums::{
         execution::{PositionLedgerState, ReconciliationResult},
         quant::{OrderIntentStatus, RecommendationAttributionOutcome, RecommendationStatus},
     },
-    types::Price,
+    types::{OrderIntentId, Price, RecommendationId},
 };
 use quant_pivot_repository::{
     postgres::{
@@ -82,10 +85,8 @@ fn attribution_service(db: &sea_orm::DatabaseConnection) -> AttributionService {
 
 async fn resolve_reconciliations_filled(
     db: &sea_orm::DatabaseConnection,
-    intent_id: &quant_pivot_models::types::OrderIntentId,
+    intent_id: &OrderIntentId,
 ) {
-    use quant_pivot_models::entities::quant_reconciliation;
-
     let rows = quant_reconciliation::Entity::find()
         .filter(quant_reconciliation::Column::OrderIntentId.eq(intent_id.clone()))
         .all(db)
@@ -102,7 +103,7 @@ async fn resolve_reconciliations_filled(
 
 async fn patch_intent_status(
     db: &sea_orm::DatabaseConnection,
-    intent_id: &quant_pivot_models::types::OrderIntentId,
+    intent_id: &OrderIntentId,
     status: OrderIntentStatus,
 ) {
     let row = quant_order_intent::Entity::find_by_id(intent_id.clone())
@@ -117,7 +118,7 @@ async fn patch_intent_status(
 
 async fn patch_recommendation_status(
     db: &sea_orm::DatabaseConnection,
-    recommendation_id: &quant_pivot_models::types::RecommendationId,
+    recommendation_id: &RecommendationId,
     status: RecommendationStatus,
 ) {
     let row = quant_recommendation::Entity::find_by_id(recommendation_id.clone())
@@ -391,9 +392,9 @@ async fn run_pass_duplicate_is_idempotent() {
     assert_eq!(second.written, 0);
     assert_eq!(second.skipped, 1);
 
-    let rows = quant_pivot_models::entities::quant_recommendation_attribution::Entity::find()
+    let rows = quant_recommendation_attribution::Entity::find()
         .filter(
-            quant_pivot_models::entities::quant_recommendation_attribution::Column::RecommendationId
+            quant_recommendation_attribution::Column::RecommendationId
                 .eq(ids.recommendation.clone()),
         )
         .all(&db)

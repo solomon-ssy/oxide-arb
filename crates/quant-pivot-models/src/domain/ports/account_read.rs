@@ -5,8 +5,11 @@ use chrono::{DateTime, Utc};
 use quant_pivot_error::QuantResult;
 
 use crate::{
-    domain::{AccountSnapshotInfo, LiveAccountSnapshot},
-    types::{AccountSnapshotId, Usd},
+    domain::{
+        AccountSnapshotInfo, EquitySnapshotInfo, EquitySnapshotQuery, LiveAccountSnapshot,
+        Paginated,
+    },
+    types::{AccountSnapshotId, EquitySnapshotId, Usd},
 };
 
 /// Live venue account read result (not persisted).
@@ -25,4 +28,16 @@ pub trait AccountReadPort: Send + Sync {
     ) -> QuantResult<Option<AccountSnapshotInfo>>;
 
     async fn live_account(&self) -> QuantResult<LiveAccountInfo>;
+
+    async fn latest_equity_snapshot(&self) -> QuantResult<Option<EquitySnapshotInfo>>;
+
+    async fn find_equity_snapshot_by_id(
+        &self,
+        id: &EquitySnapshotId,
+    ) -> QuantResult<Option<EquitySnapshotInfo>>;
+
+    async fn equity_snapshots(
+        &self,
+        query: EquitySnapshotQuery,
+    ) -> QuantResult<Paginated<EquitySnapshotInfo>>;
 }

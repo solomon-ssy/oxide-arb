@@ -66,8 +66,9 @@ flowchart TD
 | `status` | 报告状态 |
 | `summary` | 聚合摘要 |
 | `account_source` | 资本基数来源：恒 `polymarket`（真实 venue 账户；所有 mode 一致，credential-gated），见 [09](09-account-capital-position-reconciliation.md) |
-| `capital_base_usd` | 本次 sizing 的资本基数 = `AccountSnapshot.equity_usd`（真实净清算价值 `min` `portfolio.budget` 护栏） |
+| `capital_base_usd` | 本次 sizing 的策略资本基数 = `AccountSnapshot.capital_base_usd`（由真实 venue NLV 受 `portfolio.budget` 护栏约束） |
 | `account_snapshot_ref` | 指向 `quant_account_snapshot` 的决策时刻资金/持仓快照（可回放 sizing） |
+| `equity_snapshot_ref` | 指向 `quant_equity_snapshot` 的权益历史快照（可回放 high-water mark / drawdown） |
 
 ## 3. Report Summary
 

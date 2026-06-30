@@ -136,6 +136,10 @@ pub struct ModelGovernanceAuditId(Arc<Uuid>);
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AccountSnapshotId(Arc<Uuid>);
 
+/// Strategy-capital equity curve snapshot identifier.
+#[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct EquitySnapshotId(Arc<Uuid>);
+
 /// Report-level data-quality snapshot identifier (one row per report fire).
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ReportDataQualitySnapshotId(Arc<Uuid>);

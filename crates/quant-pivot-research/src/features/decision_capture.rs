@@ -324,7 +324,10 @@ mod tests {
     use crate::selection::SelectedMarket;
     use chrono::Utc;
     use quant_pivot_models::{
-        domain::market::{book::BookLevel, registry::MarketRegistryInfo},
+        domain::{
+            TokenInfo,
+            market::{book::BookLevel, registry::MarketRegistryInfo},
+        },
         enums::{
             common::{CategorySet, MarketCategory, TickSize},
             market::MarketStatus,
@@ -417,12 +420,12 @@ mod tests {
             neg_risk: false,
             tick_size: TickSize::Hundredth,
             tokens: vec![
-                quant_pivot_models::domain::market::TokenInfo {
+                TokenInfo {
                     token_id: TokenId::new("yes-token"),
                     outcome: "Yes".to_owned(),
                     neg_risk: false,
                 },
-                quant_pivot_models::domain::market::TokenInfo {
+                TokenInfo {
                     token_id: TokenId::new("no-token"),
                     outcome: "No".to_owned(),
                     neg_risk: false,

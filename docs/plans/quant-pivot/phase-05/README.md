@@ -308,7 +308,7 @@ flowchart LR
 | [`05`](../05-execution-risk-and-governance.md) §4.2 #20 / §1.3 | admission `#20` `ExitMonitorReadiness` 真实化（`ExitMonitorHealthHandle` worker 心跳）；mode preflight `exit_monitor_healthy` 由 soft 改 hard | 05.6 |
 | [`06`](../06-config-deploy-and-ops.md) | runtime-config 删除 `execution.kill_switch.enabled` 布尔；新增 kill-switch operational 单例语义 + 执行 metrics 清单 | 05.0/05.1 |
 | [`06`](../06-config-deploy-and-ops.md) | `execution` 段新增 `exit_monitor.{enabled,monitor_secs,signal_recheck_secs,signal_invalidation_ratio}` + `breaker.daily_realized_loss_cap_usd`；metric `quant_exit_triggers_total{reason}` | 05.6 |
-| [`06`](../06-config-deploy-and-ops.md) | `portfolio` 段新增 `optimizer`（greedy/lp）+ `constraints.correlation`；`execution.equity_snapshot_secs` | 05.8/05.9 |
+| [`06`](../06-config-deploy-and-ops.md) | `portfolio` 段新增 `optimizer`（LP/MILP）+ `constraints.correlation`；deploy-config `quant.workers.equity_snapshot_secs` | 05.8/05.9 |
 | [`08`](../08-third-party-crates-and-ml-stack.md) §9/§16 | `good_lp` 由"Phase 5 若 greedy 不够"明确为 **Phase 5 已实现的可选升级**（greedy 默认 + fallback，pure-Rust microlp 默认层 + 可选 native HiGHS） | 05.8 |
 | [`04`](../04-topn-report-and-recommendation.md) §9 | sizing `drawdown_scaling` 在 Phase 5 由 `quant_equity_snapshot` 提供真实回撤（不再恒 neutral） | 05.9 |
 

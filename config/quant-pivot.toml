@@ -136,6 +136,11 @@ size_threshold = 1
 # runtime-config reports.schedules[] via tokio-cron-scheduler).
 # Default: 300.
 report_expire_sweep_secs = 300
+# Purpose: best-effort strategy-capital equity history cadence (seconds).
+# Report generation still writes its own authoritative equity snapshot in the
+# report transaction; this worker only adds between-report history points.
+# Default: 300.
+equity_snapshot_secs = 300
 
 [quant.account]
 # Purpose: Polymarket proxy/funder address for keyless Data API position reads

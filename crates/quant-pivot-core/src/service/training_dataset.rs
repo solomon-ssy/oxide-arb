@@ -156,7 +156,7 @@ impl TrainingDatasetService {
 impl TrainingDatasetPlanner for TrainingDatasetService {
     async fn plan(&self, request: DatasetPlanRequest) -> QuantResult<DatasetPlan> {
         if request.window_start >= request.window_end {
-            return Err(quant_pivot_error::research::ResearchError::DatasetPlan {
+            return Err(ResearchError::DatasetPlan {
                 detail: format!(
                     "window_start {} must precede window_end {}",
                     request.window_start, request.window_end

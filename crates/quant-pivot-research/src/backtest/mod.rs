@@ -190,13 +190,13 @@ pub struct CategoryMetric {
     pub mean_realized_bps: Decimal,
 }
 
-/// One point of the equity curve (cumulative realized `PnL` after a tick).
+/// One point of the cumulative realized-PnL curve after a tick.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EquityPoint {
+pub struct PnlCurvePoint {
     /// Tick decision time.
     pub as_of: DateTime<Utc>,
     /// Cumulative realized `PnL` (USD) through this tick.
-    pub equity_usd: Decimal,
+    pub cumulative_realized_pnl_usd: Decimal,
 }
 
 /// Portfolio-level `PnL` simulation summary.
@@ -208,8 +208,8 @@ pub struct PnlSimulation {
     pub realized_pnl_usd: Decimal,
     /// Realized `PnL` as a fraction of total allocated capital.
     pub gross_return: Decimal,
-    /// Cumulative realized-PnL equity curve.
-    pub equity_curve: Vec<EquityPoint>,
+    /// Cumulative realized-PnL curve.
+    pub pnl_curve: Vec<PnlCurvePoint>,
 }
 
 /// A point-in-time backtest report (the persisted, content-addressed summary).

@@ -11,11 +11,12 @@ use chrono::{Duration, Utc};
 use quant_pivot_models::{
     domain::{
         AppendReconciliationEvidence, ExecutionOrderPatch, InsertFinalOutcome, NewAccountSnapshot,
-        NewCapitalAllocation, NewExecutionOrder, NewMarketSelection, NewModelRun, NewModelSpec,
-        NewModelVersion, NewOperationLog, NewOrderIntent, NewPortfolioPlan, NewRecommendation,
-        NewRecommendationAttribution, NewRecommendationReport, NewReconciliation,
-        NewReportDataQualitySnapshot, NewReportTransaction, NewRuntimeConfigVersion, NullablePatch,
-        OperationLogQuery, Patch, ReconciliationPatch, UpsertKillSwitchState,
+        NewCapitalAllocation, NewEquitySnapshot, NewExecutionOrder, NewMarketSelection,
+        NewModelRun, NewModelSpec, NewModelVersion, NewOperationLog, NewOrderIntent,
+        NewPortfolioPlan, NewRecommendation, NewRecommendationAttribution, NewRecommendationReport,
+        NewReconciliation, NewReportDataQualitySnapshot, NewReportTransaction,
+        NewRuntimeConfigVersion, NullablePatch, OperationLogQuery, Patch, ReconciliationPatch,
+        UpsertKillSwitchState,
     },
     enums::market::MarketStatus,
     enums::{
@@ -40,13 +41,13 @@ use quant_pivot_models::{
     types::{
         AccountPositions, AccountSnapshotId, AttributionDetail, BookSnapshotRef, Bps,
         CapitalAllocationId, ConfidenceSummary, ContentHash, DataQualitySummary,
-        EligibilitySummary, EntryOrderSpec, EntryOutcome, EntryPlan, EventId, EvidenceRefs,
-        ExecutionEligibility, ExecutionOrderId, ExitOutcome, ExitPlan, ExitPolicySpec,
-        ExposureBreakdown, FactorBreakdownEntry, FeatureVectorId, MarketContext, MarketId,
-        MarketSelectionId, ModelRunId, ModelSpecId, ModelVersionId, OperationLogId, OrderId,
-        OrderIntentId, PortfolioConstraintsSnapshot, PortfolioOptimizerMeta, PortfolioPlanId,
-        PortfolioRejectedSummary, PortfolioRiskBudget, PositionSnapshot, Price, Probability,
-        RecommendationFactorBreakdown, RecommendationId, RecommendationIdentity,
+        EligibilitySummary, EntryOrderSpec, EntryOutcome, EntryPlan, EquitySnapshotId, EventId,
+        EvidenceRefs, ExecutionEligibility, ExecutionOrderId, ExitOutcome, ExitPlan,
+        ExitPolicySpec, ExposureBreakdown, FactorBreakdownEntry, FeatureVectorId, MarketContext,
+        MarketId, MarketSelectionId, ModelRunId, ModelSpecId, ModelVersionId, OperationLogId,
+        OrderId, OrderIntentId, PortfolioConstraintsSnapshot, PortfolioOptimizerMeta,
+        PortfolioPlanId, PortfolioRejectedSummary, PortfolioRiskBudget, PositionSnapshot, Price,
+        Probability, RecommendationFactorBreakdown, RecommendationId, RecommendationIdentity,
         RecommendationReportId, ReconciliationEvidence, ReconciliationEvidenceChain,
         ReconciliationId, ReportDataQualitySnapshotId, ReportDataQualityTokens, ReportSummary,
         RiskEnvelope, RuntimeConfigVersionId, SchemaVersion, SelectionExclusionSummary, Shares,
@@ -75,6 +76,7 @@ use quant_pivot_test_support::{
     catalog_fixtures::{make_event, make_market},
     pg::setup_pg,
 };
+use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use std::str::FromStr;
 
@@ -99,7 +101,8 @@ fn new_account_snapshot() -> NewAccountSnapshot {
         account_snapshot_id: AccountSnapshotId::from_v7(),
         as_of: Utc::now(),
         source: AccountSource::Polymarket,
-        equity_usd: Usd::new(dec!(10000)),
+        venue_net_liquidation_usd: Usd::new(dec!(10000)),
+        capital_base_usd: Usd::new(dec!(10000)),
         available_usd: Usd::new(dec!(9000)),
         reserved_usd: Usd::new(dec!(0)),
         positions_json: AccountPositions(positions.clone()),
@@ -118,7 +121,7 @@ async fn account_snapshot_repo_create_find() {
     let id = snapshot.account_snapshot_id.clone();
     let created = repo.create(snapshot).await.expect("create snapshot");
     assert_eq!(created.account_snapshot_id, id);
-    assert_eq!(created.equity_usd, Usd::new(dec!(10000)));
+    assert_eq!(created.capital_base_usd, Usd::new(dec!(10000)));
     assert_eq!(created.positions_json.0.len(), 1);
 
     let found = repo
@@ -884,10 +887,25 @@ struct TxnIds {
 }
 
 fn build_report_transaction(ids: &TxnIds) -> NewReportTransaction {
+    let equity_snapshot_id = EquitySnapshotId::from_v7();
     NewReportTransaction {
         account_snapshot: NewAccountSnapshot {
             account_snapshot_id: ids.account_snapshot.clone(),
             ..new_account_snapshot()
+        },
+        equity_snapshot: NewEquitySnapshot {
+            equity_snapshot_id: equity_snapshot_id.clone(),
+            as_of: Utc::now(),
+            source: AccountSource::Polymarket,
+            venue_net_liquidation_usd: Usd::new(dec!(10000)),
+            capital_base_usd: Usd::new(dec!(10000)),
+            available_usd: Usd::new(dec!(9000)),
+            reserved_usd: Usd::ZERO,
+            realized_pnl_cumulative_usd: Usd::ZERO,
+            unrealized_pnl_usd: Usd::ZERO,
+            high_water_mark_usd: Usd::new(dec!(10000)),
+            drawdown_pct: Decimal::ZERO,
+            account_snapshot_ref: Some(ids.account_snapshot.clone()),
         },
         data_quality_snapshot: NewReportDataQualitySnapshot {
             report_data_quality_snapshot_id: ids.data_quality_snapshot.clone(),
@@ -926,6 +944,7 @@ fn build_report_transaction(ids: &TxnIds) -> NewReportTransaction {
             account_source: AccountSource::Polymarket,
             capital_base_usd: Usd::new(dec!(10000)),
             account_snapshot_ref: ids.account_snapshot.clone(),
+            equity_snapshot_ref: equity_snapshot_id,
             data_quality_snapshot_ref: ids.data_quality_snapshot.clone(),
             summary_json: report_summary(),
             published_at: Some(Utc::now()),

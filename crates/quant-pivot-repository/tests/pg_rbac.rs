@@ -6,6 +6,7 @@
 //! create their own users/roles/menus with unique keys.
 
 use casbin::{Adapter, CoreApi, DefaultModel, Enforcer, Model};
+use quant_pivot_error::storage::{StorageError, entity};
 use quant_pivot_models::{
     domain::{
         AssignMenus, AssignPermissions, AssignRoles, ChangeUserPassword, NewMenu, NewOperationLog,
@@ -145,8 +146,8 @@ async fn user_crud_paging_and_delete() {
     let dup = repo.create(new_user("alice")).await;
     assert!(matches!(
         dup,
-        Err(quant_pivot_error::storage::StorageError::Duplicate {
-            entity: quant_pivot_error::storage::entity::USER,
+        Err(StorageError::Duplicate {
+            entity: entity::USER,
             ..
         })
     ));
@@ -207,7 +208,7 @@ async fn user_crud_paging_and_delete() {
     repo.delete(&created.id).await.expect("delete");
     assert!(matches!(
         repo.find_by_id(&created.id).await,
-        Err(quant_pivot_error::storage::StorageError::NotFound { .. })
+        Err(StorageError::NotFound { .. })
     ));
 }
 
@@ -223,8 +224,8 @@ async fn role_crud_and_builtin_protection() {
         .expect("create role");
     assert!(matches!(
         repo.create(new_role("custom_role_a")).await,
-        Err(quant_pivot_error::storage::StorageError::Duplicate {
-            entity: quant_pivot_error::storage::entity::ROLE,
+        Err(StorageError::Duplicate {
+            entity: entity::ROLE,
             ..
         })
     ));
@@ -262,8 +263,8 @@ async fn role_crud_and_builtin_protection() {
         .expect("seeded");
     assert!(matches!(
         repo.delete(&builtin.id).await,
-        Err(quant_pivot_error::storage::StorageError::StateConflict {
-            entity: quant_pivot_error::storage::entity::ROLE,
+        Err(StorageError::StateConflict {
+            entity: entity::ROLE,
             ..
         })
     ));
@@ -309,8 +310,8 @@ async fn menu_tree_accessibility_and_delete_guard() {
     // Parent with children cannot be deleted.
     assert!(matches!(
         menus.delete(&root.id).await,
-        Err(quant_pivot_error::storage::StorageError::StateConflict {
-            entity: quant_pivot_error::storage::entity::MENU,
+        Err(StorageError::StateConflict {
+            entity: entity::MENU,
             ..
         })
     ));
@@ -442,7 +443,7 @@ async fn assign_roles_replaces_join_and_casbin_grouping() {
                 role_ids: vec![RoleId::from_v7()],
             })
             .await,
-        Err(quant_pivot_error::storage::StorageError::NotFound { .. })
+        Err(StorageError::NotFound { .. })
     ));
 }
 
@@ -506,7 +507,7 @@ async fn assign_permissions_validates_and_round_trips() {
                 )],
             })
             .await,
-        Err(quant_pivot_error::storage::StorageError::InvariantViolation { .. })
+        Err(StorageError::InvariantViolation { .. })
     ));
 }
 
@@ -522,16 +523,10 @@ async fn set_permissions_for_unknown_role_is_not_found() {
             permissions: vec![Permission::new(ResourceType::Market, Operation::Read)],
         })
         .await;
-    assert!(matches!(
-        result,
-        Err(quant_pivot_error::storage::StorageError::NotFound { .. })
-    ));
+    assert!(matches!(result, Err(StorageError::NotFound { .. })));
 
     let listed = perms.list_permissions(&RoleId::from_v7()).await;
-    assert!(matches!(
-        listed,
-        Err(quant_pivot_error::storage::StorageError::NotFound { .. })
-    ));
+    assert!(matches!(listed, Err(StorageError::NotFound { .. })));
 }
 
 #[tokio::test]

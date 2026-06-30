@@ -5,8 +5,16 @@ use crate::{
     app::{task_id::TaskId, task_registry::AppRunner},
     infra::periodic_task::PeriodicTask,
     pipeline::data_quality::DataQualityService,
+    service::equity::EquitySnapshotService,
 };
-use quant_pivot_error::QuantResult;
+use quant_pivot_error::{QuantError, QuantResult};
+use quant_pivot_models::{domain::RuntimeConfigPort, types::Usd};
+use quant_pivot_repository::{
+    postgres::{PgEquitySnapshotRepository, PgPositionRepository},
+    traits::{EquitySnapshotRepository, PositionRepository},
+};
+use rust_decimal::Decimal;
+use std::str::FromStr;
 use std::{sync::Arc, time::Duration};
 
 /// Interval between data-quality snapshot refreshes into Prometheus.
@@ -58,4 +66,56 @@ impl AppContext {
             .await;
         });
     }
+
+    pub fn register_equity_snapshot_worker(&self, runner: &mut AppRunner) {
+        let account_factory = Arc::clone(&self.account.provider_factory);
+        let runtime_config = Arc::clone(&self.governance.applicator);
+        let equity_service = Arc::new(EquitySnapshotService::new(
+            Arc::new(PgEquitySnapshotRepository::new(
+                self.infra.pg.connection().clone(),
+            )) as Arc<dyn EquitySnapshotRepository>,
+            Arc::new(PgPositionRepository::new(
+                self.infra.pg.connection().clone(),
+            )) as Arc<dyn PositionRepository>,
+        ));
+        let interval_secs = self.config.quant.workers.equity_snapshot_secs;
+        runner.spawn(TaskId::EquitySnapshotWorker, move |token| async move {
+            let _ = PeriodicTask::run(
+                "equity-snapshot-worker",
+                move || Duration::from_secs(interval_secs),
+                0.0,
+                true,
+                token,
+                move || {
+                    let account_factory = Arc::clone(&account_factory);
+                    let runtime_config = Arc::clone(&runtime_config);
+                    let equity_service = Arc::clone(&equity_service);
+                    async move {
+                        let budget_cap = parse_budget_cap(
+                            &runtime_config
+                                .current()
+                                .portfolio
+                                .budget
+                                .total_budget_usd
+                                .value,
+                        )?;
+                        let as_of = chrono::Utc::now();
+                        let account = account_factory.create(budget_cap)?.snapshot(as_of).await?;
+                        equity_service.record_history_snapshot(&account).await?;
+                        Ok(())
+                    }
+                },
+            )
+            .await;
+        });
+    }
+}
+
+fn parse_budget_cap(raw: &str) -> QuantResult<Usd> {
+    let value = Decimal::from_str(raw.trim()).map_err(|error| {
+        QuantError::config(format!(
+            "invalid portfolio.budget.total_budget_usd `{raw}`: {error}"
+        ))
+    })?;
+    Ok(Usd::new(value))
 }

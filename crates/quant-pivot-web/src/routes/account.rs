@@ -2,9 +2,11 @@
 
 use actix_web::{http::Method, web};
 use quant_pivot_models::{
-    domain::{AccountSnapshotView, LiveAccountView},
+    domain::{
+        AccountSnapshotView, EquitySnapshotQuery, EquitySnapshotView, LiveAccountView, Paginated,
+    },
     enums::rbac::{Operation, ResourceType},
-    types::AccountSnapshotId,
+    types::{AccountSnapshotId, EquitySnapshotId},
 };
 
 use crate::{
@@ -28,6 +30,24 @@ pub(crate) fn route_specs() -> Vec<RouteSpec> {
             "/quant/account/snapshots/{id}",
             Rule::ResourceOp(ResourceType::AccountSnapshot, Operation::Read),
             get_snapshot,
+        ),
+        spec(
+            Method::GET,
+            "/quant/account/equity-snapshots/latest",
+            Rule::ResourceOp(ResourceType::EquitySnapshot, Operation::Read),
+            latest_equity_snapshot,
+        ),
+        spec(
+            Method::GET,
+            "/quant/account/equity-snapshots/{id}",
+            Rule::ResourceOp(ResourceType::EquitySnapshot, Operation::Read),
+            get_equity_snapshot,
+        ),
+        spec(
+            Method::GET,
+            "/quant/account/equity-snapshots",
+            Rule::ResourceOp(ResourceType::EquitySnapshot, Operation::Read),
+            list_equity_snapshots,
         ),
     ]
 }
@@ -53,4 +73,39 @@ async fn get_snapshot(
         .await?
         .ok_or_else(|| WebError::NotFound(format!("account snapshot not found: {id}")))?;
     Ok(WebResponse::ok(AccountSnapshotView::from(info)))
+}
+
+async fn latest_equity_snapshot(
+    state: web::Data<AppState>,
+) -> Result<WebResponse<EquitySnapshotView>, WebError> {
+    let info = state
+        .account_read
+        .latest_equity_snapshot()
+        .await?
+        .ok_or_else(|| WebError::NotFound("equity snapshot not found".to_owned()))?;
+    Ok(WebResponse::ok(EquitySnapshotView::from(info)))
+}
+
+async fn get_equity_snapshot(
+    state: web::Data<AppState>,
+    id: web::Path<EquitySnapshotId>,
+) -> Result<WebResponse<EquitySnapshotView>, WebError> {
+    let info = state
+        .account_read
+        .find_equity_snapshot_by_id(&id)
+        .await?
+        .ok_or_else(|| WebError::NotFound(format!("equity snapshot not found: {id}")))?;
+    Ok(WebResponse::ok(EquitySnapshotView::from(info)))
+}
+
+async fn list_equity_snapshots(
+    state: web::Data<AppState>,
+    query: web::Query<EquitySnapshotQuery>,
+) -> Result<WebResponse<Paginated<EquitySnapshotView>>, WebError> {
+    let page = state
+        .account_read
+        .equity_snapshots(query.into_inner())
+        .await?
+        .map(EquitySnapshotView::from);
+    Ok(WebResponse::ok(page))
 }

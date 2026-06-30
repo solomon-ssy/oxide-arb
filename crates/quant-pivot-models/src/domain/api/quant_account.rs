@@ -1,11 +1,12 @@
 //! Venue account HTTP contract types (live + persisted snapshots).
 
 use crate::{
-    domain::{AccountSnapshotInfo, LiveAccountSnapshot},
+    domain::{AccountSnapshotInfo, EquitySnapshotInfo, LiveAccountSnapshot},
     enums::{common::MarketCategory, quant::AccountSource},
-    types::{AccountSnapshotId, ExposureBreakdown, PositionSnapshot, Usd},
+    types::{AccountSnapshotId, EquitySnapshotId, ExposureBreakdown, PositionSnapshot, Usd},
 };
 use chrono::{DateTime, Utc};
+use rust_decimal::Decimal;
 use serde::Serialize;
 
 /// Outbound projection of one venue-held outcome position at decision time.
@@ -46,7 +47,8 @@ pub struct AccountSnapshotView {
     pub account_snapshot_id: AccountSnapshotId,
     pub as_of: DateTime<Utc>,
     pub source: AccountSource,
-    pub equity_usd: Usd,
+    pub venue_net_liquidation_usd: Usd,
+    pub capital_base_usd: Usd,
     pub available_usd: Usd,
     pub reserved_usd: Usd,
     pub positions: Vec<VenuePositionSnapshotView>,
@@ -60,7 +62,8 @@ impl From<AccountSnapshotInfo> for AccountSnapshotView {
             account_snapshot_id: info.account_snapshot_id,
             as_of: info.as_of,
             source: info.source,
-            equity_usd: info.equity_usd,
+            venue_net_liquidation_usd: info.venue_net_liquidation_usd,
+            capital_base_usd: info.capital_base_usd,
             available_usd: info.available_usd,
             reserved_usd: info.reserved_usd,
             positions: info
@@ -82,7 +85,8 @@ pub struct LiveAccountView {
     pub budget_cap_usd: Usd,
     pub as_of: DateTime<Utc>,
     pub source: AccountSource,
-    pub equity_usd: Usd,
+    pub venue_net_liquidation_usd: Usd,
+    pub capital_base_usd: Usd,
     pub available_usd: Usd,
     pub reserved_usd: Usd,
     pub positions: Vec<VenuePositionSnapshotView>,
@@ -101,7 +105,8 @@ impl LiveAccountView {
             budget_cap_usd,
             as_of: snapshot.as_of,
             source: snapshot.source,
-            equity_usd: snapshot.equity_usd,
+            venue_net_liquidation_usd: snapshot.venue_net_liquidation_usd,
+            capital_base_usd: snapshot.capital_base_usd,
             available_usd: snapshot.available_usd,
             reserved_usd: snapshot.reserved_usd,
             positions: snapshot
@@ -110,6 +115,44 @@ impl LiveAccountView {
                 .map(VenuePositionSnapshotView::from)
                 .collect(),
             exposures: snapshot.exposures,
+        }
+    }
+}
+
+/// Persisted strategy-capital equity curve snapshot.
+#[derive(Debug, Clone, Serialize)]
+pub struct EquitySnapshotView {
+    pub equity_snapshot_id: EquitySnapshotId,
+    pub as_of: DateTime<Utc>,
+    pub source: AccountSource,
+    pub venue_net_liquidation_usd: Usd,
+    pub capital_base_usd: Usd,
+    pub available_usd: Usd,
+    pub reserved_usd: Usd,
+    pub realized_pnl_cumulative_usd: Usd,
+    pub unrealized_pnl_usd: Usd,
+    pub high_water_mark_usd: Usd,
+    pub drawdown_pct: Decimal,
+    pub account_snapshot_ref: Option<AccountSnapshotId>,
+    pub created_at: DateTime<Utc>,
+}
+
+impl From<EquitySnapshotInfo> for EquitySnapshotView {
+    fn from(info: EquitySnapshotInfo) -> Self {
+        Self {
+            equity_snapshot_id: info.equity_snapshot_id,
+            as_of: info.as_of,
+            source: info.source,
+            venue_net_liquidation_usd: info.venue_net_liquidation_usd,
+            capital_base_usd: info.capital_base_usd,
+            available_usd: info.available_usd,
+            reserved_usd: info.reserved_usd,
+            realized_pnl_cumulative_usd: info.realized_pnl_cumulative_usd,
+            unrealized_pnl_usd: info.unrealized_pnl_usd,
+            high_water_mark_usd: info.high_water_mark_usd,
+            drawdown_pct: info.drawdown_pct,
+            account_snapshot_ref: info.account_snapshot_ref,
+            created_at: info.created_at,
         }
     }
 }

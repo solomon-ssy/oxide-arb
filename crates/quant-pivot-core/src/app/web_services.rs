@@ -23,16 +23,16 @@ use quant_pivot_models::{
 use quant_pivot_repository::{
     pg_arc_repo,
     postgres::{
-        PgAccountSnapshotRepository, PgAttributionRepository, PgExecutionOrderRepository,
-        PgMarketRepository, PgMenuRepository, PgOperationLogRepository, PgPositionRepository,
-        PgRecommendationReportRepository, PgRecommendationRepository, PgRoleMenuRepository,
-        PgRolePermissionRepository, PgRoleRepository, PgRuntimeConfigVersionRepository,
-        PgUserRepository, PgUserRoleRepository,
+        PgAccountSnapshotRepository, PgAttributionRepository, PgEquitySnapshotRepository,
+        PgExecutionOrderRepository, PgMarketRepository, PgMenuRepository, PgOperationLogRepository,
+        PgPositionRepository, PgRecommendationReportRepository, PgRecommendationRepository,
+        PgRoleMenuRepository, PgRolePermissionRepository, PgRoleRepository,
+        PgRuntimeConfigVersionRepository, PgUserRepository, PgUserRoleRepository,
     },
     traits::{
-        AccountSnapshotRepository, AttributionRepository, ExecutionOrderRepository,
-        OperationLogRepository, PositionRepository, RecommendationReportRepository,
-        RecommendationRepository,
+        AccountSnapshotRepository, AttributionRepository, EquitySnapshotRepository,
+        ExecutionOrderRepository, OperationLogRepository, PositionRepository,
+        RecommendationReportRepository, RecommendationRepository,
     },
 };
 use quant_pivot_storage::write::{
@@ -170,6 +170,8 @@ async fn build_app_state(
         account_read: Arc::new(CoreAccountReadPort::new(
             Arc::new(PgAccountSnapshotRepository::new(pg.clone()))
                 as Arc<dyn AccountSnapshotRepository>,
+            Arc::new(PgEquitySnapshotRepository::new(pg.clone()))
+                as Arc<dyn EquitySnapshotRepository>,
             Arc::clone(&ctx.account.provider_factory),
             Arc::clone(&ctx.governance.applicator) as Arc<dyn RuntimeConfigPort>,
         )),

@@ -34,6 +34,7 @@ use quant_pivot_core::{
 };
 use quant_pivot_error::{
     QuantError, QuantResult,
+    execution::ExecutionError,
     storage::{StorageError, entity},
 };
 use quant_pivot_models::{
@@ -44,8 +45,9 @@ use quant_pivot_models::{
         ExitLedgerWrite, KillSwitchPort, KillSwitchView, MarketInfo, MarketPageQuery,
         ModelSpecInfo, ModelVersionInfo, NewCapitalAllocation, NewExecutionOrder, NewModelSpec,
         NewModelVersion, NewOperationLog, NewOrderIntent, NewReconciliation, NewReportTransaction,
-        NewRuntimeConfigActivation, NewRuntimeConfigVersion, OrderIntentInfo, Paginated,
-        QuantReportListQuery, RecommendationInfo, RecommendationReportInfo, ReconciliationInfo,
+        NewRuntimeConfigActivation, NewRuntimeConfigVersion, OperationLogInfo, OperationLogQuery,
+        OrderIntentInfo, OrderIntentListQuery, Paginated, QuantReportListQuery, RecommendationInfo,
+        RecommendationReportInfo, ReconciliationInfo, ReconciliationLedgerWrite,
         ReconciliationPatch, RuntimeConfigActivationInfo, RuntimeConfigVersionInfo,
         SetKillSwitchCommand, SubmissionLedgerWrite, UpsertMarket,
     },
@@ -309,7 +311,7 @@ impl OrderIntentRepository for MemoryIntentRepo {
 
     async fn page(
         &self,
-        _: quant_pivot_models::domain::OrderIntentListQuery,
+        _: OrderIntentListQuery,
     ) -> Result<Paginated<OrderIntentInfo>, StorageError> {
         Ok(Paginated::empty(1, 0))
     }
@@ -571,7 +573,7 @@ impl ExecutionSubmissionRepository for MemorySubmissionRepo {
     async fn apply_reconciliation(
         &self,
         _execution_order_id: &ExecutionOrderId,
-        _write: quant_pivot_models::domain::ReconciliationLedgerWrite,
+        _write: ReconciliationLedgerWrite,
     ) -> Result<ExecutionOrderInfo, StorageError> {
         unimplemented!("reconciliation is exercised in phase_05_5 tests")
     }
@@ -681,8 +683,8 @@ impl OperationLogRepository for StubOpLog {
 
     async fn page(
         &self,
-        _: quant_pivot_models::domain::OperationLogQuery,
-    ) -> Result<Paginated<quant_pivot_models::domain::OperationLogInfo>, StorageError> {
+        _: OperationLogQuery,
+    ) -> Result<Paginated<OperationLogInfo>, StorageError> {
         Ok(Paginated::empty(1, 0))
     }
 }
@@ -1310,7 +1312,7 @@ async fn semi_auto_unapproved_cannot_submit() {
         .expect_err("pending");
     assert!(matches!(
         err,
-        QuantError::Execution(quant_pivot_error::execution::ExecutionError::NotSubmittable { .. })
+        QuantError::Execution(ExecutionError::NotSubmittable { .. })
     ));
     assert_eq!(*harness.order_client.submit_count.lock().unwrap(), 0);
 }
@@ -1328,7 +1330,7 @@ async fn submit_denied_when_admission_denies() {
         .expect_err("deny");
     assert!(matches!(
         err,
-        QuantError::Execution(quant_pivot_error::execution::ExecutionError::AdmissionDenied { .. })
+        QuantError::Execution(ExecutionError::AdmissionDenied { .. })
     ));
     assert!(harness.submission.reject_called.load(Ordering::SeqCst));
     assert_eq!(*harness.order_client.submit_count.lock().unwrap(), 0);
@@ -1347,9 +1349,7 @@ async fn submit_deferred_reverts_claim_for_auto_intent() {
         .expect_err("defer");
     assert!(matches!(
         err,
-        QuantError::Execution(
-            quant_pivot_error::execution::ExecutionError::AdmissionDeferred { .. }
-        )
+        QuantError::Execution(ExecutionError::AdmissionDeferred { .. })
     ));
     assert!(harness.submission.revert_called.load(Ordering::SeqCst));
     assert_eq!(
@@ -1452,6 +1452,7 @@ async fn report_only_mode_denied_by_admission_engine() {
         account: AccountSnapshot::new(
             now(),
             AccountSource::Polymarket,
+            Usd::new(dec!(10_000)),
             Usd::new(dec!(10_000)),
             Usd::new(dec!(10_000)),
             Usd::ZERO,

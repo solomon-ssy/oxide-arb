@@ -10,15 +10,19 @@ use crate::{
         ReportBuilderDeps, ReportLifecycleDeps, ReportLifecycleService, ReportPublisher,
         ReportPublisherDeps, build_report_scheduler,
     },
+    service::equity::EquitySnapshotService,
 };
 use quant_pivot_error::QuantResult;
 use quant_pivot_models::domain::CoreEventPublisher;
 use quant_pivot_repository::{
     postgres::{
-        PgRecommendationReportRepository, PgRecommendationRepository,
-        PgRuntimeConfigVersionRepository,
+        PgEquitySnapshotRepository, PgPositionRepository, PgRecommendationReportRepository,
+        PgRecommendationRepository, PgRuntimeConfigVersionRepository,
     },
-    traits::{RecommendationReportRepository, RecommendationRepository},
+    traits::{
+        EquitySnapshotRepository, PositionRepository, RecommendationReportRepository,
+        RecommendationRepository,
+    },
 };
 use quant_pivot_research::portfolio::HistoricalCorrelationEstimator;
 
@@ -47,6 +51,12 @@ impl ReportBundle {
         let recommendation_repo: Arc<dyn RecommendationRepository> = Arc::new(
             PgRecommendationRepository::new(deps.infra.pg.connection().clone()),
         );
+        let equity_repo: Arc<dyn EquitySnapshotRepository> = Arc::new(
+            PgEquitySnapshotRepository::new(deps.infra.pg.connection().clone()),
+        );
+        let position_repo: Arc<dyn PositionRepository> = Arc::new(PgPositionRepository::new(
+            deps.infra.pg.connection().clone(),
+        ));
         let composer = Arc::new(DefaultRecommendationComposer::new());
         let builder = Arc::new(DefaultReportBuilder::new(ReportBuilderDeps {
             runtime_config_repo: Arc::new(PgRuntimeConfigVersionRepository::new(
@@ -58,6 +68,7 @@ impl ReportBundle {
             feature_pipeline: Arc::clone(&deps.research.feature_pipeline),
             model_runner: Arc::clone(&deps.research.model_runner),
             account_provider_factory: Arc::clone(&deps.account.provider_factory),
+            drawdown_provider: Arc::new(EquitySnapshotService::new(equity_repo, position_repo)),
             composer,
             pit_source: Arc::clone(&deps.data.pit_source),
             quant_fact_read_repo: Arc::clone(&deps.infra.quant_fact_read),

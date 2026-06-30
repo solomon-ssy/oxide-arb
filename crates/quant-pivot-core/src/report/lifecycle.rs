@@ -18,6 +18,7 @@ use quant_pivot_models::{
 use quant_pivot_repository::traits::{
     RecommendationReportRepository, RecommendationRepository, RuntimeConfigVersionRepository,
 };
+use tokio::sync::Mutex;
 
 use crate::{
     execution::IntentInvalidationHook, governance::RuntimeModeHandle,
@@ -66,6 +67,7 @@ pub struct ReportLifecycleService {
     publisher: Arc<ReportPublisher>,
     runtime_mode: RuntimeModeHandle,
     metrics: Arc<MetricsHub>,
+    run_lock: Mutex<()>,
     /// Cascade hook: on revoke / expire, the active order intents derived from
     /// the report are invalidated and their capital released. Set once at boot
     /// (absent in report-only builds without the execution plane).
@@ -84,6 +86,7 @@ impl ReportLifecycleService {
             publisher: deps.publisher,
             runtime_mode: deps.runtime_mode,
             metrics: deps.metrics,
+            run_lock: Mutex::new(()),
             intent_invalidation: OnceLock::new(),
         }
     }
@@ -294,6 +297,10 @@ impl ReportLifecycleService {
     async fn run(&self, request: BuildReportRequest) -> QuantResult<RecommendationReportInfo> {
         let trigger_time = request.trigger_time;
         let trigger_key = request.trigger.key(request.trigger_time);
+        if let Some(existing) = self.report_repo.find_by_trigger_key(&trigger_key).await? {
+            return Ok(existing);
+        }
+        let _run_guard = self.run_lock.lock().await;
         if let Some(existing) = self.report_repo.find_by_trigger_key(&trigger_key).await? {
             return Ok(existing);
         }

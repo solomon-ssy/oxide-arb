@@ -15,11 +15,11 @@ use quant_pivot_error::storage::{
 use quant_pivot_models::{
     domain::{
         CapitalReconcileSettlement, CapitalSettlement, ExitLedgerWrite, NewAccountSnapshot,
-        NewCapitalAllocation, NewExecutionOrder, NewMarketSelection, NewModelRun, NewModelSpec,
-        NewModelVersion, NewOperationLog, NewOrderIntent, NewPortfolioPlan, NewRecommendation,
-        NewRecommendationReport, NewReconciliation, NewReportDataQualitySnapshot,
-        NewReportTransaction, NewRuntimeConfigVersion, PositionExit, PositionFill,
-        ReconciliationLedgerWrite, SubmissionLedgerWrite,
+        NewCapitalAllocation, NewEquitySnapshot, NewExecutionOrder, NewMarketSelection,
+        NewModelRun, NewModelSpec, NewModelVersion, NewOperationLog, NewOrderIntent,
+        NewPortfolioPlan, NewRecommendation, NewRecommendationReport, NewReconciliation,
+        NewReportDataQualitySnapshot, NewReportTransaction, NewRuntimeConfigVersion, PositionExit,
+        PositionFill, ReconciliationLedgerWrite, SubmissionLedgerWrite,
     },
     entities::{quant_order_intent, quant_recommendation},
     enums::{
@@ -35,26 +35,27 @@ use quant_pivot_models::{
         operation_log::{OperationCategory, OperationOutcome},
         quant::{
             AccountSource, ApprovalStatus, BindingConstraint, EntryTriggerKind,
-            ExecutionOrderState, ModelRunKind, ModelRunStatus, OrderIntentStatus, OutcomeSide,
-            PublicationStatus, QuantRuntimeMode, RecommendationReportStatus, RecommendationStatus,
-            ReportKind, ReportTriggerKind, SettlementPolicy, SizingModelKind,
+            ExecutionOrderState, FactorDirection, ModelRunKind, ModelRunStatus, OrderIntentStatus,
+            OutcomeSide, PublicationStatus, QuantRuntimeMode, RecommendationReportStatus,
+            RecommendationStatus, ReportKind, ReportTriggerKind, SettlementPolicy, SizingModelKind,
         },
         rbac::ResourceType,
         runtime_config::RuntimeConfigVersionSource,
     },
     types::{
-        AccountPositions, AccountSnapshotId, Bps, CapitalAllocationId, ConfidenceSummary,
-        ContentHash, DataQualitySummary, EligibilitySummary, EntryOrderSpec, EntryPlan, EventId,
-        EvidenceRefs, ExecutionEligibility, ExecutionOrderId, ExitPlan, ExitPolicySpec,
-        ExposureBreakdown, FactorBreakdownEntry, FeatureVectorId, MarketContext, MarketId,
-        MarketSelectionId, ModelRunId, ModelSpecId, ModelVersionId, OperationLogId, OrderId,
-        OrderIntentId, PortfolioConstraintsSnapshot, PortfolioOptimizerMeta, PortfolioPlanId,
-        PortfolioRejectedSummary, PortfolioRiskBudget, PositionSnapshot, Price, Probability,
-        RecommendationFactorBreakdown, RecommendationId, RecommendationIdentity,
-        RecommendationReportId, ReconciliationEvidence, ReconciliationEvidenceChain,
-        ReconciliationId, ReportDataQualitySnapshotId, ReportDataQualityTokens, ReportSummary,
-        RiskEnvelope, RuntimeConfigVersionId, SchemaVersion, SelectionExclusionSummary, Shares,
-        SignalCandidateId, SizingPlan, TokenId, Usd,
+        AccountPositions, AccountSnapshotId, BookSnapshotRef, Bps, CapitalAllocationId,
+        ConfidenceSummary, ContentHash, DataQualitySummary, EligibilitySummary, EntryOrderSpec,
+        EntryPlan, EquitySnapshotId, EventId, EvidenceRefs, ExecutionEligibility, ExecutionOrderId,
+        ExitPlan, ExitPolicySpec, ExposureBreakdown, FactorBreakdownEntry, FeatureVectorId,
+        MarketContext, MarketId, MarketSelectionId, ModelRunId, ModelSpecId, ModelVersionId,
+        OperationLogId, OrderId, OrderIntentId, PortfolioConstraintsSnapshot,
+        PortfolioOptimizerMeta, PortfolioPlanId, PortfolioRejectedSummary, PortfolioRiskBudget,
+        PositionSnapshot, Price, Probability, RecommendationFactorBreakdown, RecommendationId,
+        RecommendationIdentity, RecommendationReportId, ReconciliationEvidence,
+        ReconciliationEvidenceChain, ReconciliationId, ReportDataQualitySnapshotId,
+        ReportDataQualityTokens, ReportSummary, RiskEnvelope, RuntimeConfigVersionId,
+        SchemaVersion, SelectionExclusionSummary, Shares, SignalCandidateId, SizingPlan, TokenId,
+        Usd,
     },
 };
 use quant_pivot_repository::{
@@ -1434,10 +1435,25 @@ struct TxnIds {
 }
 
 fn build_report_transaction(ids: &TxnIds) -> NewReportTransaction {
+    let equity_snapshot_id = EquitySnapshotId::from_v7();
     NewReportTransaction {
         account_snapshot: NewAccountSnapshot {
             account_snapshot_id: ids.account_snapshot.clone(),
             ..new_account_snapshot()
+        },
+        equity_snapshot: NewEquitySnapshot {
+            equity_snapshot_id: equity_snapshot_id.clone(),
+            as_of: Utc::now(),
+            source: AccountSource::Polymarket,
+            venue_net_liquidation_usd: Usd::new(dec!(10000)),
+            capital_base_usd: Usd::new(dec!(10000)),
+            available_usd: Usd::new(dec!(9000)),
+            reserved_usd: Usd::ZERO,
+            realized_pnl_cumulative_usd: Usd::ZERO,
+            unrealized_pnl_usd: Usd::ZERO,
+            high_water_mark_usd: Usd::new(dec!(10000)),
+            drawdown_pct: Decimal::ZERO,
+            account_snapshot_ref: Some(ids.account_snapshot.clone()),
         },
         data_quality_snapshot: NewReportDataQualitySnapshot {
             report_data_quality_snapshot_id: ids.data_quality_snapshot.clone(),
@@ -1476,6 +1492,7 @@ fn build_report_transaction(ids: &TxnIds) -> NewReportTransaction {
             account_source: AccountSource::Polymarket,
             capital_base_usd: Usd::new(dec!(10000)),
             account_snapshot_ref: ids.account_snapshot.clone(),
+            equity_snapshot_ref: equity_snapshot_id,
             data_quality_snapshot_ref: ids.data_quality_snapshot.clone(),
             summary_json: report_summary(),
             published_at: Some(Utc::now()),
@@ -1565,7 +1582,8 @@ fn new_account_snapshot() -> NewAccountSnapshot {
         account_snapshot_id: AccountSnapshotId::from_v7(),
         as_of: Utc::now(),
         source: AccountSource::Polymarket,
-        equity_usd: Usd::new(dec!(10000)),
+        venue_net_liquidation_usd: Usd::new(dec!(10000)),
+        capital_base_usd: Usd::new(dec!(10000)),
         available_usd: Usd::new(dec!(9000)),
         reserved_usd: Usd::new(dec!(0)),
         positions_json: AccountPositions(positions.clone()),
@@ -1648,7 +1666,7 @@ fn factor_breakdown() -> RecommendationFactorBreakdown {
         weight: dec!(0.4),
         contribution: dec!(0.32),
         confidence: Probability::new(dec!(0.75)),
-        direction: quant_pivot_models::enums::quant::FactorDirection::Positive,
+        direction: FactorDirection::Positive,
         explanation: "deep".to_owned(),
         source_refs: Vec::new(),
     }])
@@ -1684,7 +1702,7 @@ fn evidence_refs() -> EvidenceRefs {
         feature_vector_id: FeatureVectorId::from_v7(),
         model_run_id: ModelRunId::from_v7(),
         market_selection_id: MarketSelectionId::from_v7(),
-        book_snapshot_ref: quant_pivot_models::types::BookSnapshotRef::from_str(&format!(
+        book_snapshot_ref: BookSnapshotRef::from_str(&format!(
             "book:live:token-1:1:1700000000@blake3:{}",
             "0".repeat(64)
         ))

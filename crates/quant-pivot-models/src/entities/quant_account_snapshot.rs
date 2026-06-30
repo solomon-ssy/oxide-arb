@@ -14,7 +14,8 @@ pub struct Model {
     pub account_snapshot_id: AccountSnapshotId,
     pub as_of: DateTime<Utc>,
     pub source: AccountSource,
-    pub equity_usd: Usd,
+    pub venue_net_liquidation_usd: Usd,
+    pub capital_base_usd: Usd,
     pub available_usd: Usd,
     pub reserved_usd: Usd,
     #[sea_orm(column_type = "JsonBinary")]
@@ -28,11 +29,19 @@ pub struct Model {
 pub enum Relation {
     #[sea_orm(has_many = "super::quant_recommendation_report::Entity")]
     RecommendationReport,
+    #[sea_orm(has_many = "super::quant_equity_snapshot::Entity")]
+    EquitySnapshot,
 }
 
 impl Related<super::quant_recommendation_report::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::RecommendationReport.def()
+    }
+}
+
+impl Related<super::quant_equity_snapshot::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::EquitySnapshot.def()
     }
 }
 

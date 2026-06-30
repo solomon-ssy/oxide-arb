@@ -160,7 +160,7 @@ impl Default for SizingModelConfig {
             max_position_pct: DecimalString::new("0.1"),
             target_reward_multiple: DecimalString::new("2.0"),
             confidence_weighting: ConfidenceSizeCurve::Linear,
-            drawdown_scaling: DrawdownMultiplierPolicy::Fixed,
+            drawdown_scaling: DrawdownMultiplierPolicy::Conservative,
         }
     }
 }

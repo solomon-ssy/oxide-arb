@@ -19,9 +19,10 @@ use crate::pipeline::market_registry::MarketRegistry;
 
 /// Builds an [`AccountSnapshot`] from the real venue account.
 ///
-/// `equity = min(collateral + Σ position current value, budget cap)`. Any read
-/// failure propagates as an error so the report fails closed; the budget cap is
-/// never used as a substitute for real equity.
+/// `venue_net_liquidation = collateral + Σ position current value`, while
+/// `capital_base = min(venue_net_liquidation, budget cap)`. Any read failure
+/// propagates as an error so the report fails closed; the budget cap is never
+/// used as a substitute for venue truth.
 pub struct VenueAccountProvider {
     client: Arc<dyn PolymarketAccountClient>,
     registry: Arc<MarketRegistry>,
@@ -64,7 +65,7 @@ impl AccountProvider for VenueAccountProvider {
             .map(|position| position.current_value)
             .sum::<Usd>();
         let net_liquidation = collateral + positions_value;
-        let equity = net_liquidation.min(self.budget_cap);
+        let capital_base = net_liquidation.min(self.budget_cap);
 
         let reserved = self.reserved_reader.sum_locked().await?;
         let available = (collateral - reserved).max(Usd::ZERO);
@@ -72,7 +73,8 @@ impl AccountProvider for VenueAccountProvider {
         Ok(AccountSnapshot::new(
             as_of,
             AccountSource::Polymarket,
-            equity,
+            net_liquidation,
+            capital_base,
             available,
             reserved,
             positions,
@@ -156,7 +158,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn equity_is_net_liquidation_value() {
+    async fn capital_base_tracks_uncapped_venue_net_liquidation_when_below_cap() {
         let provider = provider(
             Usd::new(dec!(1000)),
             vec![venue_position(dec!(200)), venue_position(dec!(50))],
@@ -165,14 +167,15 @@ mod tests {
             false,
         );
         let snapshot = provider.snapshot(Utc::now()).await.expect("snapshot");
-        assert_eq!(snapshot.equity_usd, Usd::new(dec!(1250)));
+        assert_eq!(snapshot.venue_net_liquidation_usd, Usd::new(dec!(1250)));
+        assert_eq!(snapshot.capital_base_usd, Usd::new(dec!(1250)));
         assert_eq!(snapshot.available_usd, Usd::new(dec!(900)));
         assert_eq!(snapshot.reserved_usd, Usd::new(dec!(100)));
         assert_eq!(snapshot.positions.len(), 2);
     }
 
     #[tokio::test]
-    async fn applies_budget_cap_to_equity() {
+    async fn separates_venue_net_liquidation_from_budget_capped_capital_base() {
         let provider = provider(
             Usd::new(dec!(1000)),
             vec![venue_position(dec!(500))],
@@ -181,8 +184,9 @@ mod tests {
             false,
         );
         let snapshot = provider.snapshot(Utc::now()).await.expect("snapshot");
-        // Net liquidation 1500 > budget cap 800 → equity is the cap.
-        assert_eq!(snapshot.equity_usd, Usd::new(dec!(800)));
+        // Net liquidation 1500 > budget cap 800 → sizing capital is the cap.
+        assert_eq!(snapshot.venue_net_liquidation_usd, Usd::new(dec!(1500)));
+        assert_eq!(snapshot.capital_base_usd, Usd::new(dec!(800)));
     }
 
     #[tokio::test]

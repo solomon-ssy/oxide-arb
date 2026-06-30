@@ -3,9 +3,17 @@
 use chrono::Utc;
 use quant_pivot_core::report::AdHocReportRequest;
 use quant_pivot_error::{QuantError, account::AccountError};
-use quant_pivot_models::enums::quant::{EmptyReason, RecommendationReportStatus};
-use quant_pivot_repository::traits::{
-    OperationLogRepository, RecommendationReportRepository, RecommendationRepository,
+use quant_pivot_models::{
+    domain::{NewEquitySnapshot, OperationLogQuery},
+    enums::quant::{AccountSource, EmptyReason, RecommendationReportStatus, RecommendationStatus},
+    types::{EquitySnapshotId, Usd},
+};
+use quant_pivot_repository::{
+    postgres::{PgEquitySnapshotRepository, PgOperationLogRepository},
+    traits::{
+        EquitySnapshotRepository, OperationLogRepository, RecommendationReportRepository,
+        RecommendationRepository,
+    },
 };
 use quant_pivot_test_support::{
     pg::setup_pg,
@@ -35,10 +43,10 @@ async fn ad_hoc_publishes_report_with_recommendations() {
     assert_eq!(report.status, RecommendationReportStatus::Published);
     assert!(report.summary_json.published_recommendation_count >= 1);
 
-    let publish_logs = quant_pivot_repository::postgres::PgOperationLogRepository::new(db.clone())
-        .page(quant_pivot_models::domain::OperationLogQuery {
+    let publish_logs = PgOperationLogRepository::new(db.clone())
+        .page(OperationLogQuery {
             request_id: Some(format!("ad_hoc:{request_id}")),
-            ..quant_pivot_models::domain::OperationLogQuery::default()
+            ..OperationLogQuery::default()
         })
         .await
         .expect("publish operation log");
@@ -204,18 +212,17 @@ async fn revoke_after_publish() {
         .await
         .expect("load recommendations");
     assert!(
-        recs.iter().all(
-            |rec| rec.status == quant_pivot_models::enums::quant::RecommendationStatus::Revoked
-        )
+        recs.iter()
+            .all(|rec| rec.status == RecommendationStatus::Revoked)
     );
 
-    let op_logs = quant_pivot_repository::postgres::PgOperationLogRepository::new(db.clone())
-        .page(quant_pivot_models::domain::OperationLogQuery {
+    let op_logs = PgOperationLogRepository::new(db.clone())
+        .page(OperationLogQuery {
             request_id: Some(format!(
                 "quant-report:revoke:{}",
                 report.recommendation_report_id
             )),
-            ..quant_pivot_models::domain::OperationLogQuery::default()
+            ..OperationLogQuery::default()
         })
         .await
         .expect("revoke operation log");
@@ -287,5 +294,117 @@ async fn evidence_refs_and_rank_scores_populated() {
     assert!(
         !rec.factor_breakdown.0.is_empty(),
         "factor breakdown evidence should be present"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn report_persists_real_drawdown_from_equity_history() {
+    let collateral = Usd::new(dec!(8000));
+    let peak = Usd::new(dec!(10000));
+
+    let neutral_kelly = {
+        let (pool, _container) = setup_pg().await;
+        let db = pool.connection().clone();
+        let harness = ReportPipelineHarness::bootstrap(
+            &db,
+            HarnessOptions {
+                collateral,
+                ..HarnessOptions::default()
+            },
+        )
+        .await;
+        let report = harness
+            .lifecycle
+            .run_ad_hoc(AdHocReportRequest {
+                request_id: "drawdown-neutral-baseline".to_owned(),
+                trigger_time: Utc::now(),
+                top_n: Some(5),
+                source_delay_secs: Some(0),
+            })
+            .await
+            .expect("neutral drawdown baseline report");
+        let recs = harness
+            .recommendation_repo
+            .find_by_report(&report.recommendation_report_id)
+            .await
+            .expect("load neutral recommendations");
+        assert!(
+            !recs.is_empty(),
+            "neutral baseline must publish at least one recommendation"
+        );
+        recs[0]
+            .sizing_plan
+            .kelly_fraction_applied
+            .expect("neutral kelly fraction")
+    };
+
+    let (pool, _container) = setup_pg().await;
+    let db = pool.connection().clone();
+
+    PgEquitySnapshotRepository::new(db.clone())
+        .create(NewEquitySnapshot {
+            equity_snapshot_id: EquitySnapshotId::from_v7(),
+            as_of: Utc::now() - chrono::Duration::hours(1),
+            source: AccountSource::Polymarket,
+            venue_net_liquidation_usd: peak,
+            capital_base_usd: peak,
+            available_usd: peak,
+            reserved_usd: Usd::ZERO,
+            realized_pnl_cumulative_usd: Usd::ZERO,
+            unrealized_pnl_usd: Usd::ZERO,
+            high_water_mark_usd: peak,
+            drawdown_pct: dec!(0),
+            account_snapshot_ref: None,
+        })
+        .await
+        .expect("seed peak equity history");
+
+    let harness = ReportPipelineHarness::bootstrap(
+        &db,
+        HarnessOptions {
+            collateral,
+            ..HarnessOptions::default()
+        },
+    )
+    .await;
+
+    let report = harness
+        .lifecycle
+        .run_ad_hoc(AdHocReportRequest {
+            request_id: "drawdown-aware-sizing".to_owned(),
+            trigger_time: Utc::now(),
+            top_n: Some(5),
+            source_delay_secs: Some(0),
+        })
+        .await
+        .expect("drawdown-aware report");
+
+    let equity = PgEquitySnapshotRepository::new(db.clone())
+        .find_by_id(&report.equity_snapshot_ref)
+        .await
+        .expect("load equity snapshot")
+        .expect("equity snapshot row");
+    assert_eq!(equity.drawdown_pct, dec!(0.2));
+    assert_eq!(equity.high_water_mark_usd, peak);
+    assert_eq!(equity.capital_base_usd, collateral);
+
+    let drawdown_recs = harness
+        .recommendation_repo
+        .find_by_report(&report.recommendation_report_id)
+        .await
+        .expect("load drawdown recommendations");
+    assert!(
+        !drawdown_recs.is_empty(),
+        "drawdown report must publish at least one recommendation"
+    );
+    let drawdown_kelly = drawdown_recs[0]
+        .sizing_plan
+        .kelly_fraction_applied
+        .expect("drawdown kelly fraction");
+    assert_eq!(
+        drawdown_kelly,
+        neutral_kelly * dec!(0.8),
+        "20% drawdown must shrink Kelly multiplier by (1 - drawdown)"
     );
 }

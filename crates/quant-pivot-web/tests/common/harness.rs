@@ -18,7 +18,9 @@ use actix_web::{
 };
 use async_trait::async_trait;
 use quant_pivot_core::{app::execution_read::CoreExecutionReadPort, report::AdHocReportRequest};
-use quant_pivot_error::{QuantError, QuantResult, auth::AuthError, control::ControlError};
+use quant_pivot_error::{
+    QuantError, QuantResult, auth::AuthError, control::ControlError, execution::ExecutionError,
+};
 use quant_pivot_models::{
     config::{CacheConfig, DeployConfig, JwtConfig, RedisConfig},
     domain::{
@@ -427,13 +429,11 @@ impl ExecutionSubmitPort for MockExecutionSubmit {
         &self,
         intent_id: &OrderIntentId,
     ) -> QuantResult<ExecutionOrderInfo> {
-        Err(
-            quant_pivot_error::execution::ExecutionError::NotSubmittable {
-                intent_id: intent_id.to_string(),
-                state: "mock".to_owned(),
-            }
-            .into(),
-        )
+        Err(ExecutionError::NotSubmittable {
+            intent_id: intent_id.to_string(),
+            state: "mock".to_owned(),
+        }
+        .into())
     }
 }
 

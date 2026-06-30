@@ -12,8 +12,9 @@ use crate::{
         AccountSource, QuantRuntimeMode, RecommendationReportStatus, ReportKind, ReportTriggerKind,
     },
     idens::{
-        quant_account_snapshot::QuantAccountSnapshot, quant_market_selection::QuantMarketSelection,
-        quant_model_version::QuantModelVersion, quant_portfolio_plan::QuantPortfolioPlan,
+        quant_account_snapshot::QuantAccountSnapshot, quant_equity_snapshot::QuantEquitySnapshot,
+        quant_market_selection::QuantMarketSelection, quant_model_version::QuantModelVersion,
+        quant_portfolio_plan::QuantPortfolioPlan,
         quant_report_data_quality_snapshot::QuantReportDataQualitySnapshot,
     },
     schema::{
@@ -46,6 +47,7 @@ pub enum QuantRecommendationReport {
     AccountSource,
     CapitalBaseUsd,
     AccountSnapshotRef,
+    EquitySnapshotRef,
     DataQualitySnapshotRef,
     SummaryJson,
     PublishedAt,
@@ -145,6 +147,9 @@ fn add_payload_columns(table: &mut TableCreateStatement) {
             QuantRecommendationReport::AccountSnapshotRef,
         ))
         .col(column::uuid_fk(
+            QuantRecommendationReport::EquitySnapshotRef,
+        ))
+        .col(column::uuid_fk(
             QuantRecommendationReport::DataQualitySnapshotRef,
         ))
         .col(
@@ -208,6 +213,12 @@ fn add_foreign_keys(table: &mut TableCreateStatement) {
             QuantRecommendationReport::AccountSnapshotRef,
             QuantAccountSnapshot::Table,
             QuantAccountSnapshot::AccountSnapshotId,
+        ))
+        .foreign_key(&mut fk_restrict(
+            "fk_quant_recommendation_report_equity_snapshot",
+            QuantRecommendationReport::EquitySnapshotRef,
+            QuantEquitySnapshot::Table,
+            QuantEquitySnapshot::EquitySnapshotId,
         ))
         .foreign_key(&mut fk_restrict(
             "fk_quant_recommendation_report_dq_snapshot",
@@ -315,6 +326,7 @@ pub fn dependencies() -> Vec<TableDependency> {
         TableDependency::foreign_key(quant_market_selection_table_name),
         TableDependency::foreign_key(quant_portfolio_plan_table_name),
         TableDependency::foreign_key(quant_account_snapshot_table_name),
+        TableDependency::foreign_key(quant_equity_snapshot_table_name),
         TableDependency::foreign_key(quant_report_data_quality_snapshot_table_name),
     ]
 }
@@ -345,4 +357,8 @@ fn quant_portfolio_plan_table_name() -> String {
 
 fn quant_account_snapshot_table_name() -> String {
     QuantAccountSnapshot::Table.to_string()
+}
+
+fn quant_equity_snapshot_table_name() -> String {
+    QuantEquitySnapshot::Table.to_string()
 }

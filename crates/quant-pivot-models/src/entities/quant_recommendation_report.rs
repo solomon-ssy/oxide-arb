@@ -5,7 +5,7 @@ use crate::{
         AccountSource, QuantRuntimeMode, RecommendationReportStatus, ReportKind, ReportTriggerKind,
     },
     types::{
-        AccountSnapshotId, MarketSelectionId, ModelVersionId, PortfolioPlanId,
+        AccountSnapshotId, EquitySnapshotId, MarketSelectionId, ModelVersionId, PortfolioPlanId,
         RecommendationReportId, ReportDataQualitySnapshotId, ReportSummary, RuntimeConfigVersionId,
         Usd,
     },
@@ -35,6 +35,7 @@ pub struct Model {
     pub account_source: AccountSource,
     pub capital_base_usd: Usd,
     pub account_snapshot_ref: AccountSnapshotId,
+    pub equity_snapshot_ref: EquitySnapshotId,
     pub data_quality_snapshot_ref: ReportDataQualitySnapshotId,
     #[sea_orm(column_type = "JsonBinary")]
     pub summary_json: ReportSummary,
@@ -78,6 +79,12 @@ pub enum Relation {
     )]
     AccountSnapshot,
     #[sea_orm(
+        belongs_to = "super::quant_equity_snapshot::Entity",
+        from = "Column::EquitySnapshotRef",
+        to = "super::quant_equity_snapshot::Column::EquitySnapshotId"
+    )]
+    EquitySnapshot,
+    #[sea_orm(
         belongs_to = "super::quant_report_data_quality_snapshot::Entity",
         from = "Column::DataQualitySnapshotRef",
         to = "super::quant_report_data_quality_snapshot::Column::ReportDataQualitySnapshotId"
@@ -108,6 +115,12 @@ impl Related<super::quant_portfolio_plan::Entity> for Entity {
 impl Related<super::quant_account_snapshot::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::AccountSnapshot.def()
+    }
+}
+
+impl Related<super::quant_equity_snapshot::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::EquitySnapshot.def()
     }
 }
 

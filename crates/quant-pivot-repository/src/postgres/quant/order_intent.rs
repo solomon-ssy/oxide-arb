@@ -37,7 +37,7 @@ use quant_pivot_models::{
     },
     types::{
         EntryOrderSpec, ExecutedPartialExitNodes, OrderIntentId, RecommendationId,
-        RecommendationReportId, Usd,
+        RecommendationReportId, RuntimeConfigVersionId, Usd,
     },
 };
 use sea_orm::{
@@ -517,7 +517,7 @@ async fn load_report(
 
 async fn load_current_config_version_id(
     db: &impl ConnectionTrait,
-) -> Result<Option<quant_pivot_models::types::RuntimeConfigVersionId>, StorageError> {
+) -> Result<Option<RuntimeConfigVersionId>, StorageError> {
     runtime_config_version::Entity::find()
         .join_rev(
             JoinType::InnerJoin,

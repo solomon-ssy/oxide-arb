@@ -17,7 +17,7 @@ use quant_pivot_models::{
     runtime_config::{EmergencyExitKind, EmergencyExitPolicy},
     types::{
         Bps, ExitPolicySpec, MarketId, OrderIntentId, PartialExitNode, PositionId, Price,
-        Probability, Shares, TokenId, TrailingStop,
+        Probability, Shares, TokenId, TrailingStop, Usd,
     },
 };
 use rust_decimal::Decimal;
@@ -36,7 +36,7 @@ fn lot(shares: Decimal, avg_price: Decimal) -> PositionInfo {
         shares: Shares::new(shares),
         avg_price: Price::new(avg_price),
         cost_usd: Shares::new(shares) * Price::new(avg_price),
-        realized_pnl_usd: quant_pivot_models::types::Usd::ZERO,
+        realized_pnl_usd: Usd::ZERO,
         source: AccountSource::Polymarket,
         opened_at: Utc::now() - Duration::hours(2),
         updated_at: Utc::now(),

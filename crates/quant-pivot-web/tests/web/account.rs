@@ -76,7 +76,8 @@ async fn account_snapshot_round_trips_persisted_row() {
         account_snapshot_id: snapshot_id.clone(),
         as_of,
         source: AccountSource::Polymarket,
-        equity_usd: Usd::new(dec!(10000)),
+        venue_net_liquidation_usd: Usd::new(dec!(10000)),
+        capital_base_usd: Usd::new(dec!(10000)),
         available_usd: Usd::new(dec!(8000)),
         reserved_usd: Usd::new(dec!(2000)),
         positions_json: AccountPositions(Vec::new()),
@@ -92,7 +93,7 @@ async fn account_snapshot_round_trips_persisted_row() {
     let res = harness::call(&env.state, req).await;
     assert_eq!(res.status, StatusCode::OK);
     assert_eq!(
-        res.json()["data"]["equity_usd"],
+        res.json()["data"]["capital_base_usd"],
         serde_json::json!("10000.00000000")
     );
     assert_eq!(

@@ -7,8 +7,9 @@ use quant_pivot_error::{QuantError, QuantResult, report::ReportError};
 use quant_pivot_models::{
     clickhouse::{ChProbability, ChUsd, QuantRecommendationEventRow},
     domain::{
-        NewAccountSnapshot, NewOperationLog, NewPortfolioPlan, NewRecommendation,
-        NewRecommendationReport, NewReportDataQualitySnapshot, NewReportTransaction,
+        NewAccountSnapshot, NewEquitySnapshot, NewOperationLog, NewPortfolioPlan,
+        NewRecommendation, NewRecommendationReport, NewReportDataQualitySnapshot,
+        NewReportTransaction,
     },
     enums::{
         common::MarketCategory,
@@ -22,11 +23,11 @@ use quant_pivot_models::{
     hashing::canonical_state_hash,
     runtime_config::RuntimeConfig,
     types::{
-        AccountPositions, AccountSnapshotId, Bps, ConfidenceSummary, EligibilitySummary, EventId,
-        EvidenceRefs, EvidenceRefsInput, ExecutionEligibility, ExitPlan, FactorBreakdownEntry,
-        FactorDefinitionId, FeatureVectorId, MarketId, MarketSelectionId, ModelRunId,
-        ModelVersionId, OperationLogId, PortfolioConstraintsSnapshot, PortfolioOptimizerMeta,
-        PortfolioPlanId, PortfolioRejectedSummary, PortfolioRiskBudget, Price, Probability,
+        Bps, ConfidenceSummary, EligibilitySummary, EventId, EvidenceRefs, EvidenceRefsInput,
+        ExecutionEligibility, ExitPlan, FactorBreakdownEntry, FactorDefinitionId, FeatureVectorId,
+        MarketId, MarketSelectionId, ModelRunId, ModelVersionId, OperationLogId,
+        PortfolioConstraintsSnapshot, PortfolioOptimizerMeta, PortfolioPlanId,
+        PortfolioRejectedSummary, PortfolioRiskBudget, Price, Probability,
         RecommendationFactorBreakdown, RecommendationId, RecommendationReportId,
         RejectionReasonCount, ReportDataQualitySnapshotId, ReportSummary, RuntimeConfigVersionId,
         SizingPlan, Usd,
@@ -60,6 +61,8 @@ pub struct ComposeReportInput<'a> {
     pub model_version_id: ModelVersionId,
     pub market_selection_id: MarketSelectionId,
     pub account: &'a AccountSnapshot,
+    pub account_snapshot: NewAccountSnapshot,
+    pub equity_snapshot: NewEquitySnapshot,
     pub portfolio_plan: NewPortfolioPlan,
     pub planned: &'a [PlannedRecommendation],
     pub planner_rejected: &'a [RejectedCandidate],
@@ -138,17 +141,8 @@ impl RecommendationComposer for DefaultRecommendationComposer {
         let notification =
             report_notification(&report_id, status, &input, &summary, &recommendations);
 
-        let account_snapshot_id = AccountSnapshotId::from_v7();
-        let account_snapshot = NewAccountSnapshot {
-            account_snapshot_id: account_snapshot_id.clone(),
-            as_of: input.account.as_of,
-            source: input.account.source,
-            equity_usd: input.account.equity_usd,
-            available_usd: input.account.available_usd,
-            reserved_usd: input.account.reserved_usd,
-            positions_json: AccountPositions(input.account.positions.clone()),
-            exposures_json: input.account.exposures.clone(),
-        };
+        let account_snapshot_id = input.account_snapshot.account_snapshot_id.clone();
+        let equity_snapshot_id = input.equity_snapshot.equity_snapshot_id.clone();
         let report = NewRecommendationReport {
             recommendation_report_id: report_id.clone(),
             report_kind: ReportKind::TopN,
@@ -174,8 +168,9 @@ impl RecommendationComposer for DefaultRecommendationComposer {
             })?,
             status,
             account_source: input.account.source,
-            capital_base_usd: input.account.equity_usd,
+            capital_base_usd: input.account.capital_base_usd,
             account_snapshot_ref: account_snapshot_id,
+            equity_snapshot_ref: equity_snapshot_id,
             data_quality_snapshot_ref,
             summary_json: summary,
             published_at: Some(input.trigger_time),
@@ -193,7 +188,8 @@ impl RecommendationComposer for DefaultRecommendationComposer {
 
         Ok(ComposedReport {
             transaction: NewReportTransaction {
-                account_snapshot,
+                account_snapshot: input.account_snapshot,
+                equity_snapshot: input.equity_snapshot,
                 data_quality_snapshot: input.data_quality_snapshot,
                 portfolio_plan: input.portfolio_plan,
                 report,
@@ -818,7 +814,7 @@ fn empty_portfolio_plan(
         allocated_usd: Usd::ZERO,
         risk_budget_json: PortfolioRiskBudget {
             total_budget_usd: total_budget,
-            capital_base_usd: account.equity_usd,
+            capital_base_usd: account.capital_base_usd,
             reserved_usd: account.reserved_usd,
             allocated_usd: Usd::ZERO,
             remaining_usd: total_budget,
@@ -883,22 +879,24 @@ mod tests {
     use chrono::{Duration, TimeZone, Utc};
     use quant_pivot_error::{QuantError, report::ReportError};
     use quant_pivot_models::{
-        domain::quant::NewReportDataQualitySnapshot,
+        domain::quant::{NewAccountSnapshot, NewEquitySnapshot, NewReportDataQualitySnapshot},
         enums::quant::{
-            BindingConstraint, EmptyReason, IneligibilityReason, OutcomeSide, QuantRuntimeMode,
-            SettlementPolicy, SizingModelKind,
+            AccountSource, BindingConstraint, EmptyReason, IneligibilityReason, OutcomeSide,
+            QuantRuntimeMode, SettlementPolicy, SizingModelKind,
         },
         runtime_config::RuntimeConfig,
         types::{
-            Bps, ContentHash, MarketId, MarketSelectionId, ModelRunId, ModelVersionId, Price,
-            Probability, ReportDataQualitySnapshotId, ReportDataQualityTokens, RiskEnvelope,
-            Shares, SignalCandidateId, SizingPlan, TokenId, Usd,
+            AccountPositions, AccountSnapshotId, Bps, ContentHash, EquitySnapshotId, MarketId,
+            MarketSelectionId, ModelRunId, ModelVersionId, Price, Probability,
+            ReportDataQualitySnapshotId, ReportDataQualityTokens, RiskEnvelope,
+            RuntimeConfigVersionId, Shares, SignalCandidateId, SizingPlan, TokenId, Usd,
         },
     };
     use quant_pivot_research::{
         model::{ModelExplanation, SignalCandidate},
         portfolio::{AccountSnapshot, PlannedRecommendation},
     };
+    use rust_decimal::Decimal;
     use rust_decimal_macros::dec;
     use std::collections::HashMap;
 
@@ -1110,7 +1108,8 @@ mod tests {
         let config = RuntimeConfig::default();
         let account = AccountSnapshot::new(
             as_of,
-            quant_pivot_models::enums::quant::AccountSource::Polymarket,
+            AccountSource::Polymarket,
+            Usd::new(dec!(10_000)),
             Usd::new(dec!(10_000)),
             Usd::new(dec!(10_000)),
             Usd::ZERO,
@@ -1131,8 +1130,34 @@ mod tests {
         let data_quality_snapshot = NewReportDataQualitySnapshot {
             report_data_quality_snapshot_id: ReportDataQualitySnapshotId::from_v7(),
             as_of,
-            runtime_config_version_id: quant_pivot_models::types::RuntimeConfigVersionId::from_v7(),
+            runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
             tokens_json: ReportDataQualityTokens(Vec::new()),
+        };
+        let account_snapshot_id = AccountSnapshotId::from_v7();
+        let account_snapshot = NewAccountSnapshot {
+            account_snapshot_id: account_snapshot_id.clone(),
+            as_of: account.as_of,
+            source: account.source,
+            venue_net_liquidation_usd: account.venue_net_liquidation_usd,
+            capital_base_usd: account.capital_base_usd,
+            available_usd: account.available_usd,
+            reserved_usd: account.reserved_usd,
+            positions_json: AccountPositions(account.positions.clone()),
+            exposures_json: account.exposures.clone(),
+        };
+        let equity_snapshot = NewEquitySnapshot {
+            equity_snapshot_id: EquitySnapshotId::from_v7(),
+            as_of: account.as_of,
+            source: account.source,
+            venue_net_liquidation_usd: account.venue_net_liquidation_usd,
+            capital_base_usd: account.capital_base_usd,
+            available_usd: account.available_usd,
+            reserved_usd: account.reserved_usd,
+            realized_pnl_cumulative_usd: Usd::ZERO,
+            unrealized_pnl_usd: Usd::ZERO,
+            high_water_mark_usd: account.capital_base_usd,
+            drawdown_pct: Decimal::ZERO,
+            account_snapshot_ref: Some(account_snapshot_id),
         };
 
         let result = DefaultRecommendationComposer.compose(ComposeReportInput {
@@ -1143,12 +1168,14 @@ mod tests {
             trigger_time,
             source_delay_secs: 0,
             as_of,
-            runtime_config_version_id: quant_pivot_models::types::RuntimeConfigVersionId::from_v7(),
+            runtime_config_version_id: RuntimeConfigVersionId::from_v7(),
             runtime_config: &config,
             runtime_mode: QuantRuntimeMode::ReportOnly,
             model_version_id: ModelVersionId::from_v7(),
             market_selection_id,
             account: &account,
+            account_snapshot,
+            equity_snapshot,
             portfolio_plan,
             planned: &planned,
             planner_rejected: &[],

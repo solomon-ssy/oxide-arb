@@ -6,7 +6,7 @@ use quant_pivot_models::{enums::common::MarketCategory, types::Probability};
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 
 use crate::{
-    backtest::{CategoryMetric, EquityPoint, ExpectedVsRealized, SampleOutcome},
+    backtest::{CategoryMetric, ExpectedVsRealized, PnlCurvePoint, SampleOutcome},
     precision::RESEARCH_DECIMAL_SCALE,
     stats,
 };
@@ -97,15 +97,15 @@ pub fn tail_loss(samples: &[SampleOutcome], quantile: Decimal) -> Decimal {
     stats::mean(tail).round_dp(RESEARCH_DECIMAL_SCALE)
 }
 
-/// Maximum equity drawdown as a fraction of `budget` (or of the peak equity when
-/// the budget is non-positive). Returns a non-negative ratio.
+/// Maximum cumulative-`PnL` drawdown as a fraction of `budget` (or of the peak
+/// `PnL` when the budget is non-positive). Returns a non-negative ratio.
 #[must_use]
-pub fn max_drawdown(equity: &[EquityPoint], budget: Decimal) -> Decimal {
+pub fn max_drawdown(pnl_curve: &[PnlCurvePoint], budget: Decimal) -> Decimal {
     let mut peak = Decimal::ZERO;
     let mut max_dd = Decimal::ZERO;
-    for point in equity {
-        peak = peak.max(point.equity_usd);
-        let dd = peak - point.equity_usd;
+    for point in pnl_curve {
+        peak = peak.max(point.cumulative_realized_pnl_usd);
+        let dd = peak - point.cumulative_realized_pnl_usd;
         max_dd = max_dd.max(dd);
     }
     let denom = if budget > Decimal::ZERO {

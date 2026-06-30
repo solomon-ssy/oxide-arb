@@ -48,10 +48,6 @@ use crate::{model::signal::SignalCandidate, precision::RESEARCH_DECIMAL_SCALE};
 const BPS_PER_UNIT: i64 = 10_000;
 
 /// Decision-time drawdown state driving the conservative scaling policy.
-///
-/// Phase 4 has no cross-tick equity history, so the only constructible state is
-/// [`DrawdownState::neutral`] (no drawdown). The field is kept so Phase 5 can
-/// feed a real equity-curve drawdown without changing the sizing signature.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DrawdownState {
     /// Current peak-to-trough drawdown as a fraction in `[0, 1]` (`0` = none).
@@ -59,11 +55,19 @@ pub struct DrawdownState {
 }
 
 impl DrawdownState {
-    /// The neutral (no-drawdown) state used for every Phase 4 plan.
+    /// The neutral no-drawdown state, valid only when no equity history exists.
     #[must_use]
     pub const fn neutral() -> Self {
         Self {
             current_drawdown: Decimal::ZERO,
+        }
+    }
+
+    /// Conservative merge for repeated ledger reads within one report build.
+    #[must_use]
+    pub fn conservative_max(self, other: Self) -> Self {
+        Self {
+            current_drawdown: self.current_drawdown.max(other.current_drawdown),
         }
     }
 }
@@ -78,8 +82,8 @@ impl Default for DrawdownState {
 pub struct SizingInput<'a> {
     /// The scored candidate being sized.
     pub candidate: &'a SignalCandidate,
-    /// Capital base for sizing (`equity = min(net liquidation, budget cap)`).
-    pub equity_usd: Usd,
+    /// Strategy capital base for sizing.
+    pub capital_base_usd: Usd,
     /// Decision-time drawdown state (drives `drawdown_scaling`).
     pub drawdown_state: DrawdownState,
 }
@@ -189,7 +193,7 @@ impl SizingModel for KellySizingModel {
         let binding_kelly_cap = raw_fraction > self.max_position_pct;
         let fraction = raw_fraction.min(self.max_position_pct).max(Decimal::ZERO);
 
-        let desired_usd = (input.equity_usd * fraction).round_dp(RESEARCH_DECIMAL_SCALE);
+        let desired_usd = (input.capital_base_usd * fraction).round_dp(RESEARCH_DECIMAL_SCALE);
         let edge_bps = Bps::new((edge * bps).round_dp(RESEARCH_DECIMAL_SCALE));
 
         Ok(SizingOutcome::Sized(SizingSuggestion {
@@ -252,7 +256,7 @@ fn confidence_shrink(confidence: Decimal, curve: ConfidenceSizeCurve) -> Decimal
 /// Map the drawdown state to a scaling multiplier in `[0, 1]`.
 ///
 /// `Fixed` ignores drawdown (always `1`). `Conservative` scales down linearly
-/// with the current drawdown. Phase 4 is always neutral, so both yield `1`.
+/// with the current drawdown fraction from the equity ledger.
 fn drawdown_scale(state: DrawdownState, policy: DrawdownMultiplierPolicy) -> Decimal {
     match policy {
         DrawdownMultiplierPolicy::Fixed => Decimal::ONE,
@@ -344,7 +348,7 @@ mod tests {
             model
                 .suggest(&SizingInput {
                     candidate: &candidate(dec!(200), dec!(100), dec!(1)),
-                    equity_usd: Usd::new(dec!(10000)),
+                    capital_base_usd: Usd::new(dec!(10000)),
                     drawdown_state: DrawdownState::neutral(),
                 })
                 .expect("suggest"),
@@ -371,7 +375,7 @@ mod tests {
             model
                 .suggest(&SizingInput {
                     candidate: &candidate(dec!(50), dec!(100), dec!(1)),
-                    equity_usd: Usd::new(dec!(10000)),
+                    capital_base_usd: Usd::new(dec!(10000)),
                     drawdown_state: DrawdownState::neutral(),
                 })
                 .expect("suggest"),
@@ -387,7 +391,7 @@ mod tests {
         let outcome = model
             .suggest(&SizingInput {
                 candidate: &candidate(dec!(-100), dec!(100), dec!(1)),
-                equity_usd: Usd::new(dec!(10000)),
+                capital_base_usd: Usd::new(dec!(10000)),
                 drawdown_state: DrawdownState::neutral(),
             })
             .expect("suggest");
@@ -403,7 +407,7 @@ mod tests {
         let outcome = model
             .suggest(&SizingInput {
                 candidate: &candidate(dec!(200), dec!(0), dec!(1)),
-                equity_usd: Usd::new(dec!(10000)),
+                capital_base_usd: Usd::new(dec!(10000)),
                 drawdown_state: DrawdownState::neutral(),
             })
             .expect("suggest");
@@ -429,7 +433,7 @@ mod tests {
             model
                 .suggest(&SizingInput {
                     candidate: &candidate(dec!(10), dec!(200), dec!(1)),
-                    equity_usd: Usd::new(dec!(10000)),
+                    capital_base_usd: Usd::new(dec!(10000)),
                     drawdown_state: DrawdownState::neutral(),
                 })
                 .expect("suggest"),
@@ -438,7 +442,7 @@ mod tests {
             model
                 .suggest(&SizingInput {
                     candidate: &candidate(dec!(10), dec!(200), dec!(0.4)),
-                    equity_usd: Usd::new(dec!(10000)),
+                    capital_base_usd: Usd::new(dec!(10000)),
                     drawdown_state: DrawdownState::neutral(),
                 })
                 .expect("suggest"),
@@ -465,7 +469,7 @@ mod tests {
             model
                 .suggest(&SizingInput {
                     candidate: &candidate(dec!(10), dec!(200), dec!(0.4)),
-                    equity_usd: Usd::new(dec!(10000)),
+                    capital_base_usd: Usd::new(dec!(10000)),
                     drawdown_state: DrawdownState::neutral(),
                 })
                 .expect("suggest"),
@@ -474,7 +478,7 @@ mod tests {
             model
                 .suggest(&SizingInput {
                     candidate: &candidate(dec!(10), dec!(200), dec!(0.6)),
-                    equity_usd: Usd::new(dec!(10000)),
+                    capital_base_usd: Usd::new(dec!(10000)),
                     drawdown_state: DrawdownState::neutral(),
                 })
                 .expect("suggest"),
@@ -482,5 +486,84 @@ mod tests {
         // 0.6 → 0.5 bucket is double the 0.4 → 0.25 bucket.
         assert_eq!(mid.desired_usd, low.desired_usd * dec!(2));
         assert_eq!(model.kind(), SizingModelKind::Kelly);
+    }
+
+    #[test]
+    fn conservative_drawdown_scales_kelly_fraction() {
+        let fixed = KellySizingModel::new(
+            dec!(0.5),
+            dec!(0.9),
+            dec!(2),
+            ConfidenceSizeCurve::Linear,
+            DrawdownMultiplierPolicy::Fixed,
+        );
+        let conservative = KellySizingModel::new(
+            dec!(0.5),
+            dec!(0.9),
+            dec!(2),
+            ConfidenceSizeCurve::Linear,
+            DrawdownMultiplierPolicy::Conservative,
+        );
+        let input_candidate = candidate(dec!(10), dec!(200), dec!(1));
+        let fixed_size = sized(
+            fixed
+                .suggest(&SizingInput {
+                    candidate: &input_candidate,
+                    capital_base_usd: Usd::new(dec!(10000)),
+                    drawdown_state: DrawdownState {
+                        current_drawdown: dec!(0.2),
+                    },
+                })
+                .expect("fixed suggest"),
+        );
+        let conservative_size = sized(
+            conservative
+                .suggest(&SizingInput {
+                    candidate: &input_candidate,
+                    capital_base_usd: Usd::new(dec!(10000)),
+                    drawdown_state: DrawdownState {
+                        current_drawdown: dec!(0.2),
+                    },
+                })
+                .expect("conservative suggest"),
+        );
+
+        assert_eq!(
+            conservative_size.desired_usd,
+            fixed_size.desired_usd * dec!(0.8)
+        );
+    }
+
+    #[test]
+    fn kelly_fixed_policy_ignores_drawdown() {
+        let fixed = KellySizingModel::new(
+            dec!(0.5),
+            dec!(0.9),
+            dec!(2),
+            ConfidenceSizeCurve::Linear,
+            DrawdownMultiplierPolicy::Fixed,
+        );
+        let input_candidate = candidate(dec!(10), dec!(200), dec!(1));
+        let neutral = sized(
+            fixed
+                .suggest(&SizingInput {
+                    candidate: &input_candidate,
+                    capital_base_usd: Usd::new(dec!(10000)),
+                    drawdown_state: DrawdownState::neutral(),
+                })
+                .expect("neutral suggest"),
+        );
+        let in_drawdown = sized(
+            fixed
+                .suggest(&SizingInput {
+                    candidate: &input_candidate,
+                    capital_base_usd: Usd::new(dec!(10000)),
+                    drawdown_state: DrawdownState {
+                        current_drawdown: dec!(0.2),
+                    },
+                })
+                .expect("drawdown suggest"),
+        );
+        assert_eq!(in_drawdown.desired_usd, neutral.desired_usd);
     }
 }

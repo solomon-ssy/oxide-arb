@@ -241,7 +241,7 @@ mod tests {
     use rust_decimal_macros::dec;
 
     use crate::backtest::{
-        BacktestReport, BacktestRunResult, CategoryMetric, EquityPoint, ExpectedVsRealized,
+        BacktestReport, BacktestRunResult, CategoryMetric, ExpectedVsRealized, PnlCurvePoint,
         PnlSimulation, SampleOutcome,
     };
 
@@ -313,9 +313,9 @@ mod tests {
                 total_allocated_usd: dec!(1000),
                 realized_pnl_usd: realized_pnl,
                 gross_return: dec!(0),
-                equity_curve: vec![EquityPoint {
+                pnl_curve: vec![PnlCurvePoint {
                     as_of: Utc.timestamp_opt(1_700_000_000, 0).unwrap(),
-                    equity_usd: realized_pnl,
+                    cumulative_realized_pnl_usd: realized_pnl,
                 }],
             },
             report_hash: hash(report_seed),
