@@ -395,6 +395,7 @@ fn rbac_and_runtime_enums_are_cataloged() {
             "audit",
             "quant_report",
             "account_snapshot",
+            "equity_snapshot",
             "order_intent",
             "execution_order",
             "position",

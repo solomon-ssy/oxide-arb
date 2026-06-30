@@ -11,6 +11,7 @@ use actix_web::{
     test::TestRequest,
 };
 use quant_pivot_models::types::{OrderIntentId, RecommendationId};
+use quant_pivot_test_support::execution_pg_seed::{seed_approved_intent, seed_report_fixture};
 use serde_json::{Value, json};
 
 use crate::harness::{self, API_VERSION, TestEnv};
@@ -205,7 +206,8 @@ async fn submit_intent_requires_operator_and_maps_not_submittable_to_conflict() 
     let admin = login(&env, "admin", "admin").await;
     let operator = user_with_role(&env, &admin, "op_submit", "operator").await;
     let viewer = user_with_role(&env, &admin, "vw_submit", "viewer").await;
-    let intent_id = OrderIntentId::from_v7();
+    let ids = seed_report_fixture(&env.db).await;
+    let intent_id = seed_approved_intent(&env.db, &ids).await;
 
     let allowed = post(
         &env,

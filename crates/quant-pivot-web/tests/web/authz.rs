@@ -206,12 +206,12 @@ async fn permission_grant_takes_effect_after_reload() {
 
 #[actix_web::test]
 #[ignore = "requires Docker"]
-async fn invalid_permission_pair_is_conflict() {
+async fn invalid_permission_pair_is_bad_request() {
     let env = TestEnv::start().await;
     let admin = login(&env, "admin", "admin").await;
     let role_id = create_role(&env, &admin, "bad_perms").await;
 
-    // `user` does not allow `halt` — structurally valid but rejected as Conflict (409).
+    // `user` does not allow `halt` — rejected as Bad Request (400) before persistence.
     let res = put(
         &env,
         &format!("/api/roles/{role_id}/permissions"),
@@ -219,7 +219,7 @@ async fn invalid_permission_pair_is_conflict() {
         json!({ "permissions": [{ "resource": "user", "operation": "halt" }] }),
     )
     .await;
-    assert_eq!(res.status, StatusCode::CONFLICT);
+    assert_eq!(res.status, StatusCode::BAD_REQUEST);
 }
 
 #[actix_web::test]
