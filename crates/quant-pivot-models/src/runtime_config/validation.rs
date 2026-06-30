@@ -444,6 +444,43 @@ fn validate_execution(config: &RuntimeConfig, report: &mut ConfigValidationRepor
             detail: "must be greater than zero".to_owned(),
         });
     }
+    validate_settlement_redeem(config, report);
+}
+
+fn validate_settlement_redeem(config: &RuntimeConfig, report: &mut ConfigValidationReport) {
+    let redeem = &config.execution.settlement_redeem;
+    if redeem.enabled {
+        if redeem.interval_secs == 0 {
+            report.errors.push(ConfigValidationError::InvalidValue {
+                field: "execution.settlement_redeem.interval_secs",
+                detail: "must be greater than zero when the redeem worker is enabled".to_owned(),
+            });
+        }
+        if redeem.batch_size == 0 {
+            report.errors.push(ConfigValidationError::InvalidValue {
+                field: "execution.settlement_redeem.batch_size",
+                detail: "must be greater than zero when the redeem worker is enabled".to_owned(),
+            });
+        }
+        if redeem.max_attempts == 0 {
+            report.errors.push(ConfigValidationError::InvalidValue {
+                field: "execution.settlement_redeem.max_attempts",
+                detail: "must be greater than zero when the redeem worker is enabled".to_owned(),
+            });
+        }
+        if redeem.confirmation_blocks == 0 {
+            report.errors.push(ConfigValidationError::InvalidValue {
+                field: "execution.settlement_redeem.confirmation_blocks",
+                detail: "must be at least one when the redeem worker is enabled".to_owned(),
+            });
+        }
+    }
+    if redeem.hold_to_resolution_enabled && redeem.hold_to_resolution_within_secs == 0 {
+        report.errors.push(ConfigValidationError::InvalidValue {
+            field: "execution.settlement_redeem.hold_to_resolution_within_secs",
+            detail: "must be greater than zero when hold_to_resolution_enabled is true".to_owned(),
+        });
+    }
 }
 
 fn validate_notification(config: &RuntimeConfig, report: &mut ConfigValidationReport) {

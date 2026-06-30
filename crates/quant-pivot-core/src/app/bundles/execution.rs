@@ -8,21 +8,29 @@
 
 use std::sync::Arc;
 
-use quant_pivot_api::clob::ClobClient;
-use quant_pivot_models::domain::{DataQualityPort, ExecutionSubmitPort};
+use quant_pivot_api::{
+    clob::ClobClient, ctf::CtfClient, keystore::OrderSigner, relayer::RelayerClient,
+    wallet::WalletTopology,
+};
+use quant_pivot_error::{QuantError, QuantResult};
+use quant_pivot_models::{
+    config::DeployConfig,
+    domain::{DataQualityPort, ExecutionSubmitPort},
+};
 use quant_pivot_repository::{
     postgres::{
         PgAttributionRepository, PgCapitalAllocationRepository, PgExecutionOrderRepository,
         PgExecutionSubmissionRepository, PgMarketRepository, PgModelRegistryRepository,
         PgOrderIntentRepository, PgPositionRepository, PgRecommendationReportRepository,
         PgRecommendationRepository, PgReconciliationRepository, PgRuntimeConfigVersionRepository,
+        PgSettlementRedeemRepository,
     },
     traits::{
         AttributionRepository, CapitalAllocationRepository, ExecutionOrderRepository,
         ExecutionSubmissionRepository, MarketRepository, ModelRegistryRepository,
         OperationLogRepository, OrderIntentRepository, PositionRepository,
         RecommendationReportRepository, RecommendationRepository, ReconciliationRepository,
-        RuntimeConfigVersionRepository,
+        RuntimeConfigVersionRepository, SettlementRedeemRepository,
     },
 };
 
@@ -34,8 +42,9 @@ use crate::{
         CoreExitDispatcher, DefaultAdmissionEngine, DispatchWake, EvidenceCollector,
         ExecutionBreaker, ExecutionDispatcherDeps, ExitDispatcherDeps, ExitMonitorHealthHandle,
         ExitMonitorService, ExitMonitorServiceDeps, ExitSignalEvaluator, PolymarketOrderClient,
-        ReconciliationService, ReconciliationServiceDeps, VenueEvidenceCollector,
-        VenueReconciliationReader,
+        ReconciliationService, ReconciliationServiceDeps, RelayerSettlementClient,
+        SettlementCtfClient, SettlementRedeemService, SettlementRedeemServiceDeps,
+        VenueEvidenceCollector, VenueReconciliationReader,
     },
     pipeline::feature_window_provider::FeatureWindowProvider,
     service::{
@@ -48,6 +57,7 @@ use crate::{
 
 /// Dependencies for [`ExecutionBundle::assemble`].
 pub struct ExecutionBundleDeps<'a> {
+    pub deploy: &'a DeployConfig,
     pub infra: &'a InfraBundle,
     pub data: &'a DataBundle,
     pub governance: &'a GovernanceBundle,
@@ -55,6 +65,10 @@ pub struct ExecutionBundleDeps<'a> {
     pub account: &'a AccountBundle,
     /// Shared authenticated CLOB client (same identity as the account bundle).
     pub clob: Arc<ClobClient>,
+    /// Shared EOA signer loaded once at boot.
+    pub signer: Arc<OrderSigner>,
+    /// Resolved + validated venue wallet topology (drives settlement routing).
+    pub wallet: WalletTopology,
 }
 
 /// Entry-execution subsystem: order client + admission + breaker + dispatcher.
@@ -68,6 +82,8 @@ pub struct ExecutionBundle {
     pub reconciliation: Arc<ReconciliationService>,
     /// Exit-monitor engine (05.6): scans open lots and drives the exit ladder.
     pub exit_monitor: Arc<ExitMonitorService>,
+    /// On-chain settlement redeem engine (05.10).
+    pub settlement_redeem: Arc<SettlementRedeemService>,
     /// Final WORM recommendation-attribution builder (05.7).
     pub attribution: Arc<AttributionService>,
     /// Exit-monitor health hot read consumed by admission `#20`.
@@ -79,8 +95,7 @@ pub struct ExecutionBundle {
 
 impl ExecutionBundle {
     /// Assemble the execution subsystem from the shared planes.
-    #[must_use]
-    pub fn assemble(deps: ExecutionBundleDeps<'_>) -> Self {
+    pub fn assemble(deps: &ExecutionBundleDeps<'_>) -> QuantResult<Self> {
         let infra = deps.infra;
         let pg = infra.pg.connection();
 
@@ -109,10 +124,10 @@ impl ExecutionBundle {
         // Stateless admission: input builder (breaker venue-health + exit-monitor
         // seams) + the 20-check engine.
         let admission_builder =
-            build_admission_builder(&deps, &breaker, exit_monitor_health.clone());
+            build_admission_builder(deps, &breaker, exit_monitor_health.clone());
         let admission = Arc::new(DefaultAdmissionEngine::new(Arc::clone(&infra.metrics)));
 
-        let clob = deps.clob;
+        let clob = Arc::clone(&deps.clob);
         let order_client: Arc<dyn PolymarketOrderClient> = Arc::new(ClobOrderClient::new(
             Arc::clone(&clob),
             Arc::clone(&deps.data.fee_calculator),
@@ -177,19 +192,79 @@ impl ExecutionBundle {
             exit_monitor_health.clone(),
         );
         let attribution = build_attribution_service(infra);
+        let settlement_redeem = build_settlement_redeem_service(deps)?;
 
-        Self {
+        Ok(Self {
             order_client,
             dispatcher,
             breaker,
             submission,
             reconciliation,
             exit_monitor,
+            settlement_redeem,
             attribution,
             exit_monitor_health,
             dispatch_wake: DispatchWake::new(),
-        }
+        })
     }
+}
+
+fn build_settlement_redeem_service(
+    deps: &ExecutionBundleDeps<'_>,
+) -> QuantResult<Arc<SettlementRedeemService>> {
+    let pg = deps.infra.pg.connection();
+    let funder_address = deps.deploy.quant.account.funder.clone().ok_or_else(|| {
+        QuantError::config("quant.account.funder is required for settlement redeem")
+    })?;
+    // The wallet topology (signer/funder equality for EOA, CREATE2 match for
+    // proxy/Safe) is validated at boot in `resolve_wallet_topology`; here it only
+    // selects the on-chain settlement route.
+    let ctf = build_settlement_ctf_client(deps, &funder_address)?;
+
+    Ok(Arc::new(SettlementRedeemService::new(
+        SettlementRedeemServiceDeps {
+            positions: Arc::new(PgPositionRepository::new(pg.clone()))
+                as Arc<dyn PositionRepository>,
+            intents: Arc::new(PgOrderIntentRepository::new(pg.clone()))
+                as Arc<dyn OrderIntentRepository>,
+            markets: Arc::new(PgMarketRepository::new(pg.clone())) as Arc<dyn MarketRepository>,
+            settlement_redeems: Arc::new(PgSettlementRedeemRepository::new(pg.clone()))
+                as Arc<dyn SettlementRedeemRepository>,
+            ctf,
+            runtime_mode: deps.governance.runtime_mode.clone(),
+            kill_switch: deps.governance.kill_switch_handle.clone(),
+            config: Arc::clone(&deps.governance.runtime_config),
+            funder_address,
+            wallet_kind: deps.deploy.quant.account.wallet_kind,
+        },
+    )))
+}
+
+/// Select the settlement client by wallet topology: EOA signs + pays gas directly
+/// via the CTF contract; Proxy / Gnosis Safe read on-chain state via RPC but
+/// broadcast the redeem gaslessly through the Polymarket relayer.
+fn build_settlement_ctf_client(
+    deps: &ExecutionBundleDeps<'_>,
+    funder_address: &str,
+) -> QuantResult<Arc<dyn SettlementCtfClient>> {
+    let ctf = CtfClient::connect(deps.signer.as_ref(), &deps.deploy.polymarket)?;
+    if deps.wallet.is_eoa() {
+        return Ok(Arc::new(ctf) as Arc<dyn SettlementCtfClient>);
+    }
+    let relayer = RelayerClient::connect(
+        deps.signer.as_ref(),
+        &deps.deploy.polymarket.relayer,
+        &deps.wallet,
+        deps.deploy.polymarket.chain_id,
+    )
+    .map_err(|error| {
+        QuantError::config(format!("relayer settlement client unavailable: {error}"))
+    })?;
+    Ok(Arc::new(RelayerSettlementClient::new(
+        ctf,
+        relayer,
+        funder_address.to_owned(),
+    )) as Arc<dyn SettlementCtfClient>)
 }
 
 fn build_attribution_service(infra: &InfraBundle) -> Arc<AttributionService> {

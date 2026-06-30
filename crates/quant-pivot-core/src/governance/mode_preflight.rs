@@ -20,7 +20,10 @@ use quant_pivot_error::QuantResult;
 use quant_pivot_models::{
     config::DeployConfig,
     domain::{DataQualityPort, PreflightCheck, PreflightReport},
-    enums::{execution::KillSwitchState, quant::QuantRuntimeMode},
+    enums::{
+        execution::KillSwitchState,
+        quant::{ExecutionWalletKind, QuantRuntimeMode},
+    },
     runtime_config::{ModelVersionRef, RuntimeConfig, validate_runtime_config},
     types::ModelVersionId,
 };
@@ -111,13 +114,37 @@ impl DefaultModePreflight {
             .funder
             .as_deref()
             .is_some_and(|funder| !funder.trim().is_empty());
-        let detail = match (key, funder) {
-            (true, true) => "private_key and quant.account.funder present".to_owned(),
-            (false, true) => "missing keys.private_key".to_owned(),
-            (true, false) => "missing quant.account.funder".to_owned(),
-            (false, false) => "missing keys.private_key and quant.account.funder".to_owned(),
+        // Proxy / Gnosis Safe topologies move money (e.g. settlement redeem)
+        // through the gasless relayer, so the relayer API credentials are a hard
+        // requirement for any upgrade (semi_auto / auto_execution). EOA settles
+        // on-chain directly and needs none.
+        let wallet_kind = self.deps.deploy.quant.account.wallet_kind;
+        let relayer_required = matches!(
+            wallet_kind,
+            ExecutionWalletKind::Proxy | ExecutionWalletKind::GnosisSafe
+        );
+        let relayer_ok = !relayer_required || self.deps.deploy.polymarket.relayer.is_ready();
+
+        let mut missing = Vec::new();
+        if !key {
+            missing.push("keys.private_key");
+        }
+        if !funder {
+            missing.push("quant.account.funder");
+        }
+        if !relayer_ok {
+            missing.push("polymarket.relayer.api_key + api_key_address");
+        }
+        let passed = key && funder && relayer_ok;
+        let detail = if passed {
+            format!(
+                "private_key + quant.account.funder present (wallet_kind={})",
+                wallet_kind.as_str()
+            )
+        } else {
+            format!("missing {}", missing.join(", "))
         };
-        PreflightCheck::hard("credentials_loaded", key && funder, detail)
+        PreflightCheck::hard("credentials_loaded", passed, detail)
     }
 
     fn check_jwt(&self, target: QuantRuntimeMode) -> PreflightCheck {

@@ -25,8 +25,8 @@ use crate::{
         common::MarketCategory,
         factor::FactorFamily,
         quant::{
-            BindingConstraint, EmptyReason, EntryTriggerKind, ExitTriggerKind, FactorDirection,
-            IneligibilityReason, QuantRuntimeMode, SettlementPolicy, SizingModelKind,
+            BindingConstraint, EmptyReason, EntryTriggerKind, ExitSettlementMode, ExitTriggerKind,
+            FactorDirection, IneligibilityReason, QuantRuntimeMode, RedeemPolicy, SizingModelKind,
         },
     },
     hashing::CanonicalDigest,
@@ -123,8 +123,10 @@ pub struct ExitPlan {
     pub trailing_stop: Option<TrailingStop>,
     /// Conditions that invalidate the thesis and force an exit.
     pub signal_invalidation_rules: Vec<SignalInvalidationRule>,
-    /// How the position settles at resolution.
-    pub settlement_policy: SettlementPolicy,
+    /// Whether the lot exits before resolution or holds through resolution.
+    pub settlement_mode: ExitSettlementMode,
+    /// Whether a resolved hold-to-resolution lot is redeemed automatically.
+    pub redeem_policy: RedeemPolicy,
     /// Optional manual-review checkpoint time.
     pub manual_review_at: Option<DateTime<Utc>>,
     /// Human explanation of the exit decision.

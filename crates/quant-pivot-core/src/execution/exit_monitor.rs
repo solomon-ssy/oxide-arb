@@ -38,7 +38,7 @@ use quant_pivot_models::{
     enums::{
         common::{OrderType, Side},
         execution::{ExitReason, KillSwitchState},
-        quant::{ExitTriggerKind, SettlementPolicy},
+        quant::{ExitSettlementMode, ExitTriggerKind},
     },
     runtime_config::{EmergencyExitKind, EmergencyExitPolicy},
     types::{ExitPolicySpec, PartialExitNode, Price, Shares, TokenId},
@@ -396,8 +396,9 @@ pub fn decide_exit(input: &ExitMonitorInput) -> ExitDecision {
 
     // A `HoldToResolution` lot is held to settlement: it skips the take-gains /
     // time-out tiers below (only the protective exits above and the emergency
-    // override act). Redemption is handled at settlement (AutoRedeem, deferred).
-    if policy.settlement_policy == SettlementPolicy::HoldToResolution {
+    // override act). Redemption is handled at settlement when RedeemPolicy::Auto
+    // is enabled for the frozen exit policy.
+    if policy.settlement_mode == ExitSettlementMode::HoldToResolution {
         return ExitDecision::Hold;
     }
 

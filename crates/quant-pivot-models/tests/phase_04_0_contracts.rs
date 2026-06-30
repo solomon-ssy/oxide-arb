@@ -16,9 +16,10 @@ use quant_pivot_models::{
         common::MarketCategory,
         factor::FactorFamily,
         quant::{
-            AccountSource, BindingConstraint, EntryTriggerKind, ExitTriggerKind, FactorDirection,
-            IneligibilityReason, QuantRuntimeMode, RecommendationReportStatus, ReportKind,
-            ReportTriggerKind, SettlementPolicy, SizingModelKind,
+            AccountSource, BindingConstraint, EntryTriggerKind, ExitSettlementMode,
+            ExitTriggerKind, FactorDirection, IneligibilityReason, QuantRuntimeMode,
+            RecommendationReportStatus, RedeemPolicy, ReportKind, ReportTriggerKind,
+            SizingModelKind,
         },
     },
     runtime_config::{
@@ -108,7 +109,8 @@ fn exit_plan() -> ExitPlan {
             activation_price: Some(Price::new(dec!(0.6))),
         }),
         signal_invalidation_rules: Vec::new(),
-        settlement_policy: SettlementPolicy::HoldToResolution,
+        settlement_mode: ExitSettlementMode::HoldToResolution,
+        redeem_policy: RedeemPolicy::Manual,
         manual_review_at: None,
         exit_reason: "tp/sl + trailing".to_owned(),
     }

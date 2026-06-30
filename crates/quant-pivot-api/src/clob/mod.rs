@@ -17,6 +17,7 @@ pub use token::WireTokenId;
 use crate::{
     infra::retry::{self, RetryPolicy},
     keystore::OrderSigner,
+    wallet::WalletTopology,
     ws::BookLevelRejectHook,
 };
 use alloy::signers::Signer;
@@ -160,18 +161,35 @@ fn map_post_order_response(
 
 impl ClobClient {
     /// Authenticate with Polymarket CLOB and create a connected client.
+    ///
+    /// The [`WalletTopology`] binds the venue signature type and the money-holding
+    /// funder: an EOA signs as itself (signature type 0, no funder), while a
+    /// Proxy / Gnosis Safe routes orders and balance reads through the derived
+    /// funder wallet (signature type 1 / 2). This keeps order placement and Data
+    /// API position reads on the *same* account.
     pub async fn connect(
         signer: Arc<OrderSigner>,
         config: &PolymarketConfig,
+        topology: &WalletTopology,
     ) -> Result<Self, ApiError> {
         // Polymarket L1 auth / EIP-712 requires `chain_id` on the alloy signer.
         let mut auth_signer = signer.inner().clone();
         auth_signer.set_chain_id(Some(config.chain_id));
 
         let sdk_config = SdkConfig::builder().use_server_time(true).build();
-        let sdk = SdkClient::new(&config.clob_base_url, sdk_config)
+        let builder = SdkClient::new(&config.clob_base_url, sdk_config)
             .map_err(|e| ApiError::from(sdk_error::SdkClobError(&e)))?
-            .authentication_builder(&auth_signer)
+            .authentication_builder(&auth_signer);
+        // EOA is the SDK default; only Proxy / Safe attach an explicit funder +
+        // signature type (the SDK rejects a funder paired with the EOA type).
+        let builder = if topology.is_eoa() {
+            builder
+        } else {
+            builder
+                .signature_type(topology.signature_type)
+                .funder(topology.funder)
+        };
+        let sdk = builder
             .authenticate()
             .await
             .map_err(|e| ApiError::from(sdk_error::SdkClobError(&e)))?;

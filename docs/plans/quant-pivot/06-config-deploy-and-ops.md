@@ -67,14 +67,29 @@ exit_monitor_channel_capacity = 1024
 reconciliation_channel_capacity = 256
 
 [quant.account]
-# Polymarket proxy/funder 地址（持有 USDC.e + outcome token；独立于 signer EOA）。
-# Data API `GET /positions?user=<funder>` 用此地址读真实持仓（keyless）。
+# Polymarket funder 地址。Data API `GET /positions?user=<funder>` 用此地址读真实持仓（keyless）。
+# eoa: 必须等于 [keys].private_key 派生地址；proxy/gnosis_safe: 必须等于 CREATE2 推导的代理/Safe 地址（启动校验）。
 funder = "0x..."
+# 钱包形态，驱动下单 signature_type 与链上结算路由：
+#   "eoa"         — 资金在 signer EOA，直接签名+自付 gas 赎回。
+#   "proxy"       — Polymarket Proxy（EIP-1167，Magic/邮箱用户），经 relayer gasless 赎回。
+#   "gnosis_safe" — 1-of-1 Gnosis Safe（浏览器钱包），经 relayer gasless 赎回。
+wallet_kind = "eoa"
+
+[polymarket.relayer]
+# proxy / gnosis_safe 的 money-moving（如 CTF redeem）经 Polymarket gasless relayer 提交；eoa 忽略。
+base_url = "https://relayer-v2.polymarket.com"
+# api_key = "..."           # QUANT_PIVOT__POLYMARKET__RELAYER__API_KEY（secret）
+# api_key_address = "0x..." # QUANT_PIVOT__POLYMARKET__RELAYER__API_KEY_ADDRESS（密钥所属 EOA 地址）
+request_timeout_ms = 15000
 
 [market_data.data_api]
 # Data API base URL（公开持仓读取，keyless）。
 base_url = "https://data-api.polymarket.com"
 ```
+
+> `proxy` / `gnosis_safe` 拓扑在 `semi_auto` / `auto_execution` upgrade 时，preflight
+> `credentials_loaded` 硬要求 `[polymarket.relayer].api_key` + `api_key_address`。
 
 **私钥所有 mode 都需要（用于读真实抵押余额 + 派生 L2 读凭证）**；私钥的**签名/下单**用途
 仅 `semi_auto` / `auto_execution` preflight 才要求。已删除 `load_credentials_in_report_only`
@@ -541,12 +556,13 @@ Warning：
 
 - DryRun/Paper/Live 切换。
 - Endgame detector tuning。
-- settlement redeem。
+- old settlement redeem / redeem routing。
 - bankroll and risk metrics old。
 
 新增 runbook：
 
 - 启动 report_only。
+- 标准二元 CTF auto-redeem：EOA-only signer/funder 校验、`Submitted` 恢复、`ManualRequired` 处置。
 - 发布模型。
 - 运行 ad-hoc report。
 - 切换 semi_auto。

@@ -2,7 +2,10 @@
 //! violations that would cause silent failure at runtime.
 
 use super::DeployConfig;
-use crate::{constants::POLYGON_CHAIN_ID, enums::quant::QuantRuntimeMode};
+use crate::{
+    constants::POLYGON_CHAIN_ID,
+    enums::quant::{ExecutionWalletKind, QuantRuntimeMode},
+};
 use quant_pivot_error::config_validation::{
     ConfigValidationError, ConfigValidationReport, ConfigWarning,
 };
@@ -152,6 +155,8 @@ pub fn validate_deploy_for_quant_mode(
 /// collateral / L2 read credential) and the funder (Data API position reads) are
 /// required in every mode. Missing either fails closed. The private key is used
 /// only for reads here; signing/submission gating stays mode-aware elsewhere.
+/// Phase05.10 EOA auto-redeem additionally checks signer/funder equality during
+/// CTF worker assembly, where the signer address is available.
 fn validate_credentials_quant_mode(
     deploy: &DeployConfig,
     mode: QuantRuntimeMode,
@@ -177,6 +182,32 @@ fn validate_credentials_quant_mode(
                 mode: mode.to_string(),
                 missing,
             });
+    }
+
+    // Proxy / Gnosis Safe topologies move money via the gasless relayer, so the
+    // relayer API credentials are mandatory once order submission is allowed
+    // (SemiAuto / AutoExecution). ReportOnly never redeems, so it is exempt.
+    if mode.allows_order_submission()
+        && matches!(
+            deploy.quant.account.wallet_kind,
+            ExecutionWalletKind::Proxy | ExecutionWalletKind::GnosisSafe
+        )
+    {
+        let mut relayer_missing = Vec::new();
+        if deploy.polymarket.relayer.api_key().is_none() {
+            relayer_missing.push("polymarket.relayer.api_key");
+        }
+        if deploy.polymarket.relayer.api_key_address().is_none() {
+            relayer_missing.push("polymarket.relayer.api_key_address");
+        }
+        if !relayer_missing.is_empty() {
+            report
+                .errors
+                .push(ConfigValidationError::MissingCredentials {
+                    mode: mode.to_string(),
+                    missing: relayer_missing,
+                });
+        }
     }
 }
 

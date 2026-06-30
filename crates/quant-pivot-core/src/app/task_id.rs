@@ -59,6 +59,8 @@ pub enum TaskId {
     ReconciliationWorker,
     /// Scans open position lots and evaluates the exit priority ladder (05.6).
     ExitMonitor,
+    /// Redeems resolved standard binary CTF positions and closes settlement lots.
+    SettlementRedeemWorker,
     /// Writes final recommendation-attribution rows after execution reaches truth.
     AttributionWorker,
     /// Best-effort analytics mirror for final attribution events (05.7).
@@ -129,6 +131,7 @@ impl TaskId {
             | Self::ExecutionBreakerTick
             | Self::ReconciliationWorker
             | Self::ExitMonitor
+            | Self::SettlementRedeemWorker
             | Self::AttributionWorker => TaskKind::Execution,
             Self::ExecutionHeartbeat => TaskKind::ExecutionHeartbeat,
             Self::RiskTick

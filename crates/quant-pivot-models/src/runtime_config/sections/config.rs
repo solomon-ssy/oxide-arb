@@ -8,7 +8,7 @@ use crate::{
         ExitOrderPolicy, FactorWeights, FeatureFamily, FeatureNameRef, FeatureStalenessPolicy,
         KillSwitchPolicy, MissingFactorPolicy, ModelVersionRef, NotificationPolicies,
         PortfolioOptimizerConfig, ReconciliationPolicy, ReportDeliveryPolicy, ScheduleCadence,
-        SizingModelConfig,
+        SettlementRedeemPolicy, SizingModelConfig,
     },
     types::{SchemaVersion, Usd},
 };
@@ -465,6 +465,8 @@ pub struct ExecutionConfig {
     pub capital: CapitalPolicy,
     /// Reconciliation policy document.
     pub reconciliation: ReconciliationPolicy,
+    /// On-chain settlement redemption policy.
+    pub settlement_redeem: SettlementRedeemPolicy,
     /// Recommendation attribution worker policy.
     pub attribution: AttributionPolicy,
     /// Execution-breaker thresholds (venue health + auto kill-switch trip).
@@ -484,6 +486,7 @@ impl Default for ExecutionConfig {
             kill_switch: KillSwitchPolicy::default(),
             capital: CapitalPolicy::default(),
             reconciliation: ReconciliationPolicy::default(),
+            settlement_redeem: SettlementRedeemPolicy::default(),
             attribution: AttributionPolicy::default(),
             breaker: ExecutionBreakerConfig::default(),
         }
@@ -570,52 +573,4 @@ pub struct WebhookNotificationConfig {
     /// Webhook URL.
     #[schemars(extend("x-sensitive" = true))]
     pub url: String,
-}
-
-/// Policy for all oracle sources being unavailable.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum AllSourcesDownStrategy {
-    DegradedReport,
-    HaltExecution,
-}
-
-/// Settlement oracle source configuration retained for Polymarket data clients.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(default, deny_unknown_fields)]
-pub struct SettlementOracleConfig {
-    /// UMA oracle endpoint.
-    pub uma_endpoint: Option<String>,
-    /// Gamma fallback endpoint.
-    pub gamma_endpoint: Option<String>,
-    /// CTF fallback endpoint.
-    pub ctf_endpoint: Option<String>,
-    /// Strategy when every source is unavailable.
-    pub all_sources_down_strategy: AllSourcesDownStrategy,
-}
-
-impl Default for SettlementOracleConfig {
-    fn default() -> Self {
-        Self {
-            uma_endpoint: None,
-            gamma_endpoint: None,
-            ctf_endpoint: None,
-            all_sources_down_strategy: AllSourcesDownStrategy::DegradedReport,
-        }
-    }
-}
-
-/// CTF redeem routing policy retained for the Polymarket API wrapper.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum RedeemRoutingPolicy {
-    Standard,
-    NegRisk,
-}
-
-/// Resolved CTF redeem routing plan.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct ResolvedRedeemPlan {
-    pub policy: RedeemRoutingPolicy,
-    pub exchange: String,
 }

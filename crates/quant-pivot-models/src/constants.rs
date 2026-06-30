@@ -9,13 +9,13 @@
 /// Polygon chain ID (137).
 pub const POLYGON_CHAIN_ID: u64 = 137;
 
-// ── USDC Decimals ───────────────────────────────────────────────────────
+// ── Collateral Decimals ─────────────────────────────────────────────────
 
-/// USDC.e has 6 decimals on Polygon.
-pub const USDC_DECIMALS: u8 = 6;
+/// Polymarket collateral scale is 6 decimals.
+pub const COLLATERAL_DECIMALS: u8 = 6;
 
-/// Scaling factor for USDC (10^6).
-pub const USDC_SCALE: u64 = 1_000_000;
+/// Scaling factor for Polymarket collateral amounts (10^6).
+pub const COLLATERAL_SCALE: u64 = 1_000_000;
 
 // ── Polymarket contract deployments (Polygon mainnet) ───────────────────
 //
@@ -28,17 +28,19 @@ pub const USDC_SCALE: u64 = 1_000_000;
 /// standard (non-neg-risk) markets and the oracle `payoutDenominator` source.
 pub const CTF_ADDRESS: &str = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045";
 
-/// USDC.e (bridged USDC) — collateral token for all Polymarket markets.
+/// Polymarket pUSD collateral token used by current CTF mint/redeem flows.
+pub const PUSD_ADDRESS: &str = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB";
+
+/// USDC.e (bridged USDC) retained for adapter/accounting references where
+/// Polymarket wrapper contracts expose legacy collateral internals.
 pub const USDC_E_ADDRESS: &str = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
 
 /// Neg-risk adapter (legacy) — `redeemPositions(conditionId, amounts)` target
-/// for neg-risk markets when `settlement.redeem.neg_risk.route = neg_risk_legacy_adapter`.
+/// for future neg-risk auto-redeem support.
 pub const NEG_RISK_ADAPTER_ADDRESS: &str = "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296";
 
-/// CTF collateral adapter — alternative standard-market redeem target when
-/// `settlement.redeem.standard.route = ctf_collateral_adapter`.
+/// CTF collateral adapter retained for future verified adapter routing.
 pub const CTF_COLLATERAL_ADAPTER_ADDRESS: &str = "0xAdA100Db00Ca00073811820692005400218FcE1f";
 
-/// Neg-risk collateral adapter — alternative neg-risk redeem target when
-/// `settlement.redeem.neg_risk.route = neg_risk_collateral_adapter`.
+/// Neg-risk collateral adapter retained for future verified adapter routing.
 pub const NEG_RISK_COLLATERAL_ADAPTER_ADDRESS: &str = "0xadA2005600Dec949baf300f4C6120000bDB6eAab";

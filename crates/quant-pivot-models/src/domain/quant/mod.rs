@@ -27,6 +27,8 @@ mod report_diff;
 mod report_txn;
 #[allow(clippy::needless_update)] // NewMarketSelectionMember covers all ActiveModel columns
 mod selection;
+#[allow(clippy::needless_update)] // NewSettlementRedeem* omit DB-managed timestamps
+mod settlement;
 #[allow(clippy::needless_update)] // NewShadowComparison omits DB-managed created_at
 mod shadow;
 
@@ -50,4 +52,5 @@ pub use report_data_quality::*;
 pub use report_diff::*;
 pub use report_txn::*;
 pub use selection::*;
+pub use settlement::*;
 pub use shadow::*;

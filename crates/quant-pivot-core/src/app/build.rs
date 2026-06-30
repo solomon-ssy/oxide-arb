@@ -10,8 +10,12 @@ use super::{
 };
 use crate::observability::metrics_hub::MetricsHub;
 use parking_lot::Mutex;
-use quant_pivot_api::{clob::ClobClient, keystore::Keystore};
-use quant_pivot_error::QuantResult;
+use quant_pivot_api::{
+    clob::ClobClient,
+    keystore::{Keystore, OrderSigner},
+    wallet::WalletTopology,
+};
+use quant_pivot_error::{QuantError, QuantResult};
 use quant_pivot_models::{config::DeployConfig, domain::CoreEventPublisher};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -52,21 +56,27 @@ impl AppContext {
         // closed at boot if the private key is missing or auth fails — report_only
         // is not dry-run, so the real venue must be reachable.
         let keystore = Keystore::from_config(&deploy.keys)?;
-        let clob = Arc::new(ClobClient::connect(keystore.signer_arc(), &deploy.polymarket).await?);
+        let signer = keystore.signer_arc();
+        let wallet = resolve_wallet_topology(&deploy, &signer)?;
+        let clob =
+            Arc::new(ClobClient::connect(Arc::clone(&signer), &deploy.polymarket, &wallet).await?);
         let account = AccountBundle::assemble(AccountBundleDeps {
             deploy: &deploy,
             infra: &infra,
             market_registry: Arc::clone(&data.market_registry),
             clob: Arc::clone(&clob),
         })?;
-        let execution = ExecutionBundle::assemble(ExecutionBundleDeps {
+        let execution = ExecutionBundle::assemble(&ExecutionBundleDeps {
+            deploy: &deploy,
             infra: &infra,
             data: &data,
             governance: &governance,
             research: &research,
             account: &account,
             clob,
-        });
+            signer,
+            wallet,
+        })?;
         governance.alerts.attach_event_publisher(events.clone());
         let report = ReportBundle::assemble(ReportBundleDeps {
             infra: &infra,
@@ -98,4 +108,30 @@ impl AppContext {
             execution,
         })
     }
+}
+
+/// Resolve and validate the venue wallet topology from deploy config.
+///
+/// The funder is mandatory in every mode (report sizing reads the real venue
+/// account); for EOA it must equal the signer, and for Proxy / Gnosis Safe it
+/// must equal the CREATE2-derived wallet controlled by the signer.
+fn resolve_wallet_topology(
+    deploy: &DeployConfig,
+    signer: &OrderSigner,
+) -> QuantResult<WalletTopology> {
+    let funder = deploy
+        .quant
+        .account
+        .funder
+        .as_deref()
+        .map(str::trim)
+        .filter(|funder| !funder.is_empty())
+        .ok_or_else(|| QuantError::config("quant.account.funder is required to reach the venue"))?;
+    WalletTopology::resolve(
+        deploy.quant.account.wallet_kind,
+        signer.address(),
+        funder,
+        deploy.polymarket.chain_id,
+    )
+    .map_err(|error| QuantError::config(error.to_string()))
 }

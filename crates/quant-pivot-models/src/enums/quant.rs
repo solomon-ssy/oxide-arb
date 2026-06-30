@@ -675,16 +675,51 @@ crate::wire_enum! {
 }
 
 crate::wire_enum! {
-    /// How an open position is intended to be settled at resolution.
+    /// Whether an open lot should leave the market before resolution or be held
+    /// until the CTF payout vector is available.
     @derive(Default)
-    pub enum SettlementPolicy {
-        /// Hold the position until the market resolves, then redeem.
+    pub enum ExitSettlementMode {
+        /// Hold the position until the market resolves.
         #[default]
         HoldToResolution => "hold_to_resolution",
         /// Exit on the book before resolution per the exit plan.
         ExitBeforeResolution => "exit_before_resolution",
-        /// Redeem winnings automatically once redeemable.
-        AutoRedeem => "auto_redeem",
+    }
+}
+
+crate::wire_enum! {
+    /// Whether a resolved hold-to-resolution lot is redeemed by the system or
+    /// left for an operator.
+    @derive(Default)
+    pub enum RedeemPolicy {
+        /// Operator handles CTF redemption manually.
+        #[default]
+        Manual => "manual",
+        /// System may redeem once resolution and wallet-balance checks pass.
+        Auto => "auto",
+    }
+}
+
+crate::pg_enum! {
+    type_name = "qp_execution_wallet_kind",
+    /// Polymarket wallet shape used by money-moving on-chain actions.
+    ///
+    /// Drives both the venue signature type and the on-chain settlement route. An
+    /// EOA signs and pays gas directly (funder == signer). A Polymarket Proxy or
+    /// Gnosis Safe holds the collateral/positions and is driven by the EOA signer
+    /// through the gasless relayer; the funder is the CREATE2-derived proxy/safe
+    /// address controlled by the signer EOA.
+    @derive(Default, schemars::JsonSchema)
+    pub enum ExecutionWalletKind {
+        /// Externally owned account; signer address must equal funder address.
+        #[default]
+        Eoa => "eoa",
+        /// Polymarket Proxy wallet (EIP-1167 minimal proxy, Magic/email users);
+        /// funder is the CREATE2-derived proxy address controlled by the EOA.
+        Proxy => "proxy",
+        /// Gnosis Safe (1-of-1, browser-wallet users); funder is the CREATE2-
+        /// derived Safe address controlled by the EOA owner.
+        GnosisSafe => "gnosis_safe",
     }
 }
 

@@ -5,7 +5,7 @@
 //!   → registry (audit chain, durable activation)
 //!   → RuntimeConfigApplicator::apply
 //!       → re-preflight against the live money state (fail-closed)
-//!       → stage fallible reloads (oracle sources, redeem route) — abort
+//!       → stage fallible reloads (oracle sources, settlement-redeem policy) — abort
 //!         here leaves no live mutation at all
 //!       → commit staged states + infallible subscriber propagation
 //!         (risk → exposure → detection → execution → settlement →

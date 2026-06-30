@@ -509,6 +509,36 @@ pub struct ReconciliationPolicy {
     pub stale_open_secs: u64,
 }
 
+/// On-chain settlement redemption worker policy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct SettlementRedeemPolicy {
+    /// Whether the worker may submit standard CTF redeem transactions.
+    pub enabled: bool,
+    /// Sweep interval in seconds.
+    pub interval_secs: u64,
+    /// Maximum condition-level redeem batches processed per sweep.
+    pub batch_size: u64,
+    /// Maximum failed submit/confirm attempts before manual escalation.
+    pub max_attempts: u32,
+    /// Base retry backoff in seconds.
+    pub retry_backoff_secs: u64,
+    /// Polygon confirmations required before closing the strategy lots.
+    pub confirmation_blocks: u64,
+    /// Whether automatic redeem may sign new transactions in emergency halt.
+    pub allow_during_emergency: bool,
+    /// Whether the report composer may elect `HoldToResolution` (and, when the
+    /// worker is enabled, `RedeemPolicy::Auto`) for near-resolution lots instead
+    /// of forcing an on-book exit. Off by default (safe — preserves the on-book
+    /// Kelly exit ladder); enabling it lets settled lots redeem the full payout.
+    pub hold_to_resolution_enabled: bool,
+    /// When `hold_to_resolution_enabled`, a recommendation whose market resolves
+    /// within this many seconds (from `as_of`) is held to resolution rather than
+    /// exited on the book — the on-book time-exit would otherwise fire moments
+    /// before settlement, paying spread/slippage on a position about to pay 0/1.
+    pub hold_to_resolution_within_secs: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct AttributionPolicy {
@@ -526,6 +556,22 @@ impl Default for AttributionPolicy {
             enabled: true,
             sweep_secs: 60,
             batch_size: 256,
+        }
+    }
+}
+
+impl Default for SettlementRedeemPolicy {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            interval_secs: 300,
+            batch_size: 32,
+            max_attempts: 5,
+            retry_backoff_secs: 300,
+            confirmation_blocks: 3,
+            allow_during_emergency: false,
+            hold_to_resolution_enabled: false,
+            hold_to_resolution_within_secs: 86_400,
         }
     }
 }

@@ -16,6 +16,7 @@ pub mod intent_service;
 pub mod mode_gate;
 pub mod order_client;
 pub mod reconciliation;
+pub mod settlement_redeem;
 
 pub use admission::*;
 pub use attribution::*;
@@ -29,3 +30,4 @@ pub use intent_service::*;
 pub use mode_gate::*;
 pub use order_client::*;
 pub use reconciliation::*;
+pub use settlement_redeem::*;

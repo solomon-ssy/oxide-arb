@@ -270,7 +270,7 @@ flowchart LR
 | classical model（smartcore/linfa）主路径 **publish** | 父 [`08`](../08-third-party-crates-and-ml-stack.md) §15；[`phase-06/README.md`](../phase-06/README.md)（06.4 待开） | ML 模型族扩展；registry 已支持 artifact 类型 | **Phase 6** |
 | 研究侧 `Sell` 排序模型（机会性平仓信号） | **[`phase-06/06.1-opportunistic-sell-exit-signal.md`](../phase-06/06.1-opportunistic-sell-exit-signal.md)**（闭合 05.6 `ExitSignalEvaluator` seam） | 执行侧平仓已由 05.6 覆盖；机会性 scorer 填 seam impl | **Phase 6** |
 | 跨账户周期 reconciliation report | **[`phase-06/06.2-cross-account-reconciliation-report.md`](../phase-06/06.2-cross-account-reconciliation-report.md)**（登记于 05.5 §11） | 05.5 逐单对账已闭环；跨账户聚合属增强 | **Phase 6** |
-| `SettlementPolicy::AutoRedeem` 链上赎回 | **[`05.10-auto-redeem-settlement.md`](05.10-auto-redeem-settlement.md)** | 独立 on-chain CTF 集成（api 无 redeem 绑定） | **Phase 5 收尾**：05.6 后、05.7 前或并行 |
+| `ExitSettlementMode::HoldToResolution + RedeemPolicy::Auto` 链上赎回 | **[`05.10-auto-redeem-settlement.md`](05.10-auto-redeem-settlement.md)** | 标准二元 CTF `redeemPositions` + per-lot settlement ledger；proxy / neg-risk / multi-outcome 明确转人工并登记后续计划 | **Phase 5 收尾**：05.6 后、05.7 前或并行 |
 | 多副本 leader-elected execution/exit/recon worker | **[`phase-08/README.md`](../phase-08/README.md)** §2 | 水平扩展；单实例 advisory lock 首版正确 | **Phase 8+** |
 | Trailing stop 高频 peak 跟踪 | **[`phase-08/README.md`](../phase-08/README.md)** §3 | 05.6 `monitor_secs` 首版足够 | **Phase 8+** |
 

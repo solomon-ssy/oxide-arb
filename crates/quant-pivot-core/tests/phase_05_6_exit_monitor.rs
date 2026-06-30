@@ -12,7 +12,7 @@ use quant_pivot_models::{
     enums::{
         common::{MarketCategory, OrderType},
         execution::{ExitReason, KillSwitchState, PositionLedgerState},
-        quant::{AccountSource, ExitTriggerKind, OutcomeSide, SettlementPolicy},
+        quant::{AccountSource, ExitSettlementMode, ExitTriggerKind, OutcomeSide, RedeemPolicy},
     },
     runtime_config::{EmergencyExitKind, EmergencyExitPolicy},
     types::{
@@ -55,7 +55,8 @@ const fn empty_policy() -> ExitPolicySpec {
         trailing_stop: None,
         signal_invalidation_rules: Vec::new(),
         partial_exit_nodes: Vec::new(),
-        settlement_policy: SettlementPolicy::ExitBeforeResolution,
+        settlement_mode: ExitSettlementMode::ExitBeforeResolution,
+        redeem_policy: RedeemPolicy::Manual,
         manual_review_at: None,
         entry_reference_price: Price::new(dec!(0.50)),
         entry_composite_score: Probability::new(dec!(0.80)),
@@ -310,7 +311,7 @@ fn opportunistic_sell_is_lowest_tier() {
 #[test]
 fn settlement_hold_does_not_take_profit() {
     let mut policy = empty_policy();
-    policy.settlement_policy = SettlementPolicy::HoldToResolution;
+    policy.settlement_mode = ExitSettlementMode::HoldToResolution;
     policy.take_profit_price = Some(Price::new(dec!(0.70)));
     let i = input(policy, Some(dec!(0.80)), KillSwitchState::Closed);
     assert_eq!(decide_exit(&i), ExitDecision::Hold);
@@ -320,7 +321,7 @@ fn settlement_hold_does_not_take_profit() {
 fn settlement_hold_still_stops_loss() {
     // Protective exits still fire under hold-to-resolution.
     let mut policy = empty_policy();
-    policy.settlement_policy = SettlementPolicy::HoldToResolution;
+    policy.settlement_mode = ExitSettlementMode::HoldToResolution;
     policy.stop_loss_price = Some(Price::new(dec!(0.45)));
     let i = input(policy, Some(dec!(0.40)), KillSwitchState::Closed);
     assert_eq!(submit_reason(&decide_exit(&i)), Some(ExitReason::StopLoss));

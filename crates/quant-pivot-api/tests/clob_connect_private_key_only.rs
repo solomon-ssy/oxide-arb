@@ -3,7 +3,7 @@
 //! Run once to verify SDK `authenticate()` derives credentials at connect time:
 //! `QUANT_PIVOT_TEST_PRIVATE_KEY=0x... cargo test -p quant-pivot-api --test clob_connect_private_key_only -- --ignored --nocapture`
 
-use quant_pivot_api::{clob::ClobClient, keystore::Keystore};
+use quant_pivot_api::{clob::ClobClient, keystore::Keystore, wallet::WalletTopology};
 use quant_pivot_models::config::{KeySource, KeysConfig, PolymarketConfig};
 use std::env::var;
 
@@ -18,7 +18,8 @@ async fn clob_connect_succeeds_with_private_key_only() {
     })
     .expect("keystore from private_key");
 
-    let client = ClobClient::connect(ks.signer_arc(), &PolymarketConfig::default())
+    let topology = WalletTopology::eoa(ks.address());
+    let client = ClobClient::connect(ks.signer_arc(), &PolymarketConfig::default(), &topology)
         .await
         .expect("ClobClient::connect must succeed without configured L2 trio");
 

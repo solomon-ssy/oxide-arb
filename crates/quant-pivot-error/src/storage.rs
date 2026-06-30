@@ -32,6 +32,10 @@ pub mod entity {
     pub const QUANT_POSITION: &str = "quant_position";
     /// `quant_reconciliation`.
     pub const QUANT_RECONCILIATION: &str = "quant_reconciliation";
+    /// `quant_settlement_redeem`.
+    pub const QUANT_SETTLEMENT_REDEEM: &str = "quant_settlement_redeem";
+    /// `quant_settlement_redeem_lot`.
+    pub const QUANT_SETTLEMENT_REDEEM_LOT: &str = "quant_settlement_redeem_lot";
     /// `quant_training_dataset`.
     pub const QUANT_TRAINING_DATASET: &str = "quant_training_dataset";
     /// `quant_model_registry`.

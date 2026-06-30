@@ -22,28 +22,22 @@ mod recommendation;
 mod recommendation_report;
 mod reconciliation;
 mod reserved_capital;
+mod settlement_redeem;
 mod shadow_comparison;
 
-pub use account_snapshot::PgAccountSnapshotRepository;
-pub use attribution::PgAttributionRepository;
-pub use backtest_report::PgBacktestReportRepository;
-pub use capital_allocation::PgCapitalAllocationRepository;
-pub use comparison_report::PgModelComparisonReportRepository;
-pub use dataset::PgTrainingDatasetRepository;
-pub use equity_snapshot::PgEquitySnapshotRepository;
-pub use execution_order::PgExecutionOrderRepository;
-pub use execution_submission::PgExecutionSubmissionRepository;
-pub use factor::PgFactorRepository;
-pub use feature::PgFeatureRepository;
-pub use governance_audit::PgModelGovernanceAuditRepository;
-pub use market_selection::PgMarketSelectionRepository;
-pub use model_registry::PgModelRegistryRepository;
-pub use model_run::PgModelRunRepository;
-pub use order_intent::PgOrderIntentRepository;
-pub use portfolio_plan::PgPortfolioPlanRepository;
-pub use position::PgPositionRepository;
-pub use recommendation::PgRecommendationRepository;
-pub use recommendation_report::PgRecommendationReportRepository;
-pub use reconciliation::PgReconciliationRepository;
-pub use reserved_capital::PgReservedCapitalRepository;
-pub use shadow_comparison::PgShadowComparisonRepository;
+pub use {
+    account_snapshot::PgAccountSnapshotRepository, attribution::PgAttributionRepository,
+    backtest_report::PgBacktestReportRepository, capital_allocation::PgCapitalAllocationRepository,
+    comparison_report::PgModelComparisonReportRepository, dataset::PgTrainingDatasetRepository,
+    equity_snapshot::PgEquitySnapshotRepository, execution_order::PgExecutionOrderRepository,
+    execution_submission::PgExecutionSubmissionRepository, factor::PgFactorRepository,
+    feature::PgFeatureRepository, governance_audit::PgModelGovernanceAuditRepository,
+    market_selection::PgMarketSelectionRepository, model_registry::PgModelRegistryRepository,
+    model_run::PgModelRunRepository, order_intent::PgOrderIntentRepository,
+    portfolio_plan::PgPortfolioPlanRepository, position::PgPositionRepository,
+    recommendation::PgRecommendationRepository,
+    recommendation_report::PgRecommendationReportRepository,
+    reconciliation::PgReconciliationRepository, reserved_capital::PgReservedCapitalRepository,
+    settlement_redeem::PgSettlementRedeemRepository,
+    shadow_comparison::PgShadowComparisonRepository,
+};

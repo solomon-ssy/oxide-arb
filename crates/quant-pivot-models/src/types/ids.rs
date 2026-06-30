@@ -168,6 +168,14 @@ pub struct ExecutionOrderId(Arc<Uuid>);
 #[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CapitalAllocationId(Arc<Uuid>);
 
+/// One on-chain CTF redemption batch for a `(condition_id, funder)` pair.
+#[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SettlementRedeemId(Arc<Uuid>);
+
+/// Per-position allocation row within a settlement redemption batch.
+#[derive(UuidId, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SettlementRedeemLotId(Arc<Uuid>);
+
 /// Position-lot ledger identifier.
 ///
 /// One lot per filled entry intent (`order_intent_id` is its natural unique

@@ -213,6 +213,7 @@ impl From<ExecutionError> for WebError {
             | ExecutionError::ApprovalInvalidated { .. }
             | ExecutionError::ReconciliationUnresolvable { .. }
             | ExecutionError::ModeTransitionForbidden { .. } => Self::Conflict(error.to_string()),
+            ExecutionError::SettlementRedeemInvariant { .. } => Self::Internal(error.to_string()),
         }
     }
 }

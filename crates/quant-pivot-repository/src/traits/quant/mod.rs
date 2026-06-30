@@ -24,6 +24,7 @@ mod recommendation_report;
 mod reconciliation;
 mod reserved_capital;
 mod selection;
+mod settlement_redeem;
 mod shadow_comparison;
 
 pub use account_snapshot::*;
@@ -50,4 +51,5 @@ pub use recommendation_report::*;
 pub use reconciliation::*;
 pub use reserved_capital::*;
 pub use selection::*;
+pub use settlement_redeem::*;
 pub use shadow_comparison::*;

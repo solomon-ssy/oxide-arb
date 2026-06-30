@@ -657,7 +657,8 @@ fn project_exit_policy_spec(rec: &RecommendationInfo) -> ExitPolicySpec {
             .filter(|node| node.sell_pct < Decimal::ONE)
             .cloned()
             .collect(),
-        settlement_policy: exit.settlement_policy,
+        settlement_mode: exit.settlement_mode,
+        redeem_policy: exit.redeem_policy,
         manual_review_at: exit.manual_review_at,
         entry_reference_price,
         entry_composite_score: rec.composite_score,

@@ -93,6 +93,7 @@ impl DeployConfig {
             .try_deserialize()
             .map_err(ConfigError::Load)?;
         deploy.keys.normalize();
+        deploy.polymarket.relayer.normalize();
         deploy.ensure_valid_common()?;
         Ok(deploy)
     }

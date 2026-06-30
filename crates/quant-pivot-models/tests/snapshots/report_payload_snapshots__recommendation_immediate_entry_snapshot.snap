@@ -75,7 +75,8 @@ expression: recommendation_immediate_entry()
     "partial_exit_nodes": [],
     "trailing_stop": null,
     "signal_invalidation_rules": [],
-    "settlement_policy": "hold_to_resolution",
+    "settlement_mode": "hold_to_resolution",
+    "redeem_policy": "manual",
     "manual_review_at": null,
     "exit_reason": "tp/sl"
   },

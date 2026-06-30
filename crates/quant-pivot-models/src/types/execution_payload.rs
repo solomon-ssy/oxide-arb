@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     enums::{
         common::{OrderType, Side},
-        quant::SettlementPolicy,
+        quant::{ExitSettlementMode, RedeemPolicy},
     },
     jsonb_active,
     types::{
@@ -77,8 +77,10 @@ pub struct ExitPolicySpec {
     pub signal_invalidation_rules: Vec<SignalInvalidationRule>,
     /// Scaled partial-exit nodes (empty for a single full exit).
     pub partial_exit_nodes: Vec<PartialExitNode>,
-    /// How the position settles at resolution.
-    pub settlement_policy: SettlementPolicy,
+    /// Whether the lot exits before resolution or holds through resolution.
+    pub settlement_mode: ExitSettlementMode,
+    /// Whether a resolved hold-to-resolution lot is redeemed automatically.
+    pub redeem_policy: RedeemPolicy,
     /// Optional manual-review checkpoint time.
     pub manual_review_at: Option<DateTime<Utc>>,
     /// Frozen entry reference price (recommendation `entry_price_ref` / limit),

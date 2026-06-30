@@ -50,6 +50,10 @@ pub enum ExecutionError {
     #[error("reconciliation unresolvable: {reason}")]
     ReconciliationUnresolvable { reason: String },
 
+    /// Settlement redemption service invariant failed.
+    #[error("settlement redeem invariant failed: {reason}")]
+    SettlementRedeemInvariant { reason: String },
+
     /// Runtime-mode transition is not allowed.
     #[error("mode transition forbidden: {reason}")]
     ModeTransitionForbidden { reason: String },

@@ -1,6 +1,6 @@
 //! CLOB authentication: sign + optional live order probe.
 
-use quant_pivot_api::{clob::ClobClient, keystore::Keystore};
+use quant_pivot_api::{clob::ClobClient, keystore::Keystore, wallet::WalletTopology};
 use quant_pivot_models::{
     config::{KeySource, KeysConfig, PolymarketConfig},
     domain::order::{OrderAmount, OrderRequest},
@@ -31,7 +31,8 @@ async fn fok_order_sign_and_submit() {
         var("QUANT_PIVOT_TEST_TOKEN_ID").expect("QUANT_PIVOT_TEST_TOKEN_ID decimal token id");
     let market_id = var("QUANT_PIVOT_TEST_MARKET_ID").unwrap_or_else(|_| "0x0".into());
 
-    let client = ClobClient::connect(ks.signer_arc(), &PolymarketConfig::default())
+    let topology = WalletTopology::eoa(ks.address());
+    let client = ClobClient::connect(ks.signer_arc(), &PolymarketConfig::default(), &topology)
         .await
         .expect("connect");
 

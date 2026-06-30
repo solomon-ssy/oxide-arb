@@ -57,6 +57,21 @@ rpc_url = "https://polygon-rpc.com"
 # Default: 10000.
 rpc_timeout_ms = 10000
 
+# Gasless relayer for money-moving Proxy / Gnosis Safe transactions (e.g. CTF
+# redeemPositions). Only required when quant.account.wallet_kind is "proxy" or
+# "gnosis_safe"; EOA settlement signs + pays gas directly and ignores this.
+[polymarket.relayer]
+# Purpose: relayer submit/status base URL. Default: "https://relayer-v2.polymarket.com".
+base_url = "https://relayer-v2.polymarket.com"
+# Purpose: Relayer API key (secret). Create one from Settings > API Keys on
+# polymarket.com. Override: QUANT_PIVOT__POLYMARKET__RELAYER__API_KEY
+# api_key = "...."
+# Purpose: address that owns the relayer API key (the signer EOA address).
+# Override: QUANT_PIVOT__POLYMARKET__RELAYER__API_KEY_ADDRESS
+# api_key_address = "0x...."
+# Purpose: relayer HTTP request timeout (ms). Default: 15000.
+request_timeout_ms = 15000
+
 # Per-category feeRate (official 2026-04-04). Override when PM updates docs.
 # Exponent is always 1 per https://docs.polymarket.com/trading/fees
 [polymarket.fees]
@@ -143,12 +158,20 @@ report_expire_sweep_secs = 300
 equity_snapshot_secs = 300
 
 [quant.account]
-# Purpose: Polymarket proxy/funder address for keyless Data API position reads
+# Purpose: Polymarket funder address for keyless Data API position reads
 # (user=<funder>). Required to generate reports in ALL modes — report_only is not
-# dry-run, so sizing is built on the real venue account. Distinct from the signer
-# EOA derived from [keys].private_key.
+# dry-run, so sizing is built on the real venue account. For wallet_kind "eoa"
+# this MUST equal the signer EOA derived from [keys].private_key; for "proxy" /
+# "gnosis_safe" it MUST equal the CREATE2-derived proxy/Safe address controlled
+# by that EOA (validated at startup).
 # Override: QUANT_PIVOT__QUANT__ACCOUNT__FUNDER
 # funder = "0x...."
+# Purpose: wallet shape for money-moving on-chain settlement operations.
+#   "eoa"         — funds held by the signer EOA; redeem signs + pays gas directly.
+#   "proxy"       — Polymarket Proxy (EIP-1167, Magic/email); redeem via relayer.
+#   "gnosis_safe" — 1-of-1 Gnosis Safe (browser wallet); redeem via relayer.
+# Proxy / Gnosis Safe require [polymarket.relayer] credentials.
+wallet_kind = "eoa"
 
 # ── Research Plane (Phase 3) ──────────────────────────────────────────────────
 

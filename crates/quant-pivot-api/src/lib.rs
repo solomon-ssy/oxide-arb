@@ -11,9 +11,12 @@
 //! All types propagate errors through [`quant_pivot_error`]'s sub-error system.
 
 pub mod clob;
+pub mod ctf;
 pub mod data_api;
 pub mod fees;
 pub mod gamma;
 pub mod infra;
 pub mod keystore;
+pub mod relayer;
+pub mod wallet;
 pub mod ws;

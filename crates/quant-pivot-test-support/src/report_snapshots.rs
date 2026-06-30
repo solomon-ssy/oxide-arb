@@ -17,8 +17,8 @@ use quant_pivot_models::{
         api::{QuantRecommendationView, QuantReportDetailView},
     },
     enums::quant::{
-        EntryTriggerKind, ExitTriggerKind, IneligibilityReason, OutcomeSide, QuantRuntimeMode,
-        RecommendationReportStatus, ReportKind, SettlementPolicy,
+        EntryTriggerKind, ExitSettlementMode, ExitTriggerKind, IneligibilityReason, OutcomeSide,
+        QuantRuntimeMode, RecommendationReportStatus, RedeemPolicy, ReportKind,
     },
     types::{
         BookSnapshotRef, Bps, EligibilitySummary, EntryPlan, EquitySnapshotId, EvidenceRefs,
@@ -182,7 +182,8 @@ fn partial_exit_plan() -> ExitPlan {
             activation_price: Some(Price::new(dec!(0.6))),
         }),
         signal_invalidation_rules: Vec::new(),
-        settlement_policy: SettlementPolicy::HoldToResolution,
+        settlement_mode: ExitSettlementMode::HoldToResolution,
+        redeem_policy: RedeemPolicy::Manual,
         manual_review_at: None,
         exit_reason: "tp/sl + scaled partial exit".to_owned(),
     }

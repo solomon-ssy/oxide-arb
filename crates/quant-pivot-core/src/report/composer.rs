@@ -15,8 +15,8 @@ use quant_pivot_models::{
         common::MarketCategory,
         operation_log::{OperationCategory, OperationOutcome},
         quant::{
-            EmptyReason, IneligibilityReason, QuantRuntimeMode, RecommendationReportStatus,
-            RecommendationStatus, ReportKind, SettlementPolicy,
+            EmptyReason, ExitSettlementMode, IneligibilityReason, QuantRuntimeMode,
+            RecommendationReportStatus, RecommendationStatus, RedeemPolicy, ReportKind,
         },
         rbac::ResourceType,
     },
@@ -29,8 +29,8 @@ use quant_pivot_models::{
         PortfolioConstraintsSnapshot, PortfolioOptimizerMeta, PortfolioPlanId,
         PortfolioRejectedSummary, PortfolioRiskBudget, Price, Probability,
         RecommendationFactorBreakdown, RecommendationId, RecommendationReportId,
-        RejectionReasonCount, ReportDataQualitySnapshotId, ReportSummary, RuntimeConfigVersionId,
-        SizingPlan, Usd,
+        RejectionReasonCount, ReportDataQualitySnapshotId, ReportSummary, RiskEnvelope,
+        RuntimeConfigVersionId, SizingPlan, Usd,
     },
 };
 use quant_pivot_research::{
@@ -332,23 +332,13 @@ fn compose_recommendation(
                 detail: "non-empty recommendation missing model_run_id".into(),
             })?;
 
-    let mut risk_envelope = planned.risk_envelope.clone();
     let auto_gate = auto_execution_gate(
         candidate,
         planned.rank,
         &planned.sizing,
         input.runtime_config,
     )?;
-    risk_envelope.auto_execution_allowed = auto_gate.allowed;
-    risk_envelope.requires_approval = !auto_gate.allowed;
-    if !candidate.rejection_warnings.is_empty() {
-        risk_envelope.risk_notes.extend(
-            candidate
-                .rejection_warnings
-                .iter()
-                .map(|warning| format!("{warning:?}")),
-        );
-    }
+    let risk_envelope = compose_risk_envelope(planned, candidate, &auto_gate);
 
     Ok(NewRecommendation {
         recommendation_id: RecommendationId::from_v7(),
@@ -379,7 +369,13 @@ fn compose_recommendation(
         model_score_percentile: candidate.model_score_percentile,
         entry_plan: derive_entry_plan(candidate, input.as_of, valid_until, input.runtime_config),
         sizing_plan: planned.sizing.clone(),
-        exit_plan: exit_plan(candidate, input.as_of, input.runtime_config, horizon_secs)?,
+        exit_plan: exit_plan(
+            candidate,
+            input.as_of,
+            input.runtime_config,
+            horizon_secs,
+            capture.market_context.time_to_resolution_secs,
+        )?,
         risk_envelope,
         factor_breakdown: factor_breakdown(candidate),
         evidence_refs: EvidenceRefs::from_input(EvidenceRefsInput {
@@ -400,11 +396,33 @@ fn compose_recommendation(
     })
 }
 
+/// Build the recommendation risk envelope: clone the planned baseline, apply the
+/// auto-execution gate, and fold in any candidate rejection warnings as notes.
+fn compose_risk_envelope(
+    planned: &PlannedRecommendation,
+    candidate: &SignalCandidate,
+    auto_gate: &AutoExecutionGate,
+) -> RiskEnvelope {
+    let mut risk_envelope = planned.risk_envelope.clone();
+    risk_envelope.auto_execution_allowed = auto_gate.allowed;
+    risk_envelope.requires_approval = !auto_gate.allowed;
+    if !candidate.rejection_warnings.is_empty() {
+        risk_envelope.risk_notes.extend(
+            candidate
+                .rejection_warnings
+                .iter()
+                .map(|warning| format!("{warning:?}")),
+        );
+    }
+    risk_envelope
+}
+
 fn exit_plan(
     candidate: &SignalCandidate,
     as_of: DateTime<Utc>,
     config: &RuntimeConfig,
     horizon_secs: u64,
+    time_to_resolution_secs: Option<u64>,
 ) -> QuantResult<ExitPlan> {
     let loss = Bps::new(candidate.downside_bps)
         .to_fraction()
@@ -424,40 +442,65 @@ fn exit_plan(
     );
     let time_exit_at = as_of_plus_secs(as_of, horizon_secs)?;
 
-    // The take-profit / stop-loss / time-exit scalars are the single source of
-    // truth for the (full) exit. `partial_exit_nodes` is reserved for genuine
-    // *scaled* exits (`sell_pct < 1`); the Kelly bet structure exits in full at
-    // whichever scalar trigger fires first, so it carries no partial nodes.
-    let take_profit_price = Some(take_profit_price);
-    let stop_loss_price = Some(stop_loss_price);
-    let time_exit_at = Some(time_exit_at);
+    // Origination of the hold-to-resolution + auto-redeem lifecycle: when the
+    // market resolves within the governed window, forcing an on-book time-exit
+    // would just pay spread/slippage moments before settlement on a position
+    // about to pay 0/1. Holding to resolution and redeeming the CTF payout is
+    // strictly better. The protective stop-loss is retained either way (05.6
+    // still honors it on hold-to-resolution lots); only the take-profit and the
+    // time-exit are dropped when holding. `RedeemPolicy::Auto` is a pure config
+    // decision frozen on the intent — the settlement worker remains the
+    // authoritative gate that fails closed (topology / neg-risk / balance).
+    let redeem = &config.execution.settlement_redeem;
+    let hold_to_resolution = redeem.hold_to_resolution_enabled
+        && time_to_resolution_secs.is_some_and(|ttr| ttr <= redeem.hold_to_resolution_within_secs);
 
-    // Derive the settlement intent from the configured exits rather than hard-
-    // coding it: any active on-book exit means we leave before resolution.
-    let settlement_policy =
-        if take_profit_price.is_some() || stop_loss_price.is_some() || time_exit_at.is_some() {
-            SettlementPolicy::ExitBeforeResolution
+    let (take_profit_price, take_profit_pct, time_exit_at, max_hold_secs) = if hold_to_resolution {
+        (None, None, None, None)
+    } else {
+        (
+            Some(take_profit_price),
+            Some(gain),
+            Some(time_exit_at),
+            Some(horizon_secs),
+        )
+    };
+    let (settlement_mode, redeem_policy) = if hold_to_resolution {
+        let redeem_policy = if redeem.enabled {
+            RedeemPolicy::Auto
         } else {
-            SettlementPolicy::HoldToResolution
+            RedeemPolicy::Manual
         };
+        (ExitSettlementMode::HoldToResolution, redeem_policy)
+    } else {
+        (
+            ExitSettlementMode::ExitBeforeResolution,
+            RedeemPolicy::Manual,
+        )
+    };
 
     Ok(ExitPlan {
         take_profit_price,
-        take_profit_pct: Some(gain),
-        stop_loss_price,
+        take_profit_pct,
+        // The protective stop-loss is the single full-exit scalar that survives
+        // into hold-to-resolution; `partial_exit_nodes` is reserved for genuine
+        // *scaled* exits (`sell_pct < 1`), so the Kelly structure carries none.
+        stop_loss_price: Some(stop_loss_price),
         stop_loss_pct: Some(loss),
         time_exit_at,
-        max_hold_secs: Some(horizon_secs),
+        max_hold_secs,
         partial_exit_nodes: Vec::new(),
         trailing_stop: None,
         signal_invalidation_rules: Vec::new(),
-        settlement_policy,
+        settlement_mode,
+        redeem_policy,
         manual_review_at: None,
         exit_reason: format!(
-            "Kelly bet structure: downside={} bps, target_reward_multiple={}, target_gain={}%; model headline: {}",
+            "Kelly bet structure: downside={} bps, target_reward_multiple={}, target_gain={}%, settlement={}; model headline: {}",
             candidate.downside_bps,
             reward_multiple,
             (gain * Decimal::from(100)).round_dp(4),
+            settlement_mode.as_str(),
             candidate.model_explanation.headline
         ),
     })
@@ -881,8 +924,8 @@ mod tests {
     use quant_pivot_models::{
         domain::quant::{NewAccountSnapshot, NewEquitySnapshot, NewReportDataQualitySnapshot},
         enums::quant::{
-            AccountSource, BindingConstraint, EmptyReason, IneligibilityReason, OutcomeSide,
-            QuantRuntimeMode, SettlementPolicy, SizingModelKind,
+            AccountSource, BindingConstraint, EmptyReason, ExitSettlementMode, IneligibilityReason,
+            OutcomeSide, QuantRuntimeMode, RedeemPolicy, SizingModelKind,
         },
         runtime_config::RuntimeConfig,
         types::{
@@ -976,7 +1019,7 @@ mod tests {
         let mut config = RuntimeConfig::default();
         config.portfolio.sizing.target_reward_multiple.value = "2.0".to_owned();
 
-        let plan = exit_plan(&candidate(), as_of, &config, 3_600).expect("exit plan");
+        let plan = exit_plan(&candidate(), as_of, &config, 3_600, None).expect("exit plan");
 
         assert_eq!(plan.stop_loss_pct, Some(dec!(0.1)));
         assert_eq!(plan.take_profit_pct, Some(dec!(0.20)));
@@ -993,9 +1036,47 @@ mod tests {
         assert!(plan.partial_exit_nodes.is_empty());
         assert_eq!(plan.time_exit_at, Some(as_of + Duration::seconds(3_600)));
         assert_eq!(
-            plan.settlement_policy,
-            SettlementPolicy::ExitBeforeResolution
+            plan.settlement_mode,
+            ExitSettlementMode::ExitBeforeResolution
         );
+        assert_eq!(plan.redeem_policy, RedeemPolicy::Manual);
+    }
+
+    #[test]
+    fn exit_plan_holds_to_resolution_and_auto_redeems_near_resolution() {
+        let as_of = Utc
+            .with_ymd_and_hms(2026, 6, 1, 0, 0, 0)
+            .single()
+            .expect("valid time");
+        let mut config = RuntimeConfig::default();
+        config.execution.settlement_redeem.enabled = true;
+        config
+            .execution
+            .settlement_redeem
+            .hold_to_resolution_enabled = true;
+        config
+            .execution
+            .settlement_redeem
+            .hold_to_resolution_within_secs = 86_400;
+
+        // Market resolves in 1h, inside the 24h hold window.
+        let plan = exit_plan(&candidate(), as_of, &config, 3_600, Some(3_600)).expect("exit plan");
+
+        assert_eq!(plan.settlement_mode, ExitSettlementMode::HoldToResolution);
+        assert_eq!(plan.redeem_policy, RedeemPolicy::Auto);
+        // Take-profit and time-exit are dropped; the protective stop-loss stays.
+        assert_eq!(plan.take_profit_price, None);
+        assert_eq!(plan.time_exit_at, None);
+        assert_eq!(plan.max_hold_secs, None);
+        assert!(plan.stop_loss_price.is_some());
+
+        // Far-from-resolution markets keep the on-book exit ladder.
+        let far = exit_plan(&candidate(), as_of, &config, 3_600, Some(200_000)).expect("exit plan");
+        assert_eq!(
+            far.settlement_mode,
+            ExitSettlementMode::ExitBeforeResolution
+        );
+        assert_eq!(far.redeem_policy, RedeemPolicy::Manual);
     }
 
     fn sizing_plan(suggested_usd: Usd) -> SizingPlan {

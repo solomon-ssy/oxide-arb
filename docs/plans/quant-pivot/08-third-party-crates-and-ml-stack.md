@@ -33,6 +33,7 @@
 | 轻量推理/transformers | `candle` | `ort` | Phase 8+ | Hugging Face/safetensors |
 | 模型 artifact | `serde_json`, `bitcode` | `bincode` | Phase 3 | weighted/classical model artifact |
 | 配置 schema | `schemars` | existing | Phase 1 | 已使用，继续 |
+| Polygon 合约绑定 / RPC | `alloy` | Polymarket SDK CTF facade | Phase 5.10 | 仅 `quant-pivot-api::ctf` 使用；core 不直接依赖 alloy；标准二元 `redeemPositions` 首版 |
 
 ## 2. 不建议第一版引入
 

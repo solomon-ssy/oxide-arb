@@ -22,9 +22,10 @@ use quant_pivot_models::{
     enums::{
         factor::FactorFamily,
         quant::{
-            AccountSource, BindingConstraint, EntryTriggerKind, FactorDirection,
-            IneligibilityReason, OutcomeSide, QuantRuntimeMode, RecommendationReportStatus,
-            RecommendationStatus, ReportKind, ReportTriggerKind, SettlementPolicy, SizingModelKind,
+            AccountSource, BindingConstraint, EntryTriggerKind, ExitSettlementMode,
+            FactorDirection, IneligibilityReason, OutcomeSide, QuantRuntimeMode,
+            RecommendationReportStatus, RecommendationStatus, RedeemPolicy, ReportKind,
+            ReportTriggerKind, SizingModelKind,
         },
         rbac::{Operation, ResourceType},
     },
@@ -189,7 +190,8 @@ fn exit_plan() -> ExitPlan {
         partial_exit_nodes: Vec::new(),
         trailing_stop: None,
         signal_invalidation_rules: Vec::new(),
-        settlement_policy: SettlementPolicy::HoldToResolution,
+        settlement_mode: ExitSettlementMode::HoldToResolution,
+        redeem_policy: RedeemPolicy::Manual,
         manual_review_at: None,
         exit_reason: "tp/sl".to_owned(),
     }

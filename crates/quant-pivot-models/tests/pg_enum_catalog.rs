@@ -8,7 +8,7 @@ use quant_pivot_models::{
             AdmissionCheckId, AdmissionOutcome, ApprovalInvalidation, CapitalAllocationState,
             ExecutionOrderPhase, ExitReason, ExitState, KillSwitchState, ModeDenialReason,
             OrderIntentKind, OrderTypeKind, PositionLedgerState, ReconciliationEvidenceKind,
-            ReconciliationResult, VenueOrderStatus,
+            ReconciliationResult, SettlementRedeemState, VenueOrderStatus,
         },
         factor::{FactorDefinitionScope, FactorFamily},
         fee::FeeSource,
@@ -16,11 +16,12 @@ use quant_pivot_models::{
         model::{ClassicalKind, ModelFamily},
         operation_log::{OperationCategory, OperationOutcome},
         quant::{
-            AccountSource, ApprovalStatus, DataQualityStatus, ExecutionOrderState, FactorDirection,
-            ModelGovernanceAction, ModelRunErrorCode, ModelRunKind, ModelRunStatus,
-            OrderIntentStatus, OutcomeSide, PublicationStatus, QuantRuntimeMode,
-            RecommendationAttributionOutcome, RecommendationOutcome, RecommendationReportStatus,
-            RecommendationStatus, ReportKind, ReportTriggerKind, TrainingDatasetStatus,
+            AccountSource, ApprovalStatus, DataQualityStatus, ExecutionOrderState,
+            ExecutionWalletKind, FactorDirection, ModelGovernanceAction, ModelRunErrorCode,
+            ModelRunKind, ModelRunStatus, OrderIntentStatus, OutcomeSide, PublicationStatus,
+            QuantRuntimeMode, RecommendationAttributionOutcome, RecommendationOutcome,
+            RecommendationReportStatus, RecommendationStatus, ReportKind, ReportTriggerKind,
+            TrainingDatasetStatus,
         },
         rbac::{MenuKind, ResourceType, RoleKind, RoleStatus, UserStatus},
         runtime_config::{RuntimeConfigActivationKind, RuntimeConfigVersionSource},
@@ -85,8 +86,8 @@ fn pg_enum_specs_are_unique_and_prefixed() {
     let specs = pg_enum::specs();
     assert_eq!(
         specs.len(),
-        48,
-        "expected exactly 48 Postgres enum types, got {}",
+        50,
+        "expected exactly 50 Postgres enum types, got {}",
         specs.len()
     );
 
@@ -114,6 +115,7 @@ fn expected_pg_enum_types_are_registered() {
         "qp_exit_state",
         "qp_execution_order_phase",
         "qp_execution_order_state",
+        "qp_execution_wallet_kind",
         "qp_factor_definition_scope",
         "qp_factor_direction",
         "qp_factor_family",
@@ -149,6 +151,7 @@ fn expected_pg_enum_types_are_registered() {
         "qp_runtime_config_activation_kind",
         "qp_runtime_config_source",
         "qp_side",
+        "qp_settlement_redeem_state",
         "qp_tick_size",
         "qp_training_dataset_status",
         "qp_user_status",
@@ -311,12 +314,24 @@ fn execution_foundation_pg_enums_match_wire_labels() {
             "opportunistic",
             "manual",
             "settlement_hold",
+            "resolution_redeem",
             "kill_switch_emergency",
             "risk_envelope_breached",
             "market_abnormal",
             "data_stale",
         ]
     );
+    assert_pg_enum!(
+        SettlementRedeemState,
+        &[
+            "pending",
+            "submitted",
+            "confirmed",
+            "failed",
+            "manual_required",
+        ]
+    );
+    assert_pg_enum!(ExecutionWalletKind, &["eoa", "proxy", "gnosis_safe"]);
 }
 
 #[test]

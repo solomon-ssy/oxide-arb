@@ -17,6 +17,7 @@ pub mod quant_report;
 pub mod reconciliation_worker;
 pub mod report_scheduler;
 pub mod runtime_tasks;
+pub mod settlement_redeem_worker;
 pub mod task_id;
 pub mod task_registry;
 pub mod training_dataset;

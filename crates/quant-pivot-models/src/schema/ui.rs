@@ -891,6 +891,7 @@ fn execution_policy_fields() -> Vec<FieldUiEntry> {
     .into_iter()
     .chain(execution_exit_monitor_fields())
     .chain(execution_reconciliation_fields())
+    .chain(execution_settlement_redeem_fields())
     .chain(execution_attribution_fields())
     .chain(execution_breaker_fields())
     .collect()
@@ -958,6 +959,65 @@ fn execution_reconciliation_fields() -> Vec<FieldUiEntry> {
             "Reconciliation stale-open deadline",
             "对账强制终态秒数",
             235,
+        ),
+    ]
+}
+
+fn execution_settlement_redeem_fields() -> Vec<FieldUiEntry> {
+    vec![
+        boolean(
+            "execution.settlement_redeem.enabled",
+            "Settlement redeem enabled",
+            "启用结算赎回",
+            236,
+        ),
+        integer(
+            "execution.settlement_redeem.interval_secs",
+            "Settlement redeem interval",
+            "结算赎回间隔秒数",
+            237,
+        ),
+        integer(
+            "execution.settlement_redeem.batch_size",
+            "Settlement redeem batch size",
+            "结算赎回批量大小",
+            238,
+        ),
+        integer(
+            "execution.settlement_redeem.max_attempts",
+            "Settlement redeem max attempts",
+            "结算赎回最大尝试次数",
+            239,
+        ),
+        integer(
+            "execution.settlement_redeem.retry_backoff_secs",
+            "Settlement redeem retry backoff",
+            "结算赎回重试退避秒数",
+            240,
+        ),
+        integer(
+            "execution.settlement_redeem.confirmation_blocks",
+            "Settlement redeem confirmations",
+            "结算赎回确认块数",
+            241,
+        ),
+        boolean(
+            "execution.settlement_redeem.allow_during_emergency",
+            "Allow redeem during emergency",
+            "允许紧急状态赎回",
+            242,
+        ),
+        boolean(
+            "execution.settlement_redeem.hold_to_resolution_enabled",
+            "Hold near-resolution lots",
+            "临近结算持有到期",
+            243,
+        ),
+        integer(
+            "execution.settlement_redeem.hold_to_resolution_within_secs",
+            "Hold-to-resolution window",
+            "持有到期判定窗口秒数",
+            244,
         ),
     ]
 }

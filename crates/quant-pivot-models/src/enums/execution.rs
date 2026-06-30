@@ -64,6 +64,17 @@ impl PositionLedgerState {
 }
 
 crate::pg_enum! {
+    type_name = "qp_settlement_redeem_state",
+    pub enum SettlementRedeemState {
+        Pending => "pending",
+        Submitted => "submitted",
+        Confirmed => "confirmed",
+        Failed => "failed",
+        ManualRequired => "manual_required",
+    }
+}
+
+crate::pg_enum! {
     type_name = "qp_reconciliation_result",
     pub enum ReconciliationResult {
         /// Enqueued, not yet reconciled (truth not yet observed). The honest
@@ -225,6 +236,7 @@ crate::pg_enum! {
         Opportunistic => "opportunistic",
         Manual => "manual",
         SettlementHold => "settlement_hold",
+        ResolutionRedeem => "resolution_redeem",
         KillSwitchEmergency => "kill_switch_emergency",
         RiskEnvelopeBreached => "risk_envelope_breached",
         MarketAbnormal => "market_abnormal",

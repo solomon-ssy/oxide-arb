@@ -448,6 +448,7 @@ const fn exit_trigger_kind(reason: ExitReason) -> ExitTriggerKind {
         | ExitReason::PartialExit
         | ExitReason::Opportunistic
         | ExitReason::SettlementHold
+        | ExitReason::ResolutionRedeem
         | ExitReason::KillSwitchEmergency
         | ExitReason::RiskEnvelopeBreached
         | ExitReason::MarketAbnormal
